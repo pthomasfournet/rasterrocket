@@ -1,4 +1,4 @@
-//! Image encoding — write a `raster::Bitmap<P>` to PPM, PGM, PBM, and PNG.
+//! Image encoding — write a `raster::Bitmap<P>` to PPM, PGM, PBM, PNG, and JPEG.
 //!
 //! # Supported formats
 //!
@@ -8,6 +8,7 @@
 //! | [`write_pgm`] | Netpbm P5 binary | `Gray8` |
 //! | [`write_pbm`] | Netpbm P4 binary | `Gray8` (0 = white, non-zero = black) |
 //! | [`write_png`] | PNG | `Rgb8`, `Gray8`, `Rgba8` |
+//! | [`jpeg_gray`] | JPEG (baseline) | `Gray8` |
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in
 //! [`std::io::BufWriter`] at the call site if buffering is needed.
@@ -19,11 +20,13 @@
 //! `R = 255 − C − K` (PDF §10.3.3).  For ICC-accurate colour, convert to
 //! `Rgb8` before encoding.
 
+pub mod jpeg;
 pub mod pbm;
 pub mod pgm;
 pub mod png;
 pub mod ppm;
 
+pub use jpeg::jpeg_gray;
 pub use pbm::write_pbm;
 pub use pgm::write_pgm;
 pub use png::write_png;
@@ -42,6 +45,8 @@ pub enum EncodeError {
     UnsupportedMode(&'static str),
     /// An internal error from the `png` encoder (non-I/O).
     PngEncoder(::png::EncodingError),
+    /// An internal error from the JPEG encoder.
+    Jpeg(::jpeg_encoder::EncodingError),
 }
 
 impl std::fmt::Display for EncodeError {
@@ -50,6 +55,7 @@ impl std::fmt::Display for EncodeError {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::UnsupportedMode(m) => write!(f, "pixel mode not supported: {m}"),
             Self::PngEncoder(e) => write!(f, "PNG encoder error: {e}"),
+            Self::Jpeg(e) => write!(f, "JPEG encoder error: {e}"),
         }
     }
 }
@@ -59,6 +65,7 @@ impl std::error::Error for EncodeError {
         match self {
             Self::Io(e) => Some(e),
             Self::PngEncoder(e) => Some(e),
+            Self::Jpeg(e) => Some(e),
             Self::UnsupportedMode(_) => None,
         }
     }

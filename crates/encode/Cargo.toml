@@ -19,5 +19,8 @@ raster = { package = "rasterrocket-render", path = "../raster", version = "1.0" 
 # PNG output — pure Rust, no system libs required.
 png = "0.17"
 
+# JPEG output — pure Rust, no system libs. (MIT OR Apache-2.0) AND IJG.
+jpeg-encoder = "0.7"
+
 [lints]
 workspace = true
