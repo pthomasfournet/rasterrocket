@@ -21,6 +21,10 @@
 //! }
 //! ```
 //!
+//! For Google Cloud Vision pipelines, [`encode_for_gcv`] turns a
+//! [`RenderedPage`] into an upload-ready base64 JPEG guaranteed within GCV's
+//! request limits — no external image crate, no network guesswork.
+//!
 //! # OCR integration
 //!
 //! `rasterrocket` is a rasteriser, not an OCR framework.  For Tesseract, ocrs,
@@ -111,6 +115,7 @@ mod render;
 
 use std::path::Path;
 
+pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use pdf_interp::renderer::PageDiagnostics;
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
