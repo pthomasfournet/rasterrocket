@@ -114,6 +114,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bench"
 version = "1.0.3"
 dependencies = [
@@ -1005,8 +1011,10 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "rasterrocket"
 version = "1.0.3"
 dependencies = [
+ "base64",
  "log",
  "rasterrocket-color",
+ "rasterrocket-encode",
  "rasterrocket-gpu",
  "rasterrocket-interp",
  "rasterrocket-parser",
