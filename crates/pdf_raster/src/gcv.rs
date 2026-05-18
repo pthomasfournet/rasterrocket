@@ -320,10 +320,11 @@ mod tests {
                 "base64_len({n}) must equal actual encoded length"
             );
         }
-        // A few larger sizes spanning all three n%3 residues.
-        for n in [255usize, 256, 257, 1024, 4096, 100_000] {
+        // Larger sizes: each residue class (0/1/2) appears at least twice at
+        // different scales to confirm the formula holds beyond the dense loop.
+        for n in [255usize, 256, 257, 1_023, 1_024, 1_025] {
             let img = GcvImage {
-                jpeg: vec![0xCD; n],
+                jpeg: vec![0xAB; n],
                 quality: 80,
                 width: 1,
                 height: 1,
