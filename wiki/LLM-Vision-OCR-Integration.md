@@ -40,9 +40,9 @@ let budget = GcvBudget::default();                                // 10 MB base6
 for (page_num, result) in raster_pdf(std::path::Path::new("scan.pdf"), &opts) {
     let page = result?;
     let img = encode_for_gcv(&page, &budget)?;
-    let b64 = img.to_base64();   // drop straight into the annotate request body
+    let b64 = img.to_base64();   // drop straight into the JSON `content` field
     // img.jpeg is also available as raw bytes (disk audit, GCS async upload).
-    let _ = (page_num, b64);
+    println!("page {page_num}: {} B base64", b64.len());
 }
 ```
 
@@ -89,8 +89,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 futures = "0.3"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-base64 = "0.22"
+# `image` and `base64` are no longer needed — encode_for_gcv is built into rasterrocket.
 ```
 
 ### Rust example — parallel batch
@@ -225,6 +224,13 @@ base64 = "0.22"
 ```
 
 ### Rust example
+
+> **Note:** `page_to_base64_jpeg` in this example is a local helper that encodes
+> a `RenderedPage` to a base64 JPEG string (using the `image` + `base64` crates
+> listed in the Cargo.toml block above). For a batteries-included alternative,
+> `rasterrocket::encode_for_gcv` does the same job with no external crates and
+> enforces a size budget — see the [Google Cloud Vision section](#google-cloud-vision)
+> above.
 
 ```rust
 use rasterrocket::{RasterOptions, raster_pdf};
@@ -361,6 +367,11 @@ base64 = "0.22"
 ```
 
 ### Rust example — Mistral OCR 3
+
+> **Note:** `page_to_base64_jpeg` is a local helper (see the GPT-5 section
+> above for a definition sketch, or use `rasterrocket::encode_for_gcv` from
+> the [Google Cloud Vision section](#google-cloud-vision) as a drop-in
+> replacement with built-in budget enforcement and no external crates).
 
 ```rust
 use rasterrocket::{RasterOptions, raster_pdf};
