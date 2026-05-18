@@ -19,8 +19,10 @@ use jpeg_encoder::{ColorType, Encoder};
 /// # Errors
 ///
 /// - [`EncodeError::UnsupportedMode`] for non-grayscale modes (use
-///   [`write_ppm`][crate::write_ppm]/[`write_png`][crate::write_png]) or when
-///   a dimension exceeds `u16::MAX` (the JPEG format ceiling, 65535 px/side).
+///   [`write_ppm`][crate::write_ppm]/[`write_png`][crate::write_png]), for a
+///   zero-width or zero-height bitmap (JPEG has no empty-image encoding), or
+///   when a dimension exceeds `u16::MAX` (the JPEG format ceiling,
+///   65535 px/side).
 /// - [`EncodeError::Jpeg`] on an internal encoder failure.
 pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, EncodeError> {
     match P::MODE {
@@ -37,6 +39,16 @@ pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, E
         }
     }
 
+    // Reject empty images here rather than letting the encoder surface a
+    // library-internal `ZeroImageDimensions` as `EncodeError::Jpeg`: a
+    // zero-sized bitmap is a caller-side input-shape violation, so it belongs
+    // with the other `UnsupportedMode` precondition rejections.
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return Err(EncodeError::UnsupportedMode(
+            "zero-width or zero-height bitmap: JPEG cannot encode an empty image",
+        ));
+    }
+
     let width = u16::try_from(bitmap.width)
         .map_err(|_| EncodeError::UnsupportedMode("width exceeds JPEG limit (65535 px)"))?;
     let height = u16::try_from(bitmap.height)
@@ -44,8 +56,11 @@ pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, E
 
     let q = quality.clamp(1, 100);
 
-    let w = bitmap.width as usize;
-    let mut packed = Vec::with_capacity(w * bitmap.height as usize);
+    // `width`/`height` are now proven to fit in `u16`, so the row count and
+    // row length below fit in `usize` on every supported platform without a
+    // lossy `as` cast.
+    let w = usize::from(width);
+    let mut packed = Vec::with_capacity(w * usize::from(height));
     for y in 0..bitmap.height {
         packed.extend_from_slice(&bitmap.row_bytes(y)[..w]);
     }
@@ -111,6 +126,18 @@ mod tests {
             matches!(result, Err(EncodeError::UnsupportedMode(_))),
             "Rgb8 must return UnsupportedMode for jpeg_gray"
         );
+    }
+
+    #[test]
+    fn zero_dimension_returns_unsupported_error() {
+        for (w, h) in [(0, 4), (4, 0), (0, 0)] {
+            let bmp: Bitmap<Gray8> = Bitmap::new(w, h, 1, false);
+            let result = jpeg_gray::<Gray8>(&bmp, 85);
+            assert!(
+                matches!(result, Err(EncodeError::UnsupportedMode(_))),
+                "{w}x{h} bitmap must return UnsupportedMode, got {result:?}"
+            );
+        }
     }
 
     #[test]
