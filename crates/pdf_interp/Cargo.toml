@@ -33,11 +33,11 @@ gpu-jpeg-huffman = ["dep:gpu", "gpu/gpu-jpeg-huffman"]
 [dependencies]
 gpu      = { package = "rasterrocket-gpu",    path = "../gpu",    optional = true, default-features = false }
 bytemuck = { workspace = true, optional = true }
-raster = { package = "rasterrocket-render", path = "../raster", version = "1.0" }
-color  = { package = "rasterrocket-color",  path = "../color",  version = "1.0" }
-font   = { package = "rasterrocket-font",   path = "../font",   version = "1.0" }
-encode = { package = "rasterrocket-encode", path = "../encode", version = "1.0" }
-pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.0" }
+raster = { package = "rasterrocket-render", path = "../raster", version = "1.1" }
+color  = { package = "rasterrocket-color",  path = "../color",  version = "1.1" }
+font   = { package = "rasterrocket-font",   path = "../font",   version = "1.1" }
+encode = { package = "rasterrocket-encode", path = "../encode", version = "1.1" }
+pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.1" }
 log    = { workspace = true }
 fax = "0.2.6"
 hayro-ccitt = "0.3.0"

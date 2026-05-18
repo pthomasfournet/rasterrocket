@@ -33,10 +33,10 @@ gpu-jpeg-huffman = ["pdf_raster/gpu-jpeg-huffman"]
 gpu-validation   = ["pdf_raster/gpu-validation"]
 
 [dependencies]
-pdf_raster  = { package = "rasterrocket",        path = "../pdf_raster", version = "1.0" }
-encode      = { package = "rasterrocket-encode", path = "../encode",     version = "1.0" }
-color       = { package = "rasterrocket-color",  path = "../color",      version = "1.0" }
-raster      = { package = "rasterrocket-render", path = "../raster",     version = "1.0" }
+pdf_raster  = { package = "rasterrocket",        path = "../pdf_raster", version = "1.1" }
+encode      = { package = "rasterrocket-encode", path = "../encode",     version = "1.1" }
+color       = { package = "rasterrocket-color",  path = "../color",      version = "1.1" }
+raster      = { package = "rasterrocket-render", path = "../raster",     version = "1.1" }
 clap        = { version = "4", features = ["derive"] }
 rayon       = "1"
 log         = { workspace = true }

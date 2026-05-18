@@ -13,8 +13,8 @@ keywords             = ["pdf", "ppm", "png", "encode", "image"]
 categories           = ["multimedia::images", "encoding"]
 
 [dependencies]
-color  = { package = "rasterrocket-color",  path = "../color",  version = "1.0" }
-raster = { package = "rasterrocket-render", path = "../raster", version = "1.0" }
+color  = { package = "rasterrocket-color",  path = "../color",  version = "1.1" }
+raster = { package = "rasterrocket-render", path = "../raster", version = "1.1" }
 
 # PNG output — pure Rust, no system libs required.
 png = "0.17"

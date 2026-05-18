@@ -33,12 +33,12 @@ gpu-validation   = ["dep:gpu", "gpu/gpu-validation"]
 
 [dependencies]
 gpu         = { package = "rasterrocket-gpu",         path = "../gpu",        optional = true, default-features = false }
-pdf_interp  = { package = "rasterrocket-interp",  path = "../pdf_interp", version = "1.0" }
-raster      = { package = "rasterrocket-render",  path = "../raster",     version = "1.0" }
-color       = { package = "rasterrocket-color",   path = "../color",      version = "1.0" }
-encode      = { package = "rasterrocket-encode",  path = "../encode",     version = "1.0" }
+pdf_interp  = { package = "rasterrocket-interp",  path = "../pdf_interp", version = "1.1" }
+raster      = { package = "rasterrocket-render",  path = "../raster",     version = "1.1" }
+color       = { package = "rasterrocket-color",   path = "../color",      version = "1.1" }
+encode      = { package = "rasterrocket-encode",  path = "../encode",     version = "1.1" }
 base64      = "0.22"
-pdf         = { package = "rasterrocket-parser",  path = "../pdf",        version = "1.0" }
+pdf         = { package = "rasterrocket-parser",  path = "../pdf",        version = "1.1" }
 rayon       = "1"
 log         = { workspace = true }
 

@@ -13,8 +13,8 @@ keywords             = ["pdf", "font", "freetype", "glyph", "renderer"]
 categories           = ["rendering", "multimedia::images"]
 
 [dependencies]
-color    = { package = "rasterrocket-color",  path = "../color",  version = "1.0" }
-raster   = { package = "rasterrocket-render", path = "../raster", version = "1.0" }
+color    = { package = "rasterrocket-color",  path = "../color",  version = "1.1" }
+raster   = { package = "rasterrocket-render", path = "../raster", version = "1.1" }
 # freetype-rs 0.38 wraps FreeType 2.x with a safe API; the system library
 # is linked via pkg-config (libfreetype-dev must be installed).
 freetype-rs = { version = "0.38", default-features = false }
