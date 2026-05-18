@@ -6,6 +6,8 @@
 //! No HTTP, auth, or batching: this crate renders pixels, it is not a GCV
 //! API client.
 
+use std::borrow::Cow;
+
 use base64::Engine as _;
 use color::Gray8;
 use raster::Bitmap;
@@ -222,13 +224,19 @@ pub fn encode_for_gcv(page: &RenderedPage, budget: &GcvBudget) -> Result<GcvImag
     let mut smallest = usize::MAX;
 
     for (di, &(dw, dh)) in dims.iter().enumerate() {
-        let buf = if di == 0 {
-            page.pixels.clone()
+        let buf: Cow<[u8]> = if di == 0 {
+            Cow::Borrowed(&page.pixels)
         } else {
-            downscale_gray(&page.pixels, page.width, page.height, dw, dh)
+            Cow::Owned(downscale_gray(
+                &page.pixels,
+                page.width,
+                page.height,
+                dw,
+                dh,
+            ))
         };
 
-        let hi_jpeg = encode_jpeg(&buf, dw, dh, hi_q)?;
+        let hi_jpeg = encode_jpeg(buf.as_ref(), dw, dh, hi_q)?;
         let hi_b64 = base64_len(hi_jpeg.len());
         smallest = smallest.min(hi_b64);
         if hi_b64 <= budget.max_base64_bytes {
@@ -246,16 +254,15 @@ pub fn encode_for_gcv(page: &RenderedPage, budget: &GcvBudget) -> Result<GcvImag
         let mut best: Option<(u8, Vec<u8>)> = None;
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            let jpeg = encode_jpeg(&buf, dw, dh, mid)?;
+            let jpeg = encode_jpeg(buf.as_ref(), dw, dh, mid)?;
             let b64 = base64_len(jpeg.len());
             smallest = smallest.min(b64);
             if b64 <= budget.max_base64_bytes {
                 best = Some((mid, jpeg));
                 lo = mid + 1;
+            } else if mid == 0 {
+                break;
             } else {
-                if mid == 0 {
-                    break;
-                }
                 hi = mid - 1;
             }
         }

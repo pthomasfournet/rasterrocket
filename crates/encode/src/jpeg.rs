@@ -60,16 +60,26 @@ pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, E
     // row length below fit in `usize` on every supported platform without a
     // lossy `as` cast.
     let w = usize::from(width);
-    let mut packed = Vec::with_capacity(w * usize::from(height));
-    for y in 0..bitmap.height {
-        packed.extend_from_slice(&bitmap.row_bytes(y)[..w]);
-    }
 
     let mut out = Vec::new();
     let encoder = Encoder::new(&mut out, q);
-    encoder
-        .encode(&packed, width, height, ColorType::Luma)
-        .map_err(EncodeError::Jpeg)?;
+    let result = if bitmap.stride == w {
+        // No row padding: the backing buffer is already the contiguous pixel
+        // stream the encoder wants, so feed it directly without a copy.
+        encoder.encode(
+            &bitmap.data()[..w * usize::from(height)],
+            width,
+            height,
+            ColorType::Luma,
+        )
+    } else {
+        let mut packed = Vec::with_capacity(w * usize::from(height));
+        for y in 0..bitmap.height {
+            packed.extend_from_slice(&bitmap.row_bytes(y)[..w]);
+        }
+        encoder.encode(&packed, width, height, ColorType::Luma)
+    };
+    result.map_err(EncodeError::Jpeg)?;
     Ok(out)
 }
 
