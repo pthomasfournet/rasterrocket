@@ -187,4 +187,40 @@ mod tests {
         );
         assert_eq!(&bytes_tight[..2], &[0xFF, 0xD8], "missing SOI marker");
     }
+
+    #[test]
+    fn multi_row_padded_stride_matches_tight() {
+        // The single-row stride test cannot distinguish the stride==w fast
+        // path from the row-strip path: with one row there is no inter-row
+        // padding to interleave. A MULTI-row padded bitmap does — if the
+        // fast path were taken on a padded buffer, padding bytes would mix
+        // into the pixel stream between rows and the output would diverge
+        // from the tight encoding. Identical output proves both branches
+        // of the stride dispatch are correct.
+        let w = 5;
+        let h = 4;
+        let mut padded: Bitmap<Gray8> = Bitmap::new(w, h, 8, false);
+        let mut tight: Bitmap<Gray8> = Bitmap::new(w, h, 1, false);
+        assert!(
+            padded.stride > w as usize,
+            "padded stride {} must exceed width {w}",
+            padded.stride
+        );
+        assert_eq!(tight.stride, w as usize, "tight stride must equal width");
+
+        for y in 0..h {
+            // Distinct per-pixel content so any row/padding misalignment
+            // changes the encoded bytes.
+            let row: Vec<u8> = (0..w).map(|x| (y * 31 + x * 7 + 1) as u8).collect();
+            padded.row_bytes_mut(y)[..w as usize].copy_from_slice(&row);
+            tight.row_bytes_mut(y)[..w as usize].copy_from_slice(&row);
+        }
+
+        let bytes_padded = jpeg_gray::<Gray8>(&padded, 85).unwrap();
+        let bytes_tight = jpeg_gray::<Gray8>(&tight, 85).unwrap();
+        assert_eq!(
+            bytes_padded, bytes_tight,
+            "multi-row padded vs tight must encode identically"
+        );
+    }
 }

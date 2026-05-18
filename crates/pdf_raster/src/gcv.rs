@@ -550,4 +550,57 @@ mod tests {
             Err(GcvError::Unfittable { .. })
         ));
     }
+
+    #[test]
+    fn downscale_gray_box_average_is_exact() {
+        // 4x2 → 2x1: each output pixel is the mean of one 2x2 source box.
+        // Hand-computed so a corrupted box filter (wrong index math, sum
+        // instead of mean, etc.) produces a different value and fails here.
+        // box bounds: dst x∈{0,1}→src cols {0,1},{2,3}; dst y=0→src rows {0,1}.
+        #[rustfmt::skip]
+        let src: [u8; 8] = [
+             0, 10, 100, 110, // row 0
+            20, 30, 120, 130, // row 1
+        ];
+        let out = downscale_gray(&src, 4, 2, 2, 1);
+        // dst[0] = mean(0,10,20,30)      = 60/4  = 15
+        // dst[1] = mean(100,110,120,130) = 460/4 = 115
+        assert_eq!(out, vec![15, 115], "box-filter average must be exact");
+    }
+
+    #[test]
+    fn downscale_gray_preserves_a_uniform_region() {
+        // A constant input must downscale to the same constant — guards
+        // against accumulator/divisor mutations that would skew a flat field.
+        let src = vec![200u8; 6 * 4];
+        let out = downscale_gray(&src, 6, 4, 3, 2);
+        assert_eq!(out.len(), 3 * 2);
+        assert!(
+            out.iter().all(|&p| p == 200),
+            "uniform 200 input must stay 200, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_halving_does_not_panic_or_overshoot() {
+        // A page whose short side never lands exactly on the OCR floor as it
+        // halves exercises the `cw < 2 || ch < 2` halving-termination guard
+        // that the floor-aligned fixtures never reach. Must terminate with a
+        // valid in-contract result, never panic or emit a sub-floor / >75 MP
+        // image.
+        let page = noisy_page(3000, 17);
+        match encode_for_gcv(&page, &GcvBudget::default()) {
+            Ok(img) => {
+                assert!(
+                    u64::from(img.width) * u64::from(img.height) <= 75_000_000,
+                    "must never emit > 75 MP: {}x{}",
+                    img.width,
+                    img.height
+                );
+                assert!(img.width >= 1 && img.height >= 1);
+            }
+            Err(GcvError::Unfittable { .. }) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
 }
