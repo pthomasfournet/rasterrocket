@@ -27,6 +27,43 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Release history
 
+### v1.1.0 (May 2026)
+
+**Google Cloud Vision input optimization.** A new in-process path that
+makes the rasterrocket stage of a `pdf_oxide → rasterrocket → GCV`
+pipeline produce an upload-ready payload guaranteed within GCV's request
+limits — deterministically, with no external `image` crate and no
+network guesswork — so the only remaining bottleneck is GCV's own
+network round-trip. First public API addition since 1.0.
+
+- **`encode::jpeg_gray`** — a baseline 8-bit grayscale JPEG codec in the
+  `encode` crate. Fills the JPEG gap that previously forced every cloud-OCR
+  integrator onto the external `image` crate. A plain codec — no
+  consumer-specific policy.
+- **`rasterrocket::encode_for_gcv` + `GcvBudget` / `GcvImage` /
+  `GcvError`** — GCV policy. Encodes a `RenderedPage` to a grayscale JPEG
+  fitted deterministically to GCV's *binding* limit (10 MB of base64
+  inside the `images:annotate` request — not the 20 MB raw-file limit),
+  by stepping quality down then, only if necessary, box-downscaling
+  (aspect-preserving, never below GCV's ~1024 px OCR floor, never over
+  the 75 MP server-side-resize cap). Returns `Unfittable` rather than ever
+  emitting an over-budget or oversized payload. `GcvImage` exposes raw
+  `jpeg` bytes plus `to_base64()`; the size proxy used during fitting is
+  proven byte-exact against the real encoding.
+- **Pure in-RAM** — no intermediate files, no HTTP/auth/batching in-tree:
+  rasterrocket renders pixels and hands back a correctly-sized payload; it
+  is not a GCV API client. Disk is reachable only if the caller writes the
+  raw bytes themselves.
+- **Hardening + verification** — per-commit hardening pass (fixed a
+  zero-dimension malformed-payload path, an oversized-side codec-error
+  leak, and a pre-existing broken intra-doc link uncovered in the process);
+  hot-path copy elisions; cargo-mutants-driven test hardening of the
+  box-filter arithmetic and stride dispatch. `wiki/LLM-Vision-OCR-Integration`
+  and the README document the helper.
+
+No behavioural change to the existing render path. The new API is purely
+additive.
+
 ### v1.0.3 (May 2026)
 
 **v1.0.2 remediation + hardening campaign.** External QA found ~76% of
@@ -65,7 +102,6 @@ codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
   `gpu-validation` JPEG-oracle cfg-boundary; a pre-existing multi-backend
   `resolve_image` type-inference break it unmasked; lazy_session tests
   hard-failing on intentionally-optional private fixtures.
-- **GCV input optimization** — `encode::jpeg_gray` (in-process L8 JPEG codec, removes the forced external `image`-crate dep) + `rasterrocket::encode_for_gcv` (deterministic quality→resolution fit to GCV's 10 MB-base64 request ceiling; never an over-budget or >75 MP payload). Pure in-RAM, no intermediate files.
 
 No public API changes. Decrypt remains private-copy-only behind a
 default-No liability gate; JavaScript is detected and disclosed but never

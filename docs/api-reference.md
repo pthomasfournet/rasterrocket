@@ -369,6 +369,54 @@ pub use rasterrocket_interp::resources::ImageFilter;
 
 ---
 
+### Google Cloud Vision input (`encode_for_gcv`)
+
+```rust
+pub fn encode_for_gcv(
+    page: &RenderedPage,
+    budget: &GcvBudget,
+) -> Result<GcvImage, GcvError>;
+
+pub struct GcvBudget {
+    pub max_base64_bytes: usize, // default 10 * 1024 * 1024
+    pub min_quality: u8,         // default 60
+    pub start_quality: u8,       // default 90
+}
+
+pub struct GcvImage {
+    pub jpeg: Vec<u8>, // fitted baseline grayscale JPEG bytes
+    pub quality: u8,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl GcvImage {
+    pub fn to_base64(&self) -> String;
+}
+
+pub enum GcvError {
+    Unfittable { smallest_base64: usize, budget: usize },
+    Encode(rasterrocket_encode::EncodeError),
+}
+```
+
+Encodes a `RenderedPage` to a grayscale JPEG guaranteed to fit Google Cloud Vision's *binding* request limit — 10 MB of base64 inside the `images:annotate` JSON request, **not** the 20 MB raw-file limit — decided deterministically with no network call.
+
+Strategy: try `start_quality` at native resolution; binary-search quality down toward `min_quality`; only if the quality floor still overflows, box-downscale (aspect-preserving, never below GCV's ~1024 px OCR short-side floor, never over the 75 MP server-side-resize cap) and retry. If no candidate fits without breaking those floors, returns `GcvError::Unfittable` — never an over-budget or oversized payload. `GcvImage::to_base64()` reproduces exactly the length measured during fitting (the proxy is byte-exact against the real encoding).
+
+`GcvBudget::default()` encodes the GCV limits directly. Pass `RasterOptions { deskew: false, .. }` for this path — GCV deskews internally. The raw `jpeg` field is the universal artifact (disk, GCS `files:asyncBatchAnnotate`); `to_base64()` is the inline-`content` form. No HTTP/auth/batching is performed — rasterrocket renders pixels, it is not a GCV API client. See the [LLM Vision OCR Integration](../../../wiki/LLM-Vision-OCR-Integration) wiki for end-to-end examples.
+
+The `rasterrocket-encode` crate also exposes the underlying codec directly:
+
+```rust
+pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8)
+    -> Result<Vec<u8>, EncodeError>;
+```
+
+Baseline 8-bit grayscale JPEG (`Gray8`/`Mono8` only; `quality` clamped 1–100). A plain codec with no consumer-specific policy.
+
+---
+
 ## `rasterrocket-interp` crate — lower-level API
 
 Direct use of `rasterrocket-interp` is not required for most consumers. Use it when building a custom render loop or accessing document metadata without rendering.

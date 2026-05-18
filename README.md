@@ -6,13 +6,51 @@ Renders PDF pages to 8-bit grayscale pixel buffers for direct consumption by Tes
 
 ```toml
 # Cargo.toml — library
-rasterrocket = "1.0"
+rasterrocket = "1.1"
 ```
 
 ```bash
 # CLI — drop-in pdftoppm replacement
 cargo install rasterrocket-cli
 ```
+
+## What's new in v1.1.0
+
+**Google Cloud Vision input optimization.** First public API addition
+since 1.0. A new in-process path produces an upload-ready, size-fitted
+grayscale JPEG for a `pdf_oxide → rasterrocket → GCV` pipeline — no
+external `image` crate, no network guesswork, so the only bottleneck
+left is GCV's own round-trip.
+
+- **`encode::jpeg_gray`** — a baseline 8-bit grayscale JPEG codec
+  (`rasterrocket-encode`). Removes the dependency every cloud-OCR
+  integrator previously had to add by hand.
+- **`rasterrocket::encode_for_gcv` + `GcvBudget` / `GcvImage` /
+  `GcvError`** — deterministically fits a `RenderedPage` to GCV's
+  *binding* limit (10 MB of base64 in the `images:annotate` request, not
+  the 20 MB file limit): step quality down, then aspect-preserving
+  downscale only if needed (never below GCV's ~1024 px OCR floor, never
+  over the 75 MP cap), else `Unfittable` — never an over-budget payload.
+  `GcvImage` gives you raw `jpeg` bytes plus `to_base64()`.
+
+```rust
+use rasterrocket::{RasterOptions, raster_pdf, encode_for_gcv, GcvBudget};
+
+let opts = RasterOptions { deskew: false, ..RasterOptions::default() };
+let budget = GcvBudget::default(); // 10 MB base64 ceiling baked in
+
+for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
+    let img = encode_for_gcv(&result?, &budget)?;
+    let _b64 = img.to_base64(); // drop into the GCV annotate request body
+}
+```
+
+Pure in-RAM, no intermediate files; rasterrocket renders pixels and
+hands back a correctly-sized payload — it is not a GCV API client (no
+HTTP/auth/batching in-tree). See the
+[LLM Vision OCR Integration](../../wiki/LLM-Vision-OCR-Integration) wiki.
+No behavioural change to the existing render path; the API is purely
+additive.
 
 ## What's new in v1.0.3
 

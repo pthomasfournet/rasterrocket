@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-05-18
+
+### Documentation
+
+- Wire wiki + ROADMAP to the built-in GCV helper
+
+### Features
+
+- Add jpeg_gray L8 JPEG codec
+- GcvBudget/GcvImage/GcvError types
+- Deterministic encode_for_gcv fitting algorithm
+- Re-export encode_for_gcv at crate root
+
+### Other
+
+- Reject empty bitmaps in jpeg_gray; drop lossy as-casts
+- Treat oversized-side candidates as Unfittable, not codec error
+- Fix inaccurate crate-doc paragraph and pre-existing broken intra-doc link
+- Fix GCV setup deps, clarify intro snippet, note page_to_base64_jpeg origin
+- Tighten proxy test residue coverage and unify fixture byte
+- Drop redundant full-raster copies on the encode hot path
+
+### Testing
+
+- Lock base64_len proxy == actual encoded length
+- Close mutation-testing gaps in downscale + stride dispatch
+
 ## [1.0.3] - 2026-05-16
 
 ### Bug Fixes
@@ -36,11 +63,13 @@ All notable changes to this project will be documented in this file.
 
 - Gitignore /qa/ alongside /audit/ for private QA artifacts
 - Fix stale flate_bench example crate path
+- Release v1.0.3
 
 ### Documentation
 
 - Document hardening posture + native-FFI trust boundary
 - Refresh README/ROADMAP/api-reference for the v1.0.2 remediation
+- Regenerate CHANGELOG.md for v1.0.3
 
 ### Features
 
