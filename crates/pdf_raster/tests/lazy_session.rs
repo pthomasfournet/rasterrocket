@@ -10,10 +10,10 @@ use std::path::PathBuf;
 fn session_open_reports_correct_total_pages() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/corpus-05-academic-book.pdf");
-    // The corpus fixtures are intentionally gitignored (private corpus,
-    // same policy as /home/tom/mss); skip cleanly when absent rather than
-    // hard-failing a fresh checkout. The assertion below is the actual
-    // test — it runs whenever the fixture is provided.
+    // The corpus fixtures are intentionally gitignored (private corpus);
+    // skip cleanly when absent rather than hard-failing a fresh checkout.
+    // The assertion below is the actual test — it runs whenever the
+    // fixture is provided.
     if !path.exists() {
         eprintln!("skipping: corpus fixture absent ({})", path.display());
         return;
