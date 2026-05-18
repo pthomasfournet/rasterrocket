@@ -110,6 +110,11 @@ const GCV_MAX_PIXELS: u64 = 75_000_000;
 /// `Unfittable` (caller's decision), not a silent sub-floor image.
 const OCR_SHORT_SIDE_FLOOR: u32 = 1024;
 
+/// Baseline JPEG's hard per-side ceiling. A dimension above this cannot be
+/// encoded at all, so such a candidate is not a fitting option — it must be
+/// filtered out exactly like the 75 MP cap, not surfaced as a codec failure.
+const JPEG_MAX_SIDE: u32 = u16::MAX as u32;
+
 /// base64 length for `n` raw bytes (STANDARD, with padding): ceil(n/3)*4.
 const fn base64_len(n: usize) -> usize {
     n.div_ceil(3) * 4
@@ -191,7 +196,12 @@ pub fn encode_for_gcv(page: &RenderedPage, budget: &GcvBudget) -> Result<GcvImag
         // Native is always allowed (it is the input, not a downscale).
         // Downscaled candidates must respect the OCR short-side floor.
         let floor_ok = is_native || short >= OCR_SHORT_SIDE_FLOOR;
-        if floor_ok && u64::from(cw) * u64::from(ch) <= GCV_MAX_PIXELS {
+        // A side above the baseline-JPEG ceiling cannot be encoded; treat it
+        // as a non-candidate (it falls out to a smaller halving or, if none
+        // qualifies, `Unfittable`) rather than letting `jpeg_gray` raise a
+        // codec error the caller would misread as an encoder fault.
+        let jpeg_ok = cw <= JPEG_MAX_SIDE && ch <= JPEG_MAX_SIDE;
+        if floor_ok && jpeg_ok && u64::from(cw) * u64::from(ch) <= GCV_MAX_PIXELS {
             dims.push((cw, ch));
         }
         // Stop once we have reached/passed the floor or cannot halve further.
@@ -507,6 +517,20 @@ mod tests {
             ),
             Err(GcvError::Unfittable { .. }) => {} // acceptable: can't fit ≥ floor
             Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn oversized_side_is_unfittable_not_encode_error() {
+        // 70000 px exceeds baseline JPEG's 65535-per-side ceiling while the
+        // page stays under 75 MP. The short side (16) is below the OCR floor,
+        // so no halving produces an encodable candidate. The contract is a
+        // clean `Unfittable`, never a `GcvError::Encode` codec fault leaked
+        // from `jpeg_gray`.
+        let page = noisy_page(70_000, 16);
+        match encode_for_gcv(&page, &GcvBudget::default()) {
+            Err(GcvError::Unfittable { .. }) => {}
+            other => panic!("expected Unfittable, got {other:?}"),
         }
     }
 
