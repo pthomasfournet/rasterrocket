@@ -321,7 +321,7 @@ impl RasterSession {
 /// Wraps [`pdf_interp::prescan_page`] using the document already loaded in
 /// `session` — callers do not need to access `session.doc()` directly.
 ///
-/// Returns a [`PageDiagnostics`] with `has_images`, `has_vector_text`,
+/// Returns a [`crate::PageDiagnostics`] with `has_images`, `has_vector_text`,
 /// `dominant_filter`, and a conservative `source_ppi_hint`.
 ///
 /// # Errors

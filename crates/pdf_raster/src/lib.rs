@@ -22,8 +22,10 @@
 //! ```
 //!
 //! For Google Cloud Vision pipelines, [`encode_for_gcv`] turns a
-//! [`RenderedPage`] into an upload-ready base64 JPEG guaranteed within GCV's
-//! request limits — no external image crate, no network guesswork.
+//! [`RenderedPage`] into a size-fitted [`GcvImage`] (JPEG bytes + fitting
+//! metadata) guaranteed to stay within GCV's request limits; call
+//! [`GcvImage::to_base64`] for the inline `content` string — no external
+//! image crate, no network guesswork.
 //!
 //! # OCR integration
 //!
