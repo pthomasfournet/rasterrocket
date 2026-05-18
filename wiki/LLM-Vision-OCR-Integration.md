@@ -26,55 +26,29 @@ For local, offline OCR without network calls or per-page costs, see [OCR Integra
 
 ## Shared encoding helper: `RenderedPage` → base64 JPEG
 
-Both cloud APIs accept base64-encoded image bytes. JPEG is preferred over PNG — smaller payload means lower latency. rasterrocket's `encode` crate does not produce JPEG; add the `image` crate for this step.
-
-```toml
-# Cargo.toml
-[dependencies]
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-base64 = "0.22"
-```
-
-**Rust:**
+This is now built in — no external `image` crate, no hand-rolled encoder.
+`encode_for_gcv` produces a grayscale JPEG guaranteed to fit GCV's request
+limit, deterministically and in-process:
 
 ```rust
-use image::{GrayImage, ImageEncoder};
-use image::codecs::jpeg::JpegEncoder;
-use rasterrocket::RenderedPage;
+use rasterrocket::{raster_pdf, RasterOptions};
+use rasterrocket::{encode_for_gcv, GcvBudget};
 
-/// Encode a greyscale RenderedPage to a base64 JPEG string.
-/// quality: 0–100; 85 is a good default for OCR (small payload, no perceptible loss).
-fn page_to_base64_jpeg(page: &RenderedPage, quality: u8) -> anyhow::Result<String> {
-    let img = GrayImage::from_raw(page.width, page.height, page.pixels.clone())
-        .ok_or_else(|| anyhow::anyhow!("invalid pixel buffer dimensions"))?;
+let opts = RasterOptions { deskew: false, ..Default::default() }; // GCV deskews internally
+let budget = GcvBudget::default();                                // 10 MB base64 ceiling baked in
 
-    let mut jpeg_buf = Vec::new();
-    let encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-    encoder.encode(
-        img.as_raw(),
-        page.width,
-        page.height,
-        image::ColorType::L8,
-    )?;
-
-    Ok(base64::engine::general_purpose::STANDARD.encode(&jpeg_buf))
+for (page_num, result) in raster_pdf(std::path::Path::new("scan.pdf"), &opts) {
+    let page = result?;
+    let img = encode_for_gcv(&page, &budget)?;
+    let b64 = img.to_base64();   // drop straight into the annotate request body
+    // img.jpeg is also available as raw bytes (disk audit, GCS async upload).
+    let _ = (page_num, b64);
 }
 ```
 
-**Python:**
-
-```python
-import base64
-import io
-from PIL import Image
-
-def page_to_base64_jpeg(pixels: bytes, width: int, height: int, quality: int = 85) -> str:
-    """Encode a greyscale pixel buffer to base64 JPEG."""
-    img = Image.frombytes("L", (width, height), pixels)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
-    return base64.b64encode(buf.getvalue()).decode()
-```
+For the raw JPEG bytes (e.g. writing to disk or GCS for
+`files:asyncBatchAnnotate`), use `img.jpeg` directly — `std::fs::write(path,
+&img.jpeg)?`.
 
 ---
 
@@ -86,6 +60,7 @@ def page_to_base64_jpeg(pixels: bytes, width: int, height: int, quality: int = 8
 - **Default rate limit:** 1800 requests/min — parallelise freely up to this limit
 - Request a quota increase via the Google Cloud Console for large batches
 - Prices change — verify at https://cloud.google.com/vision/pricing
+- **Request size:** the binding limit is **10 MB of base64 inside the JSON `annotate` request** — *not* the 20 MB raw-file limit. base64 inflates bytes ~33%. Images over 75 MP are silently downscaled server-side (wasted upload + nondeterministic OCR input). `encode_for_gcv` enforces both locally so the payload always uploads in one trip with no server-side resize.
 
 ### What you get
 
@@ -138,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks = Vec::new();
     for (page_num, result) in pages {
         let page = result?;
-        let b64 = page_to_base64_jpeg(&page, 85)?;
+        let b64 = rasterrocket::encode_for_gcv(&page, &rasterrocket::GcvBudget::default())?.to_base64();
         let client = client.clone();
         let api_key = api_key.clone();
 

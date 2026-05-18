@@ -65,6 +65,7 @@ codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
   `gpu-validation` JPEG-oracle cfg-boundary; a pre-existing multi-backend
   `resolve_image` type-inference break it unmasked; lazy_session tests
   hard-failing on intentionally-optional private fixtures.
+- **GCV input optimization** — `encode::jpeg_gray` (in-process L8 JPEG codec, removes the forced external `image`-crate dep) + `rasterrocket::encode_for_gcv` (deterministic quality→resolution fit to GCV's 10 MB-base64 request ceiling; never an over-budget or >75 MP payload). Pure in-RAM, no intermediate files.
 
 No public API changes. Decrypt remains private-copy-only behind a
 default-No liability gate; JavaScript is detected and disclosed but never
@@ -1114,7 +1115,7 @@ Net deskew cost per page at steady state: **~0.4ms** (rotation-bound; detection 
 ### Goal
 
 Make rasterrocket the drop-in replacement for the pdftoppm + Leptonica preprocessing
-stack in the mss OCR pipeline.  The rasterise + deskew path is feature-complete;
+stack in a production OCR pipeline.  The rasterise + deskew path is feature-complete;
 Phase 6 closes the remaining gaps before the first production integration.
 
 ### Open work items
@@ -1237,9 +1238,9 @@ Reverse-engineering desktop NVJPG would take a multi-month research project (cf.
 
 ---
 
-## Phase 8 — Custom on-GPU parallel Huffman decoder (DEFERRED)
+## Phase 8 — Custom on-GPU parallel Huffman decoder (Phase A SHIPPED as OSS artifact v1.0.0; B–D DEFERRED by decision)
 
-**Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07. Phases 1+ deferred indefinitely as a research project, not a performance work item.
+**Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07. Phase A (the parallel-Huffman algorithm in isolation) shipped 2026-05-12 / v1.0.0 as a byte-identical CUDA+Vulkan OSS artifact, wired into the production Vulkan path but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`). Phases B–D remain deferred indefinitely as a research project, not a performance work item — the bench gate confirmed 24-thread CPU wins on aggregate throughput, which is the answer to the research question, not a gap.
 
 **Why deferred:**
 
@@ -1277,7 +1278,7 @@ The full original spec is preserved as a developer-side research artifact; it is
 
 ---
 
-## Phase 9 — Device-resident image cache and GPU page buffer (IMPLEMENTATION COMPLETE — bench gate partial)
+## Phase 9 — Device-resident image cache and GPU page buffer (✓ SHIPPED v1.0.0 — `cache` feature, opt-in)
 
 **Goal:** decoded image pixels and the page being rendered both live in VRAM for the lifetime of a render session, so the rendering hot path performs zero PCIe round-trips per image and zero decode work on cache hits.
 
@@ -1310,9 +1311,11 @@ Re-bench result: cold-render regression collapsed from 14× to 1.1–1.9× on lo
 
 **Total scope:** ~1850 LoC new Rust + ~150 LoC new CUDA + ~400 LoC modified existing. Tasks 1+2 ship in ~5-7 days; full pipeline ~3 weeks elapsed.
 
+**Shipped:** all six tasks landed; the `cache` feature is in `rasterrocket`, `rasterrocket-interp`, and the CLI as of v1.0.0. In-memory VRAM/host tiers run unconditionally when the feature is built; the disk tier is opt-in via `PDF_RASTER_CACHE_DIR`. The bench-gate reframe above (cross-pass / cross-session speedup, not cold-render) is the final answer, not an open item — criterion 5 as originally worded tested the wrong property and is closed as such.
+
 ---
 
-## Phase 10 — Vulkan compute backend (DONE except cross-vendor proof of life)
+## Phase 10 — Vulkan compute backend (✓ SHIPPED v0.8.0/v1.0.0 — cross-vendor smoke still hardware-blocked)
 
 **Goal:** replace the CUDA-specific kernel launch and device-memory layer with a backend-abstracted layer that has both CUDA and Vulkan compute implementations, so the same algorithmic kernels run on NVIDIA, AMD, Intel, and Apple GPUs from one source tree.
 
@@ -1359,7 +1362,9 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
 
 **Bench gate:** Phase 10 ships if (1) CUDA path performance unchanged within ±5%; (2) Vulkan path functional on RTX 5070 with pixel-diff ≤ 1 LSB vs CUDA; (3) Vulkan timing within 15% of CUDA on RTX 5070; (4) cross-vendor proof of life on AMD or Intel.
 
-**Status of bench gate:** criteria 1, 2, and 3 all PASS on RTX 5070 (commit `1783d66` + bench/v10/results.md, vector-heavy corpora 01-05).  Criterion 4 (cross-vendor proof of life) remains blocked on hardware.  See Task 4 step 4 above for the per-corpus numbers and the live-baseline rationale.
+**Status of bench gate:** criteria 1, 2, and 3 all PASS on RTX 5070 (commit `1783d66` + bench/v10/results.md, vector-heavy corpora 01-05).  Criterion 4 (cross-vendor proof of life) remains blocked on hardware — no AMD/Intel GPU or CI runner is available on the dev box; this is the *only* open Phase 10 item and it is external-blocked, not engineering work.
+
+**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; Vulkan is preferred over CUDA under `auto`. The parallel-Huffman JPEG decoder (Phase 8 Phase-A algorithm) is wired into the production Vulkan path (`gpu-jpeg-huffman`, implied by `vulkan`) but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) pending threshold tuning — it beats nvJPEG on 7/10 corpora when forced. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) and the `record_tile_fill` parity oracle remain deferred; none block correctness or parity.
 
 **Total scope:** ~3100 LoC new Rust + ~1000 LoC Slang + ~400 LoC modified. Estimated ~6-8 weeks elapsed (3-4 weeks tasks 1+2; 3-4 weeks task 3).
 
@@ -1406,9 +1411,9 @@ So the real Phase 11 is not "close the feature checklist" but "win a benchmark o
 
 We're already 4× faster than `pdftoppm` and 4.5× faster than `mutool` on this slice.  The 10 GB archive run in Task 11 (below) tests whether the lead holds when mmap actually pages.
 
-**What's left — Task 11 (the bench gate):**
+**Task 11 (the bench gate) — DONE, shipped v0.9.0.**
 
-Build a 10 GB output archive (~30 GB qpdf-input target), build 50–100 cross-doc archives for E3, run the four-event harness 5 times, write `bench/v11/results.md`, update `ROADMAP.md`'s release-history block with the v0.9.0 numbers.  Phase 11 ships if rasterrocket wins or ties at least three of four events on the 10 GB workload.
+The 10 GB archive run completed; `bench/v11/results.md` is written and the release-history block above carries the v0.9.0 numbers (E1 first-pixel 35.6 ms vs mutool 93.7 ms = 2.6×; E3 cross-doc 3.5 ms/archive). rasterrocket won or tied at least three of four events on the 10 GB workload, so the phase gate passed and Phase 11 shipped. Nothing in this phase is open.
 
 **What stays deferred:**
 
@@ -1429,6 +1434,39 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 - *`HttpRangeSource` / network-streaming PDF.*  PDFium's browser use case, not ours.
 - *AVX-512 simdjson-style lexer for PDF dictionaries.*  Real engineering with a real win, but the contest events don't bottleneck on dictionary parsing.  Deferred.
 - *Hugepages for GPU staging buffers.*  1–3% win on E2/E3.  Worth measuring after Task 11; not worth speccing now.
+
+---
+
+## Phase 12 — QA-driven correctness + per-commit hardening campaign (✓ SHIPPED v1.0.2 / v1.0.3)
+
+**Trigger.** External QA against a broad 238-PDF corpus found ~76% of pages were *visually wrong* after v1.0.2 — every root cause a **silent** total- or partial-loss on an input variant the curated test suite did not contain. The curated suite was green; the corpus was not. That gap, not any single bug, is the lesson of this phase: a passing test suite is not evidence of correctness on inputs it does not contain.
+
+**What shipped.** Two release waves (v1.0.2 rendering-correctness fixes, then v1.0.3 remediation + hardening). The per-release detail is in the release-history block at the top of this file (NF-1 … NF-12 and the per-commit hardening list); not duplicated here. The structural outcomes:
+
+- **Every silent-loss root fixed at the root**, not papered over with a fallback. Blank text/vector pages (indirect `/Length`, `/ObjStm` object streams, TrueType CIDFontType2), partial text drop-out, JPX+`/Mask` blank scans, page-tree "no pages", chained-filter skips, FunctionType-4 Separation tints, CFF/Type1C glyph garble, misleading errors on malformed/empty/non-PDF input, JS-bearing PDFs hard-refused, CCITTFax G3/G4 ImageMask "no rows", JPXDecode CMYK.
+- **DoS classes closed** as a deliberate hardening sweep: stack-overflow (tokenizer recursion → iteration), unbounded memory, raster-area cap (`MAX_PX_AREA`, `u64`-computed to kill a latent overflow), LZW bomb, filter-chain flood, Type-4 recursion/operand bomb, watchdog escape via tiling patterns, unbounded endstream scan.
+- **Security posture documented**: FFI trust boundary (system FreeType/OpenJPEG must be patched by the host — `cargo audit` covers only the Rust tree); bounded deterministic decoder property/fuzz harness; page-level and per-annotation/widget JavaScript *detection* (structural `/S /JavaScript` only — `/JS` is never decoded or executed; bounded, first-hit).
+- **No deferred findings.** Every review finding that didn't fit its originating commit was fixed at root, not filed and forgotten — including a git-proven latent form-XObject CTM regression, 17 missing PDF Appendix D.2 encoding slots, non-deterministic catalogue selection, and a multi-backend `resolve_image` type-inference break the campaign unmasked.
+
+**Acceptance criterion (met).** The 238-PDF exhaustive corpus is 100% legible — zero silent loss, zero crash — measured by OCR against a MuPDF oracle. No public API changes; decrypt stays private-copy-only behind a default-No liability gate; JavaScript is detected and disclosed but never executed.
+
+**Durable lesson for future phases.** Curated fixtures prove a feature works on the inputs you thought of. They do not prove absence of silent loss. Any future codec/parser work ships with a corpus-scale OCR-vs-oracle gate, not just unit fixtures.
+
+**Status: closed.** Nothing open. This is a backstop discipline, not an ongoing work item — new parser/codec work inherits the corpus-gate requirement above.
+
+---
+
+## Current status (2026-05-16)
+
+Everything substantive is **shipped or deferred by deliberate decision**. There is no active in-progress engineering work. Open items, in full:
+
+- **Phase 7** — re-bench with the `nvjpeg-hardware` feature flag (mode E). A measurement to formally confirm a near-certain negative (the hard-blocker section already establishes `NVJPEG_BACKEND_HARDWARE` is rejected at handle creation on consumer GeForce). Not engineering work.
+- **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.
+- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). External-blocked: no non-NVIDIA GPU or CI runner on the dev box. Also the `record_tile_fill` parity oracle (blocked on a CPU twin) and the perf-only Task 3 follow-ups (deferrable; none block correctness/parity).
+- **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
+- **crates.io packaging** — indefinitely postponed; nothing published, nothing yanked. Treat as closed unless reopened.
+
+The implementation plans under `docs/superpowers/plans/` (gitignored) are all completed or superseded — none describe live work. They are kept as historical execution logs, not as a backlog.
 
 ---
 
