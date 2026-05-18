@@ -21,4 +21,7 @@ tag-message = "Release v{{version}}"
 # Commit message for the version bump
 pre-release-commit-message = "chore: release v{{version}}"
 
-publish = true
+# This project is GitHub-distributed only — nothing is published to
+# crates.io. Safe-by-default: never publish even if a `--no-publish`
+# flag is forgotten on the command line.
+publish = false
