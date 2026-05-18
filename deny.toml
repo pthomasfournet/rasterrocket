@@ -1,0 +1,57 @@
+# cargo-deny configuration.
+#
+# This project is GitHub-distributed only (nothing on crates.io). The
+# license gate exists to catch a *new* dependency arriving under a license
+# the project has not vetted — not to police the existing, all-permissive
+# tree. The allow-list below is the actual set present in the dependency
+# graph as of v1.1.0 (verified with `cargo deny list`), all OSI-approved
+# permissive / public-domain-equivalent.
+
+[graph]
+# Evaluate the full host target set the project supports. all-features so a
+# feature-gated dependency's license is not silently skipped.
+all-features = true
+
+[licenses]
+# Every license actually present in the tree. SPDX `OR` expressions resolve
+# to the first satisfiable term, so dual/triple-licensed crates (e.g. r-efi
+# = "MIT OR Apache-2.0 OR LGPL-2.1-or-later") are accepted via their
+# permissive arm — LGPL is deliberately NOT allowed, so a crate offering
+# *only* LGPL would still fail the gate.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "IJG",
+]
+# The three first-party crates `bench`, `pdf_bridge`, `rasterrocket-gpu`
+# carry no `license` field and are `publish = false` workspace-internal
+# crates. They are never distributed as packages, so a license expression
+# is not required; ignore them rather than fabricate one.
+private = { ignore = true }
+
+[advisories]
+# Fail on any RUSTSEC advisory in the graph. (The FFI C libraries — system
+# FreeType / OpenJPEG — are out of cargo-audit's scope and are covered by
+# the FFI trust-boundary note in ROADMAP.md, not here.)
+yanked = "deny"
+
+[bans]
+# No multiple-version or wildcard bans enforced yet; left permissive so this
+# file's purpose stays the license gate. Tighten later if dependency bloat
+# becomes a concern.
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+# Only crates.io and the standard registry. No git or alternative sources
+# are used; reject any that appear.
+unknown-registry = "deny"
+unknown-git = "deny"
