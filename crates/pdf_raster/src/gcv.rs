@@ -292,6 +292,36 @@ mod tests {
         assert_eq!(decoded, img.jpeg);
     }
 
+    #[test]
+    fn base64_len_proxy_matches_actual_encoding() {
+        // The budget guarantee depends on base64_len() exactly predicting
+        // GcvImage::to_base64().len(). If the base64 engine ever changes to a
+        // non-padded variant this must fail loudly, not silently break budgets.
+        for n in 0..=64usize {
+            let img = GcvImage {
+                jpeg: vec![0xAB; n],
+                quality: 80,
+                width: 1,
+                height: 1,
+            };
+            assert_eq!(
+                base64_len(n),
+                img.to_base64().len(),
+                "base64_len({n}) must equal actual encoded length"
+            );
+        }
+        // A few larger sizes spanning all three n%3 residues.
+        for n in [255usize, 256, 257, 1024, 4096, 100_000] {
+            let img = GcvImage {
+                jpeg: vec![0xCD; n],
+                quality: 80,
+                width: 1,
+                height: 1,
+            };
+            assert_eq!(base64_len(n), img.to_base64().len(), "n={n}");
+        }
+    }
+
     /// Build a RenderedPage of `w`×`h` filled with a deterministic noisy
     /// pattern (uniform fills compress to almost nothing and won't exercise
     /// the step-down).
