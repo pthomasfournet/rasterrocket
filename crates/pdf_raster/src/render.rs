@@ -709,17 +709,15 @@ fn render_page_rgb_with_geom(
 
     let ops = pdf_interp::parse_page_by_id(doc, page_id)?;
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "scale = dpi/72 is always positive and small; f64→f32 precision loss is \
-                  negligible for sub-pixel rounding at any practical DPI"
-    )]
-    let scale_f32 = scale as f32;
-
+    // Pass the full-precision `scale` straight through: `new_scaled` takes f64,
+    // and `w_px`/`h_px` above are derived from this same `scale`.  An earlier
+    // f64→f32→f64 round-trip here fed a slightly different scale into the CTM
+    // than the one used for the pixel extent, leaving the matrix's translation
+    // terms minutely inconsistent with the bitmap size.
     let mut renderer = pdf_interp::renderer::PageRenderer::new_scaled(
         w_px,
         h_px,
-        scale_f32.into(),
+        scale,
         geom.rotate_cw,
         geom.origin_x,
         geom.origin_y,

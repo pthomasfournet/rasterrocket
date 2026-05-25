@@ -368,11 +368,14 @@ struct CacheState {
 
 /// Build the initial page CTM that maps PDF user space to device pixels.
 ///
-/// `scale = dpi / 72`.  `rotate_cw` is the page `/Rotate` (0/90/180/270; any
-/// other multiple of 90 falls through to the 270 branch as the spec only
-/// defines those four).  `origin_x`/`origin_y` are the selected page box's
-/// lower-left corner in PDF user space (ISO 32000-2 §14.11.2); zero for the
-/// common box-at-origin case.
+/// `scale = dpi / 72`.  `rotate_cw` is the page `/Rotate`, which callers must
+/// pass already normalised to one of {0, 90, 180, 270} (the only values ISO
+/// 32000-2 §14.11.6 defines; `page_size_pts_by_id` snaps `/Rotate` to this set
+/// upstream).  Any other value is a caller contract violation: it trips a
+/// `debug_assert` and, in release, renders unrotated rather than silently
+/// emitting a wrong-but-plausible rotation.  `origin_x`/`origin_y` are the
+/// selected page box's lower-left corner in PDF user space (ISO 32000-2
+/// §14.11.2); zero for the common box-at-origin case.
 ///
 /// The `to_device` helper applies an additional Y-flip (`height_px - dy`), so
 /// these matrices only carry scale + rotation + the box-origin pre-translation;
@@ -386,12 +389,17 @@ struct CacheState {
 /// box-at-origin matrix with the substitution `X → X-llx`, `Y → Y-lly` — i.e. an
 /// innermost pre-translation `T(-llx, -lly)` composed under scale+rotate.  Per
 /// branch (`s = scale`):
-///   Rotate 0   → `[ s,  0,  0,  s,        -llx·s,  -lly·s]`
-///   Rotate 90  → `[ 0, -s, -s,  0,  (h+lly)·s,  (w+llx)·s]`
-///   Rotate 180 → `[-s,  0,  0,  s,  (w+llx)·s,     -lly·s]`
-///   Rotate 270 → `[ 0,  s,  s,  0,     -lly·s,     -llx·s]`
+///   Rotate 0   → `[ s,  0,  0,  s,     -llx·s,     -lly·s]`
+///   Rotate 90  → `[ 0, -s,  s,  0,     -lly·s,  (h+llx)·s]`
+///   Rotate 180 → `[-s,  0,  0, -s,  (w+llx)·s,  (h+lly)·s]`
+///   Rotate 270 → `[ 0,  s, -s,  0,  (w+lly)·s,     -llx·s]`
 /// When `llx = lly = 0` every branch reduces to the box-at-origin value, so
-/// origin-at-zero PDFs (the vast majority) are bit-for-bit unchanged.
+/// origin-at-zero PDFs (the vast majority) are unchanged in scale.
+///
+/// The `initial_ctm_rotate{0,90,180,270}_maps_box_corners_to_device_pixels`
+/// tests pin each box corner to its required device pixel for every rotation,
+/// so a sign error in any branch fails a test rather than shipping a mirrored
+/// or upside-down render.
 ///
 /// Degenerate inputs cannot reach here as silent garbage: `scale` is asserted
 /// finite-positive by the sole caller, and `origin_x`/`origin_y` originate from
@@ -415,11 +423,22 @@ fn build_initial_ctm(
         // Rotate 0: standard scale + y-flip handled by to_device.
         0 => [s, 0.0, 0.0, s, -llx * s, -lly * s],
         // Rotate 90 CW: swap axes. Bitmap width = original H, height = original W.
-        90 => [0.0, -s, -s, 0.0, (h + lly) * s, (w + llx) * s],
+        90 => [0.0, -s, s, 0.0, -lly * s, (h + llx) * s],
         // Rotate 180: flip both axes.
-        180 => [-s, 0.0, 0.0, s, (w + llx) * s, -lly * s],
+        180 => [-s, 0.0, 0.0, -s, (w + llx) * s, (h + lly) * s],
         // Rotate 270 CW (= 90 CCW): swap axes, opposite orientation.
-        _ => [0.0, s, s, 0.0, -lly * s, -llx * s],
+        270 => [0.0, s, -s, 0.0, (w + lly) * s, -llx * s],
+        // Non-spec value: a caller contract violation (callers normalise to
+        // {0,90,180,270} upstream).  Fail loudly in debug; in release fall back
+        // to the unrotated matrix so a stray value renders upright rather than
+        // silently rotated-and-wrong.
+        other => {
+            debug_assert!(
+                false,
+                "build_initial_ctm: rotate_cw must be normalised to {{0,90,180,270}}, got {other}"
+            );
+            [s, 0.0, 0.0, s, -llx * s, -lly * s]
+        }
     }
 }
 
@@ -2249,15 +2268,15 @@ mod tests {
         );
         assert_ctm_eq(
             build_initial_ctm(wpx, hpx, s, 90, 0.0, 0.0),
-            [0.0, -s, -s, 0.0, h * s, w * s],
+            [0.0, -s, s, 0.0, 0.0, h * s],
         );
         assert_ctm_eq(
             build_initial_ctm(wpx, hpx, s, 180, 0.0, 0.0),
-            [-s, 0.0, 0.0, s, w * s, 0.0],
+            [-s, 0.0, 0.0, -s, w * s, h * s],
         );
         assert_ctm_eq(
             build_initial_ctm(wpx, hpx, s, 270, 0.0, 0.0),
-            [0.0, s, s, 0.0, 0.0, 0.0],
+            [0.0, s, -s, 0.0, w * s, 0.0],
         );
     }
 
@@ -2275,51 +2294,191 @@ mod tests {
         );
         assert_ctm_eq(
             build_initial_ctm(wpx, hpx, s, 90, llx, lly),
-            [0.0, -s, -s, 0.0, (h + lly) * s, (w + llx) * s],
+            [0.0, -s, s, 0.0, -lly * s, (h + llx) * s],
         );
         assert_ctm_eq(
             build_initial_ctm(wpx, hpx, s, 180, llx, lly),
-            [-s, 0.0, 0.0, s, (w + llx) * s, -lly * s],
+            [-s, 0.0, 0.0, -s, (w + llx) * s, (h + lly) * s],
         );
         assert_ctm_eq(
             build_initial_ctm(wpx, hpx, s, 270, llx, lly),
-            [0.0, s, s, 0.0, -lly * s, -llx * s],
+            [0.0, s, -s, 0.0, (w + lly) * s, -llx * s],
         );
+    }
+
+    /// Page geometry input for `assert_box_corners_map_to`.
+    ///
+    /// `wpx`/`hpx` are the output bitmap pixel dimensions, already swapped for
+    /// 90°/270° exactly as the renderer's caller swaps them before `new_scaled`.
+    struct CornerCase {
+        wpx: u32,
+        hpx: u32,
+        s: f64,
+        rotate: u16,
+        llx: f64,
+        lly: f64,
+    }
+
+    /// Expected device-pixel landing of each selected-box corner (origin
+    /// top-left): lower-left, lower-right, upper-left, upper-right in PDF user
+    /// space.  Named fields make a transposed corner a compile-readable error
+    /// rather than a silent geometry mismatch.
+    struct ExpectedCorners {
+        ll: (f64, f64),
+        lr: (f64, f64),
+        ul: (f64, f64),
+        ur: (f64, f64),
+    }
+
+    /// Map the four selected-box corners through `build_initial_ctm` + the
+    /// `to_device` Y-flip and assert each lands at its expected device pixel.
+    ///
+    /// Expected positions are an independent cross-check: they match both
+    /// `pdftoppm` and `mutool` (verified on identical fixtures), neither of
+    /// which shares code with this renderer.
+    fn assert_box_corners_map_to(case: &CornerCase, want: &ExpectedCorners) {
+        let CornerCase {
+            wpx,
+            hpx,
+            s,
+            rotate,
+            llx,
+            lly,
+        } = *case;
+        let ctm = build_initial_ctm(wpx, hpx, s, rotate, llx, lly);
+        // For 0°/180° the box is wpx×hpx; for 90°/270° the caller swapped the
+        // bitmap dims, so the box in points is hpx×wpx.  Resolve box pts from
+        // the unrotated orientation.
+        let (bw, bh) = if rotate % 180 == 0 {
+            (f64::from(wpx) / s, f64::from(hpx) / s)
+        } else {
+            (f64::from(hpx) / s, f64::from(wpx) / s)
+        };
+        let page_h = f64::from(hpx);
+        let to_dev = |x: f64, y: f64| {
+            let (dx, dy) = ctm_transform(&ctm, x, y);
+            (dx, page_h - dy)
+        };
+        let corners = [
+            ("LL", (llx, lly), want.ll),
+            ("LR", (llx + bw, lly), want.lr),
+            ("UL", (llx, lly + bh), want.ul),
+            ("UR", (llx + bw, lly + bh), want.ur),
+        ];
+        for (name, (x, y), (wx, wy)) in corners {
+            let (px, py) = to_dev(x, y);
+            assert!(
+                (px - wx).abs() < 1e-9 && (py - wy).abs() < 1e-9,
+                "rotate {rotate} {name}: got ({px}, {py}), want ({wx}, {wy})"
+            );
+        }
     }
 
     #[test]
     fn initial_ctm_rotate0_maps_box_corners_to_device_pixels() {
-        // End-to-end check of the §8.3.4 transform + the to_device Y-flip for a
-        // non-(0,0)-origin box: the box lower-left must land at device (0, H_px)
-        // and the upper-right at (W_px, 0).  This is the sign check the locked
+        // Unrotated, non-(0,0)-origin box: lower-left → device bottom-left,
+        // upper-right → device top-right.  The sign check the locked
         // (0,0)-origin baseline structurally cannot perform.
-        let (wpx, hpx, s) = (400u32, 600u32, 2.0);
-        let (llx, lly) = (50.0_f64, 30.0_f64);
-        let ctm = build_initial_ctm(wpx, hpx, s, 0, llx, lly);
-        let box_w = f64::from(wpx) / s; // 200 pt
-        let box_h = f64::from(hpx) / s; // 300 pt
-
-        // Box lower-left (PDF user coords = (llx, lly)).
-        let (dx, dy) = ctm_transform(&ctm, llx, lly);
-        let (px, py) = (dx, f64::from(hpx) - dy);
-        assert!((px - 0.0).abs() < 1e-9, "lower-left x: {px}");
-        assert!((py - f64::from(hpx)).abs() < 1e-9, "lower-left y: {py}");
-
-        // Box upper-right (PDF user coords = (llx+box_w, lly+box_h)).
-        let (dx, dy) = ctm_transform(&ctm, llx + box_w, lly + box_h);
-        let (px, py) = (dx, f64::from(hpx) - dy);
-        assert!((px - f64::from(wpx)).abs() < 1e-9, "upper-right x: {px}");
-        assert!((py - 0.0).abs() < 1e-9, "upper-right y: {py}");
+        assert_box_corners_map_to(
+            &CornerCase {
+                wpx: 400,
+                hpx: 600,
+                s: 2.0,
+                rotate: 0,
+                llx: 50.0,
+                lly: 30.0,
+            },
+            &ExpectedCorners {
+                ll: (0.0, 600.0),   // → bottom-left
+                lr: (400.0, 600.0), // → bottom-right
+                ul: (0.0, 0.0),     // → top-left
+                ur: (400.0, 0.0),   // → top-right
+            },
+        );
     }
 
     #[test]
-    fn initial_ctm_unknown_rotation_falls_through_to_270_branch() {
-        // page_size_pts_by_id normalises /Rotate to {0,90,180,270}, but defend
-        // the helper directly: any other multiple takes the 270 arm rather than
-        // panicking or producing an unscaled identity.
+    fn initial_ctm_rotate90_maps_box_corners_to_device_pixels() {
+        // Caller swaps pixel dims for 90°: bitmap is 600×400.
+        assert_box_corners_map_to(
+            &CornerCase {
+                wpx: 600,
+                hpx: 400,
+                s: 2.0,
+                rotate: 90,
+                llx: 50.0,
+                lly: 30.0,
+            },
+            &ExpectedCorners {
+                ll: (0.0, 0.0),     // → top-left
+                lr: (0.0, 400.0),   // → bottom-left
+                ul: (600.0, 0.0),   // → top-right
+                ur: (600.0, 400.0), // → bottom-right
+            },
+        );
+    }
+
+    #[test]
+    fn initial_ctm_rotate180_maps_box_corners_to_device_pixels() {
+        assert_box_corners_map_to(
+            &CornerCase {
+                wpx: 400,
+                hpx: 600,
+                s: 2.0,
+                rotate: 180,
+                llx: 50.0,
+                lly: 30.0,
+            },
+            &ExpectedCorners {
+                ll: (400.0, 0.0),   // → top-right
+                lr: (0.0, 0.0),     // → top-left
+                ul: (400.0, 600.0), // → bottom-right
+                ur: (0.0, 600.0),   // → bottom-left
+            },
+        );
+    }
+
+    #[test]
+    fn initial_ctm_rotate270_maps_box_corners_to_device_pixels() {
+        // Caller swaps pixel dims for 270°: bitmap is 600×400.
+        assert_box_corners_map_to(
+            &CornerCase {
+                wpx: 600,
+                hpx: 400,
+                s: 2.0,
+                rotate: 270,
+                llx: 50.0,
+                lly: 30.0,
+            },
+            &ExpectedCorners {
+                ll: (600.0, 400.0), // → bottom-right
+                lr: (600.0, 0.0),   // → top-right
+                ul: (0.0, 400.0),   // → bottom-left
+                ur: (0.0, 0.0),     // → top-left
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "rotate_cw must be normalised")]
+    fn initial_ctm_non_spec_rotation_trips_debug_assert() {
+        // Callers must normalise /Rotate to {0,90,180,270}; a non-spec value is a
+        // contract violation and must fail loudly in debug rather than silently
+        // selecting a rotation arm and rendering a wrong-but-plausible page.
+        let _ = build_initial_ctm(100, 100, 1.0, 45, 0.0, 0.0);
+    }
+
+    #[test]
+    fn initial_ctm_non_spec_rotation_release_falls_back_to_unrotated() {
+        // Release builds (debug_assertions off) must not panic on a stray value:
+        // the fallback is the unrotated matrix, so the page renders upright.
+        // Only meaningful without debug assertions; debug builds panic (above).
+        if cfg!(debug_assertions) {
+            return;
+        }
         assert_ctm_eq(
             build_initial_ctm(100, 100, 1.0, 45, 0.0, 0.0),
-            [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         );
     }
 
