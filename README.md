@@ -14,6 +14,28 @@ rasterrocket = "1.1"
 cargo install rasterrocket-cli
 ```
 
+## What's new in v1.1.1
+
+**Hotfix: rotated pages no longer render horizontally mirrored.** Every
+page with `/Rotate` 90, 180, or 270 was mirrored left-to-right (only
+`/Rotate 0` rendered correctly). The bug was silent — a mirrored scan
+still looks clean and full-length, so downstream OCR produced reversed,
+unusable text that slipped past word-count checks. Two-up fax scans, a
+common `/Rotate 90` layout, were hit hardest.
+
+- The page-`/Rotate` transform (`build_initial_ctm`) composed the
+  rotation with the deferred device Y-flip incorrectly for all three
+  non-zero rotations. The matrices are corrected and verified against two
+  independent reference renderers; unrotated pages are unchanged.
+- Added end-to-end corner-mapping tests for all four rotations so a
+  future sign error fails a test instead of shipping a mirror.
+- Review-pass hardening: a non-spec `/Rotate` value now fails loudly in
+  debug and renders upright in release; removed a `f64→f32→f64` scale
+  round-trip that left the CTM minutely inconsistent with the pixel
+  extent; dropped the dead `--cropbox` CLI flag.
+
+No public API changes.
+
 ## What's new in v1.1.0
 
 **Google Cloud Vision input optimization.** First public API addition

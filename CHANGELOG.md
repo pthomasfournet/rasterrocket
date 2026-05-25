@@ -2,11 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-05-25
+
+### Bug Fixes
+
+- Correct page /Rotate 90/180/270 to not horizontally mirror
+
+### Chores
+
+- Default publish=false (GitHub-only distribution)
+- Add deny.toml — pin the cargo-deny license allow-list
+
+### Refactor
+
+- Drop the --cropbox flag
+
 ## [1.1.0] - 2026-05-18
+
+### Chores
+
+- Release v1.1.0
 
 ### Documentation
 
 - Wire wiki + ROADMAP to the built-in GCV helper
+- Prep v1.1.0 release notes
+- Scrub machine-specific path from lazy_session comment
 
 ### Features
 

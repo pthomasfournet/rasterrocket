@@ -27,6 +27,34 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Release history
 
+### v1.1.1 (May 2026)
+
+**Hotfix: rotated pages no longer render horizontally mirrored.** A bug in
+the page-`/Rotate` transform mirrored every page with `/Rotate` 90, 180, or
+270 left-to-right; only `/Rotate 0` was correct. The defect was silent — a
+mirrored scan still produces a plausible-length, clean-looking raster, so
+downstream OCR yielded reversed, unusable text that passed word-count gates.
+Two-up fax scans (a common `/Rotate 90` layout) were the worst hit.
+
+- **Root cause** — `build_initial_ctm` composed the rotation with the
+  deferred device Y-flip incorrectly for all three non-zero rotations, each
+  netting a horizontal mirror. The matrices are corrected and verified
+  against two independent reference renderers; the fix is purely in the
+  initial-CTM derivation, so unrotated pages are unchanged.
+- **Regression guard** — the prior tests only asserted each matrix equaled
+  its intended formula, and the one end-to-end corner-mapping test covered
+  `/Rotate 0`. Added corner-mapping tests for all four rotations that pin
+  every box corner to its required device pixel, so a future sign error
+  fails a test instead of shipping a mirror.
+- **Hardening (review pass)** — a non-spec `/Rotate` value now trips a
+  debug assertion and falls back to the unrotated matrix in release rather
+  than silently selecting a rotation arm; removed a pre-existing
+  `f64→f32→f64` round-trip on `scale` in the render path that fed the CTM a
+  slightly different scale than the pixel extent; dropped the dead,
+  never-wired `--cropbox` CLI flag and its stale doc entry.
+
+No public API changes.
+
 ### v1.1.0 (May 2026)
 
 **Google Cloud Vision input optimization.** A new in-process path that
