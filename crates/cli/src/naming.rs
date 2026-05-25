@@ -66,7 +66,6 @@ mod tests {
             crop_y: None,
             crop_w: None,
             crop_h: None,
-            use_cropbox: false,
             png: false,
             jpeg: false,
             jpegcmyk: false,

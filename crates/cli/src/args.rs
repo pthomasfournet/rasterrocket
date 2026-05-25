@@ -104,10 +104,6 @@ pub struct Args {
     #[arg(short = 'H', long = "crop-height", value_name = "PIXELS")]
     pub crop_h: Option<u32>,
 
-    /// Use the PDF crop box instead of the media box.
-    #[arg(long = "cropbox")]
-    pub use_cropbox: bool,
-
     // ── Output format ────────────────────────────────────────────────────────
     /// Output PNG (default: PPM).
     #[arg(long)]

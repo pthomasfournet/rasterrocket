@@ -52,7 +52,9 @@ DPI values must be positive finite numbers; non-positive values are rejected at 
 | `--crop-y N` | `-y N` | Crop Y offset in pixels. |
 | `--crop-width N` | `-W N` | Crop width in pixels. |
 | `--crop-height N` | `-H N` | Crop height in pixels. |
-| `--cropbox` | | Use the PDF CropBox instead of MediaBox as the page boundary. |
+
+The page boundary is selected automatically: the CropBox clamped to the
+MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 
 ---
 
