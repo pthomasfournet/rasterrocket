@@ -113,15 +113,17 @@ pub(crate) mod decode_queue;
 pub mod deskew;
 pub mod gcv;
 pub(crate) mod gpu_init;
+pub mod page;
 mod render;
 
 use std::path::Path;
 
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
+pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
 pub use pdf_interp::renderer::PageDiagnostics;
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
-    MAX_PX_DIMENSION, RasterError, RasterSession, open_session, prescan_session, render_page_rgb,
+    RasterError, RasterSession, open_session, prescan_session, render_page_rgb,
     render_page_rgb_hinted, rgb_to_gray,
 };
 

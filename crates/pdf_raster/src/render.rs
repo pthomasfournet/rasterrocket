@@ -11,32 +11,10 @@ use crate::{BackendPolicy, PageSet, RasterOptions, RenderedPage, SessionConfig};
 
 // ── Safety limit ──────────────────────────────────────────────────────────────
 
-/// Maximum pixel dimension (width or height) accepted from a PDF page.
-///
-/// Prevents absurdly large allocations from malformed or adversarial documents.
-/// 32 768 px at 150 DPI corresponds to roughly 366 inches (~9.3 metres).
-pub const MAX_PX_DIMENSION: u32 = 32_768;
-
-/// Maximum total pixel area (width × height) accepted from a PDF page.
-///
-/// [`MAX_PX_DIMENSION`] bounds each side independently but says nothing about
-/// their product: a page whose width and height are *both* just under the
-/// per-side limit (e.g. a `/MediaBox [0 0 14400 14400]` rendered at 150 DPI →
-/// 30 000 × 30 000) passes the per-side check yet forces a single ~2.7 GB RGB
-/// allocation — an unbounded-allocation soft-DoS that lives *inside* the
-/// per-side limit. mutool and pdftoppm bound total raster size, not just each
-/// side; this matches that behaviour.
-///
-/// 600 000 000 px ≈ 600 MP ≈ 1.8 GiB at 3 bytes/px (RGB8). The headroom is
-/// deliberate: the largest legitimate page we expect is roughly A0
-/// (841 × 1189 mm ≈ 33.1 × 46.8 in) at 600 DPI ≈ 19 860 × 28 080 ≈ 5.6e8 px,
-/// which still fits with margin, while the absurd 30 000 × 30 000 = 9e8 px
-/// case is rejected before any buffer is allocated. The product is computed in
-/// `u64`: `MAX_PX_DIMENSION² = 32_768² ≈ 1.07e9` already overflows `u32`, so a
-/// `u32` area computation would itself be a latent overflow bug — the wrap
-/// could make a hostile page *pass*. `u64` cannot overflow for any
-/// `u32 × u32` product and never panics.
-pub const MAX_PX_AREA: u64 = 600_000_000;
+// The per-side and total-area pixel limits, and the guard that enforces them,
+// live in `crate::page` — the single owner of the rendered-page size policy,
+// shared by the PDF render path and the comic-archive input path.
+pub use crate::page::{MAX_PX_AREA, MAX_PX_DIMENSION};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -675,7 +653,7 @@ fn render_page_rgb_with_geom(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "scale and dimensions are positive; f64-to-u32 saturates at u32::MAX for \
-                  adversarial values, which the MAX_PX_DIMENSION check below catches"
+                  adversarial values, which the validate_dimensions check below catches"
     )]
     let (w_px, h_px) = (
         (geom.width_pts * scale).round() as u32,
@@ -688,24 +666,9 @@ fn render_page_rgb_with_geom(
             height: h_px,
         });
     }
-    if w_px > MAX_PX_DIMENSION || h_px > MAX_PX_DIMENSION {
-        return Err(RasterError::PageTooLarge {
-            width: w_px,
-            height: h_px,
-        });
-    }
-    // Both sides are within the per-side limit here, but their product is not
-    // yet bounded — reject before the bitmap is allocated, never after. The
-    // `u64` widening is mandatory: `32_768²` overflows `u32`. `u64::from` is
-    // the infallible widen — a `u32 × u32` product cannot overflow `u64`.
-    let area = u64::from(w_px) * u64::from(h_px);
-    if area > MAX_PX_AREA {
-        return Err(RasterError::PageAreaTooLarge {
-            width: w_px,
-            height: h_px,
-            area,
-        });
-    }
+    // Reject oversized pages before the bitmap is allocated, never after, via
+    // the shared guard (per-side limit, then total-area limit computed in u64).
+    crate::page::validate_dimensions(w_px, h_px)?;
 
     let ops = pdf_interp::parse_page_by_id(doc, page_id)?;
 
@@ -1277,8 +1240,6 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
         crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
     }
 
-    let pixels = bitmap_to_vec(&gray);
-
     #[expect(
         clippy::cast_possible_truncation,
         reason = "dpi is an f32 (≤ ~3400 in practice); user_unit is validated to [0.1, 10.0]; \
@@ -1286,15 +1247,13 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
     )]
     let effective_dpi = (f64::from(dpi) * geom.user_unit) as f32;
 
-    Ok(RenderedPage {
+    Ok(crate::page::gray8_to_rendered_page(
+        &gray,
         page_num,
-        width: gray.width,
-        height: gray.height,
-        pixels,
         dpi,
         effective_dpi,
         diagnostics,
-    })
+    ))
 }
 
 // ── Pixel helpers ─────────────────────────────────────────────────────────────
@@ -1319,15 +1278,6 @@ pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
         }
     }
     dst
-}
-
-fn bitmap_to_vec(bmp: &Bitmap<Gray8>) -> Vec<u8> {
-    let w = bmp.width as usize;
-    let mut out = Vec::with_capacity(w * bmp.height as usize);
-    for y in 0..bmp.height {
-        out.extend_from_slice(&bmp.row_bytes(y)[..w]);
-    }
-    out
 }
 
 #[cfg(test)]
