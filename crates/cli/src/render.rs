@@ -142,7 +142,10 @@ pub fn render_page(
 }
 
 /// Encode `rgb` to `out_path` honouring `--mono` / `--gray` and the resolved format.
-fn encode_to_path(
+///
+/// Shared by the PDF render path and the comic-archive path so colour-mode and
+/// format handling stay defined in exactly one place.
+pub fn encode_to_path(
     out_path: &str,
     rgb: &Bitmap<Rgb8>,
     args: &Args,

@@ -1,0 +1,37 @@
+[package]
+publish = false
+name                 = "rasterrocket-comic"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+readme.workspace     = true
+description          = "Comic-archive (.cbz/.cb7/.cbt) image input for the rasterrocket OCR pipeline"
+keywords             = ["cbz", "comic", "ocr", "image", "archive"]
+categories           = ["multimedia::images"]
+
+[dependencies]
+pdf_raster = { package = "rasterrocket",        path = "../pdf_raster", version = "1.1" }
+color      = { package = "rasterrocket-color",  path = "../color",      version = "1.1" }
+raster     = { package = "rasterrocket-render", path = "../raster",     version = "1.1" }
+log        = { workspace = true }
+
+# Archives — all pure-Rust, no system libs.
+zip          = { workspace = true }
+sevenz-rust2 = { workspace = true }
+tar          = { workspace = true }
+
+# Image decode — pure-Rust, no system libs.
+zune-jpeg  = "0.5"
+png        = "0.17"
+image-webp = { workspace = true }
+tiff       = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+encode   = { package = "rasterrocket-encode", path = "../encode", version = "1.1" }
+
+[lints]
+workspace = true

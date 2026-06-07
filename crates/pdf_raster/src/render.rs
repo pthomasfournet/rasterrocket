@@ -11,32 +11,10 @@ use crate::{BackendPolicy, PageSet, RasterOptions, RenderedPage, SessionConfig};
 
 // ── Safety limit ──────────────────────────────────────────────────────────────
 
-/// Maximum pixel dimension (width or height) accepted from a PDF page.
-///
-/// Prevents absurdly large allocations from malformed or adversarial documents.
-/// 32 768 px at 150 DPI corresponds to roughly 366 inches (~9.3 metres).
-pub const MAX_PX_DIMENSION: u32 = 32_768;
-
-/// Maximum total pixel area (width × height) accepted from a PDF page.
-///
-/// [`MAX_PX_DIMENSION`] bounds each side independently but says nothing about
-/// their product: a page whose width and height are *both* just under the
-/// per-side limit (e.g. a `/MediaBox [0 0 14400 14400]` rendered at 150 DPI →
-/// 30 000 × 30 000) passes the per-side check yet forces a single ~2.7 GB RGB
-/// allocation — an unbounded-allocation soft-DoS that lives *inside* the
-/// per-side limit. mutool and pdftoppm bound total raster size, not just each
-/// side; this matches that behaviour.
-///
-/// 600 000 000 px ≈ 600 MP ≈ 1.8 GiB at 3 bytes/px (RGB8). The headroom is
-/// deliberate: the largest legitimate page we expect is roughly A0
-/// (841 × 1189 mm ≈ 33.1 × 46.8 in) at 600 DPI ≈ 19 860 × 28 080 ≈ 5.6e8 px,
-/// which still fits with margin, while the absurd 30 000 × 30 000 = 9e8 px
-/// case is rejected before any buffer is allocated. The product is computed in
-/// `u64`: `MAX_PX_DIMENSION² = 32_768² ≈ 1.07e9` already overflows `u32`, so a
-/// `u32` area computation would itself be a latent overflow bug — the wrap
-/// could make a hostile page *pass*. `u64` cannot overflow for any
-/// `u32 × u32` product and never panics.
-pub const MAX_PX_AREA: u64 = 600_000_000;
+// The per-side and total-area pixel limits, and the guard that enforces them,
+// live in `crate::page` — the single owner of the rendered-page size policy,
+// shared by the PDF render path and the comic-archive input path.
+pub use crate::page::{MAX_PX_AREA, MAX_PX_DIMENSION};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -362,9 +340,41 @@ pub fn open_session(
     path: &std::path::Path,
     config: &SessionConfig,
 ) -> Result<RasterSession, RasterError> {
-    let doc = Arc::new(
-        pdf_interp::open_decrypting(path, config.decrypt_authorized).map_err(RasterError::from)?,
-    );
+    let doc =
+        pdf_interp::open_decrypting(path, config.decrypt_authorized).map_err(RasterError::from)?;
+    open_session_with_doc(doc, config)
+}
+
+/// Open a PDF held entirely in memory (e.g. extracted from an archive) and
+/// create a [`RasterSession`] for rendering.
+///
+/// Same behaviour and backend selection as [`open_session`]; only the document
+/// source differs — no file path is touched and no temp file is written.
+///
+/// # Errors
+///
+/// - [`RasterError::Pdf`] if `bytes` is not a parseable PDF.
+/// - [`RasterError::BackendUnavailable`] if `config.policy` is `ForceCuda` or
+///   `ForceVaapi` and the required GPU context fails to initialise.
+pub fn open_session_from_bytes(
+    bytes: Vec<u8>,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError> {
+    // No decrypt gate for in-memory sources: it qpdf-decrypts to a temp file,
+    // which only applies to an on-disk path. `config.decrypt_authorized` is
+    // intentionally not consulted here (see `pdf_interp::open_bytes`).
+    let doc = pdf_interp::open_bytes(bytes).map_err(RasterError::from)?;
+    open_session_with_doc(doc, config)
+}
+
+/// Shared session assembly from an already-opened document — the backend init,
+/// image cache, doc id, prefetcher, and `RasterSession` construction common to
+/// both the path and in-memory entry points.
+fn open_session_with_doc(
+    doc: pdf::Document,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError> {
+    let doc = Arc::new(doc);
     let total_pages = doc.page_count_fast();
 
     // Reject `ForceVulkan` at the policy gate when the `vulkan` feature
@@ -675,7 +685,7 @@ fn render_page_rgb_with_geom(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "scale and dimensions are positive; f64-to-u32 saturates at u32::MAX for \
-                  adversarial values, which the MAX_PX_DIMENSION check below catches"
+                  adversarial values, which the validate_dimensions check below catches"
     )]
     let (w_px, h_px) = (
         (geom.width_pts * scale).round() as u32,
@@ -688,24 +698,9 @@ fn render_page_rgb_with_geom(
             height: h_px,
         });
     }
-    if w_px > MAX_PX_DIMENSION || h_px > MAX_PX_DIMENSION {
-        return Err(RasterError::PageTooLarge {
-            width: w_px,
-            height: h_px,
-        });
-    }
-    // Both sides are within the per-side limit here, but their product is not
-    // yet bounded — reject before the bitmap is allocated, never after. The
-    // `u64` widening is mandatory: `32_768²` overflows `u32`. `u64::from` is
-    // the infallible widen — a `u32 × u32` product cannot overflow `u64`.
-    let area = u64::from(w_px) * u64::from(h_px);
-    if area > MAX_PX_AREA {
-        return Err(RasterError::PageAreaTooLarge {
-            width: w_px,
-            height: h_px,
-            area,
-        });
-    }
+    // Reject oversized pages before the bitmap is allocated, never after, via
+    // the shared guard (per-side limit, then total-area limit computed in u64).
+    crate::page::validate_dimensions(w_px, h_px)?;
 
     let ops = pdf_interp::parse_page_by_id(doc, page_id)?;
 
@@ -1070,7 +1065,37 @@ pub fn render_pages(
         };
     }
 
-    let state = open_session(path, &SessionConfig::default()).map(|session| RenderState {
+    let session = open_session(path, &SessionConfig::default());
+    page_iter_from_session(session, opts)
+}
+
+/// Render a range of pages from a PDF held entirely in memory (no file path).
+///
+/// Identical to [`render_pages`] but opens the session from owned bytes via
+/// [`open_session_from_bytes`] — for callers that already hold the document
+/// (e.g. a PDF extracted from an archive) and want to avoid a temp file.
+pub fn render_pages_from_bytes(
+    bytes: Vec<u8>,
+    opts: &RasterOptions,
+) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
+    if let Some(e) = validate_opts(opts) {
+        return PageIter {
+            state: Some(Err(e)),
+        };
+    }
+
+    let session = open_session_from_bytes(bytes, &SessionConfig::default());
+    page_iter_from_session(session, opts)
+}
+
+/// Build the page iterator shared by [`render_pages`] and
+/// [`render_pages_from_bytes`]: wrap an opened session (or its open error) and
+/// the render options into the deferred [`PageIter`] state.
+fn page_iter_from_session(
+    session: Result<RasterSession, RasterError>,
+    opts: &RasterOptions,
+) -> PageIter {
+    let state = session.map(|session| RenderState {
         cursor: PageCursor::new(opts),
         session,
         opts: opts.clone(),
@@ -1277,8 +1302,6 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
         crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
     }
 
-    let pixels = bitmap_to_vec(&gray);
-
     #[expect(
         clippy::cast_possible_truncation,
         reason = "dpi is an f32 (≤ ~3400 in practice); user_unit is validated to [0.1, 10.0]; \
@@ -1286,15 +1309,13 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
     )]
     let effective_dpi = (f64::from(dpi) * geom.user_unit) as f32;
 
-    Ok(RenderedPage {
+    Ok(crate::page::gray8_to_rendered_page(
+        &gray,
         page_num,
-        width: gray.width,
-        height: gray.height,
-        pixels,
         dpi,
         effective_dpi,
         diagnostics,
-    })
+    ))
 }
 
 // ── Pixel helpers ─────────────────────────────────────────────────────────────
@@ -1319,15 +1340,6 @@ pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
         }
     }
     dst
-}
-
-fn bitmap_to_vec(bmp: &Bitmap<Gray8>) -> Vec<u8> {
-    let w = bmp.width as usize;
-    let mut out = Vec::with_capacity(w * bmp.height as usize);
-    for y in 0..bmp.height {
-        out.extend_from_slice(&bmp.row_bytes(y)[..w]);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1966,6 +1978,52 @@ mod area_cap_tests {
         assert!(
             area > MAX_PX_AREA,
             "a both-sides-maxed page must exceed the area cap"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_bytes_tests {
+    use super::*;
+
+    /// A minimal valid single-page PDF (one empty 612×792-pt page).
+    fn minimal_pdf() -> Vec<u8> {
+        b"%PDF-1.4\n\
+1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n\
+2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n\
+3 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\nendobj\n\
+xref\n0 4\n\
+0000000000 65535 f\r\n\
+0000000009 00000 n\r\n\
+0000000056 00000 n\r\n\
+0000000111 00000 n\r\n\
+trailer\n<</Size 4 /Root 1 0 R>>\n\
+startxref\n180\n%%EOF"
+            .to_vec()
+    }
+
+    #[test]
+    fn render_pages_from_bytes_renders_a_page() {
+        let opts = RasterOptions::default();
+        let pages: Vec<_> = render_pages_from_bytes(minimal_pdf(), &opts).collect();
+        assert_eq!(
+            pages.len(),
+            1,
+            "the one-page in-memory PDF must yield exactly one page"
+        );
+        let (n, res) = &pages[0];
+        assert_eq!(*n, 1, "the single page is 1-based page 1");
+        let page = res.as_ref().expect("first page renders");
+        assert!(
+            page.width > 0 && page.height > 0,
+            "rendered page must have positive dimensions, got {}×{}",
+            page.width,
+            page.height
+        );
+        assert_eq!(
+            page.pixels.len() as u64,
+            u64::from(page.width) * u64::from(page.height),
+            "grayscale buffer must be exactly width × height bytes"
         );
     }
 }

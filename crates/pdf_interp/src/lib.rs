@@ -150,6 +150,40 @@ pub fn open_decrypting(
     Ok(doc)
 }
 
+/// Open a PDF from in-memory bytes (no file path).
+///
+/// Applies the same post-open checks as [`open_decrypting`].  For callers that
+/// already hold the PDF bytes (e.g. extracted from an archive) and want to
+/// avoid a temp file.
+///
+/// Unlike [`open_decrypting`], there is no decrypt parameter: the
+/// transparent-decrypt path qpdf-decrypts to a temp file, which only makes
+/// sense for an on-disk source.  An encrypted in-memory PDF is therefore
+/// rejected immediately with [`InterpError::Pdf`] wrapping
+/// [`pdf::PdfError::EncryptedDocument`] — rather than letting cryptic
+/// per-object decode failures surface later during rendering.
+///
+/// # Errors
+/// - [`InterpError::Pdf`] if the bytes are not a parseable PDF.
+/// - [`InterpError::Pdf`] wrapping [`pdf::PdfError::EncryptedDocument`] if the
+///   PDF is encrypted (in-memory open has no decrypt path).
+pub fn open_bytes(bytes: Vec<u8>) -> Result<Document, InterpError> {
+    let doc = Document::from_bytes_owned(bytes)?;
+    if doc.is_encrypted() {
+        // In-memory open has no decrypt path (qpdf decrypts to a temp file,
+        // which needs an on-disk source), so surface a clear encrypted-document
+        // error here rather than letting cryptic per-object decode failures
+        // appear later during rendering.
+        return Err(InterpError::Pdf(pdf::PdfError::EncryptedDocument(
+            "encrypted PDF: in-memory rendering cannot decrypt; \
+             extract the PDF and render it directly (with decryption authorised)"
+                .to_owned(),
+        )));
+    }
+    warn_if_javascript(&doc);
+    Ok(doc)
+}
+
 /// Scan the document catalog for JavaScript entry points and emit a loud
 /// `WARN` for every location present.  Never fails: rasterrocket has no
 /// JavaScript engine and never executes `/JS`, so a script's structural
@@ -1148,5 +1182,47 @@ mod page_box_tests {
             (0.0, 0.0),
             "fallback origin must be the MediaBox lower-left"
         );
+    }
+}
+
+#[cfg(test)]
+mod open_bytes_tests {
+    use super::{open_bytes, page_count};
+
+    /// A minimal valid single-page PDF (one empty 612×792-pt page).
+    fn minimal_pdf() -> Vec<u8> {
+        b"%PDF-1.4\n\
+1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n\
+2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n\
+3 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\nendobj\n\
+xref\n0 4\n\
+0000000000 65535 f\r\n\
+0000000009 00000 n\r\n\
+0000000056 00000 n\r\n\
+0000000111 00000 n\r\n\
+trailer\n<</Size 4 /Root 1 0 R>>\n\
+startxref\n180\n%%EOF"
+            .to_vec()
+    }
+
+    #[test]
+    fn open_bytes_parses_an_in_memory_pdf() {
+        let doc = open_bytes(minimal_pdf()).expect("minimal in-memory PDF must parse");
+        assert_eq!(
+            page_count(&doc),
+            1,
+            "the in-memory PDF has exactly one page"
+        );
+    }
+
+    #[test]
+    fn open_bytes_rejects_non_pdf_bytes() {
+        // `Document` is not `Debug`, so match the result rather than
+        // `expect_err` (which would need to format the `Ok` value).
+        match open_bytes(b"not a pdf at all".to_vec()) {
+            Ok(_) => panic!("garbage bytes must not parse as a PDF"),
+            Err(super::InterpError::Pdf(_)) => {}
+            Err(other) => panic!("garbage bytes must surface as InterpError::Pdf, got {other:?}"),
+        }
     }
 }

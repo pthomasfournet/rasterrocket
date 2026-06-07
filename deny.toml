@@ -30,6 +30,12 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "IJG",
+    # bzip2-1.0.6: permissive BSD-like license used by libbz2-rs-sys (via bzip2 → sevenz-rust2).
+    "bzip2-1.0.6",
+    # CC0-1.0: public-domain-equivalent; used by ppmd-rust (via sevenz-rust2).
+    "CC0-1.0",
+    # MIT-0: MIT with no attribution clause; used by ppmd-rust (via sevenz-rust2).
+    "MIT-0",
 ]
 # The three first-party crates `bench`, `pdf_bridge`, `rasterrocket-gpu`
 # carry no `license` field and are `publish = false` workspace-internal
