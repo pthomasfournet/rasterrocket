@@ -21,6 +21,10 @@
 //! }
 //! ```
 //!
+//! To render a PDF already held in memory (e.g. extracted from an archive)
+//! without writing a temp file, use [`raster_pdf_from_bytes`] — same iterator
+//! contract as [`raster_pdf`], taking owned bytes instead of a path.
+//!
 //! For Google Cloud Vision pipelines, [`encode_for_gcv`] turns a
 //! [`RenderedPage`] into a size-fitted [`GcvImage`] (JPEG bytes + fitting
 //! metadata) guaranteed to stay within GCV's request limits; call

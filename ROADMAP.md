@@ -27,6 +27,42 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Release history
 
+### v1.2.0 (June 2026)
+
+**Comic / scan archives as a first-class input.** Books sometimes arrive as a
+`.cbz`/`.cb7`/`.cbt` archive of page images rather than a PDF. A new crate
+turns such an archive into the same grayscale `RenderedPage` stream the PDF path
+produces, so it feeds Tesseract / GCV unchanged, and `rrocket` accepts these
+archives as input directly.
+
+- **`rasterrocket-comic`** — `open_comic(path, &ComicOptions)` reads `.cbz`
+  (ZIP), `.cb7` (7-Zip), and `.cbt` (TAR); decodes JPEG/PNG/WebP/TIFF pages
+  (format sniffed by magic bytes, not extension; pages ordered by a
+  numeric-aware natural sort so `page2` precedes `page10`); skips unrecognised
+  entries with a warning. `.cbr` (RAR) is intentionally unsupported — no
+  permissively-licensed Rust decoder exists — and returns an actionable
+  convert-to-`.cbz` error. All pure-Rust, no system libraries.
+- **PDF-in-archive routing.** Images win; a lone embedded PDF renders via the
+  PDF path; images + a PDF renders the images (PDF ignored with a warning); no
+  images and several PDFs is a clear `AmbiguousArchive` error, never a silent
+  guess.
+- **`raster_pdf_from_bytes`** — a public in-memory PDF render entry point
+  (mirrors `raster_pdf`, no temp file); the mechanism behind PDF-in-archive and
+  useful on its own.
+- **Shared seams, not duplication.** The grayscale `RenderedPage` constructor
+  and the per-page size guard were extracted into `rasterrocket::page` and are
+  now shared by the PDF and comic paths; the CLI comic path reuses the PDF
+  path's output encoder and `build_page_list` selector verbatim, so output
+  format, `--gray`/`--mono`, naming, page-range, and `--odd`/`--even`/`--single`
+  behave identically across input types.
+- **Hardening.** The archive and image-decode paths parse untrusted input and
+  are guarded against decompression bombs (a 512 MiB per-entry decompressed-size
+  cap across ZIP/7z/TAR, with early-halt on detection) and decode bombs (image
+  dimensions validated before the codec allocates its pixel buffer). The CLI
+  exits non-zero on any per-page failure, matching the PDF path.
+
+Additive only; the existing PDF render path is unchanged.
+
 ### v1.1.1 (May 2026)
 
 **Hotfix: rotated pages no longer render horizontally mirrored.** A bug in

@@ -14,6 +14,39 @@ rasterrocket = "1.1"
 cargo install rasterrocket-cli
 ```
 
+## What's new in v1.2.0
+
+**Comic / scan archives as a first-class input.** Books sometimes ship as a
+`.cbz`/`.cb7`/`.cbt` archive of page images rather than a PDF. The new
+`rasterrocket-comic` crate turns such an archive into the same grayscale
+`RenderedPage` stream a PDF produces, so it flows into Tesseract / GCV
+unchanged, and `rrocket` accepts these archives as input directly.
+
+- **`rasterrocket-comic`** — `open_comic(path, &ComicOptions)` reads a `.cbz`
+  (ZIP), `.cb7` (7-Zip), or `.cbt` (TAR) archive, decodes its JPEG/PNG/WebP/TIFF
+  pages (sniffed by magic bytes, ordered by a numeric-aware natural sort), and
+  yields grayscale `RenderedPage`s. Unsupported entries are skipped with a
+  warning. `.cbr` (RAR) is intentionally unsupported — RAR is proprietary with
+  no permissively-licensed Rust decoder — and returns a clear convert-to-`.cbz`
+  message instead of failing obscurely.
+- **PDF inside an archive.** If an archive holds a single PDF instead of loose
+  images, it is rendered via the PDF path; an archive with images *and* a PDF
+  renders the images (the PDF is ignored with a warning); an archive with no
+  images and several PDFs is a clear "ambiguous" error rather than a silent
+  guess.
+- **`rasterrocket::raster_pdf_from_bytes`** — renders a PDF held in memory (no
+  temp file), mirroring `raster_pdf`. Useful on its own for any in-memory PDF,
+  and the mechanism behind PDF-in-archive support.
+- **`rrocket book.cbz out`** — comic archives reuse the exact same output
+  encoder and page selector as the PDF path, so `--gray`, `--mono`, the output
+  format, `--first-page`/`--last-page`, and `--odd`/`--even`/`--single` all
+  behave identically across input types.
+
+The new archive and image-decode paths parse untrusted input and are hardened
+against decompression bombs (a per-entry decompressed-size cap) and decode bombs
+(image dimensions are validated before the codec allocates its pixel buffer).
+No change to the existing PDF render path; the API is purely additive.
+
 ## What's new in v1.1.1
 
 **Hotfix: rotated pages no longer render horizontally mirrored.** Every
@@ -114,7 +147,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | Document | Contents |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Installation, quickstart, Tesseract integration, DPI guidance, error handling, security |
-| [API Reference](docs/api-reference.md) | Full signatures for `raster_pdf`, `render_channel`, `RasterOptions`, `RenderedPage`, `RasterError`, `PageDiagnostics`, feature flags, GPU dispatch thresholds |
+| [API Reference](docs/api-reference.md) | Full signatures for `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage`, `RasterError`, `PageDiagnostics`, `rasterrocket-comic`'s `open_comic`, feature flags, GPU dispatch thresholds |
 | [CLI Reference](docs/cli-reference.md) | All `rrocket` command-line flags, output format matrix, examples, pixel-diff comparison |
 | [Benchmarks](../../wiki/Benchmarks) | Methodology, 10-document corpus results, CPU-only AVX-512 vs AVX2, GPU-accelerated, reproduction steps |
 | [OCR Integration](../../wiki/OCR-Integration) | Tesseract (`leptess`) and ocrs — instance reuse, zero-copy patterns, DPI wiring, multi-threaded examples |
@@ -124,8 +157,9 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 
 | Crate | What you get |
 |---|---|
-| [`rasterrocket`](https://crates.io/crates/rasterrocket) | Library — `raster_pdf`, `render_channel`, `RasterOptions`, `RenderedPage` |
-| [`rasterrocket-cli`](https://crates.io/crates/rasterrocket-cli) | `rrocket` binary — drop-in `pdftoppm` replacement |
+| [`rasterrocket`](https://crates.io/crates/rasterrocket) | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
+| [`rasterrocket-comic`](https://crates.io/crates/rasterrocket-comic) | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt` comic-archive input |
+| [`rasterrocket-cli`](https://crates.io/crates/rasterrocket-cli) | `rrocket` binary — drop-in `pdftoppm` replacement; also reads comic archives |
 
 ## Hardware compatibility
 
@@ -227,8 +261,14 @@ tests/compare/compare.sh -r 150 tests/fixtures/input.pdf
 
 ## Security
 
-rasterrocket parses untrusted PDF input. Its hardening posture:
+rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture:
 
+- **Comic-archive input.** The `.cbz`/`.cb7`/`.cbt` reader and the loose-image
+  decoders (`rasterrocket-comic`) are pure Rust and hold the same bar as the PDF
+  path: a per-entry decompressed-size cap defuses decompression bombs, image
+  dimensions are validated *before* a codec allocates its pixel buffer (defusing
+  decode bombs), and a malformed entry is a bounded skip or a clear `Err`, never
+  an OOM, hang, or panic. `.cbr` (RAR) is refused outright (no decoder linked).
 - **Memory-safe core.** The PDF parser, content interpreter, font/glyph
   resolution, and the JBIG2 / CCITT / JPEG / Flate / LZW decoders are pure
   Rust. Malformed, truncated, adversarial, or hostile input is converted to a

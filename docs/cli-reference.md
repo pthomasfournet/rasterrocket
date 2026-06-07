@@ -4,12 +4,24 @@
 rrocket [OPTIONS] <INPUT> <OUTPUT_PREFIX>
 ```
 
-Renders PDF pages to image files. Drop-in replacement for `pdftoppm` in scripts.
+Renders pages to image files. Drop-in replacement for `pdftoppm` in scripts.
 
 **Arguments:**
 
-- `<INPUT>` — path to the PDF file. Pass `-` to read from stdin.
+- `<INPUT>` — path to the input file. A PDF, or a comic/scan archive whose
+  extension is `.cbz` (ZIP), `.cb7` (7-Zip), or `.cbt` (TAR). The format is
+  chosen by extension: comic archives take the comic path, everything else is
+  treated as a PDF. `.cbr` (RAR) is unsupported and exits with a
+  convert-to-`.cbz` message. Pass `-` to read a PDF from stdin (stdin is always
+  treated as a PDF).
 - `<OUTPUT_PREFIX>` — output filename prefix. The page number and extension are appended automatically (e.g. prefix `out` → `out-1.ppm`, `out-2.ppm`, …).
+
+**Comic archives:** pages are the archive's image entries, ordered by a
+numeric-aware natural sort, decoded from JPEG/PNG/WebP/TIFF. All output flags
+below (page range, format, `--gray`/`--mono`, `--odd`/`--even`, `--single`)
+behave identically to the PDF path. An archive that contains a single PDF
+instead of loose images renders that PDF. `--progress`/`--timings` are PDF-only
+and have no effect on comic input.
 
 ---
 

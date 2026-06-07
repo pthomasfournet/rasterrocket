@@ -36,6 +36,27 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 
 ---
 
+### `raster_pdf_from_bytes`
+
+```rust
+pub fn raster_pdf_from_bytes(
+    bytes: Vec<u8>,
+    opts: &RasterOptions,
+) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
+```
+
+Identical to [`raster_pdf`](#raster_pdf) but renders a PDF held entirely in
+memory — no file path, no temp file. For callers that already hold the document
+bytes (e.g. a PDF extracted from an archive). Backend selection, page ordering,
+and the per-page error contract are the same as `raster_pdf`.
+
+**Note:** the in-memory path has no transparent-decrypt step (that path
+decrypts to a temp file, which only applies to an on-disk source). An encrypted
+PDF passed as bytes yields `RasterError::Pdf` (encrypted-document) rather than
+being decrypted — extract and render it from a path with decryption authorised.
+
+---
+
 ### `render_channel`
 
 ```rust
@@ -414,6 +435,52 @@ pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8)
 ```
 
 Baseline 8-bit grayscale JPEG (`Gray8`/`Mono8` only; `quality` clamped 1–100). A plain codec with no consumer-specific policy.
+
+---
+
+## `rasterrocket-comic` crate — comic-archive input
+
+Turns a comic/scan archive (`.cbz` ZIP, `.cb7` 7-Zip, `.cbt` TAR) of page
+images into the same grayscale `RenderedPage` stream the PDF path produces. Use
+it when your input is an image archive rather than a PDF.
+
+### `open_comic`
+
+```rust
+pub fn open_comic(
+    path: &Path,
+    opts: &ComicOptions,
+) -> Result<Vec<(u32, Result<RenderedPage, ComicError>)>, ComicError>
+```
+
+Opens an archive and renders its pages. Returns a `Vec` of `(page_num, result)`
+in reading order; a per-page decode failure is an inner `Err` and does not abort
+the rest, matching `raster_pdf`.
+
+**Content routing** (decided after the entry list is built):
+
+- **Page images present** → render the images (numeric-aware natural sort by
+  filename, magic-byte format detection over JPEG/PNG/WebP/TIFF). Any PDF entry
+  is ignored with a warning — images always win.
+- **No images, exactly one PDF** → render that PDF via `raster_pdf_from_bytes`
+  (the PDF's own page numbering).
+- **No images, two or more PDFs** → `ComicError::AmbiguousArchive`, naming the
+  PDFs rather than guessing.
+- **No images, no PDF** → `ComicError::NoImages`.
+
+**Whole-archive errors (outer `Err`):** `RarUnsupported` (a `.cbr` input),
+`Open`/`BadArchive` (unreadable or malformed container), `AmbiguousArchive`,
+`NoImages`. **Per-page errors (inner `Err`):** `Decode`, `TooLarge`, `Deskew`,
+`Pdf`.
+
+**`ComicOptions`** mirrors the relevant subset of `RasterOptions`: `dpi: f32`,
+`first_page: u32`, `last_page: u32`, `deskew: bool`. The DPI rides along on each
+`RenderedPage` for downstream OCR; comic images carry no intrinsic resolution.
+
+**Hardening:** entries are read under a 512 MiB per-entry decompressed-size cap
+(decompression-bomb defence), and image dimensions are validated before a codec
+allocates its pixel buffer (decode-bomb defence). `.cbr` (RAR) is refused — no
+permissively-licensed Rust RAR decoder is linked.
 
 ---
 
