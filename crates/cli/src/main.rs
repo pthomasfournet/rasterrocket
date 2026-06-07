@@ -1,4 +1,5 @@
 mod args;
+mod comic;
 mod decrypt_gate;
 mod diagnostics;
 mod naming;
@@ -46,6 +47,30 @@ fn main() {
         eprintln!("rrocket: --ram setup failed: {e}");
         std::process::exit(1);
     });
+
+    // Dispatch on the input extension. Comic archives render via the comic crate
+    // and share the PDF path's output encoder; everything else (incl. `.pdf` and
+    // unknown extensions) falls through to the native PDF interpreter below. The
+    // `--ram` redirect above already applies, so comic output honours it too;
+    // the PDF-only session/decrypt code below is skipped for comics.
+    let ext = std::path::Path::new(&args.input)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(ext.as_str(), "cbz" | "cb7" | "cbt" | "cbr") {
+        match comic::run(&args) {
+            Ok(0) => {
+                eprintln!("rrocket: no pages rendered");
+                std::process::exit(1);
+            }
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("rrocket: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let mut session_config = args.session_config().unwrap_or_else(|e| {
         eprintln!("rrocket: {e}");

@@ -34,6 +34,7 @@ gpu-validation   = ["pdf_raster/gpu-validation"]
 
 [dependencies]
 pdf_raster  = { package = "rasterrocket",        path = "../pdf_raster", version = "1.1" }
+comic       = { package = "rasterrocket-comic",  path = "../comic",      version = "1.1" }
 encode      = { package = "rasterrocket-encode", path = "../encode",     version = "1.1" }
 color       = { package = "rasterrocket-color",  path = "../color",      version = "1.1" }
 raster      = { package = "rasterrocket-render", path = "../raster",     version = "1.1" }

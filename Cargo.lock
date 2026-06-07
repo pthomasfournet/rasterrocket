@@ -1270,6 +1270,7 @@ dependencies = [
  "mimalloc",
  "rasterrocket",
  "rasterrocket-color",
+ "rasterrocket-comic",
  "rasterrocket-encode",
  "rasterrocket-render",
  "rayon",
