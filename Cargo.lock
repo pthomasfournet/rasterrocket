@@ -1292,6 +1292,7 @@ dependencies = [
  "png 0.17.16",
  "rasterrocket",
  "rasterrocket-color",
+ "rasterrocket-encode",
  "rasterrocket-render",
  "sevenz-rust2",
  "tar",
