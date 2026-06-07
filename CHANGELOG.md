@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-06-07
+
+### Bug Fixes
+
+- Guard image dimensions before codec allocation (decode-bomb)
+- Cap per-entry decompressed size (decompression bomb)
+- Comic path exits non-zero on partial failure; spill + upfront format reject
+- Clean errors for encrypted/empty embedded PDFs and Windows-path entries
+- Guard TIFF dimensions before decode; doc open_session_from_bytes
+
+### Documentation
+
+- Document comic-archive input + raster_pdf_from_bytes (v1.2.0)
+
+### Features
+
+- Scaffold rasterrocket-comic crate
+- ComicError, ComicOptions, and public skeleton
+- Natural-sort page ordering + image-file filter
+- Image decode front door (JPEG/PNG/WebP/TIFF) -> grayscale
+- Archive trait + ZIP/7z/TAR impls + .cbr error dispatch
+- In-memory PDF render entry points (raster_pdf_from_bytes)
+- Wire open_comic with image + embedded-PDF content routing
+- Dispatch comic archives (.cbz/.cb7/.cbt) to the comic path
+
+### Other
+
+- Comic-archive (.cbz/.cb7/.cbt) OCR-input pipeline
+
+### Refactor
+
+- Extract shared RenderedPage constructor + dimension guard
+
 ## [1.1.1] - 2026-05-25
 
 ### Bug Fixes
@@ -12,6 +45,11 @@ All notable changes to this project will be documented in this file.
 
 - Default publish=false (GitHub-only distribution)
 - Add deny.toml — pin the cargo-deny license allow-list
+- Release v1.1.1
+
+### Documentation
+
+- Prep v1.1.1 release notes
 
 ### Refactor
 
