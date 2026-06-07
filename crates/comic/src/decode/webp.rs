@@ -3,7 +3,7 @@
 use color::Rgb8;
 use raster::Bitmap;
 
-use super::{DecodeError, rgb_bitmap_from_tight};
+use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 
 /// Decode WebP bytes (lossy or lossless) to an `Rgb8` bitmap, dropping alpha.
 ///
@@ -17,6 +17,7 @@ pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("webp: zero dimensions {w}x{h}")));
     }
+    guard_dimensions("webp", w, h)?;
     // Size the buffer with the decoder's own contract (w*h*channels, where
     // channels follows has_alpha) rather than recomputing the channel rule here.
     let buf_len = dec

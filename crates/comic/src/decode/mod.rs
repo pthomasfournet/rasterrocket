@@ -103,6 +103,18 @@ pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     })
 }
 
+/// Reject an image whose header dimensions exceed the rendered-page size limits
+/// BEFORE the codec allocates its full pixel buffer (a decode-bomb guard).
+///
+/// `validate_dimensions` enforces the same per-side and total-area caps the PDF
+/// render path uses; calling it here, on the header dims, stops a hostile image
+/// from forcing a multi-gigabyte allocation that the post-decode check would
+/// only catch after the memory was already taken.
+fn guard_dimensions(codec: &str, w: u32, h: u32) -> Result<(), DecodeError> {
+    pdf_raster::validate_dimensions(w, h)
+        .map_err(|_| DecodeError::Codec(format!("{codec}: image too large ({w}x{h})")))
+}
+
 /// Build an `Rgb8` bitmap from a tight interleaved RGB buffer. Shared by the
 /// per-codec wrappers so each only has to produce `(w, h, Vec<u8>)`.
 fn rgb_bitmap_from_tight(w: u32, h: u32, rgb: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
@@ -230,5 +242,68 @@ mod tests {
             decode_image(b"xxxx not an image xxxx"),
             Err(DecodeError::Unsupported)
         ));
+    }
+
+    /// Standard IEEE CRC-32 (the polynomial PNG chunks use), computed without a
+    /// dependency so the bomb test can re-checksum a patched IHDR chunk.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// Patch the IHDR width/height of a valid PNG to enormous values and fix the
+    /// IHDR CRC, yielding a small file that *claims* a huge canvas — a decode
+    /// bomb. PNG layout: 8-byte signature, then the IHDR chunk as
+    /// length(4) + "IHDR"(4) + data(13) + crc(4); the CRC covers type+data.
+    fn png_bomb(claim_w: u32, claim_h: u32) -> Vec<u8> {
+        // IHDR data starts after sig(8) + length(4) + type(4) = offset 16.
+        const IHDR_DATA: usize = 16;
+        let mut png = solid_png(1, 1, [0, 0, 0]);
+        png[IHDR_DATA..IHDR_DATA + 4].copy_from_slice(&claim_w.to_be_bytes());
+        png[IHDR_DATA + 4..IHDR_DATA + 8].copy_from_slice(&claim_h.to_be_bytes());
+        // Re-CRC over "IHDR" + the 13 data bytes (offsets 12..29).
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn guard_dimensions_rejects_huge_accepts_small() {
+        assert!(
+            guard_dimensions("png", 100_000, 100_000).is_err(),
+            "100000x100000 must be rejected"
+        );
+        assert!(
+            guard_dimensions("png", 1024, 768).is_ok(),
+            "ordinary page size must pass"
+        );
+    }
+
+    #[test]
+    fn png_decode_bomb_rejected_before_allocation() {
+        // A ~70-byte file claiming 100000x100000 (≈30 GB at 3 B/px). The guard
+        // must fire on the IHDR dims and return Err before output_buffer_size()
+        // is ever allocated, so this completes instantly without an OOM.
+        let bomb = png_bomb(100_000, 100_000);
+        assert!(
+            bomb.len() < 1024,
+            "bomb file stays tiny: {} bytes",
+            bomb.len()
+        );
+        match png::decode(&bomb) {
+            Err(DecodeError::Codec(m)) => {
+                assert!(m.contains("too large"), "message names the cause: {m}");
+                assert!(m.contains("100000x100000"), "message names the dims: {m}");
+            }
+            Err(other) => panic!("expected Codec(too large), got {other:?}"),
+            Ok(_) => panic!("decode bomb was not rejected"),
+        }
     }
 }

@@ -6,6 +6,12 @@ use std::io::Write as _;
 ///
 /// `::zip` (crate-root path) is the external crate, not the sibling `zip`
 /// archive submodule that a `use super::*` would otherwise resolve to.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "pub(crate) is required so sibling modules' #[cfg(test)] blocks can \
+              call this shared fixture; the whole module being test-gated makes \
+              the nursery lint flag it, but the visibility is load-bearing"
+)]
 pub(crate) fn make_cbz(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
     {

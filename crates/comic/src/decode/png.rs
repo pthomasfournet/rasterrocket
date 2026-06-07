@@ -3,7 +3,7 @@
 use color::Rgb8;
 use raster::Bitmap;
 
-use super::{DecodeError, rgb_bitmap_from_tight};
+use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 
 /// Decode PNG bytes to an `Rgb8` bitmap, expanding palette/gray/16-bit and
 /// dropping alpha to opaque RGB.
@@ -17,14 +17,18 @@ pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let mut reader = decoder
         .read_info()
         .map_err(|e| DecodeError::Codec(format!("png: {e}")))?;
+    // read_info() parses only the IHDR header; guard the header-claimed
+    // dimensions before output_buffer_size() (= width*height*channels) is
+    // allocated, so a crafted PNG can't force a giant vec! before it decodes.
+    let (w, h) = (reader.info().width, reader.info().height);
+    if w == 0 || h == 0 {
+        return Err(DecodeError::Codec(format!("png: zero dimensions {w}x{h}")));
+    }
+    guard_dimensions("png", w, h)?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| DecodeError::Codec(format!("png: {e}")))?;
-    let (w, h) = (info.width, info.height);
-    if w == 0 || h == 0 {
-        return Err(DecodeError::Codec(format!("png: zero dimensions {w}x{h}")));
-    }
     let frame = &buf[..info.buffer_size()];
     let rgb = match info.color_type {
         png::ColorType::Rgb => frame.to_vec(),
