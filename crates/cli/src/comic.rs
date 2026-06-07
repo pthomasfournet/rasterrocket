@@ -15,11 +15,26 @@ use crate::render::{self, RenderError};
 
 /// Render a comic archive, writing each decodable page via the shared encoder.
 ///
-/// Returns the number of pages written; per-page errors are reported to stderr
-/// and skipped (one bad page never aborts the rest). Whole-archive failures
-/// (including a `.cbr` input) surface as the outer `Err`, whose `Display`
-/// carries the user-facing message.
-pub fn run(args: &Args) -> Result<usize, ComicError> {
+/// Returns `(written, failed)`: the count of pages successfully written and the
+/// count of pages that decoded-or-rendered-but-could-not-be-written. Per-page
+/// errors are reported to stderr as they occur and skipped (one bad page never
+/// aborts the rest); the caller maps a non-zero `failed` to a non-zero exit code
+/// so a partial failure is observable via `$?`, matching the PDF path.
+/// Whole-archive failures (including a `.cbr` input, or an unsupported output
+/// format) surface as the outer `Err`, whose `Display` carries the user-facing
+/// message.
+pub fn run(args: &Args, spill: &crate::ram::SpillPolicy) -> Result<(usize, usize), ComicError> {
+    // Reject JPEG/TIFF once, up front, before opening or decoding the archive.
+    // The PDF path's `render_page` rejects per page, but a comic with hundreds
+    // of pages would print one identical line per page; failing fast here emits
+    // exactly one message. `write_page` keeps its own guard as defense-in-depth.
+    let format = args.output_format();
+    if matches!(format, OutputFormat::Jpeg | OutputFormat::Tiff) {
+        return Err(ComicError::BadArchive(format!(
+            "output format {format} is not supported (comic output supports ppm/png)"
+        )));
+    }
+
     let opts = ComicOptions {
         // Comics carry no physical resolution, so the user's requested DPI rides
         // along on each RenderedPage purely for downstream OCR feature scaling;
@@ -59,31 +74,45 @@ pub fn run(args: &Args) -> Result<usize, ComicError> {
     }
 
     let mut written = 0usize;
+    let mut failed = 0usize;
     for (page_num, result) in pages {
         // Skip pages the selector excluded (odd/even/single/window).
         if i32::try_from(page_num).is_ok_and(|p| !selected.contains(&p)) {
             continue;
         }
         match result {
-            Ok(page) => match write_page(args, &page, total) {
+            Ok(page) => match write_page(args, spill, &page, total) {
                 Ok(()) => written += 1,
-                Err(e) => eprintln!("rrocket: page {page_num}: {e}"),
+                Err(e) => {
+                    eprintln!("rrocket: page {page_num}: {e}");
+                    failed += 1;
+                }
             },
-            Err(e) => eprintln!("rrocket: page {page_num}: {e}"),
+            Err(e) => {
+                eprintln!("rrocket: page {page_num}: {e}");
+                failed += 1;
+            }
         }
     }
-    Ok(written)
+    Ok((written, failed))
 }
 
 /// Wrap a grayscale [`RenderedPage`] into an [`Rgb8`] bitmap (luma replicated to
 /// R=G=B) and write it via the shared [`render::encode_to_path`], so colour-mode
 /// and format reuse the PDF path's single writer.
-fn write_page(args: &Args, page: &RenderedPage, total_pages: i32) -> Result<(), RenderError> {
+fn write_page(
+    args: &Args,
+    spill: &crate::ram::SpillPolicy,
+    page: &RenderedPage,
+    total_pages: i32,
+) -> Result<(), RenderError> {
     let format = args.output_format();
 
-    // Reject JPEG/TIFF early, exactly as the PDF render path does, before
-    // allocating the bitmap. `encode_to_path` also guards, but failing here
-    // matches `render_page` and avoids the wasted luma→RGB expansion.
+    // Defense-in-depth reject of JPEG/TIFF before allocating the bitmap.
+    // `run` already fails fast on these formats up front (so this never fires
+    // in practice), and `encode_to_path` guards too; keeping the check here
+    // mirrors `render_page` and avoids the wasted luma→RGB expansion should a
+    // future caller reach `write_page` directly.
     if matches!(format, OutputFormat::Jpeg | OutputFormat::Tiff) {
         return Err(RenderError::UnsupportedFormatCombination { output: format });
     }
@@ -102,8 +131,10 @@ fn write_page(args: &Args, page: &RenderedPage, total_pages: i32) -> Result<(), 
     // bounded by `total_pages` (≤ i32::MAX, checked in `run`), so the cast back
     // to i32 cannot overflow.
     let page_i32 = i32::try_from(page.page_num).unwrap_or(total_pages);
+    // Route through the spill policy so `--ram` output falls back to the
+    // on-disk prefix when free memory tightens, exactly as the PDF path does.
     let out_path = crate::naming::output_path_with_prefix(
-        &args.output_prefix,
+        spill.next_prefix(),
         args,
         page_i32,
         total_pages,

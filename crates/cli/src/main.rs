@@ -59,12 +59,16 @@ fn main() {
         .unwrap_or_default()
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "cbz" | "cb7" | "cbt" | "cbr") {
-        match comic::run(&args) {
-            Ok(0) => {
+        match comic::run(&args, &spill_policy) {
+            Ok((0, _)) => {
                 eprintln!("rrocket: no pages rendered");
                 std::process::exit(1);
             }
-            Ok(_) => return,
+            // Per-page errors were already printed to stderr inside `run`; a
+            // non-zero exit makes the partial failure observable via `$?`,
+            // matching the PDF path's `report_errors`.
+            Ok((_, failed)) if failed > 0 => std::process::exit(1),
+            Ok((_, _)) => return,
             Err(e) => {
                 eprintln!("rrocket: {e}");
                 std::process::exit(1);
