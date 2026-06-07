@@ -1,6 +1,6 @@
 //! `.cbz` (ZIP) container.
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 use super::Archive;
 use crate::ComicError;
@@ -30,14 +30,13 @@ impl Archive for ZipArchive {
     }
 
     fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
-        let mut f = self
+        let f = self
             .inner
             .by_name(name)
             .map_err(|e| ComicError::BadArchive(format!("zip entry {name}: {e}")))?;
-        let mut out = Vec::with_capacity(usize::try_from(f.size()).unwrap_or(0));
-        let _ = f
-            .read_to_end(&mut out)
-            .map_err(|e| ComicError::BadArchive(format!("zip read {name}: {e}")))?;
-        Ok(out)
+        // `f.size()` is the attacker-controlled uncompressed size from the
+        // central directory; the helper clamps it and bounds the inflated read.
+        let size_hint = f.size();
+        super::read_entry_capped(f, name, size_hint)
     }
 }

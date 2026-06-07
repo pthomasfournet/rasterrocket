@@ -4,9 +4,64 @@ mod sevenz;
 mod tar;
 mod zip;
 
+use std::io::Read;
 use std::path::Path;
 
 use crate::ComicError;
+
+/// Maximum decompressed size accepted for a single archive entry.
+///
+/// A decompression bomb declares a tiny compressed entry that inflates to many
+/// gigabytes; without a cap, decoding it exhausts memory. 512 MiB comfortably
+/// admits any legitimate comic page image (a 600-megapixel page — the render
+/// size ceiling — encodes to well under this) or a reasonable embedded PDF,
+/// while stopping a multi-gigabyte bomb.
+pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Read `reader` to a `Vec`, refusing to buffer more than [`MAX_ENTRY_BYTES`].
+///
+/// Bounds the decompressed size of a single entry so a decompression bomb
+/// cannot exhaust memory. The capacity hint is clamped to the cap so a lying
+/// size field cannot force a giant up-front allocation. `entry` names the entry
+/// for the error message.
+///
+/// # Errors
+/// [`ComicError::BadArchive`] if the entry yields more than the cap, or if the
+/// underlying read fails.
+pub fn read_entry_capped<R: Read>(
+    reader: R,
+    entry: &str,
+    size_hint: u64,
+) -> Result<Vec<u8>, ComicError> {
+    read_capped(reader, entry, size_hint, MAX_ENTRY_BYTES)
+}
+
+/// Limit-parameterised core of [`read_entry_capped`].
+///
+/// `limit` is injected so tests can exercise the bounding logic with a tiny cap
+/// instead of moving the production 512 MiB. The public path always passes
+/// [`MAX_ENTRY_BYTES`].
+fn read_capped<R: Read>(
+    mut reader: R,
+    entry: &str,
+    size_hint: u64,
+    limit: u64,
+) -> Result<Vec<u8>, ComicError> {
+    // Cap the pre-allocation: trust the hint only up to the limit.
+    let cap = size_hint.min(limit);
+    let mut out = Vec::with_capacity(usize::try_from(cap).unwrap_or(0));
+    // Read one byte past the limit so we can detect an over-limit entry.
+    let read = Read::take(&mut reader, limit.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|e| ComicError::BadArchive(format!("read {entry}: {e}")))?;
+    if read as u64 > limit {
+        return Err(ComicError::BadArchive(format!(
+            "entry {entry} exceeds the {limit}-byte per-entry size limit \
+             (possible decompression bomb)"
+        )));
+    }
+    Ok(out)
+}
 
 /// A read-only comic-archive container. Implementations hold the whole archive
 /// in memory (comics are image-sized, not video-sized) and expose entries by
@@ -68,5 +123,40 @@ mod tests {
     fn unknown_extension_is_bad_archive() {
         let res = open_archive_from_ext("foo.txt", Vec::new());
         assert!(matches!(res, Err(crate::ComicError::BadArchive(_))));
+    }
+
+    #[test]
+    fn over_limit_rejected() {
+        // An infinite reader against a tiny injected limit: the cap fires after
+        // reading just past the limit, so no large allocation happens.
+        let r = std::io::repeat(0u8);
+        assert!(matches!(
+            super::read_capped(r, "bomb.jpg", u64::MAX, 16),
+            Err(crate::ComicError::BadArchive(_))
+        ));
+    }
+
+    #[test]
+    fn under_limit_ok() {
+        let r = &b"hello"[..];
+        let out = super::read_capped(r, "ok.jpg", 5, 1024).unwrap();
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn at_limit_ok() {
+        // Exactly `limit` bytes must pass; only strictly-more is rejected.
+        let data = [0u8; 16];
+        let out = super::read_capped(&data[..], "edge.jpg", 16, 16).unwrap();
+        assert_eq!(out.len(), 16);
+    }
+
+    #[test]
+    fn capped_clamps_lying_size_hint() {
+        // A size hint far above the limit must not blow up the up-front alloc;
+        // the read still succeeds for an under-limit body.
+        let r = &b"hi"[..];
+        let out = super::read_capped(r, "liar.jpg", u64::MAX, 1024).unwrap();
+        assert_eq!(out, b"hi");
     }
 }

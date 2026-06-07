@@ -21,17 +21,42 @@ impl SevenzArchive {
         let mut reader = ArchiveReader::new(Cursor::new(bytes), Password::empty())
             .map_err(|e| ComicError::BadArchive(format!("7z: {e}")))?;
         let mut entries = Vec::new();
+        // The cap helper returns `ComicError`, which can't be constructed into
+        // the sevenz error type from outside that crate. Capture an over-limit
+        // failure here and halt iteration with `Ok(false)`, then surface it
+        // after the walk so the precise message survives.
+        let mut capped: Option<ComicError> = None;
         reader
             .for_each_entries(|entry, rdr| {
+                // Once an entry has tripped the size cap, stop reading any
+                // further entries. The outer block loop keeps invoking this
+                // closure even after a halt for non-solid (block-per-file)
+                // archives, so without this guard a multi-bomb archive would
+                // read every bomb before the captured error is surfaced.
+                if capped.is_some() {
+                    return Ok(false);
+                }
                 if entry.is_directory() {
                     return Ok(true);
                 }
-                let mut data = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
-                let _ = rdr.read_to_end(&mut data)?;
-                entries.push((entry.name().to_owned(), data));
-                Ok(true)
+                let name = entry.name().to_owned();
+                // `entry.size()` is the attacker-controlled uncompressed size;
+                // the helper clamps it and bounds the inflated read.
+                match super::read_entry_capped(&mut *rdr, &name, entry.size()) {
+                    Ok(data) => {
+                        entries.push((name, data));
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        capped = Some(e);
+                        Ok(false)
+                    }
+                }
             })
             .map_err(|e| ComicError::BadArchive(format!("7z: {e}")))?;
+        if let Some(e) = capped {
+            return Err(e);
+        }
         Ok(Self { entries })
     }
 }

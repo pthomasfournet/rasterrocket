@@ -1,6 +1,6 @@
 //! `.cbt` (TAR) container.
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 use super::Archive;
 use crate::ComicError;
@@ -34,10 +34,10 @@ impl TarArchive {
                 .map_err(|e| ComicError::BadArchive(format!("tar path: {e}")))?
                 .to_string_lossy()
                 .into_owned();
-            let mut data = Vec::new();
-            let _ = e
-                .read_to_end(&mut data)
-                .map_err(|e| ComicError::BadArchive(format!("tar read {path}: {e}")))?;
+            // tar is uncompressed (no inflation ratio), but a physically huge
+            // entry still reads unbounded into memory without a cap.
+            let size_hint = e.header().size().unwrap_or(0);
+            let data = super::read_entry_capped(&mut e, &path, size_hint)?;
             entries.push((path, data));
         }
         Ok(Self { entries })
