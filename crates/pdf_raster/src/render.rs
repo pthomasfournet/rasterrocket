@@ -340,9 +340,41 @@ pub fn open_session(
     path: &std::path::Path,
     config: &SessionConfig,
 ) -> Result<RasterSession, RasterError> {
-    let doc = Arc::new(
-        pdf_interp::open_decrypting(path, config.decrypt_authorized).map_err(RasterError::from)?,
-    );
+    let doc =
+        pdf_interp::open_decrypting(path, config.decrypt_authorized).map_err(RasterError::from)?;
+    open_session_with_doc(doc, config)
+}
+
+/// Open a PDF held entirely in memory (e.g. extracted from an archive) and
+/// create a [`RasterSession`] for rendering.
+///
+/// Same behaviour and backend selection as [`open_session`]; only the document
+/// source differs — no file path is touched and no temp file is written.
+///
+/// # Errors
+///
+/// - [`RasterError::Pdf`] if `bytes` is not a parseable PDF.
+/// - [`RasterError::BackendUnavailable`] if `config.policy` is `ForceCuda` or
+///   `ForceVaapi` and the required GPU context fails to initialise.
+pub fn open_session_from_bytes(
+    bytes: Vec<u8>,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError> {
+    // No decrypt gate for in-memory sources: it qpdf-decrypts to a temp file,
+    // which only applies to an on-disk path. `config.decrypt_authorized` is
+    // intentionally not consulted here (see `pdf_interp::open_bytes`).
+    let doc = pdf_interp::open_bytes(bytes).map_err(RasterError::from)?;
+    open_session_with_doc(doc, config)
+}
+
+/// Shared session assembly from an already-opened document — the backend init,
+/// image cache, doc id, prefetcher, and `RasterSession` construction common to
+/// both the path and in-memory entry points.
+fn open_session_with_doc(
+    doc: pdf::Document,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError> {
+    let doc = Arc::new(doc);
     let total_pages = doc.page_count_fast();
 
     // Reject `ForceVulkan` at the policy gate when the `vulkan` feature
@@ -1033,7 +1065,37 @@ pub fn render_pages(
         };
     }
 
-    let state = open_session(path, &SessionConfig::default()).map(|session| RenderState {
+    let session = open_session(path, &SessionConfig::default());
+    page_iter_from_session(session, opts)
+}
+
+/// Render a range of pages from a PDF held entirely in memory (no file path).
+///
+/// Identical to [`render_pages`] but opens the session from owned bytes via
+/// [`open_session_from_bytes`] — for callers that already hold the document
+/// (e.g. a PDF extracted from an archive) and want to avoid a temp file.
+pub fn render_pages_from_bytes(
+    bytes: Vec<u8>,
+    opts: &RasterOptions,
+) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
+    if let Some(e) = validate_opts(opts) {
+        return PageIter {
+            state: Some(Err(e)),
+        };
+    }
+
+    let session = open_session_from_bytes(bytes, &SessionConfig::default());
+    page_iter_from_session(session, opts)
+}
+
+/// Build the page iterator shared by [`render_pages`] and
+/// [`render_pages_from_bytes`]: wrap an opened session (or its open error) and
+/// the render options into the deferred [`PageIter`] state.
+fn page_iter_from_session(
+    session: Result<RasterSession, RasterError>,
+    opts: &RasterOptions,
+) -> PageIter {
+    let state = session.map(|session| RenderState {
         cursor: PageCursor::new(opts),
         session,
         opts: opts.clone(),
@@ -1916,6 +1978,52 @@ mod area_cap_tests {
         assert!(
             area > MAX_PX_AREA,
             "a both-sides-maxed page must exceed the area cap"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_bytes_tests {
+    use super::*;
+
+    /// A minimal valid single-page PDF (one empty 612×792-pt page).
+    fn minimal_pdf() -> Vec<u8> {
+        b"%PDF-1.4\n\
+1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n\
+2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n\
+3 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\nendobj\n\
+xref\n0 4\n\
+0000000000 65535 f\r\n\
+0000000009 00000 n\r\n\
+0000000056 00000 n\r\n\
+0000000111 00000 n\r\n\
+trailer\n<</Size 4 /Root 1 0 R>>\n\
+startxref\n180\n%%EOF"
+            .to_vec()
+    }
+
+    #[test]
+    fn render_pages_from_bytes_renders_a_page() {
+        let opts = RasterOptions::default();
+        let pages: Vec<_> = render_pages_from_bytes(minimal_pdf(), &opts).collect();
+        assert_eq!(
+            pages.len(),
+            1,
+            "the one-page in-memory PDF must yield exactly one page"
+        );
+        let (n, res) = &pages[0];
+        assert_eq!(*n, 1, "the single page is 1-based page 1");
+        let page = res.as_ref().expect("first page renders");
+        assert!(
+            page.width > 0 && page.height > 0,
+            "rendered page must have positive dimensions, got {}×{}",
+            page.width,
+            page.height
+        );
+        assert_eq!(
+            page.pixels.len() as u64,
+            u64::from(page.width) * u64::from(page.height),
+            "grayscale buffer must be exactly width × height bytes"
         );
     }
 }

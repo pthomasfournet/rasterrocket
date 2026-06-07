@@ -123,8 +123,8 @@ pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_d
 pub use pdf_interp::renderer::PageDiagnostics;
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
-    RasterError, RasterSession, open_session, prescan_session, render_page_rgb,
-    render_page_rgb_hinted, rgb_to_gray,
+    RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
+    render_page_rgb, render_page_rgb_hinted, rgb_to_gray,
 };
 
 /// Session-level API for explicit control over PDF opening and per-page rendering.
@@ -138,7 +138,8 @@ pub use render::{
 /// compatibility.
 pub mod session {
     pub use super::{
-        open_session, prescan_session, render_page_rgb, render_page_rgb_hinted, rgb_to_gray,
+        open_session, open_session_from_bytes, prescan_session, render_page_rgb,
+        render_page_rgb_hinted, rgb_to_gray,
     };
 }
 
@@ -632,6 +633,25 @@ pub fn raster_pdf(
     opts: &RasterOptions,
 ) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
     render::render_pages(path, opts)
+}
+
+/// Render a range of pages from an in-memory PDF (no file path).
+///
+/// Identical to [`raster_pdf`] but takes owned PDF bytes — for callers that
+/// already hold the document (e.g. a PDF extracted from an archive) and want to
+/// avoid writing a temp file.  Backend selection follows
+/// [`SessionConfig::default`].
+///
+/// # Errors
+///
+/// Same as [`raster_pdf`]; [`RasterError::Pdf`] if `bytes` is not a parseable
+/// PDF.  An encrypted in-memory PDF surfaces the encrypted error — the
+/// in-memory path does not go through the transparent-decrypt gate.
+pub fn raster_pdf_from_bytes(
+    bytes: Vec<u8>,
+    opts: &RasterOptions,
+) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
+    render::render_pages_from_bytes(bytes, opts)
 }
 
 /// Render a range of pages concurrently using a bounded sync channel.
