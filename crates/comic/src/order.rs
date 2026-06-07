@@ -26,6 +26,18 @@ pub fn is_image_file(name: &str) -> bool {
     )
 }
 
+/// True if `name` is a PDF entry (last extension `.pdf`, not a directory or
+/// `__MACOSX/` resource fork). Mirrors [`is_image_file`]'s path/junk guards.
+#[must_use]
+pub fn is_pdf_file(name: &str) -> bool {
+    if name.ends_with('/') || name.starts_with("__MACOSX/") || name.contains("/__MACOSX/") {
+        return false;
+    }
+    let base = name.rsplit('/').next().unwrap_or(name);
+    base.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("pdf"))
+}
+
 /// Numeric-aware ("natural") comparison of two entry names, so `page2` orders
 /// before `page10`. Runs of ASCII digits compare by numeric value; other runs
 /// compare case-insensitively, then case-sensitively as a tie-break for
@@ -113,6 +125,15 @@ mod tests {
         ] {
             assert!(!is_image_file(n), "{n} should be rejected");
         }
+    }
+
+    #[test]
+    fn is_pdf_file_matches_only_pdfs() {
+        assert!(is_pdf_file("book.pdf"));
+        assert!(is_pdf_file("sub/Book.PDF"));
+        assert!(!is_pdf_file("p.jpg"));
+        assert!(!is_pdf_file("__MACOSX/._x.pdf"));
+        assert!(!is_pdf_file("dir/"));
     }
 
     #[test]

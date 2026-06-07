@@ -45,27 +45,8 @@ pub fn open_archive_from_ext(name: &str, bytes: Vec<u8>) -> Result<Box<dyn Archi
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use super::*;
-
-    /// Build a .cbz (ZIP) in memory with the given (name, bytes) entries.
-    ///
-    /// `::zip` (crate-root path) refers to the external crate, not the sibling
-    /// `zip` submodule that `super::*` would otherwise resolve to here.
-    fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut buf = std::io::Cursor::new(Vec::new());
-        {
-            let mut w = ::zip::ZipWriter::new(&mut buf);
-            let opts: ::zip::write::FileOptions<'_, ()> = ::zip::write::FileOptions::default();
-            for (name, data) in entries {
-                w.start_file(*name, opts).unwrap();
-                w.write_all(data).unwrap();
-            }
-            let _ = w.finish().unwrap();
-        }
-        buf.into_inner()
-    }
+    use crate::test_helpers::make_cbz;
 
     #[test]
     fn cbr_path_is_rar_unsupported() {
@@ -75,7 +56,7 @@ mod tests {
 
     #[test]
     fn zip_entries_round_trip() {
-        let bytes = make_zip(&[("b.png", b"B"), ("a.png", b"A"), ("ComicInfo.xml", b"<x/>")]);
+        let bytes = make_cbz(&[("b.png", b"B"), ("a.png", b"A"), ("ComicInfo.xml", b"<x/>")]);
         let mut ar = open_archive_from_ext("x.cbz", bytes).unwrap();
         let mut names = ar.entry_names();
         names.sort();
