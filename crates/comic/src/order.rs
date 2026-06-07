@@ -2,18 +2,37 @@
 
 use std::cmp::Ordering;
 
+/// True if `name` is a directory or a macOS resource-fork (`__MACOSX`) member,
+/// considering both `/` and `\` separators (some zips use Windows paths).
+fn is_dir_or_resource_fork(name: &str) -> bool {
+    name.ends_with('/')
+        || name.ends_with('\\')
+        || name.starts_with("__MACOSX/")
+        || name.starts_with("__MACOSX\\")
+        || name.contains("/__MACOSX/")
+        || name.contains("\\__MACOSX\\")
+        || name.contains("/__MACOSX\\")
+        || name.contains("\\__MACOSX/")
+}
+
+/// Basename after the last `/` OR `\` separator, so Windows-style zip names
+/// resolve to the same basename as POSIX ones.
+fn basename(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
 /// True if `name` is a decodable image entry we should treat as a page.
 ///
-/// Rejects directories (trailing `/`), the macOS resource-fork prefix
-/// `__MACOSX/`, dotfiles like `Thumbs.db`, and anything whose final extension
+/// Rejects directories (trailing `/` or `\`), the macOS resource-fork prefix
+/// `__MACOSX`, dotfiles like `Thumbs.db`, and anything whose final extension
 /// is not a supported image type. The check is on the *last* extension, so
-/// `cover.jpg.bak` is rejected.
+/// `cover.jpg.bak` is rejected. Both `/` and `\` are honoured as separators.
 #[must_use]
 pub fn is_image_file(name: &str) -> bool {
-    if name.ends_with('/') || name.starts_with("__MACOSX/") || name.contains("/__MACOSX/") {
+    if is_dir_or_resource_fork(name) {
         return false;
     }
-    let base = name.rsplit('/').next().unwrap_or(name);
+    let base = basename(name);
     if base.eq_ignore_ascii_case("Thumbs.db") {
         return false;
     }
@@ -27,14 +46,14 @@ pub fn is_image_file(name: &str) -> bool {
 }
 
 /// True if `name` is a PDF entry (last extension `.pdf`, not a directory or
-/// `__MACOSX/` resource fork). Mirrors [`is_image_file`]'s path/junk guards.
+/// `__MACOSX` resource fork). Mirrors [`is_image_file`]'s path/junk guards.
 #[must_use]
 pub fn is_pdf_file(name: &str) -> bool {
-    if name.ends_with('/') || name.starts_with("__MACOSX/") || name.contains("/__MACOSX/") {
+    if is_dir_or_resource_fork(name) {
         return false;
     }
-    let base = name.rsplit('/').next().unwrap_or(name);
-    base.rsplit_once('.')
+    basename(name)
+        .rsplit_once('.')
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("pdf"))
 }
 
@@ -134,6 +153,18 @@ mod tests {
         assert!(!is_pdf_file("p.jpg"));
         assert!(!is_pdf_file("__MACOSX/._x.pdf"));
         assert!(!is_pdf_file("dir/"));
+    }
+
+    #[test]
+    fn backslash_paths_are_filtered_like_posix() {
+        // Windows-style separators must be honoured for the __MACOSX guard, the
+        // directory guard, and basename extraction.
+        assert!(!is_image_file("__MACOSX\\._cover.jpg"));
+        assert!(!is_image_file("a\\__MACOSX\\x.jpg"));
+        assert!(is_image_file("sub\\page.jpg")); // real image in a windows-path subdir
+        assert!(!is_image_file("winsub\\")); // backslash directory
+        assert!(!is_pdf_file("__MACOSX\\._book.pdf"));
+        assert!(is_pdf_file("scans\\book.pdf"));
     }
 
     #[test]

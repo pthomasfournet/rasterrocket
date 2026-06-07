@@ -301,9 +301,16 @@ fn render_embedded_pdf(
         deskew: opts.deskew,
         pages: None,
     };
-    let out = pdf_raster::raster_pdf_from_bytes(bytes, &ropts)
+    let out: ComicPages = pdf_raster::raster_pdf_from_bytes(bytes, &ropts)
         .map(|(n, r)| (n, r.map_err(|e| ComicError::Pdf(e.to_string()))))
         .collect();
+    if out.is_empty() {
+        // A valid PDF with zero pages yields nothing — surface that as a clear
+        // error rather than a silent empty success. A PDF whose pages all *error*
+        // still produces per-page `Err` items here (out is non-empty), so those
+        // failures surface individually and are not masked by this check.
+        return Err(ComicError::Pdf(format!("embedded PDF {name} has no pages")));
+    }
     Ok(out)
 }
 

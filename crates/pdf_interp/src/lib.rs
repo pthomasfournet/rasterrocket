@@ -158,14 +158,28 @@ pub fn open_decrypting(
 ///
 /// Unlike [`open_decrypting`], there is no decrypt parameter: the
 /// transparent-decrypt path qpdf-decrypts to a temp file, which only makes
-/// sense for an on-disk source.  An encrypted in-memory PDF opens here without
-/// error but surfaces [`InterpError::Pdf`] on first encrypted-object access
-/// (during rendering), never being decrypted.
+/// sense for an on-disk source.  An encrypted in-memory PDF is therefore
+/// rejected immediately with [`InterpError::Pdf`] wrapping
+/// [`pdf::PdfError::EncryptedDocument`] — rather than letting cryptic
+/// per-object decode failures surface later during rendering.
 ///
 /// # Errors
 /// - [`InterpError::Pdf`] if the bytes are not a parseable PDF.
+/// - [`InterpError::Pdf`] wrapping [`pdf::PdfError::EncryptedDocument`] if the
+///   PDF is encrypted (in-memory open has no decrypt path).
 pub fn open_bytes(bytes: Vec<u8>) -> Result<Document, InterpError> {
     let doc = Document::from_bytes_owned(bytes)?;
+    if doc.is_encrypted() {
+        // In-memory open has no decrypt path (qpdf decrypts to a temp file,
+        // which needs an on-disk source), so surface a clear encrypted-document
+        // error here rather than letting cryptic per-object decode failures
+        // appear later during rendering.
+        return Err(InterpError::Pdf(pdf::PdfError::EncryptedDocument(
+            "encrypted PDF: in-memory rendering cannot decrypt; \
+             extract the PDF and render it directly (with decryption authorised)"
+                .to_owned(),
+        )));
+    }
     warn_if_javascript(&doc);
     Ok(doc)
 }
