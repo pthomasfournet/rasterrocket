@@ -88,15 +88,18 @@ Lower-level API for explicit control over PDF opening and per-page rendering. Al
 ```rust
 pub mod session {
     pub use super::{
-        open_session, prescan_session, render_page_rgb,
-        render_page_rgb_hinted, rgb_to_gray,
+        open_session, open_session_from_bytes, prescan_session,
+        render_page_rgb, render_page_rgb_hinted, rgb_to_gray,
     };
 }
 ```
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>
+pub fn open_session_from_bytes(bytes: Vec<u8>, config: &SessionConfig) -> Result<RasterSession, RasterError>
 ```
+
+`open_session_from_bytes` is the in-memory counterpart to `open_session` (the session-level analogue of `raster_pdf_from_bytes`): same behaviour, taking owned PDF bytes instead of a path, with no transparent-decrypt step (an encrypted in-memory PDF errors rather than being decrypted).
 
 Opens the PDF and builds an O(1) page-ID map. Also initialises the shared GPU context (for `gpu-aa` / `gpu-icc` features) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected JS entry point (see `open` below) and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda` or `ForceVaapi` and the required GPU cannot be initialised.
 

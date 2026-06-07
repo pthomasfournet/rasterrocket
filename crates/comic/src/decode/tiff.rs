@@ -9,7 +9,7 @@ use raster::Bitmap;
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
 
-use super::{DecodeError, rgb_bitmap_from_tight};
+use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 
 /// Decode the first page of a TIFF to an `Rgb8` bitmap.
 ///
@@ -28,6 +28,10 @@ pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("tiff: zero dimensions {w}x{h}")));
     }
+    // Bound the allocation by the project's own page-size limits before
+    // read_image(), matching the PNG/WebP guards (the tiff crate has its own
+    // internal cap, but this keeps every codec on the same MAX_PX_* policy).
+    guard_dimensions("tiff", w, h)?;
     let color = dec
         .colortype()
         .map_err(|e| DecodeError::Codec(format!("tiff: {e}")))?;
