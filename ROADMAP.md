@@ -56,15 +56,20 @@ so it is now the default (−1.17% end-to-end, ~2% more encode time).
 that forced the `cuda-12080` cudarc pin is retired, so the pin moved to
 `cuda-13030`. Docs no longer promise CUDA 12.x driver compatibility.
 
-**Known issue — glyph cache is dead code.** `GlyphCache` is constructed per
-page and stored in `FontCache`, but `glyph_cache_mut()` has zero callers and
-`GlyphKey` is never constructed outside the font crate: the renderer calls
-`FontFace::make_glyph*` straight into FreeType with no cache consultation.
-Measured over 30 pages at 150 dpi, 98.7–98.9% of rasterizations are redundant
-(e.g. 56 296 calls for 723 distinct glyphs). Wiring the existing cache in is
-not mechanical — faces are keyed on the full 2×2 Trm matrix while `GlyphKey`
-carries only `size_px`, so the key needs to distinguish skew/rotation before
-it can be trusted.
+**Glyph cache actually consulted.** `GlyphCache` had been dead code — built per
+page, never read, so every occurrence of a character was re-rasterized through
+FreeType (98.7–98.9% of calls were redundant). `show_text` now goes through
+`FontFace::make_glyph*_cached`, and `GlyphRecord` holds a shared
+`Arc<GlyphBitmap>` instead of an owned copy of the pixels.
+
+Keying is safe without extending `GlyphKey`: `FaceId` is allocated per
+`(font resource, 2×2 Trm)`, so size, skew, and rotation already separate faces.
+Scope stays per page because `FontEngine` — and its `FaceId` counter — is
+per page; widening it requires document-wide `FaceId`s first.
+
+Single-threaded, 30 pages at 300 dpi: −9.5% to −24.5% wall time; −6.5% to
+−12.5% multi-threaded, where pages already parallelise. Hit rate 80.5–95.1%.
+Output is byte-for-byte identical across 127 pages.
 
 **Known issue — `pdf_bridge` cannot build unattended.** Its build script hard-
 requires `POPPLER_SRC` (a poppler *source* tree, not just the system package),
