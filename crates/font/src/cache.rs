@@ -11,6 +11,18 @@
 //! recency atomically without exclusive shard access, so concurrent reads from
 //! multiple Rayon threads no longer serialise within a shard.
 //!
+//! # Scope
+//!
+//! One cache is built per page and shared by every face on that page.  It is
+//! not process-wide: [`FaceId`] is allocated by a per-page `FontEngine` whose
+//! counter restarts at zero, so the same `FaceId` denotes different fonts on
+//! different pages and entries must not outlive the page that produced them.
+//!
+//! This bounds the hit rate — each page re-renders its own glyphs, which shows
+//! up as a miss count that grows with page count rather than levelling off.
+//! Widening the scope means giving `FaceId` document-wide meaning first; doing
+//! it without that would alias unrelated glyphs together.
+//!
 //! # Capacity policy
 //!
 //! The cache holds at most [`GLOBAL_CAPACITY`] entries total.  Eviction is
@@ -85,6 +97,24 @@ impl GlyphCache {
     /// cached bitmaps eagerly rather than waiting for LRU eviction.
     pub fn evict_face(&self, face_id: FaceId) {
         self.inner.retain(|k, _| k.face_id != face_id);
+    }
+
+    /// Return the cached bitmap for `key`, rendering and inserting it via
+    /// `render` on a miss.
+    ///
+    /// `render` returning `None` (a `FreeType` failure, or a glyph with no
+    /// outline such as a space) is **not** cached: the miss is cheap and
+    /// caching it would need a tombstone entry per absent glyph.
+    pub fn get_or_render<F>(&self, key: GlyphKey, render: F) -> Option<Arc<GlyphBitmap>>
+    where
+        F: FnOnce() -> Option<GlyphBitmap>,
+    {
+        if let Some(hit) = self.inner.get(&key) {
+            return Some(hit);
+        }
+        let bitmap = Arc::new(render()?);
+        self.inner.insert(key, Arc::clone(&bitmap));
+        Some(bitmap)
     }
 
     /// Total number of cached glyphs.
@@ -181,6 +211,46 @@ mod tests {
             b.get(&key(0, 1)).is_some(),
             "clone must share the same backing store"
         );
+    }
+
+    #[test]
+    fn get_or_render_renders_once_per_key() {
+        let cache = GlyphCache::new();
+        let calls = std::cell::Cell::new(0);
+        let mut render = || {
+            calls.set(calls.get() + 1);
+            Some(bmp(7))
+        };
+
+        let first = cache.get_or_render(key(0, 1), &mut render).expect("render");
+        let second = cache.get_or_render(key(0, 1), &mut render).expect("cached");
+
+        assert_eq!(calls.get(), 1, "second lookup must not re-render");
+        assert_eq!(first.data[0], 7);
+        assert_eq!(second.data[0], 7);
+        assert!(Arc::ptr_eq(&first, &second), "must hand back the same Arc");
+    }
+
+    #[test]
+    fn get_or_render_distinguishes_keys() {
+        let cache = GlyphCache::new();
+        let a = cache.get_or_render(key(0, 1), || Some(bmp(1))).expect("a");
+        let b = cache.get_or_render(key(0, 2), || Some(bmp(2))).expect("b");
+        // Same glyph id but a different face must not alias.
+        let c = cache.get_or_render(key(1, 1), || Some(bmp(3))).expect("c");
+
+        assert_eq!((a.data[0], b.data[0], c.data[0]), (1, 2, 3));
+        assert_eq!(cache.total_len(), 3);
+    }
+
+    #[test]
+    fn get_or_render_does_not_cache_failures() {
+        let cache = GlyphCache::new();
+        assert!(cache.get_or_render(key(0, 1), || None).is_none());
+        assert_eq!(cache.total_len(), 0, "a failed render must not be stored");
+        // A later successful render for the same key still populates.
+        let ok = cache.get_or_render(key(0, 1), || Some(bmp(9))).expect("ok");
+        assert_eq!(ok.data[0], 9);
     }
 
     #[test]

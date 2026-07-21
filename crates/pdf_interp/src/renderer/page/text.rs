@@ -119,6 +119,12 @@ impl PageRenderer<'_> {
             let tm2x2 = mat2x2_mul(&tm, &ctm);
             let trm = tm2x2.map(|v| v * font_size);
 
+            // Clone the glyph-cache handle before borrowing `font_cache` mutably:
+            // it is an `Arc` internally, so this shares one cache rather than
+            // copying it, and it sidesteps holding two borrows of `font_cache`.
+            let glyph_cache = self.font_cache.glyph_cache().clone();
+            let glyph_cache = &glyph_cache;
+
             // Load (or retrieve cached) FreeType face — mutable borrow of font_cache.
             let Some(face) = self.font_cache.get_or_load(&font_name, &descriptor, trm) else {
                 return;
@@ -149,23 +155,18 @@ impl PageRenderer<'_> {
                 |char_code_for_path: u32, gid: u32, by_gid: bool, pen_x: i32, pen_y: i32| {
                     let bmp = if do_paint {
                         if by_gid {
-                            face.make_glyph_by_gid(gid, 0)
+                            face.make_glyph_by_gid_cached(glyph_cache, gid, 0)
                         } else {
-                            face.make_glyph(gid, 0)
+                            face.make_glyph_cached(glyph_cache, gid, 0)
                         }
                     } else {
                         None
                     };
-                    if let Some(bmp) = bmp {
+                    if let Some(bitmap) = bmp {
                         records.push(GlyphRecord {
                             pen_x,
                             pen_y,
-                            x_off: bmp.x_off,
-                            y_off: bmp.y_off,
-                            width: bmp.width,
-                            height: bmp.height,
-                            aa: bmp.aa,
-                            data: bmp.data,
+                            bitmap,
                         });
                     }
                     if do_clip {
@@ -268,12 +269,12 @@ impl PageRenderer<'_> {
                     reason = "glyph dimensions are always small (sub-pixel-sized); cannot exceed i32::MAX"
                 )]
                 let glyph = GlyphBitmap {
-                    data: &rec.data,
-                    x: rec.x_off,
-                    y: rec.y_off,
-                    w: rec.width as i32,
-                    h: rec.height as i32,
-                    aa: rec.aa,
+                    data: &rec.bitmap.data,
+                    x: rec.bitmap.x_off,
+                    y: rec.bitmap.y_off,
+                    w: rec.bitmap.width as i32,
+                    h: rec.bitmap.height as i32,
+                    aa: rec.bitmap.aa,
                 };
                 // The ClipResult return value is only relevant for accumulating
                 // text-as-clip paths (text render modes 4–7), which Phase 3 below

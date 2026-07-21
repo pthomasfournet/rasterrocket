@@ -7,15 +7,13 @@ use crate::renderer::gstate::ctm_transform;
 // ── Glyph record ──────────────────────────────────────────────────────────────
 
 /// Holds rasterized glyph data for two-phase text rendering.
+///
+/// The bitmap is shared with the glyph cache rather than copied: the same
+/// glyph typically recurs many times per page, and phase 2 only reads it.
 pub(super) struct GlyphRecord {
     pub pen_x: i32,
     pub pen_y: i32,
-    pub x_off: i32,
-    pub y_off: i32,
-    pub width: u32,
-    pub height: u32,
-    pub aa: bool,
-    pub data: Vec<u8>,
+    pub bitmap: std::sync::Arc<font::bitmap::GlyphBitmap>,
 }
 
 // ── Coordinate helpers ────────────────────────────────────────────────────────

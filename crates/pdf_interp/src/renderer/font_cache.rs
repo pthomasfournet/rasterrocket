@@ -72,7 +72,7 @@ type FaceKey = (Box<[u8]>, [u64; 4]);
 /// Per-page cache of loaded font faces.
 pub struct FontCache {
     engine: SharedEngine,
-    /// Shared process-wide glyph bitmap cache.
+    /// Glyph bitmap cache shared by every face on this page.
     glyph_cache: GlyphCache,
     /// Map from (PDF resource name, four f64-as-u64 bits of the Trm 2×2 matrix) to
     /// loaded face.  The full matrix is the key because the same font can appear at
@@ -94,9 +94,10 @@ impl FontCache {
         }
     }
 
-    /// Return a mutable reference to the glyph bitmap cache.
-    pub const fn glyph_cache_mut(&mut self) -> &mut GlyphCache {
-        &mut self.glyph_cache
+    /// Return the glyph bitmap cache shared by every face in this page.
+    #[must_use]
+    pub const fn glyph_cache(&self) -> &GlyphCache {
+        &self.glyph_cache
     }
 
     /// Return a reference to the [`FontFace`] for `name`, loading it from

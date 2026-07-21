@@ -9,12 +9,14 @@
 //! Rendering is performed by [`FontFace::make_glyph`], which mirrors
 //! `SplashFTFont::makeGlyph`.
 
+use std::sync::Arc;
+
 use freetype::Matrix;
 use freetype::Vector;
 
 use crate::engine::FaceParams;
 use crate::hinting::{FontKind, load_flags};
-use crate::key::FaceId;
+use crate::key::{FaceId, GlyphKey};
 use crate::outline::decompose_outline;
 use raster::path::Path;
 
@@ -174,6 +176,37 @@ impl FontFace {
     pub fn make_glyph(&self, char_code: u32, x_frac: u8) -> Option<crate::bitmap::GlyphBitmap> {
         let glyph_id = self.resolve_gid(char_code);
         self.make_glyph_by_gid(glyph_id, x_frac)
+    }
+
+    /// Cached form of [`Self::make_glyph`].
+    ///
+    /// Resolves `char_code` to a glyph index first, so two character codes
+    /// that map to the same glyph share one cache entry.
+    #[must_use]
+    pub fn make_glyph_cached(
+        &self,
+        cache: &crate::cache::GlyphCache,
+        char_code: u32,
+        x_frac: u8,
+    ) -> Option<Arc<crate::bitmap::GlyphBitmap>> {
+        self.make_glyph_by_gid_cached(cache, self.resolve_gid(char_code), x_frac)
+    }
+
+    /// Cached form of [`Self::make_glyph_by_gid`].
+    ///
+    /// The key includes [`Self::id`], which is allocated per
+    /// `(font resource, 2×2 text rendering matrix)` — so glyphs rendered at a
+    /// different size, skew, or rotation land on distinct faces and cannot
+    /// alias, even though [`GlyphKey`] itself only records `size_px`.
+    #[must_use]
+    pub fn make_glyph_by_gid_cached(
+        &self,
+        cache: &crate::cache::GlyphCache,
+        glyph_id: u32,
+        x_frac: u8,
+    ) -> Option<Arc<crate::bitmap::GlyphBitmap>> {
+        let key = GlyphKey::new(self.id, glyph_id, self.size_px, x_frac, self.aa);
+        cache.get_or_render(key, || self.make_glyph_by_gid(glyph_id, x_frac))
     }
 
     /// Rasterize the glyph at `FreeType` glyph index `glyph_id` directly,
