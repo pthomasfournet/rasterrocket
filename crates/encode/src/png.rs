@@ -65,12 +65,14 @@ fn png_encoder<W: Write>(
     let mut encoder = ::png::Encoder::new(out, width, height);
     encoder.set_color(color);
     encoder.set_depth(depth);
+    // Deflate level 1 keeps encode time low across hundreds of pages.  The
+    // size penalty vs the default level is small for rendered grayscale
+    // content because the Paeth predictor already decorrelates most of the
+    // signal.  Set before the filter: `set_compression` also picks a filter,
+    // so choosing the filter afterwards is what makes Paeth stick.
+    encoder.set_deflate_compression(::png::DeflateCompression::Level(1));
     // Paeth filter gives good compression for photographic/gradient content.
-    encoder.set_filter(::png::FilterType::Paeth);
-    // Fast (zlib level 1) keeps encode time low across hundreds of pages.
-    // The size penalty vs Default is small for rendered grayscale content
-    // because the Paeth predictor already decorrelates most of the signal.
-    encoder.set_compression(::png::Compression::Fast);
+    encoder.set_filter(::png::Filter::Paeth);
     Ok(encoder.write_header()?)
 }
 
@@ -226,7 +228,7 @@ mod tests {
     fn decode_png(data: &[u8]) -> (u32, u32, Vec<u8>) {
         let decoder = ::png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().expect("png decode header");
-        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let mut buf = vec![0u8; reader.output_buffer_size().expect("output buffer size")];
         let frame = reader.next_frame(&mut buf).expect("png decode frame");
         let info = reader.info();
         (info.width, info.height, buf[..frame.buffer_size()].to_vec())

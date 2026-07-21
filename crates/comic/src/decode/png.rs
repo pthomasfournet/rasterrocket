@@ -12,7 +12,8 @@ use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 ///
 /// [`DecodeError::Codec`] on any malformed-stream or unsupported-config error.
 pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
-    let mut decoder = png::Decoder::new(bytes);
+    // `png` 0.18 requires `Read + Seek`; `&[u8]` is only `Read`, so wrap it.
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder
         .read_info()
@@ -25,7 +26,10 @@ pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
         return Err(DecodeError::Codec(format!("png: zero dimensions {w}x{h}")));
     }
     guard_dimensions("png", w, h)?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| DecodeError::Codec("png: output buffer size overflows".to_owned()))?;
+    let mut buf = vec![0u8; size];
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| DecodeError::Codec(format!("png: {e}")))?;

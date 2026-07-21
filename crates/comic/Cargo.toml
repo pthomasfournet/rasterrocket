@@ -25,7 +25,7 @@ tar          = { workspace = true }
 
 # Image decode — pure-Rust, no system libs.
 zune-jpeg  = "0.5"
-png        = "0.17"
+png        = "0.18"
 image-webp = { workspace = true }
 tiff       = { workspace = true }
 
