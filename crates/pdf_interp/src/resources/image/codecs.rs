@@ -121,10 +121,8 @@ pub(super) fn decode_ccitt(
         .and_then(|r| u32::try_from(r).ok())
         .unwrap_or(height);
 
-    let w_u16 = u16::try_from(width).ok()?;
     let capacity = (width as usize).checked_mul(height as usize)?;
     let p = CcittParams {
-        w_u16,
         capacity,
         width,
         height,
@@ -146,7 +144,6 @@ pub(super) fn decode_ccitt(
 
 /// Shared parameters for the CCITT decode helpers.
 struct CcittParams {
-    w_u16: u16,
     capacity: usize,
     width: u32,
     height: u32,
@@ -173,15 +170,18 @@ const fn ccitt_descriptor(p: &CcittParams, data: Vec<u8>) -> ImageDescriptor {
 
 /// Decode a Group 4 (K<0, T.6) CCITT fax stream.
 fn decode_ccitt_g4(data: &[u8], p: &CcittParams) -> Option<ImageDescriptor> {
-    let h_u16 = u16::try_from(p.height).ok()?;
     let mut data_out: Vec<u8> = Vec::with_capacity(p.capacity);
     let mut rows_decoded: u32 = 0;
 
-    let completed =
-        fax::decoder::decode_g4(data.iter().copied(), p.w_u16, Some(h_u16), |transitions| {
-            append_ccitt_row(&mut data_out, transitions, p.w_u16, p.width, p.black_is_1);
+    let completed = fax::decoder::decode_g4(
+        data.iter().copied(),
+        p.width,
+        Some(p.height),
+        |transitions| {
+            append_ccitt_row(&mut data_out, transitions, p.width, p.black_is_1);
             rows_decoded += 1;
-        });
+        },
+    );
 
     if completed.is_none() {
         log::warn!(
@@ -225,7 +225,7 @@ fn decode_ccitt_g3_1d(data: &[u8], p: &CcittParams, rows_limit: u32) -> Option<I
         if rows_decoded >= rows_limit {
             return; // discard extra rows beyond the declared height
         }
-        append_ccitt_row(&mut data_out, transitions, p.w_u16, p.width, p.black_is_1);
+        append_ccitt_row(&mut data_out, transitions, p.width, p.black_is_1);
         rows_decoded += 1;
     });
 
@@ -383,15 +383,9 @@ impl hayro_ccitt::Decoder for HayroCcittCollector {
 ///
 /// The row is padded/truncated to exactly `width` bytes.
 /// `0x00` = black, `0xFF` = white (PDF image convention).
-fn append_ccitt_row(
-    out: &mut Vec<u8>,
-    transitions: &[u16],
-    w_u16: u16,
-    width: u32,
-    black_is_1: bool,
-) {
+fn append_ccitt_row(out: &mut Vec<u8>, transitions: &[u32], width: u32, black_is_1: bool) {
     let row_start = out.len();
-    out.extend(fax::decoder::pels(transitions, w_u16).map(|color| {
+    out.extend(fax::decoder::pels(transitions, width).map(|color| {
         let is_black = match color {
             fax::Color::Black => !black_is_1,
             fax::Color::White => black_is_1,

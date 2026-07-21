@@ -39,7 +39,7 @@ font   = { package = "rasterrocket-font",   path = "../font",   version = "1.2" 
 encode = { package = "rasterrocket-encode", path = "../encode", version = "1.2" }
 pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.2" }
 log    = { workspace = true }
-fax = "0.2.6"
+fax = "0.3.0"
 hayro-ccitt = "0.3.0"
 zune-jpeg = "0.5.15"
 zune-core = "0.5.1"
