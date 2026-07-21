@@ -25,6 +25,58 @@ Phase 5 is complete. The API exists and is integrated.
 
 ---
 
+## Unreleased
+
+**Dependency sweep (July 2026).** Every workspace dependency brought current;
+`cargo outdated` reports a clean tree. Five upgrades needed API migration:
+
+- **png 0.17 → 0.18** — `FilterType`/`AdaptiveFilterType` merged into `Filter`;
+  `Compression` variants renamed and re-tuned; `Reader::output_buffer_size`
+  now returns `Option`; `Decoder` requires `Read + Seek`. Collapsed a duplicate
+  png build (`image` and `vello_common` were already on 0.18) and dropped
+  `bitflags` 1.x from the graph entirely.
+- **fax 0.2 → 0.3** — transition/width representation widened `u16` → `u32`,
+  which removed the `u16::try_from` guards that had been silently dropping any
+  CCITT image larger than 65535 px in either dimension.
+- **weezl 0.1 → 0.2**, **quick_cache 0.6 → 0.7** — drop-in; weezl carries
+  three fixes on the untrusted LZW path (a reachable panic, a silent
+  data-loss bug, and dictionary clobbering when a stream omits an early
+  clear code).
+- **vello_cpu 0.0.7 → 0.0.9** — `render_to_pixmap` now takes a `Resources`.
+  Benchmark baseline re-measured rather than assumed: unchanged within noise.
+
+**PNG row filter chosen from measurement.** The encoder hardcoded Paeth on a
+rationale that did not survive contact with real output. Measured across 21
+rendered pages, `Up` is 8.0% smaller than Paeth on scanned content but only
+1.0% smaller on text/vector, while `Adaptive` is 0.9% and 3.1% respectively.
+Adaptive is the only filter that never loses to Paeth on either content type,
+so it is now the default (−1.17% end-to-end, ~2% more encode time).
+
+**CUDA 12 floor dropped.** The reference testbench (i7-8700K + RTX 2080 SUPER)
+that forced the `cuda-12080` cudarc pin is retired, so the pin moved to
+`cuda-13030`. Docs no longer promise CUDA 12.x driver compatibility.
+
+**Known issue — glyph cache is dead code.** `GlyphCache` is constructed per
+page and stored in `FontCache`, but `glyph_cache_mut()` has zero callers and
+`GlyphKey` is never constructed outside the font crate: the renderer calls
+`FontFace::make_glyph*` straight into FreeType with no cache consultation.
+Measured over 30 pages at 150 dpi, 98.7–98.9% of rasterizations are redundant
+(e.g. 56 296 calls for 723 distinct glyphs). Wiring the existing cache in is
+not mechanical — faces are keyed on the full 2×2 Trm matrix while `GlyphKey`
+carries only `size_px`, so the key needs to distinguish skew/rotation before
+it can be trusted.
+
+**Known issue — `pdf_bridge` cannot build unattended.** Its build script hard-
+requires `POPPLER_SRC` (a poppler *source* tree, not just the system package),
+so any `cargo build/check/test --workspace` fails on a clean machine. CI never
+hits this because every job targets specific crates with `-p`. The crate has
+not been touched since v1.2.0 and exists only as a pixel-diff reference
+baseline. It should either gain a feature gate that no-ops the build script
+when `POPPLER_SRC` is absent, or move to `exclude` in the workspace manifest
+alongside `fuzz` and `qa`.
+
+---
+
 ## Release history
 
 ### v1.2.0 (June 2026)
