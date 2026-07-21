@@ -10,7 +10,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use vello_cpu::{
-    Level, Pixmap, RenderContext, RenderMode, RenderSettings,
+    Level, Pixmap, RenderContext, RenderMode, RenderSettings, Resources,
     kurbo::{BezPath, Point},
     peniko::Color,
 };
@@ -177,6 +177,10 @@ fn bench_vello(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
     )]
     let mut pixmap = Pixmap::new(W as u16, H as u16);
 
+    // Persistent glyph/image caches.  Hoisted out of the timed loop so their
+    // one-off setup is not charged to the per-frame measurement.
+    let mut resources = Resources::new();
+
     // Warmup.
     {
         #[expect(
@@ -189,7 +193,7 @@ fn bench_vello(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
             ctx.fill_path(p);
         }
         ctx.flush();
-        ctx.render_to_pixmap(&mut pixmap);
+        ctx.render_to_pixmap(&mut resources, &mut pixmap);
     }
 
     let t0 = Instant::now();
@@ -204,7 +208,7 @@ fn bench_vello(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
             ctx.fill_path(p);
         }
         ctx.flush();
-        ctx.render_to_pixmap(black_box(&mut pixmap));
+        ctx.render_to_pixmap(&mut resources, black_box(&mut pixmap));
     }
     t0.elapsed().as_secs_f64() * 1000.0 / f64::from(cfg.iters)
 }
