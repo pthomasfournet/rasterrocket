@@ -21,7 +21,7 @@ freetype-rs = { version = "0.38", default-features = false }
 # quick_cache gives a sharded concurrent LRU cache where reads do not
 # require write locks (unlike dashmap + lru::LruCache, where get() takes
 # &mut self and therefore serializes reads within each shard).
-quick_cache = "0.6.21"
+quick_cache = "0.7"
 
 [features]
 # Build FreeType from source instead of linking the system library.
