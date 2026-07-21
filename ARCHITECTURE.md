@@ -272,8 +272,7 @@ in 33 sites) un-generified.
 
 **`GpuCtx`** (CUDA) — one per process, holds the CUDA context and all compiled
 PTX kernels as `cudarc` modules.  Shared via `Arc<GpuCtx>`.  `cudarc` is pinned
-to the `cuda-12080` driver-API binding so the same source builds against both
-CUDA 12.x and 13.x drivers (forward-compatible per the CUDA driver-API ABI).
+to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
 **`VulkanBackend`** — one per process; loads the Vulkan instance, picks a
 discrete device (ranks discrete > integrated > virtual > CPU), creates a single

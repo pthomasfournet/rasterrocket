@@ -588,7 +588,7 @@ Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
 | `gpu-deskew` | CUDA-capable NVIDIA GPU | Requires CUDA NPP: `libnppig.so` + `libnppc.so` |
 | `cache` | CUDA-capable NVIDIA GPU | Phase 9 3-tier image cache (CUDA-only) |
 
-`cudarc` is pinned to the `cuda-12080` driver-API binding; the same source builds against both 12.x and 13.x drivers.
+`cudarc` is pinned to the `cuda-13030` driver-API binding; a CUDA 13.x driver is required.
 
 **Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via `MoltenVK`):**
 
@@ -638,7 +638,7 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 | `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa` and `gpu-jpeg-huffman`. | Vulkan compute backend. AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p gpu --features gpu-validation`). |
 
-GPU initialisation failures print a warning to stderr and fall back to CPU — they do not return errors.  `cudarc` is pinned to the `cuda-12080` driver-API binding so the same source builds against both 12.x and 13.x drivers (forward-compatible per the CUDA driver-API ABI).
+GPU initialisation failures print a warning to stderr and fall back to CPU — they do not return errors.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
 ### GPU dispatch thresholds
 

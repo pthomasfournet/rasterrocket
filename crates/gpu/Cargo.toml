@@ -52,7 +52,7 @@ vulkan = ["dep:ash", "dep:gpu-allocator"]
 gpu-jpeg-huffman = []
 
 [dependencies]
-cudarc   = { version = "0.19", features = ["cuda-12080"] }
+cudarc   = { version = "0.19", features = ["cuda-13030"] }
 color    = { package = "rasterrocket-color", path = "../color" }
 log      = "0.4"
 bytemuck = { workspace = true }

@@ -166,7 +166,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 **CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 12 or 13** — full feature set (nvJPEG, nvJPEG2000, AA fill, ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-12080` driver-API binding so the same source builds against both 12.x and 13.x drivers (forward-compatible per the CUDA driver-API ABI).
+- **NVIDIA via CUDA 13** — full feature set (nvJPEG, nvJPEG2000, AA fill, ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 - **Cross-vendor via Vulkan compute** — AA fill, tile fill, and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Verified on RTX 5070; cross-vendor smoke pending hardware.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc.
 

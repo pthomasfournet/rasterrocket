@@ -37,7 +37,7 @@ Three GPU backends are available on Linux:
 | `gpu-deskew` | Any CUDA-capable NVIDIA GPU | CUDA NPP (`libnppig.so`, `libnppc.so`) |
 | `cache` | Any CUDA-capable NVIDIA GPU | CUDA runtime; opt-in disk-tier persistence via `PDF_RASTER_CACHE_DIR` |
 
-`cudarc` is pinned to the `cuda-12080` driver-API binding so the same source builds against both 12.x and 13.x drivers (forward-compatible per the CUDA driver-API ABI).
+`cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
 **Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via `MoltenVK`):**
 
