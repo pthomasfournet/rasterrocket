@@ -502,10 +502,18 @@ fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
         aa_coverage_span_scalar(rows, x0, shape);
         return;
     }
-    if is_x86_feature_detected!("avx512bitalg") && is_x86_feature_detected!("avx512bw") {
+    // Each tier consumes whole chunks only and leaves the remainder to the
+    // scalar tier: AVX-512 covers 128 output pixels per chunk, AVX2 covers 64.
+    // Selecting purely on CPU capability would send a 64..128-pixel span to a
+    // kernel that yields no chunks for it, so require the span to be wide
+    // enough for the tier to do work.
+    if shape.len() >= 128
+        && is_x86_feature_detected!("avx512bitalg")
+        && is_x86_feature_detected!("avx512bw")
+    {
         // SAFETY: both features confirmed present.
         unsafe { aa_coverage_span_avx512(rows, x0, shape) };
-    } else if is_x86_feature_detected!("avx2") {
+    } else if shape.len() >= 64 && is_x86_feature_detected!("avx2") {
         // SAFETY: avx2 confirmed present.
         unsafe { aa_coverage_span_avx2(rows, x0, shape) };
     } else {

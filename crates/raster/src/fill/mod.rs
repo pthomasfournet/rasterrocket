@@ -173,16 +173,15 @@ pub(super) fn fill_impl<P: Pixel>(
         let bitmap_width = bitmap.width as usize;
         let mut aa_buf = AaBuf::new(bitmap_width);
 
-        // `render_aa_line` and `clip_aa_line` both take a *device-pixel* row and
-        // expand it into the four AA sub-rows themselves, so iterate pixel rows
-        // here. `scanner` was built from an `aa_scale()`'d path, so its bounds
-        // are in AA space and have to be divided down first.
+        // `render_aa_line` and `clip_aa_line` take a device-pixel row and expand
+        // it into the four AA sub-rows internally. `scanner` is built from an
+        // `aa_scale()`'d path, so its bounds are in AA space and divide down to
+        // pixel rows here.
         for y in (scanner.y_min / AA_SIZE)..=(scanner.y_max / AA_SIZE) {
-            // Determine x span for this output row.
             let mut x0 = scanner.x_min / AA_SIZE;
             let mut x1 = scanner.x_max / AA_SIZE;
 
-            // Clears `aa_buf` on entry and fills all four sub-rows of row `y`.
+            // Clears `aa_buf` on entry, then writes all four sub-rows of row `y`.
             scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
 
             if clip_res != ClipResult::AllInside {
@@ -363,12 +362,19 @@ fn draw_aa_line<P: Pixel>(
         aa_buf.row_slice(2),
         aa_buf.row_slice(3),
     ];
-    let mut shape = vec![0u8; count];
-    simd::aa_coverage_span(rows, x0_usize, &mut shape);
+    // The SIMD coverage tiers require an even start column; an odd `x0` would
+    // otherwise fall back to the scalar tier for the whole span. Extending the
+    // span one pixel to the left restores the alignment, and the extra leading
+    // byte is dropped before the shape is used. `lead` is non-zero only when
+    // `x0` is odd, hence `x0 >= 1` and the subtraction cannot underflow.
+    let lead = x0_usize & 1;
+    let mut shape = vec![0u8; count + lead];
+    simd::aa_coverage_span(rows, x0_usize - lead, &mut shape);
+    let shape = &mut shape[lead..];
 
     // Gamma-map in place: 0 → 0 (skip), 1..=16 → AA_GAMMA[t].
     let mut any_nonzero = false;
-    for s in &mut shape {
+    for s in &mut *shape {
         let t = *s as usize;
         if t > 0 {
             *s = AA_GAMMA[t];
@@ -392,7 +398,7 @@ fn draw_aa_line<P: Pixel>(
     let dst_pixels = &mut row[byte_off..byte_end];
     let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
 
-    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, Some(&shape), x0, x1, y);
+    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, Some(shape), x0, x1, y);
 }
 
 #[cfg(test)]

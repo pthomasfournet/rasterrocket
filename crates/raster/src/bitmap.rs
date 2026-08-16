@@ -475,6 +475,14 @@ pub struct AaBuf {
     /// Always [`AA_SIZE`] (4).
     pub height: usize,
     data: Vec<u8>, // row-major; rows are (width+7)/8 bytes each
+    /// Half-open byte range `[dirty0, dirty1)` written since the last clear,
+    /// as an offset within a row; identical for every row. Empty when
+    /// `dirty0 >= dirty1`.
+    ///
+    /// Invariant: every set bit lies within this range, so clearing it is
+    /// sufficient to zero the buffer.
+    dirty0: usize,
+    dirty1: usize,
 }
 
 /// `AA_SIZE` converted to `usize`. Computed once as a compile-time constant.
@@ -499,6 +507,8 @@ impl AaBuf {
             width,
             height,
             data: vec![0u8; row_bytes * height],
+            dirty0: 0,
+            dirty1: 0,
         }
     }
 
@@ -519,10 +529,23 @@ impl AaBuf {
         );
     }
 
-    /// Clear all bits to 0.
+    /// Clear all set bits to 0.
+    ///
+    /// Writes only the byte range recorded by [`set_span`](Self::set_span), so
+    /// the cost scales with the width of the written geometry rather than with
+    /// the width of the buffer. The buffer is entirely zero on return.
     #[inline]
     pub fn clear(&mut self) {
-        self.data.fill(0);
+        if self.dirty0 >= self.dirty1 {
+            return;
+        }
+        let row_bytes = self.row_bytes();
+        for row in 0..self.height {
+            let base = row * row_bytes;
+            self.data[base + self.dirty0..base + self.dirty1].fill(0);
+        }
+        self.dirty0 = 0;
+        self.dirty1 = 0;
     }
 
     /// Set pixels `[x0, x1)` to 1 in the given row.
@@ -543,6 +566,14 @@ impl AaBuf {
         let base = row * rb;
         let b0 = x0 >> 3;
         let b1 = (x1 - 1) >> 3;
+        // Both branches below write within `b0..=b1`.
+        if self.dirty0 >= self.dirty1 {
+            self.dirty0 = b0;
+            self.dirty1 = b1 + 1;
+        } else {
+            self.dirty0 = self.dirty0.min(b0);
+            self.dirty1 = self.dirty1.max(b1 + 1);
+        }
         if b0 == b1 {
             // Span is entirely within one byte.
             // Left mask: top x0%8 bits clear, rest set.
@@ -672,6 +703,62 @@ mod tests {
     fn aabuf_clear() {
         let mut buf = AaBuf::new(4);
         buf.set_span(0, 0, 16);
+        buf.clear();
+        for i in 0..buf.row_bytes() {
+            assert_eq!(buf.get_byte(0, i), 0);
+        }
+    }
+
+    /// `clear` zeroes every row, not just the one the last span was written to.
+    ///
+    /// The dirty range is tracked per buffer rather than per row, so a span
+    /// written to one row must not leave residue in the others.
+    #[test]
+    fn aabuf_clear_zeroes_all_rows() {
+        let mut buf = AaBuf::new(64); // width = 256, row_bytes = 32
+        for row in 0..buf.height {
+            buf.set_span(row, 100, 140);
+        }
+        buf.clear();
+        for row in 0..buf.height {
+            for i in 0..buf.row_bytes() {
+                assert_eq!(buf.get_byte(row, i), 0, "row {row} byte {i} not cleared");
+            }
+        }
+    }
+
+    /// Disjoint spans must both be cleared, including the gap-spanning case.
+    ///
+    /// The dirty range is a single interval, so writes far apart widen it to
+    /// cover both; a range tracked as two disjoint pieces would miss one.
+    #[test]
+    fn aabuf_clear_covers_disjoint_spans() {
+        let mut buf = AaBuf::new(64); // width = 256
+        buf.set_span(1, 8, 16);
+        buf.set_span(1, 200, 240);
+        buf.clear();
+        for i in 0..buf.row_bytes() {
+            assert_eq!(buf.get_byte(1, i), 0, "byte {i} not cleared");
+        }
+    }
+
+    /// A cleared buffer must be reusable: writes after a clear are tracked too.
+    #[test]
+    fn aabuf_clear_then_reuse_is_tracked() {
+        let mut buf = AaBuf::new(64);
+        buf.set_span(0, 8, 16);
+        buf.clear();
+        buf.set_span(0, 100, 120);
+        buf.clear();
+        for i in 0..buf.row_bytes() {
+            assert_eq!(buf.get_byte(0, i), 0, "byte {i} not cleared after reuse");
+        }
+    }
+
+    /// Clearing an untouched buffer is a no-op and leaves it zero.
+    #[test]
+    fn aabuf_clear_without_writes_is_noop() {
+        let mut buf = AaBuf::new(8);
         buf.clear();
         for i in 0..buf.row_bytes() {
             assert_eq!(buf.get_byte(0, i), 0);
