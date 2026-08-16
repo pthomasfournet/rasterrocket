@@ -10,7 +10,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use vello_cpu::{
-    Level, Pixmap, RenderContext, RenderMode, RenderSettings, Resources,
+    Level, Pixmap, RasterizerSettings, RenderContext, RenderMode, RenderSettings, Resources,
     kurbo::{BezPath, Point},
     peniko::Color,
 };
@@ -169,7 +169,13 @@ fn bench_vello(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
     let settings = RenderSettings {
         level: Level::try_detect().unwrap_or(Level::baseline()),
         num_threads: 0,
+    };
+    // Rasterizer settings are per-render-call.  OptimizeSpeed is already the
+    // default, but state it explicitly: our rasterizer is the speed-tuned
+    // comparison point, so the mode is part of what makes the match fair.
+    let raster_settings = RasterizerSettings {
         render_mode: RenderMode::OptimizeSpeed,
+        ..RasterizerSettings::default()
     };
     #[expect(
         clippy::cast_possible_truncation,
@@ -193,7 +199,7 @@ fn bench_vello(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
             ctx.fill_path(p);
         }
         ctx.flush();
-        ctx.render_to_pixmap(&mut resources, &mut pixmap);
+        ctx.render_with(&mut pixmap, &mut resources, raster_settings);
     }
 
     let t0 = Instant::now();
@@ -208,7 +214,7 @@ fn bench_vello(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
             ctx.fill_path(p);
         }
         ctx.flush();
-        ctx.render_to_pixmap(&mut resources, black_box(&mut pixmap));
+        ctx.render_with(black_box(&mut pixmap), &mut resources, raster_settings);
     }
     t0.elapsed().as_secs_f64() * 1000.0 / f64::from(cfg.iters)
 }

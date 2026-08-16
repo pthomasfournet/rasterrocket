@@ -36,7 +36,7 @@ env_logger = { version = ">=0.11, <1" }
 blake3     = { version = ">=1.5,  <2" }
 dashmap    = { version = ">=6.0,  <7" }
 # Comic-archive (.cbz/.cb7/.cbt) input.
-zip          = { version = ">=2.0, <6", default-features = false, features = ["deflate"] }
+zip          = { version = ">=2.0, <9", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = ">=0.13, <1" }
 tar          = { version = ">=0.4, <1" }
 image-webp   = { version = ">=0.2, <1" }

@@ -37,7 +37,7 @@ pdf_interp  = { package = "rasterrocket-interp",  path = "../pdf_interp", versio
 raster      = { package = "rasterrocket-render",  path = "../raster",     version = "1.2" }
 color       = { package = "rasterrocket-color",   path = "../color",      version = "1.2" }
 encode      = { package = "rasterrocket-encode",  path = "../encode",     version = "1.2" }
-base64      = "0.22"
+base64      = "0.23"
 pdf         = { package = "rasterrocket-parser",  path = "../pdf",        version = "1.2" }
 rayon       = "1"
 log         = { workspace = true }

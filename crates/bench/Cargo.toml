@@ -19,7 +19,7 @@ encode     = { package = "rasterrocket-encode", path = "../encode" }
 pdf        = { package = "rasterrocket-parser", path = "../pdf" }
 pdf_interp = { package = "rasterrocket-interp", path = "../pdf_interp" }
 pdf_raster = { package = "rasterrocket",        path = "../pdf_raster" }
-vello_cpu  = "0.0.9"
+vello_cpu  = "0.2.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }
