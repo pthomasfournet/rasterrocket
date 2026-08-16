@@ -173,33 +173,28 @@ pub(super) fn fill_impl<P: Pixel>(
         let bitmap_width = bitmap.width as usize;
         let mut aa_buf = AaBuf::new(bitmap_width);
 
-        for aa_y in scanner.y_min..=scanner.y_max {
-            let y = aa_y / AA_SIZE;
-            // The AA scanner row index within the 4-row AaBuf band.
-            // aa_y % AA_SIZE is in 0..AA_SIZE so always non-negative.
-            #[expect(clippy::cast_sign_loss, reason = "aa_y % AA_SIZE is in 0..AA_SIZE ≥ 0")]
-            let aa_row = (aa_y % AA_SIZE) as usize;
-
-            // Determine x span for this AA scanline.
+        // `render_aa_line` and `clip_aa_line` both take a *device-pixel* row and
+        // expand it into the four AA sub-rows themselves, so iterate pixel rows
+        // here. `scanner` was built from an `aa_scale()`'d path, so its bounds
+        // are in AA space and have to be divided down first.
+        for y in (scanner.y_min / AA_SIZE)..=(scanner.y_max / AA_SIZE) {
+            // Determine x span for this output row.
             let mut x0 = scanner.x_min / AA_SIZE;
             let mut x1 = scanner.x_max / AA_SIZE;
 
-            scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, aa_y);
+            // Clears `aa_buf` on entry and fills all four sub-rows of row `y`.
+            scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
 
             if clip_res != ClipResult::AllInside {
-                clip.clip_aa_line(&mut aa_buf, &mut x0, &mut x1, aa_y);
+                clip.clip_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
             }
 
-            // At the boundary of each output row, emit one composited line.
-            if aa_row == AA_SIZE as usize - 1 {
-                #[expect(
-                    clippy::cast_sign_loss,
-                    reason = "y = aa_y / AA_SIZE ≥ 0 since scanner.y_min ≥ 0"
-                )]
-                if x0 <= x1 && y >= 0 && (y as u32) < bitmap.height {
-                    draw_aa_line::<P>(bitmap, pipe, src, &aa_buf, x0, x1, y);
-                }
-                aa_buf.clear();
+            #[expect(
+                clippy::cast_sign_loss,
+                reason = "y ≥ 0 since scanner.y_min ≥ 0 and AA_SIZE > 0"
+            )]
+            if x0 <= x1 && y >= 0 && (y as u32) < bitmap.height {
+                draw_aa_line::<P>(bitmap, pipe, src, &aa_buf, x0, x1, y);
             }
         }
     } else {
@@ -408,6 +403,163 @@ mod tests {
     use crate::pipe::PipeSrc;
     use crate::testutil::{identity_matrix, make_clip, rect_path, simple_pipe};
     use color::Rgb8;
+
+    /// Inclusive row range that received any ink, or `None` for a blank bitmap.
+    fn inked_rows(bmp: &Bitmap<Rgb8>) -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = None;
+        for y in 0..bmp.height {
+            if bmp
+                .row(y)
+                .iter()
+                .any(|px| px.r != 0 || px.g != 0 || px.b != 0)
+            {
+                if first.is_none() {
+                    first = Some(y);
+                }
+                last = Some(y);
+            }
+        }
+        first.zip(last)
+    }
+
+    /// Inclusive column range that received any ink, or `None` for a blank bitmap.
+    fn inked_cols(bmp: &Bitmap<Rgb8>) -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = None;
+        for y in 0..bmp.height {
+            for (x, px) in bmp.row(y).iter().enumerate() {
+                if px.r != 0 || px.g != 0 || px.b != 0 {
+                    let x = x as u32;
+                    if first.is_none_or(|f| x < f) {
+                        first = Some(x);
+                    }
+                    if last.is_none_or(|l| x > l) {
+                        last = Some(x);
+                    }
+                }
+            }
+        }
+        first.zip(last)
+    }
+
+    /// An AA fill must land where the geometry is, not scaled toward the origin.
+    ///
+    /// `render_aa_line` takes a device-pixel row and expands it to the four AA
+    /// sub-rows itself, so the caller must not hand it an AA-space index. When
+    /// it did, output row `y` was composited from the coverage of row
+    /// `y * AA_SIZE + 3`, squashing every fill into the top quarter of its own
+    /// bounding box.
+    #[test]
+    fn aa_fill_rect_lands_on_its_own_geometry() {
+        const W: u32 = 64;
+        const H: u32 = 64;
+
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
+        let clip = make_clip(W, H);
+        let pipe = simple_pipe();
+        let color = [255u8, 255, 255];
+        let src = PipeSrc::Solid(&color);
+        // Deliberately away from the top edge: a row-space scaling bug cannot
+        // masquerade as a correct result here.
+        let path = rect_path(16.0, 40.0, 48.0, 56.0);
+
+        fill::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &path,
+            &pipe,
+            &src,
+            &identity_matrix(),
+            1.0,
+            true,
+        );
+
+        let (r0, r1) = inked_rows(&bmp).expect("AA fill painted nothing at all");
+        assert!(
+            r0 >= 39 && r1 <= 57,
+            "AA fill ink at rows {r0}..={r1}, expected to stay within 39..=57"
+        );
+        assert!(
+            r1 - r0 >= 14,
+            "AA fill covered only {} rows, expected ~16",
+            r1 - r0 + 1
+        );
+
+        let (c0, c1) = inked_cols(&bmp).expect("AA fill painted nothing at all");
+        assert!(
+            c0 >= 15 && c1 <= 49,
+            "AA fill ink at cols {c0}..={c1}, expected to stay within 15..=49"
+        );
+    }
+
+    /// A fill sitting below a quarter of the page height must still render.
+    ///
+    /// With an AA-space row index the scanner row lookup ran off the end of the
+    /// table for any geometry below `height / AA_SIZE`, so the fill silently
+    /// produced nothing.
+    #[test]
+    fn aa_fill_low_on_the_page_is_not_dropped() {
+        const W: u32 = 32;
+        const H: u32 = 128;
+
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
+        let clip = make_clip(W, H);
+        let pipe = simple_pipe();
+        let color = [255u8, 255, 255];
+        let src = PipeSrc::Solid(&color);
+        // Entirely below H/AA_SIZE = 32.
+        let path = rect_path(8.0, 96.0, 24.0, 120.0);
+
+        fill::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &path,
+            &pipe,
+            &src,
+            &identity_matrix(),
+            1.0,
+            true,
+        );
+
+        let (r0, r1) = inked_rows(&bmp).expect("AA fill below H/4 rendered nothing");
+        assert!(
+            r0 >= 95 && r1 <= 121,
+            "AA fill ink at rows {r0}..={r1}, expected to stay within 95..=121"
+        );
+    }
+
+    /// AA and non-AA fills of the same rect must agree on where the shape is.
+    ///
+    /// AA differs from aliased rendering at the edges by design, but the two
+    /// must not disagree about which part of the bitmap the shape occupies.
+    #[test]
+    fn aa_and_aliased_fill_agree_on_placement() {
+        const W: u32 = 48;
+        const H: u32 = 48;
+
+        let clip = make_clip(W, H);
+        let pipe = simple_pipe();
+        let color = [255u8, 255, 255];
+        let src = PipeSrc::Solid(&color);
+        let path = rect_path(12.0, 20.0, 36.0, 40.0);
+        let matrix = identity_matrix();
+
+        let mut aliased: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
+        fill::<Rgb8>(&mut aliased, &clip, &path, &pipe, &src, &matrix, 1.0, false);
+
+        let mut aa: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
+        fill::<Rgb8>(&mut aa, &clip, &path, &pipe, &src, &matrix, 1.0, true);
+
+        let (ar0, ar1) = inked_rows(&aliased).expect("aliased fill painted nothing");
+        let (br0, br1) = inked_rows(&aa).expect("AA fill painted nothing");
+
+        // Allow one row of AA bleed on each side, no more.
+        assert!(
+            br0 + 1 >= ar0 && ar0 <= br0 + 1 && br1 <= ar1 + 1 && ar1 <= br1 + 1,
+            "AA rows {br0}..={br1} disagree with aliased rows {ar0}..={ar1}"
+        );
+    }
 
     #[test]
     fn fill_rect_paints_solid() {
