@@ -46,6 +46,7 @@ tiff         = { version = ">=0.9, <1" }
 unsafe_code          = "deny"
 missing_docs         = "warn"
 unused_results       = "warn"
+unreachable_pub      = "warn"
 
 [workspace.lints.clippy]
 all      = { level = "warn", priority = -1 }

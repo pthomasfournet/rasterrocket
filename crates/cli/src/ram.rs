@@ -61,7 +61,7 @@ const PROBE_TTL: Duration = Duration::from_millis(100);
 /// `Drop` removes the directory and everything inside it. If removal fails
 /// (e.g. another process moved the directory) the error is logged and
 /// swallowed — there is no actionable response at process exit.
-pub struct RamDirGuard {
+pub(crate) struct RamDirGuard {
     /// `Some(path)` when this guard owns a directory; `None` when `--ram`
     /// was off and the guard is a no-op.
     dir: Option<PathBuf>,
@@ -88,7 +88,7 @@ impl Drop for RamDirGuard {
 ///
 /// One instance is shared across all worker threads via a borrowed reference;
 /// the inner state (atomics + mutex) is cheap to read concurrently.
-pub struct SpillPolicy {
+pub(crate) struct SpillPolicy {
     /// `(ram_prefix, disk_prefix)`. When `--ram` is off both slots hold the
     /// user's original prefix and `next_prefix` short-circuits.
     targets: (String, String),
@@ -117,7 +117,7 @@ impl SpillPolicy {
     /// `--ram` off: always the original prefix. `--ram` on: `ram_prefix`
     /// while free RAM is comfortable, `disk_prefix` once it tightens.
     #[must_use]
-    pub fn next_prefix(&self) -> &str {
+    pub(crate) fn next_prefix(&self) -> &str {
         let (ram_prefix, disk_prefix) = &self.targets;
 
         // Passthrough fast path: --ram off means both prefixes are equal,
@@ -245,7 +245,7 @@ fn use_ram_for(no_ram: bool, ram: bool, has_ram_path: bool, prefix: &str) -> boo
 ///
 /// # Errors
 /// - directory creation failed (permissions, ENOSPC on /dev/shm at startup).
-pub fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, SpillPolicy)> {
+pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, SpillPolicy)> {
     let original_prefix = args.output_prefix.clone();
 
     if !should_use_ram(args) {

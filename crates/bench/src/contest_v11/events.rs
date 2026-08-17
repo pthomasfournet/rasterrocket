@@ -12,7 +12,7 @@ use std::time::Instant;
 use pdf_raster::{BackendPolicy, SessionConfig, open_session, render_page_rgb};
 
 #[derive(Debug)]
-pub struct EventResult {
+pub(crate) struct EventResult {
     pub name: &'static str,
     pub elapsed_ms: f64,
     pub pages_rendered: u32,
@@ -35,7 +35,7 @@ fn session_config() -> SessionConfig {
 /// full pipeline including the disk write so the comparison against
 /// mutool / pdftoppm (which always write a PPM file) is apples-to-apples.
 /// `page_idx` is clamped to `[1, total_pages]`.
-pub fn e1(archive: &Path, page_idx: u32) -> Result<EventResult, String> {
+pub(crate) fn e1(archive: &Path, page_idx: u32) -> Result<EventResult, String> {
     let t0 = Instant::now();
     let session =
         open_session(archive, &session_config()).map_err(|e| format!("open_session: {e}"))?;
@@ -61,7 +61,7 @@ pub fn e1(archive: &Path, page_idx: u32) -> Result<EventResult, String> {
 }
 
 /// E2 — render `count` pages starting from `first_page` (clamped).
-pub fn e2(archive: &Path, first_page: u32, count: u32) -> Result<EventResult, String> {
+pub(crate) fn e2(archive: &Path, first_page: u32, count: u32) -> Result<EventResult, String> {
     let t0 = Instant::now();
     let session =
         open_session(archive, &session_config()).map_err(|e| format!("open_session: {e}"))?;
@@ -85,7 +85,7 @@ pub fn e2(archive: &Path, first_page: u32, count: u32) -> Result<EventResult, St
 
 /// E3 — render page 1 of each archive listed in `archives.txt`.  Archives
 /// are warmed via `warm_xref_tails` before the timed loop starts.
-pub fn e3(list_path: &Path) -> Result<EventResult, String> {
+pub(crate) fn e3(list_path: &Path) -> Result<EventResult, String> {
     let list = std::fs::read_to_string(list_path)
         .map_err(|e| format!("read {}: {e}", list_path.display()))?;
     let archives: Vec<PathBuf> = list
@@ -121,7 +121,7 @@ pub fn e3(list_path: &Path) -> Result<EventResult, String> {
 
 /// E4 — render 1000 random page indices from the archive.  Reproducible
 /// via a fixed-seed xorshift64 so successive runs touch the same pages.
-pub fn e4(archive: &Path) -> Result<EventResult, String> {
+pub(crate) fn e4(archive: &Path) -> Result<EventResult, String> {
     let t0 = Instant::now();
     let session =
         open_session(archive, &session_config()).map_err(|e| format!("open_session: {e}"))?;

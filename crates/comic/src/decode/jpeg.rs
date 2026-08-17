@@ -19,7 +19,7 @@ use super::{DecodeError, rgb_bitmap_from_tight};
 /// # Errors
 ///
 /// [`DecodeError::Codec`] if the stream is not decodable or reports zero dims.
-pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
     let mut dec = JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
     let pixels = dec

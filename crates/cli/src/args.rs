@@ -22,7 +22,7 @@ fn parse_positive_dpi(s: &str) -> Result<f64, String> {
     clippy::struct_excessive_bools,
     reason = "each bool maps to a distinct CLI flag"
 )]
-pub struct Args {
+pub(crate) struct Args {
     /// Input PDF file ("-" for stdin). A path that begins with '-' must be
     /// passed after a literal `--` (or as `./-name.pdf`) so it is not parsed
     /// as an option.
@@ -271,7 +271,7 @@ pub struct Args {
 
 /// Yes/no flag for anti-aliasing options.
 #[derive(Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum AaFlag {
+pub(crate) enum AaFlag {
     /// Anti-aliasing enabled.
     Yes,
     /// Anti-aliasing disabled.
@@ -280,7 +280,7 @@ pub enum AaFlag {
 
 /// Thin-line rendering mode.
 #[derive(Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum ThinLineMode {
+pub(crate) enum ThinLineMode {
     /// Default thin-line mode.
     Default,
     /// Force solid thin lines.
@@ -291,12 +291,12 @@ pub enum ThinLineMode {
 
 impl Args {
     /// Effective horizontal DPI.
-    pub fn x_dpi(&self) -> f64 {
+    pub(crate) fn x_dpi(&self) -> f64 {
         self.resolution_x.or(self.resolution).unwrap_or(150.0)
     }
 
     /// Effective vertical DPI.
-    pub fn y_dpi(&self) -> f64 {
+    pub(crate) fn y_dpi(&self) -> f64 {
         self.resolution_y.or(self.resolution).unwrap_or(150.0)
     }
 
@@ -304,7 +304,7 @@ impl Args {
     ///
     /// Returns `Err` with a human-readable message if any incompatible
     /// combination is present.  Call this once at startup.
-    pub fn validate_format_flags(&self) -> Result<(), String> {
+    pub(crate) fn validate_format_flags(&self) -> Result<(), String> {
         if self.jpeg && self.jpegcmyk {
             return Err("--jpeg and --jpegcmyk are mutually exclusive".to_owned());
         }
@@ -329,7 +329,7 @@ impl Args {
     ///
     /// Assumes [`validate_format_flags`](Self::validate_format_flags) has
     /// already been called — conflicting flags are not possible here.
-    pub const fn output_format(&self) -> OutputFormat {
+    pub(crate) const fn output_format(&self) -> OutputFormat {
         if self.png {
             OutputFormat::Png
         } else if self.jpeg || self.jpegcmyk {
@@ -344,7 +344,7 @@ impl Args {
 
 /// Output image format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Raw PPM/PGM (default).
     Ppm,
     /// PNG.
@@ -373,7 +373,7 @@ impl OutputFormat {
     /// - PPM + gray → `.pgm` (P5 grayscale Netpbm, 8-bit)
     /// - PNG + gray/mono → `.png` (grayscale PNG)
     /// - All other combinations use the format's natural extension.
-    pub const fn extension_with_mode(self, gray: bool, mono: bool) -> &'static str {
+    pub(crate) const fn extension_with_mode(self, gray: bool, mono: bool) -> &'static str {
         match (self, mono, gray) {
             (Self::Ppm, true, _) => "pbm",
             (Self::Ppm, false, true) => "pgm",
@@ -389,7 +389,7 @@ impl OutputFormat {
 
 /// `--backend` argument value parsed by clap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum BackendArg {
+pub(crate) enum BackendArg {
     /// Auto-select: Vulkan if compiled in and present, else CUDA, else CPU.
     /// Silent fallback at every step.  This is the default; when omitted,
     /// `PDF_RASTER_BACKEND` is also consulted.
@@ -419,7 +419,7 @@ impl Args {
     /// value alongside `--backend cpu` will not get the error; this is an
     /// acceptable trade-off given that clap does not expose an `is_present`
     /// flag for options with defaults.
-    pub fn session_config(&self) -> Result<SessionConfig, String> {
+    pub(crate) fn session_config(&self) -> Result<SessionConfig, String> {
         // Precedence: explicit `--backend <X>` wins; otherwise consult
         // `PDF_RASTER_BACKEND`; otherwise default to Auto.  Distinguishing
         // "user passed --backend auto" from "user passed nothing" requires
@@ -476,7 +476,7 @@ impl Args {
     /// returned alongside the page list so the caller decides how to display them.
     ///
     /// Precondition: `total >= 1`, validated by the caller before this is invoked.
-    pub fn build_page_list(&self, total: i32) -> Result<(Vec<i32>, Vec<String>), String> {
+    pub(crate) fn build_page_list(&self, total: i32) -> Result<(Vec<i32>, Vec<String>), String> {
         let requested_first = self.first_page;
         let requested_last = self.last_page.unwrap_or(total);
 

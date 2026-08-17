@@ -50,7 +50,7 @@ const MAX_CYCLES: u32 = 50;
     clippy::too_many_lines,
     reason = "qpdf orchestration is sequential by nature; splitting just to pass the line count would add friction"
 )]
-pub fn build(out: &Path, target_output_bytes: u64) -> Result<(), String> {
+pub(crate) fn build(out: &Path, target_output_bytes: u64) -> Result<(), String> {
     if Command::new("qpdf").arg("--version").output().is_err() {
         return Err("qpdf not found on PATH; install with `apt install qpdf` and retry".into());
     }

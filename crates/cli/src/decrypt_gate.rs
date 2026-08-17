@@ -12,7 +12,7 @@
 use std::io::{IsTerminal, Write};
 
 /// The liability waiver shown on stderr before the interactive prompt.
-pub const DISCLAIMER: &str = "\
+pub(crate) const DISCLAIMER: &str = "\
 This document is encrypted (PDF Standard Security Handler). Continuing will \
 remove its copy-protection using qpdf. This capability is intended SOLELY \
 for documents you own or are otherwise legally entitled to access (e.g. \
@@ -23,7 +23,7 @@ WITHOUT WARRANTY. This is not legal advice. Proceed? [y/N]";
 
 /// Environment variable that, when set to `1`, bypasses the interactive
 /// prompt (operator has affirmed authorisation for unattended use).
-pub const ENV_BYPASS: &str = "RROCKET_DECRYPT_OWNED";
+pub(crate) const ENV_BYPASS: &str = "RROCKET_DECRYPT_OWNED";
 
 /// Pure decision function for the decrypt gate — no I/O, fully unit
 /// testable.
@@ -40,7 +40,7 @@ pub const ENV_BYPASS: &str = "RROCKET_DECRYPT_OWNED";
 /// - Interactive: proceed ONLY on an explicit `y` answer; default (and any
 ///   other answer, including `None`) → abort.
 #[must_use]
-pub const fn should_decrypt(
+pub(crate) const fn should_decrypt(
     interactive: bool,
     flag: bool,
     env: bool,
@@ -58,7 +58,7 @@ pub const fn should_decrypt(
 /// Read `RROCKET_DECRYPT_OWNED` and return `true` only for the exact
 /// value `1` (a defined opt-in, not merely "set to anything").
 #[must_use]
-pub fn env_bypass_set() -> bool {
+pub(crate) fn env_bypass_set() -> bool {
     std::env::var(ENV_BYPASS).is_ok_and(|v| v == "1")
 }
 
@@ -69,7 +69,7 @@ pub fn env_bypass_set() -> bool {
 /// stdin.  Non-interactive stdin with no bypass returns `false` without
 /// prompting (the caller surfaces the clear `EncryptedDocument` error).
 #[must_use]
-pub fn prompt_decrypt(flag: bool) -> bool {
+pub(crate) fn prompt_decrypt(flag: bool) -> bool {
     let env = env_bypass_set();
     let interactive = std::io::stdin().is_terminal();
 

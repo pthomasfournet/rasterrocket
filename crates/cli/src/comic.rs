@@ -23,7 +23,10 @@ use crate::render::{self, RenderError};
 /// Whole-archive failures (including a `.cbr` input, or an unsupported output
 /// format) surface as the outer `Err`, whose `Display` carries the user-facing
 /// message.
-pub fn run(args: &Args, spill: &crate::ram::SpillPolicy) -> Result<(usize, usize), ComicError> {
+pub(crate) fn run(
+    args: &Args,
+    spill: &crate::ram::SpillPolicy,
+) -> Result<(usize, usize), ComicError> {
     // Reject JPEG/TIFF once, up front, before opening or decoding the archive.
     // The PDF path's `render_page` rejects per page, but a comic with hundreds
     // of pages would print one identical line per page; failing fast here emits

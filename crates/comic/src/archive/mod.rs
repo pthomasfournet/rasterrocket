@@ -16,7 +16,7 @@ use crate::ComicError;
 /// admits any legitimate comic page image (a 600-megapixel page — the render
 /// size ceiling — encodes to well under this) or a reasonable embedded PDF,
 /// while stopping a multi-gigabyte bomb.
-pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Read `reader` to a `Vec`, refusing to buffer more than [`MAX_ENTRY_BYTES`].
 ///
@@ -28,7 +28,7 @@ pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 /// # Errors
 /// [`ComicError::BadArchive`] if the entry yields more than the cap, or if the
 /// underlying read fails.
-pub fn read_entry_capped<R: Read>(
+pub(crate) fn read_entry_capped<R: Read>(
     reader: R,
     entry: &str,
     size_hint: u64,
@@ -66,7 +66,7 @@ fn read_capped<R: Read>(
 /// A read-only comic-archive container. Implementations hold the whole archive
 /// in memory (comics are image-sized, not video-sized) and expose entries by
 /// name. Ordering/filtering is the caller's job (see `crate::order`).
-pub trait Archive {
+pub(crate) trait Archive {
     /// All entry names in the archive, in stored order (unsorted, unfiltered).
     fn entry_names(&mut self) -> Vec<String>;
     /// Read one entry's raw bytes by name.
@@ -81,7 +81,10 @@ pub trait Archive {
 /// # Errors
 /// [`ComicError::RarUnsupported`] for `.cbr`; [`ComicError::BadArchive`] for an
 /// unknown extension or a container that fails to parse.
-pub fn open_archive_from_ext(name: &str, bytes: Vec<u8>) -> Result<Box<dyn Archive>, ComicError> {
+pub(crate) fn open_archive_from_ext(
+    name: &str,
+    bytes: Vec<u8>,
+) -> Result<Box<dyn Archive>, ComicError> {
     let ext = Path::new(name)
         .extension()
         .and_then(|e| e.to_str())

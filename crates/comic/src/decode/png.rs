@@ -11,7 +11,7 @@ use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on any malformed-stream or unsupported-config error.
-pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     // `png` 0.18 requires `Read + Seek`; `&[u8]` is only `Read`, so wrap it.
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);

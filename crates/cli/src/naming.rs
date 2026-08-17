@@ -18,7 +18,7 @@ pub fn output_path(args: &Args, page_num: i32, total_pages: i32, format: OutputF
 /// Examples (prefix = "out", sep = '-', format = Ppm):
 /// - page 1, total 10 → `"out-1.ppm"`
 /// - page 1, total 100, `force_num_digits` = Some(3) → `"out-001.ppm"`
-pub fn output_path_with_prefix(
+pub(crate) fn output_path_with_prefix(
     prefix: &str,
     args: &Args,
     page_num: i32,

@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::Instant;
 
 #[derive(Debug)]
-pub struct CompetitorResult {
+pub(crate) struct CompetitorResult {
     pub name: &'static str,
     pub elapsed_ms: Option<f64>,
 }
@@ -55,7 +55,7 @@ fn time_command(name: &'static str, mut cmd: Command) -> CompetitorResult {
 /// already detects spawn-failure, so no separate install probe is needed.
 /// Cleans the output file before returning so on-disk cost is not
 /// accidentally measured on subsequent runs.
-pub fn mutool_render(archive: &Path, page: u32, out: &Path) -> CompetitorResult {
+pub(crate) fn mutool_render(archive: &Path, page: u32, out: &Path) -> CompetitorResult {
     let (Some(out_str), Some(archive_str)) = (out.to_str(), archive.to_str()) else {
         return CompetitorResult {
             name: "mutool",
@@ -87,7 +87,7 @@ pub fn mutool_render(archive: &Path, page: u32, out: &Path) -> CompetitorResult 
 
 /// Render a single page with `pdftoppm -f <p> -l <p> -r 150 <archive> <prefix>`.
 /// Returns `None` if pdftoppm is not on PATH or the run fails.
-pub fn pdftoppm_render(archive: &Path, page: u32, out_prefix: &Path) -> CompetitorResult {
+pub(crate) fn pdftoppm_render(archive: &Path, page: u32, out_prefix: &Path) -> CompetitorResult {
     let (Some(prefix_str), Some(archive_str)) = (out_prefix.to_str(), archive.to_str()) else {
         return CompetitorResult {
             name: "pdftoppm",

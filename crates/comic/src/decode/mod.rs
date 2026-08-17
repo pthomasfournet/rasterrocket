@@ -15,7 +15,7 @@ use color::Rgb8;
 use raster::Bitmap;
 
 /// A decoded page in OCR-ready grayscale, plus its pixel dimensions.
-pub struct DecodedImage {
+pub(crate) struct DecodedImage {
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
@@ -26,7 +26,7 @@ pub struct DecodedImage {
 
 /// Recognised container formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageFormat {
+pub(crate) enum ImageFormat {
     /// JPEG (`FF D8 FF`).
     Jpeg,
     /// PNG (`89 50 4E 47`).
@@ -39,7 +39,7 @@ pub enum ImageFormat {
 
 /// Why decoding a single entry failed.
 #[derive(Debug)]
-pub enum DecodeError {
+pub(crate) enum DecodeError {
     /// No recognised image magic bytes.
     Unsupported,
     /// The codec rejected the byte stream.
@@ -59,7 +59,7 @@ impl std::error::Error for DecodeError {}
 
 /// Detect the image format from leading magic bytes. `None` if unrecognised.
 #[must_use]
-pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
+pub(crate) fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
         return Some(ImageFormat::Jpeg);
     }
@@ -83,7 +83,7 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
 ///
 /// [`DecodeError::Unsupported`] if no codec matches the magic bytes;
 /// [`DecodeError::Codec`] if the matched codec rejects the stream.
-pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+pub(crate) fn decode_image(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     let rgb = match sniff(bytes).ok_or(DecodeError::Unsupported)? {
         ImageFormat::Jpeg => jpeg::decode(bytes)?,
         ImageFormat::Png => png::decode(bytes)?,

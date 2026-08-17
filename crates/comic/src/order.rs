@@ -28,7 +28,7 @@ fn basename(name: &str) -> &str {
 /// is not a supported image type. The check is on the *last* extension, so
 /// `cover.jpg.bak` is rejected. Both `/` and `\` are honoured as separators.
 #[must_use]
-pub fn is_image_file(name: &str) -> bool {
+pub(crate) fn is_image_file(name: &str) -> bool {
     if is_dir_or_resource_fork(name) {
         return false;
     }
@@ -48,7 +48,7 @@ pub fn is_image_file(name: &str) -> bool {
 /// True if `name` is a PDF entry (last extension `.pdf`, not a directory or
 /// `__MACOSX` resource fork). Mirrors [`is_image_file`]'s path/junk guards.
 #[must_use]
-pub fn is_pdf_file(name: &str) -> bool {
+pub(crate) fn is_pdf_file(name: &str) -> bool {
     if is_dir_or_resource_fork(name) {
         return false;
     }
@@ -62,7 +62,7 @@ pub fn is_pdf_file(name: &str) -> bool {
 /// compare case-insensitively, then case-sensitively as a tie-break for
 /// determinism.
 #[must_use]
-pub fn natural_cmp(a: &str, b: &str) -> Ordering {
+pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut ai = a.bytes().peekable();
     let mut bi = b.bytes().peekable();
     loop {

@@ -6,7 +6,7 @@ use super::Archive;
 use crate::ComicError;
 
 /// A ZIP archive held in memory.
-pub struct ZipArchive {
+pub(super) struct ZipArchive {
     inner: zip::ZipArchive<Cursor<Vec<u8>>>,
 }
 
@@ -15,7 +15,7 @@ impl ZipArchive {
     ///
     /// # Errors
     /// [`ComicError::BadArchive`] if the central directory cannot be read.
-    pub fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
+    pub(super) fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
         let inner = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|e| ComicError::BadArchive(format!("zip: {e}")))?;
         Ok(Self { inner })

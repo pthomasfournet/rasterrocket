@@ -15,7 +15,7 @@ use crate::render::RenderError;
 /// transparent wrapper (e.g. `RasterError::Pdf` delegating to its
 /// `InterpError` source) and is skipped — repeating the same sentence under
 /// "caused by:" is noise, not a diagnosis.
-pub fn print_error_chain(e: &dyn std::error::Error) {
+pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
     let mut prev = e.to_string();
     let mut src = e.source();
     while let Some(cause) = src {
@@ -33,7 +33,7 @@ pub fn print_error_chain(e: &dyn std::error::Error) {
 /// `policy` is the resolved backend (after CLI flag → env var → default
 /// fallback) so a hint can name the source the user actually controls
 /// even when no `--backend` flag was passed.
-pub fn report_open_error(e: &RasterError, args: &Args, policy: BackendPolicy) {
+pub(crate) fn report_open_error(e: &RasterError, args: &Args, policy: BackendPolicy) {
     if matches!(e, RasterError::BackendUnavailable(_)) {
         eprintln!("rrocket: {e}");
         print_backend_hint(policy, &args.vaapi_device, args.backend.is_none());
@@ -109,7 +109,7 @@ fn print_vulkan_hint() {
 /// Sort errors by page number, print each with its cause chain, then exit 1.
 ///
 /// No-op if `errors` is empty.
-pub fn report_errors(mut errors: Vec<(i32, RenderError)>) {
+pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) {
     if errors.is_empty() {
         return;
     }

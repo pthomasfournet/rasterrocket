@@ -55,7 +55,7 @@ impl HostBudget {
 ///
 /// Implementation detail of [`HostTier`]; re-exported as `pub(crate)`
 /// from the parent module.
-pub struct HostEntry {
+pub(crate) struct HostEntry {
     /// Pinned host memory holding the decoded bytes.  Allocated with
     /// `CU_MEMHOSTALLOC_WRITECOMBINED` for fast DMA in both directions.
     pub pinned: PinnedHostSlice<u8>,
@@ -76,7 +76,7 @@ impl HostEntry {
     /// initialised to zero and is bumped to the current tick by the
     /// host tier on insert.
     #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         pinned: PinnedHostSlice<u8>,
         width: u32,
         height: u32,
@@ -93,7 +93,7 @@ impl HostEntry {
 
     /// Bytes occupied in pinned host memory by this entry.
     #[must_use]
-    pub fn host_bytes(&self) -> u64 {
+    pub(crate) fn host_bytes(&self) -> u64 {
         self.pinned.num_bytes() as u64
     }
 
@@ -121,7 +121,7 @@ impl std::fmt::Debug for HostEntry {
 ///
 /// Implementation detail of [`super::DeviceImageCache`]; re-exported
 /// as `pub(crate)` from the parent module.
-pub struct HostTier {
+pub(crate) struct HostTier {
     entries: DashMap<ContentHash, Arc<HostEntry>>,
     used_bytes: AtomicU64,
     budget: HostBudget,
@@ -130,7 +130,7 @@ pub struct HostTier {
 impl HostTier {
     /// Build an empty host tier with the given budget.
     #[must_use]
-    pub fn new(budget: HostBudget) -> Self {
+    pub(crate) fn new(budget: HostBudget) -> Self {
         Self {
             entries: DashMap::new(),
             used_bytes: AtomicU64::new(0),
@@ -162,7 +162,7 @@ impl HostTier {
 
     /// Budget in bytes.
     #[must_use]
-    pub const fn budget_bytes(&self) -> u64 {
+    pub(crate) const fn budget_bytes(&self) -> u64 {
         self.budget.host_bytes
     }
 
@@ -171,7 +171,7 @@ impl HostTier {
     /// uploading to VRAM if it needs a device-resident copy; the host
     /// entry stays in place to amortise repeated VRAM evictions.
     #[must_use]
-    pub fn lookup(&self, hash: &ContentHash, tick: u64) -> Option<Arc<HostEntry>> {
+    pub(crate) fn lookup(&self, hash: &ContentHash, tick: u64) -> Option<Arc<HostEntry>> {
         let entry = self.entries.get(hash)?.clone();
         entry.touch(tick);
         Some(entry)
@@ -192,7 +192,7 @@ impl HostTier {
     /// from a `D2H` copy and synchronises the stream before returning
     /// the populated entry.  The `gpu-validation` test fixtures call
     /// it directly and fill the buffer before any read.
-    pub fn alloc_pinned(
+    pub(crate) fn alloc_pinned(
         ctx: &Arc<cudarc::driver::CudaContext>,
         bytes: usize,
     ) -> Result<PinnedHostSlice<u8>, cudarc::driver::DriverError> {
@@ -220,7 +220,7 @@ impl HostTier {
     /// undercount is bounded by the number of in-flight lookups and
     /// resolves the moment those `Arc`s drop.  This matches the VRAM
     /// tier's contract; both tiers charge bytes to the index.
-    pub fn insert(&self, hash: ContentHash, entry: HostEntry, tick: u64) -> Arc<HostEntry> {
+    pub(crate) fn insert(&self, hash: ContentHash, entry: HostEntry, tick: u64) -> Arc<HostEntry> {
         entry.touch(tick);
         let bytes = entry.host_bytes();
         let arc = Arc::new(entry);
@@ -298,7 +298,7 @@ impl HostTier {
     /// # Errors
     /// Returns the underlying [`cudarc::driver::DriverError`] if
     /// allocation, copy, or sync fails.
-    pub fn build_from_device<D: cudarc::driver::DevicePtr<u8>>(
+    pub(crate) fn build_from_device<D: cudarc::driver::DevicePtr<u8>>(
         ctx: &Arc<cudarc::driver::CudaContext>,
         stream: &Arc<CudaStream>,
         device: &D,

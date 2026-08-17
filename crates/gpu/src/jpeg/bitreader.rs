@@ -10,7 +10,7 @@
 //! of every byte is its MSB, codewords pack left-to-right.
 
 /// Bit reader over an unstuffed JPEG entropy-coded stream.  MSB-first.
-pub struct BitReader<'a> {
+pub(crate) struct BitReader<'a> {
     src: &'a [u8],
     /// Byte position of the next byte to load into the buffer.
     byte_pos: usize,
@@ -22,7 +22,7 @@ pub struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    pub const fn new(src: &'a [u8]) -> Self {
+    pub(crate) const fn new(src: &'a [u8]) -> Self {
         Self {
             src,
             byte_pos: 0,
@@ -63,7 +63,7 @@ impl<'a> BitReader<'a> {
 
     /// Peek the next 16 bits MSB-first; pads with zeros if fewer remain.
     /// Returns `None` only if the buffer is completely empty.
-    pub fn peek_u16(&mut self) -> Option<u16> {
+    pub(crate) fn peek_u16(&mut self) -> Option<u16> {
         self.refill();
         if self.cap == 0 {
             return None;
@@ -84,7 +84,7 @@ impl<'a> BitReader<'a> {
     /// bits than the buffer holds would otherwise shift `u64` by ≥ 64,
     /// which is undefined behaviour in Rust.  Fail loudly is the right
     /// failure mode for an internal invariant violation.
-    pub fn consume(&mut self, n: usize) {
+    pub(crate) fn consume(&mut self, n: usize) {
         // Hard assert: the alternative is a release-mode shift by ≥ 64,
         // which produces an implementation-defined or undefined value.
         // Tail-call cost is one branch — negligible next to a Huffman
@@ -111,7 +111,7 @@ impl<'a> BitReader<'a> {
     /// cap at 16 bits per ISO/IEC 10918-1 § F.1.2; values above that
     /// would corrupt the right-shift arithmetic (returning truncated
     /// or undefined bits) and almost always indicate a buggy caller.
-    pub fn read_bits(&mut self, n: usize) -> Option<u32> {
+    pub(crate) fn read_bits(&mut self, n: usize) -> Option<u32> {
         if n == 0 {
             return Some(0);
         }
@@ -142,7 +142,7 @@ impl<'a> BitReader<'a> {
     /// Used when crossing an RST marker — the entropy stream is byte-aligned
     /// at every RST per JPEG § F.1.1.5, so we drop any in-flight bits.
     /// Clamps to the end of the input slice rather than panicking.
-    pub fn realign_to_byte_at(&mut self, byte_offset: usize) {
+    pub(crate) fn realign_to_byte_at(&mut self, byte_offset: usize) {
         self.buf = 0;
         self.cap = 0;
         self.byte_pos = byte_offset.min(self.src.len());

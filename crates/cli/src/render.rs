@@ -18,7 +18,7 @@ use crate::ram::SpillPolicy;
 
 /// Error returned by [`render_page`].
 #[derive(Debug)]
-pub enum RenderError {
+pub(crate) enum RenderError {
     /// An I/O error writing the output file.
     Io(std::io::Error),
     /// The page could not be rasterised.
@@ -84,7 +84,7 @@ impl From<EncodeError> for RenderError {
 ///
 /// JPEG and TIFF output are not yet implemented and return
 /// [`RenderError::UnsupportedFormatCombination`].
-pub fn render_page(
+pub(crate) fn render_page(
     session: &RasterSession,
     page_num: u32,
     total_pages: u32,
@@ -145,7 +145,7 @@ pub fn render_page(
 ///
 /// Shared by the PDF render path and the comic-archive path so colour-mode and
 /// format handling stay defined in exactly one place.
-pub fn encode_to_path(
+pub(crate) fn encode_to_path(
     out_path: &str,
     rgb: &Bitmap<Rgb8>,
     args: &Args,

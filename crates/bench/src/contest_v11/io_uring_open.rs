@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
-pub fn warm_xref_tails(paths: &[PathBuf]) {
+pub(crate) fn warm_xref_tails(paths: &[PathBuf]) {
     use rustix::fs::{Advice, fadvise};
     use std::num::NonZeroU64;
 

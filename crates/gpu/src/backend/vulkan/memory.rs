@@ -249,7 +249,7 @@ struct Inner {
 }
 
 /// Slab sub-allocator front-end.
-pub struct SlabAllocator {
+pub(super) struct SlabAllocator {
     inner: Arc<Inner>,
 }
 

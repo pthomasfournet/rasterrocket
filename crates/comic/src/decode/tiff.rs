@@ -16,7 +16,7 @@ use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on malformed/unsupported streams.
-pub fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let mut dec = Decoder::new(std::io::Cursor::new(bytes))
         .map_err(|e| DecodeError::Codec(format!("tiff: {e}")))?;
     if dec.more_images() {

@@ -8,7 +8,7 @@ use super::Archive;
 use crate::ComicError;
 
 /// A 7-Zip archive decoded eagerly into an in-memory name→bytes table.
-pub struct SevenzArchive {
+pub(super) struct SevenzArchive {
     entries: Vec<(String, Vec<u8>)>,
 }
 
@@ -17,7 +17,7 @@ impl SevenzArchive {
     ///
     /// # Errors
     /// [`ComicError::BadArchive`] if the archive cannot be opened/decoded.
-    pub fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
+    pub(super) fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
         let mut reader = ArchiveReader::new(Cursor::new(bytes), Password::empty())
             .map_err(|e| ComicError::BadArchive(format!("7z: {e}")))?;
         let mut entries = Vec::new();

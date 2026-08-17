@@ -10,24 +10,24 @@ use std::ptr;
 // ── CUDA driver API (libcuda.so) ──────────────────────────────────────────────
 
 /// Opaque CUDA stream handle (`CUstream` / `cudaStream_t` — same ABI on Linux).
-pub type CUstream = *mut c_void;
+pub(crate) type CUstream = *mut c_void;
 
 /// Opaque CUDA context handle (`CUcontext`).
-pub type CUcontext = *mut c_void;
+pub(crate) type CUcontext = *mut c_void;
 
 #[cfg_attr(
     not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
     allow(dead_code)
 )]
 unsafe extern "C" {
-    pub fn cuInit(flags: u32) -> i32;
-    pub fn cuDeviceGet(device: *mut i32, ordinal: i32) -> i32;
-    pub fn cuDevicePrimaryCtxRetain(ctx: *mut CUcontext, device: i32) -> i32;
-    pub fn cuDevicePrimaryCtxRelease(device: i32) -> i32;
-    pub fn cuCtxSetCurrent(ctx: CUcontext) -> i32;
-    pub fn cuStreamCreate(stream: *mut CUstream, flags: u32) -> i32;
-    pub fn cuStreamDestroy(stream: CUstream) -> i32;
-    pub fn cuStreamSynchronize(stream: CUstream) -> i32;
+    pub(crate) fn cuInit(flags: u32) -> i32;
+    pub(crate) fn cuDeviceGet(device: *mut i32, ordinal: i32) -> i32;
+    pub(crate) fn cuDevicePrimaryCtxRetain(ctx: *mut CUcontext, device: i32) -> i32;
+    pub(crate) fn cuDevicePrimaryCtxRelease(device: i32) -> i32;
+    pub(crate) fn cuCtxSetCurrent(ctx: CUcontext) -> i32;
+    pub(crate) fn cuStreamCreate(stream: *mut CUstream, flags: u32) -> i32;
+    pub(crate) fn cuStreamDestroy(stream: CUstream) -> i32;
+    pub(crate) fn cuStreamSynchronize(stream: CUstream) -> i32;
 }
 
 // ── CUDA runtime API (libcudart.so) ──────────────────────────────────────────
@@ -52,7 +52,7 @@ unsafe extern "C" {
     not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
     allow(dead_code)
 )]
-pub struct DeviceBuf {
+pub(crate) struct DeviceBuf {
     pub ptr: *mut c_void,
 }
 
@@ -67,7 +67,7 @@ impl DeviceBuf {
     ///
     /// Returns the raw `cudaMalloc` error code (non-zero) on failure.
     /// Callers map this to their own error type.
-    pub fn alloc(size: usize) -> Result<Self, i32> {
+    pub(crate) fn alloc(size: usize) -> Result<Self, i32> {
         let mut ptr: *mut c_void = ptr::null_mut();
         // SAFETY: cudaMalloc writes a valid device pointer (or null) to `ptr`;
         // `size` is the requested allocation size.
@@ -105,7 +105,7 @@ unsafe impl Send for DeviceBuf {}
     allow(dead_code)
 )]
 #[derive(Debug)]
-pub struct CudaInitError {
+pub(crate) struct CudaInitError {
     /// Name of the CUDA driver call that returned non-zero.
     ///
     /// Used by `npp_rotate` (`gpu-deskew` feature) to build a human-readable
@@ -121,7 +121,7 @@ pub struct CudaInitError {
     not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
     allow(dead_code)
 )]
-pub struct CudaInit {
+pub(crate) struct CudaInit {
     /// Retained primary CUDA context for `device`.
     pub cu_ctx: CUcontext,
     /// CUDA device ordinal (i32 handle as returned by `cuDeviceGet`).
@@ -159,7 +159,7 @@ pub struct CudaInit {
     not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
     allow(dead_code)
 )]
-pub fn init_primary_ctx_and_stream(device_ordinal: i32) -> Result<CudaInit, CudaInitError> {
+pub(crate) fn init_primary_ctx_and_stream(device_ordinal: i32) -> Result<CudaInit, CudaInitError> {
     // Step 1 — load the CUDA driver.  cuInit is idempotent: calling it on a
     // thread that already initialised CUDA is a no-op returning CUDA_SUCCESS.
     let r = unsafe { cuInit(0) };

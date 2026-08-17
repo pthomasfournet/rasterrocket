@@ -7,7 +7,7 @@ use crate::ComicError;
 
 /// A TAR archive held in memory. Entries are indexed eagerly on open because
 /// `tar::Archive` is a forward-only reader.
-pub struct TarArchive {
+pub(super) struct TarArchive {
     entries: Vec<(String, Vec<u8>)>,
 }
 
@@ -16,7 +16,7 @@ impl TarArchive {
     ///
     /// # Errors
     /// [`ComicError::BadArchive`] if the stream is not a valid tar.
-    pub fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
+    pub(super) fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
         let mut ar = tar::Archive::new(Cursor::new(bytes));
         let mut entries = Vec::new();
         let iter = ar
