@@ -205,9 +205,11 @@ pub(super) fn phase1_walk(
 /// `length_bits`.
 ///
 /// Same signature as `phase1_walk`; the only difference is the
-/// `state` reported on `HardLimit`. Stops other than `HardLimit`
-/// (`PrefixMiss` / `LengthBits`) are reported with the walker's pre-
-/// failure state, matching `phase1_walk`'s behaviour.
+/// `state` reported. Stops other than `HardLimit` (`PrefixMiss` /
+/// `LengthBits`) report the boundary snapshot if one was already
+/// captured, else the walker's pre-failure state — matching the
+/// kernel, which breaks out of its walk on error but still writes
+/// the captured snapshot.
 pub(super) fn phase1_walk_snapshot(
     bitstream: &PackedBitstream,
     tables: &[CanonicalCodebook],
@@ -238,8 +240,12 @@ pub(super) fn phase1_walk_snapshot(
                     snapshot = Some(state);
                 }
             }
-            StepOutcome::PrefixMiss => return (state, Phase1Stop::PrefixMiss),
-            StepOutcome::LengthBits => return (state, Phase1Stop::LengthBits),
+            StepOutcome::PrefixMiss => {
+                return (snapshot.unwrap_or(state), Phase1Stop::PrefixMiss);
+            }
+            StepOutcome::LengthBits => {
+                return (snapshot.unwrap_or(state), Phase1Stop::LengthBits);
+            }
         }
     }
 }
@@ -270,8 +276,10 @@ pub(super) fn phase1_walk_snapshot(
 /// The snapshot fires on the first symbol whose advance crosses
 /// `count_to`, capturing the post-advance state.
 ///
-/// On any decode error the walk stops early and returns the pre-advance
-/// state, matching the kernel's `break` behaviour.
+/// On any decode error the walk stops early. If a boundary snapshot
+/// was already captured it is returned (the kernel `break`s on error
+/// but still writes the captured snapshot); otherwise the error-point
+/// state is returned.
 ///
 /// Codebook slices must be per-component (length == number of active scan
 /// components), matching the layout produced by
@@ -297,11 +305,7 @@ pub(super) fn phase1_jpeg_walk_snapshot(
     let mut block_in_mcu = 0u32;
     let mut z_in_block = 0u32; // 0 = DC slot; 1..63 = AC; 64 = end-of-block
 
-    let mut snap_p = p;
-    let mut snap_n = n;
-    let mut snap_block = block_in_mcu;
-    let mut snap_z = z_in_block;
-    let mut snapshotted = false;
+    let mut snapshot: Option<SubsequenceState> = None;
 
     // max_iters bounds the loop safely: each symbol consumes ≥ 1 bit,
     // so (hard_limit - start_bit) + 1 iterations suffice even for
@@ -328,12 +332,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
 
         if lut_entry.num_bits == 0 {
             return (
-                SubsequenceState {
+                snapshot.unwrap_or(SubsequenceState {
                     p,
                     n,
                     c: block_in_mcu,
                     z: z_in_block,
-                },
+                }),
                 Phase1Stop::PrefixMiss,
             );
         }
@@ -343,12 +347,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
             let category = symbol;
             if category > 11 {
                 return (
-                    SubsequenceState {
+                    snapshot.unwrap_or(SubsequenceState {
                         p,
                         n,
                         c: block_in_mcu,
                         z: z_in_block,
-                    },
+                    }),
                     Phase1Stop::BadDcCategory,
                 );
             }
@@ -357,12 +361,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
             let size = symbol & 0x0F;
             if size > 10 {
                 return (
-                    SubsequenceState {
+                    snapshot.unwrap_or(SubsequenceState {
                         p,
                         n,
                         c: block_in_mcu,
                         z: z_in_block,
-                    },
+                    }),
                     Phase1Stop::BadAcSize,
                 );
             }
@@ -372,12 +376,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
         let advance = u32::from(lut_entry.num_bits) + value_bits;
         if p + advance > length_bits {
             return (
-                SubsequenceState {
+                snapshot.unwrap_or(SubsequenceState {
                     p,
                     n,
                     c: block_in_mcu,
                     z: z_in_block,
-                },
+                }),
                 Phase1Stop::LengthBits,
             );
         }
@@ -398,12 +402,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
                 let nz = z_in_block + 16; // ZRL
                 if nz > 64 {
                     return (
-                        SubsequenceState {
+                        snapshot.unwrap_or(SubsequenceState {
                             p,
                             n,
                             c: block_in_mcu,
                             z: z_in_block,
-                        },
+                        }),
                         Phase1Stop::AcOverflow,
                     );
                 }
@@ -413,12 +417,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
                 let nz = z_in_block + run + 1;
                 if nz > 64 {
                     return (
-                        SubsequenceState {
+                        snapshot.unwrap_or(SubsequenceState {
                             p,
                             n,
                             c: block_in_mcu,
                             z: z_in_block,
-                        },
+                        }),
                         Phase1Stop::AcOverflow,
                     );
                 }
@@ -436,31 +440,23 @@ pub(super) fn phase1_jpeg_walk_snapshot(
         // Snapshot: first symbol whose advance crosses count_to,
         // captured after the full z_in_block + block_in_mcu rotation —
         // matching the kernel's post-rotation state write.
-        if !snapshotted && p_before < count_to && p >= count_to {
-            snap_p = p;
-            snap_n = n;
-            snap_block = block_in_mcu;
-            snap_z = z_in_block;
-            snapshotted = true;
+        if snapshot.is_none() && p_before < count_to && p >= count_to {
+            snapshot = Some(SubsequenceState {
+                p,
+                n,
+                c: block_in_mcu,
+                z: z_in_block,
+            });
         }
     }
 
-    let snap = if snapshotted {
-        SubsequenceState {
-            p: snap_p,
-            n: snap_n,
-            c: snap_block,
-            z: snap_z,
-        }
-    } else {
-        SubsequenceState {
-            p,
-            n,
-            c: block_in_mcu,
-            z: z_in_block,
-        }
+    let terminal = SubsequenceState {
+        p,
+        n,
+        c: block_in_mcu,
+        z: z_in_block,
     };
-    (snap, Phase1Stop::HardLimit)
+    (snapshot.unwrap_or(terminal), Phase1Stop::HardLimit)
 }
 
 #[cfg(test)]
@@ -610,6 +606,79 @@ mod tests {
         assert_eq!(stop, Phase1Stop::HardLimit);
         assert_eq!(state.p, 12, "p should advance by 4 * (1 + 2) = 12");
         assert_eq!(state.n, 4, "4 symbols decoded");
+    }
+
+    #[test]
+    fn snapshot_survives_decode_error_after_boundary() {
+        // The GPU kernel breaks out of its walk on a decode error but
+        // still writes the already-captured boundary snapshot. The
+        // oracle must match: an error occurring *after* the snapshot
+        // fired reports the snapshot state, not the error-point state.
+        //
+        // 4 length-2 codewords = 8 bits of valid stream, truncated to
+        // length_bits = 7. count_to = 4: the second symbol (bits 2..4)
+        // crosses the boundary and fires the snapshot at p = 4. The
+        // third symbol decodes cleanly (4..6); the fourth would end at
+        // 8 > 7 — LengthBits, strictly past the snapshot point.
+        let full = book4_stream(&[0x00; 4]);
+        let stream = PackedBitstream {
+            words: full.words,
+            length_bits: 7,
+        };
+        let book = [book4_codebook()];
+        let (state, stop) = phase1_walk_snapshot(&stream, &book, 0, 7, 4);
+        assert_eq!(stop, Phase1Stop::LengthBits);
+        assert_eq!(
+            state,
+            SubsequenceState {
+                p: 4,
+                n: 2,
+                c: 0,
+                z: 2,
+            },
+            "boundary snapshot must survive the post-snapshot decode error"
+        );
+    }
+
+    #[test]
+    fn jpeg_snapshot_survives_decode_error_after_boundary() {
+        // JPEG-framed counterpart of the test above. DC and AC books
+        // each hold one length-1 code "0" (DC category 0; AC symbol
+        // 0x00 = EOB), so an all-zero stream decodes 1-bit DC / 1-bit
+        // EOB pairs — 2 bits per block. Bit 6 is set to 1, which
+        // matches no codeword: PrefixMiss at p = 6, strictly past the
+        // snapshot the boundary crossing at p = 4 captured.
+        let dc_table = JpegHuffmanTable {
+            class: DhtClass::Dc,
+            table_id: 0,
+            num_codes: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: vec![0x00],
+        };
+        let ac_table = JpegHuffmanTable {
+            class: DhtClass::Ac,
+            table_id: 0,
+            num_codes: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: vec![0x00],
+        };
+        let dc_book = CanonicalCodebook::build(&dc_table).unwrap();
+        let ac_book = CanonicalCodebook::build(&ac_table).unwrap();
+        let stream = PackedBitstream {
+            words: vec![0x0200_0000],
+            length_bits: 7,
+        };
+        let (state, stop) =
+            phase1_jpeg_walk_snapshot(&stream, &[&dc_book], &[&ac_book], &[0], 1, 0, 7, 4);
+        assert_eq!(stop, Phase1Stop::PrefixMiss);
+        assert_eq!(
+            state,
+            SubsequenceState {
+                p: 4,
+                n: 4,
+                c: 0,
+                z: 0,
+            },
+            "boundary snapshot must survive the post-snapshot decode error"
+        );
     }
 
     #[test]
