@@ -1510,7 +1510,7 @@ mod tests {
     fn jpeg_phase4_cuda_matches_oracle_on_ycbcr_444() {
         use crate::jpeg_decoder::decode_scan_symbols;
         static COLOUR_32X32_444: &[u8] =
-            include_bytes!("../../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
         let Some(b) = try_cuda() else {
             eprintln!("skipping: no CUDA device");
             return;
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn jpeg_phase4_cuda_ycbcr_stable_across_subseq_sizes() {
         static COLOUR_32X32_444: &[u8] =
-            include_bytes!("../../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
         let Some(b) = try_cuda() else {
             eprintln!("skipping: no CUDA device");
             return;
