@@ -117,18 +117,20 @@ pub(crate) mod decode_queue;
 pub mod deskew;
 pub mod gcv;
 pub(crate) mod gpu_init;
+mod gray;
 pub mod page;
 mod render;
 
 use std::path::Path;
 
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
+pub use gray::rgb_to_gray;
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
 pub use pdf_interp::renderer::PageDiagnostics;
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
     RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
-    render_page_rgb, render_page_rgb_hinted, rgb_to_gray,
+    render_page_rgb, render_page_rgb_hinted,
 };
 
 /// Session-level API for explicit control over PDF opening and per-page rendering.

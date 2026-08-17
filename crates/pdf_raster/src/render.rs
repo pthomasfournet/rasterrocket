@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use color::{Gray8, Rgb8};
+use color::Rgb8;
 use raster::Bitmap;
 
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"))]
 use crate::gpu_init;
+use crate::gray::rgb_to_gray;
 use crate::{BackendPolicy, PageSet, RasterOptions, RenderedPage, SessionConfig};
 
 // ── Safety limit ──────────────────────────────────────────────────────────────
@@ -1316,30 +1317,6 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
         effective_dpi,
         diagnostics,
     ))
-}
-
-// ── Pixel helpers ─────────────────────────────────────────────────────────────
-
-/// Convert an RGB bitmap to grayscale using BT.709 luminance coefficients.
-#[must_use]
-pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
-    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
-    let w = src.width as usize;
-    for y in 0..src.height {
-        let src_row = &src.row_bytes(y)[..w * 3];
-        let dst_row = &mut dst.row_bytes_mut(y)[..w];
-        for (dst_px, rgb) in dst_row.iter_mut().zip(src_row.chunks_exact(3)) {
-            let (r, g, b) = (u32::from(rgb[0]), u32::from(rgb[1]), u32::from(rgb[2]));
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "sum ≤ 255 by BT.709 coefficient identity"
-            )]
-            {
-                *dst_px = ((2126 * r + 7152 * g + 722 * b + 5000) / 10000) as u8;
-            }
-        }
-    }
-    dst
 }
 
 #[cfg(test)]
