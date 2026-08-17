@@ -239,19 +239,89 @@ fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 
 // ── PNG predictor ─────────────────────────────────────────────────────────────
 
+/// Read one predictor parameter, clamping malformed low values to the
+/// spec default and rejecting values above `cap` loudly — a legal value
+/// past the DoS cap means the parameters (and therefore the geometry the
+/// de-prediction would apply) cannot be honoured, so proceeding would
+/// silently scramble every row.
+fn predictor_param(
+    params: &dyn DictLookup,
+    key: &'static str,
+    default: i64,
+    cap: usize,
+) -> Result<usize, String> {
+    let v = params.get_i64(key.as_bytes()).unwrap_or(default).max(1);
+    let v = usize::try_from(v).expect("max(1) makes the value positive");
+    if v > cap {
+        return Err(format!(
+            "predictor parameter /{key} = {v} exceeds the supported cap of {cap}"
+        ));
+    }
+    Ok(v)
+}
+
+/// Undo TIFF predictor 2 (componentwise horizontal differencing) in place.
+///
+/// Each row stores its first pixel raw and every later component as a
+/// delta against the same component one pixel to the left; the undo is a
+/// componentwise running sum per row. Rows are `ceil(cols·colors·bits/8)`
+/// bytes with no per-row tag byte (unlike the PNG predictors).
+///
+/// Only 8-bit components are undone — the packed sub-byte and 16-bit
+/// variants are vanishingly rare in PDF streams; those pass through
+/// unchanged with a warning rather than being scrambled by a wrong-width
+/// delta pass. Trailing bytes that do not form a whole row also pass
+/// through unchanged.
+fn apply_tiff_predictor(
+    mut data: Vec<u8>,
+    colors: usize,
+    bits: usize,
+    cols: usize,
+) -> Result<Vec<u8>, String> {
+    if bits != 8 {
+        log::warn!(
+            "TIFF predictor 2 with BitsPerComponent={bits} is not undone; \
+             passing data through unchanged"
+        );
+        return Ok(data);
+    }
+    let stride = cols
+        .checked_mul(colors)
+        .ok_or_else(|| "TIFF predictor: stride overflow".to_string())?;
+    let n_rows = data.len() / stride;
+    if !data.len().is_multiple_of(stride) {
+        log::warn!(
+            "TIFF predictor: {} trailing bytes do not form a full {stride}-byte row; \
+             passing them through unchanged",
+            data.len() % stride,
+        );
+    }
+    for row in data.chunks_exact_mut(stride).take(n_rows) {
+        for i in colors..stride {
+            row[i] = row[i].wrapping_add(row[i - colors]);
+        }
+    }
+    Ok(data)
+}
+
 fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>, String> {
     let predictor = params.get_i64(b"Predictor").unwrap_or(1);
-    if predictor < 10 {
-        // Predictor 1 = no prediction; 2 = TIFF (we don't support TIFF predictor here).
+    if predictor < 2 {
+        // Predictor 1 = no prediction.
         return Ok(data);
     }
 
-    // PNG predictors (10–15).
-    // Sanity-cap each parameter to defeat malformed PDFs that would otherwise
-    // request gigabyte-scale allocations.
-    let colors = (params.get_i64(b"Colors").unwrap_or(1).max(1) as usize).min(32);
-    let bits = (params.get_i64(b"BitsPerComponent").unwrap_or(8).max(1) as usize).min(32);
-    let cols = (params.get_i64(b"Columns").unwrap_or(1).max(1) as usize).min(1_000_000);
+    // Parameter caps defeat malformed PDFs that would otherwise request
+    // gigabyte-scale allocations; /Colors 32 is also the DeviceN
+    // component ceiling (ISO 32000-1 § 8.6.6.5).
+    let colors = predictor_param(params, "Colors", 1, 32)?;
+    let bits = predictor_param(params, "BitsPerComponent", 8, 32)?;
+    let cols = predictor_param(params, "Columns", 1, 1_000_000)?;
+
+    if predictor < 10 {
+        // Predictor 2 = TIFF componentwise horizontal differencing.
+        return apply_tiff_predictor(data, colors, bits, cols);
+    }
 
     let stride = cols
         .checked_mul(colors)
@@ -262,6 +332,13 @@ fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>
 
     // Tolerate truncated data — process as many full rows as we have.
     let n_rows = data.len() / row_len;
+    if !data.len().is_multiple_of(row_len) {
+        log::warn!(
+            "PNG predictor: {} trailing bytes do not form a full {row_len}-byte row; \
+             emitting {n_rows} whole rows",
+            data.len() % row_len,
+        );
+    }
     let total = n_rows
         .checked_mul(stride)
         .ok_or_else(|| "PNG predictor: output size overflow".to_string())?;
@@ -307,6 +384,12 @@ fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>
 /// takes the up neighbour (`paeth(0, b, 0) = b`).
 fn apply_png_filter(filter: u8, raw: &[u8], prev: Option<&[u8]>, dst: &mut [u8], bpp: usize) {
     let stride = dst.len();
+    debug_assert!(
+        raw.len() >= stride && prev.is_none_or(|p| p.len() >= stride),
+        "apply_png_filter: raw ({}) and prev ({:?}) must cover the {stride}-byte row",
+        raw.len(),
+        prev.map(<[u8]>::len),
+    );
     let lead = bpp.min(stride);
     match (filter, prev) {
         (0, _) | (2, None) => dst.copy_from_slice(&raw[..stride]),
@@ -641,6 +724,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Minimal `DictLookup` for predictor-parameter tests.
+    struct Params(Vec<(&'static [u8], i64)>);
+
+    impl DictLookup for Params {
+        fn get_i64(&self, key: &[u8]) -> Option<i64> {
+            self.0.iter().find(|(k, _)| *k == key).map(|&(_, v)| v)
+        }
+    }
+
+    #[test]
+    fn tiff_predictor_2_undoes_horizontal_differencing() {
+        // 2 rows × 3 pixels × 2 components, 8-bit. Rows are differenced
+        // per component (first pixel raw, then deltas); undo must
+        // reconstruct the original componentwise running sums without
+        // bleeding across rows.
+        let params = Params(vec![
+            (b"Predictor", 2),
+            (b"Colors", 2),
+            (b"BitsPerComponent", 8),
+            (b"Columns", 3),
+        ]);
+        let encoded = vec![
+            10, 20, 5, 250, 3, 4, // row 0: deltas (250 exercises wrapping)
+            7, 1, 0, 0, 1, 255, // row 1
+        ];
+        let decoded = apply_png_predictor(encoded, &params).unwrap();
+        assert_eq!(
+            decoded,
+            vec![
+                10, 20, // first pixel raw
+                15, 14, // 10+5, 20+250 (wraps: 270 % 256)
+                18, 18, // 15+3, 14+4
+                7, 1, // row 1 restarts the running sums
+                7, 1, // 7+0, 1+0
+                8, 0, // 7+1, 1+255 (wraps)
+            ],
+        );
+    }
+
+    #[test]
+    fn tiff_predictor_2_sub_byte_bits_passes_through() {
+        // Sub-byte and 16-bit component depths are not undone (rare in
+        // the wild); the data must pass through unchanged rather than be
+        // scrambled by a wrong-width delta pass.
+        let params = Params(vec![
+            (b"Predictor", 2),
+            (b"Colors", 1),
+            (b"BitsPerComponent", 4),
+            (b"Columns", 8),
+        ]);
+        let data = vec![0x12, 0x34, 0x56, 0x78];
+        let out = apply_png_predictor(data.clone(), &params).unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn png_predictor_rejects_out_of_cap_colors() {
+        let params = Params(vec![(b"Predictor", 15), (b"Colors", 33)]);
+        let err = apply_png_predictor(vec![0; 64], &params).unwrap_err();
+        assert!(
+            err.contains("Colors"),
+            "error must name the parameter: {err}"
+        );
+    }
+
+    #[test]
+    fn png_predictor_rejects_out_of_cap_columns() {
+        let params = Params(vec![(b"Predictor", 15), (b"Columns", 2_000_000)]);
+        let err = apply_png_predictor(vec![0; 64], &params).unwrap_err();
+        assert!(
+            err.contains("Columns"),
+            "error must name the parameter: {err}"
+        );
+    }
+
+    #[test]
+    fn png_predictor_rejects_out_of_cap_bits() {
+        let params = Params(vec![(b"Predictor", 15), (b"BitsPerComponent", 64)]);
+        let err = apply_png_predictor(vec![0; 64], &params).unwrap_err();
+        assert!(
+            err.contains("BitsPerComponent"),
+            "error must name the parameter: {err}"
+        );
+    }
+
+    #[test]
+    fn png_predictor_tolerates_truncated_rows() {
+        // 4-byte stride + 1 filter byte per row; 7 bytes = 1 full row +
+        // 2 trailing bytes. The floor-to-whole-rows contract stands (the
+        // truncation is logged, not fatal).
+        let params = Params(vec![(b"Predictor", 15), (b"Columns", 4)]);
+        let data = vec![0u8, 1, 2, 3, 4, 0, 9];
+        let out = apply_png_predictor(data, &params).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4]);
     }
 
     #[test]
