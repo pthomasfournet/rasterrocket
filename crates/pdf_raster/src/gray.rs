@@ -47,10 +47,17 @@ pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
 /// without static AVX2 — where the autovectoriser is limited to SSE2
 /// and the runtime-detected SSE4.1 kernel wins.
 fn convert_row(src_row: &[u8], dst_row: &mut [u8]) {
+    debug_assert_eq!(
+        src_row.len(),
+        dst_row.len() * 3,
+        "convert_row: src must hold exactly 3 bytes per dst pixel",
+    );
+    // This cfg must mirror the compile gate on `convert_row_sse41`.
     #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-    if std::arch::is_x86_feature_detected!("sse4.1") {
-        // SAFETY: guarded by the sse4.1 runtime check; sse4.1 implies
-        // ssse3 on every shipped x86-64 CPU.
+    if std::arch::is_x86_feature_detected!("ssse3") && std::arch::is_x86_feature_detected!("sse4.1")
+    {
+        // SAFETY: both target features the kernel declares are
+        // runtime-confirmed above.
         #[expect(unsafe_code, reason = "SIMD tier behind runtime feature detection")]
         unsafe {
             convert_row_sse41(src_row, dst_row);
@@ -86,16 +93,12 @@ fn convert_row_scalar(src_row: &[u8], dst_row: &mut [u8]) {
 ///
 /// # Safety
 ///
-/// Caller must ensure the CPU supports SSE4.1 (and therefore SSSE3).
-#[cfg(target_arch = "x86_64")]
-#[cfg_attr(
-    all(target_feature = "avx2", not(test)),
-    expect(
-        dead_code,
-        reason = "dispatch prefers the autovectorised scalar on static-AVX2 builds; \
-                  the kernel serves baseline builds and the parity tests"
-    )
-)]
+/// Caller must ensure the CPU supports SSSE3 and SSE4.1.
+// Compiled only where the dispatch above can reach it (plus test builds,
+// so the parity tests always exercise it): on static-AVX2 builds the
+// autovectorised scalar is faster and the kernel would be dead weight.
+// This cfg must mirror the dispatch gate in `convert_row`.
+#[cfg(all(target_arch = "x86_64", any(not(target_feature = "avx2"), test)))]
 #[expect(
     unsafe_code,
     reason = "x86 intrinsics for the RGB deinterleave + madd luma kernel"
@@ -116,36 +119,32 @@ unsafe fn convert_row_sse41(src_row: &[u8], dst_row: &mut [u8]) {
         _mm_srli_epi32, _mm_storeu_si128, _mm_unpackhi_epi8, _mm_unpacklo_epi8,
     };
 
-    /// Build a `pshufb` mask selecting `idx` (0x80 = zero) per output byte.
-    const fn mask(idx: [i16; 16]) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        let mut i = 0;
-        while i < 16 {
+    /// `pshufb` masks deinterleaving channel `c` from a 48-byte block:
+    /// output byte `j` (pixel `j`'s channel) lives at source byte
+    /// `3·j + c`, which falls in load `(3·j + c) / 16` at local offset
+    /// `(3·j + c) % 16`; every other mask entry is the 0x80 zero
+    /// sentinel so the three shuffles OR together.
+    const fn channel_masks(c: usize) -> [[u8; 16]; 3] {
+        assert!(c < 3, "channel index out of range");
+        let mut out = [[0x80u8; 16]; 3];
+        let mut j = 0;
+        while j < 16 {
+            let src = 3 * j + c;
             #[expect(
                 clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "entries are 0..=15 or the 0x80 zero sentinel (-1)"
+                reason = "src % 16 < 16 by construction"
             )]
             {
-                out[i] = if idx[i] < 0 { 0x80 } else { idx[i] as u8 };
+                out[src / 16][j] = (src % 16) as u8;
             }
-            i += 1;
+            j += 1;
         }
         out
     }
 
-    // Channel c of pixel p lives at source byte 3·p + c. Per 48-byte
-    // block (three 16-byte loads v0/v1/v2), each channel's 16 bytes are
-    // assembled from three shuffles OR'd together.
-    const R0: [u8; 16] = mask([0, 3, 6, 9, 12, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]);
-    const R1: [u8; 16] = mask([-1, -1, -1, -1, -1, -1, 2, 5, 8, 11, 14, -1, -1, -1, -1, -1]);
-    const R2: [u8; 16] = mask([-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 4, 7, 10, 13]);
-    const G0: [u8; 16] = mask([1, 4, 7, 10, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]);
-    const G1: [u8; 16] = mask([-1, -1, -1, -1, -1, 0, 3, 6, 9, 12, 15, -1, -1, -1, -1, -1]);
-    const G2: [u8; 16] = mask([-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 5, 8, 11, 14]);
-    const B0: [u8; 16] = mask([2, 5, 8, 11, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]);
-    const B1: [u8; 16] = mask([-1, -1, -1, -1, -1, 1, 4, 7, 10, 13, -1, -1, -1, -1, -1, -1]);
-    const B2: [u8; 16] = mask([-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 3, 6, 9, 12, 15]);
+    const R: [[u8; 16]; 3] = channel_masks(0);
+    const G: [[u8; 16]; 3] = channel_masks(1);
+    const B: [[u8; 16]; 3] = channel_masks(2);
 
     #[inline]
     fn m128(bytes: &[u8; 16]) -> __m128i {
@@ -183,24 +182,24 @@ unsafe fn convert_row_sse41(src_row: &[u8], dst_row: &mut [u8]) {
 
         let r = _mm_or_si128(
             _mm_or_si128(
-                _mm_shuffle_epi8(v0, m128(&R0)),
-                _mm_shuffle_epi8(v1, m128(&R1)),
+                _mm_shuffle_epi8(v0, m128(&R[0])),
+                _mm_shuffle_epi8(v1, m128(&R[1])),
             ),
-            _mm_shuffle_epi8(v2, m128(&R2)),
+            _mm_shuffle_epi8(v2, m128(&R[2])),
         );
         let g = _mm_or_si128(
             _mm_or_si128(
-                _mm_shuffle_epi8(v0, m128(&G0)),
-                _mm_shuffle_epi8(v1, m128(&G1)),
+                _mm_shuffle_epi8(v0, m128(&G[0])),
+                _mm_shuffle_epi8(v1, m128(&G[1])),
             ),
-            _mm_shuffle_epi8(v2, m128(&G2)),
+            _mm_shuffle_epi8(v2, m128(&G[2])),
         );
         let b = _mm_or_si128(
             _mm_or_si128(
-                _mm_shuffle_epi8(v0, m128(&B0)),
-                _mm_shuffle_epi8(v1, m128(&B1)),
+                _mm_shuffle_epi8(v0, m128(&B[0])),
+                _mm_shuffle_epi8(v1, m128(&B[1])),
             ),
-            _mm_shuffle_epi8(v2, m128(&B2)),
+            _mm_shuffle_epi8(v2, m128(&B[2])),
         );
 
         // Interleave to [r, g] / [b, 1] byte pairs, then zero-extend to

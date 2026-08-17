@@ -93,6 +93,26 @@ fn coverage_chunk_params(x0: usize, n: usize, chunk_bytes: usize) -> (usize, usi
     (byte_x0, n_chunks)
 }
 
+/// Interleave staged even/odd coverage accumulators into `shape`:
+/// `shape[out_base + 2k] = hi[k]`, `shape[out_base + 2k + 1] = lo[k]`,
+/// skipping any pixel at or past `shape.len()` — the final chunk of a
+/// span whose last row byte is a half byte. Shared by the SIMD tiers'
+/// span-end paths so the guard logic has one home.
+#[cfg(target_arch = "x86_64")]
+fn interleave_staged_tail(hi: &[u8], lo: &[u8], out_base: usize, shape: &mut [u8]) {
+    let n = shape.len();
+    for (k, (&h, &l)) in hi.iter().zip(lo).enumerate() {
+        let even_px = out_base + k * 2;
+        let odd_px = even_px + 1;
+        if even_px < n {
+            shape[even_px] = h;
+        }
+        if odd_px < n {
+            shape[odd_px] = l;
+        }
+    }
+}
+
 // ── aarch64 NEON tier ─────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
@@ -146,7 +166,7 @@ unsafe fn aa_coverage_span_neon(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
                     row.len(),
                 );
                 let v = vld1q_u8(row[byte_off..].as_ptr());
-                // High nibble → bits 3–0 via arithmetic right-shift, then mask.
+                // High nibble → bits 3–0 via logical right-shift, then mask.
                 let hi = vandq_u8(vshrq_n_u8(v, 4), mask_lo);
                 // Low nibble → bits 3–0 directly.
                 let lo = vandq_u8(v, mask_lo);
@@ -375,16 +395,7 @@ unsafe fn aa_coverage_span_avx2(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
                 _mm256_storeu_si256(hi_buf.as_mut_ptr().cast(), acc_hi);
                 _mm256_storeu_si256(lo_buf.as_mut_ptr().cast(), acc_lo);
             }
-            for k in 0..32 {
-                let even_px = out_base + k * 2;
-                let odd_px = even_px + 1;
-                if even_px < n {
-                    shape[even_px] = hi_buf[k];
-                }
-                if odd_px < n {
-                    shape[odd_px] = lo_buf[k];
-                }
-            }
+            interleave_staged_tail(&hi_buf, &lo_buf, out_base, shape);
         }
     }
 
@@ -449,7 +460,7 @@ unsafe fn aa_coverage_span_avx512(rows: [&[u8]; 4], x0: usize, shape: &mut [u8])
             // SAFETY: byte_off + 64 ≤ row.len() asserted above.
             unsafe {
                 let v = _mm512_loadu_si512(row[byte_off..].as_ptr().cast());
-                // High nibble: arithmetic right-shift by 4, then mask off upper bits.
+                // High nibble: logical right-shift by 4, then mask off upper bits.
                 let hi = _mm512_and_si512(_mm512_srli_epi16(v, 4), mask_lo);
                 // Low nibble: mask directly.
                 let lo = _mm512_and_si512(v, mask_lo);
@@ -485,16 +496,7 @@ unsafe fn aa_coverage_span_avx512(rows: [&[u8]; 4], x0: usize, shape: &mut [u8])
                 _mm512_storeu_si512(hi_buf.as_mut_ptr().cast(), acc_hi);
                 _mm512_storeu_si512(lo_buf.as_mut_ptr().cast(), acc_lo);
             }
-            for k in 0..64 {
-                let even_px = out_base + k * 2;
-                let odd_px = even_px + 1;
-                if even_px < n {
-                    shape[even_px] = hi_buf[k];
-                }
-                if odd_px < n {
-                    shape[odd_px] = lo_buf[k];
-                }
-            }
+            interleave_staged_tail(&hi_buf, &lo_buf, out_base, shape);
         }
     }
 
@@ -795,8 +797,8 @@ mod tests {
             let mut got = vec![0u8; TIER_TEST_N];
             // SAFETY: both features confirmed present above.
             unsafe {
-                aa_coverage_span_avx512([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
-            };
+                aa_coverage_span_avx512([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got);
+            }
 
             assert_eq!(
                 got, expected,
@@ -820,8 +822,8 @@ mod tests {
             let mut got = vec![0u8; TIER_TEST_N];
             // SAFETY: avx2 confirmed present above.
             unsafe {
-                aa_coverage_span_avx2([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
-            };
+                aa_coverage_span_avx2([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got);
+            }
 
             assert_eq!(got, expected, "AVX2 coverage mismatch vs scalar at x0={x0}");
         }
