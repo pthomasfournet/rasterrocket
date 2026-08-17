@@ -1,7 +1,7 @@
 // Phase 5: zigzag inverse + dequant + 8×8 IDCT (LLM fixed-point) + JFIF YCbCr→RGB.
 //
-// Attribution: 1-D IDCT structure adapted from CESNET/GPUJPEG's gpujpeg_idct.cu
-// (BSD-2-Clause, Copyright © 2011 CESNET z.s.p.o. and contributors).
+// The 1-D IDCT is the integer Loeffler/Ligtenberg/Moschytz (1989) 8-point
+// structure with 13-bit fixed-point constants and 64-bit intermediates.
 // YCbCr→RGB uses T.871/JFIF full-range equations (round-half-away-from-zero).
 //
 // Dispatch: one block (8 × 8 × 3 threads) per 8×8 JPEG block.
@@ -25,61 +25,95 @@ __constant__ int zigzag_to_natural[64] = {
 };
 
 // ── LLM fixed-point constants (scaled by 2^13) ───────────────────────────────
-#define FRAC_BITS 13
-#define C1    11363   // cos(pi/16)  * sqrt(2) * 8192
-#define C3     9633   // cos(3pi/16) * sqrt(2) * 8192
-#define C6     4433   // cos(6pi/16) * sqrt(2) * 8192
-#define SQRT2 11585   // sqrt(2)                * 8192
+// FIX_a_bbbbbbbbb = round(a.bbbbbbbbb * 2^13), a.bbbbbbbbb = cos-derived
+// factors of the Loeffler/Ligtenberg/Moschytz 8-point IDCT.
+#define CONST_BITS 13
+#define PASS1_BITS 2
+#define FIX_0_298631336  2446
+#define FIX_0_390180644  3196
+#define FIX_0_541196100  4433
+#define FIX_0_765366865  6270
+#define FIX_0_899976223  7373
+#define FIX_1_175875602  9633
+#define FIX_1_501321110 12299
+#define FIX_1_847759065 15137
+#define FIX_1_961570560 16069
+#define FIX_2_053119869 16819
+#define FIX_2_562915447 20995
+#define FIX_3_072711026 25172
 
-// Round-half-away-from-zero right shift (T.871).
-__device__ __forceinline__ int rshift(int x, int s) {
-    int bias = 1 << (s - 1);
-    return (x + (x >= 0 ? bias : -bias)) >> s;
+// Round-half-up right shift of a 64-bit intermediate, narrowed to int32.
+// 64-bit: a 13-bit constant times a dequantised coefficient (up to
+// 2047 * 255 = 522 985 for DC) reaches ~1.3e10, far past i32::MAX.
+__device__ __forceinline__ int descale(long long x, int s) {
+    return (int)((x + (1LL << (s - 1))) >> s);
 }
 
-// Apply one 1-D 8-point LLM IDCT to v[0..8] in place.
-__device__ void idct_1d(int v[8]) {
-    int t0 = v[0]; int t1 = v[4];
-    int t2 = v[2]; int t3 = v[6];
-    int t4 = v[1]; int t5 = v[5];
-    int t6 = v[3]; int t7 = v[7];
+// One 1-D 8-point LLM IDCT on v[0..8] in place, descaled by `shift`.
+// Row pass: shift = CONST_BITS - PASS1_BITS, leaving outputs scaled up by
+// 2^PASS1_BITS. Column pass: shift = CONST_BITS + PASS1_BITS + 3, which
+// removes the pass-1 scale and the 8× gain of the two passes, so a
+// DC-only block of dequantised value D yields D/8 in every slot.
+__device__ void idct_1d(int v[8], int shift) {
+    // Even part: indices 0, 4, 2, 6.
+    long long z2 = v[2];
+    long long z3 = v[6];
+    long long z1 = (z2 + z3) * FIX_0_541196100;
+    long long tmp2 = z1 - z3 * FIX_1_847759065;
+    long long tmp3 = z1 + z2 * FIX_0_765366865;
+    long long tmp0 = (long long)(v[0] + v[4]) << CONST_BITS;
+    long long tmp1 = (long long)(v[0] - v[4]) << CONST_BITS;
+    long long t10 = tmp0 + tmp3; long long t13 = tmp0 - tmp3;
+    long long t11 = tmp1 + tmp2; long long t12 = tmp1 - tmp2;
 
-    // Even path
-    int p0 = t0 + t1;
-    int p1 = t0 - t1;
-    int p2 = rshift(C6 * t2 - SQRT2 * t3, FRAC_BITS);
-    int p3 = rshift(C6 * t3 + SQRT2 * t2, FRAC_BITS);
+    // Odd part: indices 7, 5, 3, 1 feed the four rotators.
+    long long w0 = v[7];
+    long long w1 = v[5];
+    long long w2 = v[3];
+    long long w3 = v[1];
+    long long za = w0 + w3;
+    long long zb = w1 + w2;
+    long long zc = w0 + w2;
+    long long zd = w1 + w3;
+    long long z5 = (zc + zd) * FIX_1_175875602;
+    w0 *= FIX_0_298631336;
+    w1 *= FIX_2_053119869;
+    w2 *= FIX_3_072711026;
+    w3 *= FIX_1_501321110;
+    za *= -FIX_0_899976223;
+    zb *= -FIX_2_562915447;
+    zc = z5 - zc * FIX_1_961570560;
+    zd = z5 - zd * FIX_0_390180644;
+    w0 += za + zc;
+    w1 += zb + zd;
+    w2 += zb + zc;
+    w3 += za + zd;
 
-    int e0 = p0 + p3; int e1 = p1 + p2;
-    int e2 = p1 - p2; int e3 = p0 - p3;
-
-    // Odd path
-    int q0 = rshift(C1 * t4 + C3 * t6, FRAC_BITS);
-    int q1 = rshift(C3 * t4 - C1 * t6, FRAC_BITS);
-    int q2 = rshift(C1 * t5 + C3 * t7, FRAC_BITS);
-    int q3 = rshift(C3 * t5 - C1 * t7, FRAC_BITS);
-
-    int o0 = q0 + q2; int o1 = q0 - q2;
-    int o2 = rshift(SQRT2 * (q1 - q3), FRAC_BITS);
-    int o3 = q1 + q3;
-
-    v[0] = e0 + o3; v[1] = e1 + o2;
-    v[2] = e2 + o1; v[3] = e3 + o0;
-    v[4] = e3 - o0; v[5] = e2 - o1;
-    v[6] = e1 - o2; v[7] = e0 - o3;
+    v[0] = descale(t10 + w3, shift);
+    v[7] = descale(t10 - w3, shift);
+    v[1] = descale(t11 + w2, shift);
+    v[6] = descale(t11 - w2, shift);
+    v[2] = descale(t12 + w1, shift);
+    v[5] = descale(t12 - w1, shift);
+    v[3] = descale(t13 + w0, shift);
+    v[4] = descale(t13 - w0, shift);
 }
 
 __device__ __forceinline__ int clamp_byte(int x) {
     return max(0, min(255, x));
 }
 
-// T.871 full-range YCbCr → RGB.
+// T.871 full-range YCbCr → RGB, 14-bit fixed point.
+// round(c * 2^14): 1.402 → 22970, 0.714136 → 11700, 0.344136 → 5638,
+// 1.772 → 29032. The +8192 bias makes the >> 14 round half up; the
+// result is clamped to [0, 255], so half-up equals half-away-from-zero.
 __device__ __forceinline__ void ycbcr_to_rgb(int Y, int Cb, int Cr,
                                               int *r, int *g, int *b) {
     int cb = Cb - 128; int cr = Cr - 128;
-    *r = clamp_byte(rshift((Y << 8) + 359 * cr,            8));
-    *g = clamp_byte(rshift((Y << 8) - 88 * cb - 183 * cr,  8));
-    *b = clamp_byte(rshift((Y << 8) + 454 * cb,             8));
+    int y0 = (Y << 14) + 8192;
+    *r = clamp_byte((y0 + 22970 * cr) >> 14);
+    *g = clamp_byte((y0 - 11700 * cr - 5638 * cb) >> 14);
+    *b = clamp_byte((y0 + 29032 * cb) >> 14);
 }
 
 __device__ __forceinline__ uint32_t pack_rgba8(int r, int g, int b) {
@@ -92,7 +126,7 @@ __shared__ int scratch[3][8][8];
 
 extern "C" __global__ void idct_dequant_colour(
     const int * __restrict__ coefficients,   // zigzag-order DCT coefficients
-    const int * __restrict__ qtables,        // quantisation tables, natural order
+    const int * __restrict__ qtables,        // quantisation tables, zigzag order (verbatim DQT)
     const int * __restrict__ dc_values,      // absolute DC per block
           uint32_t * __restrict__ pixels_rgba, // RGBA8 output, row-major
     uint32_t width,
@@ -123,11 +157,13 @@ extern "C" __global__ void idct_dequant_colour(
     const uint32_t coef_base = block_idx * 64u;
 
     // Step 1: dequantise + inverse-zigzag into shared scratch.
+    // Coefficients and qtables are both in zigzag order, so the quantiser
+    // for zigzag slot zz_pos is at the same offset — no permutation.
     const uint32_t zz_pos  = row * 8u + col;
     int coef = coefficients[coef_base + zz_pos];
     // DC override: use pre-resolved absolute DC from the host.
     if (zz_pos == 0u) coef = dc_values[block_idx];
-    const int qval     = qtables[qt_base + (uint32_t)zigzag_to_natural[zz_pos]];
+    const int qval     = qtables[qt_base + zz_pos];
     const int dequanted = coef * qval;
 
     const uint32_t nat_pos = (uint32_t)zigzag_to_natural[zz_pos];
@@ -135,24 +171,24 @@ extern "C" __global__ void idct_dequant_colour(
 
     __syncthreads();
 
-    // Step 2: row IDCT.
+    // Step 2: row IDCT. Outputs stay scaled up by 2^PASS1_BITS.
     {
         int v[8];
         for (int k = 0; k < 8; k++) v[k] = scratch[comp][row][k];
-        idct_1d(v);
+        idct_1d(v, CONST_BITS - PASS1_BITS);
         for (int k = 0; k < 8; k++) scratch[comp][row][k] = v[k];
     }
 
     __syncthreads();
 
-    // Step 3: column IDCT + level shift.
+    // Step 3: column IDCT + level shift. The pass-2 descale removes the
+    // pass-1 scale and the 8x two-pass gain.
     {
         int v[8];
         for (int k = 0; k < 8; k++) v[k] = scratch[comp][k][col];
-        idct_1d(v);
-        // Two IDCT passes each contribute sqrt(8); combined >> 6 collapses to 1.
+        idct_1d(v, CONST_BITS + PASS1_BITS + 3);
         for (int k = 0; k < 8; k++)
-            scratch[comp][k][col] = clamp_byte(rshift(v[k], 6) + 128);
+            scratch[comp][k][col] = clamp_byte(v[k] + 128);
     }
 
     __syncthreads();

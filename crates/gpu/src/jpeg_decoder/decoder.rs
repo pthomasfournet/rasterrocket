@@ -267,7 +267,7 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
 /// Returns `(coefficients, dc_values, qtables, num_qtables)`:
 /// - `coefficients`: `num_components × blocks_per_comp × 64` i32 in zigzag order
 /// - `dc_values`: `num_components × blocks_per_comp` i32 (absolute DC from pre-pass)
-/// - `qtables`: `num_qtables × 64` i32 in natural (row-major) order
+/// - `qtables`: `num_qtables × 64` i32 in zigzag order (verbatim DQT bytes)
 /// - `num_qtables`: count of populated quantisation table slots
 #[expect(
     clippy::type_complexity,
@@ -635,9 +635,12 @@ mod tests {
     /// Download device pixels and compare to a zune-jpeg reference decode.
     ///
     /// Tolerance: peak absolute error ≤ 1 LSB per channel, mean absolute
-    /// error ≤ 0.02 LSB — matches the IEEE 1180-1990 quantisation error
-    /// budget for the IDCT.
-    fn assert_within_ieee1180(gpu_rgba: &[u8], zune_rgba: &[u8], label: &str) {
+    /// error ≤ 0.05 LSB.  This is a cross-implementation check, not an
+    /// accuracy proof: zune's IDCT uses 12-bit fixed-point constants where
+    /// ours uses 13-bit, so the two conforming decoders disagree by ±1 on
+    /// a few percent of samples (observed ≈ 0.033 mean on these fixtures).
+    /// Absolute accuracy is pinned by `idct_kernel_matches_float_reference`.
+    fn assert_close_to_reference_decoder(gpu_rgba: &[u8], zune_rgba: &[u8], label: &str) {
         assert_eq!(
             gpu_rgba.len(),
             zune_rgba.len(),
@@ -665,10 +668,13 @@ mod tests {
             }
         }
         let mean = sum as f64 / colour_count as f64;
-        assert!(peak <= 1, "{label}: peak error {peak} > 1 LSB (IEEE 1180)");
         assert!(
-            mean <= 0.02,
-            "{label}: mean error {mean:.4} > 0.02 LSB (IEEE 1180)"
+            peak <= 1,
+            "{label}: peak error {peak} > 1 LSB vs reference decoder"
+        );
+        assert!(
+            mean <= 0.05,
+            "{label}: mean error {mean:.4} > 0.05 LSB vs reference decoder"
         );
     }
 
@@ -695,24 +701,132 @@ mod tests {
     }
 
     #[test]
-    fn real_jpeg_q95_pixel_diff_within_ieee1180() {
+    fn real_jpeg_q95_pixel_diff_close_to_reference_decoder() {
         let bytes = include_bytes!("../../../../tests/fixtures/jpeg/q95_scan.jpg");
         let backend = CudaBackend::new().expect("CUDA backend");
         let dec = JpegGpuDecoder::new(backend);
         let img = dec.decode(bytes).expect("decode q95_scan.jpg");
         let gpu_rgba = download_image(dec.backend(), &img);
         let zune_rgba = zune_decode_rgba(bytes);
-        assert_within_ieee1180(&gpu_rgba, &zune_rgba, "q95_scan.jpg");
+        assert_close_to_reference_decoder(&gpu_rgba, &zune_rgba, "q95_scan.jpg");
     }
 
     #[test]
-    fn real_jpeg_q20_pixel_diff_within_ieee1180() {
+    fn real_jpeg_q20_pixel_diff_close_to_reference_decoder() {
         let bytes = include_bytes!("../../../../tests/fixtures/jpeg/q20.jpg");
         let backend = CudaBackend::new().expect("CUDA backend");
         let dec = JpegGpuDecoder::new(backend);
         let img = dec.decode(bytes).expect("decode q20.jpg");
         let gpu_rgba = download_image(dec.backend(), &img);
         let zune_rgba = zune_decode_rgba(bytes);
-        assert_within_ieee1180(&gpu_rgba, &zune_rgba, "q20.jpg");
+        assert_close_to_reference_decoder(&gpu_rgba, &zune_rgba, "q20.jpg");
+    }
+
+    /// Standard JPEG zigzag order: zigzag index → natural (row-major) index.
+    const ZIGZAG_TO_NATURAL: [usize; 64] = [
+        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
+        20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    ];
+
+    /// GPU IDCT accuracy against the exact inverse transform.
+    ///
+    /// Random level-shifted spatial blocks are forward-transformed in f64,
+    /// rounded to integer coefficients, and pushed through the kernel with
+    /// identity quantisation tables, so the kernel's dequant + IDCT is
+    /// measured against the mathematically exact f64 inverse of the same
+    /// coefficients: peak ≤ 1 LSB, mean ≤ 0.02 LSB.
+    #[test]
+    fn idct_kernel_matches_float_reference() {
+        use std::f64::consts::{FRAC_1_SQRT_2, PI};
+
+        const BW: usize = 16;
+        const BH: usize = 16;
+        let w = (BW * 8) as u32;
+        let h = (BH * 8) as u32;
+
+        let mut nat_to_zz = [0usize; 64];
+        for (zz, &nat) in ZIGZAG_TO_NATURAL.iter().enumerate() {
+            nat_to_zz[nat] = zz;
+        }
+
+        let mut state = 0x2468_ace1u32;
+        let mut next_u8 = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        };
+        let basis =
+            |i: usize, k: usize| (f64::from((2 * i + 1) as u32) * k as f64 * PI / 16.0).cos();
+        let norm = |k: usize| if k == 0 { FRAC_1_SQRT_2 } else { 1.0 };
+
+        let n_blocks = BW * BH;
+        let mut coef_flat = vec![0i32; n_blocks * 64];
+        let mut dc_flat = vec![0i32; n_blocks];
+        let mut expect = vec![0u8; (w as usize) * (h as usize)];
+
+        for block_idx in 0..n_blocks {
+            let (bx, by) = (block_idx % BW, block_idx / BW);
+
+            let mut f = [[0f64; 8]; 8];
+            for row in &mut f {
+                for v in row.iter_mut() {
+                    *v = f64::from(next_u8()) - 128.0;
+                }
+            }
+
+            // Forward DCT, rounded to the integers the kernel will consume.
+            let mut coef = [[0i64; 8]; 8];
+            for v in 0..8 {
+                for u in 0..8 {
+                    let mut s = 0.0;
+                    for (y, row) in f.iter().enumerate() {
+                        for (x, &px) in row.iter().enumerate() {
+                            s += px * basis(x, u) * basis(y, v);
+                        }
+                    }
+                    let c = (0.25 * norm(u) * norm(v) * s).round();
+                    coef[v][u] = c as i64;
+                    let nat = v * 8 + u;
+                    coef_flat[block_idx * 64 + nat_to_zz[nat]] = c as i32;
+                }
+            }
+            dc_flat[block_idx] = coef[0][0] as i32;
+
+            // Exact inverse of the rounded coefficients.
+            for y in 0..8 {
+                for x in 0..8 {
+                    let mut s = 0.0;
+                    for v in 0..8 {
+                        for u in 0..8 {
+                            s += norm(u) * norm(v) * coef[v][u] as f64 * basis(x, u) * basis(y, v);
+                        }
+                    }
+                    let px = (0.25 * s + 128.0).round().clamp(0.0, 255.0) as u8;
+                    expect[(by * 8 + y) * (w as usize) + bx * 8 + x] = px;
+                }
+            }
+        }
+
+        let backend = CudaBackend::new().expect("CUDA backend");
+        let dec = JpegGpuDecoder::new(backend);
+        let qt = vec![1i32; 64];
+        let img = dec
+            .dispatch_idct(&coef_flat, &qt, &dc_flat, w, h, 1, BW as u32, BH as u32, 1)
+            .expect("dispatch_idct");
+        let rgba = download_image(dec.backend(), &img);
+
+        let mut peak = 0u8;
+        let mut sum = 0u64;
+        for (px, &e) in rgba.chunks_exact(4).zip(expect.iter()) {
+            let d = px[0].abs_diff(e);
+            peak = peak.max(d);
+            sum += u64::from(d);
+        }
+        let mean = sum as f64 / expect.len() as f64;
+        assert!(peak <= 1, "peak {peak} > 1 LSB vs f64 reference IDCT");
+        assert!(
+            mean <= 0.02,
+            "mean {mean:.4} > 0.02 LSB vs f64 reference IDCT"
+        );
     }
 }

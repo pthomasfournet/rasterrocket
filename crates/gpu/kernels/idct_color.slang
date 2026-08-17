@@ -1,7 +1,7 @@
 // Phase 5: zigzag inverse + dequant + 8×8 IDCT (LLM fixed-point) + JFIF YCbCr→RGB.
 //
-// Attribution: 1-D IDCT structure adapted from CESNET/GPUJPEG's gpujpeg_idct.cu
-// (BSD-2-Clause, Copyright © 2011 CESNET z.s.p.o. and contributors).
+// The 1-D IDCT is the integer Loeffler/Ligtenberg/Moschytz (1989) 8-point
+// structure with 13-bit fixed-point constants and 64-bit intermediates.
 // YCbCr→RGB uses T.871/JFIF full-range equations (round-half-away-from-zero).
 //
 // Dispatch: one workgroup (8 threads × 8 threads) per 8×8 JPEG block.
@@ -11,7 +11,7 @@
 // using 0xFF for the A channel.
 
 [[vk::binding(0, 0)]] StructuredBuffer<int>    coefficients;  // Phase 4 output, zigzag order
-[[vk::binding(1, 0)]] StructuredBuffer<int>    qtables;       // 64 × num_qtables, natural order
+[[vk::binding(1, 0)]] StructuredBuffer<int>    qtables;       // 64 × num_qtables, zigzag order (verbatim DQT)
 [[vk::binding(2, 0)]] StructuredBuffer<int>    dc_values;     // absolute DC per block, one entry/block
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint> pixels_rgba;   // RGBA8 output, row-major
 
@@ -40,77 +40,80 @@ static const int zigzag_to_natural[64] = {
 };
 
 // LLM fixed-point constants (scaled by 2^13).
-// Derived from Loeffler, Ligtenberg, Moschytz (1989).
-static const int FRAC_BITS = 13;
+// FIX_a_bbbbbbbbb = round(a.bbbbbbbbb * 2^13), a.bbbbbbbbb = cos-derived
+// factors of the Loeffler/Ligtenberg/Moschytz 8-point IDCT.
+static const int CONST_BITS = 13;
+static const int PASS1_BITS = 2;
+static const int FIX_0_298631336 =  2446;
+static const int FIX_0_390180644 =  3196;
+static const int FIX_0_541196100 =  4433;
+static const int FIX_0_765366865 =  6270;
+static const int FIX_0_899976223 =  7373;
+static const int FIX_1_175875602 =  9633;
+static const int FIX_1_501321110 = 12299;
+static const int FIX_1_847759065 = 15137;
+static const int FIX_1_961570560 = 16069;
+static const int FIX_2_053119869 = 16819;
+static const int FIX_2_562915447 = 20995;
+static const int FIX_3_072711026 = 25172;
 
-// cos(k*pi/16) * sqrt(2) * 8192:
-static const int C1    = 11363;  // cos(pi/16)  * sqrt(2) * 8192
-static const int C3    = 9633;   // cos(3pi/16) * sqrt(2) * 8192
-static const int C6    = 4433;   // cos(6pi/16) * sqrt(2) * 8192
-static const int SQRT2 = 11585;  // sqrt(2)               * 8192
-
-// Rounding right-shift preserving sign (T.871 round-half-away-from-zero).
-int rshift(int x, int s) {
-    int bias = 1 << (s - 1);
-    return (x + (x >= 0 ? bias : -bias)) >> s;
+// Round-half-up right shift of a 64-bit intermediate, narrowed to int32.
+// 64-bit: a 13-bit constant times a dequantised coefficient (up to
+// 2047 * 255 = 522 985 for DC) reaches ~1.3e10, far past i32::MAX.
+int descale(int64_t x, int s) {
+    return int((x + (int64_t(1) << (s - 1))) >> s);
 }
-// 64-bit variant: accepts a wide intermediate product and narrows the
-// result back to int32. Used in idct_1d to prevent signed overflow when
-// multiplying fixed-point constants (up to 11585) by dequantized
-// coefficients (up to 1023 * 255 = 260 865); the product can reach
-// ~3.0 G, exceeding i32::MAX = 2.15 G.
-int rshift64(int64_t x, int s) {
-    int64_t bias = int64_t(1) << (s - 1);
-    return int((x + (x >= int64_t(0) ? bias : -bias)) >> s);
-}
 
-// Apply one 1-D 8-point IDCT to `v[0..8]` in place (LLM algorithm).
-// Output is unscaled integers; the caller cancels the 64× scale from
-// both passes with >> 6 after the column pass.
-void idct_1d(inout int v[8]) {
-    // Stage 0: straight-butterfly on DC-row / Nyquist pairs.
-    int t0  = v[0];
-    int t1  = v[4];
-    int t2  = v[2];
-    int t3  = v[6];
-    int t4  = v[1];
-    int t5  = v[5];
-    int t6  = v[3];
-    int t7  = v[7];
+// One 1-D 8-point LLM IDCT on v[0..8] in place, descaled by `shift`.
+// Row pass: shift = CONST_BITS - PASS1_BITS, leaving outputs scaled up by
+// 2^PASS1_BITS. Column pass: shift = CONST_BITS + PASS1_BITS + 3, which
+// removes the pass-1 scale and the 8× gain of the two passes, so a
+// DC-only block of dequantised value D yields D/8 in every slot.
+void idct_1d(inout int v[8], int shift) {
+    // Even part: indices 0, 4, 2, 6.
+    int64_t z2 = v[2];
+    int64_t z3 = v[6];
+    int64_t z1 = (z2 + z3) * FIX_0_541196100;
+    int64_t tmp2 = z1 - z3 * FIX_1_847759065;
+    int64_t tmp3 = z1 + z2 * FIX_0_765366865;
+    int64_t tmp0 = int64_t(v[0] + v[4]) << CONST_BITS;
+    int64_t tmp1 = int64_t(v[0] - v[4]) << CONST_BITS;
+    int64_t t10 = tmp0 + tmp3;
+    int64_t t13 = tmp0 - tmp3;
+    int64_t t11 = tmp1 + tmp2;
+    int64_t t12 = tmp1 - tmp2;
 
-    // Stage 1 (even path — indices 0, 4, 2, 6):
-    // Multiplications use rshift64: C6/SQRT2 (up to 11585) times a dequantized
-    // coefficient (up to 260 865) can reach ~3.0 G, exceeding i32::MAX.
-    int p0  = t0 + t1;
-    int p1  = t0 - t1;
-    int p2  = rshift64(int64_t(C6) * t2 - int64_t(SQRT2) * t3, FRAC_BITS);
-    int p3  = rshift64(int64_t(C6) * t3 + int64_t(SQRT2) * t2, FRAC_BITS);
+    // Odd part: indices 7, 5, 3, 1 feed the four rotators.
+    int64_t w0 = v[7];
+    int64_t w1 = v[5];
+    int64_t w2 = v[3];
+    int64_t w3 = v[1];
+    int64_t za = w0 + w3;
+    int64_t zb = w1 + w2;
+    int64_t zc = w0 + w2;
+    int64_t zd = w1 + w3;
+    int64_t z5 = (zc + zd) * FIX_1_175875602;
+    w0 *= FIX_0_298631336;
+    w1 *= FIX_2_053119869;
+    w2 *= FIX_3_072711026;
+    w3 *= FIX_1_501321110;
+    za *= -FIX_0_899976223;
+    zb *= -FIX_2_562915447;
+    zc = z5 - zc * FIX_1_961570560;
+    zd = z5 - zd * FIX_0_390180644;
+    w0 += za + zc;
+    w1 += zb + zd;
+    w2 += zb + zc;
+    w3 += za + zd;
 
-    int e0  = p0 + p3;
-    int e1  = p1 + p2;
-    int e2  = p1 - p2;
-    int e3  = p0 - p3;
-
-    // Stage 2 (odd path — indices 1, 5, 3, 7):
-    int q0  = rshift64(int64_t(C1) * t4 + int64_t(C3) * t6, FRAC_BITS);
-    int q1  = rshift64(int64_t(C3) * t4 - int64_t(C1) * t6, FRAC_BITS);
-    int q2  = rshift64(int64_t(C1) * t5 + int64_t(C3) * t7, FRAC_BITS);
-    int q3  = rshift64(int64_t(C3) * t5 - int64_t(C1) * t7, FRAC_BITS);
-
-    int o0  = q0 + q2;
-    int o1  = q0 - q2;
-    int o2  = rshift64(int64_t(SQRT2) * (q1 - q3), FRAC_BITS);
-    int o3  = q1 + q3;
-
-    // Output combination:
-    v[0] = e0 + o3;
-    v[1] = e1 + o2;
-    v[2] = e2 + o1;
-    v[3] = e3 + o0;
-    v[4] = e3 - o0;
-    v[5] = e2 - o1;
-    v[6] = e1 - o2;
-    v[7] = e0 - o3;
+    v[0] = descale(t10 + w3, shift);
+    v[7] = descale(t10 - w3, shift);
+    v[1] = descale(t11 + w2, shift);
+    v[6] = descale(t11 - w2, shift);
+    v[2] = descale(t12 + w1, shift);
+    v[5] = descale(t12 - w1, shift);
+    v[3] = descale(t13 + w0, shift);
+    v[4] = descale(t13 - w0, shift);
 }
 
 // Clamp integer to [0, 255].
@@ -118,24 +121,21 @@ int clamp_byte(int x) {
     return clamp(x, 0, 255);
 }
 
-// T.871 full-range YCbCr → R, G, B.
-// Uses fixed-point with FRAC_BITS=8 fractional bits internally.
+// T.871 full-range YCbCr → R, G, B, 14-bit fixed point.
 // Coefficients from ITU-T T.871 §7:
 //   R = Y + 1.402 * (Cr - 128)
-//   G = Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128)
+//   G = Y - 0.344136 * (Cb - 128) - 0.714136 * (Cr - 128)
 //   B = Y + 1.772 * (Cb - 128)
-//
-// Scaled approximations (×256):
-//   1.402 ≈ 359/256     (error < 0.0001)
-//   0.34414 ≈ 88/256    (error < 0.001)
-//   0.71414 ≈ 183/256   (error < 0.0002)
-//   1.772 ≈ 454/256     (error < 0.0001)
+// round(c * 2^14): 1.402 → 22970, 0.714136 → 11700, 0.344136 → 5638,
+// 1.772 → 29032. The +8192 bias makes the >> 14 round half up; the
+// result is clamped to [0, 255], so half-up equals half-away-from-zero.
 int3 ycbcr_to_rgb(int Y, int Cb, int Cr) {
     int cb = Cb - 128;
     int cr = Cr - 128;
-    int r = rshift((Y << 8) + 359 * cr,          8);
-    int g = rshift((Y << 8) - 88 * cb - 183 * cr, 8);
-    int b = rshift((Y << 8) + 454 * cb,           8);
+    int y0 = (Y << 14) + 8192;
+    int r = (y0 + 22970 * cr) >> 14;
+    int g = (y0 - 11700 * cr - 5638 * cb) >> 14;
+    int b = (y0 + 29032 * cb) >> 14;
     return int3(clamp_byte(r), clamp_byte(g), clamp_byte(b));
 }
 
@@ -201,9 +201,11 @@ void idct_dequant_colour(
     // Load all 64 zigzag coefficients for this thread's block.
     // We need the whole block to run the column IDCT, so each thread
     // loads one coefficient (8 threads × 8 threads = 64 total).
+    // Coefficients and qtables are both in zigzag order, so the quantiser
+    // for zigzag slot zz_pos is at the same offset — no permutation.
     uint zz_pos = row * 8u + col;
     int  coef   = coefficients[coef_base + zz_pos];
-    int  qval   = qtables[qt_base + uint(zigzag_to_natural[zz_pos])];
+    int  qval   = qtables[qt_base + zz_pos];
     // DC absolute value override: Phase 4 symbols encode DC deltas;
     // `dc_values[block_idx]` is the running absolute DC reconstructed by
     // the host dispatcher. Overwrite slot 0 (zigzag DC position).
@@ -222,12 +224,13 @@ void idct_dequant_colour(
 
     // --- Step 2: 1-D IDCT on rows (each thread handles one element of one row) ---
     // Thread (row, col) owns row `row` of component `comp`.
+    // Outputs stay scaled up by 2^PASS1_BITS.
     {
         int v[8];
         for (uint k = 0u; k < 8u; k++) {
             v[k] = scratch[comp][row][k];
         }
-        idct_1d(v);
+        idct_1d(v, CONST_BITS - PASS1_BITS);
         for (uint k = 0u; k < 8u; k++) {
             scratch[comp][row][k] = v[k];
         }
@@ -237,16 +240,16 @@ void idct_dequant_colour(
 
     // --- Step 3: 1-D IDCT on columns ---
     // Thread (row, col) owns column `col` of component `comp`.
+    // The pass-2 descale removes the pass-1 scale and the 8× two-pass gain;
+    // then add the JPEG level-shift of 128.
     {
         int v[8];
         for (uint k = 0u; k < 8u; k++) {
             v[k] = scratch[comp][k][col];
         }
-        idct_1d(v);
-        // Scale down: two IDCT passes each introduce a factor of 8 (sqrt(64)),
-        // so divide by 64 (>> 6) and add the JPEG level-shift of 128.
+        idct_1d(v, CONST_BITS + PASS1_BITS + 3);
         for (uint k = 0u; k < 8u; k++) {
-            scratch[comp][k][col] = clamp_byte(rshift(v[k], 6) + 128);
+            scratch[comp][k][col] = clamp_byte(v[k] + 128);
         }
     }
 
