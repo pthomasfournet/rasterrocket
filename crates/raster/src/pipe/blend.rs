@@ -73,9 +73,16 @@ pub fn blend_color_dodge(src: u8, dst: u8) -> u8 {
 }
 
 /// Color burn: darken dst to reflect src.
+///
+/// A white backdrop is preserved for every source value, including `src == 0`:
+/// the spec's `1 - min(1, (1 - cb)/cs)` evaluates to 1 when `cb == 1`, since the
+/// numerator is 0 whatever the source. Returning 0 there would turn a white
+/// backdrop black under a zero source.
 #[must_use]
 pub fn blend_color_burn(src: u8, dst: u8) -> u8 {
-    if src == 0 {
+    if dst == 255 {
+        255
+    } else if src == 0 {
         0
     } else {
         let x = u32::from(255 - dst) * 255 / u32::from(src);
@@ -128,14 +135,18 @@ pub const fn blend_difference(src: u8, dst: u8) -> u8 {
     src.abs_diff(dst)
 }
 
-/// Exclusion: `src + dst - 2 × div255(src × dst)`.
+/// Exclusion: `src + dst - 2 × src × dst / 255`.
+///
+/// The subtrahend reaches 510 at `src = dst = 255`, so it cannot be routed
+/// through [`div255`], which saturates at 255. Saturating there would leave
+/// `blend_exclusion(255, 255)` at 255 (white) where the spec requires 0 (black).
 #[must_use]
 pub fn blend_exclusion(src: u8, dst: u8) -> u8 {
     let s = u32::from(src);
     let d = u32::from(dst);
-    (s + d)
-        .saturating_sub(u32::from(div255(2 * s * d)))
-        .min(255) as u8
+    // 2·s·d ≤ 130 050; the rounded quotient is exact in u32 and ≤ 510.
+    let prod = (2 * s * d + 127) / 255;
+    (s + d).saturating_sub(prod).min(255) as u8
 }
 
 // ── Non-separable helpers (RGB additive space) ────────────────────────────────
@@ -324,6 +335,72 @@ pub fn apply_nonseparable_rgb(mode: BlendMode, src: [u8; 3], dst: [u8; 3]) -> [u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference implementations from PDF 32000-1 §11.3.5, in floating point.
+    fn spec_exclusion(s: u8, d: u8) -> u8 {
+        let (cs, cb) = (f64::from(s) / 255.0, f64::from(d) / 255.0);
+        (255.0 * (cs + cb - 2.0 * cs * cb))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+
+    fn spec_color_burn(s: u8, d: u8) -> u8 {
+        let (cs, cb) = (f64::from(s) / 255.0, f64::from(d) / 255.0);
+        if cb >= 1.0 {
+            return 255;
+        }
+        if cs <= 0.0 {
+            return 0;
+        }
+        (255.0 * (1.0 - (1.0 - cb).min(cs) / cs))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+
+    /// Exclusion must not saturate its `2·s·d/255` term.
+    ///
+    /// Routing that term through `div255`, which clamps at 255, capped a quotient
+    /// that reaches 510 and inverted the mode across the bright half of the input
+    /// space — white over white came out white instead of black.
+    #[test]
+    fn exclusion_matches_spec_over_the_full_domain() {
+        assert_eq!(blend_exclusion(255, 255), 0, "white over white is black");
+        assert_eq!(blend_exclusion(0, 0), 0);
+        assert_eq!(blend_exclusion(255, 0), 255);
+        assert_eq!(blend_exclusion(0, 255), 255);
+        for s in 0..=255u8 {
+            for d in 0..=255u8 {
+                let got = blend_exclusion(s, d);
+                let want = spec_exclusion(s, d);
+                assert!(
+                    got.abs_diff(want) <= 1,
+                    "exclusion({s},{d}) = {got}, spec {want}"
+                );
+            }
+        }
+    }
+
+    /// A white backdrop survives colour burn at every source value.
+    #[test]
+    fn color_burn_preserves_a_white_backdrop() {
+        for s in 0..=255u8 {
+            assert_eq!(
+                blend_color_burn(s, 255),
+                255,
+                "color_burn({s},255) must leave a white backdrop white"
+            );
+        }
+        for s in 0..=255u8 {
+            for d in 0..=255u8 {
+                let got = blend_color_burn(s, d);
+                let want = spec_color_burn(s, d);
+                assert!(
+                    got.abs_diff(want) <= 1,
+                    "color_burn({s},{d}) = {got}, spec {want}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn multiply_identity() {
