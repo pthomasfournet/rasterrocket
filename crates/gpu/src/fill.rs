@@ -182,19 +182,13 @@ pub fn build_tile_records(
             // Global x at the exit of this tile row.
             let x_at_exit = dxdy.mul_add(seg_y1_tile - seg_y0_tile, x_enter_global);
 
-            // Tile columns spanned by this segment within the tile row.
-            let xl = x_enter_global.min(x_at_exit);
+            // Rightmost x the segment reaches within this tile row.
             let xr = x_enter_global.max(x_at_exit);
 
-            // Compute tx0/tx1 as i32 first to handle negative x safely, then
-            // clamp to [0, grid_w-1].  A negative tx1 means the segment is
-            // entirely left of the raster — skip the whole tile row.
-            // xl/xr are f32 page coordinates; floor→i32 is safe for any realistic page width.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "floor(f32) for page-coordinate x; realistic page widths fit comfortably in i32"
-            )]
-            let tx0_i = (xl / TILE_W_F).floor() as i32;
+            // Rightmost tile column the segment reaches. A negative value means the
+            // segment lies entirely left of the raster, so the tile row has nothing
+            // to record.
+            // xr is an f32 page coordinate; floor→i32 is safe for any realistic page width.
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "floor(f32) for page-coordinate x; realistic page widths fit comfortably in i32"
@@ -203,17 +197,20 @@ pub fn build_tile_records(
             if tx1_i < 0 {
                 continue;
             }
-            // tx0_i.max(0) is non-negative — safe to cast to u32.
-            #[expect(clippy::cast_sign_loss, reason = "tx0_i.max(0) ≥ 0 by construction")]
-            let tx0 = tx0_i.max(0) as u32;
-            // tx1_i ≥ 0 checked above (continue if < 0) — safe to cast to u32.
+            // tx1_i ≥ 0 checked above — safe to cast to u32.
             #[expect(
                 clippy::cast_sign_loss,
                 reason = "tx1_i ≥ 0 verified by the guard above"
             )]
             let tx1 = (tx1_i as u32).min(grid_w - 1);
 
-            for tx in tx0..=tx1 {
+            // Emit from tile column 0 rather than from the first column the segment
+            // crosses. A pixel's winding number is the signed sum over every segment
+            // to its right, so a segment must be visible to all tile columns left of
+            // it, not only to those it passes through. `segment_pixel_area` discards
+            // segments that are genuinely left of a pixel via its `xr <= px` branch,
+            // so widening the range cannot add coverage.
+            for tx in 0..=tx1 {
                 // tx ≤ grid_w-1 ≤ 0xFFFE, TILE_W_F = 16.0; product ≤ ~1M — exact in f32.
                 #[expect(
                     clippy::cast_precision_loss,
@@ -422,7 +419,7 @@ fn aa_fill_cpu_sample(segs: &[f32], sx: f32, sy: f32, eo: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{aa_fill_cpu, build_tile_records};
+    use super::{TILE_H, TILE_W, TileRecord, aa_fill_cpu, build_tile_records};
 
     #[test]
     fn aa_fill_cpu_solid_rect_full_coverage() {
@@ -480,6 +477,8 @@ mod tests {
     #[test]
     fn tile_records_single_vertical_segment() {
         // Segment from (8,0) to (8,17): crosses tile rows 0 (y 0..16) and 1 (y 16..17).
+        // It is emitted to every tile column at or left of the one it spans, so each
+        // of the two tile rows contributes one record for tile column 0.
         let segs = [8.0f32, 0.0, 8.0, 17.0];
         let (recs, _, _, _) = build_tile_records(&segs, 0.0, 0.0, 64, 64);
         assert_eq!(recs.len(), 2, "one record per tile row crossed");
@@ -490,6 +489,116 @@ mod tests {
         let segs = [0.0f32, 0.0, 32.0, 32.0];
         let (recs, _, _, _) = build_tile_records(&segs, 0.0, 0.0, 128, 128);
         assert!(recs.len() >= 2, "diagonal must produce at least 2 records");
+    }
+
+    /// CPU model of `segment_pixel_area` in `kernels/tile_fill.cu`.
+    ///
+    /// Kept byte-compatible with the device code so the coverage tests below
+    /// exercise the same arithmetic the kernel performs.
+    fn segment_pixel_area(x_at_iy0: f32, dxdy: f32, iy0: f32, iy1: f32, sign: f32, px: f32) -> f32 {
+        let y_len = iy1 - iy0;
+        if y_len <= 0.0 {
+            return 0.0;
+        }
+        let x0 = x_at_iy0;
+        let x1 = dxdy.mul_add(iy1 - iy0, x_at_iy0);
+        let xl = x0.min(x1);
+        let xr = x0.max(x1);
+        let cover = if xr <= px {
+            0.0
+        } else if xl >= px + 1.0 {
+            y_len
+        } else {
+            let dx = xr - xl;
+            if dx < 1e-6 {
+                let xmid = 0.5 * (x0 + x1);
+                if xmid >= px + 0.5 { y_len } else { 0.0 }
+            } else {
+                let left = xl.max(px);
+                let right = xr.min(px + 1.0);
+                let frac = ((right - left) / dx).clamp(0.0, 1.0);
+                let x_right_frac = (px + 1.0 - left).max(0.0) / dx;
+                y_len * frac * x_right_frac.clamp(0.0, 1.0)
+            }
+        };
+        cover * sign
+    }
+
+    /// CPU model of the `tile_fill` kernel's per-pixel accumulation loop.
+    ///
+    /// Returns the winding/area value the kernel would compute for `(px, py)`.
+    fn kernel_area_at(
+        recs: &[TileRecord],
+        starts: &[u32],
+        counts: &[u32],
+        grid_w: u32,
+        px: u32,
+        py: u32,
+    ) -> f32 {
+        let (tile_x, tile_y) = (px / TILE_W, py / TILE_H);
+        let (px_local, py_local) = (px % TILE_W, py % TILE_H);
+        let idx = (tile_y * grid_w + tile_x) as usize;
+        let (start, count) = (starts[idx] as usize, counts[idx] as usize);
+        let py_f = py_local as f32;
+        let mut area = 0.0f32;
+        for rec in &recs[start..start + count] {
+            let iy0 = rec.y0_tile.max(py_f);
+            let iy1 = rec.y1_tile.min(py_f + 1.0);
+            if iy0 >= iy1 {
+                continue;
+            }
+            let x_at_iy0 = rec.dxdy.mul_add(iy0 - rec.y0_tile, rec.x_enter);
+            area += segment_pixel_area(x_at_iy0, rec.dxdy, iy0, iy1, rec.sign, px_local as f32);
+        }
+        area
+    }
+
+    /// A fill wider than one tile must be solid across its interior.
+    ///
+    /// Winding at a pixel is the signed sum over every segment to its right, so a
+    /// segment has to reach tile columns left of the ones it crosses. When records
+    /// were emitted only to the columns a segment physically spanned, every interior
+    /// pixel more than one tile from an edge accumulated nothing and rendered as
+    /// background — losing the interior of any fill wider than `TILE_W`.
+    #[test]
+    fn tile_fill_interior_of_a_wide_rect_is_covered() {
+        // Rect x 10..210, y 10..110 — 200 px wide, i.e. many tile columns.
+        let segs = [
+            10.0f32, 10.0, 10.0, 110.0, // left edge, downward
+            210.0f32, 110.0, 210.0, 10.0, // right edge, upward
+        ];
+        let (recs, starts, counts, grid_w) = build_tile_records(&segs, 0.0, 0.0, 320, 200);
+
+        for px in [12u32, 40, 80, 120, 160, 200] {
+            let area = kernel_area_at(&recs, &starts, &counts, grid_w, px, 50);
+            assert!(
+                area.abs() > 0.5,
+                "interior pixel ({px},50) has area {area}, expected full coverage"
+            );
+        }
+
+        for px in [0u32, 5, 215, 300] {
+            let area = kernel_area_at(&recs, &starts, &counts, grid_w, px, 50);
+            assert!(
+                area.abs() < 0.5,
+                "exterior pixel ({px},50) has area {area}, expected none"
+            );
+        }
+    }
+
+    /// Every tile column of a wide fill must receive the records it needs.
+    #[test]
+    fn tile_records_reach_columns_left_of_the_segment() {
+        // One vertical edge at x=200, i.e. tile column 12.
+        let segs = [200.0f32, 0.0, 200.0, 16.0];
+        let (_, _, counts, grid_w) = build_tile_records(&segs, 0.0, 0.0, 320, 32);
+        for tx in 0..=12u32 {
+            assert!(
+                counts[tx as usize] > 0,
+                "tile column {tx} has no record for a segment at its right"
+            );
+        }
+        let _ = grid_w;
     }
 
     #[test]
