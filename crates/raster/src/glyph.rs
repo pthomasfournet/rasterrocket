@@ -255,13 +255,9 @@ fn blit_mono<P: Pixel>(
 ) {
     let x_shift = x_data_skip % 8;
     let data = glyph.data;
-
-    // Verify the glyph data buffer covers the visible region (debug builds only).
-    debug_assert!(
-        data.len() >= (y_data_skip + yy_limit) * row_bytes,
-        "blit_mono: glyph data too short: len={} < (y_data_skip={y_data_skip} + yy_limit={yy_limit}) * row_bytes={row_bytes}",
-        data.len(),
-    );
+    // An undersized `data` buffer is tolerated rather than asserted: bytes
+    // past the end read as zero bits on every path below, matching the AA
+    // path's clamped reads.
 
     // Scratch buffer for SIMD-expanded bits: one byte per pixel, 0x00 or 0xFF.
     // Sized to the maximum row width; reused across rows.
@@ -276,12 +272,14 @@ fn blit_mono<P: Pixel>(
         let y = y_start + yy as i32;
         let row_off = (y_data_skip + yy) * row_bytes + x_data_skip / 8;
 
-        // Use SIMD unpack when x_shift == 0 (bits are byte-aligned).
-        // When x_shift > 0 the pixels straddle byte boundaries, so we fall
-        // back to the scalar bit-extraction path which handles that case.
-        #[cfg(target_arch = "x86_64")]
-        let use_simd_unpack = x_shift == 0;
-        #[cfg(not(target_arch = "x86_64"))]
+        // Use SIMD unpack when x_shift == 0 (bits are byte-aligned) and the
+        // whole packed row is present — the unpacker indexes the row without
+        // clamping. When x_shift > 0 the pixels straddle byte boundaries and
+        // when the buffer is short the bytes must read as zero, so both
+        // cases take the scalar bit-extraction path, which handles them.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let use_simd_unpack = x_shift == 0 && data.len() >= row_off + xx_limit.div_ceil(8);
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let use_simd_unpack = false;
 
         if use_simd_unpack {
@@ -329,8 +327,11 @@ fn blit_mono<P: Pixel>(
         while xx < xx_limit {
             let byte_idx = row_off + xx / 8;
 
-            // When x_shift > 0, straddle two source bytes to align the read window.
-            let alpha0 = if x_shift > 0 && xx + 8 < xx_limit {
+            // When x_shift > 0, straddle two source bytes to align the read
+            // window — on every byte group, including the last: the `hi`
+            // read clamps past the buffer end to 0, and bits shifted in from
+            // beyond `xx_limit` are never consumed by the bit loop below.
+            let alpha0 = if x_shift > 0 {
                 let lo = data.get(byte_idx).copied().unwrap_or(0);
                 let hi = data.get(byte_idx + 1).copied().unwrap_or(0);
                 #[expect(clippy::cast_possible_truncation, reason = "shift result fits in u8")]
@@ -572,6 +573,92 @@ mod tests {
         let row1 = bmp.row(1);
         for (x, px) in row1.iter().enumerate().take(8) {
             assert_eq!(px.g, 0, "row 1 x={x} should be clear");
+        }
+    }
+
+    /// Left-clipped mono glyphs must paint exactly the source bits
+    /// `skip..w`, for every skip and width.
+    ///
+    /// Sweeping `x_data_skip` over 0..8 (via negative `pen_x`) across widths
+    /// 1..=40 drives both `blit_mono` tiers — the byte-aligned unpack at
+    /// `skip % 8 == 0` and the scalar straddle path otherwise — against the
+    /// same external reference: the packed source bits themselves.
+    #[test]
+    fn blit_mono_left_clip_paints_source_bits() {
+        let pipe = simple_pipe();
+        let color = [0u8, 255, 0];
+
+        for w in 1i32..=40 {
+            let row_bytes = (w as usize).div_ceil(8);
+            let data: Vec<u8> = (0..row_bytes)
+                .map(|i| [0xAAu8, 0x5C, 0x93][i % 3])
+                .collect();
+            for skip in 0i32..8 {
+                let mut bmp: Bitmap<Rgb8> = Bitmap::new(48, 1, 4, false);
+                let clip = make_clip(48, 1);
+                let src = PipeSrc::Solid(&color);
+                let glyph = GlyphBitmap {
+                    data: &data,
+                    x: 0,
+                    y: 0,
+                    w,
+                    h: 1,
+                    aa: false,
+                };
+
+                blit_glyph::<Rgb8>(&mut bmp, &clip, true, &pipe, &src, -skip, 0, &glyph);
+
+                let visible = (w - skip).max(0) as usize;
+                let row = bmp.row(0);
+                for xx in 0..visible {
+                    let bit_idx = skip as usize + xx;
+                    let expected = (data[bit_idx / 8] >> (7 - bit_idx % 8)) & 1 != 0;
+                    assert_eq!(
+                        row[xx].g == 255,
+                        expected,
+                        "w={w} skip={skip} xx={xx}: painted != source bit"
+                    );
+                }
+                for (xx, px) in row.iter().enumerate().skip(visible).take(48 - visible) {
+                    assert_eq!(px.g, 0, "w={w} skip={skip} x={xx} beyond the glyph");
+                }
+            }
+        }
+    }
+
+    /// A mono glyph whose data buffer is shorter than `h * row_bytes` must
+    /// not panic: rows past the end of the buffer read as zero bits, the
+    /// same degraded behaviour the AA path's clamped reads produce.
+    #[test]
+    fn blit_mono_short_buffer_reads_missing_rows_as_zero() {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(32, 4, 4, false);
+        let clip = make_clip(32, 4);
+        let pipe = simple_pipe();
+        let color = [0u8, 255, 0];
+        let src = PipeSrc::Solid(&color);
+
+        // 32×4 mono glyph needs 16 bytes; supply rows 0–1 only.
+        let data = vec![0xFFu8; 8];
+        let glyph = GlyphBitmap {
+            data: &data,
+            x: 0,
+            y: 0,
+            w: 32,
+            h: 4,
+            aa: false,
+        };
+
+        blit_glyph::<Rgb8>(&mut bmp, &clip, true, &pipe, &src, 0, 0, &glyph);
+
+        for y in 0..2u32 {
+            for (x, px) in bmp.row(y).iter().enumerate().take(32) {
+                assert_eq!(px.g, 255, "({x}, {y}) inside supplied rows must paint");
+            }
+        }
+        for y in 2..4u32 {
+            for (x, px) in bmp.row(y).iter().enumerate().take(32) {
+                assert_eq!(px.g, 0, "({x}, {y}) past the buffer must read as clear");
+            }
         }
     }
 
