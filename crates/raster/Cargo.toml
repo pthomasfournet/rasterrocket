@@ -15,7 +15,6 @@ categories           = ["rendering", "multimedia::images"]
 [features]
 default     = ["simd-avx2"]
 simd-avx2   = []                   # AVX2 blend / fill paths
-simd-avx512 = ["simd-avx2"]       # adds vpopcntq AA counter (requires avx512vpopcntdq)
 nightly-sve2 = []                  # SVE2 popcount tier (aarch64 only; requires nightly + stdarch_aarch64_sve)
 rayon       = ["dep:rayon"]        # tile-level rayon parallelism for fill
 
