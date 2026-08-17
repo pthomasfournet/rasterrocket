@@ -155,7 +155,7 @@ impl PixelMode {
     /// parsing mode values from untrusted sources (e.g. C FFI, file headers).
     ///
     /// ```
-    /// # use color::mode::PixelMode;
+    /// # use rasterrocket_color::mode::PixelMode;
     /// assert_eq!(PixelMode::from_u8(2), Some(PixelMode::Rgb8));
     /// assert_eq!(PixelMode::from_u8(99), None);
     /// ```
@@ -182,7 +182,7 @@ impl PixelMode {
     /// silent overflow in release builds.
     ///
     /// ```
-    /// # use color::mode::PixelMode;
+    /// # use rasterrocket_color::mode::PixelMode;
     /// assert_eq!(PixelMode::Rgb8.pixel_count_to_bytes(10), Some(30));
     /// assert_eq!(PixelMode::Mono1.pixel_count_to_bytes(10), None);
     /// assert_eq!(PixelMode::Rgb8.pixel_count_to_bytes(usize::MAX), None);

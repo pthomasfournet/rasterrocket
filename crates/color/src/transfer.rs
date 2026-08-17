@@ -141,7 +141,7 @@ impl TransferLut {
     /// # Examples
     ///
     /// ```
-    /// use color::TransferLut;
+    /// use rasterrocket_color::TransferLut;
     ///
     /// // Build an inversion LUT: i → 255 - i.
     /// let mut inv_table = [0u8; 256];
