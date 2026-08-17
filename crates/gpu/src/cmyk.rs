@@ -806,6 +806,50 @@ mod tests {
         assert_eq!(got, expected, "AVX2 CMYK→RGB mismatch");
     }
 
+    /// AVX-512-specific: direct call with 200 pseudorandom 16-pixel chunks.
+    ///
+    /// The dispatcher-driven tests exercise only the highest tier the
+    /// running machine reports, so on an AVX2-only runner the AVX-512
+    /// kernel is never executed; this direct call is its only coverage
+    /// there is. Runtime-skipped on machines without AVX-512.
+    /// Many random chunks rather than one fixed vector, so a per-lane
+    /// shuffle-mask error cannot slip through on a lucky input.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn icc_cmyk_avx512_matches_scalar() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let mut rng = 0x1357_9bdf_u32;
+        let mut next = move || {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (rng >> 24) as u8
+        };
+        for chunk_i in 0..200 {
+            let cmyk: Vec<u8> = (0..64).map(|_| next()).collect();
+            let mut expected = vec![0u8; 48];
+            for (src, dst) in cmyk.chunks_exact(4).zip(expected.chunks_exact_mut(3)) {
+                let (r, g, b) =
+                    color::convert::cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
+                dst[0] = r;
+                dst[1] = g;
+                dst[2] = b;
+            }
+            let mut got = vec![0u8; 48];
+            // SAFETY: avx512f+bw confirmed present above; cmyk is 64 bytes; got is 48 bytes.
+            unsafe {
+                super::cmyk_to_rgb_avx512(
+                    cmyk.as_slice().try_into().expect("exactly 64 bytes"),
+                    &mut got,
+                );
+            }
+            assert_eq!(
+                got, expected,
+                "AVX-512 CMYK→RGB mismatch on chunk {chunk_i}"
+            );
+        }
+    }
+
     #[test]
     fn icc_cmyk_clut_identity_corners() {
         // 2^4 = 16-node CLUT where output = matrix formula at corners.
