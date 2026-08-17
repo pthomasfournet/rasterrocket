@@ -170,7 +170,15 @@ impl Clip {
         } else {
             (self.y_min_i, self.y_max_i)
         };
-        let scanner = XPathScanner::new(xpath, eo, y_lo, y_hi);
+        // The scanner is queried in AA space when antialiasing (see
+        // `aa_coords` and `clip_aa_line`), so it must be built from an
+        // AA-scaled copy; `xpath` itself stays in device space, which
+        // `detect_rect` above relies on.
+        let scanner = if self.antialias {
+            XPathScanner::new(&xpath.aa_scaled_copy(), eo, y_lo, y_hi)
+        } else {
+            XPathScanner::new(xpath, eo, y_lo, y_hi)
+        };
         self.scanners.push(Arc::new(scanner));
     }
 
@@ -271,7 +279,7 @@ impl Clip {
     }
 
     fn test_clip_paths(&self, x: i32, y: i32) -> bool {
-        let (tx, ty, _) = aa_coords(x, x, y, self.antialias);
+        let (tx, _, ty) = aa_coords(x, x, y, self.antialias);
         self.scanners.iter().all(|s| s.test(tx, ty))
     }
 }
@@ -361,6 +369,41 @@ fn detect_rect(xpath: &XPath) -> Option<(f64, f64, f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::PathBuilder;
+
+    /// An antialiased path clip must select the device-space region the
+    /// path covers, not that region scaled down by `AA_SIZE`.
+    #[test]
+    fn aa_path_clip_selects_device_space_region() {
+        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
+
+        // Diamond centred on (16, 16): non-axis-aligned, so it stays a
+        // scanner instead of reducing to a rectangle.
+        let mut builder = PathBuilder::new();
+        builder.move_to(16.0, 2.0).expect("move_to");
+        builder.line_to(30.0, 16.0).expect("line_to");
+        builder.line_to(16.0, 30.0).expect("line_to");
+        builder.line_to(2.0, 16.0).expect("line_to");
+        builder.close(false).expect("close");
+        let path = builder.build();
+        let xpath = XPath::new(&path, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true);
+        clip.clip_to_path(&xpath, false);
+        assert_eq!(clip.scanners.len(), 1, "diamond must become a scanner clip");
+
+        assert!(clip.test(16, 16), "diamond centre must be inside the clip");
+        assert!(clip.test(16, 8), "upper interior point must be inside");
+        assert!(clip.test(9, 16), "left interior point must be inside");
+        assert!(clip.test(23, 16), "right interior point must be inside");
+        assert!(clip.test(16, 24), "lower interior point must be inside");
+        assert!(
+            !clip.test(3, 3),
+            "corner outside the diamond must be clipped"
+        );
+        assert!(
+            !clip.test(4, 4),
+            "point inside the AA_SIZE-shrunk ghost of the diamond must be clipped"
+        );
+    }
 
     #[test]
     fn new_clip_rect_bounds() {

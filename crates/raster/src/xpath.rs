@@ -127,6 +127,22 @@ pub struct XPath {
 }
 
 impl XPath {
+    /// Return a copy of this path with coordinates scaled by [`AA_SIZE`].
+    ///
+    /// The copy shares no state with `self` (the Bezier scratch is not
+    /// carried over) and `self` remains in device space, so this is the
+    /// safe form of [`XPath::aa_scale`] for consumers that must keep the
+    /// device-space original.
+    #[must_use]
+    pub(crate) fn aa_scaled_copy(&self) -> Self {
+        let mut scaled = Self {
+            segs: self.segs.clone(),
+            curve_data: None,
+        };
+        scaled.aa_scale();
+        scaled
+    }
+
     /// Create an empty `XPath` (for tests and internal use).
     #[cfg(test)]
     pub(crate) const fn empty() -> Self {
