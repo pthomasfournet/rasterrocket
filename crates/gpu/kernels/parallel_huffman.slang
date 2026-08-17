@@ -57,9 +57,9 @@
 
 // JPEG-framed phases only — bound at slots 7 + 8 in the JPEG kernel
 // descriptor layouts.  Same wire layout as `codebook` (one
-// HUFFMAN_CODEBOOK_ENTRIES-wide block per selector); `mcu_schedule`
-// is u32[blocks_per_mcu], each entry packing
-// `(ac_sel << 16) | (dc_sel << 8) | component_idx`.
+// HUFFMAN_CODEBOOK_ENTRIES-wide block per dispatch slot);
+// `mcu_schedule` is u32[blocks_per_mcu], each entry packing
+// `(ac_dispatch_idx << 16) | (dc_dispatch_idx << 8) | component_idx`.
 [[vk::binding(7, 0)]] StructuredBuffer<uint> dc_codebook;
 [[vk::binding(8, 0)]] StructuredBuffer<uint> mcu_schedule;
 
@@ -105,12 +105,15 @@ uint peek16_kernel(uint bit_pos) {
 }
 
 /// Extract `(ac_sel, dc_sel, component)` from one packed
-/// `mcu_schedule` entry. Layout (matches the Rust-side wrapper
-/// the kernel inherits via `HuffmanParams::mcu_schedule`):
+/// `mcu_schedule` entry. Both selectors are indices into the
+/// per-component *dispatch* codebook buffers (slot k = the codebook
+/// component k references), not wire DHT selector IDs. Layout
+/// (matches the Rust-side wrapper the kernel inherits via
+/// `HuffmanParams::mcu_schedule`):
 ///
-///     bits 0..8   = component_idx  (0..=3)
-///     bits 8..16  = dc_sel         (0..=3)
-///     bits 16..24 = ac_sel         (0..=3)
+///     bits 0..8   = component_idx             (0..=3)
+///     bits 8..16  = dc dispatch-codebook index (0..=3)
+///     bits 16..24 = ac dispatch-codebook index (0..=3)
 ///
 /// Caller passes `block_in_mcu` < `blocks_per_mcu` (guaranteed by
 /// the state machine's modular update).

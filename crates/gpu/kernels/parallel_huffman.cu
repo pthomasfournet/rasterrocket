@@ -357,10 +357,13 @@ extern "C" __global__ void phase2_inter_sync(
 }
 
 // JPEG-framed helper: extract (dc_sel, ac_sel) from one packed
-// mcu_schedule entry.  Layout matches the Slang side exactly:
+// mcu_schedule entry.  Both are indices into the per-component
+// *dispatch* codebook buffers (slot k = the codebook component k
+// references), not wire DHT selector IDs.  Layout matches the
+// Slang side exactly:
 //     bits 0..8   = component_idx  (unused on the kernel side)
-//     bits 8..16  = dc_sel
-//     bits 16..24 = ac_sel
+//     bits 8..16  = dc dispatch-codebook index
+//     bits 16..24 = ac dispatch-codebook index
 __device__ __forceinline__ void unpack_schedule_device(
     const unsigned int* __restrict__ mcu_schedule,
     unsigned int block_in_mcu,

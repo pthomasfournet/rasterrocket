@@ -237,45 +237,33 @@ fn pack_unstuffed_bitstream(unstuffed: &[u8]) -> Result<PackedBitstream, JpegGpu
 ///
 /// The schedule is a flat `Vec<u32>` with one entry per 8×8 block in
 /// one MCU (interleaved scan) or exactly one entry (non-interleaved).
-/// Each entry packs `(ac_sel << 16) | (dc_sel << 8) | component_idx`.
+/// Each entry packs
+/// `(ac_dispatch_idx << 16) | (dc_dispatch_idx << 8) | component_idx`.
 ///
-/// # Validation
+/// The dc/ac fields are indices into the flat *dispatch* codebook
+/// buffers (`table_base = idx * 65536`), which
+/// [`JpegPreparedInput::dc_codebooks_for_dispatch`] /
+/// [`ac_codebooks_for_dispatch`](JpegPreparedInput::ac_codebooks_for_dispatch)
+/// lay out per component: slot `k` holds the codebook component `k`
+/// references.  Both fields therefore equal `component_idx`; they stay
+/// separate wire fields so a deduplicated codebook upload can diverge
+/// them without a kernel change.  The wire DHT selector values do not
+/// appear in the schedule — they resolve to dispatch slots on the host.
 ///
-/// Both `dc_sel` and `ac_sel` must be `< num_components`; the kernel
-/// uses them as a stride multiplier into the flat codebook buffer
-/// (`table_base = sel * 65536`).  An out-of-range selector would
-/// read past the buffer end — on CUDA that is undefined behaviour; on
-/// Vulkan with `robustBufferAccess2` it returns 0 (a `DECODE_PREFIX_MISS`
-/// sentinel), producing wrong symbols rather than crashing.
-///
-/// The validation is done here in the host wrapper so the kernel can
-/// assume its inputs are valid.
-///
-/// # Errors
-///
-/// Returns [`JpegGpuError::InvalidHuffmanTables`] if any selector for
-/// any block is ≥ `prep.components.len()`.
+/// Every packed field is `< prep.components.len() ≤ 4`, so kernel-side
+/// codebook indexing is in-bounds by construction.
 ///
 /// # Panics
 ///
-/// Panics if `prep.components.len()` > `u32::MAX` or any component index
-/// exceeds 3 — neither is possible for well-formed JPEG (≤ 4 components).
-pub fn build_mcu_schedule(prep: &JpegPreparedInput) -> Result<(Vec<u32>, u32), JpegGpuError> {
+/// Panics if a component index exceeds 3 — impossible for well-formed
+/// JPEG (≤ 4 components, enforced by the pre-pass).
+#[must_use]
+pub fn build_mcu_schedule(prep: &JpegPreparedInput) -> (Vec<u32>, u32) {
     let num_components = prep.components.len();
-    let num_comp_u32 = u32::try_from(num_components).expect("components.len() ≤ 4");
 
     let mut schedule: Vec<u32> = Vec::new();
     for (k, fc) in prep.components.iter().enumerate() {
         let k_u8 = u8::try_from(k).expect("component index < 4");
-        let dc_sel = prep.dc_selectors[k];
-        let ac_sel = prep.ac_selectors[k];
-
-        if u32::from(dc_sel) >= num_comp_u32 || u32::from(ac_sel) >= num_comp_u32 {
-            return Err(JpegGpuError::InvalidHuffmanTables(format!(
-                "scan component {k_u8} references selectors (dc={dc_sel}, ac={ac_sel}) \
-                 ≥ num_components={num_components}",
-            )));
-        }
 
         let bpm: u8 = if num_components == 1 {
             1
@@ -284,17 +272,16 @@ pub fn build_mcu_schedule(prep: &JpegPreparedInput) -> Result<(Vec<u32>, u32), J
                 .checked_mul(fc.v_sampling)
                 .expect("upstream BadSamplingFactor caps h, v ≤ 4")
         };
-        let entry = (u32::from(ac_sel) << 16) | (u32::from(dc_sel) << 8) | u32::from(k_u8);
+        let entry = (u32::from(k_u8) << 16) | (u32::from(k_u8) << 8) | u32::from(k_u8);
         for _ in 0..bpm {
             schedule.push(entry);
         }
     }
 
-    let blocks_per_mcu = u32::try_from(schedule.len()).map_err(|_| {
-        JpegGpuError::InvalidHuffmanTables("blocks_per_mcu overflows u32".to_string())
-    })?;
+    let blocks_per_mcu =
+        u32::try_from(schedule.len()).expect("≤ 4 components × 16 blocks fits u32");
 
-    Ok((schedule, blocks_per_mcu))
+    (schedule, blocks_per_mcu)
 }
 
 /// Collect the DC or AC selector each scan component references, checking
@@ -479,44 +466,60 @@ mod tests {
     #[test]
     fn mcu_schedule_grayscale_one_block() {
         let prep = prepare_jpeg(GRAY_16X16_JPEG).unwrap();
-        // Grayscale: 1 component, dc_selector=0, ac_selector=0 — one entry.
-        let (sched, bpm) = build_mcu_schedule(&prep).expect("grayscale schedule must build");
+        // Grayscale: 1 component — one entry, all fields index 0.
+        let (sched, bpm) = build_mcu_schedule(&prep);
         assert_eq!(bpm, 1, "grayscale has 1 block per MCU");
         assert_eq!(sched.len(), 1);
-        // Component index = 0, dc_sel = 0, ac_sel = 0.
-        // Packed: (0 << 16) | (0 << 8) | 0 = 0.
-        assert_eq!(sched[0], 0, "grayscale entry should encode sel=0 / comp=0");
+        assert_eq!(sched[0], 0, "grayscale entry should encode dispatch idx 0");
     }
 
     #[test]
-    fn mcu_schedule_selector_bounds_validation() {
-        // Manufacture a prep with selectors ≥ num_components to trigger
-        // the validation error.  Grayscale has num_components = 1, so
-        // dc_selector = 1 is out of bounds.
+    fn mcu_schedule_accepts_wire_selectors_above_component_count() {
+        // A grayscale scan is free to reference DHT slot 1 (or 3) —
+        // the wire selector value is unrelated to the component count.
+        // The schedule must build; the packed fields must be the
+        // dispatch index (0 for the only component), because the
+        // kernels use them to index the per-component dispatch
+        // codebook buffer, not the DHT slot array.
         let mut prep = prepare_jpeg(GRAY_16X16_JPEG).unwrap();
-        prep.dc_selectors[0] = 1; // 1 ≥ 1 component → invalid
-        let err = build_mcu_schedule(&prep).expect_err("out-of-range selector must be rejected");
-        assert!(
-            matches!(err, JpegGpuError::InvalidHuffmanTables(_)),
-            "expected InvalidHuffmanTables, got: {err:?}",
-        );
+        prep.dc_selectors[0] = 1;
+        prep.ac_selectors[0] = 3;
+        let (sched, bpm) = build_mcu_schedule(&prep);
+        assert_eq!(bpm, 1);
+        assert_eq!(sched.len(), 1);
+        assert_eq!(sched[0] & 0xFF, 0, "component index");
+        assert_eq!((sched[0] >> 8) & 0xFF, 0, "dc dispatch index");
+        assert_eq!((sched[0] >> 16) & 0xFF, 0, "ac dispatch index");
+    }
 
-        let mut prep2 = prepare_jpeg(GRAY_16X16_JPEG).unwrap();
-        prep2.ac_selectors[0] = 2; // 2 ≥ 1 component → invalid
-        let err2 =
-            build_mcu_schedule(&prep2).expect_err("out-of-range AC selector must be rejected");
-        assert!(
-            matches!(err2, JpegGpuError::InvalidHuffmanTables(_)),
-            "expected InvalidHuffmanTables (AC), got: {err2:?}",
-        );
+    #[test]
+    fn mcu_schedule_packs_dispatch_indices_not_wire_selectors() {
+        // Legal DHT layouts may indirect selectors (e.g. dc = [1, 0, 0]).
+        // The dispatch codebook buffer is laid out per component — slot k
+        // holds the codebook component k references — so the packed
+        // dc/ac fields must be k itself.  Packing the wire selector is
+        // only correct when sel[sel[k]] == sel[k], which the common
+        // [0, 1, 1] layout satisfies by accident.
+        static COLOUR_32X32_444: &[u8] =
+            include_bytes!("../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+        let mut prep = prepare_jpeg(COLOUR_32X32_444).unwrap();
+        assert_eq!(prep.components.len(), 3, "fixture must be 3-component");
+        prep.dc_selectors = vec![1, 0, 0];
+        prep.ac_selectors = vec![0, 1, 1];
+        let (sched, _bpm) = build_mcu_schedule(&prep);
+        for entry in &sched {
+            let k = entry & 0xFF;
+            assert_eq!((entry >> 8) & 0xFF, k, "dc dispatch index must equal k");
+            assert_eq!((entry >> 16) & 0xFF, k, "ac dispatch index must equal k");
+        }
     }
 
     #[test]
     fn mcu_schedule_entry_encodes_correct_fields() {
-        // Verify bit-field packing: component_idx in bits 0..8,
-        // dc_sel in bits 8..16, ac_sel in bits 16..24.
+        // Verify bit-field packing: component_idx in bits 0..8, DC
+        // dispatch index in bits 8..16, AC dispatch index in bits 16..24.
         let prep = prepare_jpeg(GRAY_16X16_JPEG).unwrap();
-        let (sched, bpm) = build_mcu_schedule(&prep).unwrap();
+        let (sched, bpm) = build_mcu_schedule(&prep);
         assert_eq!(
             bpm as usize,
             sched.len(),
@@ -524,14 +527,12 @@ mod tests {
         );
         for entry in &sched {
             let comp_idx = entry & 0xFF;
-            let dc_sel = (entry >> 8) & 0xFF;
-            let ac_sel = (entry >> 16) & 0xFF;
             assert!(
                 (comp_idx as usize) < prep.components.len(),
                 "component_idx oob"
             );
-            assert_eq!(dc_sel, u32::from(prep.dc_selectors[comp_idx as usize]));
-            assert_eq!(ac_sel, u32::from(prep.ac_selectors[comp_idx as usize]));
+            assert_eq!((entry >> 8) & 0xFF, comp_idx);
+            assert_eq!((entry >> 16) & 0xFF, comp_idx);
         }
     }
 

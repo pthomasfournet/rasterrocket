@@ -83,8 +83,7 @@ fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
         ));
     }
 
-    let (mcu_sched_host, blocks_per_mcu) =
-        build_mcu_schedule(prep).map_err(|e| BackendError::msg(format!("{e}")))?;
+    let (mcu_sched_host, blocks_per_mcu) = build_mcu_schedule(prep);
 
     let ac_refs = prep.ac_codebooks_for_dispatch();
     let dc_refs = prep.dc_codebooks_for_dispatch();
@@ -187,8 +186,7 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
         ));
     }
 
-    let (mcu_sched_host, blocks_per_mcu) =
-        build_mcu_schedule(prep).map_err(|e| BackendError::msg(format!("{e}")))?;
+    let (mcu_sched_host, blocks_per_mcu) = build_mcu_schedule(prep);
 
     let ac_refs = prep.ac_codebooks_for_dispatch();
     let dc_refs = prep.dc_codebooks_for_dispatch();
@@ -335,8 +333,7 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
         ));
     }
 
-    let (mcu_sched_host, blocks_per_mcu) =
-        build_mcu_schedule(prep).map_err(|e| BackendError::msg(format!("{e}")))?;
+    let (mcu_sched_host, blocks_per_mcu) = build_mcu_schedule(prep);
 
     let ac_refs = prep.ac_codebooks_for_dispatch();
     let dc_refs = prep.dc_codebooks_for_dispatch();
@@ -1342,7 +1339,7 @@ mod tests {
             return;
         };
         let prep = prepare_jpeg(GRAY_16X16_JPEG).expect("baseline grayscale must prepare");
-        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(&prep).expect("schedule");
+        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(&prep);
 
         // Use a small subsequence so we get multiple subseqs on the 16×16 fixture.
         let subsequence_bits = 32u32;
@@ -1381,27 +1378,6 @@ mod tests {
                 "subsequence {seq_idx}: GPU vs CPU JPEG Phase 1 state mismatch"
             );
         }
-    }
-
-    /// Validate that `build_mcu_schedule` integration with the dispatcher
-    /// rejects an out-of-range selector before touching any device memory.
-    #[test]
-    fn jpeg_phase1_rejects_oob_selector_before_dispatch() {
-        use crate::jpeg::test_fixtures::GRAY_16X16_JPEG;
-        let Some(b) = try_cuda() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        let mut prep = prepare_jpeg(GRAY_16X16_JPEG).unwrap();
-        // Force the DC selector out of range for validation.
-        prep.dc_selectors[0] = 99;
-        let err = dispatch_jpeg_phase1_intra_sync(&b, &prep, 128)
-            .expect_err("out-of-range selector must be rejected");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("selector") || msg.contains("num_components"),
-            "error should mention selector/num_components: {msg}"
-        );
     }
 
     // ── B2e: JPEG Phase 2 tests ────────────────────────────────────────────
@@ -1816,7 +1792,7 @@ mod vulkan_tests {
             return;
         };
         let prep = prepare_jpeg(GRAY_16X16_JPEG).expect("baseline grayscale must prepare");
-        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(&prep).expect("schedule");
+        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(&prep);
         let subsequence_bits = 32u32;
         let gpu_states = dispatch_jpeg_phase1_intra_sync(&vk, &prep, subsequence_bits)
             .expect("Vulkan JPEG Phase 1");

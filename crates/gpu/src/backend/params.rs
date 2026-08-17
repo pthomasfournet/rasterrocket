@@ -466,7 +466,7 @@ impl HuffmanPhase {
 ///   must both be `Some`, and `blocks_per_mcu ≥ 1`.  `dc_codebook`
 ///   has the same flat layout as `codebook`; `mcu_schedule` is
 ///   `u32[blocks_per_mcu]`, each entry packing
-///   `(ac_sel << 16) | (dc_sel << 8) | component_idx`.
+///   `(ac_dispatch_idx << 16) | (dc_dispatch_idx << 8) | component_idx`.
 pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// Packed bitstream as big-endian u32 words.
     pub bitstream: &'a B::DeviceBuffer,
@@ -509,10 +509,12 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// synthetic-stream phases.
     pub dc_codebook: Option<&'a B::DeviceBuffer>,
     /// Per-block schedule within an MCU: `u32[blocks_per_mcu]`.
-    /// Each entry encodes `(ac_sel << 16) | (dc_sel << 8) |
-    /// component_idx`, where `component_idx`, `dc_sel`, and
-    /// `ac_sel` are all 0..=3. Required for any
-    /// `phase.is_jpeg_framed()`; ignored otherwise.
+    /// Each entry encodes `(ac_dispatch_idx << 16) |
+    /// (dc_dispatch_idx << 8) | component_idx`, all 0..=3. The
+    /// dispatch indices address the per-component [`Self::codebook`]
+    /// / [`Self::dc_codebook`] layout (slot k = the codebook
+    /// component k references), not wire DHT selector IDs. Required
+    /// for any `phase.is_jpeg_framed()`; ignored otherwise.
     pub mcu_schedule: Option<&'a B::DeviceBuffer>,
     /// Exact bit count of `bitstream`.
     pub length_bits: u32,
