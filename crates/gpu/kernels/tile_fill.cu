@@ -37,24 +37,34 @@ struct TileRecord {
     unsigned int _pad2;
 };
 
-// Compute the signed y-span contribution of one segment to pixel column `px`
-// for the pixel row [iy0, iy1] (both in tile-local y coordinates).
+// Compute the signed winding-area contribution of one segment to pixel
+// column `px` for the pixel row [iy0, iy1] (both in tile-local y
+// coordinates).
 //
 // The segment enters at x = x_enter (tile-local) at y = y0_tile, with slope
 // dxdy (pixels per pixel).  `iy0` and `iy1` are the already-clipped y extents
 // of this segment within the current pixel row.
 //
-// Conceptually: we want the length of the y-interval where the segment x lies
-// to the right of px (i.e. contributes to the winding count for column px).
-// Over [iy0, iy1] the segment traces a linear range [x0, x1].  We intersect
-// this with the pixel column [px, px+1] and accumulate:
+// The contribution is the exact clipped-trapezoid integral
 //
-//   cover = (y-span where x >= px+1, fully to the right)
-//         + (y-span where px <= x < px+1, partially overlapping)
+//   cover = INTEGRAL over [iy0, iy1] of clamp(x(y) - px, 0, 1) dy
 //
-// For the partial region the linear x(y) crosses from xl to xr (or px to xr,
-// etc.) over a y-span [yf_left, yf_right].  The y-fraction where x >= px is
-// simply (yf_right - yf_left) + above, where above = y_len - yf_right.
+// — the segment's winding-count contribution integrated over the pixel's
+// interior, so partially-crossed pixels get their true covered area rather
+// than a per-y step function sampled at the pixel's left edge (which
+// over-weighted diagonal crossings by up to 2×).
+//
+// Closed form: over [iy0, iy1] the segment traces a linear range [x0, x1].
+// Split the y-interval where x(y) crosses px and px + 1:
+//
+//   - y-span with x >= px + 1 contributes 1 per unit y ("above");
+//   - the partial span (x in [px, px+1]) contributes the mean of (x - px)
+//     over its linear sweep from `left` to `right`;
+//   - y-span with x <= px contributes 0.
+//
+// Mapping y-fractions through the sorted range [xl, xr] is direction-safe:
+// the integrand depends only on the distribution of x values, which is
+// uniform along the segment.
 //
 // Returns sign × cover, where cover is in [0, y_len].
 __device__ float segment_pixel_area(float x_enter, float dxdy,
@@ -82,9 +92,9 @@ __device__ float segment_pixel_area(float x_enter, float dxdy,
     } else {
         float dx = xr - xl;
         if (dx < 1e-6f) {
-            // Near-vertical: step function at the midpoint x.
+            // Near-vertical: constant x ≈ xmid across the row.
             float xmid = 0.5f * (x0 + x1);
-            cover = (xmid >= px + 0.5f) ? y_len : 0.0f;
+            cover = y_len * fminf(fmaxf(xmid - px, 0.0f), 1.0f);
         } else {
             // Clip the x-range [xl, xr] to [px, px+1].
             float left  = fmaxf(xl, px);
@@ -98,11 +108,7 @@ __device__ float segment_pixel_area(float x_enter, float dxdy,
             // y-span where x >= px+1 (fully to the right of this pixel).
             float above = y_len - yf_right;
 
-            // Total y-span contributing: partial crossing + fully-right region.
-            // (yf_right - yf_left) is the y-span of the partial crossing region;
-            // above is the y-span fully to the right.  Together they give the
-            // fraction of y_len where the segment x is >= px (winding contribution).
-            cover = (yf_right - yf_left) + above;
+            cover = (yf_right - yf_left) * ((left + right) * 0.5f - px) + above;
         }
     }
 

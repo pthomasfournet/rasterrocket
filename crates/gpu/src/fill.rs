@@ -417,9 +417,131 @@ fn aa_fill_cpu_sample(segs: &[f32], sx: f32, sy: f32, eo: bool) -> bool {
     if eo { (winding & 1) != 0 } else { winding != 0 }
 }
 
+/// CPU model of the `tile_fill` kernel's per-pixel arithmetic, shared by
+/// the unit tests below and the GPU parity tests in `lib.rs`. Kept
+/// operation-for-operation compatible with `kernels/tile_fill.cu` /
+/// `.slang` so a formula drift in either direction surfaces as a parity
+/// failure.
+#[cfg(test)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "pub(crate) is intentional: the parent `fill` module is private; \
+              explicit visibility documents that lib.rs's GPU parity tests \
+              consume these helpers"
+)]
+pub(crate) mod test_model {
+    use super::{TILE_H, TILE_W, TileRecord};
+
+    /// CPU model of `segment_pixel_area` in `kernels/tile_fill.cu`.
+    ///
+    /// Kept operation-for-operation compatible with the device code so the
+    /// coverage tests below exercise the same arithmetic the kernel performs.
+    ///
+    /// Computes the exact clipped-trapezoid integral
+    /// `sign × ∫_{iy0}^{iy1} clamp(x(y) − px, 0, 1) dy` — the winding-count
+    /// contribution of the segment integrated over the pixel's interior,
+    /// not a per-y step function sampled at the pixel's left edge.
+    pub(crate) fn segment_pixel_area(
+        x_at_iy0: f32,
+        dxdy: f32,
+        iy0: f32,
+        iy1: f32,
+        sign: f32,
+        px: f32,
+    ) -> f32 {
+        let y_len = iy1 - iy0;
+        if y_len <= 0.0 {
+            return 0.0;
+        }
+        let x0 = x_at_iy0;
+        let x1 = dxdy.mul_add(iy1 - iy0, x_at_iy0);
+        let xl = x0.min(x1);
+        let xr = x0.max(x1);
+        let cover = if xr <= px {
+            0.0
+        } else if xl >= px + 1.0 {
+            y_len
+        } else {
+            let dx = xr - xl;
+            if dx < 1e-6 {
+                // Near-vertical: constant x ≈ xmid across the row.
+                let xmid = 0.5 * (x0 + x1);
+                y_len * (xmid - px).clamp(0.0, 1.0)
+            } else {
+                // Split the y-interval where x(y) crosses px and px + 1.
+                // x(y) is monotone over the sorted range [xl, xr]; mapping
+                // y-fractions through the sorted range is direction-safe
+                // because the integrand depends only on the distribution
+                // of x values, which is uniform along the segment.
+                let left = xl.max(px);
+                let right = xr.min(px + 1.0);
+                let yf_left = (left - xl) / dx * y_len;
+                let yf_right = (right - xl) / dx * y_len;
+                // y-span with x ≥ px + 1 contributes 1 per unit y; the
+                // partial span contributes the mean of (x − px) over its
+                // linear sweep from `left` to `right`.
+                let above = y_len - yf_right;
+                (yf_right - yf_left).mul_add(0.5f32.mul_add(left + right, -px), above)
+            }
+        };
+        cover * sign
+    }
+
+    /// CPU model of the `tile_fill` kernel's per-pixel accumulation loop.
+    ///
+    /// Returns the winding/area value the kernel would compute for `(px, py)`.
+    pub(crate) fn kernel_area_at(
+        recs: &[TileRecord],
+        starts: &[u32],
+        counts: &[u32],
+        grid_w: u32,
+        px: u32,
+        py: u32,
+    ) -> f32 {
+        let (tile_x, tile_y) = (px / TILE_W, py / TILE_H);
+        let (px_local, py_local) = (px % TILE_W, py % TILE_H);
+        let idx = (tile_y * grid_w + tile_x) as usize;
+        let (start, count) = (starts[idx] as usize, counts[idx] as usize);
+        let py_f = py_local as f32;
+        let mut area = 0.0f32;
+        for rec in &recs[start..start + count] {
+            let iy0 = rec.y0_tile.max(py_f);
+            let iy1 = rec.y1_tile.min(py_f + 1.0);
+            if iy0 >= iy1 {
+                continue;
+            }
+            let x_at_iy0 = rec.dxdy.mul_add(iy0 - rec.y0_tile, rec.x_enter);
+            area += segment_pixel_area(x_at_iy0, rec.dxdy, iy0, iy1, rec.sign, px_local as f32);
+        }
+        area
+    }
+
+    /// Kernel-model coverage byte for `(px, py)` under non-zero winding,
+    /// mirroring the kernel's `min(|area|, 1) * 255.5` conversion.
+    pub(crate) fn kernel_coverage_at(
+        recs: &[TileRecord],
+        starts: &[u32],
+        counts: &[u32],
+        grid_w: u32,
+        px: u32,
+        py: u32,
+    ) -> u8 {
+        let area = kernel_area_at(recs, starts, counts, grid_w, px, py);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "min(|area|,1) * 255.5 is in [0, 255.5]; truncation to 0..=255 is the kernel's own conversion"
+        )]
+        {
+            (area.abs().min(1.0) * 255.5) as u8
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TILE_H, TILE_W, TileRecord, aa_fill_cpu, build_tile_records};
+    use super::test_model::{kernel_area_at, kernel_coverage_at, segment_pixel_area};
+    use super::{aa_fill_cpu, build_tile_records};
 
     #[test]
     fn aa_fill_cpu_solid_rect_full_coverage() {
@@ -491,66 +613,35 @@ mod tests {
         assert!(recs.len() >= 2, "diagonal must produce at least 2 records");
     }
 
-    /// CPU model of `segment_pixel_area` in `kernels/tile_fill.cu`.
-    ///
-    /// Kept byte-compatible with the device code so the coverage tests below
-    /// exercise the same arithmetic the kernel performs.
-    fn segment_pixel_area(x_at_iy0: f32, dxdy: f32, iy0: f32, iy1: f32, sign: f32, px: f32) -> f32 {
-        let y_len = iy1 - iy0;
-        if y_len <= 0.0 {
-            return 0.0;
-        }
-        let x0 = x_at_iy0;
-        let x1 = dxdy.mul_add(iy1 - iy0, x_at_iy0);
-        let xl = x0.min(x1);
-        let xr = x0.max(x1);
-        let cover = if xr <= px {
-            0.0
-        } else if xl >= px + 1.0 {
-            y_len
-        } else {
-            let dx = xr - xl;
-            if dx < 1e-6 {
-                let xmid = 0.5 * (x0 + x1);
-                if xmid >= px + 0.5 { y_len } else { 0.0 }
-            } else {
-                let left = xl.max(px);
-                let right = xr.min(px + 1.0);
-                let frac = ((right - left) / dx).clamp(0.0, 1.0);
-                let x_right_frac = (px + 1.0 - left).max(0.0) / dx;
-                y_len * frac * x_right_frac.clamp(0.0, 1.0)
-            }
-        };
-        cover * sign
-    }
+    /// `segment_pixel_area` computes the exact clipped-trapezoid integral
+    /// `∫ clamp(x(y) − px, 0, 1) dy` over the pixel row — pin its value on
+    /// the shapes where the old `frac × x_right_frac` product (and the
+    /// kernels' span-sum variant) over-weighted partial crossings.
+    #[test]
+    fn segment_pixel_area_is_the_exact_clipped_trapezoid_integral() {
+        // Diagonal sweeping the full pixel width within one scanline
+        // (x: 0 → 1 over the row): true covered area is 0.5, not 1.0.
+        let diag = segment_pixel_area(0.0, 1.0, 0.0, 1.0, 1.0, 0.0);
+        assert!((diag - 0.5).abs() < 1e-6, "diagonal: got {diag}");
 
-    /// CPU model of the `tile_fill` kernel's per-pixel accumulation loop.
-    ///
-    /// Returns the winding/area value the kernel would compute for `(px, py)`.
-    fn kernel_area_at(
-        recs: &[TileRecord],
-        starts: &[u32],
-        counts: &[u32],
-        grid_w: u32,
-        px: u32,
-        py: u32,
-    ) -> f32 {
-        let (tile_x, tile_y) = (px / TILE_W, py / TILE_H);
-        let (px_local, py_local) = (px % TILE_W, py % TILE_H);
-        let idx = (tile_y * grid_w + tile_x) as usize;
-        let (start, count) = (starts[idx] as usize, counts[idx] as usize);
-        let py_f = py_local as f32;
-        let mut area = 0.0f32;
-        for rec in &recs[start..start + count] {
-            let iy0 = rec.y0_tile.max(py_f);
-            let iy1 = rec.y1_tile.min(py_f + 1.0);
-            if iy0 >= iy1 {
-                continue;
-            }
-            let x_at_iy0 = rec.dxdy.mul_add(iy0 - rec.y0_tile, rec.x_enter);
-            area += segment_pixel_area(x_at_iy0, rec.dxdy, iy0, iy1, rec.sign, px_local as f32);
-        }
-        area
+        // Near-vertical edge at x = 0.25: covers a quarter of the pixel,
+        // not the old all-or-nothing midpoint step.
+        let vert = segment_pixel_area(0.25, 0.0, 0.0, 1.0, 1.0, 0.0);
+        assert!((vert - 0.25).abs() < 1e-6, "vertical: got {vert}");
+
+        // Partial crossing exiting right: x: 0.5 → 2.0 over the row.
+        // ∫₀^⅓ (0.5 + 1.5y) dy + ∫_⅓^1 1 dy = 1/4 + 2/3 = 11/12.
+        let cross = segment_pixel_area(0.5, 1.5, 0.0, 1.0, 1.0, 0.0);
+        assert!(
+            (cross - 11.0 / 12.0).abs() < 1e-6,
+            "partial crossing: got {cross}"
+        );
+
+        // Fully right of the column: full y-span; fully left: nothing.
+        let right = segment_pixel_area(2.0, 0.5, 0.0, 1.0, 1.0, 0.0);
+        assert!((right - 1.0).abs() < 1e-6, "fully right: got {right}");
+        let left = segment_pixel_area(-2.0, 0.5, 0.0, 1.0, 1.0, 0.0);
+        assert!(left.abs() < 1e-6, "fully left: got {left}");
     }
 
     /// A fill wider than one tile must be solid across its interior.
@@ -586,27 +677,6 @@ mod tests {
         }
     }
 
-    /// Kernel-model coverage byte for `(px, py)` under non-zero winding,
-    /// mirroring the kernel's `min(|area|, 1) * 255.5` conversion.
-    fn kernel_coverage_at(
-        recs: &[TileRecord],
-        starts: &[u32],
-        counts: &[u32],
-        grid_w: u32,
-        px: u32,
-        py: u32,
-    ) -> u8 {
-        let area = kernel_area_at(recs, starts, counts, grid_w, px, py);
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "min(|area|,1) * 255.5 is in [0, 255.5]; truncation to 0..=255 is the kernel's own conversion"
-        )]
-        {
-            (area.abs().min(1.0) * 255.5) as u8
-        }
-    }
-
     /// A rect whose right edge lands exactly at `x == bbox width` — with the
     /// width a multiple of `TILE_W`, as `gpu_fill_segs` produces for every
     /// axis-aligned shape with integral coordinates — must still cover its
@@ -628,15 +698,17 @@ mod tests {
         }
     }
 
-    /// The tile kernel model must agree with `aa_fill_cpu` on every pixel
-    /// `aa_fill_cpu` resolves as fully inside or fully outside a shape.
+    /// The tile kernel model must agree with `aa_fill_cpu` on every pixel:
+    /// exactly on pixels `aa_fill_cpu` resolves as fully inside or fully
+    /// outside, and within a sampling-noise bound on antialiased boundary
+    /// pixels (the exact clipped-trapezoid integral vs the 64-sample
+    /// jittered estimate).
     ///
     /// This is the guard against the total-content-loss class of record
-    /// bugs: a culled or missing record flips whole interior columns to 0.
-    /// Antialiased boundary pixels (0 < aa < 255) are exempt — the kernel's
-    /// analytic edge formula over-weights partially-crossed pixels relative
-    /// to the 64-sample jittered estimate, which is an edge-quality
-    /// divergence, not coverage loss.
+    /// bugs (a culled or missing record flips whole interior columns to 0)
+    /// *and* against edge-formula drift — the old `segment_pixel_area`
+    /// over-weighted diagonally-crossed pixels by up to 2×, which the
+    /// boundary bound now catches.
     #[test]
     fn tile_fill_matches_aa_fill_cpu_on_solid_pixels() {
         struct Case {
@@ -685,7 +757,14 @@ mod tests {
                             "{}: exterior pixel ({px},{py}) tile={t}, aa=0",
                             case.name
                         ),
-                        _ => {} // AA boundary pixel — see doc comment
+                        a => {
+                            let diff = (i16::from(t) - i16::from(a)).abs();
+                            assert!(
+                                diff <= 48,
+                                "{}: boundary pixel ({px},{py}) tile={t}, aa={a}, |diff|={diff}",
+                                case.name
+                            );
+                        }
                     }
                 }
             }

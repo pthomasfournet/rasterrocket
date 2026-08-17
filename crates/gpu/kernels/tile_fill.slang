@@ -27,9 +27,10 @@ struct TileRecord {
     uint  _pad2;
 };
 
-// Signed y-span contribution of one segment to pixel column `px` for the
-// pixel row [iy0, iy1] (both in tile-local y coordinates).  See aa_fill /
-// tile_fill .cu commentary for the derivation.
+// Signed winding-area contribution of one segment to pixel column `px` for
+// the pixel row [iy0, iy1] (both in tile-local y coordinates): the exact
+// clipped-trapezoid integral of clamp(x(y) - px, 0, 1) over the row.  See
+// tile_fill.cu commentary for the derivation.
 float segment_pixel_area(float x_enter, float dxdy,
                          float iy0, float iy1,
                          float sign_arg, float px)
@@ -51,15 +52,16 @@ float segment_pixel_area(float x_enter, float dxdy,
     } else {
         float dx = xr - xl;
         if (dx < 1e-6f) {
+            // Near-vertical: constant x ≈ xmid across the row.
             float xmid = 0.5f * (x0 + x1);
-            cover = (xmid >= px + 0.5f) ? y_len : 0.0f;
+            cover = y_len * clamp(xmid - px, 0.0f, 1.0f);
         } else {
             float left_  = max(xl, px);
             float right_ = min(xr, px + 1.0f);
             float yf_left  = (left_  - xl) / dx * y_len;
             float yf_right = (right_ - xl) / dx * y_len;
             float above = y_len - yf_right;
-            cover = (yf_right - yf_left) + above;
+            cover = (yf_right - yf_left) * ((left_ + right_) * 0.5f - px) + above;
         }
     }
 
