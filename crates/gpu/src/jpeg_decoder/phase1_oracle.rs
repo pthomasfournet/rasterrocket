@@ -45,7 +45,9 @@ use crate::jpeg_decoder::bitstream::peek16;
 pub(super) struct SubsequenceState {
     /// Absolute bit position in `PackedBitstream`.
     pub p: u32,
-    /// Symbols decoded since `start_bit`.
+    /// Symbols counted under the per-region convention: only symbols
+    /// whose first bit lies below the walk's `count_to` boundary, and
+    /// reset to 0 when Phase 2/4 inherit a predecessor snapshot.
     pub n: u32,
     /// Current component index (0..`num_components`).
     pub c: u32,

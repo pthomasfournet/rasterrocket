@@ -150,11 +150,14 @@ impl PageRecorder {
             })?;
         let cmd = cmd_buffers[0];
 
-        // Descriptor pool: storage-buffer-only, sized for our worst case
-        // kernel (tile_fill: 4 buffers per set) × MAX_DESC_SETS_PER_PAGE.
+        // Descriptor pool: storage-buffer-only, sized for the worst-case
+        // kernel (jpeg_phase4_redecode: 8 buffers per set) ×
+        // MAX_DESC_SETS_PER_PAGE. Undersizing fails loudly at
+        // vkAllocateDescriptorSets, but only once a page records more
+        // sets than the smaller budget covered.
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(MAX_DESC_SETS_PER_PAGE * 4)];
+            .descriptor_count(MAX_DESC_SETS_PER_PAGE * 8)];
         let dp_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(MAX_DESC_SETS_PER_PAGE)
             .pool_sizes(&pool_sizes);

@@ -469,34 +469,16 @@ __device__ __forceinline__ unsigned int try_decode_one_jpeg_symbol_device(
 }
 
 // JPEG-framed Phase 2 (inter-sequence sync by re-decode propagation).
+// Mirror of `jpeg_phase2_inter_sync` in parallel_huffman.slang — the
+// algorithm essay (Jacobi propagation over the double-buffered s_info,
+// fixpoint flags, slot-0 pinning, error-stall semantics) lives there
+// per this file's header policy.
 //
 // State semantics mirror jpeg_phase1_intra_sync:
 //   state.x = p              (bit position)
-//   state.y = n              (per-thread symbol count)
+//   state.y = n              (per-thread symbol count; restarts at 0)
 //   state.z = block_in_mcu   (0 .. blocks_per_mcu - 1)
 //   state.w = z_in_block     (0 .. 64)
-//
-// Unlike the synthetic `phase2_inter_sync`, no agreement predicate can
-// sync JPEG framing: fresh-start Phase 1 walkers hold permanently
-// wrong block phases for multi-component streams (no in-stream marker
-// carries component phase), and two wrong walkers can agree. Instead,
-// each pass is a Jacobi step over a double-buffered s_info: thread i
-// re-decodes its region from `s_info_in[i - 1]`'s boundary snapshot —
-// walking until the first symbol whose advance reaches region i's end
-// (`min(length_bits, (i + 1) * subsequence_bits)`) — and writes the
-// recomputed snapshot to `s_info_out[i]`; `n` restarts at 0 so it
-// counts only region i's symbols. Thread 0 copies its slot through
-// (its fresh start is the true stream start, so its Phase 1 snapshot
-// is correct by construction).
-//
-// flags[i] = 1 when the recompute is a fixpoint (out == in). A pass
-// in which every thread reports a fixpoint leaves the whole chain
-// correct: slot 0 is correct, and each following slot equals the
-// deterministic re-decode of its predecessor. The host swaps the two
-// buffers between passes; on convergence they are identical. A decode
-// error mid-region stops the walk and writes the error-point state —
-// deterministic, so erroring regions also reach a fixpoint and the
-// error surfaces later as a typed Phase 4 failure.
 extern "C" __global__ void jpeg_phase2_inter_sync(
     const unsigned int* __restrict__ bitstream,
     const unsigned int* __restrict__ codebook,
@@ -510,6 +492,12 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
     unsigned int num_subsequences,
     unsigned int blocks_per_mcu
 ) {
+    // Defensive mirror of the host-side validate() check: the
+    // schedule helper's modulo is undefined for 0. The Slang mirror
+    // carries the same guard.
+    if (blocks_per_mcu == 0u) {
+        return;
+    }
     unsigned int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (seq_idx >= num_subsequences) {
         return;
@@ -584,6 +572,12 @@ extern "C" __global__ void jpeg_phase4_redecode(
     unsigned int num_subsequences,
     unsigned int blocks_per_mcu
 ) {
+    // Defensive mirror of the host-side validate() check: the
+    // schedule helper's modulo is undefined for 0. The Slang mirror
+    // carries the same guard.
+    if (blocks_per_mcu == 0u) {
+        return;
+    }
     unsigned int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (seq_idx >= num_subsequences) {
         return;
@@ -645,6 +639,12 @@ extern "C" __global__ void jpeg_phase1_intra_sync(
     unsigned int num_subsequences,
     unsigned int blocks_per_mcu
 ) {
+    // Defensive mirror of the host-side validate() check: the
+    // schedule helper's modulo is undefined for 0. The Slang mirror
+    // carries the same guard.
+    if (blocks_per_mcu == 0u) {
+        return;
+    }
     unsigned int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (seq_idx >= num_subsequences) {
         return;

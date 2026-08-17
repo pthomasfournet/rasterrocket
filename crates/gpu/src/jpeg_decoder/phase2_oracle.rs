@@ -93,7 +93,7 @@ fn phase2_sync_pass(
         let me = s_info[i];
         let nxt = s_info[i + 1];
         let nxt_start_p = u32::try_from(i + 1)
-            .expect("subseq idx fits u32 by HuffmanParams::validate")
+            .expect("subsequence counts derive from u32 bit lengths")
             .saturating_mul(subsequence_bits);
         let in_range = me.p >= nxt_start_p;
         let aligned = me.c == nxt.c && me.z == nxt.z;
@@ -146,24 +146,6 @@ pub(super) fn phase2_run_to_sync(
     Phase2Outcome::SyncBoundExceeded { bound }
 }
 
-/// Pass bound for the JPEG-framed propagation Phase 2 loop.
-///
-/// Derivation: slot 0 is pinned (its Phase 1 walker starts at bit 0
-/// in the true initial state, so its snapshot is correct by
-/// construction), and each pass recomputes slot `i` from the previous
-/// pass's slot `i - 1` — so after `k` passes, slots `0..=k` hold
-/// their final values. All `n` slots are final after `n - 1` passes;
-/// the next pass observes every recompute as a fixpoint and reports
-/// convergence. The dispatch loop's `0..=bound` shape runs
-/// `bound + 1` passes, so `bound = n - 1` guarantees convergence
-/// detection for every input — including streams with decode errors,
-/// because the re-decode is a deterministic function of the
-/// predecessor state and therefore still stabilises.
-#[must_use]
-pub(super) fn jpeg_phase2_retry_bound(num_subsequences: usize) -> u32 {
-    u32::try_from(num_subsequences.saturating_sub(1)).unwrap_or(u32::MAX)
-}
-
 /// Re-decode one subsequence's region from its predecessor's boundary
 /// snapshot, returning the recomputed boundary snapshot.
 ///
@@ -178,8 +160,9 @@ pub(super) fn jpeg_phase2_retry_bound(num_subsequences: usize) -> u32 {
 ///
 /// On a decode error the walk stops and returns the error-point
 /// state. The re-decode is deterministic, so an erroring region still
-/// reaches a fixpoint; the error itself surfaces later as a typed
-/// Phase 4 failure.
+/// reaches a fixpoint, with every downstream snapshot collapsing to
+/// the error bit; the dispatcher's post-convergence stall check is
+/// what surfaces it.
 fn jpeg_phase2_redecode(
     inherited: SubsequenceState,
     region_end: u32,
@@ -251,15 +234,21 @@ pub(super) fn jpeg_phase2_run_to_sync(
     if n <= 1 {
         return Phase2Outcome::Converged { iterations: 0 };
     }
-    let bound = jpeg_phase2_retry_bound(n);
+    let bound = super::huffman::jpeg_phase2_retry_bound(
+        u32::try_from(n).expect("subsequence counts derive from u32 bit lengths"),
+    );
     let length_bits = bitstream.length_bits;
     for iter in 0..=bound {
         let prev = s_info.to_vec();
         let mut all_fixed = true;
         for i in 1..n {
+            // The kernels compute (i + 1) * subsequence_bits with plain
+            // u32 arithmetic — non-wrapping there because validate()
+            // bounds length_bits + 2·ssb; the oracle accepts arbitrary
+            // test inputs, so it saturates instead.
             let region_end = length_bits.min(
                 u32::try_from(i + 1)
-                    .expect("subseq idx fits u32 by HuffmanParams::validate")
+                    .expect("subsequence counts derive from u32 bit lengths")
                     .saturating_mul(subsequence_bits),
             );
             let out = jpeg_phase2_redecode(
@@ -517,6 +506,7 @@ mod tests {
 
     #[test]
     fn jpeg_retry_bound_is_num_subsequences_minus_one() {
+        use super::super::huffman::jpeg_phase2_retry_bound;
         assert_eq!(jpeg_phase2_retry_bound(0), 0);
         assert_eq!(jpeg_phase2_retry_bound(1), 0);
         assert_eq!(jpeg_phase2_retry_bound(2), 1);

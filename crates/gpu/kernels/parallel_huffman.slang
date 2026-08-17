@@ -448,10 +448,10 @@ void phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
 ///     state.z = block_in_mcu   (0 .. blocks_per_mcu - 1)
 ///     state.w = z_in_block     (0 .. 64)
 ///
-/// The Phase 2 sync predicate operates on snapshots: two threads are
-/// in agreement at the boundary when their `(block_in_mcu, z_in_block)`
-/// match, which is the natural framing equivalent of the synthetic-
-/// stream `(component, zig-zag)` agreement.
+/// Phase 2 re-derives each snapshot from its predecessor by re-decode
+/// propagation; Phase 1's fresh-start snapshots are only the initial
+/// guess (their block phase is generically wrong for multi-component
+/// streams).
 [shader("compute")][numthreads(256, 1, 1)]
 void jpeg_phase1_intra_sync(uint3 tid : SV_DispatchThreadID) {
     if (blocks_per_mcu == 0u) {
@@ -582,8 +582,10 @@ void jpeg_phase4_redecode(uint3 tid : SV_DispatchThreadID) {
 /// the deterministic re-decode of its predecessor. The host swaps the
 /// two buffers between passes; on convergence they are identical. A
 /// decode error mid-region stops the walk and writes the error-point
-/// state — deterministic, so erroring regions also reach a fixpoint
-/// and the error surfaces later as a typed Phase 4 failure.
+/// state — deterministic, so erroring regions also reach a fixpoint,
+/// with every downstream snapshot collapsing to the error bit; the
+/// dispatcher's post-convergence stall check surfaces it (Phase 4
+/// replays these walks and exits cleanly at end_p).
 [shader("compute")][numthreads(256, 1, 1)]
 void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
     if (blocks_per_mcu == 0u) {

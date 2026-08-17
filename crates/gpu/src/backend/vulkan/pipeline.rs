@@ -334,17 +334,16 @@ impl KernelId {
             // (data, block_sums) — len_elems travels as push constant
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => 2,
-            // (bitstream, codebook, s_info) — length_bits +
-            // subsequence_bits + num_subsequences + num_components
-            // travel as push constants (16 bytes total).
+            // (bitstream, codebook, s_info) — the shared 24-byte
+            // huffman push struct carries the scalars.
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::Phase1IntraSync => 3,
             // (bitstream, codebook, s_info, sync_flags) — shares the
-            // 20-byte push struct with all huffman phases.
+            // 24-byte push struct with all huffman phases.
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::Phase2InterSync => 4,
             // (bitstream, codebook, s_info, offsets, symbols_out,
-            // decode_status) — shares the 20-byte push struct;
+            // decode_status) — shares the 24-byte push struct;
             // Phase 4 reads `total_symbols` for bounds-checking
             // writes; the other phases ignore it. `decode_status`
             // is the per-subseq u32 exit-condition buffer (see

@@ -23,16 +23,6 @@ use crate::jpeg_decoder::phase1_oracle::SubsequenceState;
 #[cfg(test)]
 use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 
-/// `2 × ⌈log₂(n)⌉` — upper bound on Phase 2 iterations for `n` subsequences.
-///
-/// Synthetic-stream phases only; the JPEG-framed propagation loop uses
-/// [`jpeg_phase2_retry_bound`].
-#[cfg(all(test, feature = "gpu-validation"))]
-const fn phase2_retry_bound(num_subsequences: usize) -> u32 {
-    let pow2_exp = num_subsequences.next_power_of_two().trailing_zeros();
-    2u32.saturating_mul(pow2_exp)
-}
-
 /// Pass bound for the JPEG-framed Phase 2 propagation loop: `n - 1`.
 ///
 /// Slot 0 is pinned correct (its fresh start is the true stream
@@ -43,7 +33,11 @@ const fn phase2_retry_bound(num_subsequences: usize) -> u32 {
 /// most `bound + 1 = n` passes and always detects convergence — the
 /// re-decode is deterministic even for erroring streams, so the
 /// non-convergence error path is defence-in-depth only.
-const fn jpeg_phase2_retry_bound(num_subsequences: u32) -> u32 {
+///
+/// Single definition shared with the CPU oracle
+/// (`phase2_oracle::jpeg_phase2_run_to_sync`) so the bound embedded
+/// in compared `Phase2Outcome`s cannot drift between the two.
+pub(in crate::jpeg_decoder) const fn jpeg_phase2_retry_bound(num_subsequences: u32) -> u32 {
     num_subsequences.saturating_sub(1)
 }
 
@@ -75,6 +69,217 @@ fn build_gpu_codebook_refs(codebooks: &[&CanonicalCodebook]) -> Vec<u32> {
     flatten_codebooks(codebooks.iter().copied())
 }
 
+/// Device buffers and derived dimensions shared by every JPEG-framed
+/// one-shot dispatch: entropy bitstream, flat AC/DC codebooks, MCU
+/// schedule, the ping-ponged pair of per-subsequence state buffers,
+/// and the Phase 2 fixpoint flags.
+///
+/// Owns the alloc/upload preamble the dispatchers previously
+/// copy-pasted; the phase flow stays explicit at each call site.
+/// `s_info` always names the most recently written state buffer —
+/// [`run_jpeg_phase2_passes`] swaps the pair after each pass.
+struct JpegDispatchSetup<'a, B: GpuBackend> {
+    bitstream: DeviceBufferGuard<'a, B>,
+    codebook: DeviceBufferGuard<'a, B>,
+    dc_codebook: DeviceBufferGuard<'a, B>,
+    mcu_schedule: DeviceBufferGuard<'a, B>,
+    s_info: DeviceBufferGuard<'a, B>,
+    s_info_scratch: DeviceBufferGuard<'a, B>,
+    sync_flags: DeviceBufferGuard<'a, B>,
+    length_bits: u32,
+    subsequence_bits: u32,
+    num_subsequences: u32,
+    num_components: u32,
+    blocks_per_mcu: u32,
+}
+
+impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
+    /// Allocate and upload everything the JPEG-framed phases share.
+    ///
+    /// # Errors
+    /// Returns `BackendError` when `subsequence_bits` is zero, the
+    /// component count does not fit `u32`, or any allocation/upload
+    /// fails.
+    fn new(
+        backend: &'a B,
+        prep: &crate::jpeg_decoder::JpegPreparedInput,
+        subsequence_bits: u32,
+    ) -> Result<Self> {
+        if subsequence_bits == 0 {
+            return Err(BackendError::msg(
+                "jpeg huffman dispatch: subsequence_bits must be > 0",
+            ));
+        }
+        let (mcu_sched_host, blocks_per_mcu) = crate::jpeg_decoder::build_mcu_schedule(prep);
+
+        let ac_flat = build_gpu_codebook_refs(&prep.ac_codebooks_for_dispatch());
+        let dc_flat = build_gpu_codebook_refs(&prep.dc_codebooks_for_dispatch());
+
+        let num_components = u32::try_from(prep.components.len())
+            .map_err(|_| BackendError::msg("components.len() does not fit in u32"))?;
+        let length_bits = prep.bitstream.length_bits;
+        let num_subsequences = length_bits.div_ceil(subsequence_bits);
+
+        // peek16 reads `word_idx + 1` even at the stream tail, so the
+        // bitstream buffer needs one zero word of headroom.
+        let bitstream_bytes = ((length_bits.div_ceil(32) as usize) + 1) * 4;
+        let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
+        let flags_bytes = (num_subsequences as usize) * 4;
+
+        let bitstream = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
+        let codebook = DeviceBufferGuard::alloc(backend, ac_flat.len() * 4)?;
+        let dc_codebook = DeviceBufferGuard::alloc(backend, dc_flat.len() * 4)?;
+        let mcu_schedule = DeviceBufferGuard::alloc(backend, mcu_sched_host.len() * 4)?;
+        let s_info = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+        let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+        // Zeroed so a kernel guard that returns without writing (e.g.
+        // the defensive blocks_per_mcu check) reads back as
+        // all-unsynced, never as spurious convergence.
+        let sync_flags = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
+
+        let _up1 = backend.upload_async(
+            bitstream.as_ref(),
+            bytemuck::cast_slice(&prep.bitstream.words),
+        )?;
+        let _up2 = backend.upload_async(codebook.as_ref(), bytemuck::cast_slice(&ac_flat))?;
+        let _up3 = backend.upload_async(dc_codebook.as_ref(), bytemuck::cast_slice(&dc_flat))?;
+        let _up4 =
+            backend.upload_async(mcu_schedule.as_ref(), bytemuck::cast_slice(&mcu_sched_host))?;
+
+        Ok(Self {
+            bitstream,
+            codebook,
+            dc_codebook,
+            mcu_schedule,
+            s_info,
+            s_info_scratch,
+            sync_flags,
+            length_bits,
+            subsequence_bits,
+            num_subsequences,
+            num_components,
+            blocks_per_mcu,
+        })
+    }
+
+    /// `HuffmanParams` skeleton with the shared buffers and dims; the
+    /// per-phase helpers below fill in the phase-specific fields.
+    fn base_params(&self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
+        HuffmanParams {
+            bitstream: self.bitstream.as_ref(),
+            codebook: self.codebook.as_ref(),
+            s_info: self.s_info.as_ref(),
+            sync_flags: None,
+            s_info_prev: None,
+            offsets: None,
+            symbols_out: None,
+            decode_status: None,
+            dc_codebook: Some(self.dc_codebook.as_ref()),
+            mcu_schedule: Some(self.mcu_schedule.as_ref()),
+            length_bits: self.length_bits,
+            subsequence_bits: self.subsequence_bits,
+            num_components: self.num_components,
+            total_symbols: 0,
+            blocks_per_mcu: self.blocks_per_mcu,
+            phase,
+        }
+    }
+
+    /// Record and run JPEG Phase 1 into `s_info`.
+    fn run_phase1(&self, backend: &B) -> Result<()> {
+        backend.begin_page()?;
+        backend.record_huffman(self.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
+        let fence = backend.submit_page()?;
+        backend.wait_page(fence)
+    }
+
+    /// Download the current `s_info` states.
+    fn download_s_info(&self, backend: &B) -> Result<Vec<SubsequenceState>> {
+        let mut out = vec![
+            <SubsequenceState as bytemuck::Zeroable>::zeroed();
+            self.num_subsequences as usize
+        ];
+        let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut out);
+        let handle = backend.download_async(self.s_info.as_ref(), dst)?;
+        backend.wait_download(handle)?;
+        Ok(out)
+    }
+
+    /// Hand every buffer back through `free_device` (the happy-path
+    /// counterpart of the guards' Drop-frees).
+    fn free_all(self, backend: &B) {
+        backend.free_device(self.bitstream.take());
+        backend.free_device(self.codebook.take());
+        backend.free_device(self.dc_codebook.take());
+        backend.free_device(self.mcu_schedule.take());
+        backend.free_device(self.s_info.take());
+        backend.free_device(self.s_info_scratch.take());
+        backend.free_device(self.sync_flags.take());
+    }
+}
+
+/// Drive the JPEG Phase 2 propagation to convergence: each pass is one
+/// `JpegPhase2InterSync` dispatch reading the previous pass's states
+/// (`setup.s_info`) and writing the recomputed ones
+/// (`setup.s_info_scratch`), followed by a buffer swap — so
+/// `setup.s_info` always holds the last-written states, and on
+/// convergence the two buffers are identical (a fixpoint pass changes
+/// nothing).
+///
+/// Returns `Some(iterations)` (0-based index of the converged pass) or
+/// `None` when the [`jpeg_phase2_retry_bound`] pass budget runs out —
+/// unreachable for a correct kernel (the re-decode is deterministic,
+/// so even erroring streams stabilise); kept as defence-in-depth.
+///
+/// One loop shared by the oracle-parity dispatcher and the production
+/// Phase 1–4 dispatcher, so the code the parity tests exercise is the
+/// code production runs.
+fn run_jpeg_phase2_passes<B: GpuBackend>(
+    backend: &B,
+    setup: &mut JpegDispatchSetup<'_, B>,
+) -> Result<Option<u32>> {
+    let bound = jpeg_phase2_retry_bound(setup.num_subsequences);
+    let mut flags_host = vec![0u32; setup.num_subsequences as usize];
+    for iter in 0..=bound {
+        backend.begin_page()?;
+        let mut params = setup.base_params(HuffmanPhase::JpegPhase2InterSync);
+        params.s_info = setup.s_info_scratch.as_ref();
+        params.s_info_prev = Some(setup.s_info.as_ref());
+        params.sync_flags = Some(setup.sync_flags.as_ref());
+        backend.record_huffman(params)?;
+        let fence = backend.submit_page()?;
+        backend.wait_page(fence)?;
+
+        let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
+        let handle = backend.download_async(setup.sync_flags.as_ref(), dst)?;
+        backend.wait_download(handle)?;
+
+        std::mem::swap(&mut setup.s_info, &mut setup.s_info_scratch);
+        if flags_host.iter().all(|&f| f == 1) {
+            return Ok(Some(iter));
+        }
+    }
+    Ok(None)
+}
+
+/// True when the converged chain's terminal snapshot stopped short of
+/// the stream tail: a decode error inside any region stalls the
+/// propagation at the error bit — every downstream snapshot collapses
+/// to it, and Phase 4, replaying exactly the walks that produced the
+/// snapshots, exits cleanly at `end_p` without re-encountering the
+/// error. The stall is only observable here.
+///
+/// The tail allowance is one maximal symbol (16-bit codeword + 11
+/// magnitude bits): byte-padding legitimately ends every stream in a
+/// decode error within that distance of `length_bits`. For wire input
+/// the CPU pre-pass has already decoded the full stream, so a
+/// mid-stream stall indicates a kernel bug or GPU fault, not a
+/// malformed file.
+const fn jpeg_stream_stalled(terminal_p: u32, length_bits: u32) -> bool {
+    const MAX_SYMBOL_BITS: u32 = 16 + 11;
+    terminal_p.saturating_add(MAX_SYMBOL_BITS) < length_bits
+}
+
 /// One-shot JPEG Phase 1 dispatch using real JPEG framing.
 ///
 /// Builds the MCU schedule + flat codebook buffers from `prep`, uploads
@@ -83,104 +288,27 @@ fn build_gpu_codebook_refs(codebooks: &[&CanonicalCodebook]) -> Vec<u32> {
 ///
 /// # Errors
 /// Returns `BackendError` for any alloc / upload / dispatch / download
-/// failure, or if `build_mcu_schedule` rejects an out-of-range selector.
+/// failure.
 #[cfg(all(test, feature = "gpu-validation"))]
 fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
 ) -> Result<Vec<SubsequenceState>> {
-    use crate::jpeg_decoder::build_mcu_schedule;
-
     if prep.bitstream.length_bits == 0 {
         return Ok(Vec::new());
     }
-    if subsequence_bits == 0 {
-        return Err(BackendError::msg(
-            "dispatch_jpeg_phase1_intra_sync: subsequence_bits must be > 0",
-        ));
-    }
-
-    let (mcu_sched_host, blocks_per_mcu) = build_mcu_schedule(prep);
-
-    let ac_refs = prep.ac_codebooks_for_dispatch();
-    let dc_refs = prep.dc_codebooks_for_dispatch();
-    let ac_flat = build_gpu_codebook_refs(&ac_refs);
-    let dc_flat = build_gpu_codebook_refs(&dc_refs);
-
-    let num_components = u32::try_from(prep.components.len())
-        .map_err(|_| BackendError::msg("components.len() does not fit in u32"))?;
-    let length_bits = prep.bitstream.length_bits;
-    let num_subsequences = length_bits.div_ceil(subsequence_bits);
-
-    let bitstream_words = (length_bits.div_ceil(32) as usize) + 1;
-    let bitstream_bytes = bitstream_words * 4;
-    let ac_codebook_bytes = ac_flat.len() * 4;
-    let dc_codebook_bytes = dc_flat.len() * 4;
-    let mcu_sched_bytes = mcu_sched_host.len() * 4;
-    let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
-
-    let bitstream_buf = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-    let codebook_buf = DeviceBufferGuard::alloc(backend, ac_codebook_bytes)?;
-    let dc_codebook_buf = DeviceBufferGuard::alloc(backend, dc_codebook_bytes)?;
-    let mcu_sched_buf = DeviceBufferGuard::alloc(backend, mcu_sched_bytes)?;
-    let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-
-    let _up1 = backend.upload_async(
-        bitstream_buf.as_ref(),
-        bytemuck::cast_slice(&prep.bitstream.words),
-    )?;
-    let _up2 = backend.upload_async(codebook_buf.as_ref(), bytemuck::cast_slice(&ac_flat))?;
-    let _up3 = backend.upload_async(dc_codebook_buf.as_ref(), bytemuck::cast_slice(&dc_flat))?;
-    let _up4 = backend.upload_async(
-        mcu_sched_buf.as_ref(),
-        bytemuck::cast_slice(&mcu_sched_host),
-    )?;
-
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: None,
-        symbols_out: None,
-        decode_status: None,
-        dc_codebook: Some(dc_codebook_buf.as_ref()),
-        mcu_schedule: Some(mcu_sched_buf.as_ref()),
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols: 0,
-        blocks_per_mcu,
-        phase: HuffmanPhase::JpegPhase1IntraSync,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    let mut out =
-        vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut out);
-    let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
-
-    backend.free_device(bitstream_buf.take());
-    backend.free_device(codebook_buf.take());
-    backend.free_device(dc_codebook_buf.take());
-    backend.free_device(mcu_sched_buf.take());
-    backend.free_device(s_info_buf.take());
-
+    let setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
+    setup.run_phase1(backend)?;
+    let out = setup.download_s_info(backend)?;
+    setup.free_all(backend);
     Ok(out)
 }
 
 /// One-shot JPEG Phase 1 + Phase 2 dispatch using real JPEG framing.
 ///
-/// Runs JPEG Phase 1, then loops Phase 2 until all subseqs are synced
-/// or the retry bound is exhausted. Returns the final `s_info` and the
-/// `Phase2Outcome`. Mirrors `dispatch_phase1_then_phase2` but uses the
-/// JPEG-framed kernel variants and JPEG-specific buffers
-/// (`dc_codebook`, `mcu_schedule`).
+/// Runs JPEG Phase 1, then the shared Phase 2 propagation loop.
+/// Returns the final `s_info` and the `Phase2Outcome`.
 ///
 /// Test/oracle path only — production callers should drive the trait
 /// directly to keep buffers alive across pages.
@@ -189,164 +317,40 @@ fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
 /// Returns `BackendError` if any alloc/upload/dispatch/download
 /// fails. Bound-exceeded is reported via the outcome, not as an error.
 #[cfg(all(test, feature = "gpu-validation"))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear phase-1-then-phase-2 procedural script; same rationale as dispatch_phase1_through_phase4"
-)]
 fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
 ) -> Result<(Vec<SubsequenceState>, Phase2Outcome)> {
-    use crate::jpeg_decoder::build_mcu_schedule;
-
     if prep.bitstream.length_bits == 0 {
         return Ok((Vec::new(), Phase2Outcome::Converged { iterations: 0 }));
     }
-    if subsequence_bits == 0 {
-        return Err(BackendError::msg(
-            "dispatch_jpeg_phase1_then_phase2: subsequence_bits must be > 0",
-        ));
-    }
-
-    let (mcu_sched_host, blocks_per_mcu) = build_mcu_schedule(prep);
-
-    let ac_refs = prep.ac_codebooks_for_dispatch();
-    let dc_refs = prep.dc_codebooks_for_dispatch();
-    let ac_flat = build_gpu_codebook_refs(&ac_refs);
-    let dc_flat = build_gpu_codebook_refs(&dc_refs);
-
-    let num_components = u32::try_from(prep.components.len())
-        .map_err(|_| BackendError::msg("components.len() does not fit in u32"))?;
-    let length_bits = prep.bitstream.length_bits;
-    let num_subsequences = length_bits.div_ceil(subsequence_bits);
-
-    let bitstream_words = (length_bits.div_ceil(32) as usize) + 1;
-    let bitstream_bytes = bitstream_words * 4;
-    let ac_codebook_bytes = ac_flat.len() * 4;
-    let dc_codebook_bytes = dc_flat.len() * 4;
-    let mcu_sched_bytes = mcu_sched_host.len() * 4;
-    let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
-    let flags_bytes = (num_subsequences as usize) * 4;
-
-    let bitstream_buf = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-    let codebook_buf = DeviceBufferGuard::alloc(backend, ac_codebook_bytes)?;
-    let dc_codebook_buf = DeviceBufferGuard::alloc(backend, dc_codebook_bytes)?;
-    let mcu_sched_buf = DeviceBufferGuard::alloc(backend, mcu_sched_bytes)?;
-    let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-    let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-    let sync_flags_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
-
-    let _up1 = backend.upload_async(
-        bitstream_buf.as_ref(),
-        bytemuck::cast_slice(&prep.bitstream.words),
-    )?;
-    let _up2 = backend.upload_async(codebook_buf.as_ref(), bytemuck::cast_slice(&ac_flat))?;
-    let _up3 = backend.upload_async(dc_codebook_buf.as_ref(), bytemuck::cast_slice(&dc_flat))?;
-    let _up4 = backend.upload_async(
-        mcu_sched_buf.as_ref(),
-        bytemuck::cast_slice(&mcu_sched_host),
-    )?;
-
-    // Phase 1.
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: None,
-        symbols_out: None,
-        decode_status: None,
-        dc_codebook: Some(dc_codebook_buf.as_ref()),
-        mcu_schedule: Some(mcu_sched_buf.as_ref()),
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols: 0,
-        blocks_per_mcu,
-        phase: HuffmanPhase::JpegPhase1IntraSync,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    // Phase 2 — Jacobi propagation over ping-ponged state buffers:
-    // each pass reads the previous pass's states and writes the
-    // recomputed ones; convergence = every recompute is a fixpoint.
-    let bound = jpeg_phase2_retry_bound(num_subsequences);
-    let mut flags_host = vec![0u32; num_subsequences as usize];
-    let mut outcome = Phase2Outcome::SyncBoundExceeded { bound };
-    let (mut read_buf, mut write_buf) = (&s_info_buf, &s_info_scratch);
-    for iter in 0..=bound {
-        backend.begin_page()?;
-        backend.record_huffman(HuffmanParams {
-            bitstream: bitstream_buf.as_ref(),
-            codebook: codebook_buf.as_ref(),
-            s_info: write_buf.as_ref(),
-            sync_flags: Some(sync_flags_buf.as_ref()),
-            s_info_prev: Some(read_buf.as_ref()),
-            offsets: None,
-            symbols_out: None,
-            decode_status: None,
-            dc_codebook: Some(dc_codebook_buf.as_ref()),
-            mcu_schedule: Some(mcu_sched_buf.as_ref()),
-            length_bits,
-            subsequence_bits,
-            num_components,
-            total_symbols: 0,
-            blocks_per_mcu,
-            phase: HuffmanPhase::JpegPhase2InterSync,
-        })?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)?;
-
-        let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
-        let handle = backend.download_async(sync_flags_buf.as_ref(), dst)?;
-        backend.wait_download(handle)?;
-
-        std::mem::swap(&mut read_buf, &mut write_buf);
-        if flags_host.iter().all(|&f| f == 1) {
-            outcome = Phase2Outcome::Converged { iterations: iter };
-            break;
-        }
-    }
-    // Post-swap, `read_buf` holds the last-written states (on
-    // convergence both buffers are identical — the fixpoint pass
-    // changed nothing).
-
-    let mut s_info_out =
-        vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut s_info_out);
-    let handle = backend.download_async(read_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
-
-    backend.free_device(bitstream_buf.take());
-    backend.free_device(codebook_buf.take());
-    backend.free_device(dc_codebook_buf.take());
-    backend.free_device(mcu_sched_buf.take());
-    backend.free_device(s_info_buf.take());
-    backend.free_device(s_info_scratch.take());
-    backend.free_device(sync_flags_buf.take());
-
+    let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
+    setup.run_phase1(backend)?;
+    let outcome = match run_jpeg_phase2_passes(backend, &mut setup)? {
+        Some(iterations) => Phase2Outcome::Converged { iterations },
+        None => Phase2Outcome::SyncBoundExceeded {
+            bound: jpeg_phase2_retry_bound(setup.num_subsequences),
+        },
+    };
+    let s_info_out = setup.download_s_info(backend)?;
+    setup.free_all(backend);
     Ok((s_info_out, outcome))
 }
 
 /// Run all four JPEG-framed phases and return the final decoded symbol
 /// stream as a flat `Vec<u32>`.
 ///
-/// Mirrors `dispatch_phase1_through_phase4` exactly but uses the
-/// JPEG-framed kernels: `JpegPhase1IntraSync`, `JpegPhase2InterSync`,
-/// CPU-side exclusive-scan for Phase 3, and `JpegPhase4Redecode`.
+/// Uses the JPEG-framed kernels: `JpegPhase1IntraSync`, the shared
+/// `JpegPhase2InterSync` propagation loop, CPU-side exclusive scan for
+/// Phase 3, and `JpegPhase4Redecode`.
 ///
 /// # Errors
 /// Returns `BackendError` if any allocation, upload, kernel dispatch,
-/// or download fails, or if Phase 2 does not converge within the retry
-/// bound.
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear 4-phase procedural script; same rationale as dispatch_phase1_through_phase4"
-)]
+/// or download fails; if Phase 2 does not converge within the retry
+/// bound; if the converged chain stalled mid-stream on a decode error
+/// (see [`jpeg_stream_stalled`]); or if Phase 4 reports a per-subseq
+/// decode failure.
 #[expect(
     clippy::redundant_pub_crate,
     reason = "pub(crate) is intentional: parent module is pub(crate); inner items need explicit visibility for documentation and grepping"
@@ -356,186 +360,66 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
 ) -> Result<Vec<u32>> {
-    use crate::jpeg_decoder::build_mcu_schedule;
-
     if prep.bitstream.length_bits == 0 {
         return Ok(Vec::new());
     }
-    if subsequence_bits == 0 {
-        return Err(BackendError::msg(
-            "dispatch_jpeg_phase1_through_phase4: subsequence_bits must be > 0",
-        ));
-    }
+    let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
+    setup.run_phase1(backend)?;
 
-    let (mcu_sched_host, blocks_per_mcu) = build_mcu_schedule(prep);
-
-    let ac_refs = prep.ac_codebooks_for_dispatch();
-    let dc_refs = prep.dc_codebooks_for_dispatch();
-    let ac_flat = build_gpu_codebook_refs(&ac_refs);
-    let dc_flat = build_gpu_codebook_refs(&dc_refs);
-
-    let num_components = u32::try_from(prep.components.len())
-        .map_err(|_| BackendError::msg("components.len() does not fit in u32"))?;
-    let length_bits = prep.bitstream.length_bits;
-    let num_subsequences = length_bits.div_ceil(subsequence_bits);
-
-    let bitstream_words = (length_bits.div_ceil(32) as usize) + 1;
-    let bitstream_bytes = bitstream_words * 4;
-    let ac_codebook_bytes = ac_flat.len() * 4;
-    let dc_codebook_bytes = dc_flat.len() * 4;
-    let mcu_sched_bytes = mcu_sched_host.len() * 4;
-    let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
-    let flags_bytes = (num_subsequences as usize) * 4;
-    let offsets_bytes = flags_bytes;
-
-    let bitstream_buf = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-    let codebook_buf = DeviceBufferGuard::alloc(backend, ac_codebook_bytes)?;
-    let dc_codebook_buf = DeviceBufferGuard::alloc(backend, dc_codebook_bytes)?;
-    let mcu_sched_buf = DeviceBufferGuard::alloc(backend, mcu_sched_bytes)?;
-    let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-    let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-    let sync_flags_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
-    let offsets_buf = DeviceBufferGuard::alloc(backend, offsets_bytes)?;
-
-    let _up1 = backend.upload_async(
-        bitstream_buf.as_ref(),
-        bytemuck::cast_slice(&prep.bitstream.words),
-    )?;
-    let _up2 = backend.upload_async(codebook_buf.as_ref(), bytemuck::cast_slice(&ac_flat))?;
-    let _up3 = backend.upload_async(dc_codebook_buf.as_ref(), bytemuck::cast_slice(&dc_flat))?;
-    let _up4 = backend.upload_async(
-        mcu_sched_buf.as_ref(),
-        bytemuck::cast_slice(&mcu_sched_host),
-    )?;
-
-    // Phase 1.
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: None,
-        symbols_out: None,
-        decode_status: None,
-        dc_codebook: Some(dc_codebook_buf.as_ref()),
-        mcu_schedule: Some(mcu_sched_buf.as_ref()),
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols: 0,
-        blocks_per_mcu,
-        phase: HuffmanPhase::JpegPhase1IntraSync,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    // Phase 2 — Jacobi propagation over ping-ponged state buffers:
-    // each pass reads the previous pass's states and writes the
-    // recomputed ones; convergence = every recompute is a fixpoint.
-    let bound = jpeg_phase2_retry_bound(num_subsequences);
-    let mut flags_host = vec![0u32; num_subsequences as usize];
-    let mut converged = false;
-    let (mut read_buf, mut write_buf) = (&s_info_buf, &s_info_scratch);
-    for _iter in 0..=bound {
-        backend.begin_page()?;
-        backend.record_huffman(HuffmanParams {
-            bitstream: bitstream_buf.as_ref(),
-            codebook: codebook_buf.as_ref(),
-            s_info: write_buf.as_ref(),
-            sync_flags: Some(sync_flags_buf.as_ref()),
-            s_info_prev: Some(read_buf.as_ref()),
-            offsets: None,
-            symbols_out: None,
-            decode_status: None,
-            dc_codebook: Some(dc_codebook_buf.as_ref()),
-            mcu_schedule: Some(mcu_sched_buf.as_ref()),
-            length_bits,
-            subsequence_bits,
-            num_components,
-            total_symbols: 0,
-            blocks_per_mcu,
-            phase: HuffmanPhase::JpegPhase2InterSync,
-        })?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)?;
-
-        let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
-        let handle = backend.download_async(sync_flags_buf.as_ref(), dst)?;
-        backend.wait_download(handle)?;
-
-        std::mem::swap(&mut read_buf, &mut write_buf);
-        if flags_host.iter().all(|&f| f == 1) {
-            converged = true;
-            break;
-        }
-    }
-    if !converged {
+    if run_jpeg_phase2_passes(backend, &mut setup)?.is_none() {
         return Err(BackendError::msg(
             "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within retry bound",
         ));
     }
-    // Post-swap, `read_buf` holds the converged states (both buffers
-    // are identical after a fixpoint pass); Phases 3 and 4 read them
-    // from there.
-    let s_info_final = read_buf;
 
-    // Download s_info for CPU-side Phase 3 (exclusive scan).
-    let mut s_info_host =
-        vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut s_info_host);
-    let handle = backend.download_async(s_info_final.as_ref(), dst)?;
-    backend.wait_download(handle)?;
+    // Download s_info for CPU-side Phase 3 (exclusive scan) and the
+    // stall check.
+    let s_info_host = setup.download_s_info(backend)?;
+
+    if let Some(last) = s_info_host.last()
+        && jpeg_stream_stalled(last.p, setup.length_bits)
+    {
+        return Err(BackendError::msg(format!(
+            "dispatch_jpeg_phase1_through_phase4: decode stalled at bit {} of {} — \
+             mid-stream decode error propagated through the chain",
+            last.p, setup.length_bits,
+        )));
+    }
 
     // Phase 3: CPU exclusive prefix scan over per-subsequence symbol counts.
-    let mut offsets_host = Vec::<u32>::with_capacity(s_info_host.len());
-    let mut running: u32 = 0;
-    for s in &s_info_host {
-        offsets_host.push(running);
-        running = running.checked_add(s.n).ok_or_else(|| {
+    let counts: Vec<u32> = s_info_host.iter().map(|s| s.n).collect();
+    let (offsets_host, total_symbols) = crate::jpeg_decoder::scan::exclusive_scan_checked(&counts)
+        .ok_or_else(|| {
             BackendError::msg(
                 "dispatch_jpeg_phase1_through_phase4: total symbol count overflows u32",
             )
         })?;
-    }
-    let total_symbols = running;
 
     if total_symbols == 0 {
+        setup.free_all(backend);
         return Ok(Vec::new());
     }
 
+    let flags_bytes = (setup.num_subsequences as usize) * 4;
+    let offsets_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
     let _up5 = backend.upload_async(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
 
-    let symbols_bytes = (total_symbols as usize) * 4;
-    let symbols_buf = DeviceBufferGuard::alloc_zeroed(backend, symbols_bytes)?;
+    let symbols_buf = DeviceBufferGuard::alloc_zeroed(backend, (total_symbols as usize) * 4)?;
     let decode_status_buf = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
 
     // Phase 4.
     backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_final.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: Some(offsets_buf.as_ref()),
-        symbols_out: Some(symbols_buf.as_ref()),
-        decode_status: Some(decode_status_buf.as_ref()),
-        dc_codebook: Some(dc_codebook_buf.as_ref()),
-        mcu_schedule: Some(mcu_sched_buf.as_ref()),
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols,
-        blocks_per_mcu,
-        phase: HuffmanPhase::JpegPhase4Redecode,
-    })?;
+    let mut params = setup.base_params(HuffmanPhase::JpegPhase4Redecode);
+    params.offsets = Some(offsets_buf.as_ref());
+    params.symbols_out = Some(symbols_buf.as_ref());
+    params.decode_status = Some(decode_status_buf.as_ref());
+    params.total_symbols = total_symbols;
+    backend.record_huffman(params)?;
     let fence = backend.submit_page()?;
     backend.wait_page(fence)?;
 
     // Inspect per-subseq decode status before downloading symbols.
-    let mut status_host = vec![0u32; num_subsequences as usize];
+    let mut status_host = vec![0u32; setup.num_subsequences as usize];
     let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut status_host);
     let handle = backend.download_async(decode_status_buf.as_ref(), dst)?;
     backend.wait_download(handle)?;
@@ -552,13 +436,7 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     let handle = backend.download_async(symbols_buf.as_ref(), dst)?;
     backend.wait_download(handle)?;
 
-    backend.free_device(bitstream_buf.take());
-    backend.free_device(codebook_buf.take());
-    backend.free_device(dc_codebook_buf.take());
-    backend.free_device(mcu_sched_buf.take());
-    backend.free_device(s_info_buf.take());
-    backend.free_device(s_info_scratch.take());
-    backend.free_device(sync_flags_buf.take());
+    setup.free_all(backend);
     backend.free_device(offsets_buf.take());
     backend.free_device(symbols_buf.take());
     backend.free_device(decode_status_buf.take());
@@ -760,7 +638,7 @@ fn dispatch_phase1_then_phase2<B: GpuBackend>(
     backend.wait_page(fence)?;
 
     // Phase 2 — bounded retry loop.
-    let bound = phase2_retry_bound(num_subsequences as usize);
+    let bound = crate::jpeg_decoder::phase2_oracle::retry_bound(num_subsequences as usize);
     let mut flags_host = vec![0u32; num_subsequences as usize];
     let mut outcome = Phase2Outcome::SyncBoundExceeded { bound };
     for iter in 0..=bound {
@@ -912,7 +790,7 @@ fn dispatch_phase1_through_phase4<B: GpuBackend>(
     backend.wait_page(fence)?;
 
     // Phase 2.
-    let bound = phase2_retry_bound(num_subsequences as usize);
+    let bound = crate::jpeg_decoder::phase2_oracle::retry_bound(num_subsequences as usize);
     let mut flags_host = vec![0u32; num_subsequences as usize];
     let mut converged = false;
     for _iter in 0..=bound {
@@ -961,16 +839,11 @@ fn dispatch_phase1_through_phase4<B: GpuBackend>(
     let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
     backend.wait_download(handle)?;
 
-    // Exclusive scan + total over s_info[*].n. checked_add surfaces
-    // u32 overflow (silent wrapping would let Phase 4 write past the
-    // allocated symbols_out). Shared with the scan parity tests.
+    // Exclusive scan + total over s_info[*].n; the checked total
+    // surfaces u32 overflow (silent wrapping would let Phase 4 write
+    // past the allocated symbols_out).
     let counts: Vec<u32> = s_info_host.iter().map(|s| s.n).collect();
-    let offsets_host = crate::jpeg_decoder::scan::test_helpers::cpu_exclusive_scan(&counts);
-    let total_symbols = offsets_host
-        .last()
-        .copied()
-        .unwrap_or(0)
-        .checked_add(s_info_host.last().map_or(0, |s| s.n))
+    let (offsets_host, total_symbols) = crate::jpeg_decoder::scan::exclusive_scan_checked(&counts)
         .ok_or_else(|| {
             BackendError::msg("dispatch_phase1_through_phase4: total symbol count overflows u32")
         })?;
@@ -1431,6 +1304,24 @@ mod tests {
                 "subsequence {seq_idx}: GPU vs CPU JPEG Phase 1 state mismatch"
             );
         }
+    }
+
+    /// Pin the stall detector's boundary: errors within one maximal
+    /// symbol of the stream end are the normal byte-padding tail;
+    /// anything shorter is a mid-stream stall.
+    #[test]
+    fn stall_detector_allows_only_the_padding_tail() {
+        // 27 = max codeword (16) + max DC magnitude (11).
+        assert!(!jpeg_stream_stalled(1000, 1000), "clean end");
+        assert!(
+            !jpeg_stream_stalled(973, 1000),
+            "error exactly at the allowance"
+        );
+        assert!(jpeg_stream_stalled(972, 1000), "one bit past the allowance");
+        assert!(jpeg_stream_stalled(0, 1000), "stall at stream start");
+        assert!(!jpeg_stream_stalled(0, 0), "empty stream never stalls");
+        // saturating_add keeps the check meaningful near u32::MAX.
+        assert!(!jpeg_stream_stalled(u32::MAX - 5, u32::MAX));
     }
 
     // ── B2e: JPEG Phase 2 tests ────────────────────────────────────────────

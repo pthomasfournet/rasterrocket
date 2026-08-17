@@ -82,6 +82,23 @@ pub fn dispatch_blelloch_scan<B: GpuBackend>(backend: &B, input: &[u32]) -> Resu
     Ok(out)
 }
 
+/// Exclusive prefix scan with a checked running total.
+///
+/// Returns `None` when the total overflows `u32` — Phase 3 callers
+/// size the `symbols_out` device buffer from the total, so silent
+/// wrapping would let Phase 4 write past the allocation. (The test
+/// oracle in `test_helpers` wraps instead, deliberately mirroring the
+/// GPU kernel's u32 arithmetic.)
+pub(in crate::jpeg_decoder) fn exclusive_scan_checked(input: &[u32]) -> Option<(Vec<u32>, u32)> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut running = 0u32;
+    for &v in input {
+        out.push(running);
+        running = running.checked_add(v)?;
+    }
+    Some((out, running))
+}
+
 /// Shared test helpers — exclusive scan oracle + backend probes.
 /// Lives outside the per-test module so the CUDA-only and the
 /// Vulkan + cross-backend test modules can both import it.
