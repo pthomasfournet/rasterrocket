@@ -33,7 +33,14 @@ impl GpuCtx {
     ///
     /// # Panics
     ///
-    /// Panics if `tile_starts.len() != tile_counts.len()`.
+    /// Panics if the inputs are mutually inconsistent — the kernel
+    /// indexes them unchecked on the device, so host-side violations
+    /// must fail loudly here rather than read out of bounds there:
+    /// - `tile_starts.len() != tile_counts.len()`, or fewer entries
+    ///   than the `grid_w × height.div_ceil(TILE_H)` launch grid;
+    /// - any `tile_starts[i] + tile_counts[i]` range past `records`;
+    /// - `width × height` exceeding `u32` (the kernel's pixel index
+    ///   arithmetic is 32-bit).
     #[expect(
         clippy::too_many_arguments,
         reason = "all 7 args are required: records + index arrays + grid/pixel dims + fill rule; no grouping is natural here"
@@ -56,21 +63,42 @@ impl GpuCtx {
         let n_pixels = (width as usize)
             .checked_mul(height as usize)
             .expect("width × height overflows usize");
+        assert!(
+            u32::try_from(n_pixels).is_ok(),
+            "width × height = {n_pixels} pixels exceeds the kernel's 32-bit index range"
+        );
         if n_pixels == 0 {
             return Ok(Vec::new());
+        }
+        let n_tiles = (grid_w as usize)
+            .checked_mul(height.div_ceil(TILE_H) as usize)
+            .expect("tile grid size overflows usize");
+        assert!(
+            tile_starts.len() >= n_tiles,
+            "tile index arrays cover {} tiles but the launch grid has {n_tiles}",
+            tile_starts.len(),
+        );
+        for (i, (&start, &count)) in tile_starts.iter().zip(tile_counts).enumerate() {
+            let end = (start as usize)
+                .checked_add(count as usize)
+                .expect("tile record range overflows usize");
+            assert!(
+                end <= records.len(),
+                "tile {i} references records {start}..{end} but only {} exist",
+                records.len(),
+            );
+        }
+        if records.is_empty() {
+            // Consistent inputs with no records (all counts zero, checked
+            // above) provably produce all-zero coverage — skip the GPU
+            // round trip entirely.
+            return Ok(vec![0u8; n_pixels]);
         }
         let stream = &self.stream;
 
         // Upload inputs as byte buffers so they match the trait's
         // `B::DeviceBuffer = CudaSlice<u8>` shape used by the async helper.
-        let placeholder = [TileRecord::default()];
-        let records_bytes: &[u8] = if records.is_empty() {
-            // cudarc refuses zero-size allocations — use a one-record placeholder.
-            bytemuck::cast_slice(&placeholder)
-        } else {
-            bytemuck::cast_slice(records)
-        };
-        let d_records = stream.clone_htod(records_bytes)?;
+        let d_records = stream.clone_htod(bytemuck::cast_slice(records))?;
         let d_tile_starts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(tile_starts))?;
         let d_tile_counts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(tile_counts))?;
         // Device-side zero alloc — the kernel overwrites every in-bounds
@@ -89,9 +117,7 @@ impl GpuCtx {
         )?;
 
         stream.synchronize()?;
-        let mut coverage = vec![0u8; n_pixels];
-        stream.memcpy_dtoh(&d_coverage, &mut coverage)?;
-        Ok(coverage)
+        Ok(stream.clone_dtoh(&d_coverage)?)
     }
 
     /// Async kernel launch for the tile-parallel analytical fill kernel.

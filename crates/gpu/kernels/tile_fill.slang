@@ -113,10 +113,11 @@ void tile_fill(
 
     int cov;
     if (eo != 0) {
-        float a = abs(area);
-        a = a - floor(a);
-        if (a > 0.5f) a = 1.0f - a;
-        cov = int(a * 2.0f * 255.5f);
+        // Period-2 triangle-wave fold peaking at odd integers — see
+        // tile_fill.cu for the rationale.
+        float t = fmod(abs(area), 2.0f);
+        float a = (t > 1.0f) ? 2.0f - t : t;
+        cov = int(a * 255.5f);
     } else {
         cov = int(min(abs(area), 1.0f) * 255.5f);
     }

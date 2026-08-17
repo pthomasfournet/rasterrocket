@@ -113,9 +113,7 @@ impl GpuCtx {
         )?;
 
         stream.synchronize()?;
-        let mut coverage = vec![0u8; n_pixels];
-        stream.memcpy_dtoh(&d_coverage, &mut coverage)?;
-        Ok(coverage)
+        Ok(stream.clone_dtoh(&d_coverage)?)
     }
 
     /// Async kernel launch for the AA fill kernel.

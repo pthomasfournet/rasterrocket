@@ -130,6 +130,15 @@ pub fn build_tile_records(
         };
 
         let dxdy = (sx1 - sx0) / (sy1 - sy0);
+        // Two individually finite x coordinates can still overflow the
+        // difference or the quotient (e.g. ±2e38 endpoints); an infinite
+        // slope would propagate NaN through the fma in x_enter and paint
+        // silent full-coverage bands. Such a segment is effectively
+        // vertical at the scale of the raster and outside any real page
+        // geometry — skip it.
+        if !dxdy.is_finite() {
+            continue;
+        }
 
         // Clamp to output bounds.
         let ey0 = sy0.max(0.0);
@@ -436,6 +445,13 @@ pub(crate) mod test_model {
     ///
     /// Kept operation-for-operation compatible with the device code so the
     /// coverage tests below exercise the same arithmetic the kernel performs.
+    /// Inputs are finite by precondition (`build_tile_records` filters
+    /// non-finite coordinates and slopes); on NaN the CUDA fmin/fmax and
+    /// Rust min/max/clamp families diverge, so no parity claim is made
+    /// there. The model bakes `mul_add` where nvcc contracts to fma; the
+    /// GPU parity test's ±1-byte budget absorbs the ulp-level differences
+    /// (a future Slang/SPIR-V twin may pair contractions differently but
+    /// stays within the same budget).
     ///
     /// Computes the exact clipped-trapezoid integral
     /// `sign × ∫_{iy0}^{iy1} clamp(x(y) − px, 0, 1) dy` — the winding-count
@@ -516,8 +532,15 @@ pub(crate) mod test_model {
         area
     }
 
-    /// Kernel-model coverage byte for `(px, py)` under non-zero winding,
-    /// mirroring the kernel's `min(|area|, 1) * 255.5` conversion.
+    /// Kernel-model coverage byte for `(px, py)`, mirroring the
+    /// kernel's area → byte conversion for both fill rules.
+    ///
+    /// Non-zero winding: `min(|area|, 1) × 255.5`, truncated.
+    /// Even-odd: the accumulated signed area folds with the period-2
+    /// triangle wave peaking at odd integers — `t = |area| mod 2`,
+    /// coverage `t` for `t ≤ 1` and `2 − t` above — so a fully
+    /// interior pixel of a simple path (`|area| = 1`) maps to full
+    /// coverage and winding-2 overlap regions back to zero.
     pub(crate) fn kernel_coverage_at(
         recs: &[TileRecord],
         starts: &[u32],
@@ -525,16 +548,51 @@ pub(crate) mod test_model {
         grid_w: u32,
         px: u32,
         py: u32,
+        eo: bool,
     ) -> u8 {
         let area = kernel_area_at(recs, starts, counts, grid_w, px, py);
+        let a = if eo {
+            let t = area.abs() % 2.0;
+            if t > 1.0 { 2.0 - t } else { t }
+        } else {
+            area.abs().min(1.0)
+        };
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "min(|area|,1) * 255.5 is in [0, 255.5]; truncation to 0..=255 is the kernel's own conversion"
+            reason = "a is in [0, 1]; × 255.5 truncated to 0..=255 is the kernel's own conversion"
         )]
         {
-            (area.abs().min(1.0) * 255.5) as u8
+            ((a * 255.5) as i32).min(255) as u8
         }
+    }
+
+    /// The parity shapes shared by the CPU-model-vs-aa test here and
+    /// the GPU-vs-model test in `lib.rs` — one list so the two oracles
+    /// cannot drift apart.
+    pub(crate) fn parity_shapes() -> [(&'static str, Vec<f32>, u32, u32); 3] {
+        [
+            (
+                "interior rect",
+                vec![10.0, 10.0, 10.0, 110.0, 210.0, 110.0, 210.0, 10.0],
+                224,
+                128,
+            ),
+            (
+                "boundary rect",
+                vec![0.0, 0.0, 0.0, 16.0, 48.0, 16.0, 48.0, 0.0],
+                48,
+                16,
+            ),
+            (
+                "right triangle",
+                vec![
+                    0.0, 0.0, 32.0, 32.0, 32.0, 32.0, 0.0, 32.0, 0.0, 32.0, 0.0, 0.0,
+                ],
+                32,
+                32,
+            ),
+        ]
     }
 }
 
@@ -604,6 +662,28 @@ mod tests {
         let segs = [8.0f32, 0.0, 8.0, 17.0];
         let (recs, _, _, _) = build_tile_records(&segs, 0.0, 0.0, 64, 64);
         assert_eq!(recs.len(), 2, "one record per tile row crossed");
+    }
+
+    #[test]
+    fn tile_records_reject_overflowing_slopes() {
+        // Individually finite endpoints whose difference overflows f32:
+        // the quotient is ±inf and the first-row x_enter fma would be
+        // NaN. No record may carry a non-finite field (a NaN x_enter
+        // renders as a silent full-coverage band).
+        let segs = [
+            3.0e38f32, 0.0, -3.0e38, 16.0, // dx overflows → dxdy = -inf
+            1.0e30f32, 0.0, -1.0e30,
+            1e-5, // finite dx, dy near the floor → quotient overflows
+        ];
+        let (recs, _, _, _) = build_tile_records(&segs, 0.0, 0.0, 64, 64);
+        for rec in &recs {
+            assert!(
+                rec.x_enter.is_finite() && rec.dxdy.is_finite(),
+                "non-finite record emitted: x_enter={} dxdy={}",
+                rec.x_enter,
+                rec.dxdy,
+            );
+        }
     }
 
     #[test]
@@ -711,59 +791,41 @@ mod tests {
     /// boundary bound now catches.
     #[test]
     fn tile_fill_matches_aa_fill_cpu_on_solid_pixels() {
-        struct Case {
-            name: &'static str,
-            segs: Vec<f32>,
-            w: u32,
-            h: u32,
-        }
-        let cases = [
-            Case {
-                name: "interior rect",
-                segs: vec![10.0, 10.0, 10.0, 110.0, 210.0, 110.0, 210.0, 10.0],
-                w: 224,
-                h: 128,
-            },
-            Case {
-                name: "boundary rect",
-                segs: vec![0.0, 0.0, 0.0, 16.0, 48.0, 16.0, 48.0, 0.0],
-                w: 48,
-                h: 16,
-            },
-            Case {
-                name: "right triangle",
-                segs: vec![
-                    0.0, 0.0, 32.0, 32.0, 32.0, 32.0, 0.0, 32.0, 0.0, 32.0, 0.0, 0.0,
-                ],
-                w: 32,
-                h: 32,
-            },
-        ];
-        for case in &cases {
-            let aa = aa_fill_cpu(&case.segs, 0.0, 0.0, case.w, case.h, false);
-            let (recs, starts, counts, grid_w) =
-                build_tile_records(&case.segs, 0.0, 0.0, case.w, case.h);
-            for py in 0..case.h {
-                for px in 0..case.w {
-                    let t = kernel_coverage_at(&recs, &starts, &counts, grid_w, px, py);
-                    match aa[(py * case.w + px) as usize] {
-                        255 => assert!(
-                            t >= 240,
-                            "{}: interior pixel ({px},{py}) tile={t}, aa=255",
-                            case.name
-                        ),
-                        0 => assert!(
-                            t <= 16,
-                            "{}: exterior pixel ({px},{py}) tile={t}, aa=0",
-                            case.name
-                        ),
-                        a => {
-                            let diff = (i16::from(t) - i16::from(a)).abs();
-                            assert!(
-                                diff <= 48,
-                                "{}: boundary pixel ({px},{py}) tile={t}, aa={a}, |diff|={diff}",
-                                case.name
-                            );
+        // Both fill rules: the shapes are simple paths, so even-odd and
+        // non-zero winding must agree everywhere — which pins the eo
+        // fold's period (a period-1 fold zeroes every interior pixel).
+        for eo in [false, true] {
+            for (name, segs, w, h) in super::test_model::parity_shapes() {
+                let case_name = format!("{name} (eo={eo})");
+                let aa = aa_fill_cpu(&segs, 0.0, 0.0, w, h, eo);
+                let (recs, starts, counts, grid_w) = build_tile_records(&segs, 0.0, 0.0, w, h);
+                for py in 0..h {
+                    for px in 0..w {
+                        let t = kernel_coverage_at(&recs, &starts, &counts, grid_w, px, py, eo);
+                        match aa[(py * w + px) as usize] {
+                            255 => assert!(
+                                t >= 240,
+                                "{case_name}: interior pixel ({px},{py}) tile={t}, aa=255",
+                            ),
+                            0 => assert!(
+                                t <= 16,
+                                "{case_name}: exterior pixel ({px},{py}) tile={t}, aa=0",
+                            ),
+                            a => {
+                                // 48 ≈ 2× the observed worst-case gap
+                                // between the exact analytic integral and
+                                // the 64-sample jittered estimate on these
+                                // shapes (Halton discrepancy ~0.05–0.10
+                                // area units, ~13–26 bytes, doubled at
+                                // corners); the old formula's 2× diagonal
+                                // overweight produced diffs up to ~127.
+                                let diff = (i16::from(t) - i16::from(a)).abs();
+                                assert!(
+                                    diff <= 48,
+                                    "{case_name}: boundary pixel ({px},{py}) tile={t}, aa={a}, \
+                                     |diff|={diff}",
+                                );
+                            }
                         }
                     }
                 }

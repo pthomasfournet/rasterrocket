@@ -448,44 +448,25 @@ mod tests {
         #[test]
         fn tile_fill_gpu_matches_cpu_model() {
             use super::super::build_tile_records;
-            use super::super::fill::test_model::kernel_coverage_at;
+            use super::super::fill::test_model::{kernel_coverage_at, parity_shapes};
 
-            let cases: [(&str, Vec<f32>, u32, u32); 3] = [
-                (
-                    "interior rect",
-                    vec![10.0, 10.0, 10.0, 110.0, 210.0, 110.0, 210.0, 10.0],
-                    224,
-                    128,
-                ),
-                (
-                    "boundary rect",
-                    vec![0.0, 0.0, 0.0, 16.0, 48.0, 16.0, 48.0, 0.0],
-                    48,
-                    16,
-                ),
-                (
-                    "right triangle",
-                    vec![
-                        0.0, 0.0, 32.0, 32.0, 32.0, 32.0, 0.0, 32.0, 0.0, 32.0, 0.0, 0.0,
-                    ],
-                    32,
-                    32,
-                ),
-            ];
-            for (name, segs, w, h) in &cases {
-                let (recs, starts, counts, grid_w) = build_tile_records(segs, 0.0, 0.0, *w, *h);
-                let gpu_cov = gpu()
-                    .tile_fill(&recs, &starts, &counts, grid_w, *w, *h, false)
-                    .unwrap_or_else(|e| panic!("GPU tile_fill failed: {e}"));
-                for py in 0..*h {
-                    for px in 0..*w {
-                        let m = kernel_coverage_at(&recs, &starts, &counts, grid_w, px, py);
-                        let g = gpu_cov[(py * w + px) as usize];
-                        let diff = (i16::from(m) - i16::from(g)).abs();
-                        assert!(
-                            diff <= 1,
-                            "{name}: pixel ({px},{py}) model={m} gpu={g} |diff|={diff}"
-                        );
+            for eo in [false, true] {
+                for (name, segs, w, h) in parity_shapes() {
+                    let (recs, starts, counts, grid_w) = build_tile_records(&segs, 0.0, 0.0, w, h);
+                    let gpu_cov = gpu()
+                        .tile_fill(&recs, &starts, &counts, grid_w, w, h, eo)
+                        .unwrap_or_else(|e| panic!("GPU tile_fill failed: {e}"));
+                    for py in 0..h {
+                        for px in 0..w {
+                            let m = kernel_coverage_at(&recs, &starts, &counts, grid_w, px, py, eo);
+                            let g = gpu_cov[(py * w + px) as usize];
+                            let diff = (i16::from(m) - i16::from(g)).abs();
+                            assert!(
+                                diff <= 1,
+                                "{name} (eo={eo}): pixel ({px},{py}) model={m} gpu={g} \
+                                 |diff|={diff}"
+                            );
+                        }
                     }
                 }
             }

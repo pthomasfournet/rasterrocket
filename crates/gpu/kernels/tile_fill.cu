@@ -8,14 +8,16 @@
 //   fill kernel where to find records for tile i.
 //
 //   The fill kernel (one block per tile, TILE_W × TILE_H threads) computes
-//   per-pixel signed area using the analytical formula:
+//   per-pixel signed area analytically:
 //
 //     For each record crossing the pixel row [py, py+1]:
 //       - Clip segment to the pixel row.
-//       - Compute the signed y-span swept across pixel column px.
+//       - Accumulate the exact clipped-trapezoid integral of
+//         clamp(x(y) - px, 0, 1) over the row (see segment_pixel_area).
 //
-//   Non-zero winding: coverage = min(|area|, 1) × 255.
-//   Even-odd: coverage = frac(|area|) folded to [0,0.5] × 2 × 255.
+//   Non-zero winding: coverage = min(|area|, 1) × 255.5, truncated.
+//   Even-odd: |area| folded with the period-2 triangle wave peaking at
+//   odd integers, × 255.5, truncated.
 //
 // Tile geometry:
 //   TILE_W = 16 pixels wide,  TILE_H = 16 pixels tall.
@@ -170,12 +172,14 @@ extern "C" __global__ void tile_fill(
 
     int cov;
     if (eo) {
-        float a = fabsf(area);
-        a = a - floorf(a);            // fractional part in [0, 1)
-        if (a > 0.5f) a = 1.0f - a;  // fold to [0, 0.5]; max input to scale is 0.5
-        // a * 2.0f maps [0, 0.5] -> [0, 1.0]; * 255.5f and truncate gives [0, 255].
-        // min(cov, 255) is load-bearing: float rounding can push a slightly above 0.5.
-        cov = (int)(a * 2.0f * 255.5f);
+        // Even-odd folds the accumulated signed area with the period-2
+        // triangle wave peaking at odd integers: a fully interior pixel
+        // of a simple path (|area| = 1) maps to full coverage, and
+        // winding-2 overlap regions fold back to zero. min(cov, 255)
+        // is load-bearing: float rounding can push a slightly above 1.
+        float t = fmodf(fabsf(area), 2.0f);
+        float a = (t > 1.0f) ? 2.0f - t : t;
+        cov = (int)(a * 255.5f);
     } else {
         cov = (int)(fminf(fabsf(area), 1.0f) * 255.5f);
     }

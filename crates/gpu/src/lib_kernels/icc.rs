@@ -98,6 +98,11 @@ impl GpuCtx {
             cmyk.len()
         );
         let n = cmyk.len() / 4;
+        if n == 0 {
+            // Match the sibling wrappers: zero pixels is a no-op, not a
+            // zero-size device-allocation error.
+            return Ok(Vec::new());
+        }
         let n_u32 = u32::try_from(n).expect("pixel count exceeds u32::MAX");
         let stream = &self.stream;
 
@@ -117,8 +122,7 @@ impl GpuCtx {
         }
 
         stream.synchronize()?;
-        let mut rgb = vec![0u8; n * 3];
-        stream.memcpy_dtoh(&d_rgb, &mut rgb)?;
+        let rgb = stream.clone_dtoh(&d_rgb)?;
         Ok(rgb)
     }
 
