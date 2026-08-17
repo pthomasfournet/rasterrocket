@@ -284,35 +284,76 @@ fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>
         // the current row being filled.
         let (done, rest) = out.split_at_mut(row * stride);
         let dst = &mut rest[..stride];
-        let prev: &[u8] = if row == 0 {
-            &[]
-        } else {
-            &done[(row - 1) * stride..row * stride]
-        };
+        let prev: Option<&[u8]> = (row > 0).then(|| &done[(row - 1) * stride..row * stride]);
 
-        for i in 0..stride {
-            let a = if i >= bytes_per_pixel {
-                dst[i - bytes_per_pixel]
-            } else {
-                0
-            };
-            let b = prev.get(i).copied().unwrap_or(0);
-            let c = if i >= bytes_per_pixel {
-                prev.get(i - bytes_per_pixel).copied().unwrap_or(0)
-            } else {
-                0
-            };
-            dst[i] = match filter_byte {
-                0 => raw[i],
-                1 => raw[i].wrapping_add(a),
-                2 => raw[i].wrapping_add(b),
-                3 => raw[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
-                4 => raw[i].wrapping_add(paeth(a, b, c)),
-                _ => raw[i],
-            };
-        }
+        apply_png_filter(filter_byte, raw, prev, dst, bytes_per_pixel);
     }
     Ok(out)
+}
+
+/// Undo one PNG row filter (RFC 2083 § 6.5–6.9) in place.
+///
+/// Dispatched per row rather than per byte: None (0) and Up (2) are
+/// branch-free whole-row forms that autovectorise; Sub (1), Average (3),
+/// and Paeth (4) carry a left-neighbour dependency at `bpp` lag, so their
+/// loops stay scalar with the up-row handling hoisted out. `prev` is
+/// `None` on the first row (all up/up-left neighbours read as zero);
+/// unknown filter bytes copy the raw row through unchanged.
+///
+/// First-row degenerations follow from the neighbour zeroing: Up copies,
+/// Paeth reduces to Sub (`paeth(a, 0, 0) = a`), and Average halves only
+/// the left neighbour. Within the first `bpp` bytes the left neighbour is
+/// zero, so Sub copies, Average halves only the up neighbour, and Paeth
+/// takes the up neighbour (`paeth(0, b, 0) = b`).
+fn apply_png_filter(filter: u8, raw: &[u8], prev: Option<&[u8]>, dst: &mut [u8], bpp: usize) {
+    let stride = dst.len();
+    let lead = bpp.min(stride);
+    match (filter, prev) {
+        (0, _) | (2, None) => dst.copy_from_slice(&raw[..stride]),
+        (2, Some(prev)) => {
+            for (d, (&r, &p)) in dst.iter_mut().zip(raw.iter().zip(prev)) {
+                *d = r.wrapping_add(p);
+            }
+        }
+        (1, _) | (4, None) => {
+            // Sub ignores the row above; Paeth with no row above
+            // degenerates to Sub (paeth(a, 0, 0) = a).
+            dst[..lead].copy_from_slice(&raw[..lead]);
+            for i in lead..stride {
+                dst[i] = raw[i].wrapping_add(dst[i - bpp]);
+            }
+        }
+        (3, None) => {
+            dst[..lead].copy_from_slice(&raw[..lead]);
+            for i in lead..stride {
+                dst[i] = raw[i].wrapping_add(dst[i - bpp] / 2);
+            }
+        }
+        (3, Some(prev)) => {
+            for i in 0..lead {
+                dst[i] = raw[i].wrapping_add(prev[i] / 2);
+            }
+            for i in lead..stride {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "mean of two u8 widened to u16 is ≤ 255"
+                )]
+                {
+                    dst[i] = raw[i]
+                        .wrapping_add(((u16::from(dst[i - bpp]) + u16::from(prev[i])) / 2) as u8);
+                }
+            }
+        }
+        (4, Some(prev)) => {
+            for i in 0..lead {
+                dst[i] = raw[i].wrapping_add(prev[i]);
+            }
+            for i in lead..stride {
+                dst[i] = raw[i].wrapping_add(paeth(dst[i - bpp], prev[i], prev[i - bpp]));
+            }
+        }
+        (_, _) => dst.copy_from_slice(&raw[..stride]),
+    }
 }
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
@@ -540,6 +581,67 @@ impl DictLookup for Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-byte reference for `apply_png_filter`: the RFC 2083 recurrence
+    /// evaluated with all three neighbours recomputed per byte. The
+    /// row-dispatched production form must match it exactly for every
+    /// filter, including out-of-spec filter bytes (copy-through).
+    fn png_filter_reference(filter: u8, raw: &[u8], prev: &[u8], dst: &mut [u8], bpp: usize) {
+        for i in 0..dst.len() {
+            let a = if i >= bpp { dst[i - bpp] } else { 0 };
+            let b = prev.get(i).copied().unwrap_or(0);
+            let c = if i >= bpp {
+                prev.get(i - bpp).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "mean of two u8 widened to u16 is ≤ 255"
+            )]
+            {
+                dst[i] = match filter {
+                    0 => raw[i],
+                    1 => raw[i].wrapping_add(a),
+                    2 => raw[i].wrapping_add(b),
+                    3 => raw[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
+                    4 => raw[i].wrapping_add(paeth(a, b, c)),
+                    _ => raw[i],
+                };
+            }
+        }
+    }
+
+    #[test]
+    fn png_filter_matches_per_byte_reference() {
+        // Deterministic pseudo-random rows over every filter (including an
+        // out-of-spec byte), several pixel widths, and strides that are not
+        // multiples of bpp — with and without a previous row.
+        for bpp in [1usize, 2, 3, 4, 6, 8] {
+            for stride in [1usize, 2, 3, 7, 16, 33, 100] {
+                let raw: Vec<u8> = (0..stride)
+                    .map(|i| (i.wrapping_mul(151).wrapping_add(43) % 256) as u8)
+                    .collect();
+                let prev_row: Vec<u8> = (0..stride)
+                    .map(|i| (i.wrapping_mul(97).wrapping_add(17) % 256) as u8)
+                    .collect();
+                for filter in 0u8..=5 {
+                    for prev in [None, Some(&prev_row[..])] {
+                        let mut want = vec![0u8; stride];
+                        png_filter_reference(filter, &raw, prev.unwrap_or(&[]), &mut want, bpp);
+                        let mut got = vec![0u8; stride];
+                        apply_png_filter(filter, &raw, prev, &mut got, bpp);
+                        assert_eq!(
+                            got,
+                            want,
+                            "filter={filter} bpp={bpp} stride={stride} prev={}",
+                            prev.is_some()
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn ascii85_decode_basic() {
