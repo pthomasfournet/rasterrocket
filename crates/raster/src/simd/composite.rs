@@ -14,21 +14,27 @@
 //! arithmetic on `u16` gives LLVM the freedom to choose the best instruction
 //! width (128/256/512-bit) for the target, without us hard-coding a specific ISA.
 //!
-//! # div255 approximation
+//! # div255
 //!
-//! `(v + 255) >> 8` approximates `v / 255` with at most ±1 LSB of error.
-//! This matches the tiny-skia lowp `div255` and is cheaper to auto-vectorize
-//! than the higher-precision `(v + (v>>8) + 0x80) >> 8` form.
+//! `(v + (v >> 8) + 0x80) >> 8` computes `v / 255` exactly for the operand
+//! range here (`v ≤ 255²`), matching `color::convert::div255` in the general
+//! path bit for bit, so output does not depend on which tier a span takes.
+//! It stays pure u16 lane arithmetic (max intermediate 65 407), so it
+//! auto-vectorizes the same as the cruder `(v + 255) >> 8` approximation.
 
 // Number of pixels per SIMD-style lane chunk.  16 × u16 = 256 bits — one AVX2
 // vector per colour channel.  LLVM will widen to 512-bit (AVX-512) automatically
 // when the target supports it.
 const LANE: usize = 16;
 
-/// Approximate `v / 255` for `v` in `[0, 255²]`.  Maximum error: ±1 LSB.
+/// Exact `v / 255` (rounded to nearest) for `v` in `[0, 255²]`.
+///
+/// Same formula as `color::convert::div255`; the intermediate
+/// `v + (v >> 8) + 0x80` peaks at 65 407 for `v = 65 025`, so u16 cannot
+/// overflow and no clamp is needed (the result is ≤ 255 on this range).
 #[inline]
 const fn div255_u16(v: u16) -> u16 {
-    (v + 255) >> 8
+    (v + (v >> 8) + 0x80) >> 8
 }
 
 /// Composite a solid RGB source over an opaque destination (no alpha plane).
