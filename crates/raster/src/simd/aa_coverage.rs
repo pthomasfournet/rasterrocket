@@ -689,22 +689,37 @@ mod tests {
     /// chunks + 6-byte scalar).
     const TIER_TEST_N: usize = 300;
 
+    /// Even start offsets for the per-tier cross-checks. Non-zero values make
+    /// `byte_x0` in `coverage_chunk_params` non-zero, pinning the
+    /// `byte_x0 + chunk_idx * chunk_bytes` load arithmetic that the production
+    /// caller (`draw_aa_line`) exercises on every span not starting at column
+    /// 0. Bounded so `(x0 + TIER_TEST_N).div_ceil(2)` stays within the u8
+    /// iterator range of `dispatch_test_rows`.
+    const TIER_TEST_X0S: [usize; 4] = [0, 2, 64, 130];
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx512_coverage_matches_scalar() {
         if !is_x86_feature_detected!("avx512bitalg") || !is_x86_feature_detected!("avx512bw") {
             return;
         }
-        let rows = dispatch_test_rows(TIER_TEST_N.div_ceil(2), TIER_SCHEDULES);
+        for x0 in TIER_TEST_X0S {
+            let rows = dispatch_test_rows((x0 + TIER_TEST_N).div_ceil(2), TIER_SCHEDULES);
 
-        let mut expected = vec![0u8; TIER_TEST_N];
-        aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut expected);
+            let mut expected = vec![0u8; TIER_TEST_N];
+            aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut expected);
 
-        let mut got = vec![0u8; TIER_TEST_N];
-        // SAFETY: both features confirmed present above.
-        unsafe { aa_coverage_span_avx512([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut got) };
+            let mut got = vec![0u8; TIER_TEST_N];
+            // SAFETY: both features confirmed present above.
+            unsafe {
+                aa_coverage_span_avx512([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
+            };
 
-        assert_eq!(got, expected, "AVX-512 coverage mismatch vs scalar");
+            assert_eq!(
+                got, expected,
+                "AVX-512 coverage mismatch vs scalar at x0={x0}"
+            );
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -713,16 +728,20 @@ mod tests {
         if !is_x86_feature_detected!("avx2") {
             return;
         }
-        let rows = dispatch_test_rows(TIER_TEST_N.div_ceil(2), TIER_SCHEDULES);
+        for x0 in TIER_TEST_X0S {
+            let rows = dispatch_test_rows((x0 + TIER_TEST_N).div_ceil(2), TIER_SCHEDULES);
 
-        let mut expected = vec![0u8; TIER_TEST_N];
-        aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut expected);
+            let mut expected = vec![0u8; TIER_TEST_N];
+            aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut expected);
 
-        let mut got = vec![0u8; TIER_TEST_N];
-        // SAFETY: avx2 confirmed present above.
-        unsafe { aa_coverage_span_avx2([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut got) };
+            let mut got = vec![0u8; TIER_TEST_N];
+            // SAFETY: avx2 confirmed present above.
+            unsafe {
+                aa_coverage_span_avx2([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
+            };
 
-        assert_eq!(got, expected, "AVX2 coverage mismatch vs scalar");
+            assert_eq!(got, expected, "AVX2 coverage mismatch vs scalar at x0={x0}");
+        }
     }
 
     #[cfg(all(target_arch = "aarch64", feature = "nightly-sve2"))]
@@ -731,30 +750,38 @@ mod tests {
         if !std::arch::is_aarch64_feature_detected!("sve2") {
             return;
         }
-        let rows = dispatch_test_rows(TIER_TEST_N.div_ceil(2), TIER_SCHEDULES);
+        for x0 in TIER_TEST_X0S {
+            let rows = dispatch_test_rows((x0 + TIER_TEST_N).div_ceil(2), TIER_SCHEDULES);
 
-        let mut expected = vec![0u8; TIER_TEST_N];
-        aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut expected);
+            let mut expected = vec![0u8; TIER_TEST_N];
+            aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut expected);
 
-        let mut got = vec![0u8; TIER_TEST_N];
-        // SAFETY: sve2 confirmed present above.
-        unsafe { aa_coverage_span_sve2([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut got) };
+            let mut got = vec![0u8; TIER_TEST_N];
+            // SAFETY: sve2 confirmed present above.
+            unsafe {
+                aa_coverage_span_sve2([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
+            };
 
-        assert_eq!(got, expected, "SVE2 coverage mismatch vs scalar");
+            assert_eq!(got, expected, "SVE2 coverage mismatch vs scalar at x0={x0}");
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_coverage_matches_scalar() {
-        let rows = dispatch_test_rows(TIER_TEST_N.div_ceil(2), TIER_SCHEDULES);
+        for x0 in TIER_TEST_X0S {
+            let rows = dispatch_test_rows((x0 + TIER_TEST_N).div_ceil(2), TIER_SCHEDULES);
 
-        let mut expected = vec![0u8; TIER_TEST_N];
-        aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut expected);
+            let mut expected = vec![0u8; TIER_TEST_N];
+            aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut expected);
 
-        let mut got = vec![0u8; TIER_TEST_N];
-        // SAFETY: aarch64 always has NEON.
-        unsafe { aa_coverage_span_neon([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut got) };
+            let mut got = vec![0u8; TIER_TEST_N];
+            // SAFETY: aarch64 always has NEON.
+            unsafe {
+                aa_coverage_span_neon([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
+            };
 
-        assert_eq!(got, expected, "NEON coverage mismatch vs scalar");
+            assert_eq!(got, expected, "NEON coverage mismatch vs scalar at x0={x0}");
+        }
     }
 }
