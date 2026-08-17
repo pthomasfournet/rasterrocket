@@ -586,6 +586,112 @@ mod tests {
         }
     }
 
+    /// Kernel-model coverage byte for `(px, py)` under non-zero winding,
+    /// mirroring the kernel's `min(|area|, 1) * 255.5` conversion.
+    fn kernel_coverage_at(
+        recs: &[TileRecord],
+        starts: &[u32],
+        counts: &[u32],
+        grid_w: u32,
+        px: u32,
+        py: u32,
+    ) -> u8 {
+        let area = kernel_area_at(recs, starts, counts, grid_w, px, py);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "min(|area|,1) * 255.5 is in [0, 255.5]; truncation to 0..=255 is the kernel's own conversion"
+        )]
+        {
+            (area.abs().min(1.0) * 255.5) as u8
+        }
+    }
+
+    /// A rect whose right edge lands exactly at `x == bbox width` — with the
+    /// width a multiple of `TILE_W`, as `gpu_fill_segs` produces for every
+    /// axis-aligned shape with integral coordinates — must still cover its
+    /// rightmost pixel column. A lower clamp on the emit range once culled
+    /// exactly this configuration, rendering the whole rect blank.
+    #[test]
+    fn tile_fill_right_edge_at_tile_boundary_is_covered() {
+        let segs = [
+            0.0f32, 0.0, 0.0, 16.0, // left edge, downward
+            48.0f32, 16.0, 48.0, 0.0, // right edge, upward
+        ];
+        let (recs, starts, counts, grid_w) = build_tile_records(&segs, 0.0, 0.0, 48, 16);
+        for px in 0..48u32 {
+            let area = kernel_area_at(&recs, &starts, &counts, grid_w, px, 8);
+            assert!(
+                area.abs() > 0.5,
+                "pixel ({px},8) has area {area}, expected full coverage"
+            );
+        }
+    }
+
+    /// The tile kernel model must agree with `aa_fill_cpu` on every pixel
+    /// `aa_fill_cpu` resolves as fully inside or fully outside a shape.
+    ///
+    /// This is the guard against the total-content-loss class of record
+    /// bugs: a culled or missing record flips whole interior columns to 0.
+    /// Antialiased boundary pixels (0 < aa < 255) are exempt — the kernel's
+    /// analytic edge formula over-weights partially-crossed pixels relative
+    /// to the 64-sample jittered estimate, which is an edge-quality
+    /// divergence, not coverage loss.
+    #[test]
+    fn tile_fill_matches_aa_fill_cpu_on_solid_pixels() {
+        struct Case {
+            name: &'static str,
+            segs: Vec<f32>,
+            w: u32,
+            h: u32,
+        }
+        let cases = [
+            Case {
+                name: "interior rect",
+                segs: vec![10.0, 10.0, 10.0, 110.0, 210.0, 110.0, 210.0, 10.0],
+                w: 224,
+                h: 128,
+            },
+            Case {
+                name: "boundary rect",
+                segs: vec![0.0, 0.0, 0.0, 16.0, 48.0, 16.0, 48.0, 0.0],
+                w: 48,
+                h: 16,
+            },
+            Case {
+                name: "right triangle",
+                segs: vec![
+                    0.0, 0.0, 32.0, 32.0, 32.0, 32.0, 0.0, 32.0, 0.0, 32.0, 0.0, 0.0,
+                ],
+                w: 32,
+                h: 32,
+            },
+        ];
+        for case in &cases {
+            let aa = aa_fill_cpu(&case.segs, 0.0, 0.0, case.w, case.h, false);
+            let (recs, starts, counts, grid_w) =
+                build_tile_records(&case.segs, 0.0, 0.0, case.w, case.h);
+            for py in 0..case.h {
+                for px in 0..case.w {
+                    let t = kernel_coverage_at(&recs, &starts, &counts, grid_w, px, py);
+                    match aa[(py * case.w + px) as usize] {
+                        255 => assert!(
+                            t >= 240,
+                            "{}: interior pixel ({px},{py}) tile={t}, aa=255",
+                            case.name
+                        ),
+                        0 => assert!(
+                            t <= 16,
+                            "{}: exterior pixel ({px},{py}) tile={t}, aa=0",
+                            case.name
+                        ),
+                        _ => {} // AA boundary pixel — see doc comment
+                    }
+                }
+            }
+        }
+    }
+
     /// Every tile column of a wide fill must receive the records it needs.
     #[test]
     fn tile_records_reach_columns_left_of_the_segment() {
