@@ -144,6 +144,24 @@ fn composite_random_inputs() {
     );
 }
 
+#[test]
+fn composite_overflowing_blend_is_clamped() {
+    // Directed (a_src, a_dst) pairs with s = d = 255 whose blend exceeds 255
+    // via floor truncation (max 261 at (8, 16)). The LCG corpus in
+    // composite_random_inputs never reaches this band, so it cannot catch a
+    // missing clamp before the narrowing cast.
+    let cases = [(1u8, 128u8), (8, 16), (2, 64), (4, 32)];
+    let mut src = Vec::new();
+    let mut dst = Vec::new();
+    for &(a_src, a_dst) in &cases {
+        src.extend_from_slice(&[255, 255, 255, a_src]);
+        dst.extend_from_slice(&[255, 255, 255, a_dst]);
+    }
+    let cpu = run_composite_cpu(&src, &dst);
+    let vk = run_composite_vulkan(&src, &dst);
+    assert_eq!(cpu, vk, "Vulkan composite must clamp the overflowing blend");
+}
+
 // ── apply_soft_mask ─────────────────────────────────────────────────
 
 fn run_soft_mask_vulkan(pixels_in: &[u8], mask: &[u8]) -> Vec<u8> {

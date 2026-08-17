@@ -26,9 +26,10 @@ extern "C" __global__ void composite_rgba8(
     for (int c = 0; c < 3; c++) {
         unsigned int s = src_pixels[base + c];
         unsigned int d = dst_pixels[base + c];
-        dst_pixels[base + c] = (unsigned char)(
-            (s * a_src + d * a_dst * inv / 255 + a_out / 2) / a_out
-        );
+        // Floor truncation in the d*a_dst*inv/255 term can push the quotient
+        // past 255 (max 261); clamp before the narrowing cast.
+        unsigned int v = (s * a_src + d * a_dst * inv / 255 + a_out / 2) / a_out;
+        dst_pixels[base + c] = (unsigned char)min(v, 255u);
     }
     dst_pixels[base + 3] = (unsigned char)a_out;
 }

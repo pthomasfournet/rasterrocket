@@ -35,8 +35,10 @@ void composite_rgba8(
     for (int c = 0; c < 3; c++) {
         uint s = uint(src_pixels[base + c]);
         uint d = uint(dst_pixels[base + c]);
+        // Floor truncation in the d*a_dst*inv/255 term can push the quotient
+        // past 255 (max 261); clamp before the narrowing cast.
         uint v = (s * a_src + d * a_dst * inv / 255 + a_out / 2) / a_out;
-        dst_pixels[base + c] = uint8_t(v);
+        dst_pixels[base + c] = uint8_t(min(v, 255u));
     }
     dst_pixels[base + 3] = uint8_t(a_out);
 }

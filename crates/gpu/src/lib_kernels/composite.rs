@@ -92,3 +92,43 @@ impl GpuCtx {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "gpu-validation"))]
+mod tests {
+    use crate::GpuCtx;
+    use crate::composite::composite_rgba8_cpu;
+
+    /// Floor truncation in the `d * a_dst * inv / 255` term can push the
+    /// blended channel past 255 (max 261, at a_src=8 over a_dst=16); the
+    /// kernel must clamp like the CPU reference instead of letting the
+    /// narrowing cast wrap white toward black.
+    #[test]
+    fn composite_gpu_clamps_overflowing_blend_like_cpu() {
+        let Ok(ctx) = GpuCtx::init() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        // Directed (a_src, a_dst) pairs with s = d = 255: (1, 128) blends
+        // to 256; (8, 16) to 261; the rest cover the overflow band.
+        let cases = [(1u8, 128u8), (8, 16), (2, 64), (4, 32)];
+        let mut src = Vec::new();
+        let mut dst = Vec::new();
+        for &(a_src, a_dst) in &cases {
+            src.extend_from_slice(&[255, 255, 255, a_src]);
+            dst.extend_from_slice(&[255, 255, 255, a_dst]);
+        }
+
+        let mut cpu = dst.clone();
+        composite_rgba8_cpu(&src, &mut cpu);
+
+        let mut gpu = dst;
+        ctx.composite_rgba8_gpu(&src, &mut gpu)
+            .expect("gpu composite");
+
+        assert_eq!(
+            gpu, cpu,
+            "GPU composite must match the clamped CPU reference"
+        );
+    }
+}
