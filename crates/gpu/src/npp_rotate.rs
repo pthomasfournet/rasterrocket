@@ -37,6 +37,7 @@ const CUDA_MEMCPY_D2H: i32 = 2;
 
 unsafe extern "C" {
     fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
+    fn cudaMemset(dev_ptr: *mut c_void, value: i32, count: usize) -> i32;
 }
 
 // ── NPP core (libnppc.so) ─────────────────────────────────────────────────────
@@ -264,6 +265,16 @@ impl NppRotator {
         let d_dst = DeviceBuf::alloc(dst_len)
             .map_err(|code| NppRotateError(format!("cudaMalloc(dst, {dst_len}): code {code}")))?;
 
+        // nppiRotate writes only the pixels covered by the rotated source
+        // quad; pre-fill the destination with white so the uncovered corner
+        // wedges match the CPU path's 255 background instead of exposing
+        // stale device memory.
+        // SAFETY: d_dst is a valid dst_len-byte device allocation.
+        let r = unsafe { cudaMemset(d_dst.ptr, 0xFF, dst_len) };
+        if r != 0 {
+            return Err(NppRotateError(format!("cudaMemset(dst): code {r}")));
+        }
+
         // H → D upload.
         // SAFETY: src is valid for `src.len()` bytes; we validated src.len() >= src_stride*h
         // above, so NPP will not read past the device allocation.
@@ -381,7 +392,7 @@ impl NppRotator {
             // (≤ ±7°) on non-trivial images, but log it so it is diagnosable.
             log::warn!(
                 "npp_rotate: nppiRotate returned NPP_WRONG_INTERSECTION_QUAD_WARNING (30); \
-                 destination image will be blank"
+                 destination image will be all white"
             );
         } else if status < 0 {
             return Err(NppRotateError(format!(
@@ -502,4 +513,37 @@ pub fn rotate_gray8(
             RotatorSlot::Uninit => unreachable!("slot was just initialised"),
         }
     })
+}
+
+#[cfg(all(test, feature = "gpu-validation"))]
+mod tests {
+    use super::*;
+
+    /// Destination pixels the rotated source quad does not cover must come
+    /// back as white (255), matching the CPU rotate path's background fill.
+    ///
+    /// The 0° priming call makes a stale-VRAM regression deterministic: it
+    /// writes an all-black destination of the same size, which the allocator
+    /// hands back to the next same-size request, so an uncleared destination
+    /// reads 0 at the corners rather than whatever a fresh allocation holds.
+    #[test]
+    fn uncovered_corners_are_white() {
+        const W: u32 = 512;
+        const H: u32 = 512;
+        let black = vec![0u8; (W * H) as usize];
+
+        rotate_gray8(&black, W as usize, W, H, 0.0).expect("priming rotate");
+        let out = rotate_gray8(&black, W as usize, W, H, 3.0).expect("rotate");
+
+        let (w, h) = (W as usize, H as usize);
+        // At 3° about the centre, all four destination corners lie outside
+        // the rotated source quad.
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            assert_eq!(
+                out[y * w + x],
+                255,
+                "uncovered corner ({x}, {y}) must be white"
+            );
+        }
+    }
 }
