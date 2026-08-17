@@ -72,6 +72,20 @@ void clut_node(
     b = float(uint(clut[idx + 2]));
 }
 
+// Round-half-up of a value clamped to [0, 255], matching the CPU
+// fallback's clamp-then-round (half away from zero equals half up on a
+// non-negative range). Computed via the floor difference: adding 0.5f
+// first can round up to the next integer for inputs just below a half,
+// because the sum's f32 ulp is coarser than the input's. `c - fl` is
+// exact on this range (Sterbenz), so the comparison is exact. Written
+// out explicitly rather than via round(): halfway direction of
+// GLSL.std.450 Round is implementation-defined.
+uint8_t round_half_up_byte(float v) {
+    float c  = min(max(v, 0.0f), 255.0f);
+    float fl = floor(c);
+    return uint8_t(int(fl + ((c - fl) >= 0.5f ? 1.0f : 0.0f)));
+}
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void icc_cmyk_clut(
@@ -188,7 +202,7 @@ void icc_cmyk_clut(
     precise float out_g = wk * (gk1 - gk0) + gk0;
     precise float out_b = wk * (bk1 - bk0) + bk0;
 
-    rgb[ri_base + 0] = uint8_t(int(min(max(out_r + 0.5f, 0.0f), 255.0f)));
-    rgb[ri_base + 1] = uint8_t(int(min(max(out_g + 0.5f, 0.0f), 255.0f)));
-    rgb[ri_base + 2] = uint8_t(int(min(max(out_b + 0.5f, 0.0f), 255.0f)));
+    rgb[ri_base + 0] = round_half_up_byte(out_r);
+    rgb[ri_base + 1] = round_half_up_byte(out_g);
+    rgb[ri_base + 2] = round_half_up_byte(out_b);
 }

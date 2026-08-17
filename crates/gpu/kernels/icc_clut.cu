@@ -104,6 +104,18 @@ __device__ __forceinline__ void clut_node(
 //         index = (k*G^3 + c*G^2 + m*G + y)*3
 // grid_n: number of grid nodes per axis (typically 17)
 // n     : total pixel count
+// Round-half-up of a value clamped to [0, 255], matching the CPU
+// fallback's clamp-then-round (half away from zero equals half up on a
+// non-negative range). Computed via the floor difference: adding 0.5f
+// first can round up to the next integer for inputs just below a half,
+// because the sum's f32 ulp is coarser than the input's. `c - fl` is
+// exact on this range (Sterbenz), so the comparison is exact.
+__device__ __forceinline__ unsigned char round_half_up_byte(float v) {
+    float c  = fminf(fmaxf(v, 0.0f), 255.0f);
+    float fl = floorf(c);
+    return (unsigned char)(int)(fl + ((c - fl) >= 0.5f ? 1.0f : 0.0f));
+}
+
 extern "C" __global__ void icc_cmyk_clut(
     const unsigned char* __restrict__ cmyk,
     unsigned char*       __restrict__ rgb,
@@ -237,8 +249,7 @@ extern "C" __global__ void icc_cmyk_clut(
     float out_g = __fmaf_rn(wk, gk1 - gk0, gk0);
     float out_b = __fmaf_rn(wk, bk1 - bk0, bk0);
 
-    // Round to nearest and clamp to [0, 255].
-    rgb[ri_base]     = (unsigned char)(int)fminf(fmaxf(out_r + 0.5f, 0.0f), 255.0f);
-    rgb[ri_base + 1] = (unsigned char)(int)fminf(fmaxf(out_g + 0.5f, 0.0f), 255.0f);
-    rgb[ri_base + 2] = (unsigned char)(int)fminf(fmaxf(out_b + 0.5f, 0.0f), 255.0f);
+    rgb[ri_base]     = round_half_up_byte(out_r);
+    rgb[ri_base + 1] = round_half_up_byte(out_g);
+    rgb[ri_base + 2] = round_half_up_byte(out_b);
 }
