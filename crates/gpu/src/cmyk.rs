@@ -517,8 +517,11 @@ fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
 ///
 /// # Panics
 ///
-/// Panics if `clut` is `Some((_, grid_n))` and `grid_n < 2`.  A CLUT with
-/// fewer than 2 nodes per axis is degenerate and unusable for interpolation.
+/// Panics if `clut` is `Some((table, grid_n))` and either `grid_n < 2`
+/// (fewer than 2 nodes per axis is degenerate and unusable for
+/// interpolation) or `table.len() != grid_n⁴ × 3` (the table and grid size
+/// disagree — reading through the mismatch would index out of bounds for a
+/// short table and silently sample garbage for a long one).
 #[must_use]
 pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
     let n = cmyk.len() / 4;
@@ -534,6 +537,18 @@ pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
             assert!(
                 grid_n >= 2,
                 "icc_cmyk_to_rgb_cpu: grid_n must be ≥ 2, got {grid_n}"
+            );
+            let expected_len = (grid_n as usize)
+                .checked_pow(4)
+                .and_then(|nodes| nodes.checked_mul(3))
+                .unwrap_or_else(|| {
+                    panic!("grid_n({grid_n})^4*3 overflows usize — grid_n must be ≤ 255")
+                });
+            assert_eq!(
+                table.len(),
+                expected_len,
+                "CLUT table length {got} ≠ grid_n({grid_n})^4*3={expected_len}",
+                got = table.len(),
             );
             let g = grid_n as usize; // grid_n ≤ 255 from caller validation
             let g2 = g * g;
@@ -848,6 +863,16 @@ mod tests {
                 "AVX-512 CMYK→RGB mismatch on chunk {chunk_i}"
             );
         }
+    }
+
+    /// A (table, grid_n) pair whose lengths disagree must fail at the API
+    /// boundary with a diagnostic naming both, not deep inside the
+    /// interpolation closure with a bare slice index.
+    #[test]
+    #[should_panic(expected = "CLUT table length")]
+    fn icc_cmyk_clut_rejects_mismatched_table_length() {
+        let table = vec![0u8; 17usize.pow(4) * 3];
+        let _ = icc_cmyk_to_rgb_cpu(&[0, 0, 0, 255], Some((&table, 33)));
     }
 
     #[test]
