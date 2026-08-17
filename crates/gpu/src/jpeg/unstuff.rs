@@ -93,13 +93,20 @@ pub fn unstuff_into(
 
     let mut i = 0;
     while i < src.len() {
-        let b = src[i];
-        if b != 0xFF {
-            dst.push(b);
-            i += 1;
-            continue;
+        // Splice the clean run up to the next 0xFF in one copy — the
+        // position scan compiles to wide byte-compare loops, and clean
+        // runs dominate at real entropy-stream 0xFF densities (~1/256).
+        match src[i..].iter().position(|&b| b == 0xFF) {
+            None => {
+                dst.extend_from_slice(&src[i..]);
+                return Ok(());
+            }
+            Some(run) => {
+                dst.extend_from_slice(&src[i..i + run]);
+                i += run;
+            }
         }
-        // 0xFF prefix: peek at next byte to decide.
+        // src[i] == 0xFF: peek at next byte to decide.
         let Some(&next) = src.get(i + 1) else {
             return Err(UnstuffError::TrailingFf);
         };
@@ -231,6 +238,40 @@ mod tests {
         let mut rsts = Vec::new();
         let err = unstuff_into(&[0x11, 0x22, 0xFF], &mut dst, &mut rsts).unwrap_err();
         assert!(matches!(err, UnstuffError::TrailingFf));
+    }
+
+    #[test]
+    fn unstuff_long_runs_between_ff_bytes() {
+        // Clean runs longer than any vector width, split by stuffed
+        // bytes, fills, and an RST — pins the run-splice fast path
+        // against the per-byte semantics.
+        let mut src = Vec::new();
+        let run_a: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "values are reduced modulo < 256 before the cast"
+        )]
+        let run_b: Vec<u8> = (0..77u32).map(|i| (i % 199 + 1) as u8).collect();
+        src.extend_from_slice(&run_a);
+        src.extend_from_slice(&[0xFF, 0x00]);
+        src.extend_from_slice(&run_b);
+        src.extend_from_slice(&[0xFF, 0xFF, 0xD3]);
+        src.extend_from_slice(&run_a);
+
+        let (dst, rsts) = run(&src).unwrap();
+        let mut want = Vec::new();
+        want.extend_from_slice(&run_a);
+        want.push(0xFF);
+        want.extend_from_slice(&run_b);
+        want.extend_from_slice(&run_a);
+        assert_eq!(dst, want);
+        assert_eq!(
+            rsts,
+            vec![RstPosition {
+                byte_offset_in_dst: run_a.len() + 1 + run_b.len(),
+                marker_index: 3,
+            }],
+        );
     }
 
     #[test]
