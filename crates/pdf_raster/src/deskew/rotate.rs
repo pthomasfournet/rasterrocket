@@ -75,20 +75,25 @@ struct RowParams {
 
 /// Bilinear interpolation at source `(sx, sy)` given pre-floored origin `(x0, y0)`.
 ///
-/// `x0` and `y0` must already be bounds-checked (`0 ≤ x0 ≤ sx_max`, `0 ≤ y0 ≤ sy_max`).
+/// `x0` and `y0` must already be bounds-checked (`0 ≤ x0 ≤ sx_max = w-1`,
+/// `0 ≤ y0 ≤ sy_max = h-1`). On the last column/row the 2×2 footprint is
+/// clamped to the edge, so the missing neighbour duplicates the edge pixel
+/// and the interpolation degrades gracefully to nearest-neighbour there.
 #[inline]
 fn bilinear_sample(src: &Bitmap<Gray8>, x0: usize, y0: usize, fx: f32, fy: f32) -> u8 {
-    // y0 ≤ sy_max ≤ h-2 and y0+1 ≤ h-1 ≤ 32767 — safe casts.
+    let x1 = (x0 + 1).min(src.width as usize - 1);
+    let y1 = (y0 + 1).min(src.height as usize - 1);
+    // y0 ≤ sy_max = h-1 ≤ 32767 and y1 ≤ h-1 — safe casts.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "y0 ≤ h-2 ≤ 32766 and y0+1 ≤ h-1 ≤ 32767; both fit in u32"
+        reason = "y0 ≤ h-1 ≤ 32767 and y1 ≤ h-1; both fit in u32"
     )]
-    let (r0, r1) = (src.row_bytes(y0 as u32), src.row_bytes((y0 + 1) as u32));
+    let (r0, r1) = (src.row_bytes(y0 as u32), src.row_bytes(y1 as u32));
 
     let p00 = f32::from(r0[x0]);
-    let p10 = f32::from(r0[x0 + 1]);
+    let p10 = f32::from(r0[x1]);
     let p01 = f32::from(r1[x0]);
-    let p11 = f32::from(r1[x0 + 1]);
+    let p11 = f32::from(r1[x1]);
 
     let top = (p10 - p00).mul_add(fx, p00);
     let bot = (p11 - p01).mul_add(fx, p01);
@@ -180,15 +185,15 @@ unsafe fn rotate_row_neon(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams
     let v_sx_base = vdupq_n_f32(p.sx_base);
     let v_sy_base = vdupq_n_f32(p.sy_base);
     let v_zero = vdupq_n_f32(0.0);
-    // sx_max / sy_max ≤ 32766 ≤ 2^23 — exactly representable in f32.
+    // sx_max / sy_max ≤ 32767 ≤ 2^23 — exactly representable in f32.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "sx_max / sy_max ≤ 32766 ≤ 2^23 — exactly representable in f32"
+        reason = "sx_max / sy_max ≤ 32767 ≤ 2^23 — exactly representable in f32"
     )]
     let v_sx_max = vdupq_n_f32(p.sx_max as f32);
     #[expect(
         clippy::cast_precision_loss,
-        reason = "sy_max ≤ 32766 ≤ 2^23 — exactly representable in f32"
+        reason = "sy_max ≤ 32767 ≤ 2^23 — exactly representable in f32"
     )]
     let v_sy_max = vdupq_n_f32(p.sy_max as f32);
 
@@ -343,9 +348,9 @@ fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
 /// matrix centred on the image centre, then bilinear-interpolate from the
 /// four surrounding source pixels.
 ///
-/// Out-of-bounds source pixels are filled with 255 (white).  The rightmost
-/// and bottom source columns/rows are treated as out-of-bounds because bilinear
-/// sampling requires a 2×2 neighbourhood — the last valid origin is (w-2, h-2).
+/// Out-of-bounds source pixels are filled with 255 (white).  The last valid
+/// sample origin is (w-1, h-1); on that boundary `bilinear_sample` clamps
+/// the 2×2 footprint to the edge.
 #[expect(
     clippy::similar_names,
     reason = "sx_*/sy_* are paired coordinate variables; renaming would obscure the symmetry"
@@ -373,20 +378,22 @@ pub fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
     )]
     let cy = (h as f32 - 1.0) * 0.5;
 
-    // Valid source coordinate range for bilinear sampling: x ∈ [0, w-2], y ∈ [0, h-2].
+    // Valid source coordinate range: x ∈ [0, w-1], y ∈ [0, h-1].
+    // `bilinear_sample` clamps its 2×2 footprint to the edge, so the last
+    // column/row are sampleable rather than white-filled.
     // w, h ≤ 32768 — safe to cast to i32 (fits in i32 range).
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         reason = "image dimensions ≤ MAX_PX_DIMENSION = 32768; fits in i32"
     )]
-    let sx_max = (w as i32) - 2;
+    let sx_max = (w as i32) - 1;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         reason = "image dimensions ≤ MAX_PX_DIMENSION = 32768; fits in i32"
     )]
-    let sy_max = (h as i32) - 2;
+    let sy_max = (h as i32) - 1;
 
     for oy in 0..h {
         // oy < h ≤ 32768; safe to cast to u32.
@@ -461,31 +468,57 @@ mod tests {
 
         // Pin the OOB-guard strict-inequality boundaries: at 0° the inverse
         // map is identity, so output `(0, y)` samples source `x0 = 0` and
-        // output `(sx_max, y)` samples `x0 = sx_max = w - 2 = 62`.  If the
+        // output `(sx_max, y)` samples `x0 = sx_max = w - 1 = 63`.  If the
         // guard `<` → `<=`, x0=0 wrongly becomes OOB → 255.  If `>` → `>=`,
-        // x0=62 wrongly becomes OOB → 255.  The checkerboard has 0 at both
-        // boundaries on row 32, so a white-fill mutation is unmissable.
+        // x0=63 wrongly becomes OOB → 255.
         assert_eq!(
             rotated.row_bytes(32)[0],
             src.row_bytes(32)[0],
             "x0 = 0 must be in-bounds (guards `x0 < 0`, not `x0 <= 0`)"
         );
         assert_eq!(
-            rotated.row_bytes(32)[62],
-            src.row_bytes(32)[62],
+            rotated.row_bytes(32)[63],
+            src.row_bytes(32)[63],
             "x0 = sx_max must be in-bounds (guards `x0 > sx_max`, not `x0 >= sx_max`)"
         );
-        // And the y-axis boundaries: row 0 and row 62.
+        // And the y-axis boundaries: row 0 and row 63.
         assert_eq!(
             rotated.row_bytes(0)[32],
             src.row_bytes(0)[32],
             "y0 = 0 must be in-bounds (guards `y0 < 0`, not `y0 <= 0`)"
         );
         assert_eq!(
-            rotated.row_bytes(62)[32],
-            src.row_bytes(62)[32],
+            rotated.row_bytes(63)[32],
+            src.row_bytes(63)[32],
             "y0 = sy_max must be in-bounds (guards `y0 > sy_max`, not `y0 >= sy_max`)"
         );
+    }
+
+    /// At 0° the inverse map is the identity, so every pixel — including
+    /// the last row and column — must survive: edge-clamped bilinear
+    /// sampling degrades to nearest-neighbour exactly on the boundary
+    /// instead of white-filling it.
+    #[test]
+    fn rotate_zero_preserves_last_row_and_column() {
+        let mut src = Bitmap::<Gray8>::new(64, 64, 1, false);
+        for y in 0..64u32 {
+            let row = src.row_bytes_mut(y);
+            for (x, px) in row.iter_mut().enumerate() {
+                *px = if (x + y as usize).is_multiple_of(2) {
+                    0
+                } else {
+                    128
+                };
+            }
+        }
+        let rotated = rotate_cpu(&src, 0.0);
+        for y in 0..64u32 {
+            assert_eq!(
+                src.row_bytes(y),
+                rotated.row_bytes(y),
+                "row {y} must be unchanged at 0°"
+            );
+        }
     }
 
     /// `rotate_inplace` at 0° does not panic.
@@ -617,31 +650,32 @@ mod tests {
         let src = Bitmap::<Gray8>::new(8, 8, 1, false);
         let rotated = rotate_cpu(&src, 5.0);
 
-        // Corner pixels of the rotated 8×8: their inverse-mapped source
-        // coordinates fall outside [0, 6] × [0, 6] (sx_max = sy_max = 6).
-        // At 5° with cx = cy = 3.5, the (0,0) output corner maps to roughly
-        // sx = 3.5 - 3.5*cos5 - (-3.5)*sin5 ≈ 0.32, sy = -3.5*sin5 + (-3.5)*cos5 + 3.5 ≈ -0.18.
-        // sy < 0 ⇒ OOB ⇒ white.  Source is all zeros, so any non-255 corner
-        // would indicate the OOB guard is mis-firing.
+        // Corner pixels of the rotated 8×8, with cx = cy = 3.5 and the
+        // valid sample range [0, 7] × [0, 7]: at 5° the CW inverse map
+        // sends (0,0) to (0.32, -0.29) and (0,7) to (-0.29, 7.29) — a
+        // negative coordinate makes both genuinely OOB, so they white-fill.
+        // (7,0) maps to (7.29, 0.32) and (7,7) to (6.68, 7.29): both floor
+        // into the last valid column/row, where the clamped bilinear
+        // footprint samples the (black) edge pixels.
         assert_eq!(
             rotated.row_bytes(0)[0],
             255,
-            "(0,0) corner must be white-filled (inverse maps OOB at 5°)"
-        );
-        assert_eq!(
-            rotated.row_bytes(0)[7],
-            255,
-            "(7,0) corner must be white-filled"
+            "(0,0) corner must be white-filled (sy < 0 at 5°)"
         );
         assert_eq!(
             rotated.row_bytes(7)[0],
             255,
-            "(0,7) corner must be white-filled"
+            "(0,7) corner must be white-filled (sx < 0 at 5°)"
+        );
+        assert_eq!(
+            rotated.row_bytes(0)[7],
+            0,
+            "(7,0) corner floors into the last column and must sample black"
         );
         assert_eq!(
             rotated.row_bytes(7)[7],
-            255,
-            "(7,7) corner must be white-filled"
+            0,
+            "(7,7) corner floors into the last row and must sample black"
         );
 
         // Centre pixel: maps to (3.5, 3.5) which IS in-bounds; sample of
