@@ -172,6 +172,10 @@ pub(super) fn fill_impl<P: Pixel>(
     if vector_antialias {
         let bitmap_width = bitmap.width as usize;
         let mut aa_buf = AaBuf::new(bitmap_width);
+        // Per-row shape scratch, reused across rows — `draw_aa_line`
+        // sizes and zero-fills it, avoiding a heap allocation per
+        // output row.
+        let mut shape_scratch = Vec::new();
 
         // `render_aa_line` and `clip_aa_line` take a device-pixel row and expand
         // it into the four AA sub-rows internally. `scanner` is built from an
@@ -193,7 +197,7 @@ pub(super) fn fill_impl<P: Pixel>(
                 reason = "y ≥ 0 since scanner.y_min ≥ 0 and AA_SIZE > 0"
             )]
             if x0 <= x1 && y >= 0 && (y as u32) < bitmap.height {
-                draw_aa_line::<P>(bitmap, pipe, src, &aa_buf, x0, x1, y);
+                draw_aa_line::<P>(bitmap, pipe, src, &aa_buf, &mut shape_scratch, x0, x1, y);
             }
         }
     } else {
@@ -335,11 +339,16 @@ pub(super) fn draw_span_clipped<P: Pixel, S: RowSink<P>>(
 /// For each output pixel `x` in `[x0, x1]`, count the set bits across all 4
 /// AA sub-rows via `simd::aa_coverage_span` (SIMD-accelerated), look up the
 /// gamma-corrected shape byte, and call `render_span_aa` with shape > 0.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "per-row emit helper; the args are the fill loop's live state"
+)]
 fn draw_aa_line<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
     aa_buf: &AaBuf,
+    shape_scratch: &mut Vec<u8>,
     x0: i32,
     x1: i32,
     y: i32,
@@ -353,9 +362,10 @@ fn draw_aa_line<P: Pixel>(
     #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0")]
     let count = (x1 - x0 + 1) as usize;
 
-    // Gather raw coverage counts (0..=16) into shape[], then gamma-map in place.
-    // Single allocation: aa_coverage_span writes raw counts; we overwrite with
-    // AA_GAMMA[t] in the same buffer (0 stays 0; non-zero gets the LUT value).
+    // Gather raw coverage counts (0..=16) into the reused scratch, then
+    // gamma-map in place: aa_coverage_span writes raw counts; we overwrite
+    // with AA_GAMMA[t] in the same buffer (0 stays 0; non-zero gets the
+    // LUT value).
     let rows = [
         aa_buf.row_slice(0),
         aa_buf.row_slice(1),
@@ -368,9 +378,10 @@ fn draw_aa_line<P: Pixel>(
     // byte is dropped before the shape is used. `lead` is non-zero only when
     // `x0` is odd, hence `x0 >= 1` and the subtraction cannot underflow.
     let lead = x0_usize & 1;
-    let mut shape = vec![0u8; count + lead];
-    simd::aa_coverage_span(rows, x0_usize - lead, &mut shape);
-    let shape = &mut shape[lead..];
+    shape_scratch.clear();
+    shape_scratch.resize(count + lead, 0);
+    simd::aa_coverage_span(rows, x0_usize - lead, shape_scratch);
+    let shape = &mut shape_scratch[lead..];
 
     // Gamma-map in place: 0 → 0 (skip), 1..=16 → AA_GAMMA[t].
     let mut any_nonzero = false;

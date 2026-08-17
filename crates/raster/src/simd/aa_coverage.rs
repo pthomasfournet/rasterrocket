@@ -309,8 +309,9 @@ unsafe fn aa_coverage_span_sve2(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
 #[target_feature(enable = "avx2")]
 unsafe fn aa_coverage_span_avx2(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
     use std::arch::x86_64::{
-        _mm256_add_epi8, _mm256_and_si256, _mm256_loadu_si256, _mm256_set_epi8, _mm256_set1_epi8,
-        _mm256_setzero_si256, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+        _mm256_add_epi8, _mm256_and_si256, _mm256_loadu_si256, _mm256_permute2x128_si256,
+        _mm256_set_epi8, _mm256_set1_epi8, _mm256_setzero_si256, _mm256_shuffle_epi8,
+        _mm256_srli_epi16, _mm256_storeu_si256, _mm256_unpackhi_epi8, _mm256_unpacklo_epi8,
     };
 
     debug_assert!(x0 & 1 == 0, "aa_coverage_span_avx2: x0={x0} must be even");
@@ -349,25 +350,40 @@ unsafe fn aa_coverage_span_avx2(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
             acc_lo = _mm256_add_epi8(acc_lo, _mm256_shuffle_epi8(lut, lo));
         }
 
-        // Write the 32-element hi and lo vectors to a staging buffer, then
-        // interleave into shape: shape[out_base + 2k] = hi[k], shape[out_base + 2k+1] = lo[k].
-        let mut hi_buf = [0u8; 32];
-        let mut lo_buf = [0u8; 32];
-        // SAFETY: hi_buf / lo_buf are exactly 32 bytes.
-        unsafe {
-            _mm256_storeu_si256(hi_buf.as_mut_ptr().cast(), acc_hi);
-            _mm256_storeu_si256(lo_buf.as_mut_ptr().cast(), acc_lo);
-        }
-
         let out_base = chunk_idx * 64;
-        for k in 0..32 {
-            let even_px = out_base + k * 2;
-            let odd_px = even_px + 1;
-            if even_px < n {
-                shape[even_px] = hi_buf[k];
+        if out_base + 64 <= n {
+            // Vector interleave: unpacklo/hi operate within each 128-bit
+            // lane, so lane order is [px 0..16 | 32..48] and
+            // [px 16..32 | 48..64]; the permutes reassemble the lanes
+            // sequentially for two contiguous stores.
+            let t0 = _mm256_unpacklo_epi8(acc_hi, acc_lo);
+            let t1 = _mm256_unpackhi_epi8(acc_hi, acc_lo);
+            let out0 = _mm256_permute2x128_si256(t0, t1, 0x20);
+            let out1 = _mm256_permute2x128_si256(t0, t1, 0x31);
+            // SAFETY: out_base + 64 ≤ n = shape.len() checked above.
+            unsafe {
+                _mm256_storeu_si256(shape[out_base..].as_mut_ptr().cast(), out0);
+                _mm256_storeu_si256(shape[out_base + 32..].as_mut_ptr().cast(), out1);
             }
-            if odd_px < n {
-                shape[odd_px] = lo_buf[k];
+        } else {
+            // Final chunk whose odd half-byte tail falls outside `n`:
+            // stage and interleave with per-pixel bounds guards.
+            let mut hi_buf = [0u8; 32];
+            let mut lo_buf = [0u8; 32];
+            // SAFETY: hi_buf / lo_buf are exactly 32 bytes.
+            unsafe {
+                _mm256_storeu_si256(hi_buf.as_mut_ptr().cast(), acc_hi);
+                _mm256_storeu_si256(lo_buf.as_mut_ptr().cast(), acc_lo);
+            }
+            for k in 0..32 {
+                let even_px = out_base + k * 2;
+                let odd_px = even_px + 1;
+                if even_px < n {
+                    shape[even_px] = hi_buf[k];
+                }
+                if odd_px < n {
+                    shape[odd_px] = lo_buf[k];
+                }
             }
         }
     }
@@ -402,8 +418,9 @@ unsafe fn aa_coverage_span_avx2(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
 #[target_feature(enable = "avx512bitalg,avx512bw")]
 unsafe fn aa_coverage_span_avx512(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
     use std::arch::x86_64::{
-        _mm512_add_epi8, _mm512_and_si512, _mm512_loadu_si512, _mm512_popcnt_epi8,
-        _mm512_set1_epi8, _mm512_setzero_si512, _mm512_srli_epi16, _mm512_storeu_si512,
+        _mm512_add_epi8, _mm512_and_si512, _mm512_loadu_si512, _mm512_permutex2var_epi64,
+        _mm512_popcnt_epi8, _mm512_set1_epi8, _mm512_setr_epi64, _mm512_setzero_si512,
+        _mm512_srli_epi16, _mm512_storeu_si512, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
     };
 
     debug_assert!(x0 & 1 == 0, "aa_coverage_span_avx512: x0={x0} must be even");
@@ -441,24 +458,42 @@ unsafe fn aa_coverage_span_avx512(rows: [&[u8]; 4], x0: usize, shape: &mut [u8])
             }
         }
 
-        let mut hi_buf = [0u8; 64];
-        let mut lo_buf = [0u8; 64];
-        // SAFETY: buffers are exactly 64 bytes; unaligned stores are always valid.
-        unsafe {
-            _mm512_storeu_si512(hi_buf.as_mut_ptr().cast(), acc_hi);
-            _mm512_storeu_si512(lo_buf.as_mut_ptr().cast(), acc_lo);
-        }
-
-        // Interleave: even pixel k*2 ← hi_buf[k], odd pixel k*2+1 ← lo_buf[k].
         let out_base = chunk_idx * 128;
-        for k in 0..64 {
-            let even_px = out_base + k * 2;
-            let odd_px = even_px + 1;
-            if even_px < n {
-                shape[even_px] = hi_buf[k];
+        if out_base + 128 <= n {
+            // Vector interleave: unpacklo/hi operate within each 128-bit
+            // lane (lane l of t0 = px 32l..32l+16, of t1 = px
+            // 32l+16..32l+32); the qword permutes reassemble the lanes
+            // sequentially for two contiguous stores.
+            let t0 = _mm512_unpacklo_epi8(acc_hi, acc_lo);
+            let t1 = _mm512_unpackhi_epi8(acc_hi, acc_lo);
+            let idx_lo = _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11);
+            let idx_hi = _mm512_setr_epi64(4, 5, 12, 13, 6, 7, 14, 15);
+            let out0 = _mm512_permutex2var_epi64(t0, idx_lo, t1);
+            let out1 = _mm512_permutex2var_epi64(t0, idx_hi, t1);
+            // SAFETY: out_base + 128 ≤ n = shape.len() checked above.
+            unsafe {
+                _mm512_storeu_si512(shape[out_base..].as_mut_ptr().cast(), out0);
+                _mm512_storeu_si512(shape[out_base + 64..].as_mut_ptr().cast(), out1);
             }
-            if odd_px < n {
-                shape[odd_px] = lo_buf[k];
+        } else {
+            // Final chunk whose odd half-byte tail falls outside `n`:
+            // stage and interleave with per-pixel bounds guards.
+            let mut hi_buf = [0u8; 64];
+            let mut lo_buf = [0u8; 64];
+            // SAFETY: buffers are exactly 64 bytes; unaligned stores are always valid.
+            unsafe {
+                _mm512_storeu_si512(hi_buf.as_mut_ptr().cast(), acc_hi);
+                _mm512_storeu_si512(lo_buf.as_mut_ptr().cast(), acc_lo);
+            }
+            for k in 0..64 {
+                let even_px = out_base + k * 2;
+                let odd_px = even_px + 1;
+                if even_px < n {
+                    shape[even_px] = hi_buf[k];
+                }
+                if odd_px < n {
+                    shape[odd_px] = lo_buf[k];
+                }
             }
         }
     }
@@ -670,6 +705,54 @@ mod tests {
         aa_coverage_span([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut got);
 
         assert_eq!(got, expected, "dispatch mismatch on N={N}");
+    }
+
+    /// Sweep every span width through the chunk boundaries of all tiers
+    /// (AVX2: 64 px, AVX-512: 128 px, NEON: 32 px) so the interleave and
+    /// store paths are pinned at n = chunk − 1 / chunk / chunk + 1 and at
+    /// odd widths whose final pixel is the guarded half-byte.
+    #[test]
+    fn coverage_span_dispatch_matches_scalar_at_every_width() {
+        let rows = dispatch_test_rows(300usize.div_ceil(2), TIER_SCHEDULES);
+        for n in 1..=300 {
+            let mut expected = vec![0u8; n];
+            aa_coverage_span_scalar([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut expected);
+            let mut got = vec![0u8; n];
+            aa_coverage_span([&rows[0], &rows[1], &rows[2], &rows[3]], 0, &mut got);
+            assert_eq!(got, expected, "dispatch mismatch at n={n}");
+        }
+    }
+
+    /// Per-tier width sweeps across each tier's own chunk boundary — the
+    /// dispatch gates hide the tiers at small n, so the sweep above cannot
+    /// reach, e.g., the AVX-512 kernel below n = 128.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn tier_kernels_match_scalar_across_chunk_boundaries() {
+        // 255 row bytes is the generator's u8 ceiling (RangeFrom<u8>
+        // computes 255 + 1 after yielding 255) — enough for 510 px.
+        let rows = dispatch_test_rows(255, TIER_SCHEDULES);
+        let refs = [&rows[0][..], &rows[1][..], &rows[2][..], &rows[3][..]];
+        for n in (1..=300).chain([383, 384, 385, 509, 510]) {
+            let mut expected = vec![0u8; n];
+            aa_coverage_span_scalar(refs, 0, &mut expected);
+            if is_x86_feature_detected!("avx512bitalg") && is_x86_feature_detected!("avx512bw") {
+                let mut got = vec![0u8; n];
+                // SAFETY: both features confirmed present above.
+                unsafe {
+                    aa_coverage_span_avx512(refs, 0, &mut got);
+                }
+                assert_eq!(got, expected, "AVX-512 mismatch at n={n}");
+            }
+            if is_x86_feature_detected!("avx2") {
+                let mut got = vec![0u8; n];
+                // SAFETY: avx2 confirmed present above.
+                unsafe {
+                    aa_coverage_span_avx2(refs, 0, &mut got);
+                }
+                assert_eq!(got, expected, "AVX2 mismatch at n={n}");
+            }
+        }
     }
 
     #[test]
