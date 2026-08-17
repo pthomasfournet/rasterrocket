@@ -170,6 +170,10 @@ fn rotate_pixel_scalar(src: &Bitmap<Gray8>, ox: f32, p: &RowParams) -> u8 {
 /// NEON is mandatory on all ARMv8-A targets; no runtime check is needed.
 /// `dst_row.len() == w` must hold (caller guarantees this via `row_bytes_mut`).
 #[cfg(target_arch = "aarch64")]
+#[expect(
+    unsafe_code,
+    reason = "NEON intrinsics for the aarch64 rotate row kernel; mandatory on ARMv8-A"
+)]
 #[target_feature(enable = "neon")]
 unsafe fn rotate_row_neon(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams, w: usize) {
     use std::arch::aarch64::{
@@ -315,9 +319,29 @@ unsafe fn rotate_row_neon(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams
     }
 }
 
+/// Scalar per-pixel row implementation, compiled on every target.
+///
+/// The non-aarch64 dispatch path uses it directly; on aarch64 it is the
+/// reference implementation the NEON parity test compares against.
+fn rotate_row_scalar(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
+    for (ox, dst_px) in dst_row.iter_mut().enumerate() {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+        )]
+        {
+            *dst_px = rotate_pixel_scalar(src, ox as f32, p);
+        }
+    }
+}
+
 // ── Per-arch dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
+#[expect(
+    unsafe_code,
+    reason = "NEON intrinsics for the aarch64 rotate row kernel; mandatory on ARMv8-A"
+)]
 #[inline]
 fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
     let w = dst_row.len();
@@ -328,15 +352,7 @@ fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
 #[cfg(not(target_arch = "aarch64"))]
 #[inline]
 fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
-    for (ox, dst_px) in dst_row.iter_mut().enumerate() {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
-        )]
-        {
-            *dst_px = rotate_pixel_scalar(src, ox as f32, p);
-        }
-    }
+    rotate_row_scalar(dst_row, src, p);
 }
 
 // ── Public CPU path ───────────────────────────────────────────────────────────
@@ -351,11 +367,22 @@ fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
 /// Out-of-bounds source pixels are filled with 255 (white).  The last valid
 /// sample origin is (w-1, h-1); on that boundary `bilinear_sample` clamps
 /// the 2×2 footprint to the edge.
+pub fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
+    rotate_cpu_with(src, angle_deg, dispatch_rotate_row)
+}
+
+/// Row-loop driver shared by [`rotate_cpu`] and the per-row parity tests:
+/// computes the per-row inverse-map parameters and hands each output row to
+/// `row_fn`.
 #[expect(
     clippy::similar_names,
     reason = "sx_*/sy_* are paired coordinate variables; renaming would obscure the symmetry"
 )]
-pub fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
+fn rotate_cpu_with(
+    src: &Bitmap<Gray8>,
+    angle_deg: f32,
+    row_fn: impl Fn(&mut [u8], &Bitmap<Gray8>, &RowParams),
+) -> Bitmap<Gray8> {
     let w = src.width as usize;
     let h = src.height as usize;
 
@@ -421,7 +448,7 @@ pub fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
             sx_max,
             sy_max,
         };
-        dispatch_rotate_row(dst_row, src, &params);
+        row_fn(dst_row, src, &params);
     }
 
     dst
@@ -518,6 +545,50 @@ mod tests {
                 rotated.row_bytes(y),
                 "row {y} must be unchanged at 0°"
             );
+        }
+    }
+
+    /// NEON row kernel vs the scalar reference, byte-for-byte.
+    ///
+    /// Angles cover edge-boundary lanes (0.1°) and mixed in/out-of-bounds
+    /// groups (5°, 45°); widths 33 and 30 leave 1- and 2-pixel scalar
+    /// tails after the 4-wide NEON groups.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_rotate_rows_match_scalar_reference() {
+        for &(w, h, angle) in &[(33u32, 16u32, 0.1f32), (32, 32, 5.0), (30, 8, 45.0)] {
+            let mut src = Bitmap::<Gray8>::new(w, h, 1, false);
+            for y in 0..h {
+                let row = src.row_bytes_mut(y);
+                for (x, px) in row.iter_mut().enumerate() {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "mod-256 result fits in u8 by construction"
+                    )]
+                    {
+                        *px = ((x * 31 + y as usize * 97) % 256) as u8;
+                    }
+                }
+            }
+
+            let scalar = rotate_cpu_with(&src, angle, rotate_row_scalar);
+            #[expect(
+                unsafe_code,
+                reason = "direct NEON kernel invocation under test; NEON is mandatory on ARMv8-A"
+            )]
+            let neon = rotate_cpu_with(&src, angle, |row, s, p| {
+                let row_w = row.len();
+                // SAFETY: NEON mandatory on all ARMv8-A targets.
+                unsafe { rotate_row_neon(row, s, p, row_w) }
+            });
+
+            for y in 0..h {
+                assert_eq!(
+                    scalar.row_bytes(y),
+                    neon.row_bytes(y),
+                    "w={w} h={h} angle={angle} row {y}"
+                );
+            }
         }
     }
 

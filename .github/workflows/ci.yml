@@ -118,6 +118,44 @@ jobs:
           LIBZ_SYS_STATIC: 1
         run: cargo check -p rasterrocket --target aarch64-unknown-linux-gnu --features bundled
 
+  # ── aarch64 native execution ──────────────────────────────────────────────
+  #
+  # Runs the NEON test suites on a native arm64 hosted runner (free for
+  # public repositories).  The cross-check job above only compiles; this job
+  # actually executes the NEON tiers — the rotate-row parity test, the glyph
+  # unpack kernels, and the coverage tiers — which otherwise ship untested.
+  aarch64-test:
+    name: aarch64 native tests (NEON execution)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-cargo-
+
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libfreetype6-dev
+
+      - name: Test rasterrocket-render (NEON tiers)
+        run: cargo test -p rasterrocket-render --lib
+
+      - name: Test rasterrocket-gpu (NEON CMYK path)
+        run: cargo test -p rasterrocket-gpu --lib -- cmyk
+
+      - name: Test rasterrocket (NEON deskew rotate + parity)
+        run: cargo test -p rasterrocket --lib
+
   # ── Format check ──────────────────────────────────────────────────────────
   fmt:
     name: Formatting
