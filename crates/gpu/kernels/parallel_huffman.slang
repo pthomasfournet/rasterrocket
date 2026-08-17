@@ -62,6 +62,10 @@
 // `(ac_dispatch_idx << 16) | (dc_dispatch_idx << 8) | component_idx`.
 [[vk::binding(7, 0)]] StructuredBuffer<uint> dc_codebook;
 [[vk::binding(8, 0)]] StructuredBuffer<uint> mcu_schedule;
+// JPEG-framed Phase 2 only — bound at slot 9. Previous pass's s_info
+// (the Jacobi read side); `s_info_out` at slot 2 is the write side.
+// The host swaps the two buffers between passes.
+[[vk::binding(9, 0)]] StructuredBuffer<uint4> s_info_prev;
 
 // Status codes — must match the CUDA `DECODE_*` macros AND the
 // Rust-side `Phase4FailureKind` discriminants exactly.
@@ -551,20 +555,35 @@ void jpeg_phase4_redecode(uint3 tid : SV_DispatchThreadID) {
     decode_status[seq_idx] = status;
 }
 
-/// JPEG-framed Phase 2 (inter-sequence sync).  Same shape as
-/// `phase2_inter_sync` but uses the JPEG state machine via
-/// `try_decode_one_jpeg_symbol_kernel`.  State semantics:
+/// JPEG-framed Phase 2 (inter-sequence sync by re-decode propagation).
+/// State semantics:
 ///
 ///     state.x = p              (bit position)
 ///     state.y = n              (per-thread symbol count)
 ///     state.z = block_in_mcu   (0 .. blocks_per_mcu - 1)
 ///     state.w = z_in_block     (0 .. 64)
 ///
-/// Sync predicate: subseq i is synced with subseq (i+1) when its
-/// snapshot has crossed (i+1)'s start bit AND the
-/// (block_in_mcu, z_in_block) pair agrees between the two snapshots.
-/// This is the JPEG analogue of the synthetic stream's (c, z)
-/// predicate.
+/// Unlike the synthetic `phase2_inter_sync`, no agreement predicate
+/// can sync JPEG framing: fresh-start Phase 1 walkers hold permanently
+/// wrong block phases for multi-component streams (no in-stream marker
+/// carries component phase), and two wrong walkers can agree. Instead,
+/// each pass is a Jacobi step over a double-buffered s_info: thread i
+/// re-decodes its region from `s_info_prev[i - 1]`'s boundary snapshot
+/// — walking until the first symbol whose advance reaches region i's
+/// end (`min(length_bits, (i + 1) * subsequence_bits)`) — and writes
+/// the recomputed snapshot to `s_info_out[i]`; `n` restarts at 0 so it
+/// counts only region i's symbols. Thread 0 copies its slot through
+/// (its fresh start is the true stream start, so its Phase 1 snapshot
+/// is correct by construction).
+///
+/// `sync_flags[i] = 1` when the recompute is a fixpoint (out == in).
+/// A pass in which every thread reports a fixpoint leaves the whole
+/// chain correct: slot 0 is correct, and each following slot equals
+/// the deterministic re-decode of its predecessor. The host swaps the
+/// two buffers between passes; on convergence they are identical. A
+/// decode error mid-region stops the walk and writes the error-point
+/// state — deterministic, so erroring regions also reach a fixpoint
+/// and the error surfaces later as a typed Phase 4 failure.
 [shader("compute")][numthreads(256, 1, 1)]
 void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
     if (blocks_per_mcu == 0u) {
@@ -574,35 +593,35 @@ void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
     if (seq_idx >= num_subsequences) {
         return;
     }
-    // Last subseq has no right neighbour — trivially synced.
-    if (seq_idx + 1u == num_subsequences) {
-        sync_flags[seq_idx] = 1u;
+    // Slot 0 is pinned: copy through, always a fixpoint.
+    if (seq_idx == 0u) {
+        s_info_out[0] = s_info_prev[0];
+        sync_flags[0] = 1u;
         return;
     }
 
-    uint4 me  = s_info_out[seq_idx];
-    uint4 nxt = s_info_out[seq_idx + 1];
-    uint nxt_start_p = (seq_idx + 1u) * subsequence_bits;
+    uint4 prev = s_info_prev[seq_idx - 1u];
+    uint region_end = min(length_bits, (seq_idx + 1u) * subsequence_bits);
 
-    // JPEG framing: block_in_mcu is in .z; z_in_block is in .w.
-    bool in_range    = me.x >= nxt_start_p;
-    bool aligned     = me.z == nxt.z && me.w == nxt.w;
-    // nxt must have decoded at least one symbol (nxt.x > its own start_p).
-    // Without this, a nxt thread that failed to decode stays at (x=nxt_start_p,
-    // z=0, w=0); if me also lands at (z=0, w=0) after a full MCU, aligned fires
-    // as a false-positive even though nxt never established a real boundary.
-    bool nxt_decoded = nxt.x > nxt_start_p;
+    // Inherit (p, block_in_mcu, z_in_block); reset n.
+    uint4 state = uint4(prev.x, 0u, prev.z, prev.w);
 
-    if (in_range && aligned && nxt_decoded) {
-        sync_flags[seq_idx] = 1u;
-        return;
-    }
-
-    // Not synced — advance me by one JPEG symbol, write back.
-    // count_to = nxt_start_p: symbols starting before next subseq's
-    // start belong to my region; symbols past that belong to the next.
+    // Each symbol consumes >= 1 bit; +1 caps a degenerate codebook.
+    uint max_iters = (region_end > state.x ? region_end - state.x : 0u) + 1u;
     uint symbol_sink;
-    uint _ignored = try_decode_one_jpeg_symbol_kernel(me, nxt_start_p, symbol_sink);
-    s_info_out[seq_idx] = me;
-    sync_flags[seq_idx] = 0u;
+    for (uint iter = 0u; iter < max_iters; iter++) {
+        if (state.x >= region_end) {
+            break;
+        }
+        // count_to = region_end: every decoded symbol starts below it
+        // (the loop exits at the first crossing), so all count.
+        if (try_decode_one_jpeg_symbol_kernel(state, region_end, symbol_sink) != DECODE_OK) {
+            break;
+        }
+    }
+
+    uint4 me = s_info_prev[seq_idx];
+    s_info_out[seq_idx] = state;
+    sync_flags[seq_idx] =
+        (state.x == me.x && state.y == me.y && state.z == me.z && state.w == me.w) ? 1u : 0u;
 }

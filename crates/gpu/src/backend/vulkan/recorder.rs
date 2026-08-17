@@ -619,6 +619,12 @@ impl PageRecorder {
         let flags = p
             .sync_flags
             .expect("validate() proved sync_flags is Some for JpegPhase2InterSync");
+        let prev = p
+            .s_info_prev
+            .expect("validate() proved s_info_prev is Some for JpegPhase2InterSync");
+        // Buffer order matches binding_slots = [0, 1, 2, 3, 7, 8, 9]:
+        // bitstream, codebook, s_info (write side), sync_flags,
+        // dc_codebook, mcu_schedule, s_info_prev (read side).
         self.dispatch_kernel(
             KernelId::JpegPhase2InterSync,
             &[
@@ -628,6 +634,7 @@ impl PageRecorder {
                 flags.handle(),
                 dc.handle(),
                 sched.handle(),
+                prev.handle(),
             ],
             &[
                 p.bitstream.size(),
@@ -636,6 +643,7 @@ impl PageRecorder {
                 flags.size(),
                 dc.size(),
                 sched.size(),
+                prev.size(),
             ],
             push,
             groups,

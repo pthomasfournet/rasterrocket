@@ -24,9 +24,27 @@ use crate::jpeg_decoder::phase1_oracle::SubsequenceState;
 use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 
 /// `2 × ⌈log₂(n)⌉` — upper bound on Phase 2 iterations for `n` subsequences.
+///
+/// Synthetic-stream phases only; the JPEG-framed propagation loop uses
+/// [`jpeg_phase2_retry_bound`].
+#[cfg(all(test, feature = "gpu-validation"))]
 const fn phase2_retry_bound(num_subsequences: usize) -> u32 {
     let pow2_exp = num_subsequences.next_power_of_two().trailing_zeros();
     2u32.saturating_mul(pow2_exp)
+}
+
+/// Pass bound for the JPEG-framed Phase 2 propagation loop: `n - 1`.
+///
+/// Slot 0 is pinned correct (its fresh start is the true stream
+/// start); each pass recomputes slot `i` from the previous pass's
+/// slot `i - 1`, so slots stabilise left to right and all `n` are
+/// final after `n - 1` passes; the next pass observes every recompute
+/// as a fixpoint. The `0..=bound` dispatch loop therefore runs at
+/// most `bound + 1 = n` passes and always detects convergence — the
+/// re-decode is deterministic even for erroring streams, so the
+/// non-convergence error path is defence-in-depth only.
+const fn jpeg_phase2_retry_bound(num_subsequences: u32) -> u32 {
+    num_subsequences.saturating_sub(1)
 }
 
 /// Flatten an iterator of `&CanonicalCodebook` into the GPU layout:
@@ -125,6 +143,7 @@ fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: None,
         symbols_out: None,
         decode_status: None,
@@ -170,6 +189,10 @@ fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
 /// Returns `BackendError` if any alloc/upload/dispatch/download
 /// fails. Bound-exceeded is reported via the outcome, not as an error.
 #[cfg(all(test, feature = "gpu-validation"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear phase-1-then-phase-2 procedural script; same rationale as dispatch_phase1_through_phase4"
+)]
 fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,
@@ -211,6 +234,7 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     let dc_codebook_buf = DeviceBufferGuard::alloc(backend, dc_codebook_bytes)?;
     let mcu_sched_buf = DeviceBufferGuard::alloc(backend, mcu_sched_bytes)?;
     let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+    let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
     let sync_flags_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
 
     let _up1 = backend.upload_async(
@@ -231,6 +255,7 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: None,
         symbols_out: None,
         decode_status: None,
@@ -246,17 +271,21 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     let fence = backend.submit_page()?;
     backend.wait_page(fence)?;
 
-    // Phase 2 — bounded retry loop.
-    let bound = phase2_retry_bound(num_subsequences as usize);
+    // Phase 2 — Jacobi propagation over ping-ponged state buffers:
+    // each pass reads the previous pass's states and writes the
+    // recomputed ones; convergence = every recompute is a fixpoint.
+    let bound = jpeg_phase2_retry_bound(num_subsequences);
     let mut flags_host = vec![0u32; num_subsequences as usize];
     let mut outcome = Phase2Outcome::SyncBoundExceeded { bound };
+    let (mut read_buf, mut write_buf) = (&s_info_buf, &s_info_scratch);
     for iter in 0..=bound {
         backend.begin_page()?;
         backend.record_huffman(HuffmanParams {
             bitstream: bitstream_buf.as_ref(),
             codebook: codebook_buf.as_ref(),
-            s_info: s_info_buf.as_ref(),
+            s_info: write_buf.as_ref(),
             sync_flags: Some(sync_flags_buf.as_ref()),
+            s_info_prev: Some(read_buf.as_ref()),
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -276,16 +305,20 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
         let handle = backend.download_async(sync_flags_buf.as_ref(), dst)?;
         backend.wait_download(handle)?;
 
+        std::mem::swap(&mut read_buf, &mut write_buf);
         if flags_host.iter().all(|&f| f == 1) {
             outcome = Phase2Outcome::Converged { iterations: iter };
             break;
         }
     }
+    // Post-swap, `read_buf` holds the last-written states (on
+    // convergence both buffers are identical — the fixpoint pass
+    // changed nothing).
 
     let mut s_info_out =
         vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
     let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut s_info_out);
-    let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
+    let handle = backend.download_async(read_buf.as_ref(), dst)?;
     backend.wait_download(handle)?;
 
     backend.free_device(bitstream_buf.take());
@@ -293,6 +326,7 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     backend.free_device(dc_codebook_buf.take());
     backend.free_device(mcu_sched_buf.take());
     backend.free_device(s_info_buf.take());
+    backend.free_device(s_info_scratch.take());
     backend.free_device(sync_flags_buf.take());
 
     Ok((s_info_out, outcome))
@@ -359,6 +393,7 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     let dc_codebook_buf = DeviceBufferGuard::alloc(backend, dc_codebook_bytes)?;
     let mcu_sched_buf = DeviceBufferGuard::alloc(backend, mcu_sched_bytes)?;
     let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+    let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
     let sync_flags_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
     let offsets_buf = DeviceBufferGuard::alloc(backend, offsets_bytes)?;
 
@@ -380,6 +415,7 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: None,
         symbols_out: None,
         decode_status: None,
@@ -395,17 +431,21 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     let fence = backend.submit_page()?;
     backend.wait_page(fence)?;
 
-    // Phase 2 — bounded retry loop.
-    let bound = phase2_retry_bound(num_subsequences as usize);
+    // Phase 2 — Jacobi propagation over ping-ponged state buffers:
+    // each pass reads the previous pass's states and writes the
+    // recomputed ones; convergence = every recompute is a fixpoint.
+    let bound = jpeg_phase2_retry_bound(num_subsequences);
     let mut flags_host = vec![0u32; num_subsequences as usize];
     let mut converged = false;
+    let (mut read_buf, mut write_buf) = (&s_info_buf, &s_info_scratch);
     for _iter in 0..=bound {
         backend.begin_page()?;
         backend.record_huffman(HuffmanParams {
             bitstream: bitstream_buf.as_ref(),
             codebook: codebook_buf.as_ref(),
-            s_info: s_info_buf.as_ref(),
+            s_info: write_buf.as_ref(),
             sync_flags: Some(sync_flags_buf.as_ref()),
+            s_info_prev: Some(read_buf.as_ref()),
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -425,6 +465,7 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
         let handle = backend.download_async(sync_flags_buf.as_ref(), dst)?;
         backend.wait_download(handle)?;
 
+        std::mem::swap(&mut read_buf, &mut write_buf);
         if flags_host.iter().all(|&f| f == 1) {
             converged = true;
             break;
@@ -435,12 +476,16 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
             "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within retry bound",
         ));
     }
+    // Post-swap, `read_buf` holds the converged states (both buffers
+    // are identical after a fixpoint pass); Phases 3 and 4 read them
+    // from there.
+    let s_info_final = read_buf;
 
     // Download s_info for CPU-side Phase 3 (exclusive scan).
     let mut s_info_host =
         vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
     let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut s_info_host);
-    let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
+    let handle = backend.download_async(s_info_final.as_ref(), dst)?;
     backend.wait_download(handle)?;
 
     // Phase 3: CPU exclusive prefix scan over per-subsequence symbol counts.
@@ -471,8 +516,9 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     backend.record_huffman(HuffmanParams {
         bitstream: bitstream_buf.as_ref(),
         codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
+        s_info: s_info_final.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: Some(offsets_buf.as_ref()),
         symbols_out: Some(symbols_buf.as_ref()),
         decode_status: Some(decode_status_buf.as_ref()),
@@ -511,6 +557,7 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     backend.free_device(dc_codebook_buf.take());
     backend.free_device(mcu_sched_buf.take());
     backend.free_device(s_info_buf.take());
+    backend.free_device(s_info_scratch.take());
     backend.free_device(sync_flags_buf.take());
     backend.free_device(offsets_buf.take());
     backend.free_device(symbols_buf.take());
@@ -596,6 +643,7 @@ fn dispatch_phase1_intra_sync<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: None,
         symbols_out: None,
         decode_status: None,
@@ -695,6 +743,7 @@ fn dispatch_phase1_then_phase2<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: None,
         symbols_out: None,
         decode_status: None,
@@ -721,6 +770,7 @@ fn dispatch_phase1_then_phase2<B: GpuBackend>(
             codebook: codebook_buf.as_ref(),
             s_info: s_info_buf.as_ref(),
             sync_flags: Some(sync_flags_buf.as_ref()),
+            s_info_prev: None,
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -845,6 +895,7 @@ fn dispatch_phase1_through_phase4<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: None,
         symbols_out: None,
         decode_status: None,
@@ -871,6 +922,7 @@ fn dispatch_phase1_through_phase4<B: GpuBackend>(
             codebook: codebook_buf.as_ref(),
             s_info: s_info_buf.as_ref(),
             sync_flags: Some(sync_flags_buf.as_ref()),
+            s_info_prev: None,
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -946,6 +998,7 @@ fn dispatch_phase1_through_phase4<B: GpuBackend>(
         codebook: codebook_buf.as_ref(),
         s_info: s_info_buf.as_ref(),
         sync_flags: None,
+        s_info_prev: None,
         offsets: Some(offsets_buf.as_ref()),
         symbols_out: Some(symbols_buf.as_ref()),
         decode_status: Some(decode_status_buf.as_ref()),
@@ -1429,6 +1482,64 @@ mod tests {
         }
     }
 
+    /// JPEG Phase 1+2 on CUDA reproduces the CPU propagation oracle
+    /// exactly on the multi-component fixture — final states and
+    /// outcome both. This is the case the old agreement predicate
+    /// could never sync (fresh-start walkers hold wrong block phases).
+    #[test]
+    fn jpeg_phase2_cuda_matches_propagation_oracle_on_ycbcr() {
+        use crate::jpeg_decoder::phase2_oracle::jpeg_phase2_run_to_sync;
+        static COLOUR_32X32_444: &[u8] =
+            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+        let Some(b) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let prep = prepare_jpeg(COLOUR_32X32_444).expect("colour 4:4:4 JPEG must prepare");
+        assert_eq!(prep.components.len(), 3, "fixture must be 3-component");
+        let subseq_bits = 32u32;
+
+        let (gpu_s_info, gpu_outcome) =
+            dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch ok");
+
+        // CPU: same Phase 1 (per-subseq fresh-start snapshots), then
+        // the propagation oracle.
+        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(&prep);
+        let dc_refs = prep.dc_codebooks_for_dispatch();
+        let ac_refs = prep.ac_codebooks_for_dispatch();
+        let length_bits = prep.bitstream.length_bits;
+        let mut cpu_s_info: Vec<SubsequenceState> = (0..length_bits.div_ceil(subseq_bits))
+            .map(|i| {
+                let start_bit = i * subseq_bits;
+                let hard_limit = length_bits.min(start_bit + 2 * subseq_bits);
+                let count_to = length_bits.min(start_bit + subseq_bits);
+                let (state, _stop) = phase1_jpeg_walk_snapshot(
+                    &prep.bitstream,
+                    &dc_refs,
+                    &ac_refs,
+                    &mcu_sched,
+                    blocks_per_mcu,
+                    start_bit,
+                    hard_limit,
+                    count_to,
+                );
+                state
+            })
+            .collect();
+        let cpu_outcome = jpeg_phase2_run_to_sync(
+            &mut cpu_s_info,
+            &prep.bitstream,
+            &dc_refs,
+            &ac_refs,
+            &mcu_sched,
+            blocks_per_mcu,
+            subseq_bits,
+        );
+
+        assert_eq!(gpu_outcome, cpu_outcome, "GPU vs CPU Phase 2 outcome");
+        assert_eq!(gpu_s_info, cpu_s_info, "GPU vs CPU converged s_info");
+    }
+
     // ── B2f: JPEG Phase 4 CUDA tests ─────────────────────────────────────
 
     /// JPEG Phases 1–4 on CUDA decode GRAY_16X16_JPEG and the resulting
@@ -1483,10 +1594,6 @@ mod tests {
     /// (one block per component per MCU), the MCU schedule rotation for
     /// z_in_block=0 → block_in_mcu advance, and multi-component AC framing.
     #[test]
-    #[ignore = "phase 2 cannot yet sync multi-subsequence multi-component streams: the \
-                single-symbol-advance inter-sync never propagates corrected state rightward, \
-                so fresh-start walkers' block phases stay wrong; needs re-decode-from-predecessor \
-                propagation"]
     fn jpeg_phase4_cuda_matches_oracle_on_ycbcr_444() {
         use crate::jpeg_decoder::decode_scan_symbols;
         static COLOUR_32X32_444: &[u8] =
@@ -1522,10 +1629,6 @@ mod tests {
     /// the MCU schedule rotation (block_in_mcu advance on z_in_block=64) is
     /// consistent regardless of where subsequence boundaries fall.
     #[test]
-    #[ignore = "phase 2 cannot yet sync multi-subsequence multi-component streams: the \
-                single-symbol-advance inter-sync never propagates corrected state rightward, \
-                so fresh-start walkers' block phases stay wrong; needs re-decode-from-predecessor \
-                propagation"]
     fn jpeg_phase4_cuda_ycbcr_stable_across_subseq_sizes() {
         static COLOUR_32X32_444: &[u8] =
             include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
@@ -1866,6 +1969,38 @@ mod vulkan_tests {
         assert_eq!(
             cuda_o, vk_o,
             "Phase 2 outcome mismatch: CUDA={cuda_o:?} Vulkan={vk_o:?}"
+        );
+        assert_eq!(
+            cuda_s, vk_s,
+            "Phase 2 s_info mismatch: CUDA and Vulkan disagree"
+        );
+    }
+
+    /// JPEG Phase 1+2 CUDA and Vulkan produce byte-identical `s_info`
+    /// after convergence on the 3-component fixture — the case where
+    /// Phase 2 must genuinely propagate corrected block phases, so a
+    /// Slang/CUDA divergence in the re-decode walk cannot hide behind
+    /// an already-synced Phase 1 output.
+    #[test]
+    fn jpeg_phase2_cuda_vs_vulkan_ycbcr() {
+        static COLOUR_32X32_444: &[u8] =
+            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+        let (Some(cuda), Some(vk)) = (try_cuda(), try_vulkan()) else {
+            eprintln!("skipping: need both CUDA and Vulkan");
+            return;
+        };
+        let prep = prepare_jpeg(COLOUR_32X32_444).expect("colour 4:4:4 JPEG must prepare");
+        let (cuda_s, cuda_o) =
+            dispatch_jpeg_phase1_then_phase2(&cuda, &prep, 32).expect("cuda dispatch");
+        let (vk_s, vk_o) =
+            dispatch_jpeg_phase1_then_phase2(&vk, &prep, 32).expect("vulkan dispatch");
+        assert_eq!(
+            cuda_o, vk_o,
+            "Phase 2 outcome mismatch: CUDA={cuda_o:?} Vulkan={vk_o:?}"
+        );
+        assert!(
+            matches!(cuda_o, Phase2Outcome::Converged { .. }),
+            "expected convergence on YCbCr, got {cuda_o:?}"
         );
         assert_eq!(
             cuda_s, vk_s,

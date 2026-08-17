@@ -366,12 +366,16 @@ impl PageRecorder {
                 let sync_flags = p
                     .sync_flags
                     .expect("validate() proved sync_flags is Some for JpegPhase2InterSync");
+                let s_info_prev = p
+                    .s_info_prev
+                    .expect("validate() proved s_info_prev is Some for JpegPhase2InterSync");
                 self.ctx
                     .launch_jpeg_phase2_inter_sync_async(
                         p.bitstream,
                         p.codebook,
                         dc,
                         sched,
+                        s_info_prev,
                         p.s_info,
                         sync_flags,
                         p.length_bits,

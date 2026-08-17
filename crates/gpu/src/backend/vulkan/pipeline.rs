@@ -280,13 +280,14 @@ impl KernelId {
             // territory).
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::JpegPhase1IntraSync => &[0, 1, 2, 7, 8],
-            // JpegPhase2 reads bitstream + codebook + s_info_out
-            // (slots 0..2) + sync_flags (slot 3) + dc_codebook +
-            // mcu_schedule (slots 7..8). It skips slots 4..6
-            // (offsets / symbols_out / decode_status are Phase 4
-            // territory).
+            // JpegPhase2 reads bitstream + codebook (slots 0..1),
+            // writes s_info_out (slot 2) + sync_flags (slot 3), reads
+            // dc_codebook + mcu_schedule (slots 7..8) and the previous
+            // pass's s_info_prev (slot 9 — the Jacobi read side). It
+            // skips slots 4..6 (offsets / symbols_out / decode_status
+            // are Phase 4 territory).
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => &[0, 1, 2, 3, 7, 8],
+            Self::JpegPhase2InterSync => &[0, 1, 2, 3, 7, 8, 9],
             // JpegPhase4 reads bitstream + codebook + s_info_out
             // (slots 0..2) + offsets + symbols_out + decode_status
             // (slots 4..6) + dc_codebook + mcu_schedule (slots 7..8).
@@ -356,9 +357,10 @@ impl KernelId {
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::JpegPhase1IntraSync => 5,
             // (bitstream, codebook, s_info, sync_flags, dc_codebook,
-            // mcu_schedule) — JPEG-framed Phase 2, same 24-byte push.
+            // mcu_schedule, s_info_prev) — JPEG-framed Phase 2, same
+            // 24-byte push.
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 6,
+            Self::JpegPhase2InterSync => 7,
             // (bitstream, codebook, s_info, offsets, symbols_out,
             // decode_status, dc_codebook, mcu_schedule) — JPEG-framed
             // Phase 4. 8 storage buffers; same 24-byte push constant.

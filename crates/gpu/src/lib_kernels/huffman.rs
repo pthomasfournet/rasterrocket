@@ -166,12 +166,14 @@ impl GpuCtx {
         Ok(())
     }
 
-    /// Async launch of one JPEG-framed Phase 2 (inter-sequence sync) pass.
+    /// Async launch of one JPEG-framed Phase 2 (re-decode propagation)
+    /// pass.
     ///
-    /// Reads `s_info` + writes `s_info` (in-place JPEG advance) and
-    /// `sync_flags` (one u32 per subseq; 1 = synced, 0 = unsynced
-    /// and advanced this pass). Host loops until all flags are 1 or
-    /// the retry bound is exhausted.
+    /// Reads `s_info_prev` (the previous pass's states) and writes
+    /// `s_info_out` + `sync_flags` (one u32 per subseq; 1 = the
+    /// recompute was a fixpoint). Host swaps the two state buffers
+    /// between passes and loops until all flags are 1 or the retry
+    /// bound is exhausted.
     ///
     /// # Errors
     /// Returns the underlying CUDA error if the kernel launch fails.
@@ -189,7 +191,8 @@ impl GpuCtx {
         codebook: &CudaSlice<u8>,
         dc_codebook: &CudaSlice<u8>,
         mcu_schedule: &CudaSlice<u8>,
-        s_info: &CudaSlice<u8>,
+        s_info_prev: &CudaSlice<u8>,
+        s_info_out: &CudaSlice<u8>,
         sync_flags: &CudaSlice<u8>,
         length_bits: u32,
         subsequence_bits: u32,
@@ -209,7 +212,8 @@ impl GpuCtx {
             .arg(codebook)
             .arg(dc_codebook)
             .arg(mcu_schedule)
-            .arg(s_info)
+            .arg(s_info_prev)
+            .arg(s_info_out)
             .arg(sync_flags)
             .arg(&length_bits)
             .arg(&subsequence_bits)

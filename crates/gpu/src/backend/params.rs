@@ -414,9 +414,12 @@ pub enum HuffmanPhase {
     /// advances by 16.  Requires `dc_codebook` and `mcu_schedule`
     /// to be `Some`.
     JpegPhase1IntraSync,
-    /// JPEG-framed counterpart of `Phase2InterSync`.  Same
-    /// requirements as `JpegPhase1IntraSync` plus the
-    /// `sync_flags` buffer Phase2 needs.
+    /// JPEG-framed Phase 2: inter-sequence sync by re-decode
+    /// propagation. Each pass, thread `i` re-decodes its region from
+    /// `s_info_prev[i - 1]`'s boundary snapshot into `s_info[i]` and
+    /// flags a fixpoint; the host swaps the two buffers between
+    /// passes and loops until every flag is 1. Same requirements as
+    /// `JpegPhase1IntraSync` plus `sync_flags` and `s_info_prev`.
     JpegPhase2InterSync,
     /// JPEG-framed counterpart of `Phase4Redecode`.  Emits the
     /// per-block Huffman symbol stream (DC magnitude category +
@@ -456,6 +459,11 @@ impl HuffmanPhase {
 ///   `sync_flags` must be `Some` with device capacity ≥
 ///   `num_subsequences * 4` bytes (one u32 flag per subsequence). For
 ///   the Phase 1 / Phase 4 variants the field is ignored.
+/// - When `phase == JpegPhase2InterSync`: `s_info_prev` must be
+///   `Some` with the same capacity requirement as `s_info` — the
+///   previous pass's states (Jacobi read side, `s_info` is the write
+///   side; the host swaps the buffers between passes). Ignored for
+///   every other phase.
 /// - When `phase ∈ {Phase4Redecode, JpegPhase4Redecode}`: `offsets`,
 ///   `symbols_out`, and `decode_status` must all be `Some`. `offsets`
 ///   ≥ `num_subsequences * 4` bytes; `symbols_out` ≥ `total_symbols *
@@ -481,6 +489,12 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// `Phase2InterSync` and `JpegPhase2InterSync`; ignored for the
     /// Phase 1 / Phase 4 variants.
     pub sync_flags: Option<&'a B::DeviceBuffer>,
+    /// Previous pass's per-subsequence states — the Jacobi read side
+    /// of the JPEG Phase 2 propagation ([`Self::s_info`] is the
+    /// write side; the host swaps the two buffers between passes).
+    /// Same layout and capacity requirement as `s_info`. Required
+    /// for `JpegPhase2InterSync`; ignored for every other phase.
+    pub s_info_prev: Option<&'a B::DeviceBuffer>,
     /// Exclusive-scan output from Phase 3 (`u32[num_subsequences]`):
     /// `offsets[i]` is the base index into `symbols_out` where
     /// subseq `i`'s emitted symbols are written. Required for
@@ -749,6 +763,23 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
             if backend.device_buffer_len(flags) < flags_bytes {
                 return Err(invariant(
                     "sync_flags buffer is smaller than num_subsequences * 4 bytes",
+                ));
+            }
+        }
+
+        // JPEG Phase 2's Jacobi read side — same capacity rule as s_info.
+        if matches!(self.phase, HuffmanPhase::JpegPhase2InterSync) {
+            let Some(prev) = self.s_info_prev else {
+                return Err(invariant(
+                    "JpegPhase2InterSync requires s_info_prev to be Some",
+                ));
+            };
+            let prev_bytes = (self.num_subsequences() as usize)
+                .checked_mul(16)
+                .ok_or_else(|| invariant("s_info_prev byte count overflows usize"))?;
+            if backend.device_buffer_len(prev) < prev_bytes {
+                return Err(invariant(
+                    "s_info_prev buffer is smaller than num_subsequences * 16 bytes",
                 ));
             }
         }
@@ -1372,6 +1403,7 @@ mod tests {
             codebook,
             s_info,
             sync_flags: None,
+            s_info_prev: None,
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -1444,6 +1476,66 @@ mod tests {
                 assert!(
                     detail.contains("mcu_schedule"),
                     "expected mcu_schedule-related detail, got: {detail}"
+                );
+            }
+            other => panic!("expected InvariantViolation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn huffman_validate_rejects_jpeg_phase2_without_s_info_prev() {
+        let bitstream = 36;
+        let codebook = 1 << 18;
+        let s_info = 32;
+        let dc_codebook = 1 << 18;
+        let mcu_schedule = 4;
+        let sync_flags = 8;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        params.phase = HuffmanPhase::JpegPhase2InterSync;
+        params.blocks_per_mcu = 1;
+        params.dc_codebook = Some(&dc_codebook);
+        params.mcu_schedule = Some(&mcu_schedule);
+        params.sync_flags = Some(&sync_flags);
+        // s_info_prev intentionally None.
+        let err = params
+            .validate(&FakeBackend)
+            .expect_err("JpegPhase2InterSync without s_info_prev must be rejected");
+        match err {
+            super::super::BackendError::InvariantViolation { detail, .. } => {
+                assert!(
+                    detail.contains("s_info_prev"),
+                    "expected s_info_prev-related detail, got: {detail}"
+                );
+            }
+            other => panic!("expected InvariantViolation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn huffman_validate_rejects_undersized_s_info_prev() {
+        let bitstream = 36;
+        let codebook = 1 << 18;
+        let s_info = 32;
+        let dc_codebook = 1 << 18;
+        let mcu_schedule = 4;
+        let sync_flags = 8;
+        // 2 subsequences need 32 bytes; provide 16.
+        let s_info_prev = 16;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        params.phase = HuffmanPhase::JpegPhase2InterSync;
+        params.blocks_per_mcu = 1;
+        params.dc_codebook = Some(&dc_codebook);
+        params.mcu_schedule = Some(&mcu_schedule);
+        params.sync_flags = Some(&sync_flags);
+        params.s_info_prev = Some(&s_info_prev);
+        let err = params
+            .validate(&FakeBackend)
+            .expect_err("under-sized s_info_prev must be rejected");
+        match err {
+            super::super::BackendError::InvariantViolation { detail, .. } => {
+                assert!(
+                    detail.contains("s_info_prev") && detail.contains("smaller"),
+                    "expected s_info_prev size-check detail, got: {detail}"
                 );
             }
             other => panic!("expected InvariantViolation, got: {other:?}"),
