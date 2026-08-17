@@ -443,12 +443,43 @@ const fn blocks_permcu_count(comp: JpegFrameComponent) -> usize {
     (comp.h_sampling as usize) * (comp.v_sampling as usize)
 }
 
+/// Codeword bit-length by symbol value for one canonical codebook.
+///
+/// The GPU symbol stream carries symbol bytes only, so skipping each
+/// symbol's codeword in the raw bitstream needs the codeword's length.
+/// A canonical DHT assigns each symbol value exactly one codeword, so
+/// symbol → length is well-defined; a (spec-legal but pathological)
+/// duplicate symbol value makes the skip ambiguous — refuse, and the
+/// decoder falls back to the full CPU walk.
+fn symbol_code_lengths(
+    book: &crate::jpeg::CanonicalCodebook,
+) -> std::result::Result<[u8; 256], String> {
+    let mut lens = [0u8; 256];
+    for entry in book.table() {
+        if entry.num_bits == 0 {
+            continue;
+        }
+        let slot = &mut lens[usize::from(entry.symbol)];
+        if *slot == 0 {
+            *slot = entry.num_bits;
+        } else if *slot != entry.num_bits {
+            return Err(format!(
+                "symbol {:#04x} has codewords of length {} and {}; \
+                 symbol stream cannot address the bitstream unambiguously",
+                entry.symbol, *slot, entry.num_bits
+            ));
+        }
+    }
+    Ok(lens)
+}
+
 /// Reconstruct AC coefficient arrays from a GPU-decoded symbol stream.
 ///
 /// The GPU Phase 4 output contains Huffman symbol bytes only — no magnitude
-/// bits. This function does a single sequential pass over the raw bitstream,
-/// consuming only the magnitude bits interleaved between codewords; it
-/// performs no Huffman table lookups.
+/// bits. This function does a single sequential pass over the raw bitstream:
+/// each symbol's codeword bits are skipped via the symbol → code-length
+/// maps (no 16-bit prefix lookups), then the magnitude bits that follow it
+/// are consumed.
 ///
 /// Returns `(coef_flat, dc_flat)`:
 /// - `coef_flat`: `num_components × blocks_per_comp × 64` i32 in zigzag order.
@@ -474,6 +505,19 @@ fn symbols_to_coefficients(
 
     let mut coef_flat = vec![0i32; num_comp * blocks_per_comp * 64];
 
+    // Per-component symbol → codeword-length maps for skipping the
+    // Huffman codewords interleaved with the magnitude bits.
+    let dc_lens = prep
+        .dc_codebooks_for_dispatch()
+        .into_iter()
+        .map(symbol_code_lengths)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let ac_lens = prep
+        .ac_codebooks_for_dispatch()
+        .into_iter()
+        .map(symbol_code_lengths)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
     // Reconstruct the raw byte stream for magnitude bit extraction.
     let raw_bytes: Vec<u8> = prep
         .bitstream
@@ -495,9 +539,10 @@ fn symbols_to_coefficients(
                 let coef_base = (ci * blocks_per_comp + block_idx) * 64;
                 block_counts[ci] += 1;
 
-                // DC: consume the DC symbol from the stream.  The magnitude bits
-                // in the bitstream must be consumed to keep the bit position
-                // aligned with the AC symbols that follow.
+                // DC: consume the DC symbol from the stream, skip its
+                // codeword bits, then consume the magnitude bits so the
+                // bit position stays aligned with the AC symbols that
+                // follow.
                 if sym_idx >= symbols.len() {
                     return Err(format!(
                         "symbol stream too short at DC (mcu={mcu} comp={ci})"
@@ -505,6 +550,17 @@ fn symbols_to_coefficients(
                 }
                 let dc_sym = (symbols[sym_idx] & 0xFF) as u8;
                 sym_idx += 1;
+                let code_len = dc_lens[ci][usize::from(dc_sym)];
+                if code_len == 0 {
+                    return Err(format!(
+                        "DC symbol {dc_sym:#04x} not in component {ci}'s codebook (mcu={mcu})"
+                    ));
+                }
+                // read_bits (not consume) so the buffer refills; the
+                // codeword's value is already known from the symbol.
+                let _ = bits.read_bits(usize::from(code_len)).ok_or_else(|| {
+                    format!("bitstream truncated at DC codeword (mcu={mcu} comp={ci})")
+                })?;
                 let category = dc_sym;
                 if category > 0 {
                     let _ = bits.read_bits(usize::from(category)).ok_or_else(|| {
@@ -524,6 +580,16 @@ fn symbols_to_coefficients(
                     }
                     let sym_byte = (symbols[sym_idx] & 0xFF) as u8;
                     sym_idx += 1;
+                    let code_len = ac_lens[ci][usize::from(sym_byte)];
+                    if code_len == 0 {
+                        return Err(format!(
+                            "AC symbol {sym_byte:#04x} not in component {ci}'s codebook \
+                             (mcu={mcu} zz={zz})"
+                        ));
+                    }
+                    let _ = bits.read_bits(usize::from(code_len)).ok_or_else(|| {
+                        format!("bitstream truncated at AC codeword (mcu={mcu} comp={ci} zz={zz})")
+                    })?;
 
                     if sym_byte == 0x00 {
                         // EOB: remaining ACs are zero (already initialised).
@@ -610,6 +676,44 @@ pub(crate) fn extract_coefficients_pub(
     prep: &crate::jpeg_decoder::cpu_prepass::JpegPreparedInput,
 ) -> std::result::Result<(Vec<i32>, Vec<i32>, Vec<i32>, u32), String> {
     extract_coefficients(prep)
+}
+
+#[cfg(test)]
+mod symbol_coefficient_tests {
+    use crate::jpeg_decoder::cpu_prepass::prepare_jpeg;
+    use crate::jpeg_decoder::decode_scan_symbols;
+
+    /// Feeding the sequential oracle's symbol stream through the
+    /// GPU-path reconstruction must reproduce exactly what the
+    /// full CPU walk extracts — coefficient-for-coefficient. Real
+    /// multi-MCU fixtures at both quality extremes; the tiny 16×16
+    /// fixture is too short to expose bit-position drift.
+    #[test]
+    fn symbols_to_coefficients_matches_extract_coefficients() {
+        for (name, bytes) in [
+            (
+                "q20",
+                &include_bytes!("../../../../tests/fixtures/jpeg/q20.jpg")[..],
+            ),
+            (
+                "q95_scan",
+                &include_bytes!("../../../../tests/fixtures/jpeg/q95_scan.jpg")[..],
+            ),
+            (
+                "colour_32x32_444",
+                &include_bytes!("../../../../tests/fixtures/jpeg/colour_32x32_444.jpg")[..],
+            ),
+        ] {
+            let prep = prepare_jpeg(bytes).expect("fixture must prepare");
+            let symbols = decode_scan_symbols(&prep).expect("oracle symbols");
+            let (coef_sym, dc_sym) =
+                super::symbols_to_coefficients(&prep, &symbols).expect("reconstruct");
+            let (coef_ref, dc_ref, _qt, _nq) =
+                super::extract_coefficients(&prep).expect("reference extract");
+            assert_eq!(dc_sym, dc_ref, "{name}: DC values differ");
+            assert_eq!(coef_sym, coef_ref, "{name}: coefficients differ");
+        }
+    }
 }
 
 #[cfg(test)]
