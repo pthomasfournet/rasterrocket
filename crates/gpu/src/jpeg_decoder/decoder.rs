@@ -72,25 +72,24 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
             }
         }
 
-        // Validate that quantisation tables are assigned in JFIF slot order
-        // (slot 0 = luma, slot 1 = chroma). The kernel hardcodes qt_sel=0 for
-        // the Y component and qt_sel=1 for Cb/Cr; a JPEG with reversed or
-        // non-standard table assignments would silently use the wrong tables.
-        for (ci, comp) in prep.components.iter().enumerate() {
-            let expected_slot = u8::from(ci != 0);
-            if comp.quant_selector > 1 {
-                return Err(JpegGpuError::HeaderParse(format!(
-                    "component {ci} references quantisation table slot {} (expected 0 or 1)",
-                    comp.quant_selector
-                )));
-            }
-            if comp.quant_selector != expected_slot && nc == 3 {
-                return Err(JpegGpuError::HeaderParse(format!(
-                    "component {ci} uses quantisation table slot {} but kernel expects slot \
-                     {expected_slot}; only JFIF-standard slot assignment (0=luma, 1=chroma) \
-                     is supported",
-                    comp.quant_selector
-                )));
+        // For 3-component images, validate that quantisation tables are
+        // assigned in JFIF slot order (slot 0 = luma, slot 1 = chroma):
+        // the kernel hardcodes qt_sel=0 for the Y component and qt_sel=1
+        // for Cb/Cr, so a reversed or non-standard assignment would
+        // silently use the wrong tables. A grayscale component may
+        // reference any defined slot — pack_qtables resolves it to packed
+        // index 0.
+        if nc == 3 {
+            for (ci, comp) in prep.components.iter().enumerate() {
+                let expected_slot = u8::from(ci != 0);
+                if comp.quant_selector != expected_slot {
+                    return Err(JpegGpuError::HeaderParse(format!(
+                        "component {ci} uses quantisation table slot {} but kernel expects slot \
+                         {expected_slot}; only JFIF-standard slot assignment (0=luma, 1=chroma) \
+                         is supported",
+                        comp.quant_selector
+                    )));
+                }
             }
         }
 
@@ -116,28 +115,8 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
         };
 
         let (coef_flat, dc_flat, qt_flat, num_qtables) = if let Some((coef, dc)) = gpu_coefs {
-            // GPU Huffman path succeeded; build qt_flat from prep.
-            let mut qt_flat = Vec::<i32>::with_capacity(4 * 64);
-            let mut num_qtables = 0u32;
-            for (qi, qt) in prep.quant_tables.iter().enumerate() {
-                if let Some(qt) = qt {
-                    if qt.values.len() != 64 {
-                        return Err(JpegGpuError::HeaderParse(format!(
-                            "quant table {qi} has {} entries (expected 64)",
-                            qt.values.len()
-                        )));
-                    }
-                    for &v in &qt.values {
-                        qt_flat.push(i32::from(v));
-                    }
-                    num_qtables += 1;
-                }
-            }
-            if qt_flat.is_empty() {
-                return Err(JpegGpuError::HeaderParse(
-                    "no quantisation tables in JPEG".to_owned(),
-                ));
-            }
+            // GPU Huffman path succeeded; pack the referenced tables from prep.
+            let (qt_flat, num_qtables) = pack_qtables(&prep).map_err(JpegGpuError::HeaderParse)?;
             (coef, dc, qt_flat, num_qtables)
         } else {
             extract_coefficients(&prep).map_err(JpegGpuError::HeaderParse)?
@@ -409,36 +388,52 @@ fn extract_coefficients(
         }
     }
 
-    // Quantisation tables: pack populated slots densely, preserving slot order.
-    // The kernel selects qt_sel=0 for luma and qt_sel=1 (clamped) for chroma, so
-    // tables must be dense with luma-table first.  JFIF always uses slot 0 (luma)
-    // and slot 1 (chroma), so iterating in slot order and compacting gives the
-    // correct dense layout.
-    let mut qt_flat = Vec::<i32>::with_capacity(4 * 64);
-    for (qt_idx, qt) in prep.quant_tables.iter().enumerate() {
-        if let Some(qt) = qt {
-            if qt.values.len() != 64 {
-                return Err(format!(
-                    "quant table {qt_idx} has {} entries (expected 64)",
-                    qt.values.len()
-                ));
-            }
-            for &v in &qt.values {
-                qt_flat.push(i32::from(v));
-            }
-        }
-    }
-    if qt_flat.is_empty() {
-        return Err("no quantisation tables in JPEG".to_owned());
-    }
-    // At most 4 slots in a JPEG, so qt_flat.len() / 64 ≤ 4, always fits in u32.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "qt_flat has at most 4*64 entries; quotient is at most 4, fits in u32"
-    )]
-    let num_qtables = (qt_flat.len() / 64) as u32;
+    let (qt_flat, num_qtables) = pack_qtables(prep)?;
 
     Ok((coef_flat, dc_flat, qt_flat, num_qtables))
+}
+
+/// Pack the quantisation tables the frame components actually reference,
+/// in the order the kernel selects them: index 0 is component 0's table
+/// (`qt_sel = 0`), index 1 the chroma table for 3-component images
+/// (`qt_sel = 1`).
+///
+/// Packing the *referenced* slots — rather than every populated slot in
+/// slot order — keeps a grayscale image correct when its component
+/// references slot 1 while an unused slot 0 is also defined. For
+/// 3-component images `decode` has already pinned the JFIF slot
+/// assignment (0 = luma, 1 = chroma).
+fn pack_qtables(prep: &JpegPreparedInput) -> std::result::Result<(Vec<i32>, u32), String> {
+    let slots: &[usize] = if prep.components.len() == 1 {
+        &[usize::from(prep.components[0].quant_selector)]
+    } else {
+        &[0, 1]
+    };
+
+    let mut qt_flat = Vec::<i32>::with_capacity(slots.len() * 64);
+    for &slot in slots {
+        let qt = prep
+            .quant_tables
+            .get(slot)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                format!("component references undefined quantisation table slot {slot}")
+            })?;
+        if qt.values.len() != 64 {
+            return Err(format!(
+                "quant table {slot} has {} entries (expected 64)",
+                qt.values.len()
+            ));
+        }
+        qt_flat.extend(qt.values.iter().map(|&v| i32::from(v)));
+    }
+    // slots has 1 or 2 entries, so qt_flat.len() / 64 ≤ 2 — fits in u32.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "at most 2 packed tables; quotient fits in u32"
+    )]
+    let num_qtables = (qt_flat.len() / 64) as u32;
+    Ok((qt_flat, num_qtables))
 }
 
 /// Number of 8×8 blocks this component contributes per MCU.
@@ -615,6 +610,57 @@ pub(crate) fn extract_coefficients_pub(
     prep: &crate::jpeg_decoder::cpu_prepass::JpegPreparedInput,
 ) -> std::result::Result<(Vec<i32>, Vec<i32>, Vec<i32>, u32), String> {
     extract_coefficients(prep)
+}
+
+#[cfg(test)]
+mod qt_selection_tests {
+    use crate::jpeg_decoder::cpu_prepass::prepare_jpeg;
+
+    /// Build a grayscale JPEG that defines DQT slots 0 (the fixture's own
+    /// table) and 1 (all-2s), with the single frame component referencing
+    /// slot 1.  Encoders legally emit both tables even when only one is
+    /// used.
+    fn gray_jpeg_with_tq1() -> Vec<u8> {
+        let base = crate::jpeg::test_fixtures::GRAY_16X16_JPEG;
+        let sof = base
+            .windows(2)
+            .position(|w| w == [0xff, 0xc0])
+            .expect("fixture must contain an SOF0 marker");
+
+        let mut out = Vec::with_capacity(base.len() + 69);
+        out.extend_from_slice(&base[..sof]);
+        // DQT for slot 1: Pq/Tq byte 0x01, then 64 quantiser bytes of 2.
+        out.extend_from_slice(&[0xff, 0xdb, 0x00, 0x43, 0x01]);
+        out.extend_from_slice(&[0x02; 64]);
+        out.extend_from_slice(&base[sof..]);
+
+        // SOF0 layout: ff c0 len(2) precision dims(4) nc, then per-component
+        // (id, sampling, Tq) — Tq is byte 12 of the segment.
+        let tq = sof + 69 + 12;
+        assert_eq!(out[tq], 0x00, "fixture component must reference slot 0");
+        out[tq] = 0x01;
+        out
+    }
+
+    /// The kernel dequantises component 0 with qt index 0, so index 0 of
+    /// the packed tables must hold the table the component references —
+    /// not whichever populated slot sorts first.
+    #[test]
+    fn grayscale_component_gets_its_referenced_qtable() {
+        let bytes = gray_jpeg_with_tq1();
+        let prep = prepare_jpeg(&bytes).expect("prepare crafted grayscale JPEG");
+        assert_eq!(prep.components.len(), 1);
+        assert_eq!(prep.components[0].quant_selector, 1);
+
+        let (_coef, _dc, qt_flat, num_qtables) =
+            super::extract_coefficients_pub(&prep).expect("extract");
+        assert_eq!(
+            &qt_flat[..64],
+            &[2i32; 64][..],
+            "packed table 0 must be the component's referenced (slot 1) table"
+        );
+        assert_eq!(num_qtables, 1, "grayscale packs exactly one table");
+    }
 }
 
 #[cfg(all(test, feature = "gpu-validation"))]
