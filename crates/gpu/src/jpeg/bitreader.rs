@@ -74,29 +74,27 @@ impl<'a> BitReader<'a> {
         Some((self.buf >> 48) as u16)
     }
 
-    /// Consume `n` bits from the buffer.  Caller must have peeked at least
-    /// `n` bits via [`Self::peek_u16`] (which refills) before calling.
+    /// Consume `n` bits if at least `n` remain in the stream, refilling
+    /// first. Returns `false` — leaving the reader untouched — when the
+    /// stream is too short.
     ///
-    /// # Panics
-    ///
-    /// Panics (in both debug and release) if `n > cap`.  Hard-asserted
-    /// rather than `debug_assert!`'d because a caller that asks for more
-    /// bits than the buffer holds would otherwise shift `u64` by ≥ 64,
-    /// which is undefined behaviour in Rust.  Fail loudly is the right
-    /// failure mode for an internal invariant violation.
-    pub(crate) fn consume(&mut self, n: usize) {
-        // Hard assert: the alternative is a release-mode shift by ≥ 64,
-        // which produces an implementation-defined or undefined value.
-        // Tail-call cost is one branch — negligible next to a Huffman
-        // table lookup, well worth the safety.
-        assert!(
-            (n as u64) <= u64::from(self.cap),
-            "BitReader::consume: requested {n} bits but only {} buffered",
-            self.cap,
-        );
+    /// This is the truncation-safe form of the peek/lookup/consume
+    /// pattern: [`Self::peek_u16`] zero-pads past the stream end, so a
+    /// padded prefix can match a codeword longer than the bits that
+    /// actually remain — wire data, not a caller bug, and it must
+    /// surface as the caller's typed truncation error.
+    #[must_use]
+    pub(crate) fn try_consume(&mut self, n: usize) -> bool {
+        self.refill();
+        if (self.cap as usize) < n {
+            return false;
+        }
         let n_u32 = u32::try_from(n).expect("n ≤ cap ≤ 64 fits in u32");
-        self.buf <<= n_u32;
+        // checked_shl covers n == 64 (a full-buffer consume), where a
+        // plain shift would overflow.
+        self.buf = self.buf.checked_shl(n_u32).unwrap_or(0);
         self.cap -= n_u32;
+        true
     }
 
     /// Read `n` bits MSB-first as an unsigned integer.  Returns `None` if
@@ -284,13 +282,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "requested")]
-    fn consume_panics_when_buffer_too_short() {
-        // consume(n) past the buffered cap would shift the internal
-        // u64 by ≥ 64, which is implementation-defined.  The hard
-        // assert exists precisely to catch this caller bug.
-        let mut br = BitReader::new(&[]);
-        // Empty source → cap stays 0; any non-zero consume must panic.
-        br.consume(1);
+    fn try_consume_refuses_past_stream_end_without_mutating() {
+        // A zero-padded peek can match a codeword longer than the bits
+        // that remain; try_consume must refuse and leave the reader
+        // usable rather than panicking (wire data, not a caller bug).
+        let mut br = BitReader::new(&[0b1000_0000]);
+        assert!(br.try_consume(7));
+        assert!(!br.try_consume(2), "only 1 bit remains");
+        assert_eq!(br.read_bits(1), Some(0), "refusal must not consume");
+        assert!(!br.try_consume(1), "stream exhausted");
+    }
+
+    #[test]
+    fn try_consume_full_buffer_is_well_defined() {
+        // n == 64 exercises the checked shift (a plain `<<= 64` would
+        // overflow).
+        let mut br = BitReader::new(&[0xAA; 8]);
+        let _ = br.peek_u16(); // force a full 64-bit refill
+        assert!(br.try_consume(64));
+        assert_eq!(br.peek_u16(), None);
     }
 }

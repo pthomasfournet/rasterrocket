@@ -190,11 +190,11 @@ struct ScanStep<'a> {
 /// factors.  Interleaved scans emit `h_sampling × v_sampling` blocks per
 /// component per MCU.
 fn blocks_per_mcu(scan_components: usize, h_sampling: u8, v_sampling: u8) -> usize {
-    if scan_components == 1 {
-        1
-    } else {
-        usize::from(h_sampling) * usize::from(v_sampling)
-    }
+    usize::from(super::component_blocks_per_mcu(
+        scan_components,
+        h_sampling,
+        v_sampling,
+    ))
 }
 
 /// Walk the unstuffed entropy-coded segment, decoding only enough bits to
@@ -484,7 +484,15 @@ fn decode_one(
             component_index: comp_index,
         });
     }
-    bits.consume(usize::from(entry.num_bits));
+    // The peek zero-pads past the stream end, so a matched codeword can
+    // be longer than the bits that remain — a truncated stream, not a
+    // decode-table bug.
+    if !bits.try_consume(usize::from(entry.num_bits)) {
+        return Err(DcChainError::UnexpectedEnd {
+            mcu_index: mcu_idx,
+            component_index: comp_index,
+        });
+    }
     Ok(entry)
 }
 

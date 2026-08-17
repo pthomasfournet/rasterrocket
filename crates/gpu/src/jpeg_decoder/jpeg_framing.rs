@@ -197,15 +197,7 @@ impl<'a> ScanWalker<'a> {
             });
         }
         let scan_components = prep.components.len();
-        // Convert PackedBitstream back to byte form for the bit reader.
-        // The wrapper packed `unstuffed` 1:1 into BE-32 words, so the
-        // reverse is BE bytes from words capped at length_bits/8.
-        let byte_len = (prep.bitstream.length_bits as usize) / 8;
-        let mut bytes = Vec::with_capacity(byte_len);
-        for word in &prep.bitstream.words {
-            bytes.extend_from_slice(&word.to_be_bytes());
-        }
-        bytes.truncate(byte_len);
+        let bytes = prep.bitstream.unpack_bytes();
 
         let dc_cbs = prep.dc_codebooks_for_dispatch();
         let ac_cbs = prep.ac_codebooks_for_dispatch();
@@ -222,13 +214,11 @@ impl<'a> ScanWalker<'a> {
                     scan_component: k_u8,
                 });
             }
-            blocks_per_mcu[k] = if scan_components == 1 {
-                1
-            } else {
-                fc.h_sampling
-                    .checked_mul(fc.v_sampling)
-                    .expect("upstream BadSamplingFactor caps h, v ≤ 4")
-            };
+            blocks_per_mcu[k] = crate::jpeg::component_blocks_per_mcu(
+                scan_components,
+                fc.h_sampling,
+                fc.v_sampling,
+            );
         }
 
         let num_mcus = mcu_count(prep.width, prep.height, &prep.components);
@@ -287,7 +277,14 @@ fn emit_dc_symbol(
             scan_component,
         });
     }
-    bits.consume(usize::from(entry.num_bits));
+    // A zero-padded peek can match a codeword longer than the remaining
+    // stream — surface truncation, not a panic.
+    if !bits.try_consume(usize::from(entry.num_bits)) {
+        return Err(JpegFramingError::UnexpectedEnd {
+            mcu_index: mcu,
+            scan_component,
+        });
+    }
     let category = entry.symbol;
     if category > 11 {
         return Err(JpegFramingError::BadDcCategory {
@@ -328,7 +325,12 @@ fn emit_ac_symbols(
                 scan_component,
             });
         }
-        bits.consume(usize::from(entry.num_bits));
+        if !bits.try_consume(usize::from(entry.num_bits)) {
+            return Err(JpegFramingError::UnexpectedEnd {
+                mcu_index: mcu,
+                scan_component,
+            });
+        }
         let symbol = entry.symbol;
         out.push(u32::from(symbol));
         if symbol == 0x00 {

@@ -71,6 +71,11 @@ pub struct JpegPreparedInput {
     pub scan: JpegScanHeader,
     /// Restart interval in MCUs (0 = no restart markers in stream).
     pub restart_interval: u16,
+    /// Number of RST markers the entropy scan actually contained.  A
+    /// DRI header alone does not imply markers (an image with fewer
+    /// MCUs than the interval emits none); the walkers key their
+    /// restart handling off this count, not the header.
+    pub rst_marker_count: usize,
 }
 
 impl JpegPreparedInput {
@@ -115,7 +120,8 @@ fn materialise_codebook_slice<'a>(
         .map(|&sel| {
             codebooks[usize::from(sel)].as_ref().unwrap_or_else(|| {
                 panic!(
-                    "{} selector {sel} populated at prepare_jpeg time",
+                    "{} selector {sel} points at an empty codebook slot — \
+                     JpegPreparedInput was mutated after prepare_jpeg returned",
                     class.name()
                 )
             })
@@ -187,6 +193,7 @@ pub fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError
         scan,
         restart_interval,
         dc_values,
+        rst_positions,
         ..
     } = prep;
 
@@ -203,6 +210,7 @@ pub fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError
         components,
         scan,
         restart_interval,
+        rst_marker_count: rst_positions.len(),
     })
 }
 
@@ -265,13 +273,8 @@ pub fn build_mcu_schedule(prep: &JpegPreparedInput) -> (Vec<u32>, u32) {
     for (k, fc) in prep.components.iter().enumerate() {
         let k_u8 = u8::try_from(k).expect("component index < 4");
 
-        let bpm: u8 = if num_components == 1 {
-            1
-        } else {
-            fc.h_sampling
-                .checked_mul(fc.v_sampling)
-                .expect("upstream BadSamplingFactor caps h, v ≤ 4")
-        };
+        let bpm =
+            crate::jpeg::component_blocks_per_mcu(num_components, fc.h_sampling, fc.v_sampling);
         let entry = (u32::from(k_u8) << 16) | (u32::from(k_u8) << 8) | u32::from(k_u8);
         for _ in 0..bpm {
             schedule.push(entry);
@@ -404,6 +407,87 @@ mod tests {
         assert!(
             matches!(err, JpegGpuError::InvalidHuffmanTables(_)),
             "expected InvalidHuffmanTables, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_stream_truncated_mid_codeword() {
+        // 16×16 grayscale (4 MCUs) with a 2-bit DC code (category 4)
+        // and a 1-bit AC EOB code. One entropy byte decodes MCU 0 in
+        // 7 bits (2 code + 4 magnitude + 1 EOB), leaving a single bit;
+        // MCU 1's DC peek zero-pads that bit into a match for the
+        // 2-bit codeword, so the walker needs 2 bits where 1 remains.
+        // This must surface as a typed error, not a panic.
+        let mut data: Vec<u8> = vec![0xFF, 0xD8];
+        // DQT, table 0, 64 ones.
+        data.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0]);
+        data.extend_from_slice(&[1u8; 64]);
+        // SOF0, 16×16, 1 component.
+        data.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 11, 8, 0x00, 0x10, 0x00, 0x10, 1, 1, 0x11, 0x00,
+        ]);
+        // DHT DC table 0: one 2-bit code, value 4 (category 4).
+        let mut dht = vec![0xFF, 0xC4, 0x00, 20, 0x00];
+        dht.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        dht.push(4);
+        data.extend_from_slice(&dht);
+        // DHT AC table 0: one 1-bit code, value 0x00 (EOB).
+        data.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        // SOS + one entropy byte (all-zero bits) + EOI.
+        data.extend_from_slice(&[0xFF, 0xDA, 0x00, 8, 1, 1, 0x00, 0, 0x3F, 0x00, 0x00]);
+        data.extend_from_slice(&[0xFF, 0xD9]);
+
+        let err = prepare_jpeg(&data).expect_err("mid-codeword truncation must be a typed error");
+        assert!(
+            matches!(err, JpegGpuError::HeaderParse(_)),
+            "expected HeaderParse (DC chain truncation), got: {err:?}"
+        );
+    }
+
+    /// Build a 16×16 grayscale JPEG (4 MCUs) whose scan really contains
+    /// RST markers: restart interval 1, each MCU 7 bits (2-bit DC code,
+    /// category 4, EOB) padded to a byte, `FF D0`/`D1`/`D2` between MCUs.
+    fn gray_16x16_with_real_rst_markers() -> Vec<u8> {
+        let mut data: Vec<u8> = vec![0xFF, 0xD8];
+        data.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0]);
+        data.extend_from_slice(&[1u8; 64]);
+        data.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 11, 8, 0x00, 0x10, 0x00, 0x10, 1, 1, 0x11, 0x00,
+        ]);
+        // DHT DC table 0: one 2-bit code, value 4 (category 4).
+        let mut dht = vec![0xFF, 0xC4, 0x00, 20, 0x00];
+        dht.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        dht.push(4);
+        data.extend_from_slice(&dht);
+        // DHT AC table 0: one 1-bit code, value 0x00 (EOB).
+        data.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        // DRI: restart interval 1.
+        data.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x04, 0x00, 0x01]);
+        // SOS. Each MCU byte = "00" (DC) + "0000" (magnitude) + "0" (EOB)
+        // + one 1-pad bit = 0x01.
+        data.extend_from_slice(&[0xFF, 0xDA, 0x00, 8, 1, 1, 0x00, 0, 0x3F, 0x00]);
+        data.extend_from_slice(&[0x01, 0xFF, 0xD0, 0x01, 0xFF, 0xD1, 0x01, 0xFF, 0xD2, 0x01]);
+        data.extend_from_slice(&[0xFF, 0xD9]);
+        data
+    }
+
+    #[test]
+    fn extract_refuses_streams_with_real_restart_markers() {
+        // Stripping RST markers concatenates byte-aligned segments; a
+        // walker without realignment desyncs at the first boundary. The
+        // extraction paths must refuse loudly rather than walk on.
+        let prep = prepare_jpeg(&gray_16x16_with_real_rst_markers())
+            .expect("RST-bearing baseline JPEG must prepare (dc_chain realigns)");
+        assert!(prep.restart_interval > 0);
+        let err = super::super::decoder::extract_coefficients_pub(&prep)
+            .expect_err("extraction must refuse an RST-bearing stream");
+        assert!(
+            err.contains("restart"),
+            "error must name restart markers as the cause: {err}"
         );
     }
 
@@ -596,10 +680,12 @@ mod tests {
 
     #[test]
     fn dri_jpeg_extract_coefficients_succeeds() {
-        // DRI does not affect the bitstream — RST markers are stripped by
-        // the unstuffing pass.  Coefficient extraction must succeed on all
-        // three intervals and produce the same coefficients as the no-DRI
-        // baseline (the scan payload is byte-identical).
+        // These fixtures carry a DRI *header* but their scan contains no
+        // actual RST markers (the fixture's payload is unchanged), so
+        // rst_marker_count == 0 and extraction proceeds; the coefficients
+        // must match the no-DRI baseline byte for byte. Streams with real
+        // markers are refused — see
+        // extract_refuses_streams_with_real_restart_markers.
         let baseline = prepare_jpeg(GRAY_16X16_JPEG).unwrap();
         let (base_coef, base_dc, base_qt, base_nq) =
             super::super::decoder::extract_coefficients_pub(&baseline).expect("baseline extract");

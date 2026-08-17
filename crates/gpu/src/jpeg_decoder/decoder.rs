@@ -13,7 +13,7 @@
 use crate::backend::params::IdctParams;
 use crate::backend::{BackendError as BackendErr, GpuBackend};
 use crate::jpeg::bitreader::BitReader;
-use crate::jpeg::headers::{JpegFrameComponent, mcu_count};
+use crate::jpeg::headers::mcu_count;
 use crate::jpeg_decoder::cpu_prepass::{JpegPreparedInput, prepare_jpeg};
 use crate::jpeg_decoder::device_image::DeviceImage;
 use crate::jpeg_decoder::dispatch_util::DeviceBufferGuard;
@@ -93,34 +93,17 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
             }
         }
 
-        // Attempt the GPU Phases 1–4 parallel-Huffman path.  On any error
-        // (Phase 2 non-convergence, backend dispatch failure, or symbol-stream
-        // inconsistency) fall through to the CPU sequential path below.
-        let gpu_coefs: Option<(Vec<i32>, Vec<i32>)> = {
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            {
-                let subseq_bits = crate::jpeg_decoder::pick_subsequence_size(&prep);
-                crate::jpeg_decoder::huffman::dispatch_jpeg_phase1_through_phase4(
-                    &self.backend,
-                    &prep,
-                    subseq_bits,
-                )
-                .ok()
-                .and_then(|symbols| symbols_to_coefficients(&prep, &symbols).ok())
-            }
-            #[cfg(not(feature = "gpu-jpeg-huffman"))]
-            {
-                None
-            }
-        };
-
-        let (coef_flat, dc_flat, qt_flat, num_qtables) = if let Some((coef, dc)) = gpu_coefs {
-            // GPU Huffman path succeeded; pack the referenced tables from prep.
-            let (qt_flat, num_qtables) = pack_qtables(&prep).map_err(JpegGpuError::HeaderParse)?;
-            (coef, dc, qt_flat, num_qtables)
-        } else {
-            extract_coefficients(&prep).map_err(JpegGpuError::HeaderParse)?
-        };
+        // Neither coefficient walker realigns at restart boundaries;
+        // refuse RST-bearing streams up front so the caller falls back
+        // to a restart-aware CPU decoder instead of receiving desynced
+        // garbage. A DRI header without emitted markers is fine.
+        if prep.rst_marker_count > 0 {
+            return Err(JpegGpuError::Dispatch(format!(
+                "entropy stream contains {} restart marker(s); RST-aware decoding \
+                 is not implemented",
+                prep.rst_marker_count,
+            )));
+        }
 
         let width = u32::from(prep.width);
         let height = u32::from(prep.height);
@@ -136,7 +119,10 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
         // Maximum block_idx for a 3-component JPEG: 2 * BW * BH + (BH-1)*BW + (BW-1).
         // coef_base overflows u32 when block_idx >= 2^26 = 67_108_864.
         // BW * BH <= 2^26 / 3 ≈ 22.4 M corresponds to ~4730 blocks per side = ~37 840 px.
-        // Reject here so the kernel never sees an overflowing index.
+        // Checked before any coefficient extraction: the walkers allocate
+        // num_components × blocks × 64 × 4 bytes up front, so a crafted
+        // huge-dimension file must be rejected before that allocation,
+        // not after.
         let max_block_idx = u64::from(num_components)
             .saturating_mul(u64::from(blocks_wide))
             .saturating_mul(u64::from(blocks_high));
@@ -146,6 +132,52 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
                  {blocks_wide}×{blocks_high} blocks exceeds the 26-bit block index limit"
             )));
         }
+
+        // Attempt the GPU Phases 1–4 parallel-Huffman path.  On any error
+        // (Phase 2 non-convergence, backend dispatch failure, or symbol-stream
+        // inconsistency) fall through to the CPU sequential path below —
+        // logging the reason, so a systematically failing GPU path is
+        // distinguishable from a healthy one.
+        let gpu_coefs: Option<(Vec<i32>, Vec<i32>)> = {
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            {
+                let subseq_bits = crate::jpeg_decoder::pick_subsequence_size(&prep);
+                crate::jpeg_decoder::huffman::dispatch_jpeg_phase1_through_phase4(
+                    &self.backend,
+                    &prep,
+                    subseq_bits,
+                )
+                .inspect_err(|e| {
+                    log::debug!(
+                        "GPU JPEG Huffman dispatch failed ({width}×{height}, \
+                         {subseq_bits}-bit subsequences); using the CPU walk: {e}"
+                    );
+                })
+                .ok()
+                .and_then(|symbols| {
+                    symbols_to_coefficients(&prep, &symbols)
+                        .inspect_err(|e| {
+                            log::debug!(
+                                "GPU JPEG symbol stream rejected ({width}×{height}); \
+                                 using the CPU walk: {e}"
+                            );
+                        })
+                        .ok()
+                })
+            }
+            #[cfg(not(feature = "gpu-jpeg-huffman"))]
+            {
+                None
+            }
+        };
+
+        let (coef_flat, dc_flat, qt_flat, num_qtables) = if let Some((coef, dc)) = gpu_coefs {
+            // GPU Huffman path succeeded; pack the referenced tables from prep.
+            let (qt_flat, num_qtables) = pack_qtables(&prep).map_err(JpegGpuError::HeaderParse)?;
+            (coef, dc, qt_flat, num_qtables)
+        } else {
+            extract_coefficients(&prep).map_err(JpegGpuError::HeaderParse)?
+        };
 
         self.dispatch_idct(
             &coef_flat,
@@ -241,7 +273,8 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
     }
 }
 
-/// Reconstruct DCT coefficient arrays from `prep`.
+/// Reconstruct DCT coefficient arrays from `prep` by decoding the
+/// entropy stream with the canonical Huffman tables.
 ///
 /// Returns `(coefficients, dc_values, qtables, num_qtables)`:
 /// - `coefficients`: `num_components × blocks_per_comp × 64` i32 in zigzag order
@@ -252,144 +285,12 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
     clippy::type_complexity,
     reason = "4-tuple private fn return; a named struct is overkill here"
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "AC walk + DC copy + QT copy; split would obscure the single-pass structure"
-)]
 fn extract_coefficients(
     prep: &JpegPreparedInput,
 ) -> std::result::Result<(Vec<i32>, Vec<i32>, Vec<i32>, u32), String> {
-    let num_comp = prep.components.len();
-    let blocks_wide = usize::from(prep.width.div_ceil(8));
-    let blocks_high = usize::from(prep.height.div_ceil(8));
-    let blocks_per_comp = blocks_wide * blocks_high;
-
-    let mut coef_flat = vec![0i32; num_comp * blocks_per_comp * 64];
-
-    // Recover raw bitstream bytes for BitReader:
-    // PackedBitstream words use u32::from_be_bytes packing, so each word
-    // unpacks to bytes via to_be_bytes().
-    let raw_bytes: Vec<u8> = prep
-        .bitstream
-        .words
-        .iter()
-        .flat_map(|w| w.to_be_bytes())
-        .collect();
-    let mut bits = BitReader::new(&raw_bytes);
-
-    let totalmcus = mcu_count(prep.width, prep.height, &prep.components);
-    let mut block_counts = vec![0usize; num_comp];
-
-    for mcu in 0..totalmcus {
-        for (ci, comp) in prep.components.iter().enumerate() {
-            let dc_sel = usize::from(
-                *prep
-                    .dc_selectors
-                    .get(ci)
-                    .ok_or_else(|| format!("no dc_selector for comp {ci}"))?,
-            );
-            let ac_sel = usize::from(
-                *prep
-                    .ac_selectors
-                    .get(ci)
-                    .ok_or_else(|| format!("no ac_selector for comp {ci}"))?,
-            );
-            let dc_cb = prep.dc_codebooks[dc_sel]
-                .as_ref()
-                .ok_or_else(|| format!("missing DC codebook {dc_sel}"))?;
-            let ac_cb = prep.ac_codebooks[ac_sel]
-                .as_ref()
-                .ok_or_else(|| format!("missing AC codebook {ac_sel}"))?;
-
-            let bpm = blocks_permcu_count(*comp);
-            for _b in 0..bpm {
-                let block_idx = block_counts[ci];
-                let coef_base = (ci * blocks_per_comp + block_idx) * 64;
-                block_counts[ci] += 1;
-
-                // DC: peek + consume codeword, then read `category` magnitude bits.
-                let peek = bits.peek_u16().ok_or_else(|| {
-                    format!("bitstream empty at DC codeword (mcu={mcu} comp={ci})")
-                })?;
-                let dc_entry = dc_cb.lookup(peek);
-                bits.consume(usize::from(dc_entry.num_bits));
-                let category = dc_entry.symbol;
-                if category > 0 {
-                    let _ = bits.read_bits(usize::from(category)).ok_or_else(|| {
-                        format!("DC magnitude truncated (mcu={mcu} comp={ci} cat={category})")
-                    })?;
-                }
-
-                // AC: read each symbol + magnitude bits.
-                let mut zz = 1usize;
-                while zz < 64 {
-                    let peek = bits.peek_u16().ok_or_else(|| {
-                        format!("bitstream empty at AC (mcu={mcu} comp={ci} zz={zz})")
-                    })?;
-                    let ac_entry = ac_cb.lookup(peek);
-                    bits.consume(usize::from(ac_entry.num_bits));
-                    let sym_byte = ac_entry.symbol;
-
-                    if sym_byte == 0x00 {
-                        break; // EOB
-                    }
-                    if sym_byte == 0xF0 {
-                        zz += 16; // ZRL
-                        continue;
-                    }
-                    let run = (sym_byte >> 4) as usize;
-                    let size = sym_byte & 0x0F;
-                    zz += run;
-                    if zz >= 64 {
-                        break;
-                    }
-                    let ac_val = if size == 0 {
-                        0i32
-                    } else {
-                        let raw = bits.read_bits(usize::from(size)).ok_or_else(|| {
-                            format!("AC magnitude truncated (mcu={mcu} comp={ci} zz={zz})")
-                        })?;
-                        jpeg_extend(raw.cast_signed(), size)
-                    };
-                    if coef_base + zz >= coef_flat.len() {
-                        return Err(format!(
-                            "coefficient overflow: coef_base={coef_base} zz={zz} \
-                             coef_flat.len()={} (mcu={mcu} comp={ci})",
-                            coef_flat.len()
-                        ));
-                    }
-                    coef_flat[coef_base + zz] = ac_val;
-                    zz += 1;
-                }
-            }
-        }
-    }
-
-    // DC values: pre-resolved absolute DC chain from the pre-pass.
-    let mut dc_flat = vec![0i32; num_comp * blocks_per_comp];
-    for (ci, dc_vec) in prep
-        .dc_values
-        .per_component
-        .iter()
-        .take(num_comp)
-        .enumerate()
-    {
-        let base = ci * blocks_per_comp;
-        for (bi, &dc) in dc_vec.iter().enumerate() {
-            let idx = base + bi;
-            if idx >= dc_flat.len() {
-                return Err(format!(
-                    "dc_values overflow: comp={ci} block={bi} idx={idx} \
-                     dc_flat.len()={}",
-                    dc_flat.len()
-                ));
-            }
-            dc_flat[idx] = dc;
-        }
-    }
-
+    let mut source = TableSource::new(prep);
+    let (coef_flat, dc_flat) = reconstruct_coefficients(prep, &mut source)?;
     let (qt_flat, num_qtables) = pack_qtables(prep)?;
-
     Ok((coef_flat, dc_flat, qt_flat, num_qtables))
 }
 
@@ -436,11 +337,22 @@ fn pack_qtables(prep: &JpegPreparedInput) -> std::result::Result<(Vec<i32>, u32)
     Ok((qt_flat, num_qtables))
 }
 
-/// Number of 8×8 blocks this component contributes per MCU.
-/// Non-interleaved (1-component scan): always 1.
-/// Interleaved: `h_sampling` × `v_sampling`.
-const fn blocks_permcu_count(comp: JpegFrameComponent) -> usize {
-    (comp.h_sampling as usize) * (comp.v_sampling as usize)
+/// Refuse entropy streams whose scan contained real RST markers.
+///
+/// Unstuffing strips the markers and concatenates the byte-aligned
+/// segments, but neither coefficient walker realigns at the
+/// boundaries — walking on would desync at the first restart and
+/// produce plausible-looking garbage. A DRI header alone (no markers
+/// emitted) is fine.
+fn reject_restart_markers(prep: &JpegPreparedInput) -> std::result::Result<(), String> {
+    if prep.rst_marker_count > 0 {
+        return Err(format!(
+            "entropy stream contains {} restart marker(s); RST-aware coefficient \
+             extraction is not implemented",
+            prep.rst_marker_count,
+        ));
+    }
+    Ok(())
 }
 
 /// Codeword bit-length by symbol value for one canonical codebook.
@@ -475,29 +387,253 @@ fn symbol_code_lengths(
 
 /// Reconstruct AC coefficient arrays from a GPU-decoded symbol stream.
 ///
-/// The GPU Phase 4 output contains Huffman symbol bytes only — no magnitude
-/// bits. This function does a single sequential pass over the raw bitstream:
-/// each symbol's codeword bits are skipped via the symbol → code-length
-/// maps (no 16-bit prefix lookups), then the magnitude bits that follow it
-/// are consumed.
-///
-/// Returns `(coef_flat, dc_flat)`:
-/// - `coef_flat`: `num_components × blocks_per_comp × 64` i32 in zigzag order.
-///   DC coefficient at index 0 of each block is filled from `prep.dc_values`;
-///   AC coefficients 1..63 come from the symbol stream + magnitude bits.
-/// - `dc_flat`: `num_components × blocks_per_comp` i32 (absolute DC values
-///   from the CPU pre-pass, copied directly from `prep.dc_values`).
-///
-/// Returns `Err(String)` if the symbol stream length doesn't match the
-/// expected MCU count, or if magnitude bits overflow the bitstream.
-#[expect(
-    clippy::too_many_lines,
-    reason = "DC + AC magnitude walk + dc_flat copy; same structure as extract_coefficients"
-)]
+/// The GPU Phase 4 output contains Huffman symbol bytes only — no
+/// magnitude bits. The shared walk skips each symbol's codeword bits
+/// via the symbol → code-length maps and consumes the magnitude bits
+/// that follow it. The stream is a trust boundary: out-of-contract
+/// symbols and over- or under-length streams are rejected with typed
+/// messages rather than trusted.
 fn symbols_to_coefficients(
     prep: &JpegPreparedInput,
     symbols: &[u32],
 ) -> std::result::Result<(Vec<i32>, Vec<i32>), String> {
+    let mut source = StreamSource::new(prep, symbols)?;
+    let out = reconstruct_coefficients(prep, &mut source)?;
+    source.finish()?;
+    Ok(out)
+}
+
+/// One Huffman-symbol provider for [`reconstruct_coefficients`].
+///
+/// Every implementation must leave the bit reader positioned at the
+/// symbol's magnitude bits: the codeword bits are consumed inside the
+/// provider (by table lookup or by length-map skip), the magnitude
+/// bits by the shared walk.
+trait SymbolSource {
+    /// Produce the DC symbol (magnitude category) for the next block.
+    fn next_dc(
+        &mut self,
+        bits: &mut BitReader<'_>,
+        ci: usize,
+        mcu: u32,
+    ) -> std::result::Result<u8, String>;
+
+    /// Produce the next AC symbol (`(run << 4) | size`, EOB, or ZRL).
+    fn next_ac(
+        &mut self,
+        bits: &mut BitReader<'_>,
+        ci: usize,
+        mcu: u32,
+        zz: usize,
+    ) -> std::result::Result<u8, String>;
+}
+
+/// Symbol provider that decodes codewords from the bitstream with the
+/// per-component canonical tables — the CPU reference path.
+struct TableSource<'a> {
+    dc_cbs: Vec<&'a crate::jpeg::CanonicalCodebook>,
+    ac_cbs: Vec<&'a crate::jpeg::CanonicalCodebook>,
+}
+
+impl<'a> TableSource<'a> {
+    fn new(prep: &'a JpegPreparedInput) -> Self {
+        Self {
+            dc_cbs: prep.dc_codebooks_for_dispatch(),
+            ac_cbs: prep.ac_codebooks_for_dispatch(),
+        }
+    }
+
+    /// Peek, look up, and consume one codeword from `bits`.
+    fn decode_symbol(
+        bits: &mut BitReader<'_>,
+        cb: &crate::jpeg::CanonicalCodebook,
+        what: &str,
+        context: &str,
+    ) -> std::result::Result<u8, String> {
+        let peek = bits
+            .peek_u16()
+            .ok_or_else(|| format!("bitstream empty at {what} codeword ({context})"))?;
+        let entry = cb.lookup(peek);
+        if entry.num_bits == 0 {
+            return Err(format!(
+                "invalid {what} Huffman prefix {peek:#06x} ({context})"
+            ));
+        }
+        if !bits.try_consume(usize::from(entry.num_bits)) {
+            return Err(format!(
+                "bitstream truncated inside {what} codeword ({context})"
+            ));
+        }
+        Ok(entry.symbol)
+    }
+}
+
+impl SymbolSource for TableSource<'_> {
+    fn next_dc(
+        &mut self,
+        bits: &mut BitReader<'_>,
+        ci: usize,
+        mcu: u32,
+    ) -> std::result::Result<u8, String> {
+        Self::decode_symbol(bits, self.dc_cbs[ci], "DC", &format!("mcu={mcu} comp={ci}"))
+    }
+
+    fn next_ac(
+        &mut self,
+        bits: &mut BitReader<'_>,
+        ci: usize,
+        mcu: u32,
+        zz: usize,
+    ) -> std::result::Result<u8, String> {
+        Self::decode_symbol(
+            bits,
+            self.ac_cbs[ci],
+            "AC",
+            &format!("mcu={mcu} comp={ci} zz={zz}"),
+        )
+    }
+}
+
+/// Symbol provider that pops pre-decoded symbols from the GPU stream
+/// and skips their codeword bits via symbol → code-length maps.
+struct StreamSource<'a> {
+    symbols: &'a [u32],
+    idx: usize,
+    dc_lens: Vec<[u8; 256]>,
+    ac_lens: Vec<[u8; 256]>,
+}
+
+impl<'a> StreamSource<'a> {
+    fn new(prep: &JpegPreparedInput, symbols: &'a [u32]) -> std::result::Result<Self, String> {
+        let dc_lens = prep
+            .dc_codebooks_for_dispatch()
+            .into_iter()
+            .map(symbol_code_lengths)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let ac_lens = prep
+            .ac_codebooks_for_dispatch()
+            .into_iter()
+            .map(symbol_code_lengths)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Self {
+            symbols,
+            idx: 0,
+            dc_lens,
+            ac_lens,
+        })
+    }
+
+    /// Pop one symbol, validate it against the wire contract and the
+    /// component's codebook, and skip its codeword bits in `bits`.
+    ///
+    /// Associated fn over split fields so the caller can lend one of
+    /// its own length maps without re-borrowing `self`.
+    fn pop_symbol(
+        symbols: &[u32],
+        idx: &mut usize,
+        bits: &mut BitReader<'_>,
+        lens: &[u8; 256],
+        what: &str,
+        context: &str,
+    ) -> std::result::Result<u8, String> {
+        let Some(&word) = symbols.get(*idx) else {
+            return Err(format!("symbol stream too short at {what} ({context})"));
+        };
+        *idx += 1;
+        let Ok(sym) = u8::try_from(word) else {
+            return Err(format!(
+                "{what} symbol {word:#x} exceeds the u8 wire contract ({context})"
+            ));
+        };
+        let code_len = lens[usize::from(sym)];
+        if code_len == 0 {
+            return Err(format!(
+                "{what} symbol {sym:#04x} not in the component's codebook ({context})"
+            ));
+        }
+        // read_bits (not consume) so the buffer refills; the codeword's
+        // value is already known from the symbol.
+        if bits.read_bits(usize::from(code_len)).is_none() {
+            return Err(format!(
+                "bitstream truncated at {what} codeword ({context})"
+            ));
+        }
+        Ok(sym)
+    }
+
+    /// The stream must be exactly consumed: an over-emitting kernel is
+    /// as suspect as an under-emitting one.
+    fn finish(&self) -> std::result::Result<(), String> {
+        if self.idx != self.symbols.len() {
+            return Err(format!(
+                "{} trailing symbol(s) past the final MCU ({} consumed of {})",
+                self.symbols.len() - self.idx,
+                self.idx,
+                self.symbols.len(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SymbolSource for StreamSource<'_> {
+    fn next_dc(
+        &mut self,
+        bits: &mut BitReader<'_>,
+        ci: usize,
+        mcu: u32,
+    ) -> std::result::Result<u8, String> {
+        Self::pop_symbol(
+            self.symbols,
+            &mut self.idx,
+            bits,
+            &self.dc_lens[ci],
+            "DC",
+            &format!("mcu={mcu} comp={ci}"),
+        )
+    }
+
+    fn next_ac(
+        &mut self,
+        bits: &mut BitReader<'_>,
+        ci: usize,
+        mcu: u32,
+        zz: usize,
+    ) -> std::result::Result<u8, String> {
+        Self::pop_symbol(
+            self.symbols,
+            &mut self.idx,
+            bits,
+            &self.ac_lens[ci],
+            "AC",
+            &format!("mcu={mcu} comp={ci} zz={zz}"),
+        )
+    }
+}
+
+/// Walk every MCU's blocks once, reconstructing the AC coefficient
+/// plane from `source`'s Huffman symbols plus the magnitude bits in
+/// the raw bitstream, and the DC plane from the pre-pass chain.
+///
+/// One walk serves both the CPU table path and the GPU symbol-stream
+/// path, so their bit consumption and coefficient layout agree by
+/// construction — the invariant the cross-path parity test defends.
+/// The baseline magnitude caps (DC category ≤ 11, AC size ≤ 10 per
+/// ITU-T T.81 § F.1.2) are enforced here for both paths; a wider value
+/// would drive an over-wide magnitude read.
+///
+/// Returns `(coef_flat, dc_flat)`:
+/// - `coef_flat`: `num_components × blocks_per_comp × 64` i32 in
+///   zigzag order. Index 0 of each block is left 0 (the DC plane
+///   lives in `dc_flat`); AC coefficients 1..63 come from the symbols
+///   + magnitude bits.
+/// - `dc_flat`: `num_components × blocks_per_comp` i32, copied from
+///   the pre-resolved `prep.dc_values` chain.
+fn reconstruct_coefficients(
+    prep: &JpegPreparedInput,
+    source: &mut impl SymbolSource,
+) -> std::result::Result<(Vec<i32>, Vec<i32>), String> {
+    reject_restart_markers(prep)?;
     let num_comp = prep.components.len();
     let blocks_wide = usize::from(prep.width.div_ceil(8));
     let blocks_high = usize::from(prep.height.div_ceil(8));
@@ -505,117 +641,65 @@ fn symbols_to_coefficients(
 
     let mut coef_flat = vec![0i32; num_comp * blocks_per_comp * 64];
 
-    // Per-component symbol → codeword-length maps for skipping the
-    // Huffman codewords interleaved with the magnitude bits.
-    let dc_lens = prep
-        .dc_codebooks_for_dispatch()
-        .into_iter()
-        .map(symbol_code_lengths)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let ac_lens = prep
-        .ac_codebooks_for_dispatch()
-        .into_iter()
-        .map(symbol_code_lengths)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    // Reconstruct the raw byte stream for magnitude bit extraction.
-    let raw_bytes: Vec<u8> = prep
-        .bitstream
-        .words
-        .iter()
-        .flat_map(|w| w.to_be_bytes())
-        .collect();
+    let raw_bytes = prep.bitstream.unpack_bytes();
     let mut bits = BitReader::new(&raw_bytes);
 
     let totalmcus = mcu_count(prep.width, prep.height, &prep.components);
     let mut block_counts = vec![0usize; num_comp];
-    let mut sym_idx = 0usize;
 
     for mcu in 0..totalmcus {
         for (ci, comp) in prep.components.iter().enumerate() {
-            let bpm = blocks_permcu_count(*comp);
+            let bpm =
+                crate::jpeg::component_blocks_per_mcu(num_comp, comp.h_sampling, comp.v_sampling);
             for _b in 0..bpm {
                 let block_idx = block_counts[ci];
                 let coef_base = (ci * blocks_per_comp + block_idx) * 64;
                 block_counts[ci] += 1;
 
-                // DC: consume the DC symbol from the stream, skip its
-                // codeword bits, then consume the magnitude bits so the
-                // bit position stays aligned with the AC symbols that
-                // follow.
-                if sym_idx >= symbols.len() {
+                // DC: the symbol is the magnitude category; consume the
+                // magnitude bits to stay aligned. The value itself comes
+                // from the pre-resolved chain (dc_flat below).
+                let category = source.next_dc(&mut bits, ci, mcu)?;
+                if category > 11 {
                     return Err(format!(
-                        "symbol stream too short at DC (mcu={mcu} comp={ci})"
+                        "DC category {category} exceeds the baseline cap of 11 \
+                         (mcu={mcu} comp={ci})"
                     ));
                 }
-                let dc_sym = (symbols[sym_idx] & 0xFF) as u8;
-                sym_idx += 1;
-                let code_len = dc_lens[ci][usize::from(dc_sym)];
-                if code_len == 0 {
+                if category > 0 && bits.read_bits(usize::from(category)).is_none() {
                     return Err(format!(
-                        "DC symbol {dc_sym:#04x} not in component {ci}'s codebook (mcu={mcu})"
+                        "DC magnitude truncated (mcu={mcu} comp={ci} cat={category})"
                     ));
                 }
-                // read_bits (not consume) so the buffer refills; the
-                // codeword's value is already known from the symbol.
-                let _ = bits.read_bits(usize::from(code_len)).ok_or_else(|| {
-                    format!("bitstream truncated at DC codeword (mcu={mcu} comp={ci})")
-                })?;
-                let category = dc_sym;
-                if category > 0 {
-                    let _ = bits.read_bits(usize::from(category)).ok_or_else(|| {
-                        format!("DC magnitude truncated (mcu={mcu} comp={ci} cat={category})")
-                    })?;
-                }
-                // DC coefficient value comes from the CPU-resolved chain; coef[0] is left 0
-                // and dc_flat is filled separately below.
 
-                // AC: read each symbol + magnitude bits until EOB or 63 slots filled.
+                // AC: read each symbol + magnitude bits until EOB or the
+                // 63rd slot.
                 let mut zz = 1usize;
                 while zz < 64 {
-                    if sym_idx >= symbols.len() {
-                        return Err(format!(
-                            "symbol stream too short at AC (mcu={mcu} comp={ci} zz={zz})"
-                        ));
-                    }
-                    let sym_byte = (symbols[sym_idx] & 0xFF) as u8;
-                    sym_idx += 1;
-                    let code_len = ac_lens[ci][usize::from(sym_byte)];
-                    if code_len == 0 {
-                        return Err(format!(
-                            "AC symbol {sym_byte:#04x} not in component {ci}'s codebook \
-                             (mcu={mcu} zz={zz})"
-                        ));
-                    }
-                    let _ = bits.read_bits(usize::from(code_len)).ok_or_else(|| {
-                        format!("bitstream truncated at AC codeword (mcu={mcu} comp={ci} zz={zz})")
-                    })?;
-
+                    let sym_byte = source.next_ac(&mut bits, ci, mcu, zz)?;
                     if sym_byte == 0x00 {
-                        // EOB: remaining ACs are zero (already initialised).
-                        break;
+                        break; // EOB: remaining ACs stay zero.
                     }
                     if sym_byte == 0xF0 {
-                        // ZRL: 16 zeros, no magnitude bits.
-                        zz += 16;
+                        zz += 16; // ZRL: 16 zeros, no magnitude bits.
                         continue;
                     }
-                    let run = (sym_byte >> 4) as usize;
+                    let run = usize::from(sym_byte >> 4);
                     let size = sym_byte & 0x0F;
+                    if size > 10 {
+                        return Err(format!(
+                            "AC size {size} exceeds the baseline cap of 10 \
+                             (mcu={mcu} comp={ci} zz={zz})"
+                        ));
+                    }
                     zz += run;
                     if zz >= 64 {
                         break;
                     }
-                    let ac_val = if size == 0 {
-                        0i32
-                    } else {
-                        let raw = bits.read_bits(usize::from(size)).ok_or_else(|| {
-                            format!(
-                                "AC magnitude truncated (mcu={mcu} comp={ci} zz={zz} size={size})"
-                            )
-                        })?;
-                        jpeg_extend(raw.cast_signed(), size)
-                    };
+                    let raw = bits.read_bits(usize::from(size)).ok_or_else(|| {
+                        format!("AC magnitude truncated (mcu={mcu} comp={ci} zz={zz} size={size})")
+                    })?;
+                    let ac_val = jpeg_extend(raw.cast_signed(), size);
                     if coef_base + zz >= coef_flat.len() {
                         return Err(format!(
                             "coefficient overflow: coef_base={coef_base} zz={zz} \
@@ -688,6 +772,48 @@ mod symbol_coefficient_tests {
     /// full CPU walk extracts — coefficient-for-coefficient. Real
     /// multi-MCU fixtures at both quality extremes; the tiny 16×16
     /// fixture is too short to expose bit-position drift.
+    /// The GPU symbol stream is a trust boundary: a kernel that
+    /// mis-decodes yet reports success can hand back symbol values no
+    /// spec-conformant producer emits. Those must surface as errors
+    /// (triggering the CPU fallback), never as bit-reader panics.
+    #[test]
+    fn symbols_to_coefficients_rejects_out_of_spec_symbols() {
+        let prep = prepare_jpeg(crate::jpeg::test_fixtures::GRAY_16X16_JPEG).unwrap();
+        let good = decode_scan_symbols(&prep).expect("oracle symbols");
+
+        // DC category above the 8-bit baseline cap of 11. The fixture's
+        // codebook does not define it, so the membership check names it
+        // first; a hostile DHT that *does* define it is stopped by the
+        // central category cap in the shared walk.
+        let mut corrupt_dc = good.clone();
+        corrupt_dc[0] = 17;
+        let err = super::symbols_to_coefficients(&prep, &corrupt_dc)
+            .expect_err("DC category 17 must be rejected");
+        assert!(err.contains("codebook"), "error must name the cause: {err}");
+
+        // AC size nibble above the cap of 10 (run 0, size 12) — same
+        // membership-first layering.
+        let mut oversize_ac = good.clone();
+        oversize_ac[1] = 0x0C;
+        let err = super::symbols_to_coefficients(&prep, &oversize_ac)
+            .expect_err("AC size 12 must be rejected");
+        assert!(err.contains("codebook"), "error must name the cause: {err}");
+
+        // Symbol wider than the u8 wire contract.
+        let mut wide = good.clone();
+        wide[0] = 0x1_00;
+        let err = super::symbols_to_coefficients(&prep, &wide)
+            .expect_err("symbol above 0xFF must be rejected");
+        assert!(err.contains("symbol"), "error must name the cause: {err}");
+
+        // Trailing symbols past the expected MCU count.
+        let mut long = good;
+        long.push(0x00);
+        let err = super::symbols_to_coefficients(&prep, &long)
+            .expect_err("over-long symbol stream must be rejected");
+        assert!(err.contains("trailing"), "error must name the cause: {err}");
+    }
+
     #[test]
     fn symbols_to_coefficients_matches_extract_coefficients() {
         for (name, bytes) in [

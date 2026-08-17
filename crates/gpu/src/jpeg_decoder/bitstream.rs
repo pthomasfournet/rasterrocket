@@ -16,6 +16,23 @@ pub struct PackedBitstream {
     pub length_bits: u32,
 }
 
+impl PackedBitstream {
+    /// Unpack back to the byte stream the words were built from,
+    /// truncated to the whole bytes `length_bits` covers — the final
+    /// word's zero padding is not part of the stream and must not be
+    /// readable (it can mask genuine truncation).
+    #[must_use]
+    pub fn unpack_bytes(&self) -> Vec<u8> {
+        let byte_len = (self.length_bits as usize) / 8;
+        let mut bytes = Vec::with_capacity(self.words.len() * 4);
+        for word in &self.words {
+            bytes.extend_from_slice(&word.to_be_bytes());
+        }
+        bytes.truncate(byte_len);
+        bytes
+    }
+}
+
 /// Pack `bits` into big-endian 32-bit words (MSB-first within bytes).
 ///
 /// `length_bits` is the meaningful prefix length the GPU kernel will
