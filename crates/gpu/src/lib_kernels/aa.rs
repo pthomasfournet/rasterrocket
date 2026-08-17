@@ -97,8 +97,9 @@ impl GpuCtx {
         // back as f32 — its PTX signature is `const float4*`.
         let segs_bytes: &[u8] = bytemuck::cast_slice(segs);
         let d_segs = stream.clone_htod(segs_bytes)?;
-        let coverage_init = vec![0u8; n_pixels];
-        let d_coverage = stream.clone_htod(&coverage_init)?;
+        // Device-side zero alloc — the kernel overwrites every in-bounds
+        // pixel, so nothing is gained by shipping a zero Vec over PCIe.
+        let d_coverage = stream.alloc_zeros::<u8>(n_pixels)?;
 
         self.launch_aa_fill_async(
             &d_segs,
@@ -124,8 +125,8 @@ impl GpuCtx {
     /// **not** touch host memory.
     ///
     /// `d_segs` must contain `4 * n_segs * 4` bytes (4 f32s per segment).
-    /// `d_coverage` must contain `width * height` bytes pre-zeroed by
-    /// the caller (the kernel uses additive integer accumulation).
+    /// `d_coverage` must contain `width * height` bytes; the kernel
+    /// overwrites every in-bounds pixel, so no pre-fill is required.
     ///
     /// # Errors
     ///

@@ -50,11 +50,14 @@ impl GpuBackend for CudaBackend {
 
     fn alloc_device(&self, size: usize) -> Result<Self::DeviceBuffer> {
         reject_zero_size(size, "alloc_device")?;
-        // cudarc's `alloc_zeros` always zero-fills.  We over-deliver
-        // the trait contract here (which says `alloc_device` makes no
-        // promise about contents) because cudarc doesn't expose a
-        // cheaper unzeroed allocation path.  The contract is the
-        // weaker one; callers that care must use `alloc_device_zeroed`.
+        // cudarc 0.19 does expose an unzeroed path (the unsafe
+        // stream-ordered `CudaStream::alloc`), but we deliberately
+        // over-deliver the trait contract (which makes no promise
+        // about contents) with `alloc_zeros`: the memset is device-side
+        // and cheap, and a caller bug that reads before writing sees
+        // deterministic zeros instead of nondeterministic garbage.
+        // Callers that rely on zeroing must still use
+        // `alloc_device_zeroed` — the contract is the weaker one.
         self.ctx.stream().alloc_zeros::<u8>(size).map_err(be)
     }
 

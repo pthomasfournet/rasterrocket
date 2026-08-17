@@ -73,8 +73,9 @@ impl GpuCtx {
         let d_records = stream.clone_htod(records_bytes)?;
         let d_tile_starts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(tile_starts))?;
         let d_tile_counts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(tile_counts))?;
-        let d_cov_init = vec![0u8; n_pixels];
-        let d_coverage = stream.clone_htod(&d_cov_init)?;
+        // Device-side zero alloc — the kernel overwrites every in-bounds
+        // pixel, so nothing is gained by shipping a zero Vec over PCIe.
+        let d_coverage = stream.alloc_zeros::<u8>(n_pixels)?;
 
         self.launch_tile_fill_async(
             &d_records,

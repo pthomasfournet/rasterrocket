@@ -102,8 +102,9 @@ impl GpuCtx {
         let stream = &self.stream;
 
         let d_cmyk = stream.clone_htod(cmyk)?;
-        let rgb_init = vec![0u8; n * 3];
-        let d_rgb = stream.clone_htod(&rgb_init)?;
+        // Device-side zero alloc — both kernels write every output pixel,
+        // so nothing is gained by shipping a zero Vec over PCIe.
+        let d_rgb = stream.alloc_zeros::<u8>(n * 3)?;
 
         match clut {
             None => {
