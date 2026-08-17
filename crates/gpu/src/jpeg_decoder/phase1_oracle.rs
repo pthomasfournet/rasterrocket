@@ -250,6 +250,124 @@ pub(super) fn phase1_walk_snapshot(
     }
 }
 
+/// Outcome of a single JPEG-framed decode-and-advance step.
+///
+/// `Failed` carries the state the kernel's in-place mutation leaves
+/// behind: untouched for `PrefixMiss` / `BadDcCategory` / `BadAcSize`
+/// / `LengthBits` (the device helper returns before mutating), but
+/// with `p` and `n` already advanced for `AcOverflow` (the device
+/// helper consumes the codeword before the zig-zag bounds check).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JpegStep {
+    /// One symbol decoded; the state is post-advance and post-rotation.
+    Advanced(SubsequenceState),
+    /// Decode failed with the given stop kind.
+    Failed(SubsequenceState, Phase1Stop),
+}
+
+/// Decode exactly one JPEG-framed Huffman symbol starting at `state.p`.
+///
+/// JPEG framing overloads the state fields: `state.c` is
+/// `block_in_mcu` (0..`blocks_per_mcu`), `state.z` is `z_in_block`
+/// (0 = DC slot, 1..=63 = AC slots). Mirrors the kernels'
+/// `try_decode_one_jpeg_symbol_device` / `_kernel` helpers
+/// symbol-for-symbol, including the end-of-block rotation and the
+/// spec caps on DC category (≤ 11) and AC size (≤ 10).
+///
+/// `count_to` follows the shared per-region accounting convention:
+/// `n` increments only when the symbol starts below `count_to`.
+///
+/// Shared by `phase1_jpeg_walk_snapshot` (fresh-start boundary walk)
+/// and the Phase 2 propagation oracle (re-decode from an inherited
+/// state).
+#[cfg(test)]
+pub(super) fn try_decode_one_jpeg_symbol(
+    state: SubsequenceState,
+    bitstream: &PackedBitstream,
+    dc_codebooks: &[&CanonicalCodebook],
+    ac_codebooks: &[&CanonicalCodebook],
+    mcu_schedule: &[u32],
+    blocks_per_mcu: u32,
+    count_to: u32,
+) -> JpegStep {
+    let length_bits = bitstream.length_bits;
+
+    // Read the DC/AC dispatch-codebook indices from the current
+    // block's schedule entry.
+    let entry = mcu_schedule[state.c as usize];
+    let dc_sel = ((entry >> 8) & 0xFF) as usize;
+    let ac_sel = ((entry >> 16) & 0xFF) as usize;
+
+    let is_dc = state.z == 0;
+    let peek = peek16(bitstream, u64::from(state.p));
+    let lut_entry = if is_dc {
+        dc_codebooks[dc_sel].lookup(peek)
+    } else {
+        ac_codebooks[ac_sel].lookup(peek)
+    };
+
+    if lut_entry.num_bits == 0 {
+        return JpegStep::Failed(state, Phase1Stop::PrefixMiss);
+    }
+
+    let symbol = lut_entry.symbol;
+    let value_bits = if is_dc {
+        if symbol > 11 {
+            return JpegStep::Failed(state, Phase1Stop::BadDcCategory);
+        }
+        u32::from(symbol)
+    } else {
+        let size = symbol & 0x0F;
+        if size > 10 {
+            return JpegStep::Failed(state, Phase1Stop::BadAcSize);
+        }
+        u32::from(size)
+    };
+
+    let advance = u32::from(lut_entry.num_bits) + value_bits;
+    if state.p + advance > length_bits {
+        return JpegStep::Failed(state, Phase1Stop::LengthBits);
+    }
+
+    let mut next = state;
+    let count_this = state.p < count_to;
+    next.p += advance;
+    if count_this {
+        next.n = next.n.saturating_add(1);
+    }
+
+    // Advance z_in_block (mirrors the kernels' end-of-block rotate).
+    // AcOverflow fires after p/n advanced but before z is stored —
+    // same mutation order as the device helpers.
+    if is_dc {
+        next.z = 1;
+    } else if symbol == 0x00 {
+        next.z = 64; // EOB
+    } else if symbol == 0xF0 {
+        let nz = next.z + 16; // ZRL
+        if nz > 64 {
+            return JpegStep::Failed(next, Phase1Stop::AcOverflow);
+        }
+        next.z = nz;
+    } else {
+        let run = u32::from(symbol >> 4);
+        let nz = next.z + run + 1;
+        if nz > 64 {
+            return JpegStep::Failed(next, Phase1Stop::AcOverflow);
+        }
+        next.z = nz;
+    }
+
+    // End-of-block: rotate block_in_mcu and reset z_in_block.
+    if next.z == 64 {
+        next.c = (next.c + 1) % blocks_per_mcu;
+        next.z = 0;
+    }
+
+    JpegStep::Advanced(next)
+}
+
 #[cfg(test)]
 /// CPU oracle for the JPEG-framed Phase 1 intra-sync walk.
 ///
@@ -298,13 +416,12 @@ pub(super) fn phase1_jpeg_walk_snapshot(
     assert!(!mcu_schedule.is_empty(), "mcu_schedule must be non-empty");
     assert_eq!(mcu_schedule.len(), blocks_per_mcu as usize);
 
-    let length_bits = bitstream.length_bits;
-    let mut p = start_bit;
-    let mut n = 0u32;
-    // block_in_mcu → state.c (uint4.z); z_in_block → state.z (uint4.w).
-    let mut block_in_mcu = 0u32;
-    let mut z_in_block = 0u32; // 0 = DC slot; 1..63 = AC; 64 = end-of-block
-
+    let mut state = SubsequenceState {
+        p: start_bit,
+        n: 0,
+        c: 0,
+        z: 0,
+    };
     let mut snapshot: Option<SubsequenceState> = None;
 
     // max_iters bounds the loop safely: each symbol consumes ≥ 1 bit,
@@ -312,151 +429,36 @@ pub(super) fn phase1_jpeg_walk_snapshot(
     // 1-bit codewords.
     let max_iters = hard_limit.saturating_sub(start_bit) + 1;
     for _ in 0..max_iters {
-        if p >= hard_limit {
+        if state.p >= hard_limit {
             break;
         }
-        let p_before = p;
-
-        // Read DC or AC selector from the current block's schedule entry.
-        let entry = mcu_schedule[block_in_mcu as usize];
-        let dc_sel = ((entry >> 8) & 0xFF) as usize;
-        let ac_sel = ((entry >> 16) & 0xFF) as usize;
-
-        let is_dc = z_in_block == 0;
-        let peek = peek16(bitstream, u64::from(p));
-        let lut_entry = if is_dc {
-            dc_codebooks[dc_sel].lookup(peek)
-        } else {
-            ac_codebooks[ac_sel].lookup(peek)
-        };
-
-        if lut_entry.num_bits == 0 {
-            return (
-                snapshot.unwrap_or(SubsequenceState {
-                    p,
-                    n,
-                    c: block_in_mcu,
-                    z: z_in_block,
-                }),
-                Phase1Stop::PrefixMiss,
-            );
-        }
-
-        let symbol = lut_entry.symbol;
-        let value_bits = if is_dc {
-            let category = symbol;
-            if category > 11 {
-                return (
-                    snapshot.unwrap_or(SubsequenceState {
-                        p,
-                        n,
-                        c: block_in_mcu,
-                        z: z_in_block,
-                    }),
-                    Phase1Stop::BadDcCategory,
-                );
-            }
-            u32::from(category)
-        } else {
-            let size = symbol & 0x0F;
-            if size > 10 {
-                return (
-                    snapshot.unwrap_or(SubsequenceState {
-                        p,
-                        n,
-                        c: block_in_mcu,
-                        z: z_in_block,
-                    }),
-                    Phase1Stop::BadAcSize,
-                );
-            }
-            u32::from(size)
-        };
-
-        let advance = u32::from(lut_entry.num_bits) + value_bits;
-        if p + advance > length_bits {
-            return (
-                snapshot.unwrap_or(SubsequenceState {
-                    p,
-                    n,
-                    c: block_in_mcu,
-                    z: z_in_block,
-                }),
-                Phase1Stop::LengthBits,
-            );
-        }
-
-        let count_this = p < count_to;
-        p += advance;
-        if count_this {
-            n = n.saturating_add(1);
-        }
-
-        // Advance z_in_block (mirrors kernel's end-of-block rotate).
-        if is_dc {
-            z_in_block = 1;
-        } else {
-            let next_z = if symbol == 0x00 {
-                64 // EOB
-            } else if symbol == 0xF0 {
-                let nz = z_in_block + 16; // ZRL
-                if nz > 64 {
-                    return (
-                        snapshot.unwrap_or(SubsequenceState {
-                            p,
-                            n,
-                            c: block_in_mcu,
-                            z: z_in_block,
-                        }),
-                        Phase1Stop::AcOverflow,
-                    );
+        let p_before = state.p;
+        match try_decode_one_jpeg_symbol(
+            state,
+            bitstream,
+            dc_codebooks,
+            ac_codebooks,
+            mcu_schedule,
+            blocks_per_mcu,
+            count_to,
+        ) {
+            JpegStep::Advanced(next) => {
+                state = next;
+                // Snapshot: first symbol whose advance crosses count_to,
+                // captured after the full z_in_block + block_in_mcu
+                // rotation — matching the kernel's post-rotation state
+                // write.
+                if snapshot.is_none() && p_before < count_to && state.p >= count_to {
+                    snapshot = Some(state);
                 }
-                nz
-            } else {
-                let run = u32::from(symbol >> 4);
-                let nz = z_in_block + run + 1;
-                if nz > 64 {
-                    return (
-                        snapshot.unwrap_or(SubsequenceState {
-                            p,
-                            n,
-                            c: block_in_mcu,
-                            z: z_in_block,
-                        }),
-                        Phase1Stop::AcOverflow,
-                    );
-                }
-                nz
-            };
-            z_in_block = next_z;
-        }
-
-        // End-of-block: rotate block_in_mcu and reset z_in_block.
-        if z_in_block == 64 {
-            block_in_mcu = (block_in_mcu + 1) % blocks_per_mcu;
-            z_in_block = 0;
-        }
-
-        // Snapshot: first symbol whose advance crosses count_to,
-        // captured after the full z_in_block + block_in_mcu rotation —
-        // matching the kernel's post-rotation state write.
-        if snapshot.is_none() && p_before < count_to && p >= count_to {
-            snapshot = Some(SubsequenceState {
-                p,
-                n,
-                c: block_in_mcu,
-                z: z_in_block,
-            });
+            }
+            JpegStep::Failed(fail_state, stop) => {
+                return (snapshot.unwrap_or(fail_state), stop);
+            }
         }
     }
 
-    let terminal = SubsequenceState {
-        p,
-        n,
-        c: block_in_mcu,
-        z: z_in_block,
-    };
-    (snapshot.unwrap_or(terminal), Phase1Stop::HardLimit)
+    (snapshot.unwrap_or(state), Phase1Stop::HardLimit)
 }
 
 #[cfg(test)]
