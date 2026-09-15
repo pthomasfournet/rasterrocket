@@ -119,7 +119,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bench"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "rasterrocket",
  "rasterrocket-color",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "pdf_bridge"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "cc",
  "log",
@@ -1209,7 +1209,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rasterrocket"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "base64",
  "jpeg-encoder",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-cli"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -1241,14 +1241,14 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-color"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "rasterrocket-comic"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "image-webp",
  "log",
@@ -1267,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-encode"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "jpeg-encoder",
  "png",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-font"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "freetype-rs",
  "quick_cache",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-gpu"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "ash",
  "blake3",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-interp"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-parser"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "flate2",
  "libdeflater",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-render"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
