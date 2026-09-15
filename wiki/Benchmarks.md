@@ -8,7 +8,7 @@ All benchmarks render all pages of each corpus PDF at **150 DPI** (the default) 
 
 | Tool | Version |
 |---|---|
-| rasterrocket | v1.0.0, built with `-C target-cpu=native` |
+| rasterrocket | v1.0.0, built with `-C target-cpu=native` (not re-run since; tree is now 1.2.0 + unreleased work) |
 | pdftoppm (Poppler) | 24.02.0 (Ryzen), 25.03.0 (Intel) |
 
 **Corpus:** 10 real-world PDFs spanning the common workload categories. Files are not distributed with the repository (see `.gitignore`); the corpus used internally matches the 10 fixture files in `tests/fixtures/corpus-*.pdf`.

@@ -362,23 +362,38 @@ pub enum RasterError {
     PageOutOfRange { page: u32, total: u32 },
     PageDegenerate { width: u32, height: u32 },
     PageTooLarge { width: u32, height: u32 },
+    PageAreaTooLarge { width: u32, height: u32, area: u64 },
     Deskew(String),
     InvalidPageGeometry(String),
     BackendUnavailable(String),  // forced backend failed to init
+    ImageDecodeFailed(Vec<String>),
+    PageBudgetExceeded(String),
+    RenderPanic { /* isolated per-page panic */ },
 }
 ```
+
+`PageAreaTooLarge` is distinct from `PageTooLarge`: each side can be within
+`MAX_PX_DIMENSION` while the product still exceeds `MAX_PX_AREA`. `RenderPanic`
+carries an isolated per-page panic so one bad page cannot abort a batch.
 
 Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when `SessionConfig.policy` is `ForceCuda` or `ForceVaapi`.
 
 ---
 
-### `MAX_PX_DIMENSION`
+### `MAX_PX_DIMENSION` / `MAX_PX_AREA`
 
 ```rust
 pub const MAX_PX_DIMENSION: u32 = 32_768;
+pub const MAX_PX_AREA: u64 = 600_000_000;
 ```
 
-Maximum accepted pixel dimension (width or height). `PageTooLarge` is returned if either dimension exceeds this. At 150 DPI this corresponds to ~366 inches (~9.3 metres).
+`MAX_PX_DIMENSION` is the maximum accepted pixel dimension (width or height);
+`PageTooLarge` is returned if either exceeds it. At 150 DPI this corresponds to
+~366 inches (~9.3 metres).
+
+`MAX_PX_AREA` caps total raster area and is computed in `u64` (closing a latent
+overflow). A page whose sides are each legal but whose product exceeds this
+returns `PageAreaTooLarge`.
 
 ---
 
@@ -636,7 +651,7 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 | `cache` | CUDA 12 or 13 | Phase 9 device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
 | `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU. Falls back to CPU on CMYK/progressive JPEG. When `nvjpeg` is also active, nvJPEG takes priority. |
 | `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa` and `gpu-jpeg-huffman`. | Vulkan compute backend. AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
-| `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p gpu --features gpu-validation`). |
+| `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |
 
 GPU initialisation failures print a warning to stderr and fall back to CPU — they do not return errors.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
@@ -644,10 +659,18 @@ GPU initialisation failures print a warning to stderr and fall back to CPU — t
 
 | Path | Threshold | Constant |
 |---|---|---|
-| nvJPEG (DCTDecode) | ≥ 512×512 px | `GPU_JPEG_THRESHOLD_PX` |
-| nvJPEG2000 (JPXDecode) | ≥ 512×512 px | `GPU_JPEG2K_THRESHOLD_PX` |
+| nvJPEG (DCTDecode) | **disabled** (`u32::MAX`) | `GPU_JPEG_THRESHOLD_PX` |
+| GPU parallel Huffman (DCTDecode) | **dormant** (`u32::MAX`) | `GPU_JPEG_HUFFMAN_THRESHOLD_PX` |
+| nvJPEG2000 (JPXDecode) | ≥ 262 144 px (area) | `GPU_JPEG2K_THRESHOLD_PX` |
 | GPU AA fill | ≥ 256 px (longest edge) | `GPU_AA_FILL_THRESHOLD` |
 | GPU tile fill | ≥ 256 px (longest edge) | `GPU_TILE_FILL_THRESHOLD` |
 | GPU ICC CLUT | ≥ 500 000 px (area) | `GPU_ICC_CLUT_THRESHOLD` |
+
+Both JPEG thresholds are `u32::MAX` **by design**, so JPEG decode runs on the
+CPU by default: nvJPEG's `GPU_HYBRID` backend lost to 24-thread CPU decode on
+consumer hardware, and the custom parallel-Huffman path is wired end-to-end but
+off pending threshold tuning. Set `PDF_RASTER_HUFFMAN_THRESHOLD=0` to enable the
+Huffman path for benchmarking. nvJPEG2000 is genuinely active above its area
+threshold.
 
 Fill dispatch order: GPU tile fill → GPU AA fill → CPU scanline AA.

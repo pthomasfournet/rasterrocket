@@ -73,25 +73,30 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 
 ## Installation
 
-Add `rasterrocket` to your `Cargo.toml`:
+Add `rasterrocket` to your `Cargo.toml` as a git dependency:
 
 ```toml
 [dependencies]
-rasterrocket = "1.0"
+rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket" }
 ```
+
+> **Not distributed via crates.io.** `rasterrocket` and `rasterrocket-cli` were
+> published there once at 1.0.1 and then abandoned; those versions are frozen,
+> unmaintained, and missing everything added since. Use the git dependency
+> above, not a version pin.
 
 For GPU acceleration — NVIDIA (CUDA 12 or 13) + Vulkan (cross-vendor) + VA-API (Linux iGPU/dGPU):
 
 ```toml
 [dependencies]
 # CUDA GPU features (NVIDIA only; full feature set including the image cache):
-rasterrocket = { version = "1.0", features = ["nvjpeg", "nvjpeg2k", "gpu-aa", "gpu-icc", "gpu-deskew", "cache"] }
+rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["nvjpeg", "nvjpeg2k", "gpu-aa", "gpu-icc", "gpu-deskew", "cache"] }
 
 # Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via MoltenVK):
-rasterrocket = { version = "1.0", features = ["vulkan"] }
+rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vulkan"] }
 
 # VA-API (AMD/Intel iGPU on Linux — libva required):
-rasterrocket = { version = "1.0", features = ["vaapi"] }
+rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
 Run `cargo add rasterrocket` to add the latest version. Pin to a specific version for reproducible builds.
@@ -242,7 +247,8 @@ CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
 
 `CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
 
-To install the CLI from crates.io: `cargo install rasterrocket-cli`.
+The release binary lands at `target/release/rrocket`. There is no `cargo install`
+path — the crates.io packages are abandoned at 1.0.1.
 
 ### A note on output destination (v0.6.0+)
 

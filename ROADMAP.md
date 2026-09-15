@@ -1142,7 +1142,7 @@ flamegraph -o /tmp/flame.svg -- \
 RUSTFLAGS="-C target-cpu=native" cargo run -p bench --release -- --iters 30 --stars 200
 
 # Threshold bench — recalibrate GPU dispatch crossovers after any kernel change
-cargo run -p gpu --release --bin threshold_bench
+cargo run -p rasterrocket-gpu --release --bin threshold_bench
 
 # L3 occupancy monitoring (9900X3D — requires resctrl mount)
 # mount -t resctrl resctrl /sys/fs/resctrl
@@ -1613,9 +1613,22 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ---
 
-## Current status (2026-05-16)
+## Current status (2026-09-15)
 
-Everything substantive is **shipped or deferred by deliberate decision**. There is no active in-progress engineering work. Open items, in full:
+Every **phase** is shipped or deferred by deliberate decision; no phase-level
+engineering is in flight. Two things are nonetheless open and should not be
+mistaken for a clean slate:
+
+- **53 unreleased commits on `master` past `v1.2.0`** — 25 `fix`, 8 `perf`,
+  7 `deps`, 5 `test`, plus docs/refactor/chore, landing through 2026-08-17.
+  `CHANGELOG.md` stops at 1.2.0 because `git-cliff` runs manually at release
+  time (see the release workflow). Cutting a release is the natural next step.
+- **3 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
+  propagation pass-complexity, unleveraged CPU SIMD opportunities, unleveraged
+  CUDA opportunities. The latter two are opportunity inventories with several
+  items already closed in-file; none block correctness.
+
+Deferred/blocked items, in full:
 
 - **Phase 7** — re-bench with the `nvjpeg-hardware` feature flag (mode E). A measurement to formally confirm a near-certain negative (the hard-blocker section already establishes `NVJPEG_BACKEND_HARDWARE` is rejected at handle creation on consumer GeForce). Not engineering work.
 - **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.

@@ -32,6 +32,9 @@ rasterrocket-color
   │                 └── rasterrocket-cli
   │                       rasterrocket binary (pdftoppm replacement)
   │
+  ├── rasterrocket-comic  (comic-archive input: .cbz/.cb7/.cbt → RenderedPage;
+  │                        depends on rasterrocket + render + color; used by the CLI)
+  │
   ├── rasterrocket-parser  (in-tree lazy mmap PDF parser; used by rasterrocket-interp)
   │
   ├── pdf_bridge  (unused in render path; poppler reference baseline only)
@@ -112,7 +115,7 @@ Single source of truth for pixel types and colour math. No SIMD, no I/O.
 
 ### 3.2 `rasterrocket-render`
 
-~9 000 lines. The software rendering engine. PDF-agnostic — takes paths,
+~17 700 lines. The software rendering engine. PDF-agnostic — takes paths,
 bitmaps, and compositing parameters; knows nothing about operators or resources.
 
 **`Bitmap<P: Pixel>`**
@@ -230,7 +233,8 @@ resources/
 resolution is stateless and on-demand; no per-page pre-computation. This
 makes unit testing straightforward: inject a `Document` and page `ObjectId`.
 
-**GPU integration points** (feature-gated, all in `renderer/gpu_ops.rs`)
+**GPU integration points** (feature-gated, in `renderer/page/gpu_ops.rs` for
+CUDA and `renderer/page/vk_ops.rs` for Vulkan)
 - DCTDecode: call `gpu::NvJpegDecoder::decode()` if pixels ≥ `GPU_JPEG_THRESHOLD_PX`
 - JPXDecode: call `gpu::NvJpeg2kDecoder::decode()` similarly
 - CMYK→RGB: call `gpu::icc_cmyk_to_rgb()` if pixels ≥ `GPU_ICC_CLUT_THRESHOLD`
@@ -243,7 +247,12 @@ the rayon pool drops — this avoids the CUDA driver teardown race at process ex
 **Error handling**
 - Malformed operators — silently discarded (lenient parsing; real PDFs have junk)
 - Missing resources — `InterpError::MissingResource`; page fails, next page continues
-- JavaScript — rejected at open time (`InterpError::JavaScript`)
+- JavaScript — **not** an error. There is no JavaScript engine and `/JS` is never
+  decoded, so a script's structural presence cannot change the static render.
+  Detection is structural (`/S /JavaScript` only) and emits a loud `WARN` per
+  entry point; the document opens and renders normally. `InterpError` has no
+  `JavaScript` variant — the full list is `Pdf`, `PageOutOfRange`,
+  `MissingResource`, `InvalidPageGeometry`, `FontInit`, `PageBudget`.
 
 ### 3.6 `gpu`
 
@@ -282,21 +291,29 @@ across runs.  Shared via `Arc<VulkanBackend>`.  The renderer dispatches AA fill
 and tile fill through this; ICC CMYK→RGB and the `cache` feature stay CUDA-only,
 so `--backend vulkan` runs uncached and the CMYK matrix path falls to CPU AVX-512.
 
-**Kernel inventory.**  All six kernels exist in **both** `.cu` (CUDA, compiled
-to PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
-time, gated on the `vulkan` feature.
+**Kernel inventory.**  Nine kernels exist in **both** `.cu` (CUDA, compiled to
+PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
+time, gated on the `vulkan` feature.  The table below lists the six render-path
+kernels; the remaining three — `blelloch_scan`, `idct_color`, and
+`parallel_huffman` — belong to the GPU JPEG pipeline and are dormant by default
+(`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`).
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
-| `composite_rgba8` | composite_rgba8.cu | composite_rgba8.slang | Porter-Duff source-over | 500K px |
-| `apply_soft_mask` | (same) | apply_soft_mask.slang | Per-pixel alpha multiply | 500K px |
+| `composite_rgba8` | composite_rgba8.cu | composite_rgba8.slang | Porter-Duff source-over | no production caller † |
+| `apply_soft_mask` | apply_soft_mask.cu | apply_soft_mask.slang | Per-pixel alpha multiply | no production caller † |
 | `aa_fill` | aa_fill.cu | aa_fill.slang | 64-sample jittered AA coverage (warp ballot / `WaveActiveSum`) | 256 px |
 | `tile_fill` | tile_fill.cu | tile_fill.slang | Analytical 16×16 tile fill | 256 px |
 | `icc_clut` | icc_clut.cu | icc_clut.slang | CMYK→RGB via 4D quadrilinear CLUT | 500K px |
 | `icc_clut` matrix | icc_clut.cu | icc_clut.slang | CMYK→RGB via matrix (always CPU) | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image source-over composite (Phase 9) | always |
 
-15 kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` confirm
+† The GPU `composite_rgba8` / `apply_soft_mask` kernels are built and reachable
+through the backend `record_*` surface, but the renderer composites on the CPU
+(`composite_rgba8_cpu` in `crates/gpu/src/composite.rs`). They carry no dispatch
+threshold because nothing in the render path dispatches them today.
+
+16 kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` confirm
 SPIR-V vs CUDA outputs within ≤ 1 LSB per channel on the dev box.
 
 **Build-script model.**  `crates/gpu/build.rs` probes `nvcc --version` directly:
@@ -333,12 +350,20 @@ Public library crate. The stable API surface.
 RasterOptions { dpi, first_page, last_page, deskew, pages }  // pages: Option<PageSet>
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
+raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 render_channel(path, opts, capacity) → Receiver<(u32, Result<RenderedPage, RasterError>)>
 open_session(path, config) → Result<RasterSession, RasterError>
+open_session_from_bytes(bytes, config) → Result<RasterSession, RasterError>
 render_page_rgb(session, page_num, scale) → Result<Bitmap<Rgb8>, RasterError>
+render_page_rgb_hinted(...)  → Result<Bitmap<Rgb8>, RasterError>
 prescan_session(session, page_num) → Result<PageDiagnostics, RasterError>
+encode_for_gcv(page, budget) → Result<GcvImage, GcvError>   // Cloud Vision input
 release_gpu_decoders()   // call via pool.broadcast() before pool drops
 ```
+
+The `*_from_bytes` variants render an in-memory PDF with no temp file; they have
+no transparent-decrypt step, so an encrypted PDF passed as bytes errors rather
+than being decrypted.
 
 `RenderedPage` carries: `pixels: Vec<u8>` (8-bit gray, width×height), `width`,
 `height`, `dpi`, `effective_dpi` (= dpi × UserUnit), and `PageDiagnostics`.
@@ -381,9 +406,12 @@ gpu-validation     →                    →                    → gpu-validat
 
 rasterrocket-render features (orthogonal, no cross-crate effect):
   simd-avx2        default on; enables blend/fill AVX2 paths
-  simd-avx512      implies simd-avx2; adds VPOPCNTDQ AA counter
   nightly-sve2     aarch64 only; SVE2 popcount tier (requires nightly Rust)
   rayon            enables fill_parallel / eo_fill_parallel
+
+There is no `simd-avx512` feature — it was dead and has been deleted. AVX-512
+tiers are selected at runtime via `is_x86_feature_detected!`, so a
+`-C target-cpu=native` build picks them up with no feature flag.
 ```
 
 `dep:gpu` in `rasterrocket-interp` is optional — the `gpu` crate is only compiled when
@@ -515,7 +543,8 @@ face initialisation (rare). Glyph rendering uses `quick_cache::sync::Cache` (sha
 
 **Per-document errors** — abort the whole document:
 - `InterpError::Pdf` — PDF parse failure (in-tree `pdf` crate)
-- `InterpError::JavaScript` — rejected at open time
+- (JavaScript is **not** a per-document error — it is detected, warned about, and
+  rendered; see §3.5)
 
 **Per-page errors** — skip the page, continue rendering:
 - `InterpError::PageOutOfRange`

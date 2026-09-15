@@ -22,7 +22,7 @@ edition     = "2024"
 authors     = ["Tom"]
 license     = "MIT"
 repository  = "https://github.com/pthomasfournet/rasterrocket"
-homepage    = "https://crates.io/crates/rasterrocket"
+homepage    = "https://github.com/pthomasfournet/rasterrocket"
 readme      = "README.md"
 
 [workspace.dependencies]

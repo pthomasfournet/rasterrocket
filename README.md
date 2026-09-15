@@ -5,14 +5,23 @@ Pure Rust PDF → pixels pipeline. Zero Poppler, zero subprocesses, zero Leptoni
 Renders PDF pages to 8-bit grayscale pixel buffers for direct consumption by Tesseract OCR or any other downstream consumer. No intermediate files.
 
 ```toml
-# Cargo.toml — library
-rasterrocket = "1.1"
+# Cargo.toml — library (git dependency; see note below)
+rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket" }
 ```
 
 ```bash
 # CLI — drop-in pdftoppm replacement
-cargo install rasterrocket-cli
+git clone https://github.com/pthomasfournet/rasterrocket
+cd rasterrocket && cargo build --release -p rasterrocket-cli
 ```
+
+> **This project is distributed via GitHub, not crates.io.** Two crates were
+> published there once (`rasterrocket` and `rasterrocket-cli`, both at 1.0.1)
+> before the registry was abandoned; those versions are frozen, unmaintained,
+> and two minor releases behind. Do not `cargo install` them. Build from source
+> — that is the only supported path, and the only one that gets you
+> comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
+> fix since 1.0.1.
 
 ## What's new in v1.2.0
 
@@ -157,9 +166,12 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 
 | Crate | What you get |
 |---|---|
-| [`rasterrocket`](https://crates.io/crates/rasterrocket) | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
-| [`rasterrocket-comic`](https://crates.io/crates/rasterrocket-comic) | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt` comic-archive input |
-| [`rasterrocket-cli`](https://crates.io/crates/rasterrocket-cli) | `rrocket` binary — drop-in `pdftoppm` replacement; also reads comic archives |
+| `rasterrocket` | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
+| `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt` comic-archive input |
+| `rasterrocket-cli` | `rrocket` binary — drop-in `pdftoppm` replacement; also reads comic archives |
+
+All three are built from this repository. Nothing here is maintained on
+crates.io (see the note at the top).
 
 ## Hardware compatibility
 
@@ -256,7 +268,7 @@ cargo test -p rasterrocket --lib -- deskew
 cargo test -p rasterrocket-gpu --lib -- icc
 
 # Pixel-diff comparison against pdftoppm (requires release build in PATH)
-tests/compare/compare.sh -r 150 tests/fixtures/input.pdf
+tests/compare/compare.sh -r 150 tests/fixtures/corpus-01-native-text-small.pdf
 ```
 
 ## Security
@@ -301,6 +313,10 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
 ## Performance
 
 Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full methodology, hardware details, and AVX2 vs AVX-512 comparison in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
+
+> These tables were captured at **v0.9.1** and have not been re-run since; the
+> current tree is 1.2.0 plus 53 unreleased commits. Treat them as historical
+> order-of-magnitude figures, not a measurement of today's `master`.
 
 **CPU-only (no GPU), Ryzen 9 9900X3D + AVX-512, v0.9.1, RAM-backed output, cold cache, hyperfine 5 runs:**
 
