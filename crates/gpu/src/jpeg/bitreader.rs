@@ -9,6 +9,12 @@
 //! Bit ordering matches JPEG ISO/IEC 10918-1 § F.2.2.4 — the first bit
 //! of every byte is its MSB, codewords pack left-to-right.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "the module is crate-private, so pub(crate) states the real visibility; \
+              widening to pub would misdescribe the intent"
+)]
+
 /// Bit reader over an unstuffed JPEG entropy-coded stream.  MSB-first.
 pub(crate) struct BitReader<'a> {
     src: &'a [u8],

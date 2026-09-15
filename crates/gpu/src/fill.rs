@@ -103,7 +103,7 @@ pub fn build_tile_records(
 
     let mut records: Vec<TileRecord> = Vec::new();
 
-    for seg in segs.chunks_exact(4) {
+    for seg in segs.as_chunks::<4>().0 {
         let (mut sx0, mut sy0, mut sx1, mut sy1) = (
             seg[0] - x_min,
             seg[1] - y_min,
@@ -407,7 +407,7 @@ pub fn aa_fill_cpu(
 
 fn aa_fill_cpu_sample(segs: &[f32], sx: f32, sy: f32, eo: bool) -> bool {
     let mut winding = 0i32;
-    for seg in segs.chunks_exact(4) {
+    for seg in segs.as_chunks::<4>().0 {
         let (x0, y0, x1, y1) = (seg[0], seg[1], seg[2], seg[3]);
         if y0 <= sy && sy < y1 {
             let t = (sy - y0) / (y1 - y0);

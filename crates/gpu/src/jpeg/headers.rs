@@ -510,7 +510,7 @@ impl<'a> ByteCursor<'a> {
         self.pos
     }
 
-    fn peek(&self, offset: usize) -> u8 {
+    const fn peek(&self, offset: usize) -> u8 {
         self.data[self.pos + offset]
     }
 
@@ -575,7 +575,7 @@ fn parse_sof0(
         });
     }
     *components = nf;
-    let component_records = body[6..6 + usize::from(nf) * 3].chunks_exact(3);
+    let component_records = body[6..6 + usize::from(nf) * 3].as_chunks::<3>().0.iter();
     for (slot, record) in frame_components.iter_mut().zip(component_records) {
         let id = record[0];
         let h_sampling = record[1] >> 4;

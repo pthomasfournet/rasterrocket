@@ -2,7 +2,12 @@
 
 /// CPU fallback for `composite_rgba8`.
 pub fn composite_rgba8_cpu(src: &[u8], dst: &mut [u8]) {
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         let a_src = u32::from(s[3]);
         if a_src == 0 {
             continue;
@@ -38,7 +43,7 @@ pub fn composite_rgba8_cpu(src: &[u8], dst: &mut [u8]) {
 
 /// CPU fallback for `apply_soft_mask`.
 pub fn apply_soft_mask_cpu(pixels: &mut [u8], mask: &[u8]) {
-    for (p, &m) in pixels.chunks_exact_mut(4).zip(mask) {
+    for (p, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(mask) {
         let a = u32::from(p[3]);
         let m = u32::from(m);
         // a*m is at most 255*255 = 65025; +127 = 65152 < u32::MAX; /255 ≤ 255: safe cast.

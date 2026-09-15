@@ -414,7 +414,12 @@ unsafe fn cmyk_to_rgb_neon(cmyk: &[u8; 32], rgb: &mut [u8]) {
 
 #[inline]
 fn cmyk_to_rgb_scalar(cmyk: &[u8], rgb: &mut [u8]) {
-    for (src, dst) in cmyk.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+    for (src, dst) in cmyk
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgb.as_chunks_mut::<3>().0)
+    {
         let (r, g, b) = cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
         dst[0] = r;
         dst[1] = g;
@@ -433,6 +438,11 @@ fn cmyk_to_rgb_scalar(cmyk: &[u8], rgb: &mut [u8]) {
 /// machines that lack the compile-time feature.
 #[cfg(target_arch = "x86_64")]
 #[inline]
+#[expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "the tail is consumed via Chunks::remainder(); as_chunks would restructure \
+              the unsafe SIMD dispatch for no behavioural gain"
+)]
 fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
     if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
         let mut chunks = cmyk.chunks_exact(64);
@@ -523,6 +533,11 @@ fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
 /// disagree — reading through the mismatch would index out of bounds for a
 /// short table and silently sample garbage for a long one).
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one function per CLUT/matrix branch with the interpolation inline — \
+              splitting would scatter the shared index arithmetic"
+)]
 pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
     let n = cmyk.len() / 4;
     let mut rgb = vec![0u8; n * 3];
@@ -560,7 +575,12 @@ pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
             )]
             let g1 = (grid_n - 1) as f32;
             let scale = g1 / 255.0;
-            for (src, dst) in cmyk.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+            for (src, dst) in cmyk
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgb.as_chunks_mut::<3>().0)
+            {
                 let fc = f32::from(src[0]) * scale;
                 let fm = f32::from(src[1]) * scale;
                 let fy = f32::from(src[2]) * scale;
