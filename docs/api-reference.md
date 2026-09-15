@@ -592,11 +592,11 @@ Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
 
 ### GPU
 
-**NVIDIA (CUDA 12 or 13):**
+**NVIDIA (CUDA 13.0–13.3):**
 
 | Feature flag | Minimum requirement | Notes |
 |---|---|---|
-| `nvjpeg` | CUDA-capable NVIDIA GPU | `libnvjpeg.so` ships with CUDA 12 or 13 toolkit |
+| `nvjpeg` | CUDA-capable NVIDIA GPU | `libnvjpeg.so` ships with the CUDA 13 toolkit |
 | `nvjpeg2k` | CUDA-capable NVIDIA GPU | `libnvjpeg2k.so` is a separate download; build script probes `/13` then `/12` |
 | `gpu-aa` | CUDA-capable NVIDIA GPU | CUDA runtime only |
 | `gpu-icc` | CUDA-capable NVIDIA GPU | CUDA runtime only |
@@ -643,12 +643,12 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 
 | Feature | Requires | Effect |
 |---|---|---|
-| `nvjpeg` | CUDA 12 or 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Falls back to CPU zune-jpeg below 512×512 px. |
-| `nvjpeg2k` | CUDA 12 or 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to CPU OpenJPEG below 512×512 px or for sub-sampled chroma. |
-| `gpu-aa` | CUDA 12 or 13 | GPU supersampled AA fill (64-sample warp-ballot kernel). Falls back to CPU 4× scanline AA below 256 px. |
-| `gpu-icc` | CUDA 12 or 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
-| `gpu-deskew` | CUDA 12 or 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
-| `cache` | CUDA 12 or 13 | Phase 9 device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
+| `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Falls back to CPU zune-jpeg below 512×512 px. |
+| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to CPU OpenJPEG below 512×512 px or for sub-sampled chroma. |
+| `gpu-aa` | CUDA 13 | GPU supersampled AA fill (64-sample warp-ballot kernel). Falls back to CPU 4× scanline AA below 256 px. |
+| `gpu-icc` | CUDA 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
+| `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
+| `cache` | CUDA 13 | Phase 9 device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
 | `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU. Falls back to CPU on CMYK/progressive JPEG. When `nvjpeg` is also active, nvJPEG takes priority. |
 | `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa` and `gpu-jpeg-huffman`. | Vulkan compute backend. AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |

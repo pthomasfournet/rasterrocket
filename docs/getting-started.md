@@ -26,11 +26,11 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 Three GPU backends are available on Linux:
 
-**NVIDIA (CUDA 12 or 13):**
+**NVIDIA (CUDA 13.0–13.3):**
 
 | Feature | Minimum GPU | Library required |
 |---|---|---|
-| `nvjpeg` | Any CUDA-capable NVIDIA GPU | `libnvjpeg.so` (ships with CUDA 12 or 13 toolkit) |
+| `nvjpeg` | Any CUDA-capable NVIDIA GPU | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | Any CUDA-capable NVIDIA GPU | `libnvjpeg2k.so` (separate download; build script probes `/13` then `/12`) |
 | `gpu-aa` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
 | `gpu-icc` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
@@ -85,7 +85,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket" }
 > unmaintained, and missing everything added since. Use the git dependency
 > above, not a version pin.
 
-For GPU acceleration — NVIDIA (CUDA 12 or 13) + Vulkan (cross-vendor) + VA-API (Linux iGPU/dGPU):
+For GPU acceleration — NVIDIA (CUDA 13) + Vulkan (cross-vendor) + VA-API (Linux iGPU/dGPU):
 
 ```toml
 [dependencies]

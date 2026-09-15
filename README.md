@@ -190,7 +190,7 @@ All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon RO
 # CPU-only (no CUDA)
 cargo build --release -p rasterrocket-cli
 
-# With all GPU features (CUDA 12 or 13 toolkit, NVIDIA GPU required)
+# With all GPU features (CUDA 13 toolkit, NVIDIA GPU required)
 # Default CUDA_ARCH is sm_80 (Ampere); override for older or newer GPUs.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
   --features "rasterrocket/nvjpeg,rasterrocket/nvjpeg2k,rasterrocket/gpu-aa,rasterrocket/gpu-icc,rasterrocket/gpu-deskew,rasterrocket/cache"
@@ -220,7 +220,7 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 
 | Flag | What it enables | Required runtime |
 |---|---|---|
-| `nvjpeg` | GPU JPEG decode for `DCTDecode` | `libnvjpeg.so` (ships with CUDA 12 or 13 toolkit) |
+| `nvjpeg` | GPU JPEG decode for `DCTDecode` | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
 | `gpu-aa` | GPU supersampled anti-aliased fill | CUDA |
 | `gpu-icc` | GPU CMYK→RGB ICC transform | CUDA |
