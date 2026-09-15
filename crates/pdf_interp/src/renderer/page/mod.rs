@@ -45,6 +45,7 @@
 
 mod annotations;
 mod gpu_ops;
+mod image_sampler;
 mod operators;
 mod patterns;
 mod text;
@@ -95,6 +96,7 @@ use gpu::jpeg_decoder::JpegGpuDecoder;
 use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
+use image_sampler::SampleGrid;
 #[cfg(any(
     feature = "gpu-aa",
     feature = "gpu-icc",
@@ -361,8 +363,9 @@ struct CacheState {
     /// alias key for fast same-document lookups.
     doc_id: DocId,
     /// Lazy-allocated device-resident page buffer.  `None` until the
-    /// first GPU image blit allocates it; non-None pages download +
-    /// alpha-composite onto `bitmap` at `PageRenderer::finish`.
+    /// first GPU image blit allocates it.  Between blits every pixel is
+    /// zero (alpha 0): each blit composites its rows onto `bitmap` and
+    /// clears them before returning.
     page_buffer: Option<DevicePageBuffer>,
 }
 
@@ -673,8 +676,9 @@ impl<'doc> PageRenderer<'doc> {
     /// work; a miss decodes on CPU, uploads to VRAM, caches, and
     /// returns the same handle.  The renderer dispatches `Gpu`-variant
     /// images to a CUDA blit kernel that writes into a per-page
-    /// `DevicePageBuffer`; CPU-rasterised vector content stays on
-    /// `bitmap`, and the two are alpha-composited at [`Self::finish`].
+    /// `DevicePageBuffer` and composites the result onto `bitmap` in
+    /// content-stream order, so the page renders byte-identically to
+    /// the CPU-only path.
     ///
     /// `doc_id` should be a stable identifier for the source PDF
     /// (typically `BLAKE3(pdf_bytes)` or similar).  It's combined
@@ -684,10 +688,8 @@ impl<'doc> PageRenderer<'doc> {
     /// Call with `None` to revert to CPU-only image decode.
     ///
     /// **Caller contract:** call before any rendering operators
-    /// execute on this renderer.  Wiring or unwiring a cache
-    /// mid-page would discard any GPU-blit pixels written so far
-    /// (the per-page `DevicePageBuffer` is dropped on reset);
-    /// today no caller does this.
+    /// execute on this renderer; today no caller wires or unwires a
+    /// cache mid-page.
     #[cfg(feature = "cache")]
     pub fn set_image_cache(&mut self, cache: Option<Arc<DeviceImageCache>>, doc_id: DocId) {
         self.cache_state = cache.map(|cache| CacheState {
@@ -816,77 +818,7 @@ impl<'doc> PageRenderer<'doc> {
             .max_by_key(|(count, _)| *count)
             .map(|(_, filter)| *filter);
 
-        // Download the device-resident image-blit buffer (if
-        // any GPU image-blit ran on this page) and source-over
-        // composite it onto the host bitmap.  Pixels the kernel
-        // didn't write read back as alpha=0 → no-op for the
-        // composite, leaving the CPU-rasterised content untouched.
-        #[cfg(feature = "cache")]
-        if let Some(buf) = self
-            .cache_state
-            .as_mut()
-            .and_then(|cs| cs.page_buffer.take())
-        {
-            self.composite_device_page_buffer(&buf);
-        }
-
         (self.bitmap, self.diag)
-    }
-
-    /// Download the device page buffer and alpha-composite it onto
-    /// `self.bitmap`.  Source-over: written GPU pixels (alpha=255)
-    /// replace; unwritten pixels (alpha=0) leave the bitmap intact.
-    /// This is the moment where the blit kernel's writes become
-    /// visible on host.
-    #[cfg(feature = "cache")]
-    fn composite_device_page_buffer(&mut self, buf: &DevicePageBuffer) {
-        use gpu::cache::RGBA_BPP;
-
-        let host_rgba = match buf.download() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log::warn!(
-                    "finish: device page buffer download failed: {e} — GPU images will be missing"
-                );
-                return;
-            }
-        };
-        let dst_stride = self.width as usize * 3;
-        let src_stride = self.width as usize * RGBA_BPP;
-        // Sanity: degrade gracefully on a dimension mismatch rather
-        // than panic-aborting on slice-out-of-bounds in release.
-        // Today only `try_gpu_blit_image` constructs `buf` (with
-        // `self.width` / `self.height`), so a mismatch indicates a
-        // future bug — log loudly and skip the composite.
-        let expected = src_stride * self.height as usize;
-        if host_rgba.len() != expected {
-            log::warn!(
-                "finish: device page buffer size {} != expected {expected} ({}×{}×{RGBA_BPP}); skipping composite",
-                host_rgba.len(),
-                self.width,
-                self.height,
-            );
-            return;
-        }
-        let dst = self.bitmap.data_mut();
-        for y in 0..self.height as usize {
-            let src_row = &host_rgba[y * src_stride..(y + 1) * src_stride];
-            let dst_row = &mut dst[y * dst_stride..(y + 1) * dst_stride];
-            for x in 0..self.width as usize {
-                let s = &src_row[x * RGBA_BPP..x * RGBA_BPP + 4];
-                if s[3] == 0 {
-                    continue;
-                }
-                // Source-over with src.a == 255 in the kernel's
-                // current implementation; opaque copy.  When/if
-                // the kernel grows partial-alpha output, switch to
-                // a full Porter-Duff compositor here.
-                let d = &mut dst_row[x * 3..x * 3 + 3];
-                d[0] = s[0];
-                d[1] = s[1];
-                d[2] = s[2];
-            }
-        }
     }
 
     /// Execute a slice of decoded operators in order.
@@ -1552,27 +1484,13 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Blit a decoded image `XObject` onto the bitmap using the current CTM.
     ///
-    /// The PDF convention is that the CTM maps the unit square `[0,1]×[0,1]`
-    /// (image space) to the target rectangle on the page.  We sample each
-    /// output pixel by inverse-mapping it back to image space.
-    ///
-    /// For axis-aligned transforms (the common case) this is just a scaled copy.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "device pixel coords are always in page bounds after clamping; safe casts"
-    )]
-    #[expect(
-        clippy::many_single_char_names,
-        reason = "PDF CTM components a–f are standard"
-    )]
-    #[expect(
-        clippy::similar_names,
-        reason = "dx_rel / dy_rel are the standard names for the per-axis deltas in the inverse CTM formula"
-    )]
+    /// The CTM maps the unit square (image space) onto the page; every
+    /// device pixel inside the image's bounding box samples the source pixel
+    /// under its centre (nearest neighbour), via a [`SampleGrid`] shared by
+    /// the CPU sampler below and the GPU blit kernel.
     #[expect(
         clippy::too_many_lines,
-        reason = "axis-aligned fast path + full inverse-CTM path + diagnostic tracking; splitting would scatter the CTM logic across multiple helpers with shared mutable state"
+        reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
     )]
     fn blit_image(&mut self, img: &crate::resources::ImageDescriptor) {
         // Degenerate image — nothing to blit.
@@ -1580,7 +1498,7 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
         // PDF §8.9.6: stencil masks (/ImageMask true → ImageColorSpace::Mask)
-        // do not carry an /SMask.  The Mask arms below intentionally skip
+        // do not carry an /SMask.  The Mask arm below intentionally skips
         // the smask gate that the Rgb / Gray arms apply; this assert pins
         // the spec invariant so a future decoder change that sets `smask`
         // on a Mask descriptor surfaces in debug builds.
@@ -1618,96 +1536,21 @@ impl<'doc> PageRenderer<'doc> {
         }
 
         let ctm = self.gstate.current().ctm;
-        // Copy fill colour as [u8; 3] — RasterColor::as_slice always returns 3 bytes.
-        let fill_color = {
-            let s = self.gstate.current().fill_color.as_slice();
-            [s[0], s[1], s[2]]
-        };
-        let page_h = f64::from(self.height);
-
-        // PDF CTM maps (0,0)→(1,0)→(1,1)→(0,1) (bottom-left origin).
-        // y-flip converts PDF bottom-left to device top-left origin.
-        let (x00, y00) = ctm_transform(&ctm, 0.0, 0.0);
-        let (x10, y10) = ctm_transform(&ctm, 1.0, 0.0);
-        let (x01, y01) = ctm_transform(&ctm, 0.0, 1.0);
-        let (x11, y11) = ctm_transform(&ctm, 1.0, 1.0);
-
-        // Guard against a non-finite CTM (malformed PDF).  A NaN or Inf corner
-        // would produce i64::MIN/MAX after the floor/ceil cast, corrupting the
-        // bounding box calculation.
-        if ![x00, y00, x10, y10, x01, y01, x11, y11]
-            .iter()
-            .all(|v| v.is_finite())
-        {
-            log::warn!("rasterrocket-interp: blit_image: non-finite CTM corner — skipping image");
-            return;
-        }
-
-        // Bounding box of the 4 corners in device space (y-flipped).
-        let dx0 = x00.min(x10).min(x01).min(x11).floor() as i64;
-        let dx1 = x00.max(x10).max(x01).max(x11).ceil() as i64;
-        let dy0 = (page_h - y00)
-            .min(page_h - y10)
-            .min(page_h - y01)
-            .min(page_h - y11)
-            .floor() as i64;
-        let dy1 = (page_h - y00)
-            .max(page_h - y10)
-            .max(page_h - y01)
-            .max(page_h - y11)
-            .ceil() as i64;
-
-        // Clamp to bitmap.  Both ends are clamped to [0, dim] *in i64* before
-        // casting to u32 so that a negative dx1/dy1 (image entirely off the
-        // left or top edge) produces 0 rather than wrapping to a huge u32.
-        // After clamping the values are in [0, width] / [0, height], which fit
-        // u32 on any target where u32::MAX ≥ the maximum image dimension.
-        let bx0 = dx0.max(0).min(i64::from(self.width)) as u32;
-        let bx1 = dx1.max(0).min(i64::from(self.width)) as u32;
-        let by0 = dy0.max(0).min(i64::from(self.height)) as u32;
-        let by1 = dy1.max(0).min(i64::from(self.height)) as u32;
-
-        if bx0 >= bx1 || by0 >= by1 {
-            return;
-        }
-
-        // Inverse CTM: for each device pixel (dx, dy_device) compute image-space
-        // coordinates (u, v) ∈ [0,1]² via exact inverse affine mapping.
-        //
-        // CTM maps PDF user space (u, v) → device pixels (x, y_pdf):
-        //   x      = a*u + c*v + e
-        //   y_pdf  = b*u + d*v + f
-        //
-        // After y-flip (device_y = page_h − y_pdf) the inverse is:
-        //   u = ( d*(dx − e) − c*(dy_pdf − f)) / det
-        //   v = (−b*(dx − e) + a*(dy_pdf − f)) / det
-        // where dy_pdf = page_h − dy_device.
-        //
-        // This is exact for any invertible CTM (axis-aligned or rotated/sheared).
-        let [a, b, c, d, e, f] = ctm;
-        let det = a.mul_add(d, -(b * c));
-        // det is guaranteed non-zero: we already checked all corners are finite,
-        // and a singular CTM would produce a degenerate bounding box caught above.
-        let inv_det = if det.abs() < 1e-12 {
+        let Some(grid) = SampleGrid::new(&ctm, self.width, self.height, img.width, img.height)
+        else {
             log::debug!(
-                "rasterrocket-interp: blit_image: near-singular CTM (det={det:.2e}) — skipping"
+                "rasterrocket-interp: blit_image: image maps to no page pixels (CTM {ctm:?}) — skipping"
             );
             return;
-        } else {
-            1.0 / det
         };
 
-        let img_w = f64::from(img.width);
-        let img_h = f64::from(img.height);
-        let img_width_usize = img.width as usize;
-
-        // GPU image-blit fast path: device-resident pixels + CUDA kernel
-        // transform writing into a per-page DevicePageBuffer.  Returns true
-        // if the GPU path handled the image; false to fall through to the
-        // CPU sampler below.
+        // GPU image-blit path: device-resident pixels sampled by the CUDA
+        // kernel through the same grid, composited onto `bitmap` before
+        // this call returns so later operators paint over the image in
+        // content-stream order.
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
-            if self.try_gpu_blit_image(cached, &ctm, page_h) {
+            if self.try_gpu_blit_image(cached, &grid) {
                 return;
             }
             // Promotion or kernel dispatch failed and there are no host
@@ -1722,10 +1565,7 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
 
-        // CPU path: needs host-resident pixels.  The graceful skip
-        // below also covers the cache-feature-on, ImageData::Gpu
-        // case if `try_gpu_blit_image` somehow falls through (it
-        // currently doesn't, but the explicit None check is cheap).
+        // CPU path: needs host-resident pixels.
         let Some(img_bytes) = img.data.as_cpu() else {
             // Decoded pixels exist but are device-resident with no GPU
             // dispatch available to blit them — unrenderable, not absent.
@@ -1738,9 +1578,8 @@ impl<'doc> PageRenderer<'doc> {
         // Decoder contract: bytes.len() == width × height × bpp.  Promote
         // the contract to a release-mode check so a truncated buffer (an
         // adversarial PDF reporting larger dims than the decoder produced)
-        // skips the image cleanly instead of letting the safe slice index
-        // below panic in the inner loop.  One CMP per image; well below
-        // noise.
+        // skips the image cleanly instead of indexing past the buffer in
+        // the inner loop.
         let bpp = img.color_space.bytes_per_pixel();
         match check_image_bytes_len(img.width, img.height, bpp, img_bytes.len()) {
             Ok(_) => {}
@@ -1766,6 +1605,14 @@ impl<'doc> PageRenderer<'doc> {
             }
         }
 
+        // Copy fill colour as [u8; 3] — RasterColor::as_slice always returns 3 bytes.
+        let fill_color = {
+            let s = self.gstate.current().fill_color.as_slice();
+            [s[0], s[1], s[2]]
+        };
+        let smask = img.smask.as_deref();
+        let img_w = img.width as usize;
+
         // Use the bitmap's authoritative row stride rather than re-deriving
         // `width * 3`.  `Bitmap` may pad rows to a `row_pad` multiple; a local
         // recompute would silently address the wrong byte on any padded layout
@@ -1774,218 +1621,50 @@ impl<'doc> PageRenderer<'doc> {
         let stride = self.bitmap.stride;
         let data = self.bitmap.data_mut();
 
-        // Axis-aligned fast path: when b ≈ 0 and c ≈ 0, the CTM has no rotation
-        // or shear.  The inverse mapping simplifies to:
-        //   u = (dx − e) / a        (constant step per column)
-        //   v = (dy_pdf − f) / d    (constant per row)
-        //
-        // We convert both to fixed-point (Q32) so the inner loop is pure integer
-        // arithmetic — no per-pixel f64 multiply, no clamp, no int→float conversion.
-        //
-        // Threshold: |b|, |c| < 0.5 device pixels across the full image extent.
-        let is_axis_aligned = b.abs() * img_w < 0.5 && c.abs() * img_h < 0.5;
-
-        if is_axis_aligned {
-            // Fixed-point scale: 1 image pixel = FP_SCALE units.
-            const FP_SCALE: i64 = 1 << 32;
-
-            // ix step per output column: img_w / a pixels per device pixel.
-            // a may be negative (x-flipped image).
-            // FP_SCALE is 2^32, exactly representable in f64; cast is lossless.
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "FP_SCALE = 1<<32 is exactly representable in f64; img_w/a fits easily"
-            )]
-            let ix_step_fp: i64 = ((img_w / a) * FP_SCALE as f64) as i64;
-
-            // iy step per output row: -img_h / d  (v = (dy_pdf - f)/d, iy = (1-v)*img_h).
-            // d is negative when PDF y-axis is flipped to device space.
-            // Precomputed per-row below.
-
-            // img dimensions are u32, so the usize values fit well within i64.
-            #[expect(
-                clippy::cast_possible_wrap,
-                reason = "img dims are u32; usize→i64 cast is safe on 64-bit targets"
-            )]
-            let img_max_x = (img_width_usize - 1) as i64;
-
-            let smask = img.smask.as_deref();
-
-            for dy in by0..by1 {
-                let dy_pdf = page_h - f64::from(dy);
-                // v = (dy_pdf - f) / d; iy = (1 - v) * img_h, clamped.
-                let v = ((dy_pdf - f) / d).clamp(0.0, 1.0);
-                let iy = ((1.0 - v) * img_h).min(img_h - 1.0) as usize;
-                let row_base = iy * img_width_usize;
-
-                // ix at bx0: u = (bx0 - e) / a.
-                let u0 = ((f64::from(bx0) - e) / a).clamp(0.0, 1.0);
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "FP_SCALE = 1<<32 is exactly representable in f64"
-                )]
-                let mut ix_fp: i64 = (u0 * img_w * FP_SCALE as f64) as i64;
-
-                let row_off = dy as usize * stride;
-
+        for dy in grid.y0..grid.y1 {
+            let row_off = dy as usize * stride;
+            for dx in grid.x0..grid.x1 {
+                let Some((ix, iy)) = grid.sample(dx, dy) else {
+                    continue;
+                };
+                let img_idx = iy as usize * img_w + ix as usize;
+                let pixel_off = row_off + dx as usize * 3;
+                // The destination triple is in-bounds whenever
+                // `stride == width * 3`; a padded stride or an off-by-one
+                // in clip-row rounding could push the last pixel of a
+                // clipped row past the buffer.  Skip that pixel rather
+                // than panic on untrusted-PDF geometry.
+                let Some(dst) = data.get_mut(pixel_off..pixel_off + 3) else {
+                    continue;
+                };
+                // Stencil masks paint the fill colour through their zero
+                // samples and carry no soft mask (asserted at entry).
+                let alpha = match img.color_space {
+                    ImageColorSpace::Mask => 255,
+                    ImageColorSpace::Rgb | ImageColorSpace::Gray => {
+                        smask.map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255))
+                    }
+                };
+                if alpha == 0 {
+                    continue;
+                }
+                // `img_idx` is inside the buffer by the length check above;
+                // the `get`s keep the loop panic-free regardless.
                 match img.color_space {
                     ImageColorSpace::Rgb => {
-                        for dx in bx0..bx1 {
-                            let ix = (ix_fp >> 32).clamp(0, img_max_x) as usize;
-                            ix_fp = ix_fp.wrapping_add(ix_step_fp);
-                            let img_idx = row_base + ix;
-                            let alpha =
-                                smask.map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255));
-                            if alpha == 0 {
-                                continue;
-                            }
-                            let src = img_idx * 3;
-                            // Bounds checked: ix ∈ [0, img_width-1] and
-                            // iy ∈ [0, img_height-1] by the clamp above; the
-                            // length precheck guarantees src+3 ≤ img_bytes.len().
-                            let rgb = &img_bytes[src..src + 3];
-                            let pixel_off = row_off + dx as usize * 3;
-                            // Defence-in-depth: the destination triple is
-                            // in-bounds whenever `stride == width * 3`, but a
-                            // future padded stride or an off-by-one in the
-                            // clip-row rounding would push the last pixel of a
-                            // clipped row past the buffer.  Skip that pixel
-                            // rather than panic on an untrusted-PDF geometry.
-                            if pixel_off + 3 > data.len() {
-                                continue;
-                            }
-                            if alpha == 255 {
-                                data[pixel_off..pixel_off + 3].copy_from_slice(rgb);
-                            } else {
-                                let a = u16::from(alpha);
-                                data[pixel_off] = blend_u8(rgb[0], data[pixel_off], a);
-                                data[pixel_off + 1] = blend_u8(rgb[1], data[pixel_off + 1], a);
-                                data[pixel_off + 2] = blend_u8(rgb[2], data[pixel_off + 2], a);
-                            }
+                        let src = img_idx * 3;
+                        if let Some(rgb) = img_bytes.get(src..src + 3) {
+                            blend_rgb(dst, [rgb[0], rgb[1], rgb[2]], alpha);
                         }
                     }
                     ImageColorSpace::Gray => {
-                        for dx in bx0..bx1 {
-                            let ix = (ix_fp >> 32).clamp(0, img_max_x) as usize;
-                            ix_fp = ix_fp.wrapping_add(ix_step_fp);
-                            let img_idx = row_base + ix;
-                            let alpha =
-                                smask.map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255));
-                            if alpha == 0 {
-                                continue;
-                            }
-                            // Same bounds rationale as RGB arm.
-                            let v = img_bytes[img_idx];
-                            let pixel_off = row_off + dx as usize * 3;
-                            // Destination guard: same rationale as the Rgb arm.
-                            if pixel_off + 3 > data.len() {
-                                continue;
-                            }
-                            if alpha == 255 {
-                                data[pixel_off] = v;
-                                data[pixel_off + 1] = v;
-                                data[pixel_off + 2] = v;
-                            } else {
-                                let a = u16::from(alpha);
-                                // Each output channel is blended against its own
-                                // existing value — the destination bitmap is RGB
-                                // and channels may differ.
-                                data[pixel_off] = blend_u8(v, data[pixel_off], a);
-                                data[pixel_off + 1] = blend_u8(v, data[pixel_off + 1], a);
-                                data[pixel_off + 2] = blend_u8(v, data[pixel_off + 2], a);
-                            }
+                        if let Some(&g) = img_bytes.get(img_idx) {
+                            blend_rgb(dst, [g, g, g], alpha);
                         }
                     }
                     ImageColorSpace::Mask => {
-                        // No smask gate here — PDF §8.9.6 (function-entry assert).
-                        for dx in bx0..bx1 {
-                            let ix = (ix_fp >> 32).clamp(0, img_max_x) as usize;
-                            ix_fp = ix_fp.wrapping_add(ix_step_fp);
-                            let img_idx = row_base + ix;
-                            // Same bounds rationale as RGB arm.
-                            if img_bytes[img_idx] == 0x00 {
-                                let pixel_off = row_off + dx as usize * 3;
-                                // Destination guard: same rationale as the Rgb arm.
-                                if pixel_off + 3 > data.len() {
-                                    continue;
-                                }
-                                data[pixel_off..pixel_off + 3].copy_from_slice(&fill_color);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // General path: arbitrary affine CTM (rotation, shear, non-axis-aligned scale).
-            for dy in by0..by1 {
-                let dy_pdf = page_h - f64::from(dy);
-                let dy_rel = dy_pdf - f;
-                // Precompute the row-constant parts of the u/v formulas.
-                let u_row = (-c * dy_rel) * inv_det;
-                let v_row = (a * dy_rel) * inv_det;
-                for dx in bx0..bx1 {
-                    let dx_rel = f64::from(dx) - e;
-                    // Image-space coordinates ∈ [0, 1]; clamp to guard edges.
-                    let u = (d * dx_rel).mul_add(inv_det, u_row).clamp(0.0, 1.0);
-                    let v = ((-b) * dx_rel).mul_add(inv_det, v_row).clamp(0.0, 1.0);
-
-                    let ix = (u * img_w).min(img_w - 1.0) as usize;
-                    let iy = ((1.0 - v) * img_h).min(img_h - 1.0) as usize;
-                    let img_idx = iy * img_width_usize + ix;
-
-                    let alpha = img
-                        .smask
-                        .as_deref()
-                        .map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255));
-                    if alpha == 0 {
-                        continue;
-                    }
-
-                    let pixel_off = dy as usize * stride + dx as usize * 3;
-                    // Destination guard: same rationale as the axis-aligned
-                    // Rgb arm.  The general path shares the identical
-                    // untrusted-geometry exposure, so it carries the same
-                    // defence rather than relying on the clamp alone.
-                    if pixel_off + 3 > data.len() {
-                        continue;
-                    }
-
-                    match img.color_space {
-                        ImageColorSpace::Rgb => {
-                            let src = img_idx * 3;
-                            if let Some(rgb) = img_bytes.get(src..src + 3) {
-                                if alpha == 255 {
-                                    data[pixel_off..pixel_off + 3].copy_from_slice(rgb);
-                                } else {
-                                    let a = u16::from(alpha);
-                                    data[pixel_off] = blend_u8(rgb[0], data[pixel_off], a);
-                                    data[pixel_off + 1] = blend_u8(rgb[1], data[pixel_off + 1], a);
-                                    data[pixel_off + 2] = blend_u8(rgb[2], data[pixel_off + 2], a);
-                                }
-                            }
-                        }
-                        ImageColorSpace::Gray => {
-                            if let Some(&v) = img_bytes.get(img_idx) {
-                                if alpha == 255 {
-                                    data[pixel_off] = v;
-                                    data[pixel_off + 1] = v;
-                                    data[pixel_off + 2] = v;
-                                } else {
-                                    let a = u16::from(alpha);
-                                    // Each output channel is blended against its own
-                                    // existing value — the destination bitmap is RGB
-                                    // and channels may differ.
-                                    data[pixel_off] = blend_u8(v, data[pixel_off], a);
-                                    data[pixel_off + 1] = blend_u8(v, data[pixel_off + 1], a);
-                                    data[pixel_off + 2] = blend_u8(v, data[pixel_off + 2], a);
-                                }
-                            }
-                        }
-                        ImageColorSpace::Mask => {
-                            // No smask gate here — PDF §8.9.6 (function-entry assert).
-                            if img_bytes.get(img_idx) == Some(&0x00) {
-                                data[pixel_off..pixel_off + 3].copy_from_slice(&fill_color);
-                            }
+                        if img_bytes.get(img_idx) == Some(&0x00) {
+                            dst.copy_from_slice(&fill_color);
                         }
                     }
                 }
@@ -1993,37 +1672,23 @@ impl<'doc> PageRenderer<'doc> {
         }
     }
 
-    /// GPU image blit dispatcher.
+    /// GPU image blit: sample `cached` through `grid` on the device, then
+    /// download the touched rows of the page buffer and composite them onto
+    /// `bitmap`.  Returns `true` once the pixels are on the host bitmap;
+    /// `false` if any prerequisite is missing (no `GpuCtx`, page-buffer
+    /// alloc fails, kernel dispatch or download errors), in which case the
+    /// bitmap is untouched.
     ///
-    /// Lazy-allocates `device_page_buffer` on first call, builds the
-    /// inverse-CTM coefficients, computes the destination AABB, and
-    /// launches the CUDA blit kernel.  Returns `true` on success;
-    /// `false` if any prerequisite is missing (no `GpuCtx`, singular
-    /// CTM, page-buffer alloc fails, kernel dispatch errors).
-    ///
-    /// Designed to be cheap to call: per-call cost is one bbox
-    /// computation + one ~10 µs kernel launch.  No host-side pixel
-    /// touch.
+    /// Compositing before returning keeps content-stream order: anything
+    /// painted after the image lands on top of it, and an image inside a
+    /// transparency group lands in the group's bitmap.
     #[cfg(feature = "cache")]
-    #[expect(
-        clippy::similar_names,
-        reason = "page_w_i / page_h_i are paired width/height constants — renaming would obscure the symmetry"
-    )]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "device pixel coords floor/ceil to i32 cleanly within page bounds (max ~64K at 600 DPI fits losslessly)"
-    )]
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "self.width/height are PDF page dims well below i32::MAX"
-    )]
     fn try_gpu_blit_image(
         &mut self,
         cached: &Arc<gpu::cache::CachedDeviceImage>,
-        ctm: &[f64; 6],
-        page_h: f64,
+        grid: &SampleGrid,
     ) -> bool {
-        use gpu::blit::{BlitBbox, InverseCtm};
+        use gpu::blit::BlitBbox;
 
         let Some(gpu_ctx) = self.gpu_ctx.as_deref() else {
             log::debug!("blit_image: GPU image blit skipped — no GpuCtx attached");
@@ -2037,10 +1702,10 @@ impl<'doc> PageRenderer<'doc> {
         let image_cache = &cache_state.cache;
         // Stream-identity invariant: the cache uploads `cached`'s
         // device memory on its own stream; the blit kernel below
-        // launches on `gpu_ctx`'s stream; the page buffer's
-        // `download()` syncs the page buffer's stream.  All three
+        // launches on `gpu_ctx`'s stream; the page buffer's row
+        // download syncs the page buffer's stream.  All three
         // must be the *same* stream — otherwise the kernel could
-        // read pre-DMA bytes or `download()` could miss writes.
+        // read pre-DMA bytes or the download could miss writes.
         // `open_session` constructs the cache from `gpu_ctx.stream()`
         // so this holds today; the assert future-proofs against a
         // refactor that introduces per-worker streams without
@@ -2049,49 +1714,18 @@ impl<'doc> PageRenderer<'doc> {
             Arc::ptr_eq(gpu_ctx.stream(), image_cache.stream_arc()),
             "GpuCtx stream and DeviceImageCache stream diverged — cache upload, blit kernel, and page-buffer download must share one stream",
         );
-        let Some(inv_ctm) = InverseCtm::from_ctm(*ctm) else {
-            log::debug!("blit_image: GPU image blit skipped — singular CTM");
+
+        // Grid edges are clamped to the page, so they fit i32 whenever the
+        // page does; a page wider than i32::MAX pixels cannot exist.
+        let (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) = (
+            i32::try_from(grid.x0),
+            i32::try_from(grid.y0),
+            i32::try_from(grid.x1),
+            i32::try_from(grid.y1),
+        ) else {
             return false;
         };
-
-        // Compute the destination AABB (page pixels).  Must clamp at
-        // launch time because rotated images can spill off the page;
-        // the kernel itself also guards against negative coords for
-        // defence-in-depth.
-        let (x00, y00) = ctm_transform(ctm, 0.0, 0.0);
-        let (x10, y10) = ctm_transform(ctm, 1.0, 0.0);
-        let (x01, y01) = ctm_transform(ctm, 0.0, 1.0);
-        let (x11, y11) = ctm_transform(ctm, 1.0, 1.0);
-        if ![x00, y00, x10, y10, x01, y01, x11, y11]
-            .iter()
-            .all(|v| v.is_finite())
-        {
-            return false;
-        }
-        let dx0 = x00.min(x10).min(x01).min(x11).floor() as i32;
-        let dx1 = x00.max(x10).max(x01).max(x11).ceil() as i32;
-        let dy_pdf_min = (page_h - y00)
-            .min(page_h - y10)
-            .min(page_h - y01)
-            .min(page_h - y11);
-        let dy_pdf_max = (page_h - y00)
-            .max(page_h - y10)
-            .max(page_h - y01)
-            .max(page_h - y11);
-        let dy0 = dy_pdf_min.floor() as i32;
-        let dy1 = dy_pdf_max.ceil() as i32;
-
-        // Clamp to page bounds for kernel efficiency (the kernel
-        // also guards each thread, but skipping out-of-page tiles is
-        // cheaper than launching them).
-        let page_w_i = self.width as i32;
-        let page_h_i = self.height as i32;
-        let bbox = BlitBbox {
-            x0: dx0.max(0),
-            y0: dy0.max(0),
-            x1: dx1.min(page_w_i),
-            y1: dy1.min(page_h_i),
-        };
+        let bbox = BlitBbox { x0, y0, x1, y1 };
 
         // Lazy-allocate the per-page device buffer on first GPU
         // image; subsequent images on the same page reuse it.
@@ -2109,16 +1743,75 @@ impl<'doc> PageRenderer<'doc> {
             return false;
         };
 
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "page_h is u32 page height; lossless f32 for u32 ≤ 2^24, vastly larger than any PDF page"
-        )]
-        let page_h_f = self.height as f32;
-        if let Err(e) = gpu_ctx.blit_image_to_buffer(cached, buf, inv_ctm, bbox, page_h_f) {
+        if let Err(e) = gpu_ctx.blit_image_to_buffer(cached, buf, bbox, grid.cols(), grid.rows()) {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
+        let rows = match buf.download_rows(grid.y0, grid.y1) {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::warn!("blit_image: device page buffer download failed: {e}");
+                // The buffer now holds this image's pixels with alpha set;
+                // drop it so a later blit starts from a zeroed buffer.
+                cache_state.page_buffer = None;
+                return false;
+            }
+        };
+        composite_rgba_rows(&mut self.bitmap, &rows, grid);
+        // Clear the touched rows so the next blit's alpha test sees only
+        // its own writes.  On failure drop the buffer for the same reason
+        // as above; the composite already succeeded.
+        if let Err(e) = buf.zero_rows(grid.y0, grid.y1) {
+            log::warn!("blit_image: device page buffer clear failed: {e}");
+            cache_state.page_buffer = None;
+        }
         true
+    }
+}
+
+/// Source-over the rows `[grid.y0, grid.y1)` of a downloaded RGBA8 page
+/// buffer onto `bitmap`, restricted to the grid's columns.  Alpha is `255`
+/// where the blit kernel wrote a sample and `0` elsewhere, so the composite
+/// is an opaque copy gated on alpha.
+#[cfg(feature = "cache")]
+fn composite_rgba_rows(bitmap: &mut Bitmap<Rgb8>, rgba: &[u8], grid: &SampleGrid) {
+    use gpu::cache::RGBA_BPP;
+
+    let width = bitmap.width as usize;
+    let src_stride = width * RGBA_BPP;
+    let dst_stride = bitmap.stride;
+    let dst = bitmap.data_mut();
+    for (row_idx, dy) in (grid.y0..grid.y1).enumerate() {
+        let Some(src_row) = rgba.get(row_idx * src_stride..(row_idx + 1) * src_stride) else {
+            return;
+        };
+        let dst_off = dy as usize * dst_stride;
+        for dx in grid.x0..grid.x1 {
+            let s = &src_row[dx as usize * RGBA_BPP..dx as usize * RGBA_BPP + RGBA_BPP];
+            if s[3] == 0 {
+                continue;
+            }
+            let off = dst_off + dx as usize * 3;
+            if let Some(d) = dst.get_mut(off..off + 3) {
+                d.copy_from_slice(&s[..3]);
+            }
+        }
+    }
+}
+
+/// Paint `src` onto the RGB triple `dst` with coverage `alpha`; an opaque
+/// sample copies, anything else blends per channel.
+#[inline]
+fn blend_rgb(dst: &mut [u8], src: [u8; 3], alpha: u8) {
+    if alpha == 255 {
+        dst.copy_from_slice(&src);
+    } else {
+        let a = u16::from(alpha);
+        // Each output channel blends against its own existing value —
+        // the destination is RGB and channels may differ.
+        dst[0] = blend_u8(src[0], dst[0], a);
+        dst[1] = blend_u8(src[1], dst[1], a);
+        dst[2] = blend_u8(src[2], dst[2], a);
     }
 }
 

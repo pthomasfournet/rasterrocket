@@ -261,6 +261,17 @@ impl RasterSession {
         self.policy
     }
 
+    /// The device-resident image cache this session renders through, or
+    /// `None` when no CUDA context was initialised (CPU-only session).
+    ///
+    /// Exposed for diagnostics and tests that need to observe which images
+    /// took the cached path; the renderer wires the cache in itself.
+    #[cfg(feature = "cache")]
+    #[must_use]
+    pub const fn image_cache(&self) -> Option<&Arc<gpu::cache::DeviceImageCache>> {
+        self.image_cache.as_ref()
+    }
+
     /// Resolve a 1-based page number to its [`pdf::ObjectId`].
     ///
     /// Each call performs one logarithmic page-tree descent.  Per-render

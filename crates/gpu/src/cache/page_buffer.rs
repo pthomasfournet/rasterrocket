@@ -1,35 +1,24 @@
-//! Phase 9 task 4 — device-resident page buffer.
+//! Device-resident page buffer.
 //!
 //! `DevicePageBuffer` is the GPU-side composition target for one page.
-//! When the renderer dispatches an image blit through the cache, the
-//! kernel writes transformed pixels into this buffer (with `alpha=255`
-//! for written pixels, `0` for untouched).  At end-of-page,
-//! [`Self::download`] DMAs the buffer to host RGBA bytes; the renderer
-//! alpha-composites those over its CPU-rasterised vector content for
-//! the final page bitmap.
+//! The blit kernel writes transformed image pixels into it with
+//! `alpha=255`; pixels it does not touch keep their zero initialisation.
+//! The renderer downloads the rows a blit touched via
+//! [`DevicePageBuffer::download_rows`], source-over composites them onto
+//! its host bitmap, and clears them again with
+//! [`DevicePageBuffer::zero_rows`] so the next blit's alpha channel
+//! reflects only its own writes.
 //!
 //! # Layout
 //!
 //! Row-major RGBA8 (4 bytes/pixel).  Width and height match the page
 //! resolution.  Zero-initialised on creation so any pixel the kernel
-//! doesn't write reads back as `(0, 0, 0, 0)` — i.e. fully transparent
-//! and contributes nothing to the source-over composite.
-//!
-//! # Spec deferral
-//!
-//! The Phase 9 spec describes a `coverage_scratch: CudaSlice<u8>`
-//! field for AA fill output.  That landing is deferred until the
-//! renderer migrates fill/composite to read/write the page buffer
-//! (the rest of Task 4); for now this struct is image-blit-only.
+//! doesn't write reads back as `(0, 0, 0, 0)` — fully transparent, and
+//! skipped by the host-side composite.
 
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream, DriverError};
-
-// `crate::RGBA_BPP` lives at the crate root (`crate::crate::RGBA_BPP`); the `cache`
-// module re-exports it for back-compat via `pub use crate::crate::RGBA_BPP`
-// in `cache/mod.rs`.  Local references inside this file go through the
-// crate-root path.
 
 /// Device-side composition target for one rendered page.
 ///
@@ -40,12 +29,12 @@ use cudarc::driver::{CudaSlice, CudaStream, DriverError};
 ///
 /// `DevicePageBuffer` is intentionally **not** generic over
 /// [`crate::backend::GpuBackend`].  The internals call
-/// `CudaStream::alloc_zeros`, `memcpy_dtoh`, and `synchronize` directly
-/// — the `GpuBackend` trait abstracts away streams (Vulkan has command
-/// buffers + fences, not streams) and does not yet expose a
-/// `download_*` / `alloc_zeros` equivalent.  Generifying would either
-/// require those trait methods (not yet designed) or a `PhantomData`
-/// type parameter that adds noise without buying abstraction.
+/// `CudaStream::alloc_zeros`, `memcpy_dtoh`, `memset_zeros`, and
+/// `synchronize` directly — the `GpuBackend` trait abstracts away streams
+/// (Vulkan has command buffers + fences, not streams) and does not yet
+/// expose a sub-range download / zero-fill equivalent.  Generifying would
+/// either require those trait methods (not yet designed) or a
+/// `PhantomData` type parameter that adds noise without buying abstraction.
 ///
 /// Same applies to [`crate::cache::DeviceImageCache`], which is more
 /// deeply CUDA-coupled (`clone_htod`, `memcpy_dtoh`, pinned-pool
@@ -59,8 +48,8 @@ pub struct DevicePageBuffer {
     /// Height in pixels.
     pub height: u32,
     /// CUDA stream the buffer's allocations and writes are bound to.
-    /// Stored so [`Self::download`] uses the same stream and so a
-    /// caller can synchronise it before relying on completed writes.
+    /// Stored so the row download and clear use the same stream and so
+    /// a caller can synchronise it before relying on completed writes.
     stream: Arc<CudaStream>,
 }
 
@@ -98,12 +87,18 @@ impl DevicePageBuffer {
         (self.width as usize) * (self.height as usize) * crate::RGBA_BPP
     }
 
+    /// Bytes per row: `width × 4`.
+    #[must_use]
+    pub const fn row_bytes(&self) -> usize {
+        (self.width as usize) * crate::RGBA_BPP
+    }
+
     /// The CUDA stream this buffer is bound to.
     ///
-    /// `download` synchronises this stream, so kernels writing or
-    /// reading [`Self::rgba`] from a *different* stream MUST first
-    /// `cudaStreamWaitEvent` against an event recorded on this
-    /// stream — otherwise [`Self::download`] may DMA stale bytes.
+    /// [`Self::download_rows`] synchronises this stream, so kernels
+    /// writing or reading [`Self::rgba`] from a *different* stream MUST
+    /// first `cudaStreamWaitEvent` against an event recorded on this
+    /// stream — otherwise the download may DMA stale bytes.
     /// Same-stream consumption is correct without any explicit sync
     /// because cudarc serialises operations on a single stream.
     #[must_use]
@@ -111,7 +106,20 @@ impl DevicePageBuffer {
         &self.stream
     }
 
-    /// Copy the buffer to a host `Vec<u8>`.
+    /// Byte range of rows `[y0, y1)`; `Err` if the range is inverted or
+    /// runs past the buffer.
+    const fn row_range(&self, y0: u32, y1: u32) -> Result<std::ops::Range<usize>, DriverError> {
+        if y0 > y1 || y1 > self.height {
+            return Err(DriverError(
+                cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+            ));
+        }
+        let row = self.row_bytes();
+        Ok(y0 as usize * row..y1 as usize * row)
+    }
+
+    /// Copy rows `[y0, y1)` to a host `Vec<u8>` of `(y1 - y0) × width × 4`
+    /// bytes.
     ///
     /// Synchronises the stream first so all pending kernel writes
     /// (typically a sequence of blit-kernel launches) complete before
@@ -121,14 +129,43 @@ impl DevicePageBuffer {
     /// dispatcher in [`crate::GpuCtx`].
     ///
     /// # Errors
-    /// Returns the underlying [`DriverError`] if either sync or the
-    /// D→H copy fails.
-    pub fn download(&self) -> Result<Vec<u8>, DriverError> {
-        let mut host = vec![0u8; self.byte_len()];
+    /// Returns [`DriverError`] for an invalid row range, or if either sync
+    /// or the D→H copy fails.
+    pub fn download_rows(&self, y0: u32, y1: u32) -> Result<Vec<u8>, DriverError> {
+        let range = self.row_range(y0, y1)?;
+        let mut host = vec![0u8; range.len()];
+        if host.is_empty() {
+            return Ok(host);
+        }
+        let view = self.rgba.slice(range);
         self.stream.synchronize()?;
-        self.stream.memcpy_dtoh(&self.rgba, &mut host)?;
+        self.stream.memcpy_dtoh(&view, &mut host)?;
         self.stream.synchronize()?;
         Ok(host)
+    }
+
+    /// Copy the whole buffer to a host `Vec<u8>` of [`Self::byte_len`] bytes.
+    ///
+    /// # Errors
+    /// Same as [`Self::download_rows`].
+    pub fn download(&self) -> Result<Vec<u8>, DriverError> {
+        self.download_rows(0, self.height)
+    }
+
+    /// Zero rows `[y0, y1)`.  Stream-ordered: runs after any kernel
+    /// already queued on the buffer's stream and before anything queued
+    /// later.
+    ///
+    /// # Errors
+    /// Returns [`DriverError`] for an invalid row range or if the memset
+    /// fails to enqueue.
+    pub fn zero_rows(&mut self, y0: u32, y1: u32) -> Result<(), DriverError> {
+        let range = self.row_range(y0, y1)?;
+        if range.is_empty() {
+            return Ok(());
+        }
+        let mut view = self.rgba.slice_mut(range);
+        self.stream.memset_zeros(&mut view)
     }
 }
 
@@ -164,6 +201,21 @@ mod tests {
         let host = buf.download().expect("download");
         assert_eq!(host.len(), 32 * 16 * 4);
         assert!(host.iter().all(|&b| b == 0), "alloc_zeros must zero-fill");
+    }
+
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn row_ranges_are_validated_and_sized() {
+        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
+        let stream = ctx.default_stream();
+        let mut buf = DevicePageBuffer::new(stream, 8, 4).expect("alloc");
+        assert_eq!(buf.download_rows(1, 3).expect("rows").len(), 2 * 8 * 4);
+        assert!(buf.download_rows(2, 2).expect("empty").is_empty());
+        assert!(buf.download_rows(3, 2).is_err(), "inverted range");
+        assert!(buf.download_rows(0, 5).is_err(), "past the buffer");
+        assert!(buf.zero_rows(0, 5).is_err(), "past the buffer");
+        buf.zero_rows(0, 4).expect("zero");
+        assert!(buf.download().expect("download").iter().all(|&b| b == 0));
     }
 
     #[cfg(feature = "gpu-validation")]

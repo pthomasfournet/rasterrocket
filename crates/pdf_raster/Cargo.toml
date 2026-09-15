@@ -42,6 +42,10 @@ pdf         = { package = "rasterrocket-parser",  path = "../pdf",        versio
 rayon       = "1"
 log         = { workspace = true }
 
+[dev-dependencies]
+# Builds the JPEG fixtures for the cache-on vs cache-off render parity test.
+jpeg-encoder = "0.7"
+
 [lints.rust]
 unsafe_code    = "warn"   # deskew rotate may need unsafe for SIMD; explicit allow per site
 missing_docs   = "warn"

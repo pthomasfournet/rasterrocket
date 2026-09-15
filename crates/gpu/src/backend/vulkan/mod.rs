@@ -168,7 +168,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn record_blit_image(&self, params: params::BlitParams<'_, Self>) -> Result<()> {
-        params.validate()?;
+        params.validate(self)?;
         self.recorder.record_blit_image(params)
     }
 

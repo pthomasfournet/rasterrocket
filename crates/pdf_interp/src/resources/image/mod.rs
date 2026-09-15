@@ -527,8 +527,17 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         },
         Some("CCITTFaxDecode") => decode_ccitt(&codec_input, w, h, is_mask, terminal_parms),
         Some("DCTDecode") => {
+            // The GPU blit composites cached images fully opaque, so an
+            // image carrying a soft mask or explicit mask stays
+            // host-resident: neither looked up (a content-hash hit from
+            // another document would drop the mask) nor inserted.  The
+            // conditions mirror the mask resolution below.
             #[cfg(feature = "cache")]
-            let cache_ctx = codecs::DctCacheCtx::from_resources(image_cache, doc_id, stream_id);
+            let cache_ctx = if has_mask_entry(&stream.dict) {
+                None
+            } else {
+                codecs::DctCacheCtx::from_resources(image_cache, doc_id, stream_id)
+            };
             decode_dct(
                 &codec_input,
                 w,
@@ -639,6 +648,18 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     }
 
     ImageResolution::Ok(img)
+}
+
+/// Whether an image dictionary carries a mask the blit must honour: an
+/// `/SMask` stream reference, or a `/Mask` given as a stencil-mask stream
+/// reference or a colour-key range array (PDF §8.9.6).
+#[cfg(feature = "cache")]
+fn has_mask_entry(dict: &Dictionary) -> bool {
+    matches!(dict.get(b"SMask"), Some(Object::Reference(_)))
+        || matches!(
+            dict.get(b"Mask"),
+            Some(Object::Reference(_) | Object::Array(_))
+        )
 }
 
 // ── Colour space convenience wrapper ─────────────────────────────────────────

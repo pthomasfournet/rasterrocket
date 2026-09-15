@@ -6,25 +6,33 @@
 
 use super::GpuBackend;
 
-/// Parameters for a GPU image blit (texture-mapped composite onto the page buffer).
+/// Parameters for a GPU image blit (table-driven copy onto the page buffer).
+///
+/// The kernel reads source pixel `cols[dx] + rows[dy]` (Q32 fixed point,
+/// four `u32` words per entry: `[x_hi, x_lo, y_hi, y_lo]`) for every page
+/// pixel inside `bbox`; see `crate::blit` for the table layout.
 ///
 /// # Invariants enforced by `BlitParams::validate`
 /// - `src_w > 0`, `src_h > 0`, `dst_w > 0`, `dst_h > 0`
 /// - `src_layout` is `0` (RGB, 3 bytes/pixel) or `1` (Gray, 1 byte/pixel).
 ///   Mask images (layout `2`) are CPU-only and must not reach the GPU.
 /// - `bbox` is `[x0, y0, x1, y1]` with `x0 <= x1` and `y0 <= y1`
-/// - `page_h.is_finite()` and `page_h > 0.0`; conventionally `page_h == dst_h as f32`
-/// - All six `inv_ctm` coefficients `is_finite()`
+/// - `cols` holds at least `(x1 - x0)` entries and `rows` at least
+///   `(y1 - y0)` entries of 16 bytes each
 ///
 /// Backends should call `validate()` at record time. Violating these
-/// invariants would propagate `NaN`/`Inf` into kernel arithmetic, route
-/// Mask images through the Gray code path silently, or produce garbage
-/// pixels (or panics in debug builds via `debug_assert`).
+/// invariants would read past a sampling table, route Mask images through
+/// the Gray code path silently, or produce garbage pixels (or panics in
+/// debug builds via `debug_assert`).
 pub struct BlitParams<'a, B: GpuBackend + ?Sized> {
     /// Source image in device memory.
     pub src: &'a B::DeviceBuffer,
     /// Destination page buffer in device memory.
     pub dst: &'a B::DeviceBuffer,
+    /// Per-column sampling table in device memory (`bbox` width entries).
+    pub cols: &'a B::DeviceBuffer,
+    /// Per-row sampling table in device memory (`bbox` height entries).
+    pub rows: &'a B::DeviceBuffer,
     /// Source image width in pixels (must be > 0).
     pub src_w: u32,
     /// Source image height in pixels (must be > 0).
@@ -38,13 +46,12 @@ pub struct BlitParams<'a, B: GpuBackend + ?Sized> {
     pub dst_h: u32,
     /// Destination bounding box `[x0, y0, x1, y1]` in page-space pixels (`x0 <= x1`, `y0 <= y1`).
     pub bbox: [i32; 4],
-    /// Page height used for PDF → raster coordinate flip; finite and `> 0`.
-    pub page_h: f32,
-    /// Inverse current transformation matrix (6 coefficients: a b c d e f). Must all be finite.
-    pub inv_ctm: [f32; 6],
 }
 
 impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
+    /// Bytes per sampling-table entry: four `u32` words.
+    pub const TABLE_ENTRY_BYTES: usize = 16;
+
     /// Validate the invariants documented on `BlitParams`.
     ///
     /// Returns a [`super::BackendError`] describing the first violated
@@ -54,7 +61,7 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
     ///
     /// # Errors
     /// Returns a `BackendError` if any documented invariant is violated.
-    pub fn validate(&self) -> super::Result<()> {
+    pub fn validate(&self, backend: &B) -> super::Result<()> {
         const KIND: &str = "BlitInvariantViolation";
         let invariant =
             |detail: &'static str| super::BackendError::InvariantViolation { kind: KIND, detail };
@@ -68,11 +75,15 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
         if x0 > x1 || y0 > y1 {
             return Err(invariant("bbox must satisfy x0 <= x1 and y0 <= y1"));
         }
-        if !self.page_h.is_finite() || self.page_h <= 0.0 {
-            return Err(invariant("page_h must be finite and > 0"));
+        // Table coverage: the kernel indexes `cols` by `dx - x0` and `rows`
+        // by `dy - y0` without a bounds check of its own.
+        let width = usize::try_from(x1.saturating_sub(x0)).unwrap_or(0);
+        let height = usize::try_from(y1.saturating_sub(y0)).unwrap_or(0);
+        if backend.device_buffer_len(self.cols) < width.saturating_mul(Self::TABLE_ENTRY_BYTES) {
+            return Err(invariant("cols table shorter than bbox width × 16 bytes"));
         }
-        if !self.inv_ctm.iter().all(|c| c.is_finite()) {
-            return Err(invariant("inv_ctm must contain only finite coefficients"));
+        if backend.device_buffer_len(self.rows) < height.saturating_mul(Self::TABLE_ENTRY_BYTES) {
+            return Err(invariant("rows table shorter than bbox height × 16 bytes"));
         }
         // src_layout: 0 = RGB, 1 = Gray. Anything else (especially 2 = Mask)
         // would fall through the kernel's `if (src_layout == 0) { RGB } else { Gray }`
@@ -1100,35 +1111,39 @@ mod tests {
     }
 
     /// Static stand-in for a device buffer of "large enough" capacity.
-    /// The numeric value is only consulted by `device_buffer_len`, which
-    /// `BlitParams::validate` doesn't call — but `ScanParams::validate` does.
+    /// The numeric value is only consulted by `device_buffer_len`.
     static FAKE_BUF: usize = usize::MAX;
+
+    /// Sampling tables sized exactly for `ok_blit`'s 100×100 bbox.
+    static BLIT_TABLE: usize = 100 * 16;
 
     fn ok_blit() -> BlitParams<'static, FakeBackend> {
         BlitParams {
             src: &FAKE_BUF,
             dst: &FAKE_BUF,
+            cols: &BLIT_TABLE,
+            rows: &BLIT_TABLE,
             src_w: 100,
             src_h: 100,
             src_layout: 0,
             dst_w: 200,
             dst_h: 200,
             bbox: [0, 0, 100, 100],
-            page_h: 200.0,
-            inv_ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         }
     }
 
     #[test]
     fn validate_accepts_valid_blit_params() {
-        ok_blit().validate().expect("valid params should pass");
+        ok_blit()
+            .validate(&FakeBackend)
+            .expect("valid params should pass");
     }
 
     #[test]
     fn validate_rejects_zero_src_dim() {
         let mut p = ok_blit();
         p.src_w = 0;
-        let err = p.validate().unwrap_err().to_string();
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("src dimensions"), "{err}");
     }
 
@@ -1136,7 +1151,7 @@ mod tests {
     fn validate_rejects_zero_dst_dim() {
         let mut p = ok_blit();
         p.dst_h = 0;
-        let err = p.validate().unwrap_err().to_string();
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("dst dimensions"), "{err}");
     }
 
@@ -1144,69 +1159,56 @@ mod tests {
     fn validate_rejects_inverted_bbox() {
         let mut p = ok_blit();
         p.bbox = [50, 0, 10, 100]; // x0 > x1
-        let err = p.validate().unwrap_err().to_string();
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("bbox"), "{err}");
     }
 
     #[test]
-    fn validate_rejects_nan_page_h() {
+    fn validate_rejects_short_cols_table() {
         let mut p = ok_blit();
-        p.page_h = f32::NAN;
-        let err = p.validate().unwrap_err().to_string();
-        assert!(err.contains("page_h"), "{err}");
+        p.bbox = [0, 0, 101, 100];
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
+        assert!(err.contains("cols table"), "{err}");
     }
 
     #[test]
-    fn validate_rejects_negative_page_h() {
+    fn validate_rejects_short_rows_table() {
         let mut p = ok_blit();
-        p.page_h = -1.0;
-        let err = p.validate().unwrap_err().to_string();
-        assert!(err.contains("page_h"), "{err}");
+        p.bbox = [0, 0, 100, 101];
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
+        assert!(err.contains("rows table"), "{err}");
     }
 
     #[test]
-    fn validate_rejects_zero_page_h() {
+    fn validate_accepts_empty_bbox_with_empty_tables() {
+        static EMPTY: usize = 0;
         let mut p = ok_blit();
-        p.page_h = 0.0;
-        let err = p.validate().unwrap_err().to_string();
-        assert!(err.contains("page_h"), "{err}");
-    }
-
-    #[test]
-    fn validate_rejects_inf_inv_ctm() {
-        let mut p = ok_blit();
-        p.inv_ctm[3] = f32::INFINITY;
-        let err = p.validate().unwrap_err().to_string();
-        assert!(err.contains("inv_ctm"), "{err}");
-    }
-
-    #[test]
-    fn validate_rejects_nan_inv_ctm() {
-        let mut p = ok_blit();
-        p.inv_ctm[0] = f32::NAN;
-        let err = p.validate().unwrap_err().to_string();
-        assert!(err.contains("inv_ctm"), "{err}");
+        p.bbox = [10, 10, 10, 10];
+        p.cols = &EMPTY;
+        p.rows = &EMPTY;
+        p.validate(&FakeBackend)
+            .expect("an empty bbox needs no table entries");
     }
 
     #[test]
     fn validate_accepts_layout_0_rgb() {
         let mut p = ok_blit();
         p.src_layout = 0;
-        p.validate().expect("layout 0 (RGB) is valid");
+        p.validate(&FakeBackend).expect("layout 0 (RGB) is valid");
     }
 
     #[test]
     fn validate_accepts_layout_1_gray() {
         let mut p = ok_blit();
         p.src_layout = 1;
-        p.validate().expect("layout 1 (Gray) is valid");
+        p.validate(&FakeBackend).expect("layout 1 (Gray) is valid");
     }
 
     #[test]
     fn validate_rejects_layout_2_mask() {
         let mut p = ok_blit();
         p.src_layout = 2;
-        let err = p.validate().unwrap_err().to_string();
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("Mask"), "{err}");
         assert!(err.contains("CPU-only"), "{err}");
     }
@@ -1215,7 +1217,7 @@ mod tests {
     fn validate_rejects_unknown_layout() {
         let mut p = ok_blit();
         p.src_layout = 999;
-        let err = p.validate().unwrap_err().to_string();
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("src_layout"), "{err}");
     }
 

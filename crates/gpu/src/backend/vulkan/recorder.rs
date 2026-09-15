@@ -758,14 +758,11 @@ impl PageRecorder {
     ) -> Result<()> {
         // Push-constant layout (must match blit_image.slang's uniform
         // order): src_w, src_h, src_layout, dst_w, dst_h, bx0, by0, bx1,
-        // by1 as i32 (9×4 = 36 bytes); page_h as f32 (4 bytes); inv_ctm0..5
-        // as f32 (24 bytes) → 64 bytes total, well under our 128-byte
-        // push-constant range.
-        let mut push = [0u8; 64];
-        let put_int = |buf: &mut [u8; 64], off: usize, v: i32| {
-            buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
-        };
-        let put_float = |buf: &mut [u8; 64], off: usize, v: f32| {
+        // by1 as i32 (9×4 = 36 bytes), well under our 128-byte
+        // push-constant range.  The sampling tables are storage buffers
+        // (bindings 2 and 3).
+        let mut push = [0u8; 36];
+        let put_int = |buf: &mut [u8; 36], off: usize, v: i32| {
             buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
         };
         put_int(&mut push, 0, i32::try_from(p.src_w).unwrap_or(i32::MAX));
@@ -781,10 +778,6 @@ impl PageRecorder {
         put_int(&mut push, 24, p.bbox[1]);
         put_int(&mut push, 28, p.bbox[2]);
         put_int(&mut push, 32, p.bbox[3]);
-        put_float(&mut push, 36, p.page_h);
-        for (i, c) in p.inv_ctm.iter().enumerate() {
-            put_float(&mut push, 40 + i * 4, *c);
-        }
 
         // Dispatch one workgroup per 16×16 bbox tile.  We dispatch over
         // the bbox extent rather than the full page so blits in a small
@@ -796,8 +789,13 @@ impl PageRecorder {
 
         self.dispatch_kernel(
             KernelId::BlitImage,
-            &[p.src.handle(), p.dst.handle()],
-            &[p.src.size(), p.dst.size()],
+            &[
+                p.src.handle(),
+                p.dst.handle(),
+                p.cols.handle(),
+                p.rows.handle(),
+            ],
+            &[p.src.size(), p.dst.size(), p.cols.size(), p.rows.size()],
             &push,
             (groups_x, groups_y, 1),
         )

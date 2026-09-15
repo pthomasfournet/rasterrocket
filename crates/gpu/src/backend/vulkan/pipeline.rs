@@ -9,7 +9,7 @@
 //! ## Descriptor model
 //!
 //! All kernels use a single descriptor set (set = 0) with N storage
-//! buffers.  Scalar uniforms (`n_pixels`, width, height, eo, `inv_ctm`[6])
+//! buffers.  Scalar uniforms (`n_pixels`, width, height, eo, blit bbox)
 //! are passed via push constants (max 128 bytes — Vulkan's guaranteed
 //! minimum is 128, every desktop driver supports at least that).
 //!
@@ -298,8 +298,8 @@ impl KernelId {
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::IdctColor => &[0, 1, 2, 3],
             // Everyone else: sequential 0..n.
-            Self::Composite | Self::ApplySoftMask | Self::AaFill | Self::BlitImage => &[0, 1],
-            Self::TileFill => &[0, 1, 2, 3],
+            Self::Composite | Self::ApplySoftMask | Self::AaFill => &[0, 1],
+            Self::TileFill | Self::BlitImage => &[0, 1, 2, 3],
             Self::IccClut => &[0, 1, 2],
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => &[0, 1],
@@ -329,8 +329,8 @@ impl KernelId {
             Self::TileFill => 4,
             // (cmyk, rgb, clut)
             Self::IccClut => 3,
-            // (src, dst_rgba) — inv_ctm and other scalars travel as push constants
-            Self::BlitImage => 2,
+            // (src, dst_rgba, cols, rows) — dimensions and bbox travel as push constants
+            Self::BlitImage => 4,
             // (data, block_sums) — len_elems travels as push constant
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => 2,
@@ -483,7 +483,7 @@ impl PipelineCache {
             .offset(0)
             // 128 bytes: Vulkan's guaranteed minimum max push-constant size.
             // Our largest kernel push struct is well under this (icc_clut
-            // pushes 8 bytes; blit_image pushes 56).
+            // pushes 8 bytes; blit_image pushes 36).
             .size(128)];
         let pl_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)

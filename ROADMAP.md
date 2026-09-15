@@ -1625,11 +1625,19 @@ mistaken for a clean slate:
   time (see the release workflow). Cutting a release is the natural next step.
 - **4 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
   propagation pass-complexity, unleveraged CPU SIMD opportunities, unleveraged
-  CUDA opportunities, and a `cache`-feature render divergence. The two
+  CUDA opportunities, and a `gpu-aa` fill-coverage divergence from the CPU
+  rasteriser (filed 2026-09-15: the GPU tile/AA fill kernels compute
+  analytical or 64-sample coverage while the CPU path is 4× scanline AA, so
+  partial-coverage edges of large fills differ by up to ~57/255; seen on one
+  10×160 px rectangle in corpus-08 page 2, nowhere in corpus-02/-07). The two
   "unleveraged" reports are opportunity inventories with several items already
-  closed in-file; the `cache` one is a **correctness** finding (CUDA renders
-  diverge from CPU on image-bearing pages whenever the device-resident image
-  cache is enabled — pre-existing, reproduced on the v1.2.0 binary).
+  closed in-file. (The `cache`-feature render divergence found 2026-09-15 is
+  fixed and its report removed: the CPU image sampler's axis-aligned fast path
+  snapped its sampling origin to the image edge, the blit kernel used its own
+  f32 inverse-CTM, and the device page buffer was composited only at end of
+  page. Both paths now sample through one shared fixed-point grid and
+  composite per image; `crates/pdf_raster/tests/cache_render_parity.rs`
+  guards it end-to-end on a synthetic page plus corpus-07 and corpus-08.)
 
 Deferred/blocked items, in full:
 

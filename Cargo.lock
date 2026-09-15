@@ -1212,6 +1212,7 @@ name = "rasterrocket"
 version = "1.2.0"
 dependencies = [
  "base64",
+ "jpeg-encoder",
  "log",
  "rasterrocket-color",
  "rasterrocket-encode",

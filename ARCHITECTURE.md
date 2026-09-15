@@ -331,7 +331,7 @@ compile is gated on `CARGO_FEATURE_VULKAN`.
 
 **Phase 9 image cache** (`cache` feature, CUDA-only)
 - `DeviceImageCache` — three tiers: VRAM (refcount-pinned LRU), pinned host RAM (`cuMemAllocHost` slabs, demote-on-evict / promote-on-hit), disk (`<root>/<doc-blake3>/<content-hash>.bin` sidecar files; opt-in via `PDF_RASTER_CACHE_DIR`).
-- `DevicePageBuffer` — zero-init RGBA8 per page; lazy-allocated on first GPU image; downloaded + alpha-composited onto the host bitmap at `PageRenderer::finish`.
+- `DevicePageBuffer` — zero-init RGBA8 per page; lazy-allocated on first GPU image. Each blit samples the cached image through the same Q32 column/row tables the CPU sampler uses (`renderer/page/image_sampler.rs`), then the touched rows are downloaded, source-over composited onto the host bitmap in content-stream order, and re-zeroed — so cache-on and cache-off renders are byte-identical.
 - BLAKE3 content hashing keys cross-document dedup; `(DocId, ObjId)` alias keys same-document fast paths.
 
 **CPU fallbacks** — every GPU function has a pure-Rust CPU counterpart. The

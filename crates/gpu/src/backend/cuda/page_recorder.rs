@@ -30,7 +30,7 @@ use super::be;
 use crate::GpuCtx;
 use crate::backend::{BackendError, Result, params};
 #[cfg(feature = "cache")]
-use crate::blit::{BlitBbox, InverseCtm};
+use crate::blit::BlitBbox;
 
 pub(super) struct PageRecorder {
     pub(super) ctx: Arc<GpuCtx>,
@@ -120,11 +120,12 @@ impl PageRecorder {
         fence.0.synchronize().map_err(be)
     }
 
+    /// Callers run `params.validate(&backend)` before this in the
+    /// `CudaBackend::record_blit_image` wrapper.
     pub(super) fn record_blit_image(
         &self,
         p: params::BlitParams<'_, super::CudaBackend>,
     ) -> Result<()> {
-        p.validate()?;
         Self::record_blit_image_inner(&self.ctx, p)
     }
 
@@ -133,22 +134,14 @@ impl PageRecorder {
         ctx: &Arc<GpuCtx>,
         p: params::BlitParams<'_, super::CudaBackend>,
     ) -> Result<()> {
-        let inv_ctm = InverseCtm {
-            u_dx: p.inv_ctm[0],
-            u_dy: p.inv_ctm[1],
-            v_dx: p.inv_ctm[2],
-            v_dy: p.inv_ctm[3],
-            tx: p.inv_ctm[4],
-            ty: p.inv_ctm[5],
-        };
         let bbox = BlitBbox {
             x0: p.bbox[0],
             y0: p.bbox[1],
             x1: p.bbox[2],
             y1: p.bbox[3],
         };
-        // Trait passes layout as u32; kernel takes i32. validate() above
-        // has already constrained the value to {0, 1}, so the cast is exact.
+        // Trait passes layout as u32; kernel takes i32. validate() has
+        // already constrained the value to {0, 1}, so the cast is exact.
         // Keeping the explicit cast (rather than `as i32`) so a future
         // widening of valid layouts surfaces at this exact line.
         let layout_code =
@@ -161,8 +154,8 @@ impl PageRecorder {
             p.dst,
             (p.dst_w, p.dst_h),
             bbox,
-            &inv_ctm,
-            p.page_h,
+            p.cols,
+            p.rows,
         )
         .map_err(be)
     }

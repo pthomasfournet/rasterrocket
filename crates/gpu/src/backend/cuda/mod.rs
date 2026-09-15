@@ -97,6 +97,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn record_blit_image(&self, params: params::BlitParams<'_, Self>) -> Result<()> {
+        params.validate(self)?;
         self.recorder.record_blit_image(params)
     }
 
