@@ -7,7 +7,8 @@ license.workspace    = true
 repository.workspace = true
 homepage.workspace   = true
 readme.workspace     = true
-description = "PDF to pixel buffer — pure Rust, zero Poppler. For the CLI tool: cargo install rasterrocket-cli"
+publish     = false
+description = "PDF to pixel buffer — pure Rust, zero Poppler. GitHub-distributed; build the `rrocket` CLI from source."
 keywords    = ["pdf", "raster", "ocr", "renderer", "vulkan"]
 categories  = ["multimedia::images", "rendering", "parser-implementations"]
 

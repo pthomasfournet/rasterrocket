@@ -7,6 +7,7 @@ license.workspace    = true
 repository.workspace = true
 homepage.workspace   = true
 readme.workspace     = true
+publish     = false
 description = "CLI — renders PDF pages to pixel files. Drop-in pdftoppm replacement. Pure Rust, zero Poppler."
 keywords    = ["pdf", "raster", "cli", "pdftoppm", "renderer"]
 categories  = ["command-line-utilities", "multimedia::images", "rendering"]
