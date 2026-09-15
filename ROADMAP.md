@@ -1623,10 +1623,13 @@ mistaken for a clean slate:
   7 `deps`, 5 `test`, plus docs/refactor/chore, landing through 2026-09-15.
   `CHANGELOG.md` stops at 1.2.0 because `git-cliff` runs manually at release
   time (see the release workflow). Cutting a release is the natural next step.
-- **3 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
+- **4 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
   propagation pass-complexity, unleveraged CPU SIMD opportunities, unleveraged
-  CUDA opportunities. The latter two are opportunity inventories with several
-  items already closed in-file; none block correctness.
+  CUDA opportunities, and a `cache`-feature render divergence. The two
+  "unleveraged" reports are opportunity inventories with several items already
+  closed in-file; the `cache` one is a **correctness** finding (CUDA renders
+  diverge from CPU on image-bearing pages whenever the device-resident image
+  cache is enabled — pre-existing, reproduced on the v1.2.0 binary).
 
 Deferred/blocked items, in full:
 
