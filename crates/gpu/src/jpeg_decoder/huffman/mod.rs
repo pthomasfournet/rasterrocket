@@ -13,7 +13,9 @@
 #[cfg(all(test, feature = "gpu-validation"))]
 mod corpus;
 
-use crate::backend::params::{HUFFMAN_CODEBOOK_ENTRIES, HuffmanParams, HuffmanPhase};
+use crate::backend::params::{
+    HUFFMAN_CODEBOOK_ENTRIES, HUFFMAN_PHASE1_THREADS, HuffmanParams, HuffmanPhase,
+};
 use crate::backend::{BackendError, GpuBackend, Result};
 use crate::jpeg::CanonicalCodebook;
 #[cfg(all(test, feature = "gpu-validation"))]
@@ -23,22 +25,25 @@ use crate::jpeg_decoder::phase1_oracle::SubsequenceState;
 #[cfg(test)]
 use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 
-/// Pass bound for the JPEG-framed Phase 2 propagation loop: `n - 1`.
+/// Pass bound for the JPEG-framed Phase 2 propagation loop: the
+/// number of kernel workgroups, `ceil(n / HUFFMAN_PHASE1_THREADS)`.
 ///
 /// Slot 0 is pinned correct (its fresh start is the true stream
-/// start); each pass recomputes slot `i` from the previous pass's
-/// slot `i - 1`, so slots stabilise left to right and all `n` are
-/// final after `n - 1` passes; the next pass observes every recompute
-/// as a fixpoint. The `0..=bound` dispatch loop therefore runs at
-/// most `bound + 1 = n` passes and always detects convergence — the
-/// re-decode is deterministic even for erroring streams, so the
-/// non-convergence error path is defence-in-depth only.
+/// start). Each pass, every workgroup propagates to a local fixpoint
+/// from its left input (the previous pass's last slot of the
+/// workgroup before it), so it leaves holding the exact chain from
+/// that input. Workgroup `g` is therefore final after pass `g`, all
+/// `G` workgroups after pass `G - 1`, and pass `G` observes every
+/// slot as a fixpoint. The `0..=bound` dispatch loop runs at most
+/// `G + 1` passes and always detects convergence — the re-decode is
+/// deterministic even for erroring streams, so the non-convergence
+/// error path is defence-in-depth only.
 ///
 /// Single definition shared with the CPU oracle
 /// (`phase2_oracle::jpeg_phase2_run_to_sync`) so the bound embedded
 /// in compared `Phase2Outcome`s cannot drift between the two.
 pub(in crate::jpeg_decoder) const fn jpeg_phase2_retry_bound(num_subsequences: u32) -> u32 {
-    num_subsequences.saturating_sub(1)
+    num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS)
 }
 
 /// Flatten an iterator of `&CanonicalCodebook` into the GPU layout:
@@ -224,7 +229,9 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
 /// (`setup.s_info_scratch`), followed by a buffer swap — so
 /// `setup.s_info` always holds the last-written states, and on
 /// convergence the two buffers are identical (a fixpoint pass changes
-/// nothing).
+/// nothing). Propagation within a workgroup happens on-device inside
+/// the dispatch; the host loop only carries truth across workgroup
+/// boundaries.
 ///
 /// Returns `Some(iterations)` (0-based index of the converged pass) or
 /// `None` when the [`jpeg_phase2_retry_bound`] pass budget runs out —
@@ -344,6 +351,25 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
 /// Uses the JPEG-framed kernels: `JpegPhase1IntraSync`, the shared
 /// `JpegPhase2InterSync` propagation loop, CPU-side exclusive scan for
 /// Phase 3, and `JpegPhase4Redecode`.
+///
+/// # Cost model
+///
+/// With `n = ceil(length_bits / subsequence_bits)` subsequences and
+/// `W = HUFFMAN_PHASE1_THREADS` lanes per workgroup, Phases 1 and 4
+/// are one dispatch each with per-thread work of one or two regions.
+/// Phase 2 is `1 + ceil(r / W)` synchronous host round trips, where
+/// `r` is the longest run of subsequences whose fresh-start Phase 1
+/// chain never re-synchronises with the true decode; each round trip
+/// costs up to `min(r, W)` sequential region re-decodes on-device.
+/// Grayscale streams have `r ≈ 0` (the block phase is trivially
+/// right and the zig-zag index self-corrects at the next EOB).
+/// Multi-component streams have `r` bounded only by the content:
+/// short optimised codes over flat regions — document scans — never
+/// re-synchronise a wrong block phase, so `r ≈ n` and the phase
+/// costs `n` sequential region re-decodes spread over `ceil(n / W)`
+/// round trips, which is slower than the CPU walk for any stream
+/// size. The dispatcher enforces no cap; a caller routing by cost
+/// must decide from `prep.components.len()` and `length_bits`.
 ///
 /// # Errors
 /// Returns `BackendError` if any allocation, upload, kernel dispatch,
@@ -955,6 +981,13 @@ mod tests {
     use crate::jpeg_decoder::prepare_jpeg;
     use crate::jpeg_decoder::tests::fixtures::{book4_codebook, book4_stream};
 
+    static COLOUR_32X32_444: &[u8] =
+        include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+    static COLOUR_128X128_444: &[u8] =
+        include_bytes!("../../../../../tests/fixtures/jpeg/colour_128x128_444.jpg");
+    static COLOUR_128X128_420: &[u8] =
+        include_bytes!("../../../../../tests/fixtures/jpeg/colour_128x128_420.jpg");
+
     fn try_cuda() -> Option<CudaBackend> {
         CudaBackend::new().ok()
     }
@@ -1373,33 +1406,18 @@ mod tests {
         }
     }
 
-    /// JPEG Phase 1+2 on CUDA reproduces the CPU propagation oracle
-    /// exactly on the multi-component fixture — final states and
-    /// outcome both. This is the case the old agreement predicate
-    /// could never sync (fresh-start walkers hold wrong block phases).
-    #[test]
-    fn jpeg_phase2_cuda_matches_propagation_oracle_on_ycbcr() {
+    /// CPU mirror of `dispatch_jpeg_phase1_then_phase2`: per-subseq
+    /// fresh-start Phase 1 snapshots, then the propagation oracle.
+    fn cpu_jpeg_phase1_then_phase2(
+        prep: &crate::jpeg_decoder::JpegPreparedInput,
+        subseq_bits: u32,
+    ) -> (Vec<SubsequenceState>, Phase2Outcome) {
         use crate::jpeg_decoder::phase2_oracle::jpeg_phase2_run_to_sync;
-        static COLOUR_32X32_444: &[u8] =
-            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
-        let Some(b) = try_cuda() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        let prep = prepare_jpeg(COLOUR_32X32_444).expect("colour 4:4:4 JPEG must prepare");
-        assert_eq!(prep.components.len(), 3, "fixture must be 3-component");
-        let subseq_bits = 32u32;
-
-        let (gpu_s_info, gpu_outcome) =
-            dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch ok");
-
-        // CPU: same Phase 1 (per-subseq fresh-start snapshots), then
-        // the propagation oracle.
-        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(&prep);
+        let (mcu_sched, blocks_per_mcu) = build_mcu_schedule(prep);
         let dc_refs = prep.dc_codebooks_for_dispatch();
         let ac_refs = prep.ac_codebooks_for_dispatch();
         let length_bits = prep.bitstream.length_bits;
-        let mut cpu_s_info: Vec<SubsequenceState> = (0..length_bits.div_ceil(subseq_bits))
+        let mut s_info: Vec<SubsequenceState> = (0..length_bits.div_ceil(subseq_bits))
             .map(|i| {
                 let start_bit = i * subseq_bits;
                 let hard_limit = length_bits.min(start_bit + 2 * subseq_bits);
@@ -1417,8 +1435,8 @@ mod tests {
                 state
             })
             .collect();
-        let cpu_outcome = jpeg_phase2_run_to_sync(
-            &mut cpu_s_info,
+        let outcome = jpeg_phase2_run_to_sync(
+            &mut s_info,
             &prep.bitstream,
             &dc_refs,
             &ac_refs,
@@ -1426,9 +1444,66 @@ mod tests {
             blocks_per_mcu,
             subseq_bits,
         );
+        (s_info, outcome)
+    }
+
+    /// JPEG Phase 1+2 on CUDA reproduces the CPU propagation oracle
+    /// exactly on the multi-component fixture — final states and
+    /// outcome both. This is the case the old agreement predicate
+    /// could never sync (fresh-start walkers hold wrong block phases).
+    #[test]
+    fn jpeg_phase2_cuda_matches_propagation_oracle_on_ycbcr() {
+        let Some(b) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let prep = prepare_jpeg(COLOUR_32X32_444).expect("colour 4:4:4 JPEG must prepare");
+        assert_eq!(prep.components.len(), 3, "fixture must be 3-component");
+        let subseq_bits = 32u32;
+
+        let (gpu_s_info, gpu_outcome) =
+            dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch ok");
+        let (cpu_s_info, cpu_outcome) = cpu_jpeg_phase1_then_phase2(&prep, subseq_bits);
 
         assert_eq!(gpu_outcome, cpu_outcome, "GPU vs CPU Phase 2 outcome");
         assert_eq!(gpu_s_info, cpu_s_info, "GPU vs CPU converged s_info");
+    }
+
+    /// Same parity on inputs spanning several workgroups, so the
+    /// kernel's on-device local loop, its cross-workgroup hand-off
+    /// through the host pass, and the pass count all have to agree
+    /// with the oracle's model of them. Covers both 4:4:4 (three
+    /// blocks per MCU) and 4:2:0 (six).
+    #[test]
+    fn jpeg_phase2_cuda_matches_propagation_oracle_across_workgroups() {
+        let Some(b) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        for (name, bytes) in [("444", COLOUR_128X128_444), ("420", COLOUR_128X128_420)] {
+            for subseq_bits in [16u32, 64] {
+                let prep = prepare_jpeg(bytes).expect("colour JPEG must prepare");
+                let (gpu_s_info, gpu_outcome) =
+                    dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch");
+                assert!(
+                    gpu_s_info.len() > HUFFMAN_PHASE1_THREADS as usize,
+                    "{name} ssb={subseq_bits}: fixture must span more than one workgroup"
+                );
+                assert!(
+                    matches!(gpu_outcome, Phase2Outcome::Converged { .. }),
+                    "{name} ssb={subseq_bits}: expected convergence, got {gpu_outcome:?}"
+                );
+                let (cpu_s_info, cpu_outcome) = cpu_jpeg_phase1_then_phase2(&prep, subseq_bits);
+                assert_eq!(
+                    gpu_outcome, cpu_outcome,
+                    "{name} ssb={subseq_bits}: GPU vs CPU Phase 2 outcome"
+                );
+                assert_eq!(
+                    gpu_s_info, cpu_s_info,
+                    "{name} ssb={subseq_bits}: GPU vs CPU converged s_info"
+                );
+            }
+        }
     }
 
     // ── B2f: JPEG Phase 4 CUDA tests ─────────────────────────────────────
@@ -1487,8 +1562,6 @@ mod tests {
     #[test]
     fn jpeg_phase4_cuda_matches_oracle_on_ycbcr_444() {
         use crate::jpeg_decoder::decode_scan_symbols;
-        static COLOUR_32X32_444: &[u8] =
-            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
         let Some(b) = try_cuda() else {
             eprintln!("skipping: no CUDA device");
             return;
@@ -1515,14 +1588,36 @@ mod tests {
         }
     }
 
+    /// JPEG Phases 1–4 on CUDA decode a 4:2:0 YCbCr image spanning
+    /// several workgroups and match the CPU oracle: six blocks per MCU
+    /// (four luma, two chroma) and a multi-pass Phase 2.
+    #[test]
+    fn jpeg_phase4_cuda_matches_oracle_on_ycbcr_420_across_workgroups() {
+        use crate::jpeg_decoder::decode_scan_symbols;
+        let Some(b) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let prep = prepare_jpeg(COLOUR_128X128_420).expect("colour 4:2:0 JPEG must prepare");
+        let (_, blocks_per_mcu) = build_mcu_schedule(&prep);
+        assert_eq!(blocks_per_mcu, 6, "fixture must be 4:2:0");
+        let subseq_bits = 32u32;
+        assert!(
+            prep.bitstream.length_bits.div_ceil(subseq_bits) > HUFFMAN_PHASE1_THREADS,
+            "fixture must span more than one workgroup"
+        );
+        let gpu_syms = dispatch_jpeg_phase1_through_phase4(&b, &prep, subseq_bits)
+            .expect("CUDA phase4 dispatch");
+        let cpu_syms = decode_scan_symbols(&prep).expect("CPU oracle");
+        assert_eq!(gpu_syms, cpu_syms, "CUDA vs CPU symbol stream on 4:2:0");
+    }
+
     /// JPEG Phases 1–4 returns a stable symbol stream for the 4:4:4 YCbCr
     /// fixture across subsequence sizes 16, 32, and 64 bits.  Validates that
     /// the MCU schedule rotation (block_in_mcu advance on z_in_block=64) is
     /// consistent regardless of where subsequence boundaries fall.
     #[test]
     fn jpeg_phase4_cuda_ycbcr_stable_across_subseq_sizes() {
-        static COLOUR_32X32_444: &[u8] =
-            include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
         let Some(b) = try_cuda() else {
             eprintln!("skipping: no CUDA device");
             return;
@@ -1876,26 +1971,45 @@ mod vulkan_tests {
     fn jpeg_phase2_cuda_vs_vulkan_ycbcr() {
         static COLOUR_32X32_444: &[u8] =
             include_bytes!("../../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+        cuda_vs_vulkan_jpeg_phase2("32x32 4:4:4", COLOUR_32X32_444, 32);
+    }
+
+    /// Same on inputs spanning several workgroups, so the two
+    /// backends' on-device local loops and host pass counts must
+    /// agree — 4:4:4 and 4:2:0 framing both.
+    #[test]
+    fn jpeg_phase2_cuda_vs_vulkan_across_workgroups() {
+        static COLOUR_128X128_444: &[u8] =
+            include_bytes!("../../../../../tests/fixtures/jpeg/colour_128x128_444.jpg");
+        static COLOUR_128X128_420: &[u8] =
+            include_bytes!("../../../../../tests/fixtures/jpeg/colour_128x128_420.jpg");
+        cuda_vs_vulkan_jpeg_phase2("128x128 4:4:4", COLOUR_128X128_444, 16);
+        cuda_vs_vulkan_jpeg_phase2("128x128 4:2:0", COLOUR_128X128_420, 16);
+    }
+
+    /// JPEG Phase 1+2 on both backends: outcomes equal, both
+    /// converged, `s_info` byte-identical.
+    fn cuda_vs_vulkan_jpeg_phase2(name: &str, bytes: &[u8], subseq_bits: u32) {
         let (Some(cuda), Some(vk)) = (try_cuda(), try_vulkan()) else {
             eprintln!("skipping: need both CUDA and Vulkan");
             return;
         };
-        let prep = prepare_jpeg(COLOUR_32X32_444).expect("colour 4:4:4 JPEG must prepare");
+        let prep = prepare_jpeg(bytes).expect("colour JPEG must prepare");
         let (cuda_s, cuda_o) =
-            dispatch_jpeg_phase1_then_phase2(&cuda, &prep, 32).expect("cuda dispatch");
+            dispatch_jpeg_phase1_then_phase2(&cuda, &prep, subseq_bits).expect("cuda dispatch");
         let (vk_s, vk_o) =
-            dispatch_jpeg_phase1_then_phase2(&vk, &prep, 32).expect("vulkan dispatch");
+            dispatch_jpeg_phase1_then_phase2(&vk, &prep, subseq_bits).expect("vulkan dispatch");
         assert_eq!(
             cuda_o, vk_o,
-            "Phase 2 outcome mismatch: CUDA={cuda_o:?} Vulkan={vk_o:?}"
+            "{name}: Phase 2 outcome mismatch: CUDA={cuda_o:?} Vulkan={vk_o:?}"
         );
         assert!(
             matches!(cuda_o, Phase2Outcome::Converged { .. }),
-            "expected convergence on YCbCr, got {cuda_o:?}"
+            "{name}: expected convergence, got {cuda_o:?}"
         );
         assert_eq!(
             cuda_s, vk_s,
-            "Phase 2 s_info mismatch: CUDA and Vulkan disagree"
+            "{name}: Phase 2 s_info mismatch: CUDA and Vulkan disagree"
         );
     }
 

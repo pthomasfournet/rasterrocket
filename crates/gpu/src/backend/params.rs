@@ -426,11 +426,14 @@ pub enum HuffmanPhase {
     /// to be `Some`.
     JpegPhase1IntraSync,
     /// JPEG-framed Phase 2: inter-sequence sync by re-decode
-    /// propagation. Each pass, thread `i` re-decodes its region from
-    /// `s_info_prev[i - 1]`'s boundary snapshot into `s_info[i]` and
-    /// flags a fixpoint; the host swaps the two buffers between
-    /// passes and loops until every flag is 1. Same requirements as
-    /// `JpegPhase1IntraSync` plus `sync_flags` and `s_info_prev`.
+    /// propagation. Each pass, every workgroup re-decodes its
+    /// `HUFFMAN_PHASE1_THREADS` regions to a local fixpoint from the
+    /// workgroup's left input in `s_info_prev`, writes the result to
+    /// `s_info`, and flags each slot that equals its `s_info_prev`
+    /// value; the host swaps the two buffers between passes and loops
+    /// until every flag is 1, at most `ceil(n / HUFFMAN_PHASE1_THREADS)`
+    /// times. Same requirements as `JpegPhase1IntraSync` plus
+    /// `sync_flags` and `s_info_prev`.
     JpegPhase2InterSync,
     /// JPEG-framed counterpart of `Phase4Redecode`.  Emits the
     /// per-block Huffman symbol stream (DC magnitude category +

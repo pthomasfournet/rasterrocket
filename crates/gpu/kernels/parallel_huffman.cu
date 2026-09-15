@@ -294,6 +294,12 @@ extern "C" __global__ void phase4_redecode(
 // Note: the last subsequence (seq_idx + 1 == num_subsequences) has
 // no right neighbour, so it's trivially synced — flags[i] = 1, no
 // advance.
+//
+// In-place single-buffer shape: thread i reads s_info[i + 1] while
+// thread i + 1 may write it (conflicting non-atomic access). A torn
+// uint4 read can only yield a spurious flags[i] = 1 for this one
+// dispatch; see the Slang mirror for why the host loop tolerates
+// that. Synthetic (test-only) dispatchers are the only callers.
 extern "C" __global__ void phase2_inter_sync(
     const unsigned int* __restrict__ bitstream,
     const unsigned int* __restrict__ codebook,
@@ -468,11 +474,62 @@ __device__ __forceinline__ unsigned int try_decode_one_jpeg_symbol_device(
     return DECODE_OK;
 }
 
+// Mirror of `jpeg_phase2_redecode` in parallel_huffman.slang: region
+// `seq_idx`'s recomputed boundary snapshot from its predecessor's
+// snapshot `left`.
+__device__ __forceinline__ uint4 jpeg_phase2_redecode_device(
+    const unsigned int* __restrict__ bitstream,
+    const unsigned int* __restrict__ codebook,
+    const unsigned int* __restrict__ dc_codebook,
+    const unsigned int* __restrict__ mcu_schedule,
+    unsigned int length_bits,
+    unsigned int subsequence_bits,
+    unsigned int blocks_per_mcu,
+    unsigned int seq_idx,
+    uint4 left
+) {
+    unsigned int region_end = min(length_bits, (seq_idx + 1u) * subsequence_bits);
+
+    unsigned int p = left.x;
+    unsigned int n = 0u;
+    unsigned int block_in_mcu = left.z;
+    unsigned int z_in_block   = left.w;
+
+    // Each symbol consumes >= 1 bit; +1 caps a degenerate codebook.
+    unsigned int max_iters = ((region_end > p) ? (region_end - p) : 0u) + 1u;
+    unsigned int symbol_sink;
+    for (unsigned int iter = 0u; iter < max_iters; iter++) {
+        if (p >= region_end) break;
+        // count_to = region_end: every decoded symbol starts below it
+        // (the loop exits at the first crossing), so all count.
+        if (try_decode_one_jpeg_symbol_device(
+                bitstream, codebook, dc_codebook, mcu_schedule,
+                length_bits, blocks_per_mcu, region_end,
+                &p, &n, &block_in_mcu, &z_in_block, &symbol_sink) != DECODE_OK) {
+            break;
+        }
+    }
+
+    uint4 out;
+    out.x = p;
+    out.y = n;
+    out.z = block_in_mcu;
+    out.w = z_in_block;
+    return out;
+}
+
+// Block width of `jpeg_phase2_inter_sync`; equals the Slang
+// `numthreads` and the host's `HUFFMAN_PHASE1_THREADS`. The shared
+// state array is sized by it, so the kernel refuses any other launch
+// width (uniformly, before the first barrier).
+#define JPEG_PHASE2_GROUP 256u
+
 // JPEG-framed Phase 2 (inter-sequence sync by re-decode propagation).
 // Mirror of `jpeg_phase2_inter_sync` in parallel_huffman.slang — the
-// algorithm essay (Jacobi propagation over the double-buffered s_info,
-// fixpoint flags, slot-0 pinning, error-stall semantics) lives there
-// per this file's header policy.
+// algorithm essay (workgroup-local Jacobi loop to a fixpoint over the
+// double-buffered s_info, per-slot fixpoint flags, slot-0 pinning,
+// error-stall semantics, barrier ordering) lives there per this
+// file's header policy.
 //
 // State semantics mirror jpeg_phase1_intra_sync:
 //   state.x = p              (bit position)
@@ -492,55 +549,64 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
     unsigned int num_subsequences,
     unsigned int blocks_per_mcu
 ) {
+    __shared__ uint4 g_state[JPEG_PHASE2_GROUP];
+    __shared__ unsigned int g_changed;
+
     // Defensive mirror of the host-side validate() check: the
     // schedule helper's modulo is undefined for 0. The Slang mirror
-    // carries the same guard.
-    if (blocks_per_mcu == 0u) {
+    // carries the same guard. Both returns are block-uniform.
+    if (blocks_per_mcu == 0u || blockDim.x != JPEG_PHASE2_GROUP) {
         return;
     }
-    unsigned int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (seq_idx >= num_subsequences) {
-        return;
+    unsigned int lane = threadIdx.x;
+    unsigned int seq_idx = blockIdx.x * blockDim.x + lane;
+    bool active = seq_idx < num_subsequences;
+    // Slot 0 is pinned: its Phase 1 snapshot is the true stream start.
+    bool propagates = active && seq_idx != 0u;
+
+    uint4 me_in = active ? s_info_in[seq_idx] : make_uint4(0u, 0u, 0u, 0u);
+    uint4 left_fixed = (propagates && lane == 0u) ? s_info_in[seq_idx - 1u]
+                                                  : make_uint4(0u, 0u, 0u, 0u);
+    uint4 cur = me_in;
+    g_state[lane] = cur;
+    if (lane == 0u) {
+        g_changed = 0u;
     }
-    // Slot 0 is pinned: copy through, always a fixpoint.
-    if (seq_idx == 0u) {
-        s_info_out[0] = s_info_in[0];
-        flags[0] = 1u;
-        return;
-    }
+    __syncthreads();
 
-    uint4 prev = s_info_in[seq_idx - 1u];
-    unsigned int region_end = min(length_bits, (seq_idx + 1u) * subsequence_bits);
+    for (unsigned int pass = 0u; pass < JPEG_PHASE2_GROUP; pass++) {
+        uint4 left = (lane == 0u) ? left_fixed : g_state[lane - 1u];
+        __syncthreads();
 
-    unsigned int p = prev.x;
-    unsigned int n = 0u;
-    unsigned int block_in_mcu = prev.z;
-    unsigned int z_in_block   = prev.w;
-
-    // Each symbol consumes >= 1 bit; +1 caps a degenerate codebook.
-    unsigned int max_iters = ((region_end > p) ? (region_end - p) : 0u) + 1u;
-    unsigned int symbol_sink;
-    for (unsigned int iter = 0u; iter < max_iters; iter++) {
-        if (p >= region_end) break;
-        // count_to = region_end: every decoded symbol starts below it
-        // (the loop exits at the first crossing), so all count.
-        if (try_decode_one_jpeg_symbol_device(
+        uint4 out = cur;
+        if (propagates) {
+            out = jpeg_phase2_redecode_device(
                 bitstream, codebook, dc_codebook, mcu_schedule,
-                length_bits, blocks_per_mcu, region_end,
-                &p, &n, &block_in_mcu, &z_in_block, &symbol_sink) != DECODE_OK) {
+                length_bits, subsequence_bits, blocks_per_mcu, seq_idx, left);
+        }
+        if (out.x != cur.x || out.y != cur.y || out.z != cur.z || out.w != cur.w) {
+            g_changed = 1u;
+        }
+        cur = out;
+        g_state[lane] = cur;
+        __syncthreads();
+
+        bool changed = g_changed != 0u;
+        __syncthreads();
+        if (lane == 0u) {
+            g_changed = 0u;
+        }
+        if (!changed) {
             break;
         }
     }
 
-    uint4 me = s_info_in[seq_idx];
-    uint4 out;
-    out.x = p;
-    out.y = n;
-    out.z = block_in_mcu;
-    out.w = z_in_block;
-    s_info_out[seq_idx] = out;
-    flags[seq_idx] =
-        (out.x == me.x && out.y == me.y && out.z == me.z && out.w == me.w) ? 1u : 0u;
+    if (active) {
+        s_info_out[seq_idx] = cur;
+        flags[seq_idx] =
+            (cur.x == me_in.x && cur.y == me_in.y && cur.z == me_in.z && cur.w == me_in.w)
+                ? 1u : 0u;
+    }
 }
 
 // JPEG-framed Phase 4 (re-decode + write final symbols).  Same shape

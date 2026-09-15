@@ -37,6 +37,7 @@
 
 #![cfg(test)]
 
+use crate::backend::params::HUFFMAN_PHASE1_THREADS;
 use crate::jpeg::CanonicalCodebook;
 use crate::jpeg_decoder::PackedBitstream;
 use crate::jpeg_decoder::phase1_oracle::{
@@ -204,16 +205,34 @@ fn jpeg_phase2_redecode(
     state
 }
 
+/// Region `i`'s end bit, `min(length_bits, (i + 1) * subsequence_bits)`.
+///
+/// The kernels compute the product with plain u32 arithmetic —
+/// non-wrapping there because `validate()` bounds `length_bits + 2·ssb`;
+/// the oracle accepts arbitrary test inputs, so it saturates instead.
+fn jpeg_region_end(i: usize, subsequence_bits: u32, length_bits: u32) -> u32 {
+    length_bits.min(
+        u32::try_from(i + 1)
+            .expect("subsequence counts derive from u32 bit lengths")
+            .saturating_mul(subsequence_bits),
+    )
+}
+
 /// Drive the JPEG-framed Phase 2 propagation loop to convergence.
 ///
-/// Mirrors the `jpeg_phase2_inter_sync` kernels: each pass is a
-/// Jacobi step — every slot `i ≥ 1` re-decodes its region from the
-/// *previous* pass's `s_info[i - 1]` and rewrites `s_info[i]`; slot 0
-/// is copied through unchanged. A pass in which no slot changes is a
-/// fixpoint of the whole chain: slot 0 is correct by construction and
-/// each following slot is the deterministic re-decode of its
-/// predecessor, so the converged `s_info` carries the true absolute
-/// block phase for every subsequence — the property the
+/// Mirrors the `jpeg_phase2_inter_sync` kernels pass for pass. One
+/// pass is one dispatch: each workgroup of `HUFFMAN_PHASE1_THREADS`
+/// consecutive slots runs Jacobi steps — every slot `i ≥ 1` in the
+/// group re-decodes its region from the group's current `s_info[i - 1]`
+/// (for the group's first slot, the *previous* pass's `s_info[i - 1]`,
+/// fixed for the whole pass) — until a step changes nothing or the
+/// group has run one step per slot, then writes the group back; slot 0
+/// is copied through unchanged. Each group therefore leaves holding
+/// the exact chain from its left input. A pass in which no slot
+/// changes is a fixpoint of the whole chain: slot 0 is correct by
+/// construction and each following slot is the deterministic
+/// re-decode of its predecessor, so the converged `s_info` carries the
+/// true absolute block phase for every subsequence — the property the
 /// single-symbol-advance predicate this replaces could not establish
 /// for multi-component streams.
 ///
@@ -237,35 +256,44 @@ pub(super) fn jpeg_phase2_run_to_sync(
     let bound = super::huffman::jpeg_phase2_retry_bound(
         u32::try_from(n).expect("subsequence counts derive from u32 bit lengths"),
     );
+    let group = HUFFMAN_PHASE1_THREADS as usize;
     let length_bits = bitstream.length_bits;
+    let redecode = |i: usize, left: SubsequenceState| {
+        jpeg_phase2_redecode(
+            left,
+            jpeg_region_end(i, subsequence_bits, length_bits),
+            bitstream,
+            dc_codebooks,
+            ac_codebooks,
+            mcu_schedule,
+            blocks_per_mcu,
+        )
+    };
     for iter in 0..=bound {
         let prev = s_info.to_vec();
-        let mut all_fixed = true;
-        for i in 1..n {
-            // The kernels compute (i + 1) * subsequence_bits with plain
-            // u32 arithmetic — non-wrapping there because validate()
-            // bounds length_bits + 2·ssb; the oracle accepts arbitrary
-            // test inputs, so it saturates instead.
-            let region_end = length_bits.min(
-                u32::try_from(i + 1)
-                    .expect("subsequence counts derive from u32 bit lengths")
-                    .saturating_mul(subsequence_bits),
-            );
-            let out = jpeg_phase2_redecode(
-                prev[i - 1],
-                region_end,
-                bitstream,
-                dc_codebooks,
-                ac_codebooks,
-                mcu_schedule,
-                blocks_per_mcu,
-            );
-            if out != prev[i] {
-                all_fixed = false;
+        for base in (0..n).step_by(group) {
+            let end = (base + group).min(n);
+            let mut cur = prev[base..end].to_vec();
+            for _step in 0..group {
+                let mut next = cur.clone();
+                let mut changed = false;
+                for (t, slot) in next.iter_mut().enumerate() {
+                    let i = base + t;
+                    if i == 0 {
+                        continue;
+                    }
+                    let left = if t == 0 { prev[i - 1] } else { cur[t - 1] };
+                    *slot = redecode(i, left);
+                    changed |= *slot != cur[t];
+                }
+                cur = next;
+                if !changed {
+                    break;
+                }
             }
-            s_info[i] = out;
+            s_info[base..end].copy_from_slice(&cur);
         }
-        if all_fixed {
+        if *s_info == *prev {
             return Phase2Outcome::Converged { iterations: iter };
         }
     }
@@ -392,6 +420,10 @@ mod tests {
 
     static COLOUR_32X32_444: &[u8] =
         include_bytes!("../../../../tests/fixtures/jpeg/colour_32x32_444.jpg");
+    static COLOUR_128X128_444: &[u8] =
+        include_bytes!("../../../../tests/fixtures/jpeg/colour_128x128_444.jpg");
+    static COLOUR_128X128_420: &[u8] =
+        include_bytes!("../../../../tests/fixtures/jpeg/colour_128x128_420.jpg");
 
     /// Fresh-start Phase 1 `s_info`, one `phase1_jpeg_walk_snapshot`
     /// per subsequence — what the JPEG Phase 1 kernel dispatch produces.
@@ -505,12 +537,15 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_retry_bound_is_num_subsequences_minus_one() {
+    fn jpeg_retry_bound_is_workgroup_count() {
         use super::super::huffman::jpeg_phase2_retry_bound;
+        let w = HUFFMAN_PHASE1_THREADS;
         assert_eq!(jpeg_phase2_retry_bound(0), 0);
-        assert_eq!(jpeg_phase2_retry_bound(1), 0);
-        assert_eq!(jpeg_phase2_retry_bound(2), 1);
-        assert_eq!(jpeg_phase2_retry_bound(17), 16);
+        assert_eq!(jpeg_phase2_retry_bound(1), 1);
+        assert_eq!(jpeg_phase2_retry_bound(w), 1);
+        assert_eq!(jpeg_phase2_retry_bound(w + 1), 2);
+        assert_eq!(jpeg_phase2_retry_bound(17 * w), 17);
+        assert_eq!(jpeg_phase2_retry_bound(u32::MAX), u32::MAX / w + 1);
     }
 
     #[test]
@@ -613,6 +648,54 @@ mod tests {
                 "ssb={ssb}: expected convergence, got {r:?}"
             );
             assert_eq!(s_info, truth, "ssb={ssb}: converged s_info must be true");
+        }
+    }
+
+    /// Inputs spanning several workgroups, so the oracle's per-group
+    /// local loop and the cross-group hand-off both run — checked
+    /// against the structurally independent sequential walk. 4:2:0
+    /// has six blocks per MCU, the widest block-phase space the
+    /// decoder accepts.
+    #[test]
+    fn jpeg_propagation_converges_to_truth_across_workgroups() {
+        for (name, bytes) in [("444", COLOUR_128X128_444), ("420", COLOUR_128X128_420)] {
+            for ssb in [16u32, 64] {
+                let prep = prepare_jpeg(bytes).unwrap();
+                assert_eq!(
+                    prep.components.len(),
+                    3,
+                    "{name}: fixture must be 3-component"
+                );
+                let (sched, bpm) = build_mcu_schedule(&prep);
+                let dc_refs = prep.dc_codebooks_for_dispatch();
+                let ac_refs = prep.ac_codebooks_for_dispatch();
+
+                let truth = sequential_truth(&prep, &sched, bpm, ssb);
+                let mut s_info = build_jpeg_phase1_s_info(&prep, &sched, bpm, ssb);
+                assert!(
+                    s_info.len() > HUFFMAN_PHASE1_THREADS as usize,
+                    "{name} ssb={ssb}: fixture must span more than one workgroup"
+                );
+                assert_ne!(s_info, truth, "{name} ssb={ssb}: precondition");
+
+                let r = jpeg_phase2_run_to_sync(
+                    &mut s_info,
+                    &prep.bitstream,
+                    &dc_refs,
+                    &ac_refs,
+                    &sched,
+                    bpm,
+                    ssb,
+                );
+                assert!(
+                    matches!(r, Phase2Outcome::Converged { .. }),
+                    "{name} ssb={ssb}: expected convergence, got {r:?}"
+                );
+                assert_eq!(
+                    s_info, truth,
+                    "{name} ssb={ssb}: converged s_info must be true"
+                );
+            }
         }
     }
 
