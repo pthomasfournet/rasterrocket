@@ -264,10 +264,10 @@ fn bench_tile_fill(ctx: &GpuCtx, cfg: &Config) {
 
 fn bench_icc_cmyk(ctx: &GpuCtx, cfg: &Config) {
     // NOTE: this bench measures the raw GPU matrix kernel (clut=None) against
-    // CPU AVX-512.  The dispatch in icc_cmyk_to_rgb() always short-circuits to CPU
+    // the CPU SIMD path.  The dispatch in icc_cmyk_to_rgb() always short-circuits to CPU
     // for clut=None regardless of pixel count, so the crossover below is informational
     // only.  To calibrate GPU_ICC_CLUT_THRESHOLD, re-run with a real CLUT workload.
-    println!("\n══ icc_cmyk: GPU matrix kernel vs CPU AVX-512 (matrix path, informational) ══");
+    println!("\n══ icc_cmyk: GPU matrix kernel vs CPU SIMD (matrix path, informational) ══");
     println!(
         "{:>10}  {:>12}  {:>12}  {:>8}  winner",
         "pixels", "cpu_ns", "gpu_ns", "ratio"

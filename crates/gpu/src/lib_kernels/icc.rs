@@ -61,7 +61,7 @@ impl GpuCtx {
                 got = table.len(),
             );
         }
-        // Matrix path (clut=None): CPU AVX-512 always beats GPU on this machine —
+        // Matrix path (clut=None): the CPU SIMD path always beats GPU on this machine —
         // threshold_bench showed the PCIe round-trip cost exceeds the compute cost
         // at all measured sizes (256–4M pixels).  Always use the CPU path here.
         if clut.is_none() {
@@ -130,7 +130,7 @@ impl GpuCtx {
     ///
     /// Caller is responsible for stream ordering and any final D→H download.
     /// Note: the public dispatcher always routes the matrix path to the CPU
-    /// AVX-512 fallback; this helper exists for completeness so tests can
+    /// SIMD fallback; this helper exists for completeness so tests can
     /// exercise the GPU path directly.
     ///
     /// # Errors

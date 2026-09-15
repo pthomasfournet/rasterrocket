@@ -68,8 +68,6 @@ pub(crate) fn render_span_aa<P: Pixel>(
             debug_assert_eq!(color.len(), ncomps);
 
             // Fast path: solid RGB source, no alpha plane, identity transfer.
-            // composite_aa_rgb8_opaque processes 16 pixels/iter via [u16;16] lanes
-            // that LLVM auto-vectorizes into AVX2/AVX-512.
             if dst_alpha.is_none() && ncomps == 3 && pipe.transfer.is_identity_rgb() {
                 composite_aa_rgb8_opaque(
                     dst_pixels,

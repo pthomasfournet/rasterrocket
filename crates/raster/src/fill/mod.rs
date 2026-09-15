@@ -41,12 +41,6 @@ use crate::types::AA_SIZE;
 use crate::xpath::XPath;
 use color::Pixel;
 
-/// AA gamma table for `splashAASize=4`, `splashAAGamma=1.5`.
-/// Entry `i`: `round((i/16)^1.5 * 255)` for i in 0..=16.
-pub(super) const AA_GAMMA: [u8; (AA_SIZE * AA_SIZE + 1) as usize] = [
-    0, 4, 11, 21, 32, 45, 59, 74, 90, 108, 126, 145, 166, 187, 209, 231, 255,
-];
-
 /// Non-zero winding fill.
 #[expect(
     clippy::too_many_arguments,
@@ -337,8 +331,9 @@ pub(super) fn draw_span_clipped<P: Pixel, S: RowSink<P>>(
 /// Emit one composited output pixel row from the 4-row `AaBuf`.
 ///
 /// For each output pixel `x` in `[x0, x1]`, count the set bits across all 4
-/// AA sub-rows via `simd::aa_coverage_span` (SIMD-accelerated), look up the
-/// gamma-corrected shape byte, and call `render_span_aa` with shape > 0.
+/// AA sub-rows via `simd::aa_coverage_span`, map the counts to gamma-corrected
+/// shape bytes via `simd::apply_aa_gamma`, and composite the span through
+/// `pipe::render_span` unless every pixel is uncovered.
 #[expect(
     clippy::too_many_arguments,
     reason = "per-row emit helper; the args are the fill loop's live state"
@@ -363,9 +358,7 @@ fn draw_aa_line<P: Pixel>(
     let count = (x1 - x0 + 1) as usize;
 
     // Gather raw coverage counts (0..=16) into the reused scratch, then
-    // gamma-map in place: aa_coverage_span writes raw counts; we overwrite
-    // with AA_GAMMA[t] in the same buffer (0 stays 0; non-zero gets the
-    // LUT value).
+    // gamma-map them in place (0 stays 0).
     let rows = [
         aa_buf.row_slice(0),
         aa_buf.row_slice(1),
@@ -383,17 +376,7 @@ fn draw_aa_line<P: Pixel>(
     simd::aa_coverage_span(rows, x0_usize - lead, shape_scratch);
     let shape = &mut shape_scratch[lead..];
 
-    // Gamma-map in place: 0 → 0 (skip), 1..=16 → AA_GAMMA[t].
-    let mut any_nonzero = false;
-    for s in &mut *shape {
-        let t = *s as usize;
-        if t > 0 {
-            *s = AA_GAMMA[t];
-            any_nonzero = true;
-        }
-    }
-
-    if !any_nonzero {
+    if !simd::apply_aa_gamma(shape) {
         return;
     }
 
@@ -683,6 +666,7 @@ mod tests {
 
     #[test]
     fn aa_gamma_table_correct() {
+        use crate::types::AA_GAMMA;
         // Validate every entry against the defining formula:
         // round((i / (AA_SIZE² )) ^ 1.5 * 255).  Derive the divisor from the
         // table's own length so the test stays correct if AA_SIZE changes.

@@ -1,317 +1,125 @@
-//! CMYK→RGB CPU conversion paths (AVX-512, AVX2, NEON, and scalar fallback).
+//! CMYK→RGB CPU conversion paths (AVX-512 VBMI, NEON, and scalar fallback).
 
 use color::convert::cmyk_to_rgb_reflectance;
 
-// ── AVX-512 CMYK→RGB ──────────────────────────────────────────────────────────
+// ── AVX-512 VBMI CMYK→RGB ─────────────────────────────────────────────────────
 //
-// Vectorised subtractive complement: R=(255−C)*(255−K)/255 (rounded).
-// Processes 16 pixels per call using u16 arithmetic throughout.
+// Subtractive complement R = ⌊((255−C)(255−K) + 127) / 255⌋ (same for G/M and
+// B/Y), 32 pixels per call.
 //
-// AoS→SoA: shuffle_epi8 gathers one channel from each 4-pixel 128-bit lane
-// to bytes 0..3 of that lane (zeros elsewhere).  permute4x64(x, 0x88) selects
-// epi64-lanes 0 and 2, giving [ch0..3 0000 ch4..7 0000] in 128 bits.  A final
-// shuffle_epi8 compacts to [ch0..7 0×8]; unpacklo_epi64 joins two such halves
-// (pixels 0..7 and 8..15) into 16 contiguous u8; cvtepu8_epi16 widens to u16.
+// The 128 input bytes are widened to four vectors of 32 u16 lanes that keep
+// the interleaved [C M Y K] order.  Every lane is complemented (255 − v) and
+// the complemented K of each pixel is broadcast over the pixel's quad with
+// vpermw (lane j reads lane j | 3), so a single multiply yields
+// [R' G' B' K'·K'] per pixel; the fourth lane is discarded.  After the exact
+// ⌊(x+127)/255⌋ identity the lanes narrow to bytes as RGBx quads and two
+// vpermt2b passes gather the 96 RGB bytes out of the 128-byte RGBx sequence.
 //
 // Division: exact ⌊(x+127)/255⌋ = (n + (n>>8) + 1) >> 8, n = x+127.
 // Valid for n ∈ [0, 65152] (max n = 255²+127 = 65152 < 65280 = 255×256).
 
-/// Convert 16 CMYK pixels to RGB using AVX-512 u16 arithmetic.
-///
-/// `cmyk` must be exactly 64 bytes (16 pixels × 4 channels).
-/// `rgb` must be at least 48 bytes (16 pixels × 3 channels).
-///
-/// # Safety
-///
-/// Caller must ensure `avx512f` and `avx512bw` are available at runtime.
-/// `cmyk.len() == 64` and `rgb.len() >= 48` must hold.
+/// vpermw table: lane `j` reads lane `j | 3`, the K slot of `j`'s pixel.
 #[cfg(target_arch = "x86_64")]
 #[expect(
-    clippy::too_many_lines,
-    reason = "SIMD shuffle/arithmetic pipeline — splitting would obscure the data flow"
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "entries < 32"
 )]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn cmyk_to_rgb_avx512(cmyk: &[u8; 64], rgb: &mut [u8]) {
-    use std::arch::x86_64::{
-        __m256i, __m512i, _mm_loadu_si128, _mm_shuffle_epi8, _mm_storeu_si128, _mm_unpacklo_epi64,
-        _mm256_add_epi16, _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_mullo_epi16,
-        _mm256_packus_epi16, _mm256_permute4x64_epi64, _mm256_set1_epi16, _mm256_srli_epi16,
-        _mm256_sub_epi16, _mm512_castsi512_si256, _mm512_extracti64x4_epi64, _mm512_loadu_si512,
-        _mm512_shuffle_epi8,
-    };
+const K_LANE_OF_QUAD: [i16; 32] = {
+    let mut table = [0i16; 32];
+    let mut j = 0;
+    while j < 32 {
+        table[j] = (j | 3) as i16;
+        j += 1;
+    }
+    table
+};
 
-    debug_assert!(rgb.len() >= 48);
-
-    // All intrinsics in this body are unsafe; the caller is responsible for
-    // verifying avx512f+avx512bw, valid pointers, and minimum slice lengths.
-    // One block rather than per-call wrappers keeps the SIMD pipeline readable.
-    unsafe {
-        // Load all 16 CMYK pixels (64 bytes) into one 512-bit register.
-        let raw: __m512i = _mm512_loadu_si512(cmyk.as_ptr().cast());
-
-        // AoS→SoA via shuffle_epi8: permutes bytes within each 128-bit lane.
-        // Each lane holds 4 CMYK pixels (16 bytes). The mask gathers one channel
-        // to bytes 0..3 of the lane (zeros elsewhere), giving 4 lanes × 4 bytes =
-        // 16 channel values spread across the 512-bit register.
-        #[rustfmt::skip]
-    let mask_c: [u8; 64] = [
-        0, 4, 8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        0, 4, 8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        0, 4, 8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        0, 4, 8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-    ];
-        #[rustfmt::skip]
-    let mask_m: [u8; 64] = [
-        1, 5, 9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        1, 5, 9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        1, 5, 9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        1, 5, 9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-    ];
-        #[rustfmt::skip]
-    let mask_y: [u8; 64] = [
-        2, 6,10,14, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        2, 6,10,14, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        2, 6,10,14, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        2, 6,10,14, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-    ];
-        #[rustfmt::skip]
-    let mask_k: [u8; 64] = [
-        3, 7,11,15, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        3, 7,11,15, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        3, 7,11,15, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        3, 7,11,15, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-    ];
-        let shuf_c: __m512i = _mm512_loadu_si512(mask_c.as_ptr().cast());
-        let shuf_m: __m512i = _mm512_loadu_si512(mask_m.as_ptr().cast());
-        let shuf_y: __m512i = _mm512_loadu_si512(mask_y.as_ptr().cast());
-        let shuf_k: __m512i = _mm512_loadu_si512(mask_k.as_ptr().cast());
-
-        let c_bytes: __m512i = _mm512_shuffle_epi8(raw, shuf_c);
-        let m_bytes: __m512i = _mm512_shuffle_epi8(raw, shuf_m);
-        let y_bytes: __m512i = _mm512_shuffle_epi8(raw, shuf_y);
-        let k_bytes: __m512i = _mm512_shuffle_epi8(raw, shuf_k);
-
-        // After shuffle: each 128-bit lane has [ch0 ch1 ch2 ch3  0×12].
-        // permute4x64(x, 0x88) selects epi64-lanes 0 and 2:
-        //   low 128 = [ch0..3  0×4  ch4..7  0×4]  (two 4-byte groups, gaps between)
-        // compact2 shuffle closes the gaps: bytes 0..3 and 8..11 → bytes 0..7.
-        // unpacklo_epi64 joins the lo and hi halves → 16 contiguous u8.
-        // cvtepu8_epi16 zero-extends to 16 u16.
-        #[rustfmt::skip]
-    let compact2: [u8; 16] = [
-        0,1,2,3, 8,9,10,11, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-    ];
-        let compact2_128 = _mm_loadu_si128(compact2.as_ptr().cast());
-
-        macro_rules! compact_to_u16 {
-            ($v512:expr) => {{
-                let lo128 = _mm_shuffle_epi8(
-                    _mm256_castsi256_si128(_mm256_permute4x64_epi64(
-                        _mm512_castsi512_si256($v512),
-                        0x88_i32,
-                    )),
-                    compact2_128,
-                );
-                let hi128 = _mm_shuffle_epi8(
-                    _mm256_castsi256_si128(_mm256_permute4x64_epi64(
-                        _mm512_extracti64x4_epi64($v512, 1),
-                        0x88_i32,
-                    )),
-                    compact2_128,
-                );
-                _mm256_cvtepu8_epi16(_mm_unpacklo_epi64(lo128, hi128))
-            }};
-        }
-
-        let c_u16: __m256i = compact_to_u16!(c_bytes);
-        let m_u16: __m256i = compact_to_u16!(m_bytes);
-        let y_u16: __m256i = compact_to_u16!(y_bytes);
-        let k_u16: __m256i = compact_to_u16!(k_bytes);
-
-        // inv_ch = 255 − ch  (u16, max 255, no overflow)
-        let v255 = _mm256_set1_epi16(255_i16);
-        let inv_c = _mm256_sub_epi16(v255, c_u16);
-        let inv_m = _mm256_sub_epi16(v255, m_u16);
-        let inv_y = _mm256_sub_epi16(v255, y_u16);
-        let inv_k = _mm256_sub_epi16(v255, k_u16);
-
-        // prod = inv_ch * inv_k  (u16, max 255*255 = 65025 < 65536, no truncation)
-        let prod_r = _mm256_mullo_epi16(inv_c, inv_k);
-        let prod_g = _mm256_mullo_epi16(inv_m, inv_k);
-        let prod_b = _mm256_mullo_epi16(inv_y, inv_k);
-
-        // Exact ⌊(x + 127) / 255⌋ matching the scalar formula (255-c)*(255-k)+127)/255.
-        // For n = x + 127 ∈ [0, 65152]: ⌊n/255⌋ = (n + (n>>8) + 1) >> 8.
-        // Proof: let n = 255*q + r, 0 ≤ r < 255.
-        //   n>>8 = ⌊n/256⌋ = q - ⌊(256q-n)/256⌋ = q - ⌊(256r - r·1)/256⌋ ≈ q (error < 1).
-        //   More precisely (n + (n>>8) + 1)>>8 = ⌊(n + ⌊n/256⌋ + 1)/256⌋.
-        //   For n < 65280 (= 255*256) this equals q = ⌊n/255⌋ exactly.
-        //   max n = 65152 < 65280 ✓.
-        let v127 = _mm256_set1_epi16(127_i16);
-        let v1 = _mm256_set1_epi16(1_i16);
-        macro_rules! div255 {
-            ($x:expr) => {{
-                let n = _mm256_add_epi16($x, v127); // n = x + 127
-                _mm256_srli_epi16(
-                    _mm256_add_epi16(_mm256_add_epi16(n, _mm256_srli_epi16(n, 8)), v1),
-                    8,
-                )
-            }};
-        }
-        let r_u16 = div255!(prod_r);
-        let g_u16 = div255!(prod_g);
-        let b_u16 = div255!(prod_b);
-
-        // Narrow u16 → u8 (values ≤ 255; saturation never triggers).
-        // packus_epi16(v, v) → [v0..v7 v0..v7 | v8..v15 v8..v15] per 256-bit.
-        // permute4x64(x, 0x88) packs the two unique halves to the low 128 bits.
-        let r8 = _mm256_castsi256_si128(_mm256_permute4x64_epi64(
-            _mm256_packus_epi16(r_u16, r_u16),
-            0x88_i32,
-        ));
-        let g8 = _mm256_castsi256_si128(_mm256_permute4x64_epi64(
-            _mm256_packus_epi16(g_u16, g_u16),
-            0x88_i32,
-        ));
-        let b8 = _mm256_castsi256_si128(_mm256_permute4x64_epi64(
-            _mm256_packus_epi16(b_u16, b_u16),
-            0x88_i32,
-        ));
-
-        // Scatter R, G, B to interleaved RGB output via three scalar stores.
-        // The vectorised multiply+divide above provides the bulk of the speedup;
-        // this store loop is cheap (16 iterations, compiler unrolls it).
-        let mut r_arr = [0u8; 16];
-        let mut g_arr = [0u8; 16];
-        let mut b_arr = [0u8; 16];
-        _mm_storeu_si128(r_arr.as_mut_ptr().cast(), r8);
-        _mm_storeu_si128(g_arr.as_mut_ptr().cast(), g8);
-        _mm_storeu_si128(b_arr.as_mut_ptr().cast(), b8);
-        for i in 0..16 {
-            rgb[i * 3] = r_arr[i];
-            rgb[i * 3 + 1] = g_arr[i];
-            rgb[i * 3 + 2] = b_arr[i];
-        }
-    } // unsafe
+/// vpermt2b table selecting RGB bytes `first..first + 64` out of the two
+/// 64-byte `RGBx` vectors: RGB byte `b` lives at `RGBx` byte
+/// `(b / 3) * 4 + b % 3`.  Entries for `b ≥ 96` fall outside the 96 stored
+/// bytes and are never read.
+#[cfg(target_arch = "x86_64")]
+#[expect(clippy::cast_possible_truncation, reason = "entries < 128")]
+const fn rgbx_to_rgb(first: usize) -> [u8; 64] {
+    let mut table = [0u8; 64];
+    let mut i = 0;
+    while i < 64 {
+        let b = first + i;
+        table[i] = if b < 96 {
+            ((b / 3) * 4 + b % 3) as u8
+        } else {
+            0
+        };
+        i += 1;
+    }
+    table
 }
 
-// ── AVX2 CMYK→RGB ────────────────────────────────────────────────────────────
-//
-// Vectorised subtractive complement: R=(255−C)*(255−K)/255 (rounded).
-// Processes 8 pixels per call using 256-bit u16 arithmetic.
-//
-// AoS→SoA: scalar gather into 8-byte arrays (same approach as NEON — AVX2
-// VPSHUFB is lane-local and cannot cross the 128-bit boundary, so a full
-// 32-byte shuffle is not possible without extra permutes; scalar gather at
-// 8px/iter is negligible overhead).
-//
-// _mm_loadl_epi64 loads 8 u8 values; _mm256_cvtepu8_epi16 widens to u16.
-// _mm256_mullo_epi16 multiplies: max 255*255 = 65025 < 65536 ✓.
-// div255 identity: (n + (n>>8) + 1) >> 8, n = prod + 127.
-// _mm256_packus_epi16 narrows to u8; _mm_storel_epi64 stores 8 bytes.
+#[cfg(target_arch = "x86_64")]
+const RGBX_TO_RGB_LO: [u8; 64] = rgbx_to_rgb(0);
+#[cfg(target_arch = "x86_64")]
+const RGBX_TO_RGB_HI: [u8; 64] = rgbx_to_rgb(64);
 
-/// Convert 8 CMYK pixels to RGB using AVX2 u16 arithmetic.
-///
-/// `cmyk` must be exactly 32 bytes (8 pixels × 4 channels).
-/// `rgb` must be at least 24 bytes (8 pixels × 3 channels).
+/// Convert 32 CMYK pixels to RGB using AVX-512 u16 arithmetic.
 ///
 /// # Safety
 ///
-/// Caller must ensure `avx2` is available at runtime.
-/// `cmyk.len() == 32` and `rgb.len() >= 24` must hold.
+/// Caller must ensure `avx512bw` and `avx512vbmi` are available at runtime.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn cmyk_to_rgb_avx2(cmyk: &[u8; 32], rgb: &mut [u8]) {
+#[target_feature(enable = "avx512bw,avx512vbmi")]
+unsafe fn cmyk_to_rgb_avx512(cmyk: &[u8; 128], rgb: &mut [u8; 96]) {
     use std::arch::x86_64::{
-        _mm_loadl_epi64, _mm_storel_epi64, _mm256_add_epi16, _mm256_castsi256_si128,
-        _mm256_cvtepu8_epi16, _mm256_mullo_epi16, _mm256_packus_epi16, _mm256_permute4x64_epi64,
-        _mm256_set1_epi16, _mm256_srli_epi16, _mm256_sub_epi16,
+        __m256i, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_storeu_si256, _mm512_add_epi16,
+        _mm512_castsi256_si512, _mm512_castsi512_si256, _mm512_cvtepi16_epi8, _mm512_cvtepu8_epi16,
+        _mm512_inserti64x4, _mm512_loadu_si512, _mm512_mullo_epi16, _mm512_permutex2var_epi8,
+        _mm512_permutexvar_epi16, _mm512_set1_epi16, _mm512_srli_epi16, _mm512_storeu_si512,
+        _mm512_sub_epi16,
     };
 
-    debug_assert!(rgb.len() >= 24);
+    let v255 = _mm512_set1_epi16(255);
+    let v127 = _mm512_set1_epi16(127);
+    let v1 = _mm512_set1_epi16(1);
+    // SAFETY: the three tables are exactly 64 bytes each.
+    let (k_lane, gather_lo, gather_hi) = unsafe {
+        (
+            _mm512_loadu_si512(K_LANE_OF_QUAD.as_ptr().cast()),
+            _mm512_loadu_si512(RGBX_TO_RGB_LO.as_ptr().cast()),
+            _mm512_loadu_si512(RGBX_TO_RGB_HI.as_ptr().cast()),
+        )
+    };
 
-    // Scalar gather: deinterleave 8 CMYK pixels into per-channel arrays.
-    // (AVX2 VPSHUFB is lane-local; scalar gather at 8px is negligible overhead.)
-    let mut c_arr = [0u8; 8];
-    let mut m_arr = [0u8; 8];
-    let mut y_arr = [0u8; 8];
-    let mut k_arr = [0u8; 8];
-    for i in 0..8 {
-        c_arr[i] = cmyk[i * 4];
-        m_arr[i] = cmyk[i * 4 + 1];
-        y_arr[i] = cmyk[i * 4 + 2];
-        k_arr[i] = cmyk[i * 4 + 3];
+    // Four quads of eight pixels: [C M Y K] × 8 per 32 lanes.
+    let mut rgbx: [__m256i; 4] = [_mm256_setzero_si256(); 4];
+    for (q, out) in rgbx.iter_mut().enumerate() {
+        // SAFETY: q * 32 + 32 ≤ 128.
+        let v =
+            unsafe { _mm512_cvtepu8_epi16(_mm256_loadu_si256(cmyk.as_ptr().add(q * 32).cast())) };
+        let inv = _mm512_sub_epi16(v255, v);
+        let inv_k = _mm512_permutexvar_epi16(k_lane, inv);
+        // prod ≤ 255² = 65025; n = prod + 127 ≤ 65152.
+        let n = _mm512_add_epi16(_mm512_mullo_epi16(inv, inv_k), v127);
+        let r = _mm512_srli_epi16::<8>(_mm512_add_epi16(
+            _mm512_add_epi16(n, _mm512_srli_epi16::<8>(n)),
+            v1,
+        ));
+        // Values ≤ 255: truncation to bytes is exact.
+        *out = _mm512_cvtepi16_epi8(r);
     }
 
-    // All intrinsics below are unsafe; caller guarantees avx2, valid pointers, and slice bounds.
-    // One block keeps the SIMD pipeline readable rather than scattering per-call wrappers.
+    let lo = _mm512_inserti64x4::<1>(_mm512_castsi256_si512(rgbx[0]), rgbx[1]);
+    let hi = _mm512_inserti64x4::<1>(_mm512_castsi256_si512(rgbx[2]), rgbx[3]);
+    // SAFETY: rgb is exactly 96 bytes: 64 at offset 0, 32 at offset 64.
     unsafe {
-        // Load 8 u8 values via _mm_loadl_epi64 (64-bit load), then zero-extend to 8 × u16.
-        // Arrays are exactly 8 bytes; _mm_loadl_epi64 requires only 1-byte alignment.
-        let c_u16 = _mm256_cvtepu8_epi16(_mm_loadl_epi64(c_arr.as_ptr().cast()));
-        let m_u16 = _mm256_cvtepu8_epi16(_mm_loadl_epi64(m_arr.as_ptr().cast()));
-        let y_u16 = _mm256_cvtepu8_epi16(_mm_loadl_epi64(y_arr.as_ptr().cast()));
-        let k_u16 = _mm256_cvtepu8_epi16(_mm_loadl_epi64(k_arr.as_ptr().cast()));
-
-        // inv_ch = 255 − ch  (u16, max 255, no overflow)
-        let v255 = _mm256_set1_epi16(255_i16);
-        let inv_c = _mm256_sub_epi16(v255, c_u16);
-        let inv_m = _mm256_sub_epi16(v255, m_u16);
-        let inv_y = _mm256_sub_epi16(v255, y_u16);
-        let inv_k = _mm256_sub_epi16(v255, k_u16);
-
-        // prod = inv_ch * inv_k  (u16, max 255*255 = 65025 < 65536)
-        let prod_r = _mm256_mullo_epi16(inv_c, inv_k);
-        let prod_g = _mm256_mullo_epi16(inv_m, inv_k);
-        let prod_b = _mm256_mullo_epi16(inv_y, inv_k);
-
-        // Exact ⌊(x + 127) / 255⌋ = (n + (n>>8) + 1) >> 8, n = x + 127.
-        // Same identity as the AVX-512 path; valid for n ≤ 65152 (max 65025+127=65152 ✓).
-        let v127 = _mm256_set1_epi16(127_i16);
-        let v1 = _mm256_set1_epi16(1_i16);
-        macro_rules! div255 {
-            ($x:expr) => {{
-                let n = _mm256_add_epi16($x, v127);
-                _mm256_srli_epi16(
-                    _mm256_add_epi16(_mm256_add_epi16(n, _mm256_srli_epi16(n, 8)), v1),
-                    8,
-                )
-            }};
-        }
-        let r_u16 = div255!(prod_r);
-        let g_u16 = div255!(prod_g);
-        let b_u16 = div255!(prod_b);
-
-        // Narrow u16 → u8 via packus_epi16(v, v) then extract the low 64 bits.
-        // packus_epi16(v, v) → [v[0..7] v[0..7] | v[0..7] v[0..7]] in 256 bits.
-        // permute4x64(x, 0x88) packs the two unique 64-bit halves to the low 128 bits.
-        // _mm256_castsi256_si128 + _mm_storel_epi64 stores the 8 result bytes.
-        macro_rules! narrow8 {
-            ($v:expr) => {
-                _mm256_castsi256_si128(_mm256_permute4x64_epi64(
-                    _mm256_packus_epi16($v, $v),
-                    0x88_i32,
-                ))
-            };
-        }
-        let r8 = narrow8!(r_u16);
-        let g8 = narrow8!(g_u16);
-        let b8 = narrow8!(b_u16);
-
-        // Extract 8 bytes per channel and interleave into RGB output.
-        // Arrays are stack-allocated [u8; 8]; _mm_storel_epi64 stores exactly 8 bytes.
-        let mut r_arr = [0u8; 8];
-        let mut g_arr = [0u8; 8];
-        let mut b_arr = [0u8; 8];
-        _mm_storel_epi64(r_arr.as_mut_ptr().cast(), r8);
-        _mm_storel_epi64(g_arr.as_mut_ptr().cast(), g8);
-        _mm_storel_epi64(b_arr.as_mut_ptr().cast(), b8);
-        for i in 0..8 {
-            rgb[i * 3] = r_arr[i];
-            rgb[i * 3 + 1] = g_arr[i];
-            rgb[i * 3 + 2] = b_arr[i];
-        }
-    } // unsafe
+        _mm512_storeu_si512(
+            rgb.as_mut_ptr().cast(),
+            _mm512_permutex2var_epi8(lo, gather_lo, hi),
+        );
+        _mm256_storeu_si256(
+            rgb.as_mut_ptr().add(64).cast(),
+            _mm512_castsi512_si256(_mm512_permutex2var_epi8(lo, gather_hi, hi)),
+        );
+    }
 }
 
 // ── ARM NEON CMYK→RGB ─────────────────────────────────────────────────────────
@@ -412,6 +220,8 @@ unsafe fn cmyk_to_rgb_neon(cmyk: &[u8; 32], rgb: &mut [u8]) {
 
 // ── Scalar CMYK→RGB ───────────────────────────────────────────────────────────
 
+/// Per-pixel loop: the tail of every SIMD tier and the whole path on targets
+/// without one.  The loop is auto-vectorised by LLVM.
 #[inline]
 fn cmyk_to_rgb_scalar(cmyk: &[u8], rgb: &mut [u8]) {
     for (src, dst) in cmyk
@@ -429,54 +239,26 @@ fn cmyk_to_rgb_scalar(cmyk: &[u8], rgb: &mut [u8]) {
 
 // ── Per-arch dispatch ─────────────────────────────────────────────────────────
 
-/// x86-64: runtime-detect AVX-512 → AVX2 → scalar.
+/// x86-64: runtime-detect AVX-512 VBMI → scalar.
 ///
-/// Uses `is_x86_feature_detected!` so the same binary works on AVX-512
-/// machines (Ryzen 9000, Sapphire Rapids), consumer Intel (AVX2 only), and
-/// older hardware (scalar fallback).  A compile-time `#[cfg(target_feature)]`
-/// gate would compile out fallback paths on native builds, causing SIGILL on
-/// machines that lack the compile-time feature.
+/// Uses `is_x86_feature_detected!` so the same binary works on VBMI machines
+/// (Zen 4+, Ice Lake+) and everything older.  A compile-time
+/// `#[cfg(target_feature)]` gate would compile out the fallback on native
+/// builds, causing SIGILL on machines that lack the compile-time feature.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-#[expect(
-    clippy::chunks_exact_to_as_chunks,
-    reason = "the tail is consumed via Chunks::remainder(); as_chunks would restructure \
-              the unsafe SIMD dispatch for no behavioural gain"
-)]
 fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
-    if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
-        let mut chunks = cmyk.chunks_exact(64);
-        let mut out_off = 0usize;
-        for chunk in chunks.by_ref() {
-            // SAFETY: avx512f+avx512bw confirmed by is_x86_feature_detected! above;
-            // chunk is exactly 64 bytes; rgb[out_off..] has ≥ 48 bytes remaining
-            // because rgb was sized to n*3 and we advance by 48 per 64-byte input.
-            unsafe {
-                cmyk_to_rgb_avx512(
-                    chunk.try_into().expect("chunk is exactly 64 bytes"),
-                    &mut rgb[out_off..],
-                );
-            }
-            out_off += 48;
+    if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vbmi") {
+        // 128 input bytes ↔ 32 pixels ↔ 96 output bytes, so the two chunk
+        // iterators run in lockstep and their remainders describe the same
+        // tail pixels.
+        let (blocks, tail) = cmyk.as_chunks::<128>();
+        let (out_blocks, out_tail) = rgb.as_chunks_mut::<96>();
+        for (block, out) in blocks.iter().zip(out_blocks) {
+            // SAFETY: avx512bw + avx512vbmi confirmed by is_x86_feature_detected! above.
+            unsafe { cmyk_to_rgb_avx512(block, out) };
         }
-        // Scalar tail for remaining pixels (< 16).
-        cmyk_to_rgb_scalar(chunks.remainder(), &mut rgb[out_off..]);
-    } else if is_x86_feature_detected!("avx2") {
-        let mut chunks = cmyk.chunks_exact(32);
-        let mut out_off = 0usize;
-        for chunk in chunks.by_ref() {
-            // SAFETY: avx2 confirmed; chunk is exactly 32 bytes;
-            // rgb[out_off..] has ≥ 24 bytes remaining.
-            unsafe {
-                cmyk_to_rgb_avx2(
-                    chunk.try_into().expect("chunk is exactly 32 bytes"),
-                    &mut rgb[out_off..],
-                );
-            }
-            out_off += 24;
-        }
-        // Scalar tail for remaining pixels (< 8).
-        cmyk_to_rgb_scalar(chunks.remainder(), &mut rgb[out_off..]);
+        cmyk_to_rgb_scalar(tail, out_tail);
     } else {
         cmyk_to_rgb_scalar(cmyk, rgb);
     }
@@ -521,7 +303,7 @@ fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
 /// quadrilinear interpolation — the same algorithm as the GPU kernel.
 ///
 /// The `clut = None` path uses the best SIMD available at runtime:
-/// - x86-64: AVX-512 (16 px/iter) → AVX2 (8 px/iter) → scalar
+/// - x86-64: AVX-512 VBMI (32 px/iter) → scalar
 /// - aarch64: NEON (8 px/iter) — mandatory on all ARMv8-A targets
 /// - other: scalar per-pixel loop
 ///
@@ -672,6 +454,16 @@ pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
 mod tests {
     use super::icc_cmyk_to_rgb_cpu;
 
+    /// Scalar reference: `cmyk_to_rgb_reflectance` per pixel.
+    fn reference(cmyk: &[u8]) -> Vec<u8> {
+        cmyk.chunks_exact(4)
+            .flat_map(|px| {
+                let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(px[0], px[1], px[2], px[3]);
+                [r, g, b]
+            })
+            .collect()
+    }
+
     #[test]
     fn icc_cmyk_matrix_white() {
         let cmyk = [0u8, 0, 0, 0];
@@ -704,13 +496,13 @@ mod tests {
 
     /// Parity: the active SIMD path must match `cmyk_to_rgb_reflectance` byte-for-byte.
     ///
-    /// On x86-64 with `-C target-cpu=native` (AVX-512 machine) this exercises the
-    /// AVX-512 branch. On aarch64 it exercises the NEON branch. On other targets
+    /// 40 pixels: on x86-64 with AVX-512 VBMI that is one 32-pixel block plus
+    /// an 8-pixel scalar tail; on aarch64 five NEON chunks.  On other targets
     /// both sides go scalar and the test is a tautology (still passes).
     #[test]
     fn icc_cmyk_matrix_simd_vs_scalar() {
         #[rustfmt::skip]
-        let cmyk: Vec<u8> = vec![
+        let mut cmyk: Vec<u8> = vec![
             // white, black, cyan, magenta
               0,   0,   0,   0,
               0,   0,   0, 255,
@@ -721,7 +513,7 @@ mod tests {
               0,   0,   0, 128,
             255, 255, 255, 255,
             128, 128, 128, 128,
-            // mid-range sweep (fills a full 16-pixel AVX-512 chunk and 8-pixel NEON chunk)
+            // mid-range sweep
              64,  32,  16,   8,
             200, 100,  50,  25,
              10,  20,  30,  40,
@@ -731,16 +523,15 @@ mod tests {
             170, 180, 190, 200,
             210, 220, 230, 240,
         ];
-        assert_eq!(cmyk.len(), 64, "test vector must be exactly 16 pixels");
+        // Second half: the same 16 pixels with every channel inverted, then
+        // the first eight pixels again as the tail.
+        let inverted: Vec<u8> = cmyk.iter().map(|&v| 255 - v).collect();
+        cmyk.extend_from_slice(&inverted);
+        let tail = cmyk[..32].to_vec();
+        cmyk.extend_from_slice(&tail);
+        assert_eq!(cmyk.len(), 160, "test vector must be exactly 40 pixels");
 
-        let mut scalar_rgb = [0u8; 48];
-        for (src, dst) in cmyk.chunks_exact(4).zip(scalar_rgb.chunks_exact_mut(3)) {
-            let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-        }
-
+        let scalar_rgb = reference(&cmyk);
         let simd_rgb = icc_cmyk_to_rgb_cpu(&cmyk, None);
 
         for (i, (s, a)) in scalar_rgb.iter().zip(simd_rgb.iter()).enumerate() {
@@ -757,7 +548,7 @@ mod tests {
     /// Non-multiple-of-chunk-size: exercises the scalar tail path on all SIMD tiers.
     #[test]
     fn icc_cmyk_matrix_tail_pixels() {
-        // 5 pixels: AVX-512 processes 0 full chunks (< 16), NEON processes 0 (< 8).
+        // 5 pixels: AVX-512 processes 0 full blocks (< 32), NEON processes 0 (< 8).
         // All 5 pixels fall into the scalar tail on every arch.
         let cmyk: Vec<u8> = (0u8..5)
             .flat_map(|i| {
@@ -770,17 +561,10 @@ mod tests {
                 ]
             })
             .collect();
-        let mut scalar_rgb = vec![0u8; 15];
-        for (src, dst) in cmyk.chunks_exact(4).zip(scalar_rgb.chunks_exact_mut(3)) {
-            let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-        }
-        assert_eq!(icc_cmyk_to_rgb_cpu(&cmyk, None), scalar_rgb);
+        assert_eq!(icc_cmyk_to_rgb_cpu(&cmyk, None), reference(&cmyk));
     }
 
-    /// NEON-specific: 8 pixels exactly — one full NEON chunk, zero AVX-512 chunks.
+    /// NEON-specific: 8 pixels exactly — one full NEON chunk, zero AVX-512 blocks.
     #[test]
     fn icc_cmyk_matrix_eight_pixels() {
         let cmyk: Vec<u8> = (0u8..8)
@@ -794,65 +578,21 @@ mod tests {
             })
             .collect();
         assert_eq!(cmyk.len(), 32);
-        let mut scalar_rgb = vec![0u8; 24];
-        for (src, dst) in cmyk.chunks_exact(4).zip(scalar_rgb.chunks_exact_mut(3)) {
-            let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-        }
-        assert_eq!(icc_cmyk_to_rgb_cpu(&cmyk, None), scalar_rgb);
+        assert_eq!(icc_cmyk_to_rgb_cpu(&cmyk, None), reference(&cmyk));
     }
 
-    /// AVX2-specific: 8 pixels exactly — one full AVX2 chunk.
-    /// Runtime-skipped on machines without AVX2.
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn icc_cmyk_avx2_matches_scalar() {
-        if !is_x86_feature_detected!("avx2") {
-            return;
-        }
-        let cmyk: Vec<u8> = (0u8..8)
-            .flat_map(|i| {
-                [
-                    i.wrapping_mul(30),
-                    i.wrapping_mul(20),
-                    i.wrapping_mul(10),
-                    i.wrapping_mul(5),
-                ]
-            })
-            .collect();
-        assert_eq!(cmyk.len(), 32);
-        let mut expected = vec![0u8; 24];
-        for (src, dst) in cmyk.chunks_exact(4).zip(expected.chunks_exact_mut(3)) {
-            let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-        }
-        let mut got = vec![0u8; 24];
-        // SAFETY: avx2 confirmed present above; cmyk is 32 bytes; got is 24 bytes.
-        unsafe {
-            super::cmyk_to_rgb_avx2(
-                cmyk.as_slice().try_into().expect("exactly 32 bytes"),
-                &mut got,
-            );
-        }
-        assert_eq!(got, expected, "AVX2 CMYK→RGB mismatch");
-    }
-
-    /// AVX-512-specific: direct call with 200 pseudorandom 16-pixel chunks.
+    /// AVX-512-specific: direct call with 200 pseudorandom 32-pixel blocks.
     ///
     /// The dispatcher-driven tests exercise only the highest tier the
-    /// running machine reports, so on an AVX2-only runner the AVX-512
-    /// kernel is never executed; this direct call is its only coverage
-    /// there is. Runtime-skipped on machines without AVX-512.
-    /// Many random chunks rather than one fixed vector, so a per-lane
-    /// shuffle-mask error cannot slip through on a lucky input.
+    /// running machine reports, so on a machine without VBMI the kernel is
+    /// never executed; this direct call is its only coverage there is.
+    /// Runtime-skipped on machines without AVX-512 VBMI.  Many random blocks
+    /// rather than one fixed vector, so a per-lane table error cannot slip
+    /// through on a lucky input.
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn icc_cmyk_avx512_matches_scalar() {
-        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("avx512bw") {
+        if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512vbmi") {
             return;
         }
         let mut rng = 0x1357_9bdf_u32;
@@ -860,27 +600,16 @@ mod tests {
             rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (rng >> 24) as u8
         };
-        for chunk_i in 0..200 {
-            let cmyk: Vec<u8> = (0..64).map(|_| next()).collect();
-            let mut expected = vec![0u8; 48];
-            for (src, dst) in cmyk.chunks_exact(4).zip(expected.chunks_exact_mut(3)) {
-                let (r, g, b) =
-                    color::convert::cmyk_to_rgb_reflectance(src[0], src[1], src[2], src[3]);
-                dst[0] = r;
-                dst[1] = g;
-                dst[2] = b;
-            }
-            let mut got = vec![0u8; 48];
-            // SAFETY: avx512f+bw confirmed present above; cmyk is 64 bytes; got is 48 bytes.
-            unsafe {
-                super::cmyk_to_rgb_avx512(
-                    cmyk.as_slice().try_into().expect("exactly 64 bytes"),
-                    &mut got,
-                );
-            }
+        for block_i in 0..200 {
+            let cmyk: [u8; 128] = std::array::from_fn(|_| next());
+            let expected = reference(&cmyk);
+            let mut got = [0u8; 96];
+            // SAFETY: avx512bw + avx512vbmi confirmed present above.
+            unsafe { super::cmyk_to_rgb_avx512(&cmyk, &mut got) };
             assert_eq!(
-                got, expected,
-                "AVX-512 CMYK→RGB mismatch on chunk {chunk_i}"
+                got.as_slice(),
+                expected.as_slice(),
+                "AVX-512 CMYK→RGB mismatch on block {block_i}"
             );
         }
     }

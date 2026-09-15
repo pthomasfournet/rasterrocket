@@ -26,6 +26,15 @@ pub use color::{
 /// Unit: pixels (linear).
 pub const AA_SIZE: i32 = 4;
 
+/// AA coverage → shape gamma table for `splashAASize=4`, `splashAAGamma=1.5`.
+///
+/// Indexed by the per-pixel coverage count `0..=AA_SIZE²`; entry `i` is
+/// `round((i/16)^1.5 * 255)`.  Entry 0 is 0, so applying the table to a
+/// coverage buffer leaves uncovered pixels at 0.
+pub const AA_GAMMA: [u8; (AA_SIZE * AA_SIZE + 1) as usize] = [
+    0, 4, 11, 21, 32, 45, 59, 74, 90, 108, 126, 145, 166, 187, 209, 231, 255,
+];
+
 /// Maximum number of De Casteljau subdivisions when flattening a Bézier curve.
 ///
 /// A value of 1024 gives sub-pixel accuracy for all practical PDF coordinate

@@ -1,31 +1,28 @@
 //! AA compositing: Porter-Duff source-over with per-pixel coverage.
 //!
 //! Single public entry: [`composite_aa_rgb8_opaque`] — RGB pixels with no
-//! alpha plane (opaque destination).  The compositing formula simplifies to
-//! `c = div255((255-a_src)*c_dst + a_src*c_src)` per channel.  Expressed as
-//! `[u16; LANE]` lanes so that LLVM auto-vectorizes into AVX2/AVX-512 when
-//! the binary is compiled with `-C target-cpu=native`.
+//! alpha plane (opaque destination).  Per channel,
+//! `c = div255((255 − a_src) · c_dst + a_src · c_src)` with
+//! `a_src = div255(a_input · shape)`.
 //!
-//! # Why `[u16; LANE]` instead of explicit intrinsics
+//! # Tiers (x86-64)
 //!
-//! tiny-skia's lowp pipeline uses the same technique (see `src/wide/u16x16_t.rs`
-//! and its comment: "No need for explicit AVX2 SIMD; `-C target-cpu=native` will
-//! autovectorize better than us").  A plain `[u16; 16]` array with straight
-//! arithmetic on `u16` gives LLVM the freedom to choose the best instruction
-//! width (128/256/512-bit) for the target, without us hard-coding a specific ISA.
+//! 1. **AVX-512 BW+VL**, spans ≥ 32 px: 32 pixels (96 destination bytes) per
+//!    iteration.  The destination bytes stay interleaved: each 32-byte third
+//!    of the block is widened to 32 u16 lanes, its per-lane `a_src` is drawn
+//!    from the block's 32-pixel alpha vector with `vpermw` (lane `k` of third
+//!    `g` belongs to pixel `(32g + k) / 3`) and its per-lane source colour is
+//!    a constant permutation of the RGB triple — no deinterleave or
+//!    re-interleave.  Remainder pixels go through the scalar loop.
+//! 2. **Scalar** per-pixel loop, also the tier for every other architecture.
+//!    LLVM auto-vectorises it under `-C target-cpu=native`.
 //!
 //! # div255
 //!
 //! `(v + (v >> 8) + 0x80) >> 8` computes `v / 255` exactly for the operand
 //! range here (`v ≤ 255²`), matching `color::convert::div255` in the general
 //! path bit for bit, so output does not depend on which tier a span takes.
-//! It stays pure u16 lane arithmetic (max intermediate 65 407), so it
-//! auto-vectorizes the same as the cruder `(v + 255) >> 8` approximation.
-
-// Number of pixels per SIMD-style lane chunk.  16 × u16 = 256 bits — one AVX2
-// vector per colour channel.  LLVM will widen to 512-bit (AVX-512) automatically
-// when the target supports it.
-const LANE: usize = 16;
+//! It stays pure u16 lane arithmetic (max intermediate 65 407).
 
 /// Exact `v / 255` (rounded to nearest) for `v` in `[0, 255²]`.
 ///
@@ -45,10 +42,6 @@ const fn div255_u16(v: u16) -> u16 {
 /// c_result = div255((255 - a_src) * c_dst + a_src * c_src)
 /// ```
 ///
-/// Processes pixels in chunks of `LANE` (16) using `[u16; LANE]` lanes.
-/// LLVM auto-vectorizes into 256/512-bit SIMD when compiled with
-/// `-C target-cpu=native`.
-///
 /// # Arguments
 ///
 /// - `dst`: packed RGB bytes, length must be `shape.len() * 3`.
@@ -60,63 +53,174 @@ const fn div255_u16(v: u16) -> u16 {
 ///
 /// Panics if `dst.len() != shape.len() * 3`.
 pub fn composite_aa_rgb8_opaque(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
-    let count = shape.len();
     debug_assert_eq!(
         dst.len(),
-        count * 3,
+        shape.len() * 3,
         "composite_aa_rgb8_opaque: dst length mismatch (got {}, expected {})",
         dst.len(),
-        count * 3,
+        shape.len() * 3,
     );
+    dispatch_composite(dst, src, a_input, shape);
+}
 
+// ── Scalar tier ───────────────────────────────────────────────────────────────
+
+/// Per-pixel loop; the reference every other tier must match byte for byte.
+fn composite_scalar(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
     let a_in = u16::from(a_input);
-    let [sr, sg, sb] = [u16::from(src[0]), u16::from(src[1]), u16::from(src[2])];
-
-    let full_chunks = count / LANE;
-    let remainder = count % LANE;
-
-    // ── Full LANE-wide chunks ──────────────────────────────────────────────────
-    //
-    // Both loops are structured so LLVM sees LANE independent iterations over
-    // arrays of length LANE — the pattern that triggers 256/512-bit vectorization.
-    for chunk in 0..full_chunks {
-        let px_base = chunk * LANE;
-        let byte_base = px_base * 3;
-
-        // Step 1: compute a_src for each pixel in the chunk.
-        let mut a_src_lane = [0u16; LANE];
-        for (k, a) in a_src_lane.iter_mut().enumerate() {
-            *a = div255_u16(a_in * u16::from(shape[px_base + k]));
+    let [sr, sg, sb] = src.map(u16::from);
+    for (&cov, px) in shape.iter().zip(dst.as_chunks_mut::<3>().0) {
+        let a_src = div255_u16(a_in * u16::from(cov));
+        let inv = 255 - a_src;
+        #[expect(clippy::cast_possible_truncation, reason = "div255_u16 result ≤ 255")]
+        {
+            px[0] = div255_u16(inv * u16::from(px[0]) + a_src * sr) as u8;
+            px[1] = div255_u16(inv * u16::from(px[1]) + a_src * sg) as u8;
+            px[2] = div255_u16(inv * u16::from(px[2]) + a_src * sb) as u8;
         }
+    }
+}
 
-        // Step 2: composite each pixel using its a_src.
-        for (k, &a_src) in a_src_lane.iter().enumerate() {
-            let inv = 255 - a_src;
-            let b = byte_base + k * 3;
-            // Result of div255_u16 is ≤ 255, so truncation to u8 is safe.
-            #[expect(clippy::cast_possible_truncation, reason = "div255_u16 result ≤ 255")]
-            {
-                dst[b] = div255_u16(inv * u16::from(dst[b]) + a_src * sr) as u8;
-                dst[b + 1] = div255_u16(inv * u16::from(dst[b + 1]) + a_src * sg) as u8;
-                dst[b + 2] = div255_u16(inv * u16::from(dst[b + 2]) + a_src * sb) as u8;
+// ── AVX-512 tier ──────────────────────────────────────────────────────────────
+
+/// Pixels per AVX-512 block.
+#[cfg(target_arch = "x86_64")]
+const BLOCK_PX: usize = 32;
+
+/// Lane tables for the three 32-byte thirds of a 32-pixel block: byte `b`
+/// of the block belongs to pixel `b / 3` and carries channel `b % 3`.
+#[cfg(target_arch = "x86_64")]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "every entry is < 96"
+)]
+const fn lane_table(third: usize, divide: bool) -> [i16; 32] {
+    let mut table = [0i16; 32];
+    let mut k = 0;
+    while k < 32 {
+        let b = third * 32 + k;
+        table[k] = if divide {
+            (b / 3) as i16
+        } else {
+            (b % 3) as i16
+        };
+        k += 1;
+    }
+    table
+}
+
+#[cfg(target_arch = "x86_64")]
+const LANE_PIXEL: [[i16; 32]; 3] = [
+    lane_table(0, true),
+    lane_table(1, true),
+    lane_table(2, true),
+];
+
+#[cfg(target_arch = "x86_64")]
+const LANE_CHANNEL: [[i16; 32]; 3] = [
+    lane_table(0, false),
+    lane_table(1, false),
+    lane_table(2, false),
+];
+
+/// AVX-512 tier: whole 32-pixel blocks, scalar loop for the remainder.
+///
+/// # Safety
+///
+/// Caller must ensure `avx512bw` and `avx512vl` are available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw,avx512vl")]
+unsafe fn composite_avx512(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
+    use std::arch::x86_64::{
+        __m512i, _mm256_loadu_si256, _mm256_storeu_si256, _mm512_add_epi16, _mm512_cvtepi16_epi8,
+        _mm512_cvtepu8_epi16, _mm512_loadu_si512, _mm512_mullo_epi16, _mm512_permutexvar_epi16,
+        _mm512_set1_epi16, _mm512_set1_epi64, _mm512_srli_epi16, _mm512_sub_epi16,
+    };
+
+    // Only whole blocks that both slices cover go through the vector path.
+    let n = shape.len().min(dst.len() / 3);
+    let blocks = n / BLOCK_PX;
+
+    let a_in = _mm512_set1_epi16(i16::from(a_input));
+    let v255 = _mm512_set1_epi16(255);
+    let v128 = _mm512_set1_epi16(0x80);
+    // Exact v / 255 on u16 lanes: (v + (v >> 8) + 0x80) >> 8.
+    let div255 = |v: __m512i| {
+        _mm512_srli_epi16::<8>(_mm512_add_epi16(
+            _mm512_add_epi16(v, _mm512_srli_epi16::<8>(v)),
+            v128,
+        ))
+    };
+    // The RGB triple in u16 lanes 0..=2 of every qword; LANE_CHANNEL selects
+    // from those three lanes per byte position.
+    let rgb = _mm512_set1_epi64(
+        i64::from(src[0]) | (i64::from(src[1]) << 16) | (i64::from(src[2]) << 32),
+    );
+    // SAFETY: the tables are exactly 64 bytes each.
+    let (pixel_of, src_of) = unsafe {
+        let load = |t: &[i16; 32]| _mm512_loadu_si512(t.as_ptr().cast());
+        (
+            [
+                load(&LANE_PIXEL[0]),
+                load(&LANE_PIXEL[1]),
+                load(&LANE_PIXEL[2]),
+            ],
+            [
+                _mm512_permutexvar_epi16(load(&LANE_CHANNEL[0]), rgb),
+                _mm512_permutexvar_epi16(load(&LANE_CHANNEL[1]), rgb),
+                _mm512_permutexvar_epi16(load(&LANE_CHANNEL[2]), rgb),
+            ],
+        )
+    };
+
+    let sp = shape.as_ptr();
+    let dp = dst.as_mut_ptr();
+    for block in 0..blocks {
+        let px = block * BLOCK_PX;
+        // SAFETY: px + 32 ≤ n ≤ shape.len().
+        let cov = unsafe { _mm256_loadu_si256(sp.add(px).cast()) };
+        let a_src = div255(_mm512_mullo_epi16(_mm512_cvtepu8_epi16(cov), a_in));
+        for third in 0..3 {
+            let off = px * 3 + third * 32;
+            // SAFETY: off + 32 ≤ 3n ≤ dst.len().
+            unsafe {
+                let d = _mm512_cvtepu8_epi16(_mm256_loadu_si256(dp.add(off).cast()));
+                let a = _mm512_permutexvar_epi16(pixel_of[third], a_src);
+                let inv = _mm512_sub_epi16(v255, a);
+                let v = _mm512_add_epi16(
+                    _mm512_mullo_epi16(inv, d),
+                    _mm512_mullo_epi16(a, src_of[third]),
+                );
+                _mm256_storeu_si256(dp.add(off).cast(), _mm512_cvtepi16_epi8(div255(v)));
             }
         }
     }
 
-    // ── Scalar tail ───────────────────────────────────────────────────────────
-    let tail_px = full_chunks * LANE;
-    let tail_byte = tail_px * 3;
-    for k in 0..remainder {
-        let a_src = div255_u16(a_in * u16::from(shape[tail_px + k]));
-        let inv = 255 - a_src;
-        let b = tail_byte + k * 3;
-        #[expect(clippy::cast_possible_truncation, reason = "div255_u16 result ≤ 255")]
-        {
-            dst[b] = div255_u16(inv * u16::from(dst[b]) + a_src * sr) as u8;
-            dst[b + 1] = div255_u16(inv * u16::from(dst[b + 1]) + a_src * sg) as u8;
-            dst[b + 2] = div255_u16(inv * u16::from(dst[b + 2]) + a_src * sb) as u8;
-        }
+    let done = blocks * BLOCK_PX;
+    composite_scalar(&mut dst[done * 3..], src, a_input, &shape[done..]);
+}
+
+// ── Per-arch dispatch ─────────────────────────────────────────────────────────
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn dispatch_composite(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
+    if shape.len() >= BLOCK_PX
+        && is_x86_feature_detected!("avx512bw")
+        && is_x86_feature_detected!("avx512vl")
+    {
+        // SAFETY: both features confirmed present.
+        unsafe { composite_avx512(dst, src, a_input, shape) };
+    } else {
+        composite_scalar(dst, src, a_input, shape);
     }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn dispatch_composite(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
+    composite_scalar(dst, src, a_input, shape);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -125,7 +229,34 @@ pub fn composite_aa_rgb8_opaque(dst: &mut [u8], src: [u8; 3], a_input: u8, shape
 mod tests {
     use super::*;
 
-    // ── composite_aa_rgb8_opaque ─────────────────────────────────────────────
+    fn pseudorandom(n: usize, seed: u32) -> Vec<u8> {
+        let mut rng = seed;
+        (0..n)
+            .map(|_| {
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                #[expect(clippy::cast_possible_truncation, reason = "top byte of a u32")]
+                {
+                    (rng >> 24) as u8
+                }
+            })
+            .collect()
+    }
+
+    /// Pixel-by-pixel reference written independently of the tiers.
+    fn reference(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
+        let a_in = u16::from(a_input);
+        let [sr, sg, sb] = [u16::from(src[0]), u16::from(src[1]), u16::from(src[2])];
+        for (shape_v, px) in shape.iter().zip(dst.chunks_exact_mut(3)) {
+            let a_src = div255_u16(a_in * u16::from(*shape_v));
+            let inv = 255 - a_src;
+            #[expect(clippy::cast_possible_truncation, reason = "div255_u16 result ≤ 255")]
+            {
+                px[0] = div255_u16(inv * u16::from(px[0]) + a_src * sr) as u8;
+                px[1] = div255_u16(inv * u16::from(px[1]) + a_src * sg) as u8;
+                px[2] = div255_u16(inv * u16::from(px[2]) + a_src * sb) as u8;
+            }
+        }
+    }
 
     #[test]
     fn opaque_full_coverage_writes_src() {
@@ -165,44 +296,59 @@ mod tests {
         assert!((125..=131).contains(&v), "expected ~128, got {v}");
     }
 
+    /// Dispatcher-driven parity at every remainder of the 32-pixel block, plus
+    /// long spans, across a spread of source colours and opacities.
     #[test]
-    fn opaque_matches_scalar_for_large_span() {
-        // Verify LANE-chunked path matches a pixel-by-pixel reference.
-        let src = [100u8, 150, 200];
-        let a_input = 200u8;
-        let count = 37usize; // crosses chunk boundary: 2 full chunks + 5 tail
-        // i * 7 / i * 3 are mod-256 reduced before the cast, so the truncation
-        // is intentional and exact.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "mod-256 result fits in u8 by construction"
-        )]
-        let shape: Vec<u8> = (0..count).map(|i| (i * 7 % 256) as u8).collect();
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "mod-256 result fits in u8 by construction"
-        )]
-        let initial: Vec<u8> = (0..count * 3).map(|i| (i * 3 % 256) as u8).collect();
+    fn dispatch_matches_reference_at_every_length() {
+        let cases = [
+            ([100u8, 150, 200], 200u8),
+            ([0, 0, 0], 255),
+            ([255, 255, 255], 1),
+            ([7, 250, 128], 128),
+        ];
+        for (src, a_input) in cases {
+            for n in (0..=130).chain([255, 256, 257, 1000, 2500]) {
+                #[expect(clippy::cast_possible_truncation, reason = "n ≤ 2500")]
+                let seed = 0x1234_5678 ^ (n as u32);
+                let shape = pseudorandom(n, seed);
+                let initial = pseudorandom(n * 3, seed.rotate_left(7));
 
-        // Scalar reference
-        let mut ref_dst = initial.clone();
-        let a_in = u16::from(a_input);
-        let [sr, sg, sb] = [u16::from(src[0]), u16::from(src[1]), u16::from(src[2])];
-        for (shape_v, ref_chunk) in shape.iter().zip(ref_dst.chunks_exact_mut(3)) {
-            let a_src = div255_u16(a_in * u16::from(*shape_v));
-            let inv = 255 - a_src;
-            #[expect(clippy::cast_possible_truncation, reason = "div255_u16 result ≤ 255")]
-            {
-                ref_chunk[0] = div255_u16(inv * u16::from(ref_chunk[0]) + a_src * sr) as u8;
-                ref_chunk[1] = div255_u16(inv * u16::from(ref_chunk[1]) + a_src * sg) as u8;
-                ref_chunk[2] = div255_u16(inv * u16::from(ref_chunk[2]) + a_src * sb) as u8;
+                let mut want = initial.clone();
+                reference(&mut want, src, a_input, &shape);
+
+                let mut got = initial;
+                composite_aa_rgb8_opaque(&mut got, src, a_input, &shape);
+
+                assert_eq!(got, want, "src={src:?} a_input={a_input} n={n}");
             }
         }
+    }
 
-        let mut got = initial;
-        composite_aa_rgb8_opaque(&mut got, src, a_input, &shape);
+    /// Direct call into the AVX-512 tier with slices that are not a whole
+    /// number of blocks, so its own scalar remainder is exercised regardless
+    /// of the dispatcher's width gate.  Skipped where the CPU lacks it.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx512_tier_matches_reference() {
+        if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        for n in [1usize, 31, 32, 33, 63, 64, 65, 96, 100, 129] {
+            #[expect(clippy::cast_possible_truncation, reason = "n ≤ 129")]
+            let seed = 0x9e37_79b9 ^ (n as u32);
+            let shape = pseudorandom(n, seed);
+            let initial = pseudorandom(n * 3, seed.rotate_left(11));
+            let src = [33u8, 66, 99];
 
-        assert_eq!(got, ref_dst, "chunked path mismatch vs scalar reference");
+            let mut want = initial.clone();
+            reference(&mut want, src, 180, &shape);
+
+            let mut got = initial;
+            // SAFETY: avx512bw + avx512vl confirmed present above.
+            unsafe { composite_avx512(&mut got, src, 180, &shape) };
+
+            assert_eq!(got, want, "n={n}");
+        }
     }
 
     #[test]
