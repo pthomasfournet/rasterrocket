@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-BIN="${BIN:-$(dirname "$0")/../target/release/pdf-raster}"
+BIN="${BIN:-$(dirname "$0")/../target/release/rrocket}"
 FIXTURES="$(dirname "$0")/fixtures"
 REF_TOOL="pdftoppm"
 RUNS=3

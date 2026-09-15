@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-BIN="${BIN:-$(dirname "$0")/../target/release/pdf-raster}"
+BIN="${BIN:-$(dirname "$0")/../target/release/rrocket}"
 FIXTURES="$(dirname "$0")/fixtures"
 BACKEND="cpu"
 VAAPI_DEVICE="/dev/dri/renderD129"
