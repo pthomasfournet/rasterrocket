@@ -463,7 +463,7 @@ fn extract_encoding(
 
 /// Map a PDF base-encoding name to [`BaseEncoding`].  Unknown or absent →
 /// `StandardEncoding` (PDF-spec default for a simple font).
-fn parse_base_encoding(name: Option<&[u8]>) -> BaseEncoding {
+const fn parse_base_encoding(name: Option<&[u8]>) -> BaseEncoding {
     match name {
         Some(b"WinAnsiEncoding") => BaseEncoding::WinAnsi,
         Some(b"MacRomanEncoding") => BaseEncoding::MacRoman,
@@ -801,7 +801,9 @@ fn extract_cid_to_gid(doc: &Document, descendant: &Dictionary) -> Option<Vec<u32
                 return None;
             }
             let table: Vec<u32> = bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u32::from(pair[0]) << 8 | u32::from(pair[1]))
                 .collect();
             Some(table)

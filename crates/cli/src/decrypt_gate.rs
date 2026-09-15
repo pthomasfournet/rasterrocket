@@ -9,6 +9,12 @@
 //! A non-interactive process with no bypass set never auto-proceeds; it
 //! aborts with a clear, accurate error instead.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "bin-only crate with private modules: pub(crate) is the real \
+              visibility and cannot escape; widening to pub would misdescribe it"
+)]
+
 use std::io::{IsTerminal, Write};
 
 /// The liability waiver shown on stderr before the interactive prompt.

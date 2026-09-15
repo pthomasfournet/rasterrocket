@@ -4,6 +4,12 @@
 //! PDF path uses, so output format, colour mode, naming, and page-range behave
 //! identically across input types.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "bin-only crate with private modules: pub(crate) is the real \
+              visibility and cannot escape; widening to pub would misdescribe it"
+)]
+
 use std::path::Path;
 
 use color::Rgb8;

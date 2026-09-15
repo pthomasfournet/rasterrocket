@@ -36,6 +36,12 @@
 //! disk if the kernel reports tight memory — at which point we've already
 //! benefited from RAM-speed writes for the early pages.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "bin-only crate with private modules: pub(crate) is the real \
+              visibility and cannot escape; widening to pub would misdescribe it"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

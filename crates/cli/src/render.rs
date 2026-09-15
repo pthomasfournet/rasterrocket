@@ -1,5 +1,11 @@
 //! Per-page rendering: call `rasterrocket` library → apply colour mode → write file.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "bin-only crate with private modules: pub(crate) is the real \
+              visibility and cannot escape; widening to pub would misdescribe it"
+)]
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write as _};
 

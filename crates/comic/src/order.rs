@@ -1,5 +1,11 @@
 //! Page ordering: natural-sort comparison and image-file filtering.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "the module is private to the crate, so pub(crate) states the real \
+              visibility; widening to pub would misdescribe the intent"
+)]
+
 use std::cmp::Ordering;
 
 /// True if `name` is a directory or a macOS resource-fork (`__MACOSX`) member,

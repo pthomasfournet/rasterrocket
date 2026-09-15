@@ -156,7 +156,12 @@ pub(super) fn downsample_16bpp(
         return None;
     }
     // Each 16-bit sample is big-endian; take the high byte (bytes 0, 2, 4, …).
-    let out: Vec<u8> = data[..needed].chunks_exact(2).map(|pair| pair[0]).collect();
+    let out: Vec<u8> = data[..needed]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| pair[0])
+        .collect();
     Some(out)
 }
 

@@ -1,5 +1,11 @@
 //! Archive containers behind a common trait.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "the module is private to the crate, so pub(crate) states the real \
+              visibility; widening to pub would misdescribe the intent"
+)]
+
 mod sevenz;
 mod tar;
 mod zip;

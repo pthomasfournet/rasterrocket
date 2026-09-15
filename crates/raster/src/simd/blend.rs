@@ -36,7 +36,7 @@ pub(super) fn blend_solid_rgb8_scalar(dst: &mut [u8], color: [u8; 3], count: usi
         dst.len(),
         count * 3
     );
-    for chunk in dst[..count * 3].chunks_exact_mut(3) {
+    for chunk in dst[..count * 3].as_chunks_mut::<3>().0 {
         chunk.copy_from_slice(&color);
     }
 }

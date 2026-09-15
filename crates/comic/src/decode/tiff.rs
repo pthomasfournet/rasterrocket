@@ -52,7 +52,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
         ColorType::RGB(_) => u8s,
         ColorType::RGBA(_) => {
             let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3);
-            for px in u8s.chunks_exact(4) {
+            for px in u8s.as_chunks::<4>().0 {
                 out.extend_from_slice(&px[..3]);
             }
             out

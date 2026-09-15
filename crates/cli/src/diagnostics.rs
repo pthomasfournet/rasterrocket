@@ -4,6 +4,12 @@
 //! Functions are free-standing so `main` can call them without
 //! owning any render state.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "bin-only crate with private modules: pub(crate) is the real \
+              visibility and cannot escape; widening to pub would misdescribe it"
+)]
+
 use pdf_raster::{BackendPolicy, RasterError};
 
 use crate::args::Args;

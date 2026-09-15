@@ -1,5 +1,11 @@
 //! Output filename generation — page-numbered files with configurable separator and zero-padding.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "bin-only crate with private modules: pub(crate) is the real \
+              visibility and cannot escape; widening to pub would misdescribe it"
+)]
+
 use crate::args::{Args, OutputFormat};
 
 /// Compute the output filename for a given page using `args.output_prefix`.

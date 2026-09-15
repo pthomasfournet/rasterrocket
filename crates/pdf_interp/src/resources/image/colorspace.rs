@@ -120,7 +120,7 @@ fn resolve_cs_depth(doc: &Document, cs_obj: &Object, depth: u8) -> ResolvedCs {
 }
 
 /// Map a `ColorSpace` device name to a [`ResolvedCs`].
-pub(super) fn device_cs_name(name: &[u8]) -> ResolvedCs {
+pub(super) const fn device_cs_name(name: &[u8]) -> ResolvedCs {
     match name {
         b"DeviceRGB" | b"CalRGB" => ResolvedCs::Rgb,
         b"DeviceCMYK" => ResolvedCs::Cmyk,
@@ -220,7 +220,7 @@ pub(super) fn indexed_palette(doc: &Document, cs_arr: &[Object]) -> Option<(Vec<
     // Build the output palette, converting CMYK entries to RGB inline.
     let palette: Vec<u8> = if base == ResolvedCs::Cmyk {
         let mut out = Vec::with_capacity(n_entries * 3);
-        for chunk in lookup_bytes[..needed].chunks_exact(4) {
+        for chunk in lookup_bytes[..needed].as_chunks::<4>().0 {
             let (r, g, b) =
                 color::convert::cmyk_to_rgb_reflectance(chunk[0], chunk[1], chunk[2], chunk[3]);
             out.push(r);

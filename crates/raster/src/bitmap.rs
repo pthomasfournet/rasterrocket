@@ -231,6 +231,12 @@ impl<P: Pixel> Bitmap<P> {
             let n = w * P::BYTES;
             let stride = self.stride;
             for row in self.data.chunks_exact_mut(stride) {
+                // `as_chunks_mut::<P::BYTES>()` would need an associated const as a
+                // const-generic argument, which stable Rust does not accept.
+                #[expect(
+                    clippy::chunks_exact_to_as_chunks,
+                    reason = "chunk size is an associated const, not a literal"
+                )]
                 for dst in row[..n].chunks_exact_mut(P::BYTES) {
                     dst.copy_from_slice(pixel_bytes);
                 }

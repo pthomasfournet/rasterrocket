@@ -86,7 +86,7 @@ fn convert_row_to_rgb<P: Pixel>(src: &[u8], dst: &mut [u8], width: usize) {
         }
         PixelMode::Bgr8 => {
             // Source: [B, G, R] → dest: [R, G, B].
-            for (i, chunk) in src[..width * 3].chunks_exact(3).enumerate() {
+            for (i, chunk) in src[..width * 3].as_chunks::<3>().0.iter().enumerate() {
                 dst[i * 3] = chunk[2]; // R ← src[2]
                 dst[i * 3 + 1] = chunk[1]; // G ← src[1]
                 dst[i * 3 + 2] = chunk[0]; // B ← src[0]
@@ -94,7 +94,7 @@ fn convert_row_to_rgb<P: Pixel>(src: &[u8], dst: &mut [u8], width: usize) {
         }
         PixelMode::Xbgr8 => {
             // Source: [X, B, G, R] (little-endian 32-bit word) → dest: [R, G, B].
-            for (i, chunk) in src[..width * 4].chunks_exact(4).enumerate() {
+            for (i, chunk) in src[..width * 4].as_chunks::<4>().0.iter().enumerate() {
                 dst[i * 3] = chunk[3]; // R ← src[3]
                 dst[i * 3 + 1] = chunk[2]; // G ← src[2]
                 dst[i * 3 + 2] = chunk[1]; // B ← src[1]
@@ -102,7 +102,7 @@ fn convert_row_to_rgb<P: Pixel>(src: &[u8], dst: &mut [u8], width: usize) {
         }
         PixelMode::Cmyk8 => {
             // Source: [C, M, Y, K] → dest: [R, G, B].
-            for (i, chunk) in src[..width * 4].chunks_exact(4).enumerate() {
+            for (i, chunk) in src[..width * 4].as_chunks::<4>().0.iter().enumerate() {
                 let (r, g, b) = cmyk_to_rgb(chunk[0], chunk[1], chunk[2], chunk[3]);
                 dst[i * 3] = r;
                 dst[i * 3 + 1] = g;
@@ -111,7 +111,7 @@ fn convert_row_to_rgb<P: Pixel>(src: &[u8], dst: &mut [u8], width: usize) {
         }
         PixelMode::DeviceN8 => {
             // Source: [C, M, Y, K, spot0..3] — use only CMYK (bytes 0..4).
-            for (i, chunk) in src[..width * 8].chunks_exact(8).enumerate() {
+            for (i, chunk) in src[..width * 8].as_chunks::<8>().0.iter().enumerate() {
                 let (r, g, b) = cmyk_to_rgb(chunk[0], chunk[1], chunk[2], chunk[3]);
                 dst[i * 3] = r;
                 dst[i * 3 + 1] = g;

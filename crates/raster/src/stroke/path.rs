@@ -494,10 +494,10 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                         if d_join > 0.0 {
                             let dx_join = (-wdy_next + wdy) / d_join;
                             let dy_join = (wdx_next - wdx) / d_join;
-                            let xc =
-                                path.pts[j0].x + 0.5 * w * f64::cos(0.5 * (angle + angle_next));
-                            let yc =
-                                path.pts[j0].y + 0.5 * w * f64::sin(0.5 * (angle + angle_next));
+                            let xc = path.pts[j0].x
+                                + 0.5 * w * f64::cos(f64::midpoint(angle, angle_next));
+                            let yc = path.pts[j0].y
+                                + 0.5 * w * f64::sin(f64::midpoint(angle, angle_next));
                             let kappa = d_angle * BEZIER_CIRCLE2 * w;
                             let cx1 = path.pts[j0].x - wdy + kappa * dx;
                             let cy1 = path.pts[j0].y + wdx + kappa * dy;
@@ -555,10 +555,10 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                         if d_join > 0.0 {
                             let dx_join = (wdy_next - wdy) / d_join;
                             let dy_join = (-wdx_next + wdx) / d_join;
-                            let xc =
-                                path.pts[j0].x + 0.5 * w * f64::cos(0.5 * (angle + angle_next));
-                            let yc =
-                                path.pts[j0].y + 0.5 * w * f64::sin(0.5 * (angle + angle_next));
+                            let xc = path.pts[j0].x
+                                + 0.5 * w * f64::cos(f64::midpoint(angle, angle_next));
+                            let yc = path.pts[j0].y
+                                + 0.5 * w * f64::sin(f64::midpoint(angle, angle_next));
                             let kappa = d_angle * BEZIER_CIRCLE2 * w;
                             let cx1 = path.pts[j0].x + wdy + kappa * dx;
                             let cy1 = path.pts[j0].y - wdx + kappa * dy;

@@ -1013,7 +1013,7 @@ pub(super) fn cmyk_raw_to_rgb(
     // when the feature is disabled or no GpuCtx is provided).
     let npixels = pixels.len() / 4;
     let mut rgb = Vec::with_capacity(npixels.checked_mul(3)?);
-    for chunk in pixels.chunks_exact(4) {
+    for chunk in pixels.as_chunks::<4>().0 {
         let (c, m, y, k) = if inverted {
             (
                 255 - chunk[0],
@@ -1115,8 +1115,8 @@ pub(super) fn decode_jpx(
             let ImagePixelData::La8(pixels) = img_data.data else {
                 unreachable!("jpeg2k: La8 format paired with non-La8 data")
             };
-            let gray: Vec<u8> = pixels.chunks_exact(2).map(|c| c[0]).collect();
-            let alpha: Vec<u8> = pixels.chunks_exact(2).map(|c| c[1]).collect();
+            let gray: Vec<u8> = pixels.as_chunks::<2>().0.iter().map(|c| c[0]).collect();
+            let alpha: Vec<u8> = pixels.as_chunks::<2>().0.iter().map(|c| c[1]).collect();
             let mut desc = jpx_gray(jw, jh, gray);
             desc.smask = Some(alpha);
             Some(desc)
@@ -1132,10 +1132,12 @@ pub(super) fn decode_jpx(
                 unreachable!("jpeg2k: Rgba8 format paired with non-Rgba8 data")
             };
             let rgb: Vec<u8> = pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|c| [c[0], c[1], c[2]])
                 .collect();
-            let alpha: Vec<u8> = pixels.chunks_exact(4).map(|c| c[3]).collect();
+            let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|c| c[3]).collect();
             let mut desc = jpx_rgb(jw, jh, rgb);
             desc.smask = Some(alpha);
             Some(desc)
@@ -1152,8 +1154,18 @@ pub(super) fn decode_jpx(
             let ImagePixelData::La16(pixels) = img_data.data else {
                 unreachable!("jpeg2k: La16 format paired with non-La16 data")
             };
-            let gray: Vec<u8> = pixels.chunks_exact(2).map(|c| (c[0] >> 8) as u8).collect();
-            let alpha: Vec<u8> = pixels.chunks_exact(2).map(|c| (c[1] >> 8) as u8).collect();
+            let gray: Vec<u8> = pixels
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| (c[0] >> 8) as u8)
+                .collect();
+            let alpha: Vec<u8> = pixels
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| (c[1] >> 8) as u8)
+                .collect();
             let mut desc = jpx_gray(jw, jh, gray);
             desc.smask = Some(alpha);
             Some(desc)
@@ -1170,10 +1182,17 @@ pub(super) fn decode_jpx(
                 unreachable!("jpeg2k: Rgba16 format paired with non-Rgba16 data")
             };
             let rgb: Vec<u8> = pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|c| [(c[0] >> 8) as u8, (c[1] >> 8) as u8, (c[2] >> 8) as u8])
                 .collect();
-            let alpha: Vec<u8> = pixels.chunks_exact(4).map(|c| (c[3] >> 8) as u8).collect();
+            let alpha: Vec<u8> = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| (c[3] >> 8) as u8)
+                .collect();
             let mut desc = jpx_rgb(jw, jh, rgb);
             desc.smask = Some(alpha);
             Some(desc)

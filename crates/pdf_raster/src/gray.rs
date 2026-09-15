@@ -69,7 +69,7 @@ fn convert_row(src_row: &[u8], dst_row: &mut [u8]) {
 
 /// Scalar reference: one pixel at a time.
 fn convert_row_scalar(src_row: &[u8], dst_row: &mut [u8]) {
-    for (dst_px, rgb) in dst_row.iter_mut().zip(src_row.chunks_exact(3)) {
+    for (dst_px, rgb) in dst_row.iter_mut().zip(src_row.as_chunks::<3>().0.iter()) {
         let (r, g, b) = (u32::from(rgb[0]), u32::from(rgb[1]), u32::from(rgb[2]));
         #[expect(
             clippy::cast_possible_truncation,

@@ -29,7 +29,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
         .map_err(|e| DecodeError::Codec(format!("webp: {e}")))?;
     let rgb = if has_alpha {
         let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3);
-        for px in buf.chunks_exact(4) {
+        for px in buf.as_chunks::<4>().0 {
             out.extend_from_slice(&px[..3]);
         }
         out

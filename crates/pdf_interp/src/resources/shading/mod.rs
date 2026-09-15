@@ -903,7 +903,7 @@ pub(super) fn bbox_from_coords(pts: &[f64]) -> [f64; 4] {
     let mut ymin = f64::INFINITY;
     let mut xmax = f64::NEG_INFINITY;
     let mut ymax = f64::NEG_INFINITY;
-    for chunk in pts.chunks_exact(2) {
+    for chunk in pts.as_chunks::<2>().0 {
         xmin = xmin.min(chunk[0]);
         xmax = xmax.max(chunk[0]);
         ymin = ymin.min(chunk[1]);

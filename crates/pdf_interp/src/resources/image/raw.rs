@@ -217,7 +217,9 @@ fn parse_decode(dict: &Dictionary, components: usize) -> Vec<(f64, f64)> {
     // `mul_add` would produce NaN, and the final `NaN as u8` cast would silently
     // produce 0 (black) for every pixel.  Warn and fall back to identity instead.
     let pairs: Vec<(f64, f64)> = vals
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take(components)
         .map(|pair| (pair[0], pair[1]))
         .collect();

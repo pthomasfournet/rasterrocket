@@ -6,6 +6,12 @@
 //! lives in `rasterrocket` and is applied by the caller so the size error can
 //! name the offending archive entry.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "the module is private to the crate, so pub(crate) states the real \
+              visibility; widening to pub would misdescribe the intent"
+)]
+
 mod jpeg;
 mod png;
 mod tiff;
