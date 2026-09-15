@@ -1619,8 +1619,8 @@ Every **phase** is shipped or deferred by deliberate decision; no phase-level
 engineering is in flight. Two things are nonetheless open and should not be
 mistaken for a clean slate:
 
-- **53 unreleased commits on `master` past `v1.2.0`** — 25 `fix`, 8 `perf`,
-  7 `deps`, 5 `test`, plus docs/refactor/chore, landing through 2026-08-17.
+- **54 unreleased commits on `master` past `v1.2.0`** — 25 `fix`, 8 `perf`,
+  7 `deps`, 5 `test`, plus docs/refactor/chore, landing through 2026-09-15.
   `CHANGELOG.md` stops at 1.2.0 because `git-cliff` runs manually at release
   time (see the release workflow). Cutting a release is the natural next step.
 - **3 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
