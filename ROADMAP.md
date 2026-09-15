@@ -84,6 +84,54 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
+### v1.3.0 (September 2026)
+
+**Correctness release.** No API change; 59 commits of rendering fixes,
+hardening, and dependency currency since v1.2.0. Two threads dominate.
+
+**The device-resident image cache produced wrong pixels.** Building with the
+`cache` feature and rendering on CUDA diverged from the CPU path on every
+image-bearing page — 39.7% of bytes on corpus-07 page 1, deltas up to the full
+255. The feature is opt-in and off by default, which is why it survived a
+release: the bench matrices compared cache-on against cache-on, and the
+in-tree kernel parity test checked the blit kernel against a CPU reference in
+isolation, where it passes. Three independent defects were behind it — the CPU
+sampler's axis-aligned fast path snapped its per-row sampling origin to the
+image edge, the blit kernel inverse-mapped through its own `f32` copy of the
+CTM, and the device page buffer was composited once at end of page so content
+drawn after an image landed underneath it. Both paths now sample through one
+shared Q32 fixed-point grid (`renderer/page/image_sampler.rs`) whose tables the
+CPU loop and the CUDA/Slang kernels consume identically, and each blit
+composites the rows it touched. `crates/pdf_raster/tests/cache_render_parity.rs`
+guards it end-to-end.
+
+**GPU and parser hardening.** The JPEG Phase 2 GPU sync was rewritten as
+re-decode propagation over a double-buffered state (the previous
+symbol-advance scheme was unsound for multi-component streams); the JPEG
+walkers were hardened against truncation, restarts, and hostile symbols; the
+even-odd coverage fold and the tile-fill edge-coverage integral were corrected;
+mono glyph blitting was fixed on clipped, short, and aarch64 inputs; TIFF
+predictor 2 was implemented and out-of-cap predictor params now fail loudly.
+
+**Performance.** Vector interleave in `aa_coverage_span` (n=1024: 197 → 10.3
+ns), 15-bit fixed-point luma with an SSE4.1 tier for `rgb_to_gray`, per-row PNG
+predictor dispatch, clean-run splicing in JPEG byte-unstuffing, adaptive PNG
+row-filter selection, and zero-filled GPU output buffers are no longer uploaded
+over PCIe.
+
+**Dependencies.** `flate2` 1.1.10 (its stricter EOF handling on truncated
+deflate streams leaves our decoded bytes unchanged — the partial-output path
+already keyed on `Err` with a non-empty buffer), `libdeflater` 1.26.0,
+`moxcms` 0.9.1 (accepts ICC profiles with an all-zero version field), `log`
+0.4.34, `clap` 4.6.7.
+
+**Documentation.** The published docs carried stale claims — GPU JPEG dispatch
+advertised as active when both thresholds are `u32::MAX` by design, a
+"CUDA 12 or 13" requirement that `cudarc`'s `cuda-13030` pin makes impossible,
+a JavaScript-handling contradiction between two documents, and install
+instructions pointing at abandoned crates.io packages. All corrected against
+the code.
+
 ### v1.2.0 (June 2026)
 
 **Comic / scan archives as a first-class input.** Books sometimes arrive as a
@@ -1616,13 +1664,8 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 ## Current status (2026-09-15)
 
 Every **phase** is shipped or deferred by deliberate decision; no phase-level
-engineering is in flight. Two things are nonetheless open and should not be
-mistaken for a clean slate:
+engineering is in flight. What remains open:
 
-- **54 unreleased commits on `master` past `v1.2.0`** — 25 `fix`, 8 `perf`,
-  7 `deps`, 5 `test`, plus docs/refactor/chore, landing through 2026-09-15.
-  `CHANGELOG.md` stops at 1.2.0 because `git-cliff` runs manually at release
-  time (see the release workflow). Cutting a release is the natural next step.
 - **4 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
   propagation pass-complexity, unleveraged CPU SIMD opportunities, unleveraged
   CUDA opportunities, and a `gpu-aa` fill-coverage divergence from the CPU

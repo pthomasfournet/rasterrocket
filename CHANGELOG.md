@@ -2,6 +2,91 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-09-15
+
+### Bug Fixes
+
+- Pass a pixel-space row to render_aa_line in the AA fill loop
+- Emit tile records to every column left of the segment
+- Stop saturating Exclusion's product and preserve white under ColorBurn
+- Pre-fill the NPP rotate destination with white
+- Repair fixture paths that broke the gpu-validation test build
+- Correct the IDCT colour kernel's transform, dequant indexing, and precision
+- Make the AA fast path's div255 exact, matching the general path
+- Test antialiased path clips in the space the scanner was built in
+- Clip GPU coverage spans to the active clip region
+- Clamp the composite blend before the narrowing cast
+- Correct mono glyph blitting on clipped, short, and aarch64 inputs
+- Validate CLUT table length at the icc_cmyk_to_rgb_cpu boundary
+- Clamp the bilinear footprint to the image edge in deskew rotate
+- Pack the quantisation tables JPEG components actually reference
+- Round the CLUT output like the CPU fallback
+- Repair doctest imports broken by the package rename
+- Pack the MCU schedule with dispatch-codebook indices
+- Keep the oracle's boundary snapshot across decode errors
+- Skip Huffman codeword bits when rebuilding coefficients from GPU symbols
+- Sync JPEG Phase 2 by re-decode propagation instead of symbol advance
+- Compute tile_fill edge coverage as the exact clipped-trapezoid integral
+- Implement TIFF predictor 2; fail loudly on out-of-cap predictor params
+- Harden the JPEG walkers against truncation, restarts, and hostile symbols
+- Correct the even-odd coverage fold; validate tile_fill inputs
+- Detect stalled Phase 2 chains; dedupe the JPEG dispatch pipeline
+- Make cache-feature CUDA renders byte-identical to the CPU path
+
+### Chores
+
+- Update semver-compatible dependencies
+- Delete the dead simd-avx512 feature flag
+
+### Documentation
+
+- Record the dependency sweep and two findings it surfaced in ROADMAP
+- Glyph cache is wired up; record the measured result
+- Record the JPEG Phase 2 propagation rework in the roadmap
+- Correct stale claims across the documentation set
+- State the real CUDA version range instead of "CUDA 12 or 13"
+- Record the cache-feature render divergence in the open-items list
+
+### Features
+
+- CPU oracle for JPEG Phase 2 re-decode propagation
+
+### Other
+
+- Upgrade png 0.17 -> 0.18
+- Pin cudarc to the CUDA 13.3 driver-API binding
+- Upgrade weezl 0.1 -> 0.2 and quick_cache 0.6 -> 0.7
+- Upgrade fax 0.2 -> 0.3 and drop the u16 CCITT dimension ceiling
+- Upgrade vello_cpu 0.0.7 -> 0.0.9
+- Monthly sweep — moxcms 0.9, base64 0.23, zip 8, vello_cpu 0.2
+- Drop three dependencies no crate actually uses
+- Bump flate2, libdeflater, log, clap, and moxcms
+
+### Performance
+
+- Pick the PNG row filter adaptively instead of always Paeth
+- Consult the glyph cache instead of re-rasterizing every glyph
+- Narrow the AA buffer clear and stop bypassing the SIMD tiers
+- 15-bit fixed-point luma + SSE4.1 tier for rgb_to_gray
+- Vector interleave in aa_coverage_span; reuse the AA shape scratch
+- Dispatch the PNG predictor per row instead of per byte
+- Splice clean runs in JPEG byte-unstuffing
+- Stop uploading zero-filled output buffers over PCIe
+
+### Refactor
+
+- Narrow unreachable pub items to pub(crate) and enforce the lint
+- Harden the gray kernel gates; share the coverage interleave tail
+
+### Testing
+
+- Pin tile-fill right-edge boundary and solid-pixel parity vs aa_fill_cpu
+- Exercise non-zero byte_x0 in every SIMD coverage tier
+- Call the AVX-512 CMYK kernel directly with random chunks
+- Execute the NEON deskew rotate kernel in CI with a scalar parity pin
+- Ignore the multi-component phase-4 tests pending robust phase-2 sync
+- Point the bench harnesses at the binary that actually exists
+
 ## [1.2.0] - 2026-06-07
 
 ### Bug Fixes
@@ -12,9 +97,14 @@ All notable changes to this project will be documented in this file.
 - Clean errors for encrypted/empty embedded PDFs and Windows-path entries
 - Guard TIFF dimensions before decode; doc open_session_from_bytes
 
+### Chores
+
+- Release v1.2.0
+
 ### Documentation
 
 - Document comic-archive input + raster_pdf_from_bytes (v1.2.0)
+- Regenerate CHANGELOG.md for v1.2.0
 
 ### Features
 

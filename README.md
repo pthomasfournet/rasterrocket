@@ -23,6 +23,37 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## What's new in v1.3.0
+
+**Correctness release.** No API change — 59 commits of rendering fixes,
+hardening, and dependency currency.
+
+- **The device-resident image cache produced wrong pixels.** With the `cache`
+  feature built and CUDA selected, every image-bearing page diverged from the
+  CPU render — 39.7% of bytes on one test page, deltas up to the full 255. The
+  feature is opt-in and off by default, which is how it survived a release: the
+  benchmarks compared cache-on against cache-on, and the kernel parity test
+  checks the blit kernel in isolation, where it passes. Three defects were
+  behind it — the CPU sampler's axis-aligned fast path snapped its per-row
+  sampling origin to the image edge, the blit kernel inverse-mapped through its
+  own `f32` copy of the CTM, and the page buffer was composited once at end of
+  page so content drawn *after* an image ended up underneath it. Both paths now
+  sample through one shared fixed-point grid and composite per image, with an
+  end-to-end parity test guarding it.
+- **GPU and parser hardening.** JPEG Phase 2 GPU sync rewritten as re-decode
+  propagation (the previous scheme was unsound for multi-component streams);
+  JPEG walkers hardened against truncation, restarts, and hostile symbols; the
+  even-odd coverage fold and tile-fill edge-coverage integral corrected; mono
+  glyph blitting fixed on clipped, short, and aarch64 inputs; TIFF predictor 2
+  implemented, with out-of-cap predictor params now failing loudly.
+- **Performance.** Vector interleave in `aa_coverage_span` (n=1024: 197 → 10.3
+  ns), 15-bit fixed-point luma plus an SSE4.1 tier for `rgb_to_gray`, per-row
+  PNG predictor dispatch, clean-run splicing in JPEG byte-unstuffing, adaptive
+  PNG row-filter selection, and no more zero-filled GPU buffers uploaded over
+  PCIe.
+- **Dependencies.** `flate2` 1.1.10, `libdeflater` 1.26.0, `moxcms` 0.9.1,
+  `log` 0.4.34, `clap` 4.6.7.
+
 ## What's new in v1.2.0
 
 **Comic / scan archives as a first-class input.** Books sometimes ship as a
