@@ -10,8 +10,13 @@
 //! run the Vulkan side and validate against a CPU reference.
 //!
 //! Run with:
-//!   `cargo test -p gpu --features vulkan --test cu_vs_slang_parity`
-//!   `cargo test -p gpu --features 'vulkan,gpu-validation' --test cu_vs_slang_parity`
+//!   `cargo test -p rasterrocket-gpu --features vulkan --test cu_vs_slang_parity`
+//!   `cargo test -p rasterrocket-gpu --features 'vulkan,gpu-validation' --test cu_vs_slang_parity`
+//!
+//! This file has no parallel-Huffman cases. The CUDA-vs-Vulkan parity
+//! tests for those kernels live in `huffman::vulkan_tests`, gated on
+//! `gpu-jpeg-huffman` in addition to `vulkan`:
+//!   `cargo test -p rasterrocket-gpu --features 'vulkan,gpu-validation,gpu-jpeg-huffman' --lib -- vulkan_tests`
 
 #![cfg(feature = "vulkan")]
 #![expect(
