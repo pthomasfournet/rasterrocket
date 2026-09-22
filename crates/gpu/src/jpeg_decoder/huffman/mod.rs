@@ -1251,15 +1251,13 @@ mod tests {
         assert_eq!(got, symbols, "decoded stream diverges from input");
     }
 
-    /// End-to-end on **mixed** codeword lengths (lengths 2 + 3).
-    /// MVP Phase 2's `(c, z)` sync predicate can need `O(subseq_bits)`
-    /// advance steps on this corpus, exceeding the `2 * log2(n)`
-    /// retry bound. Documented limitation; the test expects either
-    /// Convergence (and validates the round-trip) or the
-    /// `SyncBoundExceeded` `BackendError`. Robust sync is a follow-up
-    /// in the post-MVP corpus work.
+    /// End-to-end on **mixed** codeword lengths (lengths 2 + 3), 1000
+    /// symbols at `subsequence_bits = 128`.  The `(c, z)` sync
+    /// predicate can need `O(subseq_bits)` advance steps per subseq on
+    /// this corpus, which exceeds the `2 * log2(n)` retry bound: Phase 2
+    /// never converges and the dispatcher surfaces `SyncBoundExceeded`.
     #[test]
-    fn end_to_end_mixed_codeword_lengths_cuda_documented_limitation() {
+    fn end_to_end_mixed_codeword_lengths_cuda_sync_bound_exceeded() {
         let Some(b) = try_cuda() else {
             eprintln!("skipping: no CUDA device");
             return;
@@ -1267,26 +1265,16 @@ mod tests {
         let symbols: Vec<u8> = (0..1000u32).map(|i| (i % 4) as u8).collect();
         let stream = book4_stream(&symbols);
         let book = [book4_codebook()];
-        match dispatch_phase1_through_phase4(&b, &stream, &book, 128) {
-            Ok(decoded) => {
-                let got: Vec<u8> = decoded
-                    .iter()
-                    .map(|&v| u8::try_from(v & 0xFF).expect("symbol fits u8"))
-                    .collect();
-                assert_eq!(got, symbols, "decoded stream diverges from input");
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                assert!(
-                    msg.contains("Phase 2 did not converge"),
-                    "unexpected error: {msg}"
-                );
-                eprintln!("mixed-stream Phase 2 convergence is a documented MVP limitation: {msg}");
-            }
-        }
+        let e = dispatch_phase1_through_phase4(&b, &stream, &book, 128)
+            .expect_err("expected SyncBoundExceeded on this mixed-length corpus");
+        let msg = format!("{e}");
+        assert!(
+            msg.contains("Phase 2 did not converge"),
+            "unexpected error: {msg}"
+        );
     }
 
-    // ── B2d: JPEG Phase 1 parity tests ────────────────────────────────────
+    // ── JPEG Phase 1 parity tests ─────────────────────────────────────────
 
     /// Run `dispatch_jpeg_phase1_intra_sync` on CUDA and verify the
     /// per-subsequence state matches the CPU oracle for every subseq.
