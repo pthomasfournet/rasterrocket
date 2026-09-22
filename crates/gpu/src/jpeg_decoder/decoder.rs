@@ -767,6 +767,10 @@ const fn jpeg_extend(value: i32, nbits: u8) -> i32 {
 /// test modules (e.g., `cpu_prepass` DRI tests) can call it without
 /// duplicating the coefficient-extraction logic.
 #[cfg(test)]
+#[expect(
+    clippy::type_complexity,
+    reason = "mirrors extract_coefficients's 4-tuple return; a named struct is overkill here"
+)]
 pub(crate) fn extract_coefficients_pub(
     prep: &crate::jpeg_decoder::cpu_prepass::JpegPreparedInput,
 ) -> std::result::Result<(Vec<i32>, Vec<i32>, Vec<i32>, u32), String> {
@@ -944,7 +948,12 @@ mod tests {
         // Compare only the three colour channels (R, G, B) per pixel.
         // Alpha is unconditionally 0xFF on both sides; including it would
         // inflate the sample count by 33% and deflate the mean error.
-        for (gp, rp) in gpu_rgba.chunks_exact(4).zip(zune_rgba.chunks_exact(4)) {
+        for (gp, rp) in gpu_rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(zune_rgba.as_chunks::<4>().0)
+        {
             for (&g, &r) in gp[..3].iter().zip(rp[..3].iter()) {
                 let diff = g.abs_diff(r);
                 if diff > peak {
@@ -954,6 +963,11 @@ mod tests {
                 colour_count += 1;
             }
         }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "sum/colour_count are bounded by a test fixture's pixel count \
+                      × 255, far below f64's 52-bit exact-integer range"
+        )]
         let mean = sum as f64 / colour_count as f64;
         assert!(
             peak <= 1,
@@ -1024,6 +1038,19 @@ mod tests {
     /// measured against the mathematically exact f64 inverse of the same
     /// coefficients: peak ≤ 1 LSB, mean ≤ 0.02 LSB.
     #[test]
+    #[expect(
+        clippy::many_single_char_names,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::needless_range_loop,
+        reason = "DCT basis-function math: i/k/u/v/x/y are the standard DCT-II \
+                  indices, always in 0..8 or 0..BW/BH; u/v double as both the \
+                  coefficient-matrix index and the basis-function argument, so \
+                  enumerate() cannot replace the range loop. w/h/BW/BH are \
+                  compile-time-bounded (16*8 = 128), never near u32::MAX; \
+                  pixel intensities are clamped to 0.0..=255.0 before the u8 cast"
+    )]
     fn idct_kernel_matches_float_reference() {
         use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
@@ -1068,7 +1095,7 @@ mod tests {
                     let mut s = 0.0;
                     for (y, row) in f.iter().enumerate() {
                         for (x, &px) in row.iter().enumerate() {
-                            s += px * basis(x, u) * basis(y, v);
+                            s = (px * basis(x, u)).mul_add(basis(y, v), s);
                         }
                     }
                     let c = (0.25 * norm(u) * norm(v) * s).round();
@@ -1085,10 +1112,11 @@ mod tests {
                     let mut s = 0.0;
                     for v in 0..8 {
                         for u in 0..8 {
-                            s += norm(u) * norm(v) * coef[v][u] as f64 * basis(x, u) * basis(y, v);
+                            s = (norm(u) * norm(v) * coef[v][u] as f64 * basis(x, u))
+                                .mul_add(basis(y, v), s);
                         }
                     }
-                    let px = (0.25 * s + 128.0).round().clamp(0.0, 255.0) as u8;
+                    let px = 0.25f64.mul_add(s, 128.0).round().clamp(0.0, 255.0) as u8;
                     expect[(by * 8 + y) * (w as usize) + bx * 8 + x] = px;
                 }
             }
@@ -1104,7 +1132,7 @@ mod tests {
 
         let mut peak = 0u8;
         let mut sum = 0u64;
-        for (px, &e) in rgba.chunks_exact(4).zip(expect.iter()) {
+        for (px, &e) in rgba.as_chunks::<4>().0.iter().zip(expect.iter()) {
             let d = px[0].abs_diff(e);
             peak = peak.max(d);
             sum += u64::from(d);

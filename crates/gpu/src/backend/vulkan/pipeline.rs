@@ -66,7 +66,7 @@ pub(super) enum KernelId {
     JpegPhase1IntraSync,
     /// JPEG-framed Phase 2 (inter-sequence sync).  Same kernel as
     /// `Phase2InterSync` but uses the JPEG sync predicate
-    /// (block_in_mcu + z_in_block agreement).
+    /// (`block_in_mcu` + `z_in_block` agreement).
     #[cfg(feature = "gpu-jpeg-huffman")]
     JpegPhase2InterSync,
     /// JPEG-framed Phase 4 (re-decode + write final symbols).  Same

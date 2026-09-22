@@ -99,8 +99,8 @@ mod tests {
     use crate::composite::composite_rgba8_cpu;
 
     /// Floor truncation in the `d * a_dst * inv / 255` term can push the
-    /// blended channel past 255 (max 261, at a_src=8 over a_dst=16); the
-    /// kernel must clamp like the CPU reference instead of letting the
+    /// blended channel past 255 (max 261, at `a_src=8` over `a_dst=16`);
+    /// the kernel must clamp like the CPU reference instead of letting the
     /// narrowing cast wrap white toward black.
     #[test]
     fn composite_gpu_clamps_overflowing_blend_like_cpu() {

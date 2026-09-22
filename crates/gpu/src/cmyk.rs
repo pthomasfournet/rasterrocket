@@ -456,10 +456,12 @@ mod tests {
 
     /// Scalar reference: `cmyk_to_rgb_reflectance` per pixel.
     fn reference(cmyk: &[u8]) -> Vec<u8> {
-        cmyk.chunks_exact(4)
+        cmyk.as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|px| {
                 let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(px[0], px[1], px[2], px[3]);
-                [r, g, b]
+                <[u8; 3]>::from((r, g, b))
             })
             .collect()
     }
@@ -614,7 +616,7 @@ mod tests {
         }
     }
 
-    /// A (table, grid_n) pair whose lengths disagree must fail at the API
+    /// A (table, `grid_n`) pair whose lengths disagree must fail at the API
     /// boundary with a diagnostic naming both, not deep inside the
     /// interpolation closure with a bare slice index.
     #[test]

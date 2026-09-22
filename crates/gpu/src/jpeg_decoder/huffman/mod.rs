@@ -1296,9 +1296,13 @@ mod tests {
         let dc_refs = prep.dc_codebooks_for_dispatch();
         let ac_refs = prep.ac_codebooks_for_dispatch();
         let num_subseq = prep.bitstream.length_bits.div_ceil(subsequence_bits);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "gpu_states.len() is a subsequence count on a 16×16 test fixture, far below u32::MAX"
+        )]
+        let gpu_state_count = gpu_states.len() as u32;
         assert_eq!(
-            gpu_states.len() as u32,
-            num_subseq,
+            gpu_state_count, num_subseq,
             "GPU state count must equal num_subsequences"
         );
 
@@ -1364,7 +1368,12 @@ mod tests {
         let (s_info, outcome) =
             dispatch_jpeg_phase1_then_phase2(&b, &prep, 32).expect("dispatch ok");
         let num_subseq = prep.bitstream.length_bits.div_ceil(32);
-        assert_eq!(s_info.len() as u32, num_subseq);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "s_info.len() is a subsequence count on a 16×16 test fixture, far below u32::MAX"
+        )]
+        let s_info_count = s_info.len() as u32;
+        assert_eq!(s_info_count, num_subseq);
         assert!(
             matches!(outcome, Phase2Outcome::Converged { .. }),
             "expected convergence on grayscale, got {outcome:?}"
@@ -1385,6 +1394,10 @@ mod tests {
         let (s_info, _) =
             dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch ok");
         for (i, s) in s_info.iter().enumerate() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "i is a subsequence index on a 16×16 test fixture, far below u32::MAX"
+            )]
             let start_p = i as u32 * subseq_bits;
             assert!(
                 s.p >= start_p,
@@ -1918,7 +1931,12 @@ mod vulkan_tests {
         let (s_info, outcome) =
             dispatch_jpeg_phase1_then_phase2(&vk, &prep, 32).expect("dispatch ok");
         let num_subseq = prep.bitstream.length_bits.div_ceil(32);
-        assert_eq!(s_info.len() as u32, num_subseq);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "s_info.len() is a subsequence count on a 16×16 test fixture, far below u32::MAX"
+        )]
+        let s_info_count = s_info.len() as u32;
+        assert_eq!(s_info_count, num_subseq);
         assert!(
             matches!(outcome, Phase2Outcome::Converged { .. }),
             "expected Vulkan convergence on grayscale, got {outcome:?}"

@@ -53,9 +53,9 @@ impl HostBudget {
 
 /// One host-resident copy of a previously-decoded image.
 ///
-/// Implementation detail of [`HostTier`]; re-exported as `pub(crate)`
-/// from the parent module.
-pub(crate) struct HostEntry {
+/// Implementation detail of [`HostTier`]; the parent `host_tier` module
+/// is private, so `pub` here is already crate-bounded.
+pub struct HostEntry {
     /// Pinned host memory holding the decoded bytes.  Allocated with
     /// `CU_MEMHOSTALLOC_WRITECOMBINED` for fast DMA in both directions.
     pub pinned: PinnedHostSlice<u8>,
@@ -119,9 +119,11 @@ impl std::fmt::Debug for HostEntry {
 
 /// Concurrent host RAM tier.  All methods take `&self`.
 ///
-/// Implementation detail of [`super::DeviceImageCache`]; re-exported
-/// as `pub(crate)` from the parent module.
-pub(crate) struct HostTier {
+/// Implementation detail of [`super::DeviceImageCache`]; the parent
+/// `host_tier` module is private, and `mod.rs` re-exports this type
+/// as `pub(crate)`, which is where the crate-wide visibility bound
+/// is actually enforced.
+pub struct HostTier {
     entries: DashMap<ContentHash, Arc<HostEntry>>,
     used_bytes: AtomicU64,
     budget: HostBudget,

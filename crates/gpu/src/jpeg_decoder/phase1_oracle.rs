@@ -405,6 +405,11 @@ pub(super) fn try_decode_one_jpeg_symbol(
 /// components), matching the layout produced by
 /// `JpegPreparedInput::dc_codebooks_for_dispatch()` /
 /// `ac_codebooks_for_dispatch()`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one CPU-side parameter per kernel binding/launch argument; a bundling \
+              struct would obscure the 1:1 correspondence with try_decode_one_jpeg_symbol_device"
+)]
 pub(super) fn phase1_jpeg_walk_snapshot(
     bitstream: &PackedBitstream,
     dc_codebooks: &[&crate::jpeg::CanonicalCodebook],

@@ -481,7 +481,7 @@ pub(crate) mod test_model {
             let dx = xr - xl;
             if dx < 1e-6 {
                 // Near-vertical: constant x ≈ xmid across the row.
-                let xmid = 0.5 * (x0 + x1);
+                let xmid = f32::midpoint(x0, x1);
                 y_len * (xmid - px).clamp(0.0, 1.0)
             } else {
                 // Split the y-interval where x(y) crosses px and px + 1.
@@ -506,6 +506,13 @@ pub(crate) mod test_model {
     /// CPU model of the `tile_fill` kernel's per-pixel accumulation loop.
     ///
     /// Returns the winding/area value the kernel would compute for `(px, py)`.
+    #[expect(
+        clippy::similar_names,
+        clippy::cast_precision_loss,
+        reason = "px_local/py_local name the pixel's offset within its tile, \
+                  mirroring the kernel's own variable names; both are < \
+                  TILE_W/H = 16, exact in f32 (24-bit mantissa)"
+    )]
     pub(crate) fn kernel_area_at(
         recs: &[TileRecord],
         starts: &[u32],
