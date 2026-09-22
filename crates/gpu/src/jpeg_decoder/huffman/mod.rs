@@ -8,8 +8,8 @@
 //! pages.
 
 // Per-phase parity tests live in this file's `mod tests` /
-// `mod vulkan_tests`; the 10-vector spec acceptance corpus lives in
-// the sibling `corpus.rs`.
+// `mod vulkan_tests`; the 10-vector adversarial-corpus acceptance
+// tests live in the sibling `corpus.rs`.
 #[cfg(all(test, feature = "gpu-validation"))]
 mod corpus;
 
@@ -79,8 +79,8 @@ fn build_gpu_codebook_refs(codebooks: &[&CanonicalCodebook]) -> Vec<u32> {
 /// schedule, the ping-ponged pair of per-subsequence state buffers,
 /// and the Phase 2 fixpoint flags.
 ///
-/// Owns the alloc/upload preamble the dispatchers previously
-/// copy-pasted; the phase flow stays explicit at each call site.
+/// Owns the alloc/upload preamble shared by every JPEG-framed
+/// dispatcher; the phase flow stays explicit at each call site.
 /// `s_info` always names the most recently written state buffer —
 /// [`run_jpeg_phase2_passes`] swaps the pair after each pass.
 struct JpegDispatchSetup<'a, B: GpuBackend> {
@@ -169,7 +169,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
 
     /// `HuffmanParams` skeleton with the shared buffers and dims; the
     /// per-phase helpers below fill in the phase-specific fields.
-    fn base_params(&self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
+    const fn base_params(&self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
         HuffmanParams {
             bitstream: self.bitstream.as_ref(),
             codebook: self.codebook.as_ref(),
@@ -1357,11 +1357,11 @@ mod tests {
         assert!(!jpeg_stream_stalled(u32::MAX - 5, u32::MAX));
     }
 
-    // ── B2e: JPEG Phase 2 tests ────────────────────────────────────────────
+    // ── JPEG Phase 2 tests ────────────────────────────────────────────────
 
     /// JPEG Phase 1+2 on CUDA converges on the grayscale fixture (single
     /// subseq — trivially synced — and small multi-subseq with a stream
-    /// whose length_bits is a clean multiple of subsequence_bits).
+    /// whose `length_bits` is a clean multiple of `subsequence_bits`).
     #[test]
     fn jpeg_phase2_cuda_converges_on_grayscale() {
         use crate::jpeg::test_fixtures::GRAY_16X16_JPEG;
@@ -1506,9 +1506,9 @@ mod tests {
         }
     }
 
-    // ── B2f: JPEG Phase 4 CUDA tests ─────────────────────────────────────
+    // ── JPEG Phase 4 CUDA tests ───────────────────────────────────────────
 
-    /// JPEG Phases 1–4 on CUDA decode GRAY_16X16_JPEG and the resulting
+    /// JPEG Phases 1–4 on CUDA decode `GRAY_16X16_JPEG` and the resulting
     /// symbol stream matches the CPU oracle (`decode_scan_symbols`).
     #[test]
     fn jpeg_phase4_cuda_matches_oracle_on_grayscale() {
@@ -1556,9 +1556,10 @@ mod tests {
     }
 
     /// JPEG Phases 1–4 on CUDA decode a 4:4:4 YCbCr image and the resulting
-    /// symbol stream matches the CPU oracle.  This exercises blocks_per_mcu=3
-    /// (one block per component per MCU), the MCU schedule rotation for
-    /// z_in_block=0 → block_in_mcu advance, and multi-component AC framing.
+    /// symbol stream matches the CPU oracle.  This exercises
+    /// `blocks_per_mcu=3` (one block per component per MCU), the MCU
+    /// schedule rotation for `z_in_block=0` → `block_in_mcu` advance, and
+    /// multi-component AC framing.
     #[test]
     fn jpeg_phase4_cuda_matches_oracle_on_ycbcr_444() {
         use crate::jpeg_decoder::decode_scan_symbols;
@@ -1614,8 +1615,9 @@ mod tests {
 
     /// JPEG Phases 1–4 returns a stable symbol stream for the 4:4:4 YCbCr
     /// fixture across subsequence sizes 16, 32, and 64 bits.  Validates that
-    /// the MCU schedule rotation (block_in_mcu advance on z_in_block=64) is
-    /// consistent regardless of where subsequence boundaries fall.
+    /// the MCU schedule rotation (`block_in_mcu` advance on
+    /// `z_in_block=64`) is consistent regardless of where subsequence
+    /// boundaries fall.
     #[test]
     fn jpeg_phase4_cuda_ycbcr_stable_across_subseq_sizes() {
         let Some(b) = try_cuda() else {
@@ -1813,7 +1815,7 @@ mod vulkan_tests {
 
     /// End-to-end Phases 1..4 on both backends; the decoded symbol
     /// streams must be byte-identical and equal to the original
-    /// input. Uniform-length corpus stays within Phase 2's MVP retry
+    /// input. Uniform-length corpus stays within Phase 2's retry
     /// bound on both backends.
     #[test]
     fn end_to_end_uniform_cuda_vs_vulkan() {
@@ -1837,7 +1839,7 @@ mod vulkan_tests {
         assert_eq!(got, symbols, "decoded stream diverges from input");
     }
 
-    // ── B2d: JPEG Phase 1 cross-backend parity tests ──────────────────────
+    // ── JPEG Phase 1 cross-backend parity tests ───────────────────────────
 
     use crate::jpeg_decoder::build_mcu_schedule;
     use crate::jpeg_decoder::phase1_oracle::phase1_jpeg_walk_snapshot;
@@ -1914,7 +1916,7 @@ mod vulkan_tests {
         }
     }
 
-    // ── B2e: JPEG Phase 2 cross-backend tests ─────────────────────────────
+    // ── JPEG Phase 2 cross-backend tests ──────────────────────────────────
 
     /// JPEG Phase 1+2 on Vulkan converges on the grayscale fixture.
     #[test]
@@ -2013,9 +2015,9 @@ mod vulkan_tests {
         );
     }
 
-    // ── B2f: JPEG Phase 4 cross-backend tests ─────────────────────────────
+    // ── JPEG Phase 4 cross-backend tests ──────────────────────────────────
 
-    /// JPEG Phases 1–4 on Vulkan decodes GRAY_16X16_JPEG and the symbol
+    /// JPEG Phases 1–4 on Vulkan decodes `GRAY_16X16_JPEG` and the symbol
     /// stream matches the CPU oracle.
     #[test]
     fn jpeg_phase4_vulkan_matches_oracle_on_grayscale() {
@@ -2043,7 +2045,7 @@ mod vulkan_tests {
     }
 
     /// JPEG Phases 1–4 CUDA and Vulkan produce byte-identical symbol
-    /// streams on GRAY_16X16_JPEG.
+    /// streams on `GRAY_16X16_JPEG`.
     #[test]
     fn jpeg_phase4_cuda_vs_vulkan_grayscale() {
         use crate::jpeg::test_fixtures::GRAY_16X16_JPEG;
