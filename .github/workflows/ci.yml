@@ -57,11 +57,17 @@ jobs:
       - name: Test rasterrocket-gpu (CMYK matrix — AVX2 and scalar parity)
         run: cargo test -p rasterrocket-gpu --lib -- cmyk
 
+      - name: Test rasterrocket-gpu (parallel-Huffman JPEG decoder, gpu-jpeg-huffman)
+        run: cargo test -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --lib -- jpeg_decoder huffman
+
       - name: Test rasterrocket (deskew, render helpers)
         run: cargo test -p rasterrocket --lib
 
       - name: Clippy (no GPU features)
         run: cargo clippy -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
+
+      - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
+        run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
 
   # ── aarch64 cross-check ───────────────────────────────────────────────────
   #
