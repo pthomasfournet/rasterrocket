@@ -288,6 +288,23 @@ impl XPathScanner {
             })
     }
 
+    /// Row offsets into [`intersects`](Self::intersects).
+    ///
+    /// Scanline `y_min + i` occupies `intersects[row_starts[i]..row_starts[i + 1]]`;
+    /// the slice has one entry per scanline plus a trailing sentinel equal to
+    /// `intersects.len()`.  Empty for an empty scanner.
+    #[must_use]
+    pub fn row_starts(&self) -> &[u32] {
+        &self.row_start
+    }
+
+    /// Every intersection in the table, grouped by scanline in ascending `y`
+    /// and sorted by `x0` within each scanline.
+    #[must_use]
+    pub fn intersects(&self) -> &[Intersect] {
+        &self.intersects
+    }
+
     /// The intersections for scanline `y`, sorted by `x0`.
     ///
     /// Returns an empty slice if `y` is outside `[y_min, y_max]`. Never panics.

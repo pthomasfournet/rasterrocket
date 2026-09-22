@@ -109,6 +109,12 @@ impl Clip {
         }
     }
 
+    /// True when the clip is its rectangle alone, with no path clips.
+    #[must_use]
+    pub const fn is_rect(&self) -> bool {
+        self.scanners.is_empty()
+    }
+
     /// Replace the clip rectangle and clear all path clips.
     pub fn reset_to_rect(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         self.set_rect(x0, y0, x1, y1);

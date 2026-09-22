@@ -112,39 +112,20 @@ pub(super) fn fill_impl<P: Pixel>(
     vector_antialias: bool,
     eo: bool,
 ) {
-    if path.pts.is_empty() {
+    if path.pts.is_empty() || bitmap.width == 0 {
         return;
     }
 
-    let mut xpath = XPath::new(path, matrix, flatness, true);
-
-    // Clip y bounds in scanner coordinates (AA or normal).
-    let (y_min_clip, y_max_clip) = if vector_antialias {
-        xpath.aa_scale();
-        let y_min = clip
-            .y_min_i
-            .checked_mul(AA_SIZE)
-            .expect("AA y_lo overflows i32: clip.y_min_i is unreasonably large");
-        let y_max = clip
-            .y_max_i
-            .checked_add(1)
-            .and_then(|v| v.checked_mul(AA_SIZE))
-            .map(|v| v - 1)
-            .expect("AA y_hi overflows i32: clip.y_max_i is unreasonably large");
-        (y_min, y_max)
+    let scanner = if vector_antialias {
+        aa_scanner(path, matrix, flatness, clip, eo)
     } else {
-        (clip.y_min_i, clip.y_max_i)
+        let xpath = XPath::new(path, matrix, flatness, true);
+        let scanner = XPathScanner::new(&xpath, eo, clip.y_min_i, clip.y_max_i);
+        (!scanner.is_empty()).then_some(scanner)
     };
-
-    let scanner = XPathScanner::new(&xpath, eo, y_min_clip, y_max_clip);
-
-    if scanner.is_empty() {
+    let Some(scanner) = scanner else {
         return;
-    }
-
-    if bitmap.width == 0 {
-        return;
-    }
+    };
 
     // Compute pixel-space bbox from scanner.
     let (x_min_i, y_min_i, x_max_i, y_max_i) = if vector_antialias {
@@ -233,6 +214,47 @@ pub(super) fn fill_impl<P: Pixel>(
             }
         }
     }
+}
+
+/// Build the AA-space scanner for `path`: the geometry stage of an
+/// antialiased fill.
+///
+/// The path is transformed by `matrix`, flattened with `flatness`, scaled by
+/// [`AA_SIZE`], and scan-converted over the clip's AA row range
+/// `[clip.y_min_i × AA_SIZE, (clip.y_max_i + 1) × AA_SIZE)`.  The scanner's
+/// bounds are AA coordinates; dividing them by [`AA_SIZE`] gives the pixel
+/// bounding box.
+///
+/// Returns `None` when the path has no points or the scanner covers no rows.
+///
+/// # Panics
+///
+/// Panics if the clip's AA row range overflows `i32`.
+#[must_use]
+pub fn aa_scanner(
+    path: &Path,
+    matrix: &[f64; 6],
+    flatness: f64,
+    clip: &Clip,
+    eo: bool,
+) -> Option<XPathScanner> {
+    if path.pts.is_empty() {
+        return None;
+    }
+    let mut xpath = XPath::new(path, matrix, flatness, true);
+    xpath.aa_scale();
+    let y_min = clip
+        .y_min_i
+        .checked_mul(AA_SIZE)
+        .expect("AA y_lo overflows i32: clip.y_min_i is unreasonably large");
+    let y_max = clip
+        .y_max_i
+        .checked_add(1)
+        .and_then(|v| v.checked_mul(AA_SIZE))
+        .map(|v| v - 1)
+        .expect("AA y_hi overflows i32: clip.y_max_i is unreasonably large");
+    let scanner = XPathScanner::new(&xpath, eo, y_min, y_max);
+    (!scanner.is_empty()).then_some(scanner)
 }
 
 // ── RowSink — shared abstraction over Bitmap and BitmapBand ──────────────────
@@ -374,12 +396,52 @@ fn draw_aa_line<P: Pixel>(
     shape_scratch.clear();
     shape_scratch.resize(count + lead, 0);
     simd::aa_coverage_span(rows, x0_usize - lead, shape_scratch);
-    let shape = &mut shape_scratch[lead..];
 
+    draw_aa_counts::<P>(bitmap, pipe, src, &mut shape_scratch[lead..], x0, x1, y);
+}
+
+/// Composite one output row from per-pixel AA coverage counts.
+///
+/// `counts[i]` is the number of set AA sub-samples (`0..=AA_SIZE²`) of pixel
+/// `x0 + i`; `counts.len()` must equal `x1 - x0 + 1`.  The counts are mapped
+/// through `AA_GAMMA` in place and composited via `pipe::render_span` as one
+/// span; a row whose counts are all zero leaves the bitmap untouched.
+///
+/// This is the compositing half of [`draw_aa_line`]; the GPU fill path
+/// supplies counts computed on the device and joins the CPU pipeline here.
+///
+/// # Panics
+///
+/// Panics if `counts.len() != x1 - x0 + 1` or if any count exceeds
+/// `AA_SIZE²`.
+pub fn draw_aa_counts<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    counts: &mut [u8],
+    x0: i32,
+    x1: i32,
+    y: i32,
+) {
+    debug_assert!(x0 >= 0, "draw_aa_counts: x0={x0} is negative");
+    debug_assert!(x0 <= x1, "draw_aa_counts: x0={x0} > x1={x1}");
+    debug_assert!(y >= 0, "draw_aa_counts: y={y} is negative");
+    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0 asserted above")]
+    let expected = (x1 - x0 + 1) as usize;
+    assert_eq!(
+        counts.len(),
+        expected,
+        "draw_aa_counts: {} counts for a {expected}-pixel span",
+        counts.len()
+    );
+
+    let shape = counts;
     if !simd::apply_aa_gamma(shape) {
         return;
     }
 
+    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0: asserted above")]
+    let x0_usize = x0 as usize;
     #[expect(clippy::cast_sign_loss, reason = "y >= 0")]
     let y_u = y as u32;
     let byte_off = x0_usize * P::BYTES;
@@ -392,7 +454,7 @@ fn draw_aa_line<P: Pixel>(
     let dst_pixels = &mut row[byte_off..byte_end];
     let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
 
-    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, Some(shape), x0, x1, y);
+    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, Some(&*shape), x0, x1, y);
 }
 
 #[cfg(test)]
