@@ -973,7 +973,7 @@ Targeted use of AVX-512 extensions that LLVM does not auto-vectorize to. All pat
 
 - [x] **`avx2` blend / glyph unpack** (`simd/blend.rs`, `simd/glyph_unpack.rs`) — `blend_solid_rgb8` and `blend_solid_gray8` use AVX2 for 32-px solid fill chunks; `unpack_mono_row` uses SSE4.1 `_mm_blendv_epi8` for 1-bpp → 8-bpp glyph expansion.
 
-- [x] **`avx512bw` ICC CMYK→RGB matrix** (`gpu/src/lib.rs`, `cmyk_to_rgb_avx512`) — processes 16 pixels per call using `_mm256_mullo_epi16` u16 arithmetic. VNNI (`_mm512_dpbusds_epi32`) was ruled out: it requires one operand to be compile-time constant weights, but the subtractive formula `(255−C)*(255−K)/255` has both operands as runtime pixel data. AoS→SoA via `_mm512_shuffle_epi8` gather + `permute4x64` + `shuffle_epi8` compact; exact `⌊(x+127)/255⌋` divide via `(n+(n>>8)+1)>>8`. Scalar fallback for tail and non-AVX-512 targets.
+- [x] **`avx512vbmi` ICC CMYK→RGB matrix** (`gpu/src/cmyk.rs`, `cmyk_to_rgb_avx512`) — processes 32 pixels per call using `_mm512_mullo_epi16` u16 arithmetic over interleaved `[C M Y K]` lanes; `vpermw` broadcasts each pixel's complemented K across its quad, and two `vpermt2b` passes gather the 96 RGB bytes out of the 128-byte RGBx sequence. VNNI (`_mm512_dpbusds_epi32`) was ruled out: it requires one operand to be compile-time constant weights, but the subtractive formula `(255−C)*(255−K)/255` has both operands as runtime pixel data. Exact `⌊(x+127)/255⌋` divide via `(n+(n>>8)+1)>>8`. Scalar fallback for tail and non-VBMI targets; an earlier 16-px `avx512bw`-only tier and an 8-px `avx2` tier both lost to the auto-vectorised scalar loop and were deleted.
 
 - [x] **`cat_l3` / `cdp_l3` cache partitioning** — deployment note documented in `ROADMAP_INTEL.md` (Deployment notes section): `resctrl` on Xeon/EPYC; not available on Intel consumer CPUs; no code change required.
 
@@ -1080,12 +1080,12 @@ CUB radix sort was evaluated and rejected for this use case: typical PDF pages h
 
 DeviceCMYK → DeviceRGB via two paths depending on whether a full ICC CLUT is available:
 
-- [x] **CPU matrix path** (`icc_cmyk_to_rgb_cpu`, clut=None): subtractive formula `(255−ch)*(255−K)/255` vectorised with `avx512bw` + `avx2` — 16 pixels/call via `_mm256_mullo_epi16`. VNNI was evaluated and rejected: `_mm512_dpbusds_epi32` requires compile-time constant weights; both operands are runtime pixel data here. Exact `⌊(x+127)/255⌋` divide matches scalar to the bit. Scalar fallback for non-AVX-512 targets and tail pixels.
+- [x] **CPU matrix path** (`icc_cmyk_to_rgb_cpu`, clut=None): subtractive formula `(255−ch)*(255−K)/255` vectorised with `avx512bw` + `avx512vbmi` — 32 pixels/call via `_mm512_mullo_epi16` over interleaved `[C M Y K]` lanes, with `vpermw`/`vpermt2b` for the K broadcast and RGBx→RGB gather. VNNI was evaluated and rejected: `_mm512_dpbusds_epi32` requires compile-time constant weights; both operands are runtime pixel data here. Exact `⌊(x+127)/255⌋` divide matches scalar to the bit. Scalar fallback for non-VBMI targets and tail pixels; an earlier 16-px `avx512bw` tier and an 8-px `avx2` tier both lost to the auto-vectorised scalar loop and were deleted.
 - [x] **GPU CLUT kernel** (`kernels/icc_clut.cu`): 4D quadrilinear interpolation over a baked `grid_n⁴ × 3` byte table; one thread per pixel; threshold `GPU_ICC_CLUT_THRESHOLD = 500 000 px` (conservative placeholder; CLUT path not yet in the hot path)
 - [x] **ICC matrix dispatch fix**: `icc_cmyk_to_rgb` short-circuits to `icc_cmyk_to_rgb_cpu` before the threshold check when `clut=None` — `threshold_bench` showed GPU matrix kernel never beats AVX-512 across all measured sizes (256–4M px); `PCIe` round-trip cost exceeds the cheap per-pixel computation
 - [x] `bake_cmyk_clut` (`rasterrocket-interp/src/resources/icc.rs`): bakes a Little CMS ICC profile into a compact `u8` CLUT for upload; `BakeError` with `InvalidGridSize` and `Cms` variants; `DEFAULT_GRID_N = 17`
 - [x] Rounding bias fix in CUDA kernel: `((255u - c) * inv_k + 127u) / 255u` (was missing the `+127` bias)
-- [x] Parity tests: `icc_cmyk_matrix_avx_vs_scalar` asserts AVX-512 and scalar agree byte-for-byte across 16 representative pixels including axis extremes and mid-range sweep
+- [x] Parity tests: `icc_cmyk_matrix_simd_vs_scalar` asserts the dispatcher-selected SIMD tier and scalar agree byte-for-byte across a 40-pixel vector covering axis extremes and a mid-range sweep; `icc_cmyk_avx512_matches_scalar` calls the AVX-512 VBMI kernel directly against 200 pseudorandom 32-pixel blocks on machines that support it
 - [x] nvJPEG2000 for JPXDecode — implemented (see Phase 4 item 1 above)
 
 **5. OptiX BVH for complex paths — low priority, evaluate later**
