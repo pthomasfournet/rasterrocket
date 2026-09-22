@@ -1,26 +1,25 @@
 //! Adversarial-corpus tests for the Phase 1→4 GPU pipeline.
 //!
-//! Implements the 10 acceptance-criteria vectors from the
-//! Phase A spec (`docs/superpowers/specs/2026-05-11-gpu-jpeg-huffman-v2-design.md`):
+//! Ten vectors exercise the parallel-Huffman dispatch across stream
+//! shapes and codeword-length distributions:
 //!
 //! 1. short stream (< 1 KB)
-//! 2. long stream (~200 K symbols, scaled down from the spec's
-//!    "~10 MB" — a real-JPEG figure, not unit-test territory)
+//! 2. long stream (~200 K symbols)
 //! 3. uniform symbol distribution
 //! 4. skewed distribution (90/10 split, uniform-length code)
 //! 5. single-symbol "alphabet" (degenerate, length-1 code)
 //! 6. maximum-length 16-bit codewords
-//! 7. Phase 2 retry trigger (adversarial, mixed-length book —
-//!    documented MVP limitation; expects `SyncBoundExceeded`)
+//! 7. Phase 2 retry trigger (adversarial, mixed-length book;
+//!    expects `SyncBoundExceeded`)
 //! 8. exactly one subsequence
 //! 9. exact 32-bit-word boundary (no tail padding)
 //! 10. maximum tail padding (31 bits short)
 //!
-//! The vectors that stay within the MVP `(c, z)` sync predicate
-//! assert byte-for-byte round-trip equivalence between input
-//! symbols and decoded symbols. The adversarial vector asserts
-//! the dispatcher surfaces the `SyncBoundExceeded` error rather
-//! than hanging or producing garbage.
+//! The vectors that stay within the `(c, z)` sync predicate's
+//! O(1)-pass regime assert byte-for-byte round-trip equivalence
+//! between input symbols and decoded symbols. The adversarial vector
+//! asserts the dispatcher surfaces the `SyncBoundExceeded` error
+//! rather than hanging or producing garbage.
 //!
 //! ## Why a separate module
 //!
@@ -266,10 +265,9 @@ fn diag_phase2_phase3_cuda_eq_vulkan_on_corpus_input() {
 #[test]
 fn vector_01_short_stream_under_1kb() {
     // 512 symbols × 2 bits = 1024 bits = 128 bytes (clean multiple of
-    // subseq_bits=128). Trailing-subseq z-misalignment is an MVP
-    // limitation that exceeds the `2*log2(n)` retry bound, so the
-    // corpus picks stream lengths that are exact multiples of
-    // subsequence_bits.
+    // subseq_bits=128). Trailing-subseq z-misalignment exceeds the
+    // `2*log2(n)` retry bound, so the corpus picks stream lengths
+    // that are exact multiples of subsequence_bits.
     let symbols: Vec<u8> = (0..512u32).map(uniform_symbol).collect();
     assert_roundtrip(&book_uniform_len2(), &symbols, 128, false);
 }
@@ -278,9 +276,9 @@ fn vector_01_short_stream_under_1kb() {
 
 #[test]
 fn vector_02_long_stream() {
-    // 200_000 symbols × 2 bits = 400 000 bits ≈ 50 KB. Scaled down
-    // from the spec's "~10 MB" (real-JPEG range, not unit-test).
-    // Still exercises the multi-tile scan + thousands of subseqs.
+    // 200_000 symbols × 2 bits = 400 000 bits ≈ 50 KB — smaller than
+    // a real-JPEG entropy stream but still exercises the multi-tile
+    // scan + thousands of subseqs.
     let symbols: Vec<u8> = (0..200_000u32).map(uniform_symbol).collect();
     assert_roundtrip(&book_uniform_len2(), &symbols, 128, false);
 }
@@ -338,8 +336,8 @@ fn vector_06_maxlen_16_codewords() {
 #[test]
 fn vector_07_phase2_retry_trigger() {
     // Mixed-length book (book4: codes 00, 01, 100, 101 at lengths
-    // 2, 2, 3, 3). Under the MVP `(c, z)` sync predicate this
-    // requires O(subsequence_bits) advance passes per subseq —
+    // 2, 2, 3, 3). The `(c, z)` sync predicate requires
+    // O(subsequence_bits) advance passes per subseq on this book —
     // exceeds the `2 × log2(n)` retry bound for any non-trivial
     // stream length. The dispatcher must surface the failure as
     // `BackendError::msg("…Phase 2 did not converge…")`, not hang
