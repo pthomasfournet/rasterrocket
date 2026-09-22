@@ -6,7 +6,7 @@
 use cudarc::driver::{CudaSlice, PushKernelArg};
 
 use crate::GpuCtx;
-use crate::backend::params::HUFFMAN_PHASE1_THREADS;
+use crate::backend::params::HUFFMAN_THREADS;
 
 impl GpuCtx {
     /// Async launch of the Phase 1 intra-sequence-sync kernel.
@@ -35,8 +35,8 @@ impl GpuCtx {
         num_components: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1),
-            block_dim: (HUFFMAN_PHASE1_THREADS, 1, 1),
+            grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
+            block_dim: (HUFFMAN_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -86,8 +86,8 @@ impl GpuCtx {
         num_components: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1),
-            block_dim: (HUFFMAN_PHASE1_THREADS, 1, 1),
+            grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
+            block_dim: (HUFFMAN_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -138,8 +138,8 @@ impl GpuCtx {
         num_components: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1),
-            block_dim: (HUFFMAN_PHASE1_THREADS, 1, 1),
+            grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
+            block_dim: (HUFFMAN_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -200,8 +200,8 @@ impl GpuCtx {
         blocks_per_mcu: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1),
-            block_dim: (HUFFMAN_PHASE1_THREADS, 1, 1),
+            grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
+            block_dim: (HUFFMAN_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -259,8 +259,8 @@ impl GpuCtx {
         blocks_per_mcu: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1),
-            block_dim: (HUFFMAN_PHASE1_THREADS, 1, 1),
+            grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
+            block_dim: (HUFFMAN_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -315,8 +315,8 @@ impl GpuCtx {
         blocks_per_mcu: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1),
-            block_dim: (HUFFMAN_PHASE1_THREADS, 1, 1),
+            grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
+            block_dim: (HUFFMAN_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
 

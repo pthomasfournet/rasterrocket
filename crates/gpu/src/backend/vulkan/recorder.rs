@@ -478,7 +478,7 @@ impl PageRecorder {
         p: params::HuffmanParams<'_, super::VulkanBackend>,
     ) -> Result<()> {
         use super::pipeline::KernelId;
-        use crate::backend::params::{HUFFMAN_PHASE1_THREADS, HuffmanPhase};
+        use crate::backend::params::{HUFFMAN_THREADS, HuffmanPhase};
 
         let num_subsequences = p.num_subsequences();
         // 6 × u32: length_bits, subsequence_bits, num_subsequences,
@@ -494,7 +494,7 @@ impl PageRecorder {
         push[16..20].copy_from_slice(&p.total_symbols.to_ne_bytes());
         push[20..24].copy_from_slice(&p.blocks_per_mcu.to_ne_bytes());
 
-        let groups = (num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS), 1, 1);
+        let groups = (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1);
 
         match p.phase {
             HuffmanPhase::Phase1IntraSync => self.dispatch_kernel(
@@ -658,8 +658,9 @@ impl PageRecorder {
     /// `too_many_lines` threshold.
     ///
     /// Buffer order matches `binding_slots = [0,1,2,4,5,6,7,8]`:
-    /// bitstream, codebook, s_info, offsets, symbols_out, decode_status,
-    /// dc_codebook, mcu_schedule (slot 3 / sync_flags is skipped).
+    /// `bitstream`, `codebook`, `s_info`, `offsets`, `symbols_out`,
+    /// `decode_status`, `dc_codebook`, `mcu_schedule` (slot 3 /
+    /// `sync_flags` is skipped).
     #[cfg(feature = "gpu-jpeg-huffman")]
     fn dispatch_jpeg_phase4(
         &self,
@@ -712,8 +713,8 @@ impl PageRecorder {
     /// Record IDCT + dequant + colour-conversion (Phase 5).
     ///
     /// Push-constant layout matches `idct_color.slang`'s `PushParams`:
-    /// width, height, num_components, blocks_wide, blocks_high, num_qtables
-    /// (6 × u32 = 24 bytes).
+    /// `width`, `height`, `num_components`, `blocks_wide`, `blocks_high`,
+    /// `num_qtables` (6 × u32 = 24 bytes).
     #[cfg(feature = "gpu-jpeg-huffman")]
     pub(super) fn record_idct(
         &self,

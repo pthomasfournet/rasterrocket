@@ -519,7 +519,7 @@ __device__ __forceinline__ uint4 jpeg_phase2_redecode_device(
 }
 
 // Block width of `jpeg_phase2_inter_sync`; equals the Slang
-// `numthreads` and the host's `HUFFMAN_PHASE1_THREADS`. The shared
+// `numthreads` and the host's `HUFFMAN_THREADS`. The shared
 // state array is sized by it, so the kernel refuses any other launch
 // width (uniformly, before the first barrier).
 #define JPEG_PHASE2_GROUP 256u

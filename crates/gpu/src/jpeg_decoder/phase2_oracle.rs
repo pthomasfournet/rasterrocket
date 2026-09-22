@@ -37,7 +37,7 @@
 
 #![cfg(test)]
 
-use crate::backend::params::HUFFMAN_PHASE1_THREADS;
+use crate::backend::params::HUFFMAN_THREADS;
 use crate::jpeg::CanonicalCodebook;
 use crate::jpeg_decoder::PackedBitstream;
 use crate::jpeg_decoder::phase1_oracle::{
@@ -221,7 +221,7 @@ fn jpeg_region_end(i: usize, subsequence_bits: u32, length_bits: u32) -> u32 {
 /// Drive the JPEG-framed Phase 2 propagation loop to convergence.
 ///
 /// Mirrors the `jpeg_phase2_inter_sync` kernels pass for pass. One
-/// pass is one dispatch: each workgroup of `HUFFMAN_PHASE1_THREADS`
+/// pass is one dispatch: each workgroup of `HUFFMAN_THREADS`
 /// consecutive slots runs Jacobi steps — every slot `i ≥ 1` in the
 /// group re-decodes its region from the group's current `s_info[i - 1]`
 /// (for the group's first slot, the *previous* pass's `s_info[i - 1]`,
@@ -256,7 +256,7 @@ pub(super) fn jpeg_phase2_run_to_sync(
     let bound = super::huffman::jpeg_phase2_retry_bound(
         u32::try_from(n).expect("subsequence counts derive from u32 bit lengths"),
     );
-    let group = HUFFMAN_PHASE1_THREADS as usize;
+    let group = HUFFMAN_THREADS as usize;
     let length_bits = bitstream.length_bits;
     let redecode = |i: usize, left: SubsequenceState| {
         jpeg_phase2_redecode(
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn jpeg_retry_bound_is_workgroup_count() {
         use super::super::huffman::jpeg_phase2_retry_bound;
-        let w = HUFFMAN_PHASE1_THREADS;
+        let w = HUFFMAN_THREADS;
         assert_eq!(jpeg_phase2_retry_bound(0), 0);
         assert_eq!(jpeg_phase2_retry_bound(1), 1);
         assert_eq!(jpeg_phase2_retry_bound(w), 1);
@@ -673,7 +673,7 @@ mod tests {
                 let truth = sequential_truth(&prep, &sched, bpm, ssb);
                 let mut s_info = build_jpeg_phase1_s_info(&prep, &sched, bpm, ssb);
                 assert!(
-                    s_info.len() > HUFFMAN_PHASE1_THREADS as usize,
+                    s_info.len() > HUFFMAN_THREADS as usize,
                     "{name} ssb={ssb}: fixture must span more than one workgroup"
                 );
                 assert_ne!(s_info, truth, "{name} ssb={ssb}: precondition");

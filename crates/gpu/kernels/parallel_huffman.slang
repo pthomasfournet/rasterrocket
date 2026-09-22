@@ -603,7 +603,7 @@ uint4 jpeg_phase2_redecode(uint seq_idx, uint4 left) {
 }
 
 /// Workgroup width of `jpeg_phase2_inter_sync`; equals its
-/// `numthreads` and the host's `HUFFMAN_PHASE1_THREADS`.
+/// `numthreads` and the host's `HUFFMAN_THREADS`.
 static const uint JPEG_PHASE2_GROUP = 256u;
 
 /// Workgroup-local state of the current propagation pass, one slot

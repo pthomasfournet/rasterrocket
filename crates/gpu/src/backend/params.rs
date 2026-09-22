@@ -385,13 +385,15 @@ impl<B: GpuBackend + ?Sized> ScanParams<'_, B> {
 /// dispatchers can size + populate the buffer correctly.
 pub const HUFFMAN_CODEBOOK_ENTRIES: usize = 65_536;
 
-/// Workgroup size for the parallel-Huffman Phase 1 kernel.
+/// Workgroup size for every parallel-Huffman kernel (Phases 1, 2, and 4).
 ///
-/// Must match the `numthreads(...)` in `parallel_huffman.slang` /
-/// the block-dim arg the CUDA launcher (`launch_phase1_intra_sync_async`)
-/// uses. Backends size their dispatch grid as
-/// `ceil(num_subsequences / HUFFMAN_PHASE1_THREADS)`.
-pub const HUFFMAN_PHASE1_THREADS: u32 = 256;
+/// Must equal the `numthreads(256, 1, 1)` hardcoded on each
+/// `[shader("compute")]` entry in `parallel_huffman.slang` and the
+/// block-dim arg the CUDA launchers pass; the CUDA side reads this
+/// constant directly, but the Slang side has no build-time link to it,
+/// so a change here must be mirrored there by hand. Backends size
+/// their dispatch grid as `ceil(num_subsequences / HUFFMAN_THREADS)`.
+pub const HUFFMAN_THREADS: u32 = 256;
 
 /// Phase selector for [`record_huffman`](super::GpuBackend::record_huffman).
 ///
@@ -427,11 +429,11 @@ pub enum HuffmanPhase {
     JpegPhase1IntraSync,
     /// JPEG-framed Phase 2: inter-sequence sync by re-decode
     /// propagation. Each pass, every workgroup re-decodes its
-    /// `HUFFMAN_PHASE1_THREADS` regions to a local fixpoint from the
+    /// `HUFFMAN_THREADS` regions to a local fixpoint from the
     /// workgroup's left input in `s_info_prev`, writes the result to
     /// `s_info`, and flags each slot that equals its `s_info_prev`
     /// value; the host swaps the two buffers between passes and loops
-    /// until every flag is 1, at most `ceil(n / HUFFMAN_PHASE1_THREADS)`
+    /// until every flag is 1, at most `ceil(n / HUFFMAN_THREADS)`
     /// times. Same requirements as `JpegPhase1IntraSync` plus
     /// `sync_flags` and `s_info_prev`.
     JpegPhase2InterSync,

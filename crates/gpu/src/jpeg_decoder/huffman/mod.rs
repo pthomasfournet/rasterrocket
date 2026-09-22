@@ -14,7 +14,7 @@
 mod corpus;
 
 use crate::backend::params::{
-    HUFFMAN_CODEBOOK_ENTRIES, HUFFMAN_PHASE1_THREADS, HuffmanParams, HuffmanPhase,
+    HUFFMAN_CODEBOOK_ENTRIES, HUFFMAN_THREADS, HuffmanParams, HuffmanPhase,
 };
 use crate::backend::{BackendError, GpuBackend, Result};
 use crate::jpeg::CanonicalCodebook;
@@ -26,7 +26,7 @@ use crate::jpeg_decoder::phase1_oracle::SubsequenceState;
 use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 
 /// Pass bound for the JPEG-framed Phase 2 propagation loop: the
-/// number of kernel workgroups, `ceil(n / HUFFMAN_PHASE1_THREADS)`.
+/// number of kernel workgroups, `ceil(n / HUFFMAN_THREADS)`.
 ///
 /// Slot 0 is pinned correct (its fresh start is the true stream
 /// start). Each pass, every workgroup propagates to a local fixpoint
@@ -43,7 +43,7 @@ use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 /// (`phase2_oracle::jpeg_phase2_run_to_sync`) so the bound embedded
 /// in compared `Phase2Outcome`s cannot drift between the two.
 pub(in crate::jpeg_decoder) const fn jpeg_phase2_retry_bound(num_subsequences: u32) -> u32 {
-    num_subsequences.div_ceil(HUFFMAN_PHASE1_THREADS)
+    num_subsequences.div_ceil(HUFFMAN_THREADS)
 }
 
 /// Flatten an iterator of `&CanonicalCodebook` into the GPU layout:
@@ -355,7 +355,7 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
 /// # Cost model
 ///
 /// With `n = ceil(length_bits / subsequence_bits)` subsequences and
-/// `W = HUFFMAN_PHASE1_THREADS` lanes per workgroup, Phases 1 and 4
+/// `W = HUFFMAN_THREADS` lanes per workgroup, Phases 1 and 4
 /// are one dispatch each with per-thread work of one or two regions.
 /// Phase 2 is `1 + ceil(r / W)` synchronous host round trips, where
 /// `r` is the longest run of subsequences whose fresh-start Phase 1
@@ -1486,7 +1486,7 @@ mod tests {
                 let (gpu_s_info, gpu_outcome) =
                     dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch");
                 assert!(
-                    gpu_s_info.len() > HUFFMAN_PHASE1_THREADS as usize,
+                    gpu_s_info.len() > HUFFMAN_THREADS as usize,
                     "{name} ssb={subseq_bits}: fixture must span more than one workgroup"
                 );
                 assert!(
@@ -1603,7 +1603,7 @@ mod tests {
         assert_eq!(blocks_per_mcu, 6, "fixture must be 4:2:0");
         let subseq_bits = 32u32;
         assert!(
-            prep.bitstream.length_bits.div_ceil(subseq_bits) > HUFFMAN_PHASE1_THREADS,
+            prep.bitstream.length_bits.div_ceil(subseq_bits) > HUFFMAN_THREADS,
             "fixture must span more than one workgroup"
         );
         let gpu_syms = dispatch_jpeg_phase1_through_phase4(&b, &prep, subseq_bits)
