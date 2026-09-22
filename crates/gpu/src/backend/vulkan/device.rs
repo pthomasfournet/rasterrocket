@@ -94,6 +94,8 @@ pub(super) fn init() -> Result<Arc<DeviceCtx>> {
     let dev_props = unsafe { instance.get_physical_device_properties(phys) };
     let max_workgroup_count = dev_props.limits.max_compute_work_group_count;
 
+    log_chosen_device(&dev_props);
+
     let (device, compute_queue, has_memory_budget) =
         create_device(&instance, phys, compute_queue_family)?;
 
@@ -252,6 +254,58 @@ const fn device_type_rank(t: vk::PhysicalDeviceType) -> u8 {
         vk::PhysicalDeviceType::CPU => 3,
         _ => 4,
     }
+}
+
+/// PCI vendor ID for NVIDIA, per the PCI-SIG registry.  Vulkan's
+/// `driver_version` field is only interpretable through `VK_VERSION_*`
+/// for vendors that follow the core spec's suggested encoding; NVIDIA
+/// packs a proprietary 10/8/8/6-bit major/minor/patch/build layout
+/// instead, and other vendors are not guaranteed to match either.
+const VENDOR_ID_NVIDIA: u32 = 0x10DE;
+
+/// Decode `driver_version` the way `vendor_id` is known to encode it,
+/// falling back to the raw integer for every vendor whose encoding this
+/// module doesn't special-case.
+fn format_driver_version(vendor_id: u32, driver_version: u32) -> String {
+    if vendor_id == VENDOR_ID_NVIDIA {
+        // NVIDIA's Vulkan driver_version is not VK_VERSION_*-shaped: it's
+        // major(10) | minor(8) | patch(8) | build(6), matching the
+        // `driver-version-major.minor` shown by `nvidia-smi`.
+        let major = driver_version >> 22;
+        let minor = (driver_version >> 14) & 0xFF;
+        let patch = (driver_version >> 6) & 0xFF;
+        let build = driver_version & 0x3F;
+        format!("{major}.{minor}.{patch}.{build}")
+    } else {
+        format!(
+            "{}.{}.{} (raw {driver_version})",
+            vk::api_version_major(driver_version),
+            vk::api_version_minor(driver_version),
+            vk::api_version_patch(driver_version)
+        )
+    }
+}
+
+/// Log the physical device chosen by [`pick_physical_device`] at
+/// `debug` level.  Called once per process: [`init`] runs behind the
+/// process-wide Vulkan backend cell.
+fn log_chosen_device(props: &vk::PhysicalDeviceProperties) {
+    let name = props.device_name_as_c_str().map_or_else(
+        |_| "<invalid device name>".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let driver_version = format_driver_version(props.vendor_id, props.driver_version);
+    let api_version = format!(
+        "{}.{}.{}",
+        vk::api_version_major(props.api_version),
+        vk::api_version_minor(props.api_version),
+        vk::api_version_patch(props.api_version)
+    );
+    let device_type = props.device_type;
+    let vendor_id = props.vendor_id;
+    log::debug!(
+        "vulkan: chosen device \"{name}\" type={device_type:?} vendor_id=0x{vendor_id:04X} driver={driver_version} api={api_version}"
+    );
 }
 
 /// Sum of every `DEVICE_LOCAL` heap on the picked physical device.

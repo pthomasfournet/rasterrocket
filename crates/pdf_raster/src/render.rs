@@ -427,12 +427,25 @@ fn open_session_with_doc(
         #[cfg(not(feature = "vulkan"))]
         let vk_won_auto = false;
 
-        if vk_won_auto {
+        let ctx = if vk_won_auto {
             None
         } else {
             init_gpu_ctx(config.policy)?
+        };
+
+        if matches!(config.policy, BackendPolicy::Auto) {
+            log_auto_resolution_once(vk_won_auto, ctx.is_some());
         }
+
+        ctx
     };
+    #[cfg(not(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache")))]
+    if matches!(config.policy, BackendPolicy::Auto) {
+        #[cfg(feature = "vulkan")]
+        log_auto_resolution_once(vk_backend.is_some(), false);
+        #[cfg(not(feature = "vulkan"))]
+        log_auto_resolution_once(false, false);
+    }
 
     let vaapi_device = config.vaapi_device.clone();
 
@@ -513,6 +526,24 @@ fn open_session_with_doc(
         #[cfg(feature = "cache")]
         prefetch,
     })
+}
+
+/// Makes [`log_auto_resolution_once`] fire once per process;
+/// `open_session` may run once per page (comic archives).
+static AUTO_RESOLUTION_LOGGED: std::sync::Once = std::sync::Once::new();
+
+/// Log, once per process at `debug` level, which backend
+/// [`BackendPolicy::Auto`] resolved to.
+fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
+    AUTO_RESOLUTION_LOGGED.call_once(|| {
+        if vulkan_won {
+            log::debug!("rasterrocket: Auto backend resolution: Vulkan won, CUDA init skipped");
+        } else if cuda_available {
+            log::debug!("rasterrocket: Auto backend resolution: CUDA");
+        } else {
+            log::debug!("rasterrocket: Auto backend resolution: CPU (no GPU backend available)");
+        }
+    });
 }
 
 /// Initialise the Vulkan compute backend.
