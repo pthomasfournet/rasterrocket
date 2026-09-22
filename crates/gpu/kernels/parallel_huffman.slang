@@ -27,9 +27,8 @@
 //
 // - `phase1_intra_sync` / `phase2_inter_sync` / `phase4_redecode`
 //   use a synthetic-stream state machine: `z += 1` per symbol,
-//   rolling `c` over on the 64-symbol boundary.  Driven by the
-//   Phase A corpus (oracle tests under
-//   `crates/gpu/src/jpeg_decoder/huffman/corpus.rs`).
+//   rolling `c` over on the 64-symbol boundary.  Exercised by the
+//   oracle tests under `crates/gpu/src/jpeg_decoder/huffman/corpus.rs`.
 //
 // - `jpeg_phase1_intra_sync` and its Phase 2 / Phase 4 counterparts
 //   use real JPEG framing: per block, one DC symbol (read size,
@@ -37,6 +36,13 @@
 //   (sym = 0x00) or slot 64.  ZRL (sym = 0xF0) advances by 16.
 //   Codebook selection is per-block via `mcu_schedule`; DC symbols
 //   look up in `dc_codebook`, AC in `codebook`.
+//
+// ## Workgroup size
+//
+// Every `[shader("compute")]` entry below declares
+// `numthreads(256, 1, 1)`. This must equal `HUFFMAN_THREADS` in
+// `backend::params` (Rust); the two have no build-time link, so a
+// change to one must be mirrored in the other by hand.
 
 [[vk::binding(0, 0)]] StructuredBuffer<uint> bitstream;
 [[vk::binding(1, 0)]] StructuredBuffer<uint> codebook;

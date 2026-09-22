@@ -2,7 +2,7 @@
 // parallel_huffman.slang. See the Slang for algorithm-level comments.
 //
 // Block size is the grid-dim argument supplied at launch by
-// `backend::params::HUFFMAN_PHASE1_THREADS`; the kernel itself reads
+// `backend::params::HUFFMAN_THREADS`; the kernel itself reads
 // threadIdx via the standard CUDA intrinsics and doesn't pin the
 // block size in source.
 
@@ -400,8 +400,8 @@ __device__ __forceinline__ void unpack_schedule_device(
 // blocks_per_mcu and z resets to 0.
 //
 // Mirrors `try_decode_one_jpeg_symbol_kernel` in the Slang file
-// byte-for-byte; a divergence between the two would surface as a
-// CUDA-vs-Vulkan output mismatch in B2d's end-to-end test.
+// byte-for-byte; the two must stay identical or CUDA and Vulkan
+// dispatch will disagree on symbol output for the same input.
 __device__ __forceinline__ unsigned int try_decode_one_jpeg_symbol_device(
     const unsigned int* __restrict__ bitstream,
     const unsigned int* __restrict__ codebook,
