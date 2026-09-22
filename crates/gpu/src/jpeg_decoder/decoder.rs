@@ -133,37 +133,48 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
             )));
         }
 
-        // Attempt the GPU Phases 1–4 parallel-Huffman path.  On any error
-        // (Phase 2 non-convergence, backend dispatch failure, or symbol-stream
-        // inconsistency) fall through to the CPU sequential path below —
-        // logging the reason, so a systematically failing GPU path is
-        // distinguishable from a healthy one.
+        // Attempt the GPU Phases 1–4 parallel-Huffman path on grayscale
+        // streams only.  On any error (Phase 2 non-convergence, backend
+        // dispatch failure, or symbol-stream inconsistency) fall through
+        // to the CPU sequential path below — logging the reason, so a
+        // systematically failing GPU path is distinguishable from a
+        // healthy one.
+        //
+        // Multi-component streams never reach the GPU dispatch: Phase 2
+        // sync propagation degrades to a sequential re-decode on
+        // non-self-synchronising content, which every multi-component
+        // baseline stream in practice is, and the CPU walk wins there
+        // regardless of pass structure.
         let gpu_coefs: Option<(Vec<i32>, Vec<i32>)> = {
             #[cfg(feature = "gpu-jpeg-huffman")]
             {
-                let subseq_bits = crate::jpeg_decoder::pick_subsequence_size(&prep);
-                crate::jpeg_decoder::huffman::dispatch_jpeg_phase1_through_phase4(
-                    &self.backend,
-                    &prep,
-                    subseq_bits,
-                )
-                .inspect_err(|e| {
-                    log::debug!(
-                        "GPU JPEG Huffman dispatch failed ({width}×{height}, \
-                         {subseq_bits}-bit subsequences); using the CPU walk: {e}"
-                    );
-                })
-                .ok()
-                .and_then(|symbols| {
-                    symbols_to_coefficients(&prep, &symbols)
-                        .inspect_err(|e| {
-                            log::debug!(
-                                "GPU JPEG symbol stream rejected ({width}×{height}); \
-                                 using the CPU walk: {e}"
-                            );
-                        })
-                        .ok()
-                })
+                if nc == 1 {
+                    let subseq_bits = crate::jpeg_decoder::pick_subsequence_size(&prep);
+                    crate::jpeg_decoder::huffman::dispatch_jpeg_phase1_through_phase4(
+                        &self.backend,
+                        &prep,
+                        subseq_bits,
+                    )
+                    .inspect_err(|e| {
+                        log::debug!(
+                            "GPU JPEG Huffman dispatch failed ({width}×{height}, \
+                             {subseq_bits}-bit subsequences); using the CPU walk: {e}"
+                        );
+                    })
+                    .ok()
+                    .and_then(|symbols| {
+                        symbols_to_coefficients(&prep, &symbols)
+                            .inspect_err(|e| {
+                                log::debug!(
+                                    "GPU JPEG symbol stream rejected ({width}×{height}); \
+                                     using the CPU walk: {e}"
+                                );
+                            })
+                            .ok()
+                    })
+                } else {
+                    None
+                }
             }
             #[cfg(not(feature = "gpu-jpeg-huffman"))]
             {
