@@ -118,19 +118,21 @@ pub fn make_doc_with_object(obj2_body: &str) -> Document {
 /// Build a minimal valid PDF containing arbitrary extra indirect objects.
 ///
 /// `objects` is a slice of `(id, body)` pairs; each becomes
-/// `{id} 0 obj\n{body}\nendobj\n`, written verbatim in the given order.  Ids
-/// must be unique, all `> 3` (objects 1–3 are reserved for the Catalog and
-/// page tree), and contiguous from 4 upward so the single-subsection xref
-/// stays valid.  This supports tests that need indirect *inner* elements
-/// (e.g. a `/W` array whose width entries are `9 0 R 10 0 R`) or deliberate
-/// reference cycles (`5 0 obj 5 0 R endobj`) to prove cycle-bounded resolution.
+/// `{id} 0 obj\n{body}\nendobj\n`, written verbatim in the given order.  A
+/// body may be a `&str` or raw bytes (a stream whose data is not UTF-8).
+/// Ids must be unique, all `> 3` (objects 1–3 are reserved for the Catalog
+/// and page tree), and contiguous from 4 upward so the single-subsection
+/// xref stays valid.  This supports tests that need indirect *inner*
+/// elements (e.g. a `/W` array whose width entries are `9 0 R 10 0 R`) or
+/// deliberate reference cycles (`5 0 obj 5 0 R endobj`) to prove
+/// cycle-bounded resolution.
 ///
 /// Object layout:
 /// - `1 0 obj` — Catalog with `/Pages 3 0 R`
 /// - `2 0 obj` — empty (reserved; kept so ids line up with the other helpers)
 /// - `3 0 obj` — empty Pages tree
 /// - `4..` — caller's `objects`
-pub fn make_doc_with_objects(objects: &[(u32, &str)]) -> Document {
+pub fn make_doc_with_objects<B: AsRef<[u8]>>(objects: &[(u32, B)]) -> Document {
     // The xref is a single `0 N` subsection, so the kth offset is bound to
     // object id k.  Ids must therefore be exactly 4, 5, 6, … in order; a gap
     // would silently bind the wrong object to a reference.  Assert loudly so a
@@ -142,21 +144,26 @@ pub fn make_doc_with_objects(objects: &[(u32, &str)]) -> Document {
         );
     }
 
-    let header = "%PDF-1.4\n";
-    let fixed = [
-        "1 0 obj\n<</Type /Catalog /Pages 3 0 R>>\nendobj\n".to_string(),
-        "2 0 obj\nnull\nendobj\n".to_string(),
-        "3 0 obj\n<</Type /Pages /Kids [] /Count 0>>\nendobj\n".to_string(),
+    let header = b"%PDF-1.4\n";
+    let fixed: [&[u8]; 3] = [
+        b"1 0 obj\n<</Type /Catalog /Pages 3 0 R>>\nendobj\n",
+        b"2 0 obj\nnull\nendobj\n",
+        b"3 0 obj\n<</Type /Pages /Kids [] /Count 0>>\nendobj\n",
     ];
-    let extra: Vec<String> = objects
+    let extra: Vec<Vec<u8>> = objects
         .iter()
-        .map(|(id, body)| format!("{id} 0 obj\n{body}\nendobj\n"))
+        .map(|(id, body)| {
+            let mut section = format!("{id} 0 obj\n").into_bytes();
+            section.extend_from_slice(body.as_ref());
+            section.extend_from_slice(b"\nendobj\n");
+            section
+        })
         .collect();
 
     // Byte offset of each object, in id order (1, 2, 3, then the extras).
     let mut offsets = Vec::with_capacity(3 + extra.len());
     let mut cursor = header.len();
-    for section in fixed.iter().chain(extra.iter()) {
+    for section in fixed.iter().copied().chain(extra.iter().map(Vec::as_slice)) {
         offsets.push(cursor);
         cursor += section.len();
     }
@@ -169,14 +176,14 @@ pub fn make_doc_with_objects(objects: &[(u32, &str)]) -> Document {
     }
     let trailer = format!("trailer\n<</Size {count} /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF");
 
-    let mut body = String::with_capacity(xref_start + xref.len() + trailer.len());
-    body.push_str(header);
-    for section in fixed.iter().chain(extra.iter()) {
-        body.push_str(section);
+    let mut body = Vec::with_capacity(xref_start + xref.len() + trailer.len());
+    body.extend_from_slice(header);
+    for section in fixed.iter().copied().chain(extra.iter().map(Vec::as_slice)) {
+        body.extend_from_slice(section);
     }
-    body.push_str(&xref);
-    body.push_str(&trailer);
-    Document::from_bytes_owned(body.into_bytes()).expect("test PDF with objects parse")
+    body.extend_from_slice(xref.as_bytes());
+    body.extend_from_slice(trailer.as_bytes());
+    Document::from_bytes_owned(body).expect("test PDF with objects parse")
 }
 
 #[cfg(test)]
