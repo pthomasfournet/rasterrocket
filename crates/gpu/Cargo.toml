@@ -41,10 +41,13 @@ cache = ["dep:blake3", "dep:dashmap"]
 # at build time via `slangc` (LunarG SDK), pulls in `ash` for runtime
 # Vulkan, and exposes `VulkanBackend` implementing `GpuBackend`.
 vulkan = ["dep:ash", "dep:gpu-allocator"]
-# Custom parallel-Huffman GPU JPEG decoder (Weißenberger & Schmidt 2021).
-# CPU-only scaffolding today (bitstream pack, codetable build, scalar
-# reference decoder, synthetic oracle); GPU dispatch lands once the
-# `GpuBackend` trait grows transfer + compute-kernel surfaces.
+# Custom parallel-Huffman GPU JPEG decoder (Weißenberger & Schmidt 2021):
+# CPU pre-pass builds canonical codebooks and a per-subsequence launch
+# plan, then CUDA/Vulkan kernels run Phases 1-4 (intra-sync decode,
+# inter-sequence sync, prefix-sum, re-decode + write) to produce the
+# symbol stream in parallel. Routed by `GPU_JPEG_HUFFMAN_THRESHOLD_PX`
+# (`crates/pdf_interp`), currently `u32::MAX` (off) pending a corpus
+# benchmark crossover point.
 gpu-jpeg-huffman = []
 
 [dependencies]
