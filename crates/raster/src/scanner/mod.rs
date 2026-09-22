@@ -37,7 +37,7 @@
 /// The coalescing span iterator for a scanner row.
 pub mod iter;
 
-use crate::bitmap::AaBuf;
+use crate::bitmap::{AA_SIZE_USIZE, AaBuf};
 use crate::types::{AA_SIZE, splash_floor};
 use crate::xpath::{XPath, XPathFlags};
 
@@ -385,86 +385,109 @@ impl XPathScanner {
     /// `x0` and `x1` are updated to the tightest bounding range of pixels
     /// written into `aa_buf`. If no pixels are written, `*x0` is set to `0`
     /// and `*x1` to `-1` (so `*x0 > *x1` reliably indicates an empty range).
-    ///
-    /// # Panics
-    ///
-    /// Does not panic in practice. `AA_SIZE` is a positive compile-time constant
-    /// so all `try_from` conversions on loop indices succeed.
     pub fn render_aa_line(&self, aa_buf: &mut AaBuf, x0: &mut i32, x1: &mut i32, y: i32) {
         aa_buf.clear();
-        let aa_width_i32 = i32::try_from(aa_buf.width).unwrap_or(i32::MAX);
-        let mut xx_min = aa_width_i32;
-        let mut xx_max = -1i32;
+        let mut xx_min = usize::MAX;
+        let mut xx_max = 0usize;
 
-        let eo_mask = if self.eo { 1i32 } else { !0i32 };
-        let aa = AA_SIZE;
-
-        for yy in 0..aa {
-            let scan_y = y * aa + yy;
-            let row = self.row(scan_y);
-            let mut count = 0i32;
-            let mut i = 0usize;
-            let mut xx = 0i32;
-
-            // Walk through intersections, emitting covered spans into aa_buf.
-            //
-            // Winding rule: we are "inside" the path when
-            //   (count & eo_mask) != 0
-            // where count is the running sum of `Intersect::count` values seen so
-            // far. For EO fill eo_mask=1 so the low bit tracks parity; for NZ
-            // winding eo_mask=!0 so any non-zero count means inside.
-            while i < row.len() || (count & eo_mask) != 0 {
-                if (count & eo_mask) == 0 {
-                    // Currently outside — skip to the next intersection entry.
-                    if i >= row.len() {
-                        break;
-                    }
-                    xx = row[i].x0;
-                    count = count.wrapping_add(row[i].count);
-                    i += 1;
-                    continue;
-                }
-
-                // Currently inside a covered region — find the end of this span.
-                let span_x1 = loop {
-                    if i >= row.len() {
-                        break aa_width_i32;
-                    }
-                    count = count.wrapping_add(row[i].count);
-                    let end = row[i].x1 + 1;
-                    i += 1;
-                    if (count & eo_mask) == 0 {
-                        break end;
-                    }
-                };
-
-                let bx0 = usize::try_from(xx.max(0)).unwrap_or(0);
-                let bx1 = usize::try_from(span_x1.min(aa_width_i32)).unwrap_or(0);
-                if bx0 < bx1 {
-                    let row_idx = usize::try_from(yy).expect("yy in 0..AA_SIZE, always >= 0");
-                    aa_buf.set_span(row_idx, bx0, bx1);
-                    let bx0_i32 = i32::try_from(bx0).unwrap_or(i32::MAX);
-                    let bx1_i32 = i32::try_from(bx1).unwrap_or(i32::MAX);
-                    if bx0_i32 < xx_min {
-                        xx_min = bx0_i32;
-                    }
-                    if bx1_i32 > xx_max {
-                        xx_max = bx1_i32;
-                    }
-                }
-                xx = span_x1;
-            }
+        for (sub_row, scan_y) in aa_sub_rows(y) {
+            self.for_each_covered_span(scan_y, aa_buf.width, |bx0, bx1| {
+                aa_buf.set_span(sub_row, bx0, bx1);
+                xx_min = xx_min.min(bx0);
+                xx_max = xx_max.max(bx1);
+            });
         }
 
-        if xx_min > xx_max {
+        if xx_min >= xx_max {
             // Empty range signal: x0 > x1.
             *x0 = 0;
             *x1 = -1;
             return;
         }
-        *x0 = xx_min / aa;
-        *x1 = (xx_max - 1) / aa;
+        let aa = AA_SIZE_USIZE;
+        *x0 = i32::try_from(xx_min / aa).unwrap_or(i32::MAX);
+        *x1 = i32::try_from((xx_max - 1) / aa).unwrap_or(i32::MAX);
     }
+
+    /// Intersect the AA supersampled row already in `aa_buf` with this
+    /// scanner's coverage over device pixels `[x0, x1]`.
+    ///
+    /// Matches `SplashXPathScanner::clipAALine`. Every sub-sample in the range
+    /// that [`render_aa_line`](Self::render_aa_line) would leave unset for this
+    /// scanner is cleared; sub-samples it would set keep their current value.
+    /// `y` is in device-pixel space; the scanner must have been built from an
+    /// `aa_scale()`'d `XPath`.
+    pub fn clip_aa_line(&self, aa_buf: &mut AaBuf, x0: i32, x1: i32, y: i32) {
+        if x0 > x1 {
+            return;
+        }
+        let aa = AA_SIZE_USIZE;
+        let lo = usize::try_from(x0.max(0)).unwrap_or(0) * aa;
+        let hi = (usize::try_from(x1.max(-1) + 1).unwrap_or(0) * aa).min(aa_buf.width);
+
+        for (sub_row, scan_y) in aa_sub_rows(y) {
+            let mut cursor = lo;
+            self.for_each_covered_span(scan_y, aa_buf.width, |bx0, bx1| {
+                if bx0 > cursor {
+                    aa_buf.clear_span(sub_row, cursor, bx0.min(hi));
+                }
+                cursor = cursor.max(bx1);
+            });
+            aa_buf.clear_span(sub_row, cursor, hi);
+        }
+    }
+
+    /// Call `emit(bx0, bx1)` for each covered half-open span `[bx0, bx1)` of
+    /// AA scanline `scan_y`, clamped to `[0, width)`, in increasing `bx0`.
+    ///
+    /// A span opens at the `x0` of the intersection that makes the running
+    /// winding count inside (`count & eo_mask != 0`: parity for even-odd,
+    /// non-zero for non-zero winding) and closes one past the `x1` of the
+    /// intersection that returns it outside; a row that ends inside extends
+    /// to `width`. Spans may overlap when intersections do.
+    fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
+        let row = self.row(scan_y);
+        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
+        let eo_mask = if self.eo { 1i32 } else { !0i32 };
+        let mut count = 0i32;
+        let mut i = 0usize;
+        let mut xx = 0i32;
+
+        while i < row.len() || (count & eo_mask) != 0 {
+            if (count & eo_mask) == 0 {
+                xx = row[i].x0;
+                count = count.wrapping_add(row[i].count);
+                i += 1;
+                continue;
+            }
+
+            let span_x1 = loop {
+                if i >= row.len() {
+                    break width_i32;
+                }
+                count = count.wrapping_add(row[i].count);
+                let end = row[i].x1 + 1;
+                i += 1;
+                if (count & eo_mask) == 0 {
+                    break end;
+                }
+            };
+
+            let bx0 = usize::try_from(xx.max(0)).unwrap_or(0);
+            let bx1 = usize::try_from(span_x1.min(width_i32)).unwrap_or(0);
+            if bx0 < bx1 {
+                emit(bx0, bx1);
+            }
+            xx = span_x1;
+        }
+    }
+}
+
+/// `(sub_row, scan_y)` for each of the `AA_SIZE` sub-rows of device row `y`.
+fn aa_sub_rows(y: i32) -> impl Iterator<Item = (usize, i32)> {
+    (0..AA_SIZE)
+        .zip(0usize..)
+        .map(move |(yy, sub_row)| (sub_row, y * AA_SIZE + yy))
 }
 
 // ── Two-pass intersection construction ───────────────────────────────────────

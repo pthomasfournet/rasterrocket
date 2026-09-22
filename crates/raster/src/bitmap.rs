@@ -496,7 +496,7 @@ pub struct AaBuf {
 /// `AA_SIZE` is `i32 = 4`, which is always non-negative, so the conversion
 /// can never fail; the `expect` ensures any future change to a negative value
 /// is caught immediately.
-const AA_SIZE_USIZE: usize = {
+pub(crate) const AA_SIZE_USIZE: usize = {
     // i32 → usize: can only fail if AA_SIZE is negative.
     assert!(AA_SIZE >= 0, "AA_SIZE must be non-negative");
     AA_SIZE as usize
@@ -607,6 +607,41 @@ impl AaBuf {
                 !(0xff_u8 >> right_shift)
             };
             self.data[base + b1] |= right_mask;
+        }
+    }
+
+    /// Clear pixels `[x0, x1)` to 0 in the given row.
+    ///
+    /// `x0` and `x1` are clamped to `[0, width]`. No-op if `x0 ≥ x1`. The
+    /// dirty range is left as is: clearing sets no bit outside it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row >= height`.
+    pub fn clear_span(&mut self, row: usize, x0: usize, x1: usize) {
+        self.assert_row_in_bounds(row);
+        let x0 = x0.min(self.width);
+        let x1 = x1.min(self.width);
+        if x0 >= x1 {
+            return;
+        }
+        let rb = self.row_bytes();
+        let base = row * rb;
+        let b0 = x0 >> 3;
+        let b1 = (x1 - 1) >> 3;
+        // Bits to keep: those before `x0` in byte `b0`, those at or after
+        // `x1` in byte `b1`.
+        let keep_left = !(0xff_u8 >> (x0 & 7));
+        let keep_right = match x1 & 7 {
+            0 => 0,
+            s => 0xff_u8 >> s,
+        };
+        if b0 == b1 {
+            self.data[base + b0] &= keep_left | keep_right;
+        } else {
+            self.data[base + b0] &= keep_left;
+            self.data[base + b0 + 1..base + b1].fill(0);
+            self.data[base + b1] &= keep_right;
         }
     }
 
@@ -768,6 +803,40 @@ mod tests {
         buf.clear();
         for i in 0..buf.row_bytes() {
             assert_eq!(buf.get_byte(0, i), 0);
+        }
+    }
+
+    /// `clear_span` zeroes exactly `[x0, x1)`: within one byte, across byte
+    /// boundaries, and with byte-aligned ends, leaving neighbouring bits set.
+    #[test]
+    fn aabuf_clear_span_clears_only_the_range() {
+        // (x0, x1, expected row bytes) on a fully set 32-bit row.
+        let cases: [(usize, usize, [u8; 4]); 5] = [
+            (2, 6, [0xc3, 0xff, 0xff, 0xff]),
+            (6, 10, [0xfc, 0x3f, 0xff, 0xff]),
+            (8, 16, [0xff, 0x00, 0xff, 0xff]),
+            (3, 29, [0xe0, 0x00, 0x00, 0x07]),
+            (0, 32, [0x00, 0x00, 0x00, 0x00]),
+        ];
+        for (x0, x1, want) in cases {
+            let mut buf = AaBuf::new(8); // width = 32, row_bytes = 4
+            buf.set_span(2, 0, 32);
+            buf.clear_span(2, x0, x1);
+            let got: Vec<u8> = (0..4).map(|i| buf.get_byte(2, i)).collect();
+            assert_eq!(got, want, "clear_span({x0}, {x1})");
+        }
+    }
+
+    /// An empty or out-of-range `clear_span` is a no-op.
+    #[test]
+    fn aabuf_clear_span_empty_is_noop() {
+        let mut buf = AaBuf::new(8);
+        buf.set_span(0, 0, 32);
+        buf.clear_span(0, 10, 10);
+        buf.clear_span(0, 12, 4);
+        buf.clear_span(0, 40, 50);
+        for i in 0..buf.row_bytes() {
+            assert_eq!(buf.get_byte(0, i), 0xff, "byte {i} changed");
         }
     }
 }

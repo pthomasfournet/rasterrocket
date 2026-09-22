@@ -246,17 +246,13 @@ impl Clip {
     /// Clip an AA buffer row, zeroing bits outside the clip region.
     ///
     /// Matches `SplashClip::clipAALine` in `SplashClip.cc`. Each path-clip
-    /// scanner is asked to render its coverage into `aa_buf`, and the output
-    /// span `[*x0, *x1]` is clamped to the integer clip bounds.
-    ///
-    /// This method does not panic. `AA_SIZE` is the compile-time constant `4`,
-    /// which is always representable as `usize`.
+    /// scanner intersects its coverage with the sub-samples already in
+    /// `aa_buf` over `[*x0, *x1]`, and the output span is then clamped to the
+    /// integer clip bounds.
     pub fn clip_aa_line(&self, aa_buf: &mut AaBuf, x0: &mut i32, x1: &mut i32, y: i32) {
-        // Apply path-clip scanners.
         for scanner in &self.scanners {
-            scanner.render_aa_line(aa_buf, x0, x1, y);
+            scanner.clip_aa_line(aa_buf, *x0, *x1, y);
         }
-        // Clamp output range to the integer clip bounds.
         *x0 = (*x0).max(self.x_min_i);
         *x1 = (*x1).min(self.x_max_i);
     }
@@ -403,6 +399,74 @@ mod tests {
             !clip.test(4, 4),
             "point inside the AA_SIZE-shrunk ghost of the diamond must be clipped"
         );
+    }
+
+    /// Diamond with vertices at `(cx, cy ± r)` and `(cx ± r, cy)`, clipped
+    /// into `clip` as a path.
+    fn clip_to_diamond(clip: &mut Clip, cx: f64, cy: f64, r: f64) {
+        let mut builder = PathBuilder::new();
+        builder.move_to(cx, cy - r).expect("move_to");
+        builder.line_to(cx + r, cy).expect("line_to");
+        builder.line_to(cx, cy + r).expect("line_to");
+        builder.line_to(cx - r, cy).expect("line_to");
+        builder.close(false).expect("close");
+        let xpath = XPath::new(&builder.build(), &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true);
+        clip.clip_to_path(&xpath, false);
+    }
+
+    /// Whether AA sub-sample `x` of sub-row `row` is set.
+    fn aa_bit(buf: &AaBuf, row: usize, x: usize) -> bool {
+        buf.get_byte(row, x / 8) & (0x80 >> (x % 8)) != 0
+    }
+
+    /// `clip_aa_line` intersects the row already in the buffer with the
+    /// clip: sub-samples inside the path clip keep their value, those outside
+    /// are cleared, and sub-samples that were never set stay unset.
+    #[test]
+    fn clip_aa_line_intersects_with_the_buffer() {
+        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
+        clip_to_diamond(&mut clip, 16.0, 16.0, 14.0);
+
+        // Row 16 crosses the diamond over device x ≈ 2..30 (AA 8..120).  The
+        // buffer holds a fill over AA 40..200 only.
+        let mut buf = AaBuf::new(64);
+        for row in 0..buf.height {
+            buf.set_span(row, 40, 200);
+        }
+        let (mut x0, mut x1) = (0, 63);
+        clip.clip_aa_line(&mut buf, &mut x0, &mut x1, 16);
+
+        for row in 0..buf.height {
+            assert!(
+                !aa_bit(&buf, row, 20),
+                "inside clip, never set: stays clear"
+            );
+            assert!(aa_bit(&buf, row, 64), "inside clip and fill: kept");
+            assert!(!aa_bit(&buf, row, 160), "fill outside the clip: cleared");
+        }
+    }
+
+    /// Nested path clips intersect: a sub-sample survives only when every
+    /// clip covers it.
+    #[test]
+    fn clip_aa_line_nested_clips_intersect() {
+        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
+        clip_to_diamond(&mut clip, 16.0, 16.0, 14.0);
+        clip_to_diamond(&mut clip, 28.0, 16.0, 14.0);
+        assert_eq!(clip.scanners.len(), 2);
+
+        let mut buf = AaBuf::new(64);
+        for row in 0..buf.height {
+            buf.set_span(row, 0, 256);
+        }
+        let (mut x0, mut x1) = (0, 63);
+        clip.clip_aa_line(&mut buf, &mut x0, &mut x1, 16);
+
+        for row in 0..buf.height {
+            assert!(!aa_bit(&buf, row, 4 * 8), "only in the first diamond");
+            assert!(aa_bit(&buf, row, 4 * 22), "in both diamonds");
+            assert!(!aa_bit(&buf, row, 4 * 36), "only in the second diamond");
+        }
     }
 
     #[test]

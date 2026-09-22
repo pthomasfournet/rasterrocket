@@ -715,6 +715,53 @@ mod tests {
         );
     }
 
+    /// An AA fill under a path clip paints the intersection of the fill and
+    /// the clip.  A 10 × 10 square centred in a diamond clip must paint the
+    /// square alone, not the diamond's width across every row it touches.
+    #[test]
+    fn aa_fill_under_path_clip_paints_the_intersection() {
+        const W: u32 = 100;
+
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(W, W, 1, false);
+        let mut clip = crate::clip::Clip::new(0.0, 0.0, f64::from(W), f64::from(W), true);
+        let mut diamond = PathBuilder::new();
+        diamond.move_to(50.0, 5.0).expect("move_to");
+        diamond.line_to(95.0, 50.0).expect("line_to");
+        diamond.line_to(50.0, 95.0).expect("line_to");
+        diamond.line_to(5.0, 50.0).expect("line_to");
+        diamond.close(false).expect("close");
+        let xpath = crate::xpath::XPath::new(&diamond.build(), &identity_matrix(), 0.1, true);
+        clip.clip_to_path(&xpath, false);
+
+        let color = [255u8, 255, 255];
+        fill::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &rect_path(45.0, 45.0, 55.0, 55.0),
+            &simple_pipe(),
+            &PipeSrc::Solid(&color),
+            &identity_matrix(),
+            1.0,
+            true,
+        );
+
+        let mut painted = Vec::new();
+        for y in 0..W {
+            for (x, px) in bmp.row(y).iter().enumerate() {
+                if px.r >= 128 {
+                    painted.push((x, y));
+                }
+            }
+        }
+        assert_eq!(painted.len(), 100, "exactly the 10 × 10 square is painted");
+        assert!(
+            painted
+                .iter()
+                .all(|&(x, y)| (45..55).contains(&x) && (45..55).contains(&y)),
+            "no pixel outside the square"
+        );
+    }
+
     // ── Parallel fill tests ───────────────────────────────────────────────────
 
     #[cfg(feature = "rayon")]
