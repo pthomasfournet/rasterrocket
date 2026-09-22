@@ -29,6 +29,8 @@
 //! outside any image (dimensions are capped at 65 536 px) and is rejected by
 //! the range check.
 
+use raster::{Clip, ClipResult};
+
 use crate::renderer::gstate::{Ctm, ctm_transform};
 
 /// `u32` words per table entry: `[x_hi, x_lo, y_hi, y_lo]`.
@@ -209,6 +211,84 @@ impl SampleGrid {
     }
 }
 
+/// Admission of a [`SampleGrid`]'s pixels by the graphics-state clip.
+///
+/// The grid's bounding box is classified once against the clip; rows and
+/// then pixels are tested only as finely as that classification requires,
+/// so an unclipped image costs one rectangle test and a clipped one costs a
+/// span test per row plus a pixel test on rows the clip edge crosses.
+pub(super) struct GridClip<'a> {
+    clip: &'a Clip,
+    bbox: ClipResult,
+    /// Inclusive column span of the grid, device pixels.
+    x0: i32,
+    x1: i32,
+}
+
+impl<'a> GridClip<'a> {
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "grid edges are clamped to the page, which fits i32"
+    )]
+    pub(super) fn new(clip: &'a Clip, grid: &SampleGrid) -> Self {
+        let (x0, y0) = (grid.x0 as i32, grid.y0 as i32);
+        let (x1, y1) = (grid.x1 as i32 - 1, grid.y1 as i32 - 1);
+        Self {
+            clip,
+            bbox: clip.test_rect(x0, y0, x1, y1),
+            x0,
+            x1,
+        }
+    }
+
+    /// Classification of the whole grid bounding box.
+    pub(super) const fn bbox(&self) -> ClipResult {
+        self.bbox
+    }
+
+    /// Admission for row `dy` of the grid, or `None` when the clip excludes
+    /// the entire row.
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "dy < grid.y1 ≤ page height, which fits i32"
+    )]
+    pub(super) fn row(&self, dy: u32) -> Option<RowClip<'a>> {
+        let y = dy as i32;
+        let res = if self.bbox == ClipResult::AllInside {
+            ClipResult::AllInside
+        } else {
+            self.clip.test_span(self.x0, self.x1, y)
+        };
+        match res {
+            ClipResult::AllOutside => None,
+            ClipResult::AllInside => Some(RowClip { clip: None, y }),
+            ClipResult::Partial => Some(RowClip {
+                clip: Some(self.clip),
+                y,
+            }),
+        }
+    }
+}
+
+/// Admission of the pixels on one grid row.  Carries the clip only when the
+/// row is partially inside it.
+pub(super) struct RowClip<'a> {
+    clip: Option<&'a Clip>,
+    y: i32,
+}
+
+impl RowClip<'_> {
+    /// Whether device column `dx` on this row may be painted.
+    #[inline]
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "dx < grid.x1 ≤ page width, which fits i32"
+    )]
+    pub(super) fn admits(&self, dx: u32) -> bool {
+        self.clip.is_none_or(|clip| clip.test(dx as i32, self.y))
+    }
+}
+
 /// Append one `[x_hi, x_lo, y_hi, y_lo]` entry.
 fn push_entry(table: &mut Vec<u32>, x: f64, y: f64) {
     let (x_hi, x_lo) = split_q32(x);
@@ -355,6 +435,42 @@ mod tests {
         assert!(SampleGrid::new(&off_page, 10, 10, 4, 4).is_none());
         let empty_image = [10.0, 0.0, 0.0, -10.0, 0.0, 10.0];
         assert!(SampleGrid::new(&empty_image, 10, 10, 0, 4).is_none());
+    }
+
+    /// A clip rectangle covering the left half of a 1:1 grid: the bbox is
+    /// partial, every row is partial, and admission splits at the clip edge.
+    #[test]
+    fn grid_clip_admits_by_rect() {
+        let ctm = [10.0, 0.0, 0.0, 10.0, 0.0, 0.0];
+        let grid = SampleGrid::new(&ctm, 10, 10, 10, 10).expect("grid");
+        let clip = Clip::new(0.0, 0.0, 5.0, 10.0, true);
+        let gc = GridClip::new(&clip, &grid);
+        assert_eq!(gc.bbox(), ClipResult::Partial);
+        let row = gc.row(3).expect("row 3 intersects the clip");
+        assert!(row.admits(0));
+        assert!(row.admits(4));
+        assert!(!row.admits(5));
+        assert!(!row.admits(9));
+    }
+
+    /// A clip rectangle above the grid: the bbox is outside and no row is
+    /// admitted; one enclosing the grid: every row admits every column.
+    #[test]
+    fn grid_clip_bbox_extremes() {
+        let ctm = [10.0, 0.0, 0.0, 10.0, 0.0, 0.0];
+        let grid = SampleGrid::new(&ctm, 10, 20, 10, 10).expect("grid");
+        assert_eq!((grid.y0, grid.y1), (10, 20));
+
+        let above = Clip::new(0.0, 0.0, 10.0, 10.0, true);
+        let gc = GridClip::new(&above, &grid);
+        assert_eq!(gc.bbox(), ClipResult::AllOutside);
+        assert!(gc.row(10).is_none());
+
+        let enclosing = Clip::new(0.0, 0.0, 10.0, 20.0, true);
+        let gc = GridClip::new(&enclosing, &grid);
+        assert_eq!(gc.bbox(), ClipResult::AllInside);
+        let row = gc.row(15).expect("row inside the clip");
+        assert!((0..10).all(|dx| row.admits(dx)));
     }
 
     #[test]

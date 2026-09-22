@@ -61,7 +61,7 @@ use font::{
     engine::{FontEngine, SharedEngine},
 };
 use raster::{
-    Bitmap, eo_fill, fill,
+    Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
     pipe::{Pattern, PipeSrc, PipeState},
     shading::{gouraud::gouraud_triangle_fill, shaded_fill},
@@ -96,7 +96,7 @@ use gpu::jpeg_decoder::JpegGpuDecoder;
 use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
-use image_sampler::SampleGrid;
+use image_sampler::{GridClip, SampleGrid};
 #[cfg(any(
     feature = "gpu-aa",
     feature = "gpu-icc",
@@ -1544,13 +1544,21 @@ impl<'doc> PageRenderer<'doc> {
             return;
         };
 
+        // The grid covers the image's bounding box on the page; the clip
+        // region decides which of those pixels the image may paint.
+        let clip = self.gstate.current().clip.clone_shared();
+        let grid_clip = GridClip::new(&clip, &grid);
+        if grid_clip.bbox() == ClipResult::AllOutside {
+            return;
+        }
+
         // GPU image-blit path: device-resident pixels sampled by the CUDA
         // kernel through the same grid, composited onto `bitmap` before
         // this call returns so later operators paint over the image in
         // content-stream order.
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
-            if self.try_gpu_blit_image(cached, &grid) {
+            if self.try_gpu_blit_image(cached, &grid, &grid_clip) {
                 return;
             }
             // Promotion or kernel dispatch failed and there are no host
@@ -1622,8 +1630,14 @@ impl<'doc> PageRenderer<'doc> {
         let data = self.bitmap.data_mut();
 
         for dy in grid.y0..grid.y1 {
+            let Some(row_clip) = grid_clip.row(dy) else {
+                continue;
+            };
             let row_off = dy as usize * stride;
             for dx in grid.x0..grid.x1 {
+                if !row_clip.admits(dx) {
+                    continue;
+                }
                 let Some((ix, iy)) = grid.sample(dx, dy) else {
                     continue;
                 };
@@ -1687,6 +1701,7 @@ impl<'doc> PageRenderer<'doc> {
         &mut self,
         cached: &Arc<gpu::cache::CachedDeviceImage>,
         grid: &SampleGrid,
+        grid_clip: &GridClip<'_>,
     ) -> bool {
         use gpu::blit::BlitBbox;
 
@@ -1757,7 +1772,7 @@ impl<'doc> PageRenderer<'doc> {
                 return false;
             }
         };
-        composite_rgba_rows(&mut self.bitmap, &rows, grid);
+        composite_rgba_rows(&mut self.bitmap, &rows, grid, grid_clip);
         // Clear the touched rows so the next blit's alpha test sees only
         // its own writes.  On failure drop the buffer for the same reason
         // as above; the composite already succeeded.
@@ -1770,11 +1785,17 @@ impl<'doc> PageRenderer<'doc> {
 }
 
 /// Source-over the rows `[grid.y0, grid.y1)` of a downloaded RGBA8 page
-/// buffer onto `bitmap`, restricted to the grid's columns.  Alpha is `255`
-/// where the blit kernel wrote a sample and `0` elsewhere, so the composite
-/// is an opaque copy gated on alpha.
+/// buffer onto `bitmap`, restricted to the grid's columns and to the pixels
+/// `grid_clip` admits.  Alpha is `255` where the blit kernel wrote a sample
+/// and `0` elsewhere, so the composite is an opaque copy gated on alpha and
+/// on the clip.
 #[cfg(feature = "cache")]
-fn composite_rgba_rows(bitmap: &mut Bitmap<Rgb8>, rgba: &[u8], grid: &SampleGrid) {
+fn composite_rgba_rows(
+    bitmap: &mut Bitmap<Rgb8>,
+    rgba: &[u8],
+    grid: &SampleGrid,
+    grid_clip: &GridClip<'_>,
+) {
     use gpu::cache::RGBA_BPP;
 
     let width = bitmap.width as usize;
@@ -1785,10 +1806,13 @@ fn composite_rgba_rows(bitmap: &mut Bitmap<Rgb8>, rgba: &[u8], grid: &SampleGrid
         let Some(src_row) = rgba.get(row_idx * src_stride..(row_idx + 1) * src_stride) else {
             return;
         };
+        let Some(row_clip) = grid_clip.row(dy) else {
+            continue;
+        };
         let dst_off = dy as usize * dst_stride;
         for dx in grid.x0..grid.x1 {
             let s = &src_row[dx as usize * RGBA_BPP..dx as usize * RGBA_BPP + RGBA_BPP];
-            if s[3] == 0 {
+            if s[3] == 0 || !row_clip.admits(dx) {
                 continue;
             }
             let off = dst_off + dx as usize * 3;
@@ -2472,5 +2496,90 @@ mod tests {
             (0, false),
             "a new per-page renderer must start with an empty, uncapped dedup set"
         );
+    }
+
+    // ── Image clipping ────────────────────────────────────────────────────────
+
+    /// Run `content` on a `size × size` white page at 72 dpi and return the
+    /// red channel of every pixel, row-major.  The page has no resources, so
+    /// the content must paint through inline images only.
+    fn render_gray(size: u32, content: &[u8]) -> Vec<u8> {
+        use crate::test_helpers::empty_doc;
+
+        let doc = empty_doc();
+        let mut renderer = PageRenderer::new(size, size, &doc, (1, 0))
+            .expect("renderer construction must not fail");
+        renderer.execute(&crate::content::parse(content));
+        let stride = renderer.bitmap.stride;
+        let data = renderer.bitmap.data();
+        (0..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .map(|(x, y)| data[y as usize * stride + x as usize * 3])
+            .collect()
+    }
+
+    /// A 2×2 all-black `DeviceGray` inline image stretched over the whole
+    /// 8 pt page.  Without a clip it would blacken every pixel.
+    const BLACK_IMAGE_OVER_PAGE: &[u8] =
+        b"q 8 0 0 8 0 0 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x00\x00\x00\x00 EI Q";
+
+    #[test]
+    fn image_blit_honours_rectangular_clip() {
+        let content = [
+            b"q 0 0 4 8 re W n ".as_slice(),
+            BLACK_IMAGE_OVER_PAGE,
+            b" Q",
+        ]
+        .concat();
+        let px = render_gray(8, &content);
+        for y in 0..8 {
+            for x in 0..8 {
+                let want = if x < 4 { 0 } else { 255 };
+                assert_eq!(px[y * 8 + x], want, "pixel ({x}, {y})");
+            }
+        }
+    }
+
+    /// A rectilinear polygon clip — the shape a scanned-page workflow uses
+    /// to confine a background image to the margins — must be honoured
+    /// through the path-clip scanner, not just the clip rectangle.  The
+    /// L-shape covers user-space `y < 4` fully and `y ≥ 4` only for `x < 4`;
+    /// device rows are flipped, so the top-right quadrant stays white.
+    ///
+    /// Column 4 of the top half lies on the polygon's vertical edge.  The
+    /// scanner's pixel test is edge-inclusive, so that column is painted;
+    /// it is left unasserted here because the test pins the clip's interior
+    /// and exterior, not the edge convention.
+    #[test]
+    fn image_blit_honours_path_clip() {
+        let content = [
+            b"q 0 0 m 8 0 l 8 4 l 4 4 l 4 8 l 0 8 l h W n ".as_slice(),
+            BLACK_IMAGE_OVER_PAGE,
+            b" Q",
+        ]
+        .concat();
+        let px = render_gray(8, &content);
+        for y in 0..8 {
+            for x in 0..8 {
+                let want = match (y < 4, x) {
+                    (true, 4) => continue,
+                    (true, 5..) => 255,
+                    _ => 0,
+                };
+                assert_eq!(px[y * 8 + x], want, "pixel ({x}, {y})");
+            }
+        }
+    }
+
+    /// An image whose bounding box misses the clip entirely paints nothing.
+    #[test]
+    fn image_blit_outside_clip_paints_nothing() {
+        let content = [
+            b"q 0 0 1 1 re W n q 4 0 0 4 4 4 cm ".as_slice(),
+            b"BI /W 2 /H 2 /CS /G /BPC 8 ID \x00\x00\x00\x00 EI Q Q",
+        ]
+        .concat();
+        let px = render_gray(8, &content);
+        assert!(px.iter().all(|&g| g == 255), "no pixel may be painted");
     }
 }
