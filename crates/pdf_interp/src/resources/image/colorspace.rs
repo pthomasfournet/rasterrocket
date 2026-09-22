@@ -2,14 +2,23 @@
 //!
 //! Maps the `ColorSpace` entry of an image stream dictionary to one of the
 //! three device spaces the blit pipeline understands (`Gray`, `Rgb`, `Cmyk`),
-//! and extracts palette data for `Indexed` spaces.
+//! extracts palette data for `Indexed` spaces, and builds the per-sample
+//! lookup that turns spot-colour tints into device colour.
 //!
 //! The `Cmyk` variant is always converted to `Rgb` before the descriptor
 //! leaves this module; callers never see raw CMYK pixels.
+//!
+//! A `Separation` (or single-colorant `DeviceN`) image decodes to one tint
+//! byte per pixel with the sample layout of `Gray`, but the byte is a tint —
+//! `0` is no colorant, `255` is full colorant (PDF §8.6.6.4) — not a gray
+//! level, whose polarity is the reverse.  [`tint_lut`] evaluates the space's
+//! tint transform for every tint value and [`apply_tint_lut`] rewrites the
+//! decoded bytes through it, so a codec never has to know about spot colour.
 
 use pdf::{Dictionary, Document, Object};
 
-use super::ImageColorSpace;
+use super::{ImageColorSpace, ImageData, ImageDescriptor};
+use crate::resources::colorspace::{ColorSpace, resolve};
 use crate::resources::dict_ext::DictExt as _;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -61,7 +70,10 @@ const MAX_CS_DEPTH: u8 = 8;
 /// - `DeviceCMYK`                    → Cmyk (caller converts to RGB)
 /// - `ICCBased`   → inspect `N` in the ICC stream dict (1→Gray, 3→Rgb, 4→Cmyk)
 /// - `Indexed`    → resolve the base space; Indexed expansion handled separately
-/// - `Separation` / `DeviceN`        → approximate as Gray (tint 0 = full ink = dark)
+/// - `Separation` / `DeviceN`        → Gray sample layout: one tint byte per
+///   pixel.  The tint → colour mapping is applied afterwards by
+///   [`apply_tint_lut`]; a multi-colorant `DeviceN` has no evaluator yet and
+///   keeps the one-byte layout of its first colorant.
 /// - unknown / absent                → Gray (safe fallback)
 pub(super) fn resolve_cs(doc: &Document, cs_obj: &Object) -> ResolvedCs {
     resolve_cs_depth(doc, cs_obj, 0)
@@ -164,6 +176,101 @@ pub(super) fn extract_icc_bytes(doc: &Document, cs_obj: &Object) -> Option<Vec<u
         .decompressed_content()
         .map_err(|e| log::debug!("image: ICCBased stream decompression failed: {e}"))
         .ok()
+}
+
+// ── Spot-colour tint lookup ───────────────────────────────────────────────────
+
+/// Colour of every 8-bit tint value of a single-colorant image colour space.
+///
+/// Entry `i` is tint `i / 255` passed through the space's tint transform and
+/// converted from the alternate space to sRGB.  `Gray` is chosen when every
+/// entry is neutral so the image keeps its one-byte layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TintLut {
+    Gray(Box<[u8; 256]>),
+    Rgb(Box<[[u8; 3]; 256]>),
+}
+
+/// Build the tint lookup for an image whose `ColorSpace` is a `Separation`,
+/// a single-colorant `DeviceN`, or an `Indexed` space over either.
+///
+/// Returns `None` for every other colour space.  An `Indexed` space
+/// qualifies because palette expansion yields one base-space tint byte per
+/// pixel, which is exactly what the lookup consumes.
+pub(super) fn tint_lut(doc: &Document, cs_obj: &Object) -> Option<TintLut> {
+    let cs = resolve(doc, cs_obj);
+    let tint_cs = match &cs {
+        ColorSpace::Indexed { base, .. } => base.as_ref(),
+        other => other,
+    };
+    if !matches!(
+        tint_cs,
+        ColorSpace::Separation { .. } | ColorSpace::DeviceN { ncomps: 1, .. }
+    ) {
+        return None;
+    }
+
+    let mut rgb = Box::new([[0u8; 3]; 256]);
+    for (sample, entry) in (0u8..=255).zip(rgb.iter_mut()) {
+        *entry = tint_cs.convert_to_rgb(doc, &[f64::from(sample) / 255.0]);
+    }
+
+    if rgb.iter().all(|[r, g, b]| r == g && g == b) {
+        let mut gray = Box::new([0u8; 256]);
+        for (out, [v, _, _]) in gray.iter_mut().zip(rgb.iter()) {
+            *out = *v;
+        }
+        Some(TintLut::Gray(gray))
+    } else {
+        Some(TintLut::Rgb(rgb))
+    }
+}
+
+/// Rewrite a decoded one-tint-byte-per-pixel image through `lut`.
+///
+/// Only a host-resident `Gray`-layout descriptor carries tint bytes; any
+/// other layout is a producer error (e.g. a three-component JPEG declared as
+/// `Separation`) or device-resident data, and is left untouched.
+pub(super) fn apply_tint_lut(img: &mut ImageDescriptor, lut: &TintLut) {
+    if img.color_space != ImageColorSpace::Gray {
+        log::debug!(
+            "image: {:?} sample layout is not one tint per pixel — leaving samples as decoded",
+            img.color_space
+        );
+        return;
+    }
+    #[cfg_attr(
+        not(feature = "cache"),
+        expect(
+            clippy::infallible_destructuring_match,
+            reason = "the cache-feature build adds a device-resident arm; keep one shape"
+        )
+    )]
+    let bytes = match &mut img.data {
+        ImageData::Cpu(bytes) => bytes,
+        #[cfg(feature = "cache")]
+        ImageData::Gpu(_) => {
+            log::debug!(
+                "image: tint lookup needs host-resident samples — leaving samples as decoded"
+            );
+            return;
+        }
+    };
+    match lut {
+        TintLut::Gray(table) => {
+            for b in bytes.iter_mut() {
+                *b = table[usize::from(*b)];
+            }
+        }
+        TintLut::Rgb(table) => {
+            let mut rgb = Vec::with_capacity(bytes.len() * 3);
+            for &b in bytes.iter() {
+                rgb.extend_from_slice(&table[usize::from(b)]);
+            }
+            *bytes = rgb;
+            img.color_space = ImageColorSpace::Rgb;
+        }
+    }
 }
 
 // ── Indexed palette ───────────────────────────────────────────────────────────
@@ -277,5 +384,171 @@ mod tests {
         let doc = crate::test_helpers::empty_doc();
         let obj = Object::Reference((999, 0));
         assert_eq!(resolve_cs(&doc, &obj), ResolvedCs::Gray);
+    }
+
+    // ── Tint lookup ───────────────────────────────────────────────────────────
+
+    use super::super::ImageFilter;
+    use crate::test_helpers::make_doc_with_objects;
+
+    fn name_obj(n: &[u8]) -> Object {
+        Object::Name(n.to_vec())
+    }
+
+    /// `[/Separation /Black /DeviceCMYK 4 0 R]` where object 4 is the Type 4
+    /// tint transform `t ↦ (0, 0, 0, t)` as a real scanner producer writes it.
+    fn separation_black_doc() -> (Document, Object) {
+        const PROGRAM: &str = "{dup 0 mul exch dup 0 mul exch dup 0 mul exch 1 mul }";
+        let body = format!(
+            "<< /FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1 0 1] /Length {} >>\n\
+             stream\n{PROGRAM}\nendstream",
+            PROGRAM.len()
+        );
+        let doc = make_doc_with_objects(&[(4, &body)]);
+        let cs = Object::Array(vec![
+            name_obj(b"Separation"),
+            name_obj(b"Black"),
+            name_obj(b"DeviceCMYK"),
+            Object::Reference((4, 0)),
+        ]);
+        (doc, cs)
+    }
+
+    #[test]
+    fn tint_lut_separation_black_maps_zero_tint_to_white() {
+        // PDF §8.6.6.4: tint 0 is no colorant.  Through t ↦ (0,0,0,t) and the
+        // CMYK alternate that is paper white; tint 1 is full black.  This is
+        // the reverse of the Gray sample polarity the bytes are decoded in.
+        let (doc, cs) = separation_black_doc();
+        let Some(TintLut::Gray(lut)) = tint_lut(&doc, &cs) else {
+            panic!("a neutral alternate colour must yield a Gray lookup");
+        };
+        assert_eq!(lut[0], 255, "tint 0 = no ink = white");
+        assert_eq!(lut[255], 0, "tint 1 = full ink = black");
+        assert!(
+            lut.windows(2).all(|w| w[0] >= w[1]),
+            "more ink must never be lighter"
+        );
+        assert!((126..=129).contains(&lut[128]), "half tint is mid gray");
+    }
+
+    #[test]
+    fn tint_lut_indexed_over_separation_uses_the_base_tint() {
+        let (doc, sep) = separation_black_doc();
+        let cs = Object::Array(vec![
+            name_obj(b"Indexed"),
+            sep,
+            Object::Integer(1),
+            Object::String(vec![0x00, 0xFF], pdf::StringFormat::Hexadecimal),
+        ]);
+        let Some(TintLut::Gray(lut)) = tint_lut(&doc, &cs) else {
+            panic!("Indexed over Separation carries base-space tints per pixel");
+        };
+        assert_eq!((lut[0], lut[255]), (255, 0));
+    }
+
+    #[test]
+    fn tint_lut_coloured_alternate_yields_rgb() {
+        // Type 2 tint transform into DeviceRGB: white at tint 0, red at tint 1.
+        let doc = make_doc_with_objects(&[(
+            4,
+            "<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>",
+        )]);
+        let cs = Object::Array(vec![
+            name_obj(b"Separation"),
+            name_obj(b"Spot"),
+            name_obj(b"DeviceRGB"),
+            Object::Reference((4, 0)),
+        ]);
+        let Some(TintLut::Rgb(lut)) = tint_lut(&doc, &cs) else {
+            panic!("a chromatic alternate colour must yield an Rgb lookup");
+        };
+        assert_eq!(lut[0], [255, 255, 255]);
+        assert_eq!(lut[255], [255, 0, 0]);
+    }
+
+    #[test]
+    fn tint_lut_none_for_non_tint_spaces() {
+        let doc = crate::test_helpers::empty_doc();
+        assert_eq!(tint_lut(&doc, &name_obj(b"DeviceGray")), None);
+        assert_eq!(tint_lut(&doc, &name_obj(b"DeviceRGB")), None);
+        assert_eq!(
+            tint_lut(
+                &doc,
+                &Object::Array(vec![name_obj(b"ICCBased"), Object::Reference((9, 0))])
+            ),
+            None
+        );
+        // Multi-colorant DeviceN has no N-input evaluator: no lookup.
+        let dn = Object::Array(vec![
+            name_obj(b"DeviceN"),
+            Object::Array(vec![name_obj(b"Cyan"), name_obj(b"Black")]),
+            name_obj(b"DeviceCMYK"),
+            Object::Reference((9, 0)),
+        ]);
+        assert_eq!(tint_lut(&doc, &dn), None);
+    }
+
+    #[test]
+    fn tint_lut_single_colorant_devicen_is_treated_like_separation() {
+        let (doc, _) = separation_black_doc();
+        let dn = Object::Array(vec![
+            name_obj(b"DeviceN"),
+            Object::Array(vec![name_obj(b"Black")]),
+            name_obj(b"DeviceCMYK"),
+            Object::Reference((4, 0)),
+        ]);
+        let Some(TintLut::Gray(lut)) = tint_lut(&doc, &dn) else {
+            panic!("one-colorant DeviceN is a Separation with another name");
+        };
+        assert_eq!((lut[0], lut[255]), (255, 0));
+    }
+
+    fn gray_desc(bytes: &[u8]) -> ImageDescriptor {
+        ImageDescriptor {
+            width: u32::try_from(bytes.len()).unwrap(),
+            height: 1,
+            color_space: ImageColorSpace::Gray,
+            data: ImageData::Cpu(bytes.to_vec()),
+            smask: None,
+            filter: ImageFilter::Raw,
+        }
+    }
+
+    #[test]
+    fn apply_tint_lut_gray_rewrites_in_place() {
+        let mut lut = Box::new([0u8; 256]);
+        for (i, v) in lut.iter_mut().enumerate() {
+            *v = 255 - u8::try_from(i).unwrap();
+        }
+        let mut img = gray_desc(&[0, 128, 255]);
+        apply_tint_lut(&mut img, &TintLut::Gray(lut));
+        assert_eq!(img.color_space, ImageColorSpace::Gray);
+        assert_eq!(img.data.as_cpu().unwrap(), &[255, 127, 0]);
+    }
+
+    #[test]
+    fn apply_tint_lut_rgb_widens_to_three_bytes_per_pixel() {
+        let mut lut = Box::new([[0u8; 3]; 256]);
+        lut[0] = [255, 255, 255];
+        lut[255] = [255, 0, 0];
+        let mut img = gray_desc(&[0, 255]);
+        apply_tint_lut(&mut img, &TintLut::Rgb(lut));
+        assert_eq!(img.color_space, ImageColorSpace::Rgb);
+        assert_eq!(img.data.as_cpu().unwrap(), &[255, 255, 255, 255, 0, 0]);
+    }
+
+    #[test]
+    fn apply_tint_lut_leaves_non_gray_layouts_alone() {
+        let lut = TintLut::Gray(Box::new([7u8; 256]));
+        let mut img = gray_desc(&[1, 2, 3]);
+        img.color_space = ImageColorSpace::Rgb;
+        apply_tint_lut(&mut img, &lut);
+        assert_eq!(img.data.as_cpu().unwrap(), &[1, 2, 3]);
+        let mut mask = gray_desc(&[0]);
+        mask.color_space = ImageColorSpace::Mask;
+        apply_tint_lut(&mut mask, &lut);
+        assert_eq!(mask.color_space, ImageColorSpace::Mask);
+        assert_eq!(mask.data.as_cpu().unwrap(), &[0]);
     }
 }

@@ -197,6 +197,16 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
         }
     }?;
     img.filter = img_filter;
+
+    // Only an inlined `[/Separation …]` array resolves here; a `/CS` naming a
+    // page `ColorSpace` resource is not looked up by this decoder.
+    if !is_mask
+        && let Some(lut) = dict
+            .get(b"ColorSpace")
+            .and_then(|cs| super::colorspace::tint_lut(doc, cs))
+    {
+        super::colorspace::apply_tint_lut(&mut img, &lut);
+    }
     Some(img)
 }
 

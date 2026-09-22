@@ -462,6 +462,17 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 
     let is_mask = stream.dict.get_bool(b"ImageMask").unwrap_or(false);
 
+    // A spot-colour image decodes to one tint byte per pixel whatever the
+    // codec; the tint → colour rewrite runs once the samples are final.
+    let tint_lut = if is_mask {
+        None
+    } else {
+        stream
+            .dict
+            .get(b"ColorSpace")
+            .and_then(|cs| colorspace::tint_lut(doc, cs))
+    };
+
     let filter_obj = stream.dict.get(b"Filter");
     let filter_chain = filter_obj.map(image_filter_chain).unwrap_or_default();
     let filter = filter_obj.and_then(filter_name);
@@ -527,13 +538,14 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         },
         Some("CCITTFaxDecode") => decode_ccitt(&codec_input, w, h, is_mask, terminal_parms),
         Some("DCTDecode") => {
-            // The GPU blit composites cached images fully opaque, so an
-            // image carrying a soft mask or explicit mask stays
+            // The GPU blit composites cached images fully opaque and
+            // reads their samples verbatim, so an image carrying a soft
+            // mask, an explicit mask, or a spot-colour tint stays
             // host-resident: neither looked up (a content-hash hit from
-            // another document would drop the mask) nor inserted.  The
-            // conditions mirror the mask resolution below.
+            // another document would drop the mask or the tint rewrite)
+            // nor inserted.  The conditions mirror the resolution below.
             #[cfg(feature = "cache")]
-            let cache_ctx = if has_mask_entry(&stream.dict) {
+            let cache_ctx = if has_mask_entry(&stream.dict) || tint_lut.is_some() {
                 None
             } else {
                 codecs::DctCacheCtx::from_resources(image_cache, doc_id, stream_id)
@@ -645,6 +657,12 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                 log::warn!("image: /Mask is neither a reference nor an array — ignoring");
             }
         }
+    }
+
+    // After masking: colour-key ranges are matched against the tint bytes,
+    // not the colours they map to.
+    if let Some(lut) = &tint_lut {
+        colorspace::apply_tint_lut(&mut img, lut);
     }
 
     ImageResolution::Ok(img)
@@ -789,6 +807,106 @@ fn xobject_id(doc: &Document, page_dict: &Dictionary, name: &[u8]) -> Option<Obj
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Spot-colour images through the full XObject path ─────────────────────
+
+    /// Decode `/Im1`, an image whose `ColorSpace` is `[/Separation /Black
+    /// /DeviceCMYK <fn>]` with the tint transform `t ↦ (0, 0, 0, t)`, carrying
+    /// `image_dict_extras` and the raw sample bytes `samples`.
+    fn resolve_separation_black(image_dict_extras: &str, samples: &[u8]) -> ImageDescriptor {
+        const PROGRAM: &str = "{dup 0 mul exch dup 0 mul exch dup 0 mul exch 1 mul }";
+        let tint_fn = format!(
+            "<< /FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1 0 1] /Length {} >>\n\
+             stream\n{PROGRAM}\nendstream",
+            PROGRAM.len()
+        )
+        .into_bytes();
+        let mut image = format!(
+            "<< /Type /XObject /Subtype /Image /ColorSpace [/Separation /Black /DeviceCMYK 4 0 R] \
+             {image_dict_extras} /Length {} >>\nstream\n",
+            samples.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(samples);
+        image.extend_from_slice(b"\nendstream");
+        let doc = crate::test_helpers::make_doc_with_objects(&[(4, tint_fn), (5, image)]);
+
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((5, 0)));
+        let mut resources = Dictionary::new();
+        resources.set("XObject", Object::Dictionary(xobjects));
+        let mut page = Dictionary::new();
+        page.set("Resources", Object::Dictionary(resources));
+
+        let resolution = resolve_image(
+            &doc,
+            &page,
+            b"Im1",
+            #[cfg(feature = "nvjpeg")]
+            None,
+            #[cfg(feature = "vaapi")]
+            None,
+            #[cfg(feature = "nvjpeg2k")]
+            None,
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+            #[cfg(feature = "gpu-icc")]
+            None,
+            #[cfg(feature = "gpu-icc")]
+            None,
+            #[cfg(feature = "cache")]
+            None,
+            #[cfg(feature = "cache")]
+            None,
+        );
+        match resolution {
+            ImageResolution::Ok(img) => img,
+            ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
+            ImageResolution::Absent => panic!("image resource not found"),
+        }
+    }
+
+    #[test]
+    fn separation_image_zero_tint_is_white() {
+        // PDF §8.6.6.4: an 8-bit Separation sample is a tint — 0 is no
+        // colorant (paper), 255 is full colorant.  Treating the bytes as
+        // gray levels renders the page as its negative.
+        let img =
+            resolve_separation_black("/Width 3 /Height 1 /BitsPerComponent 8", &[0, 128, 255]);
+        assert_eq!(img.color_space, ImageColorSpace::Gray);
+        let px = img.data.as_cpu().unwrap();
+        assert_eq!(px[0], 255, "tint 0 = no ink = white");
+        assert_eq!(px[2], 0, "tint 1 = full ink = black");
+        assert!(
+            (126..=129).contains(&px[1]),
+            "half tint is mid gray, got {}",
+            px[1]
+        );
+    }
+
+    #[test]
+    fn separation_image_decode_array_applies_before_the_tint_transform() {
+        // §8.9.5.2: Decode maps samples into the tint domain first, so
+        // [1 0] turns sample 0 into full colorant.
+        let img = resolve_separation_black(
+            "/Width 2 /Height 1 /BitsPerComponent 8 /Decode [1 0]",
+            &[0, 255],
+        );
+        assert_eq!(img.data.as_cpu().unwrap(), &[0, 255]);
+    }
+
+    #[test]
+    fn separation_image_one_bit_samples_follow_tint_polarity() {
+        // One packed row, MSB first: only the first pixel carries colorant.
+        let img = resolve_separation_black("/Width 8 /Height 1 /BitsPerComponent 1", &[0x80]);
+        assert_eq!(img.color_space, ImageColorSpace::Gray);
+        let px = img.data.as_cpu().unwrap();
+        assert_eq!(px[0], 0, "set bit = tint 1 = ink");
+        assert!(
+            px[1..].iter().all(|&v| v == 255),
+            "clear bits = tint 0 = paper"
+        );
+    }
 
     #[test]
     fn validated_dims_rejects_zero() {

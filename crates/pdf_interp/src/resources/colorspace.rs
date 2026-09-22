@@ -244,8 +244,8 @@ impl ColorSpace {
                 // tint-transform function to produce values in the alternate
                 // colour space, then convert via the alternate.  On any
                 // failure (missing dict id, function eval returns None, or
-                // alternate.convert_to_rgb falls back), use the image-
-                // pipeline heuristic (1 - tint → gray).
+                // alternate.convert_to_rgb falls back), use the `1 - tint`
+                // gray approximation.
                 if let Some(id) = tint_dict_id
                     && let Some(rgb) = separation_via_tint_fn(doc, *id, alternate, comps[0])
                 {
@@ -391,9 +391,10 @@ fn fetch_icc_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
 /// Pass a Separation tint through the document's tint-transform function
 /// and convert the result via the alternate colour space.
 ///
-/// Returns `None` and lets the caller fall back to the image-pipeline gray
-/// heuristic on any failure (function object not dereferenceable, function
-/// evaluation returns `None`, or the alternate space itself can't convert).
+/// Returns `None` and lets the caller fall back to the `1 - tint` gray
+/// approximation on any failure (function object not dereferenceable,
+/// function evaluation returns `None`, or the alternate space itself can't
+/// convert).
 fn separation_via_tint_fn(
     doc: &Document,
     tint_dict_id: ObjectId,
@@ -410,8 +411,9 @@ fn separation_via_tint_fn(
     Some(alternate.convert_to_rgb(doc, &outputs))
 }
 
-/// Image-pipeline policy: a spot tint with no resolvable transform
-/// approximates as gray with `1 - tint` (tint 0 = full ink = dark).
+/// A spot tint with no resolvable transform approximates as gray with
+/// `1 - tint`: tint 0 is no colorant (white), tint 1 is full colorant
+/// (black), per PDF §8.6.6.4.
 fn separation_fallback_gray(tint: f64) -> [u8; 3] {
     let v = (1.0 - tint).clamp(0.0, 1.0);
     gray_byte_to_rgb(color::convert::gray_to_u8(v))
