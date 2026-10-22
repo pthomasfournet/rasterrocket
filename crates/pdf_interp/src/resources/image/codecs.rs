@@ -1014,15 +1014,10 @@ pub(super) fn cmyk_raw_to_rgb(
     let npixels = pixels.len() / 4;
     let mut rgb = Vec::with_capacity(npixels.checked_mul(3)?);
     for chunk in pixels.as_chunks::<4>().0 {
-        let (c, m, y, k) = if inverted {
-            (
-                255 - chunk[0],
-                255 - chunk[1],
-                255 - chunk[2],
-                255 - chunk[3],
-            )
+        let [c, m, y, k] = if inverted {
+            chunk.map(|v| 255 - v)
         } else {
-            (chunk[0], chunk[1], chunk[2], chunk[3])
+            *chunk
         };
         let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(c, m, y, k);
         rgb.push(r);

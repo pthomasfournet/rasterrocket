@@ -793,7 +793,7 @@ mod tests {
         assert!(h.quant_tables[0].is_some());
         assert_eq!(h.scan.component_count, 1);
         assert_eq!(h.scan.components[0].id, 1);
-        assert!(!h.scan_data.is_empty());
+        assert_ne!(h.scan_data.len(), 0);
         assert_eq!(h.restart_interval, 0);
     }
 

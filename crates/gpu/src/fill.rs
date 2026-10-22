@@ -408,7 +408,7 @@ pub fn aa_fill_cpu(
 fn aa_fill_cpu_sample(segs: &[f32], sx: f32, sy: f32, eo: bool) -> bool {
     let mut winding = 0i32;
     for seg in segs.as_chunks::<4>().0 {
-        let (x0, y0, x1, y1) = (seg[0], seg[1], seg[2], seg[3]);
+        let [x0, y0, x1, y1] = *seg;
         if y0 <= sy && sy < y1 {
             let t = (sy - y0) / (y1 - y0);
             let xi = t.mul_add(x1 - x0, x0);

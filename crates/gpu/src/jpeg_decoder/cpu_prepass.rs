@@ -344,7 +344,7 @@ mod tests {
         assert!(prep.dc_codebooks[usize::from(prep.dc_selectors[0])].is_some());
         // DC values for the single component are populated.
         assert_eq!(prep.dc_values.per_component.len(), 1);
-        assert!(!prep.dc_values.per_component[0].is_empty());
+        assert_ne!(prep.dc_values.per_component[0].len(), 0);
         // No restart markers in the fixture.
         assert_eq!(prep.restart_interval, 0);
         // Bitstream is non-empty; length_bits = unstuffed byte count × 8

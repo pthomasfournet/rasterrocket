@@ -127,7 +127,7 @@ pub(super) fn eval_exponential(fn_dict: &Dictionary, t: f64, n: usize) -> Vec<f6
 
     c0.iter()
         .zip(c1.iter())
-        .map(|(&a, &b)| a + weight * (b - a))
+        .map(|(&a, &b)| weight.mul_add(b - a, a))
         .collect()
 }
 
@@ -300,7 +300,9 @@ fn eval_sampled(
     } else {
         (0.0, n_samples_minus_1_f64)
     };
-    let idx_f = (e_lo + t_norm * (e_hi - e_lo)).clamp(0.0, n_samples_minus_1_f64);
+    let idx_f = t_norm
+        .mul_add(e_hi - e_lo, e_lo)
+        .clamp(0.0, n_samples_minus_1_f64);
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
@@ -336,13 +338,13 @@ fn eval_sampled(
         .map(|ch| {
             let raw_lo = read_sample(idx_lo, ch) / s_max;
             let raw_hi = read_sample(idx_hi, ch) / s_max;
-            let raw = raw_lo + frac * (raw_hi - raw_lo);
+            let raw = frac.mul_add(raw_hi - raw_lo, raw_lo);
             let (d_lo, d_hi) = if decode.len() >= (ch + 1) * 2 {
                 (decode[ch * 2], decode[ch * 2 + 1])
             } else {
                 (0.0, 1.0)
             };
-            d_lo + raw * (d_hi - d_lo)
+            raw.mul_add(d_hi - d_lo, d_lo)
         })
         .collect();
     Some(channels)
@@ -414,7 +416,7 @@ fn eval_sampled_approx(fn_dict: &Dictionary, t: f64, n: usize) -> Vec<f64> {
             } else {
                 (0.0, 1.0)
             };
-            d_lo + t_norm * (d_hi - d_lo)
+            t_norm.mul_add(d_hi - d_lo, d_lo)
         })
         .collect()
 }

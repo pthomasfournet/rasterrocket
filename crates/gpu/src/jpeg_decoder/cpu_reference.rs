@@ -95,7 +95,7 @@ mod tests {
             length_bits: 0,
         };
         let got = decode_scalar(&book4_codebook(), &stream);
-        assert!(got.is_empty());
+        assert_eq!(got.len(), 0);
     }
 
     #[test]

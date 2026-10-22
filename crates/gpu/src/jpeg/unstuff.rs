@@ -160,14 +160,14 @@ mod tests {
     fn unstuff_no_ff_passes_through() {
         let (dst, rsts) = run(&[0x12, 0x34, 0x56, 0x78]).unwrap();
         assert_eq!(dst, [0x12, 0x34, 0x56, 0x78]);
-        assert!(rsts.is_empty());
+        assert_eq!(rsts.len(), 0);
     }
 
     #[test]
     fn unstuff_ff_00_becomes_ff() {
         let (dst, rsts) = run(&[0xFF, 0x00, 0x12, 0xFF, 0x00]).unwrap();
         assert_eq!(dst, [0xFF, 0x12, 0xFF]);
-        assert!(rsts.is_empty());
+        assert_eq!(rsts.len(), 0);
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
         let (dst, rsts) = run(&[0x11, 0xFF, 0xFF, 0x00, 0x22]).unwrap();
         // 0xFF 0xFF → fill (skip leading); next 0xFF 0x00 → literal 0xFF.
         assert_eq!(dst, [0x11, 0xFF, 0x22]);
-        assert!(rsts.is_empty());
+        assert_eq!(rsts.len(), 0);
     }
 
     #[test]
@@ -283,6 +283,6 @@ mod tests {
         }];
         unstuff_into(&[0x12, 0x34], &mut dst, &mut rsts).unwrap();
         assert_eq!(dst, [0x12, 0x34]);
-        assert!(rsts.is_empty());
+        assert_eq!(rsts.len(), 0);
     }
 }

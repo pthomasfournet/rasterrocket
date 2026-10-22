@@ -2,6 +2,7 @@
 
 use super::super::color::RasterColor;
 use super::super::gstate::ctm_multiply;
+use super::text_ops::translate_text_x;
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
 use crate::content::{Operator, TextArrayElement};
 
@@ -297,8 +298,7 @@ impl PageRenderer<'_> {
                                 ts.horiz_scaling / 100.0
                             };
                             let shift = -kern / 1000.0 * ts.font_size * hz;
-                            let [a, b, c, d, e, f] = ts.text_matrix;
-                            ts.text_matrix = [a, b, c, d, e + shift * a, f + shift * b];
+                            ts.text_matrix = translate_text_x(ts.text_matrix, shift);
                         }
                     }
                 }

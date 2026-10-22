@@ -1201,7 +1201,7 @@ mod tests {
             return;
         };
         let offsets = dispatch_phase3_offsets(&b, &[]).expect("phase3 empty");
-        assert!(offsets.is_empty());
+        assert_eq!(offsets.len(), 0);
     }
 
     /// Phase 3 over Phase 2's `s_info` matches a host-side scan of

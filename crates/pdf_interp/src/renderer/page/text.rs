@@ -4,7 +4,7 @@ use super::super::gstate::{ctm_multiply, mat2x2_mul};
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
-use super::text_ops::{GlyphRecord, text_to_device};
+use super::text_ops::{GlyphRecord, glyph_advance, text_to_device, translate_text_x};
 use color::Rgb8;
 use raster::{
     glyph::{GlyphBitmap, fill_glyph},
@@ -17,7 +17,6 @@ impl PageRenderer<'_> {
     /// Two-phase design to satisfy the borrow checker:
     /// 1. Rasterize all glyphs while holding the `font_cache` borrow (no bitmap access).
     /// 2. Blit the pre-rasterized bitmaps, using `bitmap` mutably (no `font_cache` access).
-    #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
     #[expect(
         clippy::too_many_lines,
         reason = "two-phase glyph render (rasterize then blit) inherently interleaves font, matrix, and clip logic that cannot be cleanly split without adding costly intermediate allocations"
@@ -225,9 +224,9 @@ impl PageRenderer<'_> {
                     // Word spacing does not apply to composite fonts (PDF §9.3.3).
                     let cid_width = enc.width_for_cid(cid);
                     let advance_glyph = f64::from(cid_width) / 1000.0;
-                    let tx_adv = (advance_glyph * font_size + char_spacing) * horiz_scaling;
-                    let [a, b_m, c, d, e, f] = tm;
-                    tm = [a, b_m, c, d, e + tx_adv * a, f + tx_adv * b_m];
+                    let tx_adv =
+                        glyph_advance(advance_glyph, font_size, char_spacing, 0.0, horiz_scaling);
+                    tm = translate_text_x(tm, tx_adv);
                 }
             } else {
                 // Simple font: one byte per character code.
@@ -246,9 +245,9 @@ impl PageRenderer<'_> {
                         |w| f64::from(w) / 1000.0,
                     );
                     let extra = if byte == b' ' { word_spacing } else { 0.0 };
-                    let tx_adv = (advance_glyph * font_size + char_spacing + extra) * horiz_scaling;
-                    let [a, b_m, c, d, e, f] = tm;
-                    tm = [a, b_m, c, d, e + tx_adv * a, f + tx_adv * b_m];
+                    let tx_adv =
+                        glyph_advance(advance_glyph, font_size, char_spacing, extra, horiz_scaling);
+                    tm = translate_text_x(tm, tx_adv);
                 }
             }
         } // font_cache borrow released here

@@ -248,7 +248,7 @@ fn build_clustered(mat: &mut [u8], size: usize) {
     let half = f64::from(u32::try_from(size / 2).expect("size/2 verified to fit u32 above"));
     let cx = half;
     let cy = half;
-    let max_dist = cx * cx + cy * cy;
+    let max_dist = cx.mul_add(cx, cy * cy);
     // size >= 2 ⟹ half >= 1.0 ⟹ max_dist >= 2.0; division by zero is
     // impossible. Guard defensively for the debug build.
     debug_assert!(

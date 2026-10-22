@@ -210,7 +210,7 @@ mod tests {
         let stream = ctx.default_stream();
         let mut buf = DevicePageBuffer::new(stream, 8, 4).expect("alloc");
         assert_eq!(buf.download_rows(1, 3).expect("rows").len(), 2 * 8 * 4);
-        assert!(buf.download_rows(2, 2).expect("empty").is_empty());
+        assert_eq!(buf.download_rows(2, 2).expect("empty").len(), 0);
         assert!(buf.download_rows(3, 2).is_err(), "inverted range");
         assert!(buf.download_rows(0, 5).is_err(), "past the buffer");
         assert!(buf.zero_rows(0, 5).is_err(), "past the buffer");

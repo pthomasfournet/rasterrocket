@@ -544,8 +544,8 @@ pub fn page_size_pts_by_id(
     let media_obj = doc.get_inherited_page_attr(page_id, b"MediaBox");
     let crop_obj = doc.get_inherited_page_attr(page_id, b"CropBox");
 
-    let media_box = media_obj.as_ref().and_then(&parse_box);
-    let crop_box = crop_obj.as_ref().and_then(&parse_box);
+    let media_box = media_obj.as_ref().and_then(parse_box);
+    let crop_box = crop_obj.as_ref().and_then(parse_box);
 
     // ISO 32000-2 §14.11.2: CropBox shall be intersected with MediaBox to
     // determine the visible region.  If CropBox is absent, use MediaBox

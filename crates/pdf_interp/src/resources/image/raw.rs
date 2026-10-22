@@ -221,7 +221,7 @@ fn parse_decode(dict: &Dictionary, components: usize) -> Vec<(f64, f64)> {
         .0
         .iter()
         .take(components)
-        .map(|pair| (pair[0], pair[1]))
+        .map(|&pair| pair.into())
         .collect();
     if pairs
         .iter()

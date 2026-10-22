@@ -142,7 +142,7 @@ mod tests {
             return;
         };
         let out = dispatch_blelloch_scan(&b, &[]).expect("ok");
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]

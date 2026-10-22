@@ -159,7 +159,7 @@ mod tests {
         // length_bits == 0 is the source of truth; the bits slice is
         // ignored entirely.
         let out = pack_be_words(&[0xFF, 0xFF, 0xFF, 0xFF], 0);
-        assert!(out.words.is_empty());
+        assert_eq!(out.words.len(), 0);
         assert_eq!(out.length_bits, 0);
     }
 

@@ -284,10 +284,10 @@ mod tests {
         assert_eq!(out.dc_values.per_component.len(), 1);
         assert_eq!(out.dc_values.per_component[0].len(), 4);
         // Unstuffed bitstream is non-empty.
-        assert!(!out.unstuffed.is_empty());
+        assert_ne!(out.unstuffed.len(), 0);
         // No restart interval in the fixture, so no RST positions.
         assert_eq!(out.restart_interval, 0);
-        assert!(out.rst_positions.is_empty());
+        assert_eq!(out.rst_positions.len(), 0);
         // AC + DC codebooks for selector 0 (the only one referenced by
         // the scan) are built; selectors 1..=3 are absent on each side.
         assert!(out.ac_codebooks[0].is_some());

@@ -391,7 +391,7 @@ fn emit_aa_run<P: Pixel>(
     y: i32,
     shape: &[u8],
 ) {
-    debug_assert!(!shape.is_empty());
+    debug_assert_ne!(shape, []);
     // shape.len() ≤ bitmap.width ≤ i32::MAX in practice.
     #[expect(
         clippy::cast_possible_truncation,
