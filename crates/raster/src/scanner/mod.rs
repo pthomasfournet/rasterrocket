@@ -444,7 +444,8 @@ impl XPathScanner {
     /// winding count inside (`count & eo_mask != 0`: parity for even-odd,
     /// non-zero for non-zero winding) and closes one past the `x1` of the
     /// intersection that returns it outside; a row that ends inside extends
-    /// to `width`. Spans may overlap when intersections do.
+    /// to `width`, and that span is the row's last. Spans may overlap when
+    /// intersections do.
     fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
         let row = self.row(scan_y);
         let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
@@ -477,6 +478,9 @@ impl XPathScanner {
             let bx1 = usize::try_from(span_x1.min(width_i32)).unwrap_or(0);
             if bx0 < bx1 {
                 emit(bx0, bx1);
+            }
+            if i >= row.len() {
+                break;
             }
             xx = span_x1;
         }
@@ -813,5 +817,34 @@ mod tests {
         let (count, on_span) = XPathScanner::count_crossings(&row, 6);
         assert!(!on_span);
         assert_eq!(count, -1);
+    }
+
+    #[test]
+    fn row_ending_inside_extends_to_width_and_terminates() {
+        // Every AA sub-row of pixel row 0 holds one entering intersection at
+        // AA column 6 and nothing that leaves, so the winding never returns
+        // to zero.
+        let entry = Intersect {
+            x0: 6,
+            x1: 6,
+            count: 1,
+        };
+        let scanner = XPathScanner {
+            eo: false,
+            x_min: 6,
+            x_max: 6,
+            y_min: 0,
+            y_max: 3,
+            row_start: vec![0, 1, 2, 3, 4],
+            intersects: vec![entry; 4],
+        };
+        let mut aa_buf = AaBuf::new(4);
+        let (mut x0, mut x1) = (0, 3);
+        scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, 0);
+        assert_eq!(
+            (x0, x1),
+            (1, 3),
+            "span opens at AA column 6 (pixel 1) and runs to the buffer width"
+        );
     }
 }
