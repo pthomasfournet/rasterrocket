@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# compare.sh — pixel-accurate comparison of pdftoppm vs rrocket output.
+# compare.sh — pixel-accurate comparison of rrocket against reference renderers.
 #
 # Usage:
 #   compare.sh [OPTIONS] <PDF>
@@ -9,6 +9,7 @@
 #   -f PAGE         First page, 1-based (default: 1)
 #   -l PAGE         Last page, 1-based (default: all)
 #   -t THRESHOLD    Max allowed RMSE per page, 0-255 scale (default: 2.0)
+#   -R RENDERER     Reference renderer: pdftoppm (default) or oxide
 #   -v              Verbose: print per-page stats even when passing
 #   -o DIR          Write diff images to DIR (default: discarded)
 #   -n              Dry run: print commands without executing
@@ -16,7 +17,15 @@
 # Exit code: 0 = all pages within threshold; 1 = failures or errors.
 # Dry-run always exits 0.
 #
-# Requires: pdftoppm, rrocket (release build),
+# Two independent references are supported so that a disagreement can be
+# localised: when both references agree and rrocket differs, the defect is
+# ours. `pdftoppm` is invoked with -cropbox because rrocket renders the
+# CropBox; pdftoppm defaults to the MediaBox, and without the flag any page
+# whose CropBox is smaller than its MediaBox diffs on geometry alone.
+# The oxide reference is an independent Rust implementation; set
+# PDF_OXIDE_BIN to override discovery.
+#
+# Requires: pdftoppm (or pdf-oxide), rrocket (release build),
 #           ImageMagick (compare, identify, convert), bc
 
 set -euo pipefail
@@ -24,12 +33,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RASTER_BIN="${REPO_ROOT}/target/release/rrocket"
+OXIDE_BIN="${PDF_OXIDE_BIN:-pdf-oxide}"
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 DPI=150
 FIRST=1
 LAST=""
 THRESHOLD="2.0"
+REFERENCE="pdftoppm"
 VERBOSE=false
 OUT_DIR=""
 DRY_RUN=false
@@ -44,12 +55,13 @@ die() { echo "Error: $*" >&2; exit 1; }
 is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 is_pos_number()   { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 
-while getopts ":r:f:l:t:vo:nh" opt; do
+while getopts ":r:f:l:t:R:vo:nh" opt; do
     case $opt in
         r) DPI="$OPTARG" ;;
         f) FIRST="$OPTARG" ;;
         l) LAST="$OPTARG" ;;
         t) THRESHOLD="$OPTARG" ;;
+        R) REFERENCE="$OPTARG" ;;
         v) VERBOSE=true ;;
         o) OUT_DIR="$OPTARG" ;;
         n) DRY_RUN=true ;;
@@ -70,10 +82,19 @@ is_positive_int "$FIRST" || die "-f PAGE must be a positive integer, got: $FIRST
 [[ -z "$LAST" ]] || is_positive_int "$LAST" || die "-l PAGE must be a positive integer, got: $LAST"
 is_pos_number "$THRESHOLD" || die "-t THRESHOLD must be a non-negative number, got: $THRESHOLD"
 [[ -n "$LAST" && "$LAST" -lt "$FIRST" ]] && die "-l ($LAST) must be >= -f ($FIRST)"
+case "$REFERENCE" in
+    pdftoppm|oxide) ;;
+    *) die "-R must be pdftoppm or oxide, got: $REFERENCE" ;;
+esac
 
 # ── build argument lists early (dry-run needs them) ───────────────────────────
-ref_args=(-r "$DPI" -f "$FIRST")
+# -cropbox: rrocket renders the CropBox, pdftoppm defaults to the MediaBox.
+ref_args=(-cropbox -r "$DPI" -f "$FIRST")
 [[ -n "$LAST" ]] && ref_args+=(-l "$LAST")
+# pdf-oxide takes an inclusive page range rather than -f/-l, and rejects an
+# open-ended "N-". The end page is filled in from the document's page count
+# at render time; omitting --pages renders every page.
+oxide_args=(render --dpi "$DPI" --format png)
 new_args=(-r "$DPI" -f "$FIRST")
 [[ -n "$LAST" ]] && new_args+=(-l "$LAST")
 
@@ -81,20 +102,30 @@ new_args=(-r "$DPI" -f "$FIRST")
 if $DRY_RUN; then
     echo "DRY RUN — commands that would be executed:"
     echo ""
-    echo "  [render ref]  pdftoppm ${ref_args[*]} $PDF <OUT>/ref/page"
+    if [[ "$REFERENCE" == oxide ]]; then
+        echo "  [render ref]  $OXIDE_BIN ${oxide_args[*]} -o <OUT>/ref $PDF"
+    else
+        echo "  [render ref]  pdftoppm ${ref_args[*]} $PDF <OUT>/ref/page"
+    fi
     echo "  [render new]  $RASTER_BIN ${new_args[*]} $PDF <OUT>/new/page"
     echo "  [per page]    compare -metric RMSE <OUT>/ref/page-NNN.ppm \\"
     echo "                        <OUT>/new/page-NNN.ppm <DIFF>/page-NNN-diff.png"
     echo ""
-    echo "  Settings: DPI=${DPI}  first=${FIRST}  last=${LAST:-all}  threshold=${THRESHOLD}/255"
+    echo "  Settings: DPI=${DPI}  first=${FIRST}  last=${LAST:-all}  threshold=${THRESHOLD}/255  ref=${REFERENCE}"
     [[ -n "$OUT_DIR" ]] && echo "  Diff dir: ${OUT_DIR}"
     exit 0
 fi
 
 # ── dependency check ──────────────────────────────────────────────────────────
-for cmd in pdftoppm compare identify convert bc; do
+for cmd in compare identify convert bc; do
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found in PATH"
 done
+if [[ "$REFERENCE" == oxide ]]; then
+    command -v "$OXIDE_BIN" >/dev/null 2>&1 \
+        || die "$OXIDE_BIN not found in PATH — set PDF_OXIDE_BIN to its location"
+else
+    command -v pdftoppm >/dev/null 2>&1 || die "pdftoppm not found in PATH"
+fi
 [[ -x "$RASTER_BIN" ]] || {
     echo "Error: rrocket not built at $RASTER_BIN" >&2
     echo "  Run: cargo build --release -p rasterrocket-cli" >&2
@@ -111,8 +142,41 @@ NEW_DIR="${WORK_DIR}/new"
 DIFF_DIR="${OUT_DIR:-${WORK_DIR}/diff}"
 mkdir -p "$REF_DIR" "$NEW_DIR" "$DIFF_DIR"
 
-# ── render: reference pdftoppm ────────────────────────────────────────────────
-if ! pdftoppm "${ref_args[@]}" "$PDF" "${REF_DIR}/page" 2>"${WORK_DIR}/ref.log"; then
+# ── render: reference ─────────────────────────────────────────────────────────
+if [[ "$REFERENCE" == oxide ]]; then
+    # pdf-oxide names outputs "<stem>_<n>.png" with n 1-based over the whole
+    # document, and needs an explicit end page. Render into a staging dir and
+    # normalise to the page-NNN.ppm layout the diff loop below expects.
+    OX_RAW="${WORK_DIR}/ox_raw"
+    mkdir -p "$OX_RAW"
+    if [[ -n "$LAST" ]]; then
+        oxide_args+=(--pages "${FIRST}-${LAST}")
+    elif [[ "$FIRST" -ne 1 ]]; then
+        ox_count="$("$OXIDE_BIN" info --json "$PDF" 2>/dev/null \
+            | grep -Eo '"page_count"[[:space:]]*:[[:space:]]*[0-9]+' \
+            | grep -Eo '[0-9]+$')"
+        [[ -n "$ox_count" ]] || die "could not determine page count from $OXIDE_BIN info"
+        oxide_args+=(--pages "${FIRST}-${ox_count}")
+    fi
+
+    if ! "$OXIDE_BIN" "${oxide_args[@]}" -o "$OX_RAW" "$PDF" \
+            >"${WORK_DIR}/ref.log" 2>&1; then
+        echo "Error: $OXIDE_BIN failed — see log:" >&2
+        cat "${WORK_DIR}/ref.log" >&2
+        exit 1
+    fi
+    # The CLI reports some failures on stdout with exit status 0.
+    if grep -qi '^Error:' "${WORK_DIR}/ref.log"; then
+        echo "Error: $OXIDE_BIN reported an error:" >&2
+        cat "${WORK_DIR}/ref.log" >&2
+        exit 1
+    fi
+
+    # The page index is zero-padded to the width of the document's page count,
+    # so the width is not fixed. Converting is deferred until after rrocket has
+    # run, where the width is read back off its own output filenames.
+    OXIDE_RAW_DIR="$OX_RAW"
+elif ! pdftoppm "${ref_args[@]}" "$PDF" "${REF_DIR}/page" 2>"${WORK_DIR}/ref.log"; then
     echo "Error: pdftoppm failed — see log:" >&2
     cat "${WORK_DIR}/ref.log" >&2
     exit 1
@@ -123,6 +187,30 @@ if ! "$RASTER_BIN" "${new_args[@]}" "$PDF" "${NEW_DIR}/page" 2>"${WORK_DIR}/new.
     echo "Error: rrocket failed — see log:" >&2
     cat "${WORK_DIR}/new.log" >&2
     exit 1
+fi
+
+# ── normalise the oxide reference onto rrocket's filenames ────────────────────
+if [[ -n "${OXIDE_RAW_DIR:-}" ]]; then
+    shopt -s nullglob
+    new_names=("${NEW_DIR}"/page-*.ppm)
+    shopt -u nullglob
+    [[ ${#new_names[@]} -gt 0 ]] || die "rrocket produced no output pages for ${PDF}"
+    # Width of the zero-padded index rrocket chose, e.g. "page-001.ppm" -> 3.
+    pad_sample="$(basename "${new_names[0]}" .ppm)"
+    pad_width="${#pad_sample}"
+    pad_width=$((pad_width - 5))   # strip the "page-" prefix
+
+    shopt -s nullglob
+    for png in "${OXIDE_RAW_DIR}"/*.png; do
+        idx="$(basename "$png" .png)"
+        idx="${idx##*_}"
+        [[ "$idx" =~ ^[0-9]+$ ]] || die "unexpected $OXIDE_BIN output name: $png"
+        # Strip leading zeros so the value is not read as octal.
+        idx=$((10#$idx))
+        convert "$png" "$(printf '%s/page-%0*d.ppm' "$REF_DIR" "$pad_width" "$idx")" \
+            || die "convert failed on $OXIDE_BIN output: $png"
+    done
+    shopt -u nullglob
 fi
 
 # ── compare page by page ──────────────────────────────────────────────────────
@@ -137,9 +225,9 @@ ref_pages=("${REF_DIR}"/page-*.ppm)
 shopt -u nullglob
 
 if [[ ${#ref_pages[@]} -eq 0 ]]; then
-    echo "Error: pdftoppm produced no output pages for ${PDF}" >&2
+    echo "Error: reference renderer (${REFERENCE}) produced no output pages for ${PDF}" >&2
     if [[ -s "${WORK_DIR}/ref.log" ]]; then
-        echo "  pdftoppm stderr:" >&2
+        echo "  reference stderr:" >&2
         cat "${WORK_DIR}/ref.log" >&2
     fi
     exit 1
@@ -216,6 +304,7 @@ avg_rmse="0"
 echo ""
 echo "── Summary ──────────────────────────────────────────────────────────────"
 printf "  PDF:       %s\n" "$(basename "$PDF")"
+printf "  Reference: %s\n" "$REFERENCE"
 printf "  DPI:       %s\n" "$DPI"
 printf "  Pages:     %d total, %d passed, %d failed\n" "$total" "$pass" "$fail"
 printf "  Avg RMSE:  %.4f / 255\n" "$avg_rmse"
