@@ -25,7 +25,18 @@ impl ZipArchive {
 impl Archive for ZipArchive {
     fn entry_names(&mut self) -> Vec<String> {
         (0..self.inner.len())
-            .filter_map(|i| self.inner.by_index(i).ok().map(|f| f.name().to_owned()))
+            .filter_map(|i| {
+                let entry = self
+                    .inner
+                    .by_index(i)
+                    .map_err(|e| log::warn!("comic: zip entry #{i} unreadable, skipped: {e}"))
+                    .ok()?;
+                entry
+                    .name()
+                    .map(std::borrow::Cow::into_owned)
+                    .map_err(|e| log::warn!("comic: zip entry #{i} name undecodable, skipped: {e}"))
+                    .ok()
+            })
             .collect()
     }
 

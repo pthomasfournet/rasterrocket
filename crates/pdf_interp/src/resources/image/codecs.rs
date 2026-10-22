@@ -340,8 +340,8 @@ impl HayroCcittCollector {
     fn finish(mut self) -> Vec<u8> {
         // Pad any partial final row (malformed stream that ended mid-row).
         if self.col > 0 {
-            // self.col < self.width is the invariant maintained by push_pixel /
-            // push_pixel_chunk; subtraction is therefore safe.
+            // self.col <= self.width is the invariant maintained by
+            // push_pixels; subtraction is therefore safe.
             let remaining = usize::try_from(self.width - self.col).unwrap_or(0);
             self.out.extend(std::iter::repeat_n(0xFFu8, remaining));
         }
@@ -350,19 +350,9 @@ impl HayroCcittCollector {
 }
 
 impl hayro_ccitt::Decoder for HayroCcittCollector {
-    fn push_pixel(&mut self, white: bool) {
-        // Guard against over-wide rows from malformed bitstreams.
-        if self.col < self.width {
-            self.out.push(if white { 0xFF } else { 0x00 });
-            self.col += 1;
-        }
-    }
-
-    fn push_pixel_chunk(&mut self, white: bool, chunk_count: u32) {
-        // chunk_count × 8 pixels, all the same colour.
-        let total = chunk_count.saturating_mul(8);
-        let available = self.width.saturating_sub(self.col);
-        let n = total.min(available);
+    fn push_pixels(&mut self, white: bool, count: u32) {
+        // Clamp to the row width: a malformed bitstream can overrun it.
+        let n = count.min(self.width.saturating_sub(self.col));
         let byte = if white { 0xFFu8 } else { 0x00u8 };
         self.out.extend(std::iter::repeat_n(byte, n as usize));
         self.col += n;
@@ -1504,6 +1494,53 @@ impl Jbig2Decoder for Jbig2Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pack a string of `'0'`/`'1'` into bytes, MSB first, zero-padded.
+    fn pack_bits(bits: &str) -> Vec<u8> {
+        let bits: Vec<u8> = bits.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        bits.chunks(8)
+            .map(|c| {
+                c.iter()
+                    .enumerate()
+                    .fold(0u8, |acc, (i, &b)| acc | (u8::from(b == b'1') << (7 - i)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ccitt_g3_2d_decodes_one_dimensional_rows() {
+        // T.4 MR stream, K = 1, 8 × 2.  Each row is EOL + tag bit 1 (1-D coded):
+        //   row 0: white 8                   = 10011
+        //   row 1: white 2, black 4, white 2 = 0111 011 0111
+        // followed by RTC (six EOL + tag 1).
+        const EOL_1D: &str = "000000000001 1";
+        let stream = format!("{EOL_1D} 10011 {EOL_1D} 0111 011 0111 {}", EOL_1D.repeat(6));
+        let p = CcittParams {
+            capacity: 16,
+            width: 8,
+            height: 2,
+            is_mask: false,
+            black_is_1: false,
+        };
+        let img = decode_ccitt_g3_2d(&pack_bits(&stream), &p, 2, 1).expect("decodes");
+        assert_eq!(
+            img.data.as_cpu().expect("CCITT output is host-resident"),
+            [
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, //
+                0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+            ]
+        );
+    }
+
+    #[test]
+    fn ccitt_collector_clamps_a_run_that_overruns_the_row() {
+        let mut c = HayroCcittCollector::new(8, 4);
+        hayro_ccitt::Decoder::push_pixels(&mut c, false, 3);
+        hayro_ccitt::Decoder::push_pixels(&mut c, true, 20);
+        hayro_ccitt::Decoder::next_line(&mut c);
+        assert_eq!(c.rows_decoded(), 1);
+        assert_eq!(c.finish(), [0x00, 0x00, 0x00, 0xFF]);
+    }
 
     #[test]
     fn jbig2_collector_push_pixel_grayscale() {

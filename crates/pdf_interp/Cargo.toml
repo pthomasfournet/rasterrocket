@@ -40,7 +40,7 @@ encode = { package = "rasterrocket-encode", path = "../encode", version = "1.4" 
 pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.4" }
 log    = { workspace = true }
 fax = "0.3.0"
-hayro-ccitt = "0.3.0"
+hayro-ccitt = "0.4.0"
 zune-jpeg = "0.5.15"
 zune-core = "0.5.1"
 jpeg2k      = { version = "0.10.1", default-features = false, features = ["image", "openjpeg-sys"] }

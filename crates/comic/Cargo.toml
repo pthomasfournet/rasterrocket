@@ -20,7 +20,9 @@ log        = { workspace = true }
 
 # Archives — all pure-Rust, no system libs.
 zip          = { workspace = true }
-sevenz-rust2 = { workspace = true }
+# Decoders only (LZMA/LZMA2 are always built in); archives are opened
+# with an empty password, so AES support would never decrypt anything.
+sevenz-rust2 = { workspace = true, features = ["bzip2", "ppmd"] }
 tar          = { workspace = true }
 
 # Image decode — pure-Rust, no system libs.
@@ -31,6 +33,8 @@ tiff       = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `ArchiveWriter` builds the 7z fixtures.
+sevenz-rust2 = { workspace = true, features = ["compress"] }
 encode   = { package = "rasterrocket-encode", path = "../encode", version = "1.4" }
 
 [lints]

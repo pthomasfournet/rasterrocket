@@ -17,7 +17,7 @@ raster     = { package = "rasterrocket-render", path = "../raster" }
 color      = { package = "rasterrocket-color",  path = "../color" }
 encode     = { package = "rasterrocket-encode", path = "../encode" }
 pdf_raster = { package = "rasterrocket",        path = "../pdf_raster" }
-vello_cpu  = "0.2.0"
+vello_cpu  = "0.3.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }

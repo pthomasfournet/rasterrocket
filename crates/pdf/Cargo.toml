@@ -13,7 +13,9 @@ keywords    = ["pdf", "parser", "mmap", "zero-copy", "document"]
 categories  = ["parser-implementations", "encoding"]
 
 [dependencies]
-flate2      = { version = "1" }
+# zlib-rs pinned so the fallback inflater, whose partial output on corrupt
+# streams is backend-dependent, is the same in every build.
+flate2      = { version = "1", features = ["zlib-rs"] }
 libdeflater = { version = "1", optional = true }
 memmap2     = { version = "0.9" }
 weezl       = { version = "0.2" }

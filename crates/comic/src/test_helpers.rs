@@ -16,7 +16,7 @@ pub(crate) fn make_cbz(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
     {
         let mut w = ::zip::ZipWriter::new(&mut buf);
-        let opts: ::zip::write::FileOptions<'_, ()> = ::zip::write::FileOptions::default();
+        let opts = ::zip::write::SimpleFileOptions::default();
         for (name, data) in entries {
             w.start_file(*name, opts).unwrap();
             w.write_all(data).unwrap();

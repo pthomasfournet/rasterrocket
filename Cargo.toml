@@ -30,17 +30,18 @@ bytemuck   = { version = ">=1.21, <2", features = ["derive"] }
 bitflags   = { version = ">=2.0,  <3" }
 cc         = { version = ">=1.0,  <2" }
 tempfile   = { version = ">=3.0,  <4" }
-log        = { version = ">=0.4,  <1" }
-env_logger = { version = ">=0.11, <1" }
+log        = { version = "0.4" }
+env_logger = { version = "0.11" }
 # Phase 9 device-resident image cache (gpu/cache feature).
 blake3     = { version = ">=1.5,  <2" }
 dashmap    = { version = ">=6.0,  <7" }
 # Comic-archive (.cbz/.cb7/.cbt) input.
-zip          = { version = ">=2.0, <9", default-features = false, features = ["deflate"] }
-sevenz-rust2 = { version = ">=0.13, <1" }
-tar          = { version = ">=0.4, <1" }
-image-webp   = { version = ">=0.2, <1" }
-tiff         = { version = ">=0.9, <1" }
+# Read-only use: the flate2/zlib-rs inflater, not the zopfli compressor that `deflate` adds.
+zip          = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+sevenz-rust2 = { version = "0.24", default-features = false }
+tar          = { version = "0.4" }
+image-webp   = { version = "0.2" }
+tiff         = { version = "0.11" }
 
 [workspace.lints.rust]
 unsafe_code          = "deny"
