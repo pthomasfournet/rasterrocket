@@ -6,9 +6,13 @@
 //! the counts are composited through the CPU pipeline, so the final page
 //! bitmap is the only meaningful check.
 //!
+//! The device fill path is dormant by default (`GPU_AA_FILL_THRESHOLD` is
+//! `usize::MAX`), so these tests require `PDF_RASTER_AA_FILL_THRESHOLD=0`
+//! and fail without it rather than compare the CPU render with itself.
+//!
 //! Run with:
-//!   `cargo test -p rasterrocket --features gpu-aa,gpu-validation --test gpu_aa_render_parity`
-//!   `cargo test -p rasterrocket --features vulkan --test gpu_aa_render_parity`
+//!   `PDF_RASTER_AA_FILL_THRESHOLD=0 cargo test -p rasterrocket --features gpu-aa,gpu-validation --test gpu_aa_render_parity`
+//!   `PDF_RASTER_AA_FILL_THRESHOLD=0 cargo test -p rasterrocket --features vulkan --test gpu_aa_render_parity`
 
 #![cfg(any(
     all(feature = "gpu-aa", feature = "gpu-validation"),
@@ -58,8 +62,19 @@ q 200 150 m 260 200 l 200 250 l 140 200 l h W n 0.5 0 0.5 rg 120 140 160 120 re 
     assemble_pdf(&objects)
 }
 
+/// Panic unless the device fill path is enabled for this process.
+fn require_device_fills() {
+    assert_eq!(
+        std::env::var("PDF_RASTER_AA_FILL_THRESHOLD").as_deref(),
+        Ok("0"),
+        "set PDF_RASTER_AA_FILL_THRESHOLD=0: the GPU fill path is dormant by default, \
+         and without the override both renders run on the CPU"
+    );
+}
+
 /// Render the synthetic page under `policy` and against the CPU.
 fn assert_synthetic_page_identical(policy: BackendPolicy) {
+    require_device_fills();
     let pdf = fixture_pdf();
     let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
     assert!(
@@ -73,6 +88,7 @@ fn assert_synthetic_page_identical(policy: BackendPolicy) {
 /// Render `pages` of a corpus fixture under `policy` and against the CPU.
 /// Skipped when the fixture is absent.
 fn assert_corpus_pages_identical(fixture: &str, pages: &[u32], policy: BackendPolicy) {
+    require_device_fills();
     let Some(path) = corpus_fixture(fixture) else {
         return;
     };

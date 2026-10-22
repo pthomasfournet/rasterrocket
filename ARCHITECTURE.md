@@ -239,6 +239,7 @@ CUDA and `renderer/page/vk_ops.rs` for Vulkan)
 - JPXDecode: call `gpu::NvJpeg2kDecoder::decode()` similarly
 - CMYK→RGB: call `gpu::icc_cmyk_to_rgb()` if pixels ≥ `GPU_ICC_CLUT_THRESHOLD`
 - AA fill: `gpu::GpuCtx::aa_fill()` if the bbox area ≥ `GPU_AA_FILL_THRESHOLD`
+  (dormant: `usize::MAX`; override with `PDF_RASTER_AA_FILL_THRESHOLD`)
   (solid-colour fills under a rectangular clip only).  The device evaluates
   the CPU scanner's intersection table with the CPU's span walk and the
   counts go through the CPU compositing pipeline, so the output is
@@ -306,7 +307,7 @@ kernels; the remaining three — `blelloch_scan`, `idct_color`, and
 |---|---|---|---|---|
 | `composite_rgba8` | composite_rgba8.cu | composite_rgba8.slang | Porter-Duff source-over | no production caller † |
 | `apply_soft_mask` | apply_soft_mask.cu | apply_soft_mask.slang | Per-pixel alpha multiply | no production caller † |
-| `aa_fill` | aa_fill.cu | aa_fill.slang | 4× scanline-AA sub-sample counts from the CPU scanner's intersection table (byte-identical to the CPU fill) | 256 px |
+| `aa_fill` | aa_fill.cu | aa_fill.slang | 4× scanline-AA sub-sample counts from the CPU scanner's intersection table (byte-identical to the CPU fill) | dormant (`usize::MAX`) |
 | `icc_clut` | icc_clut.cu | icc_clut.slang | CMYK→RGB via 4D quadrilinear CLUT | 500K px |
 | `icc_clut` matrix | icc_clut.cu | icc_clut.slang | CMYK→RGB via matrix (always CPU) | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image source-over composite (Phase 9) | always |

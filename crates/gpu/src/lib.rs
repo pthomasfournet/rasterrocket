@@ -103,10 +103,13 @@ pub const GPU_SOFTMASK_THRESHOLD: usize = 500_000;
 /// GPU scanline-AA kernel rather than composited from the CPU's own
 /// coverage walk.
 ///
-/// One 16×16 block is the smallest launch the kernel makes, so 256 px is the
-/// hardware-aligned floor; `threshold_bench` measures the kernel against its
-/// host twin for calibration above that.
-pub const GPU_AA_FILL_THRESHOLD: usize = 256;
+/// `usize::MAX`: the path is dormant.  The kernel replaces only the span walk
+/// and sub-sample count, which the CPU performs as bit-run fills and SIMD
+/// popcounts; scan conversion and compositing stay on the CPU either way, so
+/// the table upload, launch and readback are pure overhead and end-to-end
+/// renders are slower on the GPU at every fill size measured.  The renderer
+/// reads an override from `PDF_RASTER_AA_FILL_THRESHOLD`.
+pub const GPU_AA_FILL_THRESHOLD: usize = usize::MAX;
 /// Bytes per pixel for the RGBA8 pixel format the renderer composites in.
 ///
 /// Lives at the crate root rather than under `cache::` because every

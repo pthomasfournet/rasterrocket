@@ -51,6 +51,9 @@ jobs:
       - name: Test rasterrocket-interp (resource decoding, CPU paths)
         run: cargo test -p rasterrocket-interp --lib
 
+      - name: Test rasterrocket-interp (GPU fill host twin vs CPU fill, gpu-aa; no device)
+        run: cargo test -p rasterrocket-interp --features gpu-aa --lib -- gpu_ops
+
       - name: Test rasterrocket-render (full unit suite — SIMD dispatch, fill, blend, popcnt)
         run: cargo test -p rasterrocket-render --lib
 

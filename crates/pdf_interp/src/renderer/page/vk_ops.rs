@@ -20,7 +20,7 @@ use gpu::backend::params::AaFillParams;
 use gpu::backend::vulkan::VulkanBackend;
 
 use super::PageRenderer;
-use super::gpu_ops::{gpu_coverage_to_bitmap, prepare_aa_fill};
+use super::gpu_ops::{aa_fill_threshold, gpu_coverage_to_bitmap, prepare_aa_fill};
 
 type DeviceBuffer = <VulkanBackend as GpuBackend>::DeviceBuffer;
 
@@ -127,6 +127,7 @@ pub(super) fn try_vk_aa_fill(
         path,
         flatness,
         even_odd,
+        aa_fill_threshold(),
     ) else {
         return false;
     };

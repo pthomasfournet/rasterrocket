@@ -48,13 +48,28 @@ impl GpuAaFill {
     }
 }
 
+/// Effective GPU AA-fill dispatch threshold: [`gpu::GPU_AA_FILL_THRESHOLD`]
+/// unless `PDF_RASTER_AA_FILL_THRESHOLD` holds a decimal pixel area (`0` =
+/// every eligible fill on the device).  Read once, on first use.
+#[cfg(feature = "gpu-aa")]
+pub(super) fn aa_fill_threshold() -> usize {
+    use std::sync::OnceLock;
+    static THRESHOLD: OnceLock<usize> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("PDF_RASTER_AA_FILL_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(gpu::GPU_AA_FILL_THRESHOLD)
+    })
+}
+
 /// Build the device input for filling `path`, or `None` when the fill must
 /// stay on the CPU.
 ///
 /// `None` is returned when:
 /// - the clip carries a path clip (the CPU masks those per sub-sample);
 /// - the path is empty, scan-converts to nothing, or lies outside the bitmap;
-/// - the bounding-box area is below [`gpu::GPU_AA_FILL_THRESHOLD`];
+/// - the bounding-box area is below `threshold`;
 /// - some AA row's winding does not return to zero, in which case the
 ///   scanner's x bounds no longer bound the painted range.
 ///
@@ -70,9 +85,8 @@ pub(super) fn prepare_aa_fill(
     path: &raster::path::Path,
     flatness: f64,
     even_odd: bool,
+    threshold: usize,
 ) -> Option<GpuAaFill> {
-    use gpu::GPU_AA_FILL_THRESHOLD;
-
     if !clip.is_rect() {
         return None;
     }
@@ -94,7 +108,7 @@ pub(super) fn prepare_aa_fill(
         width: (x1 - x0 + 1) as u32,
         height: (y1 - y0 + 1) as u32,
     };
-    if rect.pixel_count()? < GPU_AA_FILL_THRESHOLD {
+    if rect.pixel_count()? < threshold {
         return None;
     }
 
@@ -212,6 +226,7 @@ pub(super) fn try_gpu_aa_fill(
         path,
         flatness,
         even_odd,
+        aa_fill_threshold(),
     ) else {
         return false;
     };
@@ -240,6 +255,8 @@ mod tests {
 
     const W: u32 = 96;
     const H: u32 = 80;
+    /// Dispatch threshold the eligibility tests run under: one 16×16 block.
+    const THRESHOLD: usize = 256;
 
     fn pipe(a_input: u8) -> PipeState<'static> {
         PipeState {
@@ -328,7 +345,7 @@ mod tests {
         let colour = [122u8, 117, 114];
         let src = PipeSrc::Solid(&colour);
 
-        let fill = prepare_aa_fill(clip, W, H, path, 0.1, even_odd)
+        let fill = prepare_aa_fill(clip, W, H, path, 0.1, even_odd, THRESHOLD)
             .unwrap_or_else(|| panic!("{name}: fill must be device-eligible"));
         let mut counts = gpu::aa_fill_cpu(&fill.table(), fill.rect, fill.aa_width, even_odd);
         let mut device = white_bitmap();
@@ -406,8 +423,30 @@ mod tests {
         assert!(!clip.is_rect(), "diamond must become a path clip");
 
         assert!(
-            prepare_aa_fill(&clip, W, H, &circle(), 0.1, false).is_none(),
+            prepare_aa_fill(&clip, W, H, &circle(), 0.1, false, THRESHOLD).is_none(),
             "a fill under a path clip must not be dispatched to the device"
+        );
+    }
+
+    #[test]
+    fn default_threshold_keeps_every_fill_on_the_cpu() {
+        let page = rect(0.5, 0.5, 95.5, 79.5);
+        assert!(
+            prepare_aa_fill(&page_clip(), W, H, &page, 0.1, false, THRESHOLD).is_some(),
+            "a page-sized fill is device-eligible above the test threshold"
+        );
+        assert!(
+            prepare_aa_fill(
+                &page_clip(),
+                W,
+                H,
+                &page,
+                0.1,
+                false,
+                gpu::GPU_AA_FILL_THRESHOLD
+            )
+            .is_none(),
+            "the shipped threshold leaves the device path dormant"
         );
     }
 
@@ -415,16 +454,25 @@ mod tests {
     fn small_and_empty_fills_stay_on_the_cpu() {
         let tiny = rect(10.0, 10.0, 20.0, 20.0);
         assert!(
-            prepare_aa_fill(&page_clip(), W, H, &tiny, 0.1, false).is_none(),
+            prepare_aa_fill(&page_clip(), W, H, &tiny, 0.1, false, THRESHOLD).is_none(),
             "a fill below the dispatch threshold stays on the CPU"
         );
         let outside = rect(200.0, 200.0, 300.0, 300.0);
         assert!(
-            prepare_aa_fill(&page_clip(), W, H, &outside, 0.1, false).is_none(),
+            prepare_aa_fill(&page_clip(), W, H, &outside, 0.1, false, THRESHOLD).is_none(),
             "a fill outside the bitmap has nothing to dispatch"
         );
         assert!(
-            prepare_aa_fill(&page_clip(), W, H, &PathBuilder::new().build(), 0.1, false).is_none(),
+            prepare_aa_fill(
+                &page_clip(),
+                W,
+                H,
+                &PathBuilder::new().build(),
+                0.1,
+                false,
+                THRESHOLD
+            )
+            .is_none(),
             "an empty path has nothing to dispatch"
         );
     }

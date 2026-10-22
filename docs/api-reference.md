@@ -645,7 +645,7 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 |---|---|---|
 | `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Falls back to CPU zune-jpeg below 512×512 px. |
 | `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to CPU OpenJPEG below 512×512 px or for sub-sampled chroma. |
-| `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Falls back to the CPU below 256 px, under path clips, and for pattern fills. |
+| `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Dormant by default: the CPU fill is faster at every size measured, so dispatch is off unless `PDF_RASTER_AA_FILL_THRESHOLD` sets a pixel-area threshold. Path clips and pattern fills always stay on the CPU. |
 | `gpu-icc` | CUDA 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
 | `cache` | CUDA 13 | Phase 9 device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
@@ -662,7 +662,7 @@ GPU initialisation failures print a warning to stderr and fall back to CPU — t
 | nvJPEG (DCTDecode) | **disabled** (`u32::MAX`) | `GPU_JPEG_THRESHOLD_PX` |
 | GPU parallel Huffman (DCTDecode) | **dormant** (`u32::MAX`) | `GPU_JPEG_HUFFMAN_THRESHOLD_PX` |
 | nvJPEG2000 (JPXDecode) | ≥ 262 144 px (area) | `GPU_JPEG2K_THRESHOLD_PX` |
-| GPU AA fill | ≥ 256 px (bounding-box area) | `GPU_AA_FILL_THRESHOLD` |
+| GPU AA fill | **dormant** (`usize::MAX`) | `GPU_AA_FILL_THRESHOLD` |
 | GPU ICC CLUT | ≥ 500 000 px (area) | `GPU_ICC_CLUT_THRESHOLD` |
 
 Both JPEG thresholds are `u32::MAX` **by design**, so JPEG decode runs on the
@@ -675,4 +675,9 @@ threshold.
 Fill dispatch order: GPU AA fill → CPU scanline AA.  The GPU path evaluates
 the CPU rasteriser's own 4× scanline intersection table and composites through
 the CPU pipeline, so a GPU render is byte-identical to the CPU render; it is
-taken only for solid-colour fills under a rectangular clip.
+taken only for solid-colour fills under a rectangular clip.  `GPU_AA_FILL_THRESHOLD`
+is `usize::MAX` for the same reason as the JPEG thresholds: the kernel replaces
+only the span walk and sub-sample count, so the upload and readback cost more
+than the CPU work they save, and CPU renders are faster at every fill size
+measured.  Set `PDF_RASTER_AA_FILL_THRESHOLD=0` to force eligible fills onto the
+device, e.g. for the parity tests.

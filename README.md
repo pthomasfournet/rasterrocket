@@ -253,7 +253,7 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 |---|---|---|
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
-| `gpu-aa` | GPU evaluation of the anti-aliased fill coverage (byte-identical to the CPU fill) | CUDA |
+| `gpu-aa` | GPU evaluation of the anti-aliased fill coverage (byte-identical to the CPU fill; dormant by default, see `PDF_RASTER_AA_FILL_THRESHOLD`) | CUDA |
 | `gpu-icc` | GPU CMYK→RGB ICC transform | CUDA |
 | `gpu-deskew` | GPU deskew rotation via NPP | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA |

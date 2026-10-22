@@ -12,7 +12,7 @@
 //!
 //! Run:
 //! ```text
-//! CUDA_ARCH=sm_120 cargo build --release -p gpu --bin threshold_bench
+//! CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-gpu --bin threshold_bench
 //! target/release/threshold_bench [--iters N] [--warmup N]
 //! ```
 //!
@@ -151,14 +151,12 @@ fn rect_table(w: u32, h: u32) -> (Vec<ScanIntersect>, Vec<u32>) {
 // ── AA fill benchmark ───────────────────────────────────────────────────────
 
 fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
-    println!("\n══ aa_fill: GPU scanline walk vs host twin ══");
+    println!("\n══ aa_fill: GPU scanline walk vs host twin (informational) ══");
     println!(
         "{:>10}  {:>12}  {:>12}  {:>8}  winner",
         "pixels", "cpu_ns", "gpu_ns", "ratio"
     );
     println!("{}", "─".repeat(60));
-
-    let mut crossover: Option<usize> = None;
 
     for &n in &sweep_sizes() {
         let (w, h) = dims(n);
@@ -203,20 +201,15 @@ fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
             ratio,
             winner
         );
-
-        if crossover.is_none() && gpu_ns < cpu_ns {
-            crossover = Some(n);
-        }
     }
 
     println!();
-    match crossover {
-        Some(px) => println!(
-            "  → Recommended GPU_AA_FILL_THRESHOLD: {px} px  (current: {})",
-            rasterrocket_gpu::GPU_AA_FILL_THRESHOLD
-        ),
-        None => println!("  → GPU never faster in this sweep — keep CPU or raise threshold"),
-    }
+    println!(
+        "  → The host twin is the per-pixel parity oracle, not the production CPU fill \
+         (bit-run spans + SIMD popcount), so this table cannot calibrate \
+         GPU_AA_FILL_THRESHOLD.  Calibrate end to end: render with \
+         PDF_RASTER_AA_FILL_THRESHOLD=<px> under --backend cuda against --backend cpu."
+    );
 }
 
 // ── ICC CMYK→RGB benchmark ──────────────────────────────────────────────────

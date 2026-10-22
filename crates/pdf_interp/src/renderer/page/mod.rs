@@ -643,7 +643,8 @@ impl<'doc> PageRenderer<'doc> {
     /// Attach a GPU context for antialiased fill dispatch.
     ///
     /// When set, solid-colour fills under a rectangular clip whose pixel
-    /// bounding-box area reaches [`gpu::GPU_AA_FILL_THRESHOLD`] have their
+    /// bounding-box area reaches the dispatch threshold (dormant by default;
+    /// see [`gpu::GPU_AA_FILL_THRESHOLD`]) have their
     /// coverage evaluated on the GPU.  The device walks the same 4× scanline
     /// intersection table the CPU fill builds and the counts are composited
     /// through the CPU pipeline, so the rendered bytes are identical to the

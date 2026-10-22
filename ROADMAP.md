@@ -42,7 +42,13 @@ stay on the CPU. Guarded at three levels: the host twin against the CPU fill
 in `pdf_interp` (CPU-only, runs in CI), CUDA and Vulkan against the twin and
 each other in `crates/gpu/tests/aa_fill_parity.rs`, and end-to-end page
 renders in `crates/pdf_raster/tests/gpu_aa_render_parity.rs` (synthetic page
-plus corpus-02/-07/-08).
+plus corpus-02/-07/-08), all verified on CUDA and Vulkan on the RTX 5070. The
+path ships **dormant** (`GPU_AA_FILL_THRESHOLD = usize::MAX`): with scan
+conversion and compositing on the CPU either way, the device only replaces the
+span walk and popcount, and end-to-end renders were slower on CUDA at every
+size measured (4 000 large fills at 300 dpi: 0.31 s GPU vs 0.10 s CPU, net of
+context init). `PDF_RASTER_AA_FILL_THRESHOLD=0` enables it; the e2e parity
+tests require that override and fail without it.
 
 **Dependency sweep (July 2026).** Every workspace dependency brought current;
 `cargo outdated` reports a clean tree. Five upgrades needed API migration:
