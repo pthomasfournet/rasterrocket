@@ -25,7 +25,58 @@ Phase 5 is complete. The API exists and is integrated.
 
 ---
 
-## Unreleased
+## Known issues
+
+**Some pages are dropped instead of rendered.** `tests/fixtures/corpus-05-academic-book.pdf`
+renders 594 of 601 pages; `pdftoppm` renders all of them. Two causes, both of
+which fail the whole page (`rrocket` exits 1) rather than the one image:
+
+- CMYK JPEGs stored as YCCK (Adobe APP14 transform 2) fail to decode
+  (`Unimplemented colorspace mapping from YCCK to CMYK`): pages 416, 417, 419,
+  421, 423, 435.
+- An image whose `/Filter` is an indirect reference (`/Filter 2354 0 R`) is
+  treated as unfiltered, so its JPEG bytes are read as raw samples: page 437.
+
+Separately, a marked-content dictionary written with no space before its
+operator (`/Part <</MCID 0 >>BDC`, valid syntax) is mis-tokenized. It logs an
+"unsupported content operator" warning per page, with no effect on pixels.
+
+**`pdf_bridge` cannot build unattended.** Its build script hard-
+requires `POPPLER_SRC` (a poppler *source* tree, not just the system package),
+so any `cargo build/check/test --workspace` fails on a clean machine. CI never
+hits this because every job targets specific crates with `-p`. The crate has
+not changed since v1.2.0 and exists only as a pixel-diff reference
+baseline. It should either gain a feature gate that no-ops the build script
+when `POPPLER_SRC` is absent, or move to `exclude` in the workspace manifest
+alongside `fuzz` and `qa`.
+
+---
+
+## Release history
+
+### v1.4.0 (October 2026)
+
+**Fidelity release.** No public API change. 26 commits since v1.3.0, most of
+them fixing pages that rendered visibly wrong.
+
+**Path clips now clip.** Three paths ignored or mangled the graphics-state
+clip:
+
+- **Antialiased fills under a non-rectangular clip** painted the clip's full
+  width on every row they touched. A 10 × 10 square inside a diamond clip
+  painted 929 pixels across the diamond instead of 100, and with nested path
+  clips only the last one survived. The clip now intersects the fill's
+  coverage per sub-sample.
+- **Image XObjects, inline images and stencil masks** ignored the clip
+  entirely, so a `W n` before `Do` had no effect. On a ClearScan witness whose
+  background image is black under the text block and clipped to the margins,
+  six pages rendered 64–77% black against pdftoppm's 6–9%. They now land within
+  0.1–0.4 points of it. Clipped image edges are hard, not antialiased.
+- **Separation images** were blitted as DeviceGray without evaluating the
+  tint transform, so every `[/Separation /Black /DeviceCMYK fn]` image
+  rendered as its negative (a page that is 90% paper rendered 80% black).
+  Single-colorant DeviceN is handled the same way. Multi-colorant DeviceN is
+  unchanged.
 
 **GPU fills are now byte-identical to the CPU rasteriser.** The `gpu-aa`
 tile-fill (analytical trapezoid area) and AA-fill (64 Halton-jittered samples)
@@ -50,62 +101,35 @@ size measured (4 000 large fills at 300 dpi: 0.31 s GPU vs 0.10 s CPU, net of
 context init). `PDF_RASTER_AA_FILL_THRESHOLD=0` enables it; the e2e parity
 tests require that override and fail without it.
 
-**Dependency sweep (July 2026).** Every workspace dependency brought current;
-`cargo outdated` reports a clean tree. Five upgrades needed API migration:
+**A latent hang in the AA span walk is closed.** The scanline walk looped
+forever on a row whose winding count never returned to zero. No PDF input
+reaches it today (the scanner balances every row of a finite closed path),
+but the GPU kernel's parity tests did, and both the CPU walk and the device
+kernel now stop after a span that runs to the row's end.
 
-- **png 0.17 → 0.18** — `FilterType`/`AdaptiveFilterType` merged into `Filter`;
-  `Compression` variants renamed and re-tuned; `Reader::output_buffer_size`
-  now returns `Option`; `Decoder` requires `Read + Seek`. Collapsed a duplicate
-  png build (`image` and `vello_common` were already on 0.18) and dropped
-  `bitflags` 1.x from the graph entirely.
-- **fax 0.2 → 0.3** — transition/width representation widened `u16` → `u32`,
-  which removed the `u16::try_from` guards that had been silently dropping any
-  CCITT image larger than 65535 px in either dimension.
-- **weezl 0.1 → 0.2**, **quick_cache 0.6 → 0.7** — drop-in; weezl carries
-  three fixes on the untrusted LZW path (a reachable panic, a silent
-  data-loss bug, and dictionary clobbering when a stream omits an early
-  clear code).
-- **vello_cpu 0.0.7 → 0.0.9** — `render_to_pixmap` now takes a `Resources`.
-  Benchmark baseline re-measured rather than assumed: unchanged within noise.
+**JPEG GPU decoding (dormant path).** Phase 2 propagation now runs to a
+fixpoint inside each workgroup on-device, so the host loop only carries state
+across workgroup boundaries. On a 2.9 MB Q90 JPEG it went from 23 431 passes /
+5.95 s to 2 passes / 248 ms. Multi-component streams skip the GPU attempt
+entirely, because they cannot beat the CPU walk.
 
-**PNG row filter chosen from measurement.** The encoder hardcoded Paeth on a
-rationale that did not survive contact with real output. Measured across 21
-rendered pages, `Up` is 8.0% smaller than Paeth on scanned content but only
-1.0% smaller on text/vector, while `Adaptive` is 0.9% and 3.1% respectively.
-Adaptive is the only filter that never loses to Paeth on either content type,
-so it is now the default (−1.17% end-to-end, ~2% more encode time).
+**CPU performance.** Pre-VBMI SIMD idioms are replaced on four hot paths, each
+measured against the auto-vectorised scalar form first: AA gamma mapping via
+`vpermb` (n=2500: 924 → 12 ns), an AVX-512 opaque AA composite (11–12.5
+px/ns), a VBMI CMYK→RGB kernel replacing two kernels that lost to scalar, and
+an AVX-512 deskew rotate row kernel.
 
-**CUDA 12 floor dropped.** The reference testbench (i7-8700K + RTX 2080 SUPER)
-that forced the `cuda-12080` cudarc pin is retired, so the pin moved to
-`cuda-13030`. Docs no longer promise CUDA 12.x driver compatibility.
-
-**Glyph cache actually consulted.** `GlyphCache` had been dead code — built per
-page, never read, so every occurrence of a character was re-rasterized through
-FreeType (98.7–98.9% of calls were redundant). `show_text` now goes through
-`FontFace::make_glyph*_cached`, and `GlyphRecord` holds a shared
-`Arc<GlyphBitmap>` instead of an owned copy of the pixels.
-
-Keying is safe without extending `GlyphKey`: `FaceId` is allocated per
-`(font resource, 2×2 Trm)`, so size, skew, and rotation already separate faces.
-Scope stays per page because `FontEngine` — and its `FaceId` counter — is
-per page; widening it requires document-wide `FaceId`s first.
-
-Single-threaded, 30 pages at 300 dpi: −9.5% to −24.5% wall time; −6.5% to
-−12.5% multi-threaded, where pages already parallelise. Hit rate 80.5–95.1%.
-Output is byte-for-byte identical across 127 pages.
-
-**Known issue — `pdf_bridge` cannot build unattended.** Its build script hard-
-requires `POPPLER_SRC` (a poppler *source* tree, not just the system package),
-so any `cargo build/check/test --workspace` fails on a clean machine. CI never
-hits this because every job targets specific crates with `-p`. The crate has
-not been touched since v1.2.0 and exists only as a pixel-diff reference
-baseline. It should either gain a feature gate that no-ops the build script
-when `POPPLER_SRC` is absent, or move to `exclude` in the workspace manifest
-alongside `fuzz` and `qa`.
-
----
-
-## Release history
+**Diagnostics and tooling.**
+- The chosen Vulkan device and the `Auto` backend outcome are logged at
+  debug level.
+- `tests/compare/compare.sh -R oxide` adds an independent second reference
+  renderer, and the pdftoppm reference now renders the CropBox (`-cropbox`)
+  to match rrocket.
+- CI runs the parallel-Huffman tests, their clippy line, and the GPU fill's
+  CPU-side parity tests.
+- The tree is clean under Rust 1.99's new lints. The text advance keeps
+  unfused arithmetic, because `mul_add` moved glyphs by a pixel on 65 pages
+  of one fixture.
 
 ### v1.3.0 (September 2026)
 
@@ -154,6 +178,53 @@ advertised as active when both thresholds are `u32::MAX` by design, a
 a JavaScript-handling contradiction between two documents, and install
 instructions pointing at abandoned crates.io packages. All corrected against
 the code.
+
+**July 2026 work, also in v1.3.0.** The following were listed as unreleased
+until v1.4.0, but every commit predates the v1.3.0 tag.
+
+**Dependency sweep (July 2026).** Every workspace dependency brought current;
+`cargo outdated` reports a clean tree. Five upgrades needed API migration:
+
+- **png 0.17 → 0.18** — `FilterType`/`AdaptiveFilterType` merged into `Filter`;
+  `Compression` variants renamed and re-tuned; `Reader::output_buffer_size`
+  now returns `Option`; `Decoder` requires `Read + Seek`. Collapsed a duplicate
+  png build (`image` and `vello_common` were already on 0.18) and dropped
+  `bitflags` 1.x from the graph entirely.
+- **fax 0.2 → 0.3** — transition/width representation widened `u16` → `u32`,
+  which removed the `u16::try_from` guards that had been silently dropping any
+  CCITT image larger than 65535 px in either dimension.
+- **weezl 0.1 → 0.2**, **quick_cache 0.6 → 0.7** — drop-in; weezl carries
+  three fixes on the untrusted LZW path (a reachable panic, a silent
+  data-loss bug, and dictionary clobbering when a stream omits an early
+  clear code).
+- **vello_cpu 0.0.7 → 0.0.9** — `render_to_pixmap` now takes a `Resources`.
+  Benchmark baseline re-measured rather than assumed: unchanged within noise.
+
+**PNG row filter chosen from measurement.** The encoder hardcoded Paeth on a
+rationale that did not survive contact with real output. Measured across 21
+rendered pages, `Up` is 8.0% smaller than Paeth on scanned content but only
+1.0% smaller on text/vector, while `Adaptive` is 0.9% and 3.1% respectively.
+Adaptive is the only filter that never loses to Paeth on either content type,
+so it is now the default (−1.17% end-to-end, ~2% more encode time).
+
+**CUDA 12 floor dropped.** The reference testbench (i7-8700K + RTX 2080 SUPER)
+that forced the `cuda-12080` cudarc pin is retired, so the pin moved to
+`cuda-13030`. Docs no longer promise CUDA 12.x driver compatibility.
+
+**Glyph cache actually consulted.** `GlyphCache` had been dead code — built per
+page, never read, so every occurrence of a character was re-rasterized through
+FreeType (98.7–98.9% of calls were redundant). `show_text` now goes through
+`FontFace::make_glyph*_cached`, and `GlyphRecord` holds a shared
+`Arc<GlyphBitmap>` instead of an owned copy of the pixels.
+
+Keying is safe without extending `GlyphKey`: `FaceId` is allocated per
+`(font resource, 2×2 Trm)`, so size, skew, and rotation already separate faces.
+Scope stays per page because `FontEngine` — and its `FaceId` counter — is
+per page; widening it requires document-wide `FaceId`s first.
+
+Single-threaded, 30 pages at 300 dpi: −9.5% to −24.5% wall time; −6.5% to
+−12.5% multi-threaded, where pages already parallelise. Hit rate 80.5–95.1%.
+Output is byte-for-byte identical across 127 pages.
 
 ### v1.2.0 (June 2026)
 
@@ -1692,16 +1763,10 @@ engineering is in flight. What remains open:
 - **Open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
   propagation pass-complexity, unleveraged CPU SIMD opportunities, and
   unleveraged CUDA opportunities. The two "unleveraged" reports are
-  opportunity inventories with several items already closed in-file. (Two
-  2026-09-15 render divergences are fixed: the `cache`-feature one — the CPU
-  image sampler's axis-aligned fast path snapped its sampling origin to the
-  image edge, the blit kernel used its own f32 inverse-CTM, and the device
-  page buffer was composited only at end of page; both paths now sample
-  through one shared fixed-point grid and composite per image, guarded by
-  `crates/pdf_raster/tests/cache_render_parity.rs` — and the `gpu-aa` one,
-  where the GPU fill kernels computed analytical / jittered coverage instead
-  of the CPU's 4× scanline AA; the kernels now evaluate the CPU scanner's
-  table, see "Unreleased".)
+  opportunity inventories with several items already closed in-file. Both
+  2026-09-15 GPU render divergences are fixed: the `cache` one in v1.3.0 and
+  the `gpu-aa` one in v1.4.0. The page-loss defects under "Known issues" are
+  the highest-priority open items.
 
 Deferred/blocked items, in full:
 
@@ -1709,7 +1774,7 @@ Deferred/blocked items, in full:
 - **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.
 - **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). External-blocked: no non-NVIDIA GPU or CI runner on the dev box. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
 - **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
-- **crates.io packaging** — indefinitely postponed; nothing published, nothing yanked. Treat as closed unless reopened.
+- **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.
 
 The implementation plans under `docs/superpowers/plans/` (gitignored) are all completed or superseded — none describe live work. They are kept as historical execution logs, not as a backlog.
 

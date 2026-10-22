@@ -156,7 +156,7 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 
 **`cuda`** — Require CUDA. Exits with an error if nvJPEG or the GPU context cannot be initialised. Use this to confirm the GPU path is actually active rather than silently falling back.
 
-**`vulkan`** — Require the Vulkan compute backend.  Exits with an error if Vulkan initialisation fails or the binary was built without `--features vulkan`.  AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels dispatch through `VulkanBackend`; the device-resident image cache is CUDA-only so the renderer runs uncached under this mode; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  Cross-vendor (NVIDIA, AMD, Intel, Apple via `MoltenVK`).
+**`vulkan`** — Require the Vulkan compute backend.  Exits with an error if Vulkan initialisation fails or the binary was built without `--features vulkan`.  AA-fill and parallel-Huffman JPEG decode kernels dispatch through `VulkanBackend` (both dormant by default; see `PDF_RASTER_AA_FILL_THRESHOLD` / `PDF_RASTER_HUFFMAN_THRESHOLD`); the device-resident image cache is CUDA-only so the renderer runs uncached under this mode; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  Cross-vendor (NVIDIA, AMD, Intel, Apple via `MoltenVK`).
 
 **`vaapi`** — Require VA-API JPEG decoding. Exits with an error if the DRM device cannot be opened. Use this to confirm iGPU/dGPU decoding is active.
 

@@ -18,10 +18,37 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > **This project is distributed via GitHub, not crates.io.** Two crates were
 > published there once (`rasterrocket` and `rasterrocket-cli`, both at 1.0.1)
 > before the registry was abandoned; those versions are frozen, unmaintained,
-> and two minor releases behind. Do not `cargo install` them. Build from source
+> and several releases behind. Do not `cargo install` them. Build from source
 > — that is the only supported path, and the only one that gets you
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
+
+## What's new in v1.4.0
+
+**Fidelity release.** No API change. 26 commits, most of them fixing pages
+that rendered visibly wrong.
+
+- **Clips are honoured everywhere.** Antialiased fills under a
+  non-rectangular clip painted the clip's full width on each row (a 10 × 10
+  square inside a diamond clip covered 929 pixels instead of 100). Images
+  ignored the clip entirely, so ClearScan pages whose black background image
+  is clipped to the margins rendered 64–77% black. Both now match the
+  reference.
+- **Separation images render the right way round.** The tint transform was
+  never evaluated, so `[/Separation /Black …]` images came out as their
+  negative.
+- **GPU fills are byte-identical to the CPU.** `--backend cuda` and
+  `--backend vulkan` used different coverage maths and drifted on fill edges.
+  The device now evaluates the CPU rasteriser's own scanline table, so the
+  output matches the CPU byte for byte. The path ships dormant because it was
+  slower than the CPU at every size measured. `PDF_RASTER_AA_FILL_THRESHOLD=0`
+  enables it.
+- **Performance.** VBMI/AVX-512 rewrites of four CPU hot paths (AA gamma map
+  n=2500: 924 → 12 ns), and dormant-path GPU JPEG Phase 2 convergence from
+  thousands of host passes to a handful.
+- **Known issue.** CMYK JPEGs stored as YCCK, and images whose `/Filter` is
+  an indirect reference, fail to decode, and the whole page is dropped (7 of
+  601 pages on one test book). See "Known issues" in `ROADMAP.md`.
 
 ## What's new in v1.3.0
 
@@ -162,7 +189,7 @@ and the page/annotation JavaScript-disclosure work).
 ## What's new in v1.0.0
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
-- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs AA fill, tile fill, and parallel-Huffman JPEG decode on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Verified on RTX 5070; cross-vendor smoke pending hardware. Under `auto`, Vulkan is preferred over CUDA when both are compiled in (faster process init on single-session workloads).
+- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels (both dormant by default) on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Verified on RTX 5070; cross-vendor smoke pending hardware. Under `auto`, Vulkan is preferred over CUDA when both are compiled in (faster process init on single-session workloads).
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
@@ -209,7 +236,7 @@ crates.io (see the note at the top).
 **CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 13** — full feature set (nvJPEG, nvJPEG2000, AA fill, ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
+- **NVIDIA via CUDA 13** — full feature set (nvJPEG, nvJPEG2000, AA fill (dormant by default), ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 - **Cross-vendor via Vulkan compute** — AA fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Verified on RTX 5070; cross-vendor smoke pending hardware.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc.
 

@@ -45,7 +45,7 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-Vulkan covers the AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels (`vulkan` implies `gpu-jpeg-huffman`).  No `nvjpeg` / `cache` support today; under `--backend vulkan` the renderer runs uncached but JPEG decode goes through the GPU parallel-Huffman path (GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX today — dormant until threshold tuning).  Verified on RTX 5070; cross-vendor smoke (AMD-RADV, Intel-ANV, Apple Metal-via-MoltenVK) pending hardware.
+Vulkan covers the AA-fill and parallel-Huffman JPEG decode kernels (`vulkan` implies `gpu-jpeg-huffman`).  No `nvjpeg` / `cache` support today; under `--backend vulkan` the renderer runs uncached but JPEG decode goes through the GPU parallel-Huffman path (GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX today — dormant until threshold tuning).  The AA fill is dormant too (`GPU_AA_FILL_THRESHOLD = usize::MAX`): it is byte-identical to the CPU fill but slower end to end; `PDF_RASTER_AA_FILL_THRESHOLD=0` enables it.  Verified on RTX 5070; cross-vendor smoke (AMD-RADV, Intel-ANV, Apple Metal-via-MoltenVK) pending hardware.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 

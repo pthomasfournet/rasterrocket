@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-10-22
+
+### Bug Fixes
+
+- Clear the clippy lints CI checks but the hook did not
+- Apply the tint transform to Separation images
+- Honour the clip region when blitting images
+- Skip GPU Huffman dispatch for multi-component JPEG streams
+- Clear pedantic clippy findings under gpu-jpeg-huffman,vulkan --tests
+- Intersect AA fill coverage with path clips
+- Terminate the AA span walk on a row that ends inside
+- Clear the clippy lints new in Rust 1.99
+- Make GPU fills byte-identical to the CPU rasteriser
+
+### Documentation
+
+- Describe the current CMYK matrix kernel
+- Fix package name and add gpu-jpeg-huffman pointer to parity test header
+- Remove stale plan/version references from feature doc comments
+- Describe what gpu-jpeg-huffman actually does
+
+### Features
+
+- Log the chosen Vulkan device and the Auto backend outcome
+
+### Other
+
+- Run gpu-jpeg-huffman tests and clippy in CI
+
+### Performance
+
+- Propagate JPEG Phase 2 to a fixpoint per workgroup on-device
+- Replace the pre-VBMI SIMD idioms on four CPU hot paths
+- Ship the GPU AA fill dormant
+
+### Refactor
+
+- Remove stale plan references from parallel-Huffman kernel comments
+- Rename HUFFMAN_PHASE1_THREADS to HUFFMAN_THREADS
+- Remove stale plan references from huffman dispatch comments
+- Remove stale plan references from the adversarial-corpus doc
+- Expose the AA fill's geometry and compositing stages
+
+### Testing
+
+- Accept byte bodies in make_doc_with_objects
+- Pin the mixed-codeword-length Phase 2 outcome
+- Add a pdf-oxide reference and render pdftoppm's CropBox
+
 ## [1.3.0] - 2026-09-15
 
 ### Bug Fixes
@@ -32,11 +81,14 @@ All notable changes to this project will be documented in this file.
 - Correct the even-odd coverage fold; validate tile_fill inputs
 - Detect stalled Phase 2 chains; dedupe the JPEG dispatch pipeline
 - Make cache-feature CUDA renders byte-identical to the CPU path
+- Clear the clippy lints the 1.98 toolchain added
 
 ### Chores
 
 - Update semver-compatible dependencies
 - Delete the dead simd-avx512 feature flag
+- Gate the two publishable crates with publish = false
+- Release v1.3.0
 
 ### Documentation
 
@@ -46,6 +98,7 @@ All notable changes to this project will be documented in this file.
 - Correct stale claims across the documentation set
 - State the real CUDA version range instead of "CUDA 12 or 13"
 - Record the cache-feature render divergence in the open-items list
+- Prep v1.3.0 release notes
 
 ### Features
 
