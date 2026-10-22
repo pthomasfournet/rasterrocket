@@ -2,7 +2,7 @@
 //!
 //! Mirrors the CUDA backend's shape: instance → device → queue at init
 //! time, then `begin_page → record_* → submit_page → wait_page` for each
-//! rendered page.  All six kernel families dispatch through `record_*`
+//! rendered page.  All five kernel families dispatch through `record_*`
 //! into a per-page command buffer; submission uses a timeline semaphore
 //! so the host waits exactly once per page.
 //!
@@ -173,15 +173,12 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn record_aa_fill(&self, params: params::AaFillParams<'_, Self>) -> Result<()> {
+        params.validate(self)?;
         self.recorder.record_aa_fill(params)
     }
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
         self.recorder.record_icc_clut(params)
-    }
-
-    fn record_tile_fill(&self, params: params::TileFillParams<'_, Self>) -> Result<()> {
-        self.recorder.record_tile_fill(params)
     }
 
     fn record_composite(&self, params: params::CompositeParams<'_, Self>) -> Result<()> {

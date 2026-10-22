@@ -319,11 +319,6 @@ pub trait GpuBackend: Send + Sync {
     /// # Errors
     /// Returns `BackendError` if the operation cannot be recorded.
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()>;
-    /// Record a tile-parallel analytical fill into the current page's command list.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded.
-    fn record_tile_fill(&self, params: params::TileFillParams<'_, Self>) -> Result<()>;
     /// Record a Porter-Duff source-over composite into the current page's command list.
     ///
     /// # Errors

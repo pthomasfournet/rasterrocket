@@ -351,55 +351,29 @@ impl PageRecorder {
         &self,
         p: params::AaFillParams<'_, super::VulkanBackend>,
     ) -> Result<()> {
-        // Push: n_segs(u32), x_min(f32), y_min(f32), width(u32), height(u32), eo(i32).
-        // x_min/y_min are 0 here for parity with the CUDA backend's choice.
-        let mut push = [0u8; 24];
-        push[0..4].copy_from_slice(&p.n_segs.to_ne_bytes());
-        push[4..8].copy_from_slice(&0.0_f32.to_ne_bytes());
-        push[8..12].copy_from_slice(&0.0_f32.to_ne_bytes());
-        push[12..16].copy_from_slice(&p.width.to_ne_bytes());
-        push[16..20].copy_from_slice(&p.height.to_ne_bytes());
-        push[20..24].copy_from_slice(&i32::from(p.fill_rule != 0).to_ne_bytes());
-        // Workgroup = 1 pixel (64 lanes); 2D dispatch so every axis stays
-        // within Vulkan's guaranteed `maxComputeWorkGroupCount[i]` of
-        // 65535 for any image up to ~65k × 65k.
+        // Push: n_rows(u32), table_y0(i32), x_min(i32), y_min(i32),
+        // width(u32), height(u32), aa_width(u32), eo(i32).
+        let mut push = [0u8; 32];
+        push[0..4].copy_from_slice(&p.n_rows.to_ne_bytes());
+        push[4..8].copy_from_slice(&p.table_y0.to_ne_bytes());
+        push[8..12].copy_from_slice(&p.rect.x.to_ne_bytes());
+        push[12..16].copy_from_slice(&p.rect.y.to_ne_bytes());
+        push[16..20].copy_from_slice(&p.rect.width.to_ne_bytes());
+        push[20..24].copy_from_slice(&p.rect.height.to_ne_bytes());
+        push[24..28].copy_from_slice(&p.aa_width.to_ne_bytes());
+        push[28..32].copy_from_slice(&i32::from(p.fill_rule != 0).to_ne_bytes());
+        // One 16×16 workgroup per pixel block; 2D dispatch so every axis
+        // stays within Vulkan's guaranteed `maxComputeWorkGroupCount[i]`.
         self.dispatch_kernel(
             KernelId::AaFill,
-            &[p.segs.handle(), p.coverage.handle()],
-            &[p.segs.size(), p.coverage.size()],
-            &push,
-            (p.width, p.height, 1),
-        )
-    }
-
-    pub(super) fn record_tile_fill(
-        &self,
-        p: params::TileFillParams<'_, super::VulkanBackend>,
-    ) -> Result<()> {
-        // Push: grid_w(u32), out_w(u32), out_h(u32), eo(i32).
-        let grid_w = p.width.div_ceil(crate::TILE_W);
-        let mut push = [0u8; 16];
-        push[0..4].copy_from_slice(&grid_w.to_ne_bytes());
-        push[4..8].copy_from_slice(&p.width.to_ne_bytes());
-        push[8..12].copy_from_slice(&p.height.to_ne_bytes());
-        push[12..16].copy_from_slice(&i32::from(p.fill_rule != 0).to_ne_bytes());
-        let grid_h = p.height.div_ceil(crate::TILE_H);
-        self.dispatch_kernel(
-            KernelId::TileFill,
             &[
-                p.records.handle(),
-                p.tile_starts.handle(),
-                p.tile_counts.handle(),
+                p.intersects.handle(),
+                p.row_starts.handle(),
                 p.coverage.handle(),
             ],
-            &[
-                p.records.size(),
-                p.tile_starts.size(),
-                p.tile_counts.size(),
-                p.coverage.size(),
-            ],
+            &[p.intersects.size(), p.row_starts.size(), p.coverage.size()],
             &push,
-            (grid_w, grid_h, 1),
+            (p.rect.width.div_ceil(16), p.rect.height.div_ceil(16), 1),
         )
     }
 

@@ -20,7 +20,9 @@
 
 use std::time::Instant;
 
-use rasterrocket_gpu::{GpuCtx, aa_fill_cpu, build_tile_records, icc_cmyk_to_rgb_cpu};
+use rasterrocket_gpu::{
+    AA_SIZE, AaFillRect, AaScanTable, GpuCtx, ScanIntersect, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
+};
 
 /// Unwrap a GPU `Result`, printing the error with context and exiting with
 /// status 1.  Used inside timing closures where `?` is not available.
@@ -119,27 +121,37 @@ fn time_ns<F: FnMut()>(mut f: F, warmup: u32, iters: u32) -> u64 {
     median_ns(samples)
 }
 
-// ── Segment fixture: a square with `n_pixels` bbox ─────────────────────────
+// ── Intersection-table fixture: a w×h rectangle at the origin ──────────────
 
-/// Return `[x0,y0,x1,y1, ...]` segments for the outline of a w×h rectangle
-/// starting at (0,0), representing the 4 edges in CCW order.
-fn square_segs(w: u32, h: u32) -> Vec<f32> {
-    // w/h ≤ 2049 px; f32 has 23-bit mantissa (exact for integers ≤ 2^24).
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "w/h ≤ 2049; exact in f32 (mantissa covers integers to 2^24)"
-    )]
-    let (w, h) = (w as f32, h as f32);
-    // bottom, right, top, left — 4 segments
-    vec![
-        0.0, 0.0, w, 0.0, w, 0.0, w, h, w, h, 0.0, h, 0.0, h, 0.0, 0.0,
-    ]
+/// Scanline intersection table of a w×h pixel rectangle at (0, 0): every
+/// AA row carries the left edge at AA column 0 and the right edge at
+/// `w × AA_SIZE - 1`.
+fn rect_table(w: u32, h: u32) -> (Vec<ScanIntersect>, Vec<u32>) {
+    let n_rows = h as usize * AA_SIZE as usize;
+    let right = i32::try_from(w).expect("width fits i32") * AA_SIZE - 1;
+    let mut intersects = Vec::with_capacity(n_rows * 2);
+    let mut row_starts = Vec::with_capacity(n_rows + 1);
+    for r in 0..n_rows {
+        row_starts.push(u32::try_from(r * 2).expect("table fits u32"));
+        intersects.push(ScanIntersect {
+            x0: 0,
+            x1: 0,
+            count: -1,
+        });
+        intersects.push(ScanIntersect {
+            x0: right,
+            x1: right,
+            count: 1,
+        });
+    }
+    row_starts.push(u32::try_from(n_rows * 2).expect("table fits u32"));
+    (intersects, row_starts)
 }
 
 // ── AA fill benchmark ───────────────────────────────────────────────────────
 
 fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
-    println!("\n══ aa_fill: GPU warp-ballot vs CPU 64-sample ══");
+    println!("\n══ aa_fill: GPU scanline walk vs host twin ══");
     println!(
         "{:>10}  {:>12}  {:>12}  {:>8}  winner",
         "pixels", "cpu_ns", "gpu_ns", "ratio"
@@ -150,11 +162,23 @@ fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
 
     for &n in &sweep_sizes() {
         let (w, h) = dims(n);
-        let segs = square_segs(w, h);
+        let (intersects, row_starts) = rect_table(w, h);
+        let table = AaScanTable {
+            intersects: &intersects,
+            row_starts: &row_starts,
+            y_min: 0,
+        };
+        let rect = AaFillRect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        };
+        let aa_width = w * AA_SIZE.unsigned_abs();
 
         let cpu_ns = time_ns(
             || {
-                let _ = aa_fill_cpu(&segs, 0.0, 0.0, w, h, false);
+                let _ = aa_fill_cpu(&table, rect, aa_width, false);
             },
             cfg.warmup,
             cfg.iters,
@@ -162,7 +186,7 @@ fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
 
         let gpu_ns = time_ns(
             || {
-                let _ = gpu_unwrap(ctx.aa_fill_gpu(&segs, 0.0, 0.0, w, h, false), "aa_fill_gpu");
+                let _ = gpu_unwrap(ctx.aa_fill(&table, rect, aa_width, false), "aa_fill");
             },
             cfg.warmup,
             cfg.iters,
@@ -190,71 +214,6 @@ fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
         Some(px) => println!(
             "  → Recommended GPU_AA_FILL_THRESHOLD: {px} px  (current: {})",
             rasterrocket_gpu::GPU_AA_FILL_THRESHOLD
-        ),
-        None => println!("  → GPU never faster in this sweep — keep CPU or raise threshold"),
-    }
-}
-
-// ── Tile fill benchmark ─────────────────────────────────────────────────────
-
-fn bench_tile_fill(ctx: &GpuCtx, cfg: &Config) {
-    println!("\n══ tile_fill: GPU analytical vs aa_fill_cpu ══");
-    println!(
-        "{:>10}  {:>12}  {:>12}  {:>8}  winner",
-        "pixels", "aa_cpu_ns", "tile_gpu_ns", "ratio"
-    );
-    println!("{}", "─".repeat(60));
-
-    let mut crossover: Option<usize> = None;
-
-    for &n in &sweep_sizes() {
-        let (w, h) = dims(n);
-        let segs = square_segs(w, h);
-
-        // CPU baseline: aa_fill_cpu (what the dispatch falls back to)
-        let cpu_ns = time_ns(
-            || {
-                let _ = aa_fill_cpu(&segs, 0.0, 0.0, w, h, false);
-            },
-            cfg.warmup,
-            cfg.iters,
-        );
-
-        // GPU: build tile records (CPU sort) + tile_fill kernel
-        let gpu_ns = time_ns(
-            || {
-                let (records, starts, counts, grid_w) = build_tile_records(&segs, 0.0, 0.0, w, h);
-                let _ = gpu_unwrap(
-                    ctx.tile_fill(&records, &starts, &counts, grid_w, w, h, false),
-                    "tile_fill",
-                );
-            },
-            cfg.warmup,
-            cfg.iters,
-        );
-
-        let ratio = cpu_ns as f64 / gpu_ns as f64;
-        let winner = if gpu_ns < cpu_ns { "GPU ✓" } else { "CPU" };
-
-        println!(
-            "{:>10}  {:>12}  {:>12}  {:>7.2}x  {}",
-            n,
-            fmt_ns(cpu_ns),
-            fmt_ns(gpu_ns),
-            ratio,
-            winner
-        );
-
-        if crossover.is_none() && gpu_ns < cpu_ns {
-            crossover = Some(n);
-        }
-    }
-
-    println!();
-    match crossover {
-        Some(px) => println!(
-            "  → Recommended GPU_TILE_FILL_THRESHOLD: {px} px  (current: {})",
-            rasterrocket_gpu::GPU_TILE_FILL_THRESHOLD
         ),
         None => println!("  → GPU never faster in this sweep — keep CPU or raise threshold"),
     }
@@ -359,7 +318,6 @@ fn main() {
     });
 
     bench_aa_fill(&ctx, &cfg);
-    bench_tile_fill(&ctx, &cfg);
     bench_icc_cmyk(&ctx, &cfg);
 
     println!("\nDone.");

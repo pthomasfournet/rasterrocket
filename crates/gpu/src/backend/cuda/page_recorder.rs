@@ -175,18 +175,16 @@ impl PageRecorder {
         p: params::AaFillParams<'_, super::CudaBackend>,
     ) -> Result<()> {
         let eo = p.fill_rule != 0;
-        // The trait API uses tile-local coordinates: callers compute
-        // `x_min` / `y_min` into the segs they upload, so the kernel
-        // origin is always (0, 0).  This matches `tile_fill` and
-        // simplifies the trait surface; if a future renderer integration
-        // needs a non-zero device-pixel offset, AaFillParams should grow
-        // an explicit `origin` field rather than re-introducing implicit
-        // x_min/y_min on this code path.
-        let x_min = 0.0_f32;
-        let y_min = 0.0_f32;
         self.ctx
             .launch_aa_fill_async(
-                p.segs, p.n_segs, x_min, y_min, p.width, p.height, eo, p.coverage,
+                p.intersects,
+                p.row_starts,
+                p.n_rows,
+                p.table_y0,
+                p.rect,
+                p.aa_width,
+                eo,
+                p.coverage,
             )
             .map_err(be)
     }
@@ -203,26 +201,6 @@ impl PageRecorder {
         })?;
         self.ctx
             .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, grid_n, p.n_pixels)
-            .map_err(be)
-    }
-
-    pub(super) fn record_tile_fill(
-        &self,
-        p: params::TileFillParams<'_, super::CudaBackend>,
-    ) -> Result<()> {
-        let eo = p.fill_rule != 0;
-        let grid_w = p.width.div_ceil(crate::TILE_W);
-        self.ctx
-            .launch_tile_fill_async(
-                p.records,
-                p.tile_starts,
-                p.tile_counts,
-                grid_w,
-                p.width,
-                p.height,
-                eo,
-                p.coverage,
-            )
             .map_err(be)
     }
 

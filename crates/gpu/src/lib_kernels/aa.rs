@@ -1,113 +1,71 @@
-//! Supersampled AA fill kernel dispatch.
+//! Scanline-AA fill kernel dispatch.
 
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
-use crate::{GPU_AA_FILL_THRESHOLD, GpuCtx, fill::aa_fill_cpu};
+use crate::GpuCtx;
+use crate::fill::{AaFillRect, AaScanTable};
+
+/// Threads per block edge for the `aa_fill` launch (`BLOCK_W` / `BLOCK_H`
+/// in `aa_fill.cu`).
+const BLOCK_EDGE: u32 = 16;
 
 impl GpuCtx {
-    /// Compute per-pixel AA coverage for a filled path using 64-sample jittered
-    /// supersampling on the GPU.
+    /// Compute per-pixel AA sub-sample counts for `rect` from a scanline
+    /// intersection table.
     ///
-    /// `segs` is a flat `[x0, y0, x1, y1]` f32 slice — 4 floats per segment.
-    /// `x_min` / `y_min` are the device-pixel coordinates of the top-left corner of
-    /// the output coverage rectangle. The output is `width * height` bytes, one byte
-    /// per pixel (0 = fully outside, 255 = fully inside).
+    /// The output is `rect.width × rect.height` bytes, row-major, each the
+    /// count `0..=AA_SIZE²` of the pixel's covered sub-samples — the same
+    /// values [`crate::aa_fill_cpu`] produces.  `aa_width` is the bitmap
+    /// width × `AA_SIZE`.
     ///
-    /// Falls back to [`aa_fill_cpu`] when the pixel count is below
-    /// [`GPU_AA_FILL_THRESHOLD`] or `segs` is empty.
+    /// The caller decides whether the fill is worth a GPU round trip
+    /// (see [`crate::GPU_AA_FILL_THRESHOLD`]); this always dispatches.
     ///
     /// # Errors
     ///
-    /// Returns an error if GPU dispatch or data transfer fails.
+    /// Returns an error if GPU data transfer or the kernel launch fails.
     ///
     /// # Panics
     ///
-    /// Panics if `segs.len()` is not a multiple of 4 or if `width * height` overflows
-    /// `u32::MAX`.
+    /// Panics if `table` is malformed ([`AaScanTable::assert_well_formed`]),
+    /// the table has more than `u32::MAX` rows, or `rect`'s pixel count
+    /// exceeds `u32::MAX`.
     pub fn aa_fill(
         &self,
-        segs: &[f32],
-        x_min: f32,
-        y_min: f32,
-        width: u32,
-        height: u32,
+        table: &AaScanTable<'_>,
+        rect: AaFillRect,
+        aa_width: u32,
         eo: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        table.assert_well_formed();
+        let n_pixels = rect.pixel_count().expect("width × height overflows usize");
         assert!(
-            segs.len().is_multiple_of(4),
-            "segs.len() must be a multiple of 4 (got {})",
-            segs.len()
+            u32::try_from(n_pixels).is_ok(),
+            "width × height = {n_pixels} pixels exceeds the kernel's 32-bit index range"
         );
-        let n_pixels = (width as usize)
-            .checked_mul(height as usize)
-            .expect("width × height overflows usize");
-
-        if segs.is_empty() || n_pixels < GPU_AA_FILL_THRESHOLD {
-            return Ok(aa_fill_cpu(segs, x_min, y_min, width, height, eo));
-        }
-
-        self.aa_fill_gpu(segs, x_min, y_min, width, height, eo)
-    }
-
-    /// Unconditional GPU dispatch for `aa_fill` (skips threshold check).
-    ///
-    /// Use this when the caller has already decided GPU is appropriate
-    /// (e.g. benchmarking or when the area is known to be large).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if GPU data transfer or kernel launch fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `segs.len()` is not a multiple of 4 or if `width * height`
-    /// overflows `u32::MAX`.
-    pub fn aa_fill_gpu(
-        &self,
-        segs: &[f32],
-        x_min: f32,
-        y_min: f32,
-        width: u32,
-        height: u32,
-        eo: bool,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        assert!(
-            segs.len().is_multiple_of(4),
-            "segs.len() must be a multiple of 4 (got {})",
-            segs.len()
-        );
-        let n_pixels = (width as usize)
-            .checked_mul(height as usize)
-            .expect("width × height overflows usize");
-        // Empty output rectangle: nothing to fill, skip GPU dispatch entirely.
-        // cudarc rejects zero-size allocations, so we'd have to scaffold a
-        // placeholder otherwise — and the right answer for a 0-pixel output
-        // is an empty Vec regardless of `segs`. Mirrors `tile_fill`'s early
-        // return at lib_kernels/tile.rs:59-61.
         if n_pixels == 0 {
             return Ok(Vec::new());
         }
-        let n_segs = u32::try_from(segs.len() / 4).expect("segment count exceeds u32::MAX");
+        if table.intersects.is_empty() {
+            // No intersections means no spans: every count is zero.
+            return Ok(vec![0u8; n_pixels]);
+        }
+        let n_rows = u32::try_from(table.n_rows()).expect("row count exceeds u32::MAX");
 
         let stream = &self.stream;
-
-        // Upload segments and allocate coverage output on device.
-        // `clone_htod` of bytes (not f32) makes the buffer a `CudaSlice<u8>`,
-        // which is the trait's `B::DeviceBuffer` type. The kernel reads it
-        // back as f32 — its PTX signature is `const float4*`.
-        let segs_bytes: &[u8] = bytemuck::cast_slice(segs);
-        let d_segs = stream.clone_htod(segs_bytes)?;
+        let d_intersects = stream.clone_htod(bytemuck::cast_slice(table.intersects))?;
+        let d_row_starts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(table.row_starts))?;
         // Device-side zero alloc — the kernel overwrites every in-bounds
         // pixel, so nothing is gained by shipping a zero Vec over PCIe.
         let d_coverage = stream.alloc_zeros::<u8>(n_pixels)?;
 
         self.launch_aa_fill_async(
-            &d_segs,
-            n_segs,
-            x_min,
-            y_min,
-            width,
-            height,
+            &d_intersects,
+            &d_row_starts,
+            n_rows,
+            table.y_min,
+            rect,
+            aa_width,
             eo,
             &d_coverage,
         )?;
@@ -116,15 +74,16 @@ impl GpuCtx {
         Ok(stream.clone_dtoh(&d_coverage)?)
     }
 
-    /// Async kernel launch for the AA fill kernel.
+    /// Async kernel launch for the scanline-AA fill kernel.
     ///
     /// Caller is responsible for stream ordering and any final D→H
     /// download. This function does **not** call `synchronize` and does
     /// **not** touch host memory.
     ///
-    /// `d_segs` must contain `4 * n_segs * 4` bytes (4 f32s per segment).
-    /// `d_coverage` must contain `width * height` bytes; the kernel
-    /// overwrites every in-bounds pixel, so no pre-fill is required.
+    /// `d_intersects` holds `i32` triples, `d_row_starts` holds
+    /// `n_rows + 1` `u32` offsets into it, and `d_coverage` must hold
+    /// `rect.width × rect.height` bytes; the kernel overwrites every
+    /// in-bounds pixel, so no pre-fill is required.
     ///
     /// # Errors
     ///
@@ -139,40 +98,42 @@ impl GpuCtx {
     )]
     pub(crate) fn launch_aa_fill_async(
         &self,
-        d_segs: &CudaSlice<u8>,
-        n_segs: u32,
-        x_min: f32,
-        y_min: f32,
-        width: u32,
-        height: u32,
+        d_intersects: &CudaSlice<u8>,
+        d_row_starts: &CudaSlice<u8>,
+        n_rows: u32,
+        table_y0: i32,
+        rect: AaFillRect,
+        aa_width: u32,
         eo: bool,
         d_coverage: &CudaSlice<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let n_pixels = (width as usize)
-            .checked_mul(height as usize)
-            .expect("width × height overflows usize");
-        let n_pixels_u32 = u32::try_from(n_pixels).expect("pixel count exceeds u32::MAX");
-
-        // Launch: one block per output pixel, 64 threads per block.
         let cfg = LaunchConfig {
-            grid_dim: (n_pixels_u32, 1, 1),
-            block_dim: (64, 1, 1),
-            shared_mem_bytes: 8, // two i32 warp_counts
+            grid_dim: (
+                rect.width.div_ceil(BLOCK_EDGE),
+                rect.height.div_ceil(BLOCK_EDGE),
+                1,
+            ),
+            block_dim: (BLOCK_EDGE, BLOCK_EDGE, 1),
+            shared_mem_bytes: 0,
         };
 
         let eo_int: i32 = i32::from(eo);
         let stream = &self.stream;
         let mut builder = stream.launch_builder(&self.kernels.aa_fill);
         builder
-            .arg(d_segs)
-            .arg(&n_segs)
-            .arg(&x_min)
-            .arg(&y_min)
-            .arg(&width)
-            .arg(&height)
+            .arg(d_intersects)
+            .arg(d_row_starts)
+            .arg(&n_rows)
+            .arg(&table_y0)
+            .arg(&rect.x)
+            .arg(&rect.y)
+            .arg(&rect.width)
+            .arg(&rect.height)
+            .arg(&aa_width)
             .arg(&eo_int)
             .arg(d_coverage);
-        // SAFETY: kernel arguments match the PTX signature; bounds verified above.
+        // SAFETY: kernel arguments match the PTX signature; bounds verified
+        // by the caller.
         unsafe { builder.launch(cfg) }?;
         Ok(())
     }

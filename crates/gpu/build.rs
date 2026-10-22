@@ -43,7 +43,6 @@ const KERNELS: &[&str] = &[
     "composite_rgba8",
     "apply_soft_mask",
     "aa_fill",
-    "tile_fill",
     "icc_clut",
     "blit_image",
     "blelloch_scan",
@@ -51,15 +50,9 @@ const KERNELS: &[&str] = &[
     "idct_color",
 ];
 
-/// Slang profile per kernel.  `aa_fill` uses subgroup ops (`WaveActiveSum`,
-/// `WaveIsFirstLane`) so it needs the `GroupNonUniform*` capability strings;
-/// the rest use only baseline `spirv_1_5`.
-fn slang_profile(kernel: &str) -> &'static str {
-    match kernel {
-        "aa_fill" => "spirv_1_5+spvGroupNonUniformBallot+spvGroupNonUniformArithmetic",
-        _ => "spirv_1_5",
-    }
-}
+/// Slang profile for every kernel: baseline `spirv_1_5`, no subgroup
+/// capabilities.
+const SLANG_PROFILE: &str = "spirv_1_5";
 
 /// Entry-point selector for the slangc invocation.
 ///
@@ -84,7 +77,6 @@ fn slang_entry(kernel: &str) -> Option<&'static str> {
         "composite_rgba8" => Some("composite_rgba8"),
         "apply_soft_mask" => Some("apply_soft_mask"),
         "aa_fill" => Some("aa_fill"),
-        "tile_fill" => Some("tile_fill"),
         "blit_image" => Some("blit_image"),
         _ => panic!("unknown kernel name: {kernel}"),
     }
@@ -330,9 +322,7 @@ fn write_placeholder_ptx(out_dir: &Path) {
 
 /// Compile every kernel's `.slang` source to SPIR-V via `slangc`.
 ///
-/// Targets `spvGroupNonUniformBallot+spvGroupNonUniformArithmetic` for
-/// `aa_fill` (the only kernel using `WaveActiveSum`/`WaveIsFirstLane`);
-/// the remaining five compile against vanilla `spirv_1_5`.
+/// Every kernel compiles against [`SLANG_PROFILE`].
 ///
 /// `slangc` is bundled with the `LunarG` Vulkan SDK and ships in the
 /// Ubuntu `slang` package; falls back to PATH lookup.  Override with
@@ -348,7 +338,7 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
             src.display()
         );
         let spv = out_dir.join(format!("{kernel}.spv"));
-        let profile = slang_profile(kernel);
+        let profile = SLANG_PROFILE;
 
         // -entry is omitted for multi-entry kernels; slangc then uses
         // the [shader(...)] attributes in the source to pick entries.

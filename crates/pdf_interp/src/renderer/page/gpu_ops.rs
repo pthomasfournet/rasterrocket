@@ -1,355 +1,250 @@
-//! GPU-accelerated fill helpers for [`PageRenderer`].
+//! GPU fill helpers for [`PageRenderer`].
 //!
-//! All functions in this module are gated on `#[cfg(feature = "gpu-aa")]` and
-//! take `renderer: &mut PageRenderer<'_>` as their first argument, delegating
-//! from thin wrapper methods in `mod.rs`.
+//! The device rasterises nothing of its own.  It evaluates the scanline
+//! intersection table the CPU fill builds (`raster::fill::aa_scanner`) with
+//! the CPU's span walk, returning per-pixel sub-sample counts, and those
+//! counts are composited through the CPU's own `raster::fill::draw_aa_counts`.
+//! Every stage that decides a pixel's value is therefore the CPU's code or a
+//! byte-exact twin of it.
+//!
+//! All functions in this module are gated on `#[cfg(feature = "gpu-aa")]`.
 
 #[cfg(feature = "gpu-aa")]
-use super::PageRenderer;
-
-/// Clamped pixel-space bounding box for a GPU fill operation.
-///
-/// All fields are in device-pixel coordinates, clipped to the bitmap bounds.
-/// `x` / `y` are the top-left corner; `w` / `h` are the extent.
+use gpu::{AaFillRect, AaScanTable, ScanIntersect};
 #[cfg(feature = "gpu-aa")]
-pub(super) struct GpuBbox {
-    pub(super) x: u32,
-    pub(super) y: u32,
-    pub(super) w: u32,
-    pub(super) h: u32,
+use raster::clip::Clip;
+#[cfg(feature = "gpu-aa")]
+use raster::pipe::{PipeSrc, PipeState};
+#[cfg(feature = "gpu-aa")]
+use raster::types::AA_SIZE;
+
+#[cfg(feature = "gpu-aa")]
+use super::{DEVICE_MATRIX, PageRenderer};
+
+/// A fill prepared for device evaluation: the CPU scanner's intersection
+/// table plus the pixel rectangle it is evaluated over.
+#[cfg(feature = "gpu-aa")]
+pub(super) struct GpuAaFill {
+    /// Intersections grouped by AA row, sorted by `x0` within a row.
+    pub(super) intersects: Vec<ScanIntersect>,
+    /// Row offsets into `intersects`; `n_rows + 1` entries.
+    pub(super) row_starts: Vec<u32>,
+    /// AA row index of table row 0.
+    pub(super) table_y0: i32,
+    /// Pixel rectangle the kernel evaluates; within the bitmap.
+    pub(super) rect: AaFillRect,
+    /// Bitmap width × `AA_SIZE`.
+    pub(super) aa_width: u32,
 }
 
-/// Shared preamble for GPU fill paths: flatten path, compute clamped bbox,
-/// convert segments to packed f32.
-///
-/// Returns `None` if the path is empty, produces no segments, or the bbox
-/// is degenerate/non-finite.  Otherwise returns `(segs_f32, bbox)`.
 #[cfg(feature = "gpu-aa")]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "bbox is clamped to [0, bitmap.width/height] before cast; all values are \
-              finite, non-negative, and ≤ u32::MAX"
-)]
-pub(super) fn gpu_fill_segs(
-    renderer: &PageRenderer<'_>,
-    path: &raster::path::Path,
-) -> Option<(Vec<f32>, GpuBbox)> {
-    use raster::xpath::XPath;
-
-    use super::DEVICE_MATRIX;
-
-    if path.pts.is_empty() {
-        return None;
-    }
-
-    let xpath = XPath::new(path, &DEVICE_MATRIX, 0.1, true);
-    if xpath.segs.is_empty() {
-        return None;
-    }
-
-    // Pixel bbox from segment endpoints.
-    let mut x_min_f = f64::INFINITY;
-    let mut y_min_f = f64::INFINITY;
-    let mut x_max_f = f64::NEG_INFINITY;
-    let mut y_max_f = f64::NEG_INFINITY;
-    for seg in &xpath.segs {
-        x_min_f = x_min_f.min(seg.x0).min(seg.x1);
-        y_min_f = y_min_f.min(seg.y0).min(seg.y1);
-        x_max_f = x_max_f.max(seg.x0).max(seg.x1);
-        y_max_f = y_max_f.max(seg.y0).max(seg.y1);
-    }
-    // Segment coords should always be finite; NaN/Inf would indicate a bug
-    // in the path construction or CTM, so we log and bail rather than panic.
-    if !x_min_f.is_finite() || !y_min_f.is_finite() || !x_max_f.is_finite() || !y_max_f.is_finite()
-    {
-        log::warn!(
-            "gpu_fill_segs: non-finite segment bbox ({x_min_f}, {y_min_f}, {x_max_f}, {y_max_f}); skipping GPU path"
-        );
-        return None;
-    }
-
-    // Clamp to bitmap dimensions and quantise to integer pixels.
-    let bmp_w = f64::from(renderer.bitmap.width);
-    let bmp_h = f64::from(renderer.bitmap.height);
-    x_min_f = x_min_f.max(0.0).floor();
-    y_min_f = y_min_f.max(0.0).floor();
-    x_max_f = x_max_f.min(bmp_w).ceil();
-    y_max_f = y_max_f.min(bmp_h).ceil();
-    if x_max_f <= x_min_f || y_max_f <= y_min_f {
-        return None;
-    }
-
-    let bbox = GpuBbox {
-        x: x_min_f as u32,
-        y: y_min_f as u32,
-        w: (x_max_f - x_min_f) as u32,
-        h: (y_max_f - y_min_f) as u32,
-    };
-
-    // Pack segments as flat f32 [x0,y0,x1,y1].  The f64→f32 cast is
-    // intentional: GPU kernels operate in f32, and precision loss is
-    // sub-pixel at realistic PDF rasterisation DPIs.
-    let segs_f32: Vec<f32> = xpath
-        .segs
-        .iter()
-        .flat_map(|seg| [seg.x0 as f32, seg.y0 as f32, seg.x1 as f32, seg.y1 as f32])
-        .collect();
-
-    Some((segs_f32, bbox))
-}
-
-/// Paint a GPU-produced per-pixel coverage buffer into `renderer.bitmap`.
-///
-/// `coverage` must be exactly `bbox.w × bbox.h` bytes (one byte per pixel,
-/// 0 = outside, 255 = inside), with `bbox` giving the top-left corner and
-/// extent in device-pixel coordinates (already clamped to bitmap bounds).
-///
-/// Scans each row for contiguous non-zero spans, clips them to the active
-/// clip region and bitmap bounds, then calls `pipe::render_span`.
-#[cfg(feature = "gpu-aa")]
-#[expect(
-    clippy::cast_possible_wrap,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "all coordinates bounded by bitmap dims which are derived from u32; \
-              realistic pages are far below i32::MAX"
-)]
-pub(super) fn gpu_coverage_to_bitmap(
-    renderer: &mut PageRenderer<'_>,
-    coverage: &[u8],
-    bbox: &GpuBbox,
-    pipe: &raster::pipe::PipeState<'_>,
-    src: &raster::pipe::PipeSrc<'_>,
-) {
-    let clip = renderer.gstate.current().clip.clone_shared();
-    paint_coverage(&mut renderer.bitmap, &clip, coverage, bbox, pipe, src);
-}
-
-/// Render one clipped sub-span of a coverage row into `bitmap`.
-#[cfg(feature = "gpu-aa")]
-fn emit_span(
-    bitmap: &mut raster::Bitmap<color::Rgb8>,
-    pipe: &raster::pipe::PipeState<'_>,
-    src: &raster::pipe::PipeSrc<'_>,
-    shape: &[u8],
-    x0: i32,
-    x1: i32,
-    y: u32,
-) {
-    use raster::Pixel;
-    use raster::pipe;
-
-    #[expect(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_wrap,
-        reason = "x0/x1 are clamped to [0, bitmap.width) by the caller"
-    )]
-    {
-        let (row_pixels, alpha_row) = bitmap.row_and_alpha_mut(y);
-        let byte_off = x0 as usize * <color::Rgb8 as Pixel>::BYTES;
-        let byte_end = (x1 as usize + 1) * <color::Rgb8 as Pixel>::BYTES;
-        let alpha_range = x0 as usize..=x1 as usize;
-        let dst_pixels = &mut row_pixels[byte_off..byte_end];
-        let dst_alpha = alpha_row.map(|a| &mut a[alpha_range]);
-
-        pipe::render_span::<color::Rgb8>(
-            pipe,
-            src,
-            dst_pixels,
-            dst_alpha,
-            Some(shape),
-            x0,
-            x1,
-            y as i32,
-        );
-    }
-}
-
-/// Clip-aware coverage painter backing [`gpu_coverage_to_bitmap`].
-///
-/// Split out from the `PageRenderer` wrapper so it can be exercised
-/// directly against a hand-built `Bitmap` + `Clip` in unit tests.
-#[cfg(feature = "gpu-aa")]
-#[expect(
-    clippy::cast_possible_wrap,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "all coordinates bounded by bitmap dims which are derived from u32; \
-              realistic pages are far below i32::MAX"
-)]
-fn paint_coverage(
-    bitmap: &mut raster::Bitmap<color::Rgb8>,
-    clip: &raster::clip::Clip,
-    coverage: &[u8],
-    bbox: &GpuBbox,
-    pipe: &raster::pipe::PipeState<'_>,
-    src: &raster::pipe::PipeSrc<'_>,
-) {
-    use raster::clip::ClipResult;
-
-    let GpuBbox {
-        x: bx,
-        y: by,
-        w: bw,
-        h: bh,
-    } = *bbox;
-
-    // The caller guarantees coverage.len() == bw * bh.  A mismatch would
-    // mean a bug in the GPU dispatch layer — catch it in debug builds.
-    debug_assert_eq!(
-        coverage.len(),
-        bw as usize * bh as usize,
-        "coverage buffer length mismatch: expected {}×{}={}, got {}",
-        bw,
-        bh,
-        bw as usize * bh as usize,
-        coverage.len()
-    );
-    // bbox was clamped to bitmap dims in gpu_fill_segs; bx+bw ≤ bitmap.width,
-    // by+bh ≤ bitmap.height.  Assert in debug builds.
-    debug_assert!(
-        bx.saturating_add(bw) <= bitmap.width && by.saturating_add(bh) <= bitmap.height,
-        "GPU bbox ({bx},{by} {bw}×{bh}) extends outside bitmap ({}×{})",
-        bitmap.width,
-        bitmap.height
-    );
-
-    let bmp_w_i = bitmap.width as i32;
-
-    for row in 0..bh {
-        let y = by + row; // cannot exceed bitmap.height (clamped in gpu_fill_segs)
-        let y_i = y as i32;
-
-        let row_start = row as usize * bw as usize;
-        let row_cov = &coverage[row_start..row_start + bw as usize];
-
-        // Walk the row, collecting contiguous non-zero spans and emitting them.
-        let mut span_start: Option<usize> = None;
-        for col in 0..=bw as usize {
-            let is_covered = col < bw as usize && row_cov[col] > 0;
-            if is_covered {
-                let _ = span_start.get_or_insert(col);
-            } else if let Some(start) = span_start.take() {
-                let x0 = bx as i32 + start as i32;
-                let x1 = bx as i32 + col as i32 - 1;
-
-                if clip.test_span(x0, x1, y_i) == ClipResult::AllOutside {
-                    continue;
-                }
-
-                // Clamp to the bitmap and the clip rectangle, trimming the
-                // coverage slice to match.
-                let sx0 = x0.max(0).max(clip.x_min_i);
-                let sx1 = x1.min(bmp_w_i - 1).min(clip.x_max_i);
-                if sx0 > sx1 {
-                    continue;
-                }
-
-                // trim_left = sx0 - x0 ≥ 0 and trim_right = x1 - sx1 ≥ 0 by the
-                // clamps above; sx0 ≤ sx1 gives trim_left + trim_right =
-                // (sx0-x0) + (x1-sx1) ≤ (x1-x0) = col-start-1, which is
-                // < shape_slice.len() = col-start.  So the subtraction is safe.
-                let shape_slice = &row_cov[start..col];
-                let trim_left = (sx0 - x0) as usize;
-                let trim_right = (x1 - sx1) as usize;
-                let trimmed_shape = &shape_slice[trim_left..shape_slice.len() - trim_right];
-                if trimmed_shape.is_empty() {
-                    continue;
-                }
-
-                // Re-test after clamping: a span that merely straddled the
-                // clip rectangle upgrades to AllInside once clamped, so only
-                // path-clip (scanner) cases pay the per-pixel walk below.
-                if clip.test_span(sx0, sx1, y_i) == ClipResult::AllInside {
-                    emit_span(bitmap, pipe, src, trimmed_shape, sx0, sx1, y);
-                    continue;
-                }
-
-                // Partial after clamping — a path-clip scanner is active.
-                // Split the span into maximal per-pixel inside runs,
-                // mirroring the CPU path's draw_span_clipped.  (Clip-path
-                // edge fidelity is per-pixel here; the CPU AA path masks
-                // per subsample.)
-                let mut run_start: Option<i32> = None;
-                for x in sx0..=sx1 + 1 {
-                    let inside = x <= sx1 && clip.test(x, y_i);
-                    if inside {
-                        let _ = run_start.get_or_insert(x);
-                    } else if let Some(rs) = run_start.take() {
-                        let re = x - 1;
-                        let off = (rs - sx0) as usize;
-                        let run_shape = &trimmed_shape[off..off + (re - rs + 1) as usize];
-                        emit_span(bitmap, pipe, src, run_shape, rs, re, y);
-                    }
-                }
-            }
+impl GpuAaFill {
+    pub(super) fn table(&self) -> AaScanTable<'_> {
+        AaScanTable {
+            intersects: &self.intersects,
+            row_starts: &self.row_starts,
+            y_min: self.table_y0,
         }
     }
 }
 
-/// Attempt to rasterise `path` with the GPU 64-sample AA kernel.
+/// Build the device input for filling `path`, or `None` when the fill must
+/// stay on the CPU.
+///
+/// `None` is returned when:
+/// - the clip carries a path clip (the CPU masks those per sub-sample);
+/// - the path is empty, scan-converts to nothing, or lies outside the bitmap;
+/// - the bounding-box area is below [`gpu::GPU_AA_FILL_THRESHOLD`];
+/// - some AA row's winding does not return to zero, in which case the
+///   scanner's x bounds no longer bound the painted range.
+///
+/// The bounding box is the scanner's AA bounds divided by `AA_SIZE`, clamped
+/// to the bitmap.  It is not clamped to the clip rectangle: the CPU applies
+/// that clamp per row after finding the painted range, and
+/// [`paint_coverage`] does the same.
+#[cfg(feature = "gpu-aa")]
+pub(super) fn prepare_aa_fill(
+    clip: &Clip,
+    bitmap_width: u32,
+    bitmap_height: u32,
+    path: &raster::path::Path,
+    flatness: f64,
+    even_odd: bool,
+) -> Option<GpuAaFill> {
+    use gpu::GPU_AA_FILL_THRESHOLD;
+
+    if !clip.is_rect() {
+        return None;
+    }
+    let scanner = raster::fill::aa_scanner(path, &DEVICE_MATRIX, flatness, clip, even_odd)?;
+
+    let width_i = i32::try_from(bitmap_width).ok()?;
+    let height_i = i32::try_from(bitmap_height).ok()?;
+    let x0 = (scanner.x_min / AA_SIZE).max(0);
+    let x1 = (scanner.x_max / AA_SIZE).min(width_i - 1);
+    let y0 = (scanner.y_min / AA_SIZE).max(0);
+    let y1 = (scanner.y_max / AA_SIZE).min(height_i - 1);
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 and y1 >= y0 checked above")]
+    let rect = AaFillRect {
+        x: x0,
+        y: y0,
+        width: (x1 - x0 + 1) as u32,
+        height: (y1 - y0 + 1) as u32,
+    };
+    if rect.pixel_count()? < GPU_AA_FILL_THRESHOLD {
+        return None;
+    }
+
+    let row_starts = scanner.row_starts();
+    let intersects = scanner.intersects();
+    let eo_mask = if even_odd { 1i32 } else { !0i32 };
+    let balanced = row_starts.windows(2).all(|w| {
+        let sum = intersects[w[0] as usize..w[1] as usize]
+            .iter()
+            .fold(0i32, |acc, ix| acc.wrapping_add(ix.count));
+        sum & eo_mask == 0
+    });
+    if !balanced {
+        return None;
+    }
+
+    Some(GpuAaFill {
+        intersects: intersects
+            .iter()
+            .map(|ix| ScanIntersect {
+                x0: ix.x0,
+                x1: ix.x1,
+                count: ix.count,
+            })
+            .collect(),
+        row_starts: row_starts.to_vec(),
+        table_y0: scanner.y_min,
+        rect,
+        aa_width: bitmap_width.saturating_mul(AA_SIZE.unsigned_abs()),
+    })
+}
+
+/// Composite device-computed coverage counts into `renderer.bitmap`.
+///
+/// `counts` must be exactly `rect.width × rect.height` bytes of sub-sample
+/// counts (`0..=AA_SIZE²`); the slice is consumed as scratch.
+#[cfg(feature = "gpu-aa")]
+pub(super) fn gpu_coverage_to_bitmap(
+    renderer: &mut PageRenderer<'_>,
+    counts: &mut [u8],
+    rect: AaFillRect,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+) {
+    let clip = renderer.gstate.current().clip.clone_shared();
+    paint_coverage(&mut renderer.bitmap, &clip, counts, rect, pipe, src);
+}
+
+/// Composite one rectangle of coverage counts, row by row, exactly as the
+/// CPU fill loop does: the painted range of a row is its first and last
+/// covered pixel, clamped to the clip rectangle, and the whole range
+/// (interior zeros included) goes through `draw_aa_counts` as one span.
+///
+/// `rect` must lie within `bitmap` and the clip must be a rectangle within
+/// the bitmap (both guaranteed by [`prepare_aa_fill`]).
+#[cfg(feature = "gpu-aa")]
+fn paint_coverage(
+    bitmap: &mut raster::Bitmap<color::Rgb8>,
+    clip: &Clip,
+    counts: &mut [u8],
+    rect: AaFillRect,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+) {
+    let width = rect.width as usize;
+    debug_assert_eq!(
+        counts.len(),
+        width * rect.height as usize,
+        "coverage buffer does not match the fill rectangle"
+    );
+    debug_assert!(clip.is_rect(), "paint_coverage requires a rectangular clip");
+
+    for (row, row_counts) in counts.chunks_exact_mut(width.max(1)).enumerate() {
+        let Some(first) = row_counts.iter().position(|&c| c != 0) else {
+            continue;
+        };
+        let last = row_counts
+            .iter()
+            .rposition(|&c| c != 0)
+            .expect("a non-zero count exists");
+        let y = rect.y + i32::try_from(row).expect("row fits i32");
+        let x0 = (rect.x + i32::try_from(first).expect("column fits i32")).max(clip.x_min_i);
+        let x1 = (rect.x + i32::try_from(last).expect("column fits i32")).min(clip.x_max_i);
+        if x0 > x1 {
+            continue;
+        }
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "x0 >= rect.x and x1 >= x0 by construction above"
+        )]
+        let span = &mut row_counts[(x0 - rect.x) as usize..=(x1 - rect.x) as usize];
+        raster::fill::draw_aa_counts::<color::Rgb8>(bitmap, pipe, src, span, x0, x1, y);
+    }
+}
+
+/// Attempt to rasterise `path` with the GPU scanline-AA kernel.
 ///
 /// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-/// Returns `false` if the area is below the dispatch threshold, the segment
-/// list is empty, the bbox is non-finite, or the GPU call fails (warning
-/// logged; CPU fill used as fallback).
+/// Returns `false` if [`prepare_aa_fill`] declines the fill or the GPU call
+/// fails (warning logged; CPU fill used as fallback).
 #[cfg(feature = "gpu-aa")]
 pub(super) fn try_gpu_aa_fill(
     renderer: &mut PageRenderer<'_>,
     path: &raster::path::Path,
     even_odd: bool,
-    pipe: &raster::pipe::PipeState<'_>,
-    src: &raster::pipe::PipeSrc<'_>,
+    flatness: f64,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
     ctx: &gpu::GpuCtx,
 ) -> bool {
-    use gpu::GPU_AA_FILL_THRESHOLD;
-
-    let Some((segs_f32, bbox)) = gpu_fill_segs(renderer, path) else {
+    let Some(fill) = prepare_aa_fill(
+        &renderer.gstate.current().clip,
+        renderer.bitmap.width,
+        renderer.bitmap.height,
+        path,
+        flatness,
+        even_odd,
+    ) else {
         return false;
     };
-    if (bbox.w as usize * bbox.h as usize) < GPU_AA_FILL_THRESHOLD {
-        return false;
-    }
 
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "bbox.x/y are u32 bitmap coords; f32 precision is sub-pixel at realistic DPIs"
-    )]
-    let coverage = match ctx.aa_fill(
-        &segs_f32,
-        bbox.x as f32,
-        bbox.y as f32,
-        bbox.w,
-        bbox.h,
-        even_odd,
-    ) {
-        Ok(cov) => cov,
+    let mut counts = match ctx.aa_fill(&fill.table(), fill.rect, fill.aa_width, even_odd) {
+        Ok(counts) => counts,
         Err(e) => {
             log::warn!("GPU AA fill failed, falling back to CPU: {e}");
             return false;
         }
     };
 
-    gpu_coverage_to_bitmap(renderer, &coverage, &bbox, pipe, src);
+    gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
     true
 }
 
 #[cfg(all(test, feature = "gpu-aa"))]
 mod tests {
     use raster::clip::Clip;
+    use raster::path::{Path, PathBuilder};
     use raster::pipe::{PipeSrc, PipeState};
     use raster::types::BlendMode;
     use raster::xpath::XPath;
 
-    use super::{GpuBbox, paint_coverage};
+    use super::{DEVICE_MATRIX, paint_coverage, prepare_aa_fill};
 
-    const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    const W: u32 = 96;
+    const H: u32 = 80;
 
-    fn opaque_pipe() -> PipeState<'static> {
+    fn pipe(a_input: u8) -> PipeState<'static> {
         PipeState {
             blend_mode: BlendMode::Normal,
-            a_input: 255,
+            a_input,
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer: raster::state::TransferSet::identity_rgb(),
@@ -361,151 +256,176 @@ mod tests {
         }
     }
 
-    fn white_bitmap(w: u32, h: u32) -> raster::Bitmap<color::Rgb8> {
-        let mut bitmap = raster::Bitmap::<color::Rgb8>::new(w, h, 1, false);
+    fn white_bitmap() -> raster::Bitmap<color::Rgb8> {
+        let mut bitmap = raster::Bitmap::<color::Rgb8>::new(W, H, 1, false);
         bitmap.data_mut().fill(255);
         bitmap
     }
 
-    fn pixel(bitmap: &raster::Bitmap<color::Rgb8>, x: usize, y: u32) -> [u8; 3] {
-        let row = bitmap.row(y);
-        [row[x].r, row[x].g, row[x].b]
+    fn page_clip() -> Clip {
+        Clip::new(0.0, 0.0, f64::from(W), f64::from(H), true)
     }
 
-    /// A span straddling the clip rectangle must not paint outside it.
-    #[test]
-    fn paint_coverage_respects_clip_rectangle() {
-        let mut bitmap = white_bitmap(64, 64);
-        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
-        clip.clip_to_rect(10.0, 0.0, 20.0, 64.0);
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Path {
+        let mut b = PathBuilder::new();
+        b.move_to(x0, y0).expect("move_to");
+        b.line_to(x1, y0).expect("line_to");
+        b.line_to(x1, y1).expect("line_to");
+        b.line_to(x0, y1).expect("line_to");
+        b.close(true).expect("close");
+        b.build()
+    }
 
-        let bbox = GpuBbox {
-            x: 0,
-            y: 0,
-            w: 32,
-            h: 32,
-        };
-        let coverage = vec![255u8; 32 * 32];
-        let pipe = opaque_pipe();
-        let black = [0u8, 0, 0];
-        let src = PipeSrc::Solid(&black);
+    fn triangle() -> Path {
+        let mut b = PathBuilder::new();
+        b.move_to(7.3, 4.6).expect("move_to");
+        b.line_to(88.9, 30.2).expect("line_to");
+        b.line_to(21.4, 74.8).expect("line_to");
+        b.close(true).expect("close");
+        b.build()
+    }
 
-        paint_coverage(&mut bitmap, &clip, &coverage, &bbox, &pipe, &src);
+    fn circle() -> Path {
+        // Four cubic arcs, kappa = 0.5523.
+        let (cx, cy, r) = (47.37, 41.61, 30.9);
+        let k = 0.5523 * r;
+        let mut b = PathBuilder::new();
+        b.move_to(cx + r, cy).expect("move_to");
+        b.curve_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+            .expect("curve_to");
+        b.curve_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+            .expect("curve_to");
+        b.curve_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+            .expect("curve_to");
+        b.curve_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+            .expect("curve_to");
+        b.close(true).expect("close");
+        b.build()
+    }
 
-        for y in 0..32u32 {
-            for x in 0..32usize {
-                let px = pixel(&bitmap, x, y);
-                if (10..=19).contains(&x) {
-                    assert_eq!(px, [0, 0, 0], "({x}, {y}) inside clip must be painted");
-                } else {
-                    assert_eq!(
-                        px,
-                        [255, 255, 255],
-                        "({x}, {y}) outside clip must stay white"
-                    );
-                }
-            }
+    fn donut() -> Path {
+        let mut b = PathBuilder::new();
+        for (x0, y0, x1, y1) in [(10.5, 8.25, 85.75, 70.5), (30.2, 24.9, 66.1, 55.3)] {
+            b.move_to(x0, y0).expect("move_to");
+            b.line_to(x1, y0).expect("line_to");
+            b.line_to(x1, y1).expect("line_to");
+            b.line_to(x0, y1).expect("line_to");
+            b.close(true).expect("close");
         }
+        b.build()
     }
 
-    /// A fill under a non-rectangular (scanner) clip must not paint outside
-    /// the clip path, only inside it.
-    #[test]
-    fn paint_coverage_respects_clip_path() {
-        let mut bitmap = white_bitmap(64, 64);
-        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
-
-        // Diamond centred on (16, 16): not axis-aligned, so clip_to_path
-        // keeps it as a scanner instead of reducing to a rectangle.
-        let mut builder = raster::path::PathBuilder::new();
-        builder.move_to(16.0, 2.0).expect("move_to");
-        builder.line_to(30.0, 16.0).expect("line_to");
-        builder.line_to(16.0, 30.0).expect("line_to");
-        builder.line_to(2.0, 16.0).expect("line_to");
-        builder.close(false).expect("close");
-        let diamond = builder.build();
-        let xpath = XPath::new(&diamond, &IDENTITY, 0.1, true);
-        clip.clip_to_path(&xpath, false);
-
-        let bbox = GpuBbox {
-            x: 0,
-            y: 0,
-            w: 32,
-            h: 32,
-        };
-        let coverage = vec![255u8; 32 * 32];
-        let pipe = opaque_pipe();
-        let black = [0u8, 0, 0];
-        let src = PipeSrc::Solid(&black);
-
-        paint_coverage(&mut bitmap, &clip, &coverage, &bbox, &pipe, &src);
-
-        // Sample points comfortably inside and outside the diamond so AA
-        // edge coverage cannot blur the verdict.
-        for (x, y) in [(16usize, 16u32), (16, 8), (16, 24), (9, 16), (23, 16)] {
-            assert_eq!(
-                pixel(&bitmap, x, y),
-                [0, 0, 0],
-                "({x}, {y}) inside the clip path must be painted"
-            );
-        }
-        for (x, y) in [(3usize, 3u32), (28, 3), (3, 28), (28, 28), (0, 16), (31, 0)] {
-            assert_eq!(
-                pixel(&bitmap, x, y),
-                [255, 255, 255],
-                "({x}, {y}) outside the clip path must stay white"
-            );
-        }
-    }
-}
-
-/// Attempt to rasterise `path` with the GPU tile-parallel analytical fill kernel.
-///
-/// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-/// Returns `false` if the area is below the dispatch threshold, the segment
-/// list is empty, the bbox is non-finite, or the GPU call fails (warning
-/// logged; caller falls through to AA or CPU fill).
-#[cfg(feature = "gpu-aa")]
-pub(super) fn try_gpu_tile_fill(
-    renderer: &mut PageRenderer<'_>,
-    path: &raster::path::Path,
-    even_odd: bool,
-    pipe: &raster::pipe::PipeState<'_>,
-    src: &raster::pipe::PipeSrc<'_>,
-    ctx: &gpu::GpuCtx,
-) -> bool {
-    use gpu::{GPU_TILE_FILL_THRESHOLD, build_tile_records};
-
-    let Some((segs_f32, bbox)) = gpu_fill_segs(renderer, path) else {
-        return false;
-    };
-    if (bbox.w as usize * bbox.h as usize) < GPU_TILE_FILL_THRESHOLD {
-        return false;
-    }
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "bbox.x/y are u32 bitmap coords; f32 precision is sub-pixel at realistic DPIs"
-    )]
-    let (records, tile_starts, tile_counts, grid_w) =
-        build_tile_records(&segs_f32, bbox.x as f32, bbox.y as f32, bbox.w, bbox.h);
-
-    let coverage = match ctx.tile_fill(
-        &records,
-        &tile_starts,
-        &tile_counts,
-        grid_w,
-        bbox.w,
-        bbox.h,
-        even_odd,
+    /// Render `path` through the device model (prepare → host twin → paint)
+    /// and through the CPU fill; both bitmaps must be byte-identical.
+    fn assert_device_model_matches_cpu(
+        name: &str,
+        path: &Path,
+        clip: &Clip,
+        even_odd: bool,
+        a_input: u8,
     ) {
-        Ok(cov) => cov,
-        Err(e) => {
-            log::warn!("GPU tile fill failed, falling back to AA fill: {e}");
-            return false;
-        }
-    };
+        let pipe = pipe(a_input);
+        let colour = [122u8, 117, 114];
+        let src = PipeSrc::Solid(&colour);
 
-    gpu_coverage_to_bitmap(renderer, &coverage, &bbox, pipe, src);
-    true
+        let fill = prepare_aa_fill(clip, W, H, path, 0.1, even_odd)
+            .unwrap_or_else(|| panic!("{name}: fill must be device-eligible"));
+        let mut counts = gpu::aa_fill_cpu(&fill.table(), fill.rect, fill.aa_width, even_odd);
+        let mut device = white_bitmap();
+        paint_coverage(&mut device, clip, &mut counts, fill.rect, &pipe, &src);
+
+        let mut cpu = white_bitmap();
+        if even_odd {
+            raster::eo_fill(&mut cpu, clip, path, &pipe, &src, &DEVICE_MATRIX, 0.1, true);
+        } else {
+            raster::fill(&mut cpu, clip, path, &pipe, &src, &DEVICE_MATRIX, 0.1, true);
+        }
+
+        assert!(
+            cpu.data().iter().any(|&b| b != 255),
+            "{name}: CPU fill painted nothing"
+        );
+        let differing = cpu
+            .data()
+            .iter()
+            .zip(device.data())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            differing, 0,
+            "{name}: {differing} bytes differ from the CPU fill"
+        );
+    }
+
+    #[test]
+    fn device_model_matches_cpu_on_fractional_rect() {
+        let path = rect(20.31, 5.27, 30.22, 69.38);
+        assert_device_model_matches_cpu("fractional rect", &path, &page_clip(), false, 255);
+    }
+
+    #[test]
+    fn device_model_matches_cpu_on_slanted_and_curved_paths() {
+        assert_device_model_matches_cpu("triangle", &triangle(), &page_clip(), false, 255);
+        assert_device_model_matches_cpu("circle", &circle(), &page_clip(), false, 255);
+    }
+
+    #[test]
+    fn device_model_matches_cpu_under_even_odd() {
+        assert_device_model_matches_cpu("donut eo", &donut(), &page_clip(), true, 255);
+        assert_device_model_matches_cpu("donut nz", &donut(), &page_clip(), false, 255);
+    }
+
+    #[test]
+    fn device_model_matches_cpu_with_constant_alpha() {
+        assert_device_model_matches_cpu("triangle alpha", &triangle(), &page_clip(), false, 128);
+    }
+
+    #[test]
+    fn device_model_matches_cpu_under_rect_clip_and_off_page_geometry() {
+        let mut clip = page_clip();
+        clip.clip_to_rect(12.6, 9.4, 70.2, 60.7);
+        assert_device_model_matches_cpu("clipped circle", &circle(), &clip, false, 255);
+
+        let off_page = rect(-15.7, -9.2, 40.4, 33.6);
+        assert_device_model_matches_cpu("off-page rect", &off_page, &page_clip(), false, 255);
+        let past_edges = rect(60.3, 50.9, 130.0, 95.5);
+        assert_device_model_matches_cpu("past-edge rect", &past_edges, &page_clip(), false, 255);
+    }
+
+    #[test]
+    fn path_clips_stay_on_the_cpu() {
+        let mut clip = page_clip();
+        let mut b = PathBuilder::new();
+        b.move_to(48.0, 2.0).expect("move_to");
+        b.line_to(94.0, 40.0).expect("line_to");
+        b.line_to(48.0, 78.0).expect("line_to");
+        b.line_to(2.0, 40.0).expect("line_to");
+        b.close(false).expect("close");
+        let diamond = XPath::new(&b.build(), &DEVICE_MATRIX, 0.1, true);
+        clip.clip_to_path(&diamond, false);
+        assert!(!clip.is_rect(), "diamond must become a path clip");
+
+        assert!(
+            prepare_aa_fill(&clip, W, H, &circle(), 0.1, false).is_none(),
+            "a fill under a path clip must not be dispatched to the device"
+        );
+    }
+
+    #[test]
+    fn small_and_empty_fills_stay_on_the_cpu() {
+        let tiny = rect(10.0, 10.0, 20.0, 20.0);
+        assert!(
+            prepare_aa_fill(&page_clip(), W, H, &tiny, 0.1, false).is_none(),
+            "a fill below the dispatch threshold stays on the CPU"
+        );
+        let outside = rect(200.0, 200.0, 300.0, 300.0);
+        assert!(
+            prepare_aa_fill(&page_clip(), W, H, &outside, 0.1, false).is_none(),
+            "a fill outside the bitmap has nothing to dispatch"
+        );
+        assert!(
+            prepare_aa_fill(&page_clip(), W, H, &PathBuilder::new().build(), 0.1, false).is_none(),
+            "an empty path has nothing to dispatch"
+        );
+    }
 }

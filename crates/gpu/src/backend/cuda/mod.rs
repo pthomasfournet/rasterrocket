@@ -102,15 +102,12 @@ impl GpuBackend for CudaBackend {
     }
 
     fn record_aa_fill(&self, params: params::AaFillParams<'_, Self>) -> Result<()> {
+        params.validate(self)?;
         self.recorder.record_aa_fill(params)
     }
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
         self.recorder.record_icc_clut(params)
-    }
-
-    fn record_tile_fill(&self, params: params::TileFillParams<'_, Self>) -> Result<()> {
-        self.recorder.record_tile_fill(params)
     }
 
     fn record_composite(&self, params: params::CompositeParams<'_, Self>) -> Result<()> {

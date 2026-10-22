@@ -323,8 +323,8 @@ pub struct PageRenderer<'doc> {
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     gpu_ctx: Option<Arc<GpuCtx>>,
     /// Vulkan compute backend, attached when the session was opened with
-    /// [`BackendPolicy::ForceVulkan`].  When set, [`gpu_ops::try_gpu_aa_fill`]
-    /// / `try_gpu_tile_fill` and the ICC CMYK→RGB path prefer the Vulkan
+    /// [`BackendPolicy::ForceVulkan`].  When set, the AA fill dispatch
+    /// and the ICC CMYK→RGB path prefer the Vulkan
     /// trait surface (`alloc → upload → record_* → submit → wait → download`)
     /// over the CUDA `GpuCtx` path.  Mutually exclusive with `gpu_ctx` in
     /// practice — the device image cache is CUDA-only, so opening a session under
@@ -640,11 +640,14 @@ impl<'doc> PageRenderer<'doc> {
         self.nvjpeg2k.take()
     }
 
-    /// Attach a GPU context for supersampled AA fill dispatch.
+    /// Attach a GPU context for antialiased fill dispatch.
     ///
-    /// When set, filled paths with a pixel bounding-box area above
-    /// [`gpu::GPU_AA_FILL_THRESHOLD`] are rasterised on the GPU using a 64-sample
-    /// jittered warp-ballot kernel instead of the CPU 4× scanline AA path.
+    /// When set, solid-colour fills under a rectangular clip whose pixel
+    /// bounding-box area reaches [`gpu::GPU_AA_FILL_THRESHOLD`] have their
+    /// coverage evaluated on the GPU.  The device walks the same 4× scanline
+    /// intersection table the CPU fill builds and the counts are composited
+    /// through the CPU pipeline, so the rendered bytes are identical to the
+    /// CPU-only render.
     ///
     /// Call with `None` to revert to CPU-only AA.
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
@@ -654,7 +657,7 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Attach a Vulkan compute backend for kernel dispatch.
     ///
-    /// When set, GPU-eligible AA fill, tile fill, and ICC CMYK→RGB calls
+    /// When set, GPU-eligible AA fill and ICC CMYK→RGB calls
     /// are routed through the [`gpu::backend::GpuBackend`] trait surface
     /// (`alloc → upload → record_* → submit → wait → download`) on the
     /// Vulkan recorder rather than the CUDA `GpuCtx`.  The CUDA path is
@@ -1031,34 +1034,26 @@ impl<'doc> PageRenderer<'doc> {
         // GPU-accelerated).  Cloning the `Arc` releases the immutable borrow
         // before the mutable `self` borrow inside the helpers.
         //
-        // Dispatch order per backend: tile-parallel analytical (large fills)
-        // → warp-ballot 64-sample AA (medium fills) → CPU scanline AA
-        // (always-available fallback).  The Vulkan branch fires before the
-        // CUDA branch when both are present, but in practice
-        // `rasterrocket::render::open_session` wires only one of them based
-        // on `BackendPolicy`, so the second branch only runs under
-        // `Auto` / `ForceCuda`.
+        // The device evaluates the CPU scanner's intersection table with
+        // the CPU's span walk and composites through the CPU pipeline, so
+        // either branch yields the bytes the CPU fill below would.  The
+        // Vulkan branch fires before the CUDA branch when both are present,
+        // but in practice `rasterrocket::render::open_session` wires only
+        // one of them based on `BackendPolicy`, so the second branch only
+        // runs under `Auto` / `ForceCuda`.
         #[cfg(feature = "vulkan")]
         if tiled.is_none()
             && let Some(vk) = self.vk_backend.clone()
+            && self.try_vk_aa_fill(path, even_odd, flatness, &pipe, &src, &vk)
         {
-            if self.try_vk_tile_fill(path, even_odd, &pipe, &src, &vk) {
-                return;
-            }
-            if self.try_vk_aa_fill(path, even_odd, &pipe, &src, &vk) {
-                return;
-            }
+            return;
         }
         #[cfg(feature = "gpu-aa")]
         if tiled.is_none()
             && let Some(ctx) = self.gpu_ctx.clone()
+            && self.try_gpu_aa_fill(path, even_odd, flatness, &pipe, &src, &ctx)
         {
-            if self.try_gpu_tile_fill(path, even_odd, &pipe, &src, &ctx) {
-                return;
-            }
-            if self.try_gpu_aa_fill(path, even_odd, &pipe, &src, &ctx) {
-                return;
-            }
+            return;
         }
 
         if even_odd {
@@ -1087,40 +1082,23 @@ impl<'doc> PageRenderer<'doc> {
         drop(tiled);
     }
 
-    /// Attempt to rasterise `path` with the GPU 64-sample AA kernel.
+    /// Attempt to rasterise `path` with the GPU scanline-AA kernel.
     ///
     /// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-    /// Returns `false` if the area is below the dispatch threshold, the segment
-    /// list is empty, the bbox is non-finite, or the GPU call fails (warning
-    /// logged; CPU fill used as fallback).
+    /// Returns `false` if the fill is not device-eligible (see
+    /// `gpu_ops::prepare_aa_fill`) or the GPU call fails (warning logged;
+    /// CPU fill used as fallback).
     #[cfg(feature = "gpu-aa")]
     fn try_gpu_aa_fill(
         &mut self,
         path: &raster::path::Path,
         even_odd: bool,
+        flatness: f64,
         pipe: &raster::pipe::PipeState<'_>,
         src: &raster::pipe::PipeSrc<'_>,
         ctx: &gpu::GpuCtx,
     ) -> bool {
-        gpu_ops::try_gpu_aa_fill(self, path, even_odd, pipe, src, ctx)
-    }
-
-    /// Attempt to rasterise `path` with the GPU tile-parallel analytical fill kernel.
-    ///
-    /// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-    /// Returns `false` if the area is below the dispatch threshold, the segment
-    /// list is empty, the bbox is non-finite, or the GPU call fails (warning
-    /// logged; caller falls through to AA or CPU fill).
-    #[cfg(feature = "gpu-aa")]
-    fn try_gpu_tile_fill(
-        &mut self,
-        path: &raster::path::Path,
-        even_odd: bool,
-        pipe: &raster::pipe::PipeState<'_>,
-        src: &raster::pipe::PipeSrc<'_>,
-        ctx: &gpu::GpuCtx,
-    ) -> bool {
-        gpu_ops::try_gpu_tile_fill(self, path, even_odd, pipe, src, ctx)
+        gpu_ops::try_gpu_aa_fill(self, path, even_odd, flatness, pipe, src, ctx)
     }
 
     /// Vulkan twin of [`Self::try_gpu_aa_fill`].  See [`vk_ops::try_vk_aa_fill`].
@@ -1129,24 +1107,12 @@ impl<'doc> PageRenderer<'doc> {
         &mut self,
         path: &raster::path::Path,
         even_odd: bool,
+        flatness: f64,
         pipe: &raster::pipe::PipeState<'_>,
         src: &raster::pipe::PipeSrc<'_>,
         backend: &Arc<VulkanBackend>,
     ) -> bool {
-        vk_ops::try_vk_aa_fill(self, backend, path, even_odd, pipe, src)
-    }
-
-    /// Vulkan twin of [`Self::try_gpu_tile_fill`].  See [`vk_ops::try_vk_tile_fill`].
-    #[cfg(feature = "vulkan")]
-    fn try_vk_tile_fill(
-        &mut self,
-        path: &raster::path::Path,
-        even_odd: bool,
-        pipe: &raster::pipe::PipeState<'_>,
-        src: &raster::pipe::PipeSrc<'_>,
-        backend: &Arc<VulkanBackend>,
-    ) -> bool {
-        vk_ops::try_vk_tile_fill(self, backend, path, even_odd, pipe, src)
+        vk_ops::try_vk_aa_fill(self, backend, path, even_odd, flatness, pipe, src)
     }
 
     fn stroke_path(&mut self, path: &raster::path::Path) {

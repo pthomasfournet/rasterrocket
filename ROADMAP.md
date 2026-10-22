@@ -27,6 +27,23 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Unreleased
 
+**GPU fills are now byte-identical to the CPU rasteriser.** The `gpu-aa`
+tile-fill (analytical trapezoid area) and AA-fill (64 Halton-jittered samples)
+kernels computed a different coverage function from the CPU's 4× scanline AA,
+so partial-coverage edges of any fill above the 256 px dispatch threshold
+differed under `--backend cuda` / `--backend vulkan` (corpus-08 page 2: 540
+bytes, max Δ57, on one 10 × 160 px rectangle; a 0.083-coverage column rendered
+as 244 on the GPU against the CPU's 238). The CPU rasteriser is the contract.
+Both kernels are replaced by one `aa_fill` kernel (CUDA and Slang) that
+evaluates the CPU scanner's own intersection table (`raster::fill::aa_scanner`)
+with the CPU's span walk and returns raw sub-sample counts; the renderer
+composites them through the CPU's `draw_aa_counts`. Fills under a path clip
+stay on the CPU. Guarded at three levels: the host twin against the CPU fill
+in `pdf_interp` (CPU-only, runs in CI), CUDA and Vulkan against the twin and
+each other in `crates/gpu/tests/aa_fill_parity.rs`, and end-to-end page
+renders in `crates/pdf_raster/tests/gpu_aa_render_parity.rs` (synthetic page
+plus corpus-02/-07/-08).
+
 **Dependency sweep (July 2026).** Every workspace dependency brought current;
 `cargo outdated` reports a clean tree. Five upgrades needed API migration:
 
@@ -1666,27 +1683,25 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 Every **phase** is shipped or deferred by deliberate decision; no phase-level
 engineering is in flight. What remains open:
 
-- **4 open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
-  propagation pass-complexity, unleveraged CPU SIMD opportunities, unleveraged
-  CUDA opportunities, and a `gpu-aa` fill-coverage divergence from the CPU
-  rasteriser (filed 2026-09-15: the GPU tile/AA fill kernels compute
-  analytical or 64-sample coverage while the CPU path is 4× scanline AA, so
-  partial-coverage edges of large fills differ by up to ~57/255; seen on one
-  10×160 px rectangle in corpus-08 page 2, nowhere in corpus-02/-07). The two
-  "unleveraged" reports are opportunity inventories with several items already
-  closed in-file. (The `cache`-feature render divergence found 2026-09-15 is
-  fixed and its report removed: the CPU image sampler's axis-aligned fast path
-  snapped its sampling origin to the image edge, the blit kernel used its own
-  f32 inverse-CTM, and the device page buffer was composited only at end of
-  page. Both paths now sample through one shared fixed-point grid and
-  composite per image; `crates/pdf_raster/tests/cache_render_parity.rs`
-  guards it end-to-end on a synthetic page plus corpus-07 and corpus-08.)
+- **Open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
+  propagation pass-complexity, unleveraged CPU SIMD opportunities, and
+  unleveraged CUDA opportunities. The two "unleveraged" reports are
+  opportunity inventories with several items already closed in-file. (Two
+  2026-09-15 render divergences are fixed: the `cache`-feature one — the CPU
+  image sampler's axis-aligned fast path snapped its sampling origin to the
+  image edge, the blit kernel used its own f32 inverse-CTM, and the device
+  page buffer was composited only at end of page; both paths now sample
+  through one shared fixed-point grid and composite per image, guarded by
+  `crates/pdf_raster/tests/cache_render_parity.rs` — and the `gpu-aa` one,
+  where the GPU fill kernels computed analytical / jittered coverage instead
+  of the CPU's 4× scanline AA; the kernels now evaluate the CPU scanner's
+  table, see "Unreleased".)
 
 Deferred/blocked items, in full:
 
 - **Phase 7** — re-bench with the `nvjpeg-hardware` feature flag (mode E). A measurement to formally confirm a near-certain negative (the hard-blocker section already establishes `NVJPEG_BACKEND_HARDWARE` is rejected at handle creation on consumer GeForce). Not engineering work.
 - **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.
-- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). External-blocked: no non-NVIDIA GPU or CI runner on the dev box. Also the `record_tile_fill` parity oracle (blocked on a CPU twin) and the perf-only Task 3 follow-ups (deferrable; none block correctness/parity).
+- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). External-blocked: no non-NVIDIA GPU or CI runner on the dev box. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
 - **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
 - **crates.io packaging** — indefinitely postponed; nothing published, nothing yanked. Treat as closed unless reopened.
 

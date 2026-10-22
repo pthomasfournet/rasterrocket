@@ -1,7 +1,7 @@
 //! Pipeline cache: SPIR-V → `VkPipeline` per kernel.
 //!
-//! Each of the six kernels (`composite_rgba8`, `apply_soft_mask`, `aa_fill`,
-//! `tile_fill`, `icc_clut`, `blit_image`) gets its own descriptor set layout +
+//! Each of the five kernels (`composite_rgba8`, `apply_soft_mask`, `aa_fill`,
+//! `icc_clut`, `blit_image`) gets its own descriptor set layout +
 //! pipeline layout + compute pipeline, lazy-created on first dispatch.
 //! The SPIR-V blobs are baked into the binary via `include_bytes!` of the
 //! build-script outputs.
@@ -12,13 +12,6 @@
 //! buffers.  Scalar uniforms (`n_pixels`, width, height, eo, blit bbox)
 //! are passed via push constants (max 128 bytes — Vulkan's guaranteed
 //! minimum is 128, every desktop driver supports at least that).
-//!
-//! ## Subgroup size for `aa_fill`
-//!
-//! `aa_fill` is the only kernel using subgroup ops.  Per the spec we
-//! ship subgroup-size-agnostic Slang; the runtime determines the wave
-//! width.  We don't pin a `requiredSubgroupSize` — the kernel adapts via
-//! its `groupshared` cross-subgroup reduction.
 
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -36,7 +29,6 @@ pub(super) enum KernelId {
     Composite,
     ApplySoftMask,
     AaFill,
-    TileFill,
     IccClut,
     BlitImage,
     /// Blelloch scan, per-workgroup phase. Same SPIR-V as the other
@@ -89,9 +81,9 @@ pub(super) enum KernelId {
 /// at build time: if `slot_index()` ever returns a value
 /// `>= NUM_KERNELS` for any variant, the build fails.
 #[cfg(feature = "gpu-jpeg-huffman")]
-const NUM_KERNELS: usize = 16;
+const NUM_KERNELS: usize = 15;
 #[cfg(not(feature = "gpu-jpeg-huffman"))]
-const NUM_KERNELS: usize = 6;
+const NUM_KERNELS: usize = 5;
 
 /// Every variant's `slot_index()` must be `< NUM_KERNELS`. Drift
 /// here would surface as a runtime panic when `self.slots[idx]` is
@@ -102,7 +94,6 @@ const _: () = {
     assert!(KernelId::Composite.slot_index() < NUM_KERNELS);
     assert!(KernelId::ApplySoftMask.slot_index() < NUM_KERNELS);
     assert!(KernelId::AaFill.slot_index() < NUM_KERNELS);
-    assert!(KernelId::TileFill.slot_index() < NUM_KERNELS);
     assert!(KernelId::IccClut.slot_index() < NUM_KERNELS);
     assert!(KernelId::BlitImage.slot_index() < NUM_KERNELS);
 };
@@ -129,7 +120,6 @@ impl KernelId {
                 include_bytes!(concat!(env!("OUT_DIR"), "/apply_soft_mask.spv"))
             }
             Self::AaFill => include_bytes!(concat!(env!("OUT_DIR"), "/aa_fill.spv")),
-            Self::TileFill => include_bytes!(concat!(env!("OUT_DIR"), "/tile_fill.spv")),
             Self::IccClut => include_bytes!(concat!(env!("OUT_DIR"), "/icc_clut.spv")),
             Self::BlitImage => include_bytes!(concat!(env!("OUT_DIR"), "/blit_image.spv")),
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -191,29 +181,28 @@ impl KernelId {
             Self::Composite => 0,
             Self::ApplySoftMask => 1,
             Self::AaFill => 2,
-            Self::TileFill => 3,
-            Self::IccClut => 4,
-            Self::BlitImage => 5,
+            Self::IccClut => 3,
+            Self::BlitImage => 4,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup => 6,
+            Self::ScanPerWorkgroup => 5,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanBlockSums => 7,
+            Self::ScanBlockSums => 6,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanScatter => 8,
+            Self::ScanScatter => 7,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => 9,
+            Self::Phase1IntraSync => 8,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => 10,
+            Self::Phase2InterSync => 9,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => 11,
+            Self::Phase4Redecode => 10,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => 12,
+            Self::JpegPhase1IntraSync => 11,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 13,
+            Self::JpegPhase2InterSync => 12,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => 14,
+            Self::JpegPhase4Redecode => 13,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => 15,
+            Self::IdctColor => 14,
         }
     }
 
@@ -224,7 +213,6 @@ impl KernelId {
             Self::Composite => "composite_rgba8",
             Self::ApplySoftMask => "apply_soft_mask",
             Self::AaFill => "aa_fill",
-            Self::TileFill => "tile_fill",
             Self::IccClut => "icc_cmyk_clut",
             Self::BlitImage => "blit_image",
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -298,9 +286,9 @@ impl KernelId {
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::IdctColor => &[0, 1, 2, 3],
             // Everyone else: sequential 0..n.
-            Self::Composite | Self::ApplySoftMask | Self::AaFill => &[0, 1],
-            Self::TileFill | Self::BlitImage => &[0, 1, 2, 3],
-            Self::IccClut => &[0, 1, 2],
+            Self::Composite | Self::ApplySoftMask => &[0, 1],
+            Self::BlitImage => &[0, 1, 2, 3],
+            Self::AaFill | Self::IccClut => &[0, 1, 2],
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => &[0, 1],
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -323,10 +311,8 @@ impl KernelId {
             Self::Composite => 2,
             // (pixels, mask)
             Self::ApplySoftMask => 2,
-            // (segs, coverage)
-            Self::AaFill => 2,
-            // (records, tile_starts, tile_counts, coverage)
-            Self::TileFill => 4,
+            // (intersects, row_starts, coverage)
+            Self::AaFill => 3,
             // (cmyk, rgb, clut)
             Self::IccClut => 3,
             // (src, dst_rgba, cols, rows) — dimensions and bbox travel as push constants
@@ -702,7 +688,6 @@ mod tests {
             KernelId::Composite,
             KernelId::ApplySoftMask,
             KernelId::AaFill,
-            KernelId::TileFill,
             KernelId::IccClut,
             KernelId::BlitImage,
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -749,7 +734,6 @@ mod tests {
             KernelId::Composite,
             KernelId::ApplySoftMask,
             KernelId::AaFill,
-            KernelId::TileFill,
             KernelId::IccClut,
             KernelId::BlitImage,
             #[cfg(feature = "gpu-jpeg-huffman")]

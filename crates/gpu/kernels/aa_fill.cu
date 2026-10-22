@@ -1,157 +1,122 @@
-// GPU supersampled anti-aliasing fill kernel.
+// Scanline anti-aliased fill: per-pixel sub-sample counts from a scanline
+// intersection table.
 //
-// Each output pixel is handled by one block of 64 threads (2 warps).
-// Each thread evaluates the winding-number test at one jittered sub-pixel
-// sample using the segment list for the filled path.
+// The table is the CPU rasteriser's `XPathScanner` in AA (4×) coordinates:
+// for each AA row, its intersections (x0, x1, count) sorted by x0.  One
+// thread per output pixel walks the pixel's four AA sub-rows exactly as the
+// CPU's `render_aa_line` does: the running winding count (masked by the
+// fill rule) enters a span at an intersection's x0 and leaves it at x1 + 1
+// of the intersection that returns the masked count to zero; a span still
+// open after the last intersection runs to aa_width.  Spans are clamped to
+// [0, aa_width).  Coverage is the number of the pixel's 16 sub-samples that
+// lie inside a span (a union — overlapping spans do not double count).
 //
-// Coverage is reduced via __ballot_sync + __popc (one 32-sample ballot per
-// warp), summed across both warps (0..64), then scaled to 0..255 and written.
+// The walk stops once an entering intersection starts at or beyond the
+// pixel's last sub-sample: intersections are sorted by x0, so no later span
+// can reach the pixel.
+//
+// Output: one byte per pixel holding the count 0..=16.  The coverage →
+// alpha mapping is applied by the host.
 //
 // Inputs
-// ------
-//   segs     : packed f32 pairs [x0,y0,x1,y1] per segment, n_segs segments
-//   n_segs   : segment count
-//   x_min    : leftmost output pixel X (inclusive, in device pixels)
-//   y_min    : topmost output pixel Y (inclusive, in device pixels)
-//   width    : output pixel width
-//   height   : output pixel height
-//   eo       : 1 = even-odd fill rule, 0 = non-zero winding
-//   coverage : output array, one byte per pixel (row-major, width * height bytes)
+//   intersects : int triples [x0, x1, count], grouped by row
+//   row_starts : n_rows + 1 offsets; row r is intersects[row_starts[r]
+//                .. row_starts[r + 1])
+//   n_rows     : rows in the table
+//   table_y0   : AA row index of table row 0
+//   x_min,y_min: device-pixel origin of the output rectangle
+//   width,height: output rectangle extent in pixels
+//   aa_width   : bitmap width × 4 — spans are clamped to [0, aa_width)
+//   eo         : 1 = even-odd, 0 = non-zero winding
+//   coverage   : output, width × height bytes (row-major)
 
-// Quasi-random Halton(base2, base3) jitter table for 64 samples within [0,1)^2.
-// Generated offline: Halton(2) for x, Halton(3) for y.
-// Using a compile-time constant avoids a per-launch memory allocation.
-__device__ __constant__ float JITTER_X[64] = {
-    0.5f, 0.25f, 0.75f, 0.125f, 0.625f, 0.375f, 0.875f, 0.0625f,
-    0.5625f, 0.3125f, 0.8125f, 0.1875f, 0.6875f, 0.4375f, 0.9375f, 0.03125f,
-    0.53125f, 0.28125f, 0.78125f, 0.15625f, 0.65625f, 0.40625f, 0.90625f, 0.09375f,
-    0.59375f, 0.34375f, 0.84375f, 0.21875f, 0.71875f, 0.46875f, 0.96875f, 0.015625f,
-    0.515625f, 0.265625f, 0.765625f, 0.140625f, 0.640625f, 0.390625f, 0.890625f, 0.078125f,
-    0.578125f, 0.328125f, 0.828125f, 0.203125f, 0.703125f, 0.453125f, 0.953125f, 0.046875f,
-    0.546875f, 0.296875f, 0.796875f, 0.171875f, 0.671875f, 0.421875f, 0.921875f, 0.109375f,
-    0.609375f, 0.359375f, 0.859375f, 0.234375f, 0.734375f, 0.484375f, 0.984375f, 0.0078125f,
-};
+#define AA_SIZE 4
+#define BLOCK_W 16
+#define BLOCK_H 16
 
-// Mirrors the authoritative `HALTON3` table in `crates/gpu/src/fill.rs`.
-// Earlier revisions of this table had transcription errors at n=17..23
-// and n=41..47 that broke CPU/GPU coverage parity on boundary pixels;
-// keep these values byte-for-byte aligned with the Rust table.
-__device__ __constant__ float JITTER_Y[64] = {
-    // n=1..8
-    0.333333f, 0.666667f, 0.111111f, 0.444444f, 0.777778f, 0.222222f, 0.555556f, 0.888889f,
-    // n=9..16
-    0.037037f, 0.370370f, 0.703704f, 0.148148f, 0.481481f, 0.814815f, 0.259259f, 0.592593f,
-    // n=17..24
-    0.925926f, 0.074074f, 0.407407f, 0.740741f, 0.185185f, 0.518519f, 0.851852f, 0.296296f,
-    // n=25..32
-    0.629630f, 0.962963f, 0.012346f, 0.345679f, 0.679012f, 0.123457f, 0.456790f, 0.790123f,
-    // n=33..40
-    0.234568f, 0.567901f, 0.901235f, 0.049383f, 0.382716f, 0.716049f, 0.160494f, 0.493827f,
-    // n=41..48
-    0.827160f, 0.271605f, 0.604938f, 0.938272f, 0.086420f, 0.419753f, 0.753086f, 0.197531f,
-    // n=49..56
-    0.530864f, 0.864198f, 0.308642f, 0.641975f, 0.975309f, 0.024691f, 0.358025f, 0.691358f,
-    // n=57..64
-    0.135802f, 0.469136f, 0.802469f, 0.246914f, 0.580247f, 0.913580f, 0.061728f, 0.395062f,
-};
-
-// Compute the non-zero winding number contribution of segment (x0,y0)→(x1,y1)
-// for sample point (px, py).
-//
-// Uses the crossing-number approach adapted for winding: count +1 for
-// upward-crossing and -1 for downward-crossing edges at the sample point.
-// An "upward" crossing is one where y0 < py <= y1; a "downward" crossing
-// is y1 < py <= y0. The x-intersection of the edge at y=py must be >= px
-// (cast a ray in the +x direction).
-//
-// Returns the winding increment for this segment (+1, -1, or 0).
-__device__ int winding_contrib(float x0, float y0, float x1, float y1,
-                               float px, float py)
+// Sub-sample bitmask of the row's coverage within the four AA columns
+// [ax0, ax0 + AA_SIZE).
+__device__ unsigned int row_coverage_mask(const int* __restrict__ intersects,
+                                          unsigned int start, unsigned int end,
+                                          int aa_width, int eo_mask, int ax0)
 {
-    // Upward crossing: y0 <= py < y1
-    if (y0 <= py && py < y1) {
-        // Compute x-intersection at py.
-        float t = (py - y0) / (y1 - y0);
-        float xi = x0 + t * (x1 - x0);
-        return (xi >= px) ? 1 : 0;
+    unsigned int mask = 0;
+    int count = 0;
+    unsigned int i = start;
+    int xx = 0;
+
+    while (i < end || (count & eo_mask) != 0) {
+        if ((count & eo_mask) == 0) {
+            if (i >= end) break;
+            xx = intersects[i * 3];
+            if (xx >= ax0 + AA_SIZE) break;
+            count += intersects[i * 3 + 2];
+            i++;
+            continue;
+        }
+
+        int span_x1;
+        for (;;) {
+            if (i >= end) {
+                span_x1 = aa_width;
+                break;
+            }
+            count += intersects[i * 3 + 2];
+            int span_end = intersects[i * 3 + 1] + 1;
+            i++;
+            if ((count & eo_mask) == 0) {
+                span_x1 = span_end;
+                break;
+            }
+        }
+
+        int bx0 = max(xx, 0);
+        int bx1 = min(span_x1, aa_width);
+        if (bx0 < bx1) {
+            int lo = max(bx0, ax0);
+            int hi = min(bx1, ax0 + AA_SIZE);
+            if (lo < hi) {
+                mask |= ((1u << (hi - lo)) - 1u) << (lo - ax0);
+            }
+        }
+        if (i >= end) break;
+        xx = span_x1;
     }
-    // Downward crossing: y1 <= py < y0
-    if (y1 <= py && py < y0) {
-        float t = (py - y1) / (y0 - y1);
-        float xi = x1 + t * (x0 - x1);
-        return (xi >= px) ? -1 : 0;
-    }
-    return 0;
+    return mask;
 }
 
-// Test whether sample point (px, py) is inside the filled path using the
-// winding number (non-zero) or even-odd rule.
-__device__ bool sample_inside(const float* __restrict__ segs, unsigned int n_segs,
-                              float px, float py, int eo)
-{
-    int winding = 0;
-    for (unsigned int k = 0; k < n_segs; k++) {
-        unsigned int base = k * 4;
-        float x0 = segs[base + 0];
-        float y0 = segs[base + 1];
-        float x1 = segs[base + 2];
-        float y1 = segs[base + 3];
-        winding += winding_contrib(x0, y0, x1, y1, px, py);
-    }
-    if (eo) {
-        return (winding & 1) != 0;
-    }
-    return winding != 0;
-}
-
+// Grid: (ceil(width / BLOCK_W), ceil(height / BLOCK_H), 1),
+// Block: (BLOCK_W, BLOCK_H, 1).
 extern "C" __global__ void aa_fill(
-    const float* __restrict__ segs,
-    unsigned int n_segs,
-    float x_min,
-    float y_min,
+    const int* __restrict__ intersects,
+    const unsigned int* __restrict__ row_starts,
+    unsigned int n_rows,
+    int table_y0,
+    int x_min,
+    int y_min,
     unsigned int width,
     unsigned int height,
+    unsigned int aa_width,
     int eo,
     unsigned char* __restrict__ coverage
 ) {
-    // blockIdx.x = pixel index (row-major)
-    unsigned int px_idx = blockIdx.x;
-    if (px_idx >= width * height) return;
+    unsigned int px = blockIdx.x * BLOCK_W + threadIdx.x;
+    unsigned int py = blockIdx.y * BLOCK_H + threadIdx.y;
+    if (px >= width || py >= height) return;
 
-    unsigned int px_x = px_idx % width;
-    unsigned int px_y = px_idx / width;
+    int eo_mask = eo ? 1 : ~0;
+    int aa_w = (int)aa_width;
+    int ax0 = (x_min + (int)px) * AA_SIZE;
+    int ay0 = (y_min + (int)py) * AA_SIZE;
 
-    // Device-space centre of this output pixel.
-    float cx = x_min + (float)px_x + 0.5f;
-    float cy = y_min + (float)px_y + 0.5f;
-
-    // Each thread handles one of 64 jittered samples.
-    unsigned int tid = threadIdx.x; // 0..63
-    unsigned int warp = tid >> 5;   // 0 or 1
-    unsigned int lane = tid & 31;   // 0..31
-
-    // Sample sub-pixel offset from pixel centre: shift by [-0.5, +0.5).
-    float sx = cx + JITTER_X[tid] - 0.5f;
-    float sy = cy + JITTER_Y[tid] - 0.5f;
-
-    bool inside = sample_inside(segs, n_segs, sx, sy, eo);
-
-    // Warp-level ballot: each warp independently counts covered samples.
-    unsigned int mask = __ballot_sync(0xFFFFFFFFu, inside);
-    int count = __popc(mask);
-
-    // One thread per warp writes its count into shared memory.
-    __shared__ int warp_counts[2];
-    if (lane == 0) {
-        warp_counts[warp] = count;
+    unsigned int total = 0;
+    for (int yy = 0; yy < AA_SIZE; yy++) {
+        int r = ay0 + yy - table_y0;
+        if (r < 0 || (unsigned int)r >= n_rows) continue;
+        unsigned int start = row_starts[r];
+        unsigned int end = row_starts[r + 1];
+        total += __popc(row_coverage_mask(intersects, start, end, aa_w, eo_mask, ax0));
     }
-    __syncthreads();
 
-    // Thread 0 aggregates and writes the final coverage byte.
-    if (tid == 0) {
-        int total = warp_counts[0] + warp_counts[1]; // 0..64
-        // Scale 0..64 → 0..255, rounding to nearest.
-        // total * 255 / 64 = total * 255 >> 6.
-        coverage[px_idx] = (unsigned char)((total * 255 + 32) >> 6);
-    }
+    coverage[py * width + px] = (unsigned char)total;
 }

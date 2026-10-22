@@ -13,8 +13,9 @@
 //!   `cargo test -p rasterrocket-gpu --features vulkan --test cu_vs_slang_parity`
 //!   `cargo test -p rasterrocket-gpu --features 'vulkan,gpu-validation' --test cu_vs_slang_parity`
 //!
-//! This file has no parallel-Huffman cases. The CUDA-vs-Vulkan parity
-//! tests for those kernels live in `huffman::vulkan_tests`, gated on
+//! This file has no `aa_fill` or parallel-Huffman cases. The fill kernel's
+//! CUDA / Vulkan / host-twin parity tests live in `aa_fill_parity.rs`; the
+//! Huffman ones live in `huffman::vulkan_tests`, gated on
 //! `gpu-jpeg-huffman` in addition to `vulkan`:
 //!   `cargo test -p rasterrocket-gpu --features 'vulkan,gpu-validation,gpu-jpeg-huffman' --lib -- vulkan_tests`
 
@@ -31,7 +32,7 @@
 
 use rasterrocket_gpu::backend::GpuBackend;
 use rasterrocket_gpu::backend::params::{
-    AaFillParams, BlitParams, CompositeParams, IccClutParams, SoftMaskParams,
+    BlitParams, CompositeParams, IccClutParams, SoftMaskParams,
 };
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
@@ -346,99 +347,6 @@ fn icc_clut_random_inputs() {
     let cpu = run_icc_clut_cpu(&cmyk, &clut, grid_n);
     let vk = run_icc_clut_vulkan(&cmyk, &clut);
     assert_within_1_lsb(&cpu, &vk, "icc_clut random");
-}
-
-// ── aa_fill ─────────────────────────────────────────────────────────
-
-fn run_aa_fill_vulkan(segs: &[f32], width: u32, height: u32, fill_rule: u8) -> Vec<u8> {
-    let backend = VulkanBackend::new().expect("VulkanBackend::new");
-    let segs_bytes: Vec<u8> = segs.iter().flat_map(|f| f.to_ne_bytes()).collect();
-    let n_segs = u32::try_from(segs.len() / 4).expect("n_segs fits u32");
-    let n_pixels = (width as usize) * (height as usize);
-
-    let d_segs = backend.alloc_device(segs_bytes.len()).expect("alloc segs");
-    let d_cov = backend.alloc_device(n_pixels).expect("alloc coverage");
-    backend
-        .upload_sync(&d_segs, &segs_bytes)
-        .expect("upload segs");
-
-    backend.begin_page().expect("begin_page");
-    backend
-        .record_aa_fill(AaFillParams {
-            segs: &d_segs,
-            n_segs,
-            coverage: &d_cov,
-            width,
-            height,
-            fill_rule,
-        })
-        .expect("record_aa_fill");
-    let fence = backend.submit_page().expect("submit_page");
-    backend.wait_page(fence).expect("wait_page");
-
-    let mut out = vec![0u8; n_pixels];
-    backend.download_sync(&d_cov, &mut out).expect("download");
-    out
-}
-
-#[test]
-fn aa_fill_axis_aligned_square() {
-    // 8×8 square inside a 16×16 canvas; closed polygon, non-zero winding.
-    // Quad from (4,4)→(12,4)→(12,12)→(4,12)→(4,4), expressed as 4 edges.
-    // Each segment is [x0, y0, x1, y1].
-    let segs: Vec<f32> = vec![
-        4.0, 4.0, 12.0, 4.0, // top
-        12.0, 4.0, 12.0, 12.0, // right
-        12.0, 12.0, 4.0, 12.0, // bottom
-        4.0, 12.0, 4.0, 4.0, // left
-    ];
-    let cpu = rasterrocket_gpu::aa_fill_cpu(&segs, 0.0, 0.0, 16, 16, false);
-    let vk = run_aa_fill_vulkan(&segs, 16, 16, 0);
-    assert_within_1_lsb(&cpu, &vk, "aa_fill axis-aligned square");
-}
-
-#[test]
-fn aa_fill_triangle() {
-    // Triangle (4,2)→(14,8)→(2,12)→(4,2), non-zero winding.
-    let segs: Vec<f32> = vec![
-        4.0, 2.0, 14.0, 8.0, 14.0, 8.0, 2.0, 12.0, 2.0, 12.0, 4.0, 2.0,
-    ];
-    let cpu = rasterrocket_gpu::aa_fill_cpu(&segs, 0.0, 0.0, 16, 16, false);
-    let vk = run_aa_fill_vulkan(&segs, 16, 16, 0);
-    assert_within_1_lsb(&cpu, &vk, "aa_fill triangle");
-}
-
-#[test]
-fn aa_fill_degenerate_segment_zero_coverage() {
-    // A single degenerate segment (start == end) covers nothing.  We
-    // can't pass zero segments because the trait rejects zero-size
-    // allocations — degenerate is the closest analogue.
-    let segs: Vec<f32> = vec![0.0, 0.0, 0.0, 0.0];
-    let vk = run_aa_fill_vulkan(&segs, 8, 8, 0);
-    assert!(
-        vk.iter().all(|&b| b == 0),
-        "degenerate segment must produce zero coverage"
-    );
-}
-
-#[test]
-fn aa_fill_512x512_exceeds_old_1d_limit() {
-    // The previous 1D dispatch capped out at maxComputeWorkGroupCount[0]
-    // (≥ 65535 per Vulkan spec), so a 256×256 image (65536 pixels) was
-    // already over the limit.  This test would have failed the old
-    // check_dispatch_size guard; passes under the new 2D dispatch.
-    let w = 512u32;
-    let h = 512u32;
-    let segs: Vec<f32> = vec![
-        // Big square inside the canvas, axis-aligned.
-        64.0, 64.0, 448.0, 64.0, // top
-        448.0, 64.0, 448.0, 448.0, // right
-        448.0, 448.0, 64.0, 448.0, // bottom
-        64.0, 448.0, 64.0, 64.0, // left
-    ];
-    let cpu = rasterrocket_gpu::aa_fill_cpu(&segs, 0.0, 0.0, w, h, false);
-    let vk = run_aa_fill_vulkan(&segs, w, h, 0);
-    assert_within_1_lsb(&cpu, &vk, "aa_fill 512×512 square");
 }
 
 // ── blit_image ──────────────────────────────────────────────────────

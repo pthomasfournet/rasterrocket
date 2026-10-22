@@ -14,7 +14,6 @@ pub mod idct;
 #[cfg(feature = "gpu-jpeg-huffman")]
 pub mod scan;
 pub mod soft_mask;
-pub mod tile;
 
 #[cfg(feature = "cache")]
 pub use crate::blit;

@@ -5,6 +5,7 @@
 //! their native pointer/handle type at record time.
 
 use super::GpuBackend;
+use crate::AaFillRect;
 
 /// Parameters for a GPU image blit (table-driven copy onto the page buffer).
 ///
@@ -97,20 +98,72 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
     }
 }
 
-/// Parameters for a GPU antialiased fill pass.
+/// Parameters for a GPU scanline-AA fill pass.
+///
+/// The kernel walks a scanline intersection table in AA coordinates (see
+/// [`crate::AaScanTable`]) and writes one sub-sample count per pixel of
+/// `rect`.
+///
+/// # Invariants enforced by `AaFillParams::validate`
+/// - `row_starts` holds at least `n_rows + 1` `u32` entries
+/// - `coverage` holds at least `rect.width × rect.height` bytes
+/// - `fill_rule` is `0` or `1`
+///
+/// The offsets inside `row_starts` cannot be checked without reading device
+/// memory; the host-side table they were uploaded from must satisfy
+/// [`crate::AaScanTable::assert_well_formed`].
 pub struct AaFillParams<'a, B: GpuBackend + ?Sized> {
-    /// Packed edge segments in device memory.
-    pub segs: &'a B::DeviceBuffer,
-    /// Number of segments in `segs`.
-    pub n_segs: u32,
-    /// Output coverage buffer in device memory.
+    /// Intersection table in device memory: `i32` triples `[x0, x1, count]`.
+    pub intersects: &'a B::DeviceBuffer,
+    /// Row offsets into `intersects` in device memory: `n_rows + 1` `u32`s.
+    pub row_starts: &'a B::DeviceBuffer,
+    /// Output coverage buffer in device memory: `rect.width × rect.height`
+    /// bytes of sub-sample counts.
     pub coverage: &'a B::DeviceBuffer,
-    /// Coverage buffer width in pixels.
-    pub width: u32,
-    /// Coverage buffer height in pixels.
-    pub height: u32,
+    /// Rows in the table.
+    pub n_rows: u32,
+    /// AA row index of table row 0.
+    pub table_y0: i32,
+    /// Output rectangle in device pixels.
+    pub rect: AaFillRect,
+    /// Bitmap width × `AA_SIZE`; spans are clamped to `[0, aa_width)`.
+    pub aa_width: u32,
     /// Fill rule: 0 = non-zero winding, 1 = even-odd.
     pub fill_rule: u8,
+}
+
+impl<B: GpuBackend + ?Sized> AaFillParams<'_, B> {
+    /// Check the buffer-size invariants the kernel indexes without bounds
+    /// checks.
+    ///
+    /// # Errors
+    /// Returns a `BackendError` if any documented invariant is violated.
+    pub fn validate(&self, backend: &B) -> super::Result<()> {
+        const KIND: &str = "AaFillInvariantViolation";
+        let invariant =
+            |detail: &'static str| super::BackendError::InvariantViolation { kind: KIND, detail };
+        let offsets_needed = (self.n_rows as usize)
+            .saturating_add(1)
+            .saturating_mul(size_of::<u32>());
+        if backend.device_buffer_len(self.row_starts) < offsets_needed {
+            return Err(invariant("row_starts shorter than (n_rows + 1) × 4 bytes"));
+        }
+        let pixels = self
+            .rect
+            .pixel_count()
+            .ok_or_else(|| invariant("rect.width × rect.height overflows usize"))?;
+        if backend.device_buffer_len(self.coverage) < pixels {
+            return Err(invariant(
+                "coverage buffer shorter than rect.width × rect.height",
+            ));
+        }
+        if self.fill_rule > 1 {
+            return Err(invariant(
+                "fill_rule must be 0 (non-zero winding) or 1 (even-odd)",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Parameters for a GPU ICC CMYK→RGB CLUT lookup.
@@ -175,24 +228,6 @@ mod clut_helpers_tests {
     fn rejects_non_4th_power() {
         assert_eq!(grid_n_from_clut_len(100 * 3), None);
     }
-}
-
-/// Parameters for a GPU tile-parallel analytical fill.
-pub struct TileFillParams<'a, B: GpuBackend + ?Sized> {
-    /// Packed tile-fill records in device memory.
-    pub records: &'a B::DeviceBuffer,
-    /// Per-tile start offsets into `records`.
-    pub tile_starts: &'a B::DeviceBuffer,
-    /// Per-tile record counts.
-    pub tile_counts: &'a B::DeviceBuffer,
-    /// Output coverage buffer in device memory.
-    pub coverage: &'a B::DeviceBuffer,
-    /// Coverage buffer width in pixels.
-    pub width: u32,
-    /// Coverage buffer height in pixels.
-    pub height: u32,
-    /// Fill rule: 0 = non-zero winding, 1 = even-odd.
-    pub fill_rule: u8,
 }
 
 /// Parameters for a GPU Porter-Duff source-over composite.
@@ -1049,9 +1084,6 @@ mod tests {
             unreachable!()
         }
         fn record_icc_clut(&self, _p: IccClutParams<'_, Self>) -> super::super::Result<()> {
-            unreachable!()
-        }
-        fn record_tile_fill(&self, _p: TileFillParams<'_, Self>) -> super::super::Result<()> {
             unreachable!()
         }
         fn record_composite(&self, _p: CompositeParams<'_, Self>) -> super::super::Result<()> {

@@ -216,7 +216,7 @@ renderer/
   text.rs          — text matrix, font state
   page/            — page-level entry points, geometry normalisation
     gpu_ops.rs     — CUDA dispatch thresholds + optional gpu:: calls
-    vk_ops.rs      — Vulkan dispatch (AA fill, tile fill)
+    vk_ops.rs      — Vulkan dispatch (AA fill)
 
 resources/
   mod.rs           — PageResources; lazy resolve_*
@@ -238,7 +238,11 @@ CUDA and `renderer/page/vk_ops.rs` for Vulkan)
 - DCTDecode: call `gpu::NvJpegDecoder::decode()` if pixels ≥ `GPU_JPEG_THRESHOLD_PX`
 - JPXDecode: call `gpu::NvJpeg2kDecoder::decode()` similarly
 - CMYK→RGB: call `gpu::icc_cmyk_to_rgb()` if pixels ≥ `GPU_ICC_CLUT_THRESHOLD`
-- AA fill: `gpu::aa_fill()` / `gpu::tile_fill()` if span ≥ `GPU_AA_FILL_THRESHOLD`
+- AA fill: `gpu::GpuCtx::aa_fill()` if the bbox area ≥ `GPU_AA_FILL_THRESHOLD`
+  (solid-colour fills under a rectangular clip only).  The device evaluates
+  the CPU scanner's intersection table with the CPU's span walk and the
+  counts go through the CPU compositing pipeline, so the output is
+  byte-identical to the CPU fill.
 
 GPU decoders live in thread-local storage on rayon worker threads (one per thread).
 They are torn down eagerly via `rasterrocket::release_gpu_decoders()` broadcast before
@@ -288,12 +292,12 @@ discrete device (ranks discrete > integrated > virtual > CPU), creates a single
 compute queue, and lazy-loads SPIR-V → `VkPipeline` per kernel.  Persistent
 `VkPipelineCache` blob at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin`
 across runs.  Shared via `Arc<VulkanBackend>`.  The renderer dispatches AA fill
-and tile fill through this; ICC CMYK→RGB and the `cache` feature stay CUDA-only,
+through this; ICC CMYK→RGB and the `cache` feature stay CUDA-only,
 so `--backend vulkan` runs uncached and the CMYK matrix path falls to CPU AVX-512.
 
-**Kernel inventory.**  Nine kernels exist in **both** `.cu` (CUDA, compiled to
+**Kernel inventory.**  Eight kernels exist in **both** `.cu` (CUDA, compiled to
 PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
-time, gated on the `vulkan` feature.  The table below lists the six render-path
+time, gated on the `vulkan` feature.  The table below lists the five render-path
 kernels; the remaining three — `blelloch_scan`, `idct_color`, and
 `parallel_huffman` — belong to the GPU JPEG pipeline and are dormant by default
 (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`).
@@ -302,8 +306,7 @@ kernels; the remaining three — `blelloch_scan`, `idct_color`, and
 |---|---|---|---|---|
 | `composite_rgba8` | composite_rgba8.cu | composite_rgba8.slang | Porter-Duff source-over | no production caller † |
 | `apply_soft_mask` | apply_soft_mask.cu | apply_soft_mask.slang | Per-pixel alpha multiply | no production caller † |
-| `aa_fill` | aa_fill.cu | aa_fill.slang | 64-sample jittered AA coverage (warp ballot / `WaveActiveSum`) | 256 px |
-| `tile_fill` | tile_fill.cu | tile_fill.slang | Analytical 16×16 tile fill | 256 px |
+| `aa_fill` | aa_fill.cu | aa_fill.slang | 4× scanline-AA sub-sample counts from the CPU scanner's intersection table (byte-identical to the CPU fill) | 256 px |
 | `icc_clut` | icc_clut.cu | icc_clut.slang | CMYK→RGB via 4D quadrilinear CLUT | 500K px |
 | `icc_clut` matrix | icc_clut.cu | icc_clut.slang | CMYK→RGB via matrix (always CPU) | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image source-over composite (Phase 9) | always |

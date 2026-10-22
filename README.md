@@ -210,7 +210,7 @@ crates.io (see the note at the top).
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — full feature set (nvJPEG, nvJPEG2000, AA fill, ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — AA fill, tile fill, and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Verified on RTX 5070; cross-vendor smoke pending hardware.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
+- **Cross-vendor via Vulkan compute** — AA fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Verified on RTX 5070; cross-vendor smoke pending hardware.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
@@ -253,12 +253,12 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 |---|---|---|
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
-| `gpu-aa` | GPU supersampled anti-aliased fill | CUDA |
+| `gpu-aa` | GPU evaluation of the anti-aliased fill coverage (byte-identical to the CPU fill) | CUDA |
 | `gpu-icc` | GPU CMYK→RGB ICC transform | CUDA |
 | `gpu-deskew` | GPU deskew rotation via NPP | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) | `libva.so.2` + DRM render node |
-| `vulkan` | Vulkan compute backend for AA fill, tile fill, and parallel-Huffman JPEG decode (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa` and `gpu-jpeg-huffman`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `vulkan` | Vulkan compute backend for AA fill and parallel-Huffman JPEG decode (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa` and `gpu-jpeg-huffman`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
 

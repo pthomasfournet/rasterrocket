@@ -16,11 +16,11 @@
 use std::sync::Arc;
 
 use gpu::backend::GpuBackend;
-use gpu::backend::params::{AaFillParams, TileFillParams};
+use gpu::backend::params::AaFillParams;
 use gpu::backend::vulkan::VulkanBackend;
 
 use super::PageRenderer;
-use super::gpu_ops::{gpu_coverage_to_bitmap, gpu_fill_segs};
+use super::gpu_ops::{gpu_coverage_to_bitmap, prepare_aa_fill};
 
 type DeviceBuffer = <VulkanBackend as GpuBackend>::DeviceBuffer;
 
@@ -28,7 +28,7 @@ type DeviceBuffer = <VulkanBackend as GpuBackend>::DeviceBuffer;
 /// warning at `warn` and return `None`.
 ///
 /// `op_name` names the high-level operation (e.g. `"vulkan aa_fill"`)
-/// and `what` names the buffer (`"segs"`, `"coverage"`, …).  Together
+/// and `what` names the buffer (`"intersects"`, `"coverage"`, …).  Together
 /// they produce a single, scannable log line at every call site.
 fn alloc_or_warn(
     backend: &VulkanBackend,
@@ -100,193 +100,83 @@ fn run_one_kernel(
     Some(out)
 }
 
-/// `bbox.w as usize * bbox.h as usize` with overflow-check; on overflow
-/// the helper returns `None` and the caller falls through to CPU.
-///
-/// Realistic page sizes can't approach `usize::MAX` on 64-bit, but
-/// adversarial input or a malformed `/MediaBox` could; pre-checking
-/// keeps the kernel arithmetic on a known-good footing.
-const fn checked_pixel_count(w: u32, h: u32) -> Option<usize> {
-    (w as usize).checked_mul(h as usize)
-}
-
-/// Attempt to rasterise `path` with the Vulkan AA fill kernel.
+/// Attempt to rasterise `path` with the Vulkan scanline-AA fill kernel.
 ///
 /// Mirrors [`super::gpu_ops::try_gpu_aa_fill`] but routes through the
-/// Vulkan trait surface.  The Vulkan recorder's AA-fill path expects segs
-/// already in coverage-buffer-local coordinates, so this helper subtracts
-/// `bbox.x` / `bbox.y` from each segment endpoint before upload.
+/// Vulkan trait surface.
 ///
 /// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-/// Returns `false` if the area is below the dispatch threshold, the
-/// segment list is empty, the bbox is non-finite, the segment count
-/// exceeds `u32::MAX`, or any Vulkan call fails (warning logged; CPU
-/// fill used as fallback).
+/// Returns `false` if [`prepare_aa_fill`] declines the fill, the table
+/// has no intersections or more rows than `u32` holds, or any Vulkan
+/// call fails (warning logged; CPU fill used as fallback).
 pub(super) fn try_vk_aa_fill(
     renderer: &mut PageRenderer<'_>,
     backend: &Arc<VulkanBackend>,
     path: &raster::path::Path,
     even_odd: bool,
+    flatness: f64,
     pipe: &raster::pipe::PipeState<'_>,
     src: &raster::pipe::PipeSrc<'_>,
 ) -> bool {
-    use gpu::GPU_AA_FILL_THRESHOLD;
-
     const OP: &str = "vulkan aa_fill";
 
-    let Some((mut segs_f32, bbox)) = gpu_fill_segs(renderer, path) else {
+    let Some(fill) = prepare_aa_fill(
+        &renderer.gstate.current().clip,
+        renderer.bitmap.width,
+        renderer.bitmap.height,
+        path,
+        flatness,
+        even_odd,
+    ) else {
         return false;
     };
-    let Some(n_pixels) = checked_pixel_count(bbox.w, bbox.h) else {
-        return false;
-    };
-    if n_pixels < GPU_AA_FILL_THRESHOLD {
+    // The backend rejects zero-size buffers; a table without intersections
+    // paints nothing on either path, so the CPU fill is the exact fallback.
+    if fill.intersects.is_empty() {
         return false;
     }
-
-    // Pre-shift segments into coverage-buffer-local coordinates, in place.
-    // The CUDA `aa_fill_gpu` uses kernel args `x_min`/`y_min` for the same
-    // shift; the trait surface (`record_aa_fill`) does not expose those
-    // params, so the caller bakes the offset in before upload.  See the
-    // comment in `crates/gpu/src/backend/cuda/page_recorder.rs::record_aa_fill`.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "bbox.x/y are u32 bitmap coords; f32 precision is sub-pixel at realistic DPIs"
-    )]
-    let (bx, by) = (bbox.x as f32, bbox.y as f32);
-    for s in segs_f32.chunks_exact_mut(4) {
-        s[0] -= bx;
-        s[1] -= by;
-        s[2] -= bx;
-        s[3] -= by;
-    }
-    let segs_bytes: &[u8] = bytemuck::cast_slice(&segs_f32);
-
-    // Reject segment counts that don't fit the kernel's u32 parameter:
-    // a saturating cast would silently feed the kernel the wrong count
-    // and corrupt the coverage output.  Realistic PDF paths produce
-    // ~10²–10⁴ segments after flattening; ≥ u32::MAX would only arise
-    // from adversarial input or a parser bug.
-    let Ok(n_segs) = u32::try_from(segs_f32.len() / 4) else {
-        log::warn!(
-            "{OP}: segment count {} exceeds u32::MAX; falling back to CPU",
-            segs_f32.len() / 4
-        );
+    let Ok(n_rows) = u32::try_from(fill.table().n_rows()) else {
+        log::warn!("{OP}: table row count exceeds u32::MAX; falling back to CPU");
+        return false;
+    };
+    let Some(n_pixels) = fill.rect.pixel_count() else {
         return false;
     };
 
-    let Some(d_segs) = alloc_or_warn(backend, segs_bytes.len(), OP, "segs") else {
+    let intersect_bytes: &[u8] = bytemuck::cast_slice(&fill.intersects);
+    let row_start_bytes: &[u8] = bytemuck::cast_slice(&fill.row_starts);
+
+    let Some(d_intersects) = alloc_or_warn(backend, intersect_bytes.len(), OP, "intersects") else {
+        return false;
+    };
+    let Some(d_row_starts) = alloc_or_warn(backend, row_start_bytes.len(), OP, "row_starts") else {
         return false;
     };
     let Some(d_cov) = alloc_or_warn(backend, n_pixels, OP, "coverage") else {
         return false;
     };
-    if !upload_or_warn(backend, &d_segs, segs_bytes, OP, "segs") {
-        return false;
-    }
-
-    let Some(coverage) = run_one_kernel(backend, &d_cov, n_pixels, OP, |be| {
-        be.record_aa_fill(AaFillParams {
-            segs: &d_segs,
-            n_segs,
-            coverage: &d_cov,
-            width: bbox.w,
-            height: bbox.h,
-            fill_rule: u8::from(even_odd),
-        })
-    }) else {
-        return false;
-    };
-
-    gpu_coverage_to_bitmap(renderer, &coverage, &bbox, pipe, src);
-    true
-}
-
-/// Attempt to rasterise `path` with the Vulkan tile-parallel analytical fill kernel.
-///
-/// Mirrors [`super::gpu_ops::try_gpu_tile_fill`] but routes through the
-/// Vulkan trait surface.  `build_tile_records` already produces tile-local
-/// records when called with `bbox.x` / `bbox.y` as the offset, so no
-/// further coordinate shift is needed.
-///
-/// Returns `true` on success, `false` on any failure (warning logged;
-/// caller falls through to AA or CPU fill).
-pub(super) fn try_vk_tile_fill(
-    renderer: &mut PageRenderer<'_>,
-    backend: &Arc<VulkanBackend>,
-    path: &raster::path::Path,
-    even_odd: bool,
-    pipe: &raster::pipe::PipeState<'_>,
-    src: &raster::pipe::PipeSrc<'_>,
-) -> bool {
-    use gpu::{GPU_TILE_FILL_THRESHOLD, build_tile_records};
-
-    const OP: &str = "vulkan tile_fill";
-
-    let Some((segs_f32, bbox)) = gpu_fill_segs(renderer, path) else {
-        return false;
-    };
-    let Some(n_pixels) = checked_pixel_count(bbox.w, bbox.h) else {
-        return false;
-    };
-    if n_pixels < GPU_TILE_FILL_THRESHOLD {
-        return false;
-    }
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "bbox.x/y are u32 bitmap coords; f32 precision is sub-pixel at realistic DPIs"
-    )]
-    let (records, tile_starts, tile_counts, _grid_w) =
-        build_tile_records(&segs_f32, bbox.x as f32, bbox.y as f32, bbox.w, bbox.h);
-
-    // `build_tile_records` may legitimately produce zero records (e.g. all
-    // segments horizontal); the Vulkan recorder rejects zero-size buffers
-    // (`reject_zero_size`), so bail and let the caller fall through.
-    // `tile_starts` and `tile_counts` are parallel arrays produced by the
-    // same call, so checking either is sufficient.
-    if records.is_empty() {
-        return false;
-    }
-
-    let records_bytes: &[u8] = bytemuck::cast_slice(&records);
-    let starts_bytes: &[u8] = bytemuck::cast_slice(&tile_starts);
-    let counts_bytes: &[u8] = bytemuck::cast_slice(&tile_counts);
-
-    let Some(d_records) = alloc_or_warn(backend, records_bytes.len(), OP, "records") else {
-        return false;
-    };
-    let Some(d_starts) = alloc_or_warn(backend, starts_bytes.len(), OP, "starts") else {
-        return false;
-    };
-    let Some(d_counts) = alloc_or_warn(backend, counts_bytes.len(), OP, "counts") else {
-        return false;
-    };
-    let Some(d_cov) = alloc_or_warn(backend, n_pixels, OP, "coverage") else {
-        return false;
-    };
-    if !upload_or_warn(backend, &d_records, records_bytes, OP, "records")
-        || !upload_or_warn(backend, &d_starts, starts_bytes, OP, "starts")
-        || !upload_or_warn(backend, &d_counts, counts_bytes, OP, "counts")
+    if !upload_or_warn(backend, &d_intersects, intersect_bytes, OP, "intersects")
+        || !upload_or_warn(backend, &d_row_starts, row_start_bytes, OP, "row_starts")
     {
         return false;
     }
 
-    let Some(coverage) = run_one_kernel(backend, &d_cov, n_pixels, OP, |be| {
-        be.record_tile_fill(TileFillParams {
-            records: &d_records,
-            tile_starts: &d_starts,
-            tile_counts: &d_counts,
+    let Some(mut counts) = run_one_kernel(backend, &d_cov, n_pixels, OP, |be| {
+        be.record_aa_fill(AaFillParams {
+            intersects: &d_intersects,
+            row_starts: &d_row_starts,
             coverage: &d_cov,
-            width: bbox.w,
-            height: bbox.h,
+            n_rows,
+            table_y0: fill.table_y0,
+            rect: fill.rect,
+            aa_width: fill.aa_width,
             fill_rule: u8::from(even_odd),
         })
     }) else {
         return false;
     };
 
-    gpu_coverage_to_bitmap(renderer, &coverage, &bbox, pipe, src);
+    gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
     true
 }
 

@@ -303,7 +303,7 @@ pub enum BackendPolicy {
 
 Controls which compute backend is used. `Auto` matches pre-v0.4.0 behaviour. The `Force*` variants convert silent GPU fallbacks into hard `RasterError::BackendUnavailable` errors so you know immediately whether the expected hardware path is actually active. `ForceVaapi` is only present when the `vaapi` Cargo feature is enabled.
 
-`ForceVulkan` runs the AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  JPEG dispatch goes through the GPU parallel-Huffman path. The path is dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`); enable it by setting `PDF_RASTER_HUFFMAN_THRESHOLD=0` at runtime.
+`ForceVulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  JPEG dispatch goes through the GPU parallel-Huffman path. The path is dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`); enable it by setting `PDF_RASTER_HUFFMAN_THRESHOLD=0` at runtime.
 
 ---
 
@@ -611,7 +611,7 @@ Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, NVIDIA driver); `slangc` from the LunarG Vulkan SDK at *build* time. Implies `gpu-aa`. |
 
-Vulkan covers the AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels (`vulkan` implies `gpu-jpeg-huffman`).  `cache` and `nvjpeg` stay CUDA-only; under `--backend vulkan` the renderer runs uncached but JPEG decode routes through the GPU parallel-Huffman path.
+Vulkan covers the AA-fill and parallel-Huffman JPEG decode kernels (`vulkan` implies `gpu-jpeg-huffman`).  `cache` and `nvjpeg` stay CUDA-only; under `--backend vulkan` the renderer runs uncached but JPEG decode routes through the GPU parallel-Huffman path.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 
@@ -645,12 +645,12 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 |---|---|---|
 | `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Falls back to CPU zune-jpeg below 512×512 px. |
 | `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to CPU OpenJPEG below 512×512 px or for sub-sampled chroma. |
-| `gpu-aa` | CUDA 13 | GPU supersampled AA fill (64-sample warp-ballot kernel). Falls back to CPU 4× scanline AA below 256 px. |
+| `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Falls back to the CPU below 256 px, under path clips, and for pattern fills. |
 | `gpu-icc` | CUDA 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
 | `cache` | CUDA 13 | Phase 9 device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
 | `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU. Falls back to CPU on CMYK/progressive JPEG. When `nvjpeg` is also active, nvJPEG takes priority. |
-| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa` and `gpu-jpeg-huffman`. | Vulkan compute backend. AA-fill, tile-fill, and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
+| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa` and `gpu-jpeg-huffman`. | Vulkan compute backend. AA-fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |
 
 GPU initialisation failures print a warning to stderr and fall back to CPU — they do not return errors.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
@@ -662,8 +662,7 @@ GPU initialisation failures print a warning to stderr and fall back to CPU — t
 | nvJPEG (DCTDecode) | **disabled** (`u32::MAX`) | `GPU_JPEG_THRESHOLD_PX` |
 | GPU parallel Huffman (DCTDecode) | **dormant** (`u32::MAX`) | `GPU_JPEG_HUFFMAN_THRESHOLD_PX` |
 | nvJPEG2000 (JPXDecode) | ≥ 262 144 px (area) | `GPU_JPEG2K_THRESHOLD_PX` |
-| GPU AA fill | ≥ 256 px (longest edge) | `GPU_AA_FILL_THRESHOLD` |
-| GPU tile fill | ≥ 256 px (longest edge) | `GPU_TILE_FILL_THRESHOLD` |
+| GPU AA fill | ≥ 256 px (bounding-box area) | `GPU_AA_FILL_THRESHOLD` |
 | GPU ICC CLUT | ≥ 500 000 px (area) | `GPU_ICC_CLUT_THRESHOLD` |
 
 Both JPEG thresholds are `u32::MAX` **by design**, so JPEG decode runs on the
@@ -673,4 +672,7 @@ off pending threshold tuning. Set `PDF_RASTER_HUFFMAN_THRESHOLD=0` to enable the
 Huffman path for benchmarking. nvJPEG2000 is genuinely active above its area
 threshold.
 
-Fill dispatch order: GPU tile fill → GPU AA fill → CPU scanline AA.
+Fill dispatch order: GPU AA fill → CPU scanline AA.  The GPU path evaluates
+the CPU rasteriser's own 4× scanline intersection table and composites through
+the CPU pipeline, so a GPU render is byte-identical to the CPU render; it is
+taken only for solid-colour fills under a rectangular clip.
