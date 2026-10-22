@@ -913,9 +913,16 @@ mod tests {
     use super::*;
     use crate::backend::cuda::CudaBackend;
 
+    fn try_cuda() -> Option<CudaBackend> {
+        CudaBackend::new().ok()
+    }
+
     #[test]
     fn decoder_decodes_grayscale_jpeg_on_cuda() {
-        let backend = CudaBackend::new().expect("CUDA backend");
+        let Some(backend) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
         let dec = JpegGpuDecoder::new(backend);
         let bytes = crate::jpeg::test_fixtures::GRAY_16X16_JPEG;
         let img = dec.decode(bytes).expect("decode");
@@ -1004,7 +1011,10 @@ mod tests {
     #[test]
     fn real_jpeg_q95_pixel_diff_close_to_reference_decoder() {
         let bytes = include_bytes!("../../../../tests/fixtures/jpeg/q95_scan.jpg");
-        let backend = CudaBackend::new().expect("CUDA backend");
+        let Some(backend) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
         let dec = JpegGpuDecoder::new(backend);
         let img = dec.decode(bytes).expect("decode q95_scan.jpg");
         let gpu_rgba = download_image(dec.backend(), &img);
@@ -1015,7 +1025,10 @@ mod tests {
     #[test]
     fn real_jpeg_q20_pixel_diff_close_to_reference_decoder() {
         let bytes = include_bytes!("../../../../tests/fixtures/jpeg/q20.jpg");
-        let backend = CudaBackend::new().expect("CUDA backend");
+        let Some(backend) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
         let dec = JpegGpuDecoder::new(backend);
         let img = dec.decode(bytes).expect("decode q20.jpg");
         let gpu_rgba = download_image(dec.backend(), &img);
@@ -1122,7 +1135,10 @@ mod tests {
             }
         }
 
-        let backend = CudaBackend::new().expect("CUDA backend");
+        let Some(backend) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
         let dec = JpegGpuDecoder::new(backend);
         let qt = vec![1i32; 64];
         let img = dec
