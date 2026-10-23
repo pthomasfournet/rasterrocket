@@ -166,11 +166,11 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
             // GPU dispatch is threshold-gated inside decode_jpx.
             #[cfg(feature = "nvjpeg2k")]
             {
-                decode_jpx(data, w, h, gpu_j2k)
+                decode_jpx(data, w, h, None, gpu_j2k)
             }
             #[cfg(not(feature = "nvjpeg2k"))]
             {
-                decode_jpx(data, w, h)
+                decode_jpx(data, w, h, None)
             }
         }
         Some("JBIG2Decode") => {

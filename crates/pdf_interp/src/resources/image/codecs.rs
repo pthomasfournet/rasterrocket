@@ -6,7 +6,6 @@
 //! `image/mod.rs`, which bridge the visibility gap without widening it in normal builds.
 
 use hayro_jbig2::Decoder as Jbig2Decoder;
-use jpeg2k::{ColorSpace as Jp2ColorSpace, Image as Jp2Image, ImageFormat, ImagePixelData};
 use pdf::{Dictionary, Document, Object};
 
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
@@ -935,16 +934,14 @@ pub(super) fn cmyk_raw_to_rgb(
 /// PDF JPEG 2000 streams may be raw codestreams (`.j2k`) or full JP2 container
 /// format (`.jp2`).  Both paths auto-detect the format from the stream.
 ///
-/// 16-bit component images are downscaled to 8-bit.  Embedded alpha channels are
-/// extracted into `ImageDescriptor::smask` so the compositor can blend them.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm per ImageFormat variant; extracting alpha adds 2 lines per alpha-capable arm"
-)]
+/// Samples of any precision are scaled to 8 bits; sub-sampled components are
+/// upsampled to the image grid.  An embedded alpha channel becomes
+/// `ImageDescriptor::smask`.
 pub(super) fn decode_jpx(
     data: &[u8],
     pdf_w: u32,
     pdf_h: u32,
+    draw_size: Option<(u32, u32)>,
     #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut NvJpeg2kDecoder>,
 ) -> Option<ImageDescriptor> {
     // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
@@ -960,235 +957,86 @@ pub(super) fn decode_jpx(
     }
 
     // ── CPU path ─────────────────────────────────────────────────────────────
-    let img = Jp2Image::from_bytes(data)
+    // Skip the wavelet levels the drawn size cannot show: the decoder keeps
+    // every level that leaves the image at least `draw_size` on both axes.
+    let settings = hayro_jpeg2000::DecodeSettings {
+        target_resolution: draw_size,
+        ..Default::default()
+    };
+    let img = hayro_jpeg2000::Image::new(data, &settings)
         .map_err(|e| log::warn!("image: JPXDecode open error: {e}"))
         .ok()?;
-
-    // CMYK JPEG 2000 must be intercepted before `get_pixels`: the `jpeg2k`
-    // crate's `get_pixels` only emits Gray/RGB(A) and errors out on CMYK.  Pull
-    // the four raw component planes instead and route them through the same
-    // CMYK→RGB conversion used for DeviceCMYK raw images and JPEG-CMYK.
-    if matches!(img.color_space(), Jp2ColorSpace::CMYK) || img.num_components() == 4 {
-        return decode_jpx_cmyk(&img, pdf_w, pdf_h);
-    }
-
-    let img_data = img
-        .get_pixels(None)
-        .map_err(|e| log::warn!("image: JPXDecode get_pixels error: {e}"))
-        .ok()?;
-
-    let jw = img_data.width;
-    let jh = img_data.height;
-
+    let (jw, jh) = (img.width(), img.height());
     if jw == 0 || jh == 0 {
         log::warn!("image: JPXDecode: JP2 reported zero dimensions {jw}×{jh}");
         return None;
     }
-
-    if jw != pdf_w || jh != pdf_h {
+    if draw_size.is_none() && (jw != pdf_w || jh != pdf_h) {
         log::debug!(
             "image: JPXDecode: PDF dict says {pdf_w}×{pdf_h}, JP2 reports {jw}×{jh} — using JP2 dims"
         );
     }
 
-    // `jpeg2k` guarantees that `img_data.format` and `img_data.data` are always
-    // consistent: an L8 format always carries L8 data, etc.  We use
-    // `let … else { unreachable! }` inside each arm to surface any library
-    // regression loudly rather than silently skipping images.
-    match img_data.format {
-        ImageFormat::L8 => {
-            let ImagePixelData::L8(pixels) = img_data.data else {
-                unreachable!("jpeg2k: L8 format paired with non-L8 data")
-            };
-            Some(jpx_gray(jw, jh, pixels))
-        }
-        ImageFormat::La8 => {
-            let ImagePixelData::La8(pixels) = img_data.data else {
-                unreachable!("jpeg2k: La8 format paired with non-La8 data")
-            };
-            let gray: Vec<u8> = pixels.as_chunks::<2>().0.iter().map(|c| c[0]).collect();
-            let alpha: Vec<u8> = pixels.as_chunks::<2>().0.iter().map(|c| c[1]).collect();
-            let mut desc = jpx_gray(jw, jh, gray);
-            desc.smask = Some(alpha);
-            Some(desc)
-        }
-        ImageFormat::Rgb8 => {
-            let ImagePixelData::Rgb8(pixels) = img_data.data else {
-                unreachable!("jpeg2k: Rgb8 format paired with non-Rgb8 data")
-            };
-            Some(jpx_rgb(jw, jh, pixels))
-        }
-        ImageFormat::Rgba8 => {
-            let ImagePixelData::Rgba8(pixels) = img_data.data else {
-                unreachable!("jpeg2k: Rgba8 format paired with non-Rgba8 data")
-            };
-            let rgb: Vec<u8> = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|c| [c[0], c[1], c[2]])
-                .collect();
-            let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|c| c[3]).collect();
-            let mut desc = jpx_rgb(jw, jh, rgb);
-            desc.smask = Some(alpha);
-            Some(desc)
-        }
-        ImageFormat::L16 => {
-            let ImagePixelData::L16(pixels) = img_data.data else {
-                unreachable!("jpeg2k: L16 format paired with non-L16 data")
-            };
-            // Downscale 16-bit → 8-bit: high byte (v >> 8 ≤ 255, cast is lossless).
-            let gray = pixels.iter().map(|&v| (v >> 8) as u8).collect();
-            Some(jpx_gray(jw, jh, gray))
-        }
-        ImageFormat::La16 => {
-            let ImagePixelData::La16(pixels) = img_data.data else {
-                unreachable!("jpeg2k: La16 format paired with non-La16 data")
-            };
-            let gray: Vec<u8> = pixels
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| (c[0] >> 8) as u8)
-                .collect();
-            let alpha: Vec<u8> = pixels
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| (c[1] >> 8) as u8)
-                .collect();
-            let mut desc = jpx_gray(jw, jh, gray);
-            desc.smask = Some(alpha);
-            Some(desc)
-        }
-        ImageFormat::Rgb16 => {
-            let ImagePixelData::Rgb16(pixels) = img_data.data else {
-                unreachable!("jpeg2k: Rgb16 format paired with non-Rgb16 data")
-            };
-            let rgb = pixels.iter().map(|&v| (v >> 8) as u8).collect();
-            Some(jpx_rgb(jw, jh, rgb))
-        }
-        ImageFormat::Rgba16 => {
-            let ImagePixelData::Rgba16(pixels) = img_data.data else {
-                unreachable!("jpeg2k: Rgba16 format paired with non-Rgba16 data")
-            };
-            let rgb: Vec<u8> = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|c| [(c[0] >> 8) as u8, (c[1] >> 8) as u8, (c[2] >> 8) as u8])
-                .collect();
-            let alpha: Vec<u8> = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| (c[3] >> 8) as u8)
-                .collect();
-            let mut desc = jpx_rgb(jw, jh, rgb);
-            desc.smask = Some(alpha);
-            Some(desc)
-        }
-    }
-}
-
-/// Decode a 4-component (CMYK) JPEG 2000 image to RGB.
-///
-/// The `jpeg2k` crate's `get_pixels` rejects CMYK outright, so this path reads
-/// the four raw component planes directly and feeds packed CMYK bytes through
-/// [`cmyk_raw_to_rgb`] — the exact same conversion used for `DeviceCMYK` raw
-/// images and JPEG-CMYK, so the output matches the rest of the pipeline.
-///
-/// Correctness notes:
-///  - `ImageComponent::data_u8` already rescales each plane from its native
-///    sample precision (1–16 bit, signed or unsigned) to 8-bit, so this path
-///    handles non-8-bpc codestreams without assuming a bit depth.
-///  - JPEG 2000 stores CMYK as direct ink density (0 = no ink, 255 = full
-///    ink), unlike the inverted convention Adobe uses in JPEG/DCT.  We pass
-///    `inverted = false` so the conversion matches `DeviceCMYK` raw images
-///    (`raw.rs`), not the JPEG-CMYK path.
-///  - The PDF `/ColorSpace` and `/Decode` are intentionally ignored for JPX,
-///    exactly as the Gray/RGB JPX paths do: the codestream is self-describing
-///    and the decoded RGB is final.
-///
-/// Sub-sampled components (different per-plane dimensions) are rejected with a
-/// clear error rather than producing garbage; this is rare for scanned CMYK
-/// and the common 1:1 case renders correctly.
-fn decode_jpx_cmyk(img: &Jp2Image, pdf_w: u32, pdf_h: u32) -> Option<ImageDescriptor> {
-    let comps = img.components();
-    let [c, m, y, k] = comps else {
-        log::warn!(
-            "image: JPXDecode: CMYK image has {} components, expected 4",
-            comps.len()
-        );
-        return None;
-    };
-
-    let (jw, jh) = (c.width(), c.height());
-    if jw == 0 || jh == 0 {
-        log::warn!("image: JPXDecode: CMYK component reports zero dimensions {jw}×{jh}");
-        return None;
-    }
-
-    // All four planes must share the base resolution.  A sub-sampled component
-    // would require per-plane upsampling that this path does not implement;
-    // fail loudly rather than interleaving mismatched-length planes.
-    if [m, y, k]
-        .iter()
-        .any(|p| p.width() != jw || p.height() != jh)
-    {
-        log::warn!(
-            "image: JPXDecode: sub-sampled CMYK components unsupported \
-             (planes {:?})",
-            [
-                (c.width(), c.height()),
-                (m.width(), m.height()),
-                (y.width(), y.height()),
-                (k.width(), k.height()),
-            ]
-        );
-        return None;
-    }
-
-    if jw != pdf_w || jh != pdf_h {
-        log::debug!(
-            "image: JPXDecode: PDF dict says {pdf_w}×{pdf_h}, JP2 reports {jw}×{jh} — using JP2 dims"
-        );
-    }
+    let channels = usize::from(img.color_space().num_channels());
+    let has_alpha = img.has_alpha();
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
+    let samples = img
+        .decode(&mut ctx)
+        .map_err(|e| log::warn!("image: JPXDecode decode error: {e}"))
+        .ok()?
+        .data_u8();
 
     let npx = (jw as usize).checked_mul(jh as usize)?;
-    let mut cmyk = Vec::with_capacity(npx.checked_mul(4)?);
-    // `data_u8` yields the plane already scaled to 8-bit; zipping the four
-    // iterators interleaves them into packed CMYK without intermediate Vecs.
-    for (((cc, mm), yy), kk) in c
-        .data_u8()
-        .zip(m.data_u8())
-        .zip(y.data_u8())
-        .zip(k.data_u8())
-    {
-        cmyk.extend_from_slice(&[cc, mm, yy, kk]);
-    }
-
-    if cmyk.len() != npx * 4 {
+    let stride = channels + usize::from(has_alpha);
+    if Some(samples.len()) != npx.checked_mul(stride) {
         log::warn!(
-            "image: JPXDecode: CMYK plane interleave produced {} bytes, expected {}",
-            cmyk.len(),
-            npx * 4
+            "image: JPXDecode: {} samples for {jw}×{jh}×{stride}",
+            samples.len()
         );
         return None;
     }
 
-    let rgb = cmyk_raw_to_rgb(
-        &cmyk,
-        false,
-        #[cfg(feature = "gpu-icc")]
-        None,
-        #[cfg(feature = "gpu-icc")]
-        None,
-        #[cfg(feature = "gpu-icc")]
-        None,
-    )?;
+    // The alpha channel, when present, is the last sample of each pixel.
+    let (colour, alpha) = if has_alpha {
+        let colour = samples
+            .chunks_exact(stride)
+            .flat_map(|px| px[..channels].iter().copied())
+            .collect();
+        let alpha = samples
+            .chunks_exact(stride)
+            .map(|px| px[channels])
+            .collect();
+        (colour, Some(alpha))
+    } else {
+        (samples, None)
+    };
 
-    Some(jpx_rgb(jw, jh, rgb))
+    // An ICC-tagged or unrecognised colour space is read by its channel
+    // count; the embedded profile is not applied.  CMYK samples are ink
+    // densities (0 = no ink).
+    let mut desc = match channels {
+        1 => jpx_gray(jw, jh, colour),
+        3 => jpx_rgb(jw, jh, colour),
+        4 => {
+            let rgb = cmyk_raw_to_rgb(
+                &colour,
+                false,
+                #[cfg(feature = "gpu-icc")]
+                None,
+                #[cfg(feature = "gpu-icc")]
+                None,
+                #[cfg(feature = "gpu-icc")]
+                None,
+            )?;
+            jpx_rgb(jw, jh, rgb)
+        }
+        n => {
+            log::warn!("image: JPXDecode: unsupported {n}-channel colour space");
+            return None;
+        }
+    };
+    desc.smask = alpha;
+    Some(desc)
 }
 
 /// GPU-accelerated JPEG 2000 decode via nvJPEG2000.
@@ -1712,6 +1560,89 @@ mod tests {
 
     // ── jpx_gray / jpx_rgb helpers ────────────────────────────────────────────
 
+    /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    fn jpx_fixture(bytes: &[u8]) -> ImageDescriptor {
+        decode_jpx(bytes, 8, 8, None).expect("decodes")
+    }
+
+    // Fixtures are lossless (reversible 5/3) encodes; the `.gray`, `.rgb`,
+    // `.rgba` and `.gray16` files are the same images decoded by an
+    // independent decoder.
+
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_draw_size_skips_levels_without_going_below_it() {
+        let gray = include_bytes!("testdata/gray8.jp2");
+        let full = decode_jpx(gray, 8, 8, None).expect("decodes");
+        assert_eq!((full.width, full.height), (8, 8));
+
+        let half = decode_jpx(gray, 8, 8, Some((4, 4))).expect("decodes");
+        assert_eq!((half.width, half.height), (4, 4));
+        assert_eq!(half.data.as_cpu().map(<[u8]>::len), Some(16));
+
+        // 4 × 4 would be smaller than the drawn size, so no level is skipped.
+        let five = decode_jpx(gray, 8, 8, Some((5, 5))).expect("decodes");
+        assert_eq!((five.width, five.height), (8, 8));
+    }
+
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_gray_matches_reference_decode() {
+        let img = jpx_fixture(include_bytes!("testdata/gray8.jp2"));
+        assert_eq!(img.color_space, ImageColorSpace::Gray);
+        assert_eq!(
+            img.data.as_cpu(),
+            Some(&include_bytes!("testdata/gray8.gray")[..])
+        );
+        assert!(img.smask.is_none());
+    }
+
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_raw_codestream_rgb_matches_reference_decode() {
+        let img = jpx_fixture(include_bytes!("testdata/rgb8.j2k"));
+        assert_eq!(img.color_space, ImageColorSpace::Rgb);
+        assert_eq!(
+            img.data.as_cpu(),
+            Some(&include_bytes!("testdata/rgb8.rgb")[..])
+        );
+    }
+
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_alpha_channel_becomes_the_soft_mask() {
+        let img = jpx_fixture(include_bytes!("testdata/rgba8.jp2"));
+        let rgba = include_bytes!("testdata/rgba8.rgba");
+        let rgb: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+        assert_eq!(img.color_space, ImageColorSpace::Rgb);
+        assert_eq!(img.data.as_cpu(), Some(&rgb[..]));
+        assert_eq!(img.smask, Some(alpha));
+    }
+
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_16_bit_samples_scale_to_8_bit() {
+        let img = jpx_fixture(include_bytes!("testdata/gray16.jp2"));
+        let reference = include_bytes!("testdata/gray16.gray16");
+        let got = img.data.as_cpu().expect("host-resident");
+        assert_eq!(got.len(), 64);
+        for (i, (&g, w)) in got.iter().zip(reference.as_chunks::<2>().0).enumerate() {
+            let want = u16::from_be_bytes(*w) >> 8;
+            assert!(
+                u16::from(g).abs_diff(want) <= 1,
+                "sample {i}: got {g}, 16-bit reference {}",
+                u16::from_be_bytes(*w)
+            );
+        }
+    }
+
     #[test]
     fn jpx_gray_smask_none_by_default() {
         let desc = jpx_gray(2, 2, vec![0u8; 4]);
@@ -1726,15 +1657,10 @@ mod tests {
 
     // ── JPX-CMYK convention ───────────────────────────────────────────────────
     //
-    // `decode_jpx_cmyk` cannot be exercised directly without a real JP2
-    // codestream (the `jpeg2k` crate exposes no public constructor for a
-    // synthetic 4-component CMYK `Image`).  This test instead pins the one
-    // non-obvious decision in that path: JPEG 2000 stores CMYK as *direct* ink
-    // density, so the conversion must use `inverted = false` — the same as
-    // DeviceCMYK raw images, and the opposite of the JPEG-CMYK path.  A
-    // regression that flipped the flag would invert every CMYK JPX page's
-    // colours; this asserts the two interpretations are distinct and that the
-    // direct one is what `decode_jpx_cmyk` requests.
+    // JPEG 2000 stores CMYK as direct ink density (0 = no ink), so
+    // `decode_jpx` converts it with `inverted = false`, as for `DeviceCMYK`
+    // raw images.  This pins that the two interpretations differ, so a
+    // flipped flag would invert every CMYK JPX image.
     #[test]
     fn jpx_cmyk_uses_direct_ink_convention_not_jpeg_inverted() {
         // Pure-cyan ink at full density: direct convention (0 = no ink).

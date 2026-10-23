@@ -354,16 +354,16 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   (the bounded page/annotation scan stops at the first hit) — is rendered
   for its static appearance and a loud warning is logged per entry point;
   detection is purely structural and no `/JS` is ever decoded or evaluated.
-- **Native FFI trust boundary.** Two transitive dependencies wrap C
-  libraries: glyph rasterization links the system **FreeType**
-  (`libfreetype6`) and JPEG 2000 decoding links the system **OpenJPEG**
-  (`libopenjp2`). These are the historically highest-CVE components of any
-  PDF stack. rasterrocket links the *system* libraries (not vendored
-  copies), so their CVE exposure is exactly your host's package patch level.
-  **Deployments that process untrusted PDFs MUST keep `libfreetype6` and
-  `libopenjp2` patched** (or sandbox the process). `cargo audit` is clean
-  for the Rust dependency tree, but RustSec does not track upstream C-library
-  CVEs — the host's patch cadence is the control there.
+- **Native FFI trust boundary.** One dependency in the render path wraps a C
+  library: glyph rasterization links the system **FreeType**
+  (`libfreetype6`), historically one of the highest-CVE components of any PDF
+  stack. rasterrocket links the *system* library by default (the `bundled`
+  feature compiles a vendored copy instead), so its CVE exposure is your
+  host's package patch level. **Deployments that process untrusted PDFs MUST
+  keep `libfreetype6` patched** (or sandbox the process). `cargo audit` is
+  clean for the Rust dependency tree, but RustSec does not track upstream
+  C-library CVEs. JPEG 2000 is decoded in pure Rust (`hayro-jpeg2000`, no
+  unsafe code); the optional `nvjpeg2k` GPU path calls NVIDIA's library.
 - **Encrypted input.** Owner-password-only encrypted PDFs are decrypted via
   an opt-in, default-deny liability gate (see Getting Started). Unencrypted
   input never spawns a subprocess and never writes a temp file.

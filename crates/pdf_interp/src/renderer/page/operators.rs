@@ -376,7 +376,7 @@ impl PageRenderer<'_> {
                     Some(&mut self.icc_clut_cache),
                 );
                 if let Some(img) = decoded {
-                    self.blit_image(&img);
+                    self.blit_image(&img, img.width);
                 } else {
                     // Inline image data is present by definition — None here is a
                     // genuine decode failure, not an absent resource.

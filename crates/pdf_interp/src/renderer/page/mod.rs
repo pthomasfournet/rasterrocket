@@ -178,6 +178,22 @@ impl PageDiagnostics {
 /// already baked into the path points by `to_device`.
 const DEVICE_MATRIX: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
+/// Device-pixel extent `(width, height)` of an image drawn under `ctm`: the
+/// lengths of the images of its unit x and y vectors, rounded up.  Correct
+/// under rotation and skew.  `None` for a degenerate or non-finite matrix.
+fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
+    let extent = |dx: f64, dy: f64| {
+        let len = dx.hypot(dy).ceil();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "len is finite, at least 1 and at most u32::MAX, checked first"
+        )]
+        (len.is_finite() && (1.0..=f64::from(u32::MAX)).contains(&len)).then_some(len as u32)
+    };
+    Some((extent(ctm[0], ctm[1])?, extent(ctm[2], ctm[3])?))
+}
+
 /// Maximum nesting depth for Form `XObjects`.
 ///
 /// Prevents unbounded recursion from self-referencing or mutually-referencing
@@ -1177,12 +1193,16 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
         // Try Image.
+        let request = crate::resources::ImageRequest {
+            name,
+            draw_size: image_draw_size(&self.gstate.current().ctm),
+        };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).
         // Each branch is a separately monomorphised call; no decoder is wasted.
         #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
         if self.jpeg_vk.is_some() {
             let resolution = self.resources.image(
-                name,
+                request,
                 #[cfg(feature = "nvjpeg")]
                 self.nvjpeg.as_mut(),
                 #[cfg(feature = "vaapi")]
@@ -1203,7 +1223,7 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
         let resolution = self.resources.image(
-            name,
+            request,
             #[cfg(feature = "nvjpeg")]
             self.nvjpeg.as_mut(),
             #[cfg(feature = "vaapi")]
@@ -1237,8 +1257,11 @@ impl<'doc> PageRenderer<'doc> {
     ) {
         use crate::resources::image::ImageResolution;
         match resolution {
-            ImageResolution::Ok(img) => {
-                self.blit_image(&img);
+            ImageResolution::Ok {
+                image,
+                source_width,
+            } => {
+                self.blit_image(&image, source_width);
             }
             ImageResolution::DecodeFailed(msg) => {
                 let name_str = String::from_utf8_lossy(name);
@@ -1459,7 +1482,10 @@ impl<'doc> PageRenderer<'doc> {
         clippy::too_many_lines,
         reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
     )]
-    fn blit_image(&mut self, img: &crate::resources::ImageDescriptor) {
+    /// `source_width` is the stream's own pixel width, which `img.width`
+    /// falls below when the image was decoded at reduced resolution; it feeds
+    /// the `source_ppi_hint` diagnostic.
+    fn blit_image(&mut self, img: &crate::resources::ImageDescriptor, source_width: u32) {
         // Degenerate image — nothing to blit.
         if img.width == 0 || img.height == 0 {
             return;
@@ -1494,7 +1520,7 @@ impl<'doc> PageRenderer<'doc> {
             clippy::cast_possible_truncation,
             reason = "src_ppi is finite and positive, checked below; f64→f32 is safe for PPI values in practice (well under f32::MAX)"
         )]
-        let src_ppi = ((f64::from(img.width) / page_pts_w) * 72.0) as f32;
+        let src_ppi = ((f64::from(source_width) / page_pts_w) * 72.0) as f32;
         if src_ppi.is_finite() && src_ppi > 0.0 {
             self.diag.source_ppi_hint = Some(match self.diag.source_ppi_hint {
                 Some(prev) if prev >= src_ppi => prev,
@@ -1883,6 +1909,45 @@ fn check_image_bytes_len(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_draw_size_measures_the_transformed_unit_square() {
+        assert_eq!(
+            super::image_draw_size(&[200.0, 0.0, 0.0, 100.0, 5.0, 7.0]),
+            Some((200, 100))
+        );
+        // Rotated 90°: the image's width lies along device y.
+        assert_eq!(
+            super::image_draw_size(&[0.0, 200.0, -100.0, 0.0, 0.0, 0.0]),
+            Some((200, 100))
+        );
+        // A fractional extent rounds up.
+        assert_eq!(
+            super::image_draw_size(&[30.0, 40.0, 0.0, 10.4, 0.0, 0.0]),
+            Some((50, 11))
+        );
+        // Flipped (negative scale) measures the same.
+        assert_eq!(
+            super::image_draw_size(&[-200.0, 0.0, 0.0, -100.0, 0.0, 0.0]),
+            Some((200, 100))
+        );
+    }
+
+    #[test]
+    fn image_draw_size_rejects_degenerate_matrices() {
+        assert_eq!(
+            super::image_draw_size(&[0.0, 0.0, 0.0, 100.0, 0.0, 0.0]),
+            None
+        );
+        assert_eq!(
+            super::image_draw_size(&[f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            None
+        );
+        assert_eq!(
+            super::image_draw_size(&[1e300, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            None
+        );
+    }
 
     fn diag_with_ppi(ppi: f32) -> PageDiagnostics {
         PageDiagnostics {

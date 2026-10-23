@@ -336,7 +336,7 @@ fn decode_one(doc: &Document, doc_id: DocId, cache: &Arc<DeviceImageCache>, job:
     let _ = resolve_image(
         doc,
         &page_dict,
-        &job.image_name,
+        crate::resources::image::ImageRequest::full(&job.image_name),
         #[cfg(feature = "nvjpeg")]
         None,
         #[cfg(feature = "vaapi")]

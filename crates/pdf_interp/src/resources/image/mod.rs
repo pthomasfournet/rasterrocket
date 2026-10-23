@@ -199,7 +199,15 @@ pub mod fuzz_entry {
 /// rendering a blank region.
 pub enum ImageResolution {
     /// Image decoded successfully.
-    Ok(ImageDescriptor),
+    Ok {
+        /// The decoded image.  A decoder that reconstructs at reduced
+        /// resolution (see [`ImageRequest::draw_size`]) yields fewer pixels
+        /// than the stream holds.
+        image: ImageDescriptor,
+        /// The stream's `/Width`: the source pixel count across, whatever
+        /// resolution `image` was decoded at.
+        source_width: u32,
+    },
     /// The codec returned `None` or the stream was structurally invalid.  The
     /// page is incomplete; the message should be surfaced to the caller.
     DecodeFailed(String),
@@ -350,6 +358,30 @@ impl ImageData {
     }
 }
 
+/// An image `XObject` to resolve, by resource name, and the size it will be
+/// drawn at.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageRequest<'a> {
+    /// The `XObject` resource name.
+    pub name: &'a [u8],
+    /// Device-pixel extent `(width, height)` the image's unit square maps to,
+    /// when known.  A decoder that can reconstruct at reduced resolution
+    /// (JPEG 2000) decodes at no less than this along either axis; `None`
+    /// decodes at full resolution.
+    pub draw_size: Option<(u32, u32)>,
+}
+
+impl<'a> ImageRequest<'a> {
+    /// Request `name` at full resolution.
+    #[must_use]
+    pub const fn full(name: &'a [u8]) -> Self {
+        Self {
+            name,
+            draw_size: None,
+        }
+    }
+}
+
 /// Decoded image data, ready for blitting onto the page bitmap.
 ///
 /// See the module-level table for the exact byte layout per [`ImageColorSpace`].
@@ -413,7 +445,7 @@ pub struct ImageDescriptor {
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     doc: &Document,
     page_dict: &Dictionary,
-    name: &[u8],
+    request: ImageRequest<'_>,
     #[cfg(feature = "nvjpeg")] gpu: Option<&mut NvJpegDecoder>,
     #[cfg(feature = "vaapi")] vaapi: Option<&JpegQueueHandle>,
     #[cfg(feature = "nvjpeg2k")] gpu_j2k: Option<&mut NvJpeg2kDecoder>,
@@ -427,6 +459,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     use raw::decode_raw;
     use smask::decode_smask;
 
+    let name = request.name;
     let Some(stream_id) = xobject_id(doc, page_dict, name) else {
         return ImageResolution::Absent;
     };
@@ -575,11 +608,11 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         Some("JPXDecode") => {
             #[cfg(feature = "nvjpeg2k")]
             {
-                decode_jpx(&codec_input, w, h, gpu_j2k)
+                decode_jpx(&codec_input, w, h, request.draw_size, gpu_j2k)
             }
             #[cfg(not(feature = "nvjpeg2k"))]
             {
-                decode_jpx(&codec_input, w, h)
+                decode_jpx(&codec_input, w, h, request.draw_size)
             }
         }
         Some("JBIG2Decode") => decode_jbig2(doc, &codec_input, w, h, is_mask, terminal_parms),
@@ -669,7 +702,10 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         colorspace::apply_tint_lut(&mut img, lut);
     }
 
-    ImageResolution::Ok(img)
+    ImageResolution::Ok {
+        image: img,
+        source_width: w,
+    }
 }
 
 /// Whether an image dictionary carries a mask the blit must honour: an
@@ -845,7 +881,7 @@ mod tests {
         let resolution = resolve_image(
             &doc,
             &page,
-            b"Im1",
+            ImageRequest::full(b"Im1"),
             #[cfg(feature = "nvjpeg")]
             None,
             #[cfg(feature = "vaapi")]
@@ -864,7 +900,7 @@ mod tests {
             None,
         );
         match resolution {
-            ImageResolution::Ok(img) => img,
+            ImageResolution::Ok { image, .. } => image,
             ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
             ImageResolution::Absent => panic!("image resource not found"),
         }

@@ -33,8 +33,8 @@ pub use font::{BaseEncoding, FontDescriptor, PdfFontKind, resolve_font};
 #[cfg(feature = "nvjpeg")]
 pub use gpu::nvjpeg::NvJpegDecoder;
 pub use image::{
-    IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageResolution,
-    resolve_image,
+    IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
+    ImageResolution, resolve_image,
 };
 
 /// Selected parameters extracted from a PDF `ExtGState` resource dictionary.
@@ -299,10 +299,11 @@ impl<'doc> PageResources<'doc> {
         colorspace::resolve(self.doc, entry)
     }
 
-    /// Decode the named image `XObject` from the resource dictionary.
+    /// Decode the image `XObject` `request` names from the resource dictionary,
+    /// at no less than `request.draw_size` when the codec can reduce.
     ///
-    /// Returns `None` if the name is absent, the object is not an image, or
-    /// decoding fails.
+    /// Returns [`image::ImageResolution::Absent`] if the name is absent or not
+    /// an image, and [`image::ImageResolution::DecodeFailed`] if decoding fails.
     ///
     /// `gpu` enables GPU-accelerated JPEG decoding for large `DCTDecode` streams
     /// when the `nvjpeg` feature is active.  `gpu_j2k` enables GPU-accelerated
@@ -330,7 +331,7 @@ impl<'doc> PageResources<'doc> {
     )]
     pub fn image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
         &self,
-        name: &[u8],
+        request: image::ImageRequest<'_>,
         #[cfg(feature = "nvjpeg")] gpu: Option<&mut gpu::nvjpeg::NvJpegDecoder>,
         #[cfg(feature = "vaapi")] vaapi: Option<&gpu::JpegQueueHandle>,
         #[cfg(feature = "nvjpeg2k")] gpu_j2k: Option<&mut gpu::nvjpeg2k::NvJpeg2kDecoder>,
@@ -350,7 +351,7 @@ impl<'doc> PageResources<'doc> {
         image::resolve_image(
             self.doc,
             &page_dict,
-            name,
+            request,
             #[cfg(feature = "nvjpeg")]
             gpu,
             #[cfg(feature = "vaapi")]

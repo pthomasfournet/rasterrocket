@@ -121,7 +121,7 @@ pub trait GpuJpegDecoder: Send {
 ///
 /// Only 1-component (gray) and 3-component (RGB) images are accelerated.
 /// Sub-sampled chroma images and images with more than 3 components fall
-/// through to the CPU `OpenJPEG` path.
+/// through to the CPU decoder.
 pub trait GpuJpeg2kDecoder: Send {
     /// Decode a JPEG 2000 bytestream to an interleaved Gray or RGB u8 buffer.
     ///
