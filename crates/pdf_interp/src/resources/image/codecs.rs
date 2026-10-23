@@ -7,7 +7,7 @@
 
 use hayro_jbig2::Decoder as Jbig2Decoder;
 use jpeg2k::{ColorSpace as Jp2ColorSpace, Image as Jp2Image, ImageFormat, ImagePixelData};
-use pdf::{Document, Object};
+use pdf::{Dictionary, Document, Object};
 
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
 use crate::resources::dict_ext::DictExt;
@@ -431,6 +431,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     data: &[u8],
     pdf_w: u32,
     pdf_h: u32,
+    dict: &Dictionary,
     #[cfg(feature = "nvjpeg")] gpu: Option<&mut NvJpegDecoder>,
     #[cfg(feature = "vaapi")] vaapi: Option<&JpegQueueHandle>,
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<
@@ -461,6 +462,14 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
         None => None,
     };
 
+    // `/Decode` remaps the decoded samples per colour-space component.  The
+    // device decoders return final samples, so a non-identity remap keeps
+    // the image on the CPU path, where it is applied before colour conversion.
+    let decode = jpeg_sof_components(data)
+        .map_or_else(Vec::new, |n| super::raw::parse_decode(dict, usize::from(n)));
+    #[cfg(any(feature = "nvjpeg", feature = "vaapi", feature = "gpu-jpeg-huffman"))]
+    let device_eligible = super::raw::is_identity_decode(&decode);
+
     #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
     let area = pdf_w.saturating_mul(pdf_h);
 
@@ -475,7 +484,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     // see the constant's docs). The expect is on the per-call site; the
     // threshold itself is not a constant truth.
     #[cfg(feature = "nvjpeg")]
-    if let Some(dec) = gpu {
+    if device_eligible && let Some(dec) = gpu {
         let is_eligible = matches!(
             jpeg_variant,
             Some(gpu::JpegVariant::Baseline | gpu::JpegVariant::Progressive)
@@ -498,7 +507,8 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     // Jobs are routed through a dedicated worker thread (JpegQueueHandle) that owns
     // the VapiJpegDecoder, eliminating Mesa driver contention across Rayon workers.
     #[cfg(feature = "vaapi")]
-    if let Some(handle) = vaapi
+    if device_eligible
+        && let Some(handle) = vaapi
         && matches!(jpeg_variant, Some(gpu::JpegVariant::Baseline))
         && {
             #[expect(
@@ -515,7 +525,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
 
     // ── GPU parallel-Huffman path ─────────────────────────────────────────────
     #[cfg(feature = "gpu-jpeg-huffman")]
-    if let Some(dec) = jpeg_gpu {
+    if device_eligible && let Some(dec) = jpeg_gpu {
         let area = pdf_w.saturating_mul(pdf_h);
         if area >= super::huffman_threshold() {
             match dec.decode(data) {
@@ -595,10 +605,29 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
 
     let options = DecoderOptions::default().jpeg_set_out_colorspace(out_cs);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
-    let pixels = decoder
+
+    // An Adobe APP14 transform of 2 marks a four-component stream as YCCK.
+    // The decoder has no YCCK → CMYK mapping, so request YCCK unchanged and
+    // convert it below.
+    let ycck = components == 4 && {
+        decoder
+            .decode_headers()
+            .map_err(|e| log::warn!("image: DCTDecode header error: {e}"))
+            .ok()?;
+        decoder.input_colorspace() == Some(ZColorSpace::YCCK)
+    };
+    if ycck {
+        decoder.set_options(options.jpeg_set_out_colorspace(ZColorSpace::YCCK));
+    }
+
+    let mut pixels = decoder
         .decode()
         .map_err(|e| log::warn!("image: DCTDecode decode error: {e}"))
         .ok()?;
+    if ycck {
+        ycck_to_adobe_cmyk(&mut pixels);
+    }
+    let pixels = super::raw::apply_decode(std::borrow::Cow::Owned(pixels), &decode);
 
     let jpeg_info = decoder.info().or_else(|| {
         log::warn!("image: DCTDecode: JPEG info unavailable after decode");
@@ -651,13 +680,15 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
             filter: ImageFilter::Dct,
         },
         ZColorSpace::CMYK => {
-            // JPEG CMYK stores inverted ink densities (0 = full ink, 255 = no ink).
-            // Pass inverted=true so cmyk_raw_to_rgb complements on-the-fly without
-            // a separate allocation.  JPEG streams embed their own colour profile;
-            // the PDF ICCBased stream is not available here, so no CLUT baking.
+            // The samples are ink densities as the image dictionary
+            // describes them.  An Adobe JPEG that stores inverted CMYK
+            // carries `/Decode [1 0 1 0 1 0 1 0]`, applied above, so no
+            // inversion is implied by the JPEG itself.  The JPEG's own
+            // colour profile is not read and the PDF `ICCBased` stream is
+            // not available here, so no CLUT is baked.
             let rgb = cmyk_raw_to_rgb(
                 &pixels,
-                true,
+                false,
                 #[cfg(feature = "gpu-icc")]
                 gpu_ctx,
                 #[cfg(feature = "gpu-icc")]
@@ -920,6 +951,20 @@ fn decode_dct_queue_path(
         filter: ImageFilter::Raw,
         smask: None,
     })
+}
+
+/// Rewrite decoded YCCK samples, in place, as the CMYK samples the stream
+/// encodes: `(Y, Cb, Cr, K)` → `(255 − R, 255 − G, 255 − B, K)`, where RGB is
+/// the full-range Y′CbCr conversion of the first three channels.  The result
+/// is in the same convention as a JPEG stored as CMYK and takes the same
+/// path.  A trailing partial pixel is left unchanged.
+fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
+    for px in pixels.as_chunks_mut::<4>().0 {
+        let (r, g, b) = color::convert::ycbcr_to_rgb(px[0], px[1], px[2]);
+        px[0] = 255 - r;
+        px[1] = 255 - g;
+        px[2] = 255 - b;
+    }
 }
 
 /// Convert a raw CMYK pixel buffer to RGB, dispatching to GPU when available.
@@ -1530,6 +1575,107 @@ mod tests {
                 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
             ]
         );
+    }
+
+    /// Encode a solid 16 × 16 four-channel JPEG at quality 100.
+    #[cfg(not(any(
+        feature = "nvjpeg",
+        feature = "vaapi",
+        feature = "gpu-jpeg-huffman",
+        feature = "gpu-icc",
+        feature = "cache"
+    )))]
+    fn solid_4ch_jpeg(px: [u8; 4], ct: jpeg_encoder::ColorType) -> Vec<u8> {
+        let pixels = px.repeat(16 * 16);
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 100)
+            .encode(&pixels, 16, 16, ct)
+            .expect("encode");
+        out
+    }
+
+    /// Decode a DCT stream to RGB and return its centre pixel.
+    #[cfg(not(any(
+        feature = "nvjpeg",
+        feature = "vaapi",
+        feature = "gpu-jpeg-huffman",
+        feature = "gpu-icc",
+        feature = "cache"
+    )))]
+    fn dct_centre_rgb(jpeg: &[u8], decode: Option<&[i64]>) -> [u8; 3] {
+        let mut dict = Dictionary::new();
+        if let Some(decode) = decode {
+            dict.set(
+                b"Decode",
+                Object::Array(decode.iter().copied().map(Object::Integer).collect()),
+            );
+        }
+        let img = decode_dct(jpeg, 16, 16, &dict).expect("decodes");
+        assert_eq!(img.color_space, ImageColorSpace::Rgb);
+        let rgb = img.data.as_cpu().expect("host-resident");
+        let i = (8 * 16 + 8) * 3;
+        [rgb[i], rgb[i + 1], rgb[i + 2]]
+    }
+
+    #[cfg(not(any(
+        feature = "nvjpeg",
+        feature = "vaapi",
+        feature = "gpu-jpeg-huffman",
+        feature = "gpu-icc",
+        feature = "cache"
+    )))]
+    #[test]
+    fn ycck_jpeg_decodes_like_the_equivalent_cmyk_jpeg() {
+        use jpeg_encoder::ColorType;
+
+        // Both encodings write the Adobe convention for the same ink values:
+        // `Cmyk` stores (255 − c, 255 − m, 255 − y, 255 − k) directly, and
+        // `CmykAsYcck` stores Y′CbCr(c, m, y) with K as 255 − k, which the
+        // YCCK path turns back into those same stored values.
+        for px in [
+            [0, 0, 0, 0],
+            [255, 0, 0, 0],
+            [0, 200, 40, 0],
+            [30, 60, 90, 120],
+            [10, 10, 10, 250],
+        ] {
+            let ycck = dct_centre_rgb(&solid_4ch_jpeg(px, ColorType::CmykAsYcck), None);
+            let cmyk = dct_centre_rgb(&solid_4ch_jpeg(px, ColorType::Cmyk), None);
+            for (a, b) in ycck.into_iter().zip(cmyk) {
+                assert!(
+                    a.abs_diff(b) <= 3,
+                    "{px:?}: YCCK decodes to {ycck:?}, CMYK to {cmyk:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(not(any(
+        feature = "nvjpeg",
+        feature = "vaapi",
+        feature = "gpu-jpeg-huffman",
+        feature = "gpu-icc",
+        feature = "cache"
+    )))]
+    #[test]
+    fn cmyk_jpeg_samples_are_ink_unless_decode_inverts_them() {
+        use jpeg_encoder::ColorType;
+
+        // Both encoders store no ink as 255 in every channel (the Adobe
+        // inverted convention).  Read as ink, that is solid black; the
+        // `/Decode [1 0 1 0 1 0 1 0]` an Adobe-inverted image carries turns
+        // it back into paper.
+        const INVERT: &[i64] = &[1, 0, 1, 0, 1, 0, 1, 0];
+        for ct in [ColorType::Cmyk, ColorType::CmykAsYcck] {
+            let jpeg = solid_4ch_jpeg([0, 0, 0, 0], ct);
+            let raw = dct_centre_rgb(&jpeg, None);
+            assert!(raw.iter().all(|&v| v <= 3), "{ct:?} as ink: {raw:?}");
+            let inverted = dct_centre_rgb(&jpeg, Some(INVERT));
+            assert!(
+                inverted.iter().all(|&v| v >= 252),
+                "{ct:?} under /Decode [1 0 …]: {inverted:?}"
+            );
+        }
     }
 
     #[test]

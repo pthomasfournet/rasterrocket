@@ -1223,6 +1223,7 @@ dependencies = [
  "fax 0.3.0",
  "hayro-ccitt",
  "hayro-jbig2",
+ "jpeg-encoder",
  "jpeg2k",
  "log",
  "moxcms 0.9.1",

@@ -160,6 +160,30 @@ pub fn cmyk_to_rgb_reflectance(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
     )
 }
 
+/// Full-range (JFIF) Y′CbCr → RGB, ITU-R BT.601 coefficients.
+///
+/// `R = Y + 1.402·Cr′`, `G = Y − 0.344136·Cb′ − 0.714136·Cr′`,
+/// `B = Y + 1.772·Cb′`, with `Cb′ = Cb − 128` and `Cr′ = Cr − 128`.  The
+/// coefficients are 16.16 fixed point, rounded half-up, and each channel is
+/// clamped to \[0, 255\].
+#[inline]
+#[must_use]
+pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
+    const HALF: i32 = 1 << 15;
+    let y = i32::from(y);
+    let cb = i32::from(cb) - 128;
+    let cr = i32::from(cr) - 128;
+    let r = y + ((91_881 * cr + HALF) >> 16);
+    let g = y + ((-22_554 * cb - 46_802 * cr + HALF) >> 16);
+    let b = y + ((116_130 * cb + HALF) >> 16);
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, 255] before narrowing"
+    )]
+    let clamp = |v: i32| v.clamp(0, 255) as u8;
+    (clamp(r), clamp(g), clamp(b))
+}
+
 // ── f64 → u8 conversions ─────────────────────────────────────────────────────
 
 /// Convert a normalised PDF value \[0.0, 1.0\] to a `u8` byte.
@@ -311,6 +335,39 @@ pub fn splash_round(x: f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ycbcr_neutral_axis_is_gray() {
+        for y in 0..=255u8 {
+            assert_eq!(ycbcr_to_rgb(y, 128, 128), (y, y, y));
+        }
+    }
+
+    #[test]
+    fn ycbcr_to_rgb_within_one_of_exact_formula() {
+        let exact = |v: f64| v.round().clamp(0.0, 255.0);
+        for y in 0..=255u8 {
+            for cb in 0..=255u8 {
+                for cr in 0..=255u8 {
+                    let (yf, cbf, crf) =
+                        (f64::from(y), f64::from(cb) - 128.0, f64::from(cr) - 128.0);
+                    let want = [
+                        exact(1.402f64.mul_add(crf, yf)),
+                        exact((-0.344_136f64).mul_add(cbf, (-0.714_136f64).mul_add(crf, yf))),
+                        exact(1.772f64.mul_add(cbf, yf)),
+                    ];
+                    let (r, g, b) = ycbcr_to_rgb(y, cb, cr);
+                    for (got, want) in [r, g, b].into_iter().zip(want) {
+                        assert!(
+                            (f64::from(got) - want).abs() <= 1.0,
+                            "ycbcr_to_rgb({y}, {cb}, {cr}) = {:?}, exact {want:?}",
+                            (r, g, b)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn div255_exhaustive() {

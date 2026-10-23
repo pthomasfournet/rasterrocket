@@ -27,15 +27,11 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**Some pages are dropped instead of rendered.** `tests/fixtures/corpus-05-academic-book.pdf`
-renders 594 of 601 pages; `pdftoppm` renders all of them. Two causes, both of
-which fail the whole page (`rrocket` exits 1) rather than the one image:
-
-- CMYK JPEGs stored as YCCK (Adobe APP14 transform 2) fail to decode
-  (`Unimplemented colorspace mapping from YCCK to CMYK`): pages 416, 417, 419,
-  421, 423, 435.
-- An image whose `/Filter` is an indirect reference (`/Filter 2354 0 R`) is
-  treated as unfiltered, so its JPEG bytes are read as raw samples: page 437.
+**An image whose `/Filter` is an indirect reference drops its page.**
+`/Filter 2354 0 R` is not resolved, so the stream is treated as unfiltered and
+its JPEG bytes are read as raw samples. The decode failure then fails the whole
+page (`rrocket` exits 1) instead of only that image: page 437 of
+`tests/fixtures/corpus-05-academic-book.pdf`, which `pdftoppm` renders.
 
 Separately, a marked-content dictionary written with no space before its
 operator (`/Part <</MCID 0 >>BDC`, valid syntax) is mis-tokenized. It logs an

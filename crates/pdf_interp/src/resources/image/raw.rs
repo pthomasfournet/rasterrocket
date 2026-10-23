@@ -196,7 +196,7 @@ pub(super) fn decode_raw(
 /// pixel via `NaN as u8 == 0`; warn and treat as identity instead).  Entries
 /// that are already identity `(0.0, 1.0)` are preserved so that `apply_decode`
 /// can detect and skip the no-op path without re-reading the dict.
-fn parse_decode(dict: &Dictionary, components: usize) -> Vec<(f64, f64)> {
+pub(super) fn parse_decode(dict: &Dictionary, components: usize) -> Vec<(f64, f64)> {
     let Some(Object::Array(arr)) = dict.get(b"Decode") else {
         return Vec::new();
     };
@@ -245,12 +245,8 @@ fn parse_decode(dict: &Dictionary, components: usize) -> Vec<(f64, f64)> {
 /// array is identity) avoid a heap copy: the identity fast-path calls
 /// `into_owned()` which only allocates when a borrow was passed; non-identity
 /// paths call `into_owned()` first and mutate in place.
-fn apply_decode(data: std::borrow::Cow<[u8]>, decode: &[(f64, f64)]) -> Vec<u8> {
-    // Use an epsilon for float comparison: Decode values come from PDF real
-    // objects (parsed f64) so exact 0.0/1.0 is normal, but an epsilon is safer.
-    const EPS: f64 = 1e-9;
-    let is_identity = |d0: f64, d1: f64| d0.abs() < EPS && (d1 - 1.0).abs() < EPS;
-    if decode.is_empty() || decode.iter().all(|&(d0, d1)| is_identity(d0, d1)) {
+pub(super) fn apply_decode(data: std::borrow::Cow<[u8]>, decode: &[(f64, f64)]) -> Vec<u8> {
+    if is_identity_decode(decode) {
         // Identity — return the buffer as-is.  If the caller passed a borrowed
         // slice (e.g. the 8-bpc path) this avoids a copy entirely.
         return data.into_owned();
@@ -259,7 +255,7 @@ fn apply_decode(data: std::borrow::Cow<[u8]>, decode: &[(f64, f64)]) -> Vec<u8> 
     let components = decode.len();
     for chunk in pixels.chunks_mut(components) {
         for (s, &(dmin, dmax)) in chunk.iter_mut().zip(decode.iter()) {
-            if is_identity(dmin, dmax) {
+            if is_identity_pair(dmin, dmax) {
                 continue; // identity — leave sample unchanged
             }
             // `s` is in [0, 255]; output = dmin*255 + s*(dmax-dmin), giving
@@ -278,6 +274,21 @@ fn apply_decode(data: std::borrow::Cow<[u8]>, decode: &[(f64, f64)]) -> Vec<u8> 
         }
     }
     pixels
+}
+
+/// `true` when `(dmin, dmax)` is `(0, 1)` within 1e-9.  Decode values are
+/// parsed PDF reals, so exact 0.0 and 1.0 are typical.
+fn is_identity_pair(dmin: f64, dmax: f64) -> bool {
+    const EPS: f64 = 1e-9;
+    dmin.abs() < EPS && (dmax - 1.0).abs() < EPS
+}
+
+/// `true` when a parsed `Decode` map leaves every sample unchanged: empty
+/// (absent or ignored array) or all pairs `(0, 1)`.
+pub(super) fn is_identity_decode(decode: &[(f64, f64)]) -> bool {
+    decode
+        .iter()
+        .all(|&(dmin, dmax)| is_identity_pair(dmin, dmax))
 }
 
 /// Return `true` when the `ImageMask`'s `Decode` array is `[1, 0]` (inverted

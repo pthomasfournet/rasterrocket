@@ -540,12 +540,15 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         Some("DCTDecode") => {
             // The GPU blit composites cached images fully opaque and
             // reads their samples verbatim, so an image carrying a soft
-            // mask, an explicit mask, or a spot-colour tint stays
-            // host-resident: neither looked up (a content-hash hit from
-            // another document would drop the mask or the tint rewrite)
-            // nor inserted.  The conditions mirror the resolution below.
+            // mask, an explicit mask, a spot-colour tint, or a `/Decode`
+            // remap stays host-resident: neither looked up (a content-hash
+            // hit from another document would drop the mask, the tint
+            // rewrite, or the remap) nor inserted.
             #[cfg(feature = "cache")]
-            let cache_ctx = if has_mask_entry(&stream.dict) || tint_lut.is_some() {
+            let cache_ctx = if has_mask_entry(&stream.dict)
+                || tint_lut.is_some()
+                || stream.dict.get(b"Decode").is_some()
+            {
                 None
             } else {
                 codecs::DctCacheCtx::from_resources(image_cache, doc_id, stream_id)
@@ -554,6 +557,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                 &codec_input,
                 w,
                 h,
+                &stream.dict,
                 #[cfg(feature = "nvjpeg")]
                 gpu,
                 #[cfg(feature = "vaapi")]

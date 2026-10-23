@@ -49,6 +49,7 @@ moxcms = "0.9.0"
 
 [dev-dependencies]
 env_logger       = { workspace = true }
+jpeg-encoder     = "0.7"
 
 
 [lints.rust]

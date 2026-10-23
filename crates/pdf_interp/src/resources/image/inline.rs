@@ -147,6 +147,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
                 data,
                 w,
                 h,
+                &dict,
                 #[cfg(feature = "nvjpeg")]
                 gpu,
                 #[cfg(feature = "vaapi")]
