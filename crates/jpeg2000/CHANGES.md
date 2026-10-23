@@ -47,6 +47,12 @@ byte-identical on the benchmark images and passes the full test suite.
   `decode_u8` against `decode` + `data_u8` on every stream in the suite.
   1.25× → 1.08× (photo 1.21×).
 
+## Release tooling
+
+- `Cargo.toml`: `[package.metadata.release] release = false`, so
+  `cargo release` leaves this crate's version (the upstream base's) alone and
+  creates no tag for it.
+
 ## Lints
 
 - `Cargo.toml` allows `clippy::too_many_arguments` for upstream code we have

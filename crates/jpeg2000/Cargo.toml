@@ -32,6 +32,11 @@ image = ["dep:image", "dep:moxcms", "std"]
 # Enable logging via the `log` crate.
 logging = ["dep:log"]
 
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false
+
 # Upstream code is linted with clippy's defaults, minus findings in code we
 # have not changed.
 [lints.clippy]
