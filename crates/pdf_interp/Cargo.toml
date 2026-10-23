@@ -40,8 +40,8 @@ encode = { package = "rasterrocket-encode", path = "../encode", version = "1.4" 
 pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.4" }
 log    = { workspace = true }
 hayro-ccitt = "0.4.0"
-# Pure-Rust JPEG 2000; `image` (the `image` crate + moxcms) is not needed.
-hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["simd"] }
+# Pure-Rust JPEG 2000: a local fork of hayro-jpeg2000 (crates/jpeg2000).
+hayro-jpeg2000 = { path = "../jpeg2000", default-features = false, features = ["simd"] }
 zune-jpeg = "0.5.15"
 zune-core = "0.5.1"
 hayro-jbig2 = { version = "0.3.0", default-features = false }
