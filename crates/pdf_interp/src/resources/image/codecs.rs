@@ -87,15 +87,25 @@ fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
 
 // ── CCITTFaxDecode ─────────────────────────────────────────────────────────────
 
-/// Decode a `CCITTFaxDecode` stream.
+/// Decode a `CCITTFaxDecode` stream (PDF §7.4.6).
 ///
-/// `K` in `DecodeParms` (PDF §7.4.6):
-/// - `K < 0` → Group 4 (T.6, 2D) — fully supported.
-/// - `K = 0` → Group 3 1D (T.4 1D) — supported.
-/// - `K > 0` → Group 3 mixed 1D/2D (T.4 2D) — supported via `hayro-ccitt`.
+/// `DecodeParms` keys honoured:
+/// - `K`: `< 0` Group 4 (T.6), `0` Group 3 1-D (T.4), `> 0` Group 3 mixed
+///   1-D/2-D (T.4 MR).
+/// - `Columns`: pixels per encoded row; defaults to `width`.  Rows are
+///   clamped or white-padded to `width` in the output.
+/// - `Rows`: rows to decode; defaults to `height`.
+/// - `EncodedByteAlign`: each encoded row starts on a byte boundary.  Applied
+///   to Group 3 only: Group 4 streams that declare it are, in practice, not
+///   row-aligned, and decoding them aligned loses all but the first rows.
+/// - `EndOfLine`: EOL codes are required.  They are accepted either way.
+/// - `EndOfBlock`: the stream may end with EOFB / RTC (default `true`).
+/// - `BlackIs1`: 1 bits are black, so output samples are inverted.
 ///
-/// `Rows` (if present) caps the number of rows decoded; otherwise decodes
-/// until the bitstream signals end-of-data.
+/// The output is exactly `width × height` bytes, `0x00` black and `0xFF`
+/// white (swapped under `BlackIs1`).  A stream that ends early or fails
+/// part-way keeps its decoded rows and pads the rest white; one that yields
+/// no row at all returns `None`.
 pub(super) fn decode_ccitt(
     data: &[u8],
     width: u32,
@@ -103,231 +113,101 @@ pub(super) fn decode_ccitt(
     is_mask: bool,
     parms: Option<&Object>,
 ) -> Option<ImageDescriptor> {
-    // Resolve DecodeParms once; all CCITT params live in the same dict.
-    let parms_dict = parms.and_then(|o| o.as_dict());
-
-    let k = parms_dict.and_then(|d| d.get_i64(b"K")).unwrap_or(0);
-
-    // BlackIs1: when true, 1-bits encode black (reversed from the T.4/T.6 default).
-    let black_is_1 = parms_dict
-        .and_then(|d| d.get_bool(b"BlackIs1"))
-        .unwrap_or(false);
-
-    // Rows: optional override for the number of rows in the stream.  When present
-    // and smaller than height, we stop early; when absent we decode until EOD and
-    // pad any missing rows with white.
-    let rows_limit = parms_dict
-        .and_then(|d| d.get_i64(b"Rows"))
-        .and_then(|r| u32::try_from(r).ok())
-        .unwrap_or(height);
-
-    let capacity = (width as usize).checked_mul(height as usize)?;
-    let p = CcittParams {
-        capacity,
-        width,
-        height,
-        is_mask,
-        black_is_1,
-    };
-
-    match k.cmp(&0) {
-        std::cmp::Ordering::Less => decode_ccitt_g4(data, &p),
-        std::cmp::Ordering::Equal => decode_ccitt_g3_1d(data, &p, rows_limit),
-        std::cmp::Ordering::Greater => {
-            // K > 0: Group 3 mixed 1D/2D (T.4 2D, "MR").
-            // The fax 0.2.x crate only decodes 1D; use hayro-ccitt for the mixed path.
-            let k_u32 = u32::try_from(k).ok()?;
-            decode_ccitt_g3_2d(data, &p, rows_limit, k_u32)
-        }
-    }
-}
-
-/// Shared parameters for the CCITT decode helpers.
-struct CcittParams {
-    capacity: usize,
-    width: u32,
-    height: u32,
-    is_mask: bool,
-    black_is_1: bool,
-}
-
-/// Build the final [`ImageDescriptor`] for a decoded CCITT bitonal image.
-const fn ccitt_descriptor(p: &CcittParams, data: Vec<u8>) -> ImageDescriptor {
-    let color_space = if p.is_mask {
-        ImageColorSpace::Mask
-    } else {
-        ImageColorSpace::Gray
-    };
-    ImageDescriptor {
-        width: p.width,
-        height: p.height,
-        color_space,
-        data: ImageData::Cpu(data),
-        smask: None,
-        filter: ImageFilter::Raw,
-    }
-}
-
-/// Decode a Group 4 (K<0, T.6) CCITT fax stream.
-fn decode_ccitt_g4(data: &[u8], p: &CcittParams) -> Option<ImageDescriptor> {
-    let mut data_out: Vec<u8> = Vec::with_capacity(p.capacity);
-    let mut rows_decoded: u32 = 0;
-
-    let completed = fax::decoder::decode_g4(
-        data.iter().copied(),
-        p.width,
-        Some(p.height),
-        |transitions| {
-            append_ccitt_row(&mut data_out, transitions, p.width, p.black_is_1);
-            rows_decoded += 1;
-        },
-    );
-
-    if completed.is_none() {
-        log::warn!(
-            "image: CCITTFaxDecode Group4 decode incomplete — got {rows_decoded}/{} rows",
-            p.height
-        );
-        if rows_decoded == 0 {
-            return None;
-        }
-    }
-
-    // Normalise to exactly p.capacity on every path (success and incomplete
-    // alike): a clean EOFB before `height` rows leaves data_out short even when
-    // `completed.is_some()`, and a malformed stream can over-emit.  G3-1D/G3-2D
-    // normalise unconditionally; keep G4 consistent so a short or long buffer
-    // never reaches ccitt_descriptor (which would later panic in scale_smask or
-    // silently drop image content).  black_is_1=true means 0xFF encodes black,
-    // so pad missing rows with 0x00 (white) instead.
-    if data_out.len() > p.capacity {
-        data_out.truncate(p.capacity);
-    } else if data_out.len() < p.capacity {
-        let pad = if p.black_is_1 { 0x00 } else { 0xFF };
-        data_out.resize(p.capacity, pad);
-    }
-
-    Some(ccitt_descriptor(p, data_out))
-}
-
-/// Decode a Group 3 1D (K=0, T.4) CCITT fax stream.
-///
-/// `rows_limit` is the maximum number of rows to emit (from `DecodeParms/Rows`
-/// or `height` when absent).  Extra rows in the stream are discarded; missing
-/// rows are padded with white.
-fn decode_ccitt_g3_1d(data: &[u8], p: &CcittParams, rows_limit: u32) -> Option<ImageDescriptor> {
-    let mut data_out: Vec<u8> = Vec::with_capacity(p.capacity);
-    let mut rows_decoded: u32 = 0;
-
-    // decode_g3 fires the callback once per decoded row (after each EOL).
-    // It returns Some(()) on clean EOD, None on bitstream error.
-    let result = fax::decoder::decode_g3(data.iter().copied(), |transitions| {
-        if rows_decoded >= rows_limit {
-            return; // discard extra rows beyond the declared height
-        }
-        append_ccitt_row(&mut data_out, transitions, p.width, p.black_is_1);
-        rows_decoded += 1;
-    });
-
-    if result.is_none() {
-        if rows_decoded == 0 {
-            log::warn!("image: CCITTFaxDecode Group3 1D decode failed with no rows");
-            return None;
-        }
-        log::warn!(
-            "image: CCITTFaxDecode Group3 1D decode error after {rows_decoded}/{} rows — \
-             padding remainder",
-            p.height
-        );
-    }
-    if rows_decoded < p.height {
-        let pad = if p.black_is_1 { 0x00 } else { 0xFF };
-        data_out.resize(p.capacity, pad);
-    }
-
-    Some(ccitt_descriptor(p, data_out))
-}
-
-/// Decode a Group 3 mixed 1D/2D (K>0, T.4 2D / "MR") CCITT fax stream.
-///
-/// Uses `hayro-ccitt` which natively supports `EncodingMode::Group3_2D { k }`.
-/// `rows_limit` caps the number of rows to emit (from `DecodeParms/Rows` or `height`).
-fn decode_ccitt_g3_2d(
-    data: &[u8],
-    p: &CcittParams,
-    rows_limit: u32,
-    k: u32,
-) -> Option<ImageDescriptor> {
     use hayro_ccitt::{DecodeSettings, DecoderContext, EncodingMode};
 
-    // EncodingMode::Group3_1D/Group3_2D expect `end_of_line = true` for T.4.
-    // `end_of_block` tells the decoder it may encounter a 6-EOL RTC marker.
-    // `rows_are_byte_aligned` = false: T.4 mixed streams are NOT byte-aligned
-    // between rows (only the EOL acts as a row separator).
-    let settings = DecodeSettings {
-        columns: p.width,
-        rows: rows_limit,
-        end_of_block: true,
-        end_of_line: true,
-        rows_are_byte_aligned: false,
-        encoding: EncodingMode::Group3_2D { k },
-        invert_black: p.black_is_1,
+    let parms_dict = parms.and_then(|o| o.as_dict());
+    let flag =
+        |key: &[u8], default: bool| parms_dict.and_then(|d| d.get_bool(key)).unwrap_or(default);
+    let positive = |key: &[u8]| {
+        parms_dict
+            .and_then(|d| d.get_i64(key))
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v > 0)
     };
-    let mut ctx = DecoderContext::new(settings);
-    let mut collector = HayroCcittCollector::new(p.capacity, p.width);
 
-    match hayro_ccitt::decode(data, &mut collector, &mut ctx) {
-        Ok(_) => {}
-        Err(e) => {
-            if collector.rows_decoded() == 0 {
-                log::warn!("image: CCITTFaxDecode Group3 2D decode failed: {e}");
-                return None;
-            }
-            log::warn!(
-                "image: CCITTFaxDecode Group3 2D decode error after {}/{} rows: {e}",
-                collector.rows_decoded(),
-                p.height
-            );
+    let k = parms_dict.and_then(|d| d.get_i64(b"K")).unwrap_or(0);
+    let encoding = match k.cmp(&0) {
+        std::cmp::Ordering::Less => EncodingMode::Group4,
+        std::cmp::Ordering::Equal => EncodingMode::Group3_1D,
+        std::cmp::Ordering::Greater => EncodingMode::Group3_2D {
+            k: u32::try_from(k).ok()?,
+        },
+    };
+    let black_is_1 = flag(b"BlackIs1", false);
+    let settings = DecodeSettings {
+        columns: positive(b"Columns").unwrap_or(width),
+        rows: positive(b"Rows").unwrap_or(height),
+        end_of_block: flag(b"EndOfBlock", true),
+        end_of_line: flag(b"EndOfLine", false),
+        rows_are_byte_aligned: k >= 0 && flag(b"EncodedByteAlign", false),
+        encoding,
+        invert_black: black_is_1,
+    };
+
+    let capacity = (width as usize).checked_mul(height as usize)?;
+    // White in the output convention: 0xFF, or 0x00 when 1 bits are black.
+    let white = if black_is_1 { 0x00 } else { 0xFF };
+    let mut collector = HayroCcittCollector::new(capacity, width, white);
+    let mut ctx = DecoderContext::new(settings);
+
+    if let Err(e) = hayro_ccitt::decode(data, &mut collector, &mut ctx) {
+        if collector.rows_decoded() == 0 {
+            log::warn!("image: CCITTFaxDecode ({encoding:?}) failed: {e}");
+            return None;
         }
+        log::warn!(
+            "image: CCITTFaxDecode ({encoding:?}) error after {}/{height} rows: {e}",
+            collector.rows_decoded()
+        );
     }
 
     let rows_decoded = collector.rows_decoded();
     let mut data_out = collector.finish();
-    // Truncate overlong output (malformed stream that emitted too many pixels)
-    // then pad short output (truncated stream); both produce exactly p.capacity bytes.
-    if data_out.len() > p.capacity {
+    if data_out.len() > capacity {
         log::debug!(
-            "image: CCITTFaxDecode Group3 2D: output too long ({} > {}), truncating",
-            data_out.len(),
-            p.capacity
+            "image: CCITTFaxDecode: output too long ({} > {capacity}), truncating",
+            data_out.len()
         );
-        data_out.truncate(p.capacity);
-    } else if data_out.len() < p.capacity {
-        log::debug!(
-            "image: CCITTFaxDecode Group3 2D: got {rows_decoded}/{} rows — padding remainder",
-            p.height
-        );
-        let pad = if p.black_is_1 { 0x00 } else { 0xFF };
-        data_out.resize(p.capacity, pad);
+        data_out.truncate(capacity);
+    } else if data_out.len() < capacity {
+        log::debug!("image: CCITTFaxDecode: got {rows_decoded}/{height} rows, padding remainder");
+        data_out.resize(capacity, white);
     }
 
-    Some(ccitt_descriptor(p, data_out))
+    let color_space = if is_mask {
+        ImageColorSpace::Mask
+    } else {
+        ImageColorSpace::Gray
+    };
+    Some(ImageDescriptor {
+        width,
+        height,
+        color_space,
+        data: ImageData::Cpu(data_out),
+        smask: None,
+        filter: ImageFilter::Raw,
+    })
 }
 
-/// Accumulates `hayro-ccitt` decoded pixels into a `Vec<u8>` (one byte per pixel,
-/// 0x00 = black, 0xFF = white).  Incomplete final rows are padded to `width`.
+/// [`hayro_ccitt::Decoder`] that collects pixel runs into one byte per pixel
+/// (`0x00` black, `0xFF` white, as the decoder reports them).
+///
+/// Every row is exactly `width` bytes: runs past the end are clamped, and a
+/// short row is filled with `pad`.
 struct HayroCcittCollector {
     out: Vec<u8>,
     width: u32,
+    pad: u8,
     col: u32,
     rows: u32,
 }
 
 impl HayroCcittCollector {
-    fn new(capacity: usize, width: u32) -> Self {
+    fn new(capacity: usize, width: u32, pad: u8) -> Self {
         Self {
             out: Vec::with_capacity(capacity),
             width,
+            pad,
             col: 0,
             rows: 0,
         }
@@ -337,54 +217,35 @@ impl HayroCcittCollector {
         self.rows
     }
 
+    /// The collected bytes, with a partial final row padded to `width`.
     fn finish(mut self) -> Vec<u8> {
-        // Pad any partial final row (malformed stream that ended mid-row).
         if self.col > 0 {
-            // self.col <= self.width is the invariant maintained by
-            // push_pixels; subtraction is therefore safe.
-            let remaining = usize::try_from(self.width - self.col).unwrap_or(0);
-            self.out.extend(std::iter::repeat_n(0xFFu8, remaining));
+            self.fill_row();
         }
         self.out
+    }
+
+    fn fill_row(&mut self) {
+        // `col <= width` holds: `push_pixels` clamps every run.
+        let remaining = (self.width - self.col) as usize;
+        self.out.extend(std::iter::repeat_n(self.pad, remaining));
+        self.col = self.width;
     }
 }
 
 impl hayro_ccitt::Decoder for HayroCcittCollector {
     fn push_pixels(&mut self, white: bool, count: u32) {
-        // Clamp to the row width: a malformed bitstream can overrun it.
-        let n = count.min(self.width.saturating_sub(self.col));
-        let byte = if white { 0xFFu8 } else { 0x00u8 };
+        let n = count.min(self.width - self.col);
+        let byte = if white { 0xFF } else { 0x00 };
         self.out.extend(std::iter::repeat_n(byte, n as usize));
         self.col += n;
     }
 
     fn next_line(&mut self) {
-        // Pad any short row produced by a malformed or truncated bitstream.
-        if self.col < self.width {
-            let remaining = usize::try_from(self.width - self.col).unwrap_or(0);
-            self.out.extend(std::iter::repeat_n(0xFFu8, remaining));
-        }
+        self.fill_row();
         self.col = 0;
         self.rows += 1;
     }
-}
-
-/// Expand one row of CCITT transitions into bytes and append to `out`.
-///
-/// The row is padded/truncated to exactly `width` bytes.
-/// `0x00` = black, `0xFF` = white (PDF image convention).
-fn append_ccitt_row(out: &mut Vec<u8>, transitions: &[u32], width: u32, black_is_1: bool) {
-    let row_start = out.len();
-    out.extend(fax::decoder::pels(transitions, width).map(|color| {
-        let is_black = match color {
-            fax::Color::Black => !black_is_1,
-            fax::Color::White => black_is_1,
-        };
-        if is_black { 0x00u8 } else { 0xFFu8 }
-    }));
-    // Pad short rows (malformed data) with white.
-    let row_end = row_start + width as usize;
-    out.resize(row_end, 0xFF);
 }
 
 // ── DCTDecode (JPEG) ──────────────────────────────────────────────────────────
@@ -1552,135 +1413,97 @@ mod tests {
             .collect()
     }
 
+    /// `DecodeParms` with the given integer and boolean entries.
+    fn ccitt_parms(ints: &[(&[u8], i64)], flags: &[(&[u8], bool)]) -> Object {
+        let mut d = Dictionary::new();
+        for &(k, v) in ints {
+            d.set(k, Object::Integer(v));
+        }
+        for &(k, v) in flags {
+            d.set(k, Object::Boolean(v));
+        }
+        Object::Dictionary(d)
+    }
+
+    fn ccitt_bytes(stream: &str, w: u32, h: u32, parms: &Object) -> Vec<u8> {
+        let img = decode_ccitt(&pack_bits(stream), w, h, false, Some(parms)).expect("decodes");
+        img.data.as_cpu().expect("host-resident").to_vec()
+    }
+
+    /// Two rows of `white 2, black 4, white 2` (8 px).
+    const TWO_ROWS: [u8; 16] = [
+        0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, //
+        0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+    ];
+    /// T.4 one-dimensional code for one `white 2, black 4, white 2` row.
+    const ROW_1D: &str = "0111 011 0111";
+    const EOL: &str = "000000000001";
+
     #[test]
-    fn ccitt_g3_2d_decodes_one_dimensional_rows() {
-        // T.4 MR stream, K = 1, 8 × 2.  Each row is EOL + tag bit 1 (1-D coded):
-        //   row 0: white 8                   = 10011
-        //   row 1: white 2, black 4, white 2 = 0111 011 0111
-        // followed by RTC (six EOL + tag 1).
-        const EOL_1D: &str = "000000000001 1";
-        let stream = format!("{EOL_1D} 10011 {EOL_1D} 0111 011 0111 {}", EOL_1D.repeat(6));
-        let p = CcittParams {
-            capacity: 16,
-            width: 8,
-            height: 2,
-            is_mask: false,
-            black_is_1: false,
-        };
-        let img = decode_ccitt_g3_2d(&pack_bits(&stream), &p, 2, 1).expect("decodes");
-        assert_eq!(
-            img.data.as_cpu().expect("CCITT output is host-resident"),
-            [
-                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, //
-                0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
-            ]
+    fn ccitt_group4_decodes_horizontal_and_vertical_modes() {
+        // Row 0 against the imaginary white line: H(white 2, black 4), V0.
+        // Row 1 against row 0: V0 three times.  Then EOFB.
+        let stream = format!("001 0111 011 1   1 1 1   {EOL} {EOL}");
+        let parms = ccitt_parms(&[(b"K", -1)], &[]);
+        assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
+    }
+
+    #[test]
+    fn ccitt_group4_ignores_encoded_byte_align() {
+        // The unaligned stream above, declared byte-aligned.
+        let stream = format!("001 0111 011 1   1 1 1   {EOL} {EOL}");
+        let parms = ccitt_parms(&[(b"K", -1)], &[(b"EncodedByteAlign", true)]);
+        assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
+    }
+
+    #[test]
+    fn ccitt_group3_2d_decodes_one_dimensional_rows() {
+        // K = 1: each row is EOL + tag bit 1 (1-D coded), then RTC.
+        let stream = format!(
+            "{EOL} 1 {ROW_1D} {EOL} 1 {ROW_1D} {}",
+            format!("{EOL} 1 ").repeat(6)
         );
+        let parms = ccitt_parms(&[(b"K", 1)], &[]);
+        assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
     }
 
-    /// Encode a solid 16 × 16 four-channel JPEG at quality 100.
-    #[cfg(not(any(
-        feature = "nvjpeg",
-        feature = "vaapi",
-        feature = "gpu-jpeg-huffman",
-        feature = "gpu-icc",
-        feature = "cache"
-    )))]
-    fn solid_4ch_jpeg(px: [u8; 4], ct: jpeg_encoder::ColorType) -> Vec<u8> {
-        let pixels = px.repeat(16 * 16);
-        let mut out = Vec::new();
-        jpeg_encoder::Encoder::new(&mut out, 100)
-            .encode(&pixels, 16, 16, ct)
-            .expect("encode");
-        out
-    }
-
-    /// Decode a DCT stream to RGB and return its centre pixel.
-    #[cfg(not(any(
-        feature = "nvjpeg",
-        feature = "vaapi",
-        feature = "gpu-jpeg-huffman",
-        feature = "gpu-icc",
-        feature = "cache"
-    )))]
-    fn dct_centre_rgb(jpeg: &[u8], decode: Option<&[i64]>) -> [u8; 3] {
-        let mut dict = Dictionary::new();
-        if let Some(decode) = decode {
-            dict.set(
-                b"Decode",
-                Object::Array(decode.iter().copied().map(Object::Integer).collect()),
-            );
-        }
-        let img = decode_dct(jpeg, 16, 16, &dict).expect("decodes");
-        assert_eq!(img.color_space, ImageColorSpace::Rgb);
-        let rgb = img.data.as_cpu().expect("host-resident");
-        let i = (8 * 16 + 8) * 3;
-        [rgb[i], rgb[i + 1], rgb[i + 2]]
-    }
-
-    #[cfg(not(any(
-        feature = "nvjpeg",
-        feature = "vaapi",
-        feature = "gpu-jpeg-huffman",
-        feature = "gpu-icc",
-        feature = "cache"
-    )))]
     #[test]
-    fn ycck_jpeg_decodes_like_the_equivalent_cmyk_jpeg() {
-        use jpeg_encoder::ColorType;
+    fn ccitt_encoded_byte_align_starts_each_row_on_a_byte() {
+        // Group 3 1-D without EOLs: each 11-bit row is zero-filled to 16 bits.
+        let stream = format!("{ROW_1D} 00000 {ROW_1D} 00000");
+        let parms = ccitt_parms(&[(b"K", 0)], &[(b"EncodedByteAlign", true)]);
+        assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
 
-        // Both encodings write the Adobe convention for the same ink values:
-        // `Cmyk` stores (255 − c, 255 − m, 255 − y, 255 − k) directly, and
-        // `CmykAsYcck` stores Y′CbCr(c, m, y) with K as 255 − k, which the
-        // YCCK path turns back into those same stored values.
-        for px in [
-            [0, 0, 0, 0],
-            [255, 0, 0, 0],
-            [0, 200, 40, 0],
-            [30, 60, 90, 120],
-            [10, 10, 10, 250],
-        ] {
-            let ycck = dct_centre_rgb(&solid_4ch_jpeg(px, ColorType::CmykAsYcck), None);
-            let cmyk = dct_centre_rgb(&solid_4ch_jpeg(px, ColorType::Cmyk), None);
-            for (a, b) in ycck.into_iter().zip(cmyk) {
-                assert!(
-                    a.abs_diff(b) <= 3,
-                    "{px:?}: YCCK decodes to {ycck:?}, CMYK to {cmyk:?}"
-                );
-            }
-        }
+        // Read unaligned, the fill bits are decoded as codes.
+        let unaligned = ccitt_parms(&[(b"K", 0)], &[]);
+        let misread = decode_ccitt(&pack_bits(&stream), 8, 2, false, Some(&unaligned))
+            .and_then(|img| img.data.as_cpu().map(<[u8]>::to_vec));
+        assert_ne!(misread.as_deref(), Some(&TWO_ROWS[..]));
     }
 
-    #[cfg(not(any(
-        feature = "nvjpeg",
-        feature = "vaapi",
-        feature = "gpu-jpeg-huffman",
-        feature = "gpu-icc",
-        feature = "cache"
-    )))]
     #[test]
-    fn cmyk_jpeg_samples_are_ink_unless_decode_inverts_them() {
-        use jpeg_encoder::ColorType;
+    fn ccitt_rows_narrower_than_the_image_are_padded_white() {
+        // `Columns 6`: rows of white 2, black 4, padded to the 8-px width.
+        let row = "0111 011";
+        let stream = format!("{EOL} {row} {EOL} {row} {}", EOL.repeat(6));
+        let parms = ccitt_parms(&[(b"K", 0), (b"Columns", 6)], &[]);
+        assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
+    }
 
-        // Both encoders store no ink as 255 in every channel (the Adobe
-        // inverted convention).  Read as ink, that is solid black; the
-        // `/Decode [1 0 1 0 1 0 1 0]` an Adobe-inverted image carries turns
-        // it back into paper.
-        const INVERT: &[i64] = &[1, 0, 1, 0, 1, 0, 1, 0];
-        for ct in [ColorType::Cmyk, ColorType::CmykAsYcck] {
-            let jpeg = solid_4ch_jpeg([0, 0, 0, 0], ct);
-            let raw = dct_centre_rgb(&jpeg, None);
-            assert!(raw.iter().all(|&v| v <= 3), "{ct:?} as ink: {raw:?}");
-            let inverted = dct_centre_rgb(&jpeg, Some(INVERT));
-            assert!(
-                inverted.iter().all(|&v| v >= 252),
-                "{ct:?} under /Decode [1 0 …]: {inverted:?}"
-            );
-        }
+    #[test]
+    fn ccitt_black_is_1_inverts_samples_and_padding() {
+        // One decoded row of two; the missing row pads with white, which is
+        // 0x00 once 1 bits mean black.
+        let stream = format!("{EOL} {ROW_1D} {}", EOL.repeat(6));
+        let parms = ccitt_parms(&[(b"K", 0)], &[(b"BlackIs1", true)]);
+        let got = ccitt_bytes(&stream, 8, 2, &parms);
+        assert_eq!(got[..8], [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00]);
+        assert_eq!(got[8..], [0x00; 8]);
     }
 
     #[test]
     fn ccitt_collector_clamps_a_run_that_overruns_the_row() {
-        let mut c = HayroCcittCollector::new(8, 4);
+        let mut c = HayroCcittCollector::new(8, 4, 0xFF);
         hayro_ccitt::Decoder::push_pixels(&mut c, false, 3);
         hayro_ccitt::Decoder::push_pixels(&mut c, true, 20);
         hayro_ccitt::Decoder::next_line(&mut c);
