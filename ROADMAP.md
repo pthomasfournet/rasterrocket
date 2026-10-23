@@ -1810,13 +1810,19 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 Every **phase** is shipped or deferred by deliberate decision; no phase-level
 engineering is in flight. What remains open:
 
-- **Open reports in `audit/`** (gitignored, worked strict-FIFO) — JPEG Phase 2
-  propagation pass-complexity, unleveraged CPU SIMD opportunities, and
-  unleveraged CUDA opportunities. The two "unleveraged" reports are
-  opportunity inventories with several items already closed in-file. Both
-  2026-09-15 GPU render divergences are fixed: the `cache` one in v1.3.0 and
-  the `gpu-aa` one in v1.4.0. The page-loss defects under "Known issues" are
-  the highest-priority open items.
+- **Open decision:** whether one undecodable image should still fail its
+  whole page (see "Known issues"). The page-loss decoders behind it (YCCK
+  JPEGs, indirect `/Filter`) are fixed in v1.4.1.
+- **JPEG 2000 follow-up:** decode masked images at the drawn size while
+  sampling the mask at its own resolution. Masked layered scans are ~10% slower
+  than with OpenJPEG today; this would make them faster.
+- **Open reports in `audit/`** (gitignored, worked strict-FIFO): performance
+  inventories (unleveraged CUDA and CPU SIMD, JPEG Phase 2 pass complexity),
+  hygiene (the parser crate inherits no lints; `--tests` clippy debt; comic
+  JPEGs decoded before a size guard), the FreeType `bundled` build shipping a
+  CVE-affected 2.13.2, and smaller findings. Both 2026-09-15 GPU render
+  divergences are fixed: the `cache` one in v1.3.0 and the `gpu-aa` one in
+  v1.4.0.
 
 Deferred/blocked items, in full:
 

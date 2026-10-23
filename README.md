@@ -63,9 +63,9 @@ that rendered visibly wrong.
 - **Performance.** VBMI/AVX-512 rewrites of four CPU hot paths (AA gamma map
   n=2500: 924 → 12 ns), and dormant-path GPU JPEG Phase 2 convergence from
   thousands of host passes to a handful.
-- **Known issue.** CMYK JPEGs stored as YCCK, and images whose `/Filter` is
-  an indirect reference, fail to decode, and the whole page is dropped (7 of
-  601 pages on one test book). See "Known issues" in `ROADMAP.md`.
+- **Known issue (fixed in v1.4.1).** CMYK JPEGs stored as YCCK, and images
+  whose `/Filter` is an indirect reference, failed to decode, and the whole
+  page was dropped (7 of 601 pages on one test book).
 
 ## What's new in v1.3.0
 
@@ -357,8 +357,8 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   decode bombs), and a malformed entry is a bounded skip or a clear `Err`, never
   an OOM, hang, or panic. `.cbr` (RAR) is refused outright (no decoder linked).
 - **Memory-safe core.** The PDF parser, content interpreter, font/glyph
-  resolution, and the JBIG2 / CCITT / JPEG / Flate / LZW decoders are pure
-  Rust. Malformed, truncated, adversarial, or hostile input is converted to a
+  resolution, and the JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders
+  are pure Rust. Malformed, truncated, adversarial, or hostile input is converted to a
   clear per-page `Err` or a bounded skip — never a silent wrong render, an
   unbounded allocation, an infinite loop, or a process abort. The render
   pipeline enforces a per-page operator/wall-clock/form-depth watchdog, an

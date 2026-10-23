@@ -644,7 +644,7 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 | Feature | Requires | Effect |
 |---|---|---|
 | `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Falls back to CPU zune-jpeg below 512×512 px. |
-| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to CPU OpenJPEG below 512×512 px or for sub-sampled chroma. |
+| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to the CPU decoder (pure-Rust `hayro-jpeg2000`) below 512×512 px or for sub-sampled chroma. |
 | `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Dormant by default: the CPU fill is faster at every size measured, so dispatch is off unless `PDF_RASTER_AA_FILL_THRESHOLD` sets a pixel-area threshold. Path clips and pattern fills always stay on the CPU. |
 | `gpu-icc` | CUDA 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |

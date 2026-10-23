@@ -26,6 +26,9 @@ rasterrocket-color
   │           ├── gpu  (optional, feature-gated)
   │           │     CUDA kernels, nvJPEG/nvJPEG2k decoders, NPP rotate
   │           │
+  │           ├── hayro-jpeg2000  (crates/jpeg2000: local fork, pure Rust)
+  │           │     JPEG 2000 decoder for JPXDecode
+  │           │
   │           └── rasterrocket
   │                 public OCR library — raster_pdf(), render_channel()
   │                 │
@@ -68,8 +71,9 @@ render_operators(ops, resources)     dispatch loop:
     │                                 raster::fill_glyph
     ├── image ops ──────────────────▶ resources::resolve_image
     │   DCT      ───────────────────▶ gpu::NvJpegDecoder  (or zune-jpeg)
-    │   JPX      ───────────────────▶ gpu::NvJpeg2kDecoder (or jpeg2k)
-    │   CCITT/JBIG2 ────────────────▶ fax / hayro-jbig2
+    │   JPX      ───────────────────▶ gpu::NvJpeg2kDecoder (or hayro-jpeg2000,
+    │                                 at the image's drawn resolution)
+    │   CCITT/JBIG2 ────────────────▶ hayro-ccitt / hayro-jbig2
     │   Flate    ───────────────────▶ libdeflate (default) / flate2 fallback
     │   CMYK     ───────────────────▶ gpu::icc_cmyk_to_rgb (or AVX-512/scalar)
     │                                 raster::draw_image
@@ -221,7 +225,10 @@ renderer/
 resources/
   mod.rs           — PageResources; lazy resolve_*
   font.rs          — font descriptor parsing
-  image/           — image descriptor, filter detection, decode dispatch
+  image/           — image descriptor, filter detection, decode dispatch;
+                     JPX decodes at `ImageRequest::draw_size` unless the
+                     image is masked; CMYK/YCCK JPEG samples are ink, with
+                     `/Decode` applied before colour conversion
   icc.rs           — ICC profile loading + moxcms CLUT extraction
   shading/         — axial/radial/mesh shading descriptors
   cmap.rs          — ToUnicode / CMap parsing
@@ -379,7 +386,18 @@ resolution. Returns `None` for vector/text-only pages.
 `sync_channel`. Typical use: `capacity=4`, Tesseract consumes from the other end
 while the next page renders.
 
-### 3.8 `rasterrocket-cli`
+### 3.8 `hayro-jpeg2000` (`crates/jpeg2000`)
+
+A local fork of the pure-Rust JPEG 2000 decoder, vendored with its licence
+files and upstream test suite (`cargo test -p hayro-jpeg2000 --features image`).
+It is not published, not released by `cargo release` (`release = false`), and
+changes are never sent upstream; `crates/jpeg2000/CHANGES.md` lists every
+local change. The local changes cut memory traffic under parallel decoding
+(strip-mined vertical IDWT, fused MCT and level shift, no redundant zeroing or
+copying) and add `Image::decode_u8`, which fuses the inverse MCT into the
+8-bit output. Each keeps output byte-identical to the vendored baseline.
+
+### 3.9 `rasterrocket-cli`
 
 Binary entry point. Thin glue over `rasterrocket` + `rasterrocket-encode`.
 
