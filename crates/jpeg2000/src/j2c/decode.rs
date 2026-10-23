@@ -492,6 +492,28 @@ fn store<'a>(
         let skip_x = image_x_offset.saturating_sub(idwt_output.rect.x0);
         let skip_y = image_y_offset.saturating_sub(idwt_output.rect.y0);
 
+        // When the IDWT output is exactly the component's whole image, the
+        // copy below would reproduce it verbatim: hand the buffer over
+        // instead, and give the IDWT the channel's previous allocation to
+        // reuse for the next component.
+        let image_width = header.size_data.image_width() as usize;
+        let image_height = header.size_data.image_height() as usize;
+        if skip_x == 0
+            && skip_y == 0
+            && resolution_tile.rect.x0 <= image_x_offset
+            && resolution_tile.rect.y0 <= image_y_offset
+            && idwt_output.rect.width() as usize == image_width
+            && idwt_output.rect.height() as usize == image_height
+            && idwt_output.coefficients.len() == image_width * image_height
+            && channel_data.container.truncated().len() == image_width * image_height
+        {
+            let coefficients = core::mem::take(&mut idwt_output.coefficients);
+            let previous =
+                core::mem::replace(&mut channel_data.container, SimdBuffer::new(coefficients));
+            idwt_output.coefficients = previous.into_vec();
+            return;
+        }
+
         let input_row_iter = idwt_output
             .coefficients
             .chunks_exact(idwt_output.rect.width() as usize)

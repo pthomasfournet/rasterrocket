@@ -509,6 +509,11 @@ impl<const N: usize> SimdBuffer<N> {
         Self { data, original_len }
     }
 
+    /// The underlying (padded) vector, for reuse as a plain buffer.
+    pub(crate) fn into_vec(self) -> Vec<f32> {
+        self.data
+    }
+
     /// Returns only the original (non-padded) data as an immutable slice.
     pub(crate) fn truncated(&self) -> &[f32] {
         &self.data[..self.original_len]

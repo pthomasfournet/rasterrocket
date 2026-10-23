@@ -33,3 +33,7 @@ byte-identical on the benchmark images and passes the full test suite.
   coefficients and code blocks partition the sub-band, so stale values are
   never read. `TileDecompositions::coefficient_count` lost its only reader and
   is removed. 1.51× → 1.42× (photo 1.50×).
+- `decode::store`: when the IDWT output covers exactly the component's whole
+  image (one tile, no sub-sampling, no offset), swap it into the channel
+  instead of copying it row by row; the IDWT reuses the channel's previous
+  allocation. 1.42× → 1.25× (photo 1.27×).
