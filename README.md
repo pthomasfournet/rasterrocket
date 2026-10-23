@@ -23,6 +23,23 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## What's new in v1.4.1
+
+**Lost pages and negative images.** No API change.
+
+- **Pages that were dropped now render.** CMYK JPEGs stored as YCCK, and
+  images whose `/Filter` is an indirect reference, failed to decode and took
+  their whole page with them. Both decode now.
+- **CMYK JPEGs are no longer negatives.** They were always inverted. Now the
+  samples are read as ink and the PDF's `/Decode` array is applied, as the
+  spec requires.
+- **JPEG 2000 decodes in pure Rust.** OpenJPEG is replaced by a local fork of
+  `hayro-jpeg2000`, which removes the last C parser of untrusted image data from
+  the default build. Images are decoded at the size they are drawn; fidelity
+  matches OpenJPEG.
+- **CCITT fax images** honour `/Columns` and `/EncodedByteAlign`.
+- **Dependencies** brought current, with fewer of them.
+
 ## What's new in v1.4.0
 
 **Fidelity release.** No API change. 26 commits, most of them fixing pages

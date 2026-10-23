@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-10-23
+
+### Bug Fixes
+
+- Decode YCCK JPEGs, read CMYK JPEG samples as ink, honour /Decode
+- Resolve indirect /Filter and /DecodeParms when loading a stream
+
+### Features
+
+- Decode JPXDecode in pure Rust, at the resolution it is drawn
+
+### Other
+
+- October sweep (hayro-ccitt 0.4, zip 9, sevenz-rust2 0.24, vello_cpu 0.3)
+- Vendor hayro-jpeg2000 as a local fork in crates/jpeg2000
+
+### Performance
+
+- Cut memory passes in the IDWT, MCT and coefficient reset
+- Hand a whole-image IDWT output to the channel without copying
+- Fuse inverse MCT into 8-bit output; keep masked JPX at full size
+
+### Refactor
+
+- Decode every CCITT mode through hayro-ccitt; honour DecodeParms
+
+### Testing
+
+- Skip the JPEG decoder's CUDA tests when no device is present
+
 ## [1.4.0] - 2026-10-22
 
 ### Bug Fixes
@@ -16,12 +46,17 @@ All notable changes to this project will be documented in this file.
 - Clear the clippy lints new in Rust 1.99
 - Make GPU fills byte-identical to the CPU rasteriser
 
+### Chores
+
+- Release v1.4.0
+
 ### Documentation
 
 - Describe the current CMYK matrix kernel
 - Fix package name and add gpu-jpeg-huffman pointer to parity test header
 - Remove stale plan/version references from feature doc comments
 - Describe what gpu-jpeg-huffman actually does
+- Prep v1.4.0 release notes
 
 ### Features
 

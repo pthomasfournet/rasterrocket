@@ -49,6 +49,61 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
+### v1.4.1 (October 2026)
+
+**Lost pages and negative images.** No API change. Ten commits since v1.4.0.
+
+**Pages that were dropped now render.**
+- **YCCK JPEGs:** CMYK JPEGs stored as YCCK (Adobe APP14 transform 2) failed
+  to decode, and the failure dropped the whole page. They are now decoded to
+  their CMYK samples and converted like any other CMYK JPEG.
+- **Indirect filters:** a stream whose `/Filter` or `/DecodeParms` was an
+  indirect reference was read as unfiltered, so its image failed to decode
+  (and a content or font stream with one would not decompress). The parser now
+  resolves those references when it loads the stream.
+- **Result:** corpus-05 renders all 601 pages (594 before). In a sample of
+  the mss archive, at least 15 pages across 7 PDFs went from dropped to
+  rendered.
+
+**CMYK JPEGs no longer render as negatives.** Every CMYK JPEG was inverted on
+the assumption that the JPEG itself signals Adobe's inverted storage. In PDF
+it does not: an inverted image carries `/Decode [1 0 1 0 1 0 1 0]`, which was
+never applied to DCT images. Samples are now read as ink, and `/Decode` is
+applied to DCT images (before colour conversion; such images stay off the GPU
+decoders and the device cache). Images with that `/Decode` render exactly as
+before; those without it (at least 16 pages across 5 PDFs in a sample of
+the mss archive) are no longer negatives.
+
+**JPEG 2000 decodes in pure Rust.** OpenJPEG (unmaintained upstream since July
+2026) is replaced by `hayro-jpeg2000`, kept as a local fork in
+`crates/jpeg2000`. That removes the last C parser of untrusted image data
+from the default build (FreeType remains for fonts), along with the `image`
+crate and a duplicate `moxcms`.
+- **Memory traffic:** the fork's changes cut memory traffic under parallel
+  decoding. Each change is byte-identical to the unmodified decoder, checked
+  on its full test suite.
+- **Decoded at the drawn size:** images are decoded at the resolution they
+  are drawn. Masked images are the exception and stay at full resolution, so
+  text masks stay sharp.
+- **Fidelity:** matches OpenJPEG on 820 pages from 396 JPX-bearing PDFs.
+- **Speed:** layered scans (colour layer plus JBIG2 text mask) are about 10%
+  slower than with OpenJPEG; unmasked images drawn at half size or less are
+  2–3× faster.
+
+**CCITT fax images.** All three modes now decode through `hayro-ccitt`
+(previously two crates). `/Columns`, `/EncodedByteAlign` (Group 3),
+`/EndOfLine` and `/EndOfBlock` are honoured; byte alignment is not applied to
+Group 4, where real files that declare it are not aligned. On 399 sampled
+CCITT pages from the archive, 396 render byte-identically to before.
+
+**Dependencies.** hayro-ccitt 0.4, zip 9, sevenz-rust2 0.24, vello_cpu 0.3
+(bench), and 56 semver-compatible updates. blake3 1.8.7 removes the
+`arrayref` dependency after that crate's owner account was compromised. Open
+0.x version ranges (which let `cargo update` cross breaking releases) are now
+carets on the current version. Unused archive features are trimmed: 14 crates
+fewer, including the 7z AES stack. `flate2` uses one backend (zlib-rs)
+everywhere.
+
 ### v1.4.0 (October 2026)
 
 **Fidelity release.** No public API change. 26 commits since v1.3.0, most of
