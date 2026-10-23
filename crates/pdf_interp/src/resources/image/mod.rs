@@ -606,13 +606,18 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
             )
         }
         Some("JPXDecode") => {
+            // A mask is resampled to the decoded image's size, so reducing a
+            // masked image would also blur the mask (typically the text layer
+            // of a scanned page); a colour-key mask compares exact samples,
+            // which a reduced decode averages.  Masked images decode in full.
+            let draw_size = request.draw_size.filter(|_| !has_mask_entry(&stream.dict));
             #[cfg(feature = "nvjpeg2k")]
             {
-                decode_jpx(&codec_input, w, h, request.draw_size, gpu_j2k)
+                decode_jpx(&codec_input, w, h, draw_size, gpu_j2k)
             }
             #[cfg(not(feature = "nvjpeg2k"))]
             {
-                decode_jpx(&codec_input, w, h, request.draw_size)
+                decode_jpx(&codec_input, w, h, draw_size)
             }
         }
         Some("JBIG2Decode") => decode_jbig2(doc, &codec_input, w, h, is_mask, terminal_parms),
@@ -711,7 +716,6 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 /// Whether an image dictionary carries a mask the blit must honour: an
 /// `/SMask` stream reference, or a `/Mask` given as a stencil-mask stream
 /// reference or a colour-key range array (PDF §8.9.6).
-#[cfg(feature = "cache")]
 fn has_mask_entry(dict: &Dictionary) -> bool {
     matches!(dict.get(b"SMask"), Some(Object::Reference(_)))
         || matches!(

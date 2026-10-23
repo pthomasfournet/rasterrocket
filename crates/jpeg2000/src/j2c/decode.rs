@@ -21,11 +21,18 @@ use crate::math::SimdBuffer;
 use crate::reader::BitReader;
 use core::ops::Range;
 
+/// Decode `data` into `ctx.channel_data`.
+///
+/// With `defer_mct`, an inverse MCT the tiles call for is validated but not
+/// applied: it is returned, and the first three components are left without
+/// it and without their DC level shift.  Otherwise it is applied and `None`
+/// is returned.
 pub(crate) fn decode<'a>(
     data: &'a [u8],
     header: &'a Header,
     ctx: &mut DecoderContext<'a>,
-) -> Result<()> {
+    defer_mct: bool,
+) -> Result<Option<mct::PendingMct>> {
     let mut reader = BitReader::new(data);
     let tiles = tile::parse(&mut reader, header)?;
 
@@ -60,35 +67,35 @@ pub(crate) fn decode<'a>(
     // Note that this assumes that either all tiles have MCT or none of them.
     // In theory, only some could have it... But hopefully no such cursed
     // images exist!
-    // The sign shift of the first three components is fused into the inverse
-    // MCT, which then touches each of their samples once instead of twice.
-    let shifted = if tiles[0].mct {
-        let offsets = core::array::from_fn(|i| {
-            header
-                .component_infos
-                .get(i)
-                .map_or(0.0, sign_shift_offset)
-        });
-        if mct::apply_inverse(
-            &mut ctx.channel_data,
-            &tiles[0].component_infos,
-            header,
-            offsets,
-        )? {
-            3
+    // The DC level shift of the first three components is fused into the
+    // inverse MCT, which then touches each of their samples once instead of
+    // twice.
+    let mut pending = None;
+    let mut shifted = 0;
+    if tiles[0].mct
+        && let Some(transform) =
+            mct::inverse_transform(&ctx.channel_data, &tiles[0].component_infos, header)?
+    {
+        let mct = mct::PendingMct {
+            transform,
+            offsets: core::array::from_fn(|i| {
+                header.component_infos.get(i).map_or(0.0, sign_shift_offset)
+            }),
+        };
+        if defer_mct {
+            pending = Some(mct);
         } else {
-            0
+            mct::apply_inverse(&mut ctx.channel_data, mct);
         }
-    } else {
-        0
-    };
+        shifted = 3;
+    }
 
     apply_sign_shift(
         &mut ctx.channel_data[shifted..],
         &header.component_infos[shifted..],
     );
 
-    Ok(())
+    Ok(pending)
 }
 
 /// A decoder context for decoding JPEG2000 images.

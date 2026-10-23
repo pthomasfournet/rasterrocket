@@ -981,10 +981,9 @@ pub(super) fn decode_jpx(
     let has_alpha = img.has_alpha();
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let samples = img
-        .decode(&mut ctx)
+        .decode_u8(&mut ctx)
         .map_err(|e| log::warn!("image: JPXDecode decode error: {e}"))
-        .ok()?
-        .data_u8();
+        .ok()?;
 
     let npx = (jw as usize).checked_mul(jh as usize)?;
     let stride = channels + usize::from(has_alpha);

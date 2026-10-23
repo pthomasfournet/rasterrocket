@@ -228,3 +228,38 @@ fn check_error(stream: &str, settings: DecodeSettings, message: &str) {
         ),
     }
 }
+
+/// `Image::decode_u8` must produce exactly the bytes of `Image::decode`
+/// followed by `DecodedImage::data_u8`, on every stream in the suite: the
+/// fused MCT path where it applies, and the plain path everywhere else.
+#[test]
+fn decode_u8_matches_decode_then_data_u8() {
+    let mut checked = 0;
+    for entry in std::fs::read_dir(tests_dir().join("streams")).unwrap() {
+        let path = entry.unwrap().path();
+        let data = std::fs::read(&path).unwrap();
+        let settings = DecodeSettings::default();
+        let Ok(image) = Image::new(&data, &settings) else {
+            continue;
+        };
+        let mut ctx = DecoderContext::default();
+        let Ok(expected) = image.decode(&mut ctx).map(|d| d.data_u8()) else {
+            assert!(
+                image.decode_u8(&mut DecoderContext::default()).is_err(),
+                "{}: decode failed but decode_u8 succeeded",
+                path.display()
+            );
+            continue;
+        };
+        let fused = image
+            .decode_u8(&mut DecoderContext::default())
+            .unwrap_or_else(|e| panic!("{}: decode_u8 failed: {e}", path.display()));
+        assert!(
+            fused == expected,
+            "{}: decode_u8 output differs",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 100, "only {checked} streams decoded");
+}

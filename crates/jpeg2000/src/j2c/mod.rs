@@ -4,7 +4,7 @@ mod build;
 mod codestream;
 mod decode;
 mod idwt;
-mod mct;
+pub(crate) mod mct;
 mod progression;
 mod rect;
 mod segment;

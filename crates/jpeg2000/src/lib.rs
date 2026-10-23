@@ -195,13 +195,68 @@ impl<'a> Image<'a> {
         self.header.component_infos[0].size_info.precision
     }
 
+    /// Decode the image and return it as interleaved unsigned 8-bit samples:
+    /// the same bytes as [`Image::decode`] followed by
+    /// [`DecodedImage::data_u8`].
+    ///
+    /// For three 8-bit components without alpha, palette, channel
+    /// definitions or a converted colour space, the inverse MCT and the
+    /// conversion to bytes run as one pass, so the transformed samples are
+    /// never written back to the component buffers.
+    pub fn decode_u8(&'a self, decoder_context: &mut DecoderContext<'a>) -> Result<Vec<u8>> {
+        if !self.rgb8_fast_path() {
+            return Ok(self.decode(decoder_context)?.data_u8());
+        }
+        match j2c::decode(self.codestream, &self.header, decoder_context, true)? {
+            Some(pending) => Ok(j2c::mct::inverse_into_rgb8(
+                &decoder_context.channel_data,
+                pending,
+            )),
+            // No MCT: palette, channel definitions and colour conversion are
+            // all absent, so `decode` would return the components as they are.
+            None => Ok(DecodedImage {
+                decoded_components: &mut decoder_context.channel_data,
+                boxes: self.boxes.clone(),
+            }
+            .data_u8()),
+        }
+    }
+
+    /// Whether [`Image::decode_u8`] may fuse the inverse MCT into the 8-bit
+    /// conversion: every step [`Image::decode`] takes after the inverse MCT
+    /// must be a no-op, and `data_u8` must take its three-component 8-bit
+    /// path.
+    fn rgb8_fast_path(&self) -> bool {
+        let converted = matches!(
+            self.boxes
+                .color_specification
+                .as_ref()
+                .map(|c| &c.color_space),
+            Some(jp2::colr::ColorSpace::Enumerated(
+                EnumeratedColorspace::Sycc
+                    | EnumeratedColorspace::CieLab(_)
+                    | EnumeratedColorspace::Ycck
+            ))
+        );
+        !converted
+            && !self.has_alpha
+            && self.boxes.palette.is_none()
+            && self.boxes.channel_definition.is_none()
+            && self.header.component_infos.len() == 3
+            && self
+                .header
+                .component_infos
+                .iter()
+                .all(|c| c.size_info.precision == 8)
+    }
+
     /// Decode the image and return its decoded components.
     pub fn decode<'b>(
         &'a self,
         decoder_context: &'b mut DecoderContext<'a>,
     ) -> Result<DecodedImage<'b>> {
         let settings = &self.settings;
-        j2c::decode(self.codestream, &self.header, decoder_context)?;
+        j2c::decode(self.codestream, &self.header, decoder_context, false)?;
         let mut decoded_image = DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
             boxes: self.boxes.clone(),

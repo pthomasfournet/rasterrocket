@@ -37,3 +37,17 @@ byte-identical on the benchmark images and passes the full test suite.
   image (one tile, no sub-sampling, no offset), swap it into the channel
   instead of copying it row by row; the IDWT reuses the channel's previous
   allocation. 1.42× → 1.25× (photo 1.27×).
+- `Image::decode_u8` (new): the bytes of `decode` + `data_u8`. For three
+  8-bit components without alpha, palette, channel definitions or a converted
+  colour space, the inverse MCT and DC level shift are computed per 8-sample
+  chunk and rounded straight into interleaved RGB, instead of being written
+  back to the component buffers and read again. `mct` now has one
+  `inverse_chunk` kernel shared by both paths; `j2c::decode` takes
+  `defer_mct` and returns the pending transform. A new test checks
+  `decode_u8` against `decode` + `data_u8` on every stream in the suite.
+  1.25× → 1.08× (photo 1.21×).
+
+## Lints
+
+- `Cargo.toml` allows `clippy::too_many_arguments` for upstream code we have
+  not changed (`bitplane.rs`).

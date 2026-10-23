@@ -32,6 +32,11 @@ image = ["dep:image", "dep:moxcms", "std"]
 # Enable logging via the `log` crate.
 logging = ["dep:log"]
 
+# Upstream code is linted with clippy's defaults, minus findings in code we
+# have not changed.
+[lints.clippy]
+too_many_arguments = "allow"
+
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 png = "0.18.1"
