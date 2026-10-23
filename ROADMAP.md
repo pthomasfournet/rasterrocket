@@ -27,11 +27,10 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**An image whose `/Filter` is an indirect reference drops its page.**
-`/Filter 2354 0 R` is not resolved, so the stream is treated as unfiltered and
-its JPEG bytes are read as raw samples. The decode failure then fails the whole
-page (`rrocket` exits 1) instead of only that image: page 437 of
-`tests/fixtures/corpus-05-academic-book.pdf`, which `pdftoppm` renders.
+**One undecodable image fails its whole page.** When an image's codec
+fails, the page render returns an error (`rrocket` exits 1) instead of
+drawing the page without that image, so its text is lost too. Whether to
+skip only the image is an open decision.
 
 Separately, a marked-content dictionary written with no space before its
 operator (`/Part <</MCID 0 >>BDC`, valid syntax) is mis-tokenized. It logs an

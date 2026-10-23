@@ -206,13 +206,61 @@ impl Document {
             }
         }
 
-        let obj = self.parse_object_uncached(id)?;
+        let mut obj = self.parse_object_uncached(id)?;
+        if let Object::Stream(stream) = &mut obj {
+            self.inline_filter_references(&mut stream.dict);
+        }
         let arc = Arc::new(obj);
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.0, Arc::clone(&arc));
         Ok(arc)
+    }
+
+    /// Replace indirect references in a stream's `/Filter` and `/DecodeParms`
+    /// (the whole value, or elements of an array value) with the objects they
+    /// name, so every consumer of the dictionary sees direct values.
+    ///
+    /// Referents are read with the uncached parser and accepted only as a
+    /// name, array, dictionary or null, which no stream can be: a reference
+    /// back to a stream (even this one) stays unresolved, without recursion.
+    fn inline_filter_references(&self, dict: &mut Dictionary) {
+        let direct = |id: ObjectId| match self.parse_object_uncached(id) {
+            Ok(o @ (Object::Name(_) | Object::Array(_) | Object::Dictionary(_) | Object::Null)) => {
+                Some(o)
+            }
+            _ => None,
+        };
+        for key in [b"Filter".as_slice(), b"DecodeParms".as_slice()] {
+            let Some(value) = dict.get(key) else {
+                continue;
+            };
+            let top = match value {
+                Object::Reference(id) => match direct(*id) {
+                    Some(o) => o,
+                    None => continue,
+                },
+                other => other.clone(),
+            };
+            let resolved = match top {
+                Object::Array(items) if items.iter().any(|o| matches!(o, Object::Reference(_))) => {
+                    Object::Array(
+                        items
+                            .into_iter()
+                            .map(|o| match o {
+                                Object::Reference(id) => direct(id).unwrap_or(Object::Null),
+                                other => other,
+                            })
+                            .collect(),
+                    )
+                }
+                other => other,
+            };
+            if dict.get(key) != Some(&resolved) {
+                dict.set(key, resolved);
+            }
+        }
     }
 
     /// Resolve a chain of indirect references until a non-Reference object is
@@ -807,6 +855,76 @@ fn validate_pdf_input(data: &[u8]) -> Result<(), PdfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Assemble a PDF from `(object number, object body)` pairs, with a
+    /// catalog as object 1 and a classic xref table.  Missing numbers are
+    /// free entries.
+    fn pdf_with_objects(objects: &[(u32, String)]) -> Vec<u8> {
+        let mut out = String::from("%PDF-1.4\n");
+        let max = objects.iter().map(|(n, _)| *n).max().unwrap_or(1).max(1);
+        let mut offsets = vec![None; max as usize + 1];
+        let catalog = (1, "<</Type /Catalog>>".to_owned());
+        for (n, body) in std::iter::once(&catalog).chain(objects) {
+            offsets[*n as usize] = Some(out.len());
+            out.push_str(&format!("{n} 0 obj\n{body}\nendobj\n"));
+        }
+        let xref_start = out.len();
+        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f\r\n", max + 1));
+        for off in &offsets[1..] {
+            match off {
+                Some(o) => out.push_str(&format!("{o:010} 00000 n\r\n")),
+                None => out.push_str("0000000000 65535 f\r\n"),
+            }
+        }
+        out.push_str(&format!(
+            "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF",
+            max + 1
+        ));
+        out.into_bytes()
+    }
+
+    fn hex_stream(filter: &str) -> String {
+        let data = "48656C6C6F>";
+        format!(
+            "<</Filter {filter} /Length {}>>\nstream\n{data}\nendstream",
+            data.len()
+        )
+    }
+
+    #[test]
+    fn indirect_filter_is_resolved_into_the_stream_dict() {
+        let bytes =
+            pdf_with_objects(&[(5, "/ASCIIHexDecode".to_owned()), (6, hex_stream("5 0 R"))]);
+        let doc = Document::from_bytes_owned(bytes).expect("parses");
+        let obj = doc.get_object((6, 0)).expect("object 6");
+        let stream = obj.as_stream().expect("a stream");
+        assert_eq!(
+            stream.dict.get(b"Filter"),
+            Some(&Object::Name(b"ASCIIHexDecode".to_vec()))
+        );
+        assert_eq!(stream.decompressed_content().expect("decodes"), b"Hello");
+    }
+
+    #[test]
+    fn indirect_filter_array_element_is_resolved() {
+        let bytes = pdf_with_objects(&[
+            (5, "/ASCIIHexDecode".to_owned()),
+            (6, hex_stream("[5 0 R]")),
+        ]);
+        let doc = Document::from_bytes_owned(bytes).expect("parses");
+        let obj = doc.get_object((6, 0)).expect("object 6");
+        let stream = obj.as_stream().expect("a stream");
+        assert_eq!(stream.decompressed_content().expect("decodes"), b"Hello");
+    }
+
+    #[test]
+    fn self_referencing_filter_neither_hangs_nor_resolves() {
+        let bytes = pdf_with_objects(&[(6, hex_stream("6 0 R"))]);
+        let doc = Document::from_bytes_owned(bytes).expect("parses");
+        let obj = doc.get_object((6, 0)).expect("object 6");
+        let stream = obj.as_stream().expect("a stream");
+        assert_eq!(stream.dict.get(b"Filter"), Some(&Object::Reference((6, 0))));
+    }
 
     fn minimal_pdf() -> Vec<u8> {
         // Minimal valid PDF with one empty page.
