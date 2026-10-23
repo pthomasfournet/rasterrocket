@@ -1,0 +1,10 @@
+# Where this local fork came from.  Read by scripts/check_vendored.py, which
+# reports upstream commits, crates.io releases and RustSec advisories that
+# appeared after this base.  Update `commit`, `date` and `version` whenever
+# upstream changes are brought over.
+crate = "hayro-jpeg2000"
+version = "0.4.1"
+repository = "LaurenzV/hayro"
+path = "hayro-jpeg2000"
+commit = "79926198e557e06fea8a8edcb0bc577eb0130ec5"
+date = "2026-10-23T00:00:00Z"

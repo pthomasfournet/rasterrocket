@@ -9,6 +9,12 @@ unless the entry says otherwise.
 
 ## Vendoring
 
+- `UPSTREAM.toml` records the base (repository, path, commit, date,
+  version). `scripts/check_vendored.py`, run weekly by the
+  `Vendored upstream` workflow, reports upstream commits to the crate,
+  newer crates.io releases and RustSec advisories after that base. Bring
+  wanted upstream changes over by hand and update `UPSTREAM.toml`.
+
 - `Cargo.toml`: workspace-inherited fields resolved to values; `publish =
   false`; the `image` integration is no longer a default feature (the test
   suite enables it with `--features image`).
