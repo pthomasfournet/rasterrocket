@@ -127,7 +127,6 @@ fn build_decompositions(
         storage.tile_decompositions.push(TileDecompositions {
             decompositions: d_start..d_end,
             first_ll_sub_band,
-            coefficient_count: coefficient_counter,
         });
 
         assert_eq!(coefficient_counter, component_samples[component_idx]);

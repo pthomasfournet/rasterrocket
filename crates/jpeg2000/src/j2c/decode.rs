@@ -60,11 +60,33 @@ pub(crate) fn decode<'a>(
     // Note that this assumes that either all tiles have MCT or none of them.
     // In theory, only some could have it... But hopefully no such cursed
     // images exist!
-    if tiles[0].mct {
-        mct::apply_inverse(&mut ctx.channel_data, &tiles[0].component_infos, header)?;
-    }
+    // The sign shift of the first three components is fused into the inverse
+    // MCT, which then touches each of their samples once instead of twice.
+    let shifted = if tiles[0].mct {
+        let offsets = core::array::from_fn(|i| {
+            header
+                .component_infos
+                .get(i)
+                .map_or(0.0, sign_shift_offset)
+        });
+        if mct::apply_inverse(
+            &mut ctx.channel_data,
+            &tiles[0].component_infos,
+            header,
+            offsets,
+        )? {
+            3
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
-    apply_sign_shift(&mut ctx.channel_data, &header.component_infos);
+    apply_sign_shift(
+        &mut ctx.channel_data[shifted..],
+        &header.component_infos[shifted..],
+    );
 
     Ok(())
 }
@@ -119,11 +141,11 @@ fn decode_tile<'a, 'b>(
 
     // Interleave bitplane decoding, IDWT, and storage for each component tile
     // so we can reuse the coefficient and IDWT buffers.
+    // Every code block of a decoded sub-band writes all of its coefficients,
+    // zeros included, and code blocks partition the sub-band, so the
+    // coefficients a component leaves behind never reach the next one's
+    // IDWT and the buffer is not cleared between components.
     for (idx, component_info) in header.component_infos.iter().enumerate() {
-        if idx > 0 {
-            let count = storage.tile_decompositions[idx].coefficient_count;
-            storage.coefficients[..count].fill(0.0);
-        }
         // We then decode the bitplanes of each code block, yielding the
         // (possibly dequantized) coefficients of each code block.
         decode_component_tile_bit_planes(idx, tile, tile_ctx, storage, header)?;
@@ -162,7 +184,6 @@ fn decode_tile<'a, 'b>(
 pub(crate) struct TileDecompositions {
     pub(crate) first_ll_sub_band: usize,
     pub(crate) decompositions: Range<usize>,
-    pub(crate) coefficient_count: usize,
 }
 
 impl TileDecompositions {
@@ -408,11 +429,16 @@ fn decode_sub_band_bitplanes(
     Ok(())
 }
 
+/// The DC level shift of a component: `2^(precision - 1)`.
+fn sign_shift_offset(component_info: &ComponentInfo) -> f32 {
+    (1_u32 << (component_info.size_info.precision - 1)) as f32
+}
+
 fn apply_sign_shift(channel_data: &mut [ComponentData], component_infos: &[ComponentInfo]) {
     use crate::math::{Level, dispatch, f32x8};
 
     for (channel, component_info) in channel_data.iter_mut().zip(component_infos.iter()) {
-        let offset = (1_u32 << (component_info.size_info.precision - 1)) as f32;
+        let offset = sign_shift_offset(component_info);
         dispatch!(Level::new(), simd => {
             let offset_v = f32x8::splat(simd, offset);
             for chunk in channel.container.as_chunks_mut::<8>().0 {

@@ -7,16 +7,20 @@ use crate::error::{ColorError, Result, bail, err};
 use crate::math::{Level, Simd, dispatch, f32x8};
 
 /// Apply the inverse multi-component transform, as specified in G.2 and G.3.
+/// Apply the inverse MCT to the first three components and add `offsets[i]`
+/// (the sign shift) to each result.  Returns whether the transform ran; when
+/// it did not, no sample was touched.
 pub(crate) fn apply_inverse(
     components: &mut [ComponentData],
     component_infos: &[super::codestream::ComponentInfo],
     header: &Header,
-) -> Result<()> {
+    offsets: [f32; 3],
+) -> Result<bool> {
     if components.len() < 3 {
         return if header.strict {
             err!(ColorError::Mct)
         } else {
-            Ok(())
+            Ok(false)
         };
     }
 
@@ -40,13 +44,20 @@ pub(crate) fn apply_inverse(
         &mut s0.container,
         &mut s1.container,
         &mut s2.container,
+        offsets,
     );
 
-    Ok(())
+    Ok(true)
 }
 
-fn apply_inner(transform: WaveletTransform, s0: &mut [f32], s1: &mut [f32], s2: &mut [f32]) {
-    dispatch!(Level::new(), simd => apply_inner_impl(simd, transform, s0, s1, s2));
+fn apply_inner(
+    transform: WaveletTransform,
+    s0: &mut [f32],
+    s1: &mut [f32],
+    s2: &mut [f32],
+    offsets: [f32; 3],
+) {
+    dispatch!(Level::new(), simd => apply_inner_impl(simd, transform, s0, s1, s2, offsets));
 }
 
 #[inline(always)]
@@ -56,7 +67,11 @@ fn apply_inner_impl<S: Simd>(
     s0: &mut [f32],
     s1: &mut [f32],
     s2: &mut [f32],
+    offsets: [f32; 3],
 ) {
+    let o0 = f32x8::splat(simd, offsets[0]);
+    let o1 = f32x8::splat(simd, offsets[1]);
+    let o2 = f32x8::splat(simd, offsets[2]);
     match transform {
         // Irreversible MCT, specified in G.3.
         WaveletTransform::Irreversible97 => {
@@ -78,9 +93,9 @@ fn apply_inner_impl<S: Simd>(
                 );
                 let i2 = y_1.mul_add(f32x8::splat(simd, 1.772), y_0);
 
-                i0.store(y0);
-                i1.store(y1);
-                i2.store(y2);
+                (i0 + o0).store(y0);
+                (i1 + o1).store(y1);
+                (i2 + o2).store(y2);
             }
         }
         // Reversible MCT, specified in G.2.
@@ -100,9 +115,9 @@ fn apply_inner_impl<S: Simd>(
                 let i0 = y_2 + i1;
                 let i2 = y_1 + i1;
 
-                i0.store(y0);
-                i1.store(y1);
-                i2.store(y2);
+                (i0 + o0).store(y0);
+                (i1 + o1).store(y1);
+                (i2 + o2).store(y2);
             }
         }
     }

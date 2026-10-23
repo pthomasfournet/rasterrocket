@@ -428,14 +428,52 @@ fn filter_vertical<S: Simd>(
     rect: IntRect,
     transform: WaveletTransform,
 ) {
-    let mut filter = VerticalFilter {
-        coefficients,
-        width: rect.width() as usize,
-        height: rect.height() as usize,
-        low_first: rect.y0.is_multiple_of(2),
-    };
+    let width = rect.width() as usize;
+    let height = rect.height() as usize;
+    let low_first = rect.y0.is_multiple_of(2);
 
-    filter_1d(simd, transform, &mut filter);
+    // Columns filter independently, so the image is processed in strips of
+    // `STRIP` columns: each strip is copied into a contiguous buffer small
+    // enough to stay in cache, all lifting steps run on it, and it is copied
+    // back.  Every sample sees the same operations in the same order as
+    // filtering the whole image row by row, but main memory is read and
+    // written once instead of once per lifting step.
+    const STRIP: usize = 32;
+    if width <= STRIP {
+        let mut filter = VerticalFilter {
+            coefficients,
+            width,
+            height,
+            low_first,
+        };
+        filter_1d(simd, transform, &mut filter);
+        return;
+    }
+
+    let mut strip = vec![0.0f32; STRIP * height];
+    for x0 in (0..width).step_by(STRIP) {
+        let w = STRIP.min(width - x0);
+        let strip = &mut strip[..w * height];
+        for (dst, src) in strip
+            .chunks_exact_mut(w)
+            .zip(coefficients.chunks_exact(width))
+        {
+            dst.copy_from_slice(&src[x0..x0 + w]);
+        }
+        let mut filter = VerticalFilter {
+            coefficients: strip,
+            width: w,
+            height,
+            low_first,
+        };
+        filter_1d(simd, transform, &mut filter);
+        for (src, dst) in strip
+            .chunks_exact(w)
+            .zip(coefficients.chunks_exact_mut(width))
+        {
+            dst[x0..x0 + w].copy_from_slice(src);
+        }
+    }
 }
 
 /// Filters all columns at once with the `1D_SR` procedure from F.3.6, operating on whole rows.
