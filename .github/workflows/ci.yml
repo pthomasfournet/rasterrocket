@@ -9,6 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Overrides `.cargo/config.toml`'s `-C target-cpu=native`.  Hosted runners
+  # vary in CPU and share the `target/` cache, so a native build restored on
+  # a runner without the original CPU's extensions dies with SIGILL (as a
+  # build script did for v1.4.1).  SIMD selection is runtime-dispatched, so
+  # the baseline target loses no coverage.
+  RUSTFLAGS: "-C target-cpu=generic"
 
 jobs:
   # ── CPU-only build and test ─────────────────────────────────────────────────
@@ -38,9 +44,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-cpu-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-generic-cpu-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-cpu-
+            ${{ runner.os }}-cargo-generic-cpu-
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libfreetype6-dev
@@ -104,9 +110,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-aarch64-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-generic-aarch64-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-aarch64-
+            ${{ runner.os }}-cargo-generic-aarch64-
 
       - name: Check rasterrocket-render (stable, NEON)
         run: cargo check -p rasterrocket-render --target aarch64-unknown-linux-gnu
@@ -149,9 +155,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-generic-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-arm64-cargo-
+            ${{ runner.os }}-generic-arm64-cargo-
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libfreetype6-dev
