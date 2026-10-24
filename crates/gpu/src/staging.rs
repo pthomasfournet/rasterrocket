@@ -199,7 +199,7 @@ mod tests {
     use super::*;
 
     fn pattern(len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i * 7 + i / 251) as u8).collect()
+        (0..len).map(|i| (i * 7 + i / 251).to_le_bytes()[0]).collect()
     }
 
     /// Bands arrive in order, cover every row exactly once, and carry the
@@ -237,6 +237,6 @@ mod tests {
             seen.extend_from_slice(band);
         })
         .expect("download");
-        assert!(seen == host);
+        assert_eq!(seen, host);
     }
 }
