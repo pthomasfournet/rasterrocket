@@ -42,7 +42,7 @@ pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
 pub(crate) fn report_open_error(e: &RasterError, args: &Args, policy: BackendPolicy) {
     if matches!(e, RasterError::BackendUnavailable(_)) {
         eprintln!("rrocket: {e}");
-        print_backend_hint(policy, &args.vaapi_device, args.backend.is_none());
+        print_backend_hint(policy, args.vaapi_device.as_deref(), args.backend.is_none());
     } else if matches!(e, RasterError::InvalidOptions(_)) {
         eprintln!("rrocket: {e}");
     } else {
@@ -56,7 +56,7 @@ pub(crate) fn report_open_error(e: &RasterError, args: &Args, policy: BackendPol
 /// `via_env` flags whether the policy came from `PDF_RASTER_BACKEND`
 /// rather than `--backend`, so the hint can name the actual knob the
 /// user reached for.
-fn print_backend_hint(policy: BackendPolicy, vaapi_device: &str, via_env: bool) {
+fn print_backend_hint(policy: BackendPolicy, vaapi_device: Option<&str>, via_env: bool) {
     #[cfg(not(feature = "vaapi"))]
     let _ = vaapi_device;
     let source_hint = |backend: &str| {
@@ -95,10 +95,16 @@ fn print_cuda_hint() {
 }
 
 #[cfg(feature = "vaapi")]
-fn print_vaapi_hint(device: &str) {
-    eprintln!("        --backend vaapi could not open the DRM device ({device}).");
-    eprintln!("        Verify the device exists and is readable by your user.");
-    eprintln!("        Use --vaapi-device PATH to specify an alternate render node.");
+fn print_vaapi_hint(device: Option<&str>) {
+    if let Some(node) = device.filter(|d| *d != pdf_raster::DEFAULT_VAAPI_DEVICE) {
+        eprintln!("        --backend vaapi could not use the DRM device {node}.");
+        eprintln!("        Verify it is readable by your user, pass one of the render");
+        eprintln!("        nodes listed above, or --vaapi-device auto to probe them all.");
+    } else {
+        eprintln!("        --backend vaapi found no render node with VA-API baseline JPEG");
+        eprintln!("        decode.  Check that a VA-API driver for the device is installed");
+        eprintln!("        (`vainfo --display drm --device <node>`).");
+    }
     eprintln!(
         "        Use --backend auto to fall back to CPU silently, \
          or --backend cpu to skip GPU entirely."

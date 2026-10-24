@@ -7,7 +7,7 @@
 )]
 
 use clap::Parser;
-use pdf_raster::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
+use pdf_raster::{BackendPolicy, SessionConfig};
 
 /// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
 fn parse_positive_dpi(s: &str) -> Result<f64, String> {
@@ -254,16 +254,14 @@ pub(crate) struct Args {
     #[arg(long = "backend", value_name = "BACKEND", verbatim_doc_comment)]
     pub backend: Option<BackendArg>,
 
-    /// VA-API DRM render node (default: /dev/dri/renderD128).
+    /// VA-API DRM render node, or `auto` (the default).
     ///
-    /// Only consulted when `--backend vaapi` or `--backend auto` with the
-    /// `vaapi` feature compiled in and a VA-API device detected at runtime.
-    #[arg(
-        long = "vaapi-device",
-        value_name = "PATH",
-        default_value = DEFAULT_VAAPI_DEVICE
-    )]
-    pub vaapi_device: String,
+    /// `auto` probes /dev/dri/renderD* in ascending number and uses the
+    /// first node whose driver supports VA-API baseline JPEG decode.
+    /// Only used with `--backend auto` or `--backend vaapi` in a binary
+    /// built with the `vaapi` feature.
+    #[arg(long = "vaapi-device", value_name = "PATH|auto", verbatim_doc_comment)]
+    pub vaapi_device: Option<String>,
 
     /// Vulkan device: an index in enumeration order (from 0) or a
     /// case-insensitive substring of the device name.
@@ -459,12 +457,6 @@ impl Args {
     /// device in question, so allowing the combination would silently
     /// ignore a user expectation.  `PDF_RASTER_VULKAN_DEVICE` is consulted
     /// only when `--vulkan-device` is absent and is never rejected.
-    ///
-    /// Note: detection is heuristic — we compare against the default path
-    /// (`/dev/dri/renderD128`).  A user who explicitly passes that default
-    /// value alongside `--backend cpu` will not get the error; this is an
-    /// acceptable trade-off given that clap does not expose an `is_present`
-    /// flag for options with defaults.
     pub(crate) fn session_config(&self) -> Result<SessionConfig, String> {
         // Precedence: explicit `--backend <X>` wins; otherwise consult
         // `PDF_RASTER_BACKEND`; otherwise default to Auto.  Distinguishing
@@ -482,7 +474,7 @@ impl Args {
             None => BackendPolicy::from_env(),
         };
 
-        if self.vaapi_device != DEFAULT_VAAPI_DEVICE
+        if self.vaapi_device.is_some()
             && matches!(
                 policy,
                 BackendPolicy::CpuOnly | BackendPolicy::ForceCuda | BackendPolicy::ForceVulkan
@@ -506,7 +498,9 @@ impl Args {
         }
 
         let mut config = SessionConfig::with_policy(policy);
-        config.vaapi_device.clone_from(&self.vaapi_device);
+        if let Some(node) = &self.vaapi_device {
+            config.vaapi_device.clone_from(node);
+        }
         config.vulkan_device = self
             .vulkan_device
             .clone()
@@ -670,6 +664,31 @@ mod page_list_tests {
         .session_config()
         .unwrap();
         assert_eq!(config.vulkan_device.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn vaapi_device_defaults_to_probe_and_is_rejected_when_unused() {
+        assert_eq!(
+            base_args().session_config().unwrap().vaapi_device,
+            pdf_raster::DEFAULT_VAAPI_DEVICE
+        );
+        // Passing the default spelling explicitly is still a user choice
+        // and is rejected where VA-API is never opened.
+        let err = Args::parse_from([
+            "rrocket",
+            "--backend",
+            "cpu",
+            "--vaapi-device",
+            "auto",
+            "in.pdf",
+            "out",
+        ])
+        .session_config()
+        .unwrap_err();
+        assert!(
+            err.contains("--vaapi-device has no effect with --backend cpu"),
+            "{err}"
+        );
     }
 
     #[test]

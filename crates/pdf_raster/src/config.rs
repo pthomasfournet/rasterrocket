@@ -120,15 +120,17 @@ impl std::str::FromStr for BackendPolicy {
 
 // ── Session configuration ─────────────────────────────────────────────────────
 
-/// Default VA-API DRM render node path used by [`SessionConfig`] and the CLI.
-pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+/// Default [`SessionConfig::vaapi_device`]: `auto`, which probes
+/// `/dev/dri/renderD*` in ascending node number and uses the first node
+/// whose driver supports VA-API baseline JPEG decode.
+pub const DEFAULT_VAAPI_DEVICE: &str = "auto";
 
 /// Configuration for opening a [`RasterSession`].
 ///
 /// Passed to [`open_session`].  Use [`Default::default()`] for the standard
 /// behaviour: backend resolved from `PDF_RASTER_BACKEND` env var (or `Auto`
 /// if unset), Vulkan device from `PDF_RASTER_VULKAN_DEVICE` (or automatic),
-/// default DRM render node, image-cache prefetch off.
+/// probed DRM render node, image-cache prefetch off.
 ///
 /// This struct is `#[non_exhaustive]`: construct it via [`SessionConfig::default()`]
 /// or [`SessionConfig::with_policy()`] rather than a struct literal.  This allows
@@ -139,10 +141,15 @@ pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 pub struct SessionConfig {
     /// Backend selection policy.
     pub policy: BackendPolicy,
-    /// VA-API DRM render node.  Default: `/dev/dri/renderD128`.
+    /// VA-API DRM render node path, or [`DEFAULT_VAAPI_DEVICE`] (`auto`, the
+    /// default) to probe for one.
     ///
-    /// Only relevant when the `vaapi` feature is enabled and `policy` is not
-    /// [`CpuOnly`](BackendPolicy::CpuOnly) or [`ForceCuda`](BackendPolicy::ForceCuda).
+    /// When no node qualifies, or the given node cannot be opened, `Auto`
+    /// decodes JPEG on the CPU and `ForceVaapi`
+    /// fails [`open_session`] with [`RasterError::BackendUnavailable`]
+    /// naming the render nodes present.  Only relevant when the `vaapi`
+    /// feature is enabled and `policy` is [`Auto`](BackendPolicy::Auto) or
+    /// `ForceVaapi`.
     pub vaapi_device: String,
     /// Vulkan physical device to use, or `None` to pick automatically.
     ///

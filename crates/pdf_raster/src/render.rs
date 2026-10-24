@@ -222,7 +222,8 @@ pub struct RasterSession {
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
     /// `None` when the `vaapi` feature is disabled, policy is `CpuOnly` /
-    /// `ForceCuda`, or VA-API initialisation failed (soft failure on `Auto`).
+    /// `ForceCuda` / `ForceVulkan`, or VA-API initialisation failed (soft
+    /// failure on `Auto`).
     #[cfg(feature = "vaapi")]
     pub(crate) vaapi_queue: Option<Arc<gpu::DecodeQueue<gpu::vaapi::VapiJpegDecoder>>>,
     /// Device-resident image cache.  `Some` when the `cache`

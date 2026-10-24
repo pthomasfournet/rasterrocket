@@ -22,6 +22,9 @@ pub enum VapiError {
     DrmOpen(String),
     /// `vaGetDisplayDRM` returned a null display pointer.
     NullDisplay,
+    /// The driver initialised but does not list `VAEntrypointVLD` for
+    /// `VAProfileJPEGBaseline`.
+    NoJpegDecode,
     /// JPEG headers are missing or malformed.
     BadJpeg(String),
     /// Image has an unsupported component count (not 1 or 3).
@@ -36,6 +39,7 @@ impl std::fmt::Display for VapiError {
             Self::VaStatus(code, msg) => write!(f, "VA-API error {code}: {msg}"),
             Self::DrmOpen(msg) => write!(f, "DRM open failed: {msg}"),
             Self::NullDisplay => write!(f, "vaGetDisplayDRM returned null"),
+            Self::NoJpegDecode => write!(f, "driver has no baseline JPEG decode entrypoint"),
             Self::BadJpeg(msg) => write!(f, "JPEG parse error: {msg}"),
             Self::UnsupportedComponents(n) => {
                 write!(f, "unsupported JPEG component count {n}")

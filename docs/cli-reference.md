@@ -149,7 +149,7 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 | Flag | Default | Description |
 |---|---|---|
 | `--backend auto\|cpu\|cuda\|vaapi\|vulkan` | `auto` | Compute backend for image decoding and GPU fills. |
-| `--vaapi-device PATH` | `/dev/dri/renderD128` | VA-API DRM render node (only used with `auto` or `vaapi`). |
+| `--vaapi-device PATH\|auto` | `auto` | VA-API DRM render node; `auto` probes for one (only used with `auto` or `vaapi`). |
 | `--vulkan-device INDEX\|NAME` | automatic | Vulkan device, by index or name substring (only used with `auto` or `vulkan`). |
 
 **`auto`** — GPU when available, silent CPU fallback (same as pre-v0.4.0).
@@ -160,9 +160,18 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 
 **`vulkan`** — Require the Vulkan compute backend.  Exits with an error if Vulkan initialisation fails or the binary was built without `--features vulkan`.  AA-fill and parallel-Huffman JPEG decode kernels dispatch through `VulkanBackend` (both dormant by default; see `PDF_RASTER_AA_FILL_THRESHOLD` / `PDF_RASTER_HUFFMAN_THRESHOLD`); the device-resident image cache is CUDA-only so the renderer runs uncached under this mode; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  Cross-vendor (NVIDIA, AMD, Intel, Apple via `MoltenVK`).
 
-**`vaapi`** — Require VA-API JPEG decoding. Exits with an error if the DRM device cannot be opened. Use this to confirm iGPU/dGPU decoding is active.
+**`vaapi`** — Require VA-API JPEG decoding. Exits with an error if no usable render node is found or the given one cannot be opened. Use this to confirm iGPU/dGPU decoding is active.
 
-`--vaapi-device` has no effect with `--backend cpu`, `--backend cuda`, or `--backend vulkan` — rrocket will reject the combination with a clear error rather than silently ignoring it.
+**`--vaapi-device`** defaults to `auto`: rrocket walks `/dev/dri/renderD*` in ascending number and uses the first node whose driver initialises and offers VA-API baseline JPEG decode, so on an iGPU + dGPU host the node numbering does not matter. If none qualifies, `--backend vaapi` fails with a list of every node and why it was rejected, and `--backend auto` decodes JPEG on the CPU after one warning. If a path is given and cannot be used, the error lists the render nodes that exist:
+
+```text
+rrocket: backend unavailable: VA-API JPEG decoder unavailable on /dev/dri/renderD129: VA-API error -1: vaInitialize: unknown libva error
+render nodes present:
+  /dev/dri/renderD128 (pci 0000:72:00.0, amdgpu)
+  /dev/dri/renderD129 (pci 0000:01:00.0, nvidia)
+```
+
+`RUST_LOG=debug` logs the chosen node once per process, with its PCI address, kernel driver and VA-API vendor string. `--vaapi-device` has no effect with `--backend cpu`, `--backend cuda`, or `--backend vulkan` — rrocket will reject the combination with a clear error rather than silently ignoring it, and those backends never open a render node.
 
 **`--vulkan-device`** picks the Vulkan device on a host with more than one. The value is either an index in Vulkan enumeration order, counted from 0 (the `GPU0`, `GPU1`, … numbering of `vulkaninfo --summary`), or a case-insensitive substring of the device name (`5070`, `radv`, `llvmpipe`). A number that is not a valid index is matched as a name, so a model number works. An exact name match beats substring matches. A value that matches no device, or more than one, is an error that lists every device:
 
@@ -189,7 +198,7 @@ rrocket --backend cpu -r 150 document.pdf out
 # Run the Vulkan backend on the integrated GPU instead of the discrete one
 rrocket --backend vulkan --vulkan-device radv document.pdf out
 
-# Use VA-API on a non-default render node
+# Use VA-API on a specific render node instead of the probed one
 rrocket --backend vaapi --vaapi-device /dev/dri/renderD129 document.pdf out
 ```
 

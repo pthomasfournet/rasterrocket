@@ -298,6 +298,14 @@ unsafe extern "C" {
     pub(super) fn vaInitialize(dpy: VADisplay, major: *mut c_int, minor: *mut c_int) -> VAStatus;
     pub(super) fn vaTerminate(dpy: VADisplay) -> VAStatus;
     pub(super) fn vaErrorStr(error_status: VAStatus) -> *const c_char;
+    pub(super) fn vaQueryVendorString(dpy: VADisplay) -> *const c_char;
+    pub(super) fn vaMaxNumEntrypoints(dpy: VADisplay) -> c_int;
+    pub(super) fn vaQueryConfigEntrypoints(
+        dpy: VADisplay,
+        profile: c_int,
+        entrypoint_list: *mut c_int,
+        num_entrypoints: *mut c_int,
+    ) -> VAStatus;
     pub(super) fn vaCreateConfig(
         dpy: VADisplay,
         profile: c_int,

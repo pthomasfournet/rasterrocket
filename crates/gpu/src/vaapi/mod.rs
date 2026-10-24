@@ -45,6 +45,7 @@
 mod error;
 mod ffi;
 mod jpeg_parser;
+mod probe;
 mod yuv;
 
 use std::os::raw::{c_int, c_uint, c_void};
@@ -67,6 +68,10 @@ use jpeg_parser::JpegHeaders;
 use yuv::nv12_to_rgb8;
 
 pub use error::VapiError as Error;
+pub use probe::{
+    ProbedNode, RenderNode, describe_render_nodes, find_jpeg_render_node, render_nodes,
+    supports_jpeg_decode,
+};
 
 // ── Colour space ──────────────────────────────────────────────────────────────
 
