@@ -199,22 +199,25 @@ impl<'a> Image<'a> {
     /// the same bytes as [`Image::decode`] followed by
     /// [`DecodedImage::data_u8`].
     ///
-    /// For three 8-bit components without alpha, palette, channel
-    /// definitions or a converted colour space, the inverse MCT and the
-    /// conversion to bytes run as one pass, so the transformed samples are
-    /// never written back to the component buffers.
+    /// For one or three 8-bit components without alpha, palette, channel
+    /// definitions or a converted colour space, the DC level shift (and for
+    /// three components the inverse MCT) and the conversion to bytes run as
+    /// one pass, so the shifted samples are never written back to the
+    /// component buffers.
     pub fn decode_u8(&'a self, decoder_context: &mut DecoderContext<'a>) -> Result<Vec<u8>> {
-        if !self.rgb8_fast_path() {
+        if !self.fused_u8_path() {
             return Ok(self.decode(decoder_context)?.data_u8());
         }
         match j2c::decode(self.codestream, &self.header, decoder_context, true)? {
-            Some(pending) => Ok(j2c::mct::inverse_into_rgb8(
+            j2c::Deferred::Mct(pending) => Ok(j2c::mct::inverse_into_rgb8(
                 &decoder_context.channel_data,
                 pending,
             )),
-            // No MCT: palette, channel definitions and colour conversion are
-            // all absent, so `decode` would return the components as they are.
-            None => Ok(DecodedImage {
+            j2c::Deferred::Shift(offset) => Ok(decoder_context.channel_data[0].shifted_u8(offset)),
+            // Every transform applied: palette, channel definitions and
+            // colour conversion are all absent, so `decode` would return the
+            // components as they are.
+            j2c::Deferred::Nothing => Ok(DecodedImage {
                 decoded_components: &mut decoder_context.channel_data,
                 boxes: self.boxes.clone(),
             }
@@ -222,11 +225,11 @@ impl<'a> Image<'a> {
         }
     }
 
-    /// Whether [`Image::decode_u8`] may fuse the inverse MCT into the 8-bit
-    /// conversion: every step [`Image::decode`] takes after the inverse MCT
-    /// must be a no-op, and `data_u8` must take its three-component 8-bit
-    /// path.
-    fn rgb8_fast_path(&self) -> bool {
+    /// Whether [`Image::decode_u8`] may fuse the DC level shift and inverse
+    /// MCT into the 8-bit conversion: every step [`Image::decode`] takes
+    /// after them must be a no-op, and `data_u8` must take its one- or
+    /// three-component 8-bit path.
+    fn fused_u8_path(&self) -> bool {
         let converted = matches!(
             self.boxes
                 .color_specification
@@ -242,7 +245,7 @@ impl<'a> Image<'a> {
             && !self.has_alpha
             && self.boxes.palette.is_none()
             && self.boxes.channel_definition.is_none()
-            && self.header.component_infos.len() == 3
+            && matches!(self.header.component_infos.len(), 1 | 3)
             && self
                 .header
                 .component_infos

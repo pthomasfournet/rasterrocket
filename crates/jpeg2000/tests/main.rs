@@ -231,7 +231,8 @@ fn check_error(stream: &str, settings: DecodeSettings, message: &str) {
 
 /// `Image::decode_u8` must produce exactly the bytes of `Image::decode`
 /// followed by `DecodedImage::data_u8`, on every stream in the suite: the
-/// fused MCT path where it applies, and the plain path everywhere else.
+/// fused MCT and single-component paths where they apply, and the plain path
+/// everywhere else.
 #[test]
 fn decode_u8_matches_decode_then_data_u8() {
     let mut checked = 0;

@@ -21,18 +21,32 @@ use crate::math::SimdBuffer;
 use crate::reader::BitReader;
 use core::ops::Range;
 
+/// The per-sample transform [`decode`] left for the caller to fuse into its
+/// own pass over the samples.
+pub(crate) enum Deferred {
+    /// Every transform has been applied.
+    Nothing,
+    /// The inverse MCT and the DC level shift of the first three components.
+    Mct(mct::PendingMct),
+    /// The DC level shift of the only component: this offset is to be added
+    /// to each of its samples.
+    Shift(f32),
+}
+
 /// Decode `data` into `ctx.channel_data`.
 ///
-/// With `defer_mct`, an inverse MCT the tiles call for is validated but not
+/// With `defer`, an inverse MCT the tiles call for is validated but not
 /// applied: it is returned, and the first three components are left without
-/// it and without their DC level shift.  Otherwise it is applied and `None`
-/// is returned.
+/// it and without their DC level shift.  Without an MCT, a single
+/// component's DC level shift is likewise returned instead of applied.
+/// Otherwise every transform is applied and [`Deferred::Nothing`] is
+/// returned.
 pub(crate) fn decode<'a>(
     data: &'a [u8],
     header: &'a Header,
     ctx: &mut DecoderContext<'a>,
-    defer_mct: bool,
-) -> Result<Option<mct::PendingMct>> {
+    defer: bool,
+) -> Result<Deferred> {
     let mut reader = BitReader::new(data);
     let tiles = tile::parse(&mut reader, header)?;
 
@@ -70,7 +84,7 @@ pub(crate) fn decode<'a>(
     // The DC level shift of the first three components is fused into the
     // inverse MCT, which then touches each of their samples once instead of
     // twice.
-    let mut pending = None;
+    let mut deferred = Deferred::Nothing;
     let mut shifted = 0;
     if tiles[0].mct
         && let Some(transform) =
@@ -82,12 +96,15 @@ pub(crate) fn decode<'a>(
                 header.component_infos.get(i).map_or(0.0, sign_shift_offset)
             }),
         };
-        if defer_mct {
-            pending = Some(mct);
+        if defer {
+            deferred = Deferred::Mct(mct);
         } else {
             mct::apply_inverse(&mut ctx.channel_data, mct);
         }
         shifted = 3;
+    } else if defer && ctx.channel_data.len() == 1 {
+        deferred = Deferred::Shift(sign_shift_offset(&header.component_infos[0]));
+        shifted = 1;
     }
 
     apply_sign_shift(
@@ -95,7 +112,7 @@ pub(crate) fn decode<'a>(
         &header.component_infos[shifted..],
     );
 
-    Ok(pending)
+    Ok(deferred)
 }
 
 /// A decoder context for decoding JPEG2000 images.

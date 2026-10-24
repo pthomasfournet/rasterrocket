@@ -21,7 +21,7 @@ use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
 use crate::math::{SIMD_WIDTH, SimdBuffer};
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
-pub(crate) use decode::decode;
+pub(crate) use decode::{Deferred, decode};
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header,
@@ -44,6 +44,16 @@ impl ComponentData {
     /// The decoded samples of this component.
     pub fn samples(&self) -> &[f32] {
         self.container.truncated()
+    }
+
+    /// The samples plus `offset`, rounded to bytes as
+    /// `DecodedImage::data_u8` rounds a single 8-bit component.  Each byte
+    /// is the one adding `offset` in place and then converting would give.
+    pub(crate) fn shifted_u8(&self, offset: f32) -> Vec<u8> {
+        self.samples()
+            .iter()
+            .map(|&v| crate::math::round_to_u8(v + offset))
+            .collect()
     }
 }
 

@@ -52,6 +52,17 @@ byte-identical on the benchmark images and passes the full test suite.
   `defer_mct` and returns the pending transform. A new test checks
   `decode_u8` against `decode` + `data_u8` on every stream in the suite.
   1.25× → 1.08× (photo 1.21×).
+- `Image::decode_u8`: the fused path also takes one 8-bit component under
+  the same conditions. `j2c::decode` leaves that component's DC level shift
+  unapplied and returns it (`Deferred::Shift`, beside `Deferred::Mct`, which
+  replaces the returned `Option<PendingMct>`), and `ComponentData::shifted_u8`
+  adds it as each sample is rounded to a byte, so the shifted samples are
+  never written back. Output is byte-identical (the `decode_u8` equivalence
+  test covers the single-component streams of the suite). On a 66-page
+  grayscale layered scan (JPX background and foreground, JBIG2 mask), 300
+  dpi, 24 threads: 0.70 s → 0.66 s and 0.76 s → 0.74 s in two interleaved
+  10-run sets; one thread 3.74 s → 3.61 s. No change at 150 dpi, where the
+  images are decoded reduced.
 
 ## Release tooling
 
