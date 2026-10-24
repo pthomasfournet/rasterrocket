@@ -11,7 +11,7 @@
 //!
 //! No surface, no graphics queue — this is a headless compute backend.
 
-use ash::ext::memory_budget;
+use ash::ext::{memory_budget, pci_bus_info};
 use ash::vk;
 use std::ffi::{CStr, c_char};
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use crate::backend::{BackendError, Result};
 
 use super::error::vk_err;
-use super::select::{self, Candidate, DeviceSelector, Ineligible};
+use super::select::{self, Candidate, DeviceSelector, Ineligible, PciAddress};
 
 /// Owned Vulkan handles.
 ///
@@ -90,8 +90,11 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
 
     let instance = create_instance(&entry)?;
 
-    let (phys, compute_queue_family) =
+    let (phys, chosen) =
         destroy_instance_on_err(&instance, pick_physical_device(&instance, selector))?;
+    let compute_queue_family = chosen
+        .compute_queue
+        .map_err(|why| BackendError::msg(format!("picked an unusable device: {why}")))?;
     let mem_props = unsafe { instance.get_physical_device_memory_properties(phys) };
 
     // Pull the dispatch group-count limit once.  Spec guarantees ≥ 65535
@@ -100,7 +103,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
     let dev_props = unsafe { instance.get_physical_device_properties(phys) };
     let max_workgroup_count = dev_props.limits.max_compute_work_group_count;
 
-    log_chosen_device(&dev_props, selector);
+    log_chosen_device(&dev_props, &chosen, selector);
 
     let (device, compute_queue, has_memory_budget) = destroy_instance_on_err(
         &instance,
@@ -167,11 +170,11 @@ fn create_instance(entry: &ash::Entry) -> Result<ash::Instance> {
 }
 
 /// Enumerate physical devices, reduce each to a [`Candidate`], and return
-/// the handle and compute queue family of the one [`select::pick`] chooses.
+/// the handle and candidate of the one [`select::pick`] chooses.
 fn pick_physical_device(
     instance: &ash::Instance,
     selector: Option<&DeviceSelector>,
-) -> Result<(vk::PhysicalDevice, u32)> {
+) -> Result<(vk::PhysicalDevice, Candidate)> {
     let physicals = unsafe { instance.enumerate_physical_devices() }
         .map_err(vk_err("vkEnumeratePhysicalDevices"))?;
     if physicals.is_empty() {
@@ -183,10 +186,10 @@ fn pick_physical_device(
         .map(|&p| describe_physical_device(instance, p))
         .collect::<Result<Vec<_>>>()?;
     let idx = select::pick(&candidates, selector)?;
-    let queue_family = candidates[idx]
-        .compute_queue
-        .map_err(|why| BackendError::msg(format!("picked an unusable device: {why}")))?;
-    Ok((physicals[idx], queue_family))
+    let chosen = candidates.into_iter().nth(idx).ok_or_else(|| {
+        BackendError::msg("device selection returned an index past the enumerated devices")
+    })?;
+    Ok((physicals[idx], chosen))
 }
 
 /// Query the properties [`select`] ranks and matches on.
@@ -215,11 +218,58 @@ fn describe_physical_device(
         }
     };
 
+    let mem_props = unsafe { instance.get_physical_device_memory_properties(phys) };
+    let (pci, uuid) = query_identity(instance, phys, props.api_version)?;
+
     Ok(Candidate {
         name,
         device_type: props.device_type,
         compute_queue,
+        device_local_bytes: total_device_local_bytes(&mem_props),
+        pci,
+        uuid,
     })
+}
+
+/// PCI address (when `VK_EXT_pci_bus_info` is supported) and device UUID.
+///
+/// `vkGetPhysicalDeviceProperties2` with `VkPhysicalDeviceIDProperties` is
+/// core in 1.1; a device reporting a lower API version yields no PCI
+/// address and an all-zero UUID.
+fn query_identity(
+    instance: &ash::Instance,
+    phys: vk::PhysicalDevice,
+    api_version: u32,
+) -> Result<(Option<PciAddress>, [u8; 16])> {
+    if api_version < vk::API_VERSION_1_1 {
+        return Ok((None, [0; 16]));
+    }
+    let exts = unsafe { instance.enumerate_device_extension_properties(phys) }
+        .map_err(vk_err("vkEnumerateDeviceExtensionProperties"))?;
+    let has_pci = exts.iter().any(|ext| {
+        // Safety: extension_name is a NUL-terminated C string per spec.
+        let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+        name == pci_bus_info::NAME
+    });
+
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+    let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    if has_pci {
+        props2 = props2.push_next(&mut pci);
+    }
+    // Safety: every struct in the chain is live for the call and of a type
+    // the device supports (ID properties are core 1.1; the PCI struct is
+    // chained only when the extension is advertised).
+    unsafe { instance.get_physical_device_properties2(phys, &mut props2) };
+
+    let address = has_pci.then_some(PciAddress {
+        domain: pci.pci_domain,
+        bus: pci.pci_bus,
+        device: pci.pci_device,
+        function: pci.pci_function,
+    });
+    Ok((address, id.device_uuid))
 }
 
 /// `deviceName` as an owned string; a name without a NUL terminator inside
@@ -318,7 +368,11 @@ fn format_driver_version(vendor_id: u32, driver_version: u32) -> String {
 /// Log the physical device chosen by [`pick_physical_device`] at
 /// `debug` level, with how it was chosen.  Called once per backend
 /// construction.
-fn log_chosen_device(props: &vk::PhysicalDeviceProperties, selector: Option<&DeviceSelector>) {
+fn log_chosen_device(
+    props: &vk::PhysicalDeviceProperties,
+    chosen: &Candidate,
+    selector: Option<&DeviceSelector>,
+) {
     let name = device_name(props);
     let driver_version = format_driver_version(props.vendor_id, props.driver_version);
     let api_version = format!(
@@ -329,13 +383,17 @@ fn log_chosen_device(props: &vk::PhysicalDeviceProperties, selector: Option<&Dev
     );
     let device_type = props.device_type;
     let vendor_id = props.vendor_id;
+    let device_local_mib = chosen.device_local_bytes >> 20;
+    let pci = chosen
+        .pci
+        .map_or_else(|| "unknown".to_owned(), |a| a.to_string());
     let chosen_by = selector.map_or_else(|| "automatic".to_owned(), |s| format!("selector {s}"));
     log::debug!(
-        "vulkan: chosen device \"{name}\" type={device_type:?} vendor_id=0x{vendor_id:04X} driver={driver_version} api={api_version} ({chosen_by})"
+        "vulkan: chosen device \"{name}\" type={device_type:?} vendor_id=0x{vendor_id:04X} driver={driver_version} api={api_version} device_local={device_local_mib}MiB pci={pci} ({chosen_by})"
     );
 }
 
-/// Sum of every `DEVICE_LOCAL` heap on the picked physical device.
+/// Sum of every `DEVICE_LOCAL` heap described by `props`.
 fn total_device_local_bytes(props: &vk::PhysicalDeviceMemoryProperties) -> u64 {
     let mut total: u64 = 0;
     for i in 0..props.memory_heap_count as usize {

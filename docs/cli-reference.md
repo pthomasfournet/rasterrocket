@@ -169,12 +169,12 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 ```text
 rrocket: invalid raster options: Vulkan device selector "nosuch": no device name contains it
 available Vulkan devices:
-  0: NVIDIA GeForce RTX 5070 (DISCRETE_GPU)
-  1: AMD Ryzen 9 9900X3D 12-Core Processor (RADV RAPHAEL_MENDOCINO) (INTEGRATED_GPU)
-  2: llvmpipe (LLVM 21.1.8, 256 bits) (CPU)
+  0: NVIDIA GeForce RTX 5070 (DISCRETE_GPU, 12227 MiB device-local, pci 0000:01:00.0)
+  1: AMD Ryzen 9 9900X3D 12-Core Processor (RADV RAPHAEL_MENDOCINO) (INTEGRATED_GPU, 10498 MiB device-local, pci 0000:72:00.0)
+  2: llvmpipe (LLVM 21.1.8, 256 bits) (CPU, 30471 MiB device-local)
 ```
 
-That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
+That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. Among devices of the same type it takes the one with more device-local memory, then the lower PCI address, then the lower device UUID, so the choice does not depend on the order the driver lists devices in. No vendor is preferred: on a host with an NVIDIA and a non-NVIDIA discrete GPU, pass `--vulkan-device` (or use `--backend cuda`) if you need the CUDA-only features such as the image cache. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
 
 ```bash
 # Confirm CUDA is active (fails loudly if no NVIDIA GPU)
