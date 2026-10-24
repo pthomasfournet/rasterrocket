@@ -243,6 +243,11 @@ fn trim_eol_before(data: &[u8], start: usize, kw: usize) -> usize {
 /// missing terminator fails fast and loudly instead of degrading throughput.
 const MAX_STREAM_SCAN: usize = 1usize << 31; // 2 GiB
 
+/// Deepest array/dictionary nesting [`parse_object`] descends into.  Deeper
+/// input fails to parse; the bound keeps recursion within a fixed stack
+/// budget on hostile input.
+const MAX_NESTING: usize = 256;
+
 /// Scan forward from `start` for the true end of the stream body.
 ///
 /// The hard part is *which* `endstream` is the terminator: `/Length` is
@@ -317,8 +322,15 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
 /// `parse_indirect_object` for that.
 ///
 /// Returns `None` only on genuine EOF or if the first non-whitespace token is
-/// not a valid object start.
+/// not a valid object start, or when arrays and dictionaries nest deeper
+/// than [`MAX_NESTING`] (an over-deep array keeps the items parsed before
+/// the limit).
 pub fn parse_object(data: &[u8], pos: &mut usize) -> Option<Object> {
+    parse_object_nested(data, pos, 0)
+}
+
+/// [`parse_object`] for an object enclosed in `depth` arrays/dictionaries.
+fn parse_object_nested(data: &[u8], pos: &mut usize, depth: usize) -> Option<Object> {
     skip_ws(data, pos);
 
     let b = *data.get(*pos)?;
@@ -334,7 +346,7 @@ pub fn parse_object(data: &[u8], pos: &mut usize) -> Option<Object> {
         }
         b'<' if data.get(*pos + 1) == Some(&b'<') => {
             // Dictionary or stream.
-            let dict = parse_dict(data, pos)?;
+            let dict = parse_dict(data, pos, depth)?;
             // Peek past whitespace to see if "stream" follows.
             let mut peek = *pos;
             skip_ws(data, &mut peek);
@@ -403,6 +415,9 @@ pub fn parse_object(data: &[u8], pos: &mut usize) -> Option<Object> {
             Some(Object::String(s, StringFormat::Hexadecimal))
         }
         b'[' => {
+            if depth >= MAX_NESTING {
+                return None;
+            }
             *pos += 1;
             let mut items = Vec::new();
             loop {
@@ -414,7 +429,7 @@ pub fn parse_object(data: &[u8], pos: &mut usize) -> Option<Object> {
                         break;
                     }
                     _ => {
-                        if let Some(item) = parse_object(data, pos) {
+                        if let Some(item) = parse_object_nested(data, pos, depth + 1) {
                             items.push(item);
                         } else {
                             break;
@@ -475,7 +490,12 @@ fn parse_scalar(data: &[u8], pos: &mut usize) -> Option<Object> {
     None
 }
 
-fn parse_dict(data: &[u8], pos: &mut usize) -> Option<Dictionary> {
+/// Parse the dictionary at `*pos`, itself enclosed in `depth`
+/// arrays/dictionaries.
+fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> {
+    if depth >= MAX_NESTING {
+        return None;
+    }
     // Caller has ensured data[*pos..] starts with "<<".
     *pos += 2;
     let mut dict = Dictionary::new();
@@ -498,7 +518,7 @@ fn parse_dict(data: &[u8], pos: &mut usize) -> Option<Dictionary> {
         let key = read_name(data, pos);
         // Value is any object.
         skip_ws(data, pos);
-        let value = parse_object(data, pos)?;
+        let value = parse_object_nested(data, pos, depth + 1)?;
         dict.insert(key, value);
     }
 
@@ -775,5 +795,44 @@ mod tests {
         let mut pos = 0;
         let obj = parse_object(src, &mut pos).expect("parse");
         assert_eq!(obj, Object::Integer(99_999_999_999));
+    }
+
+    /// Container nesting depth of `obj` (a scalar is depth 0).
+    fn nesting_depth(obj: &Object) -> usize {
+        match obj {
+            Object::Array(items) => 1 + items.iter().map(nesting_depth).max().unwrap_or(0),
+            Object::Dictionary(d) => 1 + d.iter().map(|(_, v)| nesting_depth(v)).max().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// Hostile nesting depth must not overflow the stack: a dictionary
+    /// nested past `MAX_NESTING` fails to parse, and an array stops
+    /// descending at the limit.
+    #[test]
+    fn deep_nesting_does_not_overflow_the_stack() {
+        let mut src = b"<</K ".repeat(1_000_000);
+        src.extend_from_slice(&b">>".repeat(1_000_000));
+        assert!(parse_object(&src, &mut 0).is_none());
+
+        let mut src = b"[".repeat(1_000_000);
+        src.extend_from_slice(&b"]".repeat(1_000_000));
+        let obj = parse_object(&src, &mut 0).expect("partial array");
+        assert!(nesting_depth(&obj) <= MAX_NESTING);
+    }
+
+    /// Nesting up to `MAX_NESTING` levels still parses.
+    #[test]
+    fn nesting_at_the_limit_parses() {
+        let mut src = b"[".repeat(MAX_NESTING);
+        src.extend_from_slice(&b"]".repeat(MAX_NESTING));
+        let mut obj = parse(&src);
+        for _ in 1..MAX_NESTING {
+            let Object::Array(mut items) = obj else {
+                panic!("expected an array");
+            };
+            obj = items.pop().expect("one nested item");
+        }
+        assert_eq!(obj, Object::Array(Vec::new()));
     }
 }
