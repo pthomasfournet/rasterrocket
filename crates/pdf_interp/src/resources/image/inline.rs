@@ -430,16 +430,16 @@ pub(super) fn inline_token_to_object(tok: &crate::content::tokenizer::Token<'_>)
         Token::Bool(b) => Object::Boolean(*b),
         Token::String(s) => Object::String(s.clone(), pdf::StringFormat::Literal),
         Token::Array(items) => Object::Array(items.iter().map(inline_token_to_object).collect()),
-        // The content tokenizer emits an inline `<< … >>` dictionary as a raw
-        // `Op` byte slice (it has no PDF-object parser of its own).  Inline
-        // image `/DP` (DecodeParms) is exactly such a dictionary — e.g.
-        // `<</K -1 /Columns 277>>` for a CCITT G4 ImageMask.  Re-parse it with
-        // the PDF object parser so DecodeParms keys (K, Columns, BlackIs1, …)
-        // reach the codec; otherwise they are silently dropped and a G4 stream
-        // is misrouted to the G3-1D decoder, which then yields zero rows.
-        Token::Op(raw) if raw.starts_with(b"<<") => {
-            let mut pos = 0usize;
-            pdf::parse_object(raw, &mut pos).unwrap_or(Object::Null)
+        // Inline image `/DP` (DecodeParms) is a dictionary, e.g.
+        // `<</K -1 /Columns 277>>` for a CCITT G4 image mask.
+        Token::Dict(items) => {
+            let mut dict = Dictionary::new();
+            for [key, value] in items.as_chunks::<2>().0 {
+                if let Token::Name(key) = key {
+                    dict.set(*key, inline_token_to_object(value));
+                }
+            }
+            Object::Dictionary(dict)
         }
         _ => Object::Null,
     }

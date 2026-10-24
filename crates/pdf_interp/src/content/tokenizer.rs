@@ -20,6 +20,9 @@ pub enum Token<'a> {
     String(Vec<u8>),
     /// Array operand (`[…]`), elements already decoded.
     Array(Vec<Self>),
+    /// Dictionary operand (`<< … >>`): keys and values alternate, each
+    /// already decoded; well-formed input has a `Name` at every even index.
+    Dict(Vec<Self>),
     /// Operator keyword — slice into the source buffer.
     Op(&'a [u8]),
     /// Inline image: parameter dictionary bytes + raw pixel data bytes.
@@ -232,6 +235,34 @@ impl<'a> Tokenizer<'a> {
         items
     }
 
+    /// Read a `<< … >>` dictionary; the current bytes are `<<`.
+    ///
+    /// Entries are read with [`Self::next_token`], so strings, hex strings,
+    /// arrays and nested dictionaries inside it are delimited by their own
+    /// grammar rather than by counting angle brackets.  A stray `>` is
+    /// skipped; end of input closes the dictionary.
+    fn read_dict(&mut self) -> Vec<Token<'a>> {
+        self.pos += 2;
+        let mut items = Vec::new();
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.remaining().starts_with(b">>") {
+                self.pos += 2;
+                break;
+            }
+            match self.peek() {
+                None => break,
+                Some(b'>') => self.advance(),
+                _ => {
+                    if let Some(tok) = self.next_token() {
+                        items.push(tok);
+                    }
+                }
+            }
+        }
+        items
+    }
+
     /// Read an inline image block starting immediately after the `BI` keyword.
     ///
     /// The PDF spec (§8.9.7) requires:
@@ -320,28 +351,7 @@ impl<'a> Tokenizer<'a> {
                 b'/' => return Some(Token::Name(self.read_name())),
                 b'(' => return Some(Token::String(self.read_literal_string())),
                 b'<' if self.src.get(self.pos + 1) == Some(&b'<') => {
-                    // Inline dictionary (`<< … >>`). Rare in content streams (only
-                    // appears in some inline-image parameter dicts). Emit as a raw
-                    // Op slice so the dispatcher can surface a clear error instead
-                    // of silently producing wrong output.
-                    let start = self.pos;
-                    self.pos += 2;
-                    let mut depth = 1usize;
-                    while self.pos < self.src.len() {
-                        if self.src[self.pos..].starts_with(b"<<") {
-                            depth += 1;
-                            self.pos += 2;
-                        } else if self.src[self.pos..].starts_with(b">>") {
-                            depth -= 1;
-                            self.pos += 2;
-                            if depth == 0 {
-                                break;
-                            }
-                        } else {
-                            self.pos += 1;
-                        }
-                    }
-                    return Some(Token::Op(&self.src[start..self.pos]));
+                    return Some(Token::Dict(self.read_dict()));
                 }
                 b'<' => return Some(Token::String(self.read_hex_string())),
                 b'[' => return Some(Token::Array(self.read_array())),
@@ -599,6 +609,59 @@ mod tests {
         assert!(ops.contains(&b"BDC".as_ref()), "BDC must appear: {ops:?}");
         assert!(ops.contains(&b"Tj".as_ref()), "Tj must appear: {ops:?}");
         assert!(ops.contains(&b"EMC".as_ref()), "EMC must appear: {ops:?}");
+    }
+
+    /// `>>`, `]`, `)` and `>` are delimiters, so the operator that follows
+    /// them needs no whitespace (ISO 32000-2 §7.2.3).
+    #[test]
+    fn operator_directly_after_closing_delimiter() {
+        assert_eq!(
+            tokens(b"/P <</MCID 0 >>BDC"),
+            vec![
+                Token::Name(b"P"),
+                Token::Dict(vec![Token::Name(b"MCID"), Token::Number(0.0)]),
+                Token::Op(b"BDC"),
+            ]
+        );
+        assert_eq!(
+            tokens(b"[(a)1]TJ"),
+            vec![
+                Token::Array(vec![Token::String(b"a".to_vec()), Token::Number(1.0)]),
+                Token::Op(b"TJ"),
+            ]
+        );
+        assert_eq!(
+            tokens(b"(a)Tj<62>Tj"),
+            vec![
+                Token::String(b"a".to_vec()),
+                Token::Op(b"Tj"),
+                Token::String(b"b".to_vec()),
+                Token::Op(b"Tj"),
+            ]
+        );
+    }
+
+    /// Hex strings and nested dictionaries inside a dictionary close where
+    /// their own grammar says, not where an angle-bracket count would.
+    #[test]
+    fn dict_with_hex_string_and_nested_dict() {
+        assert_eq!(
+            tokens(b"/Span<</ActualText<FEFF00A0>/A<</B[1]>>>>BDC EMC"),
+            vec![
+                Token::Name(b"Span"),
+                Token::Dict(vec![
+                    Token::Name(b"ActualText"),
+                    Token::String(vec![0xFE, 0xFF, 0x00, 0xA0]),
+                    Token::Name(b"A"),
+                    Token::Dict(vec![
+                        Token::Name(b"B"),
+                        Token::Array(vec![Token::Number(1.0)])
+                    ]),
+                ]),
+                Token::Op(b"BDC"),
+                Token::Op(b"EMC"),
+            ]
+        );
     }
 
     /// A long run of stray delimiters (the exact bytes an unbalanced `<<…>>`
