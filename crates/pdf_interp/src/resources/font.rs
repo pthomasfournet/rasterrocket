@@ -2,7 +2,7 @@
 //!
 //! Given a PDF font dictionary (as returned by `pdf::Document::get_page_fonts`),
 //! [`resolve_font`] extracts everything the rendering pipeline needs to load a
-//! `FreeType` face: the raw font bytes (from an embedded stream or a standard
+//! font face: the raw font bytes (from an embedded stream or a standard
 //! substitute), the font kind, and the char-to-glyph-index map.
 //!
 //! # PDF font taxonomy
@@ -13,7 +13,7 @@
 //!   MMType1 → Multiple Master (treated as Type 1)
 //!   TrueType → TrueType / OpenType-TT
 //!   Type0   → CIDFont composite (descendant font carries the actual bytes)
-//!   Type3   → paint-procedure glyph (content streams, no FreeType face)
+//!   Type3   → paint-procedure glyph (content streams, no font program)
 //!   CIDFontType0 / CIDFontType2 → only appear as DescendantFonts entries
 //! ```
 //!
@@ -32,7 +32,8 @@ use crate::resources::dict_ext::DictExt;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// The kind of font outline — used to select `FreeType` hinting flags.
+/// The PDF font subtype family, which decides how simple-font character
+/// codes are resolved to glyphs (see the renderer's font cache).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PdfFontKind {
     /// Type 1 / Type 1C (CFF-wrapped).
@@ -61,7 +62,7 @@ pub enum BaseEncoding {
 ///
 /// Type 0 fonts encode character codes as 1–4 byte sequences.  The `Encoding`
 /// `CMap` maps byte sequences to CIDs; the `CIDToGIDMap` (or identity) then maps
-/// CIDs to `FreeType` GIDs.
+/// CIDs to glyph indices.
 #[derive(Debug)]
 pub struct CidEncoding {
     /// Decoded `Encoding` `CMap` — maps char codes to CIDs.
@@ -133,7 +134,7 @@ pub struct Type3Glyph {
 
 /// All data extracted from a Type 3 font dictionary.
 ///
-/// Unlike FreeType-backed fonts, Type 3 glyphs are PDF content streams that
+/// Unlike fonts with a font program, Type 3 glyphs are PDF content streams that
 /// must be executed by a child renderer.  Each `CharProc` stream begins with a
 /// `d0` (colorless) or `d1` (self-colored) operator that declares the glyph
 /// advance width.
@@ -155,10 +156,10 @@ impl Type3Data {
     }
 }
 
-/// Everything needed to load a `FreeType` face for one PDF font resource.
+/// Everything needed to load a font face for one PDF font resource.
 #[derive(Debug)]
 pub struct FontDescriptor {
-    /// Kind of font outline — controls `FreeType` hinting strategy.
+    /// PDF font subtype family; selects the code → glyph resolution path.
     pub kind: PdfFontKind,
     /// Raw font bytes.  `Some` if embedded in the PDF, `None` if we must fall
     /// back to a substitute.
@@ -173,13 +174,14 @@ pub struct FontDescriptor {
     /// `[first_char, first_char + widths.len())` range.  Default `0` per PDF
     /// §9.8.2.
     pub missing_width: i32,
-    /// Glyph-index table: `code_to_gid[char_code]` → FT glyph index.
-    /// Empty means the identity map (`char_code` == glyph index).
+    /// Glyph-index table: `code_to_gid[char_code]` → glyph index.
+    /// Empty means codes resolve through the font program's own charmap.
     pub code_to_gid: Vec<u32>,
     /// Per-character glyph name overrides from the PDF `Encoding/Differences`
     /// array.  Index = char code (0–255); `None` = inherit from base encoding.
     /// Used by `FontCache` (in `rasterrocket_interp::renderer::font_cache`) to resolve
-    /// names → Unicode → GID via `FreeType`'s active charmap at face-load time.
+    /// names → Unicode → GID through the font program's charmap at
+    /// face-load time.
     pub differences: Box<[Option<Box<str>>; 256]>,
     /// Base encoding for simple fonts: the code→glyph-name table that applies
     /// before `Differences` overrides.  `StandardEncoding` per PDF spec when
@@ -189,7 +191,7 @@ pub struct FontDescriptor {
     /// `Type0`; `None` for all simple fonts (Type1, TrueType, `MMType1`).
     pub cid_encoding: Option<CidEncoding>,
     /// Type 3 glyph data.  `Some` only when `Subtype` is `Type3`; `None` for
-    /// all FreeType-backed fonts.  When `Some`, `bytes` is `None` and `kind`
+    /// all fonts with a font program.  When `Some`, `bytes` is `None` and `kind`
     /// is `Other` (Type 3 has no font program; glyphs are content streams).
     pub type3: Option<Type3Data>,
 }
@@ -202,7 +204,7 @@ impl FontDescriptor {
     /// for simple fonts in the `[FirstChar, LastChar]` range.  Outside that
     /// range, `MissingWidth` applies.  The whole array is allowed to be
     /// absent only for the 14 standard fonts (Helvetica, Times-Roman, …),
-    /// where the `FreeType` `horiAdvance` of the substitute face is the
+    /// where the advance width of the substitute face's glyph is the
     /// fallback — that's what `None` here signals to the caller.
     ///
     /// Not for Type 0 (use `CidEncoding::width_for_cid`) or Type 3
@@ -1126,7 +1128,7 @@ mod tests {
     #[test]
     fn width_for_code_empty_widths_returns_none() {
         // Standard 14 fonts (Helvetica etc.) pre-PDF-1.5 can omit Widths;
-        // None signals to the caller to fall back to the FreeType face.
+        // None signals to the caller to fall back to the font program's advance.
         let d = descriptor_with_widths(0, vec![], 0);
         assert_eq!(d.width_for_code(65), None);
     }

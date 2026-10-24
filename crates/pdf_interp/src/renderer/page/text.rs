@@ -108,6 +108,9 @@ impl PageRenderer<'_> {
         } else {
             Vec::new()
         };
+        // Device-space outlines of glyphs painted as filled paths instead of
+        // cached bitmaps (faces too large for glyph bitmaps).
+        let mut fill_paths: Vec<raster::path::Path> = Vec::new();
 
         {
             // Trm[2×2] = font_size × Tm[2×2] × CTM[2×2] — the text rendering
@@ -124,20 +127,22 @@ impl PageRenderer<'_> {
             let glyph_cache = self.font_cache.glyph_cache().clone();
             let glyph_cache = &glyph_cache;
 
-            // Load (or retrieve cached) FreeType face — mutable borrow of font_cache.
+            // Load (or retrieve cached) face — mutable borrow of font_cache.
             let Some(face) = self.font_cache.get_or_load(&font_name, &descriptor, trm) else {
                 return;
             };
+            let paint_as_path = do_paint && face.prefers_path_fill();
 
             // Iterate character codes.  Simple fonts use one byte per character;
             // Type 0 composite fonts use 1–4 bytes determined by the Encoding CMap.
             let cid_enc = descriptor.cid_encoding.as_ref();
 
             // Shared helper: push a rasterized glyph into `records` (when painting)
-            // and collect its outline path into `clip_paths` (when clipping).
+            // and collect its outline path into `clip_paths` (when clipping);
+            // a face too large for glyph bitmaps paints through `fill_paths`.
             //
             // `gid` is the resolved glyph index.  `char_code_for_path` is the
-            // raw character code.  `by_gid` selects which one FreeType is
+            // raw character code.  `by_gid` selects which one the face is
             // indexed by:
             //
             // * Simple fonts (`by_gid == false`): the char code is resolved
@@ -146,13 +151,13 @@ impl PageRenderer<'_> {
             //   standard 14, etc.).
             // * Type 0 / CIDFonts (`by_gid == true`): the interpreter has
             //   already mapped the code through the Encoding CMap and
-            //   `CIDToGIDMap` to a final FreeType glyph index.  It must be
+            //   `CIDToGIDMap` to a final glyph selector.  It must be
             //   used directly — re-resolving it through the Unicode charmap
             //   mis-maps every glyph to `.notdef` for a CID-keyed CFF subset
             //   (whose charmap is absent/unrelated), rendering a blank page.
             let mut push_glyph =
                 |char_code_for_path: u32, gid: u32, by_gid: bool, pen_x: i32, pen_y: i32| {
-                    let bmp = if do_paint {
+                    let bmp = if do_paint && !paint_as_path {
                         if by_gid {
                             face.make_glyph_by_gid_cached(glyph_cache, gid, 0)
                         } else {
@@ -168,14 +173,11 @@ impl PageRenderer<'_> {
                             bitmap,
                         });
                     }
-                    if do_clip {
-                        // Collect the glyph outline in device space.
-                        // `glyph_path` returns coordinates in text space, where
-                        // the FreeType transform (Trm) has already been applied.
-                        // The origin (0, 0) maps to the pen position; Y is
-                        // positive-up (FreeType convention).  To get device
-                        // space: translate by (pen_x, pen_y) and flip Y (device
-                        // Y is positive-down).
+                    if do_clip || paint_as_path {
+                        // The glyph outline in device space.  `glyph_path`
+                        // returns pixels relative to the pen position with
+                        // Trm applied, y up; translate by (pen_x, pen_y) and
+                        // flip y (device y is positive-down).
                         let outline = if by_gid {
                             face.glyph_path_by_gid(gid)
                         } else {
@@ -190,7 +192,14 @@ impl PageRenderer<'_> {
                             }
                             p
                         });
-                        clip_paths.push(path);
+                        if do_clip {
+                            if paint_as_path {
+                                fill_paths.extend(path.clone());
+                            }
+                            clip_paths.push(path);
+                        } else {
+                            fill_paths.extend(path);
+                        }
                     }
                 };
 
@@ -232,8 +241,8 @@ impl PageRenderer<'_> {
                 // Simple font: one byte per character code.
                 // PDF §9.2.4: the Widths array is the authoritative advance source
                 // for simple fonts (within [FirstChar, LastChar]); MissingWidth
-                // applies out-of-range.  FreeType's horiAdvance is consulted ONLY
-                // when Widths is absent entirely (e.g. the 14 standard fonts
+                // applies out-of-range.  The font program's advance is consulted
+                // ONLY when Widths is absent entirely (e.g. the 14 standard fonts
                 // pre-PDF 1.5, where a substitute face supplies metrics).
                 for &byte in bytes {
                     let (pen_x, pen_y) = text_to_device(&ctm, &tm, 0.0, rise, self.height);
@@ -287,6 +296,9 @@ impl PageRenderer<'_> {
                     rec.pen_y,
                     &glyph,
                 );
+            }
+            for path in &fill_paths {
+                self.fill_path(path, false);
             }
         }
 

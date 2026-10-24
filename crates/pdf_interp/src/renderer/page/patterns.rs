@@ -165,13 +165,7 @@ impl PageRenderer<'_> {
     ) -> Bitmap<Rgb8> {
         // Build a temporary child renderer sharing the same document / font engine.
         let doc = self.resources.doc();
-        let mut tile_renderer = match PageRenderer::new(tile_w, tile_h, doc, desc.stream_id) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("render_pattern_tile: {e}");
-                return Bitmap::new(tile_w, tile_h, 1, false);
-            }
-        };
+        let mut tile_renderer = PageRenderer::new(tile_w, tile_h, doc, desc.stream_id);
         // Propagate pattern_depth so a pattern stream that recursively
         // invokes another pattern (or itself) hits MAX_PATTERN_DEPTH instead
         // of unbounded stack recursion.  saturating_add guards against the

@@ -53,8 +53,6 @@ pub enum InterpError {
     /// A Page dictionary entry has a value that is structurally valid PDF but
     /// outside the range permitted by the spec or our safety limits.
     InvalidPageGeometry(String),
-    /// `FreeType` library initialisation failed (library not available or internal error).
-    FontInit(String),
     /// The page render was aborted because it exceeded the per-page operator
     /// budget or wall-clock deadline.  The page is pathological; the rendered
     /// bitmap is partial.
@@ -73,7 +71,6 @@ impl std::fmt::Display for InterpError {
             }
             Self::MissingResource(name) => write!(f, "missing PDF resource: {name}"),
             Self::InvalidPageGeometry(msg) => write!(f, "invalid page geometry: {msg}"),
-            Self::FontInit(msg) => write!(f, "FreeType initialisation failed: {msg}"),
             Self::PageBudget(msg) => write!(f, "page render budget exceeded: {msg}"),
         }
     }

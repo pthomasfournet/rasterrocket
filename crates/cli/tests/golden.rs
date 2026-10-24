@@ -34,7 +34,7 @@ use std::process::{Command, Stdio};
 /// Maximum allowed mean absolute error per channel (0-255 scale).
 ///
 /// Rendering differences arise from sub-pixel rounding and minor divergences
-/// in `FreeType` / anti-aliasing behaviour vs. the C++ reference.  A value of
+/// in glyph rasterisation / anti-aliasing behaviour vs. the reference.  A value of
 /// 4.0 is tight enough to catch real regressions while tolerating unavoidable
 /// implementation deltas.
 const MAE_LIMIT: f64 = 4.0;

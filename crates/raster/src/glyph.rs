@@ -47,7 +47,8 @@ impl GlyphBitmap<'_> {
             }
         } else {
             // Use saturating_add so a pathological w near i32::MAX doesn't wrap.
-            // In practice FreeType glyphs are always < 2^16 px wide.
+            // Glyph bitmaps are bounded far below 2^16 px wide by the font
+            // crate's rasteriser budget.
             #[expect(clippy::cast_sign_loss, reason = "w = self.w.max(0) is non-negative")]
             {
                 (w.saturating_add(7) / 8) as usize

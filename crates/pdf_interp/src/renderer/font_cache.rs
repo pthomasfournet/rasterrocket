@@ -7,11 +7,10 @@
 //! When a font has no embedded bytes the cache falls back to a system font
 //! (Liberation Sans or Helvetica) located via a compile-time search path.
 //!
-//! # Thread safety
+//! # Threading
 //!
-//! `FontCache` is not `Send`.  One instance is created per page renderer
-//! (one per thread when pages are rendered in parallel).  The shared
-//! `FontEngine` (in the `font` crate) is locked only during the face-load call.
+//! One instance is created per page renderer (one per thread when pages are
+//! rendered in parallel) and owns that page's [`FontEngine`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,9 +18,8 @@ use std::sync::OnceLock;
 
 use font::{
     cache::GlyphCache,
-    engine::{FaceParams, SharedEngine},
+    engine::{FaceParams, FontEngine},
     face::FontFace,
-    hinting::FontKind,
 };
 
 use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
@@ -53,16 +51,6 @@ fn fallback_font_path() -> Option<&'static str> {
     })
 }
 
-// ── Kind conversion ───────────────────────────────────────────────────────────
-
-const fn to_font_kind(k: PdfFontKind) -> FontKind {
-    match k {
-        PdfFontKind::Type1 => FontKind::Type1,
-        PdfFontKind::TrueType => FontKind::TrueType,
-        PdfFontKind::Other => FontKind::Other,
-    }
-}
-
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
 /// Key type for [`FontCache::faces`]: PDF font resource name (boxed to avoid the
@@ -71,7 +59,7 @@ type FaceKey = (Box<[u8]>, [u64; 4]);
 
 /// Per-page cache of loaded font faces.
 pub struct FontCache {
-    engine: SharedEngine,
+    engine: FontEngine,
     /// Glyph bitmap cache shared by every face on this page.
     glyph_cache: GlyphCache,
     /// Map from (PDF resource name, four f64-as-u64 bits of the Trm 2×2 matrix) to
@@ -86,7 +74,7 @@ pub struct FontCache {
 impl FontCache {
     /// Create a new cache backed by the given engine.
     #[must_use]
-    pub fn new(engine: SharedEngine, glyph_cache: GlyphCache) -> Self {
+    pub fn new(engine: FontEngine, glyph_cache: GlyphCache) -> Self {
         Self {
             engine,
             glyph_cache,
@@ -116,11 +104,11 @@ impl FontCache {
         trm: [f64; 4],
     ) -> Option<&FontFace> {
         // Key encodes the full 2×2 Trm matrix as bit patterns: same font name at
-        // different sizes or skews needs distinct FreeType faces.
+        // different sizes or skews needs distinct faces.
         let mat_key = trm.map(f64::to_bits);
-        // Can't use the entry API: `self.load_face` borrows `&self` while
-        // `entry` holds a mutable borrow of `self.faces`.  Use contains_key +
-        // insert instead.
+        // Can't use the entry API: `self.load_face` borrows `self` mutably
+        // while `entry` holds a mutable borrow of `self.faces`.  Use
+        // contains_key + insert instead.
         //
         // `Box<[u8]>` doesn't impl `Borrow<([u8], [u64;4])>` for the tuple
         // key, so heterogeneous lookup isn't available.  We box the name
@@ -128,7 +116,7 @@ impl FontCache {
         // on a miss it becomes the stored key with no second allocation.
         //
         // Failed loads (face is None) are stored so repeated calls with the
-        // same degenerate font don't pay the mutex+FreeType cost every time.
+        // same degenerate font don't pay the parse cost every time.
         let key: FaceKey = (name.into(), mat_key);
         if !self.faces.contains_key(&key) {
             let face = self.load_face(descriptor, trm);
@@ -146,8 +134,8 @@ impl FontCache {
         self.faces.get(&key)?.as_ref()
     }
 
-    fn load_face(&self, desc: &FontDescriptor, trm: [f64; 4]) -> Option<FontFace> {
-        // Pre-flight: reject degenerate matrices before paying the mutex cost.
+    fn load_face(&mut self, desc: &FontDescriptor, trm: [f64; 4]) -> Option<FontFace> {
+        // Pre-flight: reject degenerate matrices before parsing the program.
         // The y-column magnitude (hypot of indices 2 & 3) is the pixel size used by
         // FontFace::new; a value < 1.0 or non-finite produces an unusable face.
         if !trm_pixel_size_valid(trm) {
@@ -170,26 +158,20 @@ impl FontCache {
         );
 
         let params = FaceParams {
-            kind: to_font_kind(desc.kind),
             code_to_gid: desc.code_to_gid.clone(),
             mat: trm,
-            // text_mat and mat are the same here: we use a single unified Trm.
-            text_mat: trm,
         };
 
-        let mut eng = self
-            .engine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
         let mut face = if let Some(bytes) = &desc.bytes {
-            eng.load_memory_face(bytes.clone(), 0, params)
-                .inspect_err(|e| log::debug!("font_cache: memory face error: {e}"))
+            self.engine
+                .load_memory_face(bytes.clone(), 0, params)
+                .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
                 .ok()?
         } else {
             let path = fallback_font_path()?;
-            eng.load_file_face(path, 0, params)
-                .inspect_err(|e| log::debug!("font_cache: file face error ({path}): {e}"))
+            self.engine
+                .load_file_face(path, 0, params)
+                .inspect_err(|e| log::debug!("font_cache: fallback font {path}: {e}"))
                 .ok()?
         };
 
@@ -198,7 +180,7 @@ impl FontCache {
         // Unicode cmap.  Build the full code→GID table by resolving each
         // code's glyph *name* (Differences override, else the base encoding)
         // against the program's charset.  CID/Type0 keep the descriptor's
-        // table; symbolic TrueType keeps select_truetype_cmap's charmap.
+        // table; symbolic TrueType keeps the program's own charmap.
         if resolve_by_name {
             face.code_to_gid = resolve_simple_to_gid(&face, &desc.differences, desc.base_encoding);
         } else if desc.kind == PdfFontKind::TrueType
@@ -216,11 +198,11 @@ impl FontCache {
 
 // ── Shared size-validation ────────────────────────────────────────────────────
 
-/// Return `true` if the y-column magnitude of `trm` (used by `FontFace::new`
-/// as the nominal pixel size) is a finite value ≥ 1.0.
+/// Return `true` if the y-column magnitude of `trm` (the face's nominal
+/// pixel size) is a finite value ≥ 1.0.
 ///
-/// This mirrors the validation inside `FontFace::new` and is used as an early
-/// rejection to avoid the mutex lock cost for obviously degenerate matrices.
+/// This mirrors the validation the font engine applies and rejects
+/// obviously degenerate matrices before the font program is parsed.
 pub(crate) fn trm_pixel_size_valid(trm: [f64; 4]) -> bool {
     let size = f64::hypot(trm[2], trm[3]);
     size.is_finite() && size >= 1.0
@@ -240,7 +222,7 @@ pub(crate) fn trm_pixel_size_valid(trm: [f64; 4]) -> bool {
 /// - `not_type3` false  → Type 3: glyphs are content-stream procedures, not
 ///   a font program with a charset.
 /// - `kind` `TrueType`  → symbolic/non-symbolic TrueType keeps the cmap
-///   `select_truetype_cmap` chose; only `Type1` (incl. `MMType1`) and
+///   the font program selects; only `Type1` (incl. `MMType1`) and
 ///   `Other` (OpenType-CFF wrappers) are name-resolved.
 const fn wants_name_resolution(
     has_bytes: bool,
@@ -258,7 +240,7 @@ const fn wants_name_resolution(
 /// For every code 0..256 the glyph name is `differences[code]` if the
 /// `Encoding/Differences` array overrides it, otherwise the name the
 /// `base_encoding` assigns to that code (PDF §9.6.6).  The name is resolved
-/// to a GID via `FreeType`'s `FT_Get_Name_Index` (the program's charset /
+/// to a GID through the program's own glyph names (charset / `CharStrings` /
 /// `post` table — the only correct source for a subsetted program where the
 /// char code is neither the GID nor a usable Unicode-cmap key).
 ///
@@ -1644,7 +1626,7 @@ mod tests {
             false,
             PdfFontKind::Type1
         ));
-        // Embedded TrueType: keeps select_truetype_cmap's charmap.
+        // Embedded TrueType: keeps the program's own charmap.
         assert!(!wants_name_resolution(
             true,
             true,

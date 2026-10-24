@@ -735,7 +735,7 @@ fn render_page_rgb_with_geom(
         geom.origin_y,
         doc,
         page_id,
-    )?;
+    );
 
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));

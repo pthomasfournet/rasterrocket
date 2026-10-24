@@ -478,11 +478,7 @@ fn drive(bytes: Vec<u8>) -> Outcome {
         // codec stream, never into these dimensions, so `PageRenderer::new`'s
         // scale assertion (a caller-contract precondition, not an
         // input-driven path) is never the thing under test.
-        let Ok(mut renderer) =
-            rasterrocket_interp::renderer::PageRenderer::new(16, 16, &doc, page_id)
-        else {
-            return Outcome::CleanErr;
-        };
+        let mut renderer = rasterrocket_interp::renderer::PageRenderer::new(16, 16, &doc, page_id);
         renderer.execute(&ops);
         let (bitmap, _diag) = renderer.finish();
         let (w, h) = (bitmap.width, bitmap.height);

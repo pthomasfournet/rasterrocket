@@ -20,7 +20,7 @@
 //! - Clip paths: `W W*` (winding and even-odd; intersected into the current `Clip`)
 //! - Colour: `g G rg RG k K sc scn SC SCN cs CS`
 //! - Text objects + state: `BT ET Tf Tc Tw Tz TL Ts Tr Td TD Tm T*`
-//! - Text showing: `Tj TJ ' "` (via `FreeType` through font crate)
+//! - Text showing: `Tj TJ ' "` (glyphs from the font crate)
 //! - Font encoding `Differences` array — resolved via Adobe Glyph List
 //!
 //! - Type 0 / `CIDFont` composite fonts — `Encoding` `CMap` (including
@@ -57,10 +57,7 @@ use pdf::{Document, ObjectId};
 
 use color::Rgb8;
 use color::convert::div255;
-use font::{
-    cache::GlyphCache,
-    engine::{FontEngine, SharedEngine},
-};
+use font::{cache::GlyphCache, engine::FontEngine};
 use raster::{
     Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
@@ -76,7 +73,6 @@ use raster::{
 use super::color::RasterColor;
 use super::font_cache::FontCache;
 use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform};
-use crate::InterpError;
 use crate::content::Operator;
 use crate::resources::{
     ColorSpace, IMAGE_FILTER_COUNT, ImageColorSpace, ImageFilter, PageResources,
@@ -527,16 +523,8 @@ impl<'doc> PageRenderer<'doc> {
     /// where 1 user-space unit = 1 device pixel (72 dpi).
     ///
     /// `doc` and `page_id` are used to resolve font and resource dictionaries.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InterpError::FontInit`] if `FreeType` cannot be initialised.
-    pub fn new(
-        width: u32,
-        height: u32,
-        doc: &'doc Document,
-        page_id: ObjectId,
-    ) -> Result<Self, InterpError> {
+    #[must_use]
+    pub fn new(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
         Self::new_scaled(width, height, 1.0, 0, 0.0, 0.0, doc, page_id)
     }
 
@@ -552,10 +540,7 @@ impl<'doc> PageRenderer<'doc> {
     /// # Panics
     ///
     /// Panics if `scale` is not a positive finite number.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InterpError::FontInit`] if `FreeType` cannot be initialised.
+    #[must_use]
     #[expect(
         clippy::too_many_arguments,
         reason = "renderer configuration has no natural grouping; a builder would add more boilerplate than it removes"
@@ -569,7 +554,7 @@ impl<'doc> PageRenderer<'doc> {
         origin_y: f64,
         doc: &'doc Document,
         page_id: ObjectId,
-    ) -> Result<Self, InterpError> {
+    ) -> Self {
         assert!(
             scale.is_finite() && scale > 0.0,
             "PageRenderer::new_scaled: scale must be a positive finite number, got {scale}"
@@ -582,13 +567,10 @@ impl<'doc> PageRenderer<'doc> {
         gstate.current_mut().ctm =
             build_initial_ctm(width, height, scale, rotate_cw, origin_x, origin_y);
 
-        let engine: SharedEngine = FontEngine::init(true, true, false)
-            .map_err(|e| InterpError::FontInit(e.to_string()))?;
-        let glyph_cache = GlyphCache::new();
-        let font_cache = FontCache::new(engine, glyph_cache);
+        let font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
         let resources = PageResources::new(doc, page_id);
 
-        Ok(Self {
+        Self {
             bitmap,
             width,
             height,
@@ -630,7 +612,7 @@ impl<'doc> PageRenderer<'doc> {
             icc_clut_cache: crate::resources::image::IccClutCache::new(),
             #[cfg(feature = "cache")]
             cache_state: None,
-        })
+        }
     }
 
     /// Attach a GPU parallel-Huffman JPEG decoder to this renderer.
@@ -2428,8 +2410,7 @@ mod tests {
         // empty_doc has no pages, so we use object id (1,0) (the catalog) as
         // the page_id — no real page resources are needed because EndPath is a
         // pure graphics-state no-op that touches no resources.
-        let mut renderer =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut renderer = PageRenderer::new(1, 1, &doc, (1, 0));
 
         // Override op_budget to a small value so the test terminates instantly.
         renderer.set_op_budget_for_test(10);
@@ -2457,8 +2438,7 @@ mod tests {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
-        let mut renderer =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut renderer = PageRenderer::new(1, 1, &doc, (1, 0));
 
         // Set an already-elapsed deadline and a very large op budget so the
         // deadline is the only thing that can fire.
@@ -2499,11 +2479,9 @@ mod tests {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
-        let mut parent =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut parent = PageRenderer::new(1, 1, &doc, (1, 0));
         parent.record_image_failure(Some("Im0".to_owned()), "parent".to_owned());
-        let mut child =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut child = PageRenderer::new(1, 1, &doc, (1, 0));
         child.record_image_failure(None, "child".to_owned());
 
         child.fold_child_into(&mut parent);
@@ -2532,8 +2510,7 @@ mod tests {
         let doc = empty_doc();
 
         // Parent with a 100-op budget that has already spent 90 ops.
-        let mut parent =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut parent = PageRenderer::new(1, 1, &doc, (1, 0));
         parent.set_op_budget_for_test(100);
         parent.set_deadline_for_test(None);
         let ops90: Vec<Operator> = std::iter::repeat_n(Operator::EndPath, 90).collect();
@@ -2542,8 +2519,7 @@ mod tests {
         assert_eq!(parent.ops_executed_for_test(), 90);
 
         // Child adopts the *remaining* 10-op allowance, not a fresh 100.
-        let mut child =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut child = PageRenderer::new(1, 1, &doc, (1, 0));
         child.adopt_parent_budget(&parent);
         assert_eq!(
             child.op_budget, 10,
@@ -2578,8 +2554,7 @@ mod tests {
 
         // An already-tripped parent must hand the child a zero allowance so it
         // does no work at all.
-        let mut child2 =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut child2 = PageRenderer::new(1, 1, &doc, (1, 0));
         child2.adopt_parent_budget(&parent);
         assert!(
             child2.budget_status().is_some(),
@@ -2607,8 +2582,7 @@ mod tests {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
-        let mut renderer =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut renderer = PageRenderer::new(1, 1, &doc, (1, 0));
         renderer.set_op_budget_for_test(u64::MAX);
         renderer.set_deadline_for_test(None);
 
@@ -2643,8 +2617,7 @@ mod tests {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
-        let mut renderer =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let mut renderer = PageRenderer::new(1, 1, &doc, (1, 0));
 
         // Three distinct keywords, the first repeated three times.
         renderer.execute(&[
@@ -2668,8 +2641,7 @@ mod tests {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
-        let renderer =
-            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        let renderer = PageRenderer::new(1, 1, &doc, (1, 0));
         assert_eq!(
             renderer.warned_unknown_ops_state_for_test(),
             (0, false),
@@ -2686,8 +2658,7 @@ mod tests {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
-        let mut renderer = PageRenderer::new(size, size, &doc, (1, 0))
-            .expect("renderer construction must not fail");
+        let mut renderer = PageRenderer::new(size, size, &doc, (1, 0));
         renderer.execute(&crate::content::parse(content));
         let stride = renderer.bitmap.stride;
         let data = renderer.bitmap.data();

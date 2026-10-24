@@ -86,11 +86,7 @@ fn main() {
         geom.origin_y,
         &doc,
         page_id,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("error: FreeType initialisation failed: {e}");
-        std::process::exit(1);
-    });
+    );
     renderer.execute(&ops);
     let (bitmap, _diag) = renderer.finish();
 
