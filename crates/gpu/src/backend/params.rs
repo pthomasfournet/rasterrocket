@@ -430,6 +430,11 @@ pub const HUFFMAN_CODEBOOK_ENTRIES: usize = 65_536;
 /// their dispatch grid as `ceil(num_subsequences / HUFFMAN_THREADS)`.
 pub const HUFFMAN_THREADS: u32 = 256;
 
+/// Bytes of JPEG re-decode memo per subsequence: two (key, value)
+/// entries of two `uint4` each. Must match `JPEG_MEMO_STRIDE` in both
+/// kernel sources.
+pub const JPEG_MEMO_BYTES_PER_SUBSEQUENCE: usize = 4 * 16;
+
 /// Phase selector for [`record_huffman`](super::GpuBackend::record_huffman).
 ///
 /// Phase 3 of the Weißenberger algorithm is the Blelloch scan; see
@@ -461,19 +466,21 @@ pub enum HuffmanPhase {
     /// JPEG decoding semantics — DC magnitude bits are skipped,
     /// AC run/size pairs advance the zig-zag cursor by `run + 1`,
     /// `EOB` (sym = 0x00) ends the block, `ZRL` (sym = 0xF0)
-    /// advances by 16.  Requires `dc_codebook` and `mcu_schedule`
-    /// to be `Some`.
+    /// advances by 16.  Also writes the re-decode `memo` Phase 2
+    /// reads.  Requires `dc_codebook`, `mcu_schedule` and `memo` to
+    /// be `Some`.
     JpegPhase1IntraSync,
     /// JPEG-framed Phase 2: inter-sequence sync by re-decode
-    /// propagation. Each pass, every workgroup re-decodes its
-    /// `HUFFMAN_THREADS` regions to a local fixpoint from the
-    /// workgroup's left input in `s_info_prev`, writes the result to
-    /// `s_info`, and flags each slot that equals its `s_info_prev`
-    /// value; the host swaps the two buffers between passes and loops
-    /// until the last slot of every workgroup but the final one is
-    /// flagged, at most `ceil(n / HUFFMAN_THREADS)` times. Same
-    /// requirements as `JpegPhase1IntraSync` plus
-    /// `sync_flags` and `s_info_prev`.
+    /// propagation. Each pass, every workgroup resolves its
+    /// `HUFFMAN_THREADS` slots in order from the workgroup's left
+    /// input in `s_info_prev` — taking each slot's snapshot from
+    /// `memo` when its left input matches an entry and re-decoding it
+    /// otherwise — writes the result to `s_info`, and flags each slot
+    /// that equals its `s_info_prev` value; the host swaps the two
+    /// buffers between passes and loops until the last slot of every
+    /// workgroup but the final one is flagged, at most
+    /// `ceil(n / HUFFMAN_THREADS)` times. Same requirements as
+    /// `JpegPhase1IntraSync` plus `sync_flags` and `s_info_prev`.
     JpegPhase2InterSync,
     /// JPEG-framed counterpart of `Phase4Redecode`.  Emits the
     /// per-block Huffman symbol stream (DC magnitude category +
@@ -585,6 +592,13 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// component k references), not wire DHT selector IDs. Required
     /// for any `phase.is_jpeg_framed()`; ignored otherwise.
     pub mcu_schedule: Option<&'a B::DeviceBuffer>,
+    /// Re-decode memo of the JPEG-framed Phase 1 / Phase 2: four
+    /// `uint4` (key, value, key, value) per subsequence —
+    /// [`JPEG_MEMO_BYTES_PER_SUBSEQUENCE`] bytes each. Phase 1 writes
+    /// it, Phase 2 reads it and rewrites the second entry of every
+    /// slot. Required for `JpegPhase1IntraSync` and
+    /// `JpegPhase2InterSync`; ignored for every other phase.
+    pub memo: Option<&'a B::DeviceBuffer>,
     /// Exact bit count of `bitstream`.
     pub length_bits: u32,
     /// Subsequence size (Wei §III); 128 / 512 / 1024 in practice.
@@ -947,6 +961,24 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
             return Err(invariant(
                 "mcu_schedule buffer is smaller than blocks_per_mcu * 4 bytes",
             ));
+        }
+        if matches!(
+            self.phase,
+            HuffmanPhase::JpegPhase1IntraSync | HuffmanPhase::JpegPhase2InterSync,
+        ) {
+            let Some(memo) = self.memo else {
+                return Err(invariant(
+                    "JpegPhase1IntraSync (or JpegPhase2InterSync) requires memo to be Some",
+                ));
+            };
+            let memo_bytes = (self.num_subsequences() as usize)
+                .checked_mul(JPEG_MEMO_BYTES_PER_SUBSEQUENCE)
+                .ok_or_else(|| invariant("memo byte count overflows usize"))?;
+            if backend.device_buffer_len(memo) < memo_bytes {
+                return Err(invariant(
+                    "memo buffer is smaller than num_subsequences * 64 bytes",
+                ));
+            }
         }
         Ok(())
     }
@@ -1450,6 +1482,7 @@ mod tests {
             s_info,
             sync_flags: None,
             s_info_prev: None,
+            memo: None,
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -1651,9 +1684,71 @@ mod tests {
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
         params.blocks_per_mcu = 1;
+        let memo = 2 * JPEG_MEMO_BYTES_PER_SUBSEQUENCE;
+        params.memo = Some(&memo);
         params
             .validate(&FakeBackend)
             .expect("JPEG-framed phase1 with all required fields must validate");
+    }
+
+    #[test]
+    fn huffman_validate_rejects_jpeg_phase1_without_memo() {
+        let bitstream = 36;
+        let codebook = 1 << 18;
+        let s_info = 32;
+        let dc_codebook = 1 << 18;
+        let mcu_schedule = 4;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        params.phase = HuffmanPhase::JpegPhase1IntraSync;
+        params.dc_codebook = Some(&dc_codebook);
+        params.mcu_schedule = Some(&mcu_schedule);
+        params.blocks_per_mcu = 1;
+        // memo intentionally None.
+        let err = params
+            .validate(&FakeBackend)
+            .expect_err("JpegPhase1IntraSync without memo must be rejected");
+        match err {
+            super::super::BackendError::InvariantViolation { detail, .. } => {
+                assert!(
+                    detail.contains("memo"),
+                    "expected memo detail, got: {detail}"
+                );
+            }
+            other => panic!("expected InvariantViolation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn huffman_validate_rejects_undersized_memo() {
+        let bitstream = 36;
+        let codebook = 1 << 18;
+        let s_info = 32;
+        let dc_codebook = 1 << 18;
+        let mcu_schedule = 4;
+        let sync_flags = 8;
+        let s_info_prev = 32;
+        // 2 subsequences need 128 bytes; provide one byte less.
+        let memo = 2 * JPEG_MEMO_BYTES_PER_SUBSEQUENCE - 1;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        params.phase = HuffmanPhase::JpegPhase2InterSync;
+        params.dc_codebook = Some(&dc_codebook);
+        params.mcu_schedule = Some(&mcu_schedule);
+        params.blocks_per_mcu = 1;
+        params.sync_flags = Some(&sync_flags);
+        params.s_info_prev = Some(&s_info_prev);
+        params.memo = Some(&memo);
+        let err = params
+            .validate(&FakeBackend)
+            .expect_err("under-sized memo must be rejected");
+        match err {
+            super::super::BackendError::InvariantViolation { detail, .. } => {
+                assert!(
+                    detail.contains("memo") && detail.contains("smaller"),
+                    "expected memo size-check detail, got: {detail}"
+                );
+            }
+            other => panic!("expected InvariantViolation, got: {other:?}"),
+        }
     }
 
     #[test]

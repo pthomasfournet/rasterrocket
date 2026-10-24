@@ -262,19 +262,20 @@ impl KernelId {
             Self::Phase4Redecode => &[0, 1, 2, 4, 5, 6],
             // JpegPhase1 reads bitstream + codebook + s_info_out
             // (slots 0..2) plus dc_codebook + mcu_schedule (slots
-            // 7..8). It does not touch slots 3..6 (sync_flags /
-            // offsets / symbols_out / decode_status are Phase 2/4
-            // territory).
+            // 7..8) and writes the re-decode memo (slot 10). It does
+            // not touch slots 3..6 (sync_flags / offsets / symbols_out
+            // / decode_status are Phase 2/4 territory) or 9.
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => &[0, 1, 2, 7, 8],
+            Self::JpegPhase1IntraSync => &[0, 1, 2, 7, 8, 10],
             // JpegPhase2 reads bitstream + codebook (slots 0..1),
             // writes s_info_out (slot 2) + sync_flags (slot 3), reads
-            // dc_codebook + mcu_schedule (slots 7..8) and the previous
-            // pass's s_info_prev (slot 9 — the Jacobi read side). It
-            // skips slots 4..6 (offsets / symbols_out / decode_status
-            // are Phase 4 territory).
+            // dc_codebook + mcu_schedule (slots 7..8), the previous
+            // pass's s_info_prev (slot 9 — the Jacobi read side) and
+            // the re-decode memo (slot 10). It skips slots 4..6
+            // (offsets / symbols_out / decode_status are Phase 4
+            // territory).
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => &[0, 1, 2, 3, 7, 8, 9],
+            Self::JpegPhase2InterSync => &[0, 1, 2, 3, 7, 8, 9, 10],
             // JpegPhase4 reads bitstream + codebook + s_info_out
             // (slots 0..2) + offsets + symbols_out + decode_status
             // (slots 4..6) + dc_codebook + mcu_schedule (slots 7..8).
@@ -337,16 +338,16 @@ impl KernelId {
             // Phase4FailureKind for the encoding).
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::Phase4Redecode => 6,
-            // (bitstream, codebook, s_info, dc_codebook, mcu_schedule)
-            // — JPEG-framed Phase 1 reads `blocks_per_mcu` from the
-            // 24-byte push struct that all huffman phases share.
+            // (bitstream, codebook, s_info, dc_codebook, mcu_schedule,
+            // memo) — JPEG-framed Phase 1 reads `blocks_per_mcu` from
+            // the 24-byte push struct that all huffman phases share.
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => 5,
+            Self::JpegPhase1IntraSync => 6,
             // (bitstream, codebook, s_info, sync_flags, dc_codebook,
-            // mcu_schedule, s_info_prev) — JPEG-framed Phase 2, same
-            // 24-byte push.
+            // mcu_schedule, s_info_prev, memo) — JPEG-framed Phase 2,
+            // same 24-byte push.
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 7,
+            Self::JpegPhase2InterSync => 8,
             // (bitstream, codebook, s_info, offsets, symbols_out,
             // decode_status, dc_codebook, mcu_schedule) — JPEG-framed
             // Phase 4. 8 storage buffers; same 24-byte push constant.

@@ -72,6 +72,16 @@
 // pass's s_info (the Jacobi read side); `s_info_out` at slot 2 is the
 // write side. The host swaps the two buffers between passes.
 [[vk::binding(9, 0)]] StructuredBuffer<uint4> s_info_prev;
+// JPEG-framed Phase 1 + Phase 2 only — bound at slot 10. Re-decode
+// memo, four uint4 per subsequence slot i:
+//   jpeg_memo[4i + 0], [4i + 1] = key, value of the Phase 1 entry
+//   jpeg_memo[4i + 2], [4i + 3] = key, value of the last-exact entry
+// where value = region i's boundary snapshot re-decoded from a left
+// input whose (p, block_in_mcu, z_in_block) equals key's. A key whose
+// p is JPEG_MEMO_NONE matches no left input (every real p is below
+// length_bits). Phase 1 writes the Phase 1 entries and clears the
+// last-exact ones; Phase 2 reads both and rewrites the last-exact ones.
+[[vk::binding(10, 0)]] RWStructuredBuffer<uint4> jpeg_memo;
 
 // Status codes — must match the CUDA `DECODE_*` macros AND the
 // Rust-side `Phase4FailureKind` discriminants exactly.
@@ -83,6 +93,12 @@ static const uint DECODE_INCOMPLETE = 3u;
 static const uint DECODE_BAD_DC_CATEGORY = 4u;
 static const uint DECODE_BAD_AC_SIZE = 5u;
 static const uint DECODE_AC_OVERFLOW = 6u;
+
+// `jpeg_memo` layout — must match the CUDA `JPEG_MEMO_*` macros.
+static const uint JPEG_MEMO_STRIDE = 4u;
+static const uint JPEG_MEMO_PHASE1 = 0u;
+static const uint JPEG_MEMO_LAST = 2u;
+static const uint JPEG_MEMO_NONE = 0xFFFFFFFFu;
 
 [[vk::push_constant]]
 cbuffer PushParams {
@@ -466,7 +482,17 @@ void phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
 /// Phase 2 re-derives each snapshot from its predecessor by re-decode
 /// propagation; Phase 1's fresh-start snapshots are only the initial
 /// guess (their block phase is generically wrong for multi-component
-/// streams).
+/// streams, and over non-self-synchronising content the zig-zag index
+/// is too).
+///
+/// The walk continues past the snapshot `E` to the first symbol
+/// crossing region `seq_idx + 1`'s end, counting from 0 the symbols
+/// decoded after the snapshot. That is the re-decode of region
+/// `seq_idx + 1` from a left input equal to `E` in (p, block_in_mcu,
+/// z_in_block) — the same deterministic walk, from the same state, with
+/// the same region end and count — so `(E, final state)` is written as
+/// region `seq_idx + 1`'s exact Phase 1 memo entry. A walk that failed
+/// before its snapshot writes the no-match key instead.
 [shader("compute")][numthreads(256, 1, 1)]
 void jpeg_phase1_intra_sync(uint3 tid : SV_DispatchThreadID) {
     if (blocks_per_mcu == 0u) {
@@ -487,6 +513,8 @@ void jpeg_phase1_intra_sync(uint3 tid : SV_DispatchThreadID) {
     uint4 state = uint4(start_bit, 0u, 0u, 0u);
     uint4 snapshot = state;
     bool snapshotted = false;
+    // Past the snapshot, n counts the next region's symbols.
+    uint count_to = subseq_end_bit;
 
     // Defensive max_iters mirrors the synthetic Phase 1.
     uint max_iters = (hard_limit > start_bit ? hard_limit - start_bit : 0u) + 1u;
@@ -496,12 +524,14 @@ void jpeg_phase1_intra_sync(uint3 tid : SV_DispatchThreadID) {
             break;
         }
         uint p_before = state.x;
-        if (try_decode_one_jpeg_symbol_kernel(state, subseq_end_bit, symbol_sink) != DECODE_OK) {
+        if (try_decode_one_jpeg_symbol_kernel(state, count_to, symbol_sink) != DECODE_OK) {
             break;
         }
         if (!snapshotted && p_before < subseq_end_bit && state.x >= subseq_end_bit) {
             snapshot = state;
             snapshotted = true;
+            state.y = 0u;
+            count_to = hard_limit;
         }
     }
 
@@ -510,6 +540,17 @@ void jpeg_phase1_intra_sync(uint3 tid : SV_DispatchThreadID) {
     }
 
     s_info_out[seq_idx] = snapshot;
+
+    uint4 none = uint4(JPEG_MEMO_NONE, 0u, 0u, 0u);
+    jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST] = none;
+    if (seq_idx == 0u) {
+        jpeg_memo[JPEG_MEMO_PHASE1] = none;
+    }
+    if (seq_idx + 1u < num_subsequences) {
+        uint next = (seq_idx + 1u) * JPEG_MEMO_STRIDE + JPEG_MEMO_PHASE1;
+        jpeg_memo[next] = snapshotted ? snapshot : none;
+        jpeg_memo[next + 1u] = state;
+    }
 }
 
 /// JPEG-framed Phase 4 (re-decode + write final symbols).  Same shape
@@ -603,14 +644,17 @@ uint4 jpeg_phase2_redecode(uint seq_idx, uint4 left) {
 /// `numthreads` and the host's `HUFFMAN_THREADS`.
 static const uint JPEG_PHASE2_GROUP = 256u;
 
-/// Workgroup-local state of the current propagation pass, one slot
-/// per lane. Lane `t` writes only `g_phase2_state[t]` and reads only
-/// `g_phase2_state[t - 1]`; the barriers in the local loop order the
-/// two.
+/// Workgroup-local resolved states, one slot per lane. Lane `t` writes
+/// only `g_phase2_state[t]`, in step `t`, and reads only
+/// `g_phase2_state[t - 1]`, in step `t`; the per-step barrier orders
+/// the two.
 groupshared uint4 g_phase2_state[JPEG_PHASE2_GROUP];
-/// Set to 1 by any lane whose slot changed in the current local
-/// pass; reset by lane 0 once every lane has read it.
-groupshared uint g_phase2_changed;
+
+/// True when two snapshots agree on everything the re-decode reads:
+/// p, block_in_mcu, z_in_block (n is a per-region count).
+bool jpeg_same_decode_state(uint4 a, uint4 b) {
+    return a.x == b.x && a.z == b.z && a.w == b.w;
+}
 
 /// JPEG-framed Phase 2 (inter-sequence sync by re-decode propagation).
 /// State semantics:
@@ -630,16 +674,23 @@ groupshared uint g_phase2_changed;
 /// construction.
 ///
 /// One host pass is one dispatch over a double-buffered s_info. Each
-/// workgroup runs the propagation to a local fixpoint before writing
-/// back: lane t's left input is `g_phase2_state[t - 1]` (lane 0's is
-/// `s_info_prev[base - 1]`, fixed for the whole dispatch), each local
-/// pass is one Jacobi step, and the loop ends when no lane's slot
-/// changed or after `JPEG_PHASE2_GROUP` local passes — by which point
-/// lane t holds the exact (t + 1)-step chain from the workgroup's left
-/// input, since slot t is exact after local pass t. A workgroup
-/// therefore always leaves holding the exact chain from its left
-/// input; the wrong initial block phases of a non-self-synchronising
-/// stream cost local passes, not host passes.
+/// workgroup resolves its slots in lane order from the workgroup's left
+/// input (`s_info_prev[base - 1]`, fixed for the whole dispatch): in
+/// step t, lane t takes its left input — the left input for lane 0,
+/// `g_phase2_state[t - 1]` otherwise — and computes its region's
+/// snapshot from it, so after step t slot t is the exact chain from
+/// the workgroup's left input. A slot whose left input matches a memo
+/// key in (p, block_in_mcu, z_in_block) takes the memo value instead
+/// of re-decoding; the value is that same deterministic re-decode, so
+/// the result is identical and only the cost differs. Each slot holds
+/// two memo entries (layout at `JPEG_MEMO_STRIDE`): the Phase 1 entry
+/// (the snapshot of its predecessor's fresh-start walk and that walk's
+/// continuation through this region) and the last-exact entry (the
+/// left input this slot resolved from in the previous dispatch and the
+/// result), which this kernel rewrites. Re-decodes are therefore
+/// confined to slots whose true left input differs from both — where
+/// the predecessor's fresh-start walk had not synchronised with the
+/// true decode and the left input changed since the last dispatch.
 ///
 /// `sync_flags[i] = 1` when `s_info_out[i] == s_info_prev[i]`. A host
 /// pass in which the last slot of every workgroup but the final one is
@@ -655,7 +706,8 @@ groupshared uint g_phase2_changed;
 /// replays these walks and exits cleanly at end_p).
 ///
 /// Lanes past `num_subsequences` take part in every barrier and do no
-/// work; the only early return (`blocks_per_mcu == 0`) is uniform.
+/// work; the step count and the only early return
+/// (`blocks_per_mcu == 0`) are workgroup-uniform.
 [shader("compute")][numthreads(256, 1, 1)]
 void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) {
     if (blocks_per_mcu == 0u) {
@@ -663,50 +715,47 @@ void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_Gro
     }
     uint seq_idx = tid.x;
     uint lane = gtid.x;
+    uint base = seq_idx - lane;
     bool active = seq_idx < num_subsequences;
     // Slot 0 is pinned: its Phase 1 snapshot is the true stream start.
     bool propagates = active && seq_idx != 0u;
+    // Workgroup-uniform: base < num_subsequences for every dispatched group.
+    uint lanes = min(JPEG_PHASE2_GROUP, num_subsequences - base);
 
-    uint4 me_in = active ? s_info_prev[seq_idx] : uint4(0u, 0u, 0u, 0u);
-    uint4 left_fixed = (propagates && lane == 0u) ? s_info_prev[seq_idx - 1u]
-                                                  : uint4(0u, 0u, 0u, 0u);
-    uint4 cur = me_in;
-    g_phase2_state[lane] = cur;
-    if (lane == 0u) {
-        g_phase2_changed = 0u;
+    uint4 zero = uint4(0u, 0u, 0u, 0u);
+    uint4 me_in = active ? s_info_prev[seq_idx] : zero;
+    uint4 key_p1 = zero;
+    uint4 val_p1 = zero;
+    uint4 key_last = zero;
+    uint4 val_last = zero;
+    if (propagates) {
+        key_p1 = jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_PHASE1];
+        val_p1 = jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_PHASE1 + 1u];
+        key_last = jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST];
+        val_last = jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST + 1u];
     }
-    GroupMemoryBarrierWithGroupSync();
+    uint4 left_fixed = (propagates && lane == 0u) ? s_info_prev[seq_idx - 1u] : zero;
+    uint4 cur = me_in;
+    uint4 used_left = zero;
 
-    for (uint pass = 0u; pass < JPEG_PHASE2_GROUP; pass++) {
-        uint4 left = (lane == 0u) ? left_fixed : g_phase2_state[lane - 1u];
-        // Every lane has read its left input before any lane
-        // overwrites its own slot.
+    for (uint t = 0u; t < lanes; t++) {
+        if (lane == t) {
+            if (propagates) {
+                uint4 left = (lane == 0u) ? left_fixed : g_phase2_state[lane - 1u];
+                if (jpeg_same_decode_state(left, key_last)) {
+                    cur = val_last;
+                } else if (jpeg_same_decode_state(left, key_p1)) {
+                    cur = val_p1;
+                } else {
+                    cur = jpeg_phase2_redecode(seq_idx, left);
+                }
+                used_left = left;
+            }
+            g_phase2_state[lane] = cur;
+        }
+        // Lane t's slot write is visible before lane t + 1 reads it in
+        // the next step.
         GroupMemoryBarrierWithGroupSync();
-
-        uint4 out = cur;
-        if (propagates) {
-            out = jpeg_phase2_redecode(seq_idx, left);
-        }
-        if (out.x != cur.x || out.y != cur.y || out.z != cur.z || out.w != cur.w) {
-            g_phase2_changed = 1u;
-        }
-        cur = out;
-        g_phase2_state[lane] = cur;
-        // Every slot write and every changed-flag write is visible
-        // before any lane reads the flag.
-        GroupMemoryBarrierWithGroupSync();
-
-        bool changed = g_phase2_changed != 0u;
-        // Every lane has read the flag before lane 0 resets it for
-        // the next pass; the next pass's flag writes follow its
-        // first barrier, which lane 0's reset precedes.
-        GroupMemoryBarrierWithGroupSync();
-        if (lane == 0u) {
-            g_phase2_changed = 0u;
-        }
-        if (!changed) {
-            break;
-        }
     }
 
     if (active) {
@@ -715,5 +764,9 @@ void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_Gro
             (cur.x == me_in.x && cur.y == me_in.y && cur.z == me_in.z && cur.w == me_in.w)
                 ? 1u
                 : 0u;
+    }
+    if (propagates) {
+        jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST] = used_left;
+        jpeg_memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST + 1u] = cur;
     }
 }

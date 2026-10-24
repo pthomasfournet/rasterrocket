@@ -197,6 +197,7 @@ impl GpuCtx {
         s_info_prev: &CudaSlice<u8>,
         s_info_out: &CudaSlice<u8>,
         sync_flags: &CudaSlice<u8>,
+        memo: &CudaSlice<u8>,
         length_bits: u32,
         subsequence_bits: u32,
         num_subsequences: u32,
@@ -218,6 +219,7 @@ impl GpuCtx {
             .arg(s_info_prev)
             .arg(s_info_out)
             .arg(sync_flags)
+            .arg(memo)
             .arg(&length_bits)
             .arg(&subsequence_bits)
             .arg(&num_subsequences)
@@ -312,6 +314,7 @@ impl GpuCtx {
         dc_codebook: &CudaSlice<u8>,
         mcu_schedule: &CudaSlice<u8>,
         s_info_out: &CudaSlice<u8>,
+        memo: &CudaSlice<u8>,
         length_bits: u32,
         subsequence_bits: u32,
         num_subsequences: u32,
@@ -331,6 +334,7 @@ impl GpuCtx {
             .arg(dc_codebook)
             .arg(mcu_schedule)
             .arg(s_info_out)
+            .arg(memo)
             .arg(&length_bits)
             .arg(&subsequence_bits)
             .arg(&num_subsequences)

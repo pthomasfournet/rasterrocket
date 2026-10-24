@@ -151,7 +151,8 @@ impl PageRecorder {
         let cmd = cmd_buffers[0];
 
         // Descriptor pool: storage-buffer-only, sized for the worst-case
-        // kernel (jpeg_phase4_redecode: 8 buffers per set) ×
+        // kernels (jpeg_phase2_inter_sync, jpeg_phase4_redecode: 8
+        // buffers per set) ×
         // MAX_DESC_SETS_PER_PAGE. Undersizing fails loudly at
         // vkAllocateDescriptorSets, but only once a page records more
         // sets than the smaller budget covered.
@@ -561,6 +562,10 @@ impl PageRecorder {
         let sched = p
             .mcu_schedule
             .expect("validate() proved mcu_schedule is Some for JpegPhase1IntraSync");
+        let memo = p
+            .memo
+            .expect("validate() proved memo is Some for JpegPhase1IntraSync");
+        // Buffer order matches binding_slots = [0, 1, 2, 7, 8, 10].
         self.dispatch_kernel(
             KernelId::JpegPhase1IntraSync,
             &[
@@ -569,6 +574,7 @@ impl PageRecorder {
                 p.s_info.handle(),
                 dc.handle(),
                 sched.handle(),
+                memo.handle(),
             ],
             &[
                 p.bitstream.size(),
@@ -576,6 +582,7 @@ impl PageRecorder {
                 p.s_info.size(),
                 dc.size(),
                 sched.size(),
+                memo.size(),
             ],
             push,
             groups,
@@ -605,9 +612,12 @@ impl PageRecorder {
         let prev = p
             .s_info_prev
             .expect("validate() proved s_info_prev is Some for JpegPhase2InterSync");
-        // Buffer order matches binding_slots = [0, 1, 2, 3, 7, 8, 9]:
+        let memo = p
+            .memo
+            .expect("validate() proved memo is Some for JpegPhase2InterSync");
+        // Buffer order matches binding_slots = [0, 1, 2, 3, 7, 8, 9, 10]:
         // bitstream, codebook, s_info (write side), sync_flags,
-        // dc_codebook, mcu_schedule, s_info_prev (read side).
+        // dc_codebook, mcu_schedule, s_info_prev (read side), memo.
         self.dispatch_kernel(
             KernelId::JpegPhase2InterSync,
             &[
@@ -618,6 +628,7 @@ impl PageRecorder {
                 dc.handle(),
                 sched.handle(),
                 prev.handle(),
+                memo.handle(),
             ],
             &[
                 p.bitstream.size(),
@@ -627,6 +638,7 @@ impl PageRecorder {
                 dc.size(),
                 sched.size(),
                 prev.size(),
+                memo.size(),
             ],
             push,
             groups,

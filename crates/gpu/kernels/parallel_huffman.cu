@@ -520,12 +520,31 @@ __device__ __forceinline__ uint4 jpeg_phase2_redecode_device(
 // width (uniformly, before the first barrier).
 #define JPEG_PHASE2_GROUP 256u
 
+// Re-decode memo layout shared by the JPEG-framed Phase 1 and Phase 2:
+// four uint4 per subsequence slot i,
+//   memo[4i + 0], memo[4i + 1] = key, value of the Phase 1 entry
+//   memo[4i + 2], memo[4i + 3] = key, value of the last-exact entry
+// where value = region i's boundary snapshot re-decoded from a left
+// input whose (p, block_in_mcu, z_in_block) equals key's. A key whose
+// p is JPEG_MEMO_NONE matches no left input (every real p is below
+// length_bits). Mirrors the Slang `JPEG_MEMO_*` constants.
+#define JPEG_MEMO_STRIDE 4u
+#define JPEG_MEMO_PHASE1 0u
+#define JPEG_MEMO_LAST 2u
+#define JPEG_MEMO_NONE 0xFFFFFFFFu
+
+// True when two snapshots agree on everything the re-decode reads:
+// p, block_in_mcu, z_in_block (n is a per-region count).
+__device__ __forceinline__ bool jpeg_same_decode_state(uint4 a, uint4 b) {
+    return a.x == b.x && a.z == b.z && a.w == b.w;
+}
+
 // JPEG-framed Phase 2 (inter-sequence sync by re-decode propagation).
 // Mirror of `jpeg_phase2_inter_sync` in parallel_huffman.slang — the
-// algorithm essay (workgroup-local Jacobi loop to a fixpoint over the
-// double-buffered s_info, per-slot fixpoint flags, slot-0 pinning,
-// error-stall semantics, barrier ordering) lives there per this
-// file's header policy.
+// algorithm essay (sequential in-workgroup resolution from the
+// workgroup's left input, the re-decode memo, per-slot fixpoint flags,
+// slot-0 pinning, error-stall semantics, barrier ordering) lives there
+// per this file's header policy.
 //
 // State semantics mirror jpeg_phase1_intra_sync:
 //   state.x = p              (bit position)
@@ -540,13 +559,13 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
     const uint4* __restrict__ s_info_in,
     uint4* __restrict__ s_info_out,
     unsigned int* __restrict__ flags,
+    uint4* __restrict__ memo,
     unsigned int length_bits,
     unsigned int subsequence_bits,
     unsigned int num_subsequences,
     unsigned int blocks_per_mcu
 ) {
     __shared__ uint4 g_state[JPEG_PHASE2_GROUP];
-    __shared__ unsigned int g_changed;
 
     // Defensive mirror of the host-side validate() check: the
     // schedule helper's modulo is undefined for 0. The Slang mirror
@@ -555,46 +574,45 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
         return;
     }
     unsigned int lane = threadIdx.x;
-    unsigned int seq_idx = blockIdx.x * blockDim.x + lane;
+    unsigned int base = blockIdx.x * JPEG_PHASE2_GROUP;
+    unsigned int seq_idx = base + lane;
     bool active = seq_idx < num_subsequences;
     // Slot 0 is pinned: its Phase 1 snapshot is the true stream start.
     bool propagates = active && seq_idx != 0u;
+    // Block-uniform: base < num_subsequences for every launched block.
+    unsigned int lanes = min(JPEG_PHASE2_GROUP, num_subsequences - base);
 
-    uint4 me_in = active ? s_info_in[seq_idx] : make_uint4(0u, 0u, 0u, 0u);
-    uint4 left_fixed = (propagates && lane == 0u) ? s_info_in[seq_idx - 1u]
-                                                  : make_uint4(0u, 0u, 0u, 0u);
-    uint4 cur = me_in;
-    g_state[lane] = cur;
-    if (lane == 0u) {
-        g_changed = 0u;
+    uint4 zero = make_uint4(0u, 0u, 0u, 0u);
+    uint4 me_in = active ? s_info_in[seq_idx] : zero;
+    uint4 key_p1 = zero, val_p1 = zero, key_last = zero, val_last = zero;
+    if (propagates) {
+        key_p1 = memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_PHASE1];
+        val_p1 = memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_PHASE1 + 1u];
+        key_last = memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST];
+        val_last = memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST + 1u];
     }
-    __syncthreads();
+    uint4 left_fixed = (propagates && lane == 0u) ? s_info_in[seq_idx - 1u] : zero;
+    uint4 cur = me_in;
+    uint4 used_left = zero;
 
-    for (unsigned int pass = 0u; pass < JPEG_PHASE2_GROUP; pass++) {
-        uint4 left = (lane == 0u) ? left_fixed : g_state[lane - 1u];
+    for (unsigned int t = 0u; t < lanes; t++) {
+        if (lane == t) {
+            if (propagates) {
+                uint4 left = (lane == 0u) ? left_fixed : g_state[lane - 1u];
+                if (jpeg_same_decode_state(left, key_last)) {
+                    cur = val_last;
+                } else if (jpeg_same_decode_state(left, key_p1)) {
+                    cur = val_p1;
+                } else {
+                    cur = jpeg_phase2_redecode_device(
+                        bitstream, codebook, dc_codebook, mcu_schedule,
+                        length_bits, subsequence_bits, blocks_per_mcu, seq_idx, left);
+                }
+                used_left = left;
+            }
+            g_state[lane] = cur;
+        }
         __syncthreads();
-
-        uint4 out = cur;
-        if (propagates) {
-            out = jpeg_phase2_redecode_device(
-                bitstream, codebook, dc_codebook, mcu_schedule,
-                length_bits, subsequence_bits, blocks_per_mcu, seq_idx, left);
-        }
-        if (out.x != cur.x || out.y != cur.y || out.z != cur.z || out.w != cur.w) {
-            g_changed = 1u;
-        }
-        cur = out;
-        g_state[lane] = cur;
-        __syncthreads();
-
-        bool changed = g_changed != 0u;
-        __syncthreads();
-        if (lane == 0u) {
-            g_changed = 0u;
-        }
-        if (!changed) {
-            break;
-        }
     }
 
     if (active) {
@@ -602,6 +620,10 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
         flags[seq_idx] =
             (cur.x == me_in.x && cur.y == me_in.y && cur.z == me_in.z && cur.w == me_in.w)
                 ? 1u : 0u;
+    }
+    if (propagates) {
+        memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST] = used_left;
+        memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST + 1u] = cur;
     }
 }
 
@@ -683,7 +705,9 @@ extern "C" __global__ void jpeg_phase4_redecode(
 }
 
 // JPEG-framed Phase 1 (intra-sequence sync).  Same shape as
-// `phase1_intra_sync` but uses the JPEG state machine.
+// `phase1_intra_sync` but uses the JPEG state machine, and records the
+// walk past the snapshot as subsequence (seq_idx + 1)'s Phase 1 memo
+// entry; see the Slang mirror for the entry's exactness argument.
 //
 // State semantics:
 //   state.x = p              (bit position)
@@ -696,6 +720,7 @@ extern "C" __global__ void jpeg_phase1_intra_sync(
     const unsigned int* __restrict__ dc_codebook,
     const unsigned int* __restrict__ mcu_schedule,
     uint4* __restrict__ s_info_out,
+    uint4* __restrict__ memo,
     unsigned int length_bits,
     unsigned int subsequence_bits,
     unsigned int num_subsequences,
@@ -727,6 +752,8 @@ extern "C" __global__ void jpeg_phase1_intra_sync(
     unsigned int snap_block = block_in_mcu;
     unsigned int snap_z = z_in_block;
     unsigned int snapshotted = 0u;
+    // Past the snapshot, n counts the next region's symbols.
+    unsigned int count_to = subseq_end_bit;
 
     // Defensive max_iters mirrors the synthetic Phase 1.
     unsigned int max_iters = ((hard_limit > start_bit) ? (hard_limit - start_bit) : 0u) + 1u;
@@ -736,7 +763,7 @@ extern "C" __global__ void jpeg_phase1_intra_sync(
         unsigned int p_before = p;
         if (try_decode_one_jpeg_symbol_device(
                 bitstream, codebook, dc_codebook, mcu_schedule,
-                length_bits, blocks_per_mcu, subseq_end_bit,
+                length_bits, blocks_per_mcu, count_to,
                 &p, &n, &block_in_mcu, &z_in_block, &symbol_sink) != DECODE_OK) {
             break;
         }
@@ -746,6 +773,8 @@ extern "C" __global__ void jpeg_phase1_intra_sync(
             snap_block = block_in_mcu;
             snap_z = z_in_block;
             snapshotted = 1u;
+            n = 0u;
+            count_to = hard_limit;
         }
     }
 
@@ -762,4 +791,15 @@ extern "C" __global__ void jpeg_phase1_intra_sync(
     out.z = snap_block;
     out.w = snap_z;
     s_info_out[seq_idx] = out;
+
+    uint4 none = make_uint4(JPEG_MEMO_NONE, 0u, 0u, 0u);
+    memo[seq_idx * JPEG_MEMO_STRIDE + JPEG_MEMO_LAST] = none;
+    if (seq_idx == 0u) {
+        memo[JPEG_MEMO_PHASE1] = none;
+    }
+    if (seq_idx + 1u < num_subsequences) {
+        unsigned int next = (seq_idx + 1u) * JPEG_MEMO_STRIDE + JPEG_MEMO_PHASE1;
+        memo[next] = (snapshotted != 0u) ? out : none;
+        memo[next + 1u] = make_uint4(p, n, block_in_mcu, z_in_block);
+    }
 }

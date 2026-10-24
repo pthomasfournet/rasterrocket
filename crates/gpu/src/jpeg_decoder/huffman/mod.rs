@@ -21,6 +21,7 @@ use synthetic::{
 
 use crate::backend::params::{
     HUFFMAN_CODEBOOK_ENTRIES, HUFFMAN_THREADS, HuffmanParams, HuffmanPhase,
+    JPEG_MEMO_BYTES_PER_SUBSEQUENCE,
 };
 use crate::backend::{BackendError, GpuBackend, Result};
 use crate::jpeg::CanonicalCodebook;
@@ -35,10 +36,9 @@ use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 /// number of kernel workgroups, `G = ceil(n / HUFFMAN_THREADS)`.
 ///
 /// Slot 0 is pinned correct (its fresh start is the true stream
-/// start). Each pass, every workgroup propagates to a local fixpoint
-/// from its left input (the previous pass's last slot of the
-/// workgroup before it), so it leaves holding the exact chain from
-/// that input. Workgroup `g` is therefore final after pass `g`, and
+/// start). Each pass, every workgroup resolves its slots in order from
+/// its left input (the previous pass's last slot of the workgroup
+/// before it), so it leaves holding the exact chain from that input. Workgroup `g` is therefore final after pass `g`, and
 /// pass `G - 1` — the `G`-th dispatch — sees every workgroup-boundary
 /// slot unchanged, which is the convergence test
 /// ([`jpeg_phase2_converged`]). The re-decode is deterministic even
@@ -116,7 +116,8 @@ fn build_gpu_codebook_refs(codebooks: &[&CanonicalCodebook]) -> Vec<u32> {
 /// Device buffers and derived dimensions shared by every JPEG-framed
 /// one-shot dispatch: entropy bitstream, flat AC/DC codebooks, MCU
 /// schedule, the ping-ponged pair of per-subsequence state buffers,
-/// and the Phase 2 fixpoint flags.
+/// the Phase 1 / Phase 2 re-decode memo, and the Phase 2 fixpoint
+/// flags.
 ///
 /// Owns the alloc/upload preamble shared by every JPEG-framed
 /// dispatcher; the phase flow stays explicit at each call site.
@@ -129,6 +130,7 @@ struct JpegDispatchSetup<'a, B: GpuBackend> {
     mcu_schedule: DeviceBufferGuard<'a, B>,
     s_info: DeviceBufferGuard<'a, B>,
     s_info_scratch: DeviceBufferGuard<'a, B>,
+    memo: DeviceBufferGuard<'a, B>,
     sync_flags: DeviceBufferGuard<'a, B>,
     length_bits: u32,
     subsequence_bits: u32,
@@ -176,6 +178,11 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         let mcu_schedule = DeviceBufferGuard::alloc(backend, mcu_sched_host.len() * 4)?;
         let s_info = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
         let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+        // Every entry Phase 2 reads is written by Phase 1 first.
+        let memo = DeviceBufferGuard::alloc(
+            backend,
+            (num_subsequences as usize) * JPEG_MEMO_BYTES_PER_SUBSEQUENCE,
+        )?;
         // Zeroed so a kernel guard that returns without writing (e.g.
         // the defensive blocks_per_mcu check) reads back as
         // all-unsynced, never as spurious convergence.
@@ -197,6 +204,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
             mcu_schedule,
             s_info,
             s_info_scratch,
+            memo,
             sync_flags,
             length_bits,
             subsequence_bits,
@@ -220,6 +228,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
             decode_status: None,
             dc_codebook: Some(self.dc_codebook.as_ref()),
             mcu_schedule: Some(self.mcu_schedule.as_ref()),
+            memo: Some(self.memo.as_ref()),
             length_bits: self.length_bits,
             subsequence_bits: self.subsequence_bits,
             num_components: self.num_components,
@@ -259,6 +268,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         backend.free_device(self.mcu_schedule.take());
         backend.free_device(self.s_info.take());
         backend.free_device(self.s_info_scratch.take());
+        backend.free_device(self.memo.take());
         backend.free_device(self.sync_flags.take());
     }
 }
@@ -355,6 +365,31 @@ fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
     let setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
     setup.run_phase1(backend)?;
     let out = setup.download_s_info(backend)?;
+    setup.free_all(backend);
+    Ok(out)
+}
+
+/// One-shot JPEG Phase 1 dispatch returning the re-decode memo: per
+/// subsequence, `[phase1 key, phase1 value, last key, last value]`.
+///
+/// # Errors
+/// Returns `BackendError` for any alloc / upload / dispatch / download
+/// failure.
+#[cfg(all(test, feature = "gpu-validation"))]
+fn dispatch_jpeg_phase1_memo<B: GpuBackend>(
+    backend: &B,
+    prep: &crate::jpeg_decoder::JpegPreparedInput,
+    subsequence_bits: u32,
+) -> Result<Vec<[SubsequenceState; 4]>> {
+    let setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
+    setup.run_phase1(backend)?;
+    let mut out = vec![
+        [<SubsequenceState as bytemuck::Zeroable>::zeroed(); 4];
+        setup.num_subsequences as usize
+    ];
+    let dst = bytemuck::cast_slice_mut::<[SubsequenceState; 4], u8>(&mut out);
+    let handle = backend.download_async(setup.memo.as_ref(), dst)?;
+    backend.wait_download(handle)?;
     setup.free_all(backend);
     Ok(out)
 }
@@ -890,6 +925,61 @@ mod tests {
     }
 
     // ── JPEG Phase 1 parity tests ─────────────────────────────────────────
+
+    /// Every Phase 1 memo entry JPEG Phase 1 writes on CUDA is the
+    /// exact re-decode of its region from its key, per the CPU oracle,
+    /// and every last-exact entry starts out matching nothing. The
+    /// fixtures and sizes leave many walkers unsynchronised (wrong
+    /// block phase), so wrong-but-exact keys are covered too.
+    #[test]
+    fn jpeg_phase1_memo_entries_are_exact_redecodes_cuda() {
+        use crate::jpeg_decoder::phase2_oracle::{jpeg_phase2_redecode, jpeg_region_end};
+        let Some(b) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let fixtures: [(&str, &[u8]); 3] = [
+            (
+                "q95_scan",
+                include_bytes!("../../../../../tests/fixtures/jpeg/q95_scan.jpg"),
+            ),
+            ("444", COLOUR_128X128_444),
+            ("420", COLOUR_128X128_420),
+        ];
+        for (name, bytes) in fixtures {
+            let prep = prepare_jpeg(bytes).expect("fixture must prepare");
+            let (sched, bpm) = build_mcu_schedule(&prep);
+            let dc_refs = prep.dc_codebooks_for_dispatch();
+            let ac_refs = prep.ac_codebooks_for_dispatch();
+            let length_bits = prep.bitstream.length_bits;
+            let (mut keyed, mut slots) = (0usize, 0usize);
+            for subseq_bits in [16u32, 32, 64] {
+                let memo = dispatch_jpeg_phase1_memo(&b, &prep, subseq_bits).expect("dispatch");
+                slots += memo.len();
+                for (i, [key, value, last_key, _]) in memo.iter().enumerate() {
+                    assert_eq!(last_key.p, u32::MAX, "{name} ssb={subseq_bits} slot {i}");
+                    if i == 0 || key.p == u32::MAX {
+                        continue;
+                    }
+                    keyed += 1;
+                    let expected = jpeg_phase2_redecode(
+                        *key,
+                        jpeg_region_end(i, subseq_bits, length_bits),
+                        &prep.bitstream,
+                        &dc_refs,
+                        &ac_refs,
+                        &sched,
+                        bpm,
+                    );
+                    assert_eq!(
+                        *value, expected,
+                        "{name} ssb={subseq_bits} slot {i}: memo value is not the re-decode of its key"
+                    );
+                }
+            }
+            assert!(keyed * 4 > slots, "{name}: {keyed} of {slots} slots keyed");
+        }
+    }
 
     /// Run `dispatch_jpeg_phase1_intra_sync` on CUDA and verify the
     /// per-subsequence state matches the CPU oracle for every subseq.

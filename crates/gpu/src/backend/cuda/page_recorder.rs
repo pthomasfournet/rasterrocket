@@ -318,6 +318,9 @@ impl PageRecorder {
                 let sched = p
                     .mcu_schedule
                     .expect("validate() proved mcu_schedule is Some for JpegPhase1IntraSync");
+                let memo = p
+                    .memo
+                    .expect("validate() proved memo is Some for JpegPhase1IntraSync");
                 self.ctx
                     .launch_jpeg_phase1_intra_sync_async(
                         p.bitstream,
@@ -325,6 +328,7 @@ impl PageRecorder {
                         dc,
                         sched,
                         p.s_info,
+                        memo,
                         p.length_bits,
                         p.subsequence_bits,
                         num_subsequences,
@@ -345,6 +349,9 @@ impl PageRecorder {
                 let s_info_prev = p
                     .s_info_prev
                     .expect("validate() proved s_info_prev is Some for JpegPhase2InterSync");
+                let memo = p
+                    .memo
+                    .expect("validate() proved memo is Some for JpegPhase2InterSync");
                 self.ctx
                     .launch_jpeg_phase2_inter_sync_async(
                         p.bitstream,
@@ -354,6 +361,7 @@ impl PageRecorder {
                         s_info_prev,
                         p.s_info,
                         sync_flags,
+                        memo,
                         p.length_bits,
                         p.subsequence_bits,
                         num_subsequences,

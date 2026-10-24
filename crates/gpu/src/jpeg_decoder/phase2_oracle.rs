@@ -164,7 +164,7 @@ pub(super) fn phase2_run_to_sync(
 /// reaches a fixpoint, with every downstream snapshot collapsing to
 /// the error bit; the dispatcher's post-convergence stall check is
 /// what surfaces it.
-fn jpeg_phase2_redecode(
+pub(in crate::jpeg_decoder) fn jpeg_phase2_redecode(
     inherited: SubsequenceState,
     region_end: u32,
     bitstream: &PackedBitstream,
@@ -210,7 +210,11 @@ fn jpeg_phase2_redecode(
 /// The kernels compute the product with plain u32 arithmetic —
 /// non-wrapping there because `validate()` bounds `length_bits + 2·ssb`;
 /// the oracle accepts arbitrary test inputs, so it saturates instead.
-fn jpeg_region_end(i: usize, subsequence_bits: u32, length_bits: u32) -> u32 {
+pub(in crate::jpeg_decoder) fn jpeg_region_end(
+    i: usize,
+    subsequence_bits: u32,
+    length_bits: u32,
+) -> u32 {
     length_bits.min(
         u32::try_from(i + 1)
             .expect("subsequence counts derive from u32 bit lengths")
