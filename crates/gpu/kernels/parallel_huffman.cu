@@ -533,6 +533,10 @@ __device__ __forceinline__ uint4 jpeg_phase2_redecode_device(
 #define JPEG_MEMO_LAST 2u
 #define JPEG_MEMO_NONE 0xFFFFFFFFu
 
+// `flags` value of every slot of a workgroup that stopped after more
+// than `redecode_budget` re-decodes. Mirrors the Slang constant.
+#define JPEG_PHASE2_OVER_BUDGET 2u
+
 // True when two snapshots agree on everything the re-decode reads:
 // p, block_in_mcu, z_in_block (n is a per-region count).
 __device__ __forceinline__ bool jpeg_same_decode_state(uint4 a, uint4 b) {
@@ -563,9 +567,11 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
     unsigned int length_bits,
     unsigned int subsequence_bits,
     unsigned int num_subsequences,
-    unsigned int blocks_per_mcu
+    unsigned int blocks_per_mcu,
+    unsigned int redecode_budget
 ) {
     __shared__ uint4 g_state[JPEG_PHASE2_GROUP];
+    __shared__ unsigned int g_redecoded[JPEG_PHASE2_GROUP];
 
     // Defensive mirror of the host-side validate() check: the
     // schedule helper's modulo is undefined for 0. The Slang mirror
@@ -594,9 +600,13 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
     uint4 left_fixed = (propagates && lane == 0u) ? s_info_in[seq_idx - 1u] : zero;
     uint4 cur = me_in;
     uint4 used_left = zero;
+    // Block-uniform: every thread sums the same per-step flags.
+    unsigned int redecodes = 0u;
+    bool over_budget = false;
 
     for (unsigned int t = 0u; t < lanes; t++) {
         if (lane == t) {
+            unsigned int redecoded = 0u;
             if (propagates) {
                 uint4 left = (lane == 0u) ? left_fixed : g_state[lane - 1u];
                 if (jpeg_same_decode_state(left, key_last)) {
@@ -607,14 +617,28 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
                     cur = jpeg_phase2_redecode_device(
                         bitstream, codebook, dc_codebook, mcu_schedule,
                         length_bits, subsequence_bits, blocks_per_mcu, seq_idx, left);
+                    redecoded = 1u;
                 }
                 used_left = left;
             }
             g_state[lane] = cur;
+            g_redecoded[lane] = redecoded;
         }
         __syncthreads();
+        redecodes += g_redecoded[t];
+        if (redecodes > redecode_budget) {
+            over_budget = true;
+            break;
+        }
     }
 
+    if (over_budget) {
+        if (active) {
+            s_info_out[seq_idx] = me_in;
+            flags[seq_idx] = JPEG_PHASE2_OVER_BUDGET;
+        }
+        return;
+    }
     if (active) {
         s_info_out[seq_idx] = cur;
         flags[seq_idx] =

@@ -366,6 +366,7 @@ impl PageRecorder {
                         p.subsequence_bits,
                         num_subsequences,
                         p.blocks_per_mcu,
+                        p.redecode_budget,
                     )
                     .map_err(be)
             }

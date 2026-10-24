@@ -110,6 +110,7 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
             dc_codebook: None,
             mcu_schedule: None,
             memo: None,
+            redecode_budget: 0,
             length_bits: self.length_bits,
             subsequence_bits: self.subsequence_bits,
             num_components: self.num_components,

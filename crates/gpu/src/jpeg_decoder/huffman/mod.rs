@@ -21,7 +21,7 @@ use synthetic::{
 
 use crate::backend::params::{
     HUFFMAN_CODEBOOK_ENTRIES, HUFFMAN_THREADS, HuffmanParams, HuffmanPhase,
-    JPEG_MEMO_BYTES_PER_SUBSEQUENCE,
+    JPEG_MEMO_BYTES_PER_SUBSEQUENCE, JPEG_PHASE2_OVER_BUDGET,
 };
 use crate::backend::{BackendError, GpuBackend, Result};
 use crate::jpeg::CanonicalCodebook;
@@ -52,16 +52,54 @@ pub(in crate::jpeg_decoder) const fn jpeg_phase2_retry_bound(num_subsequences: u
     num_subsequences.div_ceil(HUFFMAN_THREADS)
 }
 
-/// Phase 2 dispatches [`decode_jpeg_symbols`] runs before abandoning
-/// the GPU decode.
-///
-/// Every dispatch after the first carries truth across at least one
-/// more workgroup boundary, and each one costs up to `HUFFMAN_THREADS`
-/// sequential region re-decodes on-device; a stream still unconverged
-/// after this many dispatches has a non-self-synchronising run
-/// spanning several workgroups, which the sequential CPU walk decodes
-/// faster than the remaining passes would.
-pub(in crate::jpeg_decoder) const JPEG_PHASE2_MAX_PASSES: u32 = 4;
+/// Work limits of one JPEG Phase 2 propagation; exceeding either
+/// abandons the GPU decode.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::jpeg_decoder) struct Phase2Budget {
+    /// Dispatches (host round trips).
+    pub passes: u32,
+    /// Sequential region re-decodes one workgroup may run in one
+    /// dispatch ([`HuffmanParams::redecode_budget`]).
+    pub redecodes: u32,
+}
+
+impl Phase2Budget {
+    /// No limit beyond the [`jpeg_phase2_retry_bound`] that always
+    /// suffices — the propagation the CPU oracle mirrors.
+    #[cfg(all(test, feature = "gpu-validation"))]
+    pub(in crate::jpeg_decoder) const UNLIMITED: Self = Self {
+        passes: u32::MAX,
+        redecodes: u32::MAX,
+    };
+
+    /// The limits [`decode_jpeg_symbols`] runs under.
+    ///
+    /// A dispatch costs up to `HUFFMAN_THREADS` sequential region
+    /// re-decodes per workgroup, one per slot whose true left input
+    /// matches neither memo entry — content on which fresh-start
+    /// walkers do not synchronise with the true decode. Such content is
+    /// decoded faster by the sequential CPU walk than by the remaining
+    /// re-decodes, so the GPU decode gives up once a workgroup has
+    /// re-decoded half its slots, and the decoder falls back. Within
+    /// that re-decode budget a propagation converges in one or two
+    /// passes; the pass budget bounds the remaining case, a run of
+    /// wrong workgroup-boundary inputs, at four dispatches.
+    pub(in crate::jpeg_decoder) const PRODUCTION: Self = Self {
+        passes: 4,
+        redecodes: HUFFMAN_THREADS / 2,
+    };
+}
+
+/// How a JPEG Phase 2 propagation ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase2Run {
+    /// Converged; the 0-based index of the converged pass.
+    Converged(u32),
+    /// The pass budget ran out before convergence.
+    PassBudgetExhausted,
+    /// A workgroup exceeded the re-decode budget.
+    RedecodeBudgetExhausted,
+}
 
 /// Convergence test of one JPEG Phase 2 pass, given `unchanged(i)`:
 /// whether slot `i`'s recomputed state equals its input state.
@@ -73,8 +111,8 @@ pub(in crate::jpeg_decoder) const JPEG_PHASE2_MAX_PASSES: u32 = 4;
 /// exact output when unchanged — so by induction every workgroup
 /// propagated from an exact left input and the whole chain is exact.
 /// Slots inside a workgroup may change without disturbing this: the
-/// local fixpoint makes each workgroup exact relative to its left
-/// input in the same pass.
+/// in-workgroup resolution makes each workgroup exact relative to its
+/// left input in the same pass.
 pub(in crate::jpeg_decoder) fn jpeg_phase2_converged(
     num_subsequences: usize,
     mut unchanged: impl FnMut(usize) -> bool,
@@ -234,6 +272,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
             num_components: self.num_components,
             total_symbols: 0,
             blocks_per_mcu: self.blocks_per_mcu,
+            redecode_budget: u32::MAX,
             phase,
         }
     }
@@ -287,9 +326,8 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
 /// dispatches of one page, so the only host wait per pass is the one
 /// the convergence check needs.
 ///
-/// Runs at most `min(max_passes, jpeg_phase2_retry_bound(n))`
-/// dispatches. Returns `Some(iterations)` (0-based index of the
-/// converged pass) or `None` when that budget runs out.
+/// Runs at most `min(budget.passes, jpeg_phase2_retry_bound(n))`
+/// dispatches, each under `budget.redecodes`.
 ///
 /// One loop shared by the oracle-parity dispatcher and the production
 /// Phase 1–4 dispatcher, so the code the parity tests exercise is the
@@ -297,9 +335,9 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
 fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
     backend: &B,
     setup: &mut JpegDispatchSetup<'_, B>,
-    max_passes: u32,
-) -> Result<Option<u32>> {
-    let passes = jpeg_phase2_retry_bound(setup.num_subsequences).min(max_passes);
+    budget: Phase2Budget,
+) -> Result<Phase2Run> {
+    let passes = jpeg_phase2_retry_bound(setup.num_subsequences).min(budget.passes);
     let mut flags_host = vec![0u32; setup.num_subsequences as usize];
     for iter in 0..passes {
         backend.begin_page()?;
@@ -310,6 +348,7 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
         params.s_info = setup.s_info_scratch.as_ref();
         params.s_info_prev = Some(setup.s_info.as_ref());
         params.sync_flags = Some(setup.sync_flags.as_ref());
+        params.redecode_budget = budget.redecodes;
         backend.record_huffman(params)?;
         let fence = backend.submit_page()?;
         backend.wait_page(fence)?;
@@ -319,11 +358,14 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
         backend.wait_download(handle)?;
 
         std::mem::swap(&mut setup.s_info, &mut setup.s_info_scratch);
+        if flags_host.contains(&JPEG_PHASE2_OVER_BUDGET) {
+            return Ok(Phase2Run::RedecodeBudgetExhausted);
+        }
         if jpeg_phase2_converged(flags_host.len(), |i| flags_host[i] == 1) {
-            return Ok(Some(iter));
+            return Ok(Phase2Run::Converged(iter));
         }
     }
-    Ok(None)
+    Ok(Phase2Run::PassBudgetExhausted)
 }
 
 /// True when the converged chain's terminal snapshot stopped short of
@@ -415,11 +457,16 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
         return Ok((Vec::new(), Phase2Outcome::Converged { iterations: 0 }));
     }
     let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
-    let outcome = match run_jpeg_phase1_and_phase2(backend, &mut setup, u32::MAX)? {
-        Some(iterations) => Phase2Outcome::Converged { iterations },
-        None => Phase2Outcome::SyncBoundExceeded {
+    let outcome = match run_jpeg_phase1_and_phase2(backend, &mut setup, Phase2Budget::UNLIMITED)? {
+        Phase2Run::Converged(iterations) => Phase2Outcome::Converged { iterations },
+        Phase2Run::PassBudgetExhausted => Phase2Outcome::SyncBoundExceeded {
             bound: jpeg_phase2_retry_bound(setup.num_subsequences),
         },
+        Phase2Run::RedecodeBudgetExhausted => {
+            return Err(BackendError::msg(
+                "dispatch_jpeg_phase1_then_phase2: an unlimited re-decode budget ran out",
+            ));
+        }
     };
     let s_info_out = setup.download_s_info(backend)?;
     setup.free_all(backend);
@@ -439,17 +486,20 @@ pub(crate) struct JpegSymbolDecode {
     pub phase2_passes: u32,
 }
 
-/// Test wrapper over [`decode_jpeg_symbols`] returning the symbols only.
+/// Test wrapper over [`decode_jpeg_symbols_within`] returning the
+/// symbols of an unbudgeted decode — the propagation the oracle
+/// mirrors, independent of the production give-up policy.
 ///
 /// # Errors
-/// As [`decode_jpeg_symbols`].
+/// As [`decode_jpeg_symbols`], minus the budget exhaustion.
 #[cfg(all(test, feature = "gpu-validation"))]
 fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
 ) -> Result<Vec<u32>> {
-    decode_jpeg_symbols(backend, prep, subsequence_bits).map(|d| d.symbols)
+    decode_jpeg_symbols_within(backend, prep, subsequence_bits, Phase2Budget::UNLIMITED)
+        .map(|d| d.symbols)
 }
 
 /// Run all four JPEG-framed phases and return the decoded symbol
@@ -462,26 +512,32 @@ fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
 /// # Cost model
 ///
 /// With `n = ceil(length_bits / subsequence_bits)` subsequences and
-/// `W = HUFFMAN_THREADS` lanes per workgroup, Phases 1 and 4
-/// are one dispatch each with per-thread work of one or two regions.
-/// Phase 2 is `1 + ceil(r / W)` synchronous host round trips, where
-/// `r` is the longest run of subsequences whose fresh-start Phase 1
-/// chain never re-synchronises with the true decode; each round trip
-/// costs up to `min(r, W)` sequential region re-decodes on-device.
-/// Grayscale streams have `r ≈ 0` (the block phase is trivially
-/// right and the zig-zag index self-corrects at the next EOB).
-/// Multi-component streams have `r` bounded only by the content:
-/// short optimised codes over flat regions — document scans — never
-/// re-synchronise a wrong block phase, so `r ≈ n` and the phase
-/// costs `n` sequential region re-decodes spread over `ceil(n / W)`
-/// round trips, which is slower than the CPU walk for any stream
-/// size. The dispatcher enforces no cap; a caller routing by cost
-/// must decide from `prep.components.len()` and `length_bits`.
+/// `W = HUFFMAN_THREADS` lanes per workgroup, Phase 1 is one dispatch
+/// in which every thread walks two regions, and Phase 4 one dispatch
+/// in which every thread re-walks one. Phase 2 resolves each workgroup
+/// in `W` barrier-separated steps; a step costs a memo comparison, or
+/// one region re-decode on one thread when the slot's true left input
+/// matches neither memo entry — a "miss": the predecessor's
+/// fresh-start Phase 1 walk had not synchronised with the true decode
+/// by its region end. A dispatch therefore costs the largest
+/// per-workgroup miss count times one region re-decode, plus `W`
+/// cheap steps. Dispatches are host round trips; a pass converges once
+/// every workgroup-boundary slot was right on entry, so their count is
+/// one plus the longest run of consecutive workgroup boundaries whose
+/// left input was wrong, and repeat passes resolve unchanged
+/// workgroups entirely from the last-exact memo entries.
+///
+/// Misses are content-dependent and not limited to multi-component
+/// streams: over flat regions with short optimised codes, and on
+/// dense high-quality streams, fresh-start walkers frequently settle
+/// into a different parse (bit offset, DC/AC role, or block phase) and
+/// never re-synchronise. [`Phase2Budget::PRODUCTION`] bounds both
+/// factors and abandons the GPU decode on content where they explode.
 ///
 /// # Errors
 /// Returns `BackendError` if any allocation, upload, kernel dispatch,
-/// or download fails; if Phase 2 does not converge within the retry
-/// bound; if the converged chain stalled mid-stream on a decode error
+/// or download fails; if Phase 2 exhausts [`Phase2Budget::PRODUCTION`];
+/// if the converged chain stalled mid-stream on a decode error
 /// (see [`jpeg_stream_stalled`]); or if Phase 4 reports a per-subseq
 /// decode failure.
 #[expect(
@@ -493,15 +549,15 @@ pub(crate) fn decode_jpeg_symbols<B: GpuBackend>(
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
 ) -> Result<JpegSymbolDecode> {
-    decode_jpeg_symbols_within(backend, prep, subsequence_bits, JPEG_PHASE2_MAX_PASSES)
+    decode_jpeg_symbols_within(backend, prep, subsequence_bits, Phase2Budget::PRODUCTION)
 }
 
-/// [`decode_jpeg_symbols`] with an explicit Phase 2 dispatch budget.
+/// [`decode_jpeg_symbols`] under an explicit Phase 2 budget.
 pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
-    max_passes: u32,
+    budget: Phase2Budget,
 ) -> Result<JpegSymbolDecode> {
     if prep.bitstream.length_bits == 0 {
         return Ok(JpegSymbolDecode {
@@ -510,12 +566,22 @@ pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
         });
     }
     let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
-    let Some(converged_pass) = run_jpeg_phase1_and_phase2(backend, &mut setup, max_passes)? else {
-        return Err(BackendError::msg(format!(
-            "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within \
-             {} pass(es)",
-            jpeg_phase2_retry_bound(setup.num_subsequences).min(max_passes),
-        )));
+    let converged_pass = match run_jpeg_phase1_and_phase2(backend, &mut setup, budget)? {
+        Phase2Run::Converged(pass) => pass,
+        Phase2Run::PassBudgetExhausted => {
+            return Err(BackendError::msg(format!(
+                "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within \
+                 {} pass(es)",
+                jpeg_phase2_retry_bound(setup.num_subsequences).min(budget.passes),
+            )));
+        }
+        Phase2Run::RedecodeBudgetExhausted => {
+            return Err(BackendError::msg(format!(
+                "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within \
+                 {} re-decodes per workgroup",
+                budget.redecodes,
+            )));
+        }
     };
     let phase2_passes = converged_pass + 1;
 
@@ -1236,27 +1302,57 @@ mod tests {
             "precondition: fixture must need several passes"
         );
 
-        let run = |budget: u32| {
+        let passes = |passes: u32| Phase2Budget {
+            passes,
+            redecodes: u32::MAX,
+        };
+        let run = |budget: Phase2Budget| {
             let mut setup = JpegDispatchSetup::new(&b, &prep, subseq_bits).expect("setup");
             run_jpeg_phase1_and_phase2(&b, &mut setup, budget).expect("dispatch")
         };
-        assert_eq!(
-            run(needed - 1),
-            None,
-            "budget {} must not converge",
-            needed - 1
-        );
-        assert_eq!(
-            run(needed),
-            Some(iterations),
-            "budget {needed} must converge"
-        );
+        assert_eq!(run(passes(needed - 1)), Phase2Run::PassBudgetExhausted);
+        assert_eq!(run(passes(needed)), Phase2Run::Converged(iterations));
 
-        let err = decode_jpeg_symbols_within(&b, &prep, subseq_bits, needed - 1)
-            .expect_err("an exhausted budget must refuse the stream");
+        let err = decode_jpeg_symbols_within(&b, &prep, subseq_bits, passes(needed - 1))
+            .expect_err("an exhausted pass budget must refuse the stream");
         assert!(err.to_string().contains("did not converge"), "{err}");
-        let decoded = decode_jpeg_symbols_within(&b, &prep, subseq_bits, needed).expect("decode");
+        let decoded =
+            decode_jpeg_symbols_within(&b, &prep, subseq_bits, passes(needed)).expect("decode");
         assert_eq!(decoded.phase2_passes, needed);
+    }
+
+    /// A workgroup that needs more re-decodes than the budget allows
+    /// stops the propagation (the fixture's fresh-start walkers hold
+    /// wrong block phases, so some re-decode is needed), and the capped
+    /// production decoder refuses the stream; an unlimited budget on
+    /// the same input converges to the oracle's chain.
+    #[test]
+    fn jpeg_phase2_redecode_budget_is_enforced_cuda() {
+        let Some(b) = try_cuda() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let prep = prepare_jpeg(COLOUR_128X128_420).expect("colour JPEG must prepare");
+        let subseq_bits = 16;
+        let no_redecodes = Phase2Budget {
+            passes: u32::MAX,
+            redecodes: 0,
+        };
+        let mut setup = JpegDispatchSetup::new(&b, &prep, subseq_bits).expect("setup");
+        assert_eq!(
+            run_jpeg_phase1_and_phase2(&b, &mut setup, no_redecodes).expect("dispatch"),
+            Phase2Run::RedecodeBudgetExhausted
+        );
+        let err = decode_jpeg_symbols_within(&b, &prep, subseq_bits, no_redecodes)
+            .expect_err("an exhausted re-decode budget must refuse the stream");
+        assert!(err.to_string().contains("re-decodes"), "{err}");
+
+        let (gpu_s_info, _) =
+            dispatch_jpeg_phase1_then_phase2(&b, &prep, subseq_bits).expect("dispatch");
+        assert_eq!(
+            gpu_s_info,
+            cpu_jpeg_phase1_then_phase2(&prep, subseq_bits).0
+        );
     }
 
     // ── JPEG Phase 4 CUDA tests ───────────────────────────────────────────

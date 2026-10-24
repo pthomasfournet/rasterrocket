@@ -100,6 +100,10 @@ static const uint JPEG_MEMO_PHASE1 = 0u;
 static const uint JPEG_MEMO_LAST = 2u;
 static const uint JPEG_MEMO_NONE = 0xFFFFFFFFu;
 
+// `sync_flags` value of every slot of a workgroup that stopped after
+// more than `redecode_budget` re-decodes — must match the CUDA macro.
+static const uint JPEG_PHASE2_OVER_BUDGET = 2u;
+
 [[vk::push_constant]]
 cbuffer PushParams {
     uint length_bits;
@@ -113,6 +117,9 @@ cbuffer PushParams {
     // JPEG-framed phases only — 8×8 blocks per MCU, 0 for the
     // synthetic-stream phases.
     uint blocks_per_mcu;
+    // JPEG-framed Phase 2 only — re-decodes one workgroup may run in
+    // one dispatch before it stops and flags JPEG_PHASE2_OVER_BUDGET.
+    uint redecode_budget;
 };
 
 /// Peek 16 bits MSB-first starting at absolute `bit_pos`.
@@ -649,6 +656,9 @@ static const uint JPEG_PHASE2_GROUP = 256u;
 /// `g_phase2_state[t - 1]`, in step `t`; the per-step barrier orders
 /// the two.
 groupshared uint4 g_phase2_state[JPEG_PHASE2_GROUP];
+/// Whether lane `t` re-decoded in step `t`; written once, in step `t`,
+/// and read by every lane after that step's barrier.
+groupshared uint g_phase2_redecoded[JPEG_PHASE2_GROUP];
 
 /// True when two snapshots agree on everything the re-decode reads:
 /// p, block_in_mcu, z_in_block (n is a per-region count).
@@ -691,6 +701,12 @@ bool jpeg_same_decode_state(uint4 a, uint4 b) {
 /// confined to slots whose true left input differs from both — where
 /// the predecessor's fresh-start walk had not synchronised with the
 /// true decode and the left input changed since the last dispatch.
+///
+/// A workgroup that has run more than `redecode_budget` re-decodes
+/// stops, leaves its slots unchanged and flags every one of them
+/// `JPEG_PHASE2_OVER_BUDGET`; the dispatcher then abandons the GPU
+/// decode. The count is the sum of per-step flags every lane reads
+/// after the step's barrier, so the stop is workgroup-uniform.
 ///
 /// `sync_flags[i] = 1` when `s_info_out[i] == s_info_prev[i]`. A host
 /// pass in which the last slot of every workgroup but the final one is
@@ -737,9 +753,12 @@ void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_Gro
     uint4 left_fixed = (propagates && lane == 0u) ? s_info_prev[seq_idx - 1u] : zero;
     uint4 cur = me_in;
     uint4 used_left = zero;
+    uint redecodes = 0u;
+    bool over_budget = false;
 
     for (uint t = 0u; t < lanes; t++) {
         if (lane == t) {
+            uint redecoded = 0u;
             if (propagates) {
                 uint4 left = (lane == 0u) ? left_fixed : g_phase2_state[lane - 1u];
                 if (jpeg_same_decode_state(left, key_last)) {
@@ -748,16 +767,30 @@ void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_Gro
                     cur = val_p1;
                 } else {
                     cur = jpeg_phase2_redecode(seq_idx, left);
+                    redecoded = 1u;
                 }
                 used_left = left;
             }
             g_phase2_state[lane] = cur;
+            g_phase2_redecoded[lane] = redecoded;
         }
-        // Lane t's slot write is visible before lane t + 1 reads it in
-        // the next step.
+        // Lane t's writes are visible before lane t + 1 reads its left
+        // input in the next step and before every lane reads the flag.
         GroupMemoryBarrierWithGroupSync();
+        redecodes += g_phase2_redecoded[t];
+        if (redecodes > redecode_budget) {
+            over_budget = true;
+            break;
+        }
     }
 
+    if (over_budget) {
+        if (active) {
+            s_info_out[seq_idx] = me_in;
+            sync_flags[seq_idx] = JPEG_PHASE2_OVER_BUDGET;
+        }
+        return;
+    }
     if (active) {
         s_info_out[seq_idx] = cur;
         sync_flags[seq_idx] =

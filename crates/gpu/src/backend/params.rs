@@ -435,6 +435,11 @@ pub const HUFFMAN_THREADS: u32 = 256;
 /// kernel sources.
 pub const JPEG_MEMO_BYTES_PER_SUBSEQUENCE: usize = 4 * 16;
 
+/// `sync_flags` value `JpegPhase2InterSync` writes to every slot of a
+/// workgroup that exceeded [`HuffmanParams::redecode_budget`]. Must
+/// match `JPEG_PHASE2_OVER_BUDGET` in both kernel sources.
+pub const JPEG_PHASE2_OVER_BUDGET: u32 = 2;
+
 /// Phase selector for [`record_huffman`](super::GpuBackend::record_huffman).
 ///
 /// Phase 3 of the Weißenberger algorithm is the Blelloch scan; see
@@ -619,6 +624,11 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// `symbols_out`'s end. Set to 0 for other phases (kernel
     /// ignores it).
     pub total_symbols: u32,
+    /// Re-decodes one workgroup of `JpegPhase2InterSync` may run in
+    /// one dispatch; a workgroup exceeding it stops and flags every
+    /// slot [`JPEG_PHASE2_OVER_BUDGET`]. `u32::MAX` disables the stop.
+    /// Ignored for every other phase.
+    pub redecode_budget: u32,
     /// Which phase of the parallel-Huffman algorithm this dispatch
     /// executes.
     pub phase: HuffmanPhase,
@@ -1483,6 +1493,7 @@ mod tests {
             sync_flags: None,
             s_info_prev: None,
             memo: None,
+            redecode_budget: 0,
             offsets: None,
             symbols_out: None,
             decode_status: None,

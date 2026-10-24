@@ -109,6 +109,11 @@ pub(super) struct PageRecorder {
 /// real renderers do tens, not hundreds — 64 is generous.
 const MAX_DESC_SETS_PER_PAGE: u32 = 64;
 
+/// Size of the push-constant block shared by every parallel-Huffman
+/// kernel: seven `u32`s, in the order of the Slang `PushParams`.
+#[cfg(feature = "gpu-jpeg-huffman")]
+const HUFFMAN_PUSH_BYTES: usize = 28;
+
 /// Initial timeline-semaphore signal value.  Must be > 0 so
 /// `submit_page`'s `NonZeroU64::new(signal_value)` is `Some` by
 /// construction.  Enforced at compile time by the `const _` below.
@@ -456,18 +461,21 @@ impl PageRecorder {
         use crate::backend::params::{HUFFMAN_THREADS, HuffmanPhase};
 
         let num_subsequences = p.num_subsequences();
-        // 6 × u32: length_bits, subsequence_bits, num_subsequences,
-        // num_components, total_symbols, blocks_per_mcu.  Phase 1+2
-        // ignore total_symbols; Phase 4 bounds-checks writes against
-        // it.  The synthetic phases ignore blocks_per_mcu; the
-        // JPEG-framed phases use it to wrap the block-in-MCU cursor.
-        let mut push = [0u8; 24];
+        // 7 × u32: length_bits, subsequence_bits, num_subsequences,
+        // num_components, total_symbols, blocks_per_mcu,
+        // redecode_budget.  Phase 1+2 ignore total_symbols; Phase 4
+        // bounds-checks writes against it.  The synthetic phases ignore
+        // blocks_per_mcu; the JPEG-framed phases use it to wrap the
+        // block-in-MCU cursor.  Only the JPEG-framed Phase 2 reads
+        // redecode_budget.
+        let mut push = [0u8; HUFFMAN_PUSH_BYTES];
         push[0..4].copy_from_slice(&p.length_bits.to_ne_bytes());
         push[4..8].copy_from_slice(&p.subsequence_bits.to_ne_bytes());
         push[8..12].copy_from_slice(&num_subsequences.to_ne_bytes());
         push[12..16].copy_from_slice(&p.num_components.to_ne_bytes());
         push[16..20].copy_from_slice(&p.total_symbols.to_ne_bytes());
         push[20..24].copy_from_slice(&p.blocks_per_mcu.to_ne_bytes());
+        push[24..28].copy_from_slice(&p.redecode_budget.to_ne_bytes());
 
         let groups = (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1);
 
@@ -553,7 +561,7 @@ impl PageRecorder {
     fn dispatch_jpeg_phase1(
         &self,
         p: &params::HuffmanParams<'_, super::VulkanBackend>,
-        push: &[u8; 24],
+        push: &[u8; HUFFMAN_PUSH_BYTES],
         groups: (u32, u32, u32),
     ) -> Result<()> {
         let dc = p
@@ -597,7 +605,7 @@ impl PageRecorder {
     fn dispatch_jpeg_phase2(
         &self,
         p: &params::HuffmanParams<'_, super::VulkanBackend>,
-        push: &[u8; 24],
+        push: &[u8; HUFFMAN_PUSH_BYTES],
         groups: (u32, u32, u32),
     ) -> Result<()> {
         let dc = p
@@ -657,7 +665,7 @@ impl PageRecorder {
     fn dispatch_jpeg_phase4(
         &self,
         p: &params::HuffmanParams<'_, super::VulkanBackend>,
-        push: &[u8; 24],
+        push: &[u8; HUFFMAN_PUSH_BYTES],
         groups: (u32, u32, u32),
     ) -> Result<()> {
         let dc = p

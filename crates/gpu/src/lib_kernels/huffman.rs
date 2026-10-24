@@ -202,6 +202,7 @@ impl GpuCtx {
         subsequence_bits: u32,
         num_subsequences: u32,
         blocks_per_mcu: u32,
+        redecode_budget: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (num_subsequences.div_ceil(HUFFMAN_THREADS), 1, 1),
@@ -223,7 +224,8 @@ impl GpuCtx {
             .arg(&length_bits)
             .arg(&subsequence_bits)
             .arg(&num_subsequences)
-            .arg(&blocks_per_mcu);
+            .arg(&blocks_per_mcu)
+            .arg(&redecode_budget);
         // SAFETY: arg count + types match the PTX entry's signature;
         // buffer capacities were validated by `HuffmanParams::validate`
         // before this call.
