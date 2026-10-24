@@ -25,34 +25,21 @@ uint row_coverage_mask(StructuredBuffer<int> intersects,
     uint mask = 0;
     int count = 0;
     uint i = start;
-    int xx = 0;
 
-    while (i < end || (count & eo_mask) != 0) {
-        if ((count & eo_mask) == 0) {
-            if (i >= end) break;
-            xx = intersects[i * 3];
-            if (xx >= ax0 + AA_SIZE) break;
+    while (i < end) {
+        int xx0 = intersects[i * 3];
+        if (xx0 >= ax0 + AA_SIZE) break;
+        int xx1 = intersects[i * 3 + 1];
+        count += intersects[i * 3 + 2];
+        i++;
+        while (i < end && (intersects[i * 3] <= xx1 || (count & eo_mask) != 0)) {
+            xx1 = max(xx1, intersects[i * 3 + 1]);
             count += intersects[i * 3 + 2];
             i++;
-            continue;
         }
+        int span_x1 = (i >= end && (count & eo_mask) != 0) ? aa_width : xx1 + 1;
 
-        int span_x1;
-        for (;;) {
-            if (i >= end) {
-                span_x1 = aa_width;
-                break;
-            }
-            count += intersects[i * 3 + 2];
-            int span_end = intersects[i * 3 + 1] + 1;
-            i++;
-            if ((count & eo_mask) == 0) {
-                span_x1 = span_end;
-                break;
-            }
-        }
-
-        int bx0 = max(xx, 0);
+        int bx0 = max(xx0, 0);
         int bx1 = min(span_x1, aa_width);
         if (bx0 < bx1) {
             int lo = max(bx0, ax0);
@@ -61,8 +48,6 @@ uint row_coverage_mask(StructuredBuffer<int> intersects,
                 mask |= ((1u << uint(hi - lo)) - 1u) << uint(lo - ax0);
             }
         }
-        if (i >= end) break;
-        xx = span_x1;
     }
     return mask;
 }

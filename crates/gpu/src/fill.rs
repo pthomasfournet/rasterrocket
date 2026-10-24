@@ -112,47 +112,39 @@ impl AaFillRect {
 /// Sub-sample bitmask of one AA row's coverage within the four AA columns
 /// `[ax0, ax0 + AA_SIZE)`.
 ///
-/// The walk is the CPU rasteriser's `render_aa_line`: the running winding
-/// count, masked by `eo_mask`, enters a span at an intersection's `x0` and
-/// leaves it at `x1 + 1` of the intersection that returns the masked count
-/// to zero; a span still open after the last intersection runs to
+/// The walk is the CPU rasteriser's scanline walk: every intersection covers
+/// its own cells `[x0, x1]` whatever its winding count, and a span absorbs
+/// the following intersections while they touch it or the running count,
+/// masked by `eo_mask`, is inside; a row that ends inside runs to
 /// `aa_width`.  Spans are clamped to `[0, aa_width)`; overlapping spans
-/// union.  The walk stops once an entering intersection starts at or beyond
-/// the pixel's last sub-sample, which is sound because the row is sorted
-/// by `x0`.
+/// union.  The walk stops at the first intersection starting at or beyond
+/// the pixel's last sub-sample, which is sound because the row is sorted by
+/// `x0`.
 fn row_coverage_mask(row: &[ScanIntersect], aa_width: i32, eo_mask: i32, ax0: i32) -> u32 {
     let mut mask = 0u32;
     let mut count = 0i32;
     let mut i = 0usize;
-    let mut xx = 0i32;
 
-    while i < row.len() || (count & eo_mask) != 0 {
-        if (count & eo_mask) == 0 {
-            if i >= row.len() {
-                break;
-            }
-            xx = row[i].x0;
-            if xx >= ax0 + AA_SIZE {
-                break;
-            }
-            count = count.wrapping_add(row[i].count);
-            i += 1;
-            continue;
+    while i < row.len() {
+        let xx0 = row[i].x0;
+        if xx0 >= ax0 + AA_SIZE {
+            break;
         }
-
-        let span_x1 = loop {
-            if i >= row.len() {
-                break aa_width;
-            }
+        let mut xx1 = row[i].x1;
+        count = count.wrapping_add(row[i].count);
+        i += 1;
+        while i < row.len() && (row[i].x0 <= xx1 || (count & eo_mask) != 0) {
+            xx1 = xx1.max(row[i].x1);
             count = count.wrapping_add(row[i].count);
-            let span_end = row[i].x1.wrapping_add(1);
             i += 1;
-            if (count & eo_mask) == 0 {
-                break span_end;
-            }
+        }
+        let span_x1 = if i >= row.len() && (count & eo_mask) != 0 {
+            aa_width
+        } else {
+            xx1.wrapping_add(1)
         };
 
-        let bx0 = xx.max(0);
+        let bx0 = xx0.max(0);
         let bx1 = span_x1.min(aa_width);
         if bx0 < bx1 {
             let lo = bx0.max(ax0);
@@ -161,10 +153,6 @@ fn row_coverage_mask(row: &[ScanIntersect], aa_width: i32, eo_mask: i32, ax0: i3
                 mask |= ((1u32 << (hi - lo)) - 1) << (lo - ax0);
             }
         }
-        if i >= row.len() {
-            break;
-        }
-        xx = span_x1;
     }
     mask
 }
@@ -278,9 +266,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_count_intersections_do_not_open_a_span() {
-        // A row whose entries all carry count 0 (the CPU's collapsed
-        // horizontal-edge row) paints nothing, whatever their extent.
+    fn zero_count_intersections_cover_their_own_cells() {
+        // A count-0 entry (a horizontal edge, or an edge's first scanline)
+        // bounds the shape: its own cells are covered, nothing beyond.
         let intersects = [ix(0, 40, 0)];
         let table = AaScanTable {
             intersects: &intersects,
@@ -288,8 +276,10 @@ mod tests {
             y_min: 0,
         };
         for x in 0..10 {
-            assert_eq!(pixel_coverage(&table, 64, false, x, 0), 0, "pixel {x}");
+            assert_eq!(pixel_coverage(&table, 64, false, x, 0), 4, "pixel {x}");
         }
+        assert_eq!(pixel_coverage(&table, 64, false, 10, 0), 1, "pixel 10");
+        assert_eq!(pixel_coverage(&table, 64, false, 11, 0), 0, "pixel 11");
     }
 
     #[test]

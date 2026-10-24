@@ -4,14 +4,15 @@
 // The table is the CPU rasteriser's `XPathScanner` in AA (4×) coordinates:
 // for each AA row, its intersections (x0, x1, count) sorted by x0.  One
 // thread per output pixel walks the pixel's four AA sub-rows exactly as the
-// CPU's `render_aa_line` does: the running winding count (masked by the
-// fill rule) enters a span at an intersection's x0 and leaves it at x1 + 1
-// of the intersection that returns the masked count to zero; a span still
-// open after the last intersection runs to aa_width.  Spans are clamped to
-// [0, aa_width).  Coverage is the number of the pixel's 16 sub-samples that
-// lie inside a span (a union — overlapping spans do not double count).
+// CPU's scanline walk does: every intersection covers its own cells
+// [x0, x1] whatever its winding count, and a span absorbs the following
+// intersections while they touch it or the running count (masked by the
+// fill rule) is inside; a row that ends inside runs to aa_width.  Spans are
+// clamped to [0, aa_width).  Coverage is the number of the pixel's 16
+// sub-samples that lie inside a span (a union — overlapping spans do not
+// double count).
 //
-// The walk stops once an entering intersection starts at or beyond the
+// The walk stops at the first intersection starting at or beyond the
 // pixel's last sub-sample: intersections are sorted by x0, so no later span
 // can reach the pixel.
 //
@@ -43,34 +44,21 @@ __device__ unsigned int row_coverage_mask(const int* __restrict__ intersects,
     unsigned int mask = 0;
     int count = 0;
     unsigned int i = start;
-    int xx = 0;
 
-    while (i < end || (count & eo_mask) != 0) {
-        if ((count & eo_mask) == 0) {
-            if (i >= end) break;
-            xx = intersects[i * 3];
-            if (xx >= ax0 + AA_SIZE) break;
+    while (i < end) {
+        int xx0 = intersects[i * 3];
+        if (xx0 >= ax0 + AA_SIZE) break;
+        int xx1 = intersects[i * 3 + 1];
+        count += intersects[i * 3 + 2];
+        i++;
+        while (i < end && (intersects[i * 3] <= xx1 || (count & eo_mask) != 0)) {
+            xx1 = max(xx1, intersects[i * 3 + 1]);
             count += intersects[i * 3 + 2];
             i++;
-            continue;
         }
+        int span_x1 = (i >= end && (count & eo_mask) != 0) ? aa_width : xx1 + 1;
 
-        int span_x1;
-        for (;;) {
-            if (i >= end) {
-                span_x1 = aa_width;
-                break;
-            }
-            count += intersects[i * 3 + 2];
-            int span_end = intersects[i * 3 + 1] + 1;
-            i++;
-            if ((count & eo_mask) == 0) {
-                span_x1 = span_end;
-                break;
-            }
-        }
-
-        int bx0 = max(xx, 0);
+        int bx0 = max(xx0, 0);
         int bx1 = min(span_x1, aa_width);
         if (bx0 < bx1) {
             int lo = max(bx0, ax0);
@@ -79,8 +67,6 @@ __device__ unsigned int row_coverage_mask(const int* __restrict__ intersects,
                 mask |= ((1u << (hi - lo)) - 1u) << (lo - ax0);
             }
         }
-        if (i >= end) break;
-        xx = span_x1;
     }
     return mask;
 }
