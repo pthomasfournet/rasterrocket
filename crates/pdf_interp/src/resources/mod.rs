@@ -34,7 +34,7 @@ pub use font::{BaseEncoding, FontDescriptor, PdfFontKind, resolve_font};
 pub use gpu::nvjpeg::NvJpegDecoder;
 pub use image::{
     IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
-    ImageResolution, resolve_image,
+    ImageResolution, SoftMask, resolve_image,
 };
 
 /// Selected parameters extracted from a PDF `ExtGState` resource dictionary.

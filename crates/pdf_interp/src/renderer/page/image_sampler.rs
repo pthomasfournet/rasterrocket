@@ -33,6 +33,7 @@ use raster::types::AA_SIZE;
 use raster::{AaBuf, Clip, ClipResult, simd};
 
 use crate::renderer::gstate::{Ctm, ctm_transform};
+use crate::resources::SoftMask;
 
 /// `u32` words per table entry: `[x_hi, x_lo, y_hi, y_lo]`.
 pub(super) const ENTRY_WORDS: usize = 4;
@@ -188,11 +189,41 @@ impl SampleGrid {
     /// `dx`/`dy` must lie inside the bounding box.
     #[inline]
     #[expect(
-        clippy::cast_possible_wrap,
         clippy::cast_sign_loss,
-        reason = "hi words carry an i32 bit pattern by construction; the range check proves the sum non-negative before the u32 cast"
+        reason = "the range check proves both coordinates non-negative before the u32 cast"
     )]
     pub(super) fn sample(&self, dx: u32, dy: u32) -> Option<(u32, u32)> {
+        let (x, y) = self.coord(dx, dy);
+        if x < 0 || y < 0 || x as u32 >= self.img_w || y as u32 >= self.img_h {
+            return None;
+        }
+        Some((x as u32, y as u32))
+    }
+
+    /// Source pixel for device pixel `(dx, dy)`, clamped onto the image.
+    ///
+    /// `dx`/`dy` must lie inside the bounding box.
+    #[inline]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "each coordinate is clamped to be non-negative before the u32 cast; img_w, img_h >= 1 by construction"
+    )]
+    pub(super) fn sample_clamped(&self, dx: u32, dy: u32) -> (u32, u32) {
+        let (x, y) = self.coord(dx, dy);
+        (
+            (x.max(0) as u32).min(self.img_w - 1),
+            (y.max(0) as u32).min(self.img_h - 1),
+        )
+    }
+
+    /// Unbounded integer source coordinate of device pixel `(dx, dy)`: the
+    /// column entry plus the row entry, with the fraction carry.
+    #[inline]
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "hi words carry an i32 bit pattern by construction"
+    )]
+    fn coord(&self, dx: u32, dy: u32) -> (i32, i32) {
         let c = (dx - self.x0) as usize * ENTRY_WORDS;
         let r = (dy - self.y0) as usize * ENTRY_WORDS;
         let col = &self.cols[c..c + ENTRY_WORDS];
@@ -205,10 +236,71 @@ impl SampleGrid {
         let y = (col[2] as i32)
             .wrapping_add(row[2] as i32)
             .wrapping_add(i32::from(carry_y));
-        if x < 0 || y < 0 || x as u32 >= self.img_w || y as u32 >= self.img_h {
-            return None;
-        }
-        Some((x as u32, y as u32))
+        (x, y)
+    }
+}
+
+/// Alpha lookup for a masked image blit.
+///
+/// A mask on the image's own grid is indexed by the image sample.  Any other
+/// mask is sampled through a [`SampleGrid`] of its own dimensions, built from
+/// the same CTM and page: its bounding box is the image grid's, and each
+/// device pixel reads the mask pixel under its centre, so the mask is
+/// resolved at device resolution whatever resolution the image was decoded
+/// at.  Where the image admits a pixel centre that rounding places just off
+/// the mask, the nearest mask pixel is used.
+pub(super) struct MaskSampler<'a> {
+    alpha: &'a [u8],
+    width: usize,
+    /// `None` when the mask shares the image's grid.
+    grid: Option<SampleGrid>,
+}
+
+impl<'a> MaskSampler<'a> {
+    /// Sampler for `mask` over an image of `img_w × img_h` pixels drawn
+    /// through `ctm` onto a `page_w × page_h` bitmap.
+    ///
+    /// Returns `None` only where [`SampleGrid::new`] does for the image
+    /// itself: a degenerate CTM or a bounding box off the page.
+    pub(super) fn new(
+        mask: &'a SoftMask,
+        ctm: &Ctm,
+        page_w: u32,
+        page_h: u32,
+        img_w: u32,
+        img_h: u32,
+    ) -> Option<Self> {
+        let grid = if (mask.width(), mask.height()) == (img_w, img_h) {
+            None
+        } else {
+            Some(SampleGrid::new(
+                ctm,
+                page_w,
+                page_h,
+                mask.width(),
+                mask.height(),
+            )?)
+        };
+        Some(Self {
+            alpha: mask.alpha(),
+            width: mask.width() as usize,
+            grid,
+        })
+    }
+
+    /// Alpha of device pixel `(dx, dy)`, whose image sample is `image_px`.
+    ///
+    /// `dx`/`dy` must lie inside the bounding box.
+    #[inline]
+    pub(super) fn alpha(&self, dx: u32, dy: u32, image_px: (u32, u32)) -> u8 {
+        let (mx, my) = self
+            .grid
+            .as_ref()
+            .map_or(image_px, |g| g.sample_clamped(dx, dy));
+        self.alpha
+            .get(my as usize * self.width + mx as usize)
+            .copied()
+            .unwrap_or(u8::MAX)
     }
 }
 
@@ -548,6 +640,60 @@ mod tests {
         assert_eq!(gc.bbox(), ClipResult::AllInside);
         let row = gc.row(15).expect("row inside the clip");
         assert!((0..10).all(|dx| row.coverage(dx) == 255));
+    }
+
+    /// A mask at four times the image's resolution is resolved per device
+    /// pixel: under a 1:1 device mapping of the mask, each device pixel reads
+    /// its own mask pixel, while the image repeats each sample four times.
+    #[test]
+    fn mask_sampler_resolves_a_finer_mask_per_device_pixel() {
+        let ctm = [8.0, 0.0, 0.0, 8.0, 0.0, 0.0];
+        let (img_w, img_h) = (2, 2);
+        let alpha: Vec<u8> = (0..64).collect();
+        let mask = SoftMask::new(8, 8, alpha).expect("8×8 mask");
+        let grid = SampleGrid::new(&ctm, 8, 8, img_w, img_h).expect("grid");
+        let sampler = MaskSampler::new(&mask, &ctm, 8, 8, img_w, img_h).expect("sampler");
+        for dy in grid.y0..grid.y1 {
+            for dx in grid.x0..grid.x1 {
+                let px = grid.sample(dx, dy).expect("inside");
+                assert_eq!(px, (dx / 4, dy / 4));
+                let want = u8::try_from(dy * 8 + dx).unwrap();
+                assert_eq!(sampler.alpha(dx, dy, px), want, "pixel ({dx}, {dy})");
+            }
+        }
+    }
+
+    /// A mask on the image's grid is indexed by the image sample itself.
+    #[test]
+    fn mask_sampler_on_the_image_grid_reuses_the_image_sample() {
+        let ctm = [40.0, 0.0, 0.0, 30.0, 10.0, 20.0];
+        let mask = SoftMask::new(
+            40,
+            30,
+            (0..1200u32)
+                .map(|i| u8::try_from(i % 251).unwrap())
+                .collect(),
+        )
+        .expect("40×30 mask");
+        let sampler = MaskSampler::new(&mask, &ctm, 100, 100, 40, 30).expect("sampler");
+        assert!(sampler.grid.is_none());
+        assert_eq!(sampler.alpha(0, 0, (3, 2)), mask.alpha()[2 * 40 + 3]);
+    }
+
+    /// Clamping keeps a rounding-edge centre on the nearest mask pixel.
+    #[test]
+    fn sample_clamped_stays_on_the_image() {
+        let ctm = [-200.0, 0.0, 0.0, -100.0, 250.0, 150.0];
+        let grid = SampleGrid::new(&ctm, 300, 200, 3, 3).expect("grid");
+        for dy in grid.y0..grid.y1 {
+            for dx in grid.x0..grid.x1 {
+                let (x, y) = grid.sample_clamped(dx, dy);
+                assert!(x < 3 && y < 3);
+                if let Some(p) = grid.sample(dx, dy) {
+                    assert_eq!(p, (x, y));
+                }
+            }
+        }
     }
 
     #[test]

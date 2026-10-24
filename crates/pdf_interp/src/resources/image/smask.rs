@@ -1,8 +1,11 @@
 //! Soft-mask (`SMask`) decoding for PDF images.
 //!
 //! A PDF `SMask` is a grayscale image whose pixel values become the alpha channel
-//! of the parent image.  This module decodes the `SMask` stream and resamples it
-//! to the parent image's dimensions when they differ.
+//! of the parent image.  This module decodes `SMask` streams, explicit `/Mask`
+//! stencils and colour-key masks into a [`SoftMask`].  A mask decoded from its
+//! own stream keeps that stream's resolution: the blit samples it through its
+//! own grid, so its resolution is independent of the resolution the parent
+//! image was decoded at.
 
 use pdf::{Document, Object, ObjectId};
 
@@ -15,23 +18,63 @@ use super::{ImageColorSpace, ImageDescriptor};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Decode a soft-mask (`SMask`) image stream into a flat alpha buffer.
+/// Per-pixel alpha covering an image's unit square.
 ///
-/// Returns exactly `img_w * img_h` bytes, one alpha value per pixel:
-/// `0x00` = fully transparent, `0xFF` = fully opaque.  The `SMask` stream may
-/// have different dimensions from the parent image; if so the buffer is
-/// resampled to match via nearest-neighbour scaling.  The mask's own
-/// `/Decode` maps its samples before they are read as alpha.
+/// `alpha` holds exactly `width × height` bytes in row-major order, top row
+/// first: `0x00` = fully transparent, `0xFF` = fully opaque.  The grid may
+/// differ from the parent image's; both span the same unit square, so the
+/// blit maps each device pixel into each grid separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftMask {
+    width: u32,
+    height: u32,
+    alpha: Vec<u8>,
+}
+
+impl SoftMask {
+    /// Wrap `alpha` as a `width × height` mask.  Returns `None` when either
+    /// dimension is zero or `alpha` does not hold exactly `width × height`
+    /// bytes.
+    #[must_use]
+    pub fn new(width: u32, height: u32, alpha: Vec<u8>) -> Option<Self> {
+        let expected = (width as usize).checked_mul(height as usize)?;
+        (expected != 0 && alpha.len() == expected).then_some(Self {
+            width,
+            height,
+            alpha,
+        })
+    }
+
+    /// Mask width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Mask height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Alpha bytes, `width × height`, row-major.
+    #[must_use]
+    pub fn alpha(&self) -> &[u8] {
+        &self.alpha
+    }
+}
+
+/// Decode a soft-mask (`SMask`) image stream at its own resolution.
+///
+/// The mask's dimensions are those the codec reports, which for
+/// `CCITTFaxDecode`, `JBIG2Decode` and `DCTDecode` take precedence over the
+/// dictionary's `/Width` and `/Height`.  The mask's own `/Decode` maps its
+/// samples, which are then the alpha directly (§11.6.5.2).
 ///
 /// Returns `None` when the stream is unresolvable, its filter is unsupported,
-/// or its dimensions are degenerate.  The caller must skip the image in that
-/// case rather than blit it without a mask.
-pub(super) fn decode_smask(
-    doc: &Document,
-    id: ObjectId,
-    img_w: u32,
-    img_h: u32,
-) -> Option<Vec<u8>> {
+/// or its dimensions are degenerate; the caller then blits the image
+/// unmasked.
+pub(super) fn decode_smask(doc: &Document, id: ObjectId) -> Option<SoftMask> {
     use crate::resources::dict_ext::DictExt as _;
 
     // Bind the Arc to a local so the borrow into the stream below stays alive.
@@ -58,10 +101,9 @@ pub(super) fn decode_smask(
     // bytes are the §11.6.5.2 sample values; the mask's `/Decode`, applied
     // below to every arm alike, is the only remap between sample and alpha.
     //
-    // For these compressed formats we use the actual decoded dimensions
-    // (sm_desc.width × sm_desc.height) — not the dict-declared sm_w × sm_h —
-    // as the true source size passed to scale_smask, so that a decoder that
-    // reports a different output size does not produce an out-of-bounds index.
+    // For these compressed formats the mask takes the decoded dimensions
+    // (sm_desc.width × sm_desc.height), not the dict-declared sm_w × sm_h, so
+    // the alpha buffer always matches the grid it is indexed through.
     let (samples, aw, ah): (Vec<u8>, u32, u32) = match filter.as_deref() {
         Some("CCITTFaxDecode") => {
             let parms = stream.dict.get(b"DecodeParms");
@@ -98,7 +140,7 @@ pub(super) fn decode_smask(
         std::borrow::Cow::Owned(samples),
         &parse_decode(&stream.dict, 1),
     );
-    Some(scale_smask(alpha, aw, ah, img_w, img_h))
+    SoftMask::new(aw, ah, alpha)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -110,9 +152,8 @@ pub(super) fn decode_smask(
 /// path the `SMask` pipeline exercises today, but a future codec change — or an
 /// adversarial stream that drives a decoder down a not-yet-hardened branch (the
 /// CCITT G4 clean-EOFB-before-`height`-rows path is one such gap) — could yield
-/// a short buffer.  `scale_smask` indexes `src[sy*sw + sx]` over the *declared*
-/// `width × height`, so a short `src` is a panic, not a wrong pixel.  Fail
-/// loudly and gracefully here instead, matching the explicit length guards in
+/// a short buffer, which [`SoftMask::new`] would reject without naming the
+/// codec.  Fail loudly here instead, matching the explicit length guards in
 /// the `DCTDecode` and raw/`FlateDecode` arms (a short `SMask` is a decode
 /// failure, never silently-wrong alpha — the v1 alpha-polarity sin).
 fn alpha_from_decoded(filter: &str, desc: &ImageDescriptor) -> Option<Vec<u8>> {
@@ -132,8 +173,8 @@ fn alpha_from_decoded(filter: &str, desc: &ImageDescriptor) -> Option<Vec<u8>> {
 
 /// Decode a `DCTDecode`-compressed (`JPEG`) `SMask` stream into an 8-bpp alpha buffer.
 ///
-/// Returns `(pixels, jpeg_width, jpeg_height)` so the caller can pass the
-/// JPEG-reported dimensions to `scale_smask` rather than the dict-declared ones.
+/// Returns `(pixels, jpeg_width, jpeg_height)` so the caller can size the mask
+/// by the JPEG-reported dimensions rather than the dict-declared ones.
 /// This mirrors the `CCITTFaxDecode` / `JBIG2Decode` pattern where the actual
 /// decoded size takes precedence over the dict.
 ///
@@ -196,8 +237,8 @@ fn decode_smask_raw_bytes(raw: &[u8], sm_w: u32, sm_h: u32, bpc: i64) -> Option<
         2 => expand_nbpp::<2>(raw, sm_w, sm_h, 1),
         4 => expand_nbpp::<4>(raw, sm_w, sm_h, 1),
         8 => {
-            // Validate length before the raw pass-through: scale_smask would
-            // panic with an out-of-bounds index if data is shorter than sm_w×sm_h.
+            // Validate length before the raw pass-through so a short stream is
+            // logged with its own dimensions.
             let expected = (sm_w as usize).checked_mul(sm_h as usize)?;
             if raw.len() < expected {
                 log::warn!(
@@ -214,56 +255,6 @@ fn decode_smask_raw_bytes(raw: &[u8], sm_w: u32, sm_h: u32, bpc: i64) -> Option<
             None
         }
     }
-}
-
-/// Nearest-neighbour resample of a flat grayscale `src` buffer from `(sw×sh)`
-/// to `(dw×dh)`.  Returns `src` unchanged when dimensions already match.
-///
-/// Precondition: `dw > 0` and `dh > 0` (validated by image-dimension checks
-/// before `decode_smask` is called).  `src` should have exactly `sw * sh` bytes;
-/// extra bytes are ignored.
-pub(super) fn scale_smask(src: Vec<u8>, sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
-    // Guard degenerate dimensions: zero dst causes division-by-zero; zero src
-    // means there are no pixels to sample.
-    if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
-        return Vec::new();
-    }
-    if sw == dw && sh == dh {
-        return src;
-    }
-    let src_w = u64::from(sw);
-    let src_h = u64::from(sh);
-    let dst_w = u64::from(dw);
-    let dst_h = u64::from(dh);
-    let capacity = dst_w
-        .checked_mul(dst_h)
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0);
-    let mut out = Vec::with_capacity(capacity);
-    for dy in 0..dh {
-        // sy = floor(dy * src_h / dst_h); since dy < dst_h, result < src_h ≤ 65535.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "dy < dst_h ⟹ sy < src_h ≤ 65535 — fits u32"
-        )]
-        let sy = (u64::from(dy) * src_h / dst_h) as u32;
-        for dx in 0..dw {
-            // sx = floor(dx * src_w / dst_w); since dx < dst_w, result < src_w ≤ 65535.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "dx < dst_w ⟹ sx < src_w ≤ 65535 — fits u32"
-            )]
-            let sx = (u64::from(dx) * src_w / dst_w) as u32;
-            // index = sy * src_w + sx < src_h * src_w ≤ 65535² = 4_294_836_225 < usize::MAX
-            // on all targets (usize::MAX ≥ 2^32−1 on 32-bit, 2^64−1 on 64-bit).
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "index ≤ 65535²−1 < usize::MAX on 32-bit and 64-bit targets"
-            )]
-            out.push(src[(u64::from(sy) * src_w + u64::from(sx)) as usize]);
-        }
-    }
-    out
 }
 
 /// Decode an explicit `/Mask N 0 R` stencil-mask image into an alpha buffer.
@@ -284,16 +275,10 @@ pub(super) fn scale_smask(src: Vec<u8>, sw: u32, sh: u32, dw: u32, dh: u32) -> V
 /// `alpha = !mask_byte`.  `Decode [1 0]` on the mask is already folded into
 /// the decoder output, so no extra inversion is applied here.
 ///
-/// Returns exactly `img_w * img_h` alpha bytes, resampled (nearest-neighbour)
-/// when the mask grid differs from the base image grid.  Returns `None` if the
+/// The mask keeps the stencil's decoded resolution.  Returns `None` if the
 /// referenced object is not a usable stencil image so the caller can blit the
 /// base image unmasked rather than discard it.
-pub(super) fn decode_explicit_mask(
-    doc: &Document,
-    id: ObjectId,
-    img_w: u32,
-    img_h: u32,
-) -> Option<Vec<u8>> {
+pub(super) fn decode_explicit_mask(doc: &Document, id: ObjectId) -> Option<SoftMask> {
     use crate::resources::dict_ext::DictExt as _;
 
     let obj_arc = doc.get_object(id).ok()?;
@@ -380,7 +365,7 @@ pub(super) fn decode_explicit_mask(
     // transparent marker (0xFF) → background shows (alpha 0x00).
     let alpha: Vec<u8> = desc.data.as_cpu()?.iter().map(|&b| !b).collect();
 
-    Some(scale_smask(alpha, desc.width, desc.height, img_w, img_h))
+    SoftMask::new(desc.width, desc.height, alpha)
 }
 
 /// Build an alpha buffer from a `/Mask [colour-key]` array (§8.9.6.4).
@@ -391,15 +376,16 @@ pub(super) fn decode_explicit_mask(
 /// component falls within its `[min, max]` range is *masked* (transparent,
 /// alpha `0x00`); all other pixels are opaque (alpha `0xFF`).
 ///
-/// Returns `None` when the array length doesn't match the component count or
-/// the base buffer is the wrong size, so the caller blits unmasked.
+/// The mask shares the base image's grid.  Returns `None` when the array
+/// length doesn't match the component count or the base buffer is the wrong
+/// size, so the caller blits unmasked.
 pub(super) fn colour_key_mask(
     ranges: &[Object],
     base: &[u8],
     components: usize,
     img_w: u32,
     img_h: u32,
-) -> Option<Vec<u8>> {
+) -> Option<SoftMask> {
     if components == 0 || ranges.len() != components * 2 {
         return None;
     }
@@ -429,7 +415,7 @@ pub(super) fn colour_key_mask(
             if in_range { 0x00 } else { 0xFF }
         })
         .collect();
-    Some(alpha)
+    SoftMask::new(img_w, img_h, alpha)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -439,39 +425,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scale_smask_identity() {
-        let src = vec![10u8, 20, 30, 40];
-        let result = scale_smask(src.clone(), 2, 2, 2, 2);
-        assert_eq!(result, src);
+    fn soft_mask_requires_exact_length() {
+        assert!(SoftMask::new(2, 2, vec![0; 3]).is_none());
+        assert!(SoftMask::new(2, 2, vec![0; 5]).is_none());
+        assert!(SoftMask::new(0, 2, Vec::new()).is_none());
+        let m = SoftMask::new(2, 1, vec![7, 9]).expect("exact length");
+        assert_eq!((m.width(), m.height(), m.alpha()), (2, 1, &[7u8, 9][..]));
     }
 
+    /// An `SMask` keeps its stream's resolution whatever the parent image's.
     #[test]
-    fn scale_smask_upsample_2x() {
-        // 1×1 pixel of value 99 → 2×2 all 99.
-        let src = vec![99u8];
-        let result = scale_smask(src, 1, 1, 2, 2);
-        assert_eq!(result, &[99, 99, 99, 99]);
-    }
-
-    #[test]
-    fn scale_smask_zero_dst_returns_empty() {
-        let result = scale_smask(vec![1, 2, 3], 3, 1, 0, 1);
-        assert_eq!(result, [0u8; 0]);
-    }
-
-    #[test]
-    fn scale_smask_zero_src_returns_empty() {
-        // sw=0 means no source pixels; scaling into a non-empty dst would index
-        // an empty buffer — must return empty instead.
-        let result = scale_smask(vec![], 0, 1, 4, 4);
-        assert_eq!(result, [0u8; 0]);
+    fn smask_keeps_native_resolution() {
+        let doc = crate::test_helpers::make_doc_with_stream(
+            &[1u8, 2, 3, 4, 5, 6],
+            " /Subtype /Image /Width 3 /Height 2 /BitsPerComponent 8 \
+              /ColorSpace /DeviceGray",
+        );
+        let m = decode_smask(&doc, (2, 0)).expect("raw 8-bpc SMask must decode");
+        assert_eq!((m.width(), m.height()), (3, 2));
+        assert_eq!(m.alpha(), &[1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
     fn alpha_from_decoded_short_buffer_returns_none() {
         // A bitonal codec that reports 4×4 but produced only 3 bytes must be
-        // skipped loudly, not fed to scale_smask (which would panic on the
-        // out-of-bounds index when the SMask grid differs from the parent).
+        // skipped loudly with the codec named.
         let desc = ImageDescriptor {
             width: 4,
             height: 4,
@@ -601,10 +579,13 @@ mod tests {
             " /Subtype /Image /Width 8 /Height 1 /ImageMask true \
               /BitsPerComponent 1",
         );
-        let alpha =
-            decode_explicit_mask(&doc, (2, 0), 8, 1).expect("explicit /Mask stencil must decode");
+        let mask = decode_explicit_mask(&doc, (2, 0)).expect("explicit /Mask stencil must decode");
         // Paint bit (1) → opaque base image (0xFF); 0 bit → background (0x00).
-        assert_eq!(alpha, vec![0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]);
+        assert_eq!((mask.width(), mask.height()), (8, 1));
+        assert_eq!(
+            mask.alpha(),
+            &[0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]
+        );
     }
 
     /// A `/Mask` object that is *not* an `ImageMask` stencil must be rejected
@@ -619,8 +600,8 @@ mod tests {
             " /Subtype /Image /Width 3 /Height 1 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray /Decode [1 0]",
         );
-        let alpha = decode_smask(&doc, (2, 0), 3, 1).expect("raw 8-bpc SMask must decode");
-        assert_eq!(alpha, vec![0xFF, 0x00, 0xBF]);
+        let mask = decode_smask(&doc, (2, 0)).expect("raw 8-bpc SMask must decode");
+        assert_eq!(mask.alpha(), &[0xFF, 0x00, 0xBF]);
     }
 
     #[test]
@@ -630,7 +611,7 @@ mod tests {
             " /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        assert!(decode_explicit_mask(&doc, (2, 0), 2, 2).is_none());
+        assert!(decode_explicit_mask(&doc, (2, 0)).is_none());
     }
 
     // ── Colour-key /Mask (§8.9.6.4) ──────────────────────────────────────────
@@ -640,8 +621,8 @@ mod tests {
         // Range [10 20]: pixels 15 (in) → masked (0x00); 5 and 25 (out) → 0xFF.
         let base = [15u8, 5, 25, 12];
         let ranges = [Object::Integer(10), Object::Integer(20)];
-        let alpha = colour_key_mask(&ranges, &base, 1, 4, 1).expect("valid colour-key");
-        assert_eq!(alpha, vec![0x00, 0xFF, 0xFF, 0x00]);
+        let mask = colour_key_mask(&ranges, &base, 1, 4, 1).expect("valid colour-key");
+        assert_eq!(mask.alpha(), &[0x00, 0xFF, 0xFF, 0x00]);
     }
 
     #[test]
@@ -657,8 +638,8 @@ mod tests {
             Object::Integer(0),
             Object::Integer(10),
         ];
-        let alpha = colour_key_mask(&ranges, &base, 3, 2, 1).expect("valid colour-key");
-        assert_eq!(alpha, vec![0x00, 0xFF]);
+        let mask = colour_key_mask(&ranges, &base, 3, 2, 1).expect("valid colour-key");
+        assert_eq!(mask.alpha(), &[0x00, 0xFF]);
     }
 
     #[test]
@@ -693,6 +674,6 @@ mod tests {
             " /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        assert!(decode_explicit_mask(&doc, (2, 0), 2, 1).is_none());
+        assert!(decode_explicit_mask(&doc, (2, 0)).is_none());
     }
 }

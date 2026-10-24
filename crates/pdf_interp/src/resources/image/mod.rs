@@ -157,6 +157,7 @@ pub(crate) mod raw;
 pub(crate) mod smask;
 
 pub use inline::{InlineImageCtx, decode_inline_image};
+pub use smask::SoftMask;
 
 // Visible only when cargo-fuzz sets `--cfg fuzzing`.  Not part of the public API.
 // `pub(super)` codec functions cannot be re-exported across the crate boundary,
@@ -396,11 +397,10 @@ pub struct ImageDescriptor {
     /// Pixel storage — host or (in future) device-resident.  Layout defined
     /// by `color_space` (see module doc).
     pub data: ImageData,
-    /// Optional soft-mask (`SMask`): one alpha byte per pixel, with exactly
-    /// `width × height` entries matching the image grid.  `0x00` = fully
-    /// transparent (pixel is skipped during blit); `0xFF` = fully opaque.
-    /// `None` means every pixel is fully opaque.
-    pub smask: Option<Vec<u8>>,
+    /// Optional mask (`/SMask`, `/Mask`, or an embedded alpha channel) over
+    /// the same unit square, at its own resolution, which need not be the
+    /// image's.  `None` means every pixel is fully opaque.
+    pub smask: Option<SoftMask>,
     /// The compression filter that was applied to this image in the PDF stream.
     pub filter: ImageFilter,
 }
@@ -611,11 +611,12 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                 )
             }
             Some("JPXDecode") => {
-                // A mask is resampled to the decoded image's size, so reducing a
-                // masked image would also blur the mask (typically the text layer
-                // of a scanned page); a colour-key mask compares exact samples,
-                // which a reduced decode averages.  Masked images decode in full.
-                let draw_size = request.draw_size.filter(|_| !has_mask_entry(&stream.dict));
+                // A colour-key mask compares exact samples, which a reduced
+                // decode averages, so such an image decodes in full.  A mask
+                // stream keeps its own resolution and needs no such exclusion.
+                let draw_size = request
+                    .draw_size
+                    .filter(|_| !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
                 #[cfg(feature = "nvjpeg2k")]
                 {
                     decode_jpx(&codec_input, w, h, draw_size, gpu_j2k)
@@ -650,8 +651,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 
     // Resolve and decode the soft mask (`SMask`), if present.
     if let Some(Object::Reference(smask_id)) = stream.dict.get(b"SMask") {
-        if let Some(alpha) = decode_smask(doc, *smask_id, img.width, img.height) {
-            img.smask = Some(alpha);
+        if let Some(mask) = decode_smask(doc, *smask_id) {
+            img.smask = Some(mask);
         } else {
             // SMask decode failed.  Treat as a soft skip: the base image pixels
             // are valid so we return them without a mask rather than propagating
@@ -670,10 +671,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         // image is still valid, so it is blitted fully opaque.
         match mask_obj {
             Object::Reference(mask_id) => {
-                if let Some(alpha) =
-                    smask::decode_explicit_mask(doc, *mask_id, img.width, img.height)
-                {
-                    img.smask = Some(alpha);
+                if let Some(mask) = smask::decode_explicit_mask(doc, *mask_id) {
+                    img.smask = Some(mask);
                 } else {
                     log::warn!(
                         "image: explicit /Mask (object {mask_id:?}) could not be decoded — blitting image without mask"
@@ -682,14 +681,14 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
             }
             Object::Array(ranges) => {
                 if let Some(base) = img.data.as_cpu() {
-                    if let Some(alpha) = smask::colour_key_mask(
+                    if let Some(mask) = smask::colour_key_mask(
                         ranges,
                         base,
                         img.color_space.bytes_per_pixel(),
                         img.width,
                         img.height,
                     ) {
-                        img.smask = Some(alpha);
+                        img.smask = Some(mask);
                     } else {
                         log::warn!(
                             "image: colour-key /Mask malformed or mismatched — blitting image without mask"
@@ -725,6 +724,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 /// Whether an image dictionary carries a mask the blit must honour: an
 /// `/SMask` stream reference, or a `/Mask` given as a stencil-mask stream
 /// reference or a colour-key range array (PDF §8.9.6).
+#[cfg(feature = "cache")]
 fn has_mask_entry(dict: &Dictionary) -> bool {
     matches!(dict.get(b"SMask"), Some(Object::Reference(_)))
         || matches!(

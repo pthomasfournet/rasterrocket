@@ -1052,7 +1052,7 @@ pub(super) fn decode_jpx(
             return None;
         }
     };
-    desc.smask = alpha;
+    desc.smask = alpha.and_then(|a| super::SoftMask::new(jw, jh, a));
     Some(desc)
 }
 
@@ -1640,7 +1640,9 @@ mod tests {
         let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(img.color_space, ImageColorSpace::Rgb);
         assert_eq!(img.data.as_cpu(), Some(&rgb[..]));
-        assert_eq!(img.smask, Some(alpha));
+        let mask = img.smask.expect("alpha channel present");
+        assert_eq!((mask.width(), mask.height()), (img.width, img.height));
+        assert_eq!(mask.alpha(), &alpha[..]);
     }
 
     #[cfg(not(feature = "nvjpeg2k"))]

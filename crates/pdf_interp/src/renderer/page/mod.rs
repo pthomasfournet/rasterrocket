@@ -97,7 +97,7 @@ use gpu::jpeg_decoder::JpegGpuDecoder;
 use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
-use image_sampler::{GridClip, SampleGrid};
+use image_sampler::{GridClip, MaskSampler, SampleGrid};
 #[cfg(any(
     feature = "gpu-aa",
     feature = "gpu-icc",
@@ -1590,7 +1590,8 @@ impl<'doc> PageRenderer<'doc> {
     /// The CTM maps the unit square (image space) onto the page; every
     /// device pixel inside the image's bounding box samples the source pixel
     /// under its centre (nearest neighbour), via a [`SampleGrid`] shared by
-    /// the CPU sampler below and the GPU blit kernel.
+    /// the CPU sampler below and the GPU blit kernel.  A mask is sampled the
+    /// same way through a [`MaskSampler`] at its own resolution.
     #[expect(
         clippy::too_many_lines,
         reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
@@ -1662,8 +1663,13 @@ impl<'doc> PageRenderer<'doc> {
         // kernel through the same grid, composited onto `bitmap` before
         // this call returns so later operators paint over the image in
         // content-stream order.
+        //
+        // The kernel composites opaquely and takes no mask: the decoder
+        // keeps every masked image host-resident, so masked images of any
+        // resolution take the CPU path below.
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
+            debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
             if self.try_gpu_blit_image(cached, &grid, &mut grid_clip) {
                 return;
             }
@@ -1723,7 +1729,17 @@ impl<'doc> PageRenderer<'doc> {
             let s = self.gstate.current().fill_color.as_slice();
             [s[0], s[1], s[2]]
         };
-        let smask = img.smask.as_deref();
+        let mask = match &img.smask {
+            Some(m) => {
+                let Some(sampler) =
+                    MaskSampler::new(m, &ctm, self.width, self.height, img.width, img.height)
+                else {
+                    return;
+                };
+                Some(sampler)
+            }
+            None => None,
+        };
         let img_w = img.width as usize;
 
         // Use the bitmap's authoritative row stride rather than re-deriving
@@ -1762,7 +1778,7 @@ impl<'doc> PageRenderer<'doc> {
                 let alpha = match img.color_space {
                     ImageColorSpace::Mask => coverage,
                     ImageColorSpace::Rgb | ImageColorSpace::Gray => div255(
-                        u32::from(smask.map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255)))
+                        u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, (ix, iy))))
                             * u32::from(coverage),
                     ),
                 };
