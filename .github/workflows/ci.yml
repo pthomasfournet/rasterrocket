@@ -78,6 +78,9 @@ jobs:
       - name: Test vendored read-fonts / skrifa forks (upstream suites)
         run: cargo test -p read-fonts -p skrifa --lib
 
+      - name: Test rasterrocket-camera (stages, no-panic sweep)
+        run: cargo test -p rasterrocket-camera --release
+
       - name: Clippy (no GPU features)
         run: cargo clippy -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
 
@@ -97,6 +100,9 @@ jobs:
 
       - name: Clippy (rasterrocket tests)
         run: cargo clippy -p rasterrocket --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-camera, lib and tests)
+        run: cargo clippy -p rasterrocket-camera --tests -- -D warnings
 
       - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
         run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
