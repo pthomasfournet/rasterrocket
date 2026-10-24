@@ -1122,6 +1122,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rasterrocket-camera"
+version = "1.4.1"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "rasterrocket-cli"
 version = "1.4.1"
 dependencies = [
