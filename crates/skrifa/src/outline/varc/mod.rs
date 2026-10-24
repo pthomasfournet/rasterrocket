@@ -148,7 +148,7 @@ impl<'a> Outlines<'a> {
     }
 
     fn from_base(font: &FontRef<'a>, varc: Varc<'a>, base: BaseOutlines<'a>) -> Option<Self> {
-        let glyph_metrics = GlyphHMetrics::new(font)?;
+        let glyph_metrics = GlyphHMetrics::new(font);
         let units_per_em = font.head().ok()?.units_per_em();
         let axis_count = font.axes().len();
         let coverage = varc.coverage().ok()?;

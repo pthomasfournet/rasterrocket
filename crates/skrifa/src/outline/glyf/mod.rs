@@ -67,7 +67,7 @@ impl<'a> Outlines<'a> {
             .contains(read_fonts::tables::head::Flags::FORCE_INTEGER_PPEM);
         let loca = font.loca(Some(head.index_to_loc_format() == 1)).ok()?;
         let glyf = font.glyf().ok()?;
-        let glyph_metrics = GlyphHMetrics::new(font)?;
+        let glyph_metrics = GlyphHMetrics::new(font);
         let (
             glyph_count,
             max_function_defs,
@@ -291,7 +291,12 @@ trait Scaler {
             _ => [0; 4],
         };
         let outlines = self.outlines();
-        let lsb = outlines.glyph_metrics.lsb(glyph_id, &[]);
+        // Without horizontal metrics the side bearing is taken to be xMin,
+        // which leaves the outline unshifted.
+        let lsb = outlines
+            .glyph_metrics
+            .lsb(glyph_id, &[])
+            .unwrap_or(bounds[0] as i32);
         let advance = outlines.glyph_metrics.advance_width(glyph_id, &[]);
         let [ascent, descent] = outlines.os2_vmetrics.map(|x| x as i32);
         let tsb = ascent - bounds[3] as i32;

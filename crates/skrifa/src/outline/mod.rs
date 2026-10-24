@@ -1620,4 +1620,48 @@ mod tests {
             );
         }
     }
+
+    /// Renames `hhea` and `hmtx` in the table directory so lookups miss them;
+    /// the renamed tags keep the directory sorted.
+    fn without_horizontal_metrics(data: &[u8]) -> Vec<u8> {
+        let mut data = data.to_vec();
+        let num_tables = u16::from_be_bytes([data[4], data[5]]) as usize;
+        for record in 0..num_tables {
+            let tag = 12 + record * 16;
+            match &data[tag..tag + 4] {
+                b"hhea" => data[tag..tag + 4].copy_from_slice(b"hheb"),
+                b"hmtx" => data[tag..tag + 4].copy_from_slice(b"hmty"),
+                _ => {}
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn outlines_without_horizontal_metrics() {
+        for font_data in [
+            font_test_data::TINOS_SUBSET,
+            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
+        ] {
+            let stripped = without_horizontal_metrics(font_data);
+            let full = FontRef::new(font_data).unwrap();
+            let bare = FontRef::new(&stripped).unwrap();
+            assert!(bare.hmtx().is_err());
+            let full_outlines = full.outline_glyphs();
+            let bare_outlines = bare.outline_glyphs();
+            assert_eq!(full_outlines.format(), bare_outlines.format());
+            let settings = || DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+            let mut drawn = 0;
+            for (gid, full_glyph) in full_outlines.iter() {
+                let bare_glyph = bare_outlines.get(gid).unwrap();
+                let mut full_pen = SvgPen::default();
+                let mut bare_pen = SvgPen::default();
+                full_glyph.draw(settings(), &mut full_pen).unwrap();
+                bare_glyph.draw(settings(), &mut bare_pen).unwrap();
+                assert_eq!(full_pen.to_string(), bare_pen.to_string(), "gid {gid}");
+                drawn += 1;
+            }
+            assert!(drawn > 0);
+        }
+    }
 }

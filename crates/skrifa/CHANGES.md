@@ -17,3 +17,12 @@ It is not published and changes are not sent upstream.
   `font-test-data` the copy in `crates/font_test_data`.
 
 - The licence files replace upstream's symlinks to the repository root.
+
+## Font programs embedded in PDF
+
+- `outline::metrics::GlyphHMetrics`: a font without a readable `hmtx` or
+  `hhea` table keeps its `glyf`, `CFF` and `VARC` outlines; advances read
+  as zero. Before, the whole outline collection was empty for such fonts.
+  The `glyf` loader takes the side bearing to be the glyph's `xMin` when
+  there are no metrics, so outlines are not shifted. Test:
+  `outline::tests::outlines_without_horizontal_metrics`.

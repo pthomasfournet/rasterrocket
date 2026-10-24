@@ -57,7 +57,7 @@ impl<'a> Outlines<'a> {
 
     pub fn from_cff(font: &FontRef<'a>, units_per_em: u16) -> Option<Self> {
         let cff1 = font.cff().ok()?;
-        let glyph_metrics = GlyphHMetrics::new(font)?;
+        let glyph_metrics = GlyphHMetrics::new(font);
         // "The Name INDEX in the CFF data must contain only one entry;
         // that is, there must be only one font in the CFF FontSet"
         // So we always pass 0 for Top DICT index when reading from an
@@ -78,7 +78,7 @@ impl<'a> Outlines<'a> {
 
     pub fn from_cff2(font: &FontRef<'a>, units_per_em: u16) -> Option<Self> {
         let cff2 = font.cff2().ok()?;
-        let glyph_metrics = GlyphHMetrics::new(font)?;
+        let glyph_metrics = GlyphHMetrics::new(font);
         let table_data = cff2.offset_data().as_bytes();
         let top_dict = TopDict::new(table_data, cff2.top_dict_data(), true).ok()?;
         Some(Self {
