@@ -273,12 +273,27 @@ impl hayro_ccitt::Decoder for HayroCcittCollector {
     reason = "GPU dispatch paths (nvjpeg, vaapi) plus the CPU decode path are each short; \
               combining them in one function keeps the fallback logic visible"
 )]
+// Four fixed arguments plus one per enabled decoder/cache feature and two
+// for `gpu-icc`: the lint fires once the feature-gated arguments reach four.
 #[cfg_attr(
-    all(
-        feature = "nvjpeg",
-        feature = "vaapi",
-        feature = "gpu-icc",
-        feature = "cache"
+    any(
+        all(
+            feature = "gpu-icc",
+            any(
+                all(feature = "nvjpeg", feature = "vaapi"),
+                all(feature = "nvjpeg", feature = "gpu-jpeg-huffman"),
+                all(feature = "nvjpeg", feature = "cache"),
+                all(feature = "vaapi", feature = "gpu-jpeg-huffman"),
+                all(feature = "vaapi", feature = "cache"),
+                all(feature = "gpu-jpeg-huffman", feature = "cache"),
+            )
+        ),
+        all(
+            feature = "nvjpeg",
+            feature = "vaapi",
+            feature = "gpu-jpeg-huffman",
+            feature = "cache"
+        )
     ),
     expect(
         clippy::too_many_arguments,
