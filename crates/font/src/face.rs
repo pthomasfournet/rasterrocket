@@ -68,6 +68,9 @@ pub struct FontFace {
     /// in the 0xF000–0xF0FF Private Use range.  Char-code lookups must add the
     /// 0xF000 offset before `FT_Get_Char_Index` (PDF §9.6.6.4).
     symbol_pua: bool,
+    /// The face is TrueType and `FreeType`'s active charmap is a Unicode cmap
+    /// ((3,1), (3,10) or a platform-0 table).
+    unicode_cmap: bool,
 }
 
 impl FontFace {
@@ -147,6 +150,7 @@ impl FontFace {
         // 0xF000 offset.  Unicode cmaps and non-TrueType fonts keep FreeType's
         // default (correct for WinAnsi/MacRoman/Standard encodings).
         let symbol_pua = select_truetype_cmap(&face, kind);
+        let unicode_cmap = kind == FontKind::TrueType && has_unicode_cmap(&face);
 
         Some(Self {
             id,
@@ -161,6 +165,7 @@ impl FontFace {
             ft_hinting,
             slight_hinting,
             symbol_pua,
+            unicode_cmap,
         })
     }
 
@@ -380,6 +385,13 @@ impl FontFace {
         self.face.get_char_index(unicode as usize).unwrap_or(0)
     }
 
+    /// `true` when this is a TrueType face whose active charmap is a Unicode
+    /// cmap, so [`Self::raw_get_char_index`] takes Unicode code points.
+    #[must_use]
+    pub const fn has_unicode_cmap(&self) -> bool {
+        self.unicode_cmap
+    }
+
     /// Look up a glyph *name* in the font program's own charset / `post`
     /// table (`FreeType` `FT_Get_Name_Index`) and return the glyph index.
     /// Returns 0 (`.notdef`) when the font has no name table or the name is
@@ -472,6 +484,16 @@ fn select_truetype_cmap(face: &freetype::Face, kind: FontKind) -> bool {
         }
     }
     false
+}
+
+/// `true` if the face carries a Unicode cmap.  [`select_truetype_cmap`]
+/// leaves `FreeType`'s default charmap, which is then that Unicode cmap,
+/// active whenever one is present.
+fn has_unicode_cmap(face: &freetype::Face) -> bool {
+    (0..face.num_charmaps().max(0) as isize).any(|i| {
+        let cm = face.get_charmap(i);
+        matches!((cm.platform_id(), cm.encoding_id()), (3, 1 | 10) | (0, _))
+    })
 }
 
 /// Convert a 2×2 font matrix (normalised by `divisor`) to a `FreeType` 16.16

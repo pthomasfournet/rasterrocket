@@ -201,6 +201,13 @@ impl FontCache {
         // table; symbolic TrueType keeps select_truetype_cmap's charmap.
         if resolve_by_name {
             face.code_to_gid = resolve_simple_to_gid(&face, &desc.differences, desc.base_encoding);
+        } else if desc.kind == PdfFontKind::TrueType
+            && desc.bytes.is_some()
+            && desc.cid_encoding.is_none()
+            && face.has_unicode_cmap()
+        {
+            face.code_to_gid =
+                resolve_truetype_via_unicode(&face, &desc.differences, desc.base_encoding);
         }
 
         Some(face)
@@ -281,6 +288,38 @@ fn resolve_simple_to_gid(
         *slot = gid;
     }
     table
+}
+
+/// Build a 256-entry `code_to_gid` table for a simple embedded TrueType font
+/// whose active cmap is Unicode (PDF §9.6.5.4: code → glyph name → Unicode →
+/// (3,1) cmap).
+///
+/// A code is resolved through its glyph name when the name comes from a
+/// `Differences` entry or from an explicit `WinAnsi` / `MacRoman` base
+/// encoding and the font maps the name's Unicode value; this is what places
+/// `WinAnsi` 0x80–0x9F (`oe` at 0x9C, `quoteright` at 0x92, …) on their glyphs.
+/// Every other code is looked up as a raw Unicode code point, the identity
+/// that holds for the ASCII and Latin-1 ranges of those encodings.
+fn resolve_truetype_via_unicode(
+    face: &FontFace,
+    differences: &[Option<Box<str>>; 256],
+    base: BaseEncoding,
+) -> Vec<u32> {
+    (0..256u32)
+        .map(|code| {
+            let idx = code as usize;
+            let name = differences[idx].as_deref().or_else(|| {
+                (base != BaseEncoding::Standard)
+                    .then(|| base_encoding_table(base)[idx])
+                    .flatten()
+                    .filter(|n| !n.is_empty())
+            });
+            name.and_then(adobe_glyph_to_unicode)
+                .map(|unicode| face.raw_get_char_index(unicode))
+                .filter(|&gid| gid != 0)
+                .unwrap_or_else(|| face.raw_get_char_index(code))
+        })
+        .collect()
 }
 
 /// Resolve the glyph name for one char code: the `Differences` override if
