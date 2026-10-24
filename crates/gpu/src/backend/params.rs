@@ -470,8 +470,9 @@ pub enum HuffmanPhase {
     /// workgroup's left input in `s_info_prev`, writes the result to
     /// `s_info`, and flags each slot that equals its `s_info_prev`
     /// value; the host swaps the two buffers between passes and loops
-    /// until every flag is 1, at most `ceil(n / HUFFMAN_THREADS)`
-    /// times. Same requirements as `JpegPhase1IntraSync` plus
+    /// until the last slot of every workgroup but the final one is
+    /// flagged, at most `ceil(n / HUFFMAN_THREADS)` times. Same
+    /// requirements as `JpegPhase1IntraSync` plus
     /// `sync_flags` and `s_info_prev`.
     JpegPhase2InterSync,
     /// JPEG-framed counterpart of `Phase4Redecode`.  Emits the

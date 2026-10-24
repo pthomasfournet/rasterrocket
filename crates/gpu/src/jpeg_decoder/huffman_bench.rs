@@ -12,15 +12,20 @@
 //!
 //! Optional variables: `PDF_RASTER_HUFFMAN_BENCH_SSB` (comma-separated
 //! subsequence sizes; `pick` selects `pick_subsequence_size`; default
-//! `pick,128,256,512,1024,2048,4096`) and `PDF_RASTER_HUFFMAN_BENCH_ITERS`
+//! `pick,128,256,512,1024,2048,4096`), `PDF_RASTER_HUFFMAN_BENCH_ITERS`
 //! (timed repetitions per configuration, default 7; the median is
-//! reported).
+//! reported) and `PDF_RASTER_HUFFMAN_BENCH_MAX_PASSES` (Phase 2
+//! dispatch budget, default the production `JPEG_PHASE2_MAX_PASSES`).
 //!
 //! Every GPU configuration is checked coefficient-for-coefficient
 //! against the CPU walk before it is timed, so a reported time is
 //! always the time of a correct decode. `sym_ms` is the GPU symbol
 //! decode alone; `gpu_ms` adds the CPU magnitude-bit pass that turns
-//! symbols into coefficients — the full replacement for `cpu_ms`.
+//! symbols into coefficients — the full replacement for `cpu_ms`. A
+//! configuration that exhausts the pass budget is reported as
+//! `fallback`: `sym_ms` is the time spent before the GPU decode gave
+//! up and `gpu_ms` that time plus `cpu_ms`, the cost the decoder's CPU
+//! fallback pays.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -28,7 +33,7 @@ use std::time::{Duration, Instant};
 use crate::backend::cuda::CudaBackend;
 use crate::jpeg_decoder::cpu_prepass::prepare_jpeg;
 use crate::jpeg_decoder::decoder::{extract_coefficients_pub, symbols_to_coefficients};
-use crate::jpeg_decoder::huffman::decode_jpeg_symbols;
+use crate::jpeg_decoder::huffman::{JPEG_PHASE2_MAX_PASSES, decode_jpeg_symbols_within};
 use crate::jpeg_decoder::pick_subsequence_size;
 
 fn env_or(name: &str, default: &str) -> String {
@@ -84,6 +89,12 @@ fn huffman_bench() {
     let iters: usize = env_or("PDF_RASTER_HUFFMAN_BENCH_ITERS", "7")
         .parse()
         .expect("PDF_RASTER_HUFFMAN_BENCH_ITERS must be an integer");
+    let max_passes: u32 = env_or(
+        "PDF_RASTER_HUFFMAN_BENCH_MAX_PASSES",
+        &JPEG_PHASE2_MAX_PASSES.to_string(),
+    )
+    .parse()
+    .expect("PDF_RASTER_HUFFMAN_BENCH_MAX_PASSES must be an integer");
     let sizes = env_or(
         "PDF_RASTER_HUFFMAN_BENCH_SSB",
         "pick,128,256,512,1024,2048,4096",
@@ -123,26 +134,32 @@ fn huffman_bench() {
                 ssb.to_string()
             };
             let n = prep.bitstream.length_bits.div_ceil(ssb);
-            let first = match decode_jpeg_symbols(&backend, &prep, ssb) {
+            let decode = || decode_jpeg_symbols_within(&backend, &prep, ssb, max_passes);
+            let first = match decode() {
                 Ok(d) => d,
-                Err(e) => {
+                Err(e) if e.to_string().contains("did not converge") => {
+                    let fail = time_median(iters, || decode().expect_err("budget exhausted"));
                     println!(
-                        "{name:<28} {:>2} {kib:>8.1} {label:>6} {n:>6} error: {e}",
-                        prep.components.len()
+                        "{name:<28} {:>2} {kib:>8.1} {label:>6} {n:>6} {:>6} {:>9.2} {:>9.2} {:>9.2} {:>6.2}",
+                        prep.components.len(),
+                        "fallbk",
+                        ms(fail),
+                        ms(fail + cpu),
+                        ms(cpu),
+                        ms(fail + cpu) / ms(cpu),
                     );
                     continue;
                 }
+                Err(e) => panic!("{name} ssb {ssb}: GPU decode failed: {e}"),
             };
             let (coef, dc) = symbols_to_coefficients(&prep, &first.symbols).expect("reconstruct");
             assert!(
                 coef == cpu_coef && dc == cpu_dc,
                 "{name} ssb {ssb}: GPU coefficients differ from the CPU walk"
             );
-            let sym = time_median(iters, || {
-                decode_jpeg_symbols(&backend, &prep, ssb).expect("gpu decode")
-            });
+            let sym = time_median(iters, || decode().expect("gpu decode"));
             let gpu = time_median(iters, || {
-                let d = decode_jpeg_symbols(&backend, &prep, ssb).expect("gpu decode");
+                let d = decode().expect("gpu decode");
                 symbols_to_coefficients(&prep, &d.symbols).expect("reconstruct")
             });
             println!(

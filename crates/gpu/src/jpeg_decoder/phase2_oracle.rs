@@ -228,16 +228,17 @@ fn jpeg_region_end(i: usize, subsequence_bits: u32, length_bits: u32) -> u32 {
 /// fixed for the whole pass) — until a step changes nothing or the
 /// group has run one step per slot, then writes the group back; slot 0
 /// is copied through unchanged. Each group therefore leaves holding
-/// the exact chain from its left input. A pass in which no slot
-/// changes is a fixpoint of the whole chain: slot 0 is correct by
-/// construction and each following slot is the deterministic
-/// re-decode of its predecessor, so the converged `s_info` carries the
-/// true absolute block phase for every subsequence — the property the
+/// the exact chain from its left input, and a pass in which every
+/// group's left input came out unchanged (`jpeg_phase2_converged`)
+/// leaves the whole chain exact: slot 0 is correct by construction
+/// and each following slot is the deterministic re-decode of its
+/// predecessor, so the converged `s_info` carries the true absolute
+/// block phase for every subsequence — the property the
 /// single-symbol-advance predicate this replaces could not establish
 /// for multi-component streams.
 ///
-/// Returns `Converged { iterations }` (0-based index of the fixpoint
-/// pass) or `SyncBoundExceeded` after `jpeg_phase2_retry_bound + 1`
+/// Returns `Converged { iterations }` (0-based index of the converged
+/// pass) or `SyncBoundExceeded` after `jpeg_phase2_retry_bound`
 /// passes — unreachable for deterministic inputs, kept as
 /// defence-in-depth.
 pub(super) fn jpeg_phase2_run_to_sync(
@@ -269,7 +270,7 @@ pub(super) fn jpeg_phase2_run_to_sync(
             blocks_per_mcu,
         )
     };
-    for iter in 0..=bound {
+    for iter in 0..bound {
         let prev = s_info.to_vec();
         for base in (0..n).step_by(group) {
             let end = (base + group).min(n);
@@ -293,7 +294,7 @@ pub(super) fn jpeg_phase2_run_to_sync(
             }
             s_info[base..end].copy_from_slice(&cur);
         }
-        if *s_info == *prev {
+        if super::huffman::jpeg_phase2_converged(n, |i| s_info[i] == prev[i]) {
             return Phase2Outcome::Converged { iterations: iter };
         }
     }

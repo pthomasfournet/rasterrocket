@@ -642,11 +642,12 @@ groupshared uint g_phase2_changed;
 /// stream cost local passes, not host passes.
 ///
 /// `sync_flags[i] = 1` when `s_info_out[i] == s_info_prev[i]`. A host
-/// pass in which every slot is a fixpoint leaves the whole chain
-/// correct: workgroup 0's left input is the pinned slot 0, so its
-/// chain is true; every later workgroup's left input equalled its
-/// output, so by induction each chain is true. Truth advances at
-/// least one workgroup per host pass, bounding the host loop by
+/// pass in which the last slot of every workgroup but the final one is
+/// flagged leaves the whole chain correct: workgroup 0's left input is
+/// the pinned slot 0, so its chain is true; every later workgroup's
+/// left input equalled the true output of the slot it was read from,
+/// so by induction each chain is true. Truth advances at least one
+/// workgroup per host pass, bounding the host loop by
 /// `ceil(num_subsequences / JPEG_PHASE2_GROUP)`. A decode error
 /// mid-region stops that region's walk at the error-point state;
 /// every downstream snapshot collapses to the error bit, and the
