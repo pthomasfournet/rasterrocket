@@ -1115,6 +1115,10 @@ impl<'doc> PageRenderer<'doc> {
     /// Fill `path` using the current fill colour or pattern.  Shared by `do_fill`
     /// and `do_fill_then_stroke`.
     fn fill_path(&mut self, path: &raster::path::Path, even_odd: bool) {
+        // Stroke adjustment is always on: a lone axis-aligned quadrilateral
+        // fills whole device pixels.
+        let hinted = path.with_fill_adjust_hints();
+        let path = hinted.as_ref().unwrap_or(path);
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
         let flatness = gs.flatness.max(0.1);

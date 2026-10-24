@@ -239,6 +239,52 @@ impl Path {
         }
     }
 
+    /// This path with the stroke-adjust hints a fill applies to a lone
+    /// quadrilateral, or `None` when the rule does not apply.
+    ///
+    /// A path that is a single subpath of four points left open is closed
+    /// with a closing segment, and one of five points already closed is taken
+    /// as is; either then gets one hint per pair of opposite edges (`0–1` with
+    /// `2–3`, `1–2` with `3–4`).  The scanline stage snaps a hinted pair to
+    /// pixel boundaries only when both of its edges are axis-aligned, so a
+    /// rectangle fills whole pixels and a skewed quadrilateral is unaffected.
+    /// A path that already carries hints is left alone.
+    #[must_use]
+    pub fn with_fill_adjust_hints(&self) -> Option<Self> {
+        if !self.hints.is_empty() {
+            return None;
+        }
+        let f = &self.flags;
+        let mut closed = match self.pts.len() {
+            4 if !f[0].is_closed() && !f[1].is_last() && !f[2].is_last() => {
+                let mut b = PathBuilder::new();
+                let [p0, p1, p2, p3] = [self.pts[0], self.pts[1], self.pts[2], self.pts[3]];
+                b.move_to(p0.x, p0.y).ok()?;
+                if f[1].is_curve() {
+                    b.curve_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y).ok()?;
+                } else {
+                    b.line_to(p1.x, p1.y).ok()?;
+                    b.line_to(p2.x, p2.y).ok()?;
+                    b.line_to(p3.x, p3.y).ok()?;
+                }
+                b.close(true).ok()?;
+                b.build()
+            }
+            5 if f[0].is_closed() && !f[1].is_last() && !f[2].is_last() && !f[3].is_last() => {
+                self.clone()
+            }
+            _ => return None,
+        };
+        let hint = |ctrl0, ctrl1| StrokeAdjustHint {
+            ctrl0,
+            ctrl1,
+            first_pt: 0,
+            last_pt: 4,
+        };
+        closed.hints = vec![hint(0, 2), hint(1, 3)];
+        Some(closed)
+    }
+
     // ── Geometry ──────────────────────────────────────────────────────────────
 
     /// Translate every point in the path by `(dx, dy)`.
@@ -658,6 +704,49 @@ mod tests {
     }
 
     // ── Path::append ──────────────────────────────────────────────────────────
+
+    fn quad(close: bool) -> Path {
+        let mut b = PathBuilder::new();
+        b.move_to(1.0, 2.0).unwrap();
+        b.line_to(7.0, 2.0).unwrap();
+        b.line_to(7.0, 6.0).unwrap();
+        b.line_to(1.0, 6.0).unwrap();
+        if close {
+            b.close(true).unwrap();
+        }
+        b.build()
+    }
+
+    /// A closed quadrilateral keeps its points and gains one hint per pair of
+    /// opposite edges; an open one is closed first.
+    #[test]
+    fn fill_adjust_hints_on_lone_quadrilateral() {
+        for close in [true, false] {
+            let hinted = quad(close).with_fill_adjust_hints().expect("rule applies");
+            assert_eq!(hinted.pts.len(), 5, "close={close}");
+            assert!(hinted.flags[0].is_closed(), "close={close}");
+            let pairs: Vec<_> = hinted.hints.iter().map(|h| (h.ctrl0, h.ctrl1)).collect();
+            assert_eq!(pairs, [(0, 2), (1, 3)], "close={close}");
+        }
+    }
+
+    /// Triangles, multi-subpath paths and already-hinted paths are untouched.
+    #[test]
+    fn fill_adjust_hints_skip_other_paths() {
+        let mut b = PathBuilder::new();
+        b.move_to(0.0, 0.0).unwrap();
+        b.line_to(4.0, 0.0).unwrap();
+        b.line_to(2.0, 3.0).unwrap();
+        b.close(true).unwrap();
+        assert!(b.build().with_fill_adjust_hints().is_none(), "triangle");
+
+        let mut two = quad(true);
+        two.append(&quad(true));
+        assert!(two.with_fill_adjust_hints().is_none(), "two subpaths");
+
+        let hinted = quad(true).with_fill_adjust_hints().unwrap();
+        assert!(hinted.with_fill_adjust_hints().is_none(), "already hinted");
+    }
 
     #[test]
     fn append_adjusts_hints() {
