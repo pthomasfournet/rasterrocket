@@ -640,7 +640,6 @@ pub enum InterpError {
     PageOutOfRange { page: u32, total: u32 },
     MissingResource(String),
     InvalidPageGeometry(String),
-    FontInit(String),
     PageBudget(String),
 }
 ```

@@ -48,9 +48,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-generic-cpu-
 
-      - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libfreetype6-dev
-
       - name: Build CLI (CPU-only, release)
         run: cargo build --release -p rasterrocket-cli
 
@@ -75,8 +72,14 @@ jobs:
       - name: Test rasterrocket-parser
         run: cargo test -p rasterrocket-parser --lib
 
+      - name: Test rasterrocket-font (font programs, glyph rasteriser)
+        run: cargo test -p rasterrocket-font
+
+      - name: Test vendored read-fonts / skrifa forks (upstream suites)
+        run: cargo test -p read-fonts -p skrifa --lib
+
       - name: Clippy (no GPU features)
-        run: cargo clippy -p rasterrocket-parser -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
+        run: cargo clippy -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
 
       # Test targets are linted one crate per invocation: a combined
       # `--all-targets` run exceeds runner memory.
@@ -85,6 +88,9 @@ jobs:
 
       - name: Clippy (rasterrocket-render tests)
         run: cargo clippy -p rasterrocket-render --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-font tests)
+        run: cargo clippy -p rasterrocket-font --tests -- -D warnings
 
       - name: Clippy (rasterrocket-interp tests)
         run: cargo clippy -p rasterrocket-interp --tests -- -D warnings
@@ -140,15 +146,13 @@ jobs:
       - name: Check rasterrocket-gpu (stable, NEON CMYK path)
         run: cargo check -p rasterrocket-gpu --target aarch64-unknown-linux-gnu
 
-      # rasterrocket pulls in FreeType + libz C deps that require a cross C
-      # compiler (gcc-aarch64-linux-gnu). Install it and check the full crate.
+      # rasterrocket's parser compiles the vendored libdeflate C sources,
+      # which needs a cross C compiler (gcc-aarch64-linux-gnu).
       - name: Install aarch64 cross C toolchain
-        run: sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Check rasterrocket (stable, NEON deskew path)
-        env:
-          LIBZ_SYS_STATIC: 1
-        run: cargo check -p rasterrocket --target aarch64-unknown-linux-gnu --features bundled
+        run: cargo check -p rasterrocket --target aarch64-unknown-linux-gnu
 
   # ── aarch64 native execution ──────────────────────────────────────────────
   #
@@ -175,9 +179,6 @@ jobs:
           key: ${{ runner.os }}-generic-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-generic-arm64-cargo-
-
-      - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libfreetype6-dev
 
       - name: Test rasterrocket-render (NEON tiers)
         run: cargo test -p rasterrocket-render --lib

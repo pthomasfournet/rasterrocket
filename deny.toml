@@ -44,9 +44,9 @@ allow = [
 private = { ignore = true }
 
 [advisories]
-# Fail on any RUSTSEC advisory in the graph. (The FFI C libraries — system
-# FreeType / OpenJPEG — are out of cargo-audit's scope and are covered by
-# the FFI trust-boundary note in ROADMAP.md, not here.)
+# Fail on any RUSTSEC advisory in the graph. (Vendored forks under crates/
+# are path dependencies outside cargo-audit's scope; scripts/check_vendored.py
+# reports their advisories weekly.)
 yanked = "deny"
 
 [bans]

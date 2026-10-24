@@ -395,9 +395,9 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   dimensions are validated *before* a codec allocates its pixel buffer (defusing
   decode bombs), and a malformed entry is a bounded skip or a clear `Err`, never
   an OOM, hang, or panic. `.cbr` (RAR) is refused outright (no decoder linked).
-- **Memory-safe core.** The PDF parser, content interpreter, font/glyph
-  resolution, and the JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders
-  are pure Rust. Malformed, truncated, adversarial, or hostile input is converted to a
+- **Memory-safe core.** The PDF parser, content interpreter, font-program
+  parsing (TrueType, OpenType, CFF, Type 1) and glyph rasterisation, and the
+  JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders are pure Rust. Malformed, truncated, adversarial, or hostile input is converted to a
   clear per-page `Err` or a bounded skip — never a silent wrong render, an
   unbounded allocation, an infinite loop, or a process abort. The render
   pipeline enforces a per-page operator/wall-clock/form-depth watchdog, an
@@ -410,16 +410,15 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   (the bounded page/annotation scan stops at the first hit) — is rendered
   for its static appearance and a loud warning is logged per entry point;
   detection is purely structural and no `/JS` is ever decoded or evaluated.
-- **Native FFI trust boundary.** One dependency in the render path wraps a C
-  library: glyph rasterization links the system **FreeType**
-  (`libfreetype6`), historically one of the highest-CVE components of any PDF
-  stack. rasterrocket links the *system* library by default (the `bundled`
-  feature compiles a vendored copy instead), so its CVE exposure is your
-  host's package patch level. **Deployments that process untrusted PDFs MUST
-  keep `libfreetype6` patched** (or sandbox the process). `cargo audit` is
-  clean for the Rust dependency tree, but RustSec does not track upstream
-  C-library CVEs. JPEG 2000 is decoded in pure Rust (`hayro-jpeg2000`, no
-  unsafe code); the optional `nvjpeg2k` GPU path calls NVIDIA's library.
+- **No system C libraries in the render path.** Embedded fonts, historically
+  among the highest-CVE inputs of any PDF stack, are parsed by local forks of
+  `read-fonts` / `skrifa` and rasterised by rasterrocket's own coverage
+  rasteriser; no C font library is linked. JPEG 2000 is decoded in pure Rust
+  (`hayro-jpeg2000`). The only C code in the default build is libdeflate,
+  compiled from vendored source; the optional `nvjpeg` / `nvjpeg2k` GPU paths
+  call NVIDIA's libraries. `cargo audit` covers the registry dependency tree;
+  the vendored forks are checked weekly against upstream commits, releases
+  and RustSec advisories (`scripts/check_vendored.py`).
 - **Encrypted input.** Owner-password-only encrypted PDFs are decrypted via
   an opt-in, default-deny liability gate (see Getting Started). Unencrypted
   input never spawns a subprocess and never writes a temp file.

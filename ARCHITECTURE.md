@@ -15,7 +15,10 @@ rasterrocket-color
   │     software rasterizer — paths, fills, compositing, SIMD
   │     │
   │     ├── rasterrocket-font
-  │     │     FreeType glyph cache + outline → Path bridge
+  │     │     font programs → Path → coverage bitmaps; glyph cache
+  │     │     │
+  │     │     └── skrifa, read-fonts  (crates/skrifa, crates/read_fonts: local forks)
+  │     │           TrueType / OpenType / CFF / Type 1 parsing and outlines
   │     │
   │     ├── rasterrocket-encode
   │     │     PPM / PGM / PBM / PNG output
@@ -183,16 +186,23 @@ no synchronisation needed.
 
 ### 3.3 `rasterrocket-font`
 
-FreeType wrapper with two-level caching.
+Font programs, glyph rasterisation and the glyph cache.  No C font library:
+programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
+(vendored like `crates/jpeg2000`; see their `CHANGES.md`).
 
-- `FontEngine` — owns `FT_Library`, assign face IDs. Protected by `Arc<Mutex<_>>`
-  (FreeType is not thread-safe; lock is coarse but held only during face init, not render)
-- `FontFace` — scaled face; `make_glyph(code) → GlyphBitmap`
-- `GlyphCache` — `quick_cache::sync::Cache<GlyphKey, GlyphBitmap>` (sharded lock, shared globally)
-- `GlyphKey` — `{ face_id, code, size_px, base_idx, aa }`
-- `decompose_outline(ft_outline) → raster::Path` — bridge from FreeType contours
-  to the raster path format; glyphs rendered as path fills when AA is on, direct
-  bitmap blit when AA is off
+- `FontProgram` — detects the format from the leading bytes (sfnt TrueType /
+  OpenType / collection, bare CFF incl. CID-keyed, Type 1 PFA/PFB), parses it
+  once, and answers charmap, glyph-name and CID → GID lookups, advances and
+  unhinted outlines
+- `FontEngine` — per page; assigns face IDs and shares one `FontProgram` between
+  faces built from identical bytes or the same file
+- `FontFace` — a program at one em → device matrix; `make_glyph*` → `GlyphBitmap`,
+  `glyph_path*` → `raster::Path`; faces above 2048 px/em prefer path fill
+- `PathPen` (`outline`) — outline commands → `raster::Path` with the matrix applied
+- `coverage::rasterize` — exact-area, non-zero-winding coverage rasteriser
+  (8-bit AA or 1-bit mask), bounded per glyph
+- `GlyphCache` — `quick_cache::sync::Cache<GlyphKey, Arc<GlyphBitmap>>`, one per page
+- `GlyphKey` — `{ face_id, glyph_id, size_px, x_frac, aa }`
 
 ### 3.4 `rasterrocket-encode`
 
@@ -270,7 +280,7 @@ the rayon pool drops — this avoids the CUDA driver teardown race at process ex
   Detection is structural (`/S /JavaScript` only) and emits a loud `WARN` per
   entry point; the document opens and renders normally. `InterpError` has no
   `JavaScript` variant — the full list is `Pdf`, `PageOutOfRange`,
-  `MissingResource`, `InvalidPageGeometry`, `FontInit`, `PageBudget`.
+  `MissingResource`, `InvalidPageGeometry`, `PageBudget`.
 
 ### 3.6 `gpu`
 
@@ -402,6 +412,17 @@ local change. The local changes cut memory traffic under parallel decoding
 (strip-mined vertical IDWT, fused MCT and level shift, no redundant zeroing or
 copying) and add `Image::decode_u8`, which fuses the inverse MCT into the
 8-bit output. Each keeps output byte-identical to the vendored baseline.
+
+### 3.8a `read-fonts` and `skrifa` (`crates/read_fonts`, `crates/skrifa`)
+
+Local forks of the font-parsing crates, vendored like `crates/jpeg2000`: not
+published, not released by `cargo release`, never sent upstream, base recorded
+in each `UPSTREAM.toml`, every local change listed in each `CHANGES.md`.
+`crates/font_test_data` is an unmodified copy of upstream's test fonts so both
+upstream test suites run (`cargo test -p read-fonts -p skrifa`). The local
+changes make embedded PDF font programs load where upstream rejected them
+(Type 1 programs with an unknown `/Encoding` or a `%!PS-Adobe-3.0
+Resource-Font` header; sfnt programs without `hhea`/`hmtx`).
 
 ### 3.9 `rasterrocket-cli`
 
@@ -561,9 +582,9 @@ see `Uninitialised` and are no-ops.
 `BitmapBand` (`&mut` slice of rows). Bands are independent — no synchronisation.
 Threshold: `PARALLEL_FILL_MIN_HEIGHT`.
 
-**Font engine locking**
-`FontEngine` is behind `Arc<Mutex<_>>`. The mutex is held only during FreeType
-face initialisation (rare). Glyph rendering uses `quick_cache::sync::Cache` (sharded, no write lock on read hits).
+**Font engine**
+Each page renderer owns its `FontEngine`; there is no shared lock. Glyph bitmaps
+go through `quick_cache::sync::Cache` (sharded, no write lock on read hits).
 
 ---
 
