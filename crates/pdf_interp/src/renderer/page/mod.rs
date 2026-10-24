@@ -202,6 +202,42 @@ impl PageDiagnostics {
 /// already baked into the path points by `to_device`.
 const DEVICE_MATRIX: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
+/// Inverse of the affine matrix `m` (`[a b c d e f]`, row-vector convention),
+/// or `None` when `m` is singular or not finite.
+#[expect(
+    clippy::many_single_char_names,
+    reason = "matrix entries a–f follow the PDF §8.3.3 notation"
+)]
+fn invert_affine(m: &[f64; 6]) -> Option<[f64; 6]> {
+    let [a, b, c, d, e, f] = *m;
+    let det = a.mul_add(d, -(b * c));
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    Some([
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        c.mul_add(f, -(d * e)) / det,
+        b.mul_add(e, -(a * f)) / det,
+    ])
+}
+
+/// `path` with every point mapped through `m`.  An affine map carries Bézier
+/// control points to the control points of the mapped curve, so flags and
+/// stroke-adjust hints carry over unchanged.
+fn transform_path(path: &raster::path::Path, m: &[f64; 6]) -> raster::path::Path {
+    raster::path::Path {
+        pts: path
+            .pts
+            .iter()
+            .map(|p| raster::xpath::transform(m, p.x, p.y))
+            .collect(),
+        ..path.clone()
+    }
+}
+
 /// Device-pixel extent `(width, height)` of an image drawn under `ctm`: the
 /// lengths of the images of its unit x and y vectors, rounded up.  Correct
 /// under rotation and skew.  `None` for a degenerate or non-finite matrix.
@@ -980,6 +1016,20 @@ impl<'doc> PageRenderer<'doc> {
         (dx, f64::from(self.height) - dy)
     }
 
+    /// The user-space → device-space matrix: the CTM followed by the y-flip
+    /// that [`Self::to_device`] applies.
+    fn device_matrix(&self) -> [f64; 6] {
+        let m = self.gstate.current().ctm;
+        [
+            m[0],
+            -m[1],
+            m[2],
+            -m[3],
+            m[4],
+            f64::from(self.height) - m[5],
+        ]
+    }
+
     /// Apply a pending `W`/`W*` clip using the current path, then discard the path.
     ///
     /// Called by `EndPath` (`n`) when no painting follows.
@@ -1182,6 +1232,24 @@ impl<'doc> PageRenderer<'doc> {
         let solid_color = gs.stroke_color.as_slice().to_vec();
         // gs immutable borrow ends here.
 
+        // PDF §8.4.3.2 / §8.4.3.6: the line width and dash lengths are
+        // user-space distances under the CTM at stroke time.  The path is held
+        // in device space, so it is mapped back through the inverse device
+        // matrix and the stroker transforms the outline it builds; flatness
+        // stays a device-space tolerance.  A singular CTM collapses the path
+        // to a line or point, so it is stroked in device space unchanged.
+        let device = self.device_matrix();
+        let (path, matrix, flatness) = invert_affine(&device).map_or_else(
+            || (path.clone(), DEVICE_MATRIX, flatness),
+            |inv| {
+                let scale = device[0]
+                    .mul_add(device[3], -(device[1] * device[2]))
+                    .abs()
+                    .sqrt();
+                (transform_path(path, &inv), device, flatness / scale)
+            },
+        );
+
         let params = StrokeParams {
             line_width,
             line_cap,
@@ -1205,10 +1273,10 @@ impl<'doc> PageRenderer<'doc> {
         stroke(
             &mut self.bitmap,
             &clip,
-            path,
+            &path,
             &pipe,
             &src,
-            &DEVICE_MATRIX,
+            &matrix,
             &params,
         );
         drop(tiled);
@@ -2672,6 +2740,15 @@ mod tests {
                 assert_eq!(px[y * 8 + x], want, "pixel ({x}, {y})");
             }
         }
+    }
+
+    /// The line width is a user-space distance: under a 4× CTM a 1-unit
+    /// horizontal stroke covers 4 device rows, centred on the path.
+    #[test]
+    fn stroke_width_scales_with_ctm() {
+        let px = render_gray(16, b"4 0 0 4 0 0 cm 0 G 1 w 0 2 m 4 2 l S");
+        let dark: Vec<usize> = (0..16).filter(|&y| px[y * 16 + 8] < 128).collect();
+        assert_eq!(dark, [6, 7, 8, 9], "stroke rows at x = 8");
     }
 
     /// An image whose bounding box misses the clip entirely paints nothing.
