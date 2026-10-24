@@ -108,16 +108,28 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 
 ## Camera-captured pages
 
+These flags run [`rasterrocket-camera`](api-reference.md#rasterrocket-camera-crate--camera-capture-page-cleanup)
+on each rendered page. A stage whose detector is not confident leaves the page
+unchanged, so flatbed scans and born-digital pages are written exactly as
+without the flags.
+
 | Flag | Default | Description |
 |---|---|---|
-| `--rectify` | off | Find a page photographed on a darker surround, correct the perspective and crop to the page. Pages without such a boundary (flatbed scans, born-digital pages) are written unchanged. |
-| `--dewarp` | off | Straighten text lines curved by a page bending toward the spine. Experimental: vertical displacement only. Pages whose lines are already straight, or with fewer than five text lines, are written unchanged. |
+| `--crop` | off | Find a page photographed on a darker surround and crop to its bounding box. Unrelated to `-x`/`-y`/`-W`/`-H`, which crop a fixed pixel region. |
+| `--rectify` | off | Find that page, correct the perspective and crop to the page. Supersedes `--crop` when it applies. |
 | `--split-spreads` | off | Split a double-page spread at its gutter. The halves of page N are written with an `a` (left) and `b` (right) suffix: `out-07a.png`, `out-07b.png`. Pages not detected as spreads keep their usual name. |
+| `--dewarp` | off | Straighten text lines curved by a page bending toward the spine. Experimental: vertical displacement only. Pages whose lines are already straight, or with fewer than five text lines, are written unchanged. |
 
-The stages run rectify → split → dewarp. They apply to PDF and comic-archive input alike.
+The stages run crop or rectify → split → dewarp, on PDF and comic-archive input
+alike. Detection runs on the page's luma. `--gray` and `--mono` output is
+written from the processed luma; colour output applies the same geometry to
+each colour channel, so colour is kept.
 
 ```bash
-# Phone captures of an open book: crop, split and straighten each spread
+# Phone captures of an open book, held square to the camera: crop and split
+rrocket --crop --split-spreads --gray --png -r 300 book.pdf out
+
+# Captures at an angle: rectify, split and straighten each page
 rrocket --rectify --split-spreads --dewarp --gray --png -r 300 book.pdf out
 ```
 

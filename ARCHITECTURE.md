@@ -43,6 +43,10 @@ rasterrocket-color
   │
   ├── rasterrocket-parser  (in-tree lazy mmap PDF parser; used by rasterrocket-interp)
   │
+  ├── rasterrocket-camera  (camera-capture page cleanup on 8-bit gray: crop, rectify,
+  │                         spread split, dewarp; std only, no workspace deps; used by
+  │                         the CLI)
+  │
   ├── pdf_bridge  (unused in render path; poppler reference baseline only)
   │
   └── bench  (vello_cpu throughput comparison; not linked by rasterrocket-cli)
@@ -87,18 +91,12 @@ render_operators(ops, resources)     dispatch loop:
     ▼ Bitmap<Rgb8>
 rasterrocket::rgb_to_gray()          BT.709 luma
     │
-    ▼ Bitmap<Gray8>
-camera (optional, RasterOptions::camera)
-    │   rectify   page quad on a darker surround → homography → crop
-    │   split     gutter of a double-page spread → two pages
-    │   dewarp    text-line surface fit → vertical resample (experimental)
-    │
-    ▼ one or two pages
-deskew (optional, per page)          projection-profile sweep ±7°
-    │   gpu::npp_rotate  (or cpu bilinear fallback)
-    │
     ▼ Vec<u8>  (width × height, 8-bit grayscale)
-RenderedPage { pixels, width, height, dpi, effective_dpi, diagnostics, spread_half }
+RenderedPage { pixels, width, height, dpi, effective_dpi, diagnostics }
+    │
+    ▼
+deskew (optional)                    projection-profile sweep ±7°
+    │   gpu::npp_rotate  (or cpu bilinear fallback)
     │
     ▼
 caller / Tesseract OCR
@@ -374,7 +372,7 @@ on x86-64; the correct tier is selected at runtime. ARM uses `vmull_u8` + `vshrn
 Public library crate. The stable API surface.
 
 ```rust
-RasterOptions { dpi, first_page, last_page, deskew, pages, strict, camera }  // pages: Option<PageSet>, camera: CameraOptions
+RasterOptions { dpi, first_page, last_page, deskew, pages, strict }  // pages: Option<PageSet>
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
@@ -439,6 +437,37 @@ clap args → RasterOptions → rayon ThreadPool
 All rendering is inside `pool.install()`. The broadcast teardown is the last thing
 that happens before the pool is dropped, ensuring GPU decoders are released while
 the CUDA driver is fully live.
+
+`--crop`, `--rectify`, `--split-spreads` and `--dewarp` run `rasterrocket-camera`
+on each rendered page before encoding (PDF and comic input alike). Detection
+runs on the page luma; gray and mono output is written from the processed luma,
+and RGB output replays the computed geometry (`Report::replay`) on each colour
+channel. Split halves are written as `out-07a` / `out-07b`.
+
+### 3.10 `rasterrocket-camera`
+
+Cleanup of camera-captured pages on 8-bit grayscale images, independent of PDF
+and of every other workspace crate (std only). Input is a borrowed, strided
+`GrayView`; output is owned, packed `GrayPage`s.
+
+```
+process(GrayView, &CameraOptions) → Result<Processed { pages, report }, CameraError>
+
+crop or rectify   page quad: Otsu mask → max-area hull quad → sub-pixel edge refit
+                  crop:    axis-aligned bounding box of the quad (a view, no copy)
+                  rectify: homography onto an upright rectangle at the physical
+                           aspect ratio; supersedes crop
+split             gutter shadow or facing inner margins near the centre (a view)
+dewarp, per page  text-line tracking → surface fit → vertical resample (experimental)
+```
+
+A detector that is not confident declines and the page passes through; the
+`Report` records each stage's outcome and reason, the quad, crop rectangle,
+gutter (framed and source coordinates), homography and per-stage timings.
+`CameraError` is reserved for malformed input. Everything runs on the calling
+thread with no global state, and a randomized sweep (`tests/no_panic.rs`)
+checks that no input panics any entry point. Deskew is not part of the crate;
+it stays in `rasterrocket`.
 
 ---
 
