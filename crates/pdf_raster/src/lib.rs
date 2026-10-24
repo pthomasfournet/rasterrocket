@@ -114,6 +114,7 @@
 //! }
 //! ```
 
+pub mod camera;
 mod config;
 #[cfg(feature = "vaapi")]
 pub(crate) mod decode_queue;
