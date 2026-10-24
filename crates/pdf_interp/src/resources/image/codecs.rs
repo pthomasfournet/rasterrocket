@@ -94,9 +94,10 @@ fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
 /// - `Columns`: pixels per encoded row; defaults to `width`.  Rows are
 ///   clamped or white-padded to `width` in the output.
 /// - `Rows`: rows to decode; defaults to `height`.
-/// - `EncodedByteAlign`: each encoded row starts on a byte boundary.  Applied
-///   to Group 3 only: Group 4 streams that declare it are, in practice, not
-///   row-aligned, and decoding them aligned loses all but the first rows.
+/// - `EncodedByteAlign`: each encoded row starts on a byte boundary.  Group 3
+///   streams honour it.  Group 4 streams that declare it occur both aligned
+///   and unaligned, so a Group 4 stream is read unaligned and, if that stops
+///   short, re-read aligned, keeping the reading that decodes more rows.
 /// - `EndOfLine`: EOL codes are required.  They are accepted either way.
 /// - `EndOfBlock`: the stream may end with EOFB / RTC (default `true`).
 /// - `BlackIs1`: 1 bits are black, so output samples are inverted.
@@ -133,23 +134,41 @@ pub(super) fn decode_ccitt(
         },
     };
     let black_is_1 = flag(b"BlackIs1", false);
-    let settings = DecodeSettings {
-        columns: positive(b"Columns").unwrap_or(width),
-        rows: positive(b"Rows").unwrap_or(height),
-        end_of_block: flag(b"EndOfBlock", true),
-        end_of_line: flag(b"EndOfLine", false),
-        rows_are_byte_aligned: k >= 0 && flag(b"EncodedByteAlign", false),
-        encoding,
-        invert_black: black_is_1,
-    };
+    let declared_aligned = flag(b"EncodedByteAlign", false);
+    let rows = positive(b"Rows").unwrap_or(height);
 
     let capacity = (width as usize).checked_mul(height as usize)?;
     // White in the output convention: 0xFF, or 0x00 when 1 bits are black.
     let white = if black_is_1 { 0x00 } else { 0xFF };
-    let mut collector = HayroCcittCollector::new(capacity, width, white);
-    let mut ctx = DecoderContext::new(settings);
+    let run = |aligned: bool| {
+        let settings = DecodeSettings {
+            columns: positive(b"Columns").unwrap_or(width),
+            rows,
+            end_of_block: flag(b"EndOfBlock", true),
+            end_of_line: flag(b"EndOfLine", false),
+            rows_are_byte_aligned: aligned,
+            encoding,
+            invert_black: black_is_1,
+        };
+        let mut collector = HayroCcittCollector::new(capacity, width, white);
+        let mut ctx = DecoderContext::new(settings);
+        let result = hayro_ccitt::decode(data, &mut collector, &mut ctx);
+        (collector, result)
+    };
 
-    if let Err(e) = hayro_ccitt::decode(data, &mut collector, &mut ctx) {
+    // Group 4 streams that declare `EncodedByteAlign` exist both aligned and
+    // unaligned.  The unaligned reading is tried first; when it stops short,
+    // the aligned reading is tried and whichever decodes more rows is kept.
+    let (mut collector, mut result) = run(k >= 0 && declared_aligned);
+    if k < 0 && declared_aligned && result.is_err() && collector.rows_decoded() < rows {
+        let (aligned, aligned_result) = run(true);
+        if aligned.rows_decoded() > collector.rows_decoded() {
+            collector = aligned;
+            result = aligned_result;
+        }
+    }
+
+    if let Err(e) = result {
         if collector.rows_decoded() == 0 {
             log::warn!("image: CCITTFaxDecode ({encoding:?}) failed: {e}");
             return None;
@@ -1317,6 +1336,16 @@ mod tests {
     fn ccitt_group4_ignores_encoded_byte_align() {
         // The unaligned stream above, declared byte-aligned.
         let stream = format!("001 0111 011 1   1 1 1   {EOL} {EOL}");
+        let parms = ccitt_parms(&[(b"K", -1)], &[(b"EncodedByteAlign", true)]);
+        assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
+    }
+
+    #[test]
+    fn ccitt_group4_honours_encoded_byte_align_when_rows_are_aligned() {
+        // The rows above, each padded to a byte boundary: row 0 is 11 bits
+        // (+5 zero bits), row 1 is 3 bits (+5).  Read unaligned, the padding
+        // is decoded as codes and the stream fails after row 0.
+        let stream = format!("001 0111 011 1 00000   1 1 1 00000   {EOL} {EOL}");
         let parms = ccitt_parms(&[(b"K", -1)], &[(b"EncodedByteAlign", true)]);
         assert_eq!(ccitt_bytes(&stream, 8, 2, &parms), TWO_ROWS);
     }
