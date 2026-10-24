@@ -18,9 +18,11 @@
 //!
 //! # Colour spaces
 //!
-//! Shading colours are converted to sRGB via the same colour-space resolution
-//! used for images.  Only the `N`-channel output of the function is used; ICC
-//! profiles and Indexed spaces fall back to Gray/RGB as in the image path.
+//! A shading's `ColorSpace` is resolved once into a [`ColorSpace`] and every
+//! colour (function output or mesh vertex) is converted to sRGB through
+//! [`ColorSpace::convert_to_rgb`], the conversion used for fill colours.  The
+//! function output and the per-vertex colour carry exactly
+//! [`ColorSpace::ncomponents`] channels.
 //!
 //! # PDF Function objects
 //!
@@ -33,7 +35,6 @@ mod patch;
 
 use std::sync::Arc;
 
-use color::convert::gray_to_u8;
 use pdf::{Dictionary, Document, Object, Stream};
 use raster::pipe::Pattern;
 use raster::shading::axial::AxialPattern;
@@ -41,8 +42,8 @@ use raster::shading::function::FunctionPattern;
 use raster::shading::gouraud::GouraudVertex;
 use raster::shading::radial::RadialPattern;
 
+use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
-use super::image::{ImageColorSpace, cs_to_image_color_space};
 use super::resolve_dict;
 use function::{eval_function, read_f64_array, read_fn_domain};
 use patch::{decode_type6_mesh, decode_type7_mesh};
@@ -100,9 +101,16 @@ pub fn resolve_shading(
 
     let shading_type = sh_dict.get_i64(b"ShadingType")?;
 
-    let cs_obj = sh_dict.get(b"ColorSpace")?;
-    let cs = cs_to_image_color_space(doc, cs_obj);
-    let n_channels = cs_channel_count(cs);
+    let cs_space = colorspace::resolve(doc, sh_dict.get(b"ColorSpace")?);
+    if matches!(cs_space, ColorSpace::Pattern { .. }) {
+        log::warn!("shading: Pattern colour space is not valid for a shading — skipping");
+        return None;
+    }
+    let cs = ShadingCs {
+        doc,
+        space: &cs_space,
+    };
+    let n_channels = cs.channels();
 
     match shading_type {
         1 => resolve_function_based(doc, &sh_dict, cs, n_channels, ctm, page_h)
@@ -158,7 +166,7 @@ fn stream_content(s: &Stream) -> Option<Vec<u8>> {
 fn resolve_axial(
     doc: &Document,
     sh: &Dictionary,
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -177,8 +185,8 @@ fn resolve_axial(
     let c0_user = eval_function(doc, fn_obj, t0, n)?;
     let c1_user = eval_function(doc, fn_obj, t1, n)?;
 
-    let rgb0 = cs_to_rgb(cs, &c0_user);
-    let rgb1 = cs_to_rgb(cs, &c1_user);
+    let rgb0 = cs.to_rgb(&c0_user);
+    let rgb1 = cs.to_rgb(&c1_user);
 
     // Reject non-finite user-space coordinates before transforming.
     if !coords.iter().all(|v| v.is_finite()) {
@@ -206,7 +214,7 @@ fn resolve_axial(
 fn resolve_radial(
     doc: &Document,
     sh: &Dictionary,
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -221,8 +229,8 @@ fn resolve_radial(
     let c0_user = eval_function(doc, fn_obj, t0, n)?;
     let c1_user = eval_function(doc, fn_obj, t1, n)?;
 
-    let rgb0 = cs_to_rgb(cs, &c0_user);
-    let rgb1 = cs_to_rgb(cs, &c1_user);
+    let rgb0 = cs.to_rgb(&c0_user);
+    let rgb1 = cs.to_rgb(&c1_user);
 
     // Reject non-finite user-space coordinates before transforming.
     if !coords.iter().all(|v| v.is_finite()) {
@@ -275,7 +283,7 @@ const TYPE1_GRID: usize = 64;
 fn resolve_function_based(
     doc: &Document,
     sh: &Dictionary,
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -330,7 +338,7 @@ fn resolve_function_based(
             #[expect(clippy::cast_precision_loss, reason = "col < 64; exact in f64")]
             let ux = (col as f64 / gf).mul_add(xd1 - xd0, xd0);
             let channels = eval_function(doc, fn_obj, ux, n).unwrap_or_else(|| vec![0.0; n]);
-            cs_to_rgb(cs, &channels)
+            cs.to_rgb(&channels)
         })
         .collect();
     for _ in 0..g {
@@ -552,7 +560,7 @@ pub(super) fn parse_bits_per_comp(sh: &Dictionary, tag: &str) -> Option<u8> {
 fn decode_type4_mesh(
     sh: &Dictionary,
     data: &[u8],
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n_channels: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -649,7 +657,7 @@ fn decode_type4_mesh(
 fn decode_type5_mesh(
     sh: &Dictionary,
     data: &[u8],
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n_channels: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -796,7 +804,7 @@ pub(super) fn decode_vertex(
     bits_per_coord: u8,
     bits_per_comp: u8,
     decode: &[f64],
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     ctm: &[f64; 6],
     page_h: f64,
 ) -> GouraudVertex {
@@ -832,7 +840,7 @@ pub(super) fn decode_vertex(
         })
         .collect();
 
-    let color = cs_to_rgb(cs, &channels);
+    let color = cs.to_rgb(&channels);
     let (dx, dy) = transform_point(ctm, ux, uy, page_h);
 
     GouraudVertex {
@@ -844,31 +852,34 @@ pub(super) fn decode_vertex(
 
 // ── Colour conversion helpers ─────────────────────────────────────────────────
 
-/// Convert a function output (values in `[0, 1]`) to an sRGB triple `[u8; 3]`.
-///
-/// # Tolerance for malformed inputs
-///
-/// - Missing channels (`channels.len() < cs_channel_count(cs)`) default to `0.0`
-///   — encountered with malformed shading functions that return short arrays.
-/// - Values outside `[0, 1]` are clamped by [`gray_to_u8`].
-/// - `NaN` channel values map to `0` (via [`gray_to_u8`]'s float-to-int
-///   saturation).
-pub(super) fn cs_to_rgb(cs: ImageColorSpace, channels: &[f64]) -> [u8; 3] {
-    let scale = |i: usize| gray_to_u8(channels.get(i).copied().unwrap_or(0.0));
-    match cs {
-        ImageColorSpace::Gray | ImageColorSpace::Mask => {
-            let g = scale(0);
-            [g, g, g]
-        }
-        ImageColorSpace::Rgb => [scale(0), scale(1), scale(2)],
-    }
+/// A shading's resolved colour space, bound to the document its
+/// parameterised variants (ICC profile, tint transform) dereference into.
+#[derive(Clone, Copy)]
+pub(super) struct ShadingCs<'a> {
+    doc: &'a Document,
+    space: &'a ColorSpace,
 }
 
-/// Return the number of colour channels for a colour space.
-pub(super) const fn cs_channel_count(cs: ImageColorSpace) -> usize {
-    match cs {
-        ImageColorSpace::Gray | ImageColorSpace::Mask => 1,
-        ImageColorSpace::Rgb => 3,
+impl ShadingCs<'_> {
+    /// Number of colour components a function output or mesh vertex carries.
+    pub(super) fn channels(self) -> usize {
+        self.space.ncomponents()
+    }
+
+    /// Convert colour components (nominally in `[0, 1]`) to an sRGB triple.
+    ///
+    /// A slice shorter than [`Self::channels`] reads the missing components
+    /// as `0.0`; surplus components are ignored.  Out-of-range values clamp
+    /// and `NaN` maps to the low end of the range, as in
+    /// [`ColorSpace::convert_to_rgb`].
+    pub(super) fn to_rgb(self, channels: &[f64]) -> [u8; 3] {
+        let n = self.channels();
+        if channels.len() == n {
+            return self.space.convert_to_rgb(self.doc, channels);
+        }
+        let mut fitted = channels[..channels.len().min(n)].to_vec();
+        fitted.resize(n, 0.0);
+        self.space.convert_to_rgb(self.doc, &fitted)
     }
 }
 
@@ -926,52 +937,66 @@ fn read_extend(sh: &Dictionary) -> (bool, bool) {
 mod tests {
     use super::*;
 
+    use crate::test_helpers::empty_doc;
+
+    fn to_rgb(space: &ColorSpace, channels: &[f64]) -> [u8; 3] {
+        let doc = empty_doc();
+        ShadingCs { doc: &doc, space }.to_rgb(channels)
+    }
+
     #[test]
-    fn cs_to_rgb_gray_midpoint() {
-        let rgb = cs_to_rgb(ImageColorSpace::Gray, &[0.5]);
+    fn to_rgb_gray_midpoint() {
         // round(0.5 * 255) = 128
-        assert_eq!(rgb, [128, 128, 128]);
+        assert_eq!(to_rgb(&ColorSpace::DeviceGray, &[0.5]), [128, 128, 128]);
     }
 
     #[test]
-    fn cs_to_rgb_gray_white() {
-        assert_eq!(cs_to_rgb(ImageColorSpace::Gray, &[1.0]), [255, 255, 255]);
-    }
-
-    #[test]
-    fn cs_to_rgb_rgb_passthrough() {
-        let rgb = cs_to_rgb(ImageColorSpace::Rgb, &[1.0, 0.0, 0.5]);
-        assert_eq!(rgb[0], 255);
-        assert_eq!(rgb[1], 0);
-        assert!(rgb[2] > 120 && rgb[2] < 135);
-    }
-
-    /// Short channel slices must default missing channels to 0, not panic —
-    /// malformed PDF shading functions sometimes return undersized arrays.
-    #[test]
-    fn cs_to_rgb_short_channel_slice_defaults_to_zero() {
-        assert_eq!(cs_to_rgb(ImageColorSpace::Rgb, &[]), [0, 0, 0]);
-        assert_eq!(cs_to_rgb(ImageColorSpace::Rgb, &[1.0]), [255, 0, 0]);
-        assert_eq!(cs_to_rgb(ImageColorSpace::Gray, &[]), [0, 0, 0]);
-    }
-
-    /// Over-range values are clamped via `gray_to_u8`; NaN saturates to 0.
-    #[test]
-    fn cs_to_rgb_out_of_range_and_nan() {
+    fn to_rgb_rgb_passthrough() {
         assert_eq!(
-            cs_to_rgb(ImageColorSpace::Rgb, &[2.0, -0.5, 0.5]),
+            to_rgb(&ColorSpace::DeviceRgb, &[1.0, 0.0, 0.5]),
+            [255, 0, 128]
+        );
+    }
+
+    #[test]
+    fn to_rgb_cmyk_reads_four_ink_channels() {
+        assert_eq!(
+            to_rgb(&ColorSpace::DeviceCmyk, &[0.85, 0.69, 0.0, 0.0]),
+            [38, 79, 255]
+        );
+        assert_eq!(
+            to_rgb(&ColorSpace::DeviceCmyk, &[0.0, 0.0, 0.0, 1.0]),
+            [0, 0, 0]
+        );
+    }
+
+    /// Short channel slices default missing channels to 0, not panic —
+    /// malformed shading functions sometimes return undersized arrays.
+    #[test]
+    fn to_rgb_short_slice_defaults_to_zero() {
+        assert_eq!(to_rgb(&ColorSpace::DeviceRgb, &[]), [0, 0, 0]);
+        assert_eq!(to_rgb(&ColorSpace::DeviceRgb, &[1.0]), [255, 0, 0]);
+        assert_eq!(to_rgb(&ColorSpace::DeviceCmyk, &[]), [255, 255, 255]);
+    }
+
+    #[test]
+    fn to_rgb_ignores_surplus_channels() {
+        assert_eq!(
+            to_rgb(&ColorSpace::DeviceGray, &[1.0, 0.0, 0.0]),
+            [255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn to_rgb_out_of_range_and_nan() {
+        assert_eq!(
+            to_rgb(&ColorSpace::DeviceRgb, &[2.0, -0.5, 0.5]),
             [255, 0, 128]
         );
         assert_eq!(
-            cs_to_rgb(ImageColorSpace::Rgb, &[f64::NAN, 1.0, 1.0]),
+            to_rgb(&ColorSpace::DeviceRgb, &[f64::NAN, 1.0, 1.0]),
             [0, 255, 255]
         );
-    }
-
-    #[test]
-    fn cs_channel_count_values() {
-        assert_eq!(cs_channel_count(ImageColorSpace::Gray), 1);
-        assert_eq!(cs_channel_count(ImageColorSpace::Rgb), 3);
     }
 
     #[test]

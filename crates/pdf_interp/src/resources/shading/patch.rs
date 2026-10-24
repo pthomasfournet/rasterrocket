@@ -7,10 +7,9 @@ use pdf::Dictionary;
 use raster::shading::gouraud::GouraudVertex;
 
 use super::{
-    BitReader, cs_to_rgb, parse_bits_per_comp, parse_bits_per_coord, read_decode_array,
+    BitReader, ShadingCs, parse_bits_per_comp, parse_bits_per_coord, read_decode_array,
     transform_point,
 };
-use crate::resources::image::ImageColorSpace;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -258,7 +257,7 @@ pub(super) fn read_patch_colors(
     n_channels: usize,
     bpcomp: u8,
     decode: &[f64],
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
 ) -> Option<Vec<[u8; 3]>> {
     // bpcomp ∈ VALID_BITS ⊆ [1,32]; cast to f64 exact for u32-range values.
     #[expect(
@@ -282,7 +281,7 @@ pub(super) fn read_patch_colors(
                 (f64::from(v) / max_comp).mul_add(c_max - c_min, c_min)
             })
             .collect();
-        colors.push(cs_to_rgb(cs, &channels));
+        colors.push(cs.to_rgb(&channels));
     }
     Some(colors)
 }
@@ -578,7 +577,7 @@ pub(super) fn apply_flag_type7(
 pub(super) fn decode_type6_mesh(
     sh: &Dictionary,
     data: &[u8],
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n_channels: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -644,7 +643,7 @@ pub(super) fn decode_type6_mesh(
 pub(super) fn decode_type7_mesh(
     sh: &Dictionary,
     data: &[u8],
-    cs: ImageColorSpace,
+    cs: ShadingCs<'_>,
     n_channels: usize,
     ctm: &[f64; 6],
     page_h: f64,

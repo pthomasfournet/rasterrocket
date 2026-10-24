@@ -724,20 +724,6 @@ fn has_mask_entry(dict: &Dictionary) -> bool {
         )
 }
 
-// ── Colour space convenience wrapper ─────────────────────────────────────────
-
-/// Resolve a PDF colour space object to an [`ImageColorSpace`].
-///
-/// Convenience wrapper around the internal `resolve_cs` for use in the shading
-/// module.  CMYK colour spaces are converted to RGB as in the image decode path.
-pub(crate) fn cs_to_image_color_space(doc: &Document, cs_obj: &Object) -> ImageColorSpace {
-    use colorspace::{ResolvedCs, resolve_cs};
-    match resolve_cs(doc, cs_obj) {
-        ResolvedCs::Gray => ImageColorSpace::Gray,
-        ResolvedCs::Rgb | ResolvedCs::Cmyk => ImageColorSpace::Rgb,
-    }
-}
-
 // ── Shared helpers (used by multiple sub-modules) ─────────────────────────────
 
 /// Validate raw `i64` image dimensions and cast them to `u32`.
