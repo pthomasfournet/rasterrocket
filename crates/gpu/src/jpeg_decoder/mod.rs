@@ -22,6 +22,8 @@ mod dispatch_util;
 mod error;
 #[cfg(feature = "gpu-jpeg-huffman")]
 pub(crate) mod huffman;
+#[cfg(all(test, feature = "gpu-jpeg-huffman", feature = "gpu-validation"))]
+mod huffman_bench;
 mod jpeg_framing;
 pub(crate) mod phase1_oracle;
 #[cfg(test)]

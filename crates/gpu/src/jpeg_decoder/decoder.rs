@@ -21,9 +21,10 @@ use crate::jpeg_decoder::error::JpegGpuError;
 
 /// End-to-end JPEG decoder that runs IDCT on the GPU.
 ///
-/// Phases 1–4 (parallel Huffman decode) are available via
-/// `dispatch_jpeg_phase1_through_phase4`; this struct uses a CPU
-/// coefficient extraction pass and dispatches only Phase 5 to the GPU.
+/// Grayscale streams decode their Huffman symbols on the GPU
+/// (`huffman::decode_jpeg_symbols`, feature `gpu-jpeg-huffman`) and
+/// fall back to the CPU walk on any failure; every other stream uses
+/// the CPU walk. The IDCT always runs on the GPU.
 pub struct JpegGpuDecoder<B: GpuBackend> {
     backend: B,
 }
@@ -150,7 +151,7 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
             {
                 if nc == 1 {
                     let subseq_bits = crate::jpeg_decoder::pick_subsequence_size(&prep);
-                    crate::jpeg_decoder::huffman::dispatch_jpeg_phase1_through_phase4(
+                    crate::jpeg_decoder::huffman::decode_jpeg_symbols(
                         &self.backend,
                         &prep,
                         subseq_bits,
@@ -162,8 +163,13 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
                         );
                     })
                     .ok()
-                    .and_then(|symbols| {
-                        symbols_to_coefficients(&prep, &symbols)
+                    .and_then(|decoded| {
+                        log::trace!(
+                            "GPU JPEG Huffman decode ({width}×{height}, {subseq_bits}-bit \
+                             subsequences): {} Phase 2 pass(es)",
+                            decoded.phase2_passes
+                        );
+                        symbols_to_coefficients(&prep, &decoded.symbols)
                             .inspect_err(|e| {
                                 log::debug!(
                                     "GPU JPEG symbol stream rejected ({width}×{height}); \
@@ -404,7 +410,7 @@ fn symbol_code_lengths(
 /// that follow it. The stream is a trust boundary: out-of-contract
 /// symbols and over- or under-length streams are rejected with typed
 /// messages rather than trusted.
-fn symbols_to_coefficients(
+pub(in crate::jpeg_decoder) fn symbols_to_coefficients(
     prep: &JpegPreparedInput,
     symbols: &[u32],
 ) -> std::result::Result<(Vec<i32>, Vec<i32>), String> {

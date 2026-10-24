@@ -351,8 +351,34 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     Ok((s_info_out, outcome))
 }
 
-/// Run all four JPEG-framed phases and return the final decoded symbol
-/// stream as a flat `Vec<u32>`.
+/// Result of one parallel-Huffman decode of a JPEG entropy stream.
+#[derive(Debug)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "pub(crate) is intentional: parent module is pub(crate); inner items need explicit visibility for documentation and grepping"
+)]
+pub(crate) struct JpegSymbolDecode {
+    /// Decoded Huffman symbol stream, one `u32` per symbol.
+    pub symbols: Vec<u32>,
+    /// Phase 2 dispatches (host round trips) the propagation took.
+    pub phase2_passes: u32,
+}
+
+/// Test wrapper over [`decode_jpeg_symbols`] returning the symbols only.
+///
+/// # Errors
+/// As [`decode_jpeg_symbols`].
+#[cfg(all(test, feature = "gpu-validation"))]
+fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
+    backend: &B,
+    prep: &crate::jpeg_decoder::JpegPreparedInput,
+    subsequence_bits: u32,
+) -> Result<Vec<u32>> {
+    decode_jpeg_symbols(backend, prep, subsequence_bits).map(|d| d.symbols)
+}
+
+/// Run all four JPEG-framed phases and return the decoded symbol
+/// stream.
 ///
 /// Uses the JPEG-framed kernels: `JpegPhase1IntraSync`, the shared
 /// `JpegPhase2InterSync` propagation loop, CPU-side exclusive scan for
@@ -387,22 +413,26 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
     clippy::redundant_pub_crate,
     reason = "pub(crate) is intentional: parent module is pub(crate); inner items need explicit visibility for documentation and grepping"
 )]
-pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
+pub(crate) fn decode_jpeg_symbols<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
-) -> Result<Vec<u32>> {
+) -> Result<JpegSymbolDecode> {
     if prep.bitstream.length_bits == 0 {
-        return Ok(Vec::new());
+        return Ok(JpegSymbolDecode {
+            symbols: Vec::new(),
+            phase2_passes: 0,
+        });
     }
     let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
     setup.run_phase1(backend)?;
 
-    if run_jpeg_phase2_passes(backend, &mut setup)?.is_none() {
+    let Some(converged_pass) = run_jpeg_phase2_passes(backend, &mut setup)? else {
         return Err(BackendError::msg(
             "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within retry bound",
         ));
-    }
+    };
+    let phase2_passes = converged_pass + 1;
 
     // Download s_info for CPU-side Phase 3 (exclusive scan) and the
     // stall check.
@@ -429,7 +459,10 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
 
     if total_symbols == 0 {
         setup.free_all(backend);
-        return Ok(Vec::new());
+        return Ok(JpegSymbolDecode {
+            symbols: Vec::new(),
+            phase2_passes,
+        });
     }
 
     let flags_bytes = (setup.num_subsequences as usize) * 4;
@@ -465,7 +498,10 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     backend.free_device(symbols_buf.take());
     backend.free_device(decode_status_buf.take());
 
-    Ok(symbols_host)
+    Ok(JpegSymbolDecode {
+        symbols: symbols_host,
+        phase2_passes,
+    })
 }
 
 /// Download the first `len` `u32`s of `buf`.
