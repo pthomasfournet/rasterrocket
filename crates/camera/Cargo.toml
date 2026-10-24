@@ -13,8 +13,5 @@ description          = "Camera-capture page cleanup on 8-bit grayscale images: p
 keywords             = ["camera", "scan", "perspective", "dewarp", "book"]
 categories           = ["multimedia::images", "computer-vision"]
 
-[dependencies]
-rayon = "1"
-
 [lints]
 workspace = true

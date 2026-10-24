@@ -3,8 +3,6 @@
 //! Coordinate convention: integer coordinates address pixel centres; the
 //! continuous extent of a `w`-pixel row is `[-0.5, w - 0.5]`.
 
-use rayon::prelude::*;
-
 use crate::error::{CameraError, MAX_DIMENSION};
 use crate::num::{clamp_u8, floor_index, to_f64};
 
@@ -170,20 +168,19 @@ impl<'a> GrayView<'a> {
         let (w, h) = (self.width / factor, self.height / factor);
         let area = u64::try_from(factor * factor).unwrap_or(u64::MAX);
         let mut data = vec![0u8; w * h];
-        data.par_chunks_mut(w.max(1))
-            .enumerate()
-            .for_each(|(y, out)| {
-                let mut acc = vec![0u64; w];
-                for sy in y * factor..(y + 1) * factor {
-                    let src = self.row(sy);
-                    for (a, block) in acc.iter_mut().zip(src.chunks_exact(factor)) {
-                        *a += block.iter().map(|&v| u64::from(v)).sum::<u64>();
-                    }
+        let mut acc = vec![0u64; w];
+        for (y, out) in data.chunks_exact_mut(w.max(1)).enumerate() {
+            acc.fill(0);
+            for sy in y * factor..(y + 1) * factor {
+                let src = self.row(sy);
+                for (a, block) in acc.iter_mut().zip(src.chunks_exact(factor)) {
+                    *a += block.iter().map(|&v| u64::from(v)).sum::<u64>();
                 }
-                for (o, a) in out.iter_mut().zip(acc) {
-                    *o = u8::try_from((a + area / 2) / area).unwrap_or(u8::MAX);
-                }
-            });
+            }
+            for (o, &a) in out.iter_mut().zip(&acc) {
+                *o = u8::try_from((a + area / 2) / area).unwrap_or(u8::MAX);
+            }
+        }
         GrayPage {
             width: w,
             height: h,
@@ -226,30 +223,28 @@ pub(crate) fn upscale_coord(v: f64, factor: usize) -> f64 {
 /// `out_w, out_h ≥ 1` and a validated `src`.
 pub(crate) fn resample<F>(src: GrayView<'_>, out_w: usize, out_h: usize, map: F) -> GrayPage
 where
-    F: Fn(f64, f64) -> (f64, f64) + Sync,
+    F: Fn(f64, f64) -> (f64, f64),
 {
     let mut data = vec![u8::MAX; out_w * out_h];
     let (sw, sh) = (src.width, src.height);
     let (max_x, max_y) = (to_f64(sw) - 0.5, to_f64(sh) - 0.5);
-    data.par_chunks_mut(out_w.max(1))
-        .enumerate()
-        .for_each(|(oy, row)| {
-            for (ox, px) in row.iter_mut().enumerate() {
-                let (sx, sy) = map(to_f64(ox), to_f64(oy));
-                if !(sx >= -0.5 && sy >= -0.5 && sx <= max_x && sy <= max_y) {
-                    continue;
-                }
-                let xc = sx.clamp(0.0, to_f64(sw - 1));
-                let yc = sy.clamp(0.0, to_f64(sh - 1));
-                let (x0, y0) = (floor_index(xc), floor_index(yc));
-                let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
-                let (fx, fy) = (xc - to_f64(x0), yc - to_f64(y0));
-                let (r0, r1) = (src.row(y0), src.row(y1));
-                let top = f64::from(r0[x0]).mul_add(1.0 - fx, f64::from(r0[x1]) * fx);
-                let bot = f64::from(r1[x0]).mul_add(1.0 - fx, f64::from(r1[x1]) * fx);
-                *px = clamp_u8(top.mul_add(1.0 - fy, bot * fy));
+    for (oy, row) in data.chunks_exact_mut(out_w.max(1)).enumerate() {
+        for (ox, px) in row.iter_mut().enumerate() {
+            let (sx, sy) = map(to_f64(ox), to_f64(oy));
+            if !(sx >= -0.5 && sy >= -0.5 && sx <= max_x && sy <= max_y) {
+                continue;
             }
-        });
+            let xc = sx.clamp(0.0, to_f64(sw - 1));
+            let yc = sy.clamp(0.0, to_f64(sh - 1));
+            let (x0, y0) = (floor_index(xc), floor_index(yc));
+            let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
+            let (fx, fy) = (xc - to_f64(x0), yc - to_f64(y0));
+            let (r0, r1) = (src.row(y0), src.row(y1));
+            let top = f64::from(r0[x0]).mul_add(1.0 - fx, f64::from(r0[x1]) * fx);
+            let bot = f64::from(r1[x0]).mul_add(1.0 - fx, f64::from(r1[x1]) * fx);
+            *px = clamp_u8(top.mul_add(1.0 - fy, bot * fy));
+        }
+    }
     GrayPage {
         width: out_w,
         height: out_h,
