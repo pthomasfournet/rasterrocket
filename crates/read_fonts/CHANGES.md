@@ -31,3 +31,9 @@ It is not published and changes are not sent upstream.
   Resource-Font`, which some producers write into `FontFile` streams). The
   dictionary parse that follows still rejects non-fonts. Test:
   `resource_font_header_accepted`.
+- `ps::type1::Parser::read_proc`: a token ending at the closing brace, as
+  in the `/OtherSubrs` entry `dup 3 {3} executeonly put` of TeX-derived
+  fonts, consumed the brace; the procedure then ran on through the
+  following entries and the font was rejected for lacking `/CharStrings`.
+  The closing brace is now checked before each token is read. Test:
+  `parse_procs_with_tokens_ending_at_the_brace`.

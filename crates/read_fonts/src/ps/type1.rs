@@ -908,10 +908,16 @@ impl<'a> Parser<'a> {
     }
 
     fn read_proc(&mut self, start: usize) -> Option<Token<'a>> {
-        while self.next_byte()? != b'}' {
-            // This handles nested procedures
+        // The closing brace is recognized before tokenizing, so a token
+        // that ends at the brace (`{3}`) does not swallow it.  Nested
+        // procedures are consumed whole by `next`.
+        loop {
+            self.skip_whitespace()?;
+            if self.peek_byte()? == b'}' {
+                self.pos += 1;
+                break;
+            }
             self.next()?;
-            self.skip_whitespace();
         }
         let end = self.pos;
         if self.data.get(end - 1) != Some(&b'}') {
@@ -1686,6 +1692,20 @@ mod tests {
             &[
                 Token::Proc(b"a {nested 20} proc "),
                 Token::Proc(b"simple proc"),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_procs_with_tokens_ending_at_the_brace() {
+        check_tokens(
+            "{3} {} {16 16} {a{b}c} /Next",
+            &[
+                Token::Proc(b"3"),
+                Token::Proc(b""),
+                Token::Proc(b"16 16"),
+                Token::Proc(b"a{b}c"),
+                Token::Name(b"Next"),
             ],
         );
     }

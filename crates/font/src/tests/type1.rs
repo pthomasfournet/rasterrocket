@@ -10,6 +10,9 @@
 //! | `Aacute` | `seac` of `A` (code 65) and `acute` (code 194) |
 //! | `B` | box whose top edge is a flex (`othersubr 0/1/2`) |
 //! | `C` | box with an advance width computed by `div` |
+//!
+//! The private dictionary defines the conventional `/OtherSubrs` array,
+//! whose procedures include the single-token `{3}`.
 
 const EEXEC_KEY: u16 = 55665;
 const CHARSTRING_KEY: u16 = 4330;
@@ -266,6 +269,12 @@ fn private_section() -> Vec<u8> {
 /ND{noaccess def}executeonly def\n\
 /NP{noaccess put}executeonly def\n\
 /lenIV 4 def\n\
+/OtherSubrs 4 array\n\
+dup 0 {} put\n\
+dup 1 {} put\n\
+dup 2 {} put\n\
+dup 3 {3} executeonly put\n\
+noaccess def\n\
 /BlueValues [] def\n"
         .to_vec();
     let subrs = subrs();

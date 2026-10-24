@@ -421,8 +421,9 @@ in each `UPSTREAM.toml`, every local change listed in each `CHANGES.md`.
 `crates/font_test_data` is an unmodified copy of upstream's test fonts so both
 upstream test suites run (`cargo test -p read-fonts -p skrifa`). The local
 changes make embedded PDF font programs load where upstream rejected them
-(Type 1 programs with an unknown `/Encoding` or a `%!PS-Adobe-3.0
-Resource-Font` header; sfnt programs without `hhea`/`hmtx`).
+(Type 1 programs with an unknown `/Encoding`, a `%!PS-Adobe-3.0
+Resource-Font` header or single-token procedures such as `{3}`; sfnt
+programs without `hhea`/`hmtx`).
 
 ### 3.9 `rasterrocket-cli`
 
