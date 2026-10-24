@@ -16,7 +16,7 @@
 void blit_image(
     uint3 gid : SV_DispatchThreadID,
     uniform StructuredBuffer<uint8_t> src,
-    uniform RWStructuredBuffer<uint8_t> dst_rgba,
+    uniform RWStructuredBuffer<uint> dst_rgba,   // one RGBA8 pixel per word, R in the low byte
     uniform StructuredBuffer<uint> cols,
     uniform StructuredBuffer<uint> rows,
     uniform int src_w,
@@ -49,19 +49,15 @@ void blit_image(
         return;
     }
 
-    int dst_off = (dy * dst_w + dx) * 4;
+    uint dst_px = uint(dy * dst_w + dx);
     if (src_layout == 0) {
         int src_off = (iy * src_w + ix) * 3;
-        dst_rgba[dst_off + 0] = src[src_off + 0];
-        dst_rgba[dst_off + 1] = src[src_off + 1];
-        dst_rgba[dst_off + 2] = src[src_off + 2];
-        dst_rgba[dst_off + 3] = uint8_t(255);
+        dst_rgba[dst_px] = uint(src[src_off + 0])
+                         | (uint(src[src_off + 1]) << 8)
+                         | (uint(src[src_off + 2]) << 16)
+                         | 0xFF000000u;
     } else {
-        int src_off = iy * src_w + ix;
-        uint8_t g = src[src_off];
-        dst_rgba[dst_off + 0] = g;
-        dst_rgba[dst_off + 1] = g;
-        dst_rgba[dst_off + 2] = g;
-        dst_rgba[dst_off + 3] = uint8_t(255);
+        uint g = uint(src[iy * src_w + ix]);
+        dst_rgba[dst_px] = g | (g << 8) | (g << 16) | 0xFF000000u;
     }
 }

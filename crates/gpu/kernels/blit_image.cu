@@ -66,21 +66,16 @@ extern "C" __global__ void blit_image(
         return;
     }
 
-    int dst_off = (dy * dst_w + dx) * 4;
+    // The page buffer base is allocation-aligned and every pixel is 4
+    // bytes, so each output pixel is one aligned 32-bit store.
+    uchar4* dst = reinterpret_cast<uchar4*>(dst_rgba) + ((size_t)dy * dst_w + dx);
     if (src_layout == 0) {
         // RGB: 3 bytes per source pixel
         int src_off = (iy * src_w + ix) * 3;
-        dst_rgba[dst_off + 0] = src[src_off + 0];
-        dst_rgba[dst_off + 1] = src[src_off + 1];
-        dst_rgba[dst_off + 2] = src[src_off + 2];
-        dst_rgba[dst_off + 3] = 255;
+        *dst = make_uchar4(src[src_off + 0], src[src_off + 1], src[src_off + 2], 255);
     } else {
         // Gray: 1 byte per source pixel; broadcast to RGB.
-        int src_off = iy * src_w + ix;
-        unsigned char g = src[src_off];
-        dst_rgba[dst_off + 0] = g;
-        dst_rgba[dst_off + 1] = g;
-        dst_rgba[dst_off + 2] = g;
-        dst_rgba[dst_off + 3] = 255;
+        unsigned char g = src[iy * src_w + ix];
+        *dst = make_uchar4(g, g, g, 255);
     }
 }
