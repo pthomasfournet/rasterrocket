@@ -128,9 +128,10 @@ pub struct Quad {
 }
 
 impl Quad {
-    /// The pixels of a `width × height` image that the quad touches, as
-    /// their bounding rectangle.  `None` when the quad does not overlap the
-    /// image or a corner is not finite.
+    /// The axis-aligned bounding rectangle of the quad in a `width × height`
+    /// image: the pixels whose centres lie within the corners' extent on
+    /// both axes.  `None` when no pixel centre does or a corner is not
+    /// finite.
     #[must_use]
     pub fn bounding_rect(&self, width: usize, height: usize) -> Option<Rect> {
         if !self.corners.iter().flatten().all(|v| v.is_finite()) {
@@ -144,11 +145,13 @@ impl Quad {
                     (lo.min(v), hi.max(v))
                 })
         };
-        // Pixel i covers [i − 0.5, i + 0.5): it is touched by [lo, hi] when
-        // i > lo − 0.5 and i < hi + 0.5.
+        // Pixel centres i with lo ≤ i ≤ hi.
         let span = |(lo, hi): (f64, f64), len: usize| {
-            let first = floor_index(lo + 0.5).min(len);
-            let end = floor_index((hi + 0.5).ceil()).min(len);
+            if hi < 0.0 {
+                return None;
+            }
+            let first = floor_index(lo.ceil()).min(len);
+            let end = (floor_index(hi) + 1).min(len);
             (end > first).then(|| (first, end - first))
         };
         let (x, w) = span(fold(0), width)?;
@@ -317,7 +320,7 @@ mod tests {
             Some(Rect {
                 x: 10,
                 y: 5,
-                width: 12,
+                width: 11,
                 height: 26
             })
         );
@@ -333,10 +336,12 @@ mod tests {
                 height: 30
             })
         );
-        let outside = Quad {
-            corners: [[50.0, 0.0], [60.0, 0.0], [60.0, 10.0], [50.0, 10.0]],
-        };
-        assert_eq!(outside.bounding_rect(40, 30), None);
+        for x in [50.0, -20.0] {
+            let outside = Quad {
+                corners: [[x, 0.0], [x + 10.0, 0.0], [x + 10.0, 10.0], [x, 10.0]],
+            };
+            assert_eq!(outside.bounding_rect(40, 30), None, "x {x}");
+        }
     }
 
     #[test]
