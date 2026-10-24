@@ -7,15 +7,19 @@
 //!
 //! # Tiers (x86-64)
 //!
-//! 1. **AVX-512 BW+VL**, spans ≥ 32 px: 32 pixels (96 destination bytes) per
+//! 1. **AVX-512 BW+VL**, spans ≥ 2 px: 32 pixels (96 destination bytes) per
 //!    iteration.  The destination bytes stay interleaved: each 32-byte third
 //!    of the block is widened to 32 u16 lanes, its per-lane `a_src` is drawn
 //!    from the block's 32-pixel alpha vector with `vpermw` (lane `k` of third
 //!    `g` belongs to pixel `(32g + k) / 3`) and its per-lane source colour is
 //!    a constant permutation of the RGB triple — no deinterleave or
-//!    re-interleave.  Remainder pixels go through the scalar loop.
-//! 2. **Scalar** per-pixel loop, also the tier for every other architecture.
-//!    LLVM auto-vectorises it under `-C target-cpu=native`.
+//!    re-interleave.  A remainder of 2–31 pixels is one further block under
+//!    byte masks (`vmovdqu8` with a lane mask: unselected bytes are neither
+//!    read nor written); a single remaining pixel goes through the scalar
+//!    loop.
+//! 2. **Scalar** per-pixel loop, also the tier for every other architecture
+//!    and for one-pixel spans.  LLVM auto-vectorises it under
+//!    `-C target-cpu=native`.
 //!
 //! # div255
 //!
@@ -124,7 +128,14 @@ const LANE_CHANNEL: [[i16; 32]; 3] = [
     lane_table(2, false),
 ];
 
-/// AVX-512 tier: whole 32-pixel blocks, scalar loop for the remainder.
+/// Shortest remainder the AVX-512 tier hands to the masked block; a shorter
+/// one (a single pixel) takes the scalar loop, which is cheaper there.
+#[cfg(target_arch = "x86_64")]
+const MASKED_MIN_PX: usize = 2;
+
+/// AVX-512 tier: whole 32-pixel blocks, then the remainder of 2–31 pixels as
+/// one more block under byte masks, so no byte past the span is read or
+/// written.  A one-pixel remainder takes the scalar loop.
 ///
 /// # Safety
 ///
@@ -133,12 +144,18 @@ const LANE_CHANNEL: [[i16; 32]; 3] = [
 #[target_feature(enable = "avx512bw,avx512vl")]
 unsafe fn composite_avx512(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
     use std::arch::x86_64::{
-        __m512i, _mm256_loadu_si256, _mm256_storeu_si256, _mm512_add_epi16, _mm512_cvtepi16_epi8,
+        __m256i, __m512i, __mmask32, _mm256_loadu_si256, _mm256_mask_storeu_epi8,
+        _mm256_maskz_loadu_epi8, _mm256_storeu_si256, _mm512_add_epi16, _mm512_cvtepi16_epi8,
         _mm512_cvtepu8_epi16, _mm512_loadu_si512, _mm512_mullo_epi16, _mm512_permutexvar_epi16,
         _mm512_set1_epi16, _mm512_set1_epi64, _mm512_srli_epi16, _mm512_sub_epi16,
     };
 
-    // Only whole blocks that both slices cover go through the vector path.
+    /// Mask of the low `min(bits, 32)` lanes.
+    const fn low_bits(bits: usize) -> __mmask32 {
+        if bits >= 32 { !0 } else { (1 << bits) - 1 }
+    }
+
+    // Only pixels that both slices cover are processed.
     let n = shape.len().min(dst.len() / 3);
     let blocks = n / BLOCK_PX;
 
@@ -173,32 +190,58 @@ unsafe fn composite_avx512(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u
             ],
         )
     };
+    // Per-pixel a_src of a block's 32 coverage bytes.
+    let alpha = |cov: __m256i| div255(_mm512_mullo_epi16(_mm512_cvtepu8_epi16(cov), a_in));
+    // Composited bytes of one 32-byte third `d` of a block.
+    let blend = |d: __m256i, a_src: __m512i, third: usize| {
+        let a = _mm512_permutexvar_epi16(pixel_of[third], a_src);
+        let inv = _mm512_sub_epi16(v255, a);
+        let v = _mm512_add_epi16(
+            _mm512_mullo_epi16(inv, _mm512_cvtepu8_epi16(d)),
+            _mm512_mullo_epi16(a, src_of[third]),
+        );
+        _mm512_cvtepi16_epi8(div255(v))
+    };
 
     let sp = shape.as_ptr();
     let dp = dst.as_mut_ptr();
     for block in 0..blocks {
         let px = block * BLOCK_PX;
         // SAFETY: px + 32 ≤ n ≤ shape.len().
-        let cov = unsafe { _mm256_loadu_si256(sp.add(px).cast()) };
-        let a_src = div255(_mm512_mullo_epi16(_mm512_cvtepu8_epi16(cov), a_in));
+        let a_src = alpha(unsafe { _mm256_loadu_si256(sp.add(px).cast()) });
         for third in 0..3 {
             let off = px * 3 + third * 32;
             // SAFETY: off + 32 ≤ 3n ≤ dst.len().
             unsafe {
-                let d = _mm512_cvtepu8_epi16(_mm256_loadu_si256(dp.add(off).cast()));
-                let a = _mm512_permutexvar_epi16(pixel_of[third], a_src);
-                let inv = _mm512_sub_epi16(v255, a);
-                let v = _mm512_add_epi16(
-                    _mm512_mullo_epi16(inv, d),
-                    _mm512_mullo_epi16(a, src_of[third]),
-                );
-                _mm256_storeu_si256(dp.add(off).cast(), _mm512_cvtepi16_epi8(div255(v)));
+                let d = _mm256_loadu_si256(dp.add(off).cast());
+                _mm256_storeu_si256(dp.add(off).cast(), blend(d, a_src, third));
             }
         }
     }
 
     let done = blocks * BLOCK_PX;
-    composite_scalar(&mut dst[done * 3..], src, a_input, &shape[done..]);
+    let rest = n - done;
+    if rest < MASKED_MIN_PX {
+        composite_scalar(&mut dst[done * 3..], src, a_input, &shape[done..]);
+        return;
+    }
+    // SAFETY: the masked load reads only coverage bytes done .. n.
+    let a_src = alpha(unsafe { _mm256_maskz_loadu_epi8(low_bits(rest), sp.add(done).cast()) });
+    let bytes = rest * 3;
+    for third in 0..3 {
+        let first = third * 32;
+        if first >= bytes {
+            break;
+        }
+        let k = low_bits(bytes - first);
+        let off = done * 3 + first;
+        // SAFETY: the masked load and store touch only destination bytes
+        // off .. 3n, all inside dst.
+        unsafe {
+            let d = _mm256_maskz_loadu_epi8(k, dp.add(off).cast());
+            _mm256_mask_storeu_epi8(dp.add(off).cast(), k, blend(d, a_src, third));
+        }
+    }
 }
 
 // ── Per-arch dispatch ─────────────────────────────────────────────────────────
@@ -206,7 +249,7 @@ unsafe fn composite_avx512(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn dispatch_composite(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
-    if shape.len() >= BLOCK_PX
+    if shape.len() >= MASKED_MIN_PX
         && is_x86_feature_detected!("avx512bw")
         && is_x86_feature_detected!("avx512vl")
     {
@@ -321,30 +364,56 @@ mod tests {
         }
     }
 
-    /// Direct call into the AVX-512 tier with slices that are not a whole
-    /// number of blocks, so its own scalar remainder is exercised regardless
-    /// of the dispatcher's width gate.  Skipped where the CPU lacks it.
+    /// Direct call into the AVX-512 tier for every span length 0..=64 —
+    /// whole blocks, masked remainders of every size and the one-pixel
+    /// scalar remainder — against the scalar tier, over pseudorandom
+    /// coverage, destination, source colour and opacity.  Both slices sit
+    /// between guard bytes: destination guards must come back unchanged, and
+    /// full-coverage guards around the coverage slice make any coverage byte
+    /// read past the span change the output.  Skipped where the CPU lacks
+    /// AVX-512 BW+VL.
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn avx512_tier_matches_reference() {
+    fn avx512_tier_matches_scalar_at_every_length() {
+        const GUARD: usize = 64;
         if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512vl") {
             return;
         }
-        for n in [1usize, 31, 32, 33, 63, 64, 65, 96, 100, 129] {
-            #[expect(clippy::cast_possible_truncation, reason = "n ≤ 129")]
-            let seed = 0x9e37_79b9 ^ (n as u32);
-            let shape = pseudorandom(n, seed);
-            let initial = pseudorandom(n * 3, seed.rotate_left(11));
-            let src = [33u8, 66, 99];
+        for n in 0..=64usize {
+            for trial in 0..16u32 {
+                #[expect(clippy::cast_possible_truncation, reason = "n ≤ 64")]
+                let seed = 0x9e37_79b9 ^ ((n as u32) << 8) ^ trial;
+                let mut shape = vec![0xFFu8; GUARD + n + GUARD];
+                shape[GUARD..GUARD + n].copy_from_slice(&pseudorandom(n, seed));
+                let shape = &shape[GUARD..GUARD + n];
+                let initial = pseudorandom(n * 3, seed.rotate_left(11));
+                let params = pseudorandom(4, seed.rotate_left(23));
+                let src = [params[0], params[1], params[2]];
+                let a_input = params[3];
 
-            let mut want = initial.clone();
-            reference(&mut want, src, 180, &shape);
+                let mut want = initial.clone();
+                composite_scalar(&mut want, src, a_input, shape);
 
-            let mut got = initial;
-            // SAFETY: avx512bw + avx512vl confirmed present above.
-            unsafe { composite_avx512(&mut got, src, 180, &shape) };
+                let mut buf = vec![0xA5u8; GUARD + n * 3 + GUARD];
+                buf[GUARD..GUARD + n * 3].copy_from_slice(&initial);
+                // SAFETY: avx512bw + avx512vl confirmed present above.
+                unsafe {
+                    composite_avx512(&mut buf[GUARD..GUARD + n * 3], src, a_input, shape);
+                }
 
-            assert_eq!(got, want, "n={n}");
+                assert_eq!(
+                    &buf[GUARD..GUARD + n * 3],
+                    want.as_slice(),
+                    "n={n} trial={trial} src={src:?} a_input={a_input}"
+                );
+                assert!(
+                    buf[..GUARD]
+                        .iter()
+                        .chain(&buf[GUARD + n * 3..])
+                        .all(|&b| b == 0xA5),
+                    "n={n} trial={trial}: bytes outside the span were written"
+                );
+            }
         }
     }
 
