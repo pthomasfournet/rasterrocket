@@ -1,0 +1,250 @@
+//! Backend selection policy and session configuration.
+
+#[cfg(doc)]
+use crate::{PageDiagnostics, RasterError, RasterSession, open_session};
+
+// ── Backend policy ────────────────────────────────────────────────────────────
+
+/// Controls which compute backend is used for image decoding and GPU fills.
+///
+/// The default is [`Auto`](BackendPolicy::Auto), which prefers Vulkan when
+/// compiled in, falls through to CUDA when Vulkan is unavailable, and finally
+/// to the CPU paths.  The `Force*` variants turn silent fallbacks into hard
+/// errors so you can tell immediately whether the expected hardware path is
+/// actually being taken.
+///
+/// At runtime, [`SessionConfig::default()`] resolves the policy via
+/// [`BackendPolicy::from_env`], so users can switch backends per process by
+/// setting `PDF_RASTER_BACKEND={auto,cpu,cuda,vaapi,vulkan}` without
+/// rebuilding.  Explicit construction (`SessionConfig { policy: ..., .. }`)
+/// bypasses the env var.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendPolicy {
+    /// Auto: prefer Vulkan when present, fall through to CUDA, then CPU.
+    /// Silent fallback at every step.
+    #[default]
+    Auto,
+    /// CPU only.  All GPU init is skipped; no CUDA or VA-API calls are made.
+    CpuOnly,
+    /// Require CUDA (nvJPEG, nvJPEG2000, GPU AA fill, ICC CLUT).
+    /// Returns [`RasterError::BackendUnavailable`] if CUDA initialisation fails
+    /// rather than falling back to CPU.
+    ForceCuda,
+    /// Require VA-API JPEG decoding.
+    /// Returns [`RasterError::BackendUnavailable`] if the VA-API device cannot
+    /// be opened rather than falling back to CPU.
+    ///
+    /// Only available when the `vaapi` Cargo feature is enabled.
+    #[cfg(feature = "vaapi")]
+    ForceVaapi,
+    /// Require the Vulkan compute backend.  Returns
+    /// [`RasterError::BackendUnavailable`] if Vulkan initialisation fails
+    /// (or the binary was built without `--features vulkan`).
+    ///
+    /// AA fill and tile fill kernels dispatch through `VulkanBackend`;
+    /// the device-resident image cache (`DeviceImageCache`,
+    /// `DevicePageBuffer`) is CUDA-only, so under `ForceVulkan` JPEG
+    /// images decode and composite via the CPU path, and ICC CMYK→RGB
+    /// also stays on the CPU AVX-512 fallback (the behaviour from before
+    /// the device-resident cache existed).
+    ForceVulkan,
+}
+
+impl BackendPolicy {
+    /// Resolve a policy from the `PDF_RASTER_BACKEND` environment variable.
+    ///
+    /// Convenience wrapper for [`BackendPolicy::from_env_var`] with the
+    /// canonical name.  Accepted values (case-insensitive): `auto`, `cpu`,
+    /// `cuda`, `vaapi`, `vulkan`.  Unset, empty, or unrecognised values
+    /// fall back to [`BackendPolicy::Auto`] — unrecognised values also
+    /// emit a stderr warning so a typo doesn't silently mis-route.
+    ///
+    /// Precedence: an explicit `--backend` flag (CLI) wins over
+    /// `PDF_RASTER_BACKEND`, which in turn wins over the compile-time
+    /// default.  This lets a binary ship Vulkan-default while users
+    /// override per-process without recompiling.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_env_var("PDF_RASTER_BACKEND")
+    }
+
+    /// Resolve a policy from a named environment variable.
+    ///
+    /// Used by tools (e.g. the contest harness) that want their own
+    /// env-var namespace separate from `PDF_RASTER_BACKEND` so a
+    /// developer's personal default doesn't leak into bench runs.
+    /// Same value vocabulary and warning semantics as
+    /// [`BackendPolicy::from_env`].
+    ///
+    /// Whitespace around the value is trimmed so `PDF_RASTER_BACKEND=" cuda "`
+    /// (e.g. quoted in a shell config that didn't strip) still resolves.
+    /// Matching is case-insensitive.  Unrecognised values emit a
+    /// `log::warn!` (not stderr) so library embedders control the sink.
+    #[must_use]
+    pub fn from_env_var(name: &str) -> Self {
+        // Unset / empty / unreadable env var → Auto with no allocation.
+        let Some(raw) = std::env::var_os(name) else {
+            return Self::Auto;
+        };
+        let Some(s) = raw.to_str() else {
+            log::warn!("{name} contains non-UTF-8 bytes; using Auto");
+            return Self::Auto;
+        };
+        s.parse().unwrap_or_else(|()| {
+            log::warn!(
+                "{name}={s:?} not recognised; using Auto. \
+                 Valid values: auto, cpu, cuda, vaapi, vulkan."
+            );
+            Self::Auto
+        })
+    }
+}
+
+impl std::str::FromStr for BackendPolicy {
+    type Err = ();
+
+    /// Parse a backend name.  Whitespace is trimmed and matching is
+    /// case-insensitive.  Empty input maps to `Auto`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::CpuOnly),
+            "cuda" => Ok(Self::ForceCuda),
+            #[cfg(feature = "vaapi")]
+            "vaapi" => Ok(Self::ForceVaapi),
+            "vulkan" => Ok(Self::ForceVulkan),
+            _ => Err(()),
+        }
+    }
+}
+
+// ── Session configuration ─────────────────────────────────────────────────────
+
+/// Default VA-API DRM render node path used by [`SessionConfig`] and the CLI.
+pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+
+/// Configuration for opening a [`RasterSession`].
+///
+/// Passed to [`open_session`].  Use [`Default::default()`] for the standard
+/// behaviour: backend resolved from `PDF_RASTER_BACKEND` env var (or `Auto`
+/// if unset), default DRM render node, image-cache prefetch off.
+///
+/// This struct is `#[non_exhaustive]`: construct it via [`SessionConfig::default()`]
+/// or [`SessionConfig::with_policy()`] rather than a struct literal.  This allows
+/// new fields to be added without a breaking change — in particular, the `prefetch`
+/// field only exists when the `cache` Cargo feature is enabled.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    /// Backend selection policy.
+    pub policy: BackendPolicy,
+    /// VA-API DRM render node.  Default: `/dev/dri/renderD128`.
+    ///
+    /// Only relevant when the `vaapi` feature is enabled and `policy` is not
+    /// [`CpuOnly`](BackendPolicy::CpuOnly) or [`ForceCuda`](BackendPolicy::ForceCuda).
+    pub vaapi_device: String,
+    /// Whether to spawn the image-cache prefetcher at session open.
+    /// Default `false` — opt-in because the prefetcher reads every
+    /// page's resource dict eagerly, which is wasted work for short
+    /// single-page renders.  Long renders, multi-pass renders (OCR
+    /// pipelines), and re-renders of the same PDF benefit.
+    ///
+    /// No effect when the `cache` feature is disabled or when GPU
+    /// initialisation fails (no cache → nowhere to prefetch into).
+    #[cfg(feature = "cache")]
+    pub prefetch: bool,
+    /// Whether the caller has authorised qpdf-assisted decryption of an
+    /// encrypted (PDF Standard Security Handler) document.
+    ///
+    /// Default `false`.  When the document is encrypted and this is
+    /// `false`, [`open_session`] returns a clear [`RasterError::Pdf`]
+    /// explaining the document is encrypted (never the misleading
+    /// "no pages").  The CLI sets this only after an interactive
+    /// private-copy / liability confirmation or an explicit
+    /// `--decrypt-owned` / `RROCKET_DECRYPT_OWNED=1` operator bypass; the
+    /// private QA harness sets it unconditionally for its owned-texts
+    /// automation.  No effect on unencrypted documents.
+    pub decrypt_authorized: bool,
+    /// Whether an image that cannot be decoded or drawn fails its page.
+    ///
+    /// Default `false`: the image is skipped, the page renders without it,
+    /// a warning naming the page and image is logged, and the failure is
+    /// reported in [`PageDiagnostics::image_failures`].  When `true` the
+    /// page returns [`RasterError::ImageDecodeFailed`] instead.
+    pub strict: bool,
+}
+
+impl SessionConfig {
+    /// Build a config with the given backend policy and otherwise-default
+    /// fields, **without** consulting `PDF_RASTER_BACKEND`.
+    ///
+    /// Use this when you have already resolved the policy from a more
+    /// specific source (a CLI flag, a different env var, an explicit
+    /// argument) and don't want `Default::default()`'s env-var lookup
+    /// firing — which would emit a spurious warning if the env var were
+    /// set to a malformed value, even though that value is about to be
+    /// overwritten anyway.
+    #[must_use]
+    pub fn with_policy(policy: BackendPolicy) -> Self {
+        Self {
+            policy,
+            vaapi_device: DEFAULT_VAAPI_DEVICE.to_owned(),
+            #[cfg(feature = "cache")]
+            prefetch: false,
+            decrypt_authorized: false,
+            strict: false,
+        }
+    }
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self::with_policy(BackendPolicy::from_env())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackendPolicy;
+
+    #[test]
+    fn backend_policy_parses_known_names() {
+        use std::str::FromStr;
+        assert_eq!(BackendPolicy::from_str("auto"), Ok(BackendPolicy::Auto));
+        assert_eq!(BackendPolicy::from_str("cpu"), Ok(BackendPolicy::CpuOnly));
+        assert_eq!(
+            BackendPolicy::from_str("cuda"),
+            Ok(BackendPolicy::ForceCuda)
+        );
+        #[cfg(feature = "vaapi")]
+        assert_eq!(
+            BackendPolicy::from_str("vaapi"),
+            Ok(BackendPolicy::ForceVaapi)
+        );
+        assert_eq!(
+            BackendPolicy::from_str("vulkan"),
+            Ok(BackendPolicy::ForceVulkan)
+        );
+    }
+
+    #[test]
+    fn backend_policy_empty_is_auto() {
+        use std::str::FromStr;
+        assert_eq!(BackendPolicy::from_str(""), Ok(BackendPolicy::Auto));
+    }
+
+    #[test]
+    fn backend_policy_trims_and_ignores_case() {
+        use std::str::FromStr;
+        assert_eq!(
+            BackendPolicy::from_str("  CUDA  "),
+            Ok(BackendPolicy::ForceCuda)
+        );
+    }
+
+    #[test]
+    fn backend_policy_rejects_unknown() {
+        use std::str::FromStr;
+        assert!(BackendPolicy::from_str("metal").is_err());
+    }
+}
