@@ -37,8 +37,9 @@
 //!   vertical displacement only (glyphs foreshortened near a spine stay
 //!   narrow), and a page needs at least five tracked text lines.
 //!
-//! Every function runs on the calling thread and keeps no global state;
-//! the crate has no dependencies beyond `std`.
+//! Every function runs on the calling thread, keeps no global state and
+//! returns on any input without panicking; the crate has no dependencies
+//! beyond `std`.
 
 #![cfg_attr(
     not(test),
