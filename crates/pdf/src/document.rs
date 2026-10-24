@@ -1,7 +1,9 @@
-//! The top-level [`Document`] type: lazy, memory-mapped PDF reader.
+//! The top-level [`Document`] type: lazy PDF reader.
 //!
 //! Open a PDF with [`Document::open`].  Objects are resolved on demand from the
-//! memory-mapped file — the constructor only parses the xref table and trailer.
+//! file bytes — the constructor only parses the xref table and trailer.  Files
+//! of at least [`MMAP_MIN_LEN`] bytes are memory-mapped; smaller files are
+//! read into memory.
 
 use std::{
     collections::HashMap,
@@ -31,6 +33,16 @@ use crate::{
 /// bound. This cap mirrors the per-stream `MAX_DECOMPRESSED` discipline.
 const MAX_PAGE_CONTENT: usize = 512 * 1024 * 1024; // 512 MiB
 
+/// Smallest file [`Document::open`] memory-maps; shorter files are read into
+/// an owned buffer.
+///
+/// Opening touches only the trailer, the xref sections and the objects they
+/// lead to, so a mapping costs a few page faults while a read copies the whole
+/// file.  Below this length the copy is cheaper than setting up the mapping,
+/// and an owned buffer is immune to the file being modified or truncated
+/// while open (see [`map_file`]).
+const MMAP_MIN_LEN: u64 = 256 * 1024;
+
 /// Collect the indirect references from a `/Contents` array.
 ///
 /// Shared by the indirect-ref-to-array and direct-array arms of
@@ -59,9 +71,10 @@ fn collect_content_refs(arr: &[Object], page_id: ObjectId) -> Vec<ObjectId> {
 
 // ── Document ─────────────────────────────────────────────────────────────────
 
-/// A lazily-parsed PDF document backed by a memory-mapped file.
+/// A lazily-parsed PDF document backed by a memory-mapped file or an owned
+/// buffer.
 pub struct Document {
-    /// The memory-mapped file data.  `Arc` so callers can hold byte slices.
+    /// The file bytes.  `Arc` so callers can hold byte slices.
     data: Arc<MmapOrVec>,
     xref: XrefTable,
     /// Per-object parse cache.  `None` = not yet resolved.
@@ -89,7 +102,8 @@ pub struct Document {
     decrypt_guard: DecryptGuard,
 }
 
-/// Memory source: mmap for file paths, Vec<u8> for in-memory use (tests, fuzz).
+/// Memory source: a mapping for files of at least [`MMAP_MIN_LEN`] bytes, an
+/// owned buffer for shorter files and for bytes supplied by the caller.
 enum MmapOrVec {
     Mapped(Mmap),
     Owned(Vec<u8>),
@@ -134,9 +148,13 @@ impl Document {
     /// Reads and parses only the xref table(s) and trailer.  Individual objects
     /// are parsed on first access and cached for subsequent calls.
     ///
+    /// A file of at least [`MMAP_MIN_LEN`] bytes is memory-mapped, so it must
+    /// not be modified or truncated while the returned `Document` is alive
+    /// (see [`map_file`]); a shorter file is copied into memory.
+    ///
     /// # Errors
-    /// [`PdfError::Io`] if the file cannot be opened or mapped; otherwise the
-    /// errors of [`Self::from_bytes_owned`].
+    /// [`PdfError::Io`] if the file cannot be opened, read or mapped;
+    /// otherwise the errors of [`Self::from_bytes_owned`].
     pub fn open(path: &Path) -> Result<Self, PdfError> {
         Self::open_at(path, DecryptGuard::none())
     }
@@ -181,10 +199,20 @@ impl Document {
     /// Open `path` and take ownership of `guard` (the qpdf temp-file RAII
     /// anchor, or a no-op guard).
     fn open_at(path: &Path, guard: DecryptGuard) -> Result<Self, PdfError> {
-        let file = std::fs::File::open(path)?;
-        crate::madvise::advise_random(&file);
-        let data = Arc::new(MmapOrVec::Mapped(map_file(&file)?));
-        Self::from_bytes_with_guard(data, guard)
+        use std::io::Read as _;
+
+        let mut file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let data = if len < MMAP_MIN_LEN {
+            // `len < MMAP_MIN_LEN`, so the capacity conversion cannot fail.
+            let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+            let _ = file.read_to_end(&mut bytes)?;
+            MmapOrVec::Owned(bytes)
+        } else {
+            crate::madvise::advise_random(&file);
+            MmapOrVec::Mapped(map_file(&file)?)
+        };
+        Self::from_bytes_with_guard(Arc::new(data), guard)
     }
 
     /// Construct from PDF bytes already in memory.
@@ -942,6 +970,41 @@ mod tests {
         )
         .unwrap();
         out.into_bytes()
+    }
+
+    /// Write `bytes` to a fresh temporary file and return its handle.
+    fn temp_pdf(bytes: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("create temp file");
+        file.write_all(bytes).expect("write temp file");
+        file
+    }
+
+    /// A file shorter than `MMAP_MIN_LEN` is copied into memory, so
+    /// truncating it after open leaves the document's bytes intact.
+    #[test]
+    fn small_file_is_read_and_survives_truncation() {
+        let bytes = pdf_with_objects(&[(2, "(small)".to_owned())]);
+        assert!((bytes.len() as u64) < MMAP_MIN_LEN);
+        let file = temp_pdf(&bytes);
+        let doc = Document::open(file.path()).expect("opens");
+        assert!(matches!(*doc.data, MmapOrVec::Owned(_)));
+        file.as_file().set_len(0).expect("truncate");
+        let obj = doc.get_object((2, 0)).expect("object 2");
+        assert_eq!(obj.as_str(), Some(&b"small"[..]));
+        assert_eq!(doc.bytes(), &bytes[..]);
+    }
+
+    /// A file of at least `MMAP_MIN_LEN` bytes is memory-mapped.
+    #[test]
+    fn large_file_is_mapped() {
+        let padding = "a".repeat(usize::try_from(MMAP_MIN_LEN).unwrap());
+        let bytes = pdf_with_objects(&[(2, format!("({padding})"))]);
+        let file = temp_pdf(&bytes);
+        let doc = Document::open(file.path()).expect("opens");
+        assert!(matches!(*doc.data, MmapOrVec::Mapped(_)));
+        assert_eq!(doc.bytes(), &bytes[..]);
     }
 
     fn hex_stream(filter: &str) -> String {
