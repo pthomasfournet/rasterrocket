@@ -239,7 +239,7 @@ mod tests {
             &mut out,
             &mut data,
         );
-        assert!(!out.is_empty());
+        assert_ne!(out.len(), 0);
         for p in &out {
             assert!(p.y.abs() < 1e-10, "y={} should be 0", p.y);
         }

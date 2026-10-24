@@ -631,10 +631,6 @@ mod tests {
     // ── From<(f64, f64)> / From<PathPoint> ───────────────────────────────────
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "testing exact round-trip identity through From impls, not approximate equality"
-    )]
     fn from_tuple_pathpoint() {
         let p: PathPoint = (1.5_f64, 2.5_f64).into();
         assert_eq!(p.x, 1.5);

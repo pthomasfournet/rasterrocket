@@ -1220,10 +1220,8 @@ mod tests {
     }
     impl ImageSource for SolidColor {
         fn get_row(&mut self, _y: u32, row_buf: &mut [u8]) {
-            for chunk in row_buf.chunks_exact_mut(3) {
-                chunk[0] = self.r;
-                chunk[1] = self.g;
-                chunk[2] = self.b;
+            for chunk in row_buf.as_chunks_mut::<3>().0 {
+                *chunk = [self.r, self.g, self.b];
             }
         }
     }
@@ -1493,7 +1491,7 @@ mod tests {
     fn vflip_rows_empty_noop() {
         let mut data: Vec<u8> = vec![];
         vflip_rows(&mut data, 1);
-        assert!(data.is_empty());
+        assert_eq!(data, [0u8; 0]);
     }
 
     /// Vertical flip of a 2-row image actually reverses row order.
@@ -1503,11 +1501,9 @@ mod tests {
         struct TwoRowImage;
         impl ImageSource for TwoRowImage {
             fn get_row(&mut self, y: u32, row_buf: &mut [u8]) {
-                let (r, g, b) = if y == 0 { (255, 0, 0) } else { (0, 0, 255) };
-                for chunk in row_buf.chunks_exact_mut(3) {
-                    chunk[0] = r;
-                    chunk[1] = g;
-                    chunk[2] = b;
+                let rgb = if y == 0 { [255, 0, 0] } else { [0, 0, 255] };
+                for chunk in row_buf.as_chunks_mut::<3>().0 {
+                    *chunk = rgb;
                 }
             }
         }

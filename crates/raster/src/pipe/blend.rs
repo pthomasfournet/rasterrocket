@@ -337,13 +337,23 @@ mod tests {
     use super::*;
 
     /// Reference implementations from PDF 32000-1 §11.3.5, in floating point.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, 255] before the cast"
+    )]
     fn spec_exclusion(s: u8, d: u8) -> u8 {
         let (cs, cb) = (f64::from(s) / 255.0, f64::from(d) / 255.0);
-        (255.0 * (cs + cb - 2.0 * cs * cb))
+        (255.0 * (-2.0 * cs).mul_add(cb, cs + cb))
             .round()
             .clamp(0.0, 255.0) as u8
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, 255] before the cast"
+    )]
     fn spec_color_burn(s: u8, d: u8) -> u8 {
         let (cs, cb) = (f64::from(s) / 255.0, f64::from(d) / 255.0);
         if cb >= 1.0 {

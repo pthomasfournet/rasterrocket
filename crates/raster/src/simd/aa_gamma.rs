@@ -203,10 +203,7 @@ mod tests {
             .map(|_| {
                 rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 // (rng >> 24) is 0..=255; % 17 keeps it in the table's domain.
-                #[expect(clippy::cast_possible_truncation, reason = "(x >> 24) % 17 < 17")]
-                {
-                    ((rng >> 24) % 17) as u8
-                }
+                ((rng >> 24) % 17) as u8
             })
             .collect()
     }
@@ -222,7 +219,10 @@ mod tests {
     #[test]
     fn dispatch_matches_reference_at_every_length() {
         for n in 0..=200 {
-            let shape = coverage(n, 0x1234_5678 ^ n as u32);
+            let shape = coverage(
+                n,
+                0x1234_5678 ^ u32::try_from(n).expect("test lengths fit u32"),
+            );
             let (want, want_any) = reference(&shape);
             let mut got = shape.clone();
             let got_any = apply_aa_gamma(&mut got);
@@ -230,7 +230,10 @@ mod tests {
             assert_eq!(got_any, want_any, "any-covered flag differs at n={n}");
         }
         for n in [255usize, 256, 257, 1000, 2500] {
-            let shape = coverage(n, 0xdead_beef ^ n as u32);
+            let shape = coverage(
+                n,
+                0xdead_beef ^ u32::try_from(n).expect("test lengths fit u32"),
+            );
             let (want, want_any) = reference(&shape);
             let mut got = shape;
             assert_eq!(apply_aa_gamma(&mut got), want_any, "n={n}");
@@ -286,7 +289,10 @@ mod tests {
         for n in [
             16usize, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129, 1000,
         ] {
-            let shape = coverage(n, 0x9e37_79b9 ^ n as u32);
+            let shape = coverage(
+                n,
+                0x9e37_79b9 ^ u32::try_from(n).expect("test lengths fit u32"),
+            );
             let (want, want_any) = reference(&shape);
             if is_x86_feature_detected!("ssse3") && n >= 16 {
                 let mut got = shape.clone();

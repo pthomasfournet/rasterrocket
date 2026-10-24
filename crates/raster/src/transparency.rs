@@ -442,8 +442,8 @@ mod tests {
         // Fill the group with white pixels and full alpha.
         for y in 0..group.bitmap.height {
             let row = group.bitmap.row_bytes_mut(y);
-            for chunk in row.chunks_exact_mut(3) {
-                chunk.copy_from_slice(&[255, 255, 255]);
+            for chunk in row.as_chunks_mut::<3>().0 {
+                *chunk = [255, 255, 255];
             }
         }
         group
@@ -517,8 +517,8 @@ mod tests {
         // Fill group with red.
         for y in 0..group.bitmap.height {
             let row = group.bitmap.row_bytes_mut(y);
-            for chunk in row.chunks_exact_mut(3) {
-                chunk.copy_from_slice(&[255, 0, 0]);
+            for chunk in row.as_chunks_mut::<3>().0 {
+                *chunk = [255, 0, 0];
             }
         }
         group

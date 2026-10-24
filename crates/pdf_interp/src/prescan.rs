@@ -521,10 +521,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "bit-exact: max_ppi starts at literal 0.0 and the early-return path on page_width == 0.0 must leave it untouched — epsilon comparison would mask a regression where the no-op accidentally wrote a value"
-    )]
     fn update_max_ppi_zero_page_width_is_noop() {
         let mut max_ppi = 0.0f32;
         update_max_ppi(&mut max_ppi, 1000, 0.0);

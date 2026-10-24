@@ -492,7 +492,7 @@ mod tests {
         for y in 0..bmp.height {
             for (x, px) in bmp.row(y).iter().enumerate() {
                 if px.r != 0 || px.g != 0 || px.b != 0 {
-                    let x = x as u32;
+                    let x = u32::try_from(x).expect("bitmap column fits u32");
                     if first.is_none_or(|f| x < f) {
                         first = Some(x);
                     }
@@ -618,7 +618,7 @@ mod tests {
 
         // Allow one row of AA bleed on each side, no more.
         assert!(
-            br0 + 1 >= ar0 && ar0 <= br0 + 1 && br1 <= ar1 + 1 && ar1 <= br1 + 1,
+            ar0.abs_diff(br0) <= 1 && ar1.abs_diff(br1) <= 1,
             "AA rows {br0}..={br1} disagree with aliased rows {ar0}..={ar1}"
         );
     }

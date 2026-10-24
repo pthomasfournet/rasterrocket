@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn scale_smask_zero_dst_returns_empty() {
         let result = scale_smask(vec![1, 2, 3], 3, 1, 0, 1);
-        assert!(result.is_empty());
+        assert_eq!(result, [0u8; 0]);
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         // sw=0 means no source pixels; scaling into a non-empty dst would index
         // an empty buffer — must return empty instead.
         let result = scale_smask(vec![], 0, 1, 4, 4);
-        assert!(result.is_empty());
+        assert_eq!(result, [0u8; 0]);
     }
 
     #[test]

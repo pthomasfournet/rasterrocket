@@ -738,10 +738,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "split must preserve corner control points bit-exactly — the split formulas only read these corners, they do not arithmetically derive them"
-    )]
     fn split_patch_u_flat_corners_unchanged() {
         let p = flat_patch(
             0.0,
@@ -783,10 +779,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "split must preserve corner control points bit-exactly — same rationale as the split_patch_u sibling test"
-    )]
     fn split_patch_v_flat_corners_unchanged() {
         let p = flat_patch(
             0.0,
@@ -807,10 +799,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "color_delta on a uniform-color patch must return the literal 0.0 (no per-channel difference exists); epsilon would mask a regression where the formula leaked a non-zero value through e.g. a wrong index"
-    )]
     fn color_delta_uniform_is_zero() {
         let mut p = Patch::zero();
         let c = [128u8, 64, 32];

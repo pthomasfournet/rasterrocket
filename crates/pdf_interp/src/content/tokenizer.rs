@@ -584,7 +584,7 @@ mod tests {
         // Should terminate (finite token count) — the exact token sequence is
         // not load-bearing, only that we don't loop forever.
         let t = tokens(src);
-        assert!(!t.is_empty());
+        assert_ne!(t.len(), 0);
         // The last real operators must be present.
         let ops: Vec<_> = t
             .iter()

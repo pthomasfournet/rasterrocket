@@ -588,12 +588,12 @@ mod tests {
         let pipe = simple_pipe();
         let color = [0u8, 255, 0];
 
-        for w in 1i32..=40 {
-            let row_bytes = (w as usize).div_ceil(8);
+        for w in 1usize..=40 {
+            let row_bytes = w.div_ceil(8);
             let data: Vec<u8> = (0..row_bytes)
                 .map(|i| [0xAAu8, 0x5C, 0x93][i % 3])
                 .collect();
-            for skip in 0i32..8 {
+            for skip in 0usize..8 {
                 let mut bmp: Bitmap<Rgb8> = Bitmap::new(48, 1, 4, false);
                 let clip = make_clip(48, 1);
                 let src = PipeSrc::Solid(&color);
@@ -601,20 +601,21 @@ mod tests {
                     data: &data,
                     x: 0,
                     y: 0,
-                    w,
+                    w: i32::try_from(w).expect("w ≤ 40"),
                     h: 1,
                     aa: false,
                 };
+                let x0 = -i32::try_from(skip).expect("skip < 8");
 
-                blit_glyph::<Rgb8>(&mut bmp, &clip, true, &pipe, &src, -skip, 0, &glyph);
+                blit_glyph::<Rgb8>(&mut bmp, &clip, true, &pipe, &src, x0, 0, &glyph);
 
-                let visible = (w - skip).max(0) as usize;
+                let visible = w.saturating_sub(skip);
                 let row = bmp.row(0);
-                for xx in 0..visible {
-                    let bit_idx = skip as usize + xx;
+                for (xx, px) in row.iter().enumerate().take(visible) {
+                    let bit_idx = skip + xx;
                     let expected = (data[bit_idx / 8] >> (7 - bit_idx % 8)) & 1 != 0;
                     assert_eq!(
-                        row[xx].g == 255,
+                        px.g == 255,
                         expected,
                         "w={w} skip={skip} xx={xx}: painted != source bit"
                     );

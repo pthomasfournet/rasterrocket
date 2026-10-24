@@ -340,7 +340,7 @@ mod tests {
         }
     }
 
-    /// Build a RenderedPage of `w`×`h` filled with a deterministic noisy
+    /// Build a `RenderedPage` of `w`×`h` filled with a deterministic noisy
     /// pattern (uniform fills compress to almost nothing and won't exercise
     /// the step-down).
     fn noisy_page(w: u32, h: u32) -> RenderedPage {
@@ -408,7 +408,7 @@ mod tests {
         );
         // A budget strictly between the two forces a step-down but stays fittable.
         let budget = GcvBudget {
-            max_base64_bytes: (big_len + small_len) / 2,
+            max_base64_bytes: big_len.midpoint(small_len),
             min_quality: 10,
             start_quality: 90,
         };

@@ -744,7 +744,7 @@ mod js_guard_tests {
     #[test]
     fn open_action_goto_is_not_javascript() {
         let doc = make_doc(" /OpenAction <</S /GoTo>>");
-        assert!(javascript_locations(&doc).is_empty());
+        assert_eq!(javascript_locations(&doc).len(), 0);
     }
 
     #[test]
@@ -785,7 +785,7 @@ mod js_guard_tests {
     #[test]
     fn clean_document_has_no_javascript() {
         let doc = make_doc("");
-        assert!(javascript_locations(&doc).is_empty());
+        assert_eq!(javascript_locations(&doc).len(), 0);
         warn_if_javascript(&doc); // no-op, must not panic
     }
 
@@ -816,7 +816,7 @@ mod js_guard_tests {
         // /OpenAction may be a destination array (go-to-page-on-open), which
         // is not even an action dictionary — must not be flagged.
         let doc = make_doc(" /OpenAction [0 /Fit]");
-        assert!(javascript_locations(&doc).is_empty());
+        assert_eq!(javascript_locations(&doc).len(), 0);
     }
 
     #[test]

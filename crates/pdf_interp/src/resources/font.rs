@@ -1074,7 +1074,7 @@ mod tests {
         let d = make_dict(&[]);
         let (fc, ws) = extract_widths(&d);
         assert_eq!(fc, 0);
-        assert!(ws.is_empty());
+        assert_eq!(ws.len(), 0);
     }
 
     /// Build a `FontDescriptor` with explicit widths for testing the
@@ -1219,7 +1219,7 @@ mod tests {
         let dict = make_dict(&[(b"DW", Object::Reference((2, 0)))]);
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 742);
-        assert!(segs.is_empty());
+        assert_eq!(segs.len(), 0);
     }
 
     #[test]

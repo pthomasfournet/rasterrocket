@@ -234,10 +234,7 @@ mod tests {
         (0..n)
             .map(|_| {
                 rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                #[expect(clippy::cast_possible_truncation, reason = "top byte of a u32")]
-                {
-                    (rng >> 24) as u8
-                }
+                (rng >> 24) as u8
             })
             .collect()
     }
@@ -246,7 +243,7 @@ mod tests {
     fn reference(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
         let a_in = u16::from(a_input);
         let [sr, sg, sb] = [u16::from(src[0]), u16::from(src[1]), u16::from(src[2])];
-        for (shape_v, px) in shape.iter().zip(dst.chunks_exact_mut(3)) {
+        for (shape_v, px) in shape.iter().zip(dst.as_chunks_mut::<3>().0) {
             let a_src = div255_u16(a_in * u16::from(*shape_v));
             let inv = 255 - a_src;
             #[expect(clippy::cast_possible_truncation, reason = "div255_u16 result ≤ 255")]

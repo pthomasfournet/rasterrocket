@@ -1,6 +1,11 @@
 //! Shared test utilities for the `raster` crate.
 //!
 //! This module is compiled only for tests (`#[cfg(test)]`).
+#![expect(
+    unreachable_pub,
+    reason = "the module is crate-private, so `pub` already means crate-wide; \
+              `pub(crate)` would trip clippy::redundant_pub_crate instead"
+)]
 
 use crate::clip::Clip;
 use crate::path::{Path, PathBuilder};

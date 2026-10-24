@@ -412,18 +412,21 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
                                 // the blit path, and preserve the correct
                                 // color_space tag so downstream code branches
                                 // correctly.
-                                let (color_space, pixel_data) =
-                                    if jpeg_sof_components(data) == Some(1) {
-                                        let gray: Vec<u8> =
-                                            rgba.chunks_exact(4).map(|px| px[0]).collect();
-                                        (super::ImageColorSpace::Gray, gray)
-                                    } else {
-                                        let rgb: Vec<u8> = rgba
-                                            .chunks_exact(4)
-                                            .flat_map(|px| [px[0], px[1], px[2]])
-                                            .collect();
-                                        (super::ImageColorSpace::Rgb, rgb)
-                                    };
+                                let (color_space, pixel_data) = if jpeg_sof_components(data)
+                                    == Some(1)
+                                {
+                                    let gray: Vec<u8> =
+                                        rgba.as_chunks::<4>().0.iter().map(|px| px[0]).collect();
+                                    (super::ImageColorSpace::Gray, gray)
+                                } else {
+                                    let rgb: Vec<u8> = rgba
+                                        .as_chunks::<4>()
+                                        .0
+                                        .iter()
+                                        .flat_map(|&[r, g, b, _]| [r, g, b])
+                                        .collect();
+                                    (super::ImageColorSpace::Rgb, rgb)
+                                };
                                 return Some(ImageDescriptor {
                                     width: w,
                                     height: h,
