@@ -124,104 +124,59 @@ unsafe fn cmyk_to_rgb_avx512(cmyk: &[u8; 128], rgb: &mut [u8; 96]) {
 
 // ── ARM NEON CMYK→RGB ─────────────────────────────────────────────────────────
 //
-// Vectorised subtractive complement: R=(255−C)*(255−K)/255 (rounded).
-// Processes 8 pixels per call using u16 arithmetic throughout.
+// Subtractive complement R = ⌊((255−C)(255−K) + 127) / 255⌋ (same for G/M and
+// B/Y), 16 pixels per call.
 //
-// vmull_u8: u8×u8 → u16, widens each lane pair. Takes inv_ch (uint8x8_t) and
-// inv_k (uint8x8_t) and produces uint16x8_t of products.
-// vshrn_n_u16: narrow-right-shift by 8; combined with the +127 rounding bias
-// gives ⌊(prod+127)/255⌋ ≈ ⌊prod/255⌋ rounded. We use the two-step identity:
-//   n = prod + 127
-//   result = (n + (n >> 8) + 1) >> 8
-// which is exact for n ≤ 65152. The u16 additions cannot overflow because
-// prod ≤ 255² = 65025, n ≤ 65152, and the intermediate sums are ≤ 65407 < 65536.
+// vld4q_u8 deinterleaves the 64 input bytes into one 16-lane register per
+// channel and vst3q_u8 re-interleaves the three results into 48 RGB bytes, so
+// no lane is moved by scalar code.  Each complemented channel is multiplied
+// by the complemented K with vmull_u8 / vmull_high_u8 (u8 × u8 → u16, 8 lanes
+// per half).
 //
-// Store: vst3q_u8 interleaves three uint8x8_t registers into 24 bytes of RGB.
+// Division: ⌊(x + 127) / 255⌋ = (t + 128) >> 8 with t = x + ((x + 128) >> 8),
+// exact for every x ∈ [0, 255²]; t ≤ 65279, so neither sum overflows u16.
+// vrsraq_n_u16 forms t and vrshrn_n_u16 / vrshrn_high_n_u16 apply the final
+// rounding shift while narrowing to bytes.
 
-/// Convert 8 CMYK pixels to RGB using NEON u16 widening arithmetic.
-///
-/// `cmyk` must be exactly 32 bytes (8 pixels × 4 channels).
-/// `rgb` must be at least 24 bytes (8 pixels × 3 channels).
+/// Convert 16 CMYK pixels to RGB using NEON register deinterleave.
 ///
 /// # Safety
 ///
 /// Caller must ensure `neon` is available (mandatory on all ARMv8-A targets).
-/// `cmyk.len() == 32` and `rgb.len() >= 24` must hold.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn cmyk_to_rgb_neon(cmyk: &[u8; 32], rgb: &mut [u8]) {
+unsafe fn cmyk_to_rgb_neon(cmyk: &[u8; 64], rgb: &mut [u8; 48]) {
     use std::arch::aarch64::{
-        uint8x8_t, uint8x8x3_t, uint16x8_t, vaddq_u16, vdup_n_u8, vdupq_n_u16, vld1_u8, vmull_u8,
-        vshrn_n_u16, vsraq_n_u16, vst3_u8, vsub_u8,
+        uint8x16_t, uint8x16x3_t, uint16x8_t, vget_low_u8, vld4q_u8, vmull_high_u8, vmull_u8,
+        vmvnq_u8, vrshrn_high_n_u16, vrshrn_n_u16, vrsraq_n_u16, vst3q_u8,
     };
 
-    debug_assert!(rgb.len() >= 24);
-
-    // Scalar gather: deinterleave 8 CMYK pixels into per-channel arrays.
-    // Bottleneck is multiply; gather at 8px/iter is negligible overhead.
-    let mut c_arr = [0u8; 8];
-    let mut m_arr = [0u8; 8];
-    let mut y_arr = [0u8; 8];
-    let mut k_arr = [0u8; 8];
-    for i in 0..8 {
-        c_arr[i] = cmyk[i * 4];
-        m_arr[i] = cmyk[i * 4 + 1];
-        y_arr[i] = cmyk[i * 4 + 2];
-        k_arr[i] = cmyk[i * 4 + 3];
+    /// `⌊((255 − ch)(255 − k) + 127) / 255⌋` for 16 lanes; `inv_k = 255 − k`.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    fn blend(ch: uint8x16_t, inv_k: uint8x16_t) -> uint8x16_t {
+        let inv = vmvnq_u8(ch);
+        let lo: uint16x8_t = vmull_u8(vget_low_u8(inv), vget_low_u8(inv_k));
+        let hi: uint16x8_t = vmull_high_u8(inv, inv_k);
+        // t = x + ((x + 128) >> 8), then (t + 128) >> 8 narrowed to bytes.
+        let lo = vrsraq_n_u16::<8>(lo, lo);
+        let hi = vrsraq_n_u16::<8>(hi, hi);
+        vrshrn_high_n_u16::<8>(vrshrn_n_u16::<8>(lo), hi)
     }
 
-    // All intrinsics below are unsafe; caller guarantees neon and valid slice bounds.
-    // One block keeps the SIMD pipeline readable rather than scattering per-call wrappers.
-    unsafe {
-        // vld1_u8 is the 64-bit (8-byte) load; vld1q_u8 would read 16 bytes, which is UB here.
-        // vdup_n_u8 / vdupq_n_u16 splat scalar constants without any memory access.
-        // Each c/m/y/k array is exactly 8 bytes; vld1_u8 requires only 1-byte alignment.
-        let v255: uint8x8_t = vdup_n_u8(255);
-        let c_v: uint8x8_t = vld1_u8(c_arr.as_ptr());
-        let m_v: uint8x8_t = vld1_u8(m_arr.as_ptr());
-        let y_v: uint8x8_t = vld1_u8(y_arr.as_ptr());
-        let k_v: uint8x8_t = vld1_u8(k_arr.as_ptr());
-
-        // inv_ch = 255 − ch. vsub_u8 wraps on underflow; ch ≤ 255 so no underflow.
-        let inv_c: uint8x8_t = vsub_u8(v255, c_v);
-        let inv_m: uint8x8_t = vsub_u8(v255, m_v);
-        let inv_y: uint8x8_t = vsub_u8(v255, y_v);
-        let inv_k: uint8x8_t = vsub_u8(v255, k_v);
-
-        // prod = inv_ch * inv_k, widened to u16. max = 255*255 = 65025 < 65536 ✓.
-        let prod_r: uint16x8_t = vmull_u8(inv_c, inv_k);
-        let prod_g: uint16x8_t = vmull_u8(inv_m, inv_k);
-        let prod_b: uint16x8_t = vmull_u8(inv_y, inv_k);
-
-        // Exact ⌊(x + 127) / 255⌋ = (n + (n>>8) + 1) >> 8, n = x + 127.
-        // vsraq_n_u16(a, b, n) = a + (b >> n); gives n + (n>>8) in one instruction.
-        let v127: uint16x8_t = vdupq_n_u16(127);
-        let v1: uint16x8_t = vdupq_n_u16(1);
-
-        macro_rules! div255 {
-            ($prod:expr) => {{
-                let n: uint16x8_t = vaddq_u16($prod, v127);
-                let shifted: uint16x8_t = vsraq_n_u16(n, n, 8);
-                let rounded: uint16x8_t = vaddq_u16(shifted, v1);
-                vshrn_n_u16(rounded, 8)
-            }};
-        }
-
-        let r8: uint8x8_t = div255!(prod_r);
-        let g8: uint8x8_t = div255!(prod_g);
-        let b8: uint8x8_t = div255!(prod_b);
-
-        // vst3_u8 interleaves three uint8x8_t into 24 bytes of packed RGB.
-        // rgb.len() >= 24 (debug_assert above); pointer is valid.
-        let out = uint8x8x3_t(r8, g8, b8);
-        vst3_u8(rgb.as_mut_ptr(), out);
-    } // unsafe
+    // SAFETY: `cmyk` is exactly 64 bytes, the extent of one vld4q_u8.
+    let px = unsafe { vld4q_u8(cmyk.as_ptr()) };
+    let inv_k = vmvnq_u8(px.3);
+    let out = uint8x16x3_t(blend(px.0, inv_k), blend(px.1, inv_k), blend(px.2, inv_k));
+    // SAFETY: `rgb` is exactly 48 bytes, the extent of one vst3q_u8.
+    unsafe { vst3q_u8(rgb.as_mut_ptr(), out) };
 }
 
 // ── Scalar CMYK→RGB ───────────────────────────────────────────────────────────
 
 /// Per-pixel loop: the tail of every SIMD tier and the whole path on targets
-/// without one.  The loop is auto-vectorised by LLVM.
+/// without one.  LLVM auto-vectorises the loop on x86-64; on aarch64 it
+/// compiles to a scalar byte loop.
 #[inline]
 fn cmyk_to_rgb_scalar(cmyk: &[u8], rgb: &mut [u8]) {
     for (src, dst) in cmyk
@@ -268,21 +223,16 @@ fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
-    let mut chunks = cmyk.chunks_exact(32);
-    let mut out_off = 0usize;
-    for chunk in chunks.by_ref() {
-        // SAFETY: NEON is mandatory on aarch64; chunk is exactly 32 bytes;
-        // rgb[out_off..] has ≥ 24 bytes remaining.
-        unsafe {
-            cmyk_to_rgb_neon(
-                chunk.try_into().expect("chunk is exactly 32 bytes"),
-                &mut rgb[out_off..],
-            );
-        }
-        out_off += 24;
+    // 64 input bytes ↔ 16 pixels ↔ 48 output bytes, so the two chunk
+    // iterators run in lockstep and their remainders describe the same
+    // tail pixels.
+    let (blocks, tail) = cmyk.as_chunks::<64>();
+    let (out_blocks, out_tail) = rgb.as_chunks_mut::<48>();
+    for (block, out) in blocks.iter().zip(out_blocks) {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { cmyk_to_rgb_neon(block, out) };
     }
-    // Scalar tail for remaining pixels (< 8).
-    cmyk_to_rgb_scalar(chunks.remainder(), &mut rgb[out_off..]);
+    cmyk_to_rgb_scalar(tail, out_tail);
 }
 
 /// Generic fallback for targets without SIMD specialisation.
@@ -304,7 +254,7 @@ fn dispatch_cmyk_matrix(cmyk: &[u8], rgb: &mut [u8]) {
 ///
 /// The `clut = None` path uses the best SIMD available at runtime:
 /// - x86-64: AVX-512 VBMI (32 px/iter) → scalar
-/// - aarch64: NEON (8 px/iter) — mandatory on all ARMv8-A targets
+/// - aarch64: NEON (16 px/iter) — mandatory on all ARMv8-A targets
 /// - other: scalar per-pixel loop
 ///
 /// # Panics
@@ -499,7 +449,8 @@ mod tests {
     /// Parity: the active SIMD path must match `cmyk_to_rgb_reflectance` byte-for-byte.
     ///
     /// 40 pixels: on x86-64 with AVX-512 VBMI that is one 32-pixel block plus
-    /// an 8-pixel scalar tail; on aarch64 five NEON chunks.  On other targets
+    /// an 8-pixel scalar tail; on aarch64 two 16-pixel NEON blocks plus an
+    /// 8-pixel scalar tail.  On other targets
     /// both sides go scalar and the test is a tautology (still passes).
     #[test]
     fn icc_cmyk_matrix_simd_vs_scalar() {
@@ -550,7 +501,7 @@ mod tests {
     /// Non-multiple-of-chunk-size: exercises the scalar tail path on all SIMD tiers.
     #[test]
     fn icc_cmyk_matrix_tail_pixels() {
-        // 5 pixels: AVX-512 processes 0 full blocks (< 32), NEON processes 0 (< 8).
+        // 5 pixels: AVX-512 processes 0 full blocks (< 32), NEON processes 0 (< 16).
         // All 5 pixels fall into the scalar tail on every arch.
         let cmyk: Vec<u8> = (0u8..5)
             .flat_map(|i| {
@@ -566,10 +517,10 @@ mod tests {
         assert_eq!(icc_cmyk_to_rgb_cpu(&cmyk, None), reference(&cmyk));
     }
 
-    /// NEON-specific: 8 pixels exactly — one full NEON chunk, zero AVX-512 blocks.
+    /// 16 pixels exactly — one full NEON block, zero AVX-512 blocks.
     #[test]
-    fn icc_cmyk_matrix_eight_pixels() {
-        let cmyk: Vec<u8> = (0u8..8)
+    fn icc_cmyk_matrix_sixteen_pixels() {
+        let cmyk: Vec<u8> = (0u8..16)
             .flat_map(|i| {
                 [
                     i.wrapping_mul(30),
@@ -579,8 +530,37 @@ mod tests {
                 ]
             })
             .collect();
-        assert_eq!(cmyk.len(), 32);
+        assert_eq!(cmyk.len(), 64);
         assert_eq!(icc_cmyk_to_rgb_cpu(&cmyk, None), reference(&cmyk));
+    }
+
+    /// NEON kernel vs the scalar reference over every (ink, K) byte pair.
+    ///
+    /// Pixel `i` carries ink `i & 0xFF` on C, its complement on M, a
+    /// permuted value on Y and K `i >> 8`, so each channel's product
+    /// covers all 256 × 256 operand pairs across the 4096 blocks.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn icc_cmyk_neon_matches_scalar_exhaustive() {
+        let cmyk: Vec<u8> = (0u32..65_536)
+            .flat_map(|i| {
+                let ink = i.to_le_bytes()[0];
+                let k = i.to_le_bytes()[1];
+                [ink, 255 - ink, ink.wrapping_mul(167), k]
+            })
+            .collect();
+        let expected = reference(&cmyk);
+        let mut got = vec![0u8; expected.len()];
+        for (block, out) in cmyk
+            .as_chunks::<64>()
+            .0
+            .iter()
+            .zip(got.as_chunks_mut::<48>().0)
+        {
+            // SAFETY: NEON is mandatory on aarch64.
+            unsafe { super::cmyk_to_rgb_neon(block, out) };
+        }
+        assert_eq!(got, expected);
     }
 
     /// AVX-512-specific: direct call with 200 pseudorandom 32-pixel blocks.
