@@ -269,10 +269,14 @@ impl PageRecorder {
                 let sync_flags = p
                     .sync_flags
                     .expect("validate() proved sync_flags is Some for Phase2InterSync");
+                let s_info_prev = p
+                    .s_info_prev
+                    .expect("validate() proved s_info_prev is Some for Phase2InterSync");
                 self.ctx
                     .launch_phase2_inter_sync_async(
                         p.bitstream,
                         p.codebook,
+                        s_info_prev,
                         p.s_info,
                         sync_flags,
                         p.length_bits,

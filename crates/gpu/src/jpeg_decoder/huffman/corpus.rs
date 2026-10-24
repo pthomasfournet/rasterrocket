@@ -21,13 +21,8 @@
 //! asserts the dispatcher surfaces the `SyncBoundExceeded` error
 //! rather than hanging or producing garbage.
 //!
-//! ## Why a separate module
-//!
-//! `huffman/mod.rs` already carries 1000+ lines across two test
-//! modules; per `feedback_shared_helpers_no_god_files.md`, split
-//! before becoming a god file. This module holds the
-//! corpus + its helper; the per-phase parity tests stay where
-//! they were.
+//! This module holds the corpus and its helper; the per-phase parity
+//! tests live in `huffman/mod.rs`.
 
 use super::*;
 use crate::backend::cuda::CudaBackend;

@@ -59,9 +59,10 @@ impl GpuCtx {
 
     /// Async launch of one Phase 2 (inter-sequence sync) pass.
     ///
-    /// Reads `s_info` + writes `s_info` (in-place advance) and
-    /// `sync_flags` (one u32 per subseq; 1 = synced, 0 = unsynced
-    /// and advanced this pass). Host loops the dispatch until all
+    /// Reads `s_info_prev` (the previous pass's states) and writes
+    /// every slot of `s_info_out` plus `sync_flags` (one u32 per
+    /// subseq; 1 = synced, 0 = unsynced and advanced this pass). Host
+    /// swaps the two state buffers between passes and loops until all
     /// flags are 1 or the retry bound is exhausted.
     ///
     /// # Errors
@@ -78,7 +79,8 @@ impl GpuCtx {
         &self,
         bitstream: &CudaSlice<u8>,
         codebook: &CudaSlice<u8>,
-        s_info: &CudaSlice<u8>,
+        s_info_prev: &CudaSlice<u8>,
+        s_info_out: &CudaSlice<u8>,
         sync_flags: &CudaSlice<u8>,
         length_bits: u32,
         subsequence_bits: u32,
@@ -96,7 +98,8 @@ impl GpuCtx {
         builder
             .arg(bitstream)
             .arg(codebook)
-            .arg(s_info)
+            .arg(s_info_prev)
+            .arg(s_info_out)
             .arg(sync_flags)
             .arg(&length_bits)
             .arg(&subsequence_bits)

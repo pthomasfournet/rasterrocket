@@ -441,12 +441,14 @@ pub enum HuffmanPhase {
     /// (seq_idx + 2) * subsequence_bits)`, writing the final
     /// `(p, n, c, z)` state into `s_info[seq_idx]`.
     Phase1IntraSync,
-    /// One thread per subsequence; checks whether `s_info[i]` is
-    /// synced with `s_info[i+1]` (matching `c` and `z`, and `i`'s
-    /// walk reached `i+1`'s start). Writes `sync_flags[i] = 1` on
-    /// match, else advances `s_info[i]` by one symbol and writes
-    /// `sync_flags[i] = 0`. The host loops this dispatch until all
-    /// flags are 1 or the retry bound is exhausted.
+    /// One thread per subsequence; checks whether `s_info_prev[i]`
+    /// is synced with `s_info_prev[i+1]` (matching `c` and `z`, and
+    /// `i`'s walk reached `i+1`'s start). Writes `s_info[i]` (the
+    /// state carried over on match, advanced by one symbol otherwise)
+    /// and `sync_flags[i]` (1 on match, else 0). The host swaps the
+    /// two state buffers between passes and loops this dispatch until
+    /// all flags are 1 or the retry bound is exhausted. Requires
+    /// `sync_flags` and `s_info_prev`.
     Phase2InterSync,
     /// One thread per subsequence; re-walks the subseq's owned
     /// region `[prev.p, me.p)` and writes each decoded symbol to
@@ -510,11 +512,11 @@ impl HuffmanPhase {
 ///   `sync_flags` must be `Some` with device capacity ≥
 ///   `num_subsequences * 4` bytes (one u32 flag per subsequence). For
 ///   the Phase 1 / Phase 4 variants the field is ignored.
-/// - When `phase == JpegPhase2InterSync`: `s_info_prev` must be
-///   `Some` with the same capacity requirement as `s_info` — the
-///   previous pass's states (Jacobi read side, `s_info` is the write
-///   side; the host swaps the buffers between passes). Ignored for
-///   every other phase.
+/// - When `phase ∈ {Phase2InterSync, JpegPhase2InterSync}`:
+///   `s_info_prev` must be `Some` with the same capacity requirement
+///   as `s_info` — the previous pass's states (Jacobi read side,
+///   `s_info` is the write side; the host swaps the buffers between
+///   passes). Ignored for every other phase.
 /// - When `phase ∈ {Phase4Redecode, JpegPhase4Redecode}`: `offsets`,
 ///   `symbols_out`, and `decode_status` must all be `Some`. `offsets`
 ///   ≥ `num_subsequences * 4` bytes; `symbols_out` ≥ `total_symbols *
@@ -544,7 +546,8 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// of the JPEG Phase 2 propagation ([`Self::s_info`] is the
     /// write side; the host swaps the two buffers between passes).
     /// Same layout and capacity requirement as `s_info`. Required
-    /// for `JpegPhase2InterSync`; ignored for every other phase.
+    /// for `Phase2InterSync` and `JpegPhase2InterSync`; ignored for
+    /// every other phase.
     pub s_info_prev: Option<&'a B::DeviceBuffer>,
     /// Exclusive-scan output from Phase 3 (`u32[num_subsequences]`):
     /// `offsets[i]` is the base index into `symbols_out` where
@@ -818,11 +821,14 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
             }
         }
 
-        // JPEG Phase 2's Jacobi read side — same capacity rule as s_info.
-        if matches!(self.phase, HuffmanPhase::JpegPhase2InterSync) {
+        // Phase 2's Jacobi read side — same capacity rule as s_info.
+        if matches!(
+            self.phase,
+            HuffmanPhase::Phase2InterSync | HuffmanPhase::JpegPhase2InterSync,
+        ) {
             let Some(prev) = self.s_info_prev else {
                 return Err(invariant(
-                    "JpegPhase2InterSync requires s_info_prev to be Some",
+                    "Phase2InterSync (or JpegPhase2InterSync) requires s_info_prev to be Some",
                 ));
             };
             let prev_bytes = (self.num_subsequences() as usize)
@@ -1539,6 +1545,30 @@ mod tests {
         let err = params
             .validate(&FakeBackend)
             .expect_err("JpegPhase2InterSync without s_info_prev must be rejected");
+        match err {
+            super::super::BackendError::InvariantViolation { detail, .. } => {
+                assert!(
+                    detail.contains("s_info_prev"),
+                    "expected s_info_prev-related detail, got: {detail}"
+                );
+            }
+            other => panic!("expected InvariantViolation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn huffman_validate_rejects_synthetic_phase2_without_s_info_prev() {
+        let bitstream = 36;
+        let codebook = 1 << 18;
+        let s_info = 32;
+        let sync_flags = 8;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        params.phase = HuffmanPhase::Phase2InterSync;
+        params.sync_flags = Some(&sync_flags);
+        // s_info_prev intentionally None.
+        let err = params
+            .validate(&FakeBackend)
+            .expect_err("Phase2InterSync without s_info_prev must be rejected");
         match err {
             super::super::BackendError::InvariantViolation { detail, .. } => {
                 assert!(

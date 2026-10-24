@@ -1,17 +1,23 @@
 //! Host-side dispatch for the parallel-Huffman JPEG decoder kernels.
 //!
-//! `build_gpu_codebook` flattens a slice of `CanonicalCodebook` into
-//! the device-side `u32[num_components * 65536]` layout the kernel
-//! expects. `dispatch_phase1_intra_sync` is the one-shot test/oracle
-//! entry point that owns its buffers; production callers should drive
-//! the trait's `record_huffman` directly to keep buffers alive across
-//! pages.
+//! `flatten_codebooks` packs `CanonicalCodebook`s into the device-side
+//! `u32[num_components * 65536]` layout the kernels expect.
+//! [`dispatch_jpeg_phase1_through_phase4`] is the production entry
+//! point; the synthetic-stream dispatchers in `synthetic.rs` serve the
+//! oracle-parity tests only.
 
 // Per-phase parity tests live in this file's `mod tests` /
 // `mod vulkan_tests`; the 10-vector adversarial-corpus acceptance
 // tests live in the sibling `corpus.rs`.
 #[cfg(all(test, feature = "gpu-validation"))]
 mod corpus;
+#[cfg(all(test, feature = "gpu-validation"))]
+mod synthetic;
+#[cfg(all(test, feature = "gpu-validation"))]
+use synthetic::{
+    dispatch_phase1_intra_sync, dispatch_phase1_then_phase2, dispatch_phase1_through_phase4,
+    dispatch_phase3_offsets,
+};
 
 use crate::backend::params::{
     HUFFMAN_CODEBOOK_ENTRIES, HUFFMAN_THREADS, HuffmanParams, HuffmanPhase,
@@ -431,6 +437,8 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     let _up5 = backend.upload_async(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
 
     let symbols_buf = DeviceBufferGuard::alloc_zeroed(backend, (total_symbols as usize) * 4)?;
+    // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel
+    // does not reach reads back clean.
     let decode_status_buf = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
 
     // Phase 4.
@@ -444,23 +452,13 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     let fence = backend.submit_page()?;
     backend.wait_page(fence)?;
 
-    // Inspect per-subseq decode status before downloading symbols.
-    let mut status_host = vec![0u32; setup.num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut status_host);
-    let handle = backend.download_async(decode_status_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
-    if let Some((failing_idx, &raw)) = status_host.iter().enumerate().find(|&(_, &s)| s != 0) {
-        let kind = crate::backend::params::Phase4FailureKind::from_u32(raw);
-        return Err(BackendError::msg(format!(
-            "dispatch_jpeg_phase1_through_phase4: Phase 4 decode failed on subseq {failing_idx}: {} (status code {raw})",
-            kind.label(),
-        )));
-    }
-
-    let mut symbols_host = vec![0u32; total_symbols as usize];
-    let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut symbols_host);
-    let handle = backend.download_async(symbols_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
+    check_phase4_status(
+        backend,
+        &decode_status_buf,
+        setup.num_subsequences,
+        "dispatch_jpeg_phase1_through_phase4",
+    )?;
+    let symbols_host = download_u32s(backend, &symbols_buf, total_symbols as usize)?;
 
     setup.free_all(backend);
     backend.free_device(offsets_buf.take());
@@ -470,505 +468,36 @@ pub(crate) fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
     Ok(symbols_host)
 }
 
-/// One-shot dispatch of the Phase 1 intra-sync kernel.
-///
-/// Allocates device buffers, uploads inputs, runs the kernel,
-/// downloads per-subsequence state, frees buffers. Test/oracle path
-/// only — per-page callers should keep buffers and drive the trait's
-/// `record_huffman` directly.
-///
-/// Empty bitstream returns `Ok(Vec::new())` as a no-op; other invalid
-/// inputs (zero `subsequence_bits`, no codebooks) return a typed
-/// `BackendError` rather than panicking — matches the sibling
-/// `scan::dispatch_blelloch_scan` style.
-///
-/// # Errors
-/// Returns `BackendError` for invalid arguments, or the underlying
-/// driver error if any allocation, upload, dispatch, or download
-/// fails.
-#[cfg(all(test, feature = "gpu-validation"))]
-fn dispatch_phase1_intra_sync<B: GpuBackend>(
+/// Download the first `len` `u32`s of `buf`.
+fn download_u32s<B: GpuBackend>(
     backend: &B,
-    stream: &PackedBitstream,
-    codebooks: &[CanonicalCodebook],
-    subsequence_bits: u32,
-) -> Result<Vec<SubsequenceState>> {
-    if stream.length_bits == 0 {
-        return Ok(Vec::new());
-    }
-    if subsequence_bits == 0 {
-        return Err(BackendError::msg(
-            "dispatch_phase1_intra_sync: subsequence_bits must be > 0",
-        ));
-    }
-    if codebooks.is_empty() {
-        return Err(BackendError::msg(
-            "dispatch_phase1_intra_sync: at least one codebook required",
-        ));
-    }
-
-    let num_components = u32::try_from(codebooks.len()).map_err(|_| {
-        BackendError::msg(format!(
-            "more codebooks ({}) than fit in u32",
-            codebooks.len()
-        ))
-    })?;
-    let length_bits = stream.length_bits;
-    let num_subsequences = length_bits.div_ceil(subsequence_bits);
-
-    // peek16 reads `word_idx + 1` even at the stream tail, so the
-    // bitstream buffer needs one extra zero-padded word of headroom
-    // past `ceil(length_bits / 32)`.
-    let bitstream_words = (length_bits.div_ceil(32) as usize) + 1;
-    let bitstream_bytes = bitstream_words * 4;
-
-    let codebook_flat = build_gpu_codebook(codebooks);
-    let codebook_bytes = codebook_flat.len() * 4;
-    let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
-
-    // Guards free their buffers on Drop, so any `?` between here
-    // and the explicit `take() + free_device` at the bottom doesn't
-    // leak. alloc_zeroed gives the trailing peek16-headroom word
-    // for free — we then upload only the stream's actual words,
-    // leaving the tail zero.
-    let bitstream_buf = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-    let codebook_buf = DeviceBufferGuard::alloc(backend, codebook_bytes)?;
-    let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-
-    // Both uploads queue on the transfer queue; `submit_page` inserts
-    // the cross-queue barrier before the kernel reads the buffers, so
-    // explicit wait_transfer between uploads is unnecessary.
-    let _up1 = backend.upload_async(bitstream_buf.as_ref(), bytemuck::cast_slice(&stream.words))?;
-    let _up2 = backend.upload_async(codebook_buf.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
-
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: None,
-        symbols_out: None,
-        decode_status: None,
-        dc_codebook: None,
-        mcu_schedule: None,
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols: 0,
-        blocks_per_mcu: 0,
-        phase: HuffmanPhase::Phase1IntraSync,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    // Download directly into a Vec<SubsequenceState> view, skipping
-    // the Vec<u8> → cast → to_vec double-copy. SubsequenceState is
-    // Pod+Zeroable so `bytemuck::zeroed::<T>()` is the canonical
-    // zero-value rather than a field-by-field literal.
-    let mut out =
-        vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut out);
-    let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
-
-    backend.free_device(bitstream_buf.take());
-    backend.free_device(codebook_buf.take());
-    backend.free_device(s_info_buf.take());
-
-    Ok(out)
-}
-
-/// One-shot dispatch of Phase 1 + Phase 2 (bounded retry sync loop).
-///
-/// Allocates device buffers, uploads inputs, runs Phase 1, then loops
-/// Phase 2 dispatches until all subseqs report `sync_flags[i] = 1` or
-/// the retry bound is exhausted. Returns the final `s_info` either
-/// way; the outcome tells the caller whether convergence happened.
-///
-/// Test/oracle path only — production callers should drive the trait
-/// directly to keep buffers alive across pages.
-///
-/// # Errors
-/// Returns `BackendError` if any alloc/upload/dispatch/download
-/// fails. Bound-exceeded is reported via the outcome, not as an
-/// error.
-#[cfg(all(test, feature = "gpu-validation"))]
-fn dispatch_phase1_then_phase2<B: GpuBackend>(
-    backend: &B,
-    stream: &PackedBitstream,
-    codebooks: &[CanonicalCodebook],
-    subsequence_bits: u32,
-) -> Result<(Vec<SubsequenceState>, Phase2Outcome)> {
-    if stream.length_bits == 0 {
-        return Ok((Vec::new(), Phase2Outcome::Converged { iterations: 0 }));
-    }
-    if subsequence_bits == 0 {
-        return Err(BackendError::msg(
-            "dispatch_phase1_then_phase2: subsequence_bits must be > 0",
-        ));
-    }
-    if codebooks.is_empty() {
-        return Err(BackendError::msg(
-            "dispatch_phase1_then_phase2: at least one codebook required",
-        ));
-    }
-
-    let num_components = u32::try_from(codebooks.len()).map_err(|_| {
-        BackendError::msg(format!(
-            "more codebooks ({}) than fit in u32",
-            codebooks.len()
-        ))
-    })?;
-    let length_bits = stream.length_bits;
-    let num_subsequences = length_bits.div_ceil(subsequence_bits);
-
-    let bitstream_words = (length_bits.div_ceil(32) as usize) + 1;
-    let bitstream_bytes = bitstream_words * 4;
-    let codebook_flat = build_gpu_codebook(codebooks);
-    let codebook_bytes = codebook_flat.len() * 4;
-    let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
-    let flags_bytes = (num_subsequences as usize) * 4;
-
-    // Drop-frees guards — see `dispatch_util` module doc-comment.
-    let bitstream_buf = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-    let codebook_buf = DeviceBufferGuard::alloc(backend, codebook_bytes)?;
-    let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-    let sync_flags_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
-
-    let _up1 = backend.upload_async(bitstream_buf.as_ref(), bytemuck::cast_slice(&stream.words))?;
-    let _up2 = backend.upload_async(codebook_buf.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
-
-    // Phase 1 — one pass.
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: None,
-        symbols_out: None,
-        decode_status: None,
-        dc_codebook: None,
-        mcu_schedule: None,
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols: 0,
-        blocks_per_mcu: 0,
-        phase: HuffmanPhase::Phase1IntraSync,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    // Phase 2 — bounded retry loop.
-    let bound = crate::jpeg_decoder::phase2_oracle::retry_bound(num_subsequences as usize);
-    let mut flags_host = vec![0u32; num_subsequences as usize];
-    let mut outcome = Phase2Outcome::SyncBoundExceeded { bound };
-    for iter in 0..=bound {
-        backend.begin_page()?;
-        backend.record_huffman(HuffmanParams {
-            bitstream: bitstream_buf.as_ref(),
-            codebook: codebook_buf.as_ref(),
-            s_info: s_info_buf.as_ref(),
-            sync_flags: Some(sync_flags_buf.as_ref()),
-            s_info_prev: None,
-            offsets: None,
-            symbols_out: None,
-            decode_status: None,
-            dc_codebook: None,
-            mcu_schedule: None,
-            length_bits,
-            subsequence_bits,
-            num_components,
-            total_symbols: 0,
-            blocks_per_mcu: 0,
-            phase: HuffmanPhase::Phase2InterSync,
-        })?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)?;
-
-        let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
-        let handle = backend.download_async(sync_flags_buf.as_ref(), dst)?;
-        backend.wait_download(handle)?;
-
-        if flags_host.iter().all(|&f| f == 1) {
-            outcome = Phase2Outcome::Converged { iterations: iter };
-            break;
-        }
-    }
-
-    let mut s_info_out =
-        vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut s_info_out);
-    let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
-
-    backend.free_device(bitstream_buf.take());
-    backend.free_device(codebook_buf.take());
-    backend.free_device(s_info_buf.take());
-    backend.free_device(sync_flags_buf.take());
-
-    Ok((s_info_out, outcome))
-}
-
-/// One-shot dispatch of all four phases: 1 → 2 → 3 → 4.
-///
-/// Encodes the synthetic test path end-to-end. Returns the final
-/// decoded symbol stream (u32 per symbol; the kernel writes a u8
-/// value but the buffer is u32-strided to match the Slang/CUDA
-/// signature).
-///
-/// Algorithm:
-/// - Phase 1: per-subseq intra-walk → `s_info`.
-/// - Phase 2: bounded sync loop → fixes up `s_info[i].p` and `.n`.
-/// - Phase 3: exclusive scan over `s_info[i].n` → `offsets`. Done
-///   host-side here (the values are tiny — one u32 per subseq);
-///   production callers should use `dispatch_phase3_offsets` to
-///   keep the scan on device.
-/// - Phase 4: per-subseq re-decode from `[prev.p, me.p)`, writing
-///   each symbol to `symbols_out[offsets[i] + local_n]`.
-///
-/// Test/oracle path only — production callers should drive the
-/// trait directly to keep buffers alive across pages.
-///
-/// # Errors
-/// Returns `BackendError` if any alloc/upload/dispatch/download
-/// fails, or if Phase 2 fails to converge within the retry bound.
-#[cfg(all(test, feature = "gpu-validation"))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear 4-phase procedural script; splitting would obscure the phase-by-phase flow and force the per-phase param structs through tiny helper functions"
-)]
-fn dispatch_phase1_through_phase4<B: GpuBackend>(
-    backend: &B,
-    stream: &PackedBitstream,
-    codebooks: &[CanonicalCodebook],
-    subsequence_bits: u32,
+    buf: &DeviceBufferGuard<'_, B>,
+    len: usize,
 ) -> Result<Vec<u32>> {
-    if stream.length_bits == 0 {
-        return Ok(Vec::new());
-    }
-    if subsequence_bits == 0 {
-        return Err(BackendError::msg(
-            "dispatch_phase1_through_phase4: subsequence_bits must be > 0",
-        ));
-    }
-    if codebooks.is_empty() {
-        return Err(BackendError::msg(
-            "dispatch_phase1_through_phase4: at least one codebook required",
-        ));
-    }
-
-    let num_components = u32::try_from(codebooks.len()).map_err(|_| {
-        BackendError::msg(format!(
-            "more codebooks ({}) than fit in u32",
-            codebooks.len()
-        ))
-    })?;
-    let length_bits = stream.length_bits;
-    let num_subsequences = length_bits.div_ceil(subsequence_bits);
-
-    let bitstream_words = (length_bits.div_ceil(32) as usize) + 1;
-    let bitstream_bytes = bitstream_words * 4;
-    let codebook_flat = build_gpu_codebook(codebooks);
-    let codebook_bytes = codebook_flat.len() * 4;
-    let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
-    let flags_bytes = (num_subsequences as usize) * 4;
-    let offsets_bytes = flags_bytes;
-
-    // Drop-frees guards — any `?` or early `return Err` between
-    // here and the explicit `take() + free_device` at the bottom
-    // releases the buffers automatically. The early `return Ok`
-    // on `total_symbols == 0` works the same way.
-    let bitstream_buf = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-    let codebook_buf = DeviceBufferGuard::alloc(backend, codebook_bytes)?;
-    let s_info_buf = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-    let sync_flags_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
-    let offsets_buf = DeviceBufferGuard::alloc(backend, offsets_bytes)?;
-
-    let _up1 = backend.upload_async(bitstream_buf.as_ref(), bytemuck::cast_slice(&stream.words))?;
-    let _up2 = backend.upload_async(codebook_buf.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
-
-    // Phase 1.
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: None,
-        symbols_out: None,
-        decode_status: None,
-        dc_codebook: None,
-        mcu_schedule: None,
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols: 0,
-        blocks_per_mcu: 0,
-        phase: HuffmanPhase::Phase1IntraSync,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    // Phase 2.
-    let bound = crate::jpeg_decoder::phase2_oracle::retry_bound(num_subsequences as usize);
-    let mut flags_host = vec![0u32; num_subsequences as usize];
-    let mut converged = false;
-    for _iter in 0..=bound {
-        backend.begin_page()?;
-        backend.record_huffman(HuffmanParams {
-            bitstream: bitstream_buf.as_ref(),
-            codebook: codebook_buf.as_ref(),
-            s_info: s_info_buf.as_ref(),
-            sync_flags: Some(sync_flags_buf.as_ref()),
-            s_info_prev: None,
-            offsets: None,
-            symbols_out: None,
-            decode_status: None,
-            dc_codebook: None,
-            mcu_schedule: None,
-            length_bits,
-            subsequence_bits,
-            num_components,
-            total_symbols: 0,
-            blocks_per_mcu: 0,
-            phase: HuffmanPhase::Phase2InterSync,
-        })?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)?;
-
-        let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
-        let handle = backend.download_async(sync_flags_buf.as_ref(), dst)?;
-        backend.wait_download(handle)?;
-
-        if flags_host.iter().all(|&f| f == 1) {
-            converged = true;
-            break;
-        }
-    }
-    if !converged {
-        return Err(BackendError::msg(
-            "dispatch_phase1_through_phase4: Phase 2 did not converge within retry bound",
-        ));
-    }
-
-    // Download s_info to compute Phase 3 offsets host-side and
-    // determine the total symbol count for sizing symbols_out.
-    let mut s_info_host =
-        vec![<SubsequenceState as bytemuck::Zeroable>::zeroed(); num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut s_info_host);
-    let handle = backend.download_async(s_info_buf.as_ref(), dst)?;
+    let mut host = vec![0u32; len];
+    let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut host);
+    let handle = backend.download_async(buf.as_ref(), dst)?;
     backend.wait_download(handle)?;
+    Ok(host)
+}
 
-    // Exclusive scan + total over s_info[*].n; the checked total
-    // surfaces u32 overflow (silent wrapping would let Phase 4 write
-    // past the allocated symbols_out).
-    let counts: Vec<u32> = s_info_host.iter().map(|s| s.n).collect();
-    let (offsets_host, total_symbols) = crate::jpeg_decoder::scan::exclusive_scan_checked(&counts)
-        .ok_or_else(|| {
-            BackendError::msg("dispatch_phase1_through_phase4: total symbol count overflows u32")
-        })?;
-
-    if total_symbols == 0 {
-        // Well-formed stream produced no decodable symbols. Skip
-        // Phase 4 entirely (kernel + alloc would both reject 0-size).
-        // Drop on the five guards frees their buffers.
-        return Ok(Vec::new());
-    }
-
-    let _up3 = backend.upload_async(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
-
-    let symbols_bytes = (total_symbols as usize) * 4;
-    let symbols_buf = DeviceBufferGuard::alloc_zeroed(backend, symbols_bytes)?;
-    // decode_status: one u32 per subseq. Zero-init = Phase4FailureKind::Ok
-    // so any subseq the kernel doesn't reach (degenerate dispatch grid)
-    // stays Ok and the post-Phase-4 inspection sees clean data.
-    let decode_status_buf = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
-
-    // Phase 4.
-    backend.begin_page()?;
-    backend.record_huffman(HuffmanParams {
-        bitstream: bitstream_buf.as_ref(),
-        codebook: codebook_buf.as_ref(),
-        s_info: s_info_buf.as_ref(),
-        sync_flags: None,
-        s_info_prev: None,
-        offsets: Some(offsets_buf.as_ref()),
-        symbols_out: Some(symbols_buf.as_ref()),
-        decode_status: Some(decode_status_buf.as_ref()),
-        dc_codebook: None,
-        mcu_schedule: None,
-        length_bits,
-        subsequence_bits,
-        num_components,
-        total_symbols,
-        blocks_per_mcu: 0,
-        phase: HuffmanPhase::Phase4Redecode,
-    })?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
-
-    // Inspect per-subseq decode status before downloading symbols.
-    // Any non-Ok subseq surfaces as a typed error — adversarial inputs
-    // that would have silently produced shorter symbol streams now
-    // fail loudly.
-    let mut status_host = vec![0u32; num_subsequences as usize];
-    let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut status_host);
-    let handle = backend.download_async(decode_status_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
+/// Download the per-subsequence Phase 4 exit codes and surface the
+/// first non-`Ok` one as a typed error; `who` names the dispatcher.
+fn check_phase4_status<B: GpuBackend>(
+    backend: &B,
+    decode_status: &DeviceBufferGuard<'_, B>,
+    num_subsequences: u32,
+    who: &str,
+) -> Result<()> {
+    let status_host = download_u32s(backend, decode_status, num_subsequences as usize)?;
     if let Some((failing_idx, &raw)) = status_host.iter().enumerate().find(|&(_, &s)| s != 0) {
         let kind = crate::backend::params::Phase4FailureKind::from_u32(raw);
         return Err(BackendError::msg(format!(
-            "dispatch_phase1_through_phase4: Phase 4 decode failed on subseq {failing_idx}: {} (status code {raw})",
+            "{who}: Phase 4 decode failed on subseq {failing_idx}: {} (status code {raw})",
             kind.label(),
         )));
     }
-
-    let mut symbols_host = vec![0u32; total_symbols as usize];
-    let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut symbols_host);
-    let handle = backend.download_async(symbols_buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
-
-    backend.free_device(bitstream_buf.take());
-    backend.free_device(codebook_buf.take());
-    backend.free_device(s_info_buf.take());
-    backend.free_device(sync_flags_buf.take());
-    backend.free_device(offsets_buf.take());
-    backend.free_device(symbols_buf.take());
-    backend.free_device(decode_status_buf.take());
-
-    Ok(symbols_host)
-}
-
-/// Phase 3: exclusive prefix-sum of per-subsequence symbol counts.
-///
-/// Each subsequence's `.n` (symbols decoded between its `start_bit`
-/// and the next subsequence's sync point) feeds an exclusive scan;
-/// the result is the per-subsequence base offset into the final
-/// coefficient stream — i.e., where Phase 4 should write the symbols
-/// it re-decodes from that subsequence.
-///
-/// Thin wrapper over `scan::dispatch_blelloch_scan` — the heavy
-/// lifting is already in place.
-///
-/// Empty input returns `Ok(Vec::new())`.
-///
-/// # Errors
-/// Returns the underlying `BackendError` from
-/// `dispatch_blelloch_scan` if any allocation, upload, dispatch, or
-/// download fails.
-#[cfg(all(test, feature = "gpu-validation"))]
-fn dispatch_phase3_offsets<B: GpuBackend>(
-    backend: &B,
-    s_info: &[SubsequenceState],
-) -> Result<Vec<u32>> {
-    let counts: Vec<u32> = s_info.iter().map(|s| s.n).collect();
-    crate::jpeg_decoder::scan::dispatch_blelloch_scan(backend, &counts)
+    Ok(())
 }
 
 #[cfg(all(test, feature = "gpu-validation"))]

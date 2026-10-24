@@ -10,12 +10,12 @@
 //
 // ## Phase 2 algorithm (Weißenberger & Schmidt 2021 §III-C)
 //
-// One thread per subsequence. Reads `s_info[i]` and `s_info[i+1]`,
-// tests whether `(c, z)` agree and `s_info[i].p >= (i+1) *
-// subsequence_bits`. If aligned: writes `flags[i] = 1`. Otherwise:
-// advances `s_info[i]` by one symbol, writes `flags[i] = 0`. Host
-// loops the dispatch until all flags are 1 or the retry bound is
-// exhausted.
+// One thread per subsequence. Reads the previous pass's `s_info[i]`
+// and `s_info[i+1]`, tests whether `(c, z)` agree and `s_info[i].p >=
+// (i+1) * subsequence_bits`. If aligned: carries `s_info[i]` over and
+// writes `flags[i] = 1`. Otherwise: writes `s_info[i]` advanced by one
+// symbol and `flags[i] = 0`. Host swaps the state buffers and loops
+// the dispatch until all flags are 1 or the retry bound is exhausted.
 //
 // ## Codebook layout
 //
@@ -68,9 +68,9 @@
 // `(ac_dispatch_idx << 16) | (dc_dispatch_idx << 8) | component_idx`.
 [[vk::binding(7, 0)]] StructuredBuffer<uint> dc_codebook;
 [[vk::binding(8, 0)]] StructuredBuffer<uint> mcu_schedule;
-// JPEG-framed Phase 2 only — bound at slot 9. Previous pass's s_info
-// (the Jacobi read side); `s_info_out` at slot 2 is the write side.
-// The host swaps the two buffers between passes.
+// Phase 2 only (synthetic and JPEG-framed) — bound at slot 9. Previous
+// pass's s_info (the Jacobi read side); `s_info_out` at slot 2 is the
+// write side. The host swaps the two buffers between passes.
 [[vk::binding(9, 0)]] StructuredBuffer<uint4> s_info_prev;
 
 // Status codes — must match the CUDA `DECODE_*` macros AND the
@@ -410,31 +410,28 @@ void phase4_redecode(uint3 tid : SV_DispatchThreadID) {
 }
 
 /// Synthetic-stream Phase 2: one sync-or-advance step per subseq per
-/// dispatch, in place on `s_info_out`.
+/// dispatch over a double-buffered state array.
 ///
-/// Thread `i` reads `s_info_out[i + 1]` while thread `i + 1` may be
-/// writing it — a conflicting non-atomic access with no ordering
-/// between the two. A torn `uint4` read can only produce a spurious
-/// `sync_flags[i] = 1` for that one dispatch; the host re-dispatches
-/// until every flag is 1 in the same dispatch, so the flag is
-/// re-derived from a clean read on the next pass unless every other
-/// slot was already synced. Only the synthetic (test-only) dispatchers
-/// reach this kernel; the JPEG-framed `jpeg_phase2_inter_sync` reads
-/// from a separate `s_info_prev` buffer and has no such conflict.
+/// Reads the previous pass's states from `s_info_prev` and writes every
+/// slot of `s_info_out` — the state copied through when synced, advanced
+/// by one symbol otherwise — so no thread reads a slot another thread
+/// writes in the same dispatch. The host swaps the two buffers between
+/// passes and re-dispatches until every flag is 1 in the same dispatch.
 [shader("compute")][numthreads(256, 1, 1)]
 void phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
     uint seq_idx = tid.x;
     if (seq_idx >= num_subsequences) {
         return;
     }
+    uint4 me = s_info_prev[seq_idx];
     // Last subseq has no right neighbour — trivially synced.
     if (seq_idx + 1u == num_subsequences) {
+        s_info_out[seq_idx] = me;
         sync_flags[seq_idx] = 1u;
         return;
     }
 
-    uint4 me = s_info_out[seq_idx];
-    uint4 nxt = s_info_out[seq_idx + 1];
+    uint4 nxt = s_info_prev[seq_idx + 1];
     uint nxt_start_p = (seq_idx + 1u) * subsequence_bits;
 
     // SubsequenceState.{p,n,c,z} maps to uint4.{x,y,z,w}.
@@ -442,13 +439,13 @@ void phase2_inter_sync(uint3 tid : SV_DispatchThreadID) {
     bool aligned = me.z == nxt.z && me.w == nxt.w;
 
     if (in_range && aligned) {
+        s_info_out[seq_idx] = me;
         sync_flags[seq_idx] = 1u;
         return;
     }
 
-    // Not synced — advance me by one symbol, write back, mark unsynced.
-    // The advance is permitted to fail; on miss the state stays put
-    // and we'll spin this subseq until the host's retry bound.
+    // Not synced — advance by one symbol; a failed decode leaves the
+    // state unchanged and the slot spins until the host's retry bound.
     // count_to = nxt_start_p: symbols starting before the next
     // subseq's start belong to my region.
     uint symbol_sink;  // Phase 2 doesn't emit.

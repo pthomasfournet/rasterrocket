@@ -285,25 +285,22 @@ extern "C" __global__ void phase4_redecode(
     decode_status[seq_idx] = status;
 }
 
-// Phase 2: one thread per subsequence. Checks whether `s_info[i]`
-// is "synced" with `s_info[i+1]` (same c and z, and i's walk reached
-// i+1's start). If synced, writes flags[i] = 1. Otherwise advances
-// s_info[i] by one symbol and writes flags[i] = 0. The host loops
-// the dispatch until every flag is 1 or the retry bound is exhausted.
+// Phase 2: one thread per subsequence over a double-buffered state
+// array. Reads `s_info_in[i]` and `s_info_in[i + 1]` and checks whether
+// slot i is "synced" with slot i + 1 (same c and z, and i's walk reached
+// i + 1's start). If synced, copies the state through and writes
+// flags[i] = 1; otherwise writes the state advanced by one symbol and
+// flags[i] = 0. Every slot of `s_info_out` is written, so the host can
+// swap the two buffers between passes; it loops the dispatch until
+// every flag is 1 or the retry bound is exhausted.
 //
-// Note: the last subsequence (seq_idx + 1 == num_subsequences) has
-// no right neighbour, so it's trivially synced — flags[i] = 1, no
-// advance.
-//
-// In-place single-buffer shape: thread i reads s_info[i + 1] while
-// thread i + 1 may write it (conflicting non-atomic access). A torn
-// uint4 read can only yield a spurious flags[i] = 1 for this one
-// dispatch; see the Slang mirror for why the host loop tolerates
-// that. Synthetic (test-only) dispatchers are the only callers.
+// The last subsequence (seq_idx + 1 == num_subsequences) has no right
+// neighbour, so it's trivially synced — copied through, flags[i] = 1.
 extern "C" __global__ void phase2_inter_sync(
     const unsigned int* __restrict__ bitstream,
     const unsigned int* __restrict__ codebook,
-    uint4* __restrict__ s_info,
+    const uint4* __restrict__ s_info_in,
+    uint4* __restrict__ s_info_out,
     unsigned int* __restrict__ flags,
     unsigned int length_bits,
     unsigned int subsequence_bits,
@@ -314,37 +311,36 @@ extern "C" __global__ void phase2_inter_sync(
     if (seq_idx >= num_subsequences) {
         return;
     }
-    // Last subseq has no right neighbour — trivially synced.
-    if (seq_idx + 1u == num_subsequences) {
-        flags[seq_idx] = 1u;
-        return;
-    }
-
     // SubsequenceState is (p, n, c, z) in declaration order, mapped
     // to uint4's (x, y, z, w). The struct-field z (zig-zag index)
     // lands in uint4.w; the struct-field c (component index) lands
     // in uint4.z. Naming overlap aside: .x=p, .y=n, .z=c, .w=z.
-    uint4 me = s_info[seq_idx];
-    uint4 nxt = s_info[seq_idx + 1];
-    unsigned int me_c = me.z;
-    unsigned int me_z = me.w;
-    unsigned int nxt_c = nxt.z;
-    unsigned int nxt_z = nxt.w;
-    unsigned int nxt_start_p = (seq_idx + 1u) * subsequence_bits;
-
-    unsigned int in_range = (me.x >= nxt_start_p) ? 1u : 0u;
-    unsigned int aligned = (me_c == nxt_c && me_z == nxt_z) ? 1u : 0u;
-
-    if (in_range && aligned) {
+    uint4 me = s_info_in[seq_idx];
+    // Last subseq has no right neighbour — trivially synced.
+    if (seq_idx + 1u == num_subsequences) {
+        s_info_out[seq_idx] = me;
         flags[seq_idx] = 1u;
         return;
     }
 
-    // Not synced — advance me by one symbol, write back, mark unsynced.
+    uint4 nxt = s_info_in[seq_idx + 1];
+    unsigned int nxt_start_p = (seq_idx + 1u) * subsequence_bits;
+
+    unsigned int in_range = (me.x >= nxt_start_p) ? 1u : 0u;
+    unsigned int aligned = (me.z == nxt.z && me.w == nxt.w) ? 1u : 0u;
+
+    if (in_range && aligned) {
+        s_info_out[seq_idx] = me;
+        flags[seq_idx] = 1u;
+        return;
+    }
+
+    // Not synced — advance by one symbol; a failed decode leaves the
+    // state unchanged.
     unsigned int p = me.x;
     unsigned int n = me.y;
-    unsigned int c = me_c;
-    unsigned int z = me_z;
+    unsigned int c = me.z;
+    unsigned int z = me.w;
     // count_to = nxt_start_p: symbols starting before the next
     // subseq's start belong to my region; symbols starting past
     // that don't (they belong to the next subseq).
@@ -358,7 +354,7 @@ extern "C" __global__ void phase2_inter_sync(
     updated.y = n;
     updated.z = c;
     updated.w = z;
-    s_info[seq_idx] = updated;
+    s_info_out[seq_idx] = updated;
     flags[seq_idx] = 0u;
 }
 

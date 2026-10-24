@@ -56,9 +56,8 @@ pub(super) enum KernelId {
     /// (DC magnitude skip + AC run/size/EOB/ZRL framing).
     #[cfg(feature = "gpu-jpeg-huffman")]
     JpegPhase1IntraSync,
-    /// JPEG-framed Phase 2 (inter-sequence sync).  Same kernel as
-    /// `Phase2InterSync` but uses the JPEG sync predicate
-    /// (`block_in_mcu` + `z_in_block` agreement).
+    /// JPEG-framed Phase 2 (inter-sequence sync by re-decode
+    /// propagation over the JPEG state machine).
     #[cfg(feature = "gpu-jpeg-huffman")]
     JpegPhase2InterSync,
     /// JPEG-framed Phase 4 (re-decode + write final symbols).  Same
@@ -293,8 +292,10 @@ impl KernelId {
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => &[0, 1],
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::Phase1IntraSync => &[0, 1, 2],
+            // Synthetic Phase 2 writes s_info_out (slot 2) + sync_flags
+            // (slot 3) and reads the previous pass's s_info_prev (slot 9).
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => &[0, 1, 2, 3],
+            Self::Phase2InterSync => &[0, 1, 2, 3, 9],
         }
     }
 
@@ -324,10 +325,10 @@ impl KernelId {
             // huffman push struct carries the scalars.
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::Phase1IntraSync => 3,
-            // (bitstream, codebook, s_info, sync_flags) — shares the
-            // 24-byte push struct with all huffman phases.
+            // (bitstream, codebook, s_info, sync_flags, s_info_prev) —
+            // shares the 24-byte push struct with all huffman phases.
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => 4,
+            Self::Phase2InterSync => 5,
             // (bitstream, codebook, s_info, offsets, symbols_out,
             // decode_status) — shares the 24-byte push struct;
             // Phase 4 reads `total_symbols` for bounds-checking

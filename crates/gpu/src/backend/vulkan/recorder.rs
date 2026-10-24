@@ -482,6 +482,10 @@ impl PageRecorder {
                 let flags = p
                     .sync_flags
                     .expect("validate() proved sync_flags is Some for Phase2InterSync");
+                let prev = p
+                    .s_info_prev
+                    .expect("validate() proved s_info_prev is Some for Phase2InterSync");
+                // Buffer order matches binding_slots = [0, 1, 2, 3, 9].
                 self.dispatch_kernel(
                     KernelId::Phase2InterSync,
                     &[
@@ -489,12 +493,14 @@ impl PageRecorder {
                         p.codebook.handle(),
                         p.s_info.handle(),
                         flags.handle(),
+                        prev.handle(),
                     ],
                     &[
                         p.bitstream.size(),
                         p.codebook.size(),
                         p.s_info.size(),
                         flags.size(),
+                        prev.size(),
                     ],
                     &push,
                     groups,
