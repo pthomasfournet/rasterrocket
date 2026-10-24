@@ -1481,9 +1481,16 @@ impl<'doc> PageRenderer<'doc> {
             Some(begin_group(&self.bitmap, &clip, params))
         });
 
-        // Swap in the group bitmap when present.
+        // Swap in the group bitmap when present.  PDF §11.6.6: the alpha
+        // constants and blend mode start at their initial values inside a
+        // transparency group; the parent's values apply once, when the group
+        // is composited.
         if let Some(ref mut g) = group {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
+            let gs = self.gstate.current_mut();
+            gs.fill_alpha = 255;
+            gs.stroke_alpha = 255;
+            gs.blend_mode = BlendMode::Normal;
         }
 
         // Parse and execute the form's content stream.
