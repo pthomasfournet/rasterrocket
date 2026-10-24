@@ -15,10 +15,11 @@
 //!   stepping, a lane mask for the bounds test, two dword gathers for the
 //!   2×2 footprints, FMA bilinear blend, and a white fill merged in for
 //!   out-of-bounds lanes.  Bit-exact with the scalar loop.
-//! - **aarch64**: `rotate_row_neon` processes 4 output pixels per iteration
-//!   using `vmlaq_f32` for coordinate stepping and `vcvtmq_s32_f32` for floor.
-//!   Any pixel whose source coordinates are out-of-bounds is handled by the
-//!   scalar fallback within the same loop.
+//! - **aarch64**: `rotate_row_neon` processes 8 output pixels per iteration
+//!   as two 4-lane quads — fused coordinate stepping, floor, an unsigned
+//!   bounds mask, fused bilinear blend and a white merge are lane-wise; only
+//!   the 2×2 footprint fetch is per lane (NEON has no gather).  Bit-exact
+//!   with the scalar loop.
 //! - **other**: scalar per-pixel loop.  Its per-pixel `floor`, early return
 //!   and gathered 2×2 reads keep LLVM from auto-vectorising it.
 //!
@@ -66,7 +67,7 @@ pub fn rotate_inplace(img: &mut Bitmap<Gray8>, angle_deg: f32) -> Result<(), Des
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-/// Parameters shared between the scalar and NEON inner loops.
+/// Parameters shared between the scalar and SIMD row kernels.
 ///
 /// Passed by value to avoid threading individual scalars through dispatch helpers.
 struct RowParams {
@@ -78,14 +79,14 @@ struct RowParams {
     sy_max: i32,
 }
 
-/// Bilinear interpolation at source `(sx, sy)` given pre-floored origin `(x0, y0)`.
+/// The 2×2 bilinear footprint `[p00, p10, p01, p11]` at origin `(x0, y0)`.
 ///
 /// `x0` and `y0` must already be bounds-checked (`0 ≤ x0 ≤ sx_max = w-1`,
-/// `0 ≤ y0 ≤ sy_max = h-1`). On the last column/row the 2×2 footprint is
-/// clamped to the edge, so the missing neighbour duplicates the edge pixel
-/// and the interpolation degrades gracefully to nearest-neighbour there.
+/// `0 ≤ y0 ≤ sy_max = h-1`). On the last column/row the footprint is clamped
+/// to the edge, so the missing neighbour duplicates the edge pixel and the
+/// interpolation degrades gracefully to nearest-neighbour there.
 #[inline]
-fn bilinear_sample(src: &Bitmap<Gray8>, x0: usize, y0: usize, fx: f32, fy: f32) -> u8 {
+fn footprint(src: &Bitmap<Gray8>, x0: usize, y0: usize) -> [u8; 4] {
     let x1 = (x0 + 1).min(src.width as usize - 1);
     let y1 = (y0 + 1).min(src.height as usize - 1);
     // y0 ≤ sy_max = h-1 ≤ 32767 and y1 ≤ h-1 — safe casts.
@@ -94,11 +95,14 @@ fn bilinear_sample(src: &Bitmap<Gray8>, x0: usize, y0: usize, fx: f32, fy: f32) 
         reason = "y0 ≤ h-1 ≤ 32767 and y1 ≤ h-1; both fit in u32"
     )]
     let (r0, r1) = (src.row_bytes(y0 as u32), src.row_bytes(y1 as u32));
+    [r0[x0], r0[x1], r1[x0], r1[x1]]
+}
 
-    let p00 = f32::from(r0[x0]);
-    let p10 = f32::from(r0[x1]);
-    let p01 = f32::from(r1[x0]);
-    let p11 = f32::from(r1[x1]);
+/// Bilinear interpolation at source `(sx, sy)` given pre-floored origin `(x0, y0)`
+/// and fractions `(fx, fy)`; the origin contract is that of [`footprint`].
+#[inline]
+fn bilinear_sample(src: &Bitmap<Gray8>, x0: usize, y0: usize, fx: f32, fy: f32) -> u8 {
+    let [p00, p10, p01, p11] = footprint(src, x0, y0).map(f32::from);
 
     let top = (p10 - p00).mul_add(fx, p00);
     let bot = (p11 - p01).mul_add(fx, p01);
@@ -163,165 +167,114 @@ fn rotate_pixel_scalar(src: &Bitmap<Gray8>, ox: f32, p: &RowParams) -> u8 {
 
 // ── Per-arch row implementations ──────────────────────────────────────────────
 
-/// NEON inner-loop: process one output row using `vmlaq_f32` coordinate stepping.
+/// NEON inner loop: 8 output pixels per iteration as two 4-lane quads,
+/// bit-exact with [`rotate_row_scalar`].
 ///
-/// Handles 4 output pixels per iteration.  For any group of 4 where at least one
-/// pixel's source coordinates are out-of-bounds, the entire group is processed
-/// pixel-by-pixel via `rotate_pixel_scalar` (which fills OOB pixels with white).
-/// A scalar tail handles any remaining pixels at the end of the row.
+/// Coordinates are stepped with fused multiply-add exactly as the scalar
+/// path does (`cos·ox + sx_base`), floored with `vcvtmq_s32_f32`, and
+/// bounds-tested as unsigned integers so a negative origin compares above
+/// the maximum.  NEON has no gather, so each in-bounds lane fetches its 2×2
+/// footprint through [`footprint`]; out-of-bounds lanes fetch at origin
+/// `(0, 0)` and are replaced by 255 afterwards.  The bilinear blend is the
+/// scalar `mul_add` chain lane-wise (`vfmaq_f32`), `vcvtaq_u32_f32` rounds
+/// half away from zero as `f32::round` does, and saturating narrows mirror
+/// the `as u8` cast.  A quad whose lanes are all out of bounds skips the
+/// fetch, and the final `dst_row.len() % 8` pixels take the scalar path.
 ///
 /// # Safety
 ///
 /// NEON is mandatory on all ARMv8-A targets; no runtime check is needed.
-/// `dst_row.len() == w` must hold (caller guarantees this via `row_bytes_mut`).
 #[cfg(target_arch = "aarch64")]
 #[expect(
     unsafe_code,
     reason = "NEON intrinsics for the aarch64 rotate row kernel; mandatory on ARMv8-A"
 )]
+#[expect(
+    clippy::similar_names,
+    reason = "sx/sy and x0/y0 are paired coordinate vectors; renaming would obscure the symmetry"
+)]
 #[target_feature(enable = "neon")]
-unsafe fn rotate_row_neon(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams, w: usize) {
+unsafe fn rotate_row_neon(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
     use std::arch::aarch64::{
-        vandq_u32, vcgeq_f32, vcleq_f32, vcvtmq_s32_f32, vdupq_n_f32, vgetq_lane_f32,
-        vgetq_lane_s32, vmaxvq_u32, vmlaq_f32, vmvnq_u32,
+        float32x4_t, uint32x4_t, vaddq_f32, vandq_u32, vbslq_u32, vcleq_u32, vcombine_u16,
+        vcvtaq_u32_f32, vcvtmq_s32_f32, vcvtq_f32_s32, vcvtq_f32_u32, vdupq_n_f32, vdupq_n_u32,
+        vfmaq_f32, vgetq_lane_u32, vld1q_f32, vld1q_u32, vmaxvq_u32, vqmovn_u16, vqmovn_u32,
+        vreinterpretq_u32_s32, vst1_u8, vsubq_f32,
     };
 
-    // Lane offsets [0.0, 1.0, 2.0, 3.0]: dx[i] = ox + i for i in 0..4.
-    let v_offsets = unsafe { std::arch::aarch64::vld1q_f32([0.0f32, 1.0, 2.0, 3.0].as_ptr()) };
+    /// Lane-wise `[a0, a1, a2, a3]` as `f32` from four `u8` values.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    fn widen(a: [u8; 4]) -> float32x4_t {
+        let a = a.map(u32::from);
+        // SAFETY: `a` is four u32 values, the extent of one vld1q_u32.
+        vcvtq_f32_u32(unsafe { vld1q_u32(a.as_ptr()) })
+    }
 
+    // sx_max / sy_max ≥ 0 because the source is at least 1×1.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "sx_max and sy_max are w-1 and h-1 with w, h ≥ 1"
+    )]
+    let (v_sx_max, v_sy_max) = (vdupq_n_u32(p.sx_max as u32), vdupq_n_u32(p.sy_max as u32));
     let v_cos = vdupq_n_f32(p.cos_a);
     let v_sin = vdupq_n_f32(p.sin_a);
     let v_sx_base = vdupq_n_f32(p.sx_base);
     let v_sy_base = vdupq_n_f32(p.sy_base);
-    let v_zero = vdupq_n_f32(0.0);
-    // sx_max / sy_max ≤ 32767 ≤ 2^23 — exactly representable in f32.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "sx_max / sy_max ≤ 32767 ≤ 2^23 — exactly representable in f32"
-    )]
-    let v_sx_max = vdupq_n_f32(p.sx_max as f32);
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "sy_max ≤ 32767 ≤ 2^23 — exactly representable in f32"
-    )]
-    let v_sy_max = vdupq_n_f32(p.sy_max as f32);
+    let v_white = vdupq_n_u32(255);
+    // SAFETY: four f32 values, the extent of one vld1q_f32.
+    let lane = unsafe { vld1q_f32([0.0f32, 1.0, 2.0, 3.0].as_ptr()) };
 
-    let mut ox = 0usize;
-
-    while ox + 4 <= w {
-        // dx = [ox, ox+1, ox+2, ox+3] as f32.
-        // ox ≤ 32768; exact in f32.
+    // Output pixels for columns `ox .. ox + 4`, white where out of bounds.
+    let quad = |ox: usize| -> uint32x4_t {
+        // ox ≤ MAX_PX_DIMENSION = 32768; exact in f32.
         #[expect(
             clippy::cast_precision_loss,
             reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
         )]
-        let v_dx = unsafe { std::arch::aarch64::vaddq_f32(vdupq_n_f32(ox as f32), v_offsets) };
-
-        // sx[i] = sx_base + cos_a * dx[i]
-        // sy[i] = sy_base + sin_a * dx[i]
-        let v_sx = unsafe { vmlaq_f32(v_sx_base, v_cos, v_dx) };
-        let v_sy = unsafe { vmlaq_f32(v_sy_base, v_sin, v_dx) };
-
-        // in_bounds[i] = sx[i] ∈ [0, sx_max] && sy[i] ∈ [0, sy_max].
-        // vcgeq_f32 / vcleq_f32: lane = 0xFFFF_FFFF if true, 0 if false.
-        let in_bounds = unsafe {
-            vandq_u32(
-                vandq_u32(vcgeq_f32(v_sx, v_zero), vcleq_f32(v_sx, v_sx_max)),
-                vandq_u32(vcgeq_f32(v_sy, v_zero), vcleq_f32(v_sy, v_sy_max)),
-            )
-        };
-
-        // all_in: vmvnq_u32 flips: OOB lane → 0xFFFF_FFFF, IB lane → 0.
-        // vmaxvq_u32 == 0 iff every lane was IB (flipped to 0).
-        let all_in = unsafe { vmaxvq_u32(vmvnq_u32(in_bounds)) == 0 };
-
-        if all_in {
-            // All 4 source coords are in-bounds: SIMD floor + scalar gather + bilinear.
-            // vcvtmq_s32_f32: floor f32 → i32 (round toward −∞).
-            let v_x0 = unsafe { vcvtmq_s32_f32(v_sx) };
-            let v_y0 = unsafe { vcvtmq_s32_f32(v_sy) };
-
-            // vgetq_lane_* requires a const lane index — extract all 8 values explicitly.
-            let x0_0 = unsafe { vgetq_lane_s32(v_x0, 0) };
-            let x0_1 = unsafe { vgetq_lane_s32(v_x0, 1) };
-            let x0_2 = unsafe { vgetq_lane_s32(v_x0, 2) };
-            let x0_3 = unsafe { vgetq_lane_s32(v_x0, 3) };
-            let y0_0 = unsafe { vgetq_lane_s32(v_y0, 0) };
-            let y0_1 = unsafe { vgetq_lane_s32(v_y0, 1) };
-            let y0_2 = unsafe { vgetq_lane_s32(v_y0, 2) };
-            let y0_3 = unsafe { vgetq_lane_s32(v_y0, 3) };
-
-            let sx_0 = unsafe { vgetq_lane_f32(v_sx, 0) };
-            let sx_1 = unsafe { vgetq_lane_f32(v_sx, 1) };
-            let sx_2 = unsafe { vgetq_lane_f32(v_sx, 2) };
-            let sx_3 = unsafe { vgetq_lane_f32(v_sx, 3) };
-            let sy_0 = unsafe { vgetq_lane_f32(v_sy, 0) };
-            let sy_1 = unsafe { vgetq_lane_f32(v_sy, 1) };
-            let sy_2 = unsafe { vgetq_lane_f32(v_sy, 2) };
-            let sy_3 = unsafe { vgetq_lane_f32(v_sy, 3) };
-
-            // x0 ≥ 0 (all_in), x0 ≤ sx_max ≤ 32766 ≤ 46341 ≤ 2^23: safe sign-loss and precision casts.
-            #[expect(
-                clippy::cast_sign_loss,
-                reason = "x0 ≥ 0 and y0 ≥ 0 verified by the all_in OOB check"
-            )]
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "x0 / y0 ≤ 46341 ≤ 2^23 — exactly representable in f32"
-            )]
-            {
-                dst_row[ox] = bilinear_sample(
-                    src,
-                    x0_0 as usize,
-                    y0_0 as usize,
-                    sx_0 - x0_0 as f32,
-                    sy_0 - y0_0 as f32,
-                );
-                dst_row[ox + 1] = bilinear_sample(
-                    src,
-                    x0_1 as usize,
-                    y0_1 as usize,
-                    sx_1 - x0_1 as f32,
-                    sy_1 - y0_1 as f32,
-                );
-                dst_row[ox + 2] = bilinear_sample(
-                    src,
-                    x0_2 as usize,
-                    y0_2 as usize,
-                    sx_2 - x0_2 as f32,
-                    sy_2 - y0_2 as f32,
-                );
-                dst_row[ox + 3] = bilinear_sample(
-                    src,
-                    x0_3 as usize,
-                    y0_3 as usize,
-                    sx_3 - x0_3 as f32,
-                    sy_3 - y0_3 as f32,
-                );
-            }
-        } else {
-            // At least one OOB lane — fall back to per-pixel scalar for all 4.
-            // rotate_pixel_scalar handles OOB with white fill.
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
-            )]
-            for i in 0..4usize {
-                dst_row[ox + i] = rotate_pixel_scalar(src, (ox + i) as f32, p);
-            }
+        let dx = vaddq_f32(vdupq_n_f32(ox as f32), lane);
+        let sx = vfmaq_f32(v_sx_base, v_cos, dx);
+        let sy = vfmaq_f32(v_sy_base, v_sin, dx);
+        let x0 = vcvtmq_s32_f32(sx);
+        let y0 = vcvtmq_s32_f32(sy);
+        let in_bounds = vandq_u32(
+            vcleq_u32(vreinterpretq_u32_s32(x0), v_sx_max),
+            vcleq_u32(vreinterpretq_u32_s32(y0), v_sy_max),
+        );
+        if vmaxvq_u32(in_bounds) == 0 {
+            return v_white;
         }
+        let fx = vsubq_f32(sx, vcvtq_f32_s32(x0));
+        let fy = vsubq_f32(sy, vcvtq_f32_s32(y0));
 
-        ox += 4;
-    }
+        // Out-of-bounds lanes are zeroed so every origin is a valid index.
+        let x0 = vandq_u32(vreinterpretq_u32_s32(x0), in_bounds);
+        let y0 = vandq_u32(vreinterpretq_u32_s32(y0), in_bounds);
+        let origin = |x: u32, y: u32| footprint(src, x as usize, y as usize);
+        let f = [
+            origin(vgetq_lane_u32::<0>(x0), vgetq_lane_u32::<0>(y0)),
+            origin(vgetq_lane_u32::<1>(x0), vgetq_lane_u32::<1>(y0)),
+            origin(vgetq_lane_u32::<2>(x0), vgetq_lane_u32::<2>(y0)),
+            origin(vgetq_lane_u32::<3>(x0), vgetq_lane_u32::<3>(y0)),
+        ];
+        let corner = |c: usize| widen([f[0][c], f[1][c], f[2][c], f[3][c]]);
+        let (p00, p10, p01, p11) = (corner(0), corner(1), corner(2), corner(3));
 
-    // Scalar tail: remaining pixels where ox + 4 > w.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "i ≤ MAX_PX_DIMENSION = 32768; exact in f32"
-    )]
-    for i in ox..w {
-        dst_row[i] = rotate_pixel_scalar(src, i as f32, p);
+        let top = vfmaq_f32(p00, vsubq_f32(p10, p00), fx);
+        let bot = vfmaq_f32(p01, vsubq_f32(p11, p01), fx);
+        let val = vfmaq_f32(top, vsubq_f32(bot, top), fy);
+        vbslq_u32(in_bounds, vcvtaq_u32_f32(val), v_white)
+    };
+
+    let (groups, tail) = dst_row.as_chunks_mut::<8>();
+    let tail_start = groups.len() * 8;
+    for (g, out) in groups.iter_mut().enumerate() {
+        let ox = g * 8;
+        let px = vqmovn_u16(vcombine_u16(vqmovn_u32(quad(ox)), vqmovn_u32(quad(ox + 4))));
+        // SAFETY: `out` is eight bytes, the extent of one vst1_u8.
+        unsafe { vst1_u8(out.as_mut_ptr(), px) };
     }
+    rotate_span_scalar(tail, tail_start, src, p);
 }
 
 /// AVX-512 inner loop: 16 output pixels per iteration, bit-exact with
@@ -519,18 +472,24 @@ unsafe fn rotate_row_avx512(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowPara
     }
 }
 
-/// Scalar per-pixel row implementation, compiled on every target.
+/// Scalar per-pixel row implementation.
 ///
-/// Targets without a SIMD tier use it directly; elsewhere it is the reference
-/// implementation the per-row parity tests compare against.
+/// Targets without a SIMD tier use it directly, the AVX-512 tier falls back
+/// to it, and it is the reference the per-row parity tests compare against.
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn rotate_row_scalar(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
-    for (ox, dst_px) in dst_row.iter_mut().enumerate() {
+    rotate_span_scalar(dst_row, 0, src, p);
+}
+
+/// Scalar per-pixel loop over output columns `first .. first + span.len()`.
+fn rotate_span_scalar(span: &mut [u8], first: usize, src: &Bitmap<Gray8>, p: &RowParams) {
+    for (i, dst_px) in span.iter_mut().enumerate() {
         #[expect(
             clippy::cast_precision_loss,
-            reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+            reason = "column ≤ MAX_PX_DIMENSION = 32768; exact in f32"
         )]
         {
-            *dst_px = rotate_pixel_scalar(src, ox as f32, p);
+            *dst_px = rotate_pixel_scalar(src, (first + i) as f32, p);
         }
     }
 }
@@ -544,9 +503,8 @@ fn rotate_row_scalar(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
 )]
 #[inline]
 fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
-    let w = dst_row.len();
     // SAFETY: NEON mandatory on all ARMv8-A targets.
-    unsafe { rotate_row_neon(dst_row, src, p, w) }
+    unsafe { rotate_row_neon(dst_row, src, p) }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -766,15 +724,32 @@ mod tests {
         }
     }
 
-    /// NEON row kernel vs the scalar reference, byte-for-byte.
-    ///
-    /// Angles cover edge-boundary lanes (0.1°) and mixed in/out-of-bounds
-    /// groups (5°, 45°); widths 33 and 30 leave 1- and 2-pixel scalar
-    /// tails after the 4-wide NEON groups.
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn neon_rotate_rows_match_scalar_reference() {
-        for &(w, h, angle) in &[(33u32, 16u32, 0.1f32), (32, 32, 5.0), (30, 8, 45.0)] {
+    /// Source sizes for the SIMD row-kernel parity tests: 1–15-pixel tails
+    /// after the 8- and 16-wide groups, a 4×4 image (16-byte buffer, dword
+    /// gather clamp active on every row), a 3-row strip, and a 1×1 image.
+    const PARITY_SIZES: [(u32, u32); 8] = [
+        (33, 16),
+        (32, 32),
+        (30, 8),
+        (7, 5),
+        (100, 3),
+        (4, 4),
+        (257, 129),
+        (1, 1),
+    ];
+
+    /// Angles for the parity tests: the identity, edge-boundary lanes,
+    /// mixed in/out-of-bounds groups, exact-half bilinear fractions (180°)
+    /// and negative skew.
+    const PARITY_ANGLES: [f32; 9] = [0.0, 0.1, 1.5, 5.0, 45.0, 89.0, 180.0, -3.3, 12.34];
+
+    /// Asserts that `row_fn` reproduces [`rotate_row_scalar`] byte-for-byte
+    /// over [`PARITY_SIZES`] × [`PARITY_ANGLES`].
+    fn assert_rows_match_scalar(
+        kernel: &str,
+        row_fn: impl Fn(&mut [u8], &Bitmap<Gray8>, &RowParams) + Copy,
+    ) {
+        for &(w, h) in &PARITY_SIZES {
             let mut src = Bitmap::<Gray8>::new(w, h, 1, false);
             for y in 0..h {
                 let row = src.row_bytes_mut(y);
@@ -788,35 +763,36 @@ mod tests {
                     }
                 }
             }
-
-            let scalar = rotate_cpu_with(&src, angle, rotate_row_scalar);
-            #[expect(
-                unsafe_code,
-                reason = "direct NEON kernel invocation under test; NEON is mandatory on ARMv8-A"
-            )]
-            let neon = rotate_cpu_with(&src, angle, |row, s, p| {
-                let row_w = row.len();
-                // SAFETY: NEON mandatory on all ARMv8-A targets.
-                unsafe { rotate_row_neon(row, s, p, row_w) }
-            });
-
-            for y in 0..h {
-                assert_eq!(
-                    scalar.row_bytes(y),
-                    neon.row_bytes(y),
-                    "w={w} h={h} angle={angle} row {y}"
-                );
+            for &angle in &PARITY_ANGLES {
+                let scalar = rotate_cpu_with(&src, angle, rotate_row_scalar);
+                let simd = rotate_cpu_with(&src, angle, row_fn);
+                for y in 0..h {
+                    assert_eq!(
+                        scalar.row_bytes(y),
+                        simd.row_bytes(y),
+                        "{kernel}: w={w} h={h} angle={angle} row {y}"
+                    );
+                }
             }
         }
     }
 
+    /// NEON row kernel vs the scalar reference, byte-for-byte.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_rotate_rows_match_scalar_reference() {
+        #[expect(
+            unsafe_code,
+            reason = "direct NEON kernel invocation under test; NEON is mandatory on ARMv8-A"
+        )]
+        assert_rows_match_scalar("neon", |row, s, p| {
+            // SAFETY: NEON mandatory on all ARMv8-A targets.
+            unsafe { rotate_row_neon(row, s, p) }
+        });
+    }
+
     /// AVX-512 row kernel vs the scalar reference, byte-for-byte.
-    ///
-    /// Sizes leave 1–15-pixel tails after the 16-wide groups, include a
-    /// 4×4 image (16-byte buffer, dword-gather clamp active on every row)
-    /// and a 3-row strip; angles cover the identity, edge-boundary lanes,
-    /// mixed in/out-of-bounds groups, exact-half bilinear fractions (180°)
-    /// and negative skew.  Runtime-skipped without AVX-512.
+    /// Runtime-skipped without AVX-512.
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx512_rotate_rows_match_scalar_reference() {
@@ -826,47 +802,14 @@ mod tests {
         {
             return;
         }
-        for &(w, h) in &[
-            (33u32, 16u32),
-            (32, 32),
-            (30, 8),
-            (7, 5),
-            (100, 3),
-            (4, 4),
-            (257, 129),
-        ] {
-            let mut src = Bitmap::<Gray8>::new(w, h, 1, false);
-            for y in 0..h {
-                let row = src.row_bytes_mut(y);
-                for (x, px) in row.iter_mut().enumerate() {
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "mod-256 result fits in u8 by construction"
-                    )]
-                    {
-                        *px = ((x * 31 + y as usize * 97) % 256) as u8;
-                    }
-                }
-            }
-            for &angle in &[0.0f32, 0.1, 1.5, 5.0, 45.0, 89.0, 180.0, -3.3, 12.34] {
-                let scalar = rotate_cpu_with(&src, angle, rotate_row_scalar);
-                #[expect(
-                    unsafe_code,
-                    reason = "direct AVX-512 kernel invocation under test; features confirmed above"
-                )]
-                let simd = rotate_cpu_with(&src, angle, |row, s, p| {
-                    // SAFETY: avx512f + avx512bw + avx512vl confirmed present above.
-                    unsafe { rotate_row_avx512(row, s, p) }
-                });
-                for y in 0..h {
-                    assert_eq!(
-                        scalar.row_bytes(y),
-                        simd.row_bytes(y),
-                        "w={w} h={h} angle={angle} row {y}"
-                    );
-                }
-            }
-        }
+        #[expect(
+            unsafe_code,
+            reason = "direct AVX-512 kernel invocation under test; features confirmed above"
+        )]
+        assert_rows_match_scalar("avx512", |row, s, p| {
+            // SAFETY: avx512f + avx512bw + avx512vl confirmed present above.
+            unsafe { rotate_row_avx512(row, s, p) }
+        });
     }
 
     /// A source buffer shorter than one dword cannot be gathered from; the
