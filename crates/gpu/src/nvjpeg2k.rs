@@ -720,13 +720,11 @@ impl NvJpeg2k {
                 let (plane_r, plane_g, plane_b) =
                     (&host_planes[0], &host_planes[1], &host_planes[2]);
                 interleaved
-                    .chunks_exact_mut(3)
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
                     .zip(plane_r.iter().zip(plane_g.iter().zip(plane_b.iter())))
-                    .for_each(|(chunk, (rv, (gv, bv)))| {
-                        chunk[0] = *rv;
-                        chunk[1] = *gv;
-                        chunk[2] = *bv;
-                    });
+                    .for_each(|(px, (&rv, (&gv, &bv)))| *px = [rv, gv, bv]);
                 interleaved
             }
         };
