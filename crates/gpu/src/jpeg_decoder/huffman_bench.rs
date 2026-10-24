@@ -26,7 +26,8 @@
 //! configuration that exhausts the Phase 2 budget is reported as
 //! `fallback`: `sym_ms` is the time spent before the GPU decode gave
 //! up and `gpu_ms` that time plus `cpu_ms`, the cost the decoder's CPU
-//! fallback pays.
+//! fallback pays. `zune_ms` is a full decode to pixels by the CPU
+//! decoder the renderer uses outside the GPU path.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -117,6 +118,7 @@ struct Case {
     coef: Vec<i32>,
     dc: Vec<i32>,
     cpu: Duration,
+    zune: Duration,
 }
 
 impl Case {
@@ -128,7 +130,7 @@ impl Case {
                 .expect("label carries the size"),
         );
         println!(
-            "{:<28} {:>2} {:>8.1} {ssb:>6} {n:>6} {passes:>6} {:>9.2} {:>9.2} {:>9.2} {:>6.2}",
+            "{:<28} {:>2} {:>8.1} {ssb:>6} {n:>6} {passes:>6} {:>9.2} {:>9.2} {:>9.2} {:>6.2} {:>9.2}",
             self.name,
             self.prep.components.len(),
             f64::from(self.prep.bitstream.length_bits) / 8192.0,
@@ -136,6 +138,7 @@ impl Case {
             ms(gpu),
             ms(self.cpu),
             ms(gpu) / ms(self.cpu),
+            ms(self.zune),
         );
     }
 
@@ -188,12 +191,20 @@ fn load_case(path: &Path, iters: usize) -> Option<Case> {
     };
     let (coef, dc, _, _) = extract_coefficients_pub(&prep).expect("cpu walk");
     let cpu = time_median(iters, || extract_coefficients_pub(&prep).expect("cpu walk"));
+    let zune = time_median(iters, || {
+        use zune_jpeg::JpegDecoder;
+        use zune_jpeg::zune_core::bytestream::ZCursor;
+        JpegDecoder::new(ZCursor::new(&bytes[..]))
+            .decode()
+            .expect("zune-jpeg decode")
+    });
     Some(Case {
         name,
         prep,
         coef,
         dc,
         cpu,
+        zune,
     })
 }
 
@@ -210,8 +221,8 @@ fn huffman_bench() {
     };
     let settings = Settings::from_env();
     println!(
-        "{:<28} {:>2} {:>8} {:>6} {:>6} {:>6} {:>9} {:>9} {:>9} {:>6}",
-        "file", "nc", "KiB", "ssb", "n", "passes", "sym_ms", "gpu_ms", "cpu_ms", "ratio"
+        "{:<28} {:>2} {:>8} {:>6} {:>6} {:>6} {:>9} {:>9} {:>9} {:>6} {:>9}",
+        "file", "nc", "KiB", "ssb", "n", "passes", "sym_ms", "gpu_ms", "cpu_ms", "ratio", "zune_ms"
     );
     for path in jpeg_files(Path::new(&dir)) {
         let Some(case) = load_case(&path, settings.iters) else {

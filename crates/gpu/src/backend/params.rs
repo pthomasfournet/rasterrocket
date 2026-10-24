@@ -606,7 +606,7 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     pub memo: Option<&'a B::DeviceBuffer>,
     /// Exact bit count of `bitstream`.
     pub length_bits: u32,
-    /// Subsequence size (Wei §III); 128 / 512 / 1024 in practice.
+    /// Subsequence size in bits (Wei §III).
     pub subsequence_bits: u32,
     /// Number of Huffman tables (one per component for the MVP).
     pub num_components: u32,
