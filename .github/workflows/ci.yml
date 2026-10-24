@@ -72,11 +72,17 @@ jobs:
       - name: Test rasterrocket (deskew, render helpers)
         run: cargo test -p rasterrocket --lib
 
+      - name: Test rasterrocket-parser
+        run: cargo test -p rasterrocket-parser --lib
+
       - name: Clippy (no GPU features)
-        run: cargo clippy -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
+        run: cargo clippy -p rasterrocket-parser -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
 
       # Test targets are linted one crate per invocation: a combined
       # `--all-targets` run exceeds runner memory.
+      - name: Clippy (rasterrocket-parser tests)
+        run: cargo clippy -p rasterrocket-parser --tests -- -D warnings
+
       - name: Clippy (rasterrocket-render tests)
         run: cargo clippy -p rasterrocket-render --tests -- -D warnings
 
