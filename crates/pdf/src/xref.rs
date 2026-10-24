@@ -315,8 +315,7 @@ fn read_traditional_xref(
                 .ok_or_else(|| PdfError::BadXref(format!("bad entry offset at pos {pos}")))?;
             skip_ws(data, &mut pos);
             let generation = parse_u64(data, &mut pos)
-                .ok_or_else(|| PdfError::BadXref(format!("bad generation at pos {pos}")))?
-                as u16;
+                .ok_or_else(|| PdfError::BadXref(format!("bad generation at pos {pos}")))?;
             skip_ws(data, &mut pos);
             // A missing flag (end of input) reads as free; `pos` stays within
             // `0..=data.len()`.
@@ -331,7 +330,12 @@ fn read_traditional_xref(
                 PdfError::BadXref(format!("object number overflow: first={first} i={i}"))
             })?;
             // Only insert if not already present (newer xref sections win).
-            if flag == b'n' && !table.entries.contains_key(&obj_num) {
+            // A generation above `u16::MAX` names no object that can exist;
+            // the entry is dropped rather than truncated.
+            if flag == b'n'
+                && let Ok(generation) = u16::try_from(generation)
+                && !table.entries.contains_key(&obj_num)
+            {
                 table
                     .entries
                     .insert(obj_num, XrefEntry::Direct { offset, generation });
@@ -530,27 +534,23 @@ fn read_xref_stream(
                 continue; // newer xref section already has this
             }
 
-            match type_val {
-                0 => {} // free object — skip
-                1 => {
-                    table.entries.insert(
-                        obj_num,
-                        XrefEntry::Direct {
-                            offset: f1,
-                            generation: f2 as u16,
-                        },
-                    );
-                }
-                2 => {
-                    table.entries.insert(
-                        obj_num,
-                        XrefEntry::InObjStm {
-                            container: f1 as u32,
-                            index: f2 as u32,
-                        },
-                    );
-                }
-                _ => {} // unknown type — ignore per spec
+            // A field value outside its target type names no object that
+            // can exist; such an entry is dropped rather than truncated onto
+            // a different object.
+            let entry = match type_val {
+                1 => u16::try_from(f2).ok().map(|generation| XrefEntry::Direct {
+                    offset: f1,
+                    generation,
+                }),
+                2 => u32::try_from(f1)
+                    .ok()
+                    .zip(u32::try_from(f2).ok())
+                    .map(|(container, index)| XrefEntry::InObjStm { container, index }),
+                // Type 0 is a free object; other types are ignored per spec.
+                _ => None,
+            };
+            if let Some(entry) = entry {
+                table.entries.insert(obj_num, entry);
             }
         }
     }
@@ -834,6 +834,59 @@ startxref
                 "/W {w}: got {err:?}"
             );
         }
+    }
+
+    /// Entry fields wider than their target type must not be truncated: a
+    /// type-2 container number of `2^32 + 4` used to alias object 4, and a
+    /// type-1 generation of `65536 + 7` used to alias generation 7.
+    #[test]
+    fn xref_stream_out_of_range_fields_are_dropped() {
+        // `/W [1 8 5]`: one type byte, an 8-byte field 1, a 5-byte field 2.
+        let mut entries = Vec::new();
+        let mut entry = |kind: u8, f1: u64, f2: u64| {
+            entries.push(kind);
+            entries.extend_from_slice(&f1.to_be_bytes());
+            entries.extend_from_slice(&f2.to_be_bytes()[3..]);
+        };
+        entry(2, (1 << 32) + 4, 0); // object 1
+        entry(2, 4, (1 << 32) + 1); // object 2
+        entry(1, 9, 65_536 + 7); // object 3
+        entry(1, 9, 0); // object 4: well-formed control
+
+        let data = xref_stream_pdf("[1 8 5]", "[1 4]", &entries);
+        let table = read_xref_strict(&data).expect("xref stream parses");
+        assert!(table.get(1).is_none(), "container 2^32+4 must not alias 4");
+        assert!(table.get(2).is_none(), "index 2^32+1 must not alias 1");
+        assert!(table.get(3).is_none(), "generation 65543 must not alias 7");
+        assert!(
+            matches!(
+                table.get(4),
+                Some(XrefEntry::Direct {
+                    offset: 9,
+                    generation: 0
+                })
+            ),
+            "well-formed entry must survive"
+        );
+    }
+
+    /// A traditional entry whose generation exceeds `u16::MAX` is dropped
+    /// instead of being truncated onto another generation.
+    #[test]
+    fn traditional_xref_out_of_range_generation_is_dropped() {
+        let data = b"%PDF-1.4\n\
+xref\n\
+0 2\n\
+0000000009 65543 n\r\n\
+0000000009 00000 n\r\n\
+trailer\n\
+<</Size 2>>\n\
+startxref\n\
+9\n\
+%%EOF";
+        let table = read_xref_strict(data).expect("xref parses");
+        assert!(table.get(0).is_none(), "generation 65543 must be dropped");
+        assert!(table.get(1).is_some(), "well-formed entry must survive");
     }
 
     /// A traditional table that ends immediately after an entry's
