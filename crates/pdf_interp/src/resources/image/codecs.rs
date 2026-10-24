@@ -21,12 +21,6 @@ use std::sync::Arc;
 
 // ── GPU JPEG acceleration (nvJPEG and/or VA-API) ──────────────────────────────
 
-#[cfg(feature = "nvjpeg")]
-use gpu::nvjpeg::NvJpegDecoder;
-
-#[cfg(feature = "vaapi")]
-use gpu::JpegQueueHandle;
-
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
 
@@ -292,33 +286,11 @@ impl hayro_ccitt::Decoder for HayroCcittCollector {
     reason = "GPU dispatch paths (nvjpeg, vaapi) plus the CPU decode path are each short; \
               combining them in one function keeps the fallback logic visible"
 )]
-// Four fixed arguments plus one per enabled decoder/cache feature and two
-// for `gpu-icc`: the lint fires once the feature-gated arguments reach four.
 #[cfg_attr(
-    any(
-        all(
-            feature = "gpu-icc",
-            any(
-                all(feature = "nvjpeg", feature = "vaapi"),
-                all(feature = "nvjpeg", feature = "gpu-jpeg-huffman"),
-                all(feature = "nvjpeg", feature = "cache"),
-                all(feature = "vaapi", feature = "gpu-jpeg-huffman"),
-                all(feature = "vaapi", feature = "cache"),
-                all(feature = "gpu-jpeg-huffman", feature = "cache"),
-            )
-        ),
-        all(
-            feature = "nvjpeg",
-            feature = "vaapi",
-            feature = "gpu-jpeg-huffman",
-            feature = "cache"
-        )
-    ),
+    not(any(feature = "nvjpeg", feature = "gpu-icc")),
     expect(
-        clippy::too_many_arguments,
-        reason = "decoder/cache handles are feature-gated cfg-args; bundling them \
-                  into a struct would force every caller to construct a partially-\
-                  populated context per call"
+        clippy::needless_pass_by_ref_mut,
+        reason = "only the nvjpeg and gpu-icc handles are borrowed mutably"
     )
 )]
 pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
@@ -326,19 +298,30 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     pdf_w: u32,
     pdf_h: u32,
     dict: &Dictionary,
-    #[cfg(feature = "nvjpeg")] gpu: Option<&mut NvJpegDecoder>,
-    #[cfg(feature = "vaapi")] vaapi: Option<&JpegQueueHandle>,
+    #[cfg_attr(
+        not(any(feature = "nvjpeg", feature = "vaapi", feature = "gpu-icc")),
+        expect(
+            unused_variables,
+            reason = "every handle in the context is feature-gated"
+        )
+    )]
+    ctx: &mut super::ImageDecodeCtx<'_>,
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<
         &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
     >,
-    #[cfg(feature = "gpu-icc")] gpu_ctx: Option<&GpuCtx>,
-    #[cfg(feature = "gpu-icc")] clut_cache: Option<&mut IccClutCache>,
     #[cfg(feature = "cache")] cache_ctx: Option<&DctCacheCtx<'_>>,
 ) -> Option<ImageDescriptor> {
     use zune_core::bytestream::ZCursor;
     use zune_core::colorspace::ColorSpace as ZColorSpace;
     use zune_core::options::DecoderOptions;
     use zune_jpeg::JpegDecoder;
+
+    #[cfg(feature = "nvjpeg")]
+    let gpu = ctx.nvjpeg.as_deref_mut();
+    #[cfg(feature = "vaapi")]
+    let vaapi = ctx.vaapi;
+    #[cfg(feature = "gpu-icc")]
+    let (gpu_ctx, clut_cache) = (ctx.icc.gpu_ctx, ctx.icc.clut_cache.as_deref_mut());
 
     // Device-image-cache fast path: if a cache is wired in and the encoded
     // bytes are already cached (cross-document content-hash dedup),

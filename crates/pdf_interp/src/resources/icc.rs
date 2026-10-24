@@ -262,8 +262,8 @@ mod tests {
         assert!(cache.is_empty(), "failed bake must not pollute the cache");
     }
 
-    /// Second call with the same (invalid) grid_n hits a different code path
-    /// (InvalidGridSize before any hashing occurs) — cache stays empty.
+    /// Second call with the same (invalid) `grid_n` hits a different code path
+    /// (`InvalidGridSize` before any hashing occurs) — cache stays empty.
     #[test]
     fn cached_invalid_grid_never_caches() {
         let mut cache = IccClutCache::new();
@@ -271,7 +271,7 @@ mod tests {
         assert!(cache.is_empty());
     }
 
-    /// Two calls with the same profile and grid_n return the same `Arc` pointer.
+    /// Two calls with the same profile and `grid_n` return the same `Arc` pointer.
     /// Verifies the cache hit path without requiring a real ICC profile.
     ///
     /// We use garbage ICC bytes which will fail, so we cannot test a successful

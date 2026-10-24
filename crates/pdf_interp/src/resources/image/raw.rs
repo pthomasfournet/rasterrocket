@@ -33,14 +33,6 @@ use gpu::GpuCtx;
 ///
 /// `Indexed` images with bpc 1/2/4 unpack the sub-byte palette indices first.
 /// CMYK images (bpc 8/16) are converted to RGB inline.
-#[cfg_attr(
-    feature = "gpu-icc",
-    expect(
-        clippy::too_many_arguments,
-        reason = "each argument is a distinct, non-groupable parameter; \
-                  the extra gpu-icc args push the count over the limit"
-    )
-)]
 pub(super) fn decode_raw(
     doc: &Document,
     data: &[u8],
@@ -48,9 +40,10 @@ pub(super) fn decode_raw(
     height: u32,
     is_mask: bool,
     dict: &Dictionary,
-    #[cfg(feature = "gpu-icc")] gpu_ctx: Option<&GpuCtx>,
-    #[cfg(feature = "gpu-icc")] clut_cache: Option<&mut IccClutCache>,
+    #[cfg(feature = "gpu-icc")] icc: &mut super::IccHandles<'_>,
 ) -> Option<ImageDescriptor> {
+    #[cfg(feature = "gpu-icc")]
+    let (gpu_ctx, clut_cache) = (icc.gpu_ctx, icc.clut_cache.as_deref_mut());
     let bpc = dict.get_i64(b"BitsPerComponent").unwrap_or(8);
 
     if is_mask {
@@ -632,9 +625,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.color_space, ImageColorSpace::Gray);
@@ -656,9 +647,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.color_space, ImageColorSpace::Rgb);
@@ -680,9 +669,7 @@ mod tests {
             true,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.color_space, ImageColorSpace::Mask);
@@ -709,9 +696,7 @@ mod tests {
             true,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         let pixels = desc.data.as_cpu().unwrap();
@@ -741,9 +726,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.color_space, ImageColorSpace::Rgb);
@@ -767,9 +750,7 @@ mod tests {
                 false,
                 &dict,
                 #[cfg(feature = "gpu-icc")]
-                None,
-                #[cfg(feature = "gpu-icc")]
-                None
+                &mut crate::resources::image::IccHandles::none(),
             )
             .is_none()
         );
@@ -791,9 +772,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.color_space, ImageColorSpace::Gray);
@@ -817,9 +796,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.color_space, ImageColorSpace::Rgb);
@@ -848,9 +825,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         let pixels = desc.data.as_cpu().unwrap();
@@ -878,9 +853,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         assert_eq!(desc.data.as_cpu().unwrap()[0], 128);
@@ -907,9 +880,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         let pixels = desc.data.as_cpu().unwrap();
@@ -946,9 +917,7 @@ mod tests {
             false,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .unwrap();
         // Identity fallback: output must equal input.
@@ -981,9 +950,7 @@ mod tests {
             true,
             dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut crate::resources::image::IccHandles::none(),
         )
         .expect("stencil decode should succeed")
         .data

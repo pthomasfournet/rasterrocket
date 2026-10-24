@@ -313,80 +313,26 @@ impl<'doc> PageResources<'doc> {
     /// Returns [`image::ImageResolution::Absent`] if the name is absent or not
     /// an image, and [`image::ImageResolution::DecodeFailed`] if decoding fails.
     ///
-    /// `gpu` enables GPU-accelerated JPEG decoding for large `DCTDecode` streams
-    /// when the `nvjpeg` feature is active.  `gpu_j2k` enables GPU-accelerated
-    /// JPEG 2000 decoding for large `JPXDecode` streams when the `nvjpeg2k`
-    /// feature is active.  Pass `None` for CPU-only behaviour on either path.
+    /// `ctx` carries the GPU decoders, ICC handles and image cache the decode
+    /// may use; [`image::ImageDecodeCtx::cpu`] decodes on the CPU only.
     #[must_use]
-    // Two fixed arguments plus one per enabled decoder feature and two each
-    // for `gpu-icc` and `cache`: the lint fires once the feature-gated
-    // arguments reach six.
-    #[cfg_attr(
-        any(
-            all(
-                feature = "gpu-icc",
-                feature = "cache",
-                any(
-                    all(feature = "nvjpeg", feature = "vaapi"),
-                    all(feature = "nvjpeg", feature = "nvjpeg2k"),
-                    all(feature = "nvjpeg", feature = "gpu-jpeg-huffman"),
-                    all(feature = "vaapi", feature = "nvjpeg2k"),
-                    all(feature = "vaapi", feature = "gpu-jpeg-huffman"),
-                    all(feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"),
-                )
-            ),
-            all(
-                any(feature = "gpu-icc", feature = "cache"),
-                feature = "nvjpeg",
-                feature = "vaapi",
-                feature = "nvjpeg2k",
-                feature = "gpu-jpeg-huffman"
-            )
-        ),
-        expect(
-            clippy::too_many_arguments,
-            reason = "thin forwarder to resolve_image; argument count is feature-gated"
-        )
-    )]
     pub fn image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
         &self,
         request: image::ImageRequest<'_>,
-        #[cfg(feature = "nvjpeg")] gpu: Option<&mut gpu::nvjpeg::NvJpegDecoder>,
-        #[cfg(feature = "vaapi")] vaapi: Option<&gpu::JpegQueueHandle>,
-        #[cfg(feature = "nvjpeg2k")] gpu_j2k: Option<&mut gpu::nvjpeg2k::NvJpeg2kDecoder>,
+        ctx: &mut image::ImageDecodeCtx<'_>,
         #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<
             &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
         >,
-        #[cfg(feature = "gpu-icc")] gpu_ctx: Option<&gpu::GpuCtx>,
-        #[cfg(feature = "gpu-icc")] clut_cache: Option<&mut image::IccClutCache>,
-        #[cfg(feature = "cache")] image_cache: Option<
-            &std::sync::Arc<gpu::cache::DeviceImageCache>,
-        >,
-        #[cfg(feature = "cache")] doc_id: Option<gpu::cache::DocId>,
     ) -> image::ImageResolution {
         let Some(page_dict) = self.ctx_dict() else {
             return image::ImageResolution::Absent;
         };
         image::resolve_image(
-            self.doc,
+            ctx,
             &page_dict,
             request,
-            #[cfg(feature = "nvjpeg")]
-            gpu,
-            #[cfg(feature = "vaapi")]
-            vaapi,
-            #[cfg(feature = "nvjpeg2k")]
-            gpu_j2k,
             #[cfg(feature = "gpu-jpeg-huffman")]
             jpeg_gpu,
-            #[cfg(feature = "gpu-icc")]
-            gpu_ctx,
-            #[cfg(feature = "gpu-icc")]
-            clut_cache,
-            #[cfg(feature = "cache")]
-            image_cache,
-            #[cfg(feature = "cache")]
-            doc_id,
         )
     }
 

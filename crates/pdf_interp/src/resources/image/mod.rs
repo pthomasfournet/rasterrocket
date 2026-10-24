@@ -156,7 +156,7 @@ pub(crate) mod inline;
 pub(crate) mod raw;
 pub(crate) mod smask;
 
-pub use inline::{InlineImageCtx, decode_inline_image};
+pub use inline::decode_inline_image;
 pub use smask::SoftMask;
 
 // Visible only when cargo-fuzz sets `--cfg fuzzing`.  Not part of the public API.
@@ -421,44 +421,17 @@ pub struct ImageDescriptor {
     clippy::too_many_lines,
     reason = "filter dispatch table; splitting per-filter would scatter the dispatch logic"
 )]
-#[cfg_attr(
-    any(
-        all(
-            feature = "gpu-icc",
-            feature = "cache",
-            any(feature = "nvjpeg", feature = "vaapi", feature = "nvjpeg2k")
-        ),
-        all(
-            feature = "nvjpeg",
-            feature = "vaapi",
-            feature = "nvjpeg2k",
-            any(feature = "gpu-icc", feature = "cache")
-        )
-    ),
-    expect(
-        clippy::too_many_arguments,
-        reason = "decoder/cache handles are feature-gated cfg-args; bundling them \
-                  into a struct would force every caller to construct a partially-\
-                  populated context per call"
-    )
-)]
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
-    doc: &Document,
+    ctx: &mut ImageDecodeCtx<'_>,
     page_dict: &Dictionary,
     request: ImageRequest<'_>,
-    #[cfg(feature = "nvjpeg")] gpu: Option<&mut NvJpegDecoder>,
-    #[cfg(feature = "vaapi")] vaapi: Option<&JpegQueueHandle>,
-    #[cfg(feature = "nvjpeg2k")] gpu_j2k: Option<&mut NvJpeg2kDecoder>,
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
-    #[cfg(feature = "gpu-icc")] gpu_ctx: Option<&GpuCtx>,
-    #[cfg(feature = "gpu-icc")] clut_cache: Option<&mut IccClutCache>,
-    #[cfg(feature = "cache")] image_cache: Option<&std::sync::Arc<gpu::cache::DeviceImageCache>>,
-    #[cfg(feature = "cache")] doc_id: Option<gpu::cache::DocId>,
 ) -> ImageResolution {
     use codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
     use raw::decode_raw;
     use smask::decode_smask;
 
+    let doc = ctx.doc;
     let name = request.name;
     let Some(stream_id) = xobject_id(doc, page_dict, name) else {
         return ImageResolution::Absent;
@@ -548,9 +521,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                 is_mask,
                 &stream.dict,
                 #[cfg(feature = "gpu-icc")]
-                gpu_ctx,
-                #[cfg(feature = "gpu-icc")]
-                clut_cache,
+                &mut ctx.icc,
             ),
             Some(f) if is_transport_filter(f) => match stream.decompressed_content() {
                 Ok(data) => decode_raw(
@@ -561,9 +532,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                     is_mask,
                     &stream.dict,
                     #[cfg(feature = "gpu-icc")]
-                    gpu_ctx,
-                    #[cfg(feature = "gpu-icc")]
-                    clut_cache,
+                    &mut ctx.icc,
                 ),
                 Err(e) => {
                     log::warn!("image: {f} decode failed: {e}");
@@ -589,23 +558,16 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                 {
                     None
                 } else {
-                    codecs::DctCacheCtx::from_resources(image_cache, doc_id, stream_id)
+                    codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
                 };
                 decode_dct(
                     &codec_input,
                     w,
                     h,
                     &stream.dict,
-                    #[cfg(feature = "nvjpeg")]
-                    gpu,
-                    #[cfg(feature = "vaapi")]
-                    vaapi,
+                    ctx,
                     #[cfg(feature = "gpu-jpeg-huffman")]
                     jpeg_gpu,
-                    #[cfg(feature = "gpu-icc")]
-                    gpu_ctx,
-                    #[cfg(feature = "gpu-icc")]
-                    clut_cache,
                     #[cfg(feature = "cache")]
                     cache_ctx.as_ref(),
                 )
@@ -619,7 +581,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                     .filter(|_| !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
                 #[cfg(feature = "nvjpeg2k")]
                 {
-                    decode_jpx(&codec_input, w, h, draw_size, gpu_j2k)
+                    decode_jpx(&codec_input, w, h, draw_size, ctx.nvjpeg2k.as_deref_mut())
                 }
                 #[cfg(not(feature = "nvjpeg2k"))]
                 {
@@ -757,6 +719,85 @@ pub(super) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)>
     Some((w_raw as u32, h_raw as u32))
 }
 
+/// GPU handles for ICC-based CMYK → RGB conversion.
+#[cfg(feature = "gpu-icc")]
+pub struct IccHandles<'a> {
+    /// GPU context the CLUT conversion runs on; `None` converts on the CPU.
+    pub gpu_ctx: Option<&'a GpuCtx>,
+    /// Per-renderer cache of baked CLUTs.
+    pub clut_cache: Option<&'a mut IccClutCache>,
+}
+
+#[cfg(feature = "gpu-icc")]
+impl IccHandles<'_> {
+    /// No GPU context and no CLUT cache: conversion runs on the CPU.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            gpu_ctx: None,
+            clut_cache: None,
+        }
+    }
+}
+
+/// Everything an image decode reads besides the image's own bytes, apart
+/// from the backend-generic GPU Huffman decoder (a separate argument).
+///
+/// Holds the document, the `ColorSpace` resources an inline image's `/CS`
+/// name resolves through, the GPU decoders available to the image's filter
+/// and the device image cache.  Each handle exists only with its feature;
+/// `None` selects the CPU path or skips the cache.
+pub struct ImageDecodeCtx<'a> {
+    /// Document the image's indirect objects resolve in.
+    pub doc: &'a Document,
+    /// The `/ColorSpace` subdictionary of the resources in effect, through
+    /// which an inline image's `/CS` name other than a device space resolves
+    /// (PDF §8.9.7).
+    pub color_spaces: Option<&'a Dictionary>,
+    /// nvJPEG decoder for large `DCTDecode` images.
+    #[cfg(feature = "nvjpeg")]
+    pub nvjpeg: Option<&'a mut NvJpegDecoder>,
+    /// VA-API JPEG queue for large `DCTDecode` images.
+    #[cfg(feature = "vaapi")]
+    pub vaapi: Option<&'a JpegQueueHandle>,
+    /// nvJPEG2000 decoder for large `JPXDecode` images.
+    #[cfg(feature = "nvjpeg2k")]
+    pub nvjpeg2k: Option<&'a mut NvJpeg2kDecoder>,
+    /// ICC conversion handles.
+    #[cfg(feature = "gpu-icc")]
+    pub icc: IccHandles<'a>,
+    /// Device-resident image cache.
+    #[cfg(feature = "cache")]
+    pub image_cache: Option<&'a std::sync::Arc<gpu::cache::DeviceImageCache>>,
+    /// Identity of the document within the cache.
+    #[cfg(feature = "cache")]
+    pub doc_id: Option<gpu::cache::DocId>,
+}
+
+impl<'a> ImageDecodeCtx<'a> {
+    /// A context for `doc` with no colour-space resources and every GPU
+    /// handle off.
+    #[must_use]
+    pub const fn cpu(doc: &'a Document) -> Self {
+        Self {
+            doc,
+            color_spaces: None,
+            #[cfg(feature = "nvjpeg")]
+            nvjpeg: None,
+            #[cfg(feature = "vaapi")]
+            vaapi: None,
+            #[cfg(feature = "nvjpeg2k")]
+            nvjpeg2k: None,
+            #[cfg(feature = "gpu-icc")]
+            icc: IccHandles::none(),
+            #[cfg(feature = "cache")]
+            image_cache: None,
+            #[cfg(feature = "cache")]
+            doc_id: None,
+        }
+    }
+}
+
 /// `true` for a filter that transforms bytes without being an image codec
 /// (PDF §7.4): an image ending in one decodes as raw samples after the whole
 /// filter chain is applied.
@@ -888,25 +929,11 @@ mod tests {
         page.set("Resources", Object::Dictionary(resources));
 
         let resolution = resolve_image(
-            &doc,
+            &mut ImageDecodeCtx::cpu(&doc),
             &page,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "nvjpeg")]
-            None,
-            #[cfg(feature = "vaapi")]
-            None,
-            #[cfg(feature = "nvjpeg2k")]
-            None,
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-            #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "cache")]
-            None,
-            #[cfg(feature = "cache")]
-            None,
         );
         match resolution {
             ImageResolution::Ok { image, .. } => image,

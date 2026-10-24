@@ -325,9 +325,7 @@ pub(super) fn decode_explicit_mask(doc: &Document, id: ObjectId) -> Option<SoftM
                 true,
                 &stream.dict,
                 #[cfg(feature = "gpu-icc")]
-                None,
-                #[cfg(feature = "gpu-icc")]
-                None,
+                &mut super::IccHandles::none(),
             )?
         }
         None => decode_raw(
@@ -338,9 +336,7 @@ pub(super) fn decode_explicit_mask(doc: &Document, id: ObjectId) -> Option<SoftM
             true,
             &stream.dict,
             #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
+            &mut super::IccHandles::none(),
         )?,
         Some(other) => {
             log::warn!("image: /Mask filter {other:?} not supported — skipping mask");

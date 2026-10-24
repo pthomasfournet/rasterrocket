@@ -321,7 +321,7 @@ impl PageRenderer<'_> {
             }
             Operator::InlineImage { params, data } => {
                 let color_spaces = self.resources.color_space_dict();
-                let mut ctx = crate::resources::image::InlineImageCtx {
+                let mut ctx = crate::resources::image::ImageDecodeCtx {
                     doc: self.resources.doc(),
                     color_spaces: color_spaces.as_ref(),
                     #[cfg(feature = "nvjpeg")]
@@ -331,9 +331,14 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "nvjpeg2k")]
                     nvjpeg2k: self.nvjpeg2k.as_mut(),
                     #[cfg(feature = "gpu-icc")]
-                    gpu_ctx: self.gpu_ctx.as_deref(),
-                    #[cfg(feature = "gpu-icc")]
-                    clut_cache: Some(&mut self.icc_clut_cache),
+                    icc: crate::resources::image::IccHandles {
+                        gpu_ctx: self.gpu_ctx.as_deref(),
+                        clut_cache: Some(&mut self.icc_clut_cache),
+                    },
+                    #[cfg(feature = "cache")]
+                    image_cache: None,
+                    #[cfg(feature = "cache")]
+                    doc_id: None,
                 };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).
                 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]

@@ -5,62 +5,19 @@
               redundant here because inline is a private module, but explicit visibility aids readability"
 )]
 
-use pdf::{Dictionary, Document, Object};
+use pdf::{Dictionary, Object};
 
+use super::ImageDecodeCtx;
 use super::codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
 use super::raw::{apply_bilevel_decode, decode_raw};
 use super::{ImageDescriptor, ImageFilter, filter_name, is_transport_filter, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
-#[cfg(feature = "nvjpeg")]
-use gpu::nvjpeg::NvJpegDecoder;
-
-#[cfg(feature = "nvjpeg2k")]
-use gpu::nvjpeg2k::NvJpeg2kDecoder;
-
-#[cfg(feature = "vaapi")]
-use gpu::JpegQueueHandle;
-
 #[cfg(feature = "gpu-jpeg-huffman")]
 use gpu::jpeg_decoder::JpegGpuDecoder;
 
-#[cfg(feature = "gpu-icc")]
-use gpu::GpuCtx;
-
-#[cfg(feature = "gpu-icc")]
-use super::icc::IccClutCache;
-
 #[cfg(test)]
 use super::ImageColorSpace;
-
-/// Inputs [`decode_inline_image`] reads besides the image's own bytes.
-///
-/// Holds the document, the `ColorSpace` resources a `/CS` name resolves
-/// through, and the GPU decoders available to the image's filter (all but the
-/// backend-generic GPU Huffman decoder, which is a separate argument).  Each
-/// decoder field exists only with its feature; `None` selects the CPU path.
-pub struct InlineImageCtx<'a> {
-    /// Document the image's indirect colour-space objects resolve in.
-    pub doc: &'a Document,
-    /// The `/ColorSpace` subdictionary of the resources in effect, through
-    /// which a `/CS` name other than a device space resolves (PDF §8.9.7).
-    pub color_spaces: Option<&'a Dictionary>,
-    /// nvJPEG decoder for large `DCTDecode` images.
-    #[cfg(feature = "nvjpeg")]
-    pub nvjpeg: Option<&'a mut NvJpegDecoder>,
-    /// VA-API JPEG queue for large `DCTDecode` images.
-    #[cfg(feature = "vaapi")]
-    pub vaapi: Option<&'a JpegQueueHandle>,
-    /// nvJPEG2000 decoder for large `JPXDecode` images.
-    #[cfg(feature = "nvjpeg2k")]
-    pub nvjpeg2k: Option<&'a mut NvJpeg2kDecoder>,
-    /// GPU context for ICC CMYK → RGB conversion.
-    #[cfg(feature = "gpu-icc")]
-    pub gpu_ctx: Option<&'a GpuCtx>,
-    /// Per-renderer cache of baked ICC CLUTs.
-    #[cfg(feature = "gpu-icc")]
-    pub clut_cache: Option<&'a mut IccClutCache>,
-}
 
 /// Decode an inline image (`BI … ID … EI`) from raw parameter and data bytes.
 ///
@@ -93,22 +50,12 @@ pub struct InlineImageCtx<'a> {
     reason = "filter dispatch table; splitting per-filter would scatter the dispatch logic"
 )]
 pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
-    ctx: &mut InlineImageCtx<'_>,
+    ctx: &mut ImageDecodeCtx<'_>,
     params: &[u8],
     data: &[u8],
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
 ) -> Option<ImageDescriptor> {
     let doc = ctx.doc;
-    #[cfg(feature = "nvjpeg")]
-    let gpu = ctx.nvjpeg.as_deref_mut();
-    #[cfg(feature = "vaapi")]
-    let vaapi = ctx.vaapi;
-    #[cfg(feature = "nvjpeg2k")]
-    let gpu_j2k = ctx.nvjpeg2k.as_deref_mut();
-    #[cfg(feature = "gpu-icc")]
-    let gpu_ctx = ctx.gpu_ctx;
-    #[cfg(feature = "gpu-icc")]
-    let clut_cache = ctx.clut_cache.as_deref_mut();
     let mut dict = parse_inline_params(params);
     if let Err(name) = resolve_named_color_space(&mut dict, ctx.color_spaces) {
         log::warn!(
@@ -157,9 +104,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
             is_mask,
             &dict,
             #[cfg(feature = "gpu-icc")]
-            gpu_ctx,
-            #[cfg(feature = "gpu-icc")]
-            clut_cache,
+            &mut ctx.icc,
         ),
         Some(f) if is_transport_filter(f) => match decoded_chain(&dict, data) {
             Ok(raw) => decode_raw(
@@ -170,9 +115,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
                 is_mask,
                 &dict,
                 #[cfg(feature = "gpu-icc")]
-                gpu_ctx,
-                #[cfg(feature = "gpu-icc")]
-                clut_cache,
+                &mut ctx.icc,
             ),
             Err(e) => {
                 log::warn!("inline image: {f} decode failed: {e}");
@@ -197,16 +140,9 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
                 w,
                 h,
                 &dict,
-                #[cfg(feature = "nvjpeg")]
-                gpu,
-                #[cfg(feature = "vaapi")]
-                vaapi,
+                ctx,
                 #[cfg(feature = "gpu-jpeg-huffman")]
                 jpeg_gpu,
-                #[cfg(feature = "gpu-icc")]
-                gpu_ctx,
-                #[cfg(feature = "gpu-icc")]
-                clut_cache,
                 #[cfg(feature = "cache")]
                 None::<&super::codecs::DctCacheCtx<'_>>,
             )
@@ -215,7 +151,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
             // GPU dispatch is threshold-gated inside decode_jpx.
             #[cfg(feature = "nvjpeg2k")]
             {
-                decode_jpx(&codec_input, w, h, None, gpu_j2k)
+                decode_jpx(&codec_input, w, h, None, ctx.nvjpeg2k.as_deref_mut())
             }
             #[cfg(not(feature = "nvjpeg2k"))]
             {
@@ -441,31 +377,22 @@ pub(super) const fn expand_inline_name(name: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pdf::Document;
 
     use crate::test_helpers::empty_doc;
 
     /// A context with no `ColorSpace` resources and every GPU decoder off.
-    fn cpu_ctx(doc: &Document) -> InlineImageCtx<'_> {
+    fn cpu_ctx(doc: &Document) -> ImageDecodeCtx<'_> {
         ctx_with_color_spaces(doc, None)
     }
 
     fn ctx_with_color_spaces<'a>(
         doc: &'a Document,
         color_spaces: Option<&'a Dictionary>,
-    ) -> InlineImageCtx<'a> {
-        InlineImageCtx {
-            doc,
+    ) -> ImageDecodeCtx<'a> {
+        ImageDecodeCtx {
             color_spaces,
-            #[cfg(feature = "nvjpeg")]
-            nvjpeg: None,
-            #[cfg(feature = "vaapi")]
-            vaapi: None,
-            #[cfg(feature = "nvjpeg2k")]
-            nvjpeg2k: None,
-            #[cfg(feature = "gpu-icc")]
-            gpu_ctx: None,
-            #[cfg(feature = "gpu-icc")]
-            clut_cache: None,
+            ..ImageDecodeCtx::cpu(doc)
         }
     }
 

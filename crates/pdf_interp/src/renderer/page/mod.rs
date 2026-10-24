@@ -1304,49 +1304,41 @@ impl<'doc> PageRenderer<'doc> {
             name,
             draw_size: image_draw_size(&self.gstate.current().ctm),
         };
+        let mut ctx = crate::resources::image::ImageDecodeCtx {
+            doc: self.resources.doc(),
+            color_spaces: None,
+            #[cfg(feature = "nvjpeg")]
+            nvjpeg: self.nvjpeg.as_mut(),
+            #[cfg(feature = "vaapi")]
+            vaapi: self.vaapi_jpeg_queue.as_ref(),
+            #[cfg(feature = "nvjpeg2k")]
+            nvjpeg2k: self.nvjpeg2k.as_mut(),
+            #[cfg(feature = "gpu-icc")]
+            icc: crate::resources::image::IccHandles {
+                gpu_ctx: self.gpu_ctx.as_deref(),
+                clut_cache: Some(&mut self.icc_clut_cache),
+            },
+            #[cfg(feature = "cache")]
+            image_cache: self.cache_state.as_ref().map(|cs| &cs.cache),
+            #[cfg(feature = "cache")]
+            doc_id: self.cache_state.as_ref().map(|cs| cs.doc_id),
+        };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).
         // Each branch is a separately monomorphised call; no decoder is wasted.
         #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-        if self.jpeg_vk.is_some() {
-            let resolution = self.resources.image(
-                request,
-                #[cfg(feature = "nvjpeg")]
-                self.nvjpeg.as_mut(),
-                #[cfg(feature = "vaapi")]
-                self.vaapi_jpeg_queue.as_ref(),
-                #[cfg(feature = "nvjpeg2k")]
-                self.nvjpeg2k.as_mut(),
-                self.jpeg_vk.as_mut(),
-                #[cfg(feature = "gpu-icc")]
-                self.gpu_ctx.as_deref(),
-                #[cfg(feature = "gpu-icc")]
-                Some(&mut self.icc_clut_cache),
-                #[cfg(feature = "cache")]
-                self.cache_state.as_ref().map(|cs| &cs.cache),
-                #[cfg(feature = "cache")]
-                self.cache_state.as_ref().map(|cs| cs.doc_id),
-            );
-            self.handle_image_resolution(name, resolution);
-            return;
-        }
+        let resolution = if self.jpeg_vk.is_some() {
+            self.resources
+                .image(request, &mut ctx, self.jpeg_vk.as_mut())
+        } else {
+            self.resources
+                .image(request, &mut ctx, self.jpeg_gpu.as_mut())
+        };
+        #[cfg(not(all(feature = "gpu-jpeg-huffman", feature = "vulkan")))]
         let resolution = self.resources.image(
             request,
-            #[cfg(feature = "nvjpeg")]
-            self.nvjpeg.as_mut(),
-            #[cfg(feature = "vaapi")]
-            self.vaapi_jpeg_queue.as_ref(),
-            #[cfg(feature = "nvjpeg2k")]
-            self.nvjpeg2k.as_mut(),
+            &mut ctx,
             #[cfg(feature = "gpu-jpeg-huffman")]
             self.jpeg_gpu.as_mut(),
-            #[cfg(feature = "gpu-icc")]
-            self.gpu_ctx.as_deref(),
-            #[cfg(feature = "gpu-icc")]
-            Some(&mut self.icc_clut_cache),
-            #[cfg(feature = "cache")]
-            self.cache_state.as_ref().map(|cs| &cs.cache),
-            #[cfg(feature = "cache")]
-            self.cache_state.as_ref().map(|cs| cs.doc_id),
         );
         self.handle_image_resolution(name, resolution);
     }

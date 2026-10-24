@@ -333,24 +333,17 @@ fn decode_one(doc: &Document, doc_id: DocId, cache: &Arc<DeviceImageCache>, job:
     let Ok(page_dict) = doc.get_dictionary(job.page_id) else {
         return;
     };
+    let mut ctx = crate::resources::image::ImageDecodeCtx {
+        image_cache: Some(cache),
+        doc_id: Some(doc_id),
+        ..crate::resources::image::ImageDecodeCtx::cpu(doc)
+    };
     let _ = resolve_image(
-        doc,
+        &mut ctx,
         &page_dict,
         crate::resources::image::ImageRequest::full(&job.image_name),
-        #[cfg(feature = "nvjpeg")]
-        None,
-        #[cfg(feature = "vaapi")]
-        None,
-        #[cfg(feature = "nvjpeg2k")]
-        None,
         #[cfg(feature = "gpu-jpeg-huffman")]
         None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-        #[cfg(feature = "gpu-icc")]
-        None,
-        #[cfg(feature = "gpu-icc")]
-        None,
-        Some(cache),
-        Some(doc_id),
     );
 }
 
