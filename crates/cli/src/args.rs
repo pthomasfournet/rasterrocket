@@ -265,6 +265,21 @@ pub(crate) struct Args {
     )]
     pub vaapi_device: String,
 
+    /// Vulkan device: an index in enumeration order (from 0) or a
+    /// case-insensitive substring of the device name.
+    ///
+    /// An all-digit value that is not a valid index is matched as a name.
+    /// A value matching no device, or several, is an error that lists the
+    /// available devices.  When omitted, `PDF_RASTER_VULKAN_DEVICE` is
+    /// consulted; if neither is set the device is picked automatically.
+    /// Only used with `--backend auto` or `--backend vulkan`.
+    #[arg(
+        long = "vulkan-device",
+        value_name = "INDEX|NAME",
+        verbatim_doc_comment
+    )]
+    pub vulkan_device: Option<String>,
+
     /// Fail a page when one of its images cannot be decoded or drawn.
     ///
     /// By default the image is skipped, the page is written without it, a
@@ -422,12 +437,28 @@ pub(crate) enum BackendArg {
     Vulkan,
 }
 
+/// The `--backend` spelling of `policy`.
+const fn backend_name(policy: BackendPolicy) -> &'static str {
+    match policy {
+        BackendPolicy::Auto => "auto",
+        BackendPolicy::CpuOnly => "cpu",
+        BackendPolicy::ForceCuda => "cuda",
+        #[cfg(feature = "vaapi")]
+        BackendPolicy::ForceVaapi => "vaapi",
+        BackendPolicy::ForceVulkan => "vulkan",
+    }
+}
+
 impl Args {
-    /// Build a [`SessionConfig`] from the `--backend` / `--vaapi-device` flags.
+    /// Build a [`SessionConfig`] from the `--backend` / `--vaapi-device` /
+    /// `--vulkan-device` flags.
     ///
-    /// Rejects `--vaapi-device` when combined with `--backend cpu` or
-    /// `--backend cuda` — those modes never touch the DRM node, so allowing
-    /// the combination would silently ignore a user expectation.
+    /// Rejects `--vaapi-device` when combined with `--backend cpu`,
+    /// `--backend cuda` or `--backend vulkan`, and `--vulkan-device` with
+    /// any backend but `auto` and `vulkan` — those modes never touch the
+    /// device in question, so allowing the combination would silently
+    /// ignore a user expectation.  `PDF_RASTER_VULKAN_DEVICE` is consulted
+    /// only when `--vulkan-device` is absent and is never rejected.
     ///
     /// Note: detection is heuristic — we compare against the default path
     /// (`/dev/dri/renderD128`).  A user who explicitly passes that default
@@ -457,26 +488,29 @@ impl Args {
                 BackendPolicy::CpuOnly | BackendPolicy::ForceCuda | BackendPolicy::ForceVulkan
             )
         {
-            let backend_name = match policy {
-                BackendPolicy::CpuOnly => "cpu",
-                BackendPolicy::ForceCuda => "cuda",
-                BackendPolicy::ForceVulkan => "vulkan",
-                BackendPolicy::Auto => {
-                    unreachable!("matched CpuOnly | ForceCuda | ForceVulkan above")
-                }
-                #[cfg(feature = "vaapi")]
-                BackendPolicy::ForceVaapi => {
-                    unreachable!("matched CpuOnly | ForceCuda | ForceVulkan above")
-                }
-            };
             return Err(format!(
-                "--vaapi-device has no effect with --backend {backend_name}.\n\
-                 VA-API is only used with --backend auto or --backend vaapi."
+                "--vaapi-device has no effect with --backend {}.\n\
+                 VA-API is only used with --backend auto or --backend vaapi.",
+                backend_name(policy)
+            ));
+        }
+
+        if self.vulkan_device.is_some()
+            && !matches!(policy, BackendPolicy::Auto | BackendPolicy::ForceVulkan)
+        {
+            return Err(format!(
+                "--vulkan-device has no effect with --backend {}.\n\
+                 Vulkan is only used with --backend auto or --backend vulkan.",
+                backend_name(policy)
             ));
         }
 
         let mut config = SessionConfig::with_policy(policy);
         config.vaapi_device.clone_from(&self.vaapi_device);
+        config.vulkan_device = self
+            .vulkan_device
+            .clone()
+            .or_else(SessionConfig::vulkan_device_from_env);
         config.strict = self.strict;
         #[cfg(feature = "cache")]
         {
@@ -616,6 +650,49 @@ mod page_list_tests {
         args.single_file = true;
         let (pages, _) = args.build_page_list(10).unwrap();
         assert_eq!(pages, vec![1]);
+    }
+
+    #[test]
+    fn vulkan_device_flag_reaches_session_config() {
+        let config = Args::parse_from(["rrocket", "--vulkan-device", "5070", "in.pdf", "out"])
+            .session_config()
+            .unwrap();
+        assert_eq!(config.vulkan_device.as_deref(), Some("5070"));
+        let config = Args::parse_from([
+            "rrocket",
+            "--backend",
+            "vulkan",
+            "--vulkan-device",
+            "0",
+            "in.pdf",
+            "out",
+        ])
+        .session_config()
+        .unwrap();
+        assert_eq!(config.vulkan_device.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn vulkan_device_rejected_with_non_vulkan_backends() {
+        for backend in ["cpu", "cuda"] {
+            let err = Args::parse_from([
+                "rrocket",
+                "--backend",
+                backend,
+                "--vulkan-device",
+                "0",
+                "in.pdf",
+                "out",
+            ])
+            .session_config()
+            .unwrap_err();
+            assert!(
+                err.contains(&format!(
+                    "--vulkan-device has no effect with --backend {backend}"
+                )),
+                "{err}"
+            );
+        }
     }
 
     #[test]

@@ -235,8 +235,12 @@ pub fn ensure_jpeg_gpu_huffman(policy: BackendPolicy) -> Result<(), String> {
 /// logical device on the same physical device) so per-thread command-buffer
 /// recording has no cross-thread contention. Construction is serialised via
 /// `DECODER_INIT_LOCK` to avoid concurrent Vulkan driver init races.
+///
+/// `selector` is the session's [`crate::SessionConfig::vulkan_device`]; the
+/// session's own backend has already resolved it, so a selection failure
+/// here means the device list changed in between.
 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-pub fn ensure_jpeg_vk_huffman(policy: BackendPolicy) -> Result<(), String> {
+pub fn ensure_jpeg_vk_huffman(policy: BackendPolicy, selector: Option<&str>) -> Result<(), String> {
     JPEG_VK_DEC.with(|cell| {
         match *cell.borrow() {
             JpegGpuInit::Uninitialised => {}
@@ -250,7 +254,8 @@ pub fn ensure_jpeg_vk_huffman(policy: BackendPolicy) -> Result<(), String> {
         let guard = DECODER_INIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let result = gpu::backend::vulkan::VulkanBackend::new();
+        let result = crate::vk_init::parse_selector(selector)
+            .and_then(|sel| gpu::backend::vulkan::VulkanBackend::with_selector(sel.as_ref()));
         drop(guard);
         match result {
             Ok(backend) => {

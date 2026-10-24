@@ -123,6 +123,8 @@ pub(crate) mod gpu_init;
 mod gray;
 pub mod page;
 mod render;
+#[cfg(feature = "vulkan")]
+mod vk_init;
 
 use std::path::Path;
 

@@ -94,6 +94,7 @@ mod tests {
             timings: false,
             backend: None,
             vaapi_device: "/dev/dri/renderD128".into(),
+            vulkan_device: None,
             strict: false,
             ram: false,
             no_ram: false,

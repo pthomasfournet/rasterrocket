@@ -127,7 +127,8 @@ pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 ///
 /// Passed to [`open_session`].  Use [`Default::default()`] for the standard
 /// behaviour: backend resolved from `PDF_RASTER_BACKEND` env var (or `Auto`
-/// if unset), default DRM render node, image-cache prefetch off.
+/// if unset), Vulkan device from `PDF_RASTER_VULKAN_DEVICE` (or automatic),
+/// default DRM render node, image-cache prefetch off.
 ///
 /// This struct is `#[non_exhaustive]`: construct it via [`SessionConfig::default()`]
 /// or [`SessionConfig::with_policy()`] rather than a struct literal.  This allows
@@ -143,6 +144,21 @@ pub struct SessionConfig {
     /// Only relevant when the `vaapi` feature is enabled and `policy` is not
     /// [`CpuOnly`](BackendPolicy::CpuOnly) or [`ForceCuda`](BackendPolicy::ForceCuda).
     pub vaapi_device: String,
+    /// Vulkan physical device to use, or `None` to pick automatically.
+    ///
+    /// Either an index in device enumeration order (counted from 0) or a
+    /// case-insensitive substring of the device name; an all-digit value
+    /// that is not a valid index is matched as a name.  A value that does
+    /// not resolve to exactly one usable device makes [`open_session`]
+    /// return [`RasterError::InvalidOptions`] listing the enumerated
+    /// devices, under `Auto` as well as `ForceVulkan`.
+    ///
+    /// [`SessionConfig::with_policy`] sets `None`; [`SessionConfig::default`]
+    /// reads `PDF_RASTER_VULKAN_DEVICE` (see
+    /// [`SessionConfig::vulkan_device_from_env`]).  Only relevant when the
+    /// `vulkan` feature is enabled and `policy` is
+    /// [`Auto`](BackendPolicy::Auto) or [`ForceVulkan`](BackendPolicy::ForceVulkan).
+    pub vulkan_device: Option<String>,
     /// Whether to spawn the image-cache prefetcher at session open.
     /// Default `false` — opt-in because the prefetcher reads every
     /// page's resource dict eagerly, which is wasted work for short
@@ -189,17 +205,44 @@ impl SessionConfig {
         Self {
             policy,
             vaapi_device: DEFAULT_VAAPI_DEVICE.to_owned(),
+            vulkan_device: None,
             #[cfg(feature = "cache")]
             prefetch: false,
             decrypt_authorized: false,
             strict: false,
         }
     }
+
+    /// The Vulkan device selector named by the `PDF_RASTER_VULKAN_DEVICE`
+    /// environment variable.
+    ///
+    /// `None` when the variable is unset, empty after trimming, or not
+    /// UTF-8 (the last with a `log::warn!`).  Surrounding whitespace is
+    /// trimmed.
+    #[must_use]
+    pub fn vulkan_device_from_env() -> Option<String> {
+        let raw = std::env::var_os(VULKAN_DEVICE_ENV)?;
+        let Some(s) = raw.to_str() else {
+            log::warn!("{VULKAN_DEVICE_ENV} contains non-UTF-8 bytes; ignoring it");
+            return None;
+        };
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_owned())
+    }
 }
 
+/// Environment variable read by [`SessionConfig::vulkan_device_from_env`].
+const VULKAN_DEVICE_ENV: &str = "PDF_RASTER_VULKAN_DEVICE";
+
 impl Default for SessionConfig {
+    /// Policy from `PDF_RASTER_BACKEND` ([`BackendPolicy::from_env`]),
+    /// Vulkan device from `PDF_RASTER_VULKAN_DEVICE`
+    /// ([`SessionConfig::vulkan_device_from_env`]), every other field as in
+    /// [`SessionConfig::with_policy`].
     fn default() -> Self {
-        Self::with_policy(BackendPolicy::from_env())
+        let mut config = Self::with_policy(BackendPolicy::from_env());
+        config.vulkan_device = Self::vulkan_device_from_env();
+        config
     }
 }
 

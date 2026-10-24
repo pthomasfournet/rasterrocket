@@ -65,6 +65,12 @@ pub enum BackendError {
         /// Human-readable description of the specific violation.
         detail: &'static str,
     },
+    /// An explicit device selector did not resolve to exactly one usable
+    /// device.  The message names the selector, the reason, and every
+    /// enumerated device.  Distinct from [`BackendError::Other`] so callers
+    /// can treat a configuration mistake as fatal even where an unavailable
+    /// backend would fall back silently.
+    DeviceSelection(String),
     /// Catch-all for any other backend error: Vulkan FFI failures,
     /// allocator errors, init failures, numeric overflow, free-form
     /// `BackendError::msg(...)`. `source()` returns the inner error.
@@ -119,6 +125,7 @@ impl fmt::Display for BackendError {
                 "descriptor pool exhausted: {allocated} sets allocated this page (max {max})"
             ),
             Self::InvariantViolation { kind, detail } => write!(f, "{kind}: {detail}"),
+            Self::DeviceSelection(msg) => f.write_str(msg),
             Self::Other(e) => fmt::Display::fmt(e, f),
         }
     }

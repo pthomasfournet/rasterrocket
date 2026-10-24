@@ -340,6 +340,8 @@ PDF_RASTER_BACKEND=cuda rrocket input.pdf out
 PDF_RASTER_BACKEND=cuda rrocket --backend cpu input.pdf out   # uses CPU
 ```
 
+On a host with more than one Vulkan device, `--vulkan-device <index|name>` (or `PDF_RASTER_VULKAN_DEVICE`) picks one by enumeration index or by a name substring such as `5070` or `radv`; a value that matches nothing lists the available devices. See [docs/cli-reference.md](docs/cli-reference.md#backend-selection).
+
 ### Compile cache (`sccache`) — optional
 
 `.cargo/config.toml` sets `SCCACHE_CACHE_MULTIARCH=1` so `-C target-cpu=native` builds *can* be cached, but the wrapper itself is opt-in: plain `cargo build` works without sccache.  To enable:

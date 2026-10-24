@@ -150,6 +150,7 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 |---|---|---|
 | `--backend auto\|cpu\|cuda\|vaapi\|vulkan` | `auto` | Compute backend for image decoding and GPU fills. |
 | `--vaapi-device PATH` | `/dev/dri/renderD128` | VA-API DRM render node (only used with `auto` or `vaapi`). |
+| `--vulkan-device INDEX\|NAME` | automatic | Vulkan device, by index or name substring (only used with `auto` or `vulkan`). |
 
 **`auto`** — GPU when available, silent CPU fallback (same as pre-v0.4.0).
 
@@ -163,6 +164,18 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 
 `--vaapi-device` has no effect with `--backend cpu`, `--backend cuda`, or `--backend vulkan` — rrocket will reject the combination with a clear error rather than silently ignoring it.
 
+**`--vulkan-device`** picks the Vulkan device on a host with more than one. The value is either an index in Vulkan enumeration order, counted from 0 (the `GPU0`, `GPU1`, … numbering of `vulkaninfo --summary`), or a case-insensitive substring of the device name (`5070`, `radv`, `llvmpipe`). A number that is not a valid index is matched as a name, so a model number works. An exact name match beats substring matches. A value that matches no device, or more than one, is an error that lists every device:
+
+```text
+rrocket: invalid raster options: Vulkan device selector "nosuch": no device name contains it
+available Vulkan devices:
+  0: NVIDIA GeForce RTX 5070 (DISCRETE_GPU)
+  1: AMD Ryzen 9 9900X3D 12-Core Processor (RADV RAPHAEL_MENDOCINO) (INTEGRATED_GPU)
+  2: llvmpipe (LLVM 21.1.8, 256 bits) (CPU)
+```
+
+That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
+
 ```bash
 # Confirm CUDA is active (fails loudly if no NVIDIA GPU)
 rrocket --backend cuda -r 150 document.pdf out
@@ -172,6 +185,9 @@ rrocket --backend vulkan -r 150 document.pdf out
 
 # Force CPU-only (useful for benchmarking without GPU)
 rrocket --backend cpu -r 150 document.pdf out
+
+# Run the Vulkan backend on the integrated GPU instead of the discrete one
+rrocket --backend vulkan --vulkan-device radv document.pdf out
 
 # Use VA-API on a non-default render node
 rrocket --backend vaapi --vaapi-device /dev/dri/renderD129 document.pdf out

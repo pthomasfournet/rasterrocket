@@ -8,6 +8,8 @@ use raster::Bitmap;
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"))]
 use crate::gpu_init;
 use crate::gray::rgb_to_gray;
+#[cfg(feature = "vulkan")]
+use crate::vk_init::init_vk_backend;
 use crate::{BackendPolicy, PageSet, RasterOptions, RenderedPage, SessionConfig};
 
 // ── Safety limit ──────────────────────────────────────────────────────────────
@@ -213,6 +215,10 @@ pub struct RasterSession {
     /// returns `None` regardless.  Shared across all pages.
     #[cfg(feature = "vulkan")]
     pub(crate) vk_backend: Option<Arc<gpu::backend::vulkan::VulkanBackend>>,
+    /// [`crate::SessionConfig::vulkan_device`], for the per-thread Vulkan
+    /// JPEG decoders, which open their own logical device.
+    #[cfg(all(feature = "vulkan", feature = "gpu-jpeg-huffman"))]
+    pub(crate) vulkan_device: Option<String>,
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
     /// `None` when the `vaapi` feature is disabled, policy is `CpuOnly` /
@@ -407,7 +413,7 @@ fn open_session_with_doc(
         ));
     }
     #[cfg(feature = "vulkan")]
-    let vk_backend = init_vk_backend(config.policy)?;
+    let vk_backend = init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
 
     // Symmetric reject for `ForceCuda` when no CUDA features are
     // compiled in.  Without this, the cfg-gated `init_gpu_ctx` call
@@ -460,29 +466,8 @@ fn open_session_with_doc(
         .map_err(RasterError::BackendUnavailable)?
         .map(Arc::new);
 
-    // Image cache: one per session, shared across all pages.
-    // Construction needs a CUDA stream from the GpuCtx, so the cache
-    // is gated on gpu_ctx availability — a CpuOnly session or a
-    // failed init produces `image_cache = None`.
     #[cfg(feature = "cache")]
-    let image_cache = gpu_ctx.as_ref().map(|ctx| {
-        let mut cache = gpu::cache::DeviceImageCache::new(
-            std::sync::Arc::clone(ctx.stream()),
-            // Auto-detect would need a running CUDA stream; we use
-            // the spec defaults so a session always boots.  Future
-            // work: expose a SessionConfig::cache_budget knob.
-            gpu::cache::VramBudget::DEFAULT,
-            gpu::cache::HostBudget::DEFAULT,
-        );
-        // Enable disk persistence when the cache root resolves
-        // (HOME / XDG_CACHE_HOME / PDF_RASTER_CACHE_DIR set).  No
-        // disk tier in sandboxed environments where none of those
-        // env vars are present — the cache stays in-process only.
-        if let Some(disk) = gpu::cache::DiskTier::try_new() {
-            cache = cache.with_disk(disk);
-        }
-        Arc::new(cache)
-    });
+    let image_cache = gpu_ctx.as_ref().map(build_image_cache);
 
     // DocId: BLAKE3 of the PDF bytes.  Stable per content; editing
     // the PDF naturally invalidates the disk tier because the hash
@@ -524,6 +509,8 @@ fn open_session_with_doc(
         gpu_ctx,
         #[cfg(feature = "vulkan")]
         vk_backend,
+        #[cfg(all(feature = "vulkan", feature = "gpu-jpeg-huffman"))]
+        vulkan_device: config.vulkan_device.clone(),
         #[cfg(feature = "vaapi")]
         vaapi_queue,
         #[cfg(feature = "cache")]
@@ -533,6 +520,30 @@ fn open_session_with_doc(
         #[cfg(feature = "cache")]
         prefetch,
     })
+}
+
+/// Build a session's device-resident image cache on `ctx`'s stream.
+///
+/// One cache per session, shared across all pages.  Construction needs a
+/// CUDA stream, so a session without a `GpuCtx` has no cache.
+#[cfg(feature = "cache")]
+fn build_image_cache(ctx: &Arc<gpu::GpuCtx>) -> Arc<gpu::cache::DeviceImageCache> {
+    let mut cache = gpu::cache::DeviceImageCache::new(
+        std::sync::Arc::clone(ctx.stream()),
+        // Auto-detect would need a running CUDA stream; we use
+        // the spec defaults so a session always boots.  Future
+        // work: expose a SessionConfig::cache_budget knob.
+        gpu::cache::VramBudget::DEFAULT,
+        gpu::cache::HostBudget::DEFAULT,
+    );
+    // Enable disk persistence when the cache root resolves
+    // (HOME / XDG_CACHE_HOME / PDF_RASTER_CACHE_DIR set).  No
+    // disk tier in sandboxed environments where none of those
+    // env vars are present — the cache stays in-process only.
+    if let Some(disk) = gpu::cache::DiskTier::try_new() {
+        cache = cache.with_disk(disk);
+    }
+    Arc::new(cache)
 }
 
 /// Makes [`log_auto_resolution_once`] fire once per process;
@@ -551,53 +562,6 @@ fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
             log::debug!("rasterrocket: Auto backend resolution: CPU (no GPU backend available)");
         }
     });
-}
-
-/// Initialise the Vulkan compute backend.
-///
-/// Returns `None` on every policy except `ForceVulkan`; errors loudly on
-/// `ForceVulkan` if init fails (no silent CPU fallback when the user
-/// asked for Vulkan).
-#[cfg(feature = "vulkan")]
-static VK_BACKEND: std::sync::OnceLock<Result<Arc<gpu::backend::vulkan::VulkanBackend>, String>> =
-    std::sync::OnceLock::new();
-
-/// Initialise the Vulkan compute backend.
-///
-/// `ForceVulkan` returns the backend or a hard error.  `Auto` returns the
-/// backend on success and `Ok(None)` on failure — the caller falls
-/// through to the CUDA path (and ultimately the CPU path) when Vulkan is
-/// unavailable.  All other policies return `Ok(None)` without attempting
-/// init.
-///
-/// Like [`init_gpu_ctx`], the result is cached in a process-wide
-/// `OnceLock` so successive sessions don't re-create the device + load
-/// shaders.
-#[cfg(feature = "vulkan")]
-fn init_vk_backend(
-    policy: BackendPolicy,
-) -> Result<Option<Arc<gpu::backend::vulkan::VulkanBackend>>, RasterError> {
-    if !matches!(policy, BackendPolicy::Auto | BackendPolicy::ForceVulkan) {
-        return Ok(None);
-    }
-    let cached = VK_BACKEND.get_or_init(|| match gpu::backend::vulkan::VulkanBackend::new() {
-        Ok(b) => Ok(Arc::new(b)),
-        Err(e) => Err(e.to_string()),
-    });
-    match cached {
-        Ok(b) => Ok(Some(Arc::clone(b))),
-        Err(e) => {
-            if matches!(policy, BackendPolicy::ForceVulkan) {
-                Err(RasterError::BackendUnavailable(format!(
-                    "Vulkan backend required but unavailable: {e}. \
-                     Verify with `vulkaninfo` that a Vulkan 1.3+ device is present."
-                )))
-            } else {
-                log::debug!("rasterrocket: Vulkan unavailable under Auto ({e}); trying CUDA next");
-                Ok(None)
-            }
-        }
-    }
 }
 
 /// Initialise the CUDA GPU context for AA fill and ICC colour transforms.
@@ -863,48 +827,7 @@ fn lend_decoders(
     let _ = renderer;
 
     #[cfg(feature = "gpu-jpeg-huffman")]
-    {
-        let dispatch_huffman = {
-            #[cfg(feature = "vaapi")]
-            {
-                !matches!(effective_policy, BackendPolicy::ForceVaapi)
-            }
-            #[cfg(not(feature = "vaapi"))]
-            {
-                true
-            }
-        };
-        if dispatch_huffman {
-            // Vulkan wins Auto when a Vulkan backend is available.
-            #[cfg(feature = "vulkan")]
-            let vulkan_active = matches!(effective_policy, BackendPolicy::ForceVulkan)
-                || (matches!(effective_policy, BackendPolicy::Auto)
-                    && session.vk_backend.is_some());
-            #[cfg(not(feature = "vulkan"))]
-            let vulkan_active = false;
-
-            if vulkan_active {
-                #[cfg(feature = "vulkan")]
-                {
-                    gpu_init::ensure_jpeg_vk_huffman(effective_policy)
-                        .map_err(RasterError::BackendUnavailable)?;
-                    gpu_init::JPEG_VK_DEC.with(|cell| {
-                        if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-                            renderer.set_jpeg_vk(slot.take());
-                        }
-                    });
-                }
-            } else {
-                gpu_init::ensure_jpeg_gpu_huffman(effective_policy)
-                    .map_err(RasterError::BackendUnavailable)?;
-                gpu_init::JPEG_CUDA_DEC.with(|cell| {
-                    if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-                        renderer.set_jpeg_gpu(slot.take());
-                    }
-                });
-            }
-        }
-    }
+    lend_huffman_decoder(session, renderer, effective_policy)?;
 
     #[cfg(feature = "nvjpeg")]
     {
@@ -955,6 +878,60 @@ fn lend_decoders(
         renderer.set_vaapi_queue(queue.handle());
     }
 
+    Ok(())
+}
+
+/// Lend this thread's parallel-Huffman JPEG decoder to `renderer`: the
+/// Vulkan one when Vulkan is the active backend, the CUDA one otherwise.
+/// Nothing is lent under `ForceVaapi`.
+#[cfg(feature = "gpu-jpeg-huffman")]
+fn lend_huffman_decoder(
+    session: &RasterSession,
+    renderer: &mut pdf_interp::renderer::PageRenderer,
+    effective_policy: BackendPolicy,
+) -> Result<(), RasterError> {
+    let dispatch_huffman = {
+        #[cfg(feature = "vaapi")]
+        {
+            !matches!(effective_policy, BackendPolicy::ForceVaapi)
+        }
+        #[cfg(not(feature = "vaapi"))]
+        {
+            true
+        }
+    };
+    if dispatch_huffman {
+        // Vulkan wins Auto when a Vulkan backend is available.
+        #[cfg(feature = "vulkan")]
+        let vulkan_active = matches!(effective_policy, BackendPolicy::ForceVulkan)
+            || (matches!(effective_policy, BackendPolicy::Auto) && session.vk_backend.is_some());
+        #[cfg(not(feature = "vulkan"))]
+        let vulkan_active = false;
+
+        if vulkan_active {
+            #[cfg(feature = "vulkan")]
+            {
+                gpu_init::ensure_jpeg_vk_huffman(
+                    effective_policy,
+                    session.vulkan_device.as_deref(),
+                )
+                .map_err(RasterError::BackendUnavailable)?;
+                gpu_init::JPEG_VK_DEC.with(|cell| {
+                    if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
+                        renderer.set_jpeg_vk(slot.take());
+                    }
+                });
+            }
+        } else {
+            gpu_init::ensure_jpeg_gpu_huffman(effective_policy)
+                .map_err(RasterError::BackendUnavailable)?;
+            gpu_init::JPEG_CUDA_DEC.with(|cell| {
+                if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
+                    renderer.set_jpeg_gpu(slot.take());
+                }
+            });
+        }
+    }
     Ok(())
 }
 

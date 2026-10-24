@@ -11,6 +11,7 @@
 //! - `error` — `vk::Result → BackendError` adaptor.
 //! - `memory` — slab sub-allocator, host-visible staging pool.
 //! - `pipeline` — descriptor set layouts + pipeline cache (lazy SPIR-V compile).
+//! - `select` — device selector parsing and physical-device ranking.
 //! - `recorder` — per-page command buffer + timeline-semaphore fence.
 //! - `transfer` — `upload_async` helper (probes for dedicated transfer queue).
 
@@ -19,10 +20,12 @@ mod error;
 mod memory;
 mod pipeline;
 mod recorder;
+mod select;
 mod transfer;
 
 pub use memory::{DeviceBuffer, HostBuffer};
 pub use recorder::PageFence;
+pub use select::DeviceSelector;
 
 use std::sync::Arc;
 
@@ -48,14 +51,27 @@ pub struct VulkanBackend {
 }
 
 impl VulkanBackend {
-    /// Initialise the Vulkan loader, instance, device, and kernel pipelines.
+    /// Initialise the Vulkan loader, instance, device, and kernel pipelines
+    /// on the automatically ranked physical device.
     ///
     /// # Errors
     /// Returns `BackendError` if no suitable Vulkan 1.3+ device is present,
     /// any required feature is missing, kernel SPIR-V fails to load, or any
     /// driver call returns a non-success status.
     pub fn new() -> Result<Self> {
-        let device = device::init()?;
+        Self::with_selector(None)
+    }
+
+    /// As [`Self::new`], on the device named by `selector` when given.
+    ///
+    /// # Errors
+    /// As [`Self::new`]; additionally [`BackendError::DeviceSelection`]
+    /// when `selector` matches no device, several devices, or a device
+    /// that is not eligible.
+    ///
+    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
+    pub fn with_selector(selector: Option<&DeviceSelector>) -> Result<Self> {
+        let device = device::init(selector)?;
         let memory = memory::SlabAllocator::new(device.clone())?;
         let pipelines = pipeline::PipelineCache::new(device.clone())?;
         let recorder = recorder::PageRecorder::new(device.clone(), pipelines.clone())?;

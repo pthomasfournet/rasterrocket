@@ -1,10 +1,13 @@
 //! Vulkan instance, physical-device selection, and logical-device creation.
 //!
-//! Picks the first physical device that:
+//! A physical device is eligible when it:
 //! - Supports compute on at least one queue family.
 //! - Reports `VK_API_VERSION_1_3` or higher (so we can rely on Vulkan 1.3
 //!   core for `synchronization2`, `timelineSemaphore`, 8-bit storage,
 //!   and buffer-device-address without enabling them as discrete extensions).
+//!
+//! The device is either named by a [`DeviceSelector`] or chosen by the
+//! ranking in [`select`](super::select).
 //!
 //! No surface, no graphics queue — this is a headless compute backend.
 
@@ -16,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use crate::backend::{BackendError, Result};
 
 use super::error::vk_err;
+use super::select::{self, Candidate, DeviceSelector, Ineligible};
 
 /// Owned Vulkan handles.
 ///
@@ -76,8 +80,9 @@ impl Drop for DeviceCtx {
 ///
 /// Returns an `Arc<DeviceCtx>` so the slab allocator, pipeline cache, and
 /// per-page recorder can hold their own clones without lifetime-threading
-/// the `ash::Device` reference everywhere.
-pub(super) fn init() -> Result<Arc<DeviceCtx>> {
+/// the `ash::Device` reference everywhere.  `selector`, when given,
+/// names the physical device; otherwise the automatic ranking applies.
+pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> {
     // Safety: `Entry::load` calls `dlopen("libvulkan.so")`; the returned
     // `Entry` owns the dylib handle and is `Send + Sync` by ash design.
     let entry = unsafe { ash::Entry::load() }
@@ -85,7 +90,8 @@ pub(super) fn init() -> Result<Arc<DeviceCtx>> {
 
     let instance = create_instance(&entry)?;
 
-    let (phys, compute_queue_family) = pick_physical_device(&instance)?;
+    let (phys, compute_queue_family) =
+        destroy_instance_on_err(&instance, pick_physical_device(&instance, selector))?;
     let mem_props = unsafe { instance.get_physical_device_memory_properties(phys) };
 
     // Pull the dispatch group-count limit once.  Spec guarantees ≥ 65535
@@ -94,10 +100,12 @@ pub(super) fn init() -> Result<Arc<DeviceCtx>> {
     let dev_props = unsafe { instance.get_physical_device_properties(phys) };
     let max_workgroup_count = dev_props.limits.max_compute_work_group_count;
 
-    log_chosen_device(&dev_props);
+    log_chosen_device(&dev_props, selector);
 
-    let (device, compute_queue, has_memory_budget) =
-        create_device(&instance, phys, compute_queue_family)?;
+    let (device, compute_queue, has_memory_budget) = destroy_instance_on_err(
+        &instance,
+        create_device(&instance, phys, compute_queue_family),
+    )?;
 
     let vram_total = total_device_local_bytes(&mem_props);
 
@@ -128,6 +136,19 @@ impl DeviceCtx {
     }
 }
 
+/// Pass `result` through, destroying `instance` first when it is an error.
+///
+/// Only valid while `instance` has no live child objects: every caller is
+/// in [`init`] before a logical device exists, and [`create_device`]
+/// creates none on failure.
+fn destroy_instance_on_err<T>(instance: &ash::Instance, result: Result<T>) -> Result<T> {
+    if result.is_err() {
+        // Safety: per the precondition above, no child objects exist.
+        unsafe { instance.destroy_instance(None) };
+    }
+    result
+}
+
 fn create_instance(entry: &ash::Entry) -> Result<ash::Instance> {
     let app_name = c"rasterrocket";
     let app_info = vk::ApplicationInfo::default()
@@ -145,49 +166,69 @@ fn create_instance(entry: &ash::Entry) -> Result<ash::Instance> {
     unsafe { entry.create_instance(&create_info, None) }.map_err(vk_err("vkCreateInstance"))
 }
 
-fn pick_physical_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32)> {
+/// Enumerate physical devices, reduce each to a [`Candidate`], and return
+/// the handle and compute queue family of the one [`select::pick`] chooses.
+fn pick_physical_device(
+    instance: &ash::Instance,
+    selector: Option<&DeviceSelector>,
+) -> Result<(vk::PhysicalDevice, u32)> {
     let physicals = unsafe { instance.enumerate_physical_devices() }
         .map_err(vk_err("vkEnumeratePhysicalDevices"))?;
     if physicals.is_empty() {
         return Err(BackendError::msg("no Vulkan physical devices found"));
     }
 
-    // Prefer discrete GPUs over integrated/virtual/CPU ICDs.  Stable sort
-    // by descending device-type rank so we walk the best candidate first
-    // but still fall through to weaker devices (e.g. lavapipe) if no
-    // discrete GPU meets the API-version requirement.
-    let mut ranked: Vec<_> = physicals
-        .into_iter()
-        .map(|p| {
-            let props = unsafe { instance.get_physical_device_properties(p) };
-            (device_type_rank(props.device_type), p, props)
-        })
-        .collect();
-    ranked.sort_by_key(|(r, _, _)| *r);
+    let candidates = physicals
+        .iter()
+        .map(|&p| describe_physical_device(instance, p))
+        .collect::<Result<Vec<_>>>()?;
+    let idx = select::pick(&candidates, selector)?;
+    let queue_family = candidates[idx]
+        .compute_queue
+        .map_err(|why| BackendError::msg(format!("picked an unusable device: {why}")))?;
+    Ok((physicals[idx], queue_family))
+}
 
-    for (_, phys, props) in ranked {
-        // Require Vulkan 1.3 core; we depend on synchronization2,
-        // timelineSemaphore, BDA, and 8-bit storage as core features.
-        // `props.api_version` is the maximum API version this driver
-        // supports; comparing against the packed VK_API_VERSION_1_3
-        // constant gives a single integer comparison.
-        if props.api_version < vk::API_VERSION_1_3 {
-            continue;
-        }
+/// Query the properties [`select`] ranks and matches on.
+fn describe_physical_device(
+    instance: &ash::Instance,
+    phys: vk::PhysicalDevice,
+) -> Result<Candidate> {
+    let props = unsafe { instance.get_physical_device_properties(phys) };
+    let name = device_name(&props);
 
+    // Vulkan 1.3 core is required: synchronization2, timelineSemaphore,
+    // BDA, and 8-bit storage are used as core features.  `api_version` is
+    // the maximum version the driver supports, so one packed-integer
+    // comparison suffices.
+    let compute_queue = if props.api_version < vk::API_VERSION_1_3 {
+        Err(Ineligible::ApiBelow13)
+    } else {
         let queue_families = unsafe { instance.get_physical_device_queue_family_properties(phys) };
-        for (idx, qf) in queue_families.iter().enumerate() {
-            if qf.queue_flags.contains(vk::QueueFlags::COMPUTE) {
-                let idx_u32 = u32::try_from(idx)
-                    .map_err(|_| BackendError::msg("queue family index does not fit in u32"))?;
-                return Ok((phys, idx_u32));
-            }
+        match queue_families
+            .iter()
+            .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
+        {
+            Some(idx) => Ok(u32::try_from(idx)
+                .map_err(|_| BackendError::msg("queue family index does not fit in u32"))?),
+            None => Err(Ineligible::NoComputeQueue),
         }
-    }
+    };
 
-    Err(BackendError::msg(
-        "no Vulkan 1.3+ device with a compute queue family was found",
-    ))
+    Ok(Candidate {
+        name,
+        device_type: props.device_type,
+        compute_queue,
+    })
+}
+
+/// `deviceName` as an owned string; a name without a NUL terminator inside
+/// the fixed-size array is reported as invalid rather than read past.
+fn device_name(props: &vk::PhysicalDeviceProperties) -> String {
+    props.device_name_as_c_str().map_or_else(
+        |_| "<invalid device name>".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    )
 }
 
 fn create_device(
@@ -244,18 +285,6 @@ fn create_device(
     Ok((device, queue, has_memory_budget))
 }
 
-/// Rank physical-device types so we prefer discrete > integrated > virtual > CPU.
-/// Lower number ⇒ higher preference.
-const fn device_type_rank(t: vk::PhysicalDeviceType) -> u8 {
-    match t {
-        vk::PhysicalDeviceType::DISCRETE_GPU => 0,
-        vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
-        vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
-        vk::PhysicalDeviceType::CPU => 3,
-        _ => 4,
-    }
-}
-
 /// PCI vendor ID for NVIDIA, per the PCI-SIG registry.  Vulkan's
 /// `driver_version` field is only interpretable through `VK_VERSION_*`
 /// for vendors that follow the core spec's suggested encoding; NVIDIA
@@ -287,13 +316,10 @@ fn format_driver_version(vendor_id: u32, driver_version: u32) -> String {
 }
 
 /// Log the physical device chosen by [`pick_physical_device`] at
-/// `debug` level.  Called once per process: [`init`] runs behind the
-/// process-wide Vulkan backend cell.
-fn log_chosen_device(props: &vk::PhysicalDeviceProperties) {
-    let name = props.device_name_as_c_str().map_or_else(
-        |_| "<invalid device name>".to_owned(),
-        |s| s.to_string_lossy().into_owned(),
-    );
+/// `debug` level, with how it was chosen.  Called once per backend
+/// construction.
+fn log_chosen_device(props: &vk::PhysicalDeviceProperties, selector: Option<&DeviceSelector>) {
+    let name = device_name(props);
     let driver_version = format_driver_version(props.vendor_id, props.driver_version);
     let api_version = format!(
         "{}.{}.{}",
@@ -303,8 +329,9 @@ fn log_chosen_device(props: &vk::PhysicalDeviceProperties) {
     );
     let device_type = props.device_type;
     let vendor_id = props.vendor_id;
+    let chosen_by = selector.map_or_else(|| "automatic".to_owned(), |s| format!("selector {s}"));
     log::debug!(
-        "vulkan: chosen device \"{name}\" type={device_type:?} vendor_id=0x{vendor_id:04X} driver={driver_version} api={api_version}"
+        "vulkan: chosen device \"{name}\" type={device_type:?} vendor_id=0x{vendor_id:04X} driver={driver_version} api={api_version} ({chosen_by})"
     );
 }
 

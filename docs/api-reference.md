@@ -327,15 +327,21 @@ Controls which compute backend is used. `Auto` matches pre-v0.4.0 behaviour. The
 pub struct SessionConfig {
     pub policy: BackendPolicy,
     pub vaapi_device: String,  // default: "/dev/dri/renderD128"
+    pub vulkan_device: Option<String>,  // default: None (automatic)
     // `prefetch: bool` exists only when `cache` feature is enabled
     pub decrypt_authorized: bool,  // default: false
     pub strict: bool,              // default: false
 }
 
-impl Default for SessionConfig { /* Auto policy, default DRM node */ }
+impl Default for SessionConfig { /* policy from PDF_RASTER_BACKEND, Vulkan device from PDF_RASTER_VULKAN_DEVICE */ }
+
+impl SessionConfig {
+    pub fn with_policy(policy: BackendPolicy) -> Self;      // reads no env vars
+    pub fn vulkan_device_from_env() -> Option<String>;     // PDF_RASTER_VULKAN_DEVICE
+}
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. Set `vaapi_device` to override the VA-API DRM render node (useful when `/dev/dri/renderD128` is not the correct device on your system). `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`.
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. Set `vaapi_device` to override the VA-API DRM render node (useful when `/dev/dri/renderD128` is not the correct device on your system). Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`.
 
 ---
 

@@ -43,6 +43,8 @@ pub(crate) fn report_open_error(e: &RasterError, args: &Args, policy: BackendPol
     if matches!(e, RasterError::BackendUnavailable(_)) {
         eprintln!("rrocket: {e}");
         print_backend_hint(policy, &args.vaapi_device, args.backend.is_none());
+    } else if matches!(e, RasterError::InvalidOptions(_)) {
+        eprintln!("rrocket: {e}");
     } else {
         eprintln!("rrocket: failed to open PDF: {e}");
         print_error_chain(e);
