@@ -140,14 +140,7 @@ fn write_page(
     // bounded by `total_pages` (≤ i32::MAX, checked in `run`), so the cast back
     // to i32 cannot overflow.
     let page_i32 = i32::try_from(page.page_num).unwrap_or(total_pages);
-    // Route through the spill policy so `--ram` output falls back to the
-    // on-disk prefix when free memory tightens, exactly as the PDF path does.
-    let out_path = crate::naming::output_path_with_prefix(
-        spill.next_prefix(),
-        args,
-        page_i32,
-        total_pages,
-        format,
-    );
-    render::encode_to_path(&out_path, &rgb, args, format)
+    // The shared writer applies the camera stages and routes through the
+    // spill policy, exactly as the PDF path does.
+    render::write_cleaned(rgb, args, spill, page_i32, total_pages, format)
 }

@@ -6,6 +6,8 @@
               visibility and cannot escape; widening to pub would misdescribe it"
 )]
 
+use pdf_raster::SpreadHalf;
+
 use crate::args::{Args, OutputFormat};
 
 /// Compute the output filename for a given page using `args.output_prefix`.
@@ -14,22 +16,35 @@ use crate::args::{Args, OutputFormat};
 /// (and any future callers that don't need to override the prefix) stay simple.
 #[cfg(test)]
 pub fn output_path(args: &Args, page_num: i32, total_pages: i32, format: OutputFormat) -> String {
-    output_path_with_prefix(&args.output_prefix, args, page_num, total_pages, format)
+    output_path_with_prefix(
+        &args.output_prefix,
+        args,
+        page_num,
+        total_pages,
+        format,
+        None,
+    )
 }
 
 /// Compute the output filename for a given page with an explicit prefix
 /// override. Used by `--ram` mode to redirect individual pages to disk when
 /// the [`SpillPolicy`](crate::ram::SpillPolicy) reports tight memory.
 ///
+/// `half` names one page of a split spread: the page number takes an `a`
+/// (left) or `b` (right) suffix, which sorts the halves after an unsplit
+/// page of the same number and before the next page.
+///
 /// Examples (prefix = "out", sep = '-', format = Ppm):
-/// - page 1, total 10 → `"out-1.ppm"`
+/// - page 1, total 10 → `"out-01.ppm"`
 /// - page 1, total 100, `force_num_digits` = Some(3) → `"out-001.ppm"`
+/// - page 7, total 10, left half → `"out-07a.ppm"`
 pub(crate) fn output_path_with_prefix(
     prefix: &str,
     args: &Args,
     page_num: i32,
     total_pages: i32,
     format: OutputFormat,
+    half: Option<SpreadHalf>,
 ) -> String {
     let digits = args
         .force_num_digits
@@ -37,7 +52,12 @@ pub(crate) fn output_path_with_prefix(
 
     let sep = args.separator;
     let ext = format.extension_with_mode(args.gray, args.mono);
-    format!("{prefix}{sep}{page_num:0digits$}.{ext}")
+    let suffix = match half {
+        None => "",
+        Some(SpreadHalf::Left) => "a",
+        Some(SpreadHalf::Right) => "b",
+    };
+    format!("{prefix}{sep}{page_num:0digits$}{suffix}.{ext}")
 }
 
 /// Minimum number of digits needed to represent `n`.
@@ -96,6 +116,9 @@ mod tests {
             vaapi_device: None,
             vulkan_device: None,
             strict: false,
+            rectify: false,
+            dewarp: false,
+            split_spreads: false,
             ram: false,
             no_ram: false,
             ram_path: None,
@@ -128,6 +151,15 @@ mod tests {
     fn custom_separator() {
         let a = make_args("file", '_', None);
         assert_eq!(output_path(&a, 2, 9, OutputFormat::Jpeg), "file_2.jpg");
+    }
+
+    #[test]
+    fn spread_halves_take_a_and_b_suffixes() {
+        let a = make_args("out", '-', None);
+        let path = |half| output_path_with_prefix("out", &a, 7, 10, OutputFormat::Png, half);
+        assert_eq!(path(None), "out-07.png");
+        assert_eq!(path(Some(SpreadHalf::Left)), "out-07a.png");
+        assert_eq!(path(Some(SpreadHalf::Right)), "out-07b.png");
     }
 
     #[test]

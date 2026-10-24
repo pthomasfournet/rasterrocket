@@ -13,7 +13,7 @@ use color::{Gray8, Rgb8};
 use encode::{EncodeError, write_pbm, write_pgm, write_png, write_ppm};
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
-use pdf_raster::{RasterError, RasterSession, render_page_rgb_hinted, rgb_to_gray};
+use pdf_raster::{RasterError, RasterSession, SpreadHalf, render_page_rgb_hinted, rgb_to_gray};
 use raster::Bitmap;
 
 use crate::args::{Args, OutputFormat};
@@ -123,28 +123,66 @@ pub(crate) fn render_page(
 
     let rgb: Bitmap<Rgb8> = render_page_rgb_hinted(session, page_num, scale, effective_policy)?;
 
-    // Pick RAM vs disk per page: when --ram is active, the SpillPolicy hands
-    // back the tmpfs prefix until free memory drops below the safety margin,
-    // then transparently spills the rest of the run to the user's disk path.
-    // When --ram is off, the policy is a passthrough that always returns the
-    // original prefix.
-    let prefix = spill.next_prefix();
     #[expect(
         clippy::cast_possible_wrap,
         reason = "total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
-    let out_path =
-        output_path_with_prefix(prefix, args, page_num as i32, total_pages as i32, format);
+    write_cleaned(
+        rgb,
+        args,
+        spill,
+        page_num as i32,
+        total_pages as i32,
+        format,
+    )
+}
 
-    // Write directly to the final path. The previous temp-file + atomic-rename
-    // dance triggered ext4 auto_da_alloc on every page, which forces dirty data
-    // out before the rename can complete — turning batch render into a serial
-    // disk-flush wait. For a many-page batch the safety guarantee (no partial
-    // file on encode failure) isn't worth that cost; the user re-runs on error
-    // anyway. We delete a partial file on encode failure to preserve the spirit.
-    encode_to_path(&out_path, &rgb, args, format).inspect_err(|_| {
-        let _ = fs::remove_file(&out_path);
-    })
+/// Run the camera stages selected on the command line on `rgb`, then write
+/// each resulting page: one file, or the `a`/`b` halves of a split spread
+/// (see [`output_path_with_prefix`]).
+///
+/// Shared by the PDF render path and the comic-archive path.
+pub(crate) fn write_cleaned(
+    rgb: Bitmap<Rgb8>,
+    args: &Args,
+    spill: &SpillPolicy,
+    page_num: i32,
+    total_pages: i32,
+    format: OutputFormat,
+) -> Result<(), RenderError> {
+    let (first, second) = pdf_raster::camera::process(rgb, &args.camera_options());
+    let halves = if second.is_some() {
+        [Some(SpreadHalf::Left), Some(SpreadHalf::Right)]
+    } else {
+        [None, None]
+    };
+    for (bmp, half) in std::iter::once(first).chain(second).zip(halves) {
+        // Pick RAM vs disk per file: when --ram is active, the SpillPolicy
+        // hands back the tmpfs prefix until free memory drops below the
+        // safety margin, then transparently spills the rest of the run to the
+        // user's disk path. When --ram is off, the policy is a passthrough
+        // that always returns the original prefix.
+        let out_path = output_path_with_prefix(
+            spill.next_prefix(),
+            args,
+            page_num,
+            total_pages,
+            format,
+            half,
+        );
+
+        // Write directly to the final path. The previous temp-file +
+        // atomic-rename dance triggered ext4 auto_da_alloc on every page,
+        // which forces dirty data out before the rename can complete —
+        // turning batch render into a serial disk-flush wait. For a many-page
+        // batch the safety guarantee (no partial file on encode failure)
+        // isn't worth that cost; the user re-runs on error anyway. We delete
+        // a partial file on encode failure to preserve the spirit.
+        encode_to_path(&out_path, &bmp, args, format).inspect_err(|_| {
+            let _ = fs::remove_file(&out_path);
+        })?;
+    }
+    Ok(())
 }
 
 /// Encode `rgb` to `out_path` honouring `--mono` / `--gray` and the resolved format.
