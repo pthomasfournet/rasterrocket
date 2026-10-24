@@ -48,7 +48,10 @@ log         = { workspace = true }
 jpeg-encoder = "0.7"
 
 [lints.rust]
-unsafe_code    = "warn"   # deskew rotate may need unsafe for SIMD; explicit allow per site
+# The SIMD kernels in gray.rs and deskew/rotate.rs use raw-pointer loads,
+# stores and #[target_feature] calls, which need `unsafe`; each such item
+# carries its own #[expect(unsafe_code)].
+unsafe_code    = "warn"
 missing_docs   = "warn"
 unused_results = "warn"
 
