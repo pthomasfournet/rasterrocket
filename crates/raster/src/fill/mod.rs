@@ -484,7 +484,11 @@ mod tests {
             true,
         );
         let col: Vec<u8> = (0..8).map(|y| bmp.row(y)[3].r).collect();
-        assert_eq!(col[..6], [0, 0, 255, 255, 255, 255], "rows 0..6 of column 3");
+        assert_eq!(
+            col[..6],
+            [0, 0, 255, 255, 255, 255],
+            "rows 0..6 of column 3"
+        );
     }
 
     /// Inclusive row range that received any ink, or `None` for a blank bitmap.
