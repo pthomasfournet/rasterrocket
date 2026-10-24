@@ -88,7 +88,7 @@ fn build_gpu_codebook_refs(codebooks: &[&CanonicalCodebook]) -> Vec<u32> {
 /// Owns the alloc/upload preamble shared by every JPEG-framed
 /// dispatcher; the phase flow stays explicit at each call site.
 /// `s_info` always names the most recently written state buffer —
-/// [`run_jpeg_phase2_passes`] swaps the pair after each pass.
+/// [`run_jpeg_phase1_and_phase2`] swaps the pair after each pass.
 struct JpegDispatchSetup<'a, B: GpuBackend> {
     bitstream: DeviceBufferGuard<'a, B>,
     codebook: DeviceBufferGuard<'a, B>,
@@ -197,6 +197,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
     }
 
     /// Record and run JPEG Phase 1 into `s_info`.
+    #[cfg(all(test, feature = "gpu-validation"))]
     fn run_phase1(&self, backend: &B) -> Result<()> {
         backend.begin_page()?;
         backend.record_huffman(self.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
@@ -229,15 +230,20 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
     }
 }
 
-/// Drive the JPEG Phase 2 propagation to convergence: each pass is one
-/// `JpegPhase2InterSync` dispatch reading the previous pass's states
-/// (`setup.s_info`) and writing the recomputed ones
-/// (`setup.s_info_scratch`), followed by a buffer swap — so
+/// Run JPEG Phase 1, then drive the Phase 2 propagation to
+/// convergence: each pass is one `JpegPhase2InterSync` dispatch reading
+/// the previous pass's states (`setup.s_info`) and writing the
+/// recomputed ones (`setup.s_info_scratch`), followed by a buffer swap
+/// — so
 /// `setup.s_info` always holds the last-written states, and on
 /// convergence the two buffers are identical (a fixpoint pass changes
 /// nothing). Propagation within a workgroup happens on-device inside
 /// the dispatch; the host loop only carries truth across workgroup
 /// boundaries.
+///
+/// Phase 1 is recorded in the first pass's page: the recorder orders
+/// consecutive dispatches of one page, so the only host wait per pass
+/// is the one the convergence check needs.
 ///
 /// Returns `Some(iterations)` (0-based index of the converged pass) or
 /// `None` when the [`jpeg_phase2_retry_bound`] pass budget runs out —
@@ -247,7 +253,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
 /// One loop shared by the oracle-parity dispatcher and the production
 /// Phase 1–4 dispatcher, so the code the parity tests exercise is the
 /// code production runs.
-fn run_jpeg_phase2_passes<B: GpuBackend>(
+fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
     backend: &B,
     setup: &mut JpegDispatchSetup<'_, B>,
 ) -> Result<Option<u32>> {
@@ -255,6 +261,9 @@ fn run_jpeg_phase2_passes<B: GpuBackend>(
     let mut flags_host = vec![0u32; setup.num_subsequences as usize];
     for iter in 0..=bound {
         backend.begin_page()?;
+        if iter == 0 {
+            backend.record_huffman(setup.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
+        }
         let mut params = setup.base_params(HuffmanPhase::JpegPhase2InterSync);
         params.s_info = setup.s_info_scratch.as_ref();
         params.s_info_prev = Some(setup.s_info.as_ref());
@@ -339,8 +348,7 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
         return Ok((Vec::new(), Phase2Outcome::Converged { iterations: 0 }));
     }
     let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
-    setup.run_phase1(backend)?;
-    let outcome = match run_jpeg_phase2_passes(backend, &mut setup)? {
+    let outcome = match run_jpeg_phase1_and_phase2(backend, &mut setup)? {
         Some(iterations) => Phase2Outcome::Converged { iterations },
         None => Phase2Outcome::SyncBoundExceeded {
             bound: jpeg_phase2_retry_bound(setup.num_subsequences),
@@ -425,9 +433,7 @@ pub(crate) fn decode_jpeg_symbols<B: GpuBackend>(
         });
     }
     let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
-    setup.run_phase1(backend)?;
-
-    let Some(converged_pass) = run_jpeg_phase2_passes(backend, &mut setup)? else {
+    let Some(converged_pass) = run_jpeg_phase1_and_phase2(backend, &mut setup)? else {
         return Err(BackendError::msg(
             "dispatch_jpeg_phase1_through_phase4: Phase 2 did not converge within retry bound",
         ));

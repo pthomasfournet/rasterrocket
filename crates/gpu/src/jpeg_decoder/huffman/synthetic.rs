@@ -19,7 +19,7 @@ use super::build_gpu_codebook;
 /// Device buffers and derived dimensions shared by the synthetic
 /// dispatchers: bitstream, flat codebook, and the ping-ponged pair of
 /// per-subsequence state buffers. `s_info` always names the most
-/// recently written state buffer — [`run_phase2_passes`] swaps the
+/// recently written state buffer — [`run_phase1_and_phase2`] swaps the
 /// pair after each pass.
 struct SyntheticDispatchSetup<'a, B: GpuBackend> {
     bitstream: DeviceBufferGuard<'a, B>,
@@ -139,14 +139,15 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
     }
 }
 
-/// Drive the synthetic Phase 2 sync loop: each pass reads the previous
-/// pass's states (`setup.s_info`), writes the carried-over or advanced
-/// ones (`setup.s_info_scratch`), and swaps the pair, so `setup.s_info`
-/// always holds the last-written states.
+/// Run Phase 1, then drive the synthetic Phase 2 sync loop: each pass
+/// reads the previous pass's states (`setup.s_info`), writes the
+/// carried-over or advanced ones (`setup.s_info_scratch`), and swaps
+/// the pair, so `setup.s_info` always holds the last-written states.
+/// Phase 1 is recorded in the first pass's page.
 ///
 /// Returns the converged pass index, or `SyncBoundExceeded` after
 /// `retry_bound(n) + 1` passes without every flag reading 1.
-fn run_phase2_passes<B: GpuBackend>(
+fn run_phase1_and_phase2<B: GpuBackend>(
     backend: &B,
     setup: &mut SyntheticDispatchSetup<'_, B>,
     sync_flags: &DeviceBufferGuard<'_, B>,
@@ -155,6 +156,9 @@ fn run_phase2_passes<B: GpuBackend>(
     let mut flags_host = vec![0u32; setup.num_subsequences as usize];
     for iter in 0..=bound {
         backend.begin_page()?;
+        if iter == 0 {
+            backend.record_huffman(setup.base_params(HuffmanPhase::Phase1IntraSync))?;
+        }
         let mut params = setup.base_params(HuffmanPhase::Phase2InterSync);
         params.s_info = setup.s_info_scratch.as_ref();
         params.s_info_prev = Some(setup.s_info.as_ref());
@@ -231,8 +235,7 @@ pub(super) fn dispatch_phase1_then_phase2<B: GpuBackend>(
         subsequence_bits,
     )?;
     let sync_flags = DeviceBufferGuard::alloc(backend, (setup.num_subsequences as usize) * 4)?;
-    setup.run_phase1(backend)?;
-    let outcome = run_phase2_passes(backend, &mut setup, &sync_flags)?;
+    let outcome = run_phase1_and_phase2(backend, &mut setup, &sync_flags)?;
     Ok((setup.download_s_info(backend)?, outcome))
 }
 
@@ -266,9 +269,8 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
     )?;
     let per_subseq_bytes = (setup.num_subsequences as usize) * 4;
     let sync_flags = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
-    setup.run_phase1(backend)?;
     if !matches!(
-        run_phase2_passes(backend, &mut setup, &sync_flags)?,
+        run_phase1_and_phase2(backend, &mut setup, &sync_flags)?,
         Phase2Outcome::Converged { .. }
     ) {
         return Err(BackendError::msg(
