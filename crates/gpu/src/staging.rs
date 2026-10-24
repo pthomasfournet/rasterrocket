@@ -11,8 +11,9 @@
 //! The buffers are allocated without write-combining, so host reads of a
 //! band run at cached-memory speed.  They are created on first use, grown
 //! to one row when a row exceeds [`BAND_BYTES`], and released at thread
-//! exit.  If page-locked allocation fails, the download falls back to one
-//! pageable band buffer and synchronous copies.
+//! exit.  A range of at most [`DIRECT_MAX_BYTES`] is copied in one
+//! synchronous transfer into a pageable buffer instead, and so is any range
+//! when page-locked allocation fails.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -21,6 +22,11 @@ use cudarc::driver::{CudaContext, CudaEvent, CudaStream, CudaView, DriverError, 
 
 /// Upper bound on the bytes copied per band (rounded down to whole rows).
 pub const BAND_BYTES: usize = 4 << 20;
+
+/// Largest range copied directly into pageable memory.  Below this size
+/// the driver's bounce copy costs less than allocating page-locked memory
+/// on a thread that has none.
+pub const DIRECT_MAX_BYTES: usize = 256 << 10;
 
 /// Two page-locked band buffers and the events marking their copies done.
 struct Staging {
@@ -100,6 +106,9 @@ where
     let n_rows = src.len() / row_bytes;
     if n_rows == 0 {
         return Ok(());
+    }
+    if src.len() <= DIRECT_MAX_BYTES {
+        return download_banded_pageable(stream, src, row_bytes, n_rows, f);
     }
     let band_rows = (BAND_BYTES / row_bytes).clamp(1, n_rows);
     let band_bytes = band_rows * row_bytes;
