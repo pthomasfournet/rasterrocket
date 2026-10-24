@@ -56,6 +56,9 @@ fn eval_function_depth(
         let fn_dict = resolve_fn_dict(doc, fn_obj)?;
         return read_fn_color(&fn_dict, b"C0", n).map(|c| apply_range_clip(&fn_dict, c));
     }
+    if let Some(fns) = resolve_fn_array(doc, fn_obj) {
+        return eval_function_array(doc, &fns, t, n, depth);
+    }
     let fn_dict = resolve_fn_dict(doc, fn_obj)?;
     let fn_type = fn_dict.get_i64(b"FunctionType")?;
     let result = match fn_type {
@@ -78,6 +81,42 @@ fn eval_function_depth(
         }
     };
     result.map(|c| apply_range_clip(&fn_dict, c))
+}
+
+/// Return the elements of `fn_obj` when it is an array, directly or through
+/// one indirect reference; `None` for a single function object.
+fn resolve_fn_array(doc: &Document, fn_obj: &Object) -> Option<Vec<Object>> {
+    match fn_obj {
+        Object::Array(fns) => Some(fns.clone()),
+        Object::Reference(id) => doc.get_object(*id).ok()?.as_array().map(<[_]>::to_vec),
+        _ => None,
+    }
+}
+
+/// Evaluate a shading `Function` given as an array of `n` single-output
+/// functions (PDF §8.7.4.5.1): channel `i` is the output of element `i`.
+/// An array whose length differs from `n` is malformed and yields `None`.
+fn eval_function_array(
+    doc: &Document,
+    fns: &[Object],
+    t: f64,
+    n: usize,
+    depth: u8,
+) -> Option<Vec<f64>> {
+    if fns.len() != n {
+        log::warn!(
+            "shading: Function array has {} entries, colour space needs {n} — colour unresolved",
+            fns.len()
+        );
+        return None;
+    }
+    fns.iter()
+        .map(|f| {
+            eval_function_depth(doc, f, t, 1, depth + 1)?
+                .first()
+                .copied()
+        })
+        .collect()
 }
 
 /// Clip per-channel output values to the function's `Range` array
@@ -1119,6 +1158,27 @@ mod tests {
     }
 
     use crate::test_helpers::empty_doc;
+
+    #[test]
+    fn function_array_evaluates_one_function_per_channel() {
+        let fns: Vec<pdf::Object> = [(0.0, 0.8), (0.2, 0.6), (0.0, 0.0), (1.0, 0.0)]
+            .into_iter()
+            .map(|(c0, c1)| pdf::Object::Dictionary(make_exp_dict(c0, c1, 1.0)))
+            .collect();
+        let doc = empty_doc();
+        let out = eval_function(&doc, &pdf::Object::Array(fns), 0.5, 4).expect("4 channels");
+        let want = [0.4, 0.4, 0.0, 0.5];
+        for (got, want) in out.iter().zip(want) {
+            assert!((got - want).abs() < 1e-5, "got {out:?}, want {want:?}");
+        }
+    }
+
+    #[test]
+    fn function_array_length_mismatch_is_unresolved() {
+        let fns = vec![pdf::Object::Dictionary(make_exp_dict(0.0, 1.0, 1.0)); 3];
+        let doc = empty_doc();
+        assert!(eval_function(&doc, &pdf::Object::Array(fns), 0.5, 4).is_none());
+    }
 
     #[test]
     fn eval_stitching_wrong_bounds_count_falls_back() {
