@@ -9,7 +9,7 @@
 //! use std::path::Path;
 //! use rasterrocket::{RasterOptions, raster_pdf};
 //!
-//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, ..RasterOptions::default() };
+//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, pages: None, strict: false };
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     match result {
 //!         Ok(page) => {
@@ -70,7 +70,8 @@
 //!     first_page: 1,
 //!     last_page: u32::MAX,
 //!     deskew: true,
-//!     ..RasterOptions::default()
+//!     pages: None,
+//!     strict: false,
 //! };
 //! let rx = render_channel(Path::new("scan.pdf"), &opts, 4); // 4-page buffer
 //! while let Ok((page_num, result)) = rx.recv() {
@@ -84,31 +85,6 @@
 //! }
 //! // Note: rayon::spawn tasks may still be running here. Use a rayon scope
 //! // or channel to join them if you need to wait for all work to complete.
-//! ```
-//!
-//! # Camera-captured pages
-//!
-//! Phone or camera captures of book pages carry distortions a flatbed scan
-//! does not.  [`RasterOptions::camera`] enables the [`camera`] cleanup
-//! stages — page-boundary crop with perspective correction, curvature
-//! dewarp (experimental) and double-page spread splitting — each of which
-//! leaves a page unchanged when its detector is not confident:
-//!
-//! ```rust,no_run
-//! use std::path::Path;
-//! use rasterrocket::{CameraOptions, RasterOptions, SpreadHalf, raster_pdf};
-//!
-//! let opts = RasterOptions { deskew: true, camera: CameraOptions::all(), ..RasterOptions::default() };
-//! for (page_num, result) in raster_pdf(Path::new("phone-capture.pdf"), &opts) {
-//!     let page = result.expect("render");
-//!     // A split spread yields two items with the same page_num, left first.
-//!     match page.spread_half {
-//!         None => { /* the whole page */ }
-//!         Some(SpreadHalf::Left) => { /* left page of the spread */ }
-//!         Some(SpreadHalf::Right) => { /* right page of the spread */ }
-//!     }
-//!     let _ = page_num;
-//! }
 //! ```
 //!
 //! # Sparse page selection
@@ -127,7 +103,7 @@
 //!     last_page: u32::MAX,  // ignored when pages is Some
 //!     deskew: true,
 //!     pages: Some(pages),
-//!     ..RasterOptions::default()
+//!     strict: false,
 //! };
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     // Only pages 1, 5, 23, and 100 are rendered — intermediates are skipped.
@@ -138,7 +114,6 @@
 //! }
 //! ```
 
-pub mod camera;
 mod config;
 #[cfg(feature = "vaapi")]
 pub(crate) mod decode_queue;
@@ -153,7 +128,6 @@ mod vk_init;
 
 use std::path::Path;
 
-pub use camera::{CameraOptions, SpreadHalf};
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
@@ -400,17 +374,6 @@ pub struct RasterOptions {
     /// [`SessionConfig::strict`].  Default `false`: the image is skipped and
     /// reported in [`PageDiagnostics::image_failures`].
     pub strict: bool,
-
-    /// Camera-capture cleanup stages; all off by default.  See the
-    /// [`camera`] module.
-    ///
-    /// The stages run in the order rectify → split → dewarp, and
-    /// [`deskew`](Self::deskew) then applies to each resulting page.  With
-    /// [`split_spreads`](CameraOptions::split_spreads) a page detected as a
-    /// double-page spread yields two [`RenderedPage`]s with the same
-    /// [`page_num`](RenderedPage::page_num), told apart by
-    /// [`spread_half`](RenderedPage::spread_half).
-    pub camera: CameraOptions,
 }
 
 impl Default for RasterOptions {
@@ -422,7 +385,6 @@ impl Default for RasterOptions {
             deskew: false,
             pages: None,
             strict: false,
-            camera: CameraOptions::default(),
         }
     }
 }
@@ -430,8 +392,7 @@ impl Default for RasterOptions {
 /// A single rendered page, returned as 8-bit grayscale pixels.
 #[derive(Debug)]
 pub struct RenderedPage {
-    /// Page number (1-based) of the source page in the document.  Both
-    /// halves of a split spread carry their source page's number.
+    /// Page number (1-based).
     pub page_num: u32,
     /// Width in pixels.
     pub width: u32,
@@ -460,16 +421,7 @@ pub struct RenderedPage {
     ///
     /// Use this to route pages to different OCR configurations — e.g. skip deskew
     /// on `has_vector_text = true` pages, or set Tesseract PSM based on `is_scan`.
-    /// Both halves of a split spread carry their source page's diagnostics.
     pub diagnostics: PageDiagnostics,
-    /// Which half of a double-page spread this is, or `None` for a whole
-    /// page.
-    ///
-    /// Always `None` unless [`CameraOptions::split_spreads`] is enabled and
-    /// the source page was detected as a spread; the page is then yielded
-    /// twice in succession under the same [`page_num`](Self::page_num),
-    /// [`SpreadHalf::Left`] first, then [`SpreadHalf::Right`].
-    pub spread_half: Option<SpreadHalf>,
 }
 
 // ── Top-level render entry points ─────────────────────────────────────────────
@@ -479,8 +431,6 @@ pub struct RenderedPage {
 /// Returns an iterator yielding `(page_num, Result<RenderedPage, RasterError>)`
 /// for each page in `opts.first_page..=opts.last_page`.  A per-page error does
 /// not abort remaining pages — the caller decides whether to skip or propagate.
-/// A page split by [`CameraOptions::split_spreads`] yields two consecutive
-/// `Ok` items under its page number (see [`RenderedPage::spread_half`]).
 ///
 /// GPU resources are initialised lazily on first use and reused across pages.
 /// Backend selection follows [`SessionConfig::default`] — Vulkan when present,
@@ -550,9 +500,6 @@ pub fn raster_pdf_from_bytes(
 ///   channel closes.
 /// - Per-page render errors → `(page_num, Err(...))`, rendering of
 ///   subsequent pages continues.
-/// - A page split by [`CameraOptions::split_spreads`] → two consecutive
-///   `(page_num, Ok(..))` items, left half first (see
-///   [`RenderedPage::spread_half`]).
 /// - Per-page panics → delivered as `(page_num, Err(RasterError::RenderPanic
 ///   { .. }))` and rendering continues, **but only under `panic = "unwind"`
 ///   builds** (test profiles, and embedders that override the panic strategy).
@@ -665,7 +612,6 @@ mod page_set_tests {
             deskew: false,
             pages: None,
             strict: false,
-            camera: CameraOptions::default(),
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -674,7 +620,6 @@ mod page_set_tests {
         assert_eq!(default_opts.last_page, u32::MAX);
         assert!(!default_opts.deskew);
         assert!(default_opts.pages.is_none());
-        assert!(!default_opts.camera.any());
     }
 
     #[test]
@@ -687,7 +632,6 @@ mod page_set_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
-            camera: CameraOptions::default(),
         };
         assert!(opts.pages.is_some());
     }

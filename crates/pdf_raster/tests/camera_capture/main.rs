@@ -1,10 +1,12 @@
-//! Camera-capture cleanup on synthetic captures of real pages.
+//! `rasterrocket-camera` on synthetic captures of real pages.
 //!
 //! Pages of the corpus fixtures are rendered, then photographed in
 //! perspective over a desk, curled toward a spine, or set side by side as
-//! a spread (see `synth`).  The tests assert that the cleanup stages
-//! recover the known geometry, and that flatbed-style pages pass through
-//! byte-identical when every stage is enabled.
+//! a spread (see `synth`).  Each capture is embedded in a one-image PDF and
+//! rendered back, so the camera stages see what a renderer delivers.  The
+//! tests assert that the stages recover the known geometry, and that
+//! flatbed-style pages pass through byte-identical when every stage is
+//! enabled.
 //!
 //! The fixtures are gitignored; each test skips with a note when absent.
 //! Set `CAMERA_EVAL_DIR` to also write the synthetic captures and their
@@ -30,22 +32,22 @@ mod common;
 mod metrics;
 mod synth;
 
+use camera::{CameraOptions, GrayView, Processed};
 use common::{assemble_pdf, corpus_fixture, stream_object};
-use rasterrocket::camera::{self, CameraOptions};
-use rasterrocket::{RasterOptions, RenderedPage, SpreadHalf, raster_pdf, raster_pdf_from_bytes};
+use rasterrocket::{RasterOptions, RenderedPage, raster_pdf, raster_pdf_from_bytes};
 use synth::{Gray, Pose};
 
 /// Resolution of the rendered source pages.
 const DPI: f32 = 100.0;
 
 /// Render `pages` of a corpus fixture to grayscale, or `None` when absent.
-fn fixture_pages(name: &str, pages: &[u32], opts: &RasterOptions) -> Option<Vec<RenderedPage>> {
+fn fixture_pages(name: &str, pages: &[u32]) -> Option<Vec<RenderedPage>> {
     let path = corpus_fixture(name)?;
     let set = rasterrocket::PageSet::new(pages.iter().copied()).expect("page set");
     let opts = RasterOptions {
         dpi: DPI,
         pages: Some(set),
-        ..opts.clone()
+        ..RasterOptions::default()
     };
     Some(
         raster_pdf(&path, &opts)
@@ -90,16 +92,39 @@ fn image_pdf(img: &Gray) -> Vec<u8> {
     ])
 }
 
-/// Render a one-image PDF of `img` through the public options path.
-fn render_capture(img: &Gray, camera: CameraOptions, deskew: bool) -> Vec<RenderedPage> {
+/// Render a one-image PDF of `img`.
+fn render_image(img: &Gray) -> Gray {
     let opts = RasterOptions {
         dpi: DPI,
-        deskew,
-        camera,
         ..RasterOptions::default()
     };
-    raster_pdf_from_bytes(image_pdf(img), &opts)
+    let pages: Vec<RenderedPage> = raster_pdf_from_bytes(image_pdf(img), &opts)
         .map(|(n, r)| r.unwrap_or_else(|e| panic!("capture page {n}: {e}")))
+        .collect();
+    assert_eq!(pages.len(), 1, "one-image PDF renders one page");
+    page_gray(&pages[0])
+}
+
+fn run_camera(img: &Gray, opts: CameraOptions) -> Processed {
+    camera::process(img.view(), &opts).expect("rendered page is a valid image")
+}
+
+/// Render a one-image PDF of `img`, run the camera stages on the result,
+/// then deskew each resulting page when `deskew` is set.
+fn render_capture(img: &Gray, opts: CameraOptions, deskew: bool) -> Vec<Gray> {
+    let out = run_camera(&render_image(img), opts);
+    out.pages
+        .into_iter()
+        .map(|p| {
+            let page = Gray::from_page(p);
+            if deskew {
+                let mut bmp = page.to_bitmap();
+                rasterrocket::deskew::apply(&mut bmp).expect("deskew");
+                Gray::from_bitmap(&bmp)
+            } else {
+                page
+            }
+        })
         .collect()
 }
 
@@ -156,11 +181,7 @@ const POSES: [Pose; 4] = [
 
 #[test]
 fn perspective_capture_is_rectified() {
-    let Some(pages) = fixture_pages(
-        "corpus-05-academic-book.pdf",
-        &[20, 21],
-        &RasterOptions::default(),
-    ) else {
+    let Some(pages) = fixture_pages("corpus-05-academic-book.pdf", &[20, 21]) else {
         return;
     };
     for (pi, page) in pages.iter().enumerate() {
@@ -174,7 +195,9 @@ fn perspective_capture_is_rectified() {
             dump(&format!("persp-{pi}-{k}-capture"), &cap.image);
             let diag = (flat.w as f64).hypot(flat.h as f64);
 
-            let quad = camera::detect_page_quad(&cap.image.to_bitmap())
+            let quad = camera::detect_page_quad(cap.image.view())
+                .expect("valid image")
+                .found()
                 .unwrap_or_else(|| panic!("page {pi} pose {k}: no quad found"));
             let err = metrics::corner_error(&quad.corners, &cap.corners);
             eprintln!(
@@ -188,11 +211,11 @@ fn perspective_capture_is_rectified() {
 
             let out = render_capture(&cap.image, rectify_only(), false);
             assert_eq!(out.len(), 1);
-            let rect = page_gray(&out[0]);
-            dump(&format!("persp-{pi}-{k}-rectified"), &rect);
+            let rect = &out[0];
+            dump(&format!("persp-{pi}-{k}-rectified"), rect);
             let aspect = rect.w as f64 / rect.h as f64;
             let want = flat.w as f64 / flat.h as f64;
-            let corr = metrics::correlation(&rect, &flat);
+            let corr = metrics::correlation(rect, &flat);
             eprintln!(
                 "page {pi} pose {k}: aspect {aspect:.4} vs {want:.4}, size {}x{} vs {}x{}, correlation {corr:.3}",
                 rect.w, rect.h, flat.w, flat.h
@@ -216,28 +239,21 @@ fn flatbed_pages_pass_through_unchanged() {
     ];
     let mut checked = 0;
     for (name, pages) in cases {
-        let Some(plain) = fixture_pages(name, pages, &RasterOptions::default()) else {
+        let Some(plain) = fixture_pages(name, pages) else {
             continue;
         };
-        let all = RasterOptions {
-            camera: CameraOptions::all(),
-            ..RasterOptions::default()
-        };
-        let cleaned = fixture_pages(name, pages, &all).expect("fixture present");
-        assert_eq!(plain.len(), cleaned.len(), "{name}: page count changed");
-        for (a, b) in plain.iter().zip(&cleaned) {
-            assert_eq!(b.spread_half, None, "{name} page {}: split", a.page_num);
+        for page in &plain {
+            let view = GrayView::packed(&page.pixels, page.width as usize, page.height as usize);
+            let out = camera::process(view, &CameraOptions::all()).expect("valid page");
+            let n = page.page_num;
+            assert_eq!(out.pages.len(), 1, "{name} page {n}: split");
+            let got = &out.pages[0];
             assert_eq!(
-                (a.width, a.height),
-                (b.width, b.height),
-                "{name} page {}: resized",
-                a.page_num
+                (got.width, got.height),
+                (view.width, view.height),
+                "{name} page {n}: resized"
             );
-            assert!(
-                a.pixels == b.pixels,
-                "{name} page {}: pixels changed",
-                a.page_num
-            );
+            assert!(got.data == page.pixels, "{name} page {n}: pixels changed");
             checked += 1;
         }
     }
@@ -246,11 +262,7 @@ fn flatbed_pages_pass_through_unchanged() {
 
 #[test]
 fn curled_page_is_dewarped() {
-    let Some(pages) = fixture_pages(
-        "corpus-05-academic-book.pdf",
-        &[20, 21, 40],
-        &RasterOptions::default(),
-    ) else {
+    let Some(pages) = fixture_pages("corpus-05-academic-book.pdf", &[20, 21, 40]) else {
         return;
     };
     for (pi, page) in pages.iter().enumerate() {
@@ -261,10 +273,10 @@ fn curled_page_is_dewarped() {
         dump(&format!("curl-{pi}-capture"), &curled);
         let out = render_capture(&curled, dewarp_only(), false);
         assert_eq!(out.len(), 1);
-        let fixed = page_gray(&out[0]);
-        dump(&format!("curl-{pi}-dewarped"), &fixed);
+        let fixed = &out[0];
+        dump(&format!("curl-{pi}-dewarped"), fixed);
         let (before, before_max) = metrics::line_displacement(&curled, &target);
-        let (after, after_max) = metrics::line_displacement(&fixed, &target);
+        let (after, after_max) = metrics::line_displacement(fixed, &target);
         eprintln!(
             "page {pi}: line displacement rms {before:.2} px → {after:.2} px, max {before_max:.2} px → {after_max:.2} px"
         );
@@ -281,11 +293,7 @@ fn curled_page_is_dewarped() {
 
 #[test]
 fn spread_capture_is_rectified_and_split() {
-    let Some(pages) = fixture_pages(
-        "corpus-05-academic-book.pdf",
-        &[20, 21],
-        &RasterOptions::default(),
-    ) else {
+    let Some(pages) = fixture_pages("corpus-05-academic-book.pdf", &[20, 21]) else {
         return;
     };
     let (left, right) = (page_gray(&pages[0]), page_gray(&pages[1]));
@@ -301,77 +309,114 @@ fn spread_capture_is_rectified_and_split() {
     dump("spread-capture", &cap.image);
     let out = render_capture(&cap.image, CameraOptions::all(), true);
     assert_eq!(out.len(), 2, "spread must split into two pages");
-    assert_eq!(out[0].spread_half, Some(SpreadHalf::Left));
-    assert_eq!(out[1].spread_half, Some(SpreadHalf::Right));
-    assert!(out.iter().all(|p| p.page_num == 1));
-    let total = f64::from(out[0].width + out[1].width);
-    let split = f64::from(out[0].width) / total;
+    let total = (out[0].w + out[1].w) as f64;
+    let split = out[0].w as f64 / total;
     eprintln!(
         "split at {:.4} of the rectified width ({} + {})",
-        split, out[0].width, out[1].width
+        split, out[0].w, out[1].w
     );
     assert!((split - 0.5).abs() < 0.01, "split at {split:.4}");
-    for (half, want) in out.iter().zip([&left, &right]) {
-        let got = page_gray(half);
-        dump(&format!("spread-{:?}", half.spread_half), &got);
+    for ((side, got), want) in ["left", "right"].iter().zip(&out).zip([&left, &right]) {
+        dump(&format!("spread-{side}"), got);
+        let corr = metrics::correlation(got, want);
+        eprintln!("{side}: correlation {corr:.3}");
+        assert!(corr > 0.85, "{side}: correlation {corr:.3}");
+    }
+}
+
+#[test]
+fn square_spread_on_desk_is_cropped_and_split() {
+    let Some(pages) = fixture_pages("corpus-05-academic-book.pdf", &[20, 21]) else {
+        return;
+    };
+    let (left, right) = (page_gray(&pages[0]), page_gray(&pages[1]));
+    let spread = synth::spread(&left, &right);
+    // A book held square to the camera: no tilt or roll.
+    let pose = Pose {
+        tilt_x: 0.0,
+        tilt_y: 0.0,
+        roll: 0.0,
+        canvas_scale: 1.2,
+        shift: (14.0, -9.0),
+    };
+    let cap = synth::photograph(&spread, pose, None);
+    dump("square-spread-capture", &cap.image);
+    let mut crop_split = CameraOptions::default();
+    crop_split.crop = true;
+    crop_split.split_spreads = true;
+    let out = run_camera(&render_image(&cap.image), crop_split);
+    let report = &out.report;
+    assert!(report.crop.applied(), "crop: {:?}", report.crop);
+    assert!(report.split.applied(), "split: {:?}", report.split);
+    let rect = report.crop_rect.expect("crop rectangle");
+    let edge = cap.corners[0][0] + 0.5;
+    eprintln!(
+        "crop {}x{} at ({}, {}) vs page {}x{} at ({edge:.1}, {:.1})",
+        rect.width,
+        rect.height,
+        rect.x,
+        rect.y,
+        spread.w,
+        spread.h,
+        cap.corners[0][1] + 0.5
+    );
+    assert!(
+        (rect.x as f64 - edge).abs() <= 2.0,
+        "crop left edge {}",
+        rect.x
+    );
+    assert!(
+        rect.width.abs_diff(spread.w) <= 3,
+        "crop width {}",
+        rect.width
+    );
+    let gutter = report.gutter.expect("gutter");
+    let source_x = gutter.source_x.expect("cropped cut is a source column");
+    let want = edge + left.w as f64;
+    eprintln!("gutter at source column {source_x} vs {want:.1}");
+    assert!(
+        (source_x as f64 - want).abs() <= 3.0,
+        "gutter at {source_x}"
+    );
+    for ((side, got), want) in ["left", "right"]
+        .iter()
+        .zip(&out.pages)
+        .zip([&left, &right])
+    {
+        let got = Gray::from_page(got.clone());
+        dump(&format!("square-spread-{side}"), &got);
         let corr = metrics::correlation(&got, want);
-        eprintln!("{:?}: correlation {corr:.3}", half.spread_half);
-        assert!(corr > 0.85, "{:?}: correlation {corr:.3}", half.spread_half);
+        eprintln!("{side}: {}x{}, correlation {corr:.3}", got.w, got.h);
+        assert!(corr > 0.9, "{side}: correlation {corr:.3}");
     }
 }
 
 #[test]
 fn flat_spread_without_surround_is_split() {
-    let Some(pages) = fixture_pages(
-        "corpus-05-academic-book.pdf",
-        &[20, 21],
-        &RasterOptions::default(),
-    ) else {
+    let Some(pages) = fixture_pages("corpus-05-academic-book.pdf", &[20, 21]) else {
         return;
     };
     let (left, right) = (page_gray(&pages[0]), page_gray(&pages[1]));
     let spread = synth::spread(&left, &right);
     let mut split = CameraOptions::default();
     split.split_spreads = true;
-    let out = render_capture(&spread, split, false);
-    assert_eq!(out.len(), 2);
+    let out = run_camera(&render_image(&spread), split);
+    assert_eq!(out.pages.len(), 2);
+    let gutter = out.report.gutter.expect("gutter");
+    eprintln!("split at {} vs gutter {}", gutter.x, left.w);
     assert!(
-        (i64::from(out[0].width) - left.w as i64).abs() <= 3,
+        gutter.x.abs_diff(left.w) <= 3,
         "split at {} vs gutter {}",
-        out[0].width,
+        gutter.x,
         left.w
     );
-
-    // The channel delivers both halves, in order, under the source page
-    // number; a one-page document then closes the channel.
-    let path = std::env::temp_dir().join(format!("camera-spread-{}.pdf", std::process::id()));
-    std::fs::write(&path, image_pdf(&spread)).expect("write spread pdf");
-    let opts = RasterOptions {
-        dpi: DPI,
-        camera: split,
-        ..RasterOptions::default()
-    };
-    let items: Vec<_> = rasterrocket::render_channel(&path, &opts, 1)
-        .into_iter()
-        .collect();
-    std::fs::remove_file(&path).expect("remove spread pdf");
-    let halves: Vec<_> = items
-        .iter()
-        .map(|(n, r)| (*n, r.as_ref().expect("page renders").spread_half))
-        .collect();
-    assert_eq!(
-        halves,
-        [(1, Some(SpreadHalf::Left)), (1, Some(SpreadHalf::Right))]
-    );
+    assert_eq!(gutter.source_x, Some(gutter.x));
+    assert_eq!(out.pages[0].width, gutter.x);
 }
 
 #[test]
 fn curled_spread_is_split_and_each_page_dewarped() {
-    let Some(pages) = fixture_pages(
-        "corpus-05-academic-book.pdf",
-        &[20, 21],
-        &RasterOptions::default(),
-    ) else {
+    let Some(pages) = fixture_pages("corpus-05-academic-book.pdf", &[20, 21]) else {
         return;
     };
     let (left, right) = (page_gray(&pages[0]), page_gray(&pages[1]));
@@ -385,16 +430,14 @@ fn curled_spread_is_split_and_each_page_dewarped() {
     let out = render_capture(&spread, CameraOptions::all(), true);
     assert_eq!(out.len(), 2, "curled spread must split into two pages");
     let expected = [
-        (&left, &curled_left, &target_left),
-        (&right, &curled_right, &target_right),
+        ("left", &left, &curled_left, &target_left),
+        ("right", &right, &curled_right, &target_right),
     ];
-    for (half, (flat, curled, target)) in out.iter().zip(expected) {
-        let got = page_gray(half);
-        dump(&format!("curled-spread-{:?}", half.spread_half), &got);
+    for (got, (side, flat, curled, target)) in out.iter().zip(expected) {
+        dump(&format!("curled-spread-{side}"), got);
         assert!(
-            (got.w as i64 - flat.w as i64).abs() <= 3,
-            "{:?}: width {} vs {}",
-            half.spread_half,
+            got.w.abs_diff(flat.w) <= 3,
+            "{side}: width {} vs {}",
             got.w,
             flat.w
         );
@@ -402,13 +445,8 @@ fn curled_spread_is_split_and_each_page_dewarped() {
         let (before, before_max) = metrics::line_displacement(curled, target);
         let (after, after_max) = metrics::line_displacement(&got, target);
         eprintln!(
-            "{:?}: line displacement rms {before:.2} px → {after:.2} px, max {before_max:.2} px → {after_max:.2} px",
-            half.spread_half
+            "{side}: line displacement rms {before:.2} px → {after:.2} px, max {before_max:.2} px → {after_max:.2} px"
         );
-        assert!(
-            after < 0.25 * before,
-            "{:?}: {before:.2} → {after:.2} px",
-            half.spread_half
-        );
+        assert!(after < 0.25 * before, "{side}: {before:.2} → {after:.2} px");
     }
 }

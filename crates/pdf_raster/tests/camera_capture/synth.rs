@@ -6,6 +6,7 @@
 //! coordinates, so ground truth (corners, flat line positions, gutter) is
 //! known analytically.
 
+use camera::{GrayPage, GrayView};
 use color::Gray8;
 use raster::Bitmap;
 
@@ -52,6 +53,27 @@ impl Gray {
         let mut b = Bitmap::<Gray8>::new(self.w as u32, self.h as u32, 1, false);
         b.data_mut().copy_from_slice(&self.px);
         b
+    }
+
+    pub fn from_bitmap(b: &Bitmap<Gray8>) -> Self {
+        let (w, h) = (b.width as usize, b.height as usize);
+        let mut px = Vec::with_capacity(w * h);
+        for y in 0..b.height {
+            px.extend_from_slice(&b.row_bytes(y)[..w]);
+        }
+        Self { w, h, px }
+    }
+
+    pub fn view(&self) -> GrayView<'_> {
+        GrayView::packed(&self.px, self.w, self.h)
+    }
+
+    pub fn from_page(p: GrayPage) -> Self {
+        Self {
+            w: p.width,
+            h: p.height,
+            px: p.data,
+        }
     }
 
     /// Bilinear resize to `w × h`.

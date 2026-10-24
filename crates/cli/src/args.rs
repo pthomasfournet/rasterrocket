@@ -6,8 +6,9 @@
               visibility and cannot escape; widening to pub would misdescribe it"
 )]
 
+use camera::CameraOptions;
 use clap::Parser;
-use pdf_raster::{BackendPolicy, CameraOptions, SessionConfig};
+use pdf_raster::{BackendPolicy, SessionConfig};
 
 /// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
 fn parse_positive_dpi(s: &str) -> Result<f64, String> {
@@ -288,8 +289,16 @@ pub(crate) struct Args {
     pub strict: bool,
 
     // ── Camera-capture cleanup ───────────────────────────────────────────────
+    /// Detect a page photographed on a darker surround and crop to its
+    /// bounding box.
+    ///
+    /// Pages without a clear boundary against a darker surround (flatbed
+    /// scans, born-digital pages) are written unchanged.
+    #[arg(long = "crop")]
+    pub crop: bool,
+
     /// Detect a page photographed on a darker surround, correct the
-    /// perspective and crop to the page.
+    /// perspective and crop to the page.  Supersedes `--crop`.
     ///
     /// Pages without a clear boundary against a darker surround (flatbed
     /// scans, born-digital pages) are written unchanged.
@@ -343,10 +352,11 @@ pub(crate) enum ThinLineMode {
 }
 
 impl Args {
-    /// The camera-capture cleanup stages selected by `--rectify`,
-    /// `--dewarp` and `--split-spreads`.
+    /// The camera-capture cleanup stages selected by `--crop`,
+    /// `--rectify`, `--dewarp` and `--split-spreads`.
     pub(crate) fn camera_options(&self) -> CameraOptions {
         let mut camera = CameraOptions::default();
+        camera.crop = self.crop;
         camera.rectify = self.rectify;
         camera.dewarp = self.dewarp;
         camera.split_spreads = self.split_spreads;

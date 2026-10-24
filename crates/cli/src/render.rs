@@ -13,10 +13,11 @@ use color::{Gray8, Rgb8};
 use encode::{EncodeError, write_pbm, write_pgm, write_png, write_ppm};
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
-use pdf_raster::{RasterError, RasterSession, SpreadHalf, render_page_rgb_hinted, rgb_to_gray};
+use pdf_raster::{RasterError, RasterSession, render_page_rgb_hinted, rgb_to_gray};
 use raster::Bitmap;
 
 use crate::args::{Args, OutputFormat};
+use crate::cleanup::{self, Page};
 use crate::naming::output_path_with_prefix;
 use crate::ram::SpillPolicy;
 
@@ -31,6 +32,8 @@ pub(crate) enum RenderError {
     Raster(RasterError),
     /// The encoder rejected the bitmap.
     Encode(EncodeError),
+    /// The camera-capture cleanup rejected the page.
+    Camera(String),
     /// The requested format + colour-mode combination is not supported.
     UnsupportedFormatCombination {
         /// The output format requested by the user.
@@ -44,6 +47,7 @@ impl std::fmt::Display for RenderError {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Raster(e) => write!(f, "render error: {e}"),
             Self::Encode(e) => write!(f, "encode error: {e}"),
+            Self::Camera(e) => write!(f, "camera cleanup error: {e}"),
             Self::UnsupportedFormatCombination { output } => {
                 write!(f, "output format {output} is not yet supported")
             }
@@ -57,7 +61,7 @@ impl std::error::Error for RenderError {
             Self::Io(e) => Some(e),
             Self::Raster(e) => Some(e),
             Self::Encode(e) => Some(e),
-            Self::UnsupportedFormatCombination { .. } => None,
+            Self::Camera(_) | Self::UnsupportedFormatCombination { .. } => None,
         }
     }
 }
@@ -75,6 +79,11 @@ impl From<RasterError> for RenderError {
 impl From<EncodeError> for RenderError {
     fn from(e: EncodeError) -> Self {
         Self::Encode(e)
+    }
+}
+impl From<camera::CameraError> for RenderError {
+    fn from(e: camera::CameraError) -> Self {
+        Self::Camera(e.to_string())
     }
 }
 
@@ -137,9 +146,9 @@ pub(crate) fn render_page(
     )
 }
 
-/// Run the camera stages selected on the command line on `rgb`, then write
-/// each resulting page: one file, or the `a`/`b` halves of a split spread
-/// (see [`output_path_with_prefix`]).
+/// Run the camera stages selected on the command line on `rgb` (see
+/// [`cleanup::clean`]), then write each resulting page: one file, or the
+/// `a`/`b` halves of a split spread (see [`output_path_with_prefix`]).
 ///
 /// Shared by the PDF render path and the comic-archive path.
 pub(crate) fn write_cleaned(
@@ -150,13 +159,8 @@ pub(crate) fn write_cleaned(
     total_pages: i32,
     format: OutputFormat,
 ) -> Result<(), RenderError> {
-    let (first, second) = pdf_raster::camera::process(rgb, &args.camera_options());
-    let halves = if second.is_some() {
-        [Some(SpreadHalf::Left), Some(SpreadHalf::Right)]
-    } else {
-        [None, None]
-    };
-    for (bmp, half) in std::iter::once(first).chain(second).zip(halves) {
+    let pages = cleanup::clean(rgb, args.camera_options(), args.gray || args.mono)?;
+    for (page, half) in pages {
         // Pick RAM vs disk per file: when --ram is active, the SpillPolicy
         // hands back the tmpfs prefix until free memory drops below the
         // safety margin, then transparently spills the rest of the run to the
@@ -178,7 +182,11 @@ pub(crate) fn write_cleaned(
         // batch the safety guarantee (no partial file on encode failure)
         // isn't worth that cost; the user re-runs on error anyway. We delete
         // a partial file on encode failure to preserve the spirit.
-        encode_to_path(&out_path, &bmp, args, format).inspect_err(|_| {
+        let written = match &page {
+            Page::Rgb(rgb) => encode_to_path(&out_path, rgb, args, format),
+            Page::Gray(gray) => encode_gray_to_path(&out_path, gray, args, format),
+        };
+        written.inspect_err(|_| {
             let _ = fs::remove_file(&out_path);
         })?;
     }
@@ -195,25 +203,39 @@ pub(crate) fn encode_to_path(
     args: &Args,
     format: OutputFormat,
 ) -> Result<(), RenderError> {
+    if args.mono || args.gray {
+        return encode_gray_to_path(out_path, &rgb_to_gray(rgb), args, format);
+    }
+    let mut out = BufWriter::new(File::create(out_path)?);
+    match format {
+        OutputFormat::Ppm => write_ppm(rgb, &mut out)?,
+        OutputFormat::Png => write_png(rgb, &mut out)?,
+        OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Encode a luma page to `out_path`: thresholded to two levels under
+/// `--mono`, as gray otherwise.
+fn encode_gray_to_path(
+    out_path: &str,
+    gray: &Bitmap<Gray8>,
+    args: &Args,
+    format: OutputFormat,
+) -> Result<(), RenderError> {
     let mut out = BufWriter::new(File::create(out_path)?);
     if args.mono {
-        let mono = gray_to_mono(&rgb_to_gray(rgb));
+        let mono = gray_to_mono(gray);
         match format {
             OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, &mut out)?,
             OutputFormat::Png => write_png::<Gray8, _>(&mono, &mut out)?,
             OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
         }
-    } else if args.gray {
-        let gray = rgb_to_gray(rgb);
-        match format {
-            OutputFormat::Ppm => write_pgm::<Gray8, _>(&gray, &mut out)?,
-            OutputFormat::Png => write_png::<Gray8, _>(&gray, &mut out)?,
-            OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
-        }
     } else {
         match format {
-            OutputFormat::Ppm => write_ppm(rgb, &mut out)?,
-            OutputFormat::Png => write_png(rgb, &mut out)?,
+            OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, &mut out)?,
+            OutputFormat::Png => write_png::<Gray8, _>(gray, &mut out)?,
             OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
         }
     }

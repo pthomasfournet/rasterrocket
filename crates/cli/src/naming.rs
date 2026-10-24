@@ -6,7 +6,7 @@
               visibility and cannot escape; widening to pub would misdescribe it"
 )]
 
-use pdf_raster::SpreadHalf;
+use crate::cleanup::SpreadHalf;
 
 use crate::args::{Args, OutputFormat};
 
@@ -116,6 +116,7 @@ mod tests {
             vaapi_device: None,
             vulkan_device: None,
             strict: false,
+            crop: false,
             rectify: false,
             dewarp: false,
             split_spreads: false,

@@ -1,4 +1,5 @@
 mod args;
+mod cleanup;
 mod comic;
 mod decrypt_gate;
 mod diagnostics;
