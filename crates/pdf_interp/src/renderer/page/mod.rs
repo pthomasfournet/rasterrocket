@@ -1856,17 +1856,19 @@ impl<'doc> PageRenderer<'doc> {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
-        let rows = match buf.download_rows(grid.y0, grid.y1) {
-            Ok(rows) => rows,
-            Err(e) => {
-                log::warn!("blit_image: device page buffer download failed: {e}");
-                // The buffer now holds this image's pixels with alpha set;
-                // drop it so a later blit starts from a zeroed buffer.
-                cache_state.page_buffer = None;
-                return false;
-            }
-        };
-        composite_rgba_rows(&mut self.bitmap, &rows, grid, grid_clip);
+        let bitmap = &mut self.bitmap;
+        let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
+            composite_rgba_rows(bitmap, rows, y, grid, grid_clip);
+        });
+        if let Err(e) = downloaded {
+            log::warn!("blit_image: device page buffer download failed: {e}");
+            // The buffer now holds this image's pixels with alpha set;
+            // drop it so a later blit starts from a zeroed buffer.  Bands
+            // composited before the failure stay on the bitmap; the image
+            // is still reported as not drawn.
+            cache_state.page_buffer = None;
+            return false;
+        }
         // Clear the touched rows so the next blit's alpha test sees only
         // its own writes.  On failure drop the buffer for the same reason
         // as above; the composite already succeeded.
@@ -1878,15 +1880,17 @@ impl<'doc> PageRenderer<'doc> {
     }
 }
 
-/// Source-over the rows `[grid.y0, grid.y1)` of a downloaded RGBA8 page
-/// buffer onto `bitmap`, restricted to the grid's columns and to the pixels
-/// `grid_clip` covers.  Alpha is `255` where the blit kernel wrote a sample
-/// and `0` elsewhere, so the composite copies each written sample, blended
-/// by the clip coverage on rows the clip edge crosses.
+/// Source-over whole rows of a downloaded RGBA8 page buffer, the first of
+/// which is page row `y0`, onto `bitmap`, restricted to the grid's columns
+/// and to the pixels `grid_clip` covers.  Alpha is `255` where the blit
+/// kernel wrote a sample and `0` elsewhere, so the composite copies each
+/// written sample, blended by the clip coverage on rows the clip edge
+/// crosses.
 #[cfg(feature = "cache")]
 fn composite_rgba_rows(
     bitmap: &mut Bitmap<Rgb8>,
     rgba: &[u8],
+    y0: u32,
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
 ) {
@@ -1896,10 +1900,7 @@ fn composite_rgba_rows(
     let src_stride = width * RGBA_BPP;
     let dst_stride = bitmap.stride;
     let dst = bitmap.data_mut();
-    for (row_idx, dy) in (grid.y0..grid.y1).enumerate() {
-        let Some(src_row) = rgba.get(row_idx * src_stride..(row_idx + 1) * src_stride) else {
-            return;
-        };
+    for (src_row, dy) in rgba.chunks_exact(src_stride.max(1)).zip(y0..) {
         let Some(row_clip) = grid_clip.row(dy) else {
             continue;
         };

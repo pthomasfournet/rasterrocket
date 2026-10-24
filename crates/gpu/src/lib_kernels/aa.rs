@@ -37,6 +37,37 @@ impl GpuCtx {
         aa_width: u32,
         eo: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut counts = Vec::new();
+        self.aa_fill_with(table, rect, aa_width, eo, |_, band| {
+            counts.extend_from_slice(band);
+        })?;
+        Ok(counts)
+    }
+
+    /// [`Self::aa_fill`], handing the counts to `f` in bands of whole rows
+    /// as they arrive on the host: `f(first_row, band)` in row order, where
+    /// `first_row` is relative to `rect` and `band` holds the band's rows
+    /// contiguously, `rect.width` counts each.  `band` may be modified.
+    /// The copy of the next band runs while `f` processes the current one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::aa_fill`]; bands already passed to `f` stay consumed.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::aa_fill`].
+    pub fn aa_fill_with<F>(
+        &self,
+        table: &AaScanTable<'_>,
+        rect: AaFillRect,
+        aa_width: u32,
+        eo: bool,
+        mut f: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: FnMut(u32, &mut [u8]),
+    {
         table.assert_well_formed();
         let n_pixels = rect.pixel_count().expect("width × height overflows usize");
         assert!(
@@ -44,11 +75,12 @@ impl GpuCtx {
             "width × height = {n_pixels} pixels exceeds the kernel's 32-bit index range"
         );
         if n_pixels == 0 {
-            return Ok(Vec::new());
+            return Ok(());
         }
         if table.intersects.is_empty() {
             // No intersections means no spans: every count is zero.
-            return Ok(vec![0u8; n_pixels]);
+            f(0, &mut vec![0u8; n_pixels]);
+            return Ok(());
         }
         let n_rows = u32::try_from(table.n_rows()).expect("row count exceeds u32::MAX");
 
@@ -70,8 +102,13 @@ impl GpuCtx {
             &d_coverage,
         )?;
 
-        stream.synchronize()?;
-        Ok(stream.clone_dtoh(&d_coverage)?)
+        crate::staging::download_banded(
+            &stream,
+            &d_coverage.as_view(),
+            rect.width as usize,
+            |row, band| f(u32::try_from(row).expect("row < rect.height"), band),
+        )?;
+        Ok(())
     }
 
     /// Async kernel launch for the scanline-AA fill kernel.

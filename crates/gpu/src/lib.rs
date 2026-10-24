@@ -43,6 +43,7 @@ pub mod decode_queue;
 mod fill;
 pub mod jpeg;
 pub mod jpeg_sof;
+mod staging;
 pub mod traits;
 
 pub use cmyk::icc_cmyk_to_rgb_cpu;

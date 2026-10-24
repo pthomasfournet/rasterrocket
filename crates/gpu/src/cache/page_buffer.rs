@@ -4,8 +4,8 @@
 //! The blit kernel writes transformed image pixels into it with
 //! `alpha=255`; pixels it does not touch keep their zero initialisation.
 //! The renderer downloads the rows a blit touched via
-//! [`DevicePageBuffer::download_rows`], source-over composites them onto
-//! its host bitmap, and clears them again with
+//! [`DevicePageBuffer::download_rows_with`], source-over composites them
+//! onto its host bitmap, and clears them again with
 //! [`DevicePageBuffer::zero_rows`] so the next blit's alpha channel
 //! reflects only its own writes.
 //!
@@ -95,12 +95,11 @@ impl DevicePageBuffer {
 
     /// The CUDA stream this buffer is bound to.
     ///
-    /// [`Self::download_rows`] synchronises this stream, so kernels
-    /// writing or reading [`Self::rgba`] from a *different* stream MUST
-    /// first `cudaStreamWaitEvent` against an event recorded on this
-    /// stream — otherwise the download may DMA stale bytes.
-    /// Same-stream consumption is correct without any explicit sync
-    /// because cudarc serialises operations on a single stream.
+    /// [`Self::download_rows_with`] copies on this stream, so it observes
+    /// every kernel write queued here before the call.  A kernel writing
+    /// [`Self::rgba`] through a shared reference records no write event,
+    /// so such a kernel on a *different* stream is not ordered before the
+    /// download; the blit path queues its kernels on this stream.
     #[must_use]
     pub fn stream(&self) -> &CudaStream {
         &self.stream
@@ -118,38 +117,42 @@ impl DevicePageBuffer {
         Ok(y0 as usize * row..y1 as usize * row)
     }
 
-    /// Copy rows `[y0, y1)` to a host `Vec<u8>` of `(y1 - y0) × width × 4`
-    /// bytes.
+    /// Copy rows `[y0, y1)` to the host and pass them to `f` in bands of
+    /// whole rows, in row order: `f(first_row, band)`, where `first_row`
+    /// is the page row of the band's first row and `band` holds the
+    /// band's rows contiguously, [`Self::row_bytes`] each.
     ///
-    /// Synchronises the stream first so all pending kernel writes
-    /// (typically a sequence of blit-kernel launches) complete before
-    /// the D→H copy is enqueued, then synchronises again after the
-    /// copy so the bytes are observed-stable on host before returning.
-    /// This matches the sync-then-copy ordering used by every other
-    /// dispatcher in [`crate::GpuCtx`].
+    /// The copy is ordered after all work queued on the buffer's stream
+    /// before the call.  Bands are staged through the calling thread's
+    /// page-locked buffers, and the copy of the next band runs while `f`
+    /// processes the current one.  An empty range calls `f` zero times.
     ///
     /// # Errors
-    /// Returns [`DriverError`] for an invalid row range, or if either sync
-    /// or the D→H copy fails.
-    pub fn download_rows(&self, y0: u32, y1: u32) -> Result<Vec<u8>, DriverError> {
+    /// Returns [`DriverError`] for an invalid row range or a failed copy;
+    /// bands already passed to `f` stay consumed.
+    pub fn download_rows_with<F>(&self, y0: u32, y1: u32, mut f: F) -> Result<(), DriverError>
+    where
+        F: FnMut(u32, &[u8]),
+    {
         let range = self.row_range(y0, y1)?;
-        let mut host = vec![0u8; range.len()];
-        if host.is_empty() {
-            return Ok(host);
+        if range.is_empty() {
+            return Ok(());
         }
         let view = self.rgba.slice(range);
-        self.stream.synchronize()?;
-        self.stream.memcpy_dtoh(&view, &mut host)?;
-        self.stream.synchronize()?;
-        Ok(host)
+        crate::staging::download_banded(&self.stream, &view, self.row_bytes(), |r, band| {
+            #[expect(clippy::cast_possible_truncation, reason = "r < y1 - y0, a u32")]
+            f(y0 + r as u32, band);
+        })
     }
 
     /// Copy the whole buffer to a host `Vec<u8>` of [`Self::byte_len`] bytes.
     ///
     /// # Errors
-    /// Same as [`Self::download_rows`].
+    /// Same as [`Self::download_rows_with`].
     pub fn download(&self) -> Result<Vec<u8>, DriverError> {
-        self.download_rows(0, self.height)
+        let mut host = Vec::with_capacity(self.byte_len());
+        self.download_rows_with(0, self.height, |_, band| host.extend_from_slice(band))?;
+        Ok(host)
     }
 
     /// Zero rows `[y0, y1)`.  Stream-ordered: runs after any kernel
@@ -209,10 +212,15 @@ mod tests {
         let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
         let stream = ctx.default_stream();
         let mut buf = DevicePageBuffer::new(stream, 8, 4).expect("alloc");
-        assert_eq!(buf.download_rows(1, 3).expect("rows").len(), 2 * 8 * 4);
-        assert_eq!(buf.download_rows(2, 2).expect("empty").len(), 0);
-        assert!(buf.download_rows(3, 2).is_err(), "inverted range");
-        assert!(buf.download_rows(0, 5).is_err(), "past the buffer");
+        let rows_len = |y0, y1| {
+            let mut len = 0;
+            buf.download_rows_with(y0, y1, |_, band| len += band.len())
+                .map(|()| len)
+        };
+        assert_eq!(rows_len(1, 3).expect("rows"), 2 * 8 * 4);
+        assert_eq!(rows_len(2, 2).expect("empty"), 0);
+        assert!(rows_len(3, 2).is_err(), "inverted range");
+        assert!(rows_len(0, 5).is_err(), "past the buffer");
         assert!(buf.zero_rows(0, 5).is_err(), "past the buffer");
         buf.zero_rows(0, 4).expect("zero");
         assert!(buf.download().expect("download").iter().all(|&b| b == 0));

@@ -231,16 +231,36 @@ pub(super) fn try_gpu_aa_fill(
         return false;
     };
 
-    let mut counts = match ctx.aa_fill(&fill.table(), fill.rect, fill.aa_width, even_odd) {
-        Ok(counts) => counts,
+    let mut painted_any = false;
+    let result = ctx.aa_fill_with(
+        &fill.table(),
+        fill.rect,
+        fill.aa_width,
+        even_odd,
+        |row, counts| {
+            let band = AaFillRect {
+                y: fill.rect.y + i32::try_from(row).expect("row fits i32"),
+                height: u32::try_from(counts.len() / fill.rect.width as usize)
+                    .expect("band rows fit u32"),
+                ..fill.rect
+            };
+            gpu_coverage_to_bitmap(renderer, counts, band, pipe, src);
+            painted_any = true;
+        },
+    );
+    match result {
+        Ok(()) => true,
+        // Compositing is not idempotent at partial coverage, so a CPU
+        // fallback is only taken while no band has been painted.
+        Err(e) if painted_any => {
+            log::warn!("GPU AA fill failed part-way; the fill is incomplete: {e}");
+            true
+        }
         Err(e) => {
             log::warn!("GPU AA fill failed, falling back to CPU: {e}");
-            return false;
+            false
         }
-    };
-
-    gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
-    true
+    }
 }
 
 #[cfg(all(test, feature = "gpu-aa"))]
