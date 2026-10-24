@@ -318,8 +318,10 @@ fn read_traditional_xref(
                 .ok_or_else(|| PdfError::BadXref(format!("bad generation at pos {pos}")))?
                 as u16;
             skip_ws(data, &mut pos);
+            // A missing flag (end of input) reads as free; `pos` stays within
+            // `0..=data.len()`.
             let flag = data.get(pos).copied().unwrap_or(b'f');
-            pos += 1;
+            pos = (pos + 1).min(data.len());
             // Skip up to the end of this entry line (handles \r, \n, \r\n, space+\r etc.)
             while pos < data.len() && matches!(data[pos], b' ' | b'\r' | b'\n') {
                 pos += 1;
@@ -832,5 +834,24 @@ startxref
                 "/W {w}: got {err:?}"
             );
         }
+    }
+
+    /// A traditional table that ends immediately after an entry's
+    /// generation number (no `n`/`f` flag, no trailer) must yield an error;
+    /// the flag skip used to step the cursor one byte past the end of the
+    /// buffer and the trailer lookup then sliced out of range.
+    #[test]
+    fn traditional_xref_truncated_after_generation_does_not_panic() {
+        let mut data = b"%PDF-1.4\nstartxref\n".to_vec();
+        let tail = b"\n%%EOF\n";
+        // The table follows the startxref pointer; compute its offset.
+        let digits_len = 2;
+        let xref_off = data.len() + digits_len + tail.len();
+        data.extend_from_slice(format!("{xref_off}").as_bytes());
+        assert_eq!(data.len() + tail.len(), xref_off);
+        data.extend_from_slice(tail);
+        data.extend_from_slice(b"xref\n0 1\n0000000000 65535");
+        assert!(read_xref_strict(&data).is_err());
+        let _ = read_xref(&data);
     }
 }
