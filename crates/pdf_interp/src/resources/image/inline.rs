@@ -9,7 +9,7 @@ use pdf::{Dictionary, Document, Object};
 
 use super::codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
 use super::raw::decode_raw;
-use super::{ImageDescriptor, ImageFilter, filter_name, validated_dims};
+use super::{ImageDescriptor, ImageFilter, filter_name, is_transport_filter, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
 #[cfg(feature = "nvjpeg")]
@@ -130,6 +130,24 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
 
     let img_filter = ImageFilter::from_filter_str(filter.as_deref());
 
+    // In a filter chain every filter before the terminal codec is a transport
+    // filter; applying the whole chain passes the codec bytes through.
+    let chain_len = dict
+        .get(b"Filter")
+        .map_or(0, |f| super::image_filter_chain(f).len());
+    let chained = chain_len > 1;
+    let codec_input: std::borrow::Cow<'_, [u8]> = if chained {
+        match decoded_chain(&dict, data) {
+            Ok(bytes) => std::borrow::Cow::Owned(bytes),
+            Err(e) => {
+                log::warn!("inline image: chained-filter prefilter decode failed: {e}");
+                return None;
+            }
+        }
+    } else {
+        std::borrow::Cow::Borrowed(data)
+    };
+
     let mut img = match filter.as_deref() {
         None => decode_raw(
             doc,
@@ -143,32 +161,27 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
             #[cfg(feature = "gpu-icc")]
             clut_cache,
         ),
-        Some("FlateDecode") => {
-            use pdf::Stream;
-            // Run Flate decompression on raw bytes via the pdf crate's Stream helper.
-            let stream = Stream::new(dict.clone(), data.to_vec());
-            match stream.decompressed_content() {
-                Ok(raw) => decode_raw(
-                    doc,
-                    &raw,
-                    w,
-                    h,
-                    is_mask,
-                    &dict,
-                    #[cfg(feature = "gpu-icc")]
-                    gpu_ctx,
-                    #[cfg(feature = "gpu-icc")]
-                    clut_cache,
-                ),
-                Err(e) => {
-                    log::warn!("inline image: FlateDecode failed: {e}");
-                    None
-                }
+        Some(f) if is_transport_filter(f) => match decoded_chain(&dict, data) {
+            Ok(raw) => decode_raw(
+                doc,
+                &raw,
+                w,
+                h,
+                is_mask,
+                &dict,
+                #[cfg(feature = "gpu-icc")]
+                gpu_ctx,
+                #[cfg(feature = "gpu-icc")]
+                clut_cache,
+            ),
+            Err(e) => {
+                log::warn!("inline image: {f} decode failed: {e}");
+                None
             }
-        }
+        },
         Some("CCITTFaxDecode") => {
-            let decode_parms = dict.get(b"DecodeParms");
-            decode_ccitt(data, w, h, is_mask, decode_parms)
+            let decode_parms = super::terminal_decode_parms(&dict, chain_len);
+            decode_ccitt(&codec_input, w, h, is_mask, decode_parms)
         }
         Some("DCTDecode") => {
             // GPU dispatch is threshold-gated inside decode_dct (same threshold as
@@ -177,7 +190,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
             // cross-document content-hash dedup wouldn't pay off either since
             // inline JPEGs are usually tiny (icons / glyph fallbacks).
             decode_dct(
-                data,
+                &codec_input,
                 w,
                 h,
                 &dict,
@@ -199,31 +212,16 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
             // GPU dispatch is threshold-gated inside decode_jpx.
             #[cfg(feature = "nvjpeg2k")]
             {
-                decode_jpx(data, w, h, None, gpu_j2k)
+                decode_jpx(&codec_input, w, h, None, gpu_j2k)
             }
             #[cfg(not(feature = "nvjpeg2k"))]
             {
-                decode_jpx(data, w, h, None)
+                decode_jpx(&codec_input, w, h, None)
             }
         }
         Some("JBIG2Decode") => {
             // Inline images cannot reference a JBIG2Globals stream (no object identity).
-            decode_jbig2(doc, data, w, h, is_mask, None)
-        }
-        Some("RunLengthDecode") => {
-            let raw = decode_run_length(data);
-            decode_raw(
-                doc,
-                &raw,
-                w,
-                h,
-                is_mask,
-                &dict,
-                #[cfg(feature = "gpu-icc")]
-                gpu_ctx,
-                #[cfg(feature = "gpu-icc")]
-                clut_cache,
-            )
+            decode_jbig2(doc, &codec_input, w, h, is_mask, None)
         }
         Some(other) => {
             log::warn!("inline image: unknown filter {other:?}");
@@ -283,69 +281,9 @@ fn resolve_named_color_space(
     Ok(())
 }
 
-/// Decode a `RunLengthDecode` stream (PDF §7.4.5).
-///
-/// The encoding is a simple run-length scheme:
-/// - Byte `n` in [0, 127] → copy the next `n + 1` literal bytes.
-/// - Byte `n` in [129, 255] → repeat the next byte `257 − n` times.
-/// - Byte `128` → end-of-data marker.
-///
-/// Output is capped at 256 MiB to prevent adversarial OOM from a crafted stream.
-fn decode_run_length(data: &[u8]) -> Vec<u8> {
-    // 256 MiB: enough for a 65536×65536 single-channel image, hard limit against
-    // adversarial run-length streams that encode billions of bytes from a few bytes.
-    decode_run_length_capped(data, 256 * 1024 * 1024)
-}
-
-/// `RunLength` decode with an output cap; returns immediately when `max_output` bytes are reached.
-pub(super) fn decode_run_length_capped(data: &[u8], max_output: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < data.len() {
-        let run_byte = data[i];
-        i += 1;
-        match run_byte {
-            128 => break, // EOD
-            0..=127 => {
-                let count = run_byte as usize + 1;
-                let end = i.saturating_add(count);
-                if end > data.len() {
-                    log::warn!(
-                        "inline image: RunLengthDecode literal run truncated at EOF \
-                         (wanted {count} bytes, {} available)",
-                        data.len() - i
-                    );
-                }
-                let end = end.min(data.len());
-                if out.len() + (end - i) > max_output {
-                    log::warn!("inline image: RunLengthDecode output exceeds limit — truncating");
-                    break;
-                }
-                out.extend_from_slice(&data[i..end]);
-                i = end;
-            }
-            _ => {
-                // 129..=255: repeat = 257 - run_byte
-                let repeat = 257usize.saturating_sub(run_byte as usize);
-                if let Some(&b) = data.get(i) {
-                    if out.len() + repeat > max_output {
-                        log::warn!(
-                            "inline image: RunLengthDecode output exceeds limit — truncating"
-                        );
-                        break;
-                    }
-                    out.extend(std::iter::repeat_n(b, repeat));
-                    i += 1;
-                } else {
-                    log::warn!(
-                        "inline image: RunLengthDecode truncated — repeat byte missing at EOF"
-                    );
-                    break;
-                }
-            }
-        }
-    }
-    out
+/// Apply every filter of the inline image's `/Filter` chain to `data`.
+fn decoded_chain(dict: &Dictionary, data: &[u8]) -> Result<Vec<u8>, String> {
+    pdf::Stream::new(dict.clone(), data.to_vec()).decompressed_content()
 }
 
 /// Parse the raw inline-image parameter block into a `pdf::Dictionary`.
@@ -563,6 +501,39 @@ mod tests {
         assert_eq!(img.data.as_cpu().unwrap(), &vec![0xFF, 0, 0, 0, 0xFF, 0]);
     }
 
+    fn decode_cpu(params: &[u8], data: &[u8]) -> Option<ImageDescriptor> {
+        let doc = empty_doc();
+        decode_inline_image(
+            &mut cpu_ctx(&doc),
+            params,
+            data,
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        )
+    }
+
+    /// Transport filters, alone or chained, decode to raw samples.
+    #[test]
+    fn inline_image_transport_filters() {
+        let want = vec![0x00u8, 0x80, 0xFF, 0x40];
+        for (params, data) in [
+            (
+                b"/W 2 /H 2 /CS /G /BPC 8 /F /RL".as_slice(),
+                b"\x03\x00\x80\xff\x40\x80".as_slice(),
+            ),
+            (b"/W 2 /H 2 /CS /G /BPC 8 /F /AHx", b"0080FF40>"),
+            (b"/W 2 /H 2 /CS /G /BPC 8 /F [/AHx /RL]", b"0300 80FF 4080>"),
+        ] {
+            let img = decode_cpu(params, data).expect("decodes");
+            assert_eq!(
+                img.data.as_cpu().unwrap(),
+                &want,
+                "{}",
+                String::from_utf8_lossy(params)
+            );
+        }
+    }
+
     /// A `/CS` name found in neither the device spaces nor the resources
     /// fails the decode instead of falling back to `DeviceGray`.
     #[test]
@@ -668,55 +639,6 @@ mod tests {
         assert_eq!(dp.get_i64(b"K"), Some(0));
         assert_eq!(dp.get_bool(b"BlackIs1"), Some(true));
         assert_eq!(dp.get_bool(b"EncodedByteAlign"), Some(true));
-    }
-
-    // ── decode_run_length ──────────────────────────────────────────────────────
-
-    #[test]
-    fn run_length_literal_run() {
-        // Run byte 2 → copy next 3 bytes.
-        let data = [2u8, 0xAA, 0xBB, 0xCC];
-        assert_eq!(decode_run_length(&data), vec![0xAA, 0xBB, 0xCC]);
-    }
-
-    #[test]
-    fn run_length_repeat_run() {
-        // Run byte 254 → repeat = 257 - 254 = 3.
-        let data = [254u8, 0x42];
-        assert_eq!(decode_run_length(&data), vec![0x42, 0x42, 0x42]);
-    }
-
-    #[test]
-    fn run_length_eod_terminates() {
-        // Run byte 128 = EOD; bytes after are ignored.
-        let data = [2u8, 0xAA, 0xBB, 0xCC, 128, 0xFF, 0xFF];
-        assert_eq!(decode_run_length(&data), vec![0xAA, 0xBB, 0xCC]);
-    }
-
-    #[test]
-    fn run_length_empty_input() {
-        assert_eq!(decode_run_length(&[]), Vec::<u8>::new());
-    }
-
-    #[test]
-    fn run_length_truncates_at_max_output() {
-        // Use a tiny synthetic cap so the test allocates almost nothing.
-        // Each record (2 bytes: 0x81, byte) expands to 128 copies.
-        // Cap at 1000 bytes; send enough records to exceed it.
-        const CAP: usize = 1000;
-        let mut data = Vec::new();
-        for _ in 0..20 {
-            data.push(0x81_u8); // repeat = 257 - 129 = 128
-            data.push(0xAB_u8);
-        }
-        // 20 × 128 = 2560 bytes would be decoded without cap.
-        let out = decode_run_length_capped(&data, CAP);
-        assert!(out.len() <= CAP, "output {} exceeded cap {CAP}", out.len());
-        assert!(
-            !out.is_empty(),
-            "should have decoded something before truncation"
-        );
-        assert!(out.iter().all(|&b| b == 0xAB), "all bytes should be 0xAB");
     }
 
     // ── decode_inline_image ────────────────────────────────────────────────────

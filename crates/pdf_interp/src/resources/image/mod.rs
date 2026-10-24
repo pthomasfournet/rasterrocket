@@ -551,7 +551,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
             #[cfg(feature = "gpu-icc")]
             clut_cache,
         ),
-        Some("FlateDecode") => match stream.decompressed_content() {
+        Some(f) if is_transport_filter(f) => match stream.decompressed_content() {
             Ok(data) => decode_raw(
                 doc,
                 &data,
@@ -565,8 +565,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                 clut_cache,
             ),
             Err(e) => {
-                log::warn!("image: FlateDecode decompression failed: {e}");
-                return ImageResolution::DecodeFailed(format!("FlateDecode: {e}"));
+                log::warn!("image: {f} decode failed: {e}");
+                return ImageResolution::DecodeFailed(format!("{f}: {e}"));
             }
         },
         Some("CCITTFaxDecode") => decode_ccitt(&codec_input, w, h, is_mask, terminal_parms),
@@ -748,6 +748,16 @@ pub(super) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)>
     Some((w_raw as u32, h_raw as u32))
 }
 
+/// `true` for a filter that transforms bytes without being an image codec
+/// (PDF §7.4): an image ending in one decodes as raw samples after the whole
+/// filter chain is applied.
+pub(super) fn is_transport_filter(name: &str) -> bool {
+    matches!(
+        name,
+        "FlateDecode" | "LZWDecode" | "ASCII85Decode" | "ASCIIHexDecode" | "RunLengthDecode"
+    )
+}
+
 /// Collect every filter name from a `/Filter` entry, in application order.
 ///
 /// Accepts a bare `Name` (one filter) or a `Name` array (a filter chain, PDF
@@ -805,7 +815,7 @@ pub(crate) fn filter_name(obj: &Object) -> Option<Cow<'_, str>> {
 /// - `/DecodeParms` is a dict, `/Filter` is a single name → that dict.
 /// - `/DecodeParms` is an array → the last array element (if a dict / non-null).
 /// - absent / `null` / mismatched → `None`.
-fn terminal_decode_parms(dict: &Dictionary, filter_count: usize) -> Option<&Object> {
+pub(super) fn terminal_decode_parms(dict: &Dictionary, filter_count: usize) -> Option<&Object> {
     match dict.get(b"DecodeParms")? {
         Object::Array(arr) => {
             // Prefer the entry index-aligned to the terminal (last) filter;

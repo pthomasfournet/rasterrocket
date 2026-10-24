@@ -74,6 +74,7 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
         b"LZWDecode" => apply_lzw(data, params),
         b"ASCII85Decode" => decode_ascii85(data),
         b"ASCIIHexDecode" => Ok(decode_ascii_hex(data)),
+        b"RunLengthDecode" => Ok(decode_run_length(data, MAX_DECOMPRESSED)),
         // Image filters — pass through; the caller handles them.
         b"DCTDecode" | b"CCITTFaxDecode" | b"JBIG2Decode" | b"JPXDecode" => Ok(data.to_vec()),
         other => Err(format!(
@@ -573,6 +574,46 @@ fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ── RunLength ─────────────────────────────────────────────────────────────────
+
+/// Decode `RunLengthDecode` data (PDF §7.4.5), producing at most `max_output`
+/// bytes.
+///
+/// A length byte `n` in 0–127 copies the next `n + 1` bytes; 129–255 repeats
+/// the next byte `257 − n` times; 128 ends the data.  A run cut short by the
+/// end of input contributes the bytes present, and decoding stops at a run
+/// that would exceed `max_output`.
+fn decode_run_length(data: &[u8], max_output: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(&run) = data.get(i) {
+        i += 1;
+        match run {
+            128 => break,
+            0..=127 => {
+                let end = (i + usize::from(run) + 1).min(data.len());
+                if out.len() + (end - i) > max_output {
+                    log::warn!("RunLengthDecode: output exceeds {max_output} bytes, truncated");
+                    break;
+                }
+                out.extend_from_slice(&data[i..end]);
+                i = end;
+            }
+            _ => {
+                let Some(&b) = data.get(i) else { break };
+                let repeat = 257 - usize::from(run);
+                if out.len() + repeat > max_output {
+                    log::warn!("RunLengthDecode: output exceeds {max_output} bytes, truncated");
+                    break;
+                }
+                out.resize(out.len() + repeat, b);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 // ── ASCIIHex ──────────────────────────────────────────────────────────────────
 
 fn decode_ascii_hex(data: &[u8]) -> Vec<u8> {
@@ -659,6 +700,43 @@ impl DictLookup for Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_length_literal_repeat_and_eod() {
+        // 2 → copy 3 bytes; 254 → repeat the next byte 3 times; 128 ends.
+        let data = [2u8, 0xAA, 0xBB, 0xCC, 254, 0x42, 128, 0xFF];
+        assert_eq!(
+            decode_run_length(&data, usize::MAX),
+            [0xAA, 0xBB, 0xCC, 0x42, 0x42, 0x42]
+        );
+        assert_eq!(decode_run_length(&[], usize::MAX), [0u8; 0]);
+    }
+
+    #[test]
+    fn run_length_truncated_input_keeps_present_bytes() {
+        assert_eq!(
+            decode_run_length(&[3u8, 0x01, 0x02], usize::MAX),
+            [0x01, 0x02]
+        );
+        assert_eq!(decode_run_length(&[0x81u8], usize::MAX), [0u8; 0]);
+    }
+
+    #[test]
+    fn run_length_stops_at_max_output() {
+        // 20 records of 128 repeats = 2560 bytes uncapped.
+        let data: Vec<u8> = std::iter::repeat_n([0x81u8, 0xAB], 20).flatten().collect();
+        let out = decode_run_length(&data, 1000);
+        assert_eq!(out.len(), 896, "seven whole runs fit under the cap");
+        assert!(out.iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn run_length_is_a_stream_filter() {
+        let mut dict = Dictionary::new();
+        dict.set(b"Filter", Object::Name(b"RunLengthDecode".to_vec()));
+        let stream = crate::Stream::new(dict, vec![1, b'h', b'i', 128]);
+        assert_eq!(stream.decompressed_content().unwrap(), b"hi");
+    }
 
     /// Per-byte reference for `apply_png_filter`: the RFC 2083 recurrence
     /// evaluated with all three neighbours recomputed per byte. The
