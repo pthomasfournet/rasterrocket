@@ -482,12 +482,31 @@ fn parse_scalar(data: &[u8], pos: &mut usize) -> Option<Object> {
             }
             return Some(Object::Integer(n));
         }
-        if let Ok(r) = s.parse::<f32>() {
+        if let Some(r) = parse_real(s) {
             return Some(Object::Real(r));
         }
     }
 
     None
+}
+
+/// Parse a real-number token: an optional sign, decimal digits with at most
+/// one `.`, and an optional `e`/`E` exponent.  Spellings of infinity and NaN
+/// are not numbers in PDF syntax and yield `None`; a numeric token beyond the
+/// `f32` range saturates to `±f32::MAX`, so every `Real` is finite.
+fn parse_real(s: &str) -> Option<f32> {
+    let numeric = s.bytes().any(|b| b.is_ascii_digit())
+        && s.bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'.' | b'+' | b'-' | b'e' | b'E'));
+    if !numeric {
+        return None;
+    }
+    let r = s.parse::<f32>().ok()?;
+    Some(if r.is_infinite() {
+        f32::MAX.copysign(r)
+    } else {
+        r
+    })
 }
 
 /// Parse the dictionary at `*pos`, itself enclosed in `depth`
@@ -834,5 +853,30 @@ mod tests {
             obj = items.pop().expect("one nested item");
         }
         assert_eq!(obj, Object::Array(Vec::new()));
+    }
+
+    /// Spellings of infinity and NaN are not PDF numbers; `str::parse::<f32>`
+    /// accepts them, so they used to become non-finite `Real`s.
+    #[test]
+    fn non_finite_spellings_are_not_numbers() {
+        for src in [&b"inf"[..], b"-inf", b"+infinity", b"NaN", b"nan"] {
+            let mut pos = 0;
+            let obj = parse_object(src, &mut pos);
+            assert!(
+                obj.is_none(),
+                "{:?} parsed as {obj:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    /// A numeric token beyond the `f32` range saturates instead of becoming
+    /// infinite; ordinary reals are unaffected.
+    #[test]
+    fn out_of_range_real_saturates() {
+        assert_eq!(parse(b"1e999"), Object::Real(f32::MAX));
+        assert_eq!(parse(b"-1e999"), Object::Real(-f32::MAX));
+        assert_eq!(parse(b"4."), Object::Real(4.0));
+        assert_eq!(parse(b"-.002"), Object::Real(-0.002));
     }
 }
