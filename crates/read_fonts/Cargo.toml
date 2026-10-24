@@ -1,0 +1,70 @@
+# Local fork of read-fonts (https://github.com/googlefonts/fontations,
+# directory `read-fonts/`), vendored from upstream commit
+# cd4aaef57887dd1d8a5875e38c406843e66c9cab (2026-07-03, crate version 0.41.0).  Licence: MIT OR Apache-2.0 (see LICENSE-APACHE,
+# LICENSE-MIT).  Changes made here are ours; see CHANGES.md.
+[package]
+name = "read-fonts"
+version = "0.41.0"
+description = "Reading OpenType font files."
+readme = "README.md"
+categories = ["text-processing", "parsing", "graphics"]
+
+rust-version = "1.85"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/googlefonts/fontations"
+publish = false
+
+[package.metadata.docs.rs]
+# To build locally:
+# RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --features libm,serde,std
+features = ["libm", "serde", "std"]
+
+[features]
+std = ["font-types/std"]
+codegen_test = []
+scaler_test = []
+# experimental support for incremental font transfer (https://www.w3.org/TR/IFT/)
+# code behind this feature does not honor semver and may break at any time.
+ift = []
+# this feature is not stable, but provides untyped traversal of font tables.
+# we do not consider this feature public API for the purposes of semver.
+experimental_traverse = ["std"]
+# Enables experimental implementations of proposed changes to the spec
+# as discussed at https://github.com/harfbuzz/boring-expansion-spec
+spec_next = []
+# Enables support for a new font API, as proposed at
+# https://github.com/googlefonts/oxidize/pull/77
+experimental_font_api = []
+default = ["std"]
+serde = ["dep:serde", "font-types/serde"]
+libm = ["dep:core_maths"]
+# Support for mapping glyph names <-> unicode via the Adobe glyph list
+agl = []
+
+[dependencies]
+font-types = { version = "0.12.1", features = ["bytemuck"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+core_maths = { version = "0.1", optional = true }
+bytemuck = "1.13.1"
+once_cell = { version = "1.21.4", default-features = false, features = [
+    "alloc",
+    "race",
+] }
+
+[dev-dependencies]
+read-fonts = { path = ".", features = ["experimental_font_api"] }
+font-test-data = { path = "../font_test_data" }
+serde_json = "1.0"
+
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false
+
+# Upstream code is linted with clippy's defaults, minus findings in code we
+# have not changed.
+[lints.clippy]
+collapsible_match = "allow"
+derivable_impls = "allow"
+while_let_loop = "allow"

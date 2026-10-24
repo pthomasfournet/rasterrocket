@@ -15,6 +15,9 @@ members = [
     "crates/bench",
     "crates/comic",
     "crates/jpeg2000",
+    "crates/read_fonts",
+    "crates/skrifa",
+    "crates/font_test_data",
 ]
 
 [workspace.package]
@@ -43,6 +46,12 @@ sevenz-rust2 = { version = "0.24", default-features = false }
 tar          = { version = "0.4" }
 image-webp   = { version = "0.2" }
 tiff         = { version = "0.11" }
+
+# The local read-fonts and skrifa forks replace the registry crates for every
+# dependent, including the bench crate's vello_common.
+[patch.crates-io]
+read-fonts = { path = "crates/read_fonts" }
+skrifa     = { path = "crates/skrifa" }
 
 [workspace.lints.rust]
 unsafe_code          = "deny"

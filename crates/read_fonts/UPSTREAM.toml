@@ -1,0 +1,10 @@
+# Where this local fork came from.  Read by scripts/check_vendored.py, which
+# reports upstream commits, crates.io releases and RustSec advisories that
+# appeared after this base.  Update `commit`, `date` and `version` whenever
+# upstream changes are brought over.
+crate = "read-fonts"
+version = "0.41.0"
+repository = "googlefonts/fontations"
+path = "read-fonts"
+commit = "cd4aaef57887dd1d8a5875e38c406843e66c9cab"
+date = "2026-07-03T18:31:35Z"

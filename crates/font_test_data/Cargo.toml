@@ -1,0 +1,26 @@
+# Test fonts for the local read-fonts and skrifa forks: a copy of
+# font-test-data (https://github.com/googlefonts/fontations, directory
+# `font-test-data/`) at upstream commit
+# b373cdbc6043a791fb23b3e0f413649458f5e63a (2026-07-04, crate version 0.7.0).
+# Only their test suites depend on it.  Licence: MIT OR Apache-2.0 (see
+# LICENSE-APACHE, LICENSE-MIT).
+[package]
+name = "font-test-data"
+version = "0.7.0"
+description = "Test data for the fontations crates"
+readme = "README.md"
+
+rust-version = "1.85"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/googlefonts/fontations"
+publish = false
+
+# do NOT create circular deps, even with dev-dependencies. It messes with google3 import.
+[dependencies]
+font-types = "0.12.1"
+
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false
