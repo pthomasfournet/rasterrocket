@@ -36,8 +36,14 @@ const CUDA_MEMCPY_H2D: i32 = 1;
 const CUDA_MEMCPY_D2H: i32 = 2;
 
 unsafe extern "C" {
-    fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
-    fn cudaMemset(dev_ptr: *mut c_void, value: i32, count: usize) -> i32;
+    fn cudaMemcpyAsync(
+        dst: *mut c_void,
+        src: *const c_void,
+        count: usize,
+        kind: i32,
+        stream: CudaHandle,
+    ) -> i32;
+    fn cudaMemsetAsync(dev_ptr: *mut c_void, value: i32, count: usize, stream: CudaHandle) -> i32;
 }
 
 // ── NPP core (libnppc.so) ─────────────────────────────────────────────────────
@@ -129,10 +135,14 @@ type Result<T> = std::result::Result<T, NppRotateError>;
 
 // ── NppRotator ────────────────────────────────────────────────────────────────
 
-/// Owns a CUDA primary context and stream for NPP rotation calls.
+/// Owns a CUDA primary context, a stream, and the device source and
+/// destination buffers for NPP rotation calls.
 ///
-/// Reuse across pages — context and stream creation are expensive; the
-/// per-rotate cost is two `cudaMalloc` + two `cudaMemcpy` + the NPP kernel.
+/// Reuse across pages — context and stream creation are expensive.  The
+/// device buffers persist between calls and are reallocated only when a
+/// larger image arrives, so a rotation of an image no larger than any
+/// before it costs one upload, one fill, the NPP kernel and one download,
+/// all queued on the stream, and a single stream synchronisation.
 ///
 /// # Safety
 ///
@@ -144,6 +154,32 @@ pub(crate) struct NppRotator {
     cu_ctx: *mut c_void,
     device: i32,
     stream: CudaHandle,
+    d_src: GrowBuf,
+    d_dst: GrowBuf,
+}
+
+/// A device allocation reused across calls and replaced by a larger one
+/// when a request exceeds its capacity.
+#[derive(Default)]
+struct GrowBuf {
+    buf: Option<DeviceBuf>,
+    capacity: usize,
+}
+
+impl GrowBuf {
+    /// A device buffer of at least `len` bytes.  Its contents are
+    /// unspecified.
+    fn get(&mut self, len: usize) -> std::result::Result<&DeviceBuf, i32> {
+        if self.capacity < len || self.buf.is_none() {
+            // Free before allocating so the old and new buffers never
+            // coexist in device memory.
+            self.buf = None;
+            self.capacity = 0;
+            self.buf = Some(DeviceBuf::alloc(len)?);
+            self.capacity = len;
+        }
+        Ok(self.buf.as_ref().expect("allocated above"))
+    }
 }
 
 // SAFETY: NppRotator is accessed exclusively through the per-thread
@@ -169,6 +205,8 @@ impl NppRotator {
             cu_ctx: init.cu_ctx,
             device: init.device,
             stream: init.stream,
+            d_src: GrowBuf::default(),
+            d_dst: GrowBuf::default(),
         })
     }
 
@@ -189,7 +227,7 @@ impl NppRotator {
     /// Returns [`NppRotateError`] if any precondition is violated or any CUDA
     /// or NPP call fails.
     pub(crate) fn rotate(
-        &self,
+        &mut self,
         src: &[u8],
         src_stride: usize,
         width: u32,
@@ -259,53 +297,68 @@ impl NppRotator {
             )));
         }
 
-        let d_src = DeviceBuf::alloc(src.len()).map_err(|code| {
+        let stream = self.stream;
+        let npp_ctx = self.build_npp_ctx()?;
+        let d_src = self.d_src.get(src.len()).map_err(|code| {
             NppRotateError(format!("cudaMalloc(src, {}): code {code}", src.len()))
         })?;
-        let d_dst = DeviceBuf::alloc(dst_len)
+        let d_dst = self
+            .d_dst
+            .get(dst_len)
             .map_err(|code| NppRotateError(format!("cudaMalloc(dst, {dst_len}): code {code}")))?;
 
         // nppiRotate writes only the pixels covered by the rotated source
         // quad; pre-fill the destination with white so the uncovered corner
         // wedges match the CPU path's 255 background instead of exposing
         // stale device memory.
-        // SAFETY: d_dst is a valid dst_len-byte device allocation.
-        let r = unsafe { cudaMemset(d_dst.ptr, 0xFF, dst_len) };
+        // SAFETY: d_dst holds at least dst_len bytes.
+        let r = unsafe { cudaMemsetAsync(d_dst.ptr, 0xFF, dst_len, stream) };
         if r != 0 {
-            return Err(NppRotateError(format!("cudaMemset(dst): code {r}")));
+            return Err(NppRotateError(format!("cudaMemsetAsync(dst): code {r}")));
         }
 
-        // H → D upload.
-        // SAFETY: src is valid for `src.len()` bytes; we validated src.len() >= src_stride*h
-        // above, so NPP will not read past the device allocation.
-        let r = unsafe { cudaMemcpy(d_src.ptr, src.as_ptr().cast(), src.len(), CUDA_MEMCPY_H2D) };
+        // H → D upload.  From pageable memory the call returns once `src`
+        // has been staged, so `src` is not read after it returns.
+        // SAFETY: src is valid for `src.len()` bytes and d_src holds at
+        // least that many; src.len() >= src_stride * h was validated above,
+        // so NPP does not read past the copied bytes.
+        let r = unsafe {
+            cudaMemcpyAsync(
+                d_src.ptr,
+                src.as_ptr().cast(),
+                src.len(),
+                CUDA_MEMCPY_H2D,
+                stream,
+            )
+        };
         if r != 0 {
-            return Err(NppRotateError(format!("cudaMemcpy H2D: code {r}")));
+            return Err(NppRotateError(format!("cudaMemcpyAsync H2D: code {r}")));
         }
 
-        let npp_ctx = self.build_npp_ctx()?;
         Self::call_nppi_rotate(
-            &d_src, src_stride, &d_dst, dst_stride, w, h, n_angle, shift_x, shift_y, npp_ctx,
+            d_src, src_stride, d_dst, dst_stride, w, h, n_angle, shift_x, shift_y, npp_ctx,
         )?;
 
-        // Stream sync then D → H download.
-        let r = unsafe { cuStreamSynchronize(self.stream) };
-        if r != 0 {
-            return Err(NppRotateError(format!("cuStreamSynchronize: code {r}")));
-        }
-
+        // D → H download, ordered after the kernel on the stream.
         let mut dst_pixels = vec![0u8; dst_len];
-        // SAFETY: d_dst was written by the NPP kernel and synced; dst_pixels has `dst_len` bytes.
+        // SAFETY: d_dst holds at least dst_len bytes; dst_pixels has
+        // dst_len bytes and outlives the synchronisation below.
         let r = unsafe {
-            cudaMemcpy(
+            cudaMemcpyAsync(
                 dst_pixels.as_mut_ptr().cast(),
                 d_dst.ptr,
                 dst_len,
                 CUDA_MEMCPY_D2H,
+                stream,
             )
         };
         if r != 0 {
-            return Err(NppRotateError(format!("cudaMemcpy D2H: code {r}")));
+            return Err(NppRotateError(format!("cudaMemcpyAsync D2H: code {r}")));
+        }
+        // SAFETY: stream is the live stream created in `new`.
+        let r = unsafe { cuStreamSynchronize(stream) };
+        if r != 0 {
+            return Err(NppRotateError(format!("cuStreamSynchronize: code {r}")));
         }
 
         Ok(dst_pixels)
@@ -405,6 +458,15 @@ impl NppRotator {
 
 impl Drop for NppRotator {
     fn drop(&mut self) {
+        // The device buffers belong to `cu_ctx`; free them while it is
+        // current and retained.
+        // SAFETY: cu_ctx was retained in new() and is released below.
+        let r = unsafe { cuCtxSetCurrent(self.cu_ctx) };
+        if r != 0 {
+            log::warn!("npp_rotate: cuCtxSetCurrent (drop): code {r}");
+        }
+        self.d_src = GrowBuf::default();
+        self.d_dst = GrowBuf::default();
         // SAFETY: stream and cu_ctx were initialised in new(); this is the unique owner.
         unsafe {
             let r = cuStreamDestroy(self.stream);
@@ -507,7 +569,7 @@ pub fn rotate_gray8(
             }
         }
 
-        match &*slot {
+        match &mut *slot {
             RotatorSlot::Ready(r) => r.rotate(src, src_stride, width, height, angle_deg),
             RotatorSlot::Failed => Err(NppRotateError("GPU init previously failed".into())),
             RotatorSlot::Uninit => unreachable!("slot was just initialised"),
@@ -523,9 +585,9 @@ mod tests {
     /// back as white (255), matching the CPU rotate path's background fill.
     ///
     /// The 0° priming call makes a stale-VRAM regression deterministic: it
-    /// writes an all-black destination of the same size, which the allocator
-    /// hands back to the next same-size request, so an uncleared destination
-    /// reads 0 at the corners rather than whatever a fresh allocation holds.
+    /// writes an all-black destination of the same size, which the thread's
+    /// rotator reuses as the next same-size destination, so an uncleared
+    /// destination reads 0 at the corners.
     #[test]
     fn uncovered_corners_are_white() {
         const W: u32 = 512;
