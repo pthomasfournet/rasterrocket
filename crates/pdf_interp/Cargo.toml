@@ -31,11 +31,11 @@ gpu-jpeg-huffman = ["dep:gpu", "gpu/gpu-jpeg-huffman"]
 [dependencies]
 gpu      = { package = "rasterrocket-gpu",    path = "../gpu",    optional = true, default-features = false }
 bytemuck = { workspace = true, optional = true }
-raster = { package = "rasterrocket-render", path = "../raster", version = "1.4" }
-color  = { package = "rasterrocket-color",  path = "../color",  version = "1.4" }
-font   = { package = "rasterrocket-font",   path = "../font",   version = "1.4" }
-encode = { package = "rasterrocket-encode", path = "../encode", version = "1.4" }
-pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.4" }
+raster = { package = "rasterrocket-render", path = "../raster", version = "1.5" }
+color  = { package = "rasterrocket-color",  path = "../color",  version = "1.5" }
+font   = { package = "rasterrocket-font",   path = "../font",   version = "1.5" }
+encode = { package = "rasterrocket-encode", path = "../encode", version = "1.5" }
+pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.5" }
 log    = { workspace = true }
 hayro-ccitt = "0.4.0"
 # Pure-Rust JPEG 2000: a local fork of hayro-jpeg2000 (crates/jpeg2000).

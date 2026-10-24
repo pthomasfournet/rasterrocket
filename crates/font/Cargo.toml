@@ -13,8 +13,8 @@ keywords             = ["pdf", "font", "glyph", "truetype", "renderer"]
 categories           = ["rendering", "multimedia::images"]
 
 [dependencies]
-color    = { package = "rasterrocket-color",  path = "../color",  version = "1.4" }
-raster   = { package = "rasterrocket-render", path = "../raster", version = "1.4" }
+color    = { package = "rasterrocket-color",  path = "../color",  version = "1.5" }
+raster   = { package = "rasterrocket-render", path = "../raster", version = "1.5" }
 # Local forks (crates/read_fonts, crates/skrifa): font-program parsing and
 # unhinted outlines for TrueType, OpenType, bare CFF and Type 1.  `agl`
 # provides the Adobe Glyph List used to map glyph names to Unicode.
