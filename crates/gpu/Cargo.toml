@@ -27,8 +27,6 @@ gpu-validation = []
 # Enable VA-API hardware JPEG decoding for AMD/Intel iGPU and discrete GPU on Linux.
 # Requires libva.so.2 and libva-drm.so.2 (Mesa / intel-media-driver).
 vaapi = []
-# Reserved; not read by any `#[cfg]` in this crate.
-nvjpeg-gpu = []
 # Probe `NVJPEG_BACKEND_HARDWARE` (fixed-function NVJPG engine) instead of
 # `NVJPEG_BACKEND_GPU_HYBRID`. Default (off): consumer Blackwell's single
 # NVJPG engine serialises 24-thread CPU workloads and loses. This flag
