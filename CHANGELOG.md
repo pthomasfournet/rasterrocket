@@ -2,12 +2,136 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-10-24
+
+### Bug Fixes
+
+- Composite transparency groups at their own device position
+- Evaluate a shading Function given as an array of functions
+- Convert shading colours through the resolved colour space
+- Interpret the line width and dash array in user space
+- Place WinAnsi 0x80-0x9F glyphs in Unicode-cmap TrueType fonts
+- Clear the clippy --tests debt in render, interp and rasterrocket
+- Paint every intersection's own cells in the AA scanline walk
+- Antialias image blits along path-clip edges
+- Resolve an inline image's /CS name through the ColorSpace resources
+- Check JPEG page dimensions before decoding
+- Tokenize << >> dictionaries in content streams as operands
+- Reject xref stream /W widths that are negative or wider than u64
+- Keep the xref cursor in bounds when a table ends mid-entry
+- Drop xref entries whose fields overflow their type
+- Bound array and dictionary nesting depth
+- Reject inf/NaN spellings and saturate out-of-range reals
+- Decode images whose filter chain ends in LZW, ASCII85, ASCIIHex or RunLength
+- Apply /Decode to JBIG2 and CCITT samples and to soft masks
+- Re-read a Group 4 CCITT stream byte-aligned when unaligned stops short
+- Double-buffer the synthetic Phase 2 sync kernel
+- Load Type 1 programs with unknown encodings or headers
+- Keep outlines of fonts that lack horizontal metrics
+- Keep a Type 1 procedure's closing brace after a one-byte token
+- Crop to the pixels whose centres the page quad spans
+- Walk AA spans like the CPU scanline walk in the aa_fill kernel
+
+### Chores
+
+- Drop the nvjpeg-gpu feature, which no cfg reads
+- Inherit the workspace lints and clear every finding
+- Vendor read-fonts 0.41.0 and skrifa 0.44.0 as local forks
+
+### Documentation
+
+- Bring README, ARCHITECTURE, ROADMAP and API reference up to v1.4.1
+- State why the crate allows unsafe code
+- Camera-capture cleanup in README, API, CLI and architecture
+- Document rasterrocket-camera and the CLI cleanup flags
+
+### Features
+
+- Skip an undecodable image instead of failing its page
+- Select the Vulkan device with --vulkan-device
+- Rank equally typed devices by memory, then PCI address
+- Probe render nodes for JPEG decode instead of assuming renderD128
+- Snap lone axis-aligned quadrilateral fills to pixel boundaries
+- Page-quad rectification, spread split and dewarp stages
+- RasterOptions::camera and RenderedPage::spread_half
+- --rectify, --dewarp and --split-spreads
+- Parse font programs with the read-fonts/skrifa forks and rasterise glyphs in-crate
+- Extract the camera stages into rasterrocket-camera
+
+### Other
+
+- Build for a generic CPU so cached artifacts work on every runner
+- Check the vendored JPEG 2000 fork against upstream weekly
+- Interleave nvJPEG2000 RGB planes through as_chunks_mut
+- Expect too_many_arguments on decode_dct for every feature set that trips it
+- Gate Resources::image's argument-count expectation exactly
+- Rustfmt the AA top-edge regression test
+- Lint and test the parser crate
+- Clear the clippy findings in the staging tests
+- Ci, docs: drop FreeType from CI and documentation
+
+No job installs libfreetype6-dev any more, and the aarch64 cross-check
+builds rasterrocket without the removed `bundled` feature or
+LIBZ_SYS_STATIC (the cross C toolchain stays for vendored libdeflate).
+CI now runs the font crate tests, its clippy (lib and tests), and the
+upstream suites of the vendored read-fonts / skrifa forks.
+
+README's security notes, ARCHITECTURE's font crate section (plus a
+section on the new forks), the InterpError listing in the API reference
+and the deny.toml advisory note describe the pure-Rust font path.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+- Rustfmt the staging test pattern
+- Test and lint rasterrocket-camera
+
+### Performance
+
+- Write each blit output pixel with one 32-bit store
+- Queue GPU work on a per-thread stream
+- Download page-buffer rows and fill coverage through pinned staging
+- Keep the NPP rotate device buffers across rotations
+- Copy device ranges of 256 KiB or less straight to pageable memory
+- Deinterleave NEON CMYK pixels in registers
+- Vectorise the NEON rotate bilinear blend
+- Composite short AA spans as one masked AVX-512 block
+- Read files under 256 KiB into memory instead of mapping them
+- Reduce masked JPX images and sample masks at their own resolution
+- Fuse the DC level shift into the u8 conversion for one component
+- Record JPEG Phase 1 in the first Phase 2 page
+- Converge JPEG Phase 2 on workgroup boundaries; cap its passes
+- Resolve JPEG Phase 2 in lane order from an exact re-decode memo
+- Bound JPEG Phase 2 re-decodes per workgroup with CPU fallback
+- Use a constant 512-bit JPEG subsequence size
+- Run single-threaded with no dependencies
+
+### Refactor
+
+- Move BackendPolicy and SessionConfig into a config module
+- Move the huffman dispatch tests into their own files
+- Pass image decoders through one ImageDecodeCtx
+- Drive the in-crate font engine; renderer construction is infallible
+- Move camera cleanup out of the rasterrocket API into the CLI
+
+### Testing
+
+- Synthetic camera captures of real fixture pages
+- Benchmark the parallel-Huffman decode against the CPU walk
+- No input panics any stage
+
 ## [1.4.1] - 2026-10-23
 
 ### Bug Fixes
 
 - Decode YCCK JPEGs, read CMYK JPEG samples as ink, honour /Decode
 - Resolve indirect /Filter and /DecodeParms when loading a stream
+
+### Chores
+
+- Release v1.4.1
+
+### Documentation
+
+- Prep v1.4.1 release notes
 
 ### Features
 
@@ -17,6 +141,7 @@ All notable changes to this project will be documented in this file.
 
 - October sweep (hayro-ccitt 0.4, zip 9, sevenz-rust2 0.24, vello_cpu 0.3)
 - Vendor hayro-jpeg2000 as a local fork in crates/jpeg2000
+- Keep the vendored crate out of cargo-release
 
 ### Performance
 

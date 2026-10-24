@@ -141,6 +141,12 @@ rrocket --rectify --split-spreads --dewarp --gray --png -r 300 book.pdf out
 |---|---|
 | `--opw PASSWORD` | Owner password for encrypted PDFs. |
 | `--upw PASSWORD` | User password for encrypted PDFs. |
+| `--decrypt-owned` | Authorise decrypting an encrypted (Standard Security Handler) document without the interactive confirmation. Decryption runs `qpdf`, which must be installed. Use it only for documents you own or are entitled to access. `RROCKET_DECRYPT_OWNED=1` does the same. |
+
+Without `--decrypt-owned` or `RROCKET_DECRYPT_OWNED=1`, an encrypted document
+prompts for a private-copy / liability confirmation (default: no). A
+non-interactive run with neither set exits with an error instead of removing
+the protection silently.
 
 ---
 

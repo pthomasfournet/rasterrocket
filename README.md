@@ -23,40 +23,74 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
-## On master (unreleased)
+## What's new in v1.5.0
 
-**A broken image no longer costs its page.** Behaviour change for library
-users.
+**Pages that rendered wrong now render right, and FreeType is gone.** One
+behaviour change for library users (first item); otherwise no API change.
 
-- **Skip, don't drop.** An image that cannot be decoded or drawn used to fail
-  its whole page. Now the image is skipped, the rest of the page renders, a
-  warning names the page and image, and the failure is listed in the new
-  `PageDiagnostics::image_failures` (image name and codec error).
-- **Library callers that only check for `Err`** now receive these pages as
-  `Ok` with the image missing. To keep the old behaviour, set
-  `RasterOptions::strict` (or `SessionConfig::strict`). Otherwise, read
-  `image_failures`.
-- **CLI:** `rrocket` writes such pages and exits 0, with the warning on stderr.
-  `--strict` fails the page and exits 1, as before.
-
-**Camera-captured pages.** Opt-in cleanup for phone and camera captures of
-book pages, in the new `rasterrocket-camera` crate. Every stage is off by
-default and leaves a page unchanged when its detector is not confident, so
-flatbed scans and born-digital pages pass through untouched.
-
-- **Crop** — finds the page on a darker surround and crops to its bounding
-  box.
-- **Rectify** — corrects the perspective of that page with a homography and
-  crops away desk, stand and fingers.
-- **Split** — cuts a double-page spread at its gutter into two pages.
-- **Dewarp** (experimental) — straightens text lines that curve toward the
-  spine.
-- **Library:** `rasterrocket_camera::process(GrayView, &CameraOptions)` on
-  any 8-bit grayscale image returns the pages and a `Report` of what each
-  stage did and why. The crate depends on `std` alone, is single-threaded and
-  never panics on input. The `rasterrocket` API is unchanged.
-- **CLI:** `--crop`, `--rectify`, `--split-spreads`, `--dewarp`. The halves of
-  page 7 are written as `out-07a.png` and `out-07b.png`.
+- **A broken image no longer costs its page.** An image that cannot be
+  decoded or drawn used to fail its whole page. Now the image is skipped, the
+  rest of the page renders, a warning names the page and image, and the
+  failure is listed in the new `PageDiagnostics::image_failures`.
+  - **Library callers that only check for `Err`** now receive these pages as
+    `Ok` with the image missing. Set `RasterOptions::strict` (or
+    `SessionConfig::strict`) to keep the old behaviour, or read
+    `image_failures`.
+  - **CLI:** `rrocket` writes such pages and exits 0, with the warning on
+    stderr; `--strict` fails the page and exits 1, as before.
+- **Layered scans render correctly.** Scanned books that store a colour
+  picture plus a black-and-white text layer came out washed grey, inverted,
+  black or blank: a JBIG2 or CCITT layer's `/Decode [1 0]` was ignored, Group 4
+  CCITT streams declaring `EncodedByteAlign` stopped after their first row,
+  and a high-resolution text mask was resampled down to the colour layer's
+  resolution, breaking glyphs. All three are fixed; masks are now sampled at
+  their own resolution, which also makes masked JPEG 2000 pages decode about
+  3× faster at 150 dpi.
+- **Missing content restored.**
+  - Images compressed with LZW, RunLength, ASCII85 or ASCIIHex (as ImageMagick
+    and older scanners write them) were dropped as "unsupported filter".
+  - Transparency groups placed away from the page origin, and isolated
+    groups, were shifted or not drawn.
+  - CMYK gradients and gradients whose `/Function` is an array were wrong or
+    missing.
+  - "œ", "’", bullets and the rest of WinAnsi 0x80–0x9F drew as boxes in
+    TrueType text.
+  - An inline image whose `/CS` names a page `ColorSpace` resource decoded as
+    gray.
+- **Line widths follow the resolution.** Strokes were the same pixel width at
+  every dpi; they now scale with the page, dashes included.
+- **Cleaner edges.** Images clipped by a path are antialiased along the clip
+  edge, a shape's top edge no longer loses a quarter of its coverage, and
+  axis-aligned rectangles fill whole pixels.
+- **FreeType removed.** Fonts (TrueType, OpenType, CFF, CID-keyed CFF,
+  Type 1) are parsed by local forks of `read-fonts` / `skrifa` and rasterised
+  in-crate, unhinted. No C font library is linked, the `bundled` feature and
+  `libfreetype6-dev` build dependency are gone. Text is slightly lighter;
+  a glyph-by-glyph check of 16 238 embedded font programs found nothing
+  lost.
+- **Hostile-PDF hardening.** The parser now inherits the workspace lints;
+  doing so found four inputs that could crash or abort the process (deep
+  nesting, malformed xref widths, truncated xref tables, overflowing xref
+  fields) and non-finite numbers, all fixed with regression tests. Comic JPEG
+  pages are size-checked before decoding.
+- **Camera-captured pages** — opt-in cleanup in the new
+  `rasterrocket-camera` crate: crop, perspective rectify, spread split and an
+  experimental dewarp, on any 8-bit grayscale buffer. Every stage is off by
+  default and leaves a page unchanged when it is not confident. The crate
+  depends on `std` alone, is single-threaded and never panics on input.
+  `rrocket` exposes it as `--crop`, `--rectify`, `--split-spreads` and
+  `--dewarp`; the `rasterrocket` API is unchanged.
+- **GPU and device selection.**
+  - `--vulkan-device <index|name>` (or `PDF_RASTER_VULKAN_DEVICE`) picks the
+    Vulkan device; equally ranked devices are chosen by memory, then PCI
+    address, not enumeration order.
+  - VA-API probes `/dev/dri/renderD*` for a JPEG-capable node instead of
+    assuming `renderD128`, and lists every node when none works.
+  - CUDA work runs on per-thread streams, and page and coverage downloads go
+    through pinned staging (device-to-host copy time 266 → 46 ms on a 60-page
+    scan).
+- **CPU paths.** Short AA spans composite as one masked AVX-512 block (1.3–2.8×
+  for 2–31 px); the NEON CMYK and rotate tiers deinterleave in registers.
 
 ## What's new in v1.4.1
 
@@ -241,7 +275,7 @@ and the page/annotation JavaScript-disclosure work).
 ## What's new in v1.0.0
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
-- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels (both dormant by default) on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Verified on RTX 5070; cross-vendor smoke pending hardware. Under `auto`, Vulkan is preferred over CUDA when both are compiled in (faster process init on single-session workloads).
+- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels (both dormant by default) on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. Under `auto`, Vulkan is preferred over CUDA when both are compiled in (faster process init on single-session workloads).
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
@@ -290,7 +324,7 @@ crates.io (see the note at the top).
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — full feature set (nvJPEG, nvJPEG2000, AA fill (dormant by default), ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — AA fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Verified on RTX 5070; cross-vendor smoke pending hardware.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
+- **Cross-vendor via Vulkan compute** — AA fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).

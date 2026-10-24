@@ -27,14 +27,14 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**One undecodable image fails its whole page.** When an image's codec
-fails, the page render returns an error (`rrocket` exits 1) instead of
-drawing the page without that image, so its text is lost too. Whether to
-skip only the image is an open decision.
+**Fonts that need hinting to assemble their glyphs.** Since v1.5.0 glyphs are
+rendered unhinted. A few CJK TrueType families (MingLiU and similar) build
+glyphs from components positioned by hinting instructions and would render
+garbled; none occurs in the test corpus or the mss archive. CID-keyed Type 1
+fonts (a `FontFile` with CIDFontType 0 / FontType 9) are not supported.
 
-Separately, a marked-content dictionary written with no space before its
-operator (`/Part <</MCID 0 >>BDC`, valid syntax) is mis-tokenized. It logs an
-"unsupported content operator" warning per page, with no effect on pixels.
+**Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
+on synthetic page curls only; no real phone captures exist yet.
 
 **`pdf_bridge` cannot build unattended.** Its build script hard-
 requires `POPPLER_SRC` (a poppler *source* tree, not just the system package),
@@ -49,20 +49,118 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
-### Unreleased
+### v1.5.0 (October 2026)
 
-**A broken image no longer costs its page.** Behaviour change; additive API.
+**Pages that rendered wrong now render right; FreeType is gone.** One
+behaviour change for library callers; otherwise no API change for
+`rasterrocket`. 78 commits since v1.4.1.
 
-- An image that cannot be decoded or drawn is skipped and the page renders
-  without it. A warning names the page and image. The failure is reported in
-  the new `PageDiagnostics::image_failures`, which lists each image's name
-  and codec error. Images skipped inside tiling-pattern tiles are reported too.
-- New `RasterOptions::strict` / `SessionConfig::strict` and the `rrocket
-  --strict` flag keep the old behaviour: the page fails with
-  `RasterError::ImageDecodeFailed` and the CLI exits 1.
-- `RasterOptions` and `PageDiagnostics` each gain a public field, so code
-  that builds them with a struct literal and no `..Default::default()` needs
-  one more line.
+**A broken image no longer costs its page.** An image that cannot be decoded
+or drawn is skipped and the page renders without it. A warning names the page
+and image, and the failure is reported in the new
+`PageDiagnostics::image_failures` (image name, codec error; images inside
+tiling-pattern tiles included). `RasterOptions::strict` /
+`SessionConfig::strict` and `rrocket --strict` keep the old behaviour: the page
+fails with `RasterError::ImageDecodeFailed` and the CLI exits 1. `RasterOptions`
+and `PageDiagnostics` each gain a public field, so a struct literal without
+`..Default::default()` needs one more line.
+
+**Layered scans.** Scanned books that store a colour layer plus a JBIG2 or
+CCITT text layer rendered washed grey, inverted, black or blank.
+- `/Decode [1 0]` on JBIG2 and CCITT images, stencil masks, explicit masks and
+  soft masks was ignored, so the text layer was read inverted.
+- Group 4 CCITT streams that declare `EncodedByteAlign` and really are
+  row-aligned stopped after their first row; such a stream is now re-read
+  aligned when the unaligned reading stops short.
+- Masks were resampled to the colour image's size, so a 300 dpi JBIG2 text
+  layer over a 75–150 ppi colour layer lost glyph detail. Masks now keep their
+  own resolution and are sampled per device pixel, which also lets masked JPEG
+  2000 images decode at the drawn size: corpus-10 at 150 dpi 3.6 s → 1.2 s.
+- Archive impact: of 95 sampled pages in 25 archive books with this
+  structure, 77 rendered wrong on v1.4.1 and none on v1.5.0.
+
+**Missing content restored.**
+- Images whose filter chain ends in LZW, RunLength, ASCII85 or ASCIIHex were
+  reported as an unsupported filter and dropped; RunLength joins the parser's
+  filter pipeline and every transport-terminated chain decodes to raw
+  samples, inline images included (whose chained prefilters were also
+  ignored).
+- Transparency groups rendered into a bitmap sized to their bbox but drew in
+  page coordinates, so groups away from the origin landed shifted or vanished,
+  and isolated groups never painted; inside a group the alpha constants and
+  blend mode now restart at their initial values.
+- Shadings mapped DeviceCMYK (and Separation, DeviceN, ICCBased, Lab) through
+  a Gray/RGB shortcut; they now convert through the resolved colour space. A
+  shading `/Function` given as an array of one-output functions was rejected.
+- WinAnsi 0x80–0x9F glyphs (œ, ’, bullets, dashes…) in Unicode-cmap TrueType
+  fonts drew as `.notdef` boxes; they now resolve code → glyph name → Unicode.
+- An inline image whose `/CS` names a page `ColorSpace` resource decoded as
+  DeviceGray; it now resolves through the resources (an unresolvable name is
+  a logged failure).
+- `<< … >>` dictionaries in content streams (marked-content properties) were
+  tokenised as an unknown operator; they are now operands.
+
+**Geometry.**
+- The line width and dash array were applied in device pixels; strokes are
+  now built in user space under the CTM.
+- An AA fill lost the first sub-row of a top edge lying on a sub-row boundary.
+- Image blits under a path clip are antialiased along the clip edge.
+- Lone axis-aligned quadrilateral fills are snapped to pixel boundaries
+  (stroke adjustment for fills).
+
+**FreeType removed.** Font programs (TrueType incl. symbolic subsets,
+OpenType, bare and CID-keyed CFF, Type 1 PFA/PFB) are parsed by local forks of
+`read-fonts` 0.41 and `skrifa` 0.44 (`crates/read_fonts`, `crates/skrifa`,
+fixes logged in each `CHANGES.md`) and rasterised by a new in-crate coverage
+rasteriser, unhinted. The `bundled` feature and the `libfreetype6-dev` build
+dependency are gone, and with them the CVE-affected bundled FreeType 2.13.2. A
+glyph-by-glyph comparison of all 16 238 embedded font programs in the mss
+archive (1.6 M glyphs) found every glyph present with bounding boxes within
+1.5 font units. Text is slightly lighter. `pdf_interp`: `PageRenderer::new` /
+`new_scaled` are infallible and `InterpError::FontInit` is removed.
+
+**Hostile input.** The parser crate now inherits the workspace lints. That
+surfaced four inputs that panicked or overflowed the stack (negative or
+oversized xref `/W` widths, an xref table truncated mid-entry, a million nested
+`[`, xref fields overflowing their type) and non-finite reals; each is fixed
+with a regression test. Files under 256 KiB are read into memory instead of
+mapped. Comic JPEG pages are size-checked from their header before decoding.
+
+**Camera-captured pages.** The new `rasterrocket-camera` crate cleans up
+phone and camera captures of book pages: crop to the paper, perspective
+rectify, spread split at the gutter, and an experimental dewarp. It works on
+8-bit grayscale buffers, depends on `std` alone, is single-threaded, has MSRV
+1.98 and never panics on input (no-panic test over 4 928 option/image
+combinations). Every stage is off by default and passes a page through
+unchanged when not confident. 16 MP crop + split: 11 ms. `rrocket` exposes it
+as `--crop`, `--rectify`, `--split-spreads`, `--dewarp`; the `rasterrocket`
+API does not change.
+
+**GPU and devices.**
+- `--vulkan-device` / `SessionConfig::vulkan_device` /
+  `PDF_RASTER_VULKAN_DEVICE` selects the Vulkan device by index or name;
+  automatic selection ranks equal device types by device-local memory, then
+  PCI address. Verified on an RTX 5070, an AMD Raphael iGPU (RADV) and
+  llvmpipe.
+- VA-API probes render nodes for baseline-JPEG support (`--vaapi-device auto`,
+  the default) and lists each node with its driver and failure when none works.
+- CUDA work runs on per-thread streams (the image cache on its own stream);
+  page-buffer and fill-coverage downloads go through pinned double-buffered
+  staging (device-to-host copy time on a 60-page scan 266 → 46 ms); NPP rotate
+  keeps its device buffers.
+- The dormant GPU parallel-Huffman JPEG path: Phase 2 resolved from an exact
+  re-decode memo (symbol decode 56× faster), with pass and re-decode budgets
+  falling back to the CPU. It still loses to the CPU decoder end to end (its
+  CPU coefficient reconstruct dominates), so it stays off.
+
+**CPU.** Spans of 2–31 px composite as one masked AVX-512 block (1.3–2.8×).
+The NEON CMYK and rotate tiers deinterleave in registers; the NEON rotate is
+now bit-exact with the scalar path.
+
+**Maintenance.** Image decoders take one `ImageDecodeCtx` instead of
+feature-gated argument lists; the clippy `--tests` debt is cleared and CI lints
+the tests of the render, interp, parser, font and rasterrocket crates; the dead
+`nvjpeg-gpu` feature is removed.
 
 ### v1.4.1 (October 2026)
 
@@ -1679,7 +1777,7 @@ Re-bench result: cold-render regression collapsed from 14× to 1.1–1.9× on lo
 
 ---
 
-## Phase 10 — Vulkan compute backend (✓ SHIPPED v0.8.0/v1.0.0 — cross-vendor smoke still hardware-blocked)
+## Phase 10 — Vulkan compute backend (✓ SHIPPED v0.8.0/v1.0.0 — runs on AMD RADV since v1.5.0; formal cross-vendor parity run pending)
 
 **Goal:** replace the CUDA-specific kernel launch and device-memory layer with a backend-abstracted layer that has both CUDA and Vulkan compute implementations, so the same algorithmic kernels run on NVIDIA, AMD, Intel, and Apple GPUs from one source tree.
 
@@ -1820,30 +1918,19 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ---
 
-## Current status (2026-09-15)
+## Current status (2026-10-24)
 
 Every **phase** is shipped or deferred by deliberate decision; no phase-level
-engineering is in flight. What remains open:
-
-- **Open decision:** whether one undecodable image should still fail its
-  whole page (see "Known issues"). The page-loss decoders behind it (YCCK
-  JPEGs, indirect `/Filter`) are fixed in v1.4.1.
-- **JPEG 2000 follow-up:** decode masked images at the drawn size while
-  sampling the mask at its own resolution. Masked layered scans are ~10% slower
-  than with OpenJPEG today; this would make them faster.
-- **Open reports in `audit/`** (gitignored, worked strict-FIFO): performance
-  inventories (unleveraged CUDA and CPU SIMD, JPEG Phase 2 pass complexity),
-  hygiene (the parser crate inherits no lints; `--tests` clippy debt; comic
-  JPEGs decoded before a size guard), the FreeType `bundled` build shipping a
-  CVE-affected 2.13.2, and smaller findings. Both 2026-09-15 GPU render
-  divergences are fixed: the `cache` one in v1.3.0 and the `gpu-aa` one in
-  v1.4.0.
+engineering is in flight. v1.5.0 closed every open report but one: the CUDA
+performance inventory's remaining items (fills on the recorder model,
+genuinely async transfers, two kernels without a production caller), all on
+paths that are dormant or deferred.
 
 Deferred/blocked items, in full:
 
 - **Phase 7** — re-bench with the `nvjpeg-hardware` feature flag (mode E). A measurement to formally confirm a near-certain negative (the hard-blocker section already establishes `NVJPEG_BACKEND_HARDWARE` is rejected at handle creation on consumer GeForce). Not engineering work.
 - **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.
-- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). External-blocked: no non-NVIDIA GPU or CI runner on the dev box. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
+- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; a formal byte-parity run against the CPU path on RADV is still to do. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
 - **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.
 

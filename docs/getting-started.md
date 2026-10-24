@@ -219,6 +219,20 @@ for (page_num, result) in raster_pdf(path, &opts) {
 
 Document-open errors (bad path, corrupt PDF) are yielded as `(1, Err(...))` and the iterator ends immediately after.
 
+An image that cannot be decoded or drawn does not fail its page. The image is
+skipped, the rest of the page renders, a warning names the page and image, and
+the failure is listed in `page.diagnostics.image_failures` (image name and
+codec error). Check that list to flag a page for review or re-OCR:
+
+```rust
+if !page.diagnostics.image_failures.is_empty() {
+    eprintln!("page {}: {} image(s) missing", page.page_num, page.diagnostics.image_failures.len());
+}
+```
+
+Set `RasterOptions::strict` to make such a page an `Err` instead, the
+behaviour before v1.5.0.
+
 ## Security
 
 rasterrocket is a rasterizer with no JavaScript engine: it never parses, decodes, or executes `/JS`. JavaScript-bearing PDFs (common in Acrobat/InDesign interactive exports and gov/tax/bank forms) still open and render — refusing them would be a false-negative total loss on valid documents. When a JavaScript entry point is detected, a loud `WARN` is emitted on stderr (by default, no `RUST_LOG` opt-in needed) naming each location, so the operator knows the script was ignored. Detection is purely structural (dict-key presence and `/S` subtype names); no JavaScript string is ever read.
@@ -232,6 +246,18 @@ Flagged only when genuinely JavaScript (never on bare key presence — that woul
 - page-level `/AA` and per-annotation/widget `/A`/`/AA` with a `/S /JavaScript` action (the calculate/format/validate JS of a fillable form lives here — the most common real-world placement)
 
 The page/annotation walk is bounded and stops at the first hit (one disclosure suffices): at most a few thousand pages and annotations are inspected, so a pathological multi-thousand-page document may not be fully scanned — an unbounded walk on a hostile input is the worse failure than a missed disclosure.
+
+### Encrypted PDFs
+
+A PDF protected by an owner password only (no password needed to open it) is
+decrypted with `qpdf` behind an opt-in gate. The library refuses by default:
+an encrypted document makes `open_session` return a `RasterError::Pdf` that
+says so. Set `SessionConfig::decrypt_authorized` to allow it. The CLI asks for
+a private-copy / liability confirmation, or takes `--decrypt-owned` (or
+`RROCKET_DECRYPT_OWNED=1`) for unattended runs. Use it only for documents you
+own or are entitled to access. Decryption applies to a file path; an encrypted
+PDF passed as bytes is an error. Unencrypted input never starts a subprocess
+or writes a temporary file.
 
 ## Building the CLI
 
