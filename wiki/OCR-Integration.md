@@ -75,7 +75,7 @@ fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
     // Create once. Model weights loaded here, not per page.
     let mut api = LepTess::new(None, "eng")?;
 
-    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
     let mut results = Vec::new();
 
     for (_page_num, result) in raster_pdf(path, &opts) {
@@ -109,7 +109,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec<(u32, String)>> {
-    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
     let rx = Arc::new(Mutex::new(render_channel(path, &opts, workers * 2)));
 
     let (tx_out, rx_out) = std::sync::mpsc::channel();
@@ -204,7 +204,7 @@ fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
         ..Default::default()
     })?);
 
-    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
     let mut results = Vec::new();
 
     for (_page_num, result) in raster_pdf(path, &opts) {
@@ -251,7 +251,7 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
         ..Default::default()
     })?);
 
-    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
     let rx = Arc::new(Mutex::new(render_channel(path, &opts, workers * 2)));
     let (tx_out, rx_out) = std::sync::mpsc::channel();
 

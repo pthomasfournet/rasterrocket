@@ -23,6 +23,7 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 - A per-page error does not abort remaining pages. The caller decides whether to skip or propagate.
 - If `opts.last_page` exceeds the document's page count, rendering stops at the last page — no error is returned for the overshoot.
 - GPU resources are initialised lazily on first use and reused across pages.
+- With `opts.camera.split_spreads`, a page detected as a double-page spread yields two consecutive `Ok` items under its page number, left half first (see `RenderedPage::spread_half`). Every other page yields exactly one item.
 
 **Errors (yielded as iterator items):**
 
@@ -76,6 +77,7 @@ Renders pages concurrently in a background Rayon task, streaming results through
 - Options validation failure → `(1, Err(RasterError::InvalidOptions(...)))`, channel closes.
 - File open failure → `(1, Err(RasterError::Pdf(...)))`, channel closes.
 - Per-page failures → `(page_num, Err(...))`, remaining pages continue.
+- A page split by `opts.camera.split_spreads` → two consecutive `(page_num, Ok(...))` items, left half first.
 
 If the `Receiver` is dropped before the producer finishes, the producer exits cleanly on its next `send` — no panic.
 
@@ -161,6 +163,7 @@ pub struct RasterOptions {
     pub deskew: bool,
     pub pages: Option<PageSet>,
     pub strict: bool,
+    pub camera: CameraOptions,
 }
 ```
 
@@ -172,6 +175,7 @@ pub struct RasterOptions {
 | `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
 | `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`. When `false`, the image is skipped and listed in `PageDiagnostics::image_failures`. |
+| `camera` | — | Camera-capture cleanup stages, all off by default — see [`camera` module](#camera-module). They run rectify → split → dewarp, then `deskew` applies to each resulting page. |
 
 **Default:** `RasterOptions` implements `Default`:
 
@@ -180,7 +184,7 @@ pub struct RasterOptions {
 let opts = RasterOptions { dpi: 150.0, ..RasterOptions::default() };
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `camera = CameraOptions::default()` (every stage off).
 
 ---
 
@@ -212,6 +216,7 @@ let opts = RasterOptions {
     last_page: u32::MAX, // ignored — PageSet controls the range
     deskew: true,
     pages: Some(pages),
+    ..RasterOptions::default()
 };
 ```
 
@@ -228,17 +233,19 @@ pub struct RenderedPage {
     pub dpi: f32,
     pub effective_dpi: f32,
     pub diagnostics: PageDiagnostics,
+    pub spread_half: Option<SpreadHalf>,
 }
 ```
 
 | Field | Notes |
 |---|---|
-| `page_num` | 1-based page number. |
+| `page_num` | 1-based page number of the source page. Both halves of a split spread carry it. |
 | `width`, `height` | Output bitmap dimensions in pixels. |
 | `pixels` | 8-bit grayscale, tightly packed (`stride == width`), top-to-bottom. Length is exactly `width * height`. |
 | `dpi` | Raw render DPI (`opts.dpi`). |
 | `effective_dpi` | `opts.dpi × UserUnit`. Pass this to `tesseract::set_source_resolution`. For the vast majority of documents `UserUnit = 1.0` and this equals `dpi`. |
-| `diagnostics` | Lightweight rendering metadata — see `PageDiagnostics`. |
+| `diagnostics` | Lightweight rendering metadata — see `PageDiagnostics`. Both halves of a split spread carry their source page's diagnostics. |
+| `spread_half` | `None` for a whole page. `Some(SpreadHalf::Left)` / `Some(SpreadHalf::Right)` for the halves of a page split by `RasterOptions::camera.split_spreads`; they are yielded in that order, consecutively, under the same `page_num`. Always `None` when `split_spreads` is off. |
 
 ### `PageDiagnostics`
 
@@ -356,6 +363,51 @@ The `deskew::detect` and `deskew::rotate` submodules are `pub(crate)` and are no
 
 ---
 
+### `camera` module
+
+Cleanup of camera-captured pages before OCR. Each stage is a detector followed by a resampler; a detector that is not confident leaves the page unchanged, so flatbed scans and born-digital pages pass through byte-identical.
+
+```rust
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CameraOptions {
+    pub rectify: bool,        // page-boundary crop + perspective correction
+    pub dewarp: bool,         // curved text-line straightening (experimental)
+    pub split_spreads: bool,  // double-page spread → two pages
+}
+
+impl CameraOptions {
+    pub const fn all() -> Self;        // every stage on
+    pub const fn any(&self) -> bool;   // any stage on
+}
+
+pub enum SpreadHalf { Left, Right }    // re-exported at the crate root with CameraOptions
+
+pub struct Quad { pub corners: [[f64; 2]; 4] }  // TL, TR, BR, BL, at the page edge
+
+pub fn detect_page_quad<P: CameraPixel>(img: &Bitmap<P>) -> Option<Quad>;
+pub fn rectify<P: CameraPixel>(img: &Bitmap<P>) -> Option<Bitmap<P>>;
+pub fn dewarp<P: CameraPixel>(img: &Bitmap<P>) -> Option<Bitmap<P>>;
+pub fn find_gutter<P: CameraPixel>(img: &Bitmap<P>) -> Option<u32>;
+pub fn split_spread<P: CameraPixel>(img: &Bitmap<P>) -> Option<[Bitmap<P>; 2]>;
+pub fn process<P: CameraPixel>(img: Bitmap<P>, opts: &CameraOptions)
+    -> (Bitmap<P>, Option<Bitmap<P>>);
+```
+
+`CameraPixel` is implemented for `Gray8` and `Rgb8`: detection runs on luma, resampling keeps the pixel format. `CameraOptions` is `#[non_exhaustive]` — start from `CameraOptions::default()` or `CameraOptions::all()` and set fields.
+
+| Stage | Detects | Declines (page unchanged) when |
+|---|---|---|
+| `rectify` | A light page on a darker surround: Otsu mask, maximum-area hull quadrilateral, edges refined to sub-pixel at the paper/surround step. Mapped onto an upright rectangle by a homography; the aspect ratio is recovered from the quad's vanishing geometry. | The page fills ≥ 96 % of the frame (flatbed); surround on fewer than 3 sides; paper/surround contrast < 35 levels; quad not convex, angles outside 50°–130°, or IoU with the mask < 0.92. |
+| `split_spread` | Width/height in 1.15–2.6 and a gutter in the central 30 %: a paper-level shadow valley over ink-free columns, or an ink-free run ≥ 6 % of the width bounded by text. | No such gutter, or either half carries < 15 % of the ink. A two-column landscape page (column gap < 6 %) is not split. |
+| `dewarp` | Text lines tracked by their baselines and fitted to `u = h + a(t) + b(t)·h`, a page bent about a vertical axis seen from above; columns are resampled vertically. | Fewer than 5 tracked lines; lines already straight; the model does not explain the curvature; the correction would bend lines by < max(1.5 px, 0.1 line pitch). |
+
+`process` runs the enabled stages in the order rectify → split → dewarp and returns `(page, None)` or, for a split spread, `(left, Some(right))`. The `RasterOptions` path then deskews each resulting page: deskew and dewarp both fit one model per page, and the two pages of a spread are independent sheets.
+
+**Experimental — `dewarp`:** corrects vertical displacement only; glyphs foreshortened near a spine stay narrow. Validated on synthetic curls of real pages, not yet on real captures.
+
+---
+
 ### `release_gpu_decoders`
 
 ```rust
@@ -424,6 +476,7 @@ returns `PageAreaTooLarge`.
 ```rust
 pub use rasterrocket_interp::renderer::PageDiagnostics;
 pub use rasterrocket_interp::resources::ImageFilter;
+pub use camera::{CameraOptions, SpreadHalf};
 ```
 
 `ImageFilter` identifies which decode filter was used for an embedded image (DCTDecode, JPXDecode, FlateDecode, etc.). Available through `PageDiagnostics` for routing decisions.

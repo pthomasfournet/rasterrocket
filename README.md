@@ -39,6 +39,27 @@ users.
 - **CLI:** `rrocket` writes such pages and exits 0, with the warning on stderr.
   `--strict` fails the page and exits 1, as before.
 
+**Camera-captured pages.** Opt-in cleanup for phone and camera captures of
+book pages. Every stage is off by default and leaves a page unchanged when its
+detector is not confident, so flatbed scans and born-digital pages pass
+through untouched.
+
+- **Rectify** — finds the page on a darker surround, corrects the
+  perspective with a homography and crops away desk, stand and fingers.
+- **Split** — cuts a double-page spread at its gutter into two pages.
+- **Dewarp** (experimental) — straightens text lines that curve toward the
+  spine.
+- **Library:** `RasterOptions::camera` (`CameraOptions { rectify, dewarp,
+  split_spreads }`; `CameraOptions::all()` turns everything on). A split
+  spread yields two `RenderedPage`s with the same `page_num`, left first,
+  told apart by the new `RenderedPage::spread_half`. The stages are also
+  callable directly on a `Bitmap` through the `camera` module.
+- **CLI:** `--rectify`, `--dewarp`, `--split-spreads`. The halves of page 7
+  are written as `out-07a.png` and `out-07b.png`.
+- **Source compatibility:** `RasterOptions` and `RenderedPage` each gained a
+  public field. Code that builds either with a struct literal listing every
+  field must add it (or use `..RasterOptions::default()`).
+
 ## What's new in v1.4.1
 
 **Lost pages and negative images.** No API change.
@@ -226,7 +247,7 @@ and the page/annotation JavaScript-disclosure work).
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
-- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. Use `..RasterOptions::default()` to fill unset fields.
+- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, every `camera` stage off. Use `..RasterOptions::default()` to fill unset fields.
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
 
 ```rust

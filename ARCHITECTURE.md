@@ -84,12 +84,18 @@ render_operators(ops, resources)     dispatch loop:
     ▼ Bitmap<Rgb8>
 rasterrocket::rgb_to_gray()          BT.709 luma
     │
-    ▼ Vec<u8>  (width × height, 8-bit grayscale)
-RenderedPage { pixels, width, height, dpi, effective_dpi, diagnostics }
+    ▼ Bitmap<Gray8>
+camera (optional, RasterOptions::camera)
+    │   rectify   page quad on a darker surround → homography → crop
+    │   split     gutter of a double-page spread → two pages
+    │   dewarp    text-line surface fit → vertical resample (experimental)
     │
-    ▼
-deskew (optional)                    projection-profile sweep ±7°
+    ▼ one or two pages
+deskew (optional, per page)          projection-profile sweep ±7°
     │   gpu::npp_rotate  (or cpu bilinear fallback)
+    │
+    ▼ Vec<u8>  (width × height, 8-bit grayscale)
+RenderedPage { pixels, width, height, dpi, effective_dpi, diagnostics, spread_half }
     │
     ▼
 caller / Tesseract OCR
@@ -358,7 +364,7 @@ on x86-64; the correct tier is selected at runtime. ARM uses `vmull_u8` + `vshrn
 Public library crate. The stable API surface.
 
 ```rust
-RasterOptions { dpi, first_page, last_page, deskew, pages }  // pages: Option<PageSet>
+RasterOptions { dpi, first_page, last_page, deskew, pages, strict, camera }  // pages: Option<PageSet>, camera: CameraOptions
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>

@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var("GOOGLE_CLOUD_VISION_API_KEY")?;
     let client = reqwest::Client::new();
 
-    let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
     // Collect pages so we can spawn async tasks.
     let pages: Vec<_> = render_channel(Path::new("scan.pdf"), &opts, 8)
         .iter()
@@ -241,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY")?;
     let client = reqwest::Client::new();
 
-    let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
 
     for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
         let page = result?;
@@ -382,7 +382,7 @@ async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var("MISTRAL_API_KEY")?;
     let client = reqwest::Client::new();
 
-    let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: u32::MAX, deskew: false, pages: None };
+    let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: u32::MAX, deskew: false, pages: None, ..RasterOptions::default() };
 
     for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
         let page = result?;

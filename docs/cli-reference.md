@@ -106,6 +106,23 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 
 ---
 
+## Camera-captured pages
+
+| Flag | Default | Description |
+|---|---|---|
+| `--rectify` | off | Find a page photographed on a darker surround, correct the perspective and crop to the page. Pages without such a boundary (flatbed scans, born-digital pages) are written unchanged. |
+| `--dewarp` | off | Straighten text lines curved by a page bending toward the spine. Experimental: vertical displacement only. Pages whose lines are already straight, or with fewer than five text lines, are written unchanged. |
+| `--split-spreads` | off | Split a double-page spread at its gutter. The halves of page N are written with an `a` (left) and `b` (right) suffix: `out-07a.png`, `out-07b.png`. Pages not detected as spreads keep their usual name. |
+
+The stages run rectify → split → dewarp. They apply to PDF and comic-archive input alike.
+
+```bash
+# Phone captures of an open book: crop, split and straighten each spread
+rrocket --rectify --split-spreads --dewarp --gray --png -r 300 book.pdf out
+```
+
+---
+
 ## Passwords
 
 | Flag | Description |
