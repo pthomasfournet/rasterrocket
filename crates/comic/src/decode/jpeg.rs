@@ -12,18 +12,27 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
-use super::{DecodeError, rgb_bitmap_from_tight};
+use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 
 /// Decode baseline/progressive JPEG bytes to an `Rgb8` bitmap.
 ///
+/// The frame header is read first and its dimensions checked by
+/// [`guard_dimensions`] before the pixel buffer is allocated.  The decoder's
+/// own per-side cap is raised to the shared limit so that check is the single
+/// size policy across codecs.
+///
 /// # Errors
 ///
-/// [`DecodeError::Codec`] if the stream is not decodable or reports zero dims.
+/// [`DecodeError::Codec`] if the stream is not decodable, reports zero dims,
+/// or declares dimensions beyond the rendered-page limits.
 pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
-    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+    let side_cap = pdf_raster::MAX_PX_DIMENSION as usize;
+    let opts = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGB)
+        .set_max_width(side_cap)
+        .set_max_height(side_cap);
     let mut dec = JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
-    let pixels = dec
-        .decode()
+    dec.decode_headers()
         .map_err(|e| DecodeError::Codec(format!("jpeg: {e}")))?;
     let info = dec
         .info()
@@ -32,5 +41,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("jpeg: zero dimensions {w}x{h}")));
     }
+    guard_dimensions("jpeg", w, h)?;
+    let pixels = dec
+        .decode()
+        .map_err(|e| DecodeError::Codec(format!("jpeg: {e}")))?;
     rgb_bitmap_from_tight(w, h, &pixels)
 }

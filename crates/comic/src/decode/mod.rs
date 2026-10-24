@@ -280,6 +280,34 @@ mod tests {
         png
     }
 
+    /// Patch the SOF0 frame size of a valid baseline JPEG, yielding a small
+    /// file whose header claims `claim_w`×`claim_h`.  SOF0 is `FF C0`, then
+    /// length(2), precision(1), height(2), width(2).
+    fn jpeg_bomb(claim_w: u16, claim_h: u16) -> Vec<u8> {
+        let mut jpg = solid_jpeg_gray(8, 8, 0);
+        let sof = jpg
+            .windows(2)
+            .position(|m| m == [0xFF, 0xC0])
+            .expect("baseline JPEG has an SOF0 marker");
+        jpg[sof + 5..sof + 7].copy_from_slice(&claim_h.to_be_bytes());
+        jpg[sof + 7..sof + 9].copy_from_slice(&claim_w.to_be_bytes());
+        jpg
+    }
+
+    #[test]
+    fn jpeg_decode_bomb_rejected_before_allocation() {
+        // 30000×30000 = 9e8 px exceeds the area cap; at 3 B/px the decode would
+        // allocate ~2.7 GB.  The guard fires on the SOF dims first.
+        match jpeg::decode(&jpeg_bomb(30_000, 30_000)) {
+            Err(DecodeError::Codec(m)) => {
+                assert!(m.contains("too large"), "message names the cause: {m}");
+                assert!(m.contains("30000x30000"), "message names the dims: {m}");
+            }
+            Err(other) => panic!("expected Codec(too large), got {other:?}"),
+            Ok(_) => panic!("decode bomb was not rejected"),
+        }
+    }
+
     #[test]
     fn guard_dimensions_rejects_huge_accepts_small() {
         assert!(
