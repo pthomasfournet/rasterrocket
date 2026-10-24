@@ -104,7 +104,7 @@ impl GpuCtx {
             return Ok(Vec::new());
         }
         let n_u32 = u32::try_from(n).expect("pixel count exceeds u32::MAX");
-        let stream = &self.stream;
+        let stream = self.stream();
 
         let d_cmyk = stream.clone_htod(cmyk)?;
         // Device-side zero alloc — both kernels write every output pixel,
@@ -147,7 +147,7 @@ impl GpuCtx {
         n_pixels: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.icc_cmyk_matrix);
         builder.arg(d_cmyk).arg(d_rgb).arg(&n_pixels);
         // SAFETY: 3 args match icc_cmyk_matrix PTX signature exactly.
@@ -175,7 +175,7 @@ impl GpuCtx {
         n_pixels: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.icc_cmyk_clut);
         builder
             .arg(d_cmyk)

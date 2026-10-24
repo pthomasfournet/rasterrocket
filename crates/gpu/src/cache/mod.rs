@@ -474,12 +474,12 @@ impl DeviceImageCache {
     /// # Stream contract
     ///
     /// The upload is enqueued on the cache's internal stream (see
-    /// [`Self::stream`]).  Consumers that launch kernels against
-    /// [`CachedDeviceImage::device_ptr`] on a *different* stream MUST
-    /// synchronise the cache's stream first (or use cudaStreamWaitEvent),
-    /// otherwise the kernel may read the slab before the H→D DMA
-    /// completes.  Same-stream consumption is correct without an explicit
-    /// sync because cudarc serialises operations on a single stream.
+    /// [`Self::stream`]) and records the slab's write event.  A kernel
+    /// launched against [`CachedDeviceImage::device_ptr`] through cudarc on
+    /// any other stream of the same context waits on that event, so it
+    /// never reads the slab before the H→D DMA completes.  A consumer that
+    /// reads the slab through a raw device pointer must synchronise the
+    /// cache's stream first.
     ///
     /// # Errors
     ///
@@ -571,20 +571,10 @@ impl DeviceImageCache {
     }
 
     /// The CUDA stream on which the cache enqueues uploads.  Exposed so
-    /// callers using a different stream can synchronise before reading
-    /// from a freshly inserted [`CachedDeviceImage::device_ptr`] — call
-    /// `cache.stream().synchronize()` (or wire a `cudaStreamWaitEvent`).
+    /// a caller reading a freshly inserted [`CachedDeviceImage::device_ptr`]
+    /// through a raw device pointer can synchronise it first.
     #[must_use]
     pub fn stream(&self) -> &CudaStream {
-        &self.stream
-    }
-
-    /// The cache's CUDA stream as an `Arc`, for callers that need to
-    /// own a shared reference (e.g. constructing a [`DevicePageBuffer`]
-    /// bound to the same stream so its `download()` synchronises
-    /// against blits the cache enqueues).
-    #[must_use]
-    pub const fn stream_arc(&self) -> &Arc<CudaStream> {
         &self.stream
     }
 }

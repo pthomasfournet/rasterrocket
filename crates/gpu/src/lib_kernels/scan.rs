@@ -43,7 +43,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let kernel = match phase {
             ScanPhase::PerWorkgroup => &self.kernels.scan_per_workgroup,
             ScanPhase::BlockSums => &self.kernels.scan_block_sums,

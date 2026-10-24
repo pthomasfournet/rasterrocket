@@ -38,7 +38,7 @@ impl GpuCtx {
         pixels: &mut [u8],
         mask: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let stream = &self.stream;
+        let stream = self.stream();
         let d_pixels = stream.clone_htod(pixels.as_ref())?;
         let d_mask = stream.clone_htod(mask)?;
 
@@ -59,8 +59,9 @@ impl GpuCtx {
     /// `d_pixels` is the read-modify-write target; passed as
     /// `&CudaSlice<u8>` because cudarc's launch builder accepts both
     /// shared and exclusive borrows for kernel args (the raw device
-    /// pointer is what gets pushed).  Single-stream serialisation
-    /// makes the in-place mutation race-free for in-tree callers.
+    /// pointer is what gets pushed).  In-tree callers queue all work on
+    /// the buffer from one thread, whose stream executes it in order, so
+    /// the in-place mutation is race-free.
     ///
     /// `d_pixels` must contain `4 * n_pixels` bytes; `d_mask` must
     /// contain `n_pixels` bytes.
@@ -79,7 +80,7 @@ impl GpuCtx {
         n_pixels: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.apply_soft_mask);
         builder.arg(d_pixels).arg(d_mask).arg(&n_pixels);
         // SAFETY: 3 args match apply_soft_mask PTX signature; n_pixels is u32.

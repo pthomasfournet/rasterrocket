@@ -63,8 +63,8 @@ impl GpuBackend for CudaBackend {
 
     fn alloc_device_zeroed(&self, size: usize) -> Result<Self::DeviceBuffer> {
         reject_zero_size(size, "alloc_device_zeroed")?;
-        // cudarc syncs on the default stream; the buffer reads as zero
-        // from the next host-visible op without needing wait_transfer.
+        // The memset is queued on the calling thread's stream; later work
+        // on that stream reads zeros without needing wait_transfer.
         self.ctx.stream().alloc_zeros::<u8>(size).map_err(be)
     }
 
@@ -82,7 +82,7 @@ impl GpuBackend for CudaBackend {
 
     fn alloc_host_pinned(&self, size: usize) -> Result<Self::HostBuffer> {
         reject_zero_size(size, "alloc_host_pinned")?;
-        let cuda_ctx = self.ctx.stream().context();
+        let cuda_ctx = &self.ctx.cuda;
         // Safety: the caller must initialise every byte before reading it back.
         // Mirrors the pattern in `cache::host_tier::HostTier::alloc_pinned`.
         unsafe { cuda_ctx.alloc_pinned::<u8>(size) }.map_err(be)
@@ -197,9 +197,9 @@ impl GpuBackend for CudaBackend {
     }
 
     fn submit_transfer(&self) -> Result<Self::PageFence> {
-        // CUDA: the default stream serialises uploads/downloads with
-        // compute already, so "submit transfer" is a no-op that just
-        // records an event for callers that want a fence to wait on.
+        // CUDA: a thread's stream already orders its uploads/downloads
+        // with its compute, so "submit transfer" only records an event
+        // for callers that want a fence to wait on.
         page_recorder::PageRecorder::record_fence(&self.ctx)
     }
 
@@ -210,7 +210,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {
-        let cuda_ctx = self.ctx.stream().context();
+        let cuda_ctx = &self.ctx.cuda;
         let (free, total) = cuda_ctx.mem_get_info().map_err(be)?;
         // free and total are usize (bytes); `free * 3 / 4` keeps arithmetic in
         // integer space — no f64 cast, no precision loss, no sign ambiguity.

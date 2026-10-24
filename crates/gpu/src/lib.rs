@@ -65,16 +65,17 @@ pub mod npp_rotate;
 #[cfg(feature = "vaapi")]
 pub mod vaapi;
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig};
+use cudarc::driver::{CudaContext, CudaFunction, CudaStream, LaunchConfig};
 
 // The embedded PTX strings are only consumed by `GpuCtx::init_inner`, which
 // is itself gated on `not(ptx_placeholder)`.  Gate the consts (and the
 // imports they need) the same way so a build without NVCC compiles cleanly
 // without dead-code warnings.
 #[cfg(not(ptx_placeholder))]
-use cudarc::driver::{CudaContext, CudaModule};
+use cudarc::driver::CudaModule;
 #[cfg(not(ptx_placeholder))]
 use cudarc::nvrtc::Ptx;
 
@@ -183,15 +184,20 @@ pub(crate) struct GpuKernels {
 ///
 /// # Concurrency
 ///
-/// All methods take `&self` and are safe to call from multiple threads, but they
-/// serialize on the single internal `CudaStream`: a call from thread B blocks until
-/// thread A's `stream.synchronize()` returns.  This is correct for the current
-/// architecture where GPU work is occasional (threshold-gated) and pages are the
-/// unit of parallelism.  If image decode is ever parallelized within a page, replace
-/// the shared stream with a `thread_local!` `Arc<CudaStream>` per rayon worker.
+/// All methods take `&self` and are safe to call from multiple threads.  Work is
+/// queued on the calling thread's stream ([`GpuCtx::stream`]), so concurrent
+/// callers execute independently on the device and a synchronising call waits
+/// only for the calling thread's own work.
 pub struct GpuCtx {
-    pub(crate) stream: Arc<CudaStream>,
+    pub(crate) cuda: Arc<CudaContext>,
     pub(crate) kernels: GpuKernels,
+}
+
+thread_local! {
+    /// The calling thread's stream for each [`GpuCtx`] context it has used,
+    /// created on first use.  Each stream holds an `Arc` to its context, so a
+    /// context cannot be freed (and its address reused) while an entry names it.
+    static THREAD_STREAMS: RefCell<Vec<Arc<CudaStream>>> = const { RefCell::new(Vec::new()) };
 }
 
 impl GpuCtx {
@@ -243,7 +249,6 @@ impl GpuCtx {
     #[cfg(not(ptx_placeholder))]
     fn init_inner() -> Result<Self, Box<dyn std::error::Error>> {
         let ctx: Arc<CudaContext> = CudaContext::new(0)?;
-        let stream = ctx.default_stream();
 
         let load =
             |ptx_src: &str, name: &str| -> Result<CudaFunction, Box<dyn std::error::Error>> {
@@ -253,7 +258,7 @@ impl GpuCtx {
             };
 
         Ok(Self {
-            stream,
+            cuda: Arc::clone(&ctx),
             kernels: GpuKernels {
                 composite_rgba8: load(PTX_COMPOSITE, "composite_rgba8")?,
                 apply_soft_mask: load(PTX_SOFT_MASK, "apply_soft_mask")?,
@@ -286,16 +291,56 @@ impl GpuCtx {
         })
     }
 
-    /// The CUDA stream this context binds all kernel launches and
-    /// device allocations to.
+    /// The calling thread's CUDA stream on this context.
     ///
-    /// Exposed so callers (e.g. the Phase 9 image cache) can share
-    /// the same stream for upload + dispatch + download — single-
-    /// stream serialisation eliminates the need for explicit
-    /// cross-stream synchronisation.
+    /// Every kernel launch, transfer and device allocation made through
+    /// this context is queued on the stream of the thread that makes it.
+    /// Each thread owns one non-blocking stream per context, created on
+    /// first use and destroyed at thread exit, so synchronising it waits
+    /// only for that thread's work.
+    ///
+    /// A device buffer used from more than one stream is ordered by
+    /// cudarc's per-allocation read/write events: a launch or copy waits
+    /// for the buffer's last recorded write, and records a write only when
+    /// it takes the buffer by `&mut` (copies into it, `&mut` kernel
+    /// arguments).  A kernel that writes through a `&CudaSlice` argument
+    /// or a raw device pointer records no write, so its output is ordered
+    /// only against later work on the same stream — i.e. the same thread.
+    /// Every caller in the renderer queues a page's GPU work from the
+    /// thread rendering that page, which satisfies this.
+    ///
+    /// If stream creation fails, the thread uses the context's legacy
+    /// default stream instead; the event ordering above still applies.
     #[must_use]
-    pub const fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
+    pub fn stream(&self) -> Arc<CudaStream> {
+        THREAD_STREAMS.with_borrow_mut(|streams| {
+            if let Some(s) = streams
+                .iter()
+                .find(|s| Arc::ptr_eq(s.context(), &self.cuda))
+            {
+                return Arc::clone(s);
+            }
+            let stream = self.cuda.new_stream().unwrap_or_else(|e| {
+                log::warn!(
+                    "gpu: per-thread stream creation failed ({e}); using the default stream"
+                );
+                self.cuda.default_stream()
+            });
+            streams.push(Arc::clone(&stream));
+            stream
+        })
+    }
+
+    /// A new non-blocking stream on this context, owned by the caller.
+    ///
+    /// For components that outlive any one thread's work and queue
+    /// transfers of their own, such as the device image cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns the driver error if stream creation fails.
+    pub fn new_stream(&self) -> Result<Arc<CudaStream>, cudarc::driver::DriverError> {
+        self.cuda.new_stream()
     }
 }
 

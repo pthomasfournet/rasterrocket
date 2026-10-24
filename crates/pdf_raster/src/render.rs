@@ -468,7 +468,7 @@ fn open_session_with_doc(
         .map(Arc::new);
 
     #[cfg(feature = "cache")]
-    let image_cache = gpu_ctx.as_ref().map(build_image_cache);
+    let image_cache = gpu_ctx.as_deref().map(new_image_cache);
 
     // DocId: BLAKE3 of the PDF bytes.  Stable per content; editing
     // the PDF naturally invalidates the disk tier because the hash
@@ -523,24 +523,27 @@ fn open_session_with_doc(
     })
 }
 
-/// Build a session's device-resident image cache on `ctx`'s stream.
+/// Build a session's device image cache on `ctx`.
 ///
-/// One cache per session, shared across all pages.  Construction needs a
-/// CUDA stream, so a session without a `GpuCtx` has no cache.
+/// The cache owns a stream of its own, so uploads issued by any page
+/// worker queue independently of that worker's stream; each blit waits
+/// on the write event of the upload it reads.  Budgets are the defaults.
+/// The disk tier is attached when its root resolves (`HOME`,
+/// `XDG_CACHE_HOME` or `PDF_RASTER_CACHE_DIR` set); otherwise the cache
+/// is in-process only.
 #[cfg(feature = "cache")]
-fn build_image_cache(ctx: &Arc<gpu::GpuCtx>) -> Arc<gpu::cache::DeviceImageCache> {
+fn new_image_cache(ctx: &gpu::GpuCtx) -> Arc<gpu::cache::DeviceImageCache> {
+    let stream = ctx.new_stream().unwrap_or_else(|e| {
+        log::warn!(
+            "rasterrocket: image-cache stream creation failed ({e}); sharing this thread's stream"
+        );
+        ctx.stream()
+    });
     let mut cache = gpu::cache::DeviceImageCache::new(
-        std::sync::Arc::clone(ctx.stream()),
-        // Auto-detect would need a running CUDA stream; we use
-        // the spec defaults so a session always boots.  Future
-        // work: expose a SessionConfig::cache_budget knob.
+        stream,
         gpu::cache::VramBudget::DEFAULT,
         gpu::cache::HostBudget::DEFAULT,
     );
-    // Enable disk persistence when the cache root resolves
-    // (HOME / XDG_CACHE_HOME / PDF_RASTER_CACHE_DIR set).  No
-    // disk tier in sandboxed environments where none of those
-    // env vars are present — the cache stays in-process only.
     if let Some(disk) = gpu::cache::DiskTier::try_new() {
         cache = cache.with_disk(disk);
     }

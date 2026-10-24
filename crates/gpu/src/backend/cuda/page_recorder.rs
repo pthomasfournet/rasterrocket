@@ -2,10 +2,12 @@
 //!
 //! All `record_*` methods route through the per-kernel
 //! `launch_<name>_async` helpers in `lib_kernels::*`, which queue the
-//! kernel onto the context's default stream **without** synchronising or
-//! downloading.  `submit_page` records a `CudaEvent`; `wait_page` blocks
-//! the host on it.  Callers therefore stall once per page rather than
-//! once per kernel.
+//! kernel onto the calling thread's stream ([`GpuCtx::stream`]) **without**
+//! synchronising or downloading.  `submit_page` records a `CudaEvent` on
+//! that stream; `wait_page` blocks the host on it.  Callers therefore stall
+//! once per page rather than once per kernel.  A fence covers only the work
+//! its recording thread queued, so a page's `record_*` calls and its
+//! `submit_page` must come from one thread.
 //!
 //! ## Concurrency note
 //!
@@ -13,9 +15,9 @@
 //! (immutable), even for read-modify-write operands like the
 //! composite destination.  At the cudarc layer the kernel receives a
 //! raw `CUdeviceptr`, so the &-vs-&mut distinction has no effect on
-//! the launch.  In-place writes are race-free because the CUDA
-//! backend serialises every launch on a single shared stream — by the
-//! time the next launch starts, the previous one has finished writing.
+//! the launch.  In-place writes are race-free because launches queued
+//! by one thread execute in order on its stream, and cudarc orders a
+//! launch on another stream after the buffer's last recorded write.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -38,9 +40,9 @@ pub(super) struct PageRecorder {
 
 /// A synchronisation token returned by [`PageRecorder::submit_page`].
 ///
-/// Wraps a [`CudaEvent`] recorded on the backend's stream.  `wait_page`
-/// calls `event.synchronize()`, which blocks the host until every prior
-/// kernel queued on that stream has completed.
+/// Wraps a [`CudaEvent`] recorded on the submitting thread's stream.
+/// `wait_page` calls `event.synchronize()`, which blocks the host until
+/// every prior kernel queued on that stream has completed.
 ///
 /// `Arc<CudaEvent>` so the trait's `PageFence: Clone` bound holds —
 /// the cache stashes one clone per cached entry to gate
@@ -75,9 +77,8 @@ impl PageRecorder {
 
     /// Begin a new page.
     ///
-    /// The CUDA backend has nothing to do here today — there's a single
-    /// shared stream and recording just means queuing into it.  The
-    /// method exists to mirror the `GpuBackend` trait shape so the
+    /// The CUDA backend has nothing to do here: recording means queuing
+    /// onto the calling thread's stream.  The method exists to mirror the `GpuBackend` trait shape so the
     /// Vulkan backend (which **does** allocate a per-page command
     /// buffer) and the CUDA backend share the same call site in
     /// callers.
@@ -100,12 +101,12 @@ impl PageRecorder {
         Self::record_fence(&self.ctx)
     }
 
-    /// Record a fresh fence on the backend's stream without going
+    /// Record a fresh fence on the calling thread's stream without going
     /// through the per-page state machine.  Used by
     /// `CudaBackend::submit_transfer` since the CUDA path has no
-    /// distinct transfer queue — both transfer and compute ride the
-    /// same stream, and a stream-recorded event is the universal
-    /// "wait until everything before this signals" primitive.
+    /// distinct transfer queue — a thread's transfers and kernels share
+    /// its stream, and an event recorded there signals once everything
+    /// queued before it has completed.
     pub(super) fn record_fence(ctx: &Arc<GpuCtx>) -> Result<PageFence> {
         let event = ctx.stream().record_event(None).map_err(be)?;
         Ok(PageFence(Arc::new(event)))
@@ -223,7 +224,7 @@ impl PageRecorder {
     }
 
     /// Record one Blelloch scan phase. Each call queues exactly one
-    /// kernel launch on the backend's shared stream; the host runs
+    /// kernel launch on the calling thread's stream; the host runs
     /// all three phases (`PerWorkgroup` → `BlockSums` →
     /// `ScatterBlockSums`) by calling `record_scan` three times with
     /// the same params (rebinding only `phase` between calls).
@@ -411,17 +412,18 @@ impl PageRecorder {
             .map_err(be)
     }
 
-    /// Record an async zero-fill on the backend's stream via
-    /// `cuMemsetD8Async`.  Same single-stream serialisation as the
-    /// `launch_*_async` helpers: any later record_* call ordered after
-    /// this one observes zeros without an explicit barrier.
+    /// Record an async zero-fill on the calling thread's stream via
+    /// `cuMemsetD8Async`.  The fill writes through a raw device pointer,
+    /// so it is ordered only against later work on the same stream: a
+    /// later `record_*` call from the same thread observes zeros without
+    /// an explicit barrier.
     pub(super) fn record_zero_buffer(&self, buf: &CudaSlice<u8>) -> Result<()> {
         let num_bytes = buf.num_bytes();
         if num_bytes == 0 {
             return Ok(());
         }
         let stream = self.ctx.stream();
-        let (dptr, _sync) = buf.device_ptr(stream);
+        let (dptr, _sync) = buf.device_ptr(&stream);
         // Safety: dptr was returned by cudarc for `buf` on `stream`;
         // num_bytes equals the buffer's size; the stream owns the
         // ordering against subsequent kernel launches.  Mirrors the

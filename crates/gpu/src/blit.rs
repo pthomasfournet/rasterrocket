@@ -117,7 +117,7 @@ impl GpuCtx {
             return Err(BlitError::TableSize);
         }
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let d_cols = stream
             .clone_htod(bytemuck::cast_slice::<u32, u8>(cols))
             .map_err(BlitError::cuda)?;
@@ -205,7 +205,7 @@ impl GpuCtx {
         let dst_w = i32::try_from(dst_dims.0).map_err(|_| BlitError::DimensionsTooLarge)?;
         let dst_h = i32::try_from(dst_dims.1).map_err(|_| BlitError::DimensionsTooLarge)?;
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.blit_image);
         builder
             .arg(d_src)

@@ -52,7 +52,7 @@ impl GpuCtx {
         }
         let n_rows = u32::try_from(table.n_rows()).expect("row count exceeds u32::MAX");
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let d_intersects = stream.clone_htod(bytemuck::cast_slice(table.intersects))?;
         let d_row_starts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(table.row_starts))?;
         // Device-side zero alloc — the kernel overwrites every in-bounds
@@ -118,7 +118,7 @@ impl GpuCtx {
         };
 
         let eo_int: i32 = i32::from(eo);
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.aa_fill);
         builder
             .arg(d_intersects)

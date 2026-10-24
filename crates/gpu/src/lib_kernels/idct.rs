@@ -42,7 +42,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.idct_dequant_colour);
         builder
             .arg(coefficients)

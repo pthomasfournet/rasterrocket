@@ -40,7 +40,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.phase1_intra_sync);
         builder
             .arg(bitstream)
@@ -91,7 +91,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.phase2_inter_sync);
         builder
             .arg(bitstream)
@@ -143,7 +143,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.phase4_redecode);
         builder
             .arg(bitstream)
@@ -205,7 +205,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.jpeg_phase2_inter_sync);
         builder
             .arg(bitstream)
@@ -264,7 +264,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.jpeg_phase4_redecode);
         builder
             .arg(bitstream)
@@ -320,7 +320,7 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.jpeg_phase1_intra_sync);
         builder
             .arg(bitstream)

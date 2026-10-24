@@ -414,8 +414,8 @@ pub trait GpuBackend: Send + Sync {
     /// **Submission timing.** Vulkan accumulates the copy on the
     /// transfer queue and does NOT submit until `submit_transfer` is
     /// called; the returned fence still becomes valid at that point.
-    /// CUDA enqueues on the default stream, equivalent to immediate
-    /// submission. Either way, callers wait on the fence rather than
+    /// CUDA enqueues on the calling thread's stream, equivalent to
+    /// immediate submission. Either way, callers wait on the fence rather than
     /// caring which model is in play.
     ///
     /// # Errors

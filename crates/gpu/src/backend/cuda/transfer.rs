@@ -1,10 +1,10 @@
 //! CUDA host↔device transfer helpers.
 //!
 //! `upload_async` / `download_async` are implemented here so the trait
-//! impl in `mod.rs` stays a thin dispatch table. Both ride the default
-//! stream alongside compute work — CUDA's stream-ordered model means a
-//! later `record_*` kernel launch automatically observes the transfer
-//! once the stream catches up, with no explicit barrier.
+//! impl in `mod.rs` stays a thin dispatch table. Both queue on the
+//! calling thread's stream alongside its compute work, so a later
+//! `record_*` kernel launch from the same thread observes the transfer
+//! without an explicit barrier.
 //!
 //! Drops down to cudarc's raw `result::memcpy_*_async` entry points
 //! rather than the safe `CudaStream::memcpy_htod` wrapper because the
@@ -41,8 +41,8 @@ fn check_transfer_len(src_len: usize, dst_capacity: usize, op_label: &'static st
     Ok(())
 }
 
-/// Initiate an asynchronous host→device upload on the backend's
-/// shared stream and return a fence that signals when the copy
+/// Initiate an asynchronous host→device upload on the calling thread's
+/// stream and return a fence that signals when the copy
 /// completes.
 ///
 /// Empty `src` is a no-op: cudarc rejects zero-byte transfers and the
@@ -58,7 +58,7 @@ pub(super) fn upload_async(
         return PageRecorder::record_fence(ctx);
     }
     let stream = ctx.stream();
-    let (dptr, _sync) = dst.device_ptr(stream);
+    let (dptr, _sync) = dst.device_ptr(&stream);
     // Safety: `dptr` came from cudarc for `dst` on `stream`;
     // src.as_ptr() is borrowed for the duration of this call (cudarc
     // copies the bytes asynchronously but the caller-supplied src is
@@ -74,8 +74,8 @@ pub(super) fn upload_async(
     PageRecorder::record_fence(ctx)
 }
 
-/// Initiate an asynchronous device→host download on the backend's
-/// shared stream. Returns a download inner that holds the fence; the
+/// Initiate an asynchronous device→host download on the calling
+/// thread's stream. Returns a download inner that holds the fence; the
 /// caller wraps it in a `DownloadHandle` and either waits on it via
 /// `wait_download` or lets it block-and-discard on Drop.
 ///
@@ -93,7 +93,7 @@ pub(super) fn download_async(
     // wait_download or wait on fence()" contract holds uniformly.
     if !dst.is_empty() {
         let stream = ctx.stream();
-        let (dptr, _sync) = src.device_ptr(stream);
+        let (dptr, _sync) = src.device_ptr(&stream);
         // Safety: `dptr` from cudarc for `src` on `stream`; `dst` is
         // borrowed by the returned `DownloadHandle` for the in-flight
         // DMA's lifetime via the trait's PhantomData; cudarc's async

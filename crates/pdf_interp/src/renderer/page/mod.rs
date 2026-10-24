@@ -1817,21 +1817,13 @@ impl<'doc> PageRenderer<'doc> {
             // wired-in cache.  Defensive check; cheap.
             return false;
         };
-        let image_cache = &cache_state.cache;
-        // Stream-identity invariant: the cache uploads `cached`'s
-        // device memory on its own stream; the blit kernel below
-        // launches on `gpu_ctx`'s stream; the page buffer's row
-        // download syncs the page buffer's stream.  All three
-        // must be the *same* stream — otherwise the kernel could
-        // read pre-DMA bytes or the download could miss writes.
-        // `open_session` constructs the cache from `gpu_ctx.stream()`
-        // so this holds today; the assert future-proofs against a
-        // refactor that introduces per-worker streams without
-        // updating the cache + page buffer plumbing.
-        debug_assert!(
-            Arc::ptr_eq(gpu_ctx.stream(), image_cache.stream_arc()),
-            "GpuCtx stream and DeviceImageCache stream diverged — cache upload, blit kernel, and page-buffer download must share one stream",
-        );
+        // Stream ordering: the blit kernel and the page buffer's row
+        // download and clear all run on this thread's stream, so they
+        // execute in order.  The kernel writes the page buffer through a
+        // shared device pointer, which records no cross-stream write event;
+        // the buffer is therefore bound to the stream of the thread that
+        // renders the page.  `cached` was uploaded on the cache's stream;
+        // the launch waits on its write event.
 
         // Grid edges are clamped to the page, so they fit i32 whenever the
         // page does; a page wider than i32::MAX pixels cannot exist.
@@ -1848,8 +1840,7 @@ impl<'doc> PageRenderer<'doc> {
         // Lazy-allocate the per-page device buffer on first GPU
         // image; subsequent images on the same page reuse it.
         if cache_state.page_buffer.is_none() {
-            let stream = Arc::clone(image_cache.stream_arc());
-            match DevicePageBuffer::new(stream, self.width, self.height) {
+            match DevicePageBuffer::new(gpu_ctx.stream(), self.width, self.height) {
                 Ok(buf) => cache_state.page_buffer = Some(buf),
                 Err(e) => {
                     log::warn!("blit_image: DevicePageBuffer alloc failed: {e}");

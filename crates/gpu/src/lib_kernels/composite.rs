@@ -41,7 +41,7 @@ impl GpuCtx {
         src: &[u8],
         dst: &mut [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let stream = &self.stream;
+        let stream = self.stream();
         let d_src = stream.clone_htod(src)?;
         let d_dst = stream.clone_htod(dst.as_ref())?;
 
@@ -55,8 +55,8 @@ impl GpuCtx {
 
     /// Async kernel launch for Porter-Duff source-over composite.
     ///
-    /// Caller is responsible for stream ordering (the launch is recorded
-    /// into the context's default stream) and for any final D→H download.
+    /// Caller is responsible for stream ordering (the launch is queued on
+    /// the calling thread's stream) and for any final D→H download.
     /// This function does **not** call `synchronize` and does **not**
     /// touch host memory; that's what makes it usable inside the
     /// per-page recording flow in `backend::cuda::page_recorder`.
@@ -65,8 +65,8 @@ impl GpuCtx {
     /// at the cudarc layer the kernel arg is the raw `CUdeviceptr`, so
     /// the &-vs-&mut distinction has no effect on the launch — it's
     /// the caller's responsibility to ensure no concurrent reader is
-    /// active on `d_dst` (the single-stream serialisation invariant
-    /// guarantees this for in-tree callers).
+    /// active on `d_dst` (in-tree callers queue all work on a buffer from
+    /// one thread, whose stream executes it in order).
     ///
     /// `d_src` and `d_dst` must each contain `4 * n_pixels` bytes.
     ///
@@ -84,7 +84,7 @@ impl GpuCtx {
         n_pixels: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
-        let stream = &self.stream;
+        let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.composite_rgba8);
         builder.arg(d_src).arg(d_dst).arg(&n_pixels);
         // SAFETY: 3 args match composite_rgba8 PTX signature; n_pixels is u32.
