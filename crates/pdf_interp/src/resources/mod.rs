@@ -299,6 +299,14 @@ impl<'doc> PageResources<'doc> {
         colorspace::resolve(self.doc, entry)
     }
 
+    /// The `/ColorSpace` subdictionary of the resources in effect, if any.
+    #[must_use]
+    pub fn color_space_dict(&self) -> Option<Dictionary> {
+        self.doc
+            .get_page_resource_dict(self.resource_context_id, b"ColorSpace")
+            .ok()
+    }
+
     /// Decode the image `XObject` `request` names from the resource dictionary,
     /// at no less than `request.draw_size` when the codec can reduce.
     ///

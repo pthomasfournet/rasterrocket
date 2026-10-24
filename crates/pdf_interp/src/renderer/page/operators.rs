@@ -320,60 +320,45 @@ impl PageRenderer<'_> {
                 self.do_xobject(name);
             }
             Operator::InlineImage { params, data } => {
+                let color_spaces = self.resources.color_space_dict();
+                let mut ctx = crate::resources::image::InlineImageCtx {
+                    doc: self.resources.doc(),
+                    color_spaces: color_spaces.as_ref(),
+                    #[cfg(feature = "nvjpeg")]
+                    nvjpeg: self.nvjpeg.as_mut(),
+                    #[cfg(feature = "vaapi")]
+                    vaapi: self.vaapi_jpeg_queue.as_ref(),
+                    #[cfg(feature = "nvjpeg2k")]
+                    nvjpeg2k: self.nvjpeg2k.as_mut(),
+                    #[cfg(feature = "gpu-icc")]
+                    gpu_ctx: self.gpu_ctx.as_deref(),
+                    #[cfg(feature = "gpu-icc")]
+                    clut_cache: Some(&mut self.icc_clut_cache),
+                };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).
                 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
                 let decoded = if self.jpeg_vk.is_some() {
                     crate::resources::image::decode_inline_image(
-                        self.resources.doc(),
+                        &mut ctx,
                         params,
                         data,
-                        #[cfg(feature = "nvjpeg")]
-                        self.nvjpeg.as_mut(),
-                        #[cfg(feature = "vaapi")]
-                        self.vaapi_jpeg_queue.as_ref(),
-                        #[cfg(feature = "nvjpeg2k")]
-                        self.nvjpeg2k.as_mut(),
                         self.jpeg_vk.as_mut(),
-                        #[cfg(feature = "gpu-icc")]
-                        self.gpu_ctx.as_deref(),
-                        #[cfg(feature = "gpu-icc")]
-                        Some(&mut self.icc_clut_cache),
                     )
                 } else {
                     crate::resources::image::decode_inline_image(
-                        self.resources.doc(),
+                        &mut ctx,
                         params,
                         data,
-                        #[cfg(feature = "nvjpeg")]
-                        self.nvjpeg.as_mut(),
-                        #[cfg(feature = "vaapi")]
-                        self.vaapi_jpeg_queue.as_ref(),
-                        #[cfg(feature = "nvjpeg2k")]
-                        self.nvjpeg2k.as_mut(),
                         self.jpeg_gpu.as_mut(),
-                        #[cfg(feature = "gpu-icc")]
-                        self.gpu_ctx.as_deref(),
-                        #[cfg(feature = "gpu-icc")]
-                        Some(&mut self.icc_clut_cache),
                     )
                 };
                 #[cfg(not(all(feature = "gpu-jpeg-huffman", feature = "vulkan")))]
                 let decoded = crate::resources::image::decode_inline_image(
-                    self.resources.doc(),
+                    &mut ctx,
                     params,
                     data,
-                    #[cfg(feature = "nvjpeg")]
-                    self.nvjpeg.as_mut(),
-                    #[cfg(feature = "vaapi")]
-                    self.vaapi_jpeg_queue.as_ref(),
-                    #[cfg(feature = "nvjpeg2k")]
-                    self.nvjpeg2k.as_mut(),
                     #[cfg(feature = "gpu-jpeg-huffman")]
                     self.jpeg_gpu.as_mut(),
-                    #[cfg(feature = "gpu-icc")]
-                    self.gpu_ctx.as_deref(),
-                    #[cfg(feature = "gpu-icc")]
-                    Some(&mut self.icc_clut_cache),
                 );
                 if let Some(img) = decoded {
                     self.blit_image(&img, img.width);

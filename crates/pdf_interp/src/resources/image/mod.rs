@@ -156,7 +156,7 @@ pub(crate) mod inline;
 pub(crate) mod raw;
 pub(crate) mod smask;
 
-pub use inline::decode_inline_image;
+pub use inline::{InlineImageCtx, decode_inline_image};
 
 // Visible only when cargo-fuzz sets `--cfg fuzzing`.  Not part of the public API.
 // `pub(super)` codec functions cannot be re-exported across the crate boundary,
