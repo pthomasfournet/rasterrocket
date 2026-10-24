@@ -457,49 +457,41 @@ impl XPathScanner {
     /// Call `emit(bx0, bx1)` for each covered half-open span `[bx0, bx1)` of
     /// AA scanline `scan_y`, clamped to `[0, width)`, in increasing `bx0`.
     ///
-    /// A span opens at the `x0` of the intersection that makes the running
-    /// winding count inside (`count & eo_mask != 0`: parity for even-odd,
-    /// non-zero for non-zero winding) and closes one past the `x1` of the
-    /// intersection that returns it outside; a row that ends inside extends
-    /// to `width`, and that span is the row's last. Spans may overlap when
-    /// intersections do.
+    /// Every intersection covers its own cells `[x0, x1]`, whatever its
+    /// winding count: a horizontal edge, or a sloped or vertical edge on the
+    /// scanline where it starts, carries count 0 yet still bounds the shape.
+    /// A span starts at an intersection and absorbs the following ones while
+    /// they touch it or the running winding count is inside (`count & eo_mask
+    /// != 0`: parity for even-odd, non-zero for non-zero winding); a row that
+    /// ends inside extends to `width`.
     fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
         let row = self.row(scan_y);
         let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
         let eo_mask = if self.eo { 1i32 } else { !0i32 };
         let mut count = 0i32;
         let mut i = 0usize;
-        let mut xx = 0i32;
 
-        while i < row.len() || (count & eo_mask) != 0 {
-            if (count & eo_mask) == 0 {
-                xx = row[i].x0;
+        while i < row.len() {
+            let xx0 = row[i].x0;
+            let mut xx1 = row[i].x1;
+            count = count.wrapping_add(row[i].count);
+            i += 1;
+            while i < row.len() && (row[i].x0 <= xx1 || (count & eo_mask) != 0) {
+                xx1 = xx1.max(row[i].x1);
                 count = count.wrapping_add(row[i].count);
                 i += 1;
-                continue;
             }
-
-            let span_x1 = loop {
-                if i >= row.len() {
-                    break width_i32;
-                }
-                count = count.wrapping_add(row[i].count);
-                let end = row[i].x1 + 1;
-                i += 1;
-                if (count & eo_mask) == 0 {
-                    break end;
-                }
+            let end = if i >= row.len() && (count & eo_mask) != 0 {
+                width_i32
+            } else {
+                xx1.saturating_add(1)
             };
 
-            let bx0 = usize::try_from(xx.max(0)).unwrap_or(0);
-            let bx1 = usize::try_from(span_x1.min(width_i32)).unwrap_or(0);
+            let bx0 = usize::try_from(xx0.max(0)).unwrap_or(0);
+            let bx1 = usize::try_from(end.min(width_i32)).unwrap_or(0);
             if bx0 < bx1 {
                 emit(bx0, bx1);
             }
-            if i >= row.len() {
-                break;
-            }
-            xx = span_x1;
         }
     }
 }

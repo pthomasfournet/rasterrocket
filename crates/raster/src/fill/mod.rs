@@ -466,6 +466,27 @@ mod tests {
     use crate::testutil::{identity_matrix, make_clip, rect_path, simple_pipe};
     use color::Rgb8;
 
+    /// An AA fill covers the whole first sub-row of an edge that lies on a
+    /// pixel boundary: the horizontal top edge and the vertical edges'
+    /// starting sub-row carry winding count 0 but still bound the shape.
+    #[test]
+    fn aa_fill_covers_integer_top_edge_row() {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(8, 8, 1, false);
+        let white = [255u8, 255, 255];
+        fill::<Rgb8>(
+            &mut bmp,
+            &make_clip(8, 8),
+            &rect_path(1.0, 2.0, 7.0, 6.0),
+            &simple_pipe(),
+            &PipeSrc::Solid(&white),
+            &identity_matrix(),
+            0.1,
+            true,
+        );
+        let col: Vec<u8> = (0..8).map(|y| bmp.row(y)[3].r).collect();
+        assert_eq!(col[..6], [0, 0, 255, 255, 255, 255], "rows 0..6 of column 3");
+    }
+
     /// Inclusive row range that received any ink, or `None` for a blank bitmap.
     fn inked_rows(bmp: &Bitmap<Rgb8>) -> Option<(u32, u32)> {
         let mut first = None;
