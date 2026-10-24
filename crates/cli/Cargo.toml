@@ -17,8 +17,6 @@ name = "rrocket"
 path = "src/main.rs"
 
 [features]
-# Build FreeType from source (cross-compilation, static builds).
-bundled = ["pdf_raster/bundled"]
 # GPU features pull the path-only internal `rasterrocket-gpu` crate (publish = false)
 # and are not available on crates.io.  Each feature forwards to the matching
 # pdf_raster feature, which in turn wires to `dep:gpu` and the gpu-crate feature.

@@ -13,8 +13,6 @@ keywords    = ["pdf", "interpreter", "renderer", "fonts", "images"]
 categories  = ["parser-implementations", "rendering", "multimedia::images"]
 
 [features]
-# Build FreeType from source (cross-compilation, static builds).
-bundled = ["font/bundled"]
 # GPU features pull the path-only internal `rasterrocket-gpu` crate (publish = false)
 # and are not available on crates.io.  Each feature activates `dep:gpu` so the
 # optional dependency is linked, then forwards to the matching gpu-crate feature

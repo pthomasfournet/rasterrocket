@@ -1,180 +1,165 @@
-//! Font engine — owns the `FreeType` library and creates [`FontFace`] instances.
+//! Font engine — parses font programs and creates [`FontFace`] instances.
 //!
-//! [`FontEngine`] is the Rust equivalent of `SplashFTFontEngine`.  One
-//! instance is created at startup and shared (via `Arc<Mutex<FontEngine>>`)
-//! across threads.  It is responsible for:
-//!
-//! 1. Initialising and holding the `FT_Library` handle.
-//! 2. Loading font faces from bytes (embedded PDF font streams) or file paths.
-//! 3. Assigning monotonically increasing [`FaceId`] values.
-//! 4. Wrapping loaded faces with the rendering parameters needed by [`FontFace`].
-//!
-//! # Thread safety
-//!
-//! `FreeType` itself is not thread-safe for concurrent operations on the same
-//! `FT_Library`.  `FontEngine` is therefore wrapped in a `Mutex`; callers must
-//! lock it for the duration of any face-load call.  Once a [`FontFace`] is
-//! constructed it is used without locking from its owning thread.
+//! A [`FontEngine`] assigns [`FaceId`]s and keeps every program it has
+//! parsed, so faces built from identical bytes (one font resource drawn at
+//! several sizes) or from the same file share one [`FontProgram`].  It is
+//! plain data: callers that render pages in parallel give each page its own
+//! engine.
 
-use std::sync::{Arc, Mutex};
-
-use freetype::Library;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::face::{FontFace, FontMatrix};
-use crate::hinting::FontKind;
 use crate::key::FaceId;
-
-/// Shared, thread-safe font engine handle.
-pub type SharedEngine = Arc<Mutex<FontEngine>>;
+use crate::program::FontProgram;
 
 /// Parameters passed when loading a font face.
-///
-/// Grouping into a struct keeps [`FontEngine::load_memory_face`] and
-/// [`FontEngine::load_file_face`] under the 7-argument limit.
 pub struct FaceParams {
-    /// Which kind of outline format this font uses.
-    pub kind: FontKind,
-    /// Glyph-index map: `code_to_gid[char_code]` → `FT_UInt`.
-    /// Pass an empty `Vec` for the identity map.
+    /// Glyph-index map: `code_to_gid[char_code]` → glyph index.  Pass an
+    /// empty `Vec` to resolve codes through the program's charmap.
     pub code_to_gid: Vec<u32>,
-    /// 2×2 font/device transform matrix `[a, b, c, d]`.
+    /// 2×2 matrix mapping em units to device pixels, y up (the PDF text
+    /// rendering matrix without translation).
     pub mat: FontMatrix,
-    /// 2×2 text transform matrix `[a, b, c, d]`.
-    pub text_mat: FontMatrix,
 }
 
-/// The font engine — owns `FT_Library` and assigns face IDs.
+/// Parses font programs and assigns face IDs.
+#[derive(Debug)]
 pub struct FontEngine {
-    lib: Library,
     /// Monotonically increasing face-ID counter.
     next_id: u32,
-    /// Whether anti-aliasing is globally enabled.
-    pub aa: bool,
-    /// Whether `FreeType` hinting is enabled.
-    pub ft_hinting: bool,
-    /// Whether slight-hinting mode is enabled.
-    pub slight_hinting: bool,
+    /// Whether glyph bitmaps carry 8-bit coverage.
+    aa: bool,
+    /// Programs parsed from memory, keyed by a hash of their bytes.  Hash
+    /// collisions are resolved by comparing the bytes.
+    memory_programs: HashMap<u64, Vec<Arc<FontProgram>>>,
+    /// Programs parsed from files, keyed by path and face index.
+    file_programs: HashMap<(PathBuf, u32), Arc<FontProgram>>,
 }
 
 impl FontEngine {
-    /// Initialise the `FreeType` library and return a shared engine handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `FreeType` initialisation fails (library not
-    /// found or internal `FT_Init_FreeType` error).
-    pub fn init(
-        aa: bool,
-        ft_hinting: bool,
-        slight_hinting: bool,
-    ) -> Result<SharedEngine, freetype::Error> {
-        let lib = Library::init()?;
-        Ok(Arc::new(Mutex::new(Self {
-            lib,
+    /// Create an engine whose faces render 8-bit coverage bitmaps when `aa`
+    /// is `true` and 1-bit masks otherwise.
+    #[must_use]
+    pub fn new(aa: bool) -> Self {
+        Self {
             next_id: 0,
             aa,
-            ft_hinting,
-            slight_hinting,
-        })))
+            memory_programs: HashMap::new(),
+            file_programs: HashMap::new(),
+        }
     }
 
-    /// Load a face from an in-memory font buffer.
-    ///
-    /// `font_data` is the raw font file bytes (Type 1, TrueType, CFF, etc.).
-    /// `face_index` selects the sub-face within a font collection (0 for
-    /// single-face files).
+    /// Load a face from an in-memory font program (an embedded PDF font
+    /// stream).  `face_index` selects the member of a TrueType collection.
     ///
     /// # Errors
     ///
-    /// Returns [`LoadError::FreeType`] if `FreeType` cannot parse the data,
-    /// or [`LoadError::DegenerateSize`] if the size matrix is degenerate.
+    /// [`LoadError::UnsupportedFormat`] / [`LoadError::Malformed`] when the
+    /// bytes are not a usable font program; [`LoadError::DegenerateSize`]
+    /// when the matrix is degenerate.
     pub fn load_memory_face(
         &mut self,
         font_data: Vec<u8>,
-        face_index: isize,
+        face_index: u32,
         params: FaceParams,
     ) -> Result<FontFace, LoadError> {
-        let ft_face = self
-            .lib
-            .new_memory_face(font_data, face_index)
-            .map_err(LoadError::FreeType)?;
-
-        let id = self.alloc_id();
-        FontFace::new(
-            id,
-            ft_face,
-            params,
-            self.aa,
-            self.ft_hinting,
-            self.slight_hinting,
-        )
-        .ok_or(LoadError::DegenerateSize)
+        let mut hasher = DefaultHasher::new();
+        font_data.hash(&mut hasher);
+        face_index.hash(&mut hasher);
+        let key = hasher.finish();
+        let cached = self
+            .memory_programs
+            .get(&key)
+            .and_then(|bucket| bucket.iter().find(|p| p.data() == font_data.as_slice()))
+            .cloned();
+        let program = if let Some(program) = cached {
+            program
+        } else {
+            let program = Arc::new(FontProgram::parse(font_data, face_index)?);
+            self.memory_programs
+                .entry(key)
+                .or_default()
+                .push(Arc::clone(&program));
+            program
+        };
+        self.make_face(program, params)
     }
 
-    /// Load a face from a file path.
-    ///
-    /// `face_index` selects the sub-face within a font collection.
+    /// Load a face from a font file.  `face_index` selects the member of a
+    /// TrueType collection.
     ///
     /// # Errors
     ///
-    /// Returns [`LoadError::FreeType`] if `FreeType` cannot open or parse the
-    /// file, or [`LoadError::DegenerateSize`] if the size matrix is degenerate.
+    /// [`LoadError::Io`] when the file cannot be read, otherwise as
+    /// [`Self::load_memory_face`].
     pub fn load_file_face(
         &mut self,
-        path: &str,
-        face_index: isize,
+        path: impl AsRef<Path>,
+        face_index: u32,
         params: FaceParams,
     ) -> Result<FontFace, LoadError> {
-        let ft_face = self
-            .lib
-            .new_face(path, face_index)
-            .map_err(LoadError::FreeType)?;
-
-        let id = self.alloc_id();
-        FontFace::new(
-            id,
-            ft_face,
-            params,
-            self.aa,
-            self.ft_hinting,
-            self.slight_hinting,
-        )
-        .ok_or(LoadError::DegenerateSize)
+        let key = (path.as_ref().to_path_buf(), face_index);
+        let program = if let Some(program) = self.file_programs.get(&key) {
+            Arc::clone(program)
+        } else {
+            let data = std::fs::read(&key.0).map_err(LoadError::Io)?;
+            let program = Arc::new(FontProgram::parse(data, face_index)?);
+            let _ = self.file_programs.insert(key, Arc::clone(&program));
+            program
+        };
+        self.make_face(program, params)
     }
 
-    /// Allocate the next `FaceId`, incrementing the internal counter.
-    ///
-    /// `FaceId`s wrap at `u32::MAX` — in practice a process loads at most tens of
-    /// thousands of faces, so wrap-around never occurs.
-    fn alloc_id(&mut self) -> FaceId {
-        let id = FaceId(self.next_id);
+    fn make_face(
+        &mut self,
+        program: Arc<FontProgram>,
+        params: FaceParams,
+    ) -> Result<FontFace, LoadError> {
+        let face = FontFace::new(FaceId(self.next_id), program, params, self.aa)
+            .ok_or(LoadError::DegenerateSize)?;
         debug_assert!(
             self.next_id < u32::MAX,
-            "FaceId counter wrapped; too many font faces loaded in this process"
+            "FaceId counter wrapped; too many font faces loaded by one engine"
         );
         self.next_id = self.next_id.wrapping_add(1);
-        id
+        Ok(face)
     }
 }
 
 /// Errors that can occur when loading a font face.
 #[derive(Debug)]
 pub enum LoadError {
-    /// `FreeType` returned an error (e.g. corrupt font data, missing file).
-    FreeType(freetype::Error),
-    /// The font size matrix is degenerate (zero scale or zero bounding box).
+    /// The font file could not be read.
+    Io(std::io::Error),
+    /// The bytes match none of the supported font formats.
+    UnsupportedFormat,
+    /// The bytes look like a supported format but cannot be parsed or carry
+    /// no outlines.
+    Malformed(String),
+    /// The face matrix is degenerate (non-finite, or a pixel size outside
+    /// `[1, 65535]`).
     DegenerateSize,
 }
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::FreeType(e) => write!(f, "FreeType error: {e:?}"),
-            Self::DegenerateSize => {
-                write!(f, "font face has degenerate size matrix (zero scale)")
-            }
+            Self::Io(e) => write!(f, "font file unreadable: {e}"),
+            Self::UnsupportedFormat => f.write_str("unrecognised font program format"),
+            Self::Malformed(why) => write!(f, "malformed font program: {why}"),
+            Self::DegenerateSize => f.write_str("font face has a degenerate size matrix"),
         }
     }
 }
 
-impl std::error::Error for LoadError {}
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}

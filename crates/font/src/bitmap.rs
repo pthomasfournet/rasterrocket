@@ -1,15 +1,12 @@
-//! Rasterized glyph bitmap.
-//!
-//! A `GlyphBitmap` is the Rust equivalent of `SplashGlyphBitmap` plus
-//! owned data (no `freeData` flag needed — ownership is in `Vec<u8>`).
+//! Rasterized glyph bitmap with owned pixel data.
 
 /// A rasterized glyph, either 8-bit grey (anti-aliased) or 1-bit packed
 /// (non-anti-aliased).
 ///
-/// Coordinates follow `FreeType` convention: `x_off` is the signed horizontal
-/// distance from the pen origin to the left edge of the bitmap (positive →
-/// right), and `y_off` is the signed distance from the baseline to the top
-/// edge (positive → up, `FreeType`'s `bitmap_top`).
+/// `x_off` is the signed horizontal distance from the left edge of the
+/// bitmap to the pen origin (the left edge lies at `pen_x - x_off`), and
+/// `y_off` is the signed distance from the baseline up to the top edge (the
+/// top row lies at `pen_y - y_off` in y-down device space).
 ///
 /// # Data layout
 ///
@@ -19,7 +16,7 @@
 ///   `height` rows, row stride = `(width + 7) / 8`.
 #[derive(Clone, Debug)]
 pub struct GlyphBitmap {
-    /// Signed horizontal offset from pen origin to left edge (pixels).
+    /// Signed horizontal offset from the left edge to the pen origin (pixels).
     pub x_off: i32,
     /// Signed vertical offset from baseline to top edge (pixels, up = positive).
     pub y_off: i32,

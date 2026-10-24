@@ -1,109 +1,132 @@
-//! `FreeType` outline → `raster::Path` decomposition.
+//! Glyph outline → `raster::Path` conversion.
 //!
-//! Mirrors the four `glyphPath*` callbacks in `SplashFTFont.cc`.
-//!
-//! `FreeType` outlines may contain quadratic (conic) Bézier segments.
-//! PDF paths use only cubics, so each conic is promoted to a cubic using
-//! the exact degree-elevation formula:
+//! [`PathPen`] receives outline commands in font units and appends them to a
+//! [`Path`] after mapping every point through an affine transform
+//! (`font units → em → device pixels`).  Quadratic segments are promoted to
+//! cubics by exact degree elevation:
 //!
 //! ```text
 //! p1 = (p0 + 2·pc) / 3
 //! p2 = (2·pc + p3) / 3
 //! ```
 //!
-//! where `pc` is the conic control point.  This matches `glyphPathConicTo`
-//! in `SplashFTFont.cc` and is mathematically exact.
+//! where `pc` is the quadratic control point.
 
-use freetype::Vector;
-use freetype::outline::{Curve, Outline};
 use raster::path::{Path, PathBuilder, PathPoint};
+use skrifa::outline::OutlinePen;
 
-/// Decompose a `FreeType` `Outline` into a [`Path`].
+/// Affine map `[a, b, c, d, e, f]`: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`.
+pub type Affine = [f64; 6];
+
+/// Outline pen that builds a [`Path`] in transformed coordinates.
 ///
-/// `text_scale` converts from `FreeType`'s 26.6 fixed-point units to the
-/// text-space coordinate system: `coord = ft_units / 64.0 * text_scale`.
-///
-/// Each `FreeType` contour becomes one closed subpath.  The implicit
-/// close-back is applied matching `SplashFTFont.cc`'s `path.needClose`
-/// pattern: a close is emitted only when at least one drawing operator
-/// was issued after the contour's move-to.
-///
-/// # Return value
-///
-/// Returns `None` if `text_scale == 0.0` (degenerate transform — the
-/// outline cannot be scaled to text space).  Non-zero `text_scale` values
-/// with a valid `FreeType` outline always succeed.
-#[must_use]
-pub fn decompose_outline(outline: &Outline<'_>, text_scale: f64) -> Option<Path> {
-    if text_scale == 0.0 {
-        return None;
-    }
-
-    let mut builder = PathBuilder::new();
-
-    for contour in outline.contours_iter() {
-        let start = contour.start();
-        // Each contour begins with an implicit move-to its first on-curve point.
-        // The one-point-subpath error cannot occur here: we never emit two
-        // consecutive move_to calls because there is always at least one
-        // drawing operator between contours.
-        let _ = builder.move_to(ft_x(*start, text_scale), ft_y(*start, text_scale));
-
-        let mut need_close = false;
-
-        for curve in contour {
-            match curve {
-                Curve::Line(pt) => {
-                    // NoCurPt is impossible after the move_to above.
-                    let _ = builder.line_to(ft_x(pt, text_scale), ft_y(pt, text_scale));
-                    need_close = true;
-                }
-                Curve::Bezier2(ctrl, pt) => {
-                    // Conic → cubic degree elevation requires the current point p0.
-                    if let Some(p0) = builder.cur_pt() {
-                        let xc = ft_x(ctrl, text_scale);
-                        let yc = ft_y(ctrl, text_scale);
-                        let x3 = ft_x(pt, text_scale);
-                        let y3 = ft_y(pt, text_scale);
-                        let (p1, p2) =
-                            conic_to_cubic(p0, PathPoint::new(xc, yc), PathPoint::new(x3, y3));
-                        let _ = builder.curve_to(p1.x, p1.y, p2.x, p2.y, x3, y3);
-                        need_close = true;
-                    }
-                    // No current point: drop silently (matches C++ getCurPt → return 0).
-                }
-                Curve::Bezier3(c1, c2, pt) => {
-                    let _ = builder.curve_to(
-                        ft_x(c1, text_scale),
-                        ft_y(c1, text_scale),
-                        ft_x(c2, text_scale),
-                        ft_y(c2, text_scale),
-                        ft_x(pt, text_scale),
-                        ft_y(pt, text_scale),
-                    );
-                    need_close = true;
-                }
-            }
-        }
-
-        if need_close {
-            // force=false: close only if first ≠ last (C++ `SplashPath::close` semantics).
-            let _ = builder.close(false);
-        }
-    }
-
-    Some(builder.build())
+/// A contour becomes one closed subpath.  A move-to is held back until the
+/// first drawing command of its contour, so empty contours and repeated
+/// move-tos leave no degenerate one-point subpaths, and a subpath is closed
+/// only when at least one segment was drawn into it.
+pub struct PathPen {
+    builder: PathBuilder,
+    transform: Affine,
+    pending_move: Option<PathPoint>,
+    open: bool,
 }
 
-/// Elevate a quadratic (conic) Bézier to a cubic.
-///
-/// This is the formula used by `glyphPathConicTo` in `SplashFTFont.cc`.
-/// The conversion is mathematically exact — no approximation is introduced.
-///
-/// Returns `(p1, p2)` — the two cubic off-curve control points.
+impl PathPen {
+    /// Create a pen applying `transform` to every point it receives.
+    #[must_use]
+    pub fn new(transform: Affine) -> Self {
+        Self {
+            builder: PathBuilder::new(),
+            transform,
+            pending_move: None,
+            open: false,
+        }
+    }
+
+    /// Finish the outline and return the path.
+    #[must_use]
+    pub fn finish(mut self) -> Path {
+        self.close_contour();
+        self.builder.build()
+    }
+
+    fn map(&self, x: f32, y: f32) -> PathPoint {
+        let [xx, yx, xy, yy, dx, dy] = self.transform;
+        let (x, y) = (f64::from(x), f64::from(y));
+        PathPoint::new(
+            xx.mul_add(x, xy.mul_add(y, dx)),
+            yx.mul_add(x, yy.mul_add(y, dy)),
+        )
+    }
+
+    /// Emit the held-back move-to, if any, so a segment can follow.
+    fn begin_segment(&mut self) -> bool {
+        if let Some(p) = self.pending_move.take() {
+            self.close_contour();
+            // A move-to directly after a closed or fresh path cannot fail:
+            // no one-point subpath is ever left open.
+            if self.builder.move_to(p.x, p.y).is_err() {
+                return false;
+            }
+            self.open = true;
+        }
+        self.open
+    }
+
+    fn close_contour(&mut self) {
+        if self.open {
+            // `force = false`: a closing segment is added only when the last
+            // point differs from the first.
+            let _ = self.builder.close(false);
+            self.open = false;
+        }
+    }
+}
+
+impl OutlinePen for PathPen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.close_contour();
+        self.pending_move = Some(self.map(x, y));
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = self.map(x, y);
+        if self.begin_segment() {
+            let _ = self.builder.line_to(p.x, p.y);
+        }
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        let pc = self.map(cx0, cy0);
+        let p3 = self.map(x, y);
+        if self.begin_segment()
+            && let Some(p0) = self.builder.cur_pt()
+        {
+            let (p1, p2) = quad_to_cubic(p0, pc, p3);
+            let _ = self.builder.curve_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+        }
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let p1 = self.map(cx0, cy0);
+        let p2 = self.map(cx1, cy1);
+        let p3 = self.map(x, y);
+        if self.begin_segment() {
+            let _ = self.builder.curve_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+        }
+    }
+
+    fn close(&mut self) {
+        self.pending_move = None;
+        self.close_contour();
+    }
+}
+
+/// Elevate a quadratic Bézier `(p0, pc, p3)` to a cubic; returns the two
+/// cubic control points.  The conversion is exact.
 #[inline]
 #[must_use]
-pub fn conic_to_cubic(p0: PathPoint, pc: PathPoint, p3: PathPoint) -> (PathPoint, PathPoint) {
+pub fn quad_to_cubic(p0: PathPoint, pc: PathPoint, p3: PathPoint) -> (PathPoint, PathPoint) {
     let x1 = p0.x.mul_add(1.0 / 3.0, pc.x * (2.0 / 3.0));
     let y1 = p0.y.mul_add(1.0 / 3.0, pc.y * (2.0 / 3.0));
     let x2 = pc.x.mul_add(2.0 / 3.0, p3.x * (1.0 / 3.0));
@@ -111,71 +134,88 @@ pub fn conic_to_cubic(p0: PathPoint, pc: PathPoint, p3: PathPoint) -> (PathPoint
     (PathPoint::new(x1, y1), PathPoint::new(x2, y2))
 }
 
-/// Convert `FreeType` 26.6 fixed-point x coordinate to f64 in text space.
-#[inline]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "FT_Pos is i64; typical glyph coordinates are <2^20, well within f64 mantissa precision"
-)]
-fn ft_x(pt: Vector, scale: f64) -> f64 {
-    pt.x as f64 * scale / 64.0
-}
-
-/// Convert `FreeType` 26.6 fixed-point y coordinate to f64 in text space.
-#[inline]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "FT_Pos is i64; typical glyph coordinates are <2^20, well within f64 mantissa precision"
-)]
-fn ft_y(pt: Vector, scale: f64) -> f64 {
-    pt.y as f64 * scale / 64.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raster::path::PathPoint;
+    use raster::path::PathFlags;
 
     fn pt(x: f64, y: f64) -> PathPoint {
         PathPoint::new(x, y)
     }
 
+    const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
     #[test]
-    fn conic_to_cubic_control_points() {
-        // p0=(0,0), pc=(1,1), p3=(2,0):
-        //   p1 = (0 + 2)/3 = 2/3
-        //   p2 = (2 + 2)/3 = 4/3
-        let (p1, p2) = conic_to_cubic(pt(0.0, 0.0), pt(1.0, 1.0), pt(2.0, 0.0));
-        assert!((p1.x - 2.0 / 3.0).abs() < 1e-12, "p1.x = {}", p1.x);
-        assert!((p1.y - 2.0 / 3.0).abs() < 1e-12, "p1.y = {}", p1.y);
-        assert!((p2.x - 4.0 / 3.0).abs() < 1e-12, "p2.x = {}", p2.x);
-        assert!((p2.y - 2.0 / 3.0).abs() < 1e-12, "p2.y = {}", p2.y);
+    fn quad_to_cubic_control_points() {
+        // p0=(0,0), pc=(1,1), p3=(2,0): p1 = 2/3·pc, p2 = (2·pc + p3)/3.
+        let (p1, p2) = quad_to_cubic(pt(0.0, 0.0), pt(1.0, 1.0), pt(2.0, 0.0));
+        assert!((p1.x - 2.0 / 3.0).abs() < 1e-12);
+        assert!((p1.y - 2.0 / 3.0).abs() < 1e-12);
+        assert!((p2.x - 4.0 / 3.0).abs() < 1e-12);
+        assert!((p2.y - 2.0 / 3.0).abs() < 1e-12);
     }
 
     #[test]
-    fn conic_to_cubic_collinear_stays_collinear() {
-        // Collinear control point → the cubic approximation is a straight line.
-        let p0 = pt(0.0, 0.0);
-        let p3 = pt(3.0, 0.0);
-        let pc = pt(1.5, 0.0);
-        let (p1, p2) = conic_to_cubic(p0, pc, p3);
-        assert!(p1.y.abs() < 1e-12, "collinear conic: p1.y must be zero");
-        assert!(p2.y.abs() < 1e-12, "collinear conic: p2.y must be zero");
-        assert!((p1.x - 1.0).abs() < 1e-12, "p1.x = {}", p1.x);
-        assert!((p2.x - 2.0).abs() < 1e-12, "p2.x = {}", p2.x);
+    fn collinear_quad_stays_collinear() {
+        let (p1, p2) = quad_to_cubic(pt(0.0, 0.0), pt(1.5, 0.0), pt(3.0, 0.0));
+        assert!(p1.y.abs() < 1e-12 && p2.y.abs() < 1e-12);
+        assert!((p1.x - 1.0).abs() < 1e-12);
+        assert!((p2.x - 2.0).abs() < 1e-12);
     }
 
     #[test]
-    fn ft_x_converts_26_6_to_f64() {
-        use freetype::Vector;
-        let v = Vector { x: 128, y: 0 }; // 128 / 64 = 2.0
-        assert!((ft_x(v, 1.0) - 2.0).abs() < 1e-12);
+    fn transform_is_applied() {
+        let mut pen = PathPen::new([2.0, 0.0, 0.5, 3.0, 10.0, 20.0]);
+        pen.move_to(1.0, 1.0);
+        pen.line_to(2.0, 1.0);
+        pen.close();
+        let path = pen.finish();
+        // (1,1) → (2·1 + 0.5·1 + 10, 3·1 + 20) = (12.5, 23).
+        assert_eq!(path.pts[0], pt(12.5, 23.0));
+        assert_eq!(path.pts[1], pt(14.5, 23.0));
     }
 
     #[test]
-    fn ft_x_applies_text_scale() {
-        use freetype::Vector;
-        let v = Vector { x: 64, y: 0 }; // 64 / 64 = 1.0 → × scale = 3.0
-        assert!((ft_x(v, 3.0) - 3.0).abs() < 1e-12);
+    fn contours_become_closed_subpaths() {
+        let mut pen = PathPen::new(IDENTITY);
+        pen.move_to(0.0, 0.0);
+        pen.line_to(1.0, 0.0);
+        pen.line_to(1.0, 1.0);
+        pen.close();
+        pen.move_to(5.0, 5.0);
+        pen.line_to(6.0, 5.0);
+        pen.line_to(6.0, 6.0);
+        // No explicit close: finish() closes the open contour.
+        let path = pen.finish();
+        let firsts = path.flags.iter().filter(|f| f.is_first()).count();
+        assert_eq!(firsts, 2);
+        assert!(path.flags[0].contains(PathFlags::CLOSED));
+        assert!(path.flags.last().unwrap().contains(PathFlags::CLOSED));
+    }
+
+    #[test]
+    fn empty_contours_and_repeated_moves_are_dropped() {
+        let mut pen = PathPen::new(IDENTITY);
+        pen.move_to(0.0, 0.0);
+        pen.close();
+        pen.move_to(1.0, 1.0);
+        pen.move_to(2.0, 2.0);
+        pen.line_to(3.0, 2.0);
+        pen.close();
+        let path = pen.finish();
+        assert_eq!(path.pts[0], pt(2.0, 2.0));
+        assert_eq!(path.flags.iter().filter(|f| f.is_first()).count(), 1);
+    }
+
+    #[test]
+    fn quad_is_elevated_from_current_point() {
+        let mut pen = PathPen::new(IDENTITY);
+        pen.move_to(0.0, 0.0);
+        pen.quad_to(1.0, 1.0, 2.0, 0.0);
+        pen.close();
+        let path = pen.finish();
+        assert!(path.flags[1].is_curve() && path.flags[2].is_curve());
+        assert!((path.pts[1].x - 2.0 / 3.0).abs() < 1e-6);
+        assert_eq!(path.pts[3], pt(2.0, 0.0));
     }
 }

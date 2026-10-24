@@ -1,59 +1,55 @@
-//! `FreeType` bridge and glyph cache for the `rasterrocket` pipeline.
+//! Font programs, glyph rasterisation and the glyph cache for the
+//! `rasterrocket` pipeline.
+//!
+//! Font programs (TrueType, OpenType, bare CFF, Type 1) are parsed by the
+//! local `read-fonts` / `skrifa` forks; outlines are unhinted, converted to
+//! [`raster::Path`] in device space and rasterised by an exact-area coverage
+//! rasteriser.
 //!
 //! # Structure
 //!
 //! | Module | Contents |
 //! |--------|---------|
 //! | [`key`] | [`key::FaceId`] and [`key::GlyphKey`] — cache key types |
-//! | [`bitmap`] | [`bitmap::GlyphBitmap`] — rasterized glyph (owned data) |
-//! | [`hinting`] | [`hinting::load_flags`] — `FreeType` load-flag policy |
-//! | [`outline`] | [`outline::decompose_outline`] — FT outline → `raster::Path` |
-//! | [`cache`] | [`cache::GlyphCache`] — global concurrent glyph cache |
-//! | [`face`] | [`face::FontFace`] — scaled font face, renders glyphs |
-//! | [`engine`] | [`engine::FontEngine`] — owns FT library, loads faces |
+//! | [`bitmap`] | [`bitmap::GlyphBitmap`] — rasterised glyph (owned data) |
+//! | [`program`] | [`program::FontProgram`] — format detection, charmaps, names, outlines |
+//! | [`outline`] | [`outline::PathPen`] — outline commands → `raster::Path` |
+//! | [`coverage`] | [`coverage::rasterize`] — `raster::Path` → coverage bitmap |
+//! | [`cache`] | [`cache::GlyphCache`] — concurrent glyph cache |
+//! | [`face`] | [`face::FontFace`] — a program at one text matrix |
+//! | [`engine`] | [`engine::FontEngine`] — parses programs, creates faces |
 //!
 //! # Usage
 //!
 //! ```no_run
-//! use font::engine::{FontEngine, FaceParams};
-//! use font::hinting::FontKind;
-//! use font::cache::GlyphCache;
-//! use font::key::GlyphKey;
+//! use rasterrocket_font::cache::GlyphCache;
+//! use rasterrocket_font::engine::{FaceParams, FontEngine};
 //!
-//! // One engine per process.
-//! let engine = FontEngine::init(true, true, false).expect("FreeType init failed");
-//!
-//! // Shared across threads.
+//! let mut engine = FontEngine::new(true);
 //! let cache = GlyphCache::new();
 //!
-//! // Load a face (called from the PDF rendering pipeline).
-//! let identity = [1.0, 0.0, 0.0, 1.0];
+//! // A 40 px face: em units → device pixels, y up.
 //! let params = FaceParams {
-//!     kind: FontKind::TrueType,
 //!     code_to_gid: vec![],
-//!     mat: identity,
-//!     text_mat: identity,
+//!     mat: [40.0, 0.0, 0.0, 40.0],
 //! };
-//! let face = {
-//!     let mut eng = engine.lock().unwrap();
-//!     eng.load_file_face("/path/to/font.ttf", 0, params)
-//!         .expect("face load failed")
-//! };
+//! let face = engine
+//!     .load_file_face("/path/to/font.ttf", 0, params)
+//!     .expect("face load failed");
 //!
-//! // Look up or render a glyph.
-//! let key = GlyphKey::new(face.id, 65, face.size_px, 0, face.aa);
-//! let bitmap = cache.get(&key).unwrap_or_else(|| {
-//!     let bmp = face.make_glyph(65, 0).expect("glyph render failed");
-//!     cache.insert(key, bmp);
-//!     cache.get(&key).unwrap()
-//! });
-//! let _ = bitmap;
+//! // Look up or render the glyph for character code 65.
+//! let bitmap = face.make_glyph_cached(&cache, 65, 0);
+//! # let _ = bitmap;
 //! ```
 
 pub mod bitmap;
 pub mod cache;
+pub mod coverage;
 pub mod engine;
 pub mod face;
-pub mod hinting;
 pub mod key;
 pub mod outline;
+pub mod program;
+
+#[cfg(test)]
+mod tests;

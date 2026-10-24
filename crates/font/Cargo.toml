@@ -8,25 +8,26 @@ license.workspace    = true
 repository.workspace = true
 homepage.workspace   = true
 readme.workspace     = true
-description          = "FreeType glyph cache and outline rendering for the rasterrocket PDF renderer"
-keywords             = ["pdf", "font", "freetype", "glyph", "renderer"]
+description          = "Font program parsing, glyph rasterisation and glyph cache for the rasterrocket PDF renderer"
+keywords             = ["pdf", "font", "glyph", "truetype", "renderer"]
 categories           = ["rendering", "multimedia::images"]
 
 [dependencies]
 color    = { package = "rasterrocket-color",  path = "../color",  version = "1.4" }
 raster   = { package = "rasterrocket-render", path = "../raster", version = "1.4" }
-# freetype-rs 0.38 wraps FreeType 2.x with a safe API; the system library
-# is linked via pkg-config (libfreetype-dev must be installed).
-freetype-rs = { version = "0.38", default-features = false }
+# Local forks (crates/read_fonts, crates/skrifa): font-program parsing and
+# unhinted outlines for TrueType, OpenType, bare CFF and Type 1.  `agl`
+# provides the Adobe Glyph List used to map glyph names to Unicode.
+read-fonts = { path = "../read_fonts", version = "0.41.0", default-features = false, features = ["std", "agl"] }
+skrifa     = { path = "../skrifa",     version = "0.44.0", default-features = false, features = ["std"] }
+log        = { workspace = true }
 # quick_cache gives a sharded concurrent LRU cache where reads do not
 # require write locks (unlike dashmap + lru::LruCache, where get() takes
 # &mut self and therefore serializes reads within each shard).
 quick_cache = "0.7"
 
-[features]
-# Build FreeType from source instead of linking the system library.
-# Required for cross-compilation (CI aarch64 check) and static builds.
-bundled = ["freetype-rs/bundled"]
+[dev-dependencies]
+font-test-data = { path = "../font_test_data" }
 
 [lints]
 workspace = true

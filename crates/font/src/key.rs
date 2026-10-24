@@ -2,13 +2,12 @@
 
 /// Opaque identifier for a loaded font face.
 ///
-/// Two `FaceId` values are equal when they point to the same underlying
-/// font file (equivalent to C++ pointer equality on the `shared_ptr`).
-/// Assigned once at face-load time; never reused within a process.
+/// Assigned by a [`crate::engine::FontEngine`] once per face (font program
+/// plus matrix) and never reused by that engine.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FaceId(pub(crate) u32);
 
-/// Number of sub-pixel x-fraction bits, matching `splashFontFractionBits = 2`.
+/// Number of sub-pixel x-fraction bits.
 ///
 /// Only 4 distinct x-fraction positions are cached: 0, 1, 2, 3 (quarters
 /// of a pixel).
@@ -19,15 +18,15 @@ pub const FRACTION: u32 = 1 << FRACTION_BITS;
 
 /// Full cache key for a single rendered glyph.
 ///
-/// Sub-pixel y-fraction is always zero for `FreeType` glyphs (`SplashFTFont`
-/// zeroes `yFrac` before lookup), so it is not included in the key.
+/// Glyphs are rendered at integral vertical positions, so the key carries
+/// no y-fraction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     /// Which face the glyph belongs to.
     pub face_id: FaceId,
-    /// Glyph index within the face (`FT_UInt` cast to u32).
+    /// Glyph index within the face's font program.
     pub glyph_id: u32,
-    /// Font size in pixels (non-zero; computed as `splashRound(dist(mat[2], mat[3]))`).
+    /// Font size in pixels (non-zero; `round(hypot(c, d))` of the face matrix).
     pub size_px: u16,
     /// Sub-pixel x-fraction in `[0, FRACTION)`.
     pub x_frac: u8,
@@ -83,6 +82,6 @@ mod tests {
 
     #[test]
     fn fraction_constant_matches_bits() {
-        assert_eq!(FRACTION, 4, "splashFontFractionBits=2 → 4 positions");
+        assert_eq!(FRACTION, 4, "2 fraction bits → 4 positions");
     }
 }

@@ -29,24 +29,13 @@
 //! LRU.  Entries are `Arc<GlyphBitmap>`, so eviction drops the `Arc` without
 //! freeing the bitmap data if the renderer still holds a reference.
 //!
-//! # TODO: redesign when a second glyph generator lands
+//! # Key shape
 //!
-//! Today this cache is `FreeType`-only.  When a second source appears
-//! (Type 3 `CharProcs`, `COLRv1`, SVG `OpenType`), don't add a sibling cache —
-//! the [`GlyphKey`] shape and the entry-count budget below are both
-//! Splash-era artifacts and will start to leak:
-//!
-//! - [`GlyphKey`] hardcodes `(face_id, glyph_id, size_px, x_frac, aa)` —
-//!   a Type 3 glyph is `(font instance, char_code, CTM)` and has no
-//!   `size_px` or `FreeType` `face_id`.
-//! - [`GLOBAL_CAPACITY`] = `256 × 4_096` is a port of the C++ two-level
-//!   budget; with a single global LRU it's just an entry count rounded for
-//!   nostalgia.  A bytes-budget weighter would treat 1024×1024 Type 3
-//!   glyphs and 8×8 ASCII glyphs honestly.
-//!
-//! The right shape is a `GlyphSpec` trait keyed by hash, an opaque
-//! `RenderedGlyph` value type, and a `quick_cache` weighter sized in bytes.
-//! Don't speculate — design under load when the second consumer is real.
+//! [`GlyphKey`] is `(face_id, glyph_id, size_px, x_frac, aa)`: it describes
+//! outline glyphs of a font program at one matrix.  Glyphs from other
+//! sources (Type 3 `CharProcs`, colour glyphs) have no such key and are not
+//! cached here; caching them calls for a key derived from the source and a
+//! byte-weighted capacity rather than an entry count.
 
 use std::sync::Arc;
 
@@ -55,9 +44,7 @@ use quick_cache::sync::Cache;
 use crate::bitmap::GlyphBitmap;
 use crate::key::{FaceId, GlyphKey};
 
-/// Maximum number of glyphs cached globally.
-///
-/// Matches the old two-level budget of 256 faces × 4 096 glyphs per face.
+/// Maximum number of glyphs held by one cache (256 faces × 4 096 glyphs).
 pub const GLOBAL_CAPACITY: usize = 256 * 4_096;
 
 /// Shared, thread-safe glyph bitmap cache.
@@ -102,7 +89,7 @@ impl GlyphCache {
     /// Return the cached bitmap for `key`, rendering and inserting it via
     /// `render` on a miss.
     ///
-    /// `render` returning `None` (a `FreeType` failure, or a glyph with no
+    /// `render` returning `None` (a glyph that fails to load, or one with no
     /// outline such as a space) is **not** cached: the miss is cheap and
     /// caching it would need a tombstone entry per absent glyph.
     pub fn get_or_render<F>(&self, key: GlyphKey, render: F) -> Option<Arc<GlyphBitmap>>
@@ -217,13 +204,13 @@ mod tests {
     fn get_or_render_renders_once_per_key() {
         let cache = GlyphCache::new();
         let calls = std::cell::Cell::new(0);
-        let mut render = || {
+        let render = || {
             calls.set(calls.get() + 1);
             Some(bmp(7))
         };
 
-        let first = cache.get_or_render(key(0, 1), &mut render).expect("render");
-        let second = cache.get_or_render(key(0, 1), &mut render).expect("cached");
+        let first = cache.get_or_render(key(0, 1), render).expect("render");
+        let second = cache.get_or_render(key(0, 1), render).expect("cached");
 
         assert_eq!(calls.get(), 1, "second lookup must not re-render");
         assert_eq!(first.data[0], 7);
