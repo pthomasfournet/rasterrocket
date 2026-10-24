@@ -444,20 +444,18 @@ fn read_xref_stream(
 
     // Read /W field widths.
     let w = match dict.get(b"W") {
-        Some(Object::Array(a)) => a.clone(),
+        Some(Object::Array(a)) => a,
         _ => return Err(PdfError::BadXref("xref stream: missing /W array".into())),
     };
-    let w: Vec<usize> = w
-        .iter()
-        .map(|o| match o {
-            Object::Integer(n) => *n as usize,
-            _ => 0,
-        })
-        .collect();
     if w.len() < 3 {
         return Err(PdfError::BadXref("xref stream: /W needs 3 entries".into()));
     }
-    let (w0, w1, w2) = (w[0], w[1], w[2]);
+    let (w0, w1, w2) = (
+        xref_field_width(&w[0])?,
+        xref_field_width(&w[1])?,
+        xref_field_width(&w[2])?,
+    );
+    // Each width is at most `MAX_XREF_FIELD_WIDTH`, so the sum cannot overflow.
     let entry_len = w0 + w1 + w2;
     if entry_len == 0 {
         return Err(PdfError::BadXref("xref stream: zero-width entry".into()));
@@ -559,6 +557,27 @@ fn read_xref_stream(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Widest `/W` field accepted, in bytes: every field value is read into a
+/// `u64`.
+const MAX_XREF_FIELD_WIDTH: usize = 8;
+
+/// Validate one `/W` entry of a cross-reference stream: a non-negative
+/// integer no wider than [`MAX_XREF_FIELD_WIDTH`].  A non-integer entry is
+/// read as width 0 (the field is absent).
+fn xref_field_width(obj: &Object) -> Result<usize, PdfError> {
+    let Object::Integer(n) = obj else {
+        return Ok(0);
+    };
+    usize::try_from(*n)
+        .ok()
+        .filter(|&w| w <= MAX_XREF_FIELD_WIDTH)
+        .ok_or_else(|| {
+            PdfError::BadXref(format!(
+                "xref stream: /W width {n} outside 0..={MAX_XREF_FIELD_WIDTH}"
+            ))
+        })
+}
 
 /// Decode an xref stream's raw bytes.  Almost always FlateDecode; may be
 /// uncompressed (no /Filter key).
@@ -766,5 +785,52 @@ startxref
             i += 1;
         }
         table
+    }
+
+    /// Build a file whose only xref section is an uncompressed cross-reference
+    /// stream with the given `/W` and `/Index` source text and entry bytes.
+    fn xref_stream_pdf(w: &str, index: &str, entries: &[u8]) -> Vec<u8> {
+        let mut data = b"%PDF-1.5\n".to_vec();
+        let xref_off = data.len();
+        data.extend_from_slice(
+            format!(
+                "9 0 obj\n<</Type/XRef/Size 10/W{w}/Index{index}/Length {}>>\nstream\n",
+                entries.len()
+            )
+            .as_bytes(),
+        );
+        data.extend_from_slice(entries);
+        data.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref_off}\n%%EOF").as_bytes(),
+        );
+        data
+    }
+
+    /// A negative `/W` width must be rejected; casting it to `usize` made
+    /// the field offsets wrap and the entry slicing panic.
+    #[test]
+    fn xref_stream_negative_width_is_rejected() {
+        let data = xref_stream_pdf("[-1 1 1]", "[0 1]", &[1, 0, 0]);
+        let err = read_xref_strict(&data).unwrap_err();
+        assert!(
+            matches!(&err, PdfError::BadXref(s) if s.contains("/W")),
+            "got {err:?}"
+        );
+        // The public entry point must not panic either.
+        let _ = read_xref(&data);
+    }
+
+    /// Widths whose sum overflows `usize`, or any single width wider than a
+    /// `u64`, must be rejected rather than wrapping the entry length.
+    #[test]
+    fn xref_stream_oversized_width_is_rejected() {
+        for w in ["[9223372036854775807 9223372036854775807 2]", "[1 9 1]"] {
+            let data = xref_stream_pdf(w, "[0 1]", &[1, 0, 0]);
+            let err = read_xref_strict(&data).unwrap_err();
+            assert!(
+                matches!(&err, PdfError::BadXref(s) if s.contains("/W")),
+                "/W {w}: got {err:?}"
+            );
+        }
     }
 }
