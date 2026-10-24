@@ -18,3 +18,16 @@ It is not published and changes are not sent upstream.
   `criterion` / `rand` dev-dependencies are removed.
 
 - The licence files replace upstream's symlinks to the repository root.
+
+## Type 1 fonts embedded in PDF
+
+- `ps::type1`: an `/Encoding` value the parser does not recognize (a
+  named encoding other than Standard / Expert / ISOLatin1, or a malformed
+  array) no longer rejects the whole font; the font loads with no built-in
+  encoding. A PDF simple font supplies its own encoding, so the outlines
+  are still reachable by glyph name. Test: `unrecognized_encoding_keeps_font`.
+- `ps::type1::verify_header`: any `%!` header comment is accepted, not only
+  `%!PS-AdobeFont` and `%!FontType` (for example `%!PS-Adobe-3.0
+  Resource-Font`, which some producers write into `FontFile` streams). The
+  dictionary parse that follows still rejects non-fonts. Test:
+  `resource_font_header_accepted`.

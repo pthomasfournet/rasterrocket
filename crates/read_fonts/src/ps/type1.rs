@@ -158,9 +158,12 @@ impl Type1Font {
         if font.charstrings.index.is_empty() {
             return None;
         }
+        // An /Encoding value the parser does not recognize leaves the font
+        // without a built-in encoding; the outlines remain usable.
         if let Some(encoding_offset) = encoding_offset {
-            let mut parser = Parser::new(base.get(encoding_offset..)?);
-            font.encoding = Some(parser.read_encoding(&font.charstrings)?);
+            font.encoding = base
+                .get(encoding_offset..)
+                .and_then(|data| Parser::new(data).read_encoding(&font.charstrings));
         }
         // We can only generate a Unicode cmap if we have the AGL available
         #[cfg(feature = "agl")]
@@ -446,8 +449,11 @@ impl<'a> RawDicts<'a> {
     }
 }
 
+/// Accepts any PostScript header comment (`%!PS-AdobeFont-1.0`,
+/// `%!FontType1-1.0`, `%!PS-Adobe-3.0 Resource-Font`, ...).  The font
+/// dictionary contents are validated by the parse that follows.
 fn verify_header(data: &[u8]) -> Option<()> {
-    (data.starts_with(b"%!PS-AdobeFont") || data.starts_with(b"%!FontType")).then_some(())
+    data.starts_with(b"%!").then_some(())
 }
 
 const PFB_TEXT_SEGMENT_TAG: u16 = 0x8001;
@@ -2060,6 +2066,38 @@ mod tests {
                 .encoding,
             Some(RawEncoding::Predefined(PredefinedEncoding::Standard)),
         ));
+    }
+
+    #[test]
+    fn unrecognized_encoding_keeps_font() {
+        let data = font_test_data::type1::NOTO_SERIF_REGULAR_SUBSET_PFA;
+        let pos = data
+            .windows(17)
+            .position(|w| w == b"StandardEncoding ")
+            .unwrap();
+        let mut patched = data[..pos].to_vec();
+        patched.extend_from_slice(b"FontSpecificEnc  ");
+        patched.extend_from_slice(&data[pos + 17..]);
+        let font = Type1Font::new(&patched).unwrap();
+        assert!(font.encoding.is_none());
+        assert_eq!(
+            font.num_glyphs(),
+            Type1Font::new(data).unwrap().num_glyphs()
+        );
+    }
+
+    #[test]
+    fn resource_font_header_accepted() {
+        let data = font_test_data::type1::NOTO_SERIF_REGULAR_SUBSET_PFA;
+        let line_end = data.iter().position(|b| *b == b'\n').unwrap();
+        let mut patched = b"%!PS-Adobe-3.0 Resource-Font".to_vec();
+        patched.extend_from_slice(&data[line_end..]);
+        let font = Type1Font::new(&patched).unwrap();
+        assert_eq!(
+            font.num_glyphs(),
+            Type1Font::new(data).unwrap().num_glyphs()
+        );
+        assert!(Type1Font::new(&data[line_end..]).is_err());
     }
 
     #[test]
