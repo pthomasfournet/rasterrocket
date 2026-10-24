@@ -29,7 +29,8 @@
 //! outside any image (dimensions are capped at 65 536 px) and is rejected by
 //! the range check.
 
-use raster::{Clip, ClipResult};
+use raster::types::AA_SIZE;
+use raster::{AaBuf, Clip, ClipResult, simd};
 
 use crate::renderer::gstate::{Ctm, ctm_transform};
 
@@ -216,13 +217,19 @@ impl SampleGrid {
 /// The grid's bounding box is classified once against the clip; rows and
 /// then pixels are tested only as finely as that classification requires,
 /// so an unclipped image costs one rectangle test and a clipped one costs a
-/// span test per row plus a pixel test on rows the clip edge crosses.
+/// span test per row plus a coverage computation on rows the clip edge
+/// crosses.
 pub(super) struct GridClip<'a> {
     clip: &'a Clip,
     bbox: ClipResult,
     /// Inclusive column span of the grid, device pixels.
     x0: i32,
     x1: i32,
+    /// Sub-sample scratch for antialiased clips, allocated on the first row
+    /// the clip edge crosses.
+    aa_buf: Option<AaBuf>,
+    /// Per-column coverage of the current partial row, indexed from `x0`.
+    coverage: Vec<u8>,
 }
 
 impl<'a> GridClip<'a> {
@@ -238,6 +245,8 @@ impl<'a> GridClip<'a> {
             bbox: clip.test_rect(x0, y0, x1, y1),
             x0,
             x1,
+            aa_buf: None,
+            coverage: Vec::new(),
         }
     }
 
@@ -246,13 +255,13 @@ impl<'a> GridClip<'a> {
         self.bbox
     }
 
-    /// Admission for row `dy` of the grid, or `None` when the clip excludes
+    /// Coverage for row `dy` of the grid, or `None` when the clip excludes
     /// the entire row.
     #[expect(
         clippy::cast_possible_wrap,
         reason = "dy < grid.y1 ≤ page height, which fits i32"
     )]
-    pub(super) fn row(&self, dy: u32) -> Option<RowClip<'a>> {
+    pub(super) fn row(&mut self, dy: u32) -> Option<RowClip<'_>> {
         let y = dy as i32;
         let res = if self.bbox == ClipResult::AllInside {
             ClipResult::AllInside
@@ -261,31 +270,98 @@ impl<'a> GridClip<'a> {
         };
         match res {
             ClipResult::AllOutside => None,
-            ClipResult::AllInside => Some(RowClip { clip: None, y }),
-            ClipResult::Partial => Some(RowClip {
-                clip: Some(self.clip),
-                y,
-            }),
+            ClipResult::AllInside => Some(RowClip::Full),
+            ClipResult::Partial => {
+                self.partial_coverage(y);
+                Some(RowClip::Partial {
+                    x0: self.x0,
+                    coverage: &self.coverage,
+                })
+            }
         }
+    }
+
+    /// Fill `self.coverage` for a row the clip edge crosses.
+    ///
+    /// With an antialiased clip, every sub-sample of the grid's columns is
+    /// set, intersected with the clip by [`Clip::clip_aa_line`], counted per
+    /// pixel and mapped through the AA gamma table, exactly as a fill's
+    /// coverage is.  A rectangle-only clip has integer bounds, so its columns
+    /// come out fully covered or uncovered.  A non-antialiased clip uses the
+    /// binary pixel test.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "x0 ≥ 0 (grid clamped to the page) and the clipped span lies within [x0, x1]"
+    )]
+    fn partial_coverage(&mut self, y: i32) {
+        let width = (self.x1 - self.x0 + 1) as usize;
+        self.coverage.clear();
+        self.coverage.resize(width, 0);
+        if !self.clip.antialias {
+            for (dx, cov) in (self.x0..=self.x1).zip(self.coverage.iter_mut()) {
+                if self.clip.test(dx, y) {
+                    *cov = 255;
+                }
+            }
+            return;
+        }
+        let aa_size = AA_SIZE as usize;
+        let buf = self
+            .aa_buf
+            .get_or_insert_with(|| AaBuf::new(self.x1 as usize + 1));
+        buf.clear();
+        for sub_row in 0..buf.height {
+            buf.set_span(
+                sub_row,
+                self.x0 as usize * aa_size,
+                (self.x1 as usize + 1) * aa_size,
+            );
+        }
+        let (mut cx0, mut cx1) = (self.x0, self.x1);
+        self.clip.clip_aa_line(buf, &mut cx0, &mut cx1, y);
+        let (cx0, cx1) = (cx0.max(self.x0), cx1.min(self.x1));
+        if cx0 > cx1 {
+            return;
+        }
+        let rows = [
+            buf.row_slice(0),
+            buf.row_slice(1),
+            buf.row_slice(2),
+            buf.row_slice(3),
+        ];
+        let span = &mut self.coverage[(cx0 - self.x0) as usize..=(cx1 - self.x0) as usize];
+        simd::aa_coverage_span(rows, cx0 as usize, span);
+        // An uncovered span maps to zeros, which callers skip; the
+        // any-covered flag adds nothing here.
+        let _any_covered = simd::apply_aa_gamma(span);
     }
 }
 
-/// Admission of the pixels on one grid row.  Carries the clip only when the
-/// row is partially inside it.
-pub(super) struct RowClip<'a> {
-    clip: Option<&'a Clip>,
-    y: i32,
+/// Coverage of the pixels on one grid row.
+pub(super) enum RowClip<'a> {
+    /// The whole row lies inside the clip.
+    Full,
+    /// The clip edge crosses the row; `coverage[i]` is the shape (0–255) of
+    /// device column `x0 + i`.
+    Partial { x0: i32, coverage: &'a [u8] },
 }
 
 impl RowClip<'_> {
-    /// Whether device column `dx` on this row may be painted.
+    /// Clip coverage (0 = outside, 255 = inside) of device column `dx`.
     #[inline]
     #[expect(
         clippy::cast_possible_wrap,
-        reason = "dx < grid.x1 ≤ page width, which fits i32"
+        clippy::cast_sign_loss,
+        reason = "dx < grid.x1 ≤ page width, which fits i32; the index is checked by get"
     )]
-    pub(super) fn admits(&self, dx: u32) -> bool {
-        self.clip.is_none_or(|clip| clip.test(dx as i32, self.y))
+    pub(super) fn coverage(&self, dx: u32) -> u8 {
+        match self {
+            Self::Full => 255,
+            Self::Partial { x0, coverage } => coverage
+                .get((dx as i32 - x0) as usize)
+                .copied()
+                .unwrap_or(0),
+        }
     }
 }
 
@@ -438,19 +514,20 @@ mod tests {
     }
 
     /// A clip rectangle covering the left half of a 1:1 grid: the bbox is
-    /// partial, every row is partial, and admission splits at the clip edge.
+    /// partial, every row is partial, and coverage splits at the integer clip
+    /// edge.
     #[test]
-    fn grid_clip_admits_by_rect() {
+    fn grid_clip_rect_coverage_is_binary() {
         let ctm = [10.0, 0.0, 0.0, 10.0, 0.0, 0.0];
         let grid = SampleGrid::new(&ctm, 10, 10, 10, 10).expect("grid");
         let clip = Clip::new(0.0, 0.0, 5.0, 10.0, true);
-        let gc = GridClip::new(&clip, &grid);
+        let mut gc = GridClip::new(&clip, &grid);
         assert_eq!(gc.bbox(), ClipResult::Partial);
         let row = gc.row(3).expect("row 3 intersects the clip");
-        assert!(row.admits(0));
-        assert!(row.admits(4));
-        assert!(!row.admits(5));
-        assert!(!row.admits(9));
+        assert_eq!(row.coverage(0), 255);
+        assert_eq!(row.coverage(4), 255);
+        assert_eq!(row.coverage(5), 0);
+        assert_eq!(row.coverage(9), 0);
     }
 
     /// A clip rectangle above the grid: the bbox is outside and no row is
@@ -462,15 +539,15 @@ mod tests {
         assert_eq!((grid.y0, grid.y1), (10, 20));
 
         let above = Clip::new(0.0, 0.0, 10.0, 10.0, true);
-        let gc = GridClip::new(&above, &grid);
+        let mut gc = GridClip::new(&above, &grid);
         assert_eq!(gc.bbox(), ClipResult::AllOutside);
         assert!(gc.row(10).is_none());
 
         let enclosing = Clip::new(0.0, 0.0, 10.0, 20.0, true);
-        let gc = GridClip::new(&enclosing, &grid);
+        let mut gc = GridClip::new(&enclosing, &grid);
         assert_eq!(gc.bbox(), ClipResult::AllInside);
         let row = gc.row(15).expect("row inside the clip");
-        assert!((0..10).all(|dx| row.admits(dx)));
+        assert!((0..10).all(|dx| row.coverage(dx) == 255));
     }
 
     #[test]

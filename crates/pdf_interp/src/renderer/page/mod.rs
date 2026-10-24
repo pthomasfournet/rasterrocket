@@ -56,6 +56,7 @@ mod vk_ops;
 use pdf::{Document, ObjectId};
 
 use color::Rgb8;
+use color::convert::div255;
 use font::{
     cache::GlyphCache,
     engine::{FontEngine, SharedEngine},
@@ -1648,7 +1649,7 @@ impl<'doc> PageRenderer<'doc> {
         // The grid covers the image's bounding box on the page; the clip
         // region decides which of those pixels the image may paint.
         let clip = self.gstate.current().clip.clone_shared();
-        let grid_clip = GridClip::new(&clip, &grid);
+        let mut grid_clip = GridClip::new(&clip, &grid);
         if grid_clip.bbox() == ClipResult::AllOutside {
             return;
         }
@@ -1659,7 +1660,7 @@ impl<'doc> PageRenderer<'doc> {
         // content-stream order.
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
-            if self.try_gpu_blit_image(cached, &grid, &grid_clip) {
+            if self.try_gpu_blit_image(cached, &grid, &mut grid_clip) {
                 return;
             }
             // Promotion or kernel dispatch failed and there are no host
@@ -1735,7 +1736,8 @@ impl<'doc> PageRenderer<'doc> {
             };
             let row_off = dy as usize * stride;
             for dx in grid.x0..grid.x1 {
-                if !row_clip.admits(dx) {
+                let coverage = row_clip.coverage(dx);
+                if coverage == 0 {
                     continue;
                 }
                 let Some((ix, iy)) = grid.sample(dx, dy) else {
@@ -1754,10 +1756,11 @@ impl<'doc> PageRenderer<'doc> {
                 // Stencil masks paint the fill colour through their zero
                 // samples and carry no soft mask (asserted at entry).
                 let alpha = match img.color_space {
-                    ImageColorSpace::Mask => 255,
-                    ImageColorSpace::Rgb | ImageColorSpace::Gray => {
-                        smask.map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255))
-                    }
+                    ImageColorSpace::Mask => coverage,
+                    ImageColorSpace::Rgb | ImageColorSpace::Gray => div255(
+                        u32::from(smask.map_or(255u8, |s| s.get(img_idx).copied().unwrap_or(255)))
+                            * u32::from(coverage),
+                    ),
                 };
                 if alpha == 0 {
                     continue;
@@ -1778,7 +1781,7 @@ impl<'doc> PageRenderer<'doc> {
                     }
                     ImageColorSpace::Mask => {
                         if img_bytes.get(img_idx) == Some(&0x00) {
-                            dst.copy_from_slice(&fill_color);
+                            blend_rgb(dst, fill_color, alpha);
                         }
                     }
                 }
@@ -1801,7 +1804,7 @@ impl<'doc> PageRenderer<'doc> {
         &mut self,
         cached: &Arc<gpu::cache::CachedDeviceImage>,
         grid: &SampleGrid,
-        grid_clip: &GridClip<'_>,
+        grid_clip: &mut GridClip<'_>,
     ) -> bool {
         use gpu::blit::BlitBbox;
 
@@ -1886,15 +1889,15 @@ impl<'doc> PageRenderer<'doc> {
 
 /// Source-over the rows `[grid.y0, grid.y1)` of a downloaded RGBA8 page
 /// buffer onto `bitmap`, restricted to the grid's columns and to the pixels
-/// `grid_clip` admits.  Alpha is `255` where the blit kernel wrote a sample
-/// and `0` elsewhere, so the composite is an opaque copy gated on alpha and
-/// on the clip.
+/// `grid_clip` covers.  Alpha is `255` where the blit kernel wrote a sample
+/// and `0` elsewhere, so the composite copies each written sample, blended
+/// by the clip coverage on rows the clip edge crosses.
 #[cfg(feature = "cache")]
 fn composite_rgba_rows(
     bitmap: &mut Bitmap<Rgb8>,
     rgba: &[u8],
     grid: &SampleGrid,
-    grid_clip: &GridClip<'_>,
+    grid_clip: &mut GridClip<'_>,
 ) {
     use gpu::cache::RGBA_BPP;
 
@@ -1912,12 +1915,13 @@ fn composite_rgba_rows(
         let dst_off = dy as usize * dst_stride;
         for dx in grid.x0..grid.x1 {
             let s = &src_row[dx as usize * RGBA_BPP..dx as usize * RGBA_BPP + RGBA_BPP];
-            if s[3] == 0 || !row_clip.admits(dx) {
+            let coverage = row_clip.coverage(dx);
+            if s[3] == 0 || coverage == 0 {
                 continue;
             }
             let off = dst_off + dx as usize * 3;
             if let Some(d) = dst.get_mut(off..off + 3) {
-                d.copy_from_slice(&s[..3]);
+                blend_rgb(d, [s[0], s[1], s[2]], coverage);
             }
         }
     }
@@ -2711,16 +2715,10 @@ mod tests {
         }
     }
 
-    /// A rectilinear polygon clip — the shape a scanned-page workflow uses
-    /// to confine a background image to the margins — must be honoured
-    /// through the path-clip scanner, not just the clip rectangle.  The
-    /// L-shape covers user-space `y < 4` fully and `y ≥ 4` only for `x < 4`;
-    /// device rows are flipped, so the top-right quadrant stays white.
-    ///
-    /// Column 4 of the top half lies on the polygon's vertical edge.  The
-    /// scanner's pixel test is edge-inclusive, so that column is painted;
-    /// it is left unasserted here because the test pins the clip's interior
-    /// and exterior, not the edge convention.
+    /// An L-shaped path clip over a black image: the image shows through the
+    /// L only.  Column 4 of the top half lies on the clip's vertical edge and
+    /// carries the clip's antialiased coverage (4 of 16 sub-samples, 223
+    /// after the gamma table), exactly like a fill through the same clip.
     #[test]
     fn image_blit_honours_path_clip() {
         let content = [
@@ -2733,7 +2731,7 @@ mod tests {
         for y in 0..8 {
             for x in 0..8 {
                 let want = match (y < 4, x) {
-                    (true, 4) => continue,
+                    (true, 4) => 223,
                     (true, 5..) => 255,
                     _ => 0,
                 };
