@@ -318,18 +318,29 @@ impl<'doc> PageResources<'doc> {
     /// JPEG 2000 decoding for large `JPXDecode` streams when the `nvjpeg2k`
     /// feature is active.  Pass `None` for CPU-only behaviour on either path.
     #[must_use]
+    // Two fixed arguments plus one per enabled decoder feature and two each
+    // for `gpu-icc` and `cache`: the lint fires once the feature-gated
+    // arguments reach six.
     #[cfg_attr(
         any(
             all(
                 feature = "gpu-icc",
                 feature = "cache",
-                any(feature = "nvjpeg", feature = "vaapi", feature = "nvjpeg2k")
+                any(
+                    all(feature = "nvjpeg", feature = "vaapi"),
+                    all(feature = "nvjpeg", feature = "nvjpeg2k"),
+                    all(feature = "nvjpeg", feature = "gpu-jpeg-huffman"),
+                    all(feature = "vaapi", feature = "nvjpeg2k"),
+                    all(feature = "vaapi", feature = "gpu-jpeg-huffman"),
+                    all(feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"),
+                )
             ),
             all(
+                any(feature = "gpu-icc", feature = "cache"),
                 feature = "nvjpeg",
                 feature = "vaapi",
                 feature = "nvjpeg2k",
-                any(feature = "gpu-icc", feature = "cache")
+                feature = "gpu-jpeg-huffman"
             )
         ),
         expect(
