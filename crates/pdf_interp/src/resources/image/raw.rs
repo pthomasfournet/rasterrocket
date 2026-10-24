@@ -291,6 +291,44 @@ pub(super) fn is_identity_decode(decode: &[(f64, f64)]) -> bool {
         .all(|&(dmin, dmax)| is_identity_pair(dmin, dmax))
 }
 
+/// Apply an image dictionary's `/Decode` to the output of a bilevel codec
+/// (`JBIG2Decode`, `CCITTFaxDecode`), which leaves its samples unmapped.
+///
+/// A stencil ([`ImageColorSpace::Mask`]) flips polarity under `[1 0]`, as a
+/// raw stencil does (see [`is_mask_inverted`]); a grayscale image is remapped
+/// through [`apply_decode`].  Other descriptors are left unchanged.
+pub(super) fn apply_bilevel_decode(img: &mut ImageDescriptor, dict: &Dictionary) {
+    #[cfg_attr(
+        not(feature = "cache"),
+        expect(
+            clippy::infallible_destructuring_match,
+            reason = "the cache-feature build adds a device-resident arm; keep one shape"
+        )
+    )]
+    let bytes = match &mut img.data {
+        ImageData::Cpu(bytes) => bytes,
+        #[cfg(feature = "cache")]
+        ImageData::Gpu(_) => return,
+    };
+    match img.color_space {
+        ImageColorSpace::Mask => {
+            if is_mask_inverted(dict) {
+                for b in bytes.iter_mut() {
+                    *b = !*b;
+                }
+            }
+        }
+        ImageColorSpace::Gray => {
+            let decode = parse_decode(dict, 1);
+            if !is_identity_decode(&decode) {
+                let samples = std::mem::take(bytes);
+                *bytes = apply_decode(std::borrow::Cow::Owned(samples), &decode);
+            }
+        }
+        ImageColorSpace::Rgb => {}
+    }
+}
+
 /// Return `true` when the `ImageMask`'s `Decode` array is `[1, 0]` (inverted
 /// stencil) per PDF 32000-1 §8.9.6.2.
 ///
@@ -538,6 +576,46 @@ mod tests {
     use super::*;
 
     use crate::test_helpers::empty_doc as make_doc;
+
+    fn bilevel(color_space: ImageColorSpace, bytes: &[u8]) -> ImageDescriptor {
+        ImageDescriptor {
+            width: u32::try_from(bytes.len()).unwrap(),
+            height: 1,
+            color_space,
+            data: ImageData::Cpu(bytes.to_vec()),
+            smask: None,
+            filter: ImageFilter::Raw,
+        }
+    }
+
+    fn decode_dict(values: &[i64]) -> Dictionary {
+        let mut dict = Dictionary::new();
+        dict.set(
+            "Decode",
+            Object::Array(values.iter().map(|&v| Object::Integer(v)).collect()),
+        );
+        dict
+    }
+
+    #[test]
+    fn bilevel_decode_inverts_stencil_and_gray_under_1_0() {
+        for cs in [ImageColorSpace::Mask, ImageColorSpace::Gray] {
+            let mut img = bilevel(cs, &[0x00, 0xFF, 0x00]);
+            apply_bilevel_decode(&mut img, &decode_dict(&[1, 0]));
+            assert_eq!(img.data.as_cpu(), Some(&[0xFF, 0x00, 0xFF][..]), "{cs:?}");
+        }
+    }
+
+    #[test]
+    fn bilevel_decode_default_or_absent_is_identity() {
+        for dict in [Dictionary::new(), decode_dict(&[0, 1])] {
+            for cs in [ImageColorSpace::Mask, ImageColorSpace::Gray] {
+                let mut img = bilevel(cs, &[0x00, 0xFF]);
+                apply_bilevel_decode(&mut img, &dict);
+                assert_eq!(img.data.as_cpu(), Some(&[0x00, 0xFF][..]), "{cs:?}");
+            }
+        }
+    }
 
     #[test]
     fn decode_raw_gray_8bpp() {

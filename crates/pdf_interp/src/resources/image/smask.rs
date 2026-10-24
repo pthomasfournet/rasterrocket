@@ -9,7 +9,7 @@ use pdf::{Document, Object, ObjectId};
 use super::bitpack::{downsample_16bpp, expand_1bpp, expand_nbpp};
 use super::codecs::{decode_ccitt, decode_jbig2};
 use super::filter_name;
-use super::raw::decode_raw;
+use super::raw::{apply_bilevel_decode, apply_decode, decode_raw, parse_decode};
 use super::validated_dims;
 use super::{ImageColorSpace, ImageDescriptor};
 
@@ -20,7 +20,8 @@ use super::{ImageColorSpace, ImageDescriptor};
 /// Returns exactly `img_w * img_h` bytes, one alpha value per pixel:
 /// `0x00` = fully transparent, `0xFF` = fully opaque.  The `SMask` stream may
 /// have different dimensions from the parent image; if so the buffer is
-/// resampled to match via nearest-neighbour scaling.
+/// resampled to match via nearest-neighbour scaling.  The mask's own
+/// `/Decode` maps its samples before they are read as alpha.
 ///
 /// Returns `None` when the stream is unresolvable, its filter is unsupported,
 /// or its dimensions are degenerate.  The caller must skip the image in that
@@ -54,43 +55,38 @@ pub(super) fn decode_smask(
     // directly (0x00 = transparent, 0xFF = opaque). The decoders are called with
     // is_mask=false so they return ImageColorSpace::Gray bytes following the
     // Gray convention (JBIG2/CCITT black-bit → 0x00, white-bit → 0xFF). Those
-    // bytes are the §11.6.5.2 sample values and are consumed as alpha without
-    // any further inversion — matching the already-correct DCTDecode/Flate/raw
-    // SMask arms below.
+    // bytes are the §11.6.5.2 sample values; the mask's `/Decode`, applied
+    // below to every arm alike, is the only remap between sample and alpha.
     //
     // For these compressed formats we use the actual decoded dimensions
     // (sm_desc.width × sm_desc.height) — not the dict-declared sm_w × sm_h —
     // as the true source size passed to scale_smask, so that a decoder that
     // reports a different output size does not produce an out-of-bounds index.
-    let alpha: Vec<u8> = match filter.as_deref() {
+    let (samples, aw, ah): (Vec<u8>, u32, u32) = match filter.as_deref() {
         Some("CCITTFaxDecode") => {
             let parms = stream.dict.get(b"DecodeParms");
             let sm_desc = decode_ccitt(stream.content.as_slice(), sm_w, sm_h, false, parms)?;
-            let (aw, ah) = (sm_desc.width, sm_desc.height);
-            let alpha = alpha_from_decoded("CCITTFaxDecode", &sm_desc)?;
-            return Some(scale_smask(alpha, aw, ah, img_w, img_h));
+            let samples = alpha_from_decoded("CCITTFaxDecode", &sm_desc)?;
+            (samples, sm_desc.width, sm_desc.height)
         }
         Some("JBIG2Decode") => {
             let parms = stream.dict.get(b"DecodeParms");
             let sm_desc = decode_jbig2(doc, stream.content.as_slice(), sm_w, sm_h, false, parms)?;
-            let (aw, ah) = (sm_desc.width, sm_desc.height);
-            let alpha = alpha_from_decoded("JBIG2Decode", &sm_desc)?;
-            return Some(scale_smask(alpha, aw, ah, img_w, img_h));
+            let samples = alpha_from_decoded("JBIG2Decode", &sm_desc)?;
+            (samples, sm_desc.width, sm_desc.height)
         }
-        Some("DCTDecode") => {
-            // decode_smask_dct returns (pixels, jpeg_w, jpeg_h) so we can use the
-            // JPEG-reported dimensions as the source size for scale_smask, mirroring
-            // the CCITTFax/JBIG2 pattern above.
-            let (dct_alpha, jw, jh) = decode_smask_dct(stream.content.as_slice(), sm_w, sm_h)?;
-            return Some(scale_smask(dct_alpha, jw, jh, img_w, img_h));
-        }
+        Some("DCTDecode") => decode_smask_dct(stream.content.as_slice(), sm_w, sm_h)?,
         Some("FlateDecode") => {
             let raw = stream.decompressed_content().ok()?;
-            decode_smask_raw_bytes(&raw, sm_w, sm_h, bpc)?
+            (decode_smask_raw_bytes(&raw, sm_w, sm_h, bpc)?, sm_w, sm_h)
         }
         None => {
             // No filter — raw (uncompressed) byte stream.
-            decode_smask_raw_bytes(stream.content.as_slice(), sm_w, sm_h, bpc)?
+            (
+                decode_smask_raw_bytes(stream.content.as_slice(), sm_w, sm_h, bpc)?,
+                sm_w,
+                sm_h,
+            )
         }
         Some(other) => {
             log::warn!("image: SMask filter {other:?} not supported — skipping image");
@@ -98,7 +94,11 @@ pub(super) fn decode_smask(
         }
     };
 
-    Some(scale_smask(alpha, sm_w, sm_h, img_w, img_h))
+    let alpha = apply_decode(
+        std::borrow::Cow::Owned(samples),
+        &parse_decode(&stream.dict, 1),
+    );
+    Some(scale_smask(alpha, aw, ah, img_w, img_h))
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -315,16 +315,20 @@ pub(super) fn decode_explicit_mask(
     let filter = stream.dict.get(b"Filter").and_then(filter_name);
 
     // Decode the stencil to ImageColorSpace::Mask bytes (0x00 = paint,
-    // 0xFF = transparent).  Each decoder folds the mask's own /Decode [1 0]
-    // inversion into its output.
+    // 0xFF = transparent), with the mask's own /Decode [1 0] inversion
+    // folded in: by the raw decoder itself, after the bilevel codecs.
     let desc = match filter.as_deref() {
         Some("JBIG2Decode") => {
             let parms = stream.dict.get(b"DecodeParms");
-            decode_jbig2(doc, stream.content.as_slice(), m_w, m_h, true, parms)?
+            let mut desc = decode_jbig2(doc, stream.content.as_slice(), m_w, m_h, true, parms)?;
+            apply_bilevel_decode(&mut desc, &stream.dict);
+            desc
         }
         Some("CCITTFaxDecode") => {
             let parms = stream.dict.get(b"DecodeParms");
-            decode_ccitt(stream.content.as_slice(), m_w, m_h, true, parms)?
+            let mut desc = decode_ccitt(stream.content.as_slice(), m_w, m_h, true, parms)?;
+            apply_bilevel_decode(&mut desc, &stream.dict);
+            desc
         }
         Some("FlateDecode") => {
             let raw = stream.decompressed_content().ok()?;
@@ -606,6 +610,19 @@ mod tests {
     /// A `/Mask` object that is *not* an `ImageMask` stencil must be rejected
     /// (returns `None`) so the caller blits the base image unmasked rather
     /// than mis-applying a non-stencil image as alpha.
+    /// An `SMask` stream's `/Decode [1 0]` inverts its samples before they
+    /// are read as alpha.
+    #[test]
+    fn smask_decode_array_inverts_alpha() {
+        let doc = crate::test_helpers::make_doc_with_stream(
+            &[0x00u8, 0xFF, 0x40],
+            " /Subtype /Image /Width 3 /Height 1 /BitsPerComponent 8 \
+              /ColorSpace /DeviceGray /Decode [1 0]",
+        );
+        let alpha = decode_smask(&doc, (2, 0), 3, 1).expect("raw 8-bpc SMask must decode");
+        assert_eq!(alpha, vec![0xFF, 0x00, 0xBF]);
+    }
+
     #[test]
     fn explicit_mask_rejects_non_imagemask() {
         let doc = crate::test_helpers::make_doc_with_stream(

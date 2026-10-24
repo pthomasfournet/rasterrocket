@@ -8,7 +8,7 @@
 use pdf::{Dictionary, Document, Object};
 
 use super::codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
-use super::raw::decode_raw;
+use super::raw::{apply_bilevel_decode, decode_raw};
 use super::{ImageDescriptor, ImageFilter, filter_name, is_transport_filter, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
@@ -181,7 +181,10 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
         },
         Some("CCITTFaxDecode") => {
             let decode_parms = super::terminal_decode_parms(&dict, chain_len);
-            decode_ccitt(&codec_input, w, h, is_mask, decode_parms)
+            decode_ccitt(&codec_input, w, h, is_mask, decode_parms).map(|mut img| {
+                apply_bilevel_decode(&mut img, &dict);
+                img
+            })
         }
         Some("DCTDecode") => {
             // GPU dispatch is threshold-gated inside decode_dct (same threshold as
@@ -221,7 +224,10 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
         }
         Some("JBIG2Decode") => {
             // Inline images cannot reference a JBIG2Globals stream (no object identity).
-            decode_jbig2(doc, &codec_input, w, h, is_mask, None)
+            decode_jbig2(doc, &codec_input, w, h, is_mask, None).map(|mut img| {
+                apply_bilevel_decode(&mut img, &dict);
+                img
+            })
         }
         Some(other) => {
             log::warn!("inline image: unknown filter {other:?}");
