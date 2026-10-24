@@ -363,6 +363,7 @@ mod tests {
             dpi: 300.0,
             effective_dpi: 300.0,
             diagnostics: crate::PageDiagnostics::default(),
+            spread_half: None,
         }
     }
 

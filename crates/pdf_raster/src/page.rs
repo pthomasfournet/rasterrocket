@@ -87,6 +87,7 @@ pub fn gray8_to_rendered_page(
         dpi,
         effective_dpi,
         diagnostics,
+        spread_half: None,
     }
 }
 

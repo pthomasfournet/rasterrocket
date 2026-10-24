@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use color::Rgb8;
+use color::{Gray8, Rgb8};
 use raster::Bitmap;
 
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"))]
@@ -1104,6 +1104,7 @@ pub fn render_pages(
     if let Some(e) = validate_opts(opts) {
         return PageIter {
             state: Some(Err(e)),
+            pending: None,
         };
     }
 
@@ -1123,6 +1124,7 @@ pub fn render_pages_from_bytes(
     if let Some(e) = validate_opts(opts) {
         return PageIter {
             state: Some(Err(e)),
+            pending: None,
         };
     }
 
@@ -1143,17 +1145,25 @@ fn page_iter_from_session(
         opts: opts.clone(),
     });
 
-    PageIter { state: Some(state) }
+    PageIter {
+        state: Some(state),
+        pending: None,
+    }
 }
 
 struct PageIter {
     state: Option<Result<RenderState, RasterError>>,
+    /// The right half of a split spread, yielded before the next page.
+    pending: Option<PageItem>,
 }
 
 impl Iterator for PageIter {
     type Item = (u32, Result<RenderedPage, RasterError>);
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(item) = self.pending.take() {
+            return Some(item);
+        }
         // Surface a deferred validation/open error exactly once, then close.
         if self.state.as_ref()?.is_err() {
             let err = self.state.take()?.err()?;
@@ -1167,7 +1177,28 @@ impl Iterator for PageIter {
             self.state = None;
             return None;
         };
-        Some((page_num, render_one(state, page_num)))
+        let (first, second) = into_items(page_num, render_one(state, page_num));
+        self.pending = second;
+        Some(first)
+    }
+}
+
+/// The pages of one source page, in delivery order: the page itself, or
+/// the left then right half of a split spread.
+type PageOutput = (RenderedPage, Option<RenderedPage>);
+
+/// One delivered item: a page number and its render outcome.
+type PageItem = (u32, Result<RenderedPage, RasterError>);
+
+/// Flatten one source page's outcome into its first delivered item and, for
+/// a split spread, the second.
+fn into_items(
+    page_num: u32,
+    outcome: Result<PageOutput, RasterError>,
+) -> (PageItem, Option<PageItem>) {
+    match outcome {
+        Ok((first, second)) => ((page_num, Ok(first)), second.map(|p| (page_num, Ok(p)))),
+        Err(e) => ((page_num, Err(e)), None),
     }
 }
 
@@ -1184,9 +1215,9 @@ impl std::iter::FusedIterator for PageIter {}
 ///
 /// Extracted as a generic helper so the panic-catch logic can be unit-tested
 /// by injecting an arbitrary render function.
-fn catch_page_panic<F>(page_num: u32, f: F) -> (u32, Result<RenderedPage, RasterError>)
+fn catch_page_panic<T, F>(page_num: u32, f: F) -> (u32, Result<T, RasterError>)
 where
-    F: FnOnce() -> Result<RenderedPage, RasterError> + std::panic::UnwindSafe,
+    F: FnOnce() -> Result<T, RasterError> + std::panic::UnwindSafe,
 {
     let result = std::panic::catch_unwind(f);
     let outcome = match result {
@@ -1213,10 +1244,7 @@ where
 /// `AssertUnwindSafe` is therefore sound: a caught panic cannot leave `state`
 /// or thread-local decoder slots in an inconsistent state that would corrupt
 /// subsequent pages.
-fn render_one_caught(
-    state: &RenderState,
-    page_num: u32,
-) -> (u32, Result<RenderedPage, RasterError>) {
+fn render_one_caught(state: &RenderState, page_num: u32) -> (u32, Result<PageOutput, RasterError>) {
     catch_page_panic(
         page_num,
         std::panic::AssertUnwindSafe(|| render_one(state, page_num)),
@@ -1264,8 +1292,14 @@ fn render_channel_worker(
         };
 
         while let Some(page_num) = state.next_in_range() {
-            let item = render_one_caught(&state, page_num);
-            if tx.send(item).is_err() {
+            let (pn, outcome) = render_one_caught(&state, page_num);
+            let (first, second) = into_items(pn, outcome);
+            if tx.send(first).is_err() {
+                return;
+            }
+            if let Some(item) = second
+                && tx.send(item).is_err()
+            {
                 return;
             }
         }
@@ -1321,9 +1355,11 @@ pub fn render_channel(
     rx
 }
 
-// ── Single-page render (gray + deskew) ───────────────────────────────────────
+// ── Single-page render (gray + camera cleanup + deskew) ──────────────────────
 
-fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, RasterError> {
+/// Render one source page: grayscale conversion, the camera stages, then
+/// deskew of each resulting page.
+fn render_one(state: &RenderState, page_num: u32) -> Result<PageOutput, RasterError> {
     let dpi = state.opts.dpi;
     let scale = f64::from(dpi) / 72.0;
 
@@ -1338,11 +1374,6 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
         geom,
         state.session.policy,
     )?;
-    let mut gray = rgb_to_gray(&rgb);
-
-    if state.opts.deskew {
-        crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
-    }
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -1351,13 +1382,27 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
     )]
     let effective_dpi = (f64::from(dpi) * geom.user_unit) as f32;
 
-    Ok(crate::page::gray8_to_rendered_page(
-        &gray,
-        page_num,
-        dpi,
-        effective_dpi,
-        diagnostics,
-    ))
+    let finish = |mut gray: Bitmap<Gray8>, half: Option<crate::SpreadHalf>| {
+        if state.opts.deskew {
+            crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
+        }
+        let mut page = crate::page::gray8_to_rendered_page(
+            &gray,
+            page_num,
+            dpi,
+            effective_dpi,
+            diagnostics.clone(),
+        );
+        page.spread_half = half;
+        Ok::<_, RasterError>(page)
+    };
+    match crate::camera::process(rgb_to_gray(&rgb), &state.opts.camera) {
+        (page, None) => Ok((finish(page, None)?, None)),
+        (left, Some(right)) => Ok((
+            finish(left, Some(crate::SpreadHalf::Left))?,
+            Some(finish(right, Some(crate::SpreadHalf::Right))?),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1374,6 +1419,7 @@ mod channel_tests {
             deskew: false,
             pages: None,
             strict: false,
+            camera: crate::CameraOptions::default(),
         }
     }
 
@@ -1441,6 +1487,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            camera: crate::CameraOptions::default(),
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1477,6 +1524,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            camera: crate::CameraOptions::default(),
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1536,6 +1584,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            camera: crate::CameraOptions::default(),
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -1582,6 +1631,7 @@ mod channel_tests {
             dpi: 72.0,
             effective_dpi: 72.0,
             diagnostics: crate::PageDiagnostics::default(),
+            spread_half: None,
         };
         let (pn, res) = catch_page_panic(3u32, move || -> Result<RenderedPage, RasterError> {
             Ok(dummy)
@@ -1607,6 +1657,7 @@ mod channel_tests {
                     dpi: 72.0,
                     effective_dpi: 72.0,
                     diagnostics: crate::PageDiagnostics::default(),
+                    spread_half: None,
                 })
             });
             results.push(item);
@@ -1704,6 +1755,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(set),
             strict: false,
+            camera: crate::CameraOptions::default(),
         }
     }
 
@@ -1716,6 +1768,7 @@ mod channel_tests {
             deskew: false,
             pages: None,
             strict: false,
+            camera: crate::CameraOptions::default(),
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -1736,6 +1789,7 @@ mod channel_tests {
             deskew: false,
             pages: None,
             strict: false,
+            camera: crate::CameraOptions::default(),
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));
