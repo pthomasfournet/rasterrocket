@@ -160,6 +160,7 @@ pub struct RasterOptions {
     pub last_page: u32,
     pub deskew: bool,
     pub pages: Option<PageSet>,
+    pub strict: bool,
 }
 ```
 
@@ -170,6 +171,7 @@ pub struct RasterOptions {
 | `last_page` | `≥ first_page` | 1-based inclusive. Clamped to document length silently. Ignored when `pages` is `Some`. |
 | `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
+| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`. When `false`, the image is skipped and listed in `PageDiagnostics::image_failures`. |
 
 **Default:** `RasterOptions` implements `Default`:
 
@@ -178,7 +180,7 @@ pub struct RasterOptions {
 let opts = RasterOptions { dpi: 150.0, ..RasterOptions::default() };
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`.
 
 ---
 
@@ -252,6 +254,16 @@ Collected at zero extra cost during rendering.
 | `has_vector_text` | `bool` | At least one text-showing operator (`Tj`, `TJ`, `'`, `"`) was executed. `false` on scan-only pages. |
 | `dominant_filter` | `Option<ImageFilter>` | Most common image decode filter on this page (`None` for pure-vector pages). |
 | `source_ppi_hint` | `Option<f32>` | Estimated native pixels-per-inch of the dominant image. Computed as `(image_width_px / page_width_pts) × 72`. `None` when no images were blitted. |
+| `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn. Each was skipped, so its region shows whatever was painted beneath. Empty on a complete render. Includes images inside tiling-pattern tiles. |
+
+```rust
+pub struct ImageFailure {
+    pub name: Option<String>,  // XObject resource name without '/', e.g. "Im0"; None for an inline image
+    pub reason: String,        // codec or blit error, prefixed by the filter where known, e.g. "FlateDecode: …"
+}
+```
+
+`ImageFailure` implements `Display` as `image /Im0: <reason>` or `inline image: <reason>`. Without `strict`, each failure is also logged at `warn` level as `page N: skipped …`.
 
 #### `PageDiagnostics::suggested_dpi`
 
@@ -316,12 +328,14 @@ pub struct SessionConfig {
     pub policy: BackendPolicy,
     pub vaapi_device: String,  // default: "/dev/dri/renderD128"
     // `prefetch: bool` exists only when `cache` feature is enabled
+    pub decrypt_authorized: bool,  // default: false
+    pub strict: bool,              // default: false
 }
 
 impl Default for SessionConfig { /* Auto policy, default DRM node */ }
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. Set `vaapi_device` to override the VA-API DRM render node (useful when `/dev/dri/renderD128` is not the correct device on your system).
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. Set `vaapi_device` to override the VA-API DRM render node (useful when `/dev/dri/renderD128` is not the correct device on your system). `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`.
 
 ---
 
@@ -375,6 +389,8 @@ pub enum RasterError {
 `PageAreaTooLarge` is distinct from `PageTooLarge`: each side can be within
 `MAX_PX_DIMENSION` while the product still exceeds `MAX_PX_AREA`. `RenderPanic`
 carries an isolated per-page panic so one bad page cannot abort a batch.
+
+`ImageDecodeFailed` is only returned under `strict`; it carries one message per failed image.
 
 Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when `SessionConfig.policy` is `ForceCuda` or `ForceVaapi`.
 

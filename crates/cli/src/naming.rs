@@ -94,6 +94,7 @@ mod tests {
             timings: false,
             backend: None,
             vaapi_device: "/dev/dri/renderD128".into(),
+            strict: false,
             ram: false,
             no_ram: false,
             ram_path: None,

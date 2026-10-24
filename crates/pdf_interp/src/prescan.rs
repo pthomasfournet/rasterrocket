@@ -142,6 +142,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         has_vector_text,
         dominant_filter,
         source_ppi_hint,
+        image_failures: Vec::new(),
     })
 }
 

@@ -380,9 +380,7 @@ impl PageRenderer<'_> {
                 } else {
                     // Inline image data is present by definition — None here is a
                     // genuine decode failure, not an absent resource.
-                    log::debug!("rasterrocket-interp: inline image decode failed");
-                    self.decode_errors
-                        .push("inline image: decode failed".to_owned());
+                    self.record_image_failure(None, "decode failed".to_owned());
                 }
             }
             Operator::PaintShading(name) => {

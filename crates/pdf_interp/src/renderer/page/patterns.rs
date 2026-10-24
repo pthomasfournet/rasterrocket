@@ -202,7 +202,7 @@ impl PageRenderer<'_> {
         // Account the tile's work against the shared page budget and propagate
         // any breach so the parent's execute() loop bails loudly on its next
         // iteration instead of rendering more pattern fills unbounded.
-        tile_renderer.fold_budget_into(self);
+        tile_renderer.fold_child_into(self);
         tile_renderer.finish().0
     }
 }

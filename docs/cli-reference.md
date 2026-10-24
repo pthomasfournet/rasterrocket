@@ -124,6 +124,7 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 | `--forcenum N` | — | Zero-pad page numbers to at least N digits (`001`, `002`, …). |
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |
 | `--timings` | off | Print per-page wall time and thread index to stderr for profiling. |
+| `--strict` | off | Fail a page when one of its images cannot be decoded or drawn. Without it the image is skipped, the page is written, and a warning naming the page and image goes to stderr. |
 
 ---
 
@@ -182,7 +183,7 @@ rrocket --backend vaapi --vaapi-device /dev/dri/renderD129 document.pdf out
 
 | Code | Meaning |
 |---|---|
-| `0` | All pages rendered successfully. |
+| `0` | All pages rendered. A page with a skipped image counts as rendered unless `--strict` is set; the warning is on stderr. |
 | `1` | One or more pages failed (errors printed to stderr), or invalid arguments. |
 
 ---

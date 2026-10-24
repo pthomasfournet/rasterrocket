@@ -49,6 +49,21 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
+### Unreleased
+
+**A broken image no longer costs its page.** Behaviour change; additive API.
+
+- An image that cannot be decoded or drawn is skipped and the page renders
+  without it. A warning names the page and image. The failure is reported in
+  the new `PageDiagnostics::image_failures`, which lists each image's name
+  and codec error. Images skipped inside tiling-pattern tiles are reported too.
+- New `RasterOptions::strict` / `SessionConfig::strict` and the `rrocket
+  --strict` flag keep the old behaviour: the page fails with
+  `RasterError::ImageDecodeFailed` and the CLI exits 1.
+- `RasterOptions` and `PageDiagnostics` each gain a public field, so code
+  that builds them with a struct literal and no `..Default::default()` needs
+  one more line.
+
 ### v1.4.1 (October 2026)
 
 **Lost pages and negative images.** No API change. Ten commits since v1.4.0.

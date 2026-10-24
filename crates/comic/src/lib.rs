@@ -300,6 +300,7 @@ fn render_embedded_pdf(
         last_page: opts.last_page,
         deskew: opts.deskew,
         pages: None,
+        strict: false,
     };
     let out: ComicPages = pdf_raster::raster_pdf_from_bytes(bytes, &ropts)
         .map(|(n, r)| (n, r.map_err(|e| ComicError::Pdf(e.to_string()))))

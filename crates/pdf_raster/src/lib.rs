@@ -9,7 +9,7 @@
 //! use std::path::Path;
 //! use rasterrocket::{RasterOptions, raster_pdf};
 //!
-//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, pages: None };
+//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, pages: None, strict: false };
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     match result {
 //!         Ok(page) => {
@@ -71,6 +71,7 @@
 //!     last_page: u32::MAX,
 //!     deskew: true,
 //!     pages: None,
+//!     strict: false,
 //! };
 //! let rx = render_channel(Path::new("scan.pdf"), &opts, 4); // 4-page buffer
 //! while let Ok((page_num, result)) = rx.recv() {
@@ -102,6 +103,7 @@
 //!     last_page: u32::MAX,  // ignored when pages is Some
 //!     deskew: true,
 //!     pages: Some(pages),
+//!     strict: false,
 //! };
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     // Only pages 1, 5, 23, and 100 are rendered — intermediates are skipped.
@@ -126,7 +128,7 @@ use std::path::Path;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
-pub use pdf_interp::renderer::PageDiagnostics;
+pub use pdf_interp::renderer::{ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
     RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
@@ -393,6 +395,13 @@ pub struct SessionConfig {
     /// private QA harness sets it unconditionally for its owned-texts
     /// automation.  No effect on unencrypted documents.
     pub decrypt_authorized: bool,
+    /// Whether an image that cannot be decoded or drawn fails its page.
+    ///
+    /// Default `false`: the image is skipped, the page renders without it,
+    /// a warning naming the page and image is logged, and the failure is
+    /// reported in [`PageDiagnostics::image_failures`].  When `true` the
+    /// page returns [`RasterError::ImageDecodeFailed`] instead.
+    pub strict: bool,
 }
 
 impl SessionConfig {
@@ -413,6 +422,7 @@ impl SessionConfig {
             #[cfg(feature = "cache")]
             prefetch: false,
             decrypt_authorized: false,
+            strict: false,
         }
     }
 }
@@ -555,6 +565,11 @@ pub struct RasterOptions {
     /// rendering.  When `None`, all pages in `first_page..=last_page` are
     /// rendered.
     pub pages: Option<PageSet>,
+
+    /// Whether an image that cannot be decoded or drawn fails its page; see
+    /// [`SessionConfig::strict`].  Default `false`: the image is skipped and
+    /// reported in [`PageDiagnostics::image_failures`].
+    pub strict: bool,
 }
 
 impl Default for RasterOptions {
@@ -565,6 +580,7 @@ impl Default for RasterOptions {
             last_page: u32::MAX,
             deskew: false,
             pages: None,
+            strict: false,
         }
     }
 }
@@ -791,6 +807,7 @@ mod page_set_tests {
             last_page: 5,
             deskew: false,
             pages: None,
+            strict: false,
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -818,6 +835,7 @@ mod page_set_tests {
             last_page: 5,
             deskew: false,
             pages: Some(ps),
+            strict: false,
         };
         assert!(opts.pages.is_some());
     }

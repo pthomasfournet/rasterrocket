@@ -265,6 +265,15 @@ pub(crate) struct Args {
     )]
     pub vaapi_device: String,
 
+    /// Fail a page when one of its images cannot be decoded or drawn.
+    ///
+    /// By default the image is skipped, the page is written without it, a
+    /// warning naming the page and image goes to stderr, and the exit status
+    /// is unaffected.  With `--strict` the page is not written and the run
+    /// exits 1.
+    #[arg(long = "strict")]
+    pub strict: bool,
+
     /// Prefetch image `XObject`s into the device-resident image cache at
     /// session open.  Only meaningful when the binary was built with the
     /// `cache` feature; ignored otherwise.  Off by default — the prefetch
@@ -468,6 +477,7 @@ impl Args {
 
         let mut config = SessionConfig::with_policy(policy);
         config.vaapi_device.clone_from(&self.vaapi_device);
+        config.strict = self.strict;
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -606,5 +616,15 @@ mod page_list_tests {
         args.single_file = true;
         let (pages, _) = args.build_page_list(10).unwrap();
         assert_eq!(pages, vec![1]);
+    }
+
+    #[test]
+    fn strict_flag_reaches_session_config() {
+        let lenient = base_args().session_config().unwrap();
+        assert!(!lenient.strict);
+        let strict = Args::parse_from(["rrocket", "--strict", "in.pdf", "out"])
+            .session_config()
+            .unwrap();
+        assert!(strict.strict);
     }
 }

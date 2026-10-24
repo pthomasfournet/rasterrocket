@@ -23,6 +23,22 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## On master (unreleased)
+
+**A broken image no longer costs its page.** Behaviour change for library
+users.
+
+- **Skip, don't drop.** An image that cannot be decoded or drawn used to fail
+  its whole page. Now the image is skipped, the rest of the page renders, a
+  warning names the page and image, and the failure is listed in the new
+  `PageDiagnostics::image_failures` (image name and codec error).
+- **Library callers that only check for `Err`** now receive these pages as
+  `Ok` with the image missing. To keep the old behaviour, set
+  `RasterOptions::strict` (or `SessionConfig::strict`). Otherwise, read
+  `image_failures`.
+- **CLI:** `rrocket` writes such pages and exits 0, with the warning on stderr.
+  `--strict` fails the page and exits 1, as before.
+
 ## What's new in v1.4.1
 
 **Lost pages and negative images.** No API change.

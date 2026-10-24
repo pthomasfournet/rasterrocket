@@ -65,8 +65,11 @@ pub enum RasterError {
     InvalidPageGeometry(String),
     /// A backend was required via [`BackendPolicy`] but could not be initialised.
     BackendUnavailable(String),
-    /// One or more images on the page failed to decode; the rendered page is
-    /// incomplete.  Carries the per-image failure messages.
+    /// One or more images on the page could not be decoded or drawn, and the
+    /// session is [strict](crate::SessionConfig::strict).  Carries one message
+    /// per failed image.  Without `strict` these are reported in
+    /// [`PageDiagnostics::image_failures`](crate::PageDiagnostics::image_failures)
+    /// and the page still renders.
     ImageDecodeFailed(Vec<String>),
     /// The page render was aborted because it exceeded the per-page operator
     /// budget or wall-clock deadline.  The page is pathological (e.g.
@@ -188,6 +191,9 @@ pub struct RasterSession {
     pub(crate) doc: Arc<pdf::Document>,
     pub(crate) total_pages: u32,
     pub(crate) policy: BackendPolicy,
+    /// Fail a page on an image failure instead of skipping the image
+    /// ([`crate::SessionConfig::strict`]).
+    pub(crate) strict: bool,
     /// VA-API DRM render node path. Retained in non-vaapi builds for forward
     /// compatibility; in vaapi builds the path is consumed during `open_session`
     /// to construct `vaapi_queue` and is not needed afterward.
@@ -511,6 +517,7 @@ fn open_session_with_doc(
         doc,
         total_pages,
         policy: config.policy,
+        strict: config.strict,
         #[cfg(not(feature = "vaapi"))]
         vaapi_device,
         #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
@@ -715,7 +722,6 @@ fn render_page_rgb_with_geom(
     geom: pdf_interp::PageGeometry,
     effective_policy: BackendPolicy,
 ) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
-    let _ = page_num; // kept for diagnostic / future tracing; resolution happens once at the entry point
     if !scale.is_finite() || scale <= 0.0 {
         return Err(RasterError::InvalidOptions(format!(
             "scale must be a positive finite number, got {scale}"
@@ -789,20 +795,23 @@ fn render_page_rgb_with_geom(
     guard.0.execute(&ops);
     guard.0.render_annotations(page_id);
     // Drop reclaims exactly once and releases the &mut borrow, so `renderer`
-    // is usable directly for the budget/decode-errors/finish tail below.
+    // is usable directly for the budget/image-failure/finish tail below.
     drop(guard);
 
-    // Budget exceeded is checked before decode_errors: a budget breach is more
-    // fundamental (the page may not have finished rendering at all), and the two
-    // conditions are mutually exclusive in practice.
+    // A budget breach takes precedence over image failures: the page may not
+    // have finished rendering at all.
     if let Some(reason) = renderer.budget_status() {
         return Err(RasterError::PageBudgetExceeded(reason.to_string()));
     }
 
-    if !renderer.decode_errors().is_empty() {
+    let failures = renderer.image_failures();
+    if session.strict && !failures.is_empty() {
         return Err(RasterError::ImageDecodeFailed(
-            renderer.decode_errors().to_vec(),
+            failures.iter().map(ToString::to_string).collect(),
         ));
+    }
+    for failure in failures {
+        log::warn!("page {page_num}: skipped {failure}");
     }
 
     Ok(renderer.finish())
@@ -1007,7 +1016,7 @@ fn reclaim_decoders(renderer: &mut pdf_interp::renderer::PageRenderer) {
 ///   pages on the same Rayon worker still find their decoder slots populated.
 /// - **normal success**: `drop(guard)` is called explicitly — the `&mut`
 ///   borrow is released and `renderer` is accessible directly for the
-///   `budget_status()`/`decode_errors()`/`finish()` tail.
+///   `budget_status()`/`image_failures()`/`finish()` tail.
 ///
 /// Reclaim is sound after a *partial* lend: each decoder's ensure+take+set is
 /// atomic per feature, so earlier features are fully lent and reclaim restores
@@ -1098,6 +1107,15 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
     None
 }
 
+/// The [`SessionConfig`] behind the [`RasterOptions`]-driven entry points:
+/// the default config with the per-call options that live on the session.
+fn session_config_for(opts: &RasterOptions) -> SessionConfig {
+    SessionConfig {
+        strict: opts.strict,
+        ..SessionConfig::default()
+    }
+}
+
 pub fn render_pages(
     path: &std::path::Path,
     opts: &RasterOptions,
@@ -1108,7 +1126,7 @@ pub fn render_pages(
         };
     }
 
-    let session = open_session(path, &SessionConfig::default());
+    let session = open_session(path, &session_config_for(opts));
     page_iter_from_session(session, opts)
 }
 
@@ -1127,7 +1145,7 @@ pub fn render_pages_from_bytes(
         };
     }
 
-    let session = open_session_from_bytes(bytes, &SessionConfig::default());
+    let session = open_session_from_bytes(bytes, &session_config_for(opts));
     page_iter_from_session(session, opts)
 }
 
@@ -1250,7 +1268,7 @@ fn render_channel_worker(
     opts: RasterOptions,
 ) {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let session = match open_session(path, &SessionConfig::default()) {
+        let session = match open_session(path, &session_config_for(&opts)) {
             Ok(s) => s,
             Err(e) => {
                 let _sent = tx.send((1, Err(e)));
@@ -1374,6 +1392,7 @@ mod channel_tests {
             last_page: 1,
             deskew: false,
             pages: None,
+            strict: false,
         }
     }
 
@@ -1440,6 +1459,7 @@ mod channel_tests {
             last_page: 100, // ignored when pages is Some
             deskew: false,
             pages: Some(ps),
+            strict: false,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1475,6 +1495,7 @@ mod channel_tests {
             last_page: 100,
             deskew: false,
             pages: Some(ps),
+            strict: false,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1533,6 +1554,7 @@ mod channel_tests {
             last_page: 0,  // would normally be rejected (< first_page after clamping)
             deskew: false,
             pages: Some(ps),
+            strict: false,
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -1700,6 +1722,7 @@ mod channel_tests {
             last_page: 0,
             deskew: false,
             pages: Some(set),
+            strict: false,
         }
     }
 
@@ -1711,6 +1734,7 @@ mod channel_tests {
             last_page: 5,
             deskew: false,
             pages: None,
+            strict: false,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -1730,6 +1754,7 @@ mod channel_tests {
             last_page: u32::MAX,
             deskew: false,
             pages: None,
+            strict: false,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));
@@ -1849,7 +1874,7 @@ mod decoder_reclaim_guard_tests {
         let guard = FakeGuard(&mut r);
         drop(guard);
         // `r` is usable again here — borrow was released — mirrors the
-        // decode_errors()/finish() tail in render_page_rgb_with_geom.
+        // image_failures()/finish() tail in render_page_rgb_with_geom.
         let _ = &r;
         assert_eq!(count(), 1, "must not double-reclaim after explicit drop");
     }

@@ -137,6 +137,30 @@ pub struct PageDiagnostics {
     ///
     /// `None` when no images were blitted or page geometry is unavailable.
     pub source_ppi_hint: Option<f32>,
+    /// Images that were present but could not be drawn.  Each one was skipped
+    /// and the page rendered without it, so the region it covers shows
+    /// whatever was painted beneath.  Empty on a complete render.
+    pub image_failures: Vec<ImageFailure>,
+}
+
+/// An image the renderer skipped because it could not be decoded or drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageFailure {
+    /// `XObject` resource name without the leading `/` (e.g. `Im0`); `None`
+    /// for an inline image.
+    pub name: Option<String>,
+    /// Codec or blit error, prefixed by the failing filter where known
+    /// (e.g. `FlateDecode: invalid distance`).
+    pub reason: String,
+}
+
+impl std::fmt::Display for ImageFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.name {
+            Some(name) => write!(f, "image /{name}: {}", self.reason),
+            None => write!(f, "inline image: {}", self.reason),
+        }
+    }
 }
 
 impl PageDiagnostics {
@@ -282,9 +306,10 @@ pub struct PageRenderer<'doc> {
     pub(super) pattern_depth: u32,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
-    /// Decode failures recorded during this page's render.  Non-empty means the
-    /// page is incomplete and the per-page `Result` must be an `Err`.
-    decode_errors: Vec<String>,
+    /// Resource name of the image `XObject` being drawn, set for the duration
+    /// of its blit so a blit failure is attributed to it; `None` while an
+    /// inline image is drawn.
+    current_image: Option<String>,
     /// Maximum operators this page may execute before the render is aborted.
     op_budget: u64,
     /// Absolute wall-clock deadline for this page render.
@@ -292,8 +317,7 @@ pub struct PageRenderer<'doc> {
     /// Number of operators executed so far this page.
     ops_executed: u64,
     /// Set to `Some(reason)` when the per-page budget is exceeded; `None` means ok.
-    /// Mirrors `decode_errors`: checked after `execute`, surfaces as `Err` in the
-    /// per-page result.
+    /// Checked after `execute`; surfaces as `Err` in the per-page result.
     budget_exceeded: Option<String>,
     /// Distinct unknown operator keywords already warned about this page,
     /// so a content stream that repeats an unsupported op doesn't flood the
@@ -539,7 +563,7 @@ impl<'doc> PageRenderer<'doc> {
             form_depth: 0,
             pattern_depth: 0,
             diag: PageDiagnostics::default(),
-            decode_errors: Vec::new(),
+            current_image: None,
             op_budget: MAX_PAGE_OPS,
             deadline: Some(
                 std::time::Instant::now()
@@ -719,13 +743,19 @@ impl<'doc> PageRenderer<'doc> {
         });
     }
 
-    /// Decode failures accumulated during this page's render.
-    ///
-    /// A non-empty slice means one or more images failed to decode; the rendered page
-    /// is incomplete.  The caller should check this **before** calling `finish()`.
+    /// Images skipped so far on this page; also returned in
+    /// [`PageDiagnostics::image_failures`] by [`finish`](Self::finish).
     #[must_use]
-    pub fn decode_errors(&self) -> &[String] {
-        &self.decode_errors
+    pub fn image_failures(&self) -> &[ImageFailure] {
+        &self.diag.image_failures
+    }
+
+    /// Record an image that could not be drawn.  The image is skipped and the
+    /// page render continues.
+    pub(super) fn record_image_failure(&mut self, name: Option<String>, reason: String) {
+        let failure = ImageFailure { name, reason };
+        log::debug!("rasterrocket-interp: skipped {failure}");
+        self.diag.image_failures.push(failure);
     }
 
     /// The per-page work-budget breach reason, if any.
@@ -735,8 +765,7 @@ impl<'doc> PageRenderer<'doc> {
     /// bitmap is partial and the per-page `Result` must be an `Err`.
     ///
     /// Check this after [`execute`](Self::execute) and before
-    /// [`finish`](Self::finish) — mirroring the
-    /// [`decode_errors`](Self::decode_errors) pattern.
+    /// [`finish`](Self::finish).
     #[must_use]
     pub fn budget_status(&self) -> Option<&str> {
         self.budget_exceeded.as_deref()
@@ -757,7 +786,7 @@ impl<'doc> PageRenderer<'doc> {
     /// its exact wall-clock `Instant` deadline (the same monotonic instant, so
     /// the deadline does not slide forward per child).  An already-tripped
     /// parent budget is inherited so the child does no work at all.  Call
-    /// [`fold_budget_into`](Self::fold_budget_into) on the parent afterwards to
+    /// [`fold_child_into`](Self::fold_child_into) on the parent afterwards to
     /// account for the work the child actually performed.
     pub(super) fn adopt_parent_budget(&mut self, parent: &Self) {
         // Remaining allowance = parent budget − parent ops already spent.
@@ -769,19 +798,24 @@ impl<'doc> PageRenderer<'doc> {
         self.budget_exceeded.clone_from(&parent.budget_exceeded);
     }
 
-    /// Fold a finished child renderer's watchdog consumption back into this
-    /// (parent) renderer so the shared per-page budget keeps accounting for
-    /// work done inside sub-renders (tiling-pattern tiles).
+    /// Fold a finished child renderer (a tiling-pattern tile) into its
+    /// parent: its watchdog consumption, so the shared per-page budget keeps
+    /// accounting for work done inside sub-renders, and its skipped images,
+    /// so they are reported on the page.
     ///
     /// Without this the parent's `ops_executed` would not reflect the child's
     /// work and a sequence of expensive pattern fills would never trip the
     /// page budget.  A budget breach inside the child is propagated verbatim
     /// so the outer `execute()` bails loudly on its next iteration.
-    pub(super) fn fold_budget_into(&self, parent: &mut Self) {
+    pub(super) fn fold_child_into(&self, parent: &mut Self) {
         parent.ops_executed = parent.ops_executed.saturating_add(self.ops_executed);
         if parent.budget_exceeded.is_none() && self.budget_exceeded.is_some() {
             parent.budget_exceeded.clone_from(&self.budget_exceeded);
         }
+        parent
+            .diag
+            .image_failures
+            .extend(self.diag.image_failures.iter().cloned());
     }
 
     /// Override the operator-count budget.  Test-only — used to trigger the
@@ -1247,8 +1281,8 @@ impl<'doc> PageRenderer<'doc> {
     /// Dispatch on an [`ImageResolution`] returned from [`PageResources::image`].
     ///
     /// - `Ok` → blit the image.
-    /// - `DecodeFailed` → record the error in `decode_errors` so the caller can
-    ///   surface it; the pixel region is left as-is (white background).
+    /// - `DecodeFailed` → record the failure in the page diagnostics and skip
+    ///   the image; the pixel region keeps what was painted beneath it.
     /// - `Absent` → log a debug message and skip silently (nothing to draw).
     fn handle_image_resolution(
         &mut self,
@@ -1261,13 +1295,12 @@ impl<'doc> PageRenderer<'doc> {
                 image,
                 source_width,
             } => {
+                self.current_image = Some(String::from_utf8_lossy(name).into_owned());
                 self.blit_image(&image, source_width);
+                self.current_image = None;
             }
             ImageResolution::DecodeFailed(msg) => {
-                let name_str = String::from_utf8_lossy(name);
-                log::debug!("rasterrocket-interp: Do /{name_str} decode failed: {msg}");
-                self.decode_errors
-                    .push(format!("page image /{name_str}: {msg}"));
+                self.record_image_failure(Some(String::from_utf8_lossy(name).into_owned()), msg);
             }
             ImageResolution::Absent => {
                 log::debug!(
@@ -1558,11 +1591,12 @@ impl<'doc> PageRenderer<'doc> {
             // bytes to fall back to.  The image decoded successfully but
             // cannot be rendered: this is the same silent-blank class the
             // `ImageResolution` contract eradicates upstream, so record it
-            // on `decode_errors` to surface as a per-page `Err` rather than
-            // dropping the image with only a log line.
-            log::debug!("blit_image: GPU image-blit failed with no host fallback bytes");
-            self.decode_errors
-                .push("page image: GPU blit failed, no host fallback".to_owned());
+            // as an image failure rather than dropping the image with only a
+            // log line.
+            self.record_image_failure(
+                self.current_image.clone(),
+                "GPU blit failed, no host fallback".to_owned(),
+            );
             return;
         }
 
@@ -1570,10 +1604,10 @@ impl<'doc> PageRenderer<'doc> {
         let Some(img_bytes) = img.data.as_cpu() else {
             // Decoded pixels exist but are device-resident with no GPU
             // dispatch available to blit them — unrenderable, not absent.
-            // Surface as a decode failure (silent-blank parity).
-            log::debug!("blit_image: image data not host-resident and GPU dispatch unavailable");
-            self.decode_errors
-                .push("page image: pixels device-resident but GPU dispatch unavailable".to_owned());
+            self.record_image_failure(
+                self.current_image.clone(),
+                "pixels device-resident but GPU dispatch unavailable".to_owned(),
+            );
             return;
         };
         // Decoder contract: bytes.len() == width × height × bpp.  Promote
@@ -1588,20 +1622,18 @@ impl<'doc> PageRenderer<'doc> {
                 // A decoder-contract violation on an image the codec
                 // reported as decoded — surface, never silently blank.
                 let msg = format!(
-                    "page image: dimensions overflow usize ({}×{}×{bpp} bpp)",
+                    "dimensions overflow usize ({}×{}×{bpp} bpp)",
                     img.width, img.height,
                 );
-                log::debug!("blit_image: {msg}");
-                self.decode_errors.push(msg);
+                self.record_image_failure(self.current_image.clone(), msg);
                 return;
             }
             Err(ImageLenError::ShortBuffer { expected }) => {
                 let msg = format!(
-                    "page image: decoder produced short buffer ({} bytes, expected {expected})",
+                    "decoder produced short buffer ({} bytes, expected {expected})",
                     img_bytes.len(),
                 );
-                log::debug!("blit_image: {msg}");
-                self.decode_errors.push(msg);
+                self.record_image_failure(self.current_image.clone(), msg);
                 return;
             }
         }
@@ -2375,8 +2407,40 @@ mod tests {
     /// pattern content stream escape the per-page watchdog entirely.  This
     /// pins both halves of the contract: `adopt_parent_budget` carries the
     /// parent's *remaining* allowance + exact deadline (and inherits an
-    /// already-tripped breach), and `fold_budget_into` rolls the child's
+    /// already-tripped breach), and `fold_child_into` rolls the child's
     /// consumption and any breach back into the parent.
+    /// An image skipped inside a child renderer (a tiling-pattern tile) is
+    /// reported on the page that owns the tile.
+    #[test]
+    fn child_image_failures_fold_into_parent() {
+        use crate::test_helpers::empty_doc;
+
+        let doc = empty_doc();
+        let mut parent =
+            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        parent.record_image_failure(Some("Im0".to_owned()), "parent".to_owned());
+        let mut child =
+            PageRenderer::new(1, 1, &doc, (1, 0)).expect("renderer construction must not fail");
+        child.record_image_failure(None, "child".to_owned());
+
+        child.fold_child_into(&mut parent);
+
+        let reasons: Vec<_> = parent
+            .finish()
+            .1
+            .image_failures
+            .into_iter()
+            .map(|f| (f.name, f.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (Some("Im0".to_owned()), "parent".to_owned()),
+                (None, "child".to_owned())
+            ]
+        );
+    }
+
     #[test]
     fn watchdog_budget_shared_with_child_renderer() {
         use crate::content::Operator;
@@ -2418,7 +2482,7 @@ mod tests {
 
         // Folding back: parent's counter advances by the child's work and the
         // breach propagates so the parent's execute() bails loudly next.
-        child.fold_budget_into(&mut parent);
+        child.fold_child_into(&mut parent);
         assert!(
             parent.ops_executed_for_test() >= 90 + 11,
             "parent must account the child's work, got {}",
