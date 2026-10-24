@@ -1,6 +1,6 @@
 //! PDF dictionary newtype.
 //!
-//! Wraps a `HashMap<Vec<u8>, Object>` with lopdf-compatible accessors
+//! Wraps a `HashMap<Vec<u8>, Object>` with byte-slice accessors
 //! (`get(&[u8]) -> Option<&Object>`, `set(K, V)`, etc.) so call sites can use
 //! byte literals (`dict.get(b"Type")`) without manual `.as_ref()`.
 
@@ -45,9 +45,9 @@ impl Dictionary {
         self.0.insert(key, value)
     }
 
-    /// Insert with a string-like key (for ergonomics in tests).
+    /// Insert with a string-like key, replacing any previous value.
     pub fn set<K: AsRef<[u8]>>(&mut self, key: K, value: Object) {
-        self.0.insert(key.as_ref().to_vec(), value);
+        let _ = self.0.insert(key.as_ref().to_vec(), value);
     }
 
     /// Remove and return.
@@ -68,11 +68,13 @@ impl Dictionary {
     }
 
     /// Iterate over `(&key, &value)`.
+    #[must_use]
     pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Vec<u8>, Object> {
         self.0.iter()
     }
 
     /// Iterate over keys.
+    #[must_use]
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, Vec<u8>, Object> {
         self.0.keys()
     }
@@ -98,6 +100,11 @@ impl From<HashMap<Vec<u8>, Object>> for Dictionary {
     }
 }
 
+#[expect(
+    clippy::implicit_hasher,
+    reason = "the dictionary stores a default-hasher map; this conversion \
+              moves that map out without rehashing"
+)]
 impl From<Dictionary> for HashMap<Vec<u8>, Object> {
     fn from(d: Dictionary) -> Self {
         d.0

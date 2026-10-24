@@ -1,7 +1,11 @@
+//! Error type returned by every fallible parser operation.
+
 use std::fmt;
 
+/// Failure to open, parse or decode a PDF document.
 #[derive(Debug)]
 pub enum PdfError {
+    /// Reading the input file failed.
     Io(std::io::Error),
     /// xref table or stream could not be found or parsed.
     BadXref(String),
@@ -19,7 +23,9 @@ pub enum PdfError {
     MissingXref(String),
     /// An indirect object could not be parsed at its declared offset.
     BadObject {
+        /// Object number of the object that failed.
         id: u32,
+        /// Description of the failure.
         detail: String,
     },
     /// A required dictionary key was missing or had the wrong type.
@@ -30,7 +36,9 @@ pub enum PdfError {
     NoPages,
     /// Requested page number is out of range.
     PageOutOfRange {
+        /// The requested page.
         page: u32,
+        /// Number of pages in the document.
         total: u32,
     },
     /// The document is encrypted (PDF Standard Security Handler) and could

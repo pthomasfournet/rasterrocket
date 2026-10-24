@@ -55,8 +55,10 @@ pub fn msg_gate_declined() -> String {
 }
 
 /// RAII guard that owns a qpdf-decrypted temporary file and removes it on
-/// drop.  The decrypted PDF must outlive the memory map taken over it, so
-/// the [`crate::Document`] holds this guard for its whole lifetime.
+/// drop.
+///
+/// The decrypted PDF must outlive the memory map taken over it, so the
+/// [`crate::Document`] holds this guard for its whole lifetime.
 ///
 /// Backed by `tempfile::NamedTempFile`, whose own `Drop` unlinks the file;
 /// the guard wrapper exists so the type can be stored opaquely and so the
@@ -102,7 +104,7 @@ impl DecryptGuard {
 /// - [`PdfError::EncryptedDocument`] if qpdf exits non-zero (password-
 ///   protected or otherwise undecryptable).
 /// - [`PdfError::Io`] if the temp file could not be created.
-pub fn qpdf_decrypt_to_temp(input: &Path) -> Result<(PathBuf, DecryptGuard), PdfError> {
+pub(crate) fn qpdf_decrypt_to_temp(input: &Path) -> Result<(PathBuf, DecryptGuard), PdfError> {
     // Argument-injection hardening: qpdf takes its input as a bare
     // positional argument and (as of 11.x) honours NO `--`
     // end-of-options separator, so a path whose first byte is `-`
@@ -151,7 +153,7 @@ pub fn qpdf_decrypt_to_temp(input: &Path) -> Result<(PathBuf, DecryptGuard), Pdf
     // decrypted copy is still usable).  Anything else (notably 2 =
     // invalid password) is a hard failure.
     let code = output.status.code();
-    if !matches!(code, Some(0) | Some(3)) {
+    if !matches!(code, Some(0 | 3)) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PdfError::EncryptedDocument(msg_password_protected(&stderr)));
     }
@@ -190,7 +192,7 @@ pub fn qpdf_decrypt_to_temp(input: &Path) -> Result<(PathBuf, DecryptGuard), Pdf
 /// # Errors
 /// Propagates [`qpdf_decrypt_to_temp`]'s errors, plus the gate-declined
 /// [`PdfError::EncryptedDocument`].
-pub fn resolve_source(
+pub(crate) fn resolve_source(
     original: &Path,
     is_encrypted: bool,
     authorized: bool,

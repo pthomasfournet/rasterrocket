@@ -42,7 +42,7 @@ impl LinearizationHints {
     /// stable when the hint-stream parser ships and gains real failure
     /// modes (truncated stream, bad bit-widths, …).
     pub fn try_load(doc: &Document) -> Result<Option<Self>, PdfError> {
-        let Some(lin_obj) = find_linearized_object(doc)? else {
+        let Some(lin_obj) = find_linearized_object(doc) else {
             return Ok(None);
         };
         let Some(lin_dict) = lin_obj.as_dict() else {
@@ -60,21 +60,11 @@ impl LinearizationHints {
 }
 
 /// Object 1 of a linearized PDF is the `/Linearized` dict.  Probe it; any
-/// failure to read or destructure that object collapses to `Ok(None)` —
-/// non-linearized PDFs reach this code path and we don't surface their
-/// (perfectly valid) absence as an error.
-fn find_linearized_object(doc: &Document) -> Result<Option<std::sync::Arc<Object>>, PdfError> {
-    let Ok(obj) = doc.get_object((1, 0)) else {
-        return Ok(None);
-    };
-    let Some(dict) = obj.as_dict() else {
-        return Ok(None);
-    };
-    if dict.contains_key(b"Linearized") {
-        Ok(Some(obj))
-    } else {
-        Ok(None)
-    }
+/// failure to read or destructure that object yields `None`, since a
+/// non-linearized PDF is not an error.
+fn find_linearized_object(doc: &Document) -> Option<std::sync::Arc<Object>> {
+    let obj = doc.get_object((1, 0)).ok()?;
+    obj.as_dict()?.contains_key(b"Linearized").then_some(obj)
 }
 
 /// Pure parsing of a `/Linearized` dict into `LinearizationHints`.
@@ -134,7 +124,7 @@ startxref\n180\n%%EOF"
 
     /// Object 1 in a linearized PDF is the linearization dict, not the
     /// catalog.  Construct a synthetic PDF where object 1 has /Linearized
-    /// plus the minimum required keys, and verify try_load returns Some.
+    /// plus the minimum required keys, and verify `try_load` returns Some.
     /// The rest of the document need not be a "valid" linearized PDF;
     /// `try_load` only inspects object 1.
     #[test]

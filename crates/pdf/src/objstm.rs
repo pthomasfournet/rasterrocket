@@ -42,7 +42,10 @@ impl ObjStmCache {
         stream_dict: &Dictionary,
     ) -> Result<Object, PdfError> {
         // Poison recovery: cache stores immutable parses, safe to reuse.
-        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if let Some(objects) = guard.get(&container_id) {
             let objects = Arc::clone(objects);
@@ -64,19 +67,19 @@ impl ObjStmCache {
             })?;
 
         // Parse the object stream directory: N pairs of (obj_num, byte_offset).
-        let n = bounded_dict_int(stream_dict, b"N", 0, 1_000_000).map_err(|detail| {
+        let n = bounded_dict_usize(stream_dict, b"N", 1_000_000).map_err(|detail| {
             PdfError::BadObject {
                 id: container_id,
                 detail,
             }
-        })? as usize;
+        })?;
 
-        let first = bounded_dict_int(stream_dict, b"First", 0, i64::MAX).map_err(|detail| {
+        let first = bounded_dict_usize(stream_dict, b"First", usize::MAX).map_err(|detail| {
             PdfError::BadObject {
                 id: container_id,
                 detail,
             }
-        })? as usize;
+        })?;
 
         let objects =
             parse_objstm_objects(&decoded, n, first).map_err(|detail| PdfError::BadObject {
@@ -85,7 +88,7 @@ impl ObjStmCache {
             })?;
 
         let arc = Arc::new(objects);
-        guard.insert(container_id, Arc::clone(&arc));
+        let _ = guard.insert(container_id, Arc::clone(&arc));
         drop(guard);
 
         arc.get(index as usize)
@@ -98,15 +101,16 @@ impl ObjStmCache {
 }
 
 /// Read an integer dict entry (defaulting to 0 if absent), enforcing
-/// `min..=max`. Returns the offending value formatted into the error message.
-fn bounded_dict_int(dict: &Dictionary, key: &[u8], min: i64, max: i64) -> Result<i64, String> {
+/// `0..=max`. Returns the offending value formatted into the error message.
+fn bounded_dict_usize(dict: &Dictionary, key: &[u8], max: usize) -> Result<usize, String> {
     let value = dict.get(key).and_then(Object::as_i64).unwrap_or(0);
-    if (min..=max).contains(&value) {
-        Ok(value)
-    } else {
-        let key_str = String::from_utf8_lossy(key);
-        Err(format!("/{key_str}={value} out of range [{min}, {max}]"))
-    }
+    usize::try_from(value)
+        .ok()
+        .filter(|&v| v <= max)
+        .ok_or_else(|| {
+            let key_str = String::from_utf8_lossy(key);
+            format!("/{key_str}={value} out of range [0, {max}]")
+        })
 }
 
 /// Parse all N objects from a decompressed object stream.
@@ -127,10 +131,10 @@ fn parse_objstm_objects(data: &[u8], n: usize, first: usize) -> Result<Vec<Objec
             .ok_or_else(|| format!("ObjStm directory: missing object number at pos {pos}"))?;
         skip_ws(data, &mut pos);
         let rel_off = parse_u64(data, &mut pos)
-            .ok_or_else(|| format!("ObjStm directory: missing offset at pos {pos}"))?
-            as usize;
-        let abs_off = first
-            .checked_add(rel_off)
+            .ok_or_else(|| format!("ObjStm directory: missing offset at pos {pos}"))?;
+        let abs_off = usize::try_from(rel_off)
+            .ok()
+            .and_then(|rel| first.checked_add(rel))
             .ok_or_else(|| format!("ObjStm: offset overflow first={first} rel={rel_off}"))?;
         if abs_off > data.len() {
             return Err(format!(

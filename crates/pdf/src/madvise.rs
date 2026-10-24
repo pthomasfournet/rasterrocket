@@ -1,8 +1,9 @@
 //! Kernel-hint helpers for the `Document` mmap.
 //!
-//! All helpers are no-ops on platforms without `posix_fadvise`.  The `pdf`
-//! crate enforces `unsafe_code = "deny"`; we use `rustix` for safe syscall
-//! wrappers.
+//! All helpers are no-ops on non-Unix platforms.  The syscalls go through
+//! `rustix`'s safe wrappers, so this module contains no `unsafe` code (the
+//! crate denies `unsafe_code`; the one exception is the file mapping in
+//! `document.rs`).
 //!
 //! The hints are advisory.  A wrong hint never causes a correctness issue;
 //! the worst outcome is suboptimal kernel page-cache behaviour.
@@ -21,7 +22,7 @@ use rustix::fs::{Advice, fadvise};
 ///
 /// The `len` argument is `None`, which the kernel interprets as "to EOF".
 #[cfg(unix)]
-pub fn advise_random(file: &File) {
+pub(crate) fn advise_random(file: &File) {
     let _ = fadvise(file, 0, None, Advice::Random);
 }
 
@@ -41,7 +42,7 @@ pub fn advise_random(file: &File) {
         reason = "exposed for content-stream prefetch; not yet wired in lib builds"
     )
 )]
-pub fn advise_willneed(file: &File, offset: u64, len: u64) {
+pub(crate) fn advise_willneed(file: &File, offset: u64, len: u64) {
     let Some(nz_len) = std::num::NonZeroU64::new(len) else {
         return;
     };
@@ -49,9 +50,9 @@ pub fn advise_willneed(file: &File, offset: u64, len: u64) {
 }
 
 #[cfg(not(unix))]
-pub fn advise_random(_: &std::fs::File) {}
+pub(crate) fn advise_random(_: &std::fs::File) {}
 #[cfg(not(unix))]
-pub fn advise_willneed(_: &std::fs::File, _: u64, _: u64) {}
+pub(crate) fn advise_willneed(_: &std::fs::File, _: u64, _: u64) {}
 
 #[cfg(all(test, unix))]
 mod tests {

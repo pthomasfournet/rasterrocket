@@ -14,7 +14,7 @@ use crate::{
     dictionary::Dictionary,
     error::PdfError,
     lexer::{is_ws, parse_u64, skip_ws},
-    object::{Object, ObjectId, parse_indirect_object, parse_object},
+    object::{Object, ObjectId, Stream, parse_indirect_object, parse_object},
 };
 
 /// Where to find an indirect object in the file.
@@ -29,7 +29,7 @@ pub(crate) enum XrefEntry {
         generation: u16,
     },
     /// Object is inside an object stream; `container` is the object number of
-    /// the ObjStm, `index` is the 0-based position within it.
+    /// the `ObjStm`, `index` is the 0-based position within it.
     InObjStm { container: u32, index: u32 },
 }
 
@@ -61,15 +61,12 @@ pub(crate) fn read_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         // to a catalogue).  Try the repair scan as a *bonus*: only adopt it
         // when it yields something better, otherwise keep the strict table
         // so existing higher-level diagnostics are unchanged.
-        Ok(strict_table) => match reconstruct_xref(data) {
-            Ok(rebuilt) => Ok(rebuilt),
-            Err(_) => Ok(strict_table),
-        },
+        Ok(strict_table) => Ok(reconstruct_xref(data).unwrap_or(strict_table)),
         // Strict parse failed outright (no startxref, bad offset, …).  Many
         // real-world "broken" PDFs — interrupted writes, hand-edited files,
         // naive concatenations — still contain intact object bodies and a
-        // recoverable catalogue.  Mirror mutool/poppler: scan the body for
-        // object headers and rebuild.  If repair also fails, surface the
+        // recoverable catalogue, so scan the body for object headers and
+        // rebuild.  If repair also fails, surface the
         // original strict diagnostic (the more actionable of the two).
         Err(strict_err) => reconstruct_xref(data).map_err(|_| strict_err),
     }
@@ -109,11 +106,10 @@ fn reconstruct_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         if data[i] == b'o' && data[i..].starts_with(b"obj") {
             // Ensure "obj" is a token boundary (followed by ws/EOF/delim).
             let after = data.get(i + 3).copied();
-            let token_end = after
-                .map(|b| is_ws(b) || b == b'<' || b == b'[' || b == b'(' || b == b'/')
-                .unwrap_or(true);
+            let token_end =
+                after.is_none_or(|b| is_ws(b) || b == b'<' || b == b'[' || b == b'(' || b == b'/');
             if token_end && let Some((id, header_start)) = scan_obj_header_backwards(data, i) {
-                table.entries.insert(
+                let _ = table.entries.insert(
                     id.0,
                     XrefEntry::Direct {
                         offset: header_start as u64,
@@ -145,7 +141,7 @@ fn reconstruct_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         table.trailer = dict;
     } else if let Some(root) = find_catalog_object(data, &table) {
         let mut t = Dictionary::new();
-        t.insert(b"Root".to_vec(), Object::Reference(root));
+        t.set(b"Root", Object::Reference(root));
         table.trailer = t;
     } else {
         return Err(PdfError::MissingXref(
@@ -216,7 +212,7 @@ fn find_last_trailer_dict(data: &[u8]) -> Option<Dictionary> {
 /// replaced the catalogue, or a stale copy left by a partial overwrite) the
 /// one at the *highest file offset* wins: that is the last-written
 /// definition, the same incremental-update rule the object scan and the
-/// `trailer` recovery already follow.  Iterating the `entries` HashMap and
+/// `trailer` recovery already follow.  Iterating the `entries` map and
 /// returning the first match would be non-deterministic and could resurrect
 /// a stale catalogue — a silent-wrong recovery.
 fn find_catalog_object(data: &[u8], table: &XrefTable) -> Option<ObjectId> {
@@ -225,10 +221,12 @@ fn find_catalog_object(data: &[u8], table: &XrefTable) -> Option<ObjectId> {
         let XrefEntry::Direct { offset, generation } = entry else {
             continue;
         };
-        let off = *offset as usize;
-        if off >= data.len() {
+        let Some(off) = usize::try_from(*offset)
+            .ok()
+            .filter(|&off| off < data.len())
+        else {
             continue;
-        }
+        };
         if let Some((_, Object::Dictionary(d))) = parse_indirect_object(data, off)
             && d.get(b"Type").and_then(Object::as_name) == Some(b"Catalog")
             && d.get(b"Pages").is_some()
@@ -249,12 +247,11 @@ fn read_xref_at(
     if !visited.insert(offset) {
         return Ok(()); // Cycle detected — stop.
     }
-    let off = offset as usize;
-    if off >= data.len() {
+    let Some(off) = usize::try_from(offset).ok().filter(|&off| off < data.len()) else {
         return Err(PdfError::BadXref(format!(
             "offset {offset} beyond end of file"
         )));
-    }
+    };
 
     // Detect format: "xref" keyword → traditional table; anything else must be
     // an indirect object (the xref stream).
@@ -287,21 +284,20 @@ fn read_traditional_xref(
         let first_raw = parse_u64(data, &mut pos).ok_or_else(|| {
             PdfError::BadXref("expected object number in subsection header".into())
         })?;
-        if first_raw > u64::from(u32::MAX) {
-            return Err(PdfError::BadXref(format!(
+        let first = u32::try_from(first_raw).map_err(|_| {
+            PdfError::BadXref(format!(
                 "subsection first object {first_raw} exceeds u32::MAX"
-            )));
-        }
-        let first = first_raw as u32;
+            ))
+        })?;
         skip_ws(data, &mut pos);
         let count = parse_u64(data, &mut pos)
             .ok_or_else(|| PdfError::BadXref("expected count in subsection header".into()))?;
         // Sanity cap: no real PDF has more than 10 M objects.
-        if count > 10_000_000 {
+        let Some(count) = u32::try_from(count).ok().filter(|&c| c <= 10_000_000) else {
             return Err(PdfError::BadXref(format!(
                 "xref subsection count {count} exceeds sanity limit"
             )));
-        }
+        };
         // Consume the line ending after the subsection header.
         while pos < data.len() && matches!(data[pos], b'\r' | b'\n') {
             pos += 1;
@@ -326,7 +322,7 @@ fn read_traditional_xref(
                 pos += 1;
             }
 
-            let obj_num = first.checked_add(i as u32).ok_or_else(|| {
+            let obj_num = first.checked_add(i).ok_or_else(|| {
                 PdfError::BadXref(format!("object number overflow: first={first} i={i}"))
             })?;
             // Only insert if not already present (newer xref sections win).
@@ -336,7 +332,7 @@ fn read_traditional_xref(
                 && let Ok(generation) = u16::try_from(generation)
                 && !table.entries.contains_key(&obj_num)
             {
-                table
+                let _ = table
                     .entries
                     .insert(obj_num, XrefEntry::Direct { offset, generation });
             }
@@ -377,12 +373,10 @@ fn parse_trailer_dict(
 
     // Handle hybrid files: /XRefStm points to an additional xref stream.
     if let Some(Object::Integer(xrefstm)) = dict.get(b"XRefStm")
-        && *xrefstm > 0
+        && let Some(stm_off) = positive_offset(*xrefstm)
+        && !visited.contains(&stm_off)
     {
-        let stm_off = *xrefstm as u64;
-        if !visited.contains(&stm_off) {
-            read_xref_at(data, stm_off, table, visited)?;
-        }
+        read_xref_at(data, stm_off, table, visited)?;
     }
 
     Ok(())
@@ -400,15 +394,21 @@ fn merge_trailer_and_chain(
 ) -> Result<(), PdfError> {
     for (k, v) in dict {
         if !table.trailer.contains_key(k) {
-            table.trailer.insert(k.clone(), v.clone());
+            let _ = table.trailer.insert(k.clone(), v.clone());
         }
     }
     if let Some(Object::Integer(prev)) = dict.get(b"Prev")
-        && *prev > 0
+        && let Some(prev) = positive_offset(*prev)
     {
-        read_xref_at(data, *prev as u64, table, visited)?;
+        read_xref_at(data, prev, table, visited)?;
     }
     Ok(())
+}
+
+/// A `/Prev` or `/XRefStm` value as a byte offset; zero and negative values
+/// mean "no such section".
+fn positive_offset(n: i64) -> Option<u64> {
+    u64::try_from(n).ok().filter(|&off| off > 0)
 }
 
 // ── Cross-reference stream (PDF 1.5+) ────────────────────────────────────────
@@ -422,9 +422,9 @@ fn read_xref_stream(
     // Parse the indirect object header: "<id> <gen> obj"
     let mut pos = start;
     skip_ws(data, &mut pos);
-    parse_u64(data, &mut pos); // object number — discard
+    let _ = parse_u64(data, &mut pos); // object number — discard
     skip_ws(data, &mut pos);
-    parse_u64(data, &mut pos); // generation — discard
+    let _ = parse_u64(data, &mut pos); // generation — discard
     skip_ws(data, &mut pos);
     if !data[pos..].starts_with(b"obj") {
         return Err(PdfError::BadXref(format!(
@@ -437,21 +437,21 @@ fn read_xref_stream(
     // parse_object returns Object::Stream when it finds the "stream" keyword.
     let dict_obj = parse_object(data, &mut pos)
         .ok_or_else(|| PdfError::BadXref("could not parse xref stream dict".into()))?;
-    let (dict, raw_stream) = match dict_obj {
-        Object::Stream(s) => (s.dict, s.content),
-        _ => {
-            return Err(PdfError::BadXref(
-                "xref stream object is not a Stream".into(),
-            ));
-        }
+    let Object::Stream(Stream {
+        dict,
+        content: raw_stream,
+    }) = dict_obj
+    else {
+        return Err(PdfError::BadXref(
+            "xref stream object is not a Stream".into(),
+        ));
     };
-    // Decode the stream (almost always FlateDecode).
+    // Decode the stream (almost always `FlateDecode`).
     let stream_bytes = decode_xref_stream(&raw_stream, &dict)?;
 
     // Read /W field widths.
-    let w = match dict.get(b"W") {
-        Some(Object::Array(a)) => a,
-        _ => return Err(PdfError::BadXref("xref stream: missing /W array".into())),
+    let Some(Object::Array(w)) = dict.get(b"W") else {
+        return Err(PdfError::BadXref("xref stream: missing /W array".into()));
     };
     if w.len() < 3 {
         return Err(PdfError::BadXref("xref stream: /W needs 3 entries".into()));
@@ -467,32 +467,7 @@ fn read_xref_stream(
         return Err(PdfError::BadXref("xref stream: zero-width entry".into()));
     }
 
-    // Determine which object numbers this stream covers via /Index.
-    let index_pairs: Vec<u32> = match dict.get(b"Index") {
-        Some(Object::Array(a)) => a
-            .iter()
-            .map(|o| {
-                o.as_u32().ok_or_else(|| {
-                    PdfError::BadXref(format!("xref stream /Index: bad integer {o:?}"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => {
-            // Default: one subsection starting at 0, covering /Size objects.
-            let size = dict
-                .get(b"Size")
-                .ok_or_else(|| PdfError::BadXref("xref stream: missing /Size".into()))?;
-            let size_u32 = size.as_u32().ok_or_else(|| {
-                PdfError::BadXref(format!("xref stream /Size: bad integer {size:?}"))
-            })?;
-            vec![0, size_u32]
-        }
-    };
-    if !index_pairs.len().is_multiple_of(2) {
-        return Err(PdfError::BadXref(
-            "xref stream: /Index must have even number of entries".into(),
-        ));
-    }
+    let index_pairs = xref_stream_index(&dict)?;
 
     // Decode binary entries.
     let mut byte_pos = 0usize;
@@ -550,7 +525,7 @@ fn read_xref_stream(
                 _ => None,
             };
             if let Some(entry) = entry {
-                table.entries.insert(obj_num, entry);
+                let _ = table.entries.insert(obj_num, entry);
             }
         }
     }
@@ -559,6 +534,35 @@ fn read_xref_stream(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// The `/Index` array of a cross-reference stream as flat
+/// `[first, count, first, count, …]` pairs; absent, it defaults to one
+/// subsection `[0 /Size]`.
+fn xref_stream_index(dict: &Dictionary) -> Result<Vec<u32>, PdfError> {
+    let index_pairs: Vec<u32> = if let Some(Object::Array(a)) = dict.get(b"Index") {
+        a.iter()
+            .map(|o| {
+                o.as_u32().ok_or_else(|| {
+                    PdfError::BadXref(format!("xref stream /Index: bad integer {o:?}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        let size = dict
+            .get(b"Size")
+            .ok_or_else(|| PdfError::BadXref("xref stream: missing /Size".into()))?;
+        let size_u32 = size
+            .as_u32()
+            .ok_or_else(|| PdfError::BadXref(format!("xref stream /Size: bad integer {size:?}")))?;
+        vec![0, size_u32]
+    };
+    if !index_pairs.len().is_multiple_of(2) {
+        return Err(PdfError::BadXref(
+            "xref stream: /Index must have even number of entries".into(),
+        ));
+    }
+    Ok(index_pairs)
+}
 
 /// Widest `/W` field accepted, in bytes: every field value is read into a
 /// `u64`.
@@ -581,14 +585,13 @@ fn xref_field_width(obj: &Object) -> Result<usize, PdfError> {
         })
 }
 
-/// Decode an xref stream's raw bytes.  Almost always FlateDecode; may be
+/// Decode an xref stream's raw bytes.  Almost always `FlateDecode`; may be
 /// uncompressed (no /Filter key).
 fn decode_xref_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, PdfError> {
     use crate::stream::apply_flate;
 
     // /Filter is optional, a Name, or a single-element array of a Name.
     let filter: Option<&[u8]> = match dict.get(b"Filter") {
-        None => None,
         Some(Object::Name(n)) => Some(n),
         Some(Object::Array(a)) if a.len() == 1 => a[0].as_name(),
         _ => None,
@@ -729,7 +732,7 @@ startxref
 
     /// A hostile file that is millions of `1 0 obj` tokens must terminate
     /// quickly: the scan is a single linear pass and duplicate object
-    /// numbers collapse to one HashMap entry (the cap is never the thing
+    /// numbers collapse to one map entry (the cap is never the thing
     /// that saves us here — the linear bound is).
     #[test]
     fn reconstruct_obj_flood_is_bounded() {
@@ -776,7 +779,7 @@ startxref
                 && data[i..].starts_with(b"obj")
                 && let Some((id, header_start)) = scan_obj_header_backwards(data, i)
             {
-                table.entries.insert(
+                let _ = table.entries.insert(
                     id.0,
                     XrefEntry::Direct {
                         offset: header_start as u64,

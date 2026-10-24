@@ -31,3 +31,6 @@ tempfile = { workspace = true }
 [features]
 default = ["libdeflate"]
 libdeflate = ["dep:libdeflater"]
+
+[lints]
+workspace = true

@@ -6,22 +6,22 @@
 
 /// PDF whitespace characters (spec §7.2.2).
 #[inline]
-pub const fn is_ws(b: u8) -> bool {
+pub(crate) const fn is_ws(b: u8) -> bool {
     matches!(b, b'\0' | b'\t' | b'\n' | b'\x0C' | b'\r' | b' ')
 }
 
 /// PDF delimiter characters (spec §7.2.2).
 #[inline]
-pub const fn is_delim(b: u8) -> bool {
+pub(crate) const fn is_delim(b: u8) -> bool {
     matches!(
         b,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
     )
 }
 
-/// Hex nibble value; non-hex bytes return 0 (Acrobat-compatible leniency).
+/// Hex nibble value; non-hex bytes return 0.
 #[inline]
-pub const fn hex_nibble(b: u8) -> u8 {
+pub(crate) const fn hex_nibble(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'a'..=b'f' => b - b'a' + 10,
@@ -31,7 +31,7 @@ pub const fn hex_nibble(b: u8) -> u8 {
 }
 
 /// Advance past whitespace and `%`-comments.
-pub fn skip_ws(src: &[u8], pos: &mut usize) {
+pub(crate) fn skip_ws(src: &[u8], pos: &mut usize) {
     loop {
         match src.get(*pos).copied() {
             Some(b) if is_ws(b) => *pos += 1,
@@ -49,7 +49,7 @@ pub fn skip_ws(src: &[u8], pos: &mut usize) {
 /// Read a `/Name` token starting at `pos` (which points at the `/`).
 /// Returns the name bytes (without the leading `/`) as a slice into `src`.
 /// Decodes `#xx` escape sequences into owned `Vec<u8>` when needed.
-pub fn read_name(src: &[u8], pos: &mut usize) -> Vec<u8> {
+pub(crate) fn read_name(src: &[u8], pos: &mut usize) -> Vec<u8> {
     *pos += 1; // skip '/'
     let start = *pos;
     while *pos < src.len() {
@@ -83,7 +83,7 @@ pub fn read_name(src: &[u8], pos: &mut usize) -> Vec<u8> {
 
 /// Read a literal `(string)` starting at `pos` (pointing at `(`).
 /// Returns decoded bytes (escape sequences resolved, nesting handled).
-pub fn read_literal_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
+pub(crate) fn read_literal_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
     *pos += 1; // skip '('
     let mut out = Vec::new();
     let mut depth = 1usize;
@@ -137,7 +137,7 @@ pub fn read_literal_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
                         }
                         #[expect(
                             clippy::cast_possible_truncation,
-                            reason = "PDF octal values >255 are malformed; truncate per Acrobat leniency"
+                            reason = "an octal escape above 0o377 is malformed; its high-order bit is discarded"
                         )]
                         out.push(val as u8);
                     }
@@ -152,7 +152,7 @@ pub fn read_literal_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
 
 /// Read a hex `<string>` starting at `pos` (pointing at `<`).
 /// Returns decoded bytes. Trailing unpaired nibble is zero-padded.
-pub fn read_hex_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
+pub(crate) fn read_hex_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
     *pos += 1; // skip '<'
     let mut out = Vec::new();
     let mut hi: Option<u8> = None;
@@ -182,7 +182,7 @@ pub fn read_hex_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
 
 /// Scan a run of non-whitespace, non-delimiter bytes; return it as a slice.
 /// Does NOT advance past the terminator.
-pub fn scan_token<'a>(src: &'a [u8], pos: &mut usize) -> &'a [u8] {
+pub(crate) fn scan_token<'a>(src: &'a [u8], pos: &mut usize) -> &'a [u8] {
     let start = *pos;
     while *pos < src.len() {
         let b = src[*pos];
@@ -196,7 +196,7 @@ pub fn scan_token<'a>(src: &'a [u8], pos: &mut usize) -> &'a [u8] {
 
 /// Parse a decimal non-negative integer at `pos`.  Returns `None` if no
 /// digit is present.  Does not advance past the terminator.
-pub fn parse_u64(src: &[u8], pos: &mut usize) -> Option<u64> {
+pub(crate) fn parse_u64(src: &[u8], pos: &mut usize) -> Option<u64> {
     let start = *pos;
     while *pos < src.len() && src[*pos].is_ascii_digit() {
         *pos += 1;

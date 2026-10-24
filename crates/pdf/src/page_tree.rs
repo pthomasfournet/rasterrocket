@@ -27,6 +27,13 @@ const MAX_DEPTH: usize = 64;
 ///
 /// Cycle protection: tracks visited object numbers in a `HashSet<u32>`.
 /// Depth protection: bounded to `MAX_DEPTH` levels.
+///
+/// # Errors
+/// [`PdfError::PageOutOfRange`] for an index past the page count; the
+/// errors of [`Document::get_object`] for the nodes visited; and
+/// [`PdfError::BadObject`] or [`PdfError::MissingKey`] when the tree is
+/// cyclic, deeper than `MAX_DEPTH`, or its `/Kids` and `/Count` entries are
+/// inconsistent with the requested index.
 //
 // When the linearization Page Offset Hint Table parser ships, a fast
 // path can short-circuit the descent here — `LinearizationHints::page_offset`
@@ -52,7 +59,7 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
             });
         }
         let node_obj = doc.get_dict_arc(current)?;
-        let node_dict = node_obj.as_dict().expect("get_dict_arc guarantees a dict");
+        let node_dict = dict_of(&node_obj, current)?;
         let node_type = node_dict
             .get(b"Type")
             .and_then(Object::as_name)
@@ -89,7 +96,7 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
         let mut descended = false;
         for kid_ref in &kids {
             let kid_obj = doc.get_dict_arc(*kid_ref)?;
-            let kid_dict = kid_obj.as_dict().expect("get_dict_arc guarantees a dict");
+            let kid_dict = dict_of(&kid_obj, *kid_ref)?;
             let kid_count = kid_subtree_count(*kid_ref, kid_dict)?;
             if remaining < kid_count {
                 // Found the kid containing the requested page.  If the kid
@@ -116,6 +123,15 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
     Err(PdfError::BadObject {
         id: current.0,
         detail: "page-tree descent exceeded depth limit".into(),
+    })
+}
+
+/// The dictionary of an object returned by [`Document::get_dict_arc`], which
+/// is always a dictionary or a stream.
+fn dict_of(obj: &Object, id: ObjectId) -> Result<&Dictionary, PdfError> {
+    obj.as_dict().ok_or_else(|| PdfError::BadObject {
+        id: id.0,
+        detail: format!("expected Dictionary or Stream, got {}", obj.enum_variant()),
     })
 }
 
@@ -197,7 +213,7 @@ fn refs_from_array(arr: &[Object], node_id: ObjectId) -> Result<Vec<ObjectId>, P
 mod tests {
     use super::*;
 
-    /// Two-page PDF.  Verifies that descend_to_page_index returns the
+    /// Two-page PDF.  Verifies that `descend_to_page_index` returns the
     /// correct page object for both indices.  The eager `get_pages()` and
     /// the lazy `descend_to_page_index` must agree.
     fn two_page_pdf() -> Vec<u8> {
@@ -265,14 +281,14 @@ startxref\n255\n%%EOF"
         }
     }
 
-    /// Verify descend_to_page_index agrees with the eager get_pages() iterator
+    /// Verify `descend_to_page_index` agrees with the eager `get_pages()` iterator
     /// across the same fixture.
     #[test]
     fn descend_agrees_with_eager_walk() {
         let doc = Document::from_bytes_owned(two_page_pdf()).unwrap();
         let eager: Vec<ObjectId> = doc.get_pages().map(|(_, id)| id).collect();
         for (idx, expected_id) in eager.iter().enumerate() {
-            let got = descend_to_page_index(&doc, idx as u32).expect("descend");
+            let got = descend_to_page_index(&doc, u32::try_from(idx).unwrap()).expect("descend");
             assert_eq!(got, *expected_id, "mismatch at idx {idx}");
         }
     }

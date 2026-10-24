@@ -104,11 +104,39 @@ impl MmapOrVec {
     }
 }
 
+/// Map `file` read-only into the address space.
+///
+/// The mapping shares the file's page-cache pages, so it is only as stable
+/// as the file: a write by another process changes bytes the parser has
+/// already borrowed, and a truncation makes any later access to a page past
+/// the new end of file raise `SIGBUS`, which terminates the process.  The
+/// parser never writes the file; callers must not modify or truncate a file
+/// while a [`Document`] opened from it is alive.
+fn map_file(file: &std::fs::File) -> std::io::Result<Mmap> {
+    // SAFETY: `Mmap::map` is unsafe because the returned slice aliases
+    // memory that another process can change or unmap by writing to or
+    // truncating the file; the contract above makes that the caller's
+    // obligation.  The mapping is read-only and this crate never writes
+    // through it.
+    #[expect(
+        unsafe_code,
+        reason = "a file mapping cannot be created without `unsafe`; the \
+                  external-modification hazard is documented on `map_file`"
+    )]
+    unsafe {
+        Mmap::map(file)
+    }
+}
+
 impl Document {
     /// Open a PDF file at `path`.
     ///
     /// Reads and parses only the xref table(s) and trailer.  Individual objects
     /// are parsed on first access and cached for subsequent calls.
+    ///
+    /// # Errors
+    /// [`PdfError::Io`] if the file cannot be opened or mapped; otherwise the
+    /// errors of [`Self::from_bytes_owned`].
     pub fn open(path: &Path) -> Result<Self, PdfError> {
         Self::open_at(path, DecryptGuard::none())
     }
@@ -155,13 +183,16 @@ impl Document {
     fn open_at(path: &Path, guard: DecryptGuard) -> Result<Self, PdfError> {
         let file = std::fs::File::open(path)?;
         crate::madvise::advise_random(&file);
-        // SAFETY: we do not mutate the file while it is mapped.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let data = Arc::new(MmapOrVec::Mapped(mmap));
+        let data = Arc::new(MmapOrVec::Mapped(map_file(&file)?));
         Self::from_bytes_with_guard(data, guard)
     }
 
-    /// Construct from an in-memory byte slice (used by tests).
+    /// Construct from PDF bytes already in memory.
+    ///
+    /// # Errors
+    /// [`PdfError::EmptyInput`] or [`PdfError::NotPdf`] when the bytes are
+    /// not a PDF, and [`PdfError::MissingXref`] when no cross-reference table
+    /// can be parsed or reconstructed.
     pub fn from_bytes_owned(bytes: Vec<u8>) -> Result<Self, PdfError> {
         Self::from_bytes_with_guard(Arc::new(MmapOrVec::Owned(bytes)), DecryptGuard::none())
     }
@@ -195,12 +226,19 @@ impl Document {
     ///
     /// First call parses the object from the file; subsequent calls return the
     /// cached value.
+    ///
+    /// # Errors
+    /// [`PdfError::BadObject`] when `id` is absent from the xref table or the
+    /// object (or its object stream) cannot be parsed.
     pub fn get_object(&self, id: ObjectId) -> Result<Arc<Object>, PdfError> {
         {
             // Poison recovery: a previous panic while holding the lock left the
             // mutex poisoned. The cache is just a memo of immutable parses, so
             // the inner state is safe to keep using.
-            let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(obj) = guard.get(&id.0) {
                 return Ok(Arc::clone(obj));
             }
@@ -211,9 +249,10 @@ impl Document {
             self.inline_filter_references(&mut stream.dict);
         }
         let arc = Arc::new(obj);
-        self.cache
+        let _ = self
+            .cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id.0, Arc::clone(&arc));
         Ok(arc)
     }
@@ -264,7 +303,11 @@ impl Document {
     }
 
     /// Resolve a chain of indirect references until a non-Reference object is
-    /// reached.  Prevents infinite loops with a depth counter.
+    /// reached, following at most 32 references.
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_object`], and [`PdfError::BadObject`] when
+    /// the chain is longer than 32 references.
     pub fn resolve(&self, obj: &Object) -> Result<Arc<Object>, PdfError> {
         let mut current = obj.clone();
         for _ in 0..32 {
@@ -287,7 +330,9 @@ impl Document {
 
         match entry {
             XrefEntry::Direct { offset, .. } => {
-                let (_, obj) = parse_indirect_object(self.data.as_bytes(), offset as usize)
+                let (_, obj) = usize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| parse_indirect_object(self.data.as_bytes(), offset))
                     .ok_or_else(|| PdfError::BadObject {
                         id: id.0,
                         detail: format!("parse failed at offset {offset}"),
@@ -296,14 +341,11 @@ impl Document {
             }
             XrefEntry::InObjStm { container, index } => {
                 let container_obj = self.get_object((container, 0))?;
-                let stream = match container_obj.as_ref() {
-                    Object::Stream(s) => s,
-                    _ => {
-                        return Err(PdfError::BadObject {
-                            id: container,
-                            detail: "expected Stream for ObjStm container".into(),
-                        });
-                    }
+                let Object::Stream(stream) = container_obj.as_ref() else {
+                    return Err(PdfError::BadObject {
+                        id: container,
+                        detail: "expected Stream for ObjStm container".into(),
+                    });
                 };
                 self.objstm
                     .get_or_parse(container, index, &stream.content, &stream.dict)
@@ -321,6 +363,10 @@ impl Document {
     /// repeat-lookup callers (e.g. per-page resource resolution) should cache
     /// the result themselves; the dict is hashed and small (~tens of entries)
     /// so the clone cost is bounded.
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_object`], and [`PdfError::BadObject`] when
+    /// the object is neither a dictionary nor a stream.
     pub fn get_dict(&self, id: ObjectId) -> Result<Arc<Dictionary>, PdfError> {
         let obj = self.get_object(id)?;
         match obj.as_ref() {
@@ -333,7 +379,10 @@ impl Document {
         }
     }
 
-    /// Lopdf-compatible alias for [`Self::get_dict`].
+    /// Alias for [`Self::get_dict`].
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_dict`].
     pub fn get_dictionary(&self, id: ObjectId) -> Result<Arc<Dictionary>, PdfError> {
         self.get_dict(id)
     }
@@ -346,6 +395,9 @@ impl Document {
     /// this on hot paths (e.g., page-tree descent) where every saved
     /// `HashMap<Vec<u8>, Object>` clone matters.  Callers must accept
     /// that the borrow lives only as long as the returned `Arc`.
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_dict`].
     pub fn get_dict_arc(&self, id: ObjectId) -> Result<Arc<Object>, PdfError> {
         let obj = self.get_object(id)?;
         match obj.as_ref() {
@@ -360,6 +412,11 @@ impl Document {
     // ── Document structure ────────────────────────────────────────────────────
 
     /// Return the document catalogue dictionary.
+    ///
+    /// # Errors
+    /// [`PdfError::MissingKey`] or [`PdfError::BadObject`] when the trailer
+    /// `/Root` is absent or not a reference, and the errors of
+    /// [`Self::get_dict`].
     pub fn catalog(&self) -> Result<Arc<Dictionary>, PdfError> {
         let id = self.catalog_id()?;
         self.get_dict(id)
@@ -427,9 +484,11 @@ impl Document {
         self.xref.trailer.contains_key(b"Encrypt")
     }
 
-    /// Return the number of pages in the document.
+    /// Return the number of pages in the document by walking the page tree,
+    /// saturating at `u32::MAX`.
+    #[must_use]
     pub fn page_count(&self) -> u32 {
-        self.get_pages().count() as u32
+        u32::try_from(self.get_pages().count()).unwrap_or(u32::MAX)
     }
 
     /// Return the number of pages without walking the page tree.
@@ -470,6 +529,10 @@ impl Document {
     ///
     /// `pages_root` is invariant for the document, so caching it avoids
     /// re-cloning the catalog dictionary on every page-tree descent.
+    ///
+    /// # Errors
+    /// The errors of [`Self::catalog`], and [`PdfError::MissingKey`] when the
+    /// catalog has no `/Pages` reference.
     pub fn pages_root_id(&self) -> Result<ObjectId, PdfError> {
         if let Some(id) = self.pages_root_id.get() {
             return Ok(*id);
@@ -486,6 +549,9 @@ impl Document {
     /// Resolve a 0-based page index to its `ObjectId` via logarithmic descent.
     ///
     /// See [`crate::descend_to_page_index`] for the full descent contract.
+    ///
+    /// # Errors
+    /// The errors of [`crate::descend_to_page_index`].
     pub fn get_page(&self, idx: u32) -> Result<ObjectId, PdfError> {
         crate::page_tree::descend_to_page_index(self, idx)
     }
@@ -496,6 +562,12 @@ impl Document {
     }
 
     /// Return the decoded content stream bytes for a page.
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_object`], [`PdfError::BadObject`] when the
+    /// page is not a dictionary, and [`PdfError::DecodeFailed`] when a
+    /// content stream cannot be decoded or the decoded total exceeds the
+    /// aggregate size cap.
     pub fn get_page_content(&self, page_id: ObjectId) -> Result<Vec<u8>, PdfError> {
         let page = self.get_object(page_id)?;
         let page_dict = page.as_dict().ok_or_else(|| PdfError::BadObject {
@@ -588,12 +660,19 @@ impl Document {
 
     /// Return a merged font dictionary for the page (all /Font entries from
     /// /Resources, with parent-chain inheritance).
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_page_resource_dict`].
     pub fn get_page_fonts(&self, page_id: ObjectId) -> Result<Dictionary, PdfError> {
         self.get_page_resource_dict(page_id, b"Font")
     }
 
     /// Return one named sub-dictionary from the page's /Resources, following
     /// parent page-tree inheritance.
+    ///
+    /// # Errors
+    /// The errors of [`Self::get_object`] for the page, its ancestors, and
+    /// the referenced resource dictionaries.
     pub fn get_page_resource_dict(
         &self,
         page_id: ObjectId,
@@ -707,7 +786,7 @@ impl Document {
 
 struct PageIter<'a> {
     doc: &'a Document,
-    /// Stack of (node_id, next_child_index) for page-tree traversal.
+    /// Stack of `(node_id, next_child_index)` for page-tree traversal.
     stack: Vec<(ObjectId, usize)>,
     /// Object numbers currently on the traversal stack — guards against cyclic
     /// /Kids references (malformed PDFs would otherwise loop forever).
@@ -719,22 +798,13 @@ impl<'a> PageIter<'a> {
     fn new(doc: &'a Document) -> Self {
         // Catalog errors collapse to an empty iterator — same outcome as a PDF
         // with no /Pages root. Logged so corruption doesn't go silent.
-        let catalog = match doc.catalog() {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("PageIter: catalog unavailable, no pages will be yielded: {e:?}");
-                Default::default()
-            }
-        };
+        let catalog = doc.catalog().unwrap_or_else(|e| {
+            log::warn!("PageIter: catalog unavailable, no pages will be yielded: {e:?}");
+            Arc::default()
+        });
         let pages_id = catalog.get(b"Pages").and_then(Object::as_reference);
-        let mut on_stack = std::collections::HashSet::new();
-        let stack = match pages_id {
-            Some(id) => {
-                on_stack.insert(id.0);
-                vec![(id, 0)]
-            }
-            None => Vec::new(),
-        };
+        let stack = pages_id.map(|id| (id, 0)).into_iter().collect();
+        let on_stack = pages_id.map(|id| id.0).into_iter().collect();
         Self {
             doc,
             stack,
@@ -745,7 +815,7 @@ impl<'a> PageIter<'a> {
 
     fn pop(&mut self) {
         if let Some((id, _)) = self.stack.pop() {
-            self.on_stack.remove(&id.0);
+            let _ = self.on_stack.remove(&id.0);
         }
     }
 }
@@ -758,19 +828,13 @@ impl Iterator for PageIter<'_> {
             let (node_id, child_idx) = self.stack.last_mut()?;
             let node_id = *node_id;
 
-            let obj = match self.doc.get_object(node_id) {
-                Ok(o) => o,
-                Err(_) => {
-                    self.pop();
-                    continue;
-                }
+            let Ok(obj) = self.doc.get_object(node_id) else {
+                self.pop();
+                continue;
             };
-            let dict = match obj.as_dict() {
-                Some(d) => d.clone(),
-                None => {
-                    self.pop();
-                    continue;
-                }
+            let Some(dict) = obj.as_dict().cloned() else {
+                self.pop();
+                continue;
             };
 
             let node_type = dict.get(b"Type").and_then(Object::as_name).unwrap_or(b"");
@@ -787,24 +851,17 @@ impl Iterator for PageIter<'_> {
             // the reference case so we don't silently treat valid PDFs as
             // empty (corpus-04 hit this).
             let kids = match dict.get(b"Kids") {
-                Some(Object::Array(a)) => a.clone(),
-                Some(Object::Reference(rid)) => match self.doc.get_object(*rid) {
-                    Ok(o) => match o.as_ref() {
-                        Object::Array(a) => a.clone(),
-                        _ => {
-                            self.pop();
-                            continue;
-                        }
-                    },
-                    Err(_) => {
-                        self.pop();
-                        continue;
-                    }
-                },
-                _ => {
-                    self.pop();
-                    continue;
-                }
+                Some(Object::Array(a)) => Some(a.clone()),
+                Some(Object::Reference(rid)) => self
+                    .doc
+                    .get_object(*rid)
+                    .ok()
+                    .and_then(|o| o.as_array().map(<[Object]>::to_vec)),
+                _ => None,
+            };
+            let Some(kids) = kids else {
+                self.pop();
+                continue;
             };
 
             let idx = *child_idx;
@@ -831,8 +888,8 @@ impl Iterator for PageIter<'_> {
 /// How far into the file the `%PDF-` header may legally appear.
 ///
 /// The spec puts the header at byte 0, but real-world files prepend a few
-/// junk bytes (mail transfer artefacts, UTF-8 BOM, shebang lines).  poppler
-/// and mutool scan roughly the first kilobyte; we match that leniency.
+/// junk bytes (mail transfer artefacts, UTF-8 BOM, shebang lines), so the
+/// first kilobyte is scanned.
 const HEADER_SCAN_WINDOW: usize = 1024;
 
 /// Reject obviously-unusable input *before* the xref parser runs so the
@@ -860,26 +917,30 @@ mod tests {
     /// catalog as object 1 and a classic xref table.  Missing numbers are
     /// free entries.
     fn pdf_with_objects(objects: &[(u32, String)]) -> Vec<u8> {
+        use std::fmt::Write as _;
+
         let mut out = String::from("%PDF-1.4\n");
         let max = objects.iter().map(|(n, _)| *n).max().unwrap_or(1).max(1);
         let mut offsets = vec![None; max as usize + 1];
         let catalog = (1, "<</Type /Catalog>>".to_owned());
         for (n, body) in std::iter::once(&catalog).chain(objects) {
             offsets[*n as usize] = Some(out.len());
-            out.push_str(&format!("{n} 0 obj\n{body}\nendobj\n"));
+            write!(out, "{n} 0 obj\n{body}\nendobj\n").unwrap();
         }
         let xref_start = out.len();
-        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f\r\n", max + 1));
+        write!(out, "xref\n0 {}\n0000000000 65535 f\r\n", max + 1).unwrap();
         for off in &offsets[1..] {
             match off {
-                Some(o) => out.push_str(&format!("{o:010} 00000 n\r\n")),
+                Some(o) => write!(out, "{o:010} 00000 n\r\n").unwrap(),
                 None => out.push_str("0000000000 65535 f\r\n"),
             }
         }
-        out.push_str(&format!(
+        write!(
+            out,
             "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF",
             max + 1
-        ));
+        )
+        .unwrap();
         out.into_bytes()
     }
 
@@ -998,13 +1059,13 @@ startxref\n180\n%%EOF"
     /// Build a minimal PDF-1.5 whose cross-reference is a `/Type /XRef`
     /// stream (`/W [1 2 2]`) and whose Catalog / Pages / Page objects live
     /// inside a `/Type /ObjStm` compressed object stream.  This is the
-    /// structure emitted by virtually every modern PDF toolchain (pdfTeX,
-    /// LibreOffice, …); the streams here are left uncompressed (no `/Filter`)
+    /// structure emitted by virtually every modern PDF toolchain (`pdfTeX`,
+    /// `LibreOffice`, …); the streams here are left uncompressed (no `/Filter`)
     /// so the fixture needs no zlib round-trip.
     ///
     /// Regression for the PDF-1.5 blank-render class: the page object (obj 3)
-    /// is reachable only via an xref-stream **type-2** entry → ObjStm
-    /// extraction.  If `/W` decoding, type-2 `get_object` routing, or ObjStm
+    /// is reachable only via an xref-stream **type-2** entry → `ObjStm`
+    /// extraction.  If `/W` decoding, type-2 `get_object` routing, or `ObjStm`
     /// directory parsing is wrong, the page object is unresolvable and the
     /// page renders blank.
     #[test]
@@ -1020,7 +1081,7 @@ startxref\n180\n%%EOF"
         let o3 = o2 + b2.len() + 1;
         let directory = format!("1 {o1} 2 {o2} 3 {o3} ").into_bytes();
         let first = directory.len();
-        let mut objstm_data = directory.clone();
+        let mut objstm_data = directory;
         for body in [&b1[..], &b2[..], &b3[..]] {
             objstm_data.extend_from_slice(body);
             objstm_data.push(b'\n');
@@ -1037,9 +1098,9 @@ startxref\n180\n%%EOF"
         let off5 = off4 + objstm.len();
 
         // /W [1 2 2] entries for object numbers 0..=5.
-        let entry = |t: u8, f1: u32, f2: u32| -> [u8; 5] {
-            let a = (f1 as u16).to_be_bytes();
-            let b = (f2 as u16).to_be_bytes();
+        let entry = |t: u8, f1: usize, f2: usize| -> [u8; 5] {
+            let a = u16::try_from(f1).unwrap().to_be_bytes();
+            let b = u16::try_from(f2).unwrap().to_be_bytes();
             [t, a[0], a[1], b[0], b[1]]
         };
         let mut entries = Vec::new();
@@ -1047,8 +1108,8 @@ startxref\n180\n%%EOF"
         entries.extend_from_slice(&entry(2, 4, 0)); // 1 → ObjStm 4, idx 0
         entries.extend_from_slice(&entry(2, 4, 1)); // 2 → ObjStm 4, idx 1
         entries.extend_from_slice(&entry(2, 4, 2)); // 3 → ObjStm 4, idx 2 (PAGE)
-        entries.extend_from_slice(&entry(1, off4 as u32, 0)); // 4 direct
-        entries.extend_from_slice(&entry(1, off5 as u32, 0)); // 5 direct (self)
+        entries.extend_from_slice(&entry(1, off4, 0)); // 4 direct
+        entries.extend_from_slice(&entry(1, off5, 0)); // 5 direct (self)
 
         let mut xref = format!(
             "5 0 obj\n<</Type/XRef/Size 6/W[1 2 2]/Root 1 0 R/Length {}>>\nstream\n",
@@ -1120,7 +1181,7 @@ startxref\n180\n%%EOF"
 
     /// Regression: a page whose `/Contents` is an *indirect reference to an
     /// array* of content-stream references (legal per ISO 32000-2 §7.7.3.3;
-    /// emitted by LibreOffice and many imposition tools).  The pre-fix code
+    /// emitted by `LibreOffice` and many imposition tools).  The pre-fix code
     /// dereferenced the single ref, found an `Object::Array` instead of an
     /// `Object::Stream`, skipped it, and returned an empty content buffer —
     /// every glyph-bearing page rendered pure white.  This asserts the array
@@ -1173,7 +1234,7 @@ startxref\n180\n%%EOF"
         );
         let text = String::from_utf8_lossy(&content);
         assert!(
-            text.contains("q"),
+            text.contains('q'),
             "first content stream (obj 6) missing: {text:?}"
         );
         assert!(
@@ -1248,7 +1309,7 @@ startxref\n180\n%%EOF"
 
     /// A cyclic / self-referential `/Contents`: obj 9 is `[10 0 R 9 0 R]` —
     /// the second element points back at the array object itself.  A naive
-    /// recursive expander would loop forever (the campaign's DoS class).  The
+    /// recursive expander would loop forever (a denial-of-service input).  The
     /// expander is a single non-recursive pass, so this must terminate
     /// promptly: obj 10's stream renders, and the back-reference (which
     /// resolves to an Array, not a Stream) is logged-and-skipped rather than

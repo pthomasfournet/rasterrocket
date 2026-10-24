@@ -1,7 +1,7 @@
 //! Stream filter decoding.
 //!
 //! We support the filters encountered in real renderer workloads.
-//! Image-format filters (DCT, JBIG2, JPX, CCITTFax) are intentionally
+//! Image-format filters (DCT, JBIG2, JPX, `CCITTFax`) are intentionally
 //! excluded — those bytes are passed raw to the codec layer in `rasterrocket-interp`.
 
 use crate::dictionary::Dictionary;
@@ -24,14 +24,14 @@ const MAX_FILTER_CHAIN: usize = 32;
 /// Returns the fully-decoded bytes, or `raw` unchanged if there is no filter.
 ///
 /// # Errors
-/// - The chain exceeds [`MAX_FILTER_CHAIN`] filters (hostile-array DoS guard).
-/// - Any stage produces more than [`MAX_DECOMPRESSED`] bytes.  Each Flate/LZW
+/// - The chain exceeds [`MAX_FILTER_CHAIN`] filters.
+/// - Any stage produces more than [`MAX_DECOMPRESSED`] bytes.  Each Flate and LZW
 ///   stage is individually bomb-capped, but a chain of stages could otherwise
 ///   re-expand the intermediate buffer unbounded across iterations; this check
 ///   bounds the aggregate by failing the moment any intermediate exceeds the
 ///   cap.
 /// - Any individual filter step fails (the underlying decoder's error).
-pub fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, String> {
+pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, String> {
     let filters = collect_filters(dict);
     if filters.is_empty() {
         return Ok(raw.to_vec());
@@ -73,7 +73,7 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
         .map_err(|e| e.to_string()),
         b"LZWDecode" => apply_lzw(data, params),
         b"ASCII85Decode" => decode_ascii85(data),
-        b"ASCIIHexDecode" => decode_ascii_hex(data),
+        b"ASCIIHexDecode" => Ok(decode_ascii_hex(data)),
         // Image filters — pass through; the caller handles them.
         b"DCTDecode" | b"CCITTFaxDecode" | b"JBIG2Decode" | b"JPXDecode" => Ok(data.to_vec()),
         other => Err(format!(
@@ -136,7 +136,7 @@ fn decompress_zlib_flate2(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
             // Retry with raw deflate (skip 2-byte zlib header).
             out.clear();
             let mut raw_dec = DeflateDecoder::new(&data[2..]).take(cap_plus_one);
-            raw_dec.read_to_end(&mut out)?;
+            let _ = raw_dec.read_to_end(&mut out)?;
         }
         Err(e) => {
             if out.is_empty() {
@@ -241,7 +241,7 @@ fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 
 /// Read one predictor parameter, clamping malformed low values to the
 /// spec default and rejecting values above `cap` loudly — a legal value
-/// past the DoS cap means the parameters (and therefore the geometry the
+/// past the denial-of-service cap means the parameters (and therefore the geometry the
 /// de-prediction would apply) cannot be honoured, so proceeding would
 /// silently scramble every row.
 fn predictor_param(
@@ -392,7 +392,6 @@ fn apply_png_filter(filter: u8, raw: &[u8], prev: Option<&[u8]>, dst: &mut [u8],
     );
     let lead = bpp.min(stride);
     match (filter, prev) {
-        (0, _) | (2, None) => dst.copy_from_slice(&raw[..stride]),
         (2, Some(prev)) => {
             for (d, (&r, &p)) in dst.iter_mut().zip(raw.iter().zip(prev)) {
                 *d = r.wrapping_add(p);
@@ -417,14 +416,7 @@ fn apply_png_filter(filter: u8, raw: &[u8], prev: Option<&[u8]>, dst: &mut [u8],
                 dst[i] = raw[i].wrapping_add(prev[i] / 2);
             }
             for i in lead..stride {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "mean of two u8 widened to u16 is ≤ 255"
-                )]
-                {
-                    dst[i] = raw[i]
-                        .wrapping_add(((u16::from(dst[i - bpp]) + u16::from(prev[i])) / 2) as u8);
-                }
+                dst[i] = raw[i].wrapping_add(dst[i - bpp].midpoint(prev[i]));
             }
         }
         (4, Some(prev)) => {
@@ -435,22 +427,26 @@ fn apply_png_filter(filter: u8, raw: &[u8], prev: Option<&[u8]>, dst: &mut [u8],
                 dst[i] = raw[i].wrapping_add(paeth(dst[i - bpp], prev[i], prev[i - bpp]));
             }
         }
+        // None (0), Up (2) with no row above, and out-of-spec filter bytes
+        // copy the raw row through.
         (_, _) => dst.copy_from_slice(&raw[..stride]),
     }
 }
 
+/// The Paeth predictor (RFC 2083 § 6.6): whichever of `a`, `b`, `c` is
+/// closest to `a + b - c`, ties broken in that order.
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
-    let (a, b, c) = (i16::from(a), i16::from(b), i16::from(c));
-    let p = a + b - c;
-    let pa = (p - a).unsigned_abs();
-    let pb = (p - b).unsigned_abs();
-    let pc = (p - c).unsigned_abs();
+    let (ia, ib, ic) = (i16::from(a), i16::from(b), i16::from(c));
+    let p = ia + ib - ic;
+    let pa = (p - ia).unsigned_abs();
+    let pb = (p - ib).unsigned_abs();
+    let pc = (p - ic).unsigned_abs();
     if pa <= pb && pa <= pc {
-        a as u8
+        a
     } else if pb <= pc {
-        b as u8
+        b
     } else {
-        c as u8
+        c
     }
 }
 
@@ -502,8 +498,7 @@ fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
         .and_then(Object::as_dict)
         .and_then(|d| d.get(b"EarlyChange"))
         .and_then(Object::as_i64)
-        .map(|v| v != 0)
-        .unwrap_or(true);
+        .is_none_or(|v| v != 0);
 
     let mut decoder = if early_change {
         weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
@@ -580,7 +575,7 @@ fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
 
 // ── ASCIIHex ──────────────────────────────────────────────────────────────────
 
-fn decode_ascii_hex(data: &[u8]) -> Result<Vec<u8>, String> {
+fn decode_ascii_hex(data: &[u8]) -> Vec<u8> {
     use crate::lexer::hex_nibble;
     let mut out = Vec::new();
     let mut hi: Option<u8> = None;
@@ -603,7 +598,7 @@ fn decode_ascii_hex(data: &[u8]) -> Result<Vec<u8>, String> {
     if let Some(h) = hi {
         out.push(h << 4);
     }
-    Ok(out)
+    out
 }
 
 // ── Filter/DecodeParms helpers ────────────────────────────────────────────────
@@ -636,7 +631,7 @@ fn collect_decode_parms(dict: &Dictionary, count: usize) -> Vec<Option<Object>> 
 /// Minimal dictionary lookup used inside this module to avoid coupling its
 /// callers to a specific dictionary type (it's used by both [`Dictionary`] and
 /// the raw [`Object`] variants returned from xref-stream parsing).
-pub trait DictLookup {
+pub(crate) trait DictLookup {
     fn get_i64(&self, key: &[u8]) -> Option<i64>;
 }
 
@@ -678,20 +673,16 @@ mod tests {
             } else {
                 0
             };
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "mean of two u8 widened to u16 is ≤ 255"
-            )]
-            {
-                dst[i] = match filter {
-                    0 => raw[i],
-                    1 => raw[i].wrapping_add(a),
-                    2 => raw[i].wrapping_add(b),
-                    3 => raw[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
-                    4 => raw[i].wrapping_add(paeth(a, b, c)),
-                    _ => raw[i],
-                };
-            }
+            // The Average mean is formed in u16, independently of the
+            // production `u8::midpoint`.
+            let mean = u8::try_from(u16::midpoint(u16::from(a), u16::from(b))).unwrap();
+            dst[i] = match filter {
+                1 => raw[i].wrapping_add(a),
+                2 => raw[i].wrapping_add(b),
+                3 => raw[i].wrapping_add(mean),
+                4 => raw[i].wrapping_add(paeth(a, b, c)),
+                _ => raw[i],
+            };
         }
     }
 
@@ -703,10 +694,10 @@ mod tests {
         for bpp in [1usize, 2, 3, 4, 6, 8] {
             for stride in [1usize, 2, 3, 7, 16, 33, 100] {
                 let raw: Vec<u8> = (0..stride)
-                    .map(|i| (i.wrapping_mul(151).wrapping_add(43) % 256) as u8)
+                    .map(|i| i.wrapping_mul(151).wrapping_add(43).to_le_bytes()[0])
                     .collect();
                 let prev_row: Vec<u8> = (0..stride)
-                    .map(|i| (i.wrapping_mul(97).wrapping_add(17) % 256) as u8)
+                    .map(|i| i.wrapping_mul(97).wrapping_add(17).to_le_bytes()[0])
                     .collect();
                 for filter in 0u8..=5 {
                     for prev in [None, Some(&prev_row[..])] {
@@ -832,7 +823,7 @@ mod tests {
 
     #[test]
     fn ascii_hex_decode() {
-        let decoded = decode_ascii_hex(b"48656c6c6f>").unwrap();
+        let decoded = decode_ascii_hex(b"48656c6c6f>");
         assert_eq!(decoded, b"Hello");
     }
 
@@ -892,10 +883,10 @@ mod tests {
                 let mut n = u32::from_be_bytes(grp);
                 let mut enc = [0u8; 5];
                 for slot in enc.iter_mut().rev() {
-                    *slot = b'!' + (n % 85) as u8;
+                    *slot = b'!' + u8::try_from(n % 85).unwrap();
                     n /= 85;
                 }
-                out.extend_from_slice(&enc[..chunk.len() + 1]);
+                out.extend_from_slice(&enc[..=chunk.len()]);
             }
             out.extend_from_slice(b"~>");
             out
@@ -932,6 +923,8 @@ mod tests {
 
     #[test]
     fn lzw_bomb_cap_predicate_and_sink_flag() {
+        use std::io::Write;
+
         // The LZW-bomb defence has two halves:
         //  1. the size predicate trips exactly at the cap boundary, and
         //  2. `BoundedSink` flags `tripped` + errors loudly so the caller
@@ -943,8 +936,6 @@ mod tests {
         assert!(would_overflow_cap(MAX_DECOMPRESSED - 4, 8));
         // saturating_add: an absurd incoming length cannot wrap to "fits".
         assert!(would_overflow_cap(usize::MAX, usize::MAX));
-
-        use std::io::Write;
         let mut sink = BoundedSink {
             buf: Vec::new(),
             tripped: false,

@@ -1,8 +1,7 @@
 //! PDF object model and single-object parser.
 //!
-//! [`Object`] mirrors `lopdf::Object` variant-for-variant so `rasterrocket-interp` can
-//! swap the import with minimal churn.  The parser is a hand-rolled recursive
-//! descent over a borrowed byte slice — no allocator-heavy parser combinators.
+//! [`Object`] has one variant per PDF object type (ISO 32000-1 §7.3).  The
+//! parser is a hand-rolled recursive descent over a borrowed byte slice.
 
 use crate::dictionary::Dictionary;
 use crate::lexer::{
@@ -15,48 +14,57 @@ use crate::lexer::{
 pub type ObjectId = (u32, u16);
 
 /// A PDF object value.
-///
-/// Variants match `lopdf::Object` so `rasterrocket-interp` source changes are
-/// mechanical substitutions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
+    /// The `null` object.
     Null,
+    /// `true` or `false`.
     Boolean(bool),
+    /// An integer literal.
     Integer(i64),
+    /// A real literal; always finite.
     Real(f32),
+    /// A name, without the leading `/` and with `#xx` escapes decoded.
     Name(Vec<u8>),
+    /// A string with escapes decoded, and the syntax it was written in.
     String(Vec<u8>, StringFormat),
-    Array(Vec<Object>),
+    /// An array of objects.
+    Array(Vec<Self>),
+    /// A dictionary.
     Dictionary(Dictionary),
+    /// A stream: dictionary plus undecoded body.
     Stream(Stream),
     /// Indirect reference — resolved lazily by `Document::get_object`.
     Reference(ObjectId),
 }
 
-/// String encoding hint (mirrors lopdf).
+/// Syntax a string object was written in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringFormat {
+    /// A `(literal)` string.
     Literal,
+    /// A `<hex>` string.
     Hexadecimal,
 }
 
 /// A PDF stream: a dictionary plus raw (undecoded) bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stream {
+    /// The stream dictionary.
     pub dict: Dictionary,
     /// Raw (compressed) stream bytes.
     pub content: Vec<u8>,
 }
 
 impl Stream {
-    pub fn new(dict: Dictionary, content: Vec<u8>) -> Self {
+    /// A stream with dictionary `dict` and undecoded body `content`.
+    #[must_use]
+    pub const fn new(dict: Dictionary, content: Vec<u8>) -> Self {
         Self { dict, content }
     }
 
     /// Apply the stream's `/Filter` chain to its raw `content` and return the
-    /// decoded bytes (mirrors lopdf's `Stream::decompressed_content` so callers
-    /// can use this without threading a separate decode helper through every
-    /// call site).
+    /// decoded bytes.
     ///
     /// Image filters (`DCTDecode`, `JBIG2Decode`, `JPXDecode`, `CCITTFaxDecode`)
     /// are passed through unchanged — the codec layer in `rasterrocket-interp` decodes
@@ -70,18 +78,28 @@ impl Stream {
 }
 
 impl Object {
-    // ── lopdf-compatible as_* accessors ──────────────────────────────────────
+    // ── Typed accessors: `Some` only when the variant matches ────────────────
 
-    pub fn as_bool(&self) -> Option<bool> {
+    /// The value of a `Boolean`.
+    #[must_use]
+    pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Boolean(b) => Some(*b),
             _ => None,
         }
     }
 
-    pub fn as_i64(&self) -> Option<i64> {
+    /// The value of an `Integer`, or a `Real` truncated toward zero
+    /// (saturating at the `i64` range).
+    #[must_use]
+    pub const fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Integer(n) => Some(*n),
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "truncation toward zero is the documented conversion; \
+                          `as` saturates out-of-range values"
+            )]
             Self::Real(r) => Some(*r as i64),
             _ => None,
         }
@@ -95,6 +113,11 @@ impl Object {
     fn as_integer(&self) -> Option<i64> {
         match self {
             Self::Integer(n) => Some(*n),
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the value is integral, so only out-of-range magnitudes \
+                          change, and those saturate"
+            )]
             Self::Real(r) if r.is_finite() && r.fract() == 0.0 => Some(*r as i64),
             _ => None,
         }
@@ -109,28 +132,40 @@ impl Object {
     /// representable as an integer — `100.0` ✓, `100.5` ✗.  Dict keys
     /// that lie about their type get rejected rather than silently
     /// truncated.
+    #[must_use]
     pub fn as_u32(&self) -> Option<u32> {
         u32::try_from(self.as_integer()?).ok()
     }
 
     /// Same as [`Self::as_u32`] but for byte offsets and lengths that
     /// genuinely need the full `u64` range.
+    #[must_use]
     pub fn as_u64(&self) -> Option<u64> {
         u64::try_from(self.as_integer()?).ok()
     }
 
-    pub fn as_f32(&self) -> Option<f32> {
+    /// The value of a `Real`, or an `Integer` rounded to the nearest `f32`.
+    #[must_use]
+    pub const fn as_f32(&self) -> Option<f32> {
         match self {
             Self::Real(r) => Some(*r),
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "rounding to the nearest f32 is the documented conversion"
+            )]
             Self::Integer(n) => Some(*n as f32),
             _ => None,
         }
     }
 
+    /// [`Self::as_f32`] widened to `f64`.
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         self.as_f32().map(f64::from)
     }
 
+    /// The bytes of a `Name`.
+    #[must_use]
     pub fn as_name(&self) -> Option<&[u8]> {
         match self {
             Self::Name(n) => Some(n),
@@ -138,6 +173,8 @@ impl Object {
         }
     }
 
+    /// The bytes of a `String`.
+    #[must_use]
     pub fn as_str(&self) -> Option<&[u8]> {
         match self {
             Self::String(s, _) => Some(s),
@@ -145,14 +182,18 @@ impl Object {
         }
     }
 
-    pub fn as_array(&self) -> Option<&[Object]> {
+    /// The items of an `Array`.
+    #[must_use]
+    pub fn as_array(&self) -> Option<&[Self]> {
         match self {
             Self::Array(a) => Some(a),
             _ => None,
         }
     }
 
-    pub fn as_dict(&self) -> Option<&Dictionary> {
+    /// The dictionary of a `Dictionary`, or of a `Stream`.
+    #[must_use]
+    pub const fn as_dict(&self) -> Option<&Dictionary> {
         match self {
             Self::Dictionary(d) => Some(d),
             Self::Stream(s) => Some(&s.dict),
@@ -160,25 +201,28 @@ impl Object {
         }
     }
 
-    pub fn as_stream(&self) -> Option<&Stream> {
+    /// The stream of a `Stream`.
+    #[must_use]
+    pub const fn as_stream(&self) -> Option<&Stream> {
         match self {
             Self::Stream(s) => Some(s),
             _ => None,
         }
     }
 
-    pub fn as_reference(&self) -> Option<ObjectId> {
+    /// The target of a `Reference`.
+    #[must_use]
+    pub const fn as_reference(&self) -> Option<ObjectId> {
         match self {
             Self::Reference(id) => Some(*id),
             _ => None,
         }
     }
 
-    /// Return the variant name as a static string (mirrors lopdf's
-    /// `Object::enum_variant` so error messages can describe a value's kind
-    /// without dumping the full Debug representation).
+    /// Return the variant name as a static string, so error messages can
+    /// describe a value's kind without its full `Debug` representation.
     #[must_use]
-    pub fn enum_variant(&self) -> &'static str {
+    pub const fn enum_variant(&self) -> &'static str {
         match self {
             Self::Null => "Null",
             Self::Boolean(_) => "Boolean",
@@ -220,7 +264,7 @@ fn length_lands_on_endstream(data: &[u8], start: usize, len: usize) -> bool {
 /// between the stream data and the `endstream` keyword (PDF §7.3.8.1).  `kw`
 /// is the index of the `e` in `endstream`; the returned index is the true end
 /// of the body.  Lower-bounded by `start` so an empty stream stays empty.
-fn trim_eol_before(data: &[u8], start: usize, kw: usize) -> usize {
+const fn trim_eol_before(data: &[u8], start: usize, kw: usize) -> usize {
     let mut end = kw;
     if end > start && data[end - 1] == b'\n' {
         end -= 1;
@@ -261,7 +305,7 @@ const MAX_NESTING: usize = 256;
 /// endobj` (PDF §7.3.8 / §7.3.10), so the terminator is the `endstream` that
 /// is **EOL-preceded and followed — after whitespace — by `endobj`**.  A
 /// false `endstream` embedded in compressed data essentially never satisfies
-/// both.  Preference order, mirroring poppler / pdf.js / mutool recovery:
+/// both.  Preference order:
 ///   1. first EOL-preceded `endstream` immediately followed by `endobj`
 ///      (the strong terminator — every well-formed object has exactly this,
 ///      so stop at the first to keep the scan O(stream) not O(file));
@@ -371,8 +415,7 @@ fn parse_object_nested(data: &[u8], pos: &mut usize, depth: usize) -> Option<Obj
                 let declared_len = dict
                     .get(b"Length")
                     .and_then(Object::as_i64)
-                    .filter(|&n| n >= 0)
-                    .map(|n| n as usize);
+                    .and_then(|n| usize::try_from(n).ok());
 
                 let stream_end = match declared_len {
                     Some(len) if length_lands_on_endstream(data, stream_start, len) => {
@@ -381,22 +424,17 @@ fn parse_object_nested(data: &[u8], pos: &mut usize, depth: usize) -> Option<Obj
                     // Missing, indirect (`N 0 R`), negative, or inconsistent
                     // `/Length`: locate the real end by searching for the
                     // `endstream` keyword and trimming the EOL that precedes it.
-                    _ => match find_endstream(data, stream_start) {
-                        Some(end) => end,
-                        // No `endstream` within the scan bound: the object is
-                        // truncated or the file is not a valid PDF.  Surface
-                        // it loudly — an empty body here would render a silent
-                        // blank page, the exact failure the indirect-`/Length`
-                        // recovery exists to prevent.
-                        None => {
-                            log::warn!(
-                                "stream at offset {stream_start}: no `endstream` \
-                                 terminator within {MAX_STREAM_SCAN} bytes \
-                                 (truncated or malformed object); content dropped"
-                            );
-                            stream_start
-                        }
-                    },
+                    // No `endstream` within the scan bound means the object is
+                    // truncated or the file is not a valid PDF; the body is
+                    // dropped with a warning rather than silently.
+                    _ => find_endstream(data, stream_start).unwrap_or_else(|| {
+                        log::warn!(
+                            "stream at offset {stream_start}: no `endstream` \
+                             terminator within {MAX_STREAM_SCAN} bytes \
+                             (truncated or malformed object); content dropped"
+                        );
+                        stream_start
+                    }),
                 };
                 let content = data[stream_start..stream_end].to_vec();
                 // Advance pos past "endstream".
@@ -462,21 +500,20 @@ fn parse_scalar(data: &[u8], pos: &mut usize) -> Option<Object> {
             // Peek for "gen R" to form an indirect reference. Only valid when
             // the object number fits in u32 and is non-negative; otherwise we
             // fall through and emit a plain Integer.
-            if n >= 0 && n <= i64::from(u32::MAX) {
+            if let Ok(num) = u32::try_from(n) {
                 let mut peek = *pos;
                 skip_ws(data, &mut peek);
                 let gen_tok = scan_token(data, &mut peek);
-                if !gen_tok.is_empty()
-                    && let Some(g) = std::str::from_utf8(gen_tok)
-                        .ok()
-                        .and_then(|s| s.parse::<i64>().ok())
-                    && (0..=i64::from(u16::MAX)).contains(&g)
+                if let Some(generation) = std::str::from_utf8(gen_tok)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .and_then(|g| u16::try_from(g).ok())
                 {
                     skip_ws(data, &mut peek);
                     let r_tok = scan_token(data, &mut peek);
                     if r_tok == b"R" {
                         *pos = peek;
-                        return Some(Object::Reference((n as u32, g as u16)));
+                        return Some(Object::Reference((num, generation)));
                     }
                 }
             }
@@ -538,7 +575,8 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
         // Value is any object.
         skip_ws(data, pos);
         let value = parse_object_nested(data, pos, depth + 1)?;
-        dict.insert(key, value);
+        // A repeated key keeps its last value.
+        let _ = dict.insert(key, value);
     }
 
     Some(dict)
@@ -546,21 +584,13 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
 
 /// Parse a complete indirect object (`<id> <gen> obj … endobj`) at `offset`.
 /// Returns `(object_id, object_value)`.
-pub fn parse_indirect_object(data: &[u8], offset: usize) -> Option<(ObjectId, Object)> {
+pub(crate) fn parse_indirect_object(data: &[u8], offset: usize) -> Option<(ObjectId, Object)> {
     let mut pos = offset;
     skip_ws(data, &mut pos);
 
-    let id_raw = parse_u64(data, &mut pos)?;
-    if id_raw > u64::from(u32::MAX) {
-        return None;
-    }
-    let id_num = id_raw as u32;
+    let id_num = u32::try_from(parse_u64(data, &mut pos)?).ok()?;
     skip_ws(data, &mut pos);
-    let gen_raw = parse_u64(data, &mut pos)?;
-    if gen_raw > u64::from(u16::MAX) {
-        return None;
-    }
-    let gen_num = gen_raw as u16;
+    let gen_num = u16::try_from(parse_u64(data, &mut pos)?).ok()?;
     skip_ws(data, &mut pos);
 
     if !data[pos..].starts_with(b"obj") {

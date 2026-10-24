@@ -5,14 +5,14 @@
 //! * [`Document::open`] parses only the xref table — no objects are loaded.
 //! * Objects are resolved on first access and cached (`Arc`-wrapped) for reuse.
 //! * All byte scanning uses hand-rolled primitives in the private `lexer`
-//!   submodule; no nom/nom_locate.
-//! * Shared parsing primitives live in `lexer` — `rasterrocket-interp`'s content
-//!   tokenizer will import from here in a follow-up refactor.
-//!
-//! # Compatibility
-//!
-//! Public types mirror `lopdf` naming so `rasterrocket-interp` can migrate
-//! file-by-file with mostly mechanical changes.
+//!   submodule.
+
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "every module is private, so rustc's `unreachable_pub` requires \
+              crate-internal items to be `pub(crate)`, which this lint then \
+              calls redundant; the two lints cannot both hold"
+)]
 
 mod decrypt;
 mod dictionary;
