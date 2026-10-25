@@ -10,9 +10,10 @@
 //! through the program's charset; for every other program they are glyph
 //! indices.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use raster::path::Path;
+use skrifa::outline::HintingInstance;
 
 use crate::bitmap::GlyphBitmap;
 use crate::cache::GlyphCache;
@@ -44,6 +45,11 @@ pub struct FontFace {
     pub aa: bool,
     program: Arc<FontProgram>,
     matrix: FontMatrix,
+    /// Interpreter state at `size_px` pixels per em for a program that
+    /// requires hinting ([`FontProgram::requires_hinting`]), built on first
+    /// use; `None` inside when the program needs none or it cannot be set
+    /// up.
+    hinting: OnceLock<Option<HintingInstance>>,
 }
 
 impl std::fmt::Debug for FontFace {
@@ -90,6 +96,7 @@ impl FontFace {
             aa,
             program,
             matrix: mat,
+            hinting: OnceLock::new(),
         })
     }
 
@@ -224,11 +231,34 @@ impl FontFace {
     }
 
     /// Outline of glyph `gid` in device pixels, translated right by `shift`.
+    ///
+    /// A program that requires hinting is grid-fitted at `size_px` pixels
+    /// per em and the result mapped by the matrix divided by `size_px`;
+    /// when that fails the glyph is drawn unhinted.
     fn outline(&self, gid: u32, shift: f64) -> Option<Path> {
+        if let Some(path) = self.hinted_outline(gid, shift) {
+            return Some(path);
+        }
         let scale = self.program.upem().recip();
         let [a, b, c, d] = self.matrix.map(|v| v * scale);
         let mut pen = PathPen::new([a, b, c, d, shift, 0.0]);
         let _advance = self.program.draw(gid, &mut pen)?;
+        let path = pen.finish();
+        (!path.pts.is_empty()).then_some(path)
+    }
+
+    fn hinted_outline(&self, gid: u32, shift: f64) -> Option<Path> {
+        if !self.program.requires_hinting() {
+            return None;
+        }
+        let instance = self
+            .hinting
+            .get_or_init(|| self.program.hinting_instance(f32::from(self.size_px)))
+            .as_ref()?;
+        let scale = f64::from(self.size_px).recip();
+        let [a, b, c, d] = self.matrix.map(|v| v * scale);
+        let mut pen = PathPen::new([a, b, c, d, shift, 0.0]);
+        self.program.draw_hinted(gid, instance, &mut pen)?;
         let path = pen.finish();
         (!path.pts.is_empty()).then_some(path)
     }

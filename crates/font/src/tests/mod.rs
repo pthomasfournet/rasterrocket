@@ -2,6 +2,7 @@
 //! face API, glyph routing, and robustness on hostile input.
 
 mod formats;
+mod hinting;
 mod sfnt;
 mod type1;
 

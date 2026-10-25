@@ -13,7 +13,10 @@
 //! | bare CFF (Type 1C, CID-keyed CFF) | major version 1 or 2, header size ≥ 4 | charstrings |
 //! | Type 1 (PFA, PFB) | `%!` or the PFB segment marker `80 01` | eexec-encrypted charstrings |
 //!
-//! Outlines are unhinted.
+//! Outlines are unhinted, except for the TrueType programs whose glyphs
+//! are assembled by their bytecode instructions
+//! ([`FontProgram::requires_hinting`]): those are grid-fitted by the
+//! TrueType interpreter at the size they are drawn at.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -25,7 +28,9 @@ use read_fonts::tables::cmap::{CmapSubtable, PlatformId};
 use read_fonts::types::{GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
 use skrifa::instance::{LocationRef, Size};
-use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::outline::{
+    DrawSettings, Engine, HintingInstance, HintingOptions, OutlineGlyphFormat, OutlinePen, Target,
+};
 use skrifa::{GlyphNameSource, MetadataProvider};
 
 use crate::engine::LoadError;
@@ -85,7 +90,13 @@ enum SfntCmap {
 /// Format-specific outline source.
 enum Outlines {
     /// sfnt container; the face index selects a member of a collection.
-    Sfnt { face_index: u32, cmap: SfntCmap },
+    /// `hint_reliant` marks `glyf` outlines that are correct only after the
+    /// glyph instructions run.
+    Sfnt {
+        face_index: u32,
+        cmap: SfntCmap,
+        hint_reliant: bool,
+    },
     /// Bare CFF program.
     Cff,
     /// Type 1 program, decrypted and parsed once at load.
@@ -141,9 +152,14 @@ impl FontProgram {
             FontFormat::Sfnt => {
                 let font = FontRef::from_index(&data, face_index)
                     .map_err(|e| LoadError::Malformed(format!("sfnt: {e}")))?;
-                if font.outline_glyphs().format().is_none() {
-                    return Err(LoadError::Malformed("sfnt has no glyph outlines".into()));
-                }
+                let outline_glyphs = font.outline_glyphs();
+                let hint_reliant = match outline_glyphs.format() {
+                    None => {
+                        return Err(LoadError::Malformed("sfnt has no glyph outlines".into()));
+                    }
+                    Some(OutlineGlyphFormat::Glyf) => outline_glyphs.require_interpreter(),
+                    Some(_) => false,
+                };
                 let upem = font
                     .head()
                     .map(|head| head.units_per_em())
@@ -157,7 +173,11 @@ impl FontProgram {
                     let _ = name_charmap.set(charmap);
                 }
                 (
-                    Outlines::Sfnt { face_index, cmap },
+                    Outlines::Sfnt {
+                        face_index,
+                        cmap,
+                        hint_reliant,
+                    },
                     f64::from(upem),
                     cid_to_gid,
                 )
@@ -410,6 +430,70 @@ impl FontProgram {
                 font.draw(glyph, None, pen).ok()
             }
         }
+    }
+
+    /// `true` for a TrueType program whose glyphs take their shape from the
+    /// glyph instructions rather than from the outline data alone, so that
+    /// unhinted outlines are wrong (components overlap or sit off their
+    /// strokes).  Such programs are recognised by family name and by the
+    /// lengths and checksums of their `cvt `, `fpgm` and `prep` tables,
+    /// which identify them after renaming or subsetting.
+    #[must_use]
+    pub const fn requires_hinting(&self) -> bool {
+        matches!(
+            self.outlines,
+            Outlines::Sfnt {
+                hint_reliant: true,
+                ..
+            }
+        )
+    }
+
+    /// TrueType interpreter state for drawing at `ppem` pixels per em: the
+    /// font program and control-value program have run, and the control
+    /// values are scaled.  `None` when the program does not require hinting
+    /// ([`Self::requires_hinting`]), when either program fails, or when it
+    /// disables instructions at this size.
+    ///
+    /// The target is monochrome grid-fitting, under which the interpreter
+    /// applies every instruction as written; the subpixel compatibility
+    /// mode, which suppresses movement along the x axis, would leave the
+    /// components unassembled.
+    #[must_use]
+    pub fn hinting_instance(&self, ppem: f32) -> Option<HintingInstance> {
+        if !self.requires_hinting() {
+            return None;
+        }
+        let font = self.sfnt()?;
+        let options = HintingOptions {
+            engine: Engine::Interpreter,
+            target: Target::Mono,
+        };
+        let instance = HintingInstance::new(
+            &font.outline_glyphs(),
+            Size::new(ppem),
+            LocationRef::default(),
+            options,
+        )
+        .ok()?;
+        instance.is_enabled().then_some(instance)
+    }
+
+    /// Emit the outline of glyph `gid` grid-fitted by `instance`, in pixels
+    /// at the instance's size (y up).  `None` when the glyph cannot be
+    /// drawn.
+    pub fn draw_hinted(
+        &self,
+        gid: u32,
+        instance: &HintingInstance,
+        pen: &mut impl OutlinePen,
+    ) -> Option<()> {
+        let font = self.sfnt()?;
+        let outline = font.outline_glyphs().get(GlyphId::new(gid))?;
+        outline
+            .draw(DrawSettings::hinted(instance, false), pen)
+            .ok()
+            .map(|_| ())
     }
 
     /// Font units per em of the outlines [`Self::draw`] emits.
