@@ -49,6 +49,7 @@ mod image_reduce;
 mod image_sampler;
 mod operators;
 mod patterns;
+mod soft_mask;
 mod text;
 mod text_ops;
 #[cfg(feature = "vulkan")]

@@ -58,10 +58,32 @@ pub struct ExtGStateParams {
     pub flatness: Option<f64>,
     /// Blend mode `BM`.  `None` = unchanged (keep current).
     pub blend_mode: Option<BlendMode>,
+    /// Soft mask `SMask`.  `None` = unchanged.
+    pub soft_mask: Option<SoftMaskParams>,
+}
+
+/// The `SMask` entry of an `ExtGState` dictionary (PDF §11.6.5.2).
+#[derive(Debug, Clone)]
+pub enum SoftMaskParams {
+    /// `/None`: no soft mask.
+    None,
+    /// A soft-mask dictionary.
+    Group {
+        /// `S`: `true` for `/Luminosity`, `false` for `/Alpha`.
+        luminosity: bool,
+        /// `G`: the transparency group `XObject` that defines the mask.
+        group: ObjectId,
+        /// `BC`: backdrop colour components in the group's colour space;
+        /// empty means black.
+        backdrop: Vec<f64>,
+        /// `TR`: transfer function applied to the mask values; `None` is
+        /// the identity.
+        transfer: Option<Object>,
+    },
 }
 
 impl ExtGStateParams {
-    fn from_dict(d: &Dictionary) -> Self {
+    fn from_dict(doc: &Document, d: &Dictionary) -> Self {
         Self {
             fill_alpha: real_to_u8(d, b"ca"),
             stroke_alpha: real_to_u8(d, b"CA"),
@@ -71,8 +93,61 @@ impl ExtGStateParams {
             miter_limit: real_or_int(d, b"ML"),
             flatness: real_or_int(d, b"FL"),
             blend_mode: parse_blend_mode(d),
+            soft_mask: parse_soft_mask(doc, d),
         }
     }
+}
+
+/// Parse the `SMask` key from an `ExtGState` dictionary.
+///
+/// A dictionary without a stream reference in `G`, or with an `S` other
+/// than `Luminosity` / `Alpha`, is malformed and leaves the soft mask
+/// unchanged.
+fn parse_soft_mask(doc: &Document, d: &Dictionary) -> Option<SoftMaskParams> {
+    let obj = d.get(b"SMask")?;
+    if obj.as_name() == Some(b"None".as_slice()) {
+        return Some(SoftMaskParams::None);
+    }
+    let sm = resolve_dict(doc, obj)?;
+    let luminosity = match sm.get(b"S")?.as_name()? {
+        b"Luminosity" => true,
+        b"Alpha" => false,
+        other => {
+            log::warn!(
+                "ExtGState: soft mask subtype {:?} unknown — ignoring the soft mask",
+                String::from_utf8_lossy(other)
+            );
+            return None;
+        }
+    };
+    let Object::Reference(group) = sm.get(b"G")? else {
+        return None;
+    };
+    let backdrop = match sm.get(b"BC") {
+        Some(Object::Array(a)) => a
+            .iter()
+            .filter_map(|o| match o {
+                Object::Real(r) => Some(f64::from(*r)),
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "colour components are small integers"
+                )]
+                Object::Integer(n) => Some(*n as f64),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let transfer = sm
+        .get(b"TR")
+        .filter(|o| o.as_name() != Some(b"Identity".as_slice()))
+        .cloned();
+    Some(SoftMaskParams::Group {
+        luminosity,
+        group: *group,
+        backdrop,
+        transfer,
+    })
 }
 
 /// Parse the `BM` key from an `ExtGState` dictionary.
@@ -333,7 +408,7 @@ impl<'doc> PageResources<'doc> {
         let eg_dict = self.resource_subdict(b"ExtGState")?;
         let gs_ref_or_dict = eg_dict.get(name)?;
         let gs = resolve_dict(self.doc, gs_ref_or_dict)?;
-        Some(ExtGStateParams::from_dict(&gs))
+        Some(ExtGStateParams::from_dict(self.doc, &gs))
     }
 
     /// Resolve the named `XObject` and return it as a [`FormXObject`] if its

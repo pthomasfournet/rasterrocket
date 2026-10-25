@@ -7,6 +7,8 @@
 //!
 //! The save/restore stack is a plain `Vec`; `q` pushes a clone, `Q` pops.
 
+use std::sync::Arc;
+
 use raster::Clip;
 use raster::types::{BlendMode, LineCap, LineJoin};
 
@@ -133,6 +135,23 @@ pub struct InterpGState {
     /// Declared colour space for stroke operations (PDF §8.6).  Mirrors
     /// `fill_color_space`; set by `CS /Name`.
     pub stroke_color_space: ColorSpace,
+    /// Soft mask in effect (PDF `SMask`), resolved to device pixels when
+    /// `gs` installed it.  `None` = no soft mask.
+    pub soft_mask: Option<Arc<SoftMaskPlane>>,
+}
+
+/// A soft mask resolved to one value per device pixel (PDF §11.6.5.2).
+///
+/// `values` is row-major over the page bitmap, `width × height` bytes; each
+/// byte scales the opacity of everything painted at that pixel.
+#[derive(Debug)]
+pub struct SoftMaskPlane {
+    /// Bitmap width in pixels.
+    pub width: u32,
+    /// Bitmap height in pixels.
+    pub height: u32,
+    /// Mask value per pixel: 0 = nothing painted, 255 = painted unchanged.
+    pub values: Vec<u8>,
 }
 
 impl Clone for InterpGState {
@@ -158,6 +177,7 @@ impl Clone for InterpGState {
             stroke_pattern_components: self.stroke_pattern_components.clone(),
             fill_color_space: self.fill_color_space.clone(),
             stroke_color_space: self.stroke_color_space.clone(),
+            soft_mask: self.soft_mask.clone(),
         }
     }
 }
@@ -189,6 +209,7 @@ impl InterpGState {
             // stroking and non-stroking operations until the first `cs`/`CS`.
             fill_color_space: ColorSpace::DeviceGray,
             stroke_color_space: ColorSpace::DeviceGray,
+            soft_mask: None,
         }
     }
 }

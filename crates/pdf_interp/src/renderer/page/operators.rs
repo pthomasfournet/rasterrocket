@@ -7,15 +7,6 @@ use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
 use crate::content::{Operator, TextArrayElement};
 
 impl PageRenderer<'_> {
-    #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
-    #[expect(
-        clippy::match_same_arms,
-        reason = "intentional stubs for unimplemented operators"
-    )]
-    #[expect(
-        clippy::many_single_char_names,
-        reason = "PDF matrix components and PDF spec variable names"
-    )]
     pub(super) fn execute_one(&mut self, op: &Operator) {
         // ── Optional Content Group (OCG) visibility ───────────────────────────
         // Always handle OCG stack operators regardless of visibility, then skip
@@ -39,6 +30,26 @@ impl PageRenderer<'_> {
             return;
         }
 
+        if paints(op)
+            && let Some(mask) = self.gstate.current_mut().soft_mask.take()
+        {
+            self.paint_through_soft_mask(&mask, |r| r.dispatch(op));
+            self.gstate.current_mut().soft_mask = Some(mask);
+            return;
+        }
+        self.dispatch(op);
+    }
+
+    #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "intentional stubs for unimplemented operators"
+    )]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "PDF matrix components and PDF spec variable names"
+    )]
+    fn dispatch(&mut self, op: &Operator) {
         match op {
             // ── Graphics state ────────────────────────────────────────────────
             Operator::Save => self.gstate.save(),
@@ -89,6 +100,9 @@ impl PageRenderer<'_> {
                     }
                     if let Some(bm) = params.blend_mode {
                         gs.blend_mode = bm;
+                    }
+                    if let Some(sm) = &params.soft_mask {
+                        self.set_soft_mask(sm);
                     }
                 }
             }
@@ -440,4 +454,26 @@ impl PageRenderer<'_> {
             );
         }
     }
+}
+
+/// Whether `op` paints, and so is subject to the soft mask.
+const fn paints(op: &Operator) -> bool {
+    matches!(
+        op,
+        Operator::Fill
+            | Operator::FillEvenOdd
+            | Operator::Stroke
+            | Operator::CloseStroke
+            | Operator::CloseFillStroke
+            | Operator::CloseFillStrokeEvenOdd
+            | Operator::FillStroke
+            | Operator::FillStrokeEvenOdd
+            | Operator::ShowText(_)
+            | Operator::ShowTextArray(_)
+            | Operator::MoveNextLineShow(_)
+            | Operator::MoveNextLineShowSpaced { .. }
+            | Operator::PaintXObject(_)
+            | Operator::InlineImage { .. }
+            | Operator::PaintShading(_)
+    )
 }
