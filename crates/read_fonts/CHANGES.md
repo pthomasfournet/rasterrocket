@@ -55,4 +55,4 @@ It is not published and changes are not sent upstream.
   `%!PS-Adobe-3.0 Resource-CIDFont`, which `CidType1Font::is_cid_keyed`
   tests for), and a dictionary key outside a declared dictionary or an
   unreadable `FontMatrix` is ignored instead of failing the font. Tests:
-  `ps::type1::cid::tests::*`.
+  `ps::type1::cid::tests::*` (in `src/tests/test_cid_type1.rs`).
