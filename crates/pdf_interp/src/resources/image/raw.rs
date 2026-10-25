@@ -51,22 +51,13 @@ pub(super) fn decode_raw(
     if is_mask {
         // Stencil mask — always 1 byte per pixel, no colour space conversion.
         //
-        // Polarity rationale (load-bearing — a v1 flood-fill regression came
-        // from getting this backwards): this codebase normalises *every*
-        // stencil source (JBIG2, CCITTFax, raw) to one internal
-        // `ImageColorSpace::Mask` byte convention — 0x00 = paint, 0xFF =
-        // transparent — where the *ink* bit (=1) is the paint bit.  The JBIG2
-        // and CCITTFax decoders already emit that convention (bit 1 = black =
-        // ink = paint).  Raw 1-bpc stencils are aligned to the same internal
-        // convention so all three sources composite identically downstream and
-        // match the reference renderers (mutool, pdftoppm) on real-world
-        // producers, which overwhelmingly author raw stencils ink=1=paint.
-        //
-        // NB this is the *internal* convention, not a verbatim restatement of
-        // PDF 32000-1 §8.9.6.2, whose literal default `Decode [0 1]` instead
-        // says raw sample 0 = paint.  An explicit `/Decode [1 0]` on the
-        // stencil flips polarity relative to this internal default; that is
-        // what `is_mask_inverted` detects and `invert` carries through.
+        // PDF 32000-1 §8.9.6.2: under the default `Decode [0 1]` a sample
+        // of 0 marks the page with the fill colour and a sample of 1 leaves
+        // it unchanged; `Decode [1 0]` swaps the two.  Every stencil source
+        // (raw, JBIG2, CCITTFax) is normalised to the internal
+        // `ImageColorSpace::Mask` bytes 0x00 = paint, 0xFF = transparent.
+        // The bilevel codecs emit decoded sample 0 (black) as 0x00, so a raw
+        // sample maps to the same byte value as a decoded bilevel sample.
         let invert = is_mask_inverted(dict);
         return decode_mask_raw(data, width, height, bpc, invert);
     }
@@ -424,16 +415,9 @@ fn is_mask_inverted(dict: &Dictionary) -> bool {
 
 /// Decode a stencil mask (ImageMask=true) from raw data.
 ///
-/// Internal stencil convention (NOT a verbatim PDF §8.9.6.2 restatement — see
-/// the rationale block at the `decode_mask_raw` call site in [`decode_raw`]):
-/// with the non-inverted default, raw bit 1 (= ink) maps to 0x00 (paint) and
-/// raw bit 0 maps to 0xFF (transparent).  This deliberately matches the JBIG2
-/// and `CCITTFax` decoder output (bit 1 = black = ink = paint) so every stencil
-/// source composites identically, and matches mutool/pdftoppm on real-world
-/// producers.
-///
-/// When `invert` is `true` (explicit `/Decode [1 0]`), polarity is flipped:
-/// raw bit 0 maps to 0x00 (paint) and raw bit 1 maps to 0xFF (transparent).
+/// With the default `Decode [0 1]`, sample 0 maps to 0x00 (paint) and
+/// sample 1 to 0xFF (transparent), per PDF 32000-1 §8.9.6.2.  When `invert`
+/// is `true` (explicit `/Decode [1 0]`) the mapping is swapped.
 ///
 /// Only `bpc == 1` is conformant for an `ImageMask` per §8.9.6.2; the `bpc == 8`
 /// arm is a defensive fallback for non-conformant producers and is logged.
@@ -447,11 +431,22 @@ fn decode_mask_raw(
     match bpc {
         1 => {
             let width_usize = usize::try_from(width).ok()?;
-            // Non-inverted default: ink bit (1) = paint (0x00), bit 0 =
-            // transparent (0xFF) — aligned to the JBIG2/CCITT decoders, see the
-            // call-site rationale.  `invert` (explicit /Decode [1 0]) swaps it.
-            let pixels = unpack_packed_bits(data, 1, width_usize, height, |v| {
-                let paint = if invert { v == 0 } else { v != 0 };
+            // A truncated stream is padded with the transparent sample
+            // value, so missing rows leave the page unchanged.
+            let needed = width_usize
+                .div_ceil(8)
+                .checked_mul(usize::try_from(height).ok()?)?;
+            let data: std::borrow::Cow<'_, [u8]> = if data.len() < needed {
+                let mut padded = data.to_vec();
+                padded.resize(needed, if invert { 0x00 } else { 0xFF });
+                std::borrow::Cow::Owned(padded)
+            } else {
+                std::borrow::Cow::Borrowed(data)
+            };
+            // Sample 0 paints (0x00) and sample 1 is transparent (0xFF);
+            // `invert` (explicit /Decode [1 0]) swaps them.
+            let pixels = unpack_packed_bits(&data, 1, width_usize, height, |v| {
+                let paint = if invert { v != 0 } else { v == 0 };
                 if paint { 0x00 } else { 0xFF }
             })?;
             Some(ImageDescriptor {
@@ -1030,72 +1025,68 @@ mod tests {
     }
 
     #[test]
-    fn stencil_1bpc_default_decode_bit1_is_paint() {
-        // No /Decode → internal default: ink bit (1) = paint (0x00), bit 0 =
-        // transparent (0xFF).  Byte 0b1010_0000 over 4 px → paint, trans, paint, trans.
+    fn stencil_1bpc_default_decode_sample0_is_paint() {
+        // No /Decode: sample 0 paints (0x00), sample 1 is transparent (0xFF)
+        // (§8.9.6.2).  Byte 0b1010_0000 over 4 px → trans, paint, trans, paint.
         let dict = stencil_dict(None);
-        let px = decode_stencil(&dict, &[0b1010_0000u8], 4, 1);
-        assert_eq!(px, vec![0x00, 0xFF, 0x00, 0xFF]);
-    }
-
-    #[test]
-    fn stencil_1bpc_explicit_decode_0_1_matches_default() {
-        // Explicit /Decode [0 1] is the default — must equal the no-Decode case.
-        let dict = stencil_dict(Some(vec![Object::Integer(0), Object::Integer(1)]));
-        let px = decode_stencil(&dict, &[0b1010_0000u8], 4, 1);
-        assert_eq!(px, vec![0x00, 0xFF, 0x00, 0xFF]);
-    }
-
-    #[test]
-    fn stencil_1bpc_decode_1_0_inverts_polarity() {
-        // /Decode [1 0] flips polarity: bit 0 = paint (0x00), bit 1 = transparent.
-        let dict = stencil_dict(Some(vec![Object::Integer(1), Object::Integer(0)]));
         let px = decode_stencil(&dict, &[0b1010_0000u8], 4, 1);
         assert_eq!(px, vec![0xFF, 0x00, 0xFF, 0x00]);
     }
 
     #[test]
-    fn stencil_1bpc_decode_real_1_0_also_inverts() {
-        // /Decode [1.0 0.0] written as Real objects must also invert.
-        let dict = stencil_dict(Some(vec![Object::Real(1.0), Object::Real(0.0)]));
-        let px = decode_stencil(&dict, &[0b1000_0000u8], 2, 1);
-        assert_eq!(px, vec![0xFF, 0x00]);
+    fn stencil_1bpc_explicit_decode_0_1_matches_default() {
+        let dict = stencil_dict(Some(vec![Object::Integer(0), Object::Integer(1)]));
+        let px = decode_stencil(&dict, &[0b1010_0000u8], 4, 1);
+        assert_eq!(px, vec![0xFF, 0x00, 0xFF, 0x00]);
     }
 
     #[test]
-    fn stencil_1bpc_all_zero_data_is_transparent_not_flood() {
-        // The exact docmac repro shape: a 1×1 all-zero-bit stencil with the
-        // default Decode must be transparent (0xFF), NOT paint — painting it
-        // is the v1 full-page black-flood regression.
+    fn stencil_1bpc_decode_1_0_inverts_polarity() {
+        // /Decode [1 0]: sample 1 paints, sample 0 is transparent.
+        let dict = stencil_dict(Some(vec![Object::Integer(1), Object::Integer(0)]));
+        let px = decode_stencil(&dict, &[0b1010_0000u8], 4, 1);
+        assert_eq!(px, vec![0x00, 0xFF, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn stencil_1bpc_decode_real_1_0_also_inverts() {
+        let dict = stencil_dict(Some(vec![Object::Real(1.0), Object::Real(0.0)]));
+        let px = decode_stencil(&dict, &[0b1000_0000u8], 2, 1);
+        assert_eq!(px, vec![0x00, 0xFF]);
+    }
+
+    #[test]
+    fn stencil_1bpc_all_zero_sample_paints() {
         let dict = stencil_dict(None);
-        let px = decode_stencil(&dict, &[0x00u8], 1, 1);
-        assert_eq!(
-            px,
-            vec![0xFF],
-            "all-zero default stencil must be transparent"
-        );
+        assert_eq!(decode_stencil(&dict, &[0x00u8], 1, 1), vec![0x00]);
+        assert_eq!(decode_stencil(&dict, &[0x80u8], 1, 1), vec![0xFF]);
     }
 
     #[test]
     fn stencil_1bpc_row_padding_no_bleed_across_rows() {
         // 3-px-wide, 2-row stencil at 1 bpc.  Each row pads to a whole byte
         // (PDF §7.4.1), so the 4th–8th bits of byte 0 must NOT bleed into row 1.
-        // Row 0 byte = 0b101_00000 (px: paint, trans, paint).
-        // Row 1 byte = 0b010_00000 (px: trans, paint, trans).
+        // Row 0 byte = 0b101_00000 (px: trans, paint, trans).
+        // Row 1 byte = 0b010_00000 (px: paint, trans, paint).
         let dict = stencil_dict(None);
         let px = decode_stencil(&dict, &[0b1010_0000u8, 0b0100_0000u8], 3, 2);
-        assert_eq!(px, vec![0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF]);
+        assert_eq!(px, vec![0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]);
     }
 
     #[test]
-    fn stencil_1bpc_short_buffer_zero_pads_gracefully() {
-        // Buffer shorter than width×height: missing bits read as 0 (transparent
-        // in default polarity) — graceful, no panic, no flood.
-        let dict = stencil_dict(None);
-        let px = decode_stencil(&dict, &[0b1100_0000u8], 16, 1);
-        assert_eq!(px.len(), 16);
-        assert_eq!(&px[0..2], &[0x00, 0x00]); // bits 1,1 → paint
-        assert!(px[2..].iter().all(|&b| b == 0xFF)); // zero-padded → transparent
+    fn stencil_1bpc_short_buffer_pads_transparent() {
+        // Samples past the end of a truncated stream are transparent under
+        // either polarity.
+        for (decode, first) in [
+            (None, 0xFF),
+            (Some(vec![Object::Integer(1), Object::Integer(0)]), 0x00),
+        ] {
+            let dict = stencil_dict(decode);
+            let px = decode_stencil(&dict, &[0b1100_0000u8], 16, 2);
+            assert_eq!(px.len(), 32);
+            assert_eq!(&px[0..2], &[first, first]);
+            assert!(px[8..].iter().all(|&b| b == 0xFF), "{px:?}");
+        }
     }
 
     #[test]
@@ -1106,7 +1097,7 @@ mod tests {
         let px = decode_stencil(&dict, &[0b1000_0000u8], 2, 1);
         assert_eq!(
             px,
-            vec![0x00, 0xFF],
+            vec![0xFF, 0x00],
             "malformed stencil /Decode must use default (non-inverted) polarity"
         );
     }

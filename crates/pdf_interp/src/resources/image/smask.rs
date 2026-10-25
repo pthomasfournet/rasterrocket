@@ -563,20 +563,20 @@ mod tests {
     /// (e.g. 1853-ragon-orthodoxie-maconnique p62) blitted fully opaque over
     /// the whole page and rendering near-all-dark instead of mostly-white.
     ///
-    /// Stencil bytes (raw 1-bpp, default `Decode [0 1]`): a `1` bit paints
-    /// (decoder → `0x00`), a `0` bit is transparent (decoder → `0xFF`).  Row
-    /// of 8 px `0b1010_1010`: bits 1,0,1,0,1,0,1,0 ⇒ stencil bytes
+    /// Stencil bytes (raw 1-bpp, default `Decode [0 1]`): a `0` bit paints
+    /// (decoder → `0x00`), a `1` bit is transparent (decoder → `0xFF`).  Row
+    /// of 8 px `0b0101_0101`: bits 0,1,0,1,0,1,0,1 ⇒ stencil bytes
     /// `[00 FF 00 FF 00 FF 00 FF]` ⇒ alpha `!byte` = `[FF 00 FF 00 …]`.
     #[test]
     fn explicit_mask_polarity_paint_is_opaque() {
-        // 1 row × 8 px, 1 bpp ⇒ one byte 0b1010_1010.
+        // 1 row × 8 px, 1 bpp ⇒ one byte 0b0101_0101.
         let doc = crate::test_helpers::make_doc_with_stream(
-            &[0b1010_1010u8],
+            &[0b0101_0101u8],
             " /Subtype /Image /Width 8 /Height 1 /ImageMask true \
               /BitsPerComponent 1",
         );
         let mask = decode_explicit_mask(&doc, (2, 0)).expect("explicit /Mask stencil must decode");
-        // Paint bit (1) → opaque base image (0xFF); 0 bit → background (0x00).
+        // Paint bit (0) → opaque base image (0xFF); 1 bit → background (0x00).
         assert_eq!((mask.width(), mask.height()), (8, 1));
         assert_eq!(
             mask.alpha(),
