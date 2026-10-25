@@ -1,7 +1,7 @@
 //! Axial (linear) gradient pattern (PDF §8.7.4.5, type 2).
 //!
 //! Colour at pixel (x, y) is determined by projecting onto the gradient axis
-//! and linearly interpolating between `color0` and `color1`.
+//! and reading the colour ramp at the normalised parameter.
 //!
 //! # Out-of-range pixels
 //!
@@ -10,7 +10,7 @@
 //! correct when the caller clips the shading to its bounding path — which
 //! `shaded_fill` guarantees.  Do not use this pattern without a bounding clip.
 
-use super::lerp_color;
+use super::ColorRamp;
 use crate::pipe::Pattern;
 
 /// Linear gradient between two points in device space.
@@ -18,8 +18,7 @@ use crate::pipe::Pattern;
 /// `t = dot(p - p0, axis) / |axis|²`, clamped to `[t0, t1]`
 /// (or extended to the nearest endpoint when `extend_start` / `extend_end` is set).
 pub struct AxialPattern {
-    color0: [u8; 3],
-    color1: [u8; 3],
+    ramp: ColorRamp,
     ax: f64,
     ay: f64,
     p0x: f64,
@@ -35,9 +34,9 @@ pub struct AxialPattern {
 impl AxialPattern {
     /// Create an axial gradient.
     ///
-    /// - `color0`, `color1`: RGB endpoints.
+    /// - `ramp`: colours over the normalised parameter, `t0` → 0 and `t1` → 1.
     /// - `(p0x, p0y)`, `(p1x, p1y)`: axis endpoints in device pixels.
-    /// - `t0`, `t1`: parameter range mapping to `color0` / `color1`.
+    /// - `t0`, `t1`: parameter range mapping to the start / end of `ramp`.
     ///   May be inverted (`t0 > t1`).
     /// - `extend_start` / `extend_end`: extend colour beyond axis endpoints.
     ///
@@ -48,11 +47,10 @@ impl AxialPattern {
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors PDF shading dict: 2 colors + 2 points + t range + 2 extend flags"
+        reason = "mirrors PDF shading dict: colour ramp + 2 points + t range + 2 extend flags"
     )]
     pub fn new(
-        color0: [u8; 3],
-        color1: [u8; 3],
+        ramp: ColorRamp,
         p0x: f64,
         p0y: f64,
         p1x: f64,
@@ -67,8 +65,7 @@ impl AxialPattern {
         let len_sq = ax.mul_add(ax, ay * ay);
         let inv_len_sq = if len_sq > 0.0 { 1.0 / len_sq } else { 0.0 };
         Self {
-            color0,
-            color1,
+            ramp,
             ax,
             ay,
             p0x,
@@ -123,16 +120,12 @@ impl Pattern for AxialPattern {
         for x in x0..=x1 {
             if let Some(t) = self.t_for(x, y) {
                 // Normalise t to [0,1] regardless of t0/t1 ordering.
-                let frac = if t_span.abs() < f64::EPSILON {
-                    0_u32
+                let s = if t_span.abs() < f64::EPSILON {
+                    0.0
                 } else {
-                    #[expect(clippy::cast_sign_loss, reason = "value clamped to 0.0..=256.0")]
-                    #[expect(clippy::cast_possible_truncation, reason = "value ≤ 256")]
-                    {
-                        (((t - self.t0) / t_span).clamp(0.0, 1.0) * 256.0) as u32
-                    }
+                    (t - self.t0) / t_span
                 };
-                lerp_color(self.color0, self.color1, frac, &mut out[off..off + 3]);
+                self.ramp.write(s, &mut out[off..off + 3]);
             } else {
                 out[off] = 0;
                 out[off + 1] = 0;
@@ -153,8 +146,7 @@ mod tests {
 
     fn make_axial(extend: bool) -> AxialPattern {
         AxialPattern::new(
-            [0, 0, 0],
-            [255, 255, 255],
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
             0.0,
             0.0,
             8.0,
@@ -217,8 +209,7 @@ mod tests {
     #[test]
     fn degenerate_axis_writes_zeros() {
         let p = AxialPattern::new(
-            [255, 0, 0],
-            [0, 255, 0],
+            ColorRamp::two([255, 0, 0], [0, 255, 0]),
             5.0,
             5.0,
             5.0,
@@ -246,8 +237,7 @@ mod tests {
     fn inverted_t_range_reverses_gradient() {
         // t0=1 t1=0: color0 at right end, color1 at left end.
         let p = AxialPattern::new(
-            [255, 0, 0],
-            [0, 0, 255],
+            ColorRamp::two([255, 0, 0], [0, 0, 255]),
             0.0,
             0.0,
             4.0,

@@ -62,6 +62,7 @@ pub use pipe::{Pattern, PipeSrc, PipeState};
 pub use scanner::iter::ScanIterator;
 pub use scanner::{Intersect, XPathScanner};
 pub use screen::HalftoneScreen;
+pub use shading::ColorRamp;
 pub use shading::axial::AxialPattern;
 pub use shading::function::FunctionPattern;
 pub use shading::gouraud::{GouraudVertex, gouraud_triangle_fill};

@@ -13,13 +13,12 @@
 //!
 //! [`axial`]: super::axial
 
-use super::lerp_color;
+use super::ColorRamp;
 use crate::pipe::Pattern;
 
 /// Gradient between two circles (centre `c0`, radius `r0`) and (`c1`, `r1`).
 pub struct RadialPattern {
-    color0: [u8; 3],
-    color1: [u8; 3],
+    ramp: ColorRamp,
     c0x: f64,
     c0y: f64,
     /// Δc = c1 - c0.
@@ -40,20 +39,19 @@ pub struct RadialPattern {
 impl RadialPattern {
     /// Create a radial gradient.
     ///
-    /// - `color0` / `color1`: RGB at inner / outer circle.
+    /// - `ramp`: colours over the normalised parameter, inner circle → 0 and outer → 1.
     /// - `(c0x, c0y, r0)`: inner circle centre and radius (≥ 0).
     /// - `(c1x, c1y, r1)`: outer circle centre and radius (≥ 0).
-    /// - `t0`, `t1`: parameter range mapping to `color0` / `color1`.
+    /// - `t0`, `t1`: parameter range mapping to the start / end of `ramp`.
     ///   May be inverted (`t0 > t1`).
     /// - `extend_start` / `extend_end`: extend colour beyond the gradient circles.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors PDF shading dict: 2 colors + 2 circles (cx,cy,r each) + t range + 2 extend flags"
+        reason = "mirrors PDF shading dict: colour ramp + 2 circles (cx,cy,r each) + t range + 2 extend flags"
     )]
     pub fn new(
-        color0: [u8; 3],
-        color1: [u8; 3],
+        ramp: ColorRamp,
         c0x: f64,
         c0y: f64,
         r0: f64,
@@ -71,8 +69,7 @@ impl RadialPattern {
         // a = |Δc|² - Δr²
         let a = dr.mul_add(-dr, dcx.mul_add(dcx, dcy * dcy));
         Self {
-            color0,
-            color1,
+            ramp,
             c0x,
             c0y,
             dcx,
@@ -148,16 +145,12 @@ impl Pattern for RadialPattern {
         let mut off = 0usize;
         for xi in x0..=x1 {
             if let Some(t) = self.t_for(xi, y) {
-                let frac = if t_span.abs() < f64::EPSILON {
-                    0_u32
+                let s = if t_span.abs() < f64::EPSILON {
+                    0.0
                 } else {
-                    #[expect(clippy::cast_sign_loss, reason = "value clamped to 0.0..=256.0")]
-                    #[expect(clippy::cast_possible_truncation, reason = "value ≤ 256")]
-                    {
-                        (((t - self.t0) / t_span).clamp(0.0, 1.0) * 256.0) as u32
-                    }
+                    (t - self.t0) / t_span
                 };
-                lerp_color(self.color0, self.color1, frac, &mut out[off..off + 3]);
+                self.ramp.write(s, &mut out[off..off + 3]);
             } else {
                 out[off] = 0;
                 out[off + 1] = 0;
@@ -179,8 +172,7 @@ mod tests {
     /// Concentric radial: c0=c1=(4,4), r0=0, r1=4.
     fn make_concentric() -> RadialPattern {
         RadialPattern::new(
-            [0, 0, 0],
-            [255, 255, 255],
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
             4.0,
             4.0,
             0.0,
@@ -219,8 +211,7 @@ mod tests {
     fn pixel_on_inner_circle_maps_to_color0() {
         // r0=2: pixel at distance 2 from centre → t=0 → color0.
         let p = RadialPattern::new(
-            [255, 0, 0],
-            [0, 0, 255],
+            ColorRamp::two([255, 0, 0], [0, 0, 255]),
             4.0,
             4.0,
             2.0,
@@ -243,8 +234,7 @@ mod tests {
     fn no_real_intersection_writes_zeros() {
         // Eccentric gradient where a pixel far off-axis has no real solution.
         let p = RadialPattern::new(
-            [255, 0, 0],
-            [0, 255, 0],
+            ColorRamp::two([255, 0, 0], [0, 255, 0]),
             0.0,
             0.0,
             1.0,
@@ -266,8 +256,7 @@ mod tests {
         // When |Δc|² == Δr², a=0 and we use the linear path.
         // c0=(0,0,r0=0), c1=(3,4,r1=5): |Δc|²=25, Δr=5, Δr²=25 → a=0.
         let p = RadialPattern::new(
-            [0, 0, 0],
-            [255, 255, 255],
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
             0.0,
             0.0,
             0.0,

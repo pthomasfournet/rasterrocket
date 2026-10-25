@@ -26,9 +26,11 @@
 //!
 //! # PDF Function objects
 //!
-//! The `Function` key maps `t → [c₀, c₁, …, cₙ]`.  Only Type 2 (Exponential)
-//! and Type 3 (Stitching) functions are implemented; other types are treated
-//! as a solid mid-point colour.
+//! The `Function` key maps the shading parameter to colour components
+//! (evaluated by the `function` module).  Axial and radial shadings evaluate it at
+//! uniformly spaced parameter values and interpolate the converted colours,
+//! so every stop of a stitching function and any non-linearity of the
+//! colour conversion are preserved.
 
 pub(crate) mod function;
 mod patch;
@@ -37,6 +39,7 @@ use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object, Stream};
 use raster::pipe::Pattern;
+use raster::shading::ColorRamp;
 use raster::shading::axial::AxialPattern;
 use raster::shading::function::FunctionPattern;
 use raster::shading::gouraud::GouraudVertex;
@@ -179,13 +182,7 @@ fn resolve_axial(
     // Extend: [extend_start, extend_end].
     let (ext_s, ext_e) = read_extend(sh);
 
-    // Evaluate the function at t0 and t1 to get the two colours.
-    let fn_obj = sh.get(b"Function")?;
-    let c0_user = eval_function(doc, fn_obj, t0, n)?;
-    let c1_user = eval_function(doc, fn_obj, t1, n)?;
-
-    let rgb0 = cs.to_rgb(&c0_user);
-    let rgb1 = cs.to_rgb(&c1_user);
+    let ramp = sample_ramp(doc, sh.get(b"Function")?, cs, n, t0, t1)?;
 
     // Reject non-finite user-space coordinates before transforming.
     if !coords.iter().all(|v| v.is_finite()) {
@@ -204,8 +201,36 @@ fn resolve_axial(
 
     let bbox = bbox_from_coords(&[dx0, dy0, dx1, dy1]);
 
-    let pattern = AxialPattern::new(rgb0, rgb1, dx0, dy0, dx1, dy1, t0, t1, ext_s, ext_e);
+    let pattern = AxialPattern::new(ramp, dx0, dy0, dx1, dy1, t0, t1, ext_s, ext_e);
     Some((Box::new(pattern), bbox))
+}
+
+/// Number of parameter values at which an axial or radial shading's
+/// function is evaluated.
+const RAMP_SAMPLES: u16 = 256;
+
+/// Evaluate the shading function at [`RAMP_SAMPLES`] uniformly spaced
+/// parameter values from `t0` to `t1` and convert each colour to sRGB.
+///
+/// PDF §8.7.4.5.3: the colour at parameter `t` is the colour-space
+/// conversion of `Function(t)`; between samples the ramp interpolates in
+/// sRGB.  `None` when the function fails to evaluate at any sample.
+fn sample_ramp(
+    doc: &Document,
+    fn_obj: &Object,
+    cs: ShadingCs<'_>,
+    n: usize,
+    t0: f64,
+    t1: f64,
+) -> Option<ColorRamp> {
+    let last = f64::from(RAMP_SAMPLES - 1);
+    let samples = (0..RAMP_SAMPLES)
+        .map(|k| {
+            let t = (f64::from(k) / last).mul_add(t1 - t0, t0);
+            eval_function(doc, fn_obj, t, n).map(|c| cs.to_rgb(&c))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    ColorRamp::from_samples(samples)
 }
 
 // ── Radial (Type 3) ───────────────────────────────────────────────────────────
@@ -224,12 +249,7 @@ fn resolve_radial(
     let (t0, t1) = read_fn_domain(sh);
     let (ext_s, ext_e) = read_extend(sh);
 
-    let fn_obj = sh.get(b"Function")?;
-    let c0_user = eval_function(doc, fn_obj, t0, n)?;
-    let c1_user = eval_function(doc, fn_obj, t1, n)?;
-
-    let rgb0 = cs.to_rgb(&c0_user);
-    let rgb1 = cs.to_rgb(&c1_user);
+    let ramp = sample_ramp(doc, sh.get(b"Function")?, cs, n, t0, t1)?;
 
     // Reject non-finite user-space coordinates before transforming.
     if !coords.iter().all(|v| v.is_finite()) {
@@ -260,9 +280,7 @@ fn resolve_radial(
         dy0.max(dy1) + outer_r,
     ];
 
-    let pattern = RadialPattern::new(
-        rgb0, rgb1, dx0, dy0, dr0, dx1, dy1, dr1, t0, t1, ext_s, ext_e,
-    );
+    let pattern = RadialPattern::new(ramp, dx0, dy0, dr0, dx1, dy1, dr1, t0, t1, ext_s, ext_e);
     Some((Box::new(pattern), bbox))
 }
 
