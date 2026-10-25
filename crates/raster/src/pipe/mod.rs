@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use crate::state::TransferSet;
 use crate::types::BlendMode;
 use color::Pixel;
+use color::convert::div255;
 
 /// Source colour for a single paint operation.
 ///
@@ -52,25 +53,27 @@ pub trait Pattern: Send + Sync {
         false
     }
 
-    /// Return `true` if this pattern may leave some pixels unpainted.
+    /// Return `true` if this pattern may leave some pixels unpainted or only
+    /// partially covered.
     ///
-    /// An unpainted pixel keeps its destination colour and alpha, exactly as
-    /// a pixel outside the filled area does.  [`render_span`] evaluates such a
-    /// pattern through [`Self::fill_span_painted`] and composites only its
-    /// painted runs; a pattern returning `false` paints every pixel of every
-    /// span.
+    /// A pixel of coverage `c` composites the pattern colour with its source
+    /// alpha scaled by `c / 255`; an unpainted pixel (coverage 0) keeps its
+    /// destination colour and alpha, exactly as a pixel outside the filled
+    /// area does.  [`render_span`] evaluates such a pattern through
+    /// [`Self::fill_span_coverage`] and composites only its covered runs; a
+    /// pattern returning `false` covers every pixel of every span fully.
     fn may_leave_unpainted(&self) -> bool {
         false
     }
 
-    /// Fill `out` as [`Self::fill_span`] does and set `painted[i]` to whether
-    /// pixel `x0 + i` is painted.
+    /// Fill `out` as [`Self::fill_span`] does and set `coverage[i]` to the
+    /// coverage of pixel `x0 + i`, from 0 (unpainted) to 255 (fully painted).
     ///
-    /// `painted.len()` is `x1 - x0 + 1`.  The colour bytes of an unpainted
-    /// pixel are unspecified.  The default marks every pixel painted.
-    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+    /// `coverage.len()` is `x1 - x0 + 1`.  The colour bytes of an unpainted
+    /// pixel are unspecified.  The default covers every pixel fully.
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
         self.fill_span(y, x0, x1, out);
-        painted.fill(true);
+        coverage.fill(255);
     }
 }
 
@@ -96,11 +99,23 @@ impl Pattern for RowPattern<'_> {
     }
 }
 
-// Per-thread colour and painted-mask scratch for the spans of a pattern that
-// may leave pixels unpainted — grow-never-shrink.
+/// Per-thread scratch for the spans of a pattern that may leave pixels
+/// unpainted: colour, coverage, and coverage combined with the span's shape.
+/// Grow-never-shrink.
+struct CoverageScratch {
+    colour: Vec<u8>,
+    coverage: Vec<u8>,
+    shape: Vec<u8>,
+}
+
 thread_local! {
-    static PAINTED_SPAN: RefCell<(Vec<u8>, Vec<bool>)> =
-        const { RefCell::new((Vec::new(), Vec::new())) };
+    static COVERAGE_SPAN: RefCell<CoverageScratch> = const {
+        RefCell::new(CoverageScratch {
+            colour: Vec::new(),
+            coverage: Vec::new(),
+            shape: Vec::new(),
+        })
+    };
 }
 
 /// Immutable parameters for one paint operation, built once per fill/stroke/glyph call.
@@ -242,13 +257,15 @@ pub fn render_span<P: Pixel>(
     dispatch_span::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
 }
 
-/// Composite the painted runs of a span whose pattern may leave pixels
+/// Composite the covered runs of a span whose pattern may leave pixels
 /// unpainted.
 ///
 /// The pattern is evaluated once over the whole span.  Each maximal run of
-/// painted pixels is then composited by [`dispatch_span`] from the
-/// precomputed colours, with the shape, soft-mask and alpha0 rows sliced to
-/// the run; unpainted pixels are not touched.
+/// pixels with non-zero coverage is then composited by [`dispatch_span`]
+/// from the precomputed colours, with the soft-mask and alpha0 rows sliced
+/// to the run.  A fully covered run keeps the span's shape; a partially
+/// covered run takes the product of shape and coverage as its shape.
+/// Unpainted pixels are not touched.
 #[expect(
     clippy::too_many_arguments,
     reason = "forwards the render_span arguments"
@@ -265,18 +282,42 @@ fn render_painted_runs<P: Pixel>(
 ) {
     let ncomps = P::BYTES;
     let count = dst_pixels.len() / ncomps;
-    PAINTED_SPAN.with(|cell| {
-        let (colour, painted) = &mut *cell.borrow_mut();
+    COVERAGE_SPAN.with(|cell| {
+        let CoverageScratch {
+            colour,
+            coverage,
+            shape: combined,
+        } = &mut *cell.borrow_mut();
         colour.resize(count * ncomps, 0);
-        painted.resize(count, false);
-        pat.fill_span_painted(y, x0, x1, colour, painted);
+        coverage.resize(count, 0);
+        pat.fill_span_coverage(y, x0, x1, colour, coverage);
 
         let mut start = 0;
-        while let Some(a) = painted[start..].iter().position(|&p| p).map(|i| start + i) {
-            let b = painted[a..]
+        while let Some(a) = coverage[start..]
+            .iter()
+            .position(|&c| c != 0)
+            .map(|i| start + i)
+        {
+            let b = coverage[a..]
                 .iter()
-                .position(|&p| !p)
+                .position(|&c| c == 0)
                 .map_or(count, |i| a + i);
+            let cov = &coverage[a..b];
+            let run_shape = if cov.iter().all(|&c| c == 255) {
+                shape.map(|s| &s[a..b])
+            } else {
+                combined.clear();
+                match shape {
+                    Some(s) => combined.extend(
+                        s[a..b]
+                            .iter()
+                            .zip(cov)
+                            .map(|(&s, &c)| div255(u32::from(s) * u32::from(c))),
+                    ),
+                    None => combined.extend_from_slice(cov),
+                }
+                Some(combined.as_slice())
+            };
             let run_pipe = PipeState {
                 soft_mask: pipe.soft_mask.map(|s| &s[a..b]),
                 alpha0: pipe.alpha0.map(|s| &s[a..b]),
@@ -295,7 +336,7 @@ fn render_painted_runs<P: Pixel>(
                 }),
                 &mut dst_pixels[a * ncomps..b * ncomps],
                 dst_alpha.as_deref_mut().map(|al| &mut al[a..b]),
-                shape.map(|s| &s[a..b]),
+                run_shape,
                 run_x0,
                 run_x1,
                 y,
@@ -414,24 +455,24 @@ mod tests {
 
     impl Pattern for EvenColumns {
         fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-            let mut painted = vec![false; out.len() / 3];
-            self.fill_span_painted(y, x0, x1, out, &mut painted);
+            let mut coverage = vec![0; out.len() / 3];
+            self.fill_span_coverage(y, x0, x1, out, &mut coverage);
         }
 
         fn may_leave_unpainted(&self) -> bool {
             true
         }
 
-        fn fill_span_painted(
+        fn fill_span_coverage(
             &self,
             _y: i32,
             x0: i32,
             x1: i32,
             out: &mut [u8],
-            painted: &mut [bool],
+            coverage: &mut [u8],
         ) {
-            for ((x, px), p) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(painted) {
-                *p = x % 2 == 0;
+            for ((x, px), c) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(coverage) {
+                *c = if x % 2 == 0 { 255 } else { 0 };
                 *px = [u8::try_from(x).expect("small x"), 200, 50];
             }
         }
@@ -502,6 +543,77 @@ mod tests {
                 assert_eq!(painted_px, &[7, 7, 7], "x={x} untouched");
                 assert_eq!(alpha[i], 99, "x={x} alpha");
             }
+        }
+    }
+
+    /// White at coverage `[0, 64, 128, 255]`, repeating with `x`.
+    struct RampCoverage;
+
+    impl Pattern for RampCoverage {
+        fn fill_span(&self, _y: i32, _x0: i32, _x1: i32, out: &mut [u8]) {
+            out.fill(255);
+        }
+
+        fn may_leave_unpainted(&self) -> bool {
+            true
+        }
+
+        fn fill_span_coverage(
+            &self,
+            _y: i32,
+            x0: i32,
+            x1: i32,
+            out: &mut [u8],
+            coverage: &mut [u8],
+        ) {
+            out.fill(255);
+            for (x, c) in (x0..=x1).zip(coverage) {
+                *c = [0, 64, 128, 255][usize::try_from(x % 4).expect("x ≥ 0")];
+            }
+        }
+    }
+
+    /// Render `RampCoverage` over opaque black on pixels `0..=7` and return
+    /// the red channel.
+    fn render_ramp_coverage(pipe: &PipeState<'_>, shape: Option<&[u8]>) -> Vec<u8> {
+        let mut dst = vec![0u8; 8 * 3];
+        let mut alpha = vec![255u8; 8];
+        render_span::<Rgb8>(
+            pipe,
+            &PipeSrc::Pattern(&RampCoverage),
+            &mut dst,
+            Some(&mut alpha),
+            shape,
+            0,
+            7,
+            0,
+        );
+        dst.iter().step_by(3).copied().collect()
+    }
+
+    #[test]
+    fn partial_coverage_scales_the_source_alpha() {
+        let red = render_ramp_coverage(&make_pipe(255, BlendMode::Normal), None);
+        assert_eq!(red, [0, 64, 128, 255, 0, 64, 128, 255]);
+    }
+
+    #[test]
+    fn partial_coverage_multiplies_the_shape() {
+        let shape = [128u8; 8];
+        let red = render_ramp_coverage(&make_pipe(255, BlendMode::Normal), Some(&shape));
+        for (x, (&r, want)) in red.iter().zip([0u8, 32, 64, 128].repeat(2)).enumerate() {
+            assert!(r.abs_diff(want) <= 1, "x={x}: {r} vs {want}");
+        }
+    }
+
+    #[test]
+    fn partial_coverage_composes_with_the_general_path() {
+        let mut pipe = make_pipe(255, BlendMode::Normal);
+        let soft = [255u8; 8];
+        pipe.soft_mask = Some(&soft);
+        let red = render_ramp_coverage(&pipe, None);
+        for (x, (&r, want)) in red.iter().zip([0u8, 64, 128, 255].repeat(2)).enumerate() {
+            assert!(r.abs_diff(want) <= 1, "x={x}: {r} vs {want}");
         }
     }
 

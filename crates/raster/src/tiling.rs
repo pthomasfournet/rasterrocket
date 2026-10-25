@@ -11,15 +11,21 @@ use crate::pipe::Pattern;
 ///
 /// The tile is a row-major RGB8 pixel buffer of `width × height` pixels,
 /// anchored at `(phase_x, phase_y)` in device space.  `fill_span` tiles the
-/// buffer by wrapping coordinates with `rem_euclid`.
+/// buffer by wrapping coordinates with `rem_euclid`.  An optional coverage
+/// plane, one byte per tile pixel, gives the fraction of each pixel the
+/// tile's content painted; pixels the content left unpainted leave the
+/// destination unchanged.
 ///
 /// # Invariants
 ///
 /// - `width > 0` and `height > 0` (asserted in [`TiledPattern::new`])
 /// - `pixels.len() == width * height * 3`
+/// - `coverage`, when present, has `width * height` bytes, not all 255
 pub struct TiledPattern {
     /// Rasterised tile pixels (RGB8, row-major).
     pixels: Vec<u8>,
+    /// Coverage of each tile pixel; `None` when every pixel is fully covered.
+    coverage: Option<Vec<u8>>,
     /// Tile width in device pixels.
     width: i32,
     /// Tile height in device pixels.
@@ -34,7 +40,7 @@ pub struct TiledPattern {
 }
 
 impl TiledPattern {
-    /// Construct a new [`TiledPattern`].
+    /// Construct a new [`TiledPattern`] whose every pixel is fully covered.
     ///
     /// # Panics
     ///
@@ -62,32 +68,106 @@ impl TiledPattern {
         );
         Self {
             pixels,
+            coverage: None,
             width,
             height,
             phase_x,
             phase_y,
         }
     }
+
+    /// Attach a coverage plane, one byte per tile pixel in row-major order.
+    ///
+    /// A plane that covers every pixel fully is dropped, so the pattern then
+    /// takes the fully covered compositing path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `coverage.len()` does not equal `width * height`.
+    #[must_use]
+    pub fn with_coverage(mut self, coverage: Vec<u8>) -> Self {
+        assert_eq!(
+            coverage.len() * 3,
+            self.pixels.len(),
+            "TiledPattern: coverage plane must hold one byte per tile pixel"
+        );
+        self.coverage = coverage.iter().any(|&c| c != 255).then_some(coverage);
+        self
+    }
+
+    /// Pixel index of the start of the tile row holding device row `y`.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the width is positive (asserted in new)"
+    )]
+    const fn tile_row(&self, y: i32) -> usize {
+        (y - self.phase_y).rem_euclid(self.height) as usize * self.width as usize
+    }
+
+    /// Tile column holding device column `x`.
+    const fn tile_col(&self, x: i32) -> usize {
+        (x - self.phase_x).rem_euclid(self.width) as usize
+    }
 }
 
 impl Pattern for TiledPattern {
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "rem_euclid guarantees non-negative results; safe cast to usize"
-    )]
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        let ty = (y - self.phase_y).rem_euclid(self.height) as usize;
-        let w = self.width as usize;
-        let row_start = ty * w * 3;
-        let row = &self.pixels[row_start..row_start + w * 3];
-
-        let mut out_pos = 0usize;
-        for x in x0..=x1 {
-            let tx = (x - self.phase_x).rem_euclid(self.width) as usize;
-            out[out_pos] = row[tx * 3];
-            out[out_pos + 1] = row[tx * 3 + 1];
-            out[out_pos + 2] = row[tx * 3 + 2];
-            out_pos += 3;
+        let row = self.tile_row(y);
+        for (x, px) in (x0..=x1).zip(out.as_chunks_mut::<3>().0) {
+            let i = (row + self.tile_col(x)) * 3;
+            px.copy_from_slice(&self.pixels[i..i + 3]);
         }
+    }
+
+    fn may_leave_unpainted(&self) -> bool {
+        self.coverage.is_some()
+    }
+
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+        let Some(plane) = &self.coverage else {
+            self.fill_span(y, x0, x1, out);
+            coverage.fill(255);
+            return;
+        };
+        let row = self.tile_row(y);
+        for ((x, px), c) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(coverage) {
+            let i = row + self.tile_col(x);
+            px.copy_from_slice(&self.pixels[i * 3..i * 3 + 3]);
+            *c = plane[i];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 2×1 tile: red at column 0, green at column 1, phased by one pixel.
+    fn two_by_one() -> TiledPattern {
+        TiledPattern::new(vec![255, 0, 0, 0, 255, 0], 2, 1, 1, 0)
+    }
+
+    #[test]
+    fn tiles_wrap_around_the_phase() {
+        let mut out = [0u8; 4 * 3];
+        two_by_one().fill_span(5, -1, 2, &mut out);
+        assert_eq!(out, [255, 0, 0, 0, 255, 0, 255, 0, 0, 0, 255, 0]);
+    }
+
+    #[test]
+    fn full_coverage_is_dropped() {
+        let p = two_by_one().with_coverage(vec![255, 255]);
+        assert!(!p.may_leave_unpainted());
+    }
+
+    #[test]
+    fn coverage_repeats_with_the_tile() {
+        let p = two_by_one().with_coverage(vec![0, 200]);
+        assert!(p.may_leave_unpainted());
+        let mut out = [0u8; 3 * 3];
+        let mut coverage = [9u8; 3];
+        p.fill_span_coverage(0, 0, 2, &mut out, &mut coverage);
+        assert_eq!(coverage, [200, 0, 200]);
+        assert_eq!(&out[..3], &[0, 255, 0]);
     }
 }

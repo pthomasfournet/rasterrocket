@@ -157,20 +157,20 @@ impl PageRenderer<'_> {
         let phase_y = oy.round() as i32;
 
         let pixels = tile_bitmap.data().to_vec();
-        Some(TiledPattern::new(
-            pixels,
-            tile_w as i32,
-            tile_h as i32,
-            phase_x,
-            phase_y,
-        ))
+        let tiled = TiledPattern::new(pixels, tile_w as i32, tile_h as i32, phase_x, phase_y);
+        Some(match tile_bitmap.alpha_plane() {
+            Some(alpha) => tiled.with_coverage(alpha.to_vec()),
+            None => tiled,
+        })
     }
 
     /// Render a pattern content stream into a tile bitmap.
     ///
     /// Creates a child `PageRenderer` scoped to the pattern's resource context and
     /// executes the pattern's content stream.  The tile bitmap is `tile_w ×
-    /// tile_h` pixels with a white background.
+    /// tile_h` pixels, initially transparent: its alpha plane records the
+    /// coverage of the cell's content, so the cell areas the content leaves
+    /// unpainted show the backdrop when the pattern is painted (PDF §8.7.3.1).
     ///
     /// `tint` is the resolved fill colour for `PaintType` 2 (uncoloured)
     /// patterns; it is set as the tile renderer's default fill before the
@@ -188,6 +188,7 @@ impl PageRenderer<'_> {
         // Build a temporary child renderer sharing the same document / font engine.
         let doc = self.resources.doc();
         let mut tile_renderer = PageRenderer::new(tile_w, tile_h, doc, desc.stream_id);
+        tile_renderer.bitmap = Bitmap::new(tile_w, tile_h, 1, true);
         // Propagate pattern_depth so a pattern stream that recursively
         // invokes another pattern (or itself) hits MAX_PATTERN_DEPTH instead
         // of unbounded stack recursion.  saturating_add guards against the

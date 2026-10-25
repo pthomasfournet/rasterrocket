@@ -57,10 +57,10 @@ impl Pattern for FunctionPattern {
         true
     }
 
-    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
-        for ((x, px), p) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(painted) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+        for ((x, px), c) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(coverage) {
             let rgb = (self.func)(f64::from(x), f64::from(y));
-            *p = rgb.is_some();
+            *c = u8::from(rgb.is_some()) * 255;
             *px = rgb.unwrap_or_default();
         }
     }
@@ -134,9 +134,9 @@ mod tests {
     fn pixels_outside_the_domain_are_not_painted() {
         let p = FunctionPattern::new(|x, _| (x < 2.0).then_some([9, 9, 9]));
         let mut out = [0u8; 4 * 3];
-        let mut painted = [false; 4];
-        p.fill_span_painted(0, 0, 3, &mut out, &mut painted);
-        assert_eq!(painted, [true, true, false, false]);
+        let mut coverage = [0; 4];
+        p.fill_span_coverage(0, 0, 3, &mut out, &mut coverage);
+        assert_eq!(coverage, [255, 255, 0, 0]);
         assert_eq!(&out[..6], &[9; 6]);
     }
 }

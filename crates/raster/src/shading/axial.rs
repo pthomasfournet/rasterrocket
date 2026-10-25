@@ -91,13 +91,13 @@ impl Pattern for AxialPattern {
         !(self.extend_start && self.extend_end) || self.inv_len_sq == 0.0
     }
 
-    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
         fill_ramp_span(
             &self.ramp,
             x0,
             x1,
             out,
-            |i, p| painted[i] = p,
+            |i, p| coverage[i] = u8::from(p) * 255,
             |x| self.position(x, y),
         );
     }
@@ -122,9 +122,9 @@ mod tests {
     fn painted(p: &AxialPattern, y: i32, x0: i32, x1: i32) -> Vec<bool> {
         let n = usize::try_from(x1 - x0 + 1).expect("x1 ≥ x0");
         let mut out = vec![0u8; n * 3];
-        let mut mask = vec![false; n];
-        p.fill_span_painted(y, x0, x1, &mut out, &mut mask);
-        mask
+        let mut coverage = vec![0; n];
+        p.fill_span_coverage(y, x0, x1, &mut out, &mut coverage);
+        coverage.into_iter().map(|c| c != 0).collect()
     }
 
     #[test]

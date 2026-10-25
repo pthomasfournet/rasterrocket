@@ -138,13 +138,13 @@ impl Pattern for RadialPattern {
         true
     }
 
-    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
         fill_ramp_span(
             &self.ramp,
             x0,
             x1,
             out,
-            |i, p| painted[i] = p,
+            |i, p| coverage[i] = u8::from(p) * 255,
             |x| self.position(x, y),
         );
     }
@@ -190,9 +190,9 @@ mod tests {
 
     fn colour_at(p: &RadialPattern, x: i32, y: i32) -> Option<[u8; 3]> {
         let mut out = [0u8; 3];
-        let mut painted = [false];
-        p.fill_span_painted(y, x, x, &mut out, &mut painted);
-        painted[0].then_some(out)
+        let mut coverage = [0];
+        p.fill_span_coverage(y, x, x, &mut out, &mut coverage);
+        (coverage[0] != 0).then_some(out)
     }
 
     #[test]
