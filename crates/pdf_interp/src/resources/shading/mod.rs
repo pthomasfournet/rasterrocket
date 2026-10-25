@@ -47,8 +47,9 @@ use raster::shading::radial::RadialPattern;
 
 use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
-use super::resolve_dict;
-use function::{eval_function, read_f64_array, read_fn_domain};
+use super::{read_matrix, resolve_dict};
+use crate::renderer::gstate::ctm_multiply;
+use function::{eval_function, eval_function_n, read_f64_array, read_fn_domain};
 use patch::{decode_type6_mesh, decode_type7_mesh};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -305,7 +306,7 @@ fn resolve_function_based(
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Option<(Box<dyn Pattern + Send + Sync>, [f64; 4])> {
-    // Domain: [xmin, xmax, ymin, ymax] in user space. PDF spec default is [0,1,0,1].
+    // Domain: [xmin, xmax, ymin, ymax] in shading space. PDF spec default is [0,1,0,1].
     let domain = read_f64_array(sh, b"Domain", 4).unwrap_or_else(|| vec![0.0, 1.0, 0.0, 1.0]);
     let (xd0, xd1, yd0, yd1) = (domain[0], domain[1], domain[2], domain[3]);
 
@@ -320,11 +321,15 @@ fn resolve_function_based(
 
     let fn_obj = sh.get(b"Function")?;
 
-    // Invert the CTM so fill_span can map device pixels → user space.
-    let [a, b, c, d, e, f] = *ctm;
+    // PDF §8.7.4.5.2: `Matrix` maps shading space into the target space the
+    // CTM maps to the device.
+    let shading_ctm = read_matrix(sh).map_or(*ctm, |m| ctm_multiply(&m, ctm));
+
+    // Invert shading space → device so fill_span can map device pixels back.
+    let [a, b, c, d, e, f] = shading_ctm;
     let det = a.mul_add(d, -(b * c));
     if !det.is_finite() || det.abs() < f64::EPSILON {
-        log::warn!("shading/type1: degenerate CTM (det={det:.3e}) — skipping");
+        log::warn!("shading/type1: degenerate Matrix × CTM (det={det:.3e}) — skipping");
         return None;
     }
     let inv: [f64; 6] = [
@@ -336,7 +341,7 @@ fn resolve_function_based(
         b.mul_add(e, -(a * f)) / det,
     ];
 
-    // Pre-sample the function on a TYPE1_GRID×TYPE1_GRID grid in user space.
+    // Pre-sample the function on a TYPE1_GRID×TYPE1_GRID grid over Domain.
     // All document references are resolved here; the closure captures only the
     // finished grid (Arc<[…]>) and scalar domain bounds — no lifetime issues.
     let g = TYPE1_GRID;
@@ -345,57 +350,60 @@ fn resolve_function_based(
         reason = "g=64; g-1=63 fits exactly in f64 mantissa"
     )]
     let gf = (g - 1) as f64;
+    // PDF §8.7.4.5.2: the colour at shading-space point (x, y) is the
+    // conversion of Function(x, y).  Row r of the grid holds y at r / (g − 1)
+    // of the Domain's y range, column c holds x likewise.
     let mut grid: Vec<[u8; 3]> = Vec::with_capacity(g * g);
-    // Type 1 functions take a 2D input [ux, uy]. eval_function handles only
-    // 1D types (0, 2, 3) and takes a single scalar; we pass ux (the x
-    // coordinate). The y coordinate is unused until full 2D sampled-function
-    // support is added as follow-on work. Every row gets the same colours.
-    let row_colors: Vec<[u8; 3]> = (0..g)
-        .map(|col| {
+    for row in 0..g {
+        #[expect(clippy::cast_precision_loss, reason = "row < 64; exact in f64")]
+        let sy = (row as f64 / gf).mul_add(yd1 - yd0, yd0);
+        for col in 0..g {
             #[expect(clippy::cast_precision_loss, reason = "col < 64; exact in f64")]
-            let ux = (col as f64 / gf).mul_add(xd1 - xd0, xd0);
-            let channels = eval_function(doc, fn_obj, ux, n).unwrap_or_else(|| vec![0.0; n]);
-            cs.to_rgb(&channels)
-        })
-        .collect();
-    for _ in 0..g {
-        grid.extend_from_slice(&row_colors);
+            let sx = (col as f64 / gf).mul_add(xd1 - xd0, xd0);
+            let channels =
+                eval_function_n(doc, fn_obj, &[sx, sy], n).unwrap_or_else(|| vec![0.0; n]);
+            grid.push(cs.to_rgb(&channels));
+        }
     }
     let grid: Arc<[[u8; 3]]> = Arc::from(grid.into_boxed_slice());
 
-    // Device-space bbox: transform the four domain corners.
-    // If BBox is present it clips the shading in user space, so intersect.
-    let (mut bx0, mut bx1, mut by0, mut by1) = (xd0, xd1, yd0, yd1);
+    // Device-space bbox: the Domain's corners through Matrix × CTM,
+    // intersected with the optional BBox, whose corners lie in target space.
+    let device_bbox = |m: &[f64; 6], [x0, y0, x1, y1]: [f64; 4]| {
+        let mut pts = [0f64; 8];
+        for (i, (x, y)) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            .into_iter()
+            .enumerate()
+        {
+            (pts[i * 2], pts[i * 2 + 1]) = transform_point(m, x, y, page_h);
+        }
+        bbox_from_coords(&pts)
+    };
+    let mut bbox = device_bbox(&shading_ctm, [xd0, yd0, xd1, yd1]);
     if let Some(bb) = read_f64_array(sh, b"BBox", 4) {
         if bb.iter().all(|v| v.is_finite()) {
-            bx0 = bx0.max(bb[0].min(bb[2]));
-            bx1 = bx1.min(bb[0].max(bb[2]));
-            by0 = by0.max(bb[1].min(bb[3]));
-            by1 = by1.min(bb[1].max(bb[3]));
+            let clip = device_bbox(ctm, [bb[0], bb[1], bb[2], bb[3]]);
+            bbox = [
+                bbox[0].max(clip[0]),
+                bbox[1].max(clip[1]),
+                bbox[2].min(clip[2]),
+                bbox[3].min(clip[3]),
+            ];
         } else {
             log::warn!("shading/type1: non-finite BBox — ignoring BBox");
         }
     }
-    // After intersection the clip region may be empty; that's fine — the
-    // rasterizer will simply paint nothing inside an empty bbox.
-    let mut dev_pts = [0f64; 8];
-    let corners = [(bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)];
-    for (i, (ux, uy)) in corners.into_iter().enumerate() {
-        let (dx, dy) = transform_point(ctm, ux, uy, page_h);
-        dev_pts[i * 2] = dx;
-        dev_pts[i * 2 + 1] = dy;
-    }
-    let bbox = bbox_from_coords(&dev_pts);
 
     let pattern = FunctionPattern::new(move |px, py| {
-        // Undo the y-flip applied by transform_point, then apply inverse CTM.
+        // Undo the y-flip applied by transform_point, then map back to
+        // shading space.
         let py_pdf = page_h - py;
-        let ux = inv[0].mul_add(px, inv[2] * py_pdf) + inv[4];
-        let uy = inv[1].mul_add(px, inv[3] * py_pdf) + inv[5];
+        let sx = inv[0].mul_add(px, inv[2] * py_pdf) + inv[4];
+        let sy = inv[1].mul_add(px, inv[3] * py_pdf) + inv[5];
 
         // Normalise to [0, 1] within the domain; clamp to handle rounding at edges.
-        let tx = ((ux - xd0) / (xd1 - xd0)).clamp(0.0, 1.0);
-        let ty = ((uy - yd0) / (yd1 - yd0)).clamp(0.0, 1.0);
+        let tx = ((sx - xd0) / (xd1 - xd0)).clamp(0.0, 1.0);
+        let ty = ((sy - yd0) / (yd1 - yd0)).clamp(0.0, 1.0);
 
         // Bilinear interpolation over the pre-sampled grid.
         // tx/ty ∈ [0,1] and gf > 0, so fx/fy ∈ [0, gf]; floor ∈ [0, g-1].

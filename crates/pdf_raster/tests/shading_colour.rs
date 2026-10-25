@@ -40,7 +40,12 @@ const RED_GREEN_BLUE: &str = "<< /FunctionType 3 /Domain [0 1] /Bounds [0.5] /En
 /// One `W` × `H` page running `content`, with shading `/Sh0` (`shading`),
 /// colour space `/CS0` (`CMY_DEVICEN`) and the tint transform as object 5.
 fn page(content: &str, shading: &str) -> Vec<u8> {
-    let objects = vec![
+    page_with(content, shading, &[])
+}
+
+/// [`page`] with `extra` appended as objects 7, 8, ….
+fn page_with(content: &str, shading: &str, extra: &[Vec<u8>]) -> Vec<u8> {
+    let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
@@ -53,6 +58,7 @@ fn page(content: &str, shading: &str) -> Vec<u8> {
         cmy_tint(),
         shading.as_bytes().to_vec(),
     ];
+    objects.extend_from_slice(extra);
     assemble_pdf(&objects)
 }
 
@@ -124,4 +130,59 @@ fn radial_multi_stop_function_passes_through_every_stop() {
     assert_close(px[0], [0, 255, 0], 12, "middle stop at radius 25");
     assert_close(px[1], [255, 0, 0], 12, "first stop at the centre");
     assert_close(px[2], [0, 0, 255], 4, "last stop beyond radius 50");
+}
+
+/// Type 4 function of `(x, y)` running `program`.
+fn xy_function(outputs: usize, program: &str) -> Vec<u8> {
+    let range = "0 1 ".repeat(outputs);
+    stream_object(
+        &format!("/FunctionType 4 /Domain [0 1 0 1] /Range [{range}]"),
+        program.as_bytes(),
+    )
+}
+
+/// Points of the Domain square `[0, 1]²` mapped by `Matrix [100 0 0 50 50 25]`
+/// onto the page, at shading-space `(0.1, 0.1)`, `(0.9, 0.1)`, `(0.1, 0.9)`
+/// and `(0.9, 0.9)` (pixel centres sit half a point further in).
+const TYPE1_PROBES: [(u32, u32); 4] = [(60, 30), (140, 30), (60, 70), (140, 70)];
+const TYPE1_EXPECTED: [[u8; 3]; 4] = [[27, 28, 0], [231, 28, 0], [27, 232, 0], [231, 232, 0]];
+
+#[test]
+fn function_based_shading_reads_both_coordinates_through_its_matrix() {
+    // Function(x, y) = (x, y, 0).
+    let shading = "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] \
+                   /Matrix [100 0 0 50 50 25] /Function 7 0 R >>";
+    let px = rgb_at(
+        page_with(
+            "q 50 25 100 50 re W n /Sh0 sh Q",
+            shading,
+            &[xy_function(3, "{ 0 }")],
+        ),
+        &TYPE1_PROBES,
+    );
+    for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
+        assert_close(got, want, 4, "Function(x, y) = (x, y, 0)");
+    }
+}
+
+#[test]
+fn function_based_shading_takes_an_array_of_two_input_functions() {
+    // Function = [x, y, 0], one single-output function per channel.
+    let shading = "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] \
+                   /Matrix [100 0 0 50 50 25] /Function [7 0 R 8 0 R 9 0 R] >>";
+    let px = rgb_at(
+        page_with(
+            "q 50 25 100 50 re W n /Sh0 sh Q",
+            shading,
+            &[
+                xy_function(1, "{ pop }"),
+                xy_function(1, "{ exch pop }"),
+                xy_function(1, "{ pop pop 0 }"),
+            ],
+        ),
+        &TYPE1_PROBES,
+    );
+    for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
+        assert_close(got, want, 4, "Function = [x, y, 0]");
+    }
 }

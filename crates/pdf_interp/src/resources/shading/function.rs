@@ -50,11 +50,14 @@ pub fn eval_function(doc: &Document, fn_obj: &Object, t: f64, n: usize) -> Optio
 /// `inputs`, returning `n` output values (PDF §7.10).
 ///
 /// A one-element input is exactly [`eval_function`].  With several inputs
-/// (a `DeviceN` tint transform) only the function types defined for `m > 1`
-/// apply: Type 0 (Sampled, multilinear interpolation over the sample grid)
-/// and Type 4 (PostScript calculator, inputs pushed in order).  Types 2 and
-/// 3 take one input by definition (§7.10.3, §7.10.4) and yield `None`, as
-/// does a malformed function.
+/// (a `DeviceN` tint transform, a function-based shading) only the function
+/// types defined for `m > 1` apply: Type 0 (Sampled, multilinear
+/// interpolation over the sample grid) and Type 4 (PostScript calculator,
+/// inputs pushed in order).  Types 2 and 3 take one input by definition
+/// (§7.10.3, §7.10.4) and yield `None`, as does a malformed function.
+///
+/// `fn_obj` may also be an array of `n` single-output functions of the same
+/// inputs (a shading's `Function`, §8.7.4.5.1); output `i` is element `i`'s.
 #[must_use]
 pub fn eval_function_n(
     doc: &Document,
@@ -65,6 +68,25 @@ pub fn eval_function_n(
     if let [t] = inputs {
         return eval_function(doc, fn_obj, *t, n);
     }
+    if let Some(outputs) = with_fn_array(doc, fn_obj, |fns| {
+        if fns.len() != n {
+            log::warn!(
+                "function: Function array has {} entries, {n} outputs needed",
+                fns.len()
+            );
+            return None;
+        }
+        fns.iter()
+            .map(|f| eval_single_n(doc, f, inputs, 1)?.first().copied())
+            .collect()
+    }) {
+        return outputs;
+    }
+    eval_single_n(doc, fn_obj, inputs, n)
+}
+
+/// [`eval_function_n`] for one function object with several inputs.
+fn eval_single_n(doc: &Document, fn_obj: &Object, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
     with_fn_dict(doc, fn_obj, |fn_dict| {
         let result = match fn_dict.get_i64(b"FunctionType")? {
             0 => sampled_nd::eval_sampled_nd(fn_dict, &stream_bytes_for(doc, fn_obj)?, inputs, n),
@@ -97,8 +119,10 @@ fn eval_function_depth(
             read_fn_color(fn_dict, b"C0", n).map(|c| apply_range_clip(fn_dict, c))
         });
     }
-    if let Some(fns) = resolve_fn_array(doc, fn_obj) {
-        return eval_function_array(doc, &fns, t, n, depth);
+    if let Some(outputs) = with_fn_array(doc, fn_obj, |fns| {
+        eval_function_array(doc, fns, t, n, depth)
+    }) {
+        return outputs;
     }
     with_fn_dict(doc, fn_obj, |fn_dict| {
         let fn_type = fn_dict.get_i64(b"FunctionType")?;
@@ -127,12 +151,13 @@ fn eval_function_depth(
     })
 }
 
-/// Return the elements of `fn_obj` when it is an array, directly or through
-/// one indirect reference; `None` for a single function object.
-fn resolve_fn_array(doc: &Document, fn_obj: &Object) -> Option<Vec<Object>> {
+/// Apply `f` to the elements of `fn_obj`, borrowed in place, when it is an
+/// array given directly or through one indirect reference; `None` for any
+/// other object.
+fn with_fn_array<R>(doc: &Document, fn_obj: &Object, f: impl FnOnce(&[Object]) -> R) -> Option<R> {
     match fn_obj {
-        Object::Array(fns) => Some(fns.clone()),
-        Object::Reference(id) => doc.get_object(*id).ok()?.as_array().map(<[_]>::to_vec),
+        Object::Array(fns) => Some(f(fns)),
+        Object::Reference(id) => doc.get_object(*id).ok()?.as_array().map(f),
         _ => None,
     }
 }
