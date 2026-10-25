@@ -74,9 +74,7 @@ impl PageRenderer<'_> {
 
         let desc = self.resources.tiling_pattern(name)?;
 
-        // Compose pattern matrix with current CTM to get pattern-space → device-space.
         let gs = self.gstate.current();
-        let ctm = gs.ctm;
         // PaintType 2 (uncoloured) patterns paint shape-only content streams;
         // the tint comes from the `scn /Name c1 [c2 c3 [c4]]` arguments captured
         // here as `fill_pattern_components`.  PaintType 1 (coloured) ignores it.
@@ -96,7 +94,10 @@ impl PageRenderer<'_> {
         } else {
             None
         };
-        let pat_ctm = ctm_multiply(&desc.matrix, &ctm);
+        // PDF §8.7.3.1: the pattern matrix maps pattern space to the default
+        // coordinate space of the parent content stream, not to the CTM in
+        // effect at the fill.
+        let pat_ctm = ctm_multiply(&desc.matrix, &self.pattern_ctm);
 
         // Tile size in device pixels — scale the XStep/YStep by the linear scale
         // of the combined transform.  We use the L2 norm of each column vector to
