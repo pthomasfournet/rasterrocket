@@ -183,13 +183,15 @@ impl FontCache {
         // table; symbolic TrueType keeps the program's own charmap.
         if resolve_by_name {
             face.code_to_gid = resolve_simple_to_gid(&face, &desc.differences, desc.base_encoding);
-        } else if desc.kind == PdfFontKind::TrueType
-            && desc.bytes.is_some()
-            && desc.cid_encoding.is_none()
-            && face.has_unicode_cmap()
+        } else if wants_unicode_resolution(
+            desc.bytes.is_some(),
+            desc.cid_encoding.is_none(),
+            desc.type3.is_none(),
+            desc.kind,
+        ) && face.has_unicode_cmap()
         {
             face.code_to_gid =
-                resolve_truetype_via_unicode(&face, &desc.differences, desc.base_encoding);
+                resolve_via_unicode_cmap(&face, &desc.differences, desc.base_encoding);
         }
 
         Some(face)
@@ -231,6 +233,26 @@ const fn wants_name_resolution(
     kind: PdfFontKind,
 ) -> bool {
     has_bytes && not_cid && not_type3 && matches!(kind, PdfFontKind::Type1 | PdfFontKind::Other)
+}
+
+/// Decide whether a simple font's codes are resolved through glyph names
+/// and the Unicode cmap of the loaded face ([`resolve_via_unicode_cmap`]).
+///
+/// - Embedded TrueType: PDF §9.6.5.4 resolves code → glyph name → Unicode
+///   → (3,1) cmap for a non-symbolic font.
+/// - Non-embedded font of any simple kind: the substitute face is a Unicode
+///   TrueType font that knows nothing of the PDF encoding, so a code means
+///   the glyph its encoding names, never the substitute's glyph at that
+///   code point.
+///
+/// CID/Type0 and Type 3 fonts own their resolution and never qualify.
+const fn wants_unicode_resolution(
+    has_bytes: bool,
+    not_cid: bool,
+    not_type3: bool,
+    kind: PdfFontKind,
+) -> bool {
+    not_cid && not_type3 && (!has_bytes || matches!(kind, PdfFontKind::TrueType))
 }
 
 /// Build a 256-entry `code_to_gid` table for a simple embedded
@@ -286,9 +308,10 @@ fn resolve_simple_to_gid(
     table
 }
 
-/// Build a 256-entry `code_to_gid` table for a simple embedded TrueType font
+/// Build a 256-entry `code_to_gid` table for a simple font drawn with a face
 /// whose active cmap is Unicode (PDF §9.6.5.4: code → glyph name → Unicode →
-/// (3,1) cmap).
+/// (3,1) cmap): an embedded TrueType program, or the substitute face of a
+/// non-embedded font.
 ///
 /// A code is resolved through its glyph name when the name comes from a
 /// `Differences` entry or from an explicit `WinAnsi` / `MacRoman` base
@@ -296,7 +319,7 @@ fn resolve_simple_to_gid(
 /// `WinAnsi` 0x80–0x9F (`oe` at 0x9C, `quoteright` at 0x92, …) on their glyphs.
 /// Every other code is looked up as a raw Unicode code point, the identity
 /// that holds for the ASCII and Latin-1 ranges of those encodings.
-fn resolve_truetype_via_unicode(
+fn resolve_via_unicode_cmap(
     face: &FontFace,
     differences: &[Option<Box<str>>; 256],
     base: BaseEncoding,
@@ -1722,5 +1745,92 @@ mod tests {
             base_encoding_table(BaseEncoding::MacRoman)[0x27],
             Some("quotesingle")
         );
+    }
+
+    #[test]
+    fn unicode_resolution_dispatch() {
+        // Non-embedded simple fonts of every kind resolve through the
+        // substitute face's Unicode cmap.
+        for kind in [
+            PdfFontKind::Type1,
+            PdfFontKind::TrueType,
+            PdfFontKind::Other,
+        ] {
+            assert!(
+                wants_unicode_resolution(false, true, true, kind),
+                "{kind:?}"
+            );
+        }
+        // Embedded: only TrueType; Type1/CFF programs resolve by name.
+        assert!(wants_unicode_resolution(
+            true,
+            true,
+            true,
+            PdfFontKind::TrueType
+        ));
+        assert!(!wants_unicode_resolution(
+            true,
+            true,
+            true,
+            PdfFontKind::Type1
+        ));
+        assert!(!wants_unicode_resolution(
+            true,
+            true,
+            true,
+            PdfFontKind::Other
+        ));
+        // CID/Type0 and Type 3 never qualify.
+        assert!(!wants_unicode_resolution(
+            false,
+            false,
+            true,
+            PdfFontKind::Other
+        ));
+        assert!(!wants_unicode_resolution(
+            false,
+            true,
+            false,
+            PdfFontKind::Other
+        ));
+    }
+
+    /// A non-embedded font whose `Differences` array places glyph names on
+    /// low codes (`0 /Q /eacute`) must draw those glyphs, not the substitute
+    /// face's glyphs at code points 0 and 1.
+    #[test]
+    fn non_embedded_font_resolves_differences_on_substitute_face() {
+        if fallback_font_path().is_none() {
+            eprintln!("no substitute font installed; skipping");
+            return;
+        }
+        let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(std::array::from_fn(|_| None));
+        differences[0] = Some("Q".into());
+        differences[1] = Some("eacute".into());
+        let desc = FontDescriptor {
+            kind: PdfFontKind::Type1,
+            bytes: None,
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences,
+            base_encoding: BaseEncoding::MacRoman,
+            cid_encoding: None,
+            type3: None,
+        };
+        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
+        let face = cache
+            .get_or_load(b"F1", &desc, [20.0, 0.0, 0.0, 20.0])
+            .expect("substitute face loads");
+        let q = face.raw_get_char_index(u32::from('Q'));
+        let eacute = face.raw_get_char_index(0xE9);
+        assert_ne!(q, 0);
+        assert_ne!(eacute, 0);
+        assert_eq!(face.code_to_gid.first(), Some(&q));
+        assert_eq!(face.code_to_gid.get(1), Some(&eacute));
+        // A code left to the base encoding resolves through its name too:
+        // MacRoman 0x8E is `eacute`, which is not U+008E.
+        assert_eq!(face.code_to_gid.get(0x8E), Some(&eacute));
     }
 }
