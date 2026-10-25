@@ -23,7 +23,7 @@
 use pdf::{Dictionary, Document, Object};
 
 use crate::resources::dict_ext::DictExt;
-use crate::resources::{obj_to_f64, resolve_dict};
+use crate::resources::obj_to_f64;
 
 mod sampled_nd;
 
@@ -65,19 +65,20 @@ pub fn eval_function_n(
     if let [t] = inputs {
         return eval_function(doc, fn_obj, *t, n);
     }
-    let fn_dict = resolve_fn_dict(doc, fn_obj)?;
-    let result = match fn_dict.get_i64(b"FunctionType")? {
-        0 => sampled_nd::eval_sampled_nd(&fn_dict, &stream_bytes_for(doc, fn_obj)?, inputs, n),
-        4 => eval_postscript(doc, fn_obj, &fn_dict, inputs, n),
-        other => {
-            log::debug!(
-                "function: FunctionType {other} takes one input, {} supplied",
-                inputs.len()
-            );
-            None
-        }
-    };
-    result.map(|c| apply_range_clip(&fn_dict, c))
+    with_fn_dict(doc, fn_obj, |fn_dict| {
+        let result = match fn_dict.get_i64(b"FunctionType")? {
+            0 => sampled_nd::eval_sampled_nd(fn_dict, &stream_bytes_for(doc, fn_obj)?, inputs, n),
+            4 => eval_postscript(doc, fn_obj, fn_dict, inputs, n),
+            other => {
+                log::debug!(
+                    "function: FunctionType {other} takes one input, {} supplied",
+                    inputs.len()
+                );
+                None
+            }
+        };
+        result.map(|c| apply_range_clip(fn_dict, c))
+    })
 }
 
 fn eval_function_depth(
@@ -92,34 +93,38 @@ fn eval_function_depth(
             "shading: PDF function nesting depth {depth} exceeds limit {MAX_FN_DEPTH} — \
              returning C0 fallback to prevent stack overflow"
         );
-        let fn_dict = resolve_fn_dict(doc, fn_obj)?;
-        return read_fn_color(&fn_dict, b"C0", n).map(|c| apply_range_clip(&fn_dict, c));
+        return with_fn_dict(doc, fn_obj, |fn_dict| {
+            read_fn_color(fn_dict, b"C0", n).map(|c| apply_range_clip(fn_dict, c))
+        });
     }
     if let Some(fns) = resolve_fn_array(doc, fn_obj) {
         return eval_function_array(doc, &fns, t, n, depth);
     }
-    let fn_dict = resolve_fn_dict(doc, fn_obj)?;
-    let fn_type = fn_dict.get_i64(b"FunctionType")?;
-    let result = match fn_type {
-        2 => Some(eval_exponential(&fn_dict, t, n)),
-        3 => eval_stitching_depth(doc, &fn_dict, t, n, depth),
-        0 => Some(
-            eval_sampled(doc, fn_obj, &fn_dict, t, n)
-                .unwrap_or_else(|| eval_sampled_approx(&fn_dict, t, n)),
-        ),
-        4 => eval_postscript(doc, fn_obj, &fn_dict, &[t], n).or_else(|| {
-            log::warn!(
-                "shading: Type 4 PostScript function failed to evaluate \
-                 (malformed program or stack underflow) — colour unresolved"
-            );
-            None
-        }),
-        _ => {
-            log::debug!("shading: FunctionType {fn_type} not yet implemented — using C0 fallback");
-            read_fn_color(&fn_dict, b"C0", n)
-        }
-    };
-    result.map(|c| apply_range_clip(&fn_dict, c))
+    with_fn_dict(doc, fn_obj, |fn_dict| {
+        let fn_type = fn_dict.get_i64(b"FunctionType")?;
+        let result = match fn_type {
+            2 => Some(eval_exponential(fn_dict, t, n)),
+            3 => eval_stitching_depth(doc, fn_dict, t, n, depth),
+            0 => Some(
+                eval_sampled(doc, fn_obj, fn_dict, t, n)
+                    .unwrap_or_else(|| eval_sampled_approx(fn_dict, t, n)),
+            ),
+            4 => eval_postscript(doc, fn_obj, fn_dict, &[t], n).or_else(|| {
+                log::warn!(
+                    "shading: Type 4 PostScript function failed to evaluate \
+                     (malformed program or stack underflow) — colour unresolved"
+                );
+                None
+            }),
+            _ => {
+                log::debug!(
+                    "shading: FunctionType {fn_type} not yet implemented — using C0 fallback"
+                );
+                read_fn_color(fn_dict, b"C0", n)
+            }
+        };
+        result.map(|c| apply_range_clip(fn_dict, c))
+    })
 }
 
 /// Return the elements of `fn_obj` when it is an array, directly or through
@@ -428,24 +433,29 @@ fn eval_sampled(
     Some(channels)
 }
 
-/// Resolve `fn_obj` to its function dictionary.
+/// Apply `f` to the dictionary of function object `fn_obj`, borrowed in
+/// place.
 ///
-/// Type 0 functions are *stream* objects (the dict carries `FunctionType` /
-/// `Size` / `BitsPerSample`; the stream content carries the sample bytes),
-/// so the resolver must handle `Object::Stream(s)` directly in addition to
-/// the inline-Dict and Reference-to-Dict cases that
-/// [`crate::resources::resolve_dict`] already covers.
-fn resolve_fn_dict(doc: &Document, fn_obj: &Object) -> Option<Dictionary> {
-    match fn_obj {
-        Object::Stream(s) => Some(s.dict.clone()),
+/// A function is a dictionary (Types 2 and 3) or a stream whose dictionary
+/// carries the parameters (Types 0 and 4), given directly or through one
+/// indirect reference.  `None` for any other object.
+fn with_fn_dict<R>(
+    doc: &Document,
+    fn_obj: &Object,
+    f: impl FnOnce(&Dictionary) -> Option<R>,
+) -> Option<R> {
+    let referent;
+    let target = match fn_obj {
         Object::Reference(id) => {
-            let referent = doc.get_object(*id).ok()?;
-            match referent.as_ref() {
-                Object::Stream(s) => Some(s.dict.clone()),
-                other => resolve_dict(doc, other),
-            }
+            referent = doc.get_object(*id).ok()?;
+            referent.as_ref()
         }
-        _ => resolve_dict(doc, fn_obj),
+        direct => direct,
+    };
+    match target {
+        Object::Dictionary(d) => f(d),
+        Object::Stream(s) => f(&s.dict),
+        _ => None,
     }
 }
 
