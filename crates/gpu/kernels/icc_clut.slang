@@ -1,50 +1,18 @@
 // GPU ICC colour transform kernels — Slang port of icc_clut.cu.
 //
-// Two entry points:
-//
-//   icc_cmyk_matrix — fast path for profiles that reduce to a 3×4 linear matrix.
-//     R = (255 − C) × (255 − K) / 255
-//     G = (255 − M) × (255 − K) / 255
-//     B = (255 − Y) × (255 − K) / 255
+// Entry point:
 //
 //   icc_cmyk_clut — full 4D CLUT path for A2B0 profiles.
 //     Quadrilinear interpolation over a grid_n^4 CLUT, 16 corner lookups per pixel.
 //
+// The profile-free conversion (the CUDA `icc_cmyk_matrix` entry) always runs
+// on the CPU and has no Slang counterpart.
+//
 // The CUDA source uses `__fmaf_rn` for FMA-with-round-to-nearest semantics.
 // Slang exposes the same via the `precise` keyword on the result variable
 // (suppresses aggressive reassociation) — see SPIR-V `precise` decoration.
-// CLUT access uses StructuredBuffer<uint8_t> (flat buffer); the Texture3D
-// + sampler alternative is a perf-only follow-up (see ROADMAP Phase 10
-// Task 3 follow-ups) — this layout matches the CUDA path byte-for-byte.
-
-// ── Matrix entry point ──────────────────────────────────────────────────────
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void icc_cmyk_matrix(
-    uint3 tid : SV_DispatchThreadID,
-    uniform StructuredBuffer<uint8_t> cmyk,
-    uniform RWStructuredBuffer<uint8_t> rgb,
-    uniform uint n)
-{
-    uint i = tid.x;
-    if (i >= n) return;
-
-    uint ci = i * 4;
-    uint ri = i * 3;
-
-    uint c = uint(cmyk[ci + 0]);
-    uint m = uint(cmyk[ci + 1]);
-    uint y = uint(cmyk[ci + 2]);
-    uint k = uint(cmyk[ci + 3]);
-
-    uint inv_k = 255u - k;
-
-    // Integer multiply-round-divide: (255−ch)*(255−k)/255 with unbiased rounding.
-    rgb[ri + 0] = uint8_t(((255u - c) * inv_k + 127u) / 255u);
-    rgb[ri + 1] = uint8_t(((255u - m) * inv_k + 127u) / 255u);
-    rgb[ri + 2] = uint8_t(((255u - y) * inv_k + 127u) / 255u);
-}
+// CLUT access uses StructuredBuffer<uint8_t> (flat buffer), the layout of
+// the CUDA path.
 
 // ── CLUT entry point ────────────────────────────────────────────────────────
 

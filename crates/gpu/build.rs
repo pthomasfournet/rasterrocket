@@ -57,9 +57,8 @@ const SLANG_PROFILE: &str = "spirv_1_5";
 /// Entry-point selector for the slangc invocation.
 ///
 /// - `Some(name)` → pass `-entry name` so slangc compiles exactly that
-///   entry. Used when a `.slang` file declares multiple entries but
-///   only one is consumed (e.g. `icc_clut.slang` has both matrix and
-///   CLUT entries; we only need CLUT on the GPU).
+///   entry, whose name need not match the file (e.g. `icc_clut.slang`
+///   → `icc_cmyk_clut`).
 /// - `None` → pass no `-entry` flag; slangc uses every
 ///   `[shader("compute")]` attribute in the file as an entry point and
 ///   emits them into a single multi-entry SPIR-V module. Used by the

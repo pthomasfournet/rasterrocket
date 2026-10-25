@@ -11,8 +11,8 @@ impl GpuCtx {
     /// 255 = full ink).  Returns interleaved RGB, 3 bytes per pixel.
     ///
     /// Two dispatch paths:
-    /// - `clut` is `None` — uses the fast matrix kernel (subtractive complement
-    ///   formula, identical to the CPU fallback).
+    /// - `clut` is `None` — the profile-free process-ink model
+    ///   ([`color::cmyk`]), always evaluated on the CPU.
     /// - `clut` is `Some((table, grid_n))` — uses the 4D quadrilinear CLUT kernel.
     ///   `table` must be `grid_n^4 * 3` bytes, ordered
     ///   `(k * G³ + c * G² + m * G + y) * 3` (RGB output values, u8).
@@ -61,7 +61,7 @@ impl GpuCtx {
                 got = table.len(),
             );
         }
-        // Matrix path (clut=None): the CPU SIMD path always beats GPU on this machine —
+        // Profile-free path (clut=None): the CPU SIMD path always beats GPU on this machine —
         // threshold_bench showed the PCIe round-trip cost exceeds the compute cost
         // at all measured sizes (256–4M pixels).  Always use the CPU path here.
         if clut.is_none() {
@@ -113,7 +113,8 @@ impl GpuCtx {
 
         match clut {
             None => {
-                self.launch_icc_matrix_async(&d_cmyk, &d_rgb, n_u32)?;
+                let d_corners = stream.clone_htod(&color::cmyk::CORNER_TABLE)?;
+                self.launch_icc_matrix_async(&d_cmyk, &d_rgb, &d_corners, n_u32)?;
             }
             Some((table, grid_n)) => {
                 let d_clut = stream.clone_htod(table)?;
@@ -126,12 +127,13 @@ impl GpuCtx {
         Ok(rgb)
     }
 
-    /// Async kernel launch for the ICC CMYK→RGB matrix kernel.
+    /// Async kernel launch for the profile-free CMYK→RGB kernel.
     ///
-    /// Caller is responsible for stream ordering and any final D→H download.
-    /// Note: the public dispatcher always routes the matrix path to the CPU
-    /// SIMD fallback; this helper exists for completeness so tests can
-    /// exercise the GPU path directly.
+    /// `d_corners` holds [`color::cmyk::CORNER_TABLE`]; the kernel output is
+    /// byte-identical to [`color::cmyk::cmyk_to_rgb_row`].  Caller is
+    /// responsible for stream ordering and any final D→H download.  The
+    /// public dispatcher always routes this conversion to the CPU; the
+    /// launch exists for benchmarking and parity tests.
     ///
     /// # Errors
     ///
@@ -144,13 +146,14 @@ impl GpuCtx {
         &self,
         d_cmyk: &CudaSlice<u8>,
         d_rgb: &CudaSlice<u8>,
+        d_corners: &CudaSlice<u8>,
         n_pixels: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
         let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.icc_cmyk_matrix);
-        builder.arg(d_cmyk).arg(d_rgb).arg(&n_pixels);
-        // SAFETY: 3 args match icc_cmyk_matrix PTX signature exactly.
+        builder.arg(d_cmyk).arg(d_rgb).arg(d_corners).arg(&n_pixels);
+        // SAFETY: 4 args match icc_cmyk_matrix PTX signature exactly.
         unsafe { builder.launch(cfg) }?;
         Ok(())
     }
@@ -186,5 +189,30 @@ impl GpuCtx {
         // SAFETY: 5 args match icc_cmyk_clut PTX signature exactly.
         unsafe { builder.launch(cfg) }?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "gpu-validation"))]
+mod tests {
+    use crate::GpuCtx;
+
+    /// The CUDA profile-free kernel is byte-identical to the CPU conversion
+    /// over every (ink, K) byte pair plus pseudo-random pixels.
+    #[test]
+    fn icc_matrix_kernel_matches_cpu() {
+        let gpu = GpuCtx::init().expect("gpu init");
+        let mut cmyk: Vec<u8> = (0u32..65_536)
+            .flat_map(|i| {
+                let [ink, k, ..] = i.to_le_bytes();
+                [ink, 255 - ink, ink.wrapping_mul(167), k]
+            })
+            .collect();
+        let mut s = 0x2468_ace0_u32;
+        cmyk.extend((0..4 * 100_003).map(|_| {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            s.to_be_bytes()[0]
+        }));
+        let got = gpu.icc_cmyk_to_rgb_gpu(&cmyk, None).expect("matrix kernel");
+        assert_eq!(got, color::cmyk::cmyk_to_rgb_vec(&cmyk));
     }
 }

@@ -2,12 +2,10 @@
 //
 // Two entry points:
 //
-//   icc_cmyk_matrix — fast path for profiles that reduce to a 3×4 linear matrix.
-//     The formula is the standard subtractive CMYK complement:
-//       R = (255 - C) * (255 - K) / 255
-//       G = (255 - M) * (255 - K) / 255
-//       B = (255 - Y) * (255 - K) / 255
-//     This is identical to color::convert::cmyk_to_rgb_reflectance in the Rust codebase.
+//   icc_cmyk_matrix — profile-free DeviceCMYK conversion: multilinear
+//     interpolation over the sixteen solid / overprint corner colours, in the
+//     fixed-point arithmetic of the Rust `color::cmyk` module, so the output
+//     is byte-identical to the CPU conversion.
 //
 //   icc_cmyk_clut — full 4D CLUT path for A2B0 profiles.
 //     Evaluates the CLUT using manual quadrilinear interpolation with __ldg()
@@ -24,18 +22,37 @@
 
 // ── Matrix kernel ─────────────────────────────────────────────────────────────
 
-// Convert one CMYK pixel to RGB using the subtractive complement formula.
-// PDF DeviceCMYK convention: 0 = no ink, 255 = full ink.
-//
-// R = (255−C)*(255−K)/255,  G = (255−M)*(255−K)/255,  B = (255−Y)*(255−K)/255
+// Interpolation weight of an ink byte on [0, 256]: 0 -> 0, 255 -> 256.
+__device__ __forceinline__ int ink_weight(unsigned int x) {
+    return (int)(x + (x >> 7));
+}
+
+// 256*a + (b - a)*w: one interpolation step, adding 8 fractional bits.
+__device__ __forceinline__ int lerp8(int a, int b, int w) {
+    return (a << 8) + (b - a) * w;
+}
+
+// Drop 8 fractional bits with round-half-up.
+__device__ __forceinline__ int round8(int v) {
+    return (v + 128) >> 8;
+}
+
+// Convert one CMYK pixel to RGB by multilinear interpolation over the corners.
 //
 // Parameters:
-//   cmyk : interleaved input,  4 bytes per pixel
-//   rgb  : interleaved output, 3 bytes per pixel
-//   n    : total pixel count
+//   cmyk    : interleaved input,  4 bytes per pixel
+//   rgb     : interleaved output, 3 bytes per pixel
+//   corners : 16 RGB corner colours (48 bytes), index k*8 + c*4 + m*2 + y
+//   n       : total pixel count
+//
+// The corners are reduced along Y, M, C, K.  Intermediates carry 8 fractional
+// bits and are rounded after the M and C stages; the K stage rounds to an
+// integer.  All intermediates are convex combinations of corner bytes, hence
+// non-negative and below 2^31.
 extern "C" __global__ void icc_cmyk_matrix(
     const unsigned char* __restrict__ cmyk,
     unsigned char*       __restrict__ rgb,
+    const unsigned char* __restrict__ corners,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -44,20 +61,27 @@ extern "C" __global__ void icc_cmyk_matrix(
     unsigned int ci = i * 4;
     unsigned int ri = i * 3;
 
-    unsigned int c = cmyk[ci];
-    unsigned int m = cmyk[ci + 1];
-    unsigned int y = cmyk[ci + 2];
-    unsigned int k = cmyk[ci + 3];
+    int wc = ink_weight(cmyk[ci]);
+    int wm = ink_weight(cmyk[ci + 1]);
+    int wy = ink_weight(cmyk[ci + 2]);
+    int wk = ink_weight(cmyk[ci + 3]);
 
-    unsigned int inv_k = 255u - k;
-
-    // Integer multiply-round-divide: (255−ch)*(255−k)/255, rounded to nearest.
-    // Adding 127 before dividing by 255 gives unbiased rounding; without it,
-    // truncation would systematically underestimate mid-range colours.
-    // Maximum numerator: 255*255 + 127 = 65152, safe in u32.
-    rgb[ri]     = (unsigned char)(((255u - c) * inv_k + 127u) / 255u);
-    rgb[ri + 1] = (unsigned char)(((255u - m) * inv_k + 127u) / 255u);
-    rgb[ri + 2] = (unsigned char)(((255u - y) * inv_k + 127u) / 255u);
+    for (int ch = 0; ch < 3; ++ch) {
+        // Y stage: j = k*4 + c*2 + m pairs corners 2j (y = 0) and 2j + 1 (y = 1).
+        int ys[8];
+        for (int j = 0; j < 8; ++j) {
+            int lo = (int)__ldg(&corners[(2 * j) * 3 + ch]);
+            int hi = (int)__ldg(&corners[(2 * j + 1) * 3 + ch]);
+            ys[j] = (lo << 8) + (hi - lo) * wy;
+        }
+        int m0 = round8(lerp8(ys[0], ys[1], wm));
+        int m1 = round8(lerp8(ys[2], ys[3], wm));
+        int m2 = round8(lerp8(ys[4], ys[5], wm));
+        int m3 = round8(lerp8(ys[6], ys[7], wm));
+        int c0 = round8(lerp8(m0, m1, wc));
+        int c1 = round8(lerp8(m2, m3, wc));
+        rgb[ri + ch] = (unsigned char)((lerp8(c0, c1, wk) + (1 << 15)) >> 16);
+    }
 }
 
 // ── CLUT kernel ───────────────────────────────────────────────────────────────
