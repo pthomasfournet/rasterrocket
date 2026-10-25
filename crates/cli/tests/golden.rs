@@ -124,7 +124,7 @@ fn ref_dir() -> PathBuf {
 // ── PPM parsing ───────────────────────────────────────────────────────────────
 
 /// Skip ASCII whitespace and `#`-comment lines, advancing `pos` in `buf`.
-fn skip_whitespace_and_comments(buf: &[u8], pos: &mut usize) {
+const fn skip_whitespace_and_comments(buf: &[u8], pos: &mut usize) {
     loop {
         while *pos < buf.len() && matches!(buf[*pos], b' ' | b'\t' | b'\n' | b'\r') {
             *pos += 1;

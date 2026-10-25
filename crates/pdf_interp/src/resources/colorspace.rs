@@ -1150,7 +1150,10 @@ mod tests {
         assert_eq!(teal, want);
         assert!(teal[2] > teal[0] + 40, "teal, got {teal:?}");
         // Full black on top saturates K.
-        assert_eq!(dn.convert_to_rgb(&doc, &[1.0, 1.0]), [0, 0, 0]);
+        assert_eq!(
+            dn.convert_to_rgb(&doc, &[1.0, 1.0]),
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 0.08, 0.26, 1.0])
+        );
         // No ink at all is paper white.
         assert_eq!(dn.convert_to_rgb(&doc, &[0.0, 0.0]), [255, 255, 255]);
     }

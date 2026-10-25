@@ -623,7 +623,7 @@ mod page_list_tests {
         let args = base_args();
         let (pages, warnings) = args.build_page_list(3).unwrap();
         assert_eq!(pages, vec![1, 2, 3]);
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, Vec::<String>::new());
     }
 
     #[test]

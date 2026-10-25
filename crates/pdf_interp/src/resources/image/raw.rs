@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     fn teal_rgb() -> [u8; 3] {
-        color::convert::cmyk_to_rgb_bytes(1.0, 0.08, 0.26, 0.38)
+        color::cmyk::cmyk_f64_to_rgb(1.0, 0.08, 0.26, 0.38)
     }
 
     #[test]
@@ -1162,7 +1162,7 @@ mod tests {
         let px = desc.data.as_cpu().unwrap();
         assert_eq!(px[0..3], teal_rgb());
         assert_eq!(px[3..6], [255, 255, 255]);
-        assert_eq!(px[6..9], [0, 0, 0]);
+        assert_eq!(px[6..9], color::cmyk::cmyk_f64_to_rgb(0.0, 0.0, 0.0, 1.0));
     }
 
     #[test]

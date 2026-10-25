@@ -211,7 +211,7 @@ impl ScreenParams {
     /// # Examples
     ///
     /// ```
-    /// # use raster::types::{ScreenParams, ScreenType};
+    /// # use rasterrocket_render::types::{ScreenParams, ScreenType};
     /// assert!(ScreenParams::default().validate().is_ok());
     ///
     /// let bad = ScreenParams { size: 3, ..ScreenParams::default() };
