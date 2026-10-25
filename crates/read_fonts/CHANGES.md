@@ -37,3 +37,22 @@ It is not published and changes are not sent upstream.
   following entries and the font was rejected for lacking `/CharStrings`.
   The closing brace is now checked before each token is read. Test:
   `parse_procs_with_tokens_ending_at_the_brace`.
+
+## CID-keyed Type 1 fonts
+
+- New `ps::type1::cid::CidType1Font`: a reader for CID-keyed Type 1 fonts
+  (CIDFontType 0, Adobe Technical Note #5014), which a PDF embeds as
+  `FontFile` of a `CIDFontType0` descendant font. It parses the cleartext
+  header (`CIDMapOffset`, `FDBytes`, `GDBytes`, `CIDCount`, `FDArray`),
+  locates the binary or `(Hex)` data section after `StartData`, reads
+  each font dictionary's `FontMatrix`, `lenIV` and subroutines
+  (`SubrMapOffset`, `SDBytes`, `SubrCount`), and decrypts every charstring
+  with its dictionary's `lenIV`; charstrings run through the existing
+  Type 1 interpreter with their dictionary's subroutines, and `seac` codes
+  are CIDs. Font dictionaries are delimited by `%ADOBeginFontDict`
+  comments as in FreeType's `cid` driver. Differences from FreeType, all
+  more lenient: any `%!` header is accepted (FreeType requires
+  `%!PS-Adobe-3.0 Resource-CIDFont`, which `CidType1Font::is_cid_keyed`
+  tests for), and a dictionary key outside a declared dictionary or an
+  unreadable `FontMatrix` is ignored instead of failing the font. Tests:
+  `ps::type1::cid::tests::*`.

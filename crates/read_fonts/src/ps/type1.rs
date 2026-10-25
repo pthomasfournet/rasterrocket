@@ -15,6 +15,8 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::ops::Range;
 
+pub mod cid;
+
 /// A Type1 font.
 pub struct Type1Font {
     name: Option<String>,
