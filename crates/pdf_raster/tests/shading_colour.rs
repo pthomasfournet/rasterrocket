@@ -40,11 +40,12 @@ const RED_GREEN_BLUE: &str = "<< /FunctionType 3 /Domain [0 1] /Bounds [0.5] /En
 /// One `W` × `H` page running `content`, with shading `/Sh0` (`shading`),
 /// colour space `/CS0` (`CMY_DEVICEN`) and the tint transform as object 5.
 fn page(content: &str, shading: &str) -> Vec<u8> {
-    page_with(content, shading, &[])
+    page_with(content, shading.as_bytes(), &[])
 }
 
-/// [`page`] with `extra` appended as objects 7, 8, ….
-fn page_with(content: &str, shading: &str, extra: &[Vec<u8>]) -> Vec<u8> {
+/// [`page`] with shading object `shading` (a dictionary or stream body) and
+/// `extra` appended as objects 7, 8, ….
+fn page_with(content: &str, shading: &[u8], extra: &[Vec<u8>]) -> Vec<u8> {
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -56,7 +57,7 @@ fn page_with(content: &str, shading: &str, extra: &[Vec<u8>]) -> Vec<u8> {
         .into_bytes(),
         stream_object("", content.as_bytes()),
         cmy_tint(),
-        shading.as_bytes().to_vec(),
+        shading.to_vec(),
     ];
     objects.extend_from_slice(extra);
     assemble_pdf(&objects)
@@ -155,7 +156,7 @@ fn function_based_shading_reads_both_coordinates_through_its_matrix() {
     let px = rgb_at(
         page_with(
             "q 50 25 100 50 re W n /Sh0 sh Q",
-            shading,
+            shading.as_bytes(),
             &[xy_function(3, "{ 0 }")],
         ),
         &TYPE1_PROBES,
@@ -173,7 +174,7 @@ fn function_based_shading_takes_an_array_of_two_input_functions() {
     let px = rgb_at(
         page_with(
             "q 50 25 100 50 re W n /Sh0 sh Q",
-            shading,
+            shading.as_bytes(),
             &[
                 xy_function(1, "{ pop }"),
                 xy_function(1, "{ exch pop }"),
@@ -185,4 +186,114 @@ fn function_based_shading_takes_an_array_of_two_input_functions() {
     for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
         assert_close(got, want, 4, "Function = [x, y, 0]");
     }
+}
+
+/// Probes along y = 50 where a mesh coloured with `t = x / 200` takes
+/// `RED_GREEN_BLUE` at t = 0.2, 0.5 and 0.8 (pixel centres add 0.0025).
+const MESH_PROBES: [(u32, u32); 3] = [(40, 50), (100, 50), (160, 50)];
+const MESH_EXPECTED: [[u8; 3]; 3] = [[152, 103, 0], [0, 254, 1], [0, 101, 154]];
+
+#[test]
+fn lattice_mesh_with_function_interpolates_t_through_every_stop() {
+    // A 2 × 2 lattice over the page, t = 0 on the left and 1 on the right
+    // (8-bit coordinates and t).
+    let shading = stream_object(
+        &format!(
+            "/ShadingType 5 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+             /BitsPerComponent 8 /VerticesPerRow 2 /Decode [0 200 0 100 0 1] \
+             /Function {RED_GREEN_BLUE}"
+        ),
+        &[0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255],
+    );
+    let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
+    for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
+        assert_close(got, want, 6, "type 5 mesh, t = x / 200");
+    }
+}
+
+/// Big-endian 16-bit coordinate of `v` on `[0, extent]`.
+fn coord16(v: f64, extent: f64) -> [u8; 2] {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "v ∈ [0, extent], so the product lies in [0, 65535]"
+    )]
+    let raw = (v / extent * 65535.0).round() as u16;
+    raw.to_be_bytes()
+}
+
+#[test]
+fn coons_mesh_with_function_interpolates_t_through_every_stop() {
+    // One flat patch over the page; boundary points clockwise from (0, 0)
+    // along y = 0, then up x = 200, back along y = 100 and down x = 0.
+    let third = |k: f64| k * 200.0 / 3.0;
+    let boundary = [
+        (0.0, 0.0),
+        (third(1.0), 0.0),
+        (third(2.0), 0.0),
+        (200.0, 0.0),
+        (200.0, 100.0 / 3.0),
+        (200.0, 200.0 / 3.0),
+        (200.0, 100.0),
+        (third(2.0), 100.0),
+        (third(1.0), 100.0),
+        (0.0, 100.0),
+        (0.0, 200.0 / 3.0),
+        (0.0, 100.0 / 3.0),
+    ];
+    let mut data = vec![0u8]; // flag 0
+    for (x, y) in boundary {
+        data.extend(coord16(x, 200.0));
+        data.extend(coord16(y, 100.0));
+    }
+    // Corner t at (0, 0), (200, 0), (200, 100), (0, 100).
+    data.extend([0, 255, 255, 0]);
+    let shading = stream_object(
+        &format!(
+            "/ShadingType 6 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 \
+             /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 200 0 100 0 1] \
+             /Function {RED_GREEN_BLUE}"
+        ),
+        &data,
+    );
+    let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
+    for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
+        assert_close(got, want, 6, "type 6 mesh, t = x / 200");
+    }
+}
+
+#[test]
+fn mesh_in_a_five_colorant_space_converts_every_vertex() {
+    // /CS5 = [/DeviceN [/C /M /Y /K /Spot] /DeviceCMYK { pop }]: the spot is
+    // dropped.  Every vertex of the upper half is (0, 1, 1, 0, 0.5); the flat
+    // fill of the lower strip is the same colour.
+    let mut data = Vec::new();
+    for (x, y) in [(0u8, 128u8), (255, 128), (0, 255), (255, 255)] {
+        data.extend([x, y, 0, 255, 255, 0, 128]);
+    }
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
+             /Resources << /Shading << /Sh0 6 0 R >> /ColorSpace << /CS5 7 0 R >> >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream_object("", b"/Sh0 sh /CS5 cs 0 1 1 0 0.5 scn 0 0 200 40 re f"),
+        stream_object(
+            "/FunctionType 4 /Domain [0 1 0 1 0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+            b"{ pop }",
+        ),
+        stream_object(
+            "/ShadingType 5 /ColorSpace 7 0 R /BitsPerCoordinate 8 \
+             /BitsPerComponent 8 /VerticesPerRow 2 \
+             /Decode [0 200 0 100 0 1 0 1 0 1 0 1 0 1]",
+            &data,
+        ),
+        b"[/DeviceN [/Cyan /Magenta /Yellow /Black /Spot] /DeviceCMYK 5 0 R]".to_vec(),
+    ];
+    let px = rgb_at(assemble_pdf(&objects), &[(100, 80), (100, 20)]);
+    assert_close(px[0], px[1], 2, "mesh vertex colour vs flat fill");
+    assert!(px[0][0] > 180 && px[0][1] < 80, "red: {:?}", px[0]);
 }

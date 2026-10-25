@@ -6,16 +6,10 @@
 use pdf::Dictionary;
 use raster::shading::gouraud::GouraudVertex;
 
-use super::{
-    BitReader, ShadingCs, parse_bits_per_comp, parse_bits_per_coord, read_decode_array,
-    transform_point,
-};
+use super::mesh::{COLOR_DELTA, Corner, CornerSource};
+use super::{BitReader, parse_bits_per_comp, parse_bits_per_coord, transform_point};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
-/// Colour mixing threshold for subdivision: stop when all corner pairs differ
-/// by less than this per component (PDF §8.7.4.5 adaptive subdivision).
-pub(super) const COLOR_DELTA: f64 = 3.0 / 255.0;
 
 /// Maximum adaptive subdivision depth (PDF §8.7.4.5).
 pub(super) const MAX_PATCH_DEPTH: u8 = 6;
@@ -33,17 +27,17 @@ pub(super) const VALID_FLAG_BITS: &[u8] = &[2, 4, 8];
 ///
 /// Coordinates are already in device space (CTM applied + y-flipped).
 #[derive(Clone, Copy)]
-pub(super) struct Patch {
+pub(super) struct Patch<C> {
     pub(super) xy: [[[f64; 2]; 4]; 4],
-    pub(super) color: [[[u8; 3]; 2]; 2],
+    pub(super) color: [[C; 2]; 2],
 }
 
-impl Patch {
-    /// Create a zeroed patch (all points at origin, all colours black).
+impl<C: Corner> Patch<C> {
+    /// Create a zeroed patch (all points at origin, all corners [`Corner::ZERO`]).
     pub(super) const fn zero() -> Self {
         Self {
             xy: [[[0.0; 2]; 4]; 4],
-            color: [[[0u8; 3]; 2]; 2],
+            color: [[C::ZERO; 2]; 2],
         }
     }
 }
@@ -56,31 +50,14 @@ pub(super) const fn mid2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
     [f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])]
 }
 
-/// Componentwise midpoint of two sRGB corner colours.
-#[inline]
-pub(super) fn mid_color(a: [u8; 3], b: [u8; 3]) -> [u8; 3] {
-    // lerp_u8(a, b, 128) = round((a + b) / 2) — rounded midpoint.
-    use color::convert::lerp_u8;
-    [
-        lerp_u8(a[0], b[0], 128),
-        lerp_u8(a[1], b[1], 128),
-        lerp_u8(a[2], b[2], 128),
-    ]
-}
-
 /// Maximum per-component colour difference across all 4 corner pairs of the patch.
 /// Used as the subdivision-stop criterion.
-pub(super) fn color_delta(p: &Patch) -> f64 {
+pub(super) fn color_delta<C: Corner>(p: &Patch<C>) -> f64 {
     let corners = [p.color[0][0], p.color[0][1], p.color[1][0], p.color[1][1]];
     let mut max_d = 0.0_f64;
     for i in 0..4 {
         for j in (i + 1)..4 {
-            for (a, b) in corners[i].iter().zip(corners[j].iter()) {
-                let d = f64::from(a.abs_diff(*b)) / 255.0;
-                if d > max_d {
-                    max_d = d;
-                }
-            }
+            max_d = max_d.max(C::delta(corners[i], corners[j]));
         }
     }
     max_d
@@ -109,7 +86,7 @@ pub(super) const fn casteljau_row(row: [[f64; 2]; 4]) -> ([[f64; 2]; 4], [[f64; 
 /// Split `p` at u=0.5 — applies de Casteljau along columns (u direction).
 ///
 /// Returns `(lo_u, hi_u)` where `lo_u` covers u∈[0,0.5] and `hi_u` u∈[0.5,1].
-pub(super) fn split_patch_u(p: &Patch) -> (Patch, Patch) {
+pub(super) fn split_patch_u<C: Corner>(p: &Patch<C>) -> (Patch<C>, Patch<C>) {
     let mut lo = Patch::zero();
     let mut hi = Patch::zero();
     for col in 0..4 {
@@ -121,8 +98,8 @@ pub(super) fn split_patch_u(p: &Patch) -> (Patch, Patch) {
         }
     }
     // Interpolate corner colours along u.
-    let c_mid_v0 = mid_color(p.color[0][0], p.color[1][0]);
-    let c_mid_v1 = mid_color(p.color[0][1], p.color[1][1]);
+    let c_mid_v0 = C::mid(p.color[0][0], p.color[1][0]);
+    let c_mid_v1 = C::mid(p.color[0][1], p.color[1][1]);
     lo.color[0] = p.color[0];
     lo.color[1] = [c_mid_v0, c_mid_v1];
     hi.color[0] = [c_mid_v0, c_mid_v1];
@@ -133,7 +110,7 @@ pub(super) fn split_patch_u(p: &Patch) -> (Patch, Patch) {
 /// Split `p` at v=0.5 — applies de Casteljau along rows (v direction).
 ///
 /// Returns `(lo_v, hi_v)` where `lo_v` covers v∈[0,0.5] and `hi_v` v∈[0.5,1].
-pub(super) fn split_patch_v(p: &Patch) -> (Patch, Patch) {
+pub(super) fn split_patch_v<C: Corner>(p: &Patch<C>) -> (Patch<C>, Patch<C>) {
     let mut lo = Patch::zero();
     let mut hi = Patch::zero();
     for row in 0..4 {
@@ -142,8 +119,8 @@ pub(super) fn split_patch_v(p: &Patch) -> (Patch, Patch) {
         hi.xy[row] = r;
     }
     // Interpolate corner colours along v.
-    let c_mid_u0 = mid_color(p.color[0][0], p.color[0][1]);
-    let c_mid_u1 = mid_color(p.color[1][0], p.color[1][1]);
+    let c_mid_u0 = C::mid(p.color[0][0], p.color[0][1]);
+    let c_mid_u1 = C::mid(p.color[1][0], p.color[1][1]);
     lo.color[0][0] = p.color[0][0];
     lo.color[0][1] = c_mid_u0;
     lo.color[1][0] = p.color[1][0];
@@ -157,17 +134,22 @@ pub(super) fn split_patch_v(p: &Patch) -> (Patch, Patch) {
 
 // ── Tessellation ──────────────────────────────────────────────────────────────
 
-/// Extract a corner device-space vertex from a patch.
+/// Extract a corner device-space vertex from a patch, coloured by `source`.
 ///
 /// `u=0` → row 0; `u=1` → row 3. `v=0` → col 0; `v=1` → col 3.
 #[inline]
-pub(super) const fn corner_vertex(p: &Patch, u: usize, v: usize) -> GouraudVertex {
+pub(super) fn corner_vertex<S: CornerSource>(
+    source: &S,
+    p: &Patch<S::Corner>,
+    u: usize,
+    v: usize,
+) -> GouraudVertex {
     let row = u * 3;
     let col = v * 3;
     GouraudVertex {
         x: p.xy[row][col][0],
         y: p.xy[row][col][1],
-        color: p.color[u][v],
+        color: source.rgb(p.color[u][v]),
     }
 }
 
@@ -176,25 +158,26 @@ pub(super) const fn corner_vertex(p: &Patch, u: usize, v: usize) -> GouraudVerte
 /// Subdivision stops when all corner colours are within [`COLOR_DELTA`] of each
 /// other or [`MAX_PATCH_DEPTH`] is reached (adaptive subdivision per PDF §8.7.4.5).
 /// Uses an explicit work stack (no recursion) to avoid stack overflow.
-#[expect(
-    clippy::large_types_passed_by_value,
-    reason = "Patch (272 B) is consumed on the work stack; reference would require a Clone per push"
-)]
-pub(super) fn tessellate_patch(patch: Patch, out: &mut Vec<[GouraudVertex; 3]>) {
+pub(super) fn tessellate_patch<S: CornerSource>(
+    source: &S,
+    patch: Patch<S::Corner>,
+    out: &mut Vec<[GouraudVertex; 3]>,
+) {
     // Pre-allocate the work stack.  In a DFS traversal of a 4-ary tree of depth D,
     // at most 3*D+1 nodes are simultaneously live on the stack (3 siblings waiting
     // at each level plus the children just pushed).  For MAX_PATCH_DEPTH=6 that is 19;
     // 24 is a safe round-up.
-    let mut stack: Vec<(Patch, u8)> = Vec::with_capacity(3 * MAX_PATCH_DEPTH as usize + 1);
+    let mut stack: Vec<(Patch<S::Corner>, u8)> =
+        Vec::with_capacity(3 * MAX_PATCH_DEPTH as usize + 1);
     stack.push((patch, 0));
 
     while let Some((p, depth)) = stack.pop() {
         if depth >= MAX_PATCH_DEPTH || color_delta(&p) <= COLOR_DELTA {
             // Leaf: emit 2 triangles covering the patch quad from its 4 corners.
-            let v00 = corner_vertex(&p, 0, 0);
-            let v01 = corner_vertex(&p, 0, 1);
-            let v10 = corner_vertex(&p, 1, 0);
-            let v11 = corner_vertex(&p, 1, 1);
+            let v00 = corner_vertex(source, &p, 0, 0);
+            let v01 = corner_vertex(source, &p, 0, 1);
+            let v10 = corner_vertex(source, &p, 1, 0);
+            let v11 = corner_vertex(source, &p, 1, 1);
             out.push([v00, v01, v10]);
             out.push([v01, v11, v10]);
         } else {
@@ -248,40 +231,24 @@ pub(super) fn read_patch_points(
     Some(pts)
 }
 
-/// Read `n_colors` corner colours from the bit stream.
+/// Read `n_colors` corner colours of `source.components()` fields each from
+/// the bit stream.
 ///
 /// Returns `None` on stream truncation.
-pub(super) fn read_patch_colors(
+pub(super) fn read_patch_colors<S: CornerSource>(
     reader: &mut BitReader<'_>,
     n_colors: usize,
-    n_channels: usize,
     bpcomp: u8,
     decode: &[f64],
-    cs: ShadingCs<'_>,
-) -> Option<Vec<[u8; 3]>> {
-    // bpcomp ∈ VALID_BITS ⊆ [1,32]; cast to f64 exact for u32-range values.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "max_comp ≤ 2^32−1; f64 mantissa is 52 bits"
-    )]
-    let max_comp = ((1u64 << bpcomp) - 1) as f64;
+    source: &S,
+) -> Option<Vec<S::Corner>> {
+    let mut raw = vec![0u32; source.components()];
     let mut colors = Vec::with_capacity(n_colors);
     for _ in 0..n_colors {
-        let mut raw = [0u32; 4];
-        for ch in raw.iter_mut().take(n_channels) {
-            *ch = reader.read_bits(bpcomp)?;
+        for field in &mut raw {
+            *field = reader.read_bits(bpcomp)?;
         }
-        // u32 → f64 is always lossless; mul_add avoids a separate rounding step.
-        let channels: Vec<f64> = raw[..n_channels]
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| {
-                let c_min = decode.get(4 + i * 2).copied().unwrap_or(0.0);
-                let c_max = decode.get(4 + i * 2 + 1).copied().unwrap_or(1.0);
-                (f64::from(v) / max_comp).mul_add(c_max - c_min, c_min)
-            })
-            .collect();
-        colors.push(cs.to_rgb(&channels));
+        colors.push(super::decode_corner(source, &raw, bpcomp, decode));
     }
     Some(colors)
 }
@@ -298,7 +265,7 @@ pub(super) fn parse_bits_per_flag(sh: &Dictionary, tag: &str) -> Option<u8> {
 /// Stream order traces the boundary clockwise:
 /// top row (left→right), right col (down), bottom row (right→left), left col (up).
 /// Interior points `[1][1]`, `[1][2]`, `[2][1]`, `[2][2]` are computed from the boundary.
-pub(super) fn build_patch_type6(pts: &[[f64; 2]], colors: &[[u8; 3]]) -> Patch {
+pub(super) fn build_patch_type6<C: Corner>(pts: &[[f64; 2]], colors: &[C]) -> Patch<C> {
     debug_assert_eq!(pts.len(), 12);
     debug_assert_eq!(colors.len(), 4);
     let mut p = Patch::zero();
@@ -330,7 +297,7 @@ pub(super) fn build_patch_type6(pts: &[[f64; 2]], colors: &[[u8; 3]]) -> Patch {
 /// Derive the 4 interior control points of a Coons patch from its boundary.
 ///
 /// Standard Coons patch interior derivation (same formula for x and y independently).
-pub(super) fn fill_type6_interior(p: &mut Patch) {
+pub(super) fn fill_type6_interior<C>(p: &mut Patch<C>) {
     for k in 0..2usize {
         // Snapshot boundary values before writing interior — avoids borrow conflict.
         let [p00, p01, p02, p03] = [p.xy[0][0][k], p.xy[0][1][k], p.xy[0][2][k], p.xy[0][3][k]];
@@ -363,12 +330,12 @@ pub(super) fn fill_type6_interior(p: &mut Patch) {
 /// Copies 4 control points and 2 corner colours from `prev`, then places the
 /// 8 new boundary points from `pts` and 2 new colours from `colors`.
 /// Interior points are derived after all boundary points are placed.
-pub(super) fn apply_flag_type6(
+pub(super) fn apply_flag_type6<C: Corner>(
     flag: u8,
-    prev: &Patch,
+    prev: &Patch<C>,
     pts: &[[f64; 2]],
-    colors: &[[u8; 3]],
-) -> Patch {
+    colors: &[C],
+) -> Patch<C> {
     debug_assert_eq!(pts.len(), 8);
     debug_assert_eq!(colors.len(), 2);
     let mut p = Patch::zero();
@@ -445,7 +412,7 @@ pub(super) fn apply_flag_type6(
 /// Unlike Type 6, all 16 points (12 boundary + 4 interior) are read from the stream.
 /// Stream order: top row, right col, bottom row (reversed), left col (reversed),
 /// then 4 interior points in a specific order.
-pub(super) fn build_patch_type7(pts: &[[f64; 2]], colors: &[[u8; 3]]) -> Patch {
+pub(super) fn build_patch_type7<C: Corner>(pts: &[[f64; 2]], colors: &[C]) -> Patch<C> {
     debug_assert_eq!(pts.len(), 16);
     debug_assert_eq!(colors.len(), 4);
     let mut p = Patch::zero();
@@ -482,12 +449,12 @@ pub(super) fn build_patch_type7(pts: &[[f64; 2]], colors: &[[u8; 3]]) -> Patch {
 ///
 /// For Type 7, the 4 interior control points are always read from the stream
 /// (as part of the 12 new points), never copied from the previous patch.
-pub(super) fn apply_flag_type7(
+pub(super) fn apply_flag_type7<C: Corner>(
     flag: u8,
-    prev: &Patch,
+    prev: &Patch<C>,
     pts: &[[f64; 2]],
-    colors: &[[u8; 3]],
-) -> Patch {
+    colors: &[C],
+) -> Patch<C> {
     debug_assert_eq!(pts.len(), 12);
     debug_assert_eq!(colors.len(), 2);
     let mut p = Patch::zero();
@@ -574,11 +541,11 @@ pub(super) fn apply_flag_type7(
 /// at `BitsPerComponent` bits per channel. Interior control points are derived from
 /// the boundary using the standard Coons formula. Each patch is tessellated into
 /// Gouraud triangles via adaptive subdivision.
-pub(super) fn decode_type6_mesh(
+pub(super) fn decode_type6_mesh<S: CornerSource>(
     sh: &Dictionary,
     data: &[u8],
-    cs: ShadingCs<'_>,
-    n_channels: usize,
+    source: &S,
+    decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Vec<[GouraudVertex; 3]> {
@@ -591,11 +558,9 @@ pub(super) fn decode_type6_mesh(
     let Some(bpf) = parse_bits_per_flag(sh, "type6") else {
         return vec![];
     };
-    let decode = read_decode_array(sh, n_channels);
-
     let mut reader = BitReader::new(data);
     let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
-    let mut prev: Option<Patch> = None;
+    let mut prev: Option<Patch<S::Corner>> = None;
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -606,12 +571,10 @@ pub(super) fn decode_type6_mesh(
 
         let (n_pts, n_colors): (usize, usize) = if flag == 0 { (12, 4) } else { (8, 2) };
 
-        let Some(pts) = read_patch_points(&mut reader, n_pts, bpc, &decode, ctm, page_h) else {
+        let Some(pts) = read_patch_points(&mut reader, n_pts, bpc, decode, ctm, page_h) else {
             break;
         };
-        let Some(colors) =
-            read_patch_colors(&mut reader, n_colors, n_channels, bpcomp, &decode, cs)
-        else {
+        let Some(colors) = read_patch_colors(&mut reader, n_colors, bpcomp, decode, source) else {
             break;
         };
 
@@ -628,7 +591,7 @@ pub(super) fn decode_type6_mesh(
             }
         };
 
-        tessellate_patch(patch, &mut triangles);
+        tessellate_patch(source, patch, &mut triangles);
         prev = Some(patch);
     }
 
@@ -640,11 +603,11 @@ pub(super) fn decode_type6_mesh(
 /// Like Type 6 but all 16 control points per patch are read directly from the
 /// stream (4 interior points are not derived). Flag semantics and colour handling
 /// are identical to Type 6.
-pub(super) fn decode_type7_mesh(
+pub(super) fn decode_type7_mesh<S: CornerSource>(
     sh: &Dictionary,
     data: &[u8],
-    cs: ShadingCs<'_>,
-    n_channels: usize,
+    source: &S,
+    decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Vec<[GouraudVertex; 3]> {
@@ -657,11 +620,9 @@ pub(super) fn decode_type7_mesh(
     let Some(bpf) = parse_bits_per_flag(sh, "type7") else {
         return vec![];
     };
-    let decode = read_decode_array(sh, n_channels);
-
     let mut reader = BitReader::new(data);
     let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
-    let mut prev: Option<Patch> = None;
+    let mut prev: Option<Patch<S::Corner>> = None;
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -672,12 +633,10 @@ pub(super) fn decode_type7_mesh(
 
         let (n_pts, n_colors): (usize, usize) = if flag == 0 { (16, 4) } else { (12, 2) };
 
-        let Some(pts) = read_patch_points(&mut reader, n_pts, bpc, &decode, ctm, page_h) else {
+        let Some(pts) = read_patch_points(&mut reader, n_pts, bpc, decode, ctm, page_h) else {
             break;
         };
-        let Some(colors) =
-            read_patch_colors(&mut reader, n_colors, n_channels, bpcomp, &decode, cs)
-        else {
+        let Some(colors) = read_patch_colors(&mut reader, n_colors, bpcomp, decode, source) else {
             break;
         };
 
@@ -694,7 +653,7 @@ pub(super) fn decode_type7_mesh(
             }
         };
 
-        tessellate_patch(patch, &mut triangles);
+        tessellate_patch(source, patch, &mut triangles);
         prev = Some(patch);
     }
 
@@ -718,7 +677,7 @@ mod tests {
         c01: [u8; 3],
         c10: [u8; 3],
         c11: [u8; 3],
-    ) -> Patch {
+    ) -> Patch<[u8; 3]> {
         // Bilinear interpolation of control points across the 4×4 grid.
         let mut p = Patch::zero();
         for r in 0..4u32 {
@@ -833,8 +792,15 @@ mod tests {
             [128, 128, 128],
             [128, 128, 128],
         );
+        let doc = crate::test_helpers::empty_doc();
+        let source = super::super::mesh::DirectColors {
+            cs: super::super::ShadingCs {
+                doc: &doc,
+                space: &super::super::ColorSpace::DeviceRgb,
+            },
+        };
         let mut out = Vec::new();
-        tessellate_patch(p, &mut out);
+        tessellate_patch(&source, p, &mut out);
         assert_eq!(
             out.len(),
             2,
