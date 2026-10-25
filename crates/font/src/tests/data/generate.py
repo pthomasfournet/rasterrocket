@@ -24,6 +24,13 @@ hint-assembled-*.ttf
     - `-plain`: family name `Plain`, no `fpgm` / `prep`: not recognised,
       so it renders unhinted.
 
+symbolic-mac-roman-named.ttf
+    The shape of a symbolic subset: GID 1 `therefore` (U+2234 through the
+    Adobe Glyph List) is a square covering x 100..400, y 0..300 and is
+    mapped from code 0x21 by the only `cmap` subtable, (1,0) Macintosh
+    Roman in format 6.  The version 2 `post` table names both glyphs;
+    `.notdef` has no contours.
+
 cid-keyed-type1.cid
     A CID-keyed Type 1 font (CIDFontType 0, binary StartData section)
     assembled by hand: CIDCount 5, FDBytes 1, GDBytes 4, two font dicts.
@@ -48,6 +55,7 @@ import struct
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import newTable
+from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 from fontTools.ttLib.tables._g_l_y_f import Glyph, GlyphComponent
 from fontTools.ttLib.tables.ttProgram import Program
 
@@ -151,6 +159,24 @@ def build_truetype(family, fpgm=None, prep=None):
     maxp.maxComponentElements = 2
     maxp.maxComponentDepth = 1
     return font
+
+
+def build_symbolic_mac_roman_named():
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "therefore"])
+    fb.setupCharacterMap({})
+    empty = TTGlyphPen(None).glyph()
+    fb.setupGlyf({".notdef": empty, "therefore": square_glyph()})
+    fb.setupHorizontalMetrics({".notdef": (1000, 0), "therefore": (1000, 100)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "SymbolicMac", "styleName": "Regular"})
+    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
+    fb.setupPost(keepGlyphNames=True)
+    mac = CmapSubtable.newSubtable(6)
+    mac.platformID, mac.platEncID, mac.language = 1, 0, 0
+    mac.cmap = {0x21: "therefore"}
+    fb.font["cmap"].tables = [mac]
+    return fb.font
 
 
 def write_truetype(name, font):
@@ -338,6 +364,7 @@ def main():
         ),
     )
     write_truetype("hint-assembled-plain.ttf", build_truetype("Plain"))
+    write_truetype("symbolic-mac-roman-named.ttf", build_symbolic_mac_roman_named())
     with open(os.path.join(HERE, "cid-keyed-type1.cid"), "wb") as f:
         f.write(build_cid_type1())
 

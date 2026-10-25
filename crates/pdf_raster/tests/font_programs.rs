@@ -19,6 +19,8 @@ const HINT_ASSEMBLED_BY_TABLES: &[u8] =
     include_bytes!("../../font/src/tests/data/hint-assembled-by-tables.ttf");
 const HINT_ASSEMBLED_PLAIN: &[u8] =
     include_bytes!("../../font/src/tests/data/hint-assembled-plain.ttf");
+const SYMBOLIC_MAC_ROMAN_NAMED: &[u8] =
+    include_bytes!("../../font/src/tests/data/symbolic-mac-roman-named.ttf");
 const CID_KEYED_TYPE1: &[u8] = include_bytes!("../../font/src/tests/data/cid-keyed-type1.cid");
 
 const PAGE: &[u8] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
@@ -35,6 +37,25 @@ fn truetype_page(program: &[u8]) -> Vec<u8> {
            /LastChar 66 /Widths [1000 1000] /FontDescriptor 6 0 R >>"
             .to_vec(),
         b"<< /Type /FontDescriptor /FontName /Fixture /Flags 32 \
+           /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 \
+           /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>"
+            .to_vec(),
+        stream_object(&format!("/Length1 {}", program.len()), program),
+    ])
+}
+
+/// One page showing code 0x21 (`!`) in a symbolic simple TrueType font
+/// (`Flags` 4, no `Encoding`) embedding `program`.
+fn symbolic_truetype_page(program: &[u8]) -> Vec<u8> {
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        PAGE.to_vec(),
+        stream_object("", b"BT /F1 40 Tf 10 30 Td (!) Tj ET"),
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Fixture /FirstChar 33 \
+           /LastChar 33 /Widths [1000] /FontDescriptor 6 0 R >>"
+            .to_vec(),
+        b"<< /Type /FontDescriptor /FontName /Fixture /Flags 4 \
            /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 \
            /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>"
             .to_vec(),
@@ -119,6 +140,17 @@ fn ordinary_truetype_glyphs_stay_unhinted() {
     let runs = ink_columns(&render(truetype_page(HINT_ASSEMBLED_PLAIN)));
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert!(has_run(&runs, 14, 25) && has_run(&runs, 54, 65), "{runs:?}");
+}
+
+#[test]
+fn symbolic_truetype_code_resolves_through_mac_roman_subtable() {
+    // The only cmap subtable, (1,0), maps code 0x21 to `therefore`, whose
+    // `post` name also yields a Unicode charmap keyed by U+2234.  Code 0x21
+    // selects the square (x 100..400); the contourless `.notdef` leaves
+    // the page blank.
+    let runs = ink_columns(&render(symbolic_truetype_page(SYMBOLIC_MAC_ROMAN_NAMED)));
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(has_run(&runs, 14, 25), "therefore: {runs:?}");
 }
 
 #[test]

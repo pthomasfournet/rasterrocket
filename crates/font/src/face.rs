@@ -201,6 +201,14 @@ impl FontFace {
         self.program.char_index(code)
     }
 
+    /// Glyph index of the single-byte `code` through the program's
+    /// byte-keyed (3,0) / (1,0) `cmap` subtables (see
+    /// [`FontProgram::code_index`]); 0 when unmapped.
+    #[must_use]
+    pub fn raw_get_code_index(&self, code: u8) -> u32 {
+        self.program.code_index(code)
+    }
+
     /// `true` when the program is an sfnt whose charmap takes Unicode
     /// values (see [`FontProgram::has_unicode_cmap`]).
     #[must_use]

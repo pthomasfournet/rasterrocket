@@ -294,6 +294,36 @@ impl FontProgram {
         }
     }
 
+    /// Glyph index of the single-byte code `code` through the sfnt's
+    /// byte-keyed `cmap` subtables, independent of the charmap
+    /// [`Self::char_index`] uses: the (3,0) Microsoft Symbol subtable at
+    /// `code`, then at `0xF000 + code`, then the (1,0) Macintosh Roman
+    /// subtable at `code` (PDF §9.6.6.4, symbolic TrueType font).  0 when
+    /// no such subtable maps the code, and for every non-sfnt program.
+    #[must_use]
+    pub fn code_index(&self, code: u8) -> u32 {
+        let Some(cmap) = self.sfnt().and_then(|font| font.cmap().ok()) else {
+            return 0;
+        };
+        let records = cmap.encoding_records();
+        let find = |platform: PlatformId, encoding: u16| {
+            records
+                .iter()
+                .position(|r| r.platform_id() == platform && r.encoding_id() == encoding)
+        };
+        let code = u32::from(code);
+        let symbol = find(PlatformId::Windows, 0).map_or(0, |record| {
+            match self.cmap_subtable_lookup(record, code) {
+                0 => self.cmap_subtable_lookup(record, 0xF000 | code),
+                gid => gid,
+            }
+        });
+        if symbol != 0 {
+            return symbol;
+        }
+        find(PlatformId::Macintosh, 0).map_or(0, |record| self.cmap_subtable_lookup(record, code))
+    }
+
     fn cmap_subtable_lookup(&self, record: usize, code: u32) -> u32 {
         let Some(font) = self.sfnt() else {
             return 0;

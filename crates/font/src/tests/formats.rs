@@ -62,6 +62,22 @@ fn post_names_stand_in_for_a_missing_unicode_cmap() {
 }
 
 #[test]
+fn code_index_reads_byte_subtables_beneath_a_name_charmap() {
+    // The charmap is Unicode from `post` names, so code 7 is U+0007 to it;
+    // the (1,0) subtable still maps code 7 to GID 1.
+    let named = face_at(&sfnt::named_box_font(&sfnt::mac_only_cmap()), 40.0);
+    assert_eq!(named.raw_get_char_index(7), 0);
+    assert_eq!(named.raw_get_code_index(7), 1);
+    assert_eq!(named.raw_get_code_index(8), 0);
+    // (3,0) entries at 0xF000 + code.
+    let symbol = face_at(&sfnt::symbol_only_box_font(), 40.0);
+    assert_eq!(symbol.raw_get_code_index(7), 1);
+    // A Unicode subtable is not byte-keyed.
+    let unicode = face_at(font_test_data::TINOS_SUBSET, 40.0);
+    assert_eq!(unicode.raw_get_code_index(b'A'), 0);
+}
+
+#[test]
 fn post_names_outside_the_glyph_list_keep_mac_roman() {
     // A subset whose only glyph is named `circlesolid`: no name maps to
     // Unicode, so codes resolve through the (1,0) subtable directly.

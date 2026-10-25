@@ -249,8 +249,12 @@ impl FontCache {
             desc.kind,
         ) && face.has_unicode_cmap()
         {
-            face.code_to_gid =
-                resolve_via_unicode_cmap(&face, &desc.differences, desc.base_encoding);
+            face.code_to_gid = resolve_via_unicode_cmap(
+                &face,
+                &desc.differences,
+                desc.base_encoding,
+                desc.bytes.is_some(),
+            );
         }
 
         Some(face)
@@ -378,14 +382,22 @@ fn resolve_simple_to_gid(
 /// `WinAnsi` 0x80–0x9F (`oe` at 0x9C, `quoteright` at 0x92, …) on their glyphs.
 /// Every other code is looked up as a raw Unicode code point, the identity
 /// that holds for the ASCII and Latin-1 ranges of those encodings.
+///
+/// For an `embedded` program, a code that neither lookup maps resolves
+/// through the program's byte-keyed (3,0) / (1,0) subtables
+/// ([`FontFace::raw_get_code_index`], PDF §9.6.6.4).  A Unicode charmap
+/// derived from `post` glyph names keys its glyphs by the Unicode value of
+/// the name (`therefore` → U+2234), so the code a symbolic subset assigns
+/// such a glyph is reachable only through those subtables.
 fn resolve_via_unicode_cmap(
     face: &FontFace,
     differences: &[Option<Box<str>>; 256],
     base: BaseEncoding,
+    embedded: bool,
 ) -> Vec<u32> {
-    (0..256u32)
+    (0..=u8::MAX)
         .map(|code| {
-            let idx = code as usize;
+            let idx = usize::from(code);
             let name = differences[idx].as_deref().or_else(|| {
                 matches!(base, BaseEncoding::WinAnsi | BaseEncoding::MacRoman)
                     .then(|| base_encoding_table(base)[idx])
@@ -395,7 +407,9 @@ fn resolve_via_unicode_cmap(
             name.and_then(adobe_glyph_to_unicode)
                 .map(|unicode| face.raw_get_char_index(unicode))
                 .filter(|&gid| gid != 0)
-                .unwrap_or_else(|| face.raw_get_char_index(code))
+                .or_else(|| Some(face.raw_get_char_index(u32::from(code))).filter(|&gid| gid != 0))
+                .or_else(|| embedded.then(|| face.raw_get_code_index(code)))
+                .unwrap_or(0)
         })
         .collect()
 }
