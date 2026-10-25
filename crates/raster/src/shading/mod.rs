@@ -113,10 +113,37 @@ impl ColorRamp {
     }
 }
 
+/// Write the ramp colour of each pixel `x0..=x1` of a span into `out`.
+///
+/// `position(x)` is the pixel's ramp position, or `None` when the pixel is
+/// not painted; such a pixel is written as zeros.  `mark(i, painted)` is
+/// called once per pixel with its index in the span.  `out.len()` must be
+/// `(x1 - x0 + 1) * 3`.
+#[inline]
+fn fill_ramp_span(
+    ramp: &ColorRamp,
+    x0: i32,
+    x1: i32,
+    out: &mut [u8],
+    mut mark: impl FnMut(usize, bool),
+    position: impl Fn(i32) -> Option<f64>,
+) {
+    for ((i, x), px) in (x0..=x1).enumerate().zip(out.as_chunks_mut::<3>().0) {
+        if let Some(s) = position(x) {
+            ramp.write(s, px);
+            mark(i, true);
+        } else {
+            px.fill(0);
+            mark(i, false);
+        }
+    }
+}
+
 /// Fill `path` using a shading pattern as the colour source.
 ///
 /// Equivalent to `Splash::shadedFill`.  The path defines the shading's bounding
-/// shape; `pattern` supplies per-pixel colour via the [`Pattern`] trait.
+/// shape; `pattern` supplies per-pixel colour via the [`Pattern`] trait, and
+/// pixels it leaves unpainted keep their backdrop.
 /// `eo` selects even-odd vs. non-zero winding rule.
 /// The caller sets `pipe.a_input` to control fill/stroke opacity.
 #[expect(
@@ -184,8 +211,6 @@ mod tests {
             3.5,
             6.0,
             3.5,
-            0.0,
-            1.0,
             false,
             false,
         );
@@ -221,8 +246,6 @@ mod tests {
             0.0,
             1.0,
             0.0,
-            0.0,
-            1.0,
             true,
             true,
         );
@@ -255,6 +278,59 @@ mod tests {
         );
     }
 
+    /// Fill the whole 16 × 4 bitmap, pre-painted `[0, 0, 255]`, with an axial
+    /// red → green gradient along x from 4 to 11 and return row 1.
+    fn axial_over_blue(extend: bool, aa: bool) -> Vec<Rgb8> {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 4, 4, false);
+        for px in bmp.data_mut().as_chunks_mut::<3>().0 {
+            *px = [0, 0, 255];
+        }
+        let clip = Clip::new(0.0, 0.0, 15.999, 3.999, aa);
+        let pattern = AxialPattern::new(
+            ColorRamp::two([255, 0, 0], [0, 255, 0]),
+            4.0,
+            0.0,
+            11.0,
+            0.0,
+            extend,
+            extend,
+        );
+        shaded_fill::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &rect_path(0.0, 0.0, 16.0, 4.0),
+            &simple_pipe(),
+            &pattern,
+            &identity_matrix(),
+            1.0,
+            aa,
+            false,
+        );
+        bmp.row(1).to_vec()
+    }
+
+    #[test]
+    fn axial_without_extend_leaves_the_backdrop_outside_its_axis() {
+        for aa in [false, true] {
+            let row = axial_over_blue(false, aa);
+            for (x, px) in row.iter().enumerate() {
+                let rgb = [px.r, px.g, px.b];
+                if (4..=11).contains(&x) {
+                    assert_eq!(rgb[2], 0, "aa={aa} x={x} painted: {rgb:?}");
+                } else {
+                    assert_eq!(rgb, [0, 0, 255], "aa={aa} x={x} backdrop: {rgb:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn axial_with_extend_paints_beyond_its_axis() {
+        let row = axial_over_blue(true, true);
+        assert_eq!([row[0].r, row[0].g, row[0].b], [255, 0, 0]);
+        assert_eq!([row[15].r, row[15].g, row[15].b], [0, 255, 0]);
+    }
+
     #[test]
     fn shaded_fill_empty_path_is_noop() {
         let mut bmp: Bitmap<Rgb8> = Bitmap::new(8, 8, 4, false);
@@ -267,8 +343,6 @@ mod tests {
             0.0,
             8.0,
             0.0,
-            0.0,
-            1.0,
             false,
             false,
         );

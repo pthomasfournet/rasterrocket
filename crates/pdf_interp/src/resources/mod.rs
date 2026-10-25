@@ -495,7 +495,7 @@ impl<'doc> PageResources<'doc> {
         name: &[u8],
         ctm: &[f64; 6],
         page_h: f64,
-    ) -> Option<shading::ShadingResult> {
+    ) -> Option<shading::ResolvedShading> {
         let shadings = self.resource_subdict(b"Shading")?;
         shading::resolve_shading(self.doc, &shadings, name, ctm, page_h)
     }

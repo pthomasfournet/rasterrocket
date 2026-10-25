@@ -1,12 +1,13 @@
 //! Function-based shading pattern.
 //!
-//! A PDF Type 1 shading applies an arbitrary function `f(x, y) → colour`.
-//! The function is supplied as a trait object from `pdf_bridge`; this module
-//! wraps it in the [`Pattern`] interface.
+//! A PDF Type 1 shading applies an arbitrary function `f(x, y) → colour`
+//! over a rectangular domain.  The function is supplied as a closure; this
+//! module wraps it in the [`Pattern`] interface.
 //!
-//! The function receives pixel centres in device space and returns an RGB
-//! triple already in device colour space.  Any colour-space conversion is the
-//! caller's responsibility — this type only forwards the closure's output.
+//! The closure receives device-space pixel coordinates and returns an RGB
+//! triple already in device colour space, or `None` for a pixel outside the
+//! shading's domain, which is then not painted.  Any colour-space conversion
+//! is the caller's responsibility.
 //!
 //! # Panics
 //!
@@ -15,23 +16,28 @@
 
 use crate::pipe::Pattern;
 
-/// A shading pattern driven by an arbitrary `f(x, y) → [R, G, B]` closure.
+/// The closure type of a [`FunctionPattern`].
+type ShadingFn = dyn Fn(f64, f64) -> Option<[u8; 3]> + Send + Sync;
+
+/// A shading pattern driven by an arbitrary `f(x, y) → Option<[R, G, B]>`
+/// closure.
 ///
 /// The closure is boxed so it can capture ICC profiles, LUTs, or any other
-/// per-page state from `pdf_bridge`.  It must be `Send + Sync` because
-/// [`Pattern`] is used across rayon threads.
+/// per-page state.  It must be `Send + Sync` because [`Pattern`] is used
+/// across rayon threads.
 pub struct FunctionPattern {
-    func: Box<dyn Fn(f64, f64) -> [u8; 3] + Send + Sync>,
+    func: Box<ShadingFn>,
 }
 
 impl FunctionPattern {
-    /// Create a function-based pattern from a closure `f(x, y) → [R, G, B]`.
+    /// Create a function-based pattern from a closure `f(x, y)`.
     ///
-    /// `x` and `y` are the pixel-centre coordinates in device space.
+    /// `x` and `y` are device-space pixel coordinates; `None` leaves the
+    /// pixel unpainted.
     #[must_use]
     pub fn new<F>(func: F) -> Self
     where
-        F: Fn(f64, f64) -> [u8; 3] + Send + Sync + 'static,
+        F: Fn(f64, f64) -> Option<[u8; 3]> + Send + Sync + 'static,
     {
         Self {
             func: Box::new(func),
@@ -42,18 +48,21 @@ impl FunctionPattern {
 impl Pattern for FunctionPattern {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
         // out.len() == (x1-x0+1)*3 is an invariant guaranteed by render_span.
-        let mut off = 0usize;
-        for x in x0..=x1 {
-            let rgb = (self.func)(f64::from(x), f64::from(y));
-            out[off] = rgb[0];
-            out[off + 1] = rgb[1];
-            out[off + 2] = rgb[2];
-            off += 3;
+        for (x, px) in (x0..=x1).zip(out.as_chunks_mut::<3>().0) {
+            *px = (self.func)(f64::from(x), f64::from(y)).unwrap_or_default();
         }
     }
 
-    fn is_static_color(&self) -> bool {
-        false
+    fn may_leave_unpainted(&self) -> bool {
+        true
+    }
+
+    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+        for ((x, px), p) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(painted) {
+            let rgb = (self.func)(f64::from(x), f64::from(y));
+            *p = rgb.is_some();
+            *px = rgb.unwrap_or_default();
+        }
     }
 }
 
@@ -72,7 +81,7 @@ mod tests {
         )]
         let p = FunctionPattern::new(|x, _y| {
             let v = x as u8;
-            [v, v, v]
+            Some([v, v, v])
         });
         let mut out = vec![0u8; 4 * 3];
         p.fill_span(0, 10, 13, &mut out);
@@ -90,7 +99,7 @@ mod tests {
 
     #[test]
     fn constant_function_fills_uniform_color() {
-        let p = FunctionPattern::new(|_, _| [128, 64, 32]);
+        let p = FunctionPattern::new(|_, _| Some([128, 64, 32]));
         let mut out = vec![0u8; 3 * 3];
         p.fill_span(5, 0, 2, &mut out);
         for i in 0..3usize {
@@ -107,7 +116,7 @@ mod tests {
             clippy::cast_sign_loss,
             reason = "test passes integer y = 42; cast is exact"
         )]
-        let p = FunctionPattern::new(|_x, y| [0, 0, y as u8]);
+        let p = FunctionPattern::new(|_x, y| Some([0, 0, y as u8]));
         let mut out = [0u8; 3];
         p.fill_span(42, 0, 0, &mut out);
         assert_eq!(out[2], 42, "blue channel should encode y");
@@ -115,9 +124,19 @@ mod tests {
 
     #[test]
     fn single_pixel_span_writes_three_bytes() {
-        let p = FunctionPattern::new(|_, _| [1, 2, 3]);
+        let p = FunctionPattern::new(|_, _| Some([1, 2, 3]));
         let mut out = [0u8; 3];
         p.fill_span(0, 7, 7, &mut out);
         assert_eq!(out, [1, 2, 3]);
+    }
+
+    #[test]
+    fn pixels_outside_the_domain_are_not_painted() {
+        let p = FunctionPattern::new(|x, _| (x < 2.0).then_some([9, 9, 9]));
+        let mut out = [0u8; 4 * 3];
+        let mut painted = [false; 4];
+        p.fill_span_painted(0, 0, 3, &mut out, &mut painted);
+        assert_eq!(painted, [true, true, false, false]);
+        assert_eq!(&out[..6], &[9; 6]);
     }
 }

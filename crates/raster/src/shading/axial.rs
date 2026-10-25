@@ -1,22 +1,22 @@
-//! Axial (linear) gradient pattern (PDF §8.7.4.5, type 2).
+//! Axial (linear) gradient pattern (PDF §8.7.4.5.3, type 2).
 //!
-//! Colour at pixel (x, y) is determined by projecting onto the gradient axis
-//! and reading the colour ramp at the normalised parameter.
+//! The colour at pixel `(x, y)` is read from the ramp at the normalised axis
+//! parameter `s` of the pixel's projection onto the axis: `s = 0` at the
+//! start point and `s = 1` at the end point.
 //!
-//! # Out-of-range pixels
+//! # Points beyond the axis
 //!
-//! When `extend_start` / `extend_end` is `false` and the pixel projects outside
-//! the `[t0, t1]` range, `fill_span` writes black (`[0,0,0]`).  This is only
-//! correct when the caller clips the shading to its bounding path — which
-//! `shaded_fill` guarantees.  Do not use this pattern without a bounding clip.
+//! A pixel with `s < 0` takes the start colour when `extend_start` is set and
+//! is otherwise not painted; likewise `s > 1` and `extend_end`.  A degenerate
+//! (zero-length) axis paints nothing.
 
-use super::ColorRamp;
+use super::{ColorRamp, fill_ramp_span};
 use crate::pipe::Pattern;
 
 /// Linear gradient between two points in device space.
 ///
-/// `t = dot(p - p0, axis) / |axis|²`, clamped to `[t0, t1]`
-/// (or extended to the nearest endpoint when `extend_start` / `extend_end` is set).
+/// `s = dot(p - p0, axis) / |axis|²`; pixels outside `s ∈ [0, 1]` are
+/// painted with the nearer endpoint colour only when that end is extended.
 pub struct AxialPattern {
     ramp: ColorRamp,
     ax: f64,
@@ -25,8 +25,6 @@ pub struct AxialPattern {
     p0y: f64,
     /// `1 / (ax² + ay²)`; zero when the axis is degenerate (zero-length).
     inv_len_sq: f64,
-    t0: f64,
-    t1: f64,
     extend_start: bool,
     extend_end: bool,
 }
@@ -34,29 +32,17 @@ pub struct AxialPattern {
 impl AxialPattern {
     /// Create an axial gradient.
     ///
-    /// - `ramp`: colours over the normalised parameter, `t0` → 0 and `t1` → 1.
+    /// - `ramp`: colours over the normalised parameter, start point → 0 and
+    ///   end point → 1.
     /// - `(p0x, p0y)`, `(p1x, p1y)`: axis endpoints in device pixels.
-    /// - `t0`, `t1`: parameter range mapping to the start / end of `ramp`.
-    ///   May be inverted (`t0 > t1`).
-    /// - `extend_start` / `extend_end`: extend colour beyond axis endpoints.
-    ///
-    /// # Degenerate case
-    ///
-    /// When `p0 == p1` (zero-length axis) every pixel returns `None` from
-    /// `t_for`, so `fill_span` writes zeros (per PDF §8.7.4.5).
+    /// - `extend_start` / `extend_end`: paint beyond the start / end point.
     #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors PDF shading dict: colour ramp + 2 points + t range + 2 extend flags"
-    )]
     pub fn new(
         ramp: ColorRamp,
         p0x: f64,
         p0y: f64,
         p1x: f64,
         p1y: f64,
-        t0: f64,
-        t1: f64,
         extend_start: bool,
         extend_end: bool,
     ) -> Self {
@@ -71,72 +57,49 @@ impl AxialPattern {
             p0x,
             p0y,
             inv_len_sq,
-            t0,
-            t1,
             extend_start,
             extend_end,
         }
     }
 
-    /// Compute the gradient parameter `t ∈ [t0, t1]` for pixel `(x, y)`.
-    ///
-    /// Returns `None` when the axis is degenerate or the pixel is outside the
-    /// gradient range and extension is disabled.
-    fn t_for(&self, x: i32, y: i32) -> Option<f64> {
+    /// Ramp position `s ∈ [0, 1]` of pixel `(x, y)`, or `None` when the pixel
+    /// is not painted.
+    fn position(&self, x: i32, y: i32) -> Option<f64> {
         if self.inv_len_sq == 0.0 {
             return None;
         }
         let dx = f64::from(x) - self.p0x;
         let dy = f64::from(y) - self.p0y;
-        // Project onto axis and map to [t0, t1].
-        let t_raw = dx.mul_add(self.ax, dy * self.ay) * self.inv_len_sq;
-        let t = t_raw.mul_add(self.t1 - self.t0, self.t0);
-
-        // Handle both t0 < t1 and t0 > t1 (inverted gradient).
-        let (lo, hi) = if self.t0 <= self.t1 {
-            (self.t0, self.t1)
+        let s = dx.mul_add(self.ax, dy * self.ay) * self.inv_len_sq;
+        if s < 0.0 {
+            self.extend_start.then_some(0.0)
+        } else if s > 1.0 {
+            self.extend_end.then_some(1.0)
         } else {
-            (self.t1, self.t0)
-        };
-        if t < lo {
-            if self.extend_start {
-                Some(self.t0)
-            } else {
-                None
-            }
-        } else if t > hi {
-            if self.extend_end { Some(self.t1) } else { None }
-        } else {
-            Some(t)
+            // NaN (non-finite coordinates) is not painted.
+            (s >= 0.0).then_some(s)
         }
     }
 }
 
 impl Pattern for AxialPattern {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        // out.len() == (x1-x0+1)*3 is an invariant guaranteed by render_span.
-        let t_span = self.t1 - self.t0;
-        let mut off = 0usize;
-        for x in x0..=x1 {
-            if let Some(t) = self.t_for(x, y) {
-                // Normalise t to [0,1] regardless of t0/t1 ordering.
-                let s = if t_span.abs() < f64::EPSILON {
-                    0.0
-                } else {
-                    (t - self.t0) / t_span
-                };
-                self.ramp.write(s, &mut out[off..off + 3]);
-            } else {
-                out[off] = 0;
-                out[off + 1] = 0;
-                out[off + 2] = 0;
-            }
-            off += 3;
-        }
+        fill_ramp_span(&self.ramp, x0, x1, out, |_, _| {}, |x| self.position(x, y));
     }
 
-    fn is_static_color(&self) -> bool {
-        false
+    fn may_leave_unpainted(&self) -> bool {
+        !(self.extend_start && self.extend_end) || self.inv_len_sq == 0.0
+    }
+
+    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+        fill_ramp_span(
+            &self.ramp,
+            x0,
+            x1,
+            out,
+            |i, p| painted[i] = p,
+            |x| self.position(x, y),
+        );
     }
 }
 
@@ -151,11 +114,17 @@ mod tests {
             0.0,
             8.0,
             0.0,
-            0.0,
-            1.0,
             extend,
             extend,
         )
+    }
+
+    fn painted(p: &AxialPattern, y: i32, x0: i32, x1: i32) -> Vec<bool> {
+        let n = usize::try_from(x1 - x0 + 1).expect("x1 ≥ x0");
+        let mut out = vec![0u8; n * 3];
+        let mut mask = vec![false; n];
+        p.fill_span_painted(y, x0, x1, &mut out, &mut mask);
+        mask
     }
 
     #[test]
@@ -183,17 +152,38 @@ mod tests {
     }
 
     #[test]
-    fn outside_no_extend_writes_zero() {
+    fn outside_without_extend_is_not_painted() {
         let p = make_axial(false);
-        let mut out = [0u8; 3];
-        p.fill_span(0, -1, -1, &mut out);
+        assert!(p.may_leave_unpainted());
         assert_eq!(
-            out,
-            [0, 0, 0],
-            "before start with no-extend should write zero"
+            painted(&p, 0, -2, 10),
+            [
+                false, false, true, true, true, true, true, true, true, true, true, false, false
+            ]
         );
-        p.fill_span(0, 9, 9, &mut out);
-        assert_eq!(out, [0, 0, 0], "after end with no-extend should write zero");
+    }
+
+    #[test]
+    fn one_sided_extension_paints_only_that_side() {
+        let p = AxialPattern::new(
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
+            0.0,
+            0.0,
+            8.0,
+            0.0,
+            true,
+            false,
+        );
+        let mask = painted(&p, 3, -5, 12);
+        assert!(mask[..14].iter().all(|&m| m), "x ≤ 8 painted: {mask:?}");
+        assert!(mask[14..].iter().all(|&m| !m), "x > 8 unpainted: {mask:?}");
+    }
+
+    #[test]
+    fn extension_on_both_ends_paints_everywhere() {
+        let p = make_axial(true);
+        assert!(!p.may_leave_unpainted());
+        assert!(painted(&p, 0, -50, 50).iter().all(|&m| m));
     }
 
     #[test]
@@ -207,21 +197,18 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_axis_writes_zeros() {
+    fn degenerate_axis_paints_nothing() {
         let p = AxialPattern::new(
             ColorRamp::two([255, 0, 0], [0, 255, 0]),
             5.0,
             5.0,
             5.0,
             5.0,
-            0.0,
-            1.0,
-            false,
-            false,
+            true,
+            true,
         );
-        let mut out = [42u8; 3];
-        p.fill_span(5, 5, 5, &mut out);
-        assert_eq!(out, [0, 0, 0], "degenerate axis should write zeros");
+        assert!(p.may_leave_unpainted());
+        assert_eq!(painted(&p, 5, 4, 6), [false; 3]);
     }
 
     #[test]
@@ -234,25 +221,22 @@ mod tests {
     }
 
     #[test]
-    fn inverted_t_range_reverses_gradient() {
-        // t0=1 t1=0: color0 at right end, color1 at left end.
+    fn reversed_axis_reverses_gradient() {
+        // Start point on the right: the start colour lies at x = 4.
         let p = AxialPattern::new(
             ColorRamp::two([255, 0, 0], [0, 0, 255]),
-            0.0,
-            0.0,
             4.0,
             0.0,
-            1.0,
-            0.0, // inverted
+            0.0,
+            0.0,
             true,
             true,
         );
-        let mut start = [0u8; 3];
-        let mut end = [0u8; 3];
-        p.fill_span(0, 0, 0, &mut start);
-        p.fill_span(0, 4, 4, &mut end);
-        // t=1.0 at x=0 → color0=red; t=0.0 at x=4 → color1=blue.
-        assert!(start[0] > 200, "x=0 should be near red (color0)");
-        assert!(end[2] > 200, "x=4 should be near blue (color1)");
+        let mut left = [0u8; 3];
+        let mut right = [0u8; 3];
+        p.fill_span(0, 0, 0, &mut left);
+        p.fill_span(0, 4, 4, &mut right);
+        assert!(right[0] > 200, "x=4 should be near red (color0)");
+        assert!(left[2] > 200, "x=0 should be near blue (color1)");
     }
 }

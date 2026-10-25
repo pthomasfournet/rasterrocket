@@ -8,6 +8,7 @@
 //! - `operators` — `execute_one` operator dispatch table.
 //! - `text` — `show_text` and `show_text_type3` rendering.
 //! - `patterns` — `resolve_fill_pattern` and `render_pattern_tile`.
+//! - `shading_paint` — the `sh` operator.
 //! - `text_ops` — `GlyphRecord` and `text_to_device` helpers.
 //! - `annotations` — annotation appearance stream rendering.
 //! - `gpu_ops` — GPU-accelerated fill dispatch.
@@ -49,6 +50,7 @@ mod image_reduce;
 mod image_sampler;
 mod operators;
 mod patterns;
+mod shading_paint;
 mod soft_mask;
 mod text;
 mod text_ops;
@@ -64,7 +66,6 @@ use raster::{
     Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
     pipe::{Pattern, PipeSrc, PipeState},
-    shading::{gouraud::gouraud_triangle_fill, shaded_fill},
     state::TransferSet,
     stroke::{StrokeParams, stroke},
     transparency::{GroupParams, begin_group, paint_group},
@@ -1357,64 +1358,6 @@ impl<'doc> PageRenderer<'doc> {
                     "rasterrocket-interp: Do /{} skipped (XObject subtype has no raster appearance)",
                     String::from_utf8_lossy(name)
                 );
-            }
-        }
-    }
-
-    /// Execute an `sh` shading operator.
-    ///
-    /// Looks up the named shading resource and dispatches to either
-    /// `shaded_fill` (for smooth gradient types 2–3) or `gouraud_triangle_fill`
-    /// (for mesh types 4–5).
-    fn do_shading(&mut self, name: &[u8]) {
-        use crate::resources::shading::ShadingResult;
-
-        let gs = self.gstate.current();
-        let ctm = gs.ctm;
-        let clip = gs.clip.clone_shared();
-        let flatness = gs.flatness.max(0.1);
-        let alpha = gs.fill_alpha;
-        let blend_mode = gs.blend_mode;
-        let page_h = f64::from(self.height);
-
-        let Some(result) = self.resources.shading(name, &ctm, page_h) else {
-            log::warn!(
-                "rasterrocket-interp: sh /{} — shading not available (unsupported type or missing resource)",
-                String::from_utf8_lossy(name)
-            );
-            return;
-        };
-
-        let pipe = Self::make_pipe(alpha, blend_mode);
-
-        match result {
-            ShadingResult::Pattern(pattern, _bbox) => {
-                // Build a path covering the full clip bounding box.
-                let path = {
-                    let mut pb = PathBuilder::new();
-                    let _ = pb.move_to(clip.x_min, clip.y_min);
-                    let _ = pb.line_to(clip.x_max, clip.y_min);
-                    let _ = pb.line_to(clip.x_max, clip.y_max);
-                    let _ = pb.line_to(clip.x_min, clip.y_max);
-                    let _ = pb.close(true);
-                    pb.build()
-                };
-                shaded_fill::<color::Rgb8>(
-                    &mut self.bitmap,
-                    &clip,
-                    &path,
-                    &pipe,
-                    pattern.as_ref(),
-                    &DEVICE_MATRIX,
-                    flatness,
-                    true,
-                    false,
-                );
-            }
-            ShadingResult::Mesh(triangles) => {
-                for tri in triangles {
-                    gouraud_triangle_fill::<color::Rgb8>(&mut self.bitmap, &clip, &pipe, tri);
-                }
             }
         }
     }

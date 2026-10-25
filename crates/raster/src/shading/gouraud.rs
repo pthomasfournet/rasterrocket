@@ -20,7 +20,7 @@
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::pipe::{self, Pattern, PipeSrc, PipeState};
+use crate::pipe::{self, PipeSrc, PipeState, RowPattern};
 use color::Pixel;
 use color::convert::lerp_u8;
 
@@ -121,29 +121,6 @@ fn round_x(v: &GouraudVertex) -> i32 {
     }
 }
 
-/// Pre-computed row of colour bytes used as a `Pattern` source.
-///
-/// `data` covers exactly the span `[run_x0, run_x1]` for the current scanline.
-/// `fill_span` asserts that `out.len() == data.len()` — a mismatch indicates
-/// a `P::BYTES != 3` violation in the caller.
-struct RowSrc<'a> {
-    data: &'a [u8],
-}
-
-impl Pattern for RowSrc<'_> {
-    fn fill_span(&self, _y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        debug_assert_eq!(
-            out.len(),
-            self.data.len(),
-            "RowSrc::fill_span: out.len()={} data.len()={} (x0={x0} x1={x1}) \
-             — gouraud_triangle_fill called with P::BYTES != 3",
-            out.len(),
-            self.data.len(),
-        );
-        out.copy_from_slice(self.data);
-    }
-}
-
 /// Emit one pre-coloured span `[run_x0, run_x1]` from `span_color` into `bitmap`.
 ///
 /// `buf_x0` is the leftmost x whose colour is stored at `span_color[0]`.
@@ -181,7 +158,7 @@ fn emit_run<P: Pixel>(
          (run_x0={run_x0} run_x1={run_x1} buf_x0={buf_x0})",
         span_color.len(),
     );
-    let src = RowSrc {
+    let src = RowPattern {
         data: &span_color[buf_off..buf_end],
     };
 

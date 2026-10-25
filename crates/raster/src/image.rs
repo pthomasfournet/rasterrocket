@@ -693,38 +693,6 @@ fn scale_image(
     )
 }
 
-// ── Row-as-pattern helper ─────────────────────────────────────────────────────
-
-/// A [`crate::pipe::Pattern`] that serves one pre-scaled image row.
-///
-/// `data` must be exactly `(x1 - x0 + 1) * P::BYTES` bytes — the same length
-/// as the `out` buffer that `render_span` will pass to `fill_span`.  The
-/// caller (`blit_image`) guarantees this because it slices `scaled_img` with
-/// `count * ncomps` where `ncomps == P::BYTES` (enforced by `draw_image`'s
-/// `debug_assert`).
-struct ImageRowPattern<'a> {
-    /// Pixel bytes for the visible span of one destination row.
-    data: &'a [u8],
-}
-
-impl crate::pipe::Pattern for ImageRowPattern<'_> {
-    fn fill_span(&self, _y: i32, _x0: i32, _x1: i32, out: &mut [u8]) {
-        assert_eq!(
-            out.len(),
-            self.data.len(),
-            "ImageRowPattern::fill_span: out.len()={} != data.len()={} \
-             (ncomps/P::BYTES mismatch — check draw_image caller)",
-            out.len(),
-            self.data.len(),
-        );
-        out.copy_from_slice(self.data);
-    }
-
-    fn is_static_color(&self) -> bool {
-        false
-    }
-}
-
 // ── Mask blitting ─────────────────────────────────────────────────────────────
 
 /// Blit a pre-scaled mask (one `u8` coverage per pixel) onto the bitmap.
@@ -854,7 +822,7 @@ fn emit_image_span<P: Pixel>(
     #[expect(clippy::cast_sign_loss, reason = "x1 ≥ x0 ≥ 0 by caller invariant")]
     let count = (x1 - x0 + 1) as usize;
     let data = &img_row[x_src_off * ncomps..(x_src_off + count) * ncomps];
-    let row_src = PipeSrc::Pattern(&ImageRowPattern { data });
+    let row_src = PipeSrc::Pattern(&crate::pipe::RowPattern { data });
     #[expect(clippy::cast_sign_loss, reason = "x0 ≥ 0 by caller invariant")]
     let byte_off = x0 as usize * P::BYTES;
     #[expect(clippy::cast_sign_loss, reason = "x1 ≥ x0 ≥ 0 by caller invariant")]

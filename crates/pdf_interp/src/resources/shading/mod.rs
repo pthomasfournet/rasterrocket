@@ -58,18 +58,30 @@ use patch::{decode_type6_mesh, decode_type7_mesh};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Result of resolving a named shading resource.
+/// The colour source of a resolved shading.
 ///
 /// - `Pattern`: smooth gradient — use with [`raster::shading::shaded_fill`].
+///   Pixels outside the shading's extent are left unpainted by the pattern.
 /// - `Mesh`: pre-decoded Gouraud triangle list — call
 ///   [`raster::shading::gouraud::gouraud_triangle_fill`] for each triangle.
 pub enum ShadingResult {
     /// Smooth gradient — use with [`raster::shading::shaded_fill`].
-    /// The `[f64; 4]` is an approximate bounding box `[xmin, ymin, xmax, ymax]`.
-    Pattern(Box<dyn Pattern + Send + Sync>, [f64; 4]),
+    Pattern(Box<dyn Pattern + Send + Sync>),
     /// Pre-decoded Gouraud triangle list — call
     /// [`raster::shading::gouraud::gouraud_triangle_fill`] for each element.
     Mesh(Vec<[GouraudVertex; 3]>),
+}
+
+/// A shading dictionary resolved for painting (PDF §8.7.4.3).
+pub struct ResolvedShading {
+    /// The shading's colours.
+    pub result: ShadingResult,
+    /// `BBox`, the temporary clipping boundary of the shading, as the
+    /// device-space corners of its rectangle in the shading's target space.
+    pub bbox: Option<[(f64, f64); 4]>,
+    /// `Background` converted to sRGB.  It applies only when the shading is
+    /// painted as a shading pattern, never through the `sh` operator.
+    pub background: Option<[u8; 3]>,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -87,9 +99,21 @@ pub fn resolve_shading(
     name: &[u8],
     ctm: &[f64; 6],
     page_h: f64,
-) -> Option<ShadingResult> {
-    let sh_obj = shadings.get(name)?;
+) -> Option<ResolvedShading> {
+    resolve_shading_object(doc, shadings.get(name)?, ctm, page_h)
+}
 
+/// Resolve the shading `sh_obj` (a dictionary, a stream, or a reference to
+/// either) whose target space `ctm` maps to the device.
+///
+/// Returns `None` if the type is unsupported or any required key is missing.
+#[must_use]
+pub fn resolve_shading_object(
+    doc: &Document,
+    sh_obj: &Object,
+    ctm: &[f64; 6],
+    page_h: f64,
+) -> Option<ResolvedShading> {
     // Shading types 2–3 are plain dicts; types 4–7 are streams.
     // Try stream first (stream has a dict too), then fall back to plain dict.
     // Owned Dictionary because the new pdf crate hands back Arc<Object> from
@@ -119,13 +143,11 @@ pub fn resolve_shading(
     };
     let n_channels = cs.channels();
 
-    match shading_type {
+    let result = match shading_type {
         1 => resolve_function_based(doc, &sh_dict, cs, n_channels, ctm, page_h)
-            .map(|(p, bb)| ShadingResult::Pattern(p, bb)),
-        2 => resolve_axial(doc, &sh_dict, cs, n_channels, ctm, page_h)
-            .map(|(p, bb)| ShadingResult::Pattern(p, bb)),
-        3 => resolve_radial(doc, &sh_dict, cs, n_channels, ctm, page_h)
-            .map(|(p, bb)| ShadingResult::Pattern(p, bb)),
+            .map(ShadingResult::Pattern),
+        2 => resolve_axial(doc, &sh_dict, cs, n_channels, ctm, page_h).map(ShadingResult::Pattern),
+        3 => resolve_radial(doc, &sh_dict, cs, n_channels, ctm, page_h).map(ShadingResult::Pattern),
         4..=7 => {
             let data = stream_data?;
             // PDF §8.7.4.5.5: with a Function, each vertex carries one
@@ -161,7 +183,48 @@ pub fn resolve_shading(
             log::warn!("shading: ShadingType {other} not yet implemented — skipping sh operator");
             None
         }
+    }?;
+
+    Some(ResolvedShading {
+        result,
+        bbox: read_bbox(&sh_dict, ctm, page_h),
+        background: read_background(&sh_dict, cs, n_channels),
+    })
+}
+
+/// Read `BBox` as the device-space corners of its rectangle, whose
+/// coordinates lie in the space `ctm` maps to the device.  A malformed
+/// `BBox` is ignored.
+fn read_bbox(sh: &Dictionary, ctm: &[f64; 6], page_h: f64) -> Option<[(f64, f64); 4]> {
+    let bb = read_f64_array(sh, b"BBox", 4)?;
+    let corners = [
+        (bb[0], bb[1]),
+        (bb[2], bb[1]),
+        (bb[2], bb[3]),
+        (bb[0], bb[3]),
+    ]
+    .map(|(x, y)| transform_point(ctm, x, y, page_h));
+    if corners.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        Some(corners)
+    } else {
+        log::warn!("shading: non-finite BBox — ignoring BBox");
+        None
     }
+}
+
+/// Read `Background`, one colour in the shading's colour space, as sRGB.
+/// A `Background` of the wrong length is ignored.
+fn read_background(sh: &Dictionary, cs: ShadingCs<'_>, n: usize) -> Option<[u8; 3]> {
+    let arr = sh.get(b"Background")?.as_array()?;
+    if arr.len() != n {
+        log::warn!(
+            "shading: Background has {} components, the colour space {n} — ignoring Background",
+            arr.len()
+        );
+        return None;
+    }
+    let comps = read_f64_array(sh, b"Background", n)?;
+    Some(cs.to_rgb(&comps))
 }
 
 /// Decode the stream of mesh shading `shading_type` (4–7) with vertex
@@ -203,7 +266,7 @@ fn resolve_axial(
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
-) -> Option<(Box<dyn Pattern + Send + Sync>, [f64; 4])> {
+) -> Option<Box<dyn Pattern + Send + Sync>> {
     // Coords: [x0, y0, x1, y1] in user space.
     let coords = read_f64_array(sh, b"Coords", 4)?;
 
@@ -230,10 +293,8 @@ fn resolve_axial(
         return None;
     }
 
-    let bbox = bbox_from_coords(&[dx0, dy0, dx1, dy1]);
-
-    let pattern = AxialPattern::new(ramp, dx0, dy0, dx1, dy1, t0, t1, ext_s, ext_e);
-    Some((Box::new(pattern), bbox))
+    let pattern = AxialPattern::new(ramp, dx0, dy0, dx1, dy1, ext_s, ext_e);
+    Some(Box::new(pattern))
 }
 
 /// Number of parameter values at which an axial or radial shading's
@@ -273,7 +334,7 @@ fn resolve_radial(
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
-) -> Option<(Box<dyn Pattern + Send + Sync>, [f64; 4])> {
+) -> Option<Box<dyn Pattern + Send + Sync>> {
     // Coords: [x0, y0, r0, x1, y1, r1] in user space.
     let coords = read_f64_array(sh, b"Coords", 6)?;
 
@@ -302,17 +363,8 @@ fn resolve_radial(
     let dr0 = coords[2].abs() * scale;
     let dr1 = coords[5].abs() * scale;
 
-    // Bounding box: union of both circles.
-    let outer_r = dr0.max(dr1);
-    let bbox = [
-        dx0.min(dx1) - outer_r,
-        dy0.min(dy1) - outer_r,
-        dx0.max(dx1) + outer_r,
-        dy0.max(dy1) + outer_r,
-    ];
-
-    let pattern = RadialPattern::new(ramp, dx0, dy0, dr0, dx1, dy1, dr1, t0, t1, ext_s, ext_e);
-    Some((Box::new(pattern), bbox))
+    let pattern = RadialPattern::new(ramp, dx0, dy0, dr0, dx1, dy1, dr1, ext_s, ext_e);
+    Some(Box::new(pattern))
 }
 
 // ── Function-based (Type 1) ───────────────────────────────────────────────────
@@ -320,10 +372,10 @@ fn resolve_radial(
 /// Number of grid samples per axis for the pre-sampled Type 1 shading grid.
 const TYPE1_GRID: usize = 64;
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear resolver: parse → sample grid → build closure; not decomposable without splitting state"
-)]
+/// Tolerance, in units of the Domain's extent, admitting a point on a
+/// Type 1 shading's Domain edge despite rounding error.
+const TYPE1_EDGE_TOLERANCE: f64 = 1e-9;
+
 #[expect(
     clippy::many_single_char_names,
     reason = "CTM components a–f and grid dims g, n follow PDF spec notation"
@@ -335,7 +387,7 @@ fn resolve_function_based(
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
-) -> Option<(Box<dyn Pattern + Send + Sync>, [f64; 4])> {
+) -> Option<Box<dyn Pattern + Send + Sync>> {
     // Domain: [xmin, xmax, ymin, ymax] in shading space. PDF spec default is [0,1,0,1].
     let domain = read_f64_array(sh, b"Domain", 4).unwrap_or_else(|| vec![0.0, 1.0, 0.0, 1.0]);
     let (xd0, xd1, yd0, yd1) = (domain[0], domain[1], domain[2], domain[3]);
@@ -397,33 +449,6 @@ fn resolve_function_based(
     }
     let grid: Arc<[[u8; 3]]> = Arc::from(grid.into_boxed_slice());
 
-    // Device-space bbox: the Domain's corners through Matrix × CTM,
-    // intersected with the optional BBox, whose corners lie in target space.
-    let device_bbox = |m: &[f64; 6], [x0, y0, x1, y1]: [f64; 4]| {
-        let mut pts = [0f64; 8];
-        for (i, (x, y)) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
-            .into_iter()
-            .enumerate()
-        {
-            (pts[i * 2], pts[i * 2 + 1]) = transform_point(m, x, y, page_h);
-        }
-        bbox_from_coords(&pts)
-    };
-    let mut bbox = device_bbox(&shading_ctm, [xd0, yd0, xd1, yd1]);
-    if let Some(bb) = read_f64_array(sh, b"BBox", 4) {
-        if bb.iter().all(|v| v.is_finite()) {
-            let clip = device_bbox(ctm, [bb[0], bb[1], bb[2], bb[3]]);
-            bbox = [
-                bbox[0].max(clip[0]),
-                bbox[1].max(clip[1]),
-                bbox[2].min(clip[2]),
-                bbox[3].min(clip[3]),
-            ];
-        } else {
-            log::warn!("shading/type1: non-finite BBox — ignoring BBox");
-        }
-    }
-
     let pattern = FunctionPattern::new(move |px, py| {
         // Undo the y-flip applied by transform_point, then map back to
         // shading space.
@@ -431,9 +456,14 @@ fn resolve_function_based(
         let sx = inv[0].mul_add(px, inv[2] * py_pdf) + inv[4];
         let sy = inv[1].mul_add(px, inv[3] * py_pdf) + inv[5];
 
-        // Normalise to [0, 1] within the domain; clamp to handle rounding at edges.
-        let tx = ((sx - xd0) / (xd1 - xd0)).clamp(0.0, 1.0);
-        let ty = ((sy - yd0) / (yd1 - yd0)).clamp(0.0, 1.0);
+        // PDF §8.7.4.5.2: points outside the Domain are not painted.
+        let tx = (sx - xd0) / (xd1 - xd0);
+        let ty = (sy - yd0) / (yd1 - yd0);
+        let inside = |t: f64| (-TYPE1_EDGE_TOLERANCE..=1.0 + TYPE1_EDGE_TOLERANCE).contains(&t);
+        if !inside(tx) || !inside(ty) {
+            return None;
+        }
+        let (tx, ty) = (tx.clamp(0.0, 1.0), ty.clamp(0.0, 1.0));
 
         // Bilinear interpolation over the pre-sampled grid.
         // tx/ty ∈ [0,1] and gf > 0, so fx/fy ∈ [0, gf]; floor ∈ [0, g-1].
@@ -475,14 +505,14 @@ fn resolve_function_based(
             lerp_ch(s01[1], s11[1], wc),
             lerp_ch(s01[2], s11[2], wc),
         ];
-        [
+        Some([
             lerp_ch(top[0], bot[0], wr),
             lerp_ch(top[1], bot[1], wr),
             lerp_ch(top[2], bot[2], wr),
-        ]
+        ])
     });
 
-    Some((Box::new(pattern), bbox))
+    Some(Box::new(pattern))
 }
 
 // ── Type 4 — Free-form Gouraud triangle mesh ──────────────────────────────────
@@ -970,22 +1000,6 @@ pub(super) fn ctm_scale(ctm: &[f64; 6]) -> f64 {
     if result.is_finite() { result } else { 1.0 }
 }
 
-/// Compute a bounding box from a flat list of interleaved `[x, y, x, y, …]` values.
-pub(super) fn bbox_from_coords(pts: &[f64]) -> [f64; 4] {
-    debug_assert!(pts.len() >= 4 && pts.len().is_multiple_of(2));
-    let mut xmin = f64::INFINITY;
-    let mut ymin = f64::INFINITY;
-    let mut xmax = f64::NEG_INFINITY;
-    let mut ymax = f64::NEG_INFINITY;
-    for chunk in pts.as_chunks::<2>().0 {
-        xmin = xmin.min(chunk[0]);
-        xmax = xmax.max(chunk[0]);
-        ymin = ymin.min(chunk[1]);
-        ymax = ymax.max(chunk[1]);
-    }
-    [xmin, ymin, xmax, ymax]
-}
-
 /// Read the `Extend` array `[extend_start, extend_end]`; both default to `false`.
 fn read_extend(sh: &Dictionary) -> (bool, bool) {
     let arr = sh.get(b"Extend").and_then(|o| o.as_array());
@@ -1084,12 +1098,6 @@ mod tests {
         let (dx, dy) = transform_point(&ctm, 10.0, 20.0, 100.0);
         assert!((dx - 10.0).abs() < 1e-9);
         assert!((dy - 80.0).abs() < 1e-9); // y-flip: 100 - 20
-    }
-
-    #[test]
-    fn bbox_from_two_points() {
-        let b = bbox_from_coords(&[3.0, 7.0, 10.0, 2.0]);
-        assert_eq!(b, [3.0, 2.0, 10.0, 7.0]);
     }
 
     #[test]

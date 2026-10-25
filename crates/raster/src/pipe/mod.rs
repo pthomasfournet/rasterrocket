@@ -17,6 +17,8 @@ pub mod blend;
 pub mod general;
 pub mod simple;
 
+use std::cell::RefCell;
+
 use crate::state::TransferSet;
 use crate::types::BlendMode;
 use color::Pixel;
@@ -49,6 +51,56 @@ pub trait Pattern: Send + Sync {
     fn is_static_color(&self) -> bool {
         false
     }
+
+    /// Return `true` if this pattern may leave some pixels unpainted.
+    ///
+    /// An unpainted pixel keeps its destination colour and alpha, exactly as
+    /// a pixel outside the filled area does.  [`render_span`] evaluates such a
+    /// pattern through [`Self::fill_span_painted`] and composites only its
+    /// painted runs; a pattern returning `false` paints every pixel of every
+    /// span.
+    fn may_leave_unpainted(&self) -> bool {
+        false
+    }
+
+    /// Fill `out` as [`Self::fill_span`] does and set `painted[i]` to whether
+    /// pixel `x0 + i` is painted.
+    ///
+    /// `painted.len()` is `x1 - x0 + 1`.  The colour bytes of an unpainted
+    /// pixel are unspecified.  The default marks every pixel painted.
+    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+        self.fill_span(y, x0, x1, out);
+        painted.fill(true);
+    }
+}
+
+/// A [`Pattern`] serving one precomputed span of colour bytes.
+///
+/// `fill_span` copies `data` into `out`, whose length must equal
+/// `data.len()`: a `RowPattern` is valid only for the span it holds.
+pub(crate) struct RowPattern<'a> {
+    /// Colour bytes of the span, `P::BYTES` per pixel.
+    pub(crate) data: &'a [u8],
+}
+
+impl Pattern for RowPattern<'_> {
+    fn fill_span(&self, _y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+        assert_eq!(
+            out.len(),
+            self.data.len(),
+            "RowPattern::fill_span: out.len()={} != data.len()={} (x0={x0} x1={x1})",
+            out.len(),
+            self.data.len(),
+        );
+        out.copy_from_slice(self.data);
+    }
+}
+
+// Per-thread colour and painted-mask scratch for the spans of a pattern that
+// may leave pixels unpainted — grow-never-shrink.
+thread_local! {
+    static PAINTED_SPAN: RefCell<(Vec<u8>, Vec<bool>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
 /// Immutable parameters for one paint operation, built once per fill/stroke/glyph call.
@@ -145,6 +197,9 @@ impl PipeState<'_> {
 /// - `y`: scanline y coordinate (used by pattern and halftone screen).
 /// - `ncomps`: bytes per pixel (must match `P::BYTES`).
 ///
+/// A pattern source that [may leave pixels unpainted](Pattern::may_leave_unpainted)
+/// is composited over its painted pixels only.
+///
 /// # Panics
 ///
 /// Panics in debug mode if `x0 > x1` or `P::BYTES == 0` (Mono1 must be handled
@@ -178,6 +233,94 @@ pub fn render_span<P: Pixel>(
         "render_span: dst_pixels length mismatch"
     );
 
+    if let PipeSrc::Pattern(pat) = src
+        && pat.may_leave_unpainted()
+    {
+        render_painted_runs::<P>(pipe, *pat, dst_pixels, dst_alpha, shape, x0, x1, y);
+        return;
+    }
+    dispatch_span::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
+}
+
+/// Composite the painted runs of a span whose pattern may leave pixels
+/// unpainted.
+///
+/// The pattern is evaluated once over the whole span.  Each maximal run of
+/// painted pixels is then composited by [`dispatch_span`] from the
+/// precomputed colours, with the shape, soft-mask and alpha0 rows sliced to
+/// the run; unpainted pixels are not touched.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the render_span arguments"
+)]
+fn render_painted_runs<P: Pixel>(
+    pipe: &PipeState<'_>,
+    pat: &dyn Pattern,
+    dst_pixels: &mut [u8],
+    mut dst_alpha: Option<&mut [u8]>,
+    shape: Option<&[u8]>,
+    x0: i32,
+    x1: i32,
+    y: i32,
+) {
+    let ncomps = P::BYTES;
+    let count = dst_pixels.len() / ncomps;
+    PAINTED_SPAN.with(|cell| {
+        let (colour, painted) = &mut *cell.borrow_mut();
+        colour.resize(count * ncomps, 0);
+        painted.resize(count, false);
+        pat.fill_span_painted(y, x0, x1, colour, painted);
+
+        let mut start = 0;
+        while let Some(a) = painted[start..].iter().position(|&p| p).map(|i| start + i) {
+            let b = painted[a..]
+                .iter()
+                .position(|&p| !p)
+                .map_or(count, |i| a + i);
+            let run_pipe = PipeState {
+                soft_mask: pipe.soft_mask.map(|s| &s[a..b]),
+                alpha0: pipe.alpha0.map(|s| &s[a..b]),
+                ..*pipe
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap,
+                reason = "a < b ≤ count = x1 − x0 + 1, which fits in i32"
+            )]
+            let (run_x0, run_x1) = (x0 + a as i32, x0 + b as i32 - 1);
+            dispatch_span::<P>(
+                &run_pipe,
+                &PipeSrc::Pattern(&RowPattern {
+                    data: &colour[a * ncomps..b * ncomps],
+                }),
+                &mut dst_pixels[a * ncomps..b * ncomps],
+                dst_alpha.as_deref_mut().map(|al| &mut al[a..b]),
+                shape.map(|s| &s[a..b]),
+                run_x0,
+                run_x1,
+                y,
+            );
+            start = b;
+        }
+    });
+}
+
+/// Run the pipeline variant that `pipe` and `shape` select for a span whose
+/// every pixel is painted.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the render_span arguments"
+)]
+fn dispatch_span<P: Pixel>(
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    dst_pixels: &mut [u8],
+    dst_alpha: Option<&mut [u8]>,
+    shape: Option<&[u8]>,
+    x0: i32,
+    x1: i32,
+    y: i32,
+) {
     let uses_shape = shape.is_some();
 
     if pipe.no_transparency(uses_shape) && pipe.blend_mode == BlendMode::Normal {
@@ -265,6 +408,102 @@ mod tests {
     use crate::testutil::make_pipe;
     use crate::types::BlendMode;
     use color::Rgb8;
+
+    /// Paints `[x, 200, 50]` at every even `x` and nothing at odd `x`.
+    struct EvenColumns;
+
+    impl Pattern for EvenColumns {
+        fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+            let mut painted = vec![false; out.len() / 3];
+            self.fill_span_painted(y, x0, x1, out, &mut painted);
+        }
+
+        fn may_leave_unpainted(&self) -> bool {
+            true
+        }
+
+        fn fill_span_painted(
+            &self,
+            _y: i32,
+            x0: i32,
+            x1: i32,
+            out: &mut [u8],
+            painted: &mut [bool],
+        ) {
+            for ((x, px), p) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(painted) {
+                *p = x % 2 == 0;
+                *px = [u8::try_from(x).expect("small x"), 200, 50];
+            }
+        }
+    }
+
+    /// Render `EvenColumns` over a backdrop of `[7, 7, 7]` / alpha 99 on
+    /// pixels `3..=9` and return the pixels and alpha.
+    fn render_even_columns(pipe: &PipeState<'_>, shape: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
+        let mut dst = vec![7u8; 7 * 3];
+        let mut alpha = vec![99u8; 7];
+        render_span::<Rgb8>(
+            pipe,
+            &PipeSrc::Pattern(&EvenColumns),
+            &mut dst,
+            Some(&mut alpha),
+            shape,
+            3,
+            9,
+            0,
+        );
+        (dst, alpha)
+    }
+
+    fn assert_odd_columns_untouched(dst: &[u8], alpha: &[u8]) {
+        for (i, x) in (3..=9).enumerate() {
+            if x % 2 == 1 {
+                assert_eq!(&dst[i * 3..i * 3 + 3], &[7, 7, 7], "x={x} colour");
+                assert_eq!(alpha[i], 99, "x={x} alpha");
+            } else {
+                assert_ne!(&dst[i * 3..i * 3 + 3], &[7, 7, 7], "x={x} painted");
+            }
+        }
+    }
+
+    #[test]
+    fn unpainted_pixels_keep_the_backdrop_on_the_simple_path() {
+        let (dst, alpha) = render_even_columns(&make_pipe(255, BlendMode::Normal), None);
+        assert_odd_columns_untouched(&dst, &alpha);
+        for (i, x) in (4u8..=8).step_by(2).enumerate() {
+            let at = (2 * i + 1) * 3;
+            assert_eq!(
+                &dst[at..at + 3],
+                &[x, 200, 50],
+                "x={x} carries its own colour"
+            );
+        }
+    }
+
+    #[test]
+    fn unpainted_pixels_keep_the_backdrop_on_the_aa_path() {
+        let shape = [255u8, 128, 255, 128, 255, 128, 255];
+        let (dst, alpha) = render_even_columns(&make_pipe(200, BlendMode::Normal), Some(&shape));
+        assert_odd_columns_untouched(&dst, &alpha);
+    }
+
+    #[test]
+    fn unpainted_pixels_keep_the_backdrop_on_the_general_path() {
+        // The soft mask is sliced with each run: x=4 sees 255, x=8 sees 0.
+        let soft = [0u8, 255, 0, 255, 0, 0, 0];
+        let mut pipe = make_pipe(255, BlendMode::Multiply);
+        pipe.soft_mask = Some(&soft);
+        let (dst, alpha) = render_even_columns(&pipe, None);
+        for (i, x) in (3..=9).enumerate() {
+            let painted_px = &dst[i * 3..i * 3 + 3];
+            if x == 4 || x == 6 {
+                assert_ne!(painted_px, &[7, 7, 7], "x={x} painted through the mask");
+            } else {
+                assert_eq!(painted_px, &[7, 7, 7], "x={x} untouched");
+                assert_eq!(alpha[i], 99, "x={x} alpha");
+            }
+        }
+    }
 
     #[test]
     fn no_transparency_opaque_normal() {

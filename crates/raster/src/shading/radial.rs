@@ -1,19 +1,16 @@
-//! Radial gradient pattern (PDF §8.7.4.5, type 3).
+//! Radial gradient pattern (PDF §8.7.4.5.4, type 3).
 //!
-//! Solves the quadratic `|p - (c0 + t·(c1-c0))|² = (r0 + t·(r1-r0))²`
-//! and takes the largest real root (the "outside" intersection, per PDF §8.7.4.5).
-//! The root is then clamped to `[t0, t1]` or rejected when extension is off.
+//! The shading is the family of circles `c(s) = c0 + s·(c1 − c0)`,
+//! `r(s) = r0 + s·(r1 − r0)` for `s ∈ [0, 1]`, continued to `s < 0` when
+//! `extend_start` is set and to `s > 1` when `extend_end` is set.  A pixel
+//! takes the ramp colour of the largest such `s` whose circle passes through
+//! it with `r(s) ≥ 0`; a pixel on no such circle is not painted.
 //!
-//! # Out-of-range pixels
-//!
-//! When the quadratic has no real roots, or the solution falls outside
-//! `[t0, t1]` and extension is disabled, `fill_span` writes `[0, 0, 0]`.
-//! As with [`axial`], this is only correct when the caller clips to the
-//! shading bounding path.
-//!
-//! [`axial`]: super::axial
+//! The circles through a point `p` are the roots of
+//! `a·s² − 2·b·s + c = 0` with `a = |Δc|² − Δr²`,
+//! `b = (p − c0)·Δc + r0·Δr` and `c = |p − c0|² − r0²`.
 
-use super::ColorRamp;
+use super::{ColorRamp, fill_ramp_span};
 use crate::pipe::Pattern;
 
 /// Gradient between two circles (centre `c0`, radius `r0`) and (`c1`, `r1`).
@@ -21,34 +18,32 @@ pub struct RadialPattern {
     ramp: ColorRamp,
     c0x: f64,
     c0y: f64,
-    /// Δc = c1 - c0.
+    /// Δc = c1 − c0.
     dcx: f64,
     dcy: f64,
     r0: f64,
-    /// Δr = r1 - r0.
+    /// Δr = r1 − r0.
     dr: f64,
-    t0: f64,
-    t1: f64,
     extend_start: bool,
     extend_end: bool,
-    /// `|Δc|² - Δr²` — the `t²` coefficient of the quadratic.
-    /// Zero when the gradient is linear (conic section degenerate).
+    /// `|Δc|² − Δr²`, the `s²` coefficient of the circle equation; zero
+    /// when the equation is linear in `s`.
     a: f64,
 }
 
 impl RadialPattern {
     /// Create a radial gradient.
     ///
-    /// - `ramp`: colours over the normalised parameter, inner circle → 0 and outer → 1.
-    /// - `(c0x, c0y, r0)`: inner circle centre and radius (≥ 0).
-    /// - `(c1x, c1y, r1)`: outer circle centre and radius (≥ 0).
-    /// - `t0`, `t1`: parameter range mapping to the start / end of `ramp`.
-    ///   May be inverted (`t0 > t1`).
-    /// - `extend_start` / `extend_end`: extend colour beyond the gradient circles.
+    /// - `ramp`: colours over the normalised parameter, start circle → 0 and
+    ///   end circle → 1.
+    /// - `(c0x, c0y, r0)`: start circle centre and radius (≥ 0).
+    /// - `(c1x, c1y, r1)`: end circle centre and radius (≥ 0).
+    /// - `extend_start` / `extend_end`: continue the circles beyond the start
+    ///   / end circle.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors PDF shading dict: colour ramp + 2 circles (cx,cy,r each) + t range + 2 extend flags"
+        reason = "mirrors the PDF shading dictionary: ramp, two circles (cx, cy, r each), two extend flags"
     )]
     pub fn new(
         ramp: ColorRamp,
@@ -58,16 +53,21 @@ impl RadialPattern {
         c1x: f64,
         c1y: f64,
         r1: f64,
-        t0: f64,
-        t1: f64,
         extend_start: bool,
         extend_end: bool,
     ) -> Self {
         let dcx = c1x - c0x;
         let dcy = c1y - c0y;
         let dr = r1 - r0;
-        // a = |Δc|² - Δr²
-        let a = dr.mul_add(-dr, dcx.mul_add(dcx, dcy * dcy));
+        let dc_sq = dcx.mul_add(dcx, dcy * dcy);
+        let a = dr.mul_add(-dr, dc_sq);
+        // A coefficient this small relative to its terms is cancellation
+        // noise; the equation is then linear.
+        let a = if a.abs() <= 1e-9 * dr.mul_add(dr, dc_sq) {
+            0.0
+        } else {
+            a
+        };
         Self {
             ramp,
             c0x,
@@ -76,92 +76,77 @@ impl RadialPattern {
             dcy,
             r0,
             dr,
-            t0,
-            t1,
             extend_start,
             extend_end,
             a,
         }
     }
 
-    /// Solve for `t` at pixel `(xi, yi)`.
-    ///
-    /// Quadratic `a·t² + 2·b·t + c = 0` where:
-    /// - `b = (p - c0)·Δc - r0·Δr`
-    /// - `c = |p - c0|² - r0²`
-    ///
-    /// Returns `None` when no real solution exists in the gradient range.
-    fn t_for(&self, xi: i32, yi: i32) -> Option<f64> {
+    /// Whether the circle at parameter `s` belongs to the shading.
+    fn admits(&self, s: f64) -> bool {
+        let in_range = if s < 0.0 {
+            self.extend_start
+        } else if s > 1.0 {
+            self.extend_end
+        } else {
+            // False for NaN.
+            s >= 0.0
+        };
+        in_range && self.dr.mul_add(s, self.r0) >= 0.0
+    }
+
+    /// Ramp position `s ∈ [0, 1]` of pixel `(xi, yi)`, or `None` when no
+    /// circle of the shading passes through it.
+    fn position(&self, xi: i32, yi: i32) -> Option<f64> {
         let rel_x = f64::from(xi) - self.c0x;
         let rel_y = f64::from(yi) - self.c0y;
-
         let b = self
             .r0
-            .mul_add(-self.dr, rel_x.mul_add(self.dcx, rel_y * self.dcy));
+            .mul_add(self.dr, rel_x.mul_add(self.dcx, rel_y * self.dcy));
         let c = self
             .r0
             .mul_add(-self.r0, rel_x.mul_add(rel_x, rel_y * rel_y));
 
-        let t = if self.a.abs() < 1e-12 {
-            // Linear equation: 2·b·t + c = 0.
-            if b.abs() < 1e-12 {
-                return None; // fully degenerate — no solution
+        let roots = if self.a == 0.0 {
+            if b == 0.0 {
+                return None;
             }
-            -c / (b + b)
+            let s = c / (b + b);
+            [s, s]
         } else {
             let disc = b.mul_add(b, -(self.a * c));
             if disc < 0.0 {
-                return None; // no real intersection
+                return None;
             }
             let sq = disc.sqrt();
-            // Take the larger root — the "outside" intersection (PDF §8.7.4.5).
-            f64::max((-b + sq) / self.a, (-b - sq) / self.a)
+            let (u, v) = ((b + sq) / self.a, (b - sq) / self.a);
+            [u.max(v), u.min(v)]
         };
-
-        // Handle both t0 < t1 and t0 > t1 (inverted gradient).
-        let (lo, hi) = if self.t0 <= self.t1 {
-            (self.t0, self.t1)
-        } else {
-            (self.t1, self.t0)
-        };
-        if t < lo {
-            if self.extend_start {
-                Some(self.t0)
-            } else {
-                None
-            }
-        } else if t > hi {
-            if self.extend_end { Some(self.t1) } else { None }
-        } else {
-            Some(t)
-        }
+        roots
+            .into_iter()
+            .find(|&s| self.admits(s))
+            .map(|s| s.clamp(0.0, 1.0))
     }
 }
 
 impl Pattern for RadialPattern {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        // out.len() == (x1-x0+1)*3 is an invariant guaranteed by render_span.
-        let t_span = self.t1 - self.t0;
-        let mut off = 0usize;
-        for xi in x0..=x1 {
-            if let Some(t) = self.t_for(xi, y) {
-                let s = if t_span.abs() < f64::EPSILON {
-                    0.0
-                } else {
-                    (t - self.t0) / t_span
-                };
-                self.ramp.write(s, &mut out[off..off + 3]);
-            } else {
-                out[off] = 0;
-                out[off + 1] = 0;
-                out[off + 2] = 0;
-            }
-            off += 3;
-        }
+        fill_ramp_span(&self.ramp, x0, x1, out, |_, _| {}, |x| self.position(x, y));
     }
 
-    fn is_static_color(&self) -> bool {
-        false
+    fn may_leave_unpainted(&self) -> bool {
+        true
+    }
+
+    fn fill_span_painted(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], painted: &mut [bool]) {
+        fill_ramp_span(
+            &self.ramp,
+            x0,
+            x1,
+            out,
+            |i, p| painted[i] = p,
+            |x| self.position(x, y),
+        );
     }
 }
 
@@ -170,7 +155,7 @@ mod tests {
     use super::*;
 
     /// Concentric radial: c0=c1=(4,4), r0=0, r1=4.
-    fn make_concentric() -> RadialPattern {
+    fn make_concentric(extend: bool) -> RadialPattern {
         RadialPattern::new(
             ColorRamp::two([0, 0, 0], [255, 255, 255]),
             4.0,
@@ -179,82 +164,129 @@ mod tests {
             4.0,
             4.0,
             4.0,
-            0.0,
-            1.0,
-            true,
-            true,
+            extend,
+            extend,
         )
+    }
+
+    /// Red at the start circle, green at the end circle.
+    fn red_to_green(
+        c0: (f64, f64, f64),
+        c1: (f64, f64, f64),
+        extend: (bool, bool),
+    ) -> RadialPattern {
+        RadialPattern::new(
+            ColorRamp::two([255, 0, 0], [0, 255, 0]),
+            c0.0,
+            c0.1,
+            c0.2,
+            c1.0,
+            c1.1,
+            c1.2,
+            extend.0,
+            extend.1,
+        )
+    }
+
+    fn colour_at(p: &RadialPattern, x: i32, y: i32) -> Option<[u8; 3]> {
+        let mut out = [0u8; 3];
+        let mut painted = [false];
+        p.fill_span_painted(y, x, x, &mut out, &mut painted);
+        painted[0].then_some(out)
     }
 
     #[test]
     fn centre_is_color0() {
-        let p = make_concentric();
-        let mut out = [42u8; 3];
-        p.fill_span(4, 4, 4, &mut out);
-        // Distance 0 from centre → t → 0 → color0 = black.
-        assert!(out[0] < 10, "centre should be near-black, got {}", out[0]);
+        let c = colour_at(&make_concentric(true), 4, 4).expect("painted");
+        assert!(c[0] < 10, "centre should be near-black, got {c:?}");
     }
 
     #[test]
     fn outer_ring_is_color1() {
-        let p = make_concentric();
-        let mut out = [0u8; 3];
-        p.fill_span(4, 8, 8, &mut out); // distance 4 = r1 → t = 1 → color1 = white
+        let c = colour_at(&make_concentric(true), 8, 4).expect("painted");
+        assert!(c[0] > 240, "outer ring should be near-white, got {c:?}");
+    }
+
+    #[test]
+    fn annulus_without_extend_paints_only_between_the_circles() {
+        let p = red_to_green((4.0, 4.0, 2.0), (4.0, 4.0, 6.0), (false, false));
+        let c = colour_at(&p, 6, 4).expect("on the start circle");
+        assert!(c[0] > 240 && c[1] < 20, "start circle is red: {c:?}");
+        assert_eq!(colour_at(&p, 4, 4), None, "inside the start circle");
+        assert_eq!(colour_at(&p, 11, 4), None, "outside the end circle");
+    }
+
+    #[test]
+    fn extend_clamps_outside_to_endpoints() {
+        let c = colour_at(&make_concentric(true), 14, 4).expect("painted");
         assert!(
-            out[0] > 240,
-            "outer ring should be near-white, got {}",
-            out[0]
+            c[0] > 240,
+            "beyond outer with extend should be color1: {c:?}"
         );
     }
 
     #[test]
-    fn pixel_on_inner_circle_maps_to_color0() {
-        // r0=2: pixel at distance 2 from centre → t=0 → color0.
+    fn outside_without_extend_is_not_painted() {
+        assert_eq!(colour_at(&make_concentric(false), 14, 4), None);
+    }
+
+    #[test]
+    fn non_concentric_circles_paint_only_the_swept_band() {
+        // Start circle (0, 0) r=1, end circle (10, 0) r=4: neither encloses
+        // the other, so only the band the circles sweep is painted.
+        let p = red_to_green((0.0, 0.0, 1.0), (10.0, 0.0, 4.0), (false, false));
+        let start = colour_at(&p, -1, 0).expect("leftmost point of the start circle");
+        assert!(start[0] > 240, "start circle is red: {start:?}");
+        let end = colour_at(&p, 14, 0).expect("rightmost point of the end circle");
+        assert!(end[1] > 240, "end circle is green: {end:?}");
+        // (5, 0) lies on the circles at s = 28/91 and s = 78/91; the later
+        // circle wins.
+        let mid = colour_at(&p, 5, 0).expect("inside the band");
+        assert!(
+            (25..=45).contains(&mid[0]) && (210..=230).contains(&mid[1]),
+            "s = 78/91: {mid:?}"
+        );
+        assert_eq!(colour_at(&p, -3, 0), None, "behind the start circle");
+        assert_eq!(colour_at(&p, 15, 0), None, "beyond the end circle");
+        assert_eq!(colour_at(&p, 5, 6), None, "beside the band");
+        assert_eq!(colour_at(&p, 0, 100), None, "far off the axis");
+    }
+
+    #[test]
+    fn extended_start_stops_at_the_cone_apex() {
+        // The radius shrinks by 3 per |Δc| = 10, so the extended start is a
+        // cone closing at s = −1/3, x = −10/3.
+        let p = red_to_green((0.0, 0.0, 1.0), (10.0, 0.0, 4.0), (true, false));
+        let c = colour_at(&p, -3, 0).expect("inside the cone");
+        assert!(c[0] > 240, "extended start colour: {c:?}");
+        assert_eq!(colour_at(&p, -4, 0), None, "beyond the apex");
+    }
+
+    #[test]
+    fn larger_root_outside_the_range_falls_back_to_the_smaller() {
+        // Concentric, radius 6 → 2: distance 4 lies on the circles s = 0.5
+        // and s = 2.5, of which only s = 0.5 is in range.  Distance 7 lies
+        // on s = −0.25 and s = 3.25, neither in range.
         let p = RadialPattern::new(
-            ColorRamp::two([255, 0, 0], [0, 0, 255]),
-            4.0,
-            4.0,
-            2.0,
-            4.0,
-            4.0,
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
+            0.0,
+            0.0,
             6.0,
             0.0,
-            1.0,
+            0.0,
+            2.0,
             false,
             false,
         );
-        let mut out = [0u8; 3];
-        // (6, 4) is exactly 2 units from (4,4) — on the inner circle.
-        p.fill_span(4, 6, 6, &mut out);
-        assert!(out[0] > 240, "inner circle should be near color0 (red)");
-        assert!(out[2] < 20, "inner circle should have near-zero blue");
+        let c = colour_at(&p, 4, 0).expect("between the circles");
+        assert!((120..=135).contains(&c[0]), "s = 0.5: {c:?}");
+        assert_eq!(colour_at(&p, 7, 0), None);
     }
 
     #[test]
-    fn no_real_intersection_writes_zeros() {
-        // Eccentric gradient where a pixel far off-axis has no real solution.
-        let p = RadialPattern::new(
-            ColorRamp::two([255, 0, 0], [0, 255, 0]),
-            0.0,
-            0.0,
-            1.0,
-            10.0,
-            0.0,
-            1.0,
-            0.0,
-            1.0,
-            false,
-            false,
-        );
-        let mut out = [42u8; 3]; // non-zero sentinel
-        p.fill_span(100, 100, 100, &mut out);
-        assert_eq!(out, [0, 0, 0], "no intersection should write zeros");
-    }
-
-    #[test]
-    fn degenerate_a_linear_fallback() {
-        // When |Δc|² == Δr², a=0 and we use the linear path.
-        // c0=(0,0,r0=0), c1=(3,4,r1=5): |Δc|²=25, Δr=5, Δr²=25 → a=0.
+    fn linear_equation_when_the_circles_share_a_tangent_point() {
+        // |Δc| = Δr: every circle passes through the origin and the equation
+        // is linear in s.
         let p = RadialPattern::new(
             ColorRamp::two([0, 0, 0], [255, 255, 255]),
             0.0,
@@ -263,25 +295,11 @@ mod tests {
             3.0,
             4.0,
             5.0,
-            0.0,
-            1.0,
-            true,
-            true,
+            false,
+            false,
         );
-        let mut out = [0u8; 15]; // 5 pixels × 3 bytes
-        // Must not panic.
-        p.fill_span(0, 0, 4, &mut out);
-    }
-
-    #[test]
-    fn extend_clamps_outside_to_endpoints() {
-        let p = make_concentric();
-        let mut out = [42u8; 3];
-        // Distance 10 > r1=4; with extend_end=true should clamp to color1 (white).
-        p.fill_span(4, 14, 14, &mut out);
-        assert!(
-            out[0] > 240,
-            "beyond outer with extend should clamp to color1 (white)"
-        );
+        let c = colour_at(&p, 6, 8).expect("end circle, opposite the origin");
+        assert!(c[0] > 240, "end colour: {c:?}");
+        assert_eq!(colour_at(&p, -3, -4), None, "behind the origin");
     }
 }
