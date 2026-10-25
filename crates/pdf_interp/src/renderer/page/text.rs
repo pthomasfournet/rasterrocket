@@ -134,8 +134,12 @@ impl PageRenderer<'_> {
         // Union of the device-space glyph outlines, built when `do_stroke`.
         let mut stroke_outline = raster::path::Path::new();
         // Device-space outlines of glyphs painted as filled paths instead of
-        // cached bitmaps (faces too large for glyph bitmaps).
+        // cached bitmaps: every glyph when the fill colour is a pattern, else
+        // the glyphs of faces too large for glyph bitmaps.
         let mut fill_paths: Vec<raster::path::Path> = Vec::new();
+        // A pattern fill colour paints through the path fill, which resolves
+        // the pattern once over the union of the glyph outlines.
+        let pattern_fill = do_fill && self.gstate.current().fill_pattern.is_some();
 
         {
             // Trm[2×2] = font_size × Tm[2×2] × CTM[2×2] — the text rendering
@@ -156,7 +160,7 @@ impl PageRenderer<'_> {
             let Some(face) = self.font_cache.get_or_load(&font_name, &descriptor, trm) else {
                 return;
             };
-            let fill_as_path = do_fill && face.prefers_path_fill();
+            let fill_as_path = do_fill && (pattern_fill || face.prefers_path_fill());
             let fill_as_bitmap = do_fill && !fill_as_path;
             let need_outline = do_clip || do_stroke || fill_as_path;
 
@@ -327,8 +331,18 @@ impl PageRenderer<'_> {
                     &glyph,
                 );
             }
-            for path in &fill_paths {
-                self.fill_path(path, false);
+            if pattern_fill {
+                let mut union = raster::path::Path::new();
+                for path in &fill_paths {
+                    union.append(path);
+                }
+                if !union.pts.is_empty() {
+                    self.fill_path(&union, false);
+                }
+            } else {
+                for path in &fill_paths {
+                    self.fill_path(path, false);
+                }
             }
         }
         // The stroke parameters are user-space quantities under the CTM, as
