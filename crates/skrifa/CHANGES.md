@@ -26,3 +26,20 @@ It is not published and changes are not sent upstream.
   The `glyf` loader takes the side bearing to be the glyph's `xMin` when
   there are no metrics, so outlines are not shifted. Test:
   `outline::tests::outlines_without_horizontal_metrics`.
+
+## Hint-reliant ("tricky") TrueType detection
+
+- `outline::hint_reliant`: the family name compared against the list is
+  now derived as FreeType derives it — name IDs 21, 16, 1 in that order
+  (16, 1 for a WWS-only font), the record chosen by FreeType's platform /
+  language preference, and every UTF-16 code unit or byte outside 32..=127
+  read as `?`. Before, only name ID 1 was read, a name longer than 18
+  characters never matched (FreeType matches by substring, so a subset tag
+  plus a long family such as `ABCDEF+DFKaiShu-SB-Estd-BF` was missed), and
+  non-ASCII characters were truncated to their low byte instead of reading
+  as the `?` the `HuaTianKaiTi?` / `HuaTianSongTi?` entries expect.
+- The `cvt ` / `fpgm` / `prep` identification compares table lengths first
+  and computes a table's checksum only when its length matches an entry,
+  so ordinary fonts pay no table scan. The name and checksum lists are
+  unchanged and identical to FreeType 2.13.2's. Tests:
+  `outline::hint_reliant::tests::*`.

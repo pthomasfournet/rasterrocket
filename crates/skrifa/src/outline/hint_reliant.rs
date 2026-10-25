@@ -1,29 +1,110 @@
 //! Name detection for fonts that require hinting to be run for correct
 //! contours (FreeType calls these "tricky" fonts).
 
-use crate::{string::StringId, FontRef, MetadataProvider, Tag};
+use crate::{string::StringId, FontRef, Tag};
+use alloc::string::String;
+use raw::{tables::name::Name, TableProvider};
 
 pub(super) fn require_interpreter(font: &FontRef) -> bool {
-    is_hint_reliant_by_name(font) || matches_hint_reliant_id_list(FontId::from_font(font))
+    family_name(font).is_some_and(|name| matches_hint_reliant_name_list(&name))
+        || matches_hint_reliant_id_list(font)
 }
 
-fn is_hint_reliant_by_name(font: &FontRef) -> bool {
-    font.localized_strings(StringId::FAMILY_NAME)
-        .english_or_first()
-        .map(|name| {
-            let mut buf = [0u8; MAX_HINT_RELIANT_NAME_LEN];
-            let mut len = 0;
-            let mut chars = name.chars();
-            for ch in chars.by_ref().take(MAX_HINT_RELIANT_NAME_LEN) {
-                buf[len] = ch as u8;
-                len += 1;
+/// The family name FreeType compares against the tricky-font list.
+///
+/// The name IDs are tried in FreeType's order: WWS family, typographic
+/// family, family; or, for a font whose `OS/2` `fsSelection` bit 8 marks it
+/// WWS-only, typographic family then family.
+///
+/// <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/sfnt/sfobjs.c#L1045>
+fn family_name(font: &FontRef) -> Option<String> {
+    let name = font.name().ok()?;
+    let wws_only = font
+        .os2()
+        .is_ok_and(|os2| os2.fs_selection().bits() & 0x100 != 0);
+    let ids: &[StringId] = if wws_only {
+        &[StringId::TYPOGRAPHIC_FAMILY_NAME, StringId::FAMILY_NAME]
+    } else {
+        &[
+            StringId::WWS_FAMILY_NAME,
+            StringId::TYPOGRAPHIC_FAMILY_NAME,
+            StringId::FAMILY_NAME,
+        ]
+    };
+    ids.iter().find_map(|id| ascii_name(&name, *id))
+}
+
+/// The ASCII form of name `id`, with the record chosen as FreeType's
+/// `tt_face_get_name` chooses it: an English Windows record (encoding 0, 1
+/// or 10) first; a Macintosh English or Roman record when the Windows record
+/// is not English; a Unicode or ISO record last. Code units outside
+/// 32..=127 become `?` and a NUL ends the string, so the `?` in list entries
+/// such as `HuaTianKaiTi?` stands for a non-ASCII character.
+///
+/// <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/sfnt/sfobjs.c#L102>
+fn ascii_name(name: &Name, id: StringId) -> Option<String> {
+    let records = name.name_record();
+    let mut found_unicode = None;
+    let mut found_apple_english = None;
+    let mut found_apple_roman = None;
+    let mut found_win = None;
+    let mut is_english = false;
+    for (n, record) in records.iter().enumerate() {
+        if record.name_id() != id || record.length() == 0 {
+            continue;
+        }
+        match record.platform_id() {
+            // Unicode, ISO
+            0 | 2 => found_unicode = Some(n),
+            // Macintosh
+            1 => {
+                if record.language_id() == 0 {
+                    found_apple_english = Some(n);
+                } else if record.encoding_id() == 0 {
+                    found_apple_roman = Some(n);
+                }
             }
-            if chars.next().is_some() {
-                return false;
+            // Windows; a non-English record only when no English one exists
+            3 => {
+                let english = record.language_id() & 0x3FF == 0x009;
+                if (found_win.is_none() || english) && matches!(record.encoding_id(), 0 | 1 | 10) {
+                    is_english = english;
+                    found_win = Some(n);
+                }
             }
-            matches_hint_reliant_name_list(core::str::from_utf8(&buf[..len]).unwrap_or_default())
-        })
-        .unwrap_or_default()
+            _ => {}
+        }
+    }
+    let found_apple = found_apple_english.or(found_apple_roman);
+    let (index, utf16) = match (found_win, found_apple) {
+        (Some(win), apple) if is_english || apple.is_none() => (win, true),
+        (_, Some(apple)) => (apple, false),
+        _ => (found_unicode?, true),
+    };
+    let record = records.get(index)?;
+    let start = record.string_offset().to_u32() as usize;
+    let end = start.checked_add(record.length() as usize)?;
+    let bytes = name.string_data().as_bytes().get(start..end)?;
+    let to_ascii = |code: u32| match code {
+        32..=127 => code as u8 as char,
+        _ => '?',
+    };
+    let ascii = if utf16 {
+        bytes
+            .chunks_exact(2)
+            .map(|pair| u32::from(u16::from_be_bytes([pair[0], pair[1]])))
+            .take_while(|&code| code != 0)
+            .map(to_ascii)
+            .collect()
+    } else {
+        bytes
+            .iter()
+            .map(|&byte| u32::from(byte))
+            .take_while(|&code| code != 0)
+            .map(to_ascii)
+            .collect()
+    };
+    Some(ascii)
 }
 
 /// Is this name on the list of fonts that require hinting?
@@ -92,24 +173,10 @@ const HINT_RELIANT_NAMES: &[&str] = &[
     "MingLi43",           /* mingli.ttf; version 1.00, 1992 */
 ];
 
-const MAX_HINT_RELIANT_NAME_LEN: usize = 18;
-
 #[derive(Copy, Clone, PartialEq, Default, Debug)]
 struct TableId {
     checksum: u32,
     len: u32,
-}
-
-impl TableId {
-    fn from_font_and_tag(font: &FontRef, tag: Tag) -> Option<Self> {
-        let data = font.table_data(tag)?;
-        Some(Self {
-            // Note: FreeType always just computes the checksum
-            // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/truetype/ttobjs.c#L281>
-            checksum: raw::tables::compute_checksum(data.as_bytes()),
-            len: data.len() as u32,
-        })
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Default, Debug)]
@@ -119,22 +186,35 @@ struct FontId {
     prep: TableId,
 }
 
-impl FontId {
-    fn from_font(font: &FontRef) -> Self {
-        Self {
-            cvt: TableId::from_font_and_tag(font, Tag::new(b"cvt ")).unwrap_or_default(),
-            fpgm: TableId::from_font_and_tag(font, Tag::new(b"fpgm")).unwrap_or_default(),
-            prep: TableId::from_font_and_tag(font, Tag::new(b"prep")).unwrap_or_default(),
-        }
-    }
-}
-
 /// Checks for fonts that require hinting based on the length and checksum of
-/// the cvt, fpgm and prep tables.
+/// the cvt, fpgm and prep tables; an absent table has length and checksum
+/// zero. As in FreeType, a table's checksum is computed only once its length
+/// matches an entry, so a font whose table lengths match no entry costs no
+/// table scan.
 ///
 /// Roughly equivalent to <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/truetype/ttobjs.c#L309>
-fn matches_hint_reliant_id_list(font_id: FontId) -> bool {
-    HINT_RELIANT_IDS.contains(&font_id)
+fn matches_hint_reliant_id_list(font: &FontRef) -> bool {
+    let tables = [b"cvt ", b"fpgm", b"prep"].map(|tag| font.table_data(Tag::new(tag)));
+    let lens = tables
+        .each_ref()
+        .map(|data| data.as_ref().map_or(0, |data| data.len() as u32));
+    let mut checksums: [Option<u32>; 3] = [None; 3];
+    HINT_RELIANT_IDS.iter().any(|id| {
+        let entry = [id.cvt, id.fpgm, id.prep];
+        if entry.iter().zip(lens).any(|(table, len)| table.len != len) {
+            return false;
+        }
+        entry.iter().enumerate().all(|(i, table)| {
+            // Note: FreeType always just computes the checksum
+            // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/truetype/ttobjs.c#L281>
+            let checksum = *checksums[i].get_or_insert_with(|| {
+                tables[i]
+                    .as_ref()
+                    .map_or(0, |data| raw::tables::compute_checksum(data.as_bytes()))
+            });
+            checksum == table.checksum
+        })
+    })
 }
 
 /// <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/truetype/ttobjs.c#L314>
@@ -331,13 +411,163 @@ const HINT_RELIANT_IDS: &[FontId] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
+
+    /// An sfnt holding only `tables`, with a zeroed directory checksum.
+    fn sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut tables = tables.to_vec();
+        tables.sort_by_key(|(tag, _)| **tag);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + 16 * tables.len();
+        for (tag, data) in &tables {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len().next_multiple_of(4);
+        }
+        for (_, data) in &tables {
+            out.extend_from_slice(data);
+            out.resize(out.len().next_multiple_of(4), 0);
+        }
+        out
+    }
+
+    /// A `name` table of `(platform, encoding, language, name id, bytes)`
+    /// records.
+    fn name_table(records: &[(u16, u16, u16, u16, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(6 + 12 * records.len() as u16).to_be_bytes());
+        let mut offset = 0u16;
+        for (platform, encoding, language, id, bytes) in records {
+            for field in [
+                *platform,
+                *encoding,
+                *language,
+                *id,
+                bytes.len() as u16,
+                offset,
+            ] {
+                out.extend_from_slice(&field.to_be_bytes());
+            }
+            offset += bytes.len() as u16;
+        }
+        for (.., bytes) in records {
+            out.extend_from_slice(bytes);
+        }
+        out
+    }
+
+    fn utf16(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_be_bytes).collect()
+    }
+
+    /// A Windows English Unicode record.
+    fn win(id: u16, s: &str) -> (u16, u16, u16, u16, Vec<u8>) {
+        (3, 1, 0x409, id, utf16(s))
+    }
+
+    fn requires(data: &[u8]) -> bool {
+        require_interpreter(&FontRef::new(data).unwrap())
+    }
+
+    /// Table data of `len` bytes whose checksum is `checksum`.
+    fn forged_table(len: usize, checksum: u32) -> Vec<u8> {
+        let mut data = vec![0u8; len];
+        data[..4].copy_from_slice(&checksum.to_be_bytes());
+        data
+    }
 
     #[test]
-    fn ensure_max_name_len() {
-        let max_len = HINT_RELIANT_NAMES
-            .iter()
-            .fold(0, |acc, name| acc.max(name.len()));
-        assert_eq!(max_len, MAX_HINT_RELIANT_NAME_LEN);
+    fn family_name_longer_than_any_list_entry_matches() {
+        let font = sfnt(&[(b"name", name_table(&[win(1, "ABCDEF+DFKaiShu-SB-Estd-BF")]))]);
+        assert!(requires(&font));
+    }
+
+    #[test]
+    fn non_ascii_name_characters_read_as_question_marks() {
+        // U+6977 (楷) reads as `?`, matching the `HuaTianKaiTi?` entry.
+        let font = sfnt(&[(b"name", name_table(&[win(1, "HuaTianKaiTi\u{6977}")]))]);
+        assert!(requires(&font));
+        let name = FontRef::new(&font).unwrap().name().unwrap();
+        assert_eq!(
+            ascii_name(&name, StringId::FAMILY_NAME).as_deref(),
+            Some("HuaTianKaiTi?")
+        );
+    }
+
+    #[test]
+    fn typographic_family_is_preferred_over_family() {
+        let tricky_typographic =
+            sfnt(&[(b"name", name_table(&[win(1, "Plain"), win(16, "PMingLiU")]))]);
+        assert!(requires(&tricky_typographic));
+        let tricky_family_only =
+            sfnt(&[(b"name", name_table(&[win(1, "PMingLiU"), win(16, "Plain")]))]);
+        assert!(!requires(&tricky_family_only));
+    }
+
+    #[test]
+    fn english_windows_record_is_preferred() {
+        let font = sfnt(&[(
+            b"name",
+            name_table(&[
+                (1, 0, 0, 1, b"Plain".to_vec()),
+                (3, 1, 0x404, 1, utf16("Plain")),
+                win(1, "MingLiU"),
+            ]),
+        )]);
+        assert!(requires(&font));
+    }
+
+    #[test]
+    fn macintosh_record_is_used_when_windows_record_is_not_english() {
+        let font = sfnt(&[(
+            b"name",
+            name_table(&[
+                (3, 1, 0x404, 1, utf16("Plain")),
+                (1, 0, 0, 1, b"DFKai-SB".to_vec()),
+            ]),
+        )]);
+        assert!(requires(&font));
+    }
+
+    #[test]
+    fn table_checksums_identify_a_renamed_font() {
+        // NEC fadpop7.ttf: no `cvt `, `fpgm` and `prep` of known length and
+        // checksum; the family name is not on the list.
+        let fpgm = forged_table(0xE5, 0x40C92555);
+        let prep = forged_table(0x117C, 0xA39B58E3);
+        let name = name_table(&[win(1, "Renamed")]);
+        let font = sfnt(&[
+            (b"fpgm", fpgm.clone()),
+            (b"prep", prep.clone()),
+            (b"name", name.clone()),
+        ]);
+        assert!(requires(&font));
+        // A different checksum, an extra `cvt ` table, or a missing table
+        // each break the match.
+        let font = sfnt(&[(b"fpgm", fpgm.clone()), (b"prep", forged_table(0x117C, 1))]);
+        assert!(!requires(&font));
+        let font = sfnt(&[
+            (b"cvt ", vec![0; 4]),
+            (b"fpgm", fpgm.clone()),
+            (b"prep", prep),
+        ]);
+        assert!(!requires(&font));
+        let font = sfnt(&[(b"fpgm", fpgm)]);
+        assert!(!requires(&font));
+    }
+
+    #[test]
+    fn font_without_name_or_matching_tables_is_not_hint_reliant() {
+        let font = sfnt(&[(b"name", name_table(&[win(1, "Roboto")]))]);
+        assert!(!requires(&font));
+        assert!(!requires(&sfnt(&[])));
     }
 
     #[test]
