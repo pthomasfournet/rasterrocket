@@ -1568,9 +1568,9 @@ impl<'doc> PageRenderer<'doc> {
     /// device pixel inside the image's bounding box samples the source pixel
     /// under its centre (nearest neighbour), via a [`SampleGrid`] shared by
     /// the CPU sampler below and the GPU blit kernel.  A host-resident
-    /// colour image drawn at under half its resolution is first reduced by
-    /// block averaging (`image_reduce`).  A mask is sampled the same way
-    /// through a [`MaskSampler`] at its own resolution.
+    /// image or stencil drawn at under half its resolution is first reduced
+    /// by block averaging (`image_reduce`).  A mask is reduced and sampled
+    /// the same way through a [`MaskSampler`] at its own resolution.
     #[expect(
         clippy::too_many_lines,
         reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
@@ -1622,11 +1622,18 @@ impl<'doc> PageRenderer<'doc> {
         }
 
         let ctm = self.gstate.current().ctm;
-        // An image drawn at under half its resolution is area-averaged down
-        // first so that point sampling does not drop thin features.  The
-        // mask, if any, stays the original's and is sampled on its own grid.
-        let mask_src = img.smask.as_ref();
-        let reduced = image_draw_size(&ctm).and_then(|d| image_reduce::reduce_for_draw(img, d));
+        // An image or mask drawn at under half its resolution is
+        // area-averaged down first so that point sampling neither drops thin
+        // features nor turns them into whole pixels.  The image and its mask
+        // reduce separately, each on its own grid.
+        let draw = image_draw_size(&ctm);
+        let reduced_mask = img
+            .smask
+            .as_ref()
+            .zip(draw)
+            .and_then(|(m, d)| image_reduce::reduce_mask_for_draw(m, d));
+        let mask_src = reduced_mask.as_ref().or(img.smask.as_ref());
+        let reduced = draw.and_then(|d| image_reduce::reduce_for_draw(img, d));
         let img = reduced.as_ref().unwrap_or(img);
         let Some(grid) = SampleGrid::new(&ctm, self.width, self.height, img.width, img.height)
         else {
@@ -1746,10 +1753,13 @@ impl<'doc> PageRenderer<'doc> {
                     continue;
                 };
                 let img_idx = iy as usize * img_w + ix as usize;
-                // Stencil masks paint the fill colour through their zero
-                // samples and carry no soft mask (asserted at entry).
+                // Stencil masks paint the fill colour with coverage
+                // `255 − sample` and carry no soft mask (asserted at entry).
                 let alpha = match img.color_space {
-                    ImageColorSpace::Mask => coverage,
+                    ImageColorSpace::Mask => div255(
+                        u32::from(u8::MAX - img_bytes.get(img_idx).copied().unwrap_or(u8::MAX))
+                            * u32::from(coverage),
+                    ),
                     ImageColorSpace::Rgb | ImageColorSpace::Gray => div255(
                         u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, (ix, iy))))
                             * u32::from(coverage),
@@ -1765,9 +1775,7 @@ impl<'doc> PageRenderer<'doc> {
                         .get(img_idx * 3..img_idx * 3 + 3)
                         .map(|rgb| [rgb[0], rgb[1], rgb[2]]),
                     ImageColorSpace::Gray => img_bytes.get(img_idx).map(|&g| [g, g, g]),
-                    ImageColorSpace::Mask => {
-                        (img_bytes.get(img_idx) == Some(&0x00)).then_some(fill_color)
-                    }
+                    ImageColorSpace::Mask => Some(fill_color),
                 };
                 if let Some(src) = src {
                     compositor.paint(row, alpha_row.as_deref_mut(), dx, dy, src, alpha);

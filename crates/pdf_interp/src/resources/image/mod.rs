@@ -227,6 +227,9 @@ pub enum ImageColorSpace {
     /// Three bytes per pixel: R, G, B.
     Rgb,
     /// 1-bit mask: pixel = 0 means "paint with current colour", 1 = transparent.
+    /// Decoded as one byte per pixel, `0x00` paint and `0xFF` transparent; an
+    /// intermediate byte `v` (from area-averaging reduction) paints with
+    /// coverage `255 − v`.
     Mask,
 }
 

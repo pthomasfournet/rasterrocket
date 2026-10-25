@@ -5,34 +5,72 @@
 //! [`super::image_sampler`]).  When an image is drawn at less than half its
 //! resolution, that point sampling skips most source pixels and features
 //! narrower than the sampling step — thin strokes of lettering, fine rules —
-//! break up or vanish.  Reducing the image first by the integer factor
-//! `floor(source / drawn)` on each axis, each output pixel the mean of its
-//! `fx × fy` source block, leaves the blit at most a 2:1 step, so every
-//! source pixel contributes to the page.
+//! break up or vanish, or, for a bilevel stencil, land as whole dark pixels.
+//! Reducing the image first by the integer factor `floor(source / drawn)` on
+//! each axis, each output pixel the mean of its `fx × fy` source block,
+//! leaves the blit at most a 2:1 step, so every source pixel contributes to
+//! the page in proportion to its area.
 
-use crate::resources::image::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
+use crate::resources::SoftMask;
+use crate::resources::image::{ImageData, ImageDescriptor, ImageFilter};
 
 /// Reduce `img` for drawing at `draw` device pixels (its extent along the
 /// image's own x and y axes).
 ///
 /// Returns `None` — draw `img` as is — when neither axis is reduced by a
-/// factor of at least 2, when the samples are not host-resident, or for a
-/// stencil mask, whose samples select paint rather than carry colour.  The
-/// result carries no mask: the caller keeps sampling the original mask,
-/// which is resolved at its own resolution.
+/// factor of at least 2 or when the samples are not host-resident.  A
+/// stencil mask reduces like a grey image: its samples are 0 (paint) and
+/// 255 (transparent), so each block mean is 255 minus the block's paint
+/// coverage.  The result carries no mask: the caller reduces the original's
+/// mask separately with [`reduce_mask_for_draw`], on the mask's own grid.
 pub(super) fn reduce_for_draw(img: &ImageDescriptor, draw: (u32, u32)) -> Option<ImageDescriptor> {
-    let bpp = match img.color_space {
-        ImageColorSpace::Gray => 1,
-        ImageColorSpace::Rgb => 3,
-        ImageColorSpace::Mask => return None,
-    };
-    let fx = (img.width / draw.0.max(1)).max(1);
-    let fy = (img.height / draw.1.max(1)).max(1);
-    if fx < 2 && fy < 2 {
-        return None;
-    }
+    let bpp = img.color_space.bytes_per_pixel();
+    let (fx, fy) = factors(img.width, img.height, draw)?;
     let src = img.data.as_cpu()?;
-    let (w, h) = (img.width as usize, img.height as usize);
+    let (width, height, out) = block_mean(src, img.width, img.height, bpp, fx, fy)?;
+    Some(ImageDescriptor {
+        width,
+        height,
+        color_space: img.color_space,
+        data: ImageData::Cpu(out),
+        smask: None,
+        filter: ImageFilter::Raw,
+    })
+}
+
+/// Reduce `mask` for drawing at `draw` device pixels, as
+/// [`reduce_for_draw`] does an image: each reduced value is the mean alpha
+/// of its block, so a bilevel mask becomes the fraction of each block it
+/// admits.
+pub(super) fn reduce_mask_for_draw(mask: &SoftMask, draw: (u32, u32)) -> Option<SoftMask> {
+    let (fx, fy) = factors(mask.width(), mask.height(), draw)?;
+    let (width, height, out) = block_mean(mask.alpha(), mask.width(), mask.height(), 1, fx, fy)?;
+    SoftMask::new(width, height, out)
+}
+
+/// The integer reduction factors `floor(source / drawn)` per axis, or
+/// `None` when neither reaches 2.
+fn factors(width: u32, height: u32, draw: (u32, u32)) -> Option<(u32, u32)> {
+    let fx = (width / draw.0.max(1)).max(1);
+    let fy = (height / draw.1.max(1)).max(1);
+    (fx >= 2 || fy >= 2).then_some((fx, fy))
+}
+
+/// Replace each `fx × fy` block of a `width × height` image of `bpp`-byte
+/// pixels by its rounded per-channel mean; partial blocks at the right and
+/// bottom edges average the pixels they hold.
+///
+/// Returns the reduced width, height and samples, or `None` when `src` does
+/// not hold exactly `width × height × bpp` bytes.
+fn block_mean(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    bpp: usize,
+    fx: u32,
+    fy: u32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let (w, h) = (width as usize, height as usize);
     if src.len() != w.checked_mul(h)?.checked_mul(bpp)? {
         return None;
     }
@@ -67,28 +105,17 @@ pub(super) fn reduce_for_draw(img: &ImageDescriptor, draw: (u32, u32)) -> Option
             }
         }
     }
-
-    Some(ImageDescriptor {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "out_w ≤ img.width, which is a u32"
-        )]
-        width: out_w as u32,
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "out_h ≤ img.height, which is a u32"
-        )]
-        height: out_h as u32,
-        color_space: img.color_space,
-        data: ImageData::Cpu(out),
-        smask: None,
-        filter: ImageFilter::Raw,
-    })
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "out_w ≤ width and out_h ≤ height, which are u32"
+    )]
+    Some((out_w as u32, out_h as u32, out))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::image::ImageColorSpace;
 
     fn gray(width: u32, height: u32, data: Vec<u8>) -> ImageDescriptor {
         ImageDescriptor {
@@ -136,12 +163,32 @@ mod tests {
     }
 
     #[test]
-    fn no_reduction_below_two_to_one_or_for_stencils() {
+    fn no_reduction_below_two_to_one() {
         assert!(reduce_for_draw(&gray(10, 10, vec![0; 100]), (6, 6)).is_none());
+        let mask = SoftMask::new(10, 10, vec![0; 100]).unwrap();
+        assert!(reduce_mask_for_draw(&mask, (6, 6)).is_none());
+    }
+
+    /// A stencil's reduced sample is 255 minus the paint coverage of its
+    /// block: one painted sample in four leaves 191.
+    #[test]
+    fn stencil_blocks_reduce_to_their_paint_coverage() {
         let stencil = ImageDescriptor {
             color_space: ImageColorSpace::Mask,
-            ..gray(10, 10, vec![0; 100])
+            ..gray(4, 2, vec![0, 255, 0, 0, 255, 255, 0, 0])
         };
-        assert!(reduce_for_draw(&stencil, (2, 2)).is_none());
+        let out = reduce_for_draw(&stencil, (2, 1)).expect("reduced");
+        assert_eq!(out.color_space, ImageColorSpace::Mask);
+        assert_eq!((out.width, out.height), (2, 1));
+        assert_eq!(out.data.as_cpu().unwrap(), &[191, 0]);
+    }
+
+    /// A bilevel mask reduces to the fraction of each block it admits.
+    #[test]
+    fn mask_blocks_reduce_to_their_mean_alpha() {
+        let mask = SoftMask::new(6, 3, [[255, 0, 0, 255, 255, 255]; 3].concat()).unwrap();
+        let out = reduce_mask_for_draw(&mask, (2, 1)).expect("reduced");
+        assert_eq!((out.width(), out.height()), (2, 1));
+        assert_eq!(out.alpha(), &[85, 255]);
     }
 }
