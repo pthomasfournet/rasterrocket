@@ -16,6 +16,7 @@ pub mod cmap;
 pub mod colorspace;
 pub(crate) mod dict_ext;
 pub mod font;
+pub mod font_substitute;
 pub mod image;
 pub mod shading;
 pub mod tiling;

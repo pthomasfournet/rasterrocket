@@ -29,6 +29,7 @@ use pdf::{Dictionary, Document, Object};
 
 use crate::resources::cmap::{CMap, parse_cmap};
 use crate::resources::dict_ext::DictExt;
+use crate::resources::font_substitute::{SubstituteStyle, substitute_style};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -199,6 +200,8 @@ pub struct FontDescriptor {
     /// all fonts with a font program.  When `Some`, `bytes` is `None` and `kind`
     /// is `Other` (Type 3 has no font program; glyphs are content streams).
     pub type3: Option<Type3Data>,
+    /// Typeface class of the substitute drawn when `bytes` is `None`.
+    pub substitute: SubstituteStyle,
 }
 
 impl FontDescriptor {
@@ -262,6 +265,7 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         base_encoding,
         cid_encoding: None,
         type3: None,
+        substitute: substitute_style(doc, dict, Some(dict)),
     }
 }
 
@@ -541,6 +545,7 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
             widths,
         }),
         type3: None,
+        substitute: substitute_style(doc, dict, descendant.as_ref()),
     }
 }
 
@@ -661,6 +666,7 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
             glyphs,
             font_matrix,
         }),
+        substitute: SubstituteStyle::default(),
     }
 }
 
@@ -1105,6 +1111,7 @@ mod tests {
             base_encoding: BaseEncoding::Standard,
             cid_encoding: None,
             type3: None,
+            substitute: SubstituteStyle::default(),
         }
     }
 

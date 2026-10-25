@@ -4,8 +4,10 @@
 //! [`FontFace`].  Faces are loaded on first use during rendering, then reused
 //! for all subsequent glyphs in the same page.
 //!
-//! When a font has no embedded bytes the cache falls back to a system font
-//! (Liberation Sans or Helvetica) located via a compile-time search path.
+//! When a font has no embedded bytes the cache draws it with an installed
+//! substitute of the same family class and variant (sans-serif, serif or
+//! monospaced; regular, bold, italic or bold italic), located through a
+//! fixed search path.
 //!
 //! # Threading
 //!
@@ -23,32 +25,89 @@ use font::{
 };
 
 use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
+use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 
-// ── Fallback font discovery ───────────────────────────────────────────────────
+// ── Substitute font discovery ─────────────────────────────────────────────────
 
-/// Candidate paths searched in order on Linux/macOS/Windows for a sans-serif
-/// substitute when a PDF font is not embedded.
-const FALLBACK_CANDIDATES: &[&str] = &[
-    // Linux (fonts-liberation or ttf-liberation)
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-    // macOS
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/Library/Fonts/Arial.ttf",
-    // Windows (Wine / Proton)
-    "C:/Windows/Fonts/arial.ttf",
+/// Installed typefaces per [`SubstituteStyle`], indexed by
+/// [`substitute_index`]: `[metric-compatible free family stem, macOS
+/// supplemental file stem, Windows file stem]`.
+const SUBSTITUTES: [[&str; 3]; 12] = [
+    ["LiberationSans-Regular", "Arial", "arial"],
+    ["LiberationSans-Italic", "Arial Italic", "ariali"],
+    ["LiberationSans-Bold", "Arial Bold", "arialbd"],
+    ["LiberationSans-BoldItalic", "Arial Bold Italic", "arialbi"],
+    ["LiberationSerif-Regular", "Times New Roman", "times"],
+    ["LiberationSerif-Italic", "Times New Roman Italic", "timesi"],
+    ["LiberationSerif-Bold", "Times New Roman Bold", "timesbd"],
+    [
+        "LiberationSerif-BoldItalic",
+        "Times New Roman Bold Italic",
+        "timesbi",
+    ],
+    ["LiberationMono-Regular", "Courier New", "cour"],
+    ["LiberationMono-Italic", "Courier New Italic", "couri"],
+    ["LiberationMono-Bold", "Courier New Bold", "courbd"],
+    [
+        "LiberationMono-BoldItalic",
+        "Courier New Bold Italic",
+        "courbi",
+    ],
 ];
 
-/// Locate and cache the fallback font path.  Returns `None` if none of the
-/// candidates exist.
-fn fallback_font_path() -> Option<&'static str> {
-    static CACHE: OnceLock<Option<&'static str>> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        FALLBACK_CANDIDATES
-            .iter()
-            .find(|&&p| PathBuf::from(p).exists())
-            .copied()
-    })
+/// Last-resort sans-serif candidates outside the [`SUBSTITUTES`] layout.
+const LAST_RESORT: &[&str] = &[
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Library/Fonts/Arial.ttf",
+];
+
+/// Row of [`SUBSTITUTES`] for `style`.
+const fn substitute_index(style: SubstituteStyle) -> usize {
+    let family = match style.family {
+        SubstituteFamily::Sans => 0,
+        SubstituteFamily::Serif => 1,
+        SubstituteFamily::Mono => 2,
+    };
+    family * 4 + (style.bold as usize) * 2 + (style.italic as usize)
+}
+
+/// Candidate paths for one [`SUBSTITUTES`] row, in search order.
+fn substitute_candidates([stem, mac, win]: [&str; 3]) -> [String; 4] {
+    [
+        format!("/usr/share/fonts/truetype/liberation/{stem}.ttf"),
+        format!("/usr/share/fonts/liberation/{stem}.ttf"),
+        format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
+        format!("C:/Windows/Fonts/{win}.ttf"),
+    ]
+}
+
+/// Locate the installed substitute for `style`: the exact family and
+/// variant, else the family's regular face, else the sans-serif regular
+/// face, else a last-resort system sans-serif.  `None` if nothing usable
+/// is installed.  Resolved once per process.
+fn substitute_font_path(style: SubstituteStyle) -> Option<&'static str> {
+    static CACHE: OnceLock<[Option<Box<str>>; 12]> = OnceLock::new();
+    let table = CACHE.get_or_init(|| {
+        let installed = |row: usize| {
+            substitute_candidates(SUBSTITUTES[row])
+                .into_iter()
+                .find(|p| PathBuf::from(p).exists())
+        };
+        std::array::from_fn(|row| {
+            let family_regular = row - row % 4;
+            installed(row)
+                .or_else(|| installed(family_regular))
+                .or_else(|| installed(0))
+                .or_else(|| {
+                    LAST_RESORT
+                        .iter()
+                        .find(|p| PathBuf::from(p).exists())
+                        .map(|&p| p.to_owned())
+                })
+                .map(String::into_boxed_str)
+        })
+    });
+    table[substitute_index(style)].as_deref()
 }
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -168,7 +227,7 @@ impl FontCache {
                 .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
                 .ok()?
         } else {
-            let path = fallback_font_path()?;
+            let path = substitute_font_path(desc.substitute)?;
             self.engine
                 .load_file_face(path, 0, params)
                 .inspect_err(|e| log::debug!("font_cache: fallback font {path}: {e}"))
@@ -1748,6 +1807,55 @@ mod tests {
     }
 
     #[test]
+    fn substitute_rows_match_styles() {
+        for family in [
+            SubstituteFamily::Sans,
+            SubstituteFamily::Serif,
+            SubstituteFamily::Mono,
+        ] {
+            for bold in [false, true] {
+                for italic in [false, true] {
+                    let style = SubstituteStyle {
+                        family,
+                        bold,
+                        italic,
+                    };
+                    let stem = SUBSTITUTES[substitute_index(style)][0];
+                    let family_name = match family {
+                        SubstituteFamily::Sans => "Sans-",
+                        SubstituteFamily::Serif => "Serif-",
+                        SubstituteFamily::Mono => "Mono-",
+                    };
+                    assert!(stem.contains(family_name), "{style:?} -> {stem}");
+                    assert_eq!(stem.contains("Bold"), bold, "{style:?} -> {stem}");
+                    assert_eq!(stem.contains("Italic"), italic, "{style:?} -> {stem}");
+                }
+            }
+        }
+    }
+
+    /// A serif request resolves to a different installed face than the
+    /// sans-serif default whenever a serif substitute is installed.
+    #[test]
+    fn serif_substitute_is_not_the_sans_face() {
+        let serif = SubstituteStyle {
+            family: SubstituteFamily::Serif,
+            ..SubstituteStyle::default()
+        };
+        let installed = substitute_candidates(SUBSTITUTES[substitute_index(serif)])
+            .iter()
+            .any(|p| PathBuf::from(p).exists());
+        if !installed {
+            eprintln!("no serif substitute installed; skipping");
+            return;
+        }
+        assert_ne!(
+            substitute_font_path(serif),
+            substitute_font_path(SubstituteStyle::default())
+        );
+    }
+
+    #[test]
     fn unicode_resolution_dispatch() {
         // Non-embedded simple fonts of every kind resolve through the
         // substitute face's Unicode cmap.
@@ -1800,7 +1908,7 @@ mod tests {
     /// face's glyphs at code points 0 and 1.
     #[test]
     fn non_embedded_font_resolves_differences_on_substitute_face() {
-        if fallback_font_path().is_none() {
+        if substitute_font_path(SubstituteStyle::default()).is_none() {
             eprintln!("no substitute font installed; skipping");
             return;
         }
@@ -1818,6 +1926,7 @@ mod tests {
             base_encoding: BaseEncoding::MacRoman,
             cid_encoding: None,
             type3: None,
+            substitute: SubstituteStyle::default(),
         };
         let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
         let face = cache
