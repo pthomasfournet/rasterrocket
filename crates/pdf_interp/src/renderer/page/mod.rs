@@ -52,12 +52,12 @@ mod operators;
 mod patterns;
 mod shading_paint;
 mod soft_mask;
-use patterns::PatternPaint;
 mod text;
 mod text_ops;
 #[cfg(feature = "vulkan")]
 mod vk_ops;
 
+use patterns::PatternPaint;
 use pdf::{Document, ObjectId};
 
 use color::Rgb8;
