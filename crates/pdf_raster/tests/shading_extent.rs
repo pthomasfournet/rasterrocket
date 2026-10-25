@@ -3,8 +3,9 @@
 //! parameter range unpainted unless `Extend` carries it there, a radial
 //! shading leaves the points on none of its circles unpainted, and a
 //! function-based shading leaves the points outside its `Domain` unpainted.
-//! The backdrop survives at every unpainted point.  `BBox` clips the
-//! shading (§8.7.4.3).
+//! The backdrop survives at every unpainted point.  `BBox` clips the shading;
+//! `Background` fills the area of a shading pattern before the shading, and
+//! has no effect through `sh` (§8.7.4.3).
 
 #[expect(
     dead_code,
@@ -226,6 +227,106 @@ fn rotated_function_based_shading_leaves_its_domain_corners_unpainted() {
 }
 
 #[test]
+fn background_applies_to_a_shading_pattern_but_not_to_sh() {
+    let shading = axial("/Background [1 1 0]");
+    let probes = [(10, 50), (100, 50), (190, 50)];
+
+    let sh = rgb_at(
+        page(&format!("{BACKDROP}/Sh0 sh"), &shading, PATTERN, &[]),
+        &probes,
+    );
+    assert_eq!(sh[0], BLUE, "sh ignores Background");
+    assert!(is_ramp(sh[1]), "sh paints the shading: {:?}", sh[1]);
+    assert_eq!(sh[2], BLUE, "sh ignores Background");
+
+    let scn = rgb_at(
+        page(
+            &format!("{BACKDROP}/Pattern cs /P0 scn 0 0 200 100 re f"),
+            &shading,
+            PATTERN,
+            &[],
+        ),
+        &probes,
+    );
+    assert_eq!(scn[0], [255, 255, 0], "the pattern fills with Background");
+    assert!(
+        is_ramp(scn[1]),
+        "the pattern paints the shading: {:?}",
+        scn[1]
+    );
+    assert_eq!(scn[2], [255, 255, 0], "the pattern fills with Background");
+}
+
+#[test]
+fn shading_pattern_without_background_leaves_the_backdrop() {
+    let px = rgb_at(
+        page(
+            &format!("{BACKDROP}/Pattern cs /P0 scn 0 0 200 100 re f"),
+            &axial(""),
+            PATTERN,
+            &[],
+        ),
+        &[(10, 50), (100, 50), (190, 50)],
+    );
+    assert_eq!(px[0], BLUE);
+    assert!(is_ramp(px[1]), "{:?}", px[1]);
+    assert_eq!(px[2], BLUE);
+}
+
+#[test]
+fn shading_pattern_fill_is_limited_to_the_path() {
+    let px = rgb_at(
+        page(
+            &format!("{BACKDROP}/Pattern cs /P0 scn 80 20 40 60 re f"),
+            &axial("/Extend [true true] /Background [1 1 0]"),
+            PATTERN,
+            &[],
+        ),
+        &[(100, 50), (60, 50), (100, 90)],
+    );
+    assert!(is_ramp(px[0]), "inside the path: {:?}", px[0]);
+    assert_eq!(px[1], BLUE, "outside the path");
+    assert_eq!(px[2], BLUE, "outside the path");
+}
+
+#[test]
+fn shading_pattern_space_is_the_default_space_not_the_ctm() {
+    // The CTM scale must not move the gradient: the pattern's space is the
+    // page's default coordinate space (§8.7.3.1).
+    let px = rgb_at(
+        page(
+            &format!("{BACKDROP}0.5 0 0 0.5 0 0 cm /Pattern cs /P0 scn 0 0 400 200 re f"),
+            &axial(""),
+            PATTERN,
+            &[],
+        ),
+        &[(40, 50), (100, 50), (160, 50)],
+    );
+    assert_eq!(px[0], BLUE, "x = 40 is before the start point");
+    assert!(is_ramp(px[1]), "{:?}", px[1]);
+    assert_eq!(px[2], BLUE, "x = 160 is beyond the end point");
+}
+
+#[test]
+fn shading_pattern_matrix_maps_pattern_space_to_default_space() {
+    // Matrix doubles pattern space: the axis 25 → 75 lands on 50 → 150.
+    let shading = "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [25 25 75 25] \
+                   /Function 7 0 R >>";
+    let px = rgb_at(
+        page(
+            &format!("{BACKDROP}/Pattern cs /P0 scn 0 0 200 100 re f"),
+            shading.as_bytes(),
+            "<< /PatternType 2 /Shading 5 0 R /Matrix [2 0 0 2 0 0] >>",
+            &[RED_TO_GREEN.as_bytes().to_vec()],
+        ),
+        &[(40, 50), (100, 50), (160, 50)],
+    );
+    assert_eq!(px[0], BLUE);
+    assert!(is_ramp(px[1]), "{:?}", px[1]);
+    assert_eq!(px[2], BLUE);
+}
+
+#[test]
 fn bbox_clips_the_shading() {
     let px = rgb_at(
         page(
@@ -238,4 +339,29 @@ fn bbox_clips_the_shading() {
     );
     assert!(is_ramp(px[0]), "inside the BBox: {:?}", px[0]);
     assert_eq!(px[1], BLUE, "outside the BBox");
+}
+
+#[test]
+fn mesh_shading_pattern_fill_is_limited_to_the_path() {
+    // A 2 × 2 lattice over the page, red on the left and green on the right.
+    let shading = stream_object(
+        &format!(
+            "/ShadingType 5 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+             /BitsPerComponent 8 /VerticesPerRow 2 /Decode [0 200 0 100 0 1] \
+             /Function {RED_TO_GREEN}"
+        ),
+        &[0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255],
+    );
+    let px = rgb_at(
+        page(
+            &format!("{BACKDROP}/Pattern cs /P0 scn 50 25 100 50 re f"),
+            &shading,
+            PATTERN,
+            &[],
+        ),
+        &[(100, 50), (20, 50), (100, 90)],
+    );
+    assert!(is_ramp(px[0]), "inside the path: {:?}", px[0]);
+    assert_eq!(px[1], BLUE, "outside the path");
+    assert_eq!(px[2], BLUE, "outside the path");
 }

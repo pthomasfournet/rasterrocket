@@ -7,8 +7,8 @@
 //! Sub-modules (all private; named for orientation only):
 //! - `operators` — `execute_one` operator dispatch table.
 //! - `text` — `show_text` and `show_text_type3` rendering.
-//! - `patterns` — `resolve_fill_pattern` and `render_pattern_tile`.
-//! - `shading_paint` — the `sh` operator.
+//! - `patterns` — `resolve_pattern`, `resolve_fill_pattern` and `render_pattern_tile`.
+//! - `shading_paint` — the `sh` operator and shading-pattern fills and strokes.
 //! - `text_ops` — `GlyphRecord` and `text_to_device` helpers.
 //! - `annotations` — annotation appearance stream rendering.
 //! - `gpu_ops` — GPU-accelerated fill dispatch.
@@ -30,7 +30,7 @@
 //!
 //! - Text render modes 4–7 — fill/stroke painting combined with text-as-clip
 //!   (`glyph_path` outlines accumulated into the clip region per PDF §9.3.6)
-//! - `PatternType` 1 tiling patterns via `scn`/`SCN`
+//! - `PatternType` 1 tiling patterns and `PatternType` 2 shading patterns via `scn`/`SCN`
 //! - Type 3 paint-procedure fonts — `CharProc` content streams, `d0`/`d1` metrics
 //!
 //! - Optional Content Groups (OCG / layers) — `BDC /OC` respects `OCProperties/D`
@@ -52,6 +52,7 @@ mod operators;
 mod patterns;
 mod shading_paint;
 mod soft_mask;
+use patterns::PatternPaint;
 mod text;
 mod text_ops;
 #[cfg(feature = "vulkan")]
@@ -340,6 +341,11 @@ pub struct PageRenderer<'doc> {
     /// tile renderers carry this incremented; capped at `MAX_PATTERN_DEPTH`
     /// to break self-referential pattern cycles (see `resolve_fill_pattern`).
     pub(super) pattern_depth: u32,
+    /// The matrix from the default coordinate space of the content stream
+    /// being executed to the device (PDF §8.7.3.1): the page's initial CTM,
+    /// a form's CTM once its `Matrix` is applied, or a pattern tile's CTM.
+    /// A shading pattern's `Matrix` is concatenated onto it.
+    pub(super) pattern_ctm: Ctm,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Resource name of the image `XObject` being drawn, set for the duration
@@ -567,8 +573,8 @@ impl<'doc> PageRenderer<'doc> {
         bitmap.data_mut().fill(255u8); // white background
 
         let mut gstate = GStateStack::new(width, height);
-        gstate.current_mut().ctm =
-            build_initial_ctm(width, height, scale, rotate_cw, origin_x, origin_y);
+        let initial_ctm = build_initial_ctm(width, height, scale, rotate_cw, origin_x, origin_y);
+        gstate.current_mut().ctm = initial_ctm;
 
         let font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
         let resources = PageResources::new(doc, page_id);
@@ -584,6 +590,7 @@ impl<'doc> PageRenderer<'doc> {
             resources,
             form_depth: 0,
             pattern_depth: 0,
+            pattern_ctm: initial_ctm,
             diag: PageDiagnostics::default(),
             current_image: None,
             op_budget: MAX_PAGE_OPS,
@@ -1114,9 +1121,17 @@ impl<'doc> PageRenderer<'doc> {
         let solid_color = gs.fill_color.as_slice().to_vec();
         let _ = gs; // end the immutable gstate borrow before the &mut self pattern resolve
 
-        let tiled = pat_name
+        let tiled = match pat_name
             .as_deref()
-            .and_then(|name| self.resolve_fill_pattern(name));
+            .and_then(|name| self.resolve_pattern(name))
+        {
+            Some(PatternPaint::Shading(shading)) => {
+                self.fill_with_shading(path, even_odd, clip, &pipe, flatness, shading);
+                return;
+            }
+            Some(PatternPaint::Tiled(tiled)) => Some(tiled),
+            None => None,
+        };
         let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
             PipeSrc::Pattern(p as &dyn Pattern)
         });
@@ -1229,6 +1244,7 @@ impl<'doc> PageRenderer<'doc> {
         // stays a device-space tolerance.  A singular CTM collapses the path
         // to a line or point, so it is stroked in device space unchanged.
         let device = self.device_matrix();
+        let device_flatness = flatness;
         let (path, matrix, flatness) = invert_affine(&device).map_or_else(
             || (path.clone(), DEVICE_MATRIX, flatness),
             |inv| {
@@ -1253,9 +1269,31 @@ impl<'doc> PageRenderer<'doc> {
         };
 
         // Resolve the stroke source — pattern or solid colour.
-        let tiled = pat_name
+        let tiled = match pat_name
             .as_deref()
-            .and_then(|name| self.resolve_fill_pattern(name));
+            .and_then(|name| self.resolve_pattern(name))
+        {
+            Some(PatternPaint::Shading(shading)) => {
+                let clip = clip.clone_shared();
+                if self.stroke_with_shading(
+                    &path,
+                    &matrix,
+                    &params,
+                    clip,
+                    &pipe,
+                    device_flatness,
+                    shading,
+                ) {
+                    return;
+                }
+                log::debug!(
+                    "rasterrocket-interp: mesh shading pattern as a stroke colour is not supported — stroking in the current colour"
+                );
+                None
+            }
+            Some(PatternPaint::Tiled(tiled)) => Some(tiled),
+            None => None,
+        };
         let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
             PipeSrc::Pattern(p as &dyn Pattern)
         });
@@ -1404,7 +1442,9 @@ impl<'doc> PageRenderer<'doc> {
         // reverse.  Post-multiplying scales the matrix's translation by the
         // wrong factor and pushes nested-form content off the device page.
         let old_ctm = self.gstate.current().ctm;
-        self.gstate.current_mut().ctm = ctm_multiply(&form.matrix, &old_ctm);
+        let form_ctm = ctm_multiply(&form.matrix, &old_ctm);
+        self.gstate.current_mut().ctm = form_ctm;
+        let parent_pattern_ctm = std::mem::replace(&mut self.pattern_ctm, form_ctm);
 
         // Switch to the form's resource context, keeping the parent for restore.
         let child_resources = self.resources.for_form(form);
@@ -1501,6 +1541,7 @@ impl<'doc> PageRenderer<'doc> {
 
         // Restore resources and graphics state.
         self.resources = parent_resources;
+        self.pattern_ctm = parent_pattern_ctm;
         self.form_depth -= 1;
         self.gstate.restore();
     }

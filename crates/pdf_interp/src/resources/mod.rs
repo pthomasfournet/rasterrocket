@@ -21,6 +21,7 @@ pub mod image;
 pub mod shading;
 pub mod tiling;
 
+use dict_ext::DictExt;
 use pdf::{Dictionary, Document, Object, ObjectId};
 use raster::types::BlendMode;
 
@@ -498,6 +499,39 @@ impl<'doc> PageResources<'doc> {
     ) -> Option<shading::ResolvedShading> {
         let shadings = self.resource_subdict(b"Shading")?;
         shading::resolve_shading(self.doc, &shadings, name, ctm, page_h)
+    }
+
+    /// Resolve the named `Pattern` resource as a shading pattern
+    /// (`PatternType` 2, PDF §8.7.4.2).
+    ///
+    /// `pattern_ctm` maps the default coordinate space of the pattern's
+    /// parent content stream to the device; the pattern's `Matrix` is
+    /// concatenated onto it.  Returns `None` if the name is absent, the
+    /// pattern is not a shading pattern, or its shading does not resolve.
+    #[must_use]
+    pub fn shading_pattern(
+        &self,
+        name: &[u8],
+        pattern_ctm: &[f64; 6],
+        page_h: f64,
+    ) -> Option<shading::ResolvedShading> {
+        let patterns = self.resource_subdict(b"Pattern")?;
+        let pattern = resolve_stream_dict(self.doc, patterns.get(name)?)?;
+        if pattern.get_i64(b"PatternType") != Some(2) {
+            return None;
+        }
+        let ctm = read_matrix(&pattern).map_or(*pattern_ctm, |m| {
+            crate::renderer::gstate::ctm_multiply(&m, pattern_ctm)
+        });
+        let resolved =
+            shading::resolve_shading_object(self.doc, pattern.get(b"Shading")?, &ctm, page_h);
+        if resolved.is_none() {
+            log::warn!(
+                "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
+                String::from_utf8_lossy(name)
+            );
+        }
+        resolved
     }
 
     /// Resolve a `Properties` resource entry to an OCG object ID.

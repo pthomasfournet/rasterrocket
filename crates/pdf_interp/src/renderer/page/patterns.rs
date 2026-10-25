@@ -3,6 +3,7 @@
 use super::super::color::RasterColor;
 use super::super::gstate::{ctm_multiply, ctm_transform};
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
+use crate::resources::shading::ResolvedShading;
 use crate::resources::{ColorSpace, PageResources};
 use color::Rgb8;
 use pdf::Document;
@@ -30,7 +31,27 @@ fn resolve_pattern_tint(doc: &Document, fill_cs: &ColorSpace, components: &[f64]
     components_to_color(components)
 }
 
+/// A resolved `Pattern` resource.
+pub(super) enum PatternPaint {
+    /// A tiling pattern (`PatternType` 1), rasterised to a tile.
+    Tiled(TiledPattern),
+    /// A shading pattern (`PatternType` 2).
+    Shading(ResolvedShading),
+}
+
 impl PageRenderer<'_> {
+    /// Resolve the named `Pattern` resource as a shading or tiling pattern.
+    pub(super) fn resolve_pattern(&mut self, name: &[u8]) -> Option<PatternPaint> {
+        let page_h = f64::from(self.height);
+        if let Some(shading) = self
+            .resources
+            .shading_pattern(name, &self.pattern_ctm, page_h)
+        {
+            return Some(PatternPaint::Shading(shading));
+        }
+        self.resolve_fill_pattern(name).map(PatternPaint::Tiled)
+    }
+
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -180,6 +201,7 @@ impl PageRenderer<'_> {
         tile_renderer.adopt_parent_budget(self);
 
         // Override the CTM to map pattern space → tile device space.
+        tile_renderer.pattern_ctm = *tile_ctm;
         let gs = tile_renderer.gstate.current_mut();
         gs.ctm = *tile_ctm;
         if let Some(c) = tint {
