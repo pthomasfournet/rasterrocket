@@ -11,6 +11,34 @@ use raster::{
     pipe::PipeSrc,
 };
 
+/// The painting operations of a text rendering mode (PDF §9.3.6, Table 106).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextModeOps {
+    /// Fill the glyphs with the non-stroking colour.
+    fill: bool,
+    /// Stroke the glyph outlines with the stroking colour and parameters.
+    stroke: bool,
+    /// Add the glyph outlines to the clipping path.
+    clip: bool,
+}
+
+impl TextModeOps {
+    /// The operations of `Tr` operand `mode`; a value outside `0..=7` fills.
+    const fn of(mode: i32) -> Self {
+        let (fill, stroke, clip) = match mode {
+            1 => (false, true, false),
+            2 => (true, true, false),
+            3 => (false, false, false),
+            4 => (true, false, true),
+            5 => (false, true, true),
+            6 => (true, true, true),
+            7 => (false, false, true),
+            _ => (true, false, false),
+        };
+        Self { fill, stroke, clip }
+    }
+}
+
 impl PageRenderer<'_> {
     /// Render a byte string using the current font, colour, and text matrix.
     ///
@@ -27,17 +55,14 @@ impl PageRenderer<'_> {
         }
         self.diag.has_vector_text = true;
 
-        // PDF render modes (PDF §9.3.6 Table 106):
-        //   0 fill, 1 stroke, 2 fill+stroke, 3 invisible
-        //   4 fill+clip, 5 stroke+clip, 6 fill+stroke+clip, 7 clip only
-        //
-        // For modes 4–6 we paint AND add glyph outlines to the clip path.
-        // Mode 3 and 7 skip painting; mode 7 still adds outlines to the clip.
-        let render_mode = self.gstate.current().text.render_mode;
-        let do_paint = render_mode != 3 && render_mode != 7;
-        let do_clip = render_mode >= 4;
+        let TextModeOps {
+            fill: do_fill,
+            stroke: do_stroke,
+            clip: do_clip,
+        } = TextModeOps::of(self.gstate.current().text.render_mode);
+        let do_paint = do_fill || do_stroke;
 
-        // Mode 3 (invisible) with no clip — nothing to do.
+        // Mode 3 (invisible) — nothing to do.
         if !do_paint && !do_clip {
             return;
         }
@@ -79,6 +104,9 @@ impl PageRenderer<'_> {
         // Type 3 glyphs are PDF content streams executed at the current pen
         // position.  They paint directly into the page bitmap, so there is no
         // two-phase rasterise-then-blit loop — each CharProc runs inline.
+        // A glyph description paints with its own operators and has no
+        // outline to fill or stroke (PDF §9.6.5), so every painting mode
+        // executes the CharProc unchanged.
         if let Some(t3) = descriptor.type3.clone() {
             self.show_text_type3(
                 bytes,
@@ -96,18 +124,15 @@ impl PageRenderer<'_> {
             return;
         }
 
-        // Phase 1: rasterize glyphs and optionally collect outlines for clip.
+        // Phase 1: rasterize glyphs and collect the outlines the mode needs.
         //
         // Two-phase design: borrow `font_cache` here (read-only after load), then
         // release it before touching `self.bitmap` or `self.gstate` in phase 2.
         let mut records: Vec<GlyphRecord> = Vec::with_capacity(bytes.len());
-        // Glyph outline paths in device space — populated only when `do_clip`.
-        // One entry per character code; `None` when the glyph has no outline.
-        let mut clip_paths: Vec<Option<raster::path::Path>> = if do_clip {
-            Vec::with_capacity(bytes.len())
-        } else {
-            Vec::new()
-        };
+        // Union of the device-space glyph outlines, built when `do_clip`.
+        let mut clip_outline = raster::path::Path::new();
+        // Union of the device-space glyph outlines, built when `do_stroke`.
+        let mut stroke_outline = raster::path::Path::new();
         // Device-space outlines of glyphs painted as filled paths instead of
         // cached bitmaps (faces too large for glyph bitmaps).
         let mut fill_paths: Vec<raster::path::Path> = Vec::new();
@@ -131,15 +156,18 @@ impl PageRenderer<'_> {
             let Some(face) = self.font_cache.get_or_load(&font_name, &descriptor, trm) else {
                 return;
             };
-            let paint_as_path = do_paint && face.prefers_path_fill();
+            let fill_as_path = do_fill && face.prefers_path_fill();
+            let fill_as_bitmap = do_fill && !fill_as_path;
+            let need_outline = do_clip || do_stroke || fill_as_path;
 
             // Iterate character codes.  Simple fonts use one byte per character;
             // Type 0 composite fonts use 1–4 bytes determined by the Encoding CMap.
             let cid_enc = descriptor.cid_encoding.as_ref();
 
-            // Shared helper: push a rasterized glyph into `records` (when painting)
-            // and collect its outline path into `clip_paths` (when clipping);
-            // a face too large for glyph bitmaps paints through `fill_paths`.
+            // Shared helper: push a rasterized glyph into `records` (when
+            // filling) and append its outline to `stroke_outline` (when
+            // stroking) and `clip_outline` (when clipping); a face too large
+            // for glyph bitmaps fills through `fill_paths`.
             //
             // `gid` is the resolved glyph index.  `char_code_for_path` is the
             // raw character code.  `by_gid` selects which one the face is
@@ -157,7 +185,7 @@ impl PageRenderer<'_> {
             //   (whose charmap is absent/unrelated), rendering a blank page.
             let mut push_glyph =
                 |char_code_for_path: u32, gid: u32, by_gid: bool, pen_x: i32, pen_y: i32| {
-                    let bmp = if do_paint && !paint_as_path {
+                    let bmp = if fill_as_bitmap {
                         if by_gid {
                             face.make_glyph_by_gid_cached(glyph_cache, gid, 0)
                         } else {
@@ -173,33 +201,35 @@ impl PageRenderer<'_> {
                             bitmap,
                         });
                     }
-                    if do_clip || paint_as_path {
-                        // The glyph outline in device space.  `glyph_path`
-                        // returns pixels relative to the pen position with
-                        // Trm applied, y up; translate by (pen_x, pen_y) and
-                        // flip y (device y is positive-down).
-                        let outline = if by_gid {
-                            face.glyph_path_by_gid(gid)
-                        } else {
-                            face.glyph_path(char_code_for_path)
-                        };
-                        let path = outline.map(|mut p| {
-                            let px = f64::from(pen_x);
-                            let py = f64::from(pen_y);
-                            for pt in &mut p.pts {
-                                pt.x += px;
-                                pt.y = py - pt.y;
-                            }
-                            p
-                        });
-                        if do_clip {
-                            if paint_as_path {
-                                fill_paths.extend(path.clone());
-                            }
-                            clip_paths.push(path);
-                        } else {
-                            fill_paths.extend(path);
-                        }
+                    if !need_outline {
+                        return;
+                    }
+                    // The glyph outline in device space.  `glyph_path`
+                    // returns pixels relative to the pen position with Trm
+                    // applied, y up; translate by (pen_x, pen_y) and flip y
+                    // (device y is positive-down).
+                    let outline = if by_gid {
+                        face.glyph_path_by_gid(gid)
+                    } else {
+                        face.glyph_path(char_code_for_path)
+                    };
+                    let Some(mut path) = outline else {
+                        return;
+                    };
+                    let px = f64::from(pen_x);
+                    let py = f64::from(pen_y);
+                    for pt in &mut path.pts {
+                        pt.x += px;
+                        pt.y = py - pt.y;
+                    }
+                    if do_clip {
+                        clip_outline.append(&path);
+                    }
+                    if do_stroke {
+                        stroke_outline.append(&path);
+                    }
+                    if fill_as_path {
+                        fill_paths.push(path);
                     }
                 };
 
@@ -261,8 +291,8 @@ impl PageRenderer<'_> {
             }
         } // font_cache borrow released here
 
-        // Phase 2: blit rasterized glyphs (skipped for modes 3 and 7).
-        if do_paint {
+        // Phase 2: fill the glyphs, then stroke their outlines.
+        if do_fill {
             let fill_bytes = self.gstate.current().fill_color.as_slice().to_vec();
             let clip = self.gstate.current().clip.clone_shared();
             let pipe = Self::make_pipe(
@@ -301,24 +331,20 @@ impl PageRenderer<'_> {
                 self.fill_path(path, false);
             }
         }
+        // The stroke parameters are user-space quantities under the CTM, as
+        // for any stroked path (PDF §8.4.3.2); the text matrix and font size
+        // scale the outline but not the line width.
+        if do_stroke && !stroke_outline.pts.is_empty() {
+            self.stroke_path(&stroke_outline);
+        }
 
         // Phase 3: intersect glyph outlines into the clip path (modes 4–7).
         //
         // PDF §9.3.6: glyph outlines from a single text-showing operator are
-        // unioned together first, then the union is intersected with the clip.
-        // We build a single accumulated path from all glyphs and call
-        // `clip_to_path` once with `even_odd = false` (non-zero winding), which
-        // matches Acrobat's behaviour for composite glyph clip paths.
-        if do_clip {
-            let mut glyph_outline = raster::path::Path::new();
-            for p in clip_paths.into_iter().flatten() {
-                if !p.pts.is_empty() {
-                    glyph_outline.append(&p);
-                }
-            }
-            if !glyph_outline.pts.is_empty() {
-                self.clip_path_into_gstate(&glyph_outline, false);
-            }
+        // unioned together first, then the union is intersected with the clip
+        // under the non-zero winding rule.
+        if do_clip && !clip_outline.pts.is_empty() {
+            self.clip_path_into_gstate(&clip_outline, false);
         }
 
         // Write updated text matrix back.
@@ -436,5 +462,28 @@ impl PageRenderer<'_> {
 
         // Write updated text matrix back.
         self.gstate.current_mut().text.text_matrix = tm;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextModeOps;
+
+    #[test]
+    fn text_mode_ops_follow_the_mode_table() {
+        let ops = |m| {
+            let o = TextModeOps::of(m);
+            (o.fill, o.stroke, o.clip)
+        };
+        assert_eq!(ops(0), (true, false, false));
+        assert_eq!(ops(1), (false, true, false));
+        assert_eq!(ops(2), (true, true, false));
+        assert_eq!(ops(3), (false, false, false));
+        assert_eq!(ops(4), (true, false, true));
+        assert_eq!(ops(5), (false, true, true));
+        assert_eq!(ops(6), (true, true, true));
+        assert_eq!(ops(7), (false, false, true));
+        assert_eq!(ops(8), ops(0), "out of range fills");
+        assert_eq!(ops(-1), ops(0), "out of range fills");
     }
 }
