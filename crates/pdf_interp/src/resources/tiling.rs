@@ -23,7 +23,7 @@
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 
-use super::{read_bbox, read_f64_1, read_matrix, resolve_dict};
+use super::{read_bbox, read_f64_1, read_matrix};
 
 /// Parameters extracted from a PDF Type 1 (tiling) pattern stream.
 ///
@@ -52,19 +52,16 @@ pub struct TilingDescriptor {
 
 /// Look up a named `Pattern` resource and extract its tiling descriptor.
 ///
-/// `ctx_dict` is the dictionary of the current resource context (page or form
-/// stream object).  Returns `None` if the name is absent, the object is not a
+/// `patterns` is the `/Pattern` resource sub-dictionary in effect.  Returns
+/// `None` if the name is absent, the object is not a
 /// tiling pattern, or any required key is missing.
 #[must_use]
 pub fn resolve_tiling(
     doc: &Document,
-    ctx_dict: &Dictionary,
+    patterns: &Dictionary,
     name: &[u8],
 ) -> Option<TilingDescriptor> {
-    // Navigate Resources → Pattern → name.
-    let res = resolve_dict(doc, ctx_dict.get(b"Resources")?)?;
-    let pat_dict = resolve_dict(doc, res.get(b"Pattern")?)?;
-    let pat_obj = pat_dict.get(name)?;
+    let pat_obj = patterns.get(name)?;
 
     let Object::Reference(id) = pat_obj else {
         log::debug!(

@@ -46,10 +46,7 @@ use crate::{
     content::Operator,
     page_size_pts_by_id, parse_page_by_id,
     renderer::PageDiagnostics,
-    resources::{
-        image::{IMAGE_FILTER_COUNT, ImageFilter, filter_name, inline::parse_inline_params},
-        resolve_dict,
-    },
+    resources::image::{IMAGE_FILTER_COUNT, ImageFilter, filter_name, inline::parse_inline_params},
 };
 
 /// Maximum Form `XObject` recursion depth during the pre-scan.
@@ -160,32 +157,14 @@ fn scan_xobjects(
     max_ppi: &mut f32,
     page_pts_width: f32,
 ) {
-    let Ok(page_dict) = doc.get_dictionary(context_id) else {
+    // `/Resources` is inherited down the page tree when a page has none.
+    let Ok(xobj_dict) = doc.get_page_resource_dict(context_id, b"XObject") else {
         return;
     };
 
-    let xobj_dict = {
-        let Some(res_obj) = page_dict.get(b"Resources") else {
-            return;
-        };
-        let Some(res) = resolve_dict(doc, res_obj) else {
-            return;
-        };
-        let Some(xobj_obj) = res.get(b"XObject") else {
-            return;
-        };
-        let Some(d) = resolve_dict(doc, xobj_obj) else {
-            return;
-        };
-        // Collect (name, object) pairs to avoid borrowing `doc` through the loop.
-        d.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>()
-    };
-
-    for (_name, obj) in xobj_dict {
+    for (_name, obj) in &xobj_dict {
         // All XObject entries are References to stream objects.
-        let Object::Reference(xobj_id) = obj else {
+        let &Object::Reference(xobj_id) = obj else {
             continue;
         };
         let Ok(xobj_stream) = doc.get_object(xobj_id) else {

@@ -44,7 +44,7 @@
 
 use std::borrow::Cow;
 
-use pdf::{Dictionary, Document, Object, ObjectId};
+use pdf::{Dictionary, Document, Object};
 
 use crate::resources::dict_ext::DictExt;
 
@@ -212,8 +212,8 @@ pub enum ImageResolution {
     /// The codec returned `None` or the stream was structurally invalid.  The
     /// page is incomplete; the message should be surfaced to the caller.
     DecodeFailed(String),
-    /// The named resource is not an image (wrong `Subtype`, not present in the
-    /// `XObject` dict, etc.).  The renderer should skip silently — nothing to draw.
+    /// The named `XObject` exists and is of a non-image subtype that has no
+    /// raster appearance (e.g. `/PS`).  Nothing is lost by skipping it.
     Absent,
 }
 
@@ -407,15 +407,17 @@ pub struct ImageDescriptor {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Look up a named `XObject` in the page resource dictionary and, if it is an
-/// image, decode and return its pixels.
+/// Look up a named `XObject` in `xobjects`, the `/XObject` resource
+/// sub-dictionary in effect, and, if it is an image, decode and return its
+/// pixels.
 ///
 /// Returns:
 /// - [`ImageResolution::Ok`] on success,
-/// - [`ImageResolution::Absent`] if the name is not present or the object is not
-///   an image (legitimately nothing to draw — skip silently),
-/// - [`ImageResolution::DecodeFailed`] when the codec returns `None` or the stream
-///   is structurally invalid (genuine failure — surface to the caller).
+/// - [`ImageResolution::Absent`] if the object is an `XObject` of a subtype
+///   with no raster appearance (nothing to draw — skip silently),
+/// - [`ImageResolution::DecodeFailed`] when the name does not resolve to a
+///   readable `XObject` stream, the image dictionary is incomplete, or the
+///   codec fails (content is lost — surface to the caller).
 #[must_use]
 #[expect(
     clippy::too_many_lines,
@@ -423,7 +425,7 @@ pub struct ImageDescriptor {
 )]
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
-    page_dict: &Dictionary,
+    xobjects: &Dictionary,
     request: ImageRequest<'_>,
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
 ) -> ImageResolution {
@@ -433,30 +435,38 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 
     let doc = ctx.doc;
     let name = request.name;
-    let Some(stream_id) = xobject_id(doc, page_dict, name) else {
-        return ImageResolution::Absent;
+    let unresolved = |what: &str| {
+        let msg = format!("XObject /{}: {what}", String::from_utf8_lossy(name));
+        log::warn!("image: {msg}");
+        ImageResolution::DecodeFailed(msg)
+    };
+    let Some(entry) = xobjects.get(name) else {
+        return unresolved("not found in the /XObject resources");
+    };
+    let &Object::Reference(stream_id) = entry else {
+        return unresolved("resource entry is not an indirect reference");
     };
     // Bind the Arc to a local so the borrow into the stream below stays alive.
-    let Some(obj_arc) = doc.get_object(stream_id).ok() else {
-        return ImageResolution::Absent;
+    let Ok(obj_arc) = doc.get_object(stream_id) else {
+        return unresolved("object unreadable");
     };
     let Some(stream) = obj_arc.as_ref().as_stream() else {
-        return ImageResolution::Absent;
+        return unresolved("object is not a stream");
     };
 
-    // Must be an Image subtype.
-    let Some(subtype) = stream.dict.get_name(b"Subtype") else {
-        return ImageResolution::Absent;
-    };
-    if subtype != b"Image" {
-        return ImageResolution::Absent;
+    match stream.dict.get_name(b"Subtype") {
+        Some(b"Image") => {}
+        // A form reaches this path only when its stream could not be loaded.
+        Some(b"Form") => return unresolved("form stream could not be loaded"),
+        Some(_) => return ImageResolution::Absent,
+        None => return unresolved("no /Subtype"),
     }
 
     let Some(w_raw) = stream.dict.get_i64(b"Width") else {
-        return ImageResolution::Absent;
+        return unresolved("image has no /Width");
     };
     let Some(h_raw) = stream.dict.get_i64(b"Height") else {
-        return ImageResolution::Absent;
+        return unresolved("image has no /Height");
     };
     let Some((w, h)) = validated_dims(w_raw, h_raw) else {
         log::warn!("image: degenerate dimensions {w_raw}×{h_raw}, skipping");
@@ -882,16 +892,6 @@ pub(super) fn terminal_decode_parms(dict: &Dictionary, filter_count: usize) -> O
     }
 }
 
-/// Resolve the `XObject` resource named `name` to its stream `ObjectId`.
-fn xobject_id(doc: &Document, page_dict: &Dictionary, name: &[u8]) -> Option<ObjectId> {
-    let res = super::resolve_dict(doc, page_dict.get(b"Resources")?)?;
-    let xobj = super::resolve_dict(doc, res.get(b"XObject")?)?;
-    match xobj.get(name)? {
-        Object::Reference(id) => Some(*id),
-        _ => None,
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -923,14 +923,10 @@ mod tests {
 
         let mut xobjects = Dictionary::new();
         xobjects.set("Im1", Object::Reference((5, 0)));
-        let mut resources = Dictionary::new();
-        resources.set("XObject", Object::Dictionary(xobjects));
-        let mut page = Dictionary::new();
-        page.set("Resources", Object::Dictionary(resources));
 
         let resolution = resolve_image(
             &mut ImageDecodeCtx::cpu(&doc),
-            &page,
+            &xobjects,
             ImageRequest::full(b"Im1"),
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,

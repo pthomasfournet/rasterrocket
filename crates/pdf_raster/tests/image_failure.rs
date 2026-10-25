@@ -112,3 +112,18 @@ fn strict_fails_the_page() {
         other => panic!("expected ImageDecodeFailed, got {other:?}"),
     }
 }
+
+/// A `Do` naming an `XObject` absent from the resources loses whatever the
+/// producer meant to draw; it is reported, never skipped silently.
+#[test]
+fn unresolvable_xobject_name_is_reported() {
+    let page = render(page_with_corrupt_image("/Missing Do"), false).expect("page renders");
+    let failures = &page.diagnostics.image_failures;
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert_eq!(failures[1].name.as_deref(), Some("Missing"));
+    assert!(
+        failures[1].reason.contains("not found"),
+        "reason says the name did not resolve: {}",
+        failures[1].reason
+    );
+}

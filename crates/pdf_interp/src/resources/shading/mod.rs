@@ -66,7 +66,8 @@ pub enum ShadingResult {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Resolve the named shading from the page/form resource dict.
+/// Resolve the named shading from `shadings`, the `/Shading` resource
+/// sub-dictionary in effect.
 ///
 /// Returns `None` if the name is absent, the type is unsupported, or any
 /// required key is missing.  A warning is logged for unsupported types so the
@@ -74,14 +75,12 @@ pub enum ShadingResult {
 #[must_use]
 pub fn resolve_shading(
     doc: &Document,
-    resource_context_dict: &Dictionary,
+    shadings: &Dictionary,
     name: &[u8],
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Option<ShadingResult> {
-    let res = resolve_dict(doc, resource_context_dict.get(b"Resources")?)?;
-    let sh_res = resolve_dict(doc, res.get(b"Shading")?)?;
-    let sh_obj = sh_res.get(name)?;
+    let sh_obj = shadings.get(name)?;
 
     // Shading types 2–3 are plain dicts; types 4–7 are streams.
     // Try stream first (stream has a dict too), then fall back to plain dict.

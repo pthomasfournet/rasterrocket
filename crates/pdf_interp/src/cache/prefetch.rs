@@ -324,13 +324,7 @@ fn worker_loop(rx: &Mutex<mpsc::Receiver<PrefetchJob>>, state: &PrefetchState) {
 /// `resolve_image` logs its own failures at warn level; this fn
 /// is fire-and-forget from the worker's perspective.
 fn decode_one(doc: &Document, doc_id: DocId, cache: &Arc<DeviceImageCache>, job: &PrefetchJob) {
-    // Use the leaf page dict (not the inheritance-aware
-    // `get_page_resource_dict(.., b"XObject")` we used during
-    // discovery): `resolve_image` walks `/Resources/XObject` from
-    // its `page_dict` argument and won't follow page-tree
-    // inheritance.  Inherited-resource cases will resolve `None`
-    // here and the renderer decodes on first touch.
-    let Ok(page_dict) = doc.get_dictionary(job.page_id) else {
+    let Ok(xobjects) = doc.get_page_resource_dict(job.page_id, b"XObject") else {
         return;
     };
     let mut ctx = crate::resources::image::ImageDecodeCtx {
@@ -340,7 +334,7 @@ fn decode_one(doc: &Document, doc_id: DocId, cache: &Arc<DeviceImageCache>, job:
     };
     let _ = resolve_image(
         &mut ctx,
-        &page_dict,
+        &xobjects,
         crate::resources::image::ImageRequest::full(&job.image_name),
         #[cfg(feature = "gpu-jpeg-huffman")]
         None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,

@@ -1330,7 +1330,8 @@ impl<'doc> PageRenderer<'doc> {
     /// - `Ok` → blit the image.
     /// - `DecodeFailed` → record the failure in the page diagnostics and skip
     ///   the image; the pixel region keeps what was painted beneath it.
-    /// - `Absent` → log a debug message and skip silently (nothing to draw).
+    /// - `Absent` → a non-image `XObject` subtype with no raster appearance;
+    ///   log a debug message and skip.
     fn handle_image_resolution(
         &mut self,
         name: &[u8],
@@ -1351,7 +1352,7 @@ impl<'doc> PageRenderer<'doc> {
             }
             ImageResolution::Absent => {
                 log::debug!(
-                    "rasterrocket-interp: Do /{} skipped (not an image resource)",
+                    "rasterrocket-interp: Do /{} skipped (XObject subtype has no raster appearance)",
                     String::from_utf8_lossy(name)
                 );
             }
