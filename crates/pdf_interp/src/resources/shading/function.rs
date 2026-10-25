@@ -1,15 +1,18 @@
 //! PDF Function evaluation for shading types 0 (Sampled), 2 (Exponential),
 //! 3 (Stitching), and 4 (PostScript calculator).
 //!
-//! The entry point is [`eval_function`], which dispatches on `FunctionType`.
+//! The entry points are [`eval_function`] (one input) and
+//! [`eval_function_n`] (one or more inputs, as a `DeviceN` tint transform
+//! takes), which dispatch on `FunctionType`.
 //!
 //! # Limitations
 //!
-//! Type 0 (Sampled) supports 1-D inputs with `BitsPerSample` 8 or 16 and the
-//! default `Order` 1 (linear interpolation between adjacent samples).
-//! Multi-dimensional Type 0 functions (`Size = [N0, N1, ...]`), non-1/8/16
-//! `BitsPerSample`, and `Order` 3 (cubic spline) fall back to the
-//! sample-free linear approximation that pre-dated stream decoding.
+//! One-input Type 0 (Sampled) supports `BitsPerSample` 8 or 16 and the
+//! default `Order` 1 (linear interpolation between adjacent samples); other
+//! depths and `Order` 3 (cubic spline) fall back to the sample-free linear
+//! approximation that pre-dated stream decoding.  Multi-input Type 0
+//! interpolates multilinearly at every `BitsPerSample` the specification
+//! allows.
 //!
 //! Type 4 (PostScript calculator) implements the bounded operator subset of
 //! PDF §7.10.5 — arithmetic, boolean/relational, stack, and `if`/`ifelse`
@@ -21,6 +24,8 @@ use pdf::{Dictionary, Document, Object};
 
 use crate::resources::dict_ext::DictExt;
 use crate::resources::{obj_to_f64, resolve_dict};
+
+mod sampled_nd;
 
 /// Maximum nesting depth for recursive function evaluation (guards against
 /// crafted PDFs with deeply or circularly nested Type 3 functions).
@@ -39,6 +44,40 @@ const MAX_FN_DEPTH: u8 = 10;
 /// Unknown types fall back to `C0` if available.
 pub fn eval_function(doc: &Document, fn_obj: &Object, t: f64, n: usize) -> Option<Vec<f64>> {
     eval_function_depth(doc, fn_obj, t, n, 0)
+}
+
+/// Evaluate a PDF Function object at the `m`-dimensional input point
+/// `inputs`, returning `n` output values (PDF §7.10).
+///
+/// A one-element input is exactly [`eval_function`].  With several inputs
+/// (a `DeviceN` tint transform) only the function types defined for `m > 1`
+/// apply: Type 0 (Sampled, multilinear interpolation over the sample grid)
+/// and Type 4 (PostScript calculator, inputs pushed in order).  Types 2 and
+/// 3 take one input by definition (§7.10.3, §7.10.4) and yield `None`, as
+/// does a malformed function.
+#[must_use]
+pub fn eval_function_n(
+    doc: &Document,
+    fn_obj: &Object,
+    inputs: &[f64],
+    n: usize,
+) -> Option<Vec<f64>> {
+    if let [t] = inputs {
+        return eval_function(doc, fn_obj, *t, n);
+    }
+    let fn_dict = resolve_fn_dict(doc, fn_obj)?;
+    let result = match fn_dict.get_i64(b"FunctionType")? {
+        0 => sampled_nd::eval_sampled_nd(&fn_dict, &stream_bytes_for(doc, fn_obj)?, inputs, n),
+        4 => eval_postscript(doc, fn_obj, &fn_dict, inputs, n),
+        other => {
+            log::debug!(
+                "function: FunctionType {other} takes one input, {} supplied",
+                inputs.len()
+            );
+            None
+        }
+    };
+    result.map(|c| apply_range_clip(&fn_dict, c))
 }
 
 fn eval_function_depth(
@@ -68,7 +107,7 @@ fn eval_function_depth(
             eval_sampled(doc, fn_obj, &fn_dict, t, n)
                 .unwrap_or_else(|| eval_sampled_approx(&fn_dict, t, n)),
         ),
-        4 => eval_postscript(doc, fn_obj, &fn_dict, t, n).or_else(|| {
+        4 => eval_postscript(doc, fn_obj, &fn_dict, &[t], n).or_else(|| {
             log::warn!(
                 "shading: Type 4 PostScript function failed to evaluate \
                  (malformed program or stack underflow) — colour unresolved"
@@ -1035,27 +1074,30 @@ fn exec_ps(toks: &[PsTok], stack: &mut Vec<PsVal>, steps: &mut u32, depth: usize
 
 /// Evaluate a Type 4 (PostScript calculator) function.
 ///
-/// `t` is the single input value (Separation tint or shading parameter).
-/// PDF §7.10.5: clip the input to `Domain`, run the bounded operator program,
-/// then return the top `n` stack values (deepest → channel 0).  The caller
-/// applies `Range` clipping.
+/// `inputs` are the input values (one Separation tint or shading parameter,
+/// or one tint per `DeviceN` colorant).  PDF §7.10.5: clip each input to its
+/// `Domain` interval, push the inputs in order, run the bounded operator
+/// program, then return the top `n` stack values (deepest → channel 0).  The
+/// caller applies `Range` clipping.
 fn eval_postscript(
     doc: &Document,
     fn_obj: &Object,
     fn_dict: &Dictionary,
-    t: f64,
+    inputs: &[f64],
     n: usize,
 ) -> Option<Vec<f64>> {
     let src_bytes = stream_bytes_for(doc, fn_obj)?;
     let src = std::str::from_utf8(&src_bytes).ok()?;
     let program = parse_ps_program(src)?;
 
-    // Clip the input to Domain (consistent with the other function types,
-    // which all normalise/clamp against Domain before evaluating).
-    let (d0, d1) = read_fn_domain(fn_dict);
-    let t_in = if d1 > d0 { t.clamp(d0, d1) } else { t };
-
-    let mut stack: Vec<PsVal> = vec![PsVal::Num(t_in)];
+    // Clip each input to its Domain interval (consistent with the other
+    // function types, which all normalise/clamp against Domain).
+    let domains = read_fn_domains(fn_dict, inputs.len());
+    let mut stack: Vec<PsVal> = inputs
+        .iter()
+        .zip(&domains)
+        .map(|(&t, &(d0, d1))| PsVal::Num(if d1 > d0 { t.clamp(d0, d1) } else { t }))
+        .collect();
     let mut steps = MAX_PS_STEPS;
     exec_ps(&program, &mut stack, &mut steps, 0)?;
 
@@ -1088,6 +1130,23 @@ pub(super) fn read_fn_domain(dict: &Dictionary) -> (f64, f64) {
         Some([d0, d1, ..]) => (*d0, *d1),
         _ => (0.0, 1.0),
     }
+}
+
+/// Read the first `m` `Domain` intervals of a function dict.  An interval
+/// the array does not supply defaults to `[0, 1]`; interval 0 equals
+/// [`read_fn_domain`].
+pub(super) fn read_fn_domains(dict: &Dictionary, m: usize) -> Vec<(f64, f64)> {
+    let arr: Vec<f64> = dict
+        .get(b"Domain")
+        .and_then(Object::as_array)
+        .map(|a| a.iter().filter_map(obj_to_f64).collect())
+        .unwrap_or_default();
+    (0..m)
+        .map(|i| match arr.get(2 * i..2 * i + 2) {
+            Some(&[d0, d1]) => (d0, d1),
+            _ => (0.0, 1.0),
+        })
+        .collect()
 }
 
 /// Read a colour array (`C0` or `C1`) from a function dict, padding to `n` channels.

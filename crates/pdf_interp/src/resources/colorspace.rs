@@ -14,9 +14,10 @@
 //! values, the ICC profile bytes, the full Separation tint function, etc.)
 //! — those are pulled lazily via the stored [`ObjectId`] when
 //! [`ColorSpace::convert_to_rgb`] actually runs.  ICC profiles are
-//! transformed through `moxcms`; Separation tints flow through the
-//! shading-fn evaluator (`super::shading::function::eval_function`) into
-//! the alternate space.
+//! transformed through `moxcms`; Separation and `DeviceN` tints flow through
+//! the function evaluator (`super::shading::function::eval_function_n`) into
+//! the alternate space; an `Indexed` value is looked up in its palette and
+//! converted through the base space.
 //!
 //! # PDF §8.6 mapping
 //!
@@ -47,16 +48,12 @@
 //! - **Lab whitepoint**: `convert_to_rgb` hard-codes D65; the per-document
 //!   whitepoint stored in `Lab::dict_id` isn't read yet.  Affects rare
 //!   prepress PDFs that use D50 or other reference whites.
-//! - **`Indexed` lookup**: `lookup_id` is captured at parse time but
-//!   `convert_to_rgb` still returns black for `Indexed`.  Palette
-//!   dereference + recursive base conversion is the missing piece; the
-//!   image pipeline handles Indexed via a separate path for images.
-//! - **`DeviceN` with N > 1 tint inputs**: the shading-fn evaluator
-//!   only handles 1-input functions; `DeviceN` with multiple colorants
-//!   falls back to the single-component gray heuristic on `comps[0]`.
-//!   Single-colorant `DeviceN` (N = 1) routes through the same tint
-//!   path as `Separation`.  Extending the evaluator to N-input
-//!   PostScript-style functions (Type 4) is its own scope.
+//! - **`Indexed` inline palette**: only a palette held in an indirect
+//!   stream or string is reachable through `lookup_id`; an inline palette
+//!   string converts to black.
+//! - **Inline tint transform**: a Separation / `DeviceN` tint transform
+//!   given as a direct dictionary rather than a reference falls back to the
+//!   gray heuristic.
 
 use pdf::{Document, Object, ObjectId};
 
@@ -188,10 +185,10 @@ impl ColorSpace {
     ///   `moxcms` doesn't expose a Gray layout for transforms.  Any
     ///   error (missing stream, malformed profile, transform failure)
     ///   falls back to the device-space-by-N path.
-    /// - `Indexed`: returns black.  `lookup_id` is captured at parse
-    ///   time but the palette-dereference + recursive base-space
-    ///   conversion isn't wired through yet.  The image pipeline
-    ///   handles Indexed via a separate path for image streams.
+    /// - `Indexed`: the index (rounded, clamped to `hival`) selects a
+    ///   palette entry from the lookup referenced by `lookup_id`; its bytes
+    ///   map linearly onto the base space's component ranges and convert
+    ///   through the base space.  An unreachable palette yields black.
     /// - `Pattern`: returns black — patterns are not directly convertible
     ///   to RGB; tile rasterisation is invoked elsewhere.
     /// - `Separation`: passes the tint through the document's
@@ -199,13 +196,9 @@ impl ColorSpace {
     ///   converts the result via the alternate colour space.  Any failure
     ///   (missing function, eval error, alternate falls through) drops
     ///   back to `1 - tint` as gray.
-    /// - `DeviceN`: when `ncomps == 1` (single-colorant `DeviceN` —
-    ///   rare but spec-legal), routes through the same tint-function
-    ///   path as `Separation`.  When `ncomps > 1`, falls back to the
-    ///   gray heuristic on `comps[0]` — the existing shading-fn
-    ///   evaluator only takes a single `t: f64`, and N-input
-    ///   PostScript-style (Type 4) function evaluation is a separate
-    ///   scope.
+    /// - `DeviceN`: passes all `ncomps` tints through the tint-transform
+    ///   function and converts the result via the alternate colour space.
+    ///   Any failure drops back to `1 - comps[0]` as gray.
     #[must_use]
     pub fn convert_to_rgb(&self, doc: &Document, comps: &[f64]) -> [u8; 3] {
         if comps.len() != self.ncomponents() {
@@ -235,7 +228,14 @@ impl ColorSpace {
                 }
                 icc_fallback_by_n(*n, comps)
             }
-            Self::Indexed { .. } | Self::Pattern { .. } => [0, 0, 0],
+            Self::Indexed {
+                base,
+                hival,
+                lookup_id,
+            } => lookup_id
+                .and_then(|id| indexed_to_rgb(doc, id, base, *hival, comps[0]))
+                .unwrap_or([0, 0, 0]),
+            Self::Pattern { .. } => [0, 0, 0],
             Self::Separation {
                 alternate,
                 tint_dict_id,
@@ -247,27 +247,21 @@ impl ColorSpace {
                 // alternate.convert_to_rgb falls back), use the `1 - tint`
                 // gray approximation.
                 if let Some(id) = tint_dict_id
-                    && let Some(rgb) = separation_via_tint_fn(doc, *id, alternate, comps[0])
+                    && let Some(rgb) = tint_via_fn(doc, *id, alternate, comps)
                 {
                     return rgb;
                 }
                 separation_fallback_gray(comps[0])
             }
             Self::DeviceN {
-                ncomps,
                 alternate,
                 tint_dict_id,
+                ..
             } => {
-                // PDF §8.6.6.5: like Separation but with N tint inputs.  The
-                // shading-fn evaluator (`super::shading::function::eval_function`)
-                // only takes a single `t: f64`, so we can route through it
-                // when `ncomps == 1` (a single-colorant DeviceN — uncommon,
-                // but spec-legal).  N > 1 needs an N-input evaluator
-                // (PostScript-style Type 4 functions); falls back to the
-                // gray heuristic on `comps[0]` until that lands.
-                if *ncomps == 1
-                    && let Some(id) = tint_dict_id
-                    && let Some(rgb) = separation_via_tint_fn(doc, *id, alternate, comps[0])
+                // PDF §8.6.6.5: like Separation, with one tint input per
+                // colorant.
+                if let Some(id) = tint_dict_id
+                    && let Some(rgb) = tint_via_fn(doc, *id, alternate, comps)
                 {
                     return rgb;
                 }
@@ -395,20 +389,86 @@ fn fetch_icc_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
 /// approximation on any failure (function object not dereferenceable,
 /// function evaluation returns `None`, or the alternate space itself can't
 /// convert).
-fn separation_via_tint_fn(
+fn tint_via_fn(
     doc: &Document,
     tint_dict_id: ObjectId,
     alternate: &ColorSpace,
-    tint: f64,
+    tints: &[f64],
 ) -> Option<[u8; 3]> {
     let fn_arc = doc.get_object(tint_dict_id).ok()?;
-    let outputs = super::shading::function::eval_function(
+    let outputs = super::shading::function::eval_function_n(
         doc,
         fn_arc.as_ref(),
-        tint,
+        tints,
         alternate.ncomponents(),
     )?;
     Some(alternate.convert_to_rgb(doc, &outputs))
+}
+
+/// Convert palette index `index` of an `Indexed` space to sRGB.
+///
+/// PDF §8.6.6.3: the lookup holds `hival + 1` entries of
+/// `base.ncomponents()` bytes; byte `b` of an entry maps linearly onto the
+/// base component's range (`[0, 1]` for device and tint spaces, `L*` in
+/// `[0, 100]` and `a*`, `b*` in `[-100, 100]` for the default Lab range).
+/// `None` when the lookup is unreachable or shorter than the entry.
+pub(crate) fn indexed_to_rgb(
+    doc: &Document,
+    lookup_id: ObjectId,
+    base: &ColorSpace,
+    hival: u8,
+    index: f64,
+) -> Option<[u8; 3]> {
+    let lookup = doc.get_object(lookup_id).ok()?;
+    let bytes = match lookup.as_ref() {
+        Object::Stream(s) => s.decompressed_content().ok()?,
+        Object::String(b, _) => b.clone(),
+        _ => return None,
+    };
+    let n = base.ncomponents();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, hival] ⊂ [0, 255] first"
+    )]
+    let entry = index.round().clamp(0.0, f64::from(hival)) as usize;
+    let raw = bytes.get(entry * n..(entry + 1) * n)?;
+    Some(samples_to_rgb(doc, base, raw))
+}
+
+/// Convert one 8-bit sample tuple of `space` to sRGB.
+///
+/// Sample byte `b` of component `i` maps linearly onto that component's
+/// default range (PDF §8.9.5.2 default `Decode`): `[0, 1]` for device and
+/// tint spaces, `L*` in `[0, 100]` and `a*`, `b*` in `[-100, 100]` for Lab.
+/// `samples.len()` must equal `space.ncomponents()`; a mismatch converts to
+/// black, as [`ColorSpace::convert_to_rgb`] does.
+pub(crate) fn samples_to_rgb(doc: &Document, space: &ColorSpace, samples: &[u8]) -> [u8; 3] {
+    let comps: Vec<f64> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            let v = f64::from(b) / 255.0;
+            match (space, i) {
+                (ColorSpace::Lab { .. }, 0) => v * 100.0,
+                (ColorSpace::Lab { .. }, _) => v.mul_add(200.0, -100.0),
+                _ => v,
+            }
+        })
+        .collect();
+    space.convert_to_rgb(doc, &comps)
+}
+
+/// Whether image samples in `space` need per-sample conversion through
+/// [`samples_to_rgb`]: the spaces whose component count or meaning the
+/// image path's Gray / RGB / CMYK sample layouts cannot carry
+/// (multi-colorant `DeviceN`, Lab).
+pub(crate) const fn needs_sample_conversion(space: &ColorSpace) -> bool {
+    match space {
+        ColorSpace::DeviceN { ncomps, .. } => *ncomps > 1,
+        ColorSpace::Lab { .. } => true,
+        _ => false,
+    }
 }
 
 /// A spot tint with no resolvable transform approximates as gray with
@@ -1045,7 +1105,7 @@ mod tests {
     #[test]
     fn convert_separation_unresolvable_tint_fn_falls_back() {
         // tint_dict_id points at a missing object → fetch fails →
-        // separation_via_tint_fn returns None → fall back to gray heuristic.
+        // tint_via_fn returns None → fall back to gray heuristic.
         let doc = empty_doc();
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
@@ -1054,11 +1114,61 @@ mod tests {
         assert_eq!(sep.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
     }
 
+    /// Type 4 tint transform of a two-colorant `[/Black /Spot]` space into
+    /// CMYK: Black adds to K; the spot is a teal `(1, 0.08, 0.26, 0.38)` per
+    /// unit tint.
+    const DEVICEN_TEAL_FN: &str = "{ exch 1 index 0.08 mul 2 index 0.26 mul 3 2 roll \
+                                   3 index 0.38 mul add dup 1 gt { pop 1 } if }";
+
+    fn devicen_teal_doc() -> Document {
+        let body = format!(
+            "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Length {} >>\n\
+             stream\n{DEVICEN_TEAL_FN}\nendstream",
+            DEVICEN_TEAL_FN.len()
+        );
+        crate::test_helpers::make_doc_with_objects(&[(4, &body)])
+    }
+
     #[test]
-    fn convert_devicen_multi_input_falls_back_to_gray() {
-        // The shading function evaluator only handles 1-input functions
-        // today; DeviceN with N>1 inputs cannot be transformed correctly,
-        // so we use the 1-input heuristic on comps[0].
+    fn convert_devicen_multi_input_evaluates_the_tint_transform() {
+        let doc = devicen_teal_doc();
+        let dn = ColorSpace::DeviceN {
+            ncomps: 2,
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint_dict_id: Some((4, 0)),
+        };
+        // Full spot, no black: the teal CMYK, not the gray of comps[0].
+        let teal = dn.convert_to_rgb(&doc, &[0.0, 1.0]);
+        let want = ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 0.08, 0.26, 0.38]);
+        assert_eq!(teal, want);
+        assert!(teal[2] > teal[0] + 40, "teal, got {teal:?}");
+        // Full black on top saturates K.
+        assert_eq!(dn.convert_to_rgb(&doc, &[1.0, 1.0]), [0, 0, 0]);
+        // No ink at all is paper white.
+        assert_eq!(dn.convert_to_rgb(&doc, &[0.0, 0.0]), [255, 255, 255]);
+    }
+
+    #[test]
+    fn convert_indexed_looks_up_the_palette_through_the_base() {
+        // Two-entry RGB palette: red, blue.
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            &b"<< /Length 6 >>\nstream\n\xff\x00\x00\x00\x00\xff\nendstream"[..],
+        )]);
+        let idx = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::DeviceRgb),
+            hival: 1,
+            lookup_id: Some((4, 0)),
+        };
+        assert_eq!(idx.convert_to_rgb(&doc, &[0.0]), [255, 0, 0]);
+        assert_eq!(idx.convert_to_rgb(&doc, &[1.0]), [0, 0, 255]);
+        // An out-of-range index clamps to hival.
+        assert_eq!(idx.convert_to_rgb(&doc, &[7.0]), [0, 0, 255]);
+    }
+
+    #[test]
+    fn convert_devicen_multi_input_without_tint_fn_falls_back_to_gray() {
+        // No tint transform → gray heuristic on comps[0].
         let doc = empty_doc();
         let dn = ColorSpace::DeviceN {
             ncomps: 3,

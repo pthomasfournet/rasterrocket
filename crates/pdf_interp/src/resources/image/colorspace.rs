@@ -18,7 +18,7 @@
 use pdf::{Dictionary, Document, Object};
 
 use super::{ImageColorSpace, ImageData, ImageDescriptor};
-use crate::resources::colorspace::{ColorSpace, resolve};
+use crate::resources::colorspace::{ColorSpace, needs_sample_conversion, resolve, samples_to_rgb};
 use crate::resources::dict_ext::DictExt as _;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -72,8 +72,9 @@ const MAX_CS_DEPTH: u8 = 8;
 /// - `Indexed`    → resolve the base space; Indexed expansion handled separately
 /// - `Separation` / `DeviceN`        → Gray sample layout: one tint byte per
 ///   pixel.  The tint → colour mapping is applied afterwards by
-///   [`apply_tint_lut`]; a multi-colorant `DeviceN` has no evaluator yet and
-///   keeps the one-byte layout of its first colorant.
+///   [`apply_tint_lut`].  Raw samples and `Indexed` palettes in a
+///   multi-colorant `DeviceN` or Lab space are converted per sample to RGB
+///   before this resolution applies (see `needs_sample_conversion`).
 /// - unknown / absent                → Gray (safe fallback)
 pub(super) fn resolve_cs(doc: &Document, cs_obj: &Object) -> ResolvedCs {
     resolve_cs_depth(doc, cs_obj, 0)
@@ -314,6 +315,18 @@ pub(super) fn indexed_palette(doc: &Document, cs_arr: &[Object]) -> Option<(Vec<
         _ => return None,
     };
 
+    // A base the device layouts cannot carry converts every entry to RGB.
+    let base_space = resolve(doc, &cs_arr[1]);
+    if needs_sample_conversion(&base_space) {
+        let stride = base_space.ncomponents();
+        let entries = lookup_bytes.get(..n_entries.checked_mul(stride)?)?;
+        let palette = entries
+            .chunks_exact(stride)
+            .flat_map(|entry| samples_to_rgb(doc, &base_space, entry))
+            .collect();
+        return Some((palette, ResolvedCs::Rgb));
+    }
+
     let base_stride = base.components();
     let needed = n_entries.checked_mul(base_stride)?;
     if lookup_bytes.len() < needed {
@@ -479,7 +492,8 @@ mod tests {
             ),
             None
         );
-        // Multi-colorant DeviceN has no N-input evaluator: no lookup.
+        // Multi-colorant DeviceN samples are converted per tuple, not
+        // through a one-tint lookup.
         let dn = Object::Array(vec![
             name_obj(b"DeviceN"),
             Object::Array(vec![name_obj(b"Cyan"), name_obj(b"Black")]),

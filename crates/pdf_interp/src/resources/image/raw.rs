@@ -4,6 +4,7 @@
 //! colour space.  Helper functions handle the common sub-cases: 8-bpp colour,
 //! indexed palette expansion, and CMYK→RGB conversion.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object};
@@ -11,6 +12,7 @@ use pdf::{Dictionary, Document, Object};
 use super::bitpack::{downsample_16bpp, expand_nbpp, expand_nbpp_indexed, unpack_packed_bits};
 use super::colorspace::{ResolvedCs, indexed_palette, resolve_cs};
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
+use crate::resources::colorspace::{ColorSpace, needs_sample_conversion, resolve, samples_to_rgb};
 use crate::resources::dict_ext::DictExt as _;
 
 #[cfg(feature = "gpu-icc")]
@@ -99,6 +101,13 @@ pub(super) fn decode_raw(
         return decode_raw_indexed(doc, data, width, height, bpc, arr);
     }
 
+    if let Some(o) = cs_obj {
+        let space = resolve(doc, o);
+        if needs_sample_conversion(&space) {
+            return decode_raw_converted(doc, data, width, height, bpc, dict, &space);
+        }
+    }
+
     // General path: resolve the colour space to Gray / Rgb / Cmyk.
     let resolved = cs_obj.map_or(ResolvedCs::Gray, |o| resolve_cs(doc, o));
 
@@ -138,48 +147,109 @@ pub(super) fn decode_raw(
         }};
     }
 
-    match bpc {
-        // bpc=1: PDF §8.9.3 packs one bit per sample, one sample per component.
+    decode_and_bpp!(expand_to_8bpc(
+        data,
+        width,
+        height,
+        bpc,
+        resolved.components()
+    )?)
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Expand `bpc`-bit samples of `components`-component pixels to one byte
+/// per sample (PDF §8.9.3).  8-bit data is borrowed unchanged.  `None` for
+/// an unsupported depth or data shorter than the image.
+fn expand_to_8bpc(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    bpc: i64,
+    components: usize,
+) -> Option<std::borrow::Cow<'_, [u8]>> {
+    use std::borrow::Cow;
+    Some(match bpc {
+        // bpc=1 packs one bit per sample, one sample per component.
         // Multi-component spaces (RGB: 3 bits/px, CMYK: 4 bits/px) must use
         // unpack_packed_bits with `components` samples per row — not expand_1bpp
         // which treats one bit as one pixel.
         1 => {
             let width_usize = usize::try_from(width).ok()?;
-            let samples_per_row = width_usize.checked_mul(resolved.components())?;
-            let pixels = unpack_packed_bits(data, 1, samples_per_row, height, |v| {
+            let samples_per_row = width_usize.checked_mul(components)?;
+            Cow::Owned(unpack_packed_bits(data, 1, samples_per_row, height, |v| {
                 if v == 0 { 0x00 } else { 0xFF }
-            })?;
-            decode_and_bpp!(std::borrow::Cow::Owned(pixels))
+            })?)
         }
-        2 => decode_and_bpp!(std::borrow::Cow::Owned(expand_nbpp::<2>(
-            data,
-            width,
-            height,
-            resolved.components()
-        )?)),
-        4 => decode_and_bpp!(std::borrow::Cow::Owned(expand_nbpp::<4>(
-            data,
-            width,
-            height,
-            resolved.components()
-        )?)),
-        8 => decode_and_bpp!(std::borrow::Cow::Borrowed(data)),
-        16 => {
-            decode_and_bpp!(std::borrow::Cow::Owned(downsample_16bpp(
-                data,
-                width,
-                height,
-                resolved.components()
-            )?))
-        }
+        2 => Cow::Owned(expand_nbpp::<2>(data, width, height, components)?),
+        4 => Cow::Owned(expand_nbpp::<4>(data, width, height, components)?),
+        8 => Cow::Borrowed(data),
+        16 => Cow::Owned(downsample_16bpp(data, width, height, components)?),
         other => {
             log::debug!("image: {other} bits-per-component not yet implemented");
-            None
+            return None;
         }
-    }
+    })
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+/// Decode a raw image whose colour space needs per-sample conversion
+/// (see [`needs_sample_conversion`]): expand to one byte per component,
+/// apply `Decode` for a `DeviceN` space, and convert each distinct sample
+/// tuple once through the colour space's tint transform or Lab formulae.
+fn decode_raw_converted(
+    doc: &Document,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    bpc: i64,
+    dict: &Dictionary,
+    space: &ColorSpace,
+) -> Option<ImageDescriptor> {
+    /// Distinct sample tuples memoised before the table is reset; bounds
+    /// memory on continuous-tone images.
+    const MEMO_LIMIT: usize = 1 << 16;
+
+    let n = space.ncomponents();
+    let samples = expand_to_8bpc(data, width, height, bpc, n)?;
+    let samples = if matches!(space, ColorSpace::DeviceN { .. }) {
+        apply_decode(samples, &parse_decode(dict, n))
+    } else {
+        samples.into_owned()
+    };
+    let npixels = (width as usize).checked_mul(height as usize)?;
+    let needed = npixels.checked_mul(n)?;
+    let Some(samples) = samples.get(..needed) else {
+        log::warn!(
+            "image: raw data too short ({} bytes, need {needed})",
+            samples.len()
+        );
+        return None;
+    };
+
+    let mut memo: HashMap<Box<[u8]>, [u8; 3]> = HashMap::new();
+    let mut out = Vec::with_capacity(npixels.checked_mul(3)?);
+    for px in samples.chunks_exact(n) {
+        let rgb = if let Some(&rgb) = memo.get(px) {
+            rgb
+        } else {
+            if memo.len() >= MEMO_LIMIT {
+                memo.clear();
+            }
+            let rgb = samples_to_rgb(doc, space, px);
+            let _ = memo.insert(px.into(), rgb);
+            rgb
+        };
+        out.extend_from_slice(&rgb);
+    }
+    Some(ImageDescriptor {
+        width,
+        height,
+        color_space: ImageColorSpace::Rgb,
+        data: ImageData::Cpu(out),
+        smask: None,
+        filter: ImageFilter::Raw,
+    })
+}
 
 /// Parse the `Decode` array into per-component `(dmin, dmax)` pairs.
 ///
@@ -1039,5 +1109,91 @@ mod tests {
             vec![0x00, 0xFF],
             "malformed stencil /Decode must use default (non-inverted) polarity"
         );
+    }
+
+    /// Two-colorant `[/Black /Spot]` `DeviceN` space whose Type 4 tint
+    /// transform adds Black to K and maps the spot to the teal CMYK
+    /// `(1, 0.08, 0.26, 0.38)` per unit tint.
+    fn devicen_teal() -> (Document, Object) {
+        const PROGRAM: &str = "{ exch 1 index 0.08 mul 2 index 0.26 mul 3 2 roll \
+                               3 index 0.38 mul add dup 1 gt { pop 1 } if }";
+        let body = format!(
+            "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Length {} >>\n\
+             stream\n{PROGRAM}\nendstream",
+            PROGRAM.len()
+        );
+        let doc = crate::test_helpers::make_doc_with_objects(&[(4, &body)]);
+        let cs = Object::Array(vec![
+            Object::Name(b"DeviceN".to_vec()),
+            Object::Array(vec![
+                Object::Name(b"Black".to_vec()),
+                Object::Name(b"Spot".to_vec()),
+            ]),
+            Object::Name(b"DeviceCMYK".to_vec()),
+            Object::Reference((4, 0)),
+        ]);
+        (doc, cs)
+    }
+
+    fn teal_rgb() -> [u8; 3] {
+        color::convert::cmyk_to_rgb_bytes(1.0, 0.08, 0.26, 0.38)
+    }
+
+    #[test]
+    fn decode_raw_multi_colorant_devicen_converts_each_pixel() {
+        let (doc, cs) = devicen_teal();
+        let mut dict = Dictionary::new();
+        dict.set("ColorSpace", cs);
+        dict.set("BitsPerComponent", Object::Integer(8));
+        // Pixels (Black, Spot): spot only, no ink, black only.
+        let data = [0u8, 255, 0, 0, 255, 0];
+        let desc = decode_raw(
+            &doc,
+            &data,
+            3,
+            1,
+            false,
+            &dict,
+            #[cfg(feature = "gpu-icc")]
+            &mut crate::resources::image::IccHandles::none(),
+        )
+        .unwrap();
+        assert_eq!(desc.color_space, ImageColorSpace::Rgb);
+        let px = desc.data.as_cpu().unwrap();
+        assert_eq!(px[0..3], teal_rgb());
+        assert_eq!(px[3..6], [255, 255, 255]);
+        assert_eq!(px[6..9], [0, 0, 0]);
+    }
+
+    #[test]
+    fn decode_raw_indexed_over_multi_colorant_devicen_expands_the_palette() {
+        let (doc, devicen) = devicen_teal();
+        let mut dict = Dictionary::new();
+        dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                devicen,
+                Object::Integer(1),
+                // Entry 0: full spot; entry 1: no ink.
+                Object::String(vec![0, 255, 0, 0], pdf::StringFormat::Hexadecimal),
+            ]),
+        );
+        dict.set("BitsPerComponent", Object::Integer(8));
+        let desc = decode_raw(
+            &doc,
+            &[0u8, 1],
+            2,
+            1,
+            false,
+            &dict,
+            #[cfg(feature = "gpu-icc")]
+            &mut crate::resources::image::IccHandles::none(),
+        )
+        .unwrap();
+        assert_eq!(desc.color_space, ImageColorSpace::Rgb);
+        let px = desc.data.as_cpu().unwrap();
+        assert_eq!(px[0..3], teal_rgb());
+        assert_eq!(px[3..6], [255, 255, 255]);
     }
 }
