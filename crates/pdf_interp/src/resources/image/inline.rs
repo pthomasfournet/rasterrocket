@@ -618,6 +618,26 @@ mod tests {
         assert_eq!(bytes[1], 0xFF); // second pixel: transparent
     }
 
+    /// `/IM true` with no `/BPC`: an image mask is one bit per sample.
+    #[test]
+    fn inline_image_mask_without_bpc_is_one_bit() {
+        let doc = empty_doc();
+        let img = decode_inline_image(
+            &mut cpu_ctx(&doc),
+            b"/W 10 /H 2 /IM true",
+            &[0b0100_0000, 0b0111_1111, 0b1111_1111, 0b1100_0000],
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        )
+        .expect("decode should succeed");
+        assert_eq!(img.color_space, ImageColorSpace::Mask);
+        let bytes = img.data.as_cpu().unwrap();
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(&bytes[..3], &[0x00, 0xFF, 0x00]);
+        assert_eq!(&bytes[8..10], &[0x00, 0xFF]);
+        assert!(bytes[10..].iter().all(|&b| b == 0xFF));
+    }
+
     #[test]
     fn inline_image_degenerate_dims() {
         let params = b"/W 0 /H 1 /CS /G /BPC 8";

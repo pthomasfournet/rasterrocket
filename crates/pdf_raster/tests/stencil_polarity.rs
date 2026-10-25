@@ -80,6 +80,12 @@ fn hex(data: &[u8]) -> Vec<u8> {
 /// Render the stencil described by `entries` (its `/Filter`, `/DecodeParms`
 /// and `/Decode`, in full-key form) and `data`, and report the red half.
 fn painted(how: Use, entries: &str, data: &[u8]) -> Painted {
+    painted_with_bpc(how, "/BitsPerComponent 1", entries, data)
+}
+
+/// [`painted`] with the stencil's `/BitsPerComponent` entry, in full-key
+/// form, given as `bpc` (empty to omit it).
+fn painted_with_bpc(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Painted {
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -91,7 +97,7 @@ fn painted(how: Use, entries: &str, data: &[u8]) -> Painted {
     ];
     let stencil_dict = format!(
         "/Type /XObject /Subtype /Image /Width {SIDE} /Height {SIDE} \
-         /ImageMask true /BitsPerComponent 1 {entries}"
+         /ImageMask true {bpc} {entries}"
     );
     match how {
         Use::XObject => {
@@ -102,14 +108,15 @@ fn painted(how: Use, entries: &str, data: &[u8]) -> Painted {
             objects.push(stream_object(&stencil_dict, data));
         }
         Use::Inline => {
-            let params = entries
+            let params = format!("{bpc} {entries}")
+                .replace("/BitsPerComponent", "/BPC")
                 .replace("/Filter", "/F")
                 .replace("/DecodeParms", "/DP")
                 .replace("/Decode ", "/D ")
                 .replace("/ASCIIHexDecode", "/AHx")
                 .replace("/CCITTFaxDecode", "/CCF");
             let mut content = format!(
-                "1 0 0 rg q {SIDE} 0 0 {SIDE} 0 0 cm BI /W {SIDE} /H {SIDE} /IM true /BPC 1 \
+                "1 0 0 rg q {SIDE} 0 0 {SIDE} 0 0 cm BI /W {SIDE} /H {SIDE} /IM true \
                  {params} ID "
             )
             .into_bytes();
@@ -206,6 +213,22 @@ fn inline_stencils_paint_sample_zero() {
 #[test]
 fn explicit_mask_shows_the_image_where_sample_is_zero() {
     check(Use::ExplicitMask, "explicit /Mask", &["ASCIIHex"]);
+}
+
+/// `/BitsPerComponent` is optional on an image mask, which is one bit per
+/// sample; inline, `/IM true` with no `/BPC`.
+#[test]
+fn stencil_without_bits_per_component_is_one_bit() {
+    for how in [Use::XObject, Use::Inline, Use::ExplicitMask] {
+        assert_eq!(
+            painted_with_bpc(how, "", "", &RAW_LEFT_ONES),
+            Painted::Right
+        );
+        assert_eq!(
+            painted_with_bpc(how, "", "/Decode [1 0]", &RAW_LEFT_ONES),
+            Painted::Left
+        );
+    }
 }
 
 /// A stencil whose stream ends early leaves the missing rows unpainted

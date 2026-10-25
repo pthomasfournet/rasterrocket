@@ -46,7 +46,11 @@ pub(super) fn decode_raw(
 ) -> Option<ImageDescriptor> {
     #[cfg(feature = "gpu-icc")]
     let (gpu_ctx, clut_cache) = (icc.gpu_ctx, icc.clut_cache.as_deref_mut());
-    let bpc = dict.get_i64(b"BitsPerComponent").unwrap_or(8);
+    // `BitsPerComponent` is optional for an image mask, which is 1 bit per
+    // sample (§8.9.6.2); other images default to 8.
+    let bpc = dict
+        .get_i64(b"BitsPerComponent")
+        .unwrap_or(if is_mask { 1 } else { 8 });
 
     if is_mask {
         // Stencil mask — always 1 byte per pixel, no colour space conversion.
@@ -1087,6 +1091,19 @@ mod tests {
             assert_eq!(&px[0..2], &[first, first]);
             assert!(px[8..].iter().all(|&b| b == 0xFF), "{px:?}");
         }
+    }
+
+    #[test]
+    fn stencil_without_bits_per_component_is_one_bit() {
+        let px = decode_stencil(&Dictionary::new(), &[0b0110_0000u8], 4, 1);
+        assert_eq!(px, vec![0x00, 0xFF, 0xFF, 0x00]);
+        let mut dict = Dictionary::new();
+        dict.set(
+            "Decode",
+            Object::Array(vec![Object::Integer(1), Object::Integer(0)]),
+        );
+        let px = decode_stencil(&dict, &[0b0110_0000u8], 4, 1);
+        assert_eq!(px, vec![0xFF, 0x00, 0x00, 0xFF]);
     }
 
     #[test]
