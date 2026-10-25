@@ -424,14 +424,16 @@ const fn base_encoding_table(base: BaseEncoding) -> &'static [Option<&'static st
 
 // ── Adobe Glyph List ─────────────────────────────────────────────────────────
 
-/// Adobe Glyph List subset: glyph name → Unicode codepoint, sorted by name.
+/// Adobe Glyph List subset: glyph name → Unicode codepoint, strictly
+/// ascending by name in byte order.
 ///
-/// Used by [`adobe_glyph_to_unicode`] for binary search.  Implemented as a
-/// module-level static rather than a local `static` inside the function to
-/// avoid a `clippy::items_after_statements` suppress and to make the table
-/// visually distinct from the lookup logic.
+/// Used by [`adobe_glyph_to_unicode`] for binary search: an entry out of
+/// order is unreachable, as are the entries the search steps past because of
+/// it.  Implemented as a module-level static rather than a local `static`
+/// inside the function to avoid a `clippy::items_after_statements` suppress
+/// and to make the table visually distinct from the lookup logic.
 ///
-/// A `match` expression covering all 345 entries compiles to an LLVM decision
+/// A `match` expression covering every entry compiles to an LLVM decision
 /// tree that costs hundreds of MiB of working memory per codegen unit in debug
 /// mode (OOM'd on this machine); a static array is pure data, zero LLVM IR.
 static AGL: &[(&str, u32)] = &[
@@ -671,8 +673,8 @@ static AGL: &[(&str, u32)] = &[
     ("n", 0x006E),
     ("nacute", 0x0144),
     ("ncaron", 0x0148),
-    ("notequal", 0x2260),
     ("nine", 0x0039),
+    ("notequal", 0x2260),
     ("ntilde", 0x00F1),
     ("nu", 0x03BD),
     ("numbersign", 0x0023),
@@ -681,15 +683,15 @@ static AGL: &[(&str, u32)] = &[
     ("ocircumflex", 0x00F4),
     ("odieresis", 0x00F6),
     ("oe", 0x0153),
-    ("one", 0x0031),
-    ("ograve", 0x00F2),
     ("ogonek", 0x02DB),
+    ("ograve", 0x00F2),
     ("omicron", 0x03BF),
+    ("one", 0x0031),
     ("onehalf", 0x00BD),
     ("onequarter", 0x00BC),
     ("onesuperior", 0x00B9),
-    ("ordmasculine", 0x00BA),
     ("ordfeminine", 0x00AA),
+    ("ordmasculine", 0x00BA),
     ("oslash", 0x00F8),
     ("otilde", 0x00F5),
     ("p", 0x0070),
@@ -733,9 +735,9 @@ static AGL: &[(&str, u32)] = &[
     ("section", 0x00A7),
     ("semicolon", 0x003B),
     ("seven", 0x0037),
-    ("six", 0x0036),
     ("sigma", 0x03C3),
     ("sigma1", 0x03C2),
+    ("six", 0x0036),
     ("slash", 0x002F),
     ("space", 0x0020),
     ("sterling", 0x00A3),
@@ -1941,5 +1943,65 @@ mod tests {
         // A code left to the base encoding resolves through its name too:
         // MacRoman 0x8E is `eacute`, which is not U+008E.
         assert_eq!(face.code_to_gid.get(0x8E), Some(&eacute));
+    }
+
+    /// [`adobe_glyph_to_unicode`] binary-searches [`AGL`], so the table must
+    /// be strictly ascending in byte order; every entry then resolves to its
+    /// own code point.
+    #[test]
+    fn agl_is_sorted_and_every_entry_resolves() {
+        for pair in AGL.windows(2) {
+            assert!(
+                pair[0].0.as_bytes() < pair[1].0.as_bytes(),
+                "AGL out of order: {:?} before {:?}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+        for &(name, unicode) in AGL {
+            assert_eq!(adobe_glyph_to_unicode(name), Some(unicode), "{name}");
+        }
+    }
+
+    /// An embedded non-symbolic TrueType font whose `Differences` array
+    /// shifts the digit names off their ASCII codes (`0x33 /zero /one …`)
+    /// draws the glyph each name selects through the (3,1) cmap, not the
+    /// glyph the program's cmap assigns to the raw code.
+    #[test]
+    fn embedded_truetype_differences_shift_digits() {
+        const DIGITS: [&str; 10] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(std::array::from_fn(|_| None));
+        for (slot, name) in differences[0x33..].iter_mut().zip(DIGITS) {
+            *slot = Some(name.into());
+        }
+        let desc = FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: Some(include_bytes!("../../../font_test_data/test_data/ttf/ahem.ttf").to_vec()),
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences,
+            base_encoding: BaseEncoding::FontProgram,
+            cid_encoding: None,
+            type3: None,
+            substitute: SubstituteStyle::default(),
+        };
+        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
+        let face = cache
+            .get_or_load(b"F1", &desc, [20.0, 0.0, 0.0, 20.0])
+            .expect("embedded TrueType face loads");
+        for (offset, digit) in ('0'..='9').enumerate() {
+            let code = 0x33 + offset;
+            let expected = face.raw_get_char_index(u32::from(digit));
+            assert_ne!(expected, 0, "font maps U+{:04X}", u32::from(digit));
+            assert_eq!(
+                face.code_to_gid.get(code),
+                Some(&expected),
+                "code {code:#04x} draws {digit:?}"
+            );
+        }
     }
 }
