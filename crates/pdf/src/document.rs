@@ -21,7 +21,7 @@ use crate::{
     object::{Object, ObjectId, parse_indirect_object},
     objstm::ObjStmCache,
     stream::decode_stream,
-    xref::{XrefEntry, XrefTable, read_xref},
+    xref::{XrefEntry, XrefTable, read_xref, scan_object_headers},
 };
 
 // ── Limits ───────────────────────────────────────────────────────────────────
@@ -91,6 +91,10 @@ pub struct Document {
     page_count_cache: OnceLock<u32>,
     /// Cached linearization hints, parsed lazily on first access.
     lin_hints: OnceLock<Option<LinearizationHints>>,
+    /// Object headers found by scanning the whole file, built the first time
+    /// an xref entry does not lead to its object.  `None` when the scan
+    /// exceeded its sanity limit.
+    scanned_offsets: OnceLock<Option<HashMap<u32, XrefEntry>>>,
     /// Owns the qpdf-decrypted temporary file (if any) so it outlives the
     /// memory map taken over it.  A no-op guard for documents that were
     /// not encrypted.  Dropped with the `Document`, unlinking the temp
@@ -244,6 +248,7 @@ impl Document {
             pages_root_id: OnceLock::new(),
             page_count_cache: OnceLock::new(),
             lin_hints: OnceLock::new(),
+            scanned_offsets: OnceLock::new(),
             decrypt_guard: guard,
         })
     }
@@ -358,14 +363,25 @@ impl Document {
 
         match entry {
             XrefEntry::Direct { offset, .. } => {
-                let (_, obj) = usize::try_from(offset)
-                    .ok()
-                    .and_then(|offset| parse_indirect_object(self.data.as_bytes(), offset))
-                    .ok_or_else(|| PdfError::BadObject {
-                        id: id.0,
-                        detail: format!("parse failed at offset {offset}"),
-                    })?;
-                Ok(obj)
+                match self.parse_direct(offset) {
+                    Some((found, obj)) if found.0 == id.0 => Ok(obj),
+                    // The entry does not lead to object `id`: its offset is
+                    // stale, points inside another object, or names a
+                    // different object.  Locate the object's header by
+                    // scanning the file; failing that, keep what the entry
+                    // led to.
+                    parsed => self.recover_direct(id.0, offset).map_or_else(
+                        || {
+                            parsed
+                                .map(|(_, obj)| obj)
+                                .ok_or_else(|| PdfError::BadObject {
+                                    id: id.0,
+                                    detail: format!("parse failed at offset {offset}"),
+                                })
+                        },
+                        Ok,
+                    ),
+                }
             }
             XrefEntry::InObjStm { container, index } => {
                 let container_obj = self.get_object((container, 0))?;
@@ -379,6 +395,35 @@ impl Document {
                     .get_or_parse(container, index, &stream.content, &stream.dict)
             }
         }
+    }
+
+    /// Parse the indirect object whose header starts at `offset`.
+    fn parse_direct(&self, offset: u64) -> Option<(ObjectId, Object)> {
+        usize::try_from(offset)
+            .ok()
+            .and_then(|offset| parse_indirect_object(self.data.as_bytes(), offset))
+    }
+
+    /// Object `num` parsed from the header a whole-file scan finds for it,
+    /// when that header is not at `failed_offset` and parses as object `num`.
+    fn recover_direct(&self, num: u32, failed_offset: u64) -> Option<Object> {
+        let scanned = self
+            .scanned_offsets
+            .get_or_init(|| scan_object_headers(self.data.as_bytes()).ok())
+            .as_ref()?;
+        let Some(XrefEntry::Direct { offset, .. }) = scanned.get(&num).copied() else {
+            return None;
+        };
+        if offset == failed_offset {
+            return None;
+        }
+        let (found, obj) = self.parse_direct(offset)?;
+        (found.0 == num).then(|| {
+            log::debug!(
+                "pdf: object {num} recovered at offset {offset} (xref pointed to {failed_offset})"
+            );
+            obj
+        })
     }
 
     // ── Typed dictionary accessors ────────────────────────────────────────────
@@ -970,6 +1015,71 @@ mod tests {
         )
         .unwrap();
         out.into_bytes()
+    }
+
+    /// Overwrite the classic-xref offset of object `num` in a
+    /// [`pdf_with_objects`] file with `offset`.
+    fn set_xref_offset(bytes: &mut [u8], num: usize, offset: usize) {
+        let xref = bytes
+            .windows(5)
+            .position(|w| w == b"xref\n")
+            .expect("xref keyword");
+        let first_entry = xref
+            + bytes[xref..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .and_then(|l1| {
+                    bytes[xref + l1 + 1..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map(|l2| l1 + l2 + 2)
+                })
+                .expect("subsection header");
+        let entry = first_entry + num * 20;
+        bytes[entry..entry + 10].copy_from_slice(format!("{offset:010}").as_bytes());
+    }
+
+    /// An xref offset that lands inside another object is recovered by
+    /// scanning the file for the object's header.
+    #[test]
+    fn stale_xref_offset_is_recovered_by_scanning() {
+        let mut bytes = pdf_with_objects(&[
+            (2, "(two)".to_owned()),
+            (3, "(three, a longer body)".to_owned()),
+        ]);
+        let into_three = find(&bytes, b"3 0 obj").expect("object 3") + 9;
+        set_xref_offset(&mut bytes, 2, into_three);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert_eq!(
+            doc.get_object((2, 0)).expect("object 2").as_str(),
+            Some(&b"two"[..])
+        );
+    }
+
+    /// An xref offset that leads to a different object never returns that
+    /// object under the wrong number.
+    #[test]
+    fn xref_offset_naming_another_object_is_corrected() {
+        let mut bytes = pdf_with_objects(&[(2, "(two)".to_owned()), (3, "(three)".to_owned())]);
+        let (two, three) = (
+            find(&bytes, b"2 0 obj").expect("object 2"),
+            find(&bytes, b"3 0 obj").expect("object 3"),
+        );
+        set_xref_offset(&mut bytes, 2, three);
+        set_xref_offset(&mut bytes, 3, two);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert_eq!(
+            doc.get_object((2, 0)).expect("object 2").as_str(),
+            Some(&b"two"[..])
+        );
+        assert_eq!(
+            doc.get_object((3, 0)).expect("object 3").as_str(),
+            Some(&b"three"[..])
+        );
+    }
+
+    fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
     }
 
     /// Write `bytes` to a fresh temporary file and return its handle.

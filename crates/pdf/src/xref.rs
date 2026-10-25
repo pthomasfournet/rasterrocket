@@ -93,38 +93,10 @@ fn read_xref_strict(data: &[u8]) -> Result<XrefTable, PdfError> {
 /// table is shaped exactly like a strict parse so the rest of the reader is
 /// unaware repair happened.
 fn reconstruct_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
-    const SANITY_LIMIT: usize = 10_000_000;
-
-    let mut table = XrefTable::default();
-
-    // Pass 1: locate every "<n> <g> obj" header.  We accept the *last*
-    // definition of an object number (incremental-update semantics: later
-    // bytes in the file supersede earlier ones).
-    let mut i = 0usize;
-    while i + 3 <= data.len() {
-        // Cheap anchor: only inspect positions starting with 'o' of "obj".
-        if data[i] == b'o' && data[i..].starts_with(b"obj") {
-            // Ensure "obj" is a token boundary (followed by ws/EOF/delim).
-            let after = data.get(i + 3).copied();
-            let token_end =
-                after.is_none_or(|b| is_ws(b) || b == b'<' || b == b'[' || b == b'(' || b == b'/');
-            if token_end && let Some((id, header_start)) = scan_obj_header_backwards(data, i) {
-                let _ = table.entries.insert(
-                    id.0,
-                    XrefEntry::Direct {
-                        offset: header_start as u64,
-                        generation: id.1,
-                    },
-                );
-                if table.entries.len() > SANITY_LIMIT {
-                    return Err(PdfError::MissingXref(
-                        "reconstruction exceeded object sanity limit".into(),
-                    ));
-                }
-            }
-        }
-        i += 1;
-    }
+    let mut table = XrefTable {
+        entries: scan_object_headers(data)?,
+        ..XrefTable::default()
+    };
 
     if table.entries.is_empty() {
         return Err(PdfError::MissingXref(
@@ -150,6 +122,48 @@ fn reconstruct_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     }
 
     Ok(table)
+}
+
+/// Locate every `<n> <g> obj` header in `data` and map each object number to
+/// its last definition (incremental-update semantics: later bytes supersede
+/// earlier ones).
+///
+/// Bounded: every candidate costs a constant-time check at one byte, and the
+/// entry count is capped at the strict parser's 10 M sanity limit.
+///
+/// # Errors
+/// [`PdfError::MissingXref`] when the file holds more object headers than the
+/// sanity limit.
+pub(crate) fn scan_object_headers(data: &[u8]) -> Result<HashMap<u32, XrefEntry>, PdfError> {
+    const SANITY_LIMIT: usize = 10_000_000;
+
+    let mut entries = HashMap::new();
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        // Cheap anchor: only inspect positions starting with 'o' of "obj".
+        if data[i] == b'o' && data[i..].starts_with(b"obj") {
+            // Ensure "obj" is a token boundary (followed by ws/EOF/delim).
+            let after = data.get(i + 3).copied();
+            let token_end =
+                after.is_none_or(|b| is_ws(b) || b == b'<' || b == b'[' || b == b'(' || b == b'/');
+            if token_end && let Some((id, header_start)) = scan_obj_header_backwards(data, i) {
+                let _ = entries.insert(
+                    id.0,
+                    XrefEntry::Direct {
+                        offset: header_start as u64,
+                        generation: id.1,
+                    },
+                );
+                if entries.len() > SANITY_LIMIT {
+                    return Err(PdfError::MissingXref(
+                        "reconstruction exceeded object sanity limit".into(),
+                    ));
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(entries)
 }
 
 /// Given the byte offset of the `obj` keyword, walk backwards over the
