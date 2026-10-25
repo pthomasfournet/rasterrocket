@@ -1,6 +1,7 @@
 //! Font crate tests: every supported program format through the public
 //! face API, glyph routing, and robustness on hostile input.
 
+mod cid_type1;
 mod formats;
 mod hinting;
 mod sfnt;
@@ -109,6 +110,16 @@ fn sample_programs() -> Vec<(&'static str, Vec<u8>, FontFormat)> {
             FontFormat::Type1,
         ),
         ("synthetic PFB", type1::synthetic_pfb(), FontFormat::Type1),
+        (
+            "hint-assembled (TrueType)",
+            hinting::BY_TABLES.to_vec(),
+            FontFormat::Sfnt,
+        ),
+        (
+            "CID-keyed Type 1",
+            cid_type1::CID_TYPE1.to_vec(),
+            FontFormat::Type1,
+        ),
     ]
 }
 

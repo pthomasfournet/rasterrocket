@@ -9,7 +9,7 @@
 use super::{bounds, face_at, ink, sample_programs, subpaths, try_face};
 
 const BY_NAME: &[u8] = include_bytes!("data/hint-assembled-by-name.ttf");
-const BY_TABLES: &[u8] = include_bytes!("data/hint-assembled-by-tables.ttf");
+pub(super) const BY_TABLES: &[u8] = include_bytes!("data/hint-assembled-by-tables.ttf");
 const PLAIN: &[u8] = include_bytes!("data/hint-assembled-plain.ttf");
 
 const A: u32 = 0x41;
@@ -33,7 +33,9 @@ fn hint_reliant_programs_are_recognised_by_name_and_by_tables() {
     assert!(face_at(BY_TABLES, 20.0).program().requires_hinting());
     assert!(!face_at(PLAIN, 20.0).program().requires_hinting());
     for (name, data, _) in sample_programs() {
-        assert!(!face_at(&data, 20.0).program().requires_hinting(), "{name}");
+        let expected = name.starts_with("hint-assembled");
+        let program_requires = face_at(&data, 20.0).program().requires_hinting();
+        assert_eq!(program_requires, expected, "{name}");
     }
 }
 

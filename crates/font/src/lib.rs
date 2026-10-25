@@ -1,8 +1,10 @@
 //! Font programs, glyph rasterisation and the glyph cache for the
 //! `rasterrocket` pipeline.
 //!
-//! Font programs (TrueType, OpenType, bare CFF, Type 1) are parsed by the
-//! local `read-fonts` / `skrifa` forks; outlines are unhinted, converted to
+//! Font programs (TrueType, OpenType, bare CFF, name-keyed and CID-keyed
+//! Type 1) are parsed by the local `read-fonts` / `skrifa` forks; outlines
+//! are unhinted except where a TrueType program's glyphs depend on its
+//! instructions ([`program::FontProgram::requires_hinting`]), converted to
 //! [`raster::Path`] in device space and rasterised by an exact-area coverage
 //! rasteriser.
 //!

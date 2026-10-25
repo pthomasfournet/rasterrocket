@@ -8,7 +8,7 @@
 //! Glyph indices passed to the `*_by_gid` methods follow the composite-font
 //! convention: for a CID-keyed CFF program they are CIDs and are mapped
 //! through the program's charset; for every other program they are glyph
-//! indices.
+//! indices, which in a CID-keyed Type 1 program are the CIDs.
 
 use std::sync::{Arc, OnceLock};
 

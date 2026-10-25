@@ -12,6 +12,7 @@
 //! | sfnt (TrueType, OpenType, collections) | `00 01 00 00`, `true`, `OTTO`, `ttcf` | `glyf` / `CFF ` / `CFF2` |
 //! | bare CFF (Type 1C, CID-keyed CFF) | major version 1 or 2, header size ≥ 4 | charstrings |
 //! | Type 1 (PFA, PFB) | `%!` or the PFB segment marker `80 01` | eexec-encrypted charstrings |
+//! | CID-keyed Type 1 (`CIDFontType0`) | `%!`, then a `CIDMap` and `StartData` section | charstrings per font dict, selected by CID |
 //!
 //! Outlines are unhinted, except for the TrueType programs whose glyphs
 //! are assembled by their bytecode instructions
@@ -24,6 +25,7 @@ use std::sync::OnceLock;
 use read_fonts::ps::cff::CffFontRef;
 use read_fonts::ps::charmap::Charmap;
 use read_fonts::ps::type1::Type1Font;
+use read_fonts::ps::type1::cid::CidType1Font;
 use read_fonts::tables::cmap::{CmapSubtable, PlatformId};
 use read_fonts::types::{GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
@@ -45,7 +47,7 @@ pub enum FontFormat {
     /// `Type1C` or `CIDFontType0C`).
     Cff,
     /// A PostScript Type 1 program in PFA (ASCII) or PFB (segmented)
-    /// layout.
+    /// layout, name-keyed or CID-keyed.
     Type1,
 }
 
@@ -101,6 +103,9 @@ enum Outlines {
     Cff,
     /// Type 1 program, decrypted and parsed once at load.
     Type1(Box<Type1Font>),
+    /// CID-keyed Type 1 program (`CIDFontType0`), parsed and decrypted once
+    /// at load.  Glyph indices are CIDs.
+    CidType1(Box<CidType1Font>),
 }
 
 /// A parsed font program, shared by every [`crate::face::FontFace`] built
@@ -192,10 +197,8 @@ impl FontProgram {
                 (Outlines::Cff, f64::from(cff.upem()), cid_to_gid)
             }
             FontFormat::Type1 => {
-                let font = Type1Font::new(&data)
-                    .map_err(|e| LoadError::Malformed(format!("Type 1: {e}")))?;
-                let upem = f64::from(font.upem());
-                (Outlines::Type1(Box::new(font)), upem, None)
+                let (outlines, upem) = parse_type1(&data)?;
+                (outlines, f64::from(upem), None)
             }
         };
         if !(upem.is_finite() && upem > 0.0) {
@@ -224,7 +227,7 @@ impl FontProgram {
         match self.outlines {
             Outlines::Sfnt { .. } => FontFormat::Sfnt,
             Outlines::Cff => FontFormat::Cff,
-            Outlines::Type1(_) => FontFormat::Type1,
+            Outlines::Type1(_) | Outlines::CidType1(_) => FontFormat::Type1,
         }
     }
 
@@ -286,6 +289,8 @@ impl FontProgram {
             },
             Outlines::Cff => self.name_charmap_lookup(code),
             Outlines::Type1(font) => font.unicode_charmap().map(code).map_or(0, GlyphId::to_u32),
+            // Glyphs are selected by CID only.
+            Outlines::CidType1(_) => 0,
         }
     }
 
@@ -368,13 +373,15 @@ impl FontProgram {
                 .glyph_names()
                 .map(|(gid, name)| (gid.to_u32(), name.to_owned()))
                 .collect(),
+            Outlines::CidType1(_) => Vec::new(),
         }
     }
 
     /// Map a glyph selector from a composite font to a glyph index: for a
     /// CID-keyed CFF program the selector is a CID and resolves through the
-    /// charset (CID 0 is `.notdef`); otherwise it is the glyph index.
-    /// `None` when a CID has no glyph.
+    /// charset (CID 0 is `.notdef`); otherwise it is the glyph index, which
+    /// for a CID-keyed Type 1 program is the CID itself.  `None` when a CID
+    /// has no glyph.
     #[must_use]
     pub fn cid_to_gid(&self, selector: u32) -> Option<u32> {
         match &self.cid_to_gid {
@@ -394,7 +401,9 @@ impl FontProgram {
                 let hmtx = font.hmtx().ok()?;
                 f64::from(hmtx.advance(GlyphId::new(gid))?)
             }
-            Outlines::Cff | Outlines::Type1(_) => f64::from(self.draw(gid, &mut NullPen)??),
+            Outlines::Cff | Outlines::Type1(_) | Outlines::CidType1(_) => {
+                f64::from(self.draw(gid, &mut NullPen)??)
+            }
         };
         Some(units / self.upem)
     }
@@ -429,6 +438,8 @@ impl FontProgram {
                 }
                 font.draw(glyph, None, pen).ok()
             }
+            // Out-of-range CIDs and CIDs without a glyph are errors.
+            Outlines::CidType1(font) => font.draw(glyph, None, pen).ok(),
         }
     }
 
@@ -514,6 +525,30 @@ impl FontProgram {
             Outlines::Cff => CffFontRef::new(&self.data, 0, None).ok(),
             _ => None,
         }
+    }
+}
+
+/// Parse a PostScript Type 1 program and return its outlines with their
+/// units per em.  A program with the CID-keyed resource header is read as
+/// CID-keyed; any other is read as name-keyed and, failing that, as
+/// CID-keyed, which covers `CIDFont` programs written under a different
+/// header comment.
+fn parse_type1(data: &[u8]) -> Result<(Outlines, i32), LoadError> {
+    let cid = |data: &[u8]| {
+        CidType1Font::new(data).map(|font| {
+            let upem = font.upem();
+            (Outlines::CidType1(Box::new(font)), upem)
+        })
+    };
+    if CidType1Font::is_cid_keyed(data) {
+        return cid(data).map_err(|e| LoadError::Malformed(format!("CID-keyed Type 1: {e}")));
+    }
+    match Type1Font::new(data) {
+        Ok(font) => {
+            let upem = font.upem();
+            Ok((Outlines::Type1(Box::new(font)), upem))
+        }
+        Err(e) => cid(data).map_err(|_| LoadError::Malformed(format!("Type 1: {e}"))),
     }
 }
 
