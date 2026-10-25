@@ -239,16 +239,23 @@ const fn wants_name_resolution(
 ///
 /// For every code 0..256 the glyph name is `differences[code]` if the
 /// `Encoding/Differences` array overrides it, otherwise the name the
-/// `base_encoding` assigns to that code (PDF §9.6.6).  The name is resolved
-/// to a GID through the program's own glyph names (charset / `CharStrings` /
-/// `post` table — the only correct source for a subsetted program where the
-/// char code is neither the GID nor a usable Unicode-cmap key).
+/// `base_encoding` assigns to that code (PDF §9.6.6).  With no base encoding
+/// named ([`BaseEncoding::FontProgram`]) a code without a `Differences`
+/// entry resolves through the program's built-in encoding, the only
+/// mapping a subset with a custom encoding (glyphs named for their codes,
+/// no standard names) carries.  A name is resolved to a GID through the
+/// program's own glyph names (charset / `CharStrings` / `post` table — the
+/// only correct source for a subsetted program where the char code is
+/// neither the GID nor a usable Unicode-cmap key).
 ///
 /// Resolution order per code:
-/// 1. name (Differences ▸ base encoding) → `raw_get_name_index`
-/// 2. name → Adobe Glyph List → Unicode → `raw_get_char_index` (handles
+/// 1. no `Differences` entry and no base encoding named → the program's
+///    built-in encoding (`raw_get_builtin_index`), when it assigns the code
+/// 2. name (Differences ▸ base encoding, `StandardEncoding` when none is
+///    named) → `raw_get_name_index`
+/// 3. name → Adobe Glyph List → Unicode → `raw_get_char_index` (handles
 ///    programs that expose a usable Unicode cmap but no charset names)
-/// 3. `.notdef` (0) — a truly absent glyph.  We deliberately do NOT fall
+/// 4. `.notdef` (0) — a truly absent glyph.  We deliberately do NOT fall
 ///    back to code-identity: identity is the original garble bug.
 fn resolve_simple_to_gid(
     face: &FontFace,
@@ -256,8 +263,15 @@ fn resolve_simple_to_gid(
     base: BaseEncoding,
 ) -> Vec<u32> {
     let mut table = vec![0u32; 256];
-    for (code, slot) in table.iter_mut().enumerate() {
-        let Some(name) = glyph_name_for_code(differences, base, code) else {
+    for (code, slot) in (0u8..=u8::MAX).zip(table.iter_mut()) {
+        if base == BaseEncoding::FontProgram
+            && differences[usize::from(code)].is_none()
+            && let Some(gid) = face.raw_get_builtin_index(code)
+        {
+            *slot = gid;
+            continue;
+        }
+        let Some(name) = glyph_name_for_code(differences, base, usize::from(code)) else {
             continue;
         };
 
@@ -291,7 +305,7 @@ fn resolve_truetype_via_unicode(
         .map(|code| {
             let idx = code as usize;
             let name = differences[idx].as_deref().or_else(|| {
-                (base != BaseEncoding::Standard)
+                matches!(base, BaseEncoding::WinAnsi | BaseEncoding::MacRoman)
                     .then(|| base_encoding_table(base)[idx])
                     .flatten()
                     .filter(|n| !n.is_empty())
@@ -320,7 +334,7 @@ fn glyph_name_for_code(
 /// Return the code→glyph-name table for a PDF base encoding (PDF Appendix D).
 const fn base_encoding_table(base: BaseEncoding) -> &'static [Option<&'static str>; 256] {
     match base {
-        BaseEncoding::Standard => &STANDARD_ENCODING,
+        BaseEncoding::Standard | BaseEncoding::FontProgram => &STANDARD_ENCODING,
         BaseEncoding::WinAnsi => &WIN_ANSI_ENCODING,
         BaseEncoding::MacRoman => &MAC_ROMAN_ENCODING,
     }

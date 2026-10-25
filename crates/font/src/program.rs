@@ -343,6 +343,24 @@ impl FontProgram {
             .unwrap_or(0)
     }
 
+    /// Glyph index of character code `code` through the program's own
+    /// built-in encoding (the `Encoding` of a Type 1 font dictionary or of
+    /// a name-keyed CFF Top DICT), or `None` when the program has no
+    /// built-in encoding or the encoding leaves `code` unassigned.  sfnt
+    /// and CID-keyed CFF programs carry no built-in encoding.
+    #[must_use]
+    pub fn builtin_encoding_index(&self, code: u8) -> Option<u32> {
+        let gid = match &self.outlines {
+            Outlines::Sfnt { .. } => None,
+            Outlines::Cff => self
+                .cff()
+                .filter(|cff| !cff.is_cid())
+                .and_then(|cff| cff.encoding()?.map(code)),
+            Outlines::Type1(font) => font.encoding().and_then(|enc| enc.map(code)),
+        }?;
+        Some(gid.to_u32()).filter(|&gid| gid != 0)
+    }
+
     /// Every (glyph index, name) pair the program defines, in glyph order.
     /// Synthesized names (`gidN`) are not included.
     fn glyph_names(&self) -> Vec<(u32, String)> {

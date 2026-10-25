@@ -215,6 +215,13 @@ impl FontFace {
         self.program.name_index(name)
     }
 
+    /// Glyph index of `code` through the program's built-in encoding, `None`
+    /// when it assigns none (see [`FontProgram::builtin_encoding_index`]).
+    #[must_use]
+    pub fn raw_get_builtin_index(&self, code: u8) -> Option<u32> {
+        self.program.builtin_encoding_index(code)
+    }
+
     /// Resolve a character code: through `code_to_gid` when it covers the
     /// code, otherwise through the program's charmap.
     fn resolve_gid(&self, char_code: u32) -> u32 {

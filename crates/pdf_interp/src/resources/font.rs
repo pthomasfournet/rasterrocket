@@ -56,6 +56,11 @@ pub enum BaseEncoding {
     WinAnsi,
     /// `/MacRomanEncoding` — Mac OS Roman.
     MacRoman,
+    /// No base encoding named: the embedded font program's built-in
+    /// encoding (PDF §9.6.6.1, Table 112).  A code the built-in encoding
+    /// leaves unassigned, or a font without an embedded Type 1 / CFF
+    /// program, resolves through `StandardEncoding`.
+    FontProgram,
 }
 
 /// CID encoding information for Type 0 composite fonts.
@@ -421,8 +426,8 @@ fn empty_differences() -> Box<[Option<Box<str>>; 256]> {
 ///   `Differences` array.  The font cache resolves these to GIDs at face-load
 ///   time.
 /// - `base_encoding`: the code→glyph-name table to apply before `Differences`.
-///   `/BaseEncoding` if named, else `StandardEncoding` (the PDF-spec default
-///   for a simple font with no explicit base encoding).
+///   `/BaseEncoding` (or the bare encoding name) if named, else
+///   [`BaseEncoding::FontProgram`].
 #[expect(
     clippy::type_complexity,
     reason = "private helper; a type alias for the (code_to_gid, differences, base) triple would obscure rather than clarify"
@@ -433,12 +438,12 @@ fn extract_encoding(
     _kind: PdfFontKind,
 ) -> (Vec<u32>, Box<[Option<Box<str>>; 256]>, BaseEncoding) {
     let Some(encoding) = dict.get(b"Encoding") else {
-        return (vec![], empty_differences(), BaseEncoding::Standard);
+        return (vec![], empty_differences(), BaseEncoding::FontProgram);
     };
 
     match encoding {
         Object::Reference(id) => doc.get_dictionary(*id).ok().map_or_else(
-            || (vec![], empty_differences(), BaseEncoding::Standard),
+            || (vec![], empty_differences(), BaseEncoding::FontProgram),
             |d| {
                 (
                     vec![],
@@ -459,17 +464,19 @@ fn extract_encoding(
             empty_differences(),
             parse_base_encoding(Some(n.as_slice())),
         ),
-        _ => (vec![], empty_differences(), BaseEncoding::Standard),
+        _ => (vec![], empty_differences(), BaseEncoding::FontProgram),
     }
 }
 
-/// Map a PDF base-encoding name to [`BaseEncoding`].  Unknown or absent →
-/// `StandardEncoding` (PDF-spec default for a simple font).
+/// Map a PDF base-encoding name to [`BaseEncoding`].  Absent → the font
+/// program's built-in encoding; a name other than `WinAnsiEncoding` or
+/// `MacRomanEncoding` → `StandardEncoding`.
 const fn parse_base_encoding(name: Option<&[u8]>) -> BaseEncoding {
     match name {
+        None => BaseEncoding::FontProgram,
         Some(b"WinAnsiEncoding") => BaseEncoding::WinAnsi,
         Some(b"MacRomanEncoding") => BaseEncoding::MacRoman,
-        _ => BaseEncoding::Standard,
+        Some(_) => BaseEncoding::Standard,
     }
 }
 

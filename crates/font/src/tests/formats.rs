@@ -200,7 +200,40 @@ fn cid_keyed_cff_maps_cids_through_the_charset() {
     assert!(bare.make_glyph_by_gid(9_999, 0).is_none());
 }
 
+#[test]
+fn cid_keyed_and_sfnt_programs_have_no_builtin_encoding() {
+    let bare = face_at(&sfnt::table(super::CID_SUBSET, *b"CFF "), 40.0);
+    let wrapped = face_at(super::CID_SUBSET, 40.0);
+    for code in [0, 65, 255] {
+        assert_eq!(bare.raw_get_builtin_index(code), None);
+        assert_eq!(wrapped.raw_get_builtin_index(code), None);
+    }
+}
+
 // ── Type 1 (FontFile) ─────────────────────────────────────────────────────────
+
+#[test]
+fn type1_builtin_encoding_maps_codes_to_glyphs() {
+    let standard = face_at(&type1::synthetic_pfa(), 40.0);
+    let a = standard.raw_get_name_index("A");
+    assert_ne!(a, 0);
+    assert_eq!(standard.raw_get_builtin_index(65), Some(a));
+    assert_eq!(standard.raw_get_builtin_index(33), None, "exclam is absent");
+
+    // A custom encoding assigning code 33 to `B` and nothing else.
+    let custom = String::from_utf8(type1::synthetic_pfa())
+        .expect("PFA is ASCII")
+        .replace(
+            "/Encoding StandardEncoding def",
+            "/Encoding 256 array 0 1 255 {1 index exch /.notdef put} for \
+             dup 33 /B put readonly def",
+        );
+    let custom = face_at(custom.as_bytes(), 40.0);
+    let b = custom.raw_get_name_index("B");
+    assert_ne!(b, 0);
+    assert_eq!(custom.raw_get_builtin_index(33), Some(b));
+    assert_eq!(custom.raw_get_builtin_index(65), None);
+}
 
 #[test]
 fn type1_pfa_and_pfb_render_identically() {
