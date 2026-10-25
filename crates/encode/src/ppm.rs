@@ -138,8 +138,8 @@ mod tests {
         let mut bmp = Bitmap::new(w, h, 1, false);
         for y in 0..h {
             let row = bmp.row_bytes_mut(y);
-            for chunk in row.chunks_exact_mut(3) {
-                chunk.copy_from_slice(&fill);
+            for chunk in row.as_chunks_mut::<3>().0 {
+                *chunk = fill;
             }
         }
         bmp

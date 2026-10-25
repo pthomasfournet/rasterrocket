@@ -115,7 +115,7 @@ mod tests {
         for y in 0..64 {
             let row = bmp.row_bytes_mut(y);
             for (x, px) in row.iter_mut().enumerate().take(64) {
-                *px = (((x * 7 + y as usize * 13) % 256) as u8).wrapping_mul(3);
+                *px = (x * 7 + y as usize * 13).to_le_bytes()[0].wrapping_mul(3);
             }
         }
         let low = jpeg_gray::<Gray8>(&bmp, 20).unwrap();
@@ -211,7 +211,9 @@ mod tests {
         for y in 0..h {
             // Distinct per-pixel content so any row/padding misalignment
             // changes the encoded bytes.
-            let row: Vec<u8> = (0..w).map(|x| (y * 31 + x * 7 + 1) as u8).collect();
+            let row: Vec<u8> = (0..w)
+                .map(|x| (y * 31 + x * 7 + 1).to_le_bytes()[0])
+                .collect();
             padded.row_bytes_mut(y)[..w as usize].copy_from_slice(&row);
             tight.row_bytes_mut(y)[..w as usize].copy_from_slice(&row);
         }

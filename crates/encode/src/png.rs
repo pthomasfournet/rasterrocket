@@ -213,8 +213,8 @@ mod tests {
         let mut bmp = Bitmap::new(w, h, 1, false);
         for y in 0..h {
             let row = bmp.row_bytes_mut(y);
-            for chunk in row.chunks_exact_mut(3) {
-                chunk.copy_from_slice(&fill);
+            for chunk in row.as_chunks_mut::<3>().0 {
+                *chunk = fill;
             }
         }
         bmp
@@ -247,7 +247,7 @@ mod tests {
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (4, 2));
         assert_eq!(pixels.len(), 24, "4×2 pixels × 3 bytes");
-        for chunk in pixels.chunks_exact(3) {
+        for chunk in pixels.as_chunks::<3>().0 {
             assert_eq!(chunk, &[100, 150, 200], "pixel mismatch");
         }
     }
