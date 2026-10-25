@@ -1716,20 +1716,17 @@ impl<'doc> PageRenderer<'doc> {
             None => None,
         };
         let img_w = img.width as usize;
-
-        // Use the bitmap's authoritative row stride rather than re-deriving
-        // `width * 3`.  `Bitmap` may pad rows to a `row_pad` multiple; a local
-        // recompute would silently address the wrong byte on any padded layout
-        // (a write-to-wrong-pixel corruption, not a panic).  Read it before the
-        // mutable `data_mut()` borrow.
-        let stride = self.bitmap.stride;
-        let data = self.bitmap.data_mut();
+        let compositor = ImageCompositor::new(
+            &self.bitmap,
+            self.gstate.current().fill_alpha,
+            self.gstate.current().blend_mode,
+        );
 
         for dy in grid.y0..grid.y1 {
             let Some(row_clip) = grid_clip.row(dy) else {
                 continue;
             };
-            let row_off = dy as usize * stride;
+            let (row, mut alpha_row) = self.bitmap.row_and_alpha_mut(dy);
             for dx in grid.x0..grid.x1 {
                 let coverage = row_clip.coverage(dx);
                 if coverage == 0 {
@@ -1739,15 +1736,6 @@ impl<'doc> PageRenderer<'doc> {
                     continue;
                 };
                 let img_idx = iy as usize * img_w + ix as usize;
-                let pixel_off = row_off + dx as usize * 3;
-                // The destination triple is in-bounds whenever
-                // `stride == width * 3`; a padded stride or an off-by-one
-                // in clip-row rounding could push the last pixel of a
-                // clipped row past the buffer.  Skip that pixel rather
-                // than panic on untrusted-PDF geometry.
-                let Some(dst) = data.get_mut(pixel_off..pixel_off + 3) else {
-                    continue;
-                };
                 // Stencil masks paint the fill colour through their zero
                 // samples and carry no soft mask (asserted at entry).
                 let alpha = match img.color_space {
@@ -1762,23 +1750,17 @@ impl<'doc> PageRenderer<'doc> {
                 }
                 // `img_idx` is inside the buffer by the length check above;
                 // the `get`s keep the loop panic-free regardless.
-                match img.color_space {
-                    ImageColorSpace::Rgb => {
-                        let src = img_idx * 3;
-                        if let Some(rgb) = img_bytes.get(src..src + 3) {
-                            blend_rgb(dst, [rgb[0], rgb[1], rgb[2]], alpha);
-                        }
-                    }
-                    ImageColorSpace::Gray => {
-                        if let Some(&g) = img_bytes.get(img_idx) {
-                            blend_rgb(dst, [g, g, g], alpha);
-                        }
-                    }
+                let src = match img.color_space {
+                    ImageColorSpace::Rgb => img_bytes
+                        .get(img_idx * 3..img_idx * 3 + 3)
+                        .map(|rgb| [rgb[0], rgb[1], rgb[2]]),
+                    ImageColorSpace::Gray => img_bytes.get(img_idx).map(|&g| [g, g, g]),
                     ImageColorSpace::Mask => {
-                        if img_bytes.get(img_idx) == Some(&0x00) {
-                            blend_rgb(dst, fill_color, alpha);
-                        }
+                        (img_bytes.get(img_idx) == Some(&0x00)).then_some(fill_color)
                     }
+                };
+                if let Some(src) = src {
+                    compositor.paint(row, alpha_row.as_deref_mut(), dx, dy, src, alpha);
                 }
             }
         }
@@ -1851,9 +1833,14 @@ impl<'doc> PageRenderer<'doc> {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
+        let compositor = ImageCompositor::new(
+            &self.bitmap,
+            self.gstate.current().fill_alpha,
+            self.gstate.current().blend_mode,
+        );
         let bitmap = &mut self.bitmap;
         let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
-            composite_rgba_rows(bitmap, rows, y, grid, grid_clip);
+            composite_rgba_rows(bitmap, rows, y, grid, grid_clip, compositor);
         });
         if let Err(e) = downloaded {
             log::warn!("blit_image: device page buffer download failed: {e}");
@@ -1888,29 +1875,101 @@ fn composite_rgba_rows(
     y0: u32,
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
+    compositor: ImageCompositor,
 ) {
     use gpu::cache::RGBA_BPP;
 
     let width = bitmap.width as usize;
     let src_stride = width * RGBA_BPP;
-    let dst_stride = bitmap.stride;
-    let dst = bitmap.data_mut();
     for (src_row, dy) in rgba.chunks_exact(src_stride.max(1)).zip(y0..) {
         let Some(row_clip) = grid_clip.row(dy) else {
             continue;
         };
-        let dst_off = dy as usize * dst_stride;
+        let (row, mut alpha_row) = bitmap.row_and_alpha_mut(dy);
         for dx in grid.x0..grid.x1 {
             let s = &src_row[dx as usize * RGBA_BPP..dx as usize * RGBA_BPP + RGBA_BPP];
             let coverage = row_clip.coverage(dx);
             if s[3] == 0 || coverage == 0 {
                 continue;
             }
-            let off = dst_off + dx as usize * 3;
-            if let Some(d) = dst.get_mut(off..off + 3) {
-                blend_rgb(d, [s[0], s[1], s[2]], coverage);
-            }
+            compositor.paint(
+                row,
+                alpha_row.as_deref_mut(),
+                dx,
+                dy,
+                [s[0], s[1], s[2]],
+                coverage,
+            );
         }
+    }
+}
+
+/// Composites image samples onto a page or group bitmap.
+///
+/// An image paints with the nonstroking constant alpha and the blend mode in
+/// effect (ISO 32000-1 §11.6.4.4, §11.3.5), and inside a transparency group
+/// its shape accumulates into the group's alpha plane like any other object.
+/// When none of these apply (no alpha plane, `ca` = 1, `Normal`), a sample is
+/// blended onto the destination by its coverage alone; otherwise every sample
+/// runs through the raster pipe that fills use.
+#[derive(Clone, Copy)]
+struct ImageCompositor {
+    /// `None` selects the direct coverage blend.
+    pipe: Option<PipeState<'static>>,
+}
+
+impl ImageCompositor {
+    fn new(bitmap: &Bitmap<Rgb8>, fill_alpha: u8, blend_mode: BlendMode) -> Self {
+        let direct =
+            bitmap.alpha_plane().is_none() && fill_alpha == 255 && blend_mode == BlendMode::Normal;
+        Self {
+            pipe: (!direct).then(|| PageRenderer::make_pipe(fill_alpha, blend_mode)),
+        }
+    }
+
+    /// Paint `src` at column `dx` of row `dy` with coverage `coverage`.
+    /// `row` is the row's pixel bytes and `alpha_row` its alpha plane row,
+    /// if the bitmap has one.  A column past the row's end paints nothing.
+    fn paint(
+        &self,
+        row: &mut [u8],
+        alpha_row: Option<&mut [u8]>,
+        dx: u32,
+        dy: u32,
+        src: [u8; 3],
+        coverage: u8,
+    ) {
+        let x = dx as usize;
+        let Some(dst) = row.get_mut(x * 3..x * 3 + 3) else {
+            return;
+        };
+        let Some(pipe) = &self.pipe else {
+            blend_rgb(dst, src, coverage);
+            return;
+        };
+        let pixel_pipe = PipeState {
+            a_input: div255(u32::from(coverage) * u32::from(pipe.a_input)),
+            ..*pipe
+        };
+        if pixel_pipe.a_input == 0 {
+            return;
+        }
+        let dst_alpha = alpha_row.and_then(|a| a.get_mut(x..=x));
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "dx and dy are below the bitmap's u32 dimensions, which \
+                      device bitmaps keep under 2^31"
+        )]
+        raster::pipe::render_span::<Rgb8>(
+            &pixel_pipe,
+            &PipeSrc::Solid(&src),
+            dst,
+            dst_alpha,
+            None,
+            dx as i32,
+            dx as i32,
+            dy as i32,
+        );
     }
 }
 
