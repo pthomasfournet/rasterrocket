@@ -45,6 +45,7 @@
 
 mod annotations;
 mod gpu_ops;
+mod image_reduce;
 mod image_sampler;
 mod operators;
 mod patterns;
@@ -1565,8 +1566,10 @@ impl<'doc> PageRenderer<'doc> {
     /// The CTM maps the unit square (image space) onto the page; every
     /// device pixel inside the image's bounding box samples the source pixel
     /// under its centre (nearest neighbour), via a [`SampleGrid`] shared by
-    /// the CPU sampler below and the GPU blit kernel.  A mask is sampled the
-    /// same way through a [`MaskSampler`] at its own resolution.
+    /// the CPU sampler below and the GPU blit kernel.  A host-resident
+    /// colour image drawn at under half its resolution is first reduced by
+    /// block averaging (`image_reduce`).  A mask is sampled the same way
+    /// through a [`MaskSampler`] at its own resolution.
     #[expect(
         clippy::too_many_lines,
         reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
@@ -1618,6 +1621,12 @@ impl<'doc> PageRenderer<'doc> {
         }
 
         let ctm = self.gstate.current().ctm;
+        // An image drawn at under half its resolution is area-averaged down
+        // first so that point sampling does not drop thin features.  The
+        // mask, if any, stays the original's and is sampled on its own grid.
+        let mask_src = img.smask.as_ref();
+        let reduced = image_draw_size(&ctm).and_then(|d| image_reduce::reduce_for_draw(img, d));
+        let img = reduced.as_ref().unwrap_or(img);
         let Some(grid) = SampleGrid::new(&ctm, self.width, self.height, img.width, img.height)
         else {
             log::debug!(
@@ -1704,7 +1713,7 @@ impl<'doc> PageRenderer<'doc> {
             let s = self.gstate.current().fill_color.as_slice();
             [s[0], s[1], s[2]]
         };
-        let mask = match &img.smask {
+        let mask = match mask_src {
             Some(m) => {
                 let Some(sampler) =
                     MaskSampler::new(m, &ctm, self.width, self.height, img.width, img.height)
