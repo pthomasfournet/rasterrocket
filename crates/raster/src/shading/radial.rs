@@ -9,6 +9,12 @@
 //! The circles through a point `p` are the roots of
 //! `a·s² − 2·b·s + c = 0` with `a = |Δc|² − Δr²`,
 //! `b = (p − c0)·Δc + r0·Δr` and `c = |p − c0|² − r0²`.
+//!
+//! The circles lie in the shading's own space, which
+//! [`RadialPattern::in_shading_space`] relates to the device: each device
+//! pixel is mapped into that space before the equation is solved, so an
+//! affine transform draws the circles as their affine images (ellipses
+//! under a non-conformal transform).
 
 use super::{ColorRamp, fill_ramp_span};
 use crate::pipe::Pattern;
@@ -29,6 +35,9 @@ pub struct RadialPattern {
     /// `|Δc|² − Δr²`, the `s²` coefficient of the circle equation; zero
     /// when the equation is linear in `s`.
     a: f64,
+    /// The affine map `[a b c d e f]` from device pixels to the space of
+    /// the circles.
+    device_to_shading: [f64; 6],
 }
 
 impl RadialPattern {
@@ -79,7 +88,17 @@ impl RadialPattern {
             extend_start,
             extend_end,
             a,
+            device_to_shading: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         }
+    }
+
+    /// Place the circles given to [`Self::new`] in a shading space that the
+    /// affine map `device_to_shading` (`[a b c d e f]`, mapping `(x, y)` to
+    /// `(a·x + c·y + e, b·x + d·y + f)`) takes device pixels into.
+    #[must_use]
+    pub const fn in_shading_space(mut self, device_to_shading: &[f64; 6]) -> Self {
+        self.device_to_shading = *device_to_shading;
+        self
     }
 
     /// Whether the circle at parameter `s` belongs to the shading.
@@ -98,8 +117,10 @@ impl RadialPattern {
     /// Ramp position `s ∈ [0, 1]` of pixel `(xi, yi)`, or `None` when no
     /// circle of the shading passes through it.
     fn position(&self, xi: i32, yi: i32) -> Option<f64> {
-        let rel_x = f64::from(xi) - self.c0x;
-        let rel_y = f64::from(yi) - self.c0y;
+        let inv = &self.device_to_shading;
+        let (px, py) = (f64::from(xi), f64::from(yi));
+        let rel_x = inv[0].mul_add(px, inv[2].mul_add(py, inv[4])) - self.c0x;
+        let rel_y = inv[1].mul_add(px, inv[3].mul_add(py, inv[5])) - self.c0y;
         let b = self
             .r0
             .mul_add(self.dr, rel_x.mul_add(self.dcx, rel_y * self.dcy));
@@ -301,5 +322,49 @@ mod tests {
         let c = colour_at(&p, 6, 8).expect("end circle, opposite the origin");
         assert!(c[0] > 240, "end colour: {c:?}");
         assert_eq!(colour_at(&p, -3, -4), None, "behind the origin");
+    }
+
+    #[test]
+    fn a_non_uniform_transform_draws_the_circles_as_ellipses() {
+        // Circles of radius up to 4 about the origin, with device x twice
+        // shading x: the end circle is the ellipse with half-axes 8 and 4.
+        let p = RadialPattern::new(
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            4.0,
+            false,
+            false,
+        )
+        .in_shading_space(&[0.5, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let c = colour_at(&p, 6, 0).expect("inside the ellipse along x");
+        assert!((185..=195).contains(&c[0]), "s = 0.75: {c:?}");
+        assert!(colour_at(&p, 7, 0).is_some(), "inside along x");
+        assert!(colour_at(&p, 0, 3).is_some(), "inside along y");
+        assert_eq!(colour_at(&p, 0, 5), None, "outside along y");
+        assert_eq!(colour_at(&p, 9, 0), None, "outside along x");
+    }
+
+    #[test]
+    fn a_shear_moves_the_circle_centres() {
+        // Shading space (x − y, y): the circle about the origin of radius 2
+        // is the sheared ellipse through device (2, 0) and (2, 2).
+        let p = RadialPattern::new(
+            ColorRamp::two([0, 0, 0], [255, 255, 255]),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            2.0,
+            false,
+            false,
+        )
+        .in_shading_space(&[1.0, 0.0, -1.0, 1.0, 0.0, 0.0]);
+        assert!(colour_at(&p, 2, 2).is_some(), "the sheared boundary point");
+        assert_eq!(colour_at(&p, -2, 2), None, "its mirror image is outside");
     }
 }

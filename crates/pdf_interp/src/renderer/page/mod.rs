@@ -76,7 +76,7 @@ use raster::{
 
 use super::color::RasterColor;
 use super::font_cache::FontCache;
-use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform};
+use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform, invert_affine};
 use crate::content::Operator;
 use crate::resources::{
     ColorSpace, IMAGE_FILTER_COUNT, ImageColorSpace, ImageFilter, PageResources,
@@ -202,28 +202,6 @@ impl PageDiagnostics {
 /// Identity CTM for passing to raster functions — coordinate transform is
 /// already baked into the path points by `to_device`.
 const DEVICE_MATRIX: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-
-/// Inverse of the affine matrix `m` (`[a b c d e f]`, row-vector convention),
-/// or `None` when `m` is singular or not finite.
-#[expect(
-    clippy::many_single_char_names,
-    reason = "matrix entries a–f follow the PDF §8.3.3 notation"
-)]
-fn invert_affine(m: &[f64; 6]) -> Option<[f64; 6]> {
-    let [a, b, c, d, e, f] = *m;
-    let det = a.mul_add(d, -(b * c));
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
-    }
-    Some([
-        d / det,
-        -b / det,
-        -c / det,
-        a / det,
-        c.mul_add(f, -(d * e)) / det,
-        b.mul_add(e, -(a * f)) / det,
-    ])
-}
 
 /// `path` with every point mapped through `m`.  An affine map carries Bézier
 /// control points to the control points of the mapped curve, so flags and

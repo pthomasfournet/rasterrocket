@@ -51,7 +51,7 @@ use raster::shading::radial::RadialPattern;
 use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
 use super::{read_matrix, resolve_dict};
-use crate::renderer::gstate::ctm_multiply;
+use crate::renderer::gstate::{ctm_multiply, invert_affine};
 use function::{eval_function, eval_function_n, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, emit_triangle};
 use patch::{decode_type6_mesh, decode_type7_mesh};
@@ -278,22 +278,21 @@ fn resolve_axial(
 
     let ramp = sample_ramp(doc, sh.get(b"Function")?, cs, n, t0, t1)?;
 
-    // Reject non-finite user-space coordinates before transforming.
     if !coords.iter().all(|v| v.is_finite()) {
         log::warn!("shading/axial: non-finite Coords — skipping");
         return None;
     }
-
-    // Transform Coords from user space to device space (y-flip included).
-    let (dx0, dy0) = transform_point(ctm, coords[0], coords[1], page_h);
-    let (dx1, dy1) = transform_point(ctm, coords[2], coords[3], page_h);
-
-    if !dx0.is_finite() || !dy0.is_finite() || !dx1.is_finite() || !dy1.is_finite() {
-        log::warn!("shading/axial: non-finite device coords after CTM transform — skipping");
+    let Some(inverse) = device_to_space(ctm, page_h) else {
+        log::warn!("shading/axial: singular or non-finite CTM — skipping");
         return None;
-    }
+    };
 
-    let pattern = AxialPattern::new(ramp, dx0, dy0, dx1, dy1, ext_s, ext_e);
+    // The axis stays in the shading's target space; each device pixel is
+    // projected onto it there.
+    let pattern = AxialPattern::new(
+        ramp, coords[0], coords[1], coords[2], coords[3], ext_s, ext_e,
+    )
+    .in_shading_space(&inverse);
     Some(Box::new(pattern))
 }
 
@@ -343,27 +342,30 @@ fn resolve_radial(
 
     let ramp = sample_ramp(doc, sh.get(b"Function")?, cs, n, t0, t1)?;
 
-    // Reject non-finite user-space coordinates before transforming.
     if !coords.iter().all(|v| v.is_finite()) {
         log::warn!("shading/radial: non-finite Coords — skipping");
         return None;
     }
-
-    // Transform centres; scale radius by the geometric mean of the CTM scale.
-    let (dx0, dy0) = transform_point(ctm, coords[0], coords[1], page_h);
-    let (dx1, dy1) = transform_point(ctm, coords[3], coords[4], page_h);
-
-    if !dx0.is_finite() || !dy0.is_finite() || !dx1.is_finite() || !dy1.is_finite() {
-        log::warn!("shading/radial: non-finite device coords after CTM transform — skipping");
+    let Some(inverse) = device_to_space(ctm, page_h) else {
+        log::warn!("shading/radial: singular or non-finite CTM — skipping");
         return None;
-    }
+    };
 
-    let scale = ctm_scale(ctm);
-    // PDF spec requires r ≥ 0; take abs to handle malformed input gracefully.
-    let dr0 = coords[2].abs() * scale;
-    let dr1 = coords[5].abs() * scale;
-
-    let pattern = RadialPattern::new(ramp, dx0, dy0, dr0, dx1, dy1, dr1, ext_s, ext_e);
+    // The circles stay in the shading's target space, so the CTM draws
+    // them as their affine images.  PDF requires r ≥ 0; a negative radius
+    // is taken by magnitude.
+    let pattern = RadialPattern::new(
+        ramp,
+        coords[0],
+        coords[1],
+        coords[2].abs(),
+        coords[3],
+        coords[4],
+        coords[5].abs(),
+        ext_s,
+        ext_e,
+    )
+    .in_shading_space(&inverse);
     Some(Box::new(pattern))
 }
 
@@ -376,10 +378,6 @@ const TYPE1_GRID: usize = 64;
 /// Type 1 shading's Domain edge despite rounding error.
 const TYPE1_EDGE_TOLERANCE: f64 = 1e-9;
 
-#[expect(
-    clippy::many_single_char_names,
-    reason = "CTM components a–f and grid dims g, n follow PDF spec notation"
-)]
 fn resolve_function_based(
     doc: &Document,
     sh: &Dictionary,
@@ -407,21 +405,11 @@ fn resolve_function_based(
     // CTM maps to the device.
     let shading_ctm = read_matrix(sh).map_or(*ctm, |m| ctm_multiply(&m, ctm));
 
-    // Invert shading space → device so fill_span can map device pixels back.
-    let [a, b, c, d, e, f] = shading_ctm;
-    let det = a.mul_add(d, -(b * c));
-    if !det.is_finite() || det.abs() < f64::EPSILON {
-        log::warn!("shading/type1: degenerate Matrix × CTM (det={det:.3e}) — skipping");
+    // Device pixels map back to shading space through the inverse.
+    let Some(inv) = device_to_space(&shading_ctm, page_h) else {
+        log::warn!("shading/type1: degenerate Matrix × CTM — skipping");
         return None;
-    }
-    let inv: [f64; 6] = [
-        d / det,
-        -b / det,
-        -c / det,
-        a / det,
-        c.mul_add(f, -(d * e)) / det,
-        b.mul_add(e, -(a * f)) / det,
-    ];
+    };
 
     // Pre-sample the function on a TYPE1_GRID×TYPE1_GRID grid over Domain.
     // All document references are resolved here; the closure captures only the
@@ -450,11 +438,8 @@ fn resolve_function_based(
     let grid: Arc<[[u8; 3]]> = Arc::from(grid.into_boxed_slice());
 
     let pattern = FunctionPattern::new(move |px, py| {
-        // Undo the y-flip applied by transform_point, then map back to
-        // shading space.
-        let py_pdf = page_h - py;
-        let sx = inv[0].mul_add(px, inv[2] * py_pdf) + inv[4];
-        let sy = inv[1].mul_add(px, inv[3] * py_pdf) + inv[5];
+        let sx = inv[0].mul_add(px, inv[2] * py) + inv[4];
+        let sy = inv[1].mul_add(px, inv[3] * py) + inv[5];
 
         // PDF §8.7.4.5.2: points outside the Domain are not painted.
         let tx = (sx - xd0) / (xd1 - xd0);
@@ -989,15 +974,11 @@ pub(super) fn transform_point(ctm: &[f64; 6], x: f64, y: f64, page_h: f64) -> (f
     (dx, page_h - dy)
 }
 
-/// Compute the uniform scale factor of the CTM (geometric mean of x and y scales).
-///
-/// Falls back to `1.0` when the CTM contains non-finite entries or produces a
-/// non-finite scale (e.g., from an extreme anisotropic or degenerate matrix).
-pub(super) fn ctm_scale(ctm: &[f64; 6]) -> f64 {
-    let sx = ctm[0].hypot(ctm[1]);
-    let sy = ctm[2].hypot(ctm[3]);
-    let result = (sx * sy).sqrt();
-    if result.is_finite() { result } else { 1.0 }
+/// The affine map from device pixels to the space `ctm` maps to the device:
+/// the inverse of [`transform_point`].  `None` when `ctm` is singular or not
+/// finite.
+pub(super) fn device_to_space(ctm: &[f64; 6], page_h: f64) -> Option<[f64; 6]> {
+    invert_affine(&[ctm[0], -ctm[1], ctm[2], -ctm[3], ctm[4], page_h - ctm[5]])
 }
 
 /// Read the `Extend` array `[extend_start, extend_end]`; both default to `false`.
@@ -1101,26 +1082,23 @@ mod tests {
     }
 
     #[test]
-    fn ctm_scale_identity_is_one() {
-        let ctm = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
-        assert!((ctm_scale(&ctm) - 1.0).abs() < 1e-9);
+    fn device_to_space_inverts_transform_point() {
+        let ctm = [2.0, 0.5, -1.0, 3.0, 7.0, 11.0];
+        let inv = device_to_space(&ctm, 100.0).expect("invertible");
+        let (dx, dy) = transform_point(&ctm, 4.0, -6.0, 100.0);
+        let back = (
+            inv[0].mul_add(dx, inv[2] * dy) + inv[4],
+            inv[1].mul_add(dx, inv[3] * dy) + inv[5],
+        );
+        assert!((back.0 - 4.0).abs() < 1e-9 && (back.1 + 6.0).abs() < 1e-9);
     }
 
     #[test]
-    fn ctm_scale_uniform_2x() {
-        let ctm = [2.0f64, 0.0, 0.0, 2.0, 0.0, 0.0];
-        assert!((ctm_scale(&ctm) - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn ctm_scale_nan_falls_back_to_one() {
-        let ctm = [f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0];
-        assert_eq!(ctm_scale(&ctm), 1.0);
-    }
-
-    #[test]
-    fn ctm_scale_inf_falls_back_to_one() {
-        let ctm = [f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0];
-        assert_eq!(ctm_scale(&ctm), 1.0);
+    fn device_to_space_rejects_singular_ctm() {
+        assert_eq!(device_to_space(&[1.0, 2.0, 2.0, 4.0, 0.0, 0.0], 10.0), None);
+        assert_eq!(
+            device_to_space(&[f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0], 10.0),
+            None
+        );
     }
 }

@@ -70,6 +70,29 @@ pub fn ctm_transform(ctm: &Ctm, x: f64, y: f64) -> (f64, f64) {
     )
 }
 
+/// Inverse of the affine matrix `m` (`[a b c d e f]`, row-vector convention),
+/// or `None` when `m` is singular or not finite.
+#[must_use]
+#[expect(
+    clippy::many_single_char_names,
+    reason = "matrix entries a–f follow the PDF §8.3.3 notation"
+)]
+pub fn invert_affine(m: &Ctm) -> Option<Ctm> {
+    let [a, b, c, d, e, f] = *m;
+    let det = a.mul_add(d, -(b * c));
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    Some([
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        c.mul_add(f, -(d * e)) / det,
+        b.mul_add(e, -(a * f)) / det,
+    ])
+}
+
 /// PDF graphics state at the interpreter level.
 ///
 /// One instance lives per save/restore level; the stack is managed by

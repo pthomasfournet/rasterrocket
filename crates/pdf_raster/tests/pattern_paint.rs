@@ -259,3 +259,46 @@ fn text_filled_and_stroked_with_patterns_paints_both() {
         rgb(&bmp, 35, 35)
     );
 }
+
+/// Radial red → green from radius 0 to 20 about (50, 50), not extended.
+const RADIAL: &str = "<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [50 50 0 50 50 20] \
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 1 0] /N 1 >> >>";
+
+/// Whether `rgb` is a red-to-green ramp colour (no blue).
+fn is_ramp(rgb: [u8; 3]) -> bool {
+    rgb[2] < 8 && u16::from(rgb[0]) + u16::from(rgb[1]) > 200
+}
+
+/// Assert that the radial shading, drawn with device x twice user x about
+/// device centre (100, 50), covers the ellipse with half-axes 40 and 20.
+fn assert_ellipse(bmp: &Page) {
+    for (x, y, what) in [(135, 50, "inside along x"), (100, 65, "inside along y")] {
+        assert!(is_ramp(rgb(bmp, x, y)), "{what}: {:?}", rgb(bmp, x, y));
+    }
+    assert_eq!(rgb(bmp, 145, 50), BLUE, "outside along x");
+    assert_eq!(rgb(bmp, 100, 75), BLUE, "outside along y");
+}
+
+#[test]
+fn radial_sh_under_a_non_uniform_ctm_draws_ellipses() {
+    let bmp = render(page(
+        &format!("{BACKDROP}2 0 0 1 0 0 cm /Sh0 sh"),
+        RADIAL,
+        None,
+        "/Shading << /Sh0 5 0 R >>",
+        &[],
+    ));
+    assert_ellipse(&bmp);
+}
+
+#[test]
+fn radial_shading_pattern_under_a_non_uniform_matrix_draws_ellipses() {
+    let bmp = render(page(
+        &format!("{BACKDROP}/Pattern cs /P0 scn 0 0 200 100 re f"),
+        &format!("<< /PatternType 2 /Matrix [2 0 0 1 0 0] /Shading {RADIAL} >>"),
+        None,
+        "",
+        &[],
+    ));
+    assert_ellipse(&bmp);
+}
