@@ -4,8 +4,8 @@
 //! transfer function LUTs for the rasterrocket workspace.
 //!
 //! ## Design rule
-//! Every compositing primitive (`div255`, `lerp_u8`, `cmyk_to_rgb`,
-//! `cmyk_to_rgb_reflectance`, `splash_floor`, …) lives in [`convert`].
+//! Every compositing primitive (`div255`, `lerp_u8`, `splash_floor`, …)
+//! lives in [`convert`], and every `DeviceCMYK` → RGB conversion in [`cmyk`].
 //! Downstream crates import from here and never duplicate the logic.
 //! This is the primary enforcement point of the workspace's shared-helper policy.
 //!

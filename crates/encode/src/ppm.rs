@@ -16,7 +16,8 @@
 
 use std::io::{self, Write};
 
-use color::{Pixel, PixelMode, convert::cmyk_to_rgb};
+use color::cmyk::{cmyk_to_rgb, cmyk_to_rgb_row};
+use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
 use crate::EncodeError;
@@ -102,20 +103,13 @@ fn convert_row_to_rgb<P: Pixel>(src: &[u8], dst: &mut [u8], width: usize) {
         }
         PixelMode::Cmyk8 => {
             // Source: [C, M, Y, K] → dest: [R, G, B].
-            for (i, chunk) in src[..width * 4].as_chunks::<4>().0.iter().enumerate() {
-                let (r, g, b) = cmyk_to_rgb(chunk[0], chunk[1], chunk[2], chunk[3]);
-                dst[i * 3] = r;
-                dst[i * 3 + 1] = g;
-                dst[i * 3 + 2] = b;
-            }
+            cmyk_to_rgb_row(&src[..width * 4], &mut dst[..width * 3]);
         }
         PixelMode::DeviceN8 => {
             // Source: [C, M, Y, K, spot0..3] — use only CMYK (bytes 0..4).
             for (i, chunk) in src[..width * 8].as_chunks::<8>().0.iter().enumerate() {
-                let (r, g, b) = cmyk_to_rgb(chunk[0], chunk[1], chunk[2], chunk[3]);
-                dst[i * 3] = r;
-                dst[i * 3 + 1] = g;
-                dst[i * 3 + 2] = b;
+                dst[i * 3..i * 3 + 3]
+                    .copy_from_slice(&cmyk_to_rgb(chunk[0], chunk[1], chunk[2], chunk[3]));
             }
         }
         PixelMode::Mono1 | PixelMode::Mono8 => {
@@ -196,14 +190,14 @@ mod tests {
     }
 
     #[test]
-    fn cmyk_black_converts_to_rgb_black() {
+    fn cmyk_black_converts_to_printed_black() {
         let mut bmp: Bitmap<Cmyk8> = Bitmap::new(1, 1, 1, false);
-        // CMYK (0, 0, 0, 255) = pure black.
+        // CMYK (0, 0, 0, 255) = solid K, the printed black of process ink.
         bmp.row_bytes_mut(0).copy_from_slice(&[0, 0, 0, 255]);
         let mut out = Vec::new();
         write_ppm::<Cmyk8, _>(&bmp, &mut out).unwrap();
         let hlen = header_len(&out);
-        assert_eq!(&out[hlen..], &[0, 0, 0], "CMYK black → RGB (0,0,0)");
+        assert_eq!(&out[hlen..], &cmyk_to_rgb(0, 0, 0, 255), "solid K");
     }
 
     #[test]
@@ -261,39 +255,12 @@ mod tests {
     }
 
     #[test]
-    fn cmyk_to_rgb_clamped() {
-        // cyan=200, black=100 → 255-200-100 = -45 → clamped to 0.
-        let (r, g, b) = cmyk_to_rgb(200, 0, 0, 100);
-        assert_eq!(r, 0, "negative result must clamp to 0");
-        assert_eq!(g, 155, "magenta=0, k=100: 255-0-100=155");
-        assert_eq!(b, 155, "yellow=0, k=100: 255-0-100=155");
-    }
-
-    #[test]
-    fn cmyk_to_rgb_asymmetric_channels() {
-        // Distinct non-zero values per ink so each channel's `255 - chan - k`
-        // formula is independently constrained.  K=0 isolates the C/M/Y math.
-        let (r, g, b) = cmyk_to_rgb(10, 50, 200, 0);
-        assert_eq!(r, 245, "cyan=10, k=0: 255-10=245");
-        assert_eq!(g, 205, "magenta=50, k=0: 255-50=205");
-        assert_eq!(b, 55, "yellow=200, k=0: 255-200=55");
-
-        // Non-zero K with all four channels distinct.
-        let (r, g, b) = cmyk_to_rgb(40, 80, 120, 30);
-        assert_eq!(r, 185, "255-40-30=185");
-        assert_eq!(g, 145, "255-80-30=145");
-        assert_eq!(b, 105, "255-120-30=105");
-    }
-
-    #[test]
     fn cmyk_ppm_multi_pixel_layout() {
         // 2×2 with four distinct CMYK pixels — covers per-pixel CMYK→RGB
         // conversion across multiple rows and per-row destination stride.
         let mut bmp: Bitmap<Cmyk8> = Bitmap::new(2, 2, 1, false);
-        // Row 0: [(10, 0, 0, 0), (0, 20, 0, 0)] → [(245,255,255), (255,235,255)]
         bmp.row_bytes_mut(0)
             .copy_from_slice(&[10, 0, 0, 0, 0, 20, 0, 0]);
-        // Row 1: [(0, 0, 30, 0), (40, 50, 60, 0)] → [(255,255,225), (215,205,195)]
         bmp.row_bytes_mut(1)
             .copy_from_slice(&[0, 0, 30, 0, 40, 50, 60, 0]);
         let mut out = Vec::new();
@@ -301,10 +268,10 @@ mod tests {
         let hlen = header_len(&out);
         let pixels = &out[hlen..];
         assert_eq!(pixels.len(), 12, "2×2 × 3 RGB bytes");
-        assert_eq!(&pixels[0..3], &[245, 255, 255], "row 0 px 0");
-        assert_eq!(&pixels[3..6], &[255, 235, 255], "row 0 px 1");
-        assert_eq!(&pixels[6..9], &[255, 255, 225], "row 1 px 0");
-        assert_eq!(&pixels[9..12], &[215, 205, 195], "row 1 px 1");
+        assert_eq!(&pixels[0..3], &cmyk_to_rgb(10, 0, 0, 0), "row 0 px 0");
+        assert_eq!(&pixels[3..6], &cmyk_to_rgb(0, 20, 0, 0), "row 0 px 1");
+        assert_eq!(&pixels[6..9], &cmyk_to_rgb(0, 0, 30, 0), "row 1 px 0");
+        assert_eq!(&pixels[9..12], &cmyk_to_rgb(40, 50, 60, 0), "row 1 px 1");
     }
 
     #[test]
@@ -328,16 +295,17 @@ mod tests {
         // spot bytes are skipped per pixel and only the CMYK portion drives
         // the RGB output.
         let mut bmp: Bitmap<DeviceN8> = Bitmap::new(2, 1, 1, false);
-        // px0 CMYK=(10, 0, 0, 0) → (245, 255, 255); spot=99..
-        // px1 CMYK=(0, 40, 80, 0) → (255, 215, 175); spot=88..
+        // px0 CMYK=(10, 0, 0, 0), spot=99..; px1 CMYK=(0, 40, 80, 0), spot=88..
         bmp.row_bytes_mut(0)
             .copy_from_slice(&[10, 0, 0, 0, 99, 99, 99, 99, 0, 40, 80, 0, 88, 88, 88, 88]);
         let mut out = Vec::new();
         write_ppm::<DeviceN8, _>(&bmp, &mut out).unwrap();
         let hlen = header_len(&out);
+        let mut want = cmyk_to_rgb(10, 0, 0, 0).to_vec();
+        want.extend_from_slice(&cmyk_to_rgb(0, 40, 80, 0));
         assert_eq!(
             &out[hlen..],
-            &[245, 255, 255, 255, 215, 175],
+            want.as_slice(),
             "spot bytes must be skipped per pixel; only CMYK drives the RGB output"
         );
     }

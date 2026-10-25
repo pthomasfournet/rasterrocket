@@ -3,10 +3,11 @@
 //! Maps PDF colour operator values (f64 in `[0,1]`) to raw u8 pixel components
 //! understood by the raster crate.
 //!
-//! Pure conversion functions (`gray_to_u8`, `rgb_to_bytes`, `cmyk_to_rgb_bytes`)
-//! live in `color::convert` and are re-exported from there.
+//! The pure conversion functions live in the `color` crate: `gray_to_u8` and
+//! `rgb_to_bytes` in `color::convert` (re-exported here), `DeviceCMYK` in
+//! `color::cmyk`.
 
-pub use color::convert::{cmyk_to_rgb_bytes, gray_to_u8, rgb_to_bytes};
+pub use color::convert::{gray_to_u8, rgb_to_bytes};
 
 /// Current fill or stroke colour, in a form the raster pipeline accepts.
 ///
@@ -14,8 +15,8 @@ pub use color::convert::{cmyk_to_rgb_bytes, gray_to_u8, rgb_to_bytes};
 /// RGB values.  `PipeSrc::Solid` takes `&[u8]` and asserts its length equals
 /// the pixel component count, so passing a 1-byte gray value would panic.
 ///
-/// `gray()` expands to equal R=G=B channels; `cmyk()` converts via naive
-/// PDF §10.3.3.  Full ICC-profile conversion is a later phase.
+/// `gray()` expands to equal R=G=B channels; `cmyk()` converts through the
+/// process-ink interpolation of `color::cmyk`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterColor {
     bytes: [u8; 3],
@@ -37,11 +38,11 @@ impl RasterColor {
         }
     }
 
-    /// CMYK [0, 1] each — converted to RGB via naive PDF §10.3.3 (no ICC).
+    /// `DeviceCMYK` [0, 1] each — converted with [`color::cmyk::cmyk_f64_to_rgb`].
     #[must_use]
     pub fn cmyk(c: f64, m: f64, y: f64, k: f64) -> Self {
         Self {
-            bytes: cmyk_to_rgb_bytes(c, m, y, k),
+            bytes: color::cmyk::cmyk_f64_to_rgb(c, m, y, k),
         }
     }
 

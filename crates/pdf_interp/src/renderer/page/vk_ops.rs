@@ -181,13 +181,9 @@ pub(super) fn try_vk_aa_fill(
     true
 }
 
-// ICC CMYK→RGB on Vulkan is intentionally not wired here.  The CUDA dispatcher
-// for the matrix path always short-circuits to CPU AVX-512 (PCIe round-trip
-// dominates), and the CLUT path's renderer plumbing (`resolve_image` →
-// `decode_dct` → `cmyk_raw_to_rgb`) currently threads only `Option<&GpuCtx>`.
-// Adding a parallel `Option<&VulkanBackend>` parameter through that chain is
-// scoped to a follow-up; under `BackendPolicy::ForceVulkan` `gpu_ctx` is
-// `None`, so the CMYK path falls back to the CPU `cmyk_to_rgb_reflectance`
-// matrix — a quality regression for CMYK images with embedded ICC profiles
-// vs. CUDA, not a correctness bug.  Phase 9-pre-2026-05-07 had the same
-// behaviour and it was acceptable then.
+// ICC CMYK→RGB is not wired to Vulkan.  The profile-free conversion always
+// runs on the CPU (the PCIe round trip dominates), and the CLUT path's
+// renderer plumbing (`resolve_image` → `decode_dct` → `cmyk_raw_to_rgb`)
+// threads only `Option<&GpuCtx>`.  Under `BackendPolicy::ForceVulkan`
+// `gpu_ctx` is `None`, so CMYK images with an embedded ICC profile convert
+// with the profile-free `color::cmyk` model instead of the baked CLUT.

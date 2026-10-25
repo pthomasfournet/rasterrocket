@@ -8,14 +8,10 @@
 //! - [`div255`] — fast approximate division by 255
 //! - [`lerp_u8`] — bilinear interpolation between two bytes
 //!
-//! **Color-space conversion (u8 domain)**
-//! - [`cmyk_to_rgb`] — simple subtractive CMYK → RGB
-//! - [`cmyk_to_rgb_reflectance`] — reflectance formula for raw JPEG/CMYK pixels
-//!
 //! **Color-space conversion (f64 → u8, normalised PDF values)**
+//! (`DeviceCMYK` conversion lives in [`crate::cmyk`].)
 //! - [`gray_to_u8`] — normalised grey \[0,1\] → byte
 //! - [`rgb_to_bytes`] — normalised RGB \[0,1\] → 3-byte array
-//! - [`cmyk_to_rgb_bytes`] — normalised CMYK \[0,1\] → RGB bytes via PDF §10.3.3
 //!
 //! **Geometry rounding**
 //! - [`splash_floor`] — floor toward −∞, returns i32
@@ -88,78 +84,6 @@ pub fn lerp_u8(a: u8, b: u8, t: u32) -> u8 {
 
 // ── Color space conversion ────────────────────────────────────────────────────
 
-/// CMYK → RGB using the simple subtractive model.
-///
-/// `R = 255 − (C + K)`, clamped to \[0, 255\], and similarly for G and B.
-///
-/// # Arguments
-///
-/// All inputs in \[0, 255\].
-///
-/// # Output range
-///
-/// Each output channel is in \[0, 255\].
-///
-/// # Saturation note
-///
-/// When `c + k > 255` the sum would exceed 255, so `saturating_sub` clamps
-/// the result to 0. This correctly models full ink coverage producing black.
-///
-/// # Distinction from other CMYK variants
-///
-/// - [`cmyk_to_rgb_reflectance`]: uses the reflectance formula
-///   `R = (255−C)×(255−K)/255` (rounded), for raw JPEG/CMYK pixel data.
-/// - `rasterrocket_interp::renderer::color::cmyk_to_rgb_bytes`: takes normalised f64
-///   inputs per PDF §10.3.3 (`R = 1−min(1, C+K)`), for PDF colour operators.
-#[inline]
-#[must_use]
-pub const fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
-    // Chained `u8::saturating_sub` stays in `u8` space — once a channel
-    // saturates to 0, the second subtraction is a no-op, so the result
-    // equals `255u32.saturating_sub(c + k)` clamped to `u8`.
-    (
-        255u8.saturating_sub(c).saturating_sub(k),
-        255u8.saturating_sub(m).saturating_sub(k),
-        255u8.saturating_sub(y).saturating_sub(k),
-    )
-}
-
-/// Blend one ink channel against the key: `((255−ink) × (255−k) + 127) / 255`.
-///
-/// Max product is `255 × 255 + 127 = 65 152`, which divides to 255 — fits `u8`.
-#[inline]
-fn reflectance_blend(ink: u8, inv_k: u32) -> u8 {
-    // `(255−ink)×(255−k) ≤ 65025` and `+127` then `/255` keeps the result
-    // in `[0, 255]`. `.expect` matches the workspace convention for proving
-    // small-domain u32→u8 narrowings (see `color::transfer`, `raster::state`).
-    u8::try_from((u32::from(255 - ink) * inv_k + 127) / 255)
-        .expect("reflectance_blend: ((255−ink)×inv_k+127)/255 ≤ 255")
-}
-
-/// CMYK → RGB via the reflectance formula: `R = (255−C)×(255−K)/255` (rounded).
-///
-/// Used for raw JPEG/CMYK pixel data where channels represent ink density.
-/// The `+127` bias before dividing by 255 removes truncation error; the
-/// numerator `(255−ch)×(255−k)+127 ≤ 255×255+127 = 65152` fits in `u32`.
-///
-/// # Distinction from other CMYK variants
-///
-/// - [`cmyk_to_rgb`]: simple saturating-subtract `R = 255−(C+K)`.
-///   Faster but less accurate for mid-tones.
-/// - [`cmyk_to_rgb_bytes`]: takes normalised `f64` inputs per PDF §10.3.3.
-///
-/// All inputs and outputs in \[0, 255\].
-#[inline]
-#[must_use]
-pub fn cmyk_to_rgb_reflectance(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
-    let inv_k = u32::from(255 - k);
-    (
-        reflectance_blend(c, inv_k),
-        reflectance_blend(m, inv_k),
-        reflectance_blend(y, inv_k),
-    )
-}
-
 /// Full-range (JFIF) Y′CbCr → RGB, ITU-R BT.601 coefficients.
 ///
 /// `R = Y + 1.402·Cr′`, `G = Y − 0.344136·Cb′ − 0.714136·Cr′`,
@@ -210,29 +134,6 @@ pub fn gray_to_u8(v: f64) -> u8 {
 #[must_use]
 pub fn rgb_to_bytes(r: f64, g: f64, b: f64) -> [u8; 3] {
     [gray_to_u8(r), gray_to_u8(g), gray_to_u8(b)]
-}
-
-/// Convert PDF CMYK \[0.0, 1.0\] to RGB bytes via PDF §10.3.3 formula.
-///
-/// `R = 1 − min(1, C + K)`, clamped per channel.
-///
-/// # Distinction from other CMYK variants
-///
-/// - [`cmyk_to_rgb`]: takes `u8` inputs with saturating-subtract.
-/// - [`cmyk_to_rgb_reflectance`]: takes `u8` inputs with reflectance product formula.
-/// - This function: takes normalised `f64` inputs for use with PDF colour operators.
-#[inline]
-#[must_use]
-#[expect(
-    clippy::many_single_char_names,
-    reason = "CMYK and RGB are conventional single-letter colour channel names"
-)]
-pub fn cmyk_to_rgb_bytes(c: f64, m: f64, y: f64, k: f64) -> [u8; 3] {
-    let k = k.clamp(0.0, 1.0);
-    let r = 1.0 - (c.clamp(0.0, 1.0) + k).min(1.0);
-    let g = 1.0 - (m.clamp(0.0, 1.0) + k).min(1.0);
-    let b = 1.0 - (y.clamp(0.0, 1.0) + k).min(1.0);
-    rgb_to_bytes(r, g, b)
 }
 
 // ── Geometry rounding (matching SplashMath.h portable fallbacks) ──────────────
@@ -495,114 +396,5 @@ mod tests {
     #[test]
     fn gray_nan_is_zero() {
         assert_eq!(gray_to_u8(f64::NAN), 0);
-    }
-
-    // ── cmyk_to_rgb_bytes ─────────────────────────────────────────────────────
-
-    #[test]
-    fn cmyk_bytes_black() {
-        assert_eq!(cmyk_to_rgb_bytes(0.0, 0.0, 0.0, 1.0), [0, 0, 0]);
-    }
-
-    #[test]
-    fn cmyk_bytes_white() {
-        assert_eq!(cmyk_to_rgb_bytes(0.0, 0.0, 0.0, 0.0), [255, 255, 255]);
-    }
-
-    /// NaN inputs in the formula `1 − min(c+k, 1)` go through `f64::min`,
-    /// which returns the non-NaN argument (`1.0`), so `1 − 1 = 0` lands in
-    /// the affected channel. With `k = NaN`, every channel's expression
-    /// involves the NaN, so every output byte is 0.
-    #[test]
-    fn cmyk_bytes_nan_channel_is_zero() {
-        assert_eq!(cmyk_to_rgb_bytes(f64::NAN, 0.0, 0.0, 0.0), [0, 255, 255]);
-        assert_eq!(cmyk_to_rgb_bytes(0.0, 0.0, 0.0, f64::NAN), [0, 0, 0]);
-    }
-
-    // ── cmyk_to_rgb_reflectance ───────────────────────────────────────────────
-
-    /// `cmyk_to_rgb_reflectance` — all-zero ink (no ink) must produce white.
-    #[test]
-    fn cmyk_reflectance_no_ink_is_white() {
-        assert_eq!(cmyk_to_rgb_reflectance(0, 0, 0, 0), (255, 255, 255));
-    }
-
-    /// `cmyk_to_rgb_reflectance` — full K (key/black) must produce black.
-    #[test]
-    fn cmyk_reflectance_full_k_is_black() {
-        assert_eq!(cmyk_to_rgb_reflectance(0, 0, 0, 255), (0, 0, 0));
-    }
-
-    /// `cmyk_to_rgb_reflectance` — C=255, no K → R=0, G=B=255.
-    #[test]
-    fn cmyk_reflectance_full_cyan_no_k() {
-        let (r, g, b) = cmyk_to_rgb_reflectance(255, 0, 0, 0);
-        assert_eq!(r, 0);
-        assert_eq!(g, 255);
-        assert_eq!(b, 255);
-    }
-
-    /// `cmyk_to_rgb_reflectance` — midtone C=128 gives R ≈ 127–128.
-    #[test]
-    fn cmyk_reflectance_midtone() {
-        let (r, g, b) = cmyk_to_rgb_reflectance(128, 0, 0, 0);
-        assert!((127..=128).contains(&r), "r={r}");
-        assert_eq!(g, 255);
-        assert_eq!(b, 255);
-    }
-
-    /// `cmyk_to_rgb` saturation: when c+k > 255 the channel must be 0.
-    #[test]
-    fn cmyk_saturation() {
-        // c=200, k=200 → c+k=400 → saturating_sub → 0, red=clip255(0)=0
-        let (r, g, b) = cmyk_to_rgb(200, 0, 0, 200);
-        assert_eq!(r, 0, "saturated red channel must be 0");
-        assert_eq!(g, 55, "green = 255 - 200 = 55");
-        assert_eq!(b, 55, "blue  = 255 - 200 = 55");
-
-        // Full black: all channels 0.
-        let (r, g, b) = cmyk_to_rgb(0, 0, 0, 255);
-        assert_eq!((r, g, b), (0, 0, 0));
-
-        // No ink: all channels 255.
-        let (r, g, b) = cmyk_to_rgb(0, 0, 0, 0);
-        assert_eq!((r, g, b), (255, 255, 255));
-    }
-
-    /// `cmyk_to_rgb_reflectance` agrees with the analytic formula
-    /// `((255−C)×(255−K)+127)/255` (integer, rounding toward zero) to within ±1 LSB.
-    ///
-    /// Reference values are the exact outputs of `reflectance_blend` for each case.
-    /// The ±2 LSB tolerance is kept as the assertion bound to absorb any future
-    /// rounding changes; delta 0 is expected for all cases here.
-    #[test]
-    fn cmyk_to_rgb_reflectance_colour_accuracy() {
-        let cases: &[(u8, u8, u8, u8, u8, u8, u8)] = &[
-            // (C, M, Y, K, R_ref, G_ref, B_ref)
-            // Reference values match reflectance_blend: ((255−ink)×(255−k)+127)/255
-            (0, 0, 0, 0, 255, 255, 255),       // no ink → white
-            (0, 0, 0, 255, 0, 0, 0),           // black ink only
-            (255, 0, 0, 0, 0, 255, 255),       // full cyan
-            (0, 255, 0, 0, 255, 0, 255),       // full magenta
-            (0, 0, 255, 0, 255, 255, 0),       // full yellow
-            (128, 0, 0, 0, 127, 255, 255),     // 50% cyan:   (127×255+127)/255=127
-            (0, 128, 0, 0, 255, 127, 255),     // 50% magenta
-            (0, 0, 128, 0, 255, 255, 127),     // 50% yellow
-            (128, 128, 128, 0, 127, 127, 127), // 50% CMY no K
-            (128, 128, 128, 128, 63, 63, 63),  // 50% CMY + 50% K: (127×127+127)/255=63
-            (200, 100, 50, 80, 38, 106, 141),  // mixed
-        ];
-
-        for &(c, m, y, k, r_ref, g_ref, b_ref) in cases {
-            let (r, g, b) = cmyk_to_rgb_reflectance(c, m, y, k);
-            let dr = (i32::from(r) - i32::from(r_ref)).unsigned_abs();
-            let dg = (i32::from(g) - i32::from(g_ref)).unsigned_abs();
-            let db = (i32::from(b) - i32::from(b_ref)).unsigned_abs();
-            assert!(
-                dr <= 2 && dg <= 2 && db <= 2,
-                "cmyk({c},{m},{y},{k}): got ({r},{g},{b}), ref ({r_ref},{g_ref},{b_ref}), \
-                 delta=({dr},{dg},{db})"
-            );
-        }
     }
 }

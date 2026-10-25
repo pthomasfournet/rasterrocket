@@ -961,11 +961,15 @@ mod tests {
     fn to_rgb_cmyk_reads_four_ink_channels() {
         assert_eq!(
             to_rgb(&ColorSpace::DeviceCmyk, &[0.85, 0.69, 0.0, 0.0]),
-            [38, 79, 255]
+            color::cmyk::cmyk_f64_to_rgb(0.85, 0.69, 0.0, 0.0)
         );
         assert_eq!(
             to_rgb(&ColorSpace::DeviceCmyk, &[0.0, 0.0, 0.0, 1.0]),
-            [0, 0, 0]
+            color::cmyk::CORNERS[8]
+        );
+        assert_eq!(
+            to_rgb(&ColorSpace::DeviceCmyk, &[0.0, 0.0, 1.0, 0.0]),
+            color::cmyk::CORNERS[1]
         );
     }
 

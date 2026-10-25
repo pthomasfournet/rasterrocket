@@ -947,12 +947,13 @@ mod tests {
             resolve_separation_black("/Width 3 /Height 1 /BitsPerComponent 8", &[0, 128, 255]);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
         let px = img.data.as_cpu().unwrap();
+        let solid_k = color::cmyk::CORNERS[8][0];
         assert_eq!(px[0], 255, "tint 0 = no ink = white");
-        assert_eq!(px[2], 0, "tint 1 = full ink = black");
-        assert!(
-            (126..=129).contains(&px[1]),
-            "half tint is mid gray, got {}",
-            px[1]
+        assert_eq!(px[2], solid_k, "tint 1 = solid K");
+        assert_eq!(
+            px[1],
+            color::cmyk::cmyk_to_rgb(0, 0, 0, 128)[0],
+            "half tint is the half-K grey"
         );
     }
 
@@ -964,7 +965,10 @@ mod tests {
             "/Width 2 /Height 1 /BitsPerComponent 8 /Decode [1 0]",
             &[0, 255],
         );
-        assert_eq!(img.data.as_cpu().unwrap(), &[0, 255]);
+        assert_eq!(
+            img.data.as_cpu().unwrap(),
+            &[color::cmyk::CORNERS[8][0], 255]
+        );
     }
 
     #[test]
@@ -973,7 +977,7 @@ mod tests {
         let img = resolve_separation_black("/Width 8 /Height 1 /BitsPerComponent 1", &[0x80]);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
         let px = img.data.as_cpu().unwrap();
-        assert_eq!(px[0], 0, "set bit = tint 1 = ink");
+        assert_eq!(px[0], color::cmyk::CORNERS[8][0], "set bit = tint 1 = ink");
         assert!(
             px[1..].iter().all(|&v| v == 255),
             "clear bits = tint 0 = paper"

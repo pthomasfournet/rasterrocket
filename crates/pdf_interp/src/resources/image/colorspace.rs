@@ -339,15 +339,7 @@ pub(super) fn indexed_palette(doc: &Document, cs_arr: &[Object]) -> Option<(Vec<
 
     // Build the output palette, converting CMYK entries to RGB inline.
     let palette: Vec<u8> = if base == ResolvedCs::Cmyk {
-        let mut out = Vec::with_capacity(n_entries * 3);
-        for chunk in lookup_bytes[..needed].as_chunks::<4>().0 {
-            let (r, g, b) =
-                color::convert::cmyk_to_rgb_reflectance(chunk[0], chunk[1], chunk[2], chunk[3]);
-            out.push(r);
-            out.push(g);
-            out.push(b);
-        }
-        out
+        color::cmyk::cmyk_to_rgb_vec(&lookup_bytes[..needed])
     } else {
         lookup_bytes[..needed].to_vec()
     };
@@ -430,19 +422,24 @@ mod tests {
     #[test]
     fn tint_lut_separation_black_maps_zero_tint_to_white() {
         // PDF §8.6.6.4: tint 0 is no colorant.  Through t ↦ (0,0,0,t) and the
-        // CMYK alternate that is paper white; tint 1 is full black.  This is
-        // the reverse of the Gray sample polarity the bytes are decoded in.
+        // CMYK alternate that is paper white; tint 1 is solid K.  This is the
+        // reverse of the Gray sample polarity the bytes are decoded in.
         let (doc, cs) = separation_black_doc();
         let Some(TintLut::Gray(lut)) = tint_lut(&doc, &cs) else {
             panic!("a neutral alternate colour must yield a Gray lookup");
         };
+        let solid_k = color::cmyk::CORNERS[8][0];
         assert_eq!(lut[0], 255, "tint 0 = no ink = white");
-        assert_eq!(lut[255], 0, "tint 1 = full ink = black");
+        assert_eq!(lut[255], solid_k, "tint 1 = solid K");
         assert!(
             lut.windows(2).all(|w| w[0] >= w[1]),
             "more ink must never be lighter"
         );
-        assert!((126..=129).contains(&lut[128]), "half tint is mid gray");
+        assert_eq!(
+            lut[128],
+            color::cmyk::cmyk_to_rgb(0, 0, 0, 128)[0],
+            "half tint is the half-K grey"
+        );
     }
 
     #[test]
@@ -457,7 +454,7 @@ mod tests {
         let Some(TintLut::Gray(lut)) = tint_lut(&doc, &cs) else {
             panic!("Indexed over Separation carries base-space tints per pixel");
         };
-        assert_eq!((lut[0], lut[255]), (255, 0));
+        assert_eq!((lut[0], lut[255]), (255, color::cmyk::CORNERS[8][0]));
     }
 
     #[test]
@@ -515,7 +512,7 @@ mod tests {
         let Some(TintLut::Gray(lut)) = tint_lut(&doc, &dn) else {
             panic!("one-colorant DeviceN is a Separation with another name");
         };
-        assert_eq!((lut[0], lut[255]), (255, 0));
+        assert_eq!((lut[0], lut[255]), (255, color::cmyk::CORNERS[8][0]));
     }
 
     fn gray_desc(bytes: &[u8]) -> ImageDescriptor {

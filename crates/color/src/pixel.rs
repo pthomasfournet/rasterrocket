@@ -255,8 +255,10 @@ mod tests {
             y: 0,
             k: 255,
         };
-        let (r, g, b) = crate::convert::cmyk_to_rgb(px.c, px.m, px.y, px.k);
-        assert_eq!((r, g, b), (0, 0, 0));
+        assert_eq!(
+            crate::cmyk::cmyk_to_rgb(px.c, px.m, px.y, px.k),
+            crate::cmyk::CORNERS[8]
+        );
     }
 
     /// White for `Mono1` must be `0xFF` — all 8 packed bits set to 1.

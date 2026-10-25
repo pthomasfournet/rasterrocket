@@ -276,8 +276,8 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceCmyk)),
         };
-        // (0,0,0,1) = full black.
+        // (0,0,0,1) = solid K: all four components reach the CMYK conversion.
         let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(tint.as_slice(), &[0, 0, 0]);
+        assert_eq!(tint.as_slice(), &color::cmyk::cmyk_to_rgb(0, 0, 0, 255));
     }
 }

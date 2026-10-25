@@ -852,18 +852,14 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
 /// `inverted = false` (raw images / `decode_raw_8bpp`): 0 = no ink, 255 = full ink.
 /// `inverted = true` (JPEG CMYK): codec returns the complement convention (0 = full
 /// ink, 255 = no ink); the complement is applied on-the-fly, avoiding a separate
-/// allocation.
+/// allocation.  Both conventions convert with [`color::cmyk`].
 ///
 /// `icc_bytes` — raw ICC profile bytes extracted from an `ICCBased` colour space.
 /// When provided (and the `gpu-icc` feature is active), a CLUT is baked from the
-/// profile and used for the colour transform instead of the fast matrix approximation.
+/// profile and used for the colour transform instead of the profile-free model.
 ///
 /// Returns `None` when the pixel buffer length is not a multiple of 4, or on
 /// arithmetic overflow (degenerate image size).
-#[expect(
-    clippy::many_single_char_names,
-    reason = "c/m/y/k/r/g/b are the canonical channel names for CMYK→RGB — renaming hurts clarity"
-)]
 pub(super) fn cmyk_raw_to_rgb(
     pixels: &[u8],
     inverted: bool,
@@ -881,7 +877,7 @@ pub(super) fn cmyk_raw_to_rgb(
 
     // GPU path: delegate to GpuCtx which handles the dispatch-threshold check and
     // CPU fallback internally.  When ICC bytes are present, bake a CLUT for
-    // profile-accurate conversion; fall back to the fast matrix approximation if
+    // profile-accurate conversion; fall back to the profile-free model if
     // baking fails (e.g. corrupt profile or wrong colour space).
     #[cfg(feature = "gpu-icc")]
     if let Some(ctx) = gpu_ctx {
@@ -902,13 +898,17 @@ pub(super) fn cmyk_raw_to_rgb(
             if let Some(cache) = clut_cache {
                 icc::bake_cmyk_clut_cached(bytes, icc::DEFAULT_GRID_N, cache)
                     .map_err(|e| {
-                        log::warn!("image: ICC CLUT bake failed, using matrix fallback: {e}");
+                        log::warn!(
+                            "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
+                        );
                     })
                     .ok()
             } else {
                 icc::bake_cmyk_clut(bytes, icc::DEFAULT_GRID_N)
                     .map_err(|e| {
-                        log::warn!("image: ICC CLUT bake failed, using matrix fallback: {e}");
+                        log::warn!(
+                            "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
+                        );
                     })
                     .ok()
                     .map(std::convert::Into::into)
@@ -926,18 +926,24 @@ pub(super) fn cmyk_raw_to_rgb(
 
     // CPU path (also used below threshold by GpuCtx itself, but we land here
     // when the feature is disabled or no GpuCtx is provided).
-    let npixels = pixels.len() / 4;
-    let mut rgb = Vec::with_capacity(npixels.checked_mul(3)?);
-    for chunk in pixels.as_chunks::<4>().0 {
-        let [c, m, y, k] = if inverted {
-            chunk.map(|v| 255 - v)
-        } else {
-            *chunk
-        };
-        let (r, g, b) = color::convert::cmyk_to_rgb_reflectance(c, m, y, k);
-        rgb.push(r);
-        rgb.push(g);
-        rgb.push(b);
+    let mut rgb = vec![0u8; (pixels.len() / 4).checked_mul(3)?];
+    if inverted {
+        // Complement through a stack buffer of whole pixels so the converted
+        // row never needs a second heap copy of the input.
+        const CHUNK_PX: usize = 1024;
+        let mut ink = [0u8; CHUNK_PX * 4];
+        for (src, dst) in pixels
+            .chunks(CHUNK_PX * 4)
+            .zip(rgb.chunks_mut(CHUNK_PX * 3))
+        {
+            let ink = &mut ink[..src.len()];
+            for (o, &v) in ink.iter_mut().zip(src) {
+                *o = !v;
+            }
+            color::cmyk::cmyk_to_rgb_row(ink, dst);
+        }
+    } else {
+        color::cmyk::cmyk_to_rgb_row(pixels, &mut rgb);
     }
     Some(rgb)
 }

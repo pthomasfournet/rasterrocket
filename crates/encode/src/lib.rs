@@ -16,8 +16,8 @@
 //! # CMYK handling
 //!
 //! Neither PPM nor PNG natively supports CMYK.  [`write_ppm`] converts
-//! CMYK/`DeviceN` to RGB via the naïve subtractive ink-density formula
-//! `R = 255 − C − K` (PDF §10.3.3).  For ICC-accurate colour, convert to
+//! CMYK/`DeviceN` (process channels only) to RGB with the profile-free
+//! process-ink model of `color::cmyk`.  For ICC-accurate colour, convert to
 //! `Rgb8` before encoding.
 
 pub mod jpeg;

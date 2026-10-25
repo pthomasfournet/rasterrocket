@@ -173,9 +173,8 @@ impl ColorSpace {
     ///
     /// # Variant behaviour
     ///
-    /// - `DeviceGray/Rgb/Cmyk`: direct conversion via the existing
-    ///   `color::convert` helpers (CMYK uses the naive §10.3.3 path; ICC
-    ///   profile handling is a separate phase).
+    /// - `DeviceGray/Rgb`: direct conversion via the `color::convert`
+    ///   helpers; `DeviceCmyk` via the process-ink model of `color::cmyk`.
     /// - `Lab`: CIE Lab → D65 XYZ → sRGB through the standard formulae.
     ///   Whitepoint defaults to D65 (the spec's most common choice); the
     ///   per-document whitepoint stored in `dict_id` is not yet applied.
@@ -214,7 +213,7 @@ impl ColorSpace {
             Self::DeviceGray => gray_byte_to_rgb(color::convert::gray_to_u8(comps[0])),
             Self::DeviceRgb => color::convert::rgb_to_bytes(comps[0], comps[1], comps[2]),
             Self::DeviceCmyk => {
-                color::convert::cmyk_to_rgb_bytes(comps[0], comps[1], comps[2], comps[3])
+                color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3])
             }
             Self::Lab { .. } => lab_to_srgb(comps[0], comps[1], comps[2]),
             Self::IccBased { n, stream_id } => {
@@ -485,7 +484,7 @@ fn icc_fallback_by_n(n: u8, comps: &[f64]) -> [u8; 3] {
     match n {
         1 => gray_byte_to_rgb(color::convert::gray_to_u8(comps[0])),
         3 => color::convert::rgb_to_bytes(comps[0], comps[1], comps[2]),
-        4 => color::convert::cmyk_to_rgb_bytes(comps[0], comps[1], comps[2], comps[3]),
+        4 => color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3]),
         _ => [0, 0, 0],
     }
 }
@@ -951,17 +950,22 @@ mod tests {
     }
 
     #[test]
-    fn convert_devicecmyk_uses_naive_conversion() {
+    fn convert_devicecmyk_uses_process_ink_model() {
         let doc = empty_doc();
-        // (0, 0, 0, 0) = white in CMYK.
+        // (0, 0, 0, 0) = paper white.
         assert_eq!(
             ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 0.0]),
             [255, 255, 255],
         );
-        // (1, 1, 1, 1) = black.
+        // (1, 1, 1, 1) = four-colour solid = black.
         assert_eq!(
             ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 1.0, 1.0, 1.0]),
             [0, 0, 0],
+        );
+        // Solid cyan is the printed process cyan, not the ideal (0, 255, 255).
+        assert_eq!(
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 0.0, 0.0, 0.0]),
+            color::cmyk::CORNERS[4],
         );
     }
 
@@ -1003,7 +1007,10 @@ mod tests {
         // No stream_id → skip moxcms, use device-by-N fallback directly.
         assert_eq!(icc1.convert_to_rgb(&doc, &[1.0]), [255, 255, 255]);
         assert_eq!(icc3.convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
-        assert_eq!(icc4.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 1.0]), [0, 0, 0]);
+        assert_eq!(
+            icc4.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 1.0]),
+            color::cmyk::CORNERS[8]
+        );
     }
 
     #[test]
