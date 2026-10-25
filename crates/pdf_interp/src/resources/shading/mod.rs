@@ -515,6 +515,13 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Skip to the next byte boundary, discarding the unread bits of the
+    /// current byte.  Every byte loaded into the buffer is whole, so the
+    /// partial byte's unread bits are `bits_in_buf mod 8`.
+    pub(super) const fn align(&mut self) {
+        self.bits_in_buf -= self.bits_in_buf % 8;
+    }
+
     /// Read exactly `n` bits (1–32) and return as a right-justified `u32`.
     ///
     /// Returns `None` when the stream is exhausted before `n` bits are available.
@@ -605,14 +612,16 @@ pub(super) fn parse_bits_per_comp(sh: &Dictionary, tag: &str) -> Option<u8> {
 
 /// Decode a Type 4 (free-form Gouraud triangle mesh) shading stream.
 ///
-/// Stream layout: for each record, 8-bit flag followed by `BitsPerCoordinate`
-/// bits each for X and Y, then `BitsPerComponent` bits per colour field
-/// (`source.components()` fields).
+/// Stream layout (PDF §8.7.4.5.5): one record per vertex — a
+/// `BitsPerFlag`-bit edge flag, `BitsPerCoordinate` bits each for x and y,
+/// then `BitsPerComponent` bits per colour field (`source.components()`
+/// fields) — each record starting on a byte boundary.
 ///
-/// Flag semantics (PDF §8.7.4.5.3):
-/// - 0 → new triangle: 3 new vertices A, B, C
-/// - 1 → extend from edge (B, C) of previous triangle: 1 new vertex D → triangle (B, C, D)
-/// - 2 → extend from edge (C, A) of previous triangle: 1 new vertex D → triangle (C, A, D)
+/// The flag of a vertex that opens a triangle selects how it forms one:
+/// - 0 → it and the next two vertices form a new triangle A, B, C (the next
+///   two vertices' flags are ignored);
+/// - 1 → it extends edge (B, C) of the previous triangle: triangle (B, C, D);
+/// - 2 → it extends edge (C, A) of the previous triangle: triangle (C, A, D).
 fn decode_type4_mesh<S: CornerSource>(
     sh: &Dictionary,
     data: &[u8],
@@ -627,51 +636,45 @@ fn decode_type4_mesh<S: CornerSource>(
     let Some(bpcomp) = parse_bits_per_comp(sh, "type4") else {
         return vec![];
     };
+    let Some(bpf) = patch::parse_bits_per_flag(sh, "type4") else {
+        return vec![];
+    };
 
     let mut reader = BitReader::new(data);
     let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
     // The three vertices of the most recently decoded triangle, for fan continuation.
     let mut prev: Option<[MeshVertex<S::Corner>; 3]> = None;
+    // Vertices of a flag-0 triangle read so far.
+    let mut opening: Vec<MeshVertex<S::Corner>> = Vec::with_capacity(3);
     let mut raw = vec![0u32; source.components()];
 
-    // Flag is 8 bits; read_bits(8) guarantees value ≤ 255.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "read_bits(8) returns at most 255"
-    )]
-    while let Some(flag_raw) = reader.read_bits(8) {
-        let flag = flag_raw as u8;
+    while let Some(flag) = reader.read_bits(bpf) {
+        let Some(vertex) = read_mesh_vertex(&mut reader, &mut raw, bpc, bpcomp) else {
+            break;
+        };
+        reader.align();
+        let v = decode_mesh_vertex(source, vertex, &raw, bpc, bpcomp, decode, ctm, page_h);
 
-        let n_new: usize = if flag == 0 { 3 } else { 1 };
-
-        // Read new vertices; bail out of the entire mesh on any truncation.
-        let mut new_verts = [MeshVertex {
-            x: 0.0,
-            y: 0.0,
-            corner: <S::Corner as mesh::Corner>::ZERO,
-        }; 3];
-        for slot in new_verts.iter_mut().take(n_new) {
-            let Some(vertex) = read_mesh_vertex(&mut reader, &mut raw, bpc, bpcomp) else {
-                return triangles;
-            };
-            *slot = decode_mesh_vertex(source, vertex, &raw, bpc, bpcomp, decode, ctm, page_h);
-        }
-
-        // Build the triangle from flag + previous vertices.
-        let tri = match (flag, prev) {
-            // Flag 0: independent triangle from 3 fresh vertices.
-            (0, _) => Some([new_verts[0], new_verts[1], new_verts[2]]),
-            // Flag 1: extend from edge (B=prev[1], C=prev[2]) with new vertex D.
-            (1, Some(p)) => Some([p[1], p[2], new_verts[0]]),
-            // Flag 2: extend from edge (C=prev[2], A=prev[0]) with new vertex D.
-            (2, Some(p)) => Some([p[2], p[0], new_verts[0]]),
-            // Flag 1/2 with no prior triangle, or unknown flag: skip record.
-            (f, _) => {
-                if f > 2 {
-                    log::debug!("shading/type4: unknown flag {f} — skipping record");
+        let tri = if opening.is_empty() {
+            match (flag, prev) {
+                (0, _) => {
+                    opening.push(v);
+                    None
                 }
-                None
+                (1, Some(p)) => Some([p[1], p[2], v]),
+                (2, Some(p)) => Some([p[2], p[0], v]),
+                (f, _) => {
+                    log::debug!("shading/type4: flag {f} cannot open a triangle — skipping vertex");
+                    None
+                }
             }
+        } else {
+            opening.push(v);
+            (opening.len() == 3).then(|| {
+                let t = [opening[0], opening[1], opening[2]];
+                opening.clear();
+                t
+            })
         };
 
         if let Some(t) = tri {
@@ -687,7 +690,8 @@ fn decode_type4_mesh<S: CornerSource>(
 
 /// Decode a Type 5 (lattice-form Gouraud) shading stream.
 ///
-/// `VerticesPerRow` vertices wide; vertices are laid out in row-major order.
+/// `VerticesPerRow` vertices wide; vertices are laid out in row-major order,
+/// each starting on a byte boundary.
 /// Adjacent rows of vertices form a grid; each 2×2 quad is split into two
 /// triangles (top-left + bottom-right of the quad diagonal).
 fn decode_type5_mesh<S: CornerSource>(
@@ -729,6 +733,7 @@ fn decode_type5_mesh<S: CornerSource>(
             let Some(vertex) = read_mesh_vertex(&mut reader, &mut raw, bpc, bpcomp) else {
                 break 'rows;
             };
+            reader.align();
             row.push(decode_mesh_vertex(
                 source, vertex, &raw, bpc, bpcomp, decode, ctm, page_h,
             ));
@@ -996,6 +1001,18 @@ mod tests {
     use super::*;
 
     use crate::test_helpers::empty_doc;
+
+    #[test]
+    fn bit_reader_align_skips_to_the_next_byte() {
+        let mut r = BitReader::new(&[0b1010_0000, 0xC3, 0x5A]);
+        assert_eq!(r.read_bits(3), Some(0b101));
+        r.align();
+        assert_eq!(r.read_bits(8), Some(0xC3));
+        r.align(); // already aligned: no bits skipped
+        assert_eq!(r.read_bits(4), Some(0x5));
+        r.align();
+        assert_eq!(r.read_bits(1), None);
+    }
 
     fn to_rgb(space: &ColorSpace, channels: &[f64]) -> [u8; 3] {
         let doc = empty_doc();

@@ -538,7 +538,8 @@ pub(super) fn apply_flag_type7<C: Corner>(
 ///
 /// Each record: `BitsPerFlag`-bit flag, then 12 (flag=0) or 8 (flag≥1) coordinate
 /// pairs at `BitsPerCoordinate` bits each, then 4 (flag=0) or 2 (flag≥1) colours
-/// at `BitsPerComponent` bits per channel. Interior control points are derived from
+/// at `BitsPerComponent` bits per channel; every record starts on a byte
+/// boundary. Interior control points are derived from
 /// the boundary using the standard Coons formula. Each patch is tessellated into
 /// Gouraud triangles via adaptive subdivision.
 pub(super) fn decode_type6_mesh<S: CornerSource>(
@@ -577,6 +578,7 @@ pub(super) fn decode_type6_mesh<S: CornerSource>(
         let Some(colors) = read_patch_colors(&mut reader, n_colors, bpcomp, decode, source) else {
             break;
         };
+        reader.align();
 
         let patch = match (flag, &prev) {
             (0, _) => build_patch_type6(&pts, &colors),
@@ -601,8 +603,8 @@ pub(super) fn decode_type6_mesh<S: CornerSource>(
 /// Decode a Type 7 (tensor-product patch mesh) shading stream.
 ///
 /// Like Type 6 but all 16 control points per patch are read directly from the
-/// stream (4 interior points are not derived). Flag semantics and colour handling
-/// are identical to Type 6.
+/// stream (4 interior points are not derived). Flag semantics, colour handling
+/// and record alignment are identical to Type 6.
 pub(super) fn decode_type7_mesh<S: CornerSource>(
     sh: &Dictionary,
     data: &[u8],
@@ -639,6 +641,7 @@ pub(super) fn decode_type7_mesh<S: CornerSource>(
         let Some(colors) = read_patch_colors(&mut reader, n_colors, bpcomp, decode, source) else {
             break;
         };
+        reader.align();
 
         let patch = match (flag, &prev) {
             (0, _) => build_patch_type7(&pts, &colors),

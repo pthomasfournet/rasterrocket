@@ -1,7 +1,9 @@
 //! A shading's colour at every point is the colour-space conversion of its
 //! function's output there (ISO 32000-1 §8.7.4.5), whatever the colour
 //! space (`DeviceN` with a multi-input tint transform included) and however
-//! many stops a stitching function has.
+//! many stops a stitching function has.  Mesh streams are read record by
+//! record as §8.7.4.5.5–8 lay them out: a flag on every free-form vertex,
+//! and every vertex or patch record starting on a byte boundary.
 
 #[expect(
     dead_code,
@@ -296,4 +298,113 @@ fn mesh_in_a_five_colorant_space_converts_every_vertex() {
     let px = rgb_at(assemble_pdf(&objects), &[(100, 80), (100, 20)]);
     assert_close(px[0], px[1], 2, "mesh vertex colour vs flat fill");
     assert!(px[0][0] > 180 && px[0][1] < 80, "red: {:?}", px[0]);
+}
+
+/// Pack `(value, bits)` fields MSB first, padding the record to a byte.
+fn record(fields: &[(u32, u32)]) -> Vec<u8> {
+    let mut bits: Vec<bool> = fields
+        .iter()
+        .flat_map(|&(v, n)| (0..n).rev().map(move |i| (v >> i) & 1 == 1))
+        .collect();
+    bits.resize(bits.len().div_ceil(8) * 8, false);
+    bits.chunks(8)
+        .map(|byte| byte.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b)))
+        .collect()
+}
+
+#[test]
+fn free_form_mesh_reads_a_flag_on_every_byte_aligned_vertex() {
+    // 2-bit flags make each 26-bit vertex record pad to 4 bytes.  A (0, 0),
+    // B (200, 0), C (0, 100) open a triangle (flag 0; B's and C's flags are
+    // ignored); D (200, 100) extends edge B–C (flag 1).  t = x / 200.
+    let mut data = Vec::new();
+    for (flag, x, y, t) in [
+        (0, 0, 0, 0),
+        (3, 255, 0, 255),
+        (3, 0, 255, 0),
+        (1, 255, 255, 255),
+    ] {
+        data.extend(record(&[(flag, 2), (x, 8), (y, 8), (t, 8)]));
+    }
+    let shading = stream_object(
+        &format!(
+            "/ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+             /BitsPerComponent 8 /BitsPerFlag 2 /Decode [0 200 0 100 0 1] \
+             /Function {RED_GREEN_BLUE}"
+        ),
+        &data,
+    );
+    let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
+    for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
+        assert_close(got, want, 6, "type 4 mesh, t = x / 200");
+    }
+}
+
+#[test]
+fn lattice_mesh_starts_every_vertex_on_a_byte_boundary() {
+    // 4-bit coordinates and colours: each 20-bit vertex pads to 3 bytes.
+    let mut data = Vec::new();
+    for (x, y, [r, g, b]) in [
+        (0, 0, [15, 0, 0]),
+        (15, 0, [0, 15, 0]),
+        (0, 15, [0, 0, 15]),
+        (15, 15, [15, 15, 0]),
+    ] {
+        data.extend(record(&[(x, 4), (y, 4), (r, 4), (g, 4), (b, 4)]));
+    }
+    let shading = stream_object(
+        "/ShadingType 5 /ColorSpace /DeviceRGB /BitsPerCoordinate 4 /BitsPerComponent 4 \
+         /VerticesPerRow 2 /Decode [0 200 0 100 0 1 0 1 0 1]",
+        &data,
+    );
+    let px = rgb_at(
+        page_with("/Sh0 sh", &shading, &[]),
+        &[(2, 2), (197, 2), (2, 97), (197, 97)],
+    );
+    let want = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
+    for (got, want) in px.into_iter().zip(want) {
+        assert_close(got, want, 12, "lattice corner");
+    }
+}
+
+#[test]
+fn patch_mesh_starts_every_patch_on_a_byte_boundary() {
+    // Two flat Coons patches with 2-bit flags (290-bit records): the left
+    // half red, the right half blue.
+    let mut data = Vec::new();
+    for (x0, [r, g, b]) in [(0.0, [255, 0, 0]), (100.0, [0, 0, 255])] {
+        let xs = [x0, x0 + 100.0 / 3.0, x0 + 200.0 / 3.0, x0 + 100.0];
+        let ys = [0.0, 100.0 / 3.0, 200.0 / 3.0, 100.0];
+        let boundary = [
+            (xs[0], ys[0]),
+            (xs[1], ys[0]),
+            (xs[2], ys[0]),
+            (xs[3], ys[0]),
+            (xs[3], ys[1]),
+            (xs[3], ys[2]),
+            (xs[3], ys[3]),
+            (xs[2], ys[3]),
+            (xs[1], ys[3]),
+            (xs[0], ys[3]),
+            (xs[0], ys[2]),
+            (xs[0], ys[1]),
+        ];
+        let mut fields = vec![(0, 2)];
+        for (x, y) in boundary {
+            fields.push((u32::from(u16::from_be_bytes(coord16(x, 200.0))), 16));
+            fields.push((u32::from(u16::from_be_bytes(coord16(y, 100.0))), 16));
+        }
+        for _ in 0..4 {
+            fields.extend([(r, 8), (g, 8), (b, 8)]);
+        }
+        data.extend(record(&fields));
+    }
+    let shading = stream_object(
+        "/ShadingType 6 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 /BitsPerComponent 8 \
+         /BitsPerFlag 2 /Decode [0 200 0 100 0 1 0 1 0 1]",
+        &data,
+    );
+    let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &[(50, 50), (150, 50)]);
+    assert_close(px[0], [255, 0, 0], 2, "first patch");
+    assert_close(px[1], [0, 0, 255], 2, "second patch");
 }
