@@ -347,11 +347,12 @@ impl FontProgram {
     /// built-in encoding (the `Encoding` of a Type 1 font dictionary or of
     /// a name-keyed CFF Top DICT), or `None` when the program has no
     /// built-in encoding or the encoding leaves `code` unassigned.  sfnt
-    /// and CID-keyed CFF programs carry no built-in encoding.
+    /// programs and CID-keyed programs (CFF or Type 1) carry no built-in
+    /// encoding.
     #[must_use]
     pub fn builtin_encoding_index(&self, code: u8) -> Option<u32> {
         let gid = match &self.outlines {
-            Outlines::Sfnt { .. } => None,
+            Outlines::Sfnt { .. } | Outlines::CidType1(_) => None,
             Outlines::Cff => self
                 .cff()
                 .filter(|cff| !cff.is_cid())
