@@ -240,10 +240,10 @@ impl ImageColour {
 
     /// Convert `samples` to the gray or RGB descriptor the blit draws.
     ///
-    /// `None` when the samples' layout cannot be converted: a component
-    /// count no space describes.  Device-resident samples are drawn as
-    /// they are; they are only produced for an [`identity`](Self::identity)
-    /// colour.
+    /// `None` when the samples' layout cannot be converted (a component
+    /// count no space describes) or the converted samples cannot be
+    /// allocated.  Device-resident samples are drawn as they are; they are
+    /// only produced for an [`identity`](Self::identity) colour.
     pub(super) fn convert(
         &self,
         doc: &Document,
@@ -330,14 +330,14 @@ impl ImageColour {
             }
         };
         let (cs, bytes) = match n {
-            1 => decoded.convert_one(bytes),
-            3 => decoded.convert_rgb(bytes),
+            1 => decoded.convert_one(bytes)?,
+            3 => decoded.convert_rgb(bytes)?,
             4 => decoded.convert_cmyk(
                 bytes,
                 #[cfg(feature = "gpu-icc")]
                 icc,
             )?,
-            _ => (ImageColorSpace::Rgb, decoded.convert_memo(&bytes, n)),
+            _ => (ImageColorSpace::Rgb, decoded.convert_memo(&bytes, n)?),
         };
         Some(descriptor(width, height, cs, ImageData::Cpu(bytes), smask))
     }
@@ -500,9 +500,10 @@ impl Decoded<'_> {
         }
     }
 
-    /// One-component samples through the table.
-    fn convert_one(&self, mut bytes: Vec<u8>) -> (ImageColorSpace, Vec<u8>) {
-        match self.lut() {
+    /// One-component samples through the table; `None` when the widened
+    /// output cannot be allocated.
+    fn convert_one(&self, mut bytes: Vec<u8>) -> Option<(ImageColorSpace, Vec<u8>)> {
+        Some(match self.lut() {
             Lut::Identity => (ImageColorSpace::Gray, bytes),
             Lut::Gray(table) => {
                 for b in &mut bytes {
@@ -511,13 +512,13 @@ impl Decoded<'_> {
                 (ImageColorSpace::Gray, bytes)
             }
             Lut::Rgb(table) => {
-                let mut rgb = Vec::with_capacity(bytes.len() * 3);
+                let mut rgb = super::try_with_capacity(bytes.len() * 3)?;
                 for &b in &bytes {
                     rgb.extend_from_slice(&table[usize::from(b)]);
                 }
                 (ImageColorSpace::Rgb, rgb)
             }
-        }
+        })
     }
 
     /// The conversion of the space's three-component samples; the
@@ -562,23 +563,24 @@ impl Decoded<'_> {
     }
 
     /// Three-component samples: `/Decode` as a remap, then the conversion.
-    fn convert_rgb(&self, bytes: Vec<u8>) -> (ImageColorSpace, Vec<u8>) {
+    /// `None` when the output cannot be allocated.
+    fn convert_rgb(&self, bytes: Vec<u8>) -> Option<(ImageColorSpace, Vec<u8>)> {
         let convert = self.rgb_convert();
         if matches!(convert, RgbConvert::Memo) {
-            return (ImageColorSpace::Rgb, self.convert_memo(&bytes, 3));
+            return Some((ImageColorSpace::Rgb, self.convert_memo(&bytes, 3)?));
         }
         let mut bytes = self.remap(bytes);
         match convert {
             RgbConvert::Identity | RgbConvert::Memo => {}
             RgbConvert::Shaper(shaper) => shaper.convert_in_place(&mut bytes),
             RgbConvert::Transform(conv) => {
-                let mut out = vec![0u8; bytes.len()];
+                let mut out = super::try_filled(bytes.len(), 0)?;
                 if conv.transform_pixels(&bytes, &mut out).is_some() {
                     bytes = out;
                 }
             }
         }
-        (ImageColorSpace::Rgb, bytes)
+        Some((ImageColorSpace::Rgb, bytes))
     }
 
     /// The conversion of the space's four-component samples; the device
@@ -615,7 +617,7 @@ impl Decoded<'_> {
     ) -> Option<(ImageColorSpace, Vec<u8>)> {
         let convert = self.cmyk_convert();
         if matches!(convert, CmykConvert::Memo) {
-            return Some((ImageColorSpace::Rgb, self.convert_memo(&bytes, 4)));
+            return Some((ImageColorSpace::Rgb, self.convert_memo(&bytes, 4)?));
         }
         let bytes = self.remap(bytes);
         if !bytes.len().is_multiple_of(4) {
@@ -660,7 +662,7 @@ impl Decoded<'_> {
                 Err(e) => log::warn!("image: GPU CMYK→RGB failed, falling back to CPU: {e}"),
             }
         }
-        let mut rgb = vec![0u8; bytes.len() / 4 * 3];
+        let mut rgb = super::try_filled(bytes.len() / 4 * 3, 0)?;
         let converted = match &convert {
             CmykConvert::Icc(conv) => conv.transform_pixels(&bytes, &mut rgb).is_some(),
             CmykConvert::Device | CmykConvert::Memo => false,
@@ -692,10 +694,10 @@ impl Decoded<'_> {
     }
 
     /// `n`-component samples through the space, each distinct tuple
-    /// converted once.
-    fn convert_memo(&self, bytes: &[u8], n: usize) -> Vec<u8> {
+    /// converted once; `None` when the output cannot be allocated.
+    fn convert_memo(&self, bytes: &[u8], n: usize) -> Option<Vec<u8>> {
         let mut memo: HashMap<Box<[u8]>, [u8; 3]> = HashMap::new();
-        let mut out = Vec::with_capacity(bytes.len() / n * 3);
+        let mut out = super::try_with_capacity(bytes.len() / n * 3)?;
         for px in bytes.chunks_exact(n) {
             let rgb = if let Some(&rgb) = memo.get(px) {
                 rgb
@@ -709,7 +711,7 @@ impl Decoded<'_> {
             };
             out.extend_from_slice(&rgb);
         }
-        out
+        Some(out)
     }
 }
 

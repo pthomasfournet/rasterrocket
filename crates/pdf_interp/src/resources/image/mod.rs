@@ -500,6 +500,9 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     if !is_mask && colour.paints_nothing() {
         return ImageResolution::Absent;
     }
+    if let Err(msg) = decode_budget(w, h, if is_mask { 1 } else { colour.components() }) {
+        return unresolved(&msg);
+    }
 
     // The matte colour of a soft mask the image's samples are pre-blended
     // with (§11.6.5.3).
@@ -617,26 +620,69 @@ fn has_mask_entry(dict: &Dictionary) -> bool {
 
 // ── Shared helpers (used by multiple sub-modules) ─────────────────────────────
 
+/// Largest `/Width` or `/Height` an image may declare.
+pub const MAX_IMAGE_SIDE: i64 = 131_071;
+
+/// Largest number of 8-bit samples (`width × height × components`) an
+/// image is decoded to: 1 GiB.  A larger image is refused before any
+/// allocation and reported as a decode failure.
+pub const MAX_DECODED_BYTES: u64 = 1 << 30;
+
 /// Validate raw `i64` image dimensions and cast them to `u32`.
 ///
 /// Returns `None` (caller logs and propagates) if either dimension is ≤ 0 or
-/// exceeds 65536.  The 65536 cap keeps `w × h` within `usize` on 64-bit targets
-/// (65536² = 4 294 967 296, which fits in `u64` / 64-bit `usize` but not in
-/// `u32`).  Each decoder is responsible for checking that the final allocation
-/// does not exceed available memory.
+/// exceeds [`MAX_IMAGE_SIDE`].  The product of two sides fits `u64`; the
+/// decode budget ([`decode_budget`]) bounds it further.
 ///
-/// The cast is safe: after the range check, each dimension is in [1, 65536]
-/// which fits in `u32` without sign loss or truncation.
+/// The cast is safe: after the range check, each dimension is in
+/// `[1, MAX_IMAGE_SIDE]`, which fits in `u32` without sign loss or
+/// truncation.
 #[expect(
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation,
-    reason = "value range validated to [1, 65536] — fits in u32 without loss"
+    reason = "value range validated to [1, MAX_IMAGE_SIDE] — fits in u32 without loss"
 )]
 pub(super) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)> {
-    if w_raw <= 0 || h_raw <= 0 || w_raw > 65536 || h_raw > 65536 {
+    if w_raw <= 0 || h_raw <= 0 || w_raw > MAX_IMAGE_SIDE || h_raw > MAX_IMAGE_SIDE {
         return None;
     }
     Some((w_raw as u32, h_raw as u32))
+}
+
+/// Whether a `width × height` image of `components` samples per pixel fits
+/// [`MAX_DECODED_BYTES`]; the message names the excess otherwise.
+pub(super) fn decode_budget(width: u32, height: u32, components: usize) -> Result<(), String> {
+    let bytes = u64::from(width) * u64::from(height) * components as u64;
+    if bytes <= MAX_DECODED_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "image of {width}×{height}×{components} samples ({} MiB) exceeds the {} MiB decode budget",
+        bytes >> 20,
+        MAX_DECODED_BYTES >> 20
+    ))
+}
+
+/// A vector of `len` copies of `fill`, or `None` when the allocation
+/// fails; a decoder refuses an image it cannot hold instead of aborting
+/// the process.
+pub(super) fn try_filled(len: usize, fill: u8) -> Option<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|e| log::warn!("image: cannot allocate {len} bytes: {e}"))
+        .ok()?;
+    v.resize(len, fill);
+    Some(v)
+}
+
+/// An empty vector with room for `len` bytes, or `None` when the
+/// allocation fails.
+pub(super) fn try_with_capacity(len: usize) -> Option<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|e| log::warn!("image: cannot allocate {len} bytes: {e}"))
+        .ok()?;
+    Some(v)
 }
 
 /// GPU handles for ICC-based CMYK → RGB conversion.
@@ -915,14 +961,27 @@ mod tests {
 
     #[test]
     fn validated_dims_rejects_oversized() {
-        assert!(validated_dims(65537, 1).is_none());
-        assert!(validated_dims(1, 65537).is_none());
+        assert!(validated_dims(MAX_IMAGE_SIDE + 1, 1).is_none());
+        assert!(validated_dims(1, MAX_IMAGE_SIDE + 1).is_none());
     }
 
     #[test]
     fn validated_dims_accepts_boundary() {
         assert_eq!(validated_dims(1, 1), Some((1, 1)));
-        assert_eq!(validated_dims(65536, 65536), Some((65536, 65536)));
+        assert_eq!(
+            validated_dims(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
+            Some((131_071, 131_071))
+        );
+    }
+
+    #[test]
+    fn decode_budget_bounds_the_sample_count() {
+        assert!(decode_budget(131_071, 2, 1).is_ok());
+        assert!(decode_budget(32_768, 32_768, 1).is_ok());
+        assert!(decode_budget(32_768, 32_768, 3).is_err());
+        assert!(decode_budget(65_536, 65_536, 1).is_err());
+        let msg = decode_budget(65_536, 65_536, 1).unwrap_err();
+        assert!(msg.contains("budget"), "{msg}");
     }
 
     // ── Chained-filter dispatch ────────────────────────────────────────────────

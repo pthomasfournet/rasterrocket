@@ -427,6 +427,17 @@ A JPEG 2000 image whose dictionary names no colour space converts through
 the ICC profile of its `colr` box, when it has one.  Colour-key masks are
 compared with the samples before any of this.
 
+**Image decode budget** (`resources/image/mod.rs`)
+
+An image's sides may each reach `MAX_IMAGE_SIDE` (131 071), and its
+decoded samples `width × height × components` may reach
+`MAX_DECODED_BYTES` (1 GiB); a larger image is refused before anything is
+decoded or allocated and reported as a decode failure, so a hostile
+dictionary cannot drive the process to an allocation abort.  Within the
+budget every sample buffer the decoders and the colour conversion create
+is reserved fallibly: an allocation the machine cannot satisfy fails the
+image, not the process.
+
 **Fonts** (`renderer/font_cache.rs` and its neighbours)
 
 - **Embedded programs.** A font with an embedded program draws it. Simple

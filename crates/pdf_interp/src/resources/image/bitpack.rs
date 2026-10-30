@@ -15,8 +15,9 @@
 /// `samples_per_row` is the number of samples to extract per row.
 /// Each raw value in [0, 2^bits − 1] is transformed by `map` before being pushed.
 ///
-/// Returns `None` if `bits` is not in {1, 2, 4}, or if
-/// `samples_per_row × height` overflows `usize`.
+/// Returns `None` if `bits` is not in {1, 2, 4}, if
+/// `samples_per_row × height` overflows `usize`, or if the output cannot
+/// be allocated.
 pub(super) fn unpack_packed_bits(
     data: &[u8],
     bits: u32,
@@ -33,7 +34,7 @@ pub(super) fn unpack_packed_bits(
     let row_bytes = samples_per_row.div_ceil(samples_per_byte);
     let height_usize = usize::try_from(height).ok()?;
     let total = samples_per_row.checked_mul(height_usize)?;
-    let mut out = Vec::with_capacity(total);
+    let mut out = super::try_with_capacity(total)?;
     let mask: u8 = (1u8 << bits) - 1; // bits ≤ 4 ⟹ 1u8<<bits ≤ 16 — no overflow
 
     for row in 0..height_usize {
@@ -141,12 +142,8 @@ pub(super) fn downsample_16bpp(
         return None;
     }
     // Each 16-bit sample is big-endian; take the high byte (bytes 0, 2, 4, …).
-    let out: Vec<u8> = data[..needed]
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| pair[0])
-        .collect();
+    let mut out = super::try_with_capacity(n_samples)?;
+    out.extend(data[..needed].as_chunks::<2>().0.iter().map(|pair| pair[0]));
     Some(out)
 }
 

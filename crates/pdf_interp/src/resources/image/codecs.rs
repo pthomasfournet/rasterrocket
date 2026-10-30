@@ -133,18 +133,18 @@ pub(super) fn decode_ccitt(
         settings.end_of_line = flag(b"EndOfLine", false);
         settings.rows_are_byte_aligned = aligned;
         settings.encoding = encoding;
-        let mut collector = HayroCcittCollector::new(capacity, width, columns, white);
+        let mut collector = HayroCcittCollector::new(capacity, width, columns, white)?;
         let mut ctx = DecoderContext::new(settings);
         let result = hayro_ccitt::decode(data, &mut collector, &mut ctx);
-        (collector, result)
+        Some((collector, result))
     };
 
     // Group 4 streams that declare `EncodedByteAlign` exist both aligned and
     // unaligned.  The unaligned reading is tried first; when it stops short,
     // the aligned reading is tried and whichever decodes more rows is kept.
-    let (mut collector, mut result) = run(k >= 0 && declared_aligned);
+    let (mut collector, mut result) = run(k >= 0 && declared_aligned)?;
     if k < 0 && declared_aligned && result.is_err() && collector.rows_decoded() < rows {
-        let (aligned, aligned_result) = run(true);
+        let (aligned, aligned_result) = run(true)?;
         if aligned.rows_decoded() > collector.rows_decoded() {
             collector = aligned;
             result = aligned_result;
@@ -204,14 +204,15 @@ struct HayroCcittCollector {
 }
 
 impl HayroCcittCollector {
-    fn new(capacity: usize, width: u32, columns: u32, white: u8) -> Self {
-        Self {
-            out: Vec::with_capacity(capacity),
+    /// `None` when `capacity` bytes cannot be allocated.
+    fn new(capacity: usize, width: u32, columns: u32, white: u8) -> Option<Self> {
+        Some(Self {
+            out: super::try_with_capacity(capacity)?,
             width,
             row_end: columns.min(width),
             white,
             rows: 0,
-        }
+        })
     }
 
     const fn rows_decoded(&self) -> u32 {
@@ -1219,7 +1220,7 @@ mod tests {
 
     #[test]
     fn ccitt_collector_expands_changes_and_clamps_to_the_width() {
-        let mut c = HayroCcittCollector::new(12, 4, 9, 0xFF);
+        let mut c = HayroCcittCollector::new(12, 4, 9, 0xFF).expect("collector");
         // Black from 0 to 3.
         hayro_ccitt::Decoder::push_row(&mut c, &[0, 3]);
         // Black from 2 to a change past the width (`Columns` > width).

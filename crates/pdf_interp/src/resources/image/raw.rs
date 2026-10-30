@@ -190,7 +190,7 @@ fn zero_extended(
          at {bits} bpc), missing samples are 0",
         data.len()
     );
-    let mut padded = Vec::with_capacity(needed);
+    let mut padded = super::try_with_capacity(needed)?;
     padded.extend_from_slice(data);
     padded.resize(needed, 0);
     Some(Cow::Owned(padded))
@@ -336,7 +336,8 @@ fn decode_mask_raw(
                 .div_ceil(8)
                 .checked_mul(usize::try_from(height).ok()?)?;
             let data: std::borrow::Cow<'_, [u8]> = if data.len() < needed {
-                let mut padded = data.to_vec();
+                let mut padded = super::try_with_capacity(needed)?;
+                padded.extend_from_slice(data);
                 padded.resize(needed, if invert { 0x00 } else { 0xFF });
                 std::borrow::Cow::Owned(padded)
             } else {
@@ -361,11 +362,12 @@ fn decode_mask_raw(
             let expected = (width as usize).checked_mul(height as usize)?;
             // As at 1 bpc, a truncated stream is padded with the
             // transparent sample value.
-            let mut pixels: Vec<u8> = if invert {
-                data.iter().take(expected).map(|&b| 255 - b).collect()
+            let mut pixels = super::try_with_capacity(expected)?;
+            if invert {
+                pixels.extend(data.iter().take(expected).map(|&b| 255 - b));
             } else {
-                data.iter().take(expected).copied().collect()
-            };
+                pixels.extend_from_slice(&data[..data.len().min(expected)]);
+            }
             pixels.resize(expected, 0xFF);
             Some(Samples::mask(width, height, pixels))
         }
