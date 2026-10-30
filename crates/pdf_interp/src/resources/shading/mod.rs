@@ -37,6 +37,7 @@
 pub(crate) mod function;
 mod mesh;
 mod patch;
+mod triangles;
 
 use std::sync::Arc;
 
@@ -55,6 +56,7 @@ use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, emit_triangle};
 use patch::{decode_type6_mesh, decode_type7_mesh};
+pub use triangles::Mesh;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -62,14 +64,14 @@ use patch::{decode_type6_mesh, decode_type7_mesh};
 ///
 /// - `Pattern`: smooth gradient — use with [`raster::shading::shaded_fill`].
 ///   Pixels outside the shading's extent are left unpainted by the pattern.
-/// - `Mesh`: pre-decoded Gouraud triangle list — call
-///   [`raster::shading::gouraud::gouraud_triangle_fill`] for each triangle.
+/// - `Mesh`: pre-decoded Gouraud triangles, indexed by device row — call
+///   [`raster::shading::gouraud::gouraud_triangle_fill`] for each triangle
+///   [`Mesh::meeting`] the fill's clip.
 pub enum ShadingResult {
     /// Smooth gradient — use with [`raster::shading::shaded_fill`].
     Pattern(Box<dyn Pattern + Send + Sync>),
-    /// Pre-decoded Gouraud triangle list — call
-    /// [`raster::shading::gouraud::gouraud_triangle_fill`] for each element.
-    Mesh(Vec<[GouraudVertex; 3]>),
+    /// Pre-decoded Gouraud triangles, indexed by device row.
+    Mesh(Mesh),
 }
 
 /// A shading dictionary resolved for painting (PDF §8.7.4.3).
@@ -177,7 +179,7 @@ pub fn resolve_shading_object(
                     page_h,
                 )
             };
-            Some(ShadingResult::Mesh(mesh))
+            Some(ShadingResult::Mesh(Mesh::new(mesh)))
         }
         other => {
             log::warn!("shading: ShadingType {other} not yet implemented — skipping sh operator");

@@ -142,8 +142,8 @@ impl PageRenderer<'_> {
                     false,
                 );
             }
-            ShadingResult::Mesh(triangles) => {
-                for &tri in triangles {
+            ShadingResult::Mesh(mesh) => {
+                for tri in mesh.meeting(&clip) {
                     gouraud_triangle_fill::<Rgb8>(&mut r.bitmap, &clip, &pipe, tri);
                 }
             }
@@ -187,10 +187,10 @@ impl PageRenderer<'_> {
             ShadingResult::Pattern(pattern) => {
                 paint(&mut self.bitmap, &clip, &PipeSrc::Pattern(pattern.as_ref()));
             }
-            ShadingResult::Mesh(triangles) => {
+            ShadingResult::Mesh(mesh) => {
                 let mut clip = clip;
                 clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
-                for &tri in triangles {
+                for tri in mesh.meeting(&clip) {
                     gouraud_triangle_fill::<Rgb8>(&mut self.bitmap, &clip, pipe, tri);
                 }
             }
@@ -238,7 +238,7 @@ impl PageRenderer<'_> {
                 matrix,
                 params,
             ),
-            ShadingResult::Mesh(triangles) => {
+            ShadingResult::Mesh(mesh) => {
                 let device_scale = matrix[0]
                     .mul_add(matrix[3], -(matrix[1] * matrix[2]))
                     .abs()
@@ -257,7 +257,7 @@ impl PageRenderer<'_> {
                 };
                 let mut clip = clip;
                 clip.clip_to_path(&outline, false);
-                for &tri in triangles {
+                for tri in mesh.meeting(&clip) {
                     gouraud_triangle_fill::<Rgb8>(&mut self.bitmap, &clip, pipe, tri);
                 }
             }

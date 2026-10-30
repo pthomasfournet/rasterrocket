@@ -18,7 +18,6 @@ use std::rc::Rc;
 
 use color::Rgb8;
 use pdf::ObjectId;
-use raster::shading::gouraud::GouraudVertex;
 use raster::{Bitmap, CellPhase};
 
 use super::super::color::RasterColor;
@@ -324,11 +323,9 @@ impl PageRenderer<'_> {
 }
 
 /// Host bytes of a resolved shading's mesh; a gradient counts nothing.
-const fn shading_bytes(shading: &ResolvedShading) -> usize {
+fn shading_bytes(shading: &ResolvedShading) -> usize {
     match &shading.result {
-        ShadingResult::Mesh(triangles) => {
-            triangles.len() * std::mem::size_of::<[GouraudVertex; 3]>()
-        }
+        ShadingResult::Mesh(mesh) => std::mem::size_of_val(mesh.triangles()),
         ShadingResult::Pattern(_) => 0,
     }
 }
@@ -336,6 +333,7 @@ const fn shading_bytes(shading: &ResolvedShading) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raster::shading::gouraud::GouraudVertex;
 
     fn mesh(triangles: usize) -> Rc<ResolvedShading> {
         let v = GouraudVertex {
@@ -344,7 +342,10 @@ mod tests {
             color: [0; 3],
         };
         Rc::new(ResolvedShading {
-            result: ShadingResult::Mesh(vec![[v; 3]; triangles]),
+            result: ShadingResult::Mesh(crate::resources::shading::Mesh::new(vec![
+                [v; 3];
+                triangles
+            ])),
             bbox: None,
             background: None,
         })
