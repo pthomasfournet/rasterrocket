@@ -150,13 +150,19 @@ impl PageRenderer<'_> {
         let pattern_fill = do_fill && self.gstate.current().fill_pattern.is_some();
 
         {
-            // Trm[2×2] = font_size × Tm[2×2] × CTM[2×2] — the text rendering
-            // matrix in device pixels, encoding actual size and skew/rotation.
-            // The 2×2 submatrix (indices 0–3) is stable across the glyph loop
+            // Trm[2×2] = [Tfs×Th 0 0 Tfs] × Tm[2×2] × CTM[2×2] — the text
+            // rendering matrix in device pixels (PDF §9.4.4), encoding
+            // actual size, horizontal scaling and skew/rotation.  The 2×2
+            // submatrix (indices 0–3) is stable across the glyph loop
             // because only the translation components (indices 4–5) change as
             // the pen advances — the orientation and size don't change mid-string.
-            let tm2x2 = mat2x2_mul(&tm, &ctm);
-            let trm = tm2x2.map(|v| v * font_size);
+            let [ax, ay, cx, cy] = mat2x2_mul(&tm, &ctm);
+            let trm = [
+                ax * font_size * horiz_scaling,
+                ay * font_size * horiz_scaling,
+                cx * font_size,
+                cy * font_size,
+            ];
 
             // Clone the glyph-cache handle before borrowing `font_cache` mutably:
             // it is an `Arc` internally, so this shares one cache rather than
@@ -478,35 +484,11 @@ impl PageRenderer<'_> {
                      glyph 0x{byte:02X} not painted (text position still advances)"
                 );
             } else if do_paint {
-                // Build the CharProc CTM:
-                //   Tm_rise = Tm with rise shift applied (PDF §9.4.4)
-                //   TRM     = [fs·fm[0], fs·fm[1], fs·fm[2], fs·fm[3], tx, ty]
-                //             where [tx, ty] = Tm_rise × CTM translation
-                //   charproc_ctm = TRM × CTM_current
-                //
-                // Concretely: we insert `(font_size × FontMatrix) × Tm` as the
-                // new CTM component so that the charproc's user space maps
-                // correctly to device pixels.
-                let fm = t3.font_matrix;
-                // font_size × FontMatrix (2×2 + translation)
-                let fs_fm = [
-                    font_size * fm[0],
-                    font_size * fm[1],
-                    font_size * fm[2],
-                    font_size * fm[3],
-                    fm[4],
-                    fm[5],
-                ];
-                // Apply rise to text matrix (vertical shift in text space).
-                let tm_rise = if rise.abs() > f64::EPSILON {
-                    let [a, b_m, c, d, e, f] = tm;
-                    [a, b_m, c, d, rise.mul_add(c, e), rise.mul_add(d, f)]
-                } else {
-                    tm
-                };
-                // TRM = fs_fm × tm_rise
-                let trm = ctm_multiply(&fs_fm, &tm_rise);
-                // charproc_ctm = trm × CTM
+                // The CharProc's glyph space maps to device space through
+                // `FontMatrix × [Tfs×Th 0 0 Tfs 0 Ts] × Tm × CTM`
+                // (PDF §9.4.4 with §9.6.5's `FontMatrix`).
+                let text_space = [font_size * horiz_scaling, 0.0, 0.0, font_size, 0.0, rise];
+                let trm = ctm_multiply(&ctm_multiply(&t3.font_matrix, &text_space), &tm);
                 let charproc_ctm = ctm_multiply(&trm, &ctm);
 
                 self.gstate.save();

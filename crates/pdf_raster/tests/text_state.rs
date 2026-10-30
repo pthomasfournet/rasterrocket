@@ -113,6 +113,44 @@ fn word_spacing_applies_to_one_byte_code_32_only() {
     assert_eq!(spaced, (8, 48));
 }
 
+/// A Type 3 font whose `A` is a full em square: objects 6 (CharProc).
+fn type3_square() -> (&'static str, Vec<Vec<u8>>) {
+    let font = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+                /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /square 6 0 R >> \
+                /Encoding << /Type /Encoding /Differences [65 /square] >> \
+                /FirstChar 65 /LastChar 65 /Widths [1000] /Resources << >> >>";
+    let extra = vec![stream_object(
+        "",
+        b"1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f",
+    )];
+    (font, extra)
+}
+
+/// `Tz` condenses the glyphs themselves, not only their advances: at
+/// `50 Tz` two em squares cover half their width without overlapping,
+/// in a simple font and in a Type 3 font alike (PDF §9.4.4).
+#[test]
+fn horizontal_scaling_condenses_the_glyphs() {
+    let (font, extra) = simple_ahem();
+    assert_eq!(
+        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
+        (8, 32)
+    );
+    assert_eq!(
+        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
+        (8, 16)
+    );
+    let (font, extra) = type3_square();
+    assert_eq!(
+        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
+        (8, 32)
+    );
+    assert_eq!(
+        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
+        (8, 16)
+    );
+}
+
 /// `Tw` applies to the byte 32 of a simple font.
 #[test]
 fn word_spacing_applies_to_simple_fonts() {
