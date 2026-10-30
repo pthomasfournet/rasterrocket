@@ -308,18 +308,32 @@ impl FontProgram {
         )
     }
 
-    /// `false` when the program is an sfnt with no usable `cmap` subtable
-    /// and no `post` glyph names, so that [`Self::char_index`] and
-    /// [`Self::code_index`] map every code to `.notdef`.
+    /// `true` when the program is an sfnt with no `cmap` subtable keyed by
+    /// character code (Unicode, (1,0) Macintosh Roman or (3,0) Microsoft
+    /// Symbol).  Its glyphs are then reachable only by glyph index or
+    /// through their `post` names; any Unicode charmap it answers
+    /// [`Self::char_index`] with is derived from those names.
     #[must_use]
-    pub const fn has_charmap(&self) -> bool {
-        !matches!(
-            self.outlines,
+    pub fn lacks_cmap(&self) -> bool {
+        match self.outlines {
             Outlines::Sfnt {
                 cmap: SfntCmap::None,
                 ..
-            }
-        )
+            } => true,
+            // Selected only when no Unicode or (3,0) subtable exists.
+            Outlines::Sfnt {
+                cmap: SfntCmap::UnicodeFromNames,
+                ..
+            } => !self
+                .sfnt()
+                .and_then(|font| font.cmap().ok())
+                .is_some_and(|cmap| {
+                    cmap.encoding_records()
+                        .iter()
+                        .any(|r| r.platform_id() == PlatformId::Macintosh && r.encoding_id() == 0)
+                }),
+            _ => false,
+        }
     }
 
     /// Glyph index of character code `code` through the program's charmap,

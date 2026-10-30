@@ -324,9 +324,8 @@ fn parse_program(desc: &FontDescriptor) -> Option<ResolvedProgram> {
 /// CID/Type0 keep the descriptor's table; symbolic TrueType keeps the
 /// program's own charmap.
 ///
-/// An embedded simple sfnt with no `cmap` subtable and no `post` names
-/// (a legacy subset) offers no mapping at all; its codes are its glyph
-/// indices, the only reading under which such a subset draws.
+/// An embedded simple sfnt with no code-keyed `cmap` subtable (a legacy
+/// subset) resolves through [`resolve_cmapless`].
 ///
 /// `embedded` is whether `face` draws the descriptor's own program.
 fn resolved_code_to_gid(
@@ -336,8 +335,12 @@ fn resolved_code_to_gid(
 ) -> Option<Vec<u32>> {
     let simple = desc.cid_encoding.is_none();
     let outline = desc.type3.is_none();
-    if embedded && simple && outline && !face.program().has_charmap() {
-        Some((0..256).collect())
+    if embedded && simple && outline && face.program().lacks_cmap() {
+        Some(resolve_cmapless(
+            face,
+            &desc.differences,
+            desc.base_encoding,
+        ))
     } else if wants_name_resolution(embedded, simple, outline, desc.kind) {
         Some(resolve_simple_to_gid(
             face,
@@ -368,6 +371,39 @@ fn resolved_code_to_gid(
     } else {
         None
     }
+}
+
+/// Build a 256-entry `code_to_gid` table for an embedded simple sfnt that
+/// has no code-keyed `cmap` subtable.
+///
+/// A code whose name the font's encoding declares (a `Differences` entry,
+/// else an explicit base encoding) selects the glyph of that name in the
+/// program's `post` table (PDF §9.6.6.4).  Every other code is read as a
+/// glyph index: without a `cmap`, the glyph order is the program's only
+/// built-in encoding, and producers that drop the table address glyphs by
+/// index.  A Unicode charmap derived from the `post` names is not
+/// consulted for raw codes, since a code is not a Unicode value here.
+fn resolve_cmapless(
+    face: &FontFace,
+    differences: &[Option<Box<str>>; 256],
+    base: BaseEncoding,
+) -> Vec<u32> {
+    (0..=u8::MAX)
+        .map(|code| {
+            let idx = usize::from(code);
+            differences[idx]
+                .as_deref()
+                .or_else(|| {
+                    (base != BaseEncoding::FontProgram)
+                        .then(|| base_encoding_table(base)[idx])
+                        .flatten()
+                        .filter(|n| !n.is_empty())
+                })
+                .map(|name| face.raw_get_name_index(name))
+                .filter(|&gid| gid != 0)
+                .unwrap_or_else(|| u32::from(code))
+        })
+        .collect()
 }
 
 /// Build a 65 536-entry CID → glyph table for a composite font of no
@@ -849,6 +885,84 @@ mod tests {
                 "code {code:#04x} draws {digit:?}"
             );
         }
+    }
+
+    /// `ahem.ttf` with its `cmap` table hidden: the table-directory tag is
+    /// renamed, so the program keeps its `post` names and no code-keyed
+    /// subtable.
+    fn ahem_without_cmap() -> Vec<u8> {
+        let mut data = include_bytes!("../../../font_test_data/test_data/ttf/ahem.ttf").to_vec();
+        let tables = usize::from(u16::from_be_bytes([data[4], data[5]]));
+        let at = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &data[at..at + 4] == b"cmap")
+            .expect("ahem has a cmap table");
+        data[at..at + 4].copy_from_slice(b"xmap");
+        data
+    }
+
+    /// An embedded simple TrueType program `bytes` under `differences` and
+    /// `base_encoding`.
+    fn embedded_truetype(
+        bytes: Vec<u8>,
+        differences: Box<[Option<Box<str>>; 256]>,
+        base_encoding: BaseEncoding,
+    ) -> FontDescriptor {
+        FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: Some(bytes),
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences,
+            base_encoding,
+            cid_encoding: None,
+            type3: None,
+            substitute: SubstituteStyle::default(),
+        }
+    }
+
+    /// An embedded TrueType subset with `post` names but no `cmap` and no
+    /// `Encoding` addresses its glyphs by index: code 7 draws glyph 7, not
+    /// the `.notdef` a Unicode lookup of U+0007 through the names gives.
+    #[test]
+    fn cmapless_truetype_without_encoding_reads_codes_as_glyph_indices() {
+        let desc = embedded_truetype(
+            ahem_without_cmap(),
+            Box::new(empty_diffs()),
+            BaseEncoding::FontProgram,
+        );
+        let mut cache = FontCache::new(Arc::default(), true);
+        let face = cache
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
+            .expect("embedded TrueType face loads");
+        assert!(face.program().lacks_cmap());
+        assert_eq!(face.raw_get_name_index("dollar"), 7);
+        for code in [2usize, 3, 7, 0x41, 0xFF] {
+            assert_eq!(face.code_to_gid[code] as usize, code, "code {code:#04x}");
+        }
+    }
+
+    /// A cmap-less subset under a declared encoding resolves each named
+    /// code through the `post` table: `Differences` first, then the base
+    /// encoding; a code whose name the program lacks keeps its glyph index.
+    #[test]
+    fn cmapless_truetype_resolves_declared_names_through_post() {
+        let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(empty_diffs());
+        differences[0x41] = Some("dollar".into());
+        differences[0x42] = Some("nosuchglyph".into());
+        let desc = embedded_truetype(ahem_without_cmap(), differences, BaseEncoding::WinAnsi);
+        let mut cache = FontCache::new(Arc::default(), true);
+        let face = cache
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
+            .expect("embedded TrueType face loads");
+        let exclam = face.raw_get_name_index("exclam");
+        assert_ne!(exclam, 0x21, "ahem's glyph order is not its code order");
+        assert_eq!(face.code_to_gid[0x41], 7, "Differences name");
+        assert_eq!(face.code_to_gid[0x21], exclam, "WinAnsi name");
+        assert_eq!(face.code_to_gid[0x42], 0x42, "unknown name keeps the index");
+        assert_eq!(face.code_to_gid[0x05], 0x05, "unnamed code keeps the index");
     }
 
     /// A composite font without a program and of no known collection draws
