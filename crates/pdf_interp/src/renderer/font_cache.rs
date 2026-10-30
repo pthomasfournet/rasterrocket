@@ -33,7 +33,7 @@ use pdf::ObjectId;
 use super::encodings::{base_encoding_table, glyph_name_for_code};
 use super::substitutes::substitute_program;
 use crate::resources::cmap_predefined::cid_to_unicode;
-use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
+use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind, fallback_font};
 use crate::resources::{FontKey, PageResources};
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ impl DocumentFonts {
 /// and of the size it is drawn at.  `None` inside a cell records a failure.
 #[derive(Default)]
 struct SharedFont {
-    descriptor: OnceLock<Option<Arc<FontDescriptor>>>,
+    descriptor: OnceLock<Arc<FontDescriptor>>,
     program: OnceLock<Option<Arc<FontProgram>>>,
     /// The `code_to_gid` table computed from the program, `None` when the
     /// descriptor's own table (or the program's charmap) applies.
@@ -104,9 +104,8 @@ pub struct FontCache {
     shared: Arc<DocumentFonts>,
     /// The document's glyph bitmap cache.
     glyph_cache: GlyphCache,
-    /// Descriptor of each font dictionary selected on this page; `None` for a
-    /// dictionary that does not resolve.
-    descriptors: HashMap<FontKey, Option<Arc<FontDescriptor>>>,
+    /// Descriptor of each font selected on this page.
+    descriptors: HashMap<FontKey, Arc<FontDescriptor>>,
     /// Map from (font dictionary, four f64-as-u64 bits of the Trm 2×2 matrix)
     /// to loaded face.  The full matrix is the key because the same font can
     /// appear at different sizes and skew angles within a single page.
@@ -129,22 +128,40 @@ impl FontCache {
     /// The font the resource `name` of `resources` selects, resolving its
     /// descriptor on the first selection of its dictionary.
     ///
-    /// Returns `None` if the name is absent or its entry is not a dictionary.
-    pub fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> Option<ActiveFont> {
-        let (key, entry) = resources.font_entry(name)?;
+    /// A name absent from the `/Font` resources, or whose entry is not a
+    /// font dictionary, selects [`fallback_font`] under a key private to
+    /// the resource context, so the text it shows is drawn rather than
+    /// dropped.
+    pub fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> ActiveFont {
+        let (key, entry) = resources.font_entry(name).unwrap_or_else(|| {
+            let key = FontKey::Direct {
+                context: resources.resource_context_id(),
+                name: name.into(),
+            };
+            (key, pdf::Object::Null)
+        });
         let shared = &self.shared;
         let descriptor = self
             .descriptors
             .entry(key.clone())
             .or_insert_with(|| {
-                let resolve = || resources.resolve_font_entry(&entry).map(Arc::new);
+                let resolve = || {
+                    resources
+                        .resolve_font_entry(&entry)
+                        .unwrap_or_else(|| fallback_font(resources.doc()))
+                };
                 match &key {
-                    FontKey::Object(id) => shared.font(*id).descriptor.get_or_init(resolve).clone(),
-                    FontKey::Direct { .. } => resolve(),
+                    FontKey::Object(id) => Arc::clone(
+                        shared
+                            .font(*id)
+                            .descriptor
+                            .get_or_init(|| Arc::new(resolve())),
+                    ),
+                    FontKey::Direct { .. } => Arc::new(resolve()),
                 }
             })
-            .clone()?;
-        Some(ActiveFont { key, descriptor })
+            .clone();
+        ActiveFont { key, descriptor }
     }
 
     /// The document store this cache resolves indirect fonts through.

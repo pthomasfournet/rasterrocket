@@ -10,7 +10,7 @@
 mod common;
 
 use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use rasterrocket::{BackendPolicy, RasterOptions, raster_pdf_from_bytes, render_page_rgb};
 
 /// Render a 64 × 32 pt page at one pixel per point showing `text` in the
 /// non-embedded font `font` (a font dictionary body) at 24 pt, and return
@@ -37,6 +37,31 @@ fn standard_fonts_draw_without_an_embedded_program() {
         let font = format!("<< /Type /Font /Subtype /Type1 /BaseFont /{base} >>");
         assert!(ink(&font, "(AB)") > 40, "{base} draws");
     }
+}
+
+/// A `Tf` naming a font resource the page does not define draws its text
+/// in Helvetica and reports the name in the page diagnostics.
+#[test]
+fn missing_font_resource_draws_helvetica() {
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
+          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", b"BT /F9 24 Tf 4 8 Td (AB) Tj ET"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ];
+    let opts = RasterOptions {
+        dpi: 72.0,
+        ..RasterOptions::default()
+    };
+    let (_, page) = raster_pdf_from_bytes(assemble_pdf(&objects), &opts)
+        .next()
+        .expect("one page");
+    let page = page.expect("page renders");
+    assert!(page.pixels.iter().filter(|&&v| v < 128).count() > 40);
+    assert_eq!(page.diagnostics.missing_fonts, ["F9"]);
 }
 
 /// `(width, height, dark pixel count)` of the bounding box of the ink

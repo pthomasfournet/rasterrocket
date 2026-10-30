@@ -143,6 +143,10 @@ pub struct PageDiagnostics {
     /// skipped and the page rendered from the others, so whatever it would
     /// have drawn is missing.  Empty on a complete render.
     pub content_failures: Vec<ContentFailure>,
+    /// Font resource names (without the leading `/`) that `Tf` selected but
+    /// the `/Font` resources in effect do not define.  Their text is drawn
+    /// in Helvetica.  Empty when every font resolved.
+    pub missing_fonts: Vec<String>,
 }
 
 /// An image the renderer skipped because it could not be decoded or drawn.
@@ -793,6 +797,17 @@ impl<'doc> PageRenderer<'doc> {
         let failure = ImageFailure { name, reason };
         log::debug!("rasterrocket-interp: skipped {failure}");
         self.diag.image_failures.push(failure);
+    }
+
+    /// Record a font resource `name` that `Tf` selected but the resources in
+    /// effect do not define, once per page.
+    pub(super) fn record_missing_font(&mut self, name: &[u8]) {
+        let name = String::from_utf8_lossy(name);
+        if self.diag.missing_fonts.iter().any(|n| *n == name) {
+            return;
+        }
+        log::warn!("rasterrocket-interp: font resource /{name} is not defined — drawing Helvetica");
+        self.diag.missing_fonts.push(name.into_owned());
     }
 
     /// The per-page work-budget breach reason, if any.

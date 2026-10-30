@@ -308,6 +308,18 @@ impl FontDescriptor {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// The descriptor drawn for a `Tf` whose resource name is absent from the
+/// `/Font` dictionary or names an object that is not a font dictionary:
+/// a non-embedded Helvetica, whose substitute supplies the widths.
+#[must_use]
+pub fn fallback_font(doc: &Document) -> FontDescriptor {
+    let mut dict = Dictionary::new();
+    dict.set(b"Type", Object::Name(b"Font".to_vec()));
+    dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+    dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+    resolve_font(doc, &dict, None)
+}
+
 /// Extract a [`FontDescriptor`] from a PDF font dictionary; `id` is the
 /// dictionary's object identifier when it is an indirect object.
 ///

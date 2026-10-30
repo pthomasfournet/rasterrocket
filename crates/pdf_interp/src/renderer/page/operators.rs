@@ -252,10 +252,13 @@ impl PageRenderer<'_> {
 
             // ── Text state ────────────────────────────────────────────────────
             Operator::SetFont { name, size } => {
+                if self.resources.font_entry(name).is_none() {
+                    self.record_missing_font(name);
+                }
                 let font = self.font_cache.select(&self.resources, name);
                 let ts = &mut self.gstate.current_mut().text;
                 ts.font_name.clone_from(name);
-                ts.font = font;
+                ts.font = Some(font);
                 ts.font_size = *size;
             }
             Operator::SetCharSpacing(v) => self.gstate.current_mut().text.char_spacing = *v,
