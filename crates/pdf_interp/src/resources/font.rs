@@ -31,7 +31,7 @@ use pdf::{Dictionary, Document, Object};
 
 use crate::resources::cmap::{CMap, parse_cmap};
 use crate::resources::dict_ext::DictExt;
-use crate::resources::font_substitute::{SubstituteStyle, substitute_style};
+use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle, substitute_style};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -64,6 +64,14 @@ pub enum BaseEncoding {
     /// leaves unassigned, or a font without an embedded Type 1 / CFF
     /// program, resolves through `StandardEncoding`.
     FontProgram,
+    /// The built-in encoding of the standard Symbol font (Annex D.5): the
+    /// base of a non-embedded Symbol font, whatever encoding name the
+    /// dictionary carries.
+    Symbol,
+    /// The built-in encoding of the standard `ZapfDingbats` font (Annex
+    /// D.6): the base of a non-embedded `ZapfDingbats` font, as for
+    /// [`Self::Symbol`].
+    ZapfDingbats,
 }
 
 /// CID encoding information for Type 0 composite fonts.
@@ -254,7 +262,19 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     let bytes = extract_bytes(doc, dict);
     let (first_char, widths) = extract_widths(dict);
     let missing_width = extract_missing_width(doc, dict);
-    let (code_to_gid, differences, base_encoding) = extract_encoding(doc, dict, kind);
+    let (code_to_gid, differences, mut base_encoding) = extract_encoding(doc, dict, kind);
+    let substitute = substitute_style(doc, dict, Some(dict));
+
+    // A symbolic standard font drawn by its substitute keeps its built-in
+    // encoding as the base: its codes denote symbols, not Latin letters,
+    // and only `Differences` may reassign them.
+    if bytes.is_none() {
+        match substitute.family {
+            SubstituteFamily::Symbol => base_encoding = BaseEncoding::Symbol,
+            SubstituteFamily::Dingbats => base_encoding = BaseEncoding::ZapfDingbats,
+            SubstituteFamily::Sans | SubstituteFamily::Serif | SubstituteFamily::Mono => {}
+        }
+    }
 
     FontDescriptor {
         kind,
@@ -267,7 +287,7 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         base_encoding,
         cid_encoding: None,
         type3: None,
-        substitute: substitute_style(doc, dict, Some(dict)),
+        substitute,
     }
 }
 

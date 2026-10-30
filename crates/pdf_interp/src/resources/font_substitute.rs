@@ -21,6 +21,11 @@ pub enum SubstituteFamily {
     Serif,
     /// Monospaced (the class of Courier).
     Mono,
+    /// The standard Symbol font (Greek letters, mathematical and
+    /// arrow symbols).
+    Symbol,
+    /// The standard `ZapfDingbats` font.
+    Dingbats,
 }
 
 /// Family class and variant of the substitute for a non-embedded font.
@@ -102,6 +107,16 @@ const SERIF_NAMES: &[&str] = &[
 const BOLD_NAMES: &[&str] = &["bold", "black", "heavy", "demi", "semibold", "extrabold"];
 /// Name fragments that mark an italic or oblique style.
 const ITALIC_NAMES: &[&str] = &["italic", "oblique", "slanted", "kursiv"];
+/// Names (lower case, style suffix after `,` removed) of the standard
+/// Symbol font and its TrueType namesake.
+const SYMBOL_NAMES: &[&str] = &["symbol", "symbolmt"];
+/// Names of the standard `ZapfDingbats` font and its common aliases.
+const DINGBATS_NAMES: &[&str] = &[
+    "zapfdingbats",
+    "dingbats",
+    "zapfdingbatsitc",
+    "itczapfdingbats",
+];
 
 /// Classify the substitute for the font described by `font_dict`, whose
 /// font descriptor lives in `fd_owner` (the font dictionary itself for a
@@ -140,7 +155,20 @@ pub fn substitute_style(
 /// descriptor (0 when absent).
 fn classify(name: &str, flags: i64, weight: f64, italic_angle: f64) -> SubstituteStyle {
     let has = |frags: &[&str]| frags.iter().any(|f| name.contains(f));
-    let family = if has(MONO_NAMES) {
+    // The family name proper: the part before a `,Bold`-style suffix,
+    // without the separators producers insert (`Zapf-Dingbats`, `Symbol MT`).
+    let base: String = name
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !matches!(c, '-' | ' ' | '_'))
+        .collect();
+    let family = if SYMBOL_NAMES.contains(&base.as_str()) {
+        SubstituteFamily::Symbol
+    } else if DINGBATS_NAMES.contains(&base.as_str()) {
+        SubstituteFamily::Dingbats
+    } else if has(MONO_NAMES) {
         SubstituteFamily::Mono
     } else if has(SANS_NAMES) {
         SubstituteFamily::Sans
@@ -232,6 +260,26 @@ mod tests {
             classify("xyz", FLAG_FORCE_BOLD | FLAG_ITALIC, 0.0, 0.0),
             style(Sans, true, true)
         );
+    }
+
+    #[test]
+    fn symbol_and_dingbats_names_classify() {
+        use SubstituteFamily::{Dingbats, Sans, Symbol};
+        for name in ["symbol", "symbolmt", "symbol,bold", "symbol mt"] {
+            assert_eq!(classify(name, 0, 0.0, 0.0).family, Symbol, "{name}");
+        }
+        for name in [
+            "zapfdingbats",
+            "dingbats",
+            "zapf-dingbats",
+            "zapfdingbatsitc",
+        ] {
+            assert_eq!(classify(name, 0, 0.0, 0.0).family, Dingbats, "{name}");
+        }
+        // Only the standard fonts themselves, not every name containing
+        // the word.
+        assert_eq!(classify("symbolneu", 0, 0.0, 0.0).family, Sans);
+        assert_eq!(classify("wingdings", 0, 0.0, 0.0).family, Sans);
     }
 
     #[test]

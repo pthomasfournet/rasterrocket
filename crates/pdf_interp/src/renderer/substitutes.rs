@@ -4,8 +4,10 @@
 //! and variant ([`SubstituteStyle`]): the installed metric-compatible face
 //! (Liberation, Arial, Times New Roman, Courier New) when one is found on
 //! the fixed search path, else the base-14 face compiled into the binary
-//! (`fonts/foxit/`).  Each substitute is resolved once per process and
-//! shared by every document.
+//! (`fonts/foxit/`).  The Symbol and Dingbats families always draw with
+//! the compiled-in faces, whose charsets carry the glyph names of their
+//! encodings.  Each substitute is resolved once per process and shared by
+//! every document.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -40,8 +42,9 @@ const INSTALLED: [[&str; 3]; 12] = [
     ],
 ];
 
-/// Compiled-in base-14 programs, in the row order of [`INSTALLED`].
-const EMBEDDED: [&[u8]; 12] = [
+/// Compiled-in base-14 programs: the twelve rows of [`INSTALLED`], then
+/// Symbol and Dingbats.
+const EMBEDDED: [&[u8]; 14] = [
     include_bytes!("../../fonts/foxit/Sans.cff"),
     include_bytes!("../../fonts/foxit/SansItalic.cff"),
     include_bytes!("../../fonts/foxit/SansBold.cff"),
@@ -54,14 +57,20 @@ const EMBEDDED: [&[u8]; 12] = [
     include_bytes!("../../fonts/foxit/FixedItalic.cff"),
     include_bytes!("../../fonts/foxit/FixedBold.cff"),
     include_bytes!("../../fonts/foxit/FixedBoldItalic.cff"),
+    include_bytes!("../../fonts/foxit/Symbol.cff"),
+    include_bytes!("../../fonts/foxit/Dingbats.cff"),
 ];
 
-/// Row of [`INSTALLED`] and [`EMBEDDED`] for `style`.
+/// Row of [`EMBEDDED`] for `style`; rows below `INSTALLED.len()` are
+/// also rows of [`INSTALLED`].  The Symbol and Dingbats families have one
+/// face each.
 const fn substitute_index(style: SubstituteStyle) -> usize {
     let family = match style.family {
         SubstituteFamily::Sans => 0,
         SubstituteFamily::Serif => 1,
         SubstituteFamily::Mono => 2,
+        SubstituteFamily::Symbol => return 12,
+        SubstituteFamily::Dingbats => return 13,
     };
     family * 4 + (style.bold as usize) * 2 + (style.italic as usize)
 }
@@ -105,10 +114,15 @@ fn embedded_program(bytes: &'static [u8]) -> Option<Arc<FontProgram>> {
 /// face of that exact family and variant, else the compiled-in base-14
 /// face.  Resolved once per process.
 pub fn substitute_program(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
-    static CACHE: [OnceLock<Option<Arc<FontProgram>>>; 12] = [const { OnceLock::new() }; 12];
+    static CACHE: [OnceLock<Option<Arc<FontProgram>>>; 14] = [const { OnceLock::new() }; 14];
     let row = substitute_index(style);
     CACHE[row]
-        .get_or_init(|| installed_program(row).or_else(|| embedded_program(EMBEDDED[row])))
+        .get_or_init(|| {
+            (row < INSTALLED.len())
+                .then(|| installed_program(row))
+                .flatten()
+                .or_else(|| embedded_program(EMBEDDED[row]))
+        })
         .clone()
 }
 
@@ -117,7 +131,8 @@ mod tests {
     use super::*;
     use font::engine::{FaceParams, FontEngine};
 
-    fn all_styles() -> impl Iterator<Item = SubstituteStyle> {
+    /// The Latin family classes in every variant.
+    fn latin_styles() -> impl Iterator<Item = SubstituteStyle> {
         [
             SubstituteFamily::Sans,
             SubstituteFamily::Serif,
@@ -135,14 +150,25 @@ mod tests {
         })
     }
 
+    fn all_styles() -> impl Iterator<Item = SubstituteStyle> {
+        latin_styles().chain(
+            [SubstituteFamily::Symbol, SubstituteFamily::Dingbats]
+                .into_iter()
+                .map(|family| SubstituteStyle {
+                    family,
+                    ..SubstituteStyle::default()
+                }),
+        )
+    }
+
     #[test]
     fn installed_rows_match_styles() {
-        for style in all_styles() {
+        for style in latin_styles() {
             let stem = INSTALLED[substitute_index(style)][0];
             let family_name = match style.family {
                 SubstituteFamily::Sans => "Sans-",
                 SubstituteFamily::Serif => "Serif-",
-                SubstituteFamily::Mono => "Mono-",
+                _ => "Mono-",
             };
             assert!(stem.contains(family_name), "{style:?} -> {stem}");
             assert_eq!(stem.contains("Bold"), style.bold, "{style:?} -> {stem}");
@@ -150,15 +176,22 @@ mod tests {
         }
     }
 
-    /// Every compiled-in program parses and draws the glyph named `A`
-    /// with ink, so a host without any installed font still renders text.
+    /// Every compiled-in program parses and draws a glyph of its
+    /// encoding with ink (`A` for the Latin faces, `alpha` for Symbol,
+    /// `a1` for Dingbats), so a host without any installed font still
+    /// renders text.
     #[test]
     fn embedded_programs_draw() {
         let engine = FontEngine::new(true);
         for (row, bytes) in EMBEDDED.iter().enumerate() {
             let program = embedded_program(bytes).unwrap_or_else(|| panic!("row {row} parses"));
-            let gid = program.name_index("A");
-            assert_ne!(gid, 0, "row {row} names A");
+            let name = match row {
+                12 => "alpha",
+                13 => "a1",
+                _ => "A",
+            };
+            let gid = program.name_index(name);
+            assert_ne!(gid, 0, "row {row} names {name}");
             let face = engine
                 .load_program_face(
                     program,
@@ -169,8 +202,28 @@ mod tests {
                 )
                 .expect("face at 20 px");
             let glyph = face.make_glyph_by_gid(gid, 0).expect("glyph bitmap");
-            assert!(glyph.data.iter().any(|&c| c != 0), "row {row} draws A");
+            assert!(glyph.data.iter().any(|&c| c != 0), "row {row} draws {name}");
         }
+    }
+
+    /// The Symbol and Dingbats families never take an installed face:
+    /// their codes name glyphs only the compiled-in faces carry.
+    #[test]
+    fn symbol_and_dingbats_are_always_compiled_in() {
+        let symbol = substitute_program(SubstituteStyle {
+            family: SubstituteFamily::Symbol,
+            ..SubstituteStyle::default()
+        })
+        .expect("symbol");
+        let dingbats = substitute_program(SubstituteStyle {
+            family: SubstituteFamily::Dingbats,
+            ..SubstituteStyle::default()
+        })
+        .expect("dingbats");
+        assert_eq!(symbol.data(), EMBEDDED[12]);
+        assert_eq!(dingbats.data(), EMBEDDED[13]);
+        assert_ne!(symbol.name_index("therefore"), 0);
+        assert_ne!(dingbats.name_index("a73"), 0);
     }
 
     /// Every style resolves to a program, installed or compiled in.
