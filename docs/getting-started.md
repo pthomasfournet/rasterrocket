@@ -251,6 +251,10 @@ Flagged only when genuinely JavaScript (never on bare key presence — that woul
 
 The four catalog locations are checked when the document opens, with one warning per location. Opening reads no page objects, so page and annotation actions are checked as each page is rendered: the first rendered page that carries JavaScript produces one warning for the document, naming that page. A page that is never rendered is never inspected, and at most 8192 annotations are inspected per page.
 
+### XFA forms
+
+XFA is not processed either. A dynamic XFA form (`/AcroForm /XFA` with catalog `/NeedsRendering true`) renders the placeholder page stored in the file, usually a notice asking for an XFA-capable viewer. Opening one logs a `WARN`, and `PageDiagnostics::form_type` (and `RasterSession::form_type()`) report `FormType::XfaFull`, so OCR pipelines can tell that page from real content. Static XFA forms (`FormType::XfaForeground`) carry ordinary pages and render normally.
+
 ### Encrypted PDFs
 
 A PDF protected by an owner password only (no password needed to open it) is

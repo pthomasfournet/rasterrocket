@@ -142,6 +142,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         image_failures: Vec::new(),
         content_failures,
         missing_fonts: Vec::new(),
+        form_type: crate::form_type(doc),
     })
 }
 

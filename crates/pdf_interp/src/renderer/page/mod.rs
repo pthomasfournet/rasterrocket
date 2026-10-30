@@ -148,6 +148,12 @@ pub struct PageDiagnostics {
     /// the `/Font` resources in effect do not define.  Their text is drawn
     /// in Helvetica.  Empty when every font resolved.
     pub missing_fonts: Vec<String>,
+    /// The document's interactive form type.  [`FormType::XfaFull`] marks
+    /// a dynamic XFA form, whose rendered pages are the placeholder content
+    /// stored in the file rather than the form.
+    ///
+    /// [`FormType::XfaFull`]: crate::FormType::XfaFull
+    pub form_type: crate::FormType,
 }
 
 /// An image the renderer skipped because it could not be decoded or drawn.

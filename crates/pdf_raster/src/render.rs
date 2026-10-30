@@ -11,7 +11,7 @@ use crate::gpu_init;
 use crate::gray::rgb_to_gray;
 #[cfg(feature = "vulkan")]
 use crate::vk_init::init_vk_backend;
-use crate::{BackendPolicy, PageSet, RasterOptions, RenderedPage, SessionConfig};
+use crate::{BackendPolicy, FormType, PageSet, RasterOptions, RenderedPage, SessionConfig};
 
 // ── Safety limit ──────────────────────────────────────────────────────────────
 
@@ -211,6 +211,9 @@ pub struct RasterSession {
     /// The document's optional-content configuration for
     /// [`crate::SessionConfig::purpose`], shared by every page rendered.
     pub(crate) optional_content: Arc<pdf_interp::OptionalContent>,
+    /// The document's interactive form type, reported in every page's
+    /// [`PageDiagnostics::form_type`](crate::PageDiagnostics::form_type).
+    pub(crate) form_type: pdf_interp::FormType,
     /// Set once a rendered page has been found to carry JavaScript, so the
     /// warning is emitted once per document.
     pub(crate) javascript_warned: AtomicBool,
@@ -284,6 +287,12 @@ impl RasterSession {
     #[must_use]
     pub fn doc(&self) -> &pdf::Document {
         &self.doc
+    }
+
+    /// The document's interactive form type.
+    #[must_use]
+    pub const fn form_type(&self) -> FormType {
+        self.form_type
     }
 
     /// The backend policy this session was opened with.
@@ -518,6 +527,7 @@ fn open_session_with_doc(
     };
 
     let optional_content = Arc::new(pdf_interp::OptionalContent::new(&doc, config.purpose));
+    let form_type = pdf_interp::form_type(&doc);
     Ok(RasterSession {
         doc,
         fonts: Arc::default(),
@@ -525,6 +535,7 @@ fn open_session_with_doc(
         policy: config.policy,
         strict: config.strict,
         optional_content,
+        form_type,
         javascript_warned: AtomicBool::new(false),
         #[cfg(not(feature = "vaapi"))]
         vaapi_device,
@@ -827,7 +838,9 @@ fn render_page_rgb_with_geom(
         log::warn!("page {page_num}: skipped {failure}");
     }
 
-    Ok(renderer.finish())
+    let (bitmap, mut diag) = renderer.finish();
+    diag.form_type = session.form_type;
+    Ok((bitmap, diag))
 }
 
 /// Lend per-thread GPU JPEG decoders to the renderer for one page.

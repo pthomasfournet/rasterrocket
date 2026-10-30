@@ -142,6 +142,7 @@ pub struct RasterSession { /* opaque */ }
 impl RasterSession {
     pub const fn total_pages(&self) -> u32
     pub const fn policy(&self) -> BackendPolicy
+    pub const fn form_type(&self) -> FormType
     // doc() and resolve_page() are #[doc(hidden)] — use prescan_session instead
 }
 ```
@@ -274,6 +275,18 @@ Collected at zero extra cost during rendering.
 | `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn. Each was skipped, so its region shows whatever was painted beneath. Empty on a complete render. Includes images inside tiling-pattern tiles. |
 | `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams). Each was skipped and the page drawn from the others, so whatever it held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 | `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
+| `form_type` | `FormType` | The document's interactive form type (the same on every page). `XfaFull` means a dynamic XFA form: XFA is not processed, so the page is the placeholder content stored in the file, often a notice asking for an XFA-capable viewer, and its text is not the form's. |
+
+```rust
+pub enum FormType {
+    NoForm,         // no /AcroForm in the catalog
+    AcroForm,       // /AcroForm without /XFA
+    XfaFull,        // /AcroForm with /XFA and catalog /NeedsRendering true (dynamic XFA)
+    XfaForeground,  // /AcroForm with /XFA otherwise (static XFA; pages render normally)
+}
+```
+
+Opening a dynamic XFA document (`XfaFull`) also logs one `warn`.
 
 ```rust
 pub struct ImageFailure {

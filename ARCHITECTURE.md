@@ -449,6 +449,10 @@ the rayon pool drops — this avoids the CUDA driver teardown race at process ex
   session. `InterpError` has no
   `JavaScript` variant — the full list is `Pdf`, `PageOutOfRange`,
   `MissingResource`, `InvalidPageGeometry`, `PageBudget`.
+- XFA — not processed. `form_type.rs` classifies the catalog's form
+  (`/AcroForm`, `/XFA`, `/NeedsRendering`) as `FormType`; a dynamic XFA form
+  warns once at open, and the type is carried on the session and in every
+  page's `PageDiagnostics::form_type`.
 
 ### 3.6 `gpu`
 

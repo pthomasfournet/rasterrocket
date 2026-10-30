@@ -14,6 +14,7 @@
 #[cfg(feature = "cache")]
 pub mod cache;
 pub mod content;
+pub mod form_type;
 pub mod optional_content;
 pub mod prescan;
 pub mod renderer;
@@ -21,6 +22,7 @@ pub mod resources;
 #[cfg(test)]
 mod test_helpers;
 
+pub use form_type::{FormType, form_type};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use prescan::prescan_page;
 
@@ -141,6 +143,7 @@ pub fn open_decrypting(
 ) -> Result<Document, InterpError> {
     let doc = Document::open_decrypting(path.as_ref(), decrypt_authorized)?;
     warn_if_javascript(&doc);
+    form_type::warn_if_dynamic_xfa(&doc);
     Ok(doc)
 }
 
@@ -175,6 +178,7 @@ pub fn open_bytes(bytes: Vec<u8>) -> Result<Document, InterpError> {
         )));
     }
     warn_if_javascript(&doc);
+    form_type::warn_if_dynamic_xfa(&doc);
     Ok(doc)
 }
 

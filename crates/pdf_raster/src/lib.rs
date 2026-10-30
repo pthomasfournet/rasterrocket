@@ -132,9 +132,9 @@ pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
-pub use pdf_interp::RenderPurpose;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
+pub use pdf_interp::{FormType, RenderPurpose};
 pub use render::{
     RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
     render_page_rgb, render_page_rgb_hinted,
