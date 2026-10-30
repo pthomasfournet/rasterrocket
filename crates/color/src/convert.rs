@@ -136,6 +136,18 @@ pub fn rgb_to_bytes(r: f64, g: f64, b: f64) -> [u8; 3] {
     [gray_to_u8(r), gray_to_u8(g), gray_to_u8(b)]
 }
 
+/// The luminosity of an 8-bit RGB pixel, `0.30 R + 0.59 G + 0.11 B`
+/// rounded to the nearest level (PDF §11.3.5.3).
+#[inline]
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a weighted mean of u8 values is at most 255"
+)]
+pub fn luminosity(r: u8, g: u8, b: u8) -> u8 {
+    ((30 * u32::from(r) + 59 * u32::from(g) + 11 * u32::from(b) + 50) / 100) as u8
+}
+
 // ── Geometry rounding (matching SplashMath.h portable fallbacks) ──────────────
 
 /// Saturating cast of an integer-valued `f64` to `i32`.

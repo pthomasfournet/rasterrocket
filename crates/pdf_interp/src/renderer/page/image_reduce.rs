@@ -88,7 +88,8 @@ pub(super) fn reduce_for_draw(img: &ImageDescriptor, ctm: &Ctm) -> Option<(Image
 pub(super) fn reduce_mask_for_draw(mask: &SoftMask, ctm: &Ctm) -> Option<(SoftMask, Ctm)> {
     let plan = Plan::new(ctm, mask.width(), mask.height())?;
     let out = plan.resample(mask.alpha(), 1)?;
-    Some((SoftMask::new(plan.out_w, plan.out_h, out)?, plan.ctm))
+    let reduced = SoftMask::new(plan.out_w, plan.out_h, out)?.interpolated(mask.interpolate());
+    Some((reduced, plan.ctm))
 }
 
 /// Box-filter taps along one axis: output sample `i` is the weighted sum of

@@ -28,12 +28,15 @@ pub struct SoftMask {
     width: u32,
     height: u32,
     alpha: Vec<u8>,
+    /// The mask asks to be interpolated when magnified (its own
+    /// `/Interpolate`, PDF §8.9.5.3).
+    interpolate: bool,
 }
 
 impl SoftMask {
-    /// Wrap `alpha` as a `width × height` mask.  Returns `None` when either
-    /// dimension is zero or `alpha` does not hold exactly `width × height`
-    /// bytes.
+    /// Wrap `alpha` as a `width × height` mask that is not interpolated.
+    /// Returns `None` when either dimension is zero or `alpha` does not
+    /// hold exactly `width × height` bytes.
     #[must_use]
     pub fn new(width: u32, height: u32, alpha: Vec<u8>) -> Option<Self> {
         let expected = (width as usize).checked_mul(height as usize)?;
@@ -41,7 +44,21 @@ impl SoftMask {
             width,
             height,
             alpha,
+            interpolate: false,
         })
+    }
+
+    /// The same mask, interpolated when magnified if `interpolate`.
+    #[must_use]
+    pub const fn interpolated(mut self, interpolate: bool) -> Self {
+        self.interpolate = interpolate;
+        self
+    }
+
+    /// Whether the mask asks to be interpolated when magnified.
+    #[must_use]
+    pub const fn interpolate(&self) -> bool {
+        self.interpolate
     }
 
     /// Mask width in pixels.
@@ -70,25 +87,45 @@ impl SoftMask {
 /// are those the codec reports, which for `CCITTFaxDecode`, `JBIG2Decode`,
 /// `DCTDecode` and `JPXDecode` take precedence over the dictionary's
 /// `/Width` and `/Height`.  The decoded gray samples, after the mask's own
-/// `/Decode`, are the alpha directly (§11.6.5.2).
+/// `/Decode`, are the alpha directly (§11.6.5.2); a stream that decodes to
+/// three components (a producer's RGB JPEG) yields its luminosity
+/// (§11.3.5.3).  The mask's own `/Interpolate` is kept with it.
 ///
-/// Returns `None` when the stream is unresolvable, fails to decode, does not
-/// decode to one gray component, or its dimensions are degenerate; the
-/// caller then blits the image unmasked.
+/// Returns `None` when the stream is unresolvable, fails to decode, decodes
+/// to a stencil, or its dimensions are degenerate; the caller then blits
+/// the image unmasked.
 pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option<SoftMask> {
+    use crate::resources::dict_ext::DictExt as _;
+
     // Bind the Arc to a local so the borrow into the stream below stays alive.
     let obj_arc = ctx.doc.get_object(id).ok()?;
     let stream = obj_arc.as_ref().as_stream()?;
     let desc = decode_mask_stream(ctx, stream, false, "SMask")?;
-    if desc.color_space != ImageColorSpace::Gray {
-        log::warn!(
-            "image: SMask (object {id:?}) decoded as {:?}, expected one gray component — skipping mask",
-            desc.color_space
-        );
-        return None;
-    }
-    let alpha = alpha_from_decoded("SMask", &desc)?;
-    SoftMask::new(desc.width, desc.height, alpha)
+    let alpha = match desc.color_space {
+        ImageColorSpace::Gray => alpha_from_decoded("SMask", &desc)?,
+        ImageColorSpace::Rgb => {
+            log::debug!(
+                "image: SMask (object {id:?}) holds three components; using its luminosity"
+            );
+            let bytes = desc.data.as_cpu()?;
+            let expected = (desc.width as usize).checked_mul(desc.height as usize)?;
+            if bytes.len() < expected * 3 {
+                return None;
+            }
+            bytes[..expected * 3]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[r, g, b]| color::convert::luminosity(r, g, b))
+                .collect()
+        }
+        ImageColorSpace::Mask => {
+            log::warn!("image: SMask (object {id:?}) decoded as a stencil — skipping mask");
+            return None;
+        }
+    };
+    let interpolate = stream.dict.get_bool(b"Interpolate").unwrap_or(false);
+    Some(SoftMask::new(desc.width, desc.height, alpha)?.interpolated(interpolate))
 }
 
 /// Decode an explicit `/Mask N 0 R` stencil-mask image into an alpha buffer.

@@ -1971,7 +1971,6 @@ impl<'doc> PageRenderer<'doc> {
                 mask_src.map(|m| (m, mask_ctm)),
                 &grid,
                 &mut grid_clip,
-                decoded.interpolate,
             );
         };
         if decoded.own_soft_mask {
@@ -2025,7 +2024,7 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap
     /// within `grid_clip`; `mask` is its soft mask with the matrix that
-    /// draws it, sampled bilinearly when `interpolate` is set.
+    /// draws it.
     #[expect(
         clippy::too_many_lines,
         reason = "GPU dispatch, decoder-contract checks, the mask sampler and the per-pixel loop share the grid and CTM state"
@@ -2037,7 +2036,6 @@ impl<'doc> PageRenderer<'doc> {
         mask: Option<(&SoftMask, Ctm)>,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
-        interpolate: bool,
     ) {
         // GPU image-blit path: device-resident pixels sampled by the CUDA
         // kernel through the same grid, composited onto `bitmap` before
@@ -2111,11 +2109,11 @@ impl<'doc> PageRenderer<'doc> {
                     m,
                     &mask_ctm,
                     ctm,
+                    grid.filter(),
                     self.width,
                     self.height,
                     img.width,
                     img.height,
-                    interpolate,
                 ) else {
                     return;
                 };

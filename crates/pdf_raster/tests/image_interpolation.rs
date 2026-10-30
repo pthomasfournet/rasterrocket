@@ -43,6 +43,47 @@ fn render(content: &str, image_dict: &str, samples: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// As [`render`], with the image's `/SMask` built from `mask_dict` and
+/// `mask_samples` (object 6).
+fn render_masked(
+    content: &str,
+    image_dict: &str,
+    samples: &[u8],
+    mask_dict: &str,
+    mask_samples: &[u8],
+) -> Vec<u8> {
+    let (w, h) = PAGE;
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] \
+             /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream_object("", content.as_bytes()),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /BitsPerComponent 8 {image_dict} /SMask 6 0 R"
+            ),
+            samples,
+        ),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /BitsPerComponent 8 /ColorSpace /DeviceGray \
+                 {mask_dict}"
+            ),
+            mask_samples,
+        ),
+    ];
+    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    (0..h as usize)
+        .flat_map(|y| (0..w as usize).map(move |x| (x, y)))
+        .map(|(x, y)| bmp.data()[y * bmp.stride + x * 3])
+        .collect()
+}
+
 /// Row `y` of a page rendered by [`render`].
 fn row(page: &[u8], y: usize) -> &[u8] {
     &page[y * PAGE.0 as usize..][..PAGE.0 as usize]
@@ -115,6 +156,35 @@ fn rotated_draw_blends() {
         flagged.iter().any(|&v| (0x40..=0xC0).contains(&v)),
         "no blended pixel in a rotated flagged draw"
     );
+}
+
+/// A soft mask's own `/Interpolate` blends its alpha when it is magnified,
+/// whatever the image's flag; without it the alpha keeps whole samples.
+#[test]
+fn soft_mask_interpolate_flag_blends_its_own_grid() {
+    // A black 2 × 1 image under a 2 × 1 mask that is transparent on the
+    // left and opaque on the right, drawn at 50× magnification.
+    let black = [0x00, 0x00];
+    let flagged = render_masked(
+        PAIR_DRAW,
+        PAIR_DICT,
+        &black,
+        "/Width 2 /Height 1 /Interpolate true",
+        &PAIR,
+    );
+    let r = row(&flagged, 10);
+    assert_eq!((r[10], r[90]), (0xFF, 0x00), "ends hold the edge alpha");
+    assert!(
+        (120..=136).contains(&r[50]),
+        "midpoint {} is not about half-way",
+        r[50]
+    );
+    assert!(distinct(r) > 40, "ramp has {} levels", distinct(r));
+
+    let plain = render_masked(PAIR_DRAW, PAIR_DICT, &black, "/Width 2 /Height 1", &PAIR);
+    let r = row(&plain, 10);
+    assert!(r[..50].iter().all(|&v| v == 0xFF), "{r:?}");
+    assert!(r[50..].iter().all(|&v| v == 0x00), "{r:?}");
 }
 
 #[test]

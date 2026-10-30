@@ -344,7 +344,6 @@ impl SampleGrid {
     }
 
     /// Axes interpolated between samples.
-    #[cfg(feature = "cache")]
     pub(super) const fn filter(&self) -> Filter {
         self.filter
     }
@@ -448,9 +447,10 @@ pub(super) struct MaskSampler<'a> {
 
 impl<'a> MaskSampler<'a> {
     /// Sampler for `mask` drawn through `mask_ctm`, over an image of
-    /// `img_w × img_h` pixels drawn through `img_ctm` onto a
-    /// `page_w × page_h` bitmap; `interpolate` is the image's
-    /// `/Interpolate`.
+    /// `img_w × img_h` pixels drawn through `img_ctm` with `img_filter`
+    /// onto a `page_w × page_h` bitmap.  The mask is interpolated as its
+    /// own `/Interpolate` asks; it takes the image's taps when it is placed
+    /// as the image and filtered alike.
     ///
     /// Returns `None` only where [`SampleGrid::new`] does for the mask: a
     /// degenerate matrix or a bounding box off the page.
@@ -466,17 +466,18 @@ impl<'a> MaskSampler<'a> {
         mask: &'a SoftMask,
         mask_ctm: &Ctm,
         img_ctm: &Ctm,
+        img_filter: Filter,
         page_w: u32,
         page_h: u32,
         img_w: u32,
         img_h: u32,
-        interpolate: bool,
     ) -> Option<Self> {
-        let grid = if (mask.width(), mask.height()) == (img_w, img_h) && mask_ctm == img_ctm {
+        let (w, h) = (mask.width(), mask.height());
+        let filter = Filter::for_draw(mask_ctm, w, h, mask.interpolate());
+        let placed_as_image = w == img_w && h == img_h && mask_ctm == img_ctm;
+        let grid = if placed_as_image && filter == img_filter {
             None
         } else {
-            let (w, h) = (mask.width(), mask.height());
-            let filter = Filter::for_draw(mask_ctm, w, h, interpolate);
             Some(SampleGrid::new(mask_ctm, page_w, page_h, w, h, filter)?)
         };
         Some(Self {
@@ -752,8 +753,8 @@ mod tests {
         let alpha: Vec<u8> = (0..64).collect();
         let mask = SoftMask::new(8, 8, alpha).expect("8×8 mask");
         let grid = SampleGrid::new(&ctm, 8, 8, img_w, img_h, Filter::NEAREST).expect("grid");
-        let sampler =
-            MaskSampler::new(&mask, &ctm, &ctm, 8, 8, img_w, img_h, false).expect("sampler");
+        let sampler = MaskSampler::new(&mask, &ctm, &ctm, Filter::NEAREST, 8, 8, img_w, img_h)
+            .expect("sampler");
         for dy in grid.y0..grid.y1 {
             for dx in grid.x0..grid.x1 {
                 let px = grid.sample(dx, dy).expect("inside");
@@ -776,8 +777,9 @@ mod tests {
                 .collect(),
         )
         .expect("40×30 mask");
+        let filter = Filter::for_draw(&ctm, 40, 30, false);
         let sampler =
-            MaskSampler::new(&mask, &ctm, &ctm, 100, 100, 40, 30, false).expect("sampler");
+            MaskSampler::new(&mask, &ctm, &ctm, filter, 100, 100, 40, 30).expect("sampler");
         assert!(sampler.grid.is_none());
         assert_eq!(
             sampler.alpha(0, 0, &Taps::point(3, 2)),
