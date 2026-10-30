@@ -1,7 +1,7 @@
 //! A raw image stream shorter than its dictionary declares — truncated or
 //! damaged transport data — draws the rows it holds.  The missing samples
 //! are zero, the value a short sub-byte stream already reads as, and the
-//! image is not reported as skipped.
+//! image is reported as a partial failure, not as skipped.
 
 #[expect(
     dead_code,
@@ -119,10 +119,15 @@ fn truncated_raw_images_keep_their_decoded_rows() {
     ];
     for (name, entries, data, present, missing) in cases {
         let page = render(page(&entries, &data));
+        let [failure] = page.diagnostics.image_failures.as_slice() else {
+            panic!(
+                "{name}: one partial failure expected, got {:?}",
+                page.diagnostics.image_failures
+            );
+        };
         assert!(
-            page.diagnostics.image_failures.is_empty(),
-            "{name}: reported as skipped: {:?}",
-            page.diagnostics.image_failures
+            failure.partial && failure.name.as_deref() == Some("Im0"),
+            "{name}: reported as {failure:?}"
         );
         let gray = |row: u32| page.pixels[(row * page.width + SIDE / 2) as usize];
         assert!(

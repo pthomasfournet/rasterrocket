@@ -839,7 +839,11 @@ fn render_page_rgb_with_geom(
         ));
     }
     for failure in failures {
-        log::warn!("page {page_num}: skipped {failure}");
+        if failure.partial {
+            log::warn!("page {page_num}: {failure}");
+        } else {
+            log::warn!("page {page_num}: skipped {failure}");
+        }
     }
 
     let (bitmap, mut diag) = renderer.finish();

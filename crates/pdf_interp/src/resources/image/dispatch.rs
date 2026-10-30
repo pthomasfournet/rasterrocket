@@ -39,6 +39,13 @@ pub(super) struct ImageStream<'a> {
     pub colour: ImageColour,
 }
 
+/// A decoded, colour-converted image and what its stream lacked, if
+/// anything (see [`Samples::partial`]).
+pub(super) struct DecodedStream {
+    pub image: ImageDescriptor,
+    pub partial: Option<String>,
+}
+
 /// Decode `src` through its whole `/Filter` chain and convert its samples
 /// to the colour the blit draws.
 ///
@@ -62,7 +69,7 @@ pub(super) fn decode_image_stream<
     draw_size: Option<(u32, u32)>,
     #[cfg(feature = "cache")] dct_cache: Option<&super::codecs::DctCacheCtx<'_>>,
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
-) -> Result<ImageDescriptor, String> {
+) -> Result<DecodedStream, String> {
     let doc = ctx.doc;
     let dict = &src.stream.dict;
     let (w, h, is_mask) = (src.width, src.height, src.is_mask);
@@ -152,7 +159,8 @@ pub(super) fn decode_image_stream<
         }
     }
 
-    let mut img = src
+    let partial = samples.partial.take();
+    let mut image = src
         .colour
         .convert(
             doc,
@@ -161,8 +169,8 @@ pub(super) fn decode_image_stream<
             &mut ctx.icc,
         )
         .ok_or_else(|| "colour conversion failed".to_owned())?;
-    img.filter = image_filter;
-    Ok(img)
+    image.filter = image_filter;
+    Ok(DecodedStream { image, partial })
 }
 
 /// The colour-key mask (§8.9.6.4) of a codec's host-resident samples.

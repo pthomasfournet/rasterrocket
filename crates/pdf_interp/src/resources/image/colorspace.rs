@@ -68,6 +68,10 @@ pub(super) struct Samples {
     /// The ICC profile of the codestream's own colour specification, for
     /// an image dictionary that names no colour space.
     pub embedded_profile: Option<Vec<u8>>,
+    /// What the stream lacked when the samples are only partly its own:
+    /// a stream shorter than its dictionary declares, or a codec that
+    /// stopped short, leaves the missing samples padded.
+    pub partial: Option<String>,
 }
 
 impl Samples {
@@ -80,6 +84,7 @@ impl Samples {
             data: ImageData::Cpu(data),
             smask: None,
             embedded_profile: None,
+            partial: None,
         }
     }
 
@@ -252,6 +257,7 @@ impl ImageColour {
             data,
             smask,
             embedded_profile,
+            partial: _,
         } = samples;
         let n = match layout {
             Layout::Mask => {

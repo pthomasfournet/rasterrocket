@@ -29,7 +29,8 @@ use crate::resources::dict_ext::DictExt as _;
 ///
 /// A colour-key `/Mask` array (§8.9.6.4) on a non-stencil image becomes the
 /// samples' mask, compared on the stored samples: see
-/// [`raw_colour_key_mask`].
+/// [`raw_colour_key_mask`].  Data shorter than the dictionary declares is
+/// padded and reported through [`Samples::partial`].
 pub(super) fn decode_raw(
     data: &[u8],
     width: u32,
@@ -52,7 +53,9 @@ pub(super) fn decode_raw(
         // `ImageColorSpace::Mask` bytes 0x00 = paint, 0xFF = transparent.
         // The bilevel codecs emit decoded sample 0 (black) as 0x00, so a raw
         // sample maps to the same byte value as a decoded bilevel sample.
-        return decode_mask_raw(data, width, height, bpc, is_mask_inverted(dict));
+        let mut out = decode_mask_raw(data, width, height, bpc, is_mask_inverted(dict))?;
+        out.partial = short_stream(data, width, height, bpc, 1);
+        return Some(out);
     }
 
     let components = colour.components();
@@ -73,6 +76,7 @@ pub(super) fn decode_raw(
         Layout::Color(u8::try_from(components).ok()?),
         samples,
     );
+    out.partial = short_stream(data, width, height, bpc, components);
     if let Some(Object::Array(ranges)) = dict.get(b"Mask") {
         out.smask = raw_colour_key_mask(data, width, height, bpc, components, ranges);
         if out.smask.is_none() {
@@ -123,6 +127,40 @@ fn raw_colour_key_mask(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// The length of `height` rows of `width` pixels of `components` samples
+/// at `bpc` bits each, each row padded to a whole byte (PDF §8.9.3).
+/// `None` for an unsupported depth or a length that overflows `usize`.
+fn declared_len(width: u32, height: u32, bpc: i64, components: usize) -> Option<usize> {
+    let Ok(bits @ (1 | 2 | 4 | 8 | 16)) = usize::try_from(bpc) else {
+        return None;
+    };
+    let row_bits = usize::try_from(width)
+        .ok()?
+        .checked_mul(components)?
+        .checked_mul(bits)?;
+    row_bits
+        .div_ceil(8)
+        .checked_mul(usize::try_from(height).ok()?)
+}
+
+/// What a stream shorter than [`declared_len`] lacks, for
+/// [`Samples::partial`]; `None` for data of at least the full length.
+fn short_stream(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    bpc: i64,
+    components: usize,
+) -> Option<String> {
+    let needed = declared_len(width, height, bpc, components)?;
+    (data.len() < needed).then(|| {
+        format!(
+            "raw data short: {} of {needed} bytes; the missing samples are padding",
+            data.len()
+        )
+    })
+}
+
 /// `data` extended with zero bytes to the length `height` rows of `width`
 /// pixels of `components` samples at `bpc` bits each occupy, each row
 /// padded to a whole byte (PDF §8.9.3).
@@ -139,16 +177,11 @@ fn zero_extended(
     components: usize,
 ) -> Option<std::borrow::Cow<'_, [u8]>> {
     use std::borrow::Cow;
-    let Ok(bits @ (1 | 2 | 4 | 8 | 16)) = usize::try_from(bpc) else {
+    if !matches!(bpc, 1 | 2 | 4 | 8 | 16) {
         return Some(Cow::Borrowed(data));
-    };
-    let row_bits = usize::try_from(width)
-        .ok()?
-        .checked_mul(components)?
-        .checked_mul(bits)?;
-    let needed = row_bits
-        .div_ceil(8)
-        .checked_mul(usize::try_from(height).ok()?)?;
+    }
+    let needed = declared_len(width, height, bpc, components)?;
+    let bits = bpc;
     if data.len() >= needed {
         return Some(Cow::Borrowed(data));
     }

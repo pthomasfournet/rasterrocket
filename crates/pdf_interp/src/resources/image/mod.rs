@@ -228,6 +228,11 @@ pub struct DecodedImage {
     /// The image dictionary has an `/SMask` entry, which replaces the soft
     /// mask of the graphics state for this image (PDF 32000-1 Table 89).
     pub own_soft_mask: bool,
+    /// What the stream lacked when `image` holds padding in place of
+    /// samples the stream does not have (a stream shorter than its
+    /// dictionary declares, or a codec that stopped short): the image is
+    /// drawn, and the page is incomplete.
+    pub partial: Option<String>,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -531,7 +536,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         is_mask,
         colour,
     };
-    let mut img = match dispatch::decode_image_stream(
+    let (mut img, partial) = match dispatch::decode_image_stream(
         ctx,
         &src,
         draw_size,
@@ -540,7 +545,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         #[cfg(feature = "gpu-jpeg-huffman")]
         jpeg_gpu,
     ) {
-        Ok(img) => img,
+        Ok(decoded) => (decoded.image, decoded.partial),
         Err(msg) => {
             log::warn!("image: /{}: {msg}", String::from_utf8_lossy(name));
             return ImageResolution::DecodeFailed(msg);
@@ -594,6 +599,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         source_width: w,
         interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
         own_soft_mask: !is_mask && matches!(stream.dict.get(b"SMask"), Some(Object::Reference(_))),
+        partial,
     })
 }
 

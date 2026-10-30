@@ -180,7 +180,13 @@ pub(super) fn decode_ccitt(
     } else {
         Layout::Color(1)
     };
-    Some(Samples::cpu(width, height, layout, data_out))
+    let mut samples = Samples::cpu(width, height, layout, data_out);
+    if rows_decoded < height {
+        samples.partial = Some(format!(
+            "CCITTFaxDecode: {rows_decoded} of {height} rows decoded; the rest are white"
+        ));
+    }
+    Some(samples)
 }
 
 /// [`hayro_ccitt::Decoder`] that expands each row of colour changes into one
@@ -636,6 +642,7 @@ fn samples_from_cached(cached: Arc<CachedDeviceImage>, pdf_w: u32, pdf_h: u32) -
         data: ImageData::Gpu(cached),
         smask: None,
         embedded_profile: None,
+        partial: None,
     }
 }
 

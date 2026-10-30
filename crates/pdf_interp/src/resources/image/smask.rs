@@ -224,6 +224,7 @@ fn decode_mask_stream(
     )
     .map_err(|e| log::warn!("image: {what}: {e} — skipping mask"))
     .ok()
+    .map(|decoded| decoded.image)
 }
 
 /// Extract exactly `width × height` host-resident bytes from a decoded mask

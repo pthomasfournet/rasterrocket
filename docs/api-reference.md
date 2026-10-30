@@ -277,7 +277,7 @@ Collected at zero extra cost during rendering.
 | `has_vector_text` | `bool` | At least one text-showing operator (`Tj`, `TJ`, `'`, `"`) was executed. `false` on scan-only pages. |
 | `dominant_filter` | `Option<ImageFilter>` | Most common image decode filter on this page (`None` for pure-vector pages). |
 | `source_ppi_hint` | `Option<f32>` | Estimated native pixels-per-inch of the dominant image. Computed as `(image_width_px / page_width_pts) × 72`. `None` when no images were blitted. |
-| `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn. Each was skipped, so its region shows whatever was painted beneath. Empty on a complete render. Includes images inside tiling-pattern tiles. |
+| `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn (skipped, so the region shows whatever was painted beneath), and images drawn only partly because their stream lacked samples (`partial`). Empty on a complete render. Includes images inside tiling-pattern tiles. |
 | `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams). Each was skipped and the page drawn from the others, so whatever it held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 | `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
 | `form_type` | `FormType` | The document's interactive form type (the same on every page). `XfaFull` means a dynamic XFA form: XFA is not processed, so the page is the placeholder content stored in the file, often a notice asking for an XFA-capable viewer, and its text is not the form's. |
@@ -296,11 +296,13 @@ Opening a dynamic XFA document (`XfaFull`) also logs one `warn`.
 ```rust
 pub struct ImageFailure {
     pub name: Option<String>,  // XObject resource name without '/', e.g. "Im0"; None for an inline image
-    pub reason: String,        // codec or blit error, prefixed by the filter where known, e.g. "FlateDecode: …"
+    pub reason: String,        // codec or blit error, prefixed by the filter where known, e.g. "FlateDecode: …";
+                               // for a partial image, what the stream lacked, e.g. "raw data short: 1200 of 4800 bytes; …"
+    pub partial: bool,         // the image was drawn from the samples it had, the rest padded; false when skipped
 }
 ```
 
-`ImageFailure` implements `Display` as `image /Im0: <reason>` or `inline image: <reason>`. Without `strict`, each failure is also logged at `warn` level as `page N: skipped …`.
+`ImageFailure` implements `Display` as `image /Im0: <reason>` or `inline image: <reason>`, with ` (partial)` after the name for a partial image. Without `strict`, each failure is also logged at `warn` level as `page N: skipped …` (or `page N: image /Im0 (partial): …`). Under `strict`, a partial image fails the page like a skipped one: its content is incomplete.
 
 ```rust
 pub struct ContentFailure {

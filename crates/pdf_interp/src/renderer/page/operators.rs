@@ -385,7 +385,12 @@ impl PageRenderer<'_> {
                     self.jpeg_gpu.as_mut(),
                 );
                 match decoded {
-                    crate::resources::ImageResolution::Ok(decoded) => self.blit_image(&decoded),
+                    crate::resources::ImageResolution::Ok(decoded) => {
+                        if let Some(reason) = &decoded.partial {
+                            self.record_partial_image(None, reason.clone());
+                        }
+                        self.blit_image(&decoded);
+                    }
                     crate::resources::ImageResolution::DecodeFailed(msg) => {
                         self.record_image_failure(None, msg);
                     }

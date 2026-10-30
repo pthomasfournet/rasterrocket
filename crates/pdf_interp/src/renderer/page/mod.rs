@@ -160,22 +160,28 @@ pub struct PageDiagnostics {
     pub form_type: crate::FormType,
 }
 
-/// An image the renderer skipped because it could not be decoded or drawn.
+/// An image the renderer skipped because it could not be decoded or drawn,
+/// or drew only partly because its stream lacked samples.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageFailure {
     /// `XObject` resource name without the leading `/` (e.g. `Im0`); `None`
     /// for an inline image.
     pub name: Option<String>,
     /// Codec or blit error, prefixed by the failing filter where known
-    /// (e.g. `FlateDecode: invalid distance`).
+    /// (e.g. `FlateDecode: invalid distance`); for a partial image, what
+    /// the stream lacked.
     pub reason: String,
+    /// The image was drawn from the samples its stream holds, with the
+    /// missing ones padded; `false` when it was skipped altogether.
+    pub partial: bool,
 }
 
 impl std::fmt::Display for ImageFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = if self.partial { " (partial)" } else { "" };
         match &self.name {
-            Some(name) => write!(f, "image /{name}: {}", self.reason),
-            None => write!(f, "inline image: {}", self.reason),
+            Some(name) => write!(f, "image /{name}{what}: {}", self.reason),
+            None => write!(f, "inline image{what}: {}", self.reason),
         }
     }
 }
@@ -847,8 +853,24 @@ impl<'doc> PageRenderer<'doc> {
     /// Record an image that could not be drawn.  The image is skipped and the
     /// page render continues.
     pub(super) fn record_image_failure(&mut self, name: Option<String>, reason: String) {
-        let failure = ImageFailure { name, reason };
+        let failure = ImageFailure {
+            name,
+            reason,
+            partial: false,
+        };
         log::debug!("rasterrocket-interp: skipped {failure}");
+        self.diag.image_failures.push(failure);
+    }
+
+    /// Record an image drawn from a stream that lacked samples (see
+    /// [`DecodedImage::partial`](crate::resources::DecodedImage::partial)).
+    pub(super) fn record_partial_image(&mut self, name: Option<String>, reason: String) {
+        let failure = ImageFailure {
+            name,
+            reason,
+            partial: true,
+        };
+        log::debug!("rasterrocket-interp: {failure}");
         self.diag.image_failures.push(failure);
     }
 
@@ -1599,13 +1621,21 @@ impl<'doc> PageRenderer<'doc> {
     ) {
         use crate::resources::image::ImageResolution;
         match resolution {
-            ImageResolution::Ok(decoded) => match memo_key {
-                Some((id, draw_size)) => {
-                    let decoded = self.image_memo.borrow_mut().insert(id, draw_size, decoded);
-                    self.draw_image_xobject(name, &decoded);
+            ImageResolution::Ok(decoded) => {
+                if let Some(reason) = &decoded.partial {
+                    self.record_partial_image(
+                        Some(String::from_utf8_lossy(name).into_owned()),
+                        reason.clone(),
+                    );
                 }
-                None => self.draw_image_xobject(name, &decoded),
-            },
+                match memo_key {
+                    Some((id, draw_size)) => {
+                        let decoded = self.image_memo.borrow_mut().insert(id, draw_size, decoded);
+                        self.draw_image_xobject(name, &decoded);
+                    }
+                    None => self.draw_image_xobject(name, &decoded),
+                }
+            }
             ImageResolution::DecodeFailed(msg) => {
                 self.record_image_failure(Some(String::from_utf8_lossy(name).into_owned()), msg);
             }

@@ -96,11 +96,12 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
         #[cfg(feature = "gpu-jpeg-huffman")]
         jpeg_gpu,
     ) {
-        Ok(image) => ImageResolution::Ok(DecodedImage {
-            image,
+        Ok(decoded) => ImageResolution::Ok(DecodedImage {
+            image: decoded.image,
             source_width: w,
             interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
             own_soft_mask: false,
+            partial: decoded.partial,
         }),
         Err(e) => failed(e),
     }
