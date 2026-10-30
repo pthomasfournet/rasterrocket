@@ -35,41 +35,25 @@ fuzz_target!(|data: &[u8]| {
     match selector & 0b11 {
         // K=0: Group 3 1D — no parms needed (decode_ccitt defaults K=0).
         0 => {
-            let _ =
-                pdf_interp::fuzz_helpers::decode_ccitt(payload, width, height, false, None);
+            let _ = pdf_interp::fuzz_helpers::decode_ccitt(payload, width, height, false, None);
         }
         // K<0: Group 4 (T.6) — requires K=-1 in DecodeParms.
         1 => {
             let parms = make_ccitt_parms(-1, selector);
-            let _ = pdf_interp::fuzz_helpers::decode_ccitt(
-                payload,
-                width,
-                height,
-                false,
-                Some(&parms),
-            );
+            let _ =
+                pdf_interp::fuzz_helpers::decode_ccitt(payload, width, height, false, Some(&parms));
         }
         // K>0: Group 3 mixed 1D/2D — use K=1 (minimum T.4 2D parameter).
         2 => {
             let parms = make_ccitt_parms(1, selector);
-            let _ = pdf_interp::fuzz_helpers::decode_ccitt(
-                payload,
-                width,
-                height,
-                false,
-                Some(&parms),
-            );
+            let _ =
+                pdf_interp::fuzz_helpers::decode_ccitt(payload, width, height, false, Some(&parms));
         }
         // K>0 with is_mask=true: exercises the mask colour-space path.
         _ => {
             let parms = make_ccitt_parms(1, selector);
-            let _ = pdf_interp::fuzz_helpers::decode_ccitt(
-                payload,
-                width,
-                height,
-                true,
-                Some(&parms),
-            );
+            let _ =
+                pdf_interp::fuzz_helpers::decode_ccitt(payload, width, height, true, Some(&parms));
         }
     }
 });

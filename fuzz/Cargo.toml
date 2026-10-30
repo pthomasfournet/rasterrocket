@@ -12,14 +12,17 @@ cargo-fuzz = true
 # this package.
 [workspace]
 
+[lib]
+path = "src/lib.rs"
+test = false
+doc = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
+font          = { package = "rasterrocket-font", path = "../crates/font" }
 pdf_interp    = { package = "rasterrocket-interp", path = "../crates/pdf_interp" }
 pdf           = { package = "rasterrocket-parser", path = "../crates/pdf" }
-
-# Direct dependency so we can fuzz hayro-jbig2 both through pdf_interp
-# and standalone (raw segment data without a PDF wrapper).
-hayro-jbig2 = { path = "../crates/jbig2", default-features = false }
+rasterrocket  = { path = "../crates/pdf_raster" }
 
 [[bin]]
 name = "fuzz_ccitt"
@@ -31,6 +34,62 @@ bench = false
 [[bin]]
 name = "fuzz_jbig2"
 path = "fuzz_targets/fuzz_jbig2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cmap"
+path = "fuzz_targets/fuzz_cmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_content"
+path = "fuzz_targets/fuzz_content.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decrypt"
+path = "fuzz_targets/fuzz_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_document"
+path = "fuzz_targets/fuzz_document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_filters"
+path = "fuzz_targets/fuzz_filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_font"
+path = "fuzz_targets/fuzz_font.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_function"
+path = "fuzz_targets/fuzz_function.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_image"
+path = "fuzz_targets/fuzz_image.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,83 @@
+name: Fuzz
+
+# Weekly coverage-guided fuzzing of every target in fuzz/fuzz_targets, from
+# the seed corpus fuzz/seed_corpus.py builds out of committed test data and
+# the qpdf-encrypted variants of the encryption suite.  A crash, leak or
+# timeout fails the target's job and uploads the reproducer.
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Run time per target, in seconds"
+        default: "600"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_ccitt
+          - fuzz_cmap
+          - fuzz_content
+          - fuzz_decrypt
+          - fuzz_document
+          - fuzz_filters
+          - fuzz_font
+          - fuzz_function
+          - fuzz_image
+          - fuzz_jbig2
+    env:
+      SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Install qpdf
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qpdf
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      - name: Build seed corpus
+        run: python3 -I fuzz/seed_corpus.py "$RUNNER_TEMP/seeds"
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: |
+          mkdir -p "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/artifacts"
+          seeds=()
+          [[ -d "$RUNNER_TEMP/seeds/${{ matrix.target }}" ]] && seeds=("$RUNNER_TEMP/seeds/${{ matrix.target }}")
+          cargo +nightly fuzz run "${{ matrix.target }}" "$RUNNER_TEMP/corpus" "${seeds[@]}" -- \
+            -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=4096 -timeout=30 \
+            -max_len=1048576 -artifact_prefix="$RUNNER_TEMP/artifacts/"
+
+      - name: Upload reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-reproducers
+          path: ${{ runner.temp }}/artifacts/
