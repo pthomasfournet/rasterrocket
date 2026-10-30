@@ -4,10 +4,10 @@
 //! [`FontFace`].  Faces are loaded on first use during rendering, then reused
 //! for all subsequent glyphs in the same page.
 //!
-//! When a font has no embedded bytes the cache draws it with an installed
-//! substitute of the same family class and variant (sans-serif, serif or
-//! monospaced; regular, bold, italic or bold italic), located through a
-//! fixed search path.
+//! When a font has no embedded bytes the cache draws it with a substitute
+//! of the same family class and variant (sans-serif, serif or monospaced;
+//! regular, bold, italic or bold italic), located by
+//! [`super::substitutes`].
 //!
 //! # Threading
 //!
@@ -19,7 +19,6 @@
 //! glyph bitmaps of those faces.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use font::{
@@ -31,92 +30,9 @@ use font::{
 };
 use pdf::ObjectId;
 
+use super::substitutes::substitute_program;
 use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
-use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 use crate::resources::{FontKey, PageResources};
-
-// ── Substitute font discovery ─────────────────────────────────────────────────
-
-/// Installed typefaces per [`SubstituteStyle`], indexed by
-/// [`substitute_index`]: `[metric-compatible free family stem, macOS
-/// supplemental file stem, Windows file stem]`.
-const SUBSTITUTES: [[&str; 3]; 12] = [
-    ["LiberationSans-Regular", "Arial", "arial"],
-    ["LiberationSans-Italic", "Arial Italic", "ariali"],
-    ["LiberationSans-Bold", "Arial Bold", "arialbd"],
-    ["LiberationSans-BoldItalic", "Arial Bold Italic", "arialbi"],
-    ["LiberationSerif-Regular", "Times New Roman", "times"],
-    ["LiberationSerif-Italic", "Times New Roman Italic", "timesi"],
-    ["LiberationSerif-Bold", "Times New Roman Bold", "timesbd"],
-    [
-        "LiberationSerif-BoldItalic",
-        "Times New Roman Bold Italic",
-        "timesbi",
-    ],
-    ["LiberationMono-Regular", "Courier New", "cour"],
-    ["LiberationMono-Italic", "Courier New Italic", "couri"],
-    ["LiberationMono-Bold", "Courier New Bold", "courbd"],
-    [
-        "LiberationMono-BoldItalic",
-        "Courier New Bold Italic",
-        "courbi",
-    ],
-];
-
-/// Last-resort sans-serif candidates outside the [`SUBSTITUTES`] layout.
-const LAST_RESORT: &[&str] = &[
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/Library/Fonts/Arial.ttf",
-];
-
-/// Row of [`SUBSTITUTES`] for `style`.
-const fn substitute_index(style: SubstituteStyle) -> usize {
-    let family = match style.family {
-        SubstituteFamily::Sans => 0,
-        SubstituteFamily::Serif => 1,
-        SubstituteFamily::Mono => 2,
-    };
-    family * 4 + (style.bold as usize) * 2 + (style.italic as usize)
-}
-
-/// Candidate paths for one [`SUBSTITUTES`] row, in search order.
-fn substitute_candidates([stem, mac, win]: [&str; 3]) -> [String; 4] {
-    [
-        format!("/usr/share/fonts/truetype/liberation/{stem}.ttf"),
-        format!("/usr/share/fonts/liberation/{stem}.ttf"),
-        format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
-        format!("C:/Windows/Fonts/{win}.ttf"),
-    ]
-}
-
-/// Locate the installed substitute for `style`: the exact family and
-/// variant, else the family's regular face, else the sans-serif regular
-/// face, else a last-resort system sans-serif.  `None` if nothing usable
-/// is installed.  Resolved once per process.
-fn substitute_font_path(style: SubstituteStyle) -> Option<&'static str> {
-    static CACHE: OnceLock<[Option<Box<str>>; 12]> = OnceLock::new();
-    let table = CACHE.get_or_init(|| {
-        let installed = |row: usize| {
-            substitute_candidates(SUBSTITUTES[row])
-                .into_iter()
-                .find(|p| PathBuf::from(p).exists())
-        };
-        std::array::from_fn(|row| {
-            let family_regular = row - row % 4;
-            installed(row)
-                .or_else(|| installed(family_regular))
-                .or_else(|| installed(0))
-                .or_else(|| {
-                    LAST_RESORT
-                        .iter()
-                        .find(|p| PathBuf::from(p).exists())
-                        .map(|&p| p.to_owned())
-                })
-                .map(String::into_boxed_str)
-        })
-    });
-    table[substitute_index(style)].as_deref()
-}
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
@@ -316,10 +232,10 @@ impl FontCache {
                 .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
                 .ok()?
         } else {
-            let path = substitute_font_path(desc.substitute)?;
+            let program = substitute_program(desc.substitute)?;
             self.engine
-                .load_file_face(path, 0, params)
-                .inspect_err(|e| log::debug!("font_cache: fallback font {path}: {e}"))
+                .load_program_face(program, params)
+                .inspect_err(|e| log::debug!("font_cache: substitute font: {e}"))
                 .ok()?
         };
 
@@ -340,20 +256,18 @@ impl FontCache {
 }
 
 /// Parse the program a descriptor draws with: its embedded font program, or
-/// the installed substitute for a font without one.  `None`, logged, when
-/// neither yields a usable program.
+/// the substitute for a font without one.  `None`, logged, when neither
+/// yields a usable program.
 fn parse_program(desc: &FontDescriptor) -> Option<Arc<FontProgram>> {
-    let parsed = if let Some(bytes) = &desc.bytes {
-        FontProgram::parse(bytes.clone(), 0)
-            .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
-    } else {
-        let path = substitute_font_path(desc.substitute)?;
-        std::fs::read(path)
-            .map_err(font::engine::LoadError::Io)
-            .and_then(|data| FontProgram::parse(data, 0))
-            .inspect_err(|e| log::debug!("font_cache: fallback font {path}: {e}"))
-    };
-    parsed.ok().map(Arc::new)
+    desc.bytes.as_ref().map_or_else(
+        || substitute_program(desc.substitute),
+        |bytes| {
+            FontProgram::parse(bytes.clone(), 0)
+                .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
+                .ok()
+                .map(Arc::new)
+        },
+    )
 }
 
 /// The `code_to_gid` table a face of `desc` needs in place of the
@@ -364,9 +278,11 @@ fn parse_program(desc: &FontDescriptor) -> Option<Arc<FontProgram>> {
 /// char codes are not glyph indices (subset programs pack glyphs
 /// arbitrarily) and it often has no usable Unicode cmap, so each code's name
 /// (`Differences` override, else the base encoding) is looked up in the
-/// program's charset.  A font drawn through a Unicode cmap is resolved
-/// through the names' Unicode values.  CID/Type0 keep the descriptor's
-/// table; symbolic TrueType keeps the program's own charmap.
+/// program's charset.  An embedded font drawn through a Unicode cmap, and
+/// every substitute (whose charmap is Unicode, from a `cmap` subtable or
+/// from its glyph names), is resolved through the names' Unicode values.
+/// CID/Type0 keep the descriptor's table; symbolic TrueType keeps the
+/// program's own charmap.
 fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u32>> {
     let embedded = desc.bytes.is_some();
     let simple = desc.cid_encoding.is_none();
@@ -378,7 +294,7 @@ fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u3
             desc.base_encoding,
         ))
     } else if wants_unicode_resolution(embedded, simple, outline, desc.kind)
-        && face.has_unicode_cmap()
+        && (!embedded || face.has_unicode_cmap())
     {
         Some(resolve_via_unicode_cmap(
             face,
@@ -510,8 +426,10 @@ fn resolve_simple_to_gid(
 /// `Differences` entry or from an explicit `WinAnsi` / `MacRoman` base
 /// encoding and the font maps the name's Unicode value; this is what places
 /// `WinAnsi` 0x80–0x9F (`oe` at 0x9C, `quoteright` at 0x92, …) on their glyphs.
-/// Every other code is looked up as a raw Unicode code point, the identity
-/// that holds for the ASCII and Latin-1 ranges of those encodings.
+/// A substitute program carries the name itself in its charset, which is
+/// consulted first.  Every other code is looked up as a raw Unicode code
+/// point, the identity that holds for the ASCII and Latin-1 ranges of those
+/// encodings.
 ///
 /// For an `embedded` program, a code that neither lookup maps resolves
 /// through the program's byte-keyed (3,0) / (1,0) subtables
@@ -525,6 +443,7 @@ fn resolve_via_unicode_cmap(
     base: BaseEncoding,
     embedded: bool,
 ) -> Vec<u32> {
+    let nonzero = |gid: u32| (gid != 0).then_some(gid);
     (0..=u8::MAX)
         .map(|code| {
             let idx = usize::from(code);
@@ -534,12 +453,19 @@ fn resolve_via_unicode_cmap(
                     .flatten()
                     .filter(|n| !n.is_empty())
             });
-            name.and_then(adobe_glyph_to_unicode)
-                .map(|unicode| face.raw_get_char_index(unicode))
-                .filter(|&gid| gid != 0)
-                .or_else(|| Some(face.raw_get_char_index(u32::from(code))).filter(|&gid| gid != 0))
-                .or_else(|| embedded.then(|| face.raw_get_code_index(code)))
-                .unwrap_or(0)
+            name.and_then(|name| {
+                (!embedded)
+                    .then(|| face.raw_get_name_index(name))
+                    .and_then(nonzero)
+                    .or_else(|| {
+                        adobe_glyph_to_unicode(name)
+                            .map(|unicode| face.raw_get_char_index(unicode))
+                            .and_then(nonzero)
+                    })
+            })
+            .or_else(|| nonzero(face.raw_get_char_index(u32::from(code))))
+            .or_else(|| embedded.then(|| face.raw_get_code_index(code)))
+            .unwrap_or(0)
         })
         .collect()
 }
@@ -1750,6 +1676,7 @@ static MAC_ROMAN_ENCODING: [Option<&str>; 256] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::font_substitute::SubstituteStyle;
 
     /// `desc` selected as the indirect font dictionary `1 0 R`.
     fn active(desc: FontDescriptor) -> ActiveFont {
@@ -1961,55 +1888,6 @@ mod tests {
     }
 
     #[test]
-    fn substitute_rows_match_styles() {
-        for family in [
-            SubstituteFamily::Sans,
-            SubstituteFamily::Serif,
-            SubstituteFamily::Mono,
-        ] {
-            for bold in [false, true] {
-                for italic in [false, true] {
-                    let style = SubstituteStyle {
-                        family,
-                        bold,
-                        italic,
-                    };
-                    let stem = SUBSTITUTES[substitute_index(style)][0];
-                    let family_name = match family {
-                        SubstituteFamily::Sans => "Sans-",
-                        SubstituteFamily::Serif => "Serif-",
-                        SubstituteFamily::Mono => "Mono-",
-                    };
-                    assert!(stem.contains(family_name), "{style:?} -> {stem}");
-                    assert_eq!(stem.contains("Bold"), bold, "{style:?} -> {stem}");
-                    assert_eq!(stem.contains("Italic"), italic, "{style:?} -> {stem}");
-                }
-            }
-        }
-    }
-
-    /// A serif request resolves to a different installed face than the
-    /// sans-serif default whenever a serif substitute is installed.
-    #[test]
-    fn serif_substitute_is_not_the_sans_face() {
-        let serif = SubstituteStyle {
-            family: SubstituteFamily::Serif,
-            ..SubstituteStyle::default()
-        };
-        let installed = substitute_candidates(SUBSTITUTES[substitute_index(serif)])
-            .iter()
-            .any(|p| PathBuf::from(p).exists());
-        if !installed {
-            eprintln!("no serif substitute installed; skipping");
-            return;
-        }
-        assert_ne!(
-            substitute_font_path(serif),
-            substitute_font_path(SubstituteStyle::default())
-        );
-    }
-
-    #[test]
     fn unicode_resolution_dispatch() {
         // Non-embedded simple fonts of every kind resolve through the
         // substitute face's Unicode cmap.
@@ -2062,10 +1940,6 @@ mod tests {
     /// face's glyphs at code points 0 and 1.
     #[test]
     fn non_embedded_font_resolves_differences_on_substitute_face() {
-        if substitute_font_path(SubstituteStyle::default()).is_none() {
-            eprintln!("no substitute font installed; skipping");
-            return;
-        }
         let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(std::array::from_fn(|_| None));
         differences[0] = Some("Q".into());
         differences[1] = Some("eacute".into());

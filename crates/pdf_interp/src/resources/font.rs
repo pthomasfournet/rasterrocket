@@ -21,7 +21,9 @@
 //! `FontFile2` (TrueType), or `FontFile3` (CFF/OpenType-CFF).
 //!
 //! When no bytes are embedded (standard 14, or unembedded third-party fonts)
-//! we fall back to a hardcoded Helvetica substitute shipped with the `font` crate.
+//! the renderer draws a substitute of the same family class and variant:
+//! an installed metric-compatible face, else a base-14 face compiled into
+//! the binary.
 
 use std::sync::Arc;
 
