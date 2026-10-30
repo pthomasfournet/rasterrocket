@@ -180,6 +180,46 @@ impl PageRenderer<'_> {
     }
 }
 
+impl PageRenderer<'_> {
+    /// Run `under` and then `over` with `over` knocking out `under` within
+    /// `rect`: each pixel there ends as `U + (O − U) × coverage / 255`,
+    /// where `U` is the pixel after `under` and `O` the pixel `over` paints
+    /// onto the backdrop as it was before `under`.  `coverage` holds one
+    /// value per pixel of `rect` in row-major order; outside `rect`, only
+    /// `under` paints.
+    pub(super) fn paint_knocked_out(
+        &mut self,
+        rect: PixelRect,
+        coverage: &[u8],
+        under: impl FnOnce(&mut Self),
+        over: impl FnOnce(&mut Self),
+    ) {
+        debug_assert_eq!(
+            coverage.len() as u64,
+            rect.area(),
+            "one coverage value per pixel of the rectangle"
+        );
+        let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)
+            .and_then(|clip| clip.intersect(rect));
+        let Some(region) = region else {
+            under(self);
+            return;
+        };
+        let view = MaskView {
+            values: coverage,
+            width: rect.width() as usize,
+            x0: rect.x0,
+            y0: rect.y0,
+        };
+        let backdrop = Snapshot::take(&self.bitmap, region);
+        under(self);
+        let painted = Snapshot::take(&self.bitmap, region);
+        backdrop.restore(&mut self.bitmap);
+        over(self);
+        painted.blend_back(&mut self.bitmap, &view);
+    }
+}
+
 /// Mask values over a rectangle of the bitmap whose top-left pixel is
 /// `(x0, y0)`, `width` values per row.
 struct MaskView<'a> {
@@ -220,6 +260,24 @@ impl Snapshot {
             x1,
             color,
             alpha,
+        }
+    }
+
+    /// Write the snapshot back over its rectangle.
+    fn restore(self, bitmap: &mut Bitmap<Rgb8>) {
+        let span = (self.x1 - self.x0) as usize;
+        let (cx0, ax0) = (self.x0 as usize * 3, self.x0 as usize);
+        for (i, prior) in self.color.chunks_exact(span * 3).enumerate() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
+            )]
+            let y = self.y0 + i as u32;
+            let (row, alpha_row) = bitmap.row_and_alpha_mut(y);
+            row[cx0..cx0 + span * 3].copy_from_slice(prior);
+            if let (Some(prior_a), Some(alpha_row)) = (self.alpha.as_ref(), alpha_row) {
+                alpha_row[ax0..ax0 + span].copy_from_slice(&prior_a[i * span..(i + 1) * span]);
+            }
         }
     }
 

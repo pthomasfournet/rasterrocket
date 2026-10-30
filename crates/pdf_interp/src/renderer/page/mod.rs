@@ -47,6 +47,7 @@
 
 mod annotation_synthesis;
 mod annotations;
+mod fill_stroke;
 mod gpu_ops;
 mod image_memo;
 mod image_reduce;
@@ -1221,8 +1222,7 @@ impl<'doc> PageRenderer<'doc> {
         };
         let path = builder.build();
         self.apply_pending_clip_with(&path);
-        self.fill_path(&path, even_odd);
-        self.stroke_path(&path);
+        self.fill_and_stroke(&path, even_odd);
     }
 
     /// Fill `path` using the current fill colour or pattern.  Shared by `do_fill`
