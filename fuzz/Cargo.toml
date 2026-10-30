@@ -14,7 +14,7 @@ pdf           = { path = "../crates/pdf" }
 
 # Direct dependency so we can fuzz hayro-jbig2 both through pdf_interp
 # and standalone (raw segment data without a PDF wrapper).
-hayro-jbig2 = { version = "0.3.0", default-features = false }
+hayro-jbig2 = { path = "../crates/jbig2", default-features = false }
 
 [[bin]]
 name = "fuzz_ccitt"

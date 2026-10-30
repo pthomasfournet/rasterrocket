@@ -16,6 +16,7 @@ members = [
     "crates/comic",
     "crates/camera",
     "crates/ccitt",
+    "crates/jbig2",
     "crates/jpeg2000",
     "crates/read_fonts",
     "crates/skrifa",

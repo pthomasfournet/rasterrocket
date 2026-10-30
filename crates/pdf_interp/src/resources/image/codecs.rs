@@ -1170,7 +1170,14 @@ pub(super) fn decode_jbig2(
         });
 
     // Parse the embedded JBIG2 image (page segments + optional globals).
-    let img = hayro_jbig2::Image::new_embedded(data, globals_bytes.as_deref())
+    let settings = hayro_jbig2::DecodeSettings::default();
+    let globals = globals_bytes
+        .as_deref()
+        .map(|g| hayro_jbig2::Globals::new(g, &settings))
+        .transpose()
+        .map_err(|e| log::warn!("image: JBIG2Decode globals parse error: {e}"))
+        .ok()?;
+    let img = hayro_jbig2::Page::new_embedded(data, globals.as_ref(), &settings)
         .map_err(|e| log::warn!("image: JBIG2Decode parse error: {e}"))
         .ok()?;
 

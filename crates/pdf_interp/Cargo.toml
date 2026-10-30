@@ -43,7 +43,8 @@ hayro-ccitt = { path = "../ccitt" }
 hayro-jpeg2000 = { path = "../jpeg2000", default-features = false, features = ["simd"] }
 zune-jpeg = "0.5.15"
 zune-core = "0.5.1"
-hayro-jbig2 = { version = "0.3.0", default-features = false }
+# JBIG2: a local fork of hayro-jbig2 (crates/jbig2).
+hayro-jbig2 = { path = "../jbig2", default-features = false }
 moxcms = "0.9.0"
 
 [dev-dependencies]
