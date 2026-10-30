@@ -22,6 +22,7 @@ const HINT_ASSEMBLED_PLAIN: &[u8] =
 const SYMBOLIC_MAC_ROMAN_NAMED: &[u8] =
     include_bytes!("../../font/src/tests/data/symbolic-mac-roman-named.ttf");
 const CID_KEYED_TYPE1: &[u8] = include_bytes!("../../font/src/tests/data/cid-keyed-type1.cid");
+const NO_CMAP: &[u8] = include_bytes!("../../font/src/tests/data/no-cmap.ttf");
 
 const PAGE: &[u8] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
     /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>";
@@ -44,17 +45,22 @@ fn truetype_page(program: &[u8]) -> Vec<u8> {
     ])
 }
 
-/// One page showing code 0x21 (`!`) in a symbolic simple TrueType font
-/// (`Flags` 4, no `Encoding`) embedding `program`.
-fn symbolic_truetype_page(program: &[u8]) -> Vec<u8> {
+/// One page showing the one-byte `code` in a symbolic simple TrueType
+/// font (`Flags` 4, no `Encoding`) embedding `program`.
+fn symbolic_truetype_page(program: &[u8], code: u8) -> Vec<u8> {
     assemble_pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         PAGE.to_vec(),
-        stream_object("", b"BT /F1 40 Tf 10 30 Td (!) Tj ET"),
-        b"<< /Type /Font /Subtype /TrueType /BaseFont /Fixture /FirstChar 33 \
-           /LastChar 33 /Widths [1000] /FontDescriptor 6 0 R >>"
-            .to_vec(),
+        stream_object(
+            "",
+            format!("BT /F1 40 Tf 10 30 Td <{code:02X}> Tj ET").as_bytes(),
+        ),
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Fixture /FirstChar {code} \
+             /LastChar {code} /Widths [1000] /FontDescriptor 6 0 R >>"
+        )
+        .into_bytes(),
         b"<< /Type /FontDescriptor /FontName /Fixture /Flags 4 \
            /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 \
            /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>"
@@ -148,9 +154,20 @@ fn symbolic_truetype_code_resolves_through_mac_roman_subtable() {
     // `post` name also yields a Unicode charmap keyed by U+2234.  Code 0x21
     // selects the square (x 100..400); the contourless `.notdef` leaves
     // the page blank.
-    let runs = ink_columns(&render(symbolic_truetype_page(SYMBOLIC_MAC_ROMAN_NAMED)));
+    let runs = ink_columns(&render(symbolic_truetype_page(
+        SYMBOLIC_MAC_ROMAN_NAMED,
+        0x21,
+    )));
     assert_eq!(runs.len(), 1, "{runs:?}");
     assert!(has_run(&runs, 14, 25), "therefore: {runs:?}");
+}
+
+/// An embedded subset with neither a `cmap` table nor `post` names maps
+/// each code to the glyph of that index: code 1 draws GID 1's square.
+#[test]
+fn truetype_without_cmap_or_names_uses_codes_as_glyph_indices() {
+    let runs = ink_columns(&render(symbolic_truetype_page(NO_CMAP, 1)));
+    assert!(has_run(&runs, 14, 26), "{runs:?}");
 }
 
 #[test]

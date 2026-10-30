@@ -285,11 +285,17 @@ fn parse_program(desc: &FontDescriptor) -> Option<Arc<FontProgram>> {
 /// from its glyph names), is resolved through the names' Unicode values.
 /// CID/Type0 keep the descriptor's table; symbolic TrueType keeps the
 /// program's own charmap.
+///
+/// An embedded simple sfnt with no `cmap` subtable and no `post` names
+/// (a legacy subset) offers no mapping at all; its codes are its glyph
+/// indices, the only reading under which such a subset draws.
 fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u32>> {
     let embedded = desc.bytes.is_some();
     let simple = desc.cid_encoding.is_none();
     let outline = desc.type3.is_none();
-    if wants_name_resolution(embedded, simple, outline, desc.kind) {
+    if embedded && simple && outline && !face.program().has_charmap() {
+        Some((0..256).collect())
+    } else if wants_name_resolution(embedded, simple, outline, desc.kind) {
         Some(resolve_simple_to_gid(
             face,
             &desc.differences,

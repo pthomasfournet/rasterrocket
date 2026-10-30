@@ -308,6 +308,20 @@ impl FontProgram {
         )
     }
 
+    /// `false` when the program is an sfnt with no usable `cmap` subtable
+    /// and no `post` glyph names, so that [`Self::char_index`] and
+    /// [`Self::code_index`] map every code to `.notdef`.
+    #[must_use]
+    pub const fn has_charmap(&self) -> bool {
+        !matches!(
+            self.outlines,
+            Outlines::Sfnt {
+                cmap: SfntCmap::None,
+                ..
+            }
+        )
+    }
+
     /// Glyph index of character code `code` through the program's charmap,
     /// or 0 (`.notdef`) when it has none.
     ///

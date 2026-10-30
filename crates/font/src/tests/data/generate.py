@@ -31,6 +31,11 @@ symbolic-mac-roman-named.ttf
     Roman in format 6.  The version 2 `post` table names both glyphs;
     `.notdef` has no contours.
 
+no-cmap.ttf
+    A TrueType subset with no `cmap` table and a format 3 `post` table (no
+    glyph names): GID 1 is a square covering x 100..400, y 0..300, reachable
+    only as its glyph index.
+
 vertical-forms.ttf
     A TrueType font with a `GSUB` `vert` feature: GID 1 `square` (U+0041,
     x 100..400, y 0..300) substitutes to GID 2 `tall` (x 0..300,
@@ -207,6 +212,21 @@ def build_vertical_forms():
     fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
     fb.setupPost()
     addOpenTypeFeaturesFromString(fb.font, "feature vert { sub square by tall; } vert;")
+    return fb.font
+
+
+def build_no_cmap():
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "square"])
+    fb.setupCharacterMap({})
+    empty = TTGlyphPen(None).glyph()
+    fb.setupGlyf({".notdef": empty, "square": square_glyph()})
+    fb.setupHorizontalMetrics({".notdef": (1000, 0), "square": (1000, 100)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "NoCmap", "styleName": "Regular"})
+    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
+    fb.setupPost(keepGlyphNames=False)
+    del fb.font["cmap"]
     return fb.font
 
 
@@ -397,6 +417,7 @@ def main():
     write_truetype("hint-assembled-plain.ttf", build_truetype("Plain"))
     write_truetype("symbolic-mac-roman-named.ttf", build_symbolic_mac_roman_named())
     write_truetype("vertical-forms.ttf", build_vertical_forms())
+    write_truetype("no-cmap.ttf", build_no_cmap())
     with open(os.path.join(HERE, "cid-keyed-type1.cid"), "wb") as f:
         f.write(build_cid_type1())
 
