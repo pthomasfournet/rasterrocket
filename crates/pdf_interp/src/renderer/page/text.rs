@@ -64,12 +64,10 @@ impl PageRenderer<'_> {
             stroke: do_stroke,
             clip: do_clip,
         } = TextModeOps::of(self.gstate.current().text.render_mode);
+        // Mode 3 paints nothing and clips nothing, but the pen still
+        // advances by every glyph's width (PDF §9.4.4): the run goes through
+        // the glyph loop below, which rasterises nothing it will not use.
         let do_paint = do_fill || do_stroke;
-
-        // Mode 3 (invisible) — nothing to do.
-        if !do_paint && !do_clip {
-            return;
-        }
 
         // Snapshot all state we need before any mutable borrow of font_cache.
         let font_name = self.gstate.current().text.font_name.clone();

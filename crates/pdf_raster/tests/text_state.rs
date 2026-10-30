@@ -151,6 +151,40 @@ fn horizontal_scaling_condenses_the_glyphs() {
     );
 }
 
+/// Invisible text (`3 Tr`) advances the pen by its widths: a visible run
+/// that follows a hidden one starts where the hidden one ended, in a
+/// simple font, a composite font and a Type 3 font alike (PDF §9.4.4).
+#[test]
+fn invisible_text_advances_the_pen() {
+    let (font, extra) = simple_ahem();
+    assert_eq!(
+        ink_span(
+            font,
+            &extra,
+            "BT /F1 16 Tf 8 8 Td 3 Tr (AA) Tj 0 Tr (A) Tj ET"
+        ),
+        (40, 16)
+    );
+    let (font, extra) = composite_ahem("/Identity-H", None);
+    assert_eq!(
+        ink_span(
+            &font,
+            &extra,
+            "BT /F1 16 Tf 8 8 Td 3 Tr <00410041> Tj 0 Tr <0041> Tj ET"
+        ),
+        (40, 16)
+    );
+    let (font, extra) = type3_square();
+    assert_eq!(
+        ink_span(
+            font,
+            &extra,
+            "BT /F1 16 Tf 8 8 Td 3 Tr (AA) Tj 0 Tr (A) Tj ET"
+        ),
+        (40, 16)
+    );
+}
+
 /// `Tw` applies to the byte 32 of a simple font.
 #[test]
 fn word_spacing_applies_to_simple_fonts() {
