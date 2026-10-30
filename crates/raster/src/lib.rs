@@ -71,6 +71,6 @@ pub use shading::shaded_fill;
 pub use simd::{blend_solid_gray8, blend_solid_rgb8, composite_aa_rgb8_opaque, unpack_mono_row};
 pub use state::{GraphicsState, StateStack, TransferSet};
 pub use stroke::{StrokeParams, stroke};
-pub use tiling::TiledPattern;
+pub use tiling::{Lattice, TiledPattern};
 pub use types::*;
 pub use xpath::{XPath, XPathFlags, XPathSeg};

@@ -50,6 +50,7 @@ mod image_reduce;
 mod image_sampler;
 mod operators;
 mod patterns;
+mod pixel_rect;
 mod shading_paint;
 mod soft_mask;
 mod text;
@@ -232,11 +233,8 @@ fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
 /// form streams in malformed documents.
 const MAX_FORM_DEPTH: u32 = 32;
 
-/// Maximum tiling pattern tile dimension in device pixels.
-///
-/// A malformed PDF could specify `XStep`/`YStep` values large enough to OOM
-/// the process.  This cap limits the tile to a manageable size regardless of
-/// the pattern parameters.
+/// Maximum side, in device pixels, of the bitmap on which a sub-pixel
+/// pattern cell is sampled for its mean.
 const MAX_TILE_PX: f64 = 4096.0;
 
 /// Maximum nesting depth for tiling patterns.
@@ -1099,9 +1097,16 @@ impl<'doc> PageRenderer<'doc> {
         let solid_color = gs.fill_color.as_slice().to_vec();
         let _ = gs; // end the immutable gstate borrow before the &mut self pattern resolve
 
-        // A pattern colour that does not resolve paints nothing: the fill
-        // colour is not a fallback for it.
-        let tiled = match pat_name.as_deref().map(|name| self.resolve_pattern(name)) {
+        // A pattern colour that does not resolve, or whose object lies
+        // outside the clip, paints nothing: the fill colour is not a
+        // fallback for it.
+        let region = pat_name
+            .as_ref()
+            .and_then(|_| self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), 1.0));
+        let tiled = match pat_name
+            .as_deref()
+            .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
+        {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 self.paint_shading_pattern(*pattern, false, |r, pipe, shading| {
                     r.fill_with_shading(path, even_odd, clip, pipe, flatness, shading);
@@ -1225,14 +1230,16 @@ impl<'doc> PageRenderer<'doc> {
         // to a line or point, so it is stroked in device space unchanged.
         let device = self.device_matrix();
         let device_flatness = flatness;
-        let (path, matrix, flatness) = invert_affine(&device).map_or_else(
-            || (path.clone(), DEVICE_MATRIX, flatness),
+        let device_path = path;
+        let (path, matrix, flatness, stroke_scale) = invert_affine(&device).map_or_else(
+            || (path.clone(), DEVICE_MATRIX, flatness, 1.0),
             |inv| {
                 let scale = device[0]
                     .mul_add(device[3], -(device[1] * device[2]))
                     .abs()
                     .sqrt();
-                (transform_path(path, &inv), device, flatness / scale)
+                let reach = device[0].hypot(device[1]).max(device[2].hypot(device[3]));
+                (transform_path(path, &inv), device, flatness / scale, reach)
             },
         );
 
@@ -1249,8 +1256,17 @@ impl<'doc> PageRenderer<'doc> {
         };
 
         // Resolve the stroke source — pattern or solid colour.  A pattern
-        // colour that does not resolve paints nothing.
-        let tiled = match pat_name.as_deref().map(|name| self.resolve_pattern(name)) {
+        // colour that does not resolve paints nothing.  The stroke reaches
+        // at most half the line width times the miter limit (or √2, for a
+        // square cap) past the path, measured in device pixels.
+        let region = pat_name.as_ref().and_then(|_| {
+            let reach = line_width / 2.0 * stroke_scale * miter_limit.max(std::f64::consts::SQRT_2);
+            self.paint_region(device_path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0)
+        });
+        let tiled = match pat_name
+            .as_deref()
+            .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
+        {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 let clip = clip.clone_shared();
                 let stroked = self.paint_shading_pattern(*pattern, true, |r, pipe, shading| {

@@ -1,12 +1,14 @@
 //! Tiling pattern resolution and tile rendering.
 
 use super::super::color::RasterColor;
-use super::super::gstate::{ctm_multiply, ctm_transform};
+use super::super::gstate::ctm_multiply;
+use super::pixel_rect::PixelRect;
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
 use crate::resources::{ColorSpace, PageResources, ShadingPattern};
 use color::Rgb8;
 use pdf::Document;
-use raster::{Bitmap, TiledPattern};
+use raster::path::PathBuilder;
+use raster::{Bitmap, Lattice, TiledPattern};
 
 /// Resolve an uncoloured-tiling-pattern tint to a [`RasterColor`].
 ///
@@ -32,6 +34,14 @@ fn resolve_pattern_tint(doc: &Document, fill_cs: &ColorSpace, components: &[f64]
 
 /// Side, in pixels, at which a sub-pixel cell is sampled to take its mean.
 const MEAN_SAMPLE_PX: f64 = 8.0;
+
+/// Upper bound on the cell bitmap's area as a multiple of the lattice
+/// cell's: cells stacked deeper than this are not painted.
+const MAX_CELL_OVERDRAW: f64 = 256.0;
+
+/// Upper bound on the cells rendered in place when the cell exceeds the
+/// painted region.
+const MAX_DIRECT_CELLS: usize = 4096;
 
 /// The number of whole pixels spanning a length of `v` pixels: its ceiling,
 /// taken below a tolerance that absorbs the rounding of the products that
@@ -83,9 +93,119 @@ pub(super) enum PatternPaint {
     Shading(Box<ShadingPattern>),
 }
 
+/// The content of a tiling pattern's cell, ready to render.
+struct CellContent<'a> {
+    desc: &'a crate::resources::tiling::TilingDescriptor,
+    ops: &'a [crate::content::Operator],
+    /// The colour of a `PaintType` 2 (uncoloured) pattern; `None` for
+    /// `PaintType` 1 (coloured), whose content supplies its own colours.
+    tint: Option<&'a RasterColor>,
+}
+
+/// The bounding box of a pattern cell in device pixels, relative to the
+/// pattern origin.
+struct CellBounds {
+    min_x: f64,
+    min_y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// The bounds of `bbox` under the linear part of `device`; `None` when the
+/// box is empty or non-finite.
+fn cell_bounds(device: &[f64; 6], bbox: &[f64; 4]) -> Option<CellBounds> {
+    let [x0, y0, x1, y1] = *bbox;
+    let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+    let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+        let dx = device[0].mul_add(x, device[2] * y);
+        let dy = device[1].mul_add(x, device[3] * y);
+        (min_x, max_x) = (min_x.min(dx), max_x.max(dx));
+        (min_y, max_y) = (min_y.min(dy), max_y.max(dy));
+    }
+    let (width, height) = (max_x - min_x, max_y - min_y);
+    (width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()).then_some(CellBounds {
+        min_x,
+        min_y,
+        width,
+        height,
+    })
+}
+
+/// The geometry of a tiling pattern's cell in device pixels.
+struct CellGeometry {
+    /// The linear part of the map from pattern space to device pixels.
+    linear: [f64; 4],
+    /// The cell positions: the top-left pixel of each cell's bounding box.
+    lattice: Lattice,
+    /// The area of one lattice cell, in pixels.
+    area: f64,
+    /// The cell's bounding box, relative to the pattern origin.
+    bounds: CellBounds,
+}
+
+impl CellGeometry {
+    /// The geometry of `desc` under `device`, the map from pattern space to
+    /// device pixels; `Err` names what makes the pattern unpaintable.
+    fn new(
+        device: &[f64; 6],
+        desc: &crate::resources::tiling::TilingDescriptor,
+    ) -> Result<Self, &'static str> {
+        if !device.iter().all(|v| v.is_finite()) {
+            return Err("matrix is non-finite");
+        }
+        let bounds = cell_bounds(device, &desc.bbox).ok_or("cell is empty")?;
+        // Cell (col, row) is the image of (col · XStep, row · YStep).
+        let lattice = Lattice {
+            origin: (device[4] + bounds.min_x, device[5] + bounds.min_y),
+            col_step: (device[0] * desc.x_step, device[1] * desc.x_step),
+            row_step: (device[2] * desc.y_step, device[3] * desc.y_step),
+        };
+        let area = lattice.determinant().abs();
+        if area.is_nan() || area <= 0.0 {
+            return Err("lattice is degenerate");
+        }
+        Ok(Self {
+            linear: [device[0], device[1], device[2], device[3]],
+            lattice,
+            area,
+            bounds,
+        })
+    }
+
+    /// The whole-pixel sides of the cell's bitmap.
+    fn cell_size(&self) -> (f64, f64) {
+        (
+            pixel_ceil(self.bounds.width),
+            pixel_ceil(self.bounds.height),
+        )
+    }
+
+    /// The map from pattern space to the pixels of a bitmap on which the
+    /// cell's bounding box has its top-left corner at `(x, y)`, scaled by
+    /// `k`.
+    fn placement(&self, k: f64, x: f64, y: f64) -> [f64; 6] {
+        let linear = self.linear.map(|v| v * k);
+        [
+            linear[0],
+            linear[1],
+            linear[2],
+            linear[3],
+            self.bounds.min_x.mul_add(-k, x),
+            self.bounds.min_y.mul_add(-k, y),
+        ]
+    }
+}
+
 impl PageRenderer<'_> {
     /// Resolve the named `Pattern` resource as a shading or tiling pattern.
-    pub(super) fn resolve_pattern(&mut self, name: &[u8]) -> Option<PatternPaint> {
+    /// A tiling pattern is composited over `region`, the device pixels the
+    /// painting operator can touch.
+    pub(super) fn resolve_pattern(
+        &mut self,
+        name: &[u8],
+        region: PixelRect,
+    ) -> Option<PatternPaint> {
         let page_h = f64::from(self.height);
         if let Some(shading) = self
             .resources
@@ -93,19 +213,29 @@ impl PageRenderer<'_> {
         {
             return Some(PatternPaint::Shading(Box::new(shading)));
         }
-        self.resolve_fill_pattern(name).map(PatternPaint::Tiled)
+        self.resolve_fill_pattern(name, region)
+            .map(PatternPaint::Tiled)
     }
 
+    /// Resolve a tiling pattern over `region`.
+    ///
+    /// The cell is rasterised once and composited at every lattice point
+    /// whose cell meets the region when the cell is no larger than the
+    /// region; otherwise each such cell's content is rendered directly onto
+    /// a region-sized bitmap at its exact position.  A lattice finer than a
+    /// pixel is reduced to its mean.
     #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_wrap,
-        reason = "tile dimensions are capped at 4096 and clamped to positive; phase coords are page-bounded; safe casts"
+        clippy::cast_precision_loss,
+        reason = "the region's area is page-bounded"
     )]
-    pub(super) fn resolve_fill_pattern(&mut self, name: &[u8]) -> Option<TiledPattern> {
-        // Break self-referential / cyclic pattern chains.  Each tile spawns a
+    pub(super) fn resolve_fill_pattern(
+        &mut self,
+        name: &[u8],
+        region: PixelRect,
+    ) -> Option<TiledPattern> {
+        // Break self-referential / cyclic pattern chains.  Each cell spawns a
         // fresh PageRenderer with its own pattern_depth seeded one above the
-        // parent (see render_pattern_tile below), so reaching the cap means a
+        // parent (see render_cells below), so reaching the cap means a
         // pattern's content stream re-invokes a pattern and we'd otherwise
         // recurse to stack overflow on adversarial input.
         if self.pattern_depth >= MAX_PATTERN_DEPTH {
@@ -140,150 +270,236 @@ impl PageRenderer<'_> {
         };
         // PDF §8.7.3.1: the pattern matrix maps pattern space to the default
         // coordinate space of the parent content stream, not to the CTM in
-        // effect at the fill.
+        // effect at the fill.  `device` carries on to device pixels.
         let pat_ctm = ctm_multiply(&desc.matrix, &self.pattern_ctm);
+        let device = flip_y(&pat_ctm, f64::from(self.height));
+        let geometry = match CellGeometry::new(&device, &desc) {
+            Ok(geometry) => geometry,
+            Err(why) => {
+                log::debug!(
+                    "rasterrocket-interp: Pattern /{} {why} — skipping",
+                    String::from_utf8_lossy(name)
+                );
+                return None;
+            }
+        };
+        let ops = crate::content::parse(&desc.content);
+        let cell = CellContent {
+            desc: &desc,
+            ops: &ops,
+            tint: tint.as_ref(),
+        };
 
-        // Tile size in device pixels — scale the XStep/YStep by the linear scale
-        // of the combined transform.  We use the L2 norm of each column vector to
-        // account for rotations.
-        let sx = (pat_ctm[0].hypot(pat_ctm[1])).abs();
-        let sy = (pat_ctm[2].hypot(pat_ctm[3])).abs();
-
-        if !sx.is_finite() || !sy.is_finite() {
+        // A lattice cell below one pixel in area repeats more than once per
+        // pixel; box-filtered over a pixel, the pattern is its mean.
+        if geometry.area < 1.0 {
+            return Some(self.mean_pattern(&cell, &geometry));
+        }
+        let (cell_w, cell_h) = geometry.cell_size();
+        if cell_w * cell_h > MAX_CELL_OVERDRAW * geometry.area {
             log::warn!(
-                "rasterrocket-interp: Pattern /{} CTM scale is non-finite ({sx}, {sy}) — skipping",
-                String::from_utf8_lossy(name)
+                "rasterrocket-interp: Pattern /{} cell ({cell_w}×{cell_h} px) overlaps its lattice ({:.1} px² per cell) more than {MAX_CELL_OVERDRAW}× — skipping",
+                String::from_utf8_lossy(name),
+                geometry.area,
             );
             return None;
         }
-
-        // The cell in device pixels.
-        let cell_w = desc.x_step.abs() * sx;
-        let cell_h = desc.y_step.abs() * sy;
-        if !(cell_w > 0.0 && cell_h > 0.0) {
-            log::debug!(
-                "rasterrocket-interp: Pattern /{} has a degenerate cell ({cell_w}×{cell_h} px) — skipping",
-                String::from_utf8_lossy(name)
-            );
-            return None;
+        if cell_w * cell_h <= region.area() as f64 {
+            self.composed_pattern(&cell, &geometry, region)
+        } else {
+            self.direct_pattern(name, &cell, &geometry, region)
         }
-
-        // The CTM for the tile renderer: pattern space → tile device space.
-        // Translation is handled by the phase below, so it is zero here.
-        let tile_ctm = [pat_ctm[0], pat_ctm[1], pat_ctm[2], pat_ctm[3], 0.0, 0.0];
-
-        // A cell below one pixel in area repeats more than once per pixel;
-        // box-filtered over a pixel, the pattern is its mean over one cell.
-        if cell_w * cell_h < 1.0 {
-            let k = (MEAN_SAMPLE_PX / cell_w.min(cell_h)).min(MAX_TILE_PX / cell_w.max(cell_h));
-            let sample_ctm = [
-                tile_ctm[0] * k,
-                tile_ctm[1] * k,
-                tile_ctm[2] * k,
-                tile_ctm[3] * k,
-                0.0,
-                0.0,
-            ];
-            let sample_w = (cell_w * k).ceil() as u32;
-            let sample_h = (cell_h * k).ceil() as u32;
-            let sample = self.render_pattern_tile(&desc, sample_w, sample_h, &sample_ctm, tint);
-            let (colour, coverage) = mean_over_period(&sample, cell_w * k * cell_h * k);
-            return Some(
-                TiledPattern::new(colour.to_vec(), 1, 1, 0, 0).with_coverage(vec![coverage]),
-            );
-        }
-
-        // Cap the tile to MAX_TILE_PX to avoid huge allocations from malformed PDFs.
-        let tile_w = pixel_ceil(cell_w.min(MAX_TILE_PX)) as u32;
-        let tile_h = pixel_ceil(cell_h.min(MAX_TILE_PX)) as u32;
-
-        // Rasterise the tile.
-        let tile_bitmap = self.render_pattern_tile(&desc, tile_w, tile_h, &tile_ctm, tint);
-
-        // Phase = where the pattern origin lands in device space (after y-flip).
-        let page_h = f64::from(self.height);
-        let (ox, oy_pdf) = ctm_transform(&pat_ctm, 0.0, 0.0);
-        let oy = page_h - oy_pdf;
-
-        if !ox.is_finite() || !oy.is_finite() {
-            log::warn!(
-                "rasterrocket-interp: Pattern /{} origin is non-finite ({ox}, {oy}) — skipping",
-                String::from_utf8_lossy(name)
-            );
-            return None;
-        }
-
-        let phase_x = ox.round() as i32;
-        let phase_y = oy.round() as i32;
-
-        let pixels = tile_bitmap.data().to_vec();
-        let tiled = TiledPattern::new(pixels, tile_w as i32, tile_h as i32, phase_x, phase_y);
-        Some(match tile_bitmap.alpha_plane() {
-            Some(alpha) => tiled.with_coverage(alpha.to_vec()),
-            None => tiled,
-        })
     }
 
-    /// Render a pattern content stream into a tile bitmap.
-    ///
-    /// Creates a child `PageRenderer` scoped to the pattern's resource context and
-    /// executes the pattern's content stream.  The tile bitmap is `tile_w ×
-    /// tile_h` pixels, initially transparent: its alpha plane records the
-    /// coverage of the cell's content, so the cell areas the content leaves
-    /// unpainted show the backdrop when the pattern is painted (PDF §8.7.3.1).
-    ///
-    /// `tint` is the resolved fill colour for `PaintType` 2 (uncoloured)
-    /// patterns; it is set as the tile renderer's default fill before the
-    /// content stream runs, so shape-only streams pick it up via the initial
-    /// graphics state.  Pass `None` for `PaintType` 1 (coloured) — the content
-    /// stream supplies its own colours.
-    pub(super) fn render_pattern_tile(
+    /// The mean colour and coverage of a cell over one lattice period,
+    /// sampled at about `MEAN_SAMPLE_PX` across.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the sample sides are whole pixels from pixel_ceil, at most MAX_TILE_PX"
+    )]
+    fn mean_pattern(&mut self, cell: &CellContent<'_>, geometry: &CellGeometry) -> TiledPattern {
+        let (w, h) = (geometry.bounds.width, geometry.bounds.height);
+        let k = (MEAN_SAMPLE_PX / w.min(h)).min(MAX_TILE_PX / w.max(h));
+        let size = (pixel_ceil(w * k) as u32, pixel_ceil(h * k) as u32);
+        let sample = self.render_cells(cell, size, &[geometry.placement(k, 0.0, 0.0)]);
+        let (colour, coverage) = mean_over_period(&sample, geometry.area * k * k);
+        TiledPattern::uniform(colour, coverage)
+    }
+
+    /// The cell rasterised once and composited at every lattice point whose
+    /// cell meets `region`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap,
+        reason = "the cell sides are whole pixels no larger than the region; region coordinates are page-bounded"
+    )]
+    fn composed_pattern(
         &mut self,
-        desc: &crate::resources::tiling::TilingDescriptor,
-        tile_w: u32,
-        tile_h: u32,
-        tile_ctm: &[f64; 6],
-        tint: Option<RasterColor>,
+        cell: &CellContent<'_>,
+        geometry: &CellGeometry,
+        region: PixelRect,
+    ) -> Option<TiledPattern> {
+        let (cell_w, cell_h) = geometry.cell_size();
+        let size = (cell_w as u32, cell_h as u32);
+        let bitmap = self.render_cells(cell, size, &[geometry.placement(1.0, 0.0, 0.0)]);
+        TiledPattern::compose(
+            &bitmap,
+            &geometry.lattice,
+            region.x0 as i32,
+            region.y0 as i32,
+            region.width(),
+            region.height(),
+        )
+    }
+
+    /// The cells meeting `region` rendered in place on a region-sized
+    /// bitmap, for a cell larger than the region.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap,
+        reason = "the cell sides are whole pixels from pixel_ceil; region coordinates are page-bounded"
+    )]
+    fn direct_pattern(
+        &mut self,
+        name: &[u8],
+        cell: &CellContent<'_>,
+        geometry: &CellGeometry,
+        region: PixelRect,
+    ) -> Option<TiledPattern> {
+        let (cell_w, cell_h) = geometry.cell_size();
+        let (rx0, ry0) = (region.x0 as i32, region.y0 as i32);
+        let rect = (rx0, ry0, region.x1 as i32, region.y1 as i32);
+        let (cols, rows) = geometry
+            .lattice
+            .cells_meeting(rect, cell_w as u32, cell_h as u32)?;
+        let placements: Vec<[f64; 6]> = rows
+            .flat_map(|row| cols.clone().map(move |col| (col, row)))
+            .take(MAX_DIRECT_CELLS + 1)
+            .map(|(col, row)| {
+                let (px, py) = geometry.lattice.position(col, row);
+                geometry.placement(1.0, px - f64::from(rx0), py - f64::from(ry0))
+            })
+            .collect();
+        if placements.len() > MAX_DIRECT_CELLS {
+            log::warn!(
+                "rasterrocket-interp: Pattern /{} needs more than {MAX_DIRECT_CELLS} cells over a {}×{} px area — skipping",
+                String::from_utf8_lossy(name),
+                region.width(),
+                region.height(),
+            );
+            return None;
+        }
+        let size = (region.width(), region.height());
+        let screen = self.render_cells(cell, size, &placements);
+        Some(TiledPattern::screen(screen, rx0, ry0))
+    }
+
+    /// Render the pattern cell once per matrix of `placements` onto one
+    /// `width × height` bitmap, initially transparent, whose alpha plane
+    /// records the coverage of the content.  Each placement maps pattern
+    /// space to the bitmap's pixels (y down); the content is clipped to the
+    /// cell's `BBox` (PDF §8.7.3.1).
+    ///
+    /// A child `PageRenderer` scoped to the pattern's resource context runs
+    /// the content.  An uncoloured pattern's tint is set as the fill and
+    /// stroke colour before the content runs.
+    fn render_cells(
+        &mut self,
+        cell: &CellContent<'_>,
+        (width, height): (u32, u32),
+        placements: &[[f64; 6]],
     ) -> Bitmap<Rgb8> {
+        let desc = cell.desc;
         // Build a temporary child renderer sharing the same document / font engine.
         let doc = self.resources.doc();
-        let mut tile_renderer = PageRenderer::new(tile_w, tile_h, doc, desc.stream_id);
-        tile_renderer.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
-        tile_renderer.bitmap = Bitmap::new(tile_w, tile_h, 1, true);
+        let mut child = PageRenderer::new(width, height, doc, desc.stream_id);
+        child.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
+        child.bitmap = Bitmap::new(width, height, 1, true);
         // Propagate pattern_depth so a pattern stream that recursively
         // invokes another pattern (or itself) hits MAX_PATTERN_DEPTH instead
         // of unbounded stack recursion.  saturating_add guards against the
         // (impossible) overflow.
-        tile_renderer.pattern_depth = self.pattern_depth.saturating_add(1);
+        child.pattern_depth = self.pattern_depth.saturating_add(1);
         // Share the per-page work watchdog.  A fresh PageRenderer would
         // otherwise get its own 50 M-op budget and a fresh 60 s deadline,
         // letting a pathological pattern content stream (nested up to
         // MAX_PATTERN_DEPTH) escape the page watchdog entirely — the parent's
         // execute() loop is blocked synchronously here and never gets to tick
         // its own budget or check its own deadline.
-        tile_renderer.adopt_parent_budget(self);
-
-        // Override the CTM to map pattern space → tile device space.
-        tile_renderer.pattern_ctm = *tile_ctm;
-        let gs = tile_renderer.gstate.current_mut();
-        gs.ctm = *tile_ctm;
-        if let Some(c) = tint {
-            gs.fill_color = c;
-        }
+        child.adopt_parent_budget(self);
 
         // If the pattern has no own resources, point it at the parent context.
         if !desc.has_own_resources {
-            tile_renderer.resources = PageResources::new(doc, self.resources.resource_context_id());
+            child.resources = PageResources::new(doc, self.resources.resource_context_id());
         }
 
-        let ops = crate::content::parse(&desc.content);
-        tile_renderer.execute(&ops);
-        // Account the tile's work against the shared page budget and propagate
+        for placement in placements {
+            let ctm = flip_y(placement, f64::from(height));
+            child.pattern_ctm = ctm;
+            let depth = child.gstate.depth();
+            child.gstate.save();
+            let gs = child.gstate.current_mut();
+            gs.ctm = ctm;
+            if let Some(c) = cell.tint {
+                gs.fill_color = c.clone();
+                gs.stroke_color = c.clone();
+            }
+            child.clip_to_cell(&desc.bbox);
+            child.execute(cell.ops);
+            child.gstate.restore_to(depth);
+            if child.budget_exceeded.is_some() {
+                break;
+            }
+        }
+        // Account the cells' work against the shared page budget and propagate
         // any breach so the parent's execute() loop bails loudly on its next
         // iteration instead of rendering more pattern fills unbounded.
-        tile_renderer.fold_child_into(self);
-        tile_renderer.finish().0
+        child.fold_child_into(self);
+        child.finish().0
     }
+
+    /// Intersect the clip with the pattern cell's `BBox` under the current CTM.
+    #[expect(
+        clippy::float_cmp,
+        reason = "only a quad whose corners align exactly takes the rectangle clip"
+    )]
+    fn clip_to_cell(&mut self, bbox: &[f64; 4]) {
+        let [x0, y0, x1, y1] = *bbox;
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.to_device(x, y));
+        let axis_aligned = corners[0].1 == corners[1].1
+            && corners[1].0 == corners[2].0
+            && corners[2].1 == corners[3].1
+            && corners[3].0 == corners[0].0;
+        if axis_aligned {
+            let (xa, xb) = (
+                corners[0].0.min(corners[1].0),
+                corners[0].0.max(corners[1].0),
+            );
+            let (ya, yb) = (
+                corners[0].1.min(corners[2].1),
+                corners[0].1.max(corners[2].1),
+            );
+            self.gstate.current_mut().clip.clip_to_rect(xa, ya, xb, yb);
+            return;
+        }
+        let mut pb = PathBuilder::new();
+        let _ = pb.move_to(corners[0].0, corners[0].1);
+        for (x, y) in &corners[1..] {
+            let _ = pb.line_to(*x, *y);
+        }
+        let _ = pb.close(true);
+        self.clip_path_into_gstate(&pb.build(), false);
+    }
+}
+
+/// `m` followed by the flip between y-up coordinates and the y-down rows of
+/// a bitmap `height` pixels tall.  The flip is an involution, so this maps
+/// a CTM to the device matrix of a renderer and back.
+fn flip_y(m: &[f64; 6], height: f64) -> [f64; 6] {
+    [m[0], -m[1], m[2], -m[3], m[4], height - m[5]]
 }
 
 #[cfg(test)]

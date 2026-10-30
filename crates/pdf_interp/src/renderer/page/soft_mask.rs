@@ -20,6 +20,7 @@ use raster::Bitmap;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
+use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
 use crate::resources::SoftMaskParams;
@@ -104,27 +105,16 @@ impl PageRenderer<'_> {
         paint: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let region = (mask.width == self.width && mask.height == self.height)
-            .then(|| clip_region(&self.gstate.current().clip, self.width, self.height))
+            .then(|| PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height))
             .flatten();
-        let Some((x0, y0, x1, y1)) = region else {
+        let Some(region) = region else {
             return paint(self);
         };
-        let before = Snapshot::take(&self.bitmap, x0, y0, x1, y1);
+        let before = Snapshot::take(&self.bitmap, region);
         let result = paint(self);
         before.blend_back(&mut self.bitmap, mask);
         result
     }
-}
-
-/// The pixel rectangle `(x0, y0, x1, y1)`, half-open, that the clip admits
-/// within a `width × height` bitmap; `None` when it is empty.
-fn clip_region(clip: &raster::Clip, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
-    let bound = |v: i64, len: u32| u32::try_from(v.clamp(0, i64::from(len))).ok();
-    let x0 = bound(i64::from(clip.x_min_i), width)?;
-    let y0 = bound(i64::from(clip.y_min_i), height)?;
-    let x1 = bound(i64::from(clip.x_max_i) + 1, width)?;
-    let y1 = bound(i64::from(clip.y_max_i) + 1, height)?;
-    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
 /// The pixels of a rectangle of the bitmap, captured before an object is
@@ -138,7 +128,8 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn take(bitmap: &Bitmap<Rgb8>, x0: u32, y0: u32, x1: u32, y1: u32) -> Self {
+    fn take(bitmap: &Bitmap<Rgb8>, region: PixelRect) -> Self {
+        let PixelRect { x0, y0, x1, y1 } = region;
         let (cx0, cx1) = (x0 as usize * 3, x1 as usize * 3);
         let (ax0, ax1) = (x0 as usize, x1 as usize);
         let mut color = Vec::with_capacity((cx1 - cx0) * (y1 - y0) as usize);

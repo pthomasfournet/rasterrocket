@@ -293,6 +293,18 @@ impl GStateStack {
             let _ = self.stack.pop();
         }
     }
+
+    /// The number of states on the stack, at least one.
+    #[must_use]
+    pub const fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Pop states until `depth` remain: the `Q`s that balance every `q`
+    /// since the stack was that deep.  The bottom state is never popped.
+    pub fn restore_to(&mut self, depth: usize) {
+        self.stack.truncate(depth.max(1));
+    }
 }
 
 #[cfg(test)]
