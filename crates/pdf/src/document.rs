@@ -15,6 +15,7 @@ use memmap2::Mmap;
 
 use crate::{
     decrypt::{self, DecryptGuard},
+    derived::DerivedCache,
     dictionary::Dictionary,
     error::PdfError,
     linearization::LinearizationHints,
@@ -95,6 +96,8 @@ pub struct Document {
     /// an xref entry does not lead to its object.  `None` when the scan
     /// exceeded its sanity limit.
     scanned_offsets: OnceLock<Option<HashMap<u32, XrefEntry>>>,
+    /// Values derived from objects by higher layers ([`Self::derived`]).
+    derived: DerivedCache,
     /// Owns the qpdf-decrypted temporary file (if any) so it outlives the
     /// memory map taken over it.  A no-op guard for documents that were
     /// not encrypted.  Dropped with the `Document`, unlinking the temp
@@ -249,6 +252,7 @@ impl Document {
             page_count_cache: OnceLock::new(),
             lin_hints: OnceLock::new(),
             scanned_offsets: OnceLock::new(),
+            derived: DerivedCache::default(),
             decrypt_guard: guard,
         })
     }
@@ -288,6 +292,20 @@ impl Document {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id.0, Arc::clone(&arc));
         Ok(arc)
+    }
+
+    /// The value of type `T` derived from object `id`, computed by `make` on
+    /// the first request and shared by every later one for the lifetime of
+    /// the document.  A `None` from `make` is memoised as well.
+    ///
+    /// For values that are expensive to compute and depend only on the
+    /// object, such as a decoded dictionary that many streams refer to.
+    pub fn derived<T: std::any::Any + Send + Sync>(
+        &self,
+        id: ObjectId,
+        make: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
+        self.derived.get_or_derive(id, make)
     }
 
     /// Replace indirect references in a stream's `/Filter` and `/DecodeParms`

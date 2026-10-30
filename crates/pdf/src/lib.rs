@@ -15,6 +15,7 @@
 )]
 
 mod decrypt;
+mod derived;
 mod dictionary;
 mod document;
 mod error;

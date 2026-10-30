@@ -5,6 +5,8 @@
 //! `decode_jbig2` are additionally reachable through the `fuzz_entry` wrappers in
 //! `image/mod.rs`, which bridge the visibility gap without widening it in normal builds.
 
+use std::sync::Arc;
+
 use hayro_jbig2::Decoder as Jbig2Decoder;
 use pdf::{Dictionary, Document, Object};
 
@@ -16,8 +18,6 @@ use gpu::cache::{
     CachedDeviceImage, ContentHash, DeviceImageCache, DocId, ImageLayout as CacheImageLayout,
     InsertRequest, ObjId,
 };
-#[cfg(feature = "cache")]
-use std::sync::Arc;
 
 // ── GPU JPEG acceleration (nvJPEG and/or VA-API) ──────────────────────────────
 
@@ -1147,39 +1147,48 @@ pub(super) fn decode_jbig2(
     is_mask: bool,
     parms: Option<&Object>,
 ) -> Option<ImageDescriptor> {
-    // Resolve optional JBIG2Globals stream from DecodeParms.
-    let globals_bytes: Option<Vec<u8>> = parms
+    // Resolve the optional JBIG2Globals stream from DecodeParms.  Its
+    // segments are decoded once per document and shared by every image
+    // that refers to the stream.
+    let settings = hayro_jbig2::DecodeSettings::default();
+    let globals: Option<Arc<Option<hayro_jbig2::Globals>>> = match parms
         .and_then(|o| o.as_dict())
         .and_then(|d| d.get(b"JBIG2Globals"))
-        .and_then(|o| {
-            if let Object::Reference(id) = o {
-                let g_obj = doc.get_object(*id).ok()?;
-                let g_stream = g_obj.as_ref().as_stream()?;
-                // JBIG2Globals streams are typically not compressed, but
-                // decompressed_content handles both cases transparently.
-                g_stream.decompressed_content().ok()
-            } else {
-                // PDF spec requires JBIG2Globals to be an indirect reference to
-                // a stream object; any other form is malformed.
-                log::warn!(
-                    "image: JBIG2Decode: JBIG2Globals is not an indirect reference — \
-                     ignoring globals"
-                );
-                None
-            }
-        });
-
-    // Parse the embedded JBIG2 image (page segments + optional globals).
-    let settings = hayro_jbig2::DecodeSettings::default();
-    let globals = globals_bytes
-        .as_deref()
-        .map(|g| hayro_jbig2::Globals::new(g, &settings))
-        .transpose()
-        .map_err(|e| log::warn!("image: JBIG2Decode globals parse error: {e}"))
-        .ok()?;
-    let img = hayro_jbig2::Page::new_embedded(data, globals.as_ref(), &settings)
-        .map_err(|e| log::warn!("image: JBIG2Decode parse error: {e}"))
-        .ok()?;
+    {
+        None => None,
+        // `Some(None)` is an unreadable globals stream, which the image is
+        // decoded without; `None` is a globals stream that fails to parse,
+        // which fails the image.
+        Some(&Object::Reference(id)) => Some(doc.derived(id, || {
+            let Some(g_bytes) = doc
+                .get_object(id)
+                .ok()
+                .and_then(|g| g.as_stream()?.decompressed_content().ok())
+            else {
+                return Some(None);
+            };
+            hayro_jbig2::Globals::new(&g_bytes, &settings)
+                .map_err(|e| log::warn!("image: JBIG2Decode globals parse error: {e}"))
+                .ok()
+                .map(Some)
+        })?),
+        Some(_) => {
+            // PDF spec requires JBIG2Globals to be an indirect reference to
+            // a stream object; any other form is malformed.
+            log::warn!(
+                "image: JBIG2Decode: JBIG2Globals is not an indirect reference — \
+                 ignoring globals"
+            );
+            None
+        }
+    };
+    let img = hayro_jbig2::Page::new_embedded(
+        data,
+        globals.as_deref().and_then(Option::as_ref),
+        &settings,
+    )
+    .map_err(|e| log::warn!("image: JBIG2Decode parse error: {e}"))
+    .ok()?;
 
     let jw = img.width();
     let jh = img.height();
