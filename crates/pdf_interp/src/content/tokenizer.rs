@@ -7,6 +7,8 @@
 //! Inline image data (`BI … ID … EI`) is handled as a single [`Token::InlineImage`]
 //! so the caller never sees a bare `BI` operator keyword.
 
+use crate::resources::image::inline::{inline_data_len, parse_inline_params};
+
 /// A single token from a PDF content stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'a> {
@@ -270,6 +272,11 @@ impl<'a> Tokenizer<'a> {
     /// - A single whitespace byte immediately after `ID`
     /// - Image data bytes up to `EI`, which must be preceded by whitespace
     ///
+    /// When the parameters determine the data length (see
+    /// [`inline_data_len`]) and `EI` follows that many bytes, the data is
+    /// exactly those bytes; otherwise it ends at the first `EI` preceded by
+    /// whitespace.
+    ///
     /// On a malformed stream (no `ID` or no `EI`), returns the bytes consumed
     /// so far rather than panicking.
     fn read_inline_image(&mut self) -> Token<'a> {
@@ -298,9 +305,27 @@ impl<'a> Tokenizer<'a> {
             self.pos += 1;
         };
 
-        // Scan for `EI` preceded by whitespace. The byte *before* `EI` is
-        // whitespace and is not part of the image data.
         let data_start = self.pos;
+        let params = &self.src[param_start..param_end];
+
+        // Data whose length the parameters determine ends there, when `EI`
+        // follows it after optional whitespace; its bytes may then contain
+        // `EI` themselves.
+        let declared_end = inline_data_len(&parse_inline_params(params))
+            .and_then(|len| data_start.checked_add(len))
+            .filter(|&end| end <= self.src.len());
+        if let Some(end) = declared_end
+            && let Some(after) = self.ei_at(end)
+        {
+            self.pos = after;
+            return Token::InlineImage {
+                params,
+                data: &self.src[data_start..end],
+            };
+        }
+
+        // Otherwise scan for `EI` preceded by whitespace. The byte *before*
+        // `EI` is whitespace and is not part of the image data.
         let data_end = loop {
             if self.pos >= self.src.len() {
                 break self.pos;
@@ -318,7 +343,8 @@ impl<'a> Tokenizer<'a> {
             {
                 // data_end is the position of the preceding whitespace byte,
                 // which is not part of the image data.
-                let end = self.pos.saturating_sub(1);
+                // `EI` directly at `data_start` ends empty data.
+                let end = self.pos.saturating_sub(1).max(data_start);
                 self.pos += 2; // consume `EI`
                 break end;
             }
@@ -326,9 +352,23 @@ impl<'a> Tokenizer<'a> {
         };
 
         Token::InlineImage {
-            params: &self.src[param_start..param_end],
+            params,
             data: &self.src[data_start..data_end],
         }
+    }
+
+    /// The position just past an `EI` keyword that follows `at` after
+    /// optional whitespace, or `None` when none does.
+    fn ei_at(&self, at: usize) -> Option<usize> {
+        let rest = self.src.get(at..)?;
+        let ws = rest.iter().take_while(|&&b| is_whitespace(b)).count();
+        let after = at + ws + 2;
+        (rest[ws..].starts_with(b"EI")
+            && self
+                .src
+                .get(after)
+                .is_none_or(|&b| is_whitespace(b) || is_delimiter(b)))
+        .then_some(after)
     }
 
     /// Return the next token, or `None` at end of stream.
@@ -554,6 +594,40 @@ mod tests {
         assert_eq!(t.len(), 1);
         match &t[0] {
             Token::InlineImage { data, .. } => assert_eq!(*data, b"\xFF"),
+            other => panic!("expected InlineImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_image_data_may_contain_ei() {
+        let src = b"BI /W 4 /H 1 /CS /G /BPC 8 ID  EI \nEI Q";
+        let t = tokens(src);
+        assert_eq!(t.len(), 2);
+        match &t[0] {
+            Token::InlineImage { data, .. } => assert_eq!(*data, b" EI "),
+            other => panic!("expected InlineImage, got {other:?}"),
+        }
+        assert_eq!(t[1], Token::Op(b"Q"));
+    }
+
+    #[test]
+    fn inline_image_declared_length_not_followed_by_ei_falls_back_to_the_scan() {
+        // Four bytes declared, two present before `EI`.
+        let src = b"BI /W 4 /H 1 /CS /G /BPC 8 ID ab EI Q";
+        let t = tokens(src);
+        assert_eq!(t.len(), 2);
+        match &t[0] {
+            Token::InlineImage { data, .. } => assert_eq!(*data, b"ab"),
+            other => panic!("expected InlineImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_image_empty_data() {
+        let t = tokens(b"BI ID EI Q");
+        assert_eq!(t.len(), 2);
+        match &t[0] {
+            Token::InlineImage { data, .. } => assert!(data.is_empty()),
             other => panic!("expected InlineImage, got {other:?}"),
         }
     }

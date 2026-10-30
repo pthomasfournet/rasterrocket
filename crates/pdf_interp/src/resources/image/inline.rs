@@ -176,6 +176,50 @@ pub(crate) fn parse_inline_params(params: &[u8]) -> Dictionary {
     dict
 }
 
+/// The length in bytes of an inline image's data as its parameters
+/// `dict` (keys expanded) determine it: `/Length` when present (PDF 2.0),
+/// otherwise, for unfiltered data, `⌈W·BPC·n/8⌉·H` (§8.9.7), where `n` is
+/// 1 for an image mask and the component count of a device or `/Indexed`
+/// colour space.  `None` when the parameters leave it open: filtered data
+/// without `/Length`, a colour space named from the resources, or
+/// missing, non-positive or overflowing values.
+pub(crate) fn inline_data_len(dict: &Dictionary) -> Option<usize> {
+    if let Some(len) = dict.get_i64(b"Length") {
+        return usize::try_from(len).ok();
+    }
+    if dict
+        .get(b"Filter")
+        .is_some_and(|f| !matches!(f, Object::Array(a) if a.is_empty()))
+    {
+        return None;
+    }
+    let dim = |key: &[u8]| {
+        dict.get_i64(key)
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|&v| v > 0)
+    };
+    let (w, h) = (dim(b"Width")?, dim(b"Height")?);
+    let (bpc, n) = if dict.get_bool(b"ImageMask").unwrap_or(false) {
+        (1, 1)
+    } else {
+        let n = match dict.get(b"ColorSpace")? {
+            Object::Name(name) => match name.as_slice() {
+                b"DeviceGray" => 1,
+                b"DeviceRGB" => 3,
+                b"DeviceCMYK" => 4,
+                _ => return None,
+            },
+            Object::Array(arr) if arr.first().and_then(Object::as_name) == Some(b"Indexed") => 1,
+            _ => return None,
+        };
+        (dim(b"BitsPerComponent")?, n)
+    };
+    w.checked_mul(bpc)?
+        .checked_mul(n)?
+        .div_ceil(8)
+        .checked_mul(h)
+}
+
 /// Map an abbreviated inline-image key to its canonical PDF name.
 ///
 /// Abbreviations are defined in PDF §8.9.7 Table 89.  Unknown keys are
@@ -192,6 +236,7 @@ pub(super) const fn expand_inline_key(key: &[u8]) -> &[u8] {
         b"D" => b"Decode",
         b"I" => b"Interpolate",
         b"Intent" => b"Intent",
+        b"L" => b"Length",
         other => other,
     }
 }
