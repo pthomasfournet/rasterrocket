@@ -404,6 +404,8 @@ pub struct PageRenderer<'doc> {
     /// tile renderers carry this incremented; capped at `MAX_PATTERN_DEPTH`
     /// to break self-referential pattern cycles (see `resolve_fill_pattern`).
     pub(super) pattern_depth: u32,
+    /// The page's initial CTM: user space to the device window.
+    initial_ctm: Ctm,
     /// The matrix from the default coordinate space of the content stream
     /// being executed to the device (PDF §8.7.3.1): the page's initial CTM,
     /// a form's CTM once its `Matrix` is applied, or a pattern tile's CTM.
@@ -797,6 +799,7 @@ impl<'doc> PageRenderer<'doc> {
             active_forms: Vec::new(),
             rotate_cw,
             pattern_depth: 0,
+            initial_ctm,
             pattern_ctm: initial_ctm,
             group: GroupContext::default(),
             page_group: None,
@@ -1329,6 +1332,14 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// Call this after [`execute`](Self::execute) and before [`finish`](Self::finish).
     pub fn render_annotations(&mut self, page_id: ObjectId) {
+        // PDF §12.5.5: an appearance is drawn in default user space with the
+        // initial graphics state, whatever the content stream left behind: an
+        // unbalanced `q`, a clip, a CTM or an open marked-content sequence.
+        self.gstate = GStateStack::new(self.width, self.height);
+        self.gstate.current_mut().ctm = self.initial_ctm;
+        self.path = None;
+        self.pending_clip = None;
+        self.ocg_stack.clear();
         annotations::render_annotations(self, page_id);
     }
 
@@ -3220,6 +3231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "rotate_cw must be normalised")]
     fn initial_ctm_non_spec_rotation_trips_debug_assert() {
         // Callers must normalise /Rotate to {0,90,180,270}; a non-spec value is a

@@ -4,7 +4,8 @@
 //! state-keyed appearance without `/AS` falls back to the field value and
 //! then to `Off`, `/Annots` may hold annotation dictionaries directly, and
 //! a markup annotation without a normal appearance is drawn from its
-//! geometry and colours (§12.5.6).
+//! geometry and colours (§12.5.6).  Appearances are drawn with the initial
+//! graphics state, whatever the page content leaves behind (§12.5.5).
 
 #[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
 mod common;
@@ -324,4 +325,25 @@ fn an_annotation_with_an_appearance_is_not_synthesised() {
         ],
     );
     assert_eq!(rgb_at(pdf, RenderPurpose::View, &[(10, 20)]), [BLUE]);
+}
+
+/// Page content that leaves an unbalanced `q`, a doubled CTM and a clip of
+/// the lower-left 10 × 10 units does not move or clip the annotation drawn
+/// after it.
+#[test]
+fn an_annotation_is_drawn_with_the_initial_graphics_state() {
+    let pdf = page_with(
+        "[4 0 R]",
+        "/Contents 6 0 R",
+        vec![
+            b"<< /Type /Annot /Subtype /Square /Rect [40 40 60 60] /F 4 /AP << /N 5 0 R >> >>"
+                .to_vec(),
+            blue_square(),
+            stream_object("", b"q 2 0 0 2 0 0 cm 0 0 10 10 re W n 0 g 0 0 10 10 re f"),
+        ],
+    );
+    let px = rgb_at(pdf, RenderPurpose::View, &[(50, 50), (10, 10), (30, 30)]);
+    assert_eq!(px[0], BLUE, "the appearance at its rect");
+    assert_eq!(px[1], [0, 0, 0], "the content's square, scaled by its CTM");
+    assert_eq!(px[2], WHITE, "nothing between them");
 }
