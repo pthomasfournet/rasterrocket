@@ -81,3 +81,28 @@ byte-identical on the benchmark images and passes the full test suite.
 
 - `Cargo.toml` allows `clippy::too_many_arguments` for upstream code we have
   not changed (`bitplane.rs`).
+
+## Upstream changes brought over
+
+Upstream commits to `hayro-jpeg2000/` after the base, applied as upstream
+wrote them. The base in `UPSTREAM.toml` is unchanged; `reviewed` records
+how far upstream history was examined.
+
+- `cabf8edf4` (#1618), `c5956d7f1` (#1624), `7acf4212e` (#1627),
+  `955629bb2` (#1628): `interleave_and_convert`, the conversion behind
+  `DecodedImage::data_u8` (and `decode_u8` outside its fused path), rounds
+  and interleaves 16 samples at a time with explicit SIMD for one to four
+  components of one bit depth, scaling by `255 / (2^depth - 1)`. Output
+  is byte-identical on every stream of the test suite; `data_u8` over the
+  suite went from 387 ms to 117 ms for 1 GB of output.
+- `a553afcb4` (#1648): the `logging` feature, its optional `log`
+  dependency and the warnings behind it are removed. The fork never
+  enabled the feature, so no build changes behaviour.
+
+## Upstream review (2026-10-30)
+
+Upstream history through `a543cdba5` (2026-10-29, crates.io 0.4.1) was
+reviewed by commit; the five commits above are every change to
+`hayro-jpeg2000/` after the base, and all are brought over (outside
+the crate, #1618 and #1648 also touch upstream crates this fork does not
+carry).

@@ -16,7 +16,6 @@ publish = false
 autotests = false
 
 [dependencies]
-log = { workspace = true, optional = true }
 fearless_simd = { version = "1.0.0", optional = true }
 image = { version = "0.25", default-features = false, optional = true }
 moxcms = { version = "0.8.1", optional = true }
@@ -29,8 +28,6 @@ std = []
 simd = ["fearless_simd", "std"]
 # Integration with the `image` crate (used by the test suite only).
 image = ["dep:image", "dep:moxcms", "std"]
-# Enable logging via the `log` crate.
-logging = ["dep:log"]
 
 # Not part of rasterrocket's releases: the version stays that of the
 # vendored upstream base.

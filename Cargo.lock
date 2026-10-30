@@ -737,7 +737,6 @@ version = "0.4.1"
 dependencies = [
  "fearless_simd 1.1.0",
  "image",
- "log",
  "moxcms 0.8.1",
  "png",
 ]
