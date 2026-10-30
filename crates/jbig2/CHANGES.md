@@ -30,3 +30,31 @@ of the regions before a truncated or failing segment), a byte-at-a-time
 fast path for uniform runs in generic regions, a strict mode, and a changed
 API: embedded global segments are parsed once into `Globals` and an image
 is opened with `Page::new_embedded`.
+
+## Upstream fixes brought over
+
+Upstream commits to `hayro-jbig2/` after the base, applied as upstream
+wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
+`reviewed` records how far upstream history was examined.
+
+- `96789708f` (#1629) A symbol dictionary may define and export up to
+  2^20 symbols each (was 65 535 in total). Streams with more symbols,
+  which used to fail, now decode; the `many_symbols` tests of
+  `tests/symbol.rs` and `tests/huffman.rs` are no longer ignored.
+- `86c0da15f` (#1630) A text region or symbol dictionary refers to at most
+  2^20 symbols across the dictionaries it names.
+- `44d78c7ec` (#1631) A height-class collective bitmap is bounded by area
+  (65 535² pixels) rather than by its width, which legitimately exceeds
+  65 535 when many symbols share one height class.
+- `49fd125c0` (#1640) The uniform-byte fast path of generic regions is
+  restated (`skip_mps` renamed `decode_mps_run`); decoding is unchanged.
+- `5a4ddbb86` (#1671) A page wider or taller than 65 535 pixels is
+  rejected when its page information segment is parsed, before any
+  region is decoded. Test (this fork):
+  `page::page_larger_than_bitmap_limit_is_rejected`.
+
+## Upstream review (2026-10-30)
+
+Upstream history through `a543cdba5` (2026-10-29, crates.io 0.3.1) was
+reviewed by commit; the five commits above are every change to
+`hayro-jbig2/` after the base, and all are brought over.
