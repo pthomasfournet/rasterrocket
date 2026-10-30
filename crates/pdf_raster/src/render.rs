@@ -302,7 +302,7 @@ impl RasterSession {
     /// selected box, and the `MediaBox` and `CropBox`.  No content is parsed.
     ///
     /// [`PageGeometry::size_px`](crate::PageGeometry::size_px) gives the
-    /// pixel size a render at a given scale produces.
+    /// pixel size a render at given scales produces.
     ///
     /// # Errors
     /// [`RasterError::PageOutOfRange`] when `page_num` is `0` or exceeds the
@@ -701,8 +701,8 @@ fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, Raste
 /// Render one whole page to an RGB bitmap at `scale` device pixels per point.
 ///
 /// Equivalent to [`render_page_rgb_with`] with [`RenderParams::new(scale)`](RenderParams::new).
-/// `scale` is `dpi / 72.0`, or `(x_dpi/72 · y_dpi/72).sqrt()` for the
-/// geometric mean when horizontal and vertical DPI differ.
+/// `scale` is `dpi / 72.0`; for different horizontal and vertical
+/// resolutions use [`RenderParams::new_xy`].
 ///
 /// # Errors
 ///
@@ -727,8 +727,8 @@ pub fn render_page_rgb(
 ///
 /// # Errors
 ///
-/// - [`RasterError::InvalidOptions`] if `params.scale` is ≤ 0 or non-finite,
-///   or the region is empty or extends past the page.
+/// - [`RasterError::InvalidOptions`] if a scale is ≤ 0 or non-finite, or the
+///   region is empty or extends past the page.
 /// - [`RasterError::Cancelled`] if the cancel token is raised before or
 ///   during the render.
 /// - [`RasterError::BackendUnavailable`] if a forced backend fails to init on
@@ -747,14 +747,15 @@ pub fn render_page_rgb_with(
     render_page_rgb_with_geom(session, page_num, page_id, geom, params).map(|(bmp, _diag)| bmp)
 }
 
-/// The view a render of `geom` at `scale` draws: the whole page, or `region`
-/// of it.  Enforces the pixel-size limits on what is drawn.
+/// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
+/// whole page, or `region` of it.  Enforces the pixel-size limits on what is
+/// drawn.
 fn page_view(
     geom: &pdf_interp::PageGeometry,
-    scale: f64,
+    scales: (f64, f64),
     region: Option<RenderRegion>,
 ) -> Result<pdf_interp::renderer::PageView, RasterError> {
-    let (w_px, h_px) = geom.size_px(scale);
+    let (w_px, h_px) = geom.size_px(scales.0, scales.1);
     if w_px == 0 || h_px == 0 {
         return Err(RasterError::PageDegenerate {
             width: w_px,
@@ -764,7 +765,7 @@ fn page_view(
     let whole = pdf_interp::renderer::PageView::whole(
         w_px,
         h_px,
-        scale,
+        scales,
         geom.rotate_cw,
         geom.origin_x,
         geom.origin_y,
@@ -812,11 +813,12 @@ fn render_page_rgb_with_geom(
     geom: pdf_interp::PageGeometry,
     params: &RenderParams,
 ) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
-    let scale = params.scale;
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(RasterError::InvalidOptions(format!(
-            "scale must be a positive finite number, got {scale}"
-        )));
+    for scale in [params.scale_x, params.scale_y] {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(RasterError::InvalidOptions(format!(
+                "scale must be a positive finite number, got {scale}"
+            )));
+        }
     }
     let effective_policy = params.policy.unwrap_or(session.policy);
     if params
@@ -829,7 +831,7 @@ fn render_page_rgb_with_geom(
 
     let doc = &session.doc;
 
-    let view = page_view(&geom, scale, params.region)?;
+    let view = page_view(&geom, (params.scale_x, params.scale_y), params.region)?;
 
     if !session.javascript_warned.load(Ordering::Relaxed)
         && pdf_interp::page_has_javascript(doc, page_id)
@@ -849,7 +851,7 @@ fn render_page_rgb_with_geom(
         ));
     }
 
-    // The view carries the full-precision `scale` that also sized the page,
+    // The view carries the full-precision scales that also sized the page,
     // so the CTM's translation terms are consistent with the bitmap extent.
     let mut renderer = pdf_interp::renderer::PageRenderer::with_view(&view, doc, page_id);
     if let Some(cancel) = &params.cancel {

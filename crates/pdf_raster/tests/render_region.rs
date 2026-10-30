@@ -47,7 +47,7 @@ fn stitched(session: &RasterSession, scale: f64, cols: u32, rows: u32) -> (u32, 
     let (w, h) = session
         .page_geometry(1)
         .expect("page geometry")
-        .size_px(scale);
+        .size_px(scale, scale);
     let mut out = vec![0u8; w as usize * h as usize * 3];
     let cuts = |n: u32, len: u32| (0..=n).map(move |i| len * i / n).collect::<Vec<_>>();
     let (xs, ys) = (cuts(cols, w), cuts(rows, h));
@@ -118,6 +118,37 @@ fn corpus_pages_tile_exactly() {
 }
 
 #[test]
+fn anisotropic_scales_size_and_tile_the_page() {
+    for extra in ["", "/Rotate 90"] {
+        let s = session(page_pdf(extra), BackendPolicy::CpuOnly);
+        let geom = s.page_geometry(1).expect("page geometry");
+        let params = RenderParams::new_xy(3.0, 1.25);
+        let bmp = render_page_rgb_with(&s, 1, &params).expect("anisotropic render");
+        assert_eq!((bmp.width, bmp.height), geom.size_px(3.0, 1.25));
+        let mut full = Vec::new();
+        for row in 0..bmp.height {
+            full.extend_from_slice(&bmp.row_bytes(row)[..bmp.width as usize * 3]);
+        }
+        let (w, h) = (bmp.width, bmp.height);
+        let mut tiles = vec![0u8; full.len()];
+        for (x, y, tw, th) in [(0, 0, w / 2, h), (w / 2, 0, w - w / 2, h)] {
+            let tile = render_page_rgb_with(
+                &s,
+                1,
+                &params.clone().with_region(RenderRegion::new(x, y, tw, th)),
+            )
+            .expect("anisotropic region");
+            for row in 0..th {
+                let src = &tile.row_bytes(row)[..tw as usize * 3];
+                let at = ((y + row) as usize * w as usize + x as usize) * 3;
+                tiles[at..at + src.len()].copy_from_slice(src);
+            }
+        }
+        common::assert_identical(&(w, h, full), &(w, h, tiles), extra);
+    }
+}
+
+#[test]
 fn page_geometry_reports_boxes_and_pixel_size() {
     let s = session(
         page_pdf("/CropBox [17 9 181 97] /Rotate 90"),
@@ -131,7 +162,7 @@ fn page_geometry_reports_boxes_and_pixel_size() {
     // Rotated 90°: the 164 × 88 pt crop box is 88 pt wide on the device.
     assert_eq!((geom.width_pts, geom.height_pts), (88.0, 164.0));
     let bmp = render_page_rgb(&s, 1, 2.0).expect("render");
-    assert_eq!((bmp.width, bmp.height), geom.size_px(2.0));
+    assert_eq!((bmp.width, bmp.height), geom.size_px(2.0, 2.0));
     assert!(matches!(
         s.page_geometry(2),
         Err(RasterError::PageOutOfRange { page: 2, total: 1 })
@@ -141,7 +172,7 @@ fn page_geometry_reports_boxes_and_pixel_size() {
 #[test]
 fn a_region_past_the_page_or_empty_is_rejected() {
     let s = session(page_pdf(""), BackendPolicy::CpuOnly);
-    let (w, h) = s.page_geometry(1).expect("geometry").size_px(1.0);
+    let (w, h) = s.page_geometry(1).expect("geometry").size_px(1.0, 1.0);
     for region in [
         RenderRegion::new(w - 10, 0, 11, 10),
         RenderRegion::new(0, h, 1, 1),

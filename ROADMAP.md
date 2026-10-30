@@ -92,6 +92,10 @@ version: the public API changes below are breaking.
   the new `RasterError::Cancelled`. It replaces `render_page_rgb_hinted`.
   In `rasterrocket-interp`, `PageRenderer::with_view(&PageView)` replaces
   `new_scaled`, and `budget_status()` returns a `RenderAbort`.
+- Per-axis scales: `RenderParams { scale_x, scale_y }` with
+  `RenderParams::new_xy`, `PageGeometry::size_px(scale_x, scale_y)`. The
+  CLI's `--rx`/`--ry` now render non-square pixels at the requested size
+  instead of a square-pixel render at the geometric mean of the two.
 - `SessionConfig::annotations` and `RasterOptions::annotations` (default
   `true`); `false` renders page content without annotations. The CLI's
   `--hide-annotations`, previously parsed and ignored, sets it.

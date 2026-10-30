@@ -1,4 +1,4 @@
-//! Per-call parameters of a session render: scale, device-pixel window,
+//! Per-call parameters of a session render: scales, device-pixel window,
 //! backend override and cancellation.
 
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use crate::{RasterError, RasterSession, render_page_rgb, render_page_rgb_with};
 /// A rectangle of device pixels within a page rendered at some scale.
 ///
 /// Coordinates count from the top-left corner of the whole page, whose pixel
-/// size at that scale is [`PageGeometry::size_px`](crate::PageGeometry::size_px).
+/// size at those scales is [`PageGeometry::size_px`](crate::PageGeometry::size_px).
 /// Rendering a region draws exactly the pixels the whole-page render places
 /// there, so regions that tile the page compose into the whole-page bitmap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,8 +81,12 @@ impl CancelToken {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RenderParams {
-    /// Device pixels per PDF point: `dpi / 72`.  Must be positive and finite.
-    pub scale: f64,
+    /// Horizontal device pixels per PDF point: `x_dpi / 72`.  Must be
+    /// positive and finite.
+    pub scale_x: f64,
+    /// Vertical device pixels per PDF point: `y_dpi / 72`.  Must be positive
+    /// and finite.
+    pub scale_y: f64,
     /// The window of the page to draw; `None` draws the whole page.
     ///
     /// The size limits ([`MAX_PX_DIMENSION`](crate::MAX_PX_DIMENSION),
@@ -99,11 +103,20 @@ pub struct RenderParams {
 }
 
 impl RenderParams {
-    /// Render the whole page at `scale` with the session's backend policy.
+    /// Render the whole page at `scale` device pixels per point on both
+    /// axes, with the session's backend policy.
     #[must_use]
     pub const fn new(scale: f64) -> Self {
+        Self::new_xy(scale, scale)
+    }
+
+    /// Render the whole page at `scale_x` horizontal and `scale_y` vertical
+    /// device pixels per point (non-square pixels, e.g. 300 × 150 dpi).
+    #[must_use]
+    pub const fn new_xy(scale_x: f64, scale_y: f64) -> Self {
         Self {
-            scale,
+            scale_x,
+            scale_y,
             region: None,
             policy: None,
             cancel: None,
@@ -153,9 +166,13 @@ mod tests {
             .with_region(RenderRegion::new(1, 2, 3, 4))
             .with_policy(BackendPolicy::CpuOnly)
             .with_cancel(token);
-        assert!((params.scale - 2.0).abs() < f64::EPSILON);
+        assert!((params.scale_x - 2.0).abs() < f64::EPSILON);
+        assert!((params.scale_y - 2.0).abs() < f64::EPSILON);
         assert_eq!(params.region, Some(RenderRegion::new(1, 2, 3, 4)));
         assert_eq!(params.policy, Some(BackendPolicy::CpuOnly));
         assert!(params.cancel.is_some());
+        let params = RenderParams::new_xy(3.0, 1.5);
+        assert!((params.scale_x - 3.0).abs() < f64::EPSILON);
+        assert!((params.scale_y - 1.5).abs() < f64::EPSILON);
     }
 }

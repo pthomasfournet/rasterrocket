@@ -609,8 +609,8 @@ open_session(path, config) → Result<RasterSession, RasterError>
 open_session_from_bytes(bytes, config) → Result<RasterSession, RasterError>
 render_page_rgb(session, page_num, scale) → Result<Bitmap<Rgb8>, RasterError>
 render_page_rgb_with(session, page_num, &RenderParams) → Result<Bitmap<Rgb8>, RasterError>
-    // RenderParams { scale, region: Option<RenderRegion>, policy, cancel: Option<CancelToken> }
-session.page_geometry(page_num) → Result<PageGeometry, RasterError>   // size, rotation, boxes; size_px(scale)
+    // RenderParams { scale_x, scale_y, region: Option<RenderRegion>, policy, cancel: Option<CancelToken> }
+session.page_geometry(page_num) → Result<PageGeometry, RasterError>   // size, rotation, boxes; size_px(sx, sy)
 prescan_session(session, page_num) → Result<PageDiagnostics, RasterError>
 encode_for_gcv(page, budget) → Result<GcvImage, GcvError>   // Cloud Vision input
 release_gpu_decoders()   // call via pool.broadcast() before pool drops

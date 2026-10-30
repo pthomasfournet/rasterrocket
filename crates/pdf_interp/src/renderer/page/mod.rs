@@ -527,7 +527,9 @@ struct CacheState {
 
 /// Build the initial page CTM that maps PDF user space to device pixels.
 ///
-/// `scale = dpi / 72`.  `rotate_cw` is the page `/Rotate`, which callers must
+/// `scale_x` and `scale_y` are device pixels per point along the device
+/// axes (`x_dpi / 72`, `y_dpi / 72`), applied after rotation.  `rotate_cw`
+/// is the page `/Rotate`, which callers must
 /// pass already normalised to one of {0, 90, 180, 270} (the only values ISO
 /// 32000-2 §14.11.6 defines; `page_size_pts_by_id` snaps `/Rotate` to this set
 /// upstream).  Any other value is a caller contract violation: it trips a
@@ -539,19 +541,22 @@ struct CacheState {
 /// The `to_device` helper applies an additional Y-flip (`height_px - dy`), so
 /// these matrices only carry scale + rotation + the box-origin pre-translation;
 /// the flip is not folded in here.  `w`/`h` are the output bitmap dimensions in
-/// points (`width_px / scale`, `height_px / scale`); for 90°/270° the caller has
-/// already swapped the pixel dimensions, so here `w` is the post-rotation width.
+/// points (`width_px / scale_x`, `height_px / scale_y`); for 90°/270° the
+/// caller has already swapped the pixel dimensions, so here `w` is the
+/// post-rotation width.
 ///
 /// PDF user-space content coordinates are absolute: a content point at PDF
 /// `(X, Y)` with `X ∈ [llx, llx+boxW]`, `Y ∈ [lly, lly+boxH]`.  We want the box
 /// lower-left `(llx, lly)` to land at device origin, so each branch is the
 /// box-at-origin matrix with the substitution `X → X-llx`, `Y → Y-lly` — i.e. an
-/// innermost pre-translation `T(-llx, -lly)` composed under scale+rotate.  Per
-/// branch (`s = scale`):
-///   Rotate 0   → `[ s,  0,  0,  s,     -llx·s,     -lly·s]`
-///   Rotate 90  → `[ 0, -s,  s,  0,     -lly·s,  (h+llx)·s]`
-///   Rotate 180 → `[-s,  0,  0, -s,  (w+llx)·s,  (h+lly)·s]`
-///   Rotate 270 → `[ 0,  s, -s,  0,  (w+lly)·s,     -llx·s]`
+/// innermost pre-translation `T(-llx, -lly)` composed under rotate and then
+/// the device scale.  The device scale multiplies the matrix entries that
+/// produce device x (`a`, `c`, `e`) by `sx = scale_x` and those that produce
+/// device y (`b`, `d`, `f`) by `sy = scale_y`.  Per branch:
+///   Rotate 0   → `[ sx,   0,   0,  sy,     -llx·sx,     -lly·sy]`
+///   Rotate 90  → `[  0, -sy,  sx,   0,     -lly·sx,  (h+llx)·sy]`
+///   Rotate 180 → `[-sx,   0,   0, -sy,  (w+llx)·sx,  (h+lly)·sy]`
+///   Rotate 270 → `[  0,  sy, -sx,   0,  (w+lly)·sx,     -llx·sy]`
 /// When `llx = lly = 0` every branch reduces to the box-at-origin value, so
 /// origin-at-zero PDFs (the vast majority) are unchanged in scale.
 ///
@@ -560,33 +565,32 @@ struct CacheState {
 /// so a sign error in any branch fails a test rather than shipping a mirrored
 /// or upside-down render.
 ///
-/// Degenerate inputs cannot reach here as silent garbage: `scale` is asserted
-/// finite-positive by the sole caller, and `origin_x`/`origin_y` originate from
+/// Degenerate inputs cannot reach here as silent garbage: both scales are
+/// asserted finite-positive by the sole caller, and `origin_x`/`origin_y` originate from
 /// `page_size_pts_by_id`, which rejects non-finite / zero-area boxes upstream
 /// and logs malformed-box recovery.  This function therefore performs only the
 /// arithmetic; it does not re-validate.
 fn build_initial_ctm(
     width: u32,
     height: u32,
-    scale: f64,
+    (sx, sy): (f64, f64),
     rotate_cw: u16,
     origin_x: f64,
     origin_y: f64,
 ) -> Ctm {
-    let s = scale;
     let llx = origin_x;
     let lly = origin_y;
-    let w = f64::from(width) / s;
-    let h = f64::from(height) / s;
+    let w = f64::from(width) / sx;
+    let h = f64::from(height) / sy;
     match rotate_cw % 360 {
         // Rotate 0: standard scale + y-flip handled by to_device.
-        0 => [s, 0.0, 0.0, s, -llx * s, -lly * s],
+        0 => [sx, 0.0, 0.0, sy, -llx * sx, -lly * sy],
         // Rotate 90 CW: swap axes. Bitmap width = original H, height = original W.
-        90 => [0.0, -s, s, 0.0, -lly * s, (h + llx) * s],
+        90 => [0.0, -sy, sx, 0.0, -lly * sx, (h + llx) * sy],
         // Rotate 180: flip both axes.
-        180 => [-s, 0.0, 0.0, -s, (w + llx) * s, (h + lly) * s],
+        180 => [-sx, 0.0, 0.0, -sy, (w + llx) * sx, (h + lly) * sy],
         // Rotate 270 CW (= 90 CCW): swap axes, opposite orientation.
-        270 => [0.0, s, -s, 0.0, (w + lly) * s, -llx * s],
+        270 => [0.0, sy, -sx, 0.0, (w + lly) * sx, -llx * sy],
         // Non-spec value: a caller contract violation (callers normalise to
         // {0,90,180,270} upstream).  Fail loudly in debug; in release fall back
         // to the unrotated matrix so a stray value renders upright rather than
@@ -596,7 +600,7 @@ fn build_initial_ctm(
                 false,
                 "build_initial_ctm: rotate_cw must be normalised to {{0,90,180,270}}, got {other}"
             );
-            [s, 0.0, 0.0, s, -llx * s, -lly * s]
+            [sx, 0.0, 0.0, sy, -llx * sx, -lly * sy]
         }
     }
 }
@@ -614,8 +618,12 @@ pub struct PageView {
     pub page_width: u32,
     /// Height of the whole page in device pixels, after rotation.
     pub page_height: u32,
-    /// Device pixels per PDF point (`dpi / 72 × UserUnit`).  Positive and finite.
-    pub scale: f64,
+    /// Device pixels per unit of the page's width (`x_dpi / 72` for the
+    /// renderer's callers).  Positive and finite.
+    pub scale_x: f64,
+    /// Device pixels per unit of the page's height (`y_dpi / 72` for the
+    /// renderer's callers).  Positive and finite.
+    pub scale_y: f64,
     /// The page `/Rotate`, clockwise degrees: one of 0, 90, 180, 270.
     pub rotate_cw: u16,
     /// X of the selected page box's lower-left corner in PDF user space.
@@ -633,7 +641,8 @@ pub struct PageView {
 }
 
 impl PageView {
-    /// The view of a whole `page_width × page_height` page.
+    /// The view of a whole `page_width × page_height` page drawn at
+    /// `(scale_x, scale_y)` device pixels per point.
     ///
     /// `rotate_cw`, `origin_x` and `origin_y` are the page geometry's
     /// (see `PageGeometry`); `page_width`/`page_height` are already swapped
@@ -642,7 +651,7 @@ impl PageView {
     pub const fn whole(
         page_width: u32,
         page_height: u32,
-        scale: f64,
+        (scale_x, scale_y): (f64, f64),
         rotate_cw: u16,
         origin_x: f64,
         origin_y: f64,
@@ -650,7 +659,8 @@ impl PageView {
         Self {
             page_width,
             page_height,
-            scale,
+            scale_x,
+            scale_y,
             rotate_cw,
             origin_x,
             origin_y,
@@ -685,7 +695,7 @@ impl PageView {
         let mut ctm = build_initial_ctm(
             self.page_width,
             self.page_height,
-            self.scale,
+            (self.scale_x, self.scale_y),
             self.rotate_cw,
             self.origin_x,
             self.origin_y,
@@ -711,7 +721,7 @@ impl<'doc> PageRenderer<'doc> {
     #[must_use]
     pub fn new(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
         Self::with_view(
-            &PageView::whole(width, height, 1.0, 0, 0.0, 0.0),
+            &PageView::whole(width, height, (1.0, 1.0), 0, 0.0, 0.0),
             doc,
             page_id,
         )
@@ -722,13 +732,14 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// # Panics
     ///
-    /// Panics if `view.scale` is not a positive finite number.
+    /// Panics if `view.scale_x` or `view.scale_y` is not a positive finite
+    /// number.
     #[must_use]
     pub fn with_view(view: &PageView, doc: &'doc Document, page_id: ObjectId) -> Self {
-        let scale = view.scale;
+        let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
-            scale.is_finite() && scale > 0.0,
-            "PageRenderer::with_view: scale must be a positive finite number, got {scale}"
+            sx.is_finite() && sx > 0.0 && sy.is_finite() && sy > 0.0,
+            "PageRenderer::with_view: scales must be positive finite numbers, got {sx} × {sy}"
         );
         debug_assert!(
             u64::from(view.x) + u64::from(view.width) <= u64::from(view.page_width)
@@ -2865,19 +2876,19 @@ mod tests {
         let w = f64::from(wpx) / s;
         let h = f64::from(hpx) / s;
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 0, 0.0, 0.0),
+            build_initial_ctm(wpx, hpx, (s, s), 0, 0.0, 0.0),
             [s, 0.0, 0.0, s, 0.0, 0.0],
         );
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 90, 0.0, 0.0),
+            build_initial_ctm(wpx, hpx, (s, s), 90, 0.0, 0.0),
             [0.0, -s, s, 0.0, 0.0, h * s],
         );
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 180, 0.0, 0.0),
+            build_initial_ctm(wpx, hpx, (s, s), 180, 0.0, 0.0),
             [-s, 0.0, 0.0, -s, w * s, h * s],
         );
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 270, 0.0, 0.0),
+            build_initial_ctm(wpx, hpx, (s, s), 270, 0.0, 0.0),
             [0.0, s, -s, 0.0, w * s, 0.0],
         );
     }
@@ -2891,19 +2902,19 @@ mod tests {
         let h = f64::from(hpx) / s;
 
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 0, llx, lly),
+            build_initial_ctm(wpx, hpx, (s, s), 0, llx, lly),
             [s, 0.0, 0.0, s, -llx * s, -lly * s],
         );
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 90, llx, lly),
+            build_initial_ctm(wpx, hpx, (s, s), 90, llx, lly),
             [0.0, -s, s, 0.0, -lly * s, (h + llx) * s],
         );
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 180, llx, lly),
+            build_initial_ctm(wpx, hpx, (s, s), 180, llx, lly),
             [-s, 0.0, 0.0, -s, (w + llx) * s, (h + lly) * s],
         );
         assert_ctm_eq(
-            build_initial_ctm(wpx, hpx, s, 270, llx, lly),
+            build_initial_ctm(wpx, hpx, (s, s), 270, llx, lly),
             [0.0, s, -s, 0.0, (w + lly) * s, -llx * s],
         );
     }
@@ -2915,7 +2926,8 @@ mod tests {
     struct CornerCase {
         wpx: u32,
         hpx: u32,
-        s: f64,
+        /// Device pixels per point along device x and device y.
+        scale: (f64, f64),
         rotate: u16,
         llx: f64,
         lly: f64,
@@ -2942,19 +2954,19 @@ mod tests {
         let CornerCase {
             wpx,
             hpx,
-            s,
+            scale: (sx, sy),
             rotate,
             llx,
             lly,
         } = *case;
-        let ctm = build_initial_ctm(wpx, hpx, s, rotate, llx, lly);
+        let ctm = build_initial_ctm(wpx, hpx, (sx, sy), rotate, llx, lly);
         // For 0°/180° the box is wpx×hpx; for 90°/270° the caller swapped the
         // bitmap dims, so the box in points is hpx×wpx.  Resolve box pts from
         // the unrotated orientation.
         let (bw, bh) = if rotate % 180 == 0 {
-            (f64::from(wpx) / s, f64::from(hpx) / s)
+            (f64::from(wpx) / sx, f64::from(hpx) / sy)
         } else {
-            (f64::from(hpx) / s, f64::from(wpx) / s)
+            (f64::from(hpx) / sy, f64::from(wpx) / sx)
         };
         let page_h = f64::from(hpx);
         let to_dev = |x: f64, y: f64| {
@@ -2985,7 +2997,7 @@ mod tests {
             &CornerCase {
                 wpx: 400,
                 hpx: 600,
-                s: 2.0,
+                scale: (2.0, 2.0),
                 rotate: 0,
                 llx: 50.0,
                 lly: 30.0,
@@ -3006,7 +3018,7 @@ mod tests {
             &CornerCase {
                 wpx: 600,
                 hpx: 400,
-                s: 2.0,
+                scale: (2.0, 2.0),
                 rotate: 90,
                 llx: 50.0,
                 lly: 30.0,
@@ -3026,7 +3038,7 @@ mod tests {
             &CornerCase {
                 wpx: 400,
                 hpx: 600,
-                s: 2.0,
+                scale: (2.0, 2.0),
                 rotate: 180,
                 llx: 50.0,
                 lly: 30.0,
@@ -3047,7 +3059,7 @@ mod tests {
             &CornerCase {
                 wpx: 600,
                 hpx: 400,
-                s: 2.0,
+                scale: (2.0, 2.0),
                 rotate: 270,
                 llx: 50.0,
                 lly: 30.0,
@@ -3061,13 +3073,60 @@ mod tests {
         );
     }
 
+    /// With different device scales per axis, every rotation still maps the
+    /// box corners onto the bitmap corners: the scales apply along the device
+    /// axes, after rotation.
+    #[test]
+    fn initial_ctm_anisotropic_maps_box_corners_to_bitmap_corners() {
+        let (w, h) = (300.0, 100.0);
+        for rotate in [0, 90, 180, 270] {
+            let want = match rotate {
+                0 => ExpectedCorners {
+                    ll: (0.0, h),
+                    lr: (w, h),
+                    ul: (0.0, 0.0),
+                    ur: (w, 0.0),
+                },
+                90 => ExpectedCorners {
+                    ll: (0.0, 0.0),
+                    lr: (0.0, h),
+                    ul: (w, 0.0),
+                    ur: (w, h),
+                },
+                180 => ExpectedCorners {
+                    ll: (w, 0.0),
+                    lr: (0.0, 0.0),
+                    ul: (w, h),
+                    ur: (0.0, h),
+                },
+                _ => ExpectedCorners {
+                    ll: (w, h),
+                    lr: (w, 0.0),
+                    ul: (0.0, h),
+                    ur: (0.0, 0.0),
+                },
+            };
+            assert_box_corners_map_to(
+                &CornerCase {
+                    wpx: 300,
+                    hpx: 100,
+                    scale: (3.0, 0.5),
+                    rotate,
+                    llx: 50.0,
+                    lly: 30.0,
+                },
+                &want,
+            );
+        }
+    }
+
     #[test]
     #[should_panic(expected = "rotate_cw must be normalised")]
     fn initial_ctm_non_spec_rotation_trips_debug_assert() {
         // Callers must normalise /Rotate to {0,90,180,270}; a non-spec value is a
         // contract violation and must fail loudly in debug rather than silently
         // selecting a rotation arm and rendering a wrong-but-plausible page.
-        let _ = build_initial_ctm(100, 100, 1.0, 45, 0.0, 0.0);
+        let _ = build_initial_ctm(100, 100, (1.0, 1.0), 45, 0.0, 0.0);
     }
 
     #[test]
@@ -3079,7 +3138,7 @@ mod tests {
             return;
         }
         assert_ctm_eq(
-            build_initial_ctm(100, 100, 1.0, 45, 0.0, 0.0),
+            build_initial_ctm(100, 100, (1.0, 1.0), 45, 0.0, 0.0),
             [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         );
     }

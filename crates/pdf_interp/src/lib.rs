@@ -398,22 +398,22 @@ pub struct PageGeometry {
 }
 
 impl PageGeometry {
-    /// The pixel dimensions of the page rendered at `scale` device pixels per
-    /// point: `width_pts × scale` and `height_pts × scale`, each rounded to
-    /// the nearest integer.
+    /// The pixel dimensions of the page rendered at `scale_x × scale_y`
+    /// device pixels per point: `width_pts × scale_x` and
+    /// `height_pts × scale_y`, each rounded to the nearest integer.
     ///
     /// A product beyond `u32::MAX` saturates to `u32::MAX`, and a NaN or
     /// non-positive product gives 0; callers reject both before allocating.
     #[must_use]
-    pub fn size_px(&self, scale: f64) -> (u32, u32) {
+    pub fn size_px(&self, scale_x: f64, scale_y: f64) -> (u32, u32) {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "f64-to-u32 `as` saturates at both ends and maps NaN to 0, \
                       which is the documented contract"
         )]
-        let px = |pts: f64| (pts * scale).round() as u32;
-        (px(self.width_pts), px(self.height_pts))
+        let px = |pts: f64, scale: f64| (pts * scale).round() as u32;
+        (px(self.width_pts, scale_x), px(self.height_pts, scale_y))
     }
 }
 

@@ -125,12 +125,8 @@ pub(crate) fn render_page(
     #[cfg(not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi")))]
     let effective_policy = session.policy();
 
-    // Geometric-mean scale matches the pixel-box aspect ratio when x/y DPI differ.
-    let x_dpi = args.x_dpi();
-    let y_dpi = args.y_dpi();
-    let scale = (x_dpi / 72.0 * (y_dpi / 72.0)).sqrt();
-
-    let params = RenderParams::new(scale).with_policy(effective_policy);
+    let params = RenderParams::new_xy(args.x_dpi() / 72.0, args.y_dpi() / 72.0)
+        .with_policy(effective_policy);
     let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
 
     #[expect(

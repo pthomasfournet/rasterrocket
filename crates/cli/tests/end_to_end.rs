@@ -226,6 +226,17 @@ fn gray_page(pdf: &[u8], args: &[&str]) -> (u32, u32, Vec<u8>) {
     (w, h, data)
 }
 
+#[test]
+fn unequal_rx_and_ry_give_non_square_pixels() {
+    // Page 1 is 100 × 50 pt: at 144 × 36 dpi it is 200 × 25 px, and the
+    // black square at (10, 10) of side 20 pt covers columns 20..60 and,
+    // counting rows from the top, 10..20.
+    let (w, h, data) = gray_page(&two_page_pdf(), &["--rx", "144", "--ry", "36"]);
+    assert_eq!((w, h), (200, 25));
+    let at = |x: usize, y: usize| data[y * 200 + x];
+    assert_eq!((at(40, 15), at(70, 15), at(40, 5)), (0, 255, 255));
+}
+
 /// One 120 × 60 pt page with a diagonal-edged fill and a line of text.
 fn edges_pdf() -> Vec<u8> {
     assemble_pdf(&[

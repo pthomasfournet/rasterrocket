@@ -112,7 +112,7 @@ pub fn render_page_rgb(
 ) -> Result<Bitmap<Rgb8>, RasterError>
 ```
 
-Renders one whole page to an RGB bitmap. `scale` is the pixel-per-point multiplier: `dpi / 72.0` for uniform DPI, or `sqrt((rx/72) × (ry/72))` for non-square pixels. Equivalent to `render_page_rgb_with(session, page_num, &RenderParams::new(scale))`.
+Renders one whole page to an RGB bitmap. `scale` is the pixel-per-point multiplier, `dpi / 72.0`. Equivalent to `render_page_rgb_with(session, page_num, &RenderParams::new(scale))`; for different horizontal and vertical resolutions use `RenderParams::new_xy`.
 
 Safe to call from multiple Rayon threads concurrently. GPU image decoders are managed per-thread via `thread_local!`.
 
@@ -125,13 +125,15 @@ pub fn render_page_rgb_with(
 
 #[non_exhaustive]
 pub struct RenderParams {
-    pub scale: f64,                      // dpi / 72
+    pub scale_x: f64,                    // x_dpi / 72
+    pub scale_y: f64,                    // y_dpi / 72
     pub region: Option<RenderRegion>,    // None = whole page
     pub policy: Option<BackendPolicy>,   // None = the session's
     pub cancel: Option<CancelToken>,     // None = render to completion
 }
 impl RenderParams {
-    pub const fn new(scale: f64) -> Self
+    pub const fn new(scale: f64) -> Self                     // same scale on both axes
+    pub const fn new_xy(scale_x: f64, scale_y: f64) -> Self  // non-square pixels
     pub const fn with_region(self, region: RenderRegion) -> Self
     pub const fn with_policy(self, policy: BackendPolicy) -> Self
     pub fn with_cancel(self, cancel: CancelToken) -> Self
@@ -150,7 +152,8 @@ impl CancelToken {
 
 Renders page `page_num` as `params` describes:
 
-- **`region`** draws only a window of the page, in device pixels counted from the page's top-left corner at `scale` (the whole page is `PageGeometry::size_px(scale)`). The bitmap is the region's size, and it holds exactly the pixels the whole-page render places there, so regions that tile a page stitch into the whole-page bitmap byte for byte. `MAX_PX_DIMENSION` and `MAX_PX_AREA` apply to the region, so a page too large to render whole (a map or poster at high DPI) can be rendered in tiles. An empty region, or one extending past the page, is `RasterError::InvalidOptions`.
+- **`scale_x` / `scale_y`** are device pixels per point along the bitmap's axes, applied after `/Rotate`. Unequal scales give non-square pixels (300 × 150 dpi is `new_xy(300.0 / 72.0, 150.0 / 72.0)`); the page is `PageGeometry::size_px(scale_x, scale_y)` pixels.
+- **`region`** draws only a window of the page, in device pixels counted from the page's top-left corner at those scales. The bitmap is the region's size, and it holds exactly the pixels the whole-page render places there, so regions that tile a page stitch into the whole-page bitmap byte for byte. `MAX_PX_DIMENSION` and `MAX_PX_AREA` apply to the region, so a page too large to render whole (a map or poster at high DPI) can be rendered in tiles. An empty region, or one extending past the page, is `RasterError::InvalidOptions`.
 - **`policy`** overrides the session's backend policy for this page's image decoders; pass `BackendPolicy::CpuOnly` for a page `prescan_session` reports without images to skip GPU decoder setup.
 - **`cancel`**: after `CancelToken::cancel()` on any clone, the render stops before its next content-stream operator (form, Type 3 glyph and pattern-cell content included) and returns `RasterError::Cancelled`; a render started after cancellation returns it without drawing. An operator already running (one image decode, one fill) completes first.
 
@@ -189,7 +192,7 @@ impl RasterSession {
 
 An opened, read-only document. `Sync + Send` — safe to share across Rayon threads.
 
-`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale)` is the bitmap size `render_page_rgb` produces at `scale`, so an embedder can size buffers or plan tiles before rendering.
+`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale_x, scale_y)` is the bitmap size a render at those scales produces, so an embedder can size buffers or plan tiles before rendering.
 
 ---
 
@@ -808,13 +811,13 @@ pub struct PageGeometry {
     pub crop_box: Option<[f64; 4]>,   // as authored, before intersecting with media_box
 }
 impl PageGeometry {
-    pub fn size_px(&self, scale: f64) -> (u32, u32)
+    pub fn size_px(&self, scale_x: f64, scale_y: f64) -> (u32, u32)
 }
 ```
 
 Dimensions are swapped for 90°/270° rotations so that `width_pts` always corresponds to the horizontal extent of the rendered bitmap. Re-exported as `rasterrocket::PageGeometry` and returned by `RasterSession::page_geometry`.
 
-`size_px(scale)` is the rendered pixel size, `(width_pts × scale).round()` by `(height_pts × scale).round()`, saturating at `u32::MAX`.
+`size_px(scale_x, scale_y)` is the rendered pixel size, `(width_pts × scale_x).round()` by `(height_pts × scale_y).round()`, saturating at `u32::MAX`.
 
 ### `InterpError`
 

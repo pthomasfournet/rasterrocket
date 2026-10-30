@@ -47,7 +47,7 @@ fn main() {
     );
 
     let scale = dpi / 72.0;
-    let (w, h) = geom.size_px(scale);
+    let (w, h) = geom.size_px(scale, scale);
     if w == 0 || h == 0 || w > MAX_PX || h > MAX_PX {
         eprintln!(
             "error: page {page} dimensions out of range ({w}×{h} px at {dpi} dpi; \
@@ -65,7 +65,7 @@ fn main() {
     let view = rasterrocket_interp::renderer::PageView::whole(
         w,
         h,
-        scale,
+        (scale, scale),
         geom.rotate_cw,
         geom.origin_x,
         geom.origin_y,

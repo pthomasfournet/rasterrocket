@@ -47,7 +47,7 @@ If `--first-page` < 1, it is clamped to 1 with a warning. If `--last-page` excee
 |---|---|---|
 | `-r DPI` / `--resolution DPI` | `150` | Render resolution for both axes. |
 | `--rx DPI` | same as `-r` | Horizontal resolution only (overrides `-r` for X). |
-| `--ry DPI` | same as `-r` | Vertical resolution only (overrides `-r` for Y). |
+| `--ry DPI` | same as `-r` | Vertical resolution only (overrides `-r` for Y). Unequal `--rx`/`--ry` give non-square pixels: the page is `width × rx / 72` by `height × ry / 72` pixels. |
 | `--scale-to N` | — | Scale the longest edge to N pixels (preserves aspect ratio). |
 | `--scale-to-x N` | — | Scale width to N pixels. |
 | `--scale-to-y N` | — | Scale height to N pixels. |
