@@ -1,11 +1,27 @@
 //! Cache key types for glyph lookup.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 /// Opaque identifier for a loaded font face.
 ///
-/// Assigned by a [`crate::engine::FontEngine`] once per face (font program
-/// plus matrix) and never reused by that engine.
+/// Drawn from a [`FaceIds`] source once per face (font program plus
+/// matrix); no source yields the same identifier twice.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FaceId(pub(crate) u32);
+
+/// A source of [`FaceId`]s.  Faces whose identifiers come from one source
+/// are distinct keys in a [`crate::cache::GlyphCache`] they share.
+#[derive(Debug, Default)]
+pub struct FaceIds(AtomicU32);
+
+impl FaceIds {
+    /// A fresh identifier.
+    pub fn next(&self) -> FaceId {
+        let id = self.0.fetch_add(1, Ordering::Relaxed);
+        debug_assert!(id < u32::MAX, "FaceId counter wrapped");
+        FaceId(id)
+    }
+}
 
 /// Number of sub-pixel x-fraction bits.
 ///

@@ -1,4 +1,4 @@
-//! Global glyph bitmap cache.
+//! Glyph bitmap cache.
 //!
 //! [`GlyphCache`] wraps a [`quick_cache::sync::Cache`] keyed by [`GlyphKey`].
 //!
@@ -13,39 +13,55 @@
 //!
 //! # Scope
 //!
-//! One cache is built per page and shared by every face on that page.  It is
-//! not process-wide: [`FaceId`] is allocated by a per-page `FontEngine` whose
-//! counter restarts at zero, so the same `FaceId` denotes different fonts on
-//! different pages and entries must not outlive the page that produced them.
-//!
-//! This bounds the hit rate — each page re-renders its own glyphs, which shows
-//! up as a miss count that grows with page count rather than levelling off.
-//! Widening the scope means giving `FaceId` document-wide meaning first; doing
-//! it without that would alias unrelated glyphs together.
+//! A cache may serve any faces whose [`FaceId`]s come from one
+//! [`crate::key::FaceIds`] source, across pages and threads: the identifier
+//! names a program at one matrix, which fixes every bitmap keyed by it.
+//! Faces from different sources must not share a cache, since their
+//! identifiers alias.
 //!
 //! # Capacity policy
 //!
-//! The cache holds at most [`GLOBAL_CAPACITY`] entries total.  Eviction is
-//! LRU.  Entries are `Arc<GlyphBitmap>`, so eviction drops the `Arc` without
-//! freeing the bitmap data if the renderer still holds a reference.
+//! The cache holds at most [`CAPACITY_BYTES`] of bitmap data, each entry
+//! weighed by its pixel bytes plus [`ENTRY_OVERHEAD`].  Eviction is
+//! approximately LRU.  Entries are `Arc<GlyphBitmap>`, so eviction drops the
+//! `Arc` without freeing the bitmap data if the renderer still holds a
+//! reference.
 //!
 //! # Key shape
 //!
 //! [`GlyphKey`] is `(face_id, glyph_id, size_px, x_frac, aa)`: it describes
 //! outline glyphs of a font program at one matrix.  Glyphs from other
 //! sources (Type 3 `CharProcs`, colour glyphs) have no such key and are not
-//! cached here; caching them calls for a key derived from the source and a
-//! byte-weighted capacity rather than an entry count.
+//! cached here; caching them calls for a key derived from the source.
 
 use std::sync::Arc;
 
+use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 
 use crate::bitmap::GlyphBitmap;
 use crate::key::{FaceId, GlyphKey};
 
-/// Maximum number of glyphs held by one cache (256 faces × 4 096 glyphs).
-pub const GLOBAL_CAPACITY: usize = 256 * 4_096;
+/// Bitmap bytes one cache holds before it evicts.
+pub const CAPACITY_BYTES: u64 = 256 << 20;
+
+/// Bytes charged per entry beyond its pixel data: the bitmap header, the
+/// `Arc` and the cache slot.
+pub const ENTRY_OVERHEAD: u64 = 96;
+
+/// Expected entry count, for the initial table size; the weight limit
+/// governs eviction.
+const ESTIMATED_ENTRIES: usize = 1 << 16;
+
+/// Weighs an entry by the memory it holds.
+#[derive(Clone, Copy, Debug)]
+struct BitmapBytes;
+
+impl Weighter<GlyphKey, Arc<GlyphBitmap>> for BitmapBytes {
+    fn weight(&self, _key: &GlyphKey, bitmap: &Arc<GlyphBitmap>) -> u64 {
+        bitmap.data.len() as u64 + ENTRY_OVERHEAD
+    }
+}
 
 /// Shared, thread-safe glyph bitmap cache.
 ///
@@ -53,7 +69,7 @@ pub const GLOBAL_CAPACITY: usize = 256 * 4_096;
 /// and keeps the cache alive as long as any clone exists.
 #[derive(Clone, Debug)]
 pub struct GlyphCache {
-    inner: Arc<Cache<GlyphKey, Arc<GlyphBitmap>>>,
+    inner: Arc<Cache<GlyphKey, Arc<GlyphBitmap>, BitmapBytes>>,
 }
 
 impl GlyphCache {
@@ -61,7 +77,11 @@ impl GlyphCache {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Cache::new(GLOBAL_CAPACITY)),
+            inner: Arc::new(Cache::with_weighter(
+                ESTIMATED_ENTRIES,
+                CAPACITY_BYTES,
+                BitmapBytes,
+            )),
         }
     }
 

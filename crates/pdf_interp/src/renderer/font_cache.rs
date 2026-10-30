@@ -13,9 +13,10 @@
 //!
 //! One instance is created per page renderer (one per thread when pages are
 //! rendered in parallel) and owns that page's [`FontEngine`].  What depends
-//! only on an indirect font dictionary — its descriptor, its parsed program
-//! and its code → glyph table — is kept in a [`DocumentFonts`] shared by
-//! every page of the document.
+//! only on an indirect font dictionary — its descriptor, its parsed program,
+//! its code → glyph table and the identifier of its face at each matrix — is
+//! kept in a [`DocumentFonts`] shared by every page of the document, with the
+//! glyph bitmaps of those faces.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,6 +26,7 @@ use font::{
     cache::GlyphCache,
     engine::{FaceParams, FontEngine},
     face::FontFace,
+    key::{FaceId, FaceIds},
     program::FontProgram,
 };
 use pdf::ObjectId;
@@ -139,6 +141,10 @@ pub struct ActiveFont {
 #[derive(Default)]
 pub struct DocumentFonts {
     fonts: Mutex<HashMap<ObjectId, Arc<SharedFont>>>,
+    /// Source of the identifier of every face made for the document.
+    face_ids: Arc<FaceIds>,
+    /// Glyph bitmaps of every face made for the document.
+    glyphs: GlyphCache,
 }
 
 impl DocumentFonts {
@@ -159,6 +165,18 @@ struct SharedFont {
     /// The `code_to_gid` table computed from the program, `None` when the
     /// descriptor's own table (or the program's charmap) applies.
     code_to_gid: OnceLock<Option<Vec<u32>>>,
+    /// Face identifier per Trm bit pattern, so every page draws the font at
+    /// one matrix from the same cached bitmaps.
+    face_ids: Mutex<HashMap<[u64; 4], FaceId>>,
+}
+
+impl SharedFont {
+    /// The identifier of the face at the matrix `trm`, drawn from `ids` on
+    /// first use.
+    fn face_id(&self, trm: [u64; 4], ids: &FaceIds) -> FaceId {
+        let mut face_ids = self.face_ids.lock().unwrap_or_else(PoisonError::into_inner);
+        *face_ids.entry(trm).or_insert_with(|| ids.next())
+    }
 }
 
 /// Per-page cache of resolved font descriptors and loaded font faces.
@@ -166,7 +184,7 @@ pub struct FontCache {
     engine: FontEngine,
     /// Document-wide store for indirect font dictionaries.
     shared: Arc<DocumentFonts>,
-    /// Glyph bitmap cache shared by every face on this page.
+    /// The document's glyph bitmap cache.
     glyph_cache: GlyphCache,
     /// Descriptor of each font dictionary selected on this page; `None` for a
     /// dictionary that does not resolve.
@@ -178,13 +196,13 @@ pub struct FontCache {
 }
 
 impl FontCache {
-    /// Create a new cache backed by the given engine and document store.
+    /// Create a new cache resolving through the document store `shared`.
     #[must_use]
-    pub fn new(engine: FontEngine, glyph_cache: GlyphCache, shared: Arc<DocumentFonts>) -> Self {
+    pub fn new(shared: Arc<DocumentFonts>) -> Self {
         Self {
-            engine,
+            engine: FontEngine::with_face_ids(true, Arc::clone(&shared.face_ids)),
+            glyph_cache: shared.glyphs.clone(),
             shared,
-            glyph_cache,
             descriptors: HashMap::new(),
             faces: HashMap::new(),
         }
@@ -217,7 +235,7 @@ impl FontCache {
         &self.shared
     }
 
-    /// Return the glyph bitmap cache shared by every face in this page.
+    /// Return the glyph bitmap cache shared by every face of the document.
     #[must_use]
     pub const fn glyph_cache(&self) -> &GlyphCache {
         &self.glyph_cache
@@ -287,8 +305,9 @@ impl FontCache {
                 .program
                 .get_or_init(|| parse_program(desc))
                 .as_ref()?;
+            let id = shared.face_id(trm.map(f64::to_bits), &self.shared.face_ids);
             self.engine
-                .load_program_face(Arc::clone(program), params)
+                .load_program_face_as(id, Arc::clone(program), params)
                 .inspect_err(|e| log::debug!("font_cache: {e}"))
                 .ok()?
         } else if let Some(bytes) = &desc.bytes {
@@ -2063,7 +2082,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), Arc::default());
+        let mut cache = FontCache::new(Arc::default());
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");
@@ -2122,7 +2141,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), Arc::default());
+        let mut cache = FontCache::new(Arc::default());
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("embedded TrueType face loads");

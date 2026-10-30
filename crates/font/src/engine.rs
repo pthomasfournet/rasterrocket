@@ -2,9 +2,10 @@
 //!
 //! A [`FontEngine`] assigns [`FaceId`]s and keeps every program it has
 //! parsed, so faces built from identical bytes (one font resource drawn at
-//! several sizes) or from the same file share one [`FontProgram`].  It is
-//! plain data: callers that render pages in parallel give each page its own
-//! engine.
+//! several sizes) or from the same file share one [`FontProgram`].  Its
+//! program tables are plain data: callers that render pages in parallel give
+//! each page its own engine, and engines whose faces share a glyph cache
+//! share one [`FaceIds`] source.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::face::{FontFace, FontMatrix};
-use crate::key::FaceId;
+use crate::key::{FaceId, FaceIds};
 use crate::program::FontProgram;
 
 /// Parameters passed when loading a font face.
@@ -28,8 +29,8 @@ pub struct FaceParams {
 /// Parses font programs and assigns face IDs.
 #[derive(Debug)]
 pub struct FontEngine {
-    /// Monotonically increasing face-ID counter.
-    next_id: u32,
+    /// Source of the identifiers of the faces this engine makes.
+    ids: Arc<FaceIds>,
     /// Whether glyph bitmaps carry 8-bit coverage.
     aa: bool,
     /// Programs parsed from memory, keyed by a hash of their bytes.  Hash
@@ -44,8 +45,14 @@ impl FontEngine {
     /// is `true` and 1-bit masks otherwise.
     #[must_use]
     pub fn new(aa: bool) -> Self {
+        Self::with_face_ids(aa, Arc::default())
+    }
+
+    /// As [`Self::new`], drawing face identifiers from `ids`.
+    #[must_use]
+    pub fn with_face_ids(aa: bool, ids: Arc<FaceIds>) -> Self {
         Self {
-            next_id: 0,
+            ids,
             aa,
             memory_programs: HashMap::new(),
             file_programs: HashMap::new(),
@@ -119,18 +126,27 @@ impl FontEngine {
     ///
     /// [`LoadError::DegenerateSize`] when the matrix is degenerate.
     pub fn load_program_face(
-        &mut self,
+        &self,
         program: Arc<FontProgram>,
         params: FaceParams,
     ) -> Result<FontFace, LoadError> {
-        let face = FontFace::new(FaceId(self.next_id), program, params, self.aa)
-            .ok_or(LoadError::DegenerateSize)?;
-        debug_assert!(
-            self.next_id < u32::MAX,
-            "FaceId counter wrapped; too many font faces loaded by one engine"
-        );
-        self.next_id = self.next_id.wrapping_add(1);
-        Ok(face)
+        self.load_program_face_as(self.ids.next(), program, params)
+    }
+
+    /// As [`Self::load_program_face`], with the identifier `id`.  Two faces
+    /// given one identifier must draw the same program at the same matrix:
+    /// they share glyph bitmaps.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::DegenerateSize`] when the matrix is degenerate.
+    pub fn load_program_face_as(
+        &self,
+        id: FaceId,
+        program: Arc<FontProgram>,
+        params: FaceParams,
+    ) -> Result<FontFace, LoadError> {
+        FontFace::new(id, program, params, self.aa).ok_or(LoadError::DegenerateSize)
     }
 }
 

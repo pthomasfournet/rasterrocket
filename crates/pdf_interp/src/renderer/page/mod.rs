@@ -62,7 +62,6 @@ use pdf::{Document, ObjectId};
 
 use color::Rgb8;
 use color::convert::div255;
-use font::{cache::GlyphCache, engine::FontEngine};
 use raster::{
     Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
@@ -548,7 +547,7 @@ impl<'doc> PageRenderer<'doc> {
         let initial_ctm = build_initial_ctm(width, height, scale, rotate_cw, origin_x, origin_y);
         gstate.current_mut().ctm = initial_ctm;
 
-        let font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), Arc::default());
+        let font_cache = FontCache::new(Arc::default());
         let resources = PageResources::new(doc, page_id);
 
         Self {
@@ -748,7 +747,7 @@ impl<'doc> PageRenderer<'doc> {
     /// of this renderer's document, instead of a store private to the page.
     /// Call before execute.
     pub fn set_document_fonts(&mut self, fonts: Arc<DocumentFonts>) {
-        self.font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), fonts);
+        self.font_cache = FontCache::new(fonts);
     }
 
     /// Images skipped so far on this page; also returned in
