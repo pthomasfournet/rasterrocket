@@ -1,7 +1,9 @@
 //! Transparency groups composite as the group's own colour and alpha (ISO
 //! 32000-2 §11.4.7): pixels a group never paints are left alone whatever
 //! blend mode it is composited with, and a blend mode applied inside a
-//! non-isolated group blends with the backdrop under the group.
+//! non-isolated group blends with the backdrop under the group.  In a
+//! knockout group (§11.4.6.2) each object composites with the group's
+//! initial backdrop and, within its shape, replaces the objects before it.
 
 #[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
 mod common;
@@ -240,4 +242,68 @@ fn a_blend_mode_in_nested_non_isolated_groups_sees_every_ancestor() {
         "red multiplied onto grey right of the bar"
     );
     assert_eq!(px[3], GREY, "unpainted pixel");
+}
+
+/// Two half-alpha black squares overlapping at 40..60: stacked in an
+/// ordinary group they darken the grey page twice; in a knockout group the
+/// second replaces the first where they overlap.
+#[test]
+fn objects_in_a_knockout_group_composite_with_its_initial_backdrop() {
+    let inner = "/A gs 0 g 20 20 40 40 re f 40 40 40 40 re f";
+    let stacked = rgb_at(
+        page("/A << /ca 0.5 >>", "/F Do", "/I true", inner),
+        &[(50, 50), (30, 30)],
+    );
+    assert_eq!(stacked[0], [32, 32, 32], "two layers over grey");
+    assert_eq!(stacked[1], [64, 64, 64], "one layer over grey");
+    for group in ["/I true /K true", "/I false /K true"] {
+        let knocked = rgb_at(
+            page("/A << /ca 0.5 >>", "/F Do", group, inner),
+            &[(50, 50), (30, 30), (70, 70), (10, 10)],
+        );
+        assert_eq!(knocked[0], [64, 64, 64], "{group}: the second square alone");
+        assert_eq!(knocked[1], [64, 64, 64], "{group}: the first square");
+        assert_eq!(knocked[2], [64, 64, 64], "{group}: the second square");
+        assert_eq!(knocked[3], GREY, "{group}: unpainted pixel");
+    }
+}
+
+/// A blend mode inside a non-isolated knockout group blends with the
+/// backdrop under the group, not with the group's earlier content, which the
+/// object knocks out: blue multiplied onto the page's grey, where a
+/// non-knockout group multiplies it onto the group's white square.
+#[test]
+fn a_blend_mode_in_a_knockout_group_sees_only_the_initial_backdrop() {
+    let inner = "1 g 40 40 20 20 re f q /M gs 0 0 1 rg 40 40 20 20 re f Q";
+    let px = rgb_at(
+        page("/M << /BM /Multiply >>", "/F Do", "/I false /K true", inner),
+        &[(50, 50), (10, 10)],
+    );
+    assert_eq!(px[0], BLUE_ON_GREY, "blue multiplied with the page's grey");
+    assert_eq!(px[1], GREY, "unpainted pixel");
+}
+
+/// An object's shape interpolates between the group before it and the object
+/// over the initial backdrop: a half-alpha white triangle whose hypotenuse
+/// bisects the pixel at (50, 50) leaves that pixel half black square, half
+/// white-at-half-alpha over grey.
+#[test]
+fn a_partially_covered_pixel_interpolates_by_the_object_shape() {
+    let inner = "0 g 30 40 30 20 re f /A gs 1 g 40 40 m 60 40 l 60 60 l h f";
+    let px = rgb_at(
+        page("/A << /ca 0.5 >>", "/F Do", "/I false /K true", inner),
+        &[(50, 50), (45, 55), (55, 45)],
+    );
+    // ½ · black + ½ · (white at α ½ over grey = 191) = 96.
+    assert!(
+        px[0].iter().all(|&v| (94..=98).contains(&v)),
+        "bisected pixel: {:?}",
+        px[0]
+    );
+    assert_eq!(px[1], [0, 0, 0], "the black square where uncovered");
+    assert!(
+        px[2].iter().all(|&v| v.abs_diff(191) <= 1),
+        "white at half alpha over grey: {:?}",
+        px[2]
+    );
 }

@@ -63,7 +63,8 @@ impl PageRenderer<'_> {
 
         // The mask group is painted with the graphics state in effect at
         // `gs`, except that the soft mask is `None`, the alpha constants are
-        // 1 and the blend mode is `Normal`.
+        // 1 and the blend mode is `Normal`.  The canvas is a group of its
+        // own, not the knockout group that may be in effect.
         self.gstate.save();
         {
             let gs = self.gstate.current_mut();
@@ -72,10 +73,12 @@ impl PageRenderer<'_> {
             gs.stroke_alpha = 255;
             gs.blend_mode = BlendMode::Normal;
         }
+        let knockout = std::mem::replace(&mut self.knockout, false);
         let mut canvas = Bitmap::<Rgb8>::new(self.width, self.height, 1, true);
         std::mem::swap(&mut self.bitmap, &mut canvas);
         self.do_form_xobject(&form);
         std::mem::swap(&mut self.bitmap, &mut canvas);
+        self.knockout = knockout;
         self.gstate.restore();
 
         let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
@@ -96,13 +99,27 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// Run `paint` — the painting of one object within `region`, the
-    /// pixels it can touch — under the soft mask in effect, if any.
+    /// Run `paint` — the painting of one object of constant alpha `alpha`
+    /// within `region`, the pixels it can touch — under the soft mask in
+    /// effect, if any, and knocking out the group's earlier content within
+    /// the object's shape when the group being painted into is a knockout
+    /// group (see [`Self::paint_knocking_out`]).
     ///
     /// The mask is removed from the graphics state while `paint` runs, so
     /// that painting it performs through other primitives (a Type 3 glyph's
     /// content, a group's compositing) is not masked a second time.
-    pub(super) fn paint_masked<R>(
+    pub(super) fn paint_object<R>(
+        &mut self,
+        region: Option<PixelRect>,
+        alpha: u8,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.paint_knocking_out(region, alpha, |r| r.paint_masked(region, paint))
+    }
+
+    /// Run `paint` — the painting of one object within `region` — under the
+    /// soft mask in effect, if any.
+    fn paint_masked<R>(
         &mut self,
         region: Option<PixelRect>,
         paint: impl FnOnce(&mut Self) -> R,
@@ -231,16 +248,18 @@ struct MaskView<'a> {
 
 /// The pixels of a rectangle of the bitmap, captured before an object is
 /// painted.
-struct Snapshot {
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    color: Vec<u8>,
-    alpha: Option<Vec<u8>>,
+pub(super) struct Snapshot {
+    pub(super) x0: u32,
+    pub(super) y0: u32,
+    pub(super) x1: u32,
+    /// Colour bytes, three per pixel, row-major over the rectangle.
+    pub(super) color: Vec<u8>,
+    /// Alpha per pixel, or `None` for a bitmap without an alpha plane.
+    pub(super) alpha: Option<Vec<u8>>,
 }
 
 impl Snapshot {
-    fn take(bitmap: &Bitmap<Rgb8>, region: PixelRect) -> Self {
+    pub(super) fn take(bitmap: &Bitmap<Rgb8>, region: PixelRect) -> Self {
         let PixelRect { x0, y0, x1, y1 } = region;
         let (cx0, cx1) = (x0 as usize * 3, x1 as usize * 3);
         let (ax0, ax1) = (x0 as usize, x1 as usize);

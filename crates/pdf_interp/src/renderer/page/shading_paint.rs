@@ -121,7 +121,8 @@ impl PageRenderer<'_> {
         // The shading is one object under the soft mask in effect; it can
         // paint the whole clip.
         let region = PixelRect::of_clip(&clip, self.width, self.height);
-        self.paint_masked(region, |r| match &shading.result {
+        let alpha = self.gstate.current().fill_alpha;
+        self.paint_object(region, alpha, |r| match &shading.result {
             ShadingResult::Pattern(pattern) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),

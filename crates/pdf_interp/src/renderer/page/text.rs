@@ -113,7 +113,8 @@ impl PageRenderer<'_> {
         // The glyphs are one object under the soft mask in effect.
         if let Some(t3) = &descriptor.type3 {
             let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height);
-            self.paint_masked(region, |r| {
+            let alpha = self.gstate.current().fill_alpha;
+            self.paint_object(region, alpha, |r| {
                 r.show_text_type3(
                     bytes,
                     t3,
@@ -454,7 +455,8 @@ impl PageRenderer<'_> {
                 self.width,
                 self.height,
             );
-            self.paint_masked(region, |r| {
+            let alpha = self.gstate.current().fill_alpha;
+            self.paint_object(region, alpha, |r| {
                 for rec in &records {
                     #[expect(
                         clippy::cast_possible_wrap,

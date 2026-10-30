@@ -269,12 +269,17 @@ pub struct FormXObject {
     pub transparency: Option<TransparencyGroupParams>,
 }
 
-/// Parameters extracted from a Form `XObject`'s `Group` dictionary.
-#[derive(Clone, Copy, Debug)]
+/// The attributes of a transparency group dictionary (PDF §11.6.6), of a
+/// form `XObject` or of a page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransparencyGroupParams {
-    /// `I` flag: isolated group (default: false).  The `K` (knockout) flag
-    /// is not read: objects in a group composite over one another.
+    /// `I`: the group is isolated, so blend modes inside it do not see the
+    /// backdrop under it (default: false).
     pub isolated: bool,
+    /// `K`: the group is a knockout group, in which each object composites
+    /// with the group's initial backdrop rather than over the objects
+    /// before it (default: false).
+    pub knockout: bool,
 }
 
 /// The identity of a resource object (a font, pattern or shading
@@ -832,19 +837,23 @@ pub(crate) fn read_bbox(dict: &Dictionary) -> Option<[f64; 4]> {
     Some(r)
 }
 
-/// Extract transparency group parameters from a Form `XObject` stream dictionary.
-///
-/// Returns `Some` when `Group /S /Transparency` is present; `None` otherwise.
-fn read_transparency_group(doc: &Document, dict: &Dictionary) -> Option<TransparencyGroupParams> {
+/// The transparency group attributes of `dict`, a form `XObject` stream
+/// dictionary or a page dictionary: `Some` when its `Group` has
+/// `/S /Transparency`, `None` otherwise.
+#[must_use]
+pub fn read_transparency_group(
+    doc: &Document,
+    dict: &Dictionary,
+) -> Option<TransparencyGroupParams> {
     let grp_obj = dict.get(b"Group")?;
     let grp = resolve_dict(doc, grp_obj)?;
-    // Must be /S /Transparency.
     if grp.get(b"S")?.as_name()? != b"Transparency" {
         return None;
     }
     let bool_flag = |key: &[u8]| grp.get(key).and_then(Object::as_bool).unwrap_or(false);
     Some(TransparencyGroupParams {
         isolated: bool_flag(b"I"),
+        knockout: bool_flag(b"K"),
     })
 }
 

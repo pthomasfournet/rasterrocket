@@ -9,6 +9,8 @@
 //! - `text` — `show_text` and `show_text_type3` rendering.
 //! - `patterns` — `resolve_pattern`, `resolve_fill_pattern` and `render_pattern_tile`.
 //! - `shading_paint` — the `sh` operator and shading-pattern fills and strokes.
+//! - `soft_mask` — `ExtGState` soft masks and the painting of one object under them.
+//! - `knockout` — the painting of one object in a knockout group.
 //! - `text_ops` — `GlyphRecord` and `text_to_device` helpers.
 //! - `annotations` — annotation appearance stream rendering.
 //! - `gpu_ops` — GPU-accelerated fill dispatch.
@@ -52,6 +54,7 @@ mod gpu_ops;
 mod image_memo;
 mod image_reduce;
 mod image_sampler;
+mod knockout;
 mod operators;
 mod pattern_memo;
 mod patterns;
@@ -409,6 +412,10 @@ pub struct PageRenderer<'doc> {
     /// The backdrop of the non-isolated transparency group being painted
     /// into, consulted by blend modes applied inside it; `None` outside one.
     group_backdrop: Option<Arc<Backdrop>>,
+    /// Whether the transparency group being painted into is a knockout
+    /// group, in which each object composites with the group's initial
+    /// backdrop (see the `knockout` module).
+    knockout: bool,
     /// Transparent page-sized bitmaps for transparency groups, each
     /// returned cleared when its group is composited; one per nesting level
     /// is allocated over the page's life.
@@ -781,6 +788,7 @@ impl<'doc> PageRenderer<'doc> {
             pattern_depth: 0,
             pattern_ctm: initial_ctm,
             group_backdrop: None,
+            knockout: false,
             group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
             current_image: None,
@@ -1457,7 +1465,8 @@ impl<'doc> PageRenderer<'doc> {
         let hinted = path.with_fill_adjust_hints();
         let path = hinted.as_ref().unwrap_or(path);
         let region = self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), 1.0);
-        self.paint_masked(region, |r| r.fill_within(path, even_odd, region));
+        let alpha = self.gstate.current().fill_alpha;
+        self.paint_object(region, alpha, |r| r.fill_within(path, even_odd, region));
     }
 
     /// Fill `path`, whose pixels lie within `region`.
@@ -1603,7 +1612,8 @@ impl<'doc> PageRenderer<'doc> {
 
     fn stroke_path_at(&mut self, path: &raster::path::Path, line_width: f64) {
         let region = self.stroke_bounds(path, line_width);
-        self.paint_masked(region, |r| r.stroke_within(path, line_width, region));
+        let alpha = self.gstate.current().stroke_alpha;
+        self.paint_object(region, alpha, |r| r.stroke_within(path, line_width, region));
     }
 
     /// The current line width, raised so the stroke is at least one device
@@ -1943,6 +1953,13 @@ impl<'doc> PageRenderer<'doc> {
             .as_ref()
             .and_then(|_| self.gstate.current_mut().soft_mask.take());
 
+        // Inside the group, objects knock out one another when it is a
+        // knockout group, whatever the enclosing group is.
+        let parent_knockout = group.as_ref().map(|_| {
+            let knockout = form.transparency.is_some_and(|tg| tg.knockout);
+            std::mem::replace(&mut self.knockout, knockout)
+        });
+
         // Blend modes inside the group see its own backdrop: the parent's
         // pixels for a non-isolated group, nothing for an isolated one.
         let parent_backdrop = group.as_mut().map(|g| {
@@ -1967,22 +1984,27 @@ impl<'doc> PageRenderer<'doc> {
         self.execute_content_stream(&ops);
         self.gstate.lower_floor(floor);
 
-        // Swap the group bitmap back and composite using the parent's opacity/blend
-        // (captured before gstate.save() — the form's own state is irrelevant here).
-        if let (Some(mut g), Some(parent_backdrop)) = (group, parent_backdrop) {
+        // Swap the group bitmap back and composite it as one object of the
+        // parent group, using the parent's opacity/blend (captured before
+        // gstate.save() — the form's own state is irrelevant here).
+        if let (Some(mut g), Some(parent_backdrop), Some(parent_knockout)) =
+            (group, parent_backdrop, parent_knockout)
+        {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
             self.group_backdrop = parent_backdrop;
+            self.knockout = parent_knockout;
             let backdrop = self.blend_backdrop(parent_blend_mode);
             let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode, backdrop.as_deref());
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);
             // Residual Clip is unused — parent gstate is restored immediately below.
-            let (_, bitmap) = match group_mask {
-                Some(mask) => self.paint_through_soft_mask(&mask, region, |r| {
-                    paint_group(&mut r.bitmap, g, &pipe)
-                }),
-                None => paint_group(&mut self.bitmap, g, &pipe),
-            };
+            let (_, bitmap) =
+                self.paint_knocking_out(region, parent_fill_alpha, |r| match group_mask {
+                    Some(mask) => r.paint_through_soft_mask(&mask, region, |r| {
+                        paint_group(&mut r.bitmap, g, &pipe)
+                    }),
+                    None => paint_group(&mut r.bitmap, g, &pipe),
+                });
             self.group_pool.push(bitmap);
         }
 
@@ -2204,7 +2226,7 @@ impl<'doc> PageRenderer<'doc> {
 
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
-        let mut paint = |r: &mut Self| {
+        let paint = |r: &mut Self| {
             r.composite_image(
                 img,
                 &ctm,
@@ -2213,11 +2235,12 @@ impl<'doc> PageRenderer<'doc> {
                 &mut grid_clip,
             );
         };
+        let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
+        let alpha = self.gstate.current().fill_alpha;
         if decoded.own_soft_mask {
-            paint(self);
+            self.paint_knocking_out(region, alpha, paint);
         } else {
-            let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
-            self.paint_masked(region, paint);
+            self.paint_object(region, alpha, paint);
         }
     }
 

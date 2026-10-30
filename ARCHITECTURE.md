@@ -172,8 +172,11 @@ a pool of transparent bitmaps, one per nesting level, and `paint_group`
 composites and clears that region only, so per-group cost scales with the
 region. Every group accumulates its own colour and alpha from transparent; a
 non-isolated group also keeps a copy of the backdrop under it, which blend
-modes inside the group consult (ISO 32000-2 §11.4.7). Knockout groups clear
-the accumulated alpha per object.
+modes inside the group consult (ISO 32000-2 §11.4.7). In a knockout group
+(`/K true`, §11.4.6.2) the interpreter paints each object onto its region
+cleared to transparent and merges the result with the group as it was,
+interpolating by the object's shape (`renderer/page/knockout.rs`), so every
+object composites with the group's initial backdrop.
 
 **Soft masks**
 An `ExtGState` `/SMask` renders its group into a page-sized mask plane
@@ -364,7 +367,9 @@ renderer/
                        for text and choice fields, /NeedAppearances is set
     patterns.rs      — tiling patterns on the pattern lattice
     shading_paint.rs — `sh` and shading patterns
-    soft_mask.rs     — ExtGState SMask: luminosity / alpha masks
+    soft_mask.rs     — ExtGState SMask: luminosity / alpha masks; one
+                       object's painting under the mask in effect
+    knockout.rs      — one object's painting in a knockout group
     pixel_rect.rs    — device-pixel rectangles (group and snapshot bounds)
     image_sampler.rs — fixed-point sampling grid; nearest / bilinear
     image_reduce.rs  — area-averaging of minified images
