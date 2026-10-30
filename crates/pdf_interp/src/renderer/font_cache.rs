@@ -137,11 +137,13 @@ pub struct FontCache {
 }
 
 impl FontCache {
-    /// Create a new cache resolving through the document store `shared`.
+    /// Create a new cache resolving through the document store `shared`,
+    /// rasterising glyphs with 8-bit coverage when `antialias` is set and
+    /// bilevel otherwise.
     #[must_use]
-    pub fn new(shared: Arc<DocumentFonts>) -> Self {
+    pub fn new(shared: Arc<DocumentFonts>, antialias: bool) -> Self {
         Self {
-            engine: FontEngine::with_face_ids(true, Arc::clone(&shared.face_ids)),
+            engine: FontEngine::with_face_ids(antialias, Arc::clone(&shared.face_ids)),
             glyph_cache: shared.glyphs.clone(),
             shared,
             descriptors: HashMap::new(),
@@ -752,7 +754,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(Arc::default());
+        let mut cache = FontCache::new(Arc::default(), true);
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");
@@ -788,7 +790,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(Arc::default());
+        let mut cache = FontCache::new(Arc::default(), true);
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");
@@ -833,7 +835,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(Arc::default());
+        let mut cache = FontCache::new(Arc::default(), true);
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("embedded TrueType face loads");
@@ -883,7 +885,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(Arc::default());
+        let mut cache = FontCache::new(Arc::default(), true);
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");
@@ -930,7 +932,7 @@ mod tests {
                 ..SubstituteStyle::default()
             },
         };
-        let mut cache = FontCache::new(Arc::default());
+        let mut cache = FontCache::new(Arc::default(), true);
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");

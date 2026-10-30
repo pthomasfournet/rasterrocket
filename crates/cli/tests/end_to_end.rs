@@ -226,6 +226,46 @@ fn gray_page(pdf: &[u8], args: &[&str]) -> (u32, u32, Vec<u8>) {
     (w, h, data)
 }
 
+/// One 120 × 60 pt page with a diagonal-edged fill and a line of text.
+fn edges_pdf() -> Vec<u8> {
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 60] \
+           /Resources << /Font << /F 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object(
+            "",
+            b"0 g 3.3 2.7 m 117.1 22.9 l 31.4 57.2 l h f \
+              BT /F 13.7 Tf 5.3 40.1 Td (Edges) Tj ET",
+        ),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ])
+}
+
+/// Number of pixels that are neither black nor white.
+fn grey_count(pixels: &[u8]) -> usize {
+    pixels.iter().filter(|&&v| v != 0 && v != 255).count()
+}
+
+#[test]
+fn antialias_flags_switch_edge_coverage() {
+    let pdf = edges_pdf();
+    let both = gray_page(&pdf, &[]);
+    let no_text = gray_page(&pdf, &["--aa", "no"]);
+    let no_vector = gray_page(&pdf, &["--aaVector", "no"]);
+    let neither = gray_page(&pdf, &["--aa", "no", "--aaVector", "no"]);
+    assert!(grey_count(&both.2) > 0, "antialiased edges are partial");
+    assert_ne!(no_text.2, both.2, "--aa no changes the glyphs");
+    assert_ne!(no_vector.2, both.2, "--aaVector no changes the fill");
+    assert_ne!(no_text.2, no_vector.2, "the flags govern different content");
+    assert_eq!(
+        grey_count(&neither.2),
+        0,
+        "with both off every edge is hard"
+    );
+}
+
 #[test]
 fn hide_annotations_draws_the_page_content_alone() {
     let pdf = annotated_pdf();

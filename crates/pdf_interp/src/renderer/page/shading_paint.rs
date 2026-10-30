@@ -160,6 +160,7 @@ impl PageRenderer<'_> {
         flatness: f64,
         shading: &ResolvedShading,
     ) {
+        let antialias = self.vector_antialias;
         let paint = |bitmap: &mut Bitmap<Rgb8>, clip: &Clip, src: &PipeSrc<'_>| {
             let fill_fn = if even_odd {
                 eo_fill::<Rgb8>
@@ -174,7 +175,7 @@ impl PageRenderer<'_> {
                 src,
                 &DEVICE_MATRIX,
                 flatness,
-                true,
+                antialias,
             );
         };
         if let Some(bg) = shading.background {

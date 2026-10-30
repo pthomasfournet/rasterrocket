@@ -464,6 +464,7 @@ impl PageRenderer<'_> {
         let doc = self.resources.doc();
         let mut child = PageRenderer::new(width, height, doc, desc.stream_id);
         child.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
+        child.set_antialias(self.text_antialias, self.vector_antialias);
         child.bitmap = Bitmap::new(width, height, 1, true);
         // Propagate pattern_depth so a pattern stream that recursively
         // invokes another pattern (or itself) hits MAX_PATTERN_DEPTH instead

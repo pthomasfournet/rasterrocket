@@ -392,6 +392,14 @@ pub struct RasterOptions {
     /// Default `true`.
     pub annotations: bool,
 
+    /// Whether glyphs are antialiased; see [`SessionConfig::text_antialias`].
+    /// Default `true`.
+    pub text_antialias: bool,
+
+    /// Whether paths are antialiased; see [`SessionConfig::vector_antialias`].
+    /// Default `true`.
+    pub vector_antialias: bool,
+
     /// Whether an encrypted document may be decrypted; see
     /// [`SessionConfig::decrypt_authorized`].  Default `false`: an encrypted
     /// document is an error.
@@ -414,6 +422,8 @@ impl Default for RasterOptions {
             strict: false,
             purpose: RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         }
@@ -645,6 +655,8 @@ mod page_set_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -669,6 +681,8 @@ mod page_set_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };

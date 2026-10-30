@@ -140,12 +140,9 @@ pub const DEFAULT_VAAPI_DEVICE: &str = "auto";
 /// field only exists when the `cache` Cargo feature is enabled.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "cache",
-    expect(
-        clippy::struct_excessive_bools,
-        reason = "each bool is an independent caller-facing switch"
-    )
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent caller-facing switch"
 )]
 pub struct SessionConfig {
     /// Backend selection policy.
@@ -229,6 +226,18 @@ pub struct SessionConfig {
     /// Default `true`: every annotation shown for [`purpose`](Self::purpose)
     /// is drawn.  `false` renders the page content alone.
     pub annotations: bool,
+    /// Whether glyphs are drawn with antialiased (8-bit coverage) edges.
+    ///
+    /// Default `true`.  `false` rasterises each glyph bilevel: a pixel is
+    /// inked or not.  Text drawn as paths (Type 3 glyphs, stroked or
+    /// clipping render modes) follows [`vector_antialias`](Self::vector_antialias).
+    pub text_antialias: bool,
+    /// Whether path fills, strokes and clips are antialiased.
+    ///
+    /// Default `true`: coverage is sampled on a 4 × 4 grid per pixel.
+    /// `false` scan-converts at pixel centres, giving hard bilevel edges;
+    /// such fills always run on the CPU.
+    pub vector_antialias: bool,
 }
 
 impl SessionConfig {
@@ -254,6 +263,8 @@ impl SessionConfig {
             strict: false,
             purpose: RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
         }
     }
 

@@ -108,7 +108,8 @@ pub struct InterpGState {
     ///
     /// Constructed with `antialias: true` so path-clip scanners are built in
     /// AA-scaled coordinates, matching the `vector_antialias = true` mode used
-    /// by fill and stroke.
+    /// by fill and stroke; `PageRenderer::set_antialias` replaces it when
+    /// vector antialiasing is off.
     pub clip: Clip,
     /// Current fill colour.
     pub fill_color: RasterColor,

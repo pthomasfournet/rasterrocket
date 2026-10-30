@@ -206,6 +206,10 @@ impl From<pdf::PdfError> for RasterError {
 /// `Sync` because the document is read-only after construction, the GPU context
 /// is `Arc`-wrapped, and the VA-API decode queue is `Arc`-wrapped (its inner
 /// `mpsc::Sender` is `Send + Sync`).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent session switch copied from SessionConfig"
+)]
 pub struct RasterSession {
     pub(crate) doc: Arc<pdf::Document>,
     /// Fonts of `doc` resolved once and shared by every page rendered.
@@ -221,6 +225,10 @@ pub struct RasterSession {
     /// Draw annotations over the page content
     /// ([`crate::SessionConfig::annotations`]).
     pub(crate) annotations: bool,
+    /// Antialias glyphs ([`crate::SessionConfig::text_antialias`]).
+    pub(crate) text_antialias: bool,
+    /// Antialias paths ([`crate::SessionConfig::vector_antialias`]).
+    pub(crate) vector_antialias: bool,
     /// The document's interactive form type, reported in every page's
     /// [`PageDiagnostics::form_type`](crate::PageDiagnostics::form_type).
     pub(crate) form_type: pdf_interp::FormType,
@@ -566,6 +574,8 @@ fn open_session_with_doc(
         strict: config.strict,
         optional_content,
         annotations: config.annotations,
+        text_antialias: config.text_antialias,
+        vector_antialias: config.vector_antialias,
         form_type,
         javascript_warned: AtomicBool::new(false),
         #[cfg(not(feature = "vaapi"))]
@@ -845,6 +855,7 @@ fn render_page_rgb_with_geom(
     if let Some(cancel) = &params.cancel {
         renderer.set_cancel(cancel.flag());
     }
+    renderer.set_antialias(session.text_antialias, session.vector_antialias);
     renderer.set_document_fonts(Arc::clone(&session.fonts));
     renderer.set_optional_content(Arc::clone(&session.optional_content));
 
@@ -1223,6 +1234,8 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
         strict: opts.strict,
         purpose: opts.purpose,
         annotations: opts.annotations,
+        text_antialias: opts.text_antialias,
+        vector_antialias: opts.vector_antialias,
         decrypt_authorized: opts.decrypt_authorized,
         password: opts.password.clone(),
         ..SessionConfig::default()
@@ -1507,6 +1520,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         }
@@ -1578,6 +1593,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1618,6 +1635,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1681,6 +1700,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1853,6 +1874,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         }
@@ -1869,6 +1892,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1893,6 +1918,8 @@ mod channel_tests {
             strict: false,
             purpose: crate::RenderPurpose::View,
             annotations: true,
+            text_antialias: true,
+            vector_antialias: true,
             decrypt_authorized: false,
             password: None,
         };

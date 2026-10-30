@@ -95,6 +95,11 @@ version: the public API changes below are breaking.
 - `SessionConfig::annotations` and `RasterOptions::annotations` (default
   `true`); `false` renders page content without annotations. The CLI's
   `--hide-annotations`, previously parsed and ignored, sets it.
+- `SessionConfig` / `RasterOptions` `text_antialias` and `vector_antialias`
+  (default `true`) switch glyph and path antialiasing; `false` draws hard,
+  bilevel edges. The CLI's `--aa no` and `--aaVector no`, previously ignored,
+  set them. `pdf_interp::renderer::FontCache::new` takes the glyph
+  antialiasing flag and `PageRenderer::set_antialias` selects both.
 
 **Parser.** Recovery of objects absent from or misplaced in the xref,
 including object-stream members and XRef-stream trailers; object streams

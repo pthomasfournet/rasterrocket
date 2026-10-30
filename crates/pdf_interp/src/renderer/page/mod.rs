@@ -378,6 +378,11 @@ pub struct PageRenderer<'doc> {
     pending_clip: Option<bool>,
     /// Font face cache for this page.
     font_cache: FontCache,
+    /// Rasterise glyphs with 8-bit coverage; `false` draws them bilevel.
+    text_antialias: bool,
+    /// Fill, stroke and clip paths with supersampled coverage; `false`
+    /// scan-converts them at pixel centres.
+    vector_antialias: bool,
     /// Resource accessor for the current page or innermost form.
     pub(super) resources: PageResources<'doc>,
     /// The page `/Rotate`, clockwise degrees, normalised to 0, 90, 180 or 270.
@@ -739,7 +744,7 @@ impl<'doc> PageRenderer<'doc> {
         let initial_ctm = view.initial_ctm();
         gstate.current_mut().ctm = initial_ctm;
 
-        let font_cache = FontCache::new(Arc::default());
+        let font_cache = FontCache::new(Arc::default(), true);
         let resources = PageResources::new(doc, page_id);
 
         Self {
@@ -751,6 +756,8 @@ impl<'doc> PageRenderer<'doc> {
             path: None,
             pending_clip: None,
             font_cache,
+            text_antialias: true,
+            vector_antialias: true,
             resources,
             form_depth: 0,
             active_forms: Vec::new(),
@@ -946,7 +953,24 @@ impl<'doc> PageRenderer<'doc> {
     /// of this renderer's document, instead of a store private to the page.
     /// Call before execute.
     pub fn set_document_fonts(&mut self, fonts: Arc<DocumentFonts>) {
-        self.font_cache = FontCache::new(fonts);
+        self.font_cache = FontCache::new(fonts, self.text_antialias);
+    }
+
+    /// Select antialiasing: `text` for glyph bitmaps, `vector` for path
+    /// fills, strokes and clips.  Both default to `true`.  Call before
+    /// execute: the page clip is reset to the whole bitmap in the matching
+    /// coverage mode.
+    pub fn set_antialias(&mut self, text: bool, vector: bool) {
+        self.text_antialias = text;
+        self.vector_antialias = vector;
+        self.font_cache = FontCache::new(Arc::clone(self.font_cache.document_fonts()), text);
+        self.gstate.current_mut().clip = raster::Clip::new(
+            0.0,
+            0.0,
+            f64::from(self.width),
+            f64::from(self.height),
+            vector,
+        );
     }
 
     /// Draw optional content as `optional_content` configures it, and
@@ -1472,6 +1496,7 @@ impl<'doc> PageRenderer<'doc> {
         // runs under `Auto` / `ForceCuda`.
         #[cfg(feature = "vulkan")]
         if tiled.is_none()
+            && self.vector_antialias
             && let Some(vk) = self.vk_backend.clone()
             && self.try_vk_aa_fill(path, even_odd, flatness, &pipe, &src, &vk)
         {
@@ -1479,6 +1504,7 @@ impl<'doc> PageRenderer<'doc> {
         }
         #[cfg(feature = "gpu-aa")]
         if tiled.is_none()
+            && self.vector_antialias
             && let Some(ctx) = self.gpu_ctx.clone()
             && self.try_gpu_aa_fill(path, even_odd, flatness, &pipe, &src, &ctx)
         {
@@ -1494,7 +1520,7 @@ impl<'doc> PageRenderer<'doc> {
                 &src,
                 &DEVICE_MATRIX,
                 flatness,
-                true,
+                self.vector_antialias,
             );
         } else {
             fill(
@@ -1505,7 +1531,7 @@ impl<'doc> PageRenderer<'doc> {
                 &src,
                 &DEVICE_MATRIX,
                 flatness,
-                true,
+                self.vector_antialias,
             );
         }
         drop(tiled);
@@ -1651,7 +1677,7 @@ impl<'doc> PageRenderer<'doc> {
             line_dash: &line_dash,
             line_dash_phase,
             stroke_adjust: false,
-            vector_antialias: true,
+            vector_antialias: self.vector_antialias,
         };
 
         // Resolve the stroke source — pattern or solid colour.  A pattern

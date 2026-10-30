@@ -98,8 +98,8 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--aa yes\|no` | `yes` | Enable raster anti-aliasing. |
-| `--aaVector yes\|no` | `yes` | Enable vector anti-aliasing. |
+| `--aa yes\|no` | `yes` | Antialias text. `no` draws glyphs with hard, bilevel edges. |
+| `--aaVector yes\|no` | `yes` | Antialias path fills, strokes and clips. `no` draws them with hard, bilevel edges. |
 | `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
 | `--overprint` | off | Enable overprint preview. |
 | `--thinlinemode MODE` | `default` | Thin-line rendering: `default`, `solid`, or `shape`. |

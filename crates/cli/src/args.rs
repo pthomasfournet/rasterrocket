@@ -146,11 +146,13 @@ pub(crate) struct Args {
     pub jpeg_quality: u8,
 
     // ── Rendering options ────────────────────────────────────────────────────
-    /// Enable anti-aliasing (default true).
+    /// Antialias text (default yes).  `no` draws glyphs with hard,
+    /// bilevel edges.
     #[arg(long = "aa", value_name = "yes|no", default_value = "yes")]
     pub antialias: AaFlag,
 
-    /// Enable vector anti-aliasing (default true).
+    /// Antialias path fills, strokes and clips (default yes).  `no` draws
+    /// them with hard, bilevel edges.
     #[arg(long = "aaVector", value_name = "yes|no", default_value = "yes")]
     pub vector_antialias: AaFlag,
 
@@ -587,6 +589,8 @@ impl Args {
         config.strict = self.strict;
         config.purpose = self.purpose.into();
         config.annotations = !self.hide_annotations;
+        config.text_antialias = self.antialias == AaFlag::Yes;
+        config.vector_antialias = self.vector_antialias == AaFlag::Yes;
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -812,6 +816,20 @@ mod page_list_tests {
             .session_config()
             .unwrap();
         assert!(!hidden.annotations);
+    }
+
+    #[test]
+    fn antialias_flags_reach_session_config() {
+        let config = base_args().session_config().unwrap();
+        assert!(config.text_antialias && config.vector_antialias);
+        let config = Args::parse_from(["rrocket", "--aa", "no", "in.pdf", "out"])
+            .session_config()
+            .unwrap();
+        assert!(!config.text_antialias && config.vector_antialias);
+        let config = Args::parse_from(["rrocket", "--aaVector", "no", "in.pdf", "out"])
+            .session_config()
+            .unwrap();
+        assert!(config.text_antialias && !config.vector_antialias);
     }
 
     #[test]
