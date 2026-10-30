@@ -44,11 +44,8 @@ const DPI: f32 = 100.0;
 fn fixture_pages(name: &str, pages: &[u32]) -> Option<Vec<RenderedPage>> {
     let path = corpus_fixture(name)?;
     let set = rasterrocket::PageSet::new(pages.iter().copied()).expect("page set");
-    let opts = RasterOptions {
-        dpi: DPI,
-        pages: Some(set),
-        ..RasterOptions::default()
-    };
+    let mut opts = RasterOptions::new(DPI);
+    opts.pages = Some(set);
     Some(
         raster_pdf(&path, &opts)
             .map(|(n, r)| r.unwrap_or_else(|e| panic!("{name} page {n}: {e}")))
@@ -94,10 +91,7 @@ fn image_pdf(img: &Gray) -> Vec<u8> {
 
 /// Render a one-image PDF of `img`.
 fn render_image(img: &Gray) -> Gray {
-    let opts = RasterOptions {
-        dpi: DPI,
-        ..RasterOptions::default()
-    };
+    let opts = RasterOptions::new(DPI);
     let pages: Vec<RenderedPage> = raster_pdf_from_bytes(image_pdf(img), &opts)
         .map(|(n, r)| r.unwrap_or_else(|e| panic!("capture page {n}: {e}")))
         .collect();

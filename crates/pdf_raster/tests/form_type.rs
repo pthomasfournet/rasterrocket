@@ -28,10 +28,7 @@ fn reported(catalog_extra: &str) -> [FormType; 3] {
     let pdf = document(catalog_extra);
     let config = rasterrocket::SessionConfig::with_policy(BackendPolicy::CpuOnly);
     let session = open_session_from_bytes(pdf.clone(), &config).expect("open session");
-    let opts = RasterOptions {
-        dpi: 36.0,
-        ..RasterOptions::default()
-    };
+    let opts = RasterOptions::new(36.0);
     let (_, page) = raster_pdf_from_bytes(pdf, &opts).next().expect("one page");
     let rendered = page.expect("page renders").diagnostics.form_type;
     let prescanned = prescan_session(&session, 1).expect("prescan").form_type;

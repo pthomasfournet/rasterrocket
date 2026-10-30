@@ -266,6 +266,7 @@ impl ImageColorSpace {
 /// classify image content without re-reading the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
+#[non_exhaustive]
 pub enum ImageFilter {
     /// `DCTDecode` — JPEG baseline or progressive.
     Dct = 0,

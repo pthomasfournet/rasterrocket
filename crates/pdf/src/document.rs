@@ -56,6 +56,7 @@ pub struct PageContent {
 
 /// A `/Contents` element skipped because it holds no decodable content.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ContentFailure {
     /// Object number of the element.
     pub object: u32,

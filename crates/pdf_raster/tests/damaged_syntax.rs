@@ -74,10 +74,8 @@ fn undecodable_content_element_is_reported() {
         ],
     );
     let render = |strict| {
-        let opts = RasterOptions {
-            strict,
-            ..RasterOptions::default()
-        };
+        let mut opts = RasterOptions::default();
+        opts.strict = strict;
         let mut pages: Vec<_> = raster_pdf_from_bytes(pdf.clone(), &opts).collect();
         assert_eq!(pages.len(), 1, "one page expected");
         pages.remove(0).1

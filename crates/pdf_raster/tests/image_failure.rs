@@ -38,11 +38,8 @@ fn page_with_corrupt_image(extra_ops: &str) -> Vec<u8> {
 }
 
 fn render(pdf: Vec<u8>, strict: bool) -> Result<RenderedPage, RasterError> {
-    let opts = RasterOptions {
-        dpi: DPI,
-        strict,
-        ..RasterOptions::default()
-    };
+    let mut opts = RasterOptions::new(DPI);
+    opts.strict = strict;
     let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
     assert_eq!(pages.len(), 1, "one page expected");
     pages.remove(0).1

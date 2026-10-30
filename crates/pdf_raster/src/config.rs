@@ -21,6 +21,7 @@ use crate::{Password, RenderPurpose};
 /// rebuilding.  Explicit construction (`SessionConfig { policy: ..., .. }`)
 /// bypasses the env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum BackendPolicy {
     /// Auto: prefer Vulkan when present, fall through to CUDA, then CPU.
     /// Silent fallback at every step.
@@ -99,6 +100,22 @@ impl BackendPolicy {
             );
             Self::Auto
         })
+    }
+}
+
+impl BackendPolicy {
+    /// The name [`FromStr`](std::str::FromStr) and `PDF_RASTER_BACKEND`
+    /// accept for this policy: `auto`, `cpu`, `cuda`, `vaapi` or `vulkan`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::CpuOnly => "cpu",
+            Self::ForceCuda => "cuda",
+            #[cfg(feature = "vaapi")]
+            Self::ForceVaapi => "vaapi",
+            Self::ForceVulkan => "vulkan",
+        }
     }
 }
 
@@ -331,6 +348,19 @@ mod tests {
             BackendPolicy::from_str("vulkan"),
             Ok(BackendPolicy::ForceVulkan)
         );
+    }
+
+    #[test]
+    fn backend_policy_name_round_trips() {
+        use std::str::FromStr;
+        for policy in [
+            BackendPolicy::Auto,
+            BackendPolicy::CpuOnly,
+            BackendPolicy::ForceCuda,
+            BackendPolicy::ForceVulkan,
+        ] {
+            assert_eq!(BackendPolicy::from_str(policy.name()), Ok(policy));
+        }
     }
 
     #[test]

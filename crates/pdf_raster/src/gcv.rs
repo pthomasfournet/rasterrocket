@@ -16,6 +16,7 @@ use crate::RenderedPage;
 
 /// Budget for a single GCV `images:annotate` request.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GcvBudget {
     /// Max length of the base64 string. GCV rejects JSON requests whose
     /// inline `content` exceeds 10 MB of base64.
@@ -39,6 +40,7 @@ impl Default for GcvBudget {
 
 /// A GCV-ready encoded page.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GcvImage {
     /// Fitted baseline grayscale JPEG bytes — guaranteed within budget.
     /// The universal artifact: write to disk, upload to GCS for
@@ -65,6 +67,7 @@ impl GcvImage {
 
 /// Why a page could not be fitted into a [`GcvBudget`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum GcvError {
     /// The page cannot fit the budget even at `min_quality` and the
     /// resolution floor, or it would exceed GCV's 75 MP OCR limit even

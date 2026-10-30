@@ -7,6 +7,7 @@ use crate::resources::dict_ext::DictExt;
 
 /// The interactive form a document carries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FormType {
     /// No `/AcroForm` in the catalog.
     #[default]

@@ -9,7 +9,9 @@
 //! use std::path::Path;
 //! use rasterrocket::{RasterOptions, raster_pdf};
 //!
-//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, pages: None, ..RasterOptions::default() };
+//! let mut opts = RasterOptions::new(300.0);
+//! opts.last_page = 5;
+//! opts.deskew = true;
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     match result {
 //!         Ok(page) => {
@@ -65,14 +67,8 @@
 //! // without blocking on recv themselves.  For non-CPU consumer work
 //! // (Tesseract OCR, disk I/O), prefer `std::thread::spawn` to keep the
 //! // rayon pool free for the renderer.
-//! let opts = RasterOptions {
-//!     dpi: 300.0,
-//!     first_page: 1,
-//!     last_page: u32::MAX,
-//!     deskew: true,
-//!     pages: None,
-//!     ..RasterOptions::default()
-//! };
+//! let mut opts = RasterOptions::new(300.0);
+//! opts.deskew = true;
 //! let rx = render_channel(Path::new("scan.pdf"), &opts, 4); // 4-page buffer
 //! while let Ok((page_num, result)) = rx.recv() {
 //!     match result {
@@ -97,14 +93,9 @@
 //! use rasterrocket::{PageSet, RasterOptions, raster_pdf};
 //!
 //! let pages = PageSet::new(vec![1, 5, 23, 100]).unwrap();
-//! let opts = RasterOptions {
-//!     dpi: 300.0,
-//!     first_page: 1,        // ignored when pages is Some
-//!     last_page: u32::MAX,  // ignored when pages is Some
-//!     deskew: true,
-//!     pages: Some(pages),
-//!     ..RasterOptions::default()
-//! };
+//! let mut opts = RasterOptions::new(300.0);
+//! opts.deskew = true;
+//! opts.pages = Some(pages); // first_page / last_page are then ignored
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     // Only pages 1, 5, 23, and 100 are rendered — intermediates are skipped.
 //!     match result {
@@ -349,6 +340,7 @@ impl<'a> IntoIterator for &'a PageSet {
     clippy::struct_excessive_bools,
     reason = "each bool is an independent caller-facing switch"
 )]
+#[non_exhaustive]
 pub struct RasterOptions {
     /// Must be > 0.  Pass this same value to Tesseract's `set_source_resolution`
     /// — lying about DPI degrades OCR accuracy because Tesseract uses it for
@@ -411,6 +403,21 @@ pub struct RasterOptions {
     pub password: Option<Password>,
 }
 
+impl RasterOptions {
+    /// Options for rendering every page at `dpi`, every other field at its
+    /// [`Default`] value.
+    ///
+    /// The struct is `#[non_exhaustive]`: start from this or from
+    /// [`RasterOptions::default`] and assign the fields to change.
+    #[must_use]
+    pub fn new(dpi: f32) -> Self {
+        Self {
+            dpi,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for RasterOptions {
     fn default() -> Self {
         Self {
@@ -432,6 +439,7 @@ impl Default for RasterOptions {
 
 /// A single rendered page, returned as 8-bit grayscale pixels.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RenderedPage {
     /// Page number (1-based).
     pub page_num: u32,

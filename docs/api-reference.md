@@ -4,6 +4,8 @@
 
 The `rasterrocket` crate is the integration entry point. It wraps `rasterrocket-interp` and `rasterrocket-render` behind a simple, stable API.
 
+**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `FormType`, `ImageFilter`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle and stays exhaustive. `BackendPolicy::name()` is the inverse of its `FromStr`.
+
 ---
 
 ### `raster_pdf`
@@ -200,6 +202,7 @@ An opened, read-only document. `Sync + Send` — safe to share across Rayon thre
 
 ```rust
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RasterOptions {
     pub dpi: f32,
     pub first_page: u32,
@@ -233,9 +236,11 @@ pub struct RasterOptions {
 
 **Default:** `RasterOptions` implements `Default`:
 
+`RasterOptions` is `#[non_exhaustive]`: build it with `RasterOptions::new(dpi)` (every other field at its default) or `RasterOptions::default()`, then assign fields; struct literals and `..Default::default()` updates do not compile outside the crate.
+
 ```rust
-// Short form (dpi only, everything else defaults)
-let opts = RasterOptions { dpi: 150.0, ..RasterOptions::default() };
+let mut opts = RasterOptions::new(150.0);
+opts.deskew = true;
 ```
 
 Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `decrypt_authorized = false`, `password = None`.
@@ -278,14 +283,9 @@ A validated, sorted, deduplicated set of 1-based page numbers. The internal stor
 
 ```rust
 let pages = PageSet::new(vec![1, 5, 23, 100])?;
-let opts = RasterOptions {
-    dpi: 300.0,
-    first_page: 1,       // ignored — PageSet controls the range
-    last_page: u32::MAX, // ignored — PageSet controls the range
-    deskew: true,
-    pages: Some(pages),
-    ..RasterOptions::default()
-};
+let mut opts = RasterOptions::new(300.0);
+opts.deskew = true;
+opts.pages = Some(pages); // first_page / last_page are then ignored
 ```
 
 ---
@@ -479,6 +479,7 @@ No-op when none of the GPU decoder features (`nvjpeg`, `nvjpeg2k`, `gpu-jpeg-huf
 ### `RasterError`
 
 ```rust
+#[non_exhaustive]
 pub enum RasterError {
     InvalidOptions(String),
     Pdf(rasterrocket_interp::InterpError),
@@ -571,7 +572,7 @@ Encodes a `RenderedPage` to a grayscale JPEG guaranteed to fit Google Cloud Visi
 
 Strategy: try `start_quality` at native resolution; binary-search quality down toward `min_quality`; only if the quality floor still overflows, box-downscale (aspect-preserving, never below GCV's ~1024 px OCR short-side floor, never over the 75 MP server-side-resize cap) and retry. If no candidate fits without breaking those floors, returns `GcvError::Unfittable` — never an over-budget or oversized payload. `GcvImage::to_base64()` reproduces exactly the length measured during fitting (the proxy is byte-exact against the real encoding).
 
-`GcvBudget::default()` encodes the GCV limits directly. Pass `RasterOptions { deskew: false, .. }` for this path — GCV deskews internally. The raw `jpeg` field is the universal artifact (disk, GCS `files:asyncBatchAnnotate`); `to_base64()` is the inline-`content` form. No HTTP/auth/batching is performed — rasterrocket renders pixels, it is not a GCV API client. See the [LLM Vision OCR Integration](../../../wiki/LLM-Vision-OCR-Integration) wiki for end-to-end examples.
+`GcvBudget::default()` encodes the GCV limits directly. Leave `RasterOptions::deskew` off (the default) for this path — GCV deskews internally. The raw `jpeg` field is the universal artifact (disk, GCS `files:asyncBatchAnnotate`); `to_base64()` is the inline-`content` form. No HTTP/auth/batching is performed — rasterrocket renders pixels, it is not a GCV API client. See the [LLM Vision OCR Integration](../../../wiki/LLM-Vision-OCR-Integration) wiki for end-to-end examples.
 
 The `rasterrocket-encode` crate also exposes the underlying codec directly:
 

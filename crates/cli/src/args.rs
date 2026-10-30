@@ -543,18 +543,6 @@ pub(crate) enum BackendArg {
     Vulkan,
 }
 
-/// The `--backend` spelling of `policy`.
-const fn backend_name(policy: BackendPolicy) -> &'static str {
-    match policy {
-        BackendPolicy::Auto => "auto",
-        BackendPolicy::CpuOnly => "cpu",
-        BackendPolicy::ForceCuda => "cuda",
-        #[cfg(feature = "vaapi")]
-        BackendPolicy::ForceVaapi => "vaapi",
-        BackendPolicy::ForceVulkan => "vulkan",
-    }
-}
-
 impl Args {
     /// Build a [`SessionConfig`] from the `--backend` / `--vaapi-device` /
     /// `--vulkan-device` flags.
@@ -591,7 +579,7 @@ impl Args {
             return Err(format!(
                 "--vaapi-device has no effect with --backend {}.\n\
                  VA-API is only used with --backend auto or --backend vaapi.",
-                backend_name(policy)
+                policy.name()
             ));
         }
 
@@ -601,7 +589,7 @@ impl Args {
             return Err(format!(
                 "--vulkan-device has no effect with --backend {}.\n\
                  Vulkan is only used with --backend auto or --backend vulkan.",
-                backend_name(policy)
+                policy.name()
             ));
         }
 

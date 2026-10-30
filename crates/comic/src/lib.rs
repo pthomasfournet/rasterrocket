@@ -294,13 +294,10 @@ fn render_embedded_pdf(
     opts: &ComicOptions,
 ) -> Result<ComicPages, ComicError> {
     let bytes = archive.read_entry(name)?;
-    let ropts = pdf_raster::RasterOptions {
-        dpi: opts.dpi,
-        first_page: opts.first_page,
-        last_page: opts.last_page,
-        deskew: opts.deskew,
-        ..pdf_raster::RasterOptions::default()
-    };
+    let mut ropts = pdf_raster::RasterOptions::new(opts.dpi);
+    ropts.first_page = opts.first_page;
+    ropts.last_page = opts.last_page;
+    ropts.deskew = opts.deskew;
     let out: ComicPages = pdf_raster::raster_pdf_from_bytes(bytes, &ropts)
         .map(|(n, r)| (n, r.map_err(|e| ComicError::Pdf(e.to_string()))))
         .collect();

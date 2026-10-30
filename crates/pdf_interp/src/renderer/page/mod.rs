@@ -119,6 +119,7 @@ const _: () = assert!(
 /// Callers can use this to route pages to different OCR configurations without
 /// a separate post-hoc analysis pass.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PageDiagnostics {
     /// `true` when at least one image `XObject` or inline image was blitted.
     pub has_images: bool,
@@ -163,6 +164,7 @@ pub struct PageDiagnostics {
 /// An image the renderer skipped because it could not be decoded or drawn,
 /// or drew only partly because its stream lacked samples.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImageFailure {
     /// `XObject` resource name without the leading `/` (e.g. `Im0`); `None`
     /// for an inline image.

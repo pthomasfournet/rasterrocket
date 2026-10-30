@@ -78,10 +78,7 @@ fn missing_font_resource_draws_helvetica() {
         stream_object("", b"BT /F9 24 Tf 4 8 Td (AB) Tj ET"),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
     ];
-    let opts = RasterOptions {
-        dpi: 72.0,
-        ..RasterOptions::default()
-    };
+    let opts = RasterOptions::new(72.0);
     let (_, page) = raster_pdf_from_bytes(assemble_pdf(&objects), &opts)
         .next()
         .expect("one page");

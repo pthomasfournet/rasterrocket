@@ -78,7 +78,7 @@ fn print_backend_hint(policy: BackendPolicy, vaapi_device: Option<&str>, via_env
             source_hint("vulkan");
             print_vulkan_hint();
         }
-        BackendPolicy::Auto | BackendPolicy::CpuOnly => {
+        _ => {
             eprintln!("  hint: use --backend auto to fall back to CPU when GPU is unavailable,");
             eprintln!("        or --backend cpu to force CPU-only mode.");
         }

@@ -129,10 +129,7 @@ fn page_showing_code_65(encoding: &str) -> Vec<u8> {
 }
 
 fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions {
-        dpi: DPI,
-        ..RasterOptions::default()
-    };
+    let opts = RasterOptions::new(DPI);
     let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
     assert_eq!(pages.len(), 1, "one page expected");
     pages.remove(0).1.expect("page renders")

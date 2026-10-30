@@ -244,7 +244,7 @@ left is GCV's own round-trip.
 ```rust
 use rasterrocket::{RasterOptions, raster_pdf, encode_for_gcv, GcvBudget};
 
-let opts = RasterOptions { deskew: false, ..RasterOptions::default() };
+let opts = RasterOptions::default(); // deskew off: GCV deskews internally
 let budget = GcvBudget::default(); // 10 MB base64 ceiling baked in
 
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
@@ -285,7 +285,7 @@ and the page/annotation JavaScript-disclosure work).
 ```rust
 use rasterrocket::{RasterOptions, raster_pdf};
 
-let opts = RasterOptions { dpi: 300.0, ..RasterOptions::default() };
+let opts = RasterOptions::new(300.0);
 
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     let page = result?;

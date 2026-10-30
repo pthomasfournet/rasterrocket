@@ -27,6 +27,7 @@ pub use crate::page::{MAX_PX_AREA, MAX_PX_DIMENSION};
 
 /// Errors returned by [`crate::raster_pdf`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RasterError {
     /// [`RasterOptions`](crate::RasterOptions) fields violate documented constraints
     /// (e.g. `dpi ≤ 0`, `first_page > last_page`).

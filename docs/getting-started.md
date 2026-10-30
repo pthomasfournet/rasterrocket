@@ -107,7 +107,7 @@ Run `cargo add rasterrocket` to add the latest version. Pin to a specific versio
 use std::path::Path;
 use rasterrocket::{RasterOptions, raster_pdf};
 
-let opts = RasterOptions { dpi: 300.0, ..RasterOptions::default() };
+let opts = RasterOptions::new(300.0);
 
 for (page_num, result) in raster_pdf(Path::new("document.pdf"), &opts) {
     match result {
@@ -127,7 +127,8 @@ for (page_num, result) in raster_pdf(Path::new("document.pdf"), &opts) {
 ```rust
 use rasterrocket::{RasterOptions, raster_pdf};
 
-let opts = RasterOptions { dpi: 300.0, deskew: true, ..RasterOptions::default() };
+let mut opts = RasterOptions::new(300.0);
+opts.deskew = true;
 
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     let page = match result {
@@ -188,7 +189,9 @@ For multi-document pipelines, use `render_channel` to render pages in the backgr
 ```rust
 use rasterrocket::{RasterOptions, render_channel};
 
-let opts = RasterOptions { dpi: 300.0, last_page: 100, deskew: true, ..RasterOptions::default() };
+let mut opts = RasterOptions::new(300.0);
+opts.last_page = 100;
+opts.deskew = true;
 
 // capacity=4: up to 4 rendered pages buffered before the producer blocks
 let rx = render_channel(Path::new("scan.pdf"), &opts, 4);

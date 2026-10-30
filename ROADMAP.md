@@ -99,6 +99,14 @@ version: the public API changes below are breaking.
 - CLI `-x`/`-y`/`-W`/`-H` render only the selected area through a region
   render, and `--scale-to`, `--scale-to-x`, `--scale-to-y` size the page;
   all seven were parsed and ignored before.
+- `#[non_exhaustive]` on `RasterError`, `BackendPolicy`, `RenderPurpose`,
+  `FormType`, `ImageFilter`, `GcvError`, `RenderedPage`, `PageDiagnostics`,
+  `ImageFailure`, `ContentFailure`, `GcvImage`, `GcvBudget` and
+  `RasterOptions` (with `PageGeometry`, `RenderParams` and `SessionConfig`
+  already so), so later additions are not breaking. Build `RasterOptions`
+  with the new `RasterOptions::new(dpi)` or `default()` and assign fields;
+  `BackendPolicy::name()` gives the `--backend` / `PDF_RASTER_BACKEND`
+  spelling.
 - CLI `--overprint`, `--thinlinemode` and `--jpegopt` are removed: nothing
   read them (and `--jpeg` itself is refused), so they promised behaviour
   the binary does not have.

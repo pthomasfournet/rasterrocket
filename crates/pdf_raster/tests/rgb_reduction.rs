@@ -43,10 +43,7 @@ fn render(data: &[u8]) -> RenderedPage {
             data,
         ),
     ];
-    let opts = RasterOptions {
-        dpi: 72.0,
-        ..RasterOptions::default()
-    };
+    let opts = RasterOptions::new(72.0);
     let mut pages: Vec<_> = raster_pdf_from_bytes(assemble_pdf(&objects), &opts).collect();
     assert_eq!(pages.len(), 1, "one page expected");
     pages.remove(0).1.expect("page renders")

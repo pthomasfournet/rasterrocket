@@ -326,10 +326,8 @@ fn the_authorisation_gate_holds_whatever_the_password() {
                     variant.name
                 );
             }
-            let opts = RasterOptions {
-                password: password.map(Password::from),
-                ..RasterOptions::default()
-            };
+            let mut opts = RasterOptions::default();
+            opts.password = password.map(Password::from);
             let (_, page) = raster_pdf_from_bytes(enc.clone(), &opts)
                 .next()
                 .expect("one page result");
@@ -340,11 +338,9 @@ fn the_authorisation_gate_holds_whatever_the_password() {
             );
         }
         // Authorised, the simple API renders the document.
-        let opts = RasterOptions {
-            decrypt_authorized: true,
-            password: (!variant.user_password.is_empty()).then(|| Password::from(USER)),
-            ..RasterOptions::default()
-        };
+        let mut opts = RasterOptions::default();
+        opts.decrypt_authorized = true;
+        opts.password = (!variant.user_password.is_empty()).then(|| Password::from(USER));
         let (_, page) = raster_pdf_from_bytes(enc, &opts).next().expect("one page");
         assert!(page.is_ok(), "{}: authorised raster_pdf", variant.name);
     }
