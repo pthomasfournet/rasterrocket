@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 
+use crate::content::Operator;
 use crate::renderer::encodings::glyph_name_for_code;
 use crate::resources::cmap::{CMap, DecodedCode, parse_cmap};
 use crate::resources::cmap_predefined::predefined_cmap;
@@ -190,8 +191,9 @@ impl CidEncoding {
 /// Decoded `CharProc` entry for a single Type 3 glyph.
 #[derive(Debug, Clone)]
 pub struct Type3Glyph {
-    /// Decompressed content stream bytes for this glyph's paint procedure.
-    pub content: Vec<u8>,
+    /// The glyph's paint procedure, parsed once: every occurrence of the
+    /// glyph executes the same operator sequence.
+    pub ops: Vec<Operator>,
 }
 
 /// All data extracted from a Type 3 font dictionary.
@@ -750,7 +752,9 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -
                 }
             };
 
-            glyphs[usize::from(code)] = Some(Type3Glyph { content });
+            glyphs[usize::from(code)] = Some(Type3Glyph {
+                ops: crate::content::parse(&content),
+            });
         }
     } else {
         log::warn!("font/type3: CharProcs dict missing or unresolvable — no glyphs");

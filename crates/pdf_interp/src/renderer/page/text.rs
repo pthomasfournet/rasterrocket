@@ -523,8 +523,7 @@ impl PageRenderer<'_> {
         // fresh graphics state, not a text object).
         self.gstate.current_mut().text = TextState::default();
 
-        let ops = crate::content::parse(&glyph.content);
-        self.execute(&ops);
+        self.execute(&glyph.ops);
 
         self.form_depth -= 1;
         self.gstate.restore();
