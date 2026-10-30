@@ -177,7 +177,7 @@ fn parse_soft_mask(doc: &Document, d: &Dictionary) -> Option<SoftMaskParams> {
 /// `BM` is either a single `Name` or an array of names (priority list; the
 /// viewer uses the first one it supports).  Unknown names are silently ignored
 /// and `None` is returned, leaving the current blend mode unchanged.
-fn parse_blend_mode(d: &Dictionary) -> Option<BlendMode> {
+pub(crate) fn parse_blend_mode(d: &Dictionary) -> Option<BlendMode> {
     let obj = d.get(b"BM")?;
     match obj {
         Object::Name(n) => bm_name_to_mode(n),

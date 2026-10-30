@@ -871,6 +871,7 @@ fn render_page_rgb_with_geom(
     renderer.set_antialias(session.text_antialias, session.vector_antialias);
     renderer.set_document_fonts(Arc::clone(&session.fonts));
     renderer.set_optional_content(Arc::clone(&session.optional_content));
+    renderer.set_page_group(pdf_interp::page_group(doc, page_id));
 
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));

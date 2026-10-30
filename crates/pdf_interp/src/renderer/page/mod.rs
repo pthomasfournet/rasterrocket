@@ -416,6 +416,10 @@ pub struct PageRenderer<'doc> {
     /// group, in which each object composites with the group's initial
     /// backdrop (see the `knockout` module).
     knockout: bool,
+    /// The page group the page is painted as (see [`crate::page_group`]):
+    /// the bitmap is then transparent and is composited onto white by
+    /// [`finish`](Self::finish).  `None` paints onto opaque white directly.
+    page_group: Option<crate::resources::TransparencyGroupParams>,
     /// Transparent page-sized bitmaps for transparency groups, each
     /// returned cleared when its group is composited; one per nesting level
     /// is allocated over the page's life.
@@ -789,6 +793,7 @@ impl<'doc> PageRenderer<'doc> {
             pattern_ctm: initial_ctm,
             group_backdrop: None,
             knockout: false,
+            page_group: None,
             group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
             current_image: None,
@@ -1003,6 +1008,22 @@ impl<'doc> PageRenderer<'doc> {
         self.optional_content = std::cell::OnceCell::from(optional_content);
     }
 
+    /// Paint the page as the transparency group `group` (ISO 32000-2
+    /// §11.4.7): onto a transparent bitmap, composited onto white by
+    /// [`finish`](Self::finish), so that a blend mode sees only what the
+    /// page has painted and a knockout page group knocks out.  `None`, the
+    /// default, paints onto opaque white, which gives the same pixels when
+    /// nothing on the page blends (see [`crate::page_group`]).  Call before
+    /// execute.
+    pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
+        self.page_group = group;
+        self.knockout = group.is_some_and(|g| g.knockout);
+        self.bitmap = Bitmap::new(self.width, self.height, 1, group.is_some());
+        if group.is_none() {
+            self.bitmap.data_mut().fill(u8::MAX);
+        }
+    }
+
     /// The document's optional-content configuration in effect.
     pub(super) fn optional_content(&self) -> &Arc<crate::OptionalContent> {
         self.optional_content.get_or_init(|| {
@@ -1204,6 +1225,9 @@ impl<'doc> PageRenderer<'doc> {
             .max_by_key(|(count, _)| *count)
             .map(|(_, filter)| *filter);
 
+        if self.page_group.is_some() {
+            composite_onto_white(&mut self.bitmap);
+        }
         (self.bitmap, self.diag)
     }
 
@@ -2713,6 +2737,29 @@ impl<'a> ImageCompositor<'a> {
             dy as i32,
         );
     }
+}
+
+/// Composite `bitmap`, a page group with an alpha plane, onto opaque white
+/// in place: each pixel becomes `c·α + 255·(1 − α)`, and the alpha plane is
+/// dropped.  A bitmap without an alpha plane is left as it is.
+fn composite_onto_white(bitmap: &mut Bitmap<Rgb8>) {
+    let Some(alpha) = bitmap.alpha_plane().map(<[u8]>::to_vec) else {
+        return;
+    };
+    let width = bitmap.width as usize;
+    for y in 0..bitmap.height {
+        let row = bitmap.row_bytes_mut(y);
+        let alpha_row = &alpha[y as usize * width..(y as usize + 1) * width];
+        for (px, &a) in row.as_chunks_mut::<3>().0.iter_mut().zip(alpha_row) {
+            if a == u8::MAX {
+                continue;
+            }
+            for c in px {
+                *c = blend_u8(*c, u8::MAX, u16::from(a));
+            }
+        }
+    }
+    bitmap.drop_alpha_plane();
 }
 
 /// Paint `src` onto the RGB triple `dst` with coverage `alpha`; an opaque

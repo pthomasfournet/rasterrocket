@@ -178,6 +178,16 @@ cleared to transparent and merges the result with the group as it was,
 interpolating by the object's shape (`renderer/page/knockout.rs`), so every
 object composites with the group's initial backdrop.
 
+**Page group** (ISO 32000-2 §11.4.7)
+The page's content is itself a transparency group, composited onto the
+white medium once complete: a blend mode on the page sees only what the page
+has painted, never the paper. `pdf_interp::page_group` decides per page
+whether that matters — a knockout `/Group`, or a blend mode other than
+`Normal` reachable from the page's resources (through forms, patterns, Type 3
+fonts) or its annotations' appearance streams — and only then is the page
+painted onto a transparent bitmap that `finish` composites onto white; every
+other page paints onto opaque white directly, which gives the same pixels.
+
 **Soft masks**
 An `ExtGState` `/SMask` renders its group into a page-sized mask plane
 (luminosity or alpha, through the mask's transfer function). An object painted
@@ -335,6 +345,9 @@ optional_content.rs  — OptionalContent: the /OCProperties /D configuration
                        resolved once per session for a RenderPurpose; OCG and
                        OCMD (/P, /VE) visibility for BDC /OC, XObject /OC and
                        annotation /OC
+page_group.rs        — the page group (§11.4.7): whether a page is painted as
+                       an isolated group over white (a knockout page group, or
+                       a blend mode reachable from its resources or annotations)
 prescan.rs           — classify page content without rendering pixels
 cache/               — device image-cache helpers + background prefetcher
                        (`cache` feature)

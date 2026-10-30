@@ -16,6 +16,7 @@ pub mod cache;
 pub mod content;
 pub mod form_type;
 pub mod optional_content;
+pub mod page_group;
 pub mod prescan;
 pub mod renderer;
 pub mod resources;
@@ -24,6 +25,7 @@ mod test_helpers;
 
 pub use form_type::{FormType, form_type};
 pub use optional_content::{OptionalContent, RenderPurpose};
+pub use page_group::page_group;
 pub use prescan::prescan_page;
 
 /// Entry points for fuzz targets — forwards to codec wrappers in `image::fuzz_entry`.

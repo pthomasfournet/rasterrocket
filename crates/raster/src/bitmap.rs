@@ -187,6 +187,12 @@ impl<P: Pixel> Bitmap<P> {
         self.alpha.as_deref_mut()
     }
 
+    /// Remove the alpha plane, leaving the colour data: the bitmap is opaque
+    /// from here on.  A bitmap without one is unchanged.
+    pub fn drop_alpha_plane(&mut self) {
+        self.alpha = None;
+    }
+
     /// Simultaneous mutable access to the pixel row and the alpha row.
     ///
     /// Returns `(pixel_row_bytes, Some(alpha_row))` or `(pixel_row_bytes, None)`.
