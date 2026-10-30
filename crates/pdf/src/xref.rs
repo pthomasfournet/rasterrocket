@@ -443,32 +443,12 @@ fn xref_field_width(obj: &Object) -> Result<usize, PdfError> {
         })
 }
 
-/// Decode an xref stream's raw bytes.  Almost always `FlateDecode`; may be
-/// uncompressed (no /Filter key).
+/// Decode an xref stream's raw bytes through the stream's `/Filter` chain.
+///
+/// A cross-reference stream is an ordinary stream object (ISO 32000-2
+/// §7.5.8.2): any standard filter, or chain of filters, may encode it.
 fn decode_xref_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, PdfError> {
-    use crate::stream::apply_flate;
-
-    // /Filter is optional, a Name, or a single-element array of a Name.
-    let filter: Option<&[u8]> = match dict.get(b"Filter") {
-        Some(Object::Name(n)) => Some(n.as_slice()),
-        Some(Object::Array(a)) if a.len() == 1 => a[0].as_name(),
-        _ => None,
-    }
-    .map(crate::stream::filter_full_name);
-
-    match filter {
-        None => Ok(raw.to_vec()),
-        Some(b"FlateDecode") => {
-            let params = dict
-                .get(b"DecodeParms")
-                .map(|o| o as &dyn crate::stream::DictLookup);
-            apply_flate(raw, params).map_err(|e| PdfError::DecodeFailed(e.to_string()))
-        }
-        Some(other) => Err(PdfError::DecodeFailed(format!(
-            "unsupported xref stream filter: {}",
-            String::from_utf8_lossy(other)
-        ))),
-    }
+    crate::stream::decode_stream(raw, dict).map_err(PdfError::DecodeFailed)
 }
 
 /// Read a big-endian unsigned integer from `bytes` (1–8 bytes).
@@ -566,11 +546,18 @@ startxref
     /// Build a file whose only xref section is an uncompressed cross-reference
     /// stream with the given `/W` and `/Index` source text and entry bytes.
     fn xref_stream_pdf(w: &str, index: &str, entries: &[u8]) -> Vec<u8> {
+        xref_stream_pdf_filtered("", w, index, entries)
+    }
+
+    /// [`xref_stream_pdf`] with `filter` (dictionary source text, such as
+    /// `/Filter/AHx`) added to the stream dictionary; `entries` are the
+    /// already-encoded stream bytes.
+    fn xref_stream_pdf_filtered(filter: &str, w: &str, index: &str, entries: &[u8]) -> Vec<u8> {
         let mut data = b"%PDF-1.5\n".to_vec();
         let xref_off = data.len();
         data.extend_from_slice(
             format!(
-                "9 0 obj\n<</Type/XRef/Size 10/W{w}/Index{index}/Length {}>>\nstream\n",
+                "9 0 obj\n<</Type/XRef/Size 10/W{w}/Index{index}{filter}/Length {}>>\nstream\n",
                 entries.len()
             )
             .as_bytes(),
@@ -580,6 +567,34 @@ startxref
             format!("\nendstream\nendobj\nstartxref\n{xref_off}\n%%EOF").as_bytes(),
         );
         data
+    }
+
+    /// An xref stream encoded with a filter other than `FlateDecode` decodes
+    /// through the stream filter chain: a single `ASCIIHexDecode`, and a
+    /// two-stage chain under abbreviated names.
+    #[test]
+    fn xref_stream_non_flate_filters_decode() {
+        let hex = |bytes: &[u8]| -> Vec<u8> {
+            bytes
+                .iter()
+                .flat_map(|b| format!("{b:02X} ").into_bytes())
+                .collect()
+        };
+        let entries = [1, 0, 9, 0, 1, 0, 12, 0];
+        for (filter, encoded) in [
+            ("/Filter/ASCIIHexDecode", hex(&entries)),
+            ("/Filter[/AHx/AHx]", hex(&hex(&entries))),
+        ] {
+            let data = xref_stream_pdf_filtered(filter, "[1 2 1]", "[3 2]", &encoded);
+            let table = read_xref_strict(&data).expect("filtered xref stream parses");
+            for (id, offset) in [(3, 9), (4, 12)] {
+                assert!(
+                    matches!(table.get(id), Some(XrefEntry::Direct { offset: o, .. }) if o == offset),
+                    "{filter}: object {id} → {:?}",
+                    table.get(id)
+                );
+            }
+        }
     }
 
     /// A negative `/W` width must be rejected; casting it to `usize` made
