@@ -9,15 +9,13 @@
 //!
 //! # Scope
 //!
-//! The variants capture what we need to track *which* space is active;
-//! they don't carry the full colorant-mapping data (Lab whitepoint
-//! values, the ICC profile bytes, the full Separation tint function, etc.)
-//! — those are pulled lazily via the stored [`ObjectId`] when
-//! [`ColorSpace::convert_to_rgb`] actually runs.  An ICC profile stream is
-//! compiled once per document into an `icc::IccConversion`; Separation
-//! and `DeviceN` tints flow through the compiled tint-transform function
-//! (`super::shading::function::Function`) into the alternate space; an `Indexed` value is looked up in its palette and
-//! converted through the base space.
+//! Lab parameters and ICC profiles are referenced by [`ObjectId`] and read
+//! when [`ColorSpace::convert_to_rgb`] runs; an ICC profile stream is
+//! compiled once per document into an `icc::IccConversion`.  Separation
+//! and `DeviceN` spaces hold their compiled tint transform
+//! ([`TintTransform`]) and `Indexed` spaces their palette bytes, whether
+//! given inline or by reference; indirect ones are loaded once per
+//! document.
 //!
 //! # PDF §8.6 mapping
 //!
@@ -40,23 +38,21 @@
 //! Resolving a Lab whitepoint or ICC profile up front would force the
 //! graphics state to carry several kilobytes of profile data per push/pop.
 //! Storing the `ObjectId` keeps the gstate small and lets the conversion
-//! path dereference only when it actually needs the data.
+//! path dereference only when it actually needs the data.  Tint transforms
+//! and palettes are shared through `Arc`, so they cost one pointer.
 //!
 //! # Current limitations
 //!
 //! - **Lab whitepoint**: `convert_to_rgb` hard-codes D65; the per-document
 //!   whitepoint stored in `Lab::dict_id` isn't read yet.  Affects rare
 //!   prepress PDFs that use D50 or other reference whites.
-//! - **`Indexed` inline palette**: only a palette held in an indirect
-//!   stream or string is reachable through `lookup_id`; an inline palette
-//!   string converts to black.
-//! - **Inline tint transform**: a Separation / `DeviceN` tint transform
-//!   given as a direct dictionary rather than a reference falls back to the
-//!   gray heuristic.
+
+use std::sync::Arc;
 
 use pdf::{Document, Object, ObjectId};
 
 use super::icc_shaper::srgb_encode;
+use super::shading::function::Function;
 use crate::resources::dict_ext::DictExt as _;
 
 mod cal;
@@ -110,11 +106,9 @@ pub enum ColorSpace {
         base: Box<Self>,
         /// Maximum valid index — palette has `hival + 1` entries.
         hival: u8,
-        /// `Reference` to the lookup stream/string holding the palette
-        /// entries; `None` if the array's fourth element was an inline
-        /// string (the parser doesn't store the bytes — palette lookup
-        /// would need to re-resolve via the source `Object`).
-        lookup_id: Option<ObjectId>,
+        /// The palette bytes, from an inline string or an indirect string
+        /// or stream; `None` when the lookup is missing or unreadable.
+        lookup: Option<Arc<[u8]>>,
     },
     /// Pattern space. PDF §8.7.2. The optional `base` is the underlying
     /// colour space for uncoloured patterns (`PaintType` 2); `None` for
@@ -126,19 +120,18 @@ pub enum ColorSpace {
     },
     /// Single spot-colour. PDF §8.6.6.4. `alternate` is the device space
     /// the tint converts to when the spot colorant isn't separately
-    /// available; `tint_dict_id` references the tint-transform function.
+    /// available; `tint` maps the tint into it.
     Separation {
         /// Device space the tint converts into when the spot colorant
         /// isn't available.
         alternate: Box<Self>,
-        /// `Reference` to the tint-transform function dict; `None` if
-        /// the array's fourth element wasn't an indirect reference.
-        tint_dict_id: Option<ObjectId>,
+        /// The compiled tint transform; `None` when the array has none.
+        tint: Option<TintTransform>,
         /// The colorant is `/None`: painting produces no output.
         none: bool,
     },
     /// Multi-channel spot-colour set. PDF §8.6.6.5. `ncomps` is the
-    /// number of tint inputs; `alternate` and `tint_dict_id` mirror
+    /// number of tint inputs; `alternate` and `tint` mirror
     /// `Separation`.
     DeviceN {
         /// Number of tint components — from the `Names` array length.
@@ -146,9 +139,8 @@ pub enum ColorSpace {
         /// Device space the tint converts into when spot colorants
         /// aren't available.
         alternate: Box<Self>,
-        /// `Reference` to the tint-transform function dict; `None` if
-        /// the array's fourth element wasn't an indirect reference.
-        tint_dict_id: Option<ObjectId>,
+        /// The compiled tint transform; `None` when the array has none.
+        tint: Option<TintTransform>,
         /// Every colorant is `/None`: painting produces no output.
         none: bool,
     },
@@ -213,16 +205,14 @@ impl ColorSpace {
     ///   applies (missing stream, unusable profile and alternate, transform
     ///   failure) the device space with `n` components converts.
     /// - `Indexed`: the index (rounded, clamped to `hival`) selects a
-    ///   palette entry from the lookup referenced by `lookup_id`; its bytes
+    ///   palette entry from `lookup`; its bytes
     ///   map linearly onto the base space's component ranges and convert
-    ///   through the base space.  An unreachable palette yields black.
+    ///   through the base space.  A missing or short palette yields black.
     /// - `Pattern`: returns black — patterns are not directly convertible
     ///   to RGB; tile rasterisation is invoked elsewhere.
-    /// - `Separation`: passes the tint through the document's
-    ///   tint-transform function (referenced by `tint_dict_id`) and
-    ///   converts the result via the alternate colour space.  Any failure
-    ///   (missing function, eval error, alternate falls through) drops
-    ///   back to `1 - tint` as gray.
+    /// - `Separation`: passes the tint through the tint transform `tint`
+    ///   and converts the result via the alternate colour space.  A missing
+    ///   function or a failed evaluation drops back to `1 - tint` as gray.
     /// - `DeviceN`: passes all `ncomps` tints through the tint-transform
     ///   function and converts the result via the alternate colour space.
     ///   Any failure drops back to `1 - comps[0]` as gray.
@@ -252,38 +242,34 @@ impl ColorSpace {
             Self::Indexed {
                 base,
                 hival,
-                lookup_id,
-            } => lookup_id
-                .and_then(|id| indexed_to_rgb(doc, id, base, *hival, comps[0]))
+                lookup,
+            } => lookup
+                .as_deref()
+                .and_then(|bytes| indexed_to_rgb(doc, bytes, base, *hival, comps[0]))
                 .unwrap_or([0, 0, 0]),
             Self::Pattern { .. } => [0, 0, 0],
             Self::Separation {
-                alternate,
-                tint_dict_id,
-                ..
+                alternate, tint, ..
             } => {
                 // PDF §8.6.6.4: pass the single tint component through the
                 // tint-transform function to produce values in the alternate
                 // colour space, then convert via the alternate.  On any
-                // failure (missing dict id, function eval returns None, or
-                // alternate.convert_to_rgb falls back), use the `1 - tint`
-                // gray approximation.
-                if let Some(id) = tint_dict_id
-                    && let Some(rgb) = tint_via_fn(doc, *id, alternate, comps)
+                // failure (no function, or evaluation fails), use the
+                // `1 - tint` gray approximation.
+                if let Some(tint) = tint
+                    && let Some(rgb) = tint.to_rgb(doc, alternate, comps)
                 {
                     return rgb;
                 }
                 separation_fallback_gray(comps[0])
             }
             Self::DeviceN {
-                alternate,
-                tint_dict_id,
-                ..
+                alternate, tint, ..
             } => {
                 // PDF §8.6.6.5: like Separation, with one tint input per
                 // colorant.
-                if let Some(id) = tint_dict_id
-                    && let Some(rgb) = tint_via_fn(doc, *id, alternate, comps)
+                if let Some(tint) = tint
+                    && let Some(rgb) = tint.to_rgb(doc, alternate, comps)
                 {
                     return rgb;
                 }
@@ -334,23 +320,34 @@ const fn gray_byte_to_rgb(v: u8) -> [u8; 3] {
     [v, v, v]
 }
 
-/// Pass a Separation tint through the document's tint-transform function
-/// and convert the result via the alternate colour space.
-///
-/// Returns `None` and lets the caller fall back to the `1 - tint` gray
-/// approximation on any failure (function object not dereferenceable,
-/// function evaluation returns `None`, or the alternate space itself can't
-/// convert).
-fn tint_via_fn(
-    doc: &Document,
-    tint_dict_id: ObjectId,
-    alternate: &ColorSpace,
-    tints: &[f64],
-) -> Option<[u8; 3]> {
-    let outputs = super::shading::function::Function::load(doc, &Object::Reference(tint_dict_id))
-        .eval_n(tints, alternate.ncomponents())?;
-    Some(alternate.convert_to_rgb(doc, &outputs))
+/// A compiled `Separation` / `DeviceN` tint transform (PDF §8.6.6.4),
+/// given directly or by reference.  Two values are equal when they share
+/// one compiled function.
+#[derive(Debug, Clone)]
+pub struct TintTransform(Arc<Function>);
+
+impl TintTransform {
+    /// Compile the tint-transform object `obj`.
+    #[must_use]
+    pub(crate) fn load(doc: &Document, obj: &Object) -> Self {
+        Self(Function::load(doc, obj))
+    }
+
+    /// Pass `tints` through the function and convert the result in
+    /// `alternate`.  `None` when evaluation fails.
+    fn to_rgb(&self, doc: &Document, alternate: &ColorSpace, tints: &[f64]) -> Option<[u8; 3]> {
+        let outputs = self.0.eval_n(tints, alternate.ncomponents())?;
+        Some(alternate.convert_to_rgb(doc, &outputs))
+    }
 }
+
+impl PartialEq for TintTransform {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TintTransform {}
 
 /// Convert palette index `index` of an `Indexed` space to sRGB.
 ///
@@ -358,20 +355,14 @@ fn tint_via_fn(
 /// `base.ncomponents()` bytes; byte `b` of an entry maps linearly onto the
 /// base component's range (`[0, 1]` for device and tint spaces, `L*` in
 /// `[0, 100]` and `a*`, `b*` in `[-100, 100]` for the default Lab range).
-/// `None` when the lookup is unreachable or shorter than the entry.
-pub(crate) fn indexed_to_rgb(
+/// `None` when `lookup` is shorter than the entry.
+fn indexed_to_rgb(
     doc: &Document,
-    lookup_id: ObjectId,
+    lookup: &[u8],
     base: &ColorSpace,
     hival: u8,
     index: f64,
 ) -> Option<[u8; 3]> {
-    let lookup = doc.get_object(lookup_id).ok()?;
-    let bytes = match lookup.as_ref() {
-        Object::Stream(s) => s.decompressed_content().ok()?,
-        Object::String(b, _) => b.clone(),
-        _ => return None,
-    };
     let n = base.ncomponents();
     #[expect(
         clippy::cast_possible_truncation,
@@ -379,7 +370,7 @@ pub(crate) fn indexed_to_rgb(
         reason = "clamped to [0, hival] ⊂ [0, 255] first"
     )]
     let entry = index.round().clamp(0.0, f64::from(hival)) as usize;
-    let raw = bytes.get(entry * n..(entry + 1) * n)?;
+    let raw = lookup.get(entry * n..(entry + 1) * n)?;
     Some(samples_to_rgb(doc, base, raw))
 }
 
@@ -570,15 +561,36 @@ fn resolve_indexed(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         .map(|n| n.clamp(0, 255))
         .and_then(|n| u8::try_from(n).ok())
         .unwrap_or(0);
-    // PDF §8.6.6.3: element 3 is either a hex/literal string (inline
-    // palette bytes) or an indirect reference to a stream. We store the
-    // reference; inline strings are uncommon outside small Indexed-Gray
-    // palettes and would need re-resolution via the source object.
-    let lookup_id = arr.get(3).and_then(reference_id);
     ColorSpace::Indexed {
         base,
         hival,
-        lookup_id,
+        lookup: arr.get(3).and_then(|o| indexed_lookup(doc, o)),
+    }
+}
+
+/// The palette bytes of an `Indexed` lookup `obj` (PDF §8.6.6.3): a string,
+/// or a reference to a string or stream, read once per document.
+fn indexed_lookup(doc: &Document, obj: &Object) -> Option<Arc<[u8]>> {
+    /// Document-cache entry for an indirect lookup.
+    struct Lookup(Arc<[u8]>);
+
+    let bytes = |o: &Object| match o {
+        Object::String(b, _) => Some(Arc::<[u8]>::from(b.as_slice())),
+        Object::Stream(s) => s
+            .decompressed_content()
+            .map_err(|e| log::debug!("colorspace: Indexed lookup stream: {e}"))
+            .ok()
+            .map(Arc::from),
+        _ => None,
+    };
+    match obj {
+        Object::Reference(id) => doc
+            .derived(*id, || {
+                let o = doc.get_object(*id).ok()?;
+                bytes(o.as_ref()).map(Lookup)
+            })
+            .map(|l| Arc::clone(&l.0)),
+        direct => bytes(direct),
     }
 }
 
@@ -588,10 +600,9 @@ fn resolve_separation(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         return ColorSpace::DeviceGray;
     };
     let alternate = Box::new(resolve_depth(doc, alt_obj, depth + 1));
-    let tint_dict_id = arr.get(3).and_then(reference_id);
     ColorSpace::Separation {
         alternate,
-        tint_dict_id,
+        tint: arr.get(3).map(|o| TintTransform::load(doc, o)),
         none: arr.get(1).is_some_and(is_none_colorant),
     }
 }
@@ -610,11 +621,10 @@ fn resolve_device_n(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         return ColorSpace::DeviceGray;
     };
     let alternate = Box::new(resolve_depth(doc, alt_obj, depth + 1));
-    let tint_dict_id = arr.get(3).and_then(reference_id);
     ColorSpace::DeviceN {
         ncomps,
         alternate,
-        tint_dict_id,
+        tint: arr.get(3).map(|o| TintTransform::load(doc, o)),
         none: names.iter().all(is_none_colorant),
     }
 }
@@ -740,7 +750,7 @@ mod tests {
             ColorSpace::Indexed {
                 base: Box::new(ColorSpace::DeviceRgb),
                 hival: 255,
-                lookup_id: None,
+                lookup: Some(Arc::from(&b"\x00\x01\x02"[..])),
             },
         );
     }
@@ -759,14 +769,13 @@ mod tests {
             ColorSpace::Indexed {
                 base: Box::new(ColorSpace::DeviceGray),
                 hival: 255,
-                lookup_id: None,
+                lookup: Some(Arc::from(&[][..])),
             },
         );
     }
 
     #[test]
-    fn indexed_array_captures_lookup_stream_reference() {
-        // [/Indexed /DeviceRGB 15 <ref>]  — the lookup is an indirect ref.
+    fn indexed_lookup_reference_to_a_missing_object_has_no_palette() {
         let doc = empty_doc();
         let arr = vec![
             name_obj(b"Indexed"),
@@ -779,13 +788,13 @@ mod tests {
             ColorSpace::Indexed {
                 base: Box::new(ColorSpace::DeviceRgb),
                 hival: 15,
-                lookup_id: Some((42, 0)),
+                lookup: None,
             },
         );
     }
 
     #[test]
-    fn separation_extracts_alternate_and_tint_id() {
+    fn separation_extracts_alternate_and_tint() {
         let doc = empty_doc();
         let arr = vec![
             name_obj(b"Separation"),
@@ -793,14 +802,17 @@ mod tests {
             name_obj(b"DeviceCMYK"),
             Object::Reference((42, 0)),
         ];
-        assert_eq!(
-            resolve(&doc, &Object::Array(arr)),
-            ColorSpace::Separation {
-                alternate: Box::new(ColorSpace::DeviceCmyk),
-                tint_dict_id: Some((42, 0)),
-                none: false,
-            },
-        );
+        let ColorSpace::Separation {
+            alternate,
+            tint,
+            none,
+        } = resolve(&doc, &Object::Array(arr))
+        else {
+            panic!("expected Separation");
+        };
+        assert_eq!(*alternate, ColorSpace::DeviceCmyk);
+        assert!(tint.is_some());
+        assert!(!none);
     }
 
     #[test]
@@ -817,15 +829,18 @@ mod tests {
             name_obj(b"DeviceCMYK"),
             Object::Reference((7, 0)),
         ];
-        assert_eq!(
-            resolve(&doc, &Object::Array(arr)),
-            ColorSpace::DeviceN {
-                ncomps: 3,
-                alternate: Box::new(ColorSpace::DeviceCmyk),
-                tint_dict_id: Some((7, 0)),
-                none: false,
-            },
-        );
+        let ColorSpace::DeviceN {
+            ncomps,
+            alternate,
+            tint,
+            none,
+        } = resolve(&doc, &Object::Array(arr))
+        else {
+            panic!("expected DeviceN");
+        };
+        assert_eq!((ncomps, *alternate), (3, ColorSpace::DeviceCmyk));
+        assert!(tint.is_some());
+        assert!(!none);
     }
 
     #[test]
@@ -859,7 +874,7 @@ mod tests {
             ColorSpace::Indexed {
                 base: Box::new(ColorSpace::DeviceRgb),
                 hival: 255,
-                lookup_id: None,
+                lookup: None,
             }
             .ncomponents(),
             1,
@@ -868,7 +883,7 @@ mod tests {
         assert_eq!(
             ColorSpace::Separation {
                 alternate: Box::new(ColorSpace::DeviceCmyk),
-                tint_dict_id: None,
+                tint: None,
                 none: false,
             }
             .ncomponents(),
@@ -878,7 +893,7 @@ mod tests {
             ColorSpace::DeviceN {
                 ncomps: 5,
                 alternate: Box::new(ColorSpace::DeviceCmyk),
-                tint_dict_id: None,
+                tint: None,
                 none: false,
             }
             .ncomponents(),
@@ -1094,11 +1109,11 @@ mod tests {
 
     #[test]
     fn convert_separation_without_tint_fn_falls_back_to_gray() {
-        // No tint_dict_id → skip eval_function entirely, use the 1-tint heuristic.
+        // No tint transform → the 1 - tint heuristic.
         let doc = empty_doc();
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
-            tint_dict_id: None,
+            tint: None,
             none: false,
         };
         assert_eq!(sep.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]); // no ink
@@ -1107,12 +1122,12 @@ mod tests {
 
     #[test]
     fn convert_separation_unresolvable_tint_fn_falls_back() {
-        // tint_dict_id points at a missing object → fetch fails →
-        // tint_via_fn returns None → fall back to gray heuristic.
+        // The tint transform references a missing object → evaluation
+        // fails → the gray heuristic.
         let doc = empty_doc();
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
-            tint_dict_id: Some((999, 0)),
+            tint: Some(TintTransform::load(&doc, &Object::Reference((999, 0)))),
             none: false,
         };
         assert_eq!(sep.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
@@ -1139,7 +1154,7 @@ mod tests {
         let dn = ColorSpace::DeviceN {
             ncomps: 2,
             alternate: Box::new(ColorSpace::DeviceCmyk),
-            tint_dict_id: Some((4, 0)),
+            tint: Some(TintTransform::load(&doc, &Object::Reference((4, 0)))),
             none: false,
         };
         // Full spot, no black: the teal CMYK, not the gray of comps[0].
@@ -1166,12 +1181,44 @@ mod tests {
         let idx = ColorSpace::Indexed {
             base: Box::new(ColorSpace::DeviceRgb),
             hival: 1,
-            lookup_id: Some((4, 0)),
+            lookup: indexed_lookup(&doc, &Object::Reference((4, 0))),
         };
         assert_eq!(idx.convert_to_rgb(&doc, &[0.0]), [255, 0, 0]);
         assert_eq!(idx.convert_to_rgb(&doc, &[1.0]), [0, 0, 255]);
         // An out-of-range index clamps to hival.
         assert_eq!(idx.convert_to_rgb(&doc, &[7.0]), [0, 0, 255]);
+    }
+
+    /// The colour space of the PDF object source `src`.
+    fn parse_space(doc: &Document, src: &str) -> ColorSpace {
+        let obj = pdf::parse_object(src.as_bytes(), &mut 0).expect("colour-space object parses");
+        resolve(doc, &obj)
+    }
+
+    #[test]
+    fn inline_tint_transform_converts_through_the_alternate() {
+        let doc = empty_doc();
+        let tint = "<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>";
+        let sep = parse_space(&doc, &format!("[/Separation /Spot /DeviceRGB {tint}]"));
+        assert_eq!(sep.convert_to_rgb(&doc, &[1.0]), [255, 0, 0]);
+        assert_eq!(sep.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]);
+        let dn = parse_space(&doc, &format!("[/DeviceN [/Spot] /DeviceRGB {tint}]"));
+        assert_eq!(dn.convert_to_rgb(&doc, &[1.0]), [255, 0, 0]);
+    }
+
+    #[test]
+    fn inline_indexed_palette_is_looked_up() {
+        let doc = empty_doc();
+        let idx = parse_space(&doc, "[/Indexed /DeviceRGB 1 <ff000000ff00>]");
+        assert_eq!(idx.convert_to_rgb(&doc, &[0.0]), [255, 0, 0]);
+        assert_eq!(idx.convert_to_rgb(&doc, &[1.0]), [0, 255, 0]);
+    }
+
+    #[test]
+    fn indirect_tint_transform_is_shared_across_resolutions() {
+        let doc = devicen_teal_doc();
+        let src = "[/DeviceN [/Black /Spot] /DeviceCMYK 4 0 R]";
+        assert_eq!(parse_space(&doc, src), parse_space(&doc, src));
     }
 
     #[test]
@@ -1181,7 +1228,7 @@ mod tests {
         let dn = ColorSpace::DeviceN {
             ncomps: 3,
             alternate: Box::new(ColorSpace::DeviceCmyk),
-            tint_dict_id: None,
+            tint: None,
             none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[1.0, 0.5, 0.5]), [0, 0, 0]);
@@ -1195,7 +1242,7 @@ mod tests {
         let dn = ColorSpace::DeviceN {
             ncomps: 1,
             alternate: Box::new(ColorSpace::DeviceCmyk),
-            tint_dict_id: None,
+            tint: None,
             none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]);
@@ -1204,13 +1251,13 @@ mod tests {
 
     #[test]
     fn convert_devicen_single_input_unresolvable_tint_fn_falls_back() {
-        // ncomps=1 with a tint id that doesn't resolve → eval_function
+        // ncomps=1 with a tint reference that doesn't resolve → evaluation
         // returns None → fall back to the gray heuristic.
         let doc = empty_doc();
         let dn = ColorSpace::DeviceN {
             ncomps: 1,
             alternate: Box::new(ColorSpace::DeviceCmyk),
-            tint_dict_id: Some((999, 0)),
+            tint: Some(TintTransform::load(&doc, &Object::Reference((999, 0)))),
             none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
@@ -1226,12 +1273,12 @@ mod tests {
         let doc = empty_doc();
         let inner = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceGray),
-            tint_dict_id: None,
+            tint: None,
             none: false,
         };
         let outer = ColorSpace::Separation {
             alternate: Box::new(inner),
-            tint_dict_id: None,
+            tint: None,
             none: false,
         };
         // No infinite loop, deterministic byte triple.
