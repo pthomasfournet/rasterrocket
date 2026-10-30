@@ -46,11 +46,14 @@ fn ink_span(font: &str, extra: &[Vec<u8>], content: &str) -> (usize, usize) {
     (left, right - left)
 }
 
-/// A simple TrueType Ahem: objects 6 (descriptor) and 7 (program).
-fn simple_ahem() -> (&'static str, Vec<Vec<u8>>) {
-    let font = "<< /Type /Font /Subtype /TrueType /BaseFont /Ahem /FirstChar 32 /LastChar 65 \
-                /Widths [1000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1000] \
-                /FontDescriptor 6 0 R /Encoding /WinAnsiEncoding >>";
+/// A simple Ahem of `subtype`, its program under `FontFile2`: objects 6
+/// (descriptor) and 7 (program).
+fn simple_ahem_as(subtype: &str) -> (String, Vec<Vec<u8>>) {
+    let font = format!(
+        "<< /Type /Font /Subtype /{subtype} /BaseFont /Ahem /FirstChar 32 /LastChar 65 \
+         /Widths [1000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1000] \
+         /FontDescriptor 6 0 R /Encoding /WinAnsiEncoding >>"
+    );
     let extra = vec![
         b"<< /Type /FontDescriptor /FontName /Ahem /Flags 32 /FontBBox [0 -200 1000 800] \
           /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 \
@@ -59,6 +62,11 @@ fn simple_ahem() -> (&'static str, Vec<Vec<u8>>) {
         stream_object("", AHEM),
     ];
     (font, extra)
+}
+
+/// A simple TrueType Ahem: objects 6 (descriptor) and 7 (program).
+fn simple_ahem() -> (String, Vec<Vec<u8>>) {
+    simple_ahem_as("TrueType")
 }
 
 /// A Type 0 Ahem whose `Encoding` is `encoding` (an entry value: a name
@@ -133,20 +141,20 @@ fn type3_square() -> (&'static str, Vec<Vec<u8>>) {
 fn horizontal_scaling_condenses_the_glyphs() {
     let (font, extra) = simple_ahem();
     assert_eq!(
-        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
+        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
         (8, 32)
     );
     assert_eq!(
-        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
+        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
         (8, 16)
     );
     let (font, extra) = type3_square();
     assert_eq!(
-        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
+        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
         (8, 32)
     );
     assert_eq!(
-        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
+        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
         (8, 16)
     );
 }
@@ -159,7 +167,7 @@ fn invisible_text_advances_the_pen() {
     let (font, extra) = simple_ahem();
     assert_eq!(
         ink_span(
-            font,
+            &font,
             &extra,
             "BT /F1 16 Tf 8 8 Td 3 Tr (AA) Tj 0 Tr (A) Tj ET"
         ),
@@ -185,12 +193,24 @@ fn invisible_text_advances_the_pen() {
     );
 }
 
+/// A `/Subtype /Type1` dictionary whose descriptor holds a TrueType
+/// program under `FontFile2` draws that program, not a substitute: the em
+/// square spans the full advance.
+#[test]
+fn type1_dictionary_draws_its_fontfile2_program() {
+    let (font, extra) = simple_ahem_as("Type1");
+    assert_eq!(
+        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td (A) Tj ET"),
+        (8, 16)
+    );
+}
+
 /// `Tw` applies to the byte 32 of a simple font.
 #[test]
 fn word_spacing_applies_to_simple_fonts() {
     let (font, extra) = simple_ahem();
-    let plain = ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td (A A) Tj ET");
-    let spaced = ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td 16 Tw (A A) Tj ET");
+    let plain = ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td (A A) Tj ET");
+    let spaced = ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td 16 Tw (A A) Tj ET");
     assert_eq!(plain, (8, 48));
     assert_eq!(spaced, (8, 64));
 }

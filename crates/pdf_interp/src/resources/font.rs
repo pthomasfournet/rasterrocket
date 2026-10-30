@@ -394,9 +394,10 @@ fn classify_kind(dict: &Dictionary) -> PdfFontKind {
 
 /// Try to read embedded font bytes from the `FontDescriptor` sub-dict.
 ///
-/// Key priority varies by font kind:
-/// - Type 1 → `FontFile` first, then `FontFile3` (CFF-wrapped Type 1)
-/// - TrueType / Other → `FontFile2` (TT), then `FontFile3` (CFF/OTF)
+/// Every `FontFile*` key is tried, the one the subtype names first
+/// (`FontFile` for Type 1, `FontFile2` otherwise): the program loader
+/// sniffs the actual format, so a Type 1 dictionary whose descriptor holds
+/// a TrueType program under `FontFile2` still draws with it.
 ///
 /// Returns `None` if nothing is embedded.
 fn extract_bytes(doc: &Document, dict: &Dictionary) -> Option<Vec<u8>> {
@@ -571,12 +572,13 @@ fn extract_encoding(
 }
 
 /// Map a PDF base-encoding name to [`BaseEncoding`].  Absent → the font
-/// program's built-in encoding; a name other than `WinAnsiEncoding` or
-/// `MacRomanEncoding` → `StandardEncoding`.
+/// program's built-in encoding; `MacExpertEncoding` (small capitals and
+/// figures the base tables do not carry) → `WinAnsiEncoding`, whose
+/// Latin range it shares; any other name → `StandardEncoding`.
 const fn parse_base_encoding(name: Option<&[u8]>) -> BaseEncoding {
     match name {
         None => BaseEncoding::FontProgram,
-        Some(b"WinAnsiEncoding") => BaseEncoding::WinAnsi,
+        Some(b"WinAnsiEncoding" | b"MacExpertEncoding") => BaseEncoding::WinAnsi,
         Some(b"MacRomanEncoding") => BaseEncoding::MacRoman,
         Some(_) => BaseEncoding::Standard,
     }
@@ -941,7 +943,7 @@ fn extract_bytes_with_kind(
 ) -> Option<Vec<u8>> {
     let fd = resolve_fd(doc, dict)?;
     let priority: &[&[u8]] = match kind {
-        PdfFontKind::Type1 => &[b"FontFile", b"FontFile3"],
+        PdfFontKind::Type1 => &[b"FontFile", b"FontFile3", b"FontFile2"],
         _ => &[b"FontFile2", b"FontFile3", b"FontFile"],
     };
     for key in priority {
