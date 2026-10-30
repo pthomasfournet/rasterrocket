@@ -6,9 +6,9 @@
 //! exact bits of the matrix that places it and of the page height, so every
 //! use sees what a fresh resolve under its own matrix returns.  A tiling
 //! cell is keyed by its pattern stream; its raster additionally by the exact
-//! bits of the pattern-to-device matrix, the tint of an uncoloured pattern
-//! and, for a pattern without its own resources, the resource context the
-//! content resolves names in.  A raster rendered while the page's work
+//! bits of the pattern-to-device matrix, the tint of an uncoloured pattern,
+//! for a pattern without its own resources the resource context the content
+//! resolves names in, and the sub-pixel phase it is rasterised at.  A raster rendered while the page's work
 //! budget ran out is not kept.
 
 use std::cell::RefCell;
@@ -18,8 +18,8 @@ use std::rc::Rc;
 
 use color::Rgb8;
 use pdf::ObjectId;
-use raster::Bitmap;
 use raster::shading::gouraud::GouraudVertex;
+use raster::{Bitmap, CellPhase};
 
 use super::super::color::RasterColor;
 use super::PageRenderer;
@@ -62,6 +62,7 @@ pub(super) struct RasterKey {
     device: [u64; 6],
     tint: Option<RasterColor>,
     context: Option<ObjectId>,
+    phase: CellPhase,
 }
 
 impl RasterKey {
@@ -79,6 +80,15 @@ impl RasterKey {
             device: device.map(f64::to_bits),
             tint: tint.cloned(),
             context,
+            phase: (0, 0),
+        }
+    }
+
+    /// The key of the same cell rasterised at sub-pixel `phase`.
+    pub(super) fn at_phase(&self, phase: CellPhase) -> Self {
+        Self {
+            phase,
+            ..self.clone()
         }
     }
 }
@@ -318,17 +328,17 @@ const fn shading_bytes(shading: &ResolvedShading) -> usize {
 mod tests {
     use super::*;
 
-    fn mesh(triangles: usize) -> Option<Rc<ResolvedShading>> {
+    fn mesh(triangles: usize) -> Rc<ResolvedShading> {
         let v = GouraudVertex {
             x: 0.0,
             y: 0.0,
             color: [0; 3],
         };
-        Some(Rc::new(ResolvedShading {
+        Rc::new(ResolvedShading {
             result: ShadingResult::Mesh(vec![[v; 3]; triangles]),
             bbox: None,
             background: None,
-        }))
+        })
     }
 
     const ID: ObjectId = (5, 0);
@@ -348,7 +358,7 @@ mod tests {
     fn a_shading_is_kept_per_matrix_and_page_height() {
         let mut memo = PatternMemo::with_budget(BUDGET_BYTES);
         assert!(
-            memo.shading(placed(ID, &IDENTITY, 100.0), || mesh(1))
+            memo.shading(placed(ID, &IDENTITY, 100.0), || Some(mesh(1)))
                 .is_some()
         );
         assert!(holds(&mut memo, placed(ID, &IDENTITY, 100.0)));
@@ -366,7 +376,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            memo.shading(placed(ID, &IDENTITY, 100.0), || mesh(0))
+            memo.shading(placed(ID, &IDENTITY, 100.0), || Some(mesh(0)))
                 .is_none(),
             "the kept None answers"
         );
@@ -376,8 +386,8 @@ mod tests {
     fn a_mesh_over_the_budget_is_not_kept() {
         let size = std::mem::size_of::<[GouraudVertex; 3]>();
         let mut memo = PatternMemo::with_budget(size * 3);
-        let _ = memo.shading(placed(ID, &IDENTITY, 100.0), || mesh(2));
-        let _ = memo.shading(placed((6, 0), &IDENTITY, 100.0), || mesh(2));
+        let _ = memo.shading(placed(ID, &IDENTITY, 100.0), || Some(mesh(2)));
+        let _ = memo.shading(placed((6, 0), &IDENTITY, 100.0), || Some(mesh(2)));
         assert!(holds(&mut memo, placed(ID, &IDENTITY, 100.0)));
         assert!(
             !holds(&mut memo, placed((6, 0), &IDENTITY, 100.0)),
@@ -386,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn a_raster_is_kept_per_tint_and_context() {
+    fn a_raster_is_kept_per_tint_context_and_phase() {
         let mut memo = PatternMemo::with_budget(BUDGET_BYTES);
         let red = RasterColor::rgb(1.0, 0.0, 0.0);
         let key = RasterKey::new(ID, &IDENTITY, Some(&red), None);
@@ -401,6 +411,7 @@ mod tests {
             memo.raster(&RasterKey::new(ID, &IDENTITY, Some(&red), Some((1, 0))))
                 .is_none()
         );
+        assert!(memo.raster(&key.at_phase((1, 0))).is_none());
     }
 
     #[test]

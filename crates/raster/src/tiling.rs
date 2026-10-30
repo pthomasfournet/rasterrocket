@@ -4,13 +4,14 @@
 //! `(col, row)` lies at `origin + col · col_step + row · row_step` in device
 //! space, the image of `(col · XStep, row · YStep)` under the pattern matrix
 //! (ISO 32000-2 §8.7.3.1).  [`TiledPattern::compose`] composites a
-//! rasterised cell at every lattice point whose cell meets a device
-//! rectangle, and the result serves the pipeline as a [`Pattern`] over that
+//! cell, rasterised at the quarter-pixel phase of each lattice point, at
+//! every lattice point whose cell meets a device rectangle, and the result serves the pipeline as a [`Pattern`] over that
 //! rectangle; [`TiledPattern::screen`] wraps a rectangle painted by other
 //! means.  A lattice finer than a pixel is served as its mean colour and
 //! coverage by [`TiledPattern::uniform`].
 
 use std::ops::RangeInclusive;
+use std::rc::Rc;
 
 use crate::bitmap::Bitmap;
 use crate::pipe::{self, Pattern, PipeSrc, PipeState, RowPattern};
@@ -26,6 +27,14 @@ const MAX_LATTICE_POINTS: u64 = 1 << 26;
 /// Bound on a lattice coordinate: cells further from the origin than this
 /// are not enumerated.
 const LATTICE_LIMIT: f64 = (1u32 << 30) as f64;
+
+/// Sub-pixel positions per pixel, along each axis, at which
+/// [`TiledPattern::compose`] places cells.
+pub const CELL_PHASES: u8 = 4;
+
+/// A cell's sub-pixel offset from its whole-pixel position, in
+/// `1 / CELL_PHASES` pixel along x and along y; each below [`CELL_PHASES`].
+pub type CellPhase = (u8, u8);
 
 /// The lattice of cell positions in device space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,6 +55,25 @@ impl Lattice {
         (
             col.mul_add(self.col_step.0, row.mul_add(self.row_step.0, self.origin.0)),
             col.mul_add(self.col_step.1, row.mul_add(self.row_step.1, self.origin.1)),
+        )
+    }
+
+    /// The position of cell `(col, row)` rounded to the nearest
+    /// `1 / CELL_PHASES` pixel, split into its whole-pixel part and its
+    /// phase.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "callers bound positions to 2^30 (see cells_meeting); the remainder is below CELL_PHASES"
+    )]
+    pub fn quantised(&self, col: i32, row: i32) -> ((i64, i64), CellPhase) {
+        let (px, py) = self.position(col, row);
+        let q = f64::from(CELL_PHASES);
+        let n = i64::from(CELL_PHASES);
+        let (nx, ny) = ((px * q).round() as i64, (py * q).round() as i64);
+        (
+            (nx.div_euclid(n), ny.div_euclid(n)),
+            (nx.rem_euclid(n) as u8, ny.rem_euclid(n) as u8),
         )
     }
 
@@ -209,18 +237,18 @@ impl TiledPattern {
         }
     }
 
-    /// Composite `cell` at every point of `lattice` whose cell meets the
+    /// Composite the cell at every point of `lattice` whose cell meets the
     /// `width × height` pixel rectangle at `(x0, y0)`.  Each cell lands at
-    /// its lattice position rounded to whole pixels.  `None` when the
-    /// lattice is degenerate or enumerates more than [`MAX_LATTICE_POINTS`]
-    /// points over the rectangle.
+    /// its lattice position rounded to `1 / CELL_PHASES` pixel: `cell`
+    /// returns the cell rasterised at that phase, a bitmap of at most
+    /// `cell_w × cell_h` pixels stamped at the whole-pixel part.  `cell` is
+    /// called once per phase stamped.  `None` when the lattice is
+    /// degenerate or enumerates more than [`MAX_LATTICE_POINTS`] points over
+    /// the rectangle.
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "cell positions lie within 2^30 of the origin (see Lattice::cells_meeting)"
-    )]
     pub fn compose(
-        cell: &Bitmap<Rgb8>,
+        mut cell: impl FnMut(CellPhase) -> Rc<Bitmap<Rgb8>>,
+        (cell_w, cell_h): (u32, u32),
         lattice: &Lattice,
         x0: i32,
         y0: i32,
@@ -229,7 +257,7 @@ impl TiledPattern {
     ) -> Option<Self> {
         let x1 = x0.checked_add(i32::try_from(width).ok()?)?;
         let y1 = y0.checked_add(i32::try_from(height).ok()?)?;
-        let (cols, rows) = lattice.cells_meeting((x0, y0, x1, y1), cell.width, cell.height)?;
+        let (cols, rows) = lattice.cells_meeting((x0, y0, x1, y1), cell_w, cell_h)?;
         let span = |r: &RangeInclusive<i32>| {
             u64::try_from(i64::from(*r.end()) - i64::from(*r.start()) + 1).ok()
         };
@@ -238,12 +266,20 @@ impl TiledPattern {
         }
         let mut screen = Bitmap::new(width, height, 1, true);
         let pipe = source_over();
+        let mut phases: [Option<Rc<Bitmap<Rgb8>>>; (CELL_PHASES * CELL_PHASES) as usize] =
+            Default::default();
+        let (cw, ch) = (i64::from(cell_w), i64::from(cell_h));
+        let (w, h) = (i64::from(width), i64::from(height));
         for row in rows {
             for col in cols.clone() {
-                let (px, py) = lattice.position(col, row);
-                let sx = px.round() as i64 - i64::from(x0);
-                let sy = py.round() as i64 - i64::from(y0);
-                stamp(&mut screen, cell, sx, sy, &pipe);
+                let ((px, py), phase) = lattice.quantised(col, row);
+                let (sx, sy) = (px - i64::from(x0), py - i64::from(y0));
+                if sx >= w || sy >= h || sx + cw <= 0 || sy + ch <= 0 {
+                    continue;
+                }
+                let slot = usize::from(phase.1 * CELL_PHASES + phase.0);
+                let bitmap = phases[slot].get_or_insert_with(|| cell(phase));
+                stamp(&mut screen, bitmap, sx, sy, &pipe);
             }
         }
         Some(Self::screen(screen, x0, y0))
@@ -355,6 +391,12 @@ mod tests {
         c
     }
 
+    /// [`cell`] composited at every point of `lattice` over a rectangle.
+    fn compose(lattice: &Lattice, x0: i32, y0: i32, w: u32, h: u32) -> Option<TiledPattern> {
+        let c = Rc::new(cell());
+        TiledPattern::compose(|_| Rc::clone(&c), (2, 2), lattice, x0, y0, w, h)
+    }
+
     fn axis_aligned(step: f64) -> Lattice {
         Lattice {
             origin: (0.0, 0.0),
@@ -385,12 +427,12 @@ mod tests {
             row_step: (2.0, 4.0),
         };
         assert!(l.cells_meeting((0, 0, 4, 4), 1, 1).is_none());
-        assert!(TiledPattern::compose(&cell(), &axis_aligned(f64::NAN), 0, 0, 4, 4).is_none());
+        assert!(compose(&axis_aligned(f64::NAN), 0, 0, 4, 4).is_none());
     }
 
     #[test]
     fn compose_stamps_cells_on_the_lattice_and_repeats_their_coverage() {
-        let p = TiledPattern::compose(&cell(), &axis_aligned(2.0), 0, 0, 4, 2).unwrap();
+        let p = compose(&axis_aligned(2.0), 0, 0, 4, 2).unwrap();
         assert!(p.may_leave_unpainted());
         let mut out = [9u8; 4 * 3];
         let mut cov = [9u8; 4];
@@ -400,20 +442,48 @@ mod tests {
     }
 
     #[test]
-    fn compose_rounds_each_cell_to_its_own_position() {
-        // A 2.5 px step: cells at 0, 2.5 → 3 (round half away from zero), 5.
-        let p = TiledPattern::compose(&cell(), &axis_aligned(2.5), 0, 0, 7, 1).unwrap();
+    fn compose_places_each_cell_at_its_quarter_pixel_phase() {
+        // A 2.5 px step: cells at 0, 2 + 2/4 and 5, each phase rasterised
+        // once.
+        let c = Rc::new(cell());
+        let mut asked = Vec::new();
+        let p = TiledPattern::compose(
+            |phase| {
+                asked.push(phase);
+                Rc::clone(&c)
+            },
+            (2, 2),
+            &axis_aligned(2.5),
+            0,
+            0,
+            7,
+            1,
+        )
+        .unwrap();
+        asked.sort_unstable();
+        assert_eq!(asked, [(0, 0), (2, 0)]);
         let mut out = [0u8; 7 * 3];
         let mut cov = [0u8; 7];
         p.fill_span_coverage(0, 0, 6, &mut out, &mut cov);
-        assert_eq!(cov, [255, 255, 0, 255, 255, 255, 255]);
+        assert_eq!(cov, [255, 255, 255, 255, 0, 255, 255]);
+    }
+
+    #[test]
+    fn quantised_positions_round_to_a_quarter_pixel() {
+        let l = Lattice {
+            origin: (-0.3, 1.6),
+            col_step: (1.0, 0.0),
+            row_step: (0.0, 1.0),
+        };
+        assert_eq!(l.quantised(0, 0), ((-1, 1), (3, 2)));
+        assert_eq!(l.quantised(2, 1), ((1, 2), (3, 2)));
     }
 
     #[test]
     fn overlapping_cells_composite_source_over() {
         // A 1 px step: the transparent pixel of one cell is covered by the
         // next cell's opaque pixel.
-        let p = TiledPattern::compose(&cell(), &axis_aligned(1.0), 0, 0, 3, 2).unwrap();
+        let p = compose(&axis_aligned(1.0), 0, 0, 3, 2).unwrap();
         assert!(!p.may_leave_unpainted());
         let mut out = [0u8; 3 * 3];
         p.fill_span(1, 0, 2, &mut out);
@@ -422,7 +492,7 @@ mod tests {
 
     #[test]
     fn pixels_outside_the_rectangle_are_unpainted() {
-        let p = TiledPattern::compose(&cell(), &axis_aligned(2.0), 10, 10, 2, 2).unwrap();
+        let p = compose(&axis_aligned(2.0), 10, 10, 2, 2).unwrap();
         let mut out = [7u8; 4 * 3];
         let mut cov = [7u8; 4];
         p.fill_span_coverage(10, 8, 11, &mut out, &mut cov);

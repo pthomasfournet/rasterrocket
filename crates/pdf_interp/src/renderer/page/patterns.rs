@@ -11,7 +11,7 @@ use std::rc::Rc;
 use color::Rgb8;
 use pdf::Document;
 use raster::path::PathBuilder;
-use raster::{Bitmap, Lattice, TiledPattern};
+use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern};
 
 /// Resolve an uncoloured-tiling-pattern tint to a [`RasterColor`].
 ///
@@ -218,12 +218,12 @@ impl PageRenderer<'_> {
 
     /// Resolve a tiling pattern over `region`.
     ///
-    /// The cell is rasterised once and composited at every lattice point
-    /// whose cell meets the region when the cell is no larger than the
-    /// region, or when the same raster was asked for before and fits the
-    /// page's pattern memo; otherwise each such cell's content is rendered
-    /// directly onto a region-sized bitmap at its exact position.  A
-    /// lattice finer than a pixel is reduced to its mean.
+    /// The cell is rasterised once per quarter-pixel phase and composited
+    /// at every lattice point whose cell meets the region when the cell is
+    /// no larger than the region, or when the same raster was asked for
+    /// before and fits the page's pattern memo; otherwise each such cell's
+    /// content is rendered directly onto a region-sized bitmap at its exact
+    /// position.  A lattice finer than a pixel is reduced to its mean.
     #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -321,7 +321,7 @@ impl PageRenderer<'_> {
                 .borrow_mut()
                 .repeated(&key, cell_bytes as usize)
         {
-            self.composed_pattern(&cell, &geometry, region, key)
+            self.composed_pattern(&cell, &geometry, region, &key)
         } else {
             self.direct_pattern(name, &cell, &geometry, region)
         }
@@ -354,47 +354,46 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// The cell rasterised once and composited at every lattice point whose
-    /// cell meets `region`.
+    /// The cell rasterised once per quarter-pixel phase and composited at
+    /// every lattice point whose cell meets `region`.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_possible_wrap,
-        reason = "the cell sides are whole pixels no larger than the region; region coordinates are page-bounded"
+        reason = "the cell sides are whole pixels bounded by the region or the memo budget; region coordinates are page-bounded"
     )]
     fn composed_pattern(
         &mut self,
         cell: &CellContent<'_>,
         geometry: &CellGeometry,
         region: PixelRect,
-        key: RasterKey,
+        key: &RasterKey,
     ) -> Option<TiledPattern> {
-        // The cell is rasterised at the sub-pixel phase of cell (0, 0) and
-        // stamped from the floor of its origin: cell (0, 0) lands exactly,
-        // and so does every cell of a lattice with whole-pixel steps.
-        let origin = geometry.lattice.origin;
-        let (fx, fy) = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
+        // Every phase's bitmap has room for the cell offset by up to one
+        // pixel.
         let size = (
-            pixel_ceil(geometry.bounds.width + fx) as u32,
-            pixel_ceil(geometry.bounds.height + fy) as u32,
+            pixel_ceil(geometry.bounds.width + 1.0) as u32,
+            pixel_ceil(geometry.bounds.height + 1.0) as u32,
         );
-        let raster = self.memo_raster(key, |r| {
-            CellRaster::Cell(Rc::new(r.render_cells(
-                cell,
-                size,
-                &[geometry.placement(1.0, fx, fy)],
-            )))
-        });
-        let CellRaster::Cell(bitmap) = raster else {
-            unreachable!("a cell bitmap is kept under its key")
-        };
-        let lattice = Lattice {
-            origin: (origin.0.floor(), origin.1.floor()),
-            ..geometry.lattice
+        let scale = f64::from(CELL_PHASES).recip();
+        let raster_at = |r: &mut Self, phase: CellPhase| {
+            let raster = r.memo_raster(key.at_phase(phase), |r| {
+                let (x, y) = (f64::from(phase.0) * scale, f64::from(phase.1) * scale);
+                CellRaster::Cell(Rc::new(r.render_cells(
+                    cell,
+                    size,
+                    &[geometry.placement(1.0, x, y)],
+                )))
+            });
+            let CellRaster::Cell(bitmap) = raster else {
+                unreachable!("a cell bitmap is kept under its key")
+            };
+            bitmap
         };
         TiledPattern::compose(
-            &bitmap,
-            &lattice,
+            |phase| raster_at(self, phase),
+            size,
+            &geometry.lattice,
             region.x0 as i32,
             region.y0 as i32,
             region.width(),
