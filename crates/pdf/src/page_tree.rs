@@ -60,11 +60,7 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
         }
         let node_obj = doc.get_dict_arc(current)?;
         let node_dict = dict_of(&node_obj, current)?;
-        let node_type = node_dict
-            .get(b"Type")
-            .and_then(Object::as_name)
-            .unwrap_or(b"");
-        if node_type == b"Page" {
+        if !is_interior(node_dict) {
             return Ok(current);
         }
 
@@ -108,7 +104,7 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
                 // Found the kid containing the requested page.  If the kid
                 // itself is a leaf, return immediately to avoid the
                 // top-of-loop re-fetch on the next iteration.
-                if kid_dict.get(b"Type").and_then(Object::as_name) == Some(b"Page") {
+                if !is_interior(kid_dict) {
                     return Ok(*kid_ref);
                 }
                 current = *kid_ref;
@@ -141,9 +137,11 @@ fn dict_of(obj: &Object, id: ObjectId) -> Result<&Dictionary, PdfError> {
     })
 }
 
-/// Whether a page-tree node is an interior `/Pages` node: typed `/Pages`,
-/// or untyped with a `/Kids` entry.  A node typed `/Page` is a leaf.
-fn is_interior(dict: &Dictionary) -> bool {
+/// Whether a page-tree node is an interior `/Pages` node rather than a page
+/// object: typed `/Pages`, or, when `/Type` is neither `/Page` nor `/Pages`
+/// (absent or wrong), carrying a `/Kids` entry.  A node typed `/Page` is a
+/// page.  Every page-tree walker classifies nodes by this one rule.
+pub(crate) fn is_interior(dict: &Dictionary) -> bool {
     match dict.get(b"Type").and_then(Object::as_name) {
         Some(b"Page") => false,
         Some(b"Pages") => true,
@@ -151,12 +149,11 @@ fn is_interior(dict: &Dictionary) -> bool {
     }
 }
 
-/// Read a kid's subtree page count: 1 for leaves (Page), `/Count` for
-/// interior /Pages nodes.  Returns `BadObject` if an interior node lacks
-/// a valid `/Count`.
+/// Read a kid's subtree page count: 1 for a page, `/Count` for an
+/// interior node (see [`is_interior`]).  Returns `BadObject` if an interior
+/// node lacks a valid `/Count`.
 fn kid_subtree_count(kid_id: ObjectId, kid_dict: &Dictionary) -> Result<u32, PdfError> {
-    let is_leaf = kid_dict.get(b"Type").and_then(Object::as_name) == Some(b"Page");
-    if is_leaf {
+    if !is_interior(kid_dict) {
         return Ok(1);
     }
     kid_dict
@@ -411,5 +408,78 @@ startxref\n258\n%%EOF"
         }
         // Also confirm /Pages /Count = 4 is read directly via fast path.
         assert_eq!(doc.page_count_fast(), 4);
+    }
+
+    /// A PDF whose objects 1, 2, … are `bodies`, with a classic xref table.
+    fn assemble(bodies: &[&str]) -> Vec<u8> {
+        use std::fmt::Write as _;
+
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, body) in bodies.iter().enumerate() {
+            offsets.push(out.len());
+            write!(out, "{} 0 obj\n{body}\nendobj\n", i + 1).unwrap();
+        }
+        let xref = out.len();
+        write!(out, "xref\n0 {}\n0000000000 65535 f\r\n", bodies.len() + 1).unwrap();
+        for off in offsets {
+            write!(out, "{off:010} 00000 n\r\n").unwrap();
+        }
+        write!(
+            out,
+            "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref}\n%%EOF",
+            bodies.len() + 1
+        )
+        .unwrap();
+        out.into_bytes()
+    }
+
+    /// Root `/Pages` with `root_count` → [untyped page 3, `/Pages` 4 →
+    /// [page 5, page 6]]: the root's `/Count` differs from its kid count, so
+    /// the descent sums the kids' counts.
+    fn untyped_leaf_pdf(root_count: &str) -> Vec<u8> {
+        assemble(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            &format!("<</Type /Pages /Kids [3 0 R 4 0 R] {root_count}>>"),
+            "<</Parent 2 0 R>>",
+            "<</Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R] /Count 2>>",
+            "<</Type /Page /Parent 4 0 R>>",
+            "<</Type /Page /Parent 4 0 R>>",
+        ])
+    }
+
+    /// A node with neither `/Type` nor `/Kids` is a page to the descent and
+    /// to the eager walk alike.
+    #[test]
+    fn untyped_leaf_is_a_page_to_every_walker() {
+        let doc = Document::from_bytes_owned(untyped_leaf_pdf("/Count 3")).unwrap();
+        let descended: Vec<u32> = (0..3)
+            .map(|i| descend_to_page_index(&doc, i).expect("page").0)
+            .collect();
+        assert_eq!(descended, [3, 5, 6]);
+        let walked: Vec<u32> = doc.get_pages().map(|(_, id)| id.0).collect();
+        assert_eq!(walked, [3, 5, 6]);
+
+        // Without a root `/Count` the page count comes from the eager walk.
+        let doc = Document::from_bytes_owned(untyped_leaf_pdf("")).unwrap();
+        assert_eq!(doc.page_count(), 3);
+    }
+
+    /// `/Type` decides over `/Kids`: a `/Page` with a stray `/Kids` is a page,
+    /// and an untyped node with `/Kids` is interior.
+    #[test]
+    fn type_decides_before_kids() {
+        let node = |src: &str| {
+            let mut pos = 0;
+            match crate::object::parse_object(src.as_bytes(), &mut pos) {
+                Some(Object::Dictionary(d)) => d,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(!is_interior(&node("<</Type /Page /Kids []>>")));
+        assert!(is_interior(&node("<</Type /Pages>>")));
+        assert!(is_interior(&node("<</Kids []>>")));
+        assert!(!is_interior(&node("<</Type /Annot>>")));
+        assert!(is_interior(&node("<</Type /Annot /Kids []>>")));
     }
 }

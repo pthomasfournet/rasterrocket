@@ -1170,13 +1170,14 @@ impl<'a> PageIter<'a> {
         }
     }
 
-    /// Visit node `id`: a `/Type /Page` node is returned as the next page; any
-    /// other dictionary with a `/Kids` array (direct, or an indirect reference
-    /// to one) is pushed as an interior node.  Anything else is skipped.
+    /// Visit node `id`: a page object (see [`crate::page_tree::is_interior`])
+    /// is returned as the next page; an interior node with a `/Kids` array
+    /// (direct, or an indirect reference to one) is pushed.  Anything else is
+    /// skipped.
     fn visit(&mut self, id: ObjectId) -> Option<(u32, ObjectId)> {
         let obj = self.doc.get_object(id).ok()?;
         let dict = obj.as_dict()?;
-        if dict.get(b"Type").and_then(Object::as_name) == Some(b"Page") {
+        if !crate::page_tree::is_interior(dict) {
             self.page_num += 1;
             return Some((self.page_num, id));
         }

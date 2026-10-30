@@ -282,8 +282,10 @@ cached as `Arc<Object>`.
   rest of the dictionary is kept.
 - **Page tree** (`page_tree.rs`). Logarithmic descent by `/Count`. When a
   node's `/Count` equals its number of kids the kid is indexed directly,
-  then probed: an interior node (`/Type /Pages`, or untyped with `/Kids`)
-  continues the descent.
+  then probed: an interior node continues the descent. The descent and the
+  eager walk (`get_pages`) classify nodes by one rule (`is_interior`):
+  `/Type /Page` is a page, `/Type /Pages` is interior, and any other node
+  is interior exactly when it has `/Kids`.
 - **Derived values** (`derived.rs`). `Document::derived(id, make)` memoises
   a value that a higher layer computes from an object, keyed by object and
   type, for the lifetime of the document. The interpreter uses it to parse
