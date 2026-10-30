@@ -83,6 +83,78 @@ fn d1_strokes_take_the_fill_colour() {
     assert_eq!(pixel(&render(&font, &extra, SHOW_A), 16, 16), [0, 0, 255]);
 }
 
+/// A CharProc's `Do` resolves in the font's own `/Resources`: a form
+/// XObject and an image mask held there both paint, in the fill colour.
+#[test]
+fn charprocs_use_the_font_resources() {
+    let resources = "<< /XObject << /Fx 7 0 R /Mx 8 0 R >> >>";
+    let form = stream_object(
+        "/Type /XObject /Subtype /Form /BBox [0 0 1000 1000]",
+        b"0 0 1000 1000 re f",
+    );
+    let mask = stream_object(
+        "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ImageMask true \
+         /Decode [1 0] /BitsPerComponent 1",
+        &[0xC0, 0xC0],
+    );
+    let (font, mut extra) = type3(b"1000 0 0 0 1000 1000 d1 /Fx Do", resources);
+    extra.push(form.clone());
+    extra.push(mask.clone());
+    assert_eq!(pixel(&render(&font, &extra, SHOW_A), 16, 16), [0, 0, 255]);
+
+    let (font, mut extra) = type3(
+        b"1000 0 0 0 1000 1000 d1 q 1000 0 0 1000 0 0 cm /Mx Do Q",
+        resources,
+    );
+    extra.push(form);
+    extra.push(mask);
+    assert_eq!(pixel(&render(&font, &extra, SHOW_A), 16, 16), [0, 0, 255]);
+}
+
+/// Codes outside `Differences` resolve through the base encoding —
+/// `/Encoding /WinAnsiEncoding`, or `/BaseEncoding` with a partial
+/// `Differences` — and a code without a CharProc still advances by its
+/// `Widths` entry.
+#[test]
+fn base_encodings_name_charprocs() {
+    let charprocs =
+        "/CharProcs << /A 6 0 R /B 6 0 R >> /FirstChar 65 /LastChar 66 /Widths [1000 1000]";
+    let glyph = stream_object("", b"1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f");
+    let show_ab = "BT /F1 16 Tf 8 8 Td (AB) Tj ET";
+    let winansi = format!(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] {charprocs} /Encoding /WinAnsiEncoding >>"
+    );
+    assert_eq!(ink(&render(&winansi, &[glyph.clone()], show_ab)), 2 * 256);
+
+    let partial = format!(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] {charprocs} \
+         /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [66 /A] >> >>"
+    );
+    assert_eq!(ink(&render(&partial, &[glyph.clone()], show_ab)), 2 * 256);
+
+    // No `/Encoding` at all: `StandardEncoding` names the CharProcs.
+    let standard = format!(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] {charprocs} >>"
+    );
+    assert_eq!(ink(&render(&standard, &[glyph.clone()], show_ab)), 2 * 256);
+
+    // `C` has a width but no CharProc: `A C A` paints two squares with a
+    // gap, not two adjacent squares.
+    let gap = format!(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /A 6 0 R >> \
+         /FirstChar 65 /LastChar 67 /Widths [1000 1000 1000] /Encoding /WinAnsiEncoding >>"
+    );
+    let page = render(&gap, &[glyph], "BT /F1 16 Tf 8 8 Td (ACA) Tj ET");
+    assert_eq!(ink(&page), 2 * 256);
+    assert_eq!(pixel(&page, 16, 16), [0, 0, 0]);
+    assert_eq!(pixel(&page, 32, 16), [255, 255, 255]);
+    assert_eq!(pixel(&page, 48, 16), [0, 0, 0]);
+}
+
 /// The clip component of a rendering mode does not apply to Type 3 text:
 /// mode 7 paints the glyph and leaves the clip alone; mode 3 is invisible.
 #[test]

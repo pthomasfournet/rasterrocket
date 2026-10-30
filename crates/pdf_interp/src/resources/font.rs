@@ -27,8 +27,9 @@
 
 use std::sync::Arc;
 
-use pdf::{Dictionary, Document, Object};
+use pdf::{Dictionary, Document, Object, ObjectId};
 
+use crate::renderer::encodings::glyph_name_for_code;
 use crate::resources::cmap::{CMap, DecodedCode, parse_cmap};
 use crate::resources::cmap_predefined::predefined_cmap;
 use crate::resources::dict_ext::DictExt;
@@ -191,32 +192,46 @@ impl CidEncoding {
 pub struct Type3Glyph {
     /// Decompressed content stream bytes for this glyph's paint procedure.
     pub content: Vec<u8>,
-    /// Advance width in thousandths of a text-space unit, from the `Widths` array.
-    /// `None` when absent (fall back to 0).
-    pub width_units: i32,
 }
 
 /// All data extracted from a Type 3 font dictionary.
 ///
 /// Unlike fonts with a font program, Type 3 glyphs are PDF content streams that
 /// must be executed by a child renderer.  Each `CharProc` stream begins with a
-/// `d0` (colorless) or `d1` (self-colored) operator that declares the glyph
+/// `d0` (coloured) or `d1` (shape-only) operator that declares the glyph
 /// advance width.
 #[derive(Debug, Clone)]
 pub struct Type3Data {
     /// Resolved glyph content keyed by char code (0–255).
     /// Missing entries mean `.notdef`; the caller renders nothing for them.
     pub glyphs: Vec<Option<Type3Glyph>>,
+    /// Advance width of every char code in glyph space, from the `Widths`
+    /// array; 0 for a code outside `[FirstChar, LastChar]`.  A code without
+    /// a `CharProc` advances by its width all the same (PDF §9.4.4).
+    pub widths: Vec<i32>,
     /// 6-element `FontMatrix` (user-space → glyph-space transform).
     /// Default is `[0.001, 0, 0, 0.001, 0, 0]` per PDF spec §9.6.5.
     pub font_matrix: [f64; 6],
+    /// The font dictionary, when it is an indirect object carrying its own
+    /// `/Resources`: the `CharProcs` resolve their named resources there
+    /// instead of in the page's (PDF §9.6.5).
+    pub resources: Option<ObjectId>,
 }
 
 impl Type3Data {
-    /// Return the content and nominal width for `char_code`, if any `CharProc` exists.
+    /// Return the content for `char_code`, if any `CharProc` exists.
     #[must_use]
     pub fn glyph(&self, char_code: u8) -> Option<&Type3Glyph> {
         self.glyphs.get(usize::from(char_code))?.as_ref()
+    }
+
+    /// Advance width of `char_code` in glyph space.
+    #[must_use]
+    pub fn width(&self, char_code: u8) -> i32 {
+        self.widths
+            .get(usize::from(char_code))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -274,7 +289,7 @@ impl FontDescriptor {
     /// fallback — that's what `None` here signals to the caller.
     ///
     /// Not for Type 0 (use `CidEncoding::width_for_cid`) or Type 3
-    /// (use `Type3Glyph::width_units`).
+    /// (use `Type3Data::width`).
     #[must_use]
     pub fn width_for_code(&self, char_code: u32) -> Option<i32> {
         if self.widths.is_empty() {
@@ -291,19 +306,20 @@ impl FontDescriptor {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Extract a [`FontDescriptor`] from a PDF font dictionary.
+/// Extract a [`FontDescriptor`] from a PDF font dictionary; `id` is the
+/// dictionary's object identifier when it is an indirect object.
 ///
 /// This is infallible: if any optional field is missing we fill in a sensible
 /// default so the renderer can always produce *something*, even if it is wrong.
 #[must_use]
-pub fn resolve_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
+pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> FontDescriptor {
     let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
 
     if matches!(subtype, b"Type0") {
         return resolve_type0_font(doc, dict);
     }
     if matches!(subtype, b"Type3") {
-        return resolve_type3_font(doc, dict);
+        return resolve_type3_font(doc, dict, id);
     }
 
     let kind = classify_kind(dict);
@@ -663,9 +679,10 @@ const MAX_CHARPROC_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// Type 3 fonts have no embedded font program — each glyph is a PDF content
 /// stream in the `CharProcs` dictionary.  The `Widths` array and `FirstChar`
-/// key give nominal advance widths (supplemented by the `d0`/`d1` operators
-/// inside each `CharProc`, which are authoritative).
-fn resolve_type3_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
+/// key give the advance widths.  A code's `CharProc` is the one named by
+/// `Differences`, else by the base encoding (`/Encoding /WinAnsiEncoding`,
+/// `/BaseEncoding`), else by `StandardEncoding` (PDF §9.6.6.1).
+fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> FontDescriptor {
     let (first_char, widths) = extract_widths(dict);
 
     // FontMatrix transforms glyph space to text space.
@@ -683,21 +700,17 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     });
 
     // Resolve Encoding/Differences to get char_code → glyph_name mapping.
-    let differences = extract_encoding(doc, dict, PdfFontKind::Other).1;
+    let (_, differences, base_encoding) = extract_encoding(doc, dict, PdfFontKind::Other);
 
     // Build the glyphs table: 256 entries, one per possible char code.
     let mut glyphs: Vec<Option<Type3Glyph>> = (0..256).map(|_| None).collect();
 
     if let Some(cp) = charprocs_dict {
         for code in 0u8..=255 {
-            // Determine the glyph name for this char code.
-            // Priority: Differences table overrides (if set), then treat the
-            // char code as a single-byte Latin-1 name (rare fallback).
-            let Some(glyph_name) = differences
-                .get(usize::from(code))
-                .and_then(|x| x.as_deref())
+            let Some(glyph_name) =
+                glyph_name_for_code(&differences, base_encoding, usize::from(code))
             else {
-                continue; // No mapping → no glyph for this code.
+                continue; // No name → no glyph for this code.
             };
             let glyph_name = glyph_name.as_bytes();
 
@@ -737,17 +750,31 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
                 }
             };
 
-            let width_idx = usize::from(code).saturating_sub(first_char as usize);
-            let width_units = widths.get(width_idx).copied().unwrap_or(0);
-
-            glyphs[usize::from(code)] = Some(Type3Glyph {
-                content,
-                width_units,
-            });
+            glyphs[usize::from(code)] = Some(Type3Glyph { content });
         }
     } else {
         log::warn!("font/type3: CharProcs dict missing or unresolvable — no glyphs");
     }
+
+    let code_widths = (0u32..256)
+        .map(|code| {
+            code.checked_sub(first_char)
+                .and_then(|i| widths.get(i as usize).copied())
+                .unwrap_or(0)
+        })
+        .collect();
+
+    let resources = match (dict.get(b"Resources"), id) {
+        (None, _) => None,
+        (Some(_), Some(id)) => Some(id),
+        (Some(_), None) => {
+            log::warn!(
+                "font/type3: /Resources of a direct font dictionary cannot be addressed — \
+                 CharProcs resolve in the page's resources"
+            );
+            None
+        }
+    };
 
     FontDescriptor {
         kind: PdfFontKind::Other,
@@ -767,7 +794,9 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         cid_encoding: None,
         type3: Some(Type3Data {
             glyphs,
+            widths: code_widths,
             font_matrix,
+            resources,
         }),
         substitute: SubstituteStyle::default(),
     }

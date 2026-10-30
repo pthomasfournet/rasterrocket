@@ -374,6 +374,18 @@ impl<'doc> PageResources<'doc> {
         }
     }
 
+    /// Construct a child [`PageResources`] scoped to the `Resources` of the
+    /// object `context` (a Type 3 font dictionary carrying its own).
+    #[must_use]
+    pub const fn for_context(&self, context: ObjectId) -> Self {
+        Self {
+            doc: self.doc,
+            resource_context_id: context,
+            subdicts: [const { OnceLock::new() }; Category::COUNT],
+            default_spaces: OnceLock::new(),
+        }
+    }
+
     /// The underlying [`pdf::Document`] (read-only).
     #[must_use]
     pub const fn doc(&self) -> &'doc Document {
@@ -432,7 +444,7 @@ impl<'doc> PageResources<'doc> {
     #[must_use]
     pub fn resolve_font_entry(&self, entry: &Object) -> Option<font::FontDescriptor> {
         let dict = resolve_dict(self.doc, entry)?;
-        Some(font::resolve_font(self.doc, &dict))
+        Some(font::resolve_font(self.doc, &dict, entry.as_reference()))
     }
 
     /// Resolve the named entry of the page's `/ColorSpace` resource dictionary

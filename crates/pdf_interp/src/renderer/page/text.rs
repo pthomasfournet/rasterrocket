@@ -436,14 +436,6 @@ impl PageRenderer<'_> {
     /// Each `CharProc` is a PDF content stream that paints the glyph using the
     /// full graphics pipeline.  This method sets up the CTM for each glyph
     /// position and executes the stream, then advances the text matrix.
-    ///
-    /// The `CharProc` coordinate system (glyph space) maps to device space via:
-    /// `charproc_ctm = CTM × Tm_at_glyph × scale(font_size) × FontMatrix`
-    ///
-    /// `CharProcs` are re-rasterised on every call.  If Type 3 perf becomes a
-    /// hot path, the right fix is to extend `font::GlyphCache` to key on Type
-    /// 3 font instances and add an off-screen bitmap path here, not to
-    /// reintroduce a separate Type-3-only cache.
     #[expect(
         clippy::too_many_arguments,
         reason = "mirrors show_text() parameter set; all values are needed for glyph placement"
@@ -462,53 +454,80 @@ impl PageRenderer<'_> {
         rise: f64,
         do_paint: bool,
     ) {
+        // The CharProcs resolve their named resources in the font's own
+        // `/Resources` when it has them, else in the resources in effect.
+        let parent_resources = t3.resources.map(|id| {
+            let child = self.resources.for_context(id);
+            std::mem::replace(&mut self.resources, child)
+        });
         for &byte in bytes {
-            let Some(glyph) = t3.glyph(byte) else {
-                // No CharProc for this code — advance by zero width, continue.
-                let [a, b_m, c, d, e, f] = tm;
-                let tx_adv = char_spacing * horiz_scaling;
-                tm = [a, b_m, c, d, tx_adv.mul_add(a, e), tx_adv.mul_add(b_m, f)];
-                continue;
-            };
-
-            if do_paint && self.form_depth >= MAX_FORM_DEPTH {
-                log::warn!(
-                    "rasterrocket-interp: Type 3 CharProc depth {MAX_FORM_DEPTH} exceeded — \
-                     glyph 0x{byte:02X} not painted (text position still advances)"
-                );
-            } else if do_paint {
-                // The CharProc's glyph space maps to device space through
-                // `FontMatrix × [Tfs×Th 0 0 Tfs 0 Ts] × Tm × CTM`
-                // (PDF §9.4.4 with §9.6.5's `FontMatrix`).
-                let text_space = [font_size * horiz_scaling, 0.0, 0.0, font_size, 0.0, rise];
-                let trm = ctm_multiply(&ctm_multiply(&t3.font_matrix, &text_space), &tm);
-                let charproc_ctm = ctm_multiply(&trm, &ctm);
-
-                self.gstate.save();
-                self.form_depth += 1;
-                self.gstate.current_mut().ctm = charproc_ctm;
-                // Reset text state inside charproc (PDF §9.6.5 — charproc is a
-                // fresh graphics state, not a text object).
-                self.gstate.current_mut().text = TextState::default();
-
-                let ops = crate::content::parse(&glyph.content);
-                self.execute(&ops);
-
-                self.form_depth -= 1;
-                self.gstate.restore();
+            // A code without a CharProc paints nothing but advances by its
+            // width (PDF §9.4.4).
+            if let Some(glyph) = t3.glyph(byte)
+                && do_paint
+            {
+                self.paint_type3_glyph(byte, glyph, t3, font_size, ctm, tm, horiz_scaling, rise);
             }
 
             // Advance the text matrix by the glyph width (PDF §9.4.4).
-            // width_units are in glyph space; scale by FontMatrix[0] × font_size.
-            let glyph_advance = f64::from(glyph.width_units) * t3.font_matrix[0];
+            // Widths are in glyph space; scale by FontMatrix[0] × font_size.
+            let glyph_advance = f64::from(t3.width(byte)) * t3.font_matrix[0];
             let extra = if byte == b' ' { word_spacing } else { 0.0 };
             let tx_adv = (glyph_advance.mul_add(font_size, char_spacing) + extra) * horiz_scaling;
             let [a, b_m, c, d, e, f] = tm;
             tm = [a, b_m, c, d, tx_adv.mul_add(a, e), tx_adv.mul_add(b_m, f)];
         }
+        if let Some(parent) = parent_resources {
+            self.resources = parent;
+        }
 
         // Write updated text matrix back.
         self.gstate.current_mut().text.text_matrix = tm;
+    }
+
+    /// Execute the `CharProc` `glyph` of code `byte` at the pen position
+    /// `tm` gives, in a graphics state saved around it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the text-space quantities that place one glyph"
+    )]
+    fn paint_type3_glyph(
+        &mut self,
+        byte: u8,
+        glyph: &crate::resources::font::Type3Glyph,
+        t3: &crate::resources::font::Type3Data,
+        font_size: f64,
+        ctm: [f64; 6],
+        tm: [f64; 6],
+        horiz_scaling: f64,
+        rise: f64,
+    ) {
+        if self.form_depth >= MAX_FORM_DEPTH {
+            log::warn!(
+                "rasterrocket-interp: Type 3 CharProc depth {MAX_FORM_DEPTH} exceeded — \
+                 glyph 0x{byte:02X} not painted (text position still advances)"
+            );
+            return;
+        }
+        // The CharProc's glyph space maps to device space through
+        // `FontMatrix × [Tfs×Th 0 0 Tfs 0 Ts] × Tm × CTM`
+        // (PDF §9.4.4 with §9.6.5's `FontMatrix`).
+        let text_space = [font_size * horiz_scaling, 0.0, 0.0, font_size, 0.0, rise];
+        let trm = ctm_multiply(&ctm_multiply(&t3.font_matrix, &text_space), &tm);
+        let charproc_ctm = ctm_multiply(&trm, &ctm);
+
+        self.gstate.save();
+        self.form_depth += 1;
+        self.gstate.current_mut().ctm = charproc_ctm;
+        // Reset text state inside charproc (PDF §9.6.5 — charproc is a
+        // fresh graphics state, not a text object).
+        self.gstate.current_mut().text = TextState::default();
+
+        let ops = crate::content::parse(&glyph.content);
+        self.execute(&ops);
+
+        self.form_depth -= 1;
+        self.gstate.restore();
     }
 }
 
