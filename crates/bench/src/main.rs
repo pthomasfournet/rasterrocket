@@ -17,7 +17,7 @@ use vello_cpu::{
 
 use color::Rgb8;
 use raster::{
-    Bitmap, Clip, Path, PathBuilder, PipeSrc, PipeState, fill, state::TransferSet, types::BlendMode,
+    Bitmap, Clip, Path, PathBuilder, PipeSrc, PipeState, TransferSet, fill, types::BlendMode,
 };
 
 // ── Config ────────────────────────────────────────────────────────────────────

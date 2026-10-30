@@ -330,7 +330,7 @@ cache/               — device image-cache helpers + background prefetcher
 
 renderer/
   mod.rs             — PageRenderer; render_operators() dispatch loop
-  gstate.rs          — CTM, graphics state, StateStack
+  gstate.rs          — CTM, graphics state, GStateStack
   color.rs           — colour values → device components (DeviceCMYK via
                        the process-ink model in `color::cmyk`)
   text.rs            — text state (Tc, Tw, Tz, TL, Ts, Tr)

@@ -284,7 +284,7 @@ mod tests {
             a_input,
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
-            transfer: raster::state::TransferSet::identity_rgb(),
+            transfer: raster::TransferSet::identity_rgb(),
             backdrop: None,
         }
     }

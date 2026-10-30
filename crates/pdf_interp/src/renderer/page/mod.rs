@@ -72,8 +72,7 @@ use color::convert::div255;
 use raster::{
     Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
-    pipe::{Pattern, PipeSrc, PipeState},
-    state::TransferSet,
+    pipe::{Pattern, PipeSrc, PipeState, TransferSet},
     stroke::{StrokeParams, stroke},
     transparency::{Backdrop, GroupParams, begin_group, paint_group},
     types::{BlendMode, LineCap, LineJoin},

@@ -1,9 +1,9 @@
 //! PDF graphics state for the interpreter.
 //!
-//! [`InterpGState`] tracks the PDF-level state that sits *above* the raster
-//! crate's [`raster::GraphicsState`]: current colour, text state, CTM, and
-//! the path being constructed. The raster state is rebuilt from this when a
-//! painting operator fires.
+//! [`InterpGState`] tracks the PDF graphics state: current colour, text
+//! state, CTM, and the path being constructed. The raster crate holds no
+//! graphics state of its own; each painting operator derives the raster
+//! inputs (pipe state, clip, stroke parameters) from this.
 //!
 //! The save/restore stack is a plain `Vec`; `q` pushes a clone, `Q` pops.
 

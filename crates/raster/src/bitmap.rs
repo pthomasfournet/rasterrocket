@@ -262,63 +262,6 @@ impl<P: Pixel> Bitmap<P> {
     }
 }
 
-// ── Type-erased bitmap ────────────────────────────────────────────────────────
-
-/// A mode-erased bitmap, used when the transparency group stack must store
-/// bitmaps of varying pixel types without monomorphizing the entire stack.
-///
-/// Phase 2 will add rendering methods; Phase 1 only needs storage + dimensions.
-pub enum AnyBitmap {
-    /// 24-bit RGB, 8 bits per channel.
-    Rgb8(Bitmap<crate::types::Rgb8>),
-    /// 32-bit RGBA, 8 bits per channel (alpha stored in a separate plane).
-    Rgba8(Bitmap<crate::types::Rgba8>),
-    /// 8-bit grayscale.
-    Gray8(Bitmap<crate::types::Gray8>),
-    /// 32-bit CMYK, 8 bits per channel.
-    Cmyk8(Bitmap<crate::types::Cmyk8>),
-    /// Up to 8 spot/device-N channels, 8 bits each.
-    DeviceN8(Bitmap<crate::types::DeviceN8>),
-}
-
-impl AnyBitmap {
-    /// Width of the contained bitmap in pixels.
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        match self {
-            Self::Rgb8(b) => b.width,
-            Self::Rgba8(b) => b.width,
-            Self::Gray8(b) => b.width,
-            Self::Cmyk8(b) => b.width,
-            Self::DeviceN8(b) => b.width,
-        }
-    }
-
-    /// Height of the contained bitmap in pixels.
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        match self {
-            Self::Rgb8(b) => b.height,
-            Self::Rgba8(b) => b.height,
-            Self::Gray8(b) => b.height,
-            Self::Cmyk8(b) => b.height,
-            Self::DeviceN8(b) => b.height,
-        }
-    }
-
-    /// The pixel mode (colour space + bit depth) of the contained bitmap.
-    #[must_use]
-    pub const fn mode(&self) -> crate::types::PixelMode {
-        match self {
-            Self::Rgb8(_) => crate::types::PixelMode::Rgb8,
-            Self::Rgba8(_) => crate::types::PixelMode::Xbgr8,
-            Self::Gray8(_) => crate::types::PixelMode::Mono8,
-            Self::Cmyk8(_) => crate::types::PixelMode::Cmyk8,
-            Self::DeviceN8(_) => crate::types::PixelMode::DeviceN8,
-        }
-    }
-}
-
 // ── AaBuf ─────────────────────────────────────────────────────────────────────
 
 /// Anti-aliasing scratch buffer: 4 rows × (`bitmap_width` × 4) columns, 1 bit/pixel.

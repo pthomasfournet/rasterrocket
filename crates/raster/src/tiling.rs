@@ -14,8 +14,8 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 use crate::bitmap::Bitmap;
+use crate::pipe::TransferSet;
 use crate::pipe::{self, Pattern, PipeSrc, PipeState, RowPattern};
-use crate::state::TransferSet;
 use crate::types::BlendMode;
 use color::Rgb8;
 

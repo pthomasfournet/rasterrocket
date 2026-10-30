@@ -210,7 +210,7 @@ fn render_span_aa_inner<'src>(
 mod tests {
     use super::*;
     use crate::pipe::PipeSrc;
-    use crate::state::TransferSet;
+    use crate::pipe::TransferSet;
     use color::{Rgb8, TransferLut};
 
     fn aa_pipe() -> PipeState<'static> {

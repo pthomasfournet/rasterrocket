@@ -503,8 +503,8 @@ mod tests {
     fn compute_a_src_shape_scales_alpha() {
         assert_eq!(compute_a_src(255, 128, true), u32::from(div255(255 * 128)));
     }
+    use crate::pipe::TransferSet;
     use crate::pipe::{PipeSrc, PipeState};
-    use crate::state::TransferSet;
     use color::{Gray8, Rgb8, TransferLut};
 
     fn normal_pipe(a: u8) -> PipeState<'static> {

@@ -16,13 +16,15 @@ pub mod aa;
 pub mod blend;
 pub mod general;
 pub mod simple;
+pub mod transfer;
 
 use std::cell::RefCell;
 
-use crate::state::TransferSet;
 use crate::types::BlendMode;
 use color::Pixel;
 use color::convert::div255;
+
+pub use transfer::TransferSet;
 
 /// Source colour for a single paint operation.
 ///
@@ -139,8 +141,8 @@ pub struct PipeState<'bmp> {
     /// rather than replaced.  Corresponds to `state.overprint_additive`.
     pub overprint_additive: bool,
 
-    /// Transfer function tables for the current pixel mode, borrowed from
-    /// `GraphicsState`.  Applied to the composited result before writing.
+    /// Transfer function tables for the current pixel mode.  Applied to the
+    /// composited result before writing.
     pub transfer: TransferSet<'bmp>,
 
     /// The backdrop of the non-isolated group being painted into, consulted

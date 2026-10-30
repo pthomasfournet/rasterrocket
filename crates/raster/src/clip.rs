@@ -5,7 +5,7 @@
 //!
 //! ## Sharing semantics
 //!
-//! When a [`Clip`] is cloned (e.g. for `GraphicsState::save`), the path-clip
+//! When a [`Clip`] is cloned (e.g. on a graphics-state save), the path-clip
 //! scanners are shared via [`Arc`] — matching the C++ `shared_ptr` behaviour.
 //! [`XPathScanner`] instances are immutable after construction, so sharing
 //! across threads and across `clone_shared` copies is safe: there is no
@@ -92,8 +92,7 @@ impl Clip {
     ///
     /// The cloned value and the original share the same [`XPathScanner`]
     /// instances. Because scanners are immutable after construction there is
-    /// no interior-mutability hazard. This mirrors C++ `shared_ptr` copy
-    /// semantics used in `GraphicsState::save`.
+    /// no interior-mutability hazard.
     #[must_use]
     pub fn clone_shared(&self) -> Self {
         Self {

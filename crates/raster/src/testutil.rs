@@ -10,7 +10,7 @@
 use crate::clip::Clip;
 use crate::path::{Path, PathBuilder};
 use crate::pipe::PipeState;
-use crate::state::TransferSet;
+use crate::pipe::TransferSet;
 use crate::types::BlendMode;
 
 /// Identity CTM `[a b c d e f] = [1 0 0 1 0 0]`.

@@ -8,13 +8,10 @@
 
 //! # raster
 //!
-//! Pure software rasterizer for PDF page content — no I/O, no PDF parsing,
-//! no SIMD (Phase 1).
-//!
-//! ## Phase 1 scope
-//! Foundation types only: pixel buffers, path geometry, edge tables, clip
-//! regions, halftone screens, and graphics state. Rendering (pipe, fill,
-//! stroke, image, shading, glyph, transparency) is Phase 2.
+//! Software rasterizer for PDF page content: path fill and stroke, glyph and
+//! shading fills, tiling patterns, transparency groups and the compositing
+//! pipe. No I/O and no PDF parsing; the interpreter drives it with device-space
+//! geometry and resolved colours.
 //!
 //! ## Module layout
 //! - [`types`] — raster-local enums and constants (re-exports [`color`] types)
@@ -23,9 +20,16 @@
 //! - [`xpath`] — [`XPath`] edge table (flattened, matrix-transformed segments)
 //! - [`scanner`] — [`XPathScanner`] and [`crate::ScanIterator`] (scanline span emission)
 //! - [`clip`] — [`Clip`] (rect + arbitrary path clip stack)
+//! - [`fill`](mod@fill) — non-zero and even-odd path fill, aliased and 4× antialiased
+//! - [`stroke`](mod@stroke) — stroke-to-path conversion and stroking
+//! - [`glyph`] — glyph bitmap blitting and fill
+//! - [`shading`] — axial, radial, function and Gouraud shadings
+//! - [`tiling`] — [`TiledPattern`]
+//! - [`transparency`] — transparency groups and soft masks
 //! - [`screen`] — [`HalftoneScreen`] (Bayer / stochastic threshold matrix)
-//! - [`state`] — [`GraphicsState`] and [`StateStack`]
-//! - [`pipe`] — compositing pipeline (simple, AA, general; blend modes; Pattern trait)
+//! - [`pipe`] — compositing pipeline (simple, AA, general; blend modes;
+//!   [`Pattern`] trait; [`TransferSet`])
+//! - [`simd`] — runtime-dispatched SIMD kernels used by the pipe and fill
 
 pub mod bitmap;
 pub mod clip;
@@ -37,7 +41,6 @@ pub mod scanner;
 pub mod screen;
 pub mod shading;
 pub mod simd;
-pub mod state;
 pub mod stroke;
 pub mod tiling;
 pub mod transparency;
@@ -52,7 +55,7 @@ pub use clip::{Clip, ClipResult, ClipRows, RowClip};
 pub use fill::{eo_fill, fill};
 pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};
 pub use path::{Path, PathBuilder, PathFlags, PathPoint, StrokeAdjustHint};
-pub use pipe::{Pattern, PipeSrc, PipeState};
+pub use pipe::{Pattern, PipeSrc, PipeState, TransferSet};
 pub use scanner::iter::ScanIterator;
 pub use scanner::{Intersect, XPathScanner};
 pub use screen::HalftoneScreen;
@@ -63,7 +66,6 @@ pub use shading::gouraud::{GouraudVertex, gouraud_triangle_fill};
 pub use shading::radial::RadialPattern;
 pub use shading::shaded_fill;
 pub use simd::{blend_solid_gray8, blend_solid_rgb8, composite_aa_rgb8_opaque, unpack_mono_row};
-pub use state::{GraphicsState, StateStack, TransferSet};
 pub use stroke::{StrokeParams, stroke, stroke_outline};
 pub use tiling::{CELL_PHASES, CellPhase, Lattice, TiledPattern};
 pub use types::*;

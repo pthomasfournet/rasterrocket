@@ -113,7 +113,7 @@ pub(crate) fn render_span_simple<P: Pixel>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::TransferSet;
+    use crate::pipe::TransferSet;
     use color::{Rgb8, TransferLut};
 
     fn opaque_normal_pipe() -> PipeState<'static> {
