@@ -27,7 +27,7 @@
 //! | `[/CalGray ...]`, `[/CalRGB ...]` | [`ColorSpace::Cal`]; the device space when the parameters are invalid |
 //! | `[/Lab ...]`         | [`ColorSpace::Lab`] |
 //! | `[/ICCBased <ref>]`  | [`ColorSpace::IccBased`] |
-//! | `[/Indexed ...]`     | [`ColorSpace::Indexed`] |
+//! | `[/Indexed ...]`, `[/I ...]` (Table 93) | [`ColorSpace::Indexed`] |
 //! | `/Pattern` or `[/Pattern <base>]` | [`ColorSpace::Pattern`] |
 //! | `[/Separation ...]`  | [`ColorSpace::Separation`] |
 //! | `[/DeviceN ...]`     | [`ColorSpace::DeviceN`] |
@@ -56,7 +56,7 @@ use super::shading::function::Function;
 use crate::resources::dict_ext::DictExt as _;
 
 mod cal;
-mod icc;
+pub(crate) mod icc;
 
 pub use cal::CalSpace;
 use icc::IccConversion;
@@ -349,13 +349,30 @@ impl PartialEq for TintTransform {
 
 impl Eq for TintTransform {}
 
+impl ColorSpace {
+    /// The default `Decode` array of an image in this space (PDF §8.9.5.2,
+    /// Table 90): one `(dmin, dmax)` pair per component.  `[0, 1]` for
+    /// device, CIE-based, ICC-based and tint spaces; `L*` in `[0, 100]`
+    /// and `a*`, `b*` over the Lab `Range` (`[-100, 100]` by default); and
+    /// `[0, 2^bpc − 1]` for `Indexed`, whose samples are palette indices at
+    /// `bpc` bits.
+    #[must_use]
+    pub fn default_decode(&self, bpc: u32) -> Vec<(f64, f64)> {
+        match self {
+            Self::Indexed { .. } => vec![(0.0, f64::from((1u32 << bpc.min(16)) - 1))],
+            Self::Lab { .. } => vec![(0.0, 100.0), (-100.0, 100.0), (-100.0, 100.0)],
+            _ => vec![(0.0, 1.0); self.ncomponents()],
+        }
+    }
+}
+
 /// Convert palette index `index` of an `Indexed` space to sRGB.
 ///
 /// PDF §8.6.6.3: the lookup holds `hival + 1` entries of
 /// `base.ncomponents()` bytes; byte `b` of an entry maps linearly onto the
 /// base component's range (`[0, 1]` for device and tint spaces, `L*` in
-/// `[0, 100]` and `a*`, `b*` in `[-100, 100]` for the default Lab range).
-/// `None` when `lookup` is shorter than the entry.
+/// `[0, 100]` and `a*`, `b*` over the Lab `Range`).  `None` when `lookup`
+/// is shorter than the entry.
 fn indexed_to_rgb(
     doc: &Document,
     lookup: &[u8],
@@ -377,36 +394,23 @@ fn indexed_to_rgb(
 /// Convert one 8-bit sample tuple of `space` to sRGB.
 ///
 /// Sample byte `b` of component `i` maps linearly onto that component's
-/// default range (PDF §8.9.5.2 default `Decode`): `[0, 1]` for device and
-/// tint spaces, `L*` in `[0, 100]` and `a*`, `b*` in `[-100, 100]` for Lab.
+/// default range ([`ColorSpace::default_decode`] at 8 bits).
 /// `samples.len()` must equal `space.ncomponents()`; a mismatch converts to
 /// black, as [`ColorSpace::convert_to_rgb`] does.
 pub(crate) fn samples_to_rgb(doc: &Document, space: &ColorSpace, samples: &[u8]) -> [u8; 3] {
     let comps: Vec<f64> = samples
         .iter()
-        .enumerate()
-        .map(|(i, &b)| {
-            let v = f64::from(b) / 255.0;
-            match (space, i) {
-                (ColorSpace::Lab { .. }, 0) => v * 100.0,
-                (ColorSpace::Lab { .. }, _) => v.mul_add(200.0, -100.0),
-                _ => v,
-            }
-        })
+        .zip(space.default_decode(8))
+        .map(|(&b, (dmin, dmax))| decoded_sample(b, (dmin, dmax), 255.0))
         .collect();
     space.convert_to_rgb(doc, &comps)
 }
 
-/// Whether image samples in `space` need per-sample conversion through
-/// [`samples_to_rgb`]: the spaces whose component count or meaning the
-/// image path's Gray / RGB / CMYK sample layouts cannot carry
-/// (multi-colorant `DeviceN`, Lab).
-pub(crate) const fn needs_sample_conversion(space: &ColorSpace) -> bool {
-    match space {
-        ColorSpace::DeviceN { ncomps, .. } => *ncomps > 1,
-        ColorSpace::Lab { .. } => true,
-        _ => false,
-    }
+/// The component value of sample `s` under the `Decode` pair
+/// `(dmin, dmax)` when samples run from 0 to `max_sample` (PDF §8.9.5.2):
+/// `dmin + s · (dmax − dmin) / max_sample`.
+pub(crate) fn decoded_sample(s: u8, (dmin, dmax): (f64, f64), max_sample: f64) -> f64 {
+    (f64::from(s) / max_sample).mul_add(dmax - dmin, dmin)
 }
 
 /// A spot tint with no resolvable transform approximates as gray with
@@ -554,7 +558,7 @@ fn resolve_array(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
             dict_id: arr.get(1).and_then(reference_id),
         },
         b"ICCBased" => resolve_icc_based(doc, arr.get(1), depth),
-        b"Indexed" => resolve_indexed(doc, arr, depth),
+        b"Indexed" | b"I" => resolve_indexed(doc, arr, depth),
         b"Pattern" => ColorSpace::Pattern {
             base: arr
                 .get(1)

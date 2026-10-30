@@ -19,11 +19,11 @@ use crate::resources::icc_shaper::{ProfileConversion, fetch_profile_bytes};
 
 /// The compiled sRGB conversion of one ICC profile stream for colour values
 /// of its declared component count.
-pub(super) enum IccConversion {
+pub enum IccConversion {
     /// A gray (`n = 1`) or RGB (`n = 3`) matrix/TRC profile.
     Shaper(ProfileConversion),
-    /// Any other profile with `n` of 3 or 4: an 8-bit transform whose source
-    /// pixel holds `n` channels.
+    /// Any other profile with `n` of 1, 3 or 4: an 8-bit transform whose
+    /// source pixel holds `n` channels.
     Transform {
         n: u8,
         xform: Arc<Transform8BitExecutor>,
@@ -38,7 +38,7 @@ impl IccConversion {
     /// compiled on first use and shared for the lifetime of `doc`.  `None`
     /// when neither the profile nor the `/Alternate` space converts `n`
     /// components.
-    pub(super) fn load(doc: &Document, id: ObjectId, n: u8) -> Option<Arc<Self>> {
+    pub fn load(doc: &Document, id: ObjectId, n: u8) -> Option<Arc<Self>> {
         doc.derived(id, || {
             fetch_profile_bytes(doc, id)
                 .and_then(|bytes| Self::compile(&bytes, n))
@@ -81,6 +81,7 @@ impl IccConversion {
             return Some(Self::Shaper(shaper));
         }
         let layout = match n {
+            1 => Layout::Gray,
             3 => Layout::Rgb,
             4 => Layout::Rgba,
             _ => return None,
@@ -111,6 +112,24 @@ impl IccConversion {
                     ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk
                 )
         )
+    }
+
+    /// Convert interleaved 8-bit pixels of `n` channels in `src` to the
+    /// sRGB bytes of `dst`, which holds three bytes per pixel.  `None` for
+    /// a conversion that is not a transform, a length mismatch, or a
+    /// transform failure.
+    pub fn transform_pixels(&self, src: &[u8], dst: &mut [u8]) -> Option<()> {
+        let Self::Transform { n, xform } = self else {
+            return None;
+        };
+        let n = usize::from(*n);
+        if !src.len().is_multiple_of(n) || dst.len() != src.len() / n * 3 {
+            return None;
+        }
+        xform
+            .transform(src, dst)
+            .map_err(|e| log::debug!("colorspace: ICC transform execution failed: {e}"))
+            .ok()
     }
 
     /// Convert normalised components to sRGB bytes.  Components are

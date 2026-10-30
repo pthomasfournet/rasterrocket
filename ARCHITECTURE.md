@@ -393,16 +393,36 @@ resources/
     function/        — sampled.rs (Type 0), postscript.rs (Type 4)
   image/
     mod.rs           — ImageDescriptor; XObject resolution
-    dispatch.rs      — filter chain → decoded samples (images and masks)
-    raw.rs           — raw / Flate samples; /Decode through 256-entry tables
+    dispatch.rs      — filter chain → samples → colour conversion (images
+                       and masks)
+    raw.rs           — raw / Flate samples expanded to one byte each
     bitpack.rs       — 1/2/4/16-bpc expansion
     codecs.rs        — DCT, JPX, CCITT, JBIG2; JPX decodes at
-                       `ImageRequest::draw_size` unless masked and reads
-                       colour space and /Decode from the image dictionary
-    colorspace.rs    — image colour spaces; CMYK/YCCK JPEG samples are ink
+                       `ImageRequest::draw_size` unless masked; CMYK/YCCK
+                       JPEG samples are ink
+    colorspace.rs    — ImageColour: the samples' colour space and their
+                       conversion to gray / RGB
     smask.rs         — SMask decode and /Matte removal
     inline.rs        — BI … ID … EI; data length from the dictionary
 ```
+
+**Image colour** (`resources/image/colorspace.rs`)
+
+Every codec yields samples in the image's own colour space, before
+`/Decode`: stencil bytes, or `n` bytes per pixel.  `ImageColour`, resolved
+once per image from the dictionary and the `/ColorSpace` resources in
+effect, converts them through the same `ColorSpace` conversions the fill
+operators use, so an image is drawn exactly as a fill of the same colour
+would be: `CalRGB` and `CalGray` parameters, Lab, ICC profiles (matrix/TRC
+as a shaper, any other through `moxcms`, an unusable one through its
+`/Alternate`), `Separation` / `DeviceN` tint transforms, `Indexed`
+palettes, and the `/Default*` space of a device space.  A one-component
+image converts through a 256-entry table with `/Decode` folded in, kept one
+byte per pixel when every entry is neutral; three- and four-component
+images remap `/Decode` at 8 bits and then convert (a shaper, a profile
+transform, the device CMYK model, or a memoised per-pixel conversion for Lab
+and `DeviceN`).  An image whose colorants are all `/None` is not drawn.
+Colour-key masks are compared with the samples before any of this.
 
 **Fonts** (`renderer/font_cache.rs` and its neighbours)
 

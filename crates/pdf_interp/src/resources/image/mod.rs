@@ -169,19 +169,20 @@ pub use smask::SoftMask;
 pub mod fuzz_entry {
     use pdf::{Document, Object};
 
-    use super::ImageDescriptor;
     use super::codecs;
 
+    /// Whether the stream decodes.
     pub fn decode_ccitt(
         data: &[u8],
         width: u32,
         height: u32,
         is_mask: bool,
         parms: Option<&Object>,
-    ) -> Option<ImageDescriptor> {
-        codecs::decode_ccitt(data, width, height, is_mask, parms)
+    ) -> bool {
+        codecs::decode_ccitt(data, width, height, is_mask, parms).is_some()
     }
 
+    /// Whether the stream decodes.
     pub fn decode_jbig2(
         doc: &Document,
         data: &[u8],
@@ -189,8 +190,8 @@ pub mod fuzz_entry {
         height: u32,
         is_mask: bool,
         parms: Option<&Object>,
-    ) -> Option<ImageDescriptor> {
-        codecs::decode_jbig2(doc, data, width, height, is_mask, parms)
+    ) -> bool {
+        codecs::decode_jbig2(doc, data, width, height, is_mask, parms).is_some()
     }
 }
 
@@ -205,8 +206,10 @@ pub enum ImageResolution {
     /// The codec returned `None` or the stream was structurally invalid.  The
     /// page is incomplete; the message should be surfaced to the caller.
     DecodeFailed(String),
-    /// The named `XObject` exists and is of a non-image subtype that has no
-    /// raster appearance (e.g. `/PS`).  Nothing is lost by skipping it.
+    /// The image has no raster appearance: the named `XObject` is of a
+    /// non-image subtype (e.g. `/PS`), or the image's colour space paints
+    /// nothing (every colorant `/None`, PDF §8.6.6.4).  Nothing is lost by
+    /// skipping it.
     Absent,
 }
 
@@ -428,7 +431,8 @@ pub struct ImageDescriptor {
 /// Returns:
 /// - [`ImageResolution::Ok`] on success,
 /// - [`ImageResolution::Absent`] if the object is an `XObject` of a subtype
-///   with no raster appearance (nothing to draw — skip silently),
+///   with no raster appearance, or an image whose colour space paints
+///   nothing (nothing to draw — skip silently),
 /// - [`ImageResolution::DecodeFailed`] when the name does not resolve to a
 ///   readable `XObject` stream, the image dictionary is incomplete, or the
 ///   codec fails (content is lost — surface to the caller).
@@ -487,17 +491,10 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     };
 
     let is_mask = stream.dict.get_bool(b"ImageMask").unwrap_or(false);
-
-    // A spot-colour or ICC-profiled image decodes to device samples whatever
-    // the codec; the colour rewrite runs once the samples are final.
-    let rewrite = if is_mask {
-        None
-    } else {
-        stream
-            .dict
-            .get(b"ColorSpace")
-            .and_then(|cs| colorspace::sample_rewrite(doc, cs))
-    };
+    let colour = colorspace::ImageColour::resolve(doc, &stream.dict, ctx.color_spaces);
+    if !is_mask && colour.paints_nothing() {
+        return ImageResolution::Absent;
+    }
 
     // The matte colour of a soft mask the image's samples are pre-blended
     // with (§11.6.5.3).
@@ -516,15 +513,12 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 
     // The GPU blit composites cached images fully opaque and reads their
     // samples verbatim, so an image carrying a soft mask, an explicit mask,
-    // a colour rewrite (spot tint or ICC profile), or a `/Decode` remap
+    // or any colour conversion (a non-device space, or a `/Decode` remap)
     // stays host-resident: neither looked up (a content-hash hit from
-    // another document would drop the mask, the rewrite, or the remap) nor
+    // another document would drop the mask or the conversion) nor
     // inserted.
     #[cfg(feature = "cache")]
-    let dct_cache = if has_mask_entry(&stream.dict)
-        || rewrite.is_some()
-        || stream.dict.get(b"Decode").is_some()
-    {
+    let dct_cache = if has_mask_entry(&stream.dict) || !colour.identity() {
         None
     } else {
         codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
@@ -535,6 +529,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         width: w,
         height: h,
         is_mask,
+        colour,
     };
     let mut img = match dispatch::decode_image_stream(
         ctx,
@@ -568,7 +563,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     } else if let Some(mask_obj) = stream.dict.get(b"Mask") {
         // PDF §8.9.6: an explicit /Mask, distinct from /SMask.  Two forms:
         //  - /Mask N 0 R           — §8.9.6.3 stencil mask image
-        //  - /Mask [min max …]     — §8.9.6.4 colour-key masking
+        //  - /Mask [min max …]     — §8.9.6.4 colour-key masking, compared
+        //    with the stored samples by the decode itself
         // SMask takes precedence (handled above); /Mask is only consulted when
         // no /SMask is present.  A decode failure is a soft skip — the base
         // image is still valid, so it is blitted fully opaque.
@@ -582,47 +578,15 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                     );
                 }
             }
-            // A raw image's key was compared on its stored samples in
-            // `decode_raw`; a codec's output is compared as decoded.
-            Object::Array(_) if matches!(img.filter, ImageFilter::Raw | ImageFilter::Flate) => {}
-            Object::Array(ranges) => {
-                if let Some(base) = img.data.as_cpu() {
-                    if let Some(mask) = smask::colour_key_mask(
-                        ranges,
-                        base,
-                        img.color_space.bytes_per_pixel(),
-                        img.width,
-                        img.height,
-                    ) {
-                        img.smask = Some(mask);
-                    } else {
-                        log::warn!(
-                            "image: colour-key /Mask malformed or mismatched — blitting image without mask"
-                        );
-                    }
-                } else {
-                    // Colour-key masking tests host-resident sample bytes; a
-                    // GPU-resident base can't be range-tested here.  Log rather
-                    // than drop the mask silently (the v1 silent-skip sin).
-                    log::warn!(
-                        "image: colour-key /Mask on GPU-resident base image not supported — blitting image without mask"
-                    );
-                }
-            }
+            Object::Array(_) => {}
             _ => {
                 log::warn!("image: /Mask is neither a reference nor an array — ignoring");
             }
         }
     }
 
-    // After masking: colour-key ranges are matched against the decoded
-    // samples, not the colours they map to.
-    if let Some(rewrite) = &rewrite {
-        colorspace::apply_sample_rewrite(&mut img, rewrite);
-    }
-
     if let Some(matte) = &matte {
-        smask::remove_matte(doc, stream.dict.get(b"ColorSpace"), matte, &mut img);
+        smask::remove_matte(doc, src.colour.space(), matte, &mut img);
     }
 
     ImageResolution::Ok(DecodedImage {

@@ -18,11 +18,9 @@
 //!
 //! Tags are read with `moxcms`; profiles without the full matrix/TRC tag set
 //! (A2B/B2A table-based profiles), with a non-XYZ PCS, or that fail to parse
-//! are [`ProfileConversion::Unsupported`].  Conversions are memoised
-//! process-wide, keyed by the profile bytes.
+//! are [`ProfileConversion::Unsupported`].
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock};
 
 use moxcms::{ColorProfile, DataColorSpace, ToneReprCurve, Xyzd};
 use pdf::{Document, ObjectId};
@@ -48,9 +46,6 @@ const IDENTITY_MATRIX_TOLERANCE: f64 = 2e-3;
 /// the encoding has slope 12.92, so one table step is at most
 /// `12.92 · 255 / (ENCODE_TABLE_LEN − 1) ≈ 0.2` output levels.
 const ENCODE_TABLE_LEN: usize = 16_384;
-
-/// Number of distinct profiles memoised before the cache is flushed.
-const CACHE_CAPACITY: usize = 64;
 
 // ── Curve and encoding maths ──────────────────────────────────────────────────
 
@@ -229,18 +224,11 @@ fn is_identity(m: &Mat3) -> bool {
 
 /// 8-bit gray → 8-bit sRGB gray: `table[v] = encode(grayTRC(v / 255))`.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct GrayShaper {
+pub struct GrayShaper {
     table: [u8; 256],
 }
 
 impl GrayShaper {
-    /// Rewrite one-byte-per-pixel gray samples in place.
-    pub(super) fn convert_in_place(&self, samples: &mut [u8]) {
-        for s in samples {
-            *s = self.table[usize::from(*s)];
-        }
-    }
-
     pub(super) const fn convert(&self, v: u8) -> u8 {
         self.table[v as usize]
     }
@@ -248,7 +236,7 @@ impl GrayShaper {
 
 /// 8-bit RGB → 8-bit sRGB through an RGB shaper profile.
 #[derive(Debug, PartialEq)]
-pub(super) enum RgbShaper {
+pub enum RgbShaper {
     /// The composite matrix is the identity: one table per channel,
     /// `tables[c][v] = encode(TRC_c(v / 255))`.
     PerChannel(Box<[[u8; 256]; 3]>),
@@ -291,7 +279,7 @@ impl RgbShaper {
 
     /// Rewrite packed three-byte-per-pixel samples in place.  A trailing
     /// partial pixel is left untouched.
-    pub(super) fn convert_in_place(&self, samples: &mut [u8]) {
+    pub fn convert_in_place(&self, samples: &mut [u8]) {
         let pixels = samples.as_chunks_mut::<3>().0;
         match self {
             Self::PerChannel(t) => {
@@ -315,7 +303,7 @@ impl RgbShaper {
 
 /// The evaluated form of one ICC profile for 8-bit input.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum ProfileConversion {
+pub enum ProfileConversion {
     /// Not a matrix/TRC profile, or not a valid profile.
     Unsupported,
     /// A gray TRC profile; `None` when it equals the sRGB encoding at 8 bits.
@@ -417,7 +405,6 @@ fn rgb_shaper(p: &ColorProfile) -> Result<Option<Arc<RgbShaper>>, ()> {
         return Err(());
     }
     let composite = mat_mul(&pcs_to_linear_srgb(), &colorants);
-
     let mut linear = Box::new([[0f32; 256]; 3]);
     for (trc, lin) in trcs.iter().zip(linear.iter_mut()) {
         for (v, out) in (0u8..=255).zip(lin.iter_mut()) {
@@ -430,65 +417,40 @@ fn rgb_shaper(p: &ColorProfile) -> Result<Option<Arc<RgbShaper>>, ()> {
             }
         }
     }
+    Ok(RgbShaper::from_linearisation(linear, &composite))
+}
 
-    if !is_identity(&composite) {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "matrix coefficients need no more than f32 precision"
-        )]
-        let matrix = composite.map(|row| row.map(|v| v as f32));
-        return Ok(Some(Arc::new(RgbShaper::Matrix { linear, matrix })));
-    }
-    let mut tables = Box::new([[0u8; 256]; 3]);
-    for (lin, table) in linear.iter().zip(tables.iter_mut()) {
-        for (l, out) in lin.iter().zip(table.iter_mut()) {
-            *out = unit_to_u8(srgb_encode(f64::from(*l)));
+impl RgbShaper {
+    /// The shaper that applies `linear` (`linear[c][v]`, the linear-light
+    /// value of 8-bit level `v` of channel `c`) and then `matrix`, which
+    /// maps the linear components to linear sRGB.  `None` when the result
+    /// is the identity at 8 bits.
+    pub(super) fn from_linearisation(
+        linear: Box<[[f32; 256]; 3]>,
+        matrix: &Mat3,
+    ) -> Option<Arc<Self>> {
+        if !is_identity(matrix) {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "matrix coefficients need no more than f32 precision"
+            )]
+            let matrix = matrix.map(|row| row.map(|v| v as f32));
+            return Some(Arc::new(Self::Matrix { linear, matrix }));
         }
+        let mut tables = Box::new([[0u8; 256]; 3]);
+        for (lin, table) in linear.iter().zip(tables.iter_mut()) {
+            for (l, out) in lin.iter().zip(table.iter_mut()) {
+                *out = unit_to_u8(srgb_encode(f64::from(*l)));
+            }
+        }
+        (!tables.iter().all(is_identity_table)).then(|| Arc::new(Self::PerChannel(tables)))
     }
-    Ok(if tables.iter().all(is_identity_table) {
-        None
-    } else {
-        Some(Arc::new(RgbShaper::PerChannel(tables)))
-    })
 }
 
-// ── Profile cache ─────────────────────────────────────────────────────────────
-
-/// The conversion for `bytes`, memoised process-wide by profile content.
-///
-/// The cache holds at most [`CACHE_CAPACITY`] profiles and is flushed when
-/// full; a profile is evaluated outside the lock, so concurrent first uses
-/// of one profile may each evaluate it.
-pub(super) fn conversion_for_profile(bytes: &[u8]) -> ProfileConversion {
-    static CACHE: OnceLock<Mutex<HashMap<Box<[u8]>, ProfileConversion>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(bytes)
-    {
-        return hit.clone();
-    }
-    let conv = ProfileConversion::from_profile_bytes(bytes);
-    let mut map = cache.lock().unwrap_or_else(PoisonError::into_inner);
-    if map.len() >= CACHE_CAPACITY {
-        map.clear();
-    }
-    let _ = map.insert(bytes.into(), conv.clone());
-    conv
-}
-
-/// The conversion for the ICC profile stream `stream_id`;
-/// [`ProfileConversion::Unsupported`] when the stream cannot be read.
-pub(super) fn conversion_for_stream(doc: &Document, stream_id: ObjectId) -> ProfileConversion {
-    let Some(bytes) = fetch_profile_bytes(doc, stream_id) else {
-        return ProfileConversion::Unsupported;
-    };
-    conversion_for_profile(&bytes)
-}
+// ── Profile streams ───────────────────────────────────────────────────────────
 
 /// Decompressed content of the ICC profile stream `stream_id`.
-pub(super) fn fetch_profile_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
+pub fn fetch_profile_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
     let obj = doc.get_object(stream_id).ok()?;
     obj.as_ref()
         .as_stream()?
@@ -756,7 +718,8 @@ mod tests {
     #[test]
     fn convert_in_place_matches_per_pixel() {
         let bytes = profile_with(&ToneReprCurve::Lut(vec![GAMMA_1_8]));
-        let ProfileConversion::Rgb(Some(shaper)) = conversion_for_profile(&bytes) else {
+        let ProfileConversion::Rgb(Some(shaper)) = ProfileConversion::from_profile_bytes(&bytes)
+        else {
             panic!("shaper expected");
         };
         let mut buf = vec![10, 20, 30, 128, 64, 200, 7];
@@ -764,10 +727,5 @@ mod tests {
         assert_eq!(&buf[..3], &shaper.convert([10, 20, 30]));
         assert_eq!(&buf[3..6], &shaper.convert([128, 64, 200]));
         assert_eq!(buf[6], 7, "a trailing partial pixel is left alone");
-        // The cached result is the same evaluation.
-        assert_eq!(
-            conversion_for_profile(&bytes),
-            ProfileConversion::from_profile_bytes(&bytes)
-        );
     }
 }

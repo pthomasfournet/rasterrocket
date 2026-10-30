@@ -1,19 +1,21 @@
-//! Filter-chain dispatch from an image stream to its decoded samples.
+//! Filter-chain dispatch from an image stream to its decoded, colour-converted
+//! samples.
 //!
 //! [`decode_image_stream`] is the one path from encoded stream bytes to an
 //! [`ImageDescriptor`].  `XObject` images, inline images, soft masks and
-//! stencil masks all decode through it, so each supports every filter chain
-//! and `/DecodeParms` form the others do.
+//! stencil masks all decode through it, so each supports every filter chain,
+//! `/DecodeParms` form and colour space the others do.
 
 use std::borrow::Cow;
 
-use pdf::Stream;
+use pdf::{Object, Stream};
 
 use crate::resources::dict_ext::DictExt as _;
 
 use super::codecs::{JpxOptions, decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
-use super::colorspace::indexed_array;
-use super::raw::{apply_bilevel_decode, decode_raw, expand_palette};
+use super::colorspace::{ImageColour, Samples};
+use super::raw::{apply_stencil_decode, decode_raw};
+use super::smask::colour_key_mask;
 use super::{
     ImageDecodeCtx, ImageDescriptor, ImageFilter, filter_name, image_filter_chain,
     is_transport_filter, terminal_decode_parms,
@@ -32,16 +34,21 @@ pub(super) struct ImageStream<'a> {
     pub height: u32,
     /// `/ImageMask`: decode to stencil bytes ([`super::ImageColorSpace::Mask`]).
     pub is_mask: bool,
+    /// The colour of the samples, resolved from the dictionary and the
+    /// colour-space resources in effect.
+    pub colour: ImageColour,
 }
 
-/// Decode `src` through its whole `/Filter` chain.
+/// Decode `src` through its whole `/Filter` chain and convert its samples
+/// to the colour the blit draws.
 ///
 /// Every filter before the terminal one is a transport filter (PDF §7.4)
 /// and is applied first; the terminal filter selects the codec.  A terminal
 /// transport filter, or none, leaves raw samples for [`decode_raw`].  The
 /// codec receives the `/DecodeParms` entry index-aligned to the terminal
-/// filter.  `/Decode` is applied by the codec arms, so the samples returned
-/// are final except for colour conversion.
+/// filter.  A colour-key `/Mask` array is compared with the codec's
+/// samples before `/Decode` and colour conversion; a raw image compares
+/// its stored samples (see `decode_raw`).
 ///
 /// `draw_size` is the device-pixel extent the image is drawn at, for a
 /// codec that can reconstruct at reduced resolution; `None` decodes in
@@ -86,39 +93,20 @@ pub(super) fn decode_image_stream<
     let parms = terminal_decode_parms(dict, chain_len);
 
     let decoded = match filter.as_deref() {
-        None => decode_raw(
-            doc,
-            &input,
-            w,
-            h,
-            is_mask,
-            dict,
-            #[cfg(feature = "gpu-icc")]
-            &mut ctx.icc,
-        ),
-        Some(f) if is_transport_filter(f) => decode_raw(
-            doc,
-            &input,
-            w,
-            h,
-            is_mask,
-            dict,
-            #[cfg(feature = "gpu-icc")]
-            &mut ctx.icc,
-        ),
-        Some("CCITTFaxDecode") => decode_ccitt(&input, w, h, is_mask, parms).map(|mut img| {
-            apply_bilevel_decode(&mut img, dict);
-            img
+        None => decode_raw(&input, w, h, is_mask, dict, &src.colour),
+        Some(f) if is_transport_filter(f) => decode_raw(&input, w, h, is_mask, dict, &src.colour),
+        Some("CCITTFaxDecode") => decode_ccitt(&input, w, h, is_mask, parms).map(|mut s| {
+            apply_stencil_decode(&mut s, dict);
+            s
         }),
-        Some("JBIG2Decode") => decode_jbig2(doc, &input, w, h, is_mask, parms).map(|mut img| {
-            apply_bilevel_decode(&mut img, dict);
-            img
+        Some("JBIG2Decode") => decode_jbig2(doc, &input, w, h, is_mask, parms).map(|mut s| {
+            apply_stencil_decode(&mut s, dict);
+            s
         }),
         Some("DCTDecode") => decode_dct(
             &input,
             w,
             h,
-            dict,
             ctx,
             #[cfg(feature = "gpu-jpeg-huffman")]
             jpeg_gpu,
@@ -128,37 +116,66 @@ pub(super) fn decode_image_stream<
         Some("JPXDecode") => {
             // An `/Indexed` space maps the codestream's samples through the
             // PDF palette (§8.6.6.3); any other space reads them as colour.
-            let colour_space = dict.get(b"ColorSpace").and_then(|o| doc.resolve(o).ok());
-            let palette = if is_mask {
-                None
-            } else {
-                colour_space.as_deref().and_then(indexed_array)
-            };
             let opts = JpxOptions {
-                indices: palette.is_some(),
+                indices: !is_mask && src.colour.indexed(),
                 smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
             };
             #[cfg(feature = "nvjpeg2k")]
-            let img = decode_jpx(&input, w, h, draw_size, opts, ctx.nvjpeg2k.as_deref_mut());
+            let samples = decode_jpx(&input, w, h, draw_size, opts, ctx.nvjpeg2k.as_deref_mut());
             #[cfg(not(feature = "nvjpeg2k"))]
-            let img = decode_jpx(&input, w, h, draw_size, opts);
-            match palette {
-                Some(cs_arr) => img.and_then(|idx| {
-                    let indices = idx.data.as_cpu()?;
-                    expand_palette(doc, cs_arr, indices, idx.width, idx.height)
-                }),
-                None => img,
-            }
+            let samples = decode_jpx(&input, w, h, draw_size, opts);
+            samples
         }
         Some(other) => return Err(format!("unsupported filter {other:?}")),
     };
 
-    let mut img = decoded.ok_or_else(|| match filter.as_deref() {
+    let mut samples = decoded.ok_or_else(|| match filter.as_deref() {
         Some(codec @ ("CCITTFaxDecode" | "DCTDecode" | "JPXDecode" | "JBIG2Decode")) => {
             format!("{codec} decode failed")
         }
         _ => "raw/unfiltered decode failed".to_owned(),
     })?;
-    img.filter = ImageFilter::from_filter_str(filter.as_deref());
+    let image_filter = ImageFilter::from_filter_str(filter.as_deref());
+
+    // A codec's colour key is compared with its decoded samples; a raw
+    // image's was compared with its stored samples in `decode_raw`.
+    if !is_mask
+        && !matches!(image_filter, ImageFilter::Raw | ImageFilter::Flate)
+        && let Some(Object::Array(ranges)) = dict.get(b"Mask")
+    {
+        samples.smask = codec_colour_key_mask(&samples, ranges);
+        if samples.smask.is_none() {
+            log::warn!(
+                "image: colour-key /Mask malformed or mismatched — blitting image without mask"
+            );
+        }
+    }
+
+    let mut img = src
+        .colour
+        .convert(
+            doc,
+            samples,
+            #[cfg(feature = "gpu-icc")]
+            &mut ctx.icc,
+        )
+        .ok_or_else(|| "colour conversion failed".to_owned())?;
+    img.filter = image_filter;
     Ok(img)
+}
+
+/// The colour-key mask (§8.9.6.4) of a codec's host-resident samples.
+/// Device-resident samples cannot be range-tested; the mask is dropped
+/// with a warning rather than silently.
+fn codec_colour_key_mask(samples: &Samples, ranges: &[Object]) -> Option<super::SoftMask> {
+    let super::colorspace::Layout::Color(n) = samples.layout else {
+        return None;
+    };
+    let Some(bytes) = samples.data.as_cpu() else {
+        log::warn!(
+            "image: colour-key /Mask on GPU-resident base image not supported — blitting image without mask"
+        );
+        return None;
+    };
+    colour_key_mask(ranges, bytes, usize::from(n), samples.width, samples.height)
 }

@@ -1545,7 +1545,7 @@ impl<'doc> PageRenderer<'doc> {
         let request = crate::resources::ImageRequest { name, draw_size };
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
-            color_spaces: None,
+            color_spaces: self.resources.color_space_dict(),
             #[cfg(feature = "nvjpeg")]
             nvjpeg: self.nvjpeg.as_mut(),
             #[cfg(feature = "vaapi")]
@@ -1611,7 +1611,7 @@ impl<'doc> PageRenderer<'doc> {
             }
             ImageResolution::Absent => {
                 log::debug!(
-                    "rasterrocket-interp: Do /{} skipped (XObject subtype has no raster appearance)",
+                    "rasterrocket-interp: Do /{} skipped (no raster appearance)",
                     String::from_utf8_lossy(name)
                 );
             }

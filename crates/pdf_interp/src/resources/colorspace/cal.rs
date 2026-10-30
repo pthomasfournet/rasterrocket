@@ -11,9 +11,11 @@
 //! as sRGB.  The three linear steps compose into one matrix at resolve time.
 //! `BlackPoint` is not applied.
 
+use std::sync::Arc;
+
 use pdf::{Dictionary, Document, Object};
 
-use crate::resources::icc_shaper::{Mat3, mat_inverse, mat_mul, srgb_encode};
+use crate::resources::icc_shaper::{Mat3, RgbShaper, mat_inverse, mat_mul, srgb_encode};
 use crate::resources::obj_to_f64;
 
 /// CIE XYZ of the D65 white, `Y = 1`.
@@ -128,6 +130,28 @@ impl CalSpace {
     #[must_use]
     pub const fn ncomponents(&self) -> usize {
         self.n as usize
+    }
+
+    /// The conversion of 8-bit `CalRGB` samples as a shaper: the per-channel
+    /// gamma as the linearisation and the composed matrix.  `None` for
+    /// `CalGray`, or when the conversion is the identity at 8 bits.
+    pub(crate) fn rgb_shaper(&self) -> Option<Arc<RgbShaper>> {
+        if self.n != 3 {
+            return None;
+        }
+        let mut linear = Box::new([[0f32; 256]; 3]);
+        for (gamma, lin) in self.gamma.iter().zip(linear.iter_mut()) {
+            for (v, out) in (0u8..=255).zip(lin.iter_mut()) {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a linear-light value needs no more than f32 precision"
+                )]
+                {
+                    *out = (f64::from(v) / 255.0).powf(*gamma) as f32;
+                }
+            }
+        }
+        RgbShaper::from_linearisation(linear, &self.to_linear_srgb)
     }
 
     /// Convert `comps` (each clipped to `[0, 1]`) to sRGB bytes.  The

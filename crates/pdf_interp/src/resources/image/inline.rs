@@ -7,8 +7,9 @@
 
 use pdf::{Dictionary, Object};
 
+use super::colorspace::ImageColour;
 use super::dispatch::{ImageStream, decode_image_stream};
-use super::{DecodedImage, ImageDecodeCtx, validated_dims};
+use super::{DecodedImage, ImageDecodeCtx, ImageResolution, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
 #[cfg(feature = "gpu-jpeg-huffman")]
@@ -26,7 +27,8 @@ use super::ImageColorSpace;
 ///
 /// A `/CS` that names neither a device space nor an abbreviation is looked up
 /// in `ctx.color_spaces`, as is the base of an inline `[/Indexed …]` array
-/// given by name; a name that resolves nowhere fails the decode.
+/// given by name; a name that resolves nowhere fails the decode.  A device
+/// space takes the `/Default*` entry of `ctx.color_spaces` (§8.6.5.6).
 ///
 /// Inline images cannot carry an `SMask` stream (they have no object identity),
 /// so the returned image always has `smask: None`.
@@ -39,44 +41,53 @@ use super::ImageColorSpace;
 /// dispatch logic in `decode_dct` / `decode_jpx` can make the threshold decision
 /// rather than unconditionally bypassing GPU decode for all inline images.
 ///
-/// Returns `None` if the parameter block is unparseable, dimensions are
-/// degenerate, a colour-space name is unresolvable, or the filter is
-/// unsupported.
+/// Returns [`ImageResolution::DecodeFailed`] if the parameter block is
+/// unparseable, dimensions are degenerate, a colour-space name is
+/// unresolvable, or the filter is unsupported, and
+/// [`ImageResolution::Absent`] for an image whose colour space paints
+/// nothing.
 #[must_use]
 pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
     params: &[u8],
     data: &[u8],
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
-) -> Option<DecodedImage> {
-    let doc = ctx.doc;
+) -> ImageResolution {
+    let failed = |what: String| {
+        log::warn!("inline image: {what}");
+        ImageResolution::DecodeFailed(what)
+    };
     let mut dict = parse_inline_params(params);
     if let Err(name) = resolve_named_color_space(&mut dict, ctx.color_spaces) {
-        log::warn!(
-            "inline image: /ColorSpace {:?} is neither a device space nor a ColorSpace resource",
+        return failed(format!(
+            "/ColorSpace {:?} is neither a device space nor a ColorSpace resource",
             String::from_utf8_lossy(&name)
-        );
-        return None;
+        ));
     }
 
-    let w_raw = dict.get_i64(b"Width")?;
-    let h_raw = dict.get_i64(b"Height")?;
+    let (Some(w_raw), Some(h_raw)) = (dict.get_i64(b"Width"), dict.get_i64(b"Height")) else {
+        return failed("missing /Width or /Height".to_owned());
+    };
     let Some((w, h)) = validated_dims(w_raw, h_raw) else {
-        log::warn!("inline image: degenerate dimensions {w_raw}×{h_raw}, skipping");
-        return None;
+        return failed(format!("invalid dimensions {w_raw}×{h_raw}"));
     };
 
     let is_mask = dict.get_bool(b"ImageMask").unwrap_or(false);
+    let colour = ImageColour::resolve(ctx.doc, &dict, ctx.color_spaces);
+    if !is_mask && colour.paints_nothing() {
+        return ImageResolution::Absent;
+    }
     let stream = pdf::Stream::new(dict, data.to_vec());
     let src = ImageStream {
         stream: &stream,
         width: w,
         height: h,
         is_mask,
+        colour,
     };
     // Inline images have no object identity, so the device image cache
     // never holds them.
-    let mut img = decode_image_stream(
+    match decode_image_stream(
         ctx,
         &src,
         None,
@@ -84,24 +95,15 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
         None,
         #[cfg(feature = "gpu-jpeg-huffman")]
         jpeg_gpu,
-    )
-    .map_err(|e| log::warn!("inline image: {e}"))
-    .ok()?;
-
-    if !is_mask
-        && let Some(rewrite) = stream
-            .dict
-            .get(b"ColorSpace")
-            .and_then(|cs| super::colorspace::sample_rewrite(doc, cs))
-    {
-        super::colorspace::apply_sample_rewrite(&mut img, &rewrite);
+    ) {
+        Ok(image) => ImageResolution::Ok(DecodedImage {
+            image,
+            source_width: w,
+            interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
+            own_soft_mask: false,
+        }),
+        Err(e) => failed(e),
     }
-    Some(DecodedImage {
-        image: img,
-        source_width: w,
-        interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
-        own_soft_mask: false,
-    })
 }
 
 /// Replace a `/ColorSpace` name that is not a device space with the entry it
@@ -113,7 +115,10 @@ fn resolve_named_color_space(
     color_spaces: Option<&Dictionary>,
 ) -> Result<(), Vec<u8>> {
     let lookup = |name: &[u8]| -> Result<Option<Object>, Vec<u8>> {
-        if matches!(name, b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK") {
+        if matches!(
+            name,
+            b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK" | b"Pattern"
+        ) {
             return Ok(None);
         }
         color_spaces
@@ -127,7 +132,12 @@ fn resolve_named_color_space(
     };
     let resolved = match cs {
         Object::Name(name) => lookup(name)?,
-        Object::Array(arr) if arr.first().and_then(Object::as_name) == Some(b"Indexed") => {
+        Object::Array(arr)
+            if matches!(
+                arr.first().and_then(Object::as_name),
+                Some(b"Indexed" | b"I")
+            ) =>
+        {
             match arr.get(1) {
                 Some(Object::Name(base)) => lookup(base)?.map(|base| {
                     let mut arr = arr.clone();
@@ -336,11 +346,6 @@ mod tests {
     use crate::resources::image::ImageDescriptor;
     use crate::test_helpers::empty_doc;
 
-    /// A context with no `ColorSpace` resources and every GPU decoder off.
-    fn cpu_ctx(doc: &Document) -> ImageDecodeCtx<'_> {
-        ctx_with_color_spaces(doc, None)
-    }
-
     fn ctx_with_color_spaces<'a>(
         doc: &'a Document,
         color_spaces: Option<&'a Dictionary>,
@@ -357,14 +362,17 @@ mod tests {
         data: &[u8],
     ) -> Option<ImageDescriptor> {
         let doc = empty_doc();
-        decode_inline_image(
+        let resolution = decode_inline_image(
             &mut ctx_with_color_spaces(&doc, Some(color_spaces)),
             params,
             data,
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-        )
-        .map(|decoded| decoded.image)
+        );
+        match resolution {
+            ImageResolution::Ok(decoded) => Some(decoded.image),
+            ImageResolution::DecodeFailed(_) | ImageResolution::Absent => None,
+        }
     }
 
     /// `/CS /CS0` naming a `DeviceRGB` resource decodes three bytes per pixel.
@@ -391,15 +399,50 @@ mod tests {
     }
 
     fn decode_cpu(params: &[u8], data: &[u8]) -> Option<ImageDescriptor> {
+        decode_with(&Dictionary::new(), params, data)
+    }
+
+    /// A device-space inline image takes the `/Default*` entry of the
+    /// colour-space resources.
+    #[test]
+    fn inline_device_space_takes_the_default_entry() {
+        let mut cs = Dictionary::new();
+        cs.set(
+            "DefaultGray",
+            pdf::parse_object(
+                b"[/CalGray << /WhitePoint [0.9505 1.0 1.089] /Gamma 1.8 >>]",
+                &mut 0,
+            )
+            .unwrap(),
+        );
+        let img = decode_with(&cs, b"/W 1 /H 1 /CS /G /BPC 8", &[128]).expect("decodes");
+        // 0.5^1.8 linear light encodes to sRGB 147 after the D65 adaptation.
+        let v = img.data.as_cpu().unwrap()[0];
+        assert!(v > 140 && v < 165, "got {v}");
+    }
+
+    /// An inline image whose colour space paints nothing is absent, not
+    /// a failure.
+    #[test]
+    fn inline_none_colorant_is_absent() {
+        let mut cs = Dictionary::new();
+        cs.set(
+            "CSn",
+            pdf::parse_object(
+                b"[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>]",
+                &mut 0,
+            )
+            .unwrap(),
+        );
         let doc = empty_doc();
-        decode_inline_image(
-            &mut cpu_ctx(&doc),
-            params,
-            data,
+        let resolution = decode_inline_image(
+            &mut ctx_with_color_spaces(&doc, Some(&cs)),
+            b"/W 1 /H 1 /CS /CSn /BPC 8",
+            &[255],
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-        )
-        .map(|decoded| decoded.image)
+        );
+        assert!(matches!(resolution, ImageResolution::Absent));
     }
 
     /// Transport filters, alone or chained, decode to raw samples.
@@ -538,16 +581,7 @@ mod tests {
         // 2×2 raw DeviceGray image, 8 bpc, no filter.
         let params = b"/W 2 /H 2 /CS /G /BPC 8";
         let data = [0x00u8, 0x80, 0xFF, 0x40];
-        let doc = empty_doc();
-        let img = decode_inline_image(
-            &mut cpu_ctx(&doc),
-            params,
-            &data,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-        )
-        .expect("decode should succeed")
-        .image;
+        let img = decode_cpu(params, &data).expect("decode should succeed");
         assert_eq!(img.width, 2);
         assert_eq!(img.height, 2);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
@@ -561,16 +595,7 @@ mod tests {
         let params = b"/W 2 /H 1 /IM true /BPC 1";
         // byte 0b01000000: sample 0 then sample 1.
         let data = [0b0100_0000u8];
-        let doc = empty_doc();
-        let img = decode_inline_image(
-            &mut cpu_ctx(&doc),
-            params,
-            &data,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-        )
-        .expect("decode should succeed")
-        .image;
+        let img = decode_cpu(params, &data).expect("decode should succeed");
         assert_eq!(img.color_space, ImageColorSpace::Mask);
         let bytes = img.data.as_cpu().unwrap();
         assert_eq!(bytes[0], 0x00); // first pixel: paint
@@ -580,16 +605,11 @@ mod tests {
     /// `/IM true` with no `/BPC`: an image mask is one bit per sample.
     #[test]
     fn inline_image_mask_without_bpc_is_one_bit() {
-        let doc = empty_doc();
-        let img = decode_inline_image(
-            &mut cpu_ctx(&doc),
+        let img = decode_cpu(
             b"/W 10 /H 2 /IM true",
             &[0b0100_0000, 0b0111_1111, 0b1111_1111, 0b1100_0000],
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
-        .expect("decode should succeed")
-        .image;
+        .expect("decode should succeed");
         assert_eq!(img.color_space, ImageColorSpace::Mask);
         let bytes = img.data.as_cpu().unwrap();
         assert_eq!(bytes.len(), 20);
@@ -601,33 +621,13 @@ mod tests {
     #[test]
     fn inline_image_degenerate_dims() {
         let params = b"/W 0 /H 1 /CS /G /BPC 8";
-        let doc = empty_doc();
-        assert!(
-            decode_inline_image(
-                &mut cpu_ctx(&doc),
-                params,
-                &[],
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-            )
-            .is_none()
-        );
+        assert!(decode_cpu(params, &[]).is_none());
     }
 
     #[test]
     fn inline_image_missing_dims() {
         // No width/height → None.
         let params = b"/CS /G /BPC 8";
-        let doc = empty_doc();
-        assert!(
-            decode_inline_image(
-                &mut cpu_ctx(&doc),
-                params,
-                &[0u8; 4],
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-            )
-            .is_none()
-        );
+        assert!(decode_cpu(params, &[0u8; 4]).is_none());
     }
 }

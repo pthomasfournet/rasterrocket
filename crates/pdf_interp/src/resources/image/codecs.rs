@@ -8,9 +8,11 @@
 use std::sync::Arc;
 
 use hayro_jbig2::Decoder as Jbig2Decoder;
-use pdf::{Dictionary, Document, Object};
+use pdf::{Document, Object};
 
-use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
+#[cfg(feature = "cache")]
+use super::ImageData;
+use super::colorspace::{Layout, Samples};
 use crate::resources::dict_ext::DictExt;
 
 #[cfg(feature = "cache")]
@@ -23,14 +25,6 @@ use gpu::cache::{
 
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
-
-// ── GPU ICC CMYK→RGB acceleration ─────────────────────────────────────────────
-
-#[cfg(feature = "gpu-icc")]
-use gpu::GpuCtx;
-
-#[cfg(feature = "gpu-icc")]
-use super::icc::{self, IccClutCache};
 
 // ── JPEG SOF peek ─────────────────────────────────────────────────────────────
 
@@ -106,7 +100,7 @@ pub(super) fn decode_ccitt(
     height: u32,
     is_mask: bool,
     parms: Option<&Object>,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     use hayro_ccitt::{DecodeSettings, DecoderContext, EncodingMode};
 
     let parms_dict = parms.and_then(|o| o.as_dict());
@@ -181,19 +175,12 @@ pub(super) fn decode_ccitt(
         data_out.resize(capacity, white);
     }
 
-    let color_space = if is_mask {
-        ImageColorSpace::Mask
+    let layout = if is_mask {
+        Layout::Mask
     } else {
-        ImageColorSpace::Gray
+        Layout::Color(1)
     };
-    Some(ImageDescriptor {
-        width,
-        height,
-        color_space,
-        data: ImageData::Cpu(data_out),
-        smask: None,
-        filter: ImageFilter::Raw,
-    })
+    Some(Samples::cpu(width, height, layout, data_out))
 }
 
 /// [`hayro_ccitt::Decoder`] that expands each row of colour changes into one
@@ -254,38 +241,28 @@ impl hayro_ccitt::Decoder for HayroCcittCollector {
 /// check; the actual dimensions come from the JPEG SOF marker and are
 /// authoritative.
 ///
-/// # CMYK handling
-///
-/// JPEG CMYK images in PDF store ink densities in *inverted* form: a byte value
-/// of 0 means *full ink*, 255 means *no ink*.  The JPEG decoder returns raw
-/// bytes in this inverted form.  Converting to RGB:
-///
-/// ```text
-/// R = (255 - C_raw) * (255 - K_raw) / 255
-/// ```
-///
-/// where `C_raw` and `K_raw` are the raw (inverted) byte values.  The `255 -`
-/// term converts each inverted value to a normal ink density before applying
-/// the standard CMY+K → RGB formula.
+/// A four-component stream yields CMYK samples as the dictionary describes
+/// them: an Adobe JPEG that stores inverted ink carries `/Decode [1 0 1 0 1
+/// 0 1 0]`, which the colour conversion applies, so no inversion is implied
+/// by the JPEG itself.  A YCCK stream is converted to CMYK here.
 #[expect(
     clippy::too_many_lines,
     reason = "GPU dispatch paths (nvjpeg, vaapi) plus the CPU decode path are each short; \
               combining them in one function keeps the fallback logic visible"
 )]
 #[cfg_attr(
-    not(any(feature = "nvjpeg", feature = "gpu-icc")),
+    not(feature = "nvjpeg"),
     expect(
         clippy::needless_pass_by_ref_mut,
-        reason = "only the nvjpeg and gpu-icc handles are borrowed mutably"
+        reason = "only the nvjpeg handle is borrowed mutably"
     )
 )]
 pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     data: &[u8],
     pdf_w: u32,
     pdf_h: u32,
-    dict: &Dictionary,
     #[cfg_attr(
-        not(any(feature = "nvjpeg", feature = "vaapi", feature = "gpu-icc")),
+        not(any(feature = "nvjpeg", feature = "vaapi")),
         expect(
             unused_variables,
             reason = "every handle in the context is feature-gated"
@@ -296,7 +273,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
         &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
     >,
     #[cfg(feature = "cache")] cache_ctx: Option<&DctCacheCtx<'_>>,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     use zune_core::bytestream::ZCursor;
     use zune_core::colorspace::ColorSpace as ZColorSpace;
     use zune_core::options::DecoderOptions;
@@ -306,8 +283,6 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     let gpu = ctx.nvjpeg.as_deref_mut();
     #[cfg(feature = "vaapi")]
     let vaapi = ctx.vaapi;
-    #[cfg(feature = "gpu-icc")]
-    let (gpu_ctx, clut_cache) = (ctx.icc.gpu_ctx, ctx.icc.clut_cache.as_deref_mut());
 
     // Device-image-cache fast path: if a cache is wired in and the encoded
     // bytes are already cached (cross-document content-hash dedup),
@@ -325,14 +300,6 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
         None => None,
     };
 
-    // `/Decode` remaps the decoded samples per colour-space component.  The
-    // device decoders return final samples, so a non-identity remap keeps
-    // the image on the CPU path, where it is applied before colour conversion.
-    let decode = jpeg_sof_components(data)
-        .map_or_else(Vec::new, |n| super::raw::parse_decode(dict, usize::from(n)));
-    #[cfg(any(feature = "nvjpeg", feature = "vaapi", feature = "gpu-jpeg-huffman"))]
-    let device_eligible = super::raw::is_identity_decode(&decode);
-
     #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
     let area = pdf_w.saturating_mul(pdf_h);
 
@@ -347,7 +314,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     // see the constant's docs). The expect is on the per-call site; the
     // threshold itself is not a constant truth.
     #[cfg(feature = "nvjpeg")]
-    if device_eligible && let Some(dec) = gpu {
+    if let Some(dec) = gpu {
         let is_eligible = matches!(
             jpeg_variant,
             Some(gpu::JpegVariant::Baseline | gpu::JpegVariant::Progressive)
@@ -370,8 +337,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     // Jobs are routed through a dedicated worker thread (JpegQueueHandle) that owns
     // the VapiJpegDecoder, eliminating Mesa driver contention across Rayon workers.
     #[cfg(feature = "vaapi")]
-    if device_eligible
-        && let Some(handle) = vaapi
+    if let Some(handle) = vaapi
         && matches!(jpeg_variant, Some(gpu::JpegVariant::Baseline))
         && {
             #[expect(
@@ -388,7 +354,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
 
     // ── GPU parallel-Huffman path ─────────────────────────────────────────────
     #[cfg(feature = "gpu-jpeg-huffman")]
-    if device_eligible && let Some(dec) = jpeg_gpu {
+    if let Some(dec) = jpeg_gpu {
         let area = pdf_w.saturating_mul(pdf_h);
         if area >= super::huffman_threshold() {
             match dec.decode(data) {
@@ -415,12 +381,10 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
                                 // the blit path, and preserve the correct
                                 // color_space tag so downstream code branches
                                 // correctly.
-                                let (color_space, pixel_data) = if jpeg_sof_components(data)
-                                    == Some(1)
-                                {
+                                return Some(if jpeg_sof_components(data) == Some(1) {
                                     let gray: Vec<u8> =
                                         rgba.as_chunks::<4>().0.iter().map(|px| px[0]).collect();
-                                    (super::ImageColorSpace::Gray, gray)
+                                    Samples::gray(w, h, gray)
                                 } else {
                                     let rgb: Vec<u8> = rgba
                                         .as_chunks::<4>()
@@ -428,15 +392,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
                                         .iter()
                                         .flat_map(|&[r, g, b, _]| [r, g, b])
                                         .collect();
-                                    (super::ImageColorSpace::Rgb, rgb)
-                                };
-                                return Some(ImageDescriptor {
-                                    width: w,
-                                    height: h,
-                                    color_space,
-                                    data: super::ImageData::Cpu(pixel_data),
-                                    smask: None,
-                                    filter: ImageFilter::Dct,
+                                    Samples::cpu(w, h, Layout::Color(3), rgb)
                                 });
                             }
                             Err(e) => log::warn!("GPU JPEG download failed: {e}"),
@@ -493,7 +449,6 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     if ycck {
         ycck_to_adobe_cmyk(&mut pixels);
     }
-    let pixels = super::raw::apply_decode(std::borrow::Cow::Owned(pixels), &decode);
 
     let jpeg_info = decoder.info().or_else(|| {
         log::warn!("image: DCTDecode: JPEG info unavailable after decode");
@@ -528,52 +483,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
         );
     }
 
-    let cpu_desc = match out_cs {
-        ZColorSpace::Luma => ImageDescriptor {
-            width: jw,
-            height: jh,
-            color_space: ImageColorSpace::Gray,
-            data: ImageData::Cpu(pixels),
-            smask: None,
-            filter: ImageFilter::Dct,
-        },
-        ZColorSpace::RGB => ImageDescriptor {
-            width: jw,
-            height: jh,
-            color_space: ImageColorSpace::Rgb,
-            data: ImageData::Cpu(pixels),
-            smask: None,
-            filter: ImageFilter::Dct,
-        },
-        ZColorSpace::CMYK => {
-            // The samples are ink densities as the image dictionary
-            // describes them.  An Adobe JPEG that stores inverted CMYK
-            // carries `/Decode [1 0 1 0 1 0 1 0]`, applied above, so no
-            // inversion is implied by the JPEG itself.  The JPEG's own
-            // colour profile is not read and the PDF `ICCBased` stream is
-            // not available here, so no CLUT is baked.
-            let rgb = cmyk_raw_to_rgb(
-                &pixels,
-                false,
-                #[cfg(feature = "gpu-icc")]
-                gpu_ctx,
-                #[cfg(feature = "gpu-icc")]
-                None,
-                #[cfg(feature = "gpu-icc")]
-                clut_cache,
-            )?;
-            ImageDescriptor {
-                width: jw,
-                height: jh,
-                color_space: ImageColorSpace::Rgb,
-                data: ImageData::Cpu(rgb),
-                smask: None,
-                filter: ImageFilter::Dct,
-            }
-        }
-        // out_cs is always Luma, RGB, or CMYK — set from the components match above.
-        _ => unreachable!("DCTDecode: unexpected out_cs variant"),
-    };
+    let cpu = Samples::cpu(jw, jh, Layout::Color(components), pixels);
 
     // Insert into the cache so the next render of this PDF
     // (or a different PDF with the same image content) hits the
@@ -581,9 +491,9 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
     // the hash from the lookup-miss path to skip a second BLAKE3.
     #[cfg(feature = "cache")]
     if let (Some(ctx), Some(hash)) = (cache_ctx, cache_miss_hash) {
-        return Some(try_decode_dct_cached_insert(cpu_desc, hash, ctx));
+        return Some(try_decode_dct_cached_insert(cpu, hash, ctx));
     }
-    Some(cpu_desc)
+    Some(cpu)
 }
 
 /// Device-image-cache plumbing for `decode_dct`.  When set, [`decode_dct`]
@@ -639,7 +549,7 @@ fn try_decode_dct_cached_lookup(
     pdf_w: u32,
     pdf_h: u32,
     ctx: &DctCacheCtx<'_>,
-) -> Result<ImageDescriptor, ContentHash> {
+) -> Result<Samples, ContentHash> {
     // Same-document fast path: alias by (DocId, ObjId) skips BLAKE3 hashing.
     if let Some(cached) = ctx.cache.lookup_by_id(ctx.doc_id, ctx.obj_id) {
         log::debug!(
@@ -647,7 +557,7 @@ fn try_decode_dct_cached_lookup(
             ctx.doc_id,
             ctx.obj_id,
         );
-        return Ok(image_descriptor_from_cached(cached, pdf_w, pdf_h));
+        return Ok(samples_from_cached(cached, pdf_w, pdf_h));
     }
     // Three-tier probe: VRAM → host RAM → disk (when enabled).
     // Re-binds the alias on hit so the same image referenced from a
@@ -658,65 +568,57 @@ fn try_decode_dct_cached_lookup(
         .lookup_by_hash_for_doc(ctx.doc_id, ctx.obj_id, &hash)
     {
         log::debug!("decode_dct: cache hit by content hash; alias rebound");
-        return Ok(image_descriptor_from_cached(cached, pdf_w, pdf_h));
+        return Ok(samples_from_cached(cached, pdf_w, pdf_h));
     }
     Err(hash)
 }
 
-/// Wrap a freshly-decoded JPEG into the cache, returning a
-/// device-resident `ImageDescriptor`.  Skipped (returns the
-/// caller's CPU descriptor) on insert error so the renderer
-/// still gets pixels — typically a budget violation; not fatal.
+/// Wrap a freshly-decoded JPEG into the cache, returning
+/// device-resident samples.  Skipped (returns the caller's CPU
+/// samples) on insert error so the renderer still gets pixels —
+/// typically a budget violation; not fatal.
 ///
 /// `hash` should be the value returned from
 /// [`try_decode_dct_cached_lookup`]'s `Err` arm; reusing it avoids
 /// hashing the same bytes a second time.
 #[cfg(feature = "cache")]
-fn try_decode_dct_cached_insert(
-    cpu_desc: ImageDescriptor,
-    hash: ContentHash,
-    ctx: &DctCacheCtx<'_>,
-) -> ImageDescriptor {
-    // Only cache RGB / Gray output (the layouts the blit kernel
-    // can sample).  Mask images are rare in JPEG and stay on CPU.
-    let layout = match cpu_desc.color_space {
-        ImageColorSpace::Rgb => CacheImageLayout::Rgb,
-        ImageColorSpace::Gray => CacheImageLayout::Gray,
-        ImageColorSpace::Mask => return cpu_desc,
+fn try_decode_dct_cached_insert(cpu: Samples, hash: ContentHash, ctx: &DctCacheCtx<'_>) -> Samples {
+    // Only cache RGB / Gray samples (the layouts the blit kernel can
+    // sample); CMYK samples await conversion and stay on the CPU.
+    let layout = match cpu.layout {
+        Layout::Color(3) => CacheImageLayout::Rgb,
+        Layout::Color(1) => CacheImageLayout::Gray,
+        _ => return cpu,
     };
-    let Some(pixels) = cpu_desc.data.as_cpu() else {
-        return cpu_desc;
+    let Some(pixels) = cpu.data.as_cpu() else {
+        return cpu;
     };
     let req = InsertRequest {
         doc: ctx.doc_id,
         obj: ctx.obj_id,
         hash,
-        width: cpu_desc.width,
-        height: cpu_desc.height,
+        width: cpu.width,
+        height: cpu.height,
         layout,
         pixels,
     };
     match ctx.cache.insert(req) {
-        Ok(cached) => image_descriptor_from_cached(cached, cpu_desc.width, cpu_desc.height),
+        Ok(cached) => samples_from_cached(cached, cpu.width, cpu.height),
         Err(e) => {
             log::warn!(
-                "decode_dct: cache insert failed ({e}); returning CPU descriptor — image will use CPU blit path"
+                "decode_dct: cache insert failed ({e}); returning CPU samples — image will use CPU blit path"
             );
-            cpu_desc
+            cpu
         }
     }
 }
 
 #[cfg(feature = "cache")]
-fn image_descriptor_from_cached(
-    cached: Arc<CachedDeviceImage>,
-    pdf_w: u32,
-    pdf_h: u32,
-) -> ImageDescriptor {
-    let color_space = match cached.layout {
-        CacheImageLayout::Rgb => ImageColorSpace::Rgb,
-        CacheImageLayout::Gray => ImageColorSpace::Gray,
-        CacheImageLayout::Mask => ImageColorSpace::Mask,
+fn samples_from_cached(cached: Arc<CachedDeviceImage>, pdf_w: u32, pdf_h: u32) -> Samples {
+    let layout = match cached.layout {
+        CacheImageLayout::Rgb => Layout::Color(3),
+        CacheImageLayout::Gray => Layout::Color(1),
+        CacheImageLayout::Mask => Layout::Mask,
     };
     // Prefer the cached entry's actual dimensions over the PDF
     // dict's claim — the dict can lie; the decoded image can't.
@@ -727,13 +629,12 @@ fn image_descriptor_from_cached(
             "decode_dct: cache hit dimensions {width}×{height} differ from PDF dict {pdf_w}×{pdf_h}; using cache",
         );
     }
-    ImageDescriptor {
+    Samples {
         width,
         height,
-        color_space,
+        layout,
         data: ImageData::Gpu(cached),
         smask: None,
-        filter: ImageFilter::Dct,
     }
 }
 
@@ -748,33 +649,35 @@ fn decode_dct_gpu_path<D: gpu::GpuJpegDecoder>(
     pdf_w: u32,
     pdf_h: u32,
     dec: &mut D,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     use gpu::DecodedImage;
 
     let decoded: DecodedImage = dec
         .decode_jpeg(data, pdf_w, pdf_h)
         .map_err(|e| log::warn!("image: DCTDecode: GPU path failed: {e}"))
         .ok()?;
+    device_samples(decoded, "GPU decoder")
+}
 
-    let color_space = match decoded.components {
-        1 => ImageColorSpace::Gray,
-        3 => ImageColorSpace::Rgb,
+/// The samples of a device decoder's output, when it holds one or three
+/// components; `what` names the decoder in the log otherwise.
+#[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
+fn device_samples(decoded: gpu::DecodedImage, what: &str) -> Option<Samples> {
+    let layout = match decoded.components {
+        n @ (1 | 3) => Layout::Color(n),
         n => {
             log::warn!(
-                "image: DCTDecode: GPU decoder returned unexpected component count {n}; falling back to CPU"
+                "image: DCTDecode: {what} returned unexpected component count {n}; falling back to CPU"
             );
             return None;
         }
     };
-
-    Some(ImageDescriptor {
-        width: decoded.width,
-        height: decoded.height,
-        color_space,
-        data: ImageData::Cpu(decoded.data),
-        filter: ImageFilter::Raw,
-        smask: None,
-    })
+    Some(Samples::cpu(
+        decoded.width,
+        decoded.height,
+        layout,
+        decoded.data,
+    ))
 }
 
 /// Attempt JPEG decode via a [`gpu::JpegQueueHandle`] (VA-API worker thread).
@@ -789,7 +692,7 @@ fn decode_dct_queue_path(
     pdf_w: u32,
     pdf_h: u32,
     handle: &gpu::JpegQueueHandle,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     use gpu::DecodedImage;
 
     // Arc<[u8]> is required to send the JPEG bytes to the worker thread without
@@ -797,26 +700,7 @@ fn decode_dct_queue_path(
     // VCN hardware decode time (1–5 ms/frame for ≥512×512 images).
     let arc_data: std::sync::Arc<[u8]> = std::sync::Arc::from(data);
     let decoded: DecodedImage = handle.decode(arc_data, pdf_w, pdf_h)?;
-
-    let color_space = match decoded.components {
-        1 => ImageColorSpace::Gray,
-        3 => ImageColorSpace::Rgb,
-        n => {
-            log::warn!(
-                "image: DCTDecode: VA-API queue returned unexpected component count {n}; falling back to CPU"
-            );
-            return None;
-        }
-    };
-
-    Some(ImageDescriptor {
-        width: decoded.width,
-        height: decoded.height,
-        color_space,
-        data: ImageData::Cpu(decoded.data),
-        filter: ImageFilter::Raw,
-        smask: None,
-    })
+    device_samples(decoded, "VA-API queue")
 }
 
 /// Rewrite decoded YCCK samples, in place, as the CMYK samples the stream
@@ -831,107 +715,6 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
         px[1] = 255 - g;
         px[2] = 255 - b;
     }
-}
-
-/// Convert a raw CMYK pixel buffer to RGB, dispatching to GPU when available.
-///
-/// `inverted = false` (raw images / `decode_raw_8bpp`): 0 = no ink, 255 = full ink.
-/// `inverted = true` (JPEG CMYK): codec returns the complement convention (0 = full
-/// ink, 255 = no ink); the complement is applied on-the-fly, avoiding a separate
-/// allocation.  Both conventions convert with [`color::cmyk`].
-///
-/// `icc_bytes` — raw ICC profile bytes extracted from an `ICCBased` colour space.
-/// When provided (and the `gpu-icc` feature is active), a CLUT is baked from the
-/// profile and used for the colour transform instead of the profile-free model.
-///
-/// Returns `None` when the pixel buffer length is not a multiple of 4, or on
-/// arithmetic overflow (degenerate image size).
-pub(super) fn cmyk_raw_to_rgb(
-    pixels: &[u8],
-    inverted: bool,
-    #[cfg(feature = "gpu-icc")] gpu_ctx: Option<&GpuCtx>,
-    #[cfg(feature = "gpu-icc")] icc_bytes: Option<&[u8]>,
-    #[cfg(feature = "gpu-icc")] clut_cache: Option<&mut IccClutCache>,
-) -> Option<Vec<u8>> {
-    if !pixels.len().is_multiple_of(4) {
-        log::warn!(
-            "image: cmyk_raw_to_rgb: pixel buffer length {} is not a multiple of 4",
-            pixels.len()
-        );
-        return None;
-    }
-
-    // GPU path: delegate to GpuCtx which handles the dispatch-threshold check and
-    // CPU fallback internally.  When ICC bytes are present, bake a CLUT for
-    // profile-accurate conversion; fall back to the profile-free model if
-    // baking fails (e.g. corrupt profile or wrong colour space).
-    #[cfg(feature = "gpu-icc")]
-    if let Some(ctx) = gpu_ctx {
-        // Complement JPEG CMYK pixels before GPU dispatch if needed.
-        // A Cow avoids the allocation when `inverted = false` (the common case).
-        let gpu_pixels: std::borrow::Cow<[u8]> = if inverted {
-            pixels.iter().map(|&b| 255 - b).collect::<Vec<_>>().into()
-        } else {
-            pixels.into()
-        };
-
-        #[expect(
-            clippy::option_if_let_else,
-            reason = "branches are not symmetric (cached path omits .map(Into::into)); \
-                      map_or_else would make this harder to read"
-        )]
-        let clut_arc: Option<std::sync::Arc<[u8]>> = icc_bytes.and_then(|bytes| {
-            if let Some(cache) = clut_cache {
-                icc::bake_cmyk_clut_cached(bytes, icc::DEFAULT_GRID_N, cache)
-                    .map_err(|e| {
-                        log::warn!(
-                            "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
-                        );
-                    })
-                    .ok()
-            } else {
-                icc::bake_cmyk_clut(bytes, icc::DEFAULT_GRID_N)
-                    .map_err(|e| {
-                        log::warn!(
-                            "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
-                        );
-                    })
-                    .ok()
-                    .map(std::convert::Into::into)
-            }
-        });
-
-        match ctx.icc_cmyk_to_rgb(
-            &gpu_pixels,
-            clut_arc.as_deref().map(|t| (t, icc::DEFAULT_GRID_N)),
-        ) {
-            Ok(rgb) => return Some(rgb),
-            Err(e) => log::warn!("image: GPU CMYK→RGB failed, falling back to CPU: {e}"),
-        }
-    }
-
-    // CPU path (also used below threshold by GpuCtx itself, but we land here
-    // when the feature is disabled or no GpuCtx is provided).
-    let mut rgb = vec![0u8; (pixels.len() / 4).checked_mul(3)?];
-    if inverted {
-        // Complement through a stack buffer of whole pixels so the converted
-        // row never needs a second heap copy of the input.
-        const CHUNK_PX: usize = 1024;
-        let mut ink = [0u8; CHUNK_PX * 4];
-        for (src, dst) in pixels
-            .chunks(CHUNK_PX * 4)
-            .zip(rgb.chunks_mut(CHUNK_PX * 3))
-        {
-            let ink = &mut ink[..src.len()];
-            for (o, &v) in ink.iter_mut().zip(src) {
-                *o = !v;
-            }
-            color::cmyk::cmyk_to_rgb_row(ink, dst);
-        }
-    } else {
-        color::cmyk::cmyk_to_rgb_row(pixels, &mut rgb);
-    }
-    Some(rgb)
 }
 
 // ── JPXDecode (JPEG 2000) ─────────────────────────────────────────────────────
@@ -956,7 +739,7 @@ pub(super) fn decode_jpx(
     draw_size: Option<(u32, u32)>,
     opts: JpxOptions,
     #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut NvJpeg2kDecoder>,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     if opts.indices {
         return decode_jpx_indices(data);
     }
@@ -1042,37 +825,24 @@ pub(super) fn decode_jpx(
     // An ICC-tagged or unrecognised colour space is read by its channel
     // count; the embedded profile is not applied.  CMYK samples are ink
     // densities (0 = no ink).
-    let mut desc = match channels {
-        1 => jpx_gray(jw, jh, colour),
-        3 => jpx_rgb(jw, jh, colour),
-        4 => {
-            let rgb = cmyk_raw_to_rgb(
-                &colour,
-                false,
-                #[cfg(feature = "gpu-icc")]
-                None,
-                #[cfg(feature = "gpu-icc")]
-                None,
-                #[cfg(feature = "gpu-icc")]
-                None,
-            )?;
-            jpx_rgb(jw, jh, rgb)
-        }
+    let layout = match channels {
+        n @ (1 | 3 | 4) => Layout::Color(u8::try_from(n).ok()?),
         n => {
             log::warn!("image: JPXDecode: unsupported {n}-channel colour space");
             return None;
         }
     };
-    desc.smask = alpha.and_then(|a| super::SoftMask::new(jw, jh, a));
-    Some(desc)
+    let mut samples = Samples::cpu(jw, jh, layout, colour);
+    samples.smask = alpha.and_then(|a| super::SoftMask::new(jw, jh, a));
+    Some(samples)
 }
 
 /// Decode a JPEG 2000 codestream's first component as palette indices
 /// for an `/Indexed` PDF colour space: the samples unscaled, with any
 /// palette in the JP2 container left unapplied, at full resolution (a
-/// reduced decode would average indices).  The result is a
-/// [`ImageColorSpace::Gray`] descriptor of one index byte per pixel.
-fn decode_jpx_indices(data: &[u8]) -> Option<ImageDescriptor> {
+/// reduced decode would average indices).  The result is one index byte
+/// per pixel.
+fn decode_jpx_indices(data: &[u8]) -> Option<Samples> {
     let settings = hayro_jpeg2000::DecodeSettings {
         resolve_palette_indices: false,
         ..Default::default()
@@ -1104,7 +874,7 @@ fn decode_jpx_indices(data: &[u8]) -> Option<ImageDescriptor> {
         .iter()
         .map(|&v| v.round().clamp(0.0, 255.0) as u8)
         .collect();
-    Some(jpx_gray(jw, jh, indices))
+    Some(Samples::gray(jw, jh, indices))
 }
 
 /// What the image dictionary decides about a JPEG 2000 codestream.
@@ -1129,7 +899,7 @@ fn decode_jpx_gpu(
     pdf_w: u32,
     pdf_h: u32,
     dec: &mut NvJpeg2kDecoder,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     let img = match dec.decode_sync(data) {
         Ok(img) => img,
         // Unsupported component count (CMYK, Gray+Alpha, N-channel), sub-sampled
@@ -1154,45 +924,11 @@ fn decode_jpx_gpu(
         );
     }
 
-    let color_space = match img.color_space {
-        GpuJ2kCs::Gray => ImageColorSpace::Gray,
-        GpuJ2kCs::Rgb => ImageColorSpace::Rgb,
+    let layout = match img.color_space {
+        GpuJ2kCs::Gray => Layout::Color(1),
+        GpuJ2kCs::Rgb => Layout::Color(3),
     };
-
-    Some(ImageDescriptor {
-        width: img.width,
-        height: img.height,
-        color_space,
-        data: ImageData::Cpu(img.data),
-        smask: None,
-        filter: ImageFilter::Raw,
-    })
-}
-
-/// Wrap a decoded grayscale pixel buffer into an [`ImageDescriptor`].
-#[inline]
-pub(super) const fn jpx_gray(width: u32, height: u32, data: Vec<u8>) -> ImageDescriptor {
-    ImageDescriptor {
-        width,
-        height,
-        color_space: ImageColorSpace::Gray,
-        data: ImageData::Cpu(data),
-        smask: None,
-        filter: ImageFilter::Raw,
-    }
-}
-
-/// Wrap a decoded RGB pixel buffer into an [`ImageDescriptor`].
-#[inline]
-pub(super) const fn jpx_rgb(width: u32, height: u32, data: Vec<u8>) -> ImageDescriptor {
-    ImageDescriptor {
-        width,
-        height,
-        color_space: ImageColorSpace::Rgb,
-        data: ImageData::Cpu(data),
-        smask: None,
-        filter: ImageFilter::Raw,
-    }
+    Some(Samples::cpu(img.width, img.height, layout, img.data))
 }
 
 // ── JBIG2Decode ──────────────────────────────────────────────────────────────
@@ -1214,7 +950,7 @@ pub(super) fn decode_jbig2(
     height: u32,
     is_mask: bool,
     parms: Option<&Object>,
-) -> Option<ImageDescriptor> {
+) -> Option<Samples> {
     // Resolve the optional JBIG2Globals stream from DecodeParms.  Its
     // segments are decoded once per document and shared by every image
     // that refers to the stream.
@@ -1286,19 +1022,12 @@ pub(super) fn decode_jbig2(
         return None;
     }
 
-    let cs = if is_mask {
-        ImageColorSpace::Mask
+    let layout = if is_mask {
+        Layout::Mask
     } else {
-        ImageColorSpace::Gray
+        Layout::Color(1)
     };
-    Some(ImageDescriptor {
-        width: jw,
-        height: jh,
-        color_space: cs,
-        data: ImageData::Cpu(collector.data),
-        smask: None,
-        filter: ImageFilter::Raw,
-    })
+    Some(Samples::cpu(jw, jh, layout, collector.data))
 }
 
 /// Pixel collector for `hayro_jbig2::Decoder`.
@@ -1357,6 +1086,7 @@ impl Jbig2Decoder for Jbig2Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pdf::Dictionary;
 
     /// Pack a string of `'0'`/`'1'` into bytes, MSB first, zero-padded.
     fn pack_bits(bits: &str) -> Vec<u8> {
@@ -1676,7 +1406,7 @@ mod tests {
             let mut dec = AlwaysGray;
             let result = decode_dct_gpu_path(&[], 2, 2, &mut dec);
             let img = result.expect("should succeed");
-            assert_eq!(img.color_space, ImageColorSpace::Gray);
+            assert_eq!(img.layout, Layout::Color(1));
             assert_eq!(img.width, 2);
             assert_eq!(img.height, 2);
             assert_eq!(img.data.as_cpu().unwrap(), &vec![128u8; 4]);
@@ -1694,7 +1424,7 @@ mod tests {
             let mut dec = AlwaysRgb;
             let result = decode_dct_gpu_path(&[], 2, 2, &mut dec);
             let img = result.expect("should succeed");
-            assert_eq!(img.color_space, ImageColorSpace::Rgb);
+            assert_eq!(img.layout, Layout::Color(3));
             assert_eq!(img.data.len(), 12);
         }
 
@@ -1706,7 +1436,7 @@ mod tests {
         }
     }
 
-    // ── jpx_gray / jpx_rgb helpers ────────────────────────────────────────────
+    // ── JPXDecode ─────────────────────────────────────────────────────────────
 
     /// Colour samples as stored, no alpha.
     #[cfg(not(feature = "nvjpeg2k"))]
@@ -1724,7 +1454,7 @@ mod tests {
 
     /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
     #[cfg(not(feature = "nvjpeg2k"))]
-    fn jpx_fixture(bytes: &[u8]) -> ImageDescriptor {
+    fn jpx_fixture(bytes: &[u8]) -> Samples {
         decode_jpx(bytes, 8, 8, None, WITH_ALPHA).expect("decodes")
     }
 
@@ -1752,7 +1482,7 @@ mod tests {
     #[test]
     fn jpx_gray_matches_reference_decode() {
         let img = jpx_fixture(include_bytes!("testdata/gray8.jp2"));
-        assert_eq!(img.color_space, ImageColorSpace::Gray);
+        assert_eq!(img.layout, Layout::Color(1));
         assert_eq!(
             img.data.as_cpu(),
             Some(&include_bytes!("testdata/gray8.gray")[..])
@@ -1764,7 +1494,7 @@ mod tests {
     #[test]
     fn jpx_raw_codestream_rgb_matches_reference_decode() {
         let img = jpx_fixture(include_bytes!("testdata/rgb8.j2k"));
-        assert_eq!(img.color_space, ImageColorSpace::Rgb);
+        assert_eq!(img.layout, Layout::Color(3));
         assert_eq!(
             img.data.as_cpu(),
             Some(&include_bytes!("testdata/rgb8.rgb")[..])
@@ -1783,7 +1513,7 @@ mod tests {
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
-        assert_eq!(img.color_space, ImageColorSpace::Rgb);
+        assert_eq!(img.layout, Layout::Color(3));
         assert_eq!(img.data.as_cpu(), Some(&rgb[..]));
         let mask = img.smask.expect("alpha channel present");
         assert_eq!((mask.width(), mask.height()), (img.width, img.height));
@@ -1805,71 +1535,5 @@ mod tests {
                 u16::from_be_bytes(*w)
             );
         }
-    }
-
-    #[test]
-    fn jpx_gray_smask_none_by_default() {
-        let desc = jpx_gray(2, 2, vec![0u8; 4]);
-        assert!(desc.smask.is_none(), "jpx_gray must not inject a smask");
-    }
-
-    #[test]
-    fn jpx_rgb_smask_none_by_default() {
-        let desc = jpx_rgb(2, 2, vec![0u8; 12]);
-        assert!(desc.smask.is_none(), "jpx_rgb must not inject a smask");
-    }
-
-    // ── JPX-CMYK convention ───────────────────────────────────────────────────
-    //
-    // JPEG 2000 stores CMYK as direct ink density (0 = no ink), so
-    // `decode_jpx` converts it with `inverted = false`, as for `DeviceCMYK`
-    // raw images.  This pins that the two interpretations differ, so a
-    // flipped flag would invert every CMYK JPX image.
-    #[test]
-    fn jpx_cmyk_uses_direct_ink_convention_not_jpeg_inverted() {
-        // Pure-cyan ink at full density: direct convention (0 = no ink).
-        let cyan_direct = [255u8, 0, 0, 0];
-
-        let direct = cmyk_raw_to_rgb(
-            &cyan_direct,
-            false,
-            #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
-        )
-        .expect("direct CMYK→RGB");
-        let inverted = cmyk_raw_to_rgb(
-            &cyan_direct,
-            true,
-            #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
-            #[cfg(feature = "gpu-icc")]
-            None,
-        )
-        .expect("inverted CMYK→RGB");
-
-        // Full cyan ink absorbs red → R must be the smallest channel.
-        let [r, g, b] = direct[..3] else {
-            unreachable!("3 bytes per pixel")
-        };
-        assert!(
-            r < g && r < b,
-            "full cyan ink (direct convention) must darken red: got rgb=({r},{g},{b})"
-        );
-
-        // The inverted (JPEG) reading of the same bytes is a *different* colour;
-        // if it were not, the convention choice would not matter and a flipped
-        // flag would silently regress.
-        assert_ne!(
-            &direct[..3],
-            &inverted[..3],
-            "direct and JPEG-inverted CMYK readings must differ — \
-             this is why decode_jpx_cmyk must pass inverted = false"
-        );
     }
 }

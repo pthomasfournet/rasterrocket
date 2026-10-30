@@ -384,12 +384,12 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "gpu-jpeg-huffman")]
                     self.jpeg_gpu.as_mut(),
                 );
-                if let Some(decoded) = decoded {
-                    self.blit_image(&decoded);
-                } else {
-                    // Inline image data is present by definition — None here is a
-                    // genuine decode failure, not an absent resource.
-                    self.record_image_failure(None, "decode failed".to_owned());
+                match decoded {
+                    crate::resources::ImageResolution::Ok(decoded) => self.blit_image(&decoded),
+                    crate::resources::ImageResolution::DecodeFailed(msg) => {
+                        self.record_image_failure(None, msg);
+                    }
+                    crate::resources::ImageResolution::Absent => {}
                 }
             }
             Operator::PaintShading(name) => {

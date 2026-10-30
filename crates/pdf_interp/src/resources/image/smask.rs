@@ -9,10 +9,11 @@
 
 use pdf::{Document, Object, ObjectId, Stream};
 
+use super::colorspace::ImageColour;
 use super::dispatch::{ImageStream, decode_image_stream};
 use super::validated_dims;
 use super::{ImageColorSpace, ImageData, ImageDecodeCtx, ImageDescriptor};
-use crate::resources::colorspace::{self, ColorSpace};
+use crate::resources::colorspace::ColorSpace;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -166,11 +167,14 @@ fn decode_mask_stream(
         log::warn!("image: {what} degenerate dimensions {w_raw}×{h_raw}, skipping mask");
         return None;
     };
+    // A mask's samples are its own alpha or stencil: the `/Default*`
+    // spaces of the page do not apply to them.
     let src = ImageStream {
         stream,
         width,
         height,
         is_mask,
+        colour: ImageColour::resolve(ctx.doc, &stream.dict, None),
     };
     decode_image_stream(
         ctx,
@@ -285,7 +289,8 @@ pub(super) fn matte(doc: &Document, id: ObjectId) -> Option<Vec<f64>> {
 }
 
 /// Recover the colours of an image pre-blended with the matte colour
-/// `matte` (§11.6.5.3), given in the colour space `cs_obj`.
+/// `matte` (§11.6.5.3), given in the image's colour space `cs`
+/// (`DeviceGray` when the image names none).
 ///
 /// Each stored component is `c' = m + α·(c − m)`; the inverse
 /// `c = m + (c' − m)/α`, clamped to the component range, is applied to the
@@ -296,11 +301,11 @@ pub(super) fn matte(doc: &Document, id: ObjectId) -> Option<Vec<f64>> {
 /// component count, the image is left as stored.
 pub(super) fn remove_matte(
     doc: &Document,
-    cs_obj: Option<&Object>,
+    cs: Option<&ColorSpace>,
     matte: &[f64],
     img: &mut ImageDescriptor,
 ) {
-    let cs = cs_obj.map_or(ColorSpace::DeviceGray, |o| colorspace::resolve(doc, o));
+    let cs = cs.unwrap_or(&ColorSpace::DeviceGray);
     if matte.len() != cs.ncomponents() {
         log::warn!(
             "image: /Matte has {} components, the image's colour space {}; drawing as stored",
