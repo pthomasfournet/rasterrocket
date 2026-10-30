@@ -398,20 +398,26 @@ impl PageRenderer<'_> {
             );
             let src = PipeSrc::Solid(&fill_bytes);
 
-            // The glyph bitmaps are one object under the soft mask in effect.
+            // The glyphs, as bitmaps or filled outlines, are one object under
+            // the soft mask in effect; the outline fills lie within one pixel
+            // of their points.
+            let bitmap_corners = records.iter().flat_map(|rec| {
+                let x = f64::from(rec.pen_x) + f64::from(rec.bitmap.x_off);
+                let y = f64::from(rec.pen_y) + f64::from(rec.bitmap.y_off);
+                [
+                    (x, y),
+                    (
+                        x + f64::from(rec.bitmap.width),
+                        y + f64::from(rec.bitmap.height),
+                    ),
+                ]
+            });
+            let outline_points = fill_paths
+                .iter()
+                .flat_map(|path| path.pts.iter().map(|p| (p.x, p.y)));
             let region = PixelRect::around(
-                records.iter().flat_map(|rec| {
-                    let x = f64::from(rec.pen_x) + f64::from(rec.bitmap.x_off);
-                    let y = f64::from(rec.pen_y) + f64::from(rec.bitmap.y_off);
-                    [
-                        (x, y),
-                        (
-                            x + f64::from(rec.bitmap.width),
-                            y + f64::from(rec.bitmap.height),
-                        ),
-                    ]
-                }),
-                0.0,
+                bitmap_corners.chain(outline_points),
+                1.0,
                 self.width,
                 self.height,
             );
@@ -442,20 +448,20 @@ impl PageRenderer<'_> {
                         &glyph,
                     );
                 }
+                if pattern_fill {
+                    let mut union = raster::path::Path::new();
+                    for path in &fill_paths {
+                        union.append(path);
+                    }
+                    if !union.pts.is_empty() {
+                        r.fill_path(&union, false);
+                    }
+                } else {
+                    for path in &fill_paths {
+                        r.fill_path(path, false);
+                    }
+                }
             });
-            if pattern_fill {
-                let mut union = raster::path::Path::new();
-                for path in &fill_paths {
-                    union.append(path);
-                }
-                if !union.pts.is_empty() {
-                    self.fill_path(&union, false);
-                }
-            } else {
-                for path in &fill_paths {
-                    self.fill_path(path, false);
-                }
-            }
         }
         // The stroke parameters are user-space quantities under the CTM, as
         // for any stroked path (PDF §8.4.3.2); the text matrix and font size

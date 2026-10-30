@@ -21,12 +21,21 @@ const MID_Y: u32 = 135;
 
 /// One page whose content stream is `content`, with the fixture as `/F1`.
 fn page(content: &[u8]) -> Vec<u8> {
-    assemble_pdf(&[
+    page_with(content, "", Vec::new())
+}
+
+/// One page whose content stream is `content`, with the fixture as `/F1`,
+/// `resources` added to the resource dictionary and `extra` appended as
+/// objects 8 onwards.
+fn page_with(content: &[u8], resources: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
-           /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+             /Resources << /Font << /F1 5 0 R >> {resources} >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
         stream_object("", content),
         b"<< /Type /Font /Subtype /TrueType /BaseFont /Fixture /FirstChar 65 \
            /LastChar 66 /Widths [1000 1000] /FontDescriptor 6 0 R >>"
@@ -39,7 +48,9 @@ fn page(content: &[u8]) -> Vec<u8> {
             &format!("/Length1 {}", PLAIN_TRUETYPE.len()),
             PLAIN_TRUETYPE,
         ),
-    ])
+    ];
+    objects.extend(extra);
+    assemble_pdf(&objects)
 }
 
 /// A rendered RGB page.
@@ -62,7 +73,12 @@ impl Page {
 
 /// Render the page whose content stream is `content` at 72 DPI on the CPU.
 fn render(content: &str) -> Page {
-    let session = common::session(page(content.as_bytes()), BackendPolicy::CpuOnly);
+    render_pdf(page(content.as_bytes()))
+}
+
+/// Render page 1 of `pdf` at 72 DPI on the CPU.
+fn render_pdf(pdf: Vec<u8>) -> Page {
+    let session = common::session(pdf, BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&session, 1, 1.0).expect("page renders");
     let width = bmp.width;
     let data = (0..bmp.height)
@@ -172,4 +188,32 @@ fn stroke_clip_mode_strokes_and_clips() {
         [255, 0, 0],
         "stroke painted before the clip"
     );
+}
+
+#[test]
+fn glyphs_filled_as_paths_are_one_object_under_a_soft_mask() {
+    // At 2100 pt the em exceeds the glyph-bitmap limit, so the glyphs fill
+    // as paths.  The character spacing sets the second square 200 units after the
+    // first: the first alone covers columns 0..30, both cover 30..200.  A
+    // luminosity mask of grey 0.5 makes the text half-opaque; overlapping
+    // glyphs of one text object are one shape, so the overlap is no
+    // darker than a single glyph (PDF 11.6.4.4).
+    let mask_group = stream_object(
+        "/Type /XObject /Subtype /Form /BBox [0 0 200 200] \
+         /Group << /S /Transparency /CS /DeviceGray >>",
+        b"0.5 g 0 0 200 200 re f",
+    );
+    let page = render_pdf(page_with(
+        b"/GS0 gs 1 0 0 rg BT /F1 2100 Tf -1680 Tc -600 -200 Td (BB) Tj ET",
+        "/ExtGState << /GS0 << /SMask << /S /Luminosity /G 8 0 R >> >> >>",
+        vec![mask_group],
+    ));
+    let single = page.rgb(10, 100);
+    let overlap = page.rgb(100, 100);
+    assert_eq!(single[0], 255);
+    assert!(
+        (120..=136).contains(&single[1]),
+        "one glyph is half-opaque: {single:?}"
+    );
+    assert_eq!(overlap, single, "the overlap is painted once");
 }
