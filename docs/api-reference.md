@@ -30,11 +30,16 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 
 - `RasterError::InvalidOptions` — `opts` violates constraints (e.g. `dpi ≤ 0`, `first_page > last_page`). Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::Pdf` — document cannot be opened or parsed. Yielded as `(1, Err(...))`, iterator ends immediately.
+- `RasterError::BackendUnavailable` — `PDF_RASTER_BACKEND` names a backend (`cuda`, `vaapi`, `vulkan`) that cannot be initialised. Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::PageOutOfRange` — page number exceeds document length.
 - `RasterError::PageDegenerate` — page has zero pixel dimensions.
-- `RasterError::PageTooLarge` — pixel dimensions exceed `MAX_PX_DIMENSION` (32 768).
+- `RasterError::PageTooLarge` / `RasterError::PageAreaTooLarge` — pixel dimensions exceed `MAX_PX_DIMENSION` (32 768) or the area exceeds `MAX_PX_AREA`.
 - `RasterError::InvalidPageGeometry` — `UserUnit` outside `[0.1, 10.0]`.
+- `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` — only when `opts.strict` is set; see [`RasterOptions`](#rasteroptions).
+- `RasterError::PageBudgetExceeded` — the page exceeded the per-page operator budget or wall-clock deadline.
 - `RasterError::Deskew` — deskew rotation failed (rare; graceful fallback applied when possible).
+
+A panic while rendering a page propagates out of `Iterator::next`; this iterator does not catch panics.
 
 ---
 
@@ -76,7 +81,9 @@ Renders pages concurrently in a background Rayon task, streaming results through
 
 - Options validation failure → `(1, Err(RasterError::InvalidOptions(...)))`, channel closes.
 - File open failure → `(1, Err(RasterError::Pdf(...)))`, channel closes.
+- Forced backend unavailable (e.g. `PDF_RASTER_BACKEND=cuda` with no CUDA driver) → `(1, Err(RasterError::BackendUnavailable(...)))`, channel closes.
 - Per-page failures → `(page_num, Err(...))`, remaining pages continue.
+- Per-page panic → `(page_num, Err(RasterError::RenderPanic { .. }))` and rendering continues, **only** in builds with `panic = "unwind"` (test profiles, or an embedder that overrides the workspace's `panic = "abort"` release profile). Under `panic = "abort"` a panicking page aborts the process.
 
 If the `Receiver` is dropped before the producer finishes, the producer exits cleanly on its next `send` — no panic.
 
@@ -104,7 +111,7 @@ pub fn open_session_from_bytes(bytes: Vec<u8>, config: &SessionConfig) -> Result
 
 An encrypted document (Standard security handler, revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters) is refused with `RasterError::Pdf` unless `config.decrypt_authorized` is `true`; with it, the document is decrypted in process — no subprocess, no temporary file. The empty user password is tried first (a permissions-only document needs none), then `config.password` as the user and as the owner password; a wrong password, or none where one is needed, is a `RasterError::Pdf` saying which. A document using another security handler (public-key encryption, `/Adobe.PubSec`) is refused by name.
 
-Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared GPU context (for `gpu-aa` / `gpu-icc` features) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda` or `ForceVaapi` and the required GPU cannot be initialised.
+Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared GPU context (for `gpu-aa` / `gpu-icc` features) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend cannot be initialised (for `ForceVulkan`, also when the crate was built without the `vulkan` feature).
 
 ```rust
 pub fn render_page_rgb(
@@ -163,7 +170,7 @@ Renders page `page_num` as `params` describes:
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
 ```
 
-BT.709 luminance conversion: `Y = 0.2126·R + 0.7152·G + 0.0722·B`.
+`DeviceRGB` → `DeviceGray` conversion with the weights of ISO 32000-1 §10.3.3, `Y = 0.30·R + 0.59·G + 0.11·B`, in 15-bit fixed point with round-half-up (`(9830·R + 19333·G + 3605·B + 16384) >> 15`), so `R = G = B` maps to itself. `raster_pdf`, `render_channel` and the CLI's `--gray` / `--mono` all use it.
 
 ```rust
 pub fn prescan_session(
@@ -226,7 +233,7 @@ pub struct RasterOptions {
 | `last_page` | `≥ first_page` | 1-based inclusive. Clamped to document length silently. Ignored when `pages` is `Some`. |
 | `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
-| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
+| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn, or is drawn only in part, returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded, or decodes only in part, returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped (or drawn from the data that decoded) and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
 | `purpose` | — | `RenderPurpose::View` (on-screen viewing) or `RenderPurpose::Print`. See [`RenderPurpose`](#renderpurpose). |
 | `annotations` | — | When `false`, annotations (form-field widgets included) are not drawn and pages show their content alone. |
 | `text_antialias` | — | When `false`, glyphs are rasterised bilevel (no partial coverage). Text drawn as paths follows `vector_antialias`. |
@@ -234,9 +241,7 @@ pub struct RasterOptions {
 | `decrypt_authorized` | — | Whether an encrypted document may be decrypted; see [`SessionConfig`](#sessionconfig). `false` makes an encrypted document an error. |
 | `password` | — | Password for an encrypted document, tried as user then owner password after the empty user password. No effect unless `decrypt_authorized` is `true`. |
 
-**Default:** `RasterOptions` implements `Default`:
-
-`RasterOptions` is `#[non_exhaustive]`: build it with `RasterOptions::new(dpi)` (every other field at its default) or `RasterOptions::default()`, then assign fields; struct literals and `..Default::default()` updates do not compile outside the crate.
+`RasterOptions` implements `Default` and is `#[non_exhaustive]`: build it with `RasterOptions::new(dpi)` (every other field at its default) or `RasterOptions::default()`, then assign fields; struct literals and `..Default::default()` updates do not compile outside the crate.
 
 ```rust
 let mut opts = RasterOptions::new(150.0);
@@ -327,12 +332,13 @@ Collected at zero extra cost during rendering.
 | `has_vector_text` | `bool` | At least one text-showing operator (`Tj`, `TJ`, `'`, `"`) was executed. `false` on scan-only pages. |
 | `dominant_filter` | `Option<ImageFilter>` | Most common image decode filter on this page (`None` for pure-vector pages). |
 | `source_ppi_hint` | `Option<f32>` | Estimated native pixels-per-inch of the dominant image. Computed as `(image_width_px / page_width_pts) × 72`. `None` when no images were blitted. |
-| `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn (skipped, so the region shows whatever was painted beneath), and images drawn only partly because their stream lacked samples (`partial`). Empty on a complete render. Includes images inside tiling-pattern tiles. |
-| `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams). Each was skipped and the page drawn from the others, so whatever it held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
+| `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn (skipped, so the region shows whatever was painted beneath), and images drawn only partly because their stream lacked samples (`partial`). Empty on a complete render. Includes images inside tiling-pattern tiles. An image whose decoded samples would exceed 1 GiB (width × height × components) is refused before anything is allocated and listed here. |
+| `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams), each skipped while the page is drawn from the others, and elements that decoded only in part (`partial`), executed up to where their data was lost. Either way whatever the lost data held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 | `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
 | `form_type` | `FormType` | The document's interactive form type (the same on every page). `XfaFull` means a dynamic XFA form: XFA is not processed, so the page is the placeholder content stored in the file, often a notice asking for an XFA-capable viewer, and its text is not the form's. |
 
 ```rust
+#[non_exhaustive]
 pub enum FormType {
     NoForm,         // no /AcroForm in the catalog
     AcroForm,       // /AcroForm without /XFA
@@ -344,6 +350,7 @@ pub enum FormType {
 Opening a dynamic XFA document (`XfaFull`) also logs one `warn`.
 
 ```rust
+#[non_exhaustive]
 pub struct ImageFailure {
     pub name: Option<String>,  // XObject resource name without '/', e.g. "Im0"; None for an inline image
     pub reason: String,        // codec or blit error, prefixed by the filter where known, e.g. "FlateDecode: …";
@@ -355,13 +362,16 @@ pub struct ImageFailure {
 `ImageFailure` implements `Display` as `image /Im0: <reason>` or `inline image: <reason>`, with ` (partial)` after the name for a partial image. Without `strict`, each failure is also logged at `warn` level as `page N: skipped …` (or `page N: image /Im0 (partial): …`). Under `strict`, a partial image fails the page like a skipped one: its content is incomplete.
 
 ```rust
+#[non_exhaustive]
 pub struct ContentFailure {
     pub object: u32,     // object number of the /Contents element
-    pub reason: String,  // decode error, e.g. "unsupported filter: FooDecode"
+    pub reason: String,  // decode error, e.g. "unsupported filter: FooDecode";
+                         // for a partial element, the filter that stopped early and why
+    pub partial: bool,   // the bytes decoded before the loss were kept and executed
 }
 ```
 
-`ContentFailure` implements `Display` as `content stream obj 5: <reason>` and is logged the same way.
+`ContentFailure` implements `Display` as `content stream obj 5: <reason>`, with ` (partial)` after the object number for a partial element, and is logged the same way. Under `strict`, a partial content stream fails the page like an undecodable one.
 
 #### `PageDiagnostics::suggested_dpi`
 
@@ -400,8 +410,9 @@ if !page.diagnostics.has_images && page.diagnostics.has_vector_text {
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum BackendPolicy {
-    Auto,        // GPU when available, silent CPU fallback (default)
+    Auto,        // Vulkan if compiled in and present, else CUDA, else CPU; silent fallback (default)
     CpuOnly,     // Skip all GPU init entirely
     ForceCuda,   // Require CUDA; error if unavailable
     #[cfg(feature = "vaapi")]
@@ -411,9 +422,11 @@ pub enum BackendPolicy {
 }
 ```
 
-Controls which compute backend is used. `Auto` matches pre-v0.4.0 behaviour. The `Force*` variants convert silent GPU fallbacks into hard `RasterError::BackendUnavailable` errors so you know immediately whether the expected hardware path is actually active. `ForceVaapi` is only present when the `vaapi` Cargo feature is enabled.
+Controls which compute backend is used. The `Force*` variants convert silent GPU fallbacks into hard `RasterError::BackendUnavailable` errors so you know immediately whether the expected hardware path is actually active. `ForceVaapi` is only present when the `vaapi` Cargo feature is enabled.
 
-`ForceVulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  JPEG dispatch goes through the GPU parallel-Huffman path. The path is dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`); enable it by setting `PDF_RASTER_HUFFMAN_THRESHOLD=0` at runtime.
+`ForceVulkan` runs the AA-fill kernel (and, in a build with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU.  Both GPU paths are dormant by default (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)): `PDF_RASTER_AA_FILL_THRESHOLD=0` enables the AA fill and `PDF_RASTER_HUFFMAN_THRESHOLD=0` the Huffman decode.
+
+`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vaapi` and `vulkan` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling. `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
 
 ---
 
@@ -452,8 +465,8 @@ Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct i
 
 The `deskew` module exposes a limited public API:
 
-- `deskew::apply` — applies a deskew angle to a bitmap.
-- `deskew::DeskewError` — error type returned by `apply`.
+- `deskew::apply(&mut Bitmap<Gray8>) -> Result<(), DeskewError>` — detects the skew of a grayscale bitmap and rotates it in place to correct it; angles too small to matter are left alone, and a failed detection counts as no skew.
+- `deskew::DeskewError` — error type returned by `apply` (a failed rotation).
 
 The `deskew::detect` and `deskew::rotate` submodules are `pub(crate)` and are not part of the public API.
 
@@ -494,17 +507,19 @@ pub enum RasterError {
     ContentDecodeFailed(Vec<String>),
     PageBudgetExceeded(String),
     Cancelled,                   // stopped through a CancelToken
-    RenderPanic { /* isolated per-page panic */ },
+    RenderPanic { page: u32, message: String },
 }
 ```
 
 `PageAreaTooLarge` is distinct from `PageTooLarge`: each side can be within
 `MAX_PX_DIMENSION` while the product still exceeds `MAX_PX_AREA`. `RenderPanic`
-carries an isolated per-page panic so one bad page cannot abort a batch.
+carries a per-page panic caught by `render_channel`, which happens only under
+`panic = "unwind"`; with the `panic = "abort"` release profile a panic aborts
+the process.
 
 `ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream.
 
-Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when `SessionConfig.policy` is `ForceCuda` or `ForceVaapi`.
+Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when the policy is `ForceCuda`, `ForceVaapi` or `ForceVulkan`.
 
 ---
 
@@ -528,12 +543,15 @@ returns `PageAreaTooLarge`.
 ### Re-exports
 
 ```rust
-pub use rasterrocket_interp::renderer::PageDiagnostics;
+pub use rasterrocket_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use rasterrocket_interp::resources::ImageFilter;
-pub use rasterrocket_interp::PageGeometry;
+pub use rasterrocket_interp::{FormType, PageGeometry, RenderPurpose};
+pub use rasterrocket_parser::Password;
 ```
 
-`ImageFilter` identifies which decode filter was used for an embedded image (DCTDecode, JPXDecode, FlateDecode, etc.). Available through `PageDiagnostics` for routing decisions.
+`ImageFilter` identifies which decode filter was used for an embedded image (`Dct`, `Jpx`, `CcittFax`, `Jbig2`, `Flate`, `Raw`). Available through `PageDiagnostics` for routing decisions.
+
+The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `validate_dimensions`, the helpers every `RenderedPage` producer shares.
 
 ---
 
@@ -863,7 +881,7 @@ Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
 | `gpu-aa` | CUDA-capable NVIDIA GPU | CUDA runtime only |
 | `gpu-icc` | CUDA-capable NVIDIA GPU | CUDA runtime only |
 | `gpu-deskew` | CUDA-capable NVIDIA GPU | Requires CUDA NPP: `libnppig.so` + `libnppc.so` |
-| `cache` | CUDA-capable NVIDIA GPU | Phase 9 3-tier image cache (CUDA-only) |
+| `cache` | CUDA-capable NVIDIA GPU | Device-resident 3-tier image cache (CUDA-only) |
 
 `cudarc` is pinned to the `cuda-13030` driver-API binding; a CUDA 13.x driver is required.
 
@@ -873,7 +891,7 @@ Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, NVIDIA driver); `slangc` from the LunarG Vulkan SDK at *build* time. Implies `gpu-aa`. |
 
-Vulkan covers the AA-fill and parallel-Huffman JPEG decode kernels (`vulkan` implies `gpu-jpeg-huffman`).  `cache` and `nvjpeg` stay CUDA-only; under `--backend vulkan` the renderer runs uncached but JPEG decode routes through the GPU parallel-Huffman path.
+Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when `gpu-jpeg-huffman` is also enabled (`vulkan` does not imply it).  `cache` and `nvjpeg` stay CUDA-only; under `--backend vulkan` the renderer runs uncached.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 
@@ -881,9 +899,9 @@ Vulkan covers the AA-fill and parallel-Huffman JPEG decode kernels (`vulkan` imp
 |---|---|---|
 | `vaapi` | AMD VCN (Raphael+), Intel UHD 630+, Intel Arc | `libva.so.2`, `libva-drm.so.2` |
 
-VA-API provides hardware JPEG baseline decode. CMYK and progressive JPEGs fall through to CPU. When both `nvjpeg` and `vaapi` are active, nvJPEG takes priority; VA-API fires as fallback.
+VA-API provides hardware JPEG baseline decode; CMYK and progressive JPEGs fall through to the CPU. When both `nvjpeg` and `vaapi` are active, nvJPEG is tried first. Both share the `GPU_JPEG_THRESHOLD_PX` gate, which is `u32::MAX`, so in a default build neither decodes anything and every JPEG is decoded on the CPU (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)).
 
-GPU initialisation failures at runtime print a warning to stderr and fall back to CPU — no error is returned, rendering continues normally.
+Under `BackendPolicy::Auto`, GPU initialisation failures at runtime log a warning and fall back to the CPU — no error is returned, rendering continues normally. The `Force*` policies turn them into `RasterError::BackendUnavailable`.
 
 ### Platform support
 
@@ -905,17 +923,18 @@ GPU initialisation failures at runtime print a warning to stderr and fall back t
 
 | Feature | Requires | Effect |
 |---|---|---|
-| `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Falls back to CPU zune-jpeg below 512×512 px. |
+| `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Wired but disabled: `GPU_JPEG_THRESHOLD_PX` is `u32::MAX`, so JPEGs decode on the CPU (zune-jpeg). |
 | `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to the CPU decoder (pure-Rust `hayro-jpeg2000`) below 512×512 px or for sub-sampled chroma. |
 | `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Dormant by default: the CPU fill is faster at every size measured, so dispatch is off unless `PDF_RASTER_AA_FILL_THRESHOLD` sets a pixel-area threshold. Path clips and pattern fills always stay on the CPU. |
 | `gpu-icc` | CUDA 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
-| `cache` | CUDA 13 | Phase 9 device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
-| `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU. Falls back to CPU on CMYK/progressive JPEG. When `nvjpeg` is also active, nvJPEG takes priority. |
-| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa` and `gpu-jpeg-huffman`. | Vulkan compute backend. AA-fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
+| `cache` | CUDA 13 | Device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
+| `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU; adds `BackendPolicy::ForceVaapi` and `--backend vaapi`. Shares the disabled `GPU_JPEG_THRESHOLD_PX` gate with `nvjpeg`, so JPEGs still decode on the CPU. |
+| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa`. | Vulkan compute backend. The AA-fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
+| `gpu-jpeg-huffman` | CUDA 13 or `vulkan` | Custom parallel-Huffman GPU JPEG decoder (baseline 4:4:4, one or three components). Dormant: `GPU_JPEG_HUFFMAN_THRESHOLD_PX` is `u32::MAX`; `PDF_RASTER_HUFFMAN_THRESHOLD=<area>` overrides it at runtime. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |
 
-GPU initialisation failures print a warning to stderr and fall back to CPU — they do not return errors.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
+Under `Auto`, GPU initialisation failures log a warning and fall back to CPU — they do not return errors.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
 ### GPU dispatch thresholds
 
