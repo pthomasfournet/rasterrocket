@@ -79,7 +79,7 @@ use super::font_cache::FontCache;
 use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform, invert_affine};
 use crate::content::Operator;
 use crate::resources::{
-    ColorSpace, IMAGE_FILTER_COUNT, ImageColorSpace, ImageFilter, PageResources,
+    ColorSpace, IMAGE_FILTER_COUNT, ImageColorSpace, ImageFilter, PageResources, ShadingPattern,
 };
 #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
 use gpu::GpuCtx;
@@ -1103,8 +1103,20 @@ impl<'doc> PageRenderer<'doc> {
             .as_deref()
             .and_then(|name| self.resolve_pattern(name))
         {
-            Some(PatternPaint::Shading(shading)) => {
-                self.fill_with_shading(path, even_odd, clip, &pipe, flatness, shading);
+            Some(PatternPaint::Shading(pattern)) => {
+                let ShadingPattern {
+                    shading,
+                    ext_gstate,
+                    matrix: pattern_matrix,
+                } = *pattern;
+                self.paint_shading_pattern(
+                    ext_gstate.as_ref(),
+                    &pattern_matrix,
+                    false,
+                    |r, pipe| {
+                        r.fill_with_shading(path, even_odd, clip, pipe, flatness, shading);
+                    },
+                );
                 return;
             }
             Some(PatternPaint::Tiled(tiled)) => Some(tiled),
@@ -1251,17 +1263,30 @@ impl<'doc> PageRenderer<'doc> {
             .as_deref()
             .and_then(|name| self.resolve_pattern(name))
         {
-            Some(PatternPaint::Shading(shading)) => {
-                let clip = clip.clone_shared();
-                if self.stroke_with_shading(
-                    &path,
-                    &matrix,
-                    &params,
-                    clip,
-                    &pipe,
-                    device_flatness,
+            Some(PatternPaint::Shading(pattern)) => {
+                let ShadingPattern {
                     shading,
-                ) {
+                    ext_gstate,
+                    matrix: pattern_matrix,
+                } = *pattern;
+                let clip = clip.clone_shared();
+                let stroked = self.paint_shading_pattern(
+                    ext_gstate.as_ref(),
+                    &pattern_matrix,
+                    true,
+                    |r, pipe| {
+                        r.stroke_with_shading(
+                            &path,
+                            &matrix,
+                            &params,
+                            clip,
+                            pipe,
+                            device_flatness,
+                            shading,
+                        )
+                    },
+                );
+                if stroked {
                     return;
                 }
                 log::debug!(

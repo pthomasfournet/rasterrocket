@@ -98,21 +98,21 @@ impl PageRenderer<'_> {
     /// The soft mask is removed from the graphics state while `paint` runs,
     /// so that operators nested inside it (a form's content, a Type 3
     /// glyph) are not masked a second time.
-    pub(super) fn paint_through_soft_mask(
+    pub(super) fn paint_through_soft_mask<R>(
         &mut self,
         mask: &SoftMaskPlane,
-        paint: impl FnOnce(&mut Self),
-    ) {
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let region = (mask.width == self.width && mask.height == self.height)
             .then(|| clip_region(&self.gstate.current().clip, self.width, self.height))
             .flatten();
         let Some((x0, y0, x1, y1)) = region else {
-            paint(self);
-            return;
+            return paint(self);
         };
         let before = Snapshot::take(&self.bitmap, x0, y0, x1, y1);
-        paint(self);
+        let result = paint(self);
         before.blend_back(&mut self.bitmap, mask);
+        result
     }
 }
 

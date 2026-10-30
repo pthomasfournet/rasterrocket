@@ -63,6 +63,19 @@ pub struct ExtGStateParams {
     pub soft_mask: Option<SoftMaskParams>,
 }
 
+/// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
+pub struct ShadingPattern {
+    /// The pattern's shading, placed by `matrix`.
+    pub shading: shading::ResolvedShading,
+    /// The pattern's `ExtGState`: graphics state parameters in effect while
+    /// the shading is painted.
+    pub ext_gstate: Option<ExtGStateParams>,
+    /// The pattern matrix concatenated onto the default coordinate space of
+    /// the pattern's parent content stream: pattern space to device space,
+    /// before the device y-flip.
+    pub matrix: [f64; 6],
+}
+
 /// The `SMask` entry of an `ExtGState` dictionary (PDF §11.6.5.2).
 #[derive(Debug, Clone)]
 pub enum SoftMaskParams {
@@ -514,24 +527,33 @@ impl<'doc> PageResources<'doc> {
         name: &[u8],
         pattern_ctm: &[f64; 6],
         page_h: f64,
-    ) -> Option<shading::ResolvedShading> {
+    ) -> Option<ShadingPattern> {
         let patterns = self.resource_subdict(b"Pattern")?;
         let pattern = resolve_stream_dict(self.doc, patterns.get(name)?)?;
         if pattern.get_i64(b"PatternType") != Some(2) {
             return None;
         }
-        let ctm = read_matrix(&pattern).map_or(*pattern_ctm, |m| {
+        let matrix = read_matrix(&pattern).map_or(*pattern_ctm, |m| {
             crate::renderer::gstate::ctm_multiply(&m, pattern_ctm)
         });
-        let resolved =
-            shading::resolve_shading_object(self.doc, pattern.get(b"Shading")?, &ctm, page_h);
-        if resolved.is_none() {
+        let Some(shading) =
+            shading::resolve_shading_object(self.doc, pattern.get(b"Shading")?, &matrix, page_h)
+        else {
             log::warn!(
                 "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
                 String::from_utf8_lossy(name)
             );
-        }
-        resolved
+            return None;
+        };
+        let ext_gstate = pattern
+            .get(b"ExtGState")
+            .and_then(|obj| resolve_dict(self.doc, obj))
+            .map(|d| ExtGStateParams::from_dict(self.doc, &d));
+        Some(ShadingPattern {
+            shading,
+            ext_gstate,
+            matrix,
+        })
     }
 
     /// Resolve a `Properties` resource entry to an OCG object ID.

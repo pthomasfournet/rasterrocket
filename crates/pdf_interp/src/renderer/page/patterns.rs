@@ -3,8 +3,7 @@
 use super::super::color::RasterColor;
 use super::super::gstate::{ctm_multiply, ctm_transform};
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
-use crate::resources::shading::ResolvedShading;
-use crate::resources::{ColorSpace, PageResources};
+use crate::resources::{ColorSpace, PageResources, ShadingPattern};
 use color::Rgb8;
 use pdf::Document;
 use raster::{Bitmap, TiledPattern};
@@ -36,7 +35,7 @@ pub(super) enum PatternPaint {
     /// A tiling pattern (`PatternType` 1), rasterised to a tile.
     Tiled(TiledPattern),
     /// A shading pattern (`PatternType` 2).
-    Shading(ResolvedShading),
+    Shading(Box<ShadingPattern>),
 }
 
 impl PageRenderer<'_> {
@@ -47,7 +46,7 @@ impl PageRenderer<'_> {
             .resources
             .shading_pattern(name, &self.pattern_ctm, page_h)
         {
-            return Some(PatternPaint::Shading(shading));
+            return Some(PatternPaint::Shading(Box::new(shading)));
         }
         self.resolve_fill_pattern(name).map(PatternPaint::Tiled)
     }

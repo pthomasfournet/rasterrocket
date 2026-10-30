@@ -5,6 +5,7 @@ use super::super::gstate::ctm_multiply;
 use super::text_ops::translate_text_x;
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
 use crate::content::{Operator, TextArrayElement};
+use crate::resources::ExtGStateParams;
 
 impl PageRenderer<'_> {
     pub(super) fn execute_one(&mut self, op: &Operator) {
@@ -76,34 +77,7 @@ impl PageRenderer<'_> {
 
             Operator::SetExtGState(name) => {
                 if let Some(params) = self.resources.ext_gstate(name) {
-                    let gs = self.gstate.current_mut();
-                    if let Some(a) = params.fill_alpha {
-                        gs.fill_alpha = a;
-                    }
-                    if let Some(a) = params.stroke_alpha {
-                        gs.stroke_alpha = a;
-                    }
-                    if let Some(w) = params.line_width {
-                        gs.line_width = w;
-                    }
-                    if let Some(c) = params.line_cap {
-                        gs.line_cap = int_to_cap(c);
-                    }
-                    if let Some(j) = params.line_join {
-                        gs.line_join = int_to_join(j);
-                    }
-                    if let Some(m) = params.miter_limit {
-                        gs.miter_limit = m;
-                    }
-                    if let Some(f) = params.flatness {
-                        gs.flatness = f;
-                    }
-                    if let Some(bm) = params.blend_mode {
-                        gs.blend_mode = bm;
-                    }
-                    if let Some(sm) = &params.soft_mask {
-                        self.set_soft_mask(sm);
-                    }
+                    self.apply_ext_gstate(&params);
                 }
             }
 
@@ -412,6 +386,39 @@ impl PageRenderer<'_> {
                 reason = "future Operator variants are caught here"
             )]
             _ => {}
+        }
+    }
+
+    /// Put the parameters of an `ExtGState` dictionary into effect in the
+    /// current graphics state.
+    pub(super) fn apply_ext_gstate(&mut self, params: &ExtGStateParams) {
+        let gs = self.gstate.current_mut();
+        if let Some(a) = params.fill_alpha {
+            gs.fill_alpha = a;
+        }
+        if let Some(a) = params.stroke_alpha {
+            gs.stroke_alpha = a;
+        }
+        if let Some(w) = params.line_width {
+            gs.line_width = w;
+        }
+        if let Some(c) = params.line_cap {
+            gs.line_cap = int_to_cap(c);
+        }
+        if let Some(j) = params.line_join {
+            gs.line_join = int_to_join(j);
+        }
+        if let Some(m) = params.miter_limit {
+            gs.miter_limit = m;
+        }
+        if let Some(f) = params.flatness {
+            gs.flatness = f;
+        }
+        if let Some(bm) = params.blend_mode {
+            gs.blend_mode = bm;
+        }
+        if let Some(sm) = &params.soft_mask {
+            self.set_soft_mask(sm);
         }
     }
 

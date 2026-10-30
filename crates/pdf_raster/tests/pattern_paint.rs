@@ -1,7 +1,10 @@
 //! Painting with patterns (ISO 32000-1 §8.7.3): a tiling pattern paints only
 //! what its cell's content paints, leaving the backdrop elsewhere in each
 //! cell, for coloured (`PaintType` 1) and uncoloured (`PaintType` 2) patterns
-//! alike.  Glyphs filled or stroked with a pattern paint the pattern.
+//! alike.  Glyphs filled or stroked with a pattern paint the pattern.  A
+//! radial shading under a non-uniform transform paints the affine images of
+//! its circles, and a shading pattern's `ExtGState` is in effect while, and
+//! only while, the pattern paints.
 //!
 //! The text tests use the plain TrueType fixture described in
 //! `crates/font/src/tests/data/generate.py`; its `B` is a closed square
@@ -301,4 +304,92 @@ fn radial_shading_pattern_under_a_non_uniform_matrix_draws_ellipses() {
         &[],
     ));
     assert_ellipse(&bmp);
+}
+
+/// Solid red: an axial shading from red to red, extended both ways.
+const SOLID_RED_SHADING: &str = "<< /ShadingType 2 /ColorSpace /DeviceRGB \
+     /Coords [0 0 200 0] /Extend [true true] \
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [1 0 0] /N 1 >> >>";
+
+/// A page filling (or, with `stroke`, stroking) with a solid red shading
+/// pattern whose `ExtGState` is `gstate`; `extra` are objects 6, 7, ….
+fn red_pattern_page(gstate: &str, stroke: bool, extra: &[Vec<u8>]) -> Page {
+    let paint = if stroke {
+        "/Pattern CS /P0 SCN 20 w 20 50 m 180 50 l S"
+    } else {
+        "/Pattern cs /P0 scn 0 0 200 100 re f"
+    };
+    render(page(
+        &format!("{BACKDROP}{paint}"),
+        &format!("<< /PatternType 2 /Shading {SOLID_RED_SHADING} /ExtGState {gstate} >>"),
+        None,
+        "",
+        extra,
+    ))
+}
+
+/// Whether `rgb` is red at half opacity over blue.
+fn half_red_over_blue(rgb: [u8; 3]) -> bool {
+    rgb[1] == 0 && rgb[0].abs_diff(128) <= 2 && rgb[2].abs_diff(127) <= 2
+}
+
+#[test]
+fn a_shading_pattern_extgstate_sets_the_fill_alpha() {
+    let bmp = red_pattern_page("<< /ca 0.5 >>", false, &[]);
+    assert!(
+        half_red_over_blue(rgb(&bmp, 100, 50)),
+        "{:?}",
+        rgb(&bmp, 100, 50)
+    );
+}
+
+#[test]
+fn a_shading_pattern_extgstate_sets_the_stroke_alpha() {
+    let bmp = red_pattern_page("<< /CA 0.5 >>", true, &[]);
+    assert!(
+        half_red_over_blue(rgb(&bmp, 100, 50)),
+        "{:?}",
+        rgb(&bmp, 100, 50)
+    );
+    assert_eq!(rgb(&bmp, 100, 80), BLUE, "off the stroke");
+}
+
+#[test]
+fn a_shading_pattern_extgstate_sets_the_blend_mode() {
+    // Red multiplied over blue is black.
+    let bmp = red_pattern_page("<< /BM /Multiply >>", false, &[]);
+    assert_eq!(rgb(&bmp, 100, 50), [0, 0, 0]);
+}
+
+#[test]
+fn a_shading_pattern_extgstate_soft_mask_masks_the_shading() {
+    // A luminosity mask, white over the left half of the page only.
+    let bmp = red_pattern_page(
+        "<< /SMask << /S /Luminosity /G 6 0 R >> >>",
+        false,
+        &[stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 100] \
+             /Group << /S /Transparency /CS /DeviceRGB >>",
+            b"0 g 0 0 200 100 re f 1 g 0 0 100 100 re f",
+        )],
+    );
+    assert_eq!(rgb(&bmp, 50, 50), RED, "under the white half of the mask");
+    assert_eq!(rgb(&bmp, 150, 50), BLUE, "under the black half of the mask");
+}
+
+#[test]
+fn a_shading_pattern_extgstate_lasts_only_for_the_pattern() {
+    let bmp = render(page(
+        &format!("{BACKDROP}/Pattern cs /P0 scn 0 0 100 100 re f 0 1 0 rg 100 0 100 100 re f"),
+        &format!("<< /PatternType 2 /Shading {SOLID_RED_SHADING} /ExtGState << /ca 0.5 >> >>"),
+        None,
+        "",
+        &[],
+    ));
+    assert!(
+        half_red_over_blue(rgb(&bmp, 50, 50)),
+        "{:?}",
+        rgb(&bmp, 50, 50)
+    );
+    assert_eq!(rgb(&bmp, 150, 50), GREEN, "a later fill is opaque");
 }

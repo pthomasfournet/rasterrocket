@@ -18,6 +18,7 @@ use raster::xpath::XPath;
 use raster::{Bitmap, eo_fill, fill};
 
 use super::{DEVICE_MATRIX, PageRenderer};
+use crate::resources::ExtGStateParams;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 
 /// Return `clip` intersected with the device-space quadrilateral `bbox`.
@@ -46,6 +47,47 @@ fn polygon(corners: &[(f64, f64)]) -> Path {
 }
 
 impl PageRenderer<'_> {
+    /// Run `paint`, which paints a shading pattern, with the pattern's
+    /// `ExtGState` in effect (PDF §8.7.3.3).
+    ///
+    /// `paint` receives the compositing state for the non-stroking
+    /// (`stroke == false`) or stroking constant alpha and the blend mode.
+    /// The `ExtGState` applies on top of the current graphics state for the
+    /// duration of `paint` only; a soft mask it sets is resolved in pattern
+    /// space (`matrix`) and masks what `paint` paints.
+    pub(super) fn paint_shading_pattern<R>(
+        &mut self,
+        ext_gstate: Option<&ExtGStateParams>,
+        matrix: &[f64; 6],
+        stroke: bool,
+        paint: impl FnOnce(&mut Self, &PipeState<'static>) -> R,
+    ) -> R {
+        let pipe_of = |r: &Self| {
+            let gs = r.gstate.current();
+            let alpha = if stroke {
+                gs.stroke_alpha
+            } else {
+                gs.fill_alpha
+            };
+            Self::make_pipe(alpha, gs.blend_mode)
+        };
+        let Some(ext) = ext_gstate else {
+            let pipe = pipe_of(self);
+            return paint(self, &pipe);
+        };
+        self.gstate.save();
+        let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, *matrix);
+        self.apply_ext_gstate(ext);
+        self.gstate.current_mut().ctm = ctm;
+        let pipe = pipe_of(self);
+        let result = match self.gstate.current_mut().soft_mask.take() {
+            Some(mask) => self.paint_through_soft_mask(&mask, |r| paint(r, &pipe)),
+            None => paint(self, &pipe),
+        };
+        self.gstate.restore();
+        result
+    }
+
     /// Execute an `sh` shading operator: paint the named shading over the
     /// current clip region.  The shading's `Background` does not apply.
     pub(super) fn do_shading(&mut self, name: &[u8]) {
