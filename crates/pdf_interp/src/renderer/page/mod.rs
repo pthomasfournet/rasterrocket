@@ -1160,7 +1160,7 @@ impl<'doc> PageRenderer<'doc> {
 
         // Resolve the fill source — pattern or solid colour.
         let pat_name = gs.fill_pattern.clone();
-        let solid_color = gs.fill_color.as_slice().to_vec();
+        let solid_color = gs.painted_fill_color().to_vec();
         let _ = gs; // end the immutable gstate borrow before the &mut self pattern resolve
 
         // A pattern colour that does not resolve, or whose object lies
@@ -1307,7 +1307,7 @@ impl<'doc> PageRenderer<'doc> {
         let line_dash = gs.dash.0.clone();
         let line_dash_phase = gs.dash.1;
         let pat_name = gs.stroke_pattern.clone();
-        let solid_color = gs.stroke_color.as_slice().to_vec();
+        let solid_color = gs.painted_stroke_color().to_vec();
         // gs immutable borrow ends here.
 
         // PDF §8.4.3.2 / §8.4.3.6: the line width and dash lengths are
@@ -1885,11 +1885,7 @@ impl<'doc> PageRenderer<'doc> {
             }
         }
 
-        // Copy fill colour as [u8; 3] — RasterColor::as_slice always returns 3 bytes.
-        let fill_color = {
-            let s = self.gstate.current().fill_color.as_slice();
-            [s[0], s[1], s[2]]
-        };
+        let fill_color = self.gstate.current().painted_fill_color();
         let mask = match mask {
             Some((m, mask_ctm)) => {
                 let Some(sampler) = MaskSampler::new(
@@ -1919,6 +1915,8 @@ impl<'doc> PageRenderer<'doc> {
                 .copied()
                 .unwrap_or(u8::MAX)
         };
+        let gs_transfer = self.gstate.current().transfer.clone();
+        let transfer = |px: [u8; 3]| gs_transfer.as_ref().map_or(px, |t| t.apply(px));
         let compositor = ImageCompositor::new(
             &self.bitmap,
             self.gstate.current().fill_alpha,
@@ -1954,11 +1952,13 @@ impl<'doc> PageRenderer<'doc> {
                 if alpha == 0 {
                     continue;
                 }
+                // Image samples map through the transfer function; the
+                // stencil colour is already the painted fill colour.
                 let src = match img.color_space {
                     ImageColorSpace::Rgb => {
-                        [0, 1, 2].map(|ch| taps.blend(|x, y| channel(x, y, ch)))
+                        transfer([0, 1, 2].map(|ch| taps.blend(|x, y| channel(x, y, ch))))
                     }
-                    ImageColorSpace::Gray => [taps.blend(|x, y| channel(x, y, 0)); 3],
+                    ImageColorSpace::Gray => transfer([taps.blend(|x, y| channel(x, y, 0)); 3]),
                     ImageColorSpace::Mask => fill_color,
                 };
                 compositor.paint(row, alpha_row.as_deref_mut(), dx, dy, src, alpha);
@@ -2047,9 +2047,18 @@ impl<'doc> PageRenderer<'doc> {
             self.gstate.current().blend_mode,
             backdrop.as_deref(),
         );
+        let transfer = self.gstate.current().transfer.clone();
         let bitmap = &mut self.bitmap;
         let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
-            composite_rgba_rows(bitmap, rows, y, grid, grid_clip, compositor);
+            composite_rgba_rows(
+                bitmap,
+                rows,
+                y,
+                grid,
+                grid_clip,
+                compositor,
+                transfer.as_deref(),
+            );
         });
         if let Err(e) = downloaded {
             log::warn!("blit_image: device page buffer download failed: {e}");
@@ -2076,7 +2085,7 @@ impl<'doc> PageRenderer<'doc> {
 /// and to the pixels `grid_clip` covers.  Alpha is `255` where the blit
 /// kernel wrote a sample and `0` elsewhere, so the composite copies each
 /// written sample, blended by the clip coverage on rows the clip edge
-/// crosses.
+/// crosses.  Samples map through `transfer` when one is in effect.
 #[cfg(feature = "cache")]
 fn composite_rgba_rows(
     bitmap: &mut Bitmap<Rgb8>,
@@ -2085,6 +2094,7 @@ fn composite_rgba_rows(
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
     compositor: ImageCompositor<'_>,
+    transfer: Option<&crate::resources::transfer::Transfer>,
 ) {
     use gpu::cache::RGBA_BPP;
 
@@ -2101,12 +2111,13 @@ fn composite_rgba_rows(
             if s[3] == 0 || coverage == 0 {
                 continue;
             }
+            let rgb = [s[0], s[1], s[2]];
             compositor.paint(
                 row,
                 alpha_row.as_deref_mut(),
                 dx,
                 dy,
-                [s[0], s[1], s[2]],
+                transfer.map_or(rgb, |t| t.apply(rgb)),
                 coverage,
             );
         }
@@ -3122,6 +3133,71 @@ mod tests {
         let doc = default_gray_doc("[/CalRGB << /WhitePoint [0.9505 1 1.089] >>]");
         let px = render_gray_on(&doc, (4, 0), 8, b"0.5 g 0 0 8 8 re f");
         assert!(px.iter().all(|&v| v == 128), "got {px:?}");
+    }
+
+    // ── Transfer functions ────────────────────────────────────────────────────
+
+    /// Page `(4, 0)` with `ExtGState` `/Inv` = `<< /TR 5 0 R >>` and `/Id` =
+    /// `<< /TR /Identity >>`, where object 5 inverts its input.
+    fn transfer_doc() -> Document {
+        const PS: &str = "{ 1 exch sub }";
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /ExtGState << \
+                 /Inv << /TR 5 0 R >> /Id << /TR /Identity >> >> >> >>"
+                    .to_owned(),
+            ),
+            (
+                5,
+                format!(
+                    "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length {} >>\n\
+                     stream\n{PS}\nendstream",
+                    PS.len()
+                ),
+            ),
+        ])
+    }
+
+    fn render_transfer(content: &[u8]) -> Vec<u8> {
+        render_gray_on(&transfer_doc(), (4, 0), 8, content)
+    }
+
+    /// Fills, strokes and image samples map through the transfer function
+    /// (PDF §10.5): 0.2 gray (51) paints 204.
+    #[test]
+    fn transfer_function_maps_painted_colours() {
+        for content in [
+            b"/Inv gs 0.2 g 0 0 8 8 re f".as_slice(),
+            b"/Inv gs 0.2 G 8 w 0 4 m 8 4 l S",
+            b"/Inv gs q 8 0 0 8 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x33 EI Q",
+        ] {
+            let px = render_transfer(content);
+            assert!(
+                px.iter().all(|&v| v == 204),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
+    /// The transfer function is graphics state: `Q` and `/TR /Identity`
+    /// both end it.
+    #[test]
+    fn transfer_function_is_restored_and_reset() {
+        let restored = render_transfer(b"q /Inv gs Q 0.2 g 0 0 8 8 re f");
+        assert!(restored.iter().all(|&v| v == 51), "got {restored:?}");
+        let reset = render_transfer(b"/Inv gs /Id gs 0.2 g 0 0 8 8 re f");
+        assert!(reset.iter().all(|&v| v == 51), "got {reset:?}");
+    }
+
+    /// The transfer function maps the object's colour, not the composited
+    /// result: black under an inverting transfer paints white everywhere,
+    /// including the partially covered edge pixels of a fill.
+    #[test]
+    fn transfer_function_leaves_the_backdrop_alone() {
+        let px = render_transfer(b"/Inv gs 0 g 0.5 0.5 6.3 6.3 re f");
+        assert!(px.iter().all(|&v| v == 255), "got {px:?}");
     }
 
     /// An image whose bounding box misses the clip entirely paints nothing.

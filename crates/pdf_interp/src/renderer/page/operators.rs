@@ -1,11 +1,14 @@
 //! PDF operator dispatch — `execute_one`.
 
+use std::sync::Arc;
+
 use super::super::gstate::ctm_multiply;
 use super::text_ops::{translate_text_x, translate_text_y};
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
 use crate::content::{Operator, TextArrayElement};
 use crate::resources::ExtGStateParams;
 use crate::resources::colorspace::ColorSpace;
+use crate::resources::transfer::TransferSetting;
 
 impl PageRenderer<'_> {
     pub(super) fn execute_one(&mut self, op: &Operator) {
@@ -432,6 +435,11 @@ impl PageRenderer<'_> {
         }
         if let Some(bm) = params.blend_mode {
             gs.blend_mode = bm;
+        }
+        match &params.transfer {
+            Some(TransferSetting::Identity) => gs.transfer = None,
+            Some(TransferSetting::Functions(t)) => gs.transfer = Some(Arc::clone(t)),
+            None => {}
         }
         if let Some(sm) = &params.soft_mask {
             self.set_soft_mask(sm);

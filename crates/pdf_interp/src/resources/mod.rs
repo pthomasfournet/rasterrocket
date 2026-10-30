@@ -22,6 +22,7 @@ pub(crate) mod icc_shaper;
 pub mod image;
 pub mod shading;
 pub mod tiling;
+pub mod transfer;
 
 use std::sync::OnceLock;
 
@@ -65,6 +66,8 @@ pub struct ExtGStateParams {
     pub blend_mode: Option<BlendMode>,
     /// Soft mask `SMask`.  `None` = unchanged.
     pub soft_mask: Option<SoftMaskParams>,
+    /// Transfer function `TR2`, else `TR`.  `None` = unchanged.
+    pub transfer: Option<transfer::TransferSetting>,
 }
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
@@ -112,6 +115,7 @@ impl ExtGStateParams {
             flatness: real_or_int(d, b"FL"),
             blend_mode: parse_blend_mode(d),
             soft_mask: parse_soft_mask(doc, d),
+            transfer: transfer::ext_gstate_transfer(doc, d),
         }
     }
 }

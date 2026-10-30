@@ -55,6 +55,12 @@ impl RasterColor {
         Self { bytes: rgb }
     }
 
+    /// The RGB bytes.
+    #[must_use]
+    pub const fn bytes(&self) -> [u8; 3] {
+        self.bytes
+    }
+
     /// Raw bytes slice for `PipeSrc::Solid`.
     ///
     /// Always 3 bytes (RGB), matching `Rgb8::BYTES`.

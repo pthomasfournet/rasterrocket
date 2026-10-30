@@ -15,6 +15,7 @@ use raster::types::{BlendMode, LineCap, LineJoin};
 use super::color::RasterColor;
 use super::text::TextState;
 use crate::resources::colorspace::ColorSpace;
+use crate::resources::transfer::Transfer;
 
 /// PDF current transformation matrix — a 6-element `[a b c d e f]` array.
 pub type Ctm = [f64; 6];
@@ -160,6 +161,9 @@ pub struct InterpGState {
     /// Soft mask in effect (PDF `SMask`), resolved to device pixels when
     /// `gs` installed it.  `None` = no soft mask.
     pub soft_mask: Option<Arc<SoftMaskPlane>>,
+    /// Transfer function in effect (PDF §10.5), applied to the colour of
+    /// each painted object.  `None` = identity.
+    pub transfer: Option<Arc<Transfer>>,
 }
 
 /// A soft mask resolved to one value per device pixel (PDF §11.6.5.2).
@@ -200,6 +204,7 @@ impl Clone for InterpGState {
             fill_color_space: self.fill_color_space.clone(),
             stroke_color_space: self.stroke_color_space.clone(),
             soft_mask: self.soft_mask.clone(),
+            transfer: self.transfer.clone(),
         }
     }
 }
@@ -232,7 +237,26 @@ impl InterpGState {
             fill_color_space: ColorSpace::DeviceGray,
             stroke_color_space: ColorSpace::DeviceGray,
             soft_mask: None,
+            transfer: None,
         }
+    }
+
+    /// `rgb` mapped through the transfer function in effect.
+    #[must_use]
+    pub fn transferred(&self, rgb: [u8; 3]) -> [u8; 3] {
+        self.transfer.as_ref().map_or(rgb, |t| t.apply(rgb))
+    }
+
+    /// The fill colour as painted: mapped through the transfer function.
+    #[must_use]
+    pub fn painted_fill_color(&self) -> [u8; 3] {
+        self.transferred(self.fill_color.bytes())
+    }
+
+    /// The stroke colour as painted: mapped through the transfer function.
+    #[must_use]
+    pub fn painted_stroke_color(&self) -> [u8; 3] {
+        self.transferred(self.stroke_color.bytes())
     }
 }
 

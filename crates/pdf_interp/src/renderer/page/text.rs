@@ -321,7 +321,7 @@ impl PageRenderer<'_> {
 
         // Phase 2: fill the glyphs, then stroke their outlines.
         if do_fill && !self.gstate.current().fill_color_space.paints_nothing() {
-            let fill_bytes = self.gstate.current().fill_color.as_slice().to_vec();
+            let fill_bytes = self.gstate.current().painted_fill_color().to_vec();
             let clip = self.gstate.current().clip.clone_shared();
             let blend_mode = self.gstate.current().blend_mode;
             let backdrop = self.blend_backdrop(blend_mode);

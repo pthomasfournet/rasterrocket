@@ -26,7 +26,7 @@ use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
 use crate::resources::SoftMaskParams;
-use crate::resources::shading::function::Function;
+use crate::resources::transfer::function_lut;
 
 impl PageRenderer<'_> {
     /// Apply an `ExtGState` `SMask` entry to the current graphics state.
@@ -78,7 +78,7 @@ impl PageRenderer<'_> {
         std::mem::swap(&mut self.bitmap, &mut canvas);
         self.gstate.restore();
 
-        let lut = transfer.and_then(|f| transfer_lut(self.resources.doc(), f));
+        let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
         let values = if luminosity {
             let bc = backdrop_rgb(backdrop);
             luminosity_values(&canvas, bc)
@@ -323,24 +323,6 @@ fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
         }
     }
     out
-}
-
-/// Tabulate a transfer function over the 256 mask values.
-fn transfer_lut(doc: &pdf::Document, f: &pdf::Object) -> Option<[u8; 256]> {
-    let function = Function::load(doc, f);
-    let mut lut = [0u8; 256];
-    for (i, v) in lut.iter_mut().enumerate() {
-        let t = f64::from(u8::try_from(i).ok()?) / 255.0;
-        let y = function.eval(t, 1)?.first().copied()?;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "clamped to [0, 1] and scaled to [0, 255]"
-        )]
-        let b = (y.clamp(0.0, 1.0) * 255.0).round() as u8;
-        *v = b;
-    }
-    Some(lut)
 }
 
 #[cfg(test)]
