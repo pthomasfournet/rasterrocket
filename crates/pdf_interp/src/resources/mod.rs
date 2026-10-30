@@ -13,6 +13,7 @@
 //! stays stateless and easy to test.
 
 pub mod cmap;
+pub mod cmap_predefined;
 pub mod colorspace;
 pub(crate) mod dict_ext;
 pub mod font;

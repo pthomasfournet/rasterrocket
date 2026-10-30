@@ -5,6 +5,7 @@ use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
 use super::text_ops::{GlyphRecord, glyph_advance, text_to_device, translate_text_x};
+use crate::resources::cmap::DecodedCode;
 use color::Rgb8;
 use raster::{
     glyph::{GlyphBitmap, fill_glyph},
@@ -238,26 +239,15 @@ impl PageRenderer<'_> {
                 };
 
             if let Some(enc) = cid_enc {
-                // Type 0 composite font: multi-byte character codes via Encoding CMap.
-                // Identity-H/V (enc.encoding_cmap == None) uses 2-byte codes by convention
-                // (PDF spec §9.7.4, Table 118); embedded CMaps specify their own width.
-                let code_bytes = enc.encoding_cmap.as_ref().map_or(2, |cm| cm.code_bytes);
-
-                let mut pos = 0usize;
-                while pos + usize::from(code_bytes) <= bytes.len() {
-                    let mut char_code = 0u32;
-                    for &b in &bytes[pos..pos + usize::from(code_bytes)] {
-                        char_code = (char_code << 8) | u32::from(b);
-                    }
-                    pos += usize::from(code_bytes);
-
-                    // charcode → CID (identity if no CMap), then CID → GID.
-                    let cid = enc
-                        .encoding_cmap
-                        .as_ref()
-                        .and_then(|cm| cm.map.get(&char_code).copied())
-                        .unwrap_or(char_code);
-                    let gid = enc.code_to_gid(char_code);
+                // Type 0 composite font: the Encoding CMap splits the string
+                // into 1–4-byte codes and maps each to a CID (PDF §9.7.6.3).
+                for DecodedCode {
+                    code: char_code,
+                    value: cid,
+                    ..
+                } in enc.codes(bytes)
+                {
+                    let gid = enc.gid_for_cid(cid);
 
                     let (pen_x, pen_y) = text_to_device(&ctm, &tm, 0.0, rise, self.height);
                     push_glyph(char_code, gid, true, pen_x, pen_y);

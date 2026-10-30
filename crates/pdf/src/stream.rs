@@ -107,6 +107,17 @@ pub(crate) fn apply_flate(
 /// Maximum decompressed size we will accept, to defeat decompression bombs.
 const MAX_DECOMPRESSED: usize = 1 << 30; // 1 GiB
 
+/// Inflate a zlib (RFC 1950) or raw deflate stream, as `FlateDecode` does
+/// for a stream without predictor parameters.
+///
+/// # Errors
+///
+/// An `InvalidData` error when the stream is malformed beyond recovery or
+/// its output exceeds 1 GiB.
+pub fn inflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    decompress_zlib(data)
+}
+
 /// flate2-backed decompression with partial-output tolerance.
 ///
 /// Returns whatever bytes were produced before a mid-stream error if the

@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object};
 
-use crate::resources::cmap::{CMap, parse_cmap};
+use crate::resources::cmap::{CMap, DecodedCode, parse_cmap};
+use crate::resources::cmap_predefined::predefined_cmap;
 use crate::resources::dict_ext::DictExt;
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle, substitute_style};
 
@@ -81,11 +82,10 @@ pub enum BaseEncoding {
 /// CIDs to glyph indices.
 #[derive(Debug)]
 pub struct CidEncoding {
-    /// Decoded `Encoding` `CMap` — maps char codes to CIDs.
-    ///
-    /// `None` when no `CMap` stream could be parsed (`Identity-H`/V or missing);
-    /// in that case charcode == CID (identity mapping).
-    pub encoding_cmap: Option<CMap>,
+    /// The `Encoding` `CMap`: splits strings into codes and maps each to a
+    /// CID.  The identity `CMap` for `Identity-H` / `Identity-V` and for an
+    /// `Encoding` that cannot be resolved.
+    pub encoding_cmap: Arc<CMap>,
 
     /// Precomputed CID → GID lookup from `CIDToGIDMap`.
     ///
@@ -119,18 +119,16 @@ impl CidEncoding {
         self.default_width
     }
 
-    /// Map a character code to a GID, applying both `encoding_cmap` and
-    /// `cid_to_gid`.
-    ///
-    /// Returns 0 (`.notdef`) when the code is absent from either map.
-    #[must_use]
-    pub fn code_to_gid(&self, char_code: u32) -> u32 {
-        // Step 1: char code → CID via encoding CMap (identity if absent).
-        let cid = self.encoding_cmap.as_ref().map_or(char_code, |cmap| {
-            cmap.map.get(&char_code).copied().unwrap_or(0)
-        });
+    /// Decode `bytes` into character codes through the `Encoding` `CMap`,
+    /// each with its CID and byte length.
+    pub fn codes<'a>(&'a self, bytes: &'a [u8]) -> impl Iterator<Item = DecodedCode> + 'a {
+        self.encoding_cmap.iter_codes(bytes)
+    }
 
-        // Step 2: CID → GID via table (identity if absent).
+    /// The glyph index `cid` selects through `cid_to_gid`; identity without
+    /// a table, 0 (`.notdef`) for a CID past the table's end.
+    #[must_use]
+    pub fn gid_for_cid(&self, cid: u32) -> u32 {
         // CIDs are 16-bit values (PDF spec §9.7.4); usize is always ≥ 16 bits.
         self.cid_to_gid
             .as_ref()
@@ -713,41 +711,67 @@ fn extract_matrix(dict: &Dictionary, key: &[u8]) -> Option<[f64; 6]> {
     Some(m)
 }
 
-/// Parse the `Encoding` entry of a Type 0 font into a [`CMap`].
-///
-/// `Identity-H` and `Identity-V` are predefined `CMaps` where char code == CID.
-/// We represent these as `None` (identity).  Any stream reference is parsed.
-fn extract_type0_encoding_cmap(doc: &Document, dict: &Dictionary) -> Option<CMap> {
-    let enc = dict.get(b"Encoding")?;
+/// Greatest `UseCMap` nesting followed through embedded `CMap` streams.
+const MAX_USECMAP_DEPTH: u32 = 4;
+
+/// Resolve the `Encoding` entry of a Type 0 font to its [`CMap`]: a
+/// predefined `CMap` by name, or an embedded stream.  The identity `CMap`
+/// when the entry is absent, names an unknown `CMap`, or holds a stream
+/// that does not parse.
+fn extract_type0_encoding_cmap(doc: &Document, dict: &Dictionary) -> Arc<CMap> {
+    let Some(enc) = dict.get(b"Encoding") else {
+        log::warn!("font: Type0 font has no Encoding — treating as Identity-H");
+        return Arc::new(CMap::identity());
+    };
     match enc {
-        // Named CMaps: Identity-H / Identity-V are identity (None = passthrough).
-        Object::Name(n) if n == b"Identity-H" || n == b"Identity-V" => None,
-        // Named non-identity CMaps (e.g. /GB-EUC-H) — we cannot parse these
-        // without a CMap resource database.  Fall through to None and treat as
-        // identity, which will produce wrong glyphs for CJK but not crash.
-        Object::Name(n) => {
-            log::warn!(
-                "font: named CMap /{} is not Identity — text may render incorrectly",
-                String::from_utf8_lossy(n)
-            );
-            None
-        }
-        // Stream reference — parse the CMap.
-        Object::Reference(id) => {
-            let obj = doc.get_object(*id).ok()?;
-            let stream = obj.as_stream()?;
-            let content = stream.decompressed_content().ok()?;
-            let cmap = parse_cmap(&content);
-            if cmap.is_none() {
+        Object::Name(n) => named_cmap(n),
+        Object::Reference(_) | Object::Stream(_) => embedded_cmap(doc, enc, 0).map_or_else(
+            || {
                 log::warn!("font: Type0 Encoding CMap stream could not be parsed");
-            }
-            cmap
-        }
+                Arc::new(CMap::identity())
+            },
+            Arc::new,
+        ),
         _ => {
-            log::warn!("font: Type0 Encoding is not a Name or Reference — treating as identity");
-            None
+            log::warn!("font: Type0 Encoding is not a Name or stream — treating as identity");
+            Arc::new(CMap::identity())
         }
     }
+}
+
+/// The `CMap` a name denotes: identity for `Identity-H` / `Identity-V`,
+/// else the predefined `CMap` of that name, else identity with a warning.
+fn named_cmap(name: &[u8]) -> Arc<CMap> {
+    if name == b"Identity-H" || name == b"Identity-V" {
+        return Arc::new(CMap::identity());
+    }
+    predefined_cmap(name).unwrap_or_else(|| {
+        log::warn!(
+            "font: unknown predefined CMap /{} — treating as identity",
+            String::from_utf8_lossy(name)
+        );
+        Arc::new(CMap::identity())
+    })
+}
+
+/// Parse an embedded `CMap` stream (`obj` is the stream or a reference to
+/// it) and apply its dictionary's `UseCMap`, a name or another stream,
+/// at nesting `depth`.
+fn embedded_cmap(doc: &Document, obj: &Object, depth: u32) -> Option<CMap> {
+    let resolved = doc.resolve(obj).ok()?;
+    let stream = resolved.as_stream()?;
+    let content = stream.decompressed_content().ok()?;
+    let mut cmap = parse_cmap(&content)?;
+    match stream.dict.get(b"UseCMap") {
+        Some(Object::Name(n)) => cmap.inherit(&named_cmap(n)),
+        Some(parent @ (Object::Reference(_) | Object::Stream(_))) if depth < MAX_USECMAP_DEPTH => {
+            if let Some(parent) = embedded_cmap(doc, parent, depth + 1) {
+                cmap.inherit(&parent);
+            }
+        }
+        _ => {}
+    }
+    Some(cmap)
 }
 
 /// Resolve the first entry of `DescendantFonts` to a dictionary.
