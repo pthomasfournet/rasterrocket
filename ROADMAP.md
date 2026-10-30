@@ -49,6 +49,68 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
+### Unreleased (next: v2.0.0)
+
+**A study of pdfium's renderer, worked through ticket by ticket.** Every
+capability pdfium or poppler has and rasterrocket lacked was filed, verified
+against a fixture, and fixed at the spec's terms. The next release is a major
+version: the public API changes below are breaking.
+
+**API changes.**
+- `RasterError::ContentDecodeFailed(Vec<String>)`: under `strict`, a page whose
+  `/Contents` holds a stream that cannot be decoded fails. Without `strict`
+  the stream is skipped, a warning names it, and it is listed in the new
+  `PageDiagnostics::content_failures` (`ContentFailure { object, reason }`).
+- `PageDiagnostics::missing_fonts`: font resource names that `Tf` selected but
+  the resources do not define; their text is drawn in Helvetica.
+- `pdf_interp::page_has_javascript`: page and annotation JavaScript is checked
+  per rendered page (one warning per document) instead of by a walk of every
+  page at open.
+
+**Parser.** Recovery of objects absent from or misplaced in the xref,
+including object-stream members and XRef-stream trailers; object streams
+parsed per object on demand and never nested; xref offsets relative to a
+header preceded by junk; `/XRefStm` read before `/Prev` with free entries
+honoured; abbreviated filter names and BrotliDecode; the TIFF predictor at
+1, 2, 4 and 16 bits; each `/Contents` stream decoded independently; nesting
+capped at 256; an unparsable dictionary value drops only its key.
+
+**Colour.** A process-ink DeviceCMYK model everywhere (CPU and GPU);
+ICCBased gray and RGB matrix/TRC profiles for images and fills, compiled once
+per document, with `/Alternate` for unusable profiles; CalGray and CalRGB
+through their CIE parameters; multi-colorant DeviceN and Indexed; `/None`
+colorants paint nothing; DefaultGray/RGB/CMYK; ExtGState transfer functions;
+PDF functions compiled once and evaluated by arithmetic.
+
+**Paint.** ExtGState soft masks; shading patterns as fills and strokes with
+their ExtGState and Background; tiling patterns on the pattern lattice, at
+device cell size, in the parent's default space, showing the backdrop; axial,
+radial, function-based and mesh shadings evaluated in shading space;
+non-isolated groups composited as their own colour and alpha, bounded to
+their region; images composited through the transparency pipe,
+area-averaged when minified and bilinearly interpolated when magnified.
+
+**Fonts and text.** Base-14 substitutes compiled into the binary; non-embedded fonts drawn
+with a substitute of their class and fitted to the document's widths; CJK,
+Arabic and Thai substitutes chosen by script; predefined CJK CMaps and
+vertical writing; CID-keyed Type 1; stroked and clipping text render modes;
+Type 3 glyphs in their own resources, parsed once, `d1` painted in the fill
+colour; horizontal scaling and word spacing applied as the spec says;
+glyphs placed to a quarter pixel; a missing or unparsable font drawn with a
+substitute instead of dropped; `RROCKET_FONT_DIR` for extra font directories.
+
+**Images.** LZW, RunLength and chained filters; truncated raw images draw
+their decoded rows; colour-key masks on stored samples; SMask `/Matte`; JPX
+interpreted through the image dictionary; inline image length from the
+dictionary; each image XObject decoded once per page and each JBIG2Globals
+stream once per document.
+
+**Speed.** Fonts resolved once per document and glyph bitmaps shared across
+pages; resources resolved once per context; `/Decode` through a table
+(bakhtine 4.19 → 1.51 s); document open no longer touches page objects (21
+archive documents: 87 → 10 ms summed). Per-page latency over a 14,028-page
+archive sample is lower than pdfium's on 12,519 pages.
+
 ### v1.5.0 (October 2026)
 
 **Pages that rendered wrong now render right; FreeType is gone.** One
