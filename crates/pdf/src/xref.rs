@@ -56,25 +56,45 @@ impl XrefTable {
 }
 
 /// Parse all xref sections starting from the `startxref` offset at the end of
-/// the file.  Follows `/Prev` chains.
-pub(crate) fn read_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
-    match read_xref_strict(data) {
+/// the file, following `/Prev` chains, for a file whose `%PDF-` header starts
+/// at byte `header`.
+///
+/// Returns the table and the base its byte offsets are relative to.  Offsets
+/// are measured from the start of the file (ISO 32000-2 §7.5.5).  When they
+/// do not lead to a cross-reference chain and the header is not at byte 0,
+/// they are read relative to the header: bytes prepended to a finished file
+/// (a transport header, a byte-order mark) shift every position by the
+/// header's offset.
+pub(crate) fn read_xref(data: &[u8], header: usize) -> Result<(XrefTable, usize), PdfError> {
+    let absolute = match read_xref_strict(data) {
         // A strict parse that resolved a `/Root` is authoritative — this is
         // every well-formed file, byte-unchanged.
-        Ok(table) if table.trailer.contains_key(b"Root") => Ok(table),
+        Ok(table) if table.trailer.contains_key(b"Root") => return Ok((table, 0)),
+        other => other,
+    };
+    if header > 0
+        && let Some(body) = data.get(header..)
+        && let Ok(table) = read_xref_strict(body)
+        && table.trailer.contains_key(b"Root")
+    {
+        return Ok((table, header));
+    }
+    match absolute {
         // Strict parse succeeded structurally but the trailer carries no
         // usable `/Root` (an xref section we located but could not resolve
         // to a catalogue).  Try the repair scan as a *bonus*: only adopt it
         // when it yields something better, otherwise keep the strict table
         // so existing higher-level diagnostics are unchanged.
-        Ok(strict_table) => Ok(reconstruct_xref(data).unwrap_or(strict_table)),
+        Ok(strict_table) => Ok((reconstruct_xref(data).unwrap_or(strict_table), 0)),
         // Strict parse failed outright (no startxref, bad offset, …).  Many
         // real-world "broken" PDFs — interrupted writes, hand-edited files,
         // naive concatenations — still contain intact object bodies and a
         // recoverable catalogue, so scan the body for object headers and
         // rebuild.  If repair also fails, surface the
         // original strict diagnostic (the more actionable of the two).
-        Err(strict_err) => reconstruct_xref(data).map_err(|_| strict_err),
+        Err(strict_err) => reconstruct_xref(data)
+            .map(|table| (table, 0))
+            .map_err(|_| strict_err),
     }
 }
 
@@ -511,7 +531,7 @@ trailer
 startxref
 9
 %%EOF";
-        let err = read_xref(data).unwrap_err();
+        let err = read_xref(data, 0).unwrap_err();
         match err {
             PdfError::BadXref(s) => assert!(s.contains("sanity limit"), "got: {s}"),
             other => panic!("expected BadXref, got {other:?}"),
@@ -533,7 +553,7 @@ startxref
 9
 %%EOF";
         // Should succeed: /Prev=-1 is treated as no previous xref.
-        let table = read_xref(data).expect("xref parse");
+        let (table, _) = read_xref(data, 0).expect("xref parse");
         assert!(matches!(table.get(0), Some(XrefEntry::Free)));
         assert_eq!(table.entries.len(), 1);
     }
@@ -568,7 +588,7 @@ startxref
             "got {err:?}"
         );
         // The public entry point must not panic either.
-        let _ = read_xref(&data);
+        let _ = read_xref(&data, 0);
     }
 
     /// Widths whose sum overflows `usize`, or any single width wider than a
@@ -792,6 +812,6 @@ startxref\n\
         data.extend_from_slice(tail);
         data.extend_from_slice(b"xref\n0 1\n0000000000 65535");
         assert!(read_xref_strict(&data).is_err());
-        let _ = read_xref(&data);
+        let _ = read_xref(&data, 0);
     }
 }

@@ -78,6 +78,10 @@ fn collect_content_refs(arr: &[Object], page_id: ObjectId) -> Vec<ObjectId> {
 pub struct Document {
     /// The file bytes.  `Arc` so callers can hold byte slices.
     data: Arc<MmapOrVec>,
+    /// Position in `data` that the cross-reference offsets are relative to:
+    /// 0, or the `%PDF-` header's position when bytes precede the header
+    /// and the offsets were written without them.
+    base: usize,
     xref: XrefTable,
     /// Per-object parse cache.  `None` = not yet resolved.
     cache: Mutex<HashMap<u32, Arc<Object>>>,
@@ -234,8 +238,8 @@ impl Document {
     }
 
     fn from_bytes_with_guard(data: Arc<MmapOrVec>, guard: DecryptGuard) -> Result<Self, PdfError> {
-        validate_pdf_input(data.as_bytes())?;
-        let xref = read_xref(data.as_bytes()).map_err(|e| match e {
+        let header = validate_pdf_input(data.as_bytes())?;
+        let (xref, base) = read_xref(data.as_bytes(), header).map_err(|e| match e {
             // A `%PDF-` header is present (validate_pdf_input passed) but the
             // xref could neither be parsed nor reconstructed: the file is
             // truncated or corrupt.  Replace the low-level "startxref not
@@ -245,6 +249,7 @@ impl Document {
         })?;
         Ok(Self {
             data,
+            base,
             xref,
             cache: Mutex::new(HashMap::new()),
             objstm: ObjStmCache::new(),
@@ -434,7 +439,12 @@ impl Document {
     fn parse_direct(&self, offset: u64) -> Option<(ObjectId, Object)> {
         usize::try_from(offset)
             .ok()
-            .and_then(|offset| parse_indirect_object(self.data.as_bytes(), offset))
+            .and_then(|offset| parse_indirect_object(self.body(), offset))
+    }
+
+    /// The file from `base` on: the bytes cross-reference offsets index.
+    fn body(&self) -> &[u8] {
+        &self.data.as_bytes()[self.base..]
     }
 
     /// Object `num` parsed from the header a whole-file scan finds for it,
@@ -442,11 +452,7 @@ impl Document {
     fn recover_direct(&self, num: u32, failed_offset: Option<u64>) -> Option<Object> {
         let scanned = self
             .scanned_offsets
-            .get_or_init(|| {
-                scan_objects(self.data.as_bytes())
-                    .ok()
-                    .map(|scan| scan.entries)
-            })
+            .get_or_init(|| scan_objects(self.body()).ok().map(|scan| scan.entries))
             .as_ref()?;
         let Some(XrefEntry::Direct { offset, .. }) = scanned.get(&num).copied() else {
             return None;
@@ -1018,19 +1024,20 @@ const HEADER_SCAN_WINDOW: usize = 1024;
 
 /// Reject obviously-unusable input *before* the xref parser runs so the
 /// operator gets an accurate diagnosis ("file is empty" / "not a PDF")
-/// instead of the low-level, misleading "'startxref' not found".
+/// instead of the low-level, misleading "'startxref' not found", and return
+/// the position of the `%PDF-` header.
 ///
 /// This is the single entry choke point shared by [`Document::open`] and
 /// [`Document::from_bytes_owned`].
-fn validate_pdf_input(data: &[u8]) -> Result<(), PdfError> {
+fn validate_pdf_input(data: &[u8]) -> Result<usize, PdfError> {
     if data.is_empty() {
         return Err(PdfError::EmptyInput);
     }
     let window = &data[..data.len().min(HEADER_SCAN_WINDOW)];
-    if !window.windows(5).any(|w| w == b"%PDF-") {
-        return Err(PdfError::NotPdf);
-    }
-    Ok(())
+    window
+        .windows(5)
+        .position(|w| w == b"%PDF-")
+        .ok_or(PdfError::NotPdf)
 }
 
 #[cfg(test)]
@@ -1041,9 +1048,15 @@ mod tests {
     /// catalog as object 1 and a classic xref table.  Missing numbers are
     /// free entries.
     fn pdf_with_objects(objects: &[(u32, String)]) -> Vec<u8> {
+        pdf_with_objects_after("", objects)
+    }
+
+    /// [`pdf_with_objects`] preceded by `prefix`, with every offset counted
+    /// from the start of the prefix.
+    fn pdf_with_objects_after(prefix: &str, objects: &[(u32, String)]) -> Vec<u8> {
         use std::fmt::Write as _;
 
-        let mut out = String::from("%PDF-1.4\n");
+        let mut out = format!("{prefix}%PDF-1.4\n");
         let max = objects.iter().map(|(n, _)| *n).max().unwrap_or(1).max(1);
         let mut offsets = vec![None; max as usize + 1];
         let catalog = (1, "<</Type /Catalog>>".to_owned());
@@ -1491,7 +1504,7 @@ startxref\n180\n%%EOF"
         bytes.extend_from_slice(b"\nendstream\nendobj\n");
         bytes.extend_from_slice(format!("startxref\n{startxref}\n%%EOF").as_bytes());
 
-        let table = crate::xref::read_xref(&bytes).expect("xref stream parse");
+        let (table, _) = crate::xref::read_xref(&bytes, 0).expect("xref stream parse");
         match table.get(1) {
             Some(crate::xref::XrefEntry::InObjStm { container, index }) => {
                 assert_eq!(container, 7, "type-2 field2 = ObjStm container number");
@@ -1722,6 +1735,39 @@ startxref\n180\n%%EOF"
             "header-only must yield MissingXref, got: {err}"
         );
         assert!(err.to_string().contains("truncated or corrupt"));
+    }
+
+    const TRANSPORT_HEADER: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n";
+
+    /// Bytes prepended to a finished file shift every object; the offsets
+    /// are read relative to the header and the cross-reference chain is
+    /// parsed as written (its free entry 0 survives, which a reconstruction
+    /// from an object scan does not record).
+    #[test]
+    fn offsets_written_without_a_prefix_are_read_from_the_header() {
+        let page = "<</Type /Page>>".to_owned();
+        let mut bytes = TRANSPORT_HEADER.as_bytes().to_vec();
+        bytes.extend_from_slice(&pdf_with_objects(&[(2, page)]));
+        let doc = Document::from_bytes_owned(bytes).expect("prefixed file opens");
+        assert_eq!(doc.base, TRANSPORT_HEADER.len());
+        assert!(matches!(doc.xref.get(0), Some(XrefEntry::Free)));
+        let obj = doc.get_object((2, 0)).expect("object 2 resolves");
+        assert!(
+            obj.as_dict()
+                .is_some_and(|d| d.get(b"Type").and_then(Object::as_name) == Some(b"Page"))
+        );
+    }
+
+    /// Offsets that count the bytes before the header are absolute, as the
+    /// spec measures them, and are used unchanged.
+    #[test]
+    fn offsets_counting_a_prefix_are_absolute() {
+        let page = "<</Type /Page>>".to_owned();
+        let bytes = pdf_with_objects_after(TRANSPORT_HEADER, &[(2, page)]);
+        let doc = Document::from_bytes_owned(bytes).expect("prefixed file opens");
+        assert_eq!(doc.base, 0);
+        assert!(matches!(doc.xref.get(0), Some(XrefEntry::Free)));
+        assert!(doc.get_object((2, 0)).is_ok());
     }
 
     #[test]
