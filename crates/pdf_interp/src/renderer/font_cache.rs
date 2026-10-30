@@ -230,12 +230,7 @@ impl FontCache {
         self.faces.get(&key)?.as_ref()
     }
 
-    fn load_face(
-        &self,
-        key: &FontKey,
-        desc: &FontDescriptor,
-        trm: [f64; 4],
-    ) -> Option<PageFace> {
+    fn load_face(&self, key: &FontKey, desc: &FontDescriptor, trm: [f64; 4]) -> Option<PageFace> {
         // Pre-flight: reject degenerate matrices before parsing the program.
         // The y-column magnitude (hypot of indices 2 & 3) is the pixel size used by
         // FontFace::new; a value < 1.0 or non-finite produces an unusable face.
@@ -507,6 +502,10 @@ fn resolve_simple_to_gid(
 /// point, the identity that holds for the ASCII and Latin-1 ranges of those
 /// encodings.
 ///
+/// A substitute that lacks the glyph of a name it does understand draws
+/// nothing for the code: the glyph at the raw code point would be an
+/// unrelated character (`uni4E2D` at code 65 is not `A`).
+///
 /// For an `embedded` program, a code that neither lookup maps resolves
 /// through the program's byte-keyed (3,0) / (1,0) subtables
 /// ([`FontFace::raw_get_code_index`], PDF §9.6.6.4).  A Unicode charmap
@@ -535,17 +534,22 @@ fn resolve_via_unicode_cmap(
                 .flatten()
                 .filter(|n| !n.is_empty())
             });
+            let unicode = name.and_then(font::glyph_name_to_unicode);
             name.and_then(|name| {
                 (!embedded)
                     .then(|| face.raw_get_name_index(name))
                     .and_then(nonzero)
                     .or_else(|| {
-                        font::glyph_name_to_unicode(name)
-                            .map(|unicode| face.raw_get_char_index(unicode))
+                        unicode
+                            .map(|u| face.raw_get_char_index(u))
                             .and_then(nonzero)
                     })
             })
-            .or_else(|| nonzero(face.raw_get_char_index(u32::from(code))))
+            .or_else(|| {
+                (embedded || unicode.is_none())
+                    .then(|| face.raw_get_char_index(u32::from(code)))
+                    .and_then(nonzero)
+            })
             .or_else(|| embedded.then(|| face.raw_get_code_index(code)))
             .unwrap_or(0)
         })
@@ -715,6 +719,46 @@ mod tests {
         // A code left to the base encoding resolves through its name too:
         // MacRoman 0x8E is `eacute`, which is not U+008E.
         assert_eq!(face.code_to_gid.get(0x8E), Some(&eacute));
+    }
+
+    /// A `Differences` name the substitute understands but has no glyph for
+    /// draws nothing: `uni4E2D` at code 65 must not select the Latin `A`
+    /// the substitute keeps at that code point.
+    #[test]
+    fn missing_glyph_of_a_known_name_is_notdef_on_a_substitute() {
+        let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(std::array::from_fn(|_| None));
+        differences[65] = Some("uni4E2D".into());
+        differences[66] = Some("afii10017".into());
+        let desc = FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: None,
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences,
+            base_encoding: BaseEncoding::WinAnsi,
+            cid_encoding: None,
+            type3: None,
+            substitute: SubstituteStyle::default(),
+        };
+        let mut cache = FontCache::new(Arc::default());
+        let face = cache
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
+            .expect("substitute face loads");
+        assert_eq!(
+            face.raw_get_char_index(0x4E2D),
+            0,
+            "the Latin substitute has no CJK"
+        );
+        assert_eq!(face.code_to_gid.get(65), Some(&0));
+        let cyrillic_a = face.raw_get_char_index(0x0410);
+        assert_ne!(cyrillic_a, 0);
+        assert_eq!(face.code_to_gid.get(66), Some(&cyrillic_a));
+        assert_eq!(
+            face.code_to_gid.get(67),
+            Some(&face.raw_get_char_index(u32::from('C')))
+        );
     }
 
     /// An embedded non-symbolic TrueType font whose `Differences` array
