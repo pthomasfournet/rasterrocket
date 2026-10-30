@@ -14,12 +14,22 @@
 //! level, whose polarity is the reverse.  [`tint_lut`] evaluates the space's
 //! tint transform for every tint value and [`apply_tint_lut`] rewrites the
 //! decoded bytes through it, so a codec never has to know about spot colour.
+//!
+//! An `ICCBased` N=1 or N=3 image decodes to device samples in the same way;
+//! [`sample_rewrite`] selects the profile's matrix/TRC conversion to sRGB,
+//! and [`apply_sample_rewrite`] runs it, or the tint lookup, on the final
+//! samples.
 
 use pdf::{Dictionary, Document, Object};
+
+use std::sync::Arc;
 
 use super::{ImageColorSpace, ImageData, ImageDescriptor};
 use crate::resources::colorspace::{ColorSpace, needs_sample_conversion, resolve, samples_to_rgb};
 use crate::resources::dict_ext::DictExt as _;
+use crate::resources::icc_shaper::{
+    GrayShaper, ProfileConversion, RgbShaper, conversion_for_stream,
+};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -198,7 +208,7 @@ pub(super) enum TintLut {
 /// Returns `None` for every other colour space.  An `Indexed` space
 /// qualifies because palette expansion yields one base-space tint byte per
 /// pixel, which is exactly what the lookup consumes.
-pub(super) fn tint_lut(doc: &Document, cs_obj: &Object) -> Option<TintLut> {
+fn tint_lut(doc: &Document, cs_obj: &Object) -> Option<TintLut> {
     let cs = resolve(doc, cs_obj);
     let tint_cs = match &cs {
         ColorSpace::Indexed { base, .. } => base.as_ref(),
@@ -232,7 +242,7 @@ pub(super) fn tint_lut(doc: &Document, cs_obj: &Object) -> Option<TintLut> {
 /// Only a host-resident `Gray`-layout descriptor carries tint bytes; any
 /// other layout is a producer error (e.g. a three-component JPEG declared as
 /// `Separation`) or device-resident data, and is left untouched.
-pub(super) fn apply_tint_lut(img: &mut ImageDescriptor, lut: &TintLut) {
+fn apply_tint_lut(img: &mut ImageDescriptor, lut: &TintLut) {
     if img.color_space != ImageColorSpace::Gray {
         log::debug!(
             "image: {:?} sample layout is not one tint per pixel — leaving samples as decoded",
@@ -271,6 +281,89 @@ pub(super) fn apply_tint_lut(img: &mut ImageDescriptor, lut: &TintLut) {
             *bytes = rgb;
             img.color_space = ImageColorSpace::Rgb;
         }
+    }
+}
+
+// ── Post-decode sample rewrite ────────────────────────────────────────────────
+
+/// A colour mapping applied to an image's samples once they are final.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SampleRewrite {
+    /// Spot-colour tint bytes to colour; see [`tint_lut`].
+    Tint(TintLut),
+    /// Gray samples through an `ICCBased` N=1 matrix/TRC profile.
+    IccGray(Arc<GrayShaper>),
+    /// RGB samples through an `ICCBased` N=3 matrix/TRC profile.
+    IccRgb(Arc<RgbShaper>),
+}
+
+/// The rewrite an image in colour space `cs_obj` needs, if any.
+///
+/// An `Indexed` space over `ICCBased` qualifies: palette expansion yields
+/// base-space samples.  A profile that is sRGB at 8-bit precision, or is
+/// not a matrix/TRC profile, needs none and the samples pass through.
+pub(super) fn sample_rewrite(doc: &Document, cs_obj: &Object) -> Option<SampleRewrite> {
+    if let Some(lut) = tint_lut(doc, cs_obj) {
+        return Some(SampleRewrite::Tint(lut));
+    }
+    let cs = resolve(doc, cs_obj);
+    let icc_cs = match &cs {
+        ColorSpace::Indexed { base, .. } => base.as_ref(),
+        other => other,
+    };
+    let ColorSpace::IccBased {
+        n,
+        stream_id: Some(id),
+    } = icc_cs
+    else {
+        return None;
+    };
+    match (n, conversion_for_stream(doc, *id)) {
+        (1, ProfileConversion::Gray(Some(shaper))) => Some(SampleRewrite::IccGray(shaper)),
+        (3, ProfileConversion::Rgb(Some(shaper))) => Some(SampleRewrite::IccRgb(shaper)),
+        _ => None,
+    }
+}
+
+/// Apply `rewrite` to the host-resident samples of `img`.
+///
+/// A sample layout the rewrite does not expect (a producer declaring a
+/// space whose channel count the codec output contradicts) or
+/// device-resident data is left untouched.
+pub(super) fn apply_sample_rewrite(img: &mut ImageDescriptor, rewrite: &SampleRewrite) {
+    let expected = match rewrite {
+        SampleRewrite::Tint(lut) => return apply_tint_lut(img, lut),
+        SampleRewrite::IccGray(_) => ImageColorSpace::Gray,
+        SampleRewrite::IccRgb(_) => ImageColorSpace::Rgb,
+    };
+    if img.color_space != expected {
+        log::debug!(
+            "image: {:?} sample layout does not match the ICC profile — leaving samples as decoded",
+            img.color_space
+        );
+        return;
+    }
+    #[cfg_attr(
+        not(feature = "cache"),
+        expect(
+            clippy::infallible_destructuring_match,
+            reason = "the cache-feature build adds a device-resident arm; keep one shape"
+        )
+    )]
+    let bytes = match &mut img.data {
+        ImageData::Cpu(bytes) => bytes,
+        #[cfg(feature = "cache")]
+        ImageData::Gpu(_) => {
+            log::debug!(
+                "image: ICC conversion needs host-resident samples — leaving samples as decoded"
+            );
+            return;
+        }
+    };
+    match rewrite {
+        SampleRewrite::IccGray(shaper) => shaper.convert_in_place(bytes),
+        SampleRewrite::IccRgb(shaper) => shaper.convert_in_place(bytes),
+        SampleRewrite::Tint(_) => {}
     }
 }
 
@@ -561,5 +654,97 @@ mod tests {
         apply_tint_lut(&mut mask, &lut);
         assert_eq!(mask.color_space, ImageColorSpace::Mask);
         assert_eq!(mask.data.as_cpu().unwrap(), &[0]);
+    }
+
+    // ── ICC sample rewrite ────────────────────────────────────────────────────
+
+    /// A document whose object 2 is an ICC profile stream with `/N n`,
+    /// gamma 1.8 (`u8Fixed8` 461) on sRGB primaries.
+    fn gamma_1_8_doc(n: u8) -> Document {
+        let gamma = moxcms::ToneReprCurve::Lut(vec![461]);
+        let profile = if n == 1 {
+            let mut p = moxcms::ColorProfile::new_gray_with_gamma(1.0);
+            p.gray_trc = Some(gamma);
+            p
+        } else {
+            let mut p = moxcms::ColorProfile::new_srgb();
+            p.cicp = None;
+            p.red_trc = Some(gamma.clone());
+            p.green_trc = Some(gamma.clone());
+            p.blue_trc = Some(gamma);
+            p
+        };
+        crate::test_helpers::make_doc_with_stream(&profile.encode().unwrap(), &format!(" /N {n}"))
+    }
+
+    fn icc_cs() -> Object {
+        Object::Array(vec![name_obj(b"ICCBased"), Object::Reference((2, 0))])
+    }
+
+    #[test]
+    fn icc_rgb_image_samples_go_through_the_profile() {
+        let doc = gamma_1_8_doc(3);
+        let rewrite = sample_rewrite(&doc, &icc_cs()).expect("gamma 1.8 is not sRGB");
+        let mut img = gray_desc(&[0, 128, 255, 150, 118, 80]);
+        img.width = 2;
+        img.color_space = ImageColorSpace::Rgb;
+        apply_sample_rewrite(&mut img, &rewrite);
+        // encode((v/255)^1.8): (0, 128, 255) → (0, 146, 255);
+        // (150, 118, 80) → (167, 137, 99).
+        assert_eq!(img.data.as_cpu().unwrap(), &[0, 146, 255, 167, 137, 99]);
+    }
+
+    #[test]
+    fn icc_gray_image_samples_go_through_the_profile() {
+        let doc = gamma_1_8_doc(1);
+        let rewrite = sample_rewrite(&doc, &icc_cs()).expect("gamma 1.8 is not sRGB");
+        let mut img = gray_desc(&[0, 128, 255]);
+        apply_sample_rewrite(&mut img, &rewrite);
+        assert_eq!(img.data.as_cpu().unwrap(), &[0, 146, 255]);
+    }
+
+    #[test]
+    fn indexed_over_icc_uses_the_base_profile() {
+        let doc = gamma_1_8_doc(3);
+        let cs = Object::Array(vec![
+            name_obj(b"Indexed"),
+            icc_cs(),
+            Object::Integer(0),
+            Object::String(vec![128, 128, 128], pdf::StringFormat::Hexadecimal),
+        ]);
+        assert!(matches!(
+            sample_rewrite(&doc, &cs),
+            Some(SampleRewrite::IccRgb(_))
+        ));
+    }
+
+    #[test]
+    fn srgb_and_mismatched_profiles_need_no_rewrite() {
+        let srgb = moxcms::ColorProfile::new_srgb().encode().unwrap();
+        let doc = crate::test_helpers::make_doc_with_stream(&srgb, " /N 3");
+        assert_eq!(
+            sample_rewrite(&doc, &icc_cs()),
+            None,
+            "sRGB is the identity"
+        );
+        // A gray profile declared N=3 is not applied to RGB samples.
+        let doc = crate::test_helpers::make_doc_with_stream(
+            &{
+                let mut p = moxcms::ColorProfile::new_gray_with_gamma(1.0);
+                p.gray_trc = Some(moxcms::ToneReprCurve::Lut(vec![461]));
+                p.encode().unwrap()
+            },
+            " /N 3",
+        );
+        assert_eq!(sample_rewrite(&doc, &icc_cs()), None);
+    }
+
+    #[test]
+    fn icc_rewrite_leaves_a_contradicting_layout_alone() {
+        let doc = gamma_1_8_doc(3);
+        let rewrite = sample_rewrite(&doc, &icc_cs()).unwrap();
+        let mut img = gray_desc(&[128, 128]);
+        apply_sample_rewrite(&mut img, &rewrite);
+        assert_eq!(img.data.as_cpu().unwrap(), &[128, 128]);
     }
 }

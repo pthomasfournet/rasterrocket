@@ -17,6 +17,7 @@ pub mod colorspace;
 pub(crate) mod dict_ext;
 pub mod font;
 pub mod font_substitute;
+pub(crate) mod icc_shaper;
 pub mod image;
 pub mod shading;
 pub mod tiling;

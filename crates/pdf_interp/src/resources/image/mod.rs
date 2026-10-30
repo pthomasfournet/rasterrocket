@@ -481,15 +481,15 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 
     let is_mask = stream.dict.get_bool(b"ImageMask").unwrap_or(false);
 
-    // A spot-colour image decodes to one tint byte per pixel whatever the
-    // codec; the tint → colour rewrite runs once the samples are final.
-    let tint_lut = if is_mask {
+    // A spot-colour or ICC-profiled image decodes to device samples whatever
+    // the codec; the colour rewrite runs once the samples are final.
+    let rewrite = if is_mask {
         None
     } else {
         stream
             .dict
             .get(b"ColorSpace")
-            .and_then(|cs| colorspace::tint_lut(doc, cs))
+            .and_then(|cs| colorspace::sample_rewrite(doc, cs))
     };
 
     let filter_obj = stream.dict.get(b"Filter");
@@ -560,13 +560,13 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
             Some("DCTDecode") => {
                 // The GPU blit composites cached images fully opaque and
                 // reads their samples verbatim, so an image carrying a soft
-                // mask, an explicit mask, a spot-colour tint, or a `/Decode`
-                // remap stays host-resident: neither looked up (a content-hash
-                // hit from another document would drop the mask, the tint
-                // rewrite, or the remap) nor inserted.
+                // mask, an explicit mask, a colour rewrite (spot tint or ICC
+                // profile), or a `/Decode` remap stays host-resident: neither
+                // looked up (a content-hash hit from another document would
+                // drop the mask, the rewrite, or the remap) nor inserted.
                 #[cfg(feature = "cache")]
                 let cache_ctx = if has_mask_entry(&stream.dict)
-                    || tint_lut.is_some()
+                    || rewrite.is_some()
                     || stream.dict.get(b"Decode").is_some()
                 {
                     None
@@ -684,10 +684,10 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         }
     }
 
-    // After masking: colour-key ranges are matched against the tint bytes,
-    // not the colours they map to.
-    if let Some(lut) = &tint_lut {
-        colorspace::apply_tint_lut(&mut img, lut);
+    // After masking: colour-key ranges are matched against the decoded
+    // samples, not the colours they map to.
+    if let Some(rewrite) = &rewrite {
+        colorspace::apply_sample_rewrite(&mut img, rewrite);
     }
 
     ImageResolution::Ok {

@@ -173,11 +173,11 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
     img.filter = img_filter;
 
     if !is_mask
-        && let Some(lut) = dict
+        && let Some(rewrite) = dict
             .get(b"ColorSpace")
-            .and_then(|cs| super::colorspace::tint_lut(doc, cs))
+            .and_then(|cs| super::colorspace::sample_rewrite(doc, cs))
     {
-        super::colorspace::apply_tint_lut(&mut img, &lut);
+        super::colorspace::apply_sample_rewrite(&mut img, &rewrite);
     }
     Some(img)
 }

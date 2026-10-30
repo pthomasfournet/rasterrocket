@@ -13,9 +13,10 @@
 //! they don't carry the full colorant-mapping data (Lab whitepoint
 //! values, the ICC profile bytes, the full Separation tint function, etc.)
 //! — those are pulled lazily via the stored [`ObjectId`] when
-//! [`ColorSpace::convert_to_rgb`] actually runs.  ICC profiles are
-//! transformed through `moxcms`; Separation and `DeviceN` tints flow through
-//! the function evaluator (`super::shading::function::eval_function_n`) into
+//! [`ColorSpace::convert_to_rgb`] actually runs.  Matrix/TRC ICC profiles
+//! are evaluated by `super::icc_shaper`, other ICC profiles transformed
+//! through `moxcms`; Separation and `DeviceN` tints flow through the
+//! function evaluator (`super::shading::function::eval_function_n`) into
 //! the alternate space; an `Indexed` value is looked up in its palette and
 //! converted through the base space.
 //!
@@ -57,6 +58,7 @@
 
 use pdf::{Document, Object, ObjectId};
 
+use super::icc_shaper::{conversion_for_profile, fetch_profile_bytes, srgb_encode};
 use crate::resources::dict_ext::DictExt as _;
 
 /// Maximum recursion depth for nested colour-space chains
@@ -178,12 +180,12 @@ impl ColorSpace {
     /// - `Lab`: CIE Lab → D65 XYZ → sRGB through the standard formulae.
     ///   Whitepoint defaults to D65 (the spec's most common choice); the
     ///   per-document whitepoint stored in `dict_id` is not yet applied.
-    /// - `IccBased`: dereferences `stream_id`, runs a `moxcms` 8-bit
-    ///   transform from the embedded profile to sRGB for 3- and 4-channel
-    ///   profiles.  1-channel ICC falls back to `DeviceGray` because
-    ///   `moxcms` doesn't expose a Gray layout for transforms.  Any
-    ///   error (missing stream, malformed profile, transform failure)
-    ///   falls back to the device-space-by-N path.
+    /// - `IccBased`: dereferences `stream_id`.  A gray or RGB matrix/TRC
+    ///   profile converts through the shared shaper tables of
+    ///   `super::icc_shaper`; any other 3- or 4-channel profile through a
+    ///   `moxcms` 8-bit transform to sRGB.  Any error (missing stream,
+    ///   malformed profile, transform failure) and a non-shaper 1-channel
+    ///   profile fall back to the device-space-by-N path.
     /// - `Indexed`: the index (rounded, clamped to `hival`) selects a
     ///   palette entry from the lookup referenced by `lookup_id`; its bytes
     ///   map linearly onto the base space's component ranges and convert
@@ -217,13 +219,17 @@ impl ColorSpace {
             }
             Self::Lab { .. } => lab_to_srgb(comps[0], comps[1], comps[2]),
             Self::IccBased { n, stream_id } => {
-                // Try the embedded profile first; fall back to device-by-N on
-                // any failure (missing stream, malformed profile, Gray layout
-                // unsupported by moxcms, etc.).
-                if let Some(id) = stream_id
-                    && let Some(rgb) = icc_transform(doc, *id, *n, comps)
-                {
-                    return rgb;
+                // A matrix/TRC profile goes through the shared shaper tables,
+                // as image samples in the same space do; any other profile
+                // through a `moxcms` transform; failure of both to the
+                // device space of the same channel count.
+                if let Some(bytes) = stream_id.and_then(|id| fetch_profile_bytes(doc, id)) {
+                    if let Some(rgb) = conversion_for_profile(&bytes).convert_components(comps) {
+                        return rgb;
+                    }
+                    if let Some(rgb) = icc_transform(&bytes, *n, comps) {
+                        return rgb;
+                    }
                 }
                 icc_fallback_by_n(*n, comps)
             }
@@ -306,16 +312,6 @@ fn lab_f_inv(t: f64) -> f64 {
     }
 }
 
-/// Linear → sRGB gamma encoding per IEC 61966-2-1 (piecewise).
-fn srgb_encode(c: f64) -> f64 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.003_130_8 {
-        12.92 * c
-    } else {
-        c.powf(1.0 / 2.4).mul_add(1.055, -0.055)
-    }
-}
-
 /// Expand a single grey byte into an opaque RGB triple `[v, v, v]`.
 const fn gray_byte_to_rgb(v: u8) -> [u8; 3] {
     [v, v, v]
@@ -324,22 +320,20 @@ const fn gray_byte_to_rgb(v: u8) -> [u8; 3] {
 /// Run a `moxcms` 8-bit transform from an embedded ICC profile to sRGB for a
 /// single 3- or 4-channel tint. Returns `None` and lets the caller fall back
 /// when:
-/// - the profile stream isn't dereferenceable or fails to decompress,
 /// - the profile bytes don't parse as an ICC profile,
 /// - the channel count is unsupported by `moxcms`'s 8-bit `Layout` (Gray),
 /// - the transform construction or execution returns an error.
 ///
 /// `n` is the profile's declared channel count from `/N`. `comps` is the
 /// normalised tint in [0, 1].
-fn icc_transform(doc: &Document, stream_id: ObjectId, n: u8, comps: &[f64]) -> Option<[u8; 3]> {
+fn icc_transform(icc_bytes: &[u8], n: u8, comps: &[f64]) -> Option<[u8; 3]> {
     use moxcms::{ColorProfile, Layout, TransformOptions};
     let layout = match n {
         3 => Layout::Rgb,
         4 => Layout::Rgba,
         _ => return None, // Gray (n=1) or unsupported.
     };
-    let icc_bytes = fetch_icc_bytes(doc, stream_id)?;
-    let src_profile = ColorProfile::new_from_slice(&icc_bytes)
+    let src_profile = ColorProfile::new_from_slice(icc_bytes)
         .map_err(|e| log::debug!("colorspace: ICC profile parse failed: {e}"))
         .ok()?;
     let dst_profile = ColorProfile::new_srgb();
@@ -368,17 +362,6 @@ fn icc_transform(doc: &Document, stream_id: ObjectId, n: u8, comps: &[f64]) -> O
         .map_err(|e| log::debug!("colorspace: ICC transform execution failed: {e}"))
         .ok()?;
     Some(dst)
-}
-
-/// Dereference an ICC profile stream by object id and return its
-/// decompressed content. Returns `None` on any lookup or decode failure.
-fn fetch_icc_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
-    let obj_arc = doc.get_object(stream_id).ok()?;
-    let stream = obj_arc.as_ref().as_stream()?;
-    stream
-        .decompressed_content()
-        .map_err(|e| log::debug!("colorspace: ICC stream decompress failed: {e}"))
-        .ok()
 }
 
 /// Pass a Separation tint through the document's tint-transform function
@@ -1015,8 +998,8 @@ mod tests {
 
     #[test]
     fn convert_iccbased_unresolvable_stream_falls_back() {
-        // stream_id points to an object not in the doc — fetch_icc_bytes
-        // returns None, icc_transform returns None, fallback runs.
+        // stream_id points to an object not in the doc: no profile bytes,
+        // so the device-by-N fallback runs.
         let doc = empty_doc();
         let icc = ColorSpace::IccBased {
             n: 3,
@@ -1026,15 +1009,41 @@ mod tests {
     }
 
     #[test]
-    fn convert_iccbased_n1_gray_skips_moxcms_and_falls_back() {
-        // moxcms doesn't expose a Gray layout for 8-bit transforms; even
-        // with a valid stream id, icc_transform returns None for n=1.
+    fn convert_iccbased_n1_without_a_profile_stream_falls_back() {
+        // Object 1 of the empty document is not a stream: no profile bytes.
         let doc = empty_doc();
         let icc = ColorSpace::IccBased {
             n: 1,
             stream_id: Some((1, 0)),
         };
         assert_eq!(icc.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
+    }
+
+    #[test]
+    fn convert_iccbased_gamma_1_8_profiles_apply_their_curves() {
+        // u8Fixed8 461 = gamma 1.8: encode((128/255)^1.8) = 0.5740 → 146.
+        let gamma = moxcms::ToneReprCurve::Lut(vec![461]);
+        let mut gray = moxcms::ColorProfile::new_gray_with_gamma(1.0);
+        gray.gray_trc = Some(gamma.clone());
+        let doc = crate::test_helpers::make_doc_with_stream(&gray.encode().unwrap(), " /N 1");
+        let icc = ColorSpace::IccBased {
+            n: 1,
+            stream_id: Some((2, 0)),
+        };
+        assert_eq!(icc.convert_to_rgb(&doc, &[128.0 / 255.0]), [146; 3]);
+
+        let mut rgb = moxcms::ColorProfile::new_srgb();
+        rgb.cicp = None;
+        rgb.red_trc = Some(gamma.clone());
+        rgb.green_trc = Some(gamma.clone());
+        rgb.blue_trc = Some(gamma);
+        let doc = crate::test_helpers::make_doc_with_stream(&rgb.encode().unwrap(), " /N 3");
+        let icc = ColorSpace::IccBased {
+            n: 3,
+            stream_id: Some((2, 0)),
+        };
+        let half = 128.0 / 255.0;
+        assert_eq!(icc.convert_to_rgb(&doc, &[half, half, half]), [146; 3]);
     }
 
     #[test]
