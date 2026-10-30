@@ -206,6 +206,12 @@ programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
   (8-bit AA or 1-bit mask), bounded per glyph
 - `GlyphCache` — `quick_cache::sync::Cache<GlyphKey, Arc<GlyphBitmap>>`, one per page
 - `GlyphKey` — `{ face_id, glyph_id, size_px, x_frac, aa }`
+- `FontProgram::vertical_selector` — maps a glyph to its vertical form through
+  the face's `vert` / `vrt2` GSUB features, for vertical writing with a
+  substitute face
+- `sfnt_info` — family, weight, slant, serif class and `OS/2` code-page ranges
+  of each face in an sfnt file, read from the `OS/2` and `name` tables alone;
+  the interpreter indexes installed fonts with it without loading them
 
 ### 3.4 `rasterrocket-encode`
 
@@ -291,6 +297,40 @@ resources/
   dict_ext.rs      — typed accessor helpers for `rasterrocket_parser::Dictionary`
   tiling.rs        — Type 1 tiling pattern parsing
 ```
+
+**Fonts** (`renderer/font_cache.rs` and its neighbours)
+
+- **Embedded programs.** A font with an embedded program draws it. Simple
+  fonts map code → glyph through `/Encoding` and `/Differences` over a base
+  encoding (`renderer/encodings.rs`, the tables of Annex D), then the program's
+  own cmap or glyph names.
+- **Substitutes for non-embedded fonts.** `resources/font_substitute.rs`
+  classifies a non-embedded font as sans-serif, serif or monospaced, regular,
+  bold, italic or bold italic. The class is read from `/BaseFont` first and
+  from the descriptor's `/Flags`, `/FontWeight` and `/ItalicAngle` where the
+  name is silent. `renderer/substitutes.rs` then picks an installed
+  metric-compatible face (Liberation, Arial, Times New Roman, Courier New)
+  when one is found. Otherwise it uses the base-14 face compiled into the
+  binary (`crates/pdf_interp/fonts/foxit/`, BSD-3). Symbol and ZapfDingbats
+  always draw with their compiled-in faces and built-in encodings.
+- **Scripts the bundled faces do not cover.** For CJK, Arabic and Thai,
+  `renderer/system_fonts.rs` walks the standard font directories once per
+  process. It indexes every sfnt face by family and `OS/2` code-page range,
+  then selects by script, serif class, weight and slant. A non-embedded CID
+  font whose ordering is Japan1, GB1, CNS1 or Korea1 maps CID → Unicode →
+  glyph in that face.
+- **Composite fonts.** `resources/cmap.rs` parses `CMap` streams: codespace
+  ranges of mixed width, `usecmap`, and `ToUnicode`. The predefined `CMaps`
+  of ISO 32000-2 Table 116 are compressed into the binary
+  (`crates/pdf_interp/cmaps/*.z`) and parsed on first use
+  (`resources/cmap_predefined.rs`).
+- **Vertical writing.** With `WMode 1` the glyph origin moves by the
+  descendant's `/W2` / `/DW2` metrics and the pen advances down by `w1y`.
+  Substitute faces take their vertical glyph forms from GSUB.
+- **Sharing.** Descriptors, parsed programs, code → glyph tables and glyph
+  bitmaps of indirect font dictionaries live in a `DocumentFonts` store
+  shared by every page of a document. Substitute programs are shared
+  process-wide.
 
 **PageResources** — holds an immutable reference to the `rasterrocket_parser::Document`. All resource
 resolution is stateless and on-demand; no per-page pre-computation. This
