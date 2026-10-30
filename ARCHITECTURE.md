@@ -32,6 +32,9 @@ rasterrocket-color
   │           ├── hayro-jpeg2000  (crates/jpeg2000: local fork, pure Rust)
   │           │     JPEG 2000 decoder for JPXDecode
   │           │
+  │           ├── hayro-jbig2, hayro-ccitt  (crates/jbig2, crates/ccitt: local forks)
+  │           │     JBIG2Decode and CCITTFaxDecode
+  │           │
   │           └── rasterrocket
   │                 public OCR library — raster_pdf(), render_channel()
   │                 │
@@ -53,7 +56,9 @@ rasterrocket-color
 ```
 
 `rasterrocket-color` and `rasterrocket-render` are the foundation. Nothing above them has knowledge of PDF.
-`rasterrocket-interp` is the only crate that parses PDF; everything below it is PDF-agnostic.
+`rasterrocket-parser` reads the PDF file structure (cross-reference, objects,
+streams, filters); `rasterrocket-interp` interprets content streams on top of
+it. Everything below the interpreter is PDF-agnostic.
 
 ---
 
@@ -212,6 +217,43 @@ Thin I/O layer. Takes `Bitmap<P>`, writes file format bytes to a `Write` sink.
 - `write_png` — `png` crate; supports Rgb8, Gray8, Rgba8
 
 No pixel processing beyond colour-mode conversion at the boundary.
+
+### 3.4a `rasterrocket-parser` (`crates/pdf`)
+
+The file-structure layer: a lazy, memory-mapped parser. `Document::open`
+reads only the cross-reference; objects are parsed on first access and
+cached as `Arc<Object>`.
+
+- **Cross-reference** (`xref.rs`). The chain of sections is walked newest
+  first in a loop over visited offsets. Each section contributes its own
+  entries, then those of its `/XRefStm` stream, before `/Prev` is followed
+  (ISO 32000-1 §7.5.8.4). The first entry seen for an object number wins,
+  free entries included, so an older section cannot resurrect a freed
+  object.
+- **Recovery** (`repair.rs`). When the chain cannot be read, or yields no
+  `/Root`, one pass over the file records every `N G obj` header. It steps
+  over each parsed body, so headers inside strings or stream data are not
+  taken. It also expands `/Type /ObjStm` containers and merges `trailer` and
+  `/Type /XRef` dictionaries. When an xref entry leads to the wrong object,
+  or to a free one, the same header scan locates the object by number. If
+  the scan has no header for that number, the object is missing; a
+  different object is never returned in its place.
+- **Object streams** (`objstm.rs`). Each container is decoded and its
+  directory read once per document. Objects are parsed on demand and looked
+  up by number; the xref index is a hint checked against the directory.
+- **Streams and filters** (`stream.rs`). The decode filter chain, with
+  bounded output.
+- **Page tree** (`page_tree.rs`). Logarithmic descent by `/Count`.
+- **Derived values** (`derived.rs`). `Document::derived(id, make)` memoises
+  a value that a higher layer computes from an object, keyed by object and
+  type, for the lifetime of the document. The interpreter uses it to parse
+  each `JBIG2Globals` stream once per document rather than once per image.
+- **Encryption** (`decrypt.rs`). An encrypted file is handed to `qpdf`, and
+  the decrypted copy is what gets parsed.
+
+A reference that resolves to nothing is the null object (§7.3.10). For
+example, a missing `/Contents` element is skipped and the rest of the page
+is drawn.
 
 ### 3.5 `rasterrocket-interp`
 
@@ -422,6 +464,19 @@ changes make embedded PDF font programs load where upstream rejected them
 (Type 1 programs with an unknown `/Encoding`, a `%!PS-Adobe-3.0
 Resource-Font` header or single-token procedures such as `{3}`; sfnt
 programs without `hhea`/`hmtx`).
+
+### 3.8b `hayro-jbig2` and `hayro-ccitt` (`crates/jbig2`, `crates/ccitt`)
+
+Local forks of the JBIG2 and CCITT fax decoders. They are vendored in the
+same way as `crates/jpeg2000`: not published, never sent upstream, the base
+recorded in `UPSTREAM.toml`, every local change listed in `CHANGES.md`. The
+JBIG2 fork depends on the local CCITT fork.
+
+Both bases are ahead of their last crates.io releases by upstream fixes
+(overflows, truncated-data recovery, a strict mode). The JBIG2 API parses
+embedded global segments once into `Globals`, then opens each image with
+`Page::new_embedded`. The interpreter builds `Globals` with the `std`
+feature, which makes them `Send + Sync` so they can be shared across pages.
 
 ### 3.9 `rasterrocket-cli`
 
