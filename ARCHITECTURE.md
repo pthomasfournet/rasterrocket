@@ -260,15 +260,33 @@ cached as `Arc<Object>`.
   over each parsed body, so headers inside strings or stream data are not
   taken. It also expands `/Type /ObjStm` containers and merges `trailer` and
   `/Type /XRef` dictionaries. When an xref entry leads to the wrong object,
-  or to a free one, the same header scan locates the object by number. If
-  the scan has no header for that number, the object is missing; a
-  different object is never returned in its place.
+  to a free one, or is absent from the table, the same header scan locates
+  the object by number, either as a direct header or as a member of a
+  scanned object stream. If the scan has no header for that number, the
+  object is missing; a different object is never returned in its place.
+- **Header base.** Bytes before `%PDF-` (a mail header, a wrapper) offset
+  every position in the file. `read_xref` returns that base with the table
+  and `Document::body()` exposes the file from the header on, so offsets
+  are applied as written.
 - **Object streams** (`objstm.rs`). Each container is decoded and its
   directory read once per document. Objects are parsed on demand and looked
   up by number; the xref index is a hint checked against the directory.
+  A container is decoded only when it is an object stream (`/Type /ObjStm`,
+  or untyped with integer `/N` and `/First`), and it is always read from a
+  direct entry, so object streams never nest.
 - **Streams and filters** (`stream.rs`). The decode filter chain, with
-  bounded output.
-- **Page tree** (`page_tree.rs`). Logarithmic descent by `/Count`.
+  bounded output. Abbreviated filter names (`/Fl`, `/A85`, …) are accepted
+  on every stream, `BrotliDecode` is decoded, and the TIFF predictor is
+  undone at 1, 2, 4, 8 and 16 bits per component. A page's `/Contents`
+  elements decode independently: an element that fails is skipped with a
+  warning, and the page fails only when none decodes.
+- **Objects** (`object.rs`). Array and dictionary nesting is capped at 256
+  levels. A dictionary value that does not parse drops only its key; the
+  rest of the dictionary is kept.
+- **Page tree** (`page_tree.rs`). Logarithmic descent by `/Count`. When a
+  node's `/Count` equals its number of kids the kid is indexed directly,
+  then probed: an interior node (`/Type /Pages`, or untyped with `/Kids`)
+  continues the descent.
 - **Derived values** (`derived.rs`). `Document::derived(id, make)` memoises
   a value that a higher layer computes from an object, keyed by object and
   type, for the lifetime of the document. The interpreter uses it to parse
@@ -288,7 +306,7 @@ PDF parsing and operator dispatch. Uses the in-tree `rasterrocket-parser` crate 
 
 ```
 content/
-  tokenizer.rs       — byte-level PDF token scanner
+  tokenizer.rs       — byte-level PDF token scanner; nesting capped at 256
   operands.rs        — operand stack + type coercion
   operator.rs        — 150+ typed operator variants
   mod.rs             — parse(bytes) → Vec<Operator>
