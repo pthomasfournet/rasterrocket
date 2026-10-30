@@ -13,12 +13,14 @@ pdf_oxide → [quality check fails] → rasterrocket (rasterise + deskew) → Te
 The caller's Tesseract step becomes a single in-process call — no subprocess, no files, no Leptonica:
 
 ```rust
-let page = rasterrocket::render_page(path, page_num, &opts)?;
-// page.pixels is 8-bit grayscale, tightly packed, top-to-bottom
-let text = tesseract::ocr_from_frame(
-    &page.pixels, page.width as i32, page.height as i32,
-    1, page.width as i32, "eng",
-)?;
+for (page_num, result) in rasterrocket::raster_pdf(path, &opts) {
+    let page = result?;
+    // page.pixels is 8-bit grayscale, tightly packed, top-to-bottom
+    tess = tess
+        .set_frame(&page.pixels, page.width as i32, page.height as i32, 1, page.width as i32)?
+        .set_source_resolution(page.effective_dpi as i32);
+    let text = tess.get_text()?;
+}
 ```
 
 Phase 5 is complete. The API exists and is integrated.
@@ -27,11 +29,17 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**Fonts that need hinting to assemble their glyphs.** Since v1.5.0 glyphs are
-rendered unhinted. A few CJK TrueType families (MingLiU and similar) build
-glyphs from components positioned by hinting instructions and would render
-garbled; none occurs in the test corpus or the mss archive. CID-keyed Type 1
-fonts (a `FontFile` with CIDFontType 0 / FontType 9) are not supported.
+**JPEG and TIFF output are not implemented.** `--jpeg`, `--jpegcmyk` and
+`--tiff` are accepted but every page fails ("output format … is not yet
+supported"); PPM, PGM, PBM and PNG work.
+
+**Knockout groups.** A transparency group's `/K` flag is not read: objects in
+a knockout group composite over one another.
+
+**GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
+`GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
+decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
+dispatches to it.
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -51,126 +59,191 @@ alongside `fuzz` and `qa`.
 
 ### Unreleased (next: v2.0.0)
 
-**A study of pdfium's renderer, worked through ticket by ticket.** Every
-capability pdfium or poppler has and rasterrocket lacked was filed, verified
-against a fixture, and fixed at the spec's terms. The next release is a major
-version: the public API changes below are breaking.
+**More of the PDF drawn, and drawn as the specification says; one API
+break.** Every capability that poppler or pdfium renders and rasterrocket did
+not was reproduced with a fixture and implemented from ISO 32000-2. The
+result touches every stage, from the cross-reference reader to the
+compositor, and adds in-process decryption, optional content, annotations
+and region rendering. The public types become `#[non_exhaustive]`, which is
+why this is a major release; the migration notes are under **API changes**.
 
-**API changes.**
-- `RasterError::ContentDecodeFailed(Vec<String>)`: under `strict`, a page whose
-  `/Contents` holds a stream that cannot be decoded fails. Without `strict`
-  the stream is skipped, a warning names it, and it is listed in the new
-  `PageDiagnostics::content_failures` (`ContentFailure { object, reason }`).
-- `PageDiagnostics::missing_fonts`: font resource names that `Tf` selected but
-  the resources do not define; their text is drawn in Helvetica.
-- `pdf_interp::page_has_javascript`: page and annotation JavaScript is checked
-  per rendered page (one warning per document) instead of by a walk of every
-  page at open.
-- `RenderPurpose { View, Print }` on `SessionConfig::purpose` and
-  `RasterOptions::purpose` (CLI `--purpose view|print`) selects the optional
-  content usage event and the annotation flags that apply.
-- `FormType`, `RasterSession::form_type()` and `PageDiagnostics::form_type`
-  report AcroForm / static XFA / dynamic XFA; dynamic XFA warns at open.
-- Encrypted documents are decrypted in process: the Standard security handler
-  (revisions 2–6, RC4 40–128-bit, AESV2, AESV3, crypt filters,
+**New capabilities.**
+- **Encrypted documents decrypt in process.** The Standard security handler
+  (revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters,
   `/EncryptMetadata false`, user or owner password) replaces the `qpdf`
-  subprocess and its plaintext temporary file. `SessionConfig::password` and
-  `RasterOptions::password` (plus `RasterOptions::decrypt_authorized`) carry
-  the password; `pdf::OpenOptions`, `Document::open_with`,
-  `Document::from_bytes_with`, `pdf_interp::open_with` and
-  `pdf_interp::open_bytes_with` replace `open_decrypting`; the in-memory
-  entry points decrypt too. CLI `--password` (aliases `--upw`, `--opw`)
-  replaces the two unwired flags. The authorisation gate is unchanged.
-- `RasterSession::page_geometry(page)` returns the re-exported `PageGeometry`
-  (size after `/Rotate` and `UserUnit`, rotation, box origin, and the new
-  `media_box` / `crop_box`) without parsing content; `PageGeometry::size_px`
-  is the bitmap size a render at a given scale produces.
-- `render_page_rgb_with(session, page, &RenderParams)` renders a
-  `RenderRegion` of a page (tiles stitch byte for byte into the whole page,
-  and the size limits apply to the region, so pages past `MAX_PX_AREA` render
-  in tiles), overrides the backend policy, and stops on a `CancelToken` with
-  the new `RasterError::Cancelled`. It replaces `render_page_rgb_hinted`.
-  In `rasterrocket-interp`, `PageRenderer::with_view(&PageView)` replaces
-  `new_scaled`, and `budget_status()` returns a `RenderAbort`.
-- Per-axis scales: `RenderParams { scale_x, scale_y }` with
-  `RenderParams::new_xy`, `PageGeometry::size_px(scale_x, scale_y)`. The
-  CLI's `--rx`/`--ry` now render non-square pixels at the requested size
-  instead of a square-pixel render at the geometric mean of the two.
-- CLI `-x`/`-y`/`-W`/`-H` render only the selected area through a region
-  render, and `--scale-to`, `--scale-to-x`, `--scale-to-y` size the page;
-  all seven were parsed and ignored before.
+  subprocess and its plaintext temporary file, from a path or from bytes.
+  The authorisation gate is unchanged: `decrypt_authorized` in the library,
+  and in the CLI the interactive confirmation or `--decrypt-owned` /
+  `RROCKET_DECRYPT_OWNED=1`. `--password` (aliases `--upw`, `--opw`) supplies
+  a password; public-key security is refused by name.
+- **Optional content (layers).** The model of §8.11: `/BaseState`, `/ON`,
+  `/OFF`, `/Intent`, `/AS` usage applications, membership dictionaries with
+  `/P` and `/VE`, applied to marked content, XObjects and annotations. A
+  render purpose, `RenderPurpose::View` or `Print` (CLI `--purpose`), selects
+  the usage event.
+- **Annotations and forms.** Flags (Hidden, NoView, Print, NoRotate) for the
+  render purpose, appearances fitted by Algorithm 8.1, the `/AS` state chain,
+  and appearances synthesised for markup annotations (Square, Circle, Line,
+  PolyLine, Polygon, Ink, text markup, Text) and for text, choice and button
+  form fields that have none, including `/NeedAppearances` forms whose values
+  live only in `/V`. `annotations = false` (CLI `--hide-annotations`) leaves
+  them out. A dynamic XFA form is reported as `FormType::XfaFull` and warned
+  about at open.
+- **Font substitution.** A non-embedded font is drawn with a substitute of
+  its class fitted to the document's widths: base-14 faces compiled into the
+  binary, installed Liberation/Arial/Times/Courier families, and installed
+  CJK, Arabic and Thai faces chosen by script; Symbol and ZapfDingbats with
+  their own faces and encodings. Predefined CJK CMaps, mixed-width codespaces,
+  `usecmap`, vertical writing mode, and `RROCKET_FONT_DIR` for extra font
+  directories. A missing font resource or an unparsable program falls back to
+  a substitute instead of dropping the text.
+- **Fonts that were not drawn before.** TrueType programs that position
+  glyph components by hinting (MingLiU, DFKai-SB and similar) are grid-fitted
+  through the TrueType interpreter; CID-keyed Type 1 programs render; Type 3
+  glyphs run in their own resources; stroked and clipping text render modes.
+- **Regions, geometry, per-axis resolution, cancellation.**
+  `RasterSession::page_geometry` reads a page's size, rotation, `UserUnit`
+  and boxes without parsing content. `render_page_rgb_with` renders a
+  `RenderRegion` (tiles stitch byte for byte, and the size limits apply per
+  region, so pages past `MAX_PX_AREA` render in tiles), with separate
+  horizontal and vertical scales and a `CancelToken`. In the CLI, `--rx`/`--ry`
+  give non-square pixels, `-x`/`-y`/`-W`/`-H` render only the selected area,
+  `--scale-to`, `--scale-to-x`, `--scale-to-y` size the page, and `--aa` /
+  `--aaVector` switch antialiasing; all of these were parsed and ignored
+  before.
+- **Partial-decode diagnostics.** A content stream or image whose data ends
+  early (Flate cut short, LZW stopped mid-stream, a raw image short of
+  samples) is drawn from what decoded and reported with `partial: true` in
+  `PageDiagnostics::content_failures` / `image_failures`; `strict` fails such
+  a page. Undecodable content streams are skipped and reported the same way,
+  and `PageDiagnostics::missing_fonts` lists font resources that `Tf` named
+  but the resources do not define.
+
+**Correctness.**
+- *Colour.* A process-ink DeviceCMYK model on every path, CPU and GPU;
+  ICCBased gray and RGB matrix/TRC profiles for fills and images, with
+  `/Alternate` for unusable ones; a JPX image's `colr` ICC profile; CalGray,
+  CalRGB and Lab through their CIE parameters; multi-colorant DeviceN and
+  Indexed, inline tint transforms and lookup strings; `/None` colorants paint
+  nothing; DefaultGray/RGB/CMYK; ExtGState transfer functions. Images convert
+  their samples through the same colour-space code as fills. Grayscale output
+  uses the PDF `DeviceRGB` → `DeviceGray` weights (0.30/0.59/0.11) instead of
+  BT.709, which moves saturated colours by up to ~11 levels.
+- *Paint and transparency.* ExtGState soft masks, and an image's own
+  `/SMask` replacing the graphics-state one; shading patterns as fills and
+  strokes (mesh shadings included) with their ExtGState and `/Background`;
+  axial, radial, function-based and mesh shadings evaluated in shading space
+  and left unpainted outside their extent; tiling patterns on the pattern
+  lattice at device cell size, with sub-pixel origin, showing the backdrop;
+  fill patterns through stencil masks and text; non-isolated groups composited
+  as their own colour and alpha, and nested groups composed back to their
+  isolated ancestor; a translucent stroke knocks out its own fill; form
+  XObjects clipped to their `/BBox`.
+- *Lines and edges.* Strokes thinner than one device pixel are widened to
+  one; degenerate dash arrays stroke solid and an odd-length array's phase
+  is reduced over the full cycle; path clips are antialiased at glyph edges;
+  the glyphs of one path-filled text run are masked as one object; glyph
+  bitmaps are placed to a quarter pixel.
+- *Images.* Area-averaged when drawn below their resolution (stencils and
+  masks by coverage), bilinearly interpolated when magnified or rotated;
+  colour-key masks compared on stored samples; `/Matte` removed; an image
+  mask without `/BitsPerComponent` read as one bit; raw stencil samples of 0
+  painted; inline images ended at their declared length and sized through
+  named colour spaces; BrotliDecode images; JPX codestreams interpreted
+  through the image dictionary.
+- *Text.* Horizontal scaling applied to glyph shapes, word spacing to a
+  one-byte code 32 in composite fonts, the pen advanced through invisible
+  text; `d1` Type 3 glyphs in the fill colour; symbolic TrueType codes
+  through the (1,0) subtable; simple-font codes through the built-in
+  encoding; a TrueType subset with no cmap read by glyph index.
+- *Page structure.* `/Resources` inherited from the page tree for every
+  category; `/Rotate` applied to a page with no readable page box; one
+  marked-content sequence closed per `EMC`; a self-invoking form XObject
+  skipped instead of failing the page.
+
+**Robustness.**
+- *Parser recovery.* Objects absent from or misplaced in the
+  cross-reference table, object-stream members and XRef-stream trailers are
+  recovered; object streams are parsed per object, on demand, and never
+  nested; offsets are rebased when bytes precede the header (the
+  linearization hint offset too); `/XRefStm` is read before `/Prev` with free
+  entries honoured, and a hybrid file's `XRefStm` dictionary is kept out of
+  the trailer; cross-reference streams decode through the full filter chain;
+  page-tree nodes are classified by one rule in every walker; a truncated
+  dictionary ends at the end of the data; an unparsable value drops only its
+  key; malformed content-stream numbers are read as operands; abbreviated
+  filter names; the TIFF predictor at 1, 2, 4 and 16 bits.
+- *Resource limits.* Content-stream array and dictionary nesting is capped;
+  an image over 131 071 px per side or 1 GiB of decoded samples is refused
+  before anything is allocated (it had driven one 510 KB file to an 8.7 GB
+  peak); the JBIG2 page buffer is reserved only once the decoder emits; the
+  local JBIG2 fork takes upstream's symbol and page-size limits.
+- *Vendored decoders.* hayro-jbig2 and hayro-ccitt join hayro-jpeg2000 as
+  local forks (`crates/jbig2`, `crates/ccitt`), and upstream's panic,
+  overflow and unbounded-work fixes are brought into the read-fonts and
+  skrifa forks; a 1 000 000-deep Type 1 procedure no longer overflows the
+  stack. A refused HTJ2K codestream is named as such.
+
+**Performance.** Fonts resolved once per document, glyph bitmaps shared
+across pages, outline tables parsed once per program, Type 3 CharProcs
+parsed once; each resource category resolved once per context; image
+XObjects and repeated inline images decoded once per page, JBIG2Globals once
+per document; `/Decode` through a 256-entry table; PDF functions and
+ICCBased conversions compiled once; shadings and tiling cells resolved once
+per page; a soft mask snapshots only the painted object and a transparency
+group is bounded to its region; post-table glyph names listed in linear
+time; the jpeg2000 fork takes upstream's SIMD sample conversion. Document
+open no longer touches page objects (21 archive documents: 87 → 10 ms
+summed), and page JavaScript is checked per rendered page. Per-page latency
+over a 14 028-page archive sample is lower than pdfium's on 12 519 pages.
+
+**API changes** (breaking; migration notes in italics).
 - `#[non_exhaustive]` on `RasterError`, `BackendPolicy`, `RenderPurpose`,
   `FormType`, `ImageFilter`, `GcvError`, `RenderedPage`, `PageDiagnostics`,
   `ImageFailure`, `ContentFailure`, `GcvImage`, `GcvBudget` and
-  `RasterOptions` (with `PageGeometry`, `RenderParams` and `SessionConfig`
-  already so), so later additions are not breaking. Build `RasterOptions`
-  with the new `RasterOptions::new(dpi)` or `default()` and assign fields;
-  `BackendPolicy::name()` gives the `--backend` / `PDF_RASTER_BACKEND`
-  spelling.
-- CLI `--overprint`, `--thinlinemode` and `--jpegopt` are removed: nothing
-  read them (and `--jpeg` itself is refused), so they promised behaviour
-  the binary does not have.
-- `SessionConfig::annotations` and `RasterOptions::annotations` (default
-  `true`); `false` renders page content without annotations. The CLI's
-  `--hide-annotations`, previously parsed and ignored, sets it.
-- `SessionConfig` / `RasterOptions` `text_antialias` and `vector_antialias`
-  (default `true`) switch glyph and path antialiasing; `false` draws hard,
-  bilevel edges. The CLI's `--aa no` and `--aaVector no`, previously ignored,
-  set them. `pdf_interp::renderer::FontCache::new` takes the glyph
-  antialiasing flag and `PageRenderer::set_antialias` selects both.
+  `RasterOptions` (`PageGeometry`, `RenderParams` and `SessionConfig` already
+  were). *Build `RasterOptions` with the new `RasterOptions::new(dpi)` or
+  `default()` and assign fields instead of a struct literal or
+  `..Default::default()`; add a `_` arm to matches on the enums.*
+- `render_page_rgb_hinted` is replaced by
+  `render_page_rgb_with(session, page, &RenderParams)`. *Use
+  `RenderParams::new(scale).with_policy(policy)`.*
+- `open_decrypting` is replaced by `SessionConfig` / `RasterOptions`
+  `decrypt_authorized` + `password` (`pdf::OpenOptions`,
+  `Document::open_with`, `Document::from_bytes_with`,
+  `pdf_interp::open_with`, `pdf_interp::open_bytes_with` underneath).
+- New fields and variants: `RasterError::ContentDecodeFailed` and
+  `Cancelled`; `PageDiagnostics::content_failures`, `missing_fonts` and
+  `form_type`; `ImageFailure::partial`; `SessionConfig` / `RasterOptions`
+  `purpose`, `annotations`, `text_antialias`, `vector_antialias`, `password`;
+  `PageGeometry::media_box` / `crop_box`; re-exports `ContentFailure`,
+  `FormType`, `PageGeometry`, `RenderPurpose`, `Password`, `CancelToken`,
+  `RenderParams`, `RenderRegion`.
+- `rasterrocket-interp`: `PageRenderer::with_view(&PageView)` replaces
+  `new_scaled`; `budget_status()` returns a `RenderAbort`;
+  `FontCache::new` takes the glyph-antialiasing flag and
+  `PageRenderer::set_antialias` selects both; `page_has_javascript` checks a
+  page's JavaScript.
+- `rasterrocket-render`: the unused `image` module (`draw_image`,
+  `fill_image_mask` and their scalers), the band-parallel `fill_parallel` /
+  `eo_fill_parallel` with the `rayon` feature, and `state::GraphicsState` /
+  `StateStack` are deleted; nothing in the workspace used them.
+- CLI: `--overprint`, `--thinlinemode` and `--jpegopt` are removed (nothing
+  read them); they now fail at argument parsing.
 
-**Parser.** Recovery of objects absent from or misplaced in the xref,
-including object-stream members and XRef-stream trailers; object streams
-parsed per object on demand and never nested; xref offsets relative to a
-header preceded by junk; `/XRefStm` read before `/Prev` with free entries
-honoured; abbreviated filter names and BrotliDecode; the TIFF predictor at
-1, 2, 4 and 16 bits; each `/Contents` stream decoded independently; nesting
-capped at 256; an unparsable dictionary value drops only its key.
-
-**Colour.** A process-ink DeviceCMYK model everywhere (CPU and GPU);
-ICCBased gray and RGB matrix/TRC profiles for images and fills, compiled once
-per document, with `/Alternate` for unusable profiles; CalGray and CalRGB
-through their CIE parameters; multi-colorant DeviceN and Indexed; `/None`
-colorants paint nothing; DefaultGray/RGB/CMYK; ExtGState transfer functions;
-PDF functions compiled once and evaluated by arithmetic.
-
-**Paint.** ExtGState soft masks; shading patterns as fills and strokes with
-their ExtGState and Background; tiling patterns on the pattern lattice, at
-device cell size, in the parent's default space, showing the backdrop; axial,
-radial, function-based and mesh shadings evaluated in shading space;
-non-isolated groups composited as their own colour and alpha, bounded to
-their region; images composited through the transparency pipe,
-area-averaged when minified and bilinearly interpolated when magnified.
-
-**Fonts and text.** Base-14 substitutes compiled into the binary; non-embedded fonts drawn
-with a substitute of their class and fitted to the document's widths; CJK,
-Arabic and Thai substitutes chosen by script; predefined CJK CMaps and
-vertical writing; CID-keyed Type 1; stroked and clipping text render modes;
-Type 3 glyphs in their own resources, parsed once, `d1` painted in the fill
-colour; horizontal scaling and word spacing applied as the spec says;
-glyphs placed to a quarter pixel; a missing or unparsable font drawn with a
-substitute instead of dropped; `RROCKET_FONT_DIR` for extra font directories.
-
-**Optional content and annotations.** The optional content model of §8.11:
-`/BaseState`, `/ON`, `/OFF`, `/Intent`, `/AS` usage, and membership
-dictionaries with `/P` and `/VE`, applied to marked content, XObjects and
-annotations; each `EMC` closes exactly one marked-content sequence. Annotation
-flags (Hidden, NoView, Print, NoRotate), appearances fitted by Algorithm 8.1,
-the `/AS` state chain, and synthesised appearances for markup annotations and
-form-field widgets that have none. A form XObject that invokes itself is
-skipped instead of failing the page.
-
-**Images.** LZW, RunLength and chained filters; truncated raw images draw
-their decoded rows; colour-key masks on stored samples; SMask `/Matte`; JPX
-interpreted through the image dictionary; inline image length from the
-dictionary; each image XObject decoded once per page and each JBIG2Globals
-stream once per document.
-
-**Speed.** Fonts resolved once per document and glyph bitmaps shared across
-pages; resources resolved once per context; `/Decode` through a table
-(bakhtine 4.19 → 1.51 s); document open no longer touches page objects (21
-archive documents: 87 → 10 ms summed). Per-page latency over a 14,028-page
-archive sample is lower than pdfium's on 12,519 pages.
+**Tooling and CI.** CI runs the integration suites (47 in-memory pixel
+suites), the vendored decoder suites and a bench-crate check, and lints test
+targets with the current clippy; a Dependencies workflow runs `cargo deny`
+on manifest changes and weekly; an Instruction counts workflow compares the
+instructions a single-threaded render retires against the last release each
+week (`tests/bench/instructions.py`), replacing the wall-clock scripts of the
+retired testbench. Fuzz targets now cover the parser, the filter chain, the
+security handler, content, images, fonts, CMaps, functions and the
+cross-reference reader. The dormant golden-image harness is replaced by an
+end-to-end CLI suite. `tests/compare` gains pdfium as a reference renderer,
+a tile-delta score for localised loss, size-mismatch reports, directory
+sweeps, a run over pdfium's own test corpus and a like-for-like per-page
+latency comparison.
 
 ### v1.5.0 (October 2026)
 
@@ -2041,10 +2114,39 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ---
 
-## Current status (2026-10-24)
+## Phase 13 — Output to the operating system: print and fax (planned, after v2.0.0)
 
-Every **phase** is shipped or deferred by deliberate decision; no phase-level
-engineering is in flight. v1.5.0 closed every open report but one: the CUDA
+**Status: planned, not started.** Nothing below exists in the tree, and none
+of it is part of v2.0.0.
+
+**Printing through the OS spooler.** No device or driver code of our own.
+`rrocket --print [--printer NAME] [--copies N]` renders each page at the
+printer's resolution with `RenderPurpose::Print` and hands our raster (PNG or
+PWG raster, not the PDF) to CUPS (`lp`) on Linux and macOS, and to the Win32
+spooler, behind a feature, on Windows. Parity gap: poppler's `pdftocairo` has
+`-print` / `-printer` on Windows, and pdfium renders into a Windows printer
+context.
+
+**Fax, in layers.**
+1. TIFF output with compression none, PackBits, Deflate, LZW, G3 or G4. This
+   fills today's refused `--tiff` and matches `pdftoppm -tiff`.
+2. A CCITT Group 3 / Group 4 encoder (the `crates/ccitt` fork decodes only).
+3. A `--fax` preset writing TIFF Class F: 1728 px wide, 204 × 196 dpi (fine)
+   or 204 × 98 dpi (standard) through the per-axis resolution, 1 bit, G4 by
+   default.
+4. `--fax-to NUMBER`, handing the file to a CUPS fax queue or HylaFAX
+   `sendfax`, or to the Windows Fax service.
+
+No modem code and no internet-fax services.
+
+---
+
+## Current status (2026-10-30)
+
+Every **phase** is shipped or deferred by deliberate decision, apart from the
+planned Phase 13 above; no phase-level engineering is in flight. Master
+carries the unreleased work for v2.0.0 (see the release history), which is
+gated on a full review of everything since v1.5.0. Open beyond that: the CUDA
 performance inventory's remaining items (fills on the recorder model,
 genuinely async transfers, two kernels without a production caller), all on
 paths that are dormant or deferred.
