@@ -91,14 +91,14 @@ impl PageRenderer<'_> {
         let rise = self.gstate.current().text.rise;
         let mut tm = self.gstate.current().text.text_matrix;
 
-        // Resolve font descriptor (immutable borrow of resources).
-        let Some(descriptor) = self.resources.font_dict(&font_name) else {
+        let Some(font) = self.gstate.current().text.font.clone() else {
             log::debug!(
                 "rasterrocket-interp: no font dict for /{}",
                 String::from_utf8_lossy(&font_name)
             );
             return;
         };
+        let descriptor = &*font.descriptor;
 
         // ── Type 3 fast path ──────────────────────────────────────────────────
         // Type 3 glyphs are PDF content streams executed at the current pen
@@ -107,10 +107,10 @@ impl PageRenderer<'_> {
         // A glyph description paints with its own operators and has no
         // outline to fill or stroke (PDF §9.6.5), so every painting mode
         // executes the CharProc unchanged.
-        if let Some(t3) = descriptor.type3.clone() {
+        if let Some(t3) = &descriptor.type3 {
             self.show_text_type3(
                 bytes,
-                &t3,
+                t3,
                 font_size,
                 ctm,
                 tm,
@@ -157,7 +157,7 @@ impl PageRenderer<'_> {
             let glyph_cache = &glyph_cache;
 
             // Load (or retrieve cached) face — mutable borrow of font_cache.
-            let Some(face) = self.font_cache.get_or_load(&font_name, &descriptor, trm) else {
+            let Some(face) = self.font_cache.get_or_load(&font, &font_name, trm) else {
                 return;
             };
             let fill_as_path = do_fill && (pattern_fill || face.prefers_path_fill());

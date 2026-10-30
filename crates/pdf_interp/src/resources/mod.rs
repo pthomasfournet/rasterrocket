@@ -271,6 +271,25 @@ pub struct TransparencyGroupParams {
     pub knockout: bool,
 }
 
+/// The identity of a font dictionary within one document.
+///
+/// Two resource names that refer to the same indirect font dictionary share
+/// a key, and one name bound to different dictionaries in different
+/// resource dictionaries has distinct keys.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FontKey {
+    /// An indirect font dictionary.
+    Object(ObjectId),
+    /// A direct font dictionary, held under `name` in the font resources of
+    /// the object `context`.
+    Direct {
+        /// The page or form whose resources hold the dictionary.
+        context: ObjectId,
+        /// The resource name.
+        name: Box<[u8]>,
+    },
+}
+
 /// Thin accessor wrapping a `(Document, resource_context_id)` pair.
 ///
 /// `resource_context_id` is the `ObjectId` of the object (page or form stream)
@@ -338,13 +357,29 @@ impl<'doc> PageResources<'doc> {
             .filter(|d| !d.is_empty())
     }
 
-    /// Resolve the font dictionary for the named resource (e.g. `b"F1"`).
+    /// The identity of the font dictionary the named resource (e.g. `b"F1"`)
+    /// refers to, with the resource entry itself.
     ///
     /// Returns `None` if the resource name is not present in the resource dict.
     #[must_use]
-    pub fn font_dict(&self, name: &[u8]) -> Option<font::FontDescriptor> {
+    pub fn font_entry(&self, name: &[u8]) -> Option<(FontKey, Object)> {
         let fonts = self.doc.get_page_fonts(self.resource_context_id).ok()?;
-        let entry = fonts.get(name)?;
+        let entry = fonts.get(name)?.clone();
+        let key = match entry {
+            Object::Reference(id) => FontKey::Object(id),
+            _ => FontKey::Direct {
+                context: self.resource_context_id,
+                name: name.into(),
+            },
+        };
+        Some((key, entry))
+    }
+
+    /// Resolve a font resource entry returned by [`Self::font_entry`].
+    ///
+    /// Returns `None` if the entry is not a dictionary.
+    #[must_use]
+    pub fn resolve_font_entry(&self, entry: &Object) -> Option<font::FontDescriptor> {
         let dict = resolve_dict(self.doc, entry)?;
         Some(font::resolve_font(self.doc, &dict))
     }

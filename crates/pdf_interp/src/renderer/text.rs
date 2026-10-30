@@ -3,6 +3,8 @@
 //! Tracks the parameters that control text positioning and appearance within
 //! a BT/ET text object. These are a subset of the PDF graphics state (§8.3).
 
+use super::font_cache::ActiveFont;
+
 /// PDF text matrix — a 6-element `[a b c d e f]` column-major matrix.
 pub type TextMatrix = [f64; 6];
 
@@ -32,6 +34,9 @@ pub struct TextState {
     // ── Font ─────────────────────────────────────────────────────────────────
     /// Font resource name from `Tf`.
     pub font_name: Vec<u8>,
+    /// The font `Tf` selected, resolved in the resources in effect at the
+    /// `Tf`; `None` before any `Tf` or when the name did not resolve.
+    pub font: Option<ActiveFont>,
     /// Font size from `Tf` (in text-space units).
     pub font_size: f64,
 
@@ -52,6 +57,7 @@ impl Default for TextState {
             rise: 0.0,
             render_mode: 0,
             font_name: Vec::new(),
+            font: None,
             font_size: 0.0,
             text_matrix: TEXT_MATRIX_IDENTITY,
             line_matrix: TEXT_MATRIX_IDENTITY,

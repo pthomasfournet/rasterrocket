@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use font::{
     cache::GlyphCache,
@@ -26,6 +26,7 @@ use font::{
 
 use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
+use crate::resources::{FontKey, PageResources};
 
 // ── Substitute font discovery ─────────────────────────────────────────────────
 
@@ -112,21 +113,32 @@ fn substitute_font_path(style: SubstituteStyle) -> Option<&'static str> {
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
-/// Key type for [`FontCache::faces`]: PDF font resource name (boxed to avoid the
-/// unused-capacity word of `Vec`) paired with the 2×2 Trm matrix bit pattern.
-type FaceKey = (Box<[u8]>, [u64; 4]);
+/// Key type for [`FontCache::faces`]: the font dictionary's identity paired
+/// with the 2×2 Trm matrix bit pattern.
+type FaceKey = (FontKey, [u64; 4]);
 
-/// Per-page cache of loaded font faces.
+/// The font selected by `Tf`: the identity of its dictionary and the
+/// descriptor resolved from it.
+#[derive(Clone, Debug)]
+pub struct ActiveFont {
+    /// Identity of the font dictionary.
+    pub key: FontKey,
+    /// Descriptor resolved from the dictionary, shared by every selection of
+    /// the same dictionary on the page.
+    pub descriptor: Arc<FontDescriptor>,
+}
+
+/// Per-page cache of resolved font descriptors and loaded font faces.
 pub struct FontCache {
     engine: FontEngine,
     /// Glyph bitmap cache shared by every face on this page.
     glyph_cache: GlyphCache,
-    /// Map from (PDF resource name, four f64-as-u64 bits of the Trm 2×2 matrix) to
-    /// loaded face.  The full matrix is the key because the same font can appear at
-    /// different sizes and skew angles within a single page.
-    ///
-    /// `Box<[u8]>` rather than `Vec<u8>`: one word smaller (no capacity field),
-    /// and the box is built directly from the input slice without a double-alloc.
+    /// Descriptor of each font dictionary selected on this page; `None` for a
+    /// dictionary that does not resolve.
+    descriptors: HashMap<FontKey, Option<Arc<FontDescriptor>>>,
+    /// Map from (font dictionary, four f64-as-u64 bits of the Trm 2×2 matrix)
+    /// to loaded face.  The full matrix is the key because the same font can
+    /// appear at different sizes and skew angles within a single page.
     faces: HashMap<FaceKey, Option<FontFace>>,
 }
 
@@ -137,8 +149,23 @@ impl FontCache {
         Self {
             engine,
             glyph_cache,
+            descriptors: HashMap::new(),
             faces: HashMap::new(),
         }
+    }
+
+    /// The font the resource `name` of `resources` selects, resolving its
+    /// descriptor on the first selection of its dictionary.
+    ///
+    /// Returns `None` if the name is absent or its entry is not a dictionary.
+    pub fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> Option<ActiveFont> {
+        let (key, entry) = resources.font_entry(name)?;
+        let descriptor = self
+            .descriptors
+            .entry(key.clone())
+            .or_insert_with(|| resources.resolve_font_entry(&entry).map(Arc::new))
+            .clone()?;
+        Some(ActiveFont { key, descriptor })
     }
 
     /// Return the glyph bitmap cache shared by every face in this page.
@@ -147,8 +174,9 @@ impl FontCache {
         &self.glyph_cache
     }
 
-    /// Return a reference to the [`FontFace`] for `name`, loading it from
-    /// `descriptor` on first use.
+    /// Return a reference to the [`FontFace`] for `font`, loading it on first
+    /// use.  `name` is the resource name `font` was selected by, for
+    /// diagnostics.
     ///
     /// `trm` is the 2×2 submatrix of the **text rendering matrix** in device
     /// pixels: `font_size × Tm[2×2] × CTM[2×2]`.  It determines both the
@@ -158,37 +186,23 @@ impl FontCache {
     /// glyph rendering — missing glyphs are silently omitted.
     pub fn get_or_load(
         &mut self,
+        font: &ActiveFont,
         name: &[u8],
-        descriptor: &FontDescriptor,
         trm: [f64; 4],
     ) -> Option<&FontFace> {
-        // Key encodes the full 2×2 Trm matrix as bit patterns: same font name at
-        // different sizes or skews needs distinct faces.
-        let mat_key = trm.map(f64::to_bits);
-        // Can't use the entry API: `self.load_face` borrows `self` mutably
-        // while `entry` holds a mutable borrow of `self.faces`.  Use
-        // contains_key + insert instead.
-        //
-        // `Box<[u8]>` doesn't impl `Borrow<([u8], [u64;4])>` for the tuple
-        // key, so heterogeneous lookup isn't available.  We box the name
-        // upfront: on a hit the box is immediately dropped (one small alloc);
-        // on a miss it becomes the stored key with no second allocation.
-        //
-        // Failed loads (face is None) are stored so repeated calls with the
-        // same degenerate font don't pay the parse cost every time.
-        let key: FaceKey = (name.into(), mat_key);
+        // The full 2×2 Trm matrix, as bit patterns, is part of the key: the
+        // same font at different sizes or skews needs distinct faces.  Failed
+        // loads are stored as `None`, so a font that cannot load is tried once.
+        let key: FaceKey = (font.key.clone(), trm.map(f64::to_bits));
         if !self.faces.contains_key(&key) {
-            let face = self.load_face(descriptor, trm);
+            let face = self.load_face(&font.descriptor, trm);
             if face.is_none() {
                 log::warn!(
                     "font_cache: could not load face for /{} trm={trm:?}",
                     String::from_utf8_lossy(name)
                 );
             }
-            let _ = self.faces.insert(key, face);
-            // key was moved into insert; re-box to look up what we just stored.
-            let lookup: FaceKey = (name.into(), mat_key);
-            return self.faces.get(&lookup)?.as_ref();
+            return self.faces.entry(key).or_insert(face).as_ref();
         }
         self.faces.get(&key)?.as_ref()
     }
@@ -1621,6 +1635,14 @@ static MAC_ROMAN_ENCODING: [Option<&str>; 256] = [
 mod tests {
     use super::*;
 
+    /// `desc` selected as the indirect font dictionary `1 0 R`.
+    fn active(desc: FontDescriptor) -> ActiveFont {
+        ActiveFont {
+            key: FontKey::Object((1, 0)),
+            descriptor: Arc::new(desc),
+        }
+    }
+
     fn empty_diffs() -> [Option<Box<str>>; 256] {
         std::array::from_fn(|_| None)
     }
@@ -1946,7 +1968,7 @@ mod tests {
         };
         let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
         let face = cache
-            .get_or_load(b"F1", &desc, [20.0, 0.0, 0.0, 20.0])
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");
         let q = face.raw_get_char_index(u32::from('Q'));
         let eacute = face.raw_get_char_index(0xE9);
@@ -2005,7 +2027,7 @@ mod tests {
         };
         let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
         let face = cache
-            .get_or_load(b"F1", &desc, [20.0, 0.0, 0.0, 20.0])
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("embedded TrueType face loads");
         for (offset, digit) in ('0'..='9').enumerate() {
             let code = 0x33 + offset;
