@@ -35,7 +35,7 @@ impl PageRenderer<'_> {
         paint: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let region = region
-            .filter(|_| self.knockout && alpha > 0 && self.bitmap.has_alpha())
+            .filter(|_| self.group.knockout && alpha > 0 && self.bitmap.has_alpha())
             .and_then(|r| {
                 r.intersect(PixelRect::of_clip(
                     &self.gstate.current().clip,

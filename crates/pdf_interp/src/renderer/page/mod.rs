@@ -409,13 +409,8 @@ pub struct PageRenderer<'doc> {
     /// a form's CTM once its `Matrix` is applied, or a pattern tile's CTM.
     /// A shading pattern's `Matrix` is concatenated onto it.
     pub(super) pattern_ctm: Ctm,
-    /// The backdrop of the non-isolated transparency group being painted
-    /// into, consulted by blend modes applied inside it; `None` outside one.
-    group_backdrop: Option<Arc<Backdrop>>,
-    /// Whether the transparency group being painted into is a knockout
-    /// group, in which each object composites with the group's initial
-    /// backdrop (see the `knockout` module).
-    knockout: bool,
+    /// The transparency group being painted into.
+    group: GroupContext,
     /// The page group the page is painted as (see [`crate::page_group`]):
     /// the bitmap is then transparent and is composited onto white by
     /// [`finish`](Self::finish).  `None` paints onto opaque white directly.
@@ -516,6 +511,18 @@ pub struct PageRenderer<'doc> {
     /// `None` keeps the renderer fully CPU-resident.
     #[cfg(feature = "cache")]
     cache_state: Option<CacheState>,
+}
+
+/// The transparency group being painted into: the page group, or a form's.
+#[derive(Clone, Default)]
+struct GroupContext {
+    /// The backdrop under a non-isolated group, consulted by blend modes
+    /// applied inside it; `None` for an isolated group and for the page.
+    backdrop: Option<Arc<Backdrop>>,
+    /// Whether the group is a knockout group, in which each object
+    /// composites with the group's initial backdrop (see the `knockout`
+    /// module).
+    knockout: bool,
 }
 
 /// Renderer-side device-image-cache state bundled together so the "cache
@@ -791,8 +798,7 @@ impl<'doc> PageRenderer<'doc> {
             rotate_cw,
             pattern_depth: 0,
             pattern_ctm: initial_ctm,
-            group_backdrop: None,
-            knockout: false,
+            group: GroupContext::default(),
             page_group: None,
             group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
@@ -1017,7 +1023,7 @@ impl<'doc> PageRenderer<'doc> {
     /// execute.
     pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
         self.page_group = group;
-        self.knockout = group.is_some_and(|g| g.knockout);
+        self.group.knockout = group.is_some_and(|g| g.knockout);
         self.bitmap = Bitmap::new(self.width, self.height, 1, group.is_some());
         if group.is_none() {
             self.bitmap.data_mut().fill(u8::MAX);
@@ -1444,7 +1450,7 @@ impl<'doc> PageRenderer<'doc> {
     /// not depend on it.
     fn blend_backdrop(&self, blend_mode: BlendMode) -> Option<Arc<Backdrop>> {
         (blend_mode != BlendMode::Normal)
-            .then(|| self.group_backdrop.clone())
+            .then(|| self.group.backdrop.clone())
             .flatten()
     }
 
@@ -1960,7 +1966,7 @@ impl<'doc> PageRenderer<'doc> {
                 let bitmap = self.group_bitmap();
                 begin_group(
                     &self.bitmap,
-                    self.group_backdrop.as_deref(),
+                    self.group.backdrop.as_deref(),
                     &self.gstate.current().clip,
                     params,
                     bitmap,
@@ -1977,16 +1983,11 @@ impl<'doc> PageRenderer<'doc> {
             .as_ref()
             .and_then(|_| self.gstate.current_mut().soft_mask.take());
 
-        // Inside the group, objects knock out one another when it is a
-        // knockout group, whatever the enclosing group is.
-        let parent_knockout = group.as_ref().map(|_| {
-            let knockout = form.transparency.is_some_and(|tg| tg.knockout);
-            std::mem::replace(&mut self.knockout, knockout)
-        });
-
         // Blend modes inside the group see its own backdrop: the parent's
-        // pixels for a non-isolated group, nothing for an isolated one.
-        let parent_backdrop = group.as_mut().map(|g| {
+        // pixels for a non-isolated group, nothing for an isolated one; and
+        // its objects knock out one another when it is a knockout group,
+        // whatever the enclosing group is.
+        let parent_group = group.as_mut().map(|g| {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
             let (x0, y0, x1, y1) = g.region();
             let gs = self.gstate.current_mut();
@@ -1997,7 +1998,11 @@ impl<'doc> PageRenderer<'doc> {
             // painted nowhere else and clearing the region restores it.
             gs.clip
                 .clip_to_rect(f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1));
-            std::mem::replace(&mut self.group_backdrop, g.backdrop.take().map(Arc::new))
+            let context = GroupContext {
+                backdrop: g.backdrop.take().map(Arc::new),
+                knockout: form.transparency.is_some_and(|tg| tg.knockout),
+            };
+            std::mem::replace(&mut self.group, context)
         });
 
         // Parse and execute the form's content stream.  Its `Q`s cannot
@@ -2011,12 +2016,9 @@ impl<'doc> PageRenderer<'doc> {
         // Swap the group bitmap back and composite it as one object of the
         // parent group, using the parent's opacity/blend (captured before
         // gstate.save() — the form's own state is irrelevant here).
-        if let (Some(mut g), Some(parent_backdrop), Some(parent_knockout)) =
-            (group, parent_backdrop, parent_knockout)
-        {
+        if let (Some(mut g), Some(parent_group)) = (group, parent_group) {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
-            self.group_backdrop = parent_backdrop;
-            self.knockout = parent_knockout;
+            self.group = parent_group;
             let backdrop = self.blend_backdrop(parent_blend_mode);
             let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode, backdrop.as_deref());
             let (x0, y0, x1, y1) = g.region();

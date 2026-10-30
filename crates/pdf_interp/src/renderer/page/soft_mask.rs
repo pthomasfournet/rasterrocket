@@ -73,12 +73,12 @@ impl PageRenderer<'_> {
             gs.stroke_alpha = 255;
             gs.blend_mode = BlendMode::Normal;
         }
-        let knockout = std::mem::replace(&mut self.knockout, false);
+        let knockout = std::mem::replace(&mut self.group.knockout, false);
         let mut canvas = Bitmap::<Rgb8>::new(self.width, self.height, 1, true);
         std::mem::swap(&mut self.bitmap, &mut canvas);
         self.do_form_xobject(&form);
         std::mem::swap(&mut self.bitmap, &mut canvas);
-        self.knockout = knockout;
+        self.group.knockout = knockout;
         self.gstate.restore();
 
         let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
