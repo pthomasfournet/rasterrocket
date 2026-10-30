@@ -166,7 +166,7 @@ pub(super) fn decode_image_stream<
             doc,
             samples,
             #[cfg(feature = "gpu-icc")]
-            &mut ctx.icc,
+            &ctx.icc,
         )
         .ok_or_else(|| "colour conversion failed".to_owned())?;
     image.filter = image_filter;

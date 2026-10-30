@@ -40,9 +40,6 @@ use crate::resources::colorspace::{ColorSpace, decoded_sample, default_space, re
 use crate::resources::dict_ext::DictExt as _;
 use crate::resources::icc_shaper::{ProfileConversion, RgbShaper};
 
-#[cfg(feature = "gpu-icc")]
-use crate::resources::icc_shaper::fetch_profile_bytes;
-
 // ── Codec output ──────────────────────────────────────────────────────────────
 
 /// The sample layout a codec yields.
@@ -248,7 +245,7 @@ impl ImageColour {
         &self,
         doc: &Document,
         samples: Samples,
-        #[cfg(feature = "gpu-icc")] icc: &mut super::IccHandles<'_>,
+        #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
     ) -> Option<ImageDescriptor> {
         let Samples {
             width,
@@ -275,13 +272,8 @@ impl ImageColour {
         let profile = embedded_profile
             .as_deref()
             .filter(|_| self.space.is_none())
-            .and_then(|bytes| {
-                let conv = IccConversion::compile(bytes, u8::try_from(n).ok()?)?;
-                Some(EmbeddedProfile {
-                    conv: Arc::new(conv),
-                    bytes,
-                })
-            });
+            .and_then(|bytes| IccConversion::compile(bytes, u8::try_from(n).ok()?))
+            .map(Arc::new);
         let decoded = Decoded {
             doc,
             space,
@@ -404,20 +396,10 @@ struct Decoded<'a> {
     space: &'a ColorSpace,
     decode: &'a [(f64, f64)],
     max_sample: f64,
-    /// The codestream's own profile, which converts in place of `space`
-    /// (then the device space of the same channel count) when present.
-    profile: Option<EmbeddedProfile<'a>>,
-}
-
-/// An ICC profile compiled from a codestream's colour specification.
-struct EmbeddedProfile<'a> {
-    conv: Arc<IccConversion>,
-    /// The profile as stored, for the device CLUT bake.
-    #[cfg_attr(
-        not(feature = "gpu-icc"),
-        expect(dead_code, reason = "read by the gpu-icc CLUT bake")
-    )]
-    bytes: &'a [u8],
+    /// The codestream's own profile, compiled, which converts in place of
+    /// `space` (then the device space of the same channel count) when
+    /// present.
+    profile: Option<Arc<IccConversion>>,
 }
 
 /// The colour of every value of a one-component sample.
@@ -470,7 +452,7 @@ impl Decoded<'_> {
         let comps = self.components(px);
         self.profile
             .as_ref()
-            .and_then(|p| p.conv.convert(self.doc, &comps))
+            .and_then(|p| p.convert(self.doc, &comps))
             .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, &comps))
     }
 
@@ -526,11 +508,11 @@ impl Decoded<'_> {
     /// converts nor has a CIE-based alternate.
     fn rgb_convert(&self) -> RgbConvert {
         if let Some(profile) = &self.profile {
-            return match &*profile.conv {
+            return match &**profile {
                 IccConversion::Shaper(ProfileConversion::Rgb(Some(shaper))) => {
                     RgbConvert::Shaper(Arc::clone(shaper))
                 }
-                IccConversion::Transform { .. } => RgbConvert::Transform(Arc::clone(&profile.conv)),
+                IccConversion::Transform { .. } => RgbConvert::Transform(Arc::clone(profile)),
                 _ => RgbConvert::Identity,
             };
         }
@@ -587,8 +569,8 @@ impl Decoded<'_> {
     /// model for `DeviceCMYK` and for an ICC profile without a transform.
     fn cmyk_convert(&self) -> CmykConvert {
         if let Some(profile) = &self.profile {
-            return if matches!(*profile.conv, IccConversion::Transform { .. }) {
-                CmykConvert::Icc(Arc::clone(&profile.conv))
+            return if matches!(**profile, IccConversion::Transform { .. }) {
+                CmykConvert::Icc(Arc::clone(profile))
             } else {
                 CmykConvert::Device
             };
@@ -613,7 +595,7 @@ impl Decoded<'_> {
     fn convert_cmyk(
         &self,
         bytes: Vec<u8>,
-        #[cfg(feature = "gpu-icc")] icc: &mut super::IccHandles<'_>,
+        #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
     ) -> Option<(ImageColorSpace, Vec<u8>)> {
         let convert = self.cmyk_convert();
         if matches!(convert, CmykConvert::Memo) {
@@ -629,31 +611,10 @@ impl Decoded<'_> {
         }
         #[cfg(feature = "gpu-icc")]
         if let Some(ctx) = icc.gpu_ctx {
-            let profile_bytes = match (&convert, &self.profile, &self.space) {
-                (CmykConvert::Icc(_), Some(profile), _) => Some(profile.bytes.to_vec()),
-                (
-                    CmykConvert::Icc(_),
-                    None,
-                    ColorSpace::IccBased {
-                        stream_id: Some(id),
-                        ..
-                    },
-                ) => fetch_profile_bytes(self.doc, *id),
-                _ => None,
+            let clut = match &convert {
+                CmykConvert::Icc(conv) => conv.cmyk_clut(),
+                CmykConvert::Device | CmykConvert::Memo => None,
             };
-            let clut = profile_bytes.and_then(|profile| {
-                super::icc::bake_cmyk_clut_cached(
-                    &profile,
-                    super::icc::DEFAULT_GRID_N,
-                    icc.clut_cache.as_deref_mut()?,
-                )
-                .map_err(|e| {
-                    log::warn!(
-                        "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
-                    );
-                })
-                .ok()
-            });
             match ctx.icc_cmyk_to_rgb(
                 &bytes,
                 clut.as_deref().map(|t| (t, super::icc::DEFAULT_GRID_N)),
@@ -825,7 +786,7 @@ mod tests {
                 doc,
                 Samples::cpu(width, 1, layout, data.to_vec()),
                 #[cfg(feature = "gpu-icc")]
-                &mut super::super::IccHandles::none(),
+                &super::super::IccHandles::none(),
             )
             .expect("converts")
     }
@@ -1045,7 +1006,7 @@ mod tests {
                 &doc,
                 Samples::cpu(1, 1, Layout::Color(3), vec![1, 2, 3]),
                 #[cfg(feature = "gpu-icc")]
-                &mut super::super::IccHandles::none(),
+                &super::super::IccHandles::none(),
             )
             .unwrap();
         assert_eq!(img.color_space, ImageColorSpace::Rgb);

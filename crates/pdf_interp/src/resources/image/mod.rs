@@ -73,9 +73,6 @@ use gpu::GpuCtx;
 #[path = "../icc.rs"]
 pub(crate) mod icc;
 
-#[cfg(feature = "gpu-icc")]
-pub use icc::IccClutCache;
-
 /// Minimum pixel area (width × height) for GPU-accelerated `DCTDecode`.
 ///
 /// **Currently set to `u32::MAX` — nvJPEG dispatch is disabled on consumer
@@ -689,20 +686,17 @@ pub(super) fn try_with_capacity(len: usize) -> Option<Vec<u8>> {
 #[cfg(feature = "gpu-icc")]
 pub struct IccHandles<'a> {
     /// GPU context the CLUT conversion runs on; `None` converts on the CPU.
+    /// The table itself is baked once per profile and document, with the
+    /// profile's conversion.
     pub gpu_ctx: Option<&'a GpuCtx>,
-    /// Per-renderer cache of baked CLUTs.
-    pub clut_cache: Option<&'a mut IccClutCache>,
 }
 
 #[cfg(feature = "gpu-icc")]
 impl IccHandles<'_> {
-    /// No GPU context and no CLUT cache: conversion runs on the CPU.
+    /// No GPU context: conversion runs on the CPU.
     #[must_use]
     pub const fn none() -> Self {
-        Self {
-            gpu_ctx: None,
-            clut_cache: None,
-        }
+        Self { gpu_ctx: None }
     }
 }
 

@@ -382,7 +382,8 @@ resources/
     cal.rs           — CalGray / CalRGB through WhitePoint, Gamma, Matrix
     icc.rs           — ICCBased compiled once per document: matrix/TRC
                        shaper or moxcms transform, else `/Alternate`
-  icc.rs             — ICC profile loading + moxcms CLUT extraction
+  icc.rs             — moxcms CMYK CLUT bake for the GPU path; the table is
+                       kept with the profile's per-document conversion
   icc_shaper.rs      — matrix/TRC ICC input profiles evaluated to sRGB
   tiling.rs          — Type 1 tiling pattern dictionaries
   transfer.rs        — ExtGState /TR and /TR2 tabulated to 256-entry tables,

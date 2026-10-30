@@ -11,24 +11,13 @@
 /// and produces a 17^4 × 3 = 250 563-byte table. 33 nodes give higher accuracy
 /// at 33^4 × 3 ≈ 3.4 MB — too large for L2 residency on most GPUs.
 /// Default is 17, matching the ICC/PDF standard minimum.
-use std::collections::HashMap;
-use std::hash::BuildHasher as _;
-use std::sync::Arc;
-
-use moxcms::{CmsError, ColorProfile, Layout, TransformOptions};
+use moxcms::{CmsError, Transform8BitExecutor};
 
 /// 17 nodes per axis — a practical minimum for perceptual rendering.
 ///
 /// Produces a 17^4 × 3 = 250 563-byte table.  33 nodes give higher accuracy at
 /// 33^4 × 3 ≈ 3.4 MB — too large for L2 residency on most GPUs.
 pub const DEFAULT_GRID_N: u32 = 17;
-
-/// Per-page cache of baked CMYK CLUT tables, keyed by `(hash(icc_bytes), grid_n)`.
-///
-/// Most press PDFs embed the same profile in every image, so the first image pays the bake cost
-/// (a few ms) and all subsequent images get an `Arc` clone.  The key includes `grid_n` so that
-/// two different grid sizes for the same profile never collide.
-pub type IccClutCache = HashMap<(u64, u32), Arc<[u8]>>;
 
 /// Error returned by [`bake_cmyk_clut`].
 #[derive(Debug)]
@@ -86,10 +75,8 @@ fn grid_to_u8(i: usize, step: f32) -> u8 {
     }
 }
 
-/// Bake a CMYK ICC profile into a quadrilinear CLUT table.
-///
-/// `icc_bytes` — raw ICC profile data (the stream body of an `ICCBased` PDF
-/// colour space object with N=4).
+/// Bake a CMYK → sRGB 8-bit transform (`Layout::Rgba` source, `Layout::Rgb`
+/// destination) into a quadrilinear CLUT table.
 ///
 /// `grid_n` — nodes per axis; must be in `[2, 255]`. Use [`DEFAULT_GRID_N`] (17)
 /// for standard accuracy.
@@ -99,24 +86,19 @@ fn grid_to_u8(i: usize, step: f32) -> u8 {
 ///
 /// # Errors
 ///
-/// Returns [`BakeError::InvalidGridSize`] if `grid_n` is outside `[2, 255]`.
-/// Returns [`BakeError::Cms`] if the ICC data is malformed or uses the wrong colour space.
+/// Returns [`BakeError::InvalidGridSize`] if `grid_n` is outside `[2, 255]`,
+/// or [`BakeError::Cms`] if the transform fails.
 #[expect(
     clippy::many_single_char_names,
     reason = "g/c/m/y/k are conventional CMYK grid-iteration names — clarity trumps length here"
 )]
-pub fn bake_cmyk_clut(icc_bytes: &[u8], grid_n: u32) -> Result<Vec<u8>, BakeError> {
+pub fn bake_cmyk_clut_with(
+    xform: &Transform8BitExecutor,
+    grid_n: u32,
+) -> Result<Vec<u8>, BakeError> {
     if !(2..=255).contains(&grid_n) {
         return Err(BakeError::InvalidGridSize(grid_n));
     }
-
-    let src = ColorProfile::new_from_slice(icc_bytes)?;
-    let dst = ColorProfile::new_srgb();
-
-    // CMYK profiles require `Layout::Rgba` (4 bytes/pixel: C M Y K).
-    // The destination is sRGB `Layout::Rgb` (3 bytes/pixel: R G B).
-    let xform =
-        src.create_transform_8bit(Layout::Rgba, &dst, Layout::Rgb, TransformOptions::default())?;
 
     let g = grid_n as usize; // grid_n ≤ 255, fits usize trivially
     let g2 = g * g;
@@ -184,107 +166,61 @@ pub fn bake_cmyk_clut(icc_bytes: &[u8], grid_n: u32) -> Result<Vec<u8>, BakeErro
     Ok(table)
 }
 
-/// Hash `icc_bytes` to a `u64` cache key using the `HashMap`'s own `RandomState`.
-///
-/// Using `RandomState` (which seeds from OS entropy at process start) makes the key
-/// unpredictable across runs, eliminating any chosen-input hash-collision attack surface.
-fn hash_icc(icc_bytes: &[u8], cache: &IccClutCache) -> u64 {
-    cache.hasher().hash_one(icc_bytes)
-}
-
-/// Bake a CMYK ICC profile CLUT, returning a cached `Arc` when the same profile
-/// has already been baked with the same `grid_n` during this page render.
-///
-/// On a cache hit the bake is skipped entirely.  On a miss the table is baked,
-/// stored in `cache`, and returned as an `Arc`.  The cache key includes `grid_n`
-/// so two calls with the same profile but different grid sizes never collide.
-///
-/// # Errors
-///
-/// Propagates [`BakeError`] from [`bake_cmyk_clut`] on a cache miss.
-pub fn bake_cmyk_clut_cached(
-    icc_bytes: &[u8],
-    grid_n: u32,
-    cache: &mut IccClutCache,
-) -> Result<Arc<[u8]>, BakeError> {
-    let key = (hash_icc(icc_bytes, cache), grid_n);
-    if let Some(arc) = cache.get(&key) {
-        return Ok(Arc::clone(arc));
-    }
-    let table: Arc<[u8]> = bake_cmyk_clut(icc_bytes, grid_n)?.into();
-    let _ = cache.insert(key, Arc::clone(&table));
-    Ok(table)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::resources::colorspace::icc::IccConversion;
+
+    /// A small CMYK (FOGRA-like) profile.
+    const CMYK_PROFILE: &[u8] =
+        include_bytes!("../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+
+    fn cmyk_transform() -> Arc<IccConversion> {
+        Arc::new(IccConversion::compile(CMYK_PROFILE, 4).expect("CMYK profile compiles"))
+    }
 
     #[test]
-    fn rejects_garbage_icc() {
-        let result = bake_cmyk_clut(b"not an icc profile", DEFAULT_GRID_N);
+    fn rejects_invalid_grid_sizes() {
+        let conv = cmyk_transform();
+        let IccConversion::Transform { xform, .. } = &*conv else {
+            panic!("a CMYK profile compiles to a transform");
+        };
+        for grid in [0, 1, 256] {
+            assert!(matches!(
+                bake_cmyk_clut_with(&**xform, grid),
+                Err(BakeError::InvalidGridSize(g)) if g == grid
+            ));
+        }
+    }
+
+    /// The table is baked once per conversion and shared; its no-ink corner
+    /// is paper and its solid-K corner is dark.
+    #[test]
+    fn clut_is_baked_once_per_conversion() {
+        let conv = cmyk_transform();
+        let first = conv.cmyk_clut().expect("bakes");
+        let second = conv.cmyk_clut().expect("bakes");
+        assert!(Arc::ptr_eq(&first, &second));
+        let g = DEFAULT_GRID_N as usize;
+        assert_eq!(first.len(), g * g * g * g * 3);
         assert!(
-            matches!(result, Err(BakeError::Cms(_))),
-            "expected Cms error for garbage ICC bytes"
+            first[..3].iter().all(|&c| c > 240),
+            "no ink is paper: {:?}",
+            &first[..3]
         );
-    }
-
-    #[test]
-    fn rejects_grid_zero() {
-        assert!(matches!(
-            bake_cmyk_clut(b"", 0),
-            Err(BakeError::InvalidGridSize(0))
-        ));
-    }
-
-    #[test]
-    fn rejects_grid_one() {
-        assert!(matches!(
-            bake_cmyk_clut(b"", 1),
-            Err(BakeError::InvalidGridSize(1))
-        ));
-    }
-
-    #[test]
-    fn rejects_grid_too_large() {
-        assert!(matches!(
-            bake_cmyk_clut(b"", 256),
-            Err(BakeError::InvalidGridSize(256))
-        ));
-    }
-
-    /// Cache miss propagates the bake error; cache stays empty.
-    #[test]
-    fn cached_miss_propagates_error() {
-        let mut cache = IccClutCache::new();
-        let result = bake_cmyk_clut_cached(b"garbage", DEFAULT_GRID_N, &mut cache);
-        assert!(matches!(result, Err(BakeError::Cms(_))));
-        assert!(cache.is_empty(), "failed bake must not pollute the cache");
-    }
-
-    /// Second call with the same (invalid) `grid_n` hits a different code path
-    /// (`InvalidGridSize` before any hashing occurs) — cache stays empty.
-    #[test]
-    fn cached_invalid_grid_never_caches() {
-        let mut cache = IccClutCache::new();
-        let _ = bake_cmyk_clut_cached(b"", 1, &mut cache);
-        assert!(cache.is_empty());
-    }
-
-    /// Two calls with the same profile and `grid_n` return the same `Arc` pointer.
-    /// Verifies the cache hit path without requiring a real ICC profile.
-    ///
-    /// We use garbage ICC bytes which will fail, so we cannot test a successful
-    /// hit here — that requires a real profile in test fixtures.  Instead we
-    /// verify that `bake_cmyk_clut_cached` with `grid_n=256` (invalid) never
-    /// inserts into the cache (the error short-circuits before `cache.insert`).
-    #[test]
-    fn cached_different_grid_n_produces_separate_keys() {
-        let mut cache = IccClutCache::new();
-        // Both calls fail (garbage ICC), but neither must collide in the key space.
-        // After two distinct errors the cache is still empty.
-        let _ = bake_cmyk_clut_cached(b"x", 2, &mut cache);
-        let _ = bake_cmyk_clut_cached(b"x", 3, &mut cache);
-        assert!(cache.is_empty(), "failed bakes must not pollute the cache");
+        let k = (g - 1) * g * g * g * 3;
+        assert!(
+            first[k..k + 3].iter().all(|&c| c < 60),
+            "solid K is dark: {:?}",
+            &first[k..k + 3]
+        );
+        let srgb = moxcms::ColorProfile::new_srgb().encode().unwrap();
+        let rgb = IccConversion::compile(&srgb, 3).expect("sRGB compiles");
+        assert!(
+            rgb.cmyk_clut().is_none(),
+            "no table for a three-channel profile"
+        );
     }
 }

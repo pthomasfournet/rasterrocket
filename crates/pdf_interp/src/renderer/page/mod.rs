@@ -439,11 +439,6 @@ pub struct PageRenderer<'doc> {
     /// fallback inside the renderer.
     #[cfg(feature = "vulkan")]
     vk_backend: Option<Arc<VulkanBackend>>,
-    /// Per-page cache of baked ICC CMYK→RGB CLUT tables.  Keyed by a hash of the
-    /// raw ICC profile bytes so that repeated images sharing the same profile (the
-    /// common case in press PDFs) only pay the bake cost once per page.
-    #[cfg(feature = "gpu-icc")]
-    icc_clut_cache: crate::resources::image::IccClutCache,
     /// Device-image-cache state.  `Some` only when the `cache` feature is
     /// on AND a cache was wired in via [`Self::set_image_cache`];
     /// `None` keeps the renderer fully CPU-resident.
@@ -648,8 +643,6 @@ impl<'doc> PageRenderer<'doc> {
             gpu_ctx: None,
             #[cfg(feature = "vulkan")]
             vk_backend: None,
-            #[cfg(feature = "gpu-icc")]
-            icc_clut_cache: crate::resources::image::IccClutCache::new(),
             #[cfg(feature = "cache")]
             cache_state: None,
         }
@@ -1577,7 +1570,6 @@ impl<'doc> PageRenderer<'doc> {
             #[cfg(feature = "gpu-icc")]
             icc: crate::resources::image::IccHandles {
                 gpu_ctx: self.gpu_ctx.as_deref(),
-                clut_cache: Some(&mut self.icc_clut_cache),
             },
             #[cfg(feature = "cache")]
             image_cache: self.cache_state.as_ref().map(|cs| &cs.cache),

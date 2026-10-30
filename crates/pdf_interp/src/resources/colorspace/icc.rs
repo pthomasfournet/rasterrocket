@@ -10,6 +10,8 @@
 //! alternate space.
 
 use std::sync::Arc;
+#[cfg(feature = "gpu-icc")]
+use std::sync::OnceLock;
 
 use moxcms::{ColorProfile, Layout, Transform8BitExecutor, TransformOptions};
 use pdf::{Document, ObjectId};
@@ -27,6 +29,10 @@ pub enum IccConversion {
     Transform {
         n: u8,
         xform: Arc<Transform8BitExecutor>,
+        /// The CMYK → sRGB lookup table of a four-channel transform for the
+        /// device conversion, baked on first use (see [`Self::cmyk_clut`]).
+        #[cfg(feature = "gpu-icc")]
+        clut: OnceLock<Option<Arc<[u8]>>>,
     },
     /// A profile with no conversion of its own: the `/Alternate` space of
     /// the stream, a device or CIE-based space of the same component count.
@@ -98,7 +104,35 @@ impl IccConversion {
             )
             .map_err(|e| log::debug!("colorspace: ICC transform creation failed: {e}"))
             .ok()?;
-        Some(Self::Transform { n, xform })
+        Some(Self::Transform {
+            n,
+            xform,
+            #[cfg(feature = "gpu-icc")]
+            clut: OnceLock::new(),
+        })
+    }
+
+    /// The CMYK → sRGB table of a four-channel transform on the
+    /// `DEFAULT_GRID_N` lattice, baked once per conversion and shared;
+    /// `None` for any other conversion or when the bake fails.
+    #[cfg(feature = "gpu-icc")]
+    pub fn cmyk_clut(&self) -> Option<Arc<[u8]>> {
+        use crate::resources::image::icc::{DEFAULT_GRID_N, bake_cmyk_clut_with};
+
+        let Self::Transform { n: 4, xform, clut } = self else {
+            return None;
+        };
+        clut.get_or_init(|| {
+            bake_cmyk_clut_with(&**xform, DEFAULT_GRID_N)
+                .map_err(|e| {
+                    log::warn!(
+                        "colorspace: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
+                    );
+                })
+                .ok()
+                .map(Arc::from)
+        })
+        .clone()
     }
 
     /// Whether this conversion yields the device conversion of the same
@@ -119,7 +153,7 @@ impl IccConversion {
     /// a conversion that is not a transform, a length mismatch, or a
     /// transform failure.
     pub fn transform_pixels(&self, src: &[u8], dst: &mut [u8]) -> Option<()> {
-        let Self::Transform { n, xform } = self else {
+        let Self::Transform { n, xform, .. } = self else {
             return None;
         };
         let n = usize::from(*n);
@@ -142,7 +176,7 @@ impl IccConversion {
                 (comps.len() == space.ncomponents()).then(|| space.convert_to_rgb(doc, comps))
             }
             Self::Shaper(shaper) => shaper.convert_components(comps),
-            Self::Transform { n, xform } => {
+            Self::Transform { n, xform, .. } => {
                 if comps.len() != usize::from(*n) {
                     return None;
                 }

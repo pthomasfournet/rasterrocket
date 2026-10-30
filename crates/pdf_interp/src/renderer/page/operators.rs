@@ -352,7 +352,6 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "gpu-icc")]
                     icc: crate::resources::image::IccHandles {
                         gpu_ctx: self.gpu_ctx.as_deref(),
-                        clut_cache: Some(&mut self.icc_clut_cache),
                     },
                     #[cfg(feature = "cache")]
                     image_cache: None,
