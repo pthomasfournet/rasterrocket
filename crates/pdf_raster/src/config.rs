@@ -221,11 +221,12 @@ pub struct SessionConfig {
     /// `true`, and none on an unencrypted document.  `Password` converts
     /// from `&str` and `String`, and its `Debug` output is redacted.
     pub password: Option<Password>,
-    /// Whether an image or a content stream that cannot be decoded fails its
-    /// page.
+    /// Whether an image or a content stream that cannot be decoded, or
+    /// decodes only in part, fails its page.
     ///
-    /// Default `false`: the image or stream is skipped, the page renders
-    /// without it, a warning naming the page and the object is logged, and
+    /// Default `false`: the image or stream is skipped (or drawn from the
+    /// data that decoded), the page renders, a warning naming the page and
+    /// the object is logged, and
     /// the failure is reported in [`PageDiagnostics::image_failures`] or
     /// [`PageDiagnostics::content_failures`].  When `true` the page returns
     /// [`RasterError::ImageDecodeFailed`] or

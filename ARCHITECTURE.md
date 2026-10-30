@@ -276,7 +276,10 @@ cached as `Arc<Object>`.
   cross-reference streams, and its filter set (`is_decoded_filter`) is the
   image path's set of transport filters. A page's `/Contents`
   elements decode independently: an element that fails is skipped with a
-  warning, and the page fails only when none decodes.
+  warning, and the page fails only when none decodes. A filter that keeps
+  the bytes decoded before corrupt or missing data (Flate, LZW, ASCII85,
+  RunLength, Brotli) reports the truncation, and the element is listed as
+  a partial `ContentFailure`.
 - **Objects** (`object.rs`). Array and dictionary nesting is capped at 256
   levels. A dictionary value that does not parse drops only its key; the
   rest of the dictionary is kept.

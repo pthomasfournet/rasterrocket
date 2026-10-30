@@ -18,10 +18,40 @@ use crate::object::Object;
 /// chokepoint rather than at each call site.
 const MAX_FILTER_CHAIN: usize = 32;
 
+/// The output of a filter, or of a whole filter chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Decoded {
+    /// The decoded bytes.
+    pub(crate) bytes: Vec<u8>,
+    /// Set when a filter met corrupt or missing data and kept the bytes it
+    /// had decoded before it: what was lost, naming the filter.  The first
+    /// such filter of a chain is the one reported.
+    pub(crate) truncated: Option<String>,
+}
+
+impl Decoded {
+    /// Bytes decoded from the whole input.
+    const fn whole(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            truncated: None,
+        }
+    }
+
+    /// The prefix decoded before `reason` ended the data early.
+    const fn cut(bytes: Vec<u8>, reason: String) -> Self {
+        Self {
+            bytes,
+            truncated: Some(reason),
+        }
+    }
+}
+
 /// Decode a raw stream byte slice according to its /Filter chain.
 ///
 /// `dict` is the stream dictionary; `raw` is the undecoded content bytes.
-/// Returns the fully-decoded bytes, or `raw` unchanged if there is no filter.
+/// Returns the decoded bytes, or `raw` unchanged if there is no filter,
+/// with the first truncation a filter of the chain reported.
 ///
 /// # Errors
 /// - The chain exceeds [`MAX_FILTER_CHAIN`] filters.
@@ -31,10 +61,10 @@ const MAX_FILTER_CHAIN: usize = 32;
 ///   bounds the aggregate by failing the moment any intermediate exceeds the
 ///   cap.
 /// - Any individual filter step fails (the underlying decoder's error).
-pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, String> {
+pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Decoded, String> {
     let filters = collect_filters(dict);
     if filters.is_empty() {
-        return Ok(raw.to_vec());
+        return Ok(Decoded::whole(raw.to_vec()));
     }
     if filters.len() > MAX_FILTER_CHAIN {
         return Err(format!(
@@ -47,9 +77,12 @@ pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, St
     let params_list = collect_decode_parms(dict, filters.len());
 
     let mut data = raw.to_vec();
+    let mut truncated = None;
     for (i, filter) in filters.iter().enumerate() {
         let params = params_list.get(i).and_then(|o| o.as_ref());
-        data = apply_filter(filter, &data, params)?;
+        let stage = apply_filter(filter, &data, params)?;
+        data = stage.bytes;
+        truncated = truncated.or(stage.truncated);
         if data.len() > MAX_DECOMPRESSED {
             return Err(format!(
                 "filter chain stage {i} ({}) produced {} bytes, exceeds {MAX_DECOMPRESSED}-byte \
@@ -59,7 +92,10 @@ pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, St
             ));
         }
     }
-    Ok(data)
+    Ok(Decoded {
+        bytes: data,
+        truncated,
+    })
 }
 
 /// The general-purpose filters (ISO 32000-2 §7.4) the stream decoder applies
@@ -82,7 +118,7 @@ pub fn is_decoded_filter(name: &[u8]) -> bool {
     DECODED_FILTERS.contains(&name)
 }
 
-fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
+fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<Decoded, String> {
     match filter {
         b"FlateDecode" => apply_flate(
             data,
@@ -93,7 +129,7 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
         .map_err(|e| e.to_string()),
         b"LZWDecode" => apply_lzw(data, params),
         b"ASCII85Decode" => Ok(decode_ascii85(data)),
-        b"ASCIIHexDecode" => Ok(decode_ascii_hex(data)),
+        b"ASCIIHexDecode" => Ok(Decoded::whole(decode_ascii_hex(data))),
         b"RunLengthDecode" => Ok(decode_run_length(data, MAX_DECOMPRESSED)),
         b"BrotliDecode" => apply_brotli(
             data,
@@ -105,7 +141,7 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
         // is applied when the object is parsed, so a `/Crypt` entry that
         // survives to here named the `/Identity` filter.
         b"DCTDecode" | b"CCITTFaxDecode" | b"JBIG2Decode" | b"JPXDecode" | b"Crypt" => {
-            Ok(data.to_vec())
+            Ok(Decoded::whole(data.to_vec()))
         }
         other => Err(format!(
             "unsupported filter: {}",
@@ -116,19 +152,16 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
 
 // ── FlateDecode ───────────────────────────────────────────────────────────────
 
-/// Internal helper used by both `stream.rs` and `xref.rs`.
-pub(crate) fn apply_flate(
-    data: &[u8],
-    params: Option<&dyn DictLookup>,
-) -> Result<Vec<u8>, std::io::Error> {
+/// Decode `FlateDecode` data, then undo the predictor named by `params`.
+fn apply_flate(data: &[u8], params: Option<&dyn DictLookup>) -> Result<Decoded, std::io::Error> {
     if data.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Decoded::whole(Vec::new()));
     }
 
     let mut out = decompress_zlib(data)?;
 
     if let Some(p) = params {
-        out = apply_png_predictor(out, p)
+        out.bytes = apply_png_predictor(out.bytes, p)
             .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidData, s))?;
     }
     Ok(out)
@@ -145,19 +178,19 @@ const MAX_DECOMPRESSED: usize = 1 << 30; // 1 GiB
 /// An `InvalidData` error when the stream is malformed beyond recovery or
 /// its output exceeds 1 GiB.
 pub fn inflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    decompress_zlib(data)
+    decompress_zlib(data).map(|out| out.bytes)
 }
 
 /// flate2-backed decompression with partial-output tolerance.
 ///
 /// Returns whatever bytes were produced before a mid-stream error if the
-/// decompressor wrote anything at all — real-world malformed PDFs ship
-/// truncated or checksum-corrupt content streams that flate2 emits
-/// usefully up to the failure point.
+/// decompressor wrote anything at all, marked as truncated — real-world
+/// malformed PDFs ship truncated or checksum-corrupt content streams that
+/// flate2 emits usefully up to the failure point.
 ///
 /// Bounded at [`MAX_DECOMPRESSED`] via `Read::take`; `read_to_end` would
 /// otherwise grow the output `Vec` without limit.
-fn decompress_zlib_flate2(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+fn decompress_zlib_flate2(data: &[u8]) -> Result<Decoded, std::io::Error> {
     use flate2::read::{DeflateDecoder, ZlibDecoder};
     use std::io::Read;
 
@@ -172,6 +205,7 @@ fn decompress_zlib_flate2(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     let cap_plus_one = (MAX_DECOMPRESSED as u64).saturating_add(1);
 
     let mut decoder = ZlibDecoder::new(data).take(cap_plus_one);
+    let mut truncated = None;
     match decoder.read_to_end(&mut out) {
         Ok(_) => {}
         Err(_) if out.is_empty() && data.len() > 2 => {
@@ -184,7 +218,24 @@ fn decompress_zlib_flate2(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
             if out.is_empty() {
                 return Err(e);
             }
-            // Partial decompression — use what we have (truncated stream).
+            // A complete deflate stream under a wrong or missing Adler-32
+            // trailer fails only the zlib check: read as raw deflate, it
+            // ends cleanly and nothing is lost.
+            let mut raw = Vec::with_capacity(out.len());
+            if data.len() > 2
+                && DeflateDecoder::new(&data[2..])
+                    .take(cap_plus_one)
+                    .read_to_end(&mut raw)
+                    .is_ok()
+                && raw.len() >= out.len()
+                && raw.len() <= MAX_DECOMPRESSED
+            {
+                return Ok(Decoded::whole(raw));
+            }
+            truncated = Some(format!(
+                "FlateDecode: {e}; kept the {} bytes decoded before it",
+                out.len()
+            ));
         }
     }
     if out.len() > MAX_DECOMPRESSED {
@@ -193,11 +244,14 @@ fn decompress_zlib_flate2(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
             "FlateDecode: decompressed output exceeds 1 GiB cap",
         ));
     }
-    Ok(out)
+    Ok(Decoded {
+        bytes: out,
+        truncated,
+    })
 }
 
 #[cfg(feature = "libdeflate")]
-fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+fn decompress_zlib(data: &[u8]) -> Result<Decoded, std::io::Error> {
     use libdeflater::{DecompressionError, Decompressor};
 
     // libdeflate is a non-streaming, in-memory decoder: it needs the output
@@ -212,7 +266,7 @@ fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         match decoder.zlib_decompress(data, &mut out) {
             Ok(n) => {
                 out.truncate(n);
-                return Ok(out);
+                return Ok(Decoded::whole(out));
             }
             Err(DecompressionError::InsufficientSpace) => {
                 if out.len() >= MAX_DECOMPRESSED {
@@ -235,7 +289,7 @@ fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
                 if data.len() > 2
                     && let Ok(raw) = decompress_raw_deflate(&data[2..])
                 {
-                    return Ok(raw);
+                    return Ok(Decoded::whole(raw));
                 }
                 return decompress_zlib_flate2(data);
             }
@@ -275,7 +329,7 @@ fn decompress_raw_deflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 }
 
 #[cfg(not(feature = "libdeflate"))]
-fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+fn decompress_zlib(data: &[u8]) -> Result<Decoded, std::io::Error> {
     decompress_zlib_flate2(data)
 }
 
@@ -285,31 +339,31 @@ fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 /// `params`, whose entries are those of `FlateDecode`.
 ///
 /// Output is bounded at [`MAX_DECOMPRESSED`].  A stream that is corrupt or
-/// truncated after producing output yields that output.
-fn apply_brotli(data: &[u8], params: Option<&dyn DictLookup>) -> Result<Vec<u8>, String> {
+/// truncated after producing output yields that output, marked as truncated.
+fn apply_brotli(data: &[u8], params: Option<&dyn DictLookup>) -> Result<Decoded, String> {
     use std::io::Read;
 
     let mut out = Vec::new();
     let cap_plus_one = (MAX_DECOMPRESSED as u64).saturating_add(1);
     let mut decoder = brotli_decompressor::Decompressor::new(data, 4096).take(cap_plus_one);
-    if let Err(e) = decoder.read_to_end(&mut out) {
-        if out.is_empty() {
-            return Err(format!("BrotliDecode: {e}"));
-        }
-        log::warn!(
-            "BrotliDecode: {e}; keeping the {} bytes decoded before it",
+    let truncated = match decoder.read_to_end(&mut out) {
+        Ok(_) => None,
+        Err(e) if out.is_empty() => return Err(format!("BrotliDecode: {e}")),
+        Err(e) => Some(format!(
+            "BrotliDecode: {e}; kept the {} bytes decoded before it",
             out.len()
-        );
-    }
+        )),
+    };
     if out.len() > MAX_DECOMPRESSED {
         return Err(format!(
             "BrotliDecode: decompressed output exceeds {MAX_DECOMPRESSED}-byte cap"
         ));
     }
-    match params {
-        Some(p) => apply_png_predictor(out, p),
-        None => Ok(out),
-    }
+    let bytes = match params {
+        Some(p) => apply_png_predictor(out, p)?,
+        None => out,
+    };
+    Ok(Decoded { bytes, truncated })
 }
 
 // ── PNG predictor ─────────────────────────────────────────────────────────────
@@ -606,7 +660,7 @@ impl std::io::Write for BoundedSink {
     }
 }
 
-fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
+fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Decoded, String> {
     let early_change = params
         .and_then(Object::as_dict)
         .and_then(|d| d.get(b"EarlyChange"))
@@ -628,23 +682,28 @@ fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
         buf: mut out,
         tripped,
     } = sink;
-    if let Err(e) = result.status {
+    let truncated = match result.status {
+        Ok(()) => None,
         // A bomb that tripped the size cap is unrecoverable — the partial
         // prefix is not the document's real content, so do not return it.
-        if tripped {
-            return Err(format!("LZWDecode aborted: {e}"));
-        }
-        if out.is_empty() {
+        Err(e) if tripped => return Err(format!("LZWDecode aborted: {e}")),
+        Err(e) if out.is_empty() => {
             return Err(format!("LZWDecode failed with no output: {e}"));
         }
-        log::warn!("LZWDecode partial error after {} bytes: {e}", out.len());
-    }
+        Err(e) => Some(format!(
+            "LZWDecode: {e}; kept the {} bytes decoded before it",
+            out.len()
+        )),
+    };
 
     let pred_params = params.map(|o| o as &dyn DictLookup);
     if let Some(p) = pred_params {
         out = apply_png_predictor(out, p)?;
     }
-    Ok(out)
+    Ok(Decoded {
+        bytes: out,
+        truncated,
+    })
 }
 
 // ── ASCII85 ───────────────────────────────────────────────────────────────────
@@ -653,11 +712,11 @@ fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
 ///
 /// The data ends at `~`, or at the first byte that cannot occur in it (a
 /// byte outside `!`..=`u` and whitespace, or `z` inside a group); the
-/// latter is logged and the bytes decoded before it are kept.  A final
+/// latter keeps the bytes decoded before it and marks them truncated.  A final
 /// partial group of `n` characters yields `n - 1` bytes; a lone final
 /// character carries no byte and is dropped with a warning.  A group above
 /// `s8W-!` (2^32 − 1) wraps modulo 2^32.
-fn decode_ascii85(data: &[u8]) -> Vec<u8> {
+fn decode_ascii85(data: &[u8]) -> Decoded {
     let value = |group: &[u8; 5]| {
         group.iter().fold(0u32, |acc, &x| {
             acc.wrapping_mul(85).wrapping_add(u32::from(x))
@@ -666,6 +725,7 @@ fn decode_ascii85(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut group = [0u8; 5];
     let mut count = 0usize;
+    let mut truncated = None;
 
     for (i, &b) in data.iter().enumerate() {
         match b {
@@ -681,10 +741,10 @@ fn decode_ascii85(data: &[u8]) -> Vec<u8> {
                 }
             }
             other => {
-                log::warn!(
+                truncated = Some(format!(
                     "ASCII85Decode: invalid byte {other:#04x} at offset {i}; \
-                     keeping the data decoded before it"
-                );
+                     kept the data decoded before it"
+                ));
                 break;
             }
         }
@@ -698,7 +758,10 @@ fn decode_ascii85(data: &[u8]) -> Vec<u8> {
             out.extend_from_slice(&value(&group).to_be_bytes()[..count - 1]);
         }
     }
-    out
+    Decoded {
+        bytes: out,
+        truncated,
+    }
 }
 
 // ── RunLength ─────────────────────────────────────────────────────────────────
@@ -709,36 +772,48 @@ fn decode_ascii85(data: &[u8]) -> Vec<u8> {
 /// A length byte `n` in 0–127 copies the next `n + 1` bytes; 129–255 repeats
 /// the next byte `257 − n` times; 128 ends the data.  A run cut short by the
 /// end of input contributes the bytes present, and decoding stops at a run
-/// that would exceed `max_output`.
-fn decode_run_length(data: &[u8], max_output: usize) -> Vec<u8> {
+/// that would exceed `max_output`; both mark the output truncated.
+fn decode_run_length(data: &[u8], max_output: usize) -> Decoded {
     let mut out = Vec::new();
     let mut i = 0;
+    let over_cap = || format!("RunLengthDecode: output exceeds {max_output} bytes");
     while let Some(&run) = data.get(i) {
         i += 1;
         match run {
             128 => break,
             0..=127 => {
-                let end = (i + usize::from(run) + 1).min(data.len());
+                let want = i + usize::from(run) + 1;
+                let end = want.min(data.len());
                 if out.len() + (end - i) > max_output {
-                    log::warn!("RunLengthDecode: output exceeds {max_output} bytes, truncated");
-                    break;
+                    return Decoded::cut(out, over_cap());
                 }
                 out.extend_from_slice(&data[i..end]);
+                if end < want {
+                    let missing = want - end;
+                    return Decoded::cut(
+                        out,
+                        format!("RunLengthDecode: the last run lacks {missing} bytes"),
+                    );
+                }
                 i = end;
             }
             _ => {
-                let Some(&b) = data.get(i) else { break };
+                let Some(&b) = data.get(i) else {
+                    return Decoded::cut(
+                        out,
+                        "RunLengthDecode: the last run lacks its byte".to_owned(),
+                    );
+                };
                 let repeat = 257 - usize::from(run);
                 if out.len() + repeat > max_output {
-                    log::warn!("RunLengthDecode: output exceeds {max_output} bytes, truncated");
-                    break;
+                    return Decoded::cut(out, over_cap());
                 }
                 out.resize(out.len() + repeat, b);
                 i += 1;
             }
         }
     }
-    out
+    Decoded::whole(out)
 }
 
 // ── ASCIIHex ──────────────────────────────────────────────────────────────────
@@ -851,18 +926,26 @@ mod tests {
         let data = [2u8, 0xAA, 0xBB, 0xCC, 254, 0x42, 128, 0xFF];
         assert_eq!(
             decode_run_length(&data, usize::MAX),
-            [0xAA, 0xBB, 0xCC, 0x42, 0x42, 0x42]
+            Decoded::whole(vec![0xAA, 0xBB, 0xCC, 0x42, 0x42, 0x42])
         );
-        assert_eq!(decode_run_length(&[], usize::MAX), [0u8; 0]);
+        assert_eq!(decode_run_length(&[], usize::MAX), Decoded::whole(vec![]));
     }
 
+    /// A run cut short by the end of the data keeps the bytes present and
+    /// marks the output truncated.
     #[test]
     fn run_length_truncated_input_keeps_present_bytes() {
+        let out = decode_run_length(&[3u8, 0x01, 0x02], usize::MAX);
+        assert_eq!(out.bytes, [0x01, 0x02]);
+        assert!(out.truncated.is_some_and(|r| r.contains("lacks 2 bytes")));
+        let out = decode_run_length(&[0x81u8], usize::MAX);
+        assert_eq!(out.bytes, [0u8; 0]);
+        assert!(out.truncated.is_some());
+        // Data ending at a run boundary without the end marker loses nothing.
         assert_eq!(
-            decode_run_length(&[3u8, 0x01, 0x02], usize::MAX),
-            [0x01, 0x02]
+            decode_run_length(&[1u8, 7, 8], usize::MAX),
+            Decoded::whole(vec![7, 8])
         );
-        assert_eq!(decode_run_length(&[0x81u8], usize::MAX), [0u8; 0]);
     }
 
     #[test]
@@ -870,8 +953,9 @@ mod tests {
         // 20 records of 128 repeats = 2560 bytes uncapped.
         let data: Vec<u8> = std::iter::repeat_n([0x81u8, 0xAB], 20).flatten().collect();
         let out = decode_run_length(&data, 1000);
-        assert_eq!(out.len(), 896, "seven whole runs fit under the cap");
-        assert!(out.iter().all(|&b| b == 0xAB));
+        assert_eq!(out.bytes.len(), 896, "seven whole runs fit under the cap");
+        assert!(out.bytes.iter().all(|&b| b == 0xAB));
+        assert!(out.truncated.is_some());
     }
 
     #[test]
@@ -1084,11 +1168,16 @@ mod tests {
     #[test]
     fn brotli_decodes_and_keeps_a_truncated_prefix() {
         let full = apply_brotli(&BROTLI_RAW_64, None).unwrap();
-        assert_eq!(full, BROTLI_RAW_64[3..67]);
+        assert_eq!(full, Decoded::whole(BROTLI_RAW_64[3..67].to_vec()));
         let prefix = apply_brotli(&BROTLI_RAW_64[..40], None).unwrap();
         assert!(
-            !prefix.is_empty() && full.starts_with(&prefix),
+            !prefix.bytes.is_empty() && full.bytes.starts_with(&prefix.bytes),
             "{prefix:?}"
+        );
+        assert!(
+            prefix
+                .truncated
+                .is_some_and(|r| r.starts_with("BrotliDecode"))
         );
         assert!(apply_brotli(b"not brotli at all", None).is_err());
     }
@@ -1103,7 +1192,7 @@ mod tests {
             } else {
                 b"x\x9c+\xc9\xc8,\x06\x00\x04]\x01\xc1"
             };
-            let out = apply_filter(name, encoded, None);
+            let out = apply_filter(name, encoded, None).map(|d| d.bytes);
             assert!(
                 out.as_deref() != Ok(encoded),
                 "{} passed its input through",
@@ -1118,8 +1207,8 @@ mod tests {
         ] {
             assert!(!is_decoded_filter(codec));
             assert_eq!(
-                apply_filter(codec, b"abc", None).as_deref(),
-                Ok(&b"abc"[..])
+                apply_filter(codec, b"abc", None),
+                Ok(Decoded::whole(b"abc".to_vec()))
             );
         }
     }
@@ -1153,10 +1242,17 @@ mod tests {
     #[test]
     fn ascii85_keeps_the_prefix_before_an_illegal_byte() {
         // "0 1 0 rg" is `0H`(m0HbCK`.
-        assert_eq!(decode_ascii85(b"0H`(m0HbCK\x7f+>GT)"), b"0 1 0 rg");
-        assert_eq!(decode_ascii85(b"9jqo^9jzqo^~>"), b"Man M");
-        assert_eq!(decode_ascii85(b"9jqo^9~>"), b"Man ");
-        assert_eq!(decode_ascii85(b"uuuuu~>").len(), 4);
+        let out = decode_ascii85(b"0H`(m0HbCK\x7f+>GT)");
+        assert_eq!(out.bytes, b"0 1 0 rg");
+        assert!(out.truncated.is_some_and(|r| r.contains("0x7f")));
+        let out = decode_ascii85(b"9jqo^9jzqo^~>");
+        assert_eq!(out.bytes, b"Man M");
+        assert!(out.truncated.is_some());
+        assert_eq!(
+            decode_ascii85(b"9jqo^9~>"),
+            Decoded::whole(b"Man ".to_vec())
+        );
+        assert_eq!(decode_ascii85(b"uuuuu~>").bytes.len(), 4);
     }
 
     #[test]
@@ -1164,7 +1260,7 @@ mod tests {
         // "Man " encodes to "9jqo^" in ASCII85.
         let encoded = b"9jqo^~>";
         let decoded = decode_ascii85(encoded);
-        assert_eq!(decoded, b"Man ");
+        assert_eq!(decoded, Decoded::whole(b"Man ".to_vec()));
     }
 
     #[test]
@@ -1182,7 +1278,53 @@ mod tests {
         enc.write_all(original).unwrap();
         let compressed = enc.finish().unwrap();
         let decompressed = apply_flate(&compressed, None).unwrap();
-        assert_eq!(decompressed, original);
+        assert_eq!(decompressed, Decoded::whole(original.to_vec()));
+    }
+
+    /// A Flate stream cut short keeps the bytes inflated before the cut and
+    /// reports the truncation through the whole chain; an intact one reports
+    /// none.
+    #[test]
+    fn flate_cut_short_is_reported_as_truncated() {
+        let original: Vec<u8> = (0..20_000u32)
+            .flat_map(|i| format!("{i} 0 m {i} 1 l S\n").into_bytes())
+            .collect();
+        let compressed = flate_compress(&original);
+        let mut dict = Dictionary::new();
+        dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+
+        let whole = decode_stream(&compressed, &dict).unwrap();
+        assert_eq!(whole, Decoded::whole(original.clone()));
+
+        let cut = decode_stream(&compressed[..compressed.len() / 2], &dict).unwrap();
+        assert!(!cut.bytes.is_empty() && original.starts_with(&cut.bytes));
+        assert!(cut.bytes.len() < original.len());
+        assert!(
+            cut.truncated
+                .as_deref()
+                .is_some_and(|r| r.starts_with("FlateDecode")),
+            "{:?}",
+            cut.truncated
+        );
+    }
+
+    /// A complete deflate stream whose Adler-32 trailer is wrong loses no
+    /// data and is not reported as truncated, by either inflate backend.
+    #[test]
+    fn flate_bad_checksum_is_not_truncated() {
+        let original = b"0 g 10 10 80 80 re f".repeat(50);
+        let mut compressed = flate_compress(&original);
+        let n = compressed.len();
+        compressed[n - 1] ^= 0xFF;
+
+        let flate2 = decompress_zlib_flate2(&compressed).unwrap();
+        assert_eq!(flate2, Decoded::whole(original.clone()));
+        let mut dict = Dictionary::new();
+        dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+        assert_eq!(
+            decode_stream(&compressed, &dict).unwrap(),
+            Decoded::whole(original)
+        );
     }
 
     #[test]
@@ -1198,8 +1340,8 @@ mod tests {
         enc.write_all(&original).unwrap();
         let compressed = enc.finish().unwrap();
         let decompressed = apply_flate(&compressed, None).unwrap();
-        assert_eq!(decompressed.len(), original.len());
-        assert_eq!(decompressed, original);
+        assert_eq!(decompressed.bytes.len(), original.len());
+        assert_eq!(decompressed, Decoded::whole(original));
     }
 
     // ── Filter-chain DoS guards ────────────────────────────────────────────────
@@ -1247,7 +1389,7 @@ mod tests {
             ]),
         );
         let decoded = decode_stream(&ascii85, &dict).expect("legit chain must decode");
-        assert_eq!(decoded, original);
+        assert_eq!(decoded, Decoded::whole(original.to_vec()));
     }
 
     #[test]
@@ -1303,6 +1445,6 @@ mod tests {
         dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
         let payload = b"a modest stream well under the cap";
         let decoded = decode_stream(&flate_compress(payload), &dict).unwrap();
-        assert_eq!(decoded, payload);
+        assert_eq!(decoded, Decoded::whole(payload.to_vec()));
     }
 }

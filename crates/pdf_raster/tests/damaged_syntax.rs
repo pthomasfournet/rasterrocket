@@ -100,6 +100,57 @@ fn undecodable_content_element_is_reported() {
     }
 }
 
+/// A `/Contents` element whose data breaks off mid-stream draws what decoded
+/// before the break and is reported as partial; a strict render fails the
+/// page.
+#[test]
+fn truncated_content_element_is_drawn_and_reported_partial() {
+    // ASCII85 of `0 g 10 10 80 80 re f `, then an illegal byte, then that
+    // of `0 g 100 10 80 80 re f`: the second square is lost.
+    let mut data = b"0Hb!N0ea_)0H`>/+?2%tEb-A*+9".to_vec();
+    data.push(0x7f);
+    data.extend_from_slice(b"0Hb!N0eb:(0ea_00H`>/+ED$9Ac");
+    let pdf = one_page(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>",
+        vec![stream_object("/Filter /ASCII85Decode", &data)],
+    );
+    let render = |strict| {
+        let mut opts = RasterOptions::default();
+        opts.strict = strict;
+        let mut pages: Vec<_> = raster_pdf_from_bytes(pdf.clone(), &opts).collect();
+        assert_eq!(pages.len(), 1, "one page expected");
+        pages.remove(0).1
+    };
+
+    let page = render(false).expect("page renders");
+    let failures = &page.diagnostics.content_failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].object, 4);
+    assert!(failures[0].partial);
+    assert!(
+        failures[0].reason.starts_with("ASCII85Decode"),
+        "{}",
+        failures[0].reason
+    );
+    assert!(
+        (ink(pdf.clone()) - 0.32).abs() < 0.01,
+        "the decoded square renders"
+    );
+
+    match render(true) {
+        Err(RasterError::ContentDecodeFailed(msgs)) => {
+            assert_eq!(
+                msgs,
+                [format!(
+                    "content stream obj 4 (partial): {}",
+                    failures[0].reason
+                )]
+            );
+        }
+        other => panic!("expected ContentDecodeFailed, got {other:?}"),
+    }
+}
+
 /// A page none of whose content streams decode fails rather than rendering
 /// blank.
 #[test]

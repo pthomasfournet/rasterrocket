@@ -78,11 +78,12 @@ pub enum RasterError {
     /// [`PageDiagnostics::image_failures`](crate::PageDiagnostics::image_failures)
     /// and the page still renders.
     ImageDecodeFailed(Vec<String>),
-    /// One or more of the page's content streams could not be decoded, and
-    /// the session is [strict](crate::SessionConfig::strict).  Carries one
-    /// message per skipped stream.  Without `strict` these are reported in
+    /// One or more of the page's content streams could not be decoded, or
+    /// decoded only in part, and the session is
+    /// [strict](crate::SessionConfig::strict).  Carries one message per
+    /// such stream.  Without `strict` these are reported in
     /// [`PageDiagnostics::content_failures`](crate::PageDiagnostics::content_failures)
-    /// and the page renders from the other streams.
+    /// and the page renders from the data that decoded.
     ContentDecodeFailed(Vec<String>),
     /// The page render was aborted because it exceeded the per-page operator
     /// budget or wall-clock deadline.  The page is pathological (e.g.
@@ -904,7 +905,11 @@ fn render_page_rgb_with_geom(
     }
 
     for failure in &content_failures {
-        log::warn!("page {page_num}: skipped {failure}");
+        if failure.partial {
+            log::warn!("page {page_num}: {failure}");
+        } else {
+            log::warn!("page {page_num}: skipped {failure}");
+        }
     }
     renderer.record_content_failures(content_failures);
 

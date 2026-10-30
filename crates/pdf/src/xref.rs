@@ -448,7 +448,11 @@ fn xref_field_width(obj: &Object) -> Result<usize, PdfError> {
 /// A cross-reference stream is an ordinary stream object (ISO 32000-2
 /// §7.5.8.2): any standard filter, or chain of filters, may encode it.
 fn decode_xref_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, PdfError> {
-    crate::stream::decode_stream(raw, dict).map_err(PdfError::DecodeFailed)
+    let decoded = crate::stream::decode_stream(raw, dict).map_err(PdfError::DecodeFailed)?;
+    if let Some(reason) = &decoded.truncated {
+        log::warn!("cross-reference stream: {reason}");
+    }
+    Ok(decoded.bytes)
 }
 
 /// Read a big-endian unsigned integer from `bytes` (1–8 bytes).

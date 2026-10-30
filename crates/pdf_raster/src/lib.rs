@@ -370,9 +370,9 @@ pub struct RasterOptions {
     /// rendered.
     pub pages: Option<PageSet>,
 
-    /// Whether an image or a content stream that cannot be decoded fails its
-    /// page; see [`SessionConfig::strict`].  Default `false`: it is skipped
-    /// and reported in [`PageDiagnostics::image_failures`] or
+    /// Whether an image or a content stream that cannot be decoded, or
+    /// decodes only in part, fails its page; see [`SessionConfig::strict`].
+    /// Default `false`: it is skipped (or drawn in part) and reported in [`PageDiagnostics::image_failures`] or
     /// [`PageDiagnostics::content_failures`].
     pub strict: bool,
 

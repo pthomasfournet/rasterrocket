@@ -50,25 +50,56 @@ const MMAP_MIN_LEN: u64 = 256 * 1024;
 pub struct PageContent {
     /// The decoded `/Contents` elements, concatenated in order.
     pub bytes: Vec<u8>,
-    /// The `/Contents` elements that contributed no bytes, in order.
+    /// The `/Contents` elements that contributed no bytes, or only the bytes
+    /// decoded before a truncation, in order.
     pub failures: Vec<ContentFailure>,
 }
 
-/// A `/Contents` element skipped because it holds no decodable content.
+/// A `/Contents` element skipped because it holds no decodable content, or
+/// kept only in part because a filter met corrupt or missing data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ContentFailure {
     /// Object number of the element.
     pub object: u32,
     /// Why the element was skipped: a decode error, or the type of the
-    /// object found where a stream was expected.
+    /// object found where a stream was expected; for a partial element, the
+    /// filter that stopped early and why.
     pub reason: String,
+    /// The bytes decoded before the truncation were kept and executed;
+    /// `false` when the element contributed nothing.
+    pub partial: bool,
 }
 
 impl std::fmt::Display for ContentFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "content stream obj {}: {}", self.object, self.reason)
+        let what = if self.partial { " (partial)" } else { "" };
+        write!(
+            f,
+            "content stream obj {}{what}: {}",
+            self.object, self.reason
+        )
     }
+}
+
+/// Append the decoded content stream `decoded` to the page content `out`.
+///
+/// ISO 32000-2 §7.8.2: streams in a `/Contents` array are decoded and
+/// *concatenated as if a single stream*, but a content stream need not end
+/// at an operator/token boundary — the last token of one stream can abut the
+/// first of the next (e.g. one stream ends "...50 7", the next begins
+/// "00 cm").  A whitespace byte between them is required so the lexer keeps
+/// the tokens distinct; a single LF is the canonical, minimal separator.  It
+/// is skipped only when `out` already ends in PDF whitespace
+/// (LF/CR/space/tab/FF/NUL), which already provides the boundary.
+fn append_content_stream(out: &mut Vec<u8>, decoded: &[u8]) {
+    if out
+        .last()
+        .is_some_and(|b| !matches!(b, b'\n' | b'\r' | b' ' | b'\t' | 0x0C | 0x00))
+    {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(decoded);
 }
 
 /// Collect the indirect references from a `/Contents` array.
@@ -956,6 +987,7 @@ impl Document {
                 failures.push(ContentFailure {
                     object: r.0,
                     reason: format!("{} is not a stream", stream_obj.enum_variant()),
+                    partial: false,
                 });
                 continue;
             };
@@ -973,12 +1005,29 @@ impl Document {
                     failures.push(ContentFailure {
                         object: r.0,
                         reason: e.clone(),
+                        partial: false,
                     });
                     decode_failure = decode_failure.or(Some(e));
                     continue;
                 }
             };
             decoded_any = true;
+            // A truncated element still contributes the bytes decoded before
+            // the loss; the loss is reported with the element.
+            if let Some(reason) = decoded.truncated {
+                log::warn!(
+                    "get_page_content: page {} /Contents element obj {} is truncated \
+                     ({reason}) — page may be missing content",
+                    page_id.0,
+                    r.0
+                );
+                failures.push(ContentFailure {
+                    object: r.0,
+                    reason,
+                    partial: true,
+                });
+            }
+            let decoded = decoded.bytes;
             // +1 accounts for the '\n' separator pushed below.
             if out.len().saturating_add(decoded.len()).saturating_add(1) > MAX_PAGE_CONTENT {
                 return Err(PdfError::DecodeFailed(format!(
@@ -987,22 +1036,7 @@ impl Document {
                     MAX_PAGE_CONTENT / (1024 * 1024)
                 )));
             }
-            // ISO 32000-2 §7.8.2: streams in a `/Contents` array are decoded
-            // and *concatenated as if a single stream*, but a content stream
-            // need not end at an operator/token boundary — the last token of
-            // one stream can abut the first of the next (e.g. one stream ends
-            // "...50 7", the next begins "00 cm").  A whitespace byte between
-            // them is required so the lexer keeps the tokens distinct; a
-            // single LF is the canonical, minimal separator.  Skip it only
-            // when the accumulated buffer already ends in PDF whitespace
-            // (LF/CR/space/tab/FF/NUL), which already provides the boundary.
-            if out
-                .last()
-                .is_some_and(|b| !matches!(b, b'\n' | b'\r' | b' ' | b'\t' | 0x0C | 0x00))
-            {
-                out.push(b'\n');
-            }
-            out.extend_from_slice(&decoded);
+            append_content_stream(&mut out, &decoded);
         }
         // Content streams that all fail to decode leave nothing to render.
         match decode_failure {
@@ -2199,6 +2233,35 @@ startxref\n180\n%%EOF"
         assert!(
             matches!(err, PdfError::MissingXref(_)),
             "bare-Catalog stub must yield MissingXref, got: {err}"
+        );
+    }
+
+    /// A `/Contents` element a filter decodes only in part keeps the bytes
+    /// decoded before the loss, and is reported as a partial failure; the
+    /// intact element beside it reports nothing.
+    #[test]
+    fn truncated_content_element_is_kept_and_reported_partial() {
+        let bytes = pdf_with_objects(&[
+            (2, "<</Type /Page /Contents [3 0 R 4 0 R]>>".to_owned()),
+            (
+                3,
+                "<</Filter /ASCII85Decode>>\nstream\n0H`(m0HbCK\u{7f}+>GT)\nendstream".to_owned(),
+            ),
+            (4, "<<>>\nstream\n0 0 10 10 re f\nendstream".to_owned()),
+        ]);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let content = doc.page_content((2, 0)).expect("page content");
+        assert_eq!(content.bytes, b"0 1 0 rg\n0 0 10 10 re f");
+        let [failure] = &content.failures[..] else {
+            panic!("{:?}", content.failures);
+        };
+        assert_eq!(failure.object, 3);
+        assert!(failure.partial);
+        assert!(failure.reason.starts_with("ASCII85Decode"), "{failure}");
+        assert!(
+            failure
+                .to_string()
+                .starts_with("content stream obj 3 (partial): ")
         );
     }
 }

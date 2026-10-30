@@ -71,10 +71,17 @@ impl Stream {
     /// are passed through unchanged — the codec layer in `rasterrocket-interp` decodes
     /// those.
     ///
+    /// A filter that met corrupt or missing data keeps the bytes it decoded
+    /// before it; that truncation is logged.
+    ///
     /// # Errors
     /// Returns the underlying decode error string when a filter step fails.
     pub fn decompressed_content(&self) -> Result<Vec<u8>, String> {
-        crate::stream::decode_stream(&self.content, &self.dict)
+        let decoded = crate::stream::decode_stream(&self.content, &self.dict)?;
+        if let Some(reason) = &decoded.truncated {
+            log::warn!("stream: {reason}");
+        }
+        Ok(decoded.bytes)
     }
 }
 

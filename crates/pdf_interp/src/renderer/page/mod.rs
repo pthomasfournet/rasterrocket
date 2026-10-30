@@ -145,9 +145,11 @@ pub struct PageDiagnostics {
     /// and the page rendered without it, so the region it covers shows
     /// whatever was painted beneath.  Empty on a complete render.
     pub image_failures: Vec<ImageFailure>,
-    /// Page content streams that could not be decoded.  Each one was
-    /// skipped and the page rendered from the others, so whatever it would
-    /// have drawn is missing.  Empty on a complete render.
+    /// Page content streams that could not be decoded, or only in part.  A
+    /// failed one was skipped and the page rendered from the others; a
+    /// partial one (`partial`) was executed up to where its data was lost.
+    /// Either way, whatever the lost data would have drawn is missing.
+    /// Empty on a complete render.
     pub content_failures: Vec<ContentFailure>,
     /// Font resource names (without the leading `/`) that `Tf` selected but
     /// the `/Font` resources in effect do not define.  Their text is drawn

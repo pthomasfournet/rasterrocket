@@ -39,7 +39,11 @@ impl ObjStm {
     /// # Errors
     /// The decode failure, or an out-of-range `/N` or `/First`.
     pub(crate) fn open(content: &[u8], dict: &Dictionary) -> Result<Self, String> {
-        let data = decode_stream(content, dict)?;
+        let decoded = decode_stream(content, dict)?;
+        if let Some(reason) = &decoded.truncated {
+            log::warn!("object stream: {reason}");
+        }
+        let data = decoded.bytes;
         let n = bounded_dict_usize(dict, b"N", MAX_OBJECTS)?;
         let first = bounded_dict_usize(dict, b"First", usize::MAX)?;
         if first > data.len() {
