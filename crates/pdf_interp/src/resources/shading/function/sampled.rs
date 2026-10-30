@@ -21,7 +21,6 @@ pub(super) struct Sampled {
     /// `Size`; `None` when absent or holding a non-integer entry.
     size: Option<Vec<usize>>,
     bits_per_sample: Option<u32>,
-    order: f64,
     /// Flat `[lo hi …]` numbers of `Domain`, `Encode`, `Decode`, `Range`.
     domain: Vec<f64>,
     encode: Vec<f64>,
@@ -40,10 +39,6 @@ impl Sampled {
                 .and_then(Object::as_array)
                 .and_then(|a| a.iter().map(|o| o.as_u32().map(|v| v as usize)).collect()),
             bits_per_sample: dict.get(b"BitsPerSample").and_then(Object::as_u32),
-            order: dict
-                .get(b"Order")
-                .and_then(crate::resources::obj_to_f64)
-                .unwrap_or(1.0),
             domain: numbers(dict, b"Domain"),
             encode: numbers(dict, b"Encode"),
             decode: numbers(dict, b"Decode"),
@@ -153,115 +148,6 @@ impl Sampled {
                 })
                 .collect(),
         )
-    }
-
-    /// Evaluate a one-input function at `t` by linear interpolation between
-    /// adjacent samples.  `None` unless `Size` has one entry of at least 2,
-    /// `BitsPerSample` is 8 or 16, `Order` is 1 and the stream holds every
-    /// sample.  `Decode` defaults to `[0, 1]` per output.
-    pub(super) fn eval_1d(&self, t: f64, n: usize) -> Option<Vec<f64>> {
-        let &[n_samples] = self.size.as_deref()? else {
-            return None;
-        };
-        if n_samples < 2 {
-            return None;
-        }
-        #[expect(
-            clippy::float_cmp,
-            reason = "PDF §7.10.2 Order is an integer (1 or 3); bit-exact == 1.0 is the right test"
-        )]
-        if self.order != 1.0 {
-            return None;
-        }
-        let bps = self.bits_per_sample?;
-        if bps != 8 && bps != 16 {
-            return None;
-        }
-        let stream_bytes = self.samples.as_deref()?;
-        let bytes_per_channel = (bps as usize) / 8;
-        let bytes_per_sample = bytes_per_channel * n;
-        let expected_len = bytes_per_sample.checked_mul(n_samples)?;
-        if stream_bytes.len() < expected_len {
-            log::warn!(
-                "function: Type 0 sample stream truncated ({} bytes, expected {expected_len})",
-                stream_bytes.len(),
-            );
-            return None;
-        }
-
-        let t_norm = self.unit_input(t);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "n_samples capped at u32; well within f64 mantissa"
-        )]
-        let last = (n_samples - 1) as f64;
-        let (e_lo, e_hi) = match self.encode.as_slice() {
-            [lo, hi, ..] => (*lo, *hi),
-            _ => (0.0, last),
-        };
-        let idx_f = t_norm.mul_add(e_hi - e_lo, e_lo).clamp(0.0, last);
-        #[expect(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "idx_f clamped to [0, n_samples − 1] above"
-        )]
-        let idx_lo = idx_f.floor() as usize;
-        let idx_hi = (idx_lo + 1).min(n_samples - 1);
-        let frac = idx_f - idx_f.floor();
-        let s_max = if bps == 8 { 255.0 } else { 65535.0 };
-
-        let read = |sample_idx: usize, ch: usize| -> f64 {
-            let off = sample_idx * bytes_per_sample + ch * bytes_per_channel;
-            if bps == 8 {
-                f64::from(stream_bytes[off])
-            } else {
-                f64::from(u16::from_be_bytes([
-                    stream_bytes[off],
-                    stream_bytes[off + 1],
-                ]))
-            }
-        };
-        Some(
-            (0..n)
-                .map(|ch| {
-                    let raw_lo = read(idx_lo, ch) / s_max;
-                    let raw_hi = read(idx_hi, ch) / s_max;
-                    let raw = frac.mul_add(raw_hi - raw_lo, raw_lo);
-                    let (d_lo, d_hi) = self.decode_or_unit(ch);
-                    raw.mul_add(d_hi - d_lo, d_lo)
-                })
-                .collect(),
-        )
-    }
-
-    /// The sample-free approximation of a one-input function: a straight
-    /// line from `Decode[0]` to `Decode[1]` per output across `Domain`.
-    pub(super) fn eval_approx(&self, t: f64, n: usize) -> Vec<f64> {
-        let t_norm = self.unit_input(t);
-        (0..n)
-            .map(|ch| {
-                let (d_lo, d_hi) = self.decode_or_unit(ch);
-                t_norm.mul_add(d_hi - d_lo, d_lo)
-            })
-            .collect()
-    }
-
-    /// `t` mapped from the first `Domain` interval onto `[0, 1]`.
-    fn unit_input(&self, t: f64) -> f64 {
-        let (d0, d1) = domain_pairs(&self.domain, 1).next().unwrap_or((0.0, 1.0));
-        if d1 > d0 {
-            ((t - d0) / (d1 - d0)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        }
-    }
-
-    /// `Decode` pair `ch`, or `[0, 1]`.
-    fn decode_or_unit(&self, ch: usize) -> (f64, f64) {
-        match self.decode.get(2 * ch..2 * ch + 2) {
-            Some(&[lo, hi]) => (lo, hi),
-            _ => (0.0, 1.0),
-        }
     }
 }
 

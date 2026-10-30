@@ -9,12 +9,9 @@
 //!
 //! # Limitations
 //!
-//! One-input Type 0 (Sampled) supports `BitsPerSample` 8 or 16 and the
-//! default `Order` 1 (linear interpolation between adjacent samples); other
-//! depths and `Order` 3 (cubic spline) fall back to the sample-free linear
-//! approximation that pre-dated stream decoding.  Multi-input Type 0
-//! interpolates multilinearly at every `BitsPerSample` the specification
-//! allows.
+//! Type 0 (Sampled) interpolates multilinearly at every `BitsPerSample`
+//! the specification allows; `Order 3` (cubic spline) is evaluated as
+//! `Order 1`.
 //!
 //! Type 4 (PostScript calculator) implements the bounded operator subset of
 //! PDF §7.10.5 (see [`postscript`]); a malformed program or stack underflow
@@ -28,10 +25,10 @@ use crate::resources::dict_ext::DictExt;
 use crate::resources::obj_to_f64;
 
 mod postscript;
-mod sampled_nd;
+mod sampled;
 
 use postscript::Program;
-use sampled_nd::Sampled;
+use sampled::Sampled;
 
 /// Maximum nesting depth of compiled sub-functions (guards against crafted
 /// PDFs with deeply or circularly nested Type 3 functions).
@@ -227,7 +224,7 @@ impl Function {
                 let (f, x) = stitch(*domain, functions, bounds, encode, t);
                 f.eval(x, n)?
             }
-            Body::Sampled(s) => s.eval_1d(t, n).unwrap_or_else(|| s.eval_approx(t, n)),
+            Body::Sampled(s) => s.eval_nd(&[t], n)?,
             Body::PostScript { domain, program } => {
                 let out = program
                     .as_ref()
@@ -650,9 +647,8 @@ mod tests {
 
     #[test]
     fn sampled_reads_sample_stream() {
-        // Non-linear sample table: [0, 0, 0, 0, 255] — the stream-reading path
-        // must return ~0 for t < 0.75 and ~255 for t near 1.0.  Pure linear
-        // approximation (eval_sampled_approx) would give t × 1.0 everywhere.
+        // Non-linear sample table [0, 0, 0, 0, 255]: ~0 for t < 0.75 and
+        // ~1 at t = 1.
         let stream = make_sampled_8bit_stream(&[0, 0, 0, 0, 255]);
         let doc = empty_doc();
 
@@ -666,8 +662,7 @@ mod tests {
         let mid = eval_function(&doc, &stream, 0.5, 1).expect("eval at t=0.5");
         assert!(
             mid[0].abs() < 1e-5,
-            "t=0.5 should sample idx 2 → 0/255 = 0.0; linear-approximation \
-             fallback would return 0.5.  got {}",
+            "t=0.5 should sample idx 2 → 0/255 = 0.0, got {}",
             mid[0]
         );
 
@@ -696,11 +691,81 @@ mod tests {
         );
     }
 
+    /// A three-sample peak `[0, max, 0]` over `Domain [0 1]` as a
+    /// one-input Type 0 function with the given depth, `Order` and `Range`.
+    fn peak_function(bps: i64, samples: Vec<u8>, order: i64, range: [f32; 2]) -> pdf::Object {
+        let mut dict = pdf::Dictionary::new();
+        dict.set("FunctionType", pdf::Object::Integer(0));
+        dict.set(
+            "Domain",
+            pdf::Object::Array(vec![pdf::Object::Integer(0), pdf::Object::Integer(1)]),
+        );
+        dict.set(
+            "Range",
+            pdf::Object::Array(range.iter().map(|&v| pdf::Object::Real(v)).collect()),
+        );
+        dict.set("Size", pdf::Object::Array(vec![pdf::Object::Integer(3)]));
+        dict.set("BitsPerSample", pdf::Object::Integer(bps));
+        dict.set("Order", pdf::Object::Integer(order));
+        pdf::Object::Stream(pdf::Stream::new(dict, samples))
+    }
+
+    fn assert_peak(f: &pdf::Object, lo: f64, hi: f64) {
+        let doc = empty_doc();
+        for (t, want) in [
+            (0.0, lo),
+            (0.25, f64::midpoint(lo, hi)),
+            (0.5, hi),
+            (1.0, lo),
+        ] {
+            let got = eval_function(&doc, f, t, 1).expect("sampled function evaluates")[0];
+            assert!((got - want).abs() < 1e-6, "t={t}: got {got}, want {want}");
+        }
+    }
+
     #[test]
-    fn sampled_multidim_falls_back_to_approx() {
-        // Multi-dimensional (Size = [2, 2]) — not yet implemented.  Must not
-        // panic; falls back to eval_sampled_approx which returns the linear
-        // ramp over the Decode range.
+    fn sampled_reads_every_bit_depth() {
+        assert_peak(
+            &peak_function(1, vec![0b0100_0000], 1, [0.0, 1.0]),
+            0.0,
+            1.0,
+        );
+        assert_peak(
+            &peak_function(2, vec![0b0011_0000], 1, [0.0, 1.0]),
+            0.0,
+            1.0,
+        );
+        assert_peak(&peak_function(4, vec![0x0F, 0x00], 1, [0.0, 1.0]), 0.0, 1.0);
+        assert_peak(
+            &peak_function(12, vec![0x00, 0x0F, 0xFF, 0x00, 0x00], 1, [0.0, 1.0]),
+            0.0,
+            1.0,
+        );
+        assert_peak(
+            &peak_function(24, [[0; 3], [0xFF; 3], [0; 3]].concat(), 1, [0.0, 1.0]),
+            0.0,
+            1.0,
+        );
+        assert_peak(
+            &peak_function(32, [[0; 4], [0xFF; 4], [0; 4]].concat(), 1, [0.0, 1.0]),
+            0.0,
+            1.0,
+        );
+    }
+
+    #[test]
+    fn sampled_order_3_interpolates_the_samples() {
+        assert_peak(&peak_function(8, vec![0, 255, 0], 3, [0.0, 1.0]), 0.0, 1.0);
+    }
+
+    #[test]
+    fn sampled_decode_defaults_to_range() {
+        assert_peak(&peak_function(8, vec![0, 255, 0], 1, [0.2, 0.6]), 0.2, 0.6);
+    }
+
+    #[test]
+    fn sampled_input_count_must_match_size() {
+        // Two grid axes, one input supplied.
         let mut dict = pdf::Dictionary::new();
         dict.set("FunctionType", pdf::Object::Integer(0));
         dict.set(
@@ -718,14 +783,7 @@ mod tests {
         );
         dict.set("BitsPerSample", pdf::Object::Integer(8));
         let stream = pdf::Object::Stream(pdf::Stream::new(dict, vec![0, 64, 128, 255]));
-        let doc = empty_doc();
-
-        // Just verify no panic and a result is produced.
-        let result = eval_function(&doc, &stream, 0.5, 1);
-        assert!(
-            result.is_some(),
-            "multi-dim Type 0 should fall back, not return None"
-        );
+        assert!(eval_function(&empty_doc(), &stream, 0.5, 1).is_none());
     }
 
     // ── Range clip ────────────────────────────────────────────────────────────
