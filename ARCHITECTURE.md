@@ -483,7 +483,10 @@ image, not the process.
   (`resources/cmap_predefined.rs`).
 - **Vertical writing.** With `WMode 1` the glyph origin moves by the
   descendant's `/W2` / `/DW2` metrics and the pen advances down by `w1y`.
-  Substitute faces take their vertical glyph forms from GSUB.
+  Substitute faces take their vertical glyph forms from GSUB, as do the
+  vertical-form CIDs of a collection (those only its `UCS2-V` `CMap`
+  reaches), in either writing mode. A collection CID keeps every code
+  point that maps to it and draws the first the substitute maps.
 - **Sharing.** Descriptors, parsed programs, code → glyph tables and glyph
   bitmaps of indirect font dictionaries live in a `DocumentFonts` store
   shared by every page of a document. Substitute programs are shared

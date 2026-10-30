@@ -35,7 +35,7 @@ use super::encodings::{base_encoding_table, glyph_name_for_code};
 use super::fallback::{FallbackGlyph, FallbackResolver, first_scalar};
 use super::substitutes::substitute_program;
 use crate::resources::cmap::CMap;
-use crate::resources::cmap_predefined::cid_to_unicode;
+use crate::resources::cmap_predefined::{CollectionUnicode, cid_to_unicode};
 use crate::resources::font::{
     BaseEncoding, CidEncoding, FontDescriptor, PdfFontKind, fallback_font,
 };
@@ -582,19 +582,26 @@ fn resolve_cids_via_to_unicode(face: &FontFace, enc: &CidEncoding, to_unicode: &
 
 /// Build a 65 536-entry CID → glyph table for a composite font drawn by a
 /// substitute, through the CID → Unicode table of its character
-/// collection and the substitute's Unicode charmap; in `vertical`
-/// writing mode each glyph is replaced by its vertical form.  The table
-/// spans the whole CID space so that no CID falls through to the charmap.
+/// collection and the substitute's Unicode charmap: the glyph of the
+/// first of a CID's code points the substitute maps.  In `vertical`
+/// writing mode, and for a CID that is the collection's vertical form of
+/// its code point in either mode, each glyph is replaced by its vertical
+/// form.  The table spans the whole CID space so that no CID falls
+/// through to the charmap.
 fn resolve_cids_via_unicode(
     face: &FontFace,
-    cid_to_unicode: &HashMap<u32, u32>,
+    collection: &CollectionUnicode,
     vertical: bool,
 ) -> Vec<u32> {
     let mut table = vec![0u32; 1 << 16];
-    for (&cid, &unicode) in cid_to_unicode {
+    for (cid, codes) in collection.iter() {
         if let Some(slot) = table.get_mut(cid as usize) {
-            let gid = face.raw_get_char_index(unicode);
-            *slot = if vertical {
+            let gid = codes
+                .iter()
+                .map(|&unicode| face.raw_get_char_index(unicode))
+                .find(|&gid| gid != 0)
+                .unwrap_or(0);
+            *slot = if vertical || collection.is_vertical(cid) {
                 face.program().vertical_gid(gid)
             } else {
                 gid
@@ -1361,5 +1368,14 @@ mod tests {
         assert_eq!(face.code_to_gid[264], a);
         assert_eq!(face.code_to_gid[34], a);
         assert_eq!(face.code_to_gid[0], 0);
+        // The vertical-form CIDs a `-V` `CMap` selects (long-vowel mark
+        // 7891, ideographic comma 7887, wave dash 7894) draw the vertical
+        // form of their character, in horizontal mode too.
+        for (cid, unicode) in [(7891, 0x30FC), (7887, 0x3001), (7894, 0x301C)] {
+            let gid = face.raw_get_char_index(unicode);
+            let vertical = face.program().vertical_gid(gid);
+            assert_ne!(gid, 0, "U+{unicode:04X}");
+            assert_eq!(face.code_to_gid[cid], vertical, "CID {cid}");
+        }
     }
 }

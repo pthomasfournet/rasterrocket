@@ -3,7 +3,7 @@
 //!
 //! The Identity `CMaps` are not files: [`CMap::identity`] builds them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::cmap::{CMap, parse_cmap_nested};
@@ -331,20 +331,59 @@ pub(super) fn predefined_cmap_nested(name: &[u8], depth: u32) -> Option<Arc<CMap
     Some(Arc::clone(cache.entry(key).or_insert(parsed)))
 }
 
-/// A CID → Unicode table shared process-wide.
-pub type CidToUnicode = Arc<HashMap<u32, u32>>;
+/// The CID → Unicode table of a character collection.
+///
+/// Several code points can share a CID (a unified character and its
+/// compatibility or full-width form; WAVE DASH, FULLWIDTH TILDE and TILDE
+/// OPERATOR): each CID keeps all of them, in preference order, so that a
+/// face lacking the first still draws the CID through another.
+#[derive(Debug, Default)]
+pub struct CollectionUnicode {
+    /// Code points of each CID that has any: those outside the
+    /// compatibility blocks first, then by value.
+    unicode: HashMap<u32, Box<[u32]>>,
+    /// CIDs reached only through the vertical `UCS2-V` `CMap`: the
+    /// vertical forms (rotated or repositioned glyphs) of their code
+    /// points.
+    vertical: HashSet<u32>,
+}
 
-/// CID → Unicode for the character collection of `script`, derived by
-/// inverting its `UCS2-H` `CMap` (the lowest code point of a CID wins);
-/// `None` for a script without a collection.  Built once per process.
+impl CollectionUnicode {
+    /// The code points of `cid`, in preference order; empty when it has
+    /// none.
+    #[must_use]
+    pub fn get(&self, cid: u32) -> &[u32] {
+        self.unicode.get(&cid).map_or(&[], |codes| codes)
+    }
+
+    /// Whether `cid` is the vertical form of its code point.
+    #[must_use]
+    pub fn is_vertical(&self, cid: u32) -> bool {
+        self.vertical.contains(&cid)
+    }
+
+    /// Every CID with its code points, in no fixed order.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &[u32])> + '_ {
+        self.unicode.iter().map(|(&cid, codes)| (cid, &**codes))
+    }
+}
+
+/// A [`CollectionUnicode`] shared process-wide.
+pub type CidToUnicode = Arc<CollectionUnicode>;
+
+/// CID → Unicode for the character collection of `script`.
+///
+/// The table inverts the collection's `UCS2-H` `CMap`, then its `UCS2-V`
+/// `CMap` for the CIDs only the vertical one reaches.  `None` for a
+/// script without a collection.  Built once per process.
 #[must_use]
 pub fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
     static CACHE: OnceLock<Mutex<HashMap<Script, CidToUnicode>>> = OnceLock::new();
-    let name: &[u8] = match script {
-        Script::Japanese => b"UniJIS-UCS2-H",
-        Script::SimplifiedChinese => b"UniGB-UCS2-H",
-        Script::TraditionalChinese => b"UniCNS-UCS2-H",
-        Script::Korean => b"UniKS-UCS2-H",
+    let (name, vertical_name): (&[u8], &[u8]) = match script {
+        Script::Japanese => (b"UniJIS-UCS2-H", b"UniJIS-UCS2-V"),
+        Script::SimplifiedChinese => (b"UniGB-UCS2-H", b"UniGB-UCS2-V"),
+        Script::TraditionalChinese => (b"UniCNS-UCS2-H", b"UniCNS-UCS2-V"),
+        Script::Korean => (b"UniKS-UCS2-H", b"UniKS-UCS2-V"),
         Script::Arabic | Script::Thai => return None,
     };
     let cache = CACHE.get_or_init(Mutex::default);
@@ -356,9 +395,6 @@ pub fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
         return Some(Arc::clone(table));
     }
     let cmap = predefined_cmap(name)?;
-    // Several code points share a CID (a radical, a compatibility
-    // ideograph or a full-width form beside the unified character): the
-    // unified block wins, then the lowest code point.
     let mut pairs: Vec<(u32, bool, u32)> = cmap
         .map
         .iter()
@@ -378,16 +414,40 @@ pub fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
             );
         }
     }
-    pairs.sort_unstable();
-    pairs.dedup_by_key(|&mut (cid, ..)| cid);
-    let table = Arc::new(
-        pairs
-            .into_iter()
-            .map(|(cid, _, code)| (cid, code))
-            .collect(),
-    );
+    let mut unicode = invert(pairs);
+    let vertical_pairs: Vec<(u32, bool, u32)> = predefined_cmap(vertical_name)
+        .map(|cmap| {
+            cmap.map
+                .iter()
+                .filter(|&(_, cid)| !unicode.contains_key(cid))
+                .map(|(&code, &cid)| (cid, is_compatibility_block(code), code))
+                .collect()
+        })
+        .unwrap_or_default();
+    let vertical_only = invert(vertical_pairs);
+    let vertical = vertical_only.keys().copied().collect();
+    unicode.extend(vertical_only);
+    let table = Arc::new(CollectionUnicode { unicode, vertical });
     let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
     Some(Arc::clone(cache.entry(script).or_insert(table)))
+}
+
+/// The CID → code points map of `(cid, compatibility, code)` triples: per
+/// CID, the codes outside the compatibility blocks before those inside
+/// them, each group by value.
+fn invert(mut pairs: Vec<(u32, bool, u32)>) -> HashMap<u32, Box<[u32]>> {
+    pairs.sort_unstable();
+    pairs.dedup();
+    let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (cid, _, code) in pairs {
+        let codes = map.entry(cid).or_default();
+        if !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    map.into_iter()
+        .map(|(cid, codes)| (cid, codes.into_boxed_slice()))
+        .collect()
 }
 
 /// Whether `code` lies in a block of radicals, compatibility ideographs or
@@ -407,13 +467,32 @@ mod tests {
     #[test]
     fn cid_to_unicode_inverts_the_ucs2_cmap() {
         let japan1 = cid_to_unicode(Script::Japanese).expect("Japan1");
-        assert_eq!(japan1.get(&3284), Some(&0x65E5));
-        assert_eq!(japan1.get(&34), Some(&0x41));
+        assert_eq!(japan1.get(3284).first(), Some(&0x65E5));
+        assert_eq!(japan1.get(34).first(), Some(&0x41));
         // Half-width `A`, reached only through the legacy encodings.
-        assert_eq!(japan1.get(&264), Some(&0x41));
+        assert_eq!(japan1.get(264).first(), Some(&0x41));
+        assert!(!japan1.is_vertical(3284));
+        // WAVE DASH keeps every code point of its CID, unified first.
+        assert_eq!(japan1.get(665), &[0x223C, 0x301C, 0xFF5E]);
         let gb1 = cid_to_unicode(Script::SimplifiedChinese).expect("GB1");
-        assert_eq!(gb1.get(&34), Some(&0x41));
+        assert_eq!(gb1.get(34).first(), Some(&0x41));
         assert!(cid_to_unicode(Script::Thai).is_none());
+    }
+
+    /// A CID only the `UCS2-V` `CMap` reaches maps to its code point and is
+    /// marked vertical: the vertical long-vowel mark, ideographic comma and
+    /// full stop of Adobe-Japan1.
+    #[test]
+    fn vertical_only_cids_map_to_their_code_points() {
+        let japan1 = cid_to_unicode(Script::Japanese).expect("Japan1");
+        let v = predefined_cmap(b"UniJIS-UCS2-V").expect("UniJIS-UCS2-V");
+        let h = predefined_cmap(b"UniJIS-UCS2-H").expect("UniJIS-UCS2-H");
+        for unicode in [0x30FC, 0x3001, 0x3002] {
+            let cid = v.lookup(unicode);
+            assert_ne!(cid, h.lookup(unicode), "U+{unicode:04X} has a vertical CID");
+            assert!(japan1.get(cid).contains(&unicode), "CID {cid}");
+            assert!(japan1.is_vertical(cid), "CID {cid}");
+        }
     }
 
     /// Every vendored `CMap` inflates and parses to a usable mapping.

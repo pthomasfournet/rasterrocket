@@ -42,7 +42,8 @@ pub type FallbackGlyph = (usize, u32);
 /// that draws the font.
 pub struct FallbackResolver {
     style: SubstituteStyle,
-    /// Vertical writing: a fallback glyph is replaced by its vertical form.
+    /// Vertical writing: a fallback glyph is replaced by its vertical form,
+    /// as is the glyph of a collection's vertical-form CID in either mode.
     vertical: bool,
     /// The substitute program; a character it maps needs no fallback.
     primary: Arc<FontProgram>,
@@ -54,8 +55,9 @@ pub struct FallbackResolver {
 struct State {
     /// Programs that serve at least one character, in discovery order.
     programs: Vec<Arc<FontProgram>>,
-    /// Resolution of each Unicode value looked up so far.
-    glyphs: HashMap<u32, Option<FallbackGlyph>>,
+    /// Resolution of each Unicode value looked up so far, and whether its
+    /// vertical form was asked for.
+    glyphs: HashMap<(u32, bool), Option<FallbackGlyph>>,
 }
 
 impl FallbackResolver {
@@ -91,37 +93,54 @@ impl FallbackResolver {
         })
     }
 
-    /// The Unicode value the shown `code` (with CID `cid` in a composite
-    /// font) stands for, when the font says.
-    fn unicode(&self, code: u32, cid: u32) -> Option<u32> {
-        let unicode = match &self.source {
-            UnicodeSource::Names(names) => *names.get(usize::try_from(code).ok()?)?,
-            UnicodeSource::Collection(table) => *table.get(&cid)?,
-            UnicodeSource::ToUnicode(map) => first_scalar(*map.map.get(&code)?)?,
-        };
-        (unicode != 0).then_some(unicode)
+    /// The Unicode values the shown `code` (with CID `cid` in a composite
+    /// font) stands for, in preference order; empty when the font does not
+    /// say.  Only a collection CID has more than one.
+    fn unicodes(&self, code: u32, cid: u32) -> Vec<u32> {
+        let single = |unicode: Option<u32>| unicode.filter(|&u| u != 0).into_iter().collect();
+        match &self.source {
+            UnicodeSource::Names(names) => single(
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|code| names.get(code).copied()),
+            ),
+            UnicodeSource::Collection(table) => table.get(cid).to_vec(),
+            UnicodeSource::ToUnicode(map) => {
+                single(map.map.get(&code).copied().and_then(first_scalar))
+            }
+        }
     }
 
     /// The fallback glyph that draws the shown `code` (CID `cid`): the
     /// glyph of its character in the first installed program that maps
-    /// it, when the substitute does not.  Each character is resolved once
-    /// per font.
+    /// it, when the substitute maps none of the character's code points.
+    /// Each character is resolved once per font.
     pub fn glyph(&self, code: u32, cid: u32) -> Option<FallbackGlyph> {
-        let unicode = self.unicode(code, cid)?;
-        if let Some(&known) = self.lock().glyphs.get(&unicode) {
+        let unicodes = self.unicodes(code, cid);
+        let &first = unicodes.first()?;
+        let vertical = self.vertical
+            || matches!(&self.source, UnicodeSource::Collection(table) if table.is_vertical(cid));
+        let key = (first, vertical);
+        if let Some(&known) = self.lock().glyphs.get(&key) {
             return known;
         }
         // Searched outside the lock: a first search reads installed files.
-        let found = (self.primary.char_index(unicode) == 0)
-            .then(|| fallback_program(self.style, unicode))
+        let found = unicodes
+            .iter()
+            .all(|&u| self.primary.char_index(u) == 0)
+            .then(|| {
+                unicodes
+                    .iter()
+                    .find_map(|&u| fallback_program(self.style, u).map(|program| (program, u)))
+            })
             .flatten();
         let mut state = self.lock();
-        if let Some(&known) = state.glyphs.get(&unicode) {
+        if let Some(&known) = state.glyphs.get(&key) {
             return known;
         }
-        let resolved = found.map(|program| {
+        let resolved = found.map(|(program, unicode)| {
             let mut gid = program.char_index(unicode);
-            if self.vertical {
+            if vertical {
                 gid = program.vertical_gid(gid);
             }
             let slot = state
@@ -134,7 +153,7 @@ impl FallbackResolver {
                 });
             (slot, gid)
         });
-        let _ = state.glyphs.insert(unicode, resolved);
+        let _ = state.glyphs.insert(key, resolved);
         resolved
     }
 
