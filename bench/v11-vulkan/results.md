@@ -1,5 +1,7 @@
 # Phase 11 contest results — variant 'vulkan'
 
+> **Historical.** A benchmark of a past release; not re-run since and not representative of the current renderer. See [bench/README.md](../README.md) and the wiki [Benchmarks](../../wiki/Benchmarks.md) page.
+
 **Run:** 2026-05-09T14:38:39-04:00
 **Hardware:** AMD Ryzen 9 9900X3D 12-Core Processor + NVIDIA GeForce RTX 5070, Linux 6.17.0-23-generic
 **Archive:** 2.78 GB synthetic PDF

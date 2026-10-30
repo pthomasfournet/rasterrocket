@@ -1,5 +1,7 @@
 # v0.6.0 GPU baseline — testbench (i7-8700K + RTX 2080 SUPER)
 
+> **Historical.** A benchmark of a past release; not re-run since and not representative of the current renderer. See [bench/README.md](../README.md) and the wiki [Benchmarks](../../wiki/Benchmarks.md) page.
+
 **Machine:** Intel Core i7-8700K (Coffee Lake, 6c/12t, 3.7 GHz base / 4.7 GHz boost,
 12 MB L3, AVX2 only — no AVX-512), 30 GB RAM, RTX 2080 SUPER (Turing CC 7.5,
 8 GB GDDR6, 3072 CUDA cores), Ubuntu 25.10, CUDA 12.4.

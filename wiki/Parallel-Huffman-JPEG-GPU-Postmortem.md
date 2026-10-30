@@ -1,5 +1,12 @@
 # Parallel Huffman JPEG Decode on GPU: A Post-Mortem
 
+> **Historical.** Written in May 2026 at v0.9.1; the numbers below are from
+> that release on the AMD Ryzen 9 9900X3D + RTX 5070 dev box and have not been
+> re-measured since. The path is still in the tree and still dormant (see
+> [Status](#status)); file paths and the Phase 2 bound in this page have been
+> updated to match the current source. Current benchmark results are on
+> [Benchmarks](Benchmarks).
+
 We spent roughly two weeks implementing a custom parallel Huffman JPEG decoder that runs on both CUDA and Vulkan compute shaders. The short version: **it works, it's correct, and it mostly doesn't beat the CPU.** That was the expected outcome going in — and we did it anyway. This page is the story of why, what we learned, and what the numbers actually look like.
 
 ---
@@ -31,7 +38,7 @@ JPEG Huffman decode is a context-sensitive scan — the decoder maintains a pred
 The four phases:
 
 - **Phase 1 — intra-sync:** each thread decodes its substream from the start, recording the first point where the MCU schedule closes cleanly. This is the "candidate alignment." Boundary-snapshot semantics matter here: the snapshot captures the decoder state at the first crossing into the *next* substream's region, not the over-walk state, so Phase 4 inheritance composes cleanly.
-- **Phase 2 — inter-sync (bounded retry):** verify that adjacent substreams agree on their boundary. Disagreement means the Phase 1 candidate was a false lock; retry with a search window. Bounded at `2 × log₂(n)` retries. Failures surface as a typed `SyncBoundExceeded` error — never a hang or wrong output.
+- **Phase 2 — inter-sync (bounded retry):** verify that adjacent substreams agree on their boundary. Disagreement means the Phase 1 candidate was a false lock; retry with a search window. Bounded (at the time of writing, `2 × log₂(n)` retries; the current bound is one pass per 256-thread workgroup, `⌈n / 256⌉`). Failures surface as a typed `SyncBoundExceeded` error — never a hang or wrong output.
 - **Phase 3 — Blelloch scan:** prefix-sum over the per-substream DC deltas to compute absolute DC offsets.
 - **Phase 4 — re-decode + write:** each thread re-decodes its substream from its confirmed start point, applying the Phase 3 DC base, and writes coefficients to the output buffer.
 
@@ -39,7 +46,7 @@ The four phases:
 
 ## Implementation
 
-The implementation lives in `crates/gpu/src/jpeg/`. The algorithm runs on both CUDA (PTX, `sm_80`+) and Vulkan compute (Slang, compiled to SPIR-V at build time). Both backends produce byte-identical output, verified by a 10-vector adversarial corpus in `huffman/corpus.rs` covering:
+The implementation lives in `crates/gpu/src/jpeg_decoder/`, with the kernels in `crates/gpu/kernels/parallel_huffman.{cu,slang}` and `blelloch_scan.{cu,slang}`. The algorithm runs on both CUDA (PTX, `sm_80`+) and Vulkan compute (Slang, compiled to SPIR-V at build time). Both backends produce byte-identical output, verified by a 10-vector adversarial corpus in `jpeg_decoder/huffman/corpus.rs` covering:
 
 - Short / long / uniform / skewed symbol distributions
 - Single-symbol alphabets (degenerate case)
@@ -48,9 +55,9 @@ The implementation lives in `crates/gpu/src/jpeg/`. The algorithm runs on both C
 - One-subseq degenerate case
 - Word-aligned and max-tail-padding boundaries
 
-The CUDA path uses `cooperative_groups::sync` for intra-phase barriers; the Slang path uses `AllMemoryBarrierWithGroupSync()`. Both are invoked from the same dispatch layer in `crates/gpu/src/jpeg/dispatcher.rs`.
+Within a workgroup the CUDA kernels synchronise with `__syncthreads()` and the Slang kernels with `GroupMemoryBarrierWithGroupSync()`; synchronisation across workgroups is one kernel dispatch per pass. Both backends are driven by the same backend-generic dispatch code in `crates/gpu/src/jpeg_decoder/huffman/mod.rs`.
 
-We wired the path into the production decode pipeline behind `GPU_JPEG_HUFFMAN_THRESHOLD_PX`. It's enabled per-image when the pixel count exceeds the threshold. In production the threshold is `u32::MAX` — the path is dormant. You can force it for benchmarking with `PDF_RASTER_HUFFMAN_THRESHOLD=0`.
+We wired the path into the production decode pipeline behind `GPU_JPEG_HUFFMAN_THRESHOLD_PX` (in `rasterrocket-interp`, compiled only with the `gpu-jpeg-huffman` feature). An eligible image (baseline 4:4:4, one or three components) takes it when its pixel area is at least the threshold. In production the threshold is `u32::MAX` — the path is dormant. You can force it for benchmarking with `PDF_RASTER_HUFFMAN_THRESHOLD=0`.
 
 ---
 
@@ -75,7 +82,7 @@ All numbers are mean ± σ from 5 hyperfine runs with cold-cache eviction betwee
 
 **CPU wins on 9 of 10 corpora.** The GPU Huffman path beats CPU-only exactly once — corpus 09, progressive JPEG, 490 pages — and that result has a σ of 658 ms (23% of mean) due to background load, making it unreliable.
 
-The interesting comparison is **C-huff vs C-std (nvJPEG)**. On text-heavy corpora (01–04), C-huff is 36–53% faster than nvJPEG. This is not because the parallel-Huffman decoder is faster at Huffman decoding — it's because nvJPEG on consumer hardware has significant per-image dispatch overhead that the custom path doesn't. On JPEG-heavy corpora (06–10) the margin closes to ±10%.
+The interesting comparison is **C-huff vs C-std (nvJPEG)**. On text-heavy corpora (02–04), C-huff is 36–53% faster than nvJPEG. This is not because the parallel-Huffman decoder is faster at Huffman decoding — it's because nvJPEG on consumer hardware has significant per-image dispatch overhead that the custom path doesn't. On JPEG-heavy corpora (06–10) the margin closes to ±10%.
 
 The comparison against CPU is the honest one. A 12-core/24-thread CPU with AVX-512 running `zune-jpeg` is a 24-way parallel decoder with SIMD-optimized IDCT. Our GPU decoder is also parallel, but it has PCIe latency and dispatch overhead that the CPU doesn't. For the aggregate-throughput workload that rasterrocket runs — many independent JPEG images, all pages of a document, 24 threads — the CPU wins because it keeps all 24 cores saturated without any PCIe round-trips.
 
@@ -98,11 +105,11 @@ The dormant threshold (`u32::MAX`) stays dormant until we run a proper single-pa
 **The algorithm is harder to implement than it looks.** The Weißenberger paper fits in 8 pages. The implementation took several weeks and generated a dozen hardening commits after the initial "it works" milestone. The key correctness subtleties:
 
 - **Boundary-snapshot semantics in Phase 1.** `s_info[i]` must capture state at the *first decoding step that crosses into subseq (i+1)'s region*, not the over-walk end state. The over-walk state loses information about what the aligned decoder would have seen. Getting this wrong produces a decoder that passes most tests but fails on corpora where Phase 4's DC inheritance reverses direction.
-- **The Phase 2 retry bound isn't always achievable.** Mixed-codeword-length corpora and multi-component streams with DC-delta rollover can hit the `2 × log₂(n)` bound. We surface this as `SyncBoundExceeded`, never as a hang or silently wrong output. Production JPEG streams rarely trigger this; the adversarial corpus does.
+- **The Phase 2 retry bound isn't always achievable.** Mixed-codeword-length corpora and multi-component streams with DC-delta rollover could hit the `2 × log₂(n)` bound used at the time. We surface this as `SyncBoundExceeded`, never as a hang or silently wrong output. Production JPEG streams rarely trigger this; the adversarial corpus does.
 - **Synthetic test fixtures have constraints real JPEG doesn't.** The kernel advances `code_bits + value_bits` per decode step. For a uniform-code-length table this means all symbols still have different advances if their low nibbles (value-bit counts) vary. Synthetic fixtures must pick symbols with `symbol & 0x0F == 0` to get uniform advances. Real JPEG AC tables don't have this constraint (the low nibble is the AC value bit count, which the MCU schedule knows independently), but it confused the fixture builder for a while.
-- **GPU backend differences are real.** CUDA's `cooperative_groups::sync` and Slang's `AllMemoryBarrierWithGroupSync()` have different barrier semantics with respect to shared memory visibility. Getting byte-identical output on both required careful audit of the barrier placement in Phase 1 and Phase 4.
+- **GPU backend differences are real.** CUDA's and Slang's workgroup barriers do not give the same guarantees about shared-memory visibility. Getting byte-identical output on both required careful audit of the barrier placement in Phase 1 and Phase 4.
 
-**The perf model for GPU JPEG is often cited wrong.** The 51× number lives in GPU JPEG conversations like a consensus claim. It's a real measurement, but it assumes single-threaded CPU baseline and datacenter GPU. The honest framing for consumer workloads is: GPU parallel-Huffman is roughly competitive with CPU parallelism for very large individual images (> ~4 MP), slower for everything else when you account for dispatch overhead, and much slower than nvJPEG for typical PDF JPEG images (typically 1–8 MP) where the fixed-function decoder is already fast enough.
+**The perf model for GPU JPEG is often cited wrong.** The 51× number lives in GPU JPEG conversations like a consensus claim. It's a real measurement, but it assumes single-threaded CPU baseline and datacenter GPU. The honest framing for consumer workloads is: GPU parallel-Huffman is roughly competitive with CPU parallelism for very large individual images (> ~4 MP), and slower for everything else when you account for dispatch overhead. Against nvJPEG it was faster in every corpus but two in the table above, by up to half, because nvJPEG's per-image dispatch overhead on consumer hardware is larger still; neither beats the CPU.
 
 **Building something you expect to lose is instructive.** We had a clear hypothesis going in: 24-thread AVX-512 CPU would win. The implementation confirmed it. More importantly, it confirmed *why* it wins — the PCIe round-trip and dispatch overhead are not negligible at this image size distribution — and gave us a working, tested GPU decoder that can be enabled trivially if the workload ever changes.
 
@@ -112,14 +119,17 @@ The dormant threshold (`u32::MAX`) stays dormant until we run a proper single-pa
 
 The parallel-Huffman path is **wired into production** and **dormant by default**. It runs on both CUDA and Vulkan. It produces byte-identical output to the CPU path. It is tested with an adversarial corpus. It is not automatically dispatched.
 
-To enable it for a benchmark or experiment:
+To enable it for a benchmark or experiment, build with the `gpu-jpeg-huffman` feature (plus `vulkan` for the Vulkan backend) and set the threshold to zero:
 
 ```bash
-PDF_RASTER_HUFFMAN_THRESHOLD=0 rrocket --backend cuda input.pdf out
-PDF_RASTER_HUFFMAN_THRESHOLD=0 rrocket --backend vulkan input.pdf out
+cargo build --release -p rasterrocket-cli --features gpu-jpeg-huffman
+PDF_RASTER_HUFFMAN_THRESHOLD=0 target/release/rrocket --backend cuda input.pdf out
+
+cargo build --release -p rasterrocket-cli --features vulkan,gpu-jpeg-huffman
+PDF_RASTER_HUFFMAN_THRESHOLD=0 target/release/rrocket --backend vulkan input.pdf out
 ```
 
-The source is in `crates/gpu/src/jpeg/` — `huffman.rs` (algorithm), `bitreader.rs` (shared CPU oracle and GPU pre-pass), `dispatcher.rs` (dispatch routing), `corpus.rs` (adversarial test vectors).
+The source is in `crates/gpu/src/jpeg_decoder/`: `huffman/mod.rs` (the four-phase dispatch), `decoder.rs` (the decoder that runs it and the IDCT), `bitstream.rs` and `cpu_prepass.rs` (bit packing and the CPU pre-pass), `phase1_oracle.rs` / `phase2_oracle.rs` (CPU oracles), and `huffman/corpus.rs` (adversarial test vectors).
 
 ---
 
