@@ -4,10 +4,10 @@
 //! [`FontFace`].  Faces are loaded on first use during rendering, then reused
 //! for all subsequent glyphs in the same page.
 //!
-//! When a font has no embedded bytes the cache draws it with a substitute
-//! of the same family class and variant (sans-serif, serif or monospaced;
-//! regular, bold, italic or bold italic), located by
-//! [`super::substitutes`].
+//! When a font has no embedded bytes, or its embedded program cannot be
+//! parsed, the cache draws it with a substitute of the same family class
+//! and variant (sans-serif, serif or monospaced; regular, bold, italic or
+//! bold italic), located by [`super::substitutes`].
 //!
 //! # Threading
 //!
@@ -19,6 +19,7 @@
 //! glyph bitmaps of those faces.
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use font::{
@@ -53,6 +54,26 @@ pub struct ActiveFont {
     pub descriptor: Arc<FontDescriptor>,
 }
 
+/// A face loaded for a page: the [`FontFace`] it draws with, and whether
+/// that face is a substitute program rather than one the document embeds.
+pub struct PageFace {
+    face: FontFace,
+    /// `true` when the face draws a substitute: the font has no embedded
+    /// program, or its embedded program could not be parsed.
+    pub substitute: bool,
+}
+
+impl Deref for PageFace {
+    type Target = FontFace;
+
+    fn deref(&self) -> &FontFace {
+        &self.face
+    }
+}
+
+/// The program a descriptor draws with and whether it is a substitute.
+type ResolvedProgram = (Arc<FontProgram>, bool);
+
 /// The fonts of one document, resolved once and shared by every page
 /// rendered from it.  Entries are keyed by the object number of an indirect
 /// font dictionary, so a store serves one document only.
@@ -79,7 +100,7 @@ impl DocumentFonts {
 #[derive(Default)]
 struct SharedFont {
     descriptor: OnceLock<Arc<FontDescriptor>>,
-    program: OnceLock<Option<Arc<FontProgram>>>,
+    program: OnceLock<Option<ResolvedProgram>>,
     /// The `code_to_gid` table computed from the program, `None` when the
     /// descriptor's own table (or the program's charmap) applies.
     code_to_gid: OnceLock<Option<Vec<u32>>>,
@@ -109,7 +130,7 @@ pub struct FontCache {
     /// Map from (font dictionary, four f64-as-u64 bits of the Trm 2×2 matrix)
     /// to loaded face.  The full matrix is the key because the same font can
     /// appear at different sizes and skew angles within a single page.
-    faces: HashMap<FaceKey, Option<FontFace>>,
+    faces: HashMap<FaceKey, Option<PageFace>>,
 }
 
 impl FontCache {
@@ -176,7 +197,7 @@ impl FontCache {
         &self.glyph_cache
     }
 
-    /// Return a reference to the [`FontFace`] for `font`, loading it on first
+    /// Return a reference to the [`PageFace`] for `font`, loading it on first
     /// use.  `name` is the resource name `font` was selected by, for
     /// diagnostics.
     ///
@@ -191,7 +212,7 @@ impl FontCache {
         font: &ActiveFont,
         name: &[u8],
         trm: [f64; 4],
-    ) -> Option<&FontFace> {
+    ) -> Option<&PageFace> {
         // The full 2×2 Trm matrix, as bit patterns, is part of the key: the
         // same font at different sizes or skews needs distinct faces.  Failed
         // loads are stored as `None`, so a font that cannot load is tried once.
@@ -210,11 +231,11 @@ impl FontCache {
     }
 
     fn load_face(
-        &mut self,
+        &self,
         key: &FontKey,
         desc: &FontDescriptor,
         trm: [f64; 4],
-    ) -> Option<FontFace> {
+    ) -> Option<PageFace> {
         // Pre-flight: reject degenerate matrices before parsing the program.
         // The y-column magnitude (hypot of indices 2 & 3) is the pixel size used by
         // FontFace::new; a value < 1.0 or non-finite produces an unusable face.
@@ -235,58 +256,53 @@ impl FontCache {
             FontKey::Direct { .. } => None,
         };
 
-        let mut face = if let Some(shared) = &shared {
-            let program = shared
-                .program
-                .get_or_init(|| parse_program(desc))
-                .as_ref()?;
-            let id = shared.face_id(trm.map(f64::to_bits), &self.shared.face_ids);
-            self.engine
-                .load_program_face_as(id, Arc::clone(program), params)
-                .inspect_err(|e| log::debug!("font_cache: {e}"))
-                .ok()?
-        } else if let Some(bytes) = &desc.bytes {
-            self.engine
-                .load_memory_face(bytes.clone(), 0, params)
-                .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
-                .ok()?
-        } else {
-            let program = substitute_program(desc.substitute)?;
-            self.engine
-                .load_program_face(program, params)
-                .inspect_err(|e| log::debug!("font_cache: substitute font: {e}"))
-                .ok()?
+        let (program, substitute) = match &shared {
+            Some(shared) => shared.program.get_or_init(|| parse_program(desc)).clone()?,
+            None => parse_program(desc)?,
         };
+        let mut face = match &shared {
+            Some(shared) => {
+                let id = shared.face_id(trm.map(f64::to_bits), &self.shared.face_ids);
+                self.engine.load_program_face_as(id, program, params)
+            }
+            None => self.engine.load_program_face(program, params),
+        }
+        .inspect_err(|e| log::debug!("font_cache: {e}"))
+        .ok()?;
 
+        // A substitute resolves codes as the program of a non-embedded font.
+        let embedded = desc.bytes.is_some() && !substitute;
         let table = shared.as_ref().map_or_else(
-            || resolved_code_to_gid(&face, desc),
+            || resolved_code_to_gid(&face, desc, embedded),
             |shared| {
                 shared
                     .code_to_gid
-                    .get_or_init(|| resolved_code_to_gid(&face, desc))
+                    .get_or_init(|| resolved_code_to_gid(&face, desc, embedded))
                     .clone()
             },
         );
         if let Some(table) = table {
             face.code_to_gid = table;
         }
-        Some(face)
+        Some(PageFace { face, substitute })
     }
 }
 
-/// Parse the program a descriptor draws with: its embedded font program, or
-/// the substitute for a font without one.  `None`, logged, when neither
-/// yields a usable program.
-fn parse_program(desc: &FontDescriptor) -> Option<Arc<FontProgram>> {
-    desc.bytes.as_ref().map_or_else(
-        || substitute_program(desc.substitute),
-        |bytes| {
-            FontProgram::parse(bytes.clone(), 0)
-                .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
-                .ok()
-                .map(Arc::new)
-        },
-    )
+/// Parse the program a descriptor draws with: its embedded font program,
+/// else the substitute of its style — for a font without a program, and
+/// for one whose program does not parse (truncated stream, unsupported
+/// format), which is logged.  `None` when no substitute is available
+/// either.
+fn parse_program(desc: &FontDescriptor) -> Option<ResolvedProgram> {
+    if let Some(bytes) = &desc.bytes {
+        match FontProgram::parse(bytes.clone(), 0) {
+            Ok(program) => return Some((Arc::new(program), false)),
+            Err(e) => log::warn!(
+                "font_cache: embedded font program unusable ({e}) — drawing a substitute"
+            ),
+        }
+    }
+    substitute_program(desc.substitute).map(|program| (program, true))
 }
 
 /// The `code_to_gid` table a face of `desc` needs in place of the
@@ -306,8 +322,13 @@ fn parse_program(desc: &FontDescriptor) -> Option<Arc<FontProgram>> {
 /// An embedded simple sfnt with no `cmap` subtable and no `post` names
 /// (a legacy subset) offers no mapping at all; its codes are its glyph
 /// indices, the only reading under which such a subset draws.
-fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u32>> {
-    let embedded = desc.bytes.is_some();
+///
+/// `embedded` is whether `face` draws the descriptor's own program.
+fn resolved_code_to_gid(
+    face: &FontFace,
+    desc: &FontDescriptor,
+    embedded: bool,
+) -> Option<Vec<u32>> {
     let simple = desc.cid_encoding.is_none();
     let outline = desc.type3.is_none();
     if embedded && simple && outline && !face.program().has_charmap() {

@@ -39,6 +39,32 @@ fn standard_fonts_draw_without_an_embedded_program() {
     }
 }
 
+/// A font whose embedded program is unusable (here the first 100 bytes of
+/// a TrueType file) draws with a substitute instead of losing its text.
+#[test]
+fn corrupt_embedded_program_draws_a_substitute() {
+    const AHEM: &[u8] = include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf");
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
+          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", b"BT /F1 24 Tf 4 8 Td (AB) Tj ET"),
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Ahem /FirstChar 65 /LastChar 66 \
+          /Widths [600 600] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>"
+            .to_vec(),
+        b"<< /Type /FontDescriptor /FontName /Ahem /Flags 32 /FontBBox [0 -200 1000 800] \
+          /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 \
+          /FontFile2 7 0 R >>"
+            .to_vec(),
+        stream_object("/Length1 100", &AHEM[..100]),
+    ];
+    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    assert!(bmp.data().chunks(3).filter(|px| px[0] < 128).count() > 40);
+}
+
 /// A `Tf` naming a font resource the page does not define draws its text
 /// in Helvetica and reports the name in the page diagnostics.
 #[test]
