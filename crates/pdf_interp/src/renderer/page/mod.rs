@@ -360,11 +360,14 @@ pub struct PageRenderer<'doc> {
     warned_unknown_ops_capped: bool,
     /// Per-filter blit counts used to compute `diag.dominant_filter`.
     filter_counts: [u32; IMAGE_FILTER_COUNT],
-    /// Optional Content Group (OCG) visibility stack.
+    /// Open marked-content sequences of the content stream being executed,
+    /// innermost last.
     ///
-    /// Each `BDC /OC /Name` pushes a `bool` (`true` = visible); `EMC` pops it.
-    /// Non-OCG `BDC`/`EMC` pairs do not touch this stack (they are `MarkedContent`
-    /// no-ops).  Content is skipped whenever any entry is `false`.
+    /// `BMC` and `BDC` push one entry each and `EMC` pops one: `false` for an
+    /// optional-content sequence whose group is hidden, `true` otherwise.
+    /// Content is skipped whenever any entry is `false`.  Each content
+    /// stream starts with an empty stack (see
+    /// [`execute_content_stream`](Self::execute_content_stream)).
     ocg_stack: Vec<bool>,
     /// GPU parallel-Huffman JPEG decoder via the CUDA backend.
     /// `None` means the path is inactive.
@@ -974,6 +977,21 @@ impl<'doc> PageRenderer<'doc> {
                 return;
             }
         }
+    }
+
+    /// Execute `ops` as a content stream nested in the current one: a form
+    /// `XObject` or a Type 3 glyph description.
+    ///
+    /// Marked-content sequences cannot span content streams (PDF §14.6), so
+    /// the nested stream starts with no open sequence and the enclosing
+    /// stream's sequences are restored afterwards, whatever the nested
+    /// stream left open or closed.  A nested stream is executed only while
+    /// every enclosing sequence is visible, so the visibility it inherits is
+    /// unchanged.
+    fn execute_content_stream(&mut self, ops: &[Operator]) {
+        let enclosing = std::mem::take(&mut self.ocg_stack);
+        self.execute(ops);
+        self.ocg_stack = enclosing;
     }
 
     /// Render all annotations on the page (PDF §12.5).
@@ -1614,7 +1632,7 @@ impl<'doc> PageRenderer<'doc> {
         // pop the state saved above.
         let ops = crate::content::parse(&form.content);
         let floor = self.gstate.raise_floor();
-        self.execute(&ops);
+        self.execute_content_stream(&ops);
         self.gstate.lower_floor(floor);
 
         // Swap the group bitmap back and composite using the parent's opacity/blend

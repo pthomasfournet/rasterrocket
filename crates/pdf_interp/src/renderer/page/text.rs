@@ -571,7 +571,7 @@ impl PageRenderer<'_> {
         // fresh graphics state, not a text object).
         self.gstate.current_mut().text = TextState::default();
 
-        self.execute(&glyph.ops);
+        self.execute_content_stream(&glyph.ops);
 
         self.form_depth -= 1;
         self.gstate.restore();

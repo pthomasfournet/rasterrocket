@@ -12,24 +12,26 @@ use crate::resources::transfer::TransferSetting;
 
 impl PageRenderer<'_> {
     pub(super) fn execute_one(&mut self, op: &Operator) {
-        // ── Optional Content Group (OCG) visibility ───────────────────────────
-        // Always handle OCG stack operators regardless of visibility, then skip
-        // all other rendering when inside an inactive group.
+        // ── Marked content and optional content visibility ─────────────────────
+        // Marked-content operators are tracked regardless of visibility; every
+        // other operator is skipped inside a hidden optional-content sequence.
         match op {
             Operator::BeginOptionalContent(key) => {
                 let visible = self.resources.ocg_is_visible(key);
                 self.ocg_stack.push(visible);
                 return;
             }
-            Operator::EndOptionalContent => {
-                // Unmatched EMC is tolerated to match real-world PDF readers;
-                // the popped visibility flag is intentionally discarded.
+            Operator::BeginMarkedContent => {
+                self.ocg_stack.push(true);
+                return;
+            }
+            Operator::EndMarkedContent => {
+                // An unmatched `EMC` closes nothing.
                 let _ = self.ocg_stack.pop();
                 return;
             }
             _ => {}
         }
-        // Skip rendering operators when inside an inactive OCG.
         if self.ocg_stack.iter().any(|&v| !v) {
             return;
         }
@@ -411,10 +413,12 @@ impl PageRenderer<'_> {
             }
 
             // ── No-ops ────────────────────────────────────────────────────────
-            Operator::MarkedContent | Operator::CompatibilitySection => {}
+            Operator::MarkedContentPoint | Operator::CompatibilitySection => {}
 
-            // Handled in the OCG pre-pass above; unreachable here.
-            Operator::BeginOptionalContent(_) | Operator::EndOptionalContent => {}
+            // Handled in `execute_one` above; unreachable here.
+            Operator::BeginOptionalContent(_)
+            | Operator::BeginMarkedContent
+            | Operator::EndMarkedContent => {}
 
             Operator::Unknown(kw) => self.warn_unknown_operator(kw),
 
