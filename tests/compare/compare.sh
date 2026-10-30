@@ -3,16 +3,35 @@
 #
 # Usage:
 #   compare.sh [OPTIONS] <PDF>
+#   compare.sh [OPTIONS] <DIR>      every *.pdf under DIR, one summary row each
 #
 # Options:
 #   -r DPI          Resolution in DPI (default: 150)
 #   -f PAGE         First page, 1-based (default: 1)
 #   -l PAGE         Last page, 1-based (default: all)
 #   -t THRESHOLD    Max allowed RMSE per page, 0-255 scale (default: 2.0)
+#   -k TILE_DELTA   Max allowed tile delta per page, 0-255 scale (default: 12)
 #   -R RENDERER     Reference renderer: pdftoppm (default), pdfium or oxide
 #   -v              Verbose: print per-page stats even when passing
 #   -o DIR          Write diff images to DIR (default: discarded)
 #   -n              Dry run: print commands without executing
+#   -s              Print one tab-separated summary row instead of the report
+#
+# A page fails when its RMSE exceeds -t, when its tile delta exceeds -k, or
+# when the two renders differ in size by more than 1 px in either dimension
+# (reported as SIZE: a page-box or rotation disagreement).  Renders within
+# 1 px of each other are cropped to their common size before scoring.
+#
+# The tile delta is the largest difference in mean luminance between the two
+# renders over 32 x 32 px tiles.  Anti-aliasing and hinting differences
+# between renderers move coverage within a tile but hardly change its mean
+# (text pages score 4-6 against pdftoppm at 150 dpi), while content present
+# in one render and missing from the other changes it wholesale (one dropped
+# word scores ~26) and barely moves the page-wide RMSE.
+#
+# Summary row (-s, and each row of directory mode), tab-separated:
+#   status pages failed size_mismatches avg_rmse max_rmse max_tile_delta
+#   rrocket_stderr_lines pdf
 #
 # Exit code: 0 = all pages within threshold; 1 = failures or errors.
 # Dry-run always exits 0.
@@ -48,10 +67,13 @@ DPI=150
 FIRST=1
 LAST=""
 THRESHOLD="2.0"
+TILE_LIMIT="12"
+TILE_PX=32
 REFERENCE="pdftoppm"
 VERBOSE=false
 OUT_DIR=""
 DRY_RUN=false
+SUMMARY=false
 
 usage() {
     grep '^#' "$0" | grep -v '^#!/' | sed 's/^# \{0,2\}//'
@@ -63,16 +85,18 @@ die() { echo "Error: $*" >&2; exit 1; }
 is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 is_pos_number()   { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 
-while getopts ":r:f:l:t:R:vo:nh" opt; do
+while getopts ":r:f:l:t:k:R:vo:nsh" opt; do
     case $opt in
         r) DPI="$OPTARG" ;;
         f) FIRST="$OPTARG" ;;
         l) LAST="$OPTARG" ;;
         t) THRESHOLD="$OPTARG" ;;
+        k) TILE_LIMIT="$OPTARG" ;;
         R) REFERENCE="$OPTARG" ;;
         v) VERBOSE=true ;;
         o) OUT_DIR="$OPTARG" ;;
         n) DRY_RUN=true ;;
+        s) SUMMARY=true ;;
         h) usage ;;
         :) die "option -$OPTARG requires an argument." ;;
        \?) die "unknown option -$OPTARG." ;;
@@ -83,17 +107,43 @@ shift $((OPTIND - 1))
 # ── input validation ──────────────────────────────────────────────────────────
 [[ $# -lt 1 ]] && { echo "Error: PDF argument required." >&2; usage; }
 PDF="$1"
-[[ -f "$PDF" ]] || die "file not found: $PDF"
 
 is_positive_int "$DPI"   || die "-r DPI must be a positive integer, got: $DPI"
 is_positive_int "$FIRST" || die "-f PAGE must be a positive integer, got: $FIRST"
 [[ -z "$LAST" ]] || is_positive_int "$LAST" || die "-l PAGE must be a positive integer, got: $LAST"
 is_pos_number "$THRESHOLD" || die "-t THRESHOLD must be a non-negative number, got: $THRESHOLD"
+is_pos_number "$TILE_LIMIT" || die "-k TILE_DELTA must be a non-negative number, got: $TILE_LIMIT"
 [[ -n "$LAST" && "$LAST" -lt "$FIRST" ]] && die "-l ($LAST) must be >= -f ($FIRST)"
 case "$REFERENCE" in
     pdftoppm|pdfium|oxide) ;;
     *) die "-R must be pdftoppm, pdfium or oxide, got: $REFERENCE" ;;
 esac
+
+# ── directory mode: one summary row per PDF ───────────────────────────────────
+if [[ -d "$PDF" ]]; then
+    file_opts=(-s -r "$DPI" -f "$FIRST" -t "$THRESHOLD" -k "$TILE_LIMIT" -R "$REFERENCE")
+    [[ -n "$LAST" ]] && file_opts+=(-l "$LAST")
+    mapfile -d '' pdfs < <(find "$PDF" -type f -iname '*.pdf' -print0 | sort -z)
+    [[ ${#pdfs[@]} -gt 0 ]] || die "no PDF files under $PDF"
+    $DRY_RUN && { printf '%s\n' "${pdfs[@]}"; exit 0; }
+    printf "status\tpages\tfailed\tsize\tavg_rmse\tmax_rmse\ttile\tstderr\tpdf\n"
+    any_fail=0
+    for pdf in "${pdfs[@]}"; do
+        opts=("${file_opts[@]}")
+        # Diff images of each PDF go to their own subdirectory.
+        [[ -n "$OUT_DIR" ]] && opts+=(-o "${OUT_DIR}/$(basename "$pdf" .pdf)")
+        row="$("$0" "${opts[@]}" "$pdf" 2>/dev/null)" || any_fail=1
+        # A run that stopped before scoring prints no row.
+        if [[ -n "$row" ]]; then
+            printf '%s\n' "$row"
+        else
+            printf "ERROR\t-\t-\t-\t-\t-\t-\t-\t%s\n" "$pdf"
+        fi
+    done
+    exit "$any_fail"
+fi
+
+[[ -f "$PDF" ]] || die "file not found: $PDF"
 
 # ── build argument lists early (dry-run needs them) ───────────────────────────
 # -cropbox: rrocket renders the CropBox, pdftoppm defaults to the MediaBox.
@@ -123,8 +173,10 @@ if $DRY_RUN; then
     echo "  [render new]  $RASTER_BIN ${new_args[*]} $PDF <OUT>/new/page"
     echo "  [per page]    compare -metric RMSE <OUT>/ref/page-NNN.ppm \\"
     echo "                        <OUT>/new/page-NNN.ppm <DIFF>/page-NNN-diff.png"
+    echo "  [per page]    convert <ref> <new> -colorspace gray -filter box -resize <tiles>! \\"
+    echo "                        -compose difference -composite   (tile delta)"
     echo ""
-    echo "  Settings: DPI=${DPI}  first=${FIRST}  last=${LAST:-all}  threshold=${THRESHOLD}/255  ref=${REFERENCE}"
+    echo "  Settings: DPI=${DPI}  first=${FIRST}  last=${LAST:-all}  threshold=${THRESHOLD}/255  tile=${TILE_LIMIT}/255  ref=${REFERENCE}"
     [[ -n "$OUT_DIR" ]] && echo "  Diff dir: ${OUT_DIR}"
     exit 0
 fi
@@ -246,11 +298,18 @@ if [[ -n "${RAW_REF_DIR:-}" ]]; then
 fi
 
 # ── compare page by page ──────────────────────────────────────────────────────
+# Per-page lines; suppressed in summary-row mode.
+# shellcheck disable=SC2059  # forwards the caller's format string
+say() { $SUMMARY || printf "$@"; }
+
 fail=0
 pass=0
+size_mismatch=0
 total_rmse="0"
 max_rmse="0"
 worst_page=""
+max_tile="0"
+worst_tile_page=""
 
 shopt -s nullglob
 ref_pages=("${REF_DIR}"/page-*.ppm)
@@ -268,32 +327,48 @@ fi
 for ref_file in "${ref_pages[@]}"; do
     page_tag="$(basename "$ref_file" .ppm)"   # e.g. "page-001"
     new_file="${NEW_DIR}/${page_tag}.ppm"
-    # Per-page resized file so concurrent pages don't clobber each other.
-    resized_file="${WORK_DIR}/resized-${page_tag}.ppm"
     diff_file="${DIFF_DIR}/${page_tag}-diff.png"
 
     if [[ ! -f "$new_file" ]]; then
-        printf "MISSING  %s — rrocket produced no output\n" "$page_tag"
+        say "MISSING  %s — rrocket produced no output\n" "$page_tag"
         fail=$((fail + 1))
         continue
     fi
 
-    # Normalise dimensions: renderers may differ by ±1px due to independent
-    # rounding; resize new to match reference geometry before diffing.
-    ref_dim="$(identify -format "%wx%h" "$ref_file" 2>/dev/null)" \
+    read -r ref_w ref_h < <(identify -format "%w %h\n" "$ref_file" 2>/dev/null) \
         || die "identify failed on ref image: $ref_file"
-    new_dim="$(identify -format "%wx%h" "$new_file" 2>/dev/null)" \
+    read -r new_w new_h < <(identify -format "%w %h\n" "$new_file" 2>/dev/null) \
         || die "identify failed on new image: $new_file"
 
-    cmp_file="$new_file"
-    if [[ "$ref_dim" != "$new_dim" ]]; then
-        convert "$new_file" -resize "${ref_dim}!" -filter Point "$resized_file" \
-            || die "convert resize failed for $page_tag"
-        cmp_file="$resized_file"
+    # A difference beyond 1 px is a geometry disagreement (page box, rotation,
+    # UserUnit), not rounding: report it rather than rescale one render onto
+    # the other.
+    dw=$((ref_w - new_w)); dh=$((ref_h - new_h))
+    if (( dw < -1 || dw > 1 || dh < -1 || dh > 1 )); then
+        say "SIZE     %-12s  ref=%dx%d  rrocket=%dx%d\n" "$page_tag" "$ref_w" "$ref_h" "$new_w" "$new_h"
+        size_mismatch=$((size_mismatch + 1))
+        fail=$((fail + 1))
+        continue
+    fi
+
+    # Within 1 px: score the common area, so content stays pixel-aligned.
+    ref_cmp="$ref_file"
+    new_cmp="$new_file"
+    w=$(( ref_w < new_w ? ref_w : new_w ))
+    h=$(( ref_h < new_h ? ref_h : new_h ))
+    if (( w != ref_w || h != ref_h )); then
+        ref_cmp="${WORK_DIR}/crop-ref-${page_tag}.ppm"
+        convert "$ref_file" -crop "${w}x${h}+0+0" +repage "$ref_cmp" \
+            || die "crop failed for $page_tag"
+    fi
+    if (( w != new_w || h != new_h )); then
+        new_cmp="${WORK_DIR}/crop-new-${page_tag}.ppm"
+        convert "$new_file" -crop "${w}x${h}+0+0" +repage "$new_cmp" \
+            || die "crop failed for $page_tag"
     fi
 
     # compare exits 1 when images differ (expected); 2 means a real error.
-    rmse_line="$(compare -metric RMSE "$ref_file" "$cmp_file" "$diff_file" 2>&1)" \
+    rmse_line="$(compare -metric RMSE "$ref_cmp" "$new_cmp" "$diff_file" 2>&1)" \
         || { ec=$?; [[ $ec -eq 1 ]] || die "compare failed ($ec) for $page_tag: $rmse_line"; }
 
     # Output format: "<absolute> (<normalized>)" e.g. "3.14 (0.0123)"
@@ -308,41 +383,71 @@ for ref_file in "${ref_pages[@]}"; do
     rmse_255="$(bc -l <<< "scale=4; ${rmse_norm} * 255")" \
         || die "bc arithmetic failed for $page_tag (rmse_norm='$rmse_norm')"
 
+    # Tile delta: box-average each render's luminance down to one sample per
+    # TILE_PX x TILE_PX tile, then take the largest absolute difference.
+    tiles_x=$(( (w + TILE_PX - 1) / TILE_PX ))
+    tiles_y=$(( (h + TILE_PX - 1) / TILE_PX ))
+    tile_255="$(convert "$ref_cmp" "$new_cmp" -colorspace gray -filter box \
+        -resize "${tiles_x}x${tiles_y}!" -compose difference -composite \
+        -format "%[fx:maxima*255]" info:)" \
+        || die "tile delta failed for $page_tag"
+    tile_255="$(printf '%.4f' "$tile_255")"
+
     total_rmse="$(bc -l <<< "scale=4; ${total_rmse} + ${rmse_255}")"
 
-    over_threshold="$(bc -l <<< "${rmse_255} > ${THRESHOLD}")"
-    if [[ "$over_threshold" -eq 1 ]]; then
-        printf "FAIL     %-12s  RMSE=%8s/255  (limit=%s)  diff→%s\n" \
-            "$page_tag" "$rmse_255" "$THRESHOLD" "$diff_file"
+    rmse_over="$(bc -l <<< "${rmse_255} > ${THRESHOLD}")"
+    tile_over="$(bc -l <<< "${tile_255} > ${TILE_LIMIT}")"
+    if [[ "$rmse_over" -eq 1 || "$tile_over" -eq 1 ]]; then
+        say "FAIL     %-12s  RMSE=%8s/255  tile=%8s/255  (limits %s, %s)  diff→%s\n" \
+            "$page_tag" "$rmse_255" "$tile_255" "$THRESHOLD" "$TILE_LIMIT" "$diff_file"
         fail=$((fail + 1))
     else
         if $VERBOSE; then
-            printf "OK       %-12s  RMSE=%8s/255\n" "$page_tag" "$rmse_255"
+            say "OK       %-12s  RMSE=%8s/255  tile=%8s/255\n" "$page_tag" "$rmse_255" "$tile_255"
         fi
         pass=$((pass + 1))
     fi
 
-    is_worse="$(bc -l <<< "${rmse_255} > ${max_rmse}")"
-    if [[ "$is_worse" -eq 1 ]]; then
+    if [[ "$(bc -l <<< "${rmse_255} > ${max_rmse}")" -eq 1 ]]; then
         max_rmse="$rmse_255"
         worst_page="$page_tag"
+    fi
+    if [[ "$(bc -l <<< "${tile_255} > ${max_tile}")" -eq 1 ]]; then
+        max_tile="$tile_255"
+        worst_tile_page="$page_tag"
     fi
 done
 
 total=$((pass + fail))
+scored=$((pass + fail - size_mismatch))
 avg_rmse="0"
-[[ $total -gt 0 ]] && avg_rmse="$(bc -l <<< "scale=4; ${total_rmse} / ${total}")"
+[[ $scored -gt 0 ]] && avg_rmse="$(bc -l <<< "scale=4; ${total_rmse} / ${scored}")"
+# Lines rrocket wrote to stderr: warnings about content it skipped or
+# could not decode.
+stderr_lines="$(grep -c . "${WORK_DIR}/new.log" || true)"
+
+if $SUMMARY; then
+    status=PASS
+    [[ $fail -eq 0 ]] || status=FAIL
+    printf "%s\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\t%d\t%s\n" "$status" "$total" "$fail" \
+        "$size_mismatch" "$avg_rmse" "$max_rmse" "$max_tile" "$stderr_lines" "$PDF"
+    [[ $fail -eq 0 ]] || exit 1
+    exit 0
+fi
 
 echo ""
 echo "── Summary ──────────────────────────────────────────────────────────────"
-printf "  PDF:       %s\n" "$(basename "$PDF")"
-printf "  Reference: %s\n" "$REFERENCE"
-printf "  DPI:       %s\n" "$DPI"
-printf "  Pages:     %d total, %d passed, %d failed\n" "$total" "$pass" "$fail"
-printf "  Avg RMSE:  %.4f / 255\n" "$avg_rmse"
-printf "  Max RMSE:  %.4f / 255  (%s)\n" "$max_rmse" "${worst_page:-none}"
-printf "  Threshold: %.1f / 255\n" "$THRESHOLD"
-[[ -n "$OUT_DIR" ]] && printf "  Diff dir:  %s\n" "$DIFF_DIR"
+printf "  PDF:        %s\n" "$(basename "$PDF")"
+printf "  Reference:  %s\n" "$REFERENCE"
+printf "  DPI:        %s\n" "$DPI"
+printf "  Pages:      %d total, %d passed, %d failed (%d size mismatches)\n" \
+    "$total" "$pass" "$fail" "$size_mismatch"
+printf "  Avg RMSE:   %.4f / 255\n" "$avg_rmse"
+printf "  Max RMSE:   %.4f / 255  (%s)\n" "$max_rmse" "${worst_page:-none}"
+printf "  Max tile:   %.4f / 255  (%s)\n" "$max_tile" "${worst_tile_page:-none}"
+printf "  Thresholds: RMSE %.1f / 255, tile %.1f / 255\n" "$THRESHOLD" "$TILE_LIMIT"
+printf "  rrocket stderr: %d lines\n" "$stderr_lines"
+[[ -n "$OUT_DIR" ]] && printf "  Diff dir:   %s\n" "$DIFF_DIR"
 echo "─────────────────────────────────────────────────────────────────────────"
 
 if [[ $fail -eq 0 ]]; then
