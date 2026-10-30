@@ -4,6 +4,7 @@ use super::super::gstate::{ctm_multiply, mat2x2_mul};
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
+use super::pixel_rect::PixelRect;
 use super::text_ops::{
     GlyphRecord, glyph_advance, text_to_device, translate_text_x, translate_text_y,
 };
@@ -110,20 +111,24 @@ impl PageRenderer<'_> {
         // A glyph description paints with its own operators and has no
         // outline to fill or stroke (PDF §9.6.5), so every painting mode
         // executes the CharProc unchanged.
+        // The glyphs are one object under the soft mask in effect.
         if let Some(t3) = &descriptor.type3 {
-            self.show_text_type3(
-                bytes,
-                t3,
-                font_size,
-                ctm,
-                tm,
-                char_spacing,
-                word_spacing,
-                horiz_scaling,
-                rise,
-                do_paint,
-                do_clip,
-            );
+            let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height);
+            self.paint_masked(region, |r| {
+                r.show_text_type3(
+                    bytes,
+                    t3,
+                    font_size,
+                    ctm,
+                    tm,
+                    char_spacing,
+                    word_spacing,
+                    horiz_scaling,
+                    rise,
+                    do_paint,
+                    do_clip,
+                );
+            });
             return;
         }
 
@@ -327,32 +332,51 @@ impl PageRenderer<'_> {
             );
             let src = PipeSrc::Solid(&fill_bytes);
 
-            for rec in &records {
-                #[expect(
-                    clippy::cast_possible_wrap,
-                    reason = "glyph dimensions are always small (sub-pixel-sized); cannot exceed i32::MAX"
-                )]
-                let glyph = GlyphBitmap {
-                    data: &rec.bitmap.data,
-                    x: rec.bitmap.x_off,
-                    y: rec.bitmap.y_off,
-                    w: rec.bitmap.width as i32,
-                    h: rec.bitmap.height as i32,
-                    aa: rec.bitmap.aa,
-                };
-                // The ClipResult return value is only relevant for accumulating
-                // text-as-clip paths (text render modes 4–7), which Phase 3 below
-                // handles separately via glyph_path; per-glyph fill output is unused.
-                let _ = fill_glyph::<Rgb8>(
-                    &mut self.bitmap,
-                    &clip,
-                    &pipe,
-                    &src,
-                    rec.pen_x,
-                    rec.pen_y,
-                    &glyph,
-                );
-            }
+            // The glyph bitmaps are one object under the soft mask in effect.
+            let region = PixelRect::around(
+                records.iter().flat_map(|rec| {
+                    let x = f64::from(rec.pen_x) + f64::from(rec.bitmap.x_off);
+                    let y = f64::from(rec.pen_y) + f64::from(rec.bitmap.y_off);
+                    [
+                        (x, y),
+                        (
+                            x + f64::from(rec.bitmap.width),
+                            y + f64::from(rec.bitmap.height),
+                        ),
+                    ]
+                }),
+                0.0,
+                self.width,
+                self.height,
+            );
+            self.paint_masked(region, |r| {
+                for rec in &records {
+                    #[expect(
+                        clippy::cast_possible_wrap,
+                        reason = "glyph dimensions are always small (sub-pixel-sized); cannot exceed i32::MAX"
+                    )]
+                    let glyph = GlyphBitmap {
+                        data: &rec.bitmap.data,
+                        x: rec.bitmap.x_off,
+                        y: rec.bitmap.y_off,
+                        w: rec.bitmap.width as i32,
+                        h: rec.bitmap.height as i32,
+                        aa: rec.bitmap.aa,
+                    };
+                    // The ClipResult return value is only relevant for accumulating
+                    // text-as-clip paths (text render modes 4–7), which Phase 3 below
+                    // handles separately via glyph_path; per-glyph fill output is unused.
+                    let _ = fill_glyph::<Rgb8>(
+                        &mut r.bitmap,
+                        &clip,
+                        &pipe,
+                        &src,
+                        rec.pen_x,
+                        rec.pen_y,
+                        &glyph,
+                    );
+                }
+            });
             if pattern_fill {
                 let mut union = raster::path::Path::new();
                 for path in &fill_paths {

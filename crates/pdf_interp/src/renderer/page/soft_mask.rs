@@ -11,7 +11,9 @@
 //! alpha-premultiplied colour when the bitmap carries alpha.  Every
 //! compositing operation is linear in its source alpha in that space, so the
 //! result equals painting the object with its alpha scaled by `m`, whatever
-//! the paint path (fill, stroke, glyph, image, shading, group).
+//! the paint path (fill, stroke, glyph, image, shading, group).  The prior
+//! pixels are captured over the object's own rectangle within the clip,
+//! which each painting primitive knows.
 
 use std::sync::Arc;
 
@@ -94,19 +96,43 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// Run `paint` — one painting operator — under `mask`.
+    /// Run `paint` — the painting of one object within `region`, the
+    /// pixels it can touch — under the soft mask in effect, if any.
     ///
-    /// The soft mask is removed from the graphics state while `paint` runs,
-    /// so that operators nested inside it (a form's content, a Type 3
-    /// glyph) are not masked a second time.
+    /// The mask is removed from the graphics state while `paint` runs, so
+    /// that painting it performs through other primitives (a Type 3 glyph's
+    /// content, a group's compositing) is not masked a second time.
+    pub(super) fn paint_masked<R>(
+        &mut self,
+        region: Option<PixelRect>,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let Some(mask) = self.gstate.current_mut().soft_mask.take() else {
+            return paint(self);
+        };
+        let result = self.paint_through_soft_mask(&mask, region, paint);
+        self.gstate.current_mut().soft_mask = Some(mask);
+        result
+    }
+
+    /// Run `paint` — the painting of one object within `region`, the
+    /// pixels it can touch — under `mask`.  A mask of the wrong size, or a
+    /// region outside the clip, leaves the painting unmasked.
     pub(super) fn paint_through_soft_mask<R>(
         &mut self,
         mask: &SoftMaskPlane,
+        region: Option<PixelRect>,
         paint: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let region = (mask.width == self.width && mask.height == self.height)
-            .then(|| PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height))
-            .flatten();
+        let region = region
+            .filter(|_| mask.width == self.width && mask.height == self.height)
+            .and_then(|r| {
+                r.intersect(PixelRect::of_clip(
+                    &self.gstate.current().clip,
+                    self.width,
+                    self.height,
+                )?)
+            });
         let Some(region) = region else {
             return paint(self);
         };

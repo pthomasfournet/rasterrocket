@@ -167,11 +167,12 @@ impl<P: Pixel> GroupBitmap<P> {
     }
 
     /// The group region as half-open pixel ranges `(x0, y0, x1, y1)`.
+    #[must_use]
     #[expect(
         clippy::cast_sign_loss,
         reason = "begin_group clamped the bounds to [0, parent dimension)"
     )]
-    const fn region(&self) -> (u32, u32, u32, u32) {
+    pub const fn region(&self) -> (u32, u32, u32, u32) {
         let p = &self.params;
         (
             p.x_min as u32,

@@ -31,13 +31,6 @@ impl PageRenderer<'_> {
             return;
         }
 
-        if paints(op)
-            && let Some(mask) = self.gstate.current_mut().soft_mask.take()
-        {
-            self.paint_through_soft_mask(&mask, |r| r.dispatch(op));
-            self.gstate.current_mut().soft_mask = Some(mask);
-            return;
-        }
         self.dispatch(op);
     }
 
@@ -474,26 +467,4 @@ impl PageRenderer<'_> {
             );
         }
     }
-}
-
-/// Whether `op` paints, and so is subject to the soft mask.
-const fn paints(op: &Operator) -> bool {
-    matches!(
-        op,
-        Operator::Fill
-            | Operator::FillEvenOdd
-            | Operator::Stroke
-            | Operator::CloseStroke
-            | Operator::CloseFillStroke
-            | Operator::CloseFillStrokeEvenOdd
-            | Operator::FillStroke
-            | Operator::FillStrokeEvenOdd
-            | Operator::ShowText(_)
-            | Operator::ShowTextArray(_)
-            | Operator::MoveNextLineShow(_)
-            | Operator::MoveNextLineShowSpaced { .. }
-            | Operator::PaintXObject(_)
-            | Operator::InlineImage { .. }
-            | Operator::PaintShading(_)
-    )
 }

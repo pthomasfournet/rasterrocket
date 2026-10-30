@@ -17,6 +17,7 @@ use raster::stroke::{StrokeParams, stroke};
 use raster::xpath::XPath;
 use raster::{Bitmap, eo_fill, fill};
 
+use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::resources::ShadingPattern;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
@@ -59,6 +60,7 @@ impl PageRenderer<'_> {
         &mut self,
         pattern: ShadingPattern,
         stroke: bool,
+        region: Option<PixelRect>,
         paint: impl FnOnce(&mut Self, &PipeState<'_>, ResolvedShading) -> R,
     ) -> R {
         let ShadingPattern {
@@ -87,7 +89,7 @@ impl PageRenderer<'_> {
         let (alpha, blend_mode, backdrop) = pipe_of(self);
         let pipe = Self::make_pipe(alpha, blend_mode, backdrop.as_deref());
         let result = match self.gstate.current_mut().soft_mask.take() {
-            Some(mask) => self.paint_through_soft_mask(&mask, |r| paint(r, &pipe, shading)),
+            Some(mask) => self.paint_through_soft_mask(&mask, region, |r| paint(r, &pipe, shading)),
             None => paint(self, &pipe, shading),
         };
         self.gstate.restore();
@@ -117,7 +119,10 @@ impl PageRenderer<'_> {
             shading.bbox,
             flatness,
         );
-        match shading.result {
+        // The shading is one object under the soft mask in effect; it can
+        // paint the whole clip.
+        let region = PixelRect::of_clip(&clip, self.width, self.height);
+        self.paint_masked(region, |r| match shading.result {
             ShadingResult::Pattern(pattern) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),
@@ -126,7 +131,7 @@ impl PageRenderer<'_> {
                     (clip.x_min, clip.y_max),
                 ]);
                 shaded_fill::<Rgb8>(
-                    &mut self.bitmap,
+                    &mut r.bitmap,
                     &clip,
                     &area,
                     &pipe,
@@ -139,10 +144,10 @@ impl PageRenderer<'_> {
             }
             ShadingResult::Mesh(triangles) => {
                 for tri in triangles {
-                    gouraud_triangle_fill::<Rgb8>(&mut self.bitmap, &clip, &pipe, tri);
+                    gouraud_triangle_fill::<Rgb8>(&mut r.bitmap, &clip, &pipe, tri);
                 }
             }
-        }
+        });
     }
 
     /// Fill `path` with a shading pattern under `clip`: the `Background`

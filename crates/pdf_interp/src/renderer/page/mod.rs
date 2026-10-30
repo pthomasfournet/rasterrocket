@@ -78,6 +78,7 @@ use super::color::RasterColor;
 use super::font_cache::{DocumentFonts, FontCache};
 use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform, invert_affine};
 use crate::content::Operator;
+use crate::resources::SoftMask;
 use crate::resources::{
     ColorSpace, IMAGE_FILTER_COUNT, ImageColorSpace, ImageFilter, PageResources,
 };
@@ -98,6 +99,7 @@ use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
 use image_sampler::{GridClip, MaskSampler, SampleGrid};
+use pixel_rect::PixelRect;
 use std::sync::Arc;
 
 const _: () = assert!(
@@ -1101,6 +1103,17 @@ impl<'doc> PageRenderer<'doc> {
         // fills whole device pixels.
         let hinted = path.with_fill_adjust_hints();
         let path = hinted.as_ref().unwrap_or(path);
+        let region = self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), 1.0);
+        self.paint_masked(region, |r| r.fill_within(path, even_odd, region));
+    }
+
+    /// Fill `path`, whose pixels lie within `region`.
+    fn fill_within(
+        &mut self,
+        path: &raster::path::Path,
+        even_odd: bool,
+        region: Option<PixelRect>,
+    ) {
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
         let flatness = gs.flatness.max(0.1);
@@ -1115,15 +1128,12 @@ impl<'doc> PageRenderer<'doc> {
         // A pattern colour that does not resolve, or whose object lies
         // outside the clip, paints nothing: the fill colour is not a
         // fallback for it.
-        let region = pat_name
-            .as_ref()
-            .and_then(|_| self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), 1.0));
         let tiled = match pat_name
             .as_deref()
             .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
-                self.paint_shading_pattern(*pattern, false, |r, pipe, shading| {
+                self.paint_shading_pattern(*pattern, false, region, |r, pipe, shading| {
                     r.fill_with_shading(path, even_odd, clip, pipe, flatness, shading);
                 });
                 return;
@@ -1222,6 +1232,27 @@ impl<'doc> PageRenderer<'doc> {
     }
 
     fn stroke_path(&mut self, path: &raster::path::Path) {
+        let region = self.stroke_bounds(path);
+        self.paint_masked(region, |r| r.stroke_within(path, region));
+    }
+
+    /// The pixels a stroke of `path` can touch: the path's bounds grown by
+    /// the stroke's reach — half the line width times the miter limit (or
+    /// √2, for a square cap), in device pixels — within the clip.  Under a
+    /// singular CTM the stroker works in device space with the line width
+    /// unscaled.
+    fn stroke_bounds(&self, path: &raster::path::Path) -> Option<PixelRect> {
+        let gs = self.gstate.current();
+        let device = self.device_matrix();
+        let scale = invert_affine(&device).map_or(1.0, |_| {
+            device[0].hypot(device[1]).max(device[2].hypot(device[3]))
+        });
+        let reach = gs.line_width / 2.0 * scale * gs.miter_limit.max(std::f64::consts::SQRT_2);
+        self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0)
+    }
+
+    /// Stroke `path`, whose stroke lies within `region`.
+    fn stroke_within(&mut self, path: &raster::path::Path, region: Option<PixelRect>) {
         // Clone all graphics state data before any mutable borrow.
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
@@ -1246,16 +1277,14 @@ impl<'doc> PageRenderer<'doc> {
         // to a line or point, so it is stroked in device space unchanged.
         let device = self.device_matrix();
         let device_flatness = flatness;
-        let device_path = path;
-        let (path, matrix, flatness, stroke_scale) = invert_affine(&device).map_or_else(
-            || (path.clone(), DEVICE_MATRIX, flatness, 1.0),
+        let (path, matrix, flatness) = invert_affine(&device).map_or_else(
+            || (path.clone(), DEVICE_MATRIX, flatness),
             |inv| {
                 let scale = device[0]
                     .mul_add(device[3], -(device[1] * device[2]))
                     .abs()
                     .sqrt();
-                let reach = device[0].hypot(device[1]).max(device[2].hypot(device[3]));
-                (transform_path(path, &inv), device, flatness / scale, reach)
+                (transform_path(path, &inv), device, flatness / scale)
             },
         );
 
@@ -1272,30 +1301,25 @@ impl<'doc> PageRenderer<'doc> {
         };
 
         // Resolve the stroke source — pattern or solid colour.  A pattern
-        // colour that does not resolve paints nothing.  The stroke reaches
-        // at most half the line width times the miter limit (or √2, for a
-        // square cap) past the path, measured in device pixels.
-        let region = pat_name.as_ref().and_then(|_| {
-            let reach = line_width / 2.0 * stroke_scale * miter_limit.max(std::f64::consts::SQRT_2);
-            self.paint_region(device_path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0)
-        });
+        // colour that does not resolve paints nothing.
         let tiled = match pat_name
             .as_deref()
             .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 let clip = clip.clone_shared();
-                let stroked = self.paint_shading_pattern(*pattern, true, |r, pipe, shading| {
-                    r.stroke_with_shading(
-                        &path,
-                        &matrix,
-                        &params,
-                        clip,
-                        pipe,
-                        device_flatness,
-                        shading,
-                    )
-                });
+                let stroked =
+                    self.paint_shading_pattern(*pattern, true, region, |r, pipe, shading| {
+                        r.stroke_with_shading(
+                            &path,
+                            &matrix,
+                            &params,
+                            clip,
+                            pipe,
+                            device_flatness,
+                            shading,
+                        )
+                    });
                 if stroked {
                     return;
                 }
@@ -1466,72 +1490,21 @@ impl<'doc> PageRenderer<'doc> {
 
         // Transparency group: allocate an intermediate bitmap, render into it,
         // then composite back onto the page.
-        let mut group = form.transparency.and_then(|tg| {
-            // Map BBox corners through the new CTM to get the device-space extent.
-            let ctm = self.gstate.current().ctm;
-            let page_h = f64::from(self.height);
-            let [bx0, by0, bx1, by1] = form.bbox;
-            let corners = [
-                ctm_transform(&ctm, bx0, by0),
-                ctm_transform(&ctm, bx1, by0),
-                ctm_transform(&ctm, bx0, by1),
-                ctm_transform(&ctm, bx1, by1),
-            ];
-            // A non-finite BBox or degenerate CTM produces NaN corners; the
-            // subsequent as-i32 cast would be UB on some platforms.  Fall back
-            // to rendering without a group (paint directly onto the page).
-            if corners
-                .iter()
-                .any(|(x, y)| !x.is_finite() || !y.is_finite())
-            {
-                log::warn!(
-                    "rasterrocket-interp: transparency group BBox is non-finite — rendering without group"
-                );
-                return None;
-            }
-            let left = corners
-                .iter()
-                .map(|(x, _)| *x)
-                .fold(f64::INFINITY, f64::min)
-                .floor();
-            let top = corners
-                .iter()
-                .map(|(_, y)| page_h - y)
-                .fold(f64::INFINITY, f64::min)
-                .floor();
-            let right = corners
-                .iter()
-                .map(|(x, _)| *x)
-                .fold(f64::NEG_INFINITY, f64::max)
-                .ceil();
-            let bottom = corners
-                .iter()
-                .map(|(_, y)| page_h - y)
-                .fold(f64::NEG_INFINITY, f64::max)
-                .ceil();
-
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "f64→i32 cast saturates in Rust ≥ 1.45 (no UB); \
-                          begin_group clamps GroupParams to bitmap bounds"
-            )]
-            let params = GroupParams {
-                x_min: left as i32,
-                y_min: top as i32,
-                x_max: right as i32,
-                y_max: bottom as i32,
-                isolated: tg.isolated,
-                knockout: tg.knockout,
-                soft_mask_type: raster::transparency::SoftMaskType::None,
-            };
-            let clip = self.gstate.current().clip.clone_shared();
-            Some(begin_group(&self.bitmap, &clip, params))
-        });
+        let mut group = form
+            .transparency
+            .and_then(|tg| self.group_params(form.bbox, tg))
+            .map(|params| begin_group(&self.bitmap, &self.gstate.current().clip, params));
 
         // Swap in the group bitmap when present.  PDF §11.6.6: the alpha
         // constants and blend mode start at their initial values inside a
         // transparency group; the parent's values apply once, when the group
         // is composited.
+        // A group is one object under the soft mask in effect: the mask
+        // applies when the group is composited, not to its content.
+        let group_mask = group
+            .as_ref()
+            .and_then(|_| self.gstate.current_mut().soft_mask.take());
+
         // Blend modes inside the group see its own backdrop: the parent's
         // pixels for a non-isolated group, nothing for an isolated one.
         let parent_backdrop = group.as_mut().map(|g| {
@@ -1554,8 +1527,17 @@ impl<'doc> PageRenderer<'doc> {
             self.group_backdrop = parent_backdrop;
             let backdrop = self.blend_backdrop(parent_blend_mode);
             let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode, backdrop.as_deref());
+            let (x0, y0, x1, y1) = g.region();
+            let region = PixelRect::new(x0, y0, x1, y1);
             // Residual Clip is unused — parent gstate is restored immediately below.
-            let _ = paint_group(&mut self.bitmap, g, &pipe);
+            match group_mask {
+                Some(mask) => self.paint_through_soft_mask(&mask, region, |r| {
+                    let _ = paint_group(&mut r.bitmap, g, &pipe);
+                }),
+                None => {
+                    let _ = paint_group(&mut self.bitmap, g, &pipe);
+                }
+            }
         }
 
         // Restore resources and graphics state.
@@ -1563,6 +1545,71 @@ impl<'doc> PageRenderer<'doc> {
         self.pattern_ctm = parent_pattern_ctm;
         self.form_depth -= 1;
         self.gstate.restore();
+    }
+
+    /// The parameters of a transparency group `tg` whose form has `bbox`:
+    /// the box's extent under the current CTM, in device pixels.  `None`
+    /// when the extent is non-finite; the form then paints directly onto
+    /// the page.
+    fn group_params(
+        &self,
+        bbox: [f64; 4],
+        tg: crate::resources::TransparencyGroupParams,
+    ) -> Option<GroupParams> {
+        let ctm = self.gstate.current().ctm;
+        let page_h = f64::from(self.height);
+        let [bx0, by0, bx1, by1] = bbox;
+        let corners = [
+            ctm_transform(&ctm, bx0, by0),
+            ctm_transform(&ctm, bx1, by0),
+            ctm_transform(&ctm, bx0, by1),
+            ctm_transform(&ctm, bx1, by1),
+        ];
+        if corners
+            .iter()
+            .any(|(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            log::warn!(
+                "rasterrocket-interp: transparency group BBox is non-finite — rendering without group"
+            );
+            return None;
+        }
+        let left = corners
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f64::INFINITY, f64::min)
+            .floor();
+        let top = corners
+            .iter()
+            .map(|(_, y)| page_h - y)
+            .fold(f64::INFINITY, f64::min)
+            .floor();
+        let right = corners
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil();
+        let bottom = corners
+            .iter()
+            .map(|(_, y)| page_h - y)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil();
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "f64→i32 cast saturates in Rust ≥ 1.45 (no UB); \
+                      begin_group clamps GroupParams to bitmap bounds"
+        )]
+        let params = GroupParams {
+            x_min: left as i32,
+            y_min: top as i32,
+            x_max: right as i32,
+            y_max: bottom as i32,
+            isolated: tg.isolated,
+            knockout: tg.knockout,
+            soft_mask_type: raster::transparency::SoftMaskType::None,
+        };
+        Some(params)
     }
 
     /// Blit a decoded image `XObject` onto the bitmap using the current CTM.
@@ -1574,10 +1621,6 @@ impl<'doc> PageRenderer<'doc> {
     /// image or stencil drawn below its resolution is first area-averaged
     /// onto the device pixels (`image_reduce`).  A mask is resampled the
     /// same way and sampled through a [`MaskSampler`] at its own resolution.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
-    )]
     /// `source_width` is the stream's own pixel width, which `img.width`
     /// falls below when the image was decoded at reduced resolution; it feeds
     /// the `source_ppi_hint` diagnostic.
@@ -1659,6 +1702,34 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
 
+        // The image is one object under the soft mask in effect.
+        let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
+        self.paint_masked(region, |r| {
+            r.composite_image(
+                img,
+                &ctm,
+                mask_src.map(|m| (m, mask_ctm)),
+                &grid,
+                &mut grid_clip,
+            );
+        });
+    }
+
+    /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap
+    /// within `grid_clip`; `mask` is its soft mask with the matrix that
+    /// draws it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "GPU dispatch, decoder-contract checks, the mask sampler and the per-pixel loop share the grid and CTM state"
+    )]
+    fn composite_image(
+        &mut self,
+        img: &crate::resources::ImageDescriptor,
+        ctm: &Ctm,
+        mask: Option<(&SoftMask, Ctm)>,
+        grid: &SampleGrid,
+        grid_clip: &mut GridClip<'_>,
+    ) {
         // GPU image-blit path: device-resident pixels sampled by the CUDA
         // kernel through the same grid, composited onto `bitmap` before
         // this call returns so later operators paint over the image in
@@ -1670,7 +1741,7 @@ impl<'doc> PageRenderer<'doc> {
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
-            if self.try_gpu_blit_image(cached, &grid, &mut grid_clip) {
+            if self.try_gpu_blit_image(cached, grid, grid_clip) {
                 return;
             }
             // Promotion or kernel dispatch failed and there are no host
@@ -1729,12 +1800,12 @@ impl<'doc> PageRenderer<'doc> {
             let s = self.gstate.current().fill_color.as_slice();
             [s[0], s[1], s[2]]
         };
-        let mask = match mask_src {
-            Some(m) => {
+        let mask = match mask {
+            Some((m, mask_ctm)) => {
                 let Some(sampler) = MaskSampler::new(
                     m,
                     &mask_ctm,
-                    &ctm,
+                    ctm,
                     self.width,
                     self.height,
                     img.width,

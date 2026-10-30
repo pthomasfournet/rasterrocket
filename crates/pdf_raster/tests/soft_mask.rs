@@ -145,6 +145,63 @@ fn luminosity_backdrop_colour_applies_outside_the_group() {
     assert_eq!(gray_at(&page, 75, 50), 0, "white backdrop: mask 1");
 }
 
+/// The mask applies to each object painted while it is in effect (ISO
+/// 32000-2 §11.6.4.3): two black squares painted over each other at mask
+/// 0.5 darken twice, inside a form without a group as on the page.
+#[test]
+fn a_mask_applies_to_each_object_of_a_form_without_a_group() {
+    let two_squares = b"0 g 20 20 60 60 re f 0 g 20 20 60 60 re f";
+    let pdf = page(
+        "/GS0 << /SMask << /S /Luminosity /G 5 0 R >> >>",
+        "/Fm0 6 0 R",
+        b"/GS0 gs /Fm0 Do",
+        vec![
+            group_form("", b"0.5 g 0 0 100 100 re f"),
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 100 100]",
+                two_squares,
+            ),
+        ],
+    );
+    let page = render(pdf);
+    let twice = gray_at(&page, 50, 50);
+    assert!((60..=68).contains(&twice), "two masked objects: {twice}");
+    assert_eq!(gray_at(&page, 10, 10), 255, "outside the squares");
+}
+
+/// A form with a group is one object: its content composites unmasked
+/// into the group, and the mask applies to the group once.
+#[test]
+fn a_mask_applies_once_to_a_form_with_a_group() {
+    let pdf = page(
+        "/GS0 << /SMask << /S /Luminosity /G 5 0 R >> >>",
+        "/Fm0 6 0 R",
+        b"/GS0 gs /Fm0 Do",
+        vec![
+            group_form("", b"0.5 g 0 0 100 100 re f"),
+            group_form("", b"0 g 20 20 60 60 re f 0 g 20 20 60 60 re f"),
+        ],
+    );
+    let page = render(pdf);
+    let once = gray_at(&page, 50, 50);
+    assert!((125..=130).contains(&once), "one masked group: {once}");
+}
+
+/// A masked object outside the clip paints nothing, and a mask set while
+/// the clip is empty does not disturb later painting.
+#[test]
+fn a_masked_object_outside_the_clip_paints_nothing() {
+    let pdf = page(
+        "/GS0 << /SMask << /S /Luminosity /G 5 0 R >> >>",
+        "",
+        b"q 0 0 50 100 re W n /GS0 gs 0 g 60 0 40 100 re f Q 0 g 0 0 20 20 re f",
+        vec![group_form("", b"1 g 0 0 100 100 re f")],
+    );
+    let page = render(pdf);
+    assert_eq!(gray_at(&page, 80, 50), 255, "clipped away");
+    assert_eq!(gray_at(&page, 10, 10), 0, "painted after Q");
+}
+
 /// `/SMask /None` and `Q` both lift the mask.
 #[test]
 fn soft_mask_is_lifted_by_none_and_by_restore() {
