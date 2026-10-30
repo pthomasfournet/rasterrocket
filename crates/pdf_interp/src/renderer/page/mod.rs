@@ -1179,10 +1179,7 @@ impl<'doc> PageRenderer<'doc> {
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
-            soft_mask: None,
             backdrop: backdrop.map(Backdrop::as_pipe_backdrop),
-            knockout: false,
-            knockout_opacity: 255,
         }
     }
 
@@ -1791,7 +1788,6 @@ impl<'doc> PageRenderer<'doc> {
                 x_max: i32::try_from(self.width).unwrap_or(i32::MAX),
                 y_max: i32::try_from(self.height).unwrap_or(i32::MAX),
                 isolated: tg.isolated,
-                knockout: tg.knockout,
                 soft_mask_type: raster::transparency::SoftMaskType::None,
             });
         };
@@ -1845,7 +1841,6 @@ impl<'doc> PageRenderer<'doc> {
             x_max: right as i32,
             y_max: bottom as i32,
             isolated: tg.isolated,
-            knockout: tg.knockout,
             soft_mask_type: raster::transparency::SoftMaskType::None,
         };
         Some(params)

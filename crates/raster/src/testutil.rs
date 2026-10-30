@@ -21,7 +21,7 @@ pub fn identity_matrix() -> [f64; 6] {
 /// Parametric pipe with configurable `a_input` and `blend_mode`.
 ///
 /// All other fields are set to their neutral defaults (identity transfer,
-/// no soft mask, no overprint, no knockout).
+/// no overprint).
 pub fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
     PipeState {
         blend_mode,
@@ -29,10 +29,7 @@ pub fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
         overprint_mask: 0xFFFF_FFFF,
         overprint_additive: false,
         transfer: TransferSet::identity_rgb(),
-        soft_mask: None,
         backdrop: None,
-        knockout: false,
-        knockout_opacity: 255,
     }
 }
 

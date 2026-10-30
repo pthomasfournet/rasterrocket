@@ -25,9 +25,6 @@
 //! content composited over the parent's own backdrop, so it reaches back to
 //! the nearest isolated ancestor or the page (§11.4.8).
 //!
-//! Knockout groups clear the accumulated alpha on each object; non-knockout groups
-//! accumulate.
-//!
 //! # Soft masks
 //!
 //! When `soft_mask_type != SoftMaskType::None`, the group is later used as a
@@ -78,8 +75,6 @@ pub struct GroupParams {
     /// `false` → the backdrop under the group is kept for blend modes
     /// applied inside it.
     pub isolated: bool,
-    /// `true` → each object within the group clears accumulated alpha first.
-    pub knockout: bool,
     /// Role of this group's output — controls [`extract_soft_mask`] behaviour.
     pub soft_mask_type: SoftMaskType,
 }
@@ -479,7 +474,6 @@ mod tests {
             x_max,
             y_max,
             isolated: true,
-            knockout: false,
             soft_mask_type: SoftMaskType::None,
         }
     }
@@ -563,7 +557,13 @@ mod tests {
     #[test]
     fn nested_non_isolated_backdrop_reaches_the_outer_backdrop() {
         let mut page: Bitmap<Rgb8> = Bitmap::new(4, 1, 4, true);
-        for (px, c) in page.row_bytes_mut(0).chunks_exact_mut(3).zip(0u8..) {
+        for (px, c) in page
+            .row_bytes_mut(0)
+            .as_chunks_mut::<3>()
+            .0
+            .iter_mut()
+            .zip(0u8..)
+        {
             px.copy_from_slice(&[c * 10, 100, 200]);
         }
         if let Some(a) = page.alpha_plane_mut() {

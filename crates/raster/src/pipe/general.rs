@@ -1,4 +1,4 @@
-//! General pipe: soft mask, non-normal blend modes, non-isolated/knockout groups.
+//! General pipe: non-normal blend modes and non-isolated groups.
 //!
 //! This is the "everything else" path, matching `Splash::pipeRun` (the general
 //! case, not one of the specialised `pipeRunSimple*` or `pipeRunAA*` variants).
@@ -8,7 +8,7 @@
 //! Given source alpha `a_src`, destination alpha `a_dst`, and source/dest colours:
 //!
 //! ```text
-//! a_result = a_src + a_dst - div255(a_src * a_dst)           (isolated, non-knockout)
+//! a_result = a_src + a_dst - div255(a_src * a_dst)
 //! c_result = ((a_result - a_src) * c_dst + a_src * blend(c_src, c_dst)) / a_result
 //! ```
 //!
@@ -44,7 +44,7 @@ thread_local! {
 
 /// General-purpose compositing span function.
 ///
-/// Handles soft mask, blend modes, non-isolated groups, knockout, and overprint.
+/// Handles blend modes, non-isolated groups and overprint.
 /// Slower than `simple` or `aa` but covers every case.
 ///
 /// # Preconditions (checked with `debug_assert!`)
@@ -52,7 +52,6 @@ thread_local! {
 /// - `x1 >= x0`
 /// - `dst_pixels.len() == (x1 - x0 + 1) * P::BYTES`
 /// - If `shape` is `Some`, `shape.len() == x1 - x0 + 1`
-/// - If `pipe.soft_mask` is `Some`, `soft_mask.len() == x1 - x0 + 1`
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors C++ SplashPipe API; all parameters are necessary"
@@ -79,9 +78,6 @@ pub(crate) fn render_span_general<P: Pixel>(
     if let Some(sh) = shape {
         debug_assert_eq!(sh.len(), count);
     }
-    if let Some(sm) = pipe.soft_mask {
-        debug_assert_eq!(sm.len(), count, "soft_mask length must equal span count");
-    }
 
     let a_input = u32::from(pipe.a_input);
     let is_nonseparable = matches!(
@@ -92,7 +88,6 @@ pub(crate) fn render_span_general<P: Pixel>(
 
     // Convenience: get optional slice at index i.
     let shape_at = |i: usize| shape.map_or(0xFFu8, |s| s[i]);
-    let soft_mask_at = |i: usize| pipe.soft_mask.map_or(0xFFu8, |s| s[i]);
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -120,7 +115,6 @@ pub(crate) fn render_span_general<P: Pixel>(
                 is_nonseparable,
                 is_cmyk_like,
                 &shape_at,
-                &soft_mask_at,
                 &backdrop_at,
             );
         }
@@ -141,7 +135,6 @@ pub(crate) fn render_span_general<P: Pixel>(
                     is_nonseparable,
                     is_cmyk_like,
                     &shape_at,
-                    &soft_mask_at,
                     &backdrop_at,
                 );
             });
@@ -173,10 +166,8 @@ fn render_span_general_inner<'src, 'bd>(
     is_nonseparable: bool,
     is_cmyk_like: bool,
     shape_at: &dyn Fn(usize) -> u8,
-    soft_mask_at: &dyn Fn(usize) -> u8,
     backdrop_at: &dyn Fn(usize) -> Option<(&'bd [u8], u8)>,
 ) {
-    let has_soft_mask = pipe.soft_mask.is_some();
     let has_shape = shape.is_some();
 
     match dst_alpha {
@@ -186,28 +177,18 @@ fn render_span_general_inner<'src, 'bd>(
                 let src_px = src_px_at(i);
                 let dst_px = &mut dst_pixels[i * ncomps..(i + 1) * ncomps];
                 let shape_v = u32::from(shape_at(i));
-                let soft_v = u32::from(soft_mask_at(i));
 
                 // Source alpha (PDF spec §11.3.6 eq 11.1).
-                let a_src = compute_a_src(a_input, soft_v, shape_v, has_soft_mask, has_shape);
-
-                // Knockout: clear destination alpha before the colour formula so that
-                // a_dst_eff (read on line below) reflects the zeroed value.
-                // This applies to both isolated and non-isolated knockout groups.
-                if pipe.knockout && shape_v >= u32::from(pipe.knockout_opacity) {
-                    dst_alpha[i] = 0;
-                }
+                let a_src = compute_a_src(a_input, shape_v, has_shape);
 
                 let c_src: &[u8] = src_px;
-                let a_dst_eff = u32::from(dst_alpha[i]); // may have been cleared by knockout.
+                let a_dst_eff = u32::from(dst_alpha[i]);
 
                 // The pixel the blend function sees and the alpha weighting
                 // it: the destination, or in a non-isolated group the
-                // group's content over the backdrop (its backdrop alone
-                // under knockout).
+                // group's content over the backdrop.
                 let mut c_union: [u8; MAX_COMPS] = [0; MAX_COMPS];
                 let (c_blend_dst, alpha_im1): (&[u8], u32) = match backdrop_at(i) {
-                    Some((c_0, a_0)) if pipe.knockout => (c_0, u32::from(a_0)),
                     Some((c_0, a_0)) => {
                         let a_union = union_colour(
                             dst_px,
@@ -235,7 +216,7 @@ fn render_span_general_inner<'src, 'bd>(
                 }
 
                 // Result alpha.
-                let a_result = compute_a_result(a_src, a_dst_eff, shape_v, pipe.knockout);
+                let a_result = compute_a_result(a_src, a_dst_eff);
                 let alpha_i = a_result;
 
                 // Result colour.
@@ -281,19 +262,18 @@ fn render_span_general_inner<'src, 'bd>(
         None => {
             // No separate alpha plane: aDest = 0xFF implicitly.
             // Simplifies: aResult = aSrc + 255 - div255(aSrc * 255) = 255, alpha_i = 255.
-            // Non-isolated and knockout modes require a dst_alpha plane to carry the
-            // group alpha; those states are meaningless without one.
+            // A non-isolated group requires a dst_alpha plane to carry the
+            // group alpha.
             debug_assert!(
-                pipe.backdrop.is_none() && !pipe.knockout,
-                "a group backdrop and knockout require dst_alpha; None arm uses implicit a_dst=255"
+                pipe.backdrop.is_none(),
+                "a group backdrop requires dst_alpha; None arm uses implicit a_dst=255"
             );
             for i in 0..count {
                 let src_px = src_px_at(i);
                 let dst_px = &mut dst_pixels[i * ncomps..(i + 1) * ncomps];
                 let shape_v = u32::from(shape_at(i));
-                let soft_v = u32::from(soft_mask_at(i));
 
-                let a_src = compute_a_src(a_input, soft_v, shape_v, has_soft_mask, has_shape);
+                let a_src = compute_a_src(a_input, shape_v, has_shape);
                 // a_src is derived from u8 inputs via div255, so always ≤ 255.
                 // The assert catches any future change that widens the input path.
                 debug_assert!(a_src <= 255, "a_src={a_src} out of [0, 255]");
@@ -337,42 +317,21 @@ fn render_span_general_inner<'src, 'bd>(
     }
 }
 
-/// Compute the effective source alpha for one pixel (PDF spec §11.3.6 eq 11.1).
-///
-/// Combines `a_input` with the soft mask and/or shape coverage according to the
-/// rules: soft mask and shape are multiplied together via `div255`; if either is
-/// absent its default is 1.0 (== 0xFF).
+/// Compute the effective source alpha for one pixel (PDF spec §11.3.6 eq 11.1):
+/// `a_input` scaled by the shape coverage, or `a_input` itself without a shape.
 #[inline]
-fn compute_a_src(
-    a_input: u32,
-    soft_v: u32,
-    shape_v: u32,
-    has_soft_mask: bool,
-    has_shape: bool,
-) -> u32 {
-    if has_soft_mask {
-        if has_shape {
-            u32::from(div255(u32::from(div255(a_input * soft_v)) * shape_v))
-        } else {
-            u32::from(div255(a_input * soft_v))
-        }
-    } else if has_shape {
+fn compute_a_src(a_input: u32, shape_v: u32, has_shape: bool) -> u32 {
+    if has_shape {
         u32::from(div255(a_input * shape_v))
     } else {
         a_input
     }
 }
 
-/// The result alpha of a source of alpha `a_src` and shape `shape` over a
-/// destination of alpha `a_dst`: their union, or under knockout the source
-/// over the destination outside the shape.
-fn compute_a_result(a_src: u32, a_dst: u32, shape: u32, knockout: bool) -> u32 {
-    let a_result = if knockout {
-        a_src + u32::from(div255(a_dst * (255 - shape)))
-    } else {
-        a_src + a_dst - u32::from(div255(a_src * a_dst))
-    };
-    a_result.min(255)
+/// The result alpha of a source of alpha `a_src` over a destination of
+/// alpha `a_dst`: their union.
+fn compute_a_result(a_src: u32, a_dst: u32) -> u32 {
+    (a_src + a_dst - u32::from(div255(a_src * a_dst))).min(255)
 }
 
 /// Write into `out` the colour of a group's content (`c_dst`, alpha `a_dst`)
@@ -531,27 +490,18 @@ mod tests {
     use crate::testutil::make_pipe;
 
     #[test]
-    fn compute_a_src_no_mask_no_shape_returns_a_input() {
-        assert_eq!(compute_a_src(200, 0xFF, 0xFF, false, false), 200);
+    fn compute_a_src_without_shape_returns_a_input() {
+        assert_eq!(compute_a_src(200, 0xFF, false), 200);
     }
 
     #[test]
     fn compute_a_src_shape_zero_gives_zero() {
-        assert_eq!(compute_a_src(255, 0xFF, 0, false, true), 0);
+        assert_eq!(compute_a_src(255, 0, true), 0);
     }
 
     #[test]
-    fn compute_a_src_soft_mask_scales_alpha() {
-        let result = compute_a_src(255, 128, 0xFF, true, false);
-        let expected = u32::from(div255(255 * 128));
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn compute_a_src_soft_and_shape_combines_both() {
-        let result = compute_a_src(255, 128, 128, true, true);
-        let expected = u32::from(div255(u32::from(div255(255 * 128)) * 128));
-        assert_eq!(result, expected);
+    fn compute_a_src_shape_scales_alpha() {
+        assert_eq!(compute_a_src(255, 128, true), u32::from(div255(255 * 128)));
     }
     use crate::pipe::{PipeSrc, PipeState};
     use crate::state::TransferSet;
@@ -564,10 +514,7 @@ mod tests {
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
-            soft_mask: None,
             backdrop: None,
-            knockout: false,
-            knockout_opacity: 255,
         }
     }
 
@@ -626,10 +573,8 @@ mod tests {
     #[test]
     fn a_result_is_the_union_of_source_and_destination() {
         // a_src=128, a_dst=200: 128 + 200 - div255(128 * 200) ≈ 228.
-        let ar = compute_a_result(128, 200, 255, false);
+        let ar = compute_a_result(128, 200);
         assert!((226..=230).contains(&ar), "a_result={ar}");
-        // Knockout: the source replaces the destination within its shape.
-        assert_eq!(compute_a_result(128, 200, 255, true), 128);
     }
 
     #[test]
@@ -701,36 +646,6 @@ mod tests {
     }
 
     #[test]
-    fn soft_mask_modulates_alpha() {
-        // soft_mask[0] = 128 → a_src = div255(255 * 128) ≈ 128.
-        let soft = vec![128u8];
-        let mut dst = vec![0u8; 3];
-        let mut alpha = vec![0u8];
-
-        // We need a pipe with a soft_mask reference.
-        // Since PipeState has a 'bmp lifetime, we store soft_mask as a slice reference.
-        let pipe = PipeState {
-            blend_mode: BlendMode::Normal,
-            a_input: 255,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
-            transfer: TransferSet::identity_rgb(),
-            soft_mask: Some(soft.as_slice()),
-            backdrop: None,
-            knockout: false,
-            knockout_opacity: 255,
-        };
-
-        let src = PipeSrc::Solid(&[255u8, 255, 255]);
-        render_span_general::<Rgb8>(&pipe, &src, &mut dst, Some(&mut alpha), None, 0, 0, 0);
-
-        // a_src ≈ 128; a_dst = 0; a_result ≈ 128.
-        // c = (0 * 0 + 128 * 255) / 128 = 255.
-        assert_eq!(dst[0], 255);
-        assert!((i32::from(alpha[0]) - 128).abs() <= 2, "alpha={}", alpha[0]);
-    }
-
-    #[test]
     fn gray_transfer_lut_applied_correctly() {
         // Regression: the old apply_transfer_channel used rgb[0] for channel 0
         // regardless of pixel mode, so gray transfer was silently wrong.
@@ -746,10 +661,7 @@ mod tests {
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer,
-            soft_mask: None,
             backdrop: None,
-            knockout: false,
-            knockout_opacity: 255,
         };
 
         // Opaque gray source value 100; after inverting transfer: 155.

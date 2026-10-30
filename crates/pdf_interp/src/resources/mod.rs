@@ -272,10 +272,9 @@ pub struct FormXObject {
 /// Parameters extracted from a Form `XObject`'s `Group` dictionary.
 #[derive(Clone, Copy, Debug)]
 pub struct TransparencyGroupParams {
-    /// `I` flag: isolated group (default: false).
+    /// `I` flag: isolated group (default: false).  The `K` (knockout) flag
+    /// is not read: objects in a group composite over one another.
     pub isolated: bool,
-    /// `K` flag: knockout group (default: false).
-    pub knockout: bool,
 }
 
 /// The identity of a font dictionary within one document.
@@ -814,7 +813,6 @@ fn read_transparency_group(doc: &Document, dict: &Dictionary) -> Option<Transpar
     let bool_flag = |key: &[u8]| grp.get(key).and_then(Object::as_bool).unwrap_or(false);
     Some(TransparencyGroupParams {
         isolated: bool_flag(b"I"),
-        knockout: bool_flag(b"K"),
     })
 }
 

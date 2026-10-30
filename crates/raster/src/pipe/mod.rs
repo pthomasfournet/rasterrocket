@@ -8,9 +8,9 @@
 //!
 //! | Variant | When selected | C++ equivalent |
 //! |---------|--------------|----------------|
-//! | `simple` | `a_input == 255`, no soft mask, `BlendMode::Normal` | `pipeRunSimple*` |
-//! | `aa`     | shape byte present, no soft mask, `BlendMode::Normal`, no group correction | `pipeRunAA*` |
-//! | `general`| everything else — soft mask, blend mode, non-isolated/knockout groups | `pipeRun` |
+//! | `simple` | `a_input == 255`, `BlendMode::Normal` | `pipeRunSimple*` |
+//! | `aa`     | shape byte present, `BlendMode::Normal`, no group correction | `pipeRunAA*` |
+//! | `general`| everything else — blend mode, non-isolated groups, overprint | `pipeRun` |
 
 pub mod aa;
 pub mod blend;
@@ -143,22 +143,10 @@ pub struct PipeState<'bmp> {
     /// `GraphicsState`.  Applied to the composited result before writing.
     pub transfer: TransferSet<'bmp>,
 
-    /// Soft mask alpha plane for the current transparency group, if any.
-    /// One byte per bitmap pixel; shares the bitmap's row stride.
-    /// When `Some`, `a_input` is multiplied by the soft mask value per pixel.
-    pub soft_mask: Option<&'bmp [u8]>,
-
     /// The backdrop of the non-isolated group being painted into, consulted
     /// by the blend function; `None` outside such a group, and for
     /// `BlendMode::Normal`, which does not consult it.
     pub backdrop: Option<GroupBackdrop<'bmp>>,
-
-    /// `true` if this is a knockout group: later objects replace earlier objects
-    /// within the group rather than compositing on top of them.
-    pub knockout: bool,
-
-    /// For knockout compositing: the accumulated group opacity threshold.
-    pub knockout_opacity: u8,
 }
 
 /// The backdrop of a non-isolated transparency group (ISO 32000-2 §11.4.7):
@@ -206,29 +194,25 @@ impl GroupBackdrop<'_> {
 impl PipeState<'_> {
     /// Returns `true` when the simple (no-transparency) fast path is applicable.
     ///
-    /// Matches C++ `pipe->noTransparency`:
-    /// `a_input == 255 && no soft_mask && no shape && no backdrop && !in_knockout_group`
+    /// Applicable when `a_input == 255`, there is no shape and no backdrop.
     ///
     /// Overprint must be excluded: the simple path overwrites `dst_pixels` before
     /// reading the original destination, making channel-selective restore impossible.
     #[must_use]
     pub const fn no_transparency(&self, uses_shape: bool) -> bool {
         self.a_input == 255
-            && self.soft_mask.is_none()
             && !uses_shape
-            && !self.knockout
             && self.backdrop.is_none()
             && self.overprint_mask == 0xFFFF_FFFF
     }
 
     /// Returns `true` when the AA (shape-only) fast path is applicable.
     ///
-    /// Matches C++ `pipeRunAA*` selection condition:
-    /// no pattern, not noTransparency, no `soft_mask`, usesShape,
-    /// no backdrop, `BlendMode::Normal`.
+    /// Applicable when there is no backdrop and the blend mode is
+    /// `BlendMode::Normal`.
     #[must_use]
     pub fn use_aa_path(&self) -> bool {
-        self.soft_mask.is_none() && self.backdrop.is_none() && self.blend_mode == BlendMode::Normal
+        self.backdrop.is_none() && self.blend_mode == BlendMode::Normal
     }
 }
 
@@ -240,8 +224,6 @@ impl PipeState<'_> {
 /// - `dst_alpha`: alpha plane bytes for the destination row, starting at `x0`.
 ///   `None` means the destination has no separate alpha (Mono1, or solid-color bitmaps
 ///   without transparency).
-/// - `soft_mask_row`: per-pixel soft-mask byte for this row, starting at `x0`.
-/// - `alpha0_row`: per-pixel alpha0 byte for this row, starting at `x0`.
 /// - `shape`: per-pixel AA shape byte, or `None` for the simple path.
 /// - `screen`: optional halftone screen for Mono1 dithering.
 /// - `x0`, `x1`: inclusive pixel coordinate range within the row.
@@ -298,8 +280,7 @@ pub fn render_span<P: Pixel>(
 ///
 /// The pattern is evaluated once over the whole span.  Each maximal run of
 /// pixels with non-zero coverage is then composited by [`dispatch_span`]
-/// from the precomputed colours, with the soft-mask and alpha0 rows sliced
-/// to the run.  A fully covered run keeps the span's shape; a partially
+/// from the precomputed colours.  A fully covered run keeps the span's shape; a partially
 /// covered run takes the product of shape and coverage as its shape.
 /// Unpainted pixels are not touched.
 #[expect(
@@ -354,10 +335,6 @@ fn render_painted_runs<P: Pixel>(
                 }
                 Some(combined.as_slice())
             };
-            let run_pipe = PipeState {
-                soft_mask: pipe.soft_mask.map(|s| &s[a..b]),
-                ..*pipe
-            };
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_possible_wrap,
@@ -365,7 +342,7 @@ fn render_painted_runs<P: Pixel>(
             )]
             let (run_x0, run_x1) = (x0 + a as i32, x0 + b as i32 - 1);
             dispatch_span::<P>(
-                &run_pipe,
+                pipe,
                 &PipeSrc::Pattern(&RowPattern {
                     data: &colour[a * ncomps..b * ncomps],
                 }),
@@ -565,20 +542,8 @@ mod tests {
 
     #[test]
     fn unpainted_pixels_keep_the_backdrop_on_the_general_path() {
-        // The soft mask is sliced with each run: x=4 sees 255, x=8 sees 0.
-        let soft = [0u8, 255, 0, 255, 0, 0, 0];
-        let mut pipe = make_pipe(255, BlendMode::Multiply);
-        pipe.soft_mask = Some(&soft);
-        let (dst, alpha) = render_even_columns(&pipe, None);
-        for (i, x) in (3..=9).enumerate() {
-            let painted_px = &dst[i * 3..i * 3 + 3];
-            if x == 4 || x == 6 {
-                assert_ne!(painted_px, &[7, 7, 7], "x={x} painted through the mask");
-            } else {
-                assert_eq!(painted_px, &[7, 7, 7], "x={x} untouched");
-                assert_eq!(alpha[i], 99, "x={x} alpha");
-            }
-        }
+        let (dst, alpha) = render_even_columns(&make_pipe(255, BlendMode::Difference), None);
+        assert_odd_columns_untouched(&dst, &alpha);
     }
 
     /// White at coverage `[0, 64, 128, 255]`, repeating with `x`.
@@ -643,10 +608,8 @@ mod tests {
 
     #[test]
     fn partial_coverage_composes_with_the_general_path() {
-        let mut pipe = make_pipe(255, BlendMode::Normal);
-        let soft = [255u8; 8];
-        pipe.soft_mask = Some(&soft);
-        let red = render_ramp_coverage(&pipe, None);
+        // White screened over black is white, weighted by the coverage.
+        let red = render_ramp_coverage(&make_pipe(255, BlendMode::Screen), None);
         for (x, (&r, want)) in red.iter().zip([0u8, 64, 128, 255].repeat(2)).enumerate() {
             assert!(r.abs_diff(want) <= 1, "x={x}: {r} vs {want}");
         }
@@ -666,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn use_aa_path_requires_no_soft_mask() {
+    fn use_aa_path_for_translucent_normal() {
         let pipe = make_pipe(200, BlendMode::Normal);
         assert!(pipe.use_aa_path());
     }

@@ -49,7 +49,6 @@ pub(crate) fn render_span_aa<P: Pixel>(
     y: i32,
 ) {
     debug_assert_eq!(pipe.blend_mode, BlendMode::Normal);
-    debug_assert!(pipe.soft_mask.is_none());
 
     #[expect(
         clippy::cast_sign_loss,
@@ -221,10 +220,7 @@ mod tests {
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
-            soft_mask: None,
             backdrop: None,
-            knockout: false,
-            knockout_opacity: 255,
         }
     }
 
@@ -323,10 +319,7 @@ mod tests {
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer: TransferSet::new([inv; 3], id, [id; 4], &DN_ID),
-            soft_mask: None,
             backdrop: None,
-            knockout: false,
-            knockout_opacity: 255,
         };
         assert!(
             !pipe.transfer.is_identity_rgb(),

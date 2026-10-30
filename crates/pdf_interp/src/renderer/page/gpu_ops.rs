@@ -285,10 +285,7 @@ mod tests {
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
             transfer: raster::state::TransferSet::identity_rgb(),
-            soft_mask: None,
             backdrop: None,
-            knockout: false,
-            knockout_opacity: 255,
         }
     }
 
