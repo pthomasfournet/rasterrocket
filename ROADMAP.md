@@ -66,6 +66,11 @@ version: the public API changes below are breaking.
 - `pdf_interp::page_has_javascript`: page and annotation JavaScript is checked
   per rendered page (one warning per document) instead of by a walk of every
   page at open.
+- `RenderPurpose { View, Print }` on `SessionConfig::purpose` and
+  `RasterOptions::purpose` (CLI `--purpose view|print`) selects the optional
+  content usage event and the annotation flags that apply.
+- `FormType`, `RasterSession::form_type()` and `PageDiagnostics::form_type`
+  report AcroForm / static XFA / dynamic XFA; dynamic XFA warns at open.
 
 **Parser.** Recovery of objects absent from or misplaced in the xref,
 including object-stream members and XRef-stream trailers; object streams
@@ -98,6 +103,15 @@ Type 3 glyphs in their own resources, parsed once, `d1` painted in the fill
 colour; horizontal scaling and word spacing applied as the spec says;
 glyphs placed to a quarter pixel; a missing or unparsable font drawn with a
 substitute instead of dropped; `RROCKET_FONT_DIR` for extra font directories.
+
+**Optional content and annotations.** The optional content model of §8.11:
+`/BaseState`, `/ON`, `/OFF`, `/Intent`, `/AS` usage, and membership
+dictionaries with `/P` and `/VE`, applied to marked content, XObjects and
+annotations; each `EMC` closes exactly one marked-content sequence. Annotation
+flags (Hidden, NoView, Print, NoRotate), appearances fitted by Algorithm 8.1,
+the `/AS` state chain, and synthesised appearances for markup annotations and
+form-field widgets that have none. A form XObject that invokes itself is
+skipped instead of failing the page.
 
 **Images.** LZW, RunLength and chained filters; truncated raw images draw
 their decoded rows; colour-key masks on stored samples; SMask `/Matte`; JPX
