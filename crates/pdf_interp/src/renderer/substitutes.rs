@@ -14,6 +14,7 @@ use std::sync::{Arc, OnceLock};
 
 use font::program::FontProgram;
 
+use super::system_fonts::system_program;
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 
 /// Installed typefaces per [`SubstituteStyle`], indexed by
@@ -110,11 +111,17 @@ fn embedded_program(bytes: &'static [u8]) -> Option<Arc<FontProgram>> {
         .map(Arc::new)
 }
 
-/// The substitute program for `style`: the installed metric-compatible
-/// face of that exact family and variant, else the compiled-in base-14
-/// face.  Resolved once per process.
+/// The substitute program for `style`: an installed face of its script
+/// ([`system_program`]) when it has one, else the installed
+/// metric-compatible face of that exact family and variant, else the
+/// compiled-in base-14 face.  Resolved once per process.
 pub fn substitute_program(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
     static CACHE: [OnceLock<Option<Arc<FontProgram>>>; 14] = [const { OnceLock::new() }; 14];
+    if style.script.is_some()
+        && let Some(program) = system_program(style)
+    {
+        return Some(program);
+    }
     let row = substitute_index(style);
     CACHE[row]
         .get_or_init(|| {
@@ -146,6 +153,7 @@ mod tests {
                     family,
                     bold,
                     italic,
+                    script: None,
                 })
         })
     }

@@ -343,3 +343,25 @@ fn glyph_names_resolve_to_unicode() {
     assert_eq!(glyph_name_to_unicode("A.sc"), Some(0x41));
     assert_eq!(glyph_name_to_unicode("gid42"), None);
 }
+
+/// The `OS/2` and `name` summary of a file's faces is read without
+/// loading the file; a file that is not an sfnt yields nothing.
+#[test]
+fn sfnt_face_infos_summarise_a_file() {
+    use crate::sfnt_info::face_infos;
+    let dir = std::env::temp_dir().join(format!("rrocket-sfnt-info-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let ahem = dir.join("ahem.ttf");
+    std::fs::write(&ahem, font_test_data::AHEM).expect("write");
+    let infos = face_infos(&ahem);
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].index, 0);
+    assert_eq!(infos[0].family, "Ahem");
+    assert_eq!(infos[0].weight_class, 400);
+    assert!(!infos[0].italic);
+    let text = dir.join("not-a-font.ttf");
+    std::fs::write(&text, b"hello").expect("write");
+    assert!(face_infos(&text).is_empty());
+    assert!(face_infos(&dir.join("missing.ttf")).is_empty());
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}

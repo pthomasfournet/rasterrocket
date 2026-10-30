@@ -6,6 +6,7 @@ pub mod font_cache;
 pub mod gstate;
 pub mod page;
 pub(crate) mod substitutes;
+mod system_fonts;
 pub mod text;
 
 pub use font_cache::DocumentFonts;

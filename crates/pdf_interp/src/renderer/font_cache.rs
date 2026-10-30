@@ -32,6 +32,7 @@ use pdf::ObjectId;
 
 use super::encodings::{base_encoding_table, glyph_name_for_code};
 use super::substitutes::substitute_program;
+use crate::resources::cmap_predefined::cid_to_unicode;
 use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
 use crate::resources::{FontKey, PageResources};
 
@@ -303,9 +304,28 @@ fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u3
             desc.base_encoding,
             embedded,
         ))
+    } else if !embedded
+        && !simple
+        && let Some(table) = desc.substitute.script.and_then(cid_to_unicode)
+    {
+        Some(resolve_cids_via_unicode(face, &table))
     } else {
         None
     }
+}
+
+/// Build a 65 536-entry CID → glyph table for a composite font drawn by a
+/// substitute, through the CID → Unicode table of its character
+/// collection and the substitute's Unicode charmap.  The table spans the
+/// whole CID space so that no CID falls through to the charmap.
+fn resolve_cids_via_unicode(face: &FontFace, cid_to_unicode: &HashMap<u32, u32>) -> Vec<u32> {
+    let mut table = vec![0u32; 1 << 16];
+    for (&cid, &unicode) in cid_to_unicode {
+        if let Some(slot) = table.get_mut(cid as usize) {
+            *slot = face.raw_get_char_index(unicode);
+        }
+    }
+    table
 }
 
 // ── Shared size-validation ────────────────────────────────────────────────────
@@ -682,5 +702,47 @@ mod tests {
                 "code {code:#04x} draws {digit:?}"
             );
         }
+    }
+
+    /// A composite font without a program, of a known character
+    /// collection, draws through a CID-indexed table built from the
+    /// collection's CID → Unicode mapping and the substitute's charmap:
+    /// half-width `A` (Japan1 CID 264) selects the substitute's `A`.
+    #[test]
+    fn non_embedded_cid_font_resolves_cids_through_unicode() {
+        use crate::resources::cmap::CMap;
+        use crate::resources::font::CidEncoding;
+        use crate::resources::font_substitute::Script;
+        let desc = FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: None,
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences: Box::new(empty_diffs()),
+            base_encoding: BaseEncoding::Standard,
+            cid_encoding: Some(CidEncoding {
+                encoding_cmap: Arc::new(CMap::identity()),
+                cid_to_gid: None,
+                default_width: 1000,
+                widths: vec![],
+            }),
+            type3: None,
+            substitute: SubstituteStyle {
+                script: Some(Script::Japanese),
+                ..SubstituteStyle::default()
+            },
+        };
+        let mut cache = FontCache::new(Arc::default());
+        let face = cache
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
+            .expect("substitute face loads");
+        assert_eq!(face.code_to_gid.len(), 1 << 16);
+        let a = face.raw_get_char_index(u32::from('A'));
+        assert_ne!(a, 0);
+        assert_eq!(face.code_to_gid[264], a);
+        assert_eq!(face.code_to_gid[34], a);
+        assert_eq!(face.code_to_gid[0], 0);
     }
 }

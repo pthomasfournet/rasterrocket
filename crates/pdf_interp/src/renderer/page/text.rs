@@ -241,16 +241,16 @@ impl PageRenderer<'_> {
             if let Some(enc) = cid_enc {
                 // Type 0 composite font: the Encoding CMap splits the string
                 // into 1–4-byte codes and maps each to a CID (PDF §9.7.6.3).
-                for DecodedCode {
-                    code: char_code,
-                    value: cid,
-                    ..
-                } in enc.codes(bytes)
-                {
-                    let gid = enc.gid_for_cid(cid);
-
+                for DecodedCode { value: cid, .. } in enc.codes(bytes) {
                     let (pen_x, pen_y) = text_to_device(&ctm, &tm, 0.0, rise, self.height);
-                    push_glyph(char_code, gid, true, pen_x, pen_y);
+                    // A substitute face for a composite font carries a
+                    // CID-indexed glyph table; an embedded one is selected
+                    // through `CIDToGIDMap` / its charset.
+                    if face.code_to_gid.is_empty() {
+                        push_glyph(cid, enc.gid_for_cid(cid), true, pen_x, pen_y);
+                    } else {
+                        push_glyph(cid, cid, false, pen_x, pen_y);
+                    }
 
                     // CID width lookup uses the CID, not the raw char code.
                     // Advance formula: w/1000 * font_size (PDF §9.7.4.3).

@@ -52,6 +52,7 @@ pub mod face;
 pub mod key;
 pub mod outline;
 pub mod program;
+pub mod sfnt_info;
 
 /// The Unicode scalar value a glyph name denotes.
 ///

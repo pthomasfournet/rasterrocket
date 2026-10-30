@@ -12,7 +12,7 @@ use pdf::{Dictionary, Document, Object};
 use crate::resources::dict_ext::DictExt as _;
 
 /// Family class of a substitute typeface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SubstituteFamily {
     /// Sans-serif (the class of Helvetica / Arial).
     #[default]
@@ -28,8 +28,56 @@ pub enum SubstituteFamily {
     Dingbats,
 }
 
+/// A writing system the Latin substitutes do not cover, drawn from an
+/// installed font of that script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Script {
+    /// Adobe-Japan1.
+    Japanese,
+    /// Adobe-GB1.
+    SimplifiedChinese,
+    /// Adobe-CNS1.
+    TraditionalChinese,
+    /// Adobe-Korea1 / Adobe-KR.
+    Korean,
+    /// Arabic.
+    Arabic,
+    /// Thai.
+    Thai,
+}
+
+impl Script {
+    /// The script of a `CIDSystemInfo` `Ordering`; `None` for `Identity`
+    /// and any other ordering.
+    #[must_use]
+    pub const fn from_ordering(ordering: &[u8]) -> Option<Self> {
+        match ordering {
+            b"Japan1" => Some(Self::Japanese),
+            b"GB1" => Some(Self::SimplifiedChinese),
+            b"CNS1" => Some(Self::TraditionalChinese),
+            b"Korea1" | b"KR" => Some(Self::Korean),
+            _ => None,
+        }
+    }
+
+    /// The script a Unicode scalar value belongs to, for the scripts
+    /// whose block identifies them (unified Han ideographs do not).
+    #[must_use]
+    pub const fn of_char(c: u32) -> Option<Self> {
+        match c {
+            0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => {
+                Some(Self::Arabic)
+            }
+            0x0E00..=0x0E7F => Some(Self::Thai),
+            0x3040..=0x30FF | 0x31F0..=0x31FF => Some(Self::Japanese),
+            0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => Some(Self::Korean),
+            _ => None,
+        }
+    }
+}
+
 /// Family class and variant of the substitute for a non-embedded font.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SubstituteStyle {
     /// Family class.
     pub family: SubstituteFamily,
@@ -37,6 +85,9 @@ pub struct SubstituteStyle {
     pub bold: bool,
     /// Italic / oblique variant.
     pub italic: bool,
+    /// Script the font is for, when it is one the Latin substitutes do
+    /// not cover.
+    pub script: Option<Script>,
 }
 
 /// `FixedPitch` flag (bit 1), PDF §9.8.2 Table 121.
@@ -117,6 +168,48 @@ const DINGBATS_NAMES: &[&str] = &[
     "zapfdingbatsitc",
     "itczapfdingbats",
 ];
+/// Name fragments that identify a typeface of each [`Script`].
+const SCRIPT_NAMES: &[(Script, &[&str])] = &[
+    (
+        Script::Japanese,
+        &[
+            "mincho", "gothic", "meiryo", "hiragino", "kozuka", "ipaex", "ipag", "ipam", "yugoth",
+            "yumin",
+        ],
+    ),
+    (
+        Script::SimplifiedChinese,
+        &[
+            "simsun", "simhei", "simkai", "fangsong", "kaiti", "stsong", "stheiti", "yahei",
+            "songti", "heiti",
+        ],
+    ),
+    (
+        Script::TraditionalChinese,
+        &["mingliu", "pmingliu", "dfkai", "jhenghei", "kaiu", "ming"],
+    ),
+    (
+        Script::Korean,
+        &[
+            "batang", "gulim", "dotum", "gungsuh", "malgun", "nanum", "myeongjo",
+        ],
+    ),
+    (Script::Arabic, &["arabic", "naskh", "kufi", "arab"]),
+    (
+        Script::Thai,
+        &[
+            "thai",
+            "angsana",
+            "cordia",
+            "browallia",
+            "garuda",
+            "norasi",
+            "kinnari",
+            "sawasdee",
+            "tlwg",
+        ],
+    ),
+];
 
 /// Classify the substitute for the font described by `font_dict`, whose
 /// font descriptor lives in `fd_owner` (the font dictionary itself for a
@@ -185,7 +278,54 @@ fn classify(name: &str, flags: i64, weight: f64, italic_angle: f64) -> Substitut
         family,
         bold: has(BOLD_NAMES) || flags & FLAG_FORCE_BOLD != 0 || weight >= 600.0,
         italic: has(ITALIC_NAMES) || flags & FLAG_ITALIC != 0 || italic_angle.abs() > 0.5,
+        script: SCRIPT_NAMES
+            .iter()
+            .find(|(_, frags)| has(frags))
+            .map(|&(script, _)| script),
     }
+}
+
+/// The script of the `Ordering` in the `CIDSystemInfo` of `cid_font`
+/// (`None` for `Identity` or an absent entry).
+#[must_use]
+pub fn ordering_script(doc: &Document, cid_font: &Dictionary) -> Option<Script> {
+    let info = match cid_font.get(b"CIDSystemInfo")? {
+        Object::Reference(id) => doc.get_dictionary(*id).ok().map(|d| (*d).clone())?,
+        Object::Dictionary(d) => d.clone(),
+        _ => return None,
+    };
+    Script::from_ordering(info.get(b"Ordering")?.as_str()?)
+}
+
+/// The script most of the glyph names in `differences` belong to.
+///
+/// `None` unless that script outnumbers the Latin content: the Latin
+/// names among them plus the `base_codes` the font leaves to its base
+/// encoding.  Names outside the identifying blocks and outside Latin do
+/// not count.
+#[must_use]
+pub fn differences_script(differences: &[Option<Box<str>>], base_codes: usize) -> Option<Script> {
+    let mut counts: Vec<(Script, usize)> = Vec::new();
+    let mut latin = base_codes;
+    for unicode in differences
+        .iter()
+        .flatten()
+        .filter_map(|name| font::glyph_name_to_unicode(name))
+    {
+        match Script::of_char(unicode) {
+            Some(script) => match counts.iter_mut().find(|(s, _)| *s == script) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((script, 1)),
+            },
+            None if matches!(unicode, 0x41..=0x24F) => latin += 1,
+            None => {}
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, n)| n)
+        .filter(|&(_, n)| n > latin)
+        .map(|(script, _)| script)
 }
 
 /// Dereference the `FontDescriptor` entry of `dict`.
@@ -206,7 +346,63 @@ mod tests {
             family,
             bold,
             italic,
+            script: None,
         }
+    }
+
+    #[test]
+    fn script_names_and_orderings_classify() {
+        use Script::{Arabic, Japanese, Korean, SimplifiedChinese, Thai, TraditionalChinese};
+        assert_eq!(classify("ms-mincho", 0, 0.0, 0.0).script, Some(Japanese));
+        assert_eq!(
+            classify("ms-gothic", 0, 0.0, 0.0),
+            SubstituteStyle {
+                family: SubstituteFamily::Sans,
+                script: Some(Japanese),
+                ..SubstituteStyle::default()
+            }
+        );
+        assert_eq!(
+            classify("simsun", 0, 0.0, 0.0).script,
+            Some(SimplifiedChinese)
+        );
+        assert_eq!(
+            classify("pmingliu", 0, 0.0, 0.0).script,
+            Some(TraditionalChinese)
+        );
+        assert_eq!(classify("batang", 0, 0.0, 0.0).script, Some(Korean));
+        assert_eq!(
+            classify("notonaskharabic", 0, 0.0, 0.0).script,
+            Some(Arabic)
+        );
+        assert_eq!(classify("angsananew", 0, 0.0, 0.0).script, Some(Thai));
+        assert_eq!(classify("arial", 0, 0.0, 0.0).script, None);
+        assert_eq!(Script::from_ordering(b"Japan1"), Some(Japanese));
+        assert_eq!(Script::from_ordering(b"KR"), Some(Korean));
+        assert_eq!(Script::from_ordering(b"Identity"), None);
+    }
+
+    #[test]
+    fn differences_vote_for_a_script() {
+        let diffs: Vec<Option<Box<str>>> = vec![
+            Some("A".into()),
+            Some("uni0E01".into()),
+            Some("uni0E02".into()),
+            Some("afii57415".into()),
+            None,
+        ];
+        assert_eq!(differences_script(&diffs, 0), Some(Script::Thai));
+        assert_eq!(differences_script(&[Some("A".into()), None], 0), None);
+        assert_eq!(differences_script(&[], 0), None);
+        // A Latin font with a stray Thai name stays Latin, whether the
+        // Latin content is named or left to the base encoding.
+        let mostly_latin: Vec<Option<Box<str>>> = vec![
+            Some("eacute".into()),
+            Some("uni0E01".into()),
+            Some("egrave".into()),
+        ];
+        assert_eq!(differences_script(&mostly_latin, 0), None);
+        assert_eq!(differences_script(&[Some("uni0E01".into())], 90), None);
     }
 
     #[test]

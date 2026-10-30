@@ -32,7 +32,10 @@ use pdf::{Dictionary, Document, Object};
 use crate::resources::cmap::{CMap, DecodedCode, parse_cmap};
 use crate::resources::cmap_predefined::predefined_cmap;
 use crate::resources::dict_ext::DictExt;
-use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle, substitute_style};
+use crate::resources::font_substitute::{
+    Script, SubstituteFamily, SubstituteStyle, differences_script, ordering_script,
+    substitute_style,
+};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -261,16 +264,26 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     let (first_char, widths) = extract_widths(dict);
     let missing_width = extract_missing_width(doc, dict);
     let (code_to_gid, differences, mut base_encoding) = extract_encoding(doc, dict, kind);
-    let substitute = substitute_style(doc, dict, Some(dict));
+    let mut substitute = substitute_style(doc, dict, Some(dict));
 
     // A symbolic standard font drawn by its substitute keeps its built-in
     // encoding as the base: its codes denote symbols, not Latin letters,
-    // and only `Differences` may reassign them.
+    // and only `Differences` may reassign them.  A substitute's script is
+    // also read from the glyph names `Differences` assigns.
     if bytes.is_none() {
         match substitute.family {
             SubstituteFamily::Symbol => base_encoding = BaseEncoding::Symbol,
             SubstituteFamily::Dingbats => base_encoding = BaseEncoding::ZapfDingbats,
             SubstituteFamily::Sans | SubstituteFamily::Serif | SubstituteFamily::Mono => {}
+        }
+        if substitute.script.is_none() {
+            // Codes the font encodes without a `Differences` entry are
+            // Latin content through the base encoding.
+            let last = first_char.saturating_add(u32::try_from(widths.len()).unwrap_or(u32::MAX));
+            let base_codes = (first_char..last)
+                .filter(|&code| differences.get(code as usize).is_some_and(Option::is_none))
+                .count();
+            substitute.script = differences_script(&differences[..], base_codes);
         }
     }
 
@@ -546,6 +559,22 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         .as_ref()
         .map_or(PdfFontKind::Other, classify_kind);
 
+    // 7. The script of a substitute: the CIDFont's ordering, else the
+    // CMap's, else the family name.
+    let mut substitute = substitute_style(doc, dict, descendant.as_ref());
+    if let Some(script) = descendant
+        .as_ref()
+        .and_then(|d| ordering_script(doc, d))
+        .or_else(|| {
+            encoding_cmap
+                .ordering
+                .as_deref()
+                .and_then(|o| Script::from_ordering(o.as_bytes()))
+        })
+    {
+        substitute.script = Some(script);
+    }
+
     FontDescriptor {
         kind,
         bytes,
@@ -565,7 +594,7 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
             widths,
         }),
         type3: None,
-        substitute: substitute_style(doc, dict, descendant.as_ref()),
+        substitute,
     }
 }
 

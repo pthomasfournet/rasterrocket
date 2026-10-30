@@ -118,3 +118,33 @@ fn winansi_high_codes_resolve_by_name_on_the_substitute() {
         "Eacute ({eacute}) outweighs quoteright ({quote})"
     );
 }
+
+/// A composite font without a program, of the Adobe-Japan1 collection
+/// and a Shift-JIS encoding, draws its Latin text through CID → Unicode
+/// on whatever substitute serves it: `A` is CID 264, which no Latin
+/// substitute carries as a glyph index.
+#[test]
+fn non_embedded_japanese_font_draws_latin_through_cid_to_unicode() {
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
+          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", b"BT /F1 24 Tf 4 8 Td (AB) Tj ET"),
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /MS-Mincho /Encoding /90ms-RKSJ-H \
+          /DescendantFonts [6 0 R] >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MS-Mincho \
+          /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> \
+          /FontDescriptor 7 0 R /DW 1000 /W [231 325 500] >>"
+            .to_vec(),
+        b"<< /Type /FontDescriptor /FontName /MS-Mincho /Flags 6 /FontBBox [0 -141 1000 859] \
+          /ItalicAngle 0 /Ascent 859 /Descent -141 /CapHeight 700 /StemV 80 >>"
+            .to_vec(),
+    ];
+    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    let dark = bmp.data().chunks(3).filter(|px| px[0] < 128).count();
+    assert!(dark > 40, "AB draws ({dark} dark pixels)");
+}

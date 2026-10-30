@@ -102,6 +102,9 @@ pub struct CMap {
     /// A code absent from `map` maps to itself (`Identity-H` / `Identity-V`,
     /// and every `CMap` built on them with `usecmap`).
     pub identity: bool,
+    /// The `Ordering` of the `CIDSystemInfo` the `CMap` declares (the
+    /// character collection its CIDs index), inherited through `usecmap`.
+    pub ordering: Option<Box<str>>,
 }
 
 impl CMap {
@@ -112,6 +115,7 @@ impl CMap {
             codespaces: vec![Codespace::full(2)],
             map: HashMap::new(),
             identity: true,
+            ordering: None,
         }
     }
 
@@ -166,6 +170,9 @@ impl CMap {
             let _ = self.map.entry(code).or_insert(value);
         }
         self.identity |= parent.identity;
+        if self.ordering.is_none() {
+            self.ordering.clone_from(&parent.ordering);
+        }
     }
 }
 
@@ -212,6 +219,10 @@ pub fn parse_cmap(stream: &[u8]) -> Option<CMap> {
 }
 
 /// [`parse_cmap`] at `usecmap` nesting `depth`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat match dispatch over the CMap directives"
+)]
 pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
     let tokens = tokenise(stream);
     let mut cmap = CMap::default();
@@ -299,6 +310,16 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
                 match parent {
                     Some(parent) => cmap.inherit(&parent),
                     None => log::warn!("cmap: usecmap of an unknown or too deeply nested CMap"),
+                }
+            }
+            // `/Ordering (Japan1)` inside the `CIDSystemInfo` dictionary.
+            b"/Ordering" => {
+                if let Some(value) = tokens
+                    .get(i + 1)
+                    .and_then(|t| t.strip_prefix(b"("))
+                    .and_then(|t| t.strip_suffix(b")"))
+                {
+                    cmap.ordering = Some(String::from_utf8_lossy(value).into());
                 }
             }
             _ => {}
@@ -396,6 +417,10 @@ fn tokenise(bytes: &[u8]) -> Vec<&[u8]> {
                     i += 1;
                 }
             }
+
+            // `<<` opens a dictionary: a delimiter, like the `>>` that
+            // closes it.  Its entries are tokenised as any others.
+            b'<' if bytes.get(i + 1) == Some(&b'<') => i += 2,
 
             // Hex string <...>
             b'<' => {
@@ -806,6 +831,22 @@ endcidrange
         assert_eq!(cmap.lookup(0x41), 9999);
         assert_eq!(cmap.lookup(0x42), parent.lookup(0x42));
         assert_eq!(cmap.lookup(0x889F), parent.lookup(0x889F));
+        assert_eq!(cmap.ordering.as_deref(), Some("Japan1"));
+    }
+
+    /// The `CIDSystemInfo` ordering is read from the stream, and a
+    /// `usecmap` parent supplies it when the stream has none.
+    #[test]
+    fn ordering_is_parsed_and_inherited() {
+        let own = parse_cmap(
+            b"/CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> def\n\
+              1 begincidchar\n<41> 1\nendcidchar\n",
+        )
+        .expect("parse");
+        assert_eq!(own.ordering.as_deref(), Some("GB1"));
+        let inherited = parse_cmap(b"/Identity-H usecmap\n1 begincidchar\n<0041> 1\nendcidchar\n")
+            .expect("parse");
+        assert_eq!(inherited.ordering, None);
     }
 
     /// A `CMap` without codespace ranges takes the code lengths its
