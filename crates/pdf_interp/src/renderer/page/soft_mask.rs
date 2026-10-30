@@ -408,7 +408,8 @@ fn backdrop_rgb(bc: &[f64]) -> [u8; 3] {
 }
 
 /// Luminosity mask values: each pixel of `group` composited over the opaque
-/// backdrop `bc`, reduced to `0.30 R + 0.59 G + 0.11 B` (PDF §11.3.5.3).
+/// backdrop `bc`, reduced to its luminosity by [`color::convert::luminosity`]
+/// (PDF §11.3.5.3).
 fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
     let (w, h) = (group.width as usize, group.height as usize);
     let mut out = Vec::with_capacity(w * h);
@@ -418,13 +419,14 @@ fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
         for x in 0..w {
             let a = alpha.map_or(255, |r| u32::from(r[x]));
             let px = &row[x * 3..x * 3 + 3];
-            let ch = |i: usize| (u32::from(px[i]) * a + u32::from(bc[i]) * (255 - a) + 127) / 255;
-            let lum = (30 * ch(0) + 59 * ch(1) + 11 * ch(2) + 50) / 100;
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "a weighted mean of u8 values is at most 255"
+                reason = "a weighted mean of two u8 values is at most 255"
             )]
-            out.push(lum as u8);
+            let ch = |i: usize| {
+                ((u32::from(px[i]) * a + u32::from(bc[i]) * (255 - a) + 127) / 255) as u8
+            };
+            out.push(color::convert::luminosity(ch(0), ch(1), ch(2)));
         }
     }
     out
