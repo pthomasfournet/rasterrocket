@@ -471,7 +471,7 @@ impl PipelineCache {
             .offset(0)
             // 128 bytes: Vulkan's guaranteed minimum max push-constant size.
             // Our largest kernel push struct is well under this (icc_clut
-            // pushes 8 bytes; blit_image pushes 36).
+            // pushes 8 bytes; blit_image pushes 40).
             .size(128)];
         let pl_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)

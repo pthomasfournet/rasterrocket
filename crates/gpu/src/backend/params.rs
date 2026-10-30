@@ -7,11 +7,18 @@
 use super::GpuBackend;
 use crate::AaFillRect;
 
-/// Parameters for a GPU image blit (table-driven copy onto the page buffer).
+/// [`BlitParams::filter`] bit: interpolate between source columns.
+pub const BLIT_FILTER_X: u32 = 1;
+/// [`BlitParams::filter`] bit: interpolate between source rows.
+pub const BLIT_FILTER_Y: u32 = 2;
+
+/// Parameters for a GPU image blit (table-driven sampling onto the page
+/// buffer).
 ///
-/// The kernel reads source pixel `cols[dx] + rows[dy]` (Q32 fixed point,
+/// The kernel samples the source at `cols[dx] + rows[dy]` (Q32 fixed point,
 /// four `u32` words per entry: `[x_hi, x_lo, y_hi, y_lo]`) for every page
-/// pixel inside `bbox`; see `crate::blit` for the table layout.
+/// pixel inside `bbox`, by nearest neighbour or, on the axes `filter`
+/// selects, bilinearly; see `crate::blit` for the table layout.
 ///
 /// # Invariants enforced by `BlitParams::validate`
 /// - `src_w > 0`, `src_h > 0`, `dst_w > 0`, `dst_h > 0`
@@ -20,6 +27,7 @@ use crate::AaFillRect;
 /// - `bbox` is `[x0, y0, x1, y1]` with `x0 <= x1` and `y0 <= y1`
 /// - `cols` holds at least `(x1 - x0)` entries and `rows` at least
 ///   `(y1 - y0)` entries of 16 bytes each
+/// - `filter` has no bits beyond [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`]
 ///
 /// Backends should call `validate()` at record time. Violating these
 /// invariants would read past a sampling table, route Mask images through
@@ -47,6 +55,8 @@ pub struct BlitParams<'a, B: GpuBackend + ?Sized> {
     pub dst_h: u32,
     /// Destination bounding box `[x0, y0, x1, y1]` in page-space pixels (`x0 <= x1`, `y0 <= y1`).
     pub bbox: [i32; 4],
+    /// Interpolated axes: [`BLIT_FILTER_X`] and/or [`BLIT_FILTER_Y`].
+    pub filter: u32,
 }
 
 impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
@@ -92,6 +102,11 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
         if self.src_layout > 1 {
             return Err(invariant(
                 "src_layout must be 0 (RGB) or 1 (Gray); Mask layout is CPU-only",
+            ));
+        }
+        if self.filter & !(BLIT_FILTER_X | BLIT_FILTER_Y) != 0 {
+            return Err(invariant(
+                "filter has bits beyond BLIT_FILTER_X | BLIT_FILTER_Y",
             ));
         }
         Ok(())
@@ -1215,6 +1230,7 @@ mod tests {
             dst_w: 200,
             dst_h: 200,
             bbox: [0, 0, 100, 100],
+            filter: BLIT_FILTER_X | BLIT_FILTER_Y,
         }
     }
 
@@ -1305,6 +1321,14 @@ mod tests {
         p.src_layout = 999;
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("src_layout"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_filter_bits() {
+        let mut p = ok_blit();
+        p.filter = 4;
+        let err = p.validate(&FakeBackend).unwrap_err().to_string();
+        assert!(err.contains("filter"), "{err}");
     }
 
     // --- ScanParams ---

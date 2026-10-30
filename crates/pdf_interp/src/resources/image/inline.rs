@@ -8,7 +8,7 @@
 use pdf::{Dictionary, Object};
 
 use super::dispatch::{ImageStream, decode_image_stream};
-use super::{ImageDecodeCtx, ImageDescriptor, validated_dims};
+use super::{DecodedImage, ImageDecodeCtx, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
 #[cfg(feature = "gpu-jpeg-huffman")]
@@ -29,7 +29,7 @@ use super::ImageColorSpace;
 /// given by name; a name that resolves nowhere fails the decode.
 ///
 /// Inline images cannot carry an `SMask` stream (they have no object identity),
-/// so the returned descriptor always has `smask: None`.
+/// so the returned image always has `smask: None`.
 ///
 /// GPU decoders are passed in for `DCTDecode` and `JPXDecode` streams.  The same
 /// area threshold as `resolve_image` applies — images below
@@ -48,7 +48,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
     params: &[u8],
     data: &[u8],
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
-) -> Option<ImageDescriptor> {
+) -> Option<DecodedImage> {
     let doc = ctx.doc;
     let mut dict = parse_inline_params(params);
     if let Err(name) = resolve_named_color_space(&mut dict, ctx.color_spaces) {
@@ -96,7 +96,11 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
     {
         super::colorspace::apply_sample_rewrite(&mut img, &rewrite);
     }
-    Some(img)
+    Some(DecodedImage {
+        image: img,
+        source_width: w,
+        interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
+    })
 }
 
 /// Replace a `/ColorSpace` name that is not a device space with the entry it
@@ -336,6 +340,7 @@ mod tests {
     use super::*;
     use pdf::Document;
 
+    use crate::resources::image::ImageDescriptor;
     use crate::test_helpers::empty_doc;
 
     /// A context with no `ColorSpace` resources and every GPU decoder off.
@@ -366,6 +371,7 @@ mod tests {
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
+        .map(|decoded| decoded.image)
     }
 
     /// `/CS /CS0` naming a `DeviceRGB` resource decodes three bytes per pixel.
@@ -400,6 +406,7 @@ mod tests {
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
+        .map(|decoded| decoded.image)
     }
 
     /// Transport filters, alone or chained, decode to raw samples.
@@ -546,7 +553,8 @@ mod tests {
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
-        .expect("decode should succeed");
+        .expect("decode should succeed")
+        .image;
         assert_eq!(img.width, 2);
         assert_eq!(img.height, 2);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
@@ -568,7 +576,8 @@ mod tests {
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
-        .expect("decode should succeed");
+        .expect("decode should succeed")
+        .image;
         assert_eq!(img.color_space, ImageColorSpace::Mask);
         let bytes = img.data.as_cpu().unwrap();
         assert_eq!(bytes[0], 0x00); // first pixel: paint
@@ -586,7 +595,8 @@ mod tests {
             #[cfg(feature = "gpu-jpeg-huffman")]
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
-        .expect("decode should succeed");
+        .expect("decode should succeed")
+        .image;
         assert_eq!(img.color_space, ImageColorSpace::Mask);
         let bytes = img.data.as_cpu().unwrap();
         assert_eq!(bytes.len(), 20);

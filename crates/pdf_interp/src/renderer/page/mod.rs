@@ -98,7 +98,7 @@ use gpu::jpeg_decoder::JpegGpuDecoder;
 use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
-use image_sampler::{GridClip, MaskSampler, SampleGrid};
+use image_sampler::{Filter, GridClip, MaskSampler, SampleGrid};
 use pixel_rect::PixelRect;
 use std::sync::Arc;
 
@@ -1423,12 +1423,9 @@ impl<'doc> PageRenderer<'doc> {
     ) {
         use crate::resources::image::ImageResolution;
         match resolution {
-            ImageResolution::Ok {
-                image,
-                source_width,
-            } => {
+            ImageResolution::Ok(decoded) => {
                 self.current_image = Some(String::from_utf8_lossy(name).into_owned());
-                self.blit_image(&image, source_width);
+                self.blit_image(&decoded);
                 self.current_image = None;
             }
             ImageResolution::DecodeFailed(msg) => {
@@ -1640,16 +1637,21 @@ impl<'doc> PageRenderer<'doc> {
     /// Blit a decoded image `XObject` onto the bitmap using the current CTM.
     ///
     /// The CTM maps the unit square (image space) onto the page; every
-    /// device pixel inside the image's bounding box samples the source pixel
-    /// under its centre (nearest neighbour), via a [`SampleGrid`] shared by
-    /// the CPU sampler below and the GPU blit kernel.  A host-resident
-    /// image or stencil drawn below its resolution is first area-averaged
-    /// onto the device pixels (`image_reduce`).  A mask is resampled the
-    /// same way and sampled through a [`MaskSampler`] at its own resolution.
-    /// `source_width` is the stream's own pixel width, which `img.width`
-    /// falls below when the image was decoded at reduced resolution; it feeds
-    /// the `source_ppi_hint` diagnostic.
-    fn blit_image(&mut self, img: &crate::resources::ImageDescriptor, source_width: u32) {
+    /// device pixel inside the image's bounding box samples the image at its
+    /// centre, through a [`SampleGrid`] shared by the CPU sampler below and
+    /// the GPU blit kernel: the nearest sample, or a bilinear blend along
+    /// the axes [`Filter::for_draw`] selects for a magnified or rotated
+    /// draw.  A host-resident image or stencil drawn below its resolution
+    /// is first area-averaged onto the device pixels (`image_reduce`).  A
+    /// mask is resampled the same way and sampled through a [`MaskSampler`]
+    /// at its own resolution.
+    ///
+    /// `decoded.source_width` is the stream's own pixel width, which the
+    /// image's width falls below when it was decoded at reduced resolution;
+    /// it feeds the `source_ppi_hint` diagnostic.
+    fn blit_image(&mut self, decoded: &crate::resources::DecodedImage) {
+        let img = &decoded.image;
+        let source_width = decoded.source_width;
         // Degenerate image — nothing to blit.
         if img.width == 0 || img.height == 0 {
             return;
@@ -1711,7 +1713,9 @@ impl<'doc> PageRenderer<'doc> {
             Some((i, c)) => (i, *c),
             None => (img, page_ctm),
         };
-        let Some(grid) = SampleGrid::new(&ctm, self.width, self.height, img.width, img.height)
+        let filter = Filter::for_draw(&ctm, img.width, img.height, decoded.interpolate);
+        let Some(grid) =
+            SampleGrid::new(&ctm, self.width, self.height, img.width, img.height, filter)
         else {
             log::debug!(
                 "rasterrocket-interp: blit_image: image maps to no page pixels (CTM {ctm:?}) — skipping"
@@ -1736,13 +1740,14 @@ impl<'doc> PageRenderer<'doc> {
                 mask_src.map(|m| (m, mask_ctm)),
                 &grid,
                 &mut grid_clip,
+                decoded.interpolate,
             );
         });
     }
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap
     /// within `grid_clip`; `mask` is its soft mask with the matrix that
-    /// draws it.
+    /// draws it, sampled bilinearly when `interpolate` is set.
     #[expect(
         clippy::too_many_lines,
         reason = "GPU dispatch, decoder-contract checks, the mask sampler and the per-pixel loop share the grid and CTM state"
@@ -1754,6 +1759,7 @@ impl<'doc> PageRenderer<'doc> {
         mask: Option<(&SoftMask, Ctm)>,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
+        interpolate: bool,
     ) {
         // GPU image-blit path: device-resident pixels sampled by the CUDA
         // kernel through the same grid, composited onto `bitmap` before
@@ -1835,6 +1841,7 @@ impl<'doc> PageRenderer<'doc> {
                     self.height,
                     img.width,
                     img.height,
+                    interpolate,
                 ) else {
                     return;
                 };
@@ -1844,6 +1851,15 @@ impl<'doc> PageRenderer<'doc> {
         };
         let img_w = img.width as usize;
         let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
+        // Channel `ch` of sample `(x, y)`.  Taps lie on the image, so the
+        // index is inside the buffer by the length check above; the `get`
+        // keeps the loop panic-free regardless.
+        let channel = |x: u32, y: u32, ch: usize| {
+            img_bytes
+                .get((y as usize * img_w + x as usize) * bpp + ch)
+                .copied()
+                .unwrap_or(u8::MAX)
+        };
         let compositor = ImageCompositor::new(
             &self.bitmap,
             self.gstate.current().fill_alpha,
@@ -1861,37 +1877,32 @@ impl<'doc> PageRenderer<'doc> {
                 if coverage == 0 {
                     continue;
                 }
-                let Some((ix, iy)) = grid.sample(dx, dy) else {
+                let Some(taps) = grid.sample(dx, dy) else {
                     continue;
                 };
-                let img_idx = iy as usize * img_w + ix as usize;
                 // Stencil masks paint the fill colour with coverage
                 // `255 − sample` and carry no soft mask (asserted at entry).
                 let alpha = match img.color_space {
                     ImageColorSpace::Mask => div255(
-                        u32::from(u8::MAX - img_bytes.get(img_idx).copied().unwrap_or(u8::MAX))
+                        u32::from(u8::MAX - taps.blend(|x, y| channel(x, y, 0)))
                             * u32::from(coverage),
                     ),
                     ImageColorSpace::Rgb | ImageColorSpace::Gray => div255(
-                        u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, (ix, iy))))
+                        u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, &taps)))
                             * u32::from(coverage),
                     ),
                 };
                 if alpha == 0 {
                     continue;
                 }
-                // `img_idx` is inside the buffer by the length check above;
-                // the `get`s keep the loop panic-free regardless.
                 let src = match img.color_space {
-                    ImageColorSpace::Rgb => img_bytes
-                        .get(img_idx * 3..img_idx * 3 + 3)
-                        .map(|rgb| [rgb[0], rgb[1], rgb[2]]),
-                    ImageColorSpace::Gray => img_bytes.get(img_idx).map(|&g| [g, g, g]),
-                    ImageColorSpace::Mask => Some(fill_color),
+                    ImageColorSpace::Rgb => {
+                        [0, 1, 2].map(|ch| taps.blend(|x, y| channel(x, y, ch)))
+                    }
+                    ImageColorSpace::Gray => [taps.blend(|x, y| channel(x, y, 0)); 3],
+                    ImageColorSpace::Mask => fill_color,
                 };
-                if let Some(src) = src {
-                    compositor.paint(row, alpha_row.as_deref_mut(), dx, dy, src, alpha);
-                }
+                compositor.paint(row, alpha_row.as_deref_mut(), dx, dy, src, alpha);
             }
         }
     }
@@ -1960,7 +1971,14 @@ impl<'doc> PageRenderer<'doc> {
             return false;
         };
 
-        if let Err(e) = gpu_ctx.blit_image_to_buffer(cached, buf, bbox, grid.cols(), grid.rows()) {
+        if let Err(e) = gpu_ctx.blit_image_to_buffer(
+            cached,
+            buf,
+            bbox,
+            grid.cols(),
+            grid.rows(),
+            grid.filter().bits(),
+        ) {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }

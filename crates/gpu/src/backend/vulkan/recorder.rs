@@ -759,11 +759,11 @@ impl PageRecorder {
     ) -> Result<()> {
         // Push-constant layout (must match blit_image.slang's uniform
         // order): src_w, src_h, src_layout, dst_w, dst_h, bx0, by0, bx1,
-        // by1 as i32 (9×4 = 36 bytes), well under our 128-byte
-        // push-constant range.  The sampling tables are storage buffers
-        // (bindings 2 and 3).
-        let mut push = [0u8; 36];
-        let put_int = |buf: &mut [u8; 36], off: usize, v: i32| {
+        // by1 as i32 and filter as u32 (10×4 = 40 bytes), well under our
+        // 128-byte push-constant range.  The sampling tables are storage
+        // buffers (bindings 2 and 3).
+        let mut push = [0u8; 40];
+        let put_int = |buf: &mut [u8; 40], off: usize, v: i32| {
             buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
         };
         put_int(&mut push, 0, i32::try_from(p.src_w).unwrap_or(i32::MAX));
@@ -779,6 +779,7 @@ impl PageRecorder {
         put_int(&mut push, 24, p.bbox[1]);
         put_int(&mut push, 28, p.bbox[2]);
         put_int(&mut push, 32, p.bbox[3]);
+        push[36..40].copy_from_slice(&p.filter.to_ne_bytes());
 
         // Dispatch one workgroup per 16×16 bbox tile.  We dispatch over
         // the bbox extent rather than the full page so blits in a small

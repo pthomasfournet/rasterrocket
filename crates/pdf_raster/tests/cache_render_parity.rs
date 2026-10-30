@@ -157,6 +157,57 @@ fn synthetic_page_renders_identically_through_the_cache() {
     assert_eq!(cache.len(), 2, "a warm pass must not insert again");
 }
 
+/// Magnified draws, which the sampler interpolates: a gray JPEG drawn
+/// rotated (both axes) and axis-aligned at about 3× across and 1:1 down
+/// (columns only), and an RGB JPEG with `/Interpolate true` drawn at about
+/// 10× (both axes).
+#[test]
+fn interpolated_draws_render_identically_through_the_cache() {
+    for draw in [
+        "q 60.5 15.25 -10.75 75.5 200.33 140.17 cm /ImB Do Q",
+        "q 70 0 0 38.4 150.4 5 cm /ImB Do Q",
+        "q 190.3 0 0 101.7 10.6 30.2 cm /ImD Do Q",
+    ] {
+        assert_cached_draw_identical(draw);
+    }
+}
+
+/// Render `draw` (which may use `/ImB`, a 50×80 gray JPEG, and `/ImD`, a
+/// 40×21 RGB JPEG with `/Interpolate true`) on both backends and assert the
+/// pages are byte-identical and the image came from the cache.
+fn assert_cached_draw_identical(draw: &str) {
+    let content = draw.as_bytes();
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
+           /Resources << /XObject << /ImB 5 0 R /ImD 6 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", content),
+        stream_object(
+            "/Type /XObject /Subtype /Image /Width 50 /Height 80 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode",
+            &jpeg(50, 80, true),
+        ),
+        stream_object(
+            "/Type /XObject /Subtype /Image /Width 40 /Height 21 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode \
+             /Interpolate true",
+            &jpeg(40, 21, false),
+        ),
+    ];
+    let pdf = assemble_pdf(&objects);
+    let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
+    let session = session(pdf, BackendPolicy::ForceCuda);
+    let gpu = render(&session, 1);
+    assert_identical(&cpu, &gpu, draw);
+    assert_eq!(
+        session.image_cache().expect("image cache").len(),
+        1,
+        "{draw}: the image should be drawn from the cache"
+    );
+}
+
 /// Render `pages` of a corpus fixture on both backends and assert each is
 /// byte-identical, checking that the cache grows by exactly
 /// `cached_per_page[i]` entries after page `pages[i]`.  Skipped when the

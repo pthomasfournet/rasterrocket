@@ -201,21 +201,27 @@ pub mod fuzz_entry {
 /// rendering a blank region.
 pub enum ImageResolution {
     /// Image decoded successfully.
-    Ok {
-        /// The decoded image.  A decoder that reconstructs at reduced
-        /// resolution (see [`ImageRequest::draw_size`]) yields fewer pixels
-        /// than the stream holds.
-        image: ImageDescriptor,
-        /// The stream's `/Width`: the source pixel count across, whatever
-        /// resolution `image` was decoded at.
-        source_width: u32,
-    },
+    Ok(DecodedImage),
     /// The codec returned `None` or the stream was structurally invalid.  The
     /// page is incomplete; the message should be surfaced to the caller.
     DecodeFailed(String),
     /// The named `XObject` exists and is of a non-image subtype that has no
     /// raster appearance (e.g. `/PS`).  Nothing is lost by skipping it.
     Absent,
+}
+
+/// A decoded image with the dictionary entries that govern its drawing.
+pub struct DecodedImage {
+    /// The decoded image.  A decoder that reconstructs at reduced resolution
+    /// (see [`ImageRequest::draw_size`]) yields fewer pixels than the stream
+    /// holds.
+    pub image: ImageDescriptor,
+    /// The stream's `/Width`: the source pixel count across, whatever
+    /// resolution `image` was decoded at.
+    pub source_width: u32,
+    /// `/Interpolate`: the image asks to be interpolated when magnified
+    /// (PDF 32000-1 §8.9.5.3).
+    pub interpolate: bool,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -615,10 +621,11 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         smask::remove_matte(doc, stream.dict.get(b"ColorSpace"), matte, &mut img);
     }
 
-    ImageResolution::Ok {
+    ImageResolution::Ok(DecodedImage {
         image: img,
         source_width: w,
-    }
+        interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
+    })
 }
 
 /// Whether an image dictionary carries a mask the blit must honour: an
@@ -860,7 +867,7 @@ mod tests {
             None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         );
         match resolution {
-            ImageResolution::Ok { image, .. } => image,
+            ImageResolution::Ok(decoded) => decoded.image,
             ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
             ImageResolution::Absent => panic!("image resource not found"),
         }

@@ -1,14 +1,17 @@
 //! Image blit kernel dispatcher.
 //!
-//! Wraps `kernels/blit_image.cu`.  Copies a cached source image into a
+//! Wraps `kernels/blit_image.cu`.  Samples a cached source image into a
 //! [`DevicePageBuffer`] through caller-supplied sampling tables: the
-//! source pixel for output `(dx, dy)` is `cols[dx] + rows[dy]` in Q32
-//! fixed point.  The kernel performs no transform of its own, so the
-//! caller that builds the tables (the interpreter's image sampler, which
-//! also drives the CPU path) fully determines which source pixel every
-//! output pixel reads.  Output pixels whose sample falls outside the
-//! image are left untouched (the page buffer is zero-initialised, so
-//! they composite as fully transparent).
+//! source coordinate for output `(dx, dy)` is `cols[dx] + rows[dy]` in Q32
+//! fixed point, read by nearest neighbour or, along the axes the filter
+//! bits ([`BLIT_FILTER_X`], [`BLIT_FILTER_Y`]) select, by bilinear
+//! interpolation between the two samples whose centres bracket it.  The
+//! kernel performs no transform of its own, so the caller that builds the
+//! tables (the interpreter's image sampler, which also drives the CPU path)
+//! fully determines which source samples every output pixel reads.  Output
+//! pixels whose coordinate falls outside the image are left untouched (the
+//! page buffer is zero-initialised, so they composite as fully
+//! transparent).
 //!
 //! # Table layout
 //!
@@ -21,6 +24,7 @@
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
 use crate::GpuCtx;
+pub use crate::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y};
 use crate::cache::{CachedDeviceImage, DevicePageBuffer, ImageLayout};
 
 /// `u32` words per sampling-table entry: `[x_hi, x_lo, y_hi, y_lo]`.
@@ -68,8 +72,9 @@ impl BlitBbox {
 }
 
 impl GpuCtx {
-    /// Dispatch the image-blit kernel: copy `src` into `dst` through the
-    /// `cols`/`rows` sampling tables, writing only pixels inside `bbox`.
+    /// Dispatch the image-blit kernel: sample `src` into `dst` through the
+    /// `cols`/`rows` sampling tables, writing only pixels inside `bbox` and
+    /// interpolating along the axes `filter` selects.
     ///
     /// `cols` must hold `bbox.width()` entries and `rows` `bbox.height()`
     /// entries of [`SAMPLE_ENTRY_WORDS`] words each.
@@ -80,6 +85,8 @@ impl GpuCtx {
     /// # Errors
     /// - [`BlitError::UnsupportedLayout`] for `ImageLayout::Mask`.
     /// - [`BlitError::TableSize`] if a table doesn't match the bbox.
+    /// - [`BlitError::UnknownFilter`] if `filter` has bits beyond
+    ///   [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`].
     /// - [`BlitError::DimensionsTooLarge`] if any dim doesn't fit i32.
     /// - [`BlitError::Cuda`] for any underlying CUDA failure (PTX
     ///   launch, table upload, etc.).
@@ -90,6 +97,7 @@ impl GpuCtx {
         bbox: BlitBbox,
         cols: &[u32],
         rows: &[u32],
+        filter: u32,
     ) -> Result<(), BlitError> {
         // Caller contract: bbox is non-inverted.  An inverted bbox
         // would silently render zero pixels (BlitBbox::width returns
@@ -134,6 +142,7 @@ impl GpuCtx {
             bbox,
             &d_cols,
             &d_rows,
+            filter,
         )
     }
 
@@ -154,9 +163,11 @@ impl GpuCtx {
     ///
     /// `layout_code` is the kernel's enum value: `0 = Rgb`, `1 = Gray`.
     /// Mask layout is rejected by the public wrapper before this
-    /// helper is reached.
+    /// helper is reached.  `filter` holds the interpolated axes as
+    /// [`BLIT_FILTER_X`] / [`BLIT_FILTER_Y`] bits.
     ///
     /// # Errors
+    /// - [`BlitError::UnknownFilter`] if `filter` has any other bit set.
     /// - [`BlitError::DimensionsTooLarge`] if any dim doesn't fit i32.
     /// - [`BlitError::Cuda`] for any underlying cudarc failure.
     #[expect(
@@ -177,10 +188,15 @@ impl GpuCtx {
         bbox: BlitBbox,
         d_cols: &CudaSlice<u8>,
         d_rows: &CudaSlice<u8>,
+        filter: u32,
     ) -> Result<(), BlitError> {
         // 16×16 blocks: 256 threads / block, full-warp aligned, fits
         // in any modern SM's register budget for this kernel.
         const TILE: u32 = 16;
+
+        if filter & !(BLIT_FILTER_X | BLIT_FILTER_Y) != 0 {
+            return Err(BlitError::UnknownFilter);
+        }
 
         let bw = bbox.width();
         let bh = bbox.height();
@@ -220,7 +236,8 @@ impl GpuCtx {
             .arg(&bbox.x1)
             .arg(&bbox.y1)
             .arg(d_cols)
-            .arg(d_rows);
+            .arg(d_rows)
+            .arg(&filter);
 
         // SAFETY: kernel signature in kernels/blit_image.cu matches
         // the argument list above; src/dst bounds are validated by the
@@ -240,6 +257,8 @@ pub enum BlitError {
     /// A sampling table doesn't cover the bbox (`width × 4` / `height × 4`
     /// words).
     TableSize,
+    /// The filter has bits beyond [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`].
+    UnknownFilter,
     /// Source or destination dimensions don't fit in `i32`.  Indicates
     /// a malformed image or page; should never happen at PDF-realistic
     /// resolutions (max u32 wide ≈ 4.3B px ≫ any real page).
@@ -259,6 +278,7 @@ impl std::fmt::Display for BlitError {
         match self {
             Self::UnsupportedLayout => write!(f, "blit kernel does not handle Mask layout"),
             Self::TableSize => write!(f, "blit sampling tables do not match the bbox"),
+            Self::UnknownFilter => write!(f, "blit filter has unknown bits"),
             Self::DimensionsTooLarge => {
                 write!(f, "image or page dimensions exceed i32::MAX")
             }
@@ -271,7 +291,10 @@ impl std::error::Error for BlitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Cuda(e) => Some(e),
-            Self::UnsupportedLayout | Self::TableSize | Self::DimensionsTooLarge => None,
+            Self::UnsupportedLayout
+            | Self::TableSize
+            | Self::UnknownFilter
+            | Self::DimensionsTooLarge => None,
         }
     }
 }
@@ -345,8 +368,58 @@ mod tests {
         (cols, rows)
     }
 
+    /// Taps `(lo, hi, weight of hi)` along one axis of `n` samples for the
+    /// Q32 coordinate `q`, which lies on the axis, computed in 64-bit
+    /// arithmetic: `q − ½` floored, its successor, both clamped onto the
+    /// axis, and the top 8 bits of its fraction.
+    #[cfg(feature = "gpu-validation")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test arithmetic: indices are clamped onto the axis, the weight is masked to 8 bits"
+    )]
+    fn reference_taps(q: i64, n: u32, blend: bool) -> (u32, u32, u32) {
+        if !blend {
+            let i = (q >> 32) as u32;
+            return (i, i, 0);
+        }
+        let centred = q - (1 << 31);
+        let lower = centred >> 32;
+        (
+            lower.max(0) as u32,
+            (lower + 1).min(i64::from(n) - 1) as u32,
+            ((centred >> 24) & 0xFF) as u32,
+        )
+    }
+
+    /// RGB of an `src_w`-wide RGB image sampled through the table entries
+    /// `c` and `r` with the `filter` bits.
+    #[cfg(feature = "gpu-validation")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the rounded weighted mean of u8 values is at most 255"
+    )]
+    fn reference_rgb(pixels: &[u8], src_w: u32, c: &[u32], r: &[u32], filter: u32) -> [u8; 3] {
+        let q = |word: usize| {
+            let term =
+                |t: &[u32]| (i64::from(t[word].cast_signed()) << 32) + i64::from(t[word + 1]);
+            term(c) + term(r)
+        };
+        let src_h = u32::try_from(pixels.len()).expect("small image") / 3 / src_w;
+        let (x0, x1, wx) = reference_taps(q(0), src_w, filter & BLIT_FILTER_X != 0);
+        let (y0, y1, wy) = reference_taps(q(2), src_h, filter & BLIT_FILTER_Y != 0);
+        let at = |x: u32, y: u32, ch: usize| u32::from(pixels[(y * src_w + x) as usize * 3 + ch]);
+        std::array::from_fn(|ch| {
+            let row = |y| at(x0, y, ch) * (256 - wx) + at(x1, y, ch) * wx;
+            ((row(y0) * (256 - wy) + row(y1) * wy + (1 << 15)) >> 16) as u8
+        })
+    }
+
     /// Run the kernel on a `SRC×SRC` RGB image with the given source map
-    /// and compare every page pixel against the f64 reference.
+    /// and `filter` bits, and compare every page pixel against the
+    /// reference: the f64 floor of the source coordinate selects which
+    /// pixels are written, and the sample at that floor (nearest) or
+    /// [`reference_rgb`] (interpolated) gives their colour.
     #[cfg(feature = "gpu-validation")]
     #[expect(
         clippy::cast_possible_truncation,
@@ -357,6 +430,7 @@ mod tests {
     fn check_kernel_against_reference(
         col_terms: impl Fn(f64) -> (f64, f64) + Copy,
         row_terms: impl Fn(f64) -> (f64, f64) + Copy,
+        filter: u32,
     ) {
         use crate::cache::{DeviceImageCache, ImageLayout, InsertRequest};
         use crate::cache::{DocId, HostBudget, ObjId, VramBudget};
@@ -403,7 +477,7 @@ mod tests {
         };
         let (cols, rows) = build_tables(bbox, col_terms, row_terms);
         let mut page = DevicePageBuffer::new(Arc::clone(&stream), PAGE, PAGE).expect("page");
-        gpu.blit_image_to_buffer(&cached, &mut page, bbox, &cols, &rows)
+        gpu.blit_image_to_buffer(&cached, &mut page, bbox, &cols, &rows, filter)
             .expect("blit");
         let host = page.download().expect("download");
 
@@ -422,9 +496,16 @@ mod tests {
                 let (ix, iy) = (x as u32, y as u32);
                 assert_eq!(alpha, 255, "alpha at ({dx},{dy}) — in-bounds sample");
                 let src_off = ((iy * SRC + ix) * 3) as usize;
+                let expected = if filter == 0 {
+                    [pixels[src_off], pixels[src_off + 1], pixels[src_off + 2]]
+                } else {
+                    let c = &cols[dx as usize * SAMPLE_ENTRY_WORDS..][..SAMPLE_ENTRY_WORDS];
+                    let r = &rows[dy as usize * SAMPLE_ENTRY_WORDS..][..SAMPLE_ENTRY_WORDS];
+                    reference_rgb(&pixels, SRC, c, r, filter)
+                };
                 assert_eq!(
-                    &host[off..off + 3],
-                    &pixels[src_off..src_off + 3],
+                    host[off..off + 3],
+                    expected,
                     "RGB at ({dx},{dy}) (ix={ix}, iy={iy})",
                 );
                 compared += 1;
@@ -439,7 +520,7 @@ mod tests {
     #[cfg(feature = "gpu-validation")]
     #[test]
     fn blit_kernel_identity_matches_reference() {
-        check_kernel_against_reference(|px| (px, 0.0), |py| (0.0, py));
+        check_kernel_against_reference(|px| (px, 0.0), |py| (0.0, py), 0);
     }
 
     /// Fractional scale and offset in both axes, with a y-flip, so the
@@ -455,7 +536,26 @@ mod tests {
         check_kernel_against_reference(
             |px| ((px - 1.3) * 0.7, 0.0),
             |py| (0.0, 4.0 - (py - 0.6) * 0.9),
+            0,
         );
+    }
+
+    /// The scaled placement interpolated on one axis, then on both: taps
+    /// clamp at the image edges and weights follow the fraction.
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    #[expect(
+        clippy::suboptimal_flops,
+        reason = "test geometry: the source map is spelled as scale-then-offset for readability"
+    )]
+    fn blit_kernel_bilinear_matches_reference() {
+        for filter in [BLIT_FILTER_X, BLIT_FILTER_X | BLIT_FILTER_Y] {
+            check_kernel_against_reference(
+                |px| ((px - 1.3) * 0.7, 0.0),
+                |py| (0.0, 4.0 - (py - 0.6) * 0.9),
+                filter,
+            );
+        }
     }
 
     /// A rotated placement: the column term contributes to `Y` and the row
@@ -470,6 +570,12 @@ mod tests {
         check_kernel_against_reference(
             |px| ((px - 3.0) * 0.6, (px - 3.0) * 0.4),
             |py| ((py - 3.0) * -0.4 + 2.0, (py - 3.0) * 0.6 + 2.0),
+            0,
+        );
+        check_kernel_against_reference(
+            |px| ((px - 3.0) * 0.6, (px - 3.0) * 0.4),
+            |py| ((py - 3.0) * -0.4 + 2.0, (py - 3.0) * 0.6 + 2.0),
+            BLIT_FILTER_X | BLIT_FILTER_Y,
         );
     }
 
@@ -510,7 +616,7 @@ mod tests {
         };
         let mut page = DevicePageBuffer::new(Arc::clone(&stream), 4, 4).expect("page");
         let err = gpu
-            .blit_image_to_buffer(&cached, &mut page, bbox, &[0; 8], &[0; 16])
+            .blit_image_to_buffer(&cached, &mut page, bbox, &[0; 8], &[0; 16], 0)
             .unwrap_err();
         assert!(matches!(err, BlitError::TableSize), "{err}");
     }

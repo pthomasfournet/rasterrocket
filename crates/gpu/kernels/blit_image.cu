@@ -1,12 +1,13 @@
 // Image blit kernel.
 //
 // Copies a source image into a destination RGBA8 page buffer through
-// caller-supplied sampling tables.  Each output pixel is one thread; the
-// source pixel it reads is `cols[dx] + rows[dy]` in Q32 fixed point, so
-// the kernel performs no floating-point arithmetic and no per-pixel
-// transform of its own.  The caller derives the tables from the image's
-// placement (the CPU sampler consumes the same tables, which is what
-// makes the two paths select identical source pixels).
+// caller-supplied sampling tables.  Each output pixel is one thread; its
+// source coordinate is `cols[dx] + rows[dy]` in Q32 fixed point, so the
+// kernel performs no floating-point arithmetic and no per-pixel transform
+// of its own.  The caller derives the tables from the image's placement
+// (the CPU sampler consumes the same tables and derives taps and weights
+// by the same integer arithmetic, which is what makes the two paths
+// produce identical pixels).
 //
 // Inputs
 // ------
@@ -23,6 +24,9 @@
 //   bx1, by1    : bottom-right (exclusive)
 //   cols        : (bx1 - bx0) entries of 4 u32 words: x_hi, x_lo, y_hi, y_lo
 //   rows        : (by1 - by0) entries of the same shape
+//   filter      : bit 0 interpolates between source columns, bit 1 between
+//                 source rows; a clear bit samples that axis by nearest
+//                 neighbour
 //
 // Table entry words are the Q32 split of one term of the source
 // coordinate: `hi` holds the two's-complement integer part, `lo` the
@@ -31,6 +35,49 @@
 // index falls outside `[0, src_w) × [0, src_h)` leave the destination
 // untouched (the caller allocates the page buffer zero-initialised, so
 // untouched pixels composite as fully transparent).
+//
+// An interpolated axis measures the coordinate from sample centres, half
+// a sample below the sum, by subtracting 2^31 from the fraction with
+// borrow into the integer part.  The two taps are the floor of that
+// coordinate and its successor, each clamped onto the axis, and the top
+// 8 bits of its fraction weight the upper tap.  The four taps are blended
+// per channel as `((p00·(256−wx) + p10·wx)·(256−wy) + (p01·(256−wx) +
+// p11·wx)·wy + 2^15) >> 16`, which reduces to the nearest sample when both
+// weights are zero.
+
+#define WEIGHT_ONE 256u
+#define HALF_SAMPLE 0x80000000u
+
+// Taps along one axis of `n` samples for source index `i` (in `[0, n)`)
+// and fraction `frac`; `*w` is the weight of `*hi`.
+__device__ __forceinline__ void axis_taps(
+    int i, unsigned int frac, int n, bool blend,
+    int* lo, int* hi, unsigned int* w
+) {
+    if (!blend) {
+        *lo = i;
+        *hi = i;
+        *w = 0;
+        return;
+    }
+    int lower = i - (frac < HALF_SAMPLE ? 1 : 0);
+    int l = max(lower, 0);
+    int h = min(lower + 1, n - 1);
+    *lo = l;
+    *hi = h;
+    *w = (l == h) ? 0u : ((frac - HALF_SAMPLE) >> 24);
+}
+
+// Weighted mean of byte `ch` at the four tap offsets, rounded to nearest.
+__device__ __forceinline__ unsigned int blend_taps(
+    const unsigned char* __restrict__ src, int ch,
+    int o00, int o10, int o01, int o11,
+    unsigned int wx, unsigned int wy
+) {
+    unsigned int r0 = src[o00 + ch] * (WEIGHT_ONE - wx) + src[o10 + ch] * wx;
+    unsigned int r1 = src[o01 + ch] * (WEIGHT_ONE - wx) + src[o11 + ch] * wx;
+    return (r0 * (WEIGHT_ONE - wy) + r1 * wy + 0x8000u) >> 16;
+}
 
 extern "C" __global__ void blit_image(
     const unsigned char* __restrict__ src,
@@ -43,7 +90,8 @@ extern "C" __global__ void blit_image(
     int bx0, int by0,
     int bx1, int by1,
     const unsigned int* __restrict__ cols,
-    const unsigned int* __restrict__ rows
+    const unsigned int* __restrict__ rows,
+    unsigned int filter
 ) {
     int dx = bx0 + (int)(blockIdx.x * blockDim.x + threadIdx.x);
     int dy = by0 + (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -66,16 +114,29 @@ extern "C" __global__ void blit_image(
         return;
     }
 
+    int x0, x1, y0, y1;
+    unsigned int wx, wy;
+    axis_taps(ix, x_lo, src_w, (filter & 1u) != 0, &x0, &x1, &wx);
+    axis_taps(iy, y_lo, src_h, (filter & 2u) != 0, &y0, &y1, &wy);
+
+    int bpp = src_layout == 0 ? 3 : 1;
+    int o00 = (y0 * src_w + x0) * bpp;
+    int o10 = (y0 * src_w + x1) * bpp;
+    int o01 = (y1 * src_w + x0) * bpp;
+    int o11 = (y1 * src_w + x1) * bpp;
+
     // The page buffer base is allocation-aligned and every pixel is 4
     // bytes, so each output pixel is one aligned 32-bit store.
     uchar4* dst = reinterpret_cast<uchar4*>(dst_rgba) + ((size_t)dy * dst_w + dx);
     if (src_layout == 0) {
-        // RGB: 3 bytes per source pixel
-        int src_off = (iy * src_w + ix) * 3;
-        *dst = make_uchar4(src[src_off + 0], src[src_off + 1], src[src_off + 2], 255);
+        *dst = make_uchar4(
+            (unsigned char)blend_taps(src, 0, o00, o10, o01, o11, wx, wy),
+            (unsigned char)blend_taps(src, 1, o00, o10, o01, o11, wx, wy),
+            (unsigned char)blend_taps(src, 2, o00, o10, o01, o11, wx, wy),
+            255);
     } else {
-        // Gray: 1 byte per source pixel; broadcast to RGB.
-        unsigned char g = src[iy * src_w + ix];
+        // Gray: broadcast to RGB.
+        unsigned char g = (unsigned char)blend_taps(src, 0, o00, o10, o01, o11, wx, wy);
         *dst = make_uchar4(g, g, g, 255);
     }
 }

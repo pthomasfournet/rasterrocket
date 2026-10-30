@@ -26,10 +26,8 @@ fn render(params: &str, data: &[u8]) -> [[u8; 3]; 3] {
     let objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] /Contents 4 0 R >>"
-        )
-        .into_bytes(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] /Contents 4 0 R >>")
+            .into_bytes(),
         stream_object("", &content),
     ];
     let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);

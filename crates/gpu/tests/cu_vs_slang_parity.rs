@@ -32,7 +32,7 @@
 
 use rasterrocket_gpu::backend::GpuBackend;
 use rasterrocket_gpu::backend::params::{
-    BlitParams, CompositeParams, IccClutParams, SoftMaskParams,
+    BLIT_FILTER_X, BLIT_FILTER_Y, BlitParams, CompositeParams, IccClutParams, SoftMaskParams,
 };
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
@@ -388,9 +388,29 @@ fn blit_tables(
     (cols, rows)
 }
 
+/// Taps `(lo, hi, weight of hi)` along one axis of `n` samples for the
+/// in-range integer part `i` and Q32 fraction `frac` of a source
+/// coordinate: the sample `i` alone, or, when `blend` is set, the samples
+/// whose centres bracket the coordinate, clamped onto the axis, weighted by
+/// the top 8 bits of the coordinate's fraction measured from sample centres.
+fn blit_axis_taps(i: i32, frac: u32, n: u32, blend: bool) -> (u32, u32, u32) {
+    if !blend {
+        return (i.cast_unsigned(), i.cast_unsigned(), 0);
+    }
+    let q = (i64::from(i) << 32) + i64::from(frac) - (1 << 31);
+    let lower = q >> 32;
+    let index = |v: i64| u32::try_from(v).expect("tap clamped onto the axis");
+    (
+        index(lower.max(0)),
+        index((lower + 1).min(i64::from(n) - 1)),
+        index((q >> 24) & 0xFF),
+    )
+}
+
 /// Replicate the kernel's table walk on the CPU (mirrors the test in
 /// `crates/gpu/src/blit.rs`): sum column and row terms with carry, reject
-/// out-of-image samples, copy the pixel with alpha 255.
+/// out-of-image samples, blend the taps `filter` selects and write the
+/// pixel with alpha 255.
 fn blit_cpu_reference(
     page: &mut [u8],
     page_w: u32,
@@ -402,7 +422,9 @@ fn blit_cpu_reference(
     bbox: [i32; 4],
     cols: &[u32],
     rows: &[u32],
+    filter: u32,
 ) {
+    let bpp = if src_layout == 0 { 3 } else { 1 };
     // Table index is the position within the bbox; page bounds are the
     // kernel's own reject test.
     for (r_idx, dy) in (bbox[1]..bbox[3]).enumerate() {
@@ -421,42 +443,38 @@ fn blit_cpu_reference(
             }
             let c = &cols[c_idx * 4..][..4];
             let r = &rows[r_idx * 4..][..4];
-            let (_, carry_x) = c[1].overflowing_add(r[1]);
+            let (frac_x, carry_x) = c[1].overflowing_add(r[1]);
             let ix = c[0]
                 .cast_signed()
                 .wrapping_add(r[0].cast_signed())
                 .wrapping_add(i32::from(carry_x));
-            let (_, carry_y) = c[3].overflowing_add(r[3]);
+            let (frac_y, carry_y) = c[3].overflowing_add(r[3]);
             let iy = c[2]
                 .cast_signed()
                 .wrapping_add(r[2].cast_signed())
                 .wrapping_add(i32::from(carry_y));
-            let (Ok(ix), Ok(iy)) = (u32::try_from(ix), u32::try_from(iy)) else {
+            let (Ok(ux), Ok(uy)) = (u32::try_from(ix), u32::try_from(iy)) else {
                 continue;
             };
-            if ix >= src_w || iy >= src_h {
+            if ux >= src_w || uy >= src_h {
                 continue;
             }
-            let dst_off = (dy * page_w + dx) as usize * 4;
-            #[expect(
-                clippy::branches_sharing_code,
-                reason = "shared trailing alpha=255 mirrors the kernel branch shape; \
-                          factoring out the assignment would obscure the per-branch RGB pulls"
-            )]
-            if src_layout == 0 {
-                let src_off = (iy * src_w + ix) as usize * 3;
-                page[dst_off] = src[src_off];
-                page[dst_off + 1] = src[src_off + 1];
-                page[dst_off + 2] = src[src_off + 2];
-                page[dst_off + 3] = 255;
+            let (x0, x1, wx) = blit_axis_taps(ix, frac_x, src_w, filter & BLIT_FILTER_X != 0);
+            let (y0, y1, wy) = blit_axis_taps(iy, frac_y, src_h, filter & BLIT_FILTER_Y != 0);
+            let at =
+                |x: u32, y: u32, ch: usize| u32::from(src[(y * src_w + x) as usize * bpp + ch]);
+            let blend = |ch: usize| {
+                let row = |y| at(x0, y, ch) * (256 - wx) + at(x1, y, ch) * wx;
+                ((row(y0) * (256 - wy) + row(y1) * wy + (1 << 15)) >> 16) as u8
+            };
+            let rgb = if src_layout == 0 {
+                [blend(0), blend(1), blend(2)]
             } else {
-                let src_off = (iy * src_w + ix) as usize;
-                let g = src[src_off];
-                page[dst_off] = g;
-                page[dst_off + 1] = g;
-                page[dst_off + 2] = g;
-                page[dst_off + 3] = 255;
-            }
+                [blend(0); 3]
+            };
+            let dst_off = (dy * page_w + dx) as usize * 4;
+            page[dst_off..dst_off + 3].copy_from_slice(&rgb);
+            page[dst_off + 3] = 255;
         }
     }
 }
@@ -471,6 +489,7 @@ fn run_blit_vulkan(
     bbox: [i32; 4],
     cols: &[u32],
     rows: &[u32],
+    filter: u32,
 ) -> Vec<u8> {
     let backend = VulkanBackend::new().expect("VulkanBackend::new");
     let dst_bytes = (page_w * page_h * 4) as usize;
@@ -503,6 +522,7 @@ fn run_blit_vulkan(
             dst_w: page_w,
             dst_h: page_h,
             bbox,
+            filter,
         })
         .expect("record_blit_image");
     let fence = backend.submit_page().expect("submit_page");
@@ -513,8 +533,8 @@ fn run_blit_vulkan(
     out
 }
 
-/// Run one blit through the CPU reference and Vulkan, asserting byte
-/// equality.
+/// Run one blit through the CPU reference and Vulkan, nearest-neighbour
+/// and then interpolated on both axes, asserting byte equality.
 fn check_blit_parity(
     src: &[u8],
     src_w: u32,
@@ -527,18 +547,20 @@ fn check_blit_parity(
 ) {
     let bbox = [0, 0, page as i32, page as i32];
     let (cols, rows) = blit_tables(bbox, col_terms, row_terms);
-    let mut cpu = vec![0u8; (page * page * 4) as usize];
-    blit_cpu_reference(
-        &mut cpu, page, page, src, src_w, src_h, src_layout, bbox, &cols, &rows,
-    );
-    let vk = run_blit_vulkan(
-        src, src_w, src_h, src_layout, page, page, bbox, &cols, &rows,
-    );
-    assert_eq!(cpu, vk, "{what} diverges");
-    assert!(
-        cpu.as_chunks::<4>().0.iter().any(|px| px[3] == 255),
-        "{what}: no pixel was written"
-    );
+    for filter in [0, BLIT_FILTER_X | BLIT_FILTER_Y] {
+        let mut cpu = vec![0u8; (page * page * 4) as usize];
+        blit_cpu_reference(
+            &mut cpu, page, page, src, src_w, src_h, src_layout, bbox, &cols, &rows, filter,
+        );
+        let vk = run_blit_vulkan(
+            src, src_w, src_h, src_layout, page, page, bbox, &cols, &rows, filter,
+        );
+        assert_eq!(cpu, vk, "{what} (filter {filter}) diverges");
+        assert!(
+            cpu.as_chunks::<4>().0.iter().any(|px| px[3] == 255),
+            "{what}: no pixel was written"
+        );
+    }
 }
 
 #[test]

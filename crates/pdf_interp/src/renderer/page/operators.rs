@@ -359,8 +359,8 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "gpu-jpeg-huffman")]
                     self.jpeg_gpu.as_mut(),
                 );
-                if let Some(img) = decoded {
-                    self.blit_image(&img, img.width);
+                if let Some(decoded) = decoded {
+                    self.blit_image(&decoded);
                 } else {
                     // Inline image data is present by definition — None here is a
                     // genuine decode failure, not an absent resource.

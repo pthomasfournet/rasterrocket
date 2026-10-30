@@ -157,6 +157,7 @@ impl PageRecorder {
             bbox,
             p.cols,
             p.rows,
+            p.filter,
         )
         .map_err(be)
     }

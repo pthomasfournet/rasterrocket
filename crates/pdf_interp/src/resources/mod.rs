@@ -37,7 +37,7 @@ pub use font::{BaseEncoding, FontDescriptor, PdfFontKind, resolve_font};
 #[cfg(feature = "nvjpeg")]
 pub use gpu::nvjpeg::NvJpegDecoder;
 pub use image::{
-    IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
+    DecodedImage, IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
     ImageResolution, SoftMask, resolve_image,
 };
 

@@ -45,15 +45,16 @@ const WEIGHT_BITS: u32 = 16;
 const MID_BITS: u32 = 8;
 
 /// A CTM component at most this large (device pixels per unit square) is
-/// treated as zero when classifying a draw as axis-aligned.
-const AXIS_TOLERANCE: f64 = 1e-6;
+/// treated as zero when classifying a draw as axis-aligned: the image edge
+/// it skews then drifts by under half a device pixel over its length.
+pub(super) const AXIS_TOLERANCE: f64 = 0.5;
 
 /// An axis reduces when its source samples exceed its device pixels by more
 /// than this relative margin; below it, a draw counts as full resolution.
 /// Within the margin point sampling skips at most one sample in 33, while
 /// the box filter would blend almost every device pixel with a neighbour
 /// by the sub-pixel phase of the two grids.
-const REDUCTION_MARGIN: f64 = 1.0 / 32.0;
+pub(super) const REDUCTION_MARGIN: f64 = 1.0 / 32.0;
 
 /// Resample `img` for drawing through `ctm`.
 ///
