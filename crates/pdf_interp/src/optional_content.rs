@@ -20,7 +20,7 @@
 //! membership dictionary, and every content of a document without
 //! `/OCProperties`, is visible.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 
@@ -69,6 +69,9 @@ pub struct OptionalContent {
     purpose: RenderPurpose,
     /// `None` when the document has no usable `/OCProperties /D`.
     config: Option<Config>,
+    /// The state of every group `/OCProperties /OCGs` lists, resolved once;
+    /// a group the array omits is resolved on each query.
+    states: HashMap<ObjectId, bool>,
 }
 
 /// The parts of a configuration dictionary (§8.11.4.3) that decide the state
@@ -90,13 +93,27 @@ impl OptionalContent {
     /// Resolve the default configuration of `doc` for `purpose`.
     #[must_use]
     pub fn new(doc: &Document, purpose: RenderPurpose) -> Self {
-        let config = doc
+        let properties = doc
             .catalog()
             .ok()
-            .and_then(|catalog| resolve_dict(doc, catalog.get(b"OCProperties")?))
+            .and_then(|catalog| resolve_dict(doc, catalog.get(b"OCProperties")?));
+        let config = properties
+            .as_ref()
             .and_then(|props| resolve_dict(doc, props.get(b"D")?))
             .map(|d| Config::new(doc, &d, purpose));
-        Self { purpose, config }
+        let mut this = Self {
+            purpose,
+            config,
+            states: HashMap::new(),
+        };
+        if this.config.is_some() {
+            let groups = reference_set(doc, properties.as_ref().and_then(|p| p.get(b"OCGs")));
+            this.states = groups
+                .into_iter()
+                .map(|id| (id, this.resolve_group(doc, id)))
+                .collect();
+        }
+        this
     }
 
     /// The purpose this configuration was resolved for.
@@ -113,24 +130,38 @@ impl OptionalContent {
         if self.config.is_none() {
             return true;
         }
-        let (id, dict) = match oc {
-            Object::Reference(id) => match doc.get_object(*id).ok().as_deref() {
-                Some(Object::Dictionary(d)) => (Some(*id), d.clone()),
-                _ => return true,
-            },
-            Object::Dictionary(d) => (None, d.clone()),
-            _ => return true,
-        };
-        if dict.get_name(b"Type") == Some(b"OCMD") {
-            self.membership_visible(doc, &dict)
-        } else {
-            id.is_none_or(|id| self.group_on(doc, id))
+        match oc {
+            Object::Reference(id) => {
+                if let Some(&on) = self.states.get(id) {
+                    return on;
+                }
+                match doc.get_object(*id).ok().as_deref() {
+                    Some(Object::Dictionary(d)) if d.get_name(b"Type") == Some(b"OCMD") => {
+                        self.membership_visible(doc, d)
+                    }
+                    Some(Object::Dictionary(_)) => self.resolve_group(doc, *id),
+                    _ => true,
+                }
+            }
+            Object::Dictionary(d) if d.get_name(b"Type") == Some(b"OCMD") => {
+                self.membership_visible(doc, d)
+            }
+            _ => true,
         }
     }
 
-    /// The state of the group `id` (§8.11.4.3); `true` when it does not take
-    /// part in visibility.
+    /// The state of the group `id`: as resolved at construction when
+    /// `/OCGs` lists it, else resolved now.
     fn group_on(&self, doc: &Document, id: ObjectId) -> bool {
+        self.states
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| self.resolve_group(doc, id))
+    }
+
+    /// Resolve the state of the group `id` (§8.11.4.3); `true` when it does
+    /// not take part in visibility.
+    fn resolve_group(&self, doc: &Document, id: ObjectId) -> bool {
         let Some(config) = &self.config else {
             return true;
         };
