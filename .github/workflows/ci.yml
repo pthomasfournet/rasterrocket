@@ -89,6 +89,9 @@ jobs:
       - name: Test vendored JBIG2 and CCITT decoders
         run: cargo test -p hayro-jbig2 -p hayro-ccitt --release
 
+      - name: Test rasterrocket-cli (argument handling, end-to-end runs of the binary)
+        run: cargo test -p rasterrocket-cli
+
       - name: Check bench binaries
         run: cargo check -p bench --bins
 
@@ -120,6 +123,9 @@ jobs:
 
       - name: Clippy (rasterrocket tests)
         run: cargo clippy -p rasterrocket --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-cli tests)
+        run: cargo clippy -p rasterrocket-cli --tests -- -D warnings
 
       - name: Clippy (rasterrocket-camera, lib and tests)
         run: cargo clippy -p rasterrocket-camera --tests -- -D warnings

@@ -76,11 +76,9 @@ bench/v060/*.txt
 /test_*
 /bench_*
 
-# ── Test fixtures and golden references ───────────────────────────────────────
+# ── Test fixtures ─────────────────────────────────────────────────────────────
 # Add your own PDFs locally; do not commit fixture documents to the repo.
 tests/fixtures/*.pdf
-tests/golden/ref/*.ppm
-tests/golden/ref/*.png
 tests/bench/bins/
 tests/bench/bench-results.json
 tests/bench/bench-features-results.json
