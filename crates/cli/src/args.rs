@@ -292,8 +292,9 @@ pub(crate) struct Args {
     /// What the pages are rendered for.
     ///
     /// `view`  — on-screen viewing (the default): layers take their View
-    ///           usage state.
-    /// `print` — printing: layers take their Print usage state.
+    ///           usage state and annotations marked not for viewing are omitted.
+    /// `print` — printing: layers take their Print usage state and only
+    ///           annotations marked for printing are drawn.
     #[arg(
         long = "purpose",
         value_name = "PURPOSE",

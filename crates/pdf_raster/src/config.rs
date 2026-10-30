@@ -204,7 +204,7 @@ pub struct SessionConfig {
     /// printing.
     ///
     /// Selects the optional-content usage event applied to the document's
-    /// layers (see [`RenderPurpose`]).
+    /// layers and the annotation flags honoured (see [`RenderPurpose`]).
     pub purpose: RenderPurpose,
 }
 

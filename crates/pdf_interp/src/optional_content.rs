@@ -27,12 +27,14 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use crate::resources::dict_ext::DictExt;
 
 /// The use a rendering is made for, which selects the optional-content usage
-/// event (§8.11.4.4) that applies.
+/// event (§8.11.4.4) and the annotation flags (§12.5.3) that apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderPurpose {
-    /// On-screen viewing: the `View` usage event applies.
+    /// On-screen viewing: the `View` usage event applies, and annotations
+    /// flagged `NoView` are not drawn.
     View,
-    /// Printing: the `Print` usage event applies.
+    /// Printing: the `Print` usage event applies, and only annotations
+    /// flagged `Print` are drawn.
     Print,
 }
 

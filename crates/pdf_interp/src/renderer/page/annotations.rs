@@ -3,20 +3,28 @@
 //! Free functions taking `renderer: &mut PageRenderer<'_>`, delegated from
 //! thin wrapper methods in `mod.rs`.
 
-use pdf::{Object, ObjectId};
+use pdf::{Dictionary, Document, Object, ObjectId};
 
-use super::super::gstate::ctm_multiply;
+use super::super::gstate::{Ctm, ctm_multiply};
 use super::PageRenderer;
+use crate::RenderPurpose;
+use crate::resources::dict_ext::DictExt;
+
+/// Annotation flag bits (PDF §12.5.3, Table 167).
+const HIDDEN: i64 = 1 << 1;
+const PRINT: i64 = 1 << 2;
+const NO_ROTATE: i64 = 1 << 4;
+const NO_VIEW: i64 = 1 << 5;
 
 /// Render all annotations on the page (PDF §12.5).
 ///
-/// Each annotation with an `AP/N` (normal appearance) stream is rendered
-/// after the page content stream.  Only the `/N` entry is used; rollover
-/// (`/R`) and down (`/D`) appearances are ignored (this is a rasterizer,
-/// not an interactive viewer).
+/// Each entry of `/Annots`, an annotation dictionary or a reference to one,
+/// that is shown for the renderer's purpose and has a normal appearance
+/// (`/AP /N`) is drawn after the page content stream, in array order.
+/// Rollover (`/R`) and down (`/D`) appearances are not used.
 ///
-/// Annotations with no appearance stream are silently skipped — many
-/// annotation types (e.g. `Link`) have no visible appearance by default.
+/// Annotations with no appearance stream are skipped; many annotation types
+/// (e.g. `Link`) have no visible appearance by default.
 ///
 /// Call this after `execute` and before `finish`.
 pub(super) fn render_annotations(renderer: &mut PageRenderer<'_>, page_id: ObjectId) {
@@ -31,60 +39,75 @@ pub(super) fn render_annotations(renderer: &mut PageRenderer<'_>, page_id: Objec
         return;
     };
 
-    // Collect annotation refs to avoid borrow conflict.
-    let annot_ids: Vec<ObjectId> = {
-        let arr: Vec<Object> = match page_dict.get(b"Annots") {
-            Some(Object::Array(a)) => a.clone(),
-            Some(Object::Reference(id)) => {
-                let id = *id;
-                if let Some(a) = doc
-                    .get_object(id)
-                    .ok()
-                    .and_then(|o| o.as_array().map(<[Object]>::to_vec))
-                {
-                    a
-                } else {
+    let entries: Vec<Object> = match page_dict.get(b"Annots") {
+        Some(Object::Array(a)) => a.clone(),
+        Some(Object::Reference(id)) => {
+            let id = *id;
+            if let Some(a) = doc
+                .get_object(id)
+                .ok()
+                .and_then(|o| o.as_array().map(<[Object]>::to_vec))
+            {
+                a
+            } else {
+                log::warn!(
+                    "rasterrocket-interp: render_annotations: /Annots reference ({}, {}) \
+                     did not resolve to an array — skipping annotations",
+                    id.0,
+                    id.1
+                );
+                return;
+            }
+        }
+        _ => return,
+    };
+
+    for entry in entries {
+        match entry {
+            Object::Reference(id) => {
+                let Ok(annot) = doc.get_dictionary(id) else {
                     log::warn!(
-                        "rasterrocket-interp: render_annotations: /Annots reference ({}, {}) \
-                         did not resolve to an array — skipping annotations",
+                        "rasterrocket-interp: annotation ({}, {}) object missing or not a \
+                         dictionary — skipping",
                         id.0,
                         id.1
                     );
-                    return;
-                }
+                    continue;
+                };
+                render_one_annotation(renderer, &annot, Some(id));
             }
-            _ => return,
-        };
-        arr.iter()
-            .filter_map(|o| {
-                if let Object::Reference(id) = o {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
-
-    for annot_id in annot_ids {
-        render_one_annotation(renderer, annot_id);
+            Object::Dictionary(annot) => render_one_annotation(renderer, &annot, None),
+            _ => {}
+        }
     }
 }
 
-/// Render a single annotation object into `renderer`'s bitmap.
-pub(super) fn render_one_annotation(renderer: &mut PageRenderer<'_>, annot_id: ObjectId) {
+/// Whether an annotation with flags `flags` is shown for `purpose`
+/// (PDF §12.5.3): never when `Hidden`; when viewing, unless `NoView`; when
+/// printing, only when `Print`.
+const fn shown_for(flags: i64, purpose: RenderPurpose) -> bool {
+    if flags & HIDDEN != 0 {
+        return false;
+    }
+    match purpose {
+        RenderPurpose::View => flags & NO_VIEW == 0,
+        RenderPurpose::Print => flags & PRINT != 0,
+    }
+}
+
+/// Render the annotation dictionary `annot` (object `id`, or direct when
+/// `None`) into `renderer`'s bitmap.
+pub(super) fn render_one_annotation(
+    renderer: &mut PageRenderer<'_>,
+    annot: &Dictionary,
+    id: Option<ObjectId>,
+) {
     let doc = renderer.resources.doc();
-
-    let Ok(annot_dict) = doc.get_dictionary(annot_id) else {
-        log::warn!(
-            "rasterrocket-interp: annotation ({}, {}) object missing or not a dictionary — skipping",
-            annot_id.0,
-            annot_id.1
-        );
+    let flags = annot.get_i64(b"F").unwrap_or(0);
+    if !shown_for(flags, renderer.optional_content().purpose()) {
         return;
-    };
-
-    if let Some(oc) = annot_dict.get(b"OC")
+    }
+    if let Some(oc) = annot.get(b"OC")
         && !renderer.oc_visible(oc)
     {
         return;
@@ -92,68 +115,117 @@ pub(super) fn render_one_annotation(renderer: &mut PageRenderer<'_>, annot_id: O
 
     // Check for AP/N before Rect — annotations with no AP stream have no visible
     // appearance (e.g. Link) and are expected to be absent silently.
-    let Some(ap_dict) = annot_dict
-        .get(b"AP")
-        .and_then(|o| crate::resources::resolve_dict(doc, o))
-    else {
+    let Some(stream_id) = normal_appearance(doc, annot) else {
         return;
     };
 
     // Annotation rect in page user space: [llx, lly, urx, ury].
     // Warn when AP exists but Rect is absent/malformed — visible annotation dropped.
-    let Some(rect) = read_rect(&annot_dict) else {
+    let Some(rect) = read_rect(annot) else {
         log::warn!(
-            "rasterrocket-interp: annotation ({}, {}) has AP/N stream but missing or malformed Rect — skipping",
-            annot_id.0,
-            annot_id.1
+            "rasterrocket-interp: annotation {} has AP/N stream but missing or malformed Rect — skipping",
+            id.map_or_else(
+                || "(direct)".to_owned(),
+                |id| format!("({}, {})", id.0, id.1)
+            )
         );
         return;
     };
 
-    // N can be a stream reference or a sub-dict (state-keyed appearances).
-    let stream_id: ObjectId = {
-        let Some(n_obj) = ap_dict.get(b"N") else {
-            return;
-        };
-        match n_obj {
-            Object::Reference(id) => *id,
-            Object::Dictionary(_) => {
-                // State-keyed: look up the current appearance state (AS).
-                let state = annot_dict.get(b"AS").and_then(Object::as_name);
-                let Some(state_key) = state else { return };
-                match n_obj.as_dict().and_then(|d| d.get(state_key)) {
-                    Some(Object::Reference(id)) => *id,
-                    _ => return,
-                }
-            }
-            _ => return,
-        }
-    };
-
-    // Build the FormXObject from the appearance stream.
     let Some(mut form) = renderer.resources.form_from_stream_id(stream_id) else {
         return;
     };
-
-    // form.bbox was populated by form_from_stream_id; appearance streams carry BBox not Rect.
-    let [llx, lly, urx, ury] = rect;
-    let [bx0, by0, bx1, by1] = form.bbox;
-    let bw = bx1 - bx0;
-    let bh = by1 - by0;
-    if bw.abs() < f64::EPSILON || bh.abs() < f64::EPSILON {
-        return;
+    form.matrix = ctm_multiply(&form.matrix, &fit_to_rect(&form.matrix, form.bbox, rect));
+    if flags & NO_ROTATE != 0 && renderer.rotate_cw != 0 {
+        form.matrix = ctm_multiply(&form.matrix, &upright_about(rect, renderer.rotate_cw));
     }
-
-    let sx = (urx - llx) / bw;
-    let sy = (ury - lly) / bh;
-    let tx = bx0.mul_add(-sx, llx);
-    let ty = by0.mul_add(-sy, lly);
-    let bbox_to_rect: [f64; 6] = [sx, 0.0, 0.0, sy, tx, ty];
-
-    // Composed rendering matrix: stream.Matrix × bbox_to_rect.
-    form.matrix = ctm_multiply(&form.matrix, &bbox_to_rect);
-
     renderer.do_form_xobject(&form);
+}
+
+/// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,
+/// or, when `/N` is a dictionary of appearance states, the entry for the
+/// annotation's appearance state.  The state is `/AS`; without it, the
+/// field value `/V` of the annotation or of its `/Parent` field, and
+/// otherwise `Off`.
+fn normal_appearance(doc: &Document, annot: &Dictionary) -> Option<ObjectId> {
+    let ap = crate::resources::resolve_dict(doc, annot.get(b"AP")?)?;
+    let states = match ap.get(b"N")? {
+        Object::Reference(id) => match doc.get_object(*id).ok()?.as_ref() {
+            Object::Stream(_) => return Some(*id),
+            Object::Dictionary(d) => d.clone(),
+            _ => return None,
+        },
+        Object::Dictionary(d) => d.clone(),
+        _ => return None,
+    };
+    let state: Vec<u8> = annot
+        .get_name(b"AS")
+        .or_else(|| annot.get_name(b"V"))
+        .map(<[u8]>::to_vec)
+        .or_else(|| {
+            let parent = crate::resources::resolve_dict(doc, annot.get(b"Parent")?)?;
+            parent.get_name(b"V").map(<[u8]>::to_vec)
+        })
+        .unwrap_or_else(|| b"Off".to_vec());
+    match states.get(&state)? {
+        Object::Reference(id) => Some(*id),
+        _ => None,
+    }
+}
+
+/// The matrix `A` of PDF §12.5.5 Algorithm 8.1 that maps the appearance
+/// `bbox`, transformed by its form `matrix`, onto `rect`: the bounding box
+/// of the transformed `bbox` is scaled and translated to coincide with
+/// `rect`.  A side of zero extent keeps scale 1 and aligns its lower edge.
+fn fit_to_rect(matrix: &Ctm, bbox: [f64; 4], rect: [f64; 4]) -> Ctm {
+    let [bx0, by0, bx1, by1] = bbox;
+    let corners = [(bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)].map(|(x, y)| {
+        (
+            matrix[0].mul_add(x, matrix[2] * y) + matrix[4],
+            matrix[1].mul_add(x, matrix[3] * y) + matrix[5],
+        )
+    });
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (x, y) in corners {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    let [llx, lly, urx, ury] = rect;
+    let scale = |lo: f64, hi: f64, to: f64| {
+        if (hi - lo).abs() < f64::EPSILON {
+            1.0
+        } else {
+            to / (hi - lo)
+        }
+    };
+    let sx = scale(x0, x1, urx - llx);
+    let sy = scale(y0, y1, ury - lly);
+    [sx, 0.0, 0.0, sy, x0.mul_add(-sx, llx), y0.mul_add(-sy, lly)]
+}
+
+/// The rotation by `rotate_cw` degrees counter-clockwise about the
+/// upper-left corner of `rect`, which cancels the page's `/Rotate` for a
+/// `NoRotate` annotation (PDF §12.5.3): the corner keeps its place on the
+/// page and the appearance is drawn upright from it.
+fn upright_about(rect: [f64; 4], rotate_cw: u16) -> Ctm {
+    let (sin, cos) = match rotate_cw % 360 {
+        90 => (1.0, 0.0),
+        180 => (0.0, -1.0),
+        270 => (-1.0, 0.0),
+        _ => (0.0, 1.0),
+    };
+    let (x, y) = (rect[0], rect[3]);
+    // T(-x, -y) × R × T(x, y).
+    [
+        cos,
+        sin,
+        -sin,
+        cos,
+        x - cos.mul_add(x, -sin * y),
+        y - sin.mul_add(x, cos * y),
+    ]
 }
 
 /// Read a 4-element rect `[llx, lly, urx, ury]` from a PDF dictionary.
@@ -169,4 +241,48 @@ pub(super) fn read_rect(dict: &pdf::Dictionary) -> Option<[f64; 4]> {
         r.swap(1, 3);
     }
     Some(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fit_to_rect, upright_about};
+
+    fn apply(m: &[f64; 6], (x, y): (f64, f64)) -> (f64, f64) {
+        (
+            m[0].mul_add(x, m[2] * y) + m[4],
+            m[1].mul_add(x, m[3] * y) + m[5],
+        )
+    }
+
+    #[test]
+    fn fitting_maps_the_bbox_corners_onto_the_rect() {
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let a = fit_to_rect(&identity, [10.0, 20.0, 30.0, 60.0], [0.0, 0.0, 40.0, 80.0]);
+        assert_eq!(apply(&a, (10.0, 20.0)), (0.0, 0.0));
+        assert_eq!(apply(&a, (30.0, 60.0)), (40.0, 80.0));
+    }
+
+    #[test]
+    fn a_degenerate_side_keeps_unit_scale() {
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let a = fit_to_rect(&identity, [5.0, 0.0, 5.0, 10.0], [20.0, 0.0, 40.0, 20.0]);
+        assert_eq!((a[0], a[3]), (1.0, 2.0));
+        assert_eq!(apply(&a, (5.0, 0.0)), (20.0, 0.0));
+    }
+
+    #[test]
+    fn the_upright_rotation_fixes_the_upper_left_corner() {
+        let rect = [10.0, 0.0, 50.0, 20.0];
+        for rotate in [90, 180, 270] {
+            let r = upright_about(rect, rotate);
+            let (x, y) = apply(&r, (10.0, 20.0));
+            assert!(
+                (x - 10.0).abs() < 1e-9 && (y - 20.0).abs() < 1e-9,
+                "{rotate}"
+            );
+        }
+        let r = upright_about(rect, 90);
+        let (x, y) = apply(&r, (11.0, 20.0));
+        assert!((x - 10.0).abs() < 1e-9 && (y - 21.0).abs() < 1e-9);
+    }
 }

@@ -316,6 +316,8 @@ pub struct PageRenderer<'doc> {
     font_cache: FontCache,
     /// Resource accessor for the current page or innermost form.
     pub(super) resources: PageResources<'doc>,
+    /// The page `/Rotate`, clockwise degrees, normalised to 0, 90, 180 or 270.
+    rotate_cw: u16,
     /// Current Form `XObject` nesting depth (0 = top-level page).
     form_depth: u32,
     /// Current tiling-pattern nesting depth (0 = top-level page).  Spawned
@@ -588,6 +590,7 @@ impl<'doc> PageRenderer<'doc> {
             font_cache,
             resources,
             form_depth: 0,
+            rotate_cw,
             pattern_depth: 0,
             pattern_ctm: initial_ctm,
             group_backdrop: None,
@@ -782,8 +785,8 @@ impl<'doc> PageRenderer<'doc> {
         self.font_cache = FontCache::new(fonts);
     }
 
-    /// Draw optional content as `optional_content` configures it.  Call
-    /// before execute.
+    /// Draw optional content as `optional_content` configures it, and
+    /// annotations for its purpose.  Call before execute.
     pub fn set_optional_content(&mut self, optional_content: Arc<crate::OptionalContent>) {
         self.optional_content = std::cell::OnceCell::from(optional_content);
     }
@@ -1025,10 +1028,11 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Render all annotations on the page (PDF §12.5).
     ///
-    /// Each annotation with an `AP/N` (normal appearance) stream is rendered
-    /// after the page content stream.  Only the `/N` entry is used; rollover
-    /// (`/R`) and down (`/D`) appearances are ignored (this is a rasterizer,
-    /// not an interactive viewer).
+    /// Each annotation shown for the render purpose (its `/F` flags) and
+    /// visible under its `/OC` that has an `AP/N` (normal appearance) stream
+    /// is rendered after the page content stream.  Only the `/N` entry is
+    /// used; rollover (`/R`) and down (`/D`) appearances are ignored (this is
+    /// a rasterizer, not an interactive viewer).
     ///
     /// Annotations with no appearance stream are silently skipped — many
     /// annotation types (e.g. `Link`) have no visible appearance by default.

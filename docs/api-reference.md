@@ -193,9 +193,10 @@ Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = fal
 pub enum RenderPurpose { View, Print }
 ```
 
-What a page is rendered for. It decides:
+What a page is rendered for. It decides two things:
 
 - **Optional content (layers, ISO 32000-2 §8.11).** The document's default configuration (`/OCProperties /D`) gives each group its state: `/BaseState`, then `/ON`, then `/OFF`, so a group listed in both is off. Then each `/AS` usage application dictionary whose `/Event` is `View` (or `Print` under `RenderPurpose::Print`) applies the `ViewState`, `PrintState` or `ExportState` of the groups it lists, for each category it names. A group whose `/Intent` does not match the configuration's `/Intent` is ignored. Both intents default to `View`, and `All` matches every intent. Content is hidden when its group is off or its membership dictionary (`/OCMD`, through `/VE` or through `/OCGs` with `/P`) evaluates to hidden. This applies to `BDC /OC` sequences, to image and form XObjects carrying `/OC`, and to annotations carrying `/OC`.
+- **Annotation flags (ISO 32000-2 §12.5.3).** Under `View`, annotations flagged `NoView` are not drawn. Under `Print`, only annotations flagged `Print` are drawn. Annotations flagged `Hidden` are never drawn.
 
 ---
 
