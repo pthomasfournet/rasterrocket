@@ -1,6 +1,6 @@
 # LLM Vision OCR Integration
 
-rasterrocket outputs 8-bit greyscale pixel buffers (`RenderedPage`) that can be encoded and sent to cloud vision APIs. This page covers **Google Cloud Vision** and **OpenAI GPT-5** — the two most relevant cloud APIs for PDF OCR pipelines.
+rasterrocket outputs 8-bit greyscale pixel buffers (`RenderedPage`) that can be encoded and sent to cloud vision APIs. This page covers **Google Cloud Vision** and **OpenAI GPT-5**, the two most relevant cloud APIs for PDF OCR pipelines, and Mistral's OCR and Pixtral models.
 
 For local, offline OCR without network calls or per-page costs, see [OCR Integration](OCR-Integration).
 
@@ -219,21 +219,17 @@ export OPENAI_API_KEY=sk-...
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-base64 = "0.22"
 ```
 
 ### Rust example
 
-> **Note:** `page_to_base64_jpeg` in this example is a local helper that encodes
-> a `RenderedPage` to a base64 JPEG string (using the `image` + `base64` crates
-> listed in the Cargo.toml block above). For a batteries-included alternative,
-> `rasterrocket::encode_for_gcv` does the same job with no external crates and
-> enforces a size budget — see the [Google Cloud Vision section](#google-cloud-vision)
-> above.
+> **Note:** the page is encoded with `rasterrocket::encode_for_gcv` (see the
+> [shared encoding helper](#shared-encoding-helper-renderedpage--base64-jpeg)):
+> a grayscale JPEG whose base64 form stays under 10 MB. Check the provider's
+> own image size limits; `GcvBudget` fields can be lowered to match them.
 
 ```rust
-use rasterrocket::{RasterOptions, raster_pdf};
+use rasterrocket::{GcvBudget, RasterOptions, encode_for_gcv, raster_pdf};
 use std::path::Path;
 
 #[tokio::main]
@@ -245,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
 
     for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
         let page = result?;
-        let b64 = page_to_base64_jpeg(&page, 85)?;
+        let b64 = encode_for_gcv(&page, &GcvBudget::default())?.to_base64();
 
         let body = serde_json::json!({
             "model": "gpt-5",
@@ -362,19 +358,15 @@ export MISTRAL_API_KEY=...
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-base64 = "0.22"
 ```
 
 ### Rust example — Mistral OCR 3
 
-> **Note:** `page_to_base64_jpeg` is a local helper (see the GPT-5 section
-> above for a definition sketch, or use `rasterrocket::encode_for_gcv` from
-> the [Google Cloud Vision section](#google-cloud-vision) as a drop-in
-> replacement with built-in budget enforcement and no external crates).
+> **Note:** the page is encoded with `rasterrocket::encode_for_gcv`, as in
+> the GPT-5 example.
 
 ```rust
-use rasterrocket::{RasterOptions, raster_pdf};
+use rasterrocket::{GcvBudget, RasterOptions, encode_for_gcv, raster_pdf};
 use std::path::Path;
 
 #[tokio::main]
@@ -386,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
 
     for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
         let page = result?;
-        let b64 = page_to_base64_jpeg(&page, 85)?;
+        let b64 = encode_for_gcv(&page, &GcvBudget::default())?.to_base64();
 
         let body = serde_json::json!({
             "model": "mistral-ocr-latest",
