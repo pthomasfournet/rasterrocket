@@ -341,12 +341,23 @@ impl PageRenderer<'_> {
         geometry: &CellGeometry,
         region: PixelRect,
     ) -> Option<TiledPattern> {
-        let (cell_w, cell_h) = geometry.cell_size();
-        let size = (cell_w as u32, cell_h as u32);
-        let bitmap = self.render_cells(cell, size, &[geometry.placement(1.0, 0.0, 0.0)]);
+        // The cell is rasterised at the sub-pixel phase of cell (0, 0) and
+        // stamped from the floor of its origin: cell (0, 0) lands exactly,
+        // and so does every cell of a lattice with whole-pixel steps.
+        let origin = geometry.lattice.origin;
+        let (fx, fy) = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
+        let size = (
+            pixel_ceil(geometry.bounds.width + fx) as u32,
+            pixel_ceil(geometry.bounds.height + fy) as u32,
+        );
+        let bitmap = self.render_cells(cell, size, &[geometry.placement(1.0, fx, fy)]);
+        let lattice = Lattice {
+            origin: (origin.0.floor(), origin.1.floor()),
+            ..geometry.lattice
+        };
         TiledPattern::compose(
             &bitmap,
-            &geometry.lattice,
+            &lattice,
             region.x0 as i32,
             region.y0 as i32,
             region.width(),

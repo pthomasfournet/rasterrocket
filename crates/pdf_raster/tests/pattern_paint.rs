@@ -139,6 +139,42 @@ fn tiling_cell_edges_blend_with_the_backdrop() {
     );
 }
 
+#[test]
+fn tiling_cells_keep_a_sub_pixel_origin() {
+    // Pattern matrix translation 0.5: every cell's content spans device x
+    // 20k + 0.5 .. 20k + 10.5, so its first and last columns are half
+    // covered in every cell, not only in the first.
+    let pattern = "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+         /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> \
+         /Matrix [1 0 0 1 0.5 0]";
+    let cell = b"1 0 0 rg 0 0 m 10 0 l 10 20 l 5 20 l 0 20 l h f";
+    let tiled = render(page(
+        &format!("{BACKDROP}/Pattern cs /P0 scn 0 0 200 100 re f"),
+        pattern,
+        Some(cell),
+        "",
+        &[],
+    ));
+    // The same content filled directly at the first cell's position.
+    let direct = render(page(
+        &format!("{BACKDROP}1 0 0 rg 0.5 0 m 10.5 0 l 10.5 20 l 5.5 20 l 0.5 20 l h f"),
+        pattern,
+        Some(cell),
+        "",
+        &[],
+    ));
+    for x in 0..=11 {
+        let want = rgb(&direct, x, 5);
+        for k in [0, 1, 5, 9] {
+            assert_eq!(
+                rgb(&tiled, 20 * k + x, 5),
+                want,
+                "column {x} of cell {k} matches the content painted in place"
+            );
+        }
+    }
+}
+
 /// A 100 × 100 cell, blue in its lower-left quarter and green in its
 /// upper-right quarter, under pattern matrix `scale`.
 fn quartered_cell(scale: f64) -> String {
