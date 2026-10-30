@@ -385,20 +385,21 @@ impl Document {
                     Some((found, obj)) if found.0 == id.0 => Ok(obj),
                     // The entry does not lead to object `id`: its offset is
                     // stale, points inside another object, or names a
-                    // different object.  Locate the object's header by
-                    // scanning the file; failing that, keep what the entry
-                    // led to.
-                    parsed => self.recover_direct(id.0, Some(offset)).map_or_else(
-                        || {
-                            parsed
-                                .map(|(_, obj)| obj)
-                                .ok_or_else(|| PdfError::BadObject {
-                                    id: id.0,
-                                    detail: format!("parse failed at offset {offset}"),
-                                })
-                        },
-                        Ok,
-                    ),
+                    // different object.  The object is what the header scan
+                    // finds for its number, or nothing; what the entry led
+                    // to is never returned under this number.
+                    parsed => {
+                        self.recover_direct(id.0, Some(offset))
+                            .ok_or_else(|| PdfError::BadObject {
+                                id: id.0,
+                                detail: parsed.map_or_else(
+                                    || format!("parse failed at offset {offset}"),
+                                    |(found, _)| {
+                                        format!("xref offset {offset} holds object {}", found.0)
+                                    },
+                                ),
+                            })
+                    }
                 }
             }
             XrefEntry::InObjStm { container, index } => {
@@ -700,10 +701,10 @@ impl Document {
         // impossible to loop on — each `get_object` is visited at most once
         // and non-streams are diagnosed and skipped in the decode loop below.
         let refs: Vec<ObjectId> = match &contents {
-            Object::Reference(id) => match self.get_object(*id)?.as_ref() {
-                Object::Array(arr) => collect_content_refs(arr, page_id),
-                // Stream (or anything else): keep the single ref; the decode
-                // loop below filters and diagnoses non-streams.
+            Object::Reference(id) => match self.get_object(*id).as_deref() {
+                Ok(Object::Array(arr)) => collect_content_refs(arr, page_id),
+                // Stream (or anything else, or unresolvable): keep the single
+                // ref; the decode loop below filters and diagnoses it.
                 _ => vec![*id],
             },
             Object::Array(arr) => collect_content_refs(arr, page_id),
@@ -712,7 +713,20 @@ impl Document {
 
         let mut out = Vec::new();
         for r in refs {
-            let stream_obj = self.get_object(r)?;
+            // A reference to an undefined object is the null object
+            // (ISO 32000-1 §7.3.10): not content, and not an error.
+            let stream_obj = match self.get_object(r) {
+                Ok(obj) => obj,
+                Err(e) => {
+                    log::warn!(
+                        "get_page_content: page {} /Contents element obj {} is missing \
+                         ({e}) — skipping (page may be missing content)",
+                        page_id.0,
+                        r.0
+                    );
+                    continue;
+                }
+            };
             let Object::Stream(s) = stream_obj.as_ref() else {
                 // A `/Contents` array element that does not resolve to a
                 // stream (a dict, null, number, or — non-conformant — a
@@ -1045,9 +1059,9 @@ mod tests {
         out.into_bytes()
     }
 
-    /// Overwrite the classic-xref offset of object `num` in a
-    /// [`pdf_with_objects`] file with `offset`.
-    fn set_xref_offset(bytes: &mut [u8], num: usize, offset: usize) {
+    /// Byte offset of the classic-xref entry of object `num` in a
+    /// [`pdf_with_objects`] file.
+    fn xref_entry_at(bytes: &[u8], num: usize) -> usize {
         let xref = bytes
             .windows(5)
             .position(|w| w == b"xref\n")
@@ -1063,8 +1077,56 @@ mod tests {
                         .map(|l2| l1 + l2 + 2)
                 })
                 .expect("subsection header");
-        let entry = first_entry + num * 20;
+        first_entry + num * 20
+    }
+
+    /// Overwrite the classic-xref offset of object `num` in a
+    /// [`pdf_with_objects`] file with `offset`.
+    fn set_xref_offset(bytes: &mut [u8], num: usize, offset: usize) {
+        let entry = xref_entry_at(bytes, num);
         bytes[entry..entry + 10].copy_from_slice(format!("{offset:010}").as_bytes());
+    }
+
+    /// Overwrite the classic-xref entry of object `num` in a
+    /// [`pdf_with_objects`] file with an in-use entry at `offset`.
+    fn set_xref_in_use(bytes: &mut [u8], num: usize, offset: usize) {
+        let entry = xref_entry_at(bytes, num);
+        bytes[entry..entry + 18].copy_from_slice(format!("{offset:010} 00000 n").as_bytes());
+    }
+
+    /// An xref entry that leads to another object, for an object with no
+    /// body anywhere in the file, is a missing object: the other object is
+    /// never returned under the wrong number.
+    #[test]
+    fn xref_offset_naming_another_object_with_no_body_is_missing() {
+        let mut bytes = pdf_with_objects(&[(5, "(five)".to_owned())]);
+        let five = find(&bytes, b"5 0 obj").expect("object 5");
+        set_xref_in_use(&mut bytes, 4, five);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let err = doc.get_object((4, 0)).expect_err("no object 4 exists");
+        assert!(
+            matches!(&err, PdfError::BadObject { id: 4, detail } if detail.contains("object 5")),
+            "got {err:?}"
+        );
+        assert_eq!(
+            doc.get_object((5, 0)).expect("object 5").as_str(),
+            Some(&b"five"[..])
+        );
+    }
+
+    /// An xref entry that leads to no object header at all, for an object
+    /// with no body in the file, is a missing object.
+    #[test]
+    fn xref_offset_into_garbage_with_no_body_is_missing() {
+        let mut bytes = pdf_with_objects(&[(5, "(five)".to_owned())]);
+        let inside_five = find(&bytes, b"(five)").expect("object 5 body");
+        set_xref_in_use(&mut bytes, 4, inside_five);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let err = doc.get_object((4, 0)).expect_err("no object 4 exists");
+        assert!(
+            matches!(&err, PdfError::BadObject { id: 4, .. }),
+            "got {err:?}"
+        );
     }
 
     /// An xref offset that lands inside another object is recovered by

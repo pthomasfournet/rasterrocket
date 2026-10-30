@@ -2,7 +2,8 @@
 //! (ISO 32000-1 §7.5.6), and a hybrid-reference file adds an `/XRefStm`
 //! stream that a reader consults after the section's own entries and before
 //! `/Prev` (§7.5.8.4).  The newest section that mentions an object decides
-//! it, whether it defines the object or frees it.
+//! it, whether it defines the object or frees it; an entry that leads to a
+//! different object's header leads to nothing.
 
 #[expect(
     dead_code,
@@ -108,6 +109,20 @@ fn freed_contents_pdf() -> Vec<u8> {
     pdf
 }
 
+/// The page's `/Contents 7 0 R` has an xref entry at the header of object
+/// 8, a red content stream, and no object 7 exists anywhere in the file.
+fn entry_to_another_object_pdf() -> Vec<u8> {
+    let mut pdf = b"%PDF-1.5\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut objects = page_objects();
+    objects.push((8, rect("1 0 0")));
+    let offsets = write_objects(&mut pdf, &objects);
+    let mut entries: Vec<_> = offsets.iter().map(|&(n, o)| (n, o, 0, 'n')).collect();
+    let eight = offsets.iter().find(|(n, _)| *n == 8).expect("object 8").1;
+    entries.push((7, eight, 0, 'n'));
+    write_xref(&mut pdf, &entries, "");
+    pdf
+}
+
 /// The colour at (50, 50) of the page rendered at one pixel per point.
 fn centre_colour(pdf: Vec<u8>) -> [u8; 3] {
     let s = session(pdf, BackendPolicy::CpuOnly);
@@ -127,4 +142,14 @@ fn hybrid_xrefstm_entry_shadows_prev_section() {
 #[test]
 fn freed_but_referenced_contents_still_render() {
     assert_eq!(centre_colour(freed_contents_pdf()), [0, 0, 255]);
+}
+
+/// An entry that leads to another object's header does not draw that
+/// object as the page's contents: the page is blank.
+#[test]
+fn entry_to_another_object_draws_nothing() {
+    assert_eq!(
+        centre_colour(entry_to_another_object_pdf()),
+        [255, 255, 255]
+    );
 }
