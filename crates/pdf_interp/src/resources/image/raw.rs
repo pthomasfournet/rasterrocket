@@ -10,7 +10,7 @@ use std::sync::Arc;
 use pdf::{Dictionary, Document, Object};
 
 use super::bitpack::{downsample_16bpp, expand_nbpp, expand_nbpp_indexed, unpack_packed_bits};
-use super::colorspace::{ResolvedCs, indexed_palette, resolve_cs};
+use super::colorspace::{ResolvedCs, indexed_array, indexed_palette, resolve_cs};
 use super::smask::{SoftMask, colour_key_mask_with};
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
 use crate::resources::colorspace::{ColorSpace, needs_sample_conversion, resolve, samples_to_rgb};
@@ -161,15 +161,8 @@ fn decode_raw_samples(
         cs_obj_raw
     };
 
-    // Check for Indexed colour space: [/Indexed base hival lookup].
-    // These images carry palette indices rather than component samples, so they
-    // need special handling before the general path.
-    if let Some(Object::Array(arr)) = cs_obj
-        && arr
-            .first()
-            .and_then(|o| o.as_name())
-            .is_some_and(|n| n == b"Indexed")
-    {
+    // An Indexed image carries palette indices rather than component samples.
+    if let Some(arr) = cs_obj.and_then(indexed_array) {
         return decode_raw_indexed(doc, data, width, height, bpc, arr);
     }
 
@@ -711,6 +704,19 @@ fn decode_raw_indexed(
         }
     };
 
+    expand_palette(doc, cs_arr, indices, width, height)
+}
+
+/// Map `width × height` palette indices, one byte each, through the
+/// palette of the `[/Indexed base hival lookup]` array `cs_arr` (§8.6.6.3).
+/// An index above `hival` takes the last entry.
+pub(super) fn expand_palette(
+    doc: &Document,
+    cs_arr: &[Object],
+    indices: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<ImageDescriptor> {
     let (palette, out_cs) = indexed_palette(doc, cs_arr)?;
     let stride = out_cs.components();
 
@@ -727,7 +733,7 @@ fn decode_raw_indexed(
     let npixels = (width as usize).checked_mul(height as usize)?;
     if indices.len() < npixels {
         log::warn!(
-            "image: Indexed raw data too short ({} bytes, need {npixels})",
+            "image: Indexed data too short ({} indices, need {npixels})",
             indices.len()
         );
         return None;

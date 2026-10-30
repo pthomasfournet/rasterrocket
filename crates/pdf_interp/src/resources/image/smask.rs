@@ -341,12 +341,22 @@ pub(super) fn remove_matte(
             return;
         }
     };
-    let n = device.len();
-    for (px, &a) in data.chunks_exact_mut(n).zip(mask.alpha()) {
+    unmatte(data, mask.alpha(), device);
+}
+
+/// Invert `c' = m + α·(c − m)` (§11.6.5.3) over interleaved 8-bit
+/// `samples`, `matte.len()` components per pixel, with `alpha` holding one
+/// byte per pixel: `c = m + (c' − m)/α`, rounded and clamped to 0..=255.
+/// Pixels of alpha 0 are left as stored.
+pub(super) fn unmatte(samples: &mut [u8], alpha: &[u8], matte: &[u8]) {
+    if matte.is_empty() {
+        return;
+    }
+    for (px, &a) in samples.chunks_exact_mut(matte.len()).zip(alpha) {
         if a == 0 {
             continue;
         }
-        for (c, &m) in px.iter_mut().zip(device) {
+        for (c, &m) in px.iter_mut().zip(matte) {
             let v = f32::from(m) + (f32::from(*c) - f32::from(m)) * 255.0 / f32::from(a);
             #[expect(
                 clippy::cast_possible_truncation,

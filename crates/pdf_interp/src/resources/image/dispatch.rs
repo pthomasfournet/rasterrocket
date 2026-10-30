@@ -9,8 +9,11 @@ use std::borrow::Cow;
 
 use pdf::Stream;
 
-use super::codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
-use super::raw::{apply_bilevel_decode, decode_raw};
+use crate::resources::dict_ext::DictExt as _;
+
+use super::codecs::{JpxOptions, decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
+use super::colorspace::indexed_array;
+use super::raw::{apply_bilevel_decode, decode_raw, expand_palette};
 use super::{
     ImageDecodeCtx, ImageDescriptor, ImageFilter, filter_name, image_filter_chain,
     is_transport_filter, terminal_decode_parms,
@@ -123,13 +126,28 @@ pub(super) fn decode_image_stream<
             dct_cache,
         ),
         Some("JPXDecode") => {
+            // An `/Indexed` space maps the codestream's samples through the
+            // PDF palette (§8.6.6.3); any other space reads them as colour.
+            let colour_space = dict.get(b"ColorSpace").and_then(|o| doc.resolve(o).ok());
+            let palette = if is_mask {
+                None
+            } else {
+                colour_space.as_deref().and_then(indexed_array)
+            };
+            let opts = JpxOptions {
+                indices: palette.is_some(),
+                smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
+            };
             #[cfg(feature = "nvjpeg2k")]
-            {
-                decode_jpx(&input, w, h, draw_size, ctx.nvjpeg2k.as_deref_mut())
-            }
+            let img = decode_jpx(&input, w, h, draw_size, opts, ctx.nvjpeg2k.as_deref_mut());
             #[cfg(not(feature = "nvjpeg2k"))]
-            {
-                decode_jpx(&input, w, h, draw_size)
+            let img = decode_jpx(&input, w, h, draw_size, opts);
+            match palette {
+                Some(cs_arr) => img.and_then(|idx| {
+                    let indices = idx.data.as_cpu()?;
+                    expand_palette(doc, cs_arr, indices, idx.width, idx.height)
+                }),
+                None => img,
             }
         }
         Some(other) => return Err(format!("unsupported filter {other:?}")),

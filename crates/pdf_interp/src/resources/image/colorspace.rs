@@ -369,6 +369,16 @@ pub(super) fn apply_sample_rewrite(img: &mut ImageDescriptor, rewrite: &SampleRe
 
 // ── Indexed palette ───────────────────────────────────────────────────────────
 
+/// The `[/Indexed base hival lookup]` array `cs_obj` holds, if it is one.
+pub(super) fn indexed_array(cs_obj: &Object) -> Option<&[Object]> {
+    match cs_obj {
+        Object::Array(arr) if arr.first().and_then(Object::as_name) == Some(b"Indexed") => {
+            Some(arr)
+        }
+        _ => None,
+    }
+}
+
 /// Decode an `Indexed` colour space lookup table into a flat RGB/Gray palette.
 ///
 /// `cs_arr` is the full `[/Indexed base hival lookup]` array.  Returns

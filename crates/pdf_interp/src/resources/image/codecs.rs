@@ -947,16 +947,23 @@ pub(super) fn cmyk_raw_to_rgb(
 /// format (`.jp2`).  Both paths auto-detect the format from the stream.
 ///
 /// Samples of any precision are scaled to 8 bits; sub-sampled components are
-/// upsampled to the image grid.  An embedded alpha channel becomes
-/// `ImageDescriptor::smask`.
+/// upsampled to the image grid.  `opts` carries what the image dictionary
+/// decides about the codestream: see [`JpxOptions`].
 pub(super) fn decode_jpx(
     data: &[u8],
     pdf_w: u32,
     pdf_h: u32,
     draw_size: Option<(u32, u32)>,
+    opts: JpxOptions,
     #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut NvJpeg2kDecoder>,
 ) -> Option<ImageDescriptor> {
+    if opts.indices {
+        return decode_jpx_indices(data);
+    }
+
     // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
+    // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
+    // never needs `/SMaskInData`.
     #[cfg(feature = "nvjpeg2k")]
     if let Some(dec) = gpu {
         let area = pdf_w.saturating_mul(pdf_h);
@@ -1008,16 +1015,26 @@ pub(super) fn decode_jpx(
     }
 
     // The alpha channel, when present, is the last sample of each pixel.
+    // It is the image's soft mask only when `/SMaskInData` is nonzero
+    // (§8.9.5); with 2 the colour channels are premultiplied by it, which
+    // is the matte relation with every matte component 0, inverted in the
+    // codestream's own colour space.
     let (colour, alpha) = if has_alpha {
-        let colour = samples
+        let mut colour: Vec<u8> = samples
             .chunks_exact(stride)
             .flat_map(|px| px[..channels].iter().copied())
             .collect();
-        let alpha = samples
-            .chunks_exact(stride)
-            .map(|px| px[channels])
-            .collect();
-        (colour, Some(alpha))
+        let alpha = (opts.smask_in_data != 0).then(|| {
+            let alpha: Vec<u8> = samples
+                .chunks_exact(stride)
+                .map(|px| px[channels])
+                .collect();
+            if opts.smask_in_data == 2 {
+                super::smask::unmatte(&mut colour, &alpha, &vec![0; channels]);
+            }
+            alpha
+        });
+        (colour, alpha)
     } else {
         (samples, None)
     };
@@ -1048,6 +1065,57 @@ pub(super) fn decode_jpx(
     };
     desc.smask = alpha.and_then(|a| super::SoftMask::new(jw, jh, a));
     Some(desc)
+}
+
+/// Decode a JPEG 2000 codestream's first component as palette indices
+/// for an `/Indexed` PDF colour space: the samples unscaled, with any
+/// palette in the JP2 container left unapplied, at full resolution (a
+/// reduced decode would average indices).  The result is a
+/// [`ImageColorSpace::Gray`] descriptor of one index byte per pixel.
+fn decode_jpx_indices(data: &[u8]) -> Option<ImageDescriptor> {
+    let settings = hayro_jpeg2000::DecodeSettings {
+        resolve_palette_indices: false,
+        ..Default::default()
+    };
+    let img = hayro_jpeg2000::Image::new(data, &settings)
+        .map_err(|e| log::warn!("image: JPXDecode open error: {e}"))
+        .ok()?;
+    let (jw, jh) = (img.width(), img.height());
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
+    let decoded = img
+        .decode(&mut ctx)
+        .map_err(|e| log::warn!("image: JPXDecode decode error: {e}"))
+        .ok()?;
+    let samples = decoded.components().first()?.samples();
+    let npx = (jw as usize).checked_mul(jh as usize)?;
+    if jw == 0 || jh == 0 || samples.len() != npx {
+        log::warn!(
+            "image: JPXDecode: {} index samples for {jw}×{jh}",
+            samples.len()
+        );
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=255 before the cast"
+    )]
+    let indices = samples
+        .iter()
+        .map(|&v| v.round().clamp(0.0, 255.0) as u8)
+        .collect();
+    Some(jpx_gray(jw, jh, indices))
+}
+
+/// What the image dictionary decides about a JPEG 2000 codestream.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct JpxOptions {
+    /// The PDF colour space is `/Indexed`: decode the codestream's samples
+    /// as palette indices for the caller to expand.
+    pub indices: bool,
+    /// `/SMaskInData` (§8.9.5): 0 ignores an alpha channel, 1 makes it the
+    /// soft mask, 2 makes it the soft mask of colour premultiplied by it.
+    pub smask_in_data: i64,
 }
 
 /// GPU-accelerated JPEG 2000 decode via nvJPEG2000.
@@ -1607,10 +1675,24 @@ mod tests {
 
     // ── jpx_gray / jpx_rgb helpers ────────────────────────────────────────────
 
+    /// Colour samples as stored, no alpha.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    const PLAIN: JpxOptions = JpxOptions {
+        indices: false,
+        smask_in_data: 0,
+    };
+
+    /// Colour samples as stored, an alpha channel as the soft mask.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    const WITH_ALPHA: JpxOptions = JpxOptions {
+        indices: false,
+        smask_in_data: 1,
+    };
+
     /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
     #[cfg(not(feature = "nvjpeg2k"))]
     fn jpx_fixture(bytes: &[u8]) -> ImageDescriptor {
-        decode_jpx(bytes, 8, 8, None).expect("decodes")
+        decode_jpx(bytes, 8, 8, None, WITH_ALPHA).expect("decodes")
     }
 
     // Fixtures are lossless (reversible 5/3) encodes; the `.gray`, `.rgb`,
@@ -1621,15 +1703,15 @@ mod tests {
     #[test]
     fn jpx_draw_size_skips_levels_without_going_below_it() {
         let gray = include_bytes!("testdata/gray8.jp2");
-        let full = decode_jpx(gray, 8, 8, None).expect("decodes");
+        let full = decode_jpx(gray, 8, 8, None, PLAIN).expect("decodes");
         assert_eq!((full.width, full.height), (8, 8));
 
-        let half = decode_jpx(gray, 8, 8, Some((4, 4))).expect("decodes");
+        let half = decode_jpx(gray, 8, 8, Some((4, 4)), PLAIN).expect("decodes");
         assert_eq!((half.width, half.height), (4, 4));
         assert_eq!(half.data.as_cpu().map(<[u8]>::len), Some(16));
 
         // 4 × 4 would be smaller than the drawn size, so no level is skipped.
-        let five = decode_jpx(gray, 8, 8, Some((5, 5))).expect("decodes");
+        let five = decode_jpx(gray, 8, 8, Some((5, 5)), PLAIN).expect("decodes");
         assert_eq!((five.width, five.height), (8, 8));
     }
 
