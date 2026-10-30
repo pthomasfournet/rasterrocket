@@ -316,20 +316,12 @@ pub(super) fn expand_inline_value(obj: Object) -> Object {
 /// Expand an abbreviated inline-image name (filter or colour-space).
 pub(super) const fn expand_inline_name(name: &[u8]) -> &[u8] {
     match name {
-        // Filter abbreviations (PDF §8.9.7 Table 89).
-        b"AHx" => b"ASCIIHexDecode",
-        b"A85" => b"ASCII85Decode",
-        b"LZW" => b"LZWDecode",
-        b"Fl" => b"FlateDecode",
-        b"RL" => b"RunLengthDecode",
-        b"CCF" => b"CCITTFaxDecode",
-        b"DCT" => b"DCTDecode",
         // Colour-space abbreviations.
         b"G" => b"DeviceGray",
         b"RGB" => b"DeviceRGB",
         b"CMYK" => b"DeviceCMYK",
         b"I" => b"Indexed",
-        other => other,
+        other => pdf::filter_full_name(other),
     }
 }
 

@@ -19,6 +19,7 @@ flate2      = { version = "1", features = ["zlib-rs"] }
 libdeflater = { version = "1", optional = true }
 memmap2     = { version = "0.9" }
 weezl       = { version = "0.2" }
+brotli-decompressor = { version = "6" }
 log         = { workspace = true }
 tempfile    = { workspace = true }
 

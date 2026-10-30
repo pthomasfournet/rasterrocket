@@ -37,4 +37,4 @@ pub use lexer::parse_number;
 pub use linearization::LinearizationHints;
 pub use object::{Object, ObjectId, Stream, StringFormat, parse_object};
 pub use page_tree::descend_to_page_index;
-pub use stream::inflate;
+pub use stream::{filter_full_name, inflate};

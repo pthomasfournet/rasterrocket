@@ -75,6 +75,12 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
         b"ASCII85Decode" => decode_ascii85(data),
         b"ASCIIHexDecode" => Ok(decode_ascii_hex(data)),
         b"RunLengthDecode" => Ok(decode_run_length(data, MAX_DECOMPRESSED)),
+        b"BrotliDecode" => apply_brotli(
+            data,
+            params
+                .and_then(Object::as_dict)
+                .map(|d| d as &dyn DictLookup),
+        ),
         // Image filters — pass through; the caller handles them.
         b"DCTDecode" | b"CCITTFaxDecode" | b"JBIG2Decode" | b"JPXDecode" => Ok(data.to_vec()),
         other => Err(format!(
@@ -247,6 +253,39 @@ fn decompress_raw_deflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 #[cfg(not(feature = "libdeflate"))]
 fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     decompress_zlib_flate2(data)
+}
+
+// ── BrotliDecode ──────────────────────────────────────────────────────────────
+
+/// Decode `BrotliDecode` data (RFC 7932), then undo the predictor named by
+/// `params`, whose entries are those of `FlateDecode`.
+///
+/// Output is bounded at [`MAX_DECOMPRESSED`].  A stream that is corrupt or
+/// truncated after producing output yields that output.
+fn apply_brotli(data: &[u8], params: Option<&dyn DictLookup>) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let mut out = Vec::new();
+    let cap_plus_one = (MAX_DECOMPRESSED as u64).saturating_add(1);
+    let mut decoder = brotli_decompressor::Decompressor::new(data, 4096).take(cap_plus_one);
+    if let Err(e) = decoder.read_to_end(&mut out) {
+        if out.is_empty() {
+            return Err(format!("BrotliDecode: {e}"));
+        }
+        log::warn!(
+            "BrotliDecode: {e}; keeping the {} bytes decoded before it",
+            out.len()
+        );
+    }
+    if out.len() > MAX_DECOMPRESSED {
+        return Err(format!(
+            "BrotliDecode: decompressed output exceeds {MAX_DECOMPRESSED}-byte cap"
+        ));
+    }
+    match params {
+        Some(p) => apply_png_predictor(out, p),
+        None => Ok(out),
+    }
 }
 
 // ── PNG predictor ─────────────────────────────────────────────────────────────
@@ -655,13 +694,30 @@ fn decode_ascii_hex(data: &[u8]) -> Vec<u8> {
 
 // ── Filter/DecodeParms helpers ────────────────────────────────────────────────
 
+/// The full name of the filter `name`, its abbreviation expanded.
+///
+/// An abbreviation of ISO 32000-2 Table 92 (`/Fl`, `/AHx`, …) maps to the
+/// name it abbreviates, and any other name to itself.  The abbreviations
+/// are accepted on every stream, not only on inline images.
+#[must_use]
+pub const fn filter_full_name(name: &[u8]) -> &[u8] {
+    match name {
+        b"AHx" => b"ASCIIHexDecode",
+        b"A85" => b"ASCII85Decode",
+        b"LZW" => b"LZWDecode",
+        b"Fl" => b"FlateDecode",
+        b"RL" => b"RunLengthDecode",
+        b"CCF" => b"CCITTFaxDecode",
+        b"DCT" => b"DCTDecode",
+        other => other,
+    }
+}
+
 fn collect_filters(dict: &Dictionary) -> Vec<Vec<u8>> {
+    let full = |n: &[u8]| filter_full_name(n).to_vec();
     match dict.get(b"Filter") {
-        Some(Object::Name(n)) => vec![n.clone()],
-        Some(Object::Array(a)) => a
-            .iter()
-            .filter_map(|o| Object::as_name(o).map(<[u8]>::to_vec))
-            .collect(),
+        Some(Object::Name(n)) => vec![full(n)],
+        Some(Object::Array(a)) => a.iter().filter_map(Object::as_name).map(full).collect(),
         _ => vec![],
     }
 }
@@ -900,6 +956,59 @@ mod tests {
         let data = vec![0u8, 1, 2, 3, 4, 0, 9];
         let out = apply_png_predictor(data, &params).unwrap();
         assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    /// A Brotli stream holding one uncompressed meta-block: a three-byte
+    /// header, then the 64 bytes `(7i + 3) mod 251`, then the end marker.
+    const BROTLI_RAW_64: [u8; 68] = {
+        let mut s = [0u8; 68];
+        s[0] = 0x8b;
+        s[1] = 0x1f;
+        s[2] = 0x80;
+        let mut i = 0;
+        while i < 64 {
+            #[expect(clippy::cast_possible_truncation, reason = "below 251")]
+            let b = ((i * 7 + 3) % 251) as u8;
+            s[3 + i] = b;
+            i += 1;
+        }
+        s[67] = 0x03;
+        s
+    };
+
+    #[test]
+    fn brotli_decodes_and_keeps_a_truncated_prefix() {
+        let full = apply_brotli(&BROTLI_RAW_64, None).unwrap();
+        assert_eq!(full, BROTLI_RAW_64[3..67]);
+        let prefix = apply_brotli(&BROTLI_RAW_64[..40], None).unwrap();
+        assert!(
+            !prefix.is_empty() && full.starts_with(&prefix),
+            "{prefix:?}"
+        );
+        assert!(apply_brotli(b"not brotli at all", None).is_err());
+    }
+
+    #[test]
+    fn abbreviated_filter_names_expand() {
+        let mut dict = Dictionary::new();
+        dict.set(
+            b"Filter",
+            Object::Array(vec![
+                Object::Name(b"A85".to_vec()),
+                Object::Name(b"Fl".to_vec()),
+                Object::Name(b"DCT".to_vec()),
+                Object::Name(b"Custom".to_vec()),
+            ]),
+        );
+        assert_eq!(
+            collect_filters(&dict),
+            [
+                &b"ASCII85Decode"[..],
+                b"FlateDecode",
+                b"DCTDecode",
+                b"Custom"
+            ]
+        );
     }
 
     #[test]

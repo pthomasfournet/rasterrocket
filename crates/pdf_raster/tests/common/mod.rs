@@ -91,3 +91,33 @@ pub fn session(bytes: Vec<u8>, policy: BackendPolicy) -> RasterSession {
     open_session_from_bytes(bytes, &SessionConfig::with_policy(policy))
         .unwrap_or_else(|e| panic!("{policy:?} session: {e}"))
 }
+
+/// Catalog 1, Pages 2, then `page` as object 3 and `rest` from object 4 on.
+pub fn one_page(page: &str, rest: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        page.as_bytes().to_vec(),
+    ];
+    objects.extend(rest);
+    assemble_pdf(&objects)
+}
+
+/// Fraction of page 1's pixels that are not white, at 72 dpi on the CPU.
+pub fn ink(pdf: Vec<u8>) -> f64 {
+    let s = session(pdf, BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("page renders");
+    let px = bmp.data().chunks_exact(3);
+    let total = px.len();
+    let dark = px.filter(|p| p.iter().any(|&c| c < 128)).count();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "pixel counts of a test page are far below 2^52"
+    )]
+    let frac = dark as f64 / total as f64;
+    frac
+}
+
+/// A 200 × 100 pt page whose content fills the 80 × 80 square at (10, 10):
+/// 32 % of the page.
+pub const SQUARE: &[u8] = b"0 g 10 10 80 80 re f";

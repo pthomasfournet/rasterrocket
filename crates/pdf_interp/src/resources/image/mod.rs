@@ -754,7 +754,8 @@ pub(super) fn is_transport_filter(name: &str) -> bool {
     )
 }
 
-/// Collect every filter name from a `/Filter` entry, in application order.
+/// Collect every filter name from a `/Filter` entry, in application order,
+/// abbreviations expanded.
 ///
 /// Accepts a bare `Name` (one filter) or a `Name` array (a filter chain, PDF
 /// §7.4: filters are listed in the order they were applied during encoding, so
@@ -762,16 +763,17 @@ pub(super) fn is_transport_filter(name: &str) -> bool {
 /// An empty or absent array yields an empty vector (no filter).
 pub(crate) fn image_filter_chain(obj: &Object) -> Vec<Cow<'_, str>> {
     match obj {
-        Object::Name(n) => vec![String::from_utf8_lossy(n)],
+        Object::Name(n) => vec![full_filter_name(n)],
         Object::Array(arr) => arr
             .iter()
-            .filter_map(|o| o.as_name().map(String::from_utf8_lossy))
+            .filter_map(|o| o.as_name().map(full_filter_name))
             .collect(),
         _ => Vec::new(),
     }
 }
 
-/// Extract the *terminal* image filter from a `/Filter` entry.
+/// Extract the *terminal* image filter from a `/Filter` entry, its
+/// abbreviation expanded.
 ///
 /// Accepts a bare `Name`, a single-element `Name` array, or a multi-element
 /// filter chain (e.g. `[/ASCII85Decode /CCITTFaxDecode]`).  For a chain, the
@@ -784,7 +786,7 @@ pub(crate) fn image_filter_chain(obj: &Object) -> Vec<Cow<'_, str>> {
 /// and a debug message is emitted, matching the behaviour of an absent key.
 pub(crate) fn filter_name(obj: &Object) -> Option<Cow<'_, str>> {
     match obj {
-        Object::Name(n) => Some(String::from_utf8_lossy(n)),
+        Object::Name(n) => Some(full_filter_name(n)),
         Object::Array(arr) => {
             if arr.is_empty() {
                 log::debug!("image: Filter is an empty array — treating as no filter");
@@ -793,10 +795,15 @@ pub(crate) fn filter_name(obj: &Object) -> Option<Cow<'_, str>> {
             arr.iter()
                 .rev()
                 .find_map(|o| o.as_name())
-                .map(String::from_utf8_lossy)
+                .map(full_filter_name)
         }
         _ => None,
     }
+}
+
+/// The full name of the filter `name`, abbreviations expanded.
+fn full_filter_name(name: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(pdf::filter_full_name(name))
 }
 
 /// Resolve the `/DecodeParms` entry that belongs to the *terminal* filter.
@@ -950,6 +957,16 @@ mod tests {
     fn filter_name_single_name() {
         let obj = Object::Name(b"FlateDecode".to_vec());
         assert_eq!(filter_name(&obj).as_deref(), Some("FlateDecode"));
+    }
+
+    #[test]
+    fn filter_names_expand_abbreviations() {
+        let obj = Object::Array(vec![
+            Object::Name(b"A85".to_vec()),
+            Object::Name(b"DCT".to_vec()),
+        ]);
+        assert_eq!(filter_name(&obj).as_deref(), Some("DCTDecode"));
+        assert_eq!(image_filter_chain(&obj), ["ASCII85Decode", "DCTDecode"]);
     }
 
     #[test]

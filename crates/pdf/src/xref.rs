@@ -448,10 +448,11 @@ fn decode_xref_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, PdfError
 
     // /Filter is optional, a Name, or a single-element array of a Name.
     let filter: Option<&[u8]> = match dict.get(b"Filter") {
-        Some(Object::Name(n)) => Some(n),
+        Some(Object::Name(n)) => Some(n.as_slice()),
         Some(Object::Array(a)) if a.len() == 1 => a[0].as_name(),
         _ => None,
-    };
+    }
+    .map(crate::stream::filter_full_name);
 
     match filter {
         None => Ok(raw.to_vec()),
