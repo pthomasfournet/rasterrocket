@@ -1,6 +1,6 @@
 # OCR Integration
 
-rasterrocket outputs 8-bit greyscale pixel buffers (`RenderedPage`) ready for direct consumption by any OCR engine. This page documents the optimal integration pattern for two Rust-native, offline engines: **Tesseract** (via `leptess`) and **ocrs**.
+rasterrocket outputs 8-bit greyscale pixel buffers (`RenderedPage`) ready for direct consumption by any OCR engine. This page documents the optimal integration pattern for two offline engines usable from Rust: **Tesseract** (via the `tesseract` crate) and **ocrs**.
 
 For cloud vision APIs (Google Cloud Vision, GPT-5), see [LLM Vision OCR Integration](LLM-Vision-OCR-Integration).
 
@@ -8,12 +8,12 @@ For cloud vision APIs (Google Cloud Vision, GPT-5), see [LLM Vision OCR Integrat
 
 ## Quick comparison
 
-| | Tesseract (`leptess`) | ocrs |
+| | Tesseract (`tesseract` crate) | ocrs |
 |---|---|---|
 | **Accuracy** | Excellent — best on clean documents, wide language support | Good — strong on printed English, weaker on complex scripts |
-| **System deps** | Requires `libtesseract` + language data files installed | Pure Rust — no system deps, WASM-compatible |
-| **Zero-copy ingestion** | Yes — `set_image_from_mem` aliases your buffer | Near-zero — one `u8→f32` normalisation pass, no extra copies |
-| **Threading model** | One `TessApi` per thread (not `Send`) | Single `Arc<OcrEngine>` shared across threads (`Send + Sync`) |
+| **System deps** | Requires `libtesseract`, `libleptonica` + language data files installed | Pure Rust — no system deps, WASM-compatible |
+| **Ingestion** | Raw pixels through `set_frame`; Tesseract copies them once into its own image | One `u8→f32` normalisation pass |
+| **Threading model** | One `Tesseract` instance per thread (`Send`, not `Sync`) | Single `Arc<OcrEngine>` shared across threads (`Send + Sync`) |
 | **DPI required** | Yes — pass `page.effective_dpi` or accuracy degrades | No — character size inferred from pixel dimensions |
 
 ---
@@ -31,66 +31,75 @@ Recommended render DPI for OCR: **300**. Character x-height should be 20–30 px
 
 ---
 
-## Tesseract via `leptess`
+## Tesseract via the `tesseract` crate
 
 ### Add the dependency
 
 ```toml
 # Cargo.toml
 [dependencies]
-leptess = "0.14"
+tesseract = "0.15"
 ```
 
-Requires `libtesseract-dev` and at least one language data package installed on the system:
+Requires the Tesseract and Leptonica development files and at least one language data package:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install libtesseract-dev tesseract-ocr-eng
+sudo apt install libtesseract-dev libleptonica-dev tesseract-ocr-eng
 
 # macOS
 brew install tesseract
 ```
 
+### Feed raw pixels, not an encoded image
+
+`RenderedPage::pixels` is raw 8-bit grayscale, one byte per pixel, rows packed
+top to bottom (`stride == width`). Hand it to Tesseract with `set_frame`
+(bytes per pixel `1`, bytes per line `width`). `set_image_from_mem` is the
+wrong call: it decodes an image *file* held in memory (PNG, TIFF, …) and
+rejects or misreads raw pixels.
+
 ### The footgun to avoid
 
-The `tesseract` 0.15.x crate's convenience function creates a **new `TessBaseAPI` instance per call**:
+`tesseract::ocr_from_frame` creates a **new Tesseract instance per call**:
 
 ```rust
-// ❌ DO NOT USE IN A PIPELINE — ~100 ms init overhead per page
-let text = tesseract::ocr_from_frame(&page.pixels, ...)?;
+// ❌ DO NOT USE IN A PIPELINE — engine initialisation on every page
+let text = tesseract::ocr_from_frame(&page.pixels, w, h, 1, w, "eng")?;
 ```
 
-Instance initialisation loads model weights from disk on every call. At 100 ms per page, a 1000-page document wastes ~100 seconds just on reinitialisation.
+Initialisation loads the language model from disk each time; on a
+1000-page document that cost dominates the run.
 
 ### Correct pattern — single-threaded
 
-Create one `TessApi` and reuse it across all pages:
+Create one `Tesseract` and reuse it across all pages. Its setters take and
+return the instance by value:
 
 ```rust
-use leptess::{LepTess, Variable};
 use rasterrocket::{RasterOptions, raster_pdf};
 use std::path::Path;
+use tesseract::Tesseract;
 
 fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
-    // Create once. Model weights loaded here, not per page.
-    let mut api = LepTess::new(None, "eng")?;
+    // Create once. The language model is loaded here, not per page.
+    let mut tess = Tesseract::new(None, Some("eng"))?;
 
     let opts = RasterOptions::new(dpi);
     let mut results = Vec::new();
 
     for (_page_num, result) in raster_pdf(path, &opts) {
         let page = result?;
+        let width = i32::try_from(page.width)?;
+        let height = i32::try_from(page.height)?;
 
-        // Set DPI once (or per page if your PDF has variable UserUnit).
-        // effective_dpi accounts for UserUnit scaling — always use it.
-        api.set_source_resolution(page.effective_dpi as i32);
+        // effective_dpi includes the page's UserUnit — always use it.
+        let ppi = page.effective_dpi.round() as i32;
 
-        // Zero-copy: set_image_from_mem aliases page.pixels — no copy.
-        // page.pixels must stay alive until get_utf8_text() returns.
-        api.set_image_from_mem(&page.pixels)?;
-        api.set_variable(Variable::TesseditCreateBoxfile, "0")?;
-
-        results.push(api.get_utf8_text()?);
+        tess = tess
+            .set_frame(&page.pixels, width, height, 1, width)?
+            .set_source_resolution(ppi);
+        results.push(tess.get_text()?);
     }
 
     Ok(results)
@@ -99,14 +108,15 @@ fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
 
 ### Correct pattern — multi-threaded
 
-`leptess::LepTess` is not `Send`. Spawn one thread per worker, each with its own instance. Feed pages via `render_channel`:
+A `Tesseract` instance is `Send` but not `Sync`: give each worker thread its
+own. Feed pages via `render_channel`:
 
 ```rust
-use leptess::LepTess;
 use rasterrocket::{RasterOptions, render_channel};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tesseract::Tesseract;
 
 fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec<(u32, String)>> {
     let opts = RasterOptions::new(dpi);
@@ -114,14 +124,13 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
 
     let (tx_out, rx_out) = std::sync::mpsc::channel();
 
-    // Distribute work across N threads, each holding its own TessApi.
+    // Distribute work across N threads, each holding its own instance.
     let handles: Vec<_> = (0..workers)
         .map(|_| {
             let rx = Arc::clone(&rx);
             let tx_out = tx_out.clone();
             thread::spawn(move || {
-                // Each thread creates its own instance — never shared.
-                let mut api = LepTess::new(None, "eng").expect("leptess init");
+                let mut tess = Tesseract::new(None, Some("eng")).expect("tesseract init");
                 loop {
                     let item = rx.lock().unwrap().recv();
                     let Ok((page_num, result)) = item else { break };
@@ -129,9 +138,12 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
                         Ok(p) => p,
                         Err(e) => { eprintln!("page {page_num}: {e}"); continue; }
                     };
-                    api.set_source_resolution(page.effective_dpi as i32);
-                    api.set_image_from_mem(&page.pixels).expect("set_image");
-                    let text = api.get_utf8_text().unwrap_or_default();
+                    let (w, h) = (page.width as i32, page.height as i32);
+                    tess = tess
+                        .set_frame(&page.pixels, w, h, 1, w)
+                        .expect("set_frame")
+                        .set_source_resolution(page.effective_dpi.round() as i32);
+                    let text = tess.get_text().unwrap_or_default();
                     tx_out.send((page_num, text)).ok();
                 }
             })
@@ -147,6 +159,14 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
 ```
 
 > **Note:** `render_channel` returns `std::sync::mpsc::Receiver`, which is not `Clone`. The example above wraps it in `Arc<Mutex<_>>` so multiple threads can drain the same channel. For higher throughput, `crossbeam-channel` eliminates the per-recv mutex.
+
+### Pages with missing content
+
+A page whose image or content stream could not be decoded still renders, with
+that part missing, and lists it in `page.diagnostics.image_failures` /
+`content_failures` (an entry with `partial: true` was drawn in part). Check
+them before trusting the OCR text of a page, or set `opts.strict = true` to get
+an `Err` for such pages instead.
 
 ---
 
@@ -304,6 +324,6 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
 |-----------|---------------|
 | Need wide language support or high accuracy on degraded scans | Tesseract |
 | Deploying to a container or WASM with no system deps | ocrs |
-| Need word-level bounding boxes | Tesseract (`get_component_images`) |
+| Need word-level bounding boxes | Tesseract (`get_hocr_text` / `get_tsv_text`) |
 | Simplest possible Rust-only build | ocrs |
 | Mixed scripts (Arabic, CJK, RTL) | Tesseract |
