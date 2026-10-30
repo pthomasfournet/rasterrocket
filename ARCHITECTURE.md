@@ -201,11 +201,6 @@ unpack_mono_row                       (SSE2 → NEON → scalar)
 ```
 SVE2 tier requires `nightly-sve2` Cargo feature (nightly Rust + `stdarch_aarch64_sve`).
 
-**Parallel fill** (feature: `rayon`)
-`fill_parallel` / `eo_fill_parallel` split the bitmap into horizontal bands above
-`PARALLEL_FILL_MIN_HEIGHT`. Each band is an independent `BitmapBand` (`&mut` slice),
-no synchronisation needed.
-
 ### 3.3 `rasterrocket-font`
 
 Font programs, glyph rasterisation and the glyph cache.  No C font library:
@@ -734,7 +729,6 @@ gpu-validation     →                    →                    → gpu-validat
 rasterrocket-render features (orthogonal, no cross-crate effect):
   simd-avx2        default on; enables blend/fill AVX2 paths
   nightly-sve2     aarch64 only; SVE2 popcount tier (requires nightly Rust)
-  rayon            enables fill_parallel / eo_fill_parallel
 
 There is no `simd-avx512` feature — it was dead and has been deleted. AVX-512
 tiers are selected at runtime via `is_x86_feature_detected!`, so a
@@ -854,11 +848,6 @@ concurrently, which races with the CUDA driver's own atexit shutdown. The fix:
 call `release_gpu_decoders()` via `pool.broadcast()` after `pool.install()` returns.
 This drops each decoder while the driver is still fully live; the TLS destructors
 see `Uninitialised` and are no-ops.
-
-**Parallel fill** (feature: `rayon`)
-`fill_parallel` splits the target bitmap into horizontal bands. Each band is a
-`BitmapBand` (`&mut` slice of rows). Bands are independent — no synchronisation.
-Threshold: `PARALLEL_FILL_MIN_HEIGHT`.
 
 **Font engine**
 Each page renderer owns its `FontEngine`; there is no shared lock. Glyph bitmaps

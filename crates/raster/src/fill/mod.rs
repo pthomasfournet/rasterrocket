@@ -16,21 +16,10 @@
 //! the clip AA-masks the buf, and then `draw_aa_line` reads the 4-bit coverage
 //! count (0..16) through a gamma LUT (`aaGamma`) and calls `render_span_aa`.
 //!
-//! # Parallel fill
-//!
-//! Rayon-parallel variants `fill_parallel` / `eo_fill_parallel` live in a
-//! private `parallel` submodule and are re-exported here when the `rayon`
-//! feature is enabled.
-//!
 //! # C++ equivalent
 //! `Splash::fillWithPattern`.
 
-#[cfg(feature = "rayon")]
-mod parallel;
-#[cfg(feature = "rayon")]
-pub use parallel::{PARALLEL_FILL_MIN_HEIGHT, eo_fill_parallel, fill_parallel};
-
-use crate::bitmap::{AaBuf, Bitmap, BitmapBand};
+use crate::bitmap::{AaBuf, Bitmap};
 use crate::clip::{Clip, ClipResult};
 use crate::path::Path;
 use crate::pipe::{self, PipeSrc, PipeState};
@@ -101,7 +90,7 @@ pub fn eo_fill<P: Pixel>(
     clippy::too_many_arguments,
     reason = "mirrors SplashFillWithPattern API; all params necessary"
 )]
-pub(super) fn fill_impl<P: Pixel>(
+fn fill_impl<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
@@ -207,9 +196,9 @@ pub(super) fn fill_impl<P: Pixel>(
                 }
 
                 if inner_clip {
-                    draw_span::<P, _>(bitmap, pipe, src, sx0, sx1, y);
+                    draw_span(bitmap, pipe, src, sx0, sx1, y);
                 } else {
-                    draw_span_clipped::<P, _>(bitmap, clip, pipe, src, sx0, sx1, y);
+                    draw_span_clipped(bitmap, clip, pipe, src, sx0, sx1, y);
                 }
             }
         }
@@ -257,43 +246,11 @@ pub fn aa_scanner(
     (!scanner.is_empty()).then_some(scanner)
 }
 
-// ── RowSink — shared abstraction over Bitmap and BitmapBand ──────────────────
-
-/// A target that can vend a mutable pixel row and an optional alpha row.
-///
-/// Implemented by [`Bitmap`] and [`BitmapBand`], letting `draw_span` and
-/// `draw_span_clipped` work without duplication across the sequential and
-/// parallel fill paths.
-pub(super) trait RowSink<P: Pixel> {
-    /// Return mutable access to the raw pixel bytes and the optional alpha
-    /// plane for absolute row `y`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `y` is out of range for the sink (matches the behaviour of
-    /// `Bitmap::row_and_alpha_mut` and `BitmapBand::row_and_alpha_mut`).
-    fn row_and_alpha_mut(&mut self, y: u32) -> (&mut [u8], Option<&mut [u8]>);
-}
-
-impl<P: Pixel> RowSink<P> for Bitmap<P> {
-    #[inline]
-    fn row_and_alpha_mut(&mut self, y: u32) -> (&mut [u8], Option<&mut [u8]>) {
-        self.row_and_alpha_mut(y)
-    }
-}
-
-impl<P: Pixel> RowSink<P> for BitmapBand<'_, P> {
-    #[inline]
-    fn row_and_alpha_mut(&mut self, y: u32) -> (&mut [u8], Option<&mut [u8]>) {
-        self.row_and_alpha_mut(y)
-    }
-}
-
 // ── Span drawing helpers ──────────────────────────────────────────────────────
 
-/// Emit a solid span into `sink` that is fully inside the clip — no per-pixel test.
-pub(super) fn draw_span<P: Pixel, S: RowSink<P>>(
-    sink: &mut S,
+/// Emit a solid span into `bitmap` that is fully inside the clip — no per-pixel test.
+fn draw_span<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
     x0: i32,
@@ -315,7 +272,7 @@ pub(super) fn draw_span<P: Pixel, S: RowSink<P>>(
     #[expect(clippy::cast_sign_loss, reason = "x0 >= 0, x1 >= x0 asserted above")]
     let alpha_range = x0 as usize..=x1 as usize;
 
-    let (row, alpha) = sink.row_and_alpha_mut(y_u);
+    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
     let dst_pixels = &mut row[byte_off..byte_end];
     let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
 
@@ -323,8 +280,8 @@ pub(super) fn draw_span<P: Pixel, S: RowSink<P>>(
 }
 
 /// Emit a span with per-pixel clip test (partial clip region).
-pub(super) fn draw_span_clipped<P: Pixel, S: RowSink<P>>(
-    sink: &mut S,
+fn draw_span_clipped<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
     clip: &Clip,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
@@ -342,11 +299,11 @@ pub(super) fn draw_span_clipped<P: Pixel, S: RowSink<P>>(
                 run_start = Some(x);
             }
         } else if let Some(rs) = run_start.take() {
-            draw_span(sink, pipe, src, rs, x - 1, y);
+            draw_span(bitmap, pipe, src, rs, x - 1, y);
         }
     }
     if let Some(rs) = run_start {
-        draw_span(sink, pipe, src, rs, x1, y);
+        draw_span(bitmap, pipe, src, rs, x1, y);
     }
 }
 
@@ -847,106 +804,5 @@ mod tests {
                 .all(|&(x, y)| (45..55).contains(&x) && (45..55).contains(&y)),
             "no pixel outside the square"
         );
-    }
-
-    // ── Parallel fill tests ───────────────────────────────────────────────────
-
-    #[cfg(feature = "rayon")]
-    mod parallel {
-        use super::*;
-        use crate::fill::{eo_fill_parallel, fill_parallel};
-
-        /// Parallel fill (n_bands=4) must produce identical pixel output to
-        /// sequential fill for a large rectangle.
-        #[test]
-        fn fill_parallel_matches_sequential() {
-            const W: u32 = 64;
-            const H: u32 = 512;
-
-            let mut seq: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
-            let mut par: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
-
-            let clip = make_clip(W, H);
-            let pipe = simple_pipe();
-            let color = [77u8, 155, 211];
-            let src = PipeSrc::Solid(&color);
-            let path = rect_path(4.0, 4.0, 60.0, 508.0);
-            let matrix = identity_matrix();
-
-            fill::<Rgb8>(&mut seq, &clip, &path, &pipe, &src, &matrix, 1.0, false);
-            fill_parallel::<Rgb8>(&mut par, &clip, &path, &pipe, &src, &matrix, 1.0, false, 4);
-
-            assert_eq!(
-                seq.data(),
-                par.data(),
-                "parallel fill output differs from sequential"
-            );
-        }
-
-        /// A single-band parallel fill must produce identical output to sequential fill.
-        #[test]
-        fn fill_parallel_single_band_is_sequential() {
-            const W: u32 = 32;
-            const H: u32 = 512;
-
-            let mut seq: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
-            let mut par: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
-
-            let clip = make_clip(W, H);
-            let pipe = simple_pipe();
-            let color = [33u8, 66, 99];
-            let src = PipeSrc::Solid(&color);
-            let path = rect_path(2.0, 2.0, 30.0, 510.0);
-            let matrix = identity_matrix();
-
-            fill::<Rgb8>(&mut seq, &clip, &path, &pipe, &src, &matrix, 1.0, false);
-            // n_bands=1 must behave identically to sequential.
-            fill_parallel::<Rgb8>(&mut par, &clip, &path, &pipe, &src, &matrix, 1.0, false, 1);
-
-            assert_eq!(
-                seq.data(),
-                par.data(),
-                "single-band parallel fill output differs from sequential"
-            );
-        }
-
-        /// Parallel even-odd fill (n_bands=4) must match sequential eo_fill.
-        #[test]
-        fn eo_fill_parallel_matches_sequential() {
-            const W: u32 = 64;
-            const H: u32 = 512;
-
-            let mut seq: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
-            let mut par: Bitmap<Rgb8> = Bitmap::new(W, H, 1, false);
-
-            let clip = make_clip(W, H);
-            let pipe = simple_pipe();
-            let color = [200u8, 100, 50];
-            let src = PipeSrc::Solid(&color);
-
-            // Donut: outer 4→60, inner 16→48 → EO fills only the ring.
-            let mut b = PathBuilder::new();
-            b.move_to(4.0, 4.0).unwrap();
-            b.line_to(60.0, 4.0).unwrap();
-            b.line_to(60.0, 508.0).unwrap();
-            b.line_to(4.0, 508.0).unwrap();
-            b.close(true).unwrap();
-            b.move_to(16.0, 16.0).unwrap();
-            b.line_to(48.0, 16.0).unwrap();
-            b.line_to(48.0, 496.0).unwrap();
-            b.line_to(16.0, 496.0).unwrap();
-            b.close(true).unwrap();
-            let path = b.build();
-            let matrix = identity_matrix();
-
-            eo_fill::<Rgb8>(&mut seq, &clip, &path, &pipe, &src, &matrix, 1.0, false);
-            eo_fill_parallel::<Rgb8>(&mut par, &clip, &path, &pipe, &src, &matrix, 1.0, false, 4);
-
-            assert_eq!(
-                seq.data(),
-                par.data(),
-                "parallel eo_fill output differs from sequential"
-            );
-        }
     }
 }

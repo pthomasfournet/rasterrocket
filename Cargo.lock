@@ -1394,7 +1394,6 @@ dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
  "rasterrocket-color",
- "rayon",
 ]
 
 [[package]]
