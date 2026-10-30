@@ -320,6 +320,10 @@ pub struct PageRenderer<'doc> {
     /// The backdrop of the non-isolated transparency group being painted
     /// into, consulted by blend modes applied inside it; `None` outside one.
     group_backdrop: Option<Arc<Backdrop>>,
+    /// Transparent page-sized bitmaps for transparency groups, each
+    /// returned cleared when its group is composited; one per nesting level
+    /// is allocated over the page's life.
+    group_pool: Vec<Bitmap<Rgb8>>,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Resource name of the image `XObject` being drawn, set for the duration
@@ -566,6 +570,7 @@ impl<'doc> PageRenderer<'doc> {
             pattern_depth: 0,
             pattern_ctm: initial_ctm,
             group_backdrop: None,
+            group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
             current_image: None,
             op_budget: MAX_PAGE_OPS,
@@ -1488,12 +1493,15 @@ impl<'doc> PageRenderer<'doc> {
         let child_resources = self.resources.for_form(form);
         let parent_resources = std::mem::replace(&mut self.resources, child_resources);
 
-        // Transparency group: allocate an intermediate bitmap, render into it,
-        // then composite back onto the page.
+        // Transparency group: render into an intermediate bitmap, then
+        // composite it back onto the page.
         let mut group = form
             .transparency
             .and_then(|tg| self.group_params(form.bbox, tg))
-            .map(|params| begin_group(&self.bitmap, &self.gstate.current().clip, params));
+            .map(|params| {
+                let bitmap = self.group_bitmap();
+                begin_group(&self.bitmap, &self.gstate.current().clip, params, bitmap)
+            });
 
         // Swap in the group bitmap when present.  PDF §11.6.6: the alpha
         // constants and blend mode start at their initial values inside a
@@ -1509,16 +1517,24 @@ impl<'doc> PageRenderer<'doc> {
         // pixels for a non-isolated group, nothing for an isolated one.
         let parent_backdrop = group.as_mut().map(|g| {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
+            let (x0, y0, x1, y1) = g.region();
             let gs = self.gstate.current_mut();
             gs.fill_alpha = 255;
             gs.stroke_alpha = 255;
             gs.blend_mode = BlendMode::Normal;
+            // The content is clipped to the region, so the group bitmap is
+            // painted nowhere else and clearing the region restores it.
+            gs.clip
+                .clip_to_rect(f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1));
             std::mem::replace(&mut self.group_backdrop, g.backdrop.take().map(Arc::new))
         });
 
-        // Parse and execute the form's content stream.
+        // Parse and execute the form's content stream.  Its `Q`s cannot
+        // pop the state saved above.
         let ops = crate::content::parse(&form.content);
+        let floor = self.gstate.raise_floor();
         self.execute(&ops);
+        self.gstate.lower_floor(floor);
 
         // Swap the group bitmap back and composite using the parent's opacity/blend
         // (captured before gstate.save() — the form's own state is irrelevant here).
@@ -1530,14 +1546,13 @@ impl<'doc> PageRenderer<'doc> {
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);
             // Residual Clip is unused — parent gstate is restored immediately below.
-            match group_mask {
+            let (_, bitmap) = match group_mask {
                 Some(mask) => self.paint_through_soft_mask(&mask, region, |r| {
-                    let _ = paint_group(&mut r.bitmap, g, &pipe);
+                    paint_group(&mut r.bitmap, g, &pipe)
                 }),
-                None => {
-                    let _ = paint_group(&mut self.bitmap, g, &pipe);
-                }
-            }
+                None => paint_group(&mut self.bitmap, g, &pipe),
+            };
+            self.group_pool.push(bitmap);
         }
 
         // Restore resources and graphics state.
@@ -1545,6 +1560,16 @@ impl<'doc> PageRenderer<'doc> {
         self.pattern_ctm = parent_pattern_ctm;
         self.form_depth -= 1;
         self.gstate.restore();
+    }
+
+    /// A transparent bitmap of the current bitmap's size for a transparency
+    /// group: one from the pool, or a fresh one.
+    fn group_bitmap(&mut self) -> Bitmap<Rgb8> {
+        let (width, height) = (self.bitmap.width, self.bitmap.height);
+        self.group_pool
+            .pop()
+            .filter(|b| b.width == width && b.height == height)
+            .unwrap_or_else(|| Bitmap::new(width, height, 1, true))
     }
 
     /// The parameters of a transparency group `tg` whose form has `bbox`:

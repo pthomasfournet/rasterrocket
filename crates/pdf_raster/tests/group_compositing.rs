@@ -144,3 +144,55 @@ fn a_blend_mode_inside_a_non_isolated_group_sees_earlier_group_content() {
     assert_eq!(px[0], [0, 0, 255], "blue multiplied with the group's white");
     assert_eq!(px[1], GREY, "unpainted pixel");
 }
+
+/// Two group forms in sequence under half alpha, `/F` painting the square
+/// and `/G` painting nothing, with `/G` also sent an unbalanced `Q`: the
+/// second group composites nothing of the first, and the stray `Q` neither
+/// lifts the group's clip nor the alpha.
+#[test]
+fn a_later_group_composites_only_its_own_content() {
+    let pdf = assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
+             /Resources << /ExtGState << /A << /ca 0.5 >> >> \
+             /XObject << /F 5 0 R /G 6 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream_object(
+            "",
+            format!("0.5 g 0 0 {W} {H} re f q /A gs /F Do Q q /A gs /G Do Q").as_bytes(),
+        ),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 {W} {H}] \
+                 /Group << /S /Transparency /CS /DeviceRGB >>"
+            ),
+            SQUARE.as_bytes(),
+        ),
+        stream_object(
+            "/Type /XObject /Subtype /Form /BBox [40 40 50 50] \
+             /Group << /S /Transparency /CS /DeviceRGB >>",
+            b"Q Q Q 1 0 0 rg 0 0 100 100 re f",
+        ),
+    ]);
+    let px = rgb_at(pdf, &[(50, 50), (10, 10), (45, 45)]);
+    assert!(
+        px[0]
+            .iter()
+            .zip(&[64, 64, 191])
+            .all(|(a, b)| a.abs_diff(*b) <= 1),
+        "the square once at half alpha: {:?}",
+        px[0]
+    );
+    assert_eq!(px[1], GREY, "outside both groups");
+    assert!(
+        px[2]
+            .iter()
+            .zip(&[160, 32, 96])
+            .all(|(a, b)| a.abs_diff(*b) <= 1),
+        "red at half alpha over the half-alpha square, inside the second group's box: {:?}",
+        px[2]
+    );
+}

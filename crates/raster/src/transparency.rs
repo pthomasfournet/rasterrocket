@@ -5,12 +5,14 @@
 //!
 //! A **transparency group** is an intermediate compositing surface.  The caller:
 //!
-//! 1. Calls [`begin_group`] to allocate a fresh group bitmap and push it onto the
-//!    stack.  All subsequent paint operations target that group.
+//! 1. Calls [`begin_group`] with a transparent bitmap of the parent's size,
+//!    which becomes the group bitmap.  All subsequent paint operations
+//!    target that group.
 //! 2. Renders into the group normally (fill, stroke, image, shading, glyph calls
-//!    on the group bitmap).
-//! 3. Calls [`paint_group`] (or [`discard_group`] on error) to pop the group and
-//!    composite it back into the underlying bitmap.
+//!    on the group bitmap), within the group's region.
+//! 3. Calls [`paint_group`] (or [`discard_group`] on error) to composite the
+//!    group back into the underlying bitmap.  Both return the group bitmap
+//!    with its region cleared, transparent again for the next group.
 //!
 //! # Isolated vs. non-isolated groups
 //!
@@ -82,8 +84,10 @@ pub struct GroupParams {
 ///
 /// The group bitmap has the parent's dimensions and shares its device
 /// coordinate system, so content renders into it unchanged.  Only the
-/// region `params.x_min..=x_max × y_min..=y_max` (clamped to the parent by
-/// [`begin_group`]) is composited back.
+/// region `params.x_min..=x_max × y_min..=y_max` — the bounding box
+/// intersected with the clip's rectangle and the parent by
+/// [`begin_group`] — is composited back, and the content is to be clipped
+/// to it.
 ///
 /// Returned by [`begin_group`]; passed to [`paint_group`] or [`discard_group`].
 pub struct GroupBitmap<P: Pixel> {
@@ -185,26 +189,30 @@ impl<P: Pixel> GroupBitmap<P> {
 
 // ── Group lifecycle ───────────────────────────────────────────────────────────
 
-/// Open a new transparency group and return a group bitmap to render into.
+/// Open a new transparency group on `bitmap`, a transparent bitmap of the
+/// parent's dimensions with an alpha plane — a fresh one, or one returned
+/// by [`paint_group`] or [`discard_group`].
 ///
 /// - `parent` is the current destination bitmap.  For a non-isolated group its
-///   pixels inside the bounding box are kept as the group's backdrop.
+///   pixels inside the region are kept as the group's backdrop.
 /// - The returned [`GroupBitmap`] becomes the new render target until
 ///   [`paint_group`] or [`discard_group`] is called.  It has the parent's
 ///   dimensions, so painting into it uses the parent's device coordinates.
 ///
-/// The bounding box is clamped to `parent`; an empty box after clamping is
-/// promoted to the nearest single pixel.
+/// The region is the bounding box intersected with `clip`'s rectangle and
+/// clamped to `parent`; an empty region is promoted to the nearest single
+/// pixel.
 ///
 /// # Panics
 ///
 /// Panics (in debug mode) if the bounding box is inverted (`x_min` > `x_max`
-/// or `y_min` > `y_max`).
+/// or `y_min` > `y_max`), or if `bitmap` is not the parent's size.
 #[must_use]
 pub fn begin_group<P: Pixel>(
     parent: &Bitmap<P>,
     clip: &Clip,
     mut params: GroupParams,
+    bitmap: Bitmap<P>,
 ) -> GroupBitmap<P> {
     debug_assert!(
         params.x_min <= params.x_max,
@@ -218,16 +226,19 @@ pub fn begin_group<P: Pixel>(
         params.y_min,
         params.y_max
     );
+    debug_assert!(
+        bitmap.width == parent.width && bitmap.height == parent.height && bitmap.has_alpha(),
+        "begin_group: the group bitmap must be the parent's size, with an alpha plane"
+    );
 
     let clamp_to = |v: i32, len: u32| v.clamp(0, i32::try_from(len).unwrap_or(i32::MAX) - 1);
-    params.x_min = clamp_to(params.x_min, parent.width);
-    params.y_min = clamp_to(params.y_min, parent.height);
-    params.x_max = clamp_to(params.x_max, parent.width).max(params.x_min);
-    params.y_max = clamp_to(params.y_max, parent.height).max(params.y_min);
+    params.x_min = clamp_to(params.x_min.max(clip.x_min_i), parent.width);
+    params.y_min = clamp_to(params.y_min.max(clip.y_min_i), parent.height);
+    params.x_max = clamp_to(params.x_max.min(clip.x_max_i), parent.width).max(params.x_min);
+    params.y_max = clamp_to(params.y_max.min(clip.y_max_i), parent.height).max(params.y_min);
 
     let mut group = GroupBitmap {
-        // Zero-initialised: colour 0, alpha 0 everywhere.
-        bitmap: Bitmap::new(parent.width, parent.height, 1, true),
+        bitmap,
         saved_clip: clip.clone_shared(),
         params,
         backdrop: None,
@@ -238,15 +249,14 @@ pub fn begin_group<P: Pixel>(
     group
 }
 
-/// Composite a finished group back into the parent bitmap and return the saved clip.
+/// Composite a finished group back into the parent bitmap and return the
+/// saved clip and the group bitmap, its region cleared.
 ///
 /// `pipe` controls blend mode, opacity, and transfer for the compositing step.
 /// The group's own alpha plane is folded into the effective source alpha as
 /// `eff_a = div255(group_alpha × pipe.a_input)`.
 ///
 /// Pixels with `group_alpha == 0` are skipped entirely (no-op fast path).
-///
-/// After this call `group` is consumed and its bitmap is dropped.
 ///
 /// # Panics
 ///
@@ -256,7 +266,7 @@ pub fn paint_group<P: Pixel>(
     parent: &mut Bitmap<P>,
     group: GroupBitmap<P>,
     pipe: &PipeState<'_>,
-) -> Clip {
+) -> (Clip, Bitmap<P>) {
     let (x0, y0, x1, y1) = group.region();
     let ncomps = P::BYTES;
     let width = group.bitmap.width as usize;
@@ -310,16 +320,31 @@ pub fn paint_group<P: Pixel>(
         }
     }
 
-    group.saved_clip
+    discard_group(group)
 }
 
 /// Discard a group without compositing it (used on error paths).
 ///
-/// Returns the clip that was saved when the group was opened so the caller can
-/// restore graphics state cleanly.
+/// Returns the clip that was saved when the group was opened so the caller
+/// can restore graphics state cleanly, and the group bitmap with its region
+/// cleared: transparent again, as [`begin_group`] requires.
 #[must_use]
-pub fn discard_group<P: Pixel>(group: GroupBitmap<P>) -> Clip {
-    group.saved_clip
+pub fn discard_group<P: Pixel>(group: GroupBitmap<P>) -> (Clip, Bitmap<P>) {
+    let (x0, y0, x1, y1) = group.region();
+    let GroupBitmap {
+        mut bitmap,
+        saved_clip,
+        ..
+    } = group;
+    let ncomps = P::BYTES;
+    for y in y0..y1.min(bitmap.height) {
+        let (row, alpha) = bitmap.row_and_alpha_mut(y);
+        row[x0 as usize * ncomps..x1 as usize * ncomps].fill(0);
+        if let Some(alpha) = alpha {
+            alpha[x0 as usize..x1 as usize].fill(0);
+        }
+    }
+    (saved_clip, bitmap)
 }
 
 // ── Soft mask extraction ──────────────────────────────────────────────────────
@@ -428,7 +453,12 @@ mod tests {
         let parent: Bitmap<Rgb8> = Bitmap::new(8, 8, 4, true);
         let clip = make_clip(8, 8);
         let params = default_params(0, 0, 7, 7);
-        let group = begin_group::<Rgb8>(&parent, &clip, params);
+        let group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         assert!(
             group
                 .bitmap
@@ -452,7 +482,12 @@ mod tests {
         let clip = make_clip(4, 4);
         let mut params = default_params(1, 1, 2, 2);
         params.isolated = false;
-        let group = begin_group::<Rgb8>(&parent, &clip, params);
+        let group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         assert!(
             group
                 .bitmap
@@ -471,9 +506,14 @@ mod tests {
         assert_eq!(pipe_backdrop.pixel(2, 2, 3), Some((&[0u8, 0, 0][..], 128)));
         assert_eq!(pipe_backdrop.pixel(0, 0, 3), None, "outside the region");
         assert!(
-            begin_group::<Rgb8>(&parent, &clip, default_params(0, 0, 3, 3))
-                .backdrop
-                .is_none(),
+            begin_group::<Rgb8>(
+                &parent,
+                &clip,
+                default_params(0, 0, 3, 3),
+                Bitmap::new(parent.width, parent.height, 1, true)
+            )
+            .backdrop
+            .is_none(),
             "an isolated group has no backdrop"
         );
     }
@@ -486,7 +526,12 @@ mod tests {
         let pipe = simple_pipe();
 
         let params = default_params(1, 1, 2, 2); // 2×2 group at (1,1)
-        let mut group = begin_group::<Rgb8>(&parent, &clip, params);
+        let mut group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
 
         // Fill the group with white pixels and full alpha.
         for y in 0..group.bitmap.height {
@@ -501,7 +546,7 @@ mod tests {
             .expect("alpha plane")
             .fill(255);
 
-        let _clip = paint_group::<Rgb8>(&mut parent, group, &pipe);
+        let (_clip, _) = paint_group::<Rgb8>(&mut parent, group, &pipe);
 
         assert_eq!(parent.row(1)[1].r, 255, "pixel (1,1) R should be white");
         assert_eq!(parent.row(1)[2].r, 255, "pixel (1,2) R should be white");
@@ -524,7 +569,12 @@ mod tests {
         let mut parent: Bitmap<Rgb8> = Bitmap::new(8, 8, 4, true);
         let clip = make_clip(8, 8);
         let pipe = simple_pipe();
-        let mut group = begin_group::<Rgb8>(&parent, &clip, default_params(5, 6, 7, 7));
+        let mut group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            default_params(5, 6, 7, 7),
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         assert_eq!(
             group.dims(),
             (8, 8),
@@ -534,7 +584,7 @@ mod tests {
         group.bitmap.row_bytes_mut(6)[5 * 3..6 * 3].copy_from_slice(&[0, 0, 255]);
         group.bitmap.alpha_plane_mut().expect("alpha plane")[6 * 8 + 5] = 255;
 
-        let _clip = paint_group::<Rgb8>(&mut parent, group, &pipe);
+        let (_clip, _) = paint_group::<Rgb8>(&mut parent, group, &pipe);
         assert_eq!(
             parent.row(6)[5].b,
             255,
@@ -549,7 +599,12 @@ mod tests {
         let parent: Bitmap<Rgb8> = Bitmap::new(4, 4, 4, true);
         let clip = make_clip(4, 4);
         let params = default_params(0, 0, 3, 3);
-        let mut group = begin_group::<Rgb8>(&parent, &clip, params);
+        let mut group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
 
         // Fill group with red.
         for y in 0..group.bitmap.height {
@@ -564,9 +619,28 @@ mod tests {
             .expect("alpha plane")
             .fill(255);
 
-        let _saved = discard_group(group);
+        let (_saved, bitmap) = discard_group(group);
 
         assert_eq!(parent.row(0)[0].r, 0, "discard must not paint");
+        assert!(
+            bitmap.data().iter().all(|&b| b == 0)
+                && bitmap.alpha_plane().unwrap().iter().all(|&a| a == 0),
+            "the returned bitmap is transparent again"
+        );
+    }
+
+    /// The region is the bounding box within the clip's rectangle.
+    #[test]
+    fn region_is_the_bbox_within_the_clip() {
+        let parent: Bitmap<Rgb8> = Bitmap::new(8, 8, 4, true);
+        let clip = Clip::new(2.0, 1.0, 6.0, 5.0, false);
+        let group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            default_params(0, 0, 4, 7),
+            Bitmap::new(8, 8, 1, true),
+        );
+        assert_eq!(group.region(), (2, 1, 5, 5));
     }
 
     /// `extract_soft_mask` with `SoftMaskType::Alpha` returns the group's alpha plane.
@@ -576,7 +650,12 @@ mod tests {
         let clip = make_clip(4, 4);
         let mut params = default_params(0, 0, 3, 3);
         params.soft_mask_type = SoftMaskType::Alpha;
-        let mut group = begin_group::<Rgb8>(&parent, &clip, params);
+        let mut group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         group
             .bitmap
             .alpha_plane_mut()
@@ -597,7 +676,12 @@ mod tests {
         let clip = make_clip(2, 1);
         let mut params = default_params(0, 0, 1, 0);
         params.soft_mask_type = SoftMaskType::Luminosity;
-        let mut group = begin_group::<Rgb8>(&parent, &clip, params);
+        let mut group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
 
         // Pixel 0: white (255, 255, 255) → luma = 255.
         // Pixel 1: black (0, 0, 0)      → luma = 0.
@@ -625,9 +709,14 @@ mod tests {
         let clip = make_clip(4, 4);
         let pipe = simple_pipe();
         let params = default_params(0, 0, 0, 0); // 1×1 group
-        let group = begin_group::<Rgb8>(&parent, &clip, params);
+        let group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         // The group alpha is all 0 (isolated, not painted into).
-        let _saved = paint_group::<Rgb8>(&mut parent, group, &pipe);
+        let (_saved, _) = paint_group::<Rgb8>(&mut parent, group, &pipe);
         assert_eq!(
             parent.row(0)[0].b,
             255,
@@ -643,7 +732,12 @@ mod tests {
         let clip = Clip::new(0.0, 0.0, 1.999, 0.999, false);
         let mut params = default_params(0, 0, 1, 0);
         params.soft_mask_type = SoftMaskType::Luminosity;
-        let mut group = begin_group::<Cmyk8>(&parent, &clip, params);
+        let mut group = begin_group::<Cmyk8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         group
             .bitmap
             .alpha_plane_mut()
@@ -665,7 +759,12 @@ mod tests {
         let clip = make_clip(4, 4);
         // Very large bounding box; should be clamped silently to parent bounds.
         let params = default_params(0, 0, i32::MAX, i32::MAX);
-        let group = begin_group::<Rgb8>(&parent, &clip, params);
+        let group = begin_group::<Rgb8>(
+            &parent,
+            &clip,
+            params,
+            Bitmap::new(parent.width, parent.height, 1, true),
+        );
         // The region is clamped to the parent: 4×4.
         assert_eq!(group.region(), (0, 0, 4, 4));
     }

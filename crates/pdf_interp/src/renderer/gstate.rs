@@ -244,6 +244,9 @@ impl InterpGState {
 pub struct GStateStack {
     /// Index 0 = bottom (page-level) state; last = current.
     stack: Vec<InterpGState>,
+    /// The depth `Q` never pops below: the states a content stream being
+    /// executed must not reach, at least one.
+    floor: usize,
 }
 
 impl GStateStack {
@@ -253,6 +256,7 @@ impl GStateStack {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             stack: vec![InterpGState::initial(width, height)],
+            floor: 1,
         }
     }
 
@@ -286,12 +290,24 @@ impl GStateStack {
         self.stack.push(clone);
     }
 
-    /// `Q` — pop the current state. Silently ignores an unmatched `Q`.
+    /// `Q` — pop the current state. Silently ignores an unmatched `Q`: one
+    /// that would pop below the floor.
     pub fn restore(&mut self) {
-        // Never pop the bottom state; unmatched Q is lenient.
-        if self.stack.len() > 1 {
+        if self.stack.len() > self.floor {
             let _ = self.stack.pop();
         }
+    }
+
+    /// Raise the floor to the current depth, so that the `Q`s of a content
+    /// stream executed from here cannot pop the states below it; returns
+    /// the previous floor, to pass back to [`Self::lower_floor`].
+    pub const fn raise_floor(&mut self) -> usize {
+        std::mem::replace(&mut self.floor, self.stack.len())
+    }
+
+    /// Restore the floor returned by [`Self::raise_floor`].
+    pub fn lower_floor(&mut self, floor: usize) {
+        self.floor = floor.max(1);
     }
 
     /// The number of states on the stack, at least one.
