@@ -281,7 +281,7 @@ Corpora 01–04 finished faster than `mpstat`'s 1 s sampling window — CPU% is 
 
 The version history makes one thing clear: **every new dispatch layer has a cost that shows up in cold benchmarks even when the feature is not active.** Adding GPU/VA-API paths adds branching and initialization overhead that runs on every JPEG frame regardless of backend. This is the nature of a feature-rich pipeline — each capability added to the fast path is overhead added to all paths.
 
-The practical implication: **re-run this table before every release.** A new feature that looks neutral in isolation may show a corpus-09-style blowup only when measured across a full cold-cache run. `tests/bench_versions.sh` automates the build and timing for all versions.
+The practical implication: **re-run this table before every release.** A new feature that looks neutral in isolation may show a corpus-09-style blowup only when measured across a full cold-cache run. `tests/bench/instructions.py` compares the instructions two builds retire, document by document; the weekly "Instruction counts" workflow runs it against the latest release tag.
 
 ---
 
@@ -324,27 +324,32 @@ A serial pre-scan pass over all pages before rendering starts blocks the first r
 
 ## Reproducing
 
+The scripts that produced the tables above were retired with the
+`pdf-raster` package name; the tables are kept as history.  The current
+tools:
+
 ```bash
 # Build CPU-only release
 RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli
 
-# Run the full corpus benchmark (CPU vs pdftoppm)
-tests/bench_corpus.sh
+# Instructions retired per document, two builds compared
+python3 -I tests/bench/instructions.py BASE_BIN HEAD_BIN --corpus-dir tests/fixtures
 
-# VA-API iGPU build (Linux, AMD/Intel iGPU)
-RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli \
-  --features "vaapi"
-tests/bench_corpus.sh --backend vaapi --vaapi-device /dev/dri/renderD129
+# Per-page latency against pdfium, both in process, one pinned core
+tests/compare/latency.sh -r 150 tests/fixtures/corpus-*.pdf
+
+# Wall clock of a whole document, any backend
+hyperfine -w 1 './target/release/rrocket --no-ram --backend cpu input.pdf /tmp/out/p'
 
 # Full pixel-diff comparison (verifies correctness, not just speed)
 tests/compare/compare.sh -r 150 input.pdf
 ```
 
-To reproduce the GPU benchmarks, build with the full feature set:
+To time the GPU backends, build with the full feature set and pass
+`--backend cuda` (or `vaapi`, `vulkan`) to the same `hyperfine` command:
 
 ```bash
 CUDA_ARCH=sm_120 RUSTFLAGS="-C target-cpu=native" \
   cargo build --release -p rasterrocket-cli \
   --features "nvjpeg,nvjpeg2k,gpu-aa,gpu-icc"
-tests/bench_corpus.sh --backend cuda
 ```

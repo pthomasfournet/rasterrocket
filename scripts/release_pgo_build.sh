@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PGO + BOLT release build for pdf-raster.
+# PGO + BOLT release build of the rrocket CLI.
 #
 # Usage: ./scripts/release_pgo_build.sh
 #
@@ -9,13 +9,13 @@
 #       apt install bolt          # Ubuntu 24.04+
 #       or download a build from  https://github.com/llvm/llvm-project/releases
 #
-# Output: target/release/pdf-raster (PGO-optimised; BOLT applied on top if available).
+# Output: target/release/rrocket (PGO-optimised; BOLT applied on top if available).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-BINARY="./target/release/pdf-raster"
+BINARY="./target/release/rrocket"
 
 # --- Locate llvm-profdata. -----------------------------------------------------
 # rustup ships it under the toolchain sysroot when `llvm-tools-preview` is added.
@@ -50,7 +50,7 @@ trap cleanup EXIT
 
 echo "==> [1/4] Instrumented build (profile-generate)"
 echo "         PROFDIR=$PROFDIR"
-RUSTFLAGS="-Cprofile-generate=$PROFDIR" cargo build --release -p pdf-raster
+RUSTFLAGS="-Cprofile-generate=$PROFDIR" cargo build --release -p rasterrocket-cli
 
 echo "==> [2/4] Profile training: rendering 10 pages of $TRAINING_PDF"
 "$BINARY" "$TRAINING_PDF" "$TRAIN_OUT_PREFIX" -f 1 -l 10 >/dev/null
@@ -67,11 +67,11 @@ echo "==> [3/4] Merging PGO profile data ($PROFDIR -> merged.profdata)"
 
 echo "==> [4/4] PGO-guided rebuild (profile-use)"
 RUSTFLAGS="-Cprofile-use=$PROFDIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function" \
-    cargo build --release -p pdf-raster
+    cargo build --release -p rasterrocket-cli
 
 if command -v llvm-bolt >/dev/null 2>&1; then
     echo "==> [bonus] BOLT optimisation"
-    BOLT_BACKUP="$(mktemp -t pdf-raster.pre-bolt.XXXXXX)"
+    BOLT_BACKUP="$(mktemp -t rrocket.pre-bolt.XXXXXX)"
     cp "$BINARY" "$BOLT_BACKUP"
     if llvm-bolt "$BOLT_BACKUP" \
             -o "$BINARY" \
