@@ -13,11 +13,10 @@
 //! they don't carry the full colorant-mapping data (Lab whitepoint
 //! values, the ICC profile bytes, the full Separation tint function, etc.)
 //! — those are pulled lazily via the stored [`ObjectId`] when
-//! [`ColorSpace::convert_to_rgb`] actually runs.  Matrix/TRC ICC profiles
-//! are evaluated by `super::icc_shaper`, other ICC profiles transformed
-//! through `moxcms`; Separation and `DeviceN` tints flow through the
-//! function evaluator (`super::shading::function::eval_function_n`) into
-//! the alternate space; an `Indexed` value is looked up in its palette and
+//! [`ColorSpace::convert_to_rgb`] actually runs.  An ICC profile stream is
+//! compiled once per document into an `icc::IccConversion`; Separation
+//! and `DeviceN` tints flow through the compiled tint-transform function
+//! (`super::shading::function::Function`) into the alternate space; an `Indexed` value is looked up in its palette and
 //! converted through the base space.
 //!
 //! # PDF §8.6 mapping
@@ -58,8 +57,12 @@
 
 use pdf::{Document, Object, ObjectId};
 
-use super::icc_shaper::{conversion_for_profile, fetch_profile_bytes, srgb_encode};
+use super::icc_shaper::srgb_encode;
 use crate::resources::dict_ext::DictExt as _;
+
+mod icc;
+
+use icc::IccConversion;
 
 /// Maximum recursion depth for nested colour-space chains
 /// (Indexed/Pattern/Separation/DeviceN's `alternate` base). PDF spec
@@ -180,10 +183,10 @@ impl ColorSpace {
     /// - `Lab`: CIE Lab → D65 XYZ → sRGB through the standard formulae.
     ///   Whitepoint defaults to D65 (the spec's most common choice); the
     ///   per-document whitepoint stored in `dict_id` is not yet applied.
-    /// - `IccBased`: dereferences `stream_id`.  A gray or RGB matrix/TRC
-    ///   profile converts through the shared shaper tables of
-    ///   `super::icc_shaper`; any other 3- or 4-channel profile through a
-    ///   `moxcms` 8-bit transform to sRGB.  Any error (missing stream,
+    /// - `IccBased`: converts through the `icc::IccConversion` compiled
+    ///   from the profile stream `stream_id`: shaper tables for a gray or
+    ///   RGB matrix/TRC profile, otherwise a `moxcms` 8-bit transform of a
+    ///   3- or 4-channel profile to sRGB.  Any error (missing stream,
     ///   malformed profile, transform failure) and a non-shaper 1-channel
     ///   profile fall back to the device-space-by-N path.
     /// - `Indexed`: the index (rounded, clamped to `hival`) selects a
@@ -218,21 +221,10 @@ impl ColorSpace {
                 color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3])
             }
             Self::Lab { .. } => lab_to_srgb(comps[0], comps[1], comps[2]),
-            Self::IccBased { n, stream_id } => {
-                // A matrix/TRC profile goes through the shared shaper tables,
-                // as image samples in the same space do; any other profile
-                // through a `moxcms` transform; failure of both to the
-                // device space of the same channel count.
-                if let Some(bytes) = stream_id.and_then(|id| fetch_profile_bytes(doc, id)) {
-                    if let Some(rgb) = conversion_for_profile(&bytes).convert_components(comps) {
-                        return rgb;
-                    }
-                    if let Some(rgb) = icc_transform(&bytes, *n, comps) {
-                        return rgb;
-                    }
-                }
-                icc_fallback_by_n(*n, comps)
-            }
+            Self::IccBased { n, stream_id } => stream_id
+                .and_then(|id| IccConversion::load(doc, id, *n))
+                .and_then(|conv| conv.convert(comps))
+                .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
             Self::Indexed {
                 base,
                 hival,
@@ -315,53 +307,6 @@ fn lab_f_inv(t: f64) -> f64 {
 /// Expand a single grey byte into an opaque RGB triple `[v, v, v]`.
 const fn gray_byte_to_rgb(v: u8) -> [u8; 3] {
     [v, v, v]
-}
-
-/// Run a `moxcms` 8-bit transform from an embedded ICC profile to sRGB for a
-/// single 3- or 4-channel tint. Returns `None` and lets the caller fall back
-/// when:
-/// - the profile bytes don't parse as an ICC profile,
-/// - the channel count is unsupported by `moxcms`'s 8-bit `Layout` (Gray),
-/// - the transform construction or execution returns an error.
-///
-/// `n` is the profile's declared channel count from `/N`. `comps` is the
-/// normalised tint in [0, 1].
-fn icc_transform(icc_bytes: &[u8], n: u8, comps: &[f64]) -> Option<[u8; 3]> {
-    use moxcms::{ColorProfile, Layout, TransformOptions};
-    let layout = match n {
-        3 => Layout::Rgb,
-        4 => Layout::Rgba,
-        _ => return None, // Gray (n=1) or unsupported.
-    };
-    let src_profile = ColorProfile::new_from_slice(icc_bytes)
-        .map_err(|e| log::debug!("colorspace: ICC profile parse failed: {e}"))
-        .ok()?;
-    let dst_profile = ColorProfile::new_srgb();
-    let xform = src_profile
-        .create_transform_8bit(
-            layout,
-            &dst_profile,
-            Layout::Rgb,
-            TransformOptions::default(),
-        )
-        .map_err(|e| log::debug!("colorspace: ICC transform creation failed: {e}"))
-        .ok()?;
-    // Normalised f64 [0,1] → u8 [0,255]; one pixel = n bytes. Trailing
-    // channels past `comps.len()` are zero-padded (only reached when the
-    // upstream count check is bypassed by a future caller — paranoia).
-    let src_bytes: [u8; 4] = [
-        color::convert::gray_to_u8(comps[0]),
-        color::convert::gray_to_u8(comps.get(1).copied().unwrap_or(0.0)),
-        color::convert::gray_to_u8(comps.get(2).copied().unwrap_or(0.0)),
-        color::convert::gray_to_u8(comps.get(3).copied().unwrap_or(0.0)),
-    ];
-    let src_slice = &src_bytes[..usize::from(n)];
-    let mut dst = [0u8; 3];
-    xform
-        .transform(src_slice, &mut dst)
-        .map_err(|e| log::debug!("colorspace: ICC transform execution failed: {e}"))
-        .ok()?;
-    Some(dst)
 }
 
 /// Pass a Separation tint through the document's tint-transform function
