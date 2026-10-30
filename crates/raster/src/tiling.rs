@@ -124,16 +124,14 @@ impl Pattern for TiledPattern {
     }
 
     fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+        self.fill_span(y, x0, x1, out);
         let Some(plane) = &self.coverage else {
-            self.fill_span(y, x0, x1, out);
             coverage.fill(255);
             return;
         };
         let row = self.tile_row(y);
-        for ((x, px), c) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(coverage) {
-            let i = row + self.tile_col(x);
-            px.copy_from_slice(&self.pixels[i * 3..i * 3 + 3]);
-            *c = plane[i];
+        for (x, c) in (x0..=x1).zip(coverage) {
+            *c = plane[row + self.tile_col(x)];
         }
     }
 }

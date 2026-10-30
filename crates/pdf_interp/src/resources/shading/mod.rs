@@ -51,7 +51,7 @@ use raster::shading::radial::RadialPattern;
 use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
 use super::{read_matrix, resolve_dict};
-use crate::renderer::gstate::{ctm_multiply, invert_affine};
+use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{eval_function, eval_function_n, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, emit_triangle};
 use patch::{decode_type6_mesh, decode_type7_mesh};
@@ -438,8 +438,7 @@ fn resolve_function_based(
     let grid: Arc<[[u8; 3]]> = Arc::from(grid.into_boxed_slice());
 
     let pattern = FunctionPattern::new(move |px, py| {
-        let sx = inv[0].mul_add(px, inv[2] * py) + inv[4];
-        let sy = inv[1].mul_add(px, inv[3] * py) + inv[5];
+        let (sx, sy) = ctm_transform(&inv, px, py);
 
         // PDF §8.7.4.5.2: points outside the Domain are not painted.
         let tx = (sx - xd0) / (xd1 - xd0);
@@ -1086,10 +1085,7 @@ mod tests {
         let ctm = [2.0, 0.5, -1.0, 3.0, 7.0, 11.0];
         let inv = device_to_space(&ctm, 100.0).expect("invertible");
         let (dx, dy) = transform_point(&ctm, 4.0, -6.0, 100.0);
-        let back = (
-            inv[0].mul_add(dx, inv[2] * dy) + inv[4],
-            inv[1].mul_add(dx, inv[3] * dy) + inv[5],
-        );
+        let back = ctm_transform(&inv, dx, dy);
         assert!((back.0 - 4.0).abs() < 1e-9 && (back.1 + 6.0).abs() < 1e-9);
     }
 

@@ -121,10 +121,12 @@ impl AxisFilter {
             start: Vec::with_capacity(len),
             weights: vec![0; len * width],
         };
+        // A footprint's taps lie in `0 .. n`, so no window is wider than `n`.
+        let last_start = n - u32::try_from(width).expect("filter width is at most n");
         for (i, (&f, span)) in first.iter().zip(offset.windows(2)).enumerate() {
             // Shift the window left where it would run off the end; the
             // footprint's taps then sit `f - start` into it.
-            let start = f.min(n - u32::try_from(width).unwrap_or(n).min(n));
+            let start = f.min(last_start);
             let at = (f - start) as usize;
             filter.weights[i * width + at..][..span[1] - span[0]]
                 .copy_from_slice(&ragged[span[0]..span[1]]);
@@ -366,39 +368,40 @@ impl Plan {
         let (out_w, out_h) = (self.out_w as usize, self.out_h as usize);
         let out_row_len = out_w * bpp;
         let mut out = vec![0u8; out_row_len.checked_mul(out_h)?];
+        // `acc` holds the vertical pass's row carrying `frac` fraction bits.
         let mut acc = vec![0u32; row_len];
-        let mut mid = vec![0u32; row_len];
 
         for (oy, out_row) in out.chunks_exact_mut(out_row_len).enumerate() {
-            if let Some(rows) = &self.rows {
+            let frac = if let Some(rows) = &self.rows {
                 acc.fill(0);
                 let (first, weights) = rows.taps(oy);
                 for (j, &wt) in weights.iter().enumerate() {
-                    let row = &src[(first + j) * row_len..][..row_len];
-                    accumulate_row(&mut acc, row, wt);
-                }
-                match &self.cols {
-                    Some(cols) => {
-                        // Keep MID_BITS fraction bits for the second pass.
-                        let shift = WEIGHT_BITS - MID_BITS;
-                        for (m, &a) in mid.iter_mut().zip(&acc) {
-                            *m = (a + (1 << (shift - 1))) >> shift;
-                        }
-                        reduce_row(&mid, cols, bpp, out_row, MID_BITS + WEIGHT_BITS);
-                    }
-                    None => {
-                        for (o, &a) in out_row.iter_mut().zip(&acc) {
-                            *o = round_shift(a, WEIGHT_BITS);
-                        }
+                    if wt != 0 {
+                        accumulate_row(&mut acc, &src[(first + j) * row_len..][..row_len], wt);
                     }
                 }
+                WEIGHT_BITS
             } else {
-                let row = &src[oy * row_len..][..row_len];
-                for (m, &v) in mid.iter_mut().zip(row) {
-                    *m = u32::from(v);
+                for (a, &v) in acc.iter_mut().zip(&src[oy * row_len..][..row_len]) {
+                    *a = u32::from(v);
                 }
-                if let Some(cols) = &self.cols {
-                    reduce_row(&mid, cols, bpp, out_row, WEIGHT_BITS);
+                0
+            };
+            match &self.cols {
+                Some(cols) => {
+                    // At most MID_BITS fraction bits enter the second pass.
+                    let shift = frac.saturating_sub(MID_BITS);
+                    if shift > 0 {
+                        for a in &mut acc {
+                            *a = (*a + (1 << (shift - 1))) >> shift;
+                        }
+                    }
+                    reduce_row(&acc, cols, bpp, out_row, frac - shift + WEIGHT_BITS);
+                }
+                None => {
+                    for (o, &a) in out_row.iter_mut().zip(&acc) {
+                        *o = round_shift(a, frac);
+                    }
                 }
             }
         }

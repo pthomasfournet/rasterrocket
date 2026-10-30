@@ -86,6 +86,23 @@ fn painted(how: Use, entries: &str, data: &[u8]) -> Painted {
 /// [`painted`] with the stencil's `/BitsPerComponent` entry, in full-key
 /// form, given as `bpc` (empty to omit it).
 fn painted_with_bpc(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Painted {
+    let s = session(
+        assemble_pdf(&stencil_objects(how, bpc, entries, data)),
+        BackendPolicy::CpuOnly,
+    );
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    let row = &bmp.data()[8 * bmp.stride..];
+    let red = |x: usize| row[x * 3] > 200 && row[x * 3 + 1] < 60 && row[x * 3 + 2] < 60;
+    match (red(2), red(13)) {
+        (true, false) => Painted::Left,
+        (false, true) => Painted::Right,
+        other => panic!("stencil painted neither half alone: (left, right) = {other:?}"),
+    }
+}
+
+/// The objects of a one-page document painting the stencil described by
+/// `bpc`, `entries` and `data` as `how` says.
+fn stencil_objects(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Vec<Vec<u8>> {
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -140,15 +157,7 @@ fn painted_with_bpc(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Painted 
             objects.push(stream_object(&stencil_dict, data));
         }
     }
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let row = &bmp.data()[8 * bmp.stride..];
-    let red = |x: usize| row[x * 3] > 200 && row[x * 3 + 1] < 60 && row[x * 3 + 2] < 60;
-    match (red(2), red(13)) {
-        (true, false) => Painted::Left,
-        (false, true) => Painted::Right,
-        other => panic!("stencil painted neither half alone: (left, right) = {other:?}"),
-    }
+    objects
 }
 
 /// Every source of stencil samples, with the half its default decoding
@@ -237,26 +246,12 @@ fn stencil_without_bits_per_component_is_one_bit() {
 fn truncated_raw_stencil_leaves_missing_rows_unpainted() {
     for decode in ["", "/Decode [1 0]"] {
         // Only the top four of sixteen rows are present.
-        let objects = vec![
-            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
-                 /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
-            )
-            .into_bytes(),
-            stream_object(
-                "",
-                format!("1 0 0 rg q {SIDE} 0 0 {SIDE} 0 0 cm /Im0 Do Q").as_bytes(),
-            ),
-            stream_object(
-                &format!(
-                    "/Type /XObject /Subtype /Image /Width {SIDE} /Height {SIDE} \
-                     /ImageMask true /BitsPerComponent 1 {decode}"
-                ),
-                &RAW_LEFT_ONES[..8],
-            ),
-        ];
+        let objects = stencil_objects(
+            Use::XObject,
+            "/BitsPerComponent 1",
+            decode,
+            &RAW_LEFT_ONES[..8],
+        );
         let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
         let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
         let px = |x: usize, y: usize| &bmp.data()[y * bmp.stride + x * 3..][..3];

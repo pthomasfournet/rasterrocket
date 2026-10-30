@@ -18,7 +18,7 @@ use raster::xpath::XPath;
 use raster::{Bitmap, eo_fill, fill};
 
 use super::{DEVICE_MATRIX, PageRenderer};
-use crate::resources::ExtGStateParams;
+use crate::resources::ShadingPattern;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 
 /// Return `clip` intersected with the device-space quadrilateral `bbox`.
@@ -47,21 +47,25 @@ fn polygon(corners: &[(f64, f64)]) -> Path {
 }
 
 impl PageRenderer<'_> {
-    /// Run `paint`, which paints a shading pattern, with the pattern's
-    /// `ExtGState` in effect (PDF §8.7.3.3).
+    /// Run `paint`, which paints the shading of `pattern`, with the
+    /// pattern's `ExtGState` in effect (PDF §8.7.3.3).
     ///
     /// `paint` receives the compositing state for the non-stroking
-    /// (`stroke == false`) or stroking constant alpha and the blend mode.
-    /// The `ExtGState` applies on top of the current graphics state for the
-    /// duration of `paint` only; a soft mask it sets is resolved in pattern
-    /// space (`matrix`) and masks what `paint` paints.
+    /// (`stroke == false`) or stroking constant alpha and the blend mode,
+    /// and the shading.  The `ExtGState` applies on top of the current
+    /// graphics state for the duration of `paint` only; a soft mask it sets
+    /// is resolved in pattern space and masks what `paint` paints.
     pub(super) fn paint_shading_pattern<R>(
         &mut self,
-        ext_gstate: Option<&ExtGStateParams>,
-        matrix: &[f64; 6],
+        pattern: ShadingPattern,
         stroke: bool,
-        paint: impl FnOnce(&mut Self, &PipeState<'static>) -> R,
+        paint: impl FnOnce(&mut Self, &PipeState<'static>, ResolvedShading) -> R,
     ) -> R {
+        let ShadingPattern {
+            shading,
+            ext_gstate,
+            matrix,
+        } = pattern;
         let pipe_of = |r: &Self| {
             let gs = r.gstate.current();
             let alpha = if stroke {
@@ -73,16 +77,16 @@ impl PageRenderer<'_> {
         };
         let Some(ext) = ext_gstate else {
             let pipe = pipe_of(self);
-            return paint(self, &pipe);
+            return paint(self, &pipe, shading);
         };
         self.gstate.save();
-        let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, *matrix);
-        self.apply_ext_gstate(ext);
+        let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, matrix);
+        self.apply_ext_gstate(&ext);
         self.gstate.current_mut().ctm = ctm;
         let pipe = pipe_of(self);
         let result = match self.gstate.current_mut().soft_mask.take() {
-            Some(mask) => self.paint_through_soft_mask(&mask, |r| paint(r, &pipe)),
-            None => paint(self, &pipe),
+            Some(mask) => self.paint_through_soft_mask(&mask, |r| paint(r, &pipe, shading)),
+            None => paint(self, &pipe, shading),
         };
         self.gstate.restore();
         result
