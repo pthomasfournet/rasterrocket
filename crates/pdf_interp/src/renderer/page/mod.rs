@@ -241,8 +241,8 @@ fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
 
 /// Maximum nesting depth for Form `XObjects`.
 ///
-/// Prevents unbounded recursion from self-referencing or mutually-referencing
-/// form streams in malformed documents.
+/// A form never re-enters itself (see `PageRenderer::active_forms`), so this
+/// bounds the nesting of distinct forms.
 const MAX_FORM_DEPTH: u32 = 32;
 
 /// Maximum side, in device pixels, of the bitmap on which a sub-pixel
@@ -320,6 +320,9 @@ pub struct PageRenderer<'doc> {
     rotate_cw: u16,
     /// Current Form `XObject` nesting depth (0 = top-level page).
     form_depth: u32,
+    /// The form `XObject` streams being executed, outermost first.  A form
+    /// already on this stack is not entered again.
+    active_forms: Vec<ObjectId>,
     /// Current tiling-pattern nesting depth (0 = top-level page).  Spawned
     /// tile renderers carry this incremented; capped at `MAX_PATTERN_DEPTH`
     /// to break self-referential pattern cycles (see `resolve_fill_pattern`).
@@ -590,6 +593,7 @@ impl<'doc> PageRenderer<'doc> {
             font_cache,
             resources,
             form_depth: 0,
+            active_forms: Vec::new(),
             rotate_cw,
             pattern_depth: 0,
             pattern_ctm: initial_ctm,
@@ -1590,6 +1594,9 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// When the form carries a `Group /S /Transparency` entry, content is rendered
     /// into an intermediate group bitmap and composited back (PDF §11.6.6).
+    ///
+    /// A form invoked while it is already executing, directly or through
+    /// other forms, draws nothing.
     fn do_form_xobject(&mut self, form: &crate::resources::FormXObject) {
         if self.form_depth >= MAX_FORM_DEPTH {
             self.budget_exceeded = Some(format!(
@@ -1605,6 +1612,15 @@ impl<'doc> PageRenderer<'doc> {
         if self.budget_exceeded.is_some() {
             return;
         }
+        if self.active_forms.contains(&form.resources_id) {
+            log::warn!(
+                "rasterrocket-interp: Form XObject ({}, {}) invokes itself — recursive Do skipped",
+                form.resources_id.0,
+                form.resources_id.1
+            );
+            return;
+        }
+        self.active_forms.push(form.resources_id);
 
         // Capture the parent's compositing state before saving, so the group is
         // painted using the opacity/blend that was active when the form was invoked
@@ -1697,6 +1713,7 @@ impl<'doc> PageRenderer<'doc> {
         self.resources = parent_resources;
         self.pattern_ctm = parent_pattern_ctm;
         self.form_depth -= 1;
+        let _ = self.active_forms.pop();
         self.gstate.restore();
     }
 
