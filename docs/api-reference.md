@@ -257,6 +257,7 @@ Collected at zero extra cost during rendering.
 | `source_ppi_hint` | `Option<f32>` | Estimated native pixels-per-inch of the dominant image. Computed as `(image_width_px / page_width_pts) × 72`. `None` when no images were blitted. |
 | `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn. Each was skipped, so its region shows whatever was painted beneath. Empty on a complete render. Includes images inside tiling-pattern tiles. |
 | `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams). Each was skipped and the page drawn from the others, so whatever it held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
+| `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
 
 ```rust
 pub struct ImageFailure {
