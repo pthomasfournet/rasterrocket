@@ -45,7 +45,7 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-Vulkan covers the AA-fill and parallel-Huffman JPEG decode kernels (`vulkan` implies `gpu-jpeg-huffman`).  No `nvjpeg` / `cache` support today; under `--backend vulkan` the renderer runs uncached but JPEG decode goes through the GPU parallel-Huffman path (GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX today — dormant until threshold tuning).  The AA fill is dormant too (`GPU_AA_FILL_THRESHOLD = usize::MAX`): it is byte-identical to the CPU fill but slower end to end; `PDF_RASTER_AA_FILL_THRESHOLD=0` enables it.  Verified on RTX 5070; cross-vendor smoke (AMD-RADV, Intel-ANV, Apple Metal-via-MoltenVK) pending hardware.
+Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  No `nvjpeg` / `cache` support today; under `--backend vulkan` the renderer runs uncached.  Both kernels are dormant by default: the AA fill (`GPU_AA_FILL_THRESHOLD = usize::MAX`) is byte-identical to the CPU fill but slower end to end, and the Huffman decode (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) loses to the multi-threaded CPU decoder; `PDF_RASTER_AA_FILL_THRESHOLD=0` and `PDF_RASTER_HUFFMAN_THRESHOLD=0` enable them.  Runs on the RTX 5070 and on AMD RADV; Intel ANV and Apple (MoltenVK) are untested.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 
@@ -53,7 +53,7 @@ Vulkan covers the AA-fill and parallel-Huffman JPEG decode kernels (`vulkan` imp
 |---|---|---|
 | `vaapi` | AMD VCN (Raphael+), Intel UHD 630+, Intel Arc | `libva.so.2`, `libva-drm.so.2` |
 
-VA-API provides hardware JPEG baseline decode. CMYK and progressive JPEGs fall through to CPU. When both `nvjpeg` and `vaapi` are active, nvJPEG takes priority; VA-API fires as fallback.
+VA-API provides hardware JPEG baseline decode; CMYK and progressive JPEGs fall through to the CPU. It shares the nvJPEG size gate (`GPU_JPEG_THRESHOLD_PX`), which is `u32::MAX`, so in a default build JPEGs are decoded on the CPU even with `vaapi` enabled.
 
 All GPU features fall back to CPU automatically if initialisation fails — a message is logged but no error is returned.  Use `--backend cuda` / `--backend vulkan` / `--backend vaapi` to convert silent fallbacks into hard errors.
 
@@ -99,9 +99,13 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", feature
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
-Run `cargo add rasterrocket` to add the latest version. Pin to a specific version for reproducible builds.
+For reproducible builds pin the dependency to a release tag (`tag = "v1.5.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
 
 ## Quickstart
+
+`RasterOptions` and the other option types are `#[non_exhaustive]`: start from
+`RasterOptions::new(dpi)` or `RasterOptions::default()` and assign the fields
+you change.
 
 ```rust
 use std::path::Path;
@@ -124,7 +128,12 @@ for (page_num, result) in raster_pdf(Path::new("document.pdf"), &opts) {
 
 ## Tesseract integration
 
+The buffer maps directly onto Tesseract's raw-image input. With the
+[`leptess`](https://crates.io/crates/leptess) crate (see the wiki's OCR
+Integration page for the full pattern, including reusing one engine per thread):
+
 ```rust
+use std::path::Path;
 use rasterrocket::{RasterOptions, raster_pdf};
 
 let mut opts = RasterOptions::new(300.0);
@@ -135,20 +144,15 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
         Ok(p) => p,
         Err(e) => { eprintln!("page {page_num}: {e}"); continue; }
     };
-
-    let text = tesseract::ocr_from_frame(
-        &page.pixels,
-        page.width as i32,
-        page.height as i32,
-        1,                  // bytes_per_pixel — always 1 (grayscale)
-        page.width as i32,  // bytes_per_line — stride == width, no padding
-        "eng",
-    )?;
-
-    // IMPORTANT: always pass effective_dpi, not dpi.
-    // effective_dpi accounts for the PDF UserUnit field.
-    // Passing the wrong value degrades Tesseract recognition accuracy.
-    tesseract_handle.set_source_resolution(page.effective_dpi as i32);
+    // Hand Tesseract:
+    //   data            = &page.pixels
+    //   width, height   = page.width, page.height
+    //   bytes per pixel = 1 (8-bit grayscale)
+    //   bytes per line  = page.width (stride == width, no padding)
+    //   resolution      = page.effective_dpi
+    //
+    // Always pass effective_dpi, not dpi: it includes the page's UserUnit,
+    // and a wrong resolution degrades recognition.
 }
 ```
 
@@ -174,7 +178,7 @@ if page.diagnostics.has_images && !page.diagnostics.has_vector_text {
 Use `page.diagnostics.suggested_dpi(min, max)` to re-render at the document's native image resolution:
 
 ```rust
-let page = render_at_default_dpi()?;
+// `page` is a RenderedPage rendered with `opts`.
 if let Some(native_dpi) = page.diagnostics.suggested_dpi(150.0, 600.0) {
     if (native_dpi - opts.dpi).abs() > 10.0 {
         // Re-render at native resolution to avoid up/downsampling artefacts
@@ -187,6 +191,7 @@ if let Some(native_dpi) = page.diagnostics.suggested_dpi(150.0, 600.0) {
 For multi-document pipelines, use `render_channel` to render pages in the background while OCR processes the previous one:
 
 ```rust
+use std::path::Path;
 use rasterrocket::{RasterOptions, render_channel};
 
 let mut opts = RasterOptions::new(300.0);
@@ -209,18 +214,32 @@ for (page_num, result) in rx {
 Per-page errors do not abort the remaining pages. Handle them per-iteration:
 
 ```rust
-for (page_num, result) in raster_pdf(path, &opts) {
-    match result {
-        Ok(page) => process(page),
-        Err(rasterrocket::RasterError::PageTooLarge { width, height }) => {
-            eprintln!("page {page_num}: {width}×{height} exceeds limit — skipping");
+use std::path::Path;
+use rasterrocket::{RasterError, RasterOptions, RenderedPage, raster_pdf};
+
+fn render_all(path: &Path, opts: &RasterOptions, mut process: impl FnMut(RenderedPage)) -> Result<(), RasterError> {
+    for (page_num, result) in raster_pdf(path, opts) {
+        match result {
+            Ok(page) => process(page),
+            Err(RasterError::PageTooLarge { width, height }) => {
+                eprintln!("page {page_num}: {width}×{height} exceeds limit — skipping");
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e.into()),
     }
+    Ok(())
 }
 ```
 
-Document-open errors (bad path, corrupt PDF) are yielded as `(1, Err(...))` and the iterator ends immediately after.
+`RasterError` is `#[non_exhaustive]`, so a `match` on it always needs a catch-all arm.
+
+Document-open errors (bad path, corrupt PDF, an encrypted document without authorisation) are yielded as `(1, Err(...))` and the iterator ends immediately after.
+
+A page is rendered at most 32 768 pixels on a side and 600 MP in area
+(`MAX_PX_DIMENSION`, `MAX_PX_AREA`); a larger one is `PageTooLarge` or
+`PageAreaTooLarge`, and can be rendered in tiles through the session API below.
+Images have their own decode budget. See
+[Size limits](cli-reference.md#size-limits).
 
 An image that cannot be decoded or drawn does not fail its page. The image is
 skipped, the rest of the page renders, a warning names the page and image, and
@@ -235,14 +254,48 @@ if !page.diagnostics.image_failures.is_empty() {
 
 A `/Contents` stream that cannot be decoded is treated the same way: the page
 is drawn from its other content streams and the skipped one is listed in
-`page.diagnostics.content_failures`.
+`page.diagnostics.content_failures`. A stream or image whose data ends early
+(a truncated download, a corrupt filter) is drawn from what decoded and listed
+with `partial: true`.
 
 Set `RasterOptions::strict` to make such a page an `Err` instead, the
 behaviour before v1.5.0.
 
+## Page geometry, regions, non-square pixels and cancellation
+
+The session API opens a document once and renders pages on demand, from any
+number of threads. It returns RGB bitmaps; `rgb_to_gray` converts them.
+
+```rust
+use std::path::Path;
+use rasterrocket::{
+    CancelToken, RasterError, RenderParams, RenderRegion, SessionConfig, open_session,
+    render_page_rgb_with,
+};
+
+fn top_left_tile(path: &Path) -> Result<(), RasterError> {
+    let session = open_session(path, &SessionConfig::default())?;
+    let geometry = session.page_geometry(1)?; // size, rotation, UserUnit, boxes; no content parsed
+    let (sx, sy) = (600.0 / 72.0, 300.0 / 72.0); // 600 × 300 dpi: non-square pixels
+    let (width, height) = geometry.size_px(sx, sy);
+
+    let cancel = CancelToken::new(); // clone it to another thread and call cancel() there
+    let params = RenderParams::new_xy(sx, sy)
+        .with_region(RenderRegion::new(0, 0, width.min(4096), height.min(4096)))
+        .with_cancel(cancel.clone());
+    let tile = render_page_rgb_with(&session, 1, &params)?;
+    println!("{}×{} tile of a {width}×{height} page", tile.width, tile.height);
+    Ok(())
+}
+```
+
+A region holds exactly the pixels the whole-page render puts there, so tiles
+stitch into the whole page. A cancelled render returns `RasterError::Cancelled`
+before its next content-stream operator.
+
 ## Annotations, form fields and layers
 
-Annotations are drawn after the page content, in `/Annots` order, from their normal appearance stream (`/AP /N`). The annotation flags apply for the render purpose (`RasterOptions::purpose`, `--purpose`). Hidden annotations are never drawn. NoView annotations are omitted when viewing. When printing, only annotations flagged Print are drawn. An annotation, an XObject or a marked-content sequence whose optional content group (layer) is off in the document's default configuration is not drawn.
+Annotations are drawn after the page content, in `/Annots` order, from their normal appearance stream (`/AP /N`). Set `RasterOptions::annotations = false` (CLI: `--hide-annotations`) to render the page content alone. The annotation flags apply for the render purpose (`RasterOptions::purpose`, `--purpose`). Hidden annotations are never drawn. NoView annotations are omitted when viewing. When printing, only annotations flagged Print are drawn. An annotation, an XObject or a marked-content sequence whose optional content group (layer) is off in the document's default configuration is not drawn.
 
 An annotation without a normal appearance is drawn from its dictionary. Square, Circle, Line, PolyLine, Polygon, Ink, Highlight, Underline, StrikeOut, Squiggly and Text (note icon) annotations use their geometry and colours. Form field widgets of text, choice and check/radio fields show the field value, styled by `/DA`, `/MK` and the form's `/DR`. When the form sets `/NeedAppearances`, text and choice fields are always redrawn this way, because their stored appearance may not show the value. A filled form whose values live only in `/V` therefore renders with its values, which OCR then reads.
 
@@ -295,16 +348,21 @@ cargo build --release -p rasterrocket-cli
 # With all GPU features
 # Default CUDA_ARCH is sm_80 (Ampere); override to match your card.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
-  --features "rasterrocket/nvjpeg,rasterrocket/nvjpeg2k,rasterrocket/gpu-aa,rasterrocket/gpu-icc,rasterrocket/gpu-deskew,rasterrocket/cache"
+  --features "nvjpeg,nvjpeg2k,gpu-aa,gpu-icc,gpu-deskew,cache"
+
+# Vulkan backend (needs slangc from the LunarG SDK at build time)
+cargo build --release -p rasterrocket-cli --features vulkan
 ```
+
+The CLI crate forwards each of these feature names to the library.
 
 `CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
 
 The release binary lands at `target/release/rrocket`. There is no `cargo install`
 path — the crates.io packages are abandoned at 1.0.1.
 
-### A note on output destination (v0.6.0+)
+### A note on output destination
 
-The CLI defaults to writing rendered pages into a fresh `/dev/shm/rasterrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`). Disk writes were dominating wall time on JPEG-heavy workloads — ext4 `auto_da_alloc` rename serialisation parked all 24 render threads in `do_renameat2`. Path-like prefixes (anything containing `/` or starting with `.`) opt out and write where you asked. Pass `--no-ram` to force on-disk output even for bare stems, or `--ram-path <DIR>` to override the tmpfs location. A built-in spill policy automatically falls through to disk when MemAvailable drops below 1 GiB.
+The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits**; the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when MemAvailable drops below 1 GiB.
 
 See [cli-reference.md](cli-reference.md) for CLI usage.
