@@ -249,7 +249,7 @@ Flagged only when genuinely JavaScript (never on bare key presence — that woul
 - `/Catalog/AcroForm/AA` with a `/S /JavaScript` sub-action (a `/S /SubmitForm` AcroForm is not flagged)
 - page-level `/AA` and per-annotation/widget `/A`/`/AA` with a `/S /JavaScript` action (the calculate/format/validate JS of a fillable form lives here — the most common real-world placement)
 
-The page/annotation walk is bounded and stops at the first hit (one disclosure suffices): at most a few thousand pages and annotations are inspected, so a pathological multi-thousand-page document may not be fully scanned — an unbounded walk on a hostile input is the worse failure than a missed disclosure.
+The four catalog locations are checked when the document opens, with one warning per location. Opening reads no page objects, so page and annotation actions are checked as each page is rendered: the first rendered page that carries JavaScript produces one warning for the document, naming that page. A page that is never rendered is never inspected, and at most 8192 annotations are inspected per page.
 
 ### Encrypted PDFs
 

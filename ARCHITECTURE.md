@@ -425,7 +425,10 @@ the rayon pool drops — this avoids the CUDA driver teardown race at process ex
 - JavaScript — **not** an error. There is no JavaScript engine and `/JS` is never
   decoded, so a script's structural presence cannot change the static render.
   Detection is structural (`/S /JavaScript` only) and emits a loud `WARN` per
-  entry point; the document opens and renders normally. `InterpError` has no
+  entry point; the document opens and renders normally. The catalog entry
+  points are checked at open; page `/AA` and annotation `/A`/`/AA` are checked
+  per rendered page (`pdf_interp::page_has_javascript`), warned once per
+  session. `InterpError` has no
   `JavaScript` variant — the full list is `Pdf`, `PageOutOfRange`,
   `MissingResource`, `InvalidPageGeometry`, `PageBudget`.
 

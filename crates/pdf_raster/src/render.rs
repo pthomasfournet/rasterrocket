@@ -1,6 +1,7 @@
 //! Core render pipeline: PDF page → pixel buffer.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use color::Rgb8;
 use raster::Bitmap;
@@ -207,6 +208,9 @@ pub struct RasterSession {
     /// Fail a page on an image failure instead of skipping the image
     /// ([`crate::SessionConfig::strict`]).
     pub(crate) strict: bool,
+    /// Set once a rendered page has been found to carry JavaScript, so the
+    /// warning is emitted once per document.
+    pub(crate) javascript_warned: AtomicBool,
     /// VA-API DRM render node path. Retained in non-vaapi builds for forward
     /// compatibility; in vaapi builds the path is consumed during `open_session`
     /// to construct `vaapi_queue` and is not needed afterward.
@@ -516,6 +520,7 @@ fn open_session_with_doc(
         total_pages,
         policy: config.policy,
         strict: config.strict,
+        javascript_warned: AtomicBool::new(false),
         #[cfg(not(feature = "vaapi"))]
         vaapi_device,
         #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
@@ -730,6 +735,17 @@ fn render_page_rgb_with_geom(
     // Reject oversized pages before the bitmap is allocated, never after, via
     // the shared guard (per-side limit, then total-area limit computed in u64).
     crate::page::validate_dimensions(w_px, h_px)?;
+
+    if !session.javascript_warned.load(Ordering::Relaxed)
+        && pdf_interp::page_has_javascript(doc, page_id)
+        && !session.javascript_warned.swap(true, Ordering::Relaxed)
+    {
+        log::warn!(
+            "page {page_num}: document contains JavaScript (page or annotation actions); \
+             JavaScript is ignored — rasterrocket does not execute scripts, \
+             rendering static content only"
+        );
+    }
 
     let (ops, content_failures) = pdf_interp::parse_page_content_by_id(doc, page_id)?;
     if session.strict && !content_failures.is_empty() {

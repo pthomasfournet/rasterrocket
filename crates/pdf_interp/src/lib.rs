@@ -105,15 +105,10 @@ impl From<pdf::PdfError> for InterpError {
 /// - `/Catalog/AA` with a `/S /JavaScript` sub-action (vs. a transition/GoTo)
 /// - `/Catalog/Names/JavaScript` (the JS-specific name subtree)
 /// - `/Catalog/AcroForm/AA` with a `/S /JavaScript` sub-action
-/// - page-level `/AA` and per-annotation/widget `/A`/`/AA` with a
-///   `/S /JavaScript` action — the calculate/format/validate JS of a
-///   fillable form lives here, the most common real-world placement
 ///
-/// The page/annotation walk is bounded and stops at the first hit (one
-/// disclosure suffices): at most `MAX_JS_SCAN_PAGES` pages and
-/// `MAX_JS_SCAN_ANNOTS` annotations total are inspected, so a pathological
-/// multi-thousand-page document may not be fully scanned — an unbounded
-/// walk on a hostile input is the worse failure than a missed disclosure.
+/// Page-level and annotation JavaScript is not checked here: opening a
+/// document reads no page objects.  [`page_has_javascript`] checks one page
+/// when it is rendered.
 ///
 /// # Errors
 /// - [`InterpError::Pdf`] if the file cannot be read or is not a valid PDF.
@@ -201,7 +196,7 @@ fn warn_if_javascript(doc: &Document) {
 /// Return every JavaScript entry point present in the document catalog, in
 /// scan order.  Empty when the catalog is unreadable or carries no JS.
 ///
-/// Split out from [`warn_if_javascript`] so the five detection branches are
+/// Split out from [`warn_if_javascript`] so the four detection branches are
 /// unit-testable without capturing log output.
 fn javascript_locations(doc: &Document) -> Vec<&'static str> {
     let mut found = Vec::new();
@@ -250,97 +245,56 @@ fn javascript_locations(doc: &Document) -> Vec<&'static str> {
         found.push("/AcroForm/AA");
     }
 
-    // 5. Page-level /AA and per-annotation /A and /AA.  Form-field
-    //    calculate/format/validate JavaScript (an annotation's
-    //    /AA/{K,F,V}) is the single most common real-world placement, so a
-    //    catalog-only scan would silently miss the typical fillable PDF.
-    //    Bounded + first-hit (see [`page_or_annot_has_js`]): one warn fully
-    //    discloses presence, and an unbounded walk on a hostile multi-
-    //    thousand-page document is the worse failure than a missed flag.
-    if page_or_annot_has_js(doc) {
-        found.push("/Annots or page /AA");
-    }
-
     found
 }
 
-/// `DoS` bound: a pathological document could declare millions of pages or
-/// annotations purely to make this hot-path scan (run on EVERY `open()`,
-/// including the JS-free majority) walk forever.  Cap total pages and total
-/// annotations inspected across the whole scan; exceeding either cap stops
-/// the scan.  A missed disclosure on a hostile multi-thousand-page document
-/// is acceptable — an unbounded walk on `open()` is not.
-const MAX_JS_SCAN_PAGES: usize = 4096;
+/// Upper bound on the annotations [`page_has_javascript`] inspects on one
+/// page.
 const MAX_JS_SCAN_ANNOTS: usize = 8192;
 
-/// Return `true` as soon as any page-level `/AA`, or any annotation's `/A`
-/// or `/AA`, is a `/S /JavaScript` action.  Stops at the very first hit —
-/// one disclosure suffices — and is bounded by [`MAX_JS_SCAN_PAGES`] /
-/// [`MAX_JS_SCAN_ANNOTS`] so a pathological document cannot make the
-/// `open()` path walk unbounded.
+/// True when page `page_id` carries a JavaScript action.
 ///
-/// Purely structural: only `/S` subtype names are read (via
-/// [`action_is_js`] / [`aa_dict_has_js_action`]); no `/JS` script string is
-/// ever decoded, parsed, or evaluated.  A malformed page, `/Annots` entry,
-/// or annotation is silently skipped (never aborts the scan or `open()`).
-fn page_or_annot_has_js(doc: &Document) -> bool {
-    let mut annots_seen: usize = 0;
-
-    for (pages_seen, (_page_num, page_id)) in doc.get_pages().enumerate() {
-        if pages_seen >= MAX_JS_SCAN_PAGES || annots_seen >= MAX_JS_SCAN_ANNOTS {
-            return false;
-        }
-
-        // A malformed page must not abort the scan or the open: skip it.
-        let Ok(page) = doc.get_dict(page_id) else {
-            continue;
-        };
-
-        // Page-level additional actions (/AA).  Same /S discrimination as
-        // the catalog branches: a /S /GoTo or transition /AA is not JS.
-        if let Some(aa_obj) = page.get(b"AA")
-            && aa_dict_has_js_action(doc, aa_obj)
-        {
-            return true;
-        }
-
-        // /Annots is a direct array or an indirect ref to one (mirrors the
-        // resolution in renderer::page::annotations::render_annotations).
-        let annots: Vec<pdf::Object> = match page.get(b"Annots") {
-            Some(pdf::Object::Array(a)) => a.clone(),
-            Some(pdf::Object::Reference(id)) => doc
-                .get_object(*id)
-                .ok()
-                .and_then(|o| o.as_array().map(<[pdf::Object]>::to_vec))
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-
-        for annot_obj in &annots {
-            if annots_seen >= MAX_JS_SCAN_ANNOTS {
-                return false;
-            }
-            annots_seen += 1;
-
-            // Each /Annots entry is itself usually an indirect ref; resolve
-            // to its dict, then check /A (activation) and /AA (additional).
-            let Some(annot) = resources::resolve_dict(doc, annot_obj) else {
-                continue;
-            };
-            if let Some(a_obj) = annot.get(b"A")
-                && action_is_js(doc, a_obj)
-            {
-                return true;
-            }
-            if let Some(aa_obj) = annot.get(b"AA")
-                && aa_dict_has_js_action(doc, aa_obj)
-            {
-                return true;
-            }
-        }
+/// The actions inspected are the page-level `/AA` entry and each
+/// annotation's `/A` and `/AA` entries; one whose `/S` is `/JavaScript`
+/// (ISO 32000-2 §12.6.3–§12.6.4.17) counts.  The calculate, format and
+/// validate scripts of a fillable form are annotation `/AA` entries.
+///
+/// Only `/S` names are read; no script is decoded.  An unreadable page or
+/// annotation counts as carrying none, and at most [`MAX_JS_SCAN_ANNOTS`]
+/// annotations are inspected.
+#[must_use]
+pub fn page_has_javascript(doc: &Document, page_id: pdf::ObjectId) -> bool {
+    let Ok(page) = doc.get_dict_arc(page_id) else {
+        return false;
+    };
+    let Some(page) = page.as_dict() else {
+        return false;
+    };
+    if page
+        .get(b"AA")
+        .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
+    {
+        return true;
     }
-
-    false
+    let any_js = |annots: &[pdf::Object]| {
+        annots.iter().take(MAX_JS_SCAN_ANNOTS).any(|annot| {
+            resources::resolve_dict(doc, annot).is_some_and(|annot| {
+                annot.get(b"A").is_some_and(|a| action_is_js(doc, a))
+                    || annot
+                        .get(b"AA")
+                        .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
+            })
+        })
+    };
+    match page.get(b"Annots") {
+        Some(pdf::Object::Array(annots)) => any_js(annots),
+        Some(pdf::Object::Reference(id)) => doc
+            .get_object(*id)
+            .ok()
+            .and_then(|o| o.as_array().map(any_js))
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Return `true` if `obj` (or the dict it resolves to) has `/S /JavaScript`.
@@ -740,7 +694,7 @@ pub fn parse_page_content_by_id(
 #[cfg(test)]
 mod js_guard_tests {
     use super::test_helpers::make_doc;
-    use super::{javascript_locations, warn_if_javascript};
+    use super::{javascript_locations, page_has_javascript, warn_if_javascript};
 
     #[test]
     fn open_action_javascript_is_warned_not_rejected() {
@@ -839,7 +793,10 @@ mod js_guard_tests {
         );
     }
 
-    use pdf::Document;
+    use pdf::{Document, ObjectId};
+
+    /// The page leaf of [`make_page_annot_doc`].
+    const PAGE: ObjectId = (3, 0);
 
     /// Build a one-page PDF whose Page leaf (object 3) carries the verbatim
     /// `page_extra` dict text, with an annotation (object 4) carrying the
@@ -882,8 +839,8 @@ mod js_guard_tests {
     fn page_aa_javascript_is_detected() {
         // JS only on a page-level /AA/O open action — nothing in the catalog.
         let doc = make_page_annot_doc(" /AA <</O <</S /JavaScript>>>>", "<<>>");
-        assert_eq!(javascript_locations(&doc), vec!["/Annots or page /AA"]);
-        warn_if_javascript(&doc); // must not panic
+        assert!(page_has_javascript(&doc, PAGE));
+        assert!(javascript_locations(&doc).is_empty(), "open reads no page");
     }
 
     #[test]
@@ -894,16 +851,14 @@ mod js_guard_tests {
             "",
             "<</Type /Annot /Subtype /Widget /AA <</K <</S /JavaScript>>>>>>",
         );
-        assert_eq!(javascript_locations(&doc), vec!["/Annots or page /AA"]);
-        warn_if_javascript(&doc); // must not panic
+        assert!(page_has_javascript(&doc, PAGE));
     }
 
     #[test]
     fn annotation_a_javascript_is_detected() {
         // JS only on an annotation's /A activation action.
         let doc = make_page_annot_doc("", "<</Type /Annot /Subtype /Link /A <</S /JavaScript>>>>");
-        assert_eq!(javascript_locations(&doc), vec!["/Annots or page /AA"]);
-        warn_if_javascript(&doc); // must not panic
+        assert!(page_has_javascript(&doc, PAGE));
     }
 
     #[test]
@@ -915,7 +870,7 @@ mod js_guard_tests {
             "<</Type /Annot /Subtype /Link /A <</S /URI /URI (https://example/x)>>>>",
         );
         assert!(
-            javascript_locations(&doc).is_empty(),
+            !page_has_javascript(&doc, PAGE),
             "non-JS page /AA and annotation /A must not be flagged as JavaScript"
         );
     }
