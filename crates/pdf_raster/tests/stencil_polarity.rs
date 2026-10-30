@@ -3,7 +3,8 @@
 //! §8.9.6.2).  The same holds for every way a stencil reaches the
 //! renderer — an image `XObject` or an inline image, raw or through a
 //! transport filter or a bilevel codec — and for an explicit `/Mask`
-//! stencil, which shows its base image where it would paint.
+//! stencil, which shows its base image where it would paint.  The same
+//! sources drawn as one-bit `/Indexed` images show their palette entries.
 
 #[expect(
     dead_code,
@@ -287,5 +288,46 @@ fn truncated_raw_stencil_leaves_missing_rows_unpainted() {
                 );
             }
         }
+    }
+}
+
+/// A one-bit image in an `/Indexed` space shows palette entry 0 where its
+/// decoded sample is 0 and entry 1 where it is 1, whichever source decodes
+/// the samples, bilevel codecs included (§8.6.6.3).
+#[test]
+fn indexed_bilevel_images_show_their_palette() {
+    const RED: [u8; 3] = [255, 0, 0];
+    const BLUE: [u8; 3] = [0, 0, 255];
+    for (name, entries, data, zero_half) in sources() {
+        let objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
+                 /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
+            )
+            .into_bytes(),
+            stream_object(
+                "",
+                format!("q {SIDE} 0 0 {SIDE} 0 0 cm /Im0 Do Q").as_bytes(),
+            ),
+            stream_object(
+                &format!(
+                    "/Type /XObject /Subtype /Image /Width {SIDE} /Height {SIDE} \
+                     /ColorSpace [/Indexed /DeviceRGB 1 <FF00000000FF>] \
+                     /BitsPerComponent 1 {entries}"
+                ),
+                &data,
+            ),
+        ];
+        let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+        let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+        let row = &bmp.data()[8 * bmp.stride..];
+        let at = |x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
+        let (left, right) = match zero_half {
+            Painted::Left => (RED, BLUE),
+            Painted::Right => (BLUE, RED),
+        };
+        assert_eq!((at(2), at(13)), (left, right), "{name}");
     }
 }
