@@ -36,6 +36,13 @@ pub enum Token<'a> {
     },
 }
 
+/// Maximum array/dictionary nesting depth read as structure.
+///
+/// An opener at this depth yields an empty container and its contents are
+/// read as elements of the enclosing container, so recursion depth (and stack
+/// use) is bounded by this constant regardless of input.
+const MAX_NESTING: usize = 256;
+
 /// Iterates over tokens in a PDF content stream byte slice.
 ///
 /// The tokenizer borrows its source slice for its lifetime; zero-copy for
@@ -43,13 +50,19 @@ pub enum Token<'a> {
 pub struct Tokenizer<'a> {
     src: &'a [u8],
     pos: usize,
+    /// Number of arrays and dictionaries currently open.
+    depth: usize,
 }
 
 impl<'a> Tokenizer<'a> {
     /// Create a tokenizer over `src`.
     #[must_use]
     pub const fn new(src: &'a [u8]) -> Self {
-        Self { src, pos: 0 }
+        Self {
+            src,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn remaining(&self) -> &'a [u8] {
@@ -391,10 +404,26 @@ impl<'a> Tokenizer<'a> {
                 b'/' => return Some(Token::Name(self.read_name())),
                 b'(' => return Some(Token::String(self.read_literal_string())),
                 b'<' if self.src.get(self.pos + 1) == Some(&b'<') => {
-                    return Some(Token::Dict(self.read_dict()));
+                    if self.depth >= MAX_NESTING {
+                        self.pos += 2;
+                        return Some(Token::Dict(Vec::new()));
+                    }
+                    self.depth += 1;
+                    let items = self.read_dict();
+                    self.depth -= 1;
+                    return Some(Token::Dict(items));
                 }
                 b'<' => return Some(Token::String(self.read_hex_string())),
-                b'[' => return Some(Token::Array(self.read_array())),
+                b'[' => {
+                    if self.depth >= MAX_NESTING {
+                        self.advance();
+                        return Some(Token::Array(Vec::new()));
+                    }
+                    self.depth += 1;
+                    let items = self.read_array();
+                    self.depth -= 1;
+                    return Some(Token::Array(items));
+                }
                 b']' => {
                     // Stray closing bracket — skip and re-scan on the next
                     // loop iteration. Looping (not recursing) keeps a stream of
@@ -757,5 +786,53 @@ mod tests {
             .join()
             .expect("tokenizer must not overflow the stack on stray delimiters");
         assert_eq!(n, 0, "all stray `>` are skipped, yielding no tokens");
+    }
+
+    /// Nesting depth of `tok` (a non-container token is depth 0).
+    fn nesting_depth(tok: &Token<'_>) -> usize {
+        match tok {
+            Token::Array(items) | Token::Dict(items) => {
+                1 + items.iter().map(nesting_depth).max().unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// A million unclosed `[` or `<<` must not recurse once per opener: past
+    /// `MAX_NESTING` an opener yields an empty container, so the tokenizer
+    /// finishes on a 2 MiB stack.
+    #[test]
+    fn unbounded_nesting_does_not_overflow_the_stack() {
+        for opener in [&b"["[..], &b"<<"[..]] {
+            let mut src = opener.repeat(1_000_000);
+            src.extend_from_slice(b" 0 g");
+            let handle = std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || {
+                    let toks: Vec<Token<'_>> = Tokenizer::new(&src).collect();
+                    toks.iter().map(nesting_depth).max().unwrap_or(0)
+                })
+                .expect("spawn tokenizer thread");
+            let depth = handle
+                .join()
+                .expect("tokenizer must not overflow the stack on deep nesting");
+            assert_eq!(
+                depth,
+                MAX_NESTING + 1,
+                "openers past the cap yield empty containers"
+            );
+        }
+    }
+
+    /// Nesting up to `MAX_NESTING` levels is read as structure, and the
+    /// tokens after a balanced over-deep run are unaffected.
+    #[test]
+    fn nesting_at_the_cap_is_preserved() {
+        let mut src = b"[".repeat(MAX_NESTING);
+        src.extend_from_slice(&b"]".repeat(MAX_NESTING));
+        src.extend_from_slice(b" 1 g");
+        let toks = tokens(&src);
+        assert_eq!(nesting_depth(&toks[0]), MAX_NESTING);
+        assert_eq!(&toks[1..], &[Token::Number(1.0), Token::Op(b"g")]);
     }
 }
