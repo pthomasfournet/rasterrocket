@@ -6,7 +6,6 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
-homepage.workspace   = true
 readme.workspace     = true
 description          = "Pixel types and colour math for the rasterrocket PDF renderer"
 keywords             = ["pdf", "color", "pixel", "raster", "image"]

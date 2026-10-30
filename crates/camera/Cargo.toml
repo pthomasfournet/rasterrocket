@@ -7,7 +7,6 @@ rust-version         = "1.98"
 authors.workspace    = true
 license              = "MIT"
 repository.workspace = true
-homepage.workspace   = true
 readme.workspace     = true
 description          = "Camera-capture page cleanup on 8-bit grayscale images: page crop, perspective rectification, spread splitting and dewarp"
 keywords             = ["camera", "scan", "perspective", "dewarp", "book"]

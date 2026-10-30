@@ -6,7 +6,6 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
-homepage.workspace   = true
 readme.workspace     = true
 description          = "Software rasterizer — path fill, compositing, and AVX-512/AVX2/NEON SIMD for the rasterrocket PDF renderer"
 keywords             = ["pdf", "raster", "simd", "renderer", "avx512"]

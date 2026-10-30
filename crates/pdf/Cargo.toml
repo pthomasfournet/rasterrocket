@@ -6,7 +6,6 @@ edition.workspace     = true
 authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
-homepage.workspace    = true
 readme.workspace      = true
 description = "Lazy, zero-copy PDF file parser for the rasterrocket render pipeline"
 keywords    = ["pdf", "parser", "mmap", "zero-copy", "document"]

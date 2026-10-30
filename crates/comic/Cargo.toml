@@ -6,7 +6,6 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
-homepage.workspace   = true
 readme.workspace     = true
 description          = "Comic-archive (.cbz/.cb7/.cbt) image input for the rasterrocket OCR pipeline"
 keywords             = ["cbz", "comic", "ocr", "image", "archive"]

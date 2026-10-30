@@ -6,7 +6,6 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
-homepage.workspace   = true
 readme.workspace     = true
 description          = "Font program parsing, glyph rasterisation and glyph cache for the rasterrocket PDF renderer"
 keywords             = ["pdf", "font", "glyph", "truetype", "renderer"]
