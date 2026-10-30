@@ -410,8 +410,12 @@ impl Document {
                         detail: "expected Stream for ObjStm container".into(),
                     });
                 };
+                // An object the container does not hold, or holds in an
+                // unparseable form, may still have an uncompressed body in
+                // the file.
                 self.objstm
-                    .get_or_parse(container, index, &stream.content, &stream.dict)
+                    .get_or_parse(container, index, id.0, &stream.content, &stream.dict)
+                    .or_else(|e| self.recover_direct(id.0, None).ok_or(e))
             }
             // A referenced object the xref has released: its body, when the
             // update that freed it left one in the file, is found by the
