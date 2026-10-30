@@ -1166,15 +1166,30 @@ impl<'doc> PageRenderer<'doc> {
     /// work and a sequence of expensive pattern fills would never trip the
     /// page budget.  A budget breach inside the child is propagated verbatim
     /// so the outer `execute()` bails loudly on its next iteration.
+    ///
+    /// A cell is rasterised once per phase and tint, so an image failure or
+    /// a missing font it reports is folded once, however many rasters the
+    /// page renders.  Whether images or text were drawn carries over; the
+    /// cell's filter counts and PPI hint do not, being measured in the
+    /// cell's pixels rather than the page's.
     pub(super) fn fold_child_into(&self, parent: &mut Self) {
         parent.ops_executed = parent.ops_executed.saturating_add(self.ops_executed);
         if parent.budget_exceeded.is_none() && self.budget_exceeded.is_some() {
             parent.budget_exceeded.clone_from(&self.budget_exceeded);
         }
-        parent
-            .diag
-            .image_failures
-            .extend(self.diag.image_failures.iter().cloned());
+        let diag = &mut parent.diag;
+        for failure in &self.diag.image_failures {
+            if !diag.image_failures.contains(failure) {
+                diag.image_failures.push(failure.clone());
+            }
+        }
+        for font in &self.diag.missing_fonts {
+            if !diag.missing_fonts.contains(font) {
+                diag.missing_fonts.push(font.clone());
+            }
+        }
+        diag.has_images |= self.diag.has_images;
+        diag.has_vector_text |= self.diag.has_vector_text;
     }
 
     /// Override the operator-count budget.  Test-only — used to trigger the
@@ -3402,10 +3417,11 @@ mod tests {
     /// parent's *remaining* allowance + exact deadline (and inherits an
     /// already-tripped breach), and `fold_child_into` rolls the child's
     /// consumption and any breach back into the parent.
-    /// An image skipped inside a child renderer (a tiling-pattern tile) is
-    /// reported on the page that owns the tile.
+    /// An image skipped or a font missing inside a child renderer (a
+    /// tiling-pattern cell) is reported on the page that owns the cell, once
+    /// however many times the cell is rasterised.
     #[test]
-    fn child_image_failures_fold_into_parent() {
+    fn child_diagnostics_fold_into_parent_once() {
         use crate::test_helpers::empty_doc;
 
         let doc = empty_doc();
@@ -3413,12 +3429,14 @@ mod tests {
         parent.record_image_failure(Some("Im0".to_owned()), "parent".to_owned());
         let mut child = PageRenderer::new(1, 1, &doc, (1, 0));
         child.record_image_failure(None, "child".to_owned());
+        child.record_missing_font(b"F9");
+        child.diag.has_images = true;
 
         child.fold_child_into(&mut parent);
+        child.fold_child_into(&mut parent);
 
-        let reasons: Vec<_> = parent
-            .finish()
-            .1
+        let diag = parent.finish().1;
+        let reasons: Vec<_> = diag
             .image_failures
             .into_iter()
             .map(|f| (f.name, f.reason))
@@ -3430,6 +3448,8 @@ mod tests {
                 (None, "child".to_owned())
             ]
         );
+        assert_eq!(diag.missing_fonts, ["F9"]);
+        assert!(diag.has_images);
     }
 
     #[test]
