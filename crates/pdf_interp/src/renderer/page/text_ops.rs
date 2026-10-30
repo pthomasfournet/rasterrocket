@@ -4,6 +4,7 @@
 //! and the `TJ` kerning offsets in the operator dispatch.
 
 use crate::renderer::gstate::ctm_transform;
+use font::key::FRACTION;
 
 // ── Glyph record ──────────────────────────────────────────────────────────────
 
@@ -87,7 +88,7 @@ pub(super) fn text_to_device(
     tx: f64,
     ty: f64,
     page_h: u32,
-) -> (i32, i32) {
+) -> (f64, f64) {
     // Apply text matrix: user_space = Tm * (tx, ty).
     let [a, b, c, d, e, f] = *tm;
     let ux = a.mul_add(tx, c * ty) + e;
@@ -97,11 +98,26 @@ pub(super) fn text_to_device(
     let (dx, dy) = ctm_transform(ctm, ux, uy);
 
     // y-flip.
-    let dy_flipped = f64::from(page_h) - dy;
+    (dx, f64::from(page_h) - dy)
+}
 
+/// Where a glyph bitmap goes for the exact device pen position `(dx, dy)`:
+/// the pixel column at or left of `dx`, the quarter-pixel fraction in
+/// `[0, FRACTION)` the bitmap is rendered shifted right by, and the pixel
+/// row nearest `dy`.  Glyphs are placed to a quarter pixel horizontally
+/// and to whole pixels vertically, so a run keeps its spacing on the
+/// baseline it shares.
+pub(super) fn glyph_placement(dx: f64, dy: f64) -> (i32, u8, i32) {
+    let column = dx.floor();
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "device pixels are always in [0, page_h|w]; round() output fits i32 for any real page"
+        clippy::cast_sign_loss,
+        reason = "device coordinates of a page fit i32; the fraction is in [0, FRACTION)"
     )]
-    (dx.round() as i32, dy_flipped.round() as i32)
+    let placement = (
+        column as i32,
+        ((dx - column) * f64::from(FRACTION)) as u8,
+        dy.round() as i32,
+    );
+    placement
 }

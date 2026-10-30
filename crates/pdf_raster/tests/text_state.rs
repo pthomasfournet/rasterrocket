@@ -46,6 +46,43 @@ fn ink_span(font: &str, extra: &[Vec<u8>], content: &str) -> (usize, usize) {
     (left, right - left)
 }
 
+/// The coverage-weighted mean column of the ink `content` paints, as
+/// [`ink_span`] renders it.
+fn ink_centroid_x(font: &str, extra: &[Vec<u8>], content: &str) -> f64 {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 160 32] \
+          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", content.as_bytes()),
+        font.as_bytes().to_vec(),
+    ];
+    objects.extend_from_slice(extra);
+    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    let width = bmp.width as usize;
+    let (mut weighted, mut total) = (0.0, 0.0);
+    for (i, px) in bmp.data().chunks(3).enumerate() {
+        let coverage = f64::from(255 - px[0]);
+        weighted += coverage * (i % width) as f64;
+        total += coverage;
+    }
+    weighted / total
+}
+
+/// Glyphs are placed to a quarter pixel horizontally: a run started at
+/// x = 8.25 sits a quarter pixel right of one at x = 8, and one at 8.5
+/// half a pixel right, rather than snapping to the same column.
+#[test]
+fn glyphs_are_placed_to_a_quarter_pixel() {
+    let (font, extra) = simple_ahem();
+    let at = |x: &str| ink_centroid_x(&font, &extra, &format!("BT /F1 16 Tf {x} 8 Td (A) Tj ET"));
+    let (c0, c1, c2) = (at("8"), at("8.25"), at("8.5"));
+    assert!((c1 - c0 - 0.25).abs() < 0.1, "{c0} {c1}");
+    assert!((c2 - c0 - 0.5).abs() < 0.1, "{c0} {c2}");
+}
+
 /// A simple Ahem of `subtype`, its program under `FontFile2`: objects 6
 /// (descriptor) and 7 (program).
 fn simple_ahem_as(subtype: &str) -> (String, Vec<Vec<u8>>) {

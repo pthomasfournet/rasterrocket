@@ -6,7 +6,8 @@ use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
 use super::pixel_rect::PixelRect;
 use super::text_ops::{
-    GlyphRecord, fit_to_advance, glyph_advance, text_to_device, translate_text_x, translate_text_y,
+    GlyphRecord, fit_to_advance, glyph_advance, glyph_placement, text_to_device, translate_text_x,
+    translate_text_y,
 };
 use crate::resources::cmap::DecodedCode;
 use color::Rgb8;
@@ -196,8 +197,9 @@ impl PageRenderer<'_> {
             // Shared helper: push a rasterized glyph into `records` (when
             // filling) and append its outline to `stroke_outline` (when
             // stroking) and `clip_outline` (when clipping); a face too large
-            // for glyph bitmaps fills through `fill_paths`.  `x_scale`
-            // condenses the glyph to the document's advance.
+            // for glyph bitmaps fills through `fill_paths`.  `(dx, dy)` is
+            // the exact device pen position; `x_scale` condenses the glyph
+            // to the document's advance.
             //
             // `gid` is the resolved glyph index.  `char_code_for_path` is the
             // raw character code.  `by_gid` selects which one the face is
@@ -216,8 +218,8 @@ impl PageRenderer<'_> {
             let mut push_glyph = |char_code_for_path: u32,
                                   gid: u32,
                                   by_gid: bool,
-                                  pen_x: i32,
-                                  pen_y: i32,
+                                  dx: f64,
+                                  dy: f64,
                                   x_scale: f64| {
                 // A substitute's `.notdef` is never the document's
                 // glyph: a code it cannot draw leaves a gap.
@@ -229,11 +231,12 @@ impl PageRenderer<'_> {
                 if face.substitute && notdef {
                     return;
                 }
+                let (pen_x, x_frac, pen_y) = glyph_placement(dx, dy);
                 let bmp = if fill_as_bitmap {
                     if by_gid {
-                        face.make_glyph_by_gid_cached_fitted(glyph_cache, gid, 0, x_scale)
+                        face.make_glyph_by_gid_cached_fitted(glyph_cache, gid, x_frac, x_scale)
                     } else {
-                        face.make_glyph_cached_fitted(glyph_cache, gid, 0, x_scale)
+                        face.make_glyph_cached_fitted(glyph_cache, gid, x_frac, x_scale)
                     }
                 } else {
                     None
@@ -250,8 +253,8 @@ impl PageRenderer<'_> {
                 }
                 // The glyph outline in device space.  `glyph_path`
                 // returns pixels relative to the pen position with Trm
-                // applied, y up; translate by (pen_x, pen_y) and flip y
-                // (device y is positive-down).
+                // applied, y up; translate by the exact x and the bitmap's
+                // row and flip y (device y is positive-down).
                 let outline = if by_gid {
                     face.glyph_path_by_gid_fitted(gid, x_scale)
                 } else {
@@ -260,10 +263,9 @@ impl PageRenderer<'_> {
                 let Some(mut path) = outline else {
                     return;
                 };
-                let px = f64::from(pen_x);
                 let py = f64::from(pen_y);
                 for pt in &mut path.pts {
-                    pt.x += px;
+                    pt.x += dx;
                     pt.y = py - pt.y;
                 }
                 if do_clip {
@@ -309,7 +311,7 @@ impl PageRenderer<'_> {
                     // sits at the pen: its horizontal origin is displaced
                     // by the position vector −v, in glyph units scaled by
                     // the font size (PDF §9.7.4.3).
-                    let (pen_x, pen_y) = if enc.vertical {
+                    let (dx, dy) = if enc.vertical {
                         let v = enc.vertical_metrics_for_cid(cid);
                         let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
                         let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
@@ -318,7 +320,7 @@ impl PageRenderer<'_> {
                         let tx = centre / 1000.0 * font_size * horiz_scaling;
                         text_to_device(&ctm, &tm, tx, rise, self.height)
                     };
-                    push_glyph(cid, gid, by_gid, pen_x, pen_y, x_scale);
+                    push_glyph(cid, gid, by_gid, dx, dy, x_scale);
 
                     // The advance (PDF §9.4.4): horizontally
                     // `(w0 × Tfs + Tc + Tw) × Th`; vertically
@@ -364,8 +366,8 @@ impl PageRenderer<'_> {
                         _ => (1.0, 0.0),
                     };
                     let tx = centre / 1000.0 * font_size * horiz_scaling;
-                    let (pen_x, pen_y) = text_to_device(&ctm, &tm, tx, rise, self.height);
-                    push_glyph(code, code, false, pen_x, pen_y, x_scale);
+                    let (dx, dy) = text_to_device(&ctm, &tm, tx, rise, self.height);
+                    push_glyph(code, code, false, dx, dy, x_scale);
 
                     // PDF §9.4.4: pen advances even for missing/invisible glyphs.
                     let advance_glyph = pdf_width.map_or_else(
