@@ -73,6 +73,24 @@ fn corrupt_image_is_skipped_and_reported() {
     );
 }
 
+/// The image's name appears once in the reported failure: the reason holds
+/// only what went wrong, and the display prefixes the name.
+#[test]
+fn failure_names_the_image_once() {
+    let pdf = page_with_corrupt_image("q 10 0 0 10 0 0 cm /Im9 Do Q");
+    let page = render(pdf, false).expect("page renders");
+    let failures = &page.diagnostics.image_failures;
+    let missing = failures
+        .iter()
+        .find(|f| f.name.as_deref() == Some("Im9"))
+        .unwrap_or_else(|| panic!("/Im9 reported: {failures:?}"));
+    assert_eq!(missing.reason, "not found in the /XObject resources");
+    assert_eq!(
+        missing.to_string(),
+        "image /Im9: not found in the /XObject resources"
+    );
+}
+
 #[test]
 fn content_after_a_skipped_image_still_renders() {
     let page = render(page_with_corrupt_image("0 g 80 0 20 20 re f"), false).expect("page renders");

@@ -201,7 +201,8 @@ pub enum ImageResolution {
     /// Image decoded successfully.
     Ok(DecodedImage),
     /// The codec returned `None` or the stream was structurally invalid.  The
-    /// page is incomplete; the message should be surfaced to the caller.
+    /// page is incomplete; the message should be surfaced to the caller.  It
+    /// states the reason only: the caller knows the image's name.
     DecodeFailed(String),
     /// The image has no raster appearance: the named `XObject` is of a
     /// non-image subtype (e.g. `/PS`), or the image's colour space paints
@@ -453,9 +454,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     let doc = ctx.doc;
     let name = request.name;
     let unresolved = |what: &str| {
-        let msg = format!("XObject /{}: {what}", String::from_utf8_lossy(name));
-        log::warn!("image: {msg}");
-        ImageResolution::DecodeFailed(msg)
+        log::warn!("image: /{}: {what}", String::from_utf8_lossy(name));
+        ImageResolution::DecodeFailed(what.to_owned())
     };
     let Some(entry) = xobjects.get(name) else {
         return unresolved("not found in the /XObject resources");
@@ -486,11 +486,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         return unresolved("image has no /Height");
     };
     let Some((w, h)) = validated_dims(w_raw, h_raw) else {
-        log::warn!("image: degenerate dimensions {w_raw}×{h_raw}, skipping");
-        return ImageResolution::DecodeFailed(format!(
-            "image /{}: invalid dimensions {w_raw}×{h_raw}",
-            String::from_utf8_lossy(name)
-        ));
+        return unresolved(&format!("invalid dimensions {w_raw}×{h_raw}"));
     };
 
     let is_mask = stream.dict.get_bool(b"ImageMask").unwrap_or(false);
