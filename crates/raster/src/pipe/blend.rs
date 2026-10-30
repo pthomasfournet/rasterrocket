@@ -151,7 +151,7 @@ pub fn blend_exclusion(src: u8, dst: u8) -> u8 {
 
 // ── Non-separable helpers (RGB additive space) ────────────────────────────────
 
-/// Luminance of an RGB triple using the PDF/BT.709 weights (integer rounding).
+/// Luminance of an RGB triple using the PDF weights 0.30/0.59/0.11 (integer rounding).
 #[must_use]
 const fn get_lum(r: i32, g: i32, b: i32) -> i32 {
     (r * 77 + g * 151 + b * 28 + 0x80) >> 8

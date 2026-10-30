@@ -110,7 +110,7 @@ impl Pixel for Rgba8 {
 
 /// 8-bit grayscale, 1 byte/pixel, wire layout `[Y]`.
 ///
-/// Used for `-gray` output. RGB→luminance uses BT.709 coefficients.
+/// Used for `-gray` output. RGB→luminance uses the PDF `DeviceRGB` → `DeviceGray` weights.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
 pub struct Gray8 {

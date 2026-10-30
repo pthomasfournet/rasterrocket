@@ -1,13 +1,15 @@
-//! RGB → grayscale conversion (BT.709 luma, 15-bit fixed point).
+//! RGB → grayscale conversion (PDF `DeviceRGB` → `DeviceGray`, 15-bit fixed
+//! point).
 //!
-//! The luma definition shared by every tier is
+//! The definition shared by every tier is
 //!
 //! ```text
-//! gray = (6966·r + 23436·g + 2366·b + 16384) >> 15
+//! gray = (9830·r + 19333·g + 3605·b + 16384) >> 15
 //! ```
 //!
-//! — BT.709 coefficients quantised to 1/32768 with round-half-up. The
-//! coefficient sum is exactly 32768, so `r == g == b` maps to itself at
+//! — the weights `0.30 r + 0.59 g + 0.11 b` of ISO 32000-1 §10.3.3,
+//! quantised to 1/32768 with round-half-up. The coefficient sum is
+//! exactly 32768, so `r == g == b` maps to itself at
 //! every level. The power-of-two denominator is what lets the SIMD tier
 //! be byte-exact with the scalar reference: `_mm_madd_epi16` produces
 //! the dot product directly and a single shift replaces the decimal
@@ -16,16 +18,17 @@
 use color::{Gray8, Rgb8};
 use raster::Bitmap;
 
-/// BT.709 luma coefficients in 1.15 fixed point; they sum to exactly
-/// `1 << LUMA_SHIFT`.
-const LUMA_R: u32 = 6966;
-const LUMA_G: u32 = 23436;
-const LUMA_B: u32 = 2366;
+/// `DeviceRGB` → `DeviceGray` weights in 1.15 fixed point; they sum to
+/// exactly `1 << LUMA_SHIFT`.
+const LUMA_R: u32 = 9830;
+const LUMA_G: u32 = 19333;
+const LUMA_B: u32 = 3605;
 /// Round-half-up bias (`0.5` in 1.15 fixed point).
 const LUMA_BIAS: u32 = 16384;
 const LUMA_SHIFT: u32 = 15;
 
-/// Convert an RGB bitmap to grayscale using BT.709 luminance coefficients.
+/// Convert an RGB bitmap to grayscale with the `DeviceRGB` → `DeviceGray`
+/// weights of ISO 32000-1 §10.3.3.
 #[must_use]
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
     let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
@@ -256,15 +259,12 @@ mod tests {
     #[test]
     fn luma_uses_15_bit_fixed_point_rounding() {
         // Pin the exact fixed-point definition
-        // `(6966·r + 23436·g + 2366·b + 16384) >> 15` on inputs where it
-        // differs (by exactly one level) from the old decimal
-        // `(2126·r + 7152·g + 722·b + 5000) / 10000` — a regression to
-        // the decimal divide flips these.
-        let cases: [([u8; 3], u8); 3] = [
-            ([0, 5, 179], 17),
-            ([0, 13, 169], 22),
-            ([255, 255, 255], 255),
-        ];
+        // `(9830·r + 19333·g + 3605·b + 16384) >> 15` on inputs where it
+        // differs (by exactly one level) from the decimal
+        // `(30·r + 59·g + 11·b + 50) / 100` — a regression to the decimal
+        // divide flips these.
+        let cases: [([u8; 3], u8); 3] =
+            [([0, 60, 10], 36), ([0, 150, 0], 88), ([255, 255, 255], 255)];
         let pixels: Vec<[u8; 3]> = cases.iter().map(|&(px, _)| px).collect();
         let bmp = bitmap_from_pixels(&pixels, 3, 1);
         let gray = rgb_to_gray(&bmp);

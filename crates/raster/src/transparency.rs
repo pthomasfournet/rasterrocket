@@ -299,7 +299,7 @@ pub fn discard_group<P: Pixel>(group: GroupBitmap<P>) -> Clip {
 /// |--------------------------|-----------------------------------------------|
 /// | [`SoftMaskType::None`]   | All 255 (fully opaque — no masking).          |
 /// | [`SoftMaskType::Alpha`]  | Group alpha plane, verbatim.                  |
-/// | [`SoftMaskType::Luminosity`] | BT.709 luma `(77R + 151G + 28B + 128) >> 8` per RGB pixel. Fallback to alpha for non-RGB groups. |
+/// | [`SoftMaskType::Luminosity`] | Luma `(77R + 151G + 28B + 128) >> 8` (weights 0.30/0.59/0.11) per RGB pixel. Fallback to alpha for non-RGB groups. |
 ///
 /// For [`SoftMaskType::Luminosity`], only 3-byte RGB groups compute a true luma
 /// value.  All other pixel modes (gray, CMYK, `DeviceN`) fall back to the alpha
@@ -342,7 +342,7 @@ pub fn extract_soft_mask<P: Pixel>(group: &GroupBitmap<P>) -> Vec<u8> {
                     let r = i32::from(row[off]);
                     let g = i32::from(row[off + 1]);
                     let b = i32::from(row[off + 2]);
-                    // BT.709 integer luma; coefficients sum to 256, so the result
+                    // Integer luma with weights 0.30/0.59/0.11; coefficients sum to 256, so the result
                     // is always in [0, 255] — the cast is exact.
                     // Max value: (256*255 + 0x80) >> 8 = (65280 + 128) >> 8 = 255.
                     #[expect(
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    /// `extract_soft_mask` with `SoftMaskType::Luminosity` computes BT.709 luma from RGB.
+    /// `extract_soft_mask` with `SoftMaskType::Luminosity` computes luma from RGB.
     #[test]
     fn extract_soft_mask_luminosity_computes_luma() {
         let parent: Bitmap<Rgb8> = Bitmap::new(2, 1, 4, true);
