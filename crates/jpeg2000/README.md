@@ -1,7 +1,18 @@
 # hayro-jpeg2000
 
-[![Crates.io](https://img.shields.io/crates/v/hayro-jpeg2000.svg)](https://crates.io/crates/hayro-jpeg2000)
-[![Documentation](https://docs.rs/hayro-jpeg2000/badge.svg)](https://docs.rs/hayro-jpeg2000)
+> **Local fork.** This directory is the rasterrocket workspace's local fork
+> of [`hayro-jpeg2000`](https://github.com/LaurenzV/hayro/tree/main/hayro-jpeg2000), based on an upstream
+> commit that carries crate version 0.4.1. That base commit is recorded in
+> [`UPSTREAM.toml`](UPSTREAM.toml); every change made here, and every
+> upstream fix brought over since the base, is listed in
+> [`CHANGES.md`](CHANGES.md). The crate is not published (`publish = false`)
+> and changes are not sent upstream.
+>
+> `rasterrocket-interp` uses it to decode `JPXDecode` images.
+>
+> Everything below is upstream's README, kept as written. Its links to
+> crates.io, docs.rs and the upstream issue tracker describe the upstream
+> crate, not this fork.
 
 <!-- cargo-rdme start -->
 

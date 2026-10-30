@@ -1,7 +1,19 @@
 # hayro-jbig2
 
-[![Crates.io](https://img.shields.io/crates/v/hayro-jbig2.svg)](https://crates.io/crates/hayro-jbig2)
-[![Documentation](https://docs.rs/hayro-jbig2/badge.svg)](https://docs.rs/hayro-jbig2)
+> **Local fork.** This directory is the rasterrocket workspace's local fork
+> of [`hayro-jbig2`](https://github.com/LaurenzV/hayro/tree/main/hayro-jbig2), based on an upstream
+> commit made after its 0.3.1 release. That base commit is recorded in
+> [`UPSTREAM.toml`](UPSTREAM.toml); every change made here, and every
+> upstream fix brought over since the base, is listed in
+> [`CHANGES.md`](CHANGES.md). The crate is not published (`publish = false`)
+> and changes are not sent upstream.
+>
+> `rasterrocket-interp` uses it to decode `JBIG2Decode` images; its
+> `hayro-ccitt` dependency is the local fork in `crates/ccitt`.
+>
+> Everything below is upstream's README, kept as written. Its links to
+> crates.io, docs.rs and the upstream issue tracker describe the upstream
+> crate, not this fork.
 
 A memory-safe, pure-Rust JBIG2 decoder.
 

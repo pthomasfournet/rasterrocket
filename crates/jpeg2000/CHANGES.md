@@ -19,6 +19,9 @@ unless the entry says otherwise.
   false`; the `image` integration is no longer a default feature (the test
   suite enables it with `--features image`).
 
+- `LICENSE-APACHE`, `LICENSE-MIT`: upstream's symlinks to its repository
+  root replaced by the files themselves.
+
 ## Diagnostics
 
 - `j2c/codestream.rs`, `error.rs`: a CAP marker (0xFF50, ISO/IEC 15444-15

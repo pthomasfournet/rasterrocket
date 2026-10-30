@@ -1,7 +1,19 @@
 # hayro-ccitt
 
-[![Crates.io](https://img.shields.io/crates/v/hayro-ccitt.svg)](https://crates.io/crates/hayro-ccitt)
-[![Documentation](https://docs.rs/hayro-ccitt/badge.svg)](https://docs.rs/hayro-ccitt)
+> **Local fork.** This directory is the rasterrocket workspace's local fork
+> of [`hayro-ccitt`](https://github.com/LaurenzV/hayro/tree/main/hayro-ccitt), based on an upstream
+> commit made after its 0.4.0 release. That base commit is recorded in
+> [`UPSTREAM.toml`](UPSTREAM.toml); every change made here, and every
+> upstream fix brought over since the base, is listed in
+> [`CHANGES.md`](CHANGES.md). The crate is not published (`publish = false`)
+> and changes are not sent upstream.
+>
+> `rasterrocket-interp` uses it to decode `CCITTFaxDecode` images, and the
+> local `hayro-jbig2` fork uses it for MMR-coded regions.
+>
+> Everything below is upstream's README, kept as written. Its links to
+> crates.io, docs.rs and the upstream issue tracker describe the upstream
+> crate, not this fork.
 
 <!-- cargo-rdme start -->
 
