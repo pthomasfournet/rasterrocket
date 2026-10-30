@@ -1099,17 +1099,17 @@ impl<'doc> PageRenderer<'doc> {
         let solid_color = gs.fill_color.as_slice().to_vec();
         let _ = gs; // end the immutable gstate borrow before the &mut self pattern resolve
 
-        let tiled = match pat_name
-            .as_deref()
-            .and_then(|name| self.resolve_pattern(name))
-        {
-            Some(PatternPaint::Shading(pattern)) => {
+        // A pattern colour that does not resolve paints nothing: the fill
+        // colour is not a fallback for it.
+        let tiled = match pat_name.as_deref().map(|name| self.resolve_pattern(name)) {
+            Some(Some(PatternPaint::Shading(pattern))) => {
                 self.paint_shading_pattern(*pattern, false, |r, pipe, shading| {
                     r.fill_with_shading(path, even_odd, clip, pipe, flatness, shading);
                 });
                 return;
             }
-            Some(PatternPaint::Tiled(tiled)) => Some(tiled),
+            Some(Some(PatternPaint::Tiled(tiled))) => Some(tiled),
+            Some(None) => return,
             None => None,
         };
         let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
@@ -1248,12 +1248,10 @@ impl<'doc> PageRenderer<'doc> {
             vector_antialias: true,
         };
 
-        // Resolve the stroke source — pattern or solid colour.
-        let tiled = match pat_name
-            .as_deref()
-            .and_then(|name| self.resolve_pattern(name))
-        {
-            Some(PatternPaint::Shading(pattern)) => {
+        // Resolve the stroke source — pattern or solid colour.  A pattern
+        // colour that does not resolve paints nothing.
+        let tiled = match pat_name.as_deref().map(|name| self.resolve_pattern(name)) {
+            Some(Some(PatternPaint::Shading(pattern))) => {
                 let clip = clip.clone_shared();
                 let stroked = self.paint_shading_pattern(*pattern, true, |r, pipe, shading| {
                     r.stroke_with_shading(
@@ -1274,7 +1272,8 @@ impl<'doc> PageRenderer<'doc> {
                 );
                 None
             }
-            Some(PatternPaint::Tiled(tiled)) => Some(tiled),
+            Some(Some(PatternPaint::Tiled(tiled))) => Some(tiled),
+            Some(None) => return,
             None => None,
         };
         let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {

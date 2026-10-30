@@ -30,6 +30,51 @@ fn resolve_pattern_tint(doc: &Document, fill_cs: &ColorSpace, components: &[f64]
     components_to_color(components)
 }
 
+/// Side, in pixels, at which a sub-pixel cell is sampled to take its mean.
+const MEAN_SAMPLE_PX: f64 = 8.0;
+
+/// The number of whole pixels spanning a length of `v` pixels: its ceiling,
+/// taken below a tolerance that absorbs the rounding of the products that
+/// produce it (`100 × 0.1` is `10.000000000000002`), and at least 1.
+fn pixel_ceil(v: f64) -> f64 {
+    (v - 1e-6).ceil().max(1.0)
+}
+
+/// The mean of `sample` over a period of `period_px` pixels: its
+/// alpha-weighted mean colour and its coverage, `Σ alpha / period_px`
+/// clamped to 255.  The colour is black where nothing is painted.
+fn mean_over_period(sample: &Bitmap<Rgb8>, period_px: f64) -> ([u8; 3], u8) {
+    let mut sum_a = 0u64;
+    let mut sum_c = [0u64; 3];
+    for y in 0..sample.height {
+        let row = sample.row_bytes(y);
+        let alpha = sample.alpha_row(y);
+        for (x, px) in row.as_chunks::<3>().0.iter().enumerate() {
+            let a = u64::from(alpha.map_or(255, |r| r[x]));
+            sum_a += a;
+            for (s, &c) in sum_c.iter_mut().zip(px) {
+                *s += a * u64::from(c);
+            }
+        }
+    }
+    if sum_a == 0 {
+        return ([0; 3], 0);
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "the quotients are clamped to [0, 255] before the cast"
+    )]
+    let coverage = (sum_a as f64 / period_px).round().clamp(0.0, 255.0) as u8;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an alpha-weighted mean of u8 values is at most 255"
+    )]
+    let colour = sum_c.map(|s| ((s + sum_a / 2) / sum_a) as u8);
+    (colour, coverage)
+}
+
 /// A resolved `Pattern` resource.
 pub(super) enum PatternPaint {
     /// A tiling pattern (`PatternType` 1), rasterised to a tile.
@@ -112,29 +157,45 @@ impl PageRenderer<'_> {
             return None;
         }
 
-        if sx < 0.5 || sy < 0.5 {
+        // The cell in device pixels.
+        let cell_w = desc.x_step.abs() * sx;
+        let cell_h = desc.y_step.abs() * sy;
+        if !(cell_w > 0.0 && cell_h > 0.0) {
             log::debug!(
-                "rasterrocket-interp: Pattern /{} tile scale ({sx:.2}, {sy:.2}) too small — skipping",
+                "rasterrocket-interp: Pattern /{} has a degenerate cell ({cell_w}×{cell_h} px) — skipping",
                 String::from_utf8_lossy(name)
             );
             return None;
+        }
+
+        // The CTM for the tile renderer: pattern space → tile device space.
+        // Translation is handled by the phase below, so it is zero here.
+        let tile_ctm = [pat_ctm[0], pat_ctm[1], pat_ctm[2], pat_ctm[3], 0.0, 0.0];
+
+        // A cell below one pixel in area repeats more than once per pixel;
+        // box-filtered over a pixel, the pattern is its mean over one cell.
+        if cell_w * cell_h < 1.0 {
+            let k = (MEAN_SAMPLE_PX / cell_w.min(cell_h)).min(MAX_TILE_PX / cell_w.max(cell_h));
+            let sample_ctm = [
+                tile_ctm[0] * k,
+                tile_ctm[1] * k,
+                tile_ctm[2] * k,
+                tile_ctm[3] * k,
+                0.0,
+                0.0,
+            ];
+            let sample_w = (cell_w * k).ceil() as u32;
+            let sample_h = (cell_h * k).ceil() as u32;
+            let sample = self.render_pattern_tile(&desc, sample_w, sample_h, &sample_ctm, tint);
+            let (colour, coverage) = mean_over_period(&sample, cell_w * k * cell_h * k);
+            return Some(
+                TiledPattern::new(colour.to_vec(), 1, 1, 0, 0).with_coverage(vec![coverage]),
+            );
         }
 
         // Cap the tile to MAX_TILE_PX to avoid huge allocations from malformed PDFs.
-        let tile_w = (desc.x_step.abs() * sx).min(MAX_TILE_PX).ceil() as u32;
-        let tile_h = (desc.y_step.abs() * sy).min(MAX_TILE_PX).ceil() as u32;
-
-        if tile_w == 0 || tile_h == 0 {
-            log::debug!(
-                "rasterrocket-interp: Pattern /{} produced zero-size tile ({tile_w}×{tile_h}) — skipping",
-                String::from_utf8_lossy(name)
-            );
-            return None;
-        }
-
-        // Build the CTM for the tile renderer: pattern space → tile device space.
-        // Translation is handled by phase below, so we zero it here.
-        let tile_ctm = [pat_ctm[0], pat_ctm[1], pat_ctm[2], pat_ctm[3], 0.0, 0.0];
+        let tile_w = pixel_ceil(cell_w.min(MAX_TILE_PX)) as u32;
+        let tile_h = pixel_ceil(cell_h.min(MAX_TILE_PX)) as u32;
 
         // Rasterise the tile.
         let tile_bitmap = self.render_pattern_tile(&desc, tile_w, tile_h, &tile_ctm, tint);
@@ -229,6 +290,33 @@ impl PageRenderer<'_> {
 mod tests {
     use super::*;
     use crate::test_helpers::empty_doc;
+
+    #[test]
+    fn pixel_ceil_absorbs_product_rounding() {
+        assert_eq!(pixel_ceil(100.0 * 0.1), 10.0);
+        assert_eq!(pixel_ceil(10.5), 11.0);
+        assert_eq!(pixel_ceil(0.3), 1.0);
+    }
+
+    #[test]
+    fn mean_over_period_weights_colour_by_alpha_and_coverage_by_period() {
+        // 2 × 1 sample: opaque red, half-transparent blue; period of 4 px.
+        let mut bmp = Bitmap::<Rgb8>::new(2, 1, 1, true);
+        bmp.row_bytes_mut(0)
+            .copy_from_slice(&[255, 0, 0, 0, 0, 255]);
+        bmp.alpha_plane_mut().unwrap().copy_from_slice(&[255, 128]);
+        let (colour, coverage) = mean_over_period(&bmp, 4.0);
+        assert_eq!(colour, [170, 0, 85]);
+        assert_eq!(coverage, 96);
+
+        // Nothing painted: no colour, no coverage.
+        let empty = Bitmap::<Rgb8>::new(2, 1, 1, true);
+        assert_eq!(mean_over_period(&empty, 1.0), ([0; 3], 0));
+
+        // Overlapping content past the period saturates the coverage.
+        let (_, full) = mean_over_period(&bmp, 1.0);
+        assert_eq!(full, 255);
+    }
 
     #[test]
     fn pattern_tint_devicergb_base_passes_through() {

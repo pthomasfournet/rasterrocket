@@ -139,6 +139,82 @@ fn tiling_cell_edges_blend_with_the_backdrop() {
     );
 }
 
+/// A 100 × 100 cell, blue in its lower-left quarter and green in its
+/// upper-right quarter, under pattern matrix `scale`.
+fn quartered_cell(scale: f64) -> String {
+    format!(
+        "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+         /BBox [0 0 100 100] /XStep 100 /YStep 100 /Resources << >> \
+         /Matrix [{scale} 0 0 {scale} 0 0]"
+    )
+}
+
+const QUARTERED_CONTENT: &[u8] = b"0 0 1 rg 0 0 50 50 re f 0 1 0 rg 50 50 50 50 re f";
+
+#[test]
+fn a_small_pattern_matrix_paints_the_cells_at_their_device_size() {
+    // Matrix 0.1 and XStep 100: 10 pt cells.
+    let bmp = render(page(
+        &format!("{BACKDROP}1 0 0 rg /Pattern cs /P0 scn 0 0 200 100 re f"),
+        &quartered_cell(0.1),
+        Some(QUARTERED_CONTENT),
+        "",
+        &[],
+    ));
+    assert_eq!(
+        rgb(&bmp, 2, 2),
+        BLUE,
+        "lower-left quarter of the first cell"
+    );
+    assert_eq!(rgb(&bmp, 7, 7), GREEN, "upper-right quarter");
+    assert_eq!(
+        rgb(&bmp, 47, 47),
+        GREEN,
+        "upper-right quarter, four cells on"
+    );
+    assert_eq!(
+        rgb(&bmp, 7, 2),
+        BLUE,
+        "the backdrop shows in the empty quarters"
+    );
+    assert_ne!(rgb(&bmp, 7, 2), RED, "the fill colour never paints");
+}
+
+#[test]
+fn a_sub_pixel_pattern_paints_its_mean_colour_and_coverage() {
+    // Matrix 0.01: 1 pt cells painting half their area, blue and green in
+    // equal parts.  The backdrop here is white so the mean shows directly:
+    // (0, 128, 128) at half coverage over white.
+    let bmp = render(page(
+        "1 g 0 0 200 100 re f 1 0 0 rg /Pattern cs /P0 scn 0 0 200 100 re f",
+        &quartered_cell(0.01),
+        Some(QUARTERED_CONTENT),
+        "",
+        &[],
+    ));
+    for (x, y) in [(50, 50), (3, 3), (190, 90)] {
+        let [r, g, b] = rgb(&bmp, x, y);
+        assert!(
+            r.abs_diff(128) <= 12 && g.abs_diff(192) <= 12 && b.abs_diff(192) <= 12,
+            "({x}, {y}) = {:?}, expected about (128, 192, 192)",
+            [r, g, b]
+        );
+    }
+}
+
+#[test]
+fn a_pattern_that_fails_to_resolve_paints_nothing() {
+    // `/P1` is not a resource; the fill must not fall back to the fill colour.
+    let bmp = render(page(
+        &format!("{BACKDROP}1 0 0 rg /Pattern cs /P1 scn 0 0 200 100 re f"),
+        &tiling(1),
+        Some(b"1 0 0 rg 0 0 10 10 re f"),
+        "",
+        &[],
+    ));
+    assert_eq!(rgb(&bmp, 50, 50), BLUE, "the backdrop is untouched");
+}
+
 const PLAIN_TRUETYPE: &[u8] = include_bytes!("../../font/src/tests/data/hint-assembled-plain.ttf");
 
 /// Page resources naming the fixture font `/F1` (objects 6–8).
