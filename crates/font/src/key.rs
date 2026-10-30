@@ -46,12 +46,17 @@ pub struct GlyphKey {
     pub size_px: u16,
     /// Sub-pixel x-fraction in `[0, FRACTION)`.
     pub x_frac: u8,
+    /// Horizontal scale of the outline in units of `1 / u16::MAX`;
+    /// `u16::MAX` is unscaled.  A substitute glyph condensed to the
+    /// advance the document specifies is keyed by its scale.
+    pub x_scale: u16,
     /// Whether anti-aliasing was enabled when the glyph was rasterized.
     pub aa: bool,
 }
 
 impl GlyphKey {
-    /// Construct a `GlyphKey`, masking `x_frac` to the valid range `[0, FRACTION)`.
+    /// Construct an unscaled `GlyphKey`, masking `x_frac` to the valid
+    /// range `[0, FRACTION)`.
     #[must_use]
     pub const fn new(face_id: FaceId, glyph_id: u32, size_px: u16, x_frac: u8, aa: bool) -> Self {
         // FRACTION = 4 = 0b100; FRACTION as u8 - 1 = 3 = 0b11.
@@ -66,8 +71,15 @@ impl GlyphKey {
             glyph_id,
             size_px,
             x_frac: x_frac & mask,
+            x_scale: u16::MAX,
             aa,
         }
+    }
+
+    /// This key with the horizontal scale `x_scale`.
+    #[must_use]
+    pub const fn condensed(self, x_scale: u16) -> Self {
+        Self { x_scale, ..self }
     }
 }
 
@@ -87,6 +99,14 @@ mod tests {
         let a = GlyphKey::new(FaceId(1), 42, 12, 0, true);
         let b = GlyphKey::new(FaceId(1), 42, 12, 0, false);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn x_scale_distinguishes() {
+        let a = GlyphKey::new(FaceId(1), 42, 12, 0, true);
+        let b = a.condensed(u16::MAX / 2);
+        assert_ne!(a, b);
+        assert_eq!(a, a.condensed(u16::MAX));
     }
 
     #[test]

@@ -123,7 +123,7 @@ impl FontFace {
     /// subset, a space) or one that fails to load.
     #[must_use]
     pub fn make_glyph(&self, char_code: u32, x_frac: u8) -> Option<GlyphBitmap> {
-        self.render_gid(self.glyph_index(char_code), x_frac)
+        self.render_gid(self.glyph_index(char_code), x_frac, 1.0)
     }
 
     /// Cached form of [`Self::make_glyph`].  The cache key is the resolved
@@ -135,16 +135,29 @@ impl FontFace {
         char_code: u32,
         x_frac: u8,
     ) -> Option<Arc<GlyphBitmap>> {
-        let gid = self.glyph_index(char_code);
-        let key = GlyphKey::new(self.id, gid, self.size_px, x_frac, self.aa);
-        cache.get_or_render(key, || self.render_gid(gid, x_frac))
+        self.make_glyph_cached_fitted(cache, char_code, x_frac, 1.0)
+    }
+
+    /// [`Self::make_glyph_cached`] with the outline condensed horizontally
+    /// by `x_scale` in `(0, 1]`: a substitute glyph wider than the advance
+    /// the document specifies is fitted to it.  The scale is quantised to
+    /// `1 / u16::MAX` and is part of the cache key.
+    #[must_use]
+    pub fn make_glyph_cached_fitted(
+        &self,
+        cache: &GlyphCache,
+        char_code: u32,
+        x_frac: u8,
+        x_scale: f64,
+    ) -> Option<Arc<GlyphBitmap>> {
+        self.render_cached(cache, self.glyph_index(char_code), x_frac, x_scale)
     }
 
     /// Rasterise the glyph a composite font selects with `gid` (see the
     /// module documentation), bypassing character-code resolution.
     #[must_use]
     pub fn make_glyph_by_gid(&self, gid: u32, x_frac: u8) -> Option<GlyphBitmap> {
-        self.render_gid(self.program.cid_to_gid(gid)?, x_frac)
+        self.render_gid(self.program.cid_to_gid(gid)?, x_frac, 1.0)
     }
 
     /// Cached form of [`Self::make_glyph_by_gid`].
@@ -160,23 +173,59 @@ impl FontFace {
         gid: u32,
         x_frac: u8,
     ) -> Option<Arc<GlyphBitmap>> {
-        let gid = self.program.cid_to_gid(gid)?;
-        let key = GlyphKey::new(self.id, gid, self.size_px, x_frac, self.aa);
-        cache.get_or_render(key, || self.render_gid(gid, x_frac))
+        self.make_glyph_by_gid_cached_fitted(cache, gid, x_frac, 1.0)
+    }
+
+    /// [`Self::make_glyph_by_gid_cached`] condensed by `x_scale`; see
+    /// [`Self::make_glyph_cached_fitted`].
+    #[must_use]
+    pub fn make_glyph_by_gid_cached_fitted(
+        &self,
+        cache: &GlyphCache,
+        gid: u32,
+        x_frac: u8,
+        x_scale: f64,
+    ) -> Option<Arc<GlyphBitmap>> {
+        self.render_cached(cache, self.program.cid_to_gid(gid)?, x_frac, x_scale)
+    }
+
+    fn render_cached(
+        &self,
+        cache: &GlyphCache,
+        gid: u32,
+        x_frac: u8,
+        x_scale: f64,
+    ) -> Option<Arc<GlyphBitmap>> {
+        let quantised = quantise_scale(x_scale);
+        let key = GlyphKey::new(self.id, gid, self.size_px, x_frac, self.aa).condensed(quantised);
+        let x_scale = f64::from(quantised) / f64::from(u16::MAX);
+        cache.get_or_render(key, || self.render_gid(gid, x_frac, x_scale))
     }
 
     /// Outline of the glyph for `char_code` in device pixels relative to
     /// the pen position, y up.  `None` when the glyph has no outline.
     #[must_use]
     pub fn glyph_path(&self, char_code: u32) -> Option<Path> {
-        self.outline(self.glyph_index(char_code), 0.0)
+        self.glyph_path_fitted(char_code, 1.0)
+    }
+
+    /// [`Self::glyph_path`] condensed horizontally by `x_scale`.
+    #[must_use]
+    pub fn glyph_path_fitted(&self, char_code: u32, x_scale: f64) -> Option<Path> {
+        self.outline(self.glyph_index(char_code), 0.0, x_scale)
     }
 
     /// Outline of the glyph a composite font selects with `gid`; see
     /// [`Self::glyph_path`].
     #[must_use]
     pub fn glyph_path_by_gid(&self, gid: u32) -> Option<Path> {
-        self.outline(self.program.cid_to_gid(gid)?, 0.0)
+        self.glyph_path_by_gid_fitted(gid, 1.0)
+    }
+
+    /// [`Self::glyph_path_by_gid`] condensed horizontally by `x_scale`.
+    #[must_use]
+    pub fn glyph_path_by_gid_fitted(&self, gid: u32, x_scale: f64) -> Option<Path> {
+        self.outline(self.program.cid_to_gid(gid)?, 0.0, x_scale)
     }
 
     /// Advance width of the glyph for `char_code` in em units (multiply by
@@ -242,29 +291,36 @@ impl FontFace {
             .unwrap_or_else(|| self.program.char_index(char_code))
     }
 
-    fn render_gid(&self, gid: u32, x_frac: u8) -> Option<GlyphBitmap> {
+    fn render_gid(&self, gid: u32, x_frac: u8, x_scale: f64) -> Option<GlyphBitmap> {
         let shift = f64::from(u32::from(x_frac) % FRACTION) / f64::from(FRACTION);
-        rasterize(&self.outline(gid, shift)?, self.aa)
+        rasterize(&self.outline(gid, shift, x_scale)?, self.aa)
     }
 
-    /// Outline of glyph `gid` in device pixels, translated right by `shift`.
+    /// The matrix mapping glyph units at `units_per_em` to device pixels,
+    /// the glyph condensed horizontally by `x_scale`, translated right by
+    /// `shift`.
+    fn pen_matrix(&self, units_per_em: f64, x_scale: f64, shift: f64) -> [f64; 6] {
+        let [a, b, c, d] = self.matrix.map(|v| v / units_per_em);
+        [a * x_scale, b * x_scale, c, d, shift, 0.0]
+    }
+
+    /// Outline of glyph `gid` in device pixels, condensed horizontally by
+    /// `x_scale` and translated right by `shift`.
     ///
     /// A program that requires hinting is grid-fitted at `size_px` pixels
     /// per em and the result mapped by the matrix divided by `size_px`;
     /// when that fails the glyph is drawn unhinted.
-    fn outline(&self, gid: u32, shift: f64) -> Option<Path> {
-        if let Some(path) = self.hinted_outline(gid, shift) {
+    fn outline(&self, gid: u32, shift: f64, x_scale: f64) -> Option<Path> {
+        if let Some(path) = self.hinted_outline(gid, shift, x_scale) {
             return Some(path);
         }
-        let scale = self.program.upem().recip();
-        let [a, b, c, d] = self.matrix.map(|v| v * scale);
-        let mut pen = PathPen::new([a, b, c, d, shift, 0.0]);
+        let mut pen = PathPen::new(self.pen_matrix(self.program.upem(), x_scale, shift));
         let _advance = self.program.draw(gid, &mut pen)?;
         let path = pen.finish();
         (!path.pts.is_empty()).then_some(path)
     }
 
-    fn hinted_outline(&self, gid: u32, shift: f64) -> Option<Path> {
+    fn hinted_outline(&self, gid: u32, shift: f64, x_scale: f64) -> Option<Path> {
         if !self.program.requires_hinting() {
             return None;
         }
@@ -272,11 +328,20 @@ impl FontFace {
             .hinting
             .get_or_init(|| self.program.hinting_instance(f32::from(self.size_px)))
             .as_ref()?;
-        let scale = f64::from(self.size_px).recip();
-        let [a, b, c, d] = self.matrix.map(|v| v * scale);
-        let mut pen = PathPen::new([a, b, c, d, shift, 0.0]);
+        let mut pen = PathPen::new(self.pen_matrix(f64::from(self.size_px), x_scale, shift));
         self.program.draw_hinted(gid, instance, &mut pen)?;
         let path = pen.finish();
         (!path.pts.is_empty()).then_some(path)
     }
+}
+
+/// `x_scale` in `(0, 1]` as a [`GlyphKey::x_scale`] value.
+fn quantise_scale(x_scale: f64) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, 1] and scaled to the u16 range before rounding"
+    )]
+    let quantised = (x_scale.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
+    quantised
 }

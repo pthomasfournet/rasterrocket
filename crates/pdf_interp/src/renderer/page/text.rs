@@ -6,7 +6,7 @@ use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
 use super::pixel_rect::PixelRect;
 use super::text_ops::{
-    GlyphRecord, glyph_advance, text_to_device, translate_text_x, translate_text_y,
+    GlyphRecord, fit_to_advance, glyph_advance, text_to_device, translate_text_x, translate_text_y,
 };
 use crate::resources::cmap::DecodedCode;
 use color::Rgb8;
@@ -180,10 +180,24 @@ impl PageRenderer<'_> {
             // Type 0 composite fonts use 1–4 bytes determined by the Encoding CMap.
             let cid_enc = descriptor.cid_encoding.as_ref();
 
+            // A substitute's glyphs are fitted to the advances the document
+            // specifies: condensed when wider, centred when narrower.  An
+            // embedded program's glyphs are the document's own.
+            let fit = face.substitute && !cid_enc.is_some_and(|enc| enc.vertical);
+            let face_width = |advance: Option<f64>| -> i32 {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "advances are a few em at most; thousandths fit i32"
+                )]
+                let width = advance.map_or(0.0, |w| (w * 1000.0).round()) as i32;
+                width
+            };
+
             // Shared helper: push a rasterized glyph into `records` (when
             // filling) and append its outline to `stroke_outline` (when
             // stroking) and `clip_outline` (when clipping); a face too large
-            // for glyph bitmaps fills through `fill_paths`.
+            // for glyph bitmaps fills through `fill_paths`.  `x_scale`
+            // condenses the glyph to the document's advance.
             //
             // `gid` is the resolved glyph index.  `char_code_for_path` is the
             // raw character code.  `by_gid` selects which one the face is
@@ -199,65 +213,69 @@ impl PageRenderer<'_> {
             //   used directly — re-resolving it through the Unicode charmap
             //   mis-maps every glyph to `.notdef` for a CID-keyed CFF subset
             //   (whose charmap is absent/unrelated), rendering a blank page.
-            let mut push_glyph =
-                |char_code_for_path: u32, gid: u32, by_gid: bool, pen_x: i32, pen_y: i32| {
-                    // A substitute's `.notdef` is never the document's
-                    // glyph: a code it cannot draw leaves a gap.
-                    let notdef = if by_gid {
-                        gid == 0
-                    } else {
-                        face.glyph_index(char_code_for_path) == 0
-                    };
-                    if face.substitute && notdef {
-                        return;
-                    }
-                    let bmp = if fill_as_bitmap {
-                        if by_gid {
-                            face.make_glyph_by_gid_cached(glyph_cache, gid, 0)
-                        } else {
-                            face.make_glyph_cached(glyph_cache, gid, 0)
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(bitmap) = bmp {
-                        records.push(GlyphRecord {
-                            pen_x,
-                            pen_y,
-                            bitmap,
-                        });
-                    }
-                    if !need_outline {
-                        return;
-                    }
-                    // The glyph outline in device space.  `glyph_path`
-                    // returns pixels relative to the pen position with Trm
-                    // applied, y up; translate by (pen_x, pen_y) and flip y
-                    // (device y is positive-down).
-                    let outline = if by_gid {
-                        face.glyph_path_by_gid(gid)
-                    } else {
-                        face.glyph_path(char_code_for_path)
-                    };
-                    let Some(mut path) = outline else {
-                        return;
-                    };
-                    let px = f64::from(pen_x);
-                    let py = f64::from(pen_y);
-                    for pt in &mut path.pts {
-                        pt.x += px;
-                        pt.y = py - pt.y;
-                    }
-                    if do_clip {
-                        clip_outline.append(&path);
-                    }
-                    if do_stroke {
-                        stroke_outline.append(&path);
-                    }
-                    if fill_as_path {
-                        fill_paths.push(path);
-                    }
+            let mut push_glyph = |char_code_for_path: u32,
+                                  gid: u32,
+                                  by_gid: bool,
+                                  pen_x: i32,
+                                  pen_y: i32,
+                                  x_scale: f64| {
+                // A substitute's `.notdef` is never the document's
+                // glyph: a code it cannot draw leaves a gap.
+                let notdef = if by_gid {
+                    gid == 0
+                } else {
+                    face.glyph_index(char_code_for_path) == 0
                 };
+                if face.substitute && notdef {
+                    return;
+                }
+                let bmp = if fill_as_bitmap {
+                    if by_gid {
+                        face.make_glyph_by_gid_cached_fitted(glyph_cache, gid, 0, x_scale)
+                    } else {
+                        face.make_glyph_cached_fitted(glyph_cache, gid, 0, x_scale)
+                    }
+                } else {
+                    None
+                };
+                if let Some(bitmap) = bmp {
+                    records.push(GlyphRecord {
+                        pen_x,
+                        pen_y,
+                        bitmap,
+                    });
+                }
+                if !need_outline {
+                    return;
+                }
+                // The glyph outline in device space.  `glyph_path`
+                // returns pixels relative to the pen position with Trm
+                // applied, y up; translate by (pen_x, pen_y) and flip y
+                // (device y is positive-down).
+                let outline = if by_gid {
+                    face.glyph_path_by_gid_fitted(gid, x_scale)
+                } else {
+                    face.glyph_path_fitted(char_code_for_path, x_scale)
+                };
+                let Some(mut path) = outline else {
+                    return;
+                };
+                let px = f64::from(pen_x);
+                let py = f64::from(pen_y);
+                for pt in &mut path.pts {
+                    pt.x += px;
+                    pt.y = py - pt.y;
+                }
+                if do_clip {
+                    clip_outline.append(&path);
+                }
+                if do_stroke {
+                    stroke_outline.append(&path);
+                }
+                if fill_as_path {
+                    fill_paths.push(path);
+                }
+            };
 
             if let Some(enc) = cid_enc {
                 // Type 0 composite font: the Encoding CMap splits the string
@@ -268,6 +286,25 @@ impl PageRenderer<'_> {
                     len,
                 } in enc.codes(bytes)
                 {
+                    // A substitute face for a composite font carries a
+                    // CID-indexed glyph table (vertical forms included); an
+                    // embedded one is selected through `CIDToGIDMap` / its
+                    // charset, with its vertical form substituted here.
+                    let by_gid = face.code_to_gid.is_empty();
+                    let mut gid = if by_gid { enc.gid_for_cid(cid) } else { cid };
+                    if by_gid && enc.vertical {
+                        gid = face.program().vertical_selector(gid);
+                    }
+                    let (x_scale, centre) = if fit {
+                        let advance = if by_gid {
+                            face.glyph_advance_by_gid(gid)
+                        } else {
+                            face.glyph_advance(gid)
+                        };
+                        fit_to_advance(enc.width_for_cid(cid), face_width(advance))
+                    } else {
+                        (1.0, 0.0)
+                    };
                     // In vertical writing mode the glyph's vertical origin
                     // sits at the pen: its horizontal origin is displaced
                     // by the position vector −v, in glyph units scaled by
@@ -278,21 +315,10 @@ impl PageRenderer<'_> {
                         let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
                         text_to_device(&ctm, &tm, tx, ty, self.height)
                     } else {
-                        text_to_device(&ctm, &tm, 0.0, rise, self.height)
+                        let tx = centre / 1000.0 * font_size * horiz_scaling;
+                        text_to_device(&ctm, &tm, tx, rise, self.height)
                     };
-                    // A substitute face for a composite font carries a
-                    // CID-indexed glyph table (vertical forms included); an
-                    // embedded one is selected through `CIDToGIDMap` / its
-                    // charset, with its vertical form substituted here.
-                    if face.code_to_gid.is_empty() {
-                        let mut gid = enc.gid_for_cid(cid);
-                        if enc.vertical {
-                            gid = face.program().vertical_selector(gid);
-                        }
-                        push_glyph(cid, gid, true, pen_x, pen_y);
-                    } else {
-                        push_glyph(cid, cid, false, pen_x, pen_y);
-                    }
+                    push_glyph(cid, gid, by_gid, pen_x, pen_y, x_scale);
 
                     // The advance (PDF §9.4.4): horizontally
                     // `(w0 × Tfs + Tc + Tw) × Th`; vertically
@@ -329,12 +355,21 @@ impl PageRenderer<'_> {
                 // ONLY when Widths is absent entirely (e.g. the 14 standard fonts
                 // pre-PDF 1.5, where a substitute face supplies metrics).
                 for &byte in bytes {
-                    let (pen_x, pen_y) = text_to_device(&ctm, &tm, 0.0, rise, self.height);
-                    push_glyph(u32::from(byte), u32::from(byte), false, pen_x, pen_y);
+                    let code = u32::from(byte);
+                    let pdf_width = descriptor.width_for_code(code);
+                    let (x_scale, centre) = match pdf_width {
+                        Some(width) if fit => {
+                            fit_to_advance(width, face_width(face.glyph_advance(code)))
+                        }
+                        _ => (1.0, 0.0),
+                    };
+                    let tx = centre / 1000.0 * font_size * horiz_scaling;
+                    let (pen_x, pen_y) = text_to_device(&ctm, &tm, tx, rise, self.height);
+                    push_glyph(code, code, false, pen_x, pen_y, x_scale);
 
                     // PDF §9.4.4: pen advances even for missing/invisible glyphs.
-                    let advance_glyph = descriptor.width_for_code(u32::from(byte)).map_or_else(
-                        || face.glyph_advance(u32::from(byte)).unwrap_or(0.0),
+                    let advance_glyph = pdf_width.map_or_else(
+                        || face.glyph_advance(code).unwrap_or(0.0),
                         |w| f64::from(w) / 1000.0,
                     );
                     let extra = if byte == b' ' { word_spacing } else { 0.0 };

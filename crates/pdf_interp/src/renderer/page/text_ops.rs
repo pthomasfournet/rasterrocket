@@ -40,6 +40,23 @@ pub(super) fn glyph_advance(
     (width * font_size + char_spacing + extra) * horiz_scaling
 }
 
+/// How a substitute glyph of advance `face_width` is drawn in the advance
+/// `pdf_width` the document specifies (both in thousandths of the em):
+/// `(x_scale, offset)`.  A glyph wider than the advance is condensed to it;
+/// one narrower by more than a unit is centred in it by `offset`
+/// thousandths; otherwise it is drawn as is.
+pub(super) fn fit_to_advance(pdf_width: i32, face_width: i32) -> (f64, f64) {
+    if face_width <= 0 || pdf_width <= 0 {
+        (1.0, 0.0)
+    } else if pdf_width > face_width + 1 {
+        (1.0, f64::from(pdf_width - face_width) / 2.0)
+    } else if pdf_width < face_width {
+        (f64::from(pdf_width) / f64::from(face_width), 0.0)
+    } else {
+        (1.0, 0.0)
+    }
+}
+
 /// Translate text matrix `tm` by `tx` along its own x axis: `[1 0 0 1 tx 0] × Tm`.
 ///
 /// Evaluated as separate multiplies and adds, for the reason given on

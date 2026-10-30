@@ -90,6 +90,64 @@ fn missing_font_resource_draws_helvetica() {
     assert_eq!(page.diagnostics.missing_fonts, ["F9"]);
 }
 
+/// `(left, width)` in device pixels of the ink `text` paints in the
+/// non-embedded font `font` at 24 pt from x = 4 on a 64 × 32 pt page.
+fn ink_span(font: &str, text: &str) -> (usize, usize) {
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
+          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", format!("BT /F1 24 Tf 4 8 Td {text} Tj ET").as_bytes()),
+        font.as_bytes().to_vec(),
+    ];
+    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    let width = bmp.width as usize;
+    let columns: Vec<usize> = bmp
+        .data()
+        .chunks(3)
+        .enumerate()
+        .filter(|(_, px)| px[0] < 128)
+        .map(|(i, _)| i % width)
+        .collect();
+    let left = columns.iter().copied().min().unwrap_or(0);
+    let right = columns.iter().copied().max().map_or(0, |r| r + 1);
+    (left, right - left)
+}
+
+/// A substitute's glyph is fitted to the advance the document specifies:
+/// condensed when the advance is narrower than the glyph, centred in the
+/// advance when wider.
+#[test]
+fn substitute_glyphs_are_fitted_to_the_pdf_widths() {
+    let narrow = "<< /Type /Font /Subtype /TrueType /BaseFont /ArialNarrow \
+                  /FirstChar 77 /LastChar 77 /Widths [300] /Encoding /WinAnsiEncoding \
+                  /FontDescriptor << /Type /FontDescriptor /FontName /ArialNarrow /Flags 32 \
+                  /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 \
+                  /CapHeight 700 /StemV 80 >> >>";
+    let natural = "<< /Type /Font /Subtype /TrueType /BaseFont /ArialNarrow \
+                   /Encoding /WinAnsiEncoding >>";
+    let (_, condensed) = ink_span(narrow, "(M)");
+    let (_, full) = ink_span(natural, "(M)");
+    assert!(full >= 15, "an unfitted sans M at 24 pt is wide: {full}");
+    assert!(condensed <= 9, "M condensed to 300/1000 em: {condensed}");
+
+    let wide = "<< /Type /Font /Subtype /TrueType /BaseFont /ArialNarrow \
+                /FirstChar 108 /LastChar 108 /Widths [1500] /Encoding /WinAnsiEncoding \
+                /FontDescriptor << /Type /FontDescriptor /FontName /ArialNarrow /Flags 32 \
+                /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 \
+                /CapHeight 700 /StemV 80 >> >>";
+    let (left_natural, _) = ink_span(natural, "(l)");
+    let (left_centred, _) = ink_span(wide, "(l)");
+    assert!(left_natural <= 8, "{left_natural}");
+    assert!(
+        left_centred >= left_natural + 12,
+        "l centred in a 1500-unit advance: {left_centred} vs {left_natural}"
+    );
+}
+
 /// `(width, height, dark pixel count)` of the bounding box of the ink
 /// `ink` would count, for shape checks.
 fn ink_box(font: &str, text: &str) -> (usize, usize, usize) {
