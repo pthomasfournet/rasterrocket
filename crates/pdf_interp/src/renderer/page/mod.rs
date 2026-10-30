@@ -1915,6 +1915,7 @@ impl<'doc> PageRenderer<'doc> {
     ) -> bool {
         use gpu::blit::BlitBbox;
 
+        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
         let Some(gpu_ctx) = self.gpu_ctx.as_deref() else {
             log::debug!("blit_image: GPU image blit skipped — no GpuCtx attached");
             return false;
@@ -1963,7 +1964,6 @@ impl<'doc> PageRenderer<'doc> {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
-        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
         let compositor = ImageCompositor::new(
             &self.bitmap,
             self.gstate.current().fill_alpha,
