@@ -410,8 +410,8 @@ pub(super) fn parse_decode(dict: &Dictionary, components: usize) -> Vec<(f64, f6
 /// Apply the per-component Decode remap to an already-8bpc pixel buffer.
 ///
 /// Each sample `s ∈ [0, 255]` is mapped to
-/// `round(dmin * 255 + s * (dmax - dmin))`, clamped to `[0, 255]`.
-/// Identity pairs `(0.0, 1.0)` are short-circuited per component.
+/// `round(dmin * 255 + s * (dmax - dmin))`, clamped to `[0, 255]`, through a
+/// 256-entry table per component (see [`decode_lut`]).
 ///
 /// Takes a `Cow<[u8]>` so borrowed slices (e.g. the 8-bpc path when the Decode
 /// array is identity) avoid a heap copy: the identity fast-path calls
@@ -424,28 +424,48 @@ pub(super) fn apply_decode(data: std::borrow::Cow<[u8]>, decode: &[(f64, f64)]) 
         return data.into_owned();
     }
     let mut pixels = data.into_owned();
-    let components = decode.len();
-    for chunk in pixels.chunks_mut(components) {
-        for (s, &(dmin, dmax)) in chunk.iter_mut().zip(decode.iter()) {
-            if is_identity_pair(dmin, dmax) {
-                continue; // identity — leave sample unchanged
-            }
-            // `s` is in [0, 255]; output = dmin*255 + s*(dmax-dmin), giving
-            // values in [dmin*255, dmax*255] (or swapped when dmax < dmin).
-            // Clamp to [0.0, 255.0] before rounding and casting to u8.
-            let remapped = dmin.mul_add(255.0, f64::from(*s) * (dmax - dmin));
-            // clamp(0..=255) before cast: `as u8` after clamp is always in [0, 255].
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "remapped is clamped to [0.0, 255.0] before cast; round() output is non-negative"
-            )]
-            {
-                *s = remapped.round().clamp(0.0, 255.0) as u8;
+    let luts: Vec<[u8; 256]> = decode
+        .iter()
+        .map(|&(dmin, dmax)| decode_lut(dmin, dmax))
+        .collect();
+    if let [lut] = luts.as_slice() {
+        for s in &mut pixels {
+            *s = lut[usize::from(*s)];
+        }
+    } else {
+        for chunk in pixels.chunks_mut(luts.len()) {
+            for (s, lut) in chunk.iter_mut().zip(&luts) {
+                *s = lut[usize::from(*s)];
             }
         }
     }
     pixels
+}
+
+/// Table of the `/Decode` pair `(dmin, dmax)` over every 8-bit sample `s`:
+/// `round(dmin·255 + s·(dmax − dmin))` clamped to `[0, 255]`, giving values
+/// in `[dmin·255, dmax·255]` (or swapped when `dmax < dmin`).  An identity
+/// pair yields the identity table.
+fn decode_lut(dmin: f64, dmax: f64) -> [u8; 256] {
+    let identity = is_identity_pair(dmin, dmax);
+    std::array::from_fn(|i| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "i indexes a 256-entry table"
+        )]
+        let s = i as u8;
+        if identity {
+            return s;
+        }
+        let remapped = dmin.mul_add(255.0, f64::from(s) * (dmax - dmin));
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "remapped is clamped to [0.0, 255.0] before cast"
+        )]
+        let out = remapped.round().clamp(0.0, 255.0) as u8;
+        out
+    })
 }
 
 /// `true` when `(dmin, dmax)` is `(0, 1)` within 1e-9.  Decode values are
