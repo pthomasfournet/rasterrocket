@@ -494,11 +494,11 @@ impl Decoded<'_> {
                     IccConversion::Alternate(ColorSpace::Cal(cal)) => cal
                         .rgb_shaper()
                         .map_or(RgbConvert::Identity, RgbConvert::Shaper),
-                    IccConversion::Alternate(ColorSpace::Lab { .. }) => RgbConvert::Memo,
+                    IccConversion::Alternate(ColorSpace::Lab(_)) => RgbConvert::Memo,
                     _ => RgbConvert::Identity,
                 }
             }
-            ColorSpace::Lab { .. } | ColorSpace::DeviceN { .. } => RgbConvert::Memo,
+            ColorSpace::Lab(_) | ColorSpace::DeviceN { .. } => RgbConvert::Memo,
             _ => RgbConvert::Identity,
         }
     }

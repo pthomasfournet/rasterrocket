@@ -19,10 +19,10 @@ use crate::resources::icc_shaper::{Mat3, RgbShaper, mat_inverse, mat_mul, srgb_e
 use crate::resources::obj_to_f64;
 
 /// CIE XYZ of the D65 white, `Y = 1`.
-const D65: [f64; 3] = [0.950_47, 1.0, 1.088_83];
+pub(super) const D65: [f64; 3] = [0.950_47, 1.0, 1.088_83];
 
 /// CIE XYZ (D65) → linear sRGB, IEC 61966-2-1.
-const XYZ_D65_TO_LINEAR_SRGB: Mat3 = [
+pub(super) const XYZ_D65_TO_LINEAR_SRGB: Mat3 = [
     [3.240_6, -1.537_2, -0.498_6],
     [-0.968_9, 1.875_8, 0.041_5],
     [0.055_7, -0.204_0, 1.057_0],
@@ -171,7 +171,7 @@ impl CalSpace {
 }
 
 /// The Bradford adaptation from white `src` to D65; `None` when singular.
-fn bradford(src: [f64; 3]) -> Option<Mat3> {
+pub(super) fn bradford(src: [f64; 3]) -> Option<Mat3> {
     let cone =
         |w: [f64; 3]| BRADFORD.map(|row| row[0].mul_add(w[0], row[1].mul_add(w[1], row[2] * w[2])));
     let (s, d) = (cone(src), cone(D65));
@@ -187,7 +187,7 @@ fn bradford(src: [f64; 3]) -> Option<Mat3> {
 }
 
 /// Exactly `N` numbers from array `obj`.
-fn numbers<const N: usize>(obj: &Object) -> Option<[f64; N]> {
+pub(super) fn numbers<const N: usize>(obj: &Object) -> Option<[f64; N]> {
     let arr = obj.as_array()?;
     if arr.len() != N {
         return None;

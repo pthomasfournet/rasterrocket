@@ -609,8 +609,12 @@ mod tests {
         // Three-component tint that the heuristic would interpret as RGB,
         // but Lab interprets very differently.  L=50,a=0,b=0 ≈ mid-grey.
         let doc = empty_doc();
+        let lab = crate::resources::colorspace::resolve(
+            &doc,
+            &pdf::parse_object(b"[/Lab << /WhitePoint [0.9505 1 1.089] >>]", &mut 0).unwrap(),
+        );
         let fill_cs = ColorSpace::Pattern {
-            base: Some(Box::new(ColorSpace::Lab { dict_id: None })),
+            base: Some(Box::new(lab)),
         };
         let tint = resolve_pattern_tint(&doc, &fill_cs, &[50.0, 0.0, 0.0]);
         // sRGB-encoded mid-grey from L*=50 is ~119 (gamma-correct).

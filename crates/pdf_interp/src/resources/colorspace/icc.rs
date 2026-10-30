@@ -62,7 +62,7 @@ impl IccConversion {
                     | ColorSpace::DeviceRgb
                     | ColorSpace::DeviceCmyk
                     | ColorSpace::Cal(_)
-                    | ColorSpace::Lab { .. }
+                    | ColorSpace::Lab(_)
             );
         if !usable {
             log::debug!("colorspace: ICCBased /Alternate {space:?} unusable for /N {n}");

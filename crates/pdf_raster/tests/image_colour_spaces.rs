@@ -228,3 +228,97 @@ fn indexed_image_converts_its_palette_through_the_base_space() {
     assert_ne!(fill, [128, 128, 128]);
     assert_close(img, fill, 1, "Indexed over CalRGB");
 }
+
+/// A Lab space with `/Range [-50 50 -50 50]`.
+const LAB_RANGE: &str = "[/Lab << /WhitePoint [0.9505 1.0 1.089] /Range [-50 50 -50 50] >>]";
+
+#[test]
+fn lab_image_takes_its_range_as_the_default_decode() {
+    // Sample (128, 255, 128): L* 50.2, a* at the top of the range (+50),
+    // b* at the middle (0).  Without the range a* would be +100.
+    let (fill, img) = halves(
+        &fill_and_image("50.2 50 0"),
+        &format!("/CS1 {LAB_RANGE}"),
+        image(LAB_RANGE, &[128, 255, 128]),
+        vec![],
+    );
+    assert!(
+        fill[0] > 150 && fill[0] < 230,
+        "a* 50 is a muted magenta, got {fill:?}"
+    );
+    assert_close(img, fill, 2, "Lab image under /Range");
+    // The same sample under the default range is a saturated a* +100.
+    let (fill, img) = halves(
+        &fill_and_image("50.2 100 0"),
+        &format!("/CS1 {LAB}"),
+        image(LAB, &[128, 255, 128]),
+        vec![],
+    );
+    assert!(fill[0] > 240, "a* 100 saturates red, got {fill:?}");
+    assert_close(img, fill, 2, "Lab image under the default range");
+}
+
+#[test]
+fn lab_image_decode_array_maps_its_samples() {
+    let (fill, img) = halves(
+        &fill_and_image("50.2 20 0"),
+        &format!("/CS1 {LAB}"),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 \
+                 /ColorSpace {LAB} /Decode [0 100 -20 20 -20 20]"
+            ),
+            &[128, 255, 128],
+        ),
+        vec![],
+    );
+    assert_close(img, fill, 2, "Lab image under /Decode");
+}
+
+#[test]
+fn indexed_over_lab_scales_the_palette_to_the_range() {
+    let (fill, img) = halves(
+        &fill_and_image("50.2 50 0"),
+        &format!("/CS1 {LAB_RANGE}"),
+        image(&format!("[/Indexed {LAB_RANGE} 0 <80ff80>]"), &[0]),
+        vec![],
+    );
+    assert_close(img, fill, 2, "Indexed over Lab with /Range");
+}
+
+#[test]
+fn lab_fill_components_are_clipped_to_the_range() {
+    // ISO 32000-2 §8.6.5.4: a*, b* outside /Range are adjusted to the
+    // nearest valid value, so a* 100 in a [-50 50] space paints as a* 50.
+    let (clipped, _) = halves(
+        &fill_and_image("50.2 100 0"),
+        &format!("/CS1 {LAB_RANGE}"),
+        image("/DeviceGray", &[0]),
+        vec![],
+    );
+    let (at_limit, _) = halves(
+        &fill_and_image("50.2 50 0"),
+        &format!("/CS1 {LAB_RANGE}"),
+        image("/DeviceGray", &[0]),
+        vec![],
+    );
+    assert_eq!(clipped, at_limit);
+}
+
+#[test]
+fn lab_white_point_is_adapted_so_neutrals_stay_neutral() {
+    // A D50 Lab space: L* 50 with a* = b* = 0 is a neutral gray after
+    // adaptation, not the warm cast of D50 white seen from D65.
+    const LAB_D50: &str = "[/Lab << /WhitePoint [0.9642 1.0 0.8249] >>]";
+    let (fill, img) = halves(
+        &fill_and_image("50.2 0 0"),
+        &format!("/CS1 {LAB_D50}"),
+        image(LAB_D50, &[128, 128, 128]),
+        vec![],
+    );
+    assert!(
+        fill[0].abs_diff(fill[2]) <= 2 && fill[0].abs_diff(119) <= 3,
+        "neutral mid gray expected, got {fill:?}"
+    );
+    assert_close(img, fill, 2, "D50 Lab image");
+}

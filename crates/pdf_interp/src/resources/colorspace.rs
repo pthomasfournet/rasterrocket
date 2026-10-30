@@ -9,10 +9,11 @@
 //!
 //! # Scope
 //!
-//! Lab parameters and ICC profiles are referenced by [`ObjectId`] and read
-//! when [`ColorSpace::convert_to_rgb`] runs; an ICC profile stream is
-//! compiled once per document into an `icc::IccConversion`.  Separation
-//! and `DeviceN` spaces hold their compiled tint transform
+//! ICC profiles are referenced by [`ObjectId`] and read when
+//! [`ColorSpace::convert_to_rgb`] runs; an ICC profile stream is compiled
+//! once per document into an `icc::IccConversion`.  `CalGray`, `CalRGB`
+//! and Lab parameters are resolved into [`CalSpace`] and [`LabSpace`].
+//! Separation and `DeviceN` spaces hold their compiled tint transform
 //! ([`TintTransform`]) and `Indexed` spaces their palette bytes, whether
 //! given inline or by reference; indirect ones are loaded once per
 //! document.
@@ -25,7 +26,7 @@
 //! | `/DeviceRGB`, `/RGB` (Table 89), `/CalRGB` | [`ColorSpace::DeviceRgb`] |
 //! | `/DeviceCMYK`, `/CMYK` (Table 89) | [`ColorSpace::DeviceCmyk`] |
 //! | `[/CalGray ...]`, `[/CalRGB ...]` | [`ColorSpace::Cal`]; the device space when the parameters are invalid |
-//! | `[/Lab ...]`         | [`ColorSpace::Lab`] |
+//! | `[/Lab ...]`         | [`ColorSpace::Lab`]; D65 and `[-100 100 -100 100]` when the parameters are invalid |
 //! | `[/ICCBased <ref>]`  | [`ColorSpace::IccBased`] |
 //! | `[/Indexed ...]`, `[/I ...]` (Table 93) | [`ColorSpace::Indexed`] |
 //! | `/Pattern` or `[/Pattern <base>]` | [`ColorSpace::Pattern`] |
@@ -35,31 +36,26 @@
 //!
 //! # Why the lazy `ObjectId` shape
 //!
-//! Resolving a Lab whitepoint or ICC profile up front would force the
-//! graphics state to carry several kilobytes of profile data per push/pop.
-//! Storing the `ObjectId` keeps the gstate small and lets the conversion
-//! path dereference only when it actually needs the data.  Tint transforms
-//! and palettes are shared through `Arc`, so they cost one pointer.
-//!
-//! # Current limitations
-//!
-//! - **Lab whitepoint**: `convert_to_rgb` hard-codes D65; the per-document
-//!   whitepoint stored in `Lab::dict_id` isn't read yet.  Affects rare
-//!   prepress PDFs that use D50 or other reference whites.
+//! Resolving an ICC profile up front would force the graphics state to
+//! carry several kilobytes of profile data per push/pop.  Storing the
+//! `ObjectId` keeps the gstate small and lets the conversion path
+//! dereference only when it actually needs the data.  Tint transforms and
+//! palettes are shared through `Arc`, so they cost one pointer.
 
 use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 
-use super::icc_shaper::srgb_encode;
 use super::shading::function::Function;
 use crate::resources::dict_ext::DictExt as _;
 
 mod cal;
 pub(crate) mod icc;
+mod lab;
 
 pub use cal::CalSpace;
 use icc::IccConversion;
+pub use lab::LabSpace;
 
 /// Maximum recursion depth for nested colour-space chains
 /// (Indexed/Pattern/Separation/DeviceN's `alternate` base). PDF spec
@@ -82,13 +78,8 @@ pub enum ColorSpace {
     DeviceCmyk,
     /// `CalGray` or `CalRGB` with valid parameters. PDF §8.6.5.2–3.
     Cal(Box<CalSpace>),
-    /// CIE Lab. PDF §8.6.5.4. Three components; whitepoint + range live
-    /// in the dict reachable via `dict_id` when we need them.
-    Lab {
-        /// `Reference` to the Lab parameter dictionary (whitepoint, range);
-        /// `None` if the parameters were inlined or unparseable.
-        dict_id: Option<ObjectId>,
-    },
+    /// CIE Lab with its `WhitePoint` and `Range`. PDF §8.6.5.4.
+    Lab(Box<LabSpace>),
     /// ICC-profile-based space. PDF §8.6.5.5. `n` is the channel count
     /// (1, 3, or 4) read from the profile stream's `/N` entry.
     IccBased {
@@ -157,7 +148,7 @@ impl ColorSpace {
             // Single-component spaces: scalar grey, palette index, or single
             // spot-colour tint.  All take exactly one operand on `scn`.
             Self::DeviceGray | Self::Indexed { .. } | Self::Separation { .. } => 1,
-            Self::DeviceRgb | Self::Lab { .. } => 3,
+            Self::DeviceRgb | Self::Lab(_) => 3,
             Self::DeviceCmyk => 4,
             Self::Cal(cal) => cal.ncomponents(),
             Self::IccBased { n, .. } => usize::from(*n),
@@ -194,9 +185,9 @@ impl ColorSpace {
     ///   helpers; `DeviceCmyk` via the process-ink model of `color::cmyk`.
     /// - `Cal`: gamma and matrix to XYZ, Bradford adaptation from the
     ///   space's white point to D65, sRGB encoding (see [`CalSpace`]).
-    /// - `Lab`: CIE Lab → D65 XYZ → sRGB through the standard formulae.
-    ///   Whitepoint defaults to D65 (the spec's most common choice); the
-    ///   per-document whitepoint stored in `dict_id` is not yet applied.
+    /// - `Lab`: `a*` and `b*` clipped to the `Range`, CIE Lab → XYZ relative
+    ///   to the `WhitePoint`, Bradford adaptation to D65, sRGB encoding (see
+    ///   [`LabSpace`]).
     /// - `IccBased`: converts through the `icc::IccConversion` compiled
     ///   from the profile stream `stream_id`: shaper tables for a gray or
     ///   RGB matrix/TRC profile, otherwise a `moxcms` 8-bit transform of a
@@ -234,7 +225,7 @@ impl ColorSpace {
                 color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3])
             }
             Self::Cal(cal) => cal.convert(comps),
-            Self::Lab { .. } => lab_to_srgb(comps[0], comps[1], comps[2]),
+            Self::Lab(lab) => lab.convert(comps),
             Self::IccBased { n, stream_id } => stream_id
                 .and_then(|id| IccConversion::load(doc, id, *n))
                 .and_then(|conv| conv.convert(doc, comps))
@@ -279,42 +270,6 @@ impl ColorSpace {
     }
 }
 
-/// CIE Lab → sRGB conversion through D65 XYZ. Per CIE 1976 + IEC 61966-2-1.
-///
-/// PDF Lab encodes `L* ∈ [0, 100]`, `a* / b* ∈ [-128, 127]` per the spec's
-/// Range default; callers pass the post-Decode normalised values directly.
-fn lab_to_srgb(l_star: f64, a_star: f64, b_star: f64) -> [u8; 3] {
-    // 1. Lab → XYZ (D65 whitepoint).
-    const XN: f64 = 0.95047;
-    const YN: f64 = 1.0;
-    const ZN: f64 = 1.08883;
-    let fy = (l_star + 16.0) / 116.0;
-    let fx = a_star / 500.0 + fy;
-    let fz = fy - b_star / 200.0;
-    let x = XN * lab_f_inv(fx);
-    let y = YN * lab_f_inv(fy);
-    let z = ZN * lab_f_inv(fz);
-
-    // 2. XYZ (D65) → linear sRGB (BT.709 / sRGB matrix).
-    let r_lin = x.mul_add(3.2406, y.mul_add(-1.5372, z * -0.4986));
-    let g_lin = x.mul_add(-0.9689, y.mul_add(1.8758, z * 0.0415));
-    let b_lin = x.mul_add(0.0557, y.mul_add(-0.2040, z * 1.0570));
-
-    // 3. Linear → sRGB gamma.
-    color::convert::rgb_to_bytes(srgb_encode(r_lin), srgb_encode(g_lin), srgb_encode(b_lin))
-}
-
-/// Inverse of the CIE Lab `f` function. `δ = 6/29`; threshold `t > δ` cubes,
-/// else uses the linear segment.
-fn lab_f_inv(t: f64) -> f64 {
-    const DELTA: f64 = 6.0 / 29.0;
-    if t > DELTA {
-        t * t * t
-    } else {
-        3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
-    }
-}
-
 /// Expand a single grey byte into an opaque RGB triple `[v, v, v]`.
 const fn gray_byte_to_rgb(v: u8) -> [u8; 3] {
     [v, v, v]
@@ -353,14 +308,16 @@ impl ColorSpace {
     /// The default `Decode` array of an image in this space (PDF §8.9.5.2,
     /// Table 90): one `(dmin, dmax)` pair per component.  `[0, 1]` for
     /// device, CIE-based, ICC-based and tint spaces; `L*` in `[0, 100]`
-    /// and `a*`, `b*` over the Lab `Range` (`[-100, 100]` by default); and
-    /// `[0, 2^bpc − 1]` for `Indexed`, whose samples are palette indices at
-    /// `bpc` bits.
+    /// and `a*`, `b*` over the Lab `Range`; and `[0, 2^bpc − 1]` for
+    /// `Indexed`, whose samples are palette indices at `bpc` bits.
     #[must_use]
     pub fn default_decode(&self, bpc: u32) -> Vec<(f64, f64)> {
         match self {
             Self::Indexed { .. } => vec![(0.0, f64::from((1u32 << bpc.min(16)) - 1))],
-            Self::Lab { .. } => vec![(0.0, 100.0), (-100.0, 100.0), (-100.0, 100.0)],
+            Self::Lab(lab) => {
+                let [amin, amax, bmin, bmax] = lab.range();
+                vec![(0.0, 100.0), (amin, amax), (bmin, bmax)]
+            }
             _ => vec![(0.0, 1.0); self.ncomponents()],
         }
     }
@@ -554,9 +511,7 @@ fn resolve_array(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         b"CalGray" => resolve_cal(doc, arr, 1, ColorSpace::DeviceGray),
         b"CalRGB" => resolve_cal(doc, arr, 3, ColorSpace::DeviceRgb),
         b"DeviceCMYK" => ColorSpace::DeviceCmyk,
-        b"Lab" => ColorSpace::Lab {
-            dict_id: arr.get(1).and_then(reference_id),
-        },
+        b"Lab" => ColorSpace::Lab(Box::new(LabSpace::resolve(doc, arr.get(1)))),
         b"ICCBased" => resolve_icc_based(doc, arr.get(1), depth),
         b"Indexed" | b"I" => resolve_indexed(doc, arr, depth),
         b"Pattern" => ColorSpace::Pattern {
@@ -754,26 +709,31 @@ mod tests {
         assert_eq!(resolve(&doc, &name_obj(b"Bogus")), ColorSpace::DeviceGray);
     }
 
-    #[test]
-    fn lab_array_captures_dict_reference() {
-        let doc = empty_doc();
-        let arr = vec![name_obj(b"Lab"), Object::Reference((5, 0))];
-        assert_eq!(
-            resolve(&doc, &Object::Array(arr)),
-            ColorSpace::Lab {
-                dict_id: Some((5, 0)),
-            },
-        );
+    /// `[/Lab << /WhitePoint [0.9505 1 1.089] >>]`.
+    fn lab_d65() -> ColorSpace {
+        parse_space(&empty_doc(), "[/Lab << /WhitePoint [0.9505 1 1.089] >>]")
     }
 
     #[test]
-    fn lab_array_with_inline_dict_has_no_id() {
-        let doc = empty_doc();
-        let arr = vec![name_obj(b"Lab"), Object::Dictionary(pdf::Dictionary::new())];
-        assert_eq!(
-            resolve(&doc, &Object::Array(arr)),
-            ColorSpace::Lab { dict_id: None },
+    fn lab_array_resolves_its_parameters_by_value_or_reference() {
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            "<< /WhitePoint [0.9505 1 1.089] /Range [-50 50 -50 50] >>",
+        )]);
+        let by_ref = resolve(
+            &doc,
+            &Object::Array(vec![name_obj(b"Lab"), Object::Reference((4, 0))]),
         );
+        let inline = parse_space(
+            &doc,
+            "[/Lab << /WhitePoint [0.9505 1 1.089] /Range [-50 50 -50 50] >>]",
+        );
+        assert_eq!(by_ref, inline);
+        let ColorSpace::Lab(space) = &by_ref else {
+            panic!("Lab expected");
+        };
+        assert_eq!(space.range(), [-50.0, 50.0, -50.0, 50.0]);
+        assert_ne!(by_ref, lab_d65());
     }
 
     #[test]
@@ -914,7 +874,7 @@ mod tests {
         assert_eq!(ColorSpace::DeviceGray.ncomponents(), 1);
         assert_eq!(ColorSpace::DeviceRgb.ncomponents(), 3);
         assert_eq!(ColorSpace::DeviceCmyk.ncomponents(), 4);
-        assert_eq!(ColorSpace::Lab { dict_id: None }.ncomponents(), 3);
+        assert_eq!(lab_d65().ncomponents(), 3);
         assert_eq!(
             ColorSpace::IccBased {
                 n: 4,
@@ -1010,7 +970,7 @@ mod tests {
     fn convert_lab_black_is_black() {
         let doc = empty_doc();
         // L*=0 ≡ black; a*/b* irrelevant.
-        let black = ColorSpace::Lab { dict_id: None }.convert_to_rgb(&doc, &[0.0, 0.0, 0.0]);
+        let black = lab_d65().convert_to_rgb(&doc, &[0.0, 0.0, 0.0]);
         assert_eq!(black, [0, 0, 0]);
     }
 
@@ -1019,7 +979,7 @@ mod tests {
         let doc = empty_doc();
         // L*=100, a*=b*=0 ≡ D65 white.  sRGB encoding may not be exactly 255
         // due to floating-point rounding; allow ±2 LSB.
-        let [r, g, b] = ColorSpace::Lab { dict_id: None }.convert_to_rgb(&doc, &[100.0, 0.0, 0.0]);
+        let [r, g, b] = lab_d65().convert_to_rgb(&doc, &[100.0, 0.0, 0.0]);
         assert!(
             r >= 253 && g >= 253 && b >= 253,
             "expected ~white, got [{r},{g},{b}]"
