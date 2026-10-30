@@ -196,3 +196,48 @@ fn a_later_group_composites_only_its_own_content() {
         px[2]
     );
 }
+
+/// A blend mode inside non-isolated groups nested three deep blends with
+/// the page under the outermost group and with each enclosing group's
+/// content (ISO 32000-2 §11.4.8): the multiplied square turns grey on the
+/// page's grey and black on the outer group's cyan bar.
+#[test]
+fn a_blend_mode_in_nested_non_isolated_groups_sees_every_ancestor() {
+    let form = |content: &str, xobjects: &str| {
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 {W} {H}] \
+                 /Group << /S /Transparency /CS /DeviceRGB >> \
+                 /Resources << /ExtGState << /M << /BM /Multiply >> >> \
+                 /XObject << {xobjects} >> >>"
+            ),
+            content.as_bytes(),
+        )
+    };
+    let pdf = assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
+             /Resources << /XObject << /A 5 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream_object("", format!("0.5 g 0 0 {W} {H} re f /A Do").as_bytes()),
+        form("0 1 1 rg 60 0 20 100 re f /B Do", "/B 6 0 R"),
+        form("/C Do", "/C 7 0 R"),
+        form("/M gs 1 0 0 rg 20 20 70 60 re f", ""),
+    ]);
+    let px = rgb_at(pdf, &[(40, 50), (70, 50), (85, 50), (10, 10)]);
+    assert_eq!(px[0], [128, 0, 0], "red multiplied onto the page's grey");
+    assert_eq!(
+        px[1],
+        [0, 0, 0],
+        "red multiplied onto the outer group's cyan"
+    );
+    assert_eq!(
+        px[2],
+        [128, 0, 0],
+        "red multiplied onto grey right of the bar"
+    );
+    assert_eq!(px[3], GREY, "unpainted pixel");
+}

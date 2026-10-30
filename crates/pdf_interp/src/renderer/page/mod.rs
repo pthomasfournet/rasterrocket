@@ -1704,7 +1704,13 @@ impl<'doc> PageRenderer<'doc> {
             .and_then(|tg| self.group_params(form.bbox, tg))
             .map(|params| {
                 let bitmap = self.group_bitmap();
-                begin_group(&self.bitmap, &self.gstate.current().clip, params, bitmap)
+                begin_group(
+                    &self.bitmap,
+                    self.group_backdrop.as_deref(),
+                    &self.gstate.current().clip,
+                    params,
+                    bitmap,
+                )
             });
 
         // Swap in the group bitmap when present.  PDF §11.6.6: the alpha

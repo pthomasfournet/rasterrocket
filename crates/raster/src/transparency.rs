@@ -20,7 +20,10 @@
 //! colour and alpha.  A non-isolated group also keeps a copy of the backdrop
 //! under it ([`GroupBitmap::backdrop`]), which blend modes applied inside
 //! the group consult through [`crate::pipe::GroupBackdrop`]; compositing
-//! the group back is the same for both kinds (ISO 32000-2 §11.4.7).
+//! the group back is the same for both kinds (ISO 32000-2 §11.4.7).  When the
+//! parent is itself a non-isolated group, the backdrop is the parent's
+//! content composited over the parent's own backdrop, so it reaches back to
+//! the nearest isolated ancestor or the page (§11.4.8).
 //!
 //! Knockout groups clear the accumulated alpha on each object; non-knockout groups
 //! accumulate.
@@ -40,6 +43,7 @@
 
 use crate::bitmap::Bitmap;
 use crate::clip::Clip;
+use crate::pipe::general::{MAX_COMPS, union_colour};
 use crate::pipe::{self, GroupBackdrop, PipeSrc, PipeState};
 use color::Pixel;
 use color::convert::div255;
@@ -99,7 +103,7 @@ pub struct GroupBitmap<P: Pixel> {
     /// Compositing parameters; the bounding box is clamped to the parent.
     pub params: GroupParams,
     /// For a non-isolated group: the parent's pixels under the region when
-    /// the group was opened.
+    /// the group was opened, composited over the parent's own backdrop.
     pub backdrop: Option<Backdrop>,
 }
 
@@ -119,25 +123,55 @@ pub struct Backdrop {
 }
 
 impl Backdrop {
-    /// Copy the region `x0..x1 × y0..y1` (half-open) of `parent`.
-    fn copy<P: Pixel>(parent: &Bitmap<P>, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> Self {
+    /// Copy the region `x0..x1 × y0..y1` (half-open) of `parent`, each
+    /// pixel composited over `under`, the parent's own backdrop, where that
+    /// covers it.
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "the region lies within the parent, whose dimensions are below 2^31"
+    )]
+    fn copy<P: Pixel>(
+        parent: &Bitmap<P>,
+        under: Option<&Self>,
+        (x0, y0, x1, y1): (u32, u32, u32, u32),
+    ) -> Self {
         let ncomps = P::BYTES;
         let (width, height) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let mut colour = Vec::with_capacity(width * height * ncomps);
         let mut alpha = parent
             .has_alpha()
             .then(|| Vec::with_capacity(width * height));
+        let under = under.map(Self::as_pipe_backdrop);
         for y in y0..y1 {
             let (cx0, cx1) = (x0 as usize * ncomps, x1 as usize * ncomps);
+            let row_start = colour.len();
             colour.extend_from_slice(&parent.row_bytes(y)[cx0..cx1]);
-            if let (Some(a), Some(row)) = (alpha.as_mut(), parent.alpha_row(y)) {
-                a.extend_from_slice(&row[x0 as usize..x1 as usize]);
+            let (Some(a), Some(row)) = (alpha.as_mut(), parent.alpha_row(y)) else {
+                continue;
+            };
+            let alpha_start = a.len();
+            a.extend_from_slice(&row[x0 as usize..x1 as usize]);
+            let Some(under) = under else {
+                continue;
+            };
+            let colours = colour[row_start..].chunks_exact_mut(ncomps);
+            for ((x, c), a) in (x0..x1).zip(colours).zip(&mut a[alpha_start..]) {
+                let Some((c_0, a_0)) = under.pixel(x as i32, y as i32, ncomps) else {
+                    continue;
+                };
+                let mut out = [0u8; MAX_COMPS];
+                let out = &mut out[..ncomps];
+                let a_union = union_colour(c, u32::from(*a), c_0, u32::from(a_0), out);
+                c.copy_from_slice(out);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "union_colour returns an alpha of at most 255"
+                )]
+                {
+                    *a = a_union as u8;
+                }
             }
         }
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "the region lies within the parent, whose dimensions are below 2^31"
-        )]
         let (x0, y0) = (x0 as i32, y0 as i32);
         Self {
             colour,
@@ -194,7 +228,9 @@ impl<P: Pixel> GroupBitmap<P> {
 /// by [`paint_group`] or [`discard_group`].
 ///
 /// - `parent` is the current destination bitmap.  For a non-isolated group its
-///   pixels inside the region are kept as the group's backdrop.
+///   pixels inside the region are kept as the group's backdrop, composited
+///   over `parent_backdrop`, the backdrop of `parent` when it is itself a
+///   non-isolated group.
 /// - The returned [`GroupBitmap`] becomes the new render target until
 ///   [`paint_group`] or [`discard_group`] is called.  It has the parent's
 ///   dimensions, so painting into it uses the parent's device coordinates.
@@ -210,6 +246,7 @@ impl<P: Pixel> GroupBitmap<P> {
 #[must_use]
 pub fn begin_group<P: Pixel>(
     parent: &Bitmap<P>,
+    parent_backdrop: Option<&Backdrop>,
     clip: &Clip,
     mut params: GroupParams,
     bitmap: Bitmap<P>,
@@ -244,7 +281,7 @@ pub fn begin_group<P: Pixel>(
         backdrop: None,
     };
     if !group.params.isolated {
-        group.backdrop = Some(Backdrop::copy(parent, group.region()));
+        group.backdrop = Some(Backdrop::copy(parent, parent_backdrop, group.region()));
     }
     group
 }
@@ -455,6 +492,7 @@ mod tests {
         let params = default_params(0, 0, 7, 7);
         let group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -484,6 +522,7 @@ mod tests {
         params.isolated = false;
         let group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -508,6 +547,7 @@ mod tests {
         assert!(
             begin_group::<Rgb8>(
                 &parent,
+                None,
                 &clip,
                 default_params(0, 0, 3, 3),
                 Bitmap::new(parent.width, parent.height, 1, true)
@@ -515,6 +555,60 @@ mod tests {
             .backdrop
             .is_none(),
             "an isolated group has no backdrop"
+        );
+    }
+
+    /// A non-isolated group nested in another takes as backdrop its
+    /// parent's content composited over the parent's own backdrop.
+    #[test]
+    fn nested_non_isolated_backdrop_reaches_the_outer_backdrop() {
+        let mut page: Bitmap<Rgb8> = Bitmap::new(4, 1, 4, true);
+        for (px, c) in page.row_bytes_mut(0).chunks_exact_mut(3).zip(0u8..) {
+            px.copy_from_slice(&[c * 10, 100, 200]);
+        }
+        if let Some(a) = page.alpha_plane_mut() {
+            a.fill(255);
+        }
+        let clip = make_clip(4, 1);
+        let mut params = default_params(0, 0, 3, 0);
+        params.isolated = false;
+        let outer = begin_group::<Rgb8>(
+            &page,
+            None,
+            &clip,
+            params.clone(),
+            Bitmap::new(4, 1, 1, true),
+        );
+        let mut outer_bitmap = outer.bitmap;
+        // The outer group paints opaque white at x = 1 and half-alpha
+        // black at x = 2.
+        outer_bitmap.row_bytes_mut(0)[3..6].fill(255);
+        let alpha = outer_bitmap.alpha_plane_mut().expect("alpha plane");
+        alpha[1] = 255;
+        alpha[2] = 128;
+        let inner = begin_group::<Rgb8>(
+            &outer_bitmap,
+            outer.backdrop.as_ref(),
+            &clip,
+            params,
+            Bitmap::new(4, 1, 1, true),
+        );
+        let backdrop = inner.backdrop.expect("backdrop kept");
+        let backdrop = backdrop.as_pipe_backdrop();
+        assert_eq!(
+            backdrop.pixel(0, 0, 3),
+            Some((&[0u8, 100, 200][..], 255)),
+            "nothing painted: the page"
+        );
+        assert_eq!(
+            backdrop.pixel(1, 0, 3),
+            Some((&[255u8, 255, 255][..], 255)),
+            "opaque content hides the page"
+        );
+        assert_eq!(
+            backdrop.pixel(2, 0, 3),
+            Some((&[9u8, 49, 99][..], 255)),
+            "half-alpha black over the page"
         );
     }
 
@@ -528,6 +622,7 @@ mod tests {
         let params = default_params(1, 1, 2, 2); // 2×2 group at (1,1)
         let mut group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -571,6 +666,7 @@ mod tests {
         let pipe = simple_pipe();
         let mut group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             default_params(5, 6, 7, 7),
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -601,6 +697,7 @@ mod tests {
         let params = default_params(0, 0, 3, 3);
         let mut group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -636,6 +733,7 @@ mod tests {
         let clip = Clip::new(2.0, 1.0, 6.0, 5.0, false);
         let group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             default_params(0, 0, 4, 7),
             Bitmap::new(8, 8, 1, true),
@@ -652,6 +750,7 @@ mod tests {
         params.soft_mask_type = SoftMaskType::Alpha;
         let mut group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -678,6 +777,7 @@ mod tests {
         params.soft_mask_type = SoftMaskType::Luminosity;
         let mut group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -711,6 +811,7 @@ mod tests {
         let params = default_params(0, 0, 0, 0); // 1×1 group
         let group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -734,6 +835,7 @@ mod tests {
         params.soft_mask_type = SoftMaskType::Luminosity;
         let mut group = begin_group::<Cmyk8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),
@@ -761,6 +863,7 @@ mod tests {
         let params = default_params(0, 0, i32::MAX, i32::MAX);
         let group = begin_group::<Rgb8>(
             &parent,
+            None,
             &clip,
             params,
             Bitmap::new(parent.width, parent.height, 1, true),

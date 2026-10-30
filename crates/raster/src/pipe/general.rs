@@ -35,7 +35,7 @@ use crate::types::BlendMode;
 use color::Pixel;
 use color::convert::div255;
 
-const MAX_COMPS: usize = 8; // DeviceN8: 4 CMYK + 4 spot = 8 bytes
+pub(crate) const MAX_COMPS: usize = 8; // DeviceN8: 4 CMYK + 4 spot = 8 bytes
 
 // Per-thread scratch buffer for pattern spans — grow-never-shrink.
 thread_local! {
@@ -378,7 +378,7 @@ fn compute_a_result(a_src: u32, a_dst: u32, shape: u32, knockout: bool) -> u32 {
 /// Write into `out` the colour of a group's content (`c_dst`, alpha `a_dst`)
 /// composited over its backdrop (`c_0`, alpha `a_0`) and return the alpha
 /// of that union.  Black where the union is transparent.
-fn union_colour(c_dst: &[u8], a_dst: u32, c_0: &[u8], a_0: u32, out: &mut [u8]) -> u32 {
+pub(crate) fn union_colour(c_dst: &[u8], a_dst: u32, c_0: &[u8], a_0: u32, out: &mut [u8]) -> u32 {
     let a_union = (a_dst + a_0 - u32::from(div255(a_dst * a_0))).min(255);
     if a_union == 0 {
         out.fill(0);
