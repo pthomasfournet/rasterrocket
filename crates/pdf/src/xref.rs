@@ -112,11 +112,13 @@ fn read_xref_strict(data: &[u8]) -> Result<XrefTable, PdfError> {
     {
         let trailer = read_xref_section(data, offset, &mut table)?;
         merge_trailer(&trailer, &mut table);
+        // The dictionary of a hybrid section's `/XRefStm` stream is not a
+        // trailer: the section's own trailer is the document's (§7.5.8.4),
+        // and the stream contributes entries only.
         if let Some(stm) = offset_entry(&trailer, b"XRefStm")
             && visited.insert(stm)
         {
-            let stream_trailer = read_xref_section(data, stm, &mut table)?;
-            merge_trailer(&stream_trailer, &mut table);
+            let _ = read_xref_section(data, stm, &mut table)?;
         }
         next = offset_entry(&trailer, b"Prev");
     }
@@ -666,6 +668,12 @@ startxref
     /// new entry while its `/Prev` section carries the old one.  Returns the
     /// file and the two header offsets.
     fn hybrid_file() -> (Vec<u8>, u64, u64) {
+        hybrid_file_with("")
+    }
+
+    /// [`hybrid_file`] with `stream_extra` appended to the `/XRefStm`
+    /// stream's dictionary.
+    fn hybrid_file_with(stream_extra: &str) -> (Vec<u8>, u64, u64) {
         let mut data = b"%PDF-1.7\n".to_vec();
         let old = append(&mut data, b"7 0 obj\n(old)\nendobj\n");
         let xref1 = append(
@@ -673,8 +681,10 @@ startxref
             &classic_section(7, &[(old as u64, 0, b'n')], "<</Size 8/Root 1 0 R>>"),
         );
         let new = append(&mut data, b"7 0 obj\n(new)\nendobj\n");
-        let mut stream =
-            b"9 0 obj\n<</Type/XRef/Size 10/W[1 4 1]/Index[7 1]/Length 6>>\nstream\n\x01".to_vec();
+        let mut stream = format!(
+            "9 0 obj\n<</Type/XRef/Size 10/W[1 4 1]/Index[7 1]/Length 6{stream_extra}>>\nstream\n\x01"
+        )
+        .into_bytes();
         stream.extend_from_slice(&u32::try_from(new).expect("small").to_be_bytes());
         stream.extend_from_slice(b"\x00\nendstream\nendobj\n");
         let stm = append(&mut data, &stream);
@@ -704,6 +714,18 @@ startxref
             offset, new,
             "the /XRefStm entry wins over /Prev (old at {old})"
         );
+    }
+
+    /// The `/XRefStm` stream's dictionary does not enter the trailer: a key
+    /// only it carries, such as an `/Encrypt` left behind when the trailer's
+    /// was removed, is not the document's.
+    #[test]
+    fn hybrid_xrefstm_dictionary_is_not_the_trailer() {
+        let (data, _, _) = hybrid_file_with("/Encrypt 5 0 R/Info 6 0 R");
+        let table = read_xref_strict(&data).expect("hybrid file parses");
+        assert!(!table.trailer.contains_key(b"Encrypt"));
+        assert!(!table.trailer.contains_key(b"Info"));
+        assert!(table.trailer.contains_key(b"Root"));
     }
 
     /// A newer section's free entry is recorded, so the older section's
