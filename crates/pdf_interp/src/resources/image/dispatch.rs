@@ -15,7 +15,7 @@ use crate::resources::dict_ext::DictExt as _;
 use super::codecs::{JpxOptions, decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
 use super::colorspace::{ImageColour, Samples};
 use super::raw::{apply_stencil_decode, decode_raw};
-use super::smask::colour_key_mask;
+use super::smask::{colour_key_mask, colour_key_mask_with};
 use super::{
     ImageDecodeCtx, ImageDescriptor, ImageFilter, filter_name, image_filter_chain,
     is_transport_filter, terminal_decode_parms,
@@ -143,7 +143,8 @@ pub(super) fn decode_image_stream<
         && !matches!(image_filter, ImageFilter::Raw | ImageFilter::Flate)
         && let Some(Object::Array(ranges)) = dict.get(b"Mask")
     {
-        samples.smask = codec_colour_key_mask(&samples, ranges);
+        let bilevel = matches!(image_filter, ImageFilter::CcittFax | ImageFilter::Jbig2);
+        samples.smask = codec_colour_key_mask(&samples, ranges, bilevel);
         if samples.smask.is_none() {
             log::warn!(
                 "image: colour-key /Mask malformed or mismatched — blitting image without mask"
@@ -165,9 +166,15 @@ pub(super) fn decode_image_stream<
 }
 
 /// The colour-key mask (§8.9.6.4) of a codec's host-resident samples.
+/// A `bilevel` codec's samples are one bit each, expanded to `0x00` and
+/// `0xFF`, so its ranges are compared with the bit values.
 /// Device-resident samples cannot be range-tested; the mask is dropped
 /// with a warning rather than silently.
-fn codec_colour_key_mask(samples: &Samples, ranges: &[Object]) -> Option<super::SoftMask> {
+fn codec_colour_key_mask(
+    samples: &Samples,
+    ranges: &[Object],
+    bilevel: bool,
+) -> Option<super::SoftMask> {
     let super::colorspace::Layout::Color(n) = samples.layout else {
         return None;
     };
@@ -177,5 +184,14 @@ fn codec_colour_key_mask(samples: &Samples, ranges: &[Object]) -> Option<super::
         );
         return None;
     };
+    if bilevel {
+        let npix = (samples.width as usize).checked_mul(samples.height as usize)?;
+        if bytes.len() < npix {
+            return None;
+        }
+        return colour_key_mask_with(ranges, 1, samples.width, samples.height, |p, _| {
+            u32::from(bytes[p] != 0)
+        });
+    }
     colour_key_mask(ranges, bytes, usize::from(n), samples.width, samples.height)
 }

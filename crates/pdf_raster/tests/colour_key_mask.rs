@@ -89,3 +89,32 @@ fn colour_key_compares_stored_samples() {
         assert_eq!(masked(entries, data), (true, false), "{name}");
     }
 }
+
+/// A bilevel codec's samples are one bit each, so its key ranges are
+/// compared with the bit values, not with the bytes the decoder expands
+/// them to.
+#[test]
+fn colour_key_on_a_bilevel_codec_compares_one_bit_samples() {
+    // Group 4, one row of two pixels: VL1 (a white pixel) then V0 (a black
+    // pixel to the end of the row), then EOFB.  Under the default
+    // `BlackIs1 false` the white pixel is sample 1.
+    let g4 = [0x50, 0x01, 0x00, 0x10];
+    assert_eq!(
+        masked(
+            "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode \
+             /DecodeParms << /K -1 /Columns 2 /Rows 1 >> /Mask [1 1]",
+            &g4
+        ),
+        (true, false),
+        "CCITT G4, /Mask [1 1] masks the white sample"
+    );
+    assert_eq!(
+        masked(
+            "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode \
+             /DecodeParms << /K -1 /Columns 2 /Rows 1 >> /Mask [0 0]",
+            &g4
+        ),
+        (false, true),
+        "CCITT G4, /Mask [0 0] masks the black sample"
+    );
+}
