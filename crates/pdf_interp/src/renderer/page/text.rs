@@ -11,6 +11,7 @@ use super::text_ops::{
 };
 use crate::resources::cmap::DecodedCode;
 use color::Rgb8;
+use font::face::FontFace;
 use raster::{
     glyph::{GlyphBitmap, fill_glyph},
     pipe::PipeSrc,
@@ -170,7 +171,10 @@ impl PageRenderer<'_> {
             let glyph_cache = &glyph_cache;
 
             // Load (or retrieve cached) face — mutable borrow of font_cache.
-            let Some(face) = self.font_cache.get_or_load(&font, &font_name, trm) else {
+            let Some(face) = self
+                .font_cache
+                .get_or_load_showing(&font, &font_name, trm, bytes)
+            else {
                 return;
             };
             let fill_as_path = do_fill && (pattern_fill || face.prefers_path_fill());
@@ -196,6 +200,14 @@ impl PageRenderer<'_> {
                 let width = advance.map_or(0.0, |w| (w * 1000.0).round()) as i32;
                 width
             };
+            // The advance of a drawn glyph `(face, selector, by_gid)`.
+            let advance_of = |(face, selector, by_gid): (&FontFace, u32, bool)| {
+                if by_gid {
+                    face.glyph_advance_by_gid(selector)
+                } else {
+                    face.glyph_advance(selector)
+                }
+            };
 
             // Shared helper: push a rasterized glyph into `records` (when
             // filling) and append its outline to `stroke_outline` (when
@@ -218,22 +230,17 @@ impl PageRenderer<'_> {
             //   used directly — re-resolving it through the Unicode charmap
             //   mis-maps every glyph to `.notdef` for a CID-keyed CFF subset
             //   (whose charmap is absent/unrelated), rendering a blank page.
-            let mut push_glyph = |char_code_for_path: u32,
+            //
+            // `face` is the face that draws the glyph: the font's own, or the
+            // fallback face of a code its substitute lacks, whose glyph is
+            // always selected by index.
+            let mut push_glyph = |face: &FontFace,
+                                  char_code_for_path: u32,
                                   gid: u32,
                                   by_gid: bool,
                                   dx: f64,
                                   dy: f64,
                                   x_scale: f64| {
-                // A substitute's `.notdef` is never the document's
-                // glyph: a code it cannot draw leaves a gap.
-                let notdef = if by_gid {
-                    gid == 0
-                } else {
-                    face.glyph_index(char_code_for_path) == 0
-                };
-                if face.substitute && notdef {
-                    return;
-                }
                 let (pen_x, x_frac, pen_y) = glyph_placement(dx, dy);
                 let bmp = if fill_as_bitmap {
                     if by_gid {
@@ -294,21 +301,30 @@ impl PageRenderer<'_> {
                     // A substitute face for a composite font carries a
                     // CID-indexed glyph table (vertical forms included); an
                     // embedded one is selected through `CIDToGIDMap` / its
-                    // charset, with its vertical form substituted here.
-                    let by_gid = face.code_to_gid.is_empty();
-                    let mut gid = if by_gid { enc.gid_for_cid(cid) } else { cid };
-                    if by_gid && enc.vertical {
-                        gid = face.program().vertical_selector(gid);
-                    }
-                    let (x_scale, centre) = if fit {
-                        let advance = if by_gid {
-                            face.glyph_advance_by_gid(gid)
-                        } else {
-                            face.glyph_advance(gid)
-                        };
-                        fit_to_advance(enc.width_for_cid(cid), face_width(advance))
-                    } else {
-                        (1.0, 0.0)
+                    // charset, with its vertical form substituted here.  A
+                    // substitute's `.notdef` is never the document's glyph:
+                    // a CID neither it nor a fallback draws leaves a gap.
+                    let drawn = face
+                        .fallback_glyph(code, cid)
+                        .map(|(fallback, gid)| (fallback, gid, true))
+                        .or_else(|| {
+                            let by_gid = face.code_to_gid.is_empty();
+                            let mut gid = if by_gid { enc.gid_for_cid(cid) } else { cid };
+                            if by_gid && enc.vertical {
+                                gid = face.program().vertical_selector(gid);
+                            }
+                            let notdef = if by_gid {
+                                gid == 0
+                            } else {
+                                face.glyph_index(gid) == 0
+                            };
+                            (!(face.substitute && notdef)).then_some((&**face, gid, by_gid))
+                        });
+                    let (x_scale, centre) = match drawn {
+                        Some(drawn) if fit => {
+                            fit_to_advance(enc.width_for_cid(cid), face_width(advance_of(drawn)))
+                        }
+                        _ => (1.0, 0.0),
                     };
                     // In vertical writing mode the glyph's vertical origin
                     // sits at the pen: its horizontal origin is displaced
@@ -323,7 +339,9 @@ impl PageRenderer<'_> {
                         let tx = centre / 1000.0 * font_size * horiz_scaling;
                         text_to_device(&ctm, &tm, tx, rise, self.height)
                     };
-                    push_glyph(cid, gid, by_gid, dx, dy, x_scale);
+                    if let Some((drawn, selector, by_gid)) = drawn {
+                        push_glyph(drawn, cid, selector, by_gid, dx, dy, x_scale);
+                    }
 
                     // The advance (PDF §9.4.4): horizontally
                     // `(w0 × Tfs + Tc + Tw) × Th`; vertically
@@ -362,19 +380,35 @@ impl PageRenderer<'_> {
                 for &byte in bytes {
                     let code = u32::from(byte);
                     let pdf_width = descriptor.width_for_code(code);
-                    let (x_scale, centre) = match pdf_width {
-                        Some(width) if fit => {
-                            fit_to_advance(width, face_width(face.glyph_advance(code)))
+                    // A substitute's `.notdef` is never the document's
+                    // glyph: a code neither it nor a fallback draws leaves
+                    // a gap.
+                    let drawn = face
+                        .fallback_glyph(code, code)
+                        .map(|(fallback, gid)| (fallback, gid, true))
+                        .or_else(|| {
+                            let notdef = face.glyph_index(code) == 0;
+                            (!(face.substitute && notdef)).then_some((&**face, code, false))
+                        });
+                    let (x_scale, centre) = match (pdf_width, drawn) {
+                        (Some(width), Some(drawn)) if fit => {
+                            fit_to_advance(width, face_width(advance_of(drawn)))
                         }
                         _ => (1.0, 0.0),
                     };
                     let tx = centre / 1000.0 * font_size * horiz_scaling;
                     let (dx, dy) = text_to_device(&ctm, &tm, tx, rise, self.height);
-                    push_glyph(code, code, false, dx, dy, x_scale);
+                    if let Some((drawn, selector, by_gid)) = drawn {
+                        push_glyph(drawn, code, selector, by_gid, dx, dy, x_scale);
+                    }
 
                     // PDF §9.4.4: pen advances even for missing/invisible glyphs.
                     let advance_glyph = pdf_width.map_or_else(
-                        || face.glyph_advance(code).unwrap_or(0.0),
+                        || {
+                            drawn
+                                .map_or_else(|| face.glyph_advance(code), advance_of)
+                                .unwrap_or(0.0)
+                        },
                         |w| f64::from(w) / 1000.0,
                     );
                     let extra = if byte == b' ' { word_spacing } else { 0.0 };

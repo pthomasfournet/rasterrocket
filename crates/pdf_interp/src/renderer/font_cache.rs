@@ -32,6 +32,7 @@ use font::{
 use pdf::ObjectId;
 
 use super::encodings::{base_encoding_table, glyph_name_for_code};
+use super::fallback::{FallbackGlyph, FallbackResolver, first_scalar};
 use super::substitutes::substitute_program;
 use crate::resources::cmap::CMap;
 use crate::resources::cmap_predefined::cid_to_unicode;
@@ -57,13 +58,36 @@ pub struct ActiveFont {
     pub descriptor: Arc<FontDescriptor>,
 }
 
-/// A face loaded for a page: the [`FontFace`] it draws with, and whether
-/// that face is a substitute program rather than one the document embeds.
+/// A face loaded for a page.
+///
+/// It holds the [`FontFace`] the font draws with, whether that face is a
+/// substitute program rather than one the document embeds, and, for a
+/// substitute, the installed faces that draw the characters it lacks.
 pub struct PageFace {
     face: FontFace,
     /// `true` when the face draws a substitute: the font has no embedded
     /// program, or its embedded program could not be parsed.
     pub substitute: bool,
+    /// Resolver of the characters a substitute lacks; `None` for an
+    /// embedded program.
+    fallback: Option<Arc<FallbackResolver>>,
+    /// Fallback faces at this face's matrix, by resolver slot, loaded as
+    /// shown codes need them.
+    fallback_faces: Vec<Option<FontFace>>,
+    /// The fallback glyph of each (code, CID) shown with this face.
+    fallback_glyphs: HashMap<(u32, u32), Option<FallbackGlyph>>,
+}
+
+impl PageFace {
+    /// The fallback face and its glyph index that draw the shown `code`
+    /// (CID `cid` of a composite font; the code itself for a simple font)
+    /// in place of this face, as prepared by [`FontCache::get_or_load_showing`].
+    /// `None` when this face draws the code itself.
+    #[must_use]
+    pub fn fallback_glyph(&self, code: u32, cid: u32) -> Option<(&FontFace, u32)> {
+        let (slot, gid) = (*self.fallback_glyphs.get(&(code, cid))?)?;
+        Some((self.fallback_faces.get(slot)?.as_ref()?, gid))
+    }
 }
 
 impl Deref for PageFace {
@@ -107,17 +131,20 @@ struct SharedFont {
     /// The `code_to_gid` table computed from the program, `None` when the
     /// descriptor's own table (or the program's charmap) applies.
     code_to_gid: OnceLock<Option<Vec<u32>>>,
-    /// Face identifier per Trm bit pattern, so every page draws the font at
-    /// one matrix from the same cached bitmaps.
-    face_ids: Mutex<HashMap<[u64; 4], FaceId>>,
+    /// Fallback resolver of a font drawn by a substitute.
+    fallback: OnceLock<Option<Arc<FallbackResolver>>>,
+    /// Face identifier per Trm bit pattern and face slot (0 for the font's
+    /// own face, `k + 1` for fallback program `k`), so every page draws the
+    /// font at one matrix from the same cached bitmaps.
+    face_ids: Mutex<HashMap<([u64; 4], usize), FaceId>>,
 }
 
 impl SharedFont {
-    /// The identifier of the face at the matrix `trm`, drawn from `ids` on
-    /// first use.
-    fn face_id(&self, trm: [u64; 4], ids: &FaceIds) -> FaceId {
+    /// The identifier of face `slot` at the matrix `trm`, drawn from `ids`
+    /// on first use.
+    fn face_id(&self, trm: [u64; 4], slot: usize, ids: &FaceIds) -> FaceId {
         let mut face_ids = self.face_ids.lock().unwrap_or_else(PoisonError::into_inner);
-        *face_ids.entry(trm).or_insert_with(|| ids.next())
+        *face_ids.entry((trm, slot)).or_insert_with(|| ids.next())
     }
 }
 
@@ -218,6 +245,20 @@ impl FontCache {
         name: &[u8],
         trm: [f64; 4],
     ) -> Option<&PageFace> {
+        self.get_or_load_showing(font, name, trm, &[])
+    }
+
+    /// [`Self::get_or_load`] for showing the string `bytes`: the fallback
+    /// glyph of every code of `bytes` a substitute lacks is resolved, and
+    /// its fallback face loaded, so that [`PageFace::fallback_glyph`]
+    /// answers for each.
+    pub fn get_or_load_showing(
+        &mut self,
+        font: &ActiveFont,
+        name: &[u8],
+        trm: [f64; 4],
+        bytes: &[u8],
+    ) -> Option<&PageFace> {
         // The full 2×2 Trm matrix, as bit patterns, is part of the key: the
         // same font at different sizes or skews needs distinct faces.  Failed
         // loads are stored as `None`, so a font that cannot load is tried once.
@@ -230,7 +271,21 @@ impl FontCache {
                     String::from_utf8_lossy(name)
                 );
             }
-            return self.faces.entry(key).or_insert(face).as_ref();
+            let _ = self.faces.insert(key.clone(), face);
+        }
+        let face = self.faces.get_mut(&key)?.as_mut()?;
+        if !bytes.is_empty() && face.fallback.is_some() {
+            let shared = match &font.key {
+                ResourceKey::Object(id) => Some(self.shared.font(*id)),
+                ResourceKey::Direct { .. } => None,
+            };
+            let loader = FallbackLoader {
+                engine: &self.engine,
+                ids: &self.shared.face_ids,
+                shared: shared.as_deref(),
+                trm,
+            };
+            loader.prepare(face, &font.descriptor, bytes);
         }
         self.faces.get(&key)?.as_ref()
     }
@@ -267,10 +322,11 @@ impl FontCache {
         };
         let mut face = match &shared {
             Some(shared) => {
-                let id = shared.face_id(trm.map(f64::to_bits), &self.shared.face_ids);
-                self.engine.load_program_face_as(id, program, params)
+                let id = shared.face_id(trm.map(f64::to_bits), 0, &self.shared.face_ids);
+                self.engine
+                    .load_program_face_as(id, Arc::clone(&program), params)
             }
-            None => self.engine.load_program_face(program, params),
+            None => self.engine.load_program_face(Arc::clone(&program), params),
         }
         .inspect_err(|e| log::debug!("font_cache: {e}"))
         .ok()?;
@@ -289,7 +345,96 @@ impl FontCache {
         if let Some(table) = table {
             face.code_to_gid = table;
         }
-        Some(PageFace { face, substitute })
+        let resolve = || {
+            (!embedded)
+                .then(|| FallbackResolver::new(desc, program).map(Arc::new))
+                .flatten()
+        };
+        let fallback = match &shared {
+            Some(shared) => shared.fallback.get_or_init(resolve).clone(),
+            None => resolve(),
+        };
+        Some(PageFace {
+            face,
+            substitute,
+            fallback,
+            fallback_faces: Vec::new(),
+            fallback_glyphs: HashMap::new(),
+        })
+    }
+}
+
+/// What loading the fallback faces of a [`PageFace`] needs from its
+/// [`FontCache`].
+struct FallbackLoader<'a> {
+    engine: &'a FontEngine,
+    ids: &'a FaceIds,
+    /// Document store entry of an indirect font, for stable face IDs.
+    shared: Option<&'a SharedFont>,
+    trm: [f64; 4],
+}
+
+impl FallbackLoader<'_> {
+    /// Resolve the fallback glyph of every code of `bytes` not yet seen by
+    /// `face`, loading the fallback faces they select.  A code of a simple
+    /// font is looked up only when the substitute maps it to `.notdef`; a
+    /// CID of a composite font whenever its character is known, since the
+    /// substitute's table keeps a glyph-order reading for a character it
+    /// lacks.
+    fn prepare(&self, face: &mut PageFace, desc: &FontDescriptor, bytes: &[u8]) {
+        let Some(resolver) = face.fallback.clone() else {
+            return;
+        };
+        let codes: Vec<(u32, u32)> = desc.cid_encoding.as_ref().map_or_else(
+            || {
+                bytes
+                    .iter()
+                    .map(|&b| (u32::from(b), u32::from(b)))
+                    .collect()
+            },
+            |enc| enc.codes(bytes).map(|d| (d.code, d.value)).collect(),
+        );
+        let simple = desc.cid_encoding.is_none();
+        for (code, cid) in codes {
+            if face.fallback_glyphs.contains_key(&(code, cid)) {
+                continue;
+            }
+            let glyph = (!simple || face.face.glyph_index(code) == 0)
+                .then(|| resolver.glyph(code, cid))
+                .flatten()
+                .filter(|&(slot, _)| self.ensure_face(face, &resolver, slot));
+            let _ = face.fallback_glyphs.insert((code, cid), glyph);
+        }
+    }
+
+    /// Load the face of fallback program `slot` at this matrix into
+    /// `face`, once; `false` when it cannot be loaded.
+    fn ensure_face(&self, face: &mut PageFace, resolver: &FallbackResolver, slot: usize) -> bool {
+        if face.fallback_faces.len() <= slot {
+            face.fallback_faces.resize_with(slot + 1, || None);
+        }
+        if face.fallback_faces[slot].is_some() {
+            return true;
+        }
+        let Some(program) = resolver.program(slot) else {
+            return false;
+        };
+        let params = FaceParams {
+            code_to_gid: Vec::new(),
+            mat: self.trm,
+        };
+        let loaded = match self.shared {
+            Some(shared) => {
+                let id = shared.face_id(self.trm.map(f64::to_bits), slot + 1, self.ids);
+                self.engine.load_program_face_as(id, program, params)
+            }
+            None => self.engine.load_program_face(program, params),
+        }
+        .inspect_err(|e| log::debug!("font_cache: fallback face: {e}"))
+        .ok();
+        let loaded_ok = loaded.is_some();
+        face.fallback_faces[slot] = loaded;
+        loaded_ok
     }
 }
 
@@ -417,11 +562,8 @@ fn resolve_cmapless(
 fn resolve_cids_via_to_unicode(face: &FontFace, enc: &CidEncoding, to_unicode: &CMap) -> Vec<u32> {
     let mut table: Vec<u32> = (0..1u32 << 16).collect();
     for (&code, &value) in &to_unicode.map {
-        // A value of more than one UTF-16 unit is read by its first unit.
-        let unicode = if value > 0x10_FFFF {
-            value >> 16
-        } else {
-            value
+        let Some(unicode) = first_scalar(value) else {
+            continue;
         };
         let gid = face.raw_get_char_index(unicode);
         if gid == 0 {
@@ -963,6 +1105,169 @@ mod tests {
         assert_eq!(face.code_to_gid[0x21], exclam, "WinAnsi name");
         assert_eq!(face.code_to_gid[0x42], 0x42, "unknown name keeps the index");
         assert_eq!(face.code_to_gid[0x05], 0x05, "unnamed code keeps the index");
+    }
+
+    /// Whether an installed face maps U+0915 (Devanagari KA), the probe of
+    /// the fallback tests; they are skipped on a host without one.
+    fn devanagari_installed() -> bool {
+        let found =
+            super::super::system_fonts::fallback_program(SubstituteStyle::default(), 0x0915)
+                .is_some();
+        if !found {
+            eprintln!("no installed face maps U+0915; skipping");
+        }
+        found
+    }
+
+    /// A non-embedded simple font naming a Devanagari glyph draws it from
+    /// an installed face that maps it, at the code's position in the
+    /// shown string; codes the substitute draws stay with it.
+    #[test]
+    fn substitute_lacking_a_glyph_draws_it_from_a_fallback_face() {
+        if !devanagari_installed() {
+            return;
+        }
+        let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(empty_diffs());
+        differences[65] = Some("uni0915".into());
+        let desc = FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: None,
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences,
+            base_encoding: BaseEncoding::WinAnsi,
+            cid_encoding: None,
+            type3: None,
+            substitute: SubstituteStyle::default(),
+        };
+        let mut cache = FontCache::new(Arc::default(), true);
+        let face = cache
+            .get_or_load_showing(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0], b"AB")
+            .expect("substitute face loads");
+        assert_eq!(face.code_to_gid[65], 0, "the substitute lacks U+0915");
+        let (fallback, gid) = face
+            .fallback_glyph(65, 65)
+            .expect("a fallback draws U+0915");
+        assert!(!std::ptr::eq(fallback.program(), face.program()));
+        assert_eq!(gid, fallback.program().char_index(0x0915));
+        assert!(
+            fallback
+                .make_glyph_by_gid(gid, 0)
+                .is_some_and(|g| g.data.iter().any(|&c| c != 0))
+        );
+        assert!(
+            face.fallback_glyph(66, 66).is_none(),
+            "B stays with the substitute"
+        );
+        assert!(face.fallback_glyph(67, 67).is_none(), "C was not shown");
+    }
+
+    /// A composite font without a program, through its `ToUnicode` map,
+    /// draws a character its substitute lacks from a fallback face, in
+    /// place of the glyph-order reading its table keeps for that CID.
+    #[test]
+    fn non_embedded_cid_font_draws_missing_characters_from_a_fallback() {
+        use crate::resources::cmap::parse_cmap;
+        if !devanagari_installed() {
+            return;
+        }
+        let to_unicode = parse_cmap(
+            b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+              2 beginbfchar\n<0003> <0915>\n<0004> <0048>\nendbfchar\n",
+        )
+        .expect("parses");
+        let mut cache = FontCache::new(Arc::default(), true);
+        let face = cache
+            .get_or_load_showing(
+                &active(cid_substitute(to_unicode)),
+                b"F1",
+                [20.0, 0.0, 0.0, 20.0],
+                b"\x00\x03\x00\x04",
+            )
+            .expect("substitute face loads");
+        assert_eq!(face.code_to_gid[3], 3, "glyph-order reading in the table");
+        assert!(
+            face.fallback_glyph(3, 3).is_some(),
+            "a fallback draws U+0915"
+        );
+        assert!(
+            face.fallback_glyph(4, 4).is_none(),
+            "H stays with the substitute"
+        );
+    }
+
+    /// A `ToUnicode` map spanning the whole code space resolves only the
+    /// codes shown: one shown code costs one lookup, however many the map
+    /// covers.
+    #[test]
+    fn full_range_to_unicode_resolves_only_shown_codes() {
+        use crate::resources::cmap::parse_cmap;
+        let to_unicode = parse_cmap(
+            b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+              1 beginbfrange\n<0000> <FFFF> <0000>\nendbfrange\n",
+        )
+        .expect("parses");
+        let mut cache = FontCache::new(Arc::default(), true);
+        let face = cache
+            .get_or_load_showing(
+                &active(cid_substitute(to_unicode)),
+                b"F1",
+                [20.0, 0.0, 0.0, 20.0],
+                b"\x00\x48\x09\x15",
+            )
+            .expect("substitute face loads");
+        assert_eq!(face.fallback_glyphs.len(), 2);
+        assert!(
+            face.fallback_glyph(0x48, 0x48).is_none(),
+            "H is the substitute's"
+        );
+    }
+
+    /// An embedded program draws its own glyphs only: it has no resolver.
+    #[test]
+    fn embedded_font_has_no_fallbacks() {
+        let mut differences: Box<[Option<Box<str>>; 256]> = Box::new(empty_diffs());
+        differences[65] = Some("uni0915".into());
+        let desc = embedded_truetype(
+            include_bytes!("../../../font_test_data/test_data/ttf/ahem.ttf").to_vec(),
+            differences,
+            BaseEncoding::WinAnsi,
+        );
+        let mut cache = FontCache::new(Arc::default(), true);
+        let face = cache
+            .get_or_load_showing(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0], b"A")
+            .expect("embedded face loads");
+        assert!(face.fallback.is_none());
+        assert!(face.fallback_glyph(65, 65).is_none());
+    }
+
+    /// A non-embedded Identity-H font of no known collection with the
+    /// `ToUnicode` map `to_unicode`.
+    fn cid_substitute(to_unicode: CMap) -> FontDescriptor {
+        FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: None,
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences: Box::new(empty_diffs()),
+            base_encoding: BaseEncoding::Standard,
+            cid_encoding: Some(CidEncoding {
+                encoding_cmap: Arc::new(CMap::identity()),
+                cid_to_gid: None,
+                default_width: 1000,
+                widths: vec![],
+                vertical: false,
+                default_vertical: [880, -1000],
+                vertical_metrics: vec![],
+                to_unicode: Some(Arc::new(to_unicode)),
+            }),
+            type3: None,
+            substitute: SubstituteStyle::default(),
+        }
     }
 
     /// A composite font without a program and of no known collection draws

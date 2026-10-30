@@ -2,6 +2,7 @@
 
 pub mod color;
 pub(crate) mod encodings;
+mod fallback;
 pub mod font_cache;
 pub mod gstate;
 pub mod page;

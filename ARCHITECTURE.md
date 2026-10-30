@@ -224,8 +224,9 @@ programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
   the face's `vert` / `vrt2` GSUB features, for vertical writing with a
   substitute face
 - `sfnt_info` — family, weight, slant, serif class and `OS/2` code-page ranges
-  of each face in an sfnt file, read from the `OS/2` and `name` tables alone;
-  the interpreter indexes installed fonts with it without loading them
+  of each face in an sfnt file, read from the `OS/2` and `name` tables alone,
+  and a face's Unicode `Coverage`, read from its `cmap` table alone; the
+  interpreter indexes installed fonts with it without loading them
 
 ### 3.4 `rasterrocket-encode`
 
@@ -343,8 +344,9 @@ renderer/
   text.rs            — text state (Tc, Tw, Tz, TL, Ts, Tr)
   font_cache.rs      — font loading, code → glyph tables, GlyphCache
   encodings.rs       — base encodings of Annex D
+  fallback.rs        — per-character fallback of a substitute to installed faces
   substitutes.rs     — substitute programs for non-embedded fonts
-  system_fonts.rs    — installed CJK / Arabic / Thai faces
+  system_fonts.rs    — installed CJK / Arabic / Thai faces; per-character fallback faces
   page/
     mod.rs           — per-page entry points, geometry normalisation
     operators.rs     — execute_one: one operator → renderer call
@@ -465,6 +467,15 @@ image, not the process.
   then selects by script, serif class, weight and slant. A non-embedded CID
   font whose ordering is Japan1, GB1, CNS1 or Korea1 maps CID → Unicode →
   glyph in that face.
+- **Per-character fallback.** A code whose Unicode value is known (its
+  glyph name in a simple font; its CID in a known collection, or its
+  `ToUnicode` entry, in a composite font) and which the substitute cannot
+  draw is drawn from the first installed face, ranked by serif class,
+  per-script preference, weight and slant, whose `cmap` maps it. A face's
+  `cmap` coverage is read when a lookup first reaches it. Fallback faces
+  carry the font's matrix and a code → glyph table of the codes they serve,
+  so every script an installed font covers draws, whatever the font's
+  classified script.
 - **Composite fonts.** `resources/cmap.rs` parses `CMap` streams: codespace
   ranges of mixed width, `usecmap`, and `ToUnicode`. The predefined `CMaps`
   of ISO 32000-2 Table 116 are compressed into the binary

@@ -144,7 +144,8 @@ The `--jpeg` and `--tiff` rows give the names those formats will use; today both
 Fonts a document does not embed are drawn with substitutes: the installed
 Liberation (or Arial / Times New Roman / Courier New) family when found,
 else faces compiled into the binary; CJK, Arabic and Thai text uses an
-installed face of that script. `RROCKET_FONT_DIR` names extra directories
+installed face of that script, and any character the substitute lacks is
+drawn from an installed face that covers it. `RROCKET_FONT_DIR` names extra directories
 to search first, in `PATH` syntax (`RROCKET_FONT_DIR=/opt/fonts:$HOME/fonts`).
 
 ---
