@@ -383,6 +383,8 @@ resources/
     cal.rs           — CalGray / CalRGB through WhitePoint, Gamma, Matrix
     icc.rs           — ICCBased compiled once per document: matrix/TRC
                        shaper or moxcms transform, else `/Alternate`
+    lab.rs           — Lab through Range and WhitePoint, Bradford-adapted
+                       to D65
   icc.rs             — moxcms CMYK CLUT bake for the GPU path; the table is
                        kept with the profile's per-document conversion
   icc_shaper.rs      — matrix/TRC ICC input profiles evaluated to sRGB
