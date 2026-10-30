@@ -180,6 +180,24 @@ fn sources() -> Vec<(&'static str, String, Vec<u8>, Painted)> {
             Painted::Right,
         ),
         (
+            "CCITT G4, array /DecodeParms",
+            format!(
+                "/Filter [/CCITTFaxDecode] \
+                 /DecodeParms [<< /K -1 /Columns {SIDE} /Rows {SIDE} >>]"
+            ),
+            G4_RIGHT_BLACK.to_vec(),
+            Painted::Right,
+        ),
+        (
+            "ASCIIHex then CCITT G4",
+            format!(
+                "/Filter [/ASCIIHexDecode /CCITTFaxDecode] \
+                 /DecodeParms [null << /K -1 /Columns {SIDE} /Rows {SIDE} >>]"
+            ),
+            hex(&G4_RIGHT_BLACK),
+            Painted::Right,
+        ),
+        (
             "JBIG2",
             "/Filter /JBIG2Decode".into(),
             JBIG2_LEFT_BLACK.to_vec(),
@@ -221,7 +239,7 @@ fn inline_stencils_paint_sample_zero() {
 
 #[test]
 fn explicit_mask_shows_the_image_where_sample_is_zero() {
-    check(Use::ExplicitMask, "explicit /Mask", &["ASCIIHex"]);
+    check(Use::ExplicitMask, "explicit /Mask", &[]);
 }
 
 /// `/BitsPerComponent` is optional on an image mask, which is one bit per

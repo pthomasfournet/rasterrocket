@@ -7,14 +7,11 @@
 //! own grid, so its resolution is independent of the resolution the parent
 //! image was decoded at.
 
-use pdf::{Document, Object, ObjectId};
+use pdf::{Object, ObjectId, Stream};
 
-use super::bitpack::{downsample_16bpp, expand_1bpp, expand_nbpp};
-use super::codecs::{decode_ccitt, decode_jbig2};
-use super::filter_name;
-use super::raw::{apply_bilevel_decode, apply_decode, decode_raw, parse_decode};
+use super::dispatch::{ImageStream, decode_image_stream};
 use super::validated_dims;
-use super::{ImageColorSpace, ImageDescriptor};
+use super::{ImageColorSpace, ImageDecodeCtx, ImageDescriptor};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -66,195 +63,30 @@ impl SoftMask {
 
 /// Decode a soft-mask (`SMask`) image stream at its own resolution.
 ///
-/// The mask's dimensions are those the codec reports, which for
-/// `CCITTFaxDecode`, `JBIG2Decode` and `DCTDecode` take precedence over the
-/// dictionary's `/Width` and `/Height`.  The mask's own `/Decode` maps its
-/// samples, which are then the alpha directly (§11.6.5.2).
+/// The stream decodes through the same filter dispatch as a base image, so
+/// any filter chain an image may use is accepted.  The mask's dimensions
+/// are those the codec reports, which for `CCITTFaxDecode`, `JBIG2Decode`,
+/// `DCTDecode` and `JPXDecode` take precedence over the dictionary's
+/// `/Width` and `/Height`.  The decoded gray samples, after the mask's own
+/// `/Decode`, are the alpha directly (§11.6.5.2).
 ///
-/// Returns `None` when the stream is unresolvable, its filter is unsupported,
-/// or its dimensions are degenerate; the caller then blits the image
-/// unmasked.
-pub(super) fn decode_smask(doc: &Document, id: ObjectId) -> Option<SoftMask> {
-    use crate::resources::dict_ext::DictExt as _;
-
+/// Returns `None` when the stream is unresolvable, fails to decode, does not
+/// decode to one gray component, or its dimensions are degenerate; the
+/// caller then blits the image unmasked.
+pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option<SoftMask> {
     // Bind the Arc to a local so the borrow into the stream below stays alive.
-    let obj_arc = doc.get_object(id).ok()?;
+    let obj_arc = ctx.doc.get_object(id).ok()?;
     let stream = obj_arc.as_ref().as_stream()?;
-
-    let w_raw = stream.dict.get_i64(b"Width")?;
-    let h_raw = stream.dict.get_i64(b"Height")?;
-    let Some((sm_w, sm_h)) = validated_dims(w_raw, h_raw) else {
-        log::warn!("image: SMask degenerate dimensions {w_raw}×{h_raw}, skipping");
-        return None;
-    };
-
-    let filter = stream.dict.get(b"Filter").and_then(filter_name);
-    let bpc = stream.dict.get_i64(b"BitsPerComponent").unwrap_or(8);
-
-    // CCITTFaxDecode and JBIG2Decode are decoded as grayscale samples whose
-    // bytes are used directly as alpha, matching the §11.6.5.2 soft-mask model.
-    //
-    // PDF §11.6.5.2: the SMask image's decoded sample value IS the alpha
-    // directly (0x00 = transparent, 0xFF = opaque). The decoders are called with
-    // is_mask=false so they return ImageColorSpace::Gray bytes following the
-    // Gray convention (JBIG2/CCITT black-bit → 0x00, white-bit → 0xFF). Those
-    // bytes are the §11.6.5.2 sample values; the mask's `/Decode`, applied
-    // below to every arm alike, is the only remap between sample and alpha.
-    //
-    // For these compressed formats the mask takes the decoded dimensions
-    // (sm_desc.width × sm_desc.height), not the dict-declared sm_w × sm_h, so
-    // the alpha buffer always matches the grid it is indexed through.
-    let (samples, aw, ah): (Vec<u8>, u32, u32) = match filter.as_deref() {
-        Some("CCITTFaxDecode") => {
-            let parms = stream.dict.get(b"DecodeParms");
-            let sm_desc = decode_ccitt(stream.content.as_slice(), sm_w, sm_h, false, parms)?;
-            let samples = alpha_from_decoded("CCITTFaxDecode", &sm_desc)?;
-            (samples, sm_desc.width, sm_desc.height)
-        }
-        Some("JBIG2Decode") => {
-            let parms = stream.dict.get(b"DecodeParms");
-            let sm_desc = decode_jbig2(doc, stream.content.as_slice(), sm_w, sm_h, false, parms)?;
-            let samples = alpha_from_decoded("JBIG2Decode", &sm_desc)?;
-            (samples, sm_desc.width, sm_desc.height)
-        }
-        Some("DCTDecode") => decode_smask_dct(stream.content.as_slice(), sm_w, sm_h)?,
-        Some("FlateDecode") => {
-            let raw = stream.decompressed_content().ok()?;
-            (decode_smask_raw_bytes(&raw, sm_w, sm_h, bpc)?, sm_w, sm_h)
-        }
-        None => {
-            // No filter — raw (uncompressed) byte stream.
-            (
-                decode_smask_raw_bytes(stream.content.as_slice(), sm_w, sm_h, bpc)?,
-                sm_w,
-                sm_h,
-            )
-        }
-        Some(other) => {
-            log::warn!("image: SMask filter {other:?} not supported — skipping image");
-            return None;
-        }
-    };
-
-    let alpha = apply_decode(
-        std::borrow::Cow::Owned(samples),
-        &parse_decode(&stream.dict, 1),
-    );
-    SoftMask::new(aw, ah, alpha)
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/// Extract a host-resident alpha buffer from a bitonal-codec `SMask` descriptor,
-/// validating it covers the descriptor's own reported dimensions.
-///
-/// The CCITT/JBIG2 decoders normalise their output to `width × height` on every
-/// path the `SMask` pipeline exercises today, but a future codec change — or an
-/// adversarial stream that drives a decoder down a not-yet-hardened branch (the
-/// CCITT G4 clean-EOFB-before-`height`-rows path is one such gap) — could yield
-/// a short buffer, which [`SoftMask::new`] would reject without naming the
-/// codec.  Fail loudly here instead, matching the explicit length guards in
-/// the `DCTDecode` and raw/`FlateDecode` arms (a short `SMask` is a decode
-/// failure, never silently-wrong alpha — the v1 alpha-polarity sin).
-fn alpha_from_decoded(filter: &str, desc: &ImageDescriptor) -> Option<Vec<u8>> {
-    let bytes = desc.data.as_cpu()?;
-    let expected = (desc.width as usize).checked_mul(desc.height as usize)?;
-    if bytes.len() < expected {
+    let desc = decode_mask_stream(ctx, stream, false, "SMask")?;
+    if desc.color_space != ImageColorSpace::Gray {
         log::warn!(
-            "image: {filter} SMask decoded {} bytes, expected {expected} for {}×{} — skipping image",
-            bytes.len(),
-            desc.width,
-            desc.height
+            "image: SMask (object {id:?}) decoded as {:?}, expected one gray component — skipping mask",
+            desc.color_space
         );
         return None;
     }
-    Some(bytes[..expected].to_vec())
-}
-
-/// Decode a `DCTDecode`-compressed (`JPEG`) `SMask` stream into an 8-bpp alpha buffer.
-///
-/// Returns `(pixels, jpeg_width, jpeg_height)` so the caller can size the mask
-/// by the JPEG-reported dimensions rather than the dict-declared ones.
-/// This mirrors the `CCITTFaxDecode` / `JBIG2Decode` pattern where the actual
-/// decoded size takes precedence over the dict.
-///
-/// PDF §11.6.5.2 permits `DCTDecode` on `SMask` streams.  The stream must be a
-/// single-component (grayscale) `JPEG`; if the decoder produces multiple components
-/// we reject it rather than guess which channel is the alpha.
-fn decode_smask_dct(data: &[u8], sm_w: u32, sm_h: u32) -> Option<(Vec<u8>, u32, u32)> {
-    use zune_core::bytestream::ZCursor;
-    use zune_core::colorspace::ColorSpace as ZColorSpace;
-    use zune_core::options::DecoderOptions;
-    use zune_jpeg::JpegDecoder;
-
-    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ZColorSpace::Luma);
-    let mut dec = JpegDecoder::new_with_options(ZCursor::new(data), opts);
-    dec.decode_headers().ok()?;
-    let info = dec.info().or_else(|| {
-        log::warn!("image: DCTDecode SMask: JPEG info unavailable after decode_headers");
-        None
-    })?;
-    // Reject non-grayscale JPEG alpha channels.
-    if info.components != 1 {
-        log::warn!(
-            "image: DCTDecode SMask has {} components (expected 1), skipping",
-            info.components
-        );
-        return None;
-    }
-    let jw = u32::from(info.width);
-    let jh = u32::from(info.height);
-    if jw == 0 || jh == 0 {
-        log::warn!("image: DCTDecode SMask: JPEG reported zero dimensions {jw}×{jh}");
-        return None;
-    }
-    if jw != sm_w || jh != sm_h {
-        log::debug!(
-            "image: DCTDecode SMask: dict says {sm_w}×{sm_h}, JPEG reports {jw}×{jh} — using JPEG dims"
-        );
-    }
-    let pixels = dec.decode().ok()?;
-    // Validate buffer against JPEG-reported dimensions.
-    // A short buffer means the decoder produced fewer bytes than its own SOF claimed.
-    let expected = (jw as usize).checked_mul(jh as usize)?;
-    if pixels.len() < expected {
-        log::warn!(
-            "image: DCTDecode SMask decoded {} bytes, expected {expected} for {jw}×{jh}",
-            pixels.len()
-        );
-        return None;
-    }
-    Some((pixels[..expected].to_vec(), jw, jh))
-}
-
-/// Interpret an already-decompressed byte buffer as an `SMask` alpha channel.
-///
-/// Dispatches on `bpc` to normalise sub-byte and 16-bit formats to one byte per
-/// pixel.  Returns `None` if the buffer is too short or the bpc is unsupported.
-fn decode_smask_raw_bytes(raw: &[u8], sm_w: u32, sm_h: u32, bpc: i64) -> Option<Vec<u8>> {
-    match bpc {
-        1 => expand_1bpp(raw, sm_w, sm_h),
-        2 => expand_nbpp::<2>(raw, sm_w, sm_h, 1),
-        4 => expand_nbpp::<4>(raw, sm_w, sm_h, 1),
-        8 => {
-            // Validate length before the raw pass-through so a short stream is
-            // logged with its own dimensions.
-            let expected = (sm_w as usize).checked_mul(sm_h as usize)?;
-            if raw.len() < expected {
-                log::warn!(
-                    "image: SMask raw data too short ({} bytes, need {expected} for {sm_w}×{sm_h})",
-                    raw.len()
-                );
-                return None;
-            }
-            Some(raw[..expected].to_vec())
-        }
-        16 => downsample_16bpp(raw, sm_w, sm_h, 1),
-        other => {
-            log::debug!("image: SMask {other} bpc not yet supported");
-            None
-        }
-    }
+    let alpha = alpha_from_decoded("SMask", &desc)?;
+    SoftMask::new(desc.width, desc.height, alpha)
 }
 
 /// Decode an explicit `/Mask N 0 R` stencil-mask image into an alpha buffer.
@@ -266,22 +98,22 @@ fn decode_smask_raw_bytes(raw: &[u8], sm_w: u32, sm_h: u32, bpc: i64) -> Option<
 /// `Decode [0 1]`, mask sample 0 → the base image is painted (opaque),
 /// mask sample 1 → masked out (the background shows through).
 ///
-/// The stencil decoders (`decode_jbig2`/`decode_ccitt`/raw with
-/// `is_mask=true`) return [`ImageColorSpace::Mask`] bytes using the
-/// §8.9.6.1 fill-stencil convention: `0x00` = "paint", `0xFF` =
-/// "transparent".  For an explicit mask those same markers map directly onto
-/// base-image alpha — a "paint" point shows the base image (alpha `0xFF`), a
-/// "transparent" point shows the background (alpha `0x00`).  Hence
-/// `alpha = !mask_byte`.  `Decode [1 0]` on the mask is already folded into
-/// the decoder output, so no extra inversion is applied here.
+/// The stencil decodes through the shared image dispatch to
+/// [`ImageColorSpace::Mask`] bytes using the §8.9.6.1 fill-stencil
+/// convention: `0x00` = "paint", `0xFF` = "transparent".  For an explicit
+/// mask those same markers map directly onto base-image alpha — a "paint"
+/// point shows the base image (alpha `0xFF`), a "transparent" point shows
+/// the background (alpha `0x00`).  Hence `alpha = !mask_byte`.  `Decode
+/// [1 0]` on the mask is already folded into the decoder output, so no extra
+/// inversion is applied here.
 ///
 /// The mask keeps the stencil's decoded resolution.  Returns `None` if the
 /// referenced object is not a usable stencil image so the caller can blit the
 /// base image unmasked rather than discard it.
-pub(super) fn decode_explicit_mask(doc: &Document, id: ObjectId) -> Option<SoftMask> {
+pub(super) fn decode_explicit_mask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option<SoftMask> {
     use crate::resources::dict_ext::DictExt as _;
 
-    let obj_arc = doc.get_object(id).ok()?;
+    let obj_arc = ctx.doc.get_object(id).ok()?;
     let stream = obj_arc.as_ref().as_stream()?;
 
     // §8.9.6.3: an explicit mask must be an image with ImageMask true.
@@ -290,59 +122,7 @@ pub(super) fn decode_explicit_mask(doc: &Document, id: ObjectId) -> Option<SoftM
         return None;
     }
 
-    let w_raw = stream.dict.get_i64(b"Width")?;
-    let h_raw = stream.dict.get_i64(b"Height")?;
-    let Some((m_w, m_h)) = validated_dims(w_raw, h_raw) else {
-        log::warn!("image: /Mask degenerate dimensions {w_raw}×{h_raw}, skipping mask");
-        return None;
-    };
-
-    let filter = stream.dict.get(b"Filter").and_then(filter_name);
-
-    // Decode the stencil to ImageColorSpace::Mask bytes (0x00 = paint,
-    // 0xFF = transparent), with the mask's own /Decode [1 0] inversion
-    // folded in: by the raw decoder itself, after the bilevel codecs.
-    let desc = match filter.as_deref() {
-        Some("JBIG2Decode") => {
-            let parms = stream.dict.get(b"DecodeParms");
-            let mut desc = decode_jbig2(doc, stream.content.as_slice(), m_w, m_h, true, parms)?;
-            apply_bilevel_decode(&mut desc, &stream.dict);
-            desc
-        }
-        Some("CCITTFaxDecode") => {
-            let parms = stream.dict.get(b"DecodeParms");
-            let mut desc = decode_ccitt(stream.content.as_slice(), m_w, m_h, true, parms)?;
-            apply_bilevel_decode(&mut desc, &stream.dict);
-            desc
-        }
-        Some("FlateDecode") => {
-            let raw = stream.decompressed_content().ok()?;
-            decode_raw(
-                doc,
-                &raw,
-                m_w,
-                m_h,
-                true,
-                &stream.dict,
-                #[cfg(feature = "gpu-icc")]
-                &mut super::IccHandles::none(),
-            )?
-        }
-        None => decode_raw(
-            doc,
-            stream.content.as_slice(),
-            m_w,
-            m_h,
-            true,
-            &stream.dict,
-            #[cfg(feature = "gpu-icc")]
-            &mut super::IccHandles::none(),
-        )?,
-        Some(other) => {
-            log::warn!("image: /Mask filter {other:?} not supported — skipping mask");
-            return None;
-        }
-    };
+    let desc = decode_mask_stream(ctx, stream, true, "/Mask")?;
 
     // A stencil decoded with is_mask=true must yield ImageColorSpace::Mask.
     // If it does not, the bytes are *not* the §8.9.6.1 paint/transparent
@@ -359,9 +139,68 @@ pub(super) fn decode_explicit_mask(doc: &Document, id: ObjectId) -> Option<SoftM
 
     // §8.9.6.3: paint marker (0x00) → base image opaque (alpha 0xFF);
     // transparent marker (0xFF) → background shows (alpha 0x00).
-    let alpha: Vec<u8> = desc.data.as_cpu()?.iter().map(|&b| !b).collect();
-
+    let mut alpha = alpha_from_decoded("/Mask", &desc)?;
+    for b in &mut alpha {
+        *b = !*b;
+    }
     SoftMask::new(desc.width, desc.height, alpha)
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Decode a mask stream (an `SMask` when `is_mask` is false, an explicit
+/// stencil `/Mask` when true) through the shared image dispatch.  `what`
+/// names the mask kind in log messages.
+fn decode_mask_stream(
+    ctx: &mut ImageDecodeCtx<'_>,
+    stream: &Stream,
+    is_mask: bool,
+    what: &str,
+) -> Option<ImageDescriptor> {
+    use crate::resources::dict_ext::DictExt as _;
+
+    let w_raw = stream.dict.get_i64(b"Width")?;
+    let h_raw = stream.dict.get_i64(b"Height")?;
+    let Some((width, height)) = validated_dims(w_raw, h_raw) else {
+        log::warn!("image: {what} degenerate dimensions {w_raw}×{h_raw}, skipping mask");
+        return None;
+    };
+    let src = ImageStream {
+        stream,
+        width,
+        height,
+        is_mask,
+    };
+    decode_image_stream(
+        ctx,
+        &src,
+        None,
+        #[cfg(feature = "cache")]
+        None,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+    )
+    .map_err(|e| log::warn!("image: {what}: {e} — skipping mask"))
+    .ok()
+}
+
+/// Extract exactly `width × height` host-resident bytes from a decoded mask
+/// descriptor; `what` names the mask kind when the buffer is short.
+///
+/// A short buffer is a decode failure, never silently-wrong alpha.
+fn alpha_from_decoded(what: &str, desc: &ImageDescriptor) -> Option<Vec<u8>> {
+    let bytes = desc.data.as_cpu()?;
+    let expected = (desc.width as usize).checked_mul(desc.height as usize)?;
+    if bytes.len() < expected {
+        log::warn!(
+            "image: {what} decoded {} bytes, expected {expected} for {}×{} — skipping mask",
+            bytes.len(),
+            desc.width,
+            desc.height
+        );
+        return None;
+    }
+    Some(bytes[..expected].to_vec())
 }
 
 /// Build an alpha buffer from a `/Mask [colour-key]` array (§8.9.6.4).
@@ -420,6 +259,26 @@ pub(super) fn colour_key_mask(
 mod tests {
     use super::*;
 
+    use crate::test_helpers::make_doc_with_stream;
+
+    /// Decode object (2, 0) of `doc` as an `SMask`.
+    fn smask_of(doc: &pdf::Document) -> Option<SoftMask> {
+        decode_smask(&mut ImageDecodeCtx::cpu(doc), (2, 0))
+    }
+
+    /// Decode object (2, 0) of `doc` as an explicit stencil `/Mask`.
+    fn explicit_of(doc: &pdf::Document) -> Option<SoftMask> {
+        decode_explicit_mask(&mut ImageDecodeCtx::cpu(doc), (2, 0))
+    }
+
+    /// `/Image` dictionary entries of a `w × h` 8-bit gray `SMask`.
+    fn smask_dict(w: u32, h: u32, filter: &str) -> String {
+        format!(
+            " /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 8 \
+              /ColorSpace /DeviceGray {filter}"
+        )
+    }
+
     #[test]
     fn soft_mask_requires_exact_length() {
         assert!(SoftMask::new(2, 2, vec![0; 3]).is_none());
@@ -437,7 +296,7 @@ mod tests {
             " /Subtype /Image /Width 3 /Height 2 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        let m = decode_smask(&doc, (2, 0)).expect("raw 8-bpc SMask must decode");
+        let m = smask_of(&doc).expect("raw 8-bpc SMask must decode");
         assert_eq!((m.width(), m.height()), (3, 2));
         assert_eq!(m.alpha(), &[1, 2, 3, 4, 5, 6]);
     }
@@ -478,78 +337,113 @@ mod tests {
     #[test]
     fn decode_smask_raw_bpc8_too_short_returns_none() {
         // 2×2 SMask needs 4 bytes; supplying 2 must return None, not panic.
-        assert!(decode_smask_raw_bytes(&[0u8, 255], 2, 2, 8).is_none());
+        let doc = make_doc_with_stream(&[0u8, 255], &smask_dict(2, 2, ""));
+        assert!(smask_of(&doc).is_none());
     }
 
+    /// Transport filters other than Flate, alone or in a chain, reach the
+    /// raw-sample path.
     #[test]
-    fn decode_smask_raw_bpc8_exact_length() {
-        let result = decode_smask_raw_bytes(&[10u8, 20, 30, 40], 2, 2, 8).unwrap();
-        assert_eq!(result, &[10, 20, 30, 40]);
+    fn smask_accepts_every_transport_filter() {
+        let cases: [(&str, &[u8]); 3] = [
+            ("/Filter /ASCIIHexDecode", b"0a141e28>"),
+            ("/Filter /RunLengthDecode", &[3, 10, 20, 30, 40, 128]),
+            (
+                "/Filter [/ASCIIHexDecode /RunLengthDecode]",
+                b"030a141e2880>",
+            ),
+        ];
+        for (filter, data) in cases {
+            let doc = make_doc_with_stream(data, &smask_dict(2, 2, filter));
+            let m = smask_of(&doc).unwrap_or_else(|| panic!("{filter}: SMask must decode"));
+            assert_eq!(m.alpha(), &[10, 20, 30, 40], "{filter}");
+        }
     }
 
-    /// A 1×1 grayscale JPEG (PIL-encoded, quality=90) decoded as an `SMask` buffer
-    /// must produce exactly 1 byte with a value in the mid-grey range.
-    ///
-    /// The JPEG bytes are a valid baseline JFIF stream produced by PIL/Pillow
-    /// encoding a 1×1 Luma(128) image at quality=90.  They are known-good with
-    /// zune-jpeg 0.5.x.
+    /// A bilevel codec in a stencil `/Mask` receives its own entry of an
+    /// array-form `/DecodeParms`: here Group 4 (`K -1`), where one `1` bit
+    /// codes an all-white row (vertical mode, offset 0, against the
+    /// imaginary white reference row).
+    #[test]
+    fn explicit_mask_ccitt_reads_array_decode_parms() {
+        let doc = make_doc_with_stream(
+            &[0xC0],
+            " /Subtype /Image /Width 8 /Height 2 /ImageMask true \
+              /Filter [/CCITTFaxDecode] /DecodeParms [<< /K -1 /Columns 8 /Rows 2 >>]",
+        );
+        let mask = explicit_of(&doc).expect("G4 stencil must decode");
+        // White is sample 1: transparent, so the base image is masked out.
+        assert_eq!((mask.width(), mask.height()), (8, 2));
+        assert!(mask.alpha().iter().all(|&a| a == 0x00));
+    }
+
+    /// A codec behind a transport filter decodes the transport output.
+    #[test]
+    fn smask_dct_behind_ascii_hex() {
+        let hex: String = JPEG_1X1_GRAY128
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .chain(std::iter::once(">".to_owned()))
+            .collect();
+        let doc = make_doc_with_stream(
+            hex.as_bytes(),
+            &smask_dict(1, 1, "/Filter [/ASCIIHexDecode /DCTDecode]"),
+        );
+        let m = smask_of(&doc).expect("AHx → DCT SMask must decode");
+        assert!(m.alpha()[0] > 64 && m.alpha()[0] < 192);
+    }
+
+    /// A 1×1 grayscale JPEG, value 128, quality 90, generated by:
+    ///   from PIL import Image, io
+    ///   img = Image.new('L', (1, 1), 128)
+    ///   buf = io.BytesIO(); img.save(buf, 'JPEG', quality=90)
+    const JPEG_1X1_GRAY128: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
+        0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x03, 0x02, 0x02, 0x03, 0x02,
+        0x02, 0x03, 0x03, 0x03, 0x03, 0x04, 0x03, 0x03, 0x04, 0x05, 0x08, 0x05, 0x05, 0x04, 0x04,
+        0x05, 0x0A, 0x07, 0x07, 0x06, 0x08, 0x0C, 0x0A, 0x0C, 0x0C, 0x0B, 0x0A, 0x0B, 0x0B, 0x0D,
+        0x0E, 0x12, 0x10, 0x0D, 0x0E, 0x11, 0x0E, 0x0B, 0x0B, 0x10, 0x16, 0x10, 0x11, 0x13, 0x14,
+        0x15, 0x15, 0x15, 0x0C, 0x0F, 0x17, 0x18, 0x16, 0x14, 0x18, 0x12, 0x14, 0x15, 0x14, 0xFF,
+        0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00,
+        0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+        0xFF, 0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05,
+        0x04, 0x04, 0x00, 0x00, 0x01, 0x7D, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21,
+        0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08,
+        0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A,
+        0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37,
+        0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56,
+        0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75,
+        0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93,
+        0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9,
+        0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6,
+        0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2,
+        0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7,
+        0xF8, 0xF9, 0xFA, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x2B, 0xFF,
+        0xD9,
+    ];
+
+    /// A `DCTDecode` `SMask` takes the JPEG's dimensions and its luma as alpha.
     #[test]
     fn decode_smask_dct_1x1_gray() {
-        // 1×1 grayscale JPEG, value 128, quality=90.  Generated by:
-        //   from PIL import Image, io
-        //   img = Image.new('L', (1, 1), 128)
-        //   buf = io.BytesIO(); img.save(buf, 'JPEG', quality=90)
-        let jpeg_1x1_gray128: &[u8] = &[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
-            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x03, 0x02, 0x02,
-            0x03, 0x02, 0x02, 0x03, 0x03, 0x03, 0x03, 0x04, 0x03, 0x03, 0x04, 0x05, 0x08, 0x05,
-            0x05, 0x04, 0x04, 0x05, 0x0A, 0x07, 0x07, 0x06, 0x08, 0x0C, 0x0A, 0x0C, 0x0C, 0x0B,
-            0x0A, 0x0B, 0x0B, 0x0D, 0x0E, 0x12, 0x10, 0x0D, 0x0E, 0x11, 0x0E, 0x0B, 0x0B, 0x10,
-            0x16, 0x10, 0x11, 0x13, 0x14, 0x15, 0x15, 0x15, 0x0C, 0x0F, 0x17, 0x18, 0x16, 0x14,
-            0x18, 0x12, 0x14, 0x15, 0x14, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01,
-            0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
-            0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0xB5, 0x10,
-            0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00,
-            0x01, 0x7D, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06,
-            0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42,
-            0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16,
-            0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37,
-            0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55,
-            0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73,
-            0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
-            0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5,
-            0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA,
-            0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6,
-            0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA,
-            0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFF, 0xDA, 0x00, 0x08,
-            0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x2B, 0xFF, 0xD9,
-        ];
-
-        // This is a valid PIL-produced JPEG; zune-jpeg must be able to decode it.
-        let (pixels, jw, jh) = decode_smask_dct(jpeg_1x1_gray128, 1, 1)
-            .expect("PIL-produced 1×1 JPEG must decode successfully");
-        assert_eq!(jw, 1, "JPEG width must be 1");
-        assert_eq!(jh, 1, "JPEG height must be 1");
-        assert_eq!(
-            pixels.len(),
-            1,
-            "1×1 SMask must produce exactly 1 alpha byte"
-        );
+        let doc = make_doc_with_stream(JPEG_1X1_GRAY128, &smask_dict(1, 1, "/Filter /DCTDecode"));
+        let m = smask_of(&doc).expect("PIL-produced 1×1 JPEG must decode successfully");
+        assert_eq!((m.width(), m.height()), (1, 1));
         // PIL encoded value 128 at quality=90; after JPEG quantisation the
         // decoded value is in the broad mid-grey range.
         assert!(
-            pixels[0] > 64 && pixels[0] < 192,
+            m.alpha()[0] > 64 && m.alpha()[0] < 192,
             "decoded alpha {:#04x} outside plausible mid-grey range [65, 191]",
-            pixels[0]
+            m.alpha()[0]
         );
     }
 
-    /// `decode_smask_dct` must return `None` for a truncated (corrupt) byte stream,
-    /// not panic.
+    /// A truncated (corrupt) `DCTDecode` `SMask` is rejected, not a panic.
     #[test]
     fn decode_smask_dct_corrupt_returns_none() {
-        assert!(decode_smask_dct(&[0xFF, 0xD8, 0xFF], 1, 1).is_none());
+        let doc =
+            make_doc_with_stream(&[0xFF, 0xD8, 0xFF], &smask_dict(1, 1, "/Filter /DCTDecode"));
+        assert!(smask_of(&doc).is_none());
     }
 
     // ── Explicit /Mask (§8.9.6.3) regression ─────────────────────────────────
@@ -575,7 +469,7 @@ mod tests {
             " /Subtype /Image /Width 8 /Height 1 /ImageMask true \
               /BitsPerComponent 1",
         );
-        let mask = decode_explicit_mask(&doc, (2, 0)).expect("explicit /Mask stencil must decode");
+        let mask = explicit_of(&doc).expect("explicit /Mask stencil must decode");
         // Paint bit (0) → opaque base image (0xFF); 1 bit → background (0x00).
         assert_eq!((mask.width(), mask.height()), (8, 1));
         assert_eq!(
@@ -596,7 +490,7 @@ mod tests {
             " /Subtype /Image /Width 3 /Height 1 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray /Decode [1 0]",
         );
-        let mask = decode_smask(&doc, (2, 0)).expect("raw 8-bpc SMask must decode");
+        let mask = smask_of(&doc).expect("raw 8-bpc SMask must decode");
         assert_eq!(mask.alpha(), &[0xFF, 0x00, 0xBF]);
     }
 
@@ -607,7 +501,7 @@ mod tests {
             " /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        assert!(decode_explicit_mask(&doc, (2, 0)).is_none());
+        assert!(explicit_of(&doc).is_none());
     }
 
     // ── Colour-key /Mask (§8.9.6.4) ──────────────────────────────────────────
@@ -670,6 +564,6 @@ mod tests {
             " /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        assert!(decode_explicit_mask(&doc, (2, 0)).is_none());
+        assert!(explicit_of(&doc).is_none());
     }
 }

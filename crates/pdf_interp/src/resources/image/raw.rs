@@ -166,9 +166,8 @@ fn expand_to_8bpc(
     use std::borrow::Cow;
     Some(match bpc {
         // bpc=1 packs one bit per sample, one sample per component.
-        // Multi-component spaces (RGB: 3 bits/px, CMYK: 4 bits/px) must use
-        // unpack_packed_bits with `components` samples per row — not expand_1bpp
-        // which treats one bit as one pixel.
+        // A row holds `width × components` samples (RGB: 3 bits/px,
+        // CMYK: 4 bits/px).
         1 => {
             let width_usize = usize::try_from(width).ok()?;
             let samples_per_row = width_usize.checked_mul(components)?;

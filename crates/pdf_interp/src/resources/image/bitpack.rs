@@ -56,21 +56,6 @@ pub(super) fn unpack_packed_bits(
     Some(out)
 }
 
-// ── 1-bpp expansion ───────────────────────────────────────────────────────────
-
-/// Expand 1-bit-per-pixel packed data (MSB first) to 1 byte per pixel.
-///
-/// Output byte: `0x00` = black (bit=0 in PDF), `0xFF` = white (bit=1 in PDF).
-/// Truncated rows are treated as all-black (missing bits default to 0).
-///
-/// Returns `None` if `width × height` overflows `usize`.
-pub(super) fn expand_1bpp(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    let width_usize = usize::try_from(width).ok()?;
-    unpack_packed_bits(data, 1, width_usize, height, |val| {
-        if val == 0 { 0x00 } else { 0xFF }
-    })
-}
-
 // ── N-bpp expansion ───────────────────────────────────────────────────────────
 
 /// Expand N-bits-per-sample packed data (MSB first) to 1 byte per sample, scaled to 0–255.
@@ -170,28 +155,6 @@ pub(super) fn downsample_16bpp(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── expand_1bpp ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn expand_1bpp_single_byte() {
-        // 0b1010_0000 → pixels [white, black, white, black, black, black, black, black].
-        let data = [0b1010_0000u8];
-        let out = expand_1bpp(&data, 8, 1).unwrap();
-        assert_eq!(out[0], 0xFF); // bit 7 = 1 → white
-        assert_eq!(out[1], 0x00); // bit 6 = 0 → black
-        assert_eq!(out[2], 0xFF); // bit 5 = 1 → white
-        assert_eq!(out[3], 0x00); // bit 4 = 0 → black
-    }
-
-    #[test]
-    fn expand_1bpp_partial_row() {
-        // width=4, 1 byte: 0b1111_0000 → 4 white pixels (only top 4 bits used).
-        let data = [0b1111_0000u8];
-        let out = expand_1bpp(&data, 4, 1).unwrap();
-        assert_eq!(out.len(), 4);
-        assert!(out.iter().all(|&b| b == 0xFF));
-    }
 
     // ── expand_nbpp (bpc 2 and 4) ─────────────────────────────────────────────
 

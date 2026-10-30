@@ -7,10 +7,8 @@
 
 use pdf::{Dictionary, Object};
 
-use super::ImageDecodeCtx;
-use super::codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
-use super::raw::{apply_bilevel_decode, decode_raw};
-use super::{ImageDescriptor, ImageFilter, filter_name, is_transport_filter, validated_dims};
+use super::dispatch::{ImageStream, decode_image_stream};
+use super::{ImageDecodeCtx, ImageDescriptor, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
 #[cfg(feature = "gpu-jpeg-huffman")]
@@ -45,10 +43,6 @@ use super::ImageColorSpace;
 /// degenerate, a colour-space name is unresolvable, or the filter is
 /// unsupported.
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "filter dispatch table; splitting per-filter would scatter the dispatch logic"
-)]
 pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
     params: &[u8],
@@ -73,107 +67,30 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
     };
 
     let is_mask = dict.get_bool(b"ImageMask").unwrap_or(false);
-    let filter = dict.get(b"Filter").and_then(filter_name);
-
-    let img_filter = ImageFilter::from_filter_str(filter.as_deref());
-
-    // In a filter chain every filter before the terminal codec is a transport
-    // filter; applying the whole chain passes the codec bytes through.
-    let chain_len = dict
-        .get(b"Filter")
-        .map_or(0, |f| super::image_filter_chain(f).len());
-    let chained = chain_len > 1;
-    let codec_input: std::borrow::Cow<'_, [u8]> = if chained {
-        match decoded_chain(&dict, data) {
-            Ok(bytes) => std::borrow::Cow::Owned(bytes),
-            Err(e) => {
-                log::warn!("inline image: chained-filter prefilter decode failed: {e}");
-                return None;
-            }
-        }
-    } else {
-        std::borrow::Cow::Borrowed(data)
+    let stream = pdf::Stream::new(dict, data.to_vec());
+    let src = ImageStream {
+        stream: &stream,
+        width: w,
+        height: h,
+        is_mask,
     };
-
-    let mut img = match filter.as_deref() {
-        None => decode_raw(
-            doc,
-            data,
-            w,
-            h,
-            is_mask,
-            &dict,
-            #[cfg(feature = "gpu-icc")]
-            &mut ctx.icc,
-        ),
-        Some(f) if is_transport_filter(f) => match decoded_chain(&dict, data) {
-            Ok(raw) => decode_raw(
-                doc,
-                &raw,
-                w,
-                h,
-                is_mask,
-                &dict,
-                #[cfg(feature = "gpu-icc")]
-                &mut ctx.icc,
-            ),
-            Err(e) => {
-                log::warn!("inline image: {f} decode failed: {e}");
-                None
-            }
-        },
-        Some("CCITTFaxDecode") => {
-            let decode_parms = super::terminal_decode_parms(&dict, chain_len);
-            decode_ccitt(&codec_input, w, h, is_mask, decode_parms).map(|mut img| {
-                apply_bilevel_decode(&mut img, &dict);
-                img
-            })
-        }
-        Some("DCTDecode") => {
-            // GPU dispatch is threshold-gated inside decode_dct (same threshold as
-            // resolve_image). Most inline images are small and will use the CPU path.
-            // Inline images have no stable ObjectId so we never cache them — the
-            // cross-document content-hash dedup wouldn't pay off either since
-            // inline JPEGs are usually tiny (icons / glyph fallbacks).
-            decode_dct(
-                &codec_input,
-                w,
-                h,
-                &dict,
-                ctx,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                jpeg_gpu,
-                #[cfg(feature = "cache")]
-                None::<&super::codecs::DctCacheCtx<'_>>,
-            )
-        }
-        Some("JPXDecode") => {
-            // GPU dispatch is threshold-gated inside decode_jpx.
-            #[cfg(feature = "nvjpeg2k")]
-            {
-                decode_jpx(&codec_input, w, h, None, ctx.nvjpeg2k.as_deref_mut())
-            }
-            #[cfg(not(feature = "nvjpeg2k"))]
-            {
-                decode_jpx(&codec_input, w, h, None)
-            }
-        }
-        Some("JBIG2Decode") => {
-            // Inline images cannot reference a JBIG2Globals stream (no object identity).
-            decode_jbig2(doc, &codec_input, w, h, is_mask, None).map(|mut img| {
-                apply_bilevel_decode(&mut img, &dict);
-                img
-            })
-        }
-        Some(other) => {
-            log::warn!("inline image: unknown filter {other:?}");
-            None
-        }
-    }?;
-    img.filter = img_filter;
+    // Inline images have no object identity, so the device image cache
+    // never holds them.
+    let mut img = decode_image_stream(
+        ctx,
+        &src,
+        None,
+        #[cfg(feature = "cache")]
+        None,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        jpeg_gpu,
+    )
+    .map_err(|e| log::warn!("inline image: {e}"))
+    .ok()?;
 
     if !is_mask
-        && let Some(rewrite) = dict
+        && let Some(rewrite) = stream
+            .dict
             .get(b"ColorSpace")
             .and_then(|cs| super::colorspace::sample_rewrite(doc, cs))
     {
@@ -221,11 +138,6 @@ fn resolve_named_color_space(
         dict.set("ColorSpace", obj);
     }
     Ok(())
-}
-
-/// Apply every filter of the inline image's `/Filter` chain to `data`.
-fn decoded_chain(dict: &Dictionary, data: &[u8]) -> Result<Vec<u8>, String> {
-    pdf::Stream::new(dict.clone(), data.to_vec()).decompressed_content()
 }
 
 /// Parse the raw inline-image parameter block into a `pdf::Dictionary`.

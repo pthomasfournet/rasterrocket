@@ -152,6 +152,7 @@ pub const GPU_JPEG2K_THRESHOLD_PX: u32 = 262_144;
 pub(crate) mod bitpack;
 pub(crate) mod codecs;
 pub(crate) mod colorspace;
+pub(crate) mod dispatch;
 pub(crate) mod inline;
 pub(crate) mod raw;
 pub(crate) mod smask;
@@ -424,7 +425,7 @@ pub struct ImageDescriptor {
 #[must_use]
 #[expect(
     clippy::too_many_lines,
-    reason = "filter dispatch table; splitting per-filter would scatter the dispatch logic"
+    reason = "resource lookup, decode and mask attachment read as one sequence"
 )]
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
@@ -432,10 +433,6 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     request: ImageRequest<'_>,
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
 ) -> ImageResolution {
-    use codecs::{decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
-    use raw::decode_raw;
-    use smask::decode_smask;
-
     let doc = ctx.doc;
     let name = request.name;
     let unresolved = |what: &str| {
@@ -492,141 +489,54 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
             .and_then(|cs| colorspace::sample_rewrite(doc, cs))
     };
 
-    let filter_obj = stream.dict.get(b"Filter");
-    let filter_chain = filter_obj.map(image_filter_chain).unwrap_or_default();
-    let filter = filter_obj.and_then(filter_name);
+    // A colour-key mask compares exact samples, which a reduced decode
+    // averages, so such an image decodes in full.  A mask stream keeps its
+    // own resolution and needs no such exclusion.
+    let draw_size = request
+        .draw_size
+        .filter(|_| !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
 
-    let img_filter = ImageFilter::from_filter_str(filter.as_deref());
-
-    // Resolve the codec input bytes.  For a chained `/Filter` (e.g.
-    // `[/ASCII85Decode /CCITTFaxDecode]`) every filter before the terminal one
-    // is a transport/prefilter (ASCII85, Flate, …); `decompressed_content`
-    // applies those left to right and passes the terminal image codec
-    // (CCITTFax/DCT/JBIG2/JPX) through unchanged, so its output is exactly the
-    // byte stream the terminal codec must decode.  A single transport filter
-    // (plain `FlateDecode`) is also handled here.  A pure-codec single filter
-    // (e.g. just `CCITTFaxDecode`) passes through, so `decompressed_content`
-    // returns the raw content unchanged and behaviour is preserved.
-    //
-    // Fail loudly: a chain we cannot run (unsupported prefilter, corrupt
-    // transport bytes) surfaces as a decode error — never a silent blank page.
-    let codec_input: std::borrow::Cow<'_, [u8]> = if filter_chain.len() > 1 {
-        match stream.decompressed_content() {
-            Ok(data) => std::borrow::Cow::Owned(data),
-            Err(e) => {
-                log::warn!("image: chained-filter prefilter decode failed: {e}");
-                return ImageResolution::DecodeFailed(format!("chained filter: {e}"));
-            }
-        }
+    // The GPU blit composites cached images fully opaque and reads their
+    // samples verbatim, so an image carrying a soft mask, an explicit mask,
+    // a colour rewrite (spot tint or ICC profile), or a `/Decode` remap
+    // stays host-resident: neither looked up (a content-hash hit from
+    // another document would drop the mask, the rewrite, or the remap) nor
+    // inserted.
+    #[cfg(feature = "cache")]
+    let dct_cache = if has_mask_entry(&stream.dict)
+        || rewrite.is_some()
+        || stream.dict.get(b"Decode").is_some()
+    {
+        None
     } else {
-        std::borrow::Cow::Borrowed(stream.content.as_slice())
+        codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
     };
 
-    let terminal_parms = terminal_decode_parms(&stream.dict, filter_chain.len());
-
-    let opt_img: Option<ImageDescriptor> =
-        match filter.as_deref() {
-            None => decode_raw(
-                doc,
-                &codec_input,
-                w,
-                h,
-                is_mask,
-                &stream.dict,
-                #[cfg(feature = "gpu-icc")]
-                &mut ctx.icc,
-            ),
-            Some(f) if is_transport_filter(f) => match stream.decompressed_content() {
-                Ok(data) => decode_raw(
-                    doc,
-                    &data,
-                    w,
-                    h,
-                    is_mask,
-                    &stream.dict,
-                    #[cfg(feature = "gpu-icc")]
-                    &mut ctx.icc,
-                ),
-                Err(e) => {
-                    log::warn!("image: {f} decode failed: {e}");
-                    return ImageResolution::DecodeFailed(format!("{f}: {e}"));
-                }
-            },
-            Some("CCITTFaxDecode") => decode_ccitt(&codec_input, w, h, is_mask, terminal_parms)
-                .map(|mut img| {
-                    raw::apply_bilevel_decode(&mut img, &stream.dict);
-                    img
-                }),
-            Some("DCTDecode") => {
-                // The GPU blit composites cached images fully opaque and
-                // reads their samples verbatim, so an image carrying a soft
-                // mask, an explicit mask, a colour rewrite (spot tint or ICC
-                // profile), or a `/Decode` remap stays host-resident: neither
-                // looked up (a content-hash hit from another document would
-                // drop the mask, the rewrite, or the remap) nor inserted.
-                #[cfg(feature = "cache")]
-                let cache_ctx = if has_mask_entry(&stream.dict)
-                    || rewrite.is_some()
-                    || stream.dict.get(b"Decode").is_some()
-                {
-                    None
-                } else {
-                    codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
-                };
-                decode_dct(
-                    &codec_input,
-                    w,
-                    h,
-                    &stream.dict,
-                    ctx,
-                    #[cfg(feature = "gpu-jpeg-huffman")]
-                    jpeg_gpu,
-                    #[cfg(feature = "cache")]
-                    cache_ctx.as_ref(),
-                )
-            }
-            Some("JPXDecode") => {
-                // A colour-key mask compares exact samples, which a reduced
-                // decode averages, so such an image decodes in full.  A mask
-                // stream keeps its own resolution and needs no such exclusion.
-                let draw_size = request
-                    .draw_size
-                    .filter(|_| !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
-                #[cfg(feature = "nvjpeg2k")]
-                {
-                    decode_jpx(&codec_input, w, h, draw_size, ctx.nvjpeg2k.as_deref_mut())
-                }
-                #[cfg(not(feature = "nvjpeg2k"))]
-                {
-                    decode_jpx(&codec_input, w, h, draw_size)
-                }
-            }
-            Some("JBIG2Decode") => decode_jbig2(doc, &codec_input, w, h, is_mask, terminal_parms)
-                .map(|mut img| {
-                    raw::apply_bilevel_decode(&mut img, &stream.dict);
-                    img
-                }),
-            Some(other) => {
-                log::warn!("image: unknown filter {other:?}");
-                return ImageResolution::DecodeFailed(format!("unsupported filter {other:?}"));
-            }
-        };
-
-    let Some(mut img) = opt_img else {
-        let codec = match filter.as_deref() {
-            Some("CCITTFaxDecode") => "CCITTFaxDecode decode failed",
-            Some("DCTDecode") => "DCTDecode decode failed",
-            Some("JPXDecode") => "JPXDecode decode failed",
-            Some("JBIG2Decode") => "JBIG2Decode decode failed",
-            _ => "raw/unfiltered decode failed",
-        };
-        return ImageResolution::DecodeFailed(codec.to_owned());
+    let src = dispatch::ImageStream {
+        stream,
+        width: w,
+        height: h,
+        is_mask,
     };
-    img.filter = img_filter;
+    let mut img = match dispatch::decode_image_stream(
+        ctx,
+        &src,
+        draw_size,
+        #[cfg(feature = "cache")]
+        dct_cache.as_ref(),
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        jpeg_gpu,
+    ) {
+        Ok(img) => img,
+        Err(msg) => {
+            log::warn!("image: /{}: {msg}", String::from_utf8_lossy(name));
+            return ImageResolution::DecodeFailed(msg);
+        }
+    };
 
     // Resolve and decode the soft mask (`SMask`), if present.
     if let Some(Object::Reference(smask_id)) = stream.dict.get(b"SMask") {
-        if let Some(mask) = decode_smask(doc, *smask_id) {
+        if let Some(mask) = smask::decode_smask(ctx, *smask_id) {
             img.smask = Some(mask);
         } else {
             // SMask decode failed.  Treat as a soft skip: the base image pixels
@@ -646,7 +556,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         // image is still valid, so it is blitted fully opaque.
         match mask_obj {
             Object::Reference(mask_id) => {
-                if let Some(mask) = smask::decode_explicit_mask(doc, *mask_id) {
+                if let Some(mask) = smask::decode_explicit_mask(ctx, *mask_id) {
                     img.smask = Some(mask);
                 } else {
                     log::warn!(
