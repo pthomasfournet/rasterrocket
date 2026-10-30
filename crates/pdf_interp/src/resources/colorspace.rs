@@ -26,8 +26,7 @@
 //! | `/DeviceGray`, `/G` (Table 89 abbreviation), `/CalGray` | [`ColorSpace::DeviceGray`] |
 //! | `/DeviceRGB`, `/RGB` (Table 89), `/CalRGB` | [`ColorSpace::DeviceRgb`] |
 //! | `/DeviceCMYK`, `/CMYK` (Table 89) | [`ColorSpace::DeviceCmyk`] |
-//! | `[/CalGray ...]` array form | [`ColorSpace::DeviceGray`] (approximated) |
-//! | `[/CalRGB ...]` array form | [`ColorSpace::DeviceRgb`] (approximated) |
+//! | `[/CalGray ...]`, `[/CalRGB ...]` | [`ColorSpace::Cal`]; the device space when the parameters are invalid |
 //! | `[/Lab ...]`         | [`ColorSpace::Lab`] |
 //! | `[/ICCBased <ref>]`  | [`ColorSpace::IccBased`] |
 //! | `[/Indexed ...]`     | [`ColorSpace::Indexed`] |
@@ -60,8 +59,10 @@ use pdf::{Document, Object, ObjectId};
 use super::icc_shaper::srgb_encode;
 use crate::resources::dict_ext::DictExt as _;
 
+mod cal;
 mod icc;
 
+pub use cal::CalSpace;
 use icc::IccConversion;
 
 /// Maximum recursion depth for nested colour-space chains
@@ -83,6 +84,8 @@ pub enum ColorSpace {
     DeviceRgb,
     /// Four-channel CMYK. PDF §8.6.4.4.
     DeviceCmyk,
+    /// `CalGray` or `CalRGB` with valid parameters. PDF §8.6.5.2–3.
+    Cal(Box<CalSpace>),
     /// CIE Lab. PDF §8.6.5.4. Three components; whitepoint + range live
     /// in the dict reachable via `dict_id` when we need them.
     Lab {
@@ -160,6 +163,7 @@ impl ColorSpace {
             Self::DeviceGray | Self::Indexed { .. } | Self::Separation { .. } => 1,
             Self::DeviceRgb | Self::Lab { .. } => 3,
             Self::DeviceCmyk => 4,
+            Self::Cal(cal) => cal.ncomponents(),
             Self::IccBased { n, .. } => usize::from(*n),
             Self::Pattern { .. } => 0,
             Self::DeviceN { ncomps, .. } => usize::from(*ncomps),
@@ -180,6 +184,8 @@ impl ColorSpace {
     ///
     /// - `DeviceGray/Rgb`: direct conversion via the `color::convert`
     ///   helpers; `DeviceCmyk` via the process-ink model of `color::cmyk`.
+    /// - `Cal`: gamma and matrix to XYZ, Bradford adaptation from the
+    ///   space's white point to D65, sRGB encoding (see [`CalSpace`]).
     /// - `Lab`: CIE Lab → D65 XYZ → sRGB through the standard formulae.
     ///   Whitepoint defaults to D65 (the spec's most common choice); the
     ///   per-document whitepoint stored in `dict_id` is not yet applied.
@@ -221,6 +227,7 @@ impl ColorSpace {
             Self::DeviceCmyk => {
                 color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3])
             }
+            Self::Cal(cal) => cal.convert(comps),
             Self::Lab { .. } => lab_to_srgb(comps[0], comps[1], comps[2]),
             Self::IccBased { n, stream_id } => stream_id
                 .and_then(|id| IccConversion::load(doc, id, *n))
@@ -481,8 +488,10 @@ fn resolve_array(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         return ColorSpace::DeviceGray;
     };
     match family {
-        b"DeviceGray" | b"CalGray" => ColorSpace::DeviceGray,
-        b"DeviceRGB" | b"CalRGB" => ColorSpace::DeviceRgb,
+        b"DeviceGray" => ColorSpace::DeviceGray,
+        b"DeviceRGB" => ColorSpace::DeviceRgb,
+        b"CalGray" => resolve_cal(doc, arr, 1, ColorSpace::DeviceGray),
+        b"CalRGB" => resolve_cal(doc, arr, 3, ColorSpace::DeviceRgb),
         b"DeviceCMYK" => ColorSpace::DeviceCmyk,
         b"Lab" => ColorSpace::Lab {
             dict_id: arr.get(1).and_then(reference_id),
@@ -504,6 +513,14 @@ fn resolve_array(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
             ColorSpace::DeviceGray
         }
     }
+}
+
+/// `[/CalGray dict]` (`n = 1`) or `[/CalRGB dict]` (`n = 3`); `device`
+/// when the parameter dictionary is missing or invalid.
+fn resolve_cal(doc: &Document, arr: &[Object], n: u8, device: ColorSpace) -> ColorSpace {
+    arr.get(1)
+        .and_then(|params| CalSpace::resolve(doc, params, n))
+        .map_or(device, |cal| ColorSpace::Cal(Box::new(cal)))
 }
 
 fn resolve_icc_based(doc: &Document, ref_obj: Option<&Object>, _depth: u8) -> ColorSpace {
@@ -629,8 +646,7 @@ mod tests {
     #[test]
     fn cal_spaces_approximate_to_device() {
         let doc = empty_doc();
-        // CalGray/CalRGB carry whitepoints we don't apply; approximate to
-        // their device cousins (same as the image pipeline).
+        // The bare names carry no parameters; they map to the device spaces.
         assert_eq!(resolve(&doc, &name_obj(b"CalGray")), ColorSpace::DeviceGray);
         assert_eq!(resolve(&doc, &name_obj(b"CalRGB")), ColorSpace::DeviceRgb);
     }

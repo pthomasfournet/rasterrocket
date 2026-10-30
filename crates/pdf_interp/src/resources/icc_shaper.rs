@@ -28,7 +28,7 @@ use moxcms::{ColorProfile, DataColorSpace, ToneReprCurve, Xyzd};
 use pdf::{Document, ObjectId};
 
 /// 3×3 matrix, row-major: `m[row][col]`.
-type Mat3 = [[f64; 3]; 3];
+pub(super) type Mat3 = [[f64; 3]; 3];
 
 /// D50-adapted sRGB colorants (Bradford) as columns: the `rXYZ`, `gXYZ` and
 /// `bXYZ` tags of the IEC 61966-2.1 profile.
@@ -181,7 +181,7 @@ const fn encode_index(v: f32) -> usize {
         .mul_add((ENCODE_TABLE_LEN - 1) as f32, 0.5) as usize
 }
 
-fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
+pub(super) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
     let mut out = [[0.0; 3]; 3];
     for (r, row) in out.iter_mut().enumerate() {
         for (c, cell) in row.iter_mut().enumerate() {
@@ -192,7 +192,7 @@ fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
 }
 
 /// Inverse by the adjugate; `None` for a singular or non-finite matrix.
-fn mat_inverse(m: &Mat3) -> Option<Mat3> {
+pub(super) fn mat_inverse(m: &Mat3) -> Option<Mat3> {
     let cof = |r0: usize, r1: usize, c0: usize, c1: usize| {
         m[r0][c0].mul_add(m[r1][c1], -(m[r0][c1] * m[r1][c0]))
     };

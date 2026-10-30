@@ -29,7 +29,7 @@ pub(super) enum IccConversion {
         xform: Arc<Transform8BitExecutor>,
     },
     /// A profile with no conversion of its own: the `/Alternate` space of
-    /// the stream, a device or Lab space of the same component count.
+    /// the stream, a device or CIE-based space of the same component count.
     Alternate(ColorSpace),
 }
 
@@ -46,10 +46,11 @@ impl IccConversion {
         })
     }
 
-    /// The `/Alternate` space of profile stream `id` when it is a device or
-    /// Lab space of `n` components.  Spaces that convert through another
-    /// space (ICC-based, Indexed, Separation, `DeviceN`) are excluded, so an
-    /// alternate cannot lead back to this profile.
+    /// The `/Alternate` space of profile stream `id` when it is a device,
+    /// `CalGray`, `CalRGB` or Lab space of `n` components.  Spaces that
+    /// convert through another space (ICC-based, Indexed, Separation,
+    /// `DeviceN`) are excluded, so an alternate cannot lead back to this
+    /// profile.
     fn alternate(doc: &Document, id: ObjectId, n: u8) -> Option<ColorSpace> {
         let obj = doc.get_object(id).ok()?;
         let alt = obj.as_ref().as_stream()?.dict.get(b"Alternate")?;
@@ -60,6 +61,7 @@ impl IccConversion {
                 ColorSpace::DeviceGray
                     | ColorSpace::DeviceRgb
                     | ColorSpace::DeviceCmyk
+                    | ColorSpace::Cal(_)
                     | ColorSpace::Lab { .. }
             );
         if !usable {
@@ -202,8 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn cal_alternate_converts_as_its_device_space() {
+    fn cal_alternate_converts_through_its_parameters() {
+        // CalGray with the default Gamma 1: 0.5 is linear light, sRGB 188.
         let doc = garbage_doc(1, "[/CalGray << /WhitePoint [0.9505 1 1.089] >>]");
-        assert_eq!(icc(1).convert_to_rgb(&doc, &[0.5]), [128; 3]);
+        let gray = icc(1).convert_to_rgb(&doc, &[0.5]);
+        assert!(gray.iter().all(|&c| c.abs_diff(188) <= 1), "got {gray:?}");
     }
 }
