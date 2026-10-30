@@ -91,11 +91,17 @@ was examined.
   lookahead no longer tokenizes binary data; a literal string no longer
   consumes the byte after its closing parenthesis. Hand-applied: the
   procedure scan replaces this fork's earlier `read_proc` change.
+- `7bdbbde1d` `tables::kerx::Subtable2::kerning`: the left and right
+  class values of a format 2 subtable are byte offsets (pre-multiplied by
+  the row width and by the two-byte value size), so their sum is halved
+  before indexing the kerning array. Not reached by this fork's users
+  (glyph positions come from the PDF); brought over to keep the AAT
+  reader correct.
 
 ## Upstream review (2026-10-30)
 
 Upstream history through `42e0f877d` (2026-10-27, crates.io 0.46.0) was
-reviewed by commit. Besides the fixes above, nothing is brought over:
+reviewed by commit, and through `7bdbbde1d` (2026-10-30) on that date. Besides the fixes above, nothing is brought over:
 
 - The rebase onto 0.46 is deferred to the next font work. Upstream has
   restructured the crate since the base (`model` / `OutlineGlyphs`, the
