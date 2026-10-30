@@ -5,6 +5,11 @@
 *.rmeta
 *.d
 
+# cargo-fuzz working directories (generated corpora, crash artifacts)
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+
 # Cargo lock — committed for binaries, not for libs
 # Cargo.lock
 

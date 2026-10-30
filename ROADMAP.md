@@ -1176,7 +1176,7 @@ Phases 5 and 6 are complete and integrated.  All core roadmap milestones done.
 - **Pipelined render+OCR** — `render_channel(path, opts, capacity)` for bounded producer/consumer.
 - **DPI auto-selection hint** — `suggested_dpi(min, max)` snaps to nearest standard DPI step.
 - **GPU teardown** — explicit `release_gpu_decoders()` via `pool.broadcast()` before pool drop; eliminates CUDA atexit race.
-- **Fuzz targets** — `crates/fuzz`: CCITTFaxDecode and JBIG2Decode coverage-guided fuzz targets.
+- **Fuzz targets** — `fuzz/`: CCITTFaxDecode and JBIG2Decode coverage-guided fuzz targets.
 - **Image module refactor** — 1 500-line `image/mod.rs` split into focused submodules.
 - **Glyph cache** — `DashMap` + `lru` replaced with `quick_cache::sync::Cache` (sharded; reads no longer force write lock).
 - **CLI hardening** — named rayon workers, 8 MiB stack, `MONO_THRESHOLD` const, atomic temp-file rename, `--odd`/`--even` mutual exclusion, DPI/JPEG quality validation.
@@ -2042,7 +2042,7 @@ edge cases that are hard to construct by hand.
 | `cmyk_to_rgb_reflectance` | All 256⁴ is too large; proptest over random (C,M,Y,K) tuples; assert output ∈ [0,255]³ | Overflow/underflow in the subtractive formula |
 | `grid_to_u8` in icc.rs | `i ∈ [0, grid_n-1]`, assert endpoints map exactly to 0 and 255 | Off-by-one at boundary nodes corrupts CLUT edges |
 
-**Where fuzzing beats proptest** (already covered by `crates/fuzz`):
+**Where fuzzing beats proptest** (already covered by `fuzz/`):
 
 - PDF stream parsing — coverage-guided fuzzing finds parser bugs that proptest's
   random generation misses; shrinking is less valuable when the bug is a specific

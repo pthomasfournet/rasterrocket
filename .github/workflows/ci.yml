@@ -195,6 +195,41 @@ jobs:
       - name: Test rasterrocket (NEON deskew rotate + parity)
         run: cargo test -p rasterrocket --lib
 
+  # ── Fuzz target build ─────────────────────────────────────────────────────
+  #
+  # `fuzz/` is a workspace of its own (cargo-fuzz builds it on nightly with
+  # sanitizer flags), so no workspace build compiles it.  Building every
+  # target here makes a package rename or an API change in a fuzzed crate
+  # fail on push instead of at the next fuzzing session.
+  fuzz-build:
+    name: Fuzz targets (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      - name: Build fuzz targets
+        working-directory: fuzz
+        run: cargo +nightly fuzz build
+
   # ── Format check ──────────────────────────────────────────────────────────
   fmt:
     name: Formatting

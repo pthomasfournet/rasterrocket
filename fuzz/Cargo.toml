@@ -1,5 +1,5 @@
 [package]
-name = "pdf-raster-fuzz"
+name = "rasterrocket-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -7,10 +7,15 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+# A workspace of its own: the fuzz build needs nightly sanitizer flags that
+# must not reach the main workspace, and an enclosing checkout must not claim
+# this package.
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
-pdf_interp    = { path = "../crates/pdf_interp" }
-pdf           = { path = "../crates/pdf" }
+pdf_interp    = { package = "rasterrocket-interp", path = "../crates/pdf_interp" }
+pdf           = { package = "rasterrocket-parser", path = "../crates/pdf" }
 
 # Direct dependency so we can fuzz hayro-jbig2 both through pdf_interp
 # and standalone (raw segment data without a PDF wrapper).
