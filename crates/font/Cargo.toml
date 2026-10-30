@@ -25,6 +25,8 @@ log        = { workspace = true }
 # require write locks (unlike dashmap + lru::LruCache, where get() takes
 # &mut self and therefore serializes reads within each shard).
 quick_cache = "0.7"
+# Holds the parsed views of a font program next to the bytes they borrow.
+self_cell   = "1.3"
 
 [dev-dependencies]
 font-test-data = { path = "../font_test_data" }

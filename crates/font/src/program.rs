@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use read_fonts::ps::cff::CffFontRef;
+use read_fonts::ps::cff::{CffFontRef, Subfont};
 use read_fonts::ps::charmap::Charmap;
 use read_fonts::ps::type1::Type1Font;
 use read_fonts::ps::type1::cid::CidType1Font;
@@ -31,7 +31,8 @@ use read_fonts::types::{GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{
-    DrawSettings, Engine, HintingInstance, HintingOptions, OutlineGlyphFormat, OutlinePen, Target,
+    DrawSettings, Engine, HintingInstance, HintingOptions, OutlineGlyphCollection,
+    OutlineGlyphFormat, OutlinePen, Target,
 };
 use skrifa::{GlyphNameSource, MetadataProvider};
 
@@ -108,11 +109,40 @@ enum Outlines {
     CidType1(Box<CidType1Font>),
 }
 
+/// Views of the program bytes, parsed once at load so that drawing a
+/// glyph reads only the glyph's own records.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per program, inside the self_cell's single heap allocation"
+)]
+enum Views<'a> {
+    Sfnt {
+        font: FontRef<'a>,
+        outlines: OutlineGlyphCollection<'a>,
+    },
+    Cff(CffFontRef<'a>),
+    /// Type 1 programs, which are parsed into owned structures.
+    None,
+}
+
+self_cell::self_cell!(
+    /// The program bytes and the [`Views`] that borrow them.
+    struct ProgramData {
+        owner: Box<[u8]>,
+        #[covariant]
+        dependent: Views,
+    }
+);
+
 /// A parsed font program, shared by every [`crate::face::FontFace`] built
 /// from the same bytes.
 pub struct FontProgram {
-    data: Box<[u8]>,
+    data: ProgramData,
     outlines: Outlines,
+    /// The private dictionaries of a bare CFF program, indexed by font
+    /// dictionary, each parsed on first use.  Empty for every other
+    /// program.
+    subfonts: Box<[OnceLock<Option<Subfont>>]>,
     /// Outline coordinates are in units of `1 / upem` em.
     upem: f64,
     /// CID → glyph index for CID-keyed CFF programs (bare or in an sfnt):
@@ -137,7 +167,7 @@ impl std::fmt::Debug for FontProgram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FontProgram")
             .field("format", &self.format())
-            .field("len", &self.data.len())
+            .field("len", &self.data().len())
             .field("upem", &self.upem)
             .finish_non_exhaustive()
     }
@@ -207,9 +237,24 @@ impl FontProgram {
         if !(upem.is_finite() && upem > 0.0) {
             return Err(LoadError::Malformed(format!("units per em {upem}")));
         }
+        let data = ProgramData::new(data, |data| match &outlines {
+            Outlines::Sfnt { face_index, .. } => {
+                FontRef::from_index(data, *face_index).map_or(Views::None, |font| Views::Sfnt {
+                    outlines: font.outline_glyphs(),
+                    font,
+                })
+            }
+            Outlines::Cff => CffFontRef::new(data, 0, None).map_or(Views::None, Views::Cff),
+            Outlines::Type1(_) | Outlines::CidType1(_) => Views::None,
+        });
+        let subfonts = match data.borrow_dependent() {
+            Views::Cff(cff) => (0..cff.num_subfonts()).map(|_| OnceLock::new()).collect(),
+            _ => Box::default(),
+        };
         let mut program = Self {
             data,
             outlines,
+            subfonts,
             upem,
             cid_to_gid,
             byte_charmap: Box::new([0; 256]),
@@ -238,7 +283,7 @@ impl FontProgram {
     /// Bytes of the program, exactly as given to [`Self::parse`].
     #[must_use]
     pub fn data(&self) -> &[u8] {
-        &self.data
+        self.data.borrow_owner()
     }
 
     /// `true` when this is an sfnt whose charmap is Unicode (a Unicode
@@ -487,8 +532,7 @@ impl FontProgram {
         let glyph = GlyphId::new(gid);
         match &self.outlines {
             Outlines::Sfnt { .. } => {
-                let font = self.sfnt()?;
-                let outline = font.outline_glyphs().get(glyph)?;
+                let outline = self.sfnt_outlines()?.get(glyph)?;
                 let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
                 let metrics = outline.draw(settings, pen).ok()?;
                 Some(metrics.advance_width)
@@ -498,8 +542,13 @@ impl FontProgram {
                 if gid >= cff.num_glyphs() {
                     return None;
                 }
-                let subfont = cff.subfont(cff.subfont_index(glyph)?, &[]).ok()?;
-                cff.draw(&subfont, glyph, &[], None, pen).ok()
+                let index = cff.subfont_index(glyph)?;
+                let subfont = self
+                    .subfonts
+                    .get(usize::from(index))?
+                    .get_or_init(|| cff.subfont(index, &[]).ok())
+                    .as_ref()?;
+                cff.draw(subfont, glyph, &[], None, pen).ok()
             }
             Outlines::Type1(font) => {
                 if gid >= font.num_glyphs() {
@@ -544,18 +593,14 @@ impl FontProgram {
         if !self.requires_hinting() {
             return None;
         }
-        let font = self.sfnt()?;
+        let outlines = self.sfnt_outlines()?;
         let options = HintingOptions {
             engine: Engine::Interpreter,
             target: Target::Mono,
         };
-        let instance = HintingInstance::new(
-            &font.outline_glyphs(),
-            Size::new(ppem),
-            LocationRef::default(),
-            options,
-        )
-        .ok()?;
+        let instance =
+            HintingInstance::new(outlines, Size::new(ppem), LocationRef::default(), options)
+                .ok()?;
         instance.is_enabled().then_some(instance)
     }
 
@@ -568,8 +613,7 @@ impl FontProgram {
         instance: &HintingInstance,
         pen: &mut impl OutlinePen,
     ) -> Option<()> {
-        let font = self.sfnt()?;
-        let outline = font.outline_glyphs().get(GlyphId::new(gid))?;
+        let outline = self.sfnt_outlines()?.get(GlyphId::new(gid))?;
         outline
             .draw(DrawSettings::hinted(instance, false), pen)
             .ok()
@@ -582,16 +626,23 @@ impl FontProgram {
         self.upem
     }
 
-    fn sfnt(&self) -> Option<FontRef<'_>> {
-        match self.outlines {
-            Outlines::Sfnt { face_index, .. } => FontRef::from_index(&self.data, face_index).ok(),
+    fn sfnt(&self) -> Option<&FontRef<'_>> {
+        match self.data.borrow_dependent() {
+            Views::Sfnt { font, .. } => Some(font),
             _ => None,
         }
     }
 
-    fn cff(&self) -> Option<CffFontRef<'_>> {
-        match self.outlines {
-            Outlines::Cff => CffFontRef::new(&self.data, 0, None).ok(),
+    fn sfnt_outlines(&self) -> Option<&OutlineGlyphCollection<'_>> {
+        match self.data.borrow_dependent() {
+            Views::Sfnt { outlines, .. } => Some(outlines),
+            _ => None,
+        }
+    }
+
+    fn cff(&self) -> Option<&CffFontRef<'_>> {
+        match self.data.borrow_dependent() {
+            Views::Cff(cff) => Some(cff),
             _ => None,
         }
     }
