@@ -6,7 +6,7 @@
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::super::gstate::{Ctm, ctm_multiply};
-use super::{PageRenderer, annotation_synthesis};
+use super::{PageRenderer, annotation_synthesis, widget_appearance};
 use crate::RenderPurpose;
 use crate::resources::dict_ext::DictExt;
 
@@ -62,6 +62,7 @@ pub(super) fn render_annotations(renderer: &mut PageRenderer<'_>, page_id: Objec
         _ => return,
     };
 
+    let form = widget_appearance::AcroForm::of(doc);
     for entry in entries {
         match entry {
             Object::Reference(id) => {
@@ -74,9 +75,11 @@ pub(super) fn render_annotations(renderer: &mut PageRenderer<'_>, page_id: Objec
                     );
                     continue;
                 };
-                render_one_annotation(renderer, &annot, Some(id));
+                render_one_annotation(renderer, &annot, Some(id), form.as_ref());
             }
-            Object::Dictionary(annot) => render_one_annotation(renderer, &annot, None),
+            Object::Dictionary(annot) => {
+                render_one_annotation(renderer, &annot, None, form.as_ref());
+            }
             _ => {}
         }
     }
@@ -96,11 +99,13 @@ const fn shown_for(flags: i64, purpose: RenderPurpose) -> bool {
 }
 
 /// Render the annotation dictionary `annot` (object `id`, or direct when
-/// `None`) into `renderer`'s bitmap.
+/// `None`) into `renderer`'s bitmap; `form` is the document's interactive
+/// form, for widget annotations.
 pub(super) fn render_one_annotation(
     renderer: &mut PageRenderer<'_>,
     annot: &Dictionary,
     id: Option<ObjectId>,
+    form: Option<&widget_appearance::AcroForm>,
 ) {
     let doc = renderer.resources.doc();
     let flags = annot.get_i64(b"F").unwrap_or(0);
@@ -117,6 +122,16 @@ pub(super) fn render_one_annotation(
         .get(b"AP")
         .and_then(|o| crate::resources::resolve_dict(doc, o))
         .is_some_and(|ap| ap.get(b"N").is_some());
+    if annot.get_name(b"Subtype") == Some(b"Widget")
+        && let Some(form) = form
+        && let Some(field) =
+            widget_appearance::Field::to_synthesise(doc, annot, form, has_normal_appearance)
+    {
+        if let Some(rect) = read_rect(annot) {
+            draw_widget(renderer, form, &field, rect, id);
+        }
+        return;
+    }
     if !has_normal_appearance {
         if let Some(rect) = read_rect(annot)
             && let Some(appearance) = annotation_synthesis::markup(doc, annot, rect)
@@ -194,6 +209,55 @@ fn draw_synthesized(
     gs.blend_mode = appearance.blend;
     renderer.do_form_xobject(&form);
     renderer.gstate.restore();
+}
+
+/// Draw the synthesised appearance of the widget of `field` in `rect`,
+/// with the form's default resources in effect.
+fn draw_widget(
+    renderer: &mut PageRenderer<'_>,
+    form: &widget_appearance::AcroForm,
+    field: &widget_appearance::Field,
+    rect: [f64; 4],
+    id: Option<ObjectId>,
+) {
+    let doc = renderer.resources.doc();
+    let resources = widget_appearance::resources(doc, form, field);
+    // The default resources are no object's `/Resources`; object 0, which
+    // no document defines, identifies them to the font cache.
+    let dr = renderer.resources.with_resources((0, 0), &resources);
+    let page_resources = std::mem::replace(&mut renderer.resources, dr);
+    let content = widget_appearance::content(doc, field, rect, |font, bytes| {
+        text_width(renderer, font, bytes)
+    });
+    let appearance = annotation_synthesis::Synthesized {
+        content,
+        bbox: rect,
+        opacity: 1.0,
+        blend: raster::types::BlendMode::Normal,
+    };
+    draw_synthesized(renderer, appearance, id, None);
+    renderer.resources = page_resources;
+}
+
+/// The advance of the single-byte codes `bytes` in the font resource `font`
+/// of the resources in effect, in text space units per unit font size: the
+/// font's `/Widths`, else its program's advances.
+fn text_width(renderer: &mut PageRenderer<'_>, font: &[u8], bytes: &[u8]) -> f64 {
+    let active = renderer.font_cache.select(&renderer.resources, font);
+    let mut total = 0.0;
+    for &byte in bytes {
+        let code = u32::from(byte);
+        let advance = match active.descriptor.width_for_code(code) {
+            Some(w) => f64::from(w) / 1000.0,
+            None => renderer
+                .font_cache
+                .get_or_load(&active, font, [12.0, 0.0, 0.0, 12.0])
+                .and_then(|face| face.glyph_advance(code))
+                .unwrap_or(0.5),
+        };
+        total += advance;
+    }
+    total
 }
 
 /// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,

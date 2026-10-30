@@ -24,7 +24,7 @@ pub mod shading;
 pub mod tiling;
 pub mod transfer;
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use dict_ext::DictExt;
 use pdf::{Dictionary, Document, Object, ObjectId};
@@ -309,7 +309,7 @@ pub struct PageResources<'doc> {
     resource_context_id: ObjectId,
     /// Each category sub-dictionary, resolved on first use; `None` when the
     /// category is absent or empty.
-    subdicts: [OnceLock<Option<Dictionary>>; Category::COUNT],
+    subdicts: [OnceLock<Option<Arc<Dictionary>>>; Category::COUNT],
     /// The default colour spaces for `DeviceGray`, `DeviceRGB` and
     /// `DeviceCMYK`, in that order, resolved on first use.
     default_spaces: OnceLock<[Option<ColorSpace>; 3]>,
@@ -329,6 +329,17 @@ enum Category {
 
 impl Category {
     const COUNT: usize = 7;
+
+    /// Every category, in discriminant order.
+    const ALL: [Self; Self::COUNT] = [
+        Self::Font,
+        Self::XObject,
+        Self::ExtGState,
+        Self::ColorSpace,
+        Self::Pattern,
+        Self::Shading,
+        Self::Properties,
+    ];
 
     const fn key(self) -> &'static [u8] {
         match self {
@@ -357,19 +368,46 @@ impl<'doc> PageResources<'doc> {
 
     /// Construct a child [`PageResources`] scoped to the given form's resources.
     ///
-    /// If `form.has_own_resources` is false the form inherits the parent context;
-    /// use `self` (the parent) directly instead of calling this.
+    /// A form without its own `Resources` inherits the resources in effect,
+    /// including any already resolved.
     #[must_use]
-    pub const fn for_form(&self, form: &FormXObject) -> Self {
-        let resource_context_id = if form.has_own_resources {
-            form.resources_id
-        } else {
-            self.resource_context_id
-        };
+    pub fn for_form(&self, form: &FormXObject) -> Self {
+        if !form.has_own_resources {
+            return Self {
+                doc: self.doc,
+                resource_context_id: self.resource_context_id,
+                subdicts: self.subdicts.clone(),
+                default_spaces: self.default_spaces.clone(),
+            };
+        }
         Self {
             doc: self.doc,
-            resource_context_id,
+            resource_context_id: form.resources_id,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
+            default_spaces: OnceLock::new(),
+        }
+    }
+
+    /// Construct a [`PageResources`] over the resource dictionary
+    /// `resources` itself, such as an interactive form's default resources
+    /// (`/AcroForm /DR`), rather than over an object's `/Resources` entry.
+    /// `context` identifies the dictionary to the font cache, which keys
+    /// direct font dictionaries by it and their resource name.
+    #[must_use]
+    pub fn with_resources(&self, context: ObjectId, resources: &Dictionary) -> Self {
+        let subdicts = Category::ALL.map(|category| {
+            OnceLock::from(
+                resources
+                    .get(category.key())
+                    .and_then(|o| resolve_dict(self.doc, o))
+                    .filter(|d| !d.is_empty())
+                    .map(Arc::new),
+            )
+        });
+        Self {
+            doc: self.doc,
+            resource_context_id: context,
+            subdicts,
             default_spaces: OnceLock::new(),
         }
     }
@@ -416,8 +454,9 @@ impl<'doc> PageResources<'doc> {
                     .get_page_resource_dict(self.resource_context_id, category.key())
                     .ok()
                     .filter(|d| !d.is_empty())
+                    .map(Arc::new)
             })
-            .as_ref()
+            .as_deref()
     }
 
     /// The identity of the font dictionary the named resource (e.g. `b"F1"`)

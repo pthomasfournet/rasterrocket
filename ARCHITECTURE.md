@@ -338,6 +338,10 @@ renderer/
                        appearance state, Algorithm 8.1 fit, NoRotate
     annotation_synthesis.rs — appearances synthesised for markup
                        annotations without /AP /N, from geometry and colours
+    widget_appearance.rs — appearances synthesised for form field widgets
+                       (text, choice, check/radio, push button) from /V,
+                       /DA, /MK and /AcroForm /DR, when /AP /N is absent or,
+                       for text and choice fields, /NeedAppearances is set
     patterns.rs      — tiling patterns on the pattern lattice
     shading_paint.rs — `sh` and shading patterns
     soft_mask.rs     — ExtGState SMask: luminosity / alpha masks

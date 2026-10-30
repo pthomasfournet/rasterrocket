@@ -237,6 +237,12 @@ is drawn from its other content streams and the skipped one is listed in
 Set `RasterOptions::strict` to make such a page an `Err` instead, the
 behaviour before v1.5.0.
 
+## Annotations, form fields and layers
+
+Annotations are drawn after the page content, in `/Annots` order, from their normal appearance stream (`/AP /N`). The annotation flags apply for the render purpose (`RasterOptions::purpose`, `--purpose`). Hidden annotations are never drawn. NoView annotations are omitted when viewing. When printing, only annotations flagged Print are drawn. An annotation, an XObject or a marked-content sequence whose optional content group (layer) is off in the document's default configuration is not drawn.
+
+An annotation without a normal appearance is drawn from its dictionary. Square, Circle, Line, PolyLine, Polygon, Ink, Highlight, Underline, StrikeOut, Squiggly and Text (note icon) annotations use their geometry and colours. Form field widgets of text, choice and check/radio fields show the field value, styled by `/DA`, `/MK` and the form's `/DR`. When the form sets `/NeedAppearances`, text and choice fields are always redrawn this way, because their stored appearance may not show the value. A filled form whose values live only in `/V` therefore renders with its values, which OCR then reads.
+
 ## Security
 
 rasterrocket is a rasterizer with no JavaScript engine: it never parses, decodes, or executes `/JS`. JavaScript-bearing PDFs (common in Acrobat/InDesign interactive exports and gov/tax/bank forms) still open and render — refusing them would be a false-negative total loss on valid documents. When a JavaScript entry point is detected, a loud `WARN` is emitted on stderr (by default, no `RUST_LOG` opt-in needed) naming each location, so the operator knows the script was ignored. Detection is purely structural (dict-key presence and `/S` subtype names); no JavaScript string is ever read.

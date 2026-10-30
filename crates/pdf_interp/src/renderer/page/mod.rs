@@ -60,6 +60,7 @@ mod text;
 mod text_ops;
 #[cfg(feature = "vulkan")]
 mod vk_ops;
+mod widget_appearance;
 
 use patterns::PatternPaint;
 use pdf::{ContentFailure, Document, ObjectId};
