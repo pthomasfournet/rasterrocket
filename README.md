@@ -10,7 +10,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket" }
 ```
 
 ```bash
-# CLI — drop-in pdftoppm replacement
+# CLI — `rrocket`, with pdftoppm-style flags
 git clone https://github.com/pthomasfournet/rasterrocket
 cd rasterrocket && cargo build --release -p rasterrocket-cli
 ```
@@ -22,6 +22,45 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > — that is the only supported path, and the only one that gets you
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
+
+## On master (unreleased; the next release is v2.0.0)
+
+**More of the PDF is drawn, and drawn as specified; the public API breaks
+once.** The full list, with migration notes, is in
+[ROADMAP.md](ROADMAP.md#release-history).
+
+- **Encrypted PDFs decrypt in process.** Standard security handler, RC4 and
+  AES-128/256, revisions 2–6, behind a default-deny gate:
+  `RasterOptions::decrypt_authorized` / `SessionConfig::decrypt_authorized`,
+  and on the CLI an interactive confirmation or `--decrypt-owned`.
+  `--password` (`--upw`, `--opw`) supplies a password.
+- **Layers, annotations and forms.** Optional content (layers) follows the
+  document's configuration for a render purpose (`RenderPurpose::View` or
+  `Print`, `--purpose`); annotations honour their flags, and markup
+  annotations and form fields without appearance streams are drawn from their
+  dictionaries; `--hide-annotations` / `annotations = false` leave them out.
+  A dynamic XFA form is reported as `FormType::XfaFull`.
+- **Fonts.** Non-embedded fonts are drawn with substitutes of their class
+  (bundled base-14 faces, installed CJK, Arabic and Thai faces, predefined
+  CJK CMaps, vertical writing); `RROCKET_FONT_DIR` adds font directories;
+  TrueType programs that need hinting are grid-fitted; CID-keyed Type 1
+  fonts render.
+- **Colour and transparency.** DeviceCMYK through a process-ink model,
+  ICCBased, CalGray/CalRGB, Lab, Default colour spaces, transfer functions,
+  soft masks, shading and tiling patterns, non-isolated groups.
+- **Page geometry, regions, per-axis resolution, cancellation.**
+  `RasterSession::page_geometry`, `RenderParams` with a `RenderRegion` and a
+  `CancelToken`, `RenderParams::new_xy` for separate horizontal and vertical
+  scales; on the CLI `--rx`/`--ry`, `-x`/`-y`/`-W`/`-H`, `--scale-to*`,
+  `--aa`, `--aaVector` now take effect.
+- **Damaged input.** Broken cross-reference tables and object streams are
+  recovered; a content stream or image whose data ends early is drawn from
+  what decoded and reported (`partial` in `PageDiagnostics`); an image whose
+  decoded samples would exceed 1 GiB is refused before allocation.
+- **API breaks.** Public structs and enums are `#[non_exhaustive]`: build
+  options with `RasterOptions::new(dpi)` / `::default()` and assign fields,
+  and match errors with a catch-all arm. The CLI flags `--overprint`,
+  `--thinlinemode` and `--jpegopt`, which did nothing, are removed.
 
 ## What's new in v1.5.0
 
@@ -242,6 +281,7 @@ left is GCV's own round-trip.
   `GcvImage` gives you raw `jpeg` bytes plus `to_base64()`.
 
 ```rust
+use std::path::Path;
 use rasterrocket::{RasterOptions, raster_pdf, encode_for_gcv, GcvBudget};
 
 let opts = RasterOptions::default(); // deskew off: GCV deskews internally
@@ -279,10 +319,11 @@ and the page/annotation JavaScript-disclosure work).
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
-- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`. Use `..RasterOptions::default()` to fill unset fields.
+- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (On master the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` no longer compiles outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
 
 ```rust
+use std::path::Path;
 use rasterrocket::{RasterOptions, raster_pdf};
 
 let opts = RasterOptions::new(300.0);
@@ -301,7 +342,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 |---|---|
 | [Getting Started](docs/getting-started.md) | Installation, quickstart, Tesseract integration, DPI guidance, error handling, security |
 | [API Reference](docs/api-reference.md) | Full signatures for `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage`, `RasterError`, `PageDiagnostics`, `rasterrocket-comic`'s `open_comic`, `rasterrocket-camera`, feature flags, GPU dispatch thresholds |
-| [CLI Reference](docs/cli-reference.md) | All `rrocket` command-line flags, output format matrix, examples, pixel-diff comparison |
+| [CLI Reference](docs/cli-reference.md) | All `rrocket` command-line flags, output format matrix, size limits, examples, pixel-diff comparison |
 | [Benchmarks](../../wiki/Benchmarks) | Methodology, 10-document corpus results, CPU-only AVX-512 vs AVX2, GPU-accelerated, reproduction steps |
 | [OCR Integration](../../wiki/OCR-Integration) | Tesseract (`leptess`) and ocrs — instance reuse, zero-copy patterns, DPI wiring, multi-threaded examples |
 | [LLM Vision OCR Integration](../../wiki/LLM-Vision-OCR-Integration) | Google Cloud Vision and GPT-5 — encoding helper, Rust + Python examples, cost and latency guidance |
@@ -313,7 +354,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | `rasterrocket` | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
 | `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt` comic-archive input |
 | `rasterrocket-camera` | Library — camera-capture page cleanup on 8-bit grayscale: crop, rectify, spread split, dewarp; no dependencies |
-| `rasterrocket-cli` | `rrocket` binary — drop-in `pdftoppm` replacement; also reads comic archives |
+| `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG files with `pdftoppm`-style flags; also reads comic archives |
 
 All four are built from this repository. Nothing here is maintained on
 crates.io (see the note at the top).
@@ -323,9 +364,9 @@ crates.io (see the note at the top).
 **CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 13** — full feature set (nvJPEG, nvJPEG2000, AA fill (dormant by default), ICC CLUT, ICC matrix, deskew, image cache).  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — AA fill and parallel-Huffman JPEG decode kernels run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`.  No nvJPEG / cache support under Vulkan today (JPEG decode goes through the GPU parallel-Huffman path, not nvJPEG).
-- **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc.
+- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG and the AA fill, which are wired but dormant by default because the CPU paths beat them.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
+- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`.  No nvJPEG / cache support under Vulkan.
+- **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
 
@@ -338,13 +379,15 @@ cargo build --release -p rasterrocket-cli
 # With all GPU features (CUDA 13 toolkit, NVIDIA GPU required)
 # Default CUDA_ARCH is sm_80 (Ampere); override for older or newer GPUs.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
-  --features "rasterrocket/nvjpeg,rasterrocket/nvjpeg2k,rasterrocket/gpu-aa,rasterrocket/gpu-icc,rasterrocket/gpu-deskew,rasterrocket/cache"
+  --features "nvjpeg,nvjpeg2k,gpu-aa,gpu-icc,gpu-deskew,cache"
 
 # With Vulkan compute backend (cross-vendor; no NVIDIA dependency).
 # Requires the LunarG Vulkan SDK on the build host (slangc compiles the
 # .slang shaders to SPIR-V).  Vulkan 1.3+ ICD on the runtime host.
-cargo build --release -p rasterrocket-cli --features "rasterrocket/vulkan"
+cargo build --release -p rasterrocket-cli --features vulkan
 ```
+
+The CLI crate forwards each feature name to the `rasterrocket` library.
 
 ### Picking `CUDA_ARCH` for your GPU
 
@@ -365,14 +408,15 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 
 | Flag | What it enables | Required runtime |
 |---|---|---|
-| `nvjpeg` | GPU JPEG decode for `DCTDecode` | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
+| `nvjpeg` | GPU JPEG decode for `DCTDecode` (dormant: `GPU_JPEG_THRESHOLD_PX = u32::MAX`) | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
 | `gpu-aa` | GPU evaluation of the anti-aliased fill coverage (byte-identical to the CPU fill; dormant by default, see `PDF_RASTER_AA_FILL_THRESHOLD`) | CUDA |
 | `gpu-icc` | GPU CMYK→RGB ICC transform | CUDA |
 | `gpu-deskew` | GPU deskew rotation via NPP | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA |
-| `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) | `libva.so.2` + DRM render node |
-| `vulkan` | Vulkan compute backend for AA fill and parallel-Huffman JPEG decode (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa` and `gpu-jpeg-huffman`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
+| `vulkan` | Vulkan compute backend for the AA fill (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `gpu-jpeg-huffman` | Custom parallel-Huffman GPU JPEG decode, on CUDA or (with `vulkan`) Vulkan (dormant; `PDF_RASTER_HUFFMAN_THRESHOLD=0` enables it) | CUDA or Vulkan |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
 
@@ -435,8 +479,10 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   unbounded allocation, an infinite loop, or a process abort. The render
   pipeline enforces a per-page operator/wall-clock/form-depth watchdog, an
   aggregate content-size cap, a filter-chain length and decompression-bomb
-  cap, and a total-raster-area cap; per-page panics are isolated so one bad
-  page cannot abort a batch.
+  cap, a total-raster-area cap and a per-image decode budget (see
+  [Size limits](docs/cli-reference.md#size-limits)). Release builds use
+  `panic = "abort"`, so a panic would end the process; the fuzz targets
+  exist to keep the renderer from reaching one.
 - **No script execution.** rasterrocket has no JavaScript engine. A PDF
   containing JavaScript — catalog `/OpenAction`, `/AA`, `/Names/JavaScript`,
   `/AcroForm/AA`, or a page-level `/AA` / per-annotation/widget `/A`/`/AA`
@@ -462,9 +508,10 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
 
 Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full methodology, hardware details, and AVX2 vs AVX-512 comparison in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
 
-> These tables were captured at **v0.9.1** and have not been re-run since; the
-> current tree is 1.2.0 plus 53 unreleased commits. Treat them as historical
-> order-of-magnitude figures, not a measurement of today's `master`.
+> These tables were captured at **v0.9.1** (CPU) and before v0.6.0 (GPU) and
+> have not been re-run since; the current tree is past v1.5.0, and nvJPEG is
+> now disabled by default. Treat them as historical order-of-magnitude
+> figures, not a measurement of today's `master`.
 
 **CPU-only (no GPU), Ryzen 9 9900X3D + AVX-512, v0.9.1, RAM-backed output, cold cache, hyperfine 5 runs:**
 
@@ -483,7 +530,7 @@ Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full meth
 
 Per-version regression history and the full pdftoppm comparison are in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
 
-**GPU-accelerated (CUDA: nvJPEG + nvJPEG2000), same machine + RTX 5070 (v0.9.1):**
+**GPU-accelerated (CUDA: nvJPEG + nvJPEG2000), same machine + RTX 5070 (version not recorded):**
 
 | Document | Pages | rasterrocket | pdftoppm | Speedup |
 |---|---|---|---|---|
@@ -492,4 +539,4 @@ Per-version regression history and the full pdftoppm comparison are in **[the Be
 | 1836 scan, DCT | 490 | 71 s | 356 s | **5.0×** |
 | Scan, JBIG2+JPX | 576 | 19.6 s | 148.9 s | **7.6×** |
 
-Largest gains on scan-heavy corpora where SIMD JPEG decoding (CPU) and nvJPEG/nvJPEG2000 (GPU) dominate. Short native-text PDFs are startup-bound and show modest gains. See [the Benchmarks wiki page](../../wiki/Benchmarks) for the full table including an Intel i7-8700K (AVX2-only) comparison.
+Largest gains on scan-heavy corpora where SIMD JPEG decoding (CPU) and nvJPEG/nvJPEG2000 (GPU) dominate. Short native-text PDFs are startup-bound and show modest gains. See [the Benchmarks wiki page](../../wiki/Benchmarks) for the full table including an Intel i7-8700K (AVX2-only) comparison from the since-retired testbench.

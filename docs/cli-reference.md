@@ -129,6 +129,8 @@ page fails instead.
 | `--jpeg` | `.jpg` | `.jpg` | `.jpg` |
 | `--tiff` | `.tif` | `.tif` | `.tif` |
 
+The `--jpeg` and `--tiff` rows give the names those formats will use; today both are refused (every page fails, exit status 1), and comic input refuses them before decoding.
+
 ---
 
 ## Rendering
