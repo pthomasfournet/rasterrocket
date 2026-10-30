@@ -165,9 +165,7 @@ impl Function {
                 domain: read_fn_domain(dict),
                 c0: read_color(dict, b"C0"),
                 c1: read_color(dict, b"C1"),
-                // PDF requires N ≥ 0; a negative exponent would turn 0^N
-                // into +infinity.
-                exponent: dict.get(b"N").and_then(obj_to_f64).unwrap_or(1.0).max(0.0),
+                exponent: dict.get(b"N").and_then(obj_to_f64).unwrap_or(1.0),
             },
             Some(3) => match dict.get(b"Functions").and_then(Object::as_array) {
                 Some(fns) if !fns.is_empty() => Body::Stitching {
@@ -302,8 +300,10 @@ impl Function {
     }
 }
 
-/// Type 2 (Exponential): `C0 + t_norm^N × (C1 − C0)` with `C0` default 0
-/// and `C1` default 1 per output.
+/// Type 2 (Exponential, PDF §7.10.3): `C0 + x^N × (C1 − C0)` with `x` the
+/// input clipped to `Domain`, `C0` default 0 and `C1` default 1 per output.
+/// A power with no finite real value (a negative `x` with a non-integer
+/// `N`, or `x = 0` with a negative `N`) evaluates to `C0`.
 fn eval_exponential(
     (d0, d1): (f64, f64),
     c0: Option<&[f64]>,
@@ -314,12 +314,11 @@ fn eval_exponential(
 ) -> Vec<f64> {
     let c0 = c0.map_or_else(|| vec![0.0; n], |c| pad(c, n));
     let c1 = c1.map_or_else(|| vec![1.0; n], |c| pad(c, n));
-    let t_norm = if d1 > d0 {
-        ((t - d0) / (d1 - d0)).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let weight = t_norm.powf(exponent);
+    let x = if d1 > d0 { t.clamp(d0, d1) } else { d0 };
+    let weight = x.powf(exponent);
+    if !weight.is_finite() {
+        return c0;
+    }
     c0.iter()
         .zip(&c1)
         .map(|(&a, &b)| weight.mul_add(b - a, a))
@@ -483,6 +482,45 @@ mod tests {
     }
 
     use crate::test_helpers::empty_doc;
+
+    /// A Type 2 function `C0 [0] C1 [1]` with exponent `n` over `domain`.
+    fn exp_over(domain: [f32; 2], n: f32) -> pdf::Object {
+        let mut dict = make_exp_dict(0.0, 1.0, n);
+        dict.set(
+            "Domain",
+            pdf::Object::Array(domain.iter().map(|&d| pdf::Object::Real(d)).collect()),
+        );
+        pdf::Object::Dictionary(dict)
+    }
+
+    /// PDF §7.10.3: `y = C0 + x^N × (C1 − C0)` on the input clipped to
+    /// `Domain`, not on the input rescaled onto `[0, 1]`.
+    #[test]
+    fn exponential_exponentiates_the_domain_clipped_input() {
+        let doc = empty_doc();
+        let eval = |f: &pdf::Object, t| eval_function(&doc, f, t, 1).expect("Type 2")[0];
+        let linear = exp_over([0.0, 2.0], 1.0);
+        assert!((eval(&linear, 1.0) - 1.0).abs() < 1e-9);
+        assert!((eval(&linear, 0.5) - 0.5).abs() < 1e-9);
+        assert!((eval(&linear, 3.0) - 2.0).abs() < 1e-9, "clipped to Domain");
+        let square = exp_over([0.0, 2.0], 2.0);
+        assert!((eval(&square, 1.0) - 1.0).abs() < 1e-9);
+        let symmetric = exp_over([-1.0, 1.0], 2.0);
+        assert!((eval(&symmetric, -1.0) - 1.0).abs() < 1e-9);
+        assert!((eval(&symmetric, 0.5) - 0.25).abs() < 1e-9);
+    }
+
+    /// A power with no finite real value evaluates to `C0`; a negative
+    /// exponent is otherwise honoured.
+    #[test]
+    fn exponential_undefined_powers_are_c0() {
+        let doc = empty_doc();
+        let eval = |f: &pdf::Object, t| eval_function(&doc, f, t, 1).expect("Type 2")[0];
+        assert!(eval(&exp_over([-1.0, 1.0], 0.5), -0.25).abs() < 1e-9);
+        let reciprocal = exp_over([0.0, 2.0], -1.0);
+        assert!(eval(&reciprocal, 0.0).abs() < 1e-9);
+        assert!((eval(&reciprocal, 2.0) - 0.5).abs() < 1e-9);
+    }
 
     #[test]
     fn function_array_evaluates_one_function_per_channel() {
