@@ -381,8 +381,8 @@ resources/
   binary (`crates/pdf_interp/fonts/foxit/`, BSD-3). Symbol and ZapfDingbats
   always draw with their compiled-in faces and built-in encodings.
 - **Scripts the bundled faces do not cover.** For CJK, Arabic and Thai,
-  `renderer/system_fonts.rs` walks the standard font directories once per
-  process. It indexes every sfnt face by family and `OS/2` code-page range,
+  `renderer/system_fonts.rs` walks the directories `RROCKET_FONT_DIR`
+  names, then the standard font directories, once per process. It indexes every sfnt face by family and `OS/2` code-page range,
   then selects by script, serif class, weight and slant. A non-embedded CID
   font whose ordering is Japan1, GB1, CNS1 or Korea1 maps CID → Unicode →
   glyph in that face.

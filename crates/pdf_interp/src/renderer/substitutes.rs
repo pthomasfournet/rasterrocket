@@ -2,8 +2,9 @@
 //!
 //! A font without a program is drawn with a substitute of its family class
 //! and variant ([`SubstituteStyle`]): the installed metric-compatible face
-//! (Liberation, Arial, Times New Roman, Courier New) when one is found on
-//! the fixed search path, else the base-14 face compiled into the binary
+//! (Liberation, Arial, Times New Roman, Courier New) when one is found in
+//! a directory [`super::system_fonts::FONT_DIR_ENV`] names or on the fixed
+//! search path, else the base-14 face compiled into the binary
 //! (`fonts/foxit/`).  The Symbol and Dingbats families always draw with
 //! the compiled-in faces, whose charsets carry the glyph names of their
 //! encodings.  Each substitute is resolved once per process and shared by
@@ -14,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use font::program::FontProgram;
 
-use super::system_fonts::system_program;
+use super::system_fonts::{env_font_dirs, system_program};
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 
 /// Installed typefaces per [`SubstituteStyle`], indexed by
@@ -76,14 +77,23 @@ const fn substitute_index(style: SubstituteStyle) -> usize {
     family * 4 + (style.bold as usize) * 2 + (style.italic as usize)
 }
 
-/// Candidate paths for one [`INSTALLED`] row, in search order.
-fn installed_candidates([stem, mac, win]: [&str; 3]) -> [String; 4] {
-    [
-        format!("/usr/share/fonts/truetype/liberation/{stem}.ttf"),
-        format!("/usr/share/fonts/liberation/{stem}.ttf"),
-        format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
-        format!("C:/Windows/Fonts/{win}.ttf"),
-    ]
+/// Candidate paths for one [`INSTALLED`] row, in search order: the free
+/// family's file in each environment font directory, then the fixed
+/// locations.
+fn installed_candidates([stem, mac, win]: [&str; 3]) -> Vec<PathBuf> {
+    env_font_dirs()
+        .into_iter()
+        .map(|dir| dir.join(format!("{stem}.ttf")))
+        .chain(
+            [
+                format!("/usr/share/fonts/truetype/liberation/{stem}.ttf"),
+                format!("/usr/share/fonts/liberation/{stem}.ttf"),
+                format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
+                format!("C:/Windows/Fonts/{win}.ttf"),
+            ]
+            .map(PathBuf::from),
+        )
+        .collect()
 }
 
 /// The installed face of row `row`, parsed; `None` when none of its
@@ -91,12 +101,14 @@ fn installed_candidates([stem, mac, win]: [&str; 3]) -> [String; 4] {
 fn installed_program(row: usize) -> Option<Arc<FontProgram>> {
     installed_candidates(INSTALLED[row])
         .into_iter()
-        .find(|p| PathBuf::from(p).exists())
+        .find(|p| p.exists())
         .and_then(|path| {
             std::fs::read(&path)
                 .map_err(font::engine::LoadError::Io)
                 .and_then(|data| FontProgram::parse(data, 0))
-                .inspect_err(|e| log::debug!("substitutes: installed font {path}: {e}"))
+                .inspect_err(|e| {
+                    log::debug!("substitutes: installed font {}: {e}", path.display());
+                })
                 .ok()
         })
         .map(Arc::new)

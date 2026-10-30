@@ -104,6 +104,12 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 | `--overprint` | off | Enable overprint preview. |
 | `--thinlinemode MODE` | `default` | Thin-line rendering: `default`, `solid`, or `shape`. |
 
+Fonts a document does not embed are drawn with substitutes: the installed
+Liberation (or Arial / Times New Roman / Courier New) family when found,
+else faces compiled into the binary; CJK, Arabic and Thai text uses an
+installed face of that script. `RROCKET_FONT_DIR` names extra directories
+to search first, in `PATH` syntax (`RROCKET_FONT_DIR=/opt/fonts:$HOME/fonts`).
+
 ---
 
 ## Camera-captured pages

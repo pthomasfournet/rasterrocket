@@ -1,11 +1,12 @@
 //! Installed fonts for the scripts the compiled-in substitutes do not
 //! cover ([`Script`]): CJK, Arabic and Thai.
 //!
-//! The standard font directories are walked once per process and every
-//! sfnt face is indexed by family name and `OS/2` code-page ranges.  A
-//! request selects, among the faces whose code-page bit covers the
-//! script, the best match by a per-script preference list, serif class,
-//! weight and slant.
+//! The directories named by [`FONT_DIR_ENV`], then the standard font
+//! directories, are walked once per process and every sfnt face is
+//! indexed by family name and `OS/2` code-page ranges.  A request
+//! selects, among the faces whose code-page bit covers the script, the
+//! best match by a per-script preference list, serif class, weight and
+//! slant.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,19 @@ use font::sfnt_info::{FaceInfo, face_infos};
 
 use crate::resources::font_substitute::{Script, SubstituteFamily, SubstituteStyle};
 
-/// Directories walked for fonts, in search order; `~` is the home
-/// directory.
+/// Environment variable naming extra font directories, in the platform's
+/// `PATH` syntax, searched before the standard directories.
+pub const FONT_DIR_ENV: &str = "RROCKET_FONT_DIR";
+
+/// The directories [`FONT_DIR_ENV`] names, in order; empty when unset.
+pub fn env_font_dirs() -> Vec<PathBuf> {
+    std::env::var_os(FONT_DIR_ENV)
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default()
+}
+
+/// Standard directories walked for fonts, in search order; `~` is the
+/// home directory.
 const FONT_DIRS: &[&str] = &[
     "/usr/share/fonts",
     "/usr/local/share/fonts",
@@ -194,6 +206,9 @@ fn installed_faces() -> &'static [Face] {
     FACES.get_or_init(|| {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let mut faces = Vec::new();
+        for dir in env_font_dirs() {
+            walk(&dir, 0, &mut faces);
+        }
         for dir in FONT_DIRS {
             let dir = match (dir.strip_prefix("~/"), &home) {
                 (Some(rest), Some(home)) => home.join(rest),
