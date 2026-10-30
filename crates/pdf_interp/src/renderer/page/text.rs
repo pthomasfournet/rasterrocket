@@ -248,7 +248,12 @@ impl PageRenderer<'_> {
             if let Some(enc) = cid_enc {
                 // Type 0 composite font: the Encoding CMap splits the string
                 // into 1–4-byte codes and maps each to a CID (PDF §9.7.6.3).
-                for DecodedCode { value: cid, .. } in enc.codes(bytes) {
+                for DecodedCode {
+                    code,
+                    value: cid,
+                    len,
+                } in enc.codes(bytes)
+                {
                     // In vertical writing mode the glyph's vertical origin
                     // sits at the pen: its horizontal origin is displaced
                     // by the position vector −v, in glyph units scaled by
@@ -276,12 +281,19 @@ impl PageRenderer<'_> {
                     }
 
                     // The advance (PDF §9.4.4): horizontally
-                    // `(w0 × Tfs + Tc) × Th`; vertically `w1 × Tfs + Tc`,
-                    // along the text matrix's y axis.  Word spacing does not
-                    // apply to composite fonts (PDF §9.3.3).
+                    // `(w0 × Tfs + Tc + Tw) × Th`; vertically
+                    // `w1 × Tfs + Tc + Tw`, along the text matrix's y axis.
+                    // Word spacing applies to the byte 32 when the `CMap`
+                    // reads it as a one-byte code, never to a multi-byte code
+                    // (PDF §9.3.3).
+                    let extra = if code == 32 && len == 1 {
+                        word_spacing
+                    } else {
+                        0.0
+                    };
                     if enc.vertical {
                         let w1 = f64::from(enc.vertical_metrics_for_cid(cid).w1y) / 1000.0;
-                        let ty_adv = glyph_advance(w1, font_size, char_spacing, 0.0, 1.0);
+                        let ty_adv = glyph_advance(w1, font_size, char_spacing, extra, 1.0);
                         tm = translate_text_y(tm, ty_adv);
                     } else {
                         let advance_glyph = f64::from(enc.width_for_cid(cid)) / 1000.0;
@@ -289,7 +301,7 @@ impl PageRenderer<'_> {
                             advance_glyph,
                             font_size,
                             char_spacing,
-                            0.0,
+                            extra,
                             horiz_scaling,
                         );
                         tm = translate_text_x(tm, tx_adv);
