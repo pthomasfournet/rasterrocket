@@ -612,6 +612,13 @@ dependencies = [
 [[package]]
 name = "hayro-ccitt"
 version = "0.4.0"
+dependencies = [
+ "image",
+]
+
+[[package]]
+name = "hayro-ccitt"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2866f0d976e76497480b853d5e258dab6e4b89ecfe991124e08f15dfa8fd03ad"
 
@@ -621,7 +628,7 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "000e025850f4592ddcaee85640db70704151f2bafd43b6f431aa5b6a2c6a35a9"
 dependencies = [
- "hayro-ccitt",
+ "hayro-ccitt 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1214,7 +1221,7 @@ version = "1.5.0"
 dependencies = [
  "bytemuck",
  "env_logger",
- "hayro-ccitt",
+ "hayro-ccitt 0.4.0",
  "hayro-jbig2",
  "hayro-jpeg2000",
  "jpeg-encoder",

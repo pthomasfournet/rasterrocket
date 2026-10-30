@@ -1,0 +1,28 @@
+# Local fork of hayro-ccitt (https://github.com/LaurenzV/hayro), vendored
+# from upstream commit 79926198e557e06fea8a8edcb0bc577eb0130ec5 (2026-10-23,
+# crate version 0.4.0 plus unreleased changes).  Licence: Apache-2.0 OR MIT
+# (see LICENSE-APACHE, LICENSE-MIT).  Changes made here are ours; see
+# CHANGES.md.
+[package]
+name = "hayro-ccitt"
+version = "0.4.0"
+description = "A decoder for group 3 and group 4 CCITT images (local fork)."
+authors = ["Laurenz Stampfl <laurenz.stampfl@gmail.com>"]
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+publish = false
+autotests = false
+
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[test]]
+name = "tests"
+path = "tests/main.rs"

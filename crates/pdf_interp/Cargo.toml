@@ -37,7 +37,8 @@ font   = { package = "rasterrocket-font",   path = "../font",   version = "1.5" 
 encode = { package = "rasterrocket-encode", path = "../encode", version = "1.5" }
 pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.5" }
 log    = { workspace = true }
-hayro-ccitt = "0.4.0"
+# CCITT fax: a local fork of hayro-ccitt (crates/ccitt).
+hayro-ccitt = { path = "../ccitt" }
 # Pure-Rust JPEG 2000: a local fork of hayro-jpeg2000 (crates/jpeg2000).
 hayro-jpeg2000 = { path = "../jpeg2000", default-features = false, features = ["simd"] }
 zune-jpeg = "0.5.15"

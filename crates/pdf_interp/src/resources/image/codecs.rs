@@ -123,28 +123,23 @@ pub(super) fn decode_ccitt(
     let encoding = match k.cmp(&0) {
         std::cmp::Ordering::Less => EncodingMode::Group4,
         std::cmp::Ordering::Equal => EncodingMode::Group3_1D,
-        std::cmp::Ordering::Greater => EncodingMode::Group3_2D {
-            k: u32::try_from(k).ok()?,
-        },
+        std::cmp::Ordering::Greater => EncodingMode::Group3_2D,
     };
     let black_is_1 = flag(b"BlackIs1", false);
     let declared_aligned = flag(b"EncodedByteAlign", false);
     let rows = positive(b"Rows").unwrap_or(height);
+    let columns = positive(b"Columns").unwrap_or(width);
 
     let capacity = (width as usize).checked_mul(height as usize)?;
     // White in the output convention: 0xFF, or 0x00 when 1 bits are black.
     let white = if black_is_1 { 0x00 } else { 0xFF };
     let run = |aligned: bool| {
-        let settings = DecodeSettings {
-            columns: positive(b"Columns").unwrap_or(width),
-            rows,
-            end_of_block: flag(b"EndOfBlock", true),
-            end_of_line: flag(b"EndOfLine", false),
-            rows_are_byte_aligned: aligned,
-            encoding,
-            invert_black: black_is_1,
-        };
-        let mut collector = HayroCcittCollector::new(capacity, width, white);
+        let mut settings = DecodeSettings::new(columns, rows);
+        settings.end_of_block = flag(b"EndOfBlock", true);
+        settings.end_of_line = flag(b"EndOfLine", false);
+        settings.rows_are_byte_aligned = aligned;
+        settings.encoding = encoding;
+        let mut collector = HayroCcittCollector::new(capacity, width, columns, white);
         let mut ctx = DecoderContext::new(settings);
         let result = hayro_ccitt::decode(data, &mut collector, &mut ctx);
         (collector, result)
@@ -201,26 +196,27 @@ pub(super) fn decode_ccitt(
     })
 }
 
-/// [`hayro_ccitt::Decoder`] that collects pixel runs into one byte per pixel
-/// (`0x00` black, `0xFF` white, as the decoder reports them).
+/// [`hayro_ccitt::Decoder`] that expands each row of colour changes into one
+/// byte per pixel: `white` for white runs and its complement for black runs.
 ///
-/// Every row is exactly `width` bytes: runs past the end are clamped, and a
-/// short row is filled with `pad`.
+/// Every row is exactly `width` bytes.  Decoded rows span `columns` pixels:
+/// a narrower row is padded with `white`, a wider one is clipped.
 struct HayroCcittCollector {
     out: Vec<u8>,
     width: u32,
-    pad: u8,
-    col: u32,
+    /// The pixel at which an unterminated black run ends: `min(columns, width)`.
+    row_end: u32,
+    white: u8,
     rows: u32,
 }
 
 impl HayroCcittCollector {
-    fn new(capacity: usize, width: u32, pad: u8) -> Self {
+    fn new(capacity: usize, width: u32, columns: u32, white: u8) -> Self {
         Self {
             out: Vec::with_capacity(capacity),
             width,
-            pad,
-            col: 0,
+            row_end: columns.min(width),
+            white,
             rows: 0,
         }
     }
@@ -229,33 +225,23 @@ impl HayroCcittCollector {
         self.rows
     }
 
-    /// The collected bytes, with a partial final row padded to `width`.
-    fn finish(mut self) -> Vec<u8> {
-        if self.col > 0 {
-            self.fill_row();
-        }
+    fn finish(self) -> Vec<u8> {
         self.out
-    }
-
-    fn fill_row(&mut self) {
-        // `col <= width` holds: `push_pixels` clamps every run.
-        let remaining = (self.width - self.col) as usize;
-        self.out.extend(std::iter::repeat_n(self.pad, remaining));
-        self.col = self.width;
     }
 }
 
 impl hayro_ccitt::Decoder for HayroCcittCollector {
-    fn push_pixels(&mut self, white: bool, count: u32) {
-        let n = count.min(self.width - self.col);
-        let byte = if white { 0xFF } else { 0x00 };
-        self.out.extend(std::iter::repeat_n(byte, n as usize));
-        self.col += n;
-    }
-
-    fn next_line(&mut self) {
-        self.fill_row();
-        self.col = 0;
+    fn push_row(&mut self, changes: &[u32]) {
+        let start = self.out.len();
+        self.out.resize(start + self.width as usize, self.white);
+        let row = &mut self.out[start..];
+        // Changes alternate white→black and black→white; an odd count leaves
+        // the row black to its end.
+        for run in changes.chunks(2) {
+            let from = run[0].min(self.row_end) as usize;
+            let to = run.get(1).map_or(self.row_end, |&x| x.min(self.row_end)) as usize;
+            row[from..to].fill(!self.white);
+        }
         self.rows += 1;
     }
 }
@@ -1385,13 +1371,23 @@ mod tests {
     }
 
     #[test]
-    fn ccitt_collector_clamps_a_run_that_overruns_the_row() {
-        let mut c = HayroCcittCollector::new(8, 4, 0xFF);
-        hayro_ccitt::Decoder::push_pixels(&mut c, false, 3);
-        hayro_ccitt::Decoder::push_pixels(&mut c, true, 20);
-        hayro_ccitt::Decoder::next_line(&mut c);
-        assert_eq!(c.rows_decoded(), 1);
-        assert_eq!(c.finish(), [0x00, 0x00, 0x00, 0xFF]);
+    fn ccitt_collector_expands_changes_and_clamps_to_the_width() {
+        let mut c = HayroCcittCollector::new(12, 4, 9, 0xFF);
+        // Black from 0 to 3.
+        hayro_ccitt::Decoder::push_row(&mut c, &[0, 3]);
+        // Black from 2 to a change past the width (`Columns` > width).
+        hayro_ccitt::Decoder::push_row(&mut c, &[2, 9]);
+        // An odd count: black from 1 to the end of the row.
+        hayro_ccitt::Decoder::push_row(&mut c, &[1]);
+        assert_eq!(c.rows_decoded(), 3);
+        assert_eq!(
+            c.finish(),
+            [
+                0x00, 0x00, 0x00, 0xFF, //
+                0xFF, 0xFF, 0x00, 0x00, //
+                0xFF, 0x00, 0x00, 0x00,
+            ]
+        );
     }
 
     #[test]

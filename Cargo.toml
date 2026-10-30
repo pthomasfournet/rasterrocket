@@ -15,6 +15,7 @@ members = [
     "crates/bench",
     "crates/comic",
     "crates/camera",
+    "crates/ccitt",
     "crates/jpeg2000",
     "crates/read_fonts",
     "crates/skrifa",
