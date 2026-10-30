@@ -6,6 +6,7 @@ use super::text_ops::{translate_text_x, translate_text_y};
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
 use crate::content::{Operator, TextArrayElement};
 use crate::resources::ExtGStateParams;
+use crate::resources::colorspace::ColorSpace;
 
 impl PageRenderer<'_> {
     pub(super) fn execute_one(&mut self, op: &Operator) {
@@ -75,9 +76,15 @@ impl PageRenderer<'_> {
             }
 
             // ── Colour ────────────────────────────────────────────────────────
-            Operator::SetFillGray(g) => self.set_fill(RasterColor::gray(*g)),
-            Operator::SetFillRgb(r, g, b) => self.set_fill(RasterColor::rgb(*r, *g, *b)),
-            Operator::SetFillCmyk(c, m, y, k) => self.set_fill(RasterColor::cmyk(*c, *m, *y, *k)),
+            Operator::SetFillGray(g) => {
+                self.set_fill_device(ColorSpace::DeviceGray, RasterColor::gray(*g));
+            }
+            Operator::SetFillRgb(r, g, b) => {
+                self.set_fill_device(ColorSpace::DeviceRgb, RasterColor::rgb(*r, *g, *b));
+            }
+            Operator::SetFillCmyk(c, m, y, k) => {
+                self.set_fill_device(ColorSpace::DeviceCmyk, RasterColor::cmyk(*c, *m, *y, *k));
+            }
             Operator::SetFillColor(comps) => {
                 let cs = self.gstate.current().fill_color_space.clone();
                 let c = self.color_for_components(&cs, comps);
@@ -101,10 +108,14 @@ impl PageRenderer<'_> {
                 gs.fill_pattern_components.clone_from(components);
             }
 
-            Operator::SetStrokeGray(g) => self.set_stroke(RasterColor::gray(*g)),
-            Operator::SetStrokeRgb(r, g, b) => self.set_stroke(RasterColor::rgb(*r, *g, *b)),
+            Operator::SetStrokeGray(g) => {
+                self.set_stroke_device(ColorSpace::DeviceGray, RasterColor::gray(*g));
+            }
+            Operator::SetStrokeRgb(r, g, b) => {
+                self.set_stroke_device(ColorSpace::DeviceRgb, RasterColor::rgb(*r, *g, *b));
+            }
             Operator::SetStrokeCmyk(c, m, y, k) => {
-                self.set_stroke(RasterColor::cmyk(*c, *m, *y, *k));
+                self.set_stroke_device(ColorSpace::DeviceCmyk, RasterColor::cmyk(*c, *m, *y, *k));
             }
             Operator::SetStrokeColor(comps) => {
                 let cs = self.gstate.current().stroke_color_space.clone();

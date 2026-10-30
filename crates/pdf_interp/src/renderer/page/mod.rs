@@ -974,6 +974,19 @@ impl<'doc> PageRenderer<'doc> {
         gs.stroke_pattern = None;
     }
 
+    /// `g`, `rg`, `k`: select the device space `space` for fill operations
+    /// and set the fill colour (PDF §8.6.8).
+    fn set_fill_device(&mut self, space: ColorSpace, c: RasterColor) {
+        self.set_fill(c);
+        self.gstate.current_mut().fill_color_space = space;
+    }
+
+    /// `G`, `RG`, `K`: the stroking counterpart of [`Self::set_fill_device`].
+    fn set_stroke_device(&mut self, space: ColorSpace, c: RasterColor) {
+        self.set_stroke(c);
+        self.gstate.current_mut().stroke_color_space = space;
+    }
+
     /// Resolve `sc`/`scn` (or `SC`/`SCN`) component operands against an
     /// already-selected colour space.
     ///
@@ -1118,6 +1131,9 @@ impl<'doc> PageRenderer<'doc> {
     fn fill_path(&mut self, path: &raster::path::Path, even_odd: bool) {
         // Stroke adjustment is always on: a lone axis-aligned quadrilateral
         // fills whole device pixels.
+        if self.gstate.current().fill_color_space.paints_nothing() {
+            return;
+        }
         let hinted = path.with_fill_adjust_hints();
         let path = hinted.as_ref().unwrap_or(path);
         let region = self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), 1.0);
@@ -1272,6 +1288,9 @@ impl<'doc> PageRenderer<'doc> {
     fn stroke_within(&mut self, path: &raster::path::Path, region: Option<PixelRect>) {
         // Clone all graphics state data before any mutable borrow.
         let gs = self.gstate.current();
+        if gs.stroke_color_space.paints_nothing() {
+            return;
+        }
         let clip = gs.clip.clone_shared();
         let backdrop = self.blend_backdrop(gs.blend_mode);
         let pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode, backdrop.as_deref());
@@ -1683,6 +1702,12 @@ impl<'doc> PageRenderer<'doc> {
         let source_width = decoded.source_width;
         // Degenerate image — nothing to blit.
         if img.width == 0 || img.height == 0 {
+            return;
+        }
+        // A stencil mask paints the fill colour, which may paint nothing.
+        if img.color_space == ImageColorSpace::Mask
+            && self.gstate.current().fill_color_space.paints_nothing()
+        {
             return;
         }
         // PDF §8.9.6: stencil masks (/ImageMask true → ImageColorSpace::Mask)
@@ -2899,10 +2924,13 @@ mod tests {
     /// red channel of every pixel, row-major.  The page has no resources, so
     /// the content must paint through inline images only.
     fn render_gray(size: u32, content: &[u8]) -> Vec<u8> {
-        use crate::test_helpers::empty_doc;
+        render_gray_on(&crate::test_helpers::empty_doc(), (1, 0), size, content)
+    }
 
-        let doc = empty_doc();
-        let mut renderer = PageRenderer::new(size, size, &doc, (1, 0));
+    /// [`render_gray`] on page `page_id` of `doc`, whose resources the
+    /// content may name.
+    fn render_gray_on(doc: &Document, page_id: ObjectId, size: u32, content: &[u8]) -> Vec<u8> {
+        let mut renderer = PageRenderer::new(size, size, doc, page_id);
         renderer.execute(&crate::content::parse(content));
         let stride = renderer.bitmap.stride;
         let data = renderer.bitmap.data();
@@ -2966,6 +2994,83 @@ mod tests {
         let px = render_gray(16, b"4 0 0 4 0 0 cm 0 G 1 w 0 2 m 4 2 l S");
         let dark: Vec<usize> = (0..16).filter(|&y| px[y * 16 + 8] < 128).collect();
         assert_eq!(dark, [6, 7, 8, 9], "stroke rows at x = 8");
+    }
+
+    // ── Colorant /None ────────────────────────────────────────────────────────
+
+    /// Page `(4, 0)` naming `/N` = `[/Separation /None …]`, `/A` =
+    /// `[/Separation /All …]`, `/NN` = `[/DeviceN [/None /None] …]` and
+    /// `/NC` = `[/DeviceN [/None /Cyan] …]`, all over `DeviceGray`, where
+    /// a tint of 1 in the first colorant is black.
+    fn none_colorant_doc() -> Document {
+        const PS: &str = "{ pop 1 exch sub }";
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /ColorSpace << \
+                 /N [/Separation /None /DeviceGray 5 0 R] \
+                 /A [/Separation /All /DeviceGray 5 0 R] \
+                 /NN [/DeviceN [/None /None] /DeviceGray 6 0 R] \
+                 /NC [/DeviceN [/None /Cyan] /DeviceGray 6 0 R] >> >> >>"
+                    .to_owned(),
+            ),
+            (
+                5,
+                "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>".to_owned(),
+            ),
+            (
+                6,
+                format!(
+                    "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1] /Length {} >>\n\
+                     stream\n{PS}\nendstream",
+                    PS.len()
+                ),
+            ),
+        ])
+    }
+
+    fn render_none(content: &[u8]) -> Vec<u8> {
+        render_gray_on(&none_colorant_doc(), (4, 0), 8, content)
+    }
+
+    #[test]
+    fn separation_none_paints_nothing() {
+        let fill = render_none(b"/N cs 1 scn 0 0 8 8 re f");
+        assert!(fill.iter().all(|&v| v == 255), "fill painted: {fill:?}");
+        let stroke = render_none(b"/N CS 1 SCN 4 w 0 4 m 8 4 l S");
+        assert!(
+            stroke.iter().all(|&v| v == 255),
+            "stroke painted: {stroke:?}"
+        );
+        let stencil =
+            render_none(b"/N cs 1 scn q 8 0 0 8 0 0 cm BI /W 1 /H 1 /IM true /BPC 1 ID \x00 EI Q");
+        assert!(
+            stencil.iter().all(|&v| v == 255),
+            "stencil painted: {stencil:?}"
+        );
+    }
+
+    #[test]
+    fn separation_all_paints_its_tint() {
+        let px = render_none(b"/A cs 1 scn 0 0 8 8 re f");
+        assert!(px.iter().all(|&v| v == 0), "got {px:?}");
+    }
+
+    #[test]
+    fn device_n_paints_nothing_only_when_every_colorant_is_none() {
+        let none = render_none(b"/NN cs 1 0 scn 0 0 8 8 re f");
+        assert!(none.iter().all(|&v| v == 255), "got {none:?}");
+        let cyan = render_none(b"/NC cs 1 0 scn 0 0 8 8 re f");
+        assert!(cyan.iter().all(|&v| v == 0), "got {cyan:?}");
+    }
+
+    /// `g` and `G` select `DeviceGray` (PDF §8.6.8), leaving the `/None` space.
+    #[test]
+    fn device_colour_operators_leave_a_none_space() {
+        let fill = render_none(b"/N cs 1 scn 0 g 0 0 8 8 re f");
+        assert!(fill.iter().all(|&v| v == 0), "got {fill:?}");
+        let stroke = render_none(b"/N CS 1 SCN 0 G 8 w 0 4 m 8 4 l S");
+        assert!(stroke.iter().all(|&v| v == 0), "got {stroke:?}");
     }
 
     /// An image whose bounding box misses the clip entirely paints nothing.

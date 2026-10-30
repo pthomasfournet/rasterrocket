@@ -320,7 +320,7 @@ impl PageRenderer<'_> {
         } // font_cache borrow released here
 
         // Phase 2: fill the glyphs, then stroke their outlines.
-        if do_fill {
+        if do_fill && !self.gstate.current().fill_color_space.paints_nothing() {
             let fill_bytes = self.gstate.current().fill_color.as_slice().to_vec();
             let clip = self.gstate.current().clip.clone_shared();
             let blend_mode = self.gstate.current().blend_mode;

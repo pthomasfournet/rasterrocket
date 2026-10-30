@@ -134,6 +134,8 @@ pub enum ColorSpace {
         /// `Reference` to the tint-transform function dict; `None` if
         /// the array's fourth element wasn't an indirect reference.
         tint_dict_id: Option<ObjectId>,
+        /// The colorant is `/None`: painting produces no output.
+        none: bool,
     },
     /// Multi-channel spot-colour set. PDF §8.6.6.5. `ncomps` is the
     /// number of tint inputs; `alternate` and `tint_dict_id` mirror
@@ -147,6 +149,8 @@ pub enum ColorSpace {
         /// `Reference` to the tint-transform function dict; `None` if
         /// the array's fourth element wasn't an indirect reference.
         tint_dict_id: Option<ObjectId>,
+        /// Every colorant is `/None`: painting produces no output.
+        none: bool,
     },
 }
 
@@ -167,6 +171,18 @@ impl ColorSpace {
             Self::IccBased { n, .. } => usize::from(*n),
             Self::Pattern { .. } => 0,
             Self::DeviceN { ncomps, .. } => usize::from(*ncomps),
+        }
+    }
+
+    /// Whether painting in this space produces no output: a `Separation`
+    /// space or a `DeviceN` space whose colorants are all `/None`
+    /// (PDF §8.6.6.4, §8.6.6.5), or an uncoloured-pattern space over one.
+    #[must_use]
+    pub fn paints_nothing(&self) -> bool {
+        match self {
+            Self::Separation { none, .. } | Self::DeviceN { none, .. } => *none,
+            Self::Pattern { base: Some(base) } => base.paints_nothing(),
+            _ => false,
         }
     }
 
@@ -244,6 +260,7 @@ impl ColorSpace {
             Self::Separation {
                 alternate,
                 tint_dict_id,
+                ..
             } => {
                 // PDF §8.6.6.4: pass the single tint component through the
                 // tint-transform function to produce values in the alternate
@@ -575,6 +592,7 @@ fn resolve_separation(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
     ColorSpace::Separation {
         alternate,
         tint_dict_id,
+        none: arr.get(1).is_some_and(is_none_colorant),
     }
 }
 
@@ -597,7 +615,14 @@ fn resolve_device_n(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         ncomps,
         alternate,
         tint_dict_id,
+        none: names.iter().all(is_none_colorant),
     }
+}
+
+/// Whether `name` is the colorant `/None`, which never produces visible
+/// output (PDF §8.6.6.4, §8.6.6.5).
+fn is_none_colorant(name: &Object) -> bool {
+    name.as_name() == Some(b"None".as_slice())
 }
 
 const fn reference_id(obj: &Object) -> Option<ObjectId> {
@@ -773,6 +798,7 @@ mod tests {
             ColorSpace::Separation {
                 alternate: Box::new(ColorSpace::DeviceCmyk),
                 tint_dict_id: Some((42, 0)),
+                none: false,
             },
         );
     }
@@ -797,6 +823,7 @@ mod tests {
                 ncomps: 3,
                 alternate: Box::new(ColorSpace::DeviceCmyk),
                 tint_dict_id: Some((7, 0)),
+                none: false,
             },
         );
     }
@@ -842,6 +869,7 @@ mod tests {
             ColorSpace::Separation {
                 alternate: Box::new(ColorSpace::DeviceCmyk),
                 tint_dict_id: None,
+                none: false,
             }
             .ncomponents(),
             1,
@@ -851,6 +879,7 @@ mod tests {
                 ncomps: 5,
                 alternate: Box::new(ColorSpace::DeviceCmyk),
                 tint_dict_id: None,
+                none: false,
             }
             .ncomponents(),
             5,
@@ -1070,6 +1099,7 @@ mod tests {
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint_dict_id: None,
+            none: false,
         };
         assert_eq!(sep.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]); // no ink
         assert_eq!(sep.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]); // full ink
@@ -1083,6 +1113,7 @@ mod tests {
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint_dict_id: Some((999, 0)),
+            none: false,
         };
         assert_eq!(sep.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
     }
@@ -1109,6 +1140,7 @@ mod tests {
             ncomps: 2,
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint_dict_id: Some((4, 0)),
+            none: false,
         };
         // Full spot, no black: the teal CMYK, not the gray of comps[0].
         let teal = dn.convert_to_rgb(&doc, &[0.0, 1.0]);
@@ -1150,6 +1182,7 @@ mod tests {
             ncomps: 3,
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint_dict_id: None,
+            none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[1.0, 0.5, 0.5]), [0, 0, 0]);
     }
@@ -1163,6 +1196,7 @@ mod tests {
             ncomps: 1,
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint_dict_id: None,
+            none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]);
         assert_eq!(dn.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]);
@@ -1177,6 +1211,7 @@ mod tests {
             ncomps: 1,
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint_dict_id: Some((999, 0)),
+            none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
     }
@@ -1192,10 +1227,12 @@ mod tests {
         let inner = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceGray),
             tint_dict_id: None,
+            none: false,
         };
         let outer = ColorSpace::Separation {
             alternate: Box::new(inner),
             tint_dict_id: None,
+            none: false,
         };
         // No infinite loop, deterministic byte triple.
         let result = outer.convert_to_rgb(&doc, &[0.5]);

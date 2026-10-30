@@ -149,14 +149,13 @@ pub struct InterpGState {
     pub stroke_pattern_components: Vec<f64>,
     /// Declared colour space for fill operations (PDF §8.6).
     ///
-    /// Set by `cs /Name`; defaults to `DeviceGray` per §8.6.4.1.  Used by the
-    /// uncoloured-pattern tint dispatch to interpret `fill_pattern_components`
-    /// in the spec-correct base space rather than guessing from component
-    /// count.  No effect on direct `g`/`rg`/`k` operators (they bypass the
-    /// colour-space slot per spec).
+    /// Set by `cs /Name` and to the device space by `g`/`rg`/`k` (§8.6.8);
+    /// defaults to `DeviceGray` per §8.6.4.1.  Interprets `sc`/`scn` operands
+    /// and `fill_pattern_components`, and suppresses fill painting in a
+    /// space whose colorants are all `/None`.
     pub fill_color_space: ColorSpace,
     /// Declared colour space for stroke operations (PDF §8.6).  Mirrors
-    /// `fill_color_space`; set by `CS /Name`.
+    /// `fill_color_space`; set by `CS /Name` and `G`/`RG`/`K`.
     pub stroke_color_space: ColorSpace,
     /// Soft mask in effect (PDF `SMask`), resolved to device pixels when
     /// `gs` installed it.  `None` = no soft mask.
