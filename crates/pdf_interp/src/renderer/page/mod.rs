@@ -974,15 +974,20 @@ impl<'doc> PageRenderer<'doc> {
         gs.stroke_pattern = None;
     }
 
-    /// `g`, `rg`, `k`: select the device space `space` for fill operations
-    /// and set the fill colour (PDF §8.6.8).
-    fn set_fill_device(&mut self, space: ColorSpace, c: RasterColor) {
+    /// `g`, `rg`, `k`: select the device space `device`, or the default
+    /// space that replaces it (PDF §8.6.5.6), for fill operations and set
+    /// the fill colour to `comps` in that space (PDF §8.6.8).
+    fn set_fill_device(&mut self, device: ColorSpace, comps: &[f64]) {
+        let space = self.resources.device_space(device);
+        let c = self.color_for_components(&space, comps);
         self.set_fill(c);
         self.gstate.current_mut().fill_color_space = space;
     }
 
     /// `G`, `RG`, `K`: the stroking counterpart of [`Self::set_fill_device`].
-    fn set_stroke_device(&mut self, space: ColorSpace, c: RasterColor) {
+    fn set_stroke_device(&mut self, device: ColorSpace, comps: &[f64]) {
+        let space = self.resources.device_space(device);
+        let c = self.color_for_components(&space, comps);
         self.set_stroke(c);
         self.gstate.current_mut().stroke_color_space = space;
     }
@@ -3071,6 +3076,52 @@ mod tests {
         assert!(fill.iter().all(|&v| v == 0), "got {fill:?}");
         let stroke = render_none(b"/N CS 1 SCN 0 G 8 w 0 4 m 8 4 l S");
         assert!(stroke.iter().all(|&v| v == 0), "got {stroke:?}");
+    }
+
+    // ── Default colour spaces ─────────────────────────────────────────────────
+
+    /// Page `(4, 0)` whose `/ColorSpace` resources hold `/DefaultGray` =
+    /// `default_gray`.
+    fn default_gray_doc(default_gray: &str) -> Document {
+        crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            format!(
+                "<< /Type /Page /Resources << /ColorSpace << /DefaultGray {default_gray} >> >> >>"
+            ),
+        )])
+    }
+
+    /// A linear (`/Gamma 1`) D65 `CalGray` space: a value of 0.5 is half
+    /// luminance, 188 after sRGB encoding, where `DeviceGray` 0.5 is 128.
+    const LINEAR_CAL_GRAY: &str = "[/CalGray << /WhitePoint [0.9505 1 1.089] /Gamma 1 >>]";
+
+    /// `DefaultGray` replaces `DeviceGray` whether it is selected by `cs`,
+    /// `CS`, `g` or `G` (PDF §8.6.5.6).
+    #[test]
+    fn default_gray_replaces_every_selection_of_device_gray() {
+        let doc = default_gray_doc(LINEAR_CAL_GRAY);
+        for content in [
+            b"0.5 g 0 0 8 8 re f".as_slice(),
+            b"/DeviceGray cs 0.5 sc 0 0 8 8 re f",
+            b"0.5 G 8 w 0 4 m 8 4 l S",
+            b"/DeviceGray CS 0.5 SC 8 w 0 4 m 8 4 l S",
+        ] {
+            let px = render_gray_on(&doc, (4, 0), 8, content);
+            assert!(
+                px.iter().all(|v| (186..=189).contains(v)),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
+    /// A default space of the wrong component count leaves the device space
+    /// in effect.
+    #[test]
+    fn default_space_of_another_component_count_is_ignored() {
+        let doc = default_gray_doc("[/CalRGB << /WhitePoint [0.9505 1 1.089] >>]");
+        let px = render_gray_on(&doc, (4, 0), 8, b"0.5 g 0 0 8 8 re f");
+        assert!(px.iter().all(|&v| v == 128), "got {px:?}");
     }
 
     /// An image whose bounding box misses the clip entirely paints nothing.

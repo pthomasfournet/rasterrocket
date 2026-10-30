@@ -49,7 +49,7 @@
 
 use std::sync::Arc;
 
-use pdf::{Document, Object, ObjectId};
+use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::icc_shaper::srgb_encode;
 use super::shading::function::Function;
@@ -488,6 +488,55 @@ pub fn resolve_device_name(name: &[u8]) -> ColorSpace {
             ColorSpace::DeviceGray
         }
     }
+}
+
+/// The default colour space that the `/ColorSpace` resource dictionary
+/// `cs_dict` declares for the device space `device` (PDF §8.6.5.6):
+/// `/DefaultGray`, `/DefaultRGB` or `/DefaultCMYK`.
+///
+/// `None` when `device` is not a device space, the entry is absent, or the
+/// entry is unusable: a space of a different component count, a device
+/// space, or an `Indexed` or `Pattern` space.  `None` also when the entry
+/// is an ICC-based space whose conversion equals the device conversion, so
+/// the device path stays in effect for sRGB-equivalent profiles.
+#[must_use]
+pub fn default_space(
+    doc: &Document,
+    cs_dict: &Dictionary,
+    device: &ColorSpace,
+) -> Option<ColorSpace> {
+    let key: &[u8] = match device {
+        ColorSpace::DeviceGray => b"DefaultGray",
+        ColorSpace::DeviceRgb => b"DefaultRGB",
+        ColorSpace::DeviceCmyk => b"DefaultCMYK",
+        _ => return None,
+    };
+    let space = resolve(doc, cs_dict.get(key)?);
+    let usable = space.ncomponents() == device.ncomponents()
+        && !matches!(
+            space,
+            ColorSpace::DeviceGray
+                | ColorSpace::DeviceRgb
+                | ColorSpace::DeviceCmyk
+                | ColorSpace::Indexed { .. }
+                | ColorSpace::Pattern { .. }
+        );
+    if !usable {
+        log::debug!(
+            "colorspace: /{} {space:?} unusable for {device:?}",
+            String::from_utf8_lossy(key)
+        );
+        return None;
+    }
+    if let ColorSpace::IccBased {
+        n,
+        stream_id: Some(id),
+    } = space
+        && IccConversion::load(doc, id, n).is_some_and(|conv| conv.is_device_equivalent())
+    {
+        return None;
+    }
+    Some(space)
 }
 
 fn resolve_array(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {

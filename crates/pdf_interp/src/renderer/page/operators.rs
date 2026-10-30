@@ -1,6 +1,5 @@
 //! PDF operator dispatch — `execute_one`.
 
-use super::super::color::RasterColor;
 use super::super::gstate::ctm_multiply;
 use super::text_ops::{translate_text_x, translate_text_y};
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
@@ -77,13 +76,13 @@ impl PageRenderer<'_> {
 
             // ── Colour ────────────────────────────────────────────────────────
             Operator::SetFillGray(g) => {
-                self.set_fill_device(ColorSpace::DeviceGray, RasterColor::gray(*g));
+                self.set_fill_device(ColorSpace::DeviceGray, &[*g]);
             }
             Operator::SetFillRgb(r, g, b) => {
-                self.set_fill_device(ColorSpace::DeviceRgb, RasterColor::rgb(*r, *g, *b));
+                self.set_fill_device(ColorSpace::DeviceRgb, &[*r, *g, *b]);
             }
             Operator::SetFillCmyk(c, m, y, k) => {
-                self.set_fill_device(ColorSpace::DeviceCmyk, RasterColor::cmyk(*c, *m, *y, *k));
+                self.set_fill_device(ColorSpace::DeviceCmyk, &[*c, *m, *y, *k]);
             }
             Operator::SetFillColor(comps) => {
                 let cs = self.gstate.current().fill_color_space.clone();
@@ -109,13 +108,13 @@ impl PageRenderer<'_> {
             }
 
             Operator::SetStrokeGray(g) => {
-                self.set_stroke_device(ColorSpace::DeviceGray, RasterColor::gray(*g));
+                self.set_stroke_device(ColorSpace::DeviceGray, &[*g]);
             }
             Operator::SetStrokeRgb(r, g, b) => {
-                self.set_stroke_device(ColorSpace::DeviceRgb, RasterColor::rgb(*r, *g, *b));
+                self.set_stroke_device(ColorSpace::DeviceRgb, &[*r, *g, *b]);
             }
             Operator::SetStrokeCmyk(c, m, y, k) => {
-                self.set_stroke_device(ColorSpace::DeviceCmyk, RasterColor::cmyk(*c, *m, *y, *k));
+                self.set_stroke_device(ColorSpace::DeviceCmyk, &[*c, *m, *y, *k]);
             }
             Operator::SetStrokeColor(comps) => {
                 let cs = self.gstate.current().stroke_color_space.clone();

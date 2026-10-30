@@ -100,6 +100,19 @@ impl IccConversion {
         Some(Self::Transform { n, xform })
     }
 
+    /// Whether this conversion yields the device conversion of the same
+    /// component count: a shaper profile equal to sRGB at 8 bits, or a
+    /// device `/Alternate` space.
+    pub(super) const fn is_device_equivalent(&self) -> bool {
+        matches!(
+            self,
+            Self::Shaper(ProfileConversion::Gray(None) | ProfileConversion::Rgb(None))
+                | Self::Alternate(
+                    ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk
+                )
+        )
+    }
+
     /// Convert normalised components to sRGB bytes.  Components are
     /// quantised to 8 bits for the shaper and the transform.  `None` when
     /// `comps` does not hold the compiled component count or the transform
@@ -140,6 +153,27 @@ mod tests {
             .encode()
             .expect("moxcms encodes its own sRGB profile");
         make_doc_with_stream(&bytes, " /N 3")
+    }
+
+    /// An sRGB `/DefaultRGB` converts exactly as `DeviceRGB` does, so the
+    /// device space stays selected.
+    #[test]
+    fn srgb_default_space_keeps_the_device_space() {
+        let doc = srgb_doc();
+        let conv = IccConversion::load(&doc, (2, 0), 3).expect("sRGB profile compiles");
+        assert!(conv.is_device_equivalent());
+        let mut dict = pdf::Dictionary::new();
+        dict.set(
+            "DefaultRGB",
+            pdf::Object::Array(vec![
+                pdf::Object::Name(b"ICCBased".to_vec()),
+                pdf::Object::Reference((2, 0)),
+            ]),
+        );
+        assert_eq!(
+            super::super::default_space(&doc, &dict, &ColorSpace::DeviceRgb),
+            None
+        );
     }
 
     #[test]

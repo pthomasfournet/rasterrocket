@@ -306,6 +306,9 @@ pub struct PageResources<'doc> {
     /// Each category sub-dictionary, resolved on first use; `None` when the
     /// category is absent or empty.
     subdicts: [OnceLock<Option<Dictionary>>; Category::COUNT],
+    /// The default colour spaces for `DeviceGray`, `DeviceRGB` and
+    /// `DeviceCMYK`, in that order, resolved on first use.
+    default_spaces: OnceLock<[Option<ColorSpace>; 3]>,
 }
 
 /// A sub-dictionary key of a resource dictionary (ISO 32000-1 §7.8.3).
@@ -344,6 +347,7 @@ impl<'doc> PageResources<'doc> {
             doc,
             resource_context_id: page_id,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
+            default_spaces: OnceLock::new(),
         }
     }
 
@@ -362,6 +366,7 @@ impl<'doc> PageResources<'doc> {
             doc: self.doc,
             resource_context_id,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
+            default_spaces: OnceLock::new(),
         }
     }
 
@@ -434,16 +439,19 @@ impl<'doc> PageResources<'doc> {
     /// which resolve directly, or a key into the page's `/ColorSpace`
     /// resource dict that resolves to a parameterised colour-space array.
     ///
+    /// A device-space name selects the space [`Self::device_space`] maps it
+    /// to.
+    ///
     /// Returns [`ColorSpace::DeviceGray`] when the name isn't found in the
     /// resource dict and isn't a device-space name — the same safe-fallback
     /// policy the rest of the resource layer uses on missing inputs.
     #[must_use]
     pub fn color_space(&self, name: &[u8]) -> ColorSpace {
         // Device-space names short-circuit the resource lookup per §8.6.3.
-        if matches!(
-            name,
-            b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK" | b"Pattern"
-        ) {
+        if matches!(name, b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK") {
+            return self.device_space(colorspace::resolve_device_name(name));
+        }
+        if name == b"Pattern" {
             return colorspace::resolve_device_name(name);
         }
         let cs_dict = self.resource_subdict(Category::ColorSpace);
@@ -455,6 +463,33 @@ impl<'doc> PageResources<'doc> {
             return ColorSpace::DeviceGray;
         };
         colorspace::resolve(self.doc, entry)
+    }
+
+    /// The colour space that selecting the device space `device` yields:
+    /// the usable `/DefaultGray`, `/DefaultRGB` or `/DefaultCMYK` entry of
+    /// the `/ColorSpace` resource dictionary (PDF §8.6.5.6), otherwise
+    /// `device` itself.  Spaces other than the three device spaces are
+    /// returned unchanged.
+    #[must_use]
+    pub fn device_space(&self, device: ColorSpace) -> ColorSpace {
+        let slot = match device {
+            ColorSpace::DeviceGray => 0,
+            ColorSpace::DeviceRgb => 1,
+            ColorSpace::DeviceCmyk => 2,
+            _ => return device,
+        };
+        let defaults = self.default_spaces.get_or_init(|| {
+            let Some(dict) = self.color_space_dict() else {
+                return [None, None, None];
+            };
+            [
+                ColorSpace::DeviceGray,
+                ColorSpace::DeviceRgb,
+                ColorSpace::DeviceCmyk,
+            ]
+            .map(|d| colorspace::default_space(self.doc, dict, &d))
+        });
+        defaults[slot].clone().unwrap_or(device)
     }
 
     /// The `/ColorSpace` subdictionary of the resources in effect, if any.
