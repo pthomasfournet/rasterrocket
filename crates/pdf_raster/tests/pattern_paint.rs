@@ -508,3 +508,42 @@ fn a_stencil_mask_paints_a_shading_pattern_through_its_set_samples() {
     );
     assert_eq!(rgb(&bmp, 150, 50), BLUE, "outside the stencil");
 }
+
+/// A type 4 shading covering the page in solid red: two triangles, 16-bit
+/// coordinates over `[0, 200] × [0, 100]`, 8-bit RGB.
+fn red_mesh() -> Vec<u8> {
+    let vertex = |x: u16, y: u16| {
+        let mut v = vec![0u8];
+        v.extend_from_slice(&x.to_be_bytes());
+        v.extend_from_slice(&y.to_be_bytes());
+        v.extend_from_slice(&[255, 0, 0]);
+        v
+    };
+    let mesh: Vec<u8> = [(0, 0), (u16::MAX, 0), (0, u16::MAX)]
+        .into_iter()
+        .chain([(u16::MAX, 0), (u16::MAX, u16::MAX), (0, u16::MAX)])
+        .flat_map(|(x, y)| vertex(x, y))
+        .collect();
+    stream_object(
+        "/ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 \
+         /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 200 0 100 0 1 0 1 0 1]",
+        &mesh,
+    )
+}
+
+/// A stroke whose colour is a mesh shading pattern paints the mesh over
+/// the stroke's outline, and only there.
+#[test]
+fn a_stroke_with_a_mesh_shading_pattern_paints_the_mesh() {
+    let bmp = render(page(
+        &format!("{BACKDROP} /Pattern CS /P0 SCN 10 w 20 50 m 180 50 l S"),
+        "<< /PatternType 2 /Shading 6 0 R >>",
+        None,
+        "",
+        &[red_mesh()],
+    ));
+    assert_eq!(rgb(&bmp, 100, 50), RED, "on the stroke");
+    assert_eq!(rgb(&bmp, 100, 53), RED, "inside the stroke's half width");
+    assert_eq!(rgb(&bmp, 100, 60), BLUE, "beyond the stroke");
+    assert_eq!(rgb(&bmp, 10, 50), BLUE, "before the stroke's start");
+}

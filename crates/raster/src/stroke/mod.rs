@@ -1,6 +1,6 @@
 //! Stroke rasterization.
 //!
-//! Public entry point is [`stroke`]; the helpers (`stroke_narrow`,
+//! Public entry points are [`stroke`] and [`stroke_outline`]; the helpers (`stroke_narrow`,
 //! `stroke_wide`, and the path-shaping functions in the private `path`
 //! submodule) are crate-internal implementation details.
 //!
@@ -64,23 +64,9 @@ pub fn stroke<P: Pixel>(
     matrix: &[f64; 6],
     params: &StrokeParams<'_>,
 ) {
-    if path.pts.is_empty() {
+    let Some(path2) = flattened_dashed(path, matrix, params) else {
         return;
-    }
-
-    let mut path2 = flatten_path(path, matrix, params.flatness);
-
-    let device_scale = matrix[0]
-        .mul_add(matrix[3], -(matrix[1] * matrix[2]))
-        .abs()
-        .sqrt();
-    if let Some((dash, phase)) = dash_cycle(params.line_dash, params.line_dash_phase, device_scale)
-    {
-        path2 = make_dashed_path(&path2, &dash, phase);
-        if path2.pts.is_empty() {
-            return;
-        }
-    }
+    };
 
     // Compute the approximate device-space line width by transforming a unit
     // square and taking half the maximum diagonal length. This mirrors the C++
@@ -91,6 +77,37 @@ pub fn stroke<P: Pixel>(
     } else {
         stroke_wide::<P>(bitmap, clip, &path2, pipe, src, matrix, params);
     }
+}
+
+/// The region a stroke of `path` with a positive line width covers, as a
+/// device-space path to fill with the nonzero winding rule; `None` for a
+/// hairline (`line_width == 0`) or a stroke that covers nothing.
+#[must_use]
+pub fn stroke_outline(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -> Option<XPath> {
+    if params.line_width == 0.0 {
+        return None;
+    }
+    let path = flattened_dashed(path, matrix, params)?;
+    let outline = make_stroke_path(&path, params.line_width, params);
+    Some(XPath::new(&outline, matrix, params.flatness, true))
+}
+
+/// `path` flattened and dashed per `params`; `None` when nothing remains.
+fn flattened_dashed(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -> Option<Path> {
+    if path.pts.is_empty() {
+        return None;
+    }
+    let path = flatten_path(path, matrix, params.flatness);
+    let device_scale = matrix[0]
+        .mul_add(matrix[3], -(matrix[1] * matrix[2]))
+        .abs()
+        .sqrt();
+    let Some((dash, phase)) = dash_cycle(params.line_dash, params.line_dash_phase, device_scale)
+    else {
+        return Some(path);
+    };
+    let dashed = make_dashed_path(&path, &dash, phase);
+    (!dashed.pts.is_empty()).then_some(dashed)
 }
 
 /// Draw zero-width (hairline) strokes: one pixel per scanline intersection.

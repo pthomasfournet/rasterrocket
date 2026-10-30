@@ -1480,26 +1480,18 @@ impl<'doc> PageRenderer<'doc> {
             .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
-                let clip = clip.clone_shared();
-                let stroked =
-                    self.paint_shading_pattern(*pattern, true, region, |r, pipe, shading| {
-                        r.stroke_with_shading(
-                            &path,
-                            &matrix,
-                            &params,
-                            clip,
-                            pipe,
-                            device_flatness,
-                            shading,
-                        )
-                    });
-                if stroked {
-                    return;
-                }
-                log::debug!(
-                    "rasterrocket-interp: mesh shading pattern as a stroke colour is not supported — stroking in the current colour"
-                );
-                None
+                self.paint_shading_pattern(*pattern, true, region, |r, pipe, shading| {
+                    r.stroke_with_shading(
+                        &path,
+                        &matrix,
+                        &params,
+                        clip,
+                        pipe,
+                        device_flatness,
+                        shading,
+                    );
+                });
+                return;
             }
             Some(Some(PatternPaint::Tiled(tiled))) => Some(tiled),
             Some(None) => return,

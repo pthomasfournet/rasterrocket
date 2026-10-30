@@ -13,7 +13,7 @@ use raster::clip::Clip;
 use raster::path::{Path, PathBuilder};
 use raster::pipe::{PipeSrc, PipeState};
 use raster::shading::{gouraud::gouraud_triangle_fill, shaded_fill};
-use raster::stroke::{StrokeParams, stroke};
+use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
 use raster::{Bitmap, eo_fill, fill};
 
@@ -198,10 +198,9 @@ impl PageRenderer<'_> {
 
     /// Stroke `path` (in the space `matrix` maps to the device) with a
     /// shading pattern under `clip`: the `Background` first, then the
-    /// shading clipped by its `BBox`.
-    ///
-    /// Returns `false`, painting nothing, for a mesh shading, whose
-    /// triangles cannot serve as a stroke's colour source.
+    /// shading clipped by its `BBox`.  A mesh shading paints its triangles
+    /// clipped to the stroke's outline; a hairline's outline is one device
+    /// pixel wide.
     #[expect(
         clippy::too_many_arguments,
         reason = "the stroke's geometry, compositing state and shading"
@@ -215,10 +214,7 @@ impl PageRenderer<'_> {
         pipe: &PipeState<'_>,
         flatness: f64,
         shading: ResolvedShading,
-    ) -> bool {
-        let ShadingResult::Pattern(pattern) = shading.result else {
-            return false;
-        };
+    ) {
         if let Some(bg) = shading.background {
             stroke(
                 &mut self.bitmap,
@@ -231,15 +227,39 @@ impl PageRenderer<'_> {
             );
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        stroke(
-            &mut self.bitmap,
-            &clip,
-            path,
-            pipe,
-            &PipeSrc::Pattern(pattern.as_ref()),
-            matrix,
-            params,
-        );
-        true
+        match shading.result {
+            ShadingResult::Pattern(pattern) => stroke(
+                &mut self.bitmap,
+                &clip,
+                path,
+                pipe,
+                &PipeSrc::Pattern(pattern.as_ref()),
+                matrix,
+                params,
+            ),
+            ShadingResult::Mesh(triangles) => {
+                let device_scale = matrix[0]
+                    .mul_add(matrix[3], -(matrix[1] * matrix[2]))
+                    .abs()
+                    .sqrt();
+                let hairline = StrokeParams {
+                    line_width: 1.0 / device_scale,
+                    ..*params
+                };
+                let params = if params.line_width == 0.0 && device_scale > 0.0 {
+                    &hairline
+                } else {
+                    params
+                };
+                let Some(outline) = stroke_outline(path, matrix, params) else {
+                    return;
+                };
+                let mut clip = clip;
+                clip.clip_to_path(&outline, false);
+                for tri in triangles {
+                    gouraud_triangle_fill::<Rgb8>(&mut self.bitmap, &clip, pipe, tri);
+                }
+            }
+        }
     }
 }
