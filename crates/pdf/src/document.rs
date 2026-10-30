@@ -682,9 +682,10 @@ impl Document {
     ///
     /// # Errors
     /// The errors of [`Self::get_object`], [`PdfError::BadObject`] when the
-    /// page is not a dictionary, and [`PdfError::DecodeFailed`] when a
-    /// content stream cannot be decoded or the decoded total exceeds the
-    /// aggregate size cap.
+    /// page is not a dictionary, and [`PdfError::DecodeFailed`] when the
+    /// decoded total exceeds the aggregate size cap or no content stream can
+    /// be decoded.  A `/Contents` element that is missing, is not a stream,
+    /// or cannot be decoded is otherwise skipped with a warning.
     pub fn get_page_content(&self, page_id: ObjectId) -> Result<Vec<u8>, PdfError> {
         let page = self.get_object(page_id)?;
         let page_dict = page.as_dict().ok_or_else(|| PdfError::BadObject {
@@ -727,6 +728,8 @@ impl Document {
         };
 
         let mut out = Vec::new();
+        let mut decoded_any = false;
+        let mut decode_failure = None;
         for r in refs {
             // A reference to an undefined object is the null object
             // (ISO 32000-1 §7.3.10): not content, and not an error.
@@ -759,7 +762,22 @@ impl Document {
                 );
                 continue;
             };
-            let decoded = decode_stream(&s.content, &s.dict).map_err(PdfError::DecodeFailed)?;
+            // An element that cannot be decoded contributes no content; the
+            // elements around it are independent streams and still render.
+            let decoded = match decode_stream(&s.content, &s.dict) {
+                Ok(decoded) => decoded,
+                Err(e) => {
+                    log::warn!(
+                        "get_page_content: page {} /Contents element obj {} cannot be \
+                         decoded ({e}) — skipping (page is missing content)",
+                        page_id.0,
+                        r.0
+                    );
+                    decode_failure = decode_failure.or(Some(e));
+                    continue;
+                }
+            };
+            decoded_any = true;
             // +1 accounts for the '\n' separator pushed below.
             if out.len().saturating_add(decoded.len()).saturating_add(1) > MAX_PAGE_CONTENT {
                 return Err(PdfError::DecodeFailed(format!(
@@ -785,7 +803,11 @@ impl Document {
             }
             out.extend_from_slice(&decoded);
         }
-        Ok(out)
+        // Content streams that all fail to decode leave nothing to render.
+        match decode_failure {
+            Some(e) if !decoded_any => Err(PdfError::DecodeFailed(e)),
+            _ => Ok(out),
+        }
     }
 
     /// Return a merged font dictionary for the page (all /Font entries from

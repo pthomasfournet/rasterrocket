@@ -72,7 +72,7 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
         )
         .map_err(|e| e.to_string()),
         b"LZWDecode" => apply_lzw(data, params),
-        b"ASCII85Decode" => decode_ascii85(data),
+        b"ASCII85Decode" => Ok(decode_ascii85(data)),
         b"ASCIIHexDecode" => Ok(decode_ascii_hex(data)),
         b"RunLengthDecode" => Ok(decode_run_length(data, MAX_DECOMPRESSED)),
         b"BrotliDecode" => apply_brotli(
@@ -625,41 +625,56 @@ fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
 
 // ── ASCII85 ───────────────────────────────────────────────────────────────────
 
-fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
+/// Decode `ASCII85Decode` data (ISO 32000-2 §7.4.3).
+///
+/// The data ends at `~`, or at the first byte that cannot occur in it (a
+/// byte outside `!`..=`u` and whitespace, or `z` inside a group); the
+/// latter is logged and the bytes decoded before it are kept.  A final
+/// partial group of `n` characters yields `n - 1` bytes; a lone final
+/// character carries no byte and is dropped with a warning.  A group above
+/// `s8W-!` (2^32 − 1) wraps modulo 2^32.
+fn decode_ascii85(data: &[u8]) -> Vec<u8> {
+    let value = |group: &[u8; 5]| {
+        group.iter().fold(0u32, |acc, &x| {
+            acc.wrapping_mul(85).wrapping_add(u32::from(x))
+        })
+    };
     let mut out = Vec::new();
     let mut group = [0u8; 5];
     let mut count = 0usize;
 
-    for &b in data {
+    for (i, &b) in data.iter().enumerate() {
         match b {
             b'z' if count == 0 => out.extend_from_slice(&[0u8; 4]),
             b'~' => break,
-            b' ' | b'\t' | b'\r' | b'\n' => {}
+            b' ' | b'\t' | b'\r' | b'\n' | 0x0C | 0x00 => {}
             b'!'..=b'u' => {
                 group[count] = b - b'!';
                 count += 1;
                 if count == 5 {
-                    let n = group.iter().fold(0u32, |acc, &x| acc * 85 + u32::from(x));
-                    out.extend_from_slice(&n.to_be_bytes());
+                    out.extend_from_slice(&value(&group).to_be_bytes());
                     count = 0;
                 }
             }
-            other => return Err(format!("ASCII85: invalid byte {other:#04x}")),
+            other => {
+                log::warn!(
+                    "ASCII85Decode: invalid byte {other:#04x} at offset {i}; \
+                     keeping the data decoded before it"
+                );
+                break;
+            }
         }
     }
-    if count > 0 {
-        // ASCII85 final groups must be 2..=4 bytes (1 leftover char is invalid).
-        if count == 1 {
-            return Err("ASCII85: stray single character in final group".into());
+    match count {
+        0 => {}
+        1 => log::warn!("ASCII85Decode: lone character in the final group dropped"),
+        _ => {
+            // Pad the group with 'u' (84).
+            group[count..].fill(84);
+            out.extend_from_slice(&value(&group).to_be_bytes()[..count - 1]);
         }
-        // Pad remaining group with 'u' (84).
-        for slot in group.iter_mut().skip(count) {
-            *slot = 84;
-        }
-        let n = group.iter().fold(0u32, |acc, &x| acc * 85 + u32::from(x));
-        out.extend_from_slice(&n.to_be_bytes()[..count - 1]);
     }
-    Ok(out)
+    out
 }
 
 // ── RunLength ─────────────────────────────────────────────────────────────────
@@ -1077,11 +1092,23 @@ mod tests {
         );
     }
 
+    /// An illegal byte, or `z` inside a group, ends the data; what decoded
+    /// before it is kept.  A lone final character yields nothing, and an
+    /// oversized group does not overflow.
+    #[test]
+    fn ascii85_keeps_the_prefix_before_an_illegal_byte() {
+        // "0 1 0 rg" is `0H`(m0HbCK`.
+        assert_eq!(decode_ascii85(b"0H`(m0HbCK\x7f+>GT)"), b"0 1 0 rg");
+        assert_eq!(decode_ascii85(b"9jqo^9jzqo^~>"), b"Man M");
+        assert_eq!(decode_ascii85(b"9jqo^9~>"), b"Man ");
+        assert_eq!(decode_ascii85(b"uuuuu~>").len(), 4);
+    }
+
     #[test]
     fn ascii85_decode_basic() {
         // "Man " encodes to "9jqo^" in ASCII85.
         let encoded = b"9jqo^~>";
-        let decoded = decode_ascii85(encoded).unwrap();
+        let decoded = decode_ascii85(encoded);
         assert_eq!(decoded, b"Man ");
     }
 

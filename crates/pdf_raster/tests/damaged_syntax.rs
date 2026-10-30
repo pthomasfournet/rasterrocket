@@ -3,11 +3,12 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and ink coverage"
+    reason = "shared helpers; this test uses PDF assembly, sessions and ink coverage"
 )]
 mod common;
 
-use common::{SQUARE, assemble_pdf, ink, one_page, stream_object};
+use common::{SQUARE, assemble_pdf, ink, one_page, session, stream_object};
+use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// A bare keyword as a page-dictionary value loses that key only; the page
 /// and its content are still read.
@@ -32,6 +33,46 @@ fn malformed_content_number_keeps_its_operator() {
     );
     let ink = ink(pdf);
     assert!((ink - 0.32).abs() < 0.01, "square must render, ink {ink}");
+}
+
+/// A `/Contents` element that cannot be decoded costs only its own content:
+/// the streams before it still render.
+#[test]
+fn undecodable_content_element_keeps_the_rest_of_the_page() {
+    // A stream under an unknown filter, and one whose ASCII85 data breaks
+    // off at an illegal byte after `0 1 0 rg`.
+    for (dict, data) in [
+        ("/Filter /FooDecode", &b"hello"[..]),
+        (
+            "/Filter /ASCII85Decode",
+            b"0H`(m0HbCK\x7f+>GT)+>GPm1b^%/0HbCI+D(r",
+        ),
+    ] {
+        let pdf = one_page(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents [4 0 R 5 0 R] >>",
+            vec![stream_object("", SQUARE), stream_object(dict, data)],
+        );
+        let ink = ink(pdf);
+        assert!(
+            (ink - 0.32).abs() < 0.01,
+            "{dict}: square must render, ink {ink}"
+        );
+    }
+}
+
+/// A page none of whose content streams decode fails rather than rendering
+/// blank.
+#[test]
+fn page_with_no_decodable_content_fails() {
+    let pdf = one_page(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents [4 0 R 5 0 R] >>",
+        vec![
+            stream_object("/Filter /FooDecode", b"hello"),
+            stream_object("/Filter /FooDecode", b"world"),
+        ],
+    );
+    let s = session(pdf, BackendPolicy::CpuOnly);
+    assert!(render_page_rgb(&s, 1, 1.0).is_err());
 }
 
 /// A `/Pages` node whose `/Count` equals its number of kids may still have
