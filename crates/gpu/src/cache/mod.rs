@@ -577,6 +577,22 @@ impl DeviceImageCache {
     pub fn stream(&self) -> &CudaStream {
         &self.stream
     }
+
+    /// The pixels of `image` copied back to the host, in the layout
+    /// [`CachedDeviceImage::layout`] describes.  The copy is complete when
+    /// this returns.
+    ///
+    /// # Errors
+    /// The CUDA error of the copy or the synchronisation.
+    pub fn download(
+        &self,
+        image: &CachedDeviceImage,
+    ) -> Result<Vec<u8>, cudarc::driver::DriverError> {
+        let mut pixels = vec![0u8; image.device_ptr.len()];
+        self.stream.memcpy_dtoh(&image.device_ptr, &mut pixels)?;
+        self.stream.synchronize()?;
+        Ok(pixels)
+    }
 }
 
 // Compile-time assertion: the cache and its handle are thread-safe.

@@ -1963,6 +1963,13 @@ impl<'doc> PageRenderer<'doc> {
             Some((m, c)) => (Some(m), *c),
             None => (img.smask.as_ref(), page_ctm),
         };
+        // A device-resident image is sampled at full resolution by the
+        // blit kernel; a draw that reduces it takes a host copy so that it
+        // is area-averaged as a host-resident image is.
+        #[cfg(feature = "cache")]
+        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm);
+        #[cfg(feature = "cache")]
+        let img = host_copy.as_ref().unwrap_or(img);
         let reduced = image_reduce::reduce_for_draw(img, &page_ctm);
         let (img, ctm) = match &reduced {
             Some((i, c)) => (i, *c),
@@ -2051,6 +2058,43 @@ impl<'doc> PageRenderer<'doc> {
         let area = shading_paint::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]);
         self.paint_through_coverage(rect, &coverage, |r| r.fill_path(&area, false));
         true
+    }
+
+    /// A host-resident copy of `img` when its samples are device-resident
+    /// and drawing them through `ctm` reduces the image; `None` otherwise,
+    /// or when the copy fails, in which case the device samples are drawn
+    /// as they are.
+    #[cfg(feature = "cache")]
+    fn host_copy_for_reduced_draw(
+        &self,
+        img: &crate::resources::ImageDescriptor,
+        ctm: &Ctm,
+    ) -> Option<crate::resources::ImageDescriptor> {
+        use crate::resources::image::ImageData;
+
+        let ImageData::Gpu(cached) = &img.data else {
+            return None;
+        };
+        if !image_reduce::draw_reduces(ctm, img.width, img.height) {
+            return None;
+        }
+        let cache = &self.cache_state.as_ref()?.cache;
+        let pixels = cache
+            .download(cached)
+            .map_err(|e| {
+                log::warn!(
+                    "rasterrocket-interp: reading a cached image back for a reduced draw failed: {e}"
+                );
+            })
+            .ok()?;
+        Some(crate::resources::ImageDescriptor {
+            width: img.width,
+            height: img.height,
+            color_space: img.color_space,
+            data: ImageData::Cpu(pixels),
+            smask: None,
+            filter: img.filter,
+        })
     }
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap

@@ -82,6 +82,14 @@ pub(super) fn reduce_for_draw(img: &ImageDescriptor, ctm: &Ctm) -> Option<(Image
     ))
 }
 
+/// Whether drawing a `width × height` image through `ctm` reduces it on
+/// either axis, so that [`reduce_for_draw`] would resample host-resident
+/// samples.
+#[cfg(feature = "cache")]
+pub(super) fn draw_reduces(ctm: &Ctm, width: u32, height: u32) -> bool {
+    Plan::new(ctm, width, height).is_some()
+}
+
 /// Resample `mask` for drawing through `ctm`, as [`reduce_for_draw`] does
 /// an image: each output value is the mean alpha of its footprint, so a
 /// bilevel mask becomes the fraction of each device pixel it admits.
