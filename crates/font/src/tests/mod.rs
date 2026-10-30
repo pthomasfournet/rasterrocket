@@ -344,6 +344,27 @@ fn glyph_names_resolve_to_unicode() {
     assert_eq!(glyph_name_to_unicode("gid42"), None);
 }
 
+/// The `GSUB` `vert` feature maps a glyph to its vertical form; glyphs
+/// without one, and programs without the feature, map to themselves.
+#[test]
+fn vertical_forms_come_from_gsub() {
+    let program =
+        crate::program::FontProgram::parse(include_bytes!("data/vertical-forms.ttf").to_vec(), 0)
+            .expect("parse");
+    assert_eq!(program.name_index("square"), 1);
+    assert_eq!(program.name_index("tall"), 2);
+    assert_eq!(program.vertical_gid(1), 2);
+    assert_eq!(program.vertical_gid(2), 2);
+    assert_eq!(program.vertical_gid(3), 3);
+    assert_eq!(program.vertical_selector(1), 2);
+    assert_eq!(program.vertical_selector(3), 3);
+    let plain =
+        crate::program::FontProgram::parse(font_test_data::AHEM.to_vec(), 0).expect("parse");
+    assert_eq!(plain.vertical_gid(58), 58);
+    let cid = crate::program::FontProgram::parse(CID_SUBSET.to_vec(), 0).expect("parse");
+    assert_eq!(cid.vertical_selector(34), 34);
+}
+
 /// The `OS/2` and `name` summary of a file's faces is read without
 /// loading the file; a file that is not an sfnt yields nothing.
 #[test]

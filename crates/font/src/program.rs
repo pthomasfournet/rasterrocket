@@ -27,7 +27,8 @@ use read_fonts::ps::charmap::Charmap;
 use read_fonts::ps::type1::Type1Font;
 use read_fonts::ps::type1::cid::CidType1Font;
 use read_fonts::tables::cmap::{CmapSubtable, PlatformId};
-use read_fonts::types::{GlyphId, Tag};
+use read_fonts::tables::gsub::{SingleSubst, SubstitutionSubtables};
+use read_fonts::types::{BigEndian, GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{
@@ -161,6 +162,11 @@ pub struct FontProgram {
     /// Glyph indices of the codes 0–255 through the program's built-in
     /// encoding, 0 where it assigns none.  Built on first use.
     builtin_encoding: OnceLock<Box<[u32; 256]>>,
+    /// Glyph index → its vertical form, from the `GSUB` `vert` and `vrt2`
+    /// features of an sfnt.  Built on first use; empty without them.
+    vertical_forms: OnceLock<HashMap<u32, u32>>,
+    /// Glyph index → CID, the inverse of `cid_to_gid`.  Built on first use.
+    gid_to_cid: OnceLock<HashMap<u32, u32>>,
 }
 
 impl std::fmt::Debug for FontProgram {
@@ -261,6 +267,8 @@ impl FontProgram {
             names: OnceLock::new(),
             name_charmap,
             builtin_encoding: OnceLock::new(),
+            vertical_forms: OnceLock::new(),
+            gid_to_cid: OnceLock::new(),
         };
         let mut table = [0u32; 256];
         for (code, slot) in (0u32..).zip(table.iter_mut()) {
@@ -505,6 +513,43 @@ impl FontProgram {
         }
     }
 
+    /// The vertical form of glyph `gid` through the `GSUB` `vert` / `vrt2`
+    /// single substitutions (rotated brackets and punctuation of vertical
+    /// writing), or `gid` itself when the program defines none.
+    #[must_use]
+    pub fn vertical_gid(&self, gid: u32) -> u32 {
+        self.vertical_forms
+            .get_or_init(|| {
+                self.sfnt()
+                    .map_or_else(HashMap::new, |font| vertical_forms(font))
+            })
+            .get(&gid)
+            .copied()
+            .unwrap_or(gid)
+    }
+
+    /// The composite-font selector of the vertical form of the glyph
+    /// `selector` selects (see [`Self::cid_to_gid`]): a CID for a
+    /// CID-keyed CFF program, else the glyph index.  `selector` itself
+    /// when the glyph has no vertical form.
+    #[must_use]
+    pub fn vertical_selector(&self, selector: u32) -> u32 {
+        let Some(gid) = self.cid_to_gid(selector) else {
+            return selector;
+        };
+        let vertical = self.vertical_gid(gid);
+        if vertical == gid {
+            return selector;
+        }
+        self.cid_to_gid.as_ref().map_or(vertical, |map| {
+            self.gid_to_cid
+                .get_or_init(|| map.iter().map(|(&cid, &gid)| (gid, cid)).collect())
+                .get(&vertical)
+                .copied()
+                .unwrap_or(selector)
+        })
+    }
+
     /// Advance width of glyph `gid` in em units.  `None` when the glyph
     /// does not exist or the program records no advance for it.
     #[must_use]
@@ -674,6 +719,63 @@ fn parse_type1(data: &[u8]) -> Result<(Outlines, i32), LoadError> {
 
 /// CID → glyph index table of a CID-keyed CFF program, `None` for a
 /// name-keyed one.
+/// Glyph index → vertical form from the single substitutions the `vert`
+/// and `vrt2` features of `font`'s `GSUB` table apply (the first feature
+/// listing a glyph wins).
+fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
+    let mut forms = HashMap::new();
+    let Ok(gsub) = font.gsub() else {
+        return forms;
+    };
+    let (Ok(features), Ok(lookups)) = (gsub.feature_list(), gsub.lookup_list()) else {
+        return forms;
+    };
+    let mut lookup_indices: Vec<u16> = Vec::new();
+    for record in features.feature_records() {
+        let tag = record.feature_tag();
+        if (tag == Tag::new(b"vert") || tag == Tag::new(b"vrt2"))
+            && let Ok(feature) = record.feature(features.offset_data())
+        {
+            lookup_indices.extend(feature.lookup_list_indices().iter().map(BigEndian::get));
+        }
+    }
+    lookup_indices.sort_unstable();
+    lookup_indices.dedup();
+    for index in lookup_indices {
+        let Ok(lookup) = lookups.lookups().get(usize::from(index)) else {
+            continue;
+        };
+        let Ok(SubstitutionSubtables::Single(subtables)) = lookup.subtables() else {
+            continue;
+        };
+        for subtable in subtables.iter().flatten() {
+            match subtable {
+                SingleSubst::Format1(single) => {
+                    let Ok(coverage) = single.coverage() else {
+                        continue;
+                    };
+                    let delta = i32::from(single.delta_glyph_id());
+                    for glyph in coverage.iter() {
+                        let from = i32::from(glyph.to_u16());
+                        let to = (from + delta).rem_euclid(0x1_0000).unsigned_abs();
+                        let _ = forms.entry(from.unsigned_abs()).or_insert(to);
+                    }
+                }
+                SingleSubst::Format2(single) => {
+                    let Ok(coverage) = single.coverage() else {
+                        continue;
+                    };
+                    for (glyph, to) in coverage.iter().zip(single.substitute_glyph_ids()) {
+                        let to = u32::from(to.get().to_u16());
+                        let _ = forms.entry(u32::from(glyph.to_u16())).or_insert(to);
+                    }
+                }
+            }
+        }
+    }
+    forms
+}
+
 fn cid_charset_map(cff: &CffFontRef<'_>) -> Option<HashMap<u32, u32>> {
     if !cff.is_cid() {
         return None;

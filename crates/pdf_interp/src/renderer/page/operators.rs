@@ -2,7 +2,7 @@
 
 use super::super::color::RasterColor;
 use super::super::gstate::ctm_multiply;
-use super::text_ops::translate_text_x;
+use super::text_ops::{translate_text_x, translate_text_y};
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
 use crate::content::{Operator, TextArrayElement};
 use crate::resources::ExtGStateParams;
@@ -279,16 +279,27 @@ impl PageRenderer<'_> {
                         TextArrayElement::Offset(kern) => {
                             // PDF §9.4.3: kern is in thousandths of a text-space unit.
                             // Displacement = -(w/1000) * Th * Tfs, where Th is horizontal
-                            // scaling (Tz as a fraction, default 1.0) and Tfs is font size.
+                            // scaling (Tz as a fraction, default 1.0) and Tfs is font size;
+                            // in vertical writing mode -(w/1000) * Tfs along y, without Th.
                             // Tz=0 is degenerate (invisible text); treat as 1.0 like show_text.
                             let ts = &mut self.gstate.current_mut().text;
-                            let hz = if ts.horiz_scaling.abs() < f64::EPSILON {
-                                1.0
+                            let vertical = ts
+                                .font
+                                .as_ref()
+                                .and_then(|f| f.descriptor.cid_encoding.as_ref())
+                                .is_some_and(|enc| enc.vertical);
+                            if vertical {
+                                let shift = -kern / 1000.0 * ts.font_size;
+                                ts.text_matrix = translate_text_y(ts.text_matrix, shift);
                             } else {
-                                ts.horiz_scaling / 100.0
-                            };
-                            let shift = -kern / 1000.0 * ts.font_size * hz;
-                            ts.text_matrix = translate_text_x(ts.text_matrix, shift);
+                                let hz = if ts.horiz_scaling.abs() < f64::EPSILON {
+                                    1.0
+                                } else {
+                                    ts.horiz_scaling / 100.0
+                                };
+                                let shift = -kern / 1000.0 * ts.font_size * hz;
+                                ts.text_matrix = translate_text_x(ts.text_matrix, shift);
+                            }
                         }
                     }
                 }

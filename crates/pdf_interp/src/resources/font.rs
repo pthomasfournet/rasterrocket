@@ -103,9 +103,56 @@ pub struct CidEncoding {
     ///
     /// Stored as `(first_cid, [widths…])` segments matching the PDF `W` format.
     pub widths: Vec<(u32, Vec<i32>)>,
+
+    /// Vertical writing mode: the `Encoding` `CMap` has `WMode` 1.
+    pub vertical: bool,
+
+    /// `DW2`: the default position vector's y component and the default
+    /// vertical advance, in thousandths of a text-space unit (PDF §9.7.4.3;
+    /// default `[880 -1000]`).
+    pub default_vertical: [i32; 2],
+
+    /// `W2`: explicit per-CID vertical metrics `[w1y, vx, vy]`, stored as
+    /// `(first_cid, [metrics…])` segments.
+    pub vertical_metrics: VerticalMetricsSegments,
+}
+
+/// `W2` segments: `(first_cid, [[w1y, vx, vy], …])`.
+pub type VerticalMetricsSegments = Vec<(u32, Vec<[i32; 3]>)>;
+
+/// The vertical metrics of one CID in thousandths of a text-space unit
+/// (PDF §9.7.4.3): the vertical advance `w1y` and the position vector
+/// `(vx, vy)` from the horizontal origin to the vertical origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerticalMetrics {
+    /// Vertical advance (negative: downwards).
+    pub w1y: i32,
+    /// Position vector x component.
+    pub vx: i32,
+    /// Position vector y component.
+    pub vy: i32,
 }
 
 impl CidEncoding {
+    /// The vertical metrics of `cid`: its `W2` entry, else the defaults
+    /// — `DW2`'s advance, half the horizontal width for `vx`, `DW2`'s
+    /// `vy`.
+    #[must_use]
+    pub fn vertical_metrics_for_cid(&self, cid: u32) -> VerticalMetrics {
+        for (first, metrics) in &self.vertical_metrics {
+            if cid >= *first
+                && let Some(&[w1y, vx, vy]) = metrics.get((cid - first) as usize)
+            {
+                return VerticalMetrics { w1y, vx, vy };
+            }
+        }
+        VerticalMetrics {
+            w1y: self.default_vertical[1],
+            vx: self.width_for_cid(cid) / 2,
+            vy: self.default_vertical[0],
+        }
+    }
+
     /// Return the advance width for `cid` in thousandths of a text-space unit.
     ///
     /// Searches the explicit `W` table first; falls back to `default_width`.
@@ -549,10 +596,14 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     // 4. CIDToGIDMap (CIDFontType2 only; CIDFontType0/CFF uses identity).
     let cid_to_gid = descendant.as_ref().and_then(|d| extract_cid_to_gid(doc, d));
 
-    // 5. CIDFont metrics: DW and W.
+    // 5. CIDFont metrics: DW and W, and DW2 and W2 for vertical writing.
     let (default_width, widths) = descendant
         .as_ref()
         .map_or((1000, vec![]), |d| extract_cid_widths(doc, d));
+    let (default_vertical, vertical_metrics) =
+        descendant.as_ref().map_or(([880, -1000], vec![]), |d| {
+            extract_cid_vertical_metrics(doc, d)
+        });
 
     // 6. Determine font kind from CIDFont Subtype.
     let kind = descendant
@@ -588,10 +639,13 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         // Unused for Type 0 (CID path bypasses name resolution entirely).
         base_encoding: BaseEncoding::Standard,
         cid_encoding: Some(CidEncoding {
+            vertical: encoding_cmap.vertical,
             encoding_cmap,
             cid_to_gid,
             default_width,
             widths,
+            default_vertical,
+            vertical_metrics,
         }),
         type3: None,
         substitute,
@@ -771,8 +825,11 @@ fn extract_type0_encoding_cmap(doc: &Document, dict: &Dictionary) -> Arc<CMap> {
 /// The `CMap` a name denotes: identity for `Identity-H` / `Identity-V`,
 /// else the predefined `CMap` of that name, else identity with a warning.
 fn named_cmap(name: &[u8]) -> Arc<CMap> {
-    if name == b"Identity-H" || name == b"Identity-V" {
+    if name == b"Identity-H" {
         return Arc::new(CMap::identity());
+    }
+    if name == b"Identity-V" {
+        return Arc::new(CMap::identity_vertical());
     }
     predefined_cmap(name).unwrap_or_else(|| {
         log::warn!(
@@ -784,13 +841,16 @@ fn named_cmap(name: &[u8]) -> Arc<CMap> {
 }
 
 /// Parse an embedded `CMap` stream (`obj` is the stream or a reference to
-/// it) and apply its dictionary's `UseCMap`, a name or another stream,
-/// at nesting `depth`.
+/// it) and apply its dictionary's `WMode` and `UseCMap`, a name or
+/// another stream, at nesting `depth`.
 fn embedded_cmap(doc: &Document, obj: &Object, depth: u32) -> Option<CMap> {
     let resolved = doc.resolve(obj).ok()?;
     let stream = resolved.as_stream()?;
     let content = stream.decompressed_content().ok()?;
     let mut cmap = parse_cmap(&content)?;
+    if let Some(mode) = stream.dict.get_i64(b"WMode") {
+        cmap.vertical = mode == 1;
+    }
     match stream.dict.get(b"UseCMap") {
         Some(Object::Name(n)) => cmap.inherit(&named_cmap(n)),
         Some(parent @ (Object::Reference(_) | Object::Stream(_))) if depth < MAX_USECMAP_DEPTH => {
@@ -1041,6 +1101,105 @@ fn parse_w_segments(doc: &Document, w_arr: &[Object]) -> Vec<(u32, Vec<i32>)> {
     }
 
     segments
+}
+
+/// Parse the `W2` array body into `(first_cid, metrics)` segments of
+/// `[w1y, vx, vy]` triples.  The grammar (PDF §9.7.4.3) is
+/// `[ c [w1y vx vy …]  cfirst clast w1y vx vy … ]`; elements may be
+/// indirect, as in `W`.
+fn parse_w2_segments(doc: &Document, w2: &[Object]) -> VerticalMetricsSegments {
+    let mut segments: VerticalMetricsSegments = Vec::new();
+    let mut materialised: usize = 0;
+    let number = |obj: &Object| {
+        resolve_w_elem(doc, obj)
+            .and_then(|r| r.as_i64())
+            .map(pdf_width_to_i32)
+    };
+    let cid = |obj: &Object| number(obj).and_then(|n| u32::try_from(n).ok());
+    let mut i = 0;
+    while i < w2.len() {
+        let Some(first) = cid(&w2[i]) else {
+            i += 1;
+            continue;
+        };
+        i += 1;
+        let Some(second) = w2.get(i).and_then(|o| resolve_w_elem(doc, o)) else {
+            break;
+        };
+        match second.as_ref() {
+            Object::Array(triples) => {
+                let metrics: Vec<[i32; 3]> = triples
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|t| {
+                        [
+                            number(&t[0]).unwrap_or(0),
+                            number(&t[1]).unwrap_or(0),
+                            number(&t[2]).unwrap_or(0),
+                        ]
+                    })
+                    .collect();
+                if materialised.saturating_add(metrics.len()) > MAX_CID_WIDTH_ENTRIES {
+                    break;
+                }
+                materialised += metrics.len();
+                segments.push((first, metrics));
+                i += 1;
+            }
+            Object::Integer(_) => {
+                let Some(last) = cid(&second) else {
+                    i += 1;
+                    continue;
+                };
+                let triple = [
+                    w2.get(i + 1).and_then(number),
+                    w2.get(i + 2).and_then(number),
+                    w2.get(i + 3).and_then(number),
+                ];
+                i += 4;
+                let [Some(w1y), Some(vx), Some(vy)] = triple else {
+                    break;
+                };
+                if last >= first && last - first < 0x1_0000 {
+                    let count = (last - first + 1) as usize;
+                    if materialised.saturating_add(count) > MAX_CID_WIDTH_ENTRIES {
+                        break;
+                    }
+                    materialised += count;
+                    segments.push((first, vec![[w1y, vx, vy]; count]));
+                } else {
+                    log::warn!("font: W2 array degenerate CID range {first}–{last}, skipping");
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    segments
+}
+
+/// Parse `DW2` and `W2` from a `CIDFont` dictionary: `([vy, w1y],
+/// segments)`, with the spec defaults `[880 -1000]` and no segments.
+fn extract_cid_vertical_metrics(
+    doc: &Document,
+    dict: &Dictionary,
+) -> ([i32; 2], VerticalMetricsSegments) {
+    let dw2 = dict
+        .get(b"DW2")
+        .and_then(|o| doc.resolve(o).ok())
+        .and_then(|o| {
+            let arr = o.as_array()?;
+            let vy = resolve_w_elem(doc, arr.first()?)?.as_i64()?;
+            let w1y = resolve_w_elem(doc, arr.get(1)?)?.as_i64()?;
+            Some([pdf_width_to_i32(vy), pdf_width_to_i32(w1y)])
+        })
+        .unwrap_or([880, -1000]);
+    let segments = dict
+        .get(b"W2")
+        .and_then(|o| doc.resolve(o).ok())
+        .and_then(|o| o.as_array().map(|arr| parse_w2_segments(doc, arr)))
+        .unwrap_or_default();
+    (dw2, segments)
 }
 
 /// Parse `DW` and `W` from a `CIDFont` dictionary.
@@ -1439,6 +1598,75 @@ mod tests {
         assert_eq!(segs.len(), 1, "second range exceeds the entry cap");
         assert_eq!(segs[0].0, 0);
         assert_eq!(segs[0].1.len(), 0x1_0000);
+    }
+
+    #[test]
+    fn cid_vertical_metrics_parse_both_w2_forms() {
+        // `1 [ -900 500 800 ]  5 6 -1000 250 880`
+        let doc = empty_doc();
+        let dict = make_dict(&[
+            (
+                b"DW2",
+                Object::Array(vec![Object::Integer(850), Object::Integer(-950)]),
+            ),
+            (
+                b"W2",
+                Object::Array(vec![
+                    Object::Integer(1),
+                    Object::Array(vec![
+                        Object::Integer(-900),
+                        Object::Integer(500),
+                        Object::Integer(800),
+                    ]),
+                    Object::Integer(5),
+                    Object::Integer(6),
+                    Object::Integer(-1000),
+                    Object::Integer(250),
+                    Object::Integer(880),
+                ]),
+            ),
+        ]);
+        let (dw2, segments) = extract_cid_vertical_metrics(&doc, &dict);
+        assert_eq!(dw2, [850, -950]);
+        assert_eq!(
+            segments,
+            vec![(1, vec![[-900, 500, 800]]), (5, vec![[-1000, 250, 880]; 2])]
+        );
+        let enc = CidEncoding {
+            encoding_cmap: Arc::new(CMap::identity_vertical()),
+            cid_to_gid: None,
+            default_width: 600,
+            widths: vec![],
+            vertical: true,
+            default_vertical: dw2,
+            vertical_metrics: segments,
+        };
+        assert_eq!(
+            enc.vertical_metrics_for_cid(1),
+            VerticalMetrics {
+                w1y: -900,
+                vx: 500,
+                vy: 800
+            }
+        );
+        assert_eq!(enc.vertical_metrics_for_cid(6).vx, 250);
+        // Defaults: DW2's advance and vy, half the horizontal width for vx.
+        assert_eq!(
+            enc.vertical_metrics_for_cid(9),
+            VerticalMetrics {
+                w1y: -950,
+                vx: 300,
+                vy: 850
+            }
+        );
+    }
+
+    #[test]
+    fn vertical_metrics_defaults_without_dw2() {
+        let doc = empty_doc();
+        let (dw2, segments) = extract_cid_vertical_metrics(&doc, &make_dict(&[]));
+        assert_eq!(dw2, [880, -1000]);
+        assert!(segments.is_empty());
     }
 
     #[test]

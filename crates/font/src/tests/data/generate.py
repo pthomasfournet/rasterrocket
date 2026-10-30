@@ -31,6 +31,11 @@ symbolic-mac-roman-named.ttf
     Roman in format 6.  The version 2 `post` table names both glyphs;
     `.notdef` has no contours.
 
+vertical-forms.ttf
+    A TrueType font with a `GSUB` `vert` feature: GID 1 `square` (U+0041,
+    x 100..400, y 0..300) substitutes to GID 2 `tall` (x 0..300,
+    y 100..400); GID 3 `other` (U+0042) has no vertical form.
+
 cid-keyed-type1.cid
     A CID-keyed Type 1 font (CIDFontType 0, binary StartData section)
     assembled by hand: CIDCount 5, FDBytes 1, GDBytes 4, two font dicts.
@@ -52,6 +57,7 @@ cid-keyed-type1.cid
 import os
 import struct
 
+from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import newTable
@@ -176,6 +182,31 @@ def build_symbolic_mac_roman_named():
     mac.platformID, mac.platEncID, mac.language = 1, 0, 0
     mac.cmap = {0x21: "therefore"}
     fb.font["cmap"].tables = [mac]
+    return fb.font
+
+
+def tall_glyph():
+    pen = TTGlyphPen(None)
+    pen.moveTo((0, 100))
+    pen.lineTo((0, 400))
+    pen.lineTo((300, 400))
+    pen.lineTo((300, 100))
+    pen.closePath()
+    return pen.glyph()
+
+
+def build_vertical_forms():
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "square", "tall", "other"])
+    fb.setupCharacterMap({0x41: "square", 0x42: "other"})
+    empty = TTGlyphPen(None).glyph()
+    fb.setupGlyf({".notdef": empty, "square": square_glyph(), "tall": tall_glyph(), "other": square_glyph()})
+    fb.setupHorizontalMetrics({".notdef": (1000, 0), "square": (1000, 100), "tall": (1000, 0), "other": (1000, 100)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "VerticalForms", "styleName": "Regular"})
+    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
+    fb.setupPost()
+    addOpenTypeFeaturesFromString(fb.font, "feature vert { sub square by tall; } vert;")
     return fb.font
 
 
@@ -365,6 +396,7 @@ def main():
     )
     write_truetype("hint-assembled-plain.ttf", build_truetype("Plain"))
     write_truetype("symbolic-mac-roman-named.ttf", build_symbolic_mac_roman_named())
+    write_truetype("vertical-forms.ttf", build_vertical_forms())
     with open(os.path.join(HERE, "cid-keyed-type1.cid"), "wb") as f:
         f.write(build_cid_type1())
 

@@ -308,7 +308,8 @@ fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u3
         && !simple
         && let Some(table) = desc.substitute.script.and_then(cid_to_unicode)
     {
-        Some(resolve_cids_via_unicode(face, &table))
+        let vertical = desc.cid_encoding.as_ref().is_some_and(|enc| enc.vertical);
+        Some(resolve_cids_via_unicode(face, &table, vertical))
     } else {
         None
     }
@@ -316,13 +317,23 @@ fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u3
 
 /// Build a 65 536-entry CID → glyph table for a composite font drawn by a
 /// substitute, through the CID → Unicode table of its character
-/// collection and the substitute's Unicode charmap.  The table spans the
-/// whole CID space so that no CID falls through to the charmap.
-fn resolve_cids_via_unicode(face: &FontFace, cid_to_unicode: &HashMap<u32, u32>) -> Vec<u32> {
+/// collection and the substitute's Unicode charmap; in `vertical`
+/// writing mode each glyph is replaced by its vertical form.  The table
+/// spans the whole CID space so that no CID falls through to the charmap.
+fn resolve_cids_via_unicode(
+    face: &FontFace,
+    cid_to_unicode: &HashMap<u32, u32>,
+    vertical: bool,
+) -> Vec<u32> {
     let mut table = vec![0u32; 1 << 16];
     for (&cid, &unicode) in cid_to_unicode {
         if let Some(slot) = table.get_mut(cid as usize) {
-            *slot = face.raw_get_char_index(unicode);
+            let gid = face.raw_get_char_index(unicode);
+            *slot = if vertical {
+                face.program().vertical_gid(gid)
+            } else {
+                gid
+            };
         }
     }
     table
@@ -727,6 +738,9 @@ mod tests {
                 cid_to_gid: None,
                 default_width: 1000,
                 widths: vec![],
+                vertical: false,
+                default_vertical: [880, -1000],
+                vertical_metrics: vec![],
             }),
             type3: None,
             substitute: SubstituteStyle {

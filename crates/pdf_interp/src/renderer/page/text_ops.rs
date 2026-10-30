@@ -50,6 +50,14 @@ pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
     [a, b, c, d, e + tx * a, f + tx * b]
 }
 
+/// Translate text matrix `tm` by `ty` along its own y axis: `[1 0 0 1 0 ty] × Tm`,
+/// the advance of vertical writing mode.
+#[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
+pub(super) const fn translate_text_y(tm: [f64; 6], ty: f64) -> [f64; 6] {
+    let [a, b, c, d, e, f] = tm;
+    [a, b, c, d, e + ty * c, f + ty * d]
+}
+
 /// Map a text-space point through the text matrix and CTM to device-pixel
 /// coordinates with y-flip (PDF origin = bottom-left; device origin = top-left).
 ///

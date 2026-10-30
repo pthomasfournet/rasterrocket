@@ -4,7 +4,9 @@ use super::super::gstate::{ctm_multiply, mat2x2_mul};
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
-use super::text_ops::{GlyphRecord, glyph_advance, text_to_device, translate_text_x};
+use super::text_ops::{
+    GlyphRecord, glyph_advance, text_to_device, translate_text_x, translate_text_y,
+};
 use crate::resources::cmap::DecodedCode;
 use color::Rgb8;
 use raster::{
@@ -242,24 +244,51 @@ impl PageRenderer<'_> {
                 // Type 0 composite font: the Encoding CMap splits the string
                 // into 1–4-byte codes and maps each to a CID (PDF §9.7.6.3).
                 for DecodedCode { value: cid, .. } in enc.codes(bytes) {
-                    let (pen_x, pen_y) = text_to_device(&ctm, &tm, 0.0, rise, self.height);
+                    // In vertical writing mode the glyph's vertical origin
+                    // sits at the pen: its horizontal origin is displaced
+                    // by the position vector −v, in glyph units scaled by
+                    // the font size (PDF §9.7.4.3).
+                    let (pen_x, pen_y) = if enc.vertical {
+                        let v = enc.vertical_metrics_for_cid(cid);
+                        let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
+                        let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
+                        text_to_device(&ctm, &tm, tx, ty, self.height)
+                    } else {
+                        text_to_device(&ctm, &tm, 0.0, rise, self.height)
+                    };
                     // A substitute face for a composite font carries a
-                    // CID-indexed glyph table; an embedded one is selected
-                    // through `CIDToGIDMap` / its charset.
+                    // CID-indexed glyph table (vertical forms included); an
+                    // embedded one is selected through `CIDToGIDMap` / its
+                    // charset, with its vertical form substituted here.
                     if face.code_to_gid.is_empty() {
-                        push_glyph(cid, enc.gid_for_cid(cid), true, pen_x, pen_y);
+                        let mut gid = enc.gid_for_cid(cid);
+                        if enc.vertical {
+                            gid = face.program().vertical_selector(gid);
+                        }
+                        push_glyph(cid, gid, true, pen_x, pen_y);
                     } else {
                         push_glyph(cid, cid, false, pen_x, pen_y);
                     }
 
-                    // CID width lookup uses the CID, not the raw char code.
-                    // Advance formula: w/1000 * font_size (PDF §9.7.4.3).
-                    // Word spacing does not apply to composite fonts (PDF §9.3.3).
-                    let cid_width = enc.width_for_cid(cid);
-                    let advance_glyph = f64::from(cid_width) / 1000.0;
-                    let tx_adv =
-                        glyph_advance(advance_glyph, font_size, char_spacing, 0.0, horiz_scaling);
-                    tm = translate_text_x(tm, tx_adv);
+                    // The advance (PDF §9.4.4): horizontally
+                    // `(w0 × Tfs + Tc) × Th`; vertically `w1 × Tfs + Tc`,
+                    // along the text matrix's y axis.  Word spacing does not
+                    // apply to composite fonts (PDF §9.3.3).
+                    if enc.vertical {
+                        let w1 = f64::from(enc.vertical_metrics_for_cid(cid).w1y) / 1000.0;
+                        let ty_adv = glyph_advance(w1, font_size, char_spacing, 0.0, 1.0);
+                        tm = translate_text_y(tm, ty_adv);
+                    } else {
+                        let advance_glyph = f64::from(enc.width_for_cid(cid)) / 1000.0;
+                        let tx_adv = glyph_advance(
+                            advance_glyph,
+                            font_size,
+                            char_spacing,
+                            0.0,
+                            horiz_scaling,
+                        );
+                        tm = translate_text_x(tm, tx_adv);
+                    }
                 }
             } else {
                 // Simple font: one byte per character code.

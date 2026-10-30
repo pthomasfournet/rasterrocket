@@ -105,6 +105,9 @@ pub struct CMap {
     /// The `Ordering` of the `CIDSystemInfo` the `CMap` declares (the
     /// character collection its CIDs index), inherited through `usecmap`.
     pub ordering: Option<Box<str>>,
+    /// Vertical writing mode (`/WMode 1`), inherited through `usecmap`
+    /// when the `CMap` declares none.
+    pub vertical: bool,
 }
 
 impl CMap {
@@ -116,6 +119,16 @@ impl CMap {
             map: HashMap::new(),
             identity: true,
             ordering: None,
+            vertical: false,
+        }
+    }
+
+    /// The two-byte identity `CMap` in vertical writing mode (`Identity-V`).
+    #[must_use]
+    pub fn identity_vertical() -> Self {
+        Self {
+            vertical: true,
+            ..Self::identity()
         }
     }
 
@@ -173,6 +186,7 @@ impl CMap {
         if self.ordering.is_none() {
             self.ordering.clone_from(&parent.ordering);
         }
+        self.vertical |= parent.vertical;
     }
 }
 
@@ -229,6 +243,9 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
     // Code lengths used by the mappings, for a `CMap` without codespace
     // ranges: bit `n - 1` for an `n`-byte code.
     let mut code_lengths = 0u8;
+    // The writing mode the stream declares itself, which wins over the
+    // one inherited through `usecmap`.
+    let mut declared_mode: Option<bool> = None;
     let mut i = 0usize;
     while i < tokens.len() {
         match tokens[i] {
@@ -322,11 +339,20 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
                     cmap.ordering = Some(String::from_utf8_lossy(value).into());
                 }
             }
+            // `/WMode 1 def`.
+            b"/WMode" => {
+                if let Some(mode) = tokens.get(i + 1).and_then(|t| parse_value(Some(t))) {
+                    declared_mode = Some(mode == 1);
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
+    if let Some(vertical) = declared_mode {
+        cmap.vertical = vertical;
+    }
     if cmap.map.is_empty() && cmap.codespaces.is_empty() && !cmap.identity {
         return None;
     }
@@ -349,7 +375,8 @@ fn parent_cmap(name: &[u8], depth: u32) -> Option<Arc<CMap>> {
         return None;
     }
     match name {
-        b"Identity-H" | b"Identity-V" => Some(Arc::new(CMap::identity())),
+        b"Identity-H" => Some(Arc::new(CMap::identity())),
+        b"Identity-V" => Some(Arc::new(CMap::identity_vertical())),
         _ => predefined_cmap_nested(name, depth + 1),
     }
 }
@@ -847,6 +874,28 @@ endcidrange
         let inherited = parse_cmap(b"/Identity-H usecmap\n1 begincidchar\n<0041> 1\nendcidchar\n")
             .expect("parse");
         assert_eq!(inherited.ordering, None);
+    }
+
+    /// `/WMode 1` marks vertical writing; a `usecmap` parent's mode is
+    /// inherited unless the stream declares its own.
+    #[test]
+    fn writing_mode_is_parsed_and_inherited() {
+        assert!(!CMap::identity().vertical);
+        assert!(CMap::identity_vertical().vertical);
+        let own = parse_cmap(b"/WMode 1 def\n1 begincidchar\n<41> 1\nendcidchar\n").expect("parse");
+        assert!(own.vertical);
+        let inherited = parse_cmap(b"/Identity-V usecmap\n1 begincidchar\n<0041> 1\nendcidchar\n")
+            .expect("parse");
+        assert!(inherited.vertical);
+        let overridden = parse_cmap(
+            b"/Identity-V usecmap\n/WMode 0 def\n1 begincidchar\n<0041> 1\nendcidchar\n",
+        )
+        .expect("parse");
+        assert!(!overridden.vertical);
+        let predefined_v = predefined_cmap_nested(b"90ms-RKSJ-V", 0).expect("90ms-RKSJ-V");
+        let predefined_h = predefined_cmap_nested(b"90ms-RKSJ-H", 0).expect("90ms-RKSJ-H");
+        assert!(predefined_v.vertical);
+        assert!(!predefined_h.vertical);
     }
 
     /// A `CMap` without codespace ranges takes the code lengths its
