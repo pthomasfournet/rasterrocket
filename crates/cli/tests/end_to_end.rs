@@ -199,3 +199,45 @@ fn strict_fails_a_page_with_an_undecodable_image() {
     let out = rrocket(dir.path(), &input, &["-r", "72", "--strict"]);
     assert!(!out.status.success(), "--strict accepts a failed image");
 }
+
+/// One 40 × 40 pt white page carrying a `/Square` annotation whose
+/// appearance fills (10, 10)–(30, 30) black.
+fn annotated_pdf() -> Vec<u8> {
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Annots [4 0 R] >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Square /Rect [10 10 30 30] /AP << /N 5 0 R >> >>".to_vec(),
+        stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 20 20]",
+            b"0 g 0 0 20 20 re f",
+        ),
+    ])
+}
+
+/// `(width, height, gray pixels)` that `rrocket -r 72 --gray <args>` writes
+/// for page 1 of `pdf`.
+fn gray_page(pdf: &[u8], args: &[&str]) -> (u32, u32, Vec<u8>) {
+    let (dir, input) = workdir(pdf);
+    let mut all = vec!["-r", "72", "--gray"];
+    all.extend_from_slice(args);
+    assert_success(&rrocket(dir.path(), &input, &all));
+    let (_, w, h, data) = read_pnm(&dir.path().join("out-1.pgm"));
+    (w, h, data)
+}
+
+#[test]
+fn hide_annotations_draws_the_page_content_alone() {
+    let pdf = annotated_pdf();
+    let shown = gray_page(&pdf, &[]);
+    let hidden = gray_page(&pdf, &["--hide-annotations"]);
+    assert_eq!(
+        shown.2[20 * 40 + 20],
+        0,
+        "the annotation is drawn by default"
+    );
+    assert!(
+        hidden.2.iter().all(|&v| v == 255),
+        "--hide-annotations leaves the page blank"
+    );
+}

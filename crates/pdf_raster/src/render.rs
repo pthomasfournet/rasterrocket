@@ -218,6 +218,9 @@ pub struct RasterSession {
     /// The document's optional-content configuration for
     /// [`crate::SessionConfig::purpose`], shared by every page rendered.
     pub(crate) optional_content: Arc<pdf_interp::OptionalContent>,
+    /// Draw annotations over the page content
+    /// ([`crate::SessionConfig::annotations`]).
+    pub(crate) annotations: bool,
     /// The document's interactive form type, reported in every page's
     /// [`PageDiagnostics::form_type`](crate::PageDiagnostics::form_type).
     pub(crate) form_type: pdf_interp::FormType,
@@ -562,6 +565,7 @@ fn open_session_with_doc(
         policy: config.policy,
         strict: config.strict,
         optional_content,
+        annotations: config.annotations,
         form_type,
         javascript_warned: AtomicBool::new(false),
         #[cfg(not(feature = "vaapi"))]
@@ -868,7 +872,9 @@ fn render_page_rgb_with_geom(
     let guard = DecoderReclaim(&mut renderer);
     lend_decoders(session, guard.0, effective_policy)?;
     guard.0.execute(&ops);
-    guard.0.render_annotations(page_id);
+    if session.annotations {
+        guard.0.render_annotations(page_id);
+    }
     // Drop reclaims exactly once and releases the &mut borrow, so `renderer`
     // is usable directly for the budget/image-failure/finish tail below.
     drop(guard);
@@ -1216,6 +1222,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
     SessionConfig {
         strict: opts.strict,
         purpose: opts.purpose,
+        annotations: opts.annotations,
         decrypt_authorized: opts.decrypt_authorized,
         password: opts.password.clone(),
         ..SessionConfig::default()
@@ -1499,6 +1506,7 @@ mod channel_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         }
@@ -1569,6 +1577,7 @@ mod channel_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1608,6 +1617,7 @@ mod channel_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1670,6 +1680,7 @@ mod channel_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1841,6 +1852,7 @@ mod channel_tests {
             pages: Some(set),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         }
@@ -1856,6 +1868,7 @@ mod channel_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -1879,6 +1892,7 @@ mod channel_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };

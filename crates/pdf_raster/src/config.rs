@@ -140,6 +140,13 @@ pub const DEFAULT_VAAPI_DEVICE: &str = "auto";
 /// field only exists when the `cache` Cargo feature is enabled.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "cache",
+    expect(
+        clippy::struct_excessive_bools,
+        reason = "each bool is an independent caller-facing switch"
+    )
+)]
 pub struct SessionConfig {
     /// Backend selection policy.
     pub policy: BackendPolicy,
@@ -216,6 +223,12 @@ pub struct SessionConfig {
     /// Selects the optional-content usage event applied to the document's
     /// layers and the annotation flags honoured (see [`RenderPurpose`]).
     pub purpose: RenderPurpose,
+    /// Whether annotations (PDF §12.5, form-field widgets included) are drawn
+    /// over the page content.
+    ///
+    /// Default `true`: every annotation shown for [`purpose`](Self::purpose)
+    /// is drawn.  `false` renders the page content alone.
+    pub annotations: bool,
 }
 
 impl SessionConfig {
@@ -240,6 +253,7 @@ impl SessionConfig {
             password: None,
             strict: false,
             purpose: RenderPurpose::View,
+            annotations: true,
         }
     }
 

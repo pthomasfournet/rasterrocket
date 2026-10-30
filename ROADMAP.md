@@ -92,6 +92,9 @@ version: the public API changes below are breaking.
   the new `RasterError::Cancelled`. It replaces `render_page_rgb_hinted`.
   In `rasterrocket-interp`, `PageRenderer::with_view(&PageView)` replaces
   `new_scaled`, and `budget_status()` returns a `RenderAbort`.
+- `SessionConfig::annotations` and `RasterOptions::annotations` (default
+  `true`); `false` renders page content without annotations. The CLI's
+  `--hide-annotations`, previously parsed and ignored, sets it.
 
 **Parser.** Recovery of objects absent from or misplaced in the xref,
 including object-stream members and XRef-stream trailers; object streams

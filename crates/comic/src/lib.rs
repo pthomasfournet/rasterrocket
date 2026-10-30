@@ -299,11 +299,7 @@ fn render_embedded_pdf(
         first_page: opts.first_page,
         last_page: opts.last_page,
         deskew: opts.deskew,
-        pages: None,
-        strict: false,
-        purpose: pdf_raster::RenderPurpose::View,
-        decrypt_authorized: false,
-        password: None,
+        ..pdf_raster::RasterOptions::default()
     };
     let out: ComicPages = pdf_raster::raster_pdf_from_bytes(bytes, &ropts)
         .map(|(n, r)| (n, r.map_err(|e| ComicError::Pdf(e.to_string()))))

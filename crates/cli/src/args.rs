@@ -154,7 +154,8 @@ pub(crate) struct Args {
     #[arg(long = "aaVector", value_name = "yes|no", default_value = "yes")]
     pub vector_antialias: AaFlag,
 
-    /// Hide PDF annotations.
+    /// Do not draw annotations (form fields, comments, stamps and other
+    /// PDF annotations); render the page content alone.
     #[arg(long = "hide-annotations")]
     pub hide_annotations: bool,
 
@@ -585,6 +586,7 @@ impl Args {
             .or_else(SessionConfig::vulkan_device_from_env);
         config.strict = self.strict;
         config.purpose = self.purpose.into();
+        config.annotations = !self.hide_annotations;
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -801,6 +803,15 @@ mod page_list_tests {
             .session_config()
             .unwrap();
         assert!(strict.strict);
+    }
+
+    #[test]
+    fn hide_annotations_flag_reaches_session_config() {
+        assert!(base_args().session_config().unwrap().annotations);
+        let hidden = Args::parse_from(["rrocket", "--hide-annotations", "in.pdf", "out"])
+            .session_config()
+            .unwrap();
+        assert!(!hidden.annotations);
     }
 
     #[test]

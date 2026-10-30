@@ -345,6 +345,10 @@ impl<'a> IntoIterator for &'a PageSet {
 
 /// Options controlling how pages are rendered.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent caller-facing switch"
+)]
 pub struct RasterOptions {
     /// Must be > 0.  Pass this same value to Tesseract's `set_source_resolution`
     /// — lying about DPI degrades OCR accuracy because Tesseract uses it for
@@ -384,6 +388,10 @@ pub struct RasterOptions {
     /// Default [`RenderPurpose::View`].
     pub purpose: RenderPurpose,
 
+    /// Whether annotations are drawn; see [`SessionConfig::annotations`].
+    /// Default `true`.
+    pub annotations: bool,
+
     /// Whether an encrypted document may be decrypted; see
     /// [`SessionConfig::decrypt_authorized`].  Default `false`: an encrypted
     /// document is an error.
@@ -405,6 +413,7 @@ impl Default for RasterOptions {
             pages: None,
             strict: false,
             purpose: RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         }
@@ -635,6 +644,7 @@ mod page_set_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };
@@ -658,6 +668,7 @@ mod page_set_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            annotations: true,
             decrypt_authorized: false,
             password: None,
         };

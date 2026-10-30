@@ -100,7 +100,7 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 |---|---|---|
 | `--aa yes\|no` | `yes` | Enable raster anti-aliasing. |
 | `--aaVector yes\|no` | `yes` | Enable vector anti-aliasing. |
-| `--hide-annotations` | off | Skip rendering PDF annotations. |
+| `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
 | `--overprint` | off | Enable overprint preview. |
 | `--thinlinemode MODE` | `default` | Thin-line rendering: `default`, `solid`, or `shape`. |
 

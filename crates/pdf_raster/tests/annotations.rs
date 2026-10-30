@@ -102,6 +102,25 @@ fn the_flags_decide_whether_an_annotation_is_viewed() {
 }
 
 #[test]
+fn annotations_off_draws_the_page_content_alone() {
+    let pdf = page(
+        "[4 0 R]",
+        vec![
+            b"<< /Type /Annot /Subtype /Square /Rect [10 10 30 30] /AP << /N 5 0 R >> >>".to_vec(),
+            blue_square(),
+        ],
+    );
+    for (annotations, want) in [(true, BLUE), (false, WHITE)] {
+        let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        config.annotations = annotations;
+        let s = open_session_from_bytes(pdf.clone(), &config).expect("open session");
+        let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+        let i = (H - 1 - 20) as usize * bmp.stride + 20 * 3;
+        assert_eq!(bmp.data()[i..i + 3], want, "annotations = {annotations}");
+    }
+}
+
+#[test]
 fn the_flags_decide_whether_an_annotation_is_printed() {
     assert!(!drawn_with_flags(0, RenderPurpose::Print));
     assert!(drawn_with_flags(PRINT, RenderPurpose::Print));
