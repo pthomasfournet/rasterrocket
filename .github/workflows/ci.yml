@@ -31,11 +31,20 @@ jobs:
   cpu-only:
     name: CPU-only (no GPU features)
     runs-on: ubuntu-latest
+    env:
+      # About fifty integration-test binaries are linked; line tables keep
+      # panic backtraces readable at half the size of full debug info.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # crates/pdf_raster/tests/encryption.rs builds its encrypted fixtures
+      # with qpdf at test time and skips without it.
+      - name: Install qpdf
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qpdf
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@v5
@@ -51,8 +60,8 @@ jobs:
       - name: Build CLI (CPU-only, release)
         run: cargo build --release -p rasterrocket-cli
 
-      - name: Test rasterrocket-interp (resource decoding, CPU paths)
-        run: cargo test -p rasterrocket-interp --lib
+      - name: Test rasterrocket-interp (unit suite + decoder property harness)
+        run: cargo test -p rasterrocket-interp --tests
 
       - name: Test rasterrocket-interp (GPU fill host twin vs CPU fill, gpu-aa; no device)
         run: cargo test -p rasterrocket-interp --features gpu-aa --lib -- gpu_ops
@@ -66,11 +75,22 @@ jobs:
       - name: Test rasterrocket-gpu (parallel-Huffman JPEG decoder, gpu-jpeg-huffman)
         run: cargo test -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --lib -- jpeg_decoder huffman
 
-      - name: Test rasterrocket (deskew, render helpers)
-        run: cargo test -p rasterrocket --lib
+      # The integration suites assemble their PDFs in memory and assert
+      # rendered pixels; suites that need the gitignored corpus skip.
+      - name: Test rasterrocket (unit suite + in-memory rendering suites, encryption)
+        run: cargo test -p rasterrocket --tests
 
       - name: Test rasterrocket-parser
         run: cargo test -p rasterrocket-parser --lib
+
+      - name: Test vendored JPEG 2000 decoder (upstream suite + equivalence)
+        run: cargo test -p hayro-jpeg2000 --features image --release
+
+      - name: Test vendored JBIG2 and CCITT decoders
+        run: cargo test -p hayro-jbig2 -p hayro-ccitt --release
+
+      - name: Check bench binaries
+        run: cargo check -p bench --bins
 
       - name: Test rasterrocket-font (font programs, glyph rasteriser)
         run: cargo test -p rasterrocket-font
@@ -106,6 +126,11 @@ jobs:
 
       - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
         run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
+
+      # The cache is saved after a successful run.  Test executables relink
+      # in seconds; leaving them out keeps it within the repository's quota.
+      - name: Drop test executables from the build cache
+        run: find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.*' -delete
 
   # ── aarch64 cross-check ───────────────────────────────────────────────────
   #
