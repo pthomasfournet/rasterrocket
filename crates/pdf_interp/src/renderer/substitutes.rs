@@ -166,6 +166,7 @@ mod tests {
                     bold,
                     italic,
                     script: None,
+                    standard: false,
                 })
         })
     }

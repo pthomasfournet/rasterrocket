@@ -88,6 +88,10 @@ pub struct SubstituteStyle {
     /// Script the font is for, when it is one the Latin substitutes do
     /// not cover.
     pub script: Option<Script>,
+    /// The font is one of the standard 14 or a metric-compatible alias
+    /// (Arial, Times New Roman, Courier New): the substitute's advances
+    /// are the font's own, so its glyphs are drawn unfitted.
+    pub standard: bool,
 }
 
 /// `FixedPitch` flag (bit 1), PDF §9.8.2 Table 121.
@@ -98,6 +102,26 @@ const FLAG_SERIF: i64 = 1 << 1;
 const FLAG_ITALIC: i64 = 1 << 6;
 /// `ForceBold` flag (bit 19).
 const FLAG_FORCE_BOLD: i64 = 1 << 18;
+
+/// Family names (lower case, separators removed, style suffix cut at the
+/// first `,` or `-`) of the standard 14 fonts and their metric-compatible
+/// aliases.
+const STANDARD_NAMES: &[&str] = &[
+    "helvetica",
+    "arial",
+    "arialmt",
+    "times",
+    "timesroman",
+    "timesnewroman",
+    "timesnewromanps",
+    "timesnewromanpsmt",
+    "courier",
+    "couriernew",
+    "couriernewps",
+    "couriernewpsmt",
+    "symbol",
+    "zapfdingbats",
+];
 
 /// Name fragments (lower case) that identify a monospaced typeface.
 const MONO_NAMES: &[&str] = &["courier", "mono", "consol", "typewriter", "lucidaconsole"];
@@ -257,6 +281,14 @@ fn classify(name: &str, flags: i64, weight: f64, italic_angle: f64) -> Substitut
         .chars()
         .filter(|c| !matches!(c, '-' | ' ' | '_'))
         .collect();
+    let standard_base: String = name
+        .split([',', '-'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '_'))
+        .collect();
+    let standard = STANDARD_NAMES.contains(&standard_base.as_str());
     let family = if SYMBOL_NAMES.contains(&base.as_str()) {
         SubstituteFamily::Symbol
     } else if DINGBATS_NAMES.contains(&base.as_str()) {
@@ -282,6 +314,7 @@ fn classify(name: &str, flags: i64, weight: f64, italic_angle: f64) -> Substitut
             .iter()
             .find(|(_, frags)| has(frags))
             .map(|&(script, _)| script),
+        standard,
     }
 }
 
@@ -347,6 +380,37 @@ mod tests {
             bold,
             italic,
             script: None,
+            standard: false,
+        }
+    }
+
+    /// The standard families and their aliases are recognised whatever
+    /// style suffix follows; a narrow cut of one is not metric-compatible.
+    #[test]
+    fn standard_families_are_recognised_by_name() {
+        for name in [
+            "helvetica",
+            "helvetica-bold",
+            "arial,bold",
+            "arial-boldmt",
+            "arialmt",
+            "times-roman",
+            "timesnewromanps-boldmt",
+            "times new roman",
+            "courier-boldoblique",
+            "couriernewpsmt",
+            "symbol",
+        ] {
+            assert!(classify(name, 0, 0.0, 0.0).standard, "{name}");
+        }
+        for name in [
+            "arialnarrow",
+            "arial narrow",
+            "calibri",
+            "minion-regular",
+            "carlito",
+        ] {
+            assert!(!classify(name, 0, 0.0, 0.0).standard, "{name}");
         }
     }
 
@@ -417,6 +481,10 @@ mod tests {
             ("courier-oblique", style(Mono, false, true)),
         ];
         for (name, want) in cases {
+            let want = SubstituteStyle {
+                standard: true,
+                ..want
+            };
             assert_eq!(classify(name, 0, 0.0, 0.0), want, "{name}");
         }
     }
@@ -424,14 +492,21 @@ mod tests {
     #[test]
     fn producer_names_classify() {
         use SubstituteFamily::{Sans, Serif};
+        let standard = |want: SubstituteStyle| SubstituteStyle {
+            standard: true,
+            ..want
+        };
         assert_eq!(
             classify("timesnewromanps-boldmt", 0, 0.0, 0.0),
-            style(Serif, true, false)
+            standard(style(Serif, true, false))
         );
-        assert_eq!(classify("arialmt", 0, 0.0, 0.0), style(Sans, false, false));
+        assert_eq!(
+            classify("arialmt", 0, 0.0, 0.0),
+            standard(style(Sans, false, false))
+        );
         assert_eq!(
             classify("arial,bolditalic", 0, 0.0, 0.0),
-            style(Sans, true, true)
+            standard(style(Sans, true, true))
         );
         // `Sans` in the name wins over a serif-family fragment.
         assert_eq!(

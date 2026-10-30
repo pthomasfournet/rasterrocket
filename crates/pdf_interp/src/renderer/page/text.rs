@@ -183,8 +183,11 @@ impl PageRenderer<'_> {
 
             // A substitute's glyphs are fitted to the advances the document
             // specifies: condensed when wider, centred when narrower.  An
-            // embedded program's glyphs are the document's own.
-            let fit = face.substitute && !cid_enc.is_some_and(|enc| enc.vertical);
+            // embedded program's glyphs are the document's own, and a
+            // standard family's substitute already has its advances.
+            let fit = face.substitute
+                && !descriptor.substitute.standard
+                && !cid_enc.is_some_and(|enc| enc.vertical);
             let face_width = |advance: Option<f64>| -> i32 {
                 #[expect(
                     clippy::cast_possible_truncation,
