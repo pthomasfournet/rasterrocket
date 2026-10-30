@@ -401,6 +401,11 @@ pub struct RasterOptions {
     /// Default `None`.  No effect unless
     /// [`decrypt_authorized`](Self::decrypt_authorized) is `true`.
     pub password: Option<Password>,
+
+    /// Extra directories of installed fonts, searched before those
+    /// `RROCKET_FONT_DIR` names and the standard ones; see
+    /// [`SessionConfig::font_dirs`].  Default empty.
+    pub font_dirs: Vec<std::path::PathBuf>,
 }
 
 impl RasterOptions {
@@ -433,6 +438,7 @@ impl Default for RasterOptions {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         }
     }
 }
@@ -667,6 +673,7 @@ mod page_set_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -693,6 +700,7 @@ mod page_set_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         assert!(opts.pages.is_some());
     }

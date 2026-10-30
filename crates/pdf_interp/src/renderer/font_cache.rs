@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use font::{
@@ -34,6 +35,7 @@ use pdf::ObjectId;
 use super::encodings::{base_encoding_table, glyph_name_for_code};
 use super::fallback::{FallbackGlyph, FallbackResolver, first_scalar};
 use super::substitutes::substitute_program;
+use super::system_fonts::FontLibrary;
 use crate::resources::cmap::CMap;
 use crate::resources::cmap_predefined::{CollectionUnicode, cid_to_unicode};
 use crate::resources::font::{
@@ -104,16 +106,37 @@ type ResolvedProgram = (Arc<FontProgram>, bool);
 /// The fonts of one document, resolved once and shared by every page
 /// rendered from it.  Entries are keyed by the object number of an indirect
 /// font dictionary, so a store serves one document only.
-#[derive(Default)]
 pub struct DocumentFonts {
     fonts: Mutex<HashMap<ObjectId, Arc<SharedFont>>>,
+    /// The installed fonts substitutes and fallbacks are drawn from.
+    library: Arc<FontLibrary>,
     /// Source of the identifier of every face made for the document.
     face_ids: Arc<FaceIds>,
     /// Glyph bitmaps of every face made for the document.
     glyphs: GlyphCache,
 }
 
+impl Default for DocumentFonts {
+    /// A store drawing substitutes from the standard font directories.
+    fn default() -> Self {
+        Self::with_font_dirs(&[])
+    }
+}
+
 impl DocumentFonts {
+    /// A store drawing substitutes and fallbacks from the fonts in
+    /// `font_dirs` (searched in order) and then the standard font
+    /// directories.
+    #[must_use]
+    pub fn with_font_dirs(font_dirs: &[PathBuf]) -> Self {
+        Self {
+            fonts: Mutex::default(),
+            library: FontLibrary::for_dirs(font_dirs),
+            face_ids: Arc::default(),
+            glyphs: GlyphCache::default(),
+        }
+    }
+
     /// The entry of the font dictionary `id`, created empty on first use.
     /// Its fields are filled outside the store's lock.
     fn font(&self, id: ObjectId) -> Arc<SharedFont> {
@@ -317,8 +340,11 @@ impl FontCache {
         };
 
         let (program, substitute) = match &shared {
-            Some(shared) => shared.program.get_or_init(|| parse_program(desc)).clone()?,
-            None => parse_program(desc)?,
+            Some(shared) => shared
+                .program
+                .get_or_init(|| parse_program(desc, &self.shared.library))
+                .clone()?,
+            None => parse_program(desc, &self.shared.library)?,
         };
         let mut face = match &shared {
             Some(shared) => {
@@ -347,7 +373,10 @@ impl FontCache {
         }
         let resolve = || {
             (!embedded)
-                .then(|| FallbackResolver::new(desc, program).map(Arc::new))
+                .then(|| {
+                    FallbackResolver::new(desc, program, Arc::clone(&self.shared.library))
+                        .map(Arc::new)
+                })
                 .flatten()
         };
         let fallback = match &shared {
@@ -443,7 +472,7 @@ impl FallbackLoader<'_> {
 /// for one whose program does not parse (truncated stream, unsupported
 /// format), which is logged.  `None` when no substitute is available
 /// either.
-fn parse_program(desc: &FontDescriptor) -> Option<ResolvedProgram> {
+fn parse_program(desc: &FontDescriptor, library: &FontLibrary) -> Option<ResolvedProgram> {
     if let Some(bytes) = &desc.bytes {
         match FontProgram::parse(bytes.clone(), 0) {
             Ok(program) => return Some((Arc::new(program), false)),
@@ -452,7 +481,7 @@ fn parse_program(desc: &FontDescriptor) -> Option<ResolvedProgram> {
             ),
         }
     }
-    substitute_program(desc.substitute).map(|program| (program, true))
+    substitute_program(desc.substitute, library).map(|program| (program, true))
 }
 
 /// The `code_to_gid` table a face of `desc` needs in place of the
@@ -1117,9 +1146,9 @@ mod tests {
     /// Whether an installed face maps U+0915 (Devanagari KA), the probe of
     /// the fallback tests; they are skipped on a host without one.
     fn devanagari_installed() -> bool {
-        let found =
-            super::super::system_fonts::fallback_program(SubstituteStyle::default(), 0x0915)
-                .is_some();
+        let found = FontLibrary::for_dirs(&[])
+            .fallback_program(SubstituteStyle::default(), 0x0915)
+            .is_some();
         if !found {
             eprintln!("no installed face maps U+0915; skipping");
         }

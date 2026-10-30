@@ -459,6 +459,51 @@ pub fn open_session_from_bytes(
     open_session_with_doc(doc, config)
 }
 
+/// Why `policy` cannot run in this build: a `Force*` policy whose backend
+/// was not compiled in (`ForceVulkan` without the `vulkan` feature,
+/// `ForceCuda` without any CUDA feature).  Without this gate the backend's
+/// cfg-gated initialisation disappears and the forced render silently runs
+/// on the CPU, the fallback the `Force*` variants exist to prevent.
+const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
+    let vulkan = cfg!(feature = "vulkan");
+    let cuda = cfg!(any(
+        feature = "gpu-aa",
+        feature = "gpu-icc",
+        feature = "cache"
+    ));
+    match policy {
+        BackendPolicy::ForceVulkan if !vulkan => Some(
+            "ForceVulkan requires the `vulkan` Cargo feature; \
+             rebuild with `--features vulkan` or pick another --backend.",
+        ),
+        BackendPolicy::ForceCuda if !cuda => Some(
+            "ForceCuda requires at least one of the `gpu-aa`, `gpu-icc`, or \
+             `cache` Cargo features; rebuild with the desired feature set or \
+             pick another --backend.",
+        ),
+        _ => None,
+    }
+}
+
+/// The CUDA context of a session under `policy`.  Under `Auto` a Vulkan
+/// backend wins (`vk_won_auto`) and CUDA is not initialised, which saves
+/// its ~240 ms start-up for a path the session will not use.
+#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+fn session_gpu_ctx(
+    policy: BackendPolicy,
+    vk_won_auto: bool,
+) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
+    let ctx = if vk_won_auto {
+        None
+    } else {
+        init_gpu_ctx(policy)?
+    };
+    if matches!(policy, BackendPolicy::Auto) {
+        log_auto_resolution_once(vk_won_auto, ctx.is_some());
+    }
+    Ok(ctx)
+}
+
 /// Shared session assembly from an already-opened document — the backend init,
 /// image cache, doc id, prefetcher, and `RasterSession` construction common to
 /// both the path and in-memory entry points.
@@ -469,62 +514,23 @@ fn open_session_with_doc(
     let doc = Arc::new(doc);
     let total_pages = doc.page_count_fast();
 
-    // Reject `ForceVulkan` at the policy gate when the `vulkan` feature
-    // wasn't compiled in; otherwise initialise the Vulkan backend up
-    // front so failures surface here rather than mid-render.
-    #[cfg(not(feature = "vulkan"))]
-    if matches!(config.policy, BackendPolicy::ForceVulkan) {
-        return Err(RasterError::BackendUnavailable(
-            "ForceVulkan requires the `vulkan` Cargo feature; \
-             rebuild with `--features vulkan` or pick another --backend."
-                .to_owned(),
-        ));
+    if let Some(reason) = uncompiled_backend(config.policy) {
+        return Err(RasterError::BackendUnavailable(reason.to_owned()));
     }
+    // The Vulkan backend initialises up front so that failures surface
+    // here rather than mid-render.
     #[cfg(feature = "vulkan")]
     let vk_backend = init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
+    #[cfg(feature = "vulkan")]
+    let vk_won_auto = vk_backend.is_some() && matches!(config.policy, BackendPolicy::Auto);
+    #[cfg(not(feature = "vulkan"))]
+    let vk_won_auto = false;
 
-    // Symmetric reject for `ForceCuda` when no CUDA features are
-    // compiled in.  Without this, the cfg-gated `init_gpu_ctx` call
-    // below silently disappears and `--backend cuda` becomes a CPU
-    // render — exactly the silent-fallback behaviour the `Force*`
-    // variants exist to prevent.
-    #[cfg(not(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache")))]
-    if matches!(config.policy, BackendPolicy::ForceCuda) {
-        return Err(RasterError::BackendUnavailable(
-            "ForceCuda requires at least one of the `gpu-aa`, `gpu-icc`, or \
-             `cache` Cargo features; rebuild with the desired feature set or \
-             pick another --backend."
-                .to_owned(),
-        ));
-    }
-
-    // Under `Auto` Vulkan wins; skip CUDA init when it produced a backend
-    // so we don't pay its ~240 ms cost for a path we won't use.
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
-    let gpu_ctx = {
-        #[cfg(feature = "vulkan")]
-        let vk_won_auto = vk_backend.is_some() && matches!(config.policy, BackendPolicy::Auto);
-        #[cfg(not(feature = "vulkan"))]
-        let vk_won_auto = false;
-
-        let ctx = if vk_won_auto {
-            None
-        } else {
-            init_gpu_ctx(config.policy)?
-        };
-
-        if matches!(config.policy, BackendPolicy::Auto) {
-            log_auto_resolution_once(vk_won_auto, ctx.is_some());
-        }
-
-        ctx
-    };
+    let gpu_ctx = session_gpu_ctx(config.policy, vk_won_auto)?;
     #[cfg(not(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache")))]
     if matches!(config.policy, BackendPolicy::Auto) {
-        #[cfg(feature = "vulkan")]
-        log_auto_resolution_once(vk_backend.is_some(), false);
-        #[cfg(not(feature = "vulkan"))]
-        log_auto_resolution_once(false, false);
+        log_auto_resolution_once(vk_won_auto, false);
     }
 
     let vaapi_device = config.vaapi_device.clone();
@@ -570,7 +576,9 @@ fn open_session_with_doc(
     let form_type = pdf_interp::form_type(&doc);
     Ok(RasterSession {
         doc,
-        fonts: Arc::default(),
+        fonts: Arc::new(pdf_interp::renderer::DocumentFonts::with_font_dirs(
+            &config.font_dirs,
+        )),
         total_pages,
         policy: config.policy,
         strict: config.strict,
@@ -1237,7 +1245,10 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
 
 /// The [`SessionConfig`] behind the [`RasterOptions`]-driven entry points:
 /// the default config with the per-call options that live on the session.
+/// The options' font directories come before those of the default config.
 fn session_config_for(opts: &RasterOptions) -> SessionConfig {
+    let mut defaults = SessionConfig::default();
+    let env_font_dirs = std::mem::take(&mut defaults.font_dirs);
     SessionConfig {
         strict: opts.strict,
         purpose: opts.purpose,
@@ -1246,7 +1257,13 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
         vector_antialias: opts.vector_antialias,
         decrypt_authorized: opts.decrypt_authorized,
         password: opts.password.clone(),
-        ..SessionConfig::default()
+        font_dirs: opts
+            .font_dirs
+            .iter()
+            .cloned()
+            .chain(env_font_dirs)
+            .collect(),
+        ..defaults
     }
 }
 
@@ -1532,6 +1549,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         }
     }
 
@@ -1605,6 +1623,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1647,6 +1666,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1712,6 +1732,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -1886,6 +1907,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         }
     }
 
@@ -1904,6 +1926,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -1930,6 +1953,7 @@ mod channel_tests {
             vector_antialias: true,
             decrypt_authorized: false,
             password: None,
+            font_dirs: Vec::new(),
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));

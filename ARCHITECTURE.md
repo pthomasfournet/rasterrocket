@@ -461,10 +461,14 @@ image, not the process.
   when one is found. Otherwise it uses the base-14 face compiled into the
   binary (`crates/pdf_interp/fonts/foxit/`, BSD-3). Symbol and ZapfDingbats
   always draw with their compiled-in faces and built-in encodings.
-- **Scripts the bundled faces do not cover.** For CJK, Arabic and Thai,
-  `renderer/system_fonts.rs` walks the directories `RROCKET_FONT_DIR`
-  names, then the standard font directories, once per process. It indexes every sfnt face by family and `OS/2` code-page range,
-  then selects by script, serif class, weight and slant. A non-embedded CID
+- **Installed fonts.** A `FontLibrary` (`renderer/system_fonts.rs`) walks
+  the session's font directories (`SessionConfig::font_dirs`, from
+  `RROCKET_FONT_DIR` by default), then the standard font directories, on
+  first use, and indexes every sfnt face by family and `OS/2` code-page
+  range. Libraries are shared process-wide per directory list; each holds
+  its parsed programs, fallback rankings and installed substitutes.
+- **Scripts the bundled faces do not cover.** For CJK, Arabic and Thai the
+  library selects a face by script, serif class, weight and slant. A non-embedded CID
   font whose ordering is Japan1, GB1, CNS1 or Korea1 maps CID → Unicode →
   glyph in that face.
 - **Per-character fallback.** A code whose Unicode value is known (its
@@ -472,10 +476,11 @@ image, not the process.
   `ToUnicode` entry, in a composite font) and which the substitute cannot
   draw is drawn from the first installed face, ranked by serif class,
   per-script preference, weight and slant, whose `cmap` maps it. A face's
-  `cmap` coverage is read when a lookup first reaches it. Fallback faces
-  carry the font's matrix and a code → glyph table of the codes they serve,
-  so every script an installed font covers draws, whatever the font's
-  classified script.
+  `cmap` coverage is read when a lookup first reaches it. Resolution is
+  lazy (`renderer/fallback.rs`): the codes a text operator shows are
+  looked up before its glyph loop, each character once per font, and the
+  fallback face is loaded at the font's matrix. Every script an installed
+  font covers draws, whatever the font's classified script.
 - **Composite fonts.** `resources/cmap.rs` parses `CMap` streams: codespace
   ranges of mixed width, `usecmap`, and `ToUnicode`. The predefined `CMaps`
   of ISO 32000-2 Table 116 are compressed into the binary
@@ -489,8 +494,9 @@ image, not the process.
   point that maps to it and draws the first the substitute maps.
 - **Sharing.** Descriptors, parsed programs, code → glyph tables and glyph
   bitmaps of indirect font dictionaries live in a `DocumentFonts` store
-  shared by every page of a document. Substitute programs are shared
-  process-wide.
+  shared by every page of a document. Installed substitute and fallback
+  programs are shared by every document of a font library, compiled-in
+  substitutes process-wide.
 
 **PageResources** — holds an immutable reference to the `rasterrocket_parser::Document`. All resource
 resolution is stateless and on-demand; no per-page pre-computation. This

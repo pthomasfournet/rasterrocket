@@ -1,16 +1,20 @@
-//! Installed fonts for the scripts the compiled-in substitutes do not
-//! cover ([`Script`]): CJK, Arabic and Thai; and, for any character a
-//! substitute lacks, an installed face that maps it.
+//! Installed fonts: the faces substitutes and per-character fallbacks are
+//! drawn from.
 //!
-//! The directories named by [`FONT_DIR_ENV`], then the standard font
-//! directories, are walked once per process and every sfnt face is
-//! indexed by family name and `OS/2` code-page ranges.  A request
+//! A [`FontLibrary`] walks a list of extra directories, then the standard
+//! font directories, on first use and indexes every sfnt face by family
+//! name and `OS/2` code-page ranges.  A request for a script the
+//! compiled-in substitutes do not cover ([`Script`]: CJK, Arabic, Thai)
 //! selects, among the faces whose code-page bit covers the script, the
 //! best match by a per-script preference list, serif class, weight and
-//! slant.  A per-character request ([`fallback_program`]) ranks every face
-//! the same way and takes the first whose `cmap` maps the character; a
-//! face's `cmap` coverage is read on the first such request that reaches
-//! it.
+//! slant.  A per-character request ([`FontLibrary::fallback_program`])
+//! ranks every face the same way and takes the first whose `cmap` maps the
+//! character; a face's `cmap` coverage is read on the first such request
+//! that reaches it.
+//!
+//! Libraries are shared process-wide, one per list of extra directories
+//! ([`FontLibrary::for_dirs`]), so documents rendered with the same
+//! directories index the installed fonts and parse each program once.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,18 +23,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use font::program::FontProgram;
 use font::sfnt_info::{Coverage, FaceInfo, face_infos, unicode_coverage};
 
+use super::substitutes::INSTALLED_ROWS;
 use crate::resources::font_substitute::{Script, SubstituteFamily, SubstituteStyle};
-
-/// Environment variable naming extra font directories, in the platform's
-/// `PATH` syntax, searched before the standard directories.
-pub const FONT_DIR_ENV: &str = "RROCKET_FONT_DIR";
-
-/// The directories [`FONT_DIR_ENV`] names, in order; empty when unset.
-pub fn env_font_dirs() -> Vec<PathBuf> {
-    std::env::var_os(FONT_DIR_ENV)
-        .map(|value| std::env::split_paths(&value).collect())
-        .unwrap_or_default()
-}
 
 /// Standard directories walked for fonts, in search order; `~` is the
 /// home directory.
@@ -250,29 +244,176 @@ impl Face {
     }
 }
 
-/// Every installed sfnt face, indexed once per process.
-fn installed_faces() -> &'static [Face] {
-    static FACES: OnceLock<Vec<Face>> = OnceLock::new();
-    FACES.get_or_init(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let mut faces = Vec::new();
-        for dir in env_font_dirs() {
-            walk(&dir, 0, &mut faces);
+/// Key of one fallback ranking: the family class, weight and slant asked
+/// for, and the script of the character.
+type RankKey = (SubstituteFamily, bool, bool, Option<Script>);
+
+/// The installed fonts of one list of extra directories and the standard
+/// font directories.  See the module documentation.
+pub struct FontLibrary {
+    /// Extra directories, walked before the standard ones.
+    dirs: Vec<PathBuf>,
+    /// Every sfnt face found, sorted by path; built on first use.
+    faces: OnceLock<Vec<Face>>,
+    /// Program of each face, by index into `faces`, parsed on first use.
+    programs: Mutex<HashMap<usize, Option<Arc<FontProgram>>>>,
+    /// Face order of each fallback ranking, by index into `faces`.
+    orders: Mutex<HashMap<RankKey, Arc<[usize]>>>,
+    /// The installed metric-compatible substitute of each row of the
+    /// substitute table, located on first use.
+    substitutes: [OnceLock<Option<Arc<FontProgram>>>; INSTALLED_ROWS],
+}
+
+impl FontLibrary {
+    fn new(dirs: Vec<PathBuf>) -> Self {
+        Self {
+            dirs,
+            faces: OnceLock::new(),
+            programs: Mutex::default(),
+            orders: Mutex::default(),
+            substitutes: [const { OnceLock::new() }; INSTALLED_ROWS],
         }
-        for dir in FONT_DIRS {
-            let dir = match (dir.strip_prefix("~/"), &home) {
-                (Some(rest), Some(home)) => home.join(rest),
-                (Some(_), None) => continue,
-                (None, _) => PathBuf::from(dir),
-            };
-            walk(&dir, 0, &mut faces);
+    }
+
+    /// The library searching the extra directories `dirs` (in order)
+    /// before the standard ones, shared by every caller naming the same
+    /// list.
+    #[must_use]
+    pub fn for_dirs(dirs: &[PathBuf]) -> Arc<Self> {
+        static LIBRARIES: OnceLock<Mutex<HashMap<Vec<PathBuf>, Arc<FontLibrary>>>> =
+            OnceLock::new();
+        let mut libraries = LIBRARIES
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(
+            libraries
+                .entry(dirs.to_vec())
+                .or_insert_with(|| Arc::new(Self::new(dirs.to_vec()))),
+        )
+    }
+
+    /// Every face of the library's directories, indexed on first use.
+    fn faces(&self) -> &[Face] {
+        self.faces.get_or_init(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let mut faces = Vec::new();
+            for dir in &self.dirs {
+                walk(dir, 0, &mut faces);
+            }
+            for dir in FONT_DIRS {
+                let dir = match (dir.strip_prefix("~/"), &home) {
+                    (Some(rest), Some(home)) => home.join(rest),
+                    (Some(_), None) => continue,
+                    (None, _) => PathBuf::from(dir),
+                };
+                walk(&dir, 0, &mut faces);
+            }
+            // Directory listings come in no fixed order; ties in every
+            // ranking below resolve by path, so selection is the same on
+            // every run.
+            faces.sort_by(|a, b| a.path.cmp(&b.path).then(a.index.cmp(&b.index)));
+            log::debug!("system_fonts: indexed {} faces", faces.len());
+            faces
+        })
+    }
+
+    /// The installed face that best serves `style` for `script`: among
+    /// the faces covering the script (all faces when none declares it),
+    /// the one with the closest serif class, then the earliest in the
+    /// script's preference list, then the nearest weight and slant.
+    fn select(&self, script: Script, style: SubstituteStyle) -> Option<usize> {
+        let faces = self.faces();
+        let preferred = preferred_names(Some(script));
+        let covering: Vec<usize> = (0..faces.len())
+            .filter(|&i| faces[i].covers(script))
+            .collect();
+        let pool: Vec<usize> = if covering.is_empty() {
+            (0..faces.len())
+                .filter(|&i| preferred.iter().any(|p| faces[i].family.contains(p)))
+                .collect()
+        } else {
+            covering
+        };
+        // A simple font of a non-CJK script mixes its script with Latin; a
+        // face that also covers Latin-1 (code page bit 0) keeps both drawing.
+        let want_latin = matches!(script, Script::Arabic | Script::Thai);
+        pool.into_iter().min_by_key(|&i| {
+            let face = &faces[i];
+            (
+                want_latin && face.code_page_ranges[0] & 1 == 0,
+                face.rank(style, preferred),
+            )
+        })
+    }
+
+    /// The program of face `index`, parsed once and shared by every
+    /// request that selects the face.
+    fn face_program(&self, index: usize) -> Option<Arc<FontProgram>> {
+        let face = self.faces().get(index)?;
+        if let Some(program) = self
+            .programs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&index)
+        {
+            return program.clone();
         }
-        // Directory listings come in no fixed order; ties in every ranking
-        // below resolve by path, so selection is the same on every run.
-        faces.sort_by(|a, b| a.path.cmp(&b.path).then(a.index.cmp(&b.index)));
-        log::debug!("system_fonts: indexed {} faces", faces.len());
-        faces
-    })
+        // Parsed outside the lock: a CJK collection is tens of megabytes.
+        let program = std::fs::read(&face.path)
+            .map_err(font::engine::LoadError::Io)
+            .and_then(|data| FontProgram::parse(data, face.index))
+            .inspect_err(|e| log::debug!("system_fonts: {}: {e}", face.path.display()))
+            .ok()
+            .map(Arc::new);
+        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
+        programs.entry(index).or_insert(program).clone()
+    }
+
+    /// The installed program for `style`, whose `script` must be set;
+    /// `None` when no installed face serves the script.
+    pub fn system_program(&self, style: SubstituteStyle) -> Option<Arc<FontProgram>> {
+        let script = style.script?;
+        self.select(script, style)
+            .and_then(|index| self.face_program(index))
+    }
+
+    /// The installed program that draws the character `c` for a font of
+    /// `style` whose substitute lacks it: among the faces whose `cmap` maps
+    /// `c`, the first by the ranking of [`Self::select`] (serif class, the
+    /// preference list of the character's script, weight, slant), ties
+    /// going to the earlier path.  `None` when no installed face maps `c`.
+    pub fn fallback_program(&self, style: SubstituteStyle, c: u32) -> Option<Arc<FontProgram>> {
+        let faces = self.faces();
+        let script = Script::of_char(c);
+        let key: RankKey = (style.family, style.bold, style.italic, script);
+        let order = {
+            let mut orders = self.orders.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(orders.entry(key).or_insert_with(|| {
+                let preferred = preferred_names(script);
+                let mut order: Vec<usize> = (0..faces.len()).collect();
+                order.sort_by_key(|&i| faces[i].rank(style, preferred));
+                order.into()
+            }))
+        };
+        order.iter().filter(|&&i| faces[i].maps(c)).find_map(|&i| {
+            self.face_program(i)
+                .filter(|program| program.char_index(c) != 0)
+        })
+    }
+
+    /// The installed substitute of row `row` of the substitute table,
+    /// located by `locate` from the extra directories on first use.
+    pub(super) fn substitute(
+        &self,
+        row: usize,
+        locate: impl FnOnce(&[PathBuf]) -> Option<Arc<FontProgram>>,
+    ) -> Option<Arc<FontProgram>> {
+        self.substitutes
+            .get(row)?
+            .get_or_init(|| locate(&self.dirs))
+            .clone()
+    }
 }
 
 /// Index every sfnt file below `dir`, at most [`MAX_DEPTH`] levels down.
@@ -303,108 +444,12 @@ fn walk(dir: &Path, depth: u32, faces: &mut Vec<Face>) {
     }
 }
 
-/// The installed face that best serves `style` for `script`: among the
-/// faces covering the script (all faces when none declares it), the one
-/// with the closest serif class, then the earliest in the script's
-/// preference list, then the nearest weight and slant.
-fn select(script: Script, style: SubstituteStyle) -> Option<&'static Face> {
-    let faces = installed_faces();
-    let preferred = PREFERRED
-        .iter()
-        .find(|(s, _)| *s == script)
-        .map_or(&[][..], |(_, names)| *names);
-    let covering: Vec<&Face> = faces.iter().filter(|f| f.covers(script)).collect();
-    let pool: Vec<&Face> = if covering.is_empty() {
-        faces
-            .iter()
-            .filter(|f| preferred.iter().any(|p| f.family.contains(p)))
-            .collect()
-    } else {
-        covering
-    };
-    // A simple font of a non-CJK script mixes its script with Latin; a
-    // face that also covers Latin-1 (code page bit 0) keeps both drawing.
-    let want_latin = matches!(script, Script::Arabic | Script::Thai);
-    pool.into_iter().min_by_key(|face| {
-        (
-            want_latin && face.code_page_ranges[0] & 1 == 0,
-            face.rank(style, preferred),
-        )
-    })
-}
-
 /// The family-name preference list for script `script`, or for a
 /// character of no known script.
 fn preferred_names(script: Option<Script>) -> &'static [&'static str] {
     script
         .and_then(|script| PREFERRED.iter().find(|(s, _)| *s == script))
         .map_or(PREFERRED_ANY, |(_, names)| *names)
-}
-
-/// The program of `face`, parsed once per process and shared by every
-/// request that selects the face.
-fn face_program(face: &'static Face) -> Option<Arc<FontProgram>> {
-    type Programs = HashMap<(&'static Path, u32), Option<Arc<FontProgram>>>;
-    static PROGRAMS: OnceLock<Mutex<Programs>> = OnceLock::new();
-    let programs = PROGRAMS.get_or_init(Mutex::default);
-    let key = (face.path.as_path(), face.index);
-    if let Some(program) = programs
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return program.clone();
-    }
-    // Parsed outside the lock: a CJK collection is tens of megabytes.
-    let program = std::fs::read(&face.path)
-        .map_err(font::engine::LoadError::Io)
-        .and_then(|data| FontProgram::parse(data, face.index))
-        .inspect_err(|e| log::debug!("system_fonts: {}: {e}", face.path.display()))
-        .ok()
-        .map(Arc::new);
-    let mut programs = programs.lock().unwrap_or_else(PoisonError::into_inner);
-    programs.entry(key).or_insert(program).clone()
-}
-
-/// The installed program for `style`, whose `script` must be set; `None`
-/// when no installed face serves the script.  Resolved once per style per
-/// process.
-pub fn system_program(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
-    let script = style.script?;
-    select(script, style).and_then(face_program)
-}
-
-/// Key of one fallback ranking: the family class, weight and slant asked
-/// for, and the script of the character.
-type RankKey = (SubstituteFamily, bool, bool, Option<Script>);
-
-/// The installed program that draws the character `c` for a font of
-/// `style` whose substitute lacks it: among the faces whose `cmap` maps
-/// `c`, the first by the ranking of [`select`] (serif class, the
-/// preference list of the character's script, weight, slant), ties going
-/// to the earlier path.  `None` when no installed face maps `c`.
-pub fn fallback_program(style: SubstituteStyle, c: u32) -> Option<Arc<FontProgram>> {
-    static ORDERS: OnceLock<Mutex<HashMap<RankKey, Arc<[usize]>>>> = OnceLock::new();
-    let faces = installed_faces();
-    let script = Script::of_char(c);
-    let key: RankKey = (style.family, style.bold, style.italic, script);
-    let order = {
-        let mut orders = ORDERS
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(orders.entry(key).or_insert_with(|| {
-            let preferred = preferred_names(script);
-            let mut order: Vec<usize> = (0..faces.len()).collect();
-            order.sort_by_key(|&i| faces[i].rank(style, preferred));
-            order.into()
-        }))
-    };
-    order
-        .iter()
-        .map(|&i| &faces[i])
-        .filter(|face| face.maps(c))
-        .find_map(|face| face_program(face).filter(|program| program.char_index(c) != 0))
 }
 
 #[cfg(test)]
@@ -457,21 +502,47 @@ mod tests {
             family: SubstituteFamily::Serif,
             ..sans
         };
+        let library = FontLibrary::for_dirs(&[]);
         let (Some(sans_face), Some(serif_face)) = (
-            select(Script::Japanese, sans),
-            select(Script::Japanese, serif),
+            library.select(Script::Japanese, sans),
+            library.select(Script::Japanese, serif),
         ) else {
             eprintln!("no Japanese font installed; skipping");
             return;
         };
+        let (sans_face, serif_face) = (&library.faces()[sans_face], &library.faces()[serif_face]);
         assert_ne!(sans_face.serif, Some(true), "{}", sans_face.family);
         assert_ne!(serif_face.serif, Some(false), "{}", serif_face.family);
-        let program = system_program(serif).expect("loads");
+        let program = library.system_program(serif).expect("loads");
         assert_ne!(
             program.char_index(0x65E5),
             0,
             "{} has 日",
             serif_face.family
         );
+    }
+
+    /// One library serves every caller naming the same directories, and
+    /// a different list gets its own, which indexes its directories first.
+    #[test]
+    fn libraries_are_shared_per_directory_list() {
+        let dir = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../font_test_data/test_data/ttf"
+        ));
+        let standard = FontLibrary::for_dirs(&[]);
+        assert!(Arc::ptr_eq(&standard, &FontLibrary::for_dirs(&[])));
+        let extra = FontLibrary::for_dirs(std::slice::from_ref(&dir));
+        assert!(!Arc::ptr_eq(&standard, &extra));
+        assert!(Arc::ptr_eq(
+            &extra,
+            &FontLibrary::for_dirs(std::slice::from_ref(&dir))
+        ));
+        assert_eq!(extra.dirs, std::slice::from_ref(&dir));
+        assert!(
+            extra.faces().iter().any(|f| f.path.starts_with(&dir)),
+            "the extra directory is indexed"
+        );
+        assert!(!standard.faces().iter().any(|f| f.path.starts_with(&dir)));
     }
 }

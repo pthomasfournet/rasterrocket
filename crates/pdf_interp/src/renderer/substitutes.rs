@@ -3,25 +3,28 @@
 //! A font without a program is drawn with a substitute of its family class
 //! and variant ([`SubstituteStyle`]): the installed metric-compatible face
 //! (Liberation, Arial, Times New Roman, Courier New) when one is found in
-//! a directory [`super::system_fonts::FONT_DIR_ENV`] names or on the fixed
-//! search path, else the base-14 face compiled into the binary
-//! (`fonts/foxit/`).  The Symbol and Dingbats families always draw with
-//! the compiled-in faces, whose charsets carry the glyph names of their
-//! encodings.  Each substitute is resolved once per process and shared by
-//! every document.
+//! an extra directory of the [`FontLibrary`] or on the fixed search path,
+//! else the base-14 face compiled into the binary (`fonts/foxit/`).  The
+//! Symbol and Dingbats families always draw with the compiled-in faces,
+//! whose charsets carry the glyph names of their encodings.  An installed
+//! substitute is resolved once per library, a compiled-in one once per
+//! process.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use font::program::FontProgram;
 
-use super::system_fonts::{env_font_dirs, system_program};
+use super::system_fonts::FontLibrary;
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
+
+/// Number of rows of [`INSTALLED`].
+pub const INSTALLED_ROWS: usize = 12;
 
 /// Installed typefaces per [`SubstituteStyle`], indexed by
 /// [`substitute_index`]: `[metric-compatible free family stem, macOS
 /// supplemental file stem, Windows file stem]`.
-const INSTALLED: [[&str; 3]; 12] = [
+const INSTALLED: [[&str; 3]; INSTALLED_ROWS] = [
     ["LiberationSans-Regular", "Arial", "arial"],
     ["LiberationSans-Italic", "Arial Italic", "ariali"],
     ["LiberationSans-Bold", "Arial Bold", "arialbd"],
@@ -78,11 +81,10 @@ const fn substitute_index(style: SubstituteStyle) -> usize {
 }
 
 /// Candidate paths for one [`INSTALLED`] row, in search order: the free
-/// family's file in each environment font directory, then the fixed
+/// family's file in each of the extra directories `dirs`, then the fixed
 /// locations.
-fn installed_candidates([stem, mac, win]: [&str; 3]) -> Vec<PathBuf> {
-    env_font_dirs()
-        .into_iter()
+fn installed_candidates([stem, mac, win]: [&str; 3], dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter()
         .map(|dir| dir.join(format!("{stem}.ttf")))
         .chain(
             [
@@ -96,10 +98,11 @@ fn installed_candidates([stem, mac, win]: [&str; 3]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The installed face of row `row`, parsed; `None` when none of its
-/// candidates exists or parses.
-fn installed_program(row: usize) -> Option<Arc<FontProgram>> {
-    installed_candidates(INSTALLED[row])
+/// The installed face of row `row`, searched for in the extra directories
+/// `dirs` first, parsed; `None` when none of its candidates exists or
+/// parses.
+fn installed_program(row: usize, dirs: &[PathBuf]) -> Option<Arc<FontProgram>> {
+    installed_candidates(INSTALLED[row], dirs)
         .into_iter()
         .find(|p| p.exists())
         .and_then(|path| {
@@ -123,32 +126,41 @@ fn embedded_program(bytes: &'static [u8]) -> Option<Arc<FontProgram>> {
         .map(Arc::new)
 }
 
-/// The substitute program for `style`: an installed face of its script
-/// ([`system_program`]) when it has one, else the installed
-/// metric-compatible face of that exact family and variant, else the
-/// compiled-in base-14 face.  Resolved once per process.
-pub fn substitute_program(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
-    static CACHE: [OnceLock<Option<Arc<FontProgram>>>; 14] = [const { OnceLock::new() }; 14];
+/// The substitute program for `style` from `library`: an installed face
+/// of its script ([`FontLibrary::system_program`]) when it has one, else
+/// the installed metric-compatible face of that exact family and variant,
+/// else the compiled-in base-14 face.
+pub fn substitute_program(
+    style: SubstituteStyle,
+    library: &FontLibrary,
+) -> Option<Arc<FontProgram>> {
+    static EMBEDDED_CACHE: [OnceLock<Option<Arc<FontProgram>>>; 14] =
+        [const { OnceLock::new() }; 14];
     if style.script.is_some()
-        && let Some(program) = system_program(style)
+        && let Some(program) = library.system_program(style)
     {
         return Some(program);
     }
     let row = substitute_index(style);
-    CACHE[row]
-        .get_or_init(|| {
-            (row < INSTALLED.len())
-                .then(|| installed_program(row))
-                .flatten()
-                .or_else(|| embedded_program(EMBEDDED[row]))
+    (row < INSTALLED_ROWS)
+        .then(|| library.substitute(row, |dirs| installed_program(row, dirs)))
+        .flatten()
+        .or_else(|| {
+            EMBEDDED_CACHE[row]
+                .get_or_init(|| embedded_program(EMBEDDED[row]))
+                .clone()
         })
-        .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use font::engine::{FaceParams, FontEngine};
+
+    /// [`substitute_program`] from the library of the standard directories.
+    fn substitute_program_default(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
+        substitute_program(style, &FontLibrary::for_dirs(&[]))
+    }
 
     /// The Latin family classes in every variant.
     fn latin_styles() -> impl Iterator<Item = SubstituteStyle> {
@@ -231,12 +243,12 @@ mod tests {
     /// their codes name glyphs only the compiled-in faces carry.
     #[test]
     fn symbol_and_dingbats_are_always_compiled_in() {
-        let symbol = substitute_program(SubstituteStyle {
+        let symbol = substitute_program_default(SubstituteStyle {
             family: SubstituteFamily::Symbol,
             ..SubstituteStyle::default()
         })
         .expect("symbol");
-        let dingbats = substitute_program(SubstituteStyle {
+        let dingbats = substitute_program_default(SubstituteStyle {
             family: SubstituteFamily::Dingbats,
             ..SubstituteStyle::default()
         })
@@ -251,7 +263,7 @@ mod tests {
     #[test]
     fn every_style_has_a_substitute() {
         for style in all_styles() {
-            assert!(substitute_program(style).is_some(), "{style:?}");
+            assert!(substitute_program_default(style).is_some(), "{style:?}");
         }
     }
 
@@ -263,8 +275,8 @@ mod tests {
             family: SubstituteFamily::Serif,
             ..SubstituteStyle::default()
         };
-        let serif = substitute_program(serif).expect("serif");
-        let sans = substitute_program(SubstituteStyle::default()).expect("sans");
+        let serif = substitute_program_default(serif).expect("serif");
+        let sans = substitute_program_default(SubstituteStyle::default()).expect("sans");
         assert!(!Arc::ptr_eq(&serif, &sans));
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! A substitute covers the scripts of its own family; a code whose
 //! character it lacks is drawn from an installed face that maps that
-//! character ([`fallback_program`]).  The character of a code is the
+//! character ([`FontLibrary::fallback_program`]).  The character of a code is the
 //! Unicode value of its glyph name (simple font), of its CID in the font's
 //! character collection, or of its code in the `ToUnicode` map (composite
 //! font).
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use font::program::FontProgram;
 
 use super::encodings::glyph_name_for_code;
-use super::system_fonts::fallback_program;
+use super::system_fonts::FontLibrary;
 use crate::resources::cmap::CMap;
 use crate::resources::cmap_predefined::{CidToUnicode, cid_to_unicode};
 use crate::resources::font::FontDescriptor;
@@ -47,6 +47,8 @@ pub struct FallbackResolver {
     vertical: bool,
     /// The substitute program; a character it maps needs no fallback.
     primary: Arc<FontProgram>,
+    /// The installed fonts fallbacks are drawn from.
+    library: Arc<FontLibrary>,
     source: UnicodeSource,
     state: Mutex<State>,
 }
@@ -61,10 +63,15 @@ struct State {
 }
 
 impl FallbackResolver {
-    /// The resolver of `desc` drawn by the substitute `primary`; `None`
-    /// when no Unicode value of its codes is known (a composite font of no
-    /// known collection and without a `ToUnicode` map).
-    pub fn new(desc: &FontDescriptor, primary: Arc<FontProgram>) -> Option<Self> {
+    /// The resolver of `desc` drawn by the substitute `primary`, drawing
+    /// fallbacks from `library`; `None` when no Unicode value of its codes
+    /// is known (a composite font of no known collection and without a
+    /// `ToUnicode` map).
+    pub fn new(
+        desc: &FontDescriptor,
+        primary: Arc<FontProgram>,
+        library: Arc<FontLibrary>,
+    ) -> Option<Self> {
         let source = match &desc.cid_encoding {
             None => {
                 let mut names = Box::new([0u32; 256]);
@@ -88,6 +95,7 @@ impl FallbackResolver {
             style: desc.substitute,
             vertical: desc.cid_encoding.as_ref().is_some_and(|enc| enc.vertical),
             primary,
+            library,
             source,
             state: Mutex::default(),
         })
@@ -129,9 +137,11 @@ impl FallbackResolver {
             .iter()
             .all(|&u| self.primary.char_index(u) == 0)
             .then(|| {
-                unicodes
-                    .iter()
-                    .find_map(|&u| fallback_program(self.style, u).map(|program| (program, u)))
+                unicodes.iter().find_map(|&u| {
+                    self.library
+                        .fallback_program(self.style, u)
+                        .map(|program| (program, u))
+                })
             })
             .flatten();
         let mut state = self.lock();

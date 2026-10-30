@@ -223,6 +223,7 @@ pub struct RasterOptions {
     pub vector_antialias: bool,
     pub decrypt_authorized: bool,
     pub password: Option<Password>,
+    pub font_dirs: Vec<PathBuf>,
 }
 ```
 
@@ -240,6 +241,7 @@ pub struct RasterOptions {
 | `vector_antialias` | — | When `false`, path fills, strokes and clips are scan-converted at pixel centres with hard edges, always on the CPU. |
 | `decrypt_authorized` | — | Whether an encrypted document may be decrypted; see [`SessionConfig`](#sessionconfig). `false` makes an encrypted document an error. |
 | `password` | — | Password for an encrypted document, tried as user then owner password after the empty user password. No effect unless `decrypt_authorized` is `true`. |
+| `font_dirs` | — | Extra directories of installed fonts, searched before those `RROCKET_FONT_DIR` names and the standard ones; see [`SessionConfig`](#sessionconfig). |
 
 `RasterOptions` implements `Default` and is `#[non_exhaustive]`: build it with `RasterOptions::new(dpi)` (every other field at its default) or `RasterOptions::default()`, then assign fields; struct literals and `..Default::default()` updates do not compile outside the crate.
 
@@ -248,7 +250,7 @@ let mut opts = RasterOptions::new(150.0);
 opts.deskew = true;
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `decrypt_authorized = false`, `password = None`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty.
 
 ---
 
@@ -447,17 +449,19 @@ pub struct SessionConfig {
     pub annotations: bool,         // default: true
     pub text_antialias: bool,      // default: true
     pub vector_antialias: bool,    // default: true
+    pub font_dirs: Vec<PathBuf>,   // default: RROCKET_FONT_DIR (Default), empty (with_policy)
 }
 
-impl Default for SessionConfig { /* policy from PDF_RASTER_BACKEND, Vulkan device from PDF_RASTER_VULKAN_DEVICE */ }
+impl Default for SessionConfig { /* policy from PDF_RASTER_BACKEND, Vulkan device from PDF_RASTER_VULKAN_DEVICE, font directories from RROCKET_FONT_DIR */ }
 
 impl SessionConfig {
     pub fn with_policy(policy: BackendPolicy) -> Self;      // reads no env vars
     pub fn vulkan_device_from_env() -> Option<String>;     // PDF_RASTER_VULKAN_DEVICE
+    pub fn font_dirs_from_env() -> Vec<PathBuf>;           // RROCKET_FONT_DIR
 }
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `annotations = false` renders page content without annotations and mirrors `RasterOptions::annotations`. `text_antialias` and `vector_antialias` (both default `true`) switch antialiasing of glyph bitmaps and of path fills, strokes and clips, and mirror the `RasterOptions` fields of the same names. `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it.
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `annotations = false` renders page content without annotations and mirrors `RasterOptions::annotations`. `text_antialias` and `vector_antialias` (both default `true`) switch antialiasing of glyph bitmaps and of path fills, strokes and clips, and mirror the `RasterOptions` fields of the same names. `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it. `font_dirs` lists extra directories of installed fonts, searched in order before the standard font directories: a font the document does not embed draws with an installed substitute (the metric-compatible Liberation family, or a face of the font's script) and, for a character the substitute lacks, with an installed face that covers it, and both are looked up there first. `SessionConfig::default()` reads them from `RROCKET_FONT_DIR` (`PATH` syntax), `with_policy` sets none; sessions naming the same directories share one index of the installed fonts. `RasterOptions::font_dirs` is searched before the `RROCKET_FONT_DIR` directories by `raster_pdf`, `raster_pdf_from_bytes` and `render_channel`.
 
 ---
 

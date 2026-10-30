@@ -3,6 +3,8 @@
 #[cfg(doc)]
 use crate::{PageDiagnostics, RasterError, RasterSession, open_session, open_session_from_bytes};
 
+use std::path::PathBuf;
+
 use crate::{Password, RenderPurpose};
 
 // ── Backend policy ────────────────────────────────────────────────────────────
@@ -256,6 +258,18 @@ pub struct SessionConfig {
     /// `false` scan-converts at pixel centres, giving hard bilevel edges;
     /// such fills always run on the CPU.
     pub vector_antialias: bool,
+    /// Extra directories of installed fonts, searched in order before the
+    /// standard font directories.
+    ///
+    /// A font the document does not embed is drawn with an installed
+    /// substitute (the metric-compatible Liberation family, a face of the
+    /// font's script) and, for a character its substitute lacks, with an
+    /// installed face that covers it; these directories are searched first
+    /// for both.  [`SessionConfig::with_policy`] sets none;
+    /// [`SessionConfig::default`] reads `RROCKET_FONT_DIR` (see
+    /// [`SessionConfig::font_dirs_from_env`]).  Sessions naming the same
+    /// directories share one index of the installed fonts.
+    pub font_dirs: Vec<PathBuf>,
 }
 
 impl SessionConfig {
@@ -283,6 +297,7 @@ impl SessionConfig {
             annotations: true,
             text_antialias: true,
             vector_antialias: true,
+            font_dirs: Vec::new(),
         }
     }
 
@@ -310,19 +325,39 @@ impl SessionConfig {
         let s = s.trim();
         (!s.is_empty()).then(|| s.to_owned())
     }
+
+    /// The font directories named by the `RROCKET_FONT_DIR` environment
+    /// variable, in the platform's `PATH` syntax
+    /// (`/opt/fonts:/home/me/fonts` on Unix), in order; empty when unset.
+    /// Empty entries are skipped.
+    #[must_use]
+    pub fn font_dirs_from_env() -> Vec<PathBuf> {
+        std::env::var_os(FONT_DIR_ENV)
+            .map(|value| {
+                std::env::split_paths(&value)
+                    .filter(|dir| !dir.as_os_str().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Environment variable read by [`SessionConfig::vulkan_device_from_env`].
 const VULKAN_DEVICE_ENV: &str = "PDF_RASTER_VULKAN_DEVICE";
 
+/// Environment variable read by [`SessionConfig::font_dirs_from_env`].
+const FONT_DIR_ENV: &str = "RROCKET_FONT_DIR";
+
 impl Default for SessionConfig {
     /// Policy from `PDF_RASTER_BACKEND` ([`BackendPolicy::from_env`]),
     /// Vulkan device from `PDF_RASTER_VULKAN_DEVICE`
-    /// ([`SessionConfig::vulkan_device_from_env`]), every other field as in
-    /// [`SessionConfig::with_policy`].
+    /// ([`SessionConfig::vulkan_device_from_env`]), font directories from
+    /// `RROCKET_FONT_DIR` ([`SessionConfig::font_dirs_from_env`]), every
+    /// other field as in [`SessionConfig::with_policy`].
     fn default() -> Self {
         let mut config = Self::with_policy(BackendPolicy::from_env());
         config.vulkan_device = Self::vulkan_device_from_env();
+        config.font_dirs = Self::font_dirs_from_env();
         config
     }
 }

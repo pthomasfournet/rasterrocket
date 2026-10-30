@@ -601,6 +601,7 @@ impl Args {
             .vulkan_device
             .clone()
             .or_else(SessionConfig::vulkan_device_from_env);
+        config.font_dirs = SessionConfig::font_dirs_from_env();
         config.strict = self.strict;
         config.purpose = self.purpose.into();
         config.annotations = !self.hide_annotations;
