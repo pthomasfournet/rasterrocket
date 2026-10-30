@@ -116,6 +116,7 @@ mod tests {
             vaapi_device: None,
             vulkan_device: None,
             strict: false,
+            purpose: crate::args::PurposeArg::View,
             crop: false,
             rectify: false,
             dewarp: false,

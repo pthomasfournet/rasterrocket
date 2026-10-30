@@ -431,6 +431,7 @@ impl PageRenderer<'_> {
         // its own budget or check its own deadline.
         child.adopt_parent_budget(self);
         child.share_image_memo(self);
+        child.set_optional_content(std::sync::Arc::clone(self.optional_content()));
 
         // If the pattern has no own resources, point it at the parent context.
         if !desc.has_own_resources {

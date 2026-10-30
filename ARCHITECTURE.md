@@ -311,6 +311,10 @@ content/
   operator.rs        — 150+ typed operator variants
   mod.rs             — parse(bytes) → Vec<Operator>
 
+optional_content.rs  — OptionalContent: the /OCProperties /D configuration
+                       resolved once per session for a RenderPurpose; OCG and
+                       OCMD (/P, /VE) visibility for BDC /OC, XObject /OC and
+                       annotation /OC
 prescan.rs           — classify page content without rendering pixels
 cache/               — device image-cache helpers + background prefetcher
                        (`cache` feature)
@@ -538,7 +542,7 @@ on x86-64; the correct tier is selected at runtime. ARM uses `vmull_u8` + `vshrn
 Public library crate. The stable API surface.
 
 ```rust
-RasterOptions { dpi, first_page, last_page, deskew, pages, strict }  // pages: Option<PageSet>
+RasterOptions { dpi, first_page, last_page, deskew, pages, strict, purpose }  // pages: Option<PageSet>; purpose: RenderPurpose::{View, Print}
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>

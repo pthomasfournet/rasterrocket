@@ -161,6 +161,7 @@ pub struct RasterOptions {
     pub deskew: bool,
     pub pages: Option<PageSet>,
     pub strict: bool,
+    pub purpose: RenderPurpose,
 }
 ```
 
@@ -172,6 +173,7 @@ pub struct RasterOptions {
 | `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
 | `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
+| `purpose` | — | `RenderPurpose::View` (on-screen viewing) or `RenderPurpose::Print`. See [`RenderPurpose`](#renderpurpose). |
 
 **Default:** `RasterOptions` implements `Default`:
 
@@ -180,7 +182,20 @@ pub struct RasterOptions {
 let opts = RasterOptions { dpi: 150.0, ..RasterOptions::default() };
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`.
+
+---
+
+### `RenderPurpose`
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderPurpose { View, Print }
+```
+
+What a page is rendered for. It decides:
+
+- **Optional content (layers, ISO 32000-2 §8.11).** The document's default configuration (`/OCProperties /D`) gives each group its state: `/BaseState`, then `/ON`, then `/OFF`, so a group listed in both is off. Then each `/AS` usage application dictionary whose `/Event` is `View` (or `Print` under `RenderPurpose::Print`) applies the `ViewState`, `PrintState` or `ExportState` of the groups it lists, for each category it names. A group whose `/Intent` does not match the configuration's `/Intent` is ignored. Both intents default to `View`, and `All` matches every intent. Content is hidden when its group is off or its membership dictionary (`/OCMD`, through `/VE` or through `/OCGs` with `/P`) evaluates to hidden. This applies to `BDC /OC` sequences, to image and form XObjects carrying `/OC`, and to annotations carrying `/OC`.
 
 ---
 
@@ -343,6 +358,7 @@ pub struct SessionConfig {
     // `prefetch: bool` exists only when `cache` feature is enabled
     pub decrypt_authorized: bool,  // default: false
     pub strict: bool,              // default: false
+    pub purpose: RenderPurpose,    // default: RenderPurpose::View
 }
 
 impl Default for SessionConfig { /* policy from PDF_RASTER_BACKEND, Vulkan device from PDF_RASTER_VULKAN_DEVICE */ }
@@ -353,7 +369,7 @@ impl SessionConfig {
 }
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`.
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose).
 
 ---
 

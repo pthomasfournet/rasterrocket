@@ -208,6 +208,9 @@ pub struct RasterSession {
     /// Fail a page on an image failure instead of skipping the image
     /// ([`crate::SessionConfig::strict`]).
     pub(crate) strict: bool,
+    /// The document's optional-content configuration for
+    /// [`crate::SessionConfig::purpose`], shared by every page rendered.
+    pub(crate) optional_content: Arc<pdf_interp::OptionalContent>,
     /// Set once a rendered page has been found to carry JavaScript, so the
     /// warning is emitted once per document.
     pub(crate) javascript_warned: AtomicBool,
@@ -514,12 +517,14 @@ fn open_session_with_doc(
         None
     };
 
+    let optional_content = Arc::new(pdf_interp::OptionalContent::new(&doc, config.purpose));
     Ok(RasterSession {
         doc,
         fonts: Arc::default(),
         total_pages,
         policy: config.policy,
         strict: config.strict,
+        optional_content,
         javascript_warned: AtomicBool::new(false),
         #[cfg(not(feature = "vaapi"))]
         vaapi_device,
@@ -770,6 +775,7 @@ fn render_page_rgb_with_geom(
         page_id,
     );
     renderer.set_document_fonts(Arc::clone(&session.fonts));
+    renderer.set_optional_content(Arc::clone(&session.optional_content));
 
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));
@@ -1132,6 +1138,7 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
 fn session_config_for(opts: &RasterOptions) -> SessionConfig {
     SessionConfig {
         strict: opts.strict,
+        purpose: opts.purpose,
         ..SessionConfig::default()
     }
 }
@@ -1413,6 +1420,7 @@ mod channel_tests {
             deskew: false,
             pages: None,
             strict: false,
+            purpose: crate::RenderPurpose::View,
         }
     }
 
@@ -1480,6 +1488,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1516,6 +1525,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1575,6 +1585,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -1743,6 +1754,7 @@ mod channel_tests {
             deskew: false,
             pages: Some(set),
             strict: false,
+            purpose: crate::RenderPurpose::View,
         }
     }
 
@@ -1755,6 +1767,7 @@ mod channel_tests {
             deskew: false,
             pages: None,
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -1775,6 +1788,7 @@ mod channel_tests {
             deskew: false,
             pages: None,
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));

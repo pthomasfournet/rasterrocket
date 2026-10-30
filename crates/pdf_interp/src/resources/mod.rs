@@ -690,97 +690,23 @@ impl<'doc> PageResources<'doc> {
         })
     }
 
-    /// Resolve a `Properties` resource entry to an OCG object ID.
-    ///
-    /// `props_key` is the name used in `BDC /OC /props_key` — it indexes the
-    /// `Resources/Properties` sub-dictionary.  Returns `None` if the key is
-    /// absent or the object has no object identity (inline dict OCGs are rare
-    /// and not currently supported).
+    /// The `Properties` resource `key` (PDF §14.6.2): the property list a
+    /// `BDC` names, such as the optional content group or membership
+    /// dictionary of `BDC /OC /key`.
     #[must_use]
-    pub fn ocg_object_id(&self, props_key: &[u8]) -> Option<ObjectId> {
-        let props = self.resource_subdict(Category::Properties)?;
-        match props.get(props_key)? {
-            Object::Reference(id) => Some(*id),
-            _ => None, // Inline-dict OCGs are not resolved (treat as visible).
-        }
+    pub fn property(&self, key: &[u8]) -> Option<Object> {
+        self.resource_subdict(Category::Properties)?
+            .get(key)
+            .cloned()
     }
 
-    /// Check whether an Optional Content Group is visible in the document's
-    /// default view configuration (`OCProperties/D`).
-    ///
-    /// Returns `true` (visible) when:
-    /// - `props_key` cannot be resolved to an OCG object (fail-open),
-    /// - the document has no `OCProperties` (no layers defined), or
-    /// - the default config has no explicit `OFF` list or the group is not in it.
-    ///
-    /// Returns `false` only when the group appears in the default config `OFF`
-    /// array (and that array does not also list the group in `ON`, where `ON`
-    /// takes precedence per PDF §8.11.4.3).
+    /// The `/OC` entry of the `XObject` resource `name` (PDF §8.11.3.3): the
+    /// optional content group or membership dictionary governing it.
     #[must_use]
-    pub fn ocg_is_visible(&self, props_key: &[u8]) -> bool {
-        let Some(ocg_id) = self.ocg_object_id(props_key) else {
-            return true; // Cannot resolve → treat as visible.
-        };
-
-        // Locate the default view configuration in the document catalog.
-        let Some(d_dict) = self
-            .doc
-            .catalog()
-            .ok()
-            .and_then(|cat| {
-                cat.get(b"OCProperties").and_then(|o| match o {
-                    Object::Dictionary(d) => Some(d.clone()),
-                    Object::Reference(id) => {
-                        self.doc.get_dictionary(*id).ok().map(|a| (*a).clone())
-                    }
-                    _ => None,
-                })
-            })
-            .and_then(|ocp| {
-                ocp.get(b"D").and_then(|o| match o {
-                    Object::Dictionary(d) => Some(d.clone()),
-                    Object::Reference(id) => {
-                        self.doc.get_dictionary(*id).ok().map(|a| (*a).clone())
-                    }
-                    _ => None,
-                })
-            })
-        else {
-            return true; // No OCProperties → all groups visible.
-        };
-
-        // Check the OFF list.  Per PDF §8.11.4.3, if a group appears in ON it
-        // overrides OFF; in practice most documents use only one of the two.
-        let in_off = is_id_in_ref_array(self.doc, &d_dict, b"OFF", ocg_id);
-        let in_on = is_id_in_ref_array(self.doc, &d_dict, b"ON", ocg_id);
-
-        !in_off || in_on
+    pub fn xobject_optional_content(&self, name: &[u8]) -> Option<Object> {
+        let stream = self.doc.get_object(self.xobject_id(name)?).ok()?;
+        stream.as_stream()?.dict.get(b"OC").cloned()
     }
-}
-
-/// Return `true` when `target_id` appears in the named array of object
-/// references inside `dict`.
-fn is_id_in_ref_array(doc: &Document, dict: &Dictionary, key: &[u8], target_id: ObjectId) -> bool {
-    let Some(arr_obj) = dict.get(key) else {
-        return false;
-    };
-    let arr_owned: Vec<Object>;
-    let arr: &[Object] = match arr_obj {
-        Object::Array(a) => a,
-        Object::Reference(id) => {
-            if let Ok(o) = doc.get_object(*id)
-                && let Some(a) = o.as_array()
-            {
-                arr_owned = a.to_vec();
-                &arr_owned
-            } else {
-                return false;
-            }
-        }
-        _ => return false,
-    };
-    arr.iter()
-        .any(|x| matches!(x, Object::Reference(r) if *r == target_id))
 }
 
 /// Convert a [`pdf::Object`] (Real or Integer) to `f64`.

@@ -8,7 +8,7 @@
 
 use camera::CameraOptions;
 use clap::Parser;
-use pdf_raster::{BackendPolicy, SessionConfig};
+use pdf_raster::{BackendPolicy, RenderPurpose, SessionConfig};
 
 /// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
 fn parse_positive_dpi(s: &str) -> Result<f64, String> {
@@ -289,6 +289,19 @@ pub(crate) struct Args {
     #[arg(long = "strict")]
     pub strict: bool,
 
+    /// What the pages are rendered for.
+    ///
+    /// `view`  — on-screen viewing (the default): layers take their View
+    ///           usage state.
+    /// `print` — printing: layers take their Print usage state.
+    #[arg(
+        long = "purpose",
+        value_name = "PURPOSE",
+        default_value = "view",
+        verbatim_doc_comment
+    )]
+    pub purpose: PurposeArg,
+
     // ── Camera-capture cleanup ───────────────────────────────────────────────
     /// Detect a page photographed on a darker surround and crop to its
     /// bounding box.
@@ -330,6 +343,24 @@ pub(crate) struct Args {
     #[cfg(feature = "cache")]
     #[arg(long = "prefetch")]
     pub prefetch: bool,
+}
+
+/// `--purpose` argument value parsed by clap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum PurposeArg {
+    /// On-screen viewing.
+    View,
+    /// Printing.
+    Print,
+}
+
+impl From<PurposeArg> for RenderPurpose {
+    fn from(p: PurposeArg) -> Self {
+        match p {
+            PurposeArg::View => Self::View,
+            PurposeArg::Print => Self::Print,
+        }
+    }
 }
 
 /// Yes/no flag for anti-aliasing options.
@@ -552,6 +583,7 @@ impl Args {
             .clone()
             .or_else(SessionConfig::vulkan_device_from_env);
         config.strict = self.strict;
+        config.purpose = self.purpose.into();
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -768,5 +800,15 @@ mod page_list_tests {
             .session_config()
             .unwrap();
         assert!(strict.strict);
+    }
+
+    #[test]
+    fn purpose_flag_reaches_session_config() {
+        let view = base_args().session_config().unwrap();
+        assert_eq!(view.purpose, RenderPurpose::View);
+        let print = Args::parse_from(["rrocket", "--purpose", "print", "in.pdf", "out"])
+            .session_config()
+            .unwrap();
+        assert_eq!(print.purpose, RenderPurpose::Print);
     }
 }

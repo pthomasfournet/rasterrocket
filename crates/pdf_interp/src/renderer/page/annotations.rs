@@ -84,6 +84,12 @@ pub(super) fn render_one_annotation(renderer: &mut PageRenderer<'_>, annot_id: O
         return;
     };
 
+    if let Some(oc) = annot_dict.get(b"OC")
+        && !renderer.oc_visible(oc)
+    {
+        return;
+    }
+
     // Check for AP/N before Rect — annotations with no AP stream have no visible
     // appearance (e.g. Link) and are expected to be absent silently.
     let Some(ap_dict) = annot_dict

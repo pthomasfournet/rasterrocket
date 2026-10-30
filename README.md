@@ -279,7 +279,7 @@ and the page/annotation JavaScript-disclosure work).
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
-- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`. Use `..RasterOptions::default()` to fill unset fields.
+- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`. Use `..RasterOptions::default()` to fill unset fields.
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
 
 ```rust

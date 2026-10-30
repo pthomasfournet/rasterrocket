@@ -9,7 +9,7 @@
 //! use std::path::Path;
 //! use rasterrocket::{RasterOptions, raster_pdf};
 //!
-//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, pages: None, strict: false };
+//! let opts = RasterOptions { dpi: 300.0, first_page: 1, last_page: 5, deskew: true, pages: None, ..RasterOptions::default() };
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     match result {
 //!         Ok(page) => {
@@ -71,7 +71,7 @@
 //!     last_page: u32::MAX,
 //!     deskew: true,
 //!     pages: None,
-//!     strict: false,
+//!     ..RasterOptions::default()
 //! };
 //! let rx = render_channel(Path::new("scan.pdf"), &opts, 4); // 4-page buffer
 //! while let Ok((page_num, result)) = rx.recv() {
@@ -103,7 +103,7 @@
 //!     last_page: u32::MAX,  // ignored when pages is Some
 //!     deskew: true,
 //!     pages: Some(pages),
-//!     strict: false,
+//!     ..RasterOptions::default()
 //! };
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     // Only pages 1, 5, 23, and 100 are rendered — intermediates are skipped.
@@ -132,6 +132,7 @@ pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
+pub use pdf_interp::RenderPurpose;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
@@ -375,6 +376,10 @@ pub struct RasterOptions {
     /// and reported in [`PageDiagnostics::image_failures`] or
     /// [`PageDiagnostics::content_failures`].
     pub strict: bool,
+
+    /// What the pages are rendered for; see [`SessionConfig::purpose`].
+    /// Default [`RenderPurpose::View`].
+    pub purpose: RenderPurpose,
 }
 
 impl Default for RasterOptions {
@@ -386,6 +391,7 @@ impl Default for RasterOptions {
             deskew: false,
             pages: None,
             strict: false,
+            purpose: RenderPurpose::View,
         }
     }
 }
@@ -613,6 +619,7 @@ mod page_set_tests {
             deskew: false,
             pages: None,
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -633,6 +640,7 @@ mod page_set_tests {
             deskew: false,
             pages: Some(ps),
             strict: false,
+            purpose: crate::RenderPurpose::View,
         };
         assert!(opts.pages.is_some());
     }

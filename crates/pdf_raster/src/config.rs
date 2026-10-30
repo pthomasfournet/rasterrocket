@@ -3,6 +3,8 @@
 #[cfg(doc)]
 use crate::{PageDiagnostics, RasterError, RasterSession, open_session};
 
+use crate::RenderPurpose;
+
 // ── Backend policy ────────────────────────────────────────────────────────────
 
 /// Controls which compute backend is used for image decoding and GPU fills.
@@ -198,6 +200,12 @@ pub struct SessionConfig {
     /// [`RasterError::ImageDecodeFailed`] or
     /// [`RasterError::ContentDecodeFailed`] instead.
     pub strict: bool,
+    /// What the pages are rendered for: on-screen viewing (the default) or
+    /// printing.
+    ///
+    /// Selects the optional-content usage event applied to the document's
+    /// layers (see [`RenderPurpose`]).
+    pub purpose: RenderPurpose,
 }
 
 impl SessionConfig {
@@ -220,6 +228,7 @@ impl SessionConfig {
             prefetch: false,
             decrypt_authorized: false,
             strict: false,
+            purpose: RenderPurpose::View,
         }
     }
 

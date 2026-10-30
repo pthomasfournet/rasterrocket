@@ -14,12 +14,14 @@
 #[cfg(feature = "cache")]
 pub mod cache;
 pub mod content;
+pub mod optional_content;
 pub mod prescan;
 pub mod renderer;
 pub mod resources;
 #[cfg(test)]
 mod test_helpers;
 
+pub use optional_content::{OptionalContent, RenderPurpose};
 pub use prescan::prescan_page;
 
 /// Entry points for fuzz targets — forwards to codec wrappers in `image::fuzz_entry`.

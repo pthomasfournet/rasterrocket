@@ -17,7 +17,10 @@ impl PageRenderer<'_> {
         // other operator is skipped inside a hidden optional-content sequence.
         match op {
             Operator::BeginOptionalContent(key) => {
-                let visible = self.resources.ocg_is_visible(key);
+                let visible = self
+                    .resources
+                    .property(key)
+                    .is_none_or(|oc| self.oc_visible(&oc));
                 self.ocg_stack.push(visible);
                 return;
             }

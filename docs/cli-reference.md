@@ -166,6 +166,7 @@ the protection silently.
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |
 | `--timings` | off | Print per-page wall time and thread index to stderr for profiling. |
 | `--strict` | off | Fail a page when one of its images or content streams cannot be decoded or drawn. Without it the image or stream is skipped, the page is written, and a warning naming the page and object goes to stderr. |
+| `--purpose view\|print` | `view` | What the pages are rendered for. `view`: optional-content groups (layers) take their View usage state. `print`: layers take their Print usage state. |
 
 ---
 

@@ -33,8 +33,9 @@
 //! - `PatternType` 1 tiling patterns and `PatternType` 2 shading patterns via `scn`/`SCN`
 //! - Type 3 paint-procedure fonts — `CharProc` content streams, `d0`/`d1` metrics
 //!
-//! - Optional Content Groups (OCG / layers) — `BDC /OC` respects `OCProperties/D`
-//!   default state; inactive groups are skipped at operator level
+//! - Optional content (layers) — `BDC /OC` sequences and `XObjects` and
+//!   annotations carrying `/OC` are skipped when hidden under the default
+//!   configuration (see [`crate::optional_content`])
 //! - Annotation rendering — `AP/N` normal appearance streams blitted after page content
 //! - Transparency groups — Form `XObjects` with `Group /S /Transparency` rendered into an
 //!   intermediate bitmap via `raster::transparency` and composited back (PDF §11.6.6)
@@ -369,6 +370,11 @@ pub struct PageRenderer<'doc> {
     /// stream starts with an empty stack (see
     /// [`execute_content_stream`](Self::execute_content_stream)).
     ocg_stack: Vec<bool>,
+    /// The document's optional-content configuration, resolved for the
+    /// [`RenderPurpose::View`](crate::RenderPurpose::View) purpose on first
+    /// use unless [`set_optional_content`](Self::set_optional_content)
+    /// supplied one.
+    optional_content: std::cell::OnceCell<Arc<crate::OptionalContent>>,
     /// GPU parallel-Huffman JPEG decoder via the CUDA backend.
     /// `None` means the path is inactive.
     #[cfg(feature = "gpu-jpeg-huffman")]
@@ -600,6 +606,7 @@ impl<'doc> PageRenderer<'doc> {
             warned_unknown_ops_capped: false,
             filter_counts: [0u32; IMAGE_FILTER_COUNT],
             ocg_stack: Vec::new(),
+            optional_content: std::cell::OnceCell::new(),
             #[cfg(feature = "gpu-jpeg-huffman")]
             jpeg_gpu: None,
             #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
@@ -773,6 +780,28 @@ impl<'doc> PageRenderer<'doc> {
     /// Call before execute.
     pub fn set_document_fonts(&mut self, fonts: Arc<DocumentFonts>) {
         self.font_cache = FontCache::new(fonts);
+    }
+
+    /// Draw optional content as `optional_content` configures it.  Call
+    /// before execute.
+    pub fn set_optional_content(&mut self, optional_content: Arc<crate::OptionalContent>) {
+        self.optional_content = std::cell::OnceCell::from(optional_content);
+    }
+
+    /// The document's optional-content configuration in effect.
+    pub(super) fn optional_content(&self) -> &Arc<crate::OptionalContent> {
+        self.optional_content.get_or_init(|| {
+            Arc::new(crate::OptionalContent::new(
+                self.resources.doc(),
+                crate::RenderPurpose::View,
+            ))
+        })
+    }
+
+    /// Whether content governed by the optional content group or
+    /// membership dictionary `oc` is visible.
+    pub(super) fn oc_visible(&self, oc: &pdf::Object) -> bool {
+        self.optional_content().is_visible(self.resources.doc(), oc)
     }
 
     /// Images skipped so far on this page; also returned in
@@ -1442,9 +1471,15 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Execute a `Do` operator: look up and render the named `XObject`.
     ///
+    /// An `XObject` whose `/OC` is hidden is neither decoded nor drawn.
     /// Image `XObjects` are blitted directly.  Form `XObjects` are executed
     /// recursively via [`do_form_xobject`].
     fn do_xobject(&mut self, name: &[u8]) {
+        if let Some(oc) = self.resources.xobject_optional_content(name)
+            && !self.oc_visible(&oc)
+        {
+            return;
+        }
         // Try Form first (cheap dict lookup, no pixel decoding).
         if let Some(form) = self.resources.form_xobject(name) {
             self.do_form_xobject(&form);
