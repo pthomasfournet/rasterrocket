@@ -152,6 +152,7 @@ def encrypted_seeds(out):
             data = enc.read_bytes()
             write(out, "fuzz_decrypt", data)
             write(out, "fuzz_document", data)
+            write(out, "fuzz_parse", data)
 
 
 def repo_seeds(out):
@@ -215,6 +216,7 @@ def repo_seeds(out):
     for sel, body in FUNCTION_SEEDS:
         write(out, "fuzz_function", sel + body)
     write(out, "fuzz_document", plaintext_pdf())
+    write(out, "fuzz_parse", plaintext_pdf())
 
 
 def pdf_seeds(out, root):
@@ -223,6 +225,7 @@ def pdf_seeds(out, root):
         if pdf.is_file() and pdf.stat().st_size <= MAX_SEED:
             data = pdf.read_bytes()
             write(out, "fuzz_document", data)
+            write(out, "fuzz_parse", data)
             if b"/Encrypt" in data:
                 write(out, "fuzz_decrypt", data)
             n += 1

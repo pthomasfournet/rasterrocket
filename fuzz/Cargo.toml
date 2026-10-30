@@ -88,6 +88,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_parse"
+path = "fuzz_targets/fuzz_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_image"
 path = "fuzz_targets/fuzz_image.rs"
 test = false
