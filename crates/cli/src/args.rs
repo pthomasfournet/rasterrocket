@@ -8,7 +8,7 @@
 
 use camera::CameraOptions;
 use clap::Parser;
-use pdf_raster::{BackendPolicy, RenderPurpose, SessionConfig};
+use pdf_raster::{BackendPolicy, RenderPurpose, RenderRegion, SessionConfig};
 
 /// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
 fn parse_positive_dpi(s: &str) -> Result<f64, String> {
@@ -82,33 +82,41 @@ pub(crate) struct Args {
     #[arg(long = "ry", value_name = "DPI", value_parser = parse_positive_dpi)]
     pub resolution_y: Option<f64>,
 
-    /// Scale output so the longest edge is this many pixels (preserves aspect).
-    #[arg(long = "scale-to", value_name = "PIXELS")]
+    /// Scale each page to fit a PIXELS × PIXELS box: the longer edge is
+    /// PIXELS long and the aspect ratio is kept.  Overrides -r, --rx, --ry,
+    /// --scale-to-x and --scale-to-y.
+    #[arg(long = "scale-to", value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..))]
     pub scale_to: Option<u32>,
 
-    /// Scale output width to this many pixels (overrides --scale-to width).
-    #[arg(long = "scale-to-x", value_name = "PIXELS")]
+    /// Scale each page to PIXELS wide.  Without --scale-to-y the height
+    /// keeps the aspect ratio.  Overrides -r and --rx.
+    #[arg(long = "scale-to-x", value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..))]
     pub scale_to_x: Option<u32>,
 
-    /// Scale output height to this many pixels (overrides --scale-to height).
-    #[arg(long = "scale-to-y", value_name = "PIXELS")]
+    /// Scale each page to PIXELS high.  Without --scale-to-x the width
+    /// keeps the aspect ratio.  Overrides -r and --ry.
+    #[arg(long = "scale-to-y", value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..))]
     pub scale_to_y: Option<u32>,
 
     // ── Crop ─────────────────────────────────────────────────────────────────
-    /// Crop x offset in pixels.
+    /// Left edge of the rendered area, in pixels from the page's left edge
+    /// (default 0).
     #[arg(short = 'x', long, value_name = "PIXELS")]
-    pub crop_x: Option<i32>,
+    pub crop_x: Option<u32>,
 
-    /// Crop y offset in pixels.
+    /// Top edge of the rendered area, in pixels from the page's top edge
+    /// (default 0).
     #[arg(short = 'y', long, value_name = "PIXELS")]
-    pub crop_y: Option<i32>,
+    pub crop_y: Option<u32>,
 
-    /// Crop width in pixels.
-    #[arg(short = 'W', long = "crop-width", value_name = "PIXELS")]
+    /// Width of the rendered area in pixels (default: to the page's right
+    /// edge; clipped to it).
+    #[arg(short = 'W', long = "crop-width", value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..))]
     pub crop_w: Option<u32>,
 
-    /// Crop height in pixels.
-    #[arg(short = 'H', long = "crop-height", value_name = "PIXELS")]
+    /// Height of the rendered area in pixels (default: to the page's bottom
+    /// edge; clipped to it).
+    #[arg(short = 'H', long = "crop-height", value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..))]
     pub crop_h: Option<u32>,
 
     // ── Output format ────────────────────────────────────────────────────────
@@ -407,6 +415,53 @@ impl Args {
     /// Effective vertical DPI.
     pub(crate) fn y_dpi(&self) -> f64 {
         self.resolution_y.or(self.resolution).unwrap_or(150.0)
+    }
+
+    /// Device pixels per point `(x, y)` for a page of `width_pts × height_pts`
+    /// (after `/Rotate`): from `--scale-to` when given, else from
+    /// `--scale-to-x` / `--scale-to-y`, an axis given neither taking the
+    /// other's scale when only one is set, and otherwise from the resolution
+    /// flags.
+    pub(crate) fn scales(&self, (width_pts, height_pts): (f64, f64)) -> (f64, f64) {
+        if let Some(n) = self.scale_to {
+            let s = f64::from(n) / width_pts.max(height_pts);
+            return (s, s);
+        }
+        let x = self.scale_to_x.map(|n| f64::from(n) / width_pts);
+        let y = self.scale_to_y.map(|n| f64::from(n) / height_pts);
+        match (x, y) {
+            (Some(x), Some(y)) => (x, y),
+            (Some(x), None) => (x, x),
+            (None, Some(y)) => (y, y),
+            (None, None) => (self.x_dpi() / 72.0, self.y_dpi() / 72.0),
+        }
+    }
+
+    /// The area `-x`/`-y`/`-W`/`-H` select on a page of `page_w × page_h`
+    /// pixels, or `None` when none of them is given.  A width or height
+    /// reaching past the page is clipped to it.
+    ///
+    /// Returns `Err(message)` when the offset lies outside the page.
+    pub(crate) fn crop_region(
+        &self,
+        (page_w, page_h): (u32, u32),
+    ) -> Result<Option<RenderRegion>, String> {
+        if self.crop_x.is_none()
+            && self.crop_y.is_none()
+            && self.crop_w.is_none()
+            && self.crop_h.is_none()
+        {
+            return Ok(None);
+        }
+        let (x, y) = (self.crop_x.unwrap_or(0), self.crop_y.unwrap_or(0));
+        if x >= page_w || y >= page_h {
+            return Err(format!(
+                "crop offset ({x}, {y}) lies outside the {page_w}×{page_h} page"
+            ));
+        }
+        let width = self.crop_w.map_or(page_w - x, |w| w.min(page_w - x));
+        let height = self.crop_h.map_or(page_h - y, |h| h.min(page_h - y));
+        Ok(Some(RenderRegion::new(x, y, width, height)))
     }
 
     /// Validate mutually-exclusive output-format flags.
@@ -807,6 +862,54 @@ mod page_list_tests {
             .session_config()
             .unwrap();
         assert!(strict.strict);
+    }
+
+    #[test]
+    fn scale_to_flags_set_the_page_scales() {
+        let page = (200.0, 100.0);
+        let scales = |argv: &[&str]| {
+            let mut full = vec!["rrocket"];
+            full.extend_from_slice(argv);
+            full.extend_from_slice(&["in.pdf", "out"]);
+            Args::parse_from(full).scales(page)
+        };
+        assert_eq!(scales(&["-r", "144"]), (2.0, 2.0));
+        assert_eq!(scales(&["--rx", "144", "--ry", "36"]), (2.0, 0.5));
+        assert_eq!(scales(&["--scale-to", "400", "-r", "300"]), (2.0, 2.0));
+        assert_eq!(scales(&["--scale-to-x", "100"]), (0.5, 0.5));
+        assert_eq!(scales(&["--scale-to-y", "300"]), (3.0, 3.0));
+        assert_eq!(
+            scales(&["--scale-to-x", "100", "--scale-to-y", "300"]),
+            (0.5, 3.0)
+        );
+        assert_eq!(
+            scales(&["--scale-to", "50", "--scale-to-x", "100"]),
+            (0.25, 0.25)
+        );
+    }
+
+    #[test]
+    fn crop_flags_select_a_clipped_region() {
+        let region = |argv: &[&str]| {
+            let mut full = vec!["rrocket"];
+            full.extend_from_slice(argv);
+            full.extend_from_slice(&["in.pdf", "out"]);
+            Args::parse_from(full).crop_region((100, 50))
+        };
+        assert_eq!(region(&[]), Ok(None));
+        assert_eq!(
+            region(&["-x", "10", "-y", "5", "-W", "20", "-H", "30"]),
+            Ok(Some(RenderRegion::new(10, 5, 20, 30)))
+        );
+        assert_eq!(
+            region(&["-x", "90"]),
+            Ok(Some(RenderRegion::new(90, 0, 10, 50)))
+        );
+        assert_eq!(
+            region(&["-W", "500", "-H", "7"]),
+            Ok(Some(RenderRegion::new(0, 0, 100, 7)))
+        );
+        assert!(region(&["-y", "50"]).is_err());
     }
 
     #[test]

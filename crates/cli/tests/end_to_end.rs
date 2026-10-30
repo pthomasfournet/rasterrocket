@@ -237,6 +237,43 @@ fn unequal_rx_and_ry_give_non_square_pixels() {
     assert_eq!((at(40, 15), at(70, 15), at(40, 5)), (0, 255, 255));
 }
 
+#[test]
+fn crop_flags_write_the_selected_area_of_the_page() {
+    let pdf = two_page_pdf();
+    let (w, _, full) = gray_page(&pdf, &[]);
+    let (cw, ch, crop) = gray_page(&pdf, &["-x", "5", "-y", "12", "-W", "30", "-H", "25"]);
+    assert_eq!((cw, ch), (30, 25));
+    for row in 0..25 {
+        let at = (12 + row) * w as usize + 5;
+        assert_eq!(
+            crop[row * 30..row * 30 + 30],
+            full[at..at + 30],
+            "row {row} of the crop is the page's row {}",
+            12 + row
+        );
+    }
+    // A width past the page edge is clipped to it.  Page 2 is only 60 pt
+    // wide, so offset 90 lies outside it.
+    let (cw, ch, _) = gray_page(&pdf, &["-l", "1", "-x", "90", "-W", "500"]);
+    assert_eq!((cw, ch), (10, 50));
+}
+
+#[test]
+fn scale_to_flags_size_the_page() {
+    let pdf = two_page_pdf(); // page 1 is 100 × 50 pt
+    let size = |args: &[&str]| {
+        let (w, h, _) = gray_page(&pdf, args);
+        (w, h)
+    };
+    assert_eq!(size(&["--scale-to", "300"]), (300, 150));
+    assert_eq!(size(&["--scale-to-x", "40"]), (40, 20));
+    assert_eq!(size(&["--scale-to-y", "40"]), (80, 40));
+    assert_eq!(
+        size(&["--scale-to-x", "60", "--scale-to-y", "90"]),
+        (60, 90)
+    );
+}
+
 /// One 120 × 60 pt page with a diagonal-edged fill and a line of text.
 fn edges_pdf() -> Vec<u8> {
     assemble_pdf(&[

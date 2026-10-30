@@ -48,11 +48,11 @@ If `--first-page` < 1, it is clamped to 1 with a warning. If `--last-page` excee
 | `-r DPI` / `--resolution DPI` | `150` | Render resolution for both axes. |
 | `--rx DPI` | same as `-r` | Horizontal resolution only (overrides `-r` for X). |
 | `--ry DPI` | same as `-r` | Vertical resolution only (overrides `-r` for Y). Unequal `--rx`/`--ry` give non-square pixels: the page is `width × rx / 72` by `height × ry / 72` pixels. |
-| `--scale-to N` | — | Scale the longest edge to N pixels (preserves aspect ratio). |
-| `--scale-to-x N` | — | Scale width to N pixels. |
-| `--scale-to-y N` | — | Scale height to N pixels. |
+| `--scale-to N` | — | Fit each page in an N × N box: the longer edge is N pixels, aspect ratio kept. Overrides the resolution flags and `--scale-to-x`/`--scale-to-y`. |
+| `--scale-to-x N` | — | Scale each page to N pixels wide; without `--scale-to-y` the height keeps the aspect ratio. Overrides `-r`/`--rx`. |
+| `--scale-to-y N` | — | Scale each page to N pixels high; without `--scale-to-x` the width keeps the aspect ratio. Overrides `-r`/`--ry`. Both together give exactly N × M pixels (non-square pixels). |
 
-DPI values must be positive finite numbers; non-positive values are rejected at startup.
+DPI values must be positive finite numbers and scale-to sizes positive integers; other values are rejected at startup.
 
 ---
 
@@ -60,10 +60,16 @@ DPI values must be positive finite numbers; non-positive values are rejected at 
 
 | Flag | Short | Description |
 |---|---|---|
-| `--crop-x N` | `-x N` | Crop X offset in pixels. |
-| `--crop-y N` | `-y N` | Crop Y offset in pixels. |
-| `--crop-width N` | `-W N` | Crop width in pixels. |
-| `--crop-height N` | `-H N` | Crop height in pixels. |
+| `--crop-x N` | `-x N` | Left edge of the written area, pixels from the page's left edge (default 0). |
+| `--crop-y N` | `-y N` | Top edge of the written area, pixels from the page's top edge (default 0). |
+| `--crop-width N` | `-W N` | Width of the written area (default: to the right edge; clipped to it). |
+| `--crop-height N` | `-H N` | Height of the written area (default: to the bottom edge; clipped to it). |
+
+Coordinates are pixels of the page as rendered at the chosen resolution or
+scale. Only the selected area is rendered, so a crop of a page too large to
+render whole at that resolution still succeeds. An offset outside a page
+fails that page. These flags apply to PDF input; comic-archive pages are
+written whole.
 
 The page boundary is selected automatically: the CropBox clamped to the
 MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.

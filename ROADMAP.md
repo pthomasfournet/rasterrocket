@@ -96,6 +96,9 @@ version: the public API changes below are breaking.
   `RenderParams::new_xy`, `PageGeometry::size_px(scale_x, scale_y)`. The
   CLI's `--rx`/`--ry` now render non-square pixels at the requested size
   instead of a square-pixel render at the geometric mean of the two.
+- CLI `-x`/`-y`/`-W`/`-H` render only the selected area through a region
+  render, and `--scale-to`, `--scale-to-x`, `--scale-to-y` size the page;
+  all seven were parsed and ignored before.
 - `SessionConfig::annotations` and `RasterOptions::annotations` (default
   `true`); `false` renders page content without annotations. The CLI's
   `--hide-annotations`, previously parsed and ignored, sets it.

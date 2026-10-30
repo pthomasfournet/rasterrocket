@@ -125,8 +125,15 @@ pub(crate) fn render_page(
     #[cfg(not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi")))]
     let effective_policy = session.policy();
 
-    let params = RenderParams::new_xy(args.x_dpi() / 72.0, args.y_dpi() / 72.0)
-        .with_policy(effective_policy);
+    let geom = session.page_geometry(page_num)?;
+    let (scale_x, scale_y) = args.scales((geom.width_pts, geom.height_pts));
+    let mut params = RenderParams::new_xy(scale_x, scale_y).with_policy(effective_policy);
+    if let Some(region) = args
+        .crop_region(geom.size_px(scale_x, scale_y))
+        .map_err(RasterError::InvalidOptions)?
+    {
+        params = params.with_region(region);
+    }
     let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
 
     #[expect(
