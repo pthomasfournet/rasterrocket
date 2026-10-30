@@ -123,6 +123,7 @@ mod tests {
             },
             source_width: 8,
             interpolate: false,
+            own_soft_mask: false,
         }
     }
 

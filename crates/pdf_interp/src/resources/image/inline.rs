@@ -100,6 +100,7 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
         image: img,
         source_width: w,
         interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
+        own_soft_mask: false,
     })
 }
 

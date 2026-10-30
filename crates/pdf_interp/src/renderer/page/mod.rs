@@ -1903,9 +1903,9 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
 
-        // The image is one object under the soft mask in effect.
-        let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
-        self.paint_masked(region, |r| {
+        // The image is one object under the soft mask in effect, unless its
+        // own `/SMask` replaces that mask.
+        let mut paint = |r: &mut Self| {
             r.composite_image(
                 img,
                 &ctm,
@@ -1914,7 +1914,13 @@ impl<'doc> PageRenderer<'doc> {
                 &mut grid_clip,
                 decoded.interpolate,
             );
-        });
+        };
+        if decoded.own_soft_mask {
+            paint(self);
+        } else {
+            let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
+            self.paint_masked(region, paint);
+        }
     }
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap

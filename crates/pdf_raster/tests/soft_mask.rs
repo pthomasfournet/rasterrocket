@@ -221,3 +221,37 @@ fn soft_mask_is_lifted_by_none_and_by_restore() {
     assert_eq!(gray_at(&page, 25, 75), 0, "after Q: unmasked");
     assert_eq!(gray_at(&page, 75, 75), 0, "after /SMask /None: unmasked");
 }
+
+/// An image with its own `/SMask` is drawn through that mask instead of the
+/// graphics state's: under a mask of 0 everywhere, the image with an opaque
+/// `/SMask` paints and the image without one does not.
+#[test]
+fn an_image_smask_replaces_the_graphics_state_mask() {
+    let image = |smask: &str| {
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 {smask}"
+            ),
+            &[0],
+        )
+    };
+    let pdf = page(
+        "/GS0 << /SMask << /S /Luminosity /G 5 0 R >> >>",
+        "/Own 6 0 R /Plain 8 0 R",
+        b"/GS0 gs q 50 0 0 100 0 0 cm /Own Do Q q 50 0 0 100 50 0 cm /Plain Do Q",
+        vec![
+            group_form("", b""),
+            image("/SMask 7 0 R"),
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8",
+                &[255],
+            ),
+            image(""),
+        ],
+    );
+    let page = render(pdf);
+    assert_eq!(gray_at(&page, 25, 50), 0, "own /SMask: image paints");
+    assert_eq!(gray_at(&page, 75, 50), 255, "graphics-state mask 0: hidden");
+}

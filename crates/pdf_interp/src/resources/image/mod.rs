@@ -222,6 +222,9 @@ pub struct DecodedImage {
     /// `/Interpolate`: the image asks to be interpolated when magnified
     /// (PDF 32000-1 §8.9.5.3).
     pub interpolate: bool,
+    /// The image dictionary has an `/SMask` entry, which replaces the soft
+    /// mask of the graphics state for this image (PDF 32000-1 Table 89).
+    pub own_soft_mask: bool,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -626,6 +629,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         image: img,
         source_width: w,
         interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
+        own_soft_mask: !is_mask && matches!(stream.dict.get(b"SMask"), Some(Object::Reference(_))),
     })
 }
 
