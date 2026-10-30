@@ -1,0 +1,48 @@
+name: Dependencies
+
+# cargo-deny against deny.toml: RustSec advisories (yanked crates denied),
+# licence allow-list, bans and registry sources.  A push or pull request runs
+# it only when the dependency graph or the policy can have changed; the
+# weekly run catches advisories filed against an unchanged Cargo.lock.
+# Vendored forks are path dependencies outside cargo-deny's view; the
+# "Vendored upstream" workflow reports theirs.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check advisories, bans, licences and sources
+        run: cargo deny check advisories bans licenses sources
