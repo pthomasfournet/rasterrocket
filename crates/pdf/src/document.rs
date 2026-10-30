@@ -761,7 +761,7 @@ impl Document {
                 break;
             }
             let obj = self.get_object(id)?;
-            let Some(dict) = obj.as_dict().cloned() else {
+            let Some(dict) = obj.as_dict() else {
                 break;
             };
 

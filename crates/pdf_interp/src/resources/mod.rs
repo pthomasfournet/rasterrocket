@@ -22,6 +22,8 @@ pub mod image;
 pub mod shading;
 pub mod tiling;
 
+use std::sync::OnceLock;
+
 use dict_ext::DictExt;
 use pdf::{Dictionary, Document, Object, ObjectId};
 use raster::types::BlendMode;
@@ -300,6 +302,37 @@ pub struct PageResources<'doc> {
     doc: &'doc Document,
     /// Object whose `Resources` key is consulted for font/XObject lookups.
     resource_context_id: ObjectId,
+    /// Each category sub-dictionary, resolved on first use; `None` when the
+    /// category is absent or empty.
+    subdicts: [OnceLock<Option<Dictionary>>; Category::COUNT],
+}
+
+/// A sub-dictionary key of a resource dictionary (ISO 32000-1 §7.8.3).
+#[derive(Clone, Copy)]
+enum Category {
+    Font,
+    XObject,
+    ExtGState,
+    ColorSpace,
+    Pattern,
+    Shading,
+    Properties,
+}
+
+impl Category {
+    const COUNT: usize = 7;
+
+    const fn key(self) -> &'static [u8] {
+        match self {
+            Self::Font => b"Font",
+            Self::XObject => b"XObject",
+            Self::ExtGState => b"ExtGState",
+            Self::ColorSpace => b"ColorSpace",
+            Self::Pattern => b"Pattern",
+            Self::Shading => b"Shading",
+            Self::Properties => b"Properties",
+        }
+    }
 }
 
 impl<'doc> PageResources<'doc> {
@@ -309,6 +342,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc,
             resource_context_id: page_id,
+            subdicts: [const { OnceLock::new() }; Category::COUNT],
         }
     }
 
@@ -326,6 +360,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc: self.doc,
             resource_context_id,
+            subdicts: [const { OnceLock::new() }; Category::COUNT],
         }
     }
 
@@ -351,11 +386,16 @@ impl<'doc> PageResources<'doc> {
     /// own entry takes the nearest ancestor's in the page tree.  Every resource
     /// category resolves through this one lookup so that inheritance applies
     /// uniformly.  `None` when no context in the chain defines `category`.
-    fn resource_subdict(&self, category: &[u8]) -> Option<Dictionary> {
-        self.doc
-            .get_page_resource_dict(self.resource_context_id, category)
-            .ok()
-            .filter(|d| !d.is_empty())
+    /// The lookup runs once per category; later calls borrow the result.
+    fn resource_subdict(&self, category: Category) -> Option<&Dictionary> {
+        self.subdicts[category as usize]
+            .get_or_init(|| {
+                self.doc
+                    .get_page_resource_dict(self.resource_context_id, category.key())
+                    .ok()
+                    .filter(|d| !d.is_empty())
+            })
+            .as_ref()
     }
 
     /// The identity of the font dictionary the named resource (e.g. `b"F1"`)
@@ -364,7 +404,7 @@ impl<'doc> PageResources<'doc> {
     /// Returns `None` if the resource name is not present in the resource dict.
     #[must_use]
     pub fn font_entry(&self, name: &[u8]) -> Option<(FontKey, Object)> {
-        let fonts = self.doc.get_page_fonts(self.resource_context_id).ok()?;
+        let fonts = self.resource_subdict(Category::Font)?;
         let entry = fonts.get(name)?.clone();
         let key = match entry {
             Object::Reference(id) => FontKey::Object(id),
@@ -405,8 +445,8 @@ impl<'doc> PageResources<'doc> {
         ) {
             return colorspace::resolve_device_name(name);
         }
-        let cs_dict = self.resource_subdict(b"ColorSpace");
-        let Some(entry) = cs_dict.as_ref().and_then(|d| d.get(name)) else {
+        let cs_dict = self.resource_subdict(Category::ColorSpace);
+        let Some(entry) = cs_dict.and_then(|d| d.get(name)) else {
             log::debug!(
                 "colorspace: name {:?} not found in /ColorSpace resource dict — fallback DeviceGray",
                 String::from_utf8_lossy(name)
@@ -418,8 +458,8 @@ impl<'doc> PageResources<'doc> {
 
     /// The `/ColorSpace` subdictionary of the resources in effect, if any.
     #[must_use]
-    pub fn color_space_dict(&self) -> Option<Dictionary> {
-        self.resource_subdict(b"ColorSpace")
+    pub fn color_space_dict(&self) -> Option<&Dictionary> {
+        self.resource_subdict(Category::ColorSpace)
     }
 
     /// Decode the image `XObject` `request` names from the resource dictionary,
@@ -439,10 +479,11 @@ impl<'doc> PageResources<'doc> {
             &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
         >,
     ) -> image::ImageResolution {
-        let xobjects = self.resource_subdict(b"XObject").unwrap_or_default();
+        let empty = Dictionary::new();
+        let xobjects = self.resource_subdict(Category::XObject).unwrap_or(&empty);
         image::resolve_image(
             ctx,
-            &xobjects,
+            xobjects,
             request,
             #[cfg(feature = "gpu-jpeg-huffman")]
             jpeg_gpu,
@@ -455,7 +496,7 @@ impl<'doc> PageResources<'doc> {
     /// Unknown or unsupported keys in the dict are silently ignored.
     #[must_use]
     pub fn ext_gstate(&self, name: &[u8]) -> Option<ExtGStateParams> {
-        let eg_dict = self.resource_subdict(b"ExtGState")?;
+        let eg_dict = self.resource_subdict(Category::ExtGState)?;
         let gs_ref_or_dict = eg_dict.get(name)?;
         let gs = resolve_dict(self.doc, gs_ref_or_dict)?;
         Some(ExtGStateParams::from_dict(self.doc, &gs))
@@ -466,7 +507,7 @@ impl<'doc> PageResources<'doc> {
     /// or unreadable streams.
     #[must_use]
     pub fn form_xobject(&self, name: &[u8]) -> Option<FormXObject> {
-        let xobj_dict = self.resource_subdict(b"XObject")?;
+        let xobj_dict = self.resource_subdict(Category::XObject)?;
         let Object::Reference(id) = xobj_dict.get(name)? else {
             return None;
         };
@@ -531,8 +572,8 @@ impl<'doc> PageResources<'doc> {
     /// `PatternType` 2 (shading patterns referenced via `scn`).
     #[must_use]
     pub fn tiling_pattern(&self, name: &[u8]) -> Option<tiling::TilingDescriptor> {
-        let patterns = self.resource_subdict(b"Pattern")?;
-        tiling::resolve_tiling(self.doc, &patterns, name)
+        let patterns = self.resource_subdict(Category::Pattern)?;
+        tiling::resolve_tiling(self.doc, patterns, name)
     }
 
     /// Resolve the named `Shading` resource.
@@ -546,8 +587,8 @@ impl<'doc> PageResources<'doc> {
         ctm: &[f64; 6],
         page_h: f64,
     ) -> Option<shading::ResolvedShading> {
-        let shadings = self.resource_subdict(b"Shading")?;
-        shading::resolve_shading(self.doc, &shadings, name, ctm, page_h)
+        let shadings = self.resource_subdict(Category::Shading)?;
+        shading::resolve_shading(self.doc, shadings, name, ctm, page_h)
     }
 
     /// Resolve the named `Pattern` resource as a shading pattern
@@ -564,7 +605,7 @@ impl<'doc> PageResources<'doc> {
         pattern_ctm: &[f64; 6],
         page_h: f64,
     ) -> Option<ShadingPattern> {
-        let patterns = self.resource_subdict(b"Pattern")?;
+        let patterns = self.resource_subdict(Category::Pattern)?;
         let pattern = resolve_stream_dict(self.doc, patterns.get(name)?)?;
         if pattern.get_i64(b"PatternType") != Some(2) {
             return None;
@@ -600,7 +641,7 @@ impl<'doc> PageResources<'doc> {
     /// and not currently supported).
     #[must_use]
     pub fn ocg_object_id(&self, props_key: &[u8]) -> Option<ObjectId> {
-        let props = self.resource_subdict(b"Properties")?;
+        let props = self.resource_subdict(Category::Properties)?;
         match props.get(props_key)? {
             Object::Reference(id) => Some(*id),
             _ => None, // Inline-dict OCGs are not resolved (treat as visible).
