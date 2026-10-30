@@ -71,6 +71,20 @@ fn collect_content_refs(arr: &[Object], page_id: ObjectId) -> Vec<ObjectId> {
         .collect()
 }
 
+/// Whether a stream with dictionary `dict` is an object stream: its `/Type`
+/// is `/ObjStm`, or it has no `/Type` and both `/N` and `/First` are
+/// integers.  A stream of any other type is never decoded as a container.
+fn is_object_stream(dict: &Dictionary) -> bool {
+    dict.get(b"Type").and_then(Object::as_name).map_or_else(
+        || {
+            [b"N".as_slice(), b"First".as_slice()]
+                .iter()
+                .all(|key| dict.get(key).and_then(Object::as_i64).is_some())
+        },
+        |ty| ty == b"ObjStm",
+    )
+}
+
 // ── Document ─────────────────────────────────────────────────────────────────
 
 /// A lazily-parsed PDF document backed by a memory-mapped file or an owned
@@ -271,8 +285,8 @@ impl Document {
     /// cached value.
     ///
     /// # Errors
-    /// [`PdfError::BadObject`] when `id` is absent from the xref table or the
-    /// object (or its object stream) cannot be parsed.
+    /// [`PdfError::BadObject`] when neither the xref entry for `id` nor the
+    /// header scan of the file leads to a parseable object `id`.
     pub fn get_object(&self, id: ObjectId) -> Result<Arc<Object>, PdfError> {
         {
             // Poison recovery: a previous panic while holding the lock left the
@@ -380,10 +394,16 @@ impl Document {
     }
 
     fn parse_object_uncached(&self, id: ObjectId) -> Result<Object, PdfError> {
-        let entry = self.xref.get(id.0).ok_or_else(|| PdfError::BadObject {
-            id: id.0,
-            detail: "not in xref table".into(),
-        })?;
+        // A referenced object the xref does not list, or lists as free, is
+        // what the header scan finds for its number, or nothing.
+        let Some(entry) = self.xref.get(id.0) else {
+            return self
+                .recover_object(id.0, None)
+                .ok_or_else(|| PdfError::BadObject {
+                    id: id.0,
+                    detail: "not in xref table".into(),
+                });
+        };
 
         match entry {
             XrefEntry::Direct { offset, .. } => {
@@ -395,7 +415,7 @@ impl Document {
                     // finds for its number, or nothing; what the entry led
                     // to is never returned under this number.
                     parsed => {
-                        self.recover_direct(id.0, Some(offset))
+                        self.recover_object(id.0, Some(entry))
                             .ok_or_else(|| PdfError::BadObject {
                                 id: id.0,
                                 detail: parsed.map_or_else(
@@ -408,31 +428,55 @@ impl Document {
                     }
                 }
             }
-            XrefEntry::InObjStm { container, index } => {
-                let container_obj = self.get_object((container, 0))?;
-                let Object::Stream(stream) = container_obj.as_ref() else {
-                    return Err(PdfError::BadObject {
-                        id: container,
-                        detail: "expected Stream for ObjStm container".into(),
-                    });
-                };
-                // An object the container does not hold, or holds in an
-                // unparseable form, may still have an uncompressed body in
-                // the file.
-                self.objstm
-                    .get_or_parse(container, index, id.0, &stream.content, &stream.dict)
-                    .or_else(|e| self.recover_direct(id.0, None).ok_or(e))
+            // An object the container does not hold, or holds in an
+            // unparseable form, or a container that is no object stream,
+            // may still have a body elsewhere in the file.
+            XrefEntry::InObjStm { container, index } => self
+                .parse_compressed(container, index, id.0)
+                .or_else(|e| self.recover_object(id.0, Some(entry)).ok_or(e)),
+            XrefEntry::Free => {
+                self.recover_object(id.0, Some(entry))
+                    .ok_or_else(|| PdfError::BadObject {
+                        id: id.0,
+                        detail: "free in xref table".into(),
+                    })
             }
-            // A referenced object the xref has released: its body, when the
-            // update that freed it left one in the file, is found by the
-            // header scan; otherwise the reference is to nothing.
-            XrefEntry::Free => self
-                .recover_direct(id.0, None)
-                .ok_or_else(|| PdfError::BadObject {
-                    id: id.0,
-                    detail: "free in xref table".into(),
-                }),
         }
+    }
+
+    /// Object `num` at directory position `index` of object stream
+    /// `container`, the position being a hint verified against the
+    /// directory.
+    ///
+    /// No stream, an object stream included, is stored in an object stream
+    /// (ISO 32000-2 §7.5.7): a container whose own entry is not direct is
+    /// read from the header the scan finds for it.  The container must be an object stream by
+    /// [`is_object_stream`]; any other stream is not decoded.
+    fn parse_compressed(&self, container: u32, index: u32, num: u32) -> Result<Object, PdfError> {
+        let container_obj = match self.xref.get(container) {
+            Some(XrefEntry::Direct { .. }) => self.get_object((container, 0))?,
+            _ => self
+                .recover_direct(container, None)
+                .map(Arc::new)
+                .ok_or_else(|| PdfError::BadObject {
+                    id: container,
+                    detail: "object stream has no direct xref entry or header".into(),
+                })?,
+        };
+        let Object::Stream(stream) = container_obj.as_ref() else {
+            return Err(PdfError::BadObject {
+                id: container,
+                detail: "expected Stream for ObjStm container".into(),
+            });
+        };
+        if !is_object_stream(&stream.dict) {
+            return Err(PdfError::BadObject {
+                id: container,
+                detail: "container stream is not an ObjStm".into(),
+            });
+        }
+        self.objstm
+            .get_or_parse(container, index, num, &stream.content, &stream.dict)
     }
 
     /// Parse the indirect object whose header starts at `offset`.
@@ -447,25 +491,56 @@ impl Document {
         &self.data.as_bytes()[self.base..]
     }
 
-    /// Object `num` parsed from the header a whole-file scan finds for it,
-    /// when that header is not at `failed_offset` and parses as object `num`.
-    fn recover_direct(&self, num: u32, failed_offset: Option<u64>) -> Option<Object> {
-        let scanned = self
-            .scanned_offsets
+    /// The entries a whole-file header scan finds, computed on first use.
+    fn scanned_entries(&self) -> Option<&HashMap<u32, XrefEntry>> {
+        self.scanned_offsets
             .get_or_init(|| scan_objects(self.body()).ok().map(|scan| scan.entries))
-            .as_ref()?;
-        let Some(XrefEntry::Direct { offset, .. }) = scanned.get(&num).copied() else {
+            .as_ref()
+    }
+
+    /// Object `num` as the whole-file scan locates it, when that location
+    /// differs from `failed`, the xref entry that did not yield the object.
+    ///
+    /// A direct location is a header that must parse as object `num`; a
+    /// compressed one is an object stream whose own scanned entry is
+    /// direct, so recovery never descends through more than one stream.
+    fn recover_object(&self, num: u32, failed: Option<XrefEntry>) -> Option<Object> {
+        let scanned = self.scanned_entries()?;
+        let obj = match (scanned.get(&num).copied()?, failed) {
+            (XrefEntry::Direct { .. }, _) => self.recover_direct(num, failed)?,
+            (
+                XrefEntry::InObjStm { container, .. },
+                Some(XrefEntry::InObjStm {
+                    container: tried, ..
+                }),
+            ) if container == tried => return None,
+            (XrefEntry::InObjStm { container, index }, _) => {
+                if !matches!(scanned.get(&container), Some(XrefEntry::Direct { .. })) {
+                    return None;
+                }
+                let obj = self.parse_compressed(container, index, num).ok()?;
+                log::debug!("pdf: object {num} recovered from object stream {container}");
+                obj
+            }
+            (XrefEntry::Free, _) => return None,
+        };
+        Some(obj)
+    }
+
+    /// Object `num` parsed from the header a whole-file scan finds for it,
+    /// when that header is not at the offset of `failed` and parses as
+    /// object `num`.
+    fn recover_direct(&self, num: u32, failed: Option<XrefEntry>) -> Option<Object> {
+        let Some(XrefEntry::Direct { offset, .. }) = self.scanned_entries()?.get(&num).copied()
+        else {
             return None;
         };
-        if failed_offset == Some(offset) {
+        if matches!(failed, Some(XrefEntry::Direct { offset: tried, .. }) if tried == offset) {
             return None;
         }
         let (found, obj) = self.parse_direct(offset)?;
         (found.0 == num).then(|| {
-            log::debug!(
-                "pdf: object {num} recovered at offset {offset} (xref entry: {})",
-                failed_offset.map_or_else(|| "free".to_owned(), |off| off.to_string())
-            );
+            log::debug!("pdf: object {num} recovered at offset {offset} (xref entry: {failed:?})");
             obj
         })
     }
@@ -1260,6 +1335,176 @@ mod tests {
             matches!(&err, PdfError::BadObject { id: 2, detail } if detail.contains("free")),
             "got {err:?}"
         );
+    }
+
+    /// A referenced object the xref does not list, whose body is in the
+    /// file, resolves to that body.
+    #[test]
+    fn absent_object_with_a_body_is_recovered_by_scanning() {
+        let mut bytes = pdf_with_objects(&[(2, "(two)".to_owned())]);
+        bytes.extend_from_slice(b"\n7 0 obj\n(seven)\nendobj\n");
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert!(doc.xref.get(7).is_none());
+        assert_eq!(
+            doc.get_object((7, 0)).expect("object 7").as_str(),
+            Some(&b"seven"[..])
+        );
+    }
+
+    /// A referenced object neither the xref nor the file holds is missing.
+    #[test]
+    fn absent_object_without_a_body_is_missing() {
+        let bytes = pdf_with_objects(&[(2, "(two)".to_owned())]);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let err = doc.get_object((7, 0)).expect_err("object 7 is absent");
+        assert!(
+            matches!(&err, PdfError::BadObject { id: 7, detail } if detail.contains("not in xref")),
+            "got {err:?}"
+        );
+    }
+
+    /// The body of an object stream holding `members` (number, body), as a
+    /// stream object whose dictionary opens with the entries `ty`.
+    fn objstm_body(ty: &str, members: &[(u32, &str)]) -> String {
+        use std::fmt::Write as _;
+
+        let (mut directory, mut data) = (String::new(), String::new());
+        for (num, body) in members {
+            write!(directory, "{num} {} ", data.len()).unwrap();
+            data.push_str(body);
+            data.push('\n');
+        }
+        format!(
+            "<<{ty} /N {} /First {} /Length {}>>\nstream\n{directory}{data}\nendstream",
+            members.len(),
+            directory.len(),
+            directory.len() + data.len()
+        )
+    }
+
+    /// A PDF-1.5 file holding the catalog (1) and `direct` objects, indexed
+    /// by a cross-reference stream of `/Size size` whose entries are the
+    /// direct objects' offsets and the type-2 entries `compressed`
+    /// (number, container, index); every other number is free.
+    fn xref_stream_pdf(
+        direct: &[(u32, String)],
+        compressed: &[(u32, u32, u32)],
+        size: u32,
+    ) -> Vec<u8> {
+        let mut out = b"%PDF-1.5\n".to_vec();
+        let mut rows = vec![[0u8; 7]; size as usize];
+        let catalog = (1, "<</Type /Catalog>>".to_owned());
+        for (n, body) in std::iter::once(&catalog).chain(direct) {
+            let off = u32::try_from(out.len()).unwrap().to_be_bytes();
+            rows[*n as usize] = [1, off[0], off[1], off[2], off[3], 0, 0];
+            out.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        for &(n, container, index) in compressed {
+            let (c, i) = (
+                container.to_be_bytes(),
+                u16::try_from(index).unwrap().to_be_bytes(),
+            );
+            rows[n as usize] = [2, c[0], c[1], c[2], c[3], i[0], i[1]];
+        }
+        let xref_at = out.len();
+        let data = rows.concat();
+        out.extend_from_slice(
+            format!(
+                "{size} 0 obj\n<</Type /XRef /Size {size} /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                data.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&data);
+        out.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref_at}\n%%EOF").as_bytes(),
+        );
+        out
+    }
+
+    /// A compressed object its own container lacks is recovered from
+    /// another object stream that holds it, as is a compressed object the
+    /// xref does not list.
+    #[test]
+    fn compressed_object_is_recovered_from_another_object_stream() {
+        let bytes = xref_stream_pdf(
+            &[
+                (4, objstm_body("/Type /ObjStm", &[(2, "(two)")])),
+                (
+                    5,
+                    objstm_body("/Type /ObjStm", &[(3, "(three)"), (7, "(seven)")]),
+                ),
+            ],
+            &[(2, 4, 0), (3, 4, 1)],
+            6,
+        );
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert_eq!(
+            doc.get_object((2, 0)).expect("object 2").as_str(),
+            Some(&b"two"[..])
+        );
+        assert_eq!(
+            doc.get_object((3, 0)).expect("object 3").as_str(),
+            Some(&b"three"[..])
+        );
+        assert!(doc.xref.get(7).is_none());
+        assert_eq!(
+            doc.get_object((7, 0)).expect("object 7").as_str(),
+            Some(&b"seven"[..])
+        );
+    }
+
+    /// A type-2 entry naming a stream of another `/Type`, or an untyped
+    /// stream without `/N` and `/First`, does not decode that stream; an
+    /// untyped stream with both is an object stream.
+    #[test]
+    fn container_must_be_an_object_stream() {
+        for ty in ["/Type /XObject /Subtype /Image", "/Type /ObjStmX"] {
+            let bytes = xref_stream_pdf(&[(4, objstm_body(ty, &[(2, "(two)")]))], &[(2, 4, 0)], 5);
+            let doc = Document::from_bytes_owned(bytes).expect("opens");
+            let err = doc
+                .get_object((2, 0))
+                .expect_err("object 4 is no object stream");
+            assert!(
+                matches!(&err, PdfError::BadObject { id: 4, detail } if detail.contains("ObjStm")),
+                "{ty}: got {err:?}"
+            );
+        }
+        let bytes = xref_stream_pdf(
+            &[(4, "<</Length 9>>\nstream\n2 0 (two)\nendstream".to_owned())],
+            &[(2, 4, 0)],
+            5,
+        );
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert!(doc.get_object((2, 0)).is_err());
+
+        let bytes = xref_stream_pdf(&[(4, objstm_body("", &[(2, "(two)")]))], &[(2, 4, 0)], 5);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert_eq!(
+            doc.get_object((2, 0)).expect("object 2").as_str(),
+            Some(&b"two"[..])
+        );
+    }
+
+    /// An object stream whose own entry places it inside an object stream
+    /// (here itself) is read from its header in the file, without
+    /// following the entry.
+    #[test]
+    fn self_contained_object_stream_is_read_from_the_file() {
+        let bytes = xref_stream_pdf(
+            &[(4, objstm_body("/Type /ObjStm", &[(2, "(two)")]))],
+            &[(2, 4, 0), (4, 4, 0)],
+            5,
+        );
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert_eq!(
+            doc.get_object((2, 0)).expect("object 2").as_str(),
+            Some(&b"two"[..])
+        );
+        assert!(matches!(
+            doc.get_object((4, 0)).expect("object 4").as_ref(),
+            Object::Stream(_)
+        ));
     }
 
     fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

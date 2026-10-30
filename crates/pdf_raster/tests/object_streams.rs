@@ -16,12 +16,13 @@ use rasterrocket::{BackendPolicy, render_page_rgb};
 /// stream 5 together with `extra` as object 8, with the page's blue
 /// content stream as object 4 and a cross-reference stream as object 6.
 fn objstm_pdf(extra: &str) -> Vec<u8> {
-    objstm_pdf_with_startxref(extra, None)
+    objstm_pdf_with(extra, None, false)
 }
 
 /// [`objstm_pdf`] with `startxref` pointing at `startxref` instead of the
-/// cross-reference stream.
-fn objstm_pdf_with_startxref(extra: &str, startxref: Option<usize>) -> Vec<u8> {
+/// cross-reference stream, and with the object stream's own entry placing
+/// it at index 0 of itself when `self_nested`.
+fn objstm_pdf_with(extra: &str, startxref: Option<usize>, self_nested: bool) -> Vec<u8> {
     let bodies: [(u32, &str); 4] = [
         (1, "<< /Type /Catalog /Pages 2 0 R >>"),
         (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
@@ -66,7 +67,11 @@ fn objstm_pdf_with_startxref(extra: &str, startxref: Option<usize>) -> Vec<u8> {
     row(2, 5, 1);
     row(2, 5, 2);
     row(1, offsets[4], 0);
-    row(1, offsets[5], 0);
+    if self_nested {
+        row(2, 5, 0);
+    } else {
+        row(1, offsets[5], 0);
+    }
     row(1, offsets[6], 0);
     row(0, 0, 0);
     row(2, 5, 3);
@@ -113,10 +118,18 @@ fn unparseable_neighbour_in_object_stream_keeps_the_page() {
 #[test]
 fn page_tree_in_object_stream_is_reconstructed_without_startxref() {
     assert_eq!(
-        centre_colour(objstm_pdf_with_startxref(
-            "<< /Unused true >>",
-            Some(999_999)
-        )),
+        centre_colour(objstm_pdf_with("<< /Unused true >>", Some(999_999), false)),
+        [0, 0, 255]
+    );
+}
+
+/// An object stream whose own cross-reference entry places it inside
+/// itself is read from its header in the file rather than through that
+/// entry, so the page tree it holds still resolves.
+#[test]
+fn self_nested_object_stream_entry_keeps_the_page() {
+    assert_eq!(
+        centre_colour(objstm_pdf_with("<< /Unused true >>", None, true)),
         [0, 0, 255]
     );
 }
