@@ -564,6 +564,9 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
                     );
                 }
             }
+            // A raw image's key was compared on its stored samples in
+            // `decode_raw`; a codec's output is compared as decoded.
+            Object::Array(_) if matches!(img.filter, ImageFilter::Raw | ImageFilter::Flate) => {}
             Object::Array(ranges) => {
                 if let Some(base) = img.data.as_cpu() {
                     if let Some(mask) = smask::colour_key_mask(

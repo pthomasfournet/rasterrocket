@@ -203,23 +203,44 @@ fn alpha_from_decoded(what: &str, desc: &ImageDescriptor) -> Option<Vec<u8>> {
     Some(bytes[..expected].to_vec())
 }
 
-/// Build an alpha buffer from a `/Mask [colour-key]` array (§8.9.6.4).
+/// Build an alpha buffer from a `/Mask [colour-key]` array (§8.9.6.4) over
+/// 8-bit decoded samples: `base` holds `components` bytes per pixel.
 ///
-/// The array holds `2 × n` integers `[min₁ max₁ … minₙ maxₙ]` over the base
-/// image's colour components (here only 1-component `Gray` and 3-component
-/// `Rgb` post-decode buffers are masked).  A base-image pixel whose every
-/// component falls within its `[min, max]` range is *masked* (transparent,
-/// alpha `0x00`); all other pixels are opaque (alpha `0xFF`).
-///
-/// The mask shares the base image's grid.  Returns `None` when the array
-/// length doesn't match the component count or the base buffer is the wrong
-/// size, so the caller blits unmasked.
+/// See [`colour_key_mask_with`].  Returns `None` when the array does not
+/// match the component count or `base` is shorter than the image.
 pub(super) fn colour_key_mask(
     ranges: &[Object],
     base: &[u8],
     components: usize,
     img_w: u32,
     img_h: u32,
+) -> Option<SoftMask> {
+    let npix = (img_w as usize).checked_mul(img_h as usize)?;
+    if base.len() < npix.checked_mul(components)? {
+        return None;
+    }
+    colour_key_mask_with(ranges, components, img_w, img_h, |p, c| {
+        u32::from(base[p * components + c])
+    })
+}
+
+/// Build an alpha buffer from a `/Mask [colour-key]` array (§8.9.6.4).
+///
+/// The array holds `2 × n` integers `[min₁ max₁ … minₙ maxₙ]`, one range
+/// per colour component.  `sample(p, c)` is component `c` of pixel `p`
+/// (row-major) as the ranges are expressed.  A pixel whose every component
+/// falls within its `[min, max]` range is masked (alpha `0x00`); every
+/// other pixel is opaque (alpha `0xFF`).
+///
+/// The mask shares the image's grid.  Returns `None` when the array length
+/// does not match `components` or a range is inverted, so the caller blits
+/// unmasked.
+pub(super) fn colour_key_mask_with(
+    ranges: &[Object],
+    components: usize,
+    img_w: u32,
+    img_h: u32,
+    sample: impl Fn(usize, usize) -> u32,
 ) -> Option<SoftMask> {
     if components == 0 || ranges.len() != components * 2 {
         return None;
@@ -237,14 +258,10 @@ pub(super) fn colour_key_mask(
         return None;
     }
     let npix = (img_w as usize).checked_mul(img_h as usize)?;
-    if base.len() < npix.checked_mul(components)? {
-        return None;
-    }
     let alpha: Vec<u8> = (0..npix)
         .map(|p| {
-            let px = &base[p * components..p * components + components];
             let in_range = (0..components).all(|c| {
-                let v = i64::from(px[c]);
+                let v = i64::from(sample(p, c));
                 v >= bounds[c * 2] && v <= bounds[c * 2 + 1]
             });
             if in_range { 0x00 } else { 0xFF }

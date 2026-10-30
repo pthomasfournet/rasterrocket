@@ -11,6 +11,7 @@ use pdf::{Dictionary, Document, Object};
 
 use super::bitpack::{downsample_16bpp, expand_nbpp, expand_nbpp_indexed, unpack_packed_bits};
 use super::colorspace::{ResolvedCs, indexed_palette, resolve_cs};
+use super::smask::{SoftMask, colour_key_mask_with};
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
 use crate::resources::colorspace::{ColorSpace, needs_sample_conversion, resolve, samples_to_rgb};
 use crate::resources::dict_ext::DictExt as _;
@@ -35,7 +36,83 @@ use gpu::GpuCtx;
 ///
 /// `Indexed` images with bpc 1/2/4 unpack the sub-byte palette indices first.
 /// CMYK images (bpc 8/16) are converted to RGB inline.
+///
+/// A colour-key `/Mask` array (§8.9.6.4) on a non-stencil image becomes the
+/// descriptor's mask, compared on the stored samples: see
+/// [`raw_colour_key_mask`].
 pub(super) fn decode_raw(
+    doc: &Document,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    is_mask: bool,
+    dict: &Dictionary,
+    #[cfg(feature = "gpu-icc")] icc: &mut super::IccHandles<'_>,
+) -> Option<ImageDescriptor> {
+    let mut img = decode_raw_samples(
+        doc,
+        data,
+        width,
+        height,
+        is_mask,
+        dict,
+        #[cfg(feature = "gpu-icc")]
+        icc,
+    )?;
+    if !is_mask && let Some(Object::Array(ranges)) = dict.get(b"Mask") {
+        img.smask = raw_colour_key_mask(doc, data, width, height, dict, ranges);
+        if img.smask.is_none() {
+            log::warn!(
+                "image: colour-key /Mask malformed or mismatched — blitting image without mask"
+            );
+        }
+    }
+    Some(img)
+}
+
+/// The colour-key mask (§8.9.6.4) of a raw image with key ranges `ranges`.
+///
+/// The ranges are compared with the samples as stored: palette indices for
+/// `Indexed`, colorant values before any colour conversion, values of the
+/// image's own bit depth, and before `/Decode`.  Short data is
+/// zero-extended as for decoding.  `None` for an unsupported depth or key
+/// ranges that do not match the colour space.
+fn raw_colour_key_mask(
+    doc: &Document,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    dict: &Dictionary,
+    ranges: &[Object],
+) -> Option<SoftMask> {
+    let bpc = dict.get_i64(b"BitsPerComponent").unwrap_or(8);
+    let Ok(bits @ (1 | 2 | 4 | 8 | 16)) = usize::try_from(bpc) else {
+        return None;
+    };
+    let components = dict
+        .get(b"ColorSpace")
+        .map_or(1, |cs| resolve(doc, cs).ncomponents());
+    let data = zero_extended(data, width, height, bpc, components)?;
+    let w = usize::try_from(width).ok()?;
+    // `zero_extended` checked that this product does not overflow.
+    let row_bytes = (w * components * bits).div_ceil(8);
+    colour_key_mask_with(ranges, components, width, height, |p, c| {
+        let row = &data[(p / w) * row_bytes..];
+        let i = (p % w) * components + c;
+        match bits {
+            8 => u32::from(row[i]),
+            16 => u32::from(u16::from_be_bytes([row[2 * i], row[2 * i + 1]])),
+            _ => {
+                let bit = i * bits;
+                let mask = (1u8 << bits) - 1;
+                u32::from((row[bit / 8] >> (8 - bits - bit % 8)) & mask)
+            }
+        }
+    })
+}
+
+/// [`decode_raw`] without the colour-key mask.
+fn decode_raw_samples(
     doc: &Document,
     data: &[u8],
     width: u32,
