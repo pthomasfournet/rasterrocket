@@ -37,8 +37,7 @@
 //! outside any image (dimensions are capped at 65 536 px) and is rejected by
 //! the range check.
 
-use raster::types::AA_SIZE;
-use raster::{AaBuf, Clip, ClipResult, simd};
+use raster::{Clip, ClipResult, ClipRows, RowClip};
 
 use super::image_reduce::{AXIS_TOLERANCE, REDUCTION_MARGIN};
 use crate::renderer::gstate::{Ctm, ctm_transform};
@@ -505,25 +504,10 @@ impl<'a> MaskSampler<'a> {
     }
 }
 
-/// Admission of a [`SampleGrid`]'s pixels by the graphics-state clip.
-///
-/// The grid's bounding box is classified once against the clip; rows and
-/// then pixels are tested only as finely as that classification requires,
-/// so an unclipped image costs one rectangle test and a clipped one costs a
-/// span test per row plus a coverage computation on rows the clip edge
-/// crosses.
-pub(super) struct GridClip<'a> {
-    clip: &'a Clip,
-    bbox: ClipResult,
-    /// Inclusive column span of the grid, device pixels.
-    x0: i32,
-    x1: i32,
-    /// Sub-sample scratch for antialiased clips, allocated on the first row
-    /// the clip edge crosses.
-    aa_buf: Option<AaBuf>,
-    /// Per-column coverage of the current partial row, indexed from `x0`.
-    coverage: Vec<u8>,
-}
+/// Admission of a [`SampleGrid`]'s pixels by the graphics-state clip: the
+/// clip's [`ClipRows`] over the grid's rectangle, addressed in grid
+/// coordinates.
+pub(super) struct GridClip<'a>(ClipRows<'a>);
 
 impl<'a> GridClip<'a> {
     #[expect(
@@ -531,21 +515,18 @@ impl<'a> GridClip<'a> {
         reason = "grid edges are clamped to the page, which fits i32"
     )]
     pub(super) fn new(clip: &'a Clip, grid: &SampleGrid) -> Self {
-        let (x0, y0) = (grid.x0 as i32, grid.y0 as i32);
-        let (x1, y1) = (grid.x1 as i32 - 1, grid.y1 as i32 - 1);
-        Self {
+        Self(ClipRows::new(
             clip,
-            bbox: clip.test_rect(x0, y0, x1, y1),
-            x0,
-            x1,
-            aa_buf: None,
-            coverage: Vec::new(),
-        }
+            grid.x0 as i32,
+            grid.y0 as i32,
+            grid.x1 as i32 - 1,
+            grid.y1 as i32 - 1,
+        ))
     }
 
     /// Classification of the whole grid bounding box.
     pub(super) const fn bbox(&self) -> ClipResult {
-        self.bbox
+        self.0.bbox()
     }
 
     /// Coverage for row `dy` of the grid, or `None` when the clip excludes
@@ -554,107 +535,23 @@ impl<'a> GridClip<'a> {
         clippy::cast_possible_wrap,
         reason = "dy < grid.y1 ≤ page height, which fits i32"
     )]
-    pub(super) fn row(&mut self, dy: u32) -> Option<RowClip<'_>> {
-        let y = dy as i32;
-        let res = if self.bbox == ClipResult::AllInside {
-            ClipResult::AllInside
-        } else {
-            self.clip.test_span(self.x0, self.x1, y)
-        };
-        match res {
-            ClipResult::AllOutside => None,
-            ClipResult::AllInside => Some(RowClip::Full),
-            ClipResult::Partial => {
-                self.partial_coverage(y);
-                Some(RowClip::Partial {
-                    x0: self.x0,
-                    coverage: &self.coverage,
-                })
-            }
-        }
-    }
-
-    /// Fill `self.coverage` for a row the clip edge crosses.
-    ///
-    /// With an antialiased clip, every sub-sample of the grid's columns is
-    /// set, intersected with the clip by [`Clip::clip_aa_line`], counted per
-    /// pixel and mapped through the AA gamma table, exactly as a fill's
-    /// coverage is.  A rectangle-only clip has integer bounds, so its columns
-    /// come out fully covered or uncovered.  A non-antialiased clip uses the
-    /// binary pixel test.
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "x0 ≥ 0 (grid clamped to the page) and the clipped span lies within [x0, x1]"
-    )]
-    fn partial_coverage(&mut self, y: i32) {
-        let width = (self.x1 - self.x0 + 1) as usize;
-        self.coverage.clear();
-        self.coverage.resize(width, 0);
-        if !self.clip.antialias {
-            for (dx, cov) in (self.x0..=self.x1).zip(self.coverage.iter_mut()) {
-                if self.clip.test(dx, y) {
-                    *cov = 255;
-                }
-            }
-            return;
-        }
-        let aa_size = AA_SIZE as usize;
-        let buf = self
-            .aa_buf
-            .get_or_insert_with(|| AaBuf::new(self.x1 as usize + 1));
-        buf.clear();
-        for sub_row in 0..buf.height {
-            buf.set_span(
-                sub_row,
-                self.x0 as usize * aa_size,
-                (self.x1 as usize + 1) * aa_size,
-            );
-        }
-        let (mut cx0, mut cx1) = (self.x0, self.x1);
-        self.clip.clip_aa_line(buf, &mut cx0, &mut cx1, y);
-        let (cx0, cx1) = (cx0.max(self.x0), cx1.min(self.x1));
-        if cx0 > cx1 {
-            return;
-        }
-        let rows = [
-            buf.row_slice(0),
-            buf.row_slice(1),
-            buf.row_slice(2),
-            buf.row_slice(3),
-        ];
-        let span = &mut self.coverage[(cx0 - self.x0) as usize..=(cx1 - self.x0) as usize];
-        simd::aa_coverage_span(rows, cx0 as usize, span);
-        // An uncovered span maps to zeros, which callers skip; the
-        // any-covered flag adds nothing here.
-        let _any_covered = simd::apply_aa_gamma(span);
+    pub(super) fn row(&mut self, dy: u32) -> Option<GridRow<'_>> {
+        self.0.row(dy as i32).map(GridRow)
     }
 }
 
-/// Coverage of the pixels on one grid row.
-pub(super) enum RowClip<'a> {
-    /// The whole row lies inside the clip.
-    Full,
-    /// The clip edge crosses the row; `coverage[i]` is the shape (0–255) of
-    /// device column `x0 + i`.
-    Partial { x0: i32, coverage: &'a [u8] },
-}
+/// Clip coverage of the pixels on one grid row.
+pub(super) struct GridRow<'a>(RowClip<'a>);
 
-impl RowClip<'_> {
+impl GridRow<'_> {
     /// Clip coverage (0 = outside, 255 = inside) of device column `dx`.
     #[inline]
     #[expect(
         clippy::cast_possible_wrap,
-        clippy::cast_sign_loss,
-        reason = "dx < grid.x1 ≤ page width, which fits i32; the index is checked by get"
+        reason = "dx < grid.x1 ≤ page width, which fits i32"
     )]
     pub(super) fn coverage(&self, dx: u32) -> u8 {
-        match self {
-            Self::Full => 255,
-            Self::Partial { x0, coverage } => coverage
-                .get((dx as i32 - x0) as usize)
-                .copied()
-                .unwrap_or(0),
-        }
+        self.0.coverage(dx as i32)
     }
 }
 

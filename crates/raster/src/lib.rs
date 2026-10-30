@@ -51,7 +51,7 @@ pub(crate) mod testutil;
 #[cfg(feature = "rayon")]
 pub use bitmap::BitmapBand;
 pub use bitmap::{AaBuf, Bitmap};
-pub use clip::{Clip, ClipResult};
+pub use clip::{Clip, ClipResult, ClipRows, RowClip};
 #[cfg(feature = "rayon")]
 pub use fill::{PARALLEL_FILL_MIN_HEIGHT, eo_fill_parallel, fill_parallel};
 pub use fill::{eo_fill, fill};

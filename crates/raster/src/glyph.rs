@@ -10,10 +10,11 @@
 //! `Splash::fillGlyph2`.
 
 use crate::bitmap::Bitmap;
-use crate::clip::{Clip, ClipResult};
+use crate::clip::{Clip, ClipResult, ClipRows, RowClip};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::simd;
 use color::Pixel;
+use color::convert::div255;
 
 /// A rasterized glyph bitmap as produced by a font renderer.
 ///
@@ -61,7 +62,9 @@ impl GlyphBitmap<'_> {
 ///
 /// `clip_all_inside` — if `true`, skip per-pixel clip tests (the caller has
 /// already determined the entire glyph bbox is inside the clip region).
-/// When `false`, the `clip` is tested per pixel.
+/// When `false`, each glyph pixel is scaled by the clip's coverage of that
+/// pixel ([`ClipRows`]), so an antialiased clip edge crossing the glyph is
+/// antialiased as it is for a path fill.
 ///
 /// The `pipe` and `src` describe the fill colour and compositing parameters.
 ///
@@ -123,12 +126,19 @@ pub fn blit_glyph<P: Pixel>(
     #[expect(clippy::cast_sign_loss, reason = "y_end > y_clip by guard above")]
     let yy_limit = (y_end - y_clip) as usize;
     let row_bytes = glyph.row_bytes();
+    let mut clip_rows =
+        (!clip_all_inside).then(|| ClipRows::new(clip, x_clip, y_clip, x_end - 1, y_end - 1));
+    if clip_rows
+        .as_ref()
+        .is_some_and(|rows| rows.bbox() == ClipResult::AllOutside)
+    {
+        return;
+    }
 
     if glyph.aa {
         blit_aa::<P>(
             bitmap,
-            clip,
-            clip_all_inside,
+            clip_rows.as_mut(),
             pipe,
             src,
             glyph,
@@ -143,8 +153,7 @@ pub fn blit_glyph<P: Pixel>(
     } else {
         blit_mono::<P>(
             bitmap,
-            clip,
-            clip_all_inside,
+            clip_rows.as_mut(),
             pipe,
             src,
             glyph,
@@ -166,8 +175,7 @@ pub fn blit_glyph<P: Pixel>(
 )]
 fn blit_aa<P: Pixel>(
     bitmap: &mut Bitmap<P>,
-    clip: &Clip,
-    clip_all_inside: bool,
+    mut clip_rows: Option<&mut ClipRows<'_>>,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
     glyph: &GlyphBitmap<'_>,
@@ -198,6 +206,9 @@ fn blit_aa<P: Pixel>(
         )]
         #[expect(clippy::cast_possible_wrap, reason = "yy < bitmap.height ≤ i32::MAX")]
         let y = y_start + yy as i32;
+        let Some(row_clip) = row_clip(clip_rows.as_deref_mut(), y) else {
+            continue;
+        };
         let row_off = (y_data_skip + yy) * row_bytes + x_data_skip;
 
         let mut run_start: Option<i32> = None;
@@ -211,10 +222,9 @@ fn blit_aa<P: Pixel>(
             #[expect(clippy::cast_possible_wrap, reason = "xx < bitmap.width ≤ i32::MAX")]
             let x = x_start + xx as i32;
             let data_idx = row_off + xx;
-            let alpha = data.get(data_idx).copied().unwrap_or(0);
-            let inside_clip = clip_all_inside || clip.test(x, y);
+            let alpha = clipped(data.get(data_idx).copied().unwrap_or(0), row_clip, x);
 
-            if inside_clip && alpha != 0 {
+            if alpha != 0 {
                 if run_start.is_none() {
                     run_start = Some(x);
                     run_shape.clear();
@@ -241,8 +251,7 @@ fn blit_aa<P: Pixel>(
 )]
 fn blit_mono<P: Pixel>(
     bitmap: &mut Bitmap<P>,
-    clip: &Clip,
-    clip_all_inside: bool,
+    mut clip_rows: Option<&mut ClipRows<'_>>,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
     glyph: &GlyphBitmap<'_>,
@@ -263,6 +272,8 @@ fn blit_mono<P: Pixel>(
     // Scratch buffer for SIMD-expanded bits: one byte per pixel, 0x00 or 0xFF.
     // Sized to the maximum row width; reused across rows.
     let mut expanded: Vec<u8> = vec![0u8; xx_limit];
+    // Run shape scratch for rows the clip edge crosses.
+    let mut shape: Vec<u8> = Vec::new();
 
     for yy in 0..yy_limit {
         #[expect(
@@ -271,6 +282,25 @@ fn blit_mono<P: Pixel>(
         )]
         #[expect(clippy::cast_possible_wrap, reason = "yy < bitmap.height ≤ i32::MAX")]
         let y = y_start + yy as i32;
+        let Some(row_clip) = row_clip(clip_rows.as_deref_mut(), y) else {
+            continue;
+        };
+        if let RowClip::Partial { .. } = row_clip {
+            blit_mono_row_clipped::<P>(
+                bitmap,
+                pipe,
+                src,
+                data,
+                (y_data_skip + yy) * row_bytes,
+                x_data_skip,
+                x_start,
+                xx_limit,
+                y,
+                row_clip,
+                &mut shape,
+            );
+            continue;
+        }
         let row_off = (y_data_skip + yy) * row_bytes + x_data_skip / 8;
 
         // Use SIMD unpack when x_shift == 0 (bits are byte-aligned) and the
@@ -295,10 +325,7 @@ fn blit_mono<P: Pixel>(
                 )]
                 #[expect(clippy::cast_possible_wrap, reason = "xx < bitmap.width ≤ i32::MAX")]
                 let x = x_start + xx as i32;
-                let set = cov != 0;
-                let inside_clip = clip_all_inside || clip.test(x, y);
-
-                if set && inside_clip {
+                if cov != 0 {
                     if run_start.is_none() {
                         run_start = Some(x);
                     }
@@ -354,10 +381,7 @@ fn blit_mono<P: Pixel>(
                     reason = "xx + bit < bitmap.width ≤ i32::MAX"
                 )]
                 let x = x_start + (xx + bit) as i32;
-                let set = (alpha0 >> (7 - bit)) & 1 != 0;
-                let inside_clip = clip_all_inside || clip.test(x, y);
-
-                if set && inside_clip {
+                if (alpha0 >> (7 - bit)) & 1 != 0 {
                     if run_start.is_none() {
                         run_start = Some(x);
                     }
@@ -380,6 +404,71 @@ fn blit_mono<P: Pixel>(
             let rx1 = x_start + xx_limit as i32 - 1;
             emit_solid_run::<P>(bitmap, pipe, src, rs, rx1, y);
         }
+    }
+}
+
+/// The clip coverage of row `y`: full when no clip applies, `None` when the
+/// clip excludes the row.
+fn row_clip<'r>(clip_rows: Option<&'r mut ClipRows<'_>>, y: i32) -> Option<RowClip<'r>> {
+    clip_rows.map_or(Some(RowClip::Full), |rows| rows.row(y))
+}
+
+/// Glyph coverage `alpha` at column `x` scaled by the clip's coverage.
+#[inline]
+fn clipped(alpha: u8, row_clip: RowClip<'_>, x: i32) -> u8 {
+    match row_clip {
+        RowClip::Full => alpha,
+        RowClip::Partial { .. } => div255(u32::from(alpha) * u32::from(row_clip.coverage(x))),
+    }
+}
+
+/// Blit one row of a mono glyph that the clip edge crosses: each set bit
+/// paints with the clip's coverage of its pixel as its shape.  Bit `i` of
+/// the row lies at bit `x_bit_skip + i` from byte `row_start`; bytes past the
+/// end of `data` read as zero.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal helper; all params necessary"
+)]
+fn blit_mono_row_clipped<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    data: &[u8],
+    row_start: usize,
+    x_bit_skip: usize,
+    x_start: i32,
+    xx_limit: usize,
+    y: i32,
+    row_clip: RowClip<'_>,
+    shape: &mut Vec<u8>,
+) {
+    let mut run_start: Option<i32> = None;
+    shape.clear();
+    for xx in 0..xx_limit {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "xx < xx_limit ≤ bitmap.width ≤ i32::MAX"
+        )]
+        let x = x_start + xx as i32;
+        let bit = x_bit_skip + xx;
+        let set = data
+            .get(row_start + bit / 8)
+            .is_some_and(|&byte| (byte >> (7 - bit % 8)) & 1 != 0);
+        let cov = if set { row_clip.coverage(x) } else { 0 };
+        if cov != 0 {
+            if run_start.is_none() {
+                run_start = Some(x);
+                shape.clear();
+            }
+            shape.push(cov);
+        } else if let Some(rs) = run_start.take() {
+            emit_aa_run::<P>(bitmap, pipe, src, rs, y, shape);
+        }
+    }
+    if let Some(rs) = run_start.take() {
+        emit_aa_run::<P>(bitmap, pipe, src, rs, y, shape);
     }
 }
 
@@ -687,6 +776,53 @@ mod tests {
         assert_eq!(bmp.row(0)[0].r, 0, "row 0 should be clipped");
         assert_eq!(bmp.row(1)[0].r, 0, "row 1 should be clipped");
         assert_eq!(bmp.row(2)[2].r, 255, "(2,2) should be painted");
+    }
+
+    /// A glyph crossed by the diagonal edge of an antialiased path clip takes
+    /// the clip's fractional coverage at the edge, for both glyph formats:
+    /// the edge pixels are painted partially, the interior fully, the
+    /// exterior not at all.
+    #[test]
+    fn aa_clip_edge_antialiases_glyph_pixels() {
+        use crate::path::PathBuilder;
+        use crate::xpath::XPath;
+
+        let mut clip = Clip::new(0.0, 0.0, 16.0, 16.0, true);
+        let mut builder = PathBuilder::new();
+        builder.move_to(0.0, 0.0).expect("move_to");
+        builder.line_to(16.0, 16.0).expect("line_to");
+        builder.line_to(0.0, 16.0).expect("line_to");
+        builder.close(false).expect("close");
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        clip.clip_to_path(&XPath::new(&builder.build(), &identity, 0.1, true), false);
+
+        let pipe = simple_pipe();
+        let color = [255u8, 0, 0];
+        let aa_data = vec![255u8; 16 * 16];
+        let mono_data = [0xFFu8; 2 * 16];
+        for (aa, data) in [(true, &aa_data[..]), (false, &mono_data[..])] {
+            let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 16, 4, false);
+            let src = PipeSrc::Solid(&color);
+            let glyph = GlyphBitmap {
+                data,
+                x: 0,
+                y: 0,
+                w: 16,
+                h: 16,
+                aa,
+            };
+            let res = fill_glyph::<Rgb8>(&mut bmp, &clip, &pipe, &src, 0, 0, &glyph);
+            assert_eq!(res, ClipResult::Partial);
+
+            // Below the diagonal y = x: inside; above: outside; on it: half.
+            assert_eq!(bmp.row(10)[2].r, 255, "aa={aa}: interior pixel");
+            assert_eq!(bmp.row(2)[10].r, 0, "aa={aa}: exterior pixel");
+            let edge = bmp.row(8)[8].r;
+            assert!(
+                0 < edge && edge < 255,
+                "aa={aa}: edge pixel must be partially covered, got {edge}"
+            );
+        }
     }
 
     #[test]

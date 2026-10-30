@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::bitmap::AaBuf;
 use crate::scanner::XPathScanner;
+use crate::simd;
 use crate::types::{AA_SIZE, splash_ceil, splash_floor};
 use crate::xpath::XPath;
 
@@ -283,6 +284,157 @@ impl Clip {
     fn test_clip_paths(&self, x: i32, y: i32) -> bool {
         let (tx, _, ty) = aa_coords(x, x, y, self.antialias);
         self.scanners.iter().all(|s| s.test(tx, ty))
+    }
+}
+
+// ── Row coverage ──────────────────────────────────────────────────────────────
+
+/// Per-pixel coverage of a clip over a fixed column span, row by row.
+///
+/// The span's bounding box is classified once against the clip; rows and
+/// then pixels are resolved only as finely as that classification requires.
+/// A row the clip edge crosses yields the same 0–255 shape a fill's edge
+/// would: with an antialiased clip, every sub-sample of the span is set,
+/// intersected with the clip by [`Clip::clip_aa_line`], counted per pixel and
+/// mapped through the AA gamma table.  A rectangle-only clip has integer
+/// bounds, so its columns come out fully covered or uncovered.  A
+/// non-antialiased clip uses the binary pixel test.
+pub struct ClipRows<'a> {
+    clip: &'a Clip,
+    bbox: ClipResult,
+    /// Inclusive column span, clamped to non-negative columns.
+    x0: i32,
+    x1: i32,
+    /// Sub-sample scratch, allocated on the first row the clip edge crosses.
+    aa_buf: Option<AaBuf>,
+    /// Per-column coverage of the current partial row, indexed from `x0`.
+    coverage: Vec<u8>,
+}
+
+impl<'a> ClipRows<'a> {
+    /// Coverage of `clip` over the inclusive rectangle `[x0, x1] × [y0, y1]`.
+    /// Columns left of zero are outside.
+    #[must_use]
+    pub fn new(clip: &'a Clip, x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        let x0 = x0.max(0);
+        let bbox = if x0 > x1 || y0 > y1 {
+            ClipResult::AllOutside
+        } else {
+            clip.test_rect(x0, y0, x1, y1)
+        };
+        Self {
+            clip,
+            bbox,
+            x0,
+            x1,
+            aa_buf: None,
+            coverage: Vec::new(),
+        }
+    }
+
+    /// Classification of the whole rectangle.
+    #[must_use]
+    pub const fn bbox(&self) -> ClipResult {
+        self.bbox
+    }
+
+    /// Coverage of row `y` over the span, or `None` when the clip excludes
+    /// the entire row.
+    pub fn row(&mut self, y: i32) -> Option<RowClip<'_>> {
+        let res = match self.bbox {
+            ClipResult::Partial => self.clip.test_span(self.x0, self.x1, y),
+            other => other,
+        };
+        match res {
+            ClipResult::AllOutside => None,
+            ClipResult::AllInside => Some(RowClip::Full),
+            ClipResult::Partial => {
+                self.partial_coverage(y);
+                Some(RowClip::Partial {
+                    x0: self.x0,
+                    coverage: &self.coverage,
+                })
+            }
+        }
+    }
+
+    /// Fill `self.coverage` for a row the clip edge crosses.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "x0 ≥ 0 and the clipped span lies within [x0, x1]"
+    )]
+    fn partial_coverage(&mut self, y: i32) {
+        let width = (self.x1 - self.x0 + 1) as usize;
+        self.coverage.clear();
+        self.coverage.resize(width, 0);
+        if !self.clip.antialias {
+            for (x, cov) in (self.x0..=self.x1).zip(self.coverage.iter_mut()) {
+                if self.clip.test(x, y) {
+                    *cov = 255;
+                }
+            }
+            return;
+        }
+        let aa_size = AA_SIZE as usize;
+        let buf = self
+            .aa_buf
+            .get_or_insert_with(|| AaBuf::new(self.x1 as usize + 1));
+        buf.clear();
+        for sub_row in 0..buf.height {
+            buf.set_span(
+                sub_row,
+                self.x0 as usize * aa_size,
+                (self.x1 as usize + 1) * aa_size,
+            );
+        }
+        let (mut cx0, mut cx1) = (self.x0, self.x1);
+        self.clip.clip_aa_line(buf, &mut cx0, &mut cx1, y);
+        let (cx0, cx1) = (cx0.max(self.x0), cx1.min(self.x1));
+        if cx0 > cx1 {
+            return;
+        }
+        let rows = [
+            buf.row_slice(0),
+            buf.row_slice(1),
+            buf.row_slice(2),
+            buf.row_slice(3),
+        ];
+        let span = &mut self.coverage[(cx0 - self.x0) as usize..=(cx1 - self.x0) as usize];
+        simd::aa_coverage_span(rows, cx0 as usize, span);
+        // An uncovered span maps to zeros, which callers skip; the
+        // any-covered flag adds nothing here.
+        let _any_covered = simd::apply_aa_gamma(span);
+    }
+}
+
+/// Clip coverage of the pixels on one row of a [`ClipRows`] span.
+#[derive(Clone, Copy, Debug)]
+pub enum RowClip<'a> {
+    /// The whole row lies inside the clip.
+    Full,
+    /// The clip edge crosses the row; `coverage[i]` is the shape (0–255) of
+    /// device column `x0 + i`.
+    Partial {
+        /// Device column of `coverage[0]`.
+        x0: i32,
+        /// Per-column shape.
+        coverage: &'a [u8],
+    },
+}
+
+impl RowClip<'_> {
+    /// Clip coverage (0 = outside, 255 = inside) of device column `x`.
+    #[inline]
+    #[must_use]
+    pub fn coverage(&self, x: i32) -> u8 {
+        match self {
+            Self::Full => 255,
+            Self::Partial { x0, coverage } => usize::try_from(x - x0)
+                .ok()
+                .and_then(|i| coverage.get(i))
+                .copied()
+                .unwrap_or(0),
+        }
     }
 }
 
