@@ -430,6 +430,7 @@ impl PageRenderer<'_> {
         // execute() loop is blocked synchronously here and never gets to tick
         // its own budget or check its own deadline.
         child.adopt_parent_budget(self);
+        child.share_image_memo(self);
 
         // If the pattern has no own resources, point it at the parent context.
         if !desc.has_own_resources {

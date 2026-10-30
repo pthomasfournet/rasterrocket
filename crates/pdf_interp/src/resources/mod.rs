@@ -503,17 +503,22 @@ impl<'doc> PageResources<'doc> {
         Some(ExtGStateParams::from_dict(self.doc, &gs))
     }
 
+    /// The object the `XObject` resource `name` refers to, when the entry is
+    /// an indirect reference (as `XObject` streams must be).
+    #[must_use]
+    pub fn xobject_id(&self, name: &[u8]) -> Option<ObjectId> {
+        match self.resource_subdict(Category::XObject)?.get(name)? {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     /// Resolve the named `XObject` and return it as a [`FormXObject`] if its
     /// subtype is `Form`.  Returns `None` for Image `XObjects`, missing names,
     /// or unreadable streams.
     #[must_use]
     pub fn form_xobject(&self, name: &[u8]) -> Option<FormXObject> {
-        let xobj_dict = self.resource_subdict(Category::XObject)?;
-        let Object::Reference(id) = xobj_dict.get(name)? else {
-            return None;
-        };
-        let stream_id = *id;
-
+        let stream_id = self.xobject_id(name)?;
         let obj = self.doc.get_object(stream_id).ok()?;
         let stream = obj.as_stream()?;
 

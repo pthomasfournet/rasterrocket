@@ -378,7 +378,8 @@ pub struct ImageRequest<'a> {
     /// Device-pixel extent `(width, height)` the image's unit square maps to,
     /// when known.  A decoder that can reconstruct at reduced resolution
     /// (JPEG 2000) decodes at no less than this along either axis; `None`
-    /// decodes at full resolution.
+    /// decodes at full resolution.  Every other decoder ignores it, so their
+    /// decodes serve draws of any size.
     pub draw_size: Option<(u32, u32)>,
 }
 

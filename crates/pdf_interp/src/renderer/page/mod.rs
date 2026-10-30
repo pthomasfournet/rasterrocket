@@ -46,6 +46,7 @@
 
 mod annotations;
 mod gpu_ops;
+mod image_memo;
 mod image_reduce;
 mod image_sampler;
 mod operators;
@@ -330,6 +331,9 @@ pub struct PageRenderer<'doc> {
     /// of its blit so a blit failure is attributed to it; `None` while an
     /// inline image is drawn.
     current_image: Option<String>,
+    /// Image `XObjects` already decoded on this page, shared with the
+    /// renderers of its pattern cells.
+    image_memo: image_memo::SharedImageMemo,
     /// Maximum operators this page may execute before the render is aborted.
     op_budget: u64,
     /// Absolute wall-clock deadline for this page render.
@@ -573,6 +577,7 @@ impl<'doc> PageRenderer<'doc> {
             group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
             current_image: None,
+            image_memo: image_memo::ImageMemo::shared(),
             op_budget: MAX_PAGE_OPS,
             deadline: Some(
                 std::time::Instant::now()
@@ -812,6 +817,13 @@ impl<'doc> PageRenderer<'doc> {
         self.ops_executed = 0;
         self.deadline = parent.deadline;
         self.budget_exceeded.clone_from(&parent.budget_exceeded);
+    }
+
+    /// Draw image `XObjects` from `parent`'s image memo, and keep this
+    /// renderer's decodes in it, so a pattern cell does not decode an
+    /// image the page has already decoded.
+    pub(super) fn share_image_memo(&mut self, parent: &Self) {
+        self.image_memo = std::rc::Rc::clone(&parent.image_memo);
     }
 
     /// Fold a finished child renderer (a tiling-pattern tile) into its
@@ -1365,11 +1377,15 @@ impl<'doc> PageRenderer<'doc> {
             self.do_form_xobject(&form);
             return;
         }
-        // Try Image.
-        let request = crate::resources::ImageRequest {
-            name,
-            draw_size: image_draw_size(&self.gstate.current().ctm),
-        };
+        // Try Image, decoding it only when this page has not already.
+        let draw_size = image_draw_size(&self.gstate.current().ctm);
+        let id = self.resources.xobject_id(name);
+        let memoized = id.and_then(|id| self.image_memo.borrow().get(id, draw_size));
+        if let Some(decoded) = memoized {
+            self.draw_image_xobject(name, &decoded);
+            return;
+        }
+        let request = crate::resources::ImageRequest { name, draw_size };
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
             color_spaces: None,
@@ -1406,12 +1422,14 @@ impl<'doc> PageRenderer<'doc> {
             #[cfg(feature = "gpu-jpeg-huffman")]
             self.jpeg_gpu.as_mut(),
         );
-        self.handle_image_resolution(name, resolution);
+        self.handle_image_resolution(name, resolution, id.map(|id| (id, draw_size)));
     }
 
     /// Dispatch on an [`ImageResolution`] returned from [`PageResources::image`].
     ///
-    /// - `Ok` → blit the image.
+    /// - `Ok` → blit the image, keeping it in the page's image memo under
+    ///   `memo_key` (the stream object and the draw size it was decoded
+    ///   for) when given.
     /// - `DecodeFailed` → record the failure in the page diagnostics and skip
     ///   the image; the pixel region keeps what was painted beneath it.
     /// - `Absent` → a non-image `XObject` subtype with no raster appearance;
@@ -1420,14 +1438,17 @@ impl<'doc> PageRenderer<'doc> {
         &mut self,
         name: &[u8],
         resolution: crate::resources::image::ImageResolution,
+        memo_key: Option<(ObjectId, Option<(u32, u32)>)>,
     ) {
         use crate::resources::image::ImageResolution;
         match resolution {
-            ImageResolution::Ok(decoded) => {
-                self.current_image = Some(String::from_utf8_lossy(name).into_owned());
-                self.blit_image(&decoded);
-                self.current_image = None;
-            }
+            ImageResolution::Ok(decoded) => match memo_key {
+                Some((id, draw_size)) => {
+                    let decoded = self.image_memo.borrow_mut().insert(id, draw_size, decoded);
+                    self.draw_image_xobject(name, &decoded);
+                }
+                None => self.draw_image_xobject(name, &decoded),
+            },
             ImageResolution::DecodeFailed(msg) => {
                 self.record_image_failure(Some(String::from_utf8_lossy(name).into_owned()), msg);
             }
@@ -1438,6 +1459,14 @@ impl<'doc> PageRenderer<'doc> {
                 );
             }
         }
+    }
+
+    /// Blit the decoded image `XObject` `name`, attributing a blit failure
+    /// to it.
+    fn draw_image_xobject(&mut self, name: &[u8], decoded: &crate::resources::DecodedImage) {
+        self.current_image = Some(String::from_utf8_lossy(name).into_owned());
+        self.blit_image(decoded);
+        self.current_image = None;
     }
 
     /// Execute a Form `XObject`'s content stream in the current graphics context.
