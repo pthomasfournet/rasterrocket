@@ -595,11 +595,14 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
 
     loop {
         skip_ws(data, pos);
+        if *pos >= data.len() {
+            break;
+        }
         if data[*pos..].starts_with(b">>") {
             *pos += 2;
             break;
         }
-        if *pos >= data.len() || at_object_keyword(data, *pos) {
+        if at_object_keyword(data, *pos) {
             break;
         }
         // Key must be a Name.
@@ -627,8 +630,8 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
             continue;
         }
         // Step over the token that is not a value; a lone delimiter is one
-        // byte.
-        if scan_token(data, pos).is_empty() {
+        // byte.  At the end of the data there is nothing to step over.
+        if scan_token(data, pos).is_empty() && *pos < data.len() {
             *pos += 1;
         }
     }
@@ -978,6 +981,20 @@ mod tests {
             entries(b"<< /A 1 /B >>"),
             vec![(b"A".to_vec(), Object::Integer(1))]
         );
+    }
+
+    /// A dictionary cut off after a key, or inside a key's value, ends at
+    /// the end of the data with the entries read so far.
+    #[test]
+    fn truncated_dictionary_ends_at_end_of_data() {
+        for src in [&b"<< /A 1 /B"[..], b"<< /A 1 /B ", b"<</A 1/B"] {
+            let mut pos = 0;
+            let Some(Object::Dictionary(d)) = parse_object(src, &mut pos) else {
+                panic!("expected a dictionary: {}", String::from_utf8_lossy(src));
+            };
+            assert_eq!(d.get(b"A"), Some(&Object::Integer(1)));
+            assert!(pos <= src.len());
+        }
     }
 
     /// `endobj` or `stream` where an entry is expected ends the dictionary
