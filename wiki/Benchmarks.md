@@ -1,5 +1,15 @@
 # Benchmarks
 
+> **Every table on this page is historical.** They were measured between
+> v0.1.0 and v1.0.0 (April–May 2026) and none has been re-run on the current
+> tree (v1.5.0 and later), whose font rasteriser, colour conversion,
+> transparency and image paths have all changed since. Two of the machines
+> (the i7-8700K and its RTX 2080 SUPER) have been retired. Each section says
+> which release it measured where that was recorded. The
+> [Reproducing](#reproducing) section lists the tools that measure the current
+> tree: instruction counts against the last release (run weekly in CI) and
+> per-page latency against pdfium.
+
 ## Methodology
 
 All benchmarks render all pages of each corpus PDF at **150 DPI** (the default) to PPM output, measuring wall-clock time with millisecond precision. Each tool is run sequentially (one PDF at a time, one tool at a time) to avoid contention. Output files are written to a tmpfs temporary directory and discarded. The input PDF is evicted from the OS page cache before each timed run via `posix_fadvise(FADV_DONTNEED)`, ensuring cold-cache reads that reflect real-world single-run usage.
@@ -8,7 +18,7 @@ All benchmarks render all pages of each corpus PDF at **150 DPI** (the default) 
 
 | Tool | Version |
 |---|---|
-| rasterrocket | v1.0.0, built with `-C target-cpu=native` (not re-run since; tree is now 1.2.0 + unreleased work) |
+| rasterrocket | per section (v0.1.0 – v1.0.0), built with `-C target-cpu=native` |
 | pdftoppm (Poppler) | 24.02.0 (Ryzen), 25.03.0 (Intel) |
 
 **Corpus:** 10 real-world PDFs spanning the common workload categories. Files are not distributed with the repository (see `.gitignore`); the corpus used internally matches the 10 fixture files in `tests/fixtures/corpus-*.pdf`.
@@ -29,6 +39,8 @@ All benchmarks render all pages of each corpus PDF at **150 DPI** (the default) 
 ---
 
 ## CPU-only: Ryzen 9 9900X3D (AVX-512) vs Intel i7-8700K (AVX2)
+
+The rasterrocket version measured here was not recorded. Its corpus-08 and -09 times are 5–7× the v0.9.1 figures in the [regression history](#version-regression-history-cpu-only-cold-cache), so the table predates v0.6.0's parser and output changes; the pdftoppm columns remain a fair reference for pdftoppm itself. The Intel machine has since been retired.
 
 Both binaries built **without GPU features** (`--backend cpu`). This isolates the SIMD and interpreter work from GPU acceleration, and shows how the AVX-512 specialisation in the `raster` crate translates to real-world throughput.
 
@@ -70,7 +82,9 @@ Both binaries built **without GPU features** (`--backend cpu`). This isolates th
 
 The Ryzen 9 9900X3D includes an integrated Radeon GPU (raphael/mendocino RDNA 2) accessible via VA-API on `/dev/dri/renderD129`. This is a first functional test of the VA-API JPEG decode path against the CPU-only baseline on the same machine.
 
-**Build:** `--features rasterrocket/vaapi`, `--backend vaapi --vaapi-device /dev/dri/renderD129`
+**Build:** `--features vaapi`, `--backend vaapi --vaapi-device /dev/dri/renderD129` (the node numbering on that host at the time).
+
+> In the current tree VA-API JPEG dispatch shares nvJPEG's size gate, `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so a `vaapi` build decodes every JPEG on the CPU and this comparison cannot be reproduced without changing that constant.
 
 | # | Document | Pages | VA-API (iGPU) | CPU-only | vs CPU |
 |---|---|---|---|---|---|
@@ -99,7 +113,7 @@ _All corpora: fresh uncontested cold-cache runs._
 
 ## GPU-accelerated: Ryzen 9 9900X3D + RTX 5070
 
-Built with all GPU features enabled (nvJPEG, nvJPEG2000, GPU AA fill, ICC CLUT). Compared against `pdftoppm` (CPU only) on the same machine.
+Built with all GPU features enabled (nvJPEG, nvJPEG2000, GPU AA fill, ICC CLUT). Compared against `pdftoppm` (CPU only) on the same machine. The rasterrocket version was not recorded. nvJPEG and the GPU AA fill have since been disabled by default because the CPU paths beat them, so a current GPU build uses only nvJPEG2000 and the ICC CLUT from this list.
 
 | # | Document | Pages | rasterrocket (GPU) | pdftoppm | Speedup |
 |---|---|---|---|---|---|
@@ -120,9 +134,9 @@ GPU gains are largest on scan-heavy corpora where nvJPEG and nvJPEG2000 offload 
 
 ## GPU-accelerated: Intel i7-8700K + RTX 2080 Super (Turing, sm_75)
 
-Built with nvJPEG, GPU AA fill, and ICC CLUT features. nvJPEG2000 is not available on Turing (sm_75); JBIG2/JPEG2000 streams fall through to CPU. Compared against `pdftoppm` (CPU only) on the same machine.
+The rasterrocket version was not recorded; the testbench was retired in July 2026. Built with nvJPEG, GPU AA fill, and ICC CLUT features. nvJPEG2000 is not available on Turing (sm_75); JBIG2/JPEG2000 streams fall through to CPU. Compared against `pdftoppm` (CPU only) on the same machine.
 
-**Build:** `CUDA_ARCH=sm_75 LIBZ_SYS_STATIC=1 RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli --features "rasterrocket/nvjpeg,rasterrocket/gpu-aa,rasterrocket/gpu-icc"`
+**Build:** `CUDA_ARCH=sm_75 RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli --features "nvjpeg,gpu-aa,gpu-icc"`
 
 | # | Document | Pages | rasterrocket (GPU) | pdftoppm | Speedup |
 |---|---|---|---|---|---|
@@ -151,7 +165,7 @@ Built with nvJPEG, GPU AA fill, and ICC CLUT features. nvJPEG2000 is not availab
 
 End-to-end render timings for `--backend cpu` (mode A), `--backend cuda` with `nvjpeg,gpu-aa,gpu-icc` (mode D), and `--backend vulkan` with `vulkan,gpu-aa` (mode V). Vector-/text-heavy corpora 01–05 only — DCT-heavy corpora 06–10 deliberately skipped because the Vulkan binary doesn't include nvjpeg, so they would compare CPU JPEG decode against silicon and bias the result away from what the Vulkan backend actually migrated.
 
-**Build:** `CUDA_ARCH=sm_120 scripts/bench_v10.sh`. Hyperfine 5 runs / 1 warmup; `posix_fadvise(FADV_DONTNEED)` cache eviction between runs.
+Measured for the Vulkan backend gate in May 2026 (`bench/v10/`). **Build:** `CUDA_ARCH=sm_120`, with the since-retired `scripts/bench_v10.sh`. Hyperfine 5 runs / 1 warmup; `posix_fadvise(FADV_DONTNEED)` cache eviction between runs.
 
 | # | Document | Pages | A. CPU-only | D. CUDA full GPU | V. Vulkan |
 |---|---|---|---|---|---|
@@ -168,7 +182,7 @@ End-to-end render timings for `--backend cpu` (mode A), `--backend cuda` with `n
 | CUDA path no regression vs v0.7.0 mode D | ≤ +5% slower | **PASS** on all 5 corpora (Δ −11.2% … +2.6% vs live-captured v0.7.0 baseline) |
 | Vulkan pixel-diff ≤ 1 LSB vs CUDA | byte-identical | **PASS** (16/16 byte-identical on corpus-02; 358/358 byte-identical Vulkan-vs-CPU on corpus-04) |
 | Vulkan timing within 15% of CUDA | ≤ 1.15× | **PASS** — Vulkan is faster than CUDA on every corpus (V/D 0.27–0.82×) |
-| Cross-vendor proof of life on AMD or Intel | first-pixel render | **BLOCKED** on hardware (no AMD/Intel GPU on this dev box) |
+| Cross-vendor proof of life on AMD or Intel | first-pixel render | **BLOCKED** at the time on hardware; the backend has since run on the dev box's AMD integrated GPU (RADV), with no formal parity run |
 
 The Vulkan-faster-than-CUDA result is not strictly apples-to-apples: CUDA mode D pays nvjpeg / ICC-CLUT init even on text-only corpora that don't decode JPEGs; the Vulkan binary skips those. The baseline for criterion 1 is **live-captured** rather than read from `bench/v070/D.txt` — driver/system state has drifted since v0.7.0, so stale numbers would have flagged an environmental change as a regression.
 
@@ -176,7 +190,7 @@ The Vulkan-faster-than-CUDA result is not strictly apples-to-apples: CUDA mode D
 
 ## v0.9.0 four-mode benchmark (RTX 5070 + 9900X3D)
 
-Four-mode full-corpus run covering CPU-only (A), CUDA+nvJPEG (D), CUDA parallel-Huffman (H), and Vulkan parallel-Huffman (V). Mode V was not available on this bench machine (no Vulkan ICD detected). Run with `scripts/bench_v090.sh`; results in `bench/v090/results.md`.
+Four-mode full-corpus run covering CPU-only (A), CUDA+nvJPEG (D), CUDA parallel-Huffman (H), and Vulkan parallel-Huffman (V). Mode V was not available on this bench machine (no Vulkan ICD detected). Run with the since-retired `scripts/bench_v090.sh`; results in `bench/v090/results.md`.
 
 **Mode H** exercises the `gpu-jpeg-huffman` path (`JpegGpuDecoder<CudaBackend>`). `GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX` keeps the path dormant in production — these are architecture-validation numbers, not production dispatch numbers.
 
@@ -199,7 +213,7 @@ Mode A ran under load 1.3; modes D and H ran under load 27–30 (other work in p
 
 ## v0.9.1 five-mode benchmark (RTX 5070 + 9900X3D)
 
-Five-mode full-corpus run: CPU-only (A), CUDA+nvJPEG (C-std), CUDA parallel-Huffman (C-huff), Vulkan with CPU JPEG (V-std), Vulkan parallel-Huffman (V-huff). `PDF_RASTER_HUFFMAN_THRESHOLD=0` forces all eligible JPEGs through the GPU parallel-Huffman path for the Huffman modes. Run with `scripts/bench_v091.sh`; raw results in `bench/v091/`.
+Five-mode full-corpus run: CPU-only (A), CUDA+nvJPEG (C-std), CUDA parallel-Huffman (C-huff), Vulkan with CPU JPEG (V-std), Vulkan parallel-Huffman (V-huff). `PDF_RASTER_HUFFMAN_THRESHOLD=0` forces all eligible JPEGs through the GPU parallel-Huffman path for the Huffman modes. Run with the since-retired `scripts/bench_v091.sh`; raw results in `bench/v091/`.
 
 | Corpus | A. CPU-only | C-std. CUDA+nvJPEG | C-huff. CUDA Huffman | V-std. Vulkan (CPU JPEG) | V-huff. Vulkan Huffman |
 |---|---|---|---|---|---|
@@ -215,7 +229,7 @@ Five-mode full-corpus run: CPU-only (A), CUDA+nvJPEG (C-std), CUDA parallel-Huff
 | 10 Scan, JBIG2+JPX | 17 616 ± 260 ms | 17 539 ± 365 ms | 17 904 ± 162 ms | 18 129 ± 159 ms | 17 918 ± 372 ms |
 
 **Notes:**
-- C-huff beats C-std (nvJPEG) on 7/10 corpora. The gains are largest on text-heavy corpora (01–04) where nvJPEG's per-image init cost dominates over small-image decode time.
+- C-huff beats C-std (nvJPEG) on 8/10 corpora (all but 01 and 10). The gains are largest on text-heavy corpora (02–04) where nvJPEG's per-image init cost dominates over small-image decode time.
 - V-huff matches V-std on most corpora. The only clear win for GPU Huffman on Vulkan is corpus-08 (baseline JPEG, 390 pages): 2 854 ms vs 3 188 ms = 0.90×.
 - Vulkan is 3–5× slower than CPU-only on short workloads (01–05) due to per-process init amortisation. On production workloads with many documents, use `open_session` and keep the process alive.
 - `PDF_RASTER_HUFFMAN_THRESHOLD=0` forces dispatch for benchmarking; production default keeps the parallel-Huffman path dormant until the crossover threshold is tuned.
@@ -224,7 +238,7 @@ Five-mode full-corpus run: CPU-only (A), CUDA+nvJPEG (C-std), CUDA parallel-Huff
 
 ## Version regression history (CPU-only, cold cache)
 
-All five minor versions benchmarked on the Ryzen 9 9900X3D, CPU-only backend, 150 DPI, cold cache. No pdftoppm reference — this table is purely for tracking regression and improvement across releases.
+Every release from v0.1.0 to v0.9.1 benchmarked on the Ryzen 9 9900X3D, CPU-only backend, 150 DPI, cold cache. No pdftoppm reference — this table is purely for tracking regression and improvement across releases.
 
 Built with `RUSTFLAGS="-C target-cpu=native"` at each tagged commit. v0.1.0–v0.3.0 use `glibc malloc`; v0.4.0+ use `mimalloc`.
 
@@ -249,9 +263,9 @@ Built with `RUSTFLAGS="-C target-cpu=native"` at each tagged commit. v0.1.0–v0
 
 ### What the numbers show
 
-**Corpora 01–07 and 10 are essentially flat.** The native text, vector, JBIG2, and JPEG 2000 render paths have not regressed or improved in wall time across any release — variance is noise. This is both reassuring (no regressions) and honest (no CPU-path gains either).
+**Through v0.5.1, corpora 01–07 and 10 were essentially flat.** The native text, vector, JBIG2, and JPEG 2000 render paths neither regressed nor improved in wall time across those releases — variance is noise. From v0.6.0 the parser replacement and RAM-backed output cut corpora 03, 04, 06 and 08 by 2–8×.
 
-**Corpus 08 (baseline JPEG, 390 pages)** shows mild drift: +1–2 s added over v0.1.0 baseline. The renderer adds overhead with each release — more dispatch layers, more feature flag branches, more plumbing through the call stack — and it accumulates. At ~12 s total the regression is ~10% over five versions. Not catastrophic but real.
+**Corpus 08 (baseline JPEG, 390 pages)** drifted up through v0.5.1: +1–2 s over the v0.1.0 baseline, as each release added dispatch layers and feature-flag branches to the path. At ~12 s total that was ~10% over five versions, erased by v0.6.0.
 
 **Corpus 09 (progressive JPEG, 490 pages) is the headline.** v0.1.0 ran in 35 s. v0.2.0 blew up to 77 s — a 2.2× regression. v0.3.0 partially recovered (58 s), v0.4.0 remained slow (60 s), v0.5.1 recovered to 36 s (nearly back to v0.1.0), and v0.6.0 dropped to **2.54 s** — a 14× win over the previous best.
 
@@ -262,7 +276,7 @@ The cause: v0.2.0 introduced VA-API JPEG dispatch. Even on a CPU-only build, eve
 Two things broke open the workloads that had been stuck:
 
 - **lopdf rip-out.** lopdf 0.40 was replaced by an in-tree `pdf` crate (lazy mmap-based parser, threadsafe per-object cache, ObjStm cached once across workers, DOS-hardened). lopdf's `load_objects_raw` had been burning ~20% of corpus-07 cycles in `nom_locate`'s `memchr` on the main thread before any render worker could start, capping effective parallelism at ~1.6 of 24 cores. Corpus-07 went from 757 ms (v0.5.1) to **689 ms cold cache**, with the prior hot-cache best (~2.2 s) now beaten cold.
-- **RAM-backed output by default.** The previous temp-file + atomic-rename pattern triggered ext4 `auto_da_alloc` on every page, parking 24 workers in `do_renameat2`. v0.6.0 writes pages directly to `/dev/shm/rasterrocket-<pid>-<nanos>/` for bare-stem prefixes; a `SpillPolicy` polls `/proc/meminfo` every 100 ms and falls subsequent pages through to disk when MemAvailable drops below 1 GiB. This is the dominant factor in the corpus-09 result and a non-trivial contributor on every JPEG-heavy corpus.
+- **RAM-backed output by default.** The previous temp-file + atomic-rename pattern triggered ext4 `auto_da_alloc` on every page, parking 24 workers in `do_renameat2`. v0.6.0 writes pages directly to a fresh `/dev/shm` directory for bare-stem prefixes; a `SpillPolicy` polls `/proc/meminfo` every 100 ms and falls subsequent pages through to disk when MemAvailable drops below 1 GiB. This is the dominant factor in the corpus-09 result and a non-trivial contributor on every JPEG-heavy corpus.
 
 CPU utilisation (sampled with `mpstat`) on the v0.6.0 cold runs:
 
@@ -281,7 +295,7 @@ Corpora 01–04 finished faster than `mpstat`'s 1 s sampling window — CPU% is 
 
 The version history makes one thing clear: **every new dispatch layer has a cost that shows up in cold benchmarks even when the feature is not active.** Adding GPU/VA-API paths adds branching and initialization overhead that runs on every JPEG frame regardless of backend. This is the nature of a feature-rich pipeline — each capability added to the fast path is overhead added to all paths.
 
-The practical implication: **re-run this table before every release.** A new feature that looks neutral in isolation may show a corpus-09-style blowup only when measured across a full cold-cache run. `tests/bench/instructions.py` compares the instructions two builds retire, document by document; the weekly "Instruction counts" workflow runs it against the latest release tag.
+The practical implication: **measure every release against the previous one.** A new feature that looks neutral in isolation may show a corpus-09-style blowup only when measured across a full run. `tests/bench/instructions.py` compares the instructions two builds retire, document by document (single-threaded, CPU backend), which is stable to well under 1% where wall-clock time is not; the weekly "Instruction counts" workflow runs it against the latest release tag.
 
 ---
 
@@ -332,7 +346,8 @@ tools:
 # Build CPU-only release
 RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli
 
-# Instructions retired per document, two builds compared
+# Instructions retired per document, two builds compared (without --pdf or
+# --corpus-dir it renders a synthetic set built from files in the repository)
 python3 -I tests/bench/instructions.py BASE_BIN HEAD_BIN --corpus-dir tests/fixtures
 
 # Per-page latency against pdfium, both in process, one pinned core
@@ -345,11 +360,18 @@ hyperfine -w 1 './target/release/rrocket --no-ram --backend cpu input.pdf /tmp/o
 tests/compare/compare.sh -r 150 input.pdf
 ```
 
-To time the GPU backends, build with the full feature set and pass
-`--backend cuda` (or `vaapi`, `vulkan`) to the same `hyperfine` command:
+To time the GPU backends, build with the GPU features and pass
+`--backend cuda` (or `vaapi`, `vulkan`) to the same `hyperfine` command.
+nvJPEG, VA-API JPEG, the parallel-Huffman decoder and the AA fill are dormant
+by default (see the API reference's GPU dispatch thresholds);
+`PDF_RASTER_HUFFMAN_THRESHOLD=0` and `PDF_RASTER_AA_FILL_THRESHOLD=0` enable
+the last two at runtime:
 
 ```bash
 CUDA_ARCH=sm_120 RUSTFLAGS="-C target-cpu=native" \
   cargo build --release -p rasterrocket-cli \
   --features "nvjpeg,nvjpeg2k,gpu-aa,gpu-icc"
+
+RUSTFLAGS="-C target-cpu=native" \
+  cargo build --release -p rasterrocket-cli --features "vulkan,gpu-jpeg-huffman"
 ```
