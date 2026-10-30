@@ -10,7 +10,7 @@
 //! edge case looks wrong.
 
 mod path;
-use path::{flatten_path, make_dashed_path, make_stroke_path};
+use path::{dash_cycle, flatten_path, make_dashed_path, make_stroke_path};
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
@@ -70,8 +70,13 @@ pub fn stroke<P: Pixel>(
 
     let mut path2 = flatten_path(path, matrix, params.flatness);
 
-    if !params.line_dash.is_empty() {
-        path2 = make_dashed_path(&path2, params.line_dash, params.line_dash_phase);
+    let device_scale = matrix[0]
+        .mul_add(matrix[3], -(matrix[1] * matrix[2]))
+        .abs()
+        .sqrt();
+    if let Some((dash, phase)) = dash_cycle(params.line_dash, params.line_dash_phase, device_scale)
+    {
+        path2 = make_dashed_path(&path2, &dash, phase);
         if path2.pts.is_empty() {
             return;
         }
@@ -402,20 +407,58 @@ mod tests {
         );
     }
 
-    /// Zero dash array should return an empty path (Acrobat behaviour).
+    /// A dash cycle of zero length, or one shorter than a tenth of a device
+    /// pixel, strokes solid.
     #[test]
-    fn make_dashed_path_zero_dash_is_empty() {
+    fn degenerate_dash_cycles_stroke_solid() {
+        assert_eq!(dash_cycle(&[0.0], 0.0, 1.0), None);
+        assert_eq!(dash_cycle(&[0.0, 0.0], 0.0, 1.0), None);
+        assert_eq!(dash_cycle(&[1e-6], 0.0, 1.0), None);
+        assert_eq!(dash_cycle(&[0.04, 0.04], 0.0, 1.0), None);
+        assert!(dash_cycle(&[0.04, 0.04], 0.0, 4.0).is_some());
+    }
+
+    /// Non-finite or negative entries and a non-finite phase stroke solid.
+    #[test]
+    fn invalid_dash_entries_stroke_solid() {
+        assert_eq!(dash_cycle(&[f64::NAN], 0.0, 1.0), None);
+        assert_eq!(dash_cycle(&[f64::INFINITY, 2.0], 0.0, 1.0), None);
+        assert_eq!(dash_cycle(&[3.0, -1.0], 0.0, 1.0), None);
+        assert_eq!(dash_cycle(&[6.0], f64::INFINITY, 1.0), None);
+        assert_eq!(dash_cycle(&[], 0.0, 1.0), None);
+    }
+
+    /// An odd-length array repeats with period twice its sum, and the phase
+    /// is reduced into that period whatever its sign.
+    #[test]
+    fn dash_phase_reduces_modulo_the_full_cycle() {
+        assert_eq!(dash_cycle(&[6.0], 7.0, 1.0), Some((vec![6.0, 6.0], 7.0)));
+        assert_eq!(dash_cycle(&[6.0], -3.0, 1.0), Some((vec![6.0, 6.0], 9.0)));
+        assert_eq!(
+            dash_cycle(&[5.0, 2.0, 1.0], 0.0, 1.0),
+            Some((vec![5.0, 2.0, 1.0, 5.0, 2.0, 1.0], 0.0))
+        );
+        assert_eq!(
+            dash_cycle(&[3.0, 2.0], -4.0, 1.0),
+            Some((vec![3.0, 2.0], 1.0))
+        );
+        let (_, phase) = dash_cycle(&[3.0, 2.0], 1e300, 1.0).expect("finite phase");
+        assert!((0.0..5.0).contains(&phase), "phase {phase}");
+    }
+
+    /// `[6] 7 d` starts one unit into the off half of a 12-unit cycle, so the
+    /// first dash runs from 5 to 11.
+    #[test]
+    fn odd_dash_array_with_phase_starts_off() {
         let mut b = PathBuilder::new();
         b.move_to(0.0, 0.0).unwrap();
-        b.line_to(10.0, 0.0).unwrap();
+        b.line_to(20.0, 0.0).unwrap();
         let path = b.build();
 
-        let dash = [0.0_f64];
-        let dashed = make_dashed_path(&path, &dash, 0.0);
-        assert!(
-            dashed.pts.is_empty(),
-            "zero dash array should produce empty path"
-        );
+        let (dash, phase) = dash_cycle(&[6.0], 7.0, 1.0).expect("dashed");
+        let dashed = make_dashed_path(&path, &dash, phase);
+        let xs: Vec<f64> = dashed.pts.iter().map(|p| p.x).collect();
+        assert_eq!(xs, [5.0, 11.0, 17.0, 20.0]);
     }
 
     /// `flatten_path` must convert a curve to only straight segments (no CURVE flags).

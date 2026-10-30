@@ -7,7 +7,7 @@
 use std::f64::consts::PI;
 
 use crate::path::{Path, PathBuilder};
-use crate::types::{BEZIER_CIRCLE, LineCap, LineJoin, splash_floor};
+use crate::types::{BEZIER_CIRCLE, LineCap, LineJoin};
 
 // ── Local constants ───────────────────────────────────────────────────────────
 
@@ -85,12 +85,52 @@ pub(super) fn flatten_path(path: &Path, _matrix: &[f64; 6], flatness: f64) -> Pa
     builder.build()
 }
 
+/// Shortest dash cycle drawn as dashes, in device pixels; a shorter cycle
+/// strokes solid.
+const MIN_DASH_CYCLE_PX: f64 = 0.1;
+
+/// The dash pattern of `line_dash` and `line_dash_phase` as the lengths of
+/// one full on/off cycle and the phase reduced into it, or `None` for a solid
+/// stroke.
+///
+/// Dash entries alternate on and off, so an odd-length array repeats with
+/// period twice its sum and is doubled to an even one.  The phase is reduced
+/// modulo that period for any sign or magnitude.  A pattern that cannot be
+/// walked strokes solid: an empty array, a negative or non-finite entry or
+/// phase, or a cycle shorter than [`MIN_DASH_CYCLE_PX`] once scaled to device
+/// space by `device_scale` (which covers an all-zero array).
+pub(super) fn dash_cycle(
+    line_dash: &[f64],
+    line_dash_phase: f64,
+    device_scale: f64,
+) -> Option<(Vec<f64>, f64)> {
+    if line_dash.is_empty()
+        || !line_dash_phase.is_finite()
+        || line_dash.iter().any(|&d| !d.is_finite() || d < 0.0)
+    {
+        return None;
+    }
+    let mut lengths = line_dash.to_vec();
+    if lengths.len() % 2 == 1 {
+        lengths.extend_from_slice(line_dash);
+    }
+    let period: f64 = lengths.iter().sum();
+    if !period.is_finite() || period * device_scale < MIN_DASH_CYCLE_PX {
+        return None;
+    }
+    let phase = line_dash_phase.rem_euclid(period);
+    // `rem_euclid` rounds up to `period` for a tiny negative phase.
+    Some((lengths, if phase < period { phase } else { 0.0 }))
+}
+
 /// Convert a solid-line path into a dashed path.
 ///
 /// Mirrors `Splash::makeDashedPath`.
 ///
-/// Each subpath is broken at dash boundaries. A dash phase offset
-/// (`line_dash_phase`) shifts the start of the dash pattern.
+/// Each subpath is broken at dash boundaries.  `line_dash` is one full
+/// on/off cycle of positive total length and `line_dash_phase` lies within
+/// it, as [`dash_cycle`] returns them; a cycle of zero length leaves the path
+/// solid.
 ///
 /// If the entire dashed path would be empty but all input points are
 /// coincident, a degenerate (zero-length) subpath is emitted to allow end-caps
@@ -105,22 +145,14 @@ pub(super) fn flatten_path(path: &Path, _matrix: &[f64; 6], flatness: f64) -> Pa
     reason = "direct port of Splash::makeDashedPath; seg_len is decremented toward 0 each iteration"
 )]
 pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: f64) -> Path {
-    // Sum the dash array.  Guard against zero or subnormal totals: a very small
-    // but non-zero total would cause phase / line_dash_total to overflow i32 in
-    // splash_floor, producing garbage phase values.
     let line_dash_total: f64 = line_dash.iter().sum();
-    if line_dash_total < f64::EPSILON {
-        return Path::new();
+    if line_dash_total.is_nan() || line_dash_total <= 0.0 {
+        return path.clone();
     }
+    let mut phase = line_dash_phase.clamp(0.0, line_dash_total);
 
-    // Normalise phase to [0, total).
-    let mut phase = line_dash_phase;
-    {
-        let periods = splash_floor(phase / line_dash_total);
-        phase -= f64::from(periods) * line_dash_total;
-    }
-
-    // Find which dash entry we start in and how far into it.
+    // Find which dash entry we start in and how far into it.  Rounding can
+    // leave the phase at the end of the last entry; that is the cycle start.
     let mut dash_start_on = true;
     let mut dash_start_idx: usize = 0;
     if phase > 0.0 {
@@ -130,7 +162,9 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
             dash_start_idx += 1;
         }
         if dash_start_idx == line_dash.len() {
-            return Path::new();
+            dash_start_on = true;
+            dash_start_idx = 0;
+            phase = 0.0;
         }
     }
 
