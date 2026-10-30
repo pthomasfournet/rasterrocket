@@ -334,7 +334,10 @@ renderer/
     operators.rs     — execute_one: one operator → renderer call
     text.rs          — show_text, show_text_type3
     text_ops.rs      — glyph records, advances, text-space → device
-    annotations.rs   — annotation appearance streams
+    annotations.rs   — annotation appearance streams: /F flags, /OC,
+                       appearance state, Algorithm 8.1 fit, NoRotate
+    annotation_synthesis.rs — appearances synthesised for markup
+                       annotations without /AP /N, from geometry and colours
     patterns.rs      — tiling patterns on the pattern lattice
     shading_paint.rs — `sh` and shading patterns
     soft_mask.rs     — ExtGState SMask: luminosity / alpha masks

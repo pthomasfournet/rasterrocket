@@ -45,6 +45,7 @@
 //! - `ExtGState` blend mode (`BM`) — only `Normal` is currently mapped
 //! - Type 0 named `CMaps` other than `Identity-H`/`V` (e.g. `/GB-EUC-H`)
 
+mod annotation_synthesis;
 mod annotations;
 mod gpu_ops;
 mod image_memo;

@@ -2,7 +2,9 @@
 //! whether an annotation is drawn for the render purpose (§12.5.3), the
 //! appearance stream is mapped onto `/Rect` by Algorithm 8.1 (§12.5.5), a
 //! state-keyed appearance without `/AS` falls back to the field value and
-//! then to `Off`, and `/Annots` may hold annotation dictionaries directly.
+//! then to `Off`, `/Annots` may hold annotation dictionaries directly, and
+//! a markup annotation without a normal appearance is drawn from its
+//! geometry and colours (§12.5.6).
 
 #[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
 mod common;
@@ -213,4 +215,94 @@ fn a_no_rotate_annotation_stays_upright_on_a_rotated_page() {
     // 40 × 20 appearance spans device x 20..60, y 10..30.
     let upright = rgb_at(annot(16), RenderPurpose::View, &probes);
     assert_eq!(upright, [WHITE, BLUE]);
+}
+
+/// RGB at `points` of a page whose only annotation is the direct
+/// dictionary with entries `annot` and no appearance stream.
+fn synthesised(annot: &str, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
+    let pdf = page(&format!("[<< /Type /Annot {annot} >>]"), vec![]);
+    rgb_at(pdf, RenderPurpose::View, points)
+}
+
+const RED: [u8; 3] = [255, 0, 0];
+const YELLOW: [u8; 3] = [255, 255, 0];
+const BLACK: [u8; 3] = [0, 0, 0];
+
+#[test]
+fn a_square_without_an_appearance_is_drawn_from_its_colours() {
+    let px = synthesised(
+        "/Subtype /Square /Rect [10 10 60 60] /C [1 0 0] /IC [0 0 1] /BS << /W 4 >>",
+        &[(35, 35), (11, 35), (58, 35), (5, 35)],
+    );
+    assert_eq!(px, [BLUE, RED, RED, WHITE]);
+}
+
+#[test]
+fn a_circle_without_an_appearance_is_an_inscribed_ellipse() {
+    let px = synthesised(
+        "/Subtype /Circle /Rect [10 10 90 90] /C [0 0 0] /IC [1 1 0]",
+        &[(50, 50), (12, 12), (50, 10)],
+    );
+    // The centre is filled, the corner outside the ellipse is not, and the
+    // ellipse's border touches the middle of the bottom edge.
+    assert_eq!(px, [YELLOW, WHITE, BLACK]);
+}
+
+#[test]
+fn an_ink_annotation_without_an_appearance_strokes_its_paths() {
+    let px = synthesised(
+        "/Subtype /Ink /Rect [10 10 90 90] /C [0 0 1] /InkList [[20 50 80 50]] /BS << /W 4 >>",
+        &[(50, 50), (50, 51), (50, 60)],
+    );
+    assert_eq!(px, [BLUE, BLUE, WHITE]);
+}
+
+#[test]
+fn a_highlight_without_an_appearance_multiplies_its_colour_over_the_page() {
+    let px = synthesised(
+        "/Subtype /Highlight /Rect [10 40 90 60] /QuadPoints [10 60 90 60 10 40 90 40]",
+        &[(50, 50), (50, 70)],
+    );
+    assert_eq!(px, [YELLOW, WHITE]);
+}
+
+#[test]
+fn an_underline_and_a_strike_out_are_drawn_at_the_bottom_and_middle() {
+    let quad = "/Rect [10 40 90 60] /QuadPoints [10 60 90 60 10 40 90 40]";
+    // A 1 pt line on a pixel boundary covers two pixel rows half each.
+    let inked = |px: Vec<[u8; 3]>| px.iter().map(|p| p[0] < 200).collect::<Vec<_>>();
+    let probes = [(50, 41), (50, 50)];
+    let under = synthesised(&format!("/Subtype /Underline {quad}"), &probes);
+    assert_eq!(inked(under), [true, false]);
+    let strike = synthesised(&format!("/Subtype /StrikeOut {quad}"), &probes);
+    assert_eq!(inked(strike), [false, true]);
+}
+
+#[test]
+fn a_text_annotation_without_an_appearance_draws_a_note_icon() {
+    let px = synthesised("/Subtype /Text /Rect [10 70 30 90]", &[(12, 86), (50, 50)]);
+    assert_eq!(px, [YELLOW, WHITE]);
+}
+
+#[test]
+fn a_constant_opacity_applies_to_a_synthesised_appearance() {
+    let px = synthesised(
+        "/Subtype /Square /Rect [10 10 60 60] /IC [0 0 0] /C [] /CA 0.5",
+        &[(35, 35)],
+    );
+    assert!((126..=129).contains(&px[0][0]), "{:?}", px[0]);
+}
+
+#[test]
+fn an_annotation_with_an_appearance_is_not_synthesised() {
+    // The appearance fills blue; a synthesised square would have a red border.
+    let pdf = page(
+        "[4 0 R]",
+        vec![
+            b"<< /Type /Annot /Subtype /Square /Rect [10 10 30 30] /C [1 0 0] /AP << /N 5 0 R >> >>"
+                .to_vec(),
+            blue_square(),
+        ],
+    );
+    assert_eq!(rgb_at(pdf, RenderPurpose::View, &[(10, 20)]), [BLUE]);
 }

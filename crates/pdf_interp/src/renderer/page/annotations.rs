@@ -6,7 +6,7 @@
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::super::gstate::{Ctm, ctm_multiply};
-use super::PageRenderer;
+use super::{PageRenderer, annotation_synthesis};
 use crate::RenderPurpose;
 use crate::resources::dict_ext::DictExt;
 
@@ -113,6 +113,20 @@ pub(super) fn render_one_annotation(
         return;
     }
 
+    let has_normal_appearance = annot
+        .get(b"AP")
+        .and_then(|o| crate::resources::resolve_dict(doc, o))
+        .is_some_and(|ap| ap.get(b"N").is_some());
+    if !has_normal_appearance {
+        if let Some(rect) = read_rect(annot)
+            && let Some(appearance) = annotation_synthesis::markup(doc, annot, rect)
+        {
+            let no_rotate = flags & NO_ROTATE != 0;
+            draw_synthesized(renderer, appearance, id, no_rotate.then_some(rect));
+        }
+        return;
+    }
+
     // Check for AP/N before Rect — annotations with no AP stream have no visible
     // appearance (e.g. Link) and are expected to be absent silently.
     let Some(stream_id) = normal_appearance(doc, annot) else {
@@ -140,6 +154,46 @@ pub(super) fn render_one_annotation(
         form.matrix = ctm_multiply(&form.matrix, &upright_about(rect, renderer.rotate_cw));
     }
     renderer.do_form_xobject(&form);
+}
+
+/// Draw the synthesised appearance `appearance` of the annotation `id`
+/// (direct when `None`) with its opacity and blend mode; turned upright
+/// about the upper-left corner of `no_rotate_rect` when given.
+fn draw_synthesized(
+    renderer: &mut PageRenderer<'_>,
+    appearance: annotation_synthesis::Synthesized,
+    id: Option<ObjectId>,
+    no_rotate_rect: Option<[f64; 4]>,
+) {
+    const IDENTITY: Ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let matrix = match no_rotate_rect {
+        Some(rect) if renderer.rotate_cw != 0 => upright_about(rect, renderer.rotate_cw),
+        _ => IDENTITY,
+    };
+    // The form has no stream object; the annotation (or, for a direct
+    // annotation, the page) stands in for it in the active-form stack, and
+    // it draws with the resources in effect.
+    let form = crate::resources::FormXObject {
+        content: appearance.content,
+        matrix,
+        bbox: appearance.bbox,
+        resources_id: id.unwrap_or_else(|| renderer.resources.resource_context_id()),
+        has_own_resources: false,
+        transparency: None,
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "opacity is clamped to [0, 1], so the product is in [0, 255]"
+    )]
+    let alpha = (appearance.opacity * 255.0).round() as u8;
+    renderer.gstate.save();
+    let gs = renderer.gstate.current_mut();
+    gs.fill_alpha = alpha;
+    gs.stroke_alpha = alpha;
+    gs.blend_mode = appearance.blend;
+    renderer.do_form_xobject(&form);
+    renderer.gstate.restore();
 }
 
 /// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,
