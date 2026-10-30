@@ -5,9 +5,9 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
-readme.workspace     = true
+readme               = "README.md"
 publish     = false
-description = "CLI — renders PDF pages to pixel files. Drop-in pdftoppm replacement. Pure Rust, zero Poppler."
+description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM or PNG files with pdftoppm-style flags. Pure Rust, zero Poppler."
 keywords    = ["pdf", "raster", "cli", "pdftoppm", "renderer"]
 categories  = ["command-line-utilities", "multimedia::images", "rendering"]
 

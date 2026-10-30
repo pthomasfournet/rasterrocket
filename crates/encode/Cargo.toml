@@ -7,7 +7,7 @@ authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
 readme.workspace     = true
-description          = "PPM/PGM/PBM/PNG output for the rasterrocket PDF renderer"
+description          = "PPM/PGM/PBM/PNG output and a baseline grayscale JPEG encoder for the rasterrocket PDF renderer"
 keywords             = ["pdf", "ppm", "png", "encode", "image"]
 categories           = ["multimedia::images", "encoding"]
 
