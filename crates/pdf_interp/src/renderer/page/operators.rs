@@ -33,6 +33,10 @@ impl PageRenderer<'_> {
         if self.ocg_stack.iter().any(|&v| !v) {
             return;
         }
+        // A `d1` glyph description is a stencil in the text fill colour.
+        if op.sets_colour() && self.gstate.current().colour_locked {
+            return;
+        }
 
         self.dispatch(op);
     }
@@ -387,9 +391,21 @@ impl PageRenderer<'_> {
             // ── Type 3 glyph metrics ──────────────────────────────────────────
             // `d0`/`d1` declare the glyph advance width and (for `d1`) a bounding
             // box.  Width is sourced from the font's `Widths` array at call time;
-            // the BBox is informational.  Both operators are no-ops in the renderer
-            // — the CharProc's subsequent path/colour operators do the actual work.
-            Operator::Type3GlyphWidth(..) | Operator::Type3GlyphWidthBBox(..) => {}
+            // the BBox is informational.  A `d1` description is a stencil: it
+            // paints, fills and strokes alike, in the text fill colour in
+            // effect at the text-showing operator (PDF §9.6.5), so the stroke
+            // colour takes the fill colour and the colour operators that follow
+            // are ignored.
+            Operator::Type3GlyphWidth(..) => {}
+            Operator::Type3GlyphWidthBBox(..) => {
+                let gs = self.gstate.current_mut();
+                gs.stroke_color = gs.fill_color.clone();
+                gs.stroke_pattern = gs.fill_pattern.clone();
+                gs.stroke_pattern_components = gs.fill_pattern_components.clone();
+                gs.stroke_color_space = gs.fill_color_space.clone();
+                gs.stroke_alpha = gs.fill_alpha;
+                gs.colour_locked = true;
+            }
 
             // ── No-ops ────────────────────────────────────────────────────────
             Operator::MarkedContent | Operator::CompatibilitySection => {}

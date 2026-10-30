@@ -164,6 +164,10 @@ pub struct InterpGState {
     /// Transfer function in effect (PDF §10.5), applied to the colour of
     /// each painted object.  `None` = identity.
     pub transfer: Option<Arc<Transfer>>,
+    /// Set by `d1` in a Type 3 glyph description: the glyph is a stencil
+    /// in the text fill colour, so the colour operators of the description
+    /// are ignored until it ends (PDF §9.6.5).
+    pub colour_locked: bool,
 }
 
 /// A soft mask resolved to one value per device pixel (PDF §11.6.5.2).
@@ -205,6 +209,7 @@ impl Clone for InterpGState {
             stroke_color_space: self.stroke_color_space.clone(),
             soft_mask: self.soft_mask.clone(),
             transfer: self.transfer.clone(),
+            colour_locked: self.colour_locked,
         }
     }
 }
@@ -238,6 +243,7 @@ impl InterpGState {
             stroke_color_space: ColorSpace::DeviceGray,
             soft_mask: None,
             transfer: None,
+            colour_locked: false,
         }
     }
 

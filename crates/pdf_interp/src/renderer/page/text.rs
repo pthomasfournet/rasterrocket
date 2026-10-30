@@ -109,8 +109,9 @@ impl PageRenderer<'_> {
         // position.  They paint directly into the page bitmap, so there is no
         // two-phase rasterise-then-blit loop — each CharProc runs inline.
         // A glyph description paints with its own operators and has no
-        // outline to fill or stroke (PDF §9.6.5), so every painting mode
-        // executes the CharProc unchanged.
+        // outline to fill, stroke or clip with (PDF §9.6.5): every mode but
+        // the invisible one executes the CharProc unchanged, and none adds
+        // to the clip.
         // The glyphs are one object under the soft mask in effect.
         if let Some(t3) = &descriptor.type3 {
             let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height);
@@ -125,8 +126,7 @@ impl PageRenderer<'_> {
                     word_spacing,
                     horiz_scaling,
                     rise,
-                    do_paint,
-                    do_clip,
+                    do_paint || do_clip,
                 );
             });
             return;
@@ -461,14 +461,7 @@ impl PageRenderer<'_> {
         horiz_scaling: f64,
         rise: f64,
         do_paint: bool,
-        do_clip: bool,
     ) {
-        if do_clip {
-            log::warn!(
-                "rasterrocket-interp: text-clip mode (render_mode ≥ 4) is not supported for Type 3 \
-                 fonts — clip ignored"
-            );
-        }
         for &byte in bytes {
             let Some(glyph) = t3.glyph(byte) else {
                 // No CharProc for this code — advance by zero width, continue.

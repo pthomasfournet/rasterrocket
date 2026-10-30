@@ -196,15 +196,17 @@ pub enum Operator {
     PaintShading(Vec<u8>),
 
     // ── Type 3 glyph metrics ──────────────────────────────────────────────────
-    /// `wx wy d0` — Type 3 colorless glyph: declares advance width (wx, wy).
+    /// `wx wy d0` — Type 3 coloured glyph: declares advance width (wx, wy).
     ///
-    /// Must be the first operator in a Type 3 `CharProc`.  The glyph is rendered
-    /// using the current graphics state fill/stroke colour from the parent.
+    /// Must be the first operator in a Type 3 `CharProc`.  The glyph sets
+    /// its own colours (PDF §9.6.5).
     Type3GlyphWidth(f64, f64),
-    /// `wx wy llx lly urx ury d1` — Type 3 self-colored glyph with `BBox`.
+    /// `wx wy llx lly urx ury d1` — Type 3 shape-only glyph with `BBox`.
     ///
-    /// Must be the first operator in a Type 3 `CharProc`.  The glyph provides its
-    /// own colour; the `BBox` is a hint to the renderer for caching and clipping.
+    /// Must be the first operator in a Type 3 `CharProc`.  The glyph is a
+    /// stencil painted in the text fill colour; its colour operators are
+    /// ignored (PDF §9.6.5).  The `BBox` is a hint to the renderer for
+    /// caching and clipping.
     Type3GlyphWidthBBox(f64, f64, f64, f64, f64, f64),
 
     // ── Marked content ────────────────────────────────────────────────────────
@@ -230,6 +232,29 @@ pub enum Operator {
     // ── Unknown / unimplemented ───────────────────────────────────────────────
     /// An operator keyword the decoder does not recognise.
     Unknown(Vec<u8>),
+}
+
+impl Operator {
+    /// `true` for the operators that set a fill or stroke colour, colour
+    /// space or pattern (PDF §8.6.8).
+    #[must_use]
+    pub const fn sets_colour(&self) -> bool {
+        matches!(
+            self,
+            Self::SetFillColorSpace(_)
+                | Self::SetStrokeColorSpace(_)
+                | Self::SetFillColor(_)
+                | Self::SetStrokeColor(_)
+                | Self::SetFillPattern { .. }
+                | Self::SetStrokePattern { .. }
+                | Self::SetFillGray(_)
+                | Self::SetStrokeGray(_)
+                | Self::SetFillRgb(..)
+                | Self::SetStrokeRgb(..)
+                | Self::SetFillCmyk(..)
+                | Self::SetStrokeCmyk(..)
+        )
+    }
 }
 
 /// Element of a `TJ` text-showing array.
