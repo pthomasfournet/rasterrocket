@@ -11,7 +11,10 @@ use crate::gpu_init;
 use crate::gray::rgb_to_gray;
 #[cfg(feature = "vulkan")]
 use crate::vk_init::init_vk_backend;
-use crate::{BackendPolicy, FormType, PageSet, RasterOptions, RenderedPage, SessionConfig};
+use crate::{
+    BackendPolicy, FormType, PageSet, RasterOptions, RenderParams, RenderRegion, RenderedPage,
+    SessionConfig,
+};
 
 // ── Safety limit ──────────────────────────────────────────────────────────────
 
@@ -85,6 +88,9 @@ pub enum RasterError {
     /// infinite-loop content stream or unbounded form-`XObject` recursion).
     /// The rendered bitmap is partial.
     PageBudgetExceeded(String),
+    /// The render was stopped through its [`CancelToken`](crate::CancelToken).
+    /// The rendered bitmap is partial and is discarded.
+    Cancelled,
     /// The per-page render function panicked.
     ///
     /// Caught only under `panic = "unwind"` builds (e.g. test profiles).
@@ -139,6 +145,7 @@ impl std::fmt::Display for RasterError {
                 write!(f, "content stream decode failed: {}", v.join("; "))
             }
             Self::PageBudgetExceeded(msg) => write!(f, "page render budget exceeded: {msg}"),
+            Self::Cancelled => f.write_str("page render cancelled"),
             Self::RenderPanic { page, message } => {
                 write!(f, "page {page} render panicked: {message}")
             }
@@ -277,6 +284,22 @@ impl RasterSession {
     #[must_use]
     pub const fn total_pages(&self) -> u32 {
         self.total_pages
+    }
+
+    /// The geometry of page `page_num` (1-based): its size in points after
+    /// `/Rotate` and `UserUnit`, rotation, `UserUnit`, the origin of the
+    /// selected box, and the `MediaBox` and `CropBox`.  No content is parsed.
+    ///
+    /// [`PageGeometry::size_px`](crate::PageGeometry::size_px) gives the
+    /// pixel size a render at a given scale produces.
+    ///
+    /// # Errors
+    /// [`RasterError::PageOutOfRange`] when `page_num` is `0` or exceeds the
+    /// page count; [`RasterError::Pdf`] when the page tree cannot be walked;
+    /// [`RasterError::InvalidPageGeometry`] when `UserUnit` is out of range.
+    pub fn page_geometry(&self, page_num: u32) -> Result<crate::PageGeometry, RasterError> {
+        let page_id = self.resolve_page(page_num)?;
+        pdf_interp::page_size_pts_by_id(&self.doc, page_id).map_err(RasterError::from)
     }
 
     /// Borrow the underlying [`pdf::Document`] for read-only operations.
@@ -661,100 +684,138 @@ fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, Raste
     }
 }
 
-/// Render one page to an RGB bitmap.
+/// Render one whole page to an RGB bitmap at `scale` device pixels per point.
 ///
-/// GPU image decoders are initialised lazily per calling thread on first use
-/// and reused across pages — safe to call from multiple rayon threads
-/// concurrently.
-///
-/// `scale` is the pixel-per-point multiplier: `dpi / 72.0` for square-pixel
-/// rendering, or `(x_dpi/72 · y_dpi/72).sqrt()` for the geometric mean when
-/// horizontal and vertical DPI differ.  Must be a positive finite number.
+/// Equivalent to [`render_page_rgb_with`] with [`RenderParams::new(scale)`](RenderParams::new).
+/// `scale` is `dpi / 72.0`, or `(x_dpi/72 · y_dpi/72).sqrt()` for the
+/// geometric mean when horizontal and vertical DPI differ.
 ///
 /// # Errors
 ///
-/// - [`RasterError::InvalidOptions`] if `scale` is ≤ 0 or non-finite.
-/// - [`RasterError::BackendUnavailable`] if a forced backend fails to init on
-///   this thread.
-/// - [`RasterError::InvalidPageGeometry`] / [`RasterError::PageDegenerate`] /
-///   [`RasterError::PageTooLarge`] / [`RasterError::PageOutOfRange`] /
-///   [`RasterError::Pdf`] as documented on the error variants.
+/// As [`render_page_rgb_with`].
 pub fn render_page_rgb(
     session: &RasterSession,
     page_num: u32,
     scale: f64,
 ) -> Result<Bitmap<Rgb8>, RasterError> {
-    let page_id = session.resolve_page(page_num)?;
-    let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
-    render_page_rgb_with_geom(session, page_num, page_id, scale, geom, session.policy)
-        .map(|(bmp, _diag)| bmp)
+    render_page_rgb_with(session, page_num, &RenderParams::new(scale))
 }
 
-/// Like [`render_page_rgb`] but with an affinity-dispatch policy override.
+/// Render page `page_num` (1-based) to an RGB bitmap as `params` describes:
+/// the whole page or a [`RenderRegion`] of it, with an optional backend
+/// override and [`CancelToken`](crate::CancelToken).
 ///
-/// When `effective_policy` is [`BackendPolicy::CpuOnly`], GPU decoder init is
-/// skipped entirely for this page even if the session policy would normally
-/// allow it.  The session policy is used as-is for all other variants.
-///
-/// Use this when content-aware routing has classified the page as not needing
-/// GPU decoding — e.g. a pure-vector page where the prescan diagnostics
-/// indicate `CpuOnly` is the right effective policy.
+/// GPU image decoders are initialised lazily per calling thread on first use
+/// and reused across pages — safe to call from multiple rayon threads
+/// concurrently.  The bitmap is the region's size when a region is given and
+/// the page's ([`PageGeometry::size_px`](crate::PageGeometry::size_px))
+/// otherwise.
 ///
 /// # Errors
 ///
-/// Same as [`render_page_rgb`].
-pub fn render_page_rgb_hinted(
+/// - [`RasterError::InvalidOptions`] if `params.scale` is ≤ 0 or non-finite,
+///   or the region is empty or extends past the page.
+/// - [`RasterError::Cancelled`] if the cancel token is raised before or
+///   during the render.
+/// - [`RasterError::BackendUnavailable`] if a forced backend fails to init on
+///   this thread.
+/// - [`RasterError::InvalidPageGeometry`] / [`RasterError::PageDegenerate`] /
+///   [`RasterError::PageTooLarge`] / [`RasterError::PageAreaTooLarge`] /
+///   [`RasterError::PageOutOfRange`] / [`RasterError::Pdf`] as documented on
+///   the error variants; the size limits apply to the drawn region.
+pub fn render_page_rgb_with(
     session: &RasterSession,
     page_num: u32,
-    scale: f64,
-    effective_policy: BackendPolicy,
+    params: &RenderParams,
 ) -> Result<Bitmap<Rgb8>, RasterError> {
     let page_id = session.resolve_page(page_num)?;
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
-    render_page_rgb_with_geom(session, page_num, page_id, scale, geom, effective_policy)
-        .map(|(bmp, _diag)| bmp)
+    render_page_rgb_with_geom(session, page_num, page_id, geom, params).map(|(bmp, _diag)| bmp)
 }
 
-/// Inner implementation shared by [`render_page_rgb`], [`render_page_rgb_hinted`], and [`render_one`].
-///
-/// `effective_policy` overrides `session.policy` for GPU decoder selection only.
-/// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
-fn render_page_rgb_with_geom(
-    session: &RasterSession,
-    page_num: u32,
-    page_id: pdf::ObjectId,
+/// The view a render of `geom` at `scale` draws: the whole page, or `region`
+/// of it.  Enforces the pixel-size limits on what is drawn.
+fn page_view(
+    geom: &pdf_interp::PageGeometry,
     scale: f64,
-    geom: pdf_interp::PageGeometry,
-    effective_policy: BackendPolicy,
-) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(RasterError::InvalidOptions(format!(
-            "scale must be a positive finite number, got {scale}"
-        )));
-    }
-
-    let doc = &session.doc;
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "scale and dimensions are positive; f64-to-u32 saturates at u32::MAX for \
-                  adversarial values, which the validate_dimensions check below catches"
-    )]
-    let (w_px, h_px) = (
-        (geom.width_pts * scale).round() as u32,
-        (geom.height_pts * scale).round() as u32,
-    );
-
+    region: Option<RenderRegion>,
+) -> Result<pdf_interp::renderer::PageView, RasterError> {
+    let (w_px, h_px) = geom.size_px(scale);
     if w_px == 0 || h_px == 0 {
         return Err(RasterError::PageDegenerate {
             width: w_px,
             height: h_px,
         });
     }
-    // Reject oversized pages before the bitmap is allocated, never after, via
-    // the shared guard (per-side limit, then total-area limit computed in u64).
-    crate::page::validate_dimensions(w_px, h_px)?;
+    let whole = pdf_interp::renderer::PageView::whole(
+        w_px,
+        h_px,
+        scale,
+        geom.rotate_cw,
+        geom.origin_x,
+        geom.origin_y,
+    );
+    let Some(r) = region else {
+        // Reject oversized pages before the bitmap is allocated, never after,
+        // via the shared guard (per-side limit, then total-area limit in u64).
+        crate::page::validate_dimensions(w_px, h_px)?;
+        return Ok(whole);
+    };
+    // A saturated side is not the page's true extent, so no window of it
+    // can be placed.
+    if w_px == u32::MAX || h_px == u32::MAX {
+        return Err(RasterError::PageTooLarge {
+            width: w_px,
+            height: h_px,
+        });
+    }
+    if r.width == 0 || r.height == 0 {
+        return Err(RasterError::InvalidOptions(format!(
+            "render region {}×{} is empty",
+            r.width, r.height
+        )));
+    }
+    if u64::from(r.x) + u64::from(r.width) > u64::from(w_px)
+        || u64::from(r.y) + u64::from(r.height) > u64::from(h_px)
+    {
+        return Err(RasterError::InvalidOptions(format!(
+            "render region {}×{} at ({}, {}) extends past the {w_px}×{h_px} page",
+            r.width, r.height, r.x, r.y
+        )));
+    }
+    crate::page::validate_dimensions(r.width, r.height)?;
+    Ok(whole.window(r.x, r.y, r.width, r.height))
+}
+
+/// Inner implementation shared by [`render_page_rgb_with`] and [`render_one`].
+///
+/// `params.policy` overrides `session.policy` for GPU decoder selection only.
+/// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
+fn render_page_rgb_with_geom(
+    session: &RasterSession,
+    page_num: u32,
+    page_id: pdf::ObjectId,
+    geom: pdf_interp::PageGeometry,
+    params: &RenderParams,
+) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
+    let scale = params.scale;
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(RasterError::InvalidOptions(format!(
+            "scale must be a positive finite number, got {scale}"
+        )));
+    }
+    let effective_policy = params.policy.unwrap_or(session.policy);
+    if params
+        .cancel
+        .as_ref()
+        .is_some_and(crate::CancelToken::is_cancelled)
+    {
+        return Err(RasterError::Cancelled);
+    }
+
+    let doc = &session.doc;
+
+    let view = page_view(&geom, scale, params.region)?;
 
     if !session.javascript_warned.load(Ordering::Relaxed)
         && pdf_interp::page_has_javascript(doc, page_id)
@@ -774,21 +835,12 @@ fn render_page_rgb_with_geom(
         ));
     }
 
-    // Pass the full-precision `scale` straight through: `new_scaled` takes f64,
-    // and `w_px`/`h_px` above are derived from this same `scale`.  An earlier
-    // f64→f32→f64 round-trip here fed a slightly different scale into the CTM
-    // than the one used for the pixel extent, leaving the matrix's translation
-    // terms minutely inconsistent with the bitmap size.
-    let mut renderer = pdf_interp::renderer::PageRenderer::new_scaled(
-        w_px,
-        h_px,
-        scale,
-        geom.rotate_cw,
-        geom.origin_x,
-        geom.origin_y,
-        doc,
-        page_id,
-    );
+    // The view carries the full-precision `scale` that also sized the page,
+    // so the CTM's translation terms are consistent with the bitmap extent.
+    let mut renderer = pdf_interp::renderer::PageRenderer::with_view(&view, doc, page_id);
+    if let Some(cancel) = &params.cancel {
+        renderer.set_cancel(cancel.flag());
+    }
     renderer.set_document_fonts(Arc::clone(&session.fonts));
     renderer.set_optional_content(Arc::clone(&session.optional_content));
 
@@ -823,8 +875,12 @@ fn render_page_rgb_with_geom(
 
     // A budget breach takes precedence over image failures: the page may not
     // have finished rendering at all.
-    if let Some(reason) = renderer.budget_status() {
-        return Err(RasterError::PageBudgetExceeded(reason.to_string()));
+    match renderer.budget_status() {
+        None => {}
+        Some(pdf_interp::renderer::RenderAbort::Cancelled { .. }) => {
+            return Err(RasterError::Cancelled);
+        }
+        Some(reason) => return Err(RasterError::PageBudgetExceeded(reason.to_string())),
     }
 
     for failure in &content_failures {
@@ -1403,9 +1459,8 @@ fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, Raster
         &state.session,
         page_num,
         page_id,
-        scale,
         geom,
-        state.session.policy,
+        &RenderParams::new(scale),
     )?;
     let mut gray = rgb_to_gray(&rgb);
 
@@ -1992,14 +2047,14 @@ mod decoder_reclaim_guard_tests {
 mod area_cap_tests {
     use super::*;
 
-    // The area check in `render_page_rgb_with_geom` is:
+    // The area check in `page_view` (via `validate_dimensions`) is:
     //   let area = w_px as u64 * h_px as u64;
     //   if area > MAX_PX_AREA { Err(PageAreaTooLarge { .. }) }
     // Wiring a real PageRenderer requires a parsed PDF, which is too heavy for
     // a unit test; these tests pin the exact arithmetic and error semantics
     // the render path relies on, including the per-side/area independence.
 
-    /// Re-implementation of the guarded prefix of `render_page_rgb_with_geom`,
+    /// Re-implementation of the size guard of `page_view`,
     /// kept structurally identical so a future divergence is caught here.
     fn guard(w_px: u32, h_px: u32) -> Result<(), RasterError> {
         if w_px == 0 || h_px == 0 {

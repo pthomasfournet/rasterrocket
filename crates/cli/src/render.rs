@@ -13,7 +13,7 @@ use color::{Gray8, Rgb8};
 use encode::{EncodeError, write_pbm, write_pgm, write_png, write_ppm};
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
-use pdf_raster::{RasterError, RasterSession, render_page_rgb_hinted, rgb_to_gray};
+use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with, rgb_to_gray};
 use raster::Bitmap;
 
 use crate::args::{Args, OutputFormat};
@@ -130,7 +130,8 @@ pub(crate) fn render_page(
     let y_dpi = args.y_dpi();
     let scale = (x_dpi / 72.0 * (y_dpi / 72.0)).sqrt();
 
-    let rgb: Bitmap<Rgb8> = render_page_rgb_hinted(session, page_num, scale, effective_policy)?;
+    let params = RenderParams::new(scale).with_policy(effective_policy);
+    let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
 
     #[expect(
         clippy::cast_possible_wrap,

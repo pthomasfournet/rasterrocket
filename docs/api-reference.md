@@ -88,7 +88,7 @@ Lower-level API for explicit control over PDF opening and per-page rendering. Al
 pub mod session {
     pub use super::{
         open_session, open_session_from_bytes, prescan_session,
-        render_page_rgb, render_page_rgb_hinted, rgb_to_gray,
+        render_page_rgb, render_page_rgb_with, rgb_to_gray,
     };
 }
 ```
@@ -112,9 +112,47 @@ pub fn render_page_rgb(
 ) -> Result<Bitmap<Rgb8>, RasterError>
 ```
 
-Renders one page to an RGB bitmap. `scale` is the pixel-per-point multiplier: `dpi / 72.0` for uniform DPI, or `sqrt((rx/72) × (ry/72))` for non-square pixels.
+Renders one whole page to an RGB bitmap. `scale` is the pixel-per-point multiplier: `dpi / 72.0` for uniform DPI, or `sqrt((rx/72) × (ry/72))` for non-square pixels. Equivalent to `render_page_rgb_with(session, page_num, &RenderParams::new(scale))`.
 
 Safe to call from multiple Rayon threads concurrently. GPU image decoders are managed per-thread via `thread_local!`.
+
+```rust
+pub fn render_page_rgb_with(
+    session: &RasterSession,
+    page_num: u32,
+    params: &RenderParams,
+) -> Result<Bitmap<Rgb8>, RasterError>
+
+#[non_exhaustive]
+pub struct RenderParams {
+    pub scale: f64,                      // dpi / 72
+    pub region: Option<RenderRegion>,    // None = whole page
+    pub policy: Option<BackendPolicy>,   // None = the session's
+    pub cancel: Option<CancelToken>,     // None = render to completion
+}
+impl RenderParams {
+    pub const fn new(scale: f64) -> Self
+    pub const fn with_region(self, region: RenderRegion) -> Self
+    pub const fn with_policy(self, policy: BackendPolicy) -> Self
+    pub fn with_cancel(self, cancel: CancelToken) -> Self
+}
+
+pub struct RenderRegion { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
+
+#[derive(Clone, Default)]
+pub struct CancelToken { /* Arc<AtomicBool> */ }
+impl CancelToken {
+    pub fn new() -> Self
+    pub fn cancel(&self)
+    pub fn is_cancelled(&self) -> bool
+}
+```
+
+Renders page `page_num` as `params` describes:
+
+- **`region`** draws only a window of the page, in device pixels counted from the page's top-left corner at `scale` (the whole page is `PageGeometry::size_px(scale)`). The bitmap is the region's size, and it holds exactly the pixels the whole-page render places there, so regions that tile a page stitch into the whole-page bitmap byte for byte. `MAX_PX_DIMENSION` and `MAX_PX_AREA` apply to the region, so a page too large to render whole (a map or poster at high DPI) can be rendered in tiles. An empty region, or one extending past the page, is `RasterError::InvalidOptions`.
+- **`policy`** overrides the session's backend policy for this page's image decoders; pass `BackendPolicy::CpuOnly` for a page `prescan_session` reports without images to skip GPU decoder setup.
+- **`cancel`**: after `CancelToken::cancel()` on any clone, the render stops before its next content-stream operator (form, Type 3 glyph and pattern-cell content included) and returns `RasterError::Cancelled`; a render started after cancellation returns it without drawing. An operator already running (one image decode, one fill) completes first.
 
 ```rust
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
@@ -144,11 +182,14 @@ impl RasterSession {
     pub const fn total_pages(&self) -> u32
     pub const fn policy(&self) -> BackendPolicy
     pub const fn form_type(&self) -> FormType
+    pub fn page_geometry(&self, page_num: u32) -> Result<PageGeometry, RasterError>
     // doc() and resolve_page() are #[doc(hidden)] — use prescan_session instead
 }
 ```
 
 An opened, read-only document. `Sync + Send` — safe to share across Rayon threads.
+
+`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale)` is the bitmap size `render_page_rgb` produces at `scale`, so an embedder can size buffers or plan tiles before rendering.
 
 ---
 
@@ -439,6 +480,7 @@ pub enum RasterError {
     ImageDecodeFailed(Vec<String>),
     ContentDecodeFailed(Vec<String>),
     PageBudgetExceeded(String),
+    Cancelled,                   // stopped through a CancelToken
     RenderPanic { /* isolated per-page panic */ },
 }
 ```
@@ -475,6 +517,7 @@ returns `PageAreaTooLarge`.
 ```rust
 pub use rasterrocket_interp::renderer::PageDiagnostics;
 pub use rasterrocket_interp::resources::ImageFilter;
+pub use rasterrocket_interp::PageGeometry;
 ```
 
 `ImageFilter` identifies which decode filter was used for an embedded image (DCTDecode, JPXDecode, FlateDecode, etc.). Available through `PageDiagnostics` for routing decisions.
@@ -744,17 +787,25 @@ Parses the content stream for page `page_num` and returns the decoded operator s
 ### `PageGeometry`
 
 ```rust
+#[non_exhaustive]
 pub struct PageGeometry {
     pub width_pts: f64,   // output width in PDF points (rotation + UserUnit applied)
     pub height_pts: f64,  // output height in PDF points (rotation + UserUnit applied)
     pub rotate_cw: u16,   // 0, 90, 180, or 270
     pub user_unit: f64,   // UserUnit scale factor, validated to [0.1, 10.0]
+    pub origin_x: f64,    // lower-left corner of the selected box, user space
+    pub origin_y: f64,
+    pub media_box: Option<[f64; 4]>,  // [llx, lly, urx, ury], own or inherited
+    pub crop_box: Option<[f64; 4]>,   // as authored, before intersecting with media_box
+}
+impl PageGeometry {
+    pub fn size_px(&self, scale: f64) -> (u32, u32)
 }
 ```
 
-Dimensions are swapped for 90°/270° rotations so that `width_pts` always corresponds to the horizontal extent of the rendered bitmap.
+Dimensions are swapped for 90°/270° rotations so that `width_pts` always corresponds to the horizontal extent of the rendered bitmap. Re-exported as `rasterrocket::PageGeometry` and returned by `RasterSession::page_geometry`.
 
-To get pixel dimensions: `(width_pts × dpi / 72.0).round()`.
+`size_px(scale)` is the rendered pixel size, `(width_pts × scale).round()` by `(height_pts × scale).round()`, saturating at `u32::MAX`.
 
 ### `InterpError`
 

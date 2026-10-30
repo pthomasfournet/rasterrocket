@@ -123,6 +123,7 @@ pub(crate) mod gpu_init;
 mod gray;
 pub mod page;
 mod render;
+mod request;
 #[cfg(feature = "vulkan")]
 mod vk_init;
 
@@ -135,11 +136,12 @@ pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_d
 pub use pdf::Password;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
-pub use pdf_interp::{FormType, RenderPurpose};
+pub use pdf_interp::{FormType, PageGeometry, RenderPurpose};
 pub use render::{
     RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
-    render_page_rgb, render_page_rgb_hinted,
+    render_page_rgb, render_page_rgb_with,
 };
+pub use request::{CancelToken, RenderParams, RenderRegion};
 
 /// Session-level API for explicit control over PDF opening and per-page rendering.
 ///
@@ -153,7 +155,7 @@ pub use render::{
 pub mod session {
     pub use super::{
         open_session, open_session_from_bytes, prescan_session, render_page_rgb,
-        render_page_rgb_hinted, rgb_to_gray,
+        render_page_rgb_with, rgb_to_gray,
     };
 }
 

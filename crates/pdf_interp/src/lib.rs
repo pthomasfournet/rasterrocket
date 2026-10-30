@@ -362,7 +362,8 @@ pub(crate) fn resolve_page_id(doc: &Document, page_num: u32) -> Result<pdf::Obje
 /// Both dimensions are also already scaled by `user_unit` (PDF 1.6+ `UserUnit` key).
 /// Multiply the render DPI by `user_unit` to get the true physical resolution of the
 /// rendered bitmap (i.e. the value to pass to `tesseract::set_source_resolution`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PageGeometry {
     /// Width of the rendered output in PDF points (after rotation and `UserUnit` scaling).
     pub width_pts: f64,
@@ -386,6 +387,34 @@ pub struct PageGeometry {
     ///
     /// See `origin_x`.
     pub origin_y: f64,
+    /// The page's `MediaBox` (own or inherited) as `[llx, lly, urx, ury]` in
+    /// default user space, normalised so `llx < urx` and `lly < ury`; `None`
+    /// when absent or unusable.
+    pub media_box: Option<[f64; 4]>,
+    /// The page's `CropBox` (own or inherited) as `[llx, lly, urx, ury]` in
+    /// default user space, normalised like [`media_box`](Self::media_box) and
+    /// not yet intersected with it; `None` when absent or unusable.
+    pub crop_box: Option<[f64; 4]>,
+}
+
+impl PageGeometry {
+    /// The pixel dimensions of the page rendered at `scale` device pixels per
+    /// point: `width_pts × scale` and `height_pts × scale`, each rounded to
+    /// the nearest integer.
+    ///
+    /// A product beyond `u32::MAX` saturates to `u32::MAX`, and a NaN or
+    /// non-positive product gives 0; callers reject both before allocating.
+    #[must_use]
+    pub fn size_px(&self, scale: f64) -> (u32, u32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "f64-to-u32 `as` saturates at both ends and maps NaN to 0, \
+                      which is the documented contract"
+        )]
+        let px = |pts: f64| (pts * scale).round() as u32;
+        (px(self.width_pts), px(self.height_pts))
+    }
 }
 
 /// Return the geometry for page `page_num` (1-based).
@@ -431,6 +460,8 @@ pub fn page_size_pts_by_id(
         user_unit: 1.0,
         origin_x: 0.0,
         origin_y: 0.0,
+        media_box: None,
+        crop_box: None,
     };
 
     let Ok(dict) = doc.get_dict(page_id) else {
@@ -492,6 +523,7 @@ pub fn page_size_pts_by_id(
 
     let media_box = media_obj.as_ref().and_then(parse_box);
     let crop_box = crop_obj.as_ref().and_then(parse_box);
+    let corners = |(x, y, w, h): (f64, f64, f64, f64)| [x, y, x + w, y + h];
 
     // ISO 32000-2 §14.11.2: CropBox shall be intersected with MediaBox to
     // determine the visible region.  If CropBox is absent, use MediaBox
@@ -635,7 +667,7 @@ pub fn page_size_pts_by_id(
     };
 
     // The origin is kept in unscaled PDF user-space coordinates (before UserUnit scaling).
-    // The CTM in new_scaled applies (scale = dpi/72 * user_unit) already, so the
+    // The CTM in `PageRenderer::with_view` applies (scale = dpi/72 * user_unit) already, so the
     // pre-translation by (-origin_x, -origin_y) in unscaled points is correct there.
     let (origin_x, origin_y) = (box_left, box_bottom);
 
@@ -646,6 +678,8 @@ pub fn page_size_pts_by_id(
         user_unit,
         origin_x,
         origin_y,
+        media_box: media_box.map(corners),
+        crop_box: crop_box.map(corners),
     })
 }
 

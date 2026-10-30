@@ -10,5 +10,5 @@ mod system_fonts;
 pub mod text;
 
 pub use font_cache::DocumentFonts;
-pub use page::{ImageFailure, PageDiagnostics, PageRenderer};
+pub use page::{ImageFailure, PageDiagnostics, PageRenderer, PageView, RenderAbort};
 pub use pdf::ContentFailure;

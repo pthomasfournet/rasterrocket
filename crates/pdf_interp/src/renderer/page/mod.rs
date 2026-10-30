@@ -106,6 +106,7 @@ use gpu::nvjpeg2k::NvJpeg2kDecoder;
 use image_sampler::{Filter, GridClip, MaskSampler, SampleGrid};
 use pixel_rect::PixelRect;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const _: () = assert!(
     IMAGE_FILTER_COUNT == 6,
@@ -308,14 +309,62 @@ const DEADLINE_CHECK_INTERVAL: u64 = 4_096;
 /// gigabytes before the operator budget aborts the page.  Not a tuning knob.
 pub(super) const MAX_WARNED_UNKNOWN_OPS: usize = 256;
 
+/// Why a page render stopped before executing all of its operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RenderAbort {
+    /// The page executed more operators than the per-page cap allows.
+    OperatorBudget {
+        /// Operators executed when the cap tripped.
+        ops: u64,
+    },
+    /// The page ran past the per-page wall-clock deadline.
+    Deadline {
+        /// Operators executed when the deadline was detected.
+        ops: u64,
+    },
+    /// Form `XObjects` nested deeper than the renderer's limit.
+    FormDepth,
+    /// The caller's cancellation flag was raised.
+    Cancelled {
+        /// Operators executed before the flag was observed.
+        ops: u64,
+    },
+}
+
+impl std::fmt::Display for RenderAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OperatorBudget { ops } => {
+                write!(
+                    f,
+                    "page render exceeded operator budget ({ops} ops); aborting"
+                )
+            }
+            Self::Deadline { ops } => write!(
+                f,
+                "page render exceeded {PAGE_RENDER_DEADLINE_SECS}s deadline after {ops} ops; aborting"
+            ),
+            Self::FormDepth => write!(
+                f,
+                "Form XObject nesting depth {MAX_FORM_DEPTH} exceeded; aborting page render"
+            ),
+            Self::Cancelled { ops } => write!(f, "page render cancelled after {ops} ops"),
+        }
+    }
+}
+
 /// Renders a decoded operator sequence onto a `Bitmap<Rgb8>`.
 pub struct PageRenderer<'doc> {
     /// Target pixel buffer.
     pub(super) bitmap: Bitmap<Rgb8>,
-    /// Page width in device pixels.
+    /// Width of the drawn window (the bitmap) in device pixels.
     width: u32,
-    /// Page height in device pixels.
+    /// Height of the drawn window (the bitmap) in device pixels.
     height: u32,
+    /// Width of the whole page in device pixels; equals `width` unless the
+    /// renderer draws a window of the page.
+    page_width: u32,
     /// Graphics state save/restore stack.
     pub(super) gstate: GStateStack,
     /// Current path under construction, if any.
@@ -372,9 +421,12 @@ pub struct PageRenderer<'doc> {
     deadline: Option<std::time::Instant>,
     /// Number of operators executed so far this page.
     ops_executed: u64,
-    /// Set to `Some(reason)` when the per-page budget is exceeded; `None` means ok.
+    /// Set to `Some(reason)` when the render stops early; `None` means ok.
     /// Checked after `execute`; surfaces as `Err` in the per-page result.
-    budget_exceeded: Option<String>,
+    budget_exceeded: Option<RenderAbort>,
+    /// Caller-owned cancellation flag, polled before every operator; `true`
+    /// stops the render with [`RenderAbort::Cancelled`].
+    cancel: Option<Arc<AtomicBool>>,
     /// Distinct unknown operator keywords already warned about this page,
     /// so a content stream that repeats an unsupported op doesn't flood the
     /// log.  Bounded at [`MAX_WARNED_UNKNOWN_OPS`] entries.
@@ -544,6 +596,108 @@ fn build_initial_ctm(
     }
 }
 
+/// The device-space placement of a page render: the page's pixel extent and
+/// initial-CTM parameters, and the window of that extent the renderer draws.
+///
+/// Device pixels are counted from the top-left corner of the whole page.  The
+/// renderer's bitmap covers the window `[x, x + width) × [y, y + height)`; its
+/// initial CTM is the whole-page CTM translated by the window's offset, so a
+/// window draws exactly the device pixels the whole-page render places there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageView {
+    /// Width of the whole page in device pixels, after rotation.
+    pub page_width: u32,
+    /// Height of the whole page in device pixels, after rotation.
+    pub page_height: u32,
+    /// Device pixels per PDF point (`dpi / 72 × UserUnit`).  Positive and finite.
+    pub scale: f64,
+    /// The page `/Rotate`, clockwise degrees: one of 0, 90, 180, 270.
+    pub rotate_cw: u16,
+    /// X of the selected page box's lower-left corner in PDF user space.
+    pub origin_x: f64,
+    /// Y of the selected page box's lower-left corner in PDF user space.
+    pub origin_y: f64,
+    /// Left edge of the drawn window, in device pixels from the page's left edge.
+    pub x: u32,
+    /// Top edge of the drawn window, in device pixels from the page's top edge.
+    pub y: u32,
+    /// Width of the drawn window in device pixels.
+    pub width: u32,
+    /// Height of the drawn window in device pixels.
+    pub height: u32,
+}
+
+impl PageView {
+    /// The view of a whole `page_width × page_height` page.
+    ///
+    /// `rotate_cw`, `origin_x` and `origin_y` are the page geometry's
+    /// (see `PageGeometry`); `page_width`/`page_height` are already swapped
+    /// for 90°/270°.
+    #[must_use]
+    pub const fn whole(
+        page_width: u32,
+        page_height: u32,
+        scale: f64,
+        rotate_cw: u16,
+        origin_x: f64,
+        origin_y: f64,
+    ) -> Self {
+        Self {
+            page_width,
+            page_height,
+            scale,
+            rotate_cw,
+            origin_x,
+            origin_y,
+            x: 0,
+            y: 0,
+            width: page_width,
+            height: page_height,
+        }
+    }
+
+    /// This view restricted to the window at `(x, y)` of `width × height`
+    /// device pixels.
+    #[must_use]
+    pub const fn window(self, x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            ..self
+        }
+    }
+
+    /// The initial CTM: the whole page's, with the window's top-left corner
+    /// moved to the device origin.
+    ///
+    /// Device y grows downward from the window's top edge
+    /// (`device_y = height − ctm_y`), so a window `y` pixels below the page
+    /// top and `height` tall shifts the CTM's y translation by
+    /// `page_height − y − height`.
+    fn initial_ctm(&self) -> Ctm {
+        let mut ctm = build_initial_ctm(
+            self.page_width,
+            self.page_height,
+            self.scale,
+            self.rotate_cw,
+            self.origin_x,
+            self.origin_y,
+        );
+        let below = i64::from(self.page_height) - i64::from(self.y) - i64::from(self.height);
+        ctm[4] -= f64::from(self.x);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "|below| < 2^33, exactly representable in f64"
+        )]
+        {
+            ctm[5] -= below as f64;
+        }
+        ctm
+    }
+}
+
 impl<'doc> PageRenderer<'doc> {
     /// Create a renderer for a blank white page of `width × height` pixels,
     /// where 1 user-space unit = 1 device pixel (72 dpi).
@@ -551,46 +705,38 @@ impl<'doc> PageRenderer<'doc> {
     /// `doc` and `page_id` are used to resolve font and resource dictionaries.
     #[must_use]
     pub fn new(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
-        Self::new_scaled(width, height, 1.0, 0, 0.0, 0.0, doc, page_id)
+        Self::with_view(
+            &PageView::whole(width, height, 1.0, 0, 0.0, 0.0),
+            doc,
+            page_id,
+        )
     }
 
-    /// Create a renderer with an initial uniform scale in the CTM.
-    ///
-    /// `scale = dpi / 72.0` maps PDF points to device pixels.  `rotate_cw` is
-    /// the page `/Rotate` value (one of 0, 90, 180, 270); the bitmap dimensions
-    /// must already be swapped for 90°/270° before calling this method.
-    /// `origin_x`/`origin_y` are the lower-left corner of the selected page box
-    /// in PDF user space (from `PageGeometry::origin_x`/`origin_y`); zero for
-    /// the common case where the box starts at the origin.
+    /// Create a renderer for `view`: a white bitmap of the view's window, with
+    /// the initial CTM that maps the page's user space onto that window.
     ///
     /// # Panics
     ///
-    /// Panics if `scale` is not a positive finite number.
+    /// Panics if `view.scale` is not a positive finite number.
     #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "renderer configuration has no natural grouping; a builder would add more boilerplate than it removes"
-    )]
-    pub fn new_scaled(
-        width: u32,
-        height: u32,
-        scale: f64,
-        rotate_cw: u16,
-        origin_x: f64,
-        origin_y: f64,
-        doc: &'doc Document,
-        page_id: ObjectId,
-    ) -> Self {
+    pub fn with_view(view: &PageView, doc: &'doc Document, page_id: ObjectId) -> Self {
+        let scale = view.scale;
         assert!(
             scale.is_finite() && scale > 0.0,
-            "PageRenderer::new_scaled: scale must be a positive finite number, got {scale}"
+            "PageRenderer::with_view: scale must be a positive finite number, got {scale}"
         );
+        debug_assert!(
+            u64::from(view.x) + u64::from(view.width) <= u64::from(view.page_width)
+                && u64::from(view.y) + u64::from(view.height) <= u64::from(view.page_height),
+            "PageRenderer::with_view: window lies outside the page: {view:?}"
+        );
+        let (width, height, rotate_cw) = (view.width, view.height, view.rotate_cw);
 
         let mut bitmap = Bitmap::<Rgb8>::new(width, height, 1, false);
         bitmap.data_mut().fill(255u8); // white background
 
         let mut gstate = GStateStack::new(width, height);
-        let initial_ctm = build_initial_ctm(width, height, scale, rotate_cw, origin_x, origin_y);
+        let initial_ctm = view.initial_ctm();
         gstate.current_mut().ctm = initial_ctm;
 
         let font_cache = FontCache::new(Arc::default());
@@ -600,6 +746,7 @@ impl<'doc> PageRenderer<'doc> {
             bitmap,
             width,
             height,
+            page_width: view.page_width,
             gstate,
             path: None,
             pending_clip: None,
@@ -623,6 +770,7 @@ impl<'doc> PageRenderer<'doc> {
             ),
             ops_executed: 0,
             budget_exceeded: None,
+            cancel: None,
             warned_unknown_ops: std::collections::HashSet::new(),
             warned_unknown_ops_capped: false,
             filter_counts: [0u32; IMAGE_FILTER_COUNT],
@@ -877,17 +1025,25 @@ impl<'doc> PageRenderer<'doc> {
         self.diag.missing_fonts.push(name.into_owned());
     }
 
-    /// The per-page work-budget breach reason, if any.
+    /// Why the render stopped early, if it did.
     ///
-    /// `Some(reason)` means the page was aborted early because it exceeded
-    /// either the operator count cap or the wall-clock deadline.  The rendered
-    /// bitmap is partial and the per-page `Result` must be an `Err`.
+    /// `Some(reason)` means the page was aborted before all of its operators
+    /// ran: it exceeded the operator count cap, the wall-clock deadline or
+    /// the form nesting limit, or it was cancelled.  The rendered bitmap is
+    /// partial and the per-page `Result` must be an `Err`.
     ///
     /// Check this after [`execute`](Self::execute) and before
     /// [`finish`](Self::finish).
     #[must_use]
-    pub fn budget_status(&self) -> Option<&str> {
-        self.budget_exceeded.as_deref()
+    pub const fn budget_status(&self) -> Option<&RenderAbort> {
+        self.budget_exceeded.as_ref()
+    }
+
+    /// Stop the render with [`RenderAbort::Cancelled`] once `cancel` reads
+    /// `true`.  The flag is polled before every operator, including those of
+    /// forms, Type 3 glyphs and pattern cells.  Call before execute.
+    pub fn set_cancel(&mut self, cancel: Arc<AtomicBool>) {
+        self.cancel = Some(cancel);
     }
 
     /// Seed this (child) renderer's work watchdog from a parent renderer.
@@ -914,6 +1070,7 @@ impl<'doc> PageRenderer<'doc> {
         self.op_budget = parent.op_budget.saturating_sub(parent.ops_executed);
         self.ops_executed = 0;
         self.deadline = parent.deadline;
+        self.cancel.clone_from(&parent.cancel);
         self.budget_exceeded.clone_from(&parent.budget_exceeded);
     }
 
@@ -1015,6 +1172,16 @@ impl<'doc> PageRenderer<'doc> {
             if self.budget_exceeded.is_some() {
                 return;
             }
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+            {
+                self.budget_exceeded = Some(RenderAbort::Cancelled {
+                    ops: self.ops_executed,
+                });
+                return;
+            }
             self.execute_one(op);
             // saturating_add: the op cap fires at MAX_PAGE_OPS long before u64
             // could wrap, but a test or future caller may set a huge budget
@@ -1022,10 +1189,9 @@ impl<'doc> PageRenderer<'doc> {
             // (which would mask, not catch, an unbounded stream).
             self.ops_executed = self.ops_executed.saturating_add(1);
             if self.ops_executed > self.op_budget {
-                self.budget_exceeded = Some(format!(
-                    "page render exceeded operator budget ({} ops); aborting",
-                    self.ops_executed,
-                ));
+                self.budget_exceeded = Some(RenderAbort::OperatorBudget {
+                    ops: self.ops_executed,
+                });
                 return;
             }
             // Check the wall-clock deadline periodically to keep the syscall cost low.
@@ -1034,11 +1200,9 @@ impl<'doc> PageRenderer<'doc> {
                     .deadline
                     .is_some_and(|dl| std::time::Instant::now() >= dl)
             {
-                self.budget_exceeded = Some(format!(
-                    "page render exceeded {PAGE_RENDER_DEADLINE_SECS}s deadline \
-                     after {} ops; aborting",
-                    self.ops_executed,
-                ));
+                self.budget_exceeded = Some(RenderAbort::Deadline {
+                    ops: self.ops_executed,
+                });
                 return;
             }
         }
@@ -1661,9 +1825,7 @@ impl<'doc> PageRenderer<'doc> {
     /// other forms, draws nothing.
     fn do_form_xobject(&mut self, form: &crate::resources::FormXObject) {
         if self.form_depth >= MAX_FORM_DEPTH {
-            self.budget_exceeded = Some(format!(
-                "Form XObject nesting depth {MAX_FORM_DEPTH} exceeded; aborting page render"
-            ));
+            self.budget_exceeded = Some(RenderAbort::FormDepth);
             log::warn!(
                 "rasterrocket-interp: Form XObject nesting depth {MAX_FORM_DEPTH} exceeded — aborting"
             );
@@ -1919,7 +2081,7 @@ impl<'doc> PageRenderer<'doc> {
 
         // Update source_ppi_hint: take the widest image seen (best resolution proxy).
         // ppi = (image_px_width / page_pts_width) × 72.
-        let page_pts_w = f64::from(self.width) / {
+        let page_pts_w = f64::from(self.page_width) / {
             // For unrotated pages CTM[0] carries the scale; for 90°/270° rotations
             // CTM[0] is 0 and CTM[1] carries it.  Take the larger of the two to
             // handle all axis-aligned cases.  Falls back to 1.0 for a degenerate CTM
@@ -2723,7 +2885,7 @@ mod tests {
     /// Page geometry input for `assert_box_corners_map_to`.
     ///
     /// `wpx`/`hpx` are the output bitmap pixel dimensions, already swapped for
-    /// 90°/270° exactly as the renderer's caller swaps them before `new_scaled`.
+    /// 90°/270° exactly as the renderer's caller swaps them before `PageView::whole`.
     struct CornerCase {
         wpx: u32,
         hpx: u32,
@@ -2996,6 +3158,37 @@ mod tests {
             renderer.ops_executed_for_test() <= 11, // budget=10 → fires at op 11
             "no more than budget+1 ops should have run, got {}",
             renderer.ops_executed_for_test()
+        );
+    }
+
+    /// A raised cancel flag stops the render before its next operator and
+    /// reaches a pattern-cell renderer through the shared budget.
+    #[test]
+    fn cancel_flag_stops_execute_and_is_inherited() {
+        use crate::content::Operator;
+        use crate::test_helpers::empty_doc;
+
+        let doc = empty_doc();
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut parent = PageRenderer::new(1, 1, &doc, (1, 0));
+        parent.set_cancel(Arc::clone(&flag));
+        let ops: Vec<Operator> = std::iter::repeat_n(Operator::EndPath, 8).collect();
+        parent.execute(&ops);
+        assert!(parent.budget_status().is_none(), "a lowered flag is inert");
+
+        flag.store(true, Ordering::Relaxed);
+        let mut child = PageRenderer::new(1, 1, &doc, (1, 0));
+        child.adopt_parent_budget(&parent);
+        child.execute(&ops);
+        assert_eq!(
+            child.budget_status(),
+            Some(&RenderAbort::Cancelled { ops: 0 }),
+            "the child observes the parent's flag before its first operator"
+        );
+        parent.execute(&ops);
+        assert_eq!(
+            parent.budget_status(),
+            Some(&RenderAbort::Cancelled { ops: 8 })
         );
     }
 

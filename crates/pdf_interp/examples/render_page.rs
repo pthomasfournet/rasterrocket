@@ -4,7 +4,7 @@
 
 /// Maximum pixel dimension per axis.  Matches `rasterrocket::MAX_PX_DIMENSION`;
 /// the example doesn't depend on that crate so the value is duplicated here.
-const MAX_PX: f64 = 32_768.0;
+const MAX_PX: u32 = 32_768;
 
 fn main() {
     let _ = env_logger::try_init();
@@ -47,29 +47,14 @@ fn main() {
     );
 
     let scale = dpi / 72.0;
-    // Bound the dimensions before `as u32` so a malformed PageGeometry or an
-    // extreme DPI can't silently saturate to u32::MAX.
-    let w_f = (geom.width_pts * scale).round();
-    let h_f = (geom.height_pts * scale).round();
-    if !w_f.is_finite()
-        || !h_f.is_finite()
-        || w_f <= 0.0
-        || h_f <= 0.0
-        || w_f > MAX_PX
-        || h_f > MAX_PX
-    {
+    let (w, h) = geom.size_px(scale);
+    if w == 0 || h == 0 || w > MAX_PX || h > MAX_PX {
         eprintln!(
-            "error: page {page} dimensions out of range ({w_f}×{h_f} px at {dpi} dpi; \
+            "error: page {page} dimensions out of range ({w}×{h} px at {dpi} dpi; \
              max {MAX_PX} per axis)"
         );
         std::process::exit(1);
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "bounds-checked above: w_f and h_f are finite, > 0, <= MAX_PX (32768)"
-    )]
-    let (w, h) = (w_f as u32, h_f as u32);
 
     let ops = rasterrocket_interp::parse_page(&doc, page).unwrap_or_else(|e| {
         eprintln!("error: failed to parse page {page}: {e}");
@@ -77,16 +62,15 @@ fn main() {
     });
     println!("Page {page}: {} operators", ops.len());
 
-    let mut renderer = rasterrocket_interp::renderer::PageRenderer::new_scaled(
+    let view = rasterrocket_interp::renderer::PageView::whole(
         w,
         h,
         scale,
         geom.rotate_cw,
         geom.origin_x,
         geom.origin_y,
-        &doc,
-        page_id,
     );
+    let mut renderer = rasterrocket_interp::renderer::PageRenderer::with_view(&view, &doc, page_id);
     renderer.execute(&ops);
     let (bitmap, _diag) = renderer.finish();
 

@@ -81,6 +81,17 @@ version: the public API changes below are breaking.
   `pdf_interp::open_bytes_with` replace `open_decrypting`; the in-memory
   entry points decrypt too. CLI `--password` (aliases `--upw`, `--opw`)
   replaces the two unwired flags. The authorisation gate is unchanged.
+- `RasterSession::page_geometry(page)` returns the re-exported `PageGeometry`
+  (size after `/Rotate` and `UserUnit`, rotation, box origin, and the new
+  `media_box` / `crop_box`) without parsing content; `PageGeometry::size_px`
+  is the bitmap size a render at a given scale produces.
+- `render_page_rgb_with(session, page, &RenderParams)` renders a
+  `RenderRegion` of a page (tiles stitch byte for byte into the whole page,
+  and the size limits apply to the region, so pages past `MAX_PX_AREA` render
+  in tiles), overrides the backend policy, and stops on a `CancelToken` with
+  the new `RasterError::Cancelled`. It replaces `render_page_rgb_hinted`.
+  In `rasterrocket-interp`, `PageRenderer::with_view(&PageView)` replaces
+  `new_scaled`, and `budget_status()` returns a `RenderAbort`.
 
 **Parser.** Recovery of objects absent from or misplaced in the xref,
 including object-stream members and XRef-stream trailers; object streams
