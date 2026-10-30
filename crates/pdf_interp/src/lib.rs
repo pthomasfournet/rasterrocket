@@ -424,8 +424,9 @@ impl PageGeometry {
 /// in the returned struct are already swapped for 90°/270° rotations and scaled by `UserUnit`
 /// so callers can use `width_pts × height_pts` directly as output point dimensions.
 ///
-/// Falls back to US Letter (612 × 792 pt, no rotation, `UserUnit` 1.0) when neither box
-/// can be read.
+/// When neither box can be read the page box is US Letter (612 × 792 pt at the origin),
+/// still rotated by `/Rotate` and scaled by `UserUnit`; a page object that is not a
+/// dictionary is unrotated US Letter.
 ///
 /// # Errors
 ///
@@ -531,9 +532,18 @@ pub fn page_size_pts_by_id(
     //
     // For the common case where the leaf has both boxes and CropBox ⊆ MediaBox
     // the intersection is the CropBox itself — byte-identical to the old path.
-    let Some((box_left, box_bottom, w_pts, h_pts)) = (match (media_box, crop_box) {
-        (None, None) => None,
-        (Some(m), None) => Some(m),
+    let (box_left, box_bottom, w_pts, h_pts) = match (media_box, crop_box) {
+        (None, None) => {
+            // MediaBox is mandatory (§7.7.3.3).  The box is assumed; the
+            // page's other attributes, /Rotate among them, still apply.
+            log::warn!(
+                "page object {} has no usable MediaBox or CropBox; assuming \
+                 612×792 (malformed PDF, §7.7.3.3)",
+                page_id.0
+            );
+            (0.0, 0.0, fallback.width_pts, fallback.height_pts)
+        }
+        (Some(m), None) => m,
         (None, Some(c)) => {
             // MediaBox is mandatory (§7.7.3.3); reaching here means it was
             // absent or unparseable on every node of the /Parent chain.  We
@@ -546,7 +556,7 @@ pub fn page_size_pts_by_id(
                  for page geometry (malformed PDF, §7.7.3.3)",
                 page_id.0
             );
-            Some(c)
+            c
         }
         (Some(m), Some(c)) => {
             // Clamp CropBox to the MediaBox bounds (§14.11.2 intersection).
@@ -557,7 +567,7 @@ pub fn page_size_pts_by_id(
             let w = x1 - x0;
             let h = y1 - y0;
             if w > 0.0 && h > 0.0 {
-                Some((x0, y0, w, h))
+                (x0, y0, w, h)
             } else {
                 // Degenerate intersection (CropBox entirely outside MediaBox):
                 // fall back to MediaBox so the page is not empty.  This is a
@@ -579,11 +589,9 @@ pub fn page_size_pts_by_id(
                     mw = m.2,
                     mh = m.3,
                 );
-                Some(m)
+                m
             }
         }
-    }) else {
-        return Ok(fallback);
     };
 
     // ISO 32000-2 §7.7.3.4: /Rotate is inheritable.  Walk the /Parent chain
@@ -1117,6 +1125,32 @@ mod page_box_tests {
         let trailer = format!("trailer\n<</Size 4 /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF");
         let bytes = format!("{header}{obj1}{obj2}{obj3}{xref}{trailer}").into_bytes();
         Document::from_bytes_owned(bytes).expect("cyclic-parent test PDF parse")
+    }
+
+    /// A page with no box anywhere on its /Parent chain is assumed to be US
+    /// Letter, and the /Rotate it inherits still turns it.
+    #[test]
+    fn missing_boxes_keep_inherited_rotate() {
+        let header = "%PDF-1.4\n";
+        let obj1 = "1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n";
+        let obj2 = "2 0 obj\n<</Type /Pages /Rotate 90 /Kids [3 0 R] /Count 1>>\nendobj\n";
+        let obj3 = "3 0 obj\n<</Type /Page /Parent 2 0 R>>\nendobj\n";
+        let off1 = header.len();
+        let off2 = off1 + obj1.len();
+        let off3 = off2 + obj2.len();
+        let xref_start = off3 + obj3.len();
+        let xref = format!(
+            "xref\n0 4\n0000000000 65535 f\r\n\
+             {off1:010} 00000 n\r\n{off2:010} 00000 n\r\n{off3:010} 00000 n\r\n"
+        );
+        let trailer = format!("trailer\n<</Size 4 /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF");
+        let bytes = format!("{header}{obj1}{obj2}{obj3}{xref}{trailer}").into_bytes();
+        let doc = Document::from_bytes_owned(bytes).expect("test PDF parse");
+
+        let geom = page_size_pts(&doc, 1).expect("page_size_pts");
+        assert_eq!(geom.rotate_cw, 90);
+        assert_eq!((geom.width_pts, geom.height_pts), (792.0, 612.0));
+        assert_eq!((geom.origin_x, geom.origin_y), (0.0, 0.0));
     }
 
     /// `DoS` guard: a cyclic /Parent ring must terminate (no hang, no
