@@ -71,7 +71,7 @@ const fn digit_width(n: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{AaFlag, Args, ThinLineMode};
+    use crate::args::{AaFlag, Args};
 
     fn make_args(prefix: &str, sep: char, force: Option<usize>) -> Args {
         Args {
@@ -98,12 +98,9 @@ mod tests {
             tiff: false,
             gray: false,
             mono: false,
-            jpeg_quality: 75,
             antialias: AaFlag::Yes,
             vector_antialias: AaFlag::Yes,
             hide_annotations: false,
-            overprint: false,
-            thin_line_mode: ThinLineMode::Default,
             password: None,
             decrypt_owned: false,
             num_threads: 0,

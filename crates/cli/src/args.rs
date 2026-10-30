@@ -144,15 +144,6 @@ pub(crate) struct Args {
     #[arg(long = "mono")]
     pub mono: bool,
 
-    /// JPEG quality 0-100 (default 75).
-    #[arg(
-        long = "jpegopt",
-        value_name = "QUALITY",
-        default_value_t = 75,
-        value_parser = clap::value_parser!(u8).range(0..=100)
-    )]
-    pub jpeg_quality: u8,
-
     // ── Rendering options ────────────────────────────────────────────────────
     /// Antialias text (default yes).  `no` draws glyphs with hard,
     /// bilevel edges.
@@ -168,14 +159,6 @@ pub(crate) struct Args {
     /// PDF annotations); render the page content alone.
     #[arg(long = "hide-annotations")]
     pub hide_annotations: bool,
-
-    /// Enable overprint preview.
-    #[arg(long = "overprint")]
-    pub overprint: bool,
-
-    /// Thin line rendering mode (default, solid, shape).
-    #[arg(long = "thinlinemode", value_name = "MODE", default_value = "default")]
-    pub thin_line_mode: ThinLineMode,
 
     // ── Encrypted-document decryption ────────────────────────────────────────
     /// Password for an encrypted PDF, tried as the user password and then
@@ -382,17 +365,6 @@ pub(crate) enum AaFlag {
     Yes,
     /// Anti-aliasing disabled.
     No,
-}
-
-/// Thin-line rendering mode.
-#[derive(Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum ThinLineMode {
-    /// Default thin-line mode.
-    Default,
-    /// Force solid thin lines.
-    Solid,
-    /// Use shape-based thin lines.
-    Shape,
 }
 
 impl Args {

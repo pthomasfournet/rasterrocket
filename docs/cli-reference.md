@@ -84,10 +84,9 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 | `--gray` | `.pgm` | Grayscale PGM (Netpbm P5, BT.709). Can combine with `--png`. |
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4, 50% threshold). Can combine with `--png`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG. |
-| `--jpeg` | `.jpg` | JPEG. |
-| `--jpegcmyk` | `.jpg` | JPEG in CMYK colour space. |
-| `--tiff` | `.tif` | TIFF. |
-| `--jpegopt N` | — | JPEG quality 0–100 (default 75). |
+| `--jpeg` | `.jpg` | JPEG. Not yet supported: the page fails with "output format JPEG is not yet supported". |
+| `--jpegcmyk` | `.jpg` | JPEG in CMYK colour space. Not yet supported, as `--jpeg`. |
+| `--tiff` | `.tif` | TIFF. Not yet supported, as `--jpeg`. |
 
 **Extension matrix:**
 
@@ -107,8 +106,6 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 | `--aa yes\|no` | `yes` | Antialias text. `no` draws glyphs with hard, bilevel edges. |
 | `--aaVector yes\|no` | `yes` | Antialias path fills, strokes and clips. `no` draws them with hard, bilevel edges. |
 | `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
-| `--overprint` | off | Enable overprint preview. |
-| `--thinlinemode MODE` | `default` | Thin-line rendering: `default`, `solid`, or `shape`. |
 
 Fonts a document does not embed are drawn with substitutes: the installed
 Liberation (or Arial / Times New Roman / Courier New) family when found,

@@ -99,6 +99,9 @@ version: the public API changes below are breaking.
 - CLI `-x`/`-y`/`-W`/`-H` render only the selected area through a region
   render, and `--scale-to`, `--scale-to-x`, `--scale-to-y` size the page;
   all seven were parsed and ignored before.
+- CLI `--overprint`, `--thinlinemode` and `--jpegopt` are removed: nothing
+  read them (and `--jpeg` itself is refused), so they promised behaviour
+  the binary does not have.
 - `SessionConfig::annotations` and `RasterOptions::annotations` (default
   `true`); `false` renders page content without annotations. The CLI's
   `--hide-annotations`, previously parsed and ignored, sets it.
