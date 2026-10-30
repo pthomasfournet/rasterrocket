@@ -318,7 +318,8 @@ cache/               — device image-cache helpers + background prefetcher
 renderer/
   mod.rs             — PageRenderer; render_operators() dispatch loop
   gstate.rs          — CTM, graphics state, StateStack
-  color.rs           — colour space resolution + transfer functions
+  color.rs           — colour values → device components (DeviceCMYK via
+                       the process-ink model in `color::cmyk`)
   text.rs            — text state (Tc, Tw, Tz, TL, Ts, Tr)
   font_cache.rs      — font loading, code → glyph tables, GlyphCache
   encodings.rs       — base encodings of Annex D
@@ -347,11 +348,24 @@ resources/
   font_substitute.rs — typeface class of a non-embedded font
   cmap.rs            — CMap / ToUnicode parsing
   cmap_predefined.rs — predefined CMaps compiled into the binary
-  colorspace.rs      — colour-space taxonomy for `cs` / `CS`
+  colorspace.rs      — colour-space taxonomy for `cs` / `CS`; Separation /
+                       DeviceN tint transforms, Indexed lookups, `/None`
+                       colorants, DefaultGray / DefaultRGB / DefaultCMYK
+                       (selected per resource context, memoised in
+                       `PageResources`)
+  colorspace/
+    cal.rs           — CalGray / CalRGB through WhitePoint, Gamma, Matrix
+    icc.rs           — ICCBased compiled once per document: matrix/TRC
+                       shaper or moxcms transform, else `/Alternate`
   icc.rs             — ICC profile loading + moxcms CLUT extraction
   icc_shaper.rs      — matrix/TRC ICC input profiles evaluated to sRGB
   tiling.rs          — Type 1 tiling pattern dictionaries
-  shading/           — shading types 1–7, functions, mesh vertices, patches
+  transfer.rs        — ExtGState /TR and /TR2 tabulated to 256-entry tables,
+                       applied to painted colours and image samples
+  shading/           — shading types 1–7, mesh vertices, patches
+    function.rs      — PDF functions compiled once per document, evaluated
+                       by arithmetic (Types 0, 2, 3, 4)
+    function/        — sampled.rs (Type 0), postscript.rs (Type 4)
   image/
     mod.rs           — ImageDescriptor; XObject resolution
     dispatch.rs      — filter chain → decoded samples (images and masks)
