@@ -9,7 +9,7 @@
 #   -f PAGE         First page, 1-based (default: 1)
 #   -l PAGE         Last page, 1-based (default: all)
 #   -t THRESHOLD    Max allowed RMSE per page, 0-255 scale (default: 2.0)
-#   -R RENDERER     Reference renderer: pdftoppm (default) or oxide
+#   -R RENDERER     Reference renderer: pdftoppm (default), pdfium or oxide
 #   -v              Verbose: print per-page stats even when passing
 #   -o DIR          Write diff images to DIR (default: discarded)
 #   -n              Dry run: print commands without executing
@@ -17,16 +17,21 @@
 # Exit code: 0 = all pages within threshold; 1 = failures or errors.
 # Dry-run always exits 0.
 #
-# Two independent references are supported so that a disagreement can be
-# localised: when both references agree and rrocket differs, the defect is
+# Several independent references are supported so that a disagreement can be
+# localised: when the references agree and rrocket differs, the defect is
 # ours. `pdftoppm` is invoked with -cropbox because rrocket renders the
 # CropBox; pdftoppm defaults to the MediaBox, and without the flag any page
 # whose CropBox is smaller than its MediaBox diffs on geometry alone.
+# pdfium renders the CropBox by default. It runs from a virtualenv holding
+# pypdfium2 and pillow, by default tests/compare/.venv:
+#   uv venv tests/compare/.venv
+#   uv pip install --python tests/compare/.venv/bin/python pypdfium2 pillow
+# Set PDFIUM_VENV to use another one.
 # The oxide reference is an independent Rust implementation; set
 # PDF_OXIDE_BIN to override discovery.
 #
-# Requires: pdftoppm (or pdf-oxide), rrocket (release build),
-#           ImageMagick (compare, identify, convert), bc
+# Requires: pdftoppm (or the pdfium venv, or pdf-oxide), rrocket (release
+#           build), ImageMagick (compare, identify, convert), bc
 
 set -euo pipefail
 
@@ -34,6 +39,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RASTER_BIN="${REPO_ROOT}/target/release/rrocket"
 OXIDE_BIN="${PDF_OXIDE_BIN:-pdf-oxide}"
+PDFIUM_VENV="${PDFIUM_VENV:-${SCRIPT_DIR}/.venv}"
+PDFIUM_BIN="${PDFIUM_VENV}/bin/pypdfium2"
+PDFIUM_PY="${PDFIUM_VENV}/bin/python"
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 DPI=150
@@ -83,8 +91,8 @@ is_positive_int "$FIRST" || die "-f PAGE must be a positive integer, got: $FIRST
 is_pos_number "$THRESHOLD" || die "-t THRESHOLD must be a non-negative number, got: $THRESHOLD"
 [[ -n "$LAST" && "$LAST" -lt "$FIRST" ]] && die "-l ($LAST) must be >= -f ($FIRST)"
 case "$REFERENCE" in
-    pdftoppm|oxide) ;;
-    *) die "-R must be pdftoppm or oxide, got: $REFERENCE" ;;
+    pdftoppm|pdfium|oxide) ;;
+    *) die "-R must be pdftoppm, pdfium or oxide, got: $REFERENCE" ;;
 esac
 
 # ── build argument lists early (dry-run needs them) ───────────────────────────
@@ -95,6 +103,9 @@ ref_args=(-cropbox -r "$DPI" -f "$FIRST")
 # open-ended "N-". The end page is filled in from the document's page count
 # at render time; omitting --pages renders every page.
 oxide_args=(render --dpi "$DPI" --format png)
+# pypdfium2 takes a scale in pixels per point and, like pdf-oxide, an
+# inclusive page range; the X channel is dropped so the PNG is plain RGB.
+pdfium_args=(render --scale "$(bc -l <<< "${DPI} / 72")" --format png --no-x-channel --prefix page_)
 new_args=(-r "$DPI" -f "$FIRST")
 [[ -n "$LAST" ]] && new_args+=(-l "$LAST")
 
@@ -104,6 +115,8 @@ if $DRY_RUN; then
     echo ""
     if [[ "$REFERENCE" == oxide ]]; then
         echo "  [render ref]  $OXIDE_BIN ${oxide_args[*]} -o <OUT>/ref $PDF"
+    elif [[ "$REFERENCE" == pdfium ]]; then
+        echo "  [render ref]  $PDFIUM_BIN ${pdfium_args[*]} --pages ${FIRST}-${LAST:-<N>} -o <OUT>/ref $PDF"
     else
         echo "  [render ref]  pdftoppm ${ref_args[*]} $PDF <OUT>/ref/page"
     fi
@@ -123,6 +136,9 @@ done
 if [[ "$REFERENCE" == oxide ]]; then
     command -v "$OXIDE_BIN" >/dev/null 2>&1 \
         || die "$OXIDE_BIN not found in PATH — set PDF_OXIDE_BIN to its location"
+elif [[ "$REFERENCE" == pdfium ]]; then
+    [[ -x "$PDFIUM_BIN" ]] \
+        || die "pypdfium2 not found at $PDFIUM_BIN — create the venv (see -h) or set PDFIUM_VENV"
 else
     command -v pdftoppm >/dev/null 2>&1 || die "pdftoppm not found in PATH"
 fi
@@ -175,7 +191,23 @@ if [[ "$REFERENCE" == oxide ]]; then
     # The page index is zero-padded to the width of the document's page count,
     # so the width is not fixed. Converting is deferred until after rrocket has
     # run, where the width is read back off its own output filenames.
-    OXIDE_RAW_DIR="$OX_RAW"
+    RAW_REF_DIR="$OX_RAW"
+elif [[ "$REFERENCE" == pdfium ]]; then
+    # pypdfium2 names outputs "page_<n>.png", n zero-padded like pdf-oxide's.
+    PF_RAW="${WORK_DIR}/pf_raw"
+    mkdir -p "$PF_RAW"
+    pf_last="$LAST"
+    if [[ -z "$pf_last" ]]; then
+        pf_last="$("$PDFIUM_PY" -c 'import sys, pypdfium2; print(len(pypdfium2.PdfDocument(sys.argv[1])))' "$PDF" 2>/dev/null)" \
+            || die "could not determine page count with pypdfium2"
+    fi
+    if ! "$PDFIUM_BIN" "${pdfium_args[@]}" --pages "${FIRST}-${pf_last}" -o "$PF_RAW" "$PDF" \
+            >"${WORK_DIR}/ref.log" 2>&1; then
+        echo "Error: pypdfium2 failed — see log:" >&2
+        cat "${WORK_DIR}/ref.log" >&2
+        exit 1
+    fi
+    RAW_REF_DIR="$PF_RAW"
 elif ! pdftoppm "${ref_args[@]}" "$PDF" "${REF_DIR}/page" 2>"${WORK_DIR}/ref.log"; then
     echo "Error: pdftoppm failed — see log:" >&2
     cat "${WORK_DIR}/ref.log" >&2
@@ -189,8 +221,8 @@ if ! "$RASTER_BIN" "${new_args[@]}" "$PDF" "${NEW_DIR}/page" 2>"${WORK_DIR}/new.
     exit 1
 fi
 
-# ── normalise the oxide reference onto rrocket's filenames ────────────────────
-if [[ -n "${OXIDE_RAW_DIR:-}" ]]; then
+# ── normalise a PNG reference onto rrocket's filenames ────────────────────────
+if [[ -n "${RAW_REF_DIR:-}" ]]; then
     shopt -s nullglob
     new_names=("${NEW_DIR}"/page-*.ppm)
     shopt -u nullglob
@@ -201,14 +233,14 @@ if [[ -n "${OXIDE_RAW_DIR:-}" ]]; then
     pad_width=$((pad_width - 5))   # strip the "page-" prefix
 
     shopt -s nullglob
-    for png in "${OXIDE_RAW_DIR}"/*.png; do
+    for png in "${RAW_REF_DIR}"/*.png; do
         idx="$(basename "$png" .png)"
         idx="${idx##*_}"
-        [[ "$idx" =~ ^[0-9]+$ ]] || die "unexpected $OXIDE_BIN output name: $png"
+        [[ "$idx" =~ ^[0-9]+$ ]] || die "unexpected $REFERENCE output name: $png"
         # Strip leading zeros so the value is not read as octal.
         idx=$((10#$idx))
         convert "$png" "$(printf '%s/page-%0*d.ppm' "$REF_DIR" "$pad_width" "$idx")" \
-            || die "convert failed on $OXIDE_BIN output: $png"
+            || die "convert failed on $REFERENCE output: $png"
     done
     shopt -u nullglob
 fi
