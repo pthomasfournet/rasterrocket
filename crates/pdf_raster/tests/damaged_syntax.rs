@@ -51,3 +51,16 @@ fn bare_keyword_value_drops_only_its_key() {
     let ink = ink(pdf);
     assert!((ink - 0.32).abs() < 0.01, "square must render, ink {ink}");
 }
+
+/// A malformed number in a content stream is an operand with the value of
+/// its longest well-formed prefix (`80-` is 80), so the operator after it
+/// still receives its operands.
+#[test]
+fn malformed_content_number_keeps_its_operator() {
+    let pdf = one_page(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>",
+        vec![stream_object("", b"0 g 10 10 80 80- re f")],
+    );
+    let ink = ink(pdf);
+    assert!((ink - 0.32).abs() < 0.01, "square must render, ink {ink}");
+}

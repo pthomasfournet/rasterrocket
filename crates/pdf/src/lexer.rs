@@ -180,6 +180,51 @@ pub(crate) fn read_hex_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
     out
 }
 
+/// Whether `b` can occur in a number token: digits, signs, the decimal
+/// point, and the exponent markers `e`/`E`.  Exponents are not PDF syntax
+/// (ISO 32000-2 §7.3.3) and are accepted as an extension.
+#[inline]
+pub(crate) const fn is_number_byte(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'+' | b'-' | b'.' | b'e' | b'E')
+}
+
+/// The value of a number token, or `None` when `word` is not one.
+///
+/// A word is a number token when it starts with a digit, sign or decimal
+/// point and consists of [`is_number_byte`] bytes only.  A well-formed token
+/// has its exact value; a malformed one (`--5`, `.5.`, `5-`, `34.5-6`) has
+/// the value of its longest prefix of the form `[+-]digits[.digits]`, or 0
+/// when that prefix holds no digit.  Values are clamped to the
+/// single-precision range of ISO 32000-2 Annex C, so the result is finite.
+#[must_use]
+pub fn parse_number(word: &[u8]) -> Option<f64> {
+    let first = *word.first()?;
+    if !matches!(first, b'0'..=b'9' | b'+' | b'-' | b'.')
+        || !word.iter().all(|&b| is_number_byte(b))
+    {
+        return None;
+    }
+    // The bytes are ASCII, so every prefix is UTF-8.
+    let parse = |w: &[u8]| std::str::from_utf8(w).ok()?.parse::<f64>().ok();
+    let value = parse(word).unwrap_or_else(|| {
+        let digits = |from: usize| {
+            word[from..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count()
+        };
+        let mut end = usize::from(matches!(first, b'+' | b'-'));
+        end += digits(end);
+        if word.get(end) == Some(&b'.') {
+            end += 1;
+            end += digits(end);
+        }
+        parse(&word[..end]).unwrap_or(0.0)
+    });
+    let max = f64::from(f32::MAX);
+    Some(value.clamp(-max, max))
+}
+
 /// Scan a run of non-whitespace, non-delimiter bytes; return it as a slice.
 /// Does NOT advance past the terminator.
 pub(crate) fn scan_token<'a>(src: &'a [u8], pos: &mut usize) -> &'a [u8] {
@@ -207,4 +252,54 @@ pub(crate) fn parse_u64(src: &[u8], pos: &mut usize) -> Option<u64> {
     std::str::from_utf8(&src[start..*pos])
         .ok()
         .and_then(|s| s.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn well_formed_numbers_parse_exactly() {
+        for (word, value) in [
+            (&b"42"[..], 42.0),
+            (b"-7", -7.0),
+            (b"+3.5", 3.5),
+            (b".5", 0.5),
+            (b"4.", 4.0),
+            (b"-.002", -0.002),
+            (b"1e3", 1000.0),
+        ] {
+            assert_eq!(parse_number(word), Some(value), "{word:?}");
+        }
+    }
+
+    /// A malformed number token takes the value of its longest well-formed
+    /// prefix, or 0.
+    #[test]
+    fn malformed_numbers_take_their_longest_valid_prefix() {
+        for (word, value) in [
+            (&b"--5"[..], 0.0),
+            (b".5.", 0.5),
+            (b"5-", 5.0),
+            (b"34.5-6", 34.5),
+            (b"-", 0.0),
+            (b".", 0.0),
+            (b"1e", 1.0),
+            (b"1.2.3", 1.2),
+        ] {
+            assert_eq!(parse_number(word), Some(value), "{word:?}");
+        }
+    }
+
+    /// Words outside the number alphabet, including spellings of infinity
+    /// and NaN, are not numbers; out-of-range values are clamped.
+    #[test]
+    fn non_numbers_are_rejected_and_values_stay_finite() {
+        for word in [&b"inf"[..], b"-inf", b"NaN", b"e5", b"re", b"5a", b""] {
+            assert_eq!(parse_number(word), None, "{word:?}");
+        }
+        let max = f64::from(f32::MAX);
+        assert_eq!(parse_number(b"1e400"), Some(max));
+        assert_eq!(parse_number(b"-1e400"), Some(-max));
+    }
 }

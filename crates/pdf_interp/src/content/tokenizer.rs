@@ -467,10 +467,9 @@ impl<'a> Tokenizer<'a> {
                         return Some(Token::Bool(false));
                     }
 
-                    // Try parsing as an integer or real number.
-                    if let Ok(s) = std::str::from_utf8(word)
-                        && let Ok(n) = s.parse::<f64>()
-                    {
+                    // A word of number characters is an operand even when
+                    // malformed, never an operator.
+                    if let Some(n) = pdf::parse_number(word) {
                         return Some(Token::Number(n));
                     }
 
@@ -786,6 +785,24 @@ mod tests {
             .join()
             .expect("tokenizer must not overflow the stack on stray delimiters");
         assert_eq!(n, 0, "all stray `>` are skipped, yielding no tokens");
+    }
+
+    /// A malformed number is an operand with the value of its longest
+    /// well-formed prefix, never an operator that would clear the operands
+    /// before it; a word outside the number alphabet is an operator.
+    #[test]
+    fn malformed_numbers_are_operands() {
+        assert_eq!(
+            tokens(b"10 --5 80- .5. inf re"),
+            vec![
+                Token::Number(10.0),
+                Token::Number(0.0),
+                Token::Number(80.0),
+                Token::Number(0.5),
+                Token::Op(b"inf"),
+                Token::Op(b"re"),
+            ]
+        );
     }
 
     /// Nesting depth of `tok` (a non-container token is depth 0).

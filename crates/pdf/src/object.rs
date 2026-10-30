@@ -5,7 +5,7 @@
 
 use crate::dictionary::Dictionary;
 use crate::lexer::{
-    parse_u64, read_hex_string, read_literal_string, read_name, scan_token, skip_ws,
+    is_number_byte, parse_u64, read_hex_string, read_literal_string, read_name, scan_token, skip_ws,
 };
 
 /// A PDF indirect-object identifier `(object_number, generation)`.
@@ -564,9 +564,7 @@ fn parse_scalar(data: &[u8], pos: &mut usize) -> Option<Object> {
 /// are not numbers in PDF syntax and yield `None`; a numeric token beyond the
 /// `f32` range saturates to `±f32::MAX`, so every `Real` is finite.
 fn parse_real(s: &str) -> Option<f32> {
-    let numeric = s.bytes().any(|b| b.is_ascii_digit())
-        && s.bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'.' | b'+' | b'-' | b'e' | b'E'));
+    let numeric = s.bytes().any(|b| b.is_ascii_digit()) && s.bytes().all(is_number_byte);
     if !numeric {
         return None;
     }
