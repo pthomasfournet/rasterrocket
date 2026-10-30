@@ -107,7 +107,8 @@ deskew (optional)                    projection-profile sweep ±7°
 caller / Tesseract OCR
 ```
 
-No file I/O after the initial `open()`. No subprocess at any stage.
+No file I/O after the initial `open()`. The one subprocess is `qpdf`, run by
+`open()` to decrypt a document encrypted with the Standard Security Handler.
 
 ---
 
@@ -164,11 +165,29 @@ Three compositing pipeline variants, selected at paint time by `PipeState::no_tr
 | `general` | Everything else — soft mask, blend modes, transparency groups |
 
 **Transparency groups**
-`begin_group` / `paint_group` — allocate an isolated sub-bitmap, composite back
-into the parent using the group's blend mode and opacity. Knockout groups supported.
+`begin_group` / `paint_group` composite a group back into its parent with the
+group's blend mode and opacity. The group bitmap is page-addressed but painted
+only within the group's region (its `/BBox` ∩ clip ∩ page); the renderer keeps
+a pool of transparent bitmaps, one per nesting level, and `paint_group`
+composites and clears that region only, so per-group cost scales with the
+region. Every group accumulates its own colour and alpha from transparent; a
+non-isolated group also keeps a copy of the backdrop under it, which blend
+modes inside the group consult (ISO 32000-2 §11.4.7). Knockout groups clear
+the accumulated alpha per object.
+
+**Soft masks**
+An `ExtGState` `/SMask` renders its group into a page-sized mask plane
+(luminosity or alpha, through the mask's transfer function). An object painted
+under it is painted normally; the renderer then blends the result with a
+snapshot taken before painting, weighted by the mask. The snapshot covers
+only the device rectangle the object can touch (∩ clip), not the page.
 
 **Pattern types**
-- `TiledPattern` — implements `Pattern` trait; fills spans via repeated sub-bitmap blits
+- `TiledPattern` — implements `Pattern`; composites the rasterised cell at
+  every point of the pattern lattice (`origin + col·col_step + row·row_step`,
+  the image of `(XStep, YStep)` under the pattern matrix), so skewed and
+  rotated patterns repeat along their own axes. A lattice finer than a pixel
+  is served as its mean colour and coverage.
 - Shading patterns — axial, radial, function-based, Gouraud triangle mesh
 
 **SIMD module** (`simd/`)
@@ -269,33 +288,63 @@ PDF parsing and operator dispatch. Uses the in-tree `rasterrocket-parser` crate 
 
 ```
 content/
-  tokenizer.rs     — byte-level PDF token scanner
-  operands.rs      — operand stack + type coercion
-  operator.rs      — 150+ typed operator variants
-  mod.rs           — parse(bytes) → Vec<Operator>
+  tokenizer.rs       — byte-level PDF token scanner
+  operands.rs        — operand stack + type coercion
+  operator.rs        — 150+ typed operator variants
+  mod.rs             — parse(bytes) → Vec<Operator>
+
+prescan.rs           — classify page content without rendering pixels
+cache/               — device image-cache helpers + background prefetcher
+                       (`cache` feature)
 
 renderer/
-  mod.rs           — PageRenderer; render_operators() dispatch loop
-  gstate.rs        — CTM, graphics state, StateStack
-  color.rs         — colour space resolution + transfer functions
-  font_cache.rs    — per-session face loading + GlyphCache integration
-  text.rs          — text matrix, font state
-  page/            — page-level entry points, geometry normalisation
-    gpu_ops.rs     — CUDA dispatch thresholds + optional gpu:: calls
-    vk_ops.rs      — Vulkan dispatch (AA fill)
+  mod.rs             — PageRenderer; render_operators() dispatch loop
+  gstate.rs          — CTM, graphics state, StateStack
+  color.rs           — colour space resolution + transfer functions
+  text.rs            — text state (Tc, Tw, Tz, TL, Ts, Tr)
+  font_cache.rs      — font loading, code → glyph tables, GlyphCache
+  encodings.rs       — base encodings of Annex D
+  substitutes.rs     — substitute programs for non-embedded fonts
+  system_fonts.rs    — installed CJK / Arabic / Thai faces
+  page/
+    mod.rs           — per-page entry points, geometry normalisation
+    operators.rs     — execute_one: one operator → renderer call
+    text.rs          — show_text, show_text_type3
+    text_ops.rs      — glyph records, advances, text-space → device
+    annotations.rs   — annotation appearance streams
+    patterns.rs      — tiling patterns on the pattern lattice
+    shading_paint.rs — `sh` and shading patterns
+    soft_mask.rs     — ExtGState SMask: luminosity / alpha masks
+    pixel_rect.rs    — device-pixel rectangles (group and snapshot bounds)
+    image_sampler.rs — fixed-point sampling grid; nearest / bilinear
+    image_reduce.rs  — area-averaging of minified images
+    image_memo.rs    — decoded image XObjects of one page, by object
+    gpu_ops.rs       — CUDA dispatch thresholds + optional gpu:: calls
+    vk_ops.rs        — Vulkan dispatch (AA fill)
 
 resources/
-  mod.rs           — PageResources; lazy resolve_*
-  font.rs          — font descriptor parsing
-  image/           — image descriptor, filter detection, decode dispatch;
-                     JPX decodes at `ImageRequest::draw_size` unless the
-                     image is masked; CMYK/YCCK JPEG samples are ink, with
-                     `/Decode` applied before colour conversion
-  icc.rs           — ICC profile loading + moxcms CLUT extraction
-  shading/         — axial/radial/mesh shading descriptors
-  cmap.rs          — ToUnicode / CMap parsing
-  dict_ext.rs      — typed accessor helpers for `rasterrocket_parser::Dictionary`
-  tiling.rs        — Type 1 tiling pattern parsing
+  mod.rs             — PageResources; lazy resolve_*
+  dict_ext.rs        — typed accessors for `rasterrocket_parser::Dictionary`
+  font.rs            — font dictionaries and descriptors
+  font_substitute.rs — typeface class of a non-embedded font
+  cmap.rs            — CMap / ToUnicode parsing
+  cmap_predefined.rs — predefined CMaps compiled into the binary
+  colorspace.rs      — colour-space taxonomy for `cs` / `CS`
+  icc.rs             — ICC profile loading + moxcms CLUT extraction
+  icc_shaper.rs      — matrix/TRC ICC input profiles evaluated to sRGB
+  tiling.rs          — Type 1 tiling pattern dictionaries
+  shading/           — shading types 1–7, functions, mesh vertices, patches
+  image/
+    mod.rs           — ImageDescriptor; XObject resolution
+    dispatch.rs      — filter chain → decoded samples (images and masks)
+    raw.rs           — raw / Flate samples; /Decode through 256-entry tables
+    bitpack.rs       — 1/2/4/16-bpc expansion
+    codecs.rs        — DCT, JPX, CCITT, JBIG2; JPX decodes at
+                       `ImageRequest::draw_size` unless masked and reads
+                       colour space and /Decode from the image dictionary
+    colorspace.rs    — image colour spaces; CMYK/YCCK JPEG samples are ink
+    smask.rs         — SMask decode and /Matte removal
+    inline.rs        — BI … ID … EI; data length from the dictionary
 ```
 
 **Fonts** (`renderer/font_cache.rs` and its neighbours)
@@ -739,8 +788,8 @@ go through `quick_cache::sync::Cache` (sharded, no write lock on read hits).
 
 ## 8. Key design decisions
 
-**No subprocess, no Leptonica.**
-Everything runs in-process. The Poppler wrapper (`pdf_bridge`) is kept as a
+**No Leptonica; one subprocess.**
+Everything runs in-process except decryption, which `open()` hands to `qpdf`. The Poppler wrapper (`pdf_bridge`) is kept as a
 reference baseline for pixel-diff regression tests; it is never linked in the
 production render path.
 
