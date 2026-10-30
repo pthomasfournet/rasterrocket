@@ -1066,12 +1066,22 @@ impl Document {
 
 struct PageIter<'a> {
     doc: &'a Document,
-    /// Stack of `(node_id, next_child_index)` for page-tree traversal.
-    stack: Vec<(ObjectId, usize)>,
-    /// Object numbers currently on the traversal stack — guards against cyclic
-    /// /Kids references (malformed PDFs would otherwise loop forever).
+    /// Interior nodes on the traversal path, each with its resolved `/Kids`.
+    stack: Vec<PageTreeFrame>,
+    /// Object numbers of the nodes in `stack`; a kid already present is a
+    /// cyclic `/Kids` reference and is skipped.
     on_stack: std::collections::HashSet<u32>,
+    /// The `/Pages` root, visited on the first call to `next`.
+    root: Option<ObjectId>,
     page_num: u32,
+}
+
+/// One interior page-tree node: its `/Kids` references, resolved once, and
+/// the index of the next kid to visit.
+struct PageTreeFrame {
+    id: ObjectId,
+    kids: Vec<ObjectId>,
+    next: usize,
 }
 
 impl<'a> PageIter<'a> {
@@ -1082,21 +1092,39 @@ impl<'a> PageIter<'a> {
             log::warn!("PageIter: catalog unavailable, no pages will be yielded: {e:?}");
             Arc::default()
         });
-        let pages_id = catalog.get(b"Pages").and_then(Object::as_reference);
-        let stack = pages_id.map(|id| (id, 0)).into_iter().collect();
-        let on_stack = pages_id.map(|id| id.0).into_iter().collect();
         Self {
             doc,
-            stack,
-            on_stack,
+            stack: Vec::new(),
+            on_stack: std::collections::HashSet::new(),
+            root: catalog.get(b"Pages").and_then(Object::as_reference),
             page_num: 0,
         }
     }
 
-    fn pop(&mut self) {
-        if let Some((id, _)) = self.stack.pop() {
-            let _ = self.on_stack.remove(&id.0);
+    /// Visit node `id`: a `/Type /Page` node is returned as the next page; any
+    /// other dictionary with a `/Kids` array (direct, or an indirect reference
+    /// to one) is pushed as an interior node.  Anything else is skipped.
+    fn visit(&mut self, id: ObjectId) -> Option<(u32, ObjectId)> {
+        let obj = self.doc.get_object(id).ok()?;
+        let dict = obj.as_dict()?;
+        if dict.get(b"Type").and_then(Object::as_name) == Some(b"Page") {
+            self.page_num += 1;
+            return Some((self.page_num, id));
         }
+        let kids: Vec<ObjectId> = match dict.get(b"Kids") {
+            Some(Object::Array(a)) => a.iter().filter_map(Object::as_reference).collect(),
+            Some(Object::Reference(rid)) => {
+                let arr = self.doc.get_object(*rid).ok()?;
+                arr.as_array()?
+                    .iter()
+                    .filter_map(Object::as_reference)
+                    .collect()
+            }
+            _ => return None,
+        };
+        let _ = self.on_stack.insert(id.0);
+        self.stack.push(PageTreeFrame { id, kids, next: 0 });
+        None
     }
 }
 
@@ -1104,62 +1132,26 @@ impl Iterator for PageIter<'_> {
     type Item = (u32, ObjectId);
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(root) = self.root.take()
+            && let Some(page) = self.visit(root)
+        {
+            return Some(page);
+        }
         loop {
-            let (node_id, child_idx) = self.stack.last_mut()?;
-            let node_id = *node_id;
-
-            let Ok(obj) = self.doc.get_object(node_id) else {
-                self.pop();
+            let frame = self.stack.last_mut()?;
+            let Some(&kid) = frame.kids.get(frame.next) else {
+                let id = frame.id;
+                let _ = self.stack.pop();
+                let _ = self.on_stack.remove(&id.0);
                 continue;
             };
-            let Some(dict) = obj.as_dict().cloned() else {
-                self.pop();
-                continue;
-            };
-
-            let node_type = dict.get(b"Type").and_then(Object::as_name).unwrap_or(b"");
-
-            if node_type == b"Page" {
-                // Leaf page node.
-                self.pop();
-                self.page_num += 1;
-                return Some((self.page_num, node_id));
-            }
-
-            // Pages node: iterate /Kids. The spec allows /Kids to be either
-            // a direct array or an indirect reference to an array; resolve
-            // the reference case so we don't silently treat valid PDFs as
-            // empty (corpus-04 hit this).
-            let kids = match dict.get(b"Kids") {
-                Some(Object::Array(a)) => Some(a.clone()),
-                Some(Object::Reference(rid)) => self
-                    .doc
-                    .get_object(*rid)
-                    .ok()
-                    .and_then(|o| o.as_array().map(<[Object]>::to_vec)),
-                _ => None,
-            };
-            let Some(kids) = kids else {
-                self.pop();
-                continue;
-            };
-
-            let idx = *child_idx;
-            if idx >= kids.len() {
-                self.pop();
+            frame.next += 1;
+            if self.on_stack.contains(&kid.0) {
+                log::warn!("PageIter: cyclic /Kids reference to obj {} skipped", kid.0);
                 continue;
             }
-            *child_idx += 1;
-
-            if let Some(kid_id) = kids[idx].as_reference() {
-                if self.on_stack.insert(kid_id.0) {
-                    self.stack.push((kid_id, 0));
-                } else {
-                    log::warn!(
-                        "PageIter: cyclic /Kids reference to obj {} skipped",
-                        kid_id.0
-                    );
-                }
+            if let Some(page) = self.visit(kid) {
+                return Some(page);
             }
         }
     }
