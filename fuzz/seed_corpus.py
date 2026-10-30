@@ -59,17 +59,21 @@ CONTENT_SEEDS = [
 ]
 
 CMAP_SEEDS = [
-    b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
-    b"/CMapName /Test def 1 begincodespacerange <00> <FF> endcodespacerange\n"
-    b"2 beginbfchar <01> <0041> <02> <0042> endbfchar\n"
-    b"1 beginbfrange <10> <20> <0061> endbfrange\n"
-    b"endcmap CMapName currentdict /CMap defineresource pop end end\n",
-    b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
-    b"/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> def\n"
-    b"/WMode 1 def 2 begincodespacerange <00> <80> <8140> <FCFC> endcodespacerange\n"
-    b"1 begincidrange <8140> <817E> 633 endcidrange\n"
-    b"1 begincidchar <20> 1 endcidchar\n"
-    b"/Identity-H usecmap endcmap\n",
+    (
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"/CMapName /Test def 1 begincodespacerange <00> <FF> endcodespacerange\n"
+        b"2 beginbfchar <01> <0041> <02> <0042> endbfchar\n"
+        b"1 beginbfrange <10> <20> <0061> endbfrange\n"
+        b"endcmap CMapName currentdict /CMap defineresource pop end end\n"
+    ),
+    (
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> def\n"
+        b"/WMode 1 def 2 begincodespacerange <00> <80> <8140> <FCFC> endcodespacerange\n"
+        b"1 begincidrange <8140> <817E> 633 endcidrange\n"
+        b"1 begincidchar <20> 1 endcidchar\n"
+        b"/Identity-H usecmap endcmap\n"
+    ),
 ]
 
 FUNCTION_SEEDS = [
@@ -109,7 +113,11 @@ def assemble_pdf(objects):
 
 
 def stream(dict_entries, data):
-    return b"<< %s /Length %d >>\nstream\n" % (dict_entries, len(data)) + data + b"\nendstream"
+    return (
+        b"<< %s /Length %d >>\nstream\n" % (dict_entries, len(data))
+        + data
+        + b"\nendstream"
+    )
 
 
 def plaintext_pdf():
@@ -123,19 +131,26 @@ def plaintext_pdf():
         [
             b"<< /Type /Catalog /Pages 2 0 R >>",
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R "
-            b"/Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>",
+            (
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R "
+                b"/Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>"
+            ),
             stream(b"", content),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-            b"<< /Type /Annot /Subtype /FreeText /Rect [100 100 190 130] "
-            b"/Contents (annot string) /DA (/Helv 10 Tf 0 g) /F 4 >>",
+            (
+                b"<< /Type /Annot /Subtype /FreeText /Rect [100 100 190 130] "
+                b"/Contents (annot string) /DA (/Helv 10 Tf 0 g) /F 4 >>"
+            ),
         ]
     )
 
 
 def encrypted_seeds(out):
     if shutil.which("qpdf") is None:
-        print("qpdf not found: no fuzz_decrypt seeds from the encryption suite", file=sys.stderr)
+        print(
+            "qpdf not found: no fuzz_decrypt seeds from the encryption suite",
+            file=sys.stderr,
+        )
         return
     with tempfile.TemporaryDirectory() as tmp:
         plain = pathlib.Path(tmp) / "plain.pdf"
@@ -143,8 +158,18 @@ def encrypted_seeds(out):
         for i, (enc_args, gen_args, user) in enumerate(VARIANTS):
             enc = pathlib.Path(tmp) / f"{i}.pdf"
             subprocess.run(
-                ["qpdf", "--allow-weak-crypto", "--encrypt", f"--user-password={user}",
-                 "--owner-password=owner", *enc_args, "--", *gen_args, str(plain), str(enc)],
+                [
+                    "qpdf",
+                    "--allow-weak-crypto",
+                    "--encrypt",
+                    f"--user-password={user}",
+                    "--owner-password=owner",
+                    *enc_args,
+                    "--",
+                    *gen_args,
+                    str(plain),
+                    str(enc),
+                ],
                 check=True,
             )
             data = enc.read_bytes()
@@ -158,7 +183,9 @@ def repo_seeds(out):
         data = jpg.read_bytes()
         write(out, "fuzz_image", bytes([1, 1, 3, 31, 31, 0, 0, 0]) + data)
         write(out, "fuzz_image", bytes([1, 0, 3, 63, 63, 0, 0, 0]) + data)
-    for jp2 in sorted((ROOT / "crates/pdf_interp/src/resources/image/testdata").glob("*.j*2*")):
+    for jp2 in sorted(
+        (ROOT / "crates/pdf_interp/src/resources/image/testdata").glob("*.j*2*")
+    ):
         data = jp2.read_bytes()
         for space in (0, 1):
             write(out, "fuzz_image", bytes([2, space, 3, 15, 15, 0, 0, 0]) + data)
@@ -166,20 +193,40 @@ def repo_seeds(out):
     raw = bytes(range(256)) * 3
     for space in range(8):
         write(out, "fuzz_image", bytes([0, space, 3, 15, 15, 0, 0, 0]) + raw)
-        write(out, "fuzz_image", bytes([3, space, 3, 15, 15, 2, 0, 0]) + zlib.compress(raw))
+        write(
+            out,
+            "fuzz_image",
+            bytes([3, space, 3, 15, 15, 2, 0, 0]) + zlib.compress(raw),
+        )
     write(out, "fuzz_image", bytes([0, 0, 0, 15, 15, 1, 0, 0]) + raw[:32])
 
     # Fonts: [face_index, size].
-    for pattern in ("crates/font/src/tests/data/*", "crates/font_test_data/test_data/ttf/*",
-                    "crates/font_test_data/test_data/ttc/*", "crates/font_test_data/test_data/type1/*"):
+    for pattern in (
+        "crates/font/src/tests/data/*",
+        "crates/font_test_data/test_data/ttf/*",
+        "crates/font_test_data/test_data/ttc/*",
+        "crates/font_test_data/test_data/type1/*",
+    ):
         for f in sorted(ROOT.glob(pattern)):
-            if f.suffix.lower() in (".ttf", ".otf", ".ttc", ".cid", ".pfa", ".pfb", ".cff"):
+            if f.suffix.lower() in (
+                ".ttf",
+                ".otf",
+                ".ttc",
+                ".cid",
+                ".pfa",
+                ".pfb",
+                ".cff",
+            ):
                 write(out, "fuzz_font", bytes([0, 24]) + f.read_bytes())
 
     # Filter chains: [count, f0, f1, f2, predictor, colors, bpc, columns, early].
     text = b"BT /F1 12 Tf (filter chain seed) Tj ET\n" * 8
     write(out, "fuzz_filters", bytes([0, 0, 0, 0, 0, 0, 3, 7, 1]) + zlib.compress(text))
-    write(out, "fuzz_filters", bytes([1, 2, 0, 0, 0, 0, 3, 7, 1]) + zlib.compress(text).hex().encode())
+    write(
+        out,
+        "fuzz_filters",
+        bytes([1, 2, 0, 0, 0, 0, 3, 7, 1]) + zlib.compress(text).hex().encode(),
+    )
     rows = b"".join(b"\x02" + bytes(range(i, i + 8)) for i in range(16))
     write(out, "fuzz_filters", bytes([0, 0, 0, 0, 4, 0, 3, 7, 1]) + zlib.compress(rows))
     write(out, "fuzz_filters", bytes([0, 4, 0, 0, 0, 0, 3, 7, 1]) + b"\x02abc\xfdz\x80")

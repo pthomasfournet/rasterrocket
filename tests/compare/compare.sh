@@ -22,12 +22,12 @@
 # (reported as SIZE: a page-box or rotation disagreement).  Renders within
 # 1 px of each other are cropped to their common size before scoring.
 #
-# The tile delta is the largest difference in mean luminance between the two
-# renders over 32 x 32 px tiles.  Anti-aliasing and hinting differences
-# between renderers move coverage within a tile but hardly change its mean
-# (text pages score 4-6 against pdftoppm at 150 dpi), while content present
-# in one render and missing from the other changes it wholesale (one dropped
-# word scores ~26) and barely moves the page-wide RMSE.
+# The tile delta (scored by score_pair.sh) is the largest difference in mean
+# luminance between the two renders over 32 x 32 px tiles.  Anti-aliasing
+# and hinting differences between renderers move coverage within a tile but
+# hardly change its mean (text pages score 4-6 against pdftoppm at 150 dpi),
+# while content present in one render and missing from the other changes it
+# wholesale (one dropped word scores ~26) and barely moves the page-wide RMSE.
 #
 # Summary row (-s, and each row of directory mode), tab-separated:
 #   status pages failed size_mismatches avg_rmse max_rmse max_tile_delta
@@ -68,7 +68,6 @@ FIRST=1
 LAST=""
 THRESHOLD="2.0"
 TILE_LIMIT="12"
-TILE_PX=32
 REFERENCE="pdftoppm"
 VERBOSE=false
 OUT_DIR=""
@@ -335,63 +334,16 @@ for ref_file in "${ref_pages[@]}"; do
         continue
     fi
 
-    read -r ref_w ref_h < <(identify -format "%w %h\n" "$ref_file" 2>/dev/null) \
-        || die "identify failed on ref image: $ref_file"
-    read -r new_w new_h < <(identify -format "%w %h\n" "$new_file" 2>/dev/null) \
-        || die "identify failed on new image: $new_file"
-
-    # A difference beyond 1 px is a geometry disagreement (page box, rotation,
-    # UserUnit), not rounding: report it rather than rescale one render onto
-    # the other.
-    dw=$((ref_w - new_w)); dh=$((ref_h - new_h))
-    if (( dw < -1 || dw > 1 || dh < -1 || dh > 1 )); then
-        say "SIZE     %-12s  ref=%dx%d  rrocket=%dx%d\n" "$page_tag" "$ref_w" "$ref_h" "$new_w" "$new_h"
+    read -r kind a b c d < <("${SCRIPT_DIR}/score_pair.sh" "$ref_file" "$new_file" "$diff_file") \
+        || die "scoring failed for $page_tag"
+    if [[ "$kind" == SIZE ]]; then
+        say "SIZE     %-12s  ref=%dx%d  rrocket=%dx%d\n" "$page_tag" "$a" "$b" "$c" "$d"
         size_mismatch=$((size_mismatch + 1))
         fail=$((fail + 1))
         continue
     fi
-
-    # Within 1 px: score the common area, so content stays pixel-aligned.
-    ref_cmp="$ref_file"
-    new_cmp="$new_file"
-    w=$(( ref_w < new_w ? ref_w : new_w ))
-    h=$(( ref_h < new_h ? ref_h : new_h ))
-    if (( w != ref_w || h != ref_h )); then
-        ref_cmp="${WORK_DIR}/crop-ref-${page_tag}.ppm"
-        convert "$ref_file" -crop "${w}x${h}+0+0" +repage "$ref_cmp" \
-            || die "crop failed for $page_tag"
-    fi
-    if (( w != new_w || h != new_h )); then
-        new_cmp="${WORK_DIR}/crop-new-${page_tag}.ppm"
-        convert "$new_file" -crop "${w}x${h}+0+0" +repage "$new_cmp" \
-            || die "crop failed for $page_tag"
-    fi
-
-    # compare exits 1 when images differ (expected); 2 means a real error.
-    rmse_line="$(compare -metric RMSE "$ref_cmp" "$new_cmp" "$diff_file" 2>&1)" \
-        || { ec=$?; [[ $ec -eq 1 ]] || die "compare failed ($ec) for $page_tag: $rmse_line"; }
-
-    # Output format: "<absolute> (<normalized>)" e.g. "3.14 (0.0123)"
-    # Use POSIX-compatible grep extended regex — no PCRE required.
-    rmse_norm="$(printf '%s' "$rmse_line" | grep -Eo '\([0-9.e+-]+\)' | tr -d '()')"
-    if [[ -z "$rmse_norm" ]]; then
-        echo "Warning: could not parse RMSE from compare output for ${page_tag}: ${rmse_line}" >&2
-        rmse_norm="0"
-    fi
-
-    # Scale normalised [0,1] RMSE to the intuitive 0-255 range.
-    rmse_255="$(bc -l <<< "scale=4; ${rmse_norm} * 255")" \
-        || die "bc arithmetic failed for $page_tag (rmse_norm='$rmse_norm')"
-
-    # Tile delta: box-average each render's luminance down to one sample per
-    # TILE_PX x TILE_PX tile, then take the largest absolute difference.
-    tiles_x=$(( (w + TILE_PX - 1) / TILE_PX ))
-    tiles_y=$(( (h + TILE_PX - 1) / TILE_PX ))
-    tile_255="$(convert "$ref_cmp" "$new_cmp" -colorspace gray -filter box \
-        -resize "${tiles_x}x${tiles_y}!" -compose difference -composite \
-        -format "%[fx:maxima*255]" info:)" \
-        || die "tile delta failed for $page_tag"
-    tile_255="$(printf '%.4f' "$tile_255")"
+    rmse_255="$a"
+    tile_255="$b"
 
     total_rmse="$(bc -l <<< "scale=4; ${total_rmse} + ${rmse_255}")"
 
