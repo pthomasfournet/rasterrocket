@@ -1,0 +1,95 @@
+name: Instruction counts
+
+# Weekly comparison of the instructions rrocket retires on a fixed set of
+# synthetic documents, between master and a baseline (the latest release tag
+# unless one is given).  Instruction counts under callgrind are exact, so a
+# hosted runner gives a usable signal where wall-clock time would not.  The
+# table is written to the job summary and uploaded; benchmark tables are
+# published on the project wiki by hand.
+
+on:
+  schedule:
+    - cron: "0 5 * * 0"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Baseline git ref (default: latest tag)"
+        required: false
+      fail_above:
+        description: "Fail when the total or a document regresses by more than this many percent"
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Valgrind does not decode AVX-512; SIMD selection is runtime-dispatched,
+  # so the generic target exercises the same code as CI.
+  RUSTFLAGS: "-C target-cpu=generic"
+
+jobs:
+  instructions:
+    name: Instruction counts vs baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install valgrind
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends valgrind
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-perf-
+
+      - name: Build head
+        run: |
+          cargo build --release -p rasterrocket-cli
+          cp target/release/rrocket "$RUNNER_TEMP/rrocket-head"
+
+      - name: Build baseline
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          base="${BASE:-$(git describe --tags --abbrev=0)}"
+          echo "Baseline: $base"
+          git worktree add "$RUNNER_TEMP/base-src" "$base"
+          cargo build --release -p rasterrocket-cli \
+            --manifest-path "$RUNNER_TEMP/base-src/Cargo.toml" --target-dir target/base
+          cp target/base/release/rrocket "$RUNNER_TEMP/rrocket-base"
+          echo "BASE_REF=$base" >> "$GITHUB_ENV"
+
+      - name: Count instructions
+        env:
+          FAIL_ABOVE: ${{ inputs.fail_above }}
+        run: |
+          limit=()
+          [[ -n "$FAIL_ABOVE" ]] && limit=(--fail-above "$FAIL_ABOVE")
+          python3 -I tests/bench/instructions.py \
+            "$RUNNER_TEMP/rrocket-base" "$RUNNER_TEMP/rrocket-head" \
+            --tool callgrind --markdown "$RUNNER_TEMP/instructions.md" "${limit[@]}"
+          {
+            echo "Baseline \`$BASE_REF\`, head \`$(git rev-parse --short HEAD)\`"
+            echo
+            cat "$RUNNER_TEMP/instructions.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instructions
+          path: ${{ runner.temp }}/instructions.md
+          if-no-files-found: ignore
