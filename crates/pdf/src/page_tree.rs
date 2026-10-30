@@ -71,9 +71,9 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
         let kids = resolve_kids(doc, current, node_dict)?;
 
         // Flat-tree fast path: when /Count exactly matches kids.len(), every
-        // kid is implicitly a leaf with count 1.  Skip the per-kid /Type +
-        // /Count probes and index directly.  This is the common case for
-        // shallow PDFs (catalog → /Pages with all leaves directly attached).
+        // kid holds exactly one page.  Index directly instead of summing the
+        // siblings' /Count entries; only the selected kid is probed, since
+        // it may be an interior node with a single leaf below it.
         let parent_count = node_dict.get(b"Count").and_then(Object::as_u32);
         if parent_count == Some(u32::try_from(kids.len()).unwrap_or(u32::MAX)) {
             // Bounds: idx < total ≤ Σ /Count along the descent path, and
@@ -89,7 +89,13 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
                         kids.len()
                     ),
                 })?;
-            return Ok(kid);
+            let kid_obj = doc.get_dict_arc(kid)?;
+            if !is_interior(dict_of(&kid_obj, kid)?) {
+                return Ok(kid);
+            }
+            current = kid;
+            remaining = 0;
+            continue;
         }
 
         // Mixed tree — sum /Count across siblings.
@@ -133,6 +139,16 @@ fn dict_of(obj: &Object, id: ObjectId) -> Result<&Dictionary, PdfError> {
         id: id.0,
         detail: format!("expected Dictionary or Stream, got {}", obj.enum_variant()),
     })
+}
+
+/// Whether a page-tree node is an interior `/Pages` node: typed `/Pages`,
+/// or untyped with a `/Kids` entry.  A node typed `/Page` is a leaf.
+fn is_interior(dict: &Dictionary) -> bool {
+    match dict.get(b"Type").and_then(Object::as_name) {
+        Some(b"Page") => false,
+        Some(b"Pages") => true,
+        _ => dict.get(b"Kids").is_some(),
+    }
 }
 
 /// Read a kid's subtree page count: 1 for leaves (Page), `/Count` for

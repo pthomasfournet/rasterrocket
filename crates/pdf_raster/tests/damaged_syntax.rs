@@ -64,3 +64,19 @@ fn malformed_content_number_keeps_its_operator() {
     let ink = ink(pdf);
     assert!((ink - 0.32).abs() < 0.01, "square must render, ink {ink}");
 }
+
+/// A `/Pages` node whose `/Count` equals its number of kids may still have
+/// an interior node among them: a root `/Count 1 /Kids [4 0 R]` whose kid
+/// is `/Pages /Count 1 /Kids [3 0 R]` reaches page 3, not node 4.
+#[test]
+fn single_child_interior_node_is_descended() {
+    let pdf = assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 4 0 R /MediaBox [0 0 200 100] /Contents 5 0 R >>".to_vec(),
+        b"<< /Type /Pages /Parent 2 0 R /Kids [3 0 R] /Count 1 >>".to_vec(),
+        stream_object("", SQUARE),
+    ]);
+    let ink = ink(pdf);
+    assert!((ink - 0.32).abs() < 0.01, "square must render, ink {ink}");
+}
