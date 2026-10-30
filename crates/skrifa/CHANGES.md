@@ -53,3 +53,44 @@ It is not published and changes are not sent upstream.
   render time on documents whose embedded TrueType subsets carry thousands
   of `post` names). `GlyphNames::get` is unchanged. Test:
   `glyph_name::tests::post_iter_matches_table_lookup`.
+
+## Upstream fixes brought over
+
+Fixes to code this fork's users reach (the TrueType bytecode interpreter,
+glyf and VARC outlines) from upstream commits after the base, applied as
+upstream wrote them with their tests. The base in `UPSTREAM.toml` is
+unchanged; `reviewed` records how far upstream history was examined.
+
+- `28ad033c8` (#1963) TrueType interpreter: a bound on the instructions
+  skipped by `IF` / `ELSE` / `FDEF` scanning.
+- `93d40d25f` (#1964) TrueType interpreter: out-of-bounds indexing and
+  overflowing arithmetic in `data`, `outline`, `math`, `round` and `zone`.
+  `math::mul_div_no_round` divides with `checked_div(..).unwrap_or(..)`
+  where upstream tests the divisor first (same result; the workspace's
+  `clippy -D warnings` gate rejects the manual form).
+- `8c1fedf93` (#1978) glyf: at most 2048 components are processed per
+  composite outline, against exponential fan-out.
+- `487a3335d` (#2011) TrueType interpreter: wrapping arithmetic in `MIRP`
+  and every rounding mode.
+- `f3edd9d2d` (#2039) TrueType interpreter: overflow in `line_vector`.
+- `867fe4d6e` (#2014) VARC: bounded condition-evaluation recursion.
+- `f43403c06` (#2012) VARC: a null `MultiItemVariationStore` offset no
+  longer panics.
+- `e829e72a3` (#2032) VARC: a bound on the edges processed per glyph.
+
+## Upstream review (2026-10-30)
+
+Upstream history through `8cf9cbf41` (2026-10-29, crates.io 0.49.0) was
+reviewed by commit. Besides the fixes above, nothing is brought over:
+
+- The rebase onto 0.49 is deferred to the next font work. Upstream has
+  moved hint-reliant detection, hinting error types and outline-to-path
+  conversion into read-fonts and reorganised the PostScript support,
+  which this fork's hint-reliant and metrics changes would have to be
+  re-applied onto.
+- Left out as a behaviour change that needs its own render comparison:
+  #2040 (TrueType interpreter parity checks ignore fractional bits).
+- Not reached by this fork's users, who hint with the interpreter only:
+  the autohinter fixes (#1980, #1987, #1988, #1989, #2044 and the work
+  budgets), COLR (#2009, #2031), layout, and colour or bitmap glyphs.
+

@@ -1,10 +1,16 @@
 # Where this local fork came from.  Read by scripts/check_vendored.py, which
 # reports upstream commits, crates.io releases and RustSec advisories that
-# appeared after this base.  Update `commit`, `date` and `version` whenever
-# upstream changes are brought over.
+# appeared after this base, or after the last review when `reviewed` is set.
+# Update `commit`, `date` and `version` when the fork is rebased; set the
+# `reviewed*` fields when upstream history up to a later commit has been
+# examined and every change in it brought over or deliberately left out
+# (CHANGES.md records which).
 crate = "skrifa"
 version = "0.44.0"
 repository = "googlefonts/fontations"
 path = "skrifa"
 commit = "b373cdbc6043a791fb23b3e0f413649458f5e63a"
 date = "2026-07-04T01:16:27Z"
+reviewed = "8cf9cbf413ddcd6c3f7ddff468c3f0e3780e2e0e"
+reviewed_date = "2026-10-29T17:46:58Z"
+reviewed_version = "0.49.0"

@@ -2,10 +2,13 @@
 """Report what changed upstream for every vendored crate since its base.
 
 Each vendored crate carries an `UPSTREAM.toml` (crate, version, repository,
-path, commit, date).  For each one this reports:
+path, commit, date, and optionally reviewed, reviewed_date,
+reviewed_version).  The reference point is the last review when `reviewed`
+is set, else the base commit.  For each crate this reports:
 
-- upstream commits touching the crate's directory after the base commit;
-- crates.io releases newer than the base version;
+- upstream commits touching the crate's directory after the reference
+  commit;
+- crates.io releases newer than the reference version;
 - RustSec advisories filed against the crate (cargo-deny and cargo-audit do
   not see path dependencies).
 
@@ -39,6 +42,17 @@ def get_json(url):
         raise
 
 
+def get_paged(url, pages=10):
+    """GET every page of a GitHub list endpoint, up to `pages` pages."""
+    items = []
+    for page in range(1, pages + 1):
+        batch = get_json(f"{url}&page={page}") or []
+        items += batch
+        if len(batch) < 100:
+            break
+    return items
+
+
 def version_key(v):
     return tuple(int(p) if p.isdigit() else 0 for p in v.split("-")[0].split("."))
 
@@ -48,19 +62,33 @@ def check(manifest):
     name, repo, path = base["crate"], base["repository"], base["path"]
     findings = []
 
-    commits = get_json(
-        f"https://api.github.com/repos/{repo}/commits?path={path}&since={base['date']}&per_page=100"
-    ) or []
-    new = [c for c in commits if c["sha"] != base["commit"]]
+    if "reviewed" in base:
+        ref, since, version, what = (
+            base["reviewed"],
+            base["reviewed_date"],
+            base["reviewed_version"],
+            "reviewed",
+        )
+    else:
+        ref, version, what = base["commit"], base["version"], "vendored base"
+        # The base commit's own timestamp: `date` may be a calendar day,
+        # which would also list the base's same-day ancestors.
+        commit = get_json(f"https://api.github.com/repos/{repo}/commits/{ref}")
+        since = commit["commit"]["committer"]["date"] if commit else base["date"]
+
+    commits = get_paged(
+        f"https://api.github.com/repos/{repo}/commits?path={path}&since={since}&per_page=100"
+    )
+    new = [c for c in commits if c["sha"] not in (ref, base["commit"])]
     if new:
-        findings.append(f"{len(new)} upstream commit(s) touch {path}/ since {base['commit'][:9]}:")
+        findings.append(f"{len(new)} upstream commit(s) touch {path}/ since {what} {ref[:9]}:")
         findings += [f"    {c['sha'][:9]} {c['commit']['message'].splitlines()[0]}" for c in new]
 
     crate = get_json(f"https://crates.io/api/v1/crates/{name}")
     if crate:
         latest = crate["crate"]["max_stable_version"] or crate["crate"]["max_version"]
-        if version_key(latest) > version_key(base["version"]):
-            findings.append(f"crates.io has {name} {latest} (vendored base {base['version']})")
+        if version_key(latest) > version_key(version):
+            findings.append(f"crates.io has {name} {latest} ({what} {version})")
 
     advisories = get_json(
         f"https://api.github.com/repos/rustsec/advisory-db/contents/crates/{name}"

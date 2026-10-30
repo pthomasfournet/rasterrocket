@@ -218,6 +218,9 @@ impl<'a> SimpleGlyph<'a> {
         if points.len() != n_points || flags.len() != n_points {
             return Err(ReadError::InvalidArrayLen);
         }
+        if n_points == 0 {
+            return Ok(());
+        }
         let mut cursor = FontData::new(self.glyph_data()).cursor();
         // The flag run can use two bytes per point (a flag plus its repeat
         // count), so the encoded flags may be longer than n_points; read over
@@ -353,7 +356,7 @@ struct PointIter<'a> {
     flags: Cursor<'a>,
     x_coords: Cursor<'a>,
     y_coords: Cursor<'a>,
-    flag_repeats: u8,
+    flag_repeats: u16,
     cur_flags: SimpleGlyphFlags,
     cur_x: i16,
     cur_y: i16,
@@ -388,9 +391,9 @@ impl<'a> PointIter<'a> {
             self.flag_repeats = self
                 .cur_flags
                 .contains(SimpleGlyphFlags::REPEAT_FLAG)
-                .then(|| self.flags.read().ok())
+                .then(|| self.flags.read::<u8>().ok())
                 .flatten()
-                .unwrap_or(0)
+                .unwrap_or(0) as u16
                 + 1;
         }
         self.flag_repeats -= 1;
@@ -1125,5 +1128,30 @@ mod tests {
         let actual: Vec<_> = points.iter().map(|p| (p.x, p.y)).collect();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn point_iter_repeat_count_255_does_not_overflow() {
+        // repeat byte 0xFF means the same flag applies to 256 points total
+        let flags = [SimpleGlyphFlags::REPEAT_FLAG.bits(), 0xFF];
+        // 256 coords of 2 bytes each
+        let coords = [0u8; 256 * 2];
+        let iter = PointIter::new(&flags, &coords, &coords);
+        assert_eq!(iter.count(), 256);
+    }
+
+    #[test]
+    fn read_points_fast_does_not_panic_on_empty_glyph_with_padding() {
+        let glyph_bytes: &[u8] = &[
+            0x00, 0x00, // numberOfContours = 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bbox
+            0x00, 0x00, // instructionLength = 0
+            0x00, // trailing pad byte
+        ];
+        let glyph = SimpleGlyph::read(FontData::new(glyph_bytes)).expect("parses");
+        assert_eq!(glyph.num_points(), 0);
+        let mut points: Vec<Point<f32>> = vec![];
+        let mut flags: Vec<PointFlags> = vec![];
+        assert!(glyph.read_points_fast(&mut points, &mut flags).is_ok());
     }
 }

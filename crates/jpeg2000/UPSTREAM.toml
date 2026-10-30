@@ -1,7 +1,10 @@
 # Where this local fork came from.  Read by scripts/check_vendored.py, which
 # reports upstream commits, crates.io releases and RustSec advisories that
-# appeared after this base.  Update `commit`, `date` and `version` whenever
-# upstream changes are brought over.
+# appeared after this base, or after the last review when `reviewed` is set.
+# Update `commit`, `date` and `version` when the fork is rebased; set the
+# `reviewed*` fields when upstream history up to a later commit has been
+# examined and every change in it brought over or deliberately left out
+# (CHANGES.md records which).
 crate = "hayro-jpeg2000"
 version = "0.4.1"
 repository = "LaurenzV/hayro"

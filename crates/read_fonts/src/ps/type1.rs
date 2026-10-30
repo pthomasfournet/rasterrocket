@@ -824,13 +824,8 @@ impl<'a> Parser<'a> {
                             // but Type1 fonts define /RD procs and this
                             // pattern is used by FreeType.
                             // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/type1/t1load.c#L1351>
-                            if matches!(
-                                self.peek(),
-                                Some(Token::Raw(b"RD")) | Some(Token::Raw(b"-|"))
-                            ) {
-                                // skip the token
-                                self.next();
-                                // and a single space
+                            if self.accept_blob_start() {
+                                // skip a single space
                                 self.pos += 1;
                                 // read the internal data
                                 let data = self.read_bytes(int as usize)?;
@@ -848,13 +843,26 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn peek(&self) -> Option<Token<'a>> {
-        self.clone().next()
+    /// Special lookahead case for RD or -| which indicates a binary blob in
+    /// Type1 fonts.
+    fn accept_blob_start(&mut self) -> bool {
+        let mut p = self.clone();
+        p.skip_whitespace();
+        let start = p.pos;
+        p.skip_until(is_special_or_whitespace);
+        let end = p.pos;
+        if matches!(self.data.get(start..end), Some(b"RD") | Some(b"-|")) {
+            self.pos = end;
+            true
+        } else {
+            false
+        }
     }
 
     fn accept(&mut self, token: Token) -> bool {
-        if self.peek() == Some(token) {
-            self.next();
+        let mut p = self.clone();
+        if p.next() == Some(token) {
+            self.pos = p.pos;
             true
         } else {
             false
@@ -910,30 +918,38 @@ impl<'a> Parser<'a> {
     }
 
     fn read_proc(&mut self, start: usize) -> Option<Token<'a>> {
-        // The closing brace is recognized before tokenizing, so a token
-        // that ends at the brace (`{3}`) does not swallow it.  Nested
-        // procedures are consumed whole by `next`.
-        loop {
-            self.skip_whitespace()?;
-            if self.peek_byte()? == b'}' {
-                self.pos += 1;
-                break;
+        let mut nest_depth = 1i32;
+        while let Some(c) = self.next_byte() {
+            match c {
+                b'{' => nest_depth = nest_depth.checked_add(1)?,
+                b'}' => {
+                    nest_depth -= 1;
+                    if nest_depth == 0 {
+                        break;
+                    }
+                }
+                // Skip over comments
+                b'%' => self.skip_line(),
+                // Skip over literal strings since they can contain braces
+                b'(' => {
+                    self.read_lit_string(self.pos - 1)?;
+                }
+                _ => {}
             }
-            self.next()?;
         }
-        let end = self.pos;
-        if self.data.get(end - 1) != Some(&b'}') {
+        if nest_depth != 0 {
             // unterminated procedure
             return None;
         }
+        let end = self.pos;
         Some(Token::Proc(self.data.get(start + 1..end - 1)?))
     }
 
     fn read_lit_string(&mut self, start: usize) -> Option<Token<'a>> {
-        let mut nest_depth = 1;
+        let mut nest_depth = 1i32;
         while let Some(c) = self.next_byte() {
             match c {
-                b'(' => nest_depth += 1,
+                b'(' => nest_depth = nest_depth.checked_add(1)?,
                 b')' => {
                     nest_depth -= 1;
                     if nest_depth == 0 {
@@ -954,7 +970,6 @@ impl<'a> Parser<'a> {
             return None;
         }
         let end = self.pos;
-        self.pos += 1;
         Some(Token::LitString(self.data.get(start + 1..end - 1)?))
     }
 
@@ -1710,6 +1725,28 @@ mod tests {
                 Token::Name(b"Next"),
             ],
         );
+    }
+
+    #[test]
+    fn parse_procs_with_comments_and_strings_containing_braces() {
+        check_tokens(
+            "{a {nested 20 % comment }\n} proc } {a proc with (string {with braces}} {) }",
+            &[
+                Token::Proc(b"a {nested 20 % comment }\n} proc "),
+                Token::Proc(b"a proc with (string {with braces}} {) "),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_deeply_nested_procs_without_recursion() {
+        let depth = 1_000_000;
+        let src = format!("{}{}", "{".repeat(depth), "}".repeat(depth));
+        let mut parser = Parser::new(src.as_bytes());
+        let Some(Token::Proc(body)) = parser.next() else {
+            panic!("expected a procedure");
+        };
+        assert_eq!(body.len(), 2 * depth - 2);
     }
 
     #[test]
