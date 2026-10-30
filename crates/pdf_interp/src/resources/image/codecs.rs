@@ -1270,7 +1270,7 @@ pub(super) fn decode_jbig2(
 
     let n_pixels = (jw as usize).checked_mul(jh as usize)?;
     let mut collector = Jbig2Collector {
-        data: Vec::with_capacity(n_pixels),
+        data: Vec::new(),
         n_pixels,
     };
 
@@ -1316,14 +1316,28 @@ struct Jbig2Collector {
     n_pixels: usize,
 }
 
+impl Jbig2Collector {
+    /// Reserves the whole page on the first emitted pixel.  The decoder emits
+    /// only after it has allocated the page bitmap, so `n_pixels` — taken
+    /// from the stream's page information segment — is known to be a
+    /// dimension the decoder accepted by the time it is reserved.
+    fn reserve_page(&mut self) {
+        if self.data.capacity() == 0 {
+            self.data.reserve_exact(self.n_pixels);
+        }
+    }
+}
+
 impl Jbig2Decoder for Jbig2Collector {
     fn push_pixel(&mut self, black: bool) {
+        self.reserve_page();
         if self.data.len() < self.n_pixels {
             self.data.push(if black { 0x00 } else { 0xFF });
         }
     }
 
     fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
+        self.reserve_page();
         let byte = if black { 0x00 } else { 0xFF };
         // chunk_count is in 8-pixel chunks; cap to the remaining pixels so that
         // run lengths that aren't an exact multiple of 8 don't produce a short
@@ -1488,9 +1502,8 @@ mod tests {
 
     #[test]
     fn jbig2_collector_push_pixel_chunk() {
-        // Pre-allocate 16 pixels, matching the `n_pixels` pattern used in production.
         let mut c = Jbig2Collector {
-            data: Vec::with_capacity(16),
+            data: Vec::new(),
             n_pixels: 16,
         };
         // chunk_count=2 → 16 pixels of white (0xFF each).
@@ -1505,7 +1518,7 @@ mod tests {
         // (common when page dimensions aren't a multiple of 8).
         // Before the fix, this produced a short buffer and the image was dropped.
         let mut c = Jbig2Collector {
-            data: Vec::with_capacity(10),
+            data: Vec::new(),
             n_pixels: 10,
         };
         // chunk_count=2 → 16 pixels, but n_pixels=10 — must cap at 10.
@@ -1520,6 +1533,26 @@ mod tests {
         let doc = crate::test_helpers::empty_doc();
         let result = decode_jbig2(&doc, b"\x00\x01\x02\x03", 4, 4, false, None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn jbig2_decode_oversized_page_returns_none() {
+        // A page information segment declaring a 2^32 × 2^28 page: the
+        // decoder rejects the bitmap, and no buffer of the declared size is
+        // reserved before it does.
+        let mut data = vec![
+            0x00, 0x00, 0x00, 0x00, // segment number 0
+            0x30, // type 48: page information
+            0x00, // no referred-to segments
+            0x01, // page association 1
+            0x00, 0x00, 0x00, 0x13, // data length 19
+        ];
+        data.extend_from_slice(&0xFFFF_FFF0_u32.to_be_bytes()); // width
+        data.extend_from_slice(&0x1000_0000_u32.to_be_bytes()); // height
+        data.extend_from_slice(&[0; 8]); // resolutions unknown
+        data.extend_from_slice(&[0x00, 0x00, 0x00]); // flags, striping
+        let doc = crate::test_helpers::empty_doc();
+        assert!(decode_jbig2(&doc, &data, 4, 4, false, None).is_none());
     }
 
     #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
