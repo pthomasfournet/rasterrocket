@@ -277,17 +277,18 @@ pub struct TransparencyGroupParams {
     pub isolated: bool,
 }
 
-/// The identity of a font dictionary within one document.
+/// The identity of a resource object (a font, pattern or shading
+/// dictionary) within one document.
 ///
-/// Two resource names that refer to the same indirect font dictionary share
-/// a key, and one name bound to different dictionaries in different
-/// resource dictionaries has distinct keys.
+/// Two resource names that refer to the same indirect object share a key,
+/// and one name bound to different direct objects in different resource
+/// dictionaries has distinct keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum FontKey {
-    /// An indirect font dictionary.
+pub enum ResourceKey {
+    /// An indirect object.
     Object(ObjectId),
-    /// A direct font dictionary, held under `name` in the font resources of
-    /// the object `context`.
+    /// A direct object, held under `name` in one category of the resources
+    /// of the object `context`.
     Direct {
         /// The page or form whose resources hold the dictionary.
         context: ObjectId,
@@ -462,17 +463,9 @@ impl<'doc> PageResources<'doc> {
     ///
     /// Returns `None` if the resource name is not present in the resource dict.
     #[must_use]
-    pub fn font_entry(&self, name: &[u8]) -> Option<(FontKey, Object)> {
-        let fonts = self.resource_subdict(Category::Font)?;
-        let entry = fonts.get(name)?.clone();
-        let key = match entry {
-            Object::Reference(id) => FontKey::Object(id),
-            _ => FontKey::Direct {
-                context: self.resource_context_id,
-                name: name.into(),
-            },
-        };
-        Some((key, entry))
+    pub fn font_entry(&self, name: &[u8]) -> Option<(ResourceKey, Object)> {
+        let entry = self.resource_subdict(Category::Font)?.get(name)?.clone();
+        Some((self.key_of(&entry, name), entry))
     }
 
     /// Resolve a font resource entry returned by [`Self::font_entry`].
@@ -657,6 +650,34 @@ impl<'doc> PageResources<'doc> {
             has_own_resources,
             transparency,
         })
+    }
+
+    /// The identity of the object the named `Pattern` resource refers to;
+    /// `None` when the name is absent.
+    #[must_use]
+    pub fn pattern_key(&self, name: &[u8]) -> Option<ResourceKey> {
+        let entry = self.resource_subdict(Category::Pattern)?.get(name)?;
+        Some(self.key_of(entry, name))
+    }
+
+    /// The identity of the object the named `Shading` resource refers to;
+    /// `None` when the name is absent.
+    #[must_use]
+    pub fn shading_key(&self, name: &[u8]) -> Option<ResourceKey> {
+        let entry = self.resource_subdict(Category::Shading)?.get(name)?;
+        Some(self.key_of(entry, name))
+    }
+
+    /// The identity of `entry`, held under `name` in a category of the
+    /// resources in effect.
+    fn key_of(&self, entry: &Object, name: &[u8]) -> ResourceKey {
+        match entry {
+            Object::Reference(id) => ResourceKey::Object(*id),
+            _ => ResourceKey::Direct {
+                context: self.resource_context_id,
+                name: name.into(),
+            },
+        }
     }
 
     /// Resolve the named `Pattern` resource as a tiling descriptor.

@@ -217,6 +217,30 @@ fn a_small_pattern_matrix_paints_the_cells_at_their_device_size() {
 }
 
 #[test]
+fn repeated_fills_smaller_than_the_cell_paint_the_cells() {
+    // 100 pt cells under 4 pt fills: the first fill renders in place, the
+    // later ones composite the kept cell raster.
+    let bmp = render(page(
+        "/Pattern cs /P0 scn 8 8 4 4 re f 58 58 4 4 re f 108 8 4 4 re f 158 58 4 4 re f",
+        &quartered_cell(1.0),
+        Some(QUARTERED_CONTENT),
+        "",
+        &[],
+    ));
+    for (x, y, want) in [
+        (10, 10, BLUE),
+        (60, 60, GREEN),
+        (110, 10, BLUE),
+        (160, 60, GREEN),
+    ] {
+        assert_eq!(rgb(&bmp, x, y), want, "fill centred at ({x}, {y})");
+    }
+    for (x, y) in [(20, 10), (70, 60), (120, 10), (170, 60)] {
+        assert_eq!(rgb(&bmp, x, y), [255; 3], "outside the fills at ({x}, {y})");
+    }
+}
+
+#[test]
 fn a_sub_pixel_pattern_paints_its_mean_colour_and_coverage() {
     // Matrix 0.01: 1 pt cells painting half their area, blue and green in
     // equal parts.  The backdrop here is white so the mean shows directly:

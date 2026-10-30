@@ -38,20 +38,20 @@ use crate::resources::cmap_predefined::cid_to_unicode;
 use crate::resources::font::{
     BaseEncoding, CidEncoding, FontDescriptor, PdfFontKind, fallback_font,
 };
-use crate::resources::{FontKey, PageResources};
+use crate::resources::{PageResources, ResourceKey};
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
 /// Key type for [`FontCache::faces`]: the font dictionary's identity paired
 /// with the 2×2 Trm matrix bit pattern.
-type FaceKey = (FontKey, [u64; 4]);
+type FaceKey = (ResourceKey, [u64; 4]);
 
 /// The font selected by `Tf`: the identity of its dictionary and the
 /// descriptor resolved from it.
 #[derive(Clone, Debug)]
 pub struct ActiveFont {
     /// Identity of the font dictionary.
-    pub key: FontKey,
+    pub key: ResourceKey,
     /// Descriptor resolved from the dictionary, shared by every selection of
     /// the same dictionary on the page.
     pub descriptor: Arc<FontDescriptor>,
@@ -129,7 +129,7 @@ pub struct FontCache {
     /// The document's glyph bitmap cache.
     glyph_cache: GlyphCache,
     /// Descriptor of each font selected on this page.
-    descriptors: HashMap<FontKey, Arc<FontDescriptor>>,
+    descriptors: HashMap<ResourceKey, Arc<FontDescriptor>>,
     /// Map from (font dictionary, four f64-as-u64 bits of the Trm 2×2 matrix)
     /// to loaded face.  The full matrix is the key because the same font can
     /// appear at different sizes and skew angles within a single page.
@@ -158,7 +158,7 @@ impl FontCache {
     /// dropped.
     pub fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> ActiveFont {
         let (key, entry) = resources.font_entry(name).unwrap_or_else(|| {
-            let key = FontKey::Direct {
+            let key = ResourceKey::Direct {
                 context: resources.resource_context_id(),
                 name: name.into(),
             };
@@ -175,13 +175,13 @@ impl FontCache {
                         .unwrap_or_else(|| fallback_font(resources.doc()))
                 };
                 match &key {
-                    FontKey::Object(id) => Arc::clone(
+                    ResourceKey::Object(id) => Arc::clone(
                         shared
                             .font(*id)
                             .descriptor
                             .get_or_init(|| Arc::new(resolve())),
                     ),
-                    FontKey::Direct { .. } => Arc::new(resolve()),
+                    ResourceKey::Direct { .. } => Arc::new(resolve()),
                 }
             })
             .clone();
@@ -233,7 +233,12 @@ impl FontCache {
         self.faces.get(&key)?.as_ref()
     }
 
-    fn load_face(&self, key: &FontKey, desc: &FontDescriptor, trm: [f64; 4]) -> Option<PageFace> {
+    fn load_face(
+        &self,
+        key: &ResourceKey,
+        desc: &FontDescriptor,
+        trm: [f64; 4],
+    ) -> Option<PageFace> {
         // Pre-flight: reject degenerate matrices before parsing the program.
         // The y-column magnitude (hypot of indices 2 & 3) is the pixel size used by
         // FontFace::new; a value < 1.0 or non-finite produces an unusable face.
@@ -250,8 +255,8 @@ impl FontCache {
             mat: trm,
         };
         let shared = match key {
-            FontKey::Object(id) => Some(self.shared.font(*id)),
-            FontKey::Direct { .. } => None,
+            ResourceKey::Object(id) => Some(self.shared.font(*id)),
+            ResourceKey::Direct { .. } => None,
         };
 
         let (program, substitute) = match &shared {
@@ -607,7 +612,7 @@ mod tests {
     /// `desc` selected as the indirect font dictionary `1 0 R`.
     fn active(desc: FontDescriptor) -> ActiveFont {
         ActiveFont {
-            key: FontKey::Object((1, 0)),
+            key: ResourceKey::Object((1, 0)),
             descriptor: Arc::new(desc),
         }
     }

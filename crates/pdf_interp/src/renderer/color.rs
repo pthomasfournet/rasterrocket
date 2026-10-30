@@ -17,7 +17,7 @@ pub use color::convert::{gray_to_u8, rgb_to_bytes};
 ///
 /// `gray()` expands to equal R=G=B channels; `cmyk()` converts through the
 /// process-ink interpolation of `color::cmyk`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RasterColor {
     bytes: [u8; 3],
 }

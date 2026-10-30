@@ -53,6 +53,7 @@ mod image_memo;
 mod image_reduce;
 mod image_sampler;
 mod operators;
+mod pattern_memo;
 mod patterns;
 mod pixel_rect;
 mod shading_paint;
@@ -357,6 +358,9 @@ pub struct PageRenderer<'doc> {
     /// Image `XObjects` already decoded on this page, shared with the
     /// renderers of its pattern cells.
     image_memo: image_memo::SharedImageMemo,
+    /// Shadings and tiling cells already resolved on this page, shared with
+    /// the renderers of its pattern cells.
+    pattern_memo: pattern_memo::SharedPatternMemo,
     /// Maximum operators this page may execute before the render is aborted.
     op_budget: u64,
     /// Absolute wall-clock deadline for this page render.
@@ -611,6 +615,7 @@ impl<'doc> PageRenderer<'doc> {
             diag: PageDiagnostics::default(),
             current_image: None,
             image_memo: image_memo::ImageMemo::shared(),
+            pattern_memo: pattern_memo::PatternMemo::shared(),
             op_budget: MAX_PAGE_OPS,
             deadline: Some(
                 std::time::Instant::now()
@@ -898,11 +903,12 @@ impl<'doc> PageRenderer<'doc> {
         self.budget_exceeded.clone_from(&parent.budget_exceeded);
     }
 
-    /// Draw image `XObjects` from `parent`'s image memo, and keep this
-    /// renderer's decodes in it, so a pattern cell does not decode an
-    /// image the page has already decoded.
-    pub(super) fn share_image_memo(&mut self, parent: &Self) {
+    /// Draw image `XObjects`, shadings and tiling cells from `parent`'s
+    /// memos, and keep this renderer's in them, so a pattern cell does not
+    /// decode or rasterise what the page already has.
+    pub(super) fn share_memos(&mut self, parent: &Self) {
         self.image_memo = std::rc::Rc::clone(&parent.image_memo);
+        self.pattern_memo = std::rc::Rc::clone(&parent.pattern_memo);
     }
 
     /// Fold a finished child renderer (a tiling-pattern tile) into its
@@ -1262,7 +1268,7 @@ impl<'doc> PageRenderer<'doc> {
             .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
-                self.paint_shading_pattern(*pattern, false, region, |r, pipe, shading| {
+                self.paint_shading_pattern(&pattern, false, region, |r, pipe, shading| {
                     r.fill_with_shading(path, even_odd, clip, pipe, flatness, shading);
                 });
                 return;
@@ -1477,7 +1483,7 @@ impl<'doc> PageRenderer<'doc> {
             .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
-                self.paint_shading_pattern(*pattern, true, region, |r, pipe, shading| {
+                self.paint_shading_pattern(&pattern, true, region, |r, pipe, shading| {
                     r.stroke_with_shading(
                         &path,
                         &matrix,

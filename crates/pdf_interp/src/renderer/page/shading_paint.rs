@@ -58,10 +58,10 @@ impl PageRenderer<'_> {
     /// is resolved in pattern space and masks what `paint` paints.
     pub(super) fn paint_shading_pattern<R>(
         &mut self,
-        pattern: ShadingPattern,
+        pattern: &ShadingPattern,
         stroke: bool,
         region: Option<PixelRect>,
-        paint: impl FnOnce(&mut Self, &PipeState<'_>, ResolvedShading) -> R,
+        paint: impl FnOnce(&mut Self, &PipeState<'_>, &ResolvedShading) -> R,
     ) -> R {
         let ShadingPattern {
             shading,
@@ -83,8 +83,8 @@ impl PageRenderer<'_> {
             return paint(self, &pipe, shading);
         };
         self.gstate.save();
-        let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, matrix);
-        self.apply_ext_gstate(&ext);
+        let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, *matrix);
+        self.apply_ext_gstate(ext);
         self.gstate.current_mut().ctm = ctm;
         let (alpha, blend_mode, backdrop) = pipe_of(self);
         let pipe = Self::make_pipe(alpha, blend_mode, backdrop.as_deref());
@@ -104,9 +104,8 @@ impl PageRenderer<'_> {
         let flatness = gs.flatness.max(0.1);
         let backdrop = self.blend_backdrop(gs.blend_mode);
         let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
-        let page_h = f64::from(self.height);
 
-        let Some(shading) = self.resources.shading(name, &ctm, page_h) else {
+        let Some(shading) = self.memo_shading(name, &ctm) else {
             log::warn!(
                 "rasterrocket-interp: sh /{} — shading not available (unsupported type or missing resource)",
                 String::from_utf8_lossy(name)
@@ -122,7 +121,7 @@ impl PageRenderer<'_> {
         // The shading is one object under the soft mask in effect; it can
         // paint the whole clip.
         let region = PixelRect::of_clip(&clip, self.width, self.height);
-        self.paint_masked(region, |r| match shading.result {
+        self.paint_masked(region, |r| match &shading.result {
             ShadingResult::Pattern(pattern) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),
@@ -143,7 +142,7 @@ impl PageRenderer<'_> {
                 );
             }
             ShadingResult::Mesh(triangles) => {
-                for tri in triangles {
+                for &tri in triangles {
                     gouraud_triangle_fill::<Rgb8>(&mut r.bitmap, &clip, &pipe, tri);
                 }
             }
@@ -159,7 +158,7 @@ impl PageRenderer<'_> {
         clip: Clip,
         pipe: &PipeState<'_>,
         flatness: f64,
-        shading: ResolvedShading,
+        shading: &ResolvedShading,
     ) {
         let paint = |bitmap: &mut Bitmap<Rgb8>, clip: &Clip, src: &PipeSrc<'_>| {
             let fill_fn = if even_odd {
@@ -182,14 +181,14 @@ impl PageRenderer<'_> {
             paint(&mut self.bitmap, &clip, &PipeSrc::Solid(&bg));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        match shading.result {
+        match &shading.result {
             ShadingResult::Pattern(pattern) => {
                 paint(&mut self.bitmap, &clip, &PipeSrc::Pattern(pattern.as_ref()));
             }
             ShadingResult::Mesh(triangles) => {
                 let mut clip = clip;
                 clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
-                for tri in triangles {
+                for &tri in triangles {
                     gouraud_triangle_fill::<Rgb8>(&mut self.bitmap, &clip, pipe, tri);
                 }
             }
@@ -213,7 +212,7 @@ impl PageRenderer<'_> {
         clip: Clip,
         pipe: &PipeState<'_>,
         flatness: f64,
-        shading: ResolvedShading,
+        shading: &ResolvedShading,
     ) {
         if let Some(bg) = shading.background {
             stroke(
@@ -227,7 +226,7 @@ impl PageRenderer<'_> {
             );
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        match shading.result {
+        match &shading.result {
             ShadingResult::Pattern(pattern) => stroke(
                 &mut self.bitmap,
                 &clip,
@@ -256,7 +255,7 @@ impl PageRenderer<'_> {
                 };
                 let mut clip = clip;
                 clip.clip_to_path(&outline, false);
-                for tri in triangles {
+                for &tri in triangles {
                     gouraud_triangle_fill::<Rgb8>(&mut self.bitmap, &clip, pipe, tri);
                 }
             }

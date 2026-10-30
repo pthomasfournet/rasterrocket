@@ -2,9 +2,12 @@
 
 use super::super::color::RasterColor;
 use super::super::gstate::ctm_multiply;
+use super::pattern_memo::{CellRaster, RasterKey};
 use super::pixel_rect::PixelRect;
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
 use crate::resources::{ColorSpace, PageResources, ShadingPattern};
+use std::rc::Rc;
+
 use color::Rgb8;
 use pdf::Document;
 use raster::path::PathBuilder;
@@ -90,7 +93,7 @@ pub(super) enum PatternPaint {
     /// A tiling pattern (`PatternType` 1), rasterised to a tile.
     Tiled(TiledPattern),
     /// A shading pattern (`PatternType` 2).
-    Shading(Box<ShadingPattern>),
+    Shading(Rc<ShadingPattern>),
 }
 
 /// The content of a tiling pattern's cell, ready to render.
@@ -206,12 +209,8 @@ impl PageRenderer<'_> {
         name: &[u8],
         region: PixelRect,
     ) -> Option<PatternPaint> {
-        let page_h = f64::from(self.height);
-        if let Some(shading) = self
-            .resources
-            .shading_pattern(name, &self.pattern_ctm, page_h)
-        {
-            return Some(PatternPaint::Shading(Box::new(shading)));
+        if let Some(shading) = self.memo_shading_pattern(name) {
+            return Some(PatternPaint::Shading(shading));
         }
         self.resolve_fill_pattern(name, region)
             .map(PatternPaint::Tiled)
@@ -221,12 +220,15 @@ impl PageRenderer<'_> {
     ///
     /// The cell is rasterised once and composited at every lattice point
     /// whose cell meets the region when the cell is no larger than the
-    /// region; otherwise each such cell's content is rendered directly onto
-    /// a region-sized bitmap at its exact position.  A lattice finer than a
-    /// pixel is reduced to its mean.
+    /// region, or when the same raster was asked for before and fits the
+    /// page's pattern memo; otherwise each such cell's content is rendered
+    /// directly onto a region-sized bitmap at its exact position.  A
+    /// lattice finer than a pixel is reduced to its mean.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "the region's area is page-bounded"
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the region's area is page-bounded; the cell's byte count is positive and saturates"
     )]
     pub(super) fn resolve_fill_pattern(
         &mut self,
@@ -246,7 +248,8 @@ impl PageRenderer<'_> {
             return None;
         }
 
-        let desc = self.resources.tiling_pattern(name)?;
+        let tiling = self.memo_tiling_cell(name)?;
+        let desc = &tiling.desc;
 
         let gs = self.gstate.current();
         // PaintType 2 (uncoloured) patterns paint shape-only content streams;
@@ -273,7 +276,7 @@ impl PageRenderer<'_> {
         // effect at the fill.  `device` carries on to device pixels.
         let pat_ctm = ctm_multiply(&desc.matrix, &self.pattern_ctm);
         let device = flip_y(&pat_ctm, f64::from(self.height));
-        let geometry = match CellGeometry::new(&device, &desc) {
+        let geometry = match CellGeometry::new(&device, desc) {
             Ok(geometry) => geometry,
             Err(why) => {
                 log::debug!(
@@ -283,17 +286,22 @@ impl PageRenderer<'_> {
                 return None;
             }
         };
-        let ops = crate::content::parse(&desc.content);
         let cell = CellContent {
-            desc: &desc,
-            ops: &ops,
+            desc,
+            ops: &tiling.ops,
             tint: tint.as_ref(),
         };
+        let key = RasterKey::new(
+            desc.stream_id,
+            &device,
+            tint.as_ref(),
+            (!desc.has_own_resources).then(|| self.resources.resource_context_id()),
+        );
 
         // A lattice cell below one pixel in area repeats more than once per
         // pixel; box-filtered over a pixel, the pattern is its mean.
         if geometry.area < 1.0 {
-            return Some(self.mean_pattern(&cell, &geometry));
+            return Some(self.mean_pattern(&cell, &geometry, key));
         }
         let (cell_w, cell_h) = geometry.cell_size();
         if cell_w * cell_h > MAX_CELL_OVERDRAW * geometry.area {
@@ -304,8 +312,16 @@ impl PageRenderer<'_> {
             );
             return None;
         }
-        if cell_w * cell_h <= region.area() as f64 {
-            self.composed_pattern(&cell, &geometry, region)
+        // A cell larger than the region is rendered in place, unless the
+        // same cell raster serves repeated fills.
+        let cell_bytes = (cell_w + 1.0) * (cell_h + 1.0) * 4.0;
+        if cell_w * cell_h <= region.area() as f64
+            || self
+                .pattern_memo
+                .borrow_mut()
+                .repeated(&key, cell_bytes as usize)
+        {
+            self.composed_pattern(&cell, &geometry, region, key)
         } else {
             self.direct_pattern(name, &cell, &geometry, region)
         }
@@ -318,13 +334,24 @@ impl PageRenderer<'_> {
         clippy::cast_sign_loss,
         reason = "the sample sides are whole pixels from pixel_ceil, at most MAX_TILE_PX"
     )]
-    fn mean_pattern(&mut self, cell: &CellContent<'_>, geometry: &CellGeometry) -> TiledPattern {
-        let (w, h) = (geometry.bounds.width, geometry.bounds.height);
-        let k = (MEAN_SAMPLE_PX / w.min(h)).min(MAX_TILE_PX / w.max(h));
-        let size = (pixel_ceil(w * k) as u32, pixel_ceil(h * k) as u32);
-        let sample = self.render_cells(cell, size, &[geometry.placement(k, 0.0, 0.0)]);
-        let (colour, coverage) = mean_over_period(&sample, geometry.area * k * k);
-        TiledPattern::uniform(colour, coverage)
+    fn mean_pattern(
+        &mut self,
+        cell: &CellContent<'_>,
+        geometry: &CellGeometry,
+        key: RasterKey,
+    ) -> TiledPattern {
+        let raster = self.memo_raster(key, |r| {
+            let (w, h) = (geometry.bounds.width, geometry.bounds.height);
+            let k = (MEAN_SAMPLE_PX / w.min(h)).min(MAX_TILE_PX / w.max(h));
+            let size = (pixel_ceil(w * k) as u32, pixel_ceil(h * k) as u32);
+            let sample = r.render_cells(cell, size, &[geometry.placement(k, 0.0, 0.0)]);
+            let (colour, coverage) = mean_over_period(&sample, geometry.area * k * k);
+            CellRaster::Mean(colour, coverage)
+        });
+        match raster {
+            CellRaster::Mean(colour, coverage) => TiledPattern::uniform(colour, coverage),
+            CellRaster::Cell(_) => unreachable!("a mean is kept under its key"),
+        }
     }
 
     /// The cell rasterised once and composited at every lattice point whose
@@ -340,6 +367,7 @@ impl PageRenderer<'_> {
         cell: &CellContent<'_>,
         geometry: &CellGeometry,
         region: PixelRect,
+        key: RasterKey,
     ) -> Option<TiledPattern> {
         // The cell is rasterised at the sub-pixel phase of cell (0, 0) and
         // stamped from the floor of its origin: cell (0, 0) lands exactly,
@@ -350,7 +378,16 @@ impl PageRenderer<'_> {
             pixel_ceil(geometry.bounds.width + fx) as u32,
             pixel_ceil(geometry.bounds.height + fy) as u32,
         );
-        let bitmap = self.render_cells(cell, size, &[geometry.placement(1.0, fx, fy)]);
+        let raster = self.memo_raster(key, |r| {
+            CellRaster::Cell(Rc::new(r.render_cells(
+                cell,
+                size,
+                &[geometry.placement(1.0, fx, fy)],
+            )))
+        });
+        let CellRaster::Cell(bitmap) = raster else {
+            unreachable!("a cell bitmap is kept under its key")
+        };
         let lattice = Lattice {
             origin: (origin.0.floor(), origin.1.floor()),
             ..geometry.lattice
@@ -441,7 +478,7 @@ impl PageRenderer<'_> {
         // execute() loop is blocked synchronously here and never gets to tick
         // its own budget or check its own deadline.
         child.adopt_parent_budget(self);
-        child.share_image_memo(self);
+        child.share_memos(self);
         child.set_optional_content(std::sync::Arc::clone(self.optional_content()));
 
         // If the pattern has no own resources, point it at the parent context.
