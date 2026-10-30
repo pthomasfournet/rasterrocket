@@ -377,13 +377,8 @@ fn tint_via_fn(
     alternate: &ColorSpace,
     tints: &[f64],
 ) -> Option<[u8; 3]> {
-    let fn_arc = doc.get_object(tint_dict_id).ok()?;
-    let outputs = super::shading::function::eval_function_n(
-        doc,
-        fn_arc.as_ref(),
-        tints,
-        alternate.ncomponents(),
-    )?;
+    let outputs = super::shading::function::Function::load(doc, &Object::Reference(tint_dict_id))
+        .eval_n(tints, alternate.ncomponents())?;
     Some(alternate.convert_to_rgb(doc, &outputs))
 }
 

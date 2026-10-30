@@ -26,7 +26,7 @@ use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
 use crate::resources::SoftMaskParams;
-use crate::resources::shading::function::eval_function;
+use crate::resources::shading::function::Function;
 
 impl PageRenderer<'_> {
     /// Apply an `ExtGState` `SMask` entry to the current graphics state.
@@ -327,10 +327,11 @@ fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
 
 /// Tabulate a transfer function over the 256 mask values.
 fn transfer_lut(doc: &pdf::Document, f: &pdf::Object) -> Option<[u8; 256]> {
+    let function = Function::load(doc, f);
     let mut lut = [0u8; 256];
     for (i, v) in lut.iter_mut().enumerate() {
         let t = f64::from(u8::try_from(i).ok()?) / 255.0;
-        let y = eval_function(doc, f, t, 1)?.first().copied()?;
+        let y = function.eval(t, 1)?.first().copied()?;
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,

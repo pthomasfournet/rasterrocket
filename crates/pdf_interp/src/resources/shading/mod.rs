@@ -52,7 +52,7 @@ use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
 use super::{read_matrix, resolve_dict};
 use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
-use function::{eval_function, eval_function_n, read_f64_array, read_fn_domain};
+use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, emit_triangle};
 use patch::{decode_type6_mesh, decode_type7_mesh};
 
@@ -314,11 +314,12 @@ fn sample_ramp(
     t0: f64,
     t1: f64,
 ) -> Option<ColorRamp> {
+    let function = Function::load(doc, fn_obj);
     let last = f64::from(RAMP_SAMPLES - 1);
     let samples = (0..RAMP_SAMPLES)
         .map(|k| {
             let t = (f64::from(k) / last).mul_add(t1 - t0, t0);
-            eval_function(doc, fn_obj, t, n).map(|c| cs.to_rgb(&c))
+            function.eval(t, n).map(|c| cs.to_rgb(&c))
         })
         .collect::<Option<Vec<_>>>()?;
     ColorRamp::from_samples(samples)
@@ -399,7 +400,7 @@ fn resolve_function_based(
         return None;
     }
 
-    let fn_obj = sh.get(b"Function")?;
+    let function = Function::load(doc, sh.get(b"Function")?);
 
     // PDF §8.7.4.5.2: `Matrix` maps shading space into the target space the
     // CTM maps to the device.
@@ -430,8 +431,9 @@ fn resolve_function_based(
         for col in 0..g {
             #[expect(clippy::cast_precision_loss, reason = "col < 64; exact in f64")]
             let sx = (col as f64 / gf).mul_add(xd1 - xd0, xd0);
-            let channels =
-                eval_function_n(doc, fn_obj, &[sx, sy], n).unwrap_or_else(|| vec![0.0; n]);
+            let channels = function
+                .eval_n(&[sx, sy], n)
+                .unwrap_or_else(|| vec![0.0; n]);
             grid.push(cs.to_rgb(&channels));
         }
     }

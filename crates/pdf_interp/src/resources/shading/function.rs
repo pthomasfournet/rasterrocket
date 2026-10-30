@@ -1,9 +1,11 @@
-//! PDF Function evaluation for shading types 0 (Sampled), 2 (Exponential),
-//! 3 (Stitching), and 4 (PostScript calculator).
+//! PDF functions (§7.10): Type 0 (Sampled), 2 (Exponential), 3 (Stitching)
+//! and 4 (PostScript calculator).
 //!
-//! The entry points are [`eval_function`] (one input) and
-//! [`eval_function_n`] (one or more inputs, as a `DeviceN` tint transform
-//! takes), which dispatch on `FunctionType`.
+//! A function object is compiled once into a [`Function`] — sample streams
+//! decoded, PostScript programs parsed, every dictionary entry read — and
+//! evaluated any number of times by arithmetic alone.  [`Function::load`]
+//! memoises the compiled form of an indirect function object for the
+//! lifetime of the document.
 //!
 //! # Limitations
 //!
@@ -15,1185 +17,406 @@
 //! allows.
 //!
 //! Type 4 (PostScript calculator) implements the bounded operator subset of
-//! PDF §7.10.5 — arithmetic, boolean/relational, stack, and `if`/`ifelse`
-//! conditionals only. There are no loops, defs, strings, or arrays beyond
-//! the operand stack; a malformed program or stack underflow returns `None`
-//! so the caller falls back loudly.
+//! PDF §7.10.5 (see [`postscript`]); a malformed program or stack underflow
+//! evaluates to `None` so the caller falls back loudly.
+
+use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object};
 
 use crate::resources::dict_ext::DictExt;
 use crate::resources::obj_to_f64;
 
+mod postscript;
 mod sampled_nd;
 
-/// Maximum nesting depth for recursive function evaluation (guards against
-/// crafted PDFs with deeply or circularly nested Type 3 functions).
+use postscript::Program;
+use sampled_nd::Sampled;
+
+/// Maximum nesting depth of compiled sub-functions (guards against crafted
+/// PDFs with deeply or circularly nested Type 3 functions).
 const MAX_FN_DEPTH: u8 = 10;
 
-// ── Public-to-parent API ──────────────────────────────────────────────────────
+// ── Compiled functions ────────────────────────────────────────────────────────
 
-/// Evaluate a PDF Function object at parameter `t`, returning `n` colour channels.
+/// A compiled PDF function.
 ///
-/// Supported function types:
-/// - **Type 2** (Exponential): `C0 + t^N × (C1 − C0)`.
-/// - **Type 3** (Stitching): maps `t` to a sub-function and recursively evaluates.
-/// - **Type 0** (Sampled): linear interpolation across the decode range (stream data not used).
-/// - **Type 4** (PostScript calculator): evaluates the bounded §7.10.5 operator subset.
-///
-/// Unknown types fall back to `C0` if available.
-pub fn eval_function(doc: &Document, fn_obj: &Object, t: f64, n: usize) -> Option<Vec<f64>> {
-    eval_function_depth(doc, fn_obj, t, n, 0)
+/// The output count `n` is supplied at evaluation time by the consumer (the
+/// colour space a shading or tint transform feeds), not read from `Range`.
+#[derive(Debug)]
+pub struct Function {
+    body: Body,
+    /// `Range` as flat `[lo0 hi0 lo1 hi1 …]` numbers; empty when absent.
+    range: Vec<f64>,
 }
 
-/// Evaluate a PDF Function object at the `m`-dimensional input point
-/// `inputs`, returning `n` output values (PDF §7.10).
-///
-/// A one-element input is exactly [`eval_function`].  With several inputs
-/// (a `DeviceN` tint transform, a function-based shading) only the function
-/// types defined for `m > 1` apply: Type 0 (Sampled, multilinear
-/// interpolation over the sample grid) and Type 4 (PostScript calculator,
-/// inputs pushed in order).  Types 2 and 3 take one input by definition
-/// (§7.10.3, §7.10.4) and yield `None`, as does a malformed function.
-///
-/// `fn_obj` may also be an array of `n` single-output functions of the same
-/// inputs (a shading's `Function`, §8.7.4.5.1); output `i` is element `i`'s.
-#[must_use]
-pub fn eval_function_n(
-    doc: &Document,
-    fn_obj: &Object,
-    inputs: &[f64],
-    n: usize,
-) -> Option<Vec<f64>> {
-    if let [t] = inputs {
-        return eval_function(doc, fn_obj, *t, n);
-    }
-    if let Some(outputs) = with_fn_array(doc, fn_obj, |fns| {
-        if fns.len() != n {
-            log::warn!(
-                "function: Function array has {} entries, {n} outputs needed",
-                fns.len()
-            );
-            return None;
+#[derive(Debug)]
+enum Body {
+    /// An array of single-output functions, one per output (a shading's
+    /// `Function` entry, §8.7.4.5.1).
+    Array(Vec<Arc<Function>>),
+    /// Type 2: `C0 + x^N × (C1 − C0)`.
+    Exponential {
+        domain: (f64, f64),
+        c0: Option<Vec<f64>>,
+        c1: Option<Vec<f64>>,
+        exponent: f64,
+    },
+    /// Type 3: `Domain` split at `Bounds` into sub-domains, each mapped
+    /// through its `Encode` pair onto a sub-function.
+    Stitching {
+        domain: (f64, f64),
+        functions: Vec<Function>,
+        bounds: Vec<f64>,
+        encode: Vec<f64>,
+    },
+    /// Type 0.
+    Sampled(Sampled),
+    /// Type 4; `None` when the program failed to parse.
+    PostScript {
+        domain: Vec<f64>,
+        program: Option<Program>,
+    },
+    /// A function evaluated as its `C0` entry: an unknown `FunctionType`,
+    /// or a sub-function past [`MAX_FN_DEPTH`].
+    Constant(Option<Vec<f64>>),
+    /// An object that is not a function; every evaluation yields `None`.
+    Invalid,
+}
+
+impl Function {
+    const INVALID: Self = Self {
+        body: Body::Invalid,
+        range: Vec::new(),
+    };
+
+    /// Compile the function object `obj`.  An indirect function is compiled
+    /// once per document and shared; the elements of a direct array of
+    /// functions are loaded the same way.
+    #[must_use]
+    pub fn load(doc: &Document, obj: &Object) -> Arc<Self> {
+        match obj {
+            Object::Reference(id) => doc
+                .derived(*id, || Some(Self::compile(doc, obj, 0)))
+                .unwrap_or_else(|| Arc::new(Self::INVALID)),
+            Object::Array(elems) => Arc::new(Self {
+                body: Body::Array(elems.iter().map(|e| Self::load(doc, e)).collect()),
+                range: Vec::new(),
+            }),
+            direct => Arc::new(Self::compile(doc, direct, 0)),
         }
-        fns.iter()
-            .map(|f| eval_single_n(doc, f, inputs, 1)?.first().copied())
-            .collect()
-    }) {
-        return outputs;
     }
-    eval_single_n(doc, fn_obj, inputs, n)
-}
 
-/// [`eval_function_n`] for one function object with several inputs.
-fn eval_single_n(doc: &Document, fn_obj: &Object, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
-    with_fn_dict(doc, fn_obj, |fn_dict| {
-        let result = match fn_dict.get_i64(b"FunctionType")? {
-            0 => sampled_nd::eval_sampled_nd(fn_dict, &stream_bytes_for(doc, fn_obj)?, inputs, n),
-            4 => eval_postscript(doc, fn_obj, fn_dict, inputs, n),
-            other => {
-                log::debug!(
-                    "function: FunctionType {other} takes one input, {} supplied",
-                    inputs.len()
-                );
-                None
+    /// Compile `obj` at sub-function nesting `depth`.  Never consults the
+    /// document cache, so a function that refers to itself is bounded by
+    /// [`MAX_FN_DEPTH`] rather than by re-entering its own cache cell.
+    fn compile(doc: &Document, obj: &Object, depth: u8) -> Self {
+        let referent;
+        let target = match obj {
+            Object::Reference(id) => {
+                let Ok(o) = doc.get_object(*id) else {
+                    return Self::INVALID;
+                };
+                referent = o;
+                referent.as_ref()
+            }
+            direct => direct,
+        };
+        let (dict, stream) = match target {
+            Object::Array(elems) => {
+                if depth >= MAX_FN_DEPTH {
+                    return Self::INVALID;
+                }
+                return Self {
+                    body: Body::Array(
+                        elems
+                            .iter()
+                            .map(|e| Arc::new(Self::compile(doc, e, depth + 1)))
+                            .collect(),
+                    ),
+                    range: Vec::new(),
+                };
+            }
+            Object::Dictionary(d) => (d, None),
+            Object::Stream(s) => (&s.dict, Some(s)),
+            _ => return Self::INVALID,
+        };
+        let range = numbers(dict, b"Range");
+        if depth >= MAX_FN_DEPTH {
+            log::warn!(
+                "function: nesting depth {depth} exceeds limit {MAX_FN_DEPTH} — \
+                 evaluating as C0"
+            );
+            return Self {
+                body: Body::Constant(read_color(dict, b"C0")),
+                range,
+            };
+        }
+        let stream_bytes = || {
+            stream?
+                .decompressed_content()
+                .map_err(|e| log::debug!("function: stream decode failed: {e}"))
+                .ok()
+        };
+        let body = match dict.get_i64(b"FunctionType") {
+            None => Body::Invalid,
+            Some(0) => Body::Sampled(Sampled::compile(dict, stream_bytes())),
+            Some(2) => Body::Exponential {
+                domain: read_fn_domain(dict),
+                c0: read_color(dict, b"C0"),
+                c1: read_color(dict, b"C1"),
+                // PDF requires N ≥ 0; a negative exponent would turn 0^N
+                // into +infinity.
+                exponent: dict.get(b"N").and_then(obj_to_f64).unwrap_or(1.0).max(0.0),
+            },
+            Some(3) => match dict.get(b"Functions").and_then(Object::as_array) {
+                Some(fns) if !fns.is_empty() => Body::Stitching {
+                    domain: read_fn_domain(dict),
+                    functions: fns
+                        .iter()
+                        .map(|f| Self::compile(doc, f, depth + 1))
+                        .collect(),
+                    bounds: numbers(dict, b"Bounds"),
+                    encode: numbers(dict, b"Encode"),
+                },
+                _ => Body::Invalid,
+            },
+            Some(4) => Body::PostScript {
+                domain: numbers(dict, b"Domain"),
+                program: stream_bytes().and_then(|src| {
+                    let program = Program::parse(&src);
+                    if program.is_none() {
+                        log::warn!("function: Type 4 program is malformed");
+                    }
+                    program
+                }),
+            },
+            Some(other) => {
+                log::debug!("function: FunctionType {other} not implemented — evaluating as C0");
+                Body::Constant(read_color(dict, b"C0"))
             }
         };
-        result.map(|c| apply_range_clip(fn_dict, c))
-    })
-}
+        Self { body, range }
+    }
 
-fn eval_function_depth(
-    doc: &Document,
-    fn_obj: &Object,
-    t: f64,
-    n: usize,
-    depth: u8,
-) -> Option<Vec<f64>> {
-    if depth >= MAX_FN_DEPTH {
-        log::warn!(
-            "shading: PDF function nesting depth {depth} exceeds limit {MAX_FN_DEPTH} — \
-             returning C0 fallback to prevent stack overflow"
-        );
-        return with_fn_dict(doc, fn_obj, |fn_dict| {
-            read_fn_color(fn_dict, b"C0", n).map(|c| apply_range_clip(fn_dict, c))
-        });
+    /// Evaluate at the single input `t`, returning `n` outputs clipped to
+    /// `Range`.
+    #[must_use]
+    pub fn eval(&self, t: f64, n: usize) -> Option<Vec<f64>> {
+        let out = match &self.body {
+            Body::Array(fns) => {
+                if fns.len() != n {
+                    log::warn!(
+                        "function: Function array has {} entries, {n} outputs needed",
+                        fns.len()
+                    );
+                    return None;
+                }
+                return fns.iter().map(|f| f.eval(t, 1)?.first().copied()).collect();
+            }
+            Body::Exponential {
+                domain,
+                c0,
+                c1,
+                exponent,
+            } => eval_exponential(*domain, c0.as_deref(), c1.as_deref(), *exponent, t, n),
+            Body::Stitching {
+                domain,
+                functions,
+                bounds,
+                encode,
+            } => {
+                let (f, x) = stitch(*domain, functions, bounds, encode, t);
+                f.eval(x, n)?
+            }
+            Body::Sampled(s) => s.eval_1d(t, n).unwrap_or_else(|| s.eval_approx(t, n)),
+            Body::PostScript { domain, program } => {
+                let out = program
+                    .as_ref()
+                    .and_then(|p| p.run(&clip_to_domains(domain, &[t]), n));
+                if out.is_none() {
+                    log::debug!("function: Type 4 program failed to evaluate");
+                }
+                out?
+            }
+            Body::Constant(c0) => pad(c0.as_deref()?, n),
+            Body::Invalid => return None,
+        };
+        Some(self.clip_to_range(out))
     }
-    if let Some(outputs) = with_fn_array(doc, fn_obj, |fns| {
-        eval_function_array(doc, fns, t, n, depth)
-    }) {
-        return outputs;
-    }
-    with_fn_dict(doc, fn_obj, |fn_dict| {
-        let fn_type = fn_dict.get_i64(b"FunctionType")?;
-        let result = match fn_type {
-            2 => Some(eval_exponential(fn_dict, t, n)),
-            3 => eval_stitching_depth(doc, fn_dict, t, n, depth),
-            0 => Some(
-                eval_sampled(doc, fn_obj, fn_dict, t, n)
-                    .unwrap_or_else(|| eval_sampled_approx(fn_dict, t, n)),
-            ),
-            4 => eval_postscript(doc, fn_obj, fn_dict, &[t], n).or_else(|| {
-                log::warn!(
-                    "shading: Type 4 PostScript function failed to evaluate \
-                     (malformed program or stack underflow) — colour unresolved"
-                );
-                None
-            }),
+
+    /// Evaluate at the `m`-dimensional input point `inputs`, returning `n`
+    /// outputs clipped to `Range` (PDF §7.10).
+    ///
+    /// A one-element input is exactly [`Self::eval`].  With several inputs
+    /// only Type 0 (multilinear interpolation over the sample grid) and
+    /// Type 4 (inputs pushed in order) apply; Types 2 and 3 take one input by
+    /// definition (§7.10.3, §7.10.4) and yield `None`.  An array of
+    /// functions evaluates element `i` for output `i`.
+    #[must_use]
+    pub fn eval_n(&self, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
+        if let [t] = inputs {
+            return self.eval(*t, n);
+        }
+        let out = match &self.body {
+            Body::Array(fns) => {
+                if fns.len() != n {
+                    log::warn!(
+                        "function: Function array has {} entries, {n} outputs needed",
+                        fns.len()
+                    );
+                    return None;
+                }
+                return fns
+                    .iter()
+                    .map(|f| match f.body {
+                        Body::Array(_) => None,
+                        _ => f.eval_n(inputs, 1)?.first().copied(),
+                    })
+                    .collect();
+            }
+            Body::Sampled(s) => s.eval_nd(inputs, n)?,
+            Body::PostScript { domain, program } => {
+                program.as_ref()?.run(&clip_to_domains(domain, inputs), n)?
+            }
             _ => {
                 log::debug!(
-                    "shading: FunctionType {fn_type} not yet implemented — using C0 fallback"
+                    "function: function takes one input, {} supplied",
+                    inputs.len()
                 );
-                read_fn_color(fn_dict, b"C0", n)
+                return None;
             }
         };
-        result.map(|c| apply_range_clip(fn_dict, c))
-    })
-}
+        Some(self.clip_to_range(out))
+    }
 
-/// Apply `f` to the elements of `fn_obj`, borrowed in place, when it is an
-/// array given directly or through one indirect reference; `None` for any
-/// other object.
-fn with_fn_array<R>(doc: &Document, fn_obj: &Object, f: impl FnOnce(&[Object]) -> R) -> Option<R> {
-    match fn_obj {
-        Object::Array(fns) => Some(f(fns)),
-        Object::Reference(id) => doc.get_object(*id).ok()?.as_array().map(f),
-        _ => None,
+    /// Clip output `ch` to `Range` pair `ch` (PDF §7.10.2).  A missing pair
+    /// or an empty interval leaves the output unconstrained.
+    fn clip_to_range(&self, mut out: Vec<f64>) -> Vec<f64> {
+        for (v, &[lo, hi]) in out.iter_mut().zip(self.range.as_chunks::<2>().0) {
+            if hi > lo {
+                *v = v.clamp(lo, hi);
+            }
+        }
+        out
     }
 }
 
-/// Evaluate a shading `Function` given as an array of `n` single-output
-/// functions (PDF §8.7.4.5.1): channel `i` is the output of element `i`.
-/// An array whose length differs from `n` is malformed and yields `None`.
-fn eval_function_array(
-    doc: &Document,
-    fns: &[Object],
+/// Type 2 (Exponential): `C0 + t_norm^N × (C1 − C0)` with `C0` default 0
+/// and `C1` default 1 per output.
+fn eval_exponential(
+    (d0, d1): (f64, f64),
+    c0: Option<&[f64]>,
+    c1: Option<&[f64]>,
+    exponent: f64,
     t: f64,
     n: usize,
-    depth: u8,
-) -> Option<Vec<f64>> {
-    if fns.len() != n {
-        log::warn!(
-            "shading: Function array has {} entries, colour space needs {n} — colour unresolved",
-            fns.len()
-        );
-        return None;
-    }
-    fns.iter()
-        .map(|f| {
-            eval_function_depth(doc, f, t, 1, depth + 1)?
-                .first()
-                .copied()
-        })
-        .collect()
-}
-
-/// Clip per-channel output values to the function's `Range` array
-/// (PDF §7.10.2 "Range" entry). Missing or short `Range` arrays leave the
-/// channel unconstrained. Applied at every `eval_function_depth` exit so
-/// downstream colour conversion gets values already inside the declared
-/// output range.
-fn apply_range_clip(fn_dict: &Dictionary, channels: Vec<f64>) -> Vec<f64> {
-    let Some(range) = fn_dict.get(b"Range").and_then(Object::as_array) else {
-        return channels;
-    };
-    let pairs: Vec<f64> = range.iter().filter_map(obj_to_f64).collect();
-    channels
-        .into_iter()
-        .enumerate()
-        .map(|(ch, v)| {
-            if pairs.len() < (ch + 1) * 2 {
-                return v;
-            }
-            let (lo, hi) = (pairs[ch * 2], pairs[ch * 2 + 1]);
-            if hi <= lo { v } else { v.clamp(lo, hi) }
-        })
-        .collect()
-}
-
-/// Evaluate a Type 2 Exponential function: `C0 + (t_norm)^N × (C1 − C0)`.
-pub(super) fn eval_exponential(fn_dict: &Dictionary, t: f64, n: usize) -> Vec<f64> {
-    let c0 = read_fn_color(fn_dict, b"C0", n).unwrap_or_else(|| vec![0.0; n]);
-    let c1 = read_fn_color(fn_dict, b"C1", n).unwrap_or_else(|| vec![1.0; n]);
-
-    let (d0, d1) = read_fn_domain(fn_dict);
-
-    // PDF spec says N ≥ 0; clamp exponent to avoid +infinity from 0^(negative).
-    let exponent = fn_dict
-        .get(b"N")
-        .and_then(obj_to_f64)
-        .unwrap_or(1.0)
-        .max(0.0);
-
-    // safe_clamp: f64::clamp panics when min > max or either is NaN.
+) -> Vec<f64> {
+    let c0 = c0.map_or_else(|| vec![0.0; n], |c| pad(c, n));
+    let c1 = c1.map_or_else(|| vec![1.0; n], |c| pad(c, n));
     let t_norm = if d1 > d0 {
         ((t - d0) / (d1 - d0)).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let weight = t_norm.powf(exponent);
-
     c0.iter()
-        .zip(c1.iter())
+        .zip(&c1)
         .map(|(&a, &b)| weight.mul_add(b - a, a))
         .collect()
 }
 
-fn eval_stitching_depth(
-    doc: &Document,
-    fn_dict: &Dictionary,
+/// Type 3 (Stitching): select the sub-function whose sub-domain holds `t`
+/// (clipped to `Domain`) and map `t` through that sub-domain's `Encode`
+/// pair.  `functions` is non-empty.  `Bounds` must hold one value fewer
+/// than `functions`; otherwise the first sub-function is evaluated at the
+/// clipped `t`.
+fn stitch<'f>(
+    (d0, d1): (f64, f64),
+    functions: &'f [Function],
+    bounds: &[f64],
+    encode: &[f64],
     t: f64,
-    n: usize,
-    depth: u8,
-) -> Option<Vec<f64>> {
-    let (d0, d1) = read_fn_domain(fn_dict);
-    // safe_clamp: f64::clamp panics when min > max; guard before calling.
-    let t_clamped = if d1 > d0 { t.clamp(d0, d1) } else { d0 };
-
-    let fns = fn_dict.get(b"Functions")?.as_array()?;
-    let num_fns = fns.len();
-    if num_fns == 0 {
-        return None;
-    }
-
-    // Bounds: k-1 values for k sub-functions splitting [Domain0, Domain1].
-    let bounds: Vec<f64> = fn_dict
-        .get(b"Bounds")
-        .and_then(Object::as_array)
-        .map(|arr| arr.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default();
-
-    // PDF spec: Bounds must have exactly num_fns−1 values.  A malformed dict
-    // with the wrong count would cause out-of-bounds access in `breaks[idx+1]`.
-    if bounds.len() != num_fns - 1 {
+) -> (&'f Function, f64) {
+    let t = if d1 > d0 { t.clamp(d0, d1) } else { d0 };
+    let k = functions.len();
+    if bounds.len() != k - 1 {
         log::warn!(
-            "shading: Type 3 function has {} sub-functions but {} Bounds values (expected {}); \
-             using first sub-function as fallback",
-            num_fns,
+            "function: Type 3 function has {k} sub-functions but {} Bounds values; \
+             evaluating the first sub-function",
             bounds.len(),
-            num_fns - 1,
         );
-        return eval_function_depth(doc, &fns[0], t_clamped, n, depth + 1);
+        return (&functions[0], t);
     }
-
-    // Build breakpoint list: [d0, bounds..., d1].
-    let mut breaks = Vec::with_capacity(num_fns + 1);
-    breaks.push(d0);
-    breaks.extend_from_slice(&bounds);
-    breaks.push(d1);
-
-    // Find which sub-function `t_clamped` falls into.
-    // Clamp idx to num_fns−1 to guard against rounding/NaN edge cases.
-    let idx = if t_clamped >= d1 {
-        num_fns - 1
+    let lower = |i: usize| if i == 0 { d0 } else { bounds[i - 1] };
+    let upper = |i: usize| if i == k - 1 { d1 } else { bounds[i] };
+    let idx = if t >= d1 {
+        k - 1
     } else {
-        breaks
-            .windows(2)
-            .position(|w| t_clamped < w[1])
-            .unwrap_or(num_fns - 1)
-            .min(num_fns - 1)
+        (0..k).find(|&i| t < upper(i)).unwrap_or(k - 1)
     };
-
-    // Encode: maps [breaks[i], breaks[i+1]] → [Encode[2i], Encode[2i+1]].
-    let encode: Vec<f64> = fn_dict
-        .get(b"Encode")
-        .and_then(Object::as_array)
-        .map(|arr| arr.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default();
-
-    let (in_lo, in_hi) = (breaks[idx], breaks[idx + 1]);
-    let (out_lo, out_hi) = if encode.len() >= (idx + 1) * 2 {
-        (encode[idx * 2], encode[idx * 2 + 1])
-    } else {
-        (0.0, 1.0)
+    let (in_lo, in_hi) = (lower(idx), upper(idx));
+    let (out_lo, out_hi) = match encode.get(2 * idx..2 * idx + 2) {
+        Some(&[lo, hi]) => (lo, hi),
+        _ => (0.0, 1.0),
     };
-
-    let t_encoded = if (in_hi - in_lo).abs() < f64::EPSILON {
+    let x = if (in_hi - in_lo).abs() < f64::EPSILON {
         out_lo
     } else {
-        ((t_clamped - in_lo) / (in_hi - in_lo)).mul_add(out_hi - out_lo, out_lo)
+        ((t - in_lo) / (in_hi - in_lo)).mul_add(out_hi - out_lo, out_lo)
     };
-
-    eval_function_depth(doc, &fns[idx], t_encoded, n, depth + 1)
+    (&functions[idx], x)
 }
 
-/// Evaluate a Type 0 (Sampled) function against its actual sample stream.
-///
-/// Supported scope:
-/// - 1-D input only (`Size = [N]`); higher dimensions return `None` and the
-///   caller falls back to [`eval_sampled_approx`].
-/// - `BitsPerSample` 8 or 16 (MSB-first big-endian).  Other values
-///   (1/2/4/12/24/32) return `None`.
-/// - `Order` defaults to 1 (linear interpolation between adjacent samples);
-///   `Order = 3` (cubic spline) is not implemented and falls back.
-///
-/// PDF §7.10.2 algorithm: normalise `t` against `Domain` → `Encode`, look
-/// up two adjacent samples by integer index, linearly interpolate, then
-/// rescale via `Decode`.
-fn eval_sampled(
-    doc: &Document,
-    fn_obj: &Object,
-    fn_dict: &Dictionary,
-    t: f64,
-    n: usize,
-) -> Option<Vec<f64>> {
-    // Multi-dimensional Type 0 (Size = [N0, N1, ...]) falls back: PDF spec
-    // requires N-linear interpolation over an N-dimensional grid, which is
-    // out of scope here.
-    let size = fn_dict.get(b"Size").and_then(Object::as_array)?;
-    if size.len() != 1 {
-        return None;
-    }
-    let n_samples = size.first().and_then(Object::as_u32)? as usize;
-    if n_samples < 2 {
-        return None;
-    }
-
-    // Order = 1 (linear) is the default and the only supported value.
-    // PDF §7.10.2 specifies Order as an integer (1 or 3), so values from a
-    // spec-conforming PDF are exactly representable in f64 — bit-exact
-    // comparison against 1.0 is appropriate.  Any other value (including
-    // 3, or a malformed Real that isn't 1.0) means fall back.
-    let order = fn_dict.get(b"Order").and_then(obj_to_f64).unwrap_or(1.0);
-    #[expect(
-        clippy::float_cmp,
-        reason = "PDF §7.10.2 Order is an integer (1 or 3); bit-exact == 1.0 is the right test"
-    )]
-    if order != 1.0 {
-        return None;
-    }
-
-    let bps = fn_dict.get(b"BitsPerSample").and_then(Object::as_u32)?;
-    if bps != 8 && bps != 16 {
-        return None;
-    }
-
-    // The function object must carry a stream — Type 0 sample data is the
-    // stream content.  Inline dictionaries can't represent Type 0.
-    let stream_bytes = stream_bytes_for(doc, fn_obj)?;
-    let bytes_per_channel = (bps as usize) / 8;
-    let bytes_per_sample = bytes_per_channel * n;
-    let expected_len = bytes_per_sample.checked_mul(n_samples)?;
-    if stream_bytes.len() < expected_len {
-        log::warn!(
-            "shading: Type 0 sample stream truncated ({} bytes, expected {expected_len})",
-            stream_bytes.len(),
-        );
-        return None;
-    }
-
-    let (d0, d1) = read_fn_domain(fn_dict);
-    let t_norm = if d1 > d0 {
-        ((t - d0) / (d1 - d0)).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
-    // n_samples ≥ 2 by the guard above; cast is finite and well within
-    // f64 mantissa (n_samples capped at u32::MAX by as_u32).
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "n_samples capped at u32; well within f64 mantissa"
-    )]
-    let n_samples_minus_1_f64 = (n_samples - 1) as f64;
-
-    // Encode maps Domain → sample index space; default [0, n_samples − 1].
-    let encode: Vec<f64> = fn_dict
-        .get(b"Encode")
-        .and_then(Object::as_array)
-        .map(|arr| arr.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default();
-    let (e_lo, e_hi) = if encode.len() >= 2 {
-        (encode[0], encode[1])
-    } else {
-        (0.0, n_samples_minus_1_f64)
-    };
-    let idx_f = t_norm
-        .mul_add(e_hi - e_lo, e_lo)
-        .clamp(0.0, n_samples_minus_1_f64);
-    #[expect(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "idx_f clamped to [0, n_samples − 1] above; n_samples is usize"
-    )]
-    let idx_lo = idx_f.floor() as usize;
-    let idx_hi = (idx_lo + 1).min(n_samples - 1);
-    let frac = idx_f - idx_f.floor();
-
-    // Sample max per BPS for normalisation.
-    let s_max = if bps == 8 { 255.0 } else { 65535.0 };
-
-    // Decode maps normalised sample → output channel space.  Default = [0, 1] per channel.
-    let decode: Vec<f64> = fn_dict
-        .get(b"Decode")
-        .and_then(Object::as_array)
-        .map(|arr| arr.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default();
-
-    let read_sample = |sample_idx: usize, ch: usize| -> f64 {
-        // bps is 8 or 16 by the guard above; bytes_per_channel is bps/8.
-        let off = sample_idx * bytes_per_sample + ch * bytes_per_channel;
-        if bps == 8 {
-            f64::from(stream_bytes[off])
-        } else {
-            let hi = u16::from(stream_bytes[off]);
-            let lo = u16::from(stream_bytes[off + 1]);
-            f64::from((hi << 8) | lo)
-        }
-    };
-
-    let channels = (0..n)
-        .map(|ch| {
-            let raw_lo = read_sample(idx_lo, ch) / s_max;
-            let raw_hi = read_sample(idx_hi, ch) / s_max;
-            let raw = frac.mul_add(raw_hi - raw_lo, raw_lo);
-            let (d_lo, d_hi) = if decode.len() >= (ch + 1) * 2 {
-                (decode[ch * 2], decode[ch * 2 + 1])
-            } else {
-                (0.0, 1.0)
-            };
-            raw.mul_add(d_hi - d_lo, d_lo)
-        })
-        .collect();
-    Some(channels)
-}
-
-/// Apply `f` to the dictionary of function object `fn_obj`, borrowed in
-/// place.
-///
-/// A function is a dictionary (Types 2 and 3) or a stream whose dictionary
-/// carries the parameters (Types 0 and 4), given directly or through one
-/// indirect reference.  `None` for any other object.
-fn with_fn_dict<R>(
-    doc: &Document,
-    fn_obj: &Object,
-    f: impl FnOnce(&Dictionary) -> Option<R>,
-) -> Option<R> {
-    let referent;
-    let target = match fn_obj {
-        Object::Reference(id) => {
-            referent = doc.get_object(*id).ok()?;
-            referent.as_ref()
-        }
-        direct => direct,
-    };
-    match target {
-        Object::Dictionary(d) => f(d),
-        Object::Stream(s) => f(&s.dict),
-        _ => None,
-    }
-}
-
-/// Return the decompressed stream bytes for `fn_obj` if it is a Stream or
-/// Reference-to-Stream; `None` for inline dicts or non-stream objects.
-fn stream_bytes_for(doc: &Document, fn_obj: &Object) -> Option<Vec<u8>> {
-    let resolved: std::sync::Arc<Object>;
-    let stream = match fn_obj {
-        Object::Stream(s) => s,
-        Object::Reference(id) => {
-            resolved = doc.get_object(*id).ok()?;
-            resolved.as_ref().as_stream()?
-        }
-        _ => return None,
-    };
-    stream
-        .decompressed_content()
-        .map_err(|e| log::debug!("shading: Type 0 stream decode failed: {e}"))
-        .ok()
-}
-
-/// Approximate a Type 0 Sampled function by linearly interpolating the decode range.
-///
-/// Without decompressed stream bytes, this is the best possible approximation:
-/// it returns the correct endpoints at `t = Domain[0]` and `t = Domain[1]`.
-fn eval_sampled_approx(fn_dict: &Dictionary, t: f64, n: usize) -> Vec<f64> {
-    let (d0, d1) = read_fn_domain(fn_dict);
-    // Guard: d1 > d0 before dividing; avoids divide-by-zero and clamp panic.
-    let t_norm = if d1 > d0 {
-        ((t - d0) / (d1 - d0)).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
-    // Decode range defaults to [0, 1] per channel.
-    let decode: Vec<f64> = fn_dict
-        .get(b"Decode")
-        .and_then(Object::as_array)
-        .map(|arr| arr.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default();
-
-    (0..n)
-        .map(|ch| {
-            let (d_lo, d_hi) = if decode.len() >= (ch + 1) * 2 {
-                (decode[ch * 2], decode[ch * 2 + 1])
-            } else {
-                (0.0, 1.0)
-            };
-            t_norm.mul_add(d_hi - d_lo, d_lo)
-        })
+/// Clip input `i` to `Domain` interval `i` (default `[0, 1]`); an empty
+/// interval leaves the input as given.
+fn clip_to_domains(domain: &[f64], inputs: &[f64]) -> Vec<f64> {
+    inputs
+        .iter()
+        .zip(domain_pairs(domain, inputs.len()))
+        .map(|(&t, (d0, d1))| if d1 > d0 { t.clamp(d0, d1) } else { t })
         .collect()
 }
 
-// ── Type 4 (PostScript calculator) ────────────────────────────────────────────
-
-/// Cap on total operators executed by a single Type-4 invocation.  PDF
-/// §7.10.5 forbids loops, so a well-formed program executes a fixed bounded
-/// number of operators; this guards against pathological hand-crafted input
-/// that nests `if`/`ifelse` to blow the budget.
-const MAX_PS_STEPS: u32 = 100_000;
-
-/// Cap on `{ }` procedure nesting.  Both the parser and the executor recurse
-/// per nested block, so unbounded depth can overflow the native stack on a
-/// hand-crafted `{{{{…}}}}` program (the step budget does not bound parse
-/// recursion, which runs before any step is charged, nor the executor's
-/// native frame depth on conditional branches).  Real tint transforms nest a
-/// handful of levels at most; 64 is far beyond any legitimate program.
-const MAX_PS_DEPTH: usize = 64;
-
-/// Cap on the operand stack.  A single `copy`/`dup`/`index` can request a
-/// huge push while charging only one step against [`MAX_PS_STEPS`], so the
-/// step budget alone does not bound memory; `{ 0 0 2000000000 copy }` would
-/// otherwise allocate billions of slots.  §7.10.5 calculator programs operate
-/// on a tiny working set (tint in, a few colorants out); 100k is generous.
-const MAX_PS_STACK: usize = 100_000;
-
-/// A value on the Type-4 operand stack: a real number or a boolean.  PDF
-/// §7.10.5 booleans arise from relational/boolean operators and are consumed
-/// only by `if`/`ifelse`.
-#[derive(Clone, Copy, Debug)]
-enum PsVal {
-    Num(f64),
-    Bool(bool),
+/// `values` padded with its last element, or truncated, to `n` entries;
+/// `values` is non-empty.
+fn pad(values: &[f64], n: usize) -> Vec<f64> {
+    let mut v = values.to_vec();
+    if let Some(&last) = values.last() {
+        v.resize(n, last);
+    }
+    v
 }
 
-/// A parsed Type-4 token: a literal, an operator, or a `{ ... }` procedure
-/// block (only ever an operand to `if`/`ifelse`).
-#[derive(Clone, Debug)]
-enum PsTok {
-    Num(f64),
-    Op(PsOp),
-    Proc(Vec<Self>),
+/// A colour array (`C0` or `C1`); `None` when absent or holding no number.
+fn read_color(dict: &Dictionary, key: &[u8]) -> Option<Vec<f64>> {
+    Some(numbers(dict, key)).filter(|v| !v.is_empty())
 }
 
-#[derive(Clone, Copy, Debug)]
-enum PsOp {
-    Abs,
-    Add,
-    Atan,
-    Ceiling,
-    Cos,
-    Cvi,
-    Cvr,
-    Div,
-    Exp,
-    Floor,
-    Idiv,
-    Ln,
-    Log,
-    Mod,
-    Mul,
-    Neg,
-    Round,
-    Sin,
-    Sqrt,
-    Sub,
-    Truncate,
-    Eq,
-    Ne,
-    Gt,
-    Ge,
-    Lt,
-    Le,
-    And,
-    Or,
-    Xor,
-    Not,
-    Bitshift,
-    True,
-    False,
-    Copy,
-    Dup,
-    Exch,
-    Index,
-    Pop,
-    Roll,
-    If,
-    Ifelse,
+/// The numbers of the array under `key`, non-numeric elements skipped;
+/// empty when the key is absent or not a direct array.
+fn numbers(dict: &Dictionary, key: &[u8]) -> Vec<f64> {
+    dict.get(key)
+        .and_then(Object::as_array)
+        .map(|a| a.iter().filter_map(obj_to_f64).collect())
+        .unwrap_or_default()
 }
 
-fn parse_ps_op(word: &str) -> Option<PsOp> {
-    Some(match word {
-        "abs" => PsOp::Abs,
-        "add" => PsOp::Add,
-        "atan" => PsOp::Atan,
-        "ceiling" => PsOp::Ceiling,
-        "cos" => PsOp::Cos,
-        "cvi" => PsOp::Cvi,
-        "cvr" => PsOp::Cvr,
-        "div" => PsOp::Div,
-        "exp" => PsOp::Exp,
-        "floor" => PsOp::Floor,
-        "idiv" => PsOp::Idiv,
-        "ln" => PsOp::Ln,
-        "log" => PsOp::Log,
-        "mod" => PsOp::Mod,
-        "mul" => PsOp::Mul,
-        "neg" => PsOp::Neg,
-        "round" => PsOp::Round,
-        "sin" => PsOp::Sin,
-        "sqrt" => PsOp::Sqrt,
-        "sub" => PsOp::Sub,
-        "truncate" => PsOp::Truncate,
-        "eq" => PsOp::Eq,
-        "ne" => PsOp::Ne,
-        "gt" => PsOp::Gt,
-        "ge" => PsOp::Ge,
-        "lt" => PsOp::Lt,
-        "le" => PsOp::Le,
-        "and" => PsOp::And,
-        "or" => PsOp::Or,
-        "xor" => PsOp::Xor,
-        "not" => PsOp::Not,
-        "bitshift" => PsOp::Bitshift,
-        "true" => PsOp::True,
-        "false" => PsOp::False,
-        "copy" => PsOp::Copy,
-        "dup" => PsOp::Dup,
-        "exch" => PsOp::Exch,
-        "index" => PsOp::Index,
-        "pop" => PsOp::Pop,
-        "roll" => PsOp::Roll,
-        "if" => PsOp::If,
-        "ifelse" => PsOp::Ifelse,
-        _ => return None,
+/// The first `m` intervals of the flat `Domain` numbers `domain`; an
+/// interval the array does not supply defaults to `[0, 1]`.
+fn domain_pairs(domain: &[f64], m: usize) -> impl Iterator<Item = (f64, f64)> + '_ {
+    (0..m).map(|i| match domain.get(2 * i..2 * i + 2) {
+        Some(&[d0, d1]) => (d0, d1),
+        _ => (0.0, 1.0),
     })
 }
 
-/// Split the decoded program text into whitespace/brace-delimited lexemes.
-/// `{` and `}` are returned as standalone tokens; everything else is a word.
-///
-/// PDF §7.10.5 calculator functions are PostScript, which treats `%` as a
-/// line comment to end-of-line.  Comments are stripped here so an otherwise
-/// well-formed commented program is not rejected wholesale (a rejected tint
-/// transform silently falls back to the gray heuristic, blanking
-/// spot-colour pages).
-fn ps_lex(src: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_comment = false;
-    for ch in src.chars() {
-        if in_comment {
-            // A PostScript comment runs to the next end-of-line.
-            if ch == '\n' || ch == '\r' {
-                in_comment = false;
-            }
-            continue;
-        }
-        match ch {
-            '%' => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                in_comment = true;
-            }
-            '{' | '}' => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                out.push(ch.to_string());
-            }
-            c if c.is_whitespace() => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            c => cur.push(c),
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-/// Parse a lexeme slice starting just after a `{` into a token list, stopping
-/// at the matching `}`.  Returns the tokens and the index just past the `}`.
-///
-/// `depth` is the current `{ }` nesting level; recursion is refused past
-/// [`MAX_PS_DEPTH`] so a `{{{{…}}}}` bomb cannot overflow the native stack
-/// during parsing (it returns `None`, which the caller logs and falls back
-/// on, rather than aborting the process).
-fn parse_ps_block(lexemes: &[String], mut i: usize, depth: usize) -> Option<(Vec<PsTok>, usize)> {
-    if depth > MAX_PS_DEPTH {
-        return None;
-    }
-    let mut toks = Vec::new();
-    while i < lexemes.len() {
-        let lx = lexemes[i].as_str();
-        match lx {
-            "}" => return Some((toks, i + 1)),
-            "{" => {
-                let (inner, next) = parse_ps_block(lexemes, i + 1, depth + 1)?;
-                toks.push(PsTok::Proc(inner));
-                i = next;
-            }
-            _ => {
-                if let Ok(num) = lx.parse::<f64>() {
-                    toks.push(PsTok::Num(num));
-                } else {
-                    toks.push(PsTok::Op(parse_ps_op(lx)?));
-                }
-                i += 1;
-            }
-        }
-    }
-    // Reached end of input without a closing brace.
-    None
-}
-
-/// Parse the full Type-4 program (a single top-level `{ ... }` block).
-fn parse_ps_program(src: &str) -> Option<Vec<PsTok>> {
-    let lexemes = ps_lex(src);
-    let first = lexemes.first()?;
-    if first != "{" {
-        return None;
-    }
-    let (toks, end) = parse_ps_block(&lexemes, 1, 0)?;
-    // The top-level block must be the entire program; trailing lexemes after
-    // the matching `}` mean the input is malformed.
-    if end != lexemes.len() {
-        return None;
-    }
-    Some(toks)
-}
-
-fn ps_pop(stack: &mut Vec<PsVal>) -> Option<PsVal> {
-    stack.pop()
-}
-
-fn ps_pop_num(stack: &mut Vec<PsVal>) -> Option<f64> {
-    match stack.pop()? {
-        PsVal::Num(n) => Some(n),
-        PsVal::Bool(_) => None,
-    }
-}
-
-fn ps_pop_bool(stack: &mut Vec<PsVal>) -> Option<bool> {
-    match stack.pop()? {
-        PsVal::Bool(b) => Some(b),
-        PsVal::Num(_) => None,
-    }
-}
-
-/// Execute a single operator.  `If`/`Ifelse` never reach here — [`exec_ps`]
-/// resolves them by consuming the preceding `Proc` token(s) as branches.
-fn run_ps_op(op: PsOp, stack: &mut Vec<PsVal>) -> Option<()> {
-    match op {
-        PsOp::Abs => unary(stack, f64::abs),
-        PsOp::Neg => unary(stack, |a| -a),
-        PsOp::Ceiling => unary(stack, f64::ceil),
-        PsOp::Floor => unary(stack, f64::floor),
-        PsOp::Round => unary(stack, f64::round),
-        // `truncate` and `cvi` are both truncate-toward-zero; `cvr` is a
-        // no-op since the stack is already real-valued.
-        PsOp::Truncate | PsOp::Cvi => unary(stack, f64::trunc),
-        PsOp::Cvr => unary(stack, |a| a),
-        PsOp::Sqrt => unary(stack, f64::sqrt),
-        PsOp::Sin => unary(stack, |a| a.to_radians().sin()),
-        PsOp::Cos => unary(stack, |a| a.to_radians().cos()),
-        PsOp::Ln => unary(stack, f64::ln),
-        PsOp::Log => unary(stack, f64::log10),
-        PsOp::Add => binary(stack, |a, b| a + b),
-        PsOp::Sub => binary(stack, |a, b| a - b),
-        PsOp::Mul => binary(stack, |a, b| a * b),
-        PsOp::Div => binary(stack, |a, b| a / b),
-        PsOp::Exp => binary(stack, f64::powf),
-        PsOp::Atan => binary(stack, |num, den| {
-            let deg = num.atan2(den).to_degrees();
-            if deg < 0.0 { deg + 360.0 } else { deg }
-        }),
-        PsOp::Idiv => int_binary(stack, |a, b| (a / b).trunc()),
-        PsOp::Mod => int_binary(stack, |a, b| a % b),
-        PsOp::Eq => rel_eq(stack, true),
-        PsOp::Ne => rel_eq(stack, false),
-        PsOp::Gt => rel_ord(stack, |o| o == std::cmp::Ordering::Greater),
-        PsOp::Ge => rel_ord(stack, |o| o != std::cmp::Ordering::Less),
-        PsOp::Lt => rel_ord(stack, |o| o == std::cmp::Ordering::Less),
-        PsOp::Le => rel_ord(stack, |o| o != std::cmp::Ordering::Greater),
-        PsOp::And => logic(stack, |a, b| a & b, |a, b| a & b),
-        PsOp::Or => logic(stack, |a, b| a | b, |a, b| a | b),
-        PsOp::Xor => logic(stack, |a, b| a ^ b, |a, b| a ^ b),
-        PsOp::Not => ps_not(stack),
-        PsOp::Bitshift => ps_bitshift(stack),
-        PsOp::True => {
-            stack.push(PsVal::Bool(true));
-            Some(())
-        }
-        PsOp::False => {
-            stack.push(PsVal::Bool(false));
-            Some(())
-        }
-        PsOp::Pop => ps_pop(stack).map(|_| ()),
-        PsOp::Dup => {
-            let v = *stack.last()?;
-            stack.push(v);
-            Some(())
-        }
-        PsOp::Exch => {
-            let len = stack.len();
-            if len < 2 {
-                return None;
-            }
-            stack.swap(len - 1, len - 2);
-            Some(())
-        }
-        PsOp::Index => ps_index(stack),
-        PsOp::Copy => ps_copy(stack),
-        PsOp::Roll => ps_roll(stack),
-        // If/Ifelse are resolved in exec_ps; reaching here is malformed.
-        PsOp::If | PsOp::Ifelse => None,
-    }
-}
-
-/// Pop two numbers, truncate both toward zero, apply `f`, push the result.
-/// Used by `idiv` and `mod`, which operate on integer values.
-fn int_binary(stack: &mut Vec<PsVal>, f: impl Fn(f64, f64) -> f64) -> Option<()> {
-    let b = ps_pop_num(stack)?.trunc();
-    let a = ps_pop_num(stack)?.trunc();
-    if b == 0.0 {
-        return None;
-    }
-    let r = f(a, b);
-    // §7.10.5 leaves a non-finite result undefined; refuse it rather than
-    // let an Inf/NaN flow into the tint→colour conversion (silent-wrong).
-    if !r.is_finite() {
-        return None;
-    }
-    stack.push(PsVal::Num(r));
-    Some(())
-}
-
-/// `not`: logical complement for booleans, bitwise complement for integers.
-fn ps_not(stack: &mut Vec<PsVal>) -> Option<()> {
-    match ps_pop(stack)? {
-        PsVal::Bool(b) => stack.push(PsVal::Bool(!b)),
-        PsVal::Num(n) => stack.push(PsVal::Num(f64::from(!ps_to_i32(n)?))),
-    }
-    Some(())
-}
-
-/// `bitshift`: arithmetic shift of an integer by a signed shift count
-/// (positive = left, negative = right).
-fn ps_bitshift(stack: &mut Vec<PsVal>) -> Option<()> {
-    let shift = ps_to_i32(ps_pop_num(stack)?)?;
-    let val = ps_to_i32(ps_pop_num(stack)?)?;
-    let r = if shift >= 0 {
-        val.wrapping_shl(shift.unsigned_abs())
-    } else {
-        val.wrapping_shr(shift.unsigned_abs())
-    };
-    stack.push(PsVal::Num(f64::from(r)));
-    Some(())
-}
-
-/// `n index`: push a copy of the element `n` positions below the top.
-fn ps_index(stack: &mut Vec<PsVal>) -> Option<()> {
-    let n = ps_to_usize(ps_pop_num(stack)?)?;
-    let idx = stack.len().checked_sub(1 + n)?;
-    stack.push(stack[idx]);
-    Some(())
-}
-
-/// `n copy`: duplicate the top `n` elements, preserving order.
-fn ps_copy(stack: &mut Vec<PsVal>) -> Option<()> {
-    let n = ps_to_usize(ps_pop_num(stack)?)?;
-    let start = stack.len().checked_sub(n)?;
-    for i in 0..n {
-        stack.push(stack[start + i]);
-    }
-    Some(())
-}
-
-/// `n j roll`: circularly shift the top `n` elements by `j` (positive `j`
-/// rotates toward the top of the stack).
-fn ps_roll(stack: &mut Vec<PsVal>) -> Option<()> {
-    let j = ps_to_i32(ps_pop_num(stack)?)?;
-    let n = ps_to_usize(ps_pop_num(stack)?)?;
-    if n == 0 {
-        return Some(());
-    }
-    let start = stack.len().checked_sub(n)?;
-    let slice = &mut stack[start..];
-    // rem_euclid keeps the shift in [0, n) for negative j as well.  i64
-    // avoids any 32-bit wrap; n came from a stack number bounded by ps_to_i32
-    // so it fits i64.
-    let n_i64 = i64::try_from(n).ok()?;
-    let shift = usize::try_from(i64::from(j).rem_euclid(n_i64)).ok()?;
-    slice.rotate_right(shift);
-    Some(())
-}
-
-/// Pop one number, apply `f`, push the result.  A non-finite result (e.g.
-/// `sqrt` of a negative, `ln`/`log` of a non-positive) is undefined per
-/// §7.10.5; refuse it loud-graceful so no Inf/NaN reaches colour conversion.
-fn unary(stack: &mut Vec<PsVal>, f: impl Fn(f64) -> f64) -> Option<()> {
-    let a = ps_pop_num(stack)?;
-    let r = f(a);
-    if !r.is_finite() {
-        return None;
-    }
-    stack.push(PsVal::Num(r));
-    Some(())
-}
-
-/// Pop two numbers, apply `f`, push the result.  A non-finite result (e.g.
-/// `1 0 div` → Inf, `exp` overflow) is undefined per §7.10.5; refuse it
-/// loud-graceful so no Inf/NaN reaches colour conversion.
-fn binary(stack: &mut Vec<PsVal>, f: impl Fn(f64, f64) -> f64) -> Option<()> {
-    let b = ps_pop_num(stack)?;
-    let a = ps_pop_num(stack)?;
-    let r = f(a, b);
-    if !r.is_finite() {
-        return None;
-    }
-    stack.push(PsVal::Num(r));
-    Some(())
-}
-
-fn rel_eq(stack: &mut Vec<PsVal>, want_eq: bool) -> Option<()> {
-    let b = ps_pop(stack)?;
-    let a = ps_pop(stack)?;
-    let eq = match (a, b) {
-        (PsVal::Num(x), PsVal::Num(y)) => x == y,
-        (PsVal::Bool(x), PsVal::Bool(y)) => x == y,
-        _ => return None,
-    };
-    stack.push(PsVal::Bool(eq == want_eq));
-    Some(())
-}
-
-fn rel_ord(stack: &mut Vec<PsVal>, pred: impl Fn(std::cmp::Ordering) -> bool) -> Option<()> {
-    let b = ps_pop_num(stack)?;
-    let a = ps_pop_num(stack)?;
-    let ord = a.partial_cmp(&b)?;
-    stack.push(PsVal::Bool(pred(ord)));
-    Some(())
-}
-
-fn logic(
-    stack: &mut Vec<PsVal>,
-    bf: impl Fn(bool, bool) -> bool,
-    nf: impl Fn(i32, i32) -> i32,
-) -> Option<()> {
-    let b = ps_pop(stack)?;
-    let a = ps_pop(stack)?;
-    match (a, b) {
-        (PsVal::Bool(x), PsVal::Bool(y)) => stack.push(PsVal::Bool(bf(x, y))),
-        (PsVal::Num(x), PsVal::Num(y)) => {
-            stack.push(PsVal::Num(f64::from(nf(ps_to_i32(x)?, ps_to_i32(y)?))));
-        }
-        _ => return None,
-    }
-    Some(())
-}
-
-/// Convert a stack number to an i32 for bitwise ops; reject non-integral or
-/// out-of-range values (PostScript integers are 32-bit).
-fn ps_to_i32(n: f64) -> Option<i32> {
-    if !n.is_finite() || n.fract() != 0.0 || n < f64::from(i32::MIN) || n > f64::from(i32::MAX) {
-        return None;
-    }
-    // Bounds + integrality checked above.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "value verified finite, integral, and within i32 range above"
-    )]
-    Some(n as i32)
-}
-
-/// Convert a stack number to a non-negative count for `index`/`copy`/`roll`.
-/// Rejects negative, non-integral, or out-of-i32-range values.
-fn ps_to_usize(n: f64) -> Option<usize> {
-    let i = ps_to_i32(n)?;
-    if i < 0 {
-        return None;
-    }
-    usize::try_from(i).ok()
-}
-
-/// Walk a token list, executing it while resolving `if`/`ifelse`.  The parser
-/// places procedure blocks as `Proc` tokens immediately before the `if` /
-/// `ifelse` operator; this pass consumes them as the conditional branches.
-///
-/// `depth` mirrors the `{ }` nesting and bounds this function's own native
-/// recursion: a deeply nested conditional chain (each `if` consuming only one
-/// step) could otherwise recurse far enough to overflow the native stack
-/// before [`MAX_PS_STEPS`] is reached.  The operand stack is also capped at
-/// [`MAX_PS_STACK`] because a single `copy`/`dup`/`index` can push many
-/// values while charging only one step.
-fn exec_ps(toks: &[PsTok], stack: &mut Vec<PsVal>, steps: &mut u32, depth: usize) -> Option<()> {
-    if depth > MAX_PS_DEPTH {
-        return None;
-    }
-    let mut i = 0;
-    while i < toks.len() {
-        if *steps == 0 {
-            return None;
-        }
-        match &toks[i] {
-            PsTok::Num(n) => {
-                *steps -= 1;
-                stack.push(PsVal::Num(*n));
-                i += 1;
-            }
-            PsTok::Op(PsOp::If) => {
-                // Preceding token must be the procedure block.
-                let proc = match toks.get(i.wrapping_sub(1)) {
-                    Some(PsTok::Proc(p)) if i > 0 => p,
-                    _ => return None,
-                };
-                *steps -= 1;
-                let cond = ps_pop_bool(stack)?;
-                if cond {
-                    exec_ps(proc, stack, steps, depth + 1)?;
-                }
-                i += 1;
-            }
-            PsTok::Op(PsOp::Ifelse) => {
-                // Preceding two tokens must be the two procedure blocks.
-                let (p1, p2) = match (toks.get(i.wrapping_sub(2)), toks.get(i.wrapping_sub(1))) {
-                    (Some(PsTok::Proc(a)), Some(PsTok::Proc(b))) if i >= 2 => (a, b),
-                    _ => return None,
-                };
-                *steps -= 1;
-                let cond = ps_pop_bool(stack)?;
-                if cond {
-                    exec_ps(p1, stack, steps, depth + 1)?;
-                } else {
-                    exec_ps(p2, stack, steps, depth + 1)?;
-                }
-                i += 1;
-            }
-            PsTok::Proc(_) => {
-                // A procedure block is only valid as an operand to a
-                // following if/ifelse; skip it here (it is consumed by the
-                // If/Ifelse arms by looking back).  But verify it IS followed
-                // by if/ifelse, otherwise the program is malformed.
-                let followed_by_cond =
-                    matches!(toks.get(i + 1), Some(PsTok::Op(PsOp::If | PsOp::Ifelse)))
-                        || matches!(
-                            (toks.get(i + 1), toks.get(i + 2)),
-                            (Some(PsTok::Proc(_)), Some(PsTok::Op(PsOp::Ifelse)))
-                        );
-                if !followed_by_cond {
-                    return None;
-                }
-                i += 1;
-            }
-            PsTok::Op(op) => {
-                *steps -= 1;
-                run_ps_op(*op, stack)?;
-                i += 1;
-            }
-        }
-        // Bound operand-stack growth.  `copy`/`dup`/`index` and bare literals
-        // can grow the stack while charging at most one step, so the step
-        // budget alone is not a memory bound; refuse loud-graceful past
-        // MAX_PS_STACK rather than let a `copy` bomb exhaust memory.
-        if stack.len() > MAX_PS_STACK {
-            return None;
-        }
-    }
-    Some(())
-}
-
-/// Evaluate a Type 4 (PostScript calculator) function.
-///
-/// `inputs` are the input values (one Separation tint or shading parameter,
-/// or one tint per `DeviceN` colorant).  PDF §7.10.5: clip each input to its
-/// `Domain` interval, push the inputs in order, run the bounded operator
-/// program, then return the top `n` stack values (deepest → channel 0).  The
-/// caller applies `Range` clipping.
-fn eval_postscript(
-    doc: &Document,
-    fn_obj: &Object,
-    fn_dict: &Dictionary,
-    inputs: &[f64],
-    n: usize,
-) -> Option<Vec<f64>> {
-    let src_bytes = stream_bytes_for(doc, fn_obj)?;
-    let src = std::str::from_utf8(&src_bytes).ok()?;
-    let program = parse_ps_program(src)?;
-
-    // Clip each input to its Domain interval (consistent with the other
-    // function types, which all normalise/clamp against Domain).
-    let domains = read_fn_domains(fn_dict, inputs.len());
-    let mut stack: Vec<PsVal> = inputs
-        .iter()
-        .zip(&domains)
-        .map(|(&t, &(d0, d1))| PsVal::Num(if d1 > d0 { t.clamp(d0, d1) } else { t }))
-        .collect();
-    let mut steps = MAX_PS_STEPS;
-    exec_ps(&program, &mut stack, &mut steps, 0)?;
-
-    if stack.len() < n {
-        return None;
-    }
-    let out: Vec<f64> = stack[stack.len() - n..]
-        .iter()
-        .map(|v| match v {
-            PsVal::Num(x) => Some(*x),
-            PsVal::Bool(_) => None,
-        })
-        .collect::<Option<Vec<f64>>>()?;
-    // Reject any non-finite output (NaN or ±Inf — e.g. a literal `1e400`
-    // parses to Inf).  A non-finite colour component is silent-wrong garbage
-    // once it reaches the rasterizer, so fail loud-graceful here instead.
-    if out.iter().any(|x| !x.is_finite()) {
-        return None;
-    }
-    Some(out)
-}
-
-/// Read the `Domain` key (1D) from a function dict; defaults to `[0, 1]`.
+/// Read the `Domain` key (1D) from a function or shading dict; defaults to
+/// `[0, 1]`.
 pub(super) fn read_fn_domain(dict: &Dictionary) -> (f64, f64) {
-    let arr = dict
-        .get(b"Domain")
-        .and_then(Object::as_array)
-        .map(|a| a.iter().filter_map(obj_to_f64).collect::<Vec<_>>());
-    match arr.as_deref() {
-        Some([d0, d1, ..]) => (*d0, *d1),
-        _ => (0.0, 1.0),
-    }
-}
-
-/// Read the first `m` `Domain` intervals of a function dict.  An interval
-/// the array does not supply defaults to `[0, 1]`; interval 0 equals
-/// [`read_fn_domain`].
-pub(super) fn read_fn_domains(dict: &Dictionary, m: usize) -> Vec<(f64, f64)> {
-    let arr: Vec<f64> = dict
-        .get(b"Domain")
-        .and_then(Object::as_array)
-        .map(|a| a.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default();
-    (0..m)
-        .map(|i| match arr.get(2 * i..2 * i + 2) {
-            Some(&[d0, d1]) => (d0, d1),
-            _ => (0.0, 1.0),
-        })
-        .collect()
-}
-
-/// Read a colour array (`C0` or `C1`) from a function dict, padding to `n` channels.
-pub(super) fn read_fn_color(dict: &Dictionary, key: &[u8], n: usize) -> Option<Vec<f64>> {
-    let arr = dict.get(key)?.as_array()?;
-    let mut vals: Vec<f64> = arr.iter().filter_map(obj_to_f64).collect();
-    if vals.is_empty() {
-        return None;
-    }
-    // vals is non-empty: the `if vals.is_empty()` guard above returned early.
-    vals.resize(n, *vals.last().expect("vals non-empty: checked above"));
-    Some(vals)
+    domain_pairs(&numbers(dict, b"Domain"), 1)
+        .next()
+        .unwrap_or((0.0, 1.0))
 }
 
 /// Read a fixed-length array of `f64` values from a dictionary key.
@@ -1211,7 +434,12 @@ pub(super) fn read_f64_array(dict: &Dictionary, key: &[u8], expected: usize) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::postscript::{MAX_PS_DEPTH, MAX_PS_STACK};
     use super::*;
+
+    fn eval_function(doc: &Document, fn_obj: &Object, t: f64, n: usize) -> Option<Vec<f64>> {
+        Function::load(doc, fn_obj).eval(t, n)
+    }
 
     fn make_exp_dict(c0: f32, c1: f32, exponent: f32) -> pdf::Dictionary {
         let mut dict = pdf::Dictionary::new();
@@ -1229,7 +457,8 @@ mod tests {
     #[test]
     fn exponential_linear_midpoint() {
         let dict = make_exp_dict(0.0, 1.0, 1.0);
-        let result = eval_exponential(&dict, 0.5, 1);
+        let result = eval_function(&empty_doc(), &pdf::Object::Dictionary(dict), 0.5, 1)
+            .expect("Type 2 evaluates");
         assert!(
             (result[0] - 0.5).abs() < 1e-5,
             "expected 0.5, got {}",
@@ -1240,14 +469,16 @@ mod tests {
     #[test]
     fn exponential_at_t0_gives_c0() {
         let dict = make_exp_dict(0.2, 1.0, 1.0);
-        let result = eval_exponential(&dict, 0.0, 1);
+        let result = eval_function(&empty_doc(), &pdf::Object::Dictionary(dict), 0.0, 1)
+            .expect("Type 2 evaluates");
         assert!((result[0] - 0.2).abs() < 1e-5);
     }
 
     #[test]
     fn exponential_at_t1_gives_c1() {
         let dict = make_exp_dict(0.0, 0.8, 1.0);
-        let result = eval_exponential(&dict, 1.0, 1);
+        let result = eval_function(&empty_doc(), &pdf::Object::Dictionary(dict), 1.0, 1)
+            .expect("Type 2 evaluates");
         assert!((result[0] - 0.8).abs() < 1e-5);
     }
 
@@ -1323,6 +554,35 @@ mod tests {
             "expected fallback to evaluate sub_a at t=0.5 → 0.5, got {}",
             result[0]
         );
+    }
+
+    #[test]
+    fn indirect_function_is_compiled_once_per_document() {
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length 9 >>\nstream\n{ 2 mul }\nendstream",
+        )]);
+        let a = Function::load(&doc, &Object::Reference((4, 0)));
+        let b = Function::load(&doc, &Object::Reference((4, 0)));
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "second load must reuse the compiled function"
+        );
+        let out = a.eval(0.25, 1).expect("{ 2 mul } evaluates");
+        assert!((out[0] - 0.5).abs() < 1e-12, "got {out:?}");
+    }
+
+    #[test]
+    fn self_referencing_stitching_is_depth_bounded() {
+        // 4 0 R stitches to itself: compilation recurses until the nesting
+        // limit and evaluates the innermost level as its C0.
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            "<< /FunctionType 3 /Domain [0 1] /Functions [4 0 R] /Bounds [] /Encode [0 1] /C0 [0.25] >>",
+        )]);
+        let f = Function::load(&doc, &Object::Reference((4, 0)));
+        let out = f.eval(0.5, 1).expect("innermost level evaluates as C0");
+        assert!((out[0] - 0.25).abs() < 1e-12, "got {out:?}");
     }
 
     // ── Type 0 (Sampled) ──────────────────────────────────────────────────────
