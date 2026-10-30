@@ -5,7 +5,7 @@ use super::super::gstate::ctm_multiply;
 use super::pattern_memo::{CellRaster, RasterKey};
 use super::pixel_rect::PixelRect;
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
-use crate::resources::{ColorSpace, PageResources, ShadingPattern};
+use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
 use color::Rgb8;
@@ -481,9 +481,10 @@ impl PageRenderer<'_> {
         child.share_memos(self);
         child.set_optional_content(std::sync::Arc::clone(self.optional_content()));
 
-        // If the pattern has no own resources, point it at the parent context.
+        // A pattern without resources of its own inherits the resources in
+        // effect, whichever dictionary they came from.
         if !desc.has_own_resources {
-            child.resources = PageResources::new(doc, self.resources.resource_context_id());
+            child.resources = self.resources.inherited();
         }
 
         for placement in placements {
@@ -590,6 +591,45 @@ mod tests {
         // Overlapping content past the period saturates the coverage.
         let (_, full) = mean_over_period(&bmp, 1.0);
         assert_eq!(full, 255);
+    }
+
+    /// A pattern without resources of its own resolves names in the
+    /// resources in effect, even when those are a dictionary given directly
+    /// (an interactive form's `/DR`) rather than a page's `/Resources`.
+    #[test]
+    fn a_pattern_without_resources_inherits_a_direct_resource_dictionary() {
+        let cell = b"q 8 0 0 8 0 0 cm /Im Do Q";
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (4, b"<< /Type /Page >>".to_vec()),
+            (
+                5,
+                format!(
+                    "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 8 8] \
+                     /XStep 8 /YStep 8 /Length {} >>\nstream\n{}\nendstream",
+                    cell.len(),
+                    String::from_utf8_lossy(cell)
+                )
+                .into_bytes(),
+            ),
+            (
+                6,
+                b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+                  /BitsPerComponent 8 /Length 1 >>\nstream\n\x00\nendstream"
+                    .to_vec(),
+            ),
+        ]);
+        let resources = pdf::parse_object(
+            b"<< /Pattern << /P 5 0 R >> /XObject << /Im 6 0 R >> >>",
+            &mut 0,
+        )
+        .unwrap();
+        let mut renderer = PageRenderer::new(8, 8, &doc, (4, 0));
+        renderer.resources = renderer
+            .resources
+            .with_resources((0, 0), resources.as_dict().unwrap());
+        renderer.execute(&crate::content::parse(b"/Pattern cs /P scn 0 0 8 8 re f"));
+        let px: Vec<u8> = (0..8).map(|y| renderer.bitmap.row_bytes(y)[12]).collect();
+        assert!(px.iter().all(|&v| v == 0), "cell image painted: {px:?}");
     }
 
     #[test]

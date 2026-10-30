@@ -24,7 +24,6 @@ use raster::{Bitmap, CellPhase};
 use super::super::color::RasterColor;
 use super::PageRenderer;
 use crate::content::Operator;
-use crate::resources::PageResources;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 use crate::resources::tiling::TilingDescriptor;
 use crate::resources::{ResourceKey, ShadingPattern};
@@ -295,7 +294,7 @@ impl PageRenderer<'_> {
                 let cell_resources = if desc.has_own_resources {
                     self.resources.for_context(desc.stream_id)
                 } else {
-                    PageResources::new(self.resources.doc(), self.resources.resource_context_id())
+                    self.resources.inherited()
                 };
                 let components = |name: &[u8]| cell_resources.inline_image_components(name);
                 let ops = crate::content::parse_with(&desc.content, Some(&components));

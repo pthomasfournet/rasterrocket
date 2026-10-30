@@ -377,18 +377,27 @@ impl<'doc> PageResources<'doc> {
     #[must_use]
     pub fn for_form(&self, form: &FormXObject) -> Self {
         if !form.has_own_resources {
-            return Self {
-                doc: self.doc,
-                resource_context_id: self.resource_context_id,
-                subdicts: self.subdicts.clone(),
-                default_spaces: self.default_spaces.clone(),
-            };
+            return self.inherited();
         }
         Self {
             doc: self.doc,
             resource_context_id: form.resources_id,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
+        }
+    }
+
+    /// The resources in effect as a nested content stream without
+    /// resources of its own (a form or a tiling pattern) inherits them: the
+    /// same dictionaries, whichever object or dictionary they came from,
+    /// with what is already resolved.
+    #[must_use]
+    pub fn inherited(&self) -> Self {
+        Self {
+            doc: self.doc,
+            resource_context_id: self.resource_context_id,
+            subdicts: self.subdicts.clone(),
+            default_spaces: self.default_spaces.clone(),
         }
     }
 
