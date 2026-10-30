@@ -1,13 +1,17 @@
 //! Support for accessing glyph names.
 
+use alloc::vec::Vec;
 use core::ops::Range;
 use raw::{
     ps::{
         cff::charset::{Charset, Iter as CharsetIter},
         string::Sid,
     },
-    tables::{cff::Cff, post::Post},
-    types::GlyphId,
+    tables::{
+        cff::Cff,
+        post::{Post, DEFAULT_GLYPH_NAMES},
+    },
+    types::{GlyphId, Version16Dot16},
     FontRef, TableProvider,
 };
 
@@ -104,7 +108,7 @@ impl<'a> GlyphNames<'a> {
     /// the font.
     pub fn iter(&self) -> impl Iterator<Item = (GlyphId, GlyphName)> + 'a + Clone {
         match &self.inner {
-            Inner::Post(post, n) => Iter::Post(0..*n, post.clone()),
+            Inner::Post(post, n) => Iter::Post(0..*n, PostNames::new(post)),
             Inner::Cff(cff, charset) => Iter::Cff(cff.clone(), charset.iter()),
             Inner::Synthesized(n) => Iter::Synthesized(0..*n),
         }
@@ -242,9 +246,46 @@ impl core::fmt::Write for GlyphNameWrite<'_> {
     }
 }
 
+/// The names of a `post` table, with the version 2.0 string data split
+/// once into a vector.  A string is located by walking every string before
+/// it, so naming each glyph through [`Post::glyph_name`] costs time
+/// quadratic in the number of glyphs.
+#[derive(Clone)]
+struct PostNames<'a> {
+    post: Post<'a>,
+    strings: Option<Vec<Option<&'a str>>>,
+}
+
+impl<'a> PostNames<'a> {
+    fn new(post: &Post<'a>) -> Self {
+        let strings = (post.version() == Version16Dot16::VERSION_2_0).then(|| {
+            post.string_data()
+                .map(|data| data.iter().map(|s| s.ok().map(|s| s.as_str())).collect())
+                .unwrap_or_default()
+        });
+        Self {
+            post: post.clone(),
+            strings,
+        }
+    }
+
+    fn get(&self, glyph_id: GlyphId) -> Option<GlyphName> {
+        let Some(strings) = &self.strings else {
+            return GlyphName::from_post(&self.post, glyph_id);
+        };
+        let gid = usize::try_from(glyph_id.to_u32()).ok()?;
+        let idx = self.post.glyph_name_index()?.get(gid)?.get() as usize;
+        let name = match idx.checked_sub(DEFAULT_GLYPH_NAMES.len()) {
+            None => DEFAULT_GLYPH_NAMES[idx],
+            Some(idx) => (*strings.get(idx)?)?,
+        };
+        Some(GlyphName::from_bytes(name.as_bytes()))
+    }
+}
+
 #[derive(Clone)]
 enum Iter<'a> {
-    Post(Range<u32>, Post<'a>),
+    Post(Range<u32>, PostNames<'a>),
     Cff(Cff<'a>, CharsetIter<'a>),
     Synthesized(Range<u32>),
 }
@@ -252,13 +293,9 @@ enum Iter<'a> {
 impl Iter<'_> {
     fn next_name(&mut self) -> Option<Result<(GlyphId, GlyphName), GlyphId>> {
         match self {
-            Self::Post(range, post) => {
+            Self::Post(range, names) => {
                 let gid = GlyphId::new(range.next()?);
-                Some(
-                    GlyphName::from_post(post, gid)
-                        .map(|name| (gid, name))
-                        .ok_or(gid),
-                )
+                Some(names.get(gid).map(|name| (gid, name)).ok_or(gid))
             }
             Self::Cff(cff, iter) => {
                 let (gid, sid) = iter.next()?;
@@ -322,6 +359,19 @@ mod tests {
         };
         assert_eq!(names.get(gid).unwrap(), "gid9");
         assert_eq!(names.iter().last().unwrap().1, "gid9");
+    }
+
+    #[test]
+    fn post_iter_matches_table_lookup() {
+        let post = Post::read(FontData::new(font_test_data::post::SIMPLE)).unwrap();
+        let names = GlyphNames {
+            inner: Inner::Post(post.clone(), 10),
+        };
+        for (gid, name) in names.iter() {
+            let expected = post.glyph_name(gid.try_into().unwrap()).unwrap();
+            assert_eq!(name, expected);
+        }
+        assert_eq!(names.iter().last().unwrap().1, "hola");
     }
 
     #[test]

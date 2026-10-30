@@ -43,3 +43,13 @@ It is not published and changes are not sent upstream.
   so ordinary fonts pay no table scan. The name and checksum lists are
   unchanged and identical to FreeType 2.13.2's. Tests:
   `outline::hint_reliant::tests::*`.
+
+## Glyph name iteration
+
+- `GlyphNames::iter` over a version 2.0 `post` table splits the string
+  data once and indexes it. Before, each name was found by
+  `Post::glyph_name`, which walks every Pascal string ahead of it, so
+  listing all names took time quadratic in the glyph count (about 70% of
+  render time on documents whose embedded TrueType subsets carry thousands
+  of `post` names). `GlyphNames::get` is unchanged. Test:
+  `glyph_name::tests::post_iter_matches_table_lookup`.
