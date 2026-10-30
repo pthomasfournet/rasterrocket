@@ -1527,7 +1527,7 @@ impl<'doc> PageRenderer<'doc> {
     fn fill_path(&mut self, path: &raster::path::Path, even_odd: bool) {
         // Stroke adjustment is always on: a lone axis-aligned quadrilateral
         // fills whole device pixels.
-        if self.gstate.current().fill_color_space.paints_nothing() {
+        if self.gstate.current().fill_paints_nothing() {
             return;
         }
         let hinted = path.with_fill_adjust_hints();
@@ -1733,7 +1733,7 @@ impl<'doc> PageRenderer<'doc> {
     ) {
         // Clone all graphics state data before any mutable borrow.
         let gs = self.gstate.current();
-        if gs.stroke_color_space.paints_nothing() {
+        if gs.stroke_paints_nothing() {
             return;
         }
         let clip = gs.clip.clone_shared();
@@ -2204,9 +2204,7 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
         // A stencil mask paints the fill colour, which may paint nothing.
-        if img.color_space == ImageColorSpace::Mask
-            && self.gstate.current().fill_color_space.paints_nothing()
-        {
+        if img.color_space == ImageColorSpace::Mask && self.gstate.current().fill_paints_nothing() {
             return;
         }
         // PDF §8.9.6: stencil masks (/ImageMask true → ImageColorSpace::Mask)
@@ -3716,7 +3714,8 @@ mod tests {
     /// Page `(4, 0)` naming `/N` = `[/Separation /None …]`, `/A` =
     /// `[/Separation /All …]`, `/NN` = `[/DeviceN [/None /None] …]` and
     /// `/NC` = `[/DeviceN [/None /Cyan] …]`, all over `DeviceGray`, where
-    /// a tint of 1 in the first colorant is black.
+    /// a tint of 1 in the first colorant is black, and `/I`, an `Indexed`
+    /// space whose index 0 is black and 1 white.
     fn none_colorant_doc() -> Document {
         const PS: &str = "{ pop 1 exch sub }";
         crate::test_helpers::make_doc_with_objects(&[
@@ -3726,7 +3725,8 @@ mod tests {
                  /N [/Separation /None /DeviceGray 5 0 R] \
                  /A [/Separation /All /DeviceGray 5 0 R] \
                  /NN [/DeviceN [/None /None] /DeviceGray 6 0 R] \
-                 /NC [/DeviceN [/None /Cyan] /DeviceGray 6 0 R] >> >> >>"
+                 /NC [/DeviceN [/None /Cyan] /DeviceGray 6 0 R] \
+                 /I [/Indexed /DeviceGray 1 <00ff>] >> >> >>"
                     .to_owned(),
             ),
             (
@@ -3777,6 +3777,43 @@ mod tests {
         assert!(none.iter().all(|&v| v == 255), "got {none:?}");
         let cyan = render_none(b"/NC cs 1 0 scn 0 0 8 8 re f");
         assert!(cyan.iter().all(|&v| v == 0), "got {cyan:?}");
+    }
+
+    /// `cs` and `CS` set the current colour to the new space's initial
+    /// colour (PDF §8.6.8): black for a device space, a tint of 1 for a
+    /// `Separation`, index 0 for an `Indexed` space, and no pattern — which
+    /// paints nothing — for a `Pattern` space.
+    #[test]
+    fn selecting_a_colour_space_sets_its_initial_colour() {
+        for content in [
+            b"1 g /DeviceRGB cs 0 0 8 8 re f".as_slice(),
+            b"1 g /A cs 0 0 8 8 re f",
+            b"1 g /I cs 0 0 8 8 re f",
+            b"1 G /DeviceRGB CS 8 w 0 4 m 8 4 l S",
+            b"1 G /A CS 8 w 0 4 m 8 4 l S",
+        ] {
+            let px = render_none(content);
+            assert!(
+                px.iter().all(|&v| v == 0),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+        // 0 0 0 1 in the process-ink model of DeviceCMYK.
+        let k = render_none(b"0 0 0 1 k 0 0 8 8 re f");
+        assert_eq!(render_none(b"1 g /DeviceCMYK cs 0 0 8 8 re f"), k);
+        for content in [
+            b"0 g /Pattern cs 0 0 8 8 re f".as_slice(),
+            b"0 G /Pattern CS 8 w 0 4 m 8 4 l S",
+            b"0 g /Pattern cs 0.5 sc 0 0 8 8 re f",
+        ] {
+            let px = render_none(content);
+            assert!(
+                px.iter().all(|&v| v == 255),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
     }
 
     /// `g` and `G` select `DeviceGray` (PDF §8.6.8), leaving the `/None` space.

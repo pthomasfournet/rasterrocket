@@ -102,15 +102,16 @@ impl PageRenderer<'_> {
                 self.set_fill(c);
             }
             Operator::SetFillColorSpace(name) => {
-                // PDF §8.6.8: switching colour space clears any active pattern
-                // and resets the fill colour to its default for the new space
-                // (black-equivalent in device terms — black for RGB/Gray, all
-                // ones for CMYK).  We track the declared space on the gstate
-                // so the uncoloured-pattern dispatch can convert tints
-                // spec-correctly (§8.7.3.3).
+                // PDF §8.6.8: selecting a colour space sets the current
+                // colour to the space's initial colour and clears any
+                // pattern.  The declared space interprets later `sc`/`scn`
+                // operands and an uncoloured pattern's tint (§8.7.3.3).
                 let cs = self.resources.color_space(name);
+                let c = self.color_for_components(&cs, &cs.initial_components());
                 let gs = self.gstate.current_mut();
+                gs.fill_color = c;
                 gs.fill_pattern = None;
+                gs.fill_pattern_components.clear();
                 gs.fill_color_space = cs;
             }
             Operator::SetFillPattern { name, components } => {
@@ -136,8 +137,11 @@ impl PageRenderer<'_> {
             Operator::SetStrokeColorSpace(name) => {
                 // Mirror of SetFillColorSpace; see comment above.
                 let cs = self.resources.color_space(name);
+                let c = self.color_for_components(&cs, &cs.initial_components());
                 let gs = self.gstate.current_mut();
+                gs.stroke_color = c;
                 gs.stroke_pattern = None;
+                gs.stroke_pattern_components.clear();
                 gs.stroke_color_space = cs;
             }
             Operator::SetStrokePattern { name, components } => {

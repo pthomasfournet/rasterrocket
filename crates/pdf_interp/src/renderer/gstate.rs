@@ -248,6 +248,25 @@ impl InterpGState {
         }
     }
 
+    /// Whether a fill paints nothing: the fill space has only `/None`
+    /// colorants, or it is a `Pattern` space in which no pattern has been
+    /// selected (PDF §8.6.8: the initial colour of a `Pattern` space is a
+    /// pattern that paints nothing).
+    #[must_use]
+    pub fn fill_paints_nothing(&self) -> bool {
+        self.fill_color_space.paints_nothing()
+            || (matches!(self.fill_color_space, ColorSpace::Pattern { .. })
+                && self.fill_pattern.is_none())
+    }
+
+    /// The stroking counterpart of [`Self::fill_paints_nothing`].
+    #[must_use]
+    pub fn stroke_paints_nothing(&self) -> bool {
+        self.stroke_color_space.paints_nothing()
+            || (matches!(self.stroke_color_space, ColorSpace::Pattern { .. })
+                && self.stroke_pattern.is_none())
+    }
+
     /// `rgb` mapped through the transfer function in effect.
     #[must_use]
     pub fn transferred(&self, rgb: [u8; 3]) -> [u8; 3] {

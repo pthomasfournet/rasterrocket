@@ -157,6 +157,21 @@ impl ColorSpace {
         }
     }
 
+    /// The components of the initial colour of this space (PDF §8.6.3 and
+    /// §8.6.8), to which `cs`/`CS` set the current colour: black — every
+    /// component 0, or 0 0 0 1 for `DeviceCMYK` — for the device, CIE-based
+    /// and ICC-based spaces, index 0 for `Indexed`, every tint 1 for
+    /// `Separation` and `DeviceN`.  A `Pattern` space has no components:
+    /// its initial colour is a pattern that paints nothing.
+    #[must_use]
+    pub fn initial_components(&self) -> Vec<f64> {
+        match self {
+            Self::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            Self::Separation { .. } | Self::DeviceN { .. } => vec![1.0; self.ncomponents()],
+            _ => vec![0.0; self.ncomponents()],
+        }
+    }
+
     /// Whether painting in this space produces no output: a `Separation`
     /// space or a `DeviceN` space whose colorants are all `/None`
     /// (PDF §8.6.6.4, §8.6.6.5), or an uncoloured-pattern space over one.
