@@ -388,7 +388,7 @@ impl Document {
                     // different object.  Locate the object's header by
                     // scanning the file; failing that, keep what the entry
                     // led to.
-                    parsed => self.recover_direct(id.0, offset).map_or_else(
+                    parsed => self.recover_direct(id.0, Some(offset)).map_or_else(
                         || {
                             parsed
                                 .map(|(_, obj)| obj)
@@ -412,6 +412,15 @@ impl Document {
                 self.objstm
                     .get_or_parse(container, index, &stream.content, &stream.dict)
             }
+            // A referenced object the xref has released: its body, when the
+            // update that freed it left one in the file, is found by the
+            // header scan; otherwise the reference is to nothing.
+            XrefEntry::Free => self
+                .recover_direct(id.0, None)
+                .ok_or_else(|| PdfError::BadObject {
+                    id: id.0,
+                    detail: "free in xref table".into(),
+                }),
         }
     }
 
@@ -424,7 +433,7 @@ impl Document {
 
     /// Object `num` parsed from the header a whole-file scan finds for it,
     /// when that header is not at `failed_offset` and parses as object `num`.
-    fn recover_direct(&self, num: u32, failed_offset: u64) -> Option<Object> {
+    fn recover_direct(&self, num: u32, failed_offset: Option<u64>) -> Option<Object> {
         let scanned = self
             .scanned_offsets
             .get_or_init(|| scan_object_headers(self.data.as_bytes()).ok())
@@ -432,13 +441,14 @@ impl Document {
         let Some(XrefEntry::Direct { offset, .. }) = scanned.get(&num).copied() else {
             return None;
         };
-        if offset == failed_offset {
+        if failed_offset == Some(offset) {
             return None;
         }
         let (found, obj) = self.parse_direct(offset)?;
         (found.0 == num).then(|| {
             log::debug!(
-                "pdf: object {num} recovered at offset {offset} (xref pointed to {failed_offset})"
+                "pdf: object {num} recovered at offset {offset} (xref entry: {})",
+                failed_offset.map_or_else(|| "free".to_owned(), |off| off.to_string())
             );
             obj
         })
@@ -1093,6 +1103,56 @@ mod tests {
         assert_eq!(
             doc.get_object((3, 0)).expect("object 3").as_str(),
             Some(&b"three"[..])
+        );
+    }
+
+    /// Append an incremental update to a [`pdf_with_objects`] file whose
+    /// only entry frees object `num`.
+    fn append_update_freeing(bytes: &mut Vec<u8>, num: u32) {
+        use std::fmt::Write as _;
+
+        let startxref = find(bytes, b"startxref\n").expect("startxref") + 10;
+        let prev: usize = std::str::from_utf8(&bytes[startxref..])
+            .ok()
+            .and_then(|s| s.split_whitespace().next()?.parse().ok())
+            .expect("startxref offset");
+        bytes.push(b'\n');
+        let xref = bytes.len();
+        let mut update = String::new();
+        write!(
+            update,
+            "xref\n{num} 1\n0000000000 00001 f\r\ntrailer\n<</Size 4 /Root 1 0 R /Prev {prev}>>\n\
+             startxref\n{xref}\n%%EOF"
+        )
+        .unwrap();
+        bytes.extend_from_slice(update.as_bytes());
+    }
+
+    /// A freed object that is still referenced, and whose body the update
+    /// left in the file, resolves to that body.
+    #[test]
+    fn freed_object_with_a_body_is_recovered_by_scanning() {
+        let mut bytes = pdf_with_objects(&[(2, "(two)".to_owned())]);
+        append_update_freeing(&mut bytes, 2);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert!(matches!(doc.xref.get(2), Some(XrefEntry::Free)));
+        assert_eq!(
+            doc.get_object((2, 0)).expect("object 2").as_str(),
+            Some(&b"two"[..])
+        );
+    }
+
+    /// A free entry for an object with no body in the file is a missing
+    /// object, not an error elsewhere and not another object.
+    #[test]
+    fn freed_object_without_a_body_is_missing() {
+        let bytes = pdf_with_objects(&[(3, "(three)".to_owned())]);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert!(matches!(doc.xref.get(2), Some(XrefEntry::Free)));
+        let err = doc.get_object((2, 0)).expect_err("object 2 is free");
+        assert!(
+            matches!(&err, PdfError::BadObject { id: 2, detail } if detail.contains("free")),
+            "got {err:?}"
         );
     }
 

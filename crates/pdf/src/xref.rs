@@ -31,10 +31,15 @@ pub(crate) enum XrefEntry {
     /// Object is inside an object stream; `container` is the object number of
     /// the `ObjStm`, `index` is the 0-based position within it.
     InObjStm { container: u32, index: u32 },
+    /// The object number is free (ISO 32000-1 §7.5.4): the newest section
+    /// that mentions it released it, so no older section's entry applies.
+    Free,
 }
 
 /// Complete cross-reference table built from all xref sections in the file.
-/// Later xref sections override earlier ones (incremental update semantics).
+/// Later xref sections override earlier ones (incremental update semantics):
+/// sections are read newest first and the first entry seen for an object
+/// number — in-use or free — is the one kept.
 #[derive(Debug, Default)]
 pub(crate) struct XrefTable {
     pub entries: HashMap<u32, XrefEntry>,
@@ -72,13 +77,28 @@ pub(crate) fn read_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     }
 }
 
+/// Read the chain of xref sections from `startxref`, newest first.  Each
+/// section contributes its own entries, then those of its `/XRefStm` stream,
+/// before its `/Prev` section is read (ISO 32000-1 §7.5.8.4).  The walk is a
+/// loop over offsets already seen, so neither a cyclic nor a long chain
+/// recurses.
 fn read_xref_strict(data: &[u8]) -> Result<XrefTable, PdfError> {
-    let start_offset = find_startxref(data)?;
-
     let mut table = XrefTable::default();
-    // Track visited offsets to break infinite loops in corrupt /Prev chains.
     let mut visited = std::collections::HashSet::new();
-    read_xref_at(data, start_offset, &mut table, &mut visited)?;
+    let mut next = Some(find_startxref(data)?);
+    while let Some(offset) = next
+        && visited.insert(offset)
+    {
+        let trailer = read_xref_section(data, offset, &mut table)?;
+        merge_trailer(&trailer, &mut table);
+        if let Some(stm) = offset_entry(&trailer, b"XRefStm")
+            && visited.insert(stm)
+        {
+            let stream_trailer = read_xref_section(data, stm, &mut table)?;
+            merge_trailer(&stream_trailer, &mut table);
+        }
+        next = offset_entry(&trailer, b"Prev");
+    }
     Ok(table)
 }
 
@@ -252,15 +272,13 @@ fn find_catalog_object(data: &[u8], table: &XrefTable) -> Option<ObjectId> {
     best.map(|(id, _)| id)
 }
 
-fn read_xref_at(
+/// Read the entries of the xref section at `offset` into `table` (entries
+/// already present win) and return the section's trailer dictionary.
+fn read_xref_section(
     data: &[u8],
     offset: u64,
     table: &mut XrefTable,
-    visited: &mut std::collections::HashSet<u64>,
-) -> Result<(), PdfError> {
-    if !visited.insert(offset) {
-        return Ok(()); // Cycle detected — stop.
-    }
+) -> Result<Dictionary, PdfError> {
     let Some(off) = usize::try_from(offset).ok().filter(|&off| off < data.len()) else {
         return Err(PdfError::BadXref(format!(
             "offset {offset} beyond end of file"
@@ -270,9 +288,9 @@ fn read_xref_at(
     // Detect format: "xref" keyword → traditional table; anything else must be
     // an indirect object (the xref stream).
     if data[off..].starts_with(b"xref") {
-        read_traditional_xref(data, off, table, visited)
+        read_traditional_xref(data, off, table)
     } else {
-        read_xref_stream(data, off, table, visited)
+        read_xref_stream(data, off, table)
     }
 }
 
@@ -282,8 +300,7 @@ fn read_traditional_xref(
     data: &[u8],
     start: usize,
     table: &mut XrefTable,
-    visited: &mut std::collections::HashSet<u64>,
-) -> Result<(), PdfError> {
+) -> Result<Dictionary, PdfError> {
     let mut pos = start + 4; // skip "xref"
     skip_ws(data, &mut pos);
 
@@ -341,29 +358,27 @@ fn read_traditional_xref(
             })?;
             // Only insert if not already present (newer xref sections win).
             // A generation above `u16::MAX` names no object that can exist;
-            // the entry is dropped rather than truncated.
-            if flag == b'n'
-                && let Ok(generation) = u16::try_from(generation)
-                && !table.entries.contains_key(&obj_num)
-            {
-                let _ = table
-                    .entries
-                    .insert(obj_num, XrefEntry::Direct { offset, generation });
+            // the entry is dropped rather than truncated.  A free entry is
+            // kept as such so that no older section can redefine the object.
+            let entry = match flag {
+                b'n' => u16::try_from(generation)
+                    .ok()
+                    .map(|generation| XrefEntry::Direct { offset, generation }),
+                b'f' => Some(XrefEntry::Free),
+                _ => None,
+            };
+            if let Some(entry) = entry {
+                let _ = table.entries.entry(obj_num).or_insert(entry);
             }
         }
     }
 
     // Parse the trailer dictionary.
     skip_ws(data, &mut pos);
-    parse_trailer_dict(data, &mut pos, table, visited)
+    parse_trailer_dict(data, &mut pos)
 }
 
-fn parse_trailer_dict(
-    data: &[u8],
-    pos: &mut usize,
-    table: &mut XrefTable,
-    visited: &mut std::collections::HashSet<u64>,
-) -> Result<(), PdfError> {
+fn parse_trailer_dict(data: &[u8], pos: &mut usize) -> Result<Dictionary, PdfError> {
     skip_ws(data, pos);
     // The trailer dict starts with "<<".
     if !data[*pos..].starts_with(b"<<") {
@@ -374,55 +389,31 @@ fn parse_trailer_dict(
 
     let obj = parse_object(data, pos)
         .ok_or_else(|| PdfError::BadXref("could not parse trailer dictionary".into()))?;
-    let dict = match obj {
-        Object::Dictionary(d) => d,
-        other => {
-            return Err(PdfError::BadXref(format!(
-                "trailer is not a dict: {other:?}"
-            )));
-        }
-    };
-
-    merge_trailer_and_chain(data, &dict, table, visited)?;
-
-    // Handle hybrid files: /XRefStm points to an additional xref stream.
-    if let Some(Object::Integer(xrefstm)) = dict.get(b"XRefStm")
-        && let Some(stm_off) = positive_offset(*xrefstm)
-        && !visited.contains(&stm_off)
-    {
-        read_xref_at(data, stm_off, table, visited)?;
+    match obj {
+        Object::Dictionary(d) => Ok(d),
+        other => Err(PdfError::BadXref(format!(
+            "trailer is not a dict: {other:?}"
+        ))),
     }
-
-    Ok(())
 }
 
-/// Merge `dict` into `table.trailer` (existing keys win — newer xref sections
-/// already populated the table) and recurse into the `/Prev` chain if present
-/// and positive.  Negative or zero `/Prev` values are silently ignored — they
-/// indicate "no previous xref section" rather than an error.
-fn merge_trailer_and_chain(
-    data: &[u8],
-    dict: &Dictionary,
-    table: &mut XrefTable,
-    visited: &mut std::collections::HashSet<u64>,
-) -> Result<(), PdfError> {
+/// Merge `dict` into `table.trailer`; existing keys win, as newer sections
+/// are merged first.
+fn merge_trailer(dict: &Dictionary, table: &mut XrefTable) {
     for (k, v) in dict {
         if !table.trailer.contains_key(k) {
             let _ = table.trailer.insert(k.clone(), v.clone());
         }
     }
-    if let Some(Object::Integer(prev)) = dict.get(b"Prev")
-        && let Some(prev) = positive_offset(*prev)
-    {
-        read_xref_at(data, prev, table, visited)?;
-    }
-    Ok(())
 }
 
-/// A `/Prev` or `/XRefStm` value as a byte offset; zero and negative values
-/// mean "no such section".
-fn positive_offset(n: i64) -> Option<u64> {
-    u64::try_from(n).ok().filter(|&off| off > 0)
+/// The byte offset a trailer's `/Prev` or `/XRefStm` entry names.  A missing
+/// entry, a non-integer, zero or a negative value all mean "no such section".
+fn offset_entry(dict: &Dictionary, key: &[u8]) -> Option<u64> {
+    match dict.get(key) {
+        Some(Object::Integer(n)) => u64::try_from(*n).ok().filter(|&off| off > 0),
+        _ => None,
+    }
 }
 
 // ── Cross-reference stream (PDF 1.5+) ────────────────────────────────────────
@@ -431,8 +422,7 @@ fn read_xref_stream(
     data: &[u8],
     start: usize,
     table: &mut XrefTable,
-    visited: &mut std::collections::HashSet<u64>,
-) -> Result<(), PdfError> {
+) -> Result<Dictionary, PdfError> {
     // Parse the indirect object header: "<id> <gen> obj"
     let mut pos = start;
     skip_ws(data, &mut pos);
@@ -527,6 +517,7 @@ fn read_xref_stream(
             // can exist; such an entry is dropped rather than truncated onto
             // a different object.
             let entry = match type_val {
+                0 => Some(XrefEntry::Free),
                 1 => u16::try_from(f2).ok().map(|generation| XrefEntry::Direct {
                     offset: f1,
                     generation,
@@ -535,7 +526,7 @@ fn read_xref_stream(
                     .ok()
                     .zip(u32::try_from(f2).ok())
                     .map(|(container, index)| XrefEntry::InObjStm { container, index }),
-                // Type 0 is a free object; other types are ignored per spec.
+                // Other types are ignored per spec.
                 _ => None,
             };
             if let Some(entry) = entry {
@@ -544,7 +535,7 @@ fn read_xref_stream(
         }
     }
 
-    merge_trailer_and_chain(data, &dict, table, visited)
+    Ok(dict)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -712,7 +703,8 @@ startxref
 %%EOF";
         // Should succeed: /Prev=-1 is treated as no previous xref.
         let table = read_xref(data).expect("xref parse");
-        assert_eq!(table.entries.len(), 0);
+        assert!(matches!(table.get(0), Some(XrefEntry::Free)));
+        assert_eq!(table.entries.len(), 1);
     }
 
     // ── Xref reconstruction (repair fallback) ────────────────────────────
@@ -885,6 +877,144 @@ startxref
             ),
             "well-formed entry must survive"
         );
+    }
+
+    /// A classic xref section `xref\n<first> <count>\n<entries>` followed by
+    /// `trailer <dict>`, as one byte string.
+    fn classic_section(first: u32, entries: &[(u64, u16, u8)], trailer: &str) -> Vec<u8> {
+        let mut s = format!("xref\n{first} {}\n", entries.len());
+        for (offset, generation, flag) in entries {
+            s.push_str(&format!(
+                "{offset:010} {generation:05} {} \n",
+                *flag as char
+            ));
+        }
+        s.push_str(&format!("trailer\n{trailer}\n"));
+        s.into_bytes()
+    }
+
+    /// Append `section` to `data` and return its offset.
+    fn append(data: &mut Vec<u8>, section: &[u8]) -> usize {
+        let off = data.len();
+        data.extend_from_slice(section);
+        off
+    }
+
+    /// A hybrid-reference file: object 7 is defined at `old`, then
+    /// redefined at `new` by an update whose `/XRefStm` stream carries the
+    /// new entry while its `/Prev` section carries the old one.  Returns the
+    /// file and the two header offsets.
+    fn hybrid_file() -> (Vec<u8>, u64, u64) {
+        let mut data = b"%PDF-1.7\n".to_vec();
+        let old = append(&mut data, b"7 0 obj\n(old)\nendobj\n");
+        let xref1 = append(
+            &mut data,
+            &classic_section(7, &[(old as u64, 0, b'n')], "<</Size 8/Root 1 0 R>>"),
+        );
+        let new = append(&mut data, b"7 0 obj\n(new)\nendobj\n");
+        let mut stream =
+            b"9 0 obj\n<</Type/XRef/Size 10/W[1 4 1]/Index[7 1]/Length 6>>\nstream\n\x01".to_vec();
+        stream.extend_from_slice(&(new as u32).to_be_bytes());
+        stream.extend_from_slice(b"\x00\nendstream\nendobj\n");
+        let stm = append(&mut data, &stream);
+        let xref2 = append(
+            &mut data,
+            &classic_section(
+                9,
+                &[(stm as u64, 0, b'n')],
+                &format!("<</Size 10/Root 1 0 R/Prev {xref1}/XRefStm {stm}>>"),
+            ),
+        );
+        data.extend_from_slice(format!("startxref\n{xref2}\n%%EOF").as_bytes());
+        (data, old as u64, new as u64)
+    }
+
+    /// In a hybrid file the `/XRefStm` stream is consulted before the
+    /// `/Prev` chain (ISO 32000-1 §7.5.8.4), so its entry for a redefined
+    /// object shadows the older section's.
+    #[test]
+    fn hybrid_xrefstm_entries_shadow_prev_section() {
+        let (data, old, new) = hybrid_file();
+        let table = read_xref_strict(&data).expect("hybrid file parses");
+        let Some(XrefEntry::Direct { offset, .. }) = table.get(7) else {
+            panic!("object 7 must be a direct entry, got {:?}", table.get(7));
+        };
+        assert_eq!(
+            offset, new,
+            "the /XRefStm entry wins over /Prev (old at {old})"
+        );
+    }
+
+    /// A newer section's free entry is recorded, so the older section's
+    /// in-use entry for the same object cannot resurrect it.
+    #[test]
+    fn free_entry_shadows_older_definition() {
+        let mut data = b"%PDF-1.7\n".to_vec();
+        let body = append(&mut data, b"4 0 obj\n(body)\nendobj\n");
+        let xref1 = append(
+            &mut data,
+            &classic_section(4, &[(body as u64, 0, b'n')], "<</Size 5/Root 1 0 R>>"),
+        );
+        let xref2 = append(
+            &mut data,
+            &classic_section(
+                4,
+                &[(0, 1, b'f')],
+                &format!("<</Size 5/Root 1 0 R/Prev {xref1}>>"),
+            ),
+        );
+        data.extend_from_slice(format!("startxref\n{xref2}\n%%EOF").as_bytes());
+        let table = read_xref_strict(&data).expect("file parses");
+        assert!(
+            matches!(table.get(4), Some(XrefEntry::Free)),
+            "object 4 must be free, got {:?}",
+            table.get(4)
+        );
+    }
+
+    /// A type-0 entry in a newer cross-reference stream frees the object
+    /// against an older section's in-use entry.
+    #[test]
+    fn xref_stream_free_entry_shadows_older_definition() {
+        let mut data = b"%PDF-1.5\n".to_vec();
+        let body = append(&mut data, b"4 0 obj\n(body)\nendobj\n");
+        let xref1 = append(
+            &mut data,
+            &classic_section(4, &[(body as u64, 0, b'n')], "<</Size 5/Root 1 0 R>>"),
+        );
+        let stm = append(
+            &mut data,
+            format!(
+                "9 0 obj\n<</Type/XRef/Size 10/W[1 1 1]/Index[4 1]/Prev {xref1}/Root 1 0 R\
+                 /Length 3>>\nstream\n\x00\x00\x00\nendstream\nendobj\n"
+            )
+            .as_bytes(),
+        );
+        data.extend_from_slice(format!("startxref\n{stm}\n%%EOF").as_bytes());
+        let table = read_xref_strict(&data).expect("file parses");
+        assert!(
+            matches!(table.get(4), Some(XrefEntry::Free)),
+            "object 4 must be free, got {:?}",
+            table.get(4)
+        );
+    }
+
+    /// A `/Prev` chain of any length is walked without recursion: a file of
+    /// tens of thousands of sections parses rather than exhausting the stack.
+    #[test]
+    fn long_prev_chain_is_walked_iteratively() {
+        let mut data = b"%PDF-1.7\n".to_vec();
+        let mut prev: Option<usize> = None;
+        for _ in 0..50_000 {
+            let trailer = prev.map_or_else(
+                || "<</Size 1>>".to_owned(),
+                |p| format!("<</Size 1/Prev {p}>>"),
+            );
+            prev = Some(append(&mut data, &classic_section(0, &[], &trailer)));
+        }
+        data.extend_from_slice(format!("startxref\n{}\n%%EOF", prev.unwrap()).as_bytes());
+        let table = read_xref_strict(&data).expect("chain parses");
+        assert!(table.entries.is_empty());
     }
 
     /// A traditional entry whose generation exceeds `u16::MAX` is dropped
