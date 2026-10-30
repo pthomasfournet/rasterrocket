@@ -1363,9 +1363,43 @@ impl<'doc> PageRenderer<'doc> {
         vk_ops::try_vk_aa_fill(self, backend, path, even_odd, flatness, pipe, src)
     }
 
+    /// Stroke `path` with the current line width, widened to at least one
+    /// device pixel.
     fn stroke_path(&mut self, path: &raster::path::Path) {
-        let region = self.stroke_bounds(path);
-        self.paint_masked(region, |r| r.stroke_within(path, region));
+        let line_width = self.min_stroke_width();
+        self.stroke_path_at(path, line_width);
+    }
+
+    /// Stroke a text outline (render modes 1, 2, 5, 6) with the current line
+    /// width as given: the outline's own fill carries the glyph shape, and a
+    /// widened outline stroke thickens every stem.
+    pub(super) fn stroke_text_outline(&mut self, path: &raster::path::Path) {
+        let line_width = self.gstate.current().line_width;
+        self.stroke_path_at(path, line_width);
+    }
+
+    fn stroke_path_at(&mut self, path: &raster::path::Path, line_width: f64) {
+        let region = self.stroke_bounds(path, line_width);
+        self.paint_masked(region, |r| r.stroke_within(path, line_width, region));
+    }
+
+    /// The current line width, raised so the stroke is at least one device
+    /// pixel thick, the device thickness being the user width times the
+    /// CTM's area scale `√|det|`.  Width 0 keeps its one-pixel hairline;
+    /// under a singular CTM the width is already in device pixels.
+    fn min_stroke_width(&self) -> f64 {
+        let line_width = self.gstate.current().line_width;
+        if line_width <= 0.0 {
+            return line_width;
+        }
+        let device = self.device_matrix();
+        let scale = invert_affine(&device).map_or(1.0, |_| {
+            device[0]
+                .mul_add(device[3], -(device[1] * device[2]))
+                .abs()
+                .sqrt()
+        });
+        line_width.max(1.0 / scale)
     }
 
     /// The pixels a stroke of `path` can touch: the path's bounds grown by
@@ -1373,18 +1407,23 @@ impl<'doc> PageRenderer<'doc> {
     /// √2, for a square cap), in device pixels — within the clip.  Under a
     /// singular CTM the stroker works in device space with the line width
     /// unscaled.
-    fn stroke_bounds(&self, path: &raster::path::Path) -> Option<PixelRect> {
+    fn stroke_bounds(&self, path: &raster::path::Path, line_width: f64) -> Option<PixelRect> {
         let gs = self.gstate.current();
         let device = self.device_matrix();
         let scale = invert_affine(&device).map_or(1.0, |_| {
             device[0].hypot(device[1]).max(device[2].hypot(device[3]))
         });
-        let reach = gs.line_width / 2.0 * scale * gs.miter_limit.max(std::f64::consts::SQRT_2);
+        let reach = line_width / 2.0 * scale * gs.miter_limit.max(std::f64::consts::SQRT_2);
         self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0)
     }
 
-    /// Stroke `path`, whose stroke lies within `region`.
-    fn stroke_within(&mut self, path: &raster::path::Path, region: Option<PixelRect>) {
+    /// Stroke `path` `line_width` wide, whose stroke lies within `region`.
+    fn stroke_within(
+        &mut self,
+        path: &raster::path::Path,
+        line_width: f64,
+        region: Option<PixelRect>,
+    ) {
         // Clone all graphics state data before any mutable borrow.
         let gs = self.gstate.current();
         if gs.stroke_color_space.paints_nothing() {
@@ -1393,7 +1432,6 @@ impl<'doc> PageRenderer<'doc> {
         let clip = gs.clip.clone_shared();
         let backdrop = self.blend_backdrop(gs.blend_mode);
         let pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode, backdrop.as_deref());
-        let line_width = gs.line_width;
         let line_cap = gs.line_cap;
         let line_join = gs.line_join;
         let miter_limit = gs.miter_limit;
@@ -3317,6 +3355,22 @@ mod tests {
     fn transfer_function_leaves_the_backdrop_alone() {
         let px = render_transfer(b"/Inv gs 0 g 0.5 0.5 6.3 6.3 re f");
         assert!(px.iter().all(|&v| v == 255), "got {px:?}");
+    }
+
+    /// A stroke thinner than a device pixel is widened to one pixel: a
+    /// 0.1-unit rule centred in a pixel row paints that row solid.
+    #[test]
+    fn thin_stroke_widens_to_one_device_pixel() {
+        let px = render_gray(16, b"0 G 0.1 w 0 4.5 m 16 4.5 l S");
+        let column: Vec<u8> = (0..16).map(|y| px[y * 16 + 8]).collect();
+        assert_eq!(column[11], 0, "rule row solid, column {column:?}");
+        assert!(
+            column
+                .iter()
+                .enumerate()
+                .all(|(y, &g)| (10..=12).contains(&y) || g == 255),
+            "no paint beyond the rule's neighbour rows, column {column:?}"
+        );
     }
 
     /// An image whose bounding box misses the clip entirely paints nothing.

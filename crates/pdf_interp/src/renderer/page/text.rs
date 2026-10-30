@@ -461,7 +461,7 @@ impl PageRenderer<'_> {
         // for any stroked path (PDF §8.4.3.2); the text matrix and font size
         // scale the outline but not the line width.
         if do_stroke && !stroke_outline.pts.is_empty() {
-            self.stroke_path(&stroke_outline);
+            self.stroke_text_outline(&stroke_outline);
         }
 
         // Phase 3: intersect glyph outlines into the clip path (modes 4–7).
