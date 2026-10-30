@@ -761,12 +761,9 @@ impl<'a> ImageDecodeCtx<'a> {
 
 /// `true` for a filter that transforms bytes without being an image codec
 /// (PDF §7.4): an image ending in one decodes as raw samples after the whole
-/// filter chain is applied.
+/// filter chain is applied.  The set is the stream decoder's own.
 pub(super) fn is_transport_filter(name: &str) -> bool {
-    matches!(
-        name,
-        "FlateDecode" | "LZWDecode" | "ASCII85Decode" | "ASCIIHexDecode" | "RunLengthDecode"
-    )
+    pdf::is_decoded_filter(name.as_bytes())
 }
 
 /// Collect every filter name from a `/Filter` entry, in application order,

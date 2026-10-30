@@ -272,7 +272,9 @@ cached as `Arc<Object>`.
 - **Streams and filters** (`stream.rs`). The decode filter chain, with
   bounded output. Abbreviated filter names (`/Fl`, `/A85`, …) are accepted
   on every stream, `BrotliDecode` is decoded, and the TIFF predictor is
-  undone at 1, 2, 4, 8 and 16 bits per component. A page's `/Contents`
+  undone at 1, 2, 4, 8 and 16 bits per component. The same chain decodes
+  cross-reference streams, and its filter set (`is_decoded_filter`) is the
+  image path's set of transport filters. A page's `/Contents`
   elements decode independently: an element that fails is skipped with a
   warning, and the page fails only when none decodes.
 - **Objects** (`object.rs`). Array and dictionary nesting is capped at 256

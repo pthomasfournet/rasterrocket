@@ -62,6 +62,26 @@ pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Vec<u8>, St
     Ok(data)
 }
 
+/// The general-purpose filters (ISO 32000-2 §7.4) the stream decoder applies
+/// itself, by full name.  Every other recognised filter is an image codec
+/// whose bytes pass through the chain unchanged.
+const DECODED_FILTERS: [&[u8]; 6] = [
+    b"FlateDecode",
+    b"LZWDecode",
+    b"ASCII85Decode",
+    b"ASCIIHexDecode",
+    b"RunLengthDecode",
+    b"BrotliDecode",
+];
+
+/// Whether the stream decoder applies the filter named `name` (its full
+/// name, see [`filter_full_name`]) rather than passing its bytes through:
+/// a stream whose chain ends in such a filter decodes to raw samples.
+#[must_use]
+pub fn is_decoded_filter(name: &[u8]) -> bool {
+    DECODED_FILTERS.contains(&name)
+}
+
 fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<Vec<u8>, String> {
     match filter {
         b"FlateDecode" => apply_flate(
@@ -1071,6 +1091,37 @@ mod tests {
             "{prefix:?}"
         );
         assert!(apply_brotli(b"not brotli at all", None).is_err());
+    }
+
+    /// Every filter [`is_decoded_filter`] names transforms its input in
+    /// [`apply_filter`]; image codecs pass through unchanged.
+    #[test]
+    fn decoded_filters_are_the_ones_apply_filter_decodes() {
+        for name in DECODED_FILTERS {
+            let encoded: &[u8] = if name == b"BrotliDecode" {
+                &BROTLI_RAW_64
+            } else {
+                b"x\x9c+\xc9\xc8,\x06\x00\x04]\x01\xc1"
+            };
+            let out = apply_filter(name, encoded, None);
+            assert!(
+                out.as_deref() != Ok(encoded),
+                "{} passed its input through",
+                String::from_utf8_lossy(name)
+            );
+        }
+        for codec in [
+            &b"DCTDecode"[..],
+            b"JPXDecode",
+            b"JBIG2Decode",
+            b"CCITTFaxDecode",
+        ] {
+            assert!(!is_decoded_filter(codec));
+            assert_eq!(
+                apply_filter(codec, b"abc", None).as_deref(),
+                Ok(&b"abc"[..])
+            );
+        }
     }
 
     #[test]

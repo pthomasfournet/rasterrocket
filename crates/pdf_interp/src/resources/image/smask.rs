@@ -514,12 +514,18 @@ mod tests {
     /// raw-sample path.
     #[test]
     fn smask_accepts_every_transport_filter() {
-        let cases: [(&str, &[u8]); 3] = [
+        let cases: [(&str, &[u8]); 5] = [
             ("/Filter /ASCIIHexDecode", b"0a141e28>"),
             ("/Filter /RunLengthDecode", &[3, 10, 20, 30, 40, 128]),
             (
                 "/Filter [/ASCIIHexDecode /RunLengthDecode]",
                 b"030a141e2880>",
+            ),
+            // One uncompressed Brotli meta-block holding the four samples.
+            ("/Filter /BrotliDecode", &[139, 1, 128, 10, 20, 30, 40, 3]),
+            (
+                "/Filter [/ASCIIHexDecode /BrotliDecode]",
+                b"8b01800a141e2803>",
             ),
         ];
         for (filter, data) in cases {
