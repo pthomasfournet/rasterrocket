@@ -315,13 +315,13 @@ fn predictor_param(
 ///
 /// Each row stores its first pixel raw and every later component as a
 /// delta against the same component one pixel to the left; the undo is a
-/// componentwise running sum per row. Rows are `ceil(cols·colors·bits/8)`
-/// bytes with no per-row tag byte (unlike the PNG predictors).
+/// componentwise running sum per row, modulo `2^bits`. Rows are
+/// `ceil(cols·colors·bits/8)` bytes with no per-row tag byte (unlike the
+/// PNG predictors); sub-byte components are packed most significant bit
+/// first and 16-bit components are big-endian.
 ///
-/// Only 8-bit components are undone — the packed sub-byte and 16-bit
-/// variants are vanishingly rare in PDF streams; those pass through
-/// unchanged with a warning rather than being scrambled by a wrong-width
-/// delta pass. Trailing bytes that do not form a whole row also pass
+/// Component depths other than 1, 2, 4, 8 and 16 pass through unchanged
+/// with a warning. Trailing bytes that do not form a whole row also pass
 /// through unchanged.
 fn apply_tiff_predictor(
     mut data: Vec<u8>,
@@ -329,17 +329,20 @@ fn apply_tiff_predictor(
     bits: usize,
     cols: usize,
 ) -> Result<Vec<u8>, String> {
-    if bits != 8 {
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
         log::warn!(
             "TIFF predictor 2 with BitsPerComponent={bits} is not undone; \
              passing data through unchanged"
         );
         return Ok(data);
     }
-    let stride = cols
+    let samples = cols
         .checked_mul(colors)
         .ok_or_else(|| "TIFF predictor: stride overflow".to_string())?;
-    let n_rows = data.len() / stride;
+    let stride = samples
+        .checked_mul(bits)
+        .map(|b| b.div_ceil(8))
+        .ok_or_else(|| "TIFF predictor: stride overflow".to_string())?;
     if !data.len().is_multiple_of(stride) {
         log::warn!(
             "TIFF predictor: {} trailing bytes do not form a full {stride}-byte row; \
@@ -347,12 +350,47 @@ fn apply_tiff_predictor(
             data.len() % stride,
         );
     }
-    for row in data.chunks_exact_mut(stride).take(n_rows) {
-        for i in colors..stride {
-            row[i] = row[i].wrapping_add(row[i - colors]);
+    for row in data.chunks_exact_mut(stride) {
+        match bits {
+            8 => {
+                for i in colors..stride {
+                    row[i] = row[i].wrapping_add(row[i - colors]);
+                }
+            }
+            16 => {
+                for i in colors..samples {
+                    let left =
+                        u16::from_be_bytes([row[2 * (i - colors)], row[2 * (i - colors) + 1]]);
+                    let delta = u16::from_be_bytes([row[2 * i], row[2 * i + 1]]);
+                    row[2 * i..2 * i + 2].copy_from_slice(&left.wrapping_add(delta).to_be_bytes());
+                }
+            }
+            _ => {
+                for i in colors..samples {
+                    let sum = packed_sample(row, i, bits) + packed_sample(row, i - colors, bits);
+                    set_packed_sample(row, i, bits, sum);
+                }
+            }
         }
     }
     Ok(data)
+}
+
+/// Sample `i` of `row`, packed `bits` (1, 2 or 4) to a sample, most
+/// significant bit first.
+const fn packed_sample(row: &[u8], i: usize, bits: usize) -> u8 {
+    let bit = i * bits;
+    let shift = 8 - bits - bit % 8;
+    (row[bit / 8] >> shift) & ((1 << bits) - 1)
+}
+
+/// Store `value` modulo `2^bits` as sample `i` of `row`, packed as in
+/// [`packed_sample`].
+const fn set_packed_sample(row: &mut [u8], i: usize, bits: usize, value: u8) {
+    let bit = i * bits;
+    let shift = 8 - bits - bit % 8;
+    let mask = ((1u8 << bits) - 1) << shift;
+    row[bit / 8] = (row[bit / 8] & !mask) | ((value << shift) & mask);
 }
 
 fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>, String> {
@@ -902,17 +940,45 @@ mod tests {
     }
 
     #[test]
-    fn tiff_predictor_2_sub_byte_bits_passes_through() {
-        // Sub-byte and 16-bit component depths are not undone (rare in
-        // the wild); the data must pass through unchanged rather than be
-        // scrambled by a wrong-width delta pass.
+    fn tiff_predictor_2_undoes_packed_and_16_bit_components() {
+        let undo = |bits, colors, cols, data: Vec<u8>| {
+            let params = Params(vec![
+                (b"Predictor", 2),
+                (b"Colors", colors),
+                (b"BitsPerComponent", bits),
+                (b"Columns", cols),
+            ]);
+            apply_png_predictor(data, &params).unwrap()
+        };
+        // 1-bit: a running XOR per row; the row is padded to a byte.
+        assert_eq!(undo(1, 1, 6, vec![0b1000_1000]), [0b1111_0000]);
+        // 2-bit, two components: 1 2 | 3 3 | 1 0 → 1 2 | 0 1 | 1 1.
+        assert_eq!(
+            undo(2, 2, 3, vec![0b0110_1111, 0b0100_0000]),
+            [0b0110_0001, 0b0101_0000]
+        );
+        // 4-bit, two rows: 0 7 9 7 → 0 7 0 7, then F 1 → F 0 (wraps).
+        assert_eq!(undo(4, 1, 2, vec![0x07, 0xF1]), [0x07, 0xF0]);
+        assert_eq!(
+            undo(4, 1, 4, vec![0x07, 0x97, 0xF1, 0x00]),
+            [0x07, 0x07, 0xF0, 0x00]
+        );
+        // 16-bit big-endian: 0x00FF + 0x0001 carries into the high byte.
+        assert_eq!(
+            undo(16, 1, 3, vec![0x00, 0xFF, 0x00, 0x01, 0xFF, 0x00]),
+            [0x00, 0xFF, 0x01, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn tiff_predictor_2_unsupported_depth_passes_through() {
         let params = Params(vec![
             (b"Predictor", 2),
             (b"Colors", 1),
-            (b"BitsPerComponent", 4),
+            (b"BitsPerComponent", 3),
             (b"Columns", 8),
         ]);
-        let data = vec![0x12, 0x34, 0x56, 0x78];
+        let data = vec![0x12, 0x34, 0x56];
         let out = apply_png_predictor(data.clone(), &params).unwrap();
         assert_eq!(out, data);
     }

@@ -79,6 +79,42 @@ fn brotli_content_stream_decodes() {
     assert!((ink - 0.32).abs() < 0.01, "square must render, ink {ink}");
 }
 
+/// TIFF predictor 2 is undone at every component depth: one row of gray
+/// samples, differenced and compressed, drawn over the 80 × 80 square.
+#[test]
+fn tiff_predictor_undoes_every_depth() {
+    // (bits, columns, zlib of the differenced row, ink of the true row)
+    for (bits, cols, zlib, want) in [
+        // 1 1 1 1 0 0 0 0, differenced 1 0 0 0 1 0 0 0: half black.
+        (1, 8, "789ceb000000890089", 0.16),
+        // 0 1 0 1, differenced 0 1 3 1: all dark.
+        (2, 4, "789c930500001e001e", 0.32),
+        // 0 7 0 7, differenced 0 7 9 7: all dark.
+        (4, 4, "789c639f0e0000a7009f", 0.32),
+        // 0 0x7000 0 0x7000, differenced 0 0x7000 0x9000 0x7000: all dark.
+        (16, 4, "789c636028609800c40005c80171", 0.32),
+    ] {
+        let image = format!(
+            "/Type /XObject /Subtype /Image /Width {cols} /Height 1 \
+             /ColorSpace /DeviceGray /BitsPerComponent {bits} /Filter /FlateDecode \
+             /DecodeParms << /Predictor 2 /BitsPerComponent {bits} /Columns {cols} >>"
+        );
+        let pdf = one_page(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
+               /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+            vec![
+                stream_object("", b"q 80 0 0 80 10 10 cm /Im0 Do Q"),
+                stream_object(&image, &unhex(zlib)),
+            ],
+        );
+        let ink = ink(pdf);
+        assert!(
+            (ink - want).abs() < 0.01,
+            "{bits}-bit: ink {ink}, want {want}"
+        );
+    }
+}
+
 /// `data` as ASCII hexadecimal.
 fn hex_of(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
