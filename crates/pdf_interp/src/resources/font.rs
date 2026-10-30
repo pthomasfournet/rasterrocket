@@ -117,6 +117,11 @@ pub struct CidEncoding {
     /// `W2`: explicit per-CID vertical metrics `[w1y, vx, vy]`, stored as
     /// `(first_cid, [metrics…])` segments.
     pub vertical_metrics: VerticalMetricsSegments,
+
+    /// The font's `ToUnicode` `CMap` (code → Unicode), read for a font
+    /// without a program: a substitute selects its glyphs by Unicode value,
+    /// and the collection's CID → Unicode table is the only other source.
+    pub to_unicode: Option<Arc<CMap>>,
 }
 
 /// `W2` segments: `(first_cid, [[w1y, vx, vy], …])`.
@@ -611,7 +616,7 @@ const fn parse_base_encoding(name: Option<&[u8]>) -> BaseEncoding {
 ///     DW: integer                   ← default advance width
 ///     W: array                      ← per-CID widths
 ///     CIDToGIDMap: /Identity | ref  ← CID → GID (CIDFontType2 only)
-///   ToUnicode: stream               ← optional; not used for rendering
+///   ToUnicode: stream               ← optional; read for a substitute
 /// ```
 fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     // 1. Encoding CMap: maps char codes to CIDs.
@@ -642,7 +647,16 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         .as_ref()
         .map_or(PdfFontKind::Other, classify_kind);
 
-    // 7. The script of a substitute: the CIDFont's ordering, else the
+    // 7. The `ToUnicode` map a substitute draws through.
+    let to_unicode = if bytes.is_none() {
+        dict.get(b"ToUnicode")
+            .and_then(|obj| embedded_cmap(doc, obj, 0))
+            .map(Arc::new)
+    } else {
+        None
+    };
+
+    // 8. The script of a substitute: the CIDFont's ordering, else the
     // CMap's, else the family name.
     let mut substitute = substitute_style(doc, dict, descendant.as_ref());
     if let Some(script) = descendant
@@ -678,6 +692,7 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
             widths,
             default_vertical,
             vertical_metrics,
+            to_unicode,
         }),
         type3: None,
         substitute,
@@ -1687,6 +1702,7 @@ mod tests {
             vertical: true,
             default_vertical: dw2,
             vertical_metrics: segments,
+            to_unicode: None,
         };
         assert_eq!(
             enc.vertical_metrics_for_cid(1),

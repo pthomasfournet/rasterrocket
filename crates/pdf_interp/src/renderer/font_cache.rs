@@ -33,8 +33,11 @@ use pdf::ObjectId;
 
 use super::encodings::{base_encoding_table, glyph_name_for_code};
 use super::substitutes::substitute_program;
+use crate::resources::cmap::CMap;
 use crate::resources::cmap_predefined::cid_to_unicode;
-use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind, fallback_font};
+use crate::resources::font::{
+    BaseEncoding, CidEncoding, FontDescriptor, PdfFontKind, fallback_font,
+};
 use crate::resources::{FontKey, PageResources};
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -345,13 +348,51 @@ fn resolved_code_to_gid(
         ))
     } else if !embedded
         && !simple
-        && let Some(table) = desc.substitute.script.and_then(cid_to_unicode)
+        && let Some(enc) = &desc.cid_encoding
     {
-        let vertical = desc.cid_encoding.as_ref().is_some_and(|enc| enc.vertical);
-        Some(resolve_cids_via_unicode(face, &table, vertical))
+        desc.substitute.script.and_then(cid_to_unicode).map_or_else(
+            || {
+                enc.to_unicode
+                    .as_ref()
+                    .map(|to_unicode| resolve_cids_via_to_unicode(face, enc, to_unicode))
+            },
+            |table| Some(resolve_cids_via_unicode(face, &table, enc.vertical)),
+        )
     } else {
         None
     }
+}
+
+/// Build a 65 536-entry CID → glyph table for a composite font of no
+/// known character collection drawn by a substitute, through the font's
+/// `ToUnicode` map: each code it maps is read as its CID through the
+/// `Encoding` `CMap` and its glyph found by Unicode value in the
+/// substitute's charmap (vertical form in vertical writing mode).  A CID
+/// the map leaves out, or whose glyph the substitute lacks, keeps the
+/// identity reading, under which the substitutes of the metric-compatible
+/// families draw by glyph order.
+fn resolve_cids_via_to_unicode(face: &FontFace, enc: &CidEncoding, to_unicode: &CMap) -> Vec<u32> {
+    let mut table: Vec<u32> = (0..1u32 << 16).collect();
+    for (&code, &value) in &to_unicode.map {
+        // A value of more than one UTF-16 unit is read by its first unit.
+        let unicode = if value > 0x10_FFFF {
+            value >> 16
+        } else {
+            value
+        };
+        let gid = face.raw_get_char_index(unicode);
+        if gid == 0 {
+            continue;
+        }
+        if let Some(slot) = table.get_mut(enc.encoding_cmap.lookup(code) as usize) {
+            *slot = if enc.vertical {
+                face.program().vertical_gid(gid)
+            } else {
+                gid
+            };
+        }
+    }
+    table
 }
 
 /// Build a 65 536-entry CID → glyph table for a composite font drawn by a
@@ -803,6 +844,53 @@ mod tests {
         }
     }
 
+    /// A composite font without a program and of no known collection draws
+    /// each code its `ToUnicode` map covers by Unicode value: Identity-H
+    /// code 3 → `H` selects the substitute's `H`, while an unmapped code
+    /// keeps the identity reading.
+    #[test]
+    fn non_embedded_cid_font_resolves_codes_through_to_unicode() {
+        use crate::resources::cmap::parse_cmap;
+        let to_unicode = parse_cmap(
+            b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+              1 beginbfchar\n<0003> <0048>\nendbfchar\n",
+        )
+        .expect("parses");
+        let desc = FontDescriptor {
+            kind: PdfFontKind::TrueType,
+            bytes: None,
+            widths: vec![],
+            first_char: 0,
+            missing_width: 0,
+            code_to_gid: vec![],
+            differences: Box::new(empty_diffs()),
+            base_encoding: BaseEncoding::Standard,
+            cid_encoding: Some(CidEncoding {
+                encoding_cmap: Arc::new(CMap::identity()),
+                cid_to_gid: None,
+                default_width: 1000,
+                widths: vec![],
+                vertical: false,
+                default_vertical: [880, -1000],
+                vertical_metrics: vec![],
+                to_unicode: Some(Arc::new(to_unicode)),
+            }),
+            type3: None,
+            substitute: SubstituteStyle::default(),
+        };
+        let mut cache = FontCache::new(Arc::default());
+        let face = cache
+            .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
+            .expect("substitute face loads");
+        let h = face.raw_get_char_index(u32::from('H'));
+        assert_ne!(h, 0);
+        assert_eq!(face.code_to_gid[3], h);
+        assert_eq!(
+            face.code_to_gid[43], 43,
+            "unmapped CIDs keep the identity reading"
+        );
+    }
+
     /// A composite font without a program, of a known character
     /// collection, draws through a CID-indexed table built from the
     /// collection's CID → Unicode mapping and the substitute's charmap:
@@ -829,6 +917,7 @@ mod tests {
                 vertical: false,
                 default_vertical: [880, -1000],
                 vertical_metrics: vec![],
+                to_unicode: None,
             }),
             type3: None,
             substitute: SubstituteStyle {
