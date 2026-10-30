@@ -46,6 +46,8 @@ log         = { workspace = true }
 camera       = { package = "rasterrocket-camera", path = "../camera" }
 # Builds the JPEG fixtures for the cache-on vs cache-off render parity test.
 jpeg-encoder = "0.7"
+# Holds the qpdf-encrypted fixtures of the encryption test.
+tempfile     = { workspace = true }
 
 [lints.rust]
 # The SIMD kernels in gray.rs and deskew/rotate.rs use raw-pointer loads,

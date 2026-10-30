@@ -71,6 +71,16 @@ version: the public API changes below are breaking.
   content usage event and the annotation flags that apply.
 - `FormType`, `RasterSession::form_type()` and `PageDiagnostics::form_type`
   report AcroForm / static XFA / dynamic XFA; dynamic XFA warns at open.
+- Encrypted documents are decrypted in process: the Standard security handler
+  (revisions 2–6, RC4 40–128-bit, AESV2, AESV3, crypt filters,
+  `/EncryptMetadata false`, user or owner password) replaces the `qpdf`
+  subprocess and its plaintext temporary file. `SessionConfig::password` and
+  `RasterOptions::password` (plus `RasterOptions::decrypt_authorized`) carry
+  the password; `pdf::OpenOptions`, `Document::open_with`,
+  `Document::from_bytes_with`, `pdf_interp::open_with` and
+  `pdf_interp::open_bytes_with` replace `open_decrypting`; the in-memory
+  entry points decrypt too. CLI `--password` (aliases `--upw`, `--opw`)
+  replaces the two unwired flags. The authorisation gate is unchanged.
 
 **Parser.** Recovery of objects absent from or misplaced in the xref,
 including object-stream members and XRef-stream trailers; object streams

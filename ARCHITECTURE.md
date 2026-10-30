@@ -107,8 +107,8 @@ deskew (optional)                    projection-profile sweep ±7°
 caller / Tesseract OCR
 ```
 
-No file I/O after the initial `open()`. The one subprocess is `qpdf`, run by
-`open()` to decrypt a document encrypted with the Standard Security Handler.
+No file I/O after the initial `open()`, and no subprocess: an encrypted
+document is decrypted in process as its objects are parsed.
 
 ---
 
@@ -291,8 +291,22 @@ cached as `Arc<Object>`.
   a value that a higher layer computes from an object, keyed by object and
   type, for the lifetime of the document. The interpreter uses it to parse
   each `JBIG2Globals` stream once per document rather than once per image.
-- **Encryption** (`decrypt.rs`). An encrypted file is handed to `qpdf`, and
-  the decrypted copy is what gets parsed.
+- **Encryption** (`crypt/`). The Standard security handler (ISO 32000-2
+  §7.6): revisions 2–4 derive the file key from the password with MD5 and
+  check it against `/U` and `/O` (RC4); revisions 5 and 6 hash the password
+  with SHA-256 (and, for 6, the AES/SHA-2 iteration of Algorithm 2.B) and
+  unwrap the key from `/UE` or `/OE` with AES-256.  The empty user password
+  is tried first, then the caller's password as user and as owner password.
+  Every string and stream of an indirect object is decrypted as the object
+  is parsed, under the per-object key of Algorithm 1 (RC4, AESV2) or the
+  file key (AESV3), by the cipher its crypt filter names (`/StmF`, `/StrF`,
+  a stream's own `/Crypt` filter, `/Identity`); cross-reference streams,
+  objects inside object streams, the `/Encrypt` dictionary and (under
+  `/EncryptMetadata false`) metadata streams are left as written.  Whether
+  decryption is permitted at all is the caller's decision
+  (`OpenOptions::decrypt_authorized`); a password is only an input to it.
+  Public-key encryption (`/Adobe.PubSec`) is not supported and is refused by
+  name.
 
 A reference that resolves to nothing is the null object (§7.3.10). For
 example, a missing `/Contents` element is skipped and the rest of the page
@@ -567,9 +581,8 @@ encode_for_gcv(page, budget) → Result<GcvImage, GcvError>   // Cloud Vision in
 release_gpu_decoders()   // call via pool.broadcast() before pool drops
 ```
 
-The `*_from_bytes` variants render an in-memory PDF with no temp file; they have
-no transparent-decrypt step, so an encrypted PDF passed as bytes errors rather
-than being decrypted.
+The `*_from_bytes` variants render an in-memory PDF with no temp file, with
+the same decryption behaviour as the path variants.
 
 `RenderedPage` carries: `pixels: Vec<u8>` (8-bit gray, width×height), `width`,
 `height`, `dpi`, `effective_dpi` (= dpi × UserUnit), and `PageDiagnostics`.
@@ -838,8 +851,8 @@ go through `quick_cache::sync::Cache` (sharded, no write lock on read hits).
 
 ## 8. Key design decisions
 
-**No Leptonica; one subprocess.**
-Everything runs in-process except decryption, which `open()` hands to `qpdf`. The Poppler wrapper (`pdf_bridge`) is kept as a
+**No Leptonica; no subprocess.**
+Everything runs in-process, decryption included. The Poppler wrapper (`pdf_bridge`) is kept as a
 reference baseline for pixel-diff regression tests; it is never linked in the
 production render path.
 

@@ -1,4 +1,5 @@
-//! Liability gate for qpdf-assisted decryption on the production CLI path.
+//! Liability gate for decrypting an encrypted document on the production
+//! CLI path.
 //!
 //! The QA harness auto-decrypts (private owned-texts tooling); the CLI
 //! must NOT silently strip copy-protection.  An encrypted document here
@@ -20,7 +21,7 @@ use std::io::{IsTerminal, Write};
 /// The liability waiver shown on stderr before the interactive prompt.
 pub(crate) const DISCLAIMER: &str = "\
 This document is encrypted (PDF Standard Security Handler). Continuing will \
-remove its copy-protection using qpdf. This capability is intended SOLELY \
+remove its copy-protection. This capability is intended SOLELY \
 for documents you own or are otherwise legally entitled to access (e.g. \
 personal copies of books you have purchased). By continuing you affirm you \
 have the lawful right to decrypt this document. The authors of this \
@@ -147,7 +148,7 @@ mod tests {
     #[test]
     fn disclaimer_has_required_substance() {
         assert!(DISCLAIMER.contains("PDF Standard Security Handler"));
-        assert!(DISCLAIMER.contains("qpdf"));
+        assert!(DISCLAIMER.contains("remove its copy-protection"));
         assert!(DISCLAIMER.contains("NO liability"));
         assert!(DISCLAIMER.contains("WITHOUT WARRANTY"));
         assert!(DISCLAIMER.contains("not legal advice"));

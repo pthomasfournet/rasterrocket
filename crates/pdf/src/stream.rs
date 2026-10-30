@@ -81,8 +81,12 @@ fn apply_filter(filter: &[u8], data: &[u8], params: Option<&Object>) -> Result<V
                 .and_then(Object::as_dict)
                 .map(|d| d as &dyn DictLookup),
         ),
-        // Image filters — pass through; the caller handles them.
-        b"DCTDecode" | b"CCITTFaxDecode" | b"JBIG2Decode" | b"JPXDecode" => Ok(data.to_vec()),
+        // Image filters — pass through; the caller handles them.  Decryption
+        // is applied when the object is parsed, so a `/Crypt` entry that
+        // survives to here named the `/Identity` filter.
+        b"DCTDecode" | b"CCITTFaxDecode" | b"JBIG2Decode" | b"JPXDecode" | b"Crypt" => {
+            Ok(data.to_vec())
+        }
         other => Err(format!(
             "unsupported filter: {}",
             String::from_utf8_lossy(other)

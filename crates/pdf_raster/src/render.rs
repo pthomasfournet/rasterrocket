@@ -383,39 +383,43 @@ const _: fn() = || {
 /// decoders are initialised lazily per rayon worker thread on first page
 /// render.
 ///
+/// An encrypted document opens only with `config.decrypt_authorized`; its
+/// objects are then decrypted in process, with `config.password` when the
+/// empty user password does not unlock it.
+///
 /// # Errors
 ///
-/// - [`RasterError::Pdf`] if the file cannot be opened or parsed.
+/// - [`RasterError::Pdf`] if the file cannot be opened or parsed, or is
+///   encrypted and decryption is not authorised or the password is wrong.
 /// - [`RasterError::BackendUnavailable`] if `config.policy` is `ForceCuda` or
 ///   `ForceVaapi` and the required GPU context fails to initialise.
 pub fn open_session(
     path: &std::path::Path,
     config: &SessionConfig,
 ) -> Result<RasterSession, RasterError> {
-    let doc =
-        pdf_interp::open_decrypting(path, config.decrypt_authorized).map_err(RasterError::from)?;
+    let doc = pdf_interp::open_with(path, &config.open_options()).map_err(RasterError::from)?;
     open_session_with_doc(doc, config)
 }
 
 /// Open a PDF held entirely in memory (e.g. extracted from an archive) and
 /// create a [`RasterSession`] for rendering.
 ///
-/// Same behaviour and backend selection as [`open_session`]; only the document
-/// source differs — no file path is touched and no temp file is written.
+/// Same behaviour, backend selection and decryption as [`open_session`];
+/// only the document source differs — no file path is touched.
 ///
 /// # Errors
 ///
-/// - [`RasterError::Pdf`] if `bytes` is not a parseable PDF.
+/// - [`RasterError::Pdf`] if `bytes` is not a parseable PDF, or is an
+///   encrypted document whose decryption is not authorised or whose
+///   password is wrong.
 /// - [`RasterError::BackendUnavailable`] if `config.policy` is `ForceCuda` or
 ///   `ForceVaapi` and the required GPU context fails to initialise.
 pub fn open_session_from_bytes(
     bytes: Vec<u8>,
     config: &SessionConfig,
 ) -> Result<RasterSession, RasterError> {
-    // No decrypt gate for in-memory sources: it qpdf-decrypts to a temp file,
-    // which only applies to an on-disk path. `config.decrypt_authorized` is
-    // intentionally not consulted here (see `pdf_interp::open_bytes`).
-    let doc = pdf_interp::open_bytes(bytes).map_err(RasterError::from)?;
+    let doc =
+        pdf_interp::open_bytes_with(bytes, &config.open_options()).map_err(RasterError::from)?;
     open_session_with_doc(doc, config)
 }
 
@@ -1152,6 +1156,8 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
     SessionConfig {
         strict: opts.strict,
         purpose: opts.purpose,
+        decrypt_authorized: opts.decrypt_authorized,
+        password: opts.password.clone(),
         ..SessionConfig::default()
     }
 }
@@ -1434,6 +1440,8 @@ mod channel_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         }
     }
 
@@ -1502,6 +1510,8 @@ mod channel_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1539,6 +1549,8 @@ mod channel_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1599,6 +1611,8 @@ mod channel_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -1768,6 +1782,8 @@ mod channel_tests {
             pages: Some(set),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         }
     }
 
@@ -1781,6 +1797,8 @@ mod channel_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -1802,6 +1820,8 @@ mod channel_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));

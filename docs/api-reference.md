@@ -50,10 +50,9 @@ memory — no file path, no temp file. For callers that already hold the documen
 bytes (e.g. a PDF extracted from an archive). Backend selection, page ordering,
 and the per-page error contract are the same as `raster_pdf`.
 
-**Note:** the in-memory path has no transparent-decrypt step (that path
-decrypts to a temp file, which only applies to an on-disk source). An encrypted
-PDF passed as bytes yields `RasterError::Pdf` (encrypted-document) rather than
-being decrypted — extract and render it from a path with decryption authorised.
+An encrypted document is handled exactly as by `raster_pdf`: decrypted in
+process when `opts.decrypt_authorized` is set, with `opts.password` when the
+empty user password does not open it.
 
 ---
 
@@ -99,7 +98,9 @@ pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession
 pub fn open_session_from_bytes(bytes: Vec<u8>, config: &SessionConfig) -> Result<RasterSession, RasterError>
 ```
 
-`open_session_from_bytes` is the in-memory counterpart to `open_session` (the session-level analogue of `raster_pdf_from_bytes`): same behaviour, taking owned PDF bytes instead of a path, with no transparent-decrypt step (an encrypted in-memory PDF errors rather than being decrypted).
+`open_session_from_bytes` is the in-memory counterpart to `open_session` (the session-level analogue of `raster_pdf_from_bytes`): same behaviour, taking owned PDF bytes instead of a path.
+
+An encrypted document (Standard security handler, revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters) is refused with `RasterError::Pdf` unless `config.decrypt_authorized` is `true`; with it, the document is decrypted in process — no subprocess, no temporary file. The empty user password is tried first (a permissions-only document needs none), then `config.password` as the user and as the owner password; a wrong password, or none where one is needed, is a `RasterError::Pdf` saying which. A document using another security handler (public-key encryption, `/Adobe.PubSec`) is refused by name.
 
 Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared GPU context (for `gpu-aa` / `gpu-icc` features) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda` or `ForceVaapi` and the required GPU cannot be initialised.
 
@@ -163,6 +164,8 @@ pub struct RasterOptions {
     pub pages: Option<PageSet>,
     pub strict: bool,
     pub purpose: RenderPurpose,
+    pub decrypt_authorized: bool,
+    pub password: Option<Password>,
 }
 ```
 
@@ -175,6 +178,8 @@ pub struct RasterOptions {
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
 | `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
 | `purpose` | — | `RenderPurpose::View` (on-screen viewing) or `RenderPurpose::Print`. See [`RenderPurpose`](#renderpurpose). |
+| `decrypt_authorized` | — | Whether an encrypted document may be decrypted; see [`SessionConfig`](#sessionconfig). `false` makes an encrypted document an error. |
+| `password` | — | Password for an encrypted document, tried as user then owner password after the empty user password. No effect unless `decrypt_authorized` is `true`. |
 
 **Default:** `RasterOptions` implements `Default`:
 
@@ -183,7 +188,7 @@ pub struct RasterOptions {
 let opts = RasterOptions { dpi: 150.0, ..RasterOptions::default() };
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `decrypt_authorized = false`, `password = None`.
 
 ---
 
@@ -371,6 +376,7 @@ pub struct SessionConfig {
     pub vulkan_device: Option<String>,  // default: None (automatic)
     // `prefetch: bool` exists only when `cache` feature is enabled
     pub decrypt_authorized: bool,  // default: false
+    pub password: Option<Password>, // default: None
     pub strict: bool,              // default: false
     pub purpose: RenderPurpose,    // default: RenderPurpose::View
 }
@@ -383,7 +389,7 @@ impl SessionConfig {
 }
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose).
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it.
 
 ---
 
@@ -696,9 +702,14 @@ Direct use of `rasterrocket-interp` is not required for most consumers. Use it w
 
 ```rust
 pub fn open(path: impl AsRef<Path>) -> Result<pdf::Document, InterpError>
+pub fn open_with(path: impl AsRef<Path>, options: &pdf::OpenOptions) -> Result<pdf::Document, InterpError>
+pub fn open_bytes(bytes: Vec<u8>) -> Result<pdf::Document, InterpError>
+pub fn open_bytes_with(bytes: Vec<u8>, options: &pdf::OpenOptions) -> Result<pdf::Document, InterpError>
 ```
 
-Opens and validates a PDF. If a catalog JavaScript entry point is detected (checked locations: `/OpenAction`, catalog `/AA`, `/Names/JavaScript`, `/AcroForm/AA`, each flagged only when genuinely a `/S /JavaScript` action), a loud `WARN` is emitted per location and the document still opens — rasterrocket has no JavaScript engine and never executes `/JS`, so a script's structural presence cannot change the static rendered page. No JS is parsed or evaluated. No page object is read at open; page-level `/AA` and annotation `/A`/`/AA` are checked per page by `page_has_javascript(doc, page_id) -> bool`, which the render path calls before each page and warns on once per session.
+Opens and validates a PDF, from a path or from bytes. `open` and `open_bytes` refuse an encrypted document; the `_with` forms take `pdf::OpenOptions { decrypt_authorized: bool, password: Option<Password> }`, with the same meaning as the `SessionConfig` fields of those names: an authorised encrypted document is decrypted in process as its objects are read (the `pdf` crate's Standard security handler), and `Document::is_encrypted()` then reports `true`. `pdf::is_encrypted(path) -> Result<bool, PdfError>` probes the trailer for `/Encrypt` without opening the document.
+
+ If a catalog JavaScript entry point is detected (checked locations: `/OpenAction`, catalog `/AA`, `/Names/JavaScript`, `/AcroForm/AA`, each flagged only when genuinely a `/S /JavaScript` action), a loud `WARN` is emitted per location and the document still opens — rasterrocket has no JavaScript engine and never executes `/JS`, so a script's structural presence cannot change the static rendered page. No JS is parsed or evaluated. No page object is read at open; page-level `/AA` and annotation `/A`/`/AA` are checked per page by `page_has_javascript(doc, page_id) -> bool`, which the render path calls before each page and warns on once per session.
 
 The returned `pdf::Document` comes from the in-tree `pdf` crate (replaced lopdf 0.40 in v0.6.0). It is a lazy, mmap-backed reader: opening the file parses only the xref table and trailer; individual objects resolve on demand via byte-offset seek with a per-object `Arc` cache shared safely across worker threads. Object stream (`ObjStm`) decompression is cached once and reused. The API mirrors the lopdf method names previously used here.
 

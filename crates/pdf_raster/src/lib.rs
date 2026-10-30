@@ -132,6 +132,7 @@ pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
+pub use pdf::Password;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{FormType, RenderPurpose};
@@ -218,14 +219,14 @@ pub fn release_gpu_decoders() {
 /// Security Handler — an `/Encrypt` entry in the trailer).
 ///
 /// A cheap structural probe: only the xref table and trailer are parsed,
-/// no objects are decoded.  Returns `false` (rather than erroring) when
-/// the file cannot be opened or parsed — callers that need a hard parse
-/// error get it from [`open_session`] proper; this probe exists solely so
-/// the CLI can decide whether to show its decryption liability prompt
-/// without paying a full session open.
+/// no objects are decoded and no password is needed.  Returns `false`
+/// (rather than erroring) when the file cannot be opened or parsed —
+/// callers that need a hard parse error get it from [`open_session`]
+/// proper; this probe exists solely so the CLI can decide whether to show
+/// its decryption liability prompt without paying a full session open.
 #[must_use]
 pub fn is_encrypted(path: &Path) -> bool {
-    pdf::Document::open(path).is_ok_and(|d| d.is_encrypted())
+    pdf::is_encrypted(path).unwrap_or(false)
 }
 
 /// Message shown when an encrypted document's decryption is not authorised.
@@ -380,6 +381,16 @@ pub struct RasterOptions {
     /// What the pages are rendered for; see [`SessionConfig::purpose`].
     /// Default [`RenderPurpose::View`].
     pub purpose: RenderPurpose,
+
+    /// Whether an encrypted document may be decrypted; see
+    /// [`SessionConfig::decrypt_authorized`].  Default `false`: an encrypted
+    /// document is an error.
+    pub decrypt_authorized: bool,
+
+    /// Password for an encrypted document; see [`SessionConfig::password`].
+    /// Default `None`.  No effect unless
+    /// [`decrypt_authorized`](Self::decrypt_authorized) is `true`.
+    pub password: Option<Password>,
 }
 
 impl Default for RasterOptions {
@@ -392,6 +403,8 @@ impl Default for RasterOptions {
             pages: None,
             strict: false,
             purpose: RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         }
     }
 }
@@ -478,8 +491,8 @@ pub fn raster_pdf(
 /// # Errors
 ///
 /// Same as [`raster_pdf`]; [`RasterError::Pdf`] if `bytes` is not a parseable
-/// PDF.  An encrypted in-memory PDF surfaces the encrypted error — the
-/// in-memory path does not go through the transparent-decrypt gate.
+/// PDF.  An encrypted document is decrypted in process under the same
+/// options as [`raster_pdf`].
 pub fn raster_pdf_from_bytes(
     bytes: Vec<u8>,
     opts: &RasterOptions,
@@ -620,6 +633,8 @@ mod page_set_tests {
             pages: None,
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -641,6 +656,8 @@ mod page_set_tests {
             pages: Some(ps),
             strict: false,
             purpose: crate::RenderPurpose::View,
+            decrypt_authorized: false,
+            password: None,
         };
         assert!(opts.pages.is_some());
     }

@@ -452,9 +452,11 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   call NVIDIA's libraries. `cargo audit` covers the registry dependency tree;
   the vendored forks are checked weekly against upstream commits, releases
   and RustSec advisories (`scripts/check_vendored.py`).
-- **Encrypted input.** Owner-password-only encrypted PDFs are decrypted via
-  an opt-in, default-deny liability gate (see Getting Started). Unencrypted
-  input never spawns a subprocess and never writes a temp file.
+- **Encrypted input.** Documents protected by the Standard security
+  handler (RC4 40–128-bit, AES-128, AES-256; revisions 2–6; user or owner
+  password, or none) are decrypted in process behind an opt-in, default-deny
+  liability gate (see Getting Started). No subprocess, no temporary file,
+  no plaintext on disk, from a path or from bytes.
 
 ## Performance
 

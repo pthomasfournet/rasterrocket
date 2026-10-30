@@ -263,15 +263,25 @@ XFA is not processed either. A dynamic XFA form (`/AcroForm /XFA` with catalog `
 
 ### Encrypted PDFs
 
-A PDF protected by an owner password only (no password needed to open it) is
-decrypted with `qpdf` behind an opt-in gate. The library refuses by default:
-an encrypted document makes `open_session` return a `RasterError::Pdf` that
-says so. Set `SessionConfig::decrypt_authorized` to allow it. The CLI asks for
-a private-copy / liability confirmation, or takes `--decrypt-owned` (or
+A PDF encrypted with the Standard security handler — RC4 (40 to 128 bits),
+AES-128 or AES-256, revisions 2 to 6 — is decrypted in process, behind an
+opt-in gate. The library refuses by default: an encrypted document makes
+`open_session` (and `open_session_from_bytes`) return a `RasterError::Pdf`
+that says so. Set `SessionConfig::decrypt_authorized` (or
+`RasterOptions::decrypt_authorized`) to allow it. The CLI asks for a
+private-copy / liability confirmation, or takes `--decrypt-owned` (or
 `RROCKET_DECRYPT_OWNED=1`) for unattended runs. Use it only for documents you
-own or are entitled to access. Decryption applies to a file path; an encrypted
-PDF passed as bytes is an error. Unencrypted input never starts a subprocess
-or writes a temporary file.
+own or are entitled to access.
+
+A document whose user password is empty (permissions-only protection) opens
+with no password. One that needs a password takes it from
+`SessionConfig::password` / `RasterOptions::password` (CLI: `--password`,
+alias `--upw` / `--opw`); it is tried as the user password and then as the
+owner password, and a wrong one is an error naming the problem. A password
+is an input to decryption, not an authorisation: without the gate it does
+nothing. Public-key encryption (`/Adobe.PubSec`) is not supported. Nothing
+is written to disk and no subprocess runs, for encrypted or unencrypted
+input.
 
 ## Building the CLI
 

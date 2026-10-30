@@ -78,6 +78,11 @@ impl Dictionary {
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, Vec<u8>, Object> {
         self.0.keys()
     }
+
+    /// Iterate mutably over values.
+    pub fn values_mut(&mut self) -> std::collections::hash_map::ValuesMut<'_, Vec<u8>, Object> {
+        self.0.values_mut()
+    }
 }
 
 impl<'a> IntoIterator for &'a Dictionary {

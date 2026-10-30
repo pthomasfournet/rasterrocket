@@ -38,7 +38,7 @@ pub mod fuzz_helpers {
 
 use std::path::Path;
 
-use pdf::Document;
+use pdf::{Document, OpenOptions};
 
 /// Errors that can occur during PDF loading or content stream interpretation.
 #[derive(Debug)]
@@ -114,34 +114,33 @@ impl From<pdf::PdfError> for InterpError {
 /// document reads no page objects.  [`page_has_javascript`] checks one page
 /// when it is rendered.
 ///
-/// # Errors
-/// - [`InterpError::Pdf`] if the file cannot be read or is not a valid PDF.
-pub fn open(path: impl AsRef<Path>) -> Result<Document, InterpError> {
-    open_decrypting(path, false)
-}
-
-/// Open a PDF, transparently qpdf-decrypting it first when it is encrypted
-/// and `decrypt_authorized` is `true`.
-///
-/// `decrypt_authorized` MUST reflect a deliberate caller decision — the
-/// CLI gates it behind an interactive private-copy / liability waiver or
-/// an explicit operator bypass; the private QA harness auto-authorises.
-/// When the document is encrypted and `decrypt_authorized` is `false`,
-/// this returns [`InterpError::Pdf`] wrapping
-/// [`pdf::PdfError::EncryptedDocument`] with an accurate, actionable
-/// message — never the misleading "document has no pages".
-///
-/// Unencrypted documents take the fast path: no qpdf spawn, no temp file.
+/// An encrypted document is refused; see [`open_with`].
 ///
 /// # Errors
 /// - [`InterpError::Pdf`] if the file cannot be read, is not a valid PDF,
-///   or is encrypted and could not be (or was not authorised to be)
-///   decrypted.
-pub fn open_decrypting(
-    path: impl AsRef<Path>,
-    decrypt_authorized: bool,
-) -> Result<Document, InterpError> {
-    let doc = Document::open_decrypting(path.as_ref(), decrypt_authorized)?;
+///   or is encrypted.
+pub fn open(path: impl AsRef<Path>) -> Result<Document, InterpError> {
+    open_with(path, &OpenOptions::default())
+}
+
+/// [`open`] with `options` deciding how an encrypted document is treated.
+///
+/// An encrypted document is refused unless
+/// [`OpenOptions::decrypt_authorized`] is set, which must reflect a
+/// deliberate caller decision (the CLI gates it behind an interactive
+/// private-copy / liability waiver or an explicit operator bypass).  With it,
+/// the empty user password and then [`OpenOptions::password`] unlock the
+/// document, whose strings and streams are then decrypted in process as they
+/// are read.  A password is an input to decryption, not an authorisation.
+///
+/// # Errors
+/// - [`InterpError::Pdf`] if the file cannot be read or is not a valid PDF.
+/// - [`InterpError::Pdf`] wrapping [`pdf::PdfError::EncryptedDocument`] if
+///   the document is encrypted and decryption is not authorised, uses an
+///   unsupported security handler, or needs a password other than the one
+///   given.
+pub fn open_with(path: impl AsRef<Path>, options: &OpenOptions) -> Result<Document, InterpError> {
+    let doc = Document::open_with(path.as_ref(), options)?;
     warn_if_javascript(&doc);
     form_type::warn_if_dynamic_xfa(&doc);
     Ok(doc)
@@ -149,34 +148,24 @@ pub fn open_decrypting(
 
 /// Open a PDF from in-memory bytes (no file path).
 ///
-/// Applies the same post-open checks as [`open_decrypting`].  For callers that
-/// already hold the PDF bytes (e.g. extracted from an archive) and want to
-/// avoid a temp file.
-///
-/// Unlike [`open_decrypting`], there is no decrypt parameter: the
-/// transparent-decrypt path qpdf-decrypts to a temp file, which only makes
-/// sense for an on-disk source.  An encrypted in-memory PDF is therefore
-/// rejected immediately with [`InterpError::Pdf`] wrapping
-/// [`pdf::PdfError::EncryptedDocument`] — rather than letting cryptic
-/// per-object decode failures surface later during rendering.
+/// Applies the same post-open checks as [`open`].  For callers that already
+/// hold the PDF bytes (e.g. extracted from an archive).  An encrypted
+/// document is refused; see [`open_bytes_with`].
 ///
 /// # Errors
-/// - [`InterpError::Pdf`] if the bytes are not a parseable PDF.
-/// - [`InterpError::Pdf`] wrapping [`pdf::PdfError::EncryptedDocument`] if the
-///   PDF is encrypted (in-memory open has no decrypt path).
+/// - [`InterpError::Pdf`] if the bytes are not a parseable PDF, or are an
+///   encrypted document.
 pub fn open_bytes(bytes: Vec<u8>) -> Result<Document, InterpError> {
-    let doc = Document::from_bytes_owned(bytes)?;
-    if doc.is_encrypted() {
-        // In-memory open has no decrypt path (qpdf decrypts to a temp file,
-        // which needs an on-disk source), so surface a clear encrypted-document
-        // error here rather than letting cryptic per-object decode failures
-        // appear later during rendering.
-        return Err(InterpError::Pdf(pdf::PdfError::EncryptedDocument(
-            "encrypted PDF: in-memory rendering cannot decrypt; \
-             extract the PDF and render it directly (with decryption authorised)"
-                .to_owned(),
-        )));
-    }
+    open_bytes_with(bytes, &OpenOptions::default())
+}
+
+/// [`open_bytes`] with `options` deciding how an encrypted document is
+/// treated, exactly as for [`open_with`].
+///
+/// # Errors
+/// The errors of [`open_with`] other than file I/O.
+pub fn open_bytes_with(bytes: Vec<u8>, options: &OpenOptions) -> Result<Document, InterpError> {
+    let doc = Document::from_bytes_with(bytes, options)?;
     warn_if_javascript(&doc);
     form_type::warn_if_dynamic_xfa(&doc);
     Ok(doc)

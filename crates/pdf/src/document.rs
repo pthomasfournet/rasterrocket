@@ -14,7 +14,7 @@ use std::{
 use memmap2::Mmap;
 
 use crate::{
-    decrypt::{self, DecryptGuard},
+    crypt::{OpenOptions, Password, SecurityHandler},
     derived::DerivedCache,
     dictionary::Dictionary,
     error::PdfError,
@@ -142,15 +142,12 @@ pub struct Document {
     scanned_offsets: OnceLock<Option<HashMap<u32, XrefEntry>>>,
     /// Values derived from objects by higher layers ([`Self::derived`]).
     derived: DerivedCache,
-    /// Owns the qpdf-decrypted temporary file (if any) so it outlives the
-    /// memory map taken over it.  A no-op guard for documents that were
-    /// not encrypted.  Dropped with the `Document`, unlinking the temp
-    /// plaintext — no leaked decrypted copies.
-    #[expect(
-        dead_code,
-        reason = "lifetime anchor only; Drop unlinks the temp file when the Document is dropped"
-    )]
-    decrypt_guard: DecryptGuard,
+    /// The authenticated security handler of an encrypted document; `None`
+    /// for a document whose trailer has no `/Encrypt`.
+    crypt: Option<SecurityHandler>,
+    /// Object number of the indirect `/Encrypt` dictionary, whose strings
+    /// are never encrypted.
+    encrypt_id: Option<u32>,
 }
 
 /// Memory source: a mapping for files of at least [`MMAP_MIN_LEN`] bytes, an
@@ -193,6 +190,52 @@ fn map_file(file: &std::fs::File) -> std::io::Result<Mmap> {
     }
 }
 
+/// The bytes of the file at `path`: a mapping for a file of at least
+/// [`MMAP_MIN_LEN`] bytes, an owned buffer for a shorter one.
+fn load_file(path: &Path) -> std::io::Result<MmapOrVec> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len < MMAP_MIN_LEN {
+        // `len < MMAP_MIN_LEN`, so the capacity conversion cannot fail.
+        let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        let _ = file.read_to_end(&mut bytes)?;
+        Ok(MmapOrVec::Owned(bytes))
+    } else {
+        crate::madvise::advise_random(&file);
+        Ok(MmapOrVec::Mapped(map_file(&file)?))
+    }
+}
+
+/// The cross-reference table and the header position of `data`.
+fn parse_structure(data: &[u8]) -> Result<(XrefTable, usize), PdfError> {
+    let header = validate_pdf_input(data)?;
+    read_xref(data, header).map_err(|e| match e {
+        // A `%PDF-` header is present (validate_pdf_input passed) but the
+        // xref could neither be parsed nor reconstructed: the file is
+        // truncated or corrupt.  Replace the low-level "startxref not
+        // found" with an accurate, operator-actionable diagnosis.
+        PdfError::BadXref(detail) => PdfError::MissingXref(detail),
+        other => other,
+    })
+}
+
+/// True when the PDF at `path` carries an `/Encrypt` entry in its trailer.
+///
+/// A structural probe: the cross-reference table and trailer are parsed,
+/// no object is read and no decryption is attempted, so the answer does
+/// not depend on any password.
+///
+/// # Errors
+/// [`PdfError::Io`] if the file cannot be read, and the structural errors of
+/// [`Document::open`] (empty, not a PDF, no cross-reference table).
+pub fn is_encrypted(path: &Path) -> Result<bool, PdfError> {
+    let data = load_file(path)?;
+    let (xref, _) = parse_structure(data.as_bytes())?;
+    Ok(xref.trailer.contains_key(b"Encrypt"))
+}
+
 impl Document {
     /// Open a PDF file at `path`.
     ///
@@ -207,86 +250,50 @@ impl Document {
     /// [`PdfError::Io`] if the file cannot be opened, read or mapped;
     /// otherwise the errors of [`Self::from_bytes_owned`].
     pub fn open(path: &Path) -> Result<Self, PdfError> {
-        Self::open_at(path, DecryptGuard::none())
+        Self::open_with(path, &OpenOptions::default())
     }
 
-    /// Open `path`, transparently qpdf-decrypting first when the document
-    /// is encrypted and `authorized` is `true`.
+    /// Open `path` with `options` deciding how an encrypted document is
+    /// treated.
     ///
-    /// The decision to authorise decryption is made by the caller (the CLI
-    /// gates it behind an interactive liability waiver / explicit operator
-    /// bypass; the QA harness auto-authorises).  This constructor only
-    /// performs the mechanical decrypt and anchors the resulting temp
-    /// file's lifetime to the returned `Document`.
-    ///
-    /// Unencrypted documents take the original path with no qpdf spawn and
-    /// no temp file — a pure structural trailer check.
+    /// An encrypted document is refused unless
+    /// [`OpenOptions::decrypt_authorized`] is set; with it, the empty user
+    /// password and then [`OpenOptions::password`] unlock the file key, and
+    /// every string and stream is decrypted in process as its object is
+    /// parsed.  An unencrypted document ignores `options`.
     ///
     /// # Errors
-    /// - [`PdfError::EncryptedDocument`] when the document is encrypted and
-    ///   `authorized` is `false`, when `qpdf` is absent, or when qpdf
-    ///   cannot decrypt (password-protected).  Never the misleading
-    ///   "document has no pages".
-    pub fn open_decrypting(path: &Path, authorized: bool) -> Result<Self, PdfError> {
-        // Open the original once to read the trailer's /Encrypt.  No
-        // objects are parsed, so this is the same cost as `open`.
-        let probe = Self::open_at(path, DecryptGuard::none())?;
-        if !probe.is_encrypted() {
-            // Unencrypted hot path: the probe IS the document — return it
-            // directly.  No qpdf spawn, no temp file, and crucially no
-            // second mmap+xref parse (re-opening here would double the
-            // cost of every unencrypted open).
-            return Ok(probe);
-        }
-        drop(probe);
-
-        // Encrypted: qpdf-decrypt to a temp file (gated on `authorized`),
-        // then open that plaintext copy.  The re-open is unavoidable here
-        // because the bytes the parser must read are a different file.
-        let (source, guard) = decrypt::resolve_source(path, true, authorized)?;
-        Self::open_at(&source, guard)
-    }
-
-    /// Open `path` and take ownership of `guard` (the qpdf temp-file RAII
-    /// anchor, or a no-op guard).
-    fn open_at(path: &Path, guard: DecryptGuard) -> Result<Self, PdfError> {
-        use std::io::Read as _;
-
-        let mut file = std::fs::File::open(path)?;
-        let len = file.metadata()?.len();
-        let data = if len < MMAP_MIN_LEN {
-            // `len < MMAP_MIN_LEN`, so the capacity conversion cannot fail.
-            let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-            let _ = file.read_to_end(&mut bytes)?;
-            MmapOrVec::Owned(bytes)
-        } else {
-            crate::madvise::advise_random(&file);
-            MmapOrVec::Mapped(map_file(&file)?)
-        };
-        Self::from_bytes_with_guard(Arc::new(data), guard)
+    /// The errors of [`Self::open`], and [`PdfError::EncryptedDocument`]
+    /// when the document is encrypted and decryption is not authorised,
+    /// uses a security handler other than `/Standard`, or needs a password
+    /// other than the one given.
+    pub fn open_with(path: &Path, options: &OpenOptions) -> Result<Self, PdfError> {
+        Self::from_source(Arc::new(load_file(path)?), options)
     }
 
     /// Construct from PDF bytes already in memory.
     ///
     /// # Errors
     /// [`PdfError::EmptyInput`] or [`PdfError::NotPdf`] when the bytes are
-    /// not a PDF, and [`PdfError::MissingXref`] when no cross-reference table
-    /// can be parsed or reconstructed.
+    /// not a PDF, [`PdfError::MissingXref`] when no cross-reference table
+    /// can be parsed or reconstructed, and [`PdfError::EncryptedDocument`]
+    /// when the document is encrypted (see [`Self::from_bytes_with`]).
     pub fn from_bytes_owned(bytes: Vec<u8>) -> Result<Self, PdfError> {
-        Self::from_bytes_with_guard(Arc::new(MmapOrVec::Owned(bytes)), DecryptGuard::none())
+        Self::from_bytes_with(bytes, &OpenOptions::default())
     }
 
-    fn from_bytes_with_guard(data: Arc<MmapOrVec>, guard: DecryptGuard) -> Result<Self, PdfError> {
-        let header = validate_pdf_input(data.as_bytes())?;
-        let (xref, base) = read_xref(data.as_bytes(), header).map_err(|e| match e {
-            // A `%PDF-` header is present (validate_pdf_input passed) but the
-            // xref could neither be parsed nor reconstructed: the file is
-            // truncated or corrupt.  Replace the low-level "startxref not
-            // found" with an accurate, operator-actionable diagnosis.
-            PdfError::BadXref(detail) => PdfError::MissingXref(detail),
-            other => other,
-        })?;
-        Ok(Self {
+    /// [`Self::from_bytes_owned`] with `options` deciding how an encrypted
+    /// document is treated, as for [`Self::open_with`].
+    ///
+    /// # Errors
+    /// The errors of [`Self::open_with`] other than I/O.
+    pub fn from_bytes_with(bytes: Vec<u8>, options: &OpenOptions) -> Result<Self, PdfError> {
+        Self::from_source(Arc::new(MmapOrVec::Owned(bytes)), options)
+    }
+
+    fn from_source(data: Arc<MmapOrVec>, options: &OpenOptions) -> Result<Self, PdfError> {
+        let (xref, base) = parse_structure(data.as_bytes())?;
+        let mut doc = Self {
             data,
             base,
             xref,
@@ -298,8 +305,62 @@ impl Document {
             lin_hints: OnceLock::new(),
             scanned_offsets: OnceLock::new(),
             derived: DerivedCache::default(),
-            decrypt_guard: guard,
-        })
+            crypt: None,
+            encrypt_id: None,
+        };
+        if let Some(encrypt) = doc.xref.trailer.get(b"Encrypt").cloned() {
+            if !options.decrypt_authorized {
+                return Err(PdfError::EncryptedDocument(
+                    crate::crypt::msg_gate_declined(),
+                ));
+            }
+            doc.install_security_handler(
+                &encrypt,
+                options.password.as_ref().map(Password::as_str),
+            )?;
+        }
+        Ok(doc)
+    }
+
+    /// Build the document's [`SecurityHandler`] from the trailer's
+    /// `/Encrypt` value and the trailer `/ID`.
+    ///
+    /// Runs before `crypt` is set, so the `/Encrypt` dictionary is parsed
+    /// (and cached) with its strings untouched, as the specification
+    /// requires.
+    fn install_security_handler(
+        &mut self,
+        encrypt: &Object,
+        password: Option<&str>,
+    ) -> Result<(), PdfError> {
+        let dict = match encrypt {
+            Object::Reference(id) => {
+                self.encrypt_id = Some(id.0);
+                self.get_dict(*id).map_err(|e| {
+                    PdfError::EncryptedDocument(format!(
+                        "document is encrypted but its /Encrypt dictionary cannot be read: {e}"
+                    ))
+                })?
+            }
+            Object::Dictionary(d) => Arc::new(d.clone()),
+            other => {
+                return Err(PdfError::EncryptedDocument(format!(
+                    "document is encrypted but /Encrypt is {}, not a dictionary",
+                    other.enum_variant()
+                )));
+            }
+        };
+        let id0 = self
+            .xref
+            .trailer
+            .get(b"ID")
+            .and_then(Object::as_array)
+            .and_then(|ids| ids.first())
+            .and_then(Object::as_str)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        self.crypt = Some(SecurityHandler::open(&dict, &id0, password)?);
+        Ok(())
     }
 
     // ── Object resolution ────────────────────────────────────────────────────
@@ -505,10 +566,20 @@ impl Document {
     }
 
     /// Parse the indirect object whose header starts at `offset`.
+    ///
+    /// In an encrypted document the object's strings and streams are
+    /// decrypted here, under the number and generation of its header; the
+    /// `/Encrypt` dictionary itself is left as written.
     fn parse_direct(&self, offset: u64) -> Option<(ObjectId, Object)> {
-        usize::try_from(offset)
+        let (found, mut obj) = usize::try_from(offset)
             .ok()
-            .and_then(|offset| parse_indirect_object(self.body(), offset))
+            .and_then(|offset| parse_indirect_object(self.body(), offset))?;
+        if let Some(crypt) = &self.crypt
+            && self.encrypt_id != Some(found.0)
+        {
+            crypt.decrypt_object(found, &mut obj);
+        }
+        Some((found, obj))
     }
 
     /// The file from `base` on: the bytes cross-reference offsets index.
@@ -690,15 +761,12 @@ impl Document {
         self.data.as_bytes()
     }
 
-    /// True when the trailer carries an `/Encrypt` entry, i.e. the document
-    /// uses the PDF Standard Security Handler.  This is a pure structural
-    /// check — no decryption is attempted and no objects are parsed.
-    ///
-    /// Used to route encrypted documents through the qpdf-assisted decrypt
-    /// preprocess instead of failing with the misleading "no pages".
+    /// True when the document is encrypted, i.e. it was opened through its
+    /// Standard security handler and its objects are decrypted as they are
+    /// read.
     #[must_use]
-    pub fn is_encrypted(&self) -> bool {
-        self.xref.trailer.contains_key(b"Encrypt")
+    pub const fn is_encrypted(&self) -> bool {
+        self.crypt.is_some()
     }
 
     /// Return the number of pages in the document by walking the page tree,

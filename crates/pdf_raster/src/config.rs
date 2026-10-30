@@ -1,9 +1,9 @@
 //! Backend selection policy and session configuration.
 
 #[cfg(doc)]
-use crate::{PageDiagnostics, RasterError, RasterSession, open_session};
+use crate::{PageDiagnostics, RasterError, RasterSession, open_session, open_session_from_bytes};
 
-use crate::RenderPurpose;
+use crate::{Password, RenderPurpose};
 
 // ── Backend policy ────────────────────────────────────────────────────────────
 
@@ -178,18 +178,28 @@ pub struct SessionConfig {
     /// initialisation fails (no cache → nowhere to prefetch into).
     #[cfg(feature = "cache")]
     pub prefetch: bool,
-    /// Whether the caller has authorised qpdf-assisted decryption of an
-    /// encrypted (PDF Standard Security Handler) document.
+    /// Whether the caller has authorised decrypting an encrypted (PDF
+    /// Standard Security Handler) document.
     ///
     /// Default `false`.  When the document is encrypted and this is
-    /// `false`, [`open_session`] returns a clear [`RasterError::Pdf`]
-    /// explaining the document is encrypted (never the misleading
-    /// "no pages").  The CLI sets this only after an interactive
-    /// private-copy / liability confirmation or an explicit
-    /// `--decrypt-owned` / `RROCKET_DECRYPT_OWNED=1` operator bypass; the
-    /// private QA harness sets it unconditionally for its owned-texts
-    /// automation.  No effect on unencrypted documents.
+    /// `false`, [`open_session`] and [`open_session_from_bytes`] return a
+    /// clear [`RasterError::Pdf`] explaining the document is encrypted
+    /// (never the misleading "no pages"), whatever [`password`](Self::password)
+    /// holds.  The CLI sets this only after an interactive private-copy /
+    /// liability confirmation or an explicit `--decrypt-owned` /
+    /// `RROCKET_DECRYPT_OWNED=1` operator bypass; the private QA harness
+    /// sets it unconditionally for its owned-texts automation.  No effect on
+    /// unencrypted documents.
     pub decrypt_authorized: bool,
+    /// Password for an encrypted document, tried as the user password and
+    /// then as the owner password after the empty user password (which
+    /// alone opens a permissions-only document).
+    ///
+    /// Default `None`.  An input to decryption, not an authorisation: it has
+    /// no effect unless [`decrypt_authorized`](Self::decrypt_authorized) is
+    /// `true`, and none on an unencrypted document.  `Password` converts
+    /// from `&str` and `String`, and its `Debug` output is redacted.
+    pub password: Option<Password>,
     /// Whether an image or a content stream that cannot be decoded fails its
     /// page.
     ///
@@ -227,8 +237,17 @@ impl SessionConfig {
             #[cfg(feature = "cache")]
             prefetch: false,
             decrypt_authorized: false,
+            password: None,
             strict: false,
             purpose: RenderPurpose::View,
+        }
+    }
+
+    /// The parser's view of this config's decryption fields.
+    pub(crate) fn open_options(&self) -> pdf::OpenOptions {
+        pdf::OpenOptions {
+            decrypt_authorized: self.decrypt_authorized,
+            password: self.password.clone(),
         }
     }
 

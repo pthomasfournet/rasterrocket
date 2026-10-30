@@ -99,6 +99,9 @@ fn main() {
         }
         session_config.decrypt_authorized = true;
     }
+    // The password is an input to decryption, not an authorisation: it is
+    // passed whether or not the gate ran, and does nothing without it.
+    session_config.password = args.password.as_deref().map(pdf_raster::Password::from);
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(args.num_threads)

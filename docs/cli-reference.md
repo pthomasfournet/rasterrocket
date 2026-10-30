@@ -145,14 +145,17 @@ rrocket --rectify --split-spreads --dewarp --gray --png -r 300 book.pdf out
 
 | Flag | Description |
 |---|---|
-| `--opw PASSWORD` | Owner password for encrypted PDFs. |
-| `--upw PASSWORD` | User password for encrypted PDFs. |
-| `--decrypt-owned` | Authorise decrypting an encrypted (Standard Security Handler) document without the interactive confirmation. Decryption runs `qpdf`, which must be installed. Use it only for documents you own or are entitled to access. `RROCKET_DECRYPT_OWNED=1` does the same. |
+| `--password PASSWORD` | Password for an encrypted PDF, tried as the user password and then as the owner password. `--upw` and `--opw` are aliases. Not needed when the user password is empty. |
+| `--decrypt-owned` | Authorise decrypting an encrypted (Standard Security Handler) document without the interactive confirmation. Use it only for documents you own or are entitled to access. `RROCKET_DECRYPT_OWNED=1` does the same. |
 
-Without `--decrypt-owned` or `RROCKET_DECRYPT_OWNED=1`, an encrypted document
-prompts for a private-copy / liability confirmation (default: no). A
-non-interactive run with neither set exits with an error instead of removing
-the protection silently.
+Decryption runs in process (RC4, AES-128 and AES-256; revisions 2 to 6);
+nothing is written to disk. Without `--decrypt-owned` or
+`RROCKET_DECRYPT_OWNED=1`, an encrypted document prompts for a private-copy /
+liability confirmation (default: no). A non-interactive run with neither set
+exits with an error instead of removing the protection silently. A password
+is an input to decryption, not an authorisation: `--password` alone does not
+pass the gate. A wrong password, or none where one is needed, is an error
+that says so.
 
 ---
 

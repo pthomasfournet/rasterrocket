@@ -166,19 +166,19 @@ pub(crate) struct Args {
     #[arg(long = "thinlinemode", value_name = "MODE", default_value = "default")]
     pub thin_line_mode: ThinLineMode,
 
-    // ── Passwords ────────────────────────────────────────────────────────────
-    /// Owner password for encrypted PDFs.
-    #[arg(long = "opw", value_name = "PASSWORD")]
-    pub owner_password: Option<String>,
-
-    /// User password for encrypted PDFs.
-    #[arg(long = "upw", value_name = "PASSWORD")]
-    pub user_password: Option<String>,
-
     // ── Encrypted-document decryption ────────────────────────────────────────
-    /// Authorise qpdf-assisted decryption of an encrypted (PDF Standard
-    /// Security Handler) document without the interactive liability
-    /// confirmation.
+    /// Password for an encrypted PDF, tried as the user password and then
+    /// as the owner password (`--upw` and `--opw` are aliases).
+    ///
+    /// Not needed for a document whose user password is empty.  A password
+    /// is an input to decryption, not an authorisation: decrypting still
+    /// requires the liability confirmation, `--decrypt-owned` or
+    /// `RROCKET_DECRYPT_OWNED=1`.
+    #[arg(long = "password", visible_aliases = ["upw", "opw"], value_name = "PASSWORD")]
+    pub password: Option<String>,
+
+    /// Authorise decrypting an encrypted (PDF Standard Security Handler)
+    /// document without the interactive liability confirmation.
     ///
     /// Intended SOLELY for documents you own or are otherwise legally
     /// entitled to access.  Setting this (or the `RROCKET_DECRYPT_OWNED=1`
