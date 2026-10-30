@@ -24,7 +24,10 @@
 //! The samples of an `Indexed` image are palette indices and convert
 //! through the palette as one-component samples.  A device space takes the
 //! `/DefaultGray`, `/DefaultRGB` or `/DefaultCMYK` entry of the colour-space
-//! resources in effect (§8.6.5.6).
+//! resources in effect (§8.6.5.6).  When the dictionary names no colour
+//! space, an ICC profile the codestream carries (JPEG 2000 `colr` box)
+//! converts the samples as an `ICCBased` space of the same channel count
+//! would; otherwise the channel count selects the device space.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,6 +65,9 @@ pub(super) struct Samples {
     /// Alpha the codestream itself carries (JPEG 2000 under `/SMaskInData`),
     /// on the image's own grid.
     pub smask: Option<SoftMask>,
+    /// The ICC profile of the codestream's own colour specification, for
+    /// an image dictionary that names no colour space.
+    pub embedded_profile: Option<Vec<u8>>,
 }
 
 impl Samples {
@@ -73,6 +79,7 @@ impl Samples {
             layout,
             data: ImageData::Cpu(data),
             smask: None,
+            embedded_profile: None,
         }
     }
 
@@ -244,6 +251,7 @@ impl ImageColour {
             layout,
             data,
             smask,
+            embedded_profile,
         } = samples;
         let n = match layout {
             Layout::Mask => {
@@ -258,6 +266,16 @@ impl ImageColour {
             Layout::Color(n) => usize::from(n),
         };
         let (space, decode) = self.space_for(n)?;
+        let profile = embedded_profile
+            .as_deref()
+            .filter(|_| self.space.is_none())
+            .and_then(|bytes| {
+                let conv = IccConversion::compile(bytes, u8::try_from(n).ok()?)?;
+                Some(EmbeddedProfile {
+                    conv: Arc::new(conv),
+                    bytes,
+                })
+            });
         let decoded = Decoded {
             doc,
             space,
@@ -267,6 +285,7 @@ impl ImageColour {
             } else {
                 255.0
             },
+            profile,
         };
         #[cfg_attr(
             not(feature = "cache"),
@@ -379,6 +398,20 @@ struct Decoded<'a> {
     space: &'a ColorSpace,
     decode: &'a [(f64, f64)],
     max_sample: f64,
+    /// The codestream's own profile, which converts in place of `space`
+    /// (then the device space of the same channel count) when present.
+    profile: Option<EmbeddedProfile<'a>>,
+}
+
+/// An ICC profile compiled from a codestream's colour specification.
+struct EmbeddedProfile<'a> {
+    conv: Arc<IccConversion>,
+    /// The profile as stored, for the device CLUT bake.
+    #[cfg_attr(
+        not(feature = "gpu-icc"),
+        expect(dead_code, reason = "read by the gpu-icc CLUT bake")
+    )]
+    bytes: &'a [u8],
 }
 
 /// The colour of every value of a one-component sample.
@@ -425,6 +458,16 @@ impl Decoded<'_> {
             .collect()
     }
 
+    /// The colour of the sample tuple `px` through the profile when there
+    /// is one, otherwise through the space.
+    fn to_rgb(&self, px: &[u8]) -> [u8; 3] {
+        let comps = self.components(px);
+        self.profile
+            .as_ref()
+            .and_then(|p| p.conv.convert(self.doc, &comps))
+            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, &comps))
+    }
+
     /// The table of the space's conversion of every one-component sample.
     /// A table whose entries are each neutral to within one level (the
     /// rounding of a CIE-based gray conversion) keeps one byte per pixel,
@@ -432,7 +475,7 @@ impl Decoded<'_> {
     fn lut(&self) -> Lut {
         let mut rgb = Box::new([[0u8; 3]; 256]);
         for (s, entry) in (0u8..=255).zip(rgb.iter_mut()) {
-            *entry = self.space.convert_to_rgb(self.doc, &self.components(&[s]));
+            *entry = self.to_rgb(&[s]);
         }
         if rgb
             .iter()
@@ -475,6 +518,15 @@ impl Decoded<'_> {
     /// identity for `DeviceRGB` and for an ICC profile that neither
     /// converts nor has a CIE-based alternate.
     fn rgb_convert(&self) -> RgbConvert {
+        if let Some(profile) = &self.profile {
+            return match &*profile.conv {
+                IccConversion::Shaper(ProfileConversion::Rgb(Some(shaper))) => {
+                    RgbConvert::Shaper(Arc::clone(shaper))
+                }
+                IccConversion::Transform { .. } => RgbConvert::Transform(Arc::clone(&profile.conv)),
+                _ => RgbConvert::Identity,
+            };
+        }
         match self.space {
             ColorSpace::Cal(cal) => cal
                 .rgb_shaper()
@@ -526,6 +578,13 @@ impl Decoded<'_> {
     /// The conversion of the space's four-component samples; the device
     /// model for `DeviceCMYK` and for an ICC profile without a transform.
     fn cmyk_convert(&self) -> CmykConvert {
+        if let Some(profile) = &self.profile {
+            return if matches!(*profile.conv, IccConversion::Transform { .. }) {
+                CmykConvert::Icc(Arc::clone(&profile.conv))
+            } else {
+                CmykConvert::Device
+            };
+        }
         match self.space {
             ColorSpace::IccBased {
                 stream_id: Some(id),
@@ -562,28 +621,31 @@ impl Decoded<'_> {
         }
         #[cfg(feature = "gpu-icc")]
         if let Some(ctx) = icc.gpu_ctx {
-            let clut = match (&convert, &self.space) {
+            let profile_bytes = match (&convert, &self.profile, &self.space) {
+                (CmykConvert::Icc(_), Some(profile), _) => Some(profile.bytes.to_vec()),
                 (
                     CmykConvert::Icc(_),
+                    None,
                     ColorSpace::IccBased {
                         stream_id: Some(id),
                         ..
                     },
-                ) => fetch_profile_bytes(self.doc, *id).and_then(|profile| {
-                    super::icc::bake_cmyk_clut_cached(
-                        &profile,
-                        super::icc::DEFAULT_GRID_N,
-                        icc.clut_cache.as_deref_mut()?,
-                    )
-                    .map_err(|e| {
-                        log::warn!(
-                            "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
-                        );
-                    })
-                    .ok()
-                }),
+                ) => fetch_profile_bytes(self.doc, *id),
                 _ => None,
             };
+            let clut = profile_bytes.and_then(|profile| {
+                super::icc::bake_cmyk_clut_cached(
+                    &profile,
+                    super::icc::DEFAULT_GRID_N,
+                    icc.clut_cache.as_deref_mut()?,
+                )
+                .map_err(|e| {
+                    log::warn!(
+                        "image: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
+                    );
+                })
+                .ok()
+            });
             match ctx.icc_cmyk_to_rgb(
                 &bytes,
                 clut.as_deref().map(|t| (t, super::icc::DEFAULT_GRID_N)),
@@ -635,7 +697,7 @@ impl Decoded<'_> {
                 if memo.len() >= MEMO_LIMIT {
                     memo.clear();
                 }
-                let rgb = self.space.convert_to_rgb(self.doc, &self.components(px));
+                let rgb = self.to_rgb(px);
                 let _ = memo.insert(px.into(), rgb);
                 rgb
             };

@@ -104,3 +104,59 @@ fn codestream_alpha_follows_smask_in_data() {
         [255, 228, 178],
     );
 }
+
+/// 8 × 8 RGB raw codestream: a 16-colour gradient (see `rgb8.rgb` beside it).
+const RGB8_J2K: &[u8] = include_bytes!("../../pdf_interp/src/resources/image/testdata/rgb8.j2k");
+
+/// `codestream` wrapped in a JP2 file whose `colr` box carries the ICC
+/// profile `profile` (method 2) for `channels` 8-bit channels.
+fn jp2_with_icc(codestream: &[u8], channels: u16, profile: &[u8]) -> Vec<u8> {
+    fn boxed(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut b = u32::try_from(8 + body.len())
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        b.extend_from_slice(&kind);
+        b.extend_from_slice(body);
+        b
+    }
+    let mut ihdr = SIDE.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&SIDE.to_be_bytes());
+    ihdr.extend_from_slice(&channels.to_be_bytes());
+    // 8 bits unsigned, JPEG 2000 compression, colour space known, no IPR.
+    ihdr.extend_from_slice(&[7, 7, 0, 0]);
+    // METH 2: a restricted ICC profile.
+    let mut colr = vec![2, 0, 0];
+    colr.extend_from_slice(profile);
+    let jp2h = [boxed(*b"ihdr", &ihdr), boxed(*b"colr", &colr)].concat();
+    [
+        boxed(*b"jP  ", b"\r\n\x87\n"),
+        boxed(*b"ftyp", b"jp2 \0\0\0\0jp2 "),
+        boxed(*b"jp2h", &jp2h),
+        boxed(*b"jp2c", codestream),
+    ]
+    .concat()
+}
+
+/// Without a `/ColorSpace`, the codestream's own ICC profile converts the
+/// samples (ISO 32000-2 Table 89, `JPXDecode`); with one, the dictionary's
+/// space does and the profile is ignored.
+#[test]
+fn embedded_icc_profile_applies_only_without_a_pdf_colour_space() {
+    let jp2 = jp2_with_icc(
+        RGB8_J2K,
+        3,
+        &common::icc::rgb_profile(common::icc::GAMMA_1_8),
+    );
+    let plain = pixel("/ColorSpace /DeviceRGB", &jp2, 4, 4);
+    let through_profile = pixel("", &jp2, 4, 4);
+    // Gamma 1.8 lightens every mid-tone: encode((v/255)^1.8) > v.
+    assert!(
+        through_profile
+            .iter()
+            .zip(plain)
+            .all(|(&p, d)| (d > 20 && d < 235 && p > d) || p.abs_diff(d) <= 1),
+        "profile {through_profile:?} should lighten the device reading {plain:?}"
+    );
+    assert_ne!(through_profile, plain);
+}

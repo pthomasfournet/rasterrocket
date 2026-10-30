@@ -2,6 +2,8 @@
 //! assembly, session construction per backend policy, and byte-exact page
 //! comparison.
 
+pub mod icc;
+
 use std::fmt::Write as _;
 use std::path::PathBuf;
 

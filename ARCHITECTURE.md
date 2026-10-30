@@ -422,7 +422,9 @@ byte per pixel when every entry is neutral; three- and four-component
 images remap `/Decode` at 8 bits and then convert (a shaper, a profile
 transform, the device CMYK model, or a memoised per-pixel conversion for Lab
 and `DeviceN`).  An image whose colorants are all `/None` is not drawn.
-Colour-key masks are compared with the samples before any of this.
+A JPEG 2000 image whose dictionary names no colour space converts through
+the ICC profile of its `colr` box, when it has one.  Colour-key masks are
+compared with the samples before any of this.
 
 **Fonts** (`renderer/font_cache.rs` and its neighbours)
 

@@ -72,7 +72,7 @@ impl IccConversion {
 
     /// Compile profile `bytes` for `n`-component values without consulting
     /// a cache.
-    fn compile(bytes: &[u8], n: u8) -> Option<Self> {
+    pub fn compile(bytes: &[u8], n: u8) -> Option<Self> {
         let shaper = ProfileConversion::from_profile_bytes(bytes);
         if matches!(
             (&shaper, n),
@@ -136,7 +136,7 @@ impl IccConversion {
     /// quantised to 8 bits for the shaper and the transform.  `None` when
     /// `comps` does not hold the compiled component count or the transform
     /// fails.
-    pub(super) fn convert(&self, doc: &Document, comps: &[f64]) -> Option<[u8; 3]> {
+    pub fn convert(&self, doc: &Document, comps: &[f64]) -> Option<[u8; 3]> {
         match self {
             Self::Alternate(space) => {
                 (comps.len() == space.ncomponents()).then(|| space.convert_to_rgb(doc, comps))

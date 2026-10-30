@@ -635,6 +635,7 @@ fn samples_from_cached(cached: Arc<CachedDeviceImage>, pdf_w: u32, pdf_h: u32) -
         layout,
         data: ImageData::Gpu(cached),
         smask: None,
+        embedded_profile: None,
     }
 }
 
@@ -731,7 +732,10 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
 ///
 /// Samples of any precision are scaled to 8 bits; sub-sampled components are
 /// upsampled to the image grid.  `opts` carries what the image dictionary
-/// decides about the codestream: see [`JpxOptions`].
+/// decides about the codestream: see [`JpxOptions`].  An ICC profile the
+/// codestream's colour specification carries is returned with the samples
+/// (`Samples::embedded_profile`) for an image dictionary that names no
+/// colour space.
 pub(super) fn decode_jpx(
     data: &[u8],
     pdf_w: u32,
@@ -744,23 +748,10 @@ pub(super) fn decode_jpx(
         return decode_jpx_indices(data);
     }
 
-    // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
-    // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
-    // never needs `/SMaskInData`.
-    #[cfg(feature = "nvjpeg2k")]
-    if let Some(dec) = gpu {
-        let area = pdf_w.saturating_mul(pdf_h);
-        if area >= super::GPU_JPEG2K_THRESHOLD_PX {
-            if let Some(img) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
-                return Some(img);
-            }
-            log::debug!("image: JPXDecode: GPU path failed, retrying on CPU");
-        }
-    }
-
-    // ── CPU path ─────────────────────────────────────────────────────────────
-    // Skip the wavelet levels the drawn size cannot show: the decoder keeps
-    // every level that leaves the image at least `draw_size` on both axes.
+    // The headers: the codestream's colour specification, and the decoder
+    // of the CPU path, which skips the wavelet levels the drawn size cannot
+    // show (it keeps every level that leaves the image at least `draw_size`
+    // on both axes).
     let settings = hayro_jpeg2000::DecodeSettings {
         target_resolution: draw_size,
         ..Default::default()
@@ -768,6 +759,27 @@ pub(super) fn decode_jpx(
     let img = hayro_jpeg2000::Image::new(data, &settings)
         .map_err(|e| log::warn!("image: JPXDecode open error: {e}"))
         .ok()?;
+    let embedded_profile = match img.color_space() {
+        hayro_jpeg2000::ColorSpace::Icc { profile, .. } => Some(profile.clone()),
+        _ => None,
+    };
+
+    // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
+    // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
+    // never needs `/SMaskInData`.
+    #[cfg(feature = "nvjpeg2k")]
+    if let Some(dec) = gpu {
+        let area = pdf_w.saturating_mul(pdf_h);
+        if area >= super::GPU_JPEG2K_THRESHOLD_PX {
+            if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
+                samples.embedded_profile = embedded_profile;
+                return Some(samples);
+            }
+            log::debug!("image: JPXDecode: GPU path failed, retrying on CPU");
+        }
+    }
+
+    // ── CPU path ─────────────────────────────────────────────────────────────
     let (jw, jh) = (img.width(), img.height());
     if jw == 0 || jh == 0 {
         log::warn!("image: JPXDecode: JP2 reported zero dimensions {jw}×{jh}");
@@ -822,8 +834,7 @@ pub(super) fn decode_jpx(
         (samples, None)
     };
 
-    // An ICC-tagged or unrecognised colour space is read by its channel
-    // count; the embedded profile is not applied.  CMYK samples are ink
+    // The samples are read by channel count; CMYK samples are ink
     // densities (0 = no ink).
     let layout = match channels {
         n @ (1 | 3 | 4) => Layout::Color(u8::try_from(n).ok()?),
@@ -834,6 +845,7 @@ pub(super) fn decode_jpx(
     };
     let mut samples = Samples::cpu(jw, jh, layout, colour);
     samples.smask = alpha.and_then(|a| super::SoftMask::new(jw, jh, a));
+    samples.embedded_profile = embedded_profile;
     Some(samples)
 }
 
