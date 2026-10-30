@@ -5,7 +5,8 @@
 
 use crate::dictionary::Dictionary;
 use crate::lexer::{
-    is_number_byte, parse_u64, read_hex_string, read_literal_string, read_name, scan_token, skip_ws,
+    is_delim, is_number_byte, is_ws, parse_u64, read_hex_string, read_literal_string, read_name,
+    scan_token, skip_ws,
 };
 
 /// A PDF indirect-object identifier `(object_number, generation)`.
@@ -641,12 +642,16 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
 
 /// Whether the token at `pos` is a keyword that ends an indirect object or
 /// opens a stream body, so no dictionary entry can continue past it.
+///
+/// Reads at most one byte past the longest keyword, so a caller stepping
+/// through a long token byte by byte stays linear in its length.
 fn at_object_keyword(data: &[u8], pos: usize) -> bool {
-    let mut end = pos;
-    matches!(
-        scan_token(data, &mut end),
-        b"endobj" | b"stream" | b"endstream"
-    )
+    let rest = &data[pos.min(data.len())..];
+    [b"endobj".as_slice(), b"stream", b"endstream"]
+        .iter()
+        .any(|kw| {
+            rest.starts_with(kw) && rest.get(kw.len()).is_none_or(|&b| is_ws(b) || is_delim(b))
+        })
 }
 
 /// Parse a complete indirect object (`<id> <gen> obj … endobj`) at `offset`.
@@ -1041,5 +1046,37 @@ mod tests {
         assert_eq!(parse(b"-1e999"), Object::Real(-f32::MAX));
         assert_eq!(parse(b"4."), Object::Real(4.0));
         assert_eq!(parse(b"-.002"), Object::Real(-0.002));
+    }
+
+    /// A dictionary that runs into a long token that is no key (stream data
+    /// after a lost `>>`) is stepped through in time linear in its length:
+    /// a megabyte of it finishes, where rescanning the token at every byte
+    /// would not.
+    #[test]
+    fn dictionary_over_long_junk_token_is_linear() {
+        let mut src = b"<< /A 1 ".to_vec();
+        src.resize(src.len() + (1 << 20), b'7');
+        let mut pos = 0;
+        let Some(Object::Dictionary(dict)) = parse_object(&src, &mut pos) else {
+            panic!("a dictionary");
+        };
+        assert_eq!(dict.get(b"A"), Some(&Object::Integer(1)));
+    }
+
+    /// The object keywords end a dictionary only as whole tokens.
+    #[test]
+    fn object_keywords_end_a_dictionary_as_whole_tokens() {
+        for (src, keys) in [
+            (&b"<< /A 1 endobj /B 2 >>"[..], 1),
+            (b"<< /A 1 stream\n", 1),
+            (b"<< /A 1 endstream", 1),
+            (b"<< /A 1 streamer /B 2 >>", 2),
+            (b"<< /A 1 endobjx /B 2 >>", 2),
+        ] {
+            let mut pos = 0;
+            let obj = parse_object(src, &mut pos).expect("an object");
+            let dict = obj.as_dict().expect("a dictionary or stream");
+            assert_eq!(dict.len(), keys, "{}", String::from_utf8_lossy(src));
+        }
     }
 }
