@@ -201,6 +201,16 @@ impl PageRenderer<'_> {
             //   (whose charmap is absent/unrelated), rendering a blank page.
             let mut push_glyph =
                 |char_code_for_path: u32, gid: u32, by_gid: bool, pen_x: i32, pen_y: i32| {
+                    // A substitute's `.notdef` is never the document's
+                    // glyph: a code it cannot draw leaves a gap.
+                    let notdef = if by_gid {
+                        gid == 0
+                    } else {
+                        face.glyph_index(char_code_for_path) == 0
+                    };
+                    if face.substitute && notdef {
+                        return;
+                    }
                     let bmp = if fill_as_bitmap {
                         if by_gid {
                             face.make_glyph_by_gid_cached(glyph_cache, gid, 0)

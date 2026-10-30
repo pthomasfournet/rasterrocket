@@ -123,7 +123,7 @@ impl FontFace {
     /// subset, a space) or one that fails to load.
     #[must_use]
     pub fn make_glyph(&self, char_code: u32, x_frac: u8) -> Option<GlyphBitmap> {
-        self.render_gid(self.resolve_gid(char_code), x_frac)
+        self.render_gid(self.glyph_index(char_code), x_frac)
     }
 
     /// Cached form of [`Self::make_glyph`].  The cache key is the resolved
@@ -135,7 +135,7 @@ impl FontFace {
         char_code: u32,
         x_frac: u8,
     ) -> Option<Arc<GlyphBitmap>> {
-        let gid = self.resolve_gid(char_code);
+        let gid = self.glyph_index(char_code);
         let key = GlyphKey::new(self.id, gid, self.size_px, x_frac, self.aa);
         cache.get_or_render(key, || self.render_gid(gid, x_frac))
     }
@@ -169,7 +169,7 @@ impl FontFace {
     /// the pen position, y up.  `None` when the glyph has no outline.
     #[must_use]
     pub fn glyph_path(&self, char_code: u32) -> Option<Path> {
-        self.outline(self.resolve_gid(char_code), 0.0)
+        self.outline(self.glyph_index(char_code), 0.0)
     }
 
     /// Outline of the glyph a composite font selects with `gid`; see
@@ -184,7 +184,7 @@ impl FontFace {
     /// records none.
     #[must_use]
     pub fn glyph_advance(&self, char_code: u32) -> Option<f64> {
-        self.program.advance(self.resolve_gid(char_code))
+        self.program.advance(self.glyph_index(char_code))
     }
 
     /// Advance width of the glyph a composite font selects with `gid`; see
@@ -230,9 +230,11 @@ impl FontFace {
         self.program.builtin_encoding_index(code)
     }
 
-    /// Resolve a character code: through `code_to_gid` when it covers the
-    /// code, otherwise through the program's charmap.
-    fn resolve_gid(&self, char_code: u32) -> u32 {
+    /// The glyph index `char_code` selects: through `code_to_gid` when it
+    /// covers the code, otherwise through the program's charmap; 0
+    /// (`.notdef`) when neither maps it.
+    #[must_use]
+    pub fn glyph_index(&self, char_code: u32) -> u32 {
         usize::try_from(char_code)
             .ok()
             .and_then(|i| self.code_to_gid.get(i))
