@@ -45,6 +45,31 @@ const MAX_PAGE_CONTENT: usize = 512 * 1024 * 1024; // 512 MiB
 /// while open (see [`map_file`]).
 const MMAP_MIN_LEN: u64 = 256 * 1024;
 
+/// The decoded content of a page, as returned by [`Document::page_content`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageContent {
+    /// The decoded `/Contents` elements, concatenated in order.
+    pub bytes: Vec<u8>,
+    /// The `/Contents` elements that contributed no bytes, in order.
+    pub failures: Vec<ContentFailure>,
+}
+
+/// A `/Contents` element skipped because it holds no decodable content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentFailure {
+    /// Object number of the element.
+    pub object: u32,
+    /// Why the element was skipped: a decode error, or the type of the
+    /// object found where a stream was expected.
+    pub reason: String,
+}
+
+impl std::fmt::Display for ContentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "content stream obj {}: {}", self.object, self.reason)
+    }
+}
+
 /// Collect the indirect references from a `/Contents` array.
 ///
 /// Shared by the indirect-ref-to-array and direct-array arms of
@@ -755,13 +780,29 @@ impl Document {
 
     /// Return the decoded content stream bytes for a page.
     ///
+    /// Equivalent to [`Self::page_content`] without the record of skipped
+    /// elements.
+    ///
+    /// # Errors
+    /// The errors of [`Self::page_content`].
+    pub fn get_page_content(&self, page_id: ObjectId) -> Result<Vec<u8>, PdfError> {
+        self.page_content(page_id).map(|content| content.bytes)
+    }
+
+    /// Return the decoded content stream bytes for a page, with the
+    /// `/Contents` elements that contributed nothing.
+    ///
+    /// A `/Contents` element that is not a stream, or that cannot be decoded,
+    /// is skipped with a warning and listed in [`PageContent::failures`].  A
+    /// reference to an undefined object is the null object (ISO 32000-1
+    /// §7.3.10) and is skipped without being listed.
+    ///
     /// # Errors
     /// The errors of [`Self::get_object`], [`PdfError::BadObject`] when the
     /// page is not a dictionary, and [`PdfError::DecodeFailed`] when the
     /// decoded total exceeds the aggregate size cap or no content stream can
-    /// be decoded.  A `/Contents` element that is missing, is not a stream,
-    /// or cannot be decoded is otherwise skipped with a warning.
-    pub fn get_page_content(&self, page_id: ObjectId) -> Result<Vec<u8>, PdfError> {
+    /// be decoded.
+    pub fn page_content(&self, page_id: ObjectId) -> Result<PageContent, PdfError> {
         let page = self.get_object(page_id)?;
         let page_dict = page.as_dict().ok_or_else(|| PdfError::BadObject {
             id: page_id.0,
@@ -769,7 +810,7 @@ impl Document {
         })?;
 
         let contents = match page_dict.get(b"Contents") {
-            None => return Ok(Vec::new()),
+            None => return Ok(PageContent::default()),
             Some(obj) => obj.clone(),
         };
 
@@ -799,10 +840,11 @@ impl Document {
                 _ => vec![*id],
             },
             Object::Array(arr) => collect_content_refs(arr, page_id),
-            _ => return Ok(Vec::new()),
+            _ => return Ok(PageContent::default()),
         };
 
         let mut out = Vec::new();
+        let mut failures = Vec::new();
         let mut decoded_any = false;
         let mut decode_failure = None;
         for r in refs {
@@ -835,6 +877,10 @@ impl Document {
                     r.0,
                     stream_obj.enum_variant()
                 );
+                failures.push(ContentFailure {
+                    object: r.0,
+                    reason: format!("{} is not a stream", stream_obj.enum_variant()),
+                });
                 continue;
             };
             // An element that cannot be decoded contributes no content; the
@@ -848,6 +894,10 @@ impl Document {
                         page_id.0,
                         r.0
                     );
+                    failures.push(ContentFailure {
+                        object: r.0,
+                        reason: e.clone(),
+                    });
                     decode_failure = decode_failure.or(Some(e));
                     continue;
                 }
@@ -881,7 +931,10 @@ impl Document {
         // Content streams that all fail to decode leave nothing to render.
         match decode_failure {
             Some(e) if !decoded_any => Err(PdfError::DecodeFailed(e)),
-            _ => Ok(out),
+            _ => Ok(PageContent {
+                bytes: out,
+                failures,
+            }),
         }
     }
 

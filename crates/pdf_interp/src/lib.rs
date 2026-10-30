@@ -721,8 +721,20 @@ pub fn parse_page_by_id(
     doc: &Document,
     page_id: pdf::ObjectId,
 ) -> Result<Vec<content::Operator>, InterpError> {
-    let content_bytes = doc.get_page_content(page_id)?;
-    Ok(content::parse(&content_bytes))
+    parse_page_content_by_id(doc, page_id).map(|(ops, _)| ops)
+}
+
+/// Like [`parse_page_by_id`], also returning the `/Contents` elements that
+/// were skipped because they hold no decodable content.
+///
+/// # Errors
+/// [`InterpError::Pdf`] if the content stream cannot be read.
+pub fn parse_page_content_by_id(
+    doc: &Document,
+    page_id: pdf::ObjectId,
+) -> Result<(Vec<content::Operator>, Vec<pdf::ContentFailure>), InterpError> {
+    let content = doc.page_content(page_id)?;
+    Ok((content::parse(&content.bytes), content.failures))
 }
 
 #[cfg(test)]

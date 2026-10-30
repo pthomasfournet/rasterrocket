@@ -188,12 +188,15 @@ pub struct SessionConfig {
     /// private QA harness sets it unconditionally for its owned-texts
     /// automation.  No effect on unencrypted documents.
     pub decrypt_authorized: bool,
-    /// Whether an image that cannot be decoded or drawn fails its page.
+    /// Whether an image or a content stream that cannot be decoded fails its
+    /// page.
     ///
-    /// Default `false`: the image is skipped, the page renders without it,
-    /// a warning naming the page and image is logged, and the failure is
-    /// reported in [`PageDiagnostics::image_failures`].  When `true` the
-    /// page returns [`RasterError::ImageDecodeFailed`] instead.
+    /// Default `false`: the image or stream is skipped, the page renders
+    /// without it, a warning naming the page and the object is logged, and
+    /// the failure is reported in [`PageDiagnostics::image_failures`] or
+    /// [`PageDiagnostics::content_failures`].  When `true` the page returns
+    /// [`RasterError::ImageDecodeFailed`] or
+    /// [`RasterError::ContentDecodeFailed`] instead.
     pub strict: bool,
 }
 

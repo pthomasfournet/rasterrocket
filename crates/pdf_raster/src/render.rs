@@ -73,6 +73,12 @@ pub enum RasterError {
     /// [`PageDiagnostics::image_failures`](crate::PageDiagnostics::image_failures)
     /// and the page still renders.
     ImageDecodeFailed(Vec<String>),
+    /// One or more of the page's content streams could not be decoded, and
+    /// the session is [strict](crate::SessionConfig::strict).  Carries one
+    /// message per skipped stream.  Without `strict` these are reported in
+    /// [`PageDiagnostics::content_failures`](crate::PageDiagnostics::content_failures)
+    /// and the page renders from the other streams.
+    ContentDecodeFailed(Vec<String>),
     /// The page render was aborted because it exceeded the per-page operator
     /// budget or wall-clock deadline.  The page is pathological (e.g.
     /// infinite-loop content stream or unbounded form-`XObject` recursion).
@@ -128,6 +134,9 @@ impl std::fmt::Display for RasterError {
             Self::InvalidPageGeometry(msg) => write!(f, "invalid page geometry: {msg}"),
             Self::BackendUnavailable(msg) => write!(f, "backend unavailable: {msg}"),
             Self::ImageDecodeFailed(v) => write!(f, "image decode failed: {}", v.join("; ")),
+            Self::ContentDecodeFailed(v) => {
+                write!(f, "content stream decode failed: {}", v.join("; "))
+            }
             Self::PageBudgetExceeded(msg) => write!(f, "page render budget exceeded: {msg}"),
             Self::RenderPanic { page, message } => {
                 write!(f, "page {page} render panicked: {message}")
@@ -722,7 +731,12 @@ fn render_page_rgb_with_geom(
     // the shared guard (per-side limit, then total-area limit computed in u64).
     crate::page::validate_dimensions(w_px, h_px)?;
 
-    let ops = pdf_interp::parse_page_by_id(doc, page_id)?;
+    let (ops, content_failures) = pdf_interp::parse_page_content_by_id(doc, page_id)?;
+    if session.strict && !content_failures.is_empty() {
+        return Err(RasterError::ContentDecodeFailed(
+            content_failures.iter().map(ToString::to_string).collect(),
+        ));
+    }
 
     // Pass the full-precision `scale` straight through: `new_scaled` takes f64,
     // and `w_px`/`h_px` above are derived from this same `scale`.  An earlier
@@ -775,6 +789,11 @@ fn render_page_rgb_with_geom(
     if let Some(reason) = renderer.budget_status() {
         return Err(RasterError::PageBudgetExceeded(reason.to_string()));
     }
+
+    for failure in &content_failures {
+        log::warn!("page {page_num}: skipped {failure}");
+    }
+    renderer.record_content_failures(content_failures);
 
     let failures = renderer.image_failures();
     if session.strict && !failures.is_empty() {

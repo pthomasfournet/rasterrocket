@@ -171,7 +171,7 @@ pub struct RasterOptions {
 | `last_page` | `≥ first_page` | 1-based inclusive. Clamped to document length silently. Ignored when `pages` is `Some`. |
 | `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
-| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`. When `false`, the image is skipped and listed in `PageDiagnostics::image_failures`. |
+| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
 
 **Default:** `RasterOptions` implements `Default`:
 
@@ -256,6 +256,7 @@ Collected at zero extra cost during rendering.
 | `dominant_filter` | `Option<ImageFilter>` | Most common image decode filter on this page (`None` for pure-vector pages). |
 | `source_ppi_hint` | `Option<f32>` | Estimated native pixels-per-inch of the dominant image. Computed as `(image_width_px / page_width_pts) × 72`. `None` when no images were blitted. |
 | `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn. Each was skipped, so its region shows whatever was painted beneath. Empty on a complete render. Includes images inside tiling-pattern tiles. |
+| `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams). Each was skipped and the page drawn from the others, so whatever it held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 
 ```rust
 pub struct ImageFailure {
@@ -265,6 +266,15 @@ pub struct ImageFailure {
 ```
 
 `ImageFailure` implements `Display` as `image /Im0: <reason>` or `inline image: <reason>`. Without `strict`, each failure is also logged at `warn` level as `page N: skipped …`.
+
+```rust
+pub struct ContentFailure {
+    pub object: u32,     // object number of the /Contents element
+    pub reason: String,  // decode error, e.g. "unsupported filter: FooDecode"
+}
+```
+
+`ContentFailure` implements `Display` as `content stream obj 5: <reason>` and is logged the same way.
 
 #### `PageDiagnostics::suggested_dpi`
 
@@ -388,6 +398,7 @@ pub enum RasterError {
     InvalidPageGeometry(String),
     BackendUnavailable(String),  // forced backend failed to init
     ImageDecodeFailed(Vec<String>),
+    ContentDecodeFailed(Vec<String>),
     PageBudgetExceeded(String),
     RenderPanic { /* isolated per-page panic */ },
 }
@@ -397,7 +408,7 @@ pub enum RasterError {
 `MAX_PX_DIMENSION` while the product still exceeds `MAX_PX_AREA`. `RenderPanic`
 carries an isolated per-page panic so one bad page cannot abort a batch.
 
-`ImageDecodeFailed` is only returned under `strict`; it carries one message per failed image.
+`ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream.
 
 Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when `SessionConfig.policy` is `ForceCuda` or `ForceVaapi`.
 

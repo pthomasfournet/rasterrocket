@@ -132,7 +132,7 @@ pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
-pub use pdf_interp::renderer::{ImageFailure, PageDiagnostics};
+pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
 pub use render::{
     RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
@@ -370,9 +370,10 @@ pub struct RasterOptions {
     /// rendered.
     pub pages: Option<PageSet>,
 
-    /// Whether an image that cannot be decoded or drawn fails its page; see
-    /// [`SessionConfig::strict`].  Default `false`: the image is skipped and
-    /// reported in [`PageDiagnostics::image_failures`].
+    /// Whether an image or a content stream that cannot be decoded fails its
+    /// page; see [`SessionConfig::strict`].  Default `false`: it is skipped
+    /// and reported in [`PageDiagnostics::image_failures`] or
+    /// [`PageDiagnostics::content_failures`].
     pub strict: bool,
 }
 

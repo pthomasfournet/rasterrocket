@@ -230,6 +230,10 @@ if !page.diagnostics.image_failures.is_empty() {
 }
 ```
 
+A `/Contents` stream that cannot be decoded is treated the same way: the page
+is drawn from its other content streams and the skipped one is listed in
+`page.diagnostics.content_failures`.
+
 Set `RasterOptions::strict` to make such a page an `Err` instead, the
 behaviour before v1.5.0.
 

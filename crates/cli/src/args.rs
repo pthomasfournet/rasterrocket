@@ -279,11 +279,12 @@ pub(crate) struct Args {
     )]
     pub vulkan_device: Option<String>,
 
-    /// Fail a page when one of its images cannot be decoded or drawn.
+    /// Fail a page when one of its images or content streams cannot be
+    /// decoded or drawn.
     ///
-    /// By default the image is skipped, the page is written without it, a
-    /// warning naming the page and image goes to stderr, and the exit status
-    /// is unaffected.  With `--strict` the page is not written and the run
+    /// By default the image or stream is skipped, the page is written
+    /// without it, a warning naming the page and object goes to stderr, and
+    /// the exit status is unaffected.  With `--strict` the page is not written and the run
     /// exits 1.
     #[arg(long = "strict")]
     pub strict: bool,

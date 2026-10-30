@@ -8,7 +8,9 @@
 mod common;
 
 use common::{SQUARE, assemble_pdf, ink, one_page, session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use rasterrocket::{
+    BackendPolicy, RasterError, RasterOptions, raster_pdf_from_bytes, render_page_rgb,
+};
 
 /// A bare keyword as a page-dictionary value loses that key only; the page
 /// and its content are still read.
@@ -57,6 +59,46 @@ fn undecodable_content_element_keeps_the_rest_of_the_page() {
             (ink - 0.32).abs() < 0.01,
             "{dict}: square must render, ink {ink}"
         );
+    }
+}
+
+/// A skipped `/Contents` element is reported in the page diagnostics, and a
+/// strict render fails the page instead.
+#[test]
+fn undecodable_content_element_is_reported() {
+    let pdf = one_page(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents [4 0 R 5 0 R] >>",
+        vec![
+            stream_object("", SQUARE),
+            stream_object("/Filter /FooDecode", b"hello"),
+        ],
+    );
+    let render = |strict| {
+        let opts = RasterOptions {
+            strict,
+            ..RasterOptions::default()
+        };
+        let mut pages: Vec<_> = raster_pdf_from_bytes(pdf.clone(), &opts).collect();
+        assert_eq!(pages.len(), 1, "one page expected");
+        pages.remove(0).1
+    };
+
+    let page = render(false).expect("page renders");
+    let failures = &page.diagnostics.content_failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].object, 5);
+    assert!(
+        failures[0].reason.contains("FooDecode"),
+        "reason names the filter: {}",
+        failures[0].reason
+    );
+
+    match render(true) {
+        Err(RasterError::ContentDecodeFailed(msgs)) => {
+            assert_eq!(msgs.len(), 1, "{msgs:?}");
+            assert!(msgs[0].starts_with("content stream obj 5"), "{}", msgs[0]);
+        }
+        other => panic!("expected ContentDecodeFailed, got {other:?}"),
     }
 }
 

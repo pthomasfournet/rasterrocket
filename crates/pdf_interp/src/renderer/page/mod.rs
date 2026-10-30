@@ -60,7 +60,7 @@ mod text_ops;
 mod vk_ops;
 
 use patterns::PatternPaint;
-use pdf::{Document, ObjectId};
+use pdf::{ContentFailure, Document, ObjectId};
 
 use color::Rgb8;
 use color::convert::div255;
@@ -139,6 +139,10 @@ pub struct PageDiagnostics {
     /// and the page rendered without it, so the region it covers shows
     /// whatever was painted beneath.  Empty on a complete render.
     pub image_failures: Vec<ImageFailure>,
+    /// Page content streams that could not be decoded.  Each one was
+    /// skipped and the page rendered from the others, so whatever it would
+    /// have drawn is missing.  Empty on a complete render.
+    pub content_failures: Vec<ContentFailure>,
 }
 
 /// An image the renderer skipped because it could not be decoded or drawn.
@@ -769,6 +773,18 @@ impl<'doc> PageRenderer<'doc> {
     #[must_use]
     pub fn image_failures(&self) -> &[ImageFailure] {
         &self.diag.image_failures
+    }
+
+    /// Content streams skipped on this page; also returned in
+    /// [`PageDiagnostics::content_failures`] by [`finish`](Self::finish).
+    #[must_use]
+    pub fn content_failures(&self) -> &[ContentFailure] {
+        &self.diag.content_failures
+    }
+
+    /// Record the page content streams that were skipped before execution.
+    pub fn record_content_failures(&mut self, failures: Vec<ContentFailure>) {
+        self.diag.content_failures.extend(failures);
     }
 
     /// Record an image that could not be drawn.  The image is skipped and the

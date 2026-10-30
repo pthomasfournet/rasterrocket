@@ -44,7 +44,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use crate::{
     InterpError,
     content::Operator,
-    page_size_pts_by_id, parse_page_by_id,
+    page_size_pts_by_id, parse_page_content_by_id,
     renderer::PageDiagnostics,
     resources::image::{IMAGE_FILTER_COUNT, ImageFilter, filter_name, inline::parse_inline_params},
 };
@@ -102,7 +102,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
 
     // 2. Walk content stream operators for inline images and text.
     let mut has_vector_text = false;
-    let ops = parse_page_by_id(doc, page_id)?;
+    let (ops, content_failures) = parse_page_content_by_id(doc, page_id)?;
     for op in &ops {
         match op {
             Operator::InlineImage { params, .. } => {
@@ -140,6 +140,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         dominant_filter,
         source_ppi_hint,
         image_failures: Vec::new(),
+        content_failures,
     })
 }
 

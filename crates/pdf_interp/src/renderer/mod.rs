@@ -11,3 +11,4 @@ pub mod text;
 
 pub use font_cache::DocumentFonts;
 pub use page::{ImageFailure, PageDiagnostics, PageRenderer};
+pub use pdf::ContentFailure;
