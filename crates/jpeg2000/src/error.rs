@@ -41,6 +41,8 @@ pub enum MarkerError {
     Invalid,
     /// Unsupported marker encountered.
     Unsupported,
+    /// The codestream uses the HTJ2K block coder (ISO/IEC 15444-15, CAP marker).
+    UnsupportedHtj2k,
     /// Expected a specific marker.
     Expected(&'static str),
     /// Missing a required marker.
@@ -151,6 +153,10 @@ impl fmt::Display for MarkerError {
         match self {
             Self::Invalid => write!(f, "invalid marker"),
             Self::Unsupported => write!(f, "unsupported marker"),
+            Self::UnsupportedHtj2k => write!(
+                f,
+                "HTJ2K (ISO/IEC 15444-15) codestream: the high-throughput block coder is not supported"
+            ),
             Self::Expected(marker) => write!(f, "expected {marker} marker"),
             Self::Missing(marker) => write!(f, "missing {marker} marker"),
             Self::ParseFailure(marker) => write!(f, "failed to parse {marker} marker"),

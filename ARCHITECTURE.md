@@ -638,6 +638,9 @@ local change. The local changes cut memory traffic under parallel decoding
 (strip-mined vertical IDWT, fused MCT and level shift, no redundant zeroing or
 copying) and add `Image::decode_u8`, which fuses the inverse MCT into the
 8-bit output. Each keeps output byte-identical to the vendored baseline.
+HTJ2K codestreams (ISO/IEC 15444-15, signalled by the CAP marker) are refused
+with a diagnostic that names them: the high-throughput block coder exists
+neither upstream nor here, so such an image is skipped and reported.
 
 ### 3.8a `read-fonts` and `skrifa` (`crates/read_fonts`, `crates/skrifa`)
 

@@ -743,7 +743,7 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
 /// decides about the codestream: see [`JpxOptions`].  An ICC profile the
 /// codestream's colour specification carries is returned with the samples
 /// (`Samples::embedded_profile`) for an image dictionary that names no
-/// colour space.
+/// colour space.  The error names what the decoder refused.
 pub(super) fn decode_jpx(
     data: &[u8],
     pdf_w: u32,
@@ -751,7 +751,7 @@ pub(super) fn decode_jpx(
     draw_size: Option<(u32, u32)>,
     opts: JpxOptions,
     #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut NvJpeg2kDecoder>,
-) -> Option<Samples> {
+) -> Result<Samples, String> {
     if opts.indices {
         return decode_jpx_indices(data);
     }
@@ -764,9 +764,7 @@ pub(super) fn decode_jpx(
         target_resolution: draw_size,
         ..Default::default()
     };
-    let img = hayro_jpeg2000::Image::new(data, &settings)
-        .map_err(|e| log::warn!("image: JPXDecode open error: {e}"))
-        .ok()?;
+    let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
     let embedded_profile = match img.color_space() {
         hayro_jpeg2000::ColorSpace::Icc { profile, .. } => Some(profile.clone()),
         _ => None,
@@ -781,7 +779,7 @@ pub(super) fn decode_jpx(
         if area >= super::GPU_JPEG2K_THRESHOLD_PX {
             if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
                 samples.embedded_profile = embedded_profile;
-                return Some(samples);
+                return Ok(samples);
             }
             log::debug!("image: JPXDecode: GPU path failed, retrying on CPU");
         }
@@ -790,8 +788,7 @@ pub(super) fn decode_jpx(
     // ── CPU path ─────────────────────────────────────────────────────────────
     let (jw, jh) = (img.width(), img.height());
     if jw == 0 || jh == 0 {
-        log::warn!("image: JPXDecode: JP2 reported zero dimensions {jw}×{jh}");
-        return None;
+        return Err(format!("codestream reports zero dimensions {jw}×{jh}"));
     }
     if draw_size.is_none() && (jw != pdf_w || jh != pdf_h) {
         log::debug!(
@@ -802,19 +799,14 @@ pub(super) fn decode_jpx(
     let channels = usize::from(img.color_space().num_channels());
     let has_alpha = img.has_alpha();
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
-    let samples = img
-        .decode_u8(&mut ctx)
-        .map_err(|e| log::warn!("image: JPXDecode decode error: {e}"))
-        .ok()?;
+    let samples = img.decode_u8(&mut ctx).map_err(|e| e.to_string())?;
 
-    let npx = (jw as usize).checked_mul(jh as usize)?;
     let stride = channels + usize::from(has_alpha);
-    if Some(samples.len()) != npx.checked_mul(stride) {
-        log::warn!(
-            "image: JPXDecode: {} samples for {jw}×{jh}×{stride}",
-            samples.len()
-        );
-        return None;
+    let expected = (jw as usize)
+        .checked_mul(jh as usize)
+        .and_then(|npx| npx.checked_mul(stride));
+    if expected != Some(samples.len()) {
+        return Err(format!("{} samples for {jw}×{jh}×{stride}", samples.len()));
     }
 
     // The alpha channel, when present, is the last sample of each pixel.
@@ -845,16 +837,15 @@ pub(super) fn decode_jpx(
     // The samples are read by channel count; CMYK samples are ink
     // densities (0 = no ink).
     let layout = match channels {
-        n @ (1 | 3 | 4) => Layout::Color(u8::try_from(n).ok()?),
-        n => {
-            log::warn!("image: JPXDecode: unsupported {n}-channel colour space");
-            return None;
-        }
+        1 => Layout::Color(1),
+        3 => Layout::Color(3),
+        4 => Layout::Color(4),
+        n => return Err(format!("unsupported {n}-channel colour space")),
     };
     let mut samples = Samples::cpu(jw, jh, layout, colour);
     samples.smask = alpha.and_then(|a| super::SoftMask::new(jw, jh, a));
     samples.embedded_profile = embedded_profile;
-    Some(samples)
+    Ok(samples)
 }
 
 /// Decode a JPEG 2000 codestream's first component as palette indices
@@ -862,28 +853,23 @@ pub(super) fn decode_jpx(
 /// palette in the JP2 container left unapplied, at full resolution (a
 /// reduced decode would average indices).  The result is one index byte
 /// per pixel.
-fn decode_jpx_indices(data: &[u8]) -> Option<Samples> {
+fn decode_jpx_indices(data: &[u8]) -> Result<Samples, String> {
     let settings = hayro_jpeg2000::DecodeSettings {
         resolve_palette_indices: false,
         ..Default::default()
     };
-    let img = hayro_jpeg2000::Image::new(data, &settings)
-        .map_err(|e| log::warn!("image: JPXDecode open error: {e}"))
-        .ok()?;
+    let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
     let (jw, jh) = (img.width(), img.height());
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
-    let decoded = img
-        .decode(&mut ctx)
-        .map_err(|e| log::warn!("image: JPXDecode decode error: {e}"))
-        .ok()?;
-    let samples = decoded.components().first()?.samples();
-    let npx = (jw as usize).checked_mul(jh as usize)?;
-    if jw == 0 || jh == 0 || samples.len() != npx {
-        log::warn!(
-            "image: JPXDecode: {} index samples for {jw}×{jh}",
-            samples.len()
-        );
-        return None;
+    let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
+    let samples = decoded
+        .components()
+        .first()
+        .ok_or_else(|| "codestream has no component".to_owned())?
+        .samples();
+    let npx = (jw as usize).checked_mul(jh as usize);
+    if jw == 0 || jh == 0 || npx != Some(samples.len()) {
+        return Err(format!("{} index samples for {jw}×{jh}", samples.len()));
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -894,7 +880,7 @@ fn decode_jpx_indices(data: &[u8]) -> Option<Samples> {
         .iter()
         .map(|&v| v.round().clamp(0.0, 255.0) as u8)
         .collect();
-    Some(Samples::gray(jw, jh, indices))
+    Ok(Samples::gray(jw, jh, indices))
 }
 
 /// What the image dictionary decides about a JPEG 2000 codestream.
@@ -1538,6 +1524,23 @@ mod tests {
         let mask = img.smask.expect("alpha channel present");
         assert_eq!((mask.width(), mask.height()), (img.width, img.height));
         assert_eq!(mask.alpha(), &alpha[..]);
+    }
+
+    /// A codestream whose main header carries a CAP marker (HTJ2K) is
+    /// refused with a diagnostic that names it.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_htj2k_codestream_is_refused_by_name() {
+        // SOC and SIZ of the RGB fixture, then CAP (Lcap 8, Pcap bit 15:
+        // Part 15, Ccap15 0x4000), then an EOC.
+        let j2k = include_bytes!("testdata/rgb8.j2k");
+        assert_eq!(&j2k[..4], &[0xFF, 0x4F, 0xFF, 0x51]);
+        let lsiz = usize::from(u16::from_be_bytes([j2k[4], j2k[5]]));
+        let mut ht = j2k[..4 + lsiz].to_vec();
+        ht.extend_from_slice(&[0xFF, 0x50, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x40, 0x00]);
+        ht.extend_from_slice(&[0xFF, 0xD9]);
+        let err = decode_jpx(&ht, 8, 8, None, PLAIN).expect_err("HTJ2K is not decoded");
+        assert!(err.contains("HTJ2K"), "{err}");
     }
 
     #[cfg(not(feature = "nvjpeg2k"))]

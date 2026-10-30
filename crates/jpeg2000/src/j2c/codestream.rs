@@ -112,6 +112,12 @@ pub(crate) fn read_header<'a>(
                 reader.read_marker()?;
                 skip_marker_segment(reader);
             }
+            markers::CAP => {
+                // ISO/IEC 15444-15 (HTJ2K): the high-throughput block coder
+                // is signalled by the CAP marker; its code-blocks cannot be
+                // decoded here.
+                bail!(MarkerError::UnsupportedHtj2k);
+            }
             (0x30..=0x3F) => {
                 // "All markers with the marker code between 0xFF30 and 0xFF3F
                 // have no marker segment parameters. They shall be skipped by
@@ -1027,6 +1033,8 @@ pub(crate) mod markers {
 
     /// Image and tile size - 'SIZ'.
     pub(crate) const SIZ: u8 = 0x51;
+    /// Extended capabilities (ISO/IEC 15444-15, HTJ2K).
+    pub(crate) const CAP: u8 = 0x50;
 
     /// Coding style default - 'COD'.
     pub(crate) const COD: u8 = 0x52;

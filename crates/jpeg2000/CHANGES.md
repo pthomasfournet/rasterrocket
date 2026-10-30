@@ -19,6 +19,13 @@ unless the entry says otherwise.
   false`; the `image` integration is no longer a default feature (the test
   suite enables it with `--features image`).
 
+## Diagnostics
+
+- `j2c/codestream.rs`, `error.rs`: a CAP marker (0xFF50, ISO/IEC 15444-15
+  HTJ2K) in the main header fails with `MarkerError::UnsupportedHtj2k`,
+  whose message names HTJ2K, instead of the generic "unsupported marker".
+  Decoding is otherwise unchanged; HTJ2K code-blocks are not decoded.
+
 ## Memory traffic under parallel decoding
 
 Measured on 24 concurrent decodes of a 2 641 × 4 278 RGB 9/7 image (the
