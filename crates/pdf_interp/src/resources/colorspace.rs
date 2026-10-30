@@ -186,9 +186,10 @@ impl ColorSpace {
     /// - `IccBased`: converts through the `icc::IccConversion` compiled
     ///   from the profile stream `stream_id`: shaper tables for a gray or
     ///   RGB matrix/TRC profile, otherwise a `moxcms` 8-bit transform of a
-    ///   3- or 4-channel profile to sRGB.  Any error (missing stream,
-    ///   malformed profile, transform failure) and a non-shaper 1-channel
-    ///   profile fall back to the device-space-by-N path.
+    ///   3- or 4-channel profile to sRGB, otherwise the stream's device or
+    ///   Lab `/Alternate` space of the same component count.  When none
+    ///   applies (missing stream, unusable profile and alternate, transform
+    ///   failure) the device space with `n` components converts.
     /// - `Indexed`: the index (rounded, clamped to `hival`) selects a
     ///   palette entry from the lookup referenced by `lookup_id`; its bytes
     ///   map linearly onto the base space's component ranges and convert
@@ -223,7 +224,7 @@ impl ColorSpace {
             Self::Lab { .. } => lab_to_srgb(comps[0], comps[1], comps[2]),
             Self::IccBased { n, stream_id } => stream_id
                 .and_then(|id| IccConversion::load(doc, id, *n))
-                .and_then(|conv| conv.convert(comps))
+                .and_then(|conv| conv.convert(doc, comps))
                 .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
             Self::Indexed {
                 base,

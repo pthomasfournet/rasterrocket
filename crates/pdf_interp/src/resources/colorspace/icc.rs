@@ -3,14 +3,18 @@
 //! A profile stream is compiled once per document into an
 //! [`IccConversion`]: a gray or RGB matrix/TRC profile into the shared
 //! shaper tables of `super::super::icc_shaper`, any other 3- or 4-channel
-//! profile into a `moxcms` 8-bit transform to sRGB.  Converting a colour
-//! value is then a table lookup or one transform call.
+//! profile into a `moxcms` 8-bit transform to sRGB.  A profile that admits
+//! neither compiles to its `/Alternate` space when that space takes the
+//! same number of components (§8.6.5.5, Table 66).  Converting a colour
+//! value is then a table lookup, one transform call, or a conversion in the
+//! alternate space.
 
 use std::sync::Arc;
 
 use moxcms::{ColorProfile, Layout, Transform8BitExecutor, TransformOptions};
 use pdf::{Document, ObjectId};
 
+use super::ColorSpace;
 use crate::resources::icc_shaper::{ProfileConversion, fetch_profile_bytes};
 
 /// The compiled sRGB conversion of one ICC profile stream for colour values
@@ -24,18 +28,48 @@ pub(super) enum IccConversion {
         n: u8,
         xform: Arc<Transform8BitExecutor>,
     },
+    /// A profile with no conversion of its own: the `/Alternate` space of
+    /// the stream, a device or Lab space of the same component count.
+    Alternate(ColorSpace),
 }
 
 impl IccConversion {
     /// The conversion of profile stream `id` for `n`-component values,
     /// compiled on first use and shared for the lifetime of `doc`.  `None`
-    /// when the stream cannot be read, the profile does not parse, or no
-    /// conversion exists for `n` channels.
+    /// when neither the profile nor the `/Alternate` space converts `n`
+    /// components.
     pub(super) fn load(doc: &Document, id: ObjectId, n: u8) -> Option<Arc<Self>> {
-        doc.derived(id, || Self::compile(&fetch_profile_bytes(doc, id)?, n))
+        doc.derived(id, || {
+            fetch_profile_bytes(doc, id)
+                .and_then(|bytes| Self::compile(&bytes, n))
+                .or_else(|| Self::alternate(doc, id, n).map(Self::Alternate))
+        })
     }
 
-    /// Compile `bytes` for `n`-component values without consulting a cache.
+    /// The `/Alternate` space of profile stream `id` when it is a device or
+    /// Lab space of `n` components.  Spaces that convert through another
+    /// space (ICC-based, Indexed, Separation, `DeviceN`) are excluded, so an
+    /// alternate cannot lead back to this profile.
+    fn alternate(doc: &Document, id: ObjectId, n: u8) -> Option<ColorSpace> {
+        let obj = doc.get_object(id).ok()?;
+        let alt = obj.as_ref().as_stream()?.dict.get(b"Alternate")?;
+        let space = super::resolve(doc, alt);
+        let usable = space.ncomponents() == usize::from(n)
+            && matches!(
+                space,
+                ColorSpace::DeviceGray
+                    | ColorSpace::DeviceRgb
+                    | ColorSpace::DeviceCmyk
+                    | ColorSpace::Lab { .. }
+            );
+        if !usable {
+            log::debug!("colorspace: ICCBased /Alternate {space:?} unusable for /N {n}");
+        }
+        usable.then_some(space)
+    }
+
+    /// Compile profile `bytes` for `n`-component values without consulting
+    /// a cache.
     fn compile(bytes: &[u8], n: u8) -> Option<Self> {
         let shaper = ProfileConversion::from_profile_bytes(bytes);
         if matches!(
@@ -65,10 +99,14 @@ impl IccConversion {
     }
 
     /// Convert normalised components to sRGB bytes.  Components are
-    /// quantised to 8 bits.  `None` when `comps` does not hold the compiled
-    /// component count or the transform fails.
-    pub(super) fn convert(&self, comps: &[f64]) -> Option<[u8; 3]> {
+    /// quantised to 8 bits for the shaper and the transform.  `None` when
+    /// `comps` does not hold the compiled component count or the transform
+    /// fails.
+    pub(super) fn convert(&self, doc: &Document, comps: &[f64]) -> Option<[u8; 3]> {
         match self {
+            Self::Alternate(space) => {
+                (comps.len() == space.ncomponents()).then(|| space.convert_to_rgb(doc, comps))
+            }
             Self::Shaper(shaper) => shaper.convert_components(comps),
             Self::Transform { n, xform } => {
                 if comps.len() != usize::from(*n) {
@@ -92,6 +130,7 @@ impl IccConversion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::colorspace::ColorSpace;
     use crate::test_helpers::make_doc_with_stream;
 
     fn srgb_doc() -> Document {
@@ -114,8 +153,8 @@ mod tests {
         let doc = srgb_doc();
         let conv = IccConversion::load(&doc, (2, 0), 3).expect("sRGB profile compiles");
         assert!(matches!(*conv, IccConversion::Shaper(_)));
-        assert_eq!(conv.convert(&[1.0, 0.0, 0.0]), Some([255, 0, 0]));
-        assert_eq!(conv.convert(&[1.0, 0.0]), None);
+        assert_eq!(conv.convert(&doc, &[1.0, 0.0, 0.0]), Some([255, 0, 0]));
+        assert_eq!(conv.convert(&doc, &[1.0, 0.0]), None);
     }
 
     #[test]
@@ -123,5 +162,48 @@ mod tests {
         let bytes = ColorProfile::new_srgb().encode().expect("encodes");
         assert!(IccConversion::compile(&bytes, 1).is_none());
         assert!(IccConversion::compile(b"not a profile", 3).is_none());
+    }
+
+    /// `[/ICCBased <unparseable profile, /N n, /Alternate alt>]`.
+    fn garbage_doc(n: u8, alternate: &str) -> Document {
+        make_doc_with_stream(b"not a profile", &format!(" /N {n} /Alternate {alternate}"))
+    }
+
+    fn icc(n: u8) -> ColorSpace {
+        ColorSpace::IccBased {
+            n,
+            stream_id: Some((2, 0)),
+        }
+    }
+
+    #[test]
+    fn unusable_profile_converts_through_its_alternate() {
+        let doc = garbage_doc(3, "[/Lab << /WhitePoint [0.9505 1 1.089] >>]");
+        let gray = icc(3).convert_to_rgb(&doc, &[50.0, 0.0, 0.0]);
+        assert!(gray.iter().all(|&c| c.abs_diff(119) <= 1), "got {gray:?}");
+    }
+
+    #[test]
+    fn alternate_with_another_component_count_is_ignored() {
+        let doc = garbage_doc(3, "/DeviceGray");
+        assert_eq!(icc(3).convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
+    }
+
+    #[test]
+    fn derived_alternates_are_ignored() {
+        let doc = garbage_doc(3, "[/ICCBased 2 0 R]");
+        assert_eq!(icc(3).convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
+        // A Separation alternate whose own alternate is this profile.
+        let doc = garbage_doc(
+            1,
+            "[/Separation /Spot [/ICCBased 2 0 R] << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+        );
+        assert_eq!(icc(1).convert_to_rgb(&doc, &[1.0]), [255; 3]);
+    }
+
+    #[test]
+    fn cal_alternate_converts_as_its_device_space() {
+        let doc = garbage_doc(1, "[/CalGray << /WhitePoint [0.9505 1 1.089] >>]");
+        assert_eq!(icc(1).convert_to_rgb(&doc, &[0.5]), [128; 3]);
     }
 }
