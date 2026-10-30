@@ -164,7 +164,14 @@ pub(super) fn render_one_annotation(
     let Some(mut form) = renderer.resources.form_from_stream_id(stream_id) else {
         return;
     };
-    form.matrix = ctm_multiply(&form.matrix, &fit_to_rect(&form.matrix, form.bbox, rect));
+    form.matrix = ctm_multiply(
+        &form.matrix,
+        &fit_to_rect(
+            &form.matrix,
+            form.bbox.unwrap_or([0.0, 0.0, 1.0, 1.0]),
+            rect,
+        ),
+    );
     if flags & NO_ROTATE != 0 && renderer.rotate_cw != 0 {
         form.matrix = ctm_multiply(&form.matrix, &upright_about(rect, renderer.rotate_cw));
     }
@@ -191,7 +198,7 @@ fn draw_synthesized(
     let form = crate::resources::FormXObject {
         content: appearance.content,
         matrix,
-        bbox: appearance.bbox,
+        bbox: Some(appearance.bbox),
         resources_id: id.unwrap_or_else(|| renderer.resources.resource_context_id()),
         has_own_resources: false,
         transparency: None,

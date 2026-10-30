@@ -256,11 +256,10 @@ pub struct FormXObject {
     pub content: Vec<u8>,
     /// Optional form Matrix `[a b c d e f]` (default: identity).
     pub matrix: [f64; 6],
-    /// Form bounding box in form user space `[llx, lly, urx, ury]`.
-    ///
-    /// Used when computing the device-space extent of a transparency group.
-    /// Defaults to `[0.0, 0.0, 1.0, 1.0]` when absent.
-    pub bbox: [f64; 4],
+    /// Form bounding box in form space `[llx, lly, urx, ury]`, which clips
+    /// the form's content and bounds its transparency group; `None` when
+    /// absent or malformed.
+    pub bbox: Option<[f64; 4]>,
     /// The object ID of the form stream, used to build a child `PageResources`.
     pub resources_id: ObjectId,
     /// True if the form has its own `Resources` dict; false means it inherits
@@ -622,7 +621,7 @@ impl<'doc> PageResources<'doc> {
         // Optional Matrix — defaults to identity if absent or malformed.
         let matrix = read_matrix(&stream.dict).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 
-        let bbox = read_bbox(&stream.dict).unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let bbox = read_bbox(&stream.dict);
 
         let has_own_resources = stream.dict.get(b"Resources").is_some();
 
@@ -648,7 +647,7 @@ impl<'doc> PageResources<'doc> {
         let stream = obj.as_stream()?;
         let content = stream.decompressed_content().ok()?;
         let matrix = read_matrix(&stream.dict).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        let bbox = read_bbox(&stream.dict).unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let bbox = read_bbox(&stream.dict);
         let has_own_resources = stream.dict.get(b"Resources").is_some();
         let transparency = read_transparency_group(self.doc, &stream.dict);
         Some(FormXObject {

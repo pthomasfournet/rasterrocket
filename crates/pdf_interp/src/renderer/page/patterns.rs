@@ -449,7 +449,7 @@ impl PageRenderer<'_> {
                 gs.fill_color = c.clone();
                 gs.stroke_color = c.clone();
             }
-            child.clip_to_cell(&desc.bbox);
+            child.clip_to_user_rect(&desc.bbox);
             child.execute(cell.ops);
             child.gstate.restore_to(depth);
             if child.budget_exceeded.is_some() {
@@ -463,14 +463,22 @@ impl PageRenderer<'_> {
         child.finish().0
     }
 
-    /// Intersect the clip with the pattern cell's `BBox` under the current CTM.
+    /// Intersect the clip with `bbox`, a rectangle `[x0, y0, x1, y1]` in
+    /// user space, under the current CTM.  A non-finite device image of the
+    /// rectangle leaves the clip unchanged.
     #[expect(
         clippy::float_cmp,
         reason = "only a quad whose corners align exactly takes the rectangle clip"
     )]
-    fn clip_to_cell(&mut self, bbox: &[f64; 4]) {
+    pub(super) fn clip_to_user_rect(&mut self, bbox: &[f64; 4]) {
         let [x0, y0, x1, y1] = *bbox;
         let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.to_device(x, y));
+        if corners
+            .iter()
+            .any(|(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return;
+        }
         let axis_aligned = corners[0].1 == corners[1].1
             && corners[1].0 == corners[2].0
             && corners[2].1 == corners[3].1

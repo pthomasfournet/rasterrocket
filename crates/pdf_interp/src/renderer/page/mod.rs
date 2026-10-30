@@ -1688,6 +1688,10 @@ impl<'doc> PageRenderer<'doc> {
         let form_ctm = ctm_multiply(&form.matrix, &old_ctm);
         self.gstate.current_mut().ctm = form_ctm;
         let parent_pattern_ctm = std::mem::replace(&mut self.pattern_ctm, form_ctm);
+        // PDF §8.10.1: the form's BBox, in form space, clips its content.
+        if let Some(bbox) = form.bbox {
+            self.clip_to_user_rect(&bbox);
+        }
 
         // Switch to the form's resource context, keeping the parent for restore.
         let child_resources = self.resources.for_form(form);
@@ -1774,14 +1778,25 @@ impl<'doc> PageRenderer<'doc> {
     }
 
     /// The parameters of a transparency group `tg` whose form has `bbox`:
-    /// the box's extent under the current CTM, in device pixels.  `None`
-    /// when the extent is non-finite; the form then paints directly onto
-    /// the page.
+    /// the box's extent under the current CTM, in device pixels, or the
+    /// whole page when the form has no box.  `None` when the extent is
+    /// non-finite; the form then paints directly onto the page.
     fn group_params(
         &self,
-        bbox: [f64; 4],
+        bbox: Option<[f64; 4]>,
         tg: crate::resources::TransparencyGroupParams,
     ) -> Option<GroupParams> {
+        let Some(bbox) = bbox else {
+            return Some(GroupParams {
+                x_min: 0,
+                y_min: 0,
+                x_max: i32::try_from(self.width).unwrap_or(i32::MAX),
+                y_max: i32::try_from(self.height).unwrap_or(i32::MAX),
+                isolated: tg.isolated,
+                knockout: tg.knockout,
+                soft_mask_type: raster::transparency::SoftMaskType::None,
+            });
+        };
         let ctm = self.gstate.current().ctm;
         let page_h = f64::from(self.height);
         let [bx0, by0, bx1, by1] = bbox;
