@@ -88,7 +88,7 @@ render_operators(ops, resources)     dispatch loop:
     │   CCITT/JBIG2 ────────────────▶ hayro-ccitt / hayro-jbig2
     │   Flate    ───────────────────▶ libdeflate (default) / flate2 fallback
     │   CMYK     ───────────────────▶ gpu::icc_cmyk_to_rgb (or AVX-512/scalar)
-    │                                 raster::draw_image
+    │                                 PageRenderer::blit_image
     ├── shading ops ────────────────▶ raster::shaded_fill / gouraud_triangle_fill
     ├── tiling ops  ────────────────▶ raster::TiledPattern
     └── transparency groups ────────▶ raster begin_group / paint_group
