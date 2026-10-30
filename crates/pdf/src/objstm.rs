@@ -28,14 +28,17 @@ const MAX_OBJECTS: usize = 1_000_000;
 
 /// A decoded object stream: its bytes and its directory of
 /// `(object number, absolute byte offset)` pairs, in directory order.
-struct ObjStm {
+pub(crate) struct ObjStm {
     data: Vec<u8>,
     directory: Vec<(u32, usize)>,
 }
 
 impl ObjStm {
     /// Decode `content` with `dict` and read the directory.
-    fn open(content: &[u8], dict: &Dictionary) -> Result<Self, String> {
+    ///
+    /// # Errors
+    /// The decode failure, or an out-of-range `/N` or `/First`.
+    pub(crate) fn open(content: &[u8], dict: &Dictionary) -> Result<Self, String> {
         let data = decode_stream(content, dict)?;
         let n = bounded_dict_usize(dict, b"N", MAX_OBJECTS)?;
         let first = bounded_dict_usize(dict, b"First", usize::MAX)?;
@@ -59,8 +62,13 @@ impl ObjStm {
         self.directory.iter().position(|&(n, _)| n == num)
     }
 
+    /// The directory: `(object number, absolute byte offset)` per entry.
+    pub(crate) fn directory(&self) -> &[(u32, usize)] {
+        &self.directory
+    }
+
     /// Parse the object at directory position `pos`.
-    fn parse_at(&self, pos: usize) -> Option<Object> {
+    pub(crate) fn parse_at(&self, pos: usize) -> Option<Object> {
         let mut at = self.directory.get(pos)?.1;
         parse_object(&self.data, &mut at)
     }
@@ -276,7 +284,7 @@ mod tests {
             Object::Integer(42)
         );
         // A pair whose offset is beyond the data is dropped, not addressed.
-        data.splice(0..0, b"5 999999 ".iter().copied());
+        drop(data.splice(0..0, b"5 999999 ".iter().copied()));
         let mut dict2 = dict.clone();
         dict2.set(
             b"First",

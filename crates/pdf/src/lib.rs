@@ -25,6 +25,7 @@ mod madvise;
 mod object;
 mod objstm;
 mod page_tree;
+mod repair;
 mod stream;
 mod xref;
 

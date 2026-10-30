@@ -21,8 +21,9 @@ use crate::{
     linearization::LinearizationHints,
     object::{Object, ObjectId, parse_indirect_object},
     objstm::ObjStmCache,
+    repair::scan_objects,
     stream::decode_stream,
-    xref::{XrefEntry, XrefTable, read_xref, scan_object_headers},
+    xref::{XrefEntry, XrefTable, read_xref},
 };
 
 // ── Limits ───────────────────────────────────────────────────────────────────
@@ -441,7 +442,11 @@ impl Document {
     fn recover_direct(&self, num: u32, failed_offset: Option<u64>) -> Option<Object> {
         let scanned = self
             .scanned_offsets
-            .get_or_init(|| scan_object_headers(self.data.as_bytes()).ok())
+            .get_or_init(|| {
+                scan_objects(self.data.as_bytes())
+                    .ok()
+                    .map(|scan| scan.entries)
+            })
             .as_ref()?;
         let Some(XrefEntry::Direct { offset, .. }) = scanned.get(&num).copied() else {
             return None;

@@ -16,6 +16,12 @@ use rasterrocket::{BackendPolicy, render_page_rgb};
 /// stream 5 together with `extra` as object 8, with the page's blue
 /// content stream as object 4 and a cross-reference stream as object 6.
 fn objstm_pdf(extra: &str) -> Vec<u8> {
+    objstm_pdf_with_startxref(extra, None)
+}
+
+/// [`objstm_pdf`] with `startxref` pointing at `startxref` instead of the
+/// cross-reference stream.
+fn objstm_pdf_with_startxref(extra: &str, startxref: Option<usize>) -> Vec<u8> {
     let bodies: [(u32, &str); 4] = [
         (1, "<< /Type /Catalog /Pages 2 0 R >>"),
         (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
@@ -69,7 +75,13 @@ fn objstm_pdf(extra: &str) -> Vec<u8> {
         "/Type /XRef /Size 9 /Root 1 0 R /W [1 4 1]",
         &rows,
     ));
-    pdf.extend_from_slice(format!("\nendobj\nstartxref\n{}\n%%EOF\n", offsets[6]).as_bytes());
+    pdf.extend_from_slice(
+        format!(
+            "\nendobj\nstartxref\n{}\n%%EOF\n",
+            startxref.unwrap_or(offsets[6])
+        )
+        .as_bytes(),
+    );
     pdf
 }
 
@@ -93,4 +105,18 @@ fn page_tree_in_object_stream_renders() {
 #[test]
 fn unparseable_neighbour_in_object_stream_keeps_the_page() {
     assert_eq!(centre_colour(objstm_pdf(")))garbage(((")), [0, 0, 255]);
+}
+
+/// With `startxref` pointing past the end of the file, the page tree is
+/// recovered from the object stream and the root from the
+/// cross-reference stream's dictionary.
+#[test]
+fn page_tree_in_object_stream_is_reconstructed_without_startxref() {
+    assert_eq!(
+        centre_colour(objstm_pdf_with_startxref(
+            "<< /Unused true >>",
+            Some(999_999)
+        )),
+        [0, 0, 255]
+    );
 }

@@ -285,7 +285,7 @@ const fn trim_eol_before(data: &[u8], start: usize, kw: usize) -> usize {
 /// aggregate decoded-content cap in `document.rs` with generous headroom for
 /// the compressed-to-decoded ratio, so a real stream is always found while a
 /// missing terminator fails fast and loudly instead of degrading throughput.
-const MAX_STREAM_SCAN: usize = 1usize << 31; // 2 GiB
+pub(crate) const MAX_STREAM_SCAN: usize = 1usize << 31; // 2 GiB
 
 /// Deepest array/dictionary nesting [`parse_object`] descends into.  Deeper
 /// input fails to parse; the bound keeps recursion within a fixed stack
@@ -361,6 +361,74 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
     Some(trim_eol_before(data, start, kw))
 }
 
+/// Where the body of a stream object lies, relative to its dictionary.
+pub(crate) enum StreamBody {
+    /// No `stream` keyword follows the dictionary: a plain dictionary.
+    None,
+    /// `stream` follows, but no `endstream` terminates the body within
+    /// [`MAX_STREAM_SCAN`] of `start`, where the body begins.
+    Unterminated { start: usize },
+    /// The body's byte range, and the position after `endstream`.
+    Found {
+        body: std::ops::Range<usize>,
+        end: usize,
+    },
+}
+
+/// Locate the body of the stream whose dictionary `dict` ends at `pos`.
+///
+/// `/Length` is authoritative when it is a *direct* integer that lands on
+/// `endstream`; the dvips / pdfTeX idiom writes it as a forward indirect
+/// reference (`/Length N 0 R`) whose value object appears *after* the
+/// stream — unresolvable here, without a `Document`.  In that case, and
+/// whenever the declared length does not land on `endstream`, the real end
+/// is found by searching for the keyword and trimming the EOL before it.
+pub(crate) fn stream_body(data: &[u8], dict: &Dictionary, pos: usize) -> StreamBody {
+    let mut peek = pos;
+    skip_ws(data, &mut peek);
+    if !data[peek..].starts_with(b"stream") {
+        return StreamBody::None;
+    }
+    peek += 6;
+    // Consume exactly one newline after "stream".
+    if data.get(peek) == Some(&b'\r') {
+        peek += 1;
+    }
+    if data.get(peek) == Some(&b'\n') {
+        peek += 1;
+    }
+    let start = peek.min(data.len());
+    let declared_len = dict
+        .get(b"Length")
+        .and_then(Object::as_i64)
+        .and_then(|n| usize::try_from(n).ok());
+    let stream_end = match declared_len {
+        Some(len) if length_lands_on_endstream(data, start, len) => {
+            start.saturating_add(len).min(data.len())
+        }
+        _ => match find_endstream(data, start) {
+            Some(end) => end,
+            None => return StreamBody::Unterminated { start },
+        },
+    };
+    let mut end = stream_end;
+    skip_ws(data, &mut end);
+    if data[end..].starts_with(b"endstream") {
+        end += 9;
+    }
+    StreamBody::Found {
+        body: start..stream_end,
+        end,
+    }
+}
+
+/// Parse the dictionary at `*pos`, which the caller has checked starts
+/// with `<<`, leaving `*pos` after its `>>`; a stream body that follows is
+/// not consumed.
+pub(crate) fn parse_dictionary(data: &[u8], pos: &mut usize) -> Option<Dictionary> {
+    parse_dict(data, pos, 0)
+}
+
 /// Parse one PDF object starting at `*pos` in `data`.  Advances `*pos` past
 /// the object.  Does NOT parse the `<id> <gen> obj … endobj` wrapper — call
 /// `parse_indirect_object` for that.
@@ -391,61 +459,25 @@ fn parse_object_nested(data: &[u8], pos: &mut usize, depth: usize) -> Option<Obj
         b'<' if data.get(*pos + 1) == Some(&b'<') => {
             // Dictionary or stream.
             let dict = parse_dict(data, pos, depth)?;
-            // Peek past whitespace to see if "stream" follows.
-            let mut peek = *pos;
-            skip_ws(data, &mut peek);
-            if data[peek..].starts_with(b"stream") {
-                peek += 6;
-                // Consume exactly one newline after "stream".
-                if data.get(peek) == Some(&b'\r') {
-                    peek += 1;
+            match stream_body(data, &dict, *pos) {
+                StreamBody::None => Some(Object::Dictionary(dict)),
+                // No `endstream` within the scan bound means the object is
+                // truncated or the file is not a valid PDF; the body is
+                // dropped with a warning rather than silently.
+                StreamBody::Unterminated { start } => {
+                    log::warn!(
+                        "stream at offset {start}: no `endstream` terminator within \
+                         {MAX_STREAM_SCAN} bytes (truncated or malformed object); \
+                         content dropped"
+                    );
+                    *pos = start;
+                    Some(Object::Stream(Stream::new(dict, Vec::new())))
                 }
-                if data.get(peek) == Some(&b'\n') {
-                    peek += 1;
+                StreamBody::Found { body, end } => {
+                    let content = data[body].to_vec();
+                    *pos = end;
+                    Some(Object::Stream(Stream::new(dict, content)))
                 }
-                let stream_start = peek.min(data.len());
-                // Determine stream length.  `/Length` is authoritative when it
-                // is a *direct* integer, but the dvips / pdfTeX idiom writes it
-                // as a forward indirect reference (`/Length N 0 R`) whose value
-                // object appears *after* the stream — unresolvable here because
-                // `parse_object` has no `Document`.  In that case (and whenever
-                // the declared length does not actually land on `endstream`),
-                // fall back to scanning for the `endstream` keyword, which is
-                // what every production PDF reader does for robustness.
-                let declared_len = dict
-                    .get(b"Length")
-                    .and_then(Object::as_i64)
-                    .and_then(|n| usize::try_from(n).ok());
-
-                let stream_end = match declared_len {
-                    Some(len) if length_lands_on_endstream(data, stream_start, len) => {
-                        stream_start.saturating_add(len).min(data.len())
-                    }
-                    // Missing, indirect (`N 0 R`), negative, or inconsistent
-                    // `/Length`: locate the real end by searching for the
-                    // `endstream` keyword and trimming the EOL that precedes it.
-                    // No `endstream` within the scan bound means the object is
-                    // truncated or the file is not a valid PDF; the body is
-                    // dropped with a warning rather than silently.
-                    _ => find_endstream(data, stream_start).unwrap_or_else(|| {
-                        log::warn!(
-                            "stream at offset {stream_start}: no `endstream` \
-                             terminator within {MAX_STREAM_SCAN} bytes \
-                             (truncated or malformed object); content dropped"
-                        );
-                        stream_start
-                    }),
-                };
-                let content = data[stream_start..stream_end].to_vec();
-                // Advance pos past "endstream".
-                *pos = stream_end;
-                skip_ws(data, pos);
-                if data[*pos..].starts_with(b"endstream") {
-                    *pos += 9;
-                }
-                Some(Object::Stream(Stream::new(dict, content)))
-            } else {
-                Some(Object::Dictionary(dict))
             }
         }
         b'<' => {
