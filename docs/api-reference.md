@@ -538,6 +538,16 @@ pub const MAX_PX_AREA: u64 = 600_000_000;
 overflow). A page whose sides are each legal but whose product exceeds this
 returns `PageAreaTooLarge`.
 
+Both are checked before the bitmap is allocated, and they bound what one call
+draws: with a `RenderParams::region` they apply to the region, so a page larger
+than either can be rendered as tiles.
+
+Images inside a page have their own budget, in `rasterrocket-interp`
+(`resources::image::MAX_IMAGE_SIDE` = 131 071 px per declared side,
+`MAX_DECODED_BYTES` = 1 GiB of decoded samples, width × height × components):
+an image over it is refused before decompression and reported in
+`PageDiagnostics::image_failures`, or fails the page under `strict`.
+
 ---
 
 ### Re-exports

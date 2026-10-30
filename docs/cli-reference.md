@@ -82,6 +82,32 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 
 ---
 
+## Size limits
+
+**Page raster.** One render is at most 32 768 pixels on a side and
+600 000 000 pixels (600 MP) in area. Both limits are checked from the page
+geometry before any pixel buffer is allocated. A page over either is refused:
+rrocket prints `rrocket: page N: render error: page pixel dimensions W×H exceed safety
+limit (32768)` (or `page pixel area W×H = A exceeds safety limit (MAX_PX_AREA =
+600000000)`), the other pages still render, and the run exits with status 1.
+
+The limits apply to what one render draws, not to the page: with the crop
+flags only the selected area is rendered, so output larger than the limits
+(a poster or map at high resolution, a 64K-class frame) is produced as tiles,
+one run per tile with `-x`/`-y`/`-W`/`-H`. In the library the same is done
+with `RenderParams::with_region` and `RenderRegion`; see the
+[API reference](api-reference.md#rasterrocketsession-module). A page whose pixel size
+at the chosen resolution does not fit in 32 bits cannot be tiled either.
+
+**Images.** An image may declare at most 131 071 pixels on a side and decode
+to at most 1 GiB of samples (width × height × components). An image over
+either is refused before it is decompressed: it is skipped, the page renders
+without it, and a warning naming the page and image goes to stderr; the
+library reports it in `PageDiagnostics::image_failures`. With `--strict` the
+page fails instead.
+
+---
+
 ## Output format
 
 | Flag | Extension | Description |
