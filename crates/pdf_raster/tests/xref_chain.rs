@@ -87,7 +87,7 @@ fn hybrid_pdf() -> Vec<u8> {
         )],
     )[0]
     .1;
-    write_xref(
+    let _ = write_xref(
         &mut pdf,
         &[(9, stm, 0, 'n')],
         &format!("/Prev {prev} /XRefStm {stm}"),
@@ -105,7 +105,7 @@ fn freed_contents_pdf() -> Vec<u8> {
     let offsets = write_objects(&mut pdf, &objects);
     let entries: Vec<_> = offsets.iter().map(|&(n, o)| (n, o, 0, 'n')).collect();
     let prev = write_xref(&mut pdf, &entries, "");
-    write_xref(&mut pdf, &[(7, 0, 1, 'f')], &format!("/Prev {prev}"));
+    let _ = write_xref(&mut pdf, &[(7, 0, 1, 'f')], &format!("/Prev {prev}"));
     pdf
 }
 
@@ -119,7 +119,7 @@ fn entry_to_another_object_pdf() -> Vec<u8> {
     let mut entries: Vec<_> = offsets.iter().map(|&(n, o)| (n, o, 0, 'n')).collect();
     let eight = offsets.iter().find(|(n, _)| *n == 8).expect("object 8").1;
     entries.push((7, eight, 0, 'n'));
-    write_xref(&mut pdf, &entries, "");
+    let _ = write_xref(&mut pdf, &entries, "");
     pdf
 }
 

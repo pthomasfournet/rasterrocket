@@ -371,8 +371,8 @@ mod tests {
         // 45° lattice with a step of 10 px: positions (0, 0), (7.07, 7.07), …
         let l = Lattice {
             origin: (0.0, 0.0),
-            col_step: (7.0710678, 7.0710678),
-            row_step: (-7.0710678, 7.0710678),
+            col_step: (7.071_067_8, 7.071_067_8),
+            row_step: (-7.071_067_8, 7.071_067_8),
         };
         let (cols, rows) = l.cells_meeting((0, 0, 20, 20), 2, 2).unwrap();
         assert!(cols.contains(&0) && cols.contains(&2), "{cols:?}");

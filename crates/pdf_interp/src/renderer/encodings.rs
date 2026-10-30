@@ -1506,7 +1506,7 @@ mod tests {
         assert_eq!(symbol[0xF0], None);
     }
 
-    /// Annex D.6: the ZapfDingbats font's codes carry the `aN` names.
+    /// Annex D.6: the Zapf Dingbats font's codes carry the `aN` names.
     #[test]
     fn zapf_dingbats_encoding_known_codes() {
         let dingbats = base_encoding_table(BaseEncoding::ZapfDingbats);

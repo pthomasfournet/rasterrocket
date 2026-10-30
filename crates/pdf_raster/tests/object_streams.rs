@@ -9,6 +9,8 @@
 )]
 mod common;
 
+use std::fmt::Write as _;
+
 use common::{session, stream_object};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
@@ -35,7 +37,7 @@ fn objstm_pdf_with(extra: &str, startxref: Option<usize>, self_nested: bool) -> 
     let mut directory = String::new();
     let mut data = String::new();
     for (num, body) in bodies {
-        directory.push_str(&format!("{num} {} ", data.len()));
+        write!(directory, "{num} {} ", data.len()).expect("writing to a String");
         data.push_str(body);
         data.push('\n');
     }

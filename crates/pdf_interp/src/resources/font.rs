@@ -1729,7 +1729,7 @@ mod tests {
         let doc = empty_doc();
         let (dw2, segments) = extract_cid_vertical_metrics(&doc, &make_dict(&[]));
         assert_eq!(dw2, [880, -1000]);
-        assert!(segments.is_empty());
+        assert_eq!(segments.len(), 0);
     }
 
     #[test]

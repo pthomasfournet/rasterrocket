@@ -7,6 +7,8 @@
 )]
 mod common;
 
+use std::fmt::Write as _;
+
 use common::{SQUARE, ink, one_page, stream_object};
 
 /// The bytes spelled by the hexadecimal string `hex`.
@@ -33,7 +35,7 @@ fn content_ink(filter: &str, data: &[u8]) -> f64 {
 #[test]
 fn abbreviated_filter_names_decode_content_streams() {
     let ahx = format!("{}>", hex_of(SQUARE));
-    let ahx_fl = format!("{}>", SQUARE_ZLIB);
+    let ahx_fl = format!("{SQUARE_ZLIB}>");
     for (filter, data) in [
         ("/Fl", unhex(SQUARE_ZLIB)),
         ("/AHx", ahx.into_bytes()),
@@ -49,7 +51,7 @@ fn abbreviated_filter_names_decode_content_streams() {
     }
 }
 
-/// An image XObject whose `/Filter` is abbreviated decodes as under the
+/// An image `XObject` whose `/Filter` is abbreviated decodes as under the
 /// full name.
 #[test]
 fn abbreviated_filter_name_decodes_an_image() {
@@ -117,7 +119,10 @@ fn tiff_predictor_undoes_every_depth() {
 
 /// `data` as ASCII hexadecimal.
 fn hex_of(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
+    data.iter().fold(String::new(), |mut s, b| {
+        write!(s, "{b:02x}").expect("writing to a String");
+        s
+    })
 }
 
 /// `data` as a single `RunLengthDecode` literal run followed by EOD.

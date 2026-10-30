@@ -655,7 +655,7 @@ mod tests {
         let t = tokens(b"BI ID EI Q");
         assert_eq!(t.len(), 2);
         match &t[0] {
-            Token::InlineImage { data, .. } => assert!(data.is_empty()),
+            Token::InlineImage { data, .. } => assert_eq!(data.len(), 0),
             other => panic!("expected InlineImage, got {other:?}"),
         }
     }

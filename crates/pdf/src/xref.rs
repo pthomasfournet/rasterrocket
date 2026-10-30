@@ -502,6 +502,8 @@ fn find_startxref(data: &[u8]) -> Result<u64, PdfError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     #[test]
@@ -645,12 +647,10 @@ startxref
     fn classic_section(first: u32, entries: &[(u64, u16, u8)], trailer: &str) -> Vec<u8> {
         let mut s = format!("xref\n{first} {}\n", entries.len());
         for (offset, generation, flag) in entries {
-            s.push_str(&format!(
-                "{offset:010} {generation:05} {} \n",
-                *flag as char
-            ));
+            writeln!(s, "{offset:010} {generation:05} {} ", *flag as char)
+                .expect("writing to a String");
         }
-        s.push_str(&format!("trailer\n{trailer}\n"));
+        writeln!(s, "trailer\n{trailer}").expect("writing to a String");
         s.into_bytes()
     }
 
@@ -675,7 +675,7 @@ startxref
         let new = append(&mut data, b"7 0 obj\n(new)\nendobj\n");
         let mut stream =
             b"9 0 obj\n<</Type/XRef/Size 10/W[1 4 1]/Index[7 1]/Length 6>>\nstream\n\x01".to_vec();
-        stream.extend_from_slice(&(new as u32).to_be_bytes());
+        stream.extend_from_slice(&u32::try_from(new).expect("small").to_be_bytes());
         stream.extend_from_slice(b"\x00\nendstream\nendobj\n");
         let stm = append(&mut data, &stream);
         let xref2 = append(

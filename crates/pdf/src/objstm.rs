@@ -186,6 +186,8 @@ fn read_directory(data: &[u8], n: usize, first: usize) -> Vec<(u32, usize)> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// An object stream whose bodies are `objects`, with `/N` set to
@@ -194,14 +196,20 @@ mod tests {
         let mut directory = String::new();
         let mut bodies = String::new();
         for (num, body) in objects {
-            directory.push_str(&format!("{num} {} ", bodies.len()));
+            write!(directory, "{num} {} ", bodies.len()).expect("writing to a String");
             bodies.push_str(body);
             bodies.push('\n');
         }
         let first = directory.len();
         let mut dict = Dictionary::new();
-        dict.set(b"N", Object::Integer(declared as i64));
-        dict.set(b"First", Object::Integer(first as i64));
+        dict.set(
+            b"N",
+            Object::Integer(i64::try_from(declared).expect("small")),
+        );
+        dict.set(
+            b"First",
+            Object::Integer(i64::try_from(first).expect("small")),
+        );
         (format!("{directory}{bodies}").into_bytes(), dict)
     }
 

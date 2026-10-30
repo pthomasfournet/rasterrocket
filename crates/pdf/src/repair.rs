@@ -277,6 +277,8 @@ fn scan_obj_header_backwards(data: &[u8], obj_kw: usize) -> Option<(ObjectId, us
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// The header offset of `needle` in `hay`.
@@ -300,7 +302,7 @@ mod tests {
         let mut directory = String::new();
         let mut bodies = String::new();
         for (num, body) in objects {
-            directory.push_str(&format!("{num} {} ", bodies.len()));
+            write!(directory, "{num} {} ", bodies.len()).expect("writing to a String");
             bodies.push_str(body);
             bodies.push('\n');
         }

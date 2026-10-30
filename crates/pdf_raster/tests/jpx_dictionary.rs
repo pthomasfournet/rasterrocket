@@ -10,6 +10,8 @@
 )]
 mod common;
 
+use std::fmt::Write as _;
+
 use common::{assemble_pdf, session, stream_object};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
@@ -63,9 +65,10 @@ fn assert_near(name: &str, got: [u8; 3], want: [u8; 3]) {
 #[test]
 fn indexed_colour_space_applies_the_pdf_palette() {
     // Entry i of the palette is (i, 0, 255 − i).
-    let palette: String = (0..=255u8)
-        .map(|i| format!("{i:02X}00{:02X}", 255 - i))
-        .collect();
+    let palette = (0..=255u8).fold(String::new(), |mut s, i| {
+        write!(s, "{i:02X}00{:02X}", 255 - i).expect("writing to a String");
+        s
+    });
     let entries = format!("/ColorSpace [/Indexed /DeviceRGB 255 <{palette}>]");
     for (row, &v) in GRAY8_ROWS.iter().enumerate() {
         assert_near(

@@ -577,7 +577,7 @@ mod tests {
                 for (y, row) in data.chunks_exact(w).enumerate() {
                     let wy = overlap(t0, t1, y);
                     if wy > 0.0 {
-                        sum += wy * exact_mean(row, s0, s1);
+                        sum = wy.mul_add(exact_mean(row, s0, s1), sum);
                     }
                 }
                 let want = sum / (t1 - t0);

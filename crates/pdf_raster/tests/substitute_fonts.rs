@@ -202,7 +202,7 @@ fn symbol_font_draws_its_own_encoding() {
     );
 }
 
-/// A non-embedded ZapfDingbats font draws dingbats: code `n` is `a73`, a
+/// A non-embedded `ZapfDingbats` font draws dingbats: code `n` is `a73`, a
 /// filled square, whose ink fills its bounding box.
 #[test]
 fn zapf_dingbats_font_draws_dingbats() {

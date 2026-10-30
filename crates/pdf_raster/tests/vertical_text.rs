@@ -29,7 +29,7 @@ enum Encoding<'a> {
 
 /// Bounding box `(x0, y0, x1, y1)` (device pixels, y down, inclusive) and
 /// dark pixel count of `content` shown in a `CIDFontType2` Ahem with
-/// `encoding` and the extra CIDFont entries `cid_extra`, on a 48 × 64 pt
+/// `encoding` and the extra `CIDFont` entries `cid_extra`, on a 48 × 64 pt
 /// page at one pixel per point.
 fn ink(
     encoding: &Encoding<'_>,

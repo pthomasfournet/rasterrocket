@@ -327,7 +327,7 @@ fn corrupted_programs_do_not_panic() {
 }
 
 /// Glyph names resolve to Unicode through the Adobe Glyph List (version
-/// 2.0, which carries no ZapfDingbats `aN` name) and the `uni` / `u`
+/// 2.0, which carries no Zapf Dingbats `aN` name) and the `uni` / `u`
 /// conventions; a `.variant` suffix is ignored.
 #[test]
 fn glyph_names_resolve_to_unicode() {
@@ -382,7 +382,7 @@ fn sfnt_face_infos_summarise_a_file() {
     assert!(!infos[0].italic);
     let text = dir.join("not-a-font.ttf");
     std::fs::write(&text, b"hello").expect("write");
-    assert!(face_infos(&text).is_empty());
-    assert!(face_infos(&dir.join("missing.ttf")).is_empty());
+    assert_eq!(face_infos(&text).len(), 0);
+    assert_eq!(face_infos(&dir.join("missing.ttf")).len(), 0);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }

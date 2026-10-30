@@ -448,7 +448,7 @@ mod tests {
         let pixels: Vec<u8> = (0..SRC * SRC * 3)
             .map(|i| u8::try_from(((i * 7) + 3) % 251).expect("fits"))
             .collect();
-        let h = DeviceImageCache::hash_bytes(&pixels);
+        let hash = DeviceImageCache::hash_bytes(&pixels);
 
         let cache = DeviceImageCache::new(
             Arc::clone(&stream),
@@ -461,7 +461,7 @@ mod tests {
             .insert(InsertRequest {
                 doc: DocId([0; 32]),
                 obj: ObjId(1),
-                hash: h,
+                hash,
                 width: SRC,
                 height: SRC,
                 layout: ImageLayout::Rgb,

@@ -107,9 +107,9 @@ pub fn one_page(page: &str, rest: Vec<Vec<u8>>) -> Vec<u8> {
 pub fn ink(pdf: Vec<u8>) -> f64 {
     let s = session(pdf, BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("page renders");
-    let px = bmp.data().chunks_exact(3);
+    let (px, _) = bmp.data().as_chunks::<3>();
     let total = px.len();
-    let dark = px.filter(|p| p.iter().any(|&c| c < 128)).count();
+    let dark = px.iter().filter(|p| p.iter().any(|&c| c < 128)).count();
     #[expect(
         clippy::cast_precision_loss,
         reason = "pixel counts of a test page are far below 2^52"

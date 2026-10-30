@@ -65,7 +65,11 @@ fn ink_centroid_x(font: &str, extra: &[Vec<u8>], content: &str) -> f64 {
     let (mut weighted, mut total) = (0.0, 0.0);
     for (i, px) in bmp.data().chunks(3).enumerate() {
         let coverage = f64::from(255 - px[0]);
-        weighted += coverage * (i % width) as f64;
+        weighted = f64::mul_add(
+            coverage,
+            f64::from(u32::try_from(i % width).expect("column fits u32")),
+            weighted,
+        );
         total += coverage;
     }
     weighted / total
@@ -111,8 +115,10 @@ fn simple_ahem() -> (String, Vec<Vec<u8>>) {
 /// square and code/CID 0x20 a space.  Objects 6–9 and, for a stream, 10.
 fn composite_ahem(encoding: &str, cmap: Option<&[u8]>) -> (String, Vec<Vec<u8>>) {
     let mut map = vec![0u8; 2 * 0x42];
-    map[2 * 0x20..2 * 0x20 + 2].copy_from_slice(&(SPACE as u16).to_be_bytes());
-    map[2 * 0x41..2 * 0x41 + 2].copy_from_slice(&(SQUARE as u16).to_be_bytes());
+    map[2 * 0x20..2 * 0x20 + 2]
+        .copy_from_slice(&u16::try_from(SPACE).expect("glyph id").to_be_bytes());
+    map[2 * 0x41..2 * 0x41 + 2]
+        .copy_from_slice(&u16::try_from(SQUARE).expect("glyph id").to_be_bytes());
     let font = format!(
         "<< /Type /Font /Subtype /Type0 /BaseFont /Ahem /Encoding {encoding} \
          /DescendantFonts [6 0 R] >>"
@@ -158,7 +164,7 @@ fn word_spacing_applies_to_one_byte_code_32_only() {
     assert_eq!(spaced, (8, 48));
 }
 
-/// A Type 3 font whose `A` is a full em square: objects 6 (CharProc).
+/// A Type 3 font whose `A` is a full em square: objects 6 (`CharProc`).
 fn type3_square() -> (&'static str, Vec<Vec<u8>>) {
     let font = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
                 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /square 6 0 R >> \
@@ -187,11 +193,11 @@ fn horizontal_scaling_condenses_the_glyphs() {
     );
     let (font, extra) = type3_square();
     assert_eq!(
-        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
+        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td (AA) Tj ET"),
         (8, 32)
     );
     assert_eq!(
-        ink_span(&font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
+        ink_span(font, &extra, "BT /F1 16 Tf 8 8 Td 50 Tz (AA) Tj ET"),
         (8, 16)
     );
 }

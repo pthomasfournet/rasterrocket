@@ -405,7 +405,7 @@ fn red_pattern_page(gstate: &str, stroke: bool, extra: &[Vec<u8>]) -> Page {
 }
 
 /// Whether `rgb` is red at half opacity over blue.
-fn half_red_over_blue(rgb: [u8; 3]) -> bool {
+const fn half_red_over_blue(rgb: [u8; 3]) -> bool {
     rgb[1] == 0 && rgb[0].abs_diff(128) <= 2 && rgb[2].abs_diff(127) <= 2
 }
 

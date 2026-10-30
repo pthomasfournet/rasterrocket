@@ -44,7 +44,7 @@ fn ink(page: &Bitmap<Rgb8>) -> usize {
     page.data().chunks(3).filter(|px| px[0] < 128).count()
 }
 
-/// A Type 3 font whose `A` runs the CharProc `glyph` (object 6) over a
+/// A Type 3 font whose `A` runs the `CharProc` `glyph` (object 6) over a
 /// 1000-unit em; `resources` is the font's `/Resources` entry.
 fn type3(glyph: &[u8], resources: &str) -> (String, Vec<Vec<u8>>) {
     let font = format!(
@@ -83,8 +83,8 @@ fn d1_strokes_take_the_fill_colour() {
     assert_eq!(pixel(&render(&font, &extra, SHOW_A), 16, 16), [0, 0, 255]);
 }
 
-/// A CharProc's `Do` resolves in the font's own `/Resources`: a form
-/// XObject and an image mask held there both paint, in the fill colour.
+/// A `CharProc`'s `Do` resolves in the font's own `/Resources`: a form
+/// `XObject` and an image mask held there both paint, in the fill colour.
 #[test]
 fn charprocs_use_the_font_resources() {
     let resources = "<< /XObject << /Fx 7 0 R /Mx 8 0 R >> >>";
@@ -113,7 +113,7 @@ fn charprocs_use_the_font_resources() {
 
 /// Codes outside `Differences` resolve through the base encoding —
 /// `/Encoding /WinAnsiEncoding`, or `/BaseEncoding` with a partial
-/// `Differences` — and a code without a CharProc still advances by its
+/// `Differences` — and a code without a `CharProc` still advances by its
 /// `Widths` entry.
 #[test]
 fn base_encodings_name_charprocs() {
@@ -125,29 +125,37 @@ fn base_encodings_name_charprocs() {
         "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
          /FontMatrix [0.001 0 0 0.001 0 0] {charprocs} /Encoding /WinAnsiEncoding >>"
     );
-    assert_eq!(ink(&render(&winansi, &[glyph.clone()], show_ab)), 2 * 256);
+    assert_eq!(
+        ink(&render(&winansi, std::slice::from_ref(&glyph), show_ab)),
+        2 * 256
+    );
 
     let partial = format!(
         "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
          /FontMatrix [0.001 0 0 0.001 0 0] {charprocs} \
          /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [66 /A] >> >>"
     );
-    assert_eq!(ink(&render(&partial, &[glyph.clone()], show_ab)), 2 * 256);
+    assert_eq!(
+        ink(&render(&partial, std::slice::from_ref(&glyph), show_ab)),
+        2 * 256
+    );
 
     // No `/Encoding` at all: `StandardEncoding` names the CharProcs.
     let standard = format!(
         "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
          /FontMatrix [0.001 0 0 0.001 0 0] {charprocs} >>"
     );
-    assert_eq!(ink(&render(&standard, &[glyph.clone()], show_ab)), 2 * 256);
+    assert_eq!(
+        ink(&render(&standard, std::slice::from_ref(&glyph), show_ab)),
+        2 * 256
+    );
 
     // `C` has a width but no CharProc: `A C A` paints two squares with a
     // gap, not two adjacent squares.
-    let gap = format!(
-        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+    let gap = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
          /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /A 6 0 R >> \
          /FirstChar 65 /LastChar 67 /Widths [1000 1000 1000] /Encoding /WinAnsiEncoding >>"
-    );
+        .to_string();
     let page = render(&gap, &[glyph], "BT /F1 16 Tf 8 8 Td (ACA) Tj ET");
     assert_eq!(ink(&page), 2 * 256);
     assert_eq!(pixel(&page, 16, 16), [0, 0, 0]);

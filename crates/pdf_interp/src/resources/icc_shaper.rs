@@ -645,8 +645,7 @@ mod tests {
         };
         assert!(matches!(*shaper, RgbShaper::PerChannel(_)));
         // encode((128/255)^1.8) = 0.5740 → 146.
-        let [r, g, b] = shaper.convert([128, 128, 128]);
-        assert_eq!((r, g, b), (146, 146, 146));
+        assert_eq!(shaper.convert([128, 128, 128]), [146, 146, 146]);
         assert_eq!(shaper.convert([0, 0, 0]), [0, 0, 0]);
         assert_eq!(shaper.convert([255, 255, 255]), [255, 255, 255]);
     }

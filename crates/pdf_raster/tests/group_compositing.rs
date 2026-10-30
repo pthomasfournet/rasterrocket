@@ -13,7 +13,7 @@ use rasterrocket::{BackendPolicy, render_page_rgb};
 const W: u32 = 100;
 const H: u32 = 100;
 
-/// A page painted mid-grey, then running `content` with ExtGState entries
+/// A page painted mid-grey, then running `content` with `ExtGState` entries
 /// `gstates` and the form `/F` (object 5): a `/Group` form over the page
 /// painting `form_content`, with the group entries `group`.
 fn page(gstates: &str, content: &str, group: &str, form_content: &str) -> Vec<u8> {

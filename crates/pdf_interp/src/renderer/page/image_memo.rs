@@ -143,13 +143,13 @@ mod tests {
     #[test]
     fn jpx_decode_serves_only_its_draw_size() {
         let mut memo = ImageMemo::with_budget(BUDGET_BYTES);
-        memo.insert(ID, Some((4, 4)), decoded(ImageFilter::Jpx, 4));
+        let _ = memo.insert(ID, Some((4, 4)), decoded(ImageFilter::Jpx, 4));
         assert!(memo.get(ID, Some((4, 4))).is_some());
         assert!(memo.get(ID, Some((8, 8))).is_none());
         assert!(memo.get(ID, None).is_none());
 
         // A decode for another size replaces it.
-        memo.insert(ID, Some((8, 8)), decoded(ImageFilter::Jpx, 8));
+        let _ = memo.insert(ID, Some((8, 8)), decoded(ImageFilter::Jpx, 8));
         assert!(memo.get(ID, Some((4, 4))).is_none());
         assert_eq!(memo.get(ID, Some((8, 8))).expect("hit").image.width, 8);
         assert_eq!(memo.bytes, 8);
@@ -166,7 +166,7 @@ mod tests {
         assert!(memo.get((6, 0), None).is_none());
         assert_eq!(memo.bytes, 8);
         // Replacing an entry frees its bytes first.
-        memo.insert(ID, None, decoded(ImageFilter::Raw, 10));
+        let _ = memo.insert(ID, None, decoded(ImageFilter::Raw, 10));
         assert_eq!(memo.bytes, 10);
     }
 }
