@@ -583,6 +583,13 @@ impl Document {
         Some((found, obj))
     }
 
+    /// The position in [`Self::bytes`] that offsets written in the file
+    /// (cross-reference entries, linearization hint offsets) are relative
+    /// to: 0, or the `%PDF-` header's position when bytes precede it.
+    pub(crate) const fn base(&self) -> usize {
+        self.base
+    }
+
     /// The file from `base` on: the bytes cross-reference offsets index.
     fn body(&self) -> &[u8] {
         &self.data.as_bytes()[self.base..]

@@ -22,7 +22,9 @@ pub struct LinearizationHints {
     pub page_count: u32,
     /// `/O` — object number of the first page (page 0).
     pub first_page_obj: u32,
-    /// `/H[0]` — byte offset of the Page Offset Hint Table stream.
+    /// `/H[0]` — position of the Page Offset Hint Table stream in
+    /// [`Document::bytes`]: the offset written in the file plus the bytes
+    /// that precede the `%PDF-` header, if any.
     pub hint_stream_offset: u64,
     /// `/H[1]` — length of the Page Offset Hint Table stream.
     pub hint_stream_length: u64,
@@ -48,7 +50,7 @@ impl LinearizationHints {
         let Some(lin_dict) = lin_obj.as_dict() else {
             return Ok(None);
         };
-        let hints = parse_dict(lin_dict);
+        let hints = parse_dict(lin_dict, doc.base());
         if hints.is_none() {
             log::debug!(
                 "LinearizationHints: /Linearized dict present but required keys missing; \
@@ -67,9 +69,10 @@ fn find_linearized_object(doc: &Document) -> Option<std::sync::Arc<Object>> {
     obj.as_dict()?.contains_key(b"Linearized").then_some(obj)
 }
 
-/// Pure parsing of a `/Linearized` dict into `LinearizationHints`.
+/// Pure parsing of a `/Linearized` dict into `LinearizationHints`, for a
+/// file whose written offsets are relative to position `base`.
 /// Returns `None` if any required key is missing or malformed.
-fn parse_dict(lin_dict: &crate::dictionary::Dictionary) -> Option<LinearizationHints> {
+fn parse_dict(lin_dict: &crate::dictionary::Dictionary, base: usize) -> Option<LinearizationHints> {
     let page_count = lin_dict.get(b"N").and_then(Object::as_u32)?;
     let first_page_obj = lin_dict.get(b"O").and_then(Object::as_u32)?;
 
@@ -77,7 +80,10 @@ fn parse_dict(lin_dict: &crate::dictionary::Dictionary) -> Option<LinearizationH
     // (Page Offset Hint Table); subsequent pairs are optional.  Borrow the
     // array — we only read [0] and [1], no need to clone the Vec.
     let h_array = lin_dict.get(b"H").and_then(Object::as_array)?;
-    let hint_stream_offset = h_array.first().and_then(Object::as_u64)?;
+    let hint_stream_offset = h_array
+        .first()
+        .and_then(Object::as_u64)?
+        .checked_add(u64::try_from(base).ok()?)?;
     let hint_stream_length = h_array.get(1).and_then(Object::as_u64)?;
 
     Some(LinearizationHints {
@@ -146,13 +152,24 @@ xref\n0 4\n\
 trailer\n<</Size 4 /Root 2 0 R>>\n\
 startxref\n166\n%%EOF"
             .to_vec();
-        let doc = Document::from_bytes_owned(bytes).unwrap();
+        let doc = Document::from_bytes_owned(bytes.clone()).unwrap();
         let hints = LinearizationHints::try_load(&doc)
             .expect("ok")
             .expect("Some(hints)");
         assert_eq!(hints.page_count, 100);
         assert_eq!(hints.first_page_obj, 5);
         assert_eq!(hints.hint_stream_offset, 12345);
+        assert_eq!(hints.hint_stream_length, 678);
+
+        // Bytes before the header shift every written offset, the hint
+        // stream's included: its position in `Document::bytes` moves with
+        // them.
+        let prefix = b"Header: x\n";
+        let doc = Document::from_bytes_owned([&prefix[..], &bytes].concat()).unwrap();
+        let hints = LinearizationHints::try_load(&doc)
+            .expect("ok")
+            .expect("Some(hints) behind a prefix");
+        assert_eq!(hints.hint_stream_offset, 12345 + prefix.len() as u64);
         assert_eq!(hints.hint_stream_length, 678);
     }
 
