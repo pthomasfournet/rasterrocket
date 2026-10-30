@@ -157,12 +157,7 @@ mod tests {
         let id = TransferLut::IDENTITY.as_array();
         let inv = TransferLut::INVERTED.as_array();
 
-        let transfer = TransferSet {
-            rgb: [inv; 3],
-            gray: id,
-            cmyk: [id; 4],
-            device_n: &DN,
-        };
+        let transfer = TransferSet::new([inv; 3], id, [id; 4], &DN);
 
         let pipe = PipeState {
             blend_mode: BlendMode::Normal,

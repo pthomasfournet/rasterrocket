@@ -251,21 +251,21 @@ impl GraphicsState {
     /// of this `GraphicsState`.
     #[must_use]
     pub fn transfer_set(&self) -> TransferSet<'_> {
-        TransferSet {
-            rgb: [
+        TransferSet::new(
+            [
                 self.rgb_transfer[0].as_array(),
                 self.rgb_transfer[1].as_array(),
                 self.rgb_transfer[2].as_array(),
             ],
-            gray: self.gray_transfer.as_array(),
-            cmyk: [
+            self.gray_transfer.as_array(),
+            [
                 self.cmyk_transfer[0].as_array(),
                 self.cmyk_transfer[1].as_array(),
                 self.cmyk_transfer[2].as_array(),
                 self.cmyk_transfer[3].as_array(),
             ],
-            device_n: &self.device_n_transfer,
-        }
+            &self.device_n_transfer,
+        )
     }
 }
 
@@ -296,23 +296,37 @@ pub struct TransferSet<'a> {
     /// of needing a separate `static DN: [[u8; 256]; 8]` declaration in
     /// each test site.
     pub device_n: &'a [[u8; 256]],
+    /// Whether all three `rgb` tables are the identity `v → v`; fixed at
+    /// construction, so the per-span query is a field read.
+    rgb_identity: bool,
 }
 
-impl TransferSet<'_> {
+impl<'a> TransferSet<'a> {
+    /// Assemble a `TransferSet` from its tables.
+    #[must_use]
+    pub fn new(
+        rgb: [&'a [u8; 256]; 3],
+        gray: &'a [u8; 256],
+        cmyk: [&'a [u8; 256]; 4],
+        device_n: &'a [[u8; 256]],
+    ) -> Self {
+        let id = color::TransferLut::IDENTITY.as_array();
+        Self {
+            rgb,
+            gray,
+            cmyk,
+            device_n,
+            rgb_identity: rgb.iter().all(|lut| *lut == id),
+        }
+    }
+
     /// Return `true` if all three RGB transfer tables are the identity `v → v`.
     ///
     /// Used by the AA fast path to skip the transfer step entirely when it would
-    /// be a no-op.  Checking pointer equality against the static identity table
-    /// is O(1) and covers the common case; a full element-by-element comparison
-    /// is the fallback for non-static tables that happen to be identity.
+    /// be a no-op.
     #[must_use]
-    pub fn is_identity_rgb(&self) -> bool {
-        use color::TransferLut;
-        let id = TransferLut::IDENTITY.as_array();
-        self.rgb.iter().all(|lut| {
-            // Fast path: same pointer (static identity table).
-            std::ptr::eq(*lut, id) || *lut == id
-        })
+    pub const fn is_identity_rgb(&self) -> bool {
+        self.rgb_identity
     }
 
     /// Return a `TransferSet` backed by identity (pass-through) arrays.
@@ -342,6 +356,7 @@ impl TransferSet<'_> {
                 static DN: [[u8; 256]; 8] = [TransferLut::IDENTITY.0; 8];
                 &DN
             },
+            rgb_identity: true,
         }
     }
 }

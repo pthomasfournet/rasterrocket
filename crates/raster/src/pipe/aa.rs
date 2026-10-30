@@ -323,12 +323,7 @@ mod tests {
             a_input: 255,
             overprint_mask: 0xFFFF_FFFF,
             overprint_additive: false,
-            transfer: TransferSet {
-                rgb: [inv; 3],
-                gray: id,
-                cmyk: [id; 4],
-                device_n: &DN_ID,
-            },
+            transfer: TransferSet::new([inv; 3], id, [id; 4], &DN_ID),
             soft_mask: None,
             alpha0: None,
             knockout: false,
