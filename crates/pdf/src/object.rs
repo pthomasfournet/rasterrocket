@@ -580,6 +580,13 @@ fn parse_real(s: &str) -> Option<f32> {
 
 /// Parse the dictionary at `*pos`, itself enclosed in `depth`
 /// arrays/dictionaries.
+///
+/// A key whose value is not an object (a bare keyword, a stray delimiter) is
+/// dropped together with the offending token, and the remaining entries are
+/// read.  An object-level keyword (`endobj`, `stream`, `endstream`) where a
+/// key or value is expected ends the dictionary without being consumed.
+/// `None` only when the dictionary, or a container value inside it, nests
+/// deeper than [`MAX_NESTING`].
 fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> {
     if depth >= MAX_NESTING {
         return None;
@@ -594,11 +601,11 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
             *pos += 2;
             break;
         }
-        if *pos >= data.len() {
+        if *pos >= data.len() || at_object_keyword(data, *pos) {
             break;
         }
         // Key must be a Name.
-        if *data.get(*pos)? != b'/' {
+        if data[*pos] != b'/' {
             // Malformed dict — skip one byte and retry.
             *pos += 1;
             continue;
@@ -606,12 +613,39 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
         let key = read_name(data, pos);
         // Value is any object.
         skip_ws(data, pos);
-        let value = parse_object_nested(data, pos, depth + 1)?;
-        // A repeated key keeps its last value.
-        let _ = dict.insert(key, value);
+        let value_start = *pos;
+        if let Some(value) = parse_object_nested(data, pos, depth + 1) {
+            // A repeated key keeps its last value.
+            let _ = dict.insert(key, value);
+            continue;
+        }
+        // Only a container nested past the limit fails to parse as a
+        // container; that failure is the whole dictionary's.
+        if data[value_start..].starts_with(b"<<") || data.get(value_start) == Some(&b'[') {
+            return None;
+        }
+        *pos = value_start;
+        if data[*pos..].starts_with(b">>") || at_object_keyword(data, *pos) {
+            continue;
+        }
+        // Step over the token that is not a value; a lone delimiter is one
+        // byte.
+        if scan_token(data, pos).is_empty() {
+            *pos += 1;
+        }
     }
 
     Some(dict)
+}
+
+/// Whether the token at `pos` is a keyword that ends an indirect object or
+/// opens a stream body, so no dictionary entry can continue past it.
+fn at_object_keyword(data: &[u8], pos: usize) -> bool {
+    let mut end = pos;
+    matches!(
+        scan_token(data, &mut end),
+        b"endobj" | b"stream" | b"endstream"
+    )
 }
 
 /// Parse a complete indirect object (`<id> <gen> obj … endobj`) at `offset`.
@@ -915,6 +949,58 @@ mod tests {
             obj = items.pop().expect("one nested item");
         }
         assert_eq!(obj, Object::Array(Vec::new()));
+    }
+
+    /// The dictionary `src` parses to, as `(key, value)` pairs sorted by key.
+    fn entries(src: &[u8]) -> Vec<(Vec<u8>, Object)> {
+        let Object::Dictionary(d) = parse(src) else {
+            panic!("expected a dictionary");
+        };
+        let mut v: Vec<_> = d.iter().map(|(k, o)| (k.clone(), o.clone())).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// A value that is not an object drops its key and the offending token;
+    /// the entries around it survive.
+    #[test]
+    fn unparsable_value_drops_only_its_key() {
+        let expect = vec![
+            (b"A".to_vec(), Object::Integer(1)),
+            (b"C".to_vec(), Object::Name(b"D".to_vec())),
+        ];
+        for bad in [&b"bar"[..], b")", b"}", b"]", b"R"] {
+            let mut src = b"<< /A 1 /B ".to_vec();
+            src.extend_from_slice(bad);
+            src.extend_from_slice(b" /C /D >>");
+            assert_eq!(entries(&src), expect, "{}", String::from_utf8_lossy(bad));
+        }
+        // A key with no value before `>>`.
+        assert_eq!(
+            entries(b"<< /A 1 /B >>"),
+            vec![(b"A".to_vec(), Object::Integer(1))]
+        );
+    }
+
+    /// `endobj` or `stream` where an entry is expected ends the dictionary
+    /// unconsumed, so an unclosed dictionary neither swallows the next
+    /// object nor hides its stream body.
+    #[test]
+    fn object_keyword_ends_an_unclosed_dictionary() {
+        let src = b"<< /A 1 /B endobj 4 0 obj << /C 2 >>";
+        let mut pos = 0;
+        let Some(Object::Dictionary(d)) = parse_object(src, &mut pos) else {
+            panic!("expected a dictionary");
+        };
+        assert_eq!(d.len(), 1);
+        assert!(src[pos..].starts_with(b"endobj"));
+
+        let src = b"<< /Length 3 /B stream\nabc\nendstream";
+        let Object::Stream(stream) = parse(src) else {
+            panic!("expected a stream");
+        };
+        assert_eq!(stream.content, b"abc");
+        assert_eq!(stream.dict.get(b"Length"), Some(&Object::Integer(3)));
     }
 
     /// Spellings of infinity and NaN are not PDF numbers; `str::parse::<f32>`
