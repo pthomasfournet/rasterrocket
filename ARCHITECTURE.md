@@ -362,7 +362,8 @@ renderer/
     pixel_rect.rs    — device-pixel rectangles (group and snapshot bounds)
     image_sampler.rs — fixed-point sampling grid; nearest / bilinear
     image_reduce.rs  — area-averaging of minified images
-    image_memo.rs    — decoded image XObjects of one page, by object
+    image_memo.rs    — decoded images of one page: XObjects by object,
+                       inline images by context and bytes
     gpu_ops.rs       — CUDA dispatch thresholds + optional gpu:: calls
     vk_ops.rs        — Vulkan dispatch (AA fill)
 

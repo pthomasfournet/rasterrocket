@@ -339,6 +339,18 @@ impl PageRenderer<'_> {
                 self.do_xobject(name);
             }
             Operator::InlineImage { params, data } => {
+                // The same block in a form or pattern cell drawn repeatedly
+                // decodes once per page.
+                let key = super::image_memo::ImageMemo::inline_key(
+                    self.resources.resource_context_id(),
+                    params,
+                    data,
+                );
+                let memoized = self.image_memo.borrow().get_inline(&key);
+                if let Some(decoded) = memoized {
+                    self.blit_image(&decoded);
+                    return;
+                }
                 let color_spaces = self.resources.color_space_dict();
                 let mut ctx = crate::resources::image::ImageDecodeCtx {
                     doc: self.resources.doc(),
@@ -388,6 +400,7 @@ impl PageRenderer<'_> {
                         if let Some(reason) = &decoded.partial {
                             self.record_partial_image(None, reason.clone());
                         }
+                        let decoded = self.image_memo.borrow_mut().insert_inline(key, decoded);
                         self.blit_image(&decoded);
                     }
                     crate::resources::ImageResolution::DecodeFailed(msg) => {

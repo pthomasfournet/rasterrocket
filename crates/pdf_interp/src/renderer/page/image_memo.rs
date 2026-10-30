@@ -1,12 +1,15 @@
-//! Decoded image `XObjects` of one page, keyed by stream object, so an
-//! image drawn by several `Do` operators (in the page, its forms and its
-//! pattern cells) is decoded once.
+//! Decoded images of one page — image `XObjects` keyed by stream object,
+//! inline images keyed by their bytes — so an image drawn several times
+//! (by `Do` operators in the page, its forms and its pattern cells, or by
+//! the same `BI … EI` block in a form drawn repeatedly) is decoded once.
 //!
 //! A decode depends on the stream and, for JPEG 2000 alone, on the
 //! requested draw size, which selects the resolution level.  An entry is
 //! therefore returned for any request when it is not JPEG 2000 and only
 //! for an equal draw size when it is, so every draw renders exactly as a
-//! fresh decode would.
+//! fresh decode would.  An inline image's key holds the resource context
+//! it was decoded under with its parameters and data, since a named
+//! colour space resolves through that context.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,9 +28,10 @@ const BUDGET_BYTES: usize = 64 << 20;
 /// cells.
 pub(super) type SharedImageMemo = Rc<RefCell<ImageMemo>>;
 
-/// Decoded images keyed by stream object.
+/// Decoded images keyed by stream object or by inline-image bytes.
 pub(super) struct ImageMemo {
     entries: HashMap<ObjectId, Entry>,
+    inline: HashMap<Box<[u8]>, Entry>,
     /// Sum of the entries' [`Entry::bytes`].
     bytes: usize,
     budget: usize,
@@ -50,9 +54,56 @@ impl ImageMemo {
     fn with_budget(budget: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            inline: HashMap::new(),
             bytes: 0,
             budget,
         }
+    }
+
+    /// The key of an inline image: `context` (the object whose resources
+    /// its colour-space names resolve through), its parameters and its
+    /// data.
+    pub(super) fn inline_key(context: ObjectId, params: &[u8], data: &[u8]) -> Box<[u8]> {
+        let mut key = Vec::with_capacity(16 + params.len() + data.len());
+        key.extend_from_slice(&context.0.to_le_bytes());
+        key.extend_from_slice(&context.1.to_le_bytes());
+        key.extend_from_slice(&(params.len() as u64).to_le_bytes());
+        key.extend_from_slice(params);
+        key.extend_from_slice(data);
+        key.into_boxed_slice()
+    }
+
+    /// The decode kept for the inline image `key` (see
+    /// [`Self::inline_key`]); an inline image has no draw size.
+    pub(super) fn get_inline(&self, key: &[u8]) -> Option<Rc<DecodedImage>> {
+        self.inline.get(key).map(|e| Rc::clone(&e.image))
+    }
+
+    /// Keep `image`, the decode of the inline image `key`, as
+    /// [`insert`](Self::insert) does for an `XObject`.
+    pub(super) fn insert_inline(
+        &mut self,
+        key: Box<[u8]>,
+        image: DecodedImage,
+    ) -> Rc<DecodedImage> {
+        let image = Rc::new(image);
+        let bytes = host_bytes(&image);
+        let replaced = self.inline.get(&key).map_or(0, |e| e.bytes);
+        let old = if bytes <= self.budget - (self.bytes - replaced) {
+            self.bytes += bytes;
+            let entry = Entry {
+                image: Rc::clone(&image),
+                draw_size: None,
+                bytes,
+            };
+            self.inline.insert(key, entry)
+        } else {
+            self.inline.remove(&key)
+        };
+        if let Some(old) = old {
+            self.bytes -= old.bytes;
+        }
+        image
     }
 
     /// The decode of `id` kept for a request at `draw_size`, when it equals
