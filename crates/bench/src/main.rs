@@ -231,10 +231,9 @@ fn bench_ours(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
         overprint_additive: false,
         transfer,
         soft_mask: None,
-        alpha0: None,
+        backdrop: None,
         knockout: false,
         knockout_opacity: 255,
-        non_isolated_group: false,
     };
     let paths: Vec<Path> = params
         .iter()
