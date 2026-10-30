@@ -552,6 +552,16 @@ impl<'doc> PageResources<'doc> {
         defaults[slot].clone().unwrap_or(device)
     }
 
+    /// Whether the resources in effect replace any device colour space with
+    /// a default space, so that a shading's device space resolves
+    /// differently here than under resources without one.
+    #[must_use]
+    pub fn has_default_spaces(&self) -> bool {
+        self.device_space(ColorSpace::DeviceGray) != ColorSpace::DeviceGray
+            || self.device_space(ColorSpace::DeviceRgb) != ColorSpace::DeviceRgb
+            || self.device_space(ColorSpace::DeviceCmyk) != ColorSpace::DeviceCmyk
+    }
+
     /// The `/ColorSpace` subdictionary of the resources in effect, if any.
     #[must_use]
     pub fn color_space_dict(&self) -> Option<&Dictionary> {
@@ -728,7 +738,7 @@ impl<'doc> PageResources<'doc> {
         page_h: f64,
     ) -> Option<shading::ResolvedShading> {
         let shadings = self.resource_subdict(Category::Shading)?;
-        shading::resolve_shading(self.doc, shadings, name, ctm, page_h)
+        shading::resolve_shading(self, shadings, name, ctm, page_h)
     }
 
     /// Resolve the named `Pattern` resource as a shading pattern
@@ -754,7 +764,7 @@ impl<'doc> PageResources<'doc> {
             crate::renderer::gstate::ctm_multiply(&m, pattern_ctm)
         });
         let Some(shading) =
-            shading::resolve_shading_object(self.doc, pattern.get(b"Shading")?, &matrix, page_h)
+            shading::resolve_shading_object(self, pattern.get(b"Shading")?, &matrix, page_h)
         else {
             log::warn!(
                 "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",

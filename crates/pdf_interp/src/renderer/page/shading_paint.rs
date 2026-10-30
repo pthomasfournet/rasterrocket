@@ -21,6 +21,9 @@ use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::resources::ShadingPattern;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
+use crate::resources::transfer::Transfer;
+use raster::transparency::Backdrop;
+use raster::types::BlendMode;
 
 /// Return `clip` intersected with the device-space quadrilateral `bbox`.
 fn clip_to_bbox(mut clip: Clip, bbox: Option<[(f64, f64); 4]>, flatness: f64) -> Clip {
@@ -48,6 +51,21 @@ pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
 }
 
 impl PageRenderer<'_> {
+    /// The compositing state for a shading: `make_pipe` with `transfer`,
+    /// the transfer function in effect, applied to the shading's colours.
+    fn shading_pipe<'a>(
+        alpha: u8,
+        blend_mode: BlendMode,
+        backdrop: Option<&'a Backdrop>,
+        transfer: Option<&'a Transfer>,
+    ) -> PipeState<'a> {
+        let mut pipe = Self::make_pipe(alpha, blend_mode, backdrop);
+        if let Some(transfer) = transfer {
+            pipe.transfer = Self::transfer_set(transfer);
+        }
+        pipe
+    }
+
     /// Run `paint`, which paints the shading of `pattern`, with the
     /// pattern's `ExtGState` in effect (PDF §8.7.3.3).
     ///
@@ -75,19 +93,25 @@ impl PageRenderer<'_> {
             } else {
                 gs.fill_alpha
             };
-            (alpha, gs.blend_mode, r.blend_backdrop(gs.blend_mode))
+            (
+                alpha,
+                gs.blend_mode,
+                r.blend_backdrop(gs.blend_mode),
+                gs.transfer.clone(),
+            )
         };
         let Some(ext) = ext_gstate else {
-            let (alpha, blend_mode, backdrop) = pipe_of(self);
-            let pipe = Self::make_pipe(alpha, blend_mode, backdrop.as_deref());
+            let (alpha, blend_mode, backdrop, transfer) = pipe_of(self);
+            let pipe =
+                Self::shading_pipe(alpha, blend_mode, backdrop.as_deref(), transfer.as_deref());
             return paint(self, &pipe, shading);
         };
         self.gstate.save();
         let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, *matrix);
         self.apply_ext_gstate(ext);
         self.gstate.current_mut().ctm = ctm;
-        let (alpha, blend_mode, backdrop) = pipe_of(self);
-        let pipe = Self::make_pipe(alpha, blend_mode, backdrop.as_deref());
+        let (alpha, blend_mode, backdrop, transfer) = pipe_of(self);
+        let pipe = Self::shading_pipe(alpha, blend_mode, backdrop.as_deref(), transfer.as_deref());
         let result = match self.gstate.current_mut().soft_mask.take() {
             Some(mask) => self.paint_through_soft_mask(&mask, region, |r| paint(r, &pipe, shading)),
             None => paint(self, &pipe, shading),
@@ -103,7 +127,13 @@ impl PageRenderer<'_> {
         let ctm = gs.ctm;
         let flatness = gs.flatness.max(0.1);
         let backdrop = self.blend_backdrop(gs.blend_mode);
-        let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
+        let transfer = gs.transfer.clone();
+        let pipe = Self::shading_pipe(
+            gs.fill_alpha,
+            gs.blend_mode,
+            backdrop.as_deref(),
+            transfer.as_deref(),
+        );
 
         let Some(shading) = self.memo_shading(name, &ctm) else {
             log::warn!(

@@ -52,6 +52,13 @@ pub struct Transfer {
 }
 
 impl Transfer {
+    /// The red, green and blue tables.
+    #[must_use]
+    pub const fn tables(&self) -> [&[u8; 256]; 3] {
+        let [r, g, b] = &self.rgb;
+        [r, g, b]
+    }
+
     /// Map an RGB colour through the tables.
     #[must_use]
     pub fn apply(&self, rgb: [u8; 3]) -> [u8; 3] {

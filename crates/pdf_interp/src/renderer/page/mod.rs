@@ -71,8 +71,8 @@ mod widget_appearance;
 use patterns::PatternPaint;
 use pdf::{ContentFailure, Document, ObjectId};
 
-use color::Rgb8;
 use color::convert::div255;
+use color::{Rgb8, TransferLut};
 use raster::{
     Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
@@ -88,6 +88,7 @@ use super::font_cache::{DocumentFonts, FontCache};
 use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform, invert_affine};
 use crate::content::Operator;
 use crate::resources::SoftMask;
+use crate::resources::transfer::Transfer;
 use crate::resources::{
     ColorSpace, IMAGE_FILTER_COUNT, ImageColorSpace, ImageFilter, PageResources,
 };
@@ -1471,6 +1472,17 @@ impl<'doc> PageRenderer<'doc> {
         }
     }
 
+    /// The tables of `transfer` as the pipe applies them to a source that
+    /// is not mapped beforehand: a pattern's colours, a shading and its
+    /// background.  A solid fill or stroke colour is mapped before painting
+    /// (see `InterpGState::painted_fill_color`) and paints through the
+    /// identity.
+    fn transfer_set(transfer: &Transfer) -> TransferSet<'_> {
+        static DN: [[u8; 256]; 8] = [TransferLut::IDENTITY.0; 8];
+        let id = TransferLut::IDENTITY.as_array();
+        TransferSet::new(transfer.tables(), id, [id; 4], &DN)
+    }
+
     /// The backdrop a paint under `blend_mode` blends with: the enclosing
     /// non-isolated group's, unless the mode is `Normal`, whose result does
     /// not depend on it.
@@ -1536,9 +1548,12 @@ impl<'doc> PageRenderer<'doc> {
         let clip = gs.clip.clone_shared();
         let flatness = gs.flatness.max(0.1);
         let backdrop = self.blend_backdrop(gs.blend_mode);
-        let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
+        let transfer = gs.transfer.clone();
+        let mut pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
 
-        // Resolve the fill source — pattern or solid colour.
+        // Resolve the fill source — pattern or solid colour.  The solid
+        // colour is already mapped through the transfer function; a
+        // pattern's colours map in the pipe.
         let pat_name = gs.fill_pattern.clone();
         let solid_color = gs.painted_fill_color().to_vec();
         let _ = gs; // end the immutable gstate borrow before the &mut self pattern resolve
@@ -1560,6 +1575,9 @@ impl<'doc> PageRenderer<'doc> {
             Some(None) => return,
             None => None,
         };
+        if let (Some(_), Some(transfer)) = (&tiled, &transfer) {
+            pipe.transfer = Self::transfer_set(transfer);
+        }
         let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
             PipeSrc::Pattern(p as &dyn Pattern)
         });
@@ -1720,7 +1738,8 @@ impl<'doc> PageRenderer<'doc> {
         }
         let clip = gs.clip.clone_shared();
         let backdrop = self.blend_backdrop(gs.blend_mode);
-        let pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode, backdrop.as_deref());
+        let transfer = gs.transfer.clone();
+        let mut pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode, backdrop.as_deref());
         let line_cap = gs.line_cap;
         let line_join = gs.line_join;
         let miter_limit = gs.miter_limit;
@@ -1786,6 +1805,9 @@ impl<'doc> PageRenderer<'doc> {
             Some(None) => return,
             None => None,
         };
+        if let (Some(_), Some(transfer)) = (&tiled, &transfer) {
+            pipe.transfer = Self::transfer_set(transfer);
+        }
         let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
             PipeSrc::Pattern(p as &dyn Pattern)
         });
@@ -3903,5 +3925,113 @@ mod tests {
         .concat();
         let px = render_gray(8, &content);
         assert!(px.iter().all(|&g| g == 255), "no pixel may be painted");
+    }
+
+    // ── Shadings and patterns: /None, default spaces, transfer ───────────────
+
+    /// Page `(4, 0)` whose `/ColorSpace` resources are `color_spaces`, with
+    /// the axial shading `/Sh` (and the shading pattern `/P` over it) of the
+    /// constant `value` in the colour space `shading_space`, the coloured
+    /// tiling pattern `/T` painting 0.2 gray, and the inverting transfer
+    /// `ExtGState` `/Inv`.
+    fn shading_doc(color_spaces: &str, shading_space: &str, value: f64) -> Document {
+        const PS: &str = "{ 1 exch sub }";
+        const CELL: &str = "0.2 g 0 0 8 8 re f";
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                format!(
+                    "<< /Type /Page /Resources << /ColorSpace << {color_spaces} >> \
+                     /Shading << /Sh 5 0 R >> /Pattern << /P 6 0 R /T 7 0 R >> \
+                     /ExtGState << /Inv << /TR 8 0 R >> >> >> >>"
+                ),
+            ),
+            (
+                5,
+                format!(
+                    "<< /ShadingType 2 /ColorSpace {shading_space} /Coords [0 0 8 0] \
+                     /Function 9 0 R /Extend [true true] >>"
+                ),
+            ),
+            (6, "<< /PatternType 2 /Shading 5 0 R >>".to_owned()),
+            (
+                7,
+                format!(
+                    "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 8 8] \
+                     /XStep 8 /YStep 8 /Length {} >>\nstream\n{CELL}\nendstream",
+                    CELL.len()
+                ),
+            ),
+            (
+                8,
+                format!(
+                    "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length {} >>\n\
+                     stream\n{PS}\nendstream",
+                    PS.len()
+                ),
+            ),
+            (
+                9,
+                format!("<< /FunctionType 2 /Domain [0 1] /C0 [{value}] /C1 [{value}] /N 1 >>"),
+            ),
+        ])
+    }
+
+    /// A shading in a space whose colorants are all `/None` paints nothing,
+    /// through `sh` and through a shading pattern alike.
+    #[test]
+    fn shading_in_a_none_space_paints_nothing() {
+        let doc = shading_doc("", "[/Separation /None /DeviceGray 9 0 R]", 0.2);
+        for content in [b"/Sh sh".as_slice(), b"/Pattern cs /P scn 0 0 8 8 re f"] {
+            let px = render_gray_on(&doc, (4, 0), 8, content);
+            assert!(
+                px.iter().all(|&v| v == 255),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
+    /// A shading in `DeviceGray` takes the `/DefaultGray` of the resources
+    /// in effect (PDF §8.6.5.6): 0.5 in the linear space is 188, not 128.
+    #[test]
+    fn shading_takes_the_default_colour_space() {
+        let doc = shading_doc(
+            &format!("/DefaultGray {LINEAR_CAL_GRAY}"),
+            "/DeviceGray",
+            0.5,
+        );
+        for content in [b"/Sh sh".as_slice(), b"/Pattern cs /P scn 0 0 8 8 re f"] {
+            let px = render_gray_on(&doc, (4, 0), 8, content);
+            assert!(
+                px.iter().all(|v| (186..=189).contains(v)),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
+    /// A shading and a tiling pattern paint through the transfer function
+    /// in effect (PDF §10.5): 0.2 gray (51) paints 204 under the inverting
+    /// transfer, whether painted by `sh`, a shading pattern or a tiling
+    /// pattern.
+    #[test]
+    fn shadings_and_patterns_map_through_the_transfer_function() {
+        let doc = shading_doc("", "/DeviceGray", 0.2);
+        for content in [
+            b"/Inv gs /Sh sh".as_slice(),
+            b"/Inv gs /Pattern cs /P scn 0 0 8 8 re f",
+            b"/Inv gs /Pattern cs /T scn 0 0 8 8 re f",
+            b"/Inv gs /Pattern CS /T SCN 8 w 0 4 m 8 4 l S",
+        ] {
+            let px = render_gray_on(&doc, (4, 0), 8, content);
+            assert!(
+                px.iter().all(|&v| v == 204),
+                "{}: {px:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+        let px = render_gray_on(&doc, (4, 0), 8, b"/Pattern cs /T scn 0 0 8 8 re f");
+        assert!(px.iter().all(|&v| v == 51), "without the transfer: {px:?}");
     }
 }

@@ -18,11 +18,14 @@
 //!
 //! # Colour spaces
 //!
-//! A shading's `ColorSpace` is resolved once into a [`ColorSpace`] and every
-//! colour (function output or mesh vertex) is converted to sRGB through
-//! [`ColorSpace::convert_to_rgb`], the conversion used for fill colours.  A
-//! function output carries exactly [`ColorSpace::ncomponents`] channels, as
-//! does a mesh vertex of a shading without a `Function`.
+//! A shading's `ColorSpace` is resolved once into a [`ColorSpace`] — a device
+//! space being replaced by the default space of the resources in effect
+//! (PDF §8.6.5.6) — and every colour (function output or mesh vertex) is
+//! converted to sRGB through [`ColorSpace::convert_to_rgb`], the conversion
+//! used for fill colours.  A function output carries exactly
+//! [`ColorSpace::ncomponents`] channels, as does a mesh vertex of a shading
+//! without a `Function`.  A shading in a space whose colorants are all
+//! `/None` paints nothing: it resolves to an empty mesh with no background.
 //!
 //! # PDF Function objects
 //!
@@ -51,7 +54,7 @@ use raster::shading::radial::RadialPattern;
 
 use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
-use super::{read_matrix, resolve_dict};
+use super::{PageResources, read_matrix, resolve_dict};
 use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, emit_triangle};
@@ -89,33 +92,36 @@ pub struct ResolvedShading {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Resolve the named shading from `shadings`, the `/Shading` resource
-/// sub-dictionary in effect.
+/// sub-dictionary in effect, whose default colour spaces `resources`
+/// supplies.
 ///
 /// Returns `None` if the name is absent, the type is unsupported, or any
 /// required key is missing.  A warning is logged for unsupported types so the
 /// caller can fall back gracefully.
 #[must_use]
 pub fn resolve_shading(
-    doc: &Document,
+    resources: &PageResources<'_>,
     shadings: &Dictionary,
     name: &[u8],
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Option<ResolvedShading> {
-    resolve_shading_object(doc, shadings.get(name)?, ctm, page_h)
+    resolve_shading_object(resources, shadings.get(name)?, ctm, page_h)
 }
 
 /// Resolve the shading `sh_obj` (a dictionary, a stream, or a reference to
-/// either) whose target space `ctm` maps to the device.
+/// either) whose target space `ctm` maps to the device, with the default
+/// colour spaces of `resources`.
 ///
 /// Returns `None` if the type is unsupported or any required key is missing.
 #[must_use]
 pub fn resolve_shading_object(
-    doc: &Document,
+    resources: &PageResources<'_>,
     sh_obj: &Object,
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Option<ResolvedShading> {
+    let doc = resources.doc();
     // Shading types 2–3 are plain dicts; types 4–7 are streams.
     // Try stream first (stream has a dict too), then fall back to plain dict.
     // Owned Dictionary because the new pdf crate hands back Arc<Object> from
@@ -134,10 +140,18 @@ pub fn resolve_shading_object(
 
     let shading_type = sh_dict.get_i64(b"ShadingType")?;
 
-    let cs_space = colorspace::resolve(doc, sh_dict.get(b"ColorSpace")?);
+    let cs_space = resources.device_space(colorspace::resolve(doc, sh_dict.get(b"ColorSpace")?));
     if matches!(cs_space, ColorSpace::Pattern { .. }) {
         log::warn!("shading: Pattern colour space is not valid for a shading — skipping");
         return None;
+    }
+    if cs_space.paints_nothing() {
+        log::debug!("shading: every colorant is /None — the shading paints nothing");
+        return Some(ResolvedShading {
+            result: ShadingResult::Mesh(Mesh::new(Vec::new())),
+            bbox: None,
+            background: None,
+        });
     }
     let cs = ShadingCs {
         doc,

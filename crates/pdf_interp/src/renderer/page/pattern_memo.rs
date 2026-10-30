@@ -2,9 +2,11 @@
 //! shading painted by many operators is decoded and rasterised once.
 //!
 //! A resolved shading is in device space: it is keyed by its resource (the
-//! object, or the resource context and name of a direct dictionary) and the
-//! exact bits of the matrix that places it and of the page height, so every
-//! use sees what a fresh resolve under its own matrix returns.  A tiling
+//! object, or the resource context and name of a direct dictionary), the
+//! exact bits of the matrix that places it and of the page height, and, when
+//! the resources in effect replace a device colour space with a default
+//! space, the resource context, so every use sees what a fresh resolve under
+//! its own matrix and resources returns.  A tiling
 //! cell is keyed by its pattern stream; its raster additionally by the exact
 //! bits of the pattern-to-device matrix, the tint of an uncoloured pattern,
 //! for a pattern without its own resources the resource context the content
@@ -41,15 +43,24 @@ pub(super) struct PlacedKey {
     id: ResourceKey,
     matrix: [u64; 6],
     page_h: u64,
+    /// The resource context, when its default colour spaces take part.
+    defaults: Option<ObjectId>,
 }
 
 impl PlacedKey {
-    /// The key of object `id` under `matrix` on a page `page_h` pixels high.
-    pub(super) fn new(id: ResourceKey, matrix: &[f64; 6], page_h: f64) -> Self {
+    /// The key of object `id` under `matrix` on a page `page_h` pixels
+    /// high, resolved with the default colour spaces of `defaults`.
+    pub(super) fn new(
+        id: ResourceKey,
+        matrix: &[f64; 6],
+        page_h: f64,
+        defaults: Option<ObjectId>,
+    ) -> Self {
         Self {
             id,
             matrix: matrix.map(f64::to_bits),
             page_h: page_h.to_bits(),
+            defaults,
         }
     }
 }
@@ -260,7 +271,12 @@ impl PageRenderer<'_> {
     /// pattern matrix in effect, from the memo when kept.
     pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
         let page_h = f64::from(self.height);
-        let key = PlacedKey::new(self.resources.pattern_key(name)?, &self.pattern_ctm, page_h);
+        let key = PlacedKey::new(
+            self.resources.pattern_key(name)?,
+            &self.pattern_ctm,
+            page_h,
+            self.default_spaces_context(),
+        );
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             self.resources
                 .shading_pattern(name, &self.pattern_ctm, page_h)
@@ -272,10 +288,23 @@ impl PageRenderer<'_> {
     /// kept.
     pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
         let page_h = f64::from(self.height);
-        let key = PlacedKey::new(self.resources.shading_key(name)?, ctm, page_h);
+        let key = PlacedKey::new(
+            self.resources.shading_key(name)?,
+            ctm,
+            page_h,
+            self.default_spaces_context(),
+        );
         self.pattern_memo.borrow_mut().shading(key, || {
             self.resources.shading(name, ctm, page_h).map(Rc::new)
         })
+    }
+
+    /// The resource context whose default colour spaces a shading resolved
+    /// here takes; `None` when the resources in effect have none.
+    fn default_spaces_context(&self) -> Option<ObjectId> {
+        self.resources
+            .has_default_spaces()
+            .then(|| self.resources.resource_context_id())
     }
 
     /// The named `Pattern` resource resolved as a tiling pattern, with its
@@ -355,7 +384,7 @@ mod tests {
     const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
     fn placed(id: ObjectId, matrix: &[f64; 6], page_h: f64) -> PlacedKey {
-        PlacedKey::new(ResourceKey::Object(id), matrix, page_h)
+        PlacedKey::new(ResourceKey::Object(id), matrix, page_h, None)
     }
 
     /// Whether `memo` holds the shading at `key`: a lookup that would
