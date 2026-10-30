@@ -69,7 +69,7 @@ use raster::{
     pipe::{Pattern, PipeSrc, PipeState},
     state::TransferSet,
     stroke::{StrokeParams, stroke},
-    transparency::{GroupParams, begin_group, paint_group},
+    transparency::{Backdrop, GroupParams, begin_group, paint_group},
     types::{BlendMode, LineCap, LineJoin},
     xpath::XPath,
 };
@@ -315,6 +315,9 @@ pub struct PageRenderer<'doc> {
     /// a form's CTM once its `Matrix` is applied, or a pattern tile's CTM.
     /// A shading pattern's `Matrix` is concatenated onto it.
     pub(super) pattern_ctm: Ctm,
+    /// The backdrop of the non-isolated transparency group being painted
+    /// into, consulted by blend modes applied inside it; `None` outside one.
+    group_backdrop: Option<Arc<Backdrop>>,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Resource name of the image `XObject` being drawn, set for the duration
@@ -560,6 +563,7 @@ impl<'doc> PageRenderer<'doc> {
             form_depth: 0,
             pattern_depth: 0,
             pattern_ctm: initial_ctm,
+            group_backdrop: None,
             diag: PageDiagnostics::default(),
             current_image: None,
             op_budget: MAX_PAGE_OPS,
@@ -1033,8 +1037,10 @@ impl<'doc> PageRenderer<'doc> {
             .clip_to_path(&xpath, even_odd);
     }
 
-    /// Build a [`PipeState`] with the given opacity and blend mode.
-    fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
+    /// Build a [`PipeState`] with the given opacity and blend mode;
+    /// `backdrop` is the enclosing non-isolated group's, for a blend mode
+    /// that consults it (see [`Self::blend_backdrop`]).
+    fn make_pipe(a_input: u8, blend_mode: BlendMode, backdrop: Option<&Backdrop>) -> PipeState<'_> {
         PipeState {
             blend_mode,
             a_input,
@@ -1042,11 +1048,19 @@ impl<'doc> PageRenderer<'doc> {
             overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             soft_mask: None,
-            alpha0: None,
+            backdrop: backdrop.map(Backdrop::as_pipe_backdrop),
             knockout: false,
             knockout_opacity: 255,
-            non_isolated_group: false,
         }
+    }
+
+    /// The backdrop a paint under `blend_mode` blends with: the enclosing
+    /// non-isolated group's, unless the mode is `Normal`, whose result does
+    /// not depend on it.
+    fn blend_backdrop(&self, blend_mode: BlendMode) -> Option<Arc<Backdrop>> {
+        (blend_mode != BlendMode::Normal)
+            .then(|| self.group_backdrop.clone())
+            .flatten()
     }
 
     fn do_fill(&mut self, even_odd: bool) {
@@ -1090,7 +1104,8 @@ impl<'doc> PageRenderer<'doc> {
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
         let flatness = gs.flatness.max(0.1);
-        let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode);
+        let backdrop = self.blend_backdrop(gs.blend_mode);
+        let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
 
         // Resolve the fill source — pattern or solid colour.
         let pat_name = gs.fill_pattern.clone();
@@ -1210,7 +1225,8 @@ impl<'doc> PageRenderer<'doc> {
         // Clone all graphics state data before any mutable borrow.
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
-        let pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode);
+        let backdrop = self.blend_backdrop(gs.blend_mode);
+        let pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode, backdrop.as_deref());
         let line_width = gs.line_width;
         let line_cap = gs.line_cap;
         let line_join = gs.line_join;
@@ -1516,13 +1532,16 @@ impl<'doc> PageRenderer<'doc> {
         // constants and blend mode start at their initial values inside a
         // transparency group; the parent's values apply once, when the group
         // is composited.
-        if let Some(ref mut g) = group {
+        // Blend modes inside the group see its own backdrop: the parent's
+        // pixels for a non-isolated group, nothing for an isolated one.
+        let parent_backdrop = group.as_mut().map(|g| {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
             let gs = self.gstate.current_mut();
             gs.fill_alpha = 255;
             gs.stroke_alpha = 255;
             gs.blend_mode = BlendMode::Normal;
-        }
+            std::mem::replace(&mut self.group_backdrop, g.backdrop.take().map(Arc::new))
+        });
 
         // Parse and execute the form's content stream.
         let ops = crate::content::parse(&form.content);
@@ -1530,9 +1549,11 @@ impl<'doc> PageRenderer<'doc> {
 
         // Swap the group bitmap back and composite using the parent's opacity/blend
         // (captured before gstate.save() — the form's own state is irrelevant here).
-        if let Some(mut g) = group {
+        if let (Some(mut g), Some(parent_backdrop)) = (group, parent_backdrop) {
             std::mem::swap(&mut self.bitmap, &mut g.bitmap);
-            let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode);
+            self.group_backdrop = parent_backdrop;
+            let backdrop = self.blend_backdrop(parent_blend_mode);
+            let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode, backdrop.as_deref());
             // Residual Clip is unused — parent gstate is restored immediately below.
             let _ = paint_group(&mut self.bitmap, g, &pipe);
         }
@@ -1726,10 +1747,12 @@ impl<'doc> PageRenderer<'doc> {
             None => None,
         };
         let img_w = img.width as usize;
+        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
         let compositor = ImageCompositor::new(
             &self.bitmap,
             self.gstate.current().fill_alpha,
             self.gstate.current().blend_mode,
+            backdrop.as_deref(),
         );
 
         for dy in grid.y0..grid.y1 {
@@ -1844,10 +1867,12 @@ impl<'doc> PageRenderer<'doc> {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
+        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
         let compositor = ImageCompositor::new(
             &self.bitmap,
             self.gstate.current().fill_alpha,
             self.gstate.current().blend_mode,
+            backdrop.as_deref(),
         );
         let bitmap = &mut self.bitmap;
         let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
@@ -1886,7 +1911,7 @@ fn composite_rgba_rows(
     y0: u32,
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
-    compositor: ImageCompositor,
+    compositor: ImageCompositor<'_>,
 ) {
     use gpu::cache::RGBA_BPP;
 
@@ -1924,17 +1949,22 @@ fn composite_rgba_rows(
 /// blended onto the destination by its coverage alone; otherwise every sample
 /// runs through the raster pipe that fills use.
 #[derive(Clone, Copy)]
-struct ImageCompositor {
+struct ImageCompositor<'a> {
     /// `None` selects the direct coverage blend.
-    pipe: Option<PipeState<'static>>,
+    pipe: Option<PipeState<'a>>,
 }
 
-impl ImageCompositor {
-    fn new(bitmap: &Bitmap<Rgb8>, fill_alpha: u8, blend_mode: BlendMode) -> Self {
+impl<'a> ImageCompositor<'a> {
+    fn new(
+        bitmap: &Bitmap<Rgb8>,
+        fill_alpha: u8,
+        blend_mode: BlendMode,
+        backdrop: Option<&'a Backdrop>,
+    ) -> Self {
         let direct =
             bitmap.alpha_plane().is_none() && fill_alpha == 255 && blend_mode == BlendMode::Normal;
         Self {
-            pipe: (!direct).then(|| PageRenderer::make_pipe(fill_alpha, blend_mode)),
+            pipe: (!direct).then(|| PageRenderer::make_pipe(fill_alpha, blend_mode, backdrop)),
         }
     }
 

@@ -14,10 +14,11 @@
 //!
 //! # Isolated vs. non-isolated groups
 //!
-//! | Flag | Effect |
-//! |------|--------|
-//! | `isolated = true` | Group starts with a transparent background (alpha = 0). |
-//! | `isolated = false` | Group is pre-initialised with the backdrop's colours. |
+//! Every group bitmap starts transparent and accumulates the group's own
+//! colour and alpha.  A non-isolated group also keeps a copy of the backdrop
+//! under it ([`GroupBitmap::backdrop`]), which blend modes applied inside
+//! the group consult through [`crate::pipe::GroupBackdrop`]; compositing
+//! the group back is the same for both kinds (ISO 32000-2 §11.4.7).
 //!
 //! Knockout groups clear the accumulated alpha on each object; non-knockout groups
 //! accumulate.
@@ -35,11 +36,9 @@
 //! - `Splash::endTransparencyGroup`
 //! - `Splash::paintTransparencyGroup`
 
-use std::sync::Arc;
-
 use crate::bitmap::Bitmap;
 use crate::clip::Clip;
-use crate::pipe::{self, PipeSrc, PipeState};
+use crate::pipe::{self, GroupBackdrop, PipeSrc, PipeState};
 use color::Pixel;
 use color::convert::div255;
 
@@ -70,7 +69,8 @@ pub struct GroupParams {
     pub x_max: i32,
     /// Bottom edge of the group bounding box in device pixels (inclusive).
     pub y_max: i32,
-    /// `true` → group starts transparent; `false` → backdrop is copied in.
+    /// `false` → the backdrop under the group is kept for blend modes
+    /// applied inside it.
     pub isolated: bool,
     /// `true` → each object within the group clears accumulated alpha first.
     pub knockout: bool,
@@ -83,21 +83,80 @@ pub struct GroupParams {
 /// The group bitmap has the parent's dimensions and shares its device
 /// coordinate system, so content renders into it unchanged.  Only the
 /// region `params.x_min..=x_max × y_min..=y_max` (clamped to the parent by
-/// [`begin_group`]) is initialised from the backdrop and composited back.
+/// [`begin_group`]) is composited back.
 ///
 /// Returned by [`begin_group`]; passed to [`paint_group`] or [`discard_group`].
 pub struct GroupBitmap<P: Pixel> {
-    /// The rendered group content.  Its alpha plane is the group's shape ×
-    /// opacity: zero outside painted pixels of an isolated group, the
-    /// backdrop alpha under a non-isolated group.
+    /// The rendered group content.  Its alpha plane is the group's own
+    /// shape × opacity: zero wherever the group has painted nothing.
     pub bitmap: Bitmap<P>,
     /// Clip region at the time the group was opened (restored on pop).
     pub saved_clip: Clip,
     /// Compositing parameters; the bounding box is clamped to the parent.
     pub params: GroupParams,
-    /// For non-isolated groups: a snapshot of the parent alpha at the time the
-    /// group was opened, used as `alpha0` during the compositing pass.
-    pub alpha0: Option<Arc<[u8]>>,
+    /// For a non-isolated group: the parent's pixels under the region when
+    /// the group was opened.
+    pub backdrop: Option<Backdrop>,
+}
+
+/// The pixels of a parent bitmap under a non-isolated group's region.
+pub struct Backdrop {
+    /// Colour bytes, `P::BYTES` per pixel, row-major over the region.
+    colour: Vec<u8>,
+    /// Alpha per pixel, or `None` for a parent without an alpha plane.
+    alpha: Option<Vec<u8>>,
+    /// Device column and row of the region's top-left pixel.
+    x0: i32,
+    y0: i32,
+    /// Pixels per row.
+    width: usize,
+    /// Rows.
+    height: usize,
+}
+
+impl Backdrop {
+    /// Copy the region `x0..x1 × y0..y1` (half-open) of `parent`.
+    fn copy<P: Pixel>(parent: &Bitmap<P>, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> Self {
+        let ncomps = P::BYTES;
+        let (width, height) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let mut colour = Vec::with_capacity(width * height * ncomps);
+        let mut alpha = parent
+            .has_alpha()
+            .then(|| Vec::with_capacity(width * height));
+        for y in y0..y1 {
+            let (cx0, cx1) = (x0 as usize * ncomps, x1 as usize * ncomps);
+            colour.extend_from_slice(&parent.row_bytes(y)[cx0..cx1]);
+            if let (Some(a), Some(row)) = (alpha.as_mut(), parent.alpha_row(y)) {
+                a.extend_from_slice(&row[x0 as usize..x1 as usize]);
+            }
+        }
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "the region lies within the parent, whose dimensions are below 2^31"
+        )]
+        let (x0, y0) = (x0 as i32, y0 as i32);
+        Self {
+            colour,
+            alpha,
+            x0,
+            y0,
+            width,
+            height,
+        }
+    }
+
+    /// The backdrop as the pipe consults it.
+    #[must_use]
+    pub fn as_pipe_backdrop(&self) -> GroupBackdrop<'_> {
+        GroupBackdrop {
+            colour: &self.colour,
+            alpha: self.alpha.as_deref(),
+            x0: self.x0,
+            y0: self.y0,
+            width: self.width,
+            height: self.height,
+        }
+    }
 }
 
 impl<P: Pixel> GroupBitmap<P> {
@@ -128,7 +187,7 @@ impl<P: Pixel> GroupBitmap<P> {
 /// Open a new transparency group and return a group bitmap to render into.
 ///
 /// - `parent` is the current destination bitmap.  For a non-isolated group its
-///   colours and alpha inside the bounding box initialise the group.
+///   pixels inside the bounding box are kept as the group's backdrop.
 /// - The returned [`GroupBitmap`] becomes the new render target until
 ///   [`paint_group`] or [`discard_group`] is called.  It has the parent's
 ///   dimensions, so painting into it uses the parent's device coordinates.
@@ -165,44 +224,17 @@ pub fn begin_group<P: Pixel>(
     params.x_max = clamp_to(params.x_max, parent.width).max(params.x_min);
     params.y_max = clamp_to(params.y_max, parent.height).max(params.y_min);
 
-    let isolated = params.isolated;
     let mut group = GroupBitmap {
-        // Zero-initialised: colour 0, alpha 0 everywhere — the isolated backdrop.
+        // Zero-initialised: colour 0, alpha 0 everywhere.
         bitmap: Bitmap::new(parent.width, parent.height, 1, true),
         saved_clip: clip.clone_shared(),
         params,
-        alpha0: None,
+        backdrop: None,
     };
-    if !isolated {
-        copy_backdrop(parent, &mut group);
-        group.alpha0 = Some(parent.alpha_plane().map_or_else(
-            || vec![255u8; parent.width as usize * parent.height as usize].into(),
-            Into::into,
-        ));
+    if !group.params.isolated {
+        group.backdrop = Some(Backdrop::copy(parent, group.region()));
     }
     group
-}
-
-/// Copy the parent's colours and alpha inside the group region into the
-/// group bitmap.  A parent without an alpha plane is fully opaque.
-fn copy_backdrop<P: Pixel>(parent: &Bitmap<P>, group: &mut GroupBitmap<P>) {
-    let (x0, y0, x1, y1) = group.region();
-    let (x0, x1) = (x0 as usize, x1 as usize);
-    let width = parent.width as usize;
-    let ncomps = P::BYTES;
-    for y in y0..y1 {
-        group.bitmap.row_bytes_mut(y)[x0 * ncomps..x1 * ncomps]
-            .copy_from_slice(&parent.row_bytes(y)[x0 * ncomps..x1 * ncomps]);
-        let row_off = y as usize * width;
-        let dst = &mut group
-            .bitmap
-            .alpha_plane_mut()
-            .expect("group bitmap is allocated with an alpha plane")[row_off + x0..row_off + x1];
-        match parent.alpha_plane() {
-            Some(pa) => dst.copy_from_slice(&pa[row_off + x0..row_off + x1]),
-            None => dst.fill(255),
-        }
-    }
 }
 
 /// Composite a finished group back into the parent bitmap and return the saved clip.
@@ -407,15 +439,17 @@ mod tests {
         );
     }
 
-    /// A non-isolated group copies the parent alpha.
+    /// A non-isolated group starts transparent too, keeping the parent's
+    /// pixels under its region as its backdrop.
     #[test]
-    fn non_isolated_group_copies_parent_alpha() {
+    fn non_isolated_group_keeps_the_backdrop_aside() {
         let mut parent: Bitmap<Rgb8> = Bitmap::new(4, 4, 4, true);
         if let Some(a) = parent.alpha_plane_mut() {
             a.fill(128);
         }
+        parent.row_bytes_mut(2)[3..6].copy_from_slice(&[10, 20, 30]);
         let clip = make_clip(4, 4);
-        let mut params = default_params(0, 0, 3, 3);
+        let mut params = default_params(1, 1, 2, 2);
         params.isolated = false;
         let group = begin_group::<Rgb8>(&parent, &clip, params);
         assert!(
@@ -424,8 +458,22 @@ mod tests {
                 .alpha_plane()
                 .expect("alpha plane")
                 .iter()
-                .all(|&a| a == 128),
-            "non-isolated group must copy parent alpha"
+                .all(|&a| a == 0),
+            "the group's own alpha starts at zero"
+        );
+        let backdrop = group.backdrop.as_ref().expect("backdrop kept");
+        let pipe_backdrop = backdrop.as_pipe_backdrop();
+        assert_eq!(
+            pipe_backdrop.pixel(1, 2, 3),
+            Some((&[10u8, 20, 30][..], 128))
+        );
+        assert_eq!(pipe_backdrop.pixel(2, 2, 3), Some((&[0u8, 0, 0][..], 128)));
+        assert_eq!(pipe_backdrop.pixel(0, 0, 3), None, "outside the region");
+        assert!(
+            begin_group::<Rgb8>(&parent, &clip, default_params(0, 0, 3, 3))
+                .backdrop
+                .is_none(),
+            "an isolated group has no backdrop"
         );
     }
 
@@ -492,18 +540,6 @@ mod tests {
             "pixel (5,6) carries the group content"
         );
         assert_eq!(parent.row(0)[0].b, 0, "nothing lands at the origin");
-    }
-
-    /// A non-isolated group starts from the backdrop colours inside its region.
-    #[test]
-    fn non_isolated_group_copies_backdrop_colours() {
-        let mut parent: Bitmap<Rgb8> = Bitmap::new(4, 4, 4, true);
-        parent.row_bytes_mut(2)[3..6].copy_from_slice(&[10, 20, 30]);
-        let clip = make_clip(4, 4);
-        let mut params = default_params(1, 1, 2, 2);
-        params.isolated = false;
-        let group = begin_group::<Rgb8>(&parent, &clip, params);
-        assert_eq!(&group.bitmap.row_bytes(2)[3..6], &[10, 20, 30]);
     }
 
     /// Discarding a group returns the saved clip without painting.

@@ -30,10 +30,9 @@ pub fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
         overprint_additive: false,
         transfer: TransferSet::identity_rgb(),
         soft_mask: None,
-        alpha0: None,
+        backdrop: None,
         knockout: false,
         knockout_opacity: 255,
-        non_isolated_group: false,
     }
 }
 

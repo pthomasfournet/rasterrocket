@@ -148,9 +148,10 @@ pub struct PipeState<'bmp> {
     /// When `Some`, `a_input` is multiplied by the soft mask value per pixel.
     pub soft_mask: Option<&'bmp [u8]>,
 
-    /// Group alpha0 plane (non-isolated transparency group).
-    /// One byte per bitmap pixel; `None` for isolated groups and normal painting.
-    pub alpha0: Option<&'bmp [u8]>,
+    /// The backdrop of the non-isolated group being painted into, consulted
+    /// by the blend function; `None` outside such a group, and for
+    /// `BlendMode::Normal`, which does not consult it.
+    pub backdrop: Option<GroupBackdrop<'bmp>>,
 
     /// `true` if this is a knockout group: later objects replace earlier objects
     /// within the group rather than compositing on top of them.
@@ -158,16 +159,55 @@ pub struct PipeState<'bmp> {
 
     /// For knockout compositing: the accumulated group opacity threshold.
     pub knockout_opacity: u8,
+}
 
-    /// `true` if we are inside a non-isolated group.
-    pub non_isolated_group: bool,
+/// The backdrop of a non-isolated transparency group (ISO 32000-2 §11.4.7):
+/// the pixels under the group when it was opened.
+///
+/// The group's bitmap holds the group's own colour and alpha.  A blend mode
+/// applied inside the group blends the source with the group's content
+/// composited over this backdrop, weighted by that union's alpha, and the
+/// result is stored as the group's own colour again, so the backdrop shapes
+/// the blend but never enters the stored pixels; compositing the group onto
+/// its parent then needs no removal of the backdrop.
+#[derive(Copy, Clone, Debug)]
+pub struct GroupBackdrop<'a> {
+    /// Colour bytes of the copied rectangle, `ncomps` per pixel, row-major.
+    pub colour: &'a [u8],
+    /// Alpha of each copied pixel; `None` for an opaque backdrop.
+    pub alpha: Option<&'a [u8]>,
+    /// Device column of the copied rectangle's top-left pixel.
+    pub x0: i32,
+    /// Device row of the copied rectangle's top-left pixel.
+    pub y0: i32,
+    /// Pixels per row of the copied rectangle.
+    pub width: usize,
+    /// Rows of the copied rectangle.
+    pub height: usize,
+}
+
+impl GroupBackdrop<'_> {
+    /// The colour bytes and alpha of the backdrop at device pixel `(x, y)`;
+    /// `None` outside the copied rectangle, where the backdrop is
+    /// transparent.
+    #[must_use]
+    pub fn pixel(&self, x: i32, y: i32, ncomps: usize) -> Option<(&[u8], u8)> {
+        let col = usize::try_from(x.checked_sub(self.x0)?).ok()?;
+        let row = usize::try_from(y.checked_sub(self.y0)?).ok()?;
+        if col >= self.width || row >= self.height {
+            return None;
+        }
+        let i = row * self.width + col;
+        let alpha = self.alpha.map_or(255, |a| a[i]);
+        Some((&self.colour[i * ncomps..(i + 1) * ncomps], alpha))
+    }
 }
 
 impl PipeState<'_> {
     /// Returns `true` when the simple (no-transparency) fast path is applicable.
     ///
     /// Matches C++ `pipe->noTransparency`:
-    /// `a_input == 255 && no soft_mask && no shape && !in_non_isolated_group && !in_knockout_group`
+    /// `a_input == 255 && no soft_mask && no shape && no backdrop && !in_knockout_group`
     ///
     /// Overprint must be excluded: the simple path overwrites `dst_pixels` before
     /// reading the original destination, making channel-selective restore impossible.
@@ -176,9 +216,8 @@ impl PipeState<'_> {
         self.a_input == 255
             && self.soft_mask.is_none()
             && !uses_shape
-            && !self.non_isolated_group
             && !self.knockout
-            && self.alpha0.is_none()
+            && self.backdrop.is_none()
             && self.overprint_mask == 0xFFFF_FFFF
     }
 
@@ -186,13 +225,10 @@ impl PipeState<'_> {
     ///
     /// Matches C++ `pipeRunAA*` selection condition:
     /// no pattern, not noTransparency, no `soft_mask`, usesShape,
-    /// no alpha0, `BlendMode::Normal`, not `non_isolated_group`.
+    /// no backdrop, `BlendMode::Normal`.
     #[must_use]
     pub fn use_aa_path(&self) -> bool {
-        self.soft_mask.is_none()
-            && self.alpha0.is_none()
-            && self.blend_mode == BlendMode::Normal
-            && !self.non_isolated_group
+        self.soft_mask.is_none() && self.backdrop.is_none() && self.blend_mode == BlendMode::Normal
     }
 }
 
@@ -320,7 +356,6 @@ fn render_painted_runs<P: Pixel>(
             };
             let run_pipe = PipeState {
                 soft_mask: pipe.soft_mask.map(|s| &s[a..b]),
-                alpha0: pipe.alpha0.map(|s| &s[a..b]),
                 ..*pipe
             };
             #[expect(

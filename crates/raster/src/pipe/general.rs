@@ -14,6 +14,19 @@
 //!
 //! For blend mode `Normal`, `blend(c_src, c_dst) = c_src` so the formula reduces
 //! to the standard Porter-Duff over.
+//!
+//! Inside a non-isolated group (`pipe.backdrop` set) the destination holds
+//! the group's own colour and alpha, and the blend function sees the group's
+//! content over the backdrop (ISO 32000-2 §11.4.7, with the backdrop
+//! contribution removed from the stored result):
+//!
+//! ```text
+//! a_union  = a_dst + a_0 - div255(a_dst * a_0)
+//! c_union  = (a_dst * c_dst + (255 - a_dst) * a_0 * c_0 / 255) / a_union
+//! c_result = ((a_result - a_src) * c_dst
+//!             + a_src * ((255 - a_union) * c_src + a_union * blend(c_src, c_union)) / 255)
+//!            / a_result
+//! ```
 
 use std::cell::RefCell;
 
@@ -80,7 +93,17 @@ pub(crate) fn render_span_general<P: Pixel>(
     // Convenience: get optional slice at index i.
     let shape_at = |i: usize| shape.map_or(0xFFu8, |s| s[i]);
     let soft_mask_at = |i: usize| pipe.soft_mask.map_or(0xFFu8, |s| s[i]);
-    let alpha0_at = |i: usize| pipe.alpha0.map(|a| a[i]);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "i < count = x1 − x0 + 1, which fits in i32"
+    )]
+    let backdrop_at = |i: usize| {
+        pipe.backdrop.as_ref().map(|b| {
+            b.pixel(x0 + i as i32, y, ncomps)
+                .unwrap_or((&[0; MAX_COMPS][..ncomps], 0))
+        })
+    };
 
     match src {
         PipeSrc::Solid(color) => {
@@ -98,7 +121,7 @@ pub(crate) fn render_span_general<P: Pixel>(
                 is_cmyk_like,
                 &shape_at,
                 &soft_mask_at,
-                &alpha0_at,
+                &backdrop_at,
             );
         }
         PipeSrc::Pattern(pat) => {
@@ -119,7 +142,7 @@ pub(crate) fn render_span_general<P: Pixel>(
                     is_cmyk_like,
                     &shape_at,
                     &soft_mask_at,
-                    &alpha0_at,
+                    &backdrop_at,
                 );
             });
         }
@@ -138,7 +161,7 @@ pub(crate) fn render_span_general<P: Pixel>(
     clippy::single_match_else,
     reason = "both Some and None arms have substantial independent logic; if-let would be less clear"
 )]
-fn render_span_general_inner<'src>(
+fn render_span_general_inner<'src, 'bd>(
     pipe: &PipeState<'_>,
     src_px_at: impl Fn(usize) -> &'src [u8],
     dst_pixels: &mut [u8],
@@ -151,7 +174,7 @@ fn render_span_general_inner<'src>(
     is_cmyk_like: bool,
     shape_at: &dyn Fn(usize) -> u8,
     soft_mask_at: &dyn Fn(usize) -> u8,
-    alpha0_at: &dyn Fn(usize) -> Option<u8>,
+    backdrop_at: &dyn Fn(usize) -> Option<(&'bd [u8], u8)>,
 ) {
     let has_soft_mask = pipe.soft_mask.is_some();
     let has_shape = shape.is_some();
@@ -162,7 +185,6 @@ fn render_span_general_inner<'src>(
             for i in 0..count {
                 let src_px = src_px_at(i);
                 let dst_px = &mut dst_pixels[i * ncomps..(i + 1) * ncomps];
-                let a_dst = u32::from(dst_alpha[i]);
                 let shape_v = u32::from(shape_at(i));
                 let soft_v = u32::from(soft_mask_at(i));
 
@@ -176,28 +198,27 @@ fn render_span_general_inner<'src>(
                     dst_alpha[i] = 0;
                 }
 
-                // Non-isolated group colour correction (PDF spec §11.4.8).
-                // c_src_corrected = c_src + (c_src - c_dst) * (a_dst * 255 / shape - a_dst) / 255.
-                // shape_v in [1, 255] (from u8), a_dst in [0, 255]:
-                //   t_max = (255 * 255) / 1 - 0 = 65025 ≤ i32::MAX, so the cast is lossless.
-                let mut c_src_corr: [u8; MAX_COMPS] = [0; MAX_COMPS];
-                let c_src: &[u8] = if pipe.non_isolated_group && shape_v != 0 {
-                    let t = (a_dst * 255) / shape_v - a_dst;
-                    let t_i = t.cast_signed(); // t ≤ (255*255)/1 - 0 = 65025 ≪ i32::MAX
-                    for j in 0..ncomps {
-                        let v = i32::from(src_px[j])
-                            + (i32::from(src_px[j]) - i32::from(dst_px[j])) * t_i / 255;
-                        #[expect(
-                            clippy::cast_sign_loss,
-                            reason = "value is clamped to [0, 255] above"
-                        )]
-                        {
-                            c_src_corr[j] = v.clamp(0, 255) as u8;
-                        }
+                let c_src: &[u8] = src_px;
+                let a_dst_eff = u32::from(dst_alpha[i]); // may have been cleared by knockout.
+
+                // The pixel the blend function sees and the alpha weighting
+                // it: the destination, or in a non-isolated group the
+                // group's content over the backdrop (its backdrop alone
+                // under knockout).
+                let mut c_union: [u8; MAX_COMPS] = [0; MAX_COMPS];
+                let (c_blend_dst, alpha_im1): (&[u8], u32) = match backdrop_at(i) {
+                    Some((c_0, a_0)) if pipe.knockout => (c_0, u32::from(a_0)),
+                    Some((c_0, a_0)) => {
+                        let a_union = union_colour(
+                            dst_px,
+                            a_dst_eff,
+                            c_0,
+                            u32::from(a_0),
+                            &mut c_union[..ncomps],
+                        );
+                        (&c_union[..ncomps], a_union)
                     }
-                    &c_src_corr[..ncomps]
-                } else {
-                    src_px
+                    None => (&*dst_px, a_dst_eff),
                 };
 
                 // Blend function.
@@ -206,7 +227,7 @@ fn render_span_general_inner<'src>(
                     apply_blend_fn(
                         pipe.blend_mode,
                         c_src,
-                        dst_px,
+                        c_blend_dst,
                         &mut c_blend[..ncomps],
                         is_cmyk_like,
                         is_nonseparable,
@@ -214,9 +235,8 @@ fn render_span_general_inner<'src>(
                 }
 
                 // Result alpha.
-                let a_dst_eff = u32::from(dst_alpha[i]); // may have been cleared by knockout.
-                let (a_result, alpha_i, alpha_im1) =
-                    compute_alphas(a_src, a_dst_eff, shape_v, alpha0_at(i), pipe.knockout);
+                let a_result = compute_a_result(a_src, a_dst_eff, shape_v, pipe.knockout);
+                let alpha_i = a_result;
 
                 // Result colour.
                 if a_result == 0 {
@@ -251,7 +271,7 @@ fn render_span_general_inner<'src>(
 
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "a_result is clamped to ≤ 255 in compute_alphas"
+                    reason = "a_result is clamped to ≤ 255 in compute_a_result"
                 )]
                 {
                     dst_alpha[i] = a_result as u8;
@@ -264,8 +284,8 @@ fn render_span_general_inner<'src>(
             // Non-isolated and knockout modes require a dst_alpha plane to carry the
             // group alpha; those states are meaningless without one.
             debug_assert!(
-                !pipe.non_isolated_group && !pipe.knockout,
-                "non_isolated_group/knockout require dst_alpha; None arm uses implicit a_dst=255"
+                pipe.backdrop.is_none() && !pipe.knockout,
+                "a group backdrop and knockout require dst_alpha; None arm uses implicit a_dst=255"
             );
             for i in 0..count {
                 let src_px = src_px_at(i);
@@ -343,45 +363,38 @@ fn compute_a_src(
     }
 }
 
-/// Compute result alpha and the two intermediate alphas used in the colour formula.
-///
-/// Returns `(a_result, alpha_i, alpha_im1)`.
-///
-/// Matches the C++ `pipeRun` alpha logic for isolated/non-isolated, knockout/non-knockout.
-#[expect(
-    clippy::option_if_let_else,
-    reason = "if-let form is clearer than map_or_else for this multi-branch alpha computation"
-)]
-fn compute_alphas(
-    a_src: u32,
-    a_dst: u32,
-    shape: u32,
-    alpha0: Option<u8>,
-    knockout: bool,
-) -> (u32, u32, u32) {
-    if let Some(a0) = alpha0 {
-        let a0 = u32::from(a0);
-        if knockout {
-            // Non-isolated, knockout.
-            let a_result = a_src + u32::from(div255(a_dst * (255 - shape)));
-            let alpha_i = a_result + a0 - u32::from(div255(a_result * a0));
-            (a_result.min(255), alpha_i.min(255), a0)
-        } else {
-            // Non-isolated, non-knockout.
-            let a_result = a_src + a_dst - u32::from(div255(a_src * a_dst));
-            let alpha_i = a_result + a0 - u32::from(div255(a_result * a0));
-            let alpha_im1 = a0 + a_dst - u32::from(div255(a0 * a_dst));
-            (a_result.min(255), alpha_i.min(255), alpha_im1.min(255))
-        }
-    } else if knockout {
-        // Isolated, knockout.
-        let a_result = a_src + u32::from(div255(a_dst * (255 - shape)));
-        (a_result.min(255), a_result.min(255), 0)
+/// The result alpha of a source of alpha `a_src` and shape `shape` over a
+/// destination of alpha `a_dst`: their union, or under knockout the source
+/// over the destination outside the shape.
+fn compute_a_result(a_src: u32, a_dst: u32, shape: u32, knockout: bool) -> u32 {
+    let a_result = if knockout {
+        a_src + u32::from(div255(a_dst * (255 - shape)))
     } else {
-        // Isolated, non-knockout (most common).
-        let a_result = a_src + a_dst - u32::from(div255(a_src * a_dst));
-        (a_result.min(255), a_result.min(255), a_dst)
+        a_src + a_dst - u32::from(div255(a_src * a_dst))
+    };
+    a_result.min(255)
+}
+
+/// Write into `out` the colour of a group's content (`c_dst`, alpha `a_dst`)
+/// composited over its backdrop (`c_0`, alpha `a_0`) and return the alpha
+/// of that union.  Black where the union is transparent.
+fn union_colour(c_dst: &[u8], a_dst: u32, c_0: &[u8], a_0: u32, out: &mut [u8]) -> u32 {
+    let a_union = (a_dst + a_0 - u32::from(div255(a_dst * a_0))).min(255);
+    if a_union == 0 {
+        out.fill(0);
+        return 0;
     }
+    for ((o, &c_d), &c_b) in out.iter_mut().zip(c_dst).zip(c_0) {
+        let num = a_dst * u32::from(c_d) * 255 + (255 - a_dst) * a_0 * u32::from(c_b);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a weighted mean of u8 values is at most 255"
+        )]
+        {
+            *o = (num / (255 * a_union)) as u8;
+        }
+    }
+    a_union
 }
 
 /// Apply the blend function and write into `c_blend`.
@@ -514,6 +527,8 @@ fn apply_overprint(pipe: &PipeState<'_>, dst_px: &mut [u8], src_px: &[u8], ncomp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe::GroupBackdrop;
+    use crate::testutil::make_pipe;
 
     #[test]
     fn compute_a_src_no_mask_no_shape_returns_a_input() {
@@ -550,10 +565,9 @@ mod tests {
             overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             soft_mask: None,
-            alpha0: None,
+            backdrop: None,
             knockout: false,
             knockout_opacity: 255,
-            non_isolated_group: false,
         }
     }
 
@@ -610,13 +624,80 @@ mod tests {
     }
 
     #[test]
-    fn compute_alphas_isolated_non_knockout() {
-        // a_src=128, a_dst=200.
-        let (ar, ai, aim1) = compute_alphas(128, 200, 255, None, false);
-        // a_result = 128 + 200 - div255(128 * 200) ≈ 228.
+    fn a_result_is_the_union_of_source_and_destination() {
+        // a_src=128, a_dst=200: 128 + 200 - div255(128 * 200) ≈ 228.
+        let ar = compute_a_result(128, 200, 255, false);
         assert!((226..=230).contains(&ar), "a_result={ar}");
-        assert_eq!(ai, ar, "isolated: alpha_i == a_result");
-        assert_eq!(aim1, 200, "isolated non-knockout: alpha_im1 == a_dst");
+        // Knockout: the source replaces the destination within its shape.
+        assert_eq!(compute_a_result(128, 200, 255, true), 128);
+    }
+
+    #[test]
+    fn union_colour_composites_the_group_over_its_backdrop() {
+        let mut out = [0u8; 3];
+        // Nothing painted yet: the backdrop itself.
+        assert_eq!(
+            union_colour(&[9, 9, 9], 0, &[10, 20, 30], 255, &mut out),
+            255
+        );
+        assert_eq!(out, [10, 20, 30]);
+        // Opaque content hides the backdrop.
+        assert_eq!(
+            union_colour(&[1, 2, 3], 255, &[10, 20, 30], 255, &mut out),
+            255
+        );
+        assert_eq!(out, [1, 2, 3]);
+        // Half-covered white over opaque black: mid-grey.
+        assert_eq!(union_colour(&[255; 3], 128, &[0; 3], 255, &mut out), 255);
+        assert_eq!(out, [128, 128, 128]);
+        // A transparent backdrop contributes nothing.
+        assert_eq!(union_colour(&[255; 3], 128, &[0; 3], 0, &mut out), 128);
+        assert_eq!(out, [255, 255, 255]);
+    }
+
+    /// Inside a non-isolated group, a blend mode sees the backdrop: blue
+    /// multiplied into an empty group over opaque mid-grey stores
+    /// (0, 0, 128) at full alpha, where an isolated group stores blue.
+    #[test]
+    fn blend_inside_a_non_isolated_group_sees_the_backdrop() {
+        let backdrop = [128u8, 128, 128];
+        let mut pipe = make_pipe(255, BlendMode::Multiply);
+        pipe.backdrop = Some(GroupBackdrop {
+            colour: &backdrop,
+            alpha: None,
+            x0: 0,
+            y0: 0,
+            width: 1,
+            height: 1,
+        });
+        let mut dst = [0u8; 3];
+        let mut alpha = [0u8];
+        render_span_general::<Rgb8>(
+            &pipe,
+            &PipeSrc::Solid(&[0, 0, 255]),
+            &mut dst,
+            Some(&mut alpha),
+            None,
+            0,
+            0,
+            0,
+        );
+        assert_eq!((dst, alpha), ([0, 0, 128], [255]));
+
+        // Outside the copied rectangle the backdrop is transparent: no blend.
+        let mut dst = [0u8; 3];
+        let mut alpha = [0u8];
+        render_span_general::<Rgb8>(
+            &pipe,
+            &PipeSrc::Solid(&[0, 0, 255]),
+            &mut dst,
+            Some(&mut alpha),
+            None,
+            5,
+            5,
+            0,
+        );
+        assert_eq!((dst, alpha), ([0, 0, 255], [255]));
     }
 
     #[test]
@@ -635,10 +716,9 @@ mod tests {
             overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             soft_mask: Some(soft.as_slice()),
-            alpha0: None,
+            backdrop: None,
             knockout: false,
             knockout_opacity: 255,
-            non_isolated_group: false,
         };
 
         let src = PipeSrc::Solid(&[255u8, 255, 255]);
@@ -667,10 +747,9 @@ mod tests {
             overprint_additive: false,
             transfer,
             soft_mask: None,
-            alpha0: None,
+            backdrop: None,
             knockout: false,
             knockout_opacity: 255,
-            non_isolated_group: false,
         };
 
         // Opaque gray source value 100; after inverting transfer: 155.

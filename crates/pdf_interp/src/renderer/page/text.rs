@@ -318,9 +318,12 @@ impl PageRenderer<'_> {
         if do_fill {
             let fill_bytes = self.gstate.current().fill_color.as_slice().to_vec();
             let clip = self.gstate.current().clip.clone_shared();
+            let blend_mode = self.gstate.current().blend_mode;
+            let backdrop = self.blend_backdrop(blend_mode);
             let pipe = Self::make_pipe(
                 self.gstate.current().fill_alpha,
-                self.gstate.current().blend_mode,
+                blend_mode,
+                backdrop.as_deref(),
             );
             let src = PipeSrc::Solid(&fill_bytes);
 

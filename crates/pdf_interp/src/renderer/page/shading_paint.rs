@@ -59,7 +59,7 @@ impl PageRenderer<'_> {
         &mut self,
         pattern: ShadingPattern,
         stroke: bool,
-        paint: impl FnOnce(&mut Self, &PipeState<'static>, ResolvedShading) -> R,
+        paint: impl FnOnce(&mut Self, &PipeState<'_>, ResolvedShading) -> R,
     ) -> R {
         let ShadingPattern {
             shading,
@@ -73,17 +73,19 @@ impl PageRenderer<'_> {
             } else {
                 gs.fill_alpha
             };
-            Self::make_pipe(alpha, gs.blend_mode)
+            (alpha, gs.blend_mode, r.blend_backdrop(gs.blend_mode))
         };
         let Some(ext) = ext_gstate else {
-            let pipe = pipe_of(self);
+            let (alpha, blend_mode, backdrop) = pipe_of(self);
+            let pipe = Self::make_pipe(alpha, blend_mode, backdrop.as_deref());
             return paint(self, &pipe, shading);
         };
         self.gstate.save();
         let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, matrix);
         self.apply_ext_gstate(&ext);
         self.gstate.current_mut().ctm = ctm;
-        let pipe = pipe_of(self);
+        let (alpha, blend_mode, backdrop) = pipe_of(self);
+        let pipe = Self::make_pipe(alpha, blend_mode, backdrop.as_deref());
         let result = match self.gstate.current_mut().soft_mask.take() {
             Some(mask) => self.paint_through_soft_mask(&mask, |r| paint(r, &pipe, shading)),
             None => paint(self, &pipe, shading),
@@ -98,7 +100,8 @@ impl PageRenderer<'_> {
         let gs = self.gstate.current();
         let ctm = gs.ctm;
         let flatness = gs.flatness.max(0.1);
-        let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode);
+        let backdrop = self.blend_backdrop(gs.blend_mode);
+        let pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
         let page_h = f64::from(self.height);
 
         let Some(shading) = self.resources.shading(name, &ctm, page_h) else {
