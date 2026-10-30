@@ -195,11 +195,16 @@ pub(crate) fn parse_inline_params(params: &[u8]) -> Dictionary {
 /// The length in bytes of an inline image's data as its parameters
 /// `dict` (keys expanded) determine it: `/Length` when present (PDF 2.0),
 /// otherwise, for unfiltered data, `⌈W·BPC·n/8⌉·H` (§8.9.7), where `n` is
-/// 1 for an image mask and the component count of a device or `/Indexed`
-/// colour space.  `None` when the parameters leave it open: filtered data
-/// without `/Length`, a colour space named from the resources, or
-/// missing, non-positive or overflowing values.
-pub(crate) fn inline_data_len(dict: &Dictionary) -> Option<usize> {
+/// 1 for an image mask, the component count of a device or `/Indexed`
+/// colour space, or that of a colour space named from the resources as
+/// `components` resolves it.  `None` when the parameters leave it open:
+/// filtered data without `/Length`, a named colour space without a
+/// resolver or unknown to it, or missing, non-positive or overflowing
+/// values.
+pub(crate) fn inline_data_len(
+    dict: &Dictionary,
+    components: Option<crate::content::InlineComponents<'_>>,
+) -> Option<usize> {
     if let Some(len) = dict.get_i64(b"Length") {
         return usize::try_from(len).ok();
     }
@@ -223,9 +228,16 @@ pub(crate) fn inline_data_len(dict: &Dictionary) -> Option<usize> {
                 b"DeviceGray" => 1,
                 b"DeviceRGB" => 3,
                 b"DeviceCMYK" => 4,
-                _ => return None,
+                named => components?(named)?,
             },
-            Object::Array(arr) if arr.first().and_then(Object::as_name) == Some(b"Indexed") => 1,
+            Object::Array(arr)
+                if matches!(
+                    arr.first().and_then(Object::as_name),
+                    Some(b"Indexed" | b"I")
+                ) =>
+            {
+                1
+            }
             _ => return None,
         };
         (dim(b"BitsPerComponent")?, n)

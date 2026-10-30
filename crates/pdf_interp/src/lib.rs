@@ -683,7 +683,12 @@ pub fn parse_page_content_by_id(
     page_id: pdf::ObjectId,
 ) -> Result<(Vec<content::Operator>, Vec<pdf::ContentFailure>), InterpError> {
     let content = doc.page_content(page_id)?;
-    Ok((content::parse(&content.bytes), content.failures))
+    let resources = resources::PageResources::new(doc, page_id);
+    let components = |name: &[u8]| resources.inline_image_components(name);
+    Ok((
+        content::parse_with(&content.bytes, Some(&components)),
+        content.failures,
+    ))
 }
 
 #[cfg(test)]

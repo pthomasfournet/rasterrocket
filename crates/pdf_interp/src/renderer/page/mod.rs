@@ -1766,7 +1766,8 @@ impl<'doc> PageRenderer<'doc> {
 
         // Parse and execute the form's content stream.  Its `Q`s cannot
         // pop the state saved above.
-        let ops = crate::content::parse(&form.content);
+        let components = |name: &[u8]| self.resources.inline_image_components(name);
+        let ops = crate::content::parse_with(&form.content, Some(&components));
         let floor = self.gstate.raise_floor();
         self.execute_content_stream(&ops);
         self.gstate.lower_floor(floor);

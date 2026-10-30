@@ -403,7 +403,8 @@ resources/
     colorspace.rs    — ImageColour: the samples' colour space and their
                        conversion to gray / RGB
     smask.rs         — SMask decode and /Matte removal
-    inline.rs        — BI … ID … EI; data length from the dictionary
+    inline.rs        — BI … ID … EI; data length from the dictionary, a
+                       named colour space resolved through the resources
 ```
 
 **Image colour** (`resources/image/colorspace.rs`)

@@ -43,6 +43,11 @@ pub enum Token<'a> {
 /// use) is bounded by this constant regardless of input.
 const MAX_NESTING: usize = 256;
 
+/// The component count of a colour space named from the `/ColorSpace`
+/// resources, for an inline image's data length; `None` for a name the
+/// resources do not define.
+pub type InlineComponents<'a> = &'a dyn Fn(&[u8]) -> Option<usize>;
+
 /// Iterates over tokens in a PDF content stream byte slice.
 ///
 /// The tokenizer borrows its source slice for its lifetime; zero-copy for
@@ -52,6 +57,9 @@ pub struct Tokenizer<'a> {
     pos: usize,
     /// Number of arrays and dictionaries currently open.
     depth: usize,
+    /// Resolves a named colour space of an inline image to its component
+    /// count (see [`inline_data_len`]).
+    inline_components: Option<InlineComponents<'a>>,
 }
 
 impl<'a> Tokenizer<'a> {
@@ -62,7 +70,16 @@ impl<'a> Tokenizer<'a> {
             src,
             pos: 0,
             depth: 0,
+            inline_components: None,
         }
+    }
+
+    /// The same tokenizer, resolving an inline image's named colour space
+    /// through `components` when computing the image's data length.
+    #[must_use]
+    pub const fn with_inline_components(mut self, components: InlineComponents<'a>) -> Self {
+        self.inline_components = Some(components);
+        self
     }
 
     fn remaining(&self) -> &'a [u8] {
@@ -324,7 +341,7 @@ impl<'a> Tokenizer<'a> {
         // Data whose length the parameters determine ends there, when `EI`
         // follows it after optional whitespace; its bytes may then contain
         // `EI` themselves.
-        let declared_end = inline_data_len(&parse_inline_params(params))
+        let declared_end = inline_data_len(&parse_inline_params(params), self.inline_components)
             .and_then(|len| data_start.checked_add(len))
             .filter(|&end| end <= self.src.len());
         if let Some(end) = declared_end

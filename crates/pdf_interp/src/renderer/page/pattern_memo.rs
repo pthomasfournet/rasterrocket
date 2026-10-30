@@ -24,6 +24,7 @@ use raster::{Bitmap, CellPhase};
 use super::super::color::RasterColor;
 use super::PageRenderer;
 use crate::content::Operator;
+use crate::resources::PageResources;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 use crate::resources::tiling::TilingDescriptor;
 use crate::resources::{ResourceKey, ShadingPattern};
@@ -288,7 +289,16 @@ impl PageRenderer<'_> {
         };
         self.pattern_memo.borrow_mut().cell(id, || {
             self.resources.tiling_pattern(name).map(|desc| {
-                let ops = crate::content::parse(&desc.content);
+                // The cell's inline images name colour spaces from the
+                // pattern's own resources, or the parent context's when it
+                // has none.
+                let cell_resources = if desc.has_own_resources {
+                    self.resources.for_context(desc.stream_id)
+                } else {
+                    PageResources::new(self.resources.doc(), self.resources.resource_context_id())
+                };
+                let components = |name: &[u8]| cell_resources.inline_image_components(name);
+                let ops = crate::content::parse_with(&desc.content, Some(&components));
                 Rc::new(TilingCell { desc, ops })
             })
         })

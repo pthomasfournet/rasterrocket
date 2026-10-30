@@ -544,6 +544,17 @@ impl<'doc> PageResources<'doc> {
         self.resource_subdict(Category::ColorSpace)
     }
 
+    /// The component count of the colour space `name` names in the
+    /// `/ColorSpace` resources, for the data length of an inline image
+    /// (see [`crate::content::parse_with`]); `None` for a name the
+    /// resources do not define or a `Pattern` space.
+    #[must_use]
+    pub fn inline_image_components(&self, name: &[u8]) -> Option<usize> {
+        let entry = self.color_space_dict()?.get(name)?;
+        let n = colorspace::resolve(self.doc, entry).ncomponents();
+        (n > 0).then_some(n)
+    }
+
     /// Decode the image `XObject` `request` names from the resource dictionary,
     /// at no less than `request.draw_size` when the codec can reduce.
     ///

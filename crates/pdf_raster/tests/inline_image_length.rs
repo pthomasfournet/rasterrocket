@@ -20,14 +20,22 @@ const SIDE: u32 = 16;
 /// the pixels at the centre of the image's top-left sample, of its bottom
 /// row, and of the red square.
 fn render(params: &str, data: &[u8]) -> [[u8; 3]; 3] {
+    render_with_resources(params, data, "")
+}
+
+/// As [`render`], with `resources` as the page's `/Resources` entries.
+fn render_with_resources(params: &str, data: &[u8], resources: &str) -> [[u8; 3]; 3] {
     let mut content = format!("q {SIDE} 0 0 {SIDE} 0 0 cm BI /W 4 /H 2 {params} ID ").into_bytes();
     content.extend_from_slice(data);
     content.extend_from_slice(b"\nEI Q 1 0 0 rg 0 0 2 2 re f");
     let objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] /Contents 4 0 R >>")
-            .into_bytes(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
+             /Resources << {resources} >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
         stream_object("", &content),
     ];
     let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
@@ -66,6 +74,21 @@ fn unfiltered_data_length_comes_from_the_dimensions() {
     assert_near("RGB, first sample", first, [0x20; 3]);
     assert_near("RGB, bottom row", bottom, [0x80; 3]);
     assert_near("RGB, operators after EI", red, [255, 0, 0]);
+}
+
+/// A colour space named from the resources resolves to its component
+/// count, so the data length is known for it too.
+#[test]
+fn named_colour_space_length_comes_from_the_resources() {
+    let mut rgb = vec![0x20, 0x20, 0x20];
+    rgb.extend_from_slice(&EI);
+    rgb.extend_from_slice(&[0x20; 5]);
+    rgb.extend_from_slice(&[0x80; 12]);
+    let [first, bottom, red] =
+        render_with_resources("/CS /CS0 /BPC 8", &rgb, "/ColorSpace << /CS0 /DeviceRGB >>");
+    assert_near("named RGB, first sample", first, [0x20; 3]);
+    assert_near("named RGB, bottom row", bottom, [0x80; 3]);
+    assert_near("named RGB, operators after EI", red, [255, 0, 0]);
 }
 
 #[test]

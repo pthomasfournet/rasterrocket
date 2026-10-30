@@ -5,7 +5,7 @@ pub mod operator;
 pub mod tokenizer;
 
 pub use operator::{Operator, TextArrayElement};
-pub use tokenizer::Tokenizer;
+pub use tokenizer::{InlineComponents, Tokenizer};
 
 /// Parse a raw content stream byte slice into a `Vec` of decoded operators.
 ///
@@ -13,12 +13,27 @@ pub use tokenizer::Tokenizer;
 /// - Operand tokens that do not match the expected type for an operator are
 ///   treated as zero/empty (lenient, matching Acrobat's behaviour).
 /// - Stray operands with no following operator are silently discarded.
+///
+/// An inline image whose colour space is named from the resources has its
+/// data length computed only through [`parse_with`].
 #[must_use]
 pub fn parse(src: &[u8]) -> Vec<Operator> {
+    parse_with(src, None)
+}
+
+/// [`parse`], resolving an inline image's named colour space to its
+/// component count through `components` (see
+/// [`Tokenizer::with_inline_components`]).
+#[must_use]
+pub fn parse_with(src: &[u8], components: Option<InlineComponents<'_>>) -> Vec<Operator> {
     let mut operands: Vec<tokenizer::Token<'_>> = Vec::new();
     let mut ops = Vec::new();
 
-    for token in Tokenizer::new(src) {
+    let mut tokenizer = Tokenizer::new(src);
+    if let Some(components) = components {
+        tokenizer = tokenizer.with_inline_components(components);
+    }
+    for token in tokenizer {
         match token {
             tokenizer::Token::Op(kw) => {
                 ops.push(operator::decode(kw, &mut operands));
