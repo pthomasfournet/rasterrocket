@@ -489,12 +489,20 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
             .and_then(|cs| colorspace::sample_rewrite(doc, cs))
     };
 
+    // The matte colour of a soft mask the image's samples are pre-blended
+    // with (§11.6.5.3).
+    let matte = match stream.dict.get(b"SMask") {
+        Some(Object::Reference(id)) if !is_mask => smask::matte(doc, *id),
+        _ => None,
+    };
+
     // A colour-key mask compares exact samples, which a reduced decode
-    // averages, so such an image decodes in full.  A mask stream keeps its
+    // averages, and a matte is removed pixel by pixel on the mask's grid,
+    // so such an image decodes in full.  A mask stream otherwise keeps its
     // own resolution and needs no such exclusion.
     let draw_size = request
         .draw_size
-        .filter(|_| !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
+        .filter(|_| matte.is_none() && !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
 
     // The GPU blit composites cached images fully opaque and reads their
     // samples verbatim, so an image carrying a soft mask, an explicit mask,
@@ -601,6 +609,10 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     // samples, not the colours they map to.
     if let Some(rewrite) = &rewrite {
         colorspace::apply_sample_rewrite(&mut img, rewrite);
+    }
+
+    if let Some(matte) = &matte {
+        smask::remove_matte(doc, stream.dict.get(b"ColorSpace"), matte, &mut img);
     }
 
     ImageResolution::Ok {

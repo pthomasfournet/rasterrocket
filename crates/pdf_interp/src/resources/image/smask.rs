@@ -7,11 +7,12 @@
 //! own grid, so its resolution is independent of the resolution the parent
 //! image was decoded at.
 
-use pdf::{Object, ObjectId, Stream};
+use pdf::{Document, Object, ObjectId, Stream};
 
 use super::dispatch::{ImageStream, decode_image_stream};
 use super::validated_dims;
-use super::{ImageColorSpace, ImageDecodeCtx, ImageDescriptor};
+use super::{ImageColorSpace, ImageData, ImageDecodeCtx, ImageDescriptor};
+use crate::resources::colorspace::{self, ColorSpace};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -268,6 +269,95 @@ pub(super) fn colour_key_mask_with(
         })
         .collect();
     SoftMask::new(img_w, img_h, alpha)
+}
+
+/// The `/Matte` array of soft-mask stream `id`: the matte colour, with one
+/// component per component of the parent image's colour space
+/// (§11.6.5.3).  `None` when the mask has no `/Matte` or an entry is not a
+/// number.
+pub(super) fn matte(doc: &Document, id: ObjectId) -> Option<Vec<f64>> {
+    let obj_arc = doc.get_object(id).ok()?;
+    let stream = obj_arc.as_ref().as_stream()?;
+    let Object::Array(arr) = stream.dict.get(b"Matte")? else {
+        return None;
+    };
+    arr.iter().map(Object::as_f64).collect()
+}
+
+/// Recover the colours of an image pre-blended with the matte colour
+/// `matte` (§11.6.5.3), given in the colour space `cs_obj`.
+///
+/// Each stored component is `c' = m + α·(c − m)`; the inverse
+/// `c = m + (c' − m)/α`, clamped to the component range, is applied to the
+/// decoded device samples with the matte converted to the same device
+/// space.  Pixels of alpha 0 are left as stored.  The mask must share the
+/// image's grid, as §11.6.5.3 requires of a mask carrying `/Matte`;
+/// otherwise, or when the matte does not match the colour space's
+/// component count, the image is left as stored.
+pub(super) fn remove_matte(
+    doc: &Document,
+    cs_obj: Option<&Object>,
+    matte: &[f64],
+    img: &mut ImageDescriptor,
+) {
+    let cs = cs_obj.map_or(ColorSpace::DeviceGray, |o| colorspace::resolve(doc, o));
+    if matte.len() != cs.ncomponents() {
+        log::warn!(
+            "image: /Matte has {} components, the image's colour space {}; drawing as stored",
+            matte.len(),
+            cs.ncomponents()
+        );
+        return;
+    }
+    let rgb = cs.convert_to_rgb(doc, matte);
+    let device: &[u8] = match img.color_space {
+        ImageColorSpace::Rgb => &rgb,
+        ImageColorSpace::Gray => &rgb[..1],
+        ImageColorSpace::Mask => return,
+    };
+    let Some(mask) = &img.smask else { return };
+    if (mask.width(), mask.height()) != (img.width, img.height) {
+        log::warn!(
+            "image: /Matte mask is {}×{}, the image {}×{}; drawing as stored",
+            mask.width(),
+            mask.height(),
+            img.width,
+            img.height
+        );
+        return;
+    }
+    #[cfg_attr(
+        not(feature = "cache"),
+        expect(
+            clippy::infallible_destructuring_match,
+            reason = "the cache-feature build adds a device-resident arm; keep one shape"
+        )
+    )]
+    let data = match &mut img.data {
+        ImageData::Cpu(bytes) => bytes,
+        #[cfg(feature = "cache")]
+        ImageData::Gpu(_) => {
+            log::warn!("image: /Matte needs host-resident samples; drawing as stored");
+            return;
+        }
+    };
+    let n = device.len();
+    for (px, &a) in data.chunks_exact_mut(n).zip(mask.alpha()) {
+        if a == 0 {
+            continue;
+        }
+        for (c, &m) in px.iter_mut().zip(device) {
+            let v = f32::from(m) + (f32::from(*c) - f32::from(m)) * 255.0 / f32::from(a);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to 0..=255 before the cast"
+            )]
+            {
+                *c = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
