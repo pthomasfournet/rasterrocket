@@ -128,6 +128,9 @@ pub struct FontProgram {
     /// charmap is built from names (Type 1, bare CFF, sfnt without a
     /// Unicode subtable).  Built on first use.
     name_charmap: OnceLock<Charmap>,
+    /// Glyph indices of the codes 0–255 through the program's built-in
+    /// encoding, 0 where it assigns none.  Built on first use.
+    builtin_encoding: OnceLock<Box<[u32; 256]>>,
 }
 
 impl std::fmt::Debug for FontProgram {
@@ -212,6 +215,7 @@ impl FontProgram {
             byte_charmap: Box::new([0; 256]),
             names: OnceLock::new(),
             name_charmap,
+            builtin_encoding: OnceLock::new(),
         };
         let mut table = [0u32; 256];
         for (code, slot) in (0u32..).zip(table.iter_mut()) {
@@ -381,15 +385,31 @@ impl FontProgram {
     /// encoding.
     #[must_use]
     pub fn builtin_encoding_index(&self, code: u8) -> Option<u32> {
-        let gid = match &self.outlines {
-            Outlines::Sfnt { .. } | Outlines::CidType1(_) => None,
-            Outlines::Cff => self
-                .cff()
-                .filter(|cff| !cff.is_cid())
-                .and_then(|cff| cff.encoding()?.map(code)),
-            Outlines::Type1(font) => font.encoding().and_then(|enc| enc.map(code)),
-        }?;
-        Some(gid.to_u32()).filter(|&gid| gid != 0)
+        let table = self.builtin_encoding.get_or_init(|| {
+            let mut table = Box::new([0; 256]);
+            let mut fill = |map: &dyn Fn(u8) -> Option<GlyphId>| {
+                for (code, slot) in (0..=u8::MAX).zip(table.iter_mut()) {
+                    *slot = map(code).map_or(0, GlyphId::to_u32);
+                }
+            };
+            match &self.outlines {
+                Outlines::Sfnt { .. } | Outlines::CidType1(_) => {}
+                Outlines::Cff => {
+                    if let Some(cff) = self.cff().filter(|cff| !cff.is_cid())
+                        && let Some(encoding) = cff.encoding()
+                    {
+                        fill(&|code| encoding.map(code));
+                    }
+                }
+                Outlines::Type1(font) => {
+                    if let Some(encoding) = font.encoding() {
+                        fill(&|code| encoding.map(code));
+                    }
+                }
+            }
+            table
+        });
+        Some(table[usize::from(code)]).filter(|&gid| gid != 0)
     }
 
     /// Every (glyph index, name) pair the program defines, in glyph order.

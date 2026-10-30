@@ -85,7 +85,7 @@ impl FontEngine {
                 .push(Arc::clone(&program));
             program
         };
-        self.make_face(program, params)
+        self.load_program_face(program, params)
     }
 
     /// Load a face from a font file.  `face_index` selects the member of a
@@ -110,10 +110,15 @@ impl FontEngine {
             let _ = self.file_programs.insert(key, Arc::clone(&program));
             program
         };
-        self.make_face(program, params)
+        self.load_program_face(program, params)
     }
 
-    fn make_face(
+    /// Make a face of a program already parsed, possibly by another engine.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::DegenerateSize`] when the matrix is degenerate.
+    pub fn load_program_face(
         &mut self,
         program: Arc<FontProgram>,
         params: FaceParams,

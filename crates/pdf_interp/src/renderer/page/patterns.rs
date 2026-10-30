@@ -187,6 +187,7 @@ impl PageRenderer<'_> {
         // Build a temporary child renderer sharing the same document / font engine.
         let doc = self.resources.doc();
         let mut tile_renderer = PageRenderer::new(tile_w, tile_h, doc, desc.stream_id);
+        tile_renderer.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
         tile_renderer.bitmap = Bitmap::new(tile_w, tile_h, 1, true);
         // Propagate pattern_depth so a pattern stream that recursively
         // invokes another pattern (or itself) hits MAX_PATTERN_DEPTH instead

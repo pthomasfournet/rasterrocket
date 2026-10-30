@@ -75,7 +75,7 @@ use raster::{
 };
 
 use super::color::RasterColor;
-use super::font_cache::FontCache;
+use super::font_cache::{DocumentFonts, FontCache};
 use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform, invert_affine};
 use crate::content::Operator;
 use crate::resources::{
@@ -98,12 +98,6 @@ use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
 use image_sampler::{GridClip, MaskSampler, SampleGrid};
-#[cfg(any(
-    feature = "gpu-aa",
-    feature = "gpu-icc",
-    feature = "cache",
-    feature = "vulkan"
-))]
 use std::sync::Arc;
 
 const _: () = assert!(
@@ -554,7 +548,7 @@ impl<'doc> PageRenderer<'doc> {
         let initial_ctm = build_initial_ctm(width, height, scale, rotate_cw, origin_x, origin_y);
         gstate.current_mut().ctm = initial_ctm;
 
-        let font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
+        let font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), Arc::default());
         let resources = PageResources::new(doc, page_id);
 
         Self {
@@ -748,6 +742,13 @@ impl<'doc> PageRenderer<'doc> {
             doc_id,
             page_buffer: None,
         });
+    }
+
+    /// Resolve indirect fonts through `fonts`, a store shared by every page
+    /// of this renderer's document, instead of a store private to the page.
+    /// Call before execute.
+    pub fn set_document_fonts(&mut self, fonts: Arc<DocumentFonts>) {
+        self.font_cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), fonts);
     }
 
     /// Images skipped so far on this page; also returned in

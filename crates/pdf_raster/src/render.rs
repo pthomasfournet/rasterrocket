@@ -191,6 +191,8 @@ impl From<pdf::PdfError> for RasterError {
 /// `mpsc::Sender` is `Send + Sync`).
 pub struct RasterSession {
     pub(crate) doc: Arc<pdf::Document>,
+    /// Fonts of `doc` resolved once and shared by every page rendered.
+    pub(crate) fonts: Arc<pdf_interp::renderer::DocumentFonts>,
     pub(crate) total_pages: u32,
     pub(crate) policy: BackendPolicy,
     /// Fail a page on an image failure instead of skipping the image
@@ -501,6 +503,7 @@ fn open_session_with_doc(
 
     Ok(RasterSession {
         doc,
+        fonts: Arc::default(),
         total_pages,
         policy: config.policy,
         strict: config.strict,
@@ -736,6 +739,7 @@ fn render_page_rgb_with_geom(
         doc,
         page_id,
     );
+    renderer.set_document_fonts(Arc::clone(&session.fonts));
 
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));

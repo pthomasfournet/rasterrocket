@@ -12,17 +12,22 @@
 //! # Threading
 //!
 //! One instance is created per page renderer (one per thread when pages are
-//! rendered in parallel) and owns that page's [`FontEngine`].
+//! rendered in parallel) and owns that page's [`FontEngine`].  What depends
+//! only on an indirect font dictionary — its descriptor, its parsed program
+//! and its code → glyph table — is kept in a [`DocumentFonts`] shared by
+//! every page of the document.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use font::{
     cache::GlyphCache,
     engine::{FaceParams, FontEngine},
     face::FontFace,
+    program::FontProgram,
 };
+use pdf::ObjectId;
 
 use crate::resources::font::{BaseEncoding, FontDescriptor, PdfFontKind};
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
@@ -128,9 +133,39 @@ pub struct ActiveFont {
     pub descriptor: Arc<FontDescriptor>,
 }
 
+/// The fonts of one document, resolved once and shared by every page
+/// rendered from it.  Entries are keyed by the object number of an indirect
+/// font dictionary, so a store serves one document only.
+#[derive(Default)]
+pub struct DocumentFonts {
+    fonts: Mutex<HashMap<ObjectId, Arc<SharedFont>>>,
+}
+
+impl DocumentFonts {
+    /// The entry of the font dictionary `id`, created empty on first use.
+    /// Its fields are filled outside the store's lock.
+    fn font(&self, id: ObjectId) -> Arc<SharedFont> {
+        let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(fonts.entry(id).or_default())
+    }
+}
+
+/// What one indirect font dictionary resolves to, independent of the page
+/// and of the size it is drawn at.  `None` inside a cell records a failure.
+#[derive(Default)]
+struct SharedFont {
+    descriptor: OnceLock<Option<Arc<FontDescriptor>>>,
+    program: OnceLock<Option<Arc<FontProgram>>>,
+    /// The `code_to_gid` table computed from the program, `None` when the
+    /// descriptor's own table (or the program's charmap) applies.
+    code_to_gid: OnceLock<Option<Vec<u32>>>,
+}
+
 /// Per-page cache of resolved font descriptors and loaded font faces.
 pub struct FontCache {
     engine: FontEngine,
+    /// Document-wide store for indirect font dictionaries.
+    shared: Arc<DocumentFonts>,
     /// Glyph bitmap cache shared by every face on this page.
     glyph_cache: GlyphCache,
     /// Descriptor of each font dictionary selected on this page; `None` for a
@@ -143,11 +178,12 @@ pub struct FontCache {
 }
 
 impl FontCache {
-    /// Create a new cache backed by the given engine.
+    /// Create a new cache backed by the given engine and document store.
     #[must_use]
-    pub fn new(engine: FontEngine, glyph_cache: GlyphCache) -> Self {
+    pub fn new(engine: FontEngine, glyph_cache: GlyphCache, shared: Arc<DocumentFonts>) -> Self {
         Self {
             engine,
+            shared,
             glyph_cache,
             descriptors: HashMap::new(),
             faces: HashMap::new(),
@@ -160,12 +196,25 @@ impl FontCache {
     /// Returns `None` if the name is absent or its entry is not a dictionary.
     pub fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> Option<ActiveFont> {
         let (key, entry) = resources.font_entry(name)?;
+        let shared = &self.shared;
         let descriptor = self
             .descriptors
             .entry(key.clone())
-            .or_insert_with(|| resources.resolve_font_entry(&entry).map(Arc::new))
+            .or_insert_with(|| {
+                let resolve = || resources.resolve_font_entry(&entry).map(Arc::new);
+                match &key {
+                    FontKey::Object(id) => shared.font(*id).descriptor.get_or_init(resolve).clone(),
+                    FontKey::Direct { .. } => resolve(),
+                }
+            })
             .clone()?;
         Some(ActiveFont { key, descriptor })
+    }
+
+    /// The document store this cache resolves indirect fonts through.
+    #[must_use]
+    pub const fn document_fonts(&self) -> &Arc<DocumentFonts> {
+        &self.shared
     }
 
     /// Return the glyph bitmap cache shared by every face in this page.
@@ -195,7 +244,7 @@ impl FontCache {
         // loads are stored as `None`, so a font that cannot load is tried once.
         let key: FaceKey = (font.key.clone(), trm.map(f64::to_bits));
         if !self.faces.contains_key(&key) {
-            let face = self.load_face(&font.descriptor, trm);
+            let face = self.load_face(&font.key, &font.descriptor, trm);
             if face.is_none() {
                 log::warn!(
                     "font_cache: could not load face for /{} trm={trm:?}",
@@ -207,7 +256,12 @@ impl FontCache {
         self.faces.get(&key)?.as_ref()
     }
 
-    fn load_face(&mut self, desc: &FontDescriptor, trm: [f64; 4]) -> Option<FontFace> {
+    fn load_face(
+        &mut self,
+        key: &FontKey,
+        desc: &FontDescriptor,
+        trm: [f64; 4],
+    ) -> Option<FontFace> {
         // Pre-flight: reject degenerate matrices before parsing the program.
         // The y-column magnitude (hypot of indices 2 & 3) is the pixel size used by
         // FontFace::new; a value < 1.0 or non-finite produces an unusable face.
@@ -219,23 +273,25 @@ impl FontCache {
             return None;
         }
 
-        // code_to_gid from the descriptor is populated for CID/Type0 fonts and
-        // must be preserved.  A simple embedded Type1/Type1C/CFF font instead
-        // needs its codes resolved by glyph *name* against the font program's
-        // own charset after the face is loaded (see resolve_simple_to_gid).
-        let resolve_by_name = wants_name_resolution(
-            desc.bytes.is_some(),
-            desc.cid_encoding.is_none(),
-            desc.type3.is_none(),
-            desc.kind,
-        );
-
         let params = FaceParams {
             code_to_gid: desc.code_to_gid.clone(),
             mat: trm,
         };
+        let shared = match key {
+            FontKey::Object(id) => Some(self.shared.font(*id)),
+            FontKey::Direct { .. } => None,
+        };
 
-        let mut face = if let Some(bytes) = &desc.bytes {
+        let mut face = if let Some(shared) = &shared {
+            let program = shared
+                .program
+                .get_or_init(|| parse_program(desc))
+                .as_ref()?;
+            self.engine
+                .load_program_face(Arc::clone(program), params)
+                .inspect_err(|e| log::debug!("font_cache: {e}"))
+                .ok()?
+        } else if let Some(bytes) = &desc.bytes {
             self.engine
                 .load_memory_face(bytes.clone(), 0, params)
                 .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
@@ -248,30 +304,71 @@ impl FontCache {
                 .ok()?
         };
 
-        // For a simple embedded Type1/CFF font the char code is NOT the GID
-        // (subset programs pack glyphs arbitrarily) and often has no usable
-        // Unicode cmap.  Build the full code→GID table by resolving each
-        // code's glyph *name* (Differences override, else the base encoding)
-        // against the program's charset.  CID/Type0 keep the descriptor's
-        // table; symbolic TrueType keeps the program's own charmap.
-        if resolve_by_name {
-            face.code_to_gid = resolve_simple_to_gid(&face, &desc.differences, desc.base_encoding);
-        } else if wants_unicode_resolution(
-            desc.bytes.is_some(),
-            desc.cid_encoding.is_none(),
-            desc.type3.is_none(),
-            desc.kind,
-        ) && face.has_unicode_cmap()
-        {
-            face.code_to_gid = resolve_via_unicode_cmap(
-                &face,
-                &desc.differences,
-                desc.base_encoding,
-                desc.bytes.is_some(),
-            );
+        let table = shared.as_ref().map_or_else(
+            || resolved_code_to_gid(&face, desc),
+            |shared| {
+                shared
+                    .code_to_gid
+                    .get_or_init(|| resolved_code_to_gid(&face, desc))
+                    .clone()
+            },
+        );
+        if let Some(table) = table {
+            face.code_to_gid = table;
         }
-
         Some(face)
+    }
+}
+
+/// Parse the program a descriptor draws with: its embedded font program, or
+/// the installed substitute for a font without one.  `None`, logged, when
+/// neither yields a usable program.
+fn parse_program(desc: &FontDescriptor) -> Option<Arc<FontProgram>> {
+    let parsed = if let Some(bytes) = &desc.bytes {
+        FontProgram::parse(bytes.clone(), 0)
+            .inspect_err(|e| log::debug!("font_cache: embedded font program: {e}"))
+    } else {
+        let path = substitute_font_path(desc.substitute)?;
+        std::fs::read(path)
+            .map_err(font::engine::LoadError::Io)
+            .and_then(|data| FontProgram::parse(data, 0))
+            .inspect_err(|e| log::debug!("font_cache: fallback font {path}: {e}"))
+    };
+    parsed.ok().map(Arc::new)
+}
+
+/// The `code_to_gid` table a face of `desc` needs in place of the
+/// descriptor's, or `None` when the descriptor's table (or the program's own
+/// charmap) applies.
+///
+/// A simple embedded Type1/Type1C/CFF font is resolved by glyph *name*: its
+/// char codes are not glyph indices (subset programs pack glyphs
+/// arbitrarily) and it often has no usable Unicode cmap, so each code's name
+/// (`Differences` override, else the base encoding) is looked up in the
+/// program's charset.  A font drawn through a Unicode cmap is resolved
+/// through the names' Unicode values.  CID/Type0 keep the descriptor's
+/// table; symbolic TrueType keeps the program's own charmap.
+fn resolved_code_to_gid(face: &FontFace, desc: &FontDescriptor) -> Option<Vec<u32>> {
+    let embedded = desc.bytes.is_some();
+    let simple = desc.cid_encoding.is_none();
+    let outline = desc.type3.is_none();
+    if wants_name_resolution(embedded, simple, outline, desc.kind) {
+        Some(resolve_simple_to_gid(
+            face,
+            &desc.differences,
+            desc.base_encoding,
+        ))
+    } else if wants_unicode_resolution(embedded, simple, outline, desc.kind)
+        && face.has_unicode_cmap()
+    {
+        Some(resolve_via_unicode_cmap(
+            face,
+            &desc.differences,
+            desc.base_encoding,
+            embedded,
+        ))
+    } else {
+        None
     }
 }
 
@@ -1966,7 +2063,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
+        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), Arc::default());
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("substitute face loads");
@@ -2025,7 +2122,7 @@ mod tests {
             type3: None,
             substitute: SubstituteStyle::default(),
         };
-        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new());
+        let mut cache = FontCache::new(FontEngine::new(true), GlyphCache::new(), Arc::default());
         let face = cache
             .get_or_load(&active(desc), b"F1", [20.0, 0.0, 0.0, 20.0])
             .expect("embedded TrueType face loads");
