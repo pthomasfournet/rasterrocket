@@ -246,6 +246,16 @@ impl FontCache {
         &self.shared
     }
 
+    /// The face identifier under which the coverage of the Type 3 font
+    /// dictionary `id`, drawn with the glyph-to-device matrix `matrix`
+    /// (2×2 part), is cached; one per document, font and matrix.
+    #[must_use]
+    pub fn type3_face_id(&self, id: ObjectId, matrix: [f64; 4]) -> FaceId {
+        self.shared
+            .font(id)
+            .face_id(matrix.map(f64::to_bits), 0, &self.shared.face_ids)
+    }
+
     /// Return the glyph bitmap cache shared by every face of the document.
     #[must_use]
     pub const fn glyph_cache(&self) -> &GlyphCache {

@@ -179,3 +179,33 @@ fn clip_modes_paint_type3_glyphs() {
     let invisible = render(&font, &extra, "BT 3 Tr /F1 16 Tf 8 8 Td (A) Tj ET");
     assert_eq!(ink(&invisible), 0);
 }
+
+/// A `d1` glyph whose content leaves its declared bounding box draws
+/// whole: the box `[0 0 500 500]` holds a quarter of the 1000-unit square
+/// it fills, and all of the square's 16 × 16 pixels are inked.
+#[test]
+fn d1_content_outside_its_box_draws_whole() {
+    let (font, extra) = type3(b"1000 0 0 0 500 500 d1 0 0 1000 1000 re f", "<< >>");
+    assert_eq!(ink(&render(&font, &extra, SHOW_A)), 16 * 16);
+}
+
+/// Repeated `d1` glyphs at the same pixel phase draw the same pixels,
+/// each a 16 × 16 square in the fill colour.
+#[test]
+fn repeated_d1_glyphs_draw_alike() {
+    let (font, extra) = type3(
+        b"1000 0 0 0 1000 1000 d1 100 100 m 900 500 l 100 900 l f",
+        "<< >>",
+    );
+    let page = render(&font, &extra, "BT 0 0 1 rg /F1 16 Tf 8 8 Td (AA) Tj ET");
+    for y in 8..24 {
+        for x in 8..24 {
+            assert_eq!(pixel(&page, x, y), pixel(&page, x + 16, y), "({x}, {y})");
+        }
+    }
+    let inked = ink(&page);
+    assert!(
+        inked > 2 * 60 && inked.is_multiple_of(2),
+        "{inked} dark pixels"
+    );
+}

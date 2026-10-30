@@ -350,7 +350,8 @@ renderer/
   page/
     mod.rs           — per-page entry points, geometry normalisation
     operators.rs     — execute_one: one operator → renderer call
-    text.rs          — show_text, show_text_type3
+    text.rs          — show_text
+    type3.rs         — show_text_type3; coverage cache of d1 glyphs
     text_ops.rs      — glyph records, advances, text-space → device
     annotations.rs   — annotation appearance streams: /F flags, /OC,
                        appearance state, Algorithm 8.1 fit, NoRotate
@@ -492,6 +493,13 @@ image, not the process.
   vertical-form CIDs of a collection (those only its `UCS2-V` `CMap`
   reaches), in either writing mode. A collection CID keeps every code
   point that maps to it and draws the first the substitute maps.
+- **Type 3 glyphs.** A `CharProc` runs per glyph under the glyph-to-device
+  matrix. A `d1` glyph of an indirect font, shown with an opaque colour in
+  the normal blend mode, is a stencil: its coverage is rendered once per
+  matrix and 1/16-pixel phase by running the `CharProc` in a child renderer
+  onto a transparent bitmap sized from the declared bounding box, kept in
+  the document glyph cache and composited in the fill colour. Content that
+  reaches the bitmap's margin runs directly instead.
 - **Sharing.** Descriptors, parsed programs, code → glyph tables and glyph
   bitmaps of indirect font dictionaries live in a `DocumentFonts` store
   shared by every page of a document. Installed substitute and fallback

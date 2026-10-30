@@ -60,6 +60,7 @@ mod shading_paint;
 mod soft_mask;
 mod text;
 mod text_ops;
+mod type3;
 #[cfg(feature = "vulkan")]
 mod vk_ops;
 mod widget_appearance;
