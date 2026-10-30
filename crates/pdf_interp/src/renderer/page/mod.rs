@@ -1555,9 +1555,9 @@ impl<'doc> PageRenderer<'doc> {
     /// device pixel inside the image's bounding box samples the source pixel
     /// under its centre (nearest neighbour), via a [`SampleGrid`] shared by
     /// the CPU sampler below and the GPU blit kernel.  A host-resident
-    /// image or stencil drawn at under half its resolution is first reduced
-    /// by block averaging (`image_reduce`).  A mask is reduced and sampled
-    /// the same way through a [`MaskSampler`] at its own resolution.
+    /// image or stencil drawn below its resolution is first area-averaged
+    /// onto the device pixels (`image_reduce`).  A mask is resampled the
+    /// same way and sampled through a [`MaskSampler`] at its own resolution.
     #[expect(
         clippy::too_many_lines,
         reason = "diagnostics, GPU dispatch, decoder-contract checks, and the per-pixel loop share the grid and CTM state"
@@ -1608,20 +1608,25 @@ impl<'doc> PageRenderer<'doc> {
             });
         }
 
-        let ctm = self.gstate.current().ctm;
-        // An image or mask drawn at under half its resolution is
-        // area-averaged down first so that point sampling neither drops thin
-        // features nor turns them into whole pixels.  The image and its mask
-        // reduce separately, each on its own grid.
-        let draw = image_draw_size(&ctm);
+        // An image or mask drawn below its resolution is area-averaged
+        // first, so that point sampling neither drops thin features nor
+        // turns them into whole pixels.  The image and its mask resample
+        // separately, each on its own grid, and each comes with the matrix
+        // that draws the resampled samples.
+        let page_ctm = self.gstate.current().ctm;
         let reduced_mask = img
             .smask
             .as_ref()
-            .zip(draw)
-            .and_then(|(m, d)| image_reduce::reduce_mask_for_draw(m, d));
-        let mask_src = reduced_mask.as_ref().or(img.smask.as_ref());
-        let reduced = draw.and_then(|d| image_reduce::reduce_for_draw(img, d));
-        let img = reduced.as_ref().unwrap_or(img);
+            .and_then(|m| image_reduce::reduce_mask_for_draw(m, &page_ctm));
+        let (mask_src, mask_ctm) = match &reduced_mask {
+            Some((m, c)) => (Some(m), *c),
+            None => (img.smask.as_ref(), page_ctm),
+        };
+        let reduced = image_reduce::reduce_for_draw(img, &page_ctm);
+        let (img, ctm) = match &reduced {
+            Some((i, c)) => (i, *c),
+            None => (img, page_ctm),
+        };
         let Some(grid) = SampleGrid::new(&ctm, self.width, self.height, img.width, img.height)
         else {
             log::debug!(
@@ -1710,9 +1715,15 @@ impl<'doc> PageRenderer<'doc> {
         };
         let mask = match mask_src {
             Some(m) => {
-                let Some(sampler) =
-                    MaskSampler::new(m, &ctm, self.width, self.height, img.width, img.height)
-                else {
+                let Some(sampler) = MaskSampler::new(
+                    m,
+                    &mask_ctm,
+                    &ctm,
+                    self.width,
+                    self.height,
+                    img.width,
+                    img.height,
+                ) else {
                     return;
                 };
                 Some(sampler)

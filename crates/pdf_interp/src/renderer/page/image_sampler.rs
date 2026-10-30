@@ -202,14 +202,17 @@ impl SampleGrid {
 
     /// Source pixel for device pixel `(dx, dy)`, clamped onto the image.
     ///
-    /// `dx`/`dy` must lie inside the bounding box.
+    /// A device pixel outside the bounding box is first clamped onto it.
     #[inline]
     #[expect(
         clippy::cast_sign_loss,
         reason = "each coordinate is clamped to be non-negative before the u32 cast; img_w, img_h >= 1 by construction"
     )]
     pub(super) fn sample_clamped(&self, dx: u32, dy: u32) -> (u32, u32) {
-        let (x, y) = self.coord(dx, dy);
+        let (x, y) = self.coord(
+            dx.clamp(self.x0, self.x1 - 1),
+            dy.clamp(self.y0, self.y1 - 1),
+        );
         (
             (x.max(0) as u32).min(self.img_w - 1),
             (y.max(0) as u32).min(self.img_h - 1),
@@ -242,13 +245,13 @@ impl SampleGrid {
 
 /// Alpha lookup for a masked image blit.
 ///
-/// A mask on the image's own grid is indexed by the image sample.  Any other
-/// mask is sampled through a [`SampleGrid`] of its own dimensions, built from
-/// the same CTM and page: its bounding box is the image grid's, and each
-/// device pixel reads the mask pixel under its centre, so the mask is
-/// resolved at device resolution whatever resolution the image was decoded
-/// at.  Where the image admits a pixel centre that rounding places just off
-/// the mask, the nearest mask pixel is used.
+/// A mask on the image's own grid — the same dimensions drawn through the
+/// same matrix — is indexed by the image sample.  Any other mask is sampled
+/// through a [`SampleGrid`] of its own dimensions and matrix on the same
+/// page: each device pixel reads the mask pixel under its centre, so the
+/// mask is resolved at device resolution whatever resolution the image was
+/// decoded or resampled at.  Where the image admits a pixel centre that
+/// rounding places just off the mask, the nearest mask pixel is used.
 pub(super) struct MaskSampler<'a> {
     alpha: &'a [u8],
     width: usize,
@@ -257,24 +260,30 @@ pub(super) struct MaskSampler<'a> {
 }
 
 impl<'a> MaskSampler<'a> {
-    /// Sampler for `mask` over an image of `img_w × img_h` pixels drawn
-    /// through `ctm` onto a `page_w × page_h` bitmap.
+    /// Sampler for `mask` drawn through `mask_ctm`, over an image of
+    /// `img_w × img_h` pixels drawn through `img_ctm` onto a
+    /// `page_w × page_h` bitmap.
     ///
-    /// Returns `None` only where [`SampleGrid::new`] does for the image
-    /// itself: a degenerate CTM or a bounding box off the page.
+    /// Returns `None` only where [`SampleGrid::new`] does for the mask: a
+    /// degenerate matrix or a bounding box off the page.
+    #[expect(
+        clippy::float_cmp,
+        reason = "the mask shares the image grid only when both are drawn through the identical matrix"
+    )]
     pub(super) fn new(
         mask: &'a SoftMask,
-        ctm: &Ctm,
+        mask_ctm: &Ctm,
+        img_ctm: &Ctm,
         page_w: u32,
         page_h: u32,
         img_w: u32,
         img_h: u32,
     ) -> Option<Self> {
-        let grid = if (mask.width(), mask.height()) == (img_w, img_h) {
+        let grid = if (mask.width(), mask.height()) == (img_w, img_h) && mask_ctm == img_ctm {
             None
         } else {
             Some(SampleGrid::new(
-                ctm,
+                mask_ctm,
                 page_w,
                 page_h,
                 mask.width(),
@@ -652,7 +661,7 @@ mod tests {
         let alpha: Vec<u8> = (0..64).collect();
         let mask = SoftMask::new(8, 8, alpha).expect("8×8 mask");
         let grid = SampleGrid::new(&ctm, 8, 8, img_w, img_h).expect("grid");
-        let sampler = MaskSampler::new(&mask, &ctm, 8, 8, img_w, img_h).expect("sampler");
+        let sampler = MaskSampler::new(&mask, &ctm, &ctm, 8, 8, img_w, img_h).expect("sampler");
         for dy in grid.y0..grid.y1 {
             for dx in grid.x0..grid.x1 {
                 let px = grid.sample(dx, dy).expect("inside");
@@ -675,7 +684,7 @@ mod tests {
                 .collect(),
         )
         .expect("40×30 mask");
-        let sampler = MaskSampler::new(&mask, &ctm, 100, 100, 40, 30).expect("sampler");
+        let sampler = MaskSampler::new(&mask, &ctm, &ctm, 100, 100, 40, 30).expect("sampler");
         assert!(sampler.grid.is_none());
         assert_eq!(sampler.alpha(0, 0, (3, 2)), mask.alpha()[2 * 40 + 3]);
     }
@@ -694,6 +703,15 @@ mod tests {
                 }
             }
         }
+        // Device pixels outside the bounding box clamp onto its edge.
+        assert_eq!(
+            grid.sample_clamped(0, 0),
+            grid.sample_clamped(grid.x0, grid.y0)
+        );
+        assert_eq!(
+            grid.sample_clamped(299, 199),
+            grid.sample_clamped(grid.x1 - 1, grid.y1 - 1)
+        );
     }
 
     #[test]
