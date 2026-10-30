@@ -469,3 +469,42 @@ fn a_shading_pattern_extgstate_lasts_only_for_the_pattern() {
     );
     assert_eq!(rgb(&bmp, 150, 50), GREEN, "a later fill is opaque");
 }
+
+/// A stencil mask stretched over `x`..`x + w` × 0..100, its two samples
+/// given by `byte`'s top bits (0 paints).
+fn stencil(x: u32, w: u32, byte: char) -> String {
+    format!("q {w} 0 0 100 {x} 0 cm BI /IM true /W 2 /H 1 /BPC 1 ID {byte} EI Q")
+}
+
+#[test]
+fn a_stencil_mask_paints_a_tiling_pattern_through_its_set_samples() {
+    let bmp = render(page(
+        &format!("{BACKDROP}/Pattern cs /P0 scn {}", stencil(0, 200, '@')),
+        &tiling(1),
+        Some(b"1 0 0 rg 0 0 10 10 re f"),
+        "",
+        &[],
+    ));
+    assert_eq!(rgb(&bmp, 5, 5), RED, "a cell's painted quarter");
+    assert_eq!(rgb(&bmp, 15, 5), BLUE, "a cell's empty area");
+    assert_eq!(rgb(&bmp, 85, 45), RED, "a later cell's painted quarter");
+    assert_eq!(rgb(&bmp, 105, 5), BLUE, "under the stencil's unset sample");
+}
+
+#[test]
+fn a_stencil_mask_paints_a_shading_pattern_through_its_set_samples() {
+    let bmp = render(page(
+        &format!("{BACKDROP}/Pattern cs /P0 scn {}", stencil(0, 100, '\0')),
+        AXIAL_PATTERN,
+        None,
+        "",
+        &[],
+    ));
+    assert!(reddish(rgb(&bmp, 10, 50)), "left: {:?}", rgb(&bmp, 10, 50));
+    assert!(
+        greenish(rgb(&bmp, 80, 50)),
+        "right: {:?}",
+        rgb(&bmp, 80, 50)
+    );
+    assert_eq!(rgb(&bmp, 150, 50), BLUE, "outside the stencil");
+}

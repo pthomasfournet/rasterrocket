@@ -1941,6 +1941,13 @@ impl<'doc> PageRenderer<'doc> {
             return;
         }
 
+        if matches!(img.color_space, ImageColorSpace::Mask)
+            && self.gstate.current().fill_pattern.is_some()
+            && self.fill_stencil_with_pattern(img, &grid)
+        {
+            return;
+        }
+
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
         let mut paint = |r: &mut Self| {
@@ -1959,6 +1966,47 @@ impl<'doc> PageRenderer<'doc> {
             let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
             self.paint_masked(region, paint);
         }
+    }
+
+    /// Paint the fill pattern through the stencil mask `img` sampled
+    /// through `grid` (PDF §8.9.6.2: the stencil's set samples are painted
+    /// with the current fill colour, here a pattern).  The pattern fills the
+    /// grid's rectangle, scaled at each pixel by the stencil coverage, so a
+    /// tiling or shading pattern of any kind — with its `Background`, `BBox`
+    /// and `ExtGState` — paints exactly as it does through a path fill.
+    ///
+    /// Returns `false`, painting nothing, when the stencil is not host
+    /// resident.
+    fn fill_stencil_with_pattern(
+        &mut self,
+        img: &crate::resources::ImageDescriptor,
+        grid: &SampleGrid,
+    ) -> bool {
+        let Some(bytes) = img.data.as_cpu() else {
+            return false;
+        };
+        let Some(rect) = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1) else {
+            return true;
+        };
+        let img_w = img.width as usize;
+        let sample = |x: u32, y: u32| {
+            bytes
+                .get(y as usize * img_w + x as usize)
+                .copied()
+                .unwrap_or(u8::MAX)
+        };
+        let coverage: Vec<u8> = (rect.y0..rect.y1)
+            .flat_map(|dy| (rect.x0..rect.x1).map(move |dx| (dx, dy)))
+            .map(|(dx, dy)| {
+                grid.sample(dx, dy)
+                    .map_or(0, |taps| u8::MAX - taps.blend(sample))
+            })
+            .collect();
+        let (x0, y0) = (f64::from(rect.x0), f64::from(rect.y0));
+        let (x1, y1) = (f64::from(rect.x1), f64::from(rect.y1));
+        let area = shading_paint::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]);
+        self.paint_through_coverage(rect, &coverage, |r| r.fill_path(&area, false));
+        true
     }
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap

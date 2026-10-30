@@ -136,11 +136,57 @@ impl PageRenderer<'_> {
         let Some(region) = region else {
             return paint(self);
         };
+        let view = MaskView {
+            values: &mask.values,
+            width: mask.width as usize,
+            x0: 0,
+            y0: 0,
+        };
         let before = Snapshot::take(&self.bitmap, region);
         let result = paint(self);
-        before.blend_back(&mut self.bitmap, mask);
+        before.blend_back(&mut self.bitmap, &view);
         result
     }
+
+    /// Run `paint` with what it paints scaled by `coverage`, one value per
+    /// pixel of `rect` in row-major order; pixels outside `rect` are left
+    /// unchanged.  `coverage` must hold `rect.area()` values.
+    pub(super) fn paint_through_coverage<R>(
+        &mut self,
+        rect: PixelRect,
+        coverage: &[u8],
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        debug_assert_eq!(
+            coverage.len() as u64,
+            rect.area(),
+            "one coverage value per pixel of the rectangle"
+        );
+        let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)
+            .and_then(|clip| clip.intersect(rect));
+        let Some(region) = region else {
+            return paint(self);
+        };
+        let view = MaskView {
+            values: coverage,
+            width: rect.width() as usize,
+            x0: rect.x0,
+            y0: rect.y0,
+        };
+        let before = Snapshot::take(&self.bitmap, region);
+        let result = paint(self);
+        before.blend_back(&mut self.bitmap, &view);
+        result
+    }
+}
+
+/// Mask values over a rectangle of the bitmap whose top-left pixel is
+/// `(x0, y0)`, `width` values per row.
+struct MaskView<'a> {
+    values: &'a [u8],
+    width: usize,
+    x0: u32,
+    y0: u32,
 }
 
 /// The pixels of a rectangle of the bitmap, captured before an object is
@@ -179,17 +225,18 @@ impl Snapshot {
 
     /// Replace each pixel of the rectangle by its interpolation between the
     /// snapshot and its current value, weighted by the mask.
-    fn blend_back(self, bitmap: &mut Bitmap<Rgb8>, mask: &SoftMaskPlane) {
+    /// The snapshot lies within the mask's rectangle.
+    fn blend_back(self, bitmap: &mut Bitmap<Rgb8>, mask: &MaskView<'_>) {
         let span = (self.x1 - self.x0) as usize;
         let (cx0, ax0) = (self.x0 as usize * 3, self.x0 as usize);
-        let width = mask.width as usize;
+        let mx0 = (self.x0 - mask.x0) as usize;
         for (i, prior) in self.color.chunks_exact(span * 3).enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
             )]
             let y = self.y0 + i as u32;
-            let m_off = y as usize * width + ax0;
+            let m_off = (y - mask.y0) as usize * mask.width + mx0;
             let m = &mask.values[m_off..m_off + span];
             let (row, alpha_row) = bitmap.row_and_alpha_mut(y);
             let row = &mut row[cx0..cx0 + span * 3];

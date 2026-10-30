@@ -32,7 +32,7 @@ fn clip_to_bbox(mut clip: Clip, bbox: Option<[(f64, f64); 4]>, flatness: f64) ->
 }
 
 /// The closed polygon through `corners`.
-fn polygon(corners: &[(f64, f64)]) -> Path {
+pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
     let mut pb = PathBuilder::new();
     for (i, &(x, y)) in corners.iter().enumerate() {
         let added = if i == 0 {
