@@ -335,10 +335,13 @@ mod tests {
     }
 
     #[test]
-    fn decode_smask_raw_bpc8_too_short_returns_none() {
-        // 2×2 SMask needs 4 bytes; supplying 2 must return None, not panic.
+    fn decode_smask_raw_bpc8_too_short_is_transparent_where_missing() {
+        // 2×2 SMask needs 4 bytes; the two missing samples are alpha 0.
         let doc = make_doc_with_stream(&[0u8, 255], &smask_dict(2, 2, ""));
-        assert!(smask_of(&doc).is_none());
+        assert_eq!(
+            smask_of(&doc).expect("short SMask decodes").alpha(),
+            &[0, 255, 0, 0]
+        );
     }
 
     /// Transport filters other than Flate, alone or in a chain, reach the

@@ -153,9 +153,50 @@ pub(super) fn decode_raw(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// `data` extended with zero bytes to the length `height` rows of `width`
+/// pixels of `components` samples at `bpc` bits each occupy, each row
+/// padded to a whole byte (PDF §8.9.3).
+///
+/// A raw stream shorter than its dictionary declares (truncated or damaged
+/// transport data) keeps the rows it holds; every missing sample is 0.
+/// Data of at least the full length, or of an unsupported depth, is
+/// borrowed unchanged.  `None` when the length overflows `usize`.
+fn zero_extended(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    bpc: i64,
+    components: usize,
+) -> Option<std::borrow::Cow<'_, [u8]>> {
+    use std::borrow::Cow;
+    let Ok(bits @ (1 | 2 | 4 | 8 | 16)) = usize::try_from(bpc) else {
+        return Some(Cow::Borrowed(data));
+    };
+    let row_bits = usize::try_from(width)
+        .ok()?
+        .checked_mul(components)?
+        .checked_mul(bits)?;
+    let needed = row_bits
+        .div_ceil(8)
+        .checked_mul(usize::try_from(height).ok()?)?;
+    if data.len() >= needed {
+        return Some(Cow::Borrowed(data));
+    }
+    log::warn!(
+        "image: raw data short ({} of {needed} bytes for {width}×{height}×{components} \
+         at {bits} bpc), missing samples are 0",
+        data.len()
+    );
+    let mut padded = Vec::with_capacity(needed);
+    padded.extend_from_slice(data);
+    padded.resize(needed, 0);
+    Some(Cow::Owned(padded))
+}
+
 /// Expand `bpc`-bit samples of `components`-component pixels to one byte
-/// per sample (PDF §8.9.3).  8-bit data is borrowed unchanged.  `None` for
-/// an unsupported depth or data shorter than the image.
+/// per sample (PDF §8.9.3).  8-bit data of the full length is borrowed
+/// unchanged; short data is first extended by [`zero_extended`].  `None`
+/// for an unsupported depth.
 fn expand_to_8bpc(
     data: &[u8],
     width: u32,
@@ -164,6 +205,11 @@ fn expand_to_8bpc(
     components: usize,
 ) -> Option<std::borrow::Cow<'_, [u8]>> {
     use std::borrow::Cow;
+    let full = zero_extended(data, width, height, bpc, components)?;
+    if bpc == 8 {
+        return Some(full);
+    }
+    let data = full.as_ref();
     Some(match bpc {
         // bpc=1 packs one bit per sample, one sample per component.
         // A row holds `width × components` samples (RGB: 3 bits/px,
@@ -177,7 +223,6 @@ fn expand_to_8bpc(
         }
         2 => Cow::Owned(expand_nbpp::<2>(data, width, height, components)?),
         4 => Cow::Owned(expand_nbpp::<4>(data, width, height, components)?),
-        8 => Cow::Borrowed(data),
         16 => Cow::Owned(downsample_16bpp(data, width, height, components)?),
         other => {
             log::debug!("image: {other} bits-per-component not yet implemented");
@@ -470,18 +515,14 @@ fn decode_mask_raw(
                  (§8.9.6.2 requires 1) — decoding as 8-bpc stencil"
             );
             let expected = (width as usize).checked_mul(height as usize)?;
-            if data.len() < expected {
-                log::warn!(
-                    "image: mask raw data too short ({} bytes, need {expected})",
-                    data.len()
-                );
-                return None;
-            }
-            let pixels: Vec<u8> = if invert {
-                data[..expected].iter().map(|&b| 255 - b).collect()
+            // As at 1 bpc, a truncated stream is padded with the
+            // transparent sample value.
+            let mut pixels: Vec<u8> = if invert {
+                data.iter().take(expected).map(|&b| 255 - b).collect()
             } else {
-                data[..expected].to_vec()
+                data.iter().take(expected).copied().collect()
             };
+            pixels.resize(expected, 0xFF);
             Some(ImageDescriptor {
                 width,
                 height,
@@ -571,6 +612,8 @@ fn decode_raw_indexed(
     bpc: i64,
     cs_arr: &[Object],
 ) -> Option<ImageDescriptor> {
+    let full = zero_extended(data, width, height, bpc, 1)?;
+    let data = full.as_ref();
     let indices_8bit: Vec<u8>;
     let indices: &[u8] = match bpc {
         1 | 2 | 4 => {
@@ -801,27 +844,37 @@ mod tests {
         assert_eq!(desc.data.as_cpu().unwrap(), &[255, 255, 255]);
     }
 
+    /// Short data keeps its samples; the missing ones are 0.
     #[test]
-    fn decode_raw_too_short_returns_none() {
+    fn decode_raw_too_short_is_zero_extended() {
         let doc = make_doc();
         let mut dict = Dictionary::new();
         dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
         dict.set("BitsPerComponent", Object::Integer(8));
         // Claim 2×2 RGB but supply only 3 bytes (need 12).
-        let data = vec![0u8, 0, 0];
-        assert!(
-            decode_raw(
-                &doc,
-                &data,
-                2,
-                2,
-                false,
-                &dict,
-                #[cfg(feature = "gpu-icc")]
-                &mut crate::resources::image::IccHandles::none(),
-            )
-            .is_none()
-        );
+        let desc = decode_raw(
+            &doc,
+            &[10, 20, 30],
+            2,
+            2,
+            false,
+            &dict,
+            #[cfg(feature = "gpu-icc")]
+            &mut crate::resources::image::IccHandles::none(),
+        )
+        .expect("short data decodes");
+        let mut expected = vec![0u8; 12];
+        expected[..3].copy_from_slice(&[10, 20, 30]);
+        assert_eq!(desc.data.as_cpu().unwrap(), expected.as_slice());
+    }
+
+    /// A short 8-bpc stencil leaves its missing samples transparent.
+    #[test]
+    fn stencil_8bpc_short_buffer_pads_transparent() {
+        let desc = decode_mask_raw(&[0x00], 2, 1, 8, false).expect("short stencil decodes");
+        assert_eq!(desc.data.as_cpu().unwrap(), &[0x00, 0xFF]);
+        let desc = decode_mask_raw(&[0xFF], 2, 1, 8, true).expect("short stencil decodes");
+        assert_eq!(desc.data.as_cpu().unwrap(), &[0x00, 0xFF]);
     }
 
     #[test]
