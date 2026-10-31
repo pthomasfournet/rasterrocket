@@ -104,11 +104,18 @@ jobs:
       - name: Test rasterrocket-camera (stages, no-panic sweep)
         run: cargo test -p rasterrocket-camera --release
 
+      - name: Test rasterrocket-color, rasterrocket-encode, rasterrocket-comic
+        run: cargo test -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic
+
       - name: Clippy (no GPU features)
-        run: cargo clippy -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
+        run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
 
       # Test targets are linted one crate per invocation: a combined
       # `--all-targets` run exceeds runner memory.
+      # Three small crates whose test targets fit in one invocation.
+      - name: Clippy (rasterrocket-color, -encode, -comic tests)
+        run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic --tests -- -D warnings
+
       - name: Clippy (rasterrocket-parser tests)
         run: cargo clippy -p rasterrocket-parser --tests -- -D warnings
 
@@ -261,9 +268,9 @@ jobs:
         working-directory: fuzz
         run: cargo +nightly fuzz build
 
-  # ── Format check ──────────────────────────────────────────────────────────
+  # ── Format and spelling check ─────────────────────────────────────────────
   fmt:
-    name: Formatting
+    name: Formatting and spelling
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -271,3 +278,10 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Install typos
+        uses: taiki-e/install-action@v2
+        with:
+          tool: typos
+      # Allowed PDF and font terms and the excluded vendored trees are in
+      # _typos.toml.
+      - run: typos
