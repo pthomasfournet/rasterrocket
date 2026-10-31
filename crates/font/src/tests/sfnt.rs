@@ -87,6 +87,11 @@ fn cmap_mac() -> Vec<u8> {
 
 /// The (3,0) Microsoft Symbol subtable: format 4, 0xF007 → GID 1.
 fn cmap_symbol() -> Vec<u8> {
+    cmap_format4(0xF007)
+}
+
+/// A format 4 subtable mapping `code` to GID 1.
+pub(super) fn cmap_format4(code: u16) -> Vec<u8> {
     let mut c = Vec::new();
     c.extend_from_slice(&be16(4)); // format
     c.extend_from_slice(&be16(32)); // length
@@ -95,13 +100,14 @@ fn cmap_symbol() -> Vec<u8> {
     c.extend_from_slice(&be16(4)); // searchRange
     c.extend_from_slice(&be16(1)); // entrySelector
     c.extend_from_slice(&be16(0)); // rangeShift
-    c.extend_from_slice(&be16(0xF007)); // endCode[0]
+    c.extend_from_slice(&be16(code)); // endCode[0]
     c.extend_from_slice(&be16(0xFFFF)); // endCode[1]
     c.extend_from_slice(&be16(0)); // reservedPad
-    c.extend_from_slice(&be16(0xF007)); // startCode[0]
+    c.extend_from_slice(&be16(code)); // startCode[0]
     c.extend_from_slice(&be16(0xFFFF)); // startCode[1]
     // gid = (code + delta) mod 65536.
-    let delta = u16::try_from(1u32.wrapping_sub(0xF007) & 0xFFFF).expect("masked to 16 bits");
+    let delta =
+        u16::try_from(1u32.wrapping_sub(u32::from(code)) & 0xFFFF).expect("masked to 16 bits");
     c.extend_from_slice(&be16(delta));
     c.extend_from_slice(&be16(1)); // idDelta[1]
     c.extend_from_slice(&be16(0)); // idRangeOffset[0]

@@ -8,11 +8,13 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use read_fonts::tables::cmap::{Cmap, CmapIterLimits, CmapSubtable, PlatformId};
+use read_fonts::tables::cmap::{Cmap, CmapIterLimits};
 use read_fonts::tables::name::Name;
 use read_fonts::tables::os2::Os2;
 use read_fonts::types::NameId;
 use read_fonts::{FontData, FontRead};
+
+use crate::program::unicode_subtable_index;
 
 /// What the `OS/2` and `name` tables say about one face.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,8 +102,9 @@ impl Coverage {
 /// The Unicode coverage of face `index` of the sfnt file at `path`.
 ///
 /// The coverage is the set of code points the face's Unicode `cmap`
-/// subtable maps to a glyph other than `.notdef`, read from the table
-/// directory and the `cmap` table alone.  `None` when the face has no
+/// subtable (the one a [`crate::program::FontProgram`] of the face resolves
+/// Unicode values through) maps to a glyph other than `.notdef`, read from
+/// the table directory and the `cmap` table alone.  `None` when the face has no
 /// outline table (`glyf`, `CFF ` or `CFF2`), no Unicode subtable, or cannot
 /// be read.
 #[must_use]
@@ -120,42 +123,16 @@ pub fn unicode_coverage(path: &Path, index: u32) -> Option<Coverage> {
         max_char: 0x10_FFFF,
         glyph_count: u32::from(u16::MAX) + 1,
     };
-    let points = unicode_subtable(&cmap)?
+    let record = cmap
+        .encoding_records()
+        .get(unicode_subtable_index(&cmap)?)?;
+    let points = record
+        .subtable(cmap.offset_data())
+        .ok()?
         .iter_with_limits(limits)
         .filter(|(_, gid)| gid.to_u32() != 0)
         .map(|(c, _)| c);
     Some(Coverage::from_points(points))
-}
-
-/// The Unicode subtable of `cmap`: a full-repertoire subtable ((3,10),
-/// (0,4), (0,6)) before a BMP one ((3,1), (0,0)–(0,3)).  Microsoft Symbol,
-/// Macintosh and variation-sequence subtables are not Unicode maps.
-fn unicode_subtable<'a>(cmap: &Cmap<'a>) -> Option<CmapSubtable<'a>> {
-    let records = cmap.encoding_records();
-    let find = |wanted: fn(PlatformId, u16) -> bool| {
-        records.iter().find_map(|r| {
-            if !wanted(r.platform_id(), r.encoding_id()) {
-                return None;
-            }
-            r.subtable(cmap.offset_data())
-                .ok()
-                .filter(|t| !matches!(t, CmapSubtable::Format14(_)))
-        })
-    };
-    find(|p, e| {
-        matches!(
-            (p, e),
-            (PlatformId::Windows, 10) | (PlatformId::Unicode, 4 | 6)
-        )
-    })
-    .or_else(|| {
-        find(|p, e| {
-            matches!(
-                (p, e),
-                (PlatformId::Windows, 1) | (PlatformId::Unicode, 0..=3)
-            )
-        })
-    })
 }
 
 /// Offsets of the table directories of the faces in `file`: one for a

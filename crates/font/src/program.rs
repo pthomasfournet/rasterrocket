@@ -26,7 +26,7 @@ use read_fonts::ps::cff::{CffFontRef, Subfont};
 use read_fonts::ps::charmap::Charmap;
 use read_fonts::ps::type1::Type1Font;
 use read_fonts::ps::type1::cid::CidType1Font;
-use read_fonts::tables::cmap::{CmapSubtable, PlatformId};
+use read_fonts::tables::cmap::{Cmap, CmapSubtable, PlatformId};
 use read_fonts::tables::gsub::{SingleSubst, SubstitutionSubtables};
 use read_fonts::types::{BigEndian, GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
@@ -827,6 +827,34 @@ fn select_sfnt_cmap(font: &FontRef<'_>) -> (SfntCmap, Option<Charmap>) {
             (SfntCmap::UnicodeFromNames, Some(map))
         });
     };
+    if let Some(i) = unicode_subtable_index(&cmap) {
+        return (SfntCmap::Unicode(i), None);
+    }
+    let records = cmap.encoding_records();
+    let find = |platform: PlatformId, encoding: u16| {
+        records
+            .iter()
+            .position(|r| r.platform_id() == platform && r.encoding_id() == encoding)
+    };
+    let symbol = find(PlatformId::Windows, 0);
+    if symbol.is_none()
+        && let Some(map) = post_name_charmap(font)
+    {
+        return (SfntCmap::UnicodeFromNames, Some(map));
+    }
+    let choice = find(PlatformId::Macintosh, 0)
+        .map(SfntCmap::MacRoman)
+        .or_else(|| symbol.map(SfntCmap::Symbol))
+        .unwrap_or(SfntCmap::None);
+    (choice, None)
+}
+
+/// Index of the encoding record of `cmap` whose subtable maps Unicode
+/// scalar values: among the readable Unicode-platform, ISO, (3,1) and
+/// (3,10) records, a full-repertoire subtable before a BMP one and, within
+/// each class, the last listed.  Variation-sequence (format 14) subtables
+/// map no characters and are skipped.
+pub(crate) fn unicode_subtable_index(cmap: &Cmap<'_>) -> Option<usize> {
     let records = cmap.encoding_records();
     let format = |i: usize| records[i].subtable(cmap.offset_data()).ok();
     let is_unicode = |i: usize| {
@@ -844,31 +872,10 @@ fn select_sfnt_cmap(font: &FontRef<'_>) -> (SfntCmap, Option<Charmap>) {
             _ => false,
         }
     };
-    if let Some(i) = (0..records.len())
+    (0..records.len())
         .rev()
         .find(|&i| is_unicode(i) && is_ucs4(i))
-    {
-        return (SfntCmap::Unicode(i), None);
-    }
-    if let Some(i) = (0..records.len()).rev().find(|&i| is_unicode(i)) {
-        return (SfntCmap::Unicode(i), None);
-    }
-    let find = |platform: PlatformId, encoding: u16| {
-        records
-            .iter()
-            .position(|r| r.platform_id() == platform && r.encoding_id() == encoding)
-    };
-    let symbol = find(PlatformId::Windows, 0);
-    if symbol.is_none()
-        && let Some(map) = post_name_charmap(font)
-    {
-        return (SfntCmap::UnicodeFromNames, Some(map));
-    }
-    let choice = find(PlatformId::Macintosh, 0)
-        .map(SfntCmap::MacRoman)
-        .or_else(|| symbol.map(SfntCmap::Symbol))
-        .unwrap_or(SfntCmap::None);
-    (choice, None)
+        .or_else(|| (0..records.len()).rev().find(|&i| is_unicode(i)))
 }
 
 /// Unicode map derived from the `post` glyph names, `None` when the table

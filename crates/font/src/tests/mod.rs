@@ -386,3 +386,42 @@ fn sfnt_face_infos_summarise_a_file() {
     assert_eq!(face_infos(&dir.join("missing.ttf")).len(), 0);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+/// The coverage reported for an installed face is that of the subtable its
+/// program resolves Unicode values through: an ISO-platform subtable counts,
+/// and of two Unicode subtables of one class the last listed wins.
+#[test]
+fn sfnt_coverage_follows_the_program_charmap() {
+    use crate::program::FontProgram;
+    use crate::sfnt_info::unicode_coverage;
+    let dir = std::env::temp_dir().join(format!("rrocket-sfnt-cov-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let cases = [
+        (
+            "iso.ttf",
+            sfnt::box_font(&[(2, 1, sfnt::cmap_format4(0x41))]),
+            0x41,
+        ),
+        (
+            "two-bmp.ttf",
+            sfnt::box_font(&[
+                (0, 3, sfnt::cmap_format4(0x41)),
+                (3, 1, sfnt::cmap_format4(0x42)),
+            ]),
+            0x42,
+        ),
+    ];
+    for (name, font, code) in cases {
+        let program = FontProgram::parse(font.clone(), 0).expect("parse");
+        assert_eq!(program.char_index(code), 1, "{name}: program maps {code}");
+        let path = dir.join(name);
+        std::fs::write(&path, &font).expect("write");
+        let set = unicode_coverage(&path, 0).expect("a Unicode subtable");
+        assert!(set.contains(code), "{name}: coverage holds {code}");
+        assert!(
+            !set.contains(0x83 - code),
+            "{name}: coverage is one subtable's"
+        );
+    }
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
