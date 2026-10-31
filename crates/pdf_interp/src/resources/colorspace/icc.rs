@@ -19,6 +19,9 @@ use pdf::{Document, ObjectId};
 use super::ColorSpace;
 use crate::resources::icc_shaper::{ProfileConversion, fetch_profile_bytes};
 
+#[cfg(feature = "gpu-icc")]
+pub mod clut;
+
 /// The compiled sRGB conversion of one ICC profile stream for colour values
 /// of its declared component count.
 pub enum IccConversion {
@@ -117,7 +120,7 @@ impl IccConversion {
     /// `None` for any other conversion or when the bake fails.
     #[cfg(feature = "gpu-icc")]
     pub fn cmyk_clut(&self) -> Option<Arc<[u8]>> {
-        use crate::resources::image::icc::{DEFAULT_GRID_N, bake_cmyk_clut_with};
+        use clut::{DEFAULT_GRID_N, bake_cmyk_clut_with};
 
         let Self::Transform { n: 4, xform, clut } = self else {
             return None;

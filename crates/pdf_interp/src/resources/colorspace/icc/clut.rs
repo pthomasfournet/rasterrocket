@@ -1,28 +1,21 @@
-/// ICC CMYK→RGB CLUT baking via `moxcms`.
-///
-/// Evaluates a CMYK ICC profile on a regular `grid_n^4` lattice and returns the
-/// result as a flat `u8` table indexed by `(k*G³+c*G²+m*G+y)*3`, matching the
-/// layout expected by `GpuCtx::icc_cmyk_to_rgb(..., Some((table, grid_n)))` and
-/// the CPU quadrilinear fallback in `gpu::icc_cmyk_to_rgb_cpu`.
-///
-/// # Grid size choice
-///
-/// 17 nodes per axis (the ICC minimum) is sufficient for perceptual rendering
-/// and produces a 17^4 × 3 = 250 563-byte table. 33 nodes give higher accuracy
-/// at 33^4 × 3 ≈ 3.4 MB — too large for L2 residency on most GPUs.
-/// Default is 17, matching the ICC/PDF standard minimum.
+//! CMYK → sRGB lookup tables baked from an ICC transform.
+//!
+//! A four-channel `moxcms` transform is evaluated on a regular `grid_n^4`
+//! lattice; the result is a flat `u8` table indexed by
+//! `(k·G³ + c·G² + m·G + y) · 3`, the layout of
+//! `GpuCtx::icc_cmyk_to_rgb(..., Some((table, grid_n)))` and of the CPU
+//! quadrilinear interpolation `gpu::icc_cmyk_to_rgb_cpu`.
+
 use moxcms::{CmsError, Transform8BitExecutor};
 
-/// 17 nodes per axis — a practical minimum for perceptual rendering.
-///
-/// Produces a 17^4 × 3 = 250 563-byte table.  33 nodes give higher accuracy at
-/// 33^4 × 3 ≈ 3.4 MB — too large for L2 residency on most GPUs.
+/// Lattice nodes per axis: 17, the ICC minimum, gives a 17^4 × 3 =
+/// 250 563-byte table; 33 nodes (≈ 3.4 MB) exceed the L2 cache of most GPUs.
 pub const DEFAULT_GRID_N: u32 = 17;
 
-/// Error returned by [`bake_cmyk_clut`].
+/// Error returned by [`bake_cmyk_clut_with`].
 #[derive(Debug)]
 pub enum BakeError {
-    /// `grid_n` is outside the valid range `[2, 255]`.
+    /// `grid_n` is outside `[2, 255]`, or its table does not fit `usize`.
     InvalidGridSize(u32),
     /// The ICC profile is malformed, uses the wrong colour space, or the
     /// transform could not be built.
@@ -86,8 +79,9 @@ fn grid_to_u8(i: usize, step: f32) -> u8 {
 ///
 /// # Errors
 ///
-/// Returns [`BakeError::InvalidGridSize`] if `grid_n` is outside `[2, 255]`,
-/// or [`BakeError::Cms`] if the transform fails.
+/// Returns [`BakeError::InvalidGridSize`] if `grid_n` is outside `[2, 255]`
+/// or its table does not fit `usize`, or [`BakeError::Cms`] if the
+/// transform fails.
 #[expect(
     clippy::many_single_char_names,
     reason = "g/c/m/y/k are conventional CMYK grid-iteration names — clarity trumps length here"
@@ -100,15 +94,14 @@ pub fn bake_cmyk_clut_with(
         return Err(BakeError::InvalidGridSize(grid_n));
     }
 
-    let g = grid_n as usize; // grid_n ≤ 255, fits usize trivially
+    let g = grid_n as usize; // grid_n ≤ 255
     let g2 = g * g;
     let g3 = g2 * g;
-    // grid_n ≤ 255 → g^4 ≤ 255^4 ≈ 4.2 × 10^9; fits usize on 64-bit (our only target).
-    // The checked_mul guards against any future 32-bit build attempt.
+    // 255^4 · 3 exceeds a 32-bit usize.
     let total = g3
         .checked_mul(g)
         .and_then(|n| n.checked_mul(3))
-        .expect("grid_n^4*3 overflows usize — unreachable for grid_n ≤ 255 on 64-bit");
+        .ok_or(BakeError::InvalidGridSize(grid_n))?;
 
     // step = 255 / (grid_n - 1) maps grid index i ∈ [0, grid_n-1] to channel value [0, 255].
     // Using (grid_n - 1) as divisor ensures the last node (i = grid_n-1) maps exactly to 255,
@@ -170,12 +163,12 @@ pub fn bake_cmyk_clut_with(
 mod tests {
     use std::sync::Arc;
 
+    use super::super::IccConversion;
     use super::*;
-    use crate::resources::colorspace::icc::IccConversion;
 
     /// A small CMYK (FOGRA-like) profile.
     const CMYK_PROFILE: &[u8] =
-        include_bytes!("../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+        include_bytes!("../../../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
 
     fn cmyk_transform() -> Arc<IccConversion> {
         Arc::new(IccConversion::compile(CMYK_PROFILE, 4).expect("CMYK profile compiles"))

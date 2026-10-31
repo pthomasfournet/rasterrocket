@@ -69,10 +69,6 @@ use gpu::jpeg_decoder::JpegGpuDecoder;
 #[cfg(feature = "gpu-icc")]
 use gpu::GpuCtx;
 
-#[cfg(feature = "gpu-icc")]
-#[path = "../icc.rs"]
-pub(crate) mod icc;
-
 /// Minimum pixel area (width × height) for GPU-accelerated `DCTDecode`
 /// (nvJPEG or VA-API).
 ///

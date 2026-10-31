@@ -637,7 +637,8 @@ impl Decoded<'_> {
             };
             match ctx.icc_cmyk_to_rgb(
                 &bytes,
-                clut.as_deref().map(|t| (t, super::icc::DEFAULT_GRID_N)),
+                clut.as_deref()
+                    .map(|t| (t, crate::resources::colorspace::icc::clut::DEFAULT_GRID_N)),
             ) {
                 Ok(rgb) => return Some((ImageColorSpace::Rgb, rgb)),
                 Err(e) => log::warn!("image: GPU CMYK→RGB failed, falling back to CPU: {e}"),
