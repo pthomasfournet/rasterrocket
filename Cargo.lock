@@ -562,9 +562,9 @@ checksum = "f4beca3cb2444e3304ac30843cc091f44ed58932353cd492ce740067bfce6b12"
 
 [[package]]
 name = "fearless_simd"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3296eb97d869113eaf148a6bdf01884e90b3828ad7ae2340b0f93362fc158611"
+checksum = "629c9d6b6f30b5604089e0980f4d924a013aacb1654a6cdf5d3d852224f68651"
 
 [[package]]
 name = "filetime"
@@ -726,7 +726,7 @@ dependencies = [
 name = "hayro-jbig2"
 version = "0.3.1"
 dependencies = [
- "fearless_simd 1.1.0",
+ "fearless_simd 1.2.0",
  "hayro-ccitt",
  "image",
 ]
@@ -735,7 +735,7 @@ dependencies = [
 name = "hayro-jpeg2000"
 version = "0.4.1"
 dependencies = [
- "fearless_simd 1.1.0",
+ "fearless_simd 1.2.0",
  "image",
  "moxcms 0.8.1",
  "png",
