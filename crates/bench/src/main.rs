@@ -35,41 +35,49 @@ impl Default for Config {
     }
 }
 
+const USAGE: &str = "usage: bench [--iters N] [--stars N]  (N ≥ 1)";
+
+/// Parse `--iters` and `--stars`; an unknown flag, a missing value or a
+/// value that is not a positive integer exits with status 2.
 fn parse_config() -> Config {
     let mut cfg = Config::default();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--iters" => {
-                let Some(v) = args.next() else {
-                    eprintln!("warning: --iters requires a value");
-                    continue;
-                };
-                match v.parse::<u32>() {
-                    Ok(n) => cfg.iters = n,
-                    Err(e) => eprintln!(
-                        "warning: --iters {v:?} is not a valid u32 ({e}); using {}",
-                        cfg.iters
-                    ),
-                }
+        let slot = match flag.as_str() {
+            "--iters" => Slot::Iters,
+            "--stars" => Slot::Stars,
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
             }
-            "--stars" => {
-                let Some(v) = args.next() else {
-                    eprintln!("warning: --stars requires a value");
-                    continue;
-                };
-                match v.parse::<usize>() {
-                    Ok(n) => cfg.stars = n,
-                    Err(e) => eprintln!(
-                        "warning: --stars {v:?} is not a valid usize ({e}); using {}",
-                        cfg.stars
-                    ),
-                }
-            }
-            other => eprintln!("warning: unknown flag {other:?}"),
+            other => fail(&format!("unknown flag {other:?}")),
+        };
+        let Some(value) = args.next() else {
+            fail(&format!("{flag} requires a value"));
+        };
+        let n = value
+            .parse::<u32>()
+            .ok()
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| fail(&format!("{flag} {value:?} is not a positive integer")));
+        match slot {
+            Slot::Iters => cfg.iters = n,
+            Slot::Stars => cfg.stars = n as usize,
         }
     }
     cfg
+}
+
+/// The [`Config`] field a flag sets.
+enum Slot {
+    Iters,
+    Stars,
+}
+
+/// Print `msg` and the usage line to stderr and exit with status 2.
+fn fail(msg: &str) -> ! {
+    eprintln!("bench: {msg}\n{USAGE}");
+    std::process::exit(2);
 }
 
 const W: u32 = 1024;
@@ -270,7 +278,7 @@ fn bench_ours(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
                 true,
             );
         }
-        let _ = black_box(bitmap);
+        drop(black_box(bitmap));
     }
     t0.elapsed().as_secs_f64() * 1000.0 / f64::from(cfg.iters)
 }
