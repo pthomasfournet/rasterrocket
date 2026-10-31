@@ -465,34 +465,25 @@ pub fn page_size_pts_by_id(
         return Ok(fallback);
     };
 
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "PDF page sizes are at most a few thousand points; i64 → f64 precision loss is negligible"
-    )]
-    let to_f64 = |o: &pdf::Object| match o {
-        pdf::Object::Real(r) => f64::from(*r),
-        pdf::Object::Integer(i) => *i as f64,
-        _ => 0.0,
-    };
+    // A number, directly or through an indirect reference.
+    let number = |o: &pdf::Object| doc.resolve(o).ok().and_then(|o| resources::obj_to_f64(&o));
 
     // Returns (x0, y0, w, h) — the lower-left origin and dimensions of the box.
     // The origin is needed to pre-translate the initial CTM so the box lower-left
     // maps to device origin (ISO 32000-2 §8.3.2: user space origin = box lower-left).
+    // A box with an entry that is not a number is unusable.
     //
     // Takes an Object (resolved via the inherited-attr lookup) rather than a dict
     // key, so the same parsing logic can be applied regardless of which node in the
     // /Parent chain supplied the value.
     let parse_box = |obj: &pdf::Object| -> Option<(f64, f64, f64, f64)> {
-        let arr = match obj {
-            pdf::Object::Array(a) if a.len() == 4 => a,
-            _ => return None,
+        let pdf::Object::Array(arr) = obj else {
+            return None;
         };
-        let (x0, y0, x1, y1) = (
-            to_f64(&arr[0]),
-            to_f64(&arr[1]),
-            to_f64(&arr[2]),
-            to_f64(&arr[3]),
-        );
+        let [x0, y0, x1, y1] = arr.as_slice() else {
+            return None;
+        };
+        let (x0, y0, x1, y1) = (number(x0)?, number(y0)?, number(x1)?, number(y1)?);
         // Reject non-finite coordinates before any arithmetic.  A hostile PDF
         // can write a magnitude that overflows f32 (e.g. /MediaBox
         // [0 0 1e40 1e40]) which the lexer stores as Real(inf); without this
@@ -591,14 +582,25 @@ pub fn page_size_pts_by_id(
     };
 
     // ISO 32000-2 §7.7.3.4: /Rotate is inheritable.  Walk the /Parent chain
-    // for the same reason as MediaBox/CropBox above.
-    // rem_euclid(360) is always 0..=359, which fits u16.
+    // for the same reason as MediaBox/CropBox above.  A real number is read
+    // truncated toward zero, as an integer-valued entry such as `90.0` is
+    // meant.
+    let rotate = doc.get_inherited_page_attr(page_id, b"Rotate");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "f64-to-i64 `as` truncates toward zero and saturates; the value is finite"
+    )]
+    let rotate_n = match &rotate {
+        Some(pdf::Object::Integer(n)) => Some(*n),
+        Some(pdf::Object::Real(r)) if r.is_finite() => Some(f64::from(*r) as i64),
+        _ => None,
+    };
     #[expect(
         clippy::cast_possible_truncation,
         reason = "rem_euclid(360) is always 0..=359, which fits u16"
     )]
-    let rotate_cw: u16 = match doc.get_inherited_page_attr(page_id, b"Rotate") {
-        Some(pdf::Object::Integer(n)) => {
+    let rotate_cw: u16 = match (rotate_n, rotate) {
+        (Some(n), _) => {
             // rem_euclid maps any sign into 0..=359 (so -90 → 270, 450 → 90).
             let normalized = n.rem_euclid(360) as u16;
             if !normalized.is_multiple_of(90) {
@@ -617,12 +619,12 @@ pub fn page_size_pts_by_id(
             normalized / 90 * 90
         }
         // Absent /Rotate is the common, conforming case (no rotation) — silent.
-        None => 0,
+        (None, None) => 0,
         // get_inherited_page_attr already resolves indirection, so any value
-        // reaching here that is not an Integer is a malformed /Rotate type.
-        Some(other) => {
+        // reaching here that is not a number is a malformed /Rotate type.
+        (None, Some(other)) => {
             log::warn!(
-                "/Rotate on page object {} is not an integer (got {}); \
+                "/Rotate on page object {} is not a finite number (got {}); \
                  assuming 0 (malformed PDF, ISO 32000-2 §7.7.3.4)",
                 page_id.0,
                 other.enum_variant(),
@@ -641,17 +643,13 @@ pub fn page_size_pts_by_id(
     let user_unit: f64 = match dict.get(b"UserUnit") {
         None => 1.0, // absent — use default
         Some(obj) => {
-            match obj {
-                pdf::Object::Real(_) | pdf::Object::Integer(_) => {}
-                other => {
-                    return Err(InterpError::InvalidPageGeometry(format!(
-                        "UserUnit on page object {} is not a number (got {})",
-                        page_id.0,
-                        other.enum_variant()
-                    )));
-                }
-            }
-            let v = to_f64(obj);
+            let Some(v) = number(obj) else {
+                return Err(InterpError::InvalidPageGeometry(format!(
+                    "UserUnit on page object {} is not a number (got {})",
+                    page_id.0,
+                    obj.enum_variant()
+                )));
+            };
             if !v.is_finite() || !(0.1..=10.0).contains(&v) {
                 return Err(InterpError::InvalidPageGeometry(format!(
                     "UserUnit {v} on page object {} is outside the valid range [0.1, 10.0]",
@@ -1210,6 +1208,36 @@ mod page_box_tests {
             (0.0, 0.0),
             "fallback origin must be the MediaBox lower-left"
         );
+    }
+
+    /// The geometry of page object `(4, 0)` with dictionary entries `page`
+    /// and indirect objects 5, 6, … `objects`.
+    fn geometry_of(page: &str, objects: &[&str]) -> super::PageGeometry {
+        let mut all = vec![(4, format!("<< /Type /Page {page} >>"))];
+        all.extend((5..).zip(objects.iter().map(|o| (*o).to_owned())));
+        let doc = crate::test_helpers::make_doc_with_objects(&all);
+        page_size_pts_by_id(&doc, (4, 0)).expect("geometry")
+    }
+
+    #[test]
+    fn a_box_with_a_non_numeric_entry_is_unusable() {
+        let geom = geometry_of("/MediaBox [10 10 /W 792]", &[]);
+        assert_eq!(geom.media_box, None);
+        assert_eq!((geom.width_pts, geom.height_pts), (612.0, 792.0));
+    }
+
+    #[test]
+    fn box_entries_and_user_unit_may_be_indirect() {
+        let geom = geometry_of("/MediaBox [0 0 5 0 R 400] /UserUnit 6 0 R", &["300", "2"]);
+        assert_eq!(geom.user_unit, 2.0);
+        assert_eq!((geom.width_pts, geom.height_pts), (600.0, 800.0));
+    }
+
+    #[test]
+    fn a_real_rotate_is_read_as_an_integer() {
+        let geom = geometry_of("/MediaBox [0 0 300 400] /Rotate 90.0", &[]);
+        assert_eq!(geom.rotate_cw, 90);
+        assert_eq!((geom.width_pts, geom.height_pts), (400.0, 300.0));
     }
 }
 
