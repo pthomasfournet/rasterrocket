@@ -1588,7 +1588,7 @@ The scan-heavy corpus (JPEG/JPEG2K) shows the largest gap because nvJPEG + nvJPE
 `/Rotate` and `CropBox` are fully handled: `rasterrocket_interp::page_size_pts` reads
 `CropBox` (falling back to `MediaBox`), normalises `/Rotate` to 0/90/180/270,
 and swaps dimensions for 90°/270° rotations.  `PageRenderer::new_scaled`
-applies the matching CTM so all four rotation values produce correctly-oriented
+(now `PageRenderer::with_view`) applies the matching CTM so all four rotation values produce correctly-oriented
 output.  A landscape PDF with `/Rotate: 270` portrait MediaBox now renders as
 landscape, matching poppler.
 
