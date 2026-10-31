@@ -2,6 +2,473 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-10-31
+
+### Bug Fixes
+
+- Recover an object whose xref entry does not lead to it
+- Derive the tricky-font family name as FreeType does
+- Inherit /Resources from the page tree for every category
+- Composite images through the transparency pipe
+- Resolve simple-font codes through the built-in encoding
+- Report no built-in encoding for CID-keyed Type 1 programs
+- Resolve a non-embedded font's encoding on the substitute face
+- Convert multi-colorant DeviceN and Indexed colours
+- Area-average an image drawn below half its resolution
+- Sort the Adobe Glyph List table so every name resolves
+- Sample axial and radial shading functions across the range
+- Evaluate function-based shadings at both coordinates
+- Colour mesh shadings through their Function
+- Read mesh shading records as the specification frames them
+- Coverage-average stencils and masks drawn below resolution
+- Resolve symbolic TrueType codes through the (1,0) subtable
+- Leave the points outside a shading's extent unpainted
+- Place tiling patterns in the parent stream's default space
+- Let tiling pattern cells show the backdrop where unpainted
+- Fill text with the pattern when the fill colour is a pattern
+- Evaluate axial and radial shadings in shading space
+- Paint raw stencil samples of 0, as the specification says
+- Read an image mask without /BitsPerComponent as 1 bit
+- Area-average images drawn below resolution onto device pixels
+- Convert RGB output to gray with the DeviceRGB → DeviceGray weights
+- Select fonts by dictionary identity at Tf, resolving each once per page
+- Apply ICCBased gray and RGB matrix/TRC profiles
+- Ship the licence texts instead of dangling symlinks
+- Read /XRefStm before /Prev and record free xref entries
+- Never return another object for an xref entry that misses
+- Parse object streams per object, by number, on demand
+- Reconstruct object-stream members and XRef-stream trailers
+- Draw non-embedded Symbol and ZapfDingbats with their own faces and encodings
+- Paint tiling patterns at their device cell size, never the fill colour
+- Repeat tiling cells on the pattern lattice, not on device axes
+- Composite non-isolated groups as their own colour and alpha
+- Take the group backdrop before borrowing the image cache state
+- Decode image masks through the shared filter dispatch
+- Draw the decoded rows of a truncated raw image
+- Compare colour-key masks on stored image samples
+- Remove the soft-mask matte from pre-blended images
+- Interpret JPX codestreams through the image dictionary
+- End inline image data at its declared length
+- Cap array and dictionary nesting in the content tokenizer
+- Read xref offsets relative to the header when bytes precede it
+- Drop only the key whose dictionary value does not parse
+- Lex malformed content-stream numbers as operands
+- Descend into an interior kid on the flat page-tree path
+- Undo TIFF predictor 2 for 1-, 2-, 4- and 16-bit components
+- Render the decodable content streams of a page
+- Recover unlisted and misplaced compressed objects, and never nest object streams
+- Exponentiate the Domain-clipped input in Type 2 functions
+- Evaluate one-input Type 0 functions at every sample depth
+- Convert unusable ICCBased fill colours through /Alternate
+- Convert CalGray and CalRGB fill colours through their CIE parameters
+- Paint nothing in a Separation or DeviceN space of /None colorants
+- Accept inline tint transforms and Indexed lookup strings in colour spaces
+- Select DefaultGray, DefaultRGB and DefaultCMYK for device colours
+- Apply ExtGState transfer functions to painted colours and images
+- Apply word spacing to a one-byte code 32 in composite fonts
+- Apply horizontal scaling to glyph shapes, not only advances
+- Paint d1 Type 3 glyphs in the fill colour and under every mode but 3
+- Run Type 3 CharProcs in the font's resources with base-encoded names
+- Advance the pen through invisible text
+- Draw the FontFile2 program of a Type 1 dictionary
+- Read codes as glyph indices in a TrueType subset with no cmap and no names
+- Draw text whose font resource is missing in Helvetica
+- Draw a substitute when the embedded font program does not parse
+- Draw nothing for a known glyph name the substitute lacks
+- Leave a gap for a code a substitute face cannot draw
+- Fit substitute glyphs to the advances the document specifies
+- Draw a non-embedded composite font of no known collection through its ToUnicode map
+- Draw the substitutes of the standard families unfitted
+- Construct PipeState with the group backdrop field
+- Close one marked-content sequence per EMC and scope them per content stream
+- Honour annotation flags, fit appearances per Algorithm 8.1, and accept direct annotations
+- Skip a form XObject that invokes itself instead of aborting the page
+- Keep a hybrid file's XRefStm dictionary out of the trailer
+- Let an image's own /SMask replace the graphics-state soft mask
+- Widen strokes thinner than one device pixel
+- Stroke solid for degenerate dash patterns and reduce phase over the full cycle
+- Paint the fill pattern through stencil masks
+- Antialias path clips at glyph edges
+- Let a translucent stroke knock out its own fill
+- Clip form XObject content to its BBox
+- Compose a nested group's backdrop back to its isolated ancestor
+- Stroke with mesh shading patterns
+- Mask path-filled glyphs of one text run as one object
+- Keep a tiling lattice's sub-pixel origin
+- Place tiling cells at quarter-pixel phases
+- End a truncated dictionary at the end of the data
+- Reserve the JBIG2 page buffer only once the decoder emits
+- Build the fuzz crate against the renamed packages
+- Bring upstream robustness fixes into the read-fonts and skrifa forks
+- Convert image samples through the fill path's colour spaces
+- Apply a Lab space's WhitePoint and Range
+- Compare a bilevel codec's colour key with its one-bit samples
+- Read a soft mask as its own stream describes it
+- Size an inline image through a colour space named from the resources
+- Refuse an image over a 1 GiB decode budget before allocating
+- Area-average a cached image for a reduced draw like a host image
+- Remove the --overprint, --thinlinemode and --jpegopt flags
+- Decode cross-reference streams through the filter chain
+- Decode BrotliDecode images through the stream filter set
+- Apply /Rotate to a page with no readable page box
+- Port upstream symbol and page size limits
+- Classify page-tree nodes by one rule in every walker
+- Rebase the linearization hint offset by the header base
+- End-of-dictionary keyword check in constant time
+- Name a failed image once in its diagnostic
+- Resolve a cmap-less TrueType subset by post name, else glyph index
+- Read kerx format 2 class values as byte offsets
+- Draw the vertical-form CIDs of a non-embedded CJK font
+- Paint no colour image inside a d1 Type 3 glyph
+- Report a pattern cell's diagnostics once per page
+- Let a pattern without resources inherit the resources in effect
+- Draw annotations with the initial graphics state
+- Give shadings and patterns /None, default spaces and the transfer function
+- Set the initial colour of a colour space selected by cs or CS
+- Give an uncoloured pattern's underlying space the default space
+- Select Off when a widget's field value names no appearance state
+- **breaking** Scale the initial CTM by /UserUnit
+- Build on platforms without posix_fadvise
+- Write bare-stem output to disk where /dev/shm does not exist
+- Keep pdfium corpus runs alive through reference timeouts
+- Report unreadable inputs in the latency scripts
+- Fail the vendored-crate check instead of truncating
+- Make the font and CMap vendoring scripts fail loudly
+- Fail a stream decode whose /Filter is not a name
+- Bound object-stream nesting reached through stream filters
+- Derive the file key length from the security handler revision
+- Compare password-derived hashes in constant time
+- End the endstream scan at the next object
+- Evaluate a shared visibility subexpression once
+- Bound the zigzag of a synthesised Squiggly annotation
+- Wrap synthesised text in time linear in its length
+- Keep non-finite numbers out of synthesised appearances
+- Choose the fallback collection order once per text
+- Do not encode a character through a ligature's code
+- Resolve rich text character references in linear time
+- Decode the PDFDocEncoding spacing accents 0x18-0x1F
+- Give a synthesised font name one font in every appearance
+- Inherit field attributes through the whole /Parent chain
+- Look up a list box's selected options in constant time
+- Refuse an image whose colour space is Pattern
+- Budget an image by the size of its converted samples
+- Hold codec-reported image dimensions to the decode budget
+- Stop a CCITT decode at the image's height
+- Exit 1 on a missing PDF argument; -h prints the header only
+- Keep target-cpu=native in the PGO build and profile BOLT
+- Report what the latency run skipped instead of discarding it
+- Budget the GPU parallel-Huffman decode by the JPEG frame header
+- Clip a text object to the union of its glyphs at ET
+- Advance the pen through runs no face draws, and honour Tz 0
+- Render cached Type 3 glyphs in the resources in effect
+- Parse an inheriting pattern cell per resource context
+- Read a luminosity soft mask's backdrop in its group's space
+- Interpolate bytes exactly in lerp_u8
+- Keep a black backdrop black under ColorDodge
+- Round Gouraud positions toward −∞ and reject non-finite vertices
+- **breaking** Drop Rgba8 and share one RGB row conversion for PPM and PNG
+- Stroke solid when a dash pattern would cut the path into more than 2^20 dashes
+- Read font widths through indirect references and as reals
+- Keep Differences names on their codes
+- Bound and bisect the per-CID W and W2 metrics
+- Draw the bullet for unassigned WinAnsi codes
+- Cap the mappings and size of a CMap stream
+- Parse each Type 3 CharProc once and bound their total size
+- Try every installed substitute candidate until one parses
+- Keep a region located beyond i32::MAX off the page
+- Stop bitmap decoding once the arithmetic decoder is exhausted
+- Bound CID-keyed Type 1 decoding by the data section
+- Bound the allocations a codestream header can ask for
+- Fail on palettes the decoder cannot apply instead of panicking
+- Order a tile's packets after its precincts are bounded
+- Validate Type 4 programs at parse time and follow PostScript operator semantics
+- Compile each referenced sub-function once per function
+- Bound the triangles a mesh shading decodes to
+- Size Type 5 mesh rows by the stream, not VerticesPerRow
+- Give a tall mesh triangle one row-index entry
+- Continue a patch from the flagged corner of the previous one
+- Skip a Type 1 shading whose function evaluates nowhere
+- Report a malformed shading function once, not per evaluation
+- **breaking** Chain InterpError to its parser error and drop dead variants
+- Read page boxes, UserUnit and Rotate through references and reals
+- Take sc/scn components from the top of the operand stack
+- Decode #xx escapes in content-stream names
+- End inline-image parameters only at a whole ID keyword
+- Walk each form once in the page prescan
+- Read a tiling pattern's PaintType as an enum and say why one is skipped
+- **breaking** Report a prefetch thread that cannot start instead of panicking
+- Read an indirect /NeedsRendering and tidy the lexer and example
+- Balance q/Q within nested content streams and bound q depth
+- Draw annotations in the page's vector antialiasing mode
+- Stroke a negative line width as its magnitude
+- Warn when PDF_RASTER_AA_FILL_THRESHOLD does not parse
+- Start annotation appearances without the page's text clip
+- Print an oversized-page error once and name tiled rendering
+- Match the face index when reusing an in-memory program
+- Select the coverage subtable with the program's own rule
+- Report the coverage of a format 0 Unicode subtable
+- Validate the ICC, composite and soft-mask records
+- Bound blit source and page buffers before launch
+- Return errors for malformed CMYK input to GpuCtx::icc_cmyk_to_rgb
+- Reject invalid flags instead of benchmarking the defaults
+- Refuse an existing --ram-path instead of deleting it on exit
+- Return from main instead of process::exit so the RAM dir is removed
+- Refuse --jpeg, --jpegcmyk and --tiff at startup
+- Write --singlefile output without a page number
+- **breaking** Decode archive pages lazily instead of all before returning
+- Read free memory on the first RAM spill check
+- Build the fuzz targets against the narrowed and non-exhaustive API
+- **breaking** Report a page's resolution once, as pixels per physical inch
+
+### Chores
+
+- Clear clippy lints in the test modules
+- Clear the clippy 1.99 lints in test targets
+- Drop the benchmark scripts of the retired package name
+- Drop package.homepage from the manifests
+- Add a typos configuration for PDF and font terms
+- Drop duplicate .gitignore entries and correct a deny.toml note
+
+### Documentation
+
+- Describe the parser crate and the JBIG2/CCITT forks
+- Describe font resolution — substitutes, bundled faces, CMaps, scripts, vertical writing
+- Current interp module tree, groups, soft masks, tiling lattice
+- Describe the parser's recovery, header base, filters and page-tree probing
+- List PageDiagnostics::missing_fonts in the API reference
+- Unreleased block for the next major release
+- Colour spaces, ICC compilation, transfer functions and compiled PDF functions
+- Optional content, annotations and the render purpose in the unreleased block
+- List the Lab colour space module
+- Open each fork README with its provenance
+- Mark the bench results and the Huffman post-mortem historical
+- Bring the API reference in line with the current crate
+- Correct the CLI reference against the clap definitions
+- Document the page raster and image decode size limits
+- Fix build and install advice, add the session API
+- Mark every Benchmarks table historical and fix its claims
+- Summarise unreleased work and correct the build and GPU notes
+- Feed Tesseract raw pixels through set_frame
+- Encode LLM-vision pages with encode_for_gcv
+- Add READMEs for the public crates and fix two descriptions
+- Complete the v2.0.0 notes and plan print and fax
+- Plan text shaping for substituted fonts
+- Describe the newly synthesised annotation appearances
+- List the build, run-time and comparison dependencies
+- Drop the knockout-group known issue
+- Close moot phase items and correct stale phase claims
+- Describe the page-tree descent without the removed hint stub
+- Correct the benchmarking commands
+- Describe the per-document font store and glyph cache
+- List knockout groups, name every C dependency, drop cargo install
+- Name the current page-renderer constructor
+- Correct the Dictionary, EncryptedDocument and trailer docs
+- State the image module's comments as mechanism
+- Correct backend, feature and error statements against the code
+- State the pattern, text and sampler invariants plainly
+- State mechanism instead of the third-party sources in comments
+- State what embeds the bundled fonts and CMaps
+- State the encoding tables and text state without narration
+- State the size limits on Image::new
+- Correct the glyph cache and CFF charset comments
+- State the Slang CLUT kernel's rounding accurately
+- Repair intra-doc links broken by the render.rs split
+- Describe the CMYK CLUT layout instead of naming an interp function
+- State the path and scanner invariants without a reference renderer
+- Keep public docs from linking private or feature-gated items
+- Name the crate correctly in the crate-level example
+- State InterpError, the interp types and the PageSet surface as they are
+- RAM directory removal on failure, error chains and resource bounds
+- Pin to v2.0.0 and state behaviour without release history
+- Bring crate, module and SIMD descriptions in line with the code
+- Present the v2.0.0 changes as the current release
+- State ComicPages::len and list render_page_gray
+- State that the JPEG and TIFF flags are refused at startup
+- Record v2.0.0 in the release history
+
+### Features
+
+- Grid-fit the TrueType programs whose glyphs need it
+- Read CID-keyed Type 1 fonts
+- Render CID-keyed Type 1 programs
+- Draw a non-embedded font with a substitute of its class
+- Add a process-ink DeviceCMYK → sRGB model
+- Convert DeviceCMYK through the process-ink model everywhere
+- Match the CUDA profile-free CMYK kernel to color::cmyk
+- Stroke glyph outlines in text render modes 1, 2, 5 and 6
+- Honour ExtGState soft masks
+- Paint shading patterns, with Background, as fills and strokes
+- Honour a shading pattern's ExtGState
+- Compile the base-14 substitute faces into the binary
+- Predefined CJK CMaps, mixed-width codespaces, usecmap and byte-oriented CMap streams
+- Substitute installed CJK, Arabic and Thai faces by script, and map CIDs through Unicode
+- Vertical writing mode for composite fonts
+- Interpolate magnified and rotated images bilinearly
+- Accept abbreviated filter names on every stream and decode BrotliDecode
+- Report skipped content streams in PageDiagnostics and fail them under strict
+- Search the directories RROCKET_FONT_DIR names for fonts
+- Place glyph bitmaps to a quarter pixel horizontally
+- Implement the optional content model and a render purpose
+- Report a document's form type and warn on dynamic XFA
+- Synthesise appearances for markup annotations without /AP /N
+- Synthesise form field widget appearances
+- Decrypt Standard-security-handler documents in process
+- Convert a JPX image through the ICC profile of its colr box
+- Report an image drawn from a short stream as a partial failure
+- Name HTJ2K in the diagnostic of a refused CAP codestream
+- Page geometry query, region render and cancellation
+- Make --hide-annotations hide annotations
+- Make --aa and --aaVector switch antialiasing
+- Render at separate horizontal and vertical scales
+- Make the crop and scale-to flags work
+- **breaking** Make the public types non-exhaustive
+- Report content streams that decode only in part
+- Draw characters a substitute lacks from any installed face
+- Add SessionConfig::font_dirs and per-library font caches
+- Bundle Noto fallback faces for non-CJK scripts
+- Composite each object of a knockout group with its initial backdrop
+- Paint a page that can blend as an isolated page group
+- Draw /LE line endings on synthesised Line and PolyLine
+- Synthesise FreeText appearances
+- Draw pop-ups only when open, synthesising open ones
+- Turn synthesised widget appearances by /MK /R
+- Show the rich text value /RV of a synthesised text field
+- Set synthesised appearance text through the /DA font's encoding
+- **breaking** Mark ComicOptions and ComicError non-exhaustive
+- Read the array destination form of bfrange
+- **breaking** Mark the resource and token types non-exhaustive
+- **breaking** Make PageView non-exhaustive
+- Cancel the batch entry points through RasterOptions::cancel
+- **breaking** Give BackendPolicy's FromStr a real error type
+- **breaking** Make OpenOptions non-exhaustive with a constructor
+
+### Other
+
+- Group the pattern import with the other imports
+- Vendor hayro-ccitt as a local fork in crates/ccitt
+- Vendor hayro-jbig2 as a local fork in crates/jbig2
+- Run the integration suites, vendored decoder suites and bench check
+- Run cargo deny on dependency changes and weekly
+- Track instruction counts against the last release weekly
+- Configure ruff, pylint and mypy for the repository scripts
+- Test and lint the colour, encode and comic crates; check spelling
+- Share the fuzz build cache's flags; compare a release against its predecessor
+- Drop the unused colour dependency of font and pdf_bridge
+- Update log to 0.4.35 and rustix to 1.1.6
+- Update fearless_simd to 1.2.0 for the JBIG2 and JPEG 2000 forks
+- Turn off clippy's redundant_pub_crate in favour of rustc's unreachable_pub
+
+### Performance
+
+- Borrow function dictionaries instead of cloning them
+- Resolve each resource category once per resource context
+- List post-table glyph names in linear time
+- Resolve each font once per document, not once per page
+- Share glyph bitmaps across the pages of a document
+- Decode each JBIG2Globals stream once per document
+- Parse a program's outline tables once, not once per glyph
+- Decide transfer identity once per paint, not per span
+- Snapshot only the painted object under a soft mask
+- Bound a transparency group to its region and reuse its bitmap
+- Decode each image XObject once per page
+- Apply /Decode through a 256-entry table per component
+- Compile PDF functions once and evaluate by arithmetic
+- Compile ICCBased fill conversions once per document
+- Resolve each page-tree node's /Kids once in get_pages
+- Check page and annotation JavaScript per rendered page, not at open
+- Parse each Type 3 CharProc once
+- Resolve shadings and tiling cells once per page
+- Decode a repeated inline image once per page
+- Port upstream SIMD sample conversion and logging removal
+- Cache the coverage of d1 Type 3 glyphs
+- Visit only the mesh triangles that can meet a fill
+- Resolve optional-content group states once per document
+- Read short raw image data without a padded input copy
+- Composite a transparency group back in runs, not pixel by pixel
+- Test marked-content visibility in constant time
+- Composite image rows in runs, not sample by sample
+- Borrow the font name of a text-show operator instead of copying it
+- **breaking** Resolve an object without copying it
+- Move a decoded tar or 7z entry out instead of copying it
+- Name a failed image only when a failure is recorded
+- Classify a prescanned image's filter without owning its name
+- **breaking** Borrow a font resource entry instead of copying it
+- Look up fallback glyphs without per-call allocations
+- Borrow CFF and Type 1 glyph names instead of copying them
+- **breaking** Share the font and pattern names across saved graphics states
+- **breaking** Borrow content-stream operands from the stream
+
+### Refactor
+
+- Move the CID-keyed Type 1 tests to src/tests
+- Simplify the shading-pattern, tiling and image-reduction changes
+- Drop the pipe's soft-mask plane and knockout state
+- Keep the GPU CMYK CLUT with the profile's conversion
+- Delete the unused raster::image module
+- Delete the unused band-parallel fill
+- Delete the unused GraphicsState and StateStack
+- Use the shared luminosity helper for soft masks
+- Hold the group's backdrop and knockout flag together
+- Gather annotation appearance code into one module
+- Share tool invocation and one-page PDF assembly
+- Share the fixture font scaffolding in the generator
+- Share the hex-digit decoder between hex strings and ASCIIHexDecode
+- Remove the unused advise_willneed hint
+- **breaking** Return linearization hints as an Option
+- Share the array, opacity and markup-text readers
+- Parse an image's filter chain once per decode
+- Split the image codecs into one module per codec
+- Share the CCITT/JBIG2 dimension parsing and PDF assembly
+- Advance Type 3 text through the shared text helpers
+- Share the image memo's budgeted insert
+- **breaking** Remove the unused overprint fields of PipeState
+- **breaking** Remove the unused soft-mask extraction from transparency groups
+- Composite every span through one bitmap-span helper and one clip-run walk
+- **breaking** Take an Rgb8 bitmap in gouraud_triangle_fill
+- Drop flatten_path's unused matrix and fill alpha with slice::fill
+- Parse the embedded font program once, into the descriptor
+- Drop dead font-encoding state and share dictionary lookups
+- Split the code → glyph resolution out of the font cache
+- Split resources::font by font type
+- Build the embedded CMap and Noto tables with a macro
+- Split mesh-stream decoding out of the shading module
+- Resolve Type 0 interval arrays once at compile time
+- Drop the unused ICCBased depth argument and correct colour-space notes
+- Keep the CMYK CLUT bake with the ICC conversion it serves
+- Share the numeric and form readers of the resource layer
+- Resolve /Annots and inherited /Resources through the shared helpers
+- Make the operator dispatch exhaustive
+- Share the page renderer's rectangle, clip and scale helpers
+- Split the page renderer into focused modules
+- Split render.rs into focused modules
+- Mask the glyph x-fraction with a typed constant
+- Drop RasterSession's unread vaapi_device field
+- **breaking** Name the saturating rounding helpers by what they do
+- Take the clip rectangle through one renderer helper
+- **breaking** Narrow public surface that nothing outside its crate reaches
+
+### Testing
+
+- Synthetic hint-assembled TrueType and CID-keyed Type 1 fixtures
+- Render hint-assembled TrueType and CID-keyed Type 1 end to end
+- Images honour the constant fill alpha
+- Follow the process-ink K corner in DeviceN tests; clear new lints
+- Inline image colour spaces and image blend modes end to end
+- Add pdfium as a reference renderer
+- Render ICCBased gamma-1.8 images end to end
+- Per-page latency against pdfium, measured like for like
+- Replace the dormant golden harness with an end-to-end suite
+- Add parser, filter, decrypt, content, image, font, CMap and function targets
+- Score localized loss, report size mismatches, sweep directories
+- Run pdfium's test corpus as QA input
+- Pin the one-pixel hairline of a zero-width rectangle
+- Add a parse-only target for the cross-reference reader
+- Pin the palette of one-bit Indexed bilevel images
+- Cover the synthesised push-button caption
+- Share the render, sampling and page-tree helpers; tighten weak assertions
+- Expect the decoder's sample limit to refuse an oversized JPX codestream
+- Use a last-byte mismatch the spell checker accepts
+
 ## [1.5.0] - 2026-10-24
 
 ### Bug Fixes
@@ -37,6 +504,7 @@ All notable changes to this project will be documented in this file.
 - Drop the nvjpeg-gpu feature, which no cfg reads
 - Inherit the workspace lints and clear every finding
 - Vendor read-fonts 0.41.0 and skrifa 0.44.0 as local forks
+- Release v1.5.0
 
 ### Documentation
 
@@ -44,6 +512,7 @@ All notable changes to this project will be documented in this file.
 - State why the crate allows unsafe code
 - Camera-capture cleanup in README, API, CLI and architecture
 - Document rasterrocket-camera and the CLI cleanup flags
+- Prep v1.5.0 release notes
 
 ### Features
 
