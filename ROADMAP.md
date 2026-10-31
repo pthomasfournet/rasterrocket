@@ -83,10 +83,13 @@ why this is a major release; the migration notes are under **API changes**.
   the usage event.
 - **Annotations and forms.** Flags (Hidden, NoView, Print, NoRotate) for the
   render purpose, appearances fitted by Algorithm 8.1, the `/AS` state chain,
-  and appearances synthesised for markup annotations (Square, Circle, Line,
-  PolyLine, Polygon, Ink, text markup, Text) and for text, choice and button
-  form fields that have none, including `/NeedAppearances` forms whose values
-  live only in `/V`. `annotations = false` (CLI `--hide-annotations`) leaves
+  and appearances synthesised for markup annotations (Square, Circle, Line
+  and PolyLine with `/LE` endings, Polygon, Ink, text markup, Text,
+  FreeText with `/RC` and callouts, open pop-ups) and for text, choice and
+  button form fields that have none, including `/NeedAppearances` forms
+  whose values live only in `/V`, `/MK /R` rotation, rich text `/RV` and CJK
+  `/DA` fonts with a fallback for characters the font lacks. Closed pop-ups
+  are not drawn. `annotations = false` (CLI `--hide-annotations`) leaves
   them out. A dynamic XFA form is reported as `FormType::XfaFull` and warned
   about at open.
 - **Font substitution.** A non-embedded font is drawn with a substitute of
