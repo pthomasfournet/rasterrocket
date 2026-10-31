@@ -7,11 +7,13 @@
 //! stored appearance.  A pop-up is drawn only while open.
 
 mod content;
+mod encoder;
 mod free_text;
 mod line_ending;
 mod markup;
 mod popup;
 mod text;
+mod typeset;
 mod widget;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
@@ -21,6 +23,7 @@ use super::PageRenderer;
 use crate::RenderPurpose;
 use crate::resources::dict_ext::DictExt;
 use raster::types::BlendMode;
+use typeset::Typesetter;
 
 /// A synthesised appearance.
 struct Synthesized {
@@ -169,8 +172,8 @@ fn render_one_annotation(
             if let Some(rect) = read_rect(annot) {
                 let resources = text::resources(doc, None, &[(popup::FONT, b"Helvetica")]);
                 let no_rotate_rect = (flags & NO_ROTATE != 0).then_some(rect);
-                draw_text_appearance(renderer, &resources, id, no_rotate_rect, |width| {
-                    popup::appearance(doc, parent.as_ref(), rect, width)
+                draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
+                    popup::appearance(doc, parent.as_ref(), rect, ts)
                 });
             }
             return;
@@ -277,21 +280,21 @@ fn draw_synthesized(
 }
 
 /// Draw the synthesised appearance that `build` writes, with `resources`,
-/// derived from the form's default resources, in effect; `build` is given
-/// the measure of a byte string in a font resource ([`text_width`]).  The
+/// derived from the form's default resources, in effect; `build` sets its
+/// text with a [`encoder::FontTypesetter`] over those resources.  The
 /// remaining arguments are those of [`draw_synthesized`].
 fn draw_text_appearance(
     renderer: &mut PageRenderer<'_>,
     resources: &Dictionary,
     id: Option<ObjectId>,
     no_rotate_rect: Option<[f64; 4]>,
-    build: impl FnOnce(&mut dyn FnMut(&[u8], &[u8]) -> f64) -> Synthesized,
+    build: impl FnOnce(&mut dyn Typesetter) -> Synthesized,
 ) {
     // The default resources are no object's `/Resources`; object 0, which
     // no document defines, identifies them to the font cache.
     let dr = renderer.resources.with_resources((0, 0), resources);
     let page_resources = std::mem::replace(&mut renderer.resources, dr);
-    let appearance = build(&mut |font, bytes| text_width(renderer, font, bytes));
+    let appearance = build(&mut encoder::FontTypesetter::new(renderer));
     draw_synthesized(renderer, appearance, id, no_rotate_rect);
     renderer.resources = page_resources;
 }
@@ -308,8 +311,8 @@ fn draw_widget(
     let doc = renderer.resources.doc();
     let resources = widget::resources(doc, form, field);
     let (local, matrix) = rotated_box(rect, field.rotation());
-    draw_text_appearance(renderer, &resources, id, None, |width| Synthesized {
-        content: widget::content(doc, field, local, width),
+    draw_text_appearance(renderer, &resources, id, None, |ts| Synthesized {
+        content: widget::content(doc, field, local, ts),
         bbox: local,
         opacity: 1.0,
         blend: BlendMode::Normal,
@@ -349,30 +352,9 @@ fn draw_free_text(
         form.and_then(widget::AcroForm::default_resources),
         &[(free_text.font(), b"Helvetica")],
     );
-    draw_text_appearance(renderer, &resources, id, no_rotate_rect, |width| {
-        free_text.appearance(width)
+    draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
+        free_text.appearance(ts)
     });
-}
-
-/// The advance of the single-byte codes `bytes` in the font resource `font`
-/// of the resources in effect, in text space units per unit font size: the
-/// font's `/Widths`, else its program's advances.
-fn text_width(renderer: &mut PageRenderer<'_>, font: &[u8], bytes: &[u8]) -> f64 {
-    let active = renderer.font_cache.select(&renderer.resources, font);
-    let mut total = 0.0;
-    for &byte in bytes {
-        let code = u32::from(byte);
-        let advance = match active.descriptor.width_for_code(code) {
-            Some(w) => f64::from(w) / 1000.0,
-            None => renderer
-                .font_cache
-                .get_or_load(&active, font, [12.0, 0.0, 0.0, 12.0])
-                .and_then(|face| face.glyph_advance(code))
-                .unwrap_or(0.5),
-        };
-        total += advance;
-    }
-    total
 }
 
 /// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,

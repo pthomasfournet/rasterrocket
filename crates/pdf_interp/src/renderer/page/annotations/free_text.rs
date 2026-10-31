@@ -20,10 +20,8 @@ use super::content::{
     Border, colour, colour_op, inset, n, number, numbers, rectangle, string, text_or_stream,
 };
 use super::line_ending::LineEnding;
-use super::text::{
-    AUTO_MULTILINE_SIZE, DefaultAppearance, TextBlock, decode_text_string, encode_win_ansi,
-    plain_text,
-};
+use super::text::{DefaultAppearance, decode_text_string, plain_text};
+use super::typeset::{AUTO_MULTILINE_SIZE, TextBlock, Typesetter};
 use super::widget::AcroForm;
 use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
@@ -113,9 +111,8 @@ impl FreeText {
         &self.da.font
     }
 
-    /// The appearance; `width` measures a byte string in a font resource,
-    /// in text space units per unit font size.
-    pub(super) fn appearance(&self, mut width: impl FnMut(&[u8], &[u8]) -> f64) -> Synthesized {
+    /// The appearance, its text set by `ts`.
+    pub(super) fn appearance(&self, ts: &mut dyn Typesetter) -> Synthesized {
         let mut s = String::new();
         let bw = self.border.width;
         let frame = inset(self.text_box, &[bw / 2.0; 4]);
@@ -151,8 +148,7 @@ impl FreeText {
         }
         s.push_str("Q\n");
         let area = inset(self.text_box, &[2.0 * bw; 4]);
-        let text = encode_win_ansi(&self.text);
-        if !text.is_empty() {
+        if !self.text.is_empty() {
             s.push_str("q\n");
             rectangle(&mut s, area);
             s.push_str("W n\n");
@@ -166,7 +162,7 @@ impl FreeText {
                 quadding: self.quadding,
                 area,
             };
-            block.write(&mut s, &text, &mut width);
+            block.write(&mut s, &self.text, ts);
             s.push_str("Q\n");
         }
         Synthesized {
@@ -182,17 +178,17 @@ impl FreeText {
 #[cfg(test)]
 mod tests {
     use super::FreeText;
+    use crate::renderer::page::annotations::typeset::WinAnsiTypesetter;
     use crate::test_helpers::make_doc_with_object;
 
-    /// The appearance content of the free text annotation `annot`, every
-    /// byte measured as half an em.
+    /// The appearance content of the free text annotation `annot`, set by
+    /// [`WinAnsiTypesetter`].
     fn content(annot: &str) -> String {
         let doc = make_doc_with_object(annot);
         let dict = doc.get_dictionary((2, 0)).expect("a dictionary");
         let rect = super::super::read_rect(&dict).expect("a rect");
         let ft = FreeText::of(&doc, &dict, rect, None);
-        let width = |_: &[u8], b: &[u8]| f64::from(u32::try_from(b.len()).unwrap_or(0)) / 2.0;
-        String::from_utf8(ft.appearance(width).content).expect("ASCII")
+        String::from_utf8(ft.appearance(&mut WinAnsiTypesetter).content).expect("ASCII")
     }
 
     #[test]

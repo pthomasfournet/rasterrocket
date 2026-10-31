@@ -12,7 +12,8 @@ use pdf::{Dictionary, Document};
 use raster::types::BlendMode;
 
 use super::content::{inset, rectangle, string};
-use super::text::{DefaultAppearance, TextBlock, decode_text_string, encode_win_ansi, plain_text};
+use super::text::{DefaultAppearance, decode_text_string, plain_text};
+use super::typeset::{TextBlock, Typesetter};
 use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
 
@@ -34,12 +35,12 @@ pub(super) fn parent(doc: &Document, annot: &Dictionary) -> Option<Dictionary> {
 }
 
 /// The appearance of the open pop-up whose window is `rect` and whose
-/// parent is `parent`; `width` measures a byte string in [`FONT`].
+/// parent is `parent`, its text set by `ts` in [`FONT`].
 pub(super) fn appearance(
     doc: &Document,
     parent: Option<&Dictionary>,
     rect: [f64; 4],
-    mut width: &mut dyn FnMut(&[u8], &[u8]) -> f64,
+    ts: &mut dyn Typesetter,
 ) -> Synthesized {
     let mut s = String::from("1 1 0 rg 0 G 1 w\n");
     rectangle(&mut s, inset(rect, &[0.5; 4]));
@@ -76,7 +77,7 @@ pub(super) fn appearance(
             quadding: 0,
             area,
         };
-        block.write(&mut s, &encode_win_ansi(&text), &mut width);
+        block.write(&mut s, &text, ts);
         s.push_str("Q\n");
     }
     Synthesized {

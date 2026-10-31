@@ -389,7 +389,13 @@ renderer/
                        window holding the parent's /T and /Contents
       line_ending.rs — /LE line endings (arrows, square, circle, diamond,
                        butt, slash) in a frame along the line
-      text.rs        — /DA parsing, text strings, line wrapping and layout
+      text.rs        — /DA parsing, the /DR-derived resources, text strings
+                       and rich text reduced to plain text
+      typeset.rs     — Unicode text set as runs of codes in font resources;
+                       line wrapping and layout
+      encoder.rs     — Unicode → codes of a font (inverse of its encoding,
+                       ToUnicode or collection); CJK fallback Type 0 fonts
+                       for characters the /DA font cannot encode
       content.rs     — object access and content-stream fragments shared
                        by the synthesised appearances
     patterns.rs      — tiling patterns on the pattern lattice

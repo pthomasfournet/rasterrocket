@@ -19,9 +19,9 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use super::content::{
     self, circle, colour_op, n, number, numbers, rectangle, resolve_array, string, text_or_stream,
 };
-use super::text::{
-    self, AUTO_MULTILINE_SIZE, DefaultAppearance, LEADING, TextBlock, aligned_x,
-    decode_text_string, encode_win_ansi, hex, plain_text,
+use super::text::{self, DefaultAppearance, decode_text_string, plain_text};
+use super::typeset::{
+    AUTO_MULTILINE_SIZE, LEADING, TextBlock, Typesetter, aligned_x, hex, show_line,
 };
 use crate::resources::dict_ext::DictExt;
 
@@ -234,13 +234,12 @@ pub(super) fn resources(doc: &Document, form: &AcroForm, field: &Field) -> Dicti
     )
 }
 
-/// The appearance content of `field` in `rect`; `width` measures a byte
-/// string in the field's font, in text space units per unit font size.
+/// The appearance content of `field` in `rect`, its text set by `ts`.
 pub(super) fn content(
     doc: &Document,
     field: &Field,
     rect: [f64; 4],
-    mut width: impl FnMut(&[u8], &[u8]) -> f64,
+    ts: &mut dyn Typesetter,
 ) -> Vec<u8> {
     let mut s = String::new();
     let radio = field.kind == Kind::Button && field.flags & (RADIO | PUSH_BUTTON) == RADIO;
@@ -261,54 +260,36 @@ pub(super) fn content(
     );
     let text_area = inset(inner, bw.max(1.0));
     match field.kind {
-        Kind::Choice if field.flags & COMBO == 0 => list(&mut s, field, text_area, &mut width),
+        Kind::Choice if field.flags & COMBO == 0 => list(&mut s, field, text_area, ts),
         Kind::Text | Kind::Choice => {
             let text = display_text(doc, field);
-            let text: Vec<u8> = if field.flags & PASSWORD != 0 {
-                vec![b'*'; text.len()]
+            let text = if field.flags & PASSWORD != 0 {
+                "*".repeat(text.chars().count())
             } else {
                 text
             };
             if field.flags & MULTILINE != 0 && field.kind == Kind::Text {
-                multiline(&mut s, field, text_area, &text, &mut width);
+                multiline(&mut s, field, text_area, &text, ts);
             } else if field.flags & COMB != 0 && field.max_len.is_some_and(|m| m > 0) {
-                comb(&mut s, field, text_area, &text, &mut width);
+                comb(&mut s, field, text_area, &text, ts);
             } else {
-                let line = Line {
-                    font: &field.da.font,
-                    quadding: field.quadding,
-                    area: text_area,
-                };
-                single_line(&mut s, field, &line, &text, &mut width);
+                single_line(&mut s, field, field.quadding, text_area, &text, ts);
             }
         }
         Kind::Button if field.flags & PUSH_BUTTON != 0 => {
             if let Some(caption) = &field.caption {
-                let text = encode_win_ansi(&decode_text_string(caption));
-                let line = Line {
-                    font: &field.da.font,
-                    quadding: 1,
-                    area: text_area,
-                };
-                single_line(&mut s, field, &line, &text, &mut width);
+                let text = decode_text_string(caption);
+                single_line(&mut s, field, 1, text_area, &text, ts);
             }
         }
         Kind::Button => {
             if field.on {
-                check_mark(&mut s, field, inner, radio, &mut width);
+                check_mark(&mut s, field, inner, radio, ts);
             }
         }
     }
     s.push_str("Q\n");
     s.into_bytes()
-}
-
-/// Where a single line of text goes: its font, its quadding and the area it
-/// is fitted and aligned in.
-struct Line<'a> {
-    font: &'a [u8],
-    quadding: i64,
-    area: [f64; 4],
 }
 
 /// The background `/MK /BG` and border `/MK /BC` of the widget, a circle
@@ -346,7 +327,7 @@ fn frame(s: &mut String, field: &Field, rect: [f64; 4], radio: bool) {
 /// `/RV` instead when it is a rich text field or its value is empty; its
 /// paragraphs are lines of a multiline field and are joined by spaces
 /// otherwise (§12.7.4.3).
-fn display_text(doc: &Document, field: &Field) -> Vec<u8> {
+fn display_text(doc: &Document, field: &Field) -> String {
     let raw = match &field.value {
         Some(Object::String(s, _)) => s.clone(),
         Some(Object::Name(n)) => n.clone(),
@@ -360,18 +341,18 @@ fn display_text(doc: &Document, field: &Field) -> Vec<u8> {
     if let Some(rich) = &field.rich
         && (field.flags & RICH_TEXT != 0 || raw.is_empty())
     {
-        return encode_win_ansi(&if field.flags & MULTILINE != 0 {
+        return if field.flags & MULTILINE != 0 {
             rich.clone()
         } else {
             rich.replace('\n', " ")
-        });
+        };
     }
     let raw = field
         .options
         .iter()
         .find(|(export, _)| *export == raw)
         .map_or(raw, |(_, display)| display.clone());
-    encode_win_ansi(&decode_text_string(&raw))
+    decode_text_string(&raw)
 }
 
 /// The font size of a single line of `text` in `area`: the `/DA` size, or
@@ -390,36 +371,32 @@ fn line_size(field: &Field, area: [f64; 4], text_em: f64) -> f64 {
     by_height.min(by_width).max(1.0)
 }
 
-/// One line of `text`, aligned and centred vertically as `line` places it.
+/// One line of `text` in the field's font, aligned in `area` by `quadding`
+/// and centred vertically.
 fn single_line(
     s: &mut String,
     field: &Field,
-    line: &Line<'_>,
-    text: &[u8],
-    width: &mut impl FnMut(&[u8], &[u8]) -> f64,
+    quadding: i64,
+    area: [f64; 4],
+    text: &str,
+    ts: &mut dyn Typesetter,
 ) {
     if text.is_empty() {
         return;
     }
-    let em = width(line.font, text);
-    let size = line_size(field, line.area, em);
-    let x = aligned_x(line.quadding, line.area, em * size);
+    let font = &field.da.font;
+    let em = ts.width(font, text);
+    let size = line_size(field, area, em);
+    let x = aligned_x(quadding, area, em * size);
     // The baseline sits so that the body of the line, taken as 0.7 of the
     // font size above it, is centred.
-    let y = 0.35f64.mul_add(-size, f64::midpoint(line.area[1], line.area[3]));
-    field.da.begin_text(s, line.font, size);
-    let _ = writeln!(s, "{} {} Td {} Tj ET", n(x), n(y), hex(text));
+    let y = 0.35f64.mul_add(-size, f64::midpoint(area[1], area[3]));
+    show_line(s, ts, &field.da, font, size, (x, y), text);
 }
 
 /// Multi-line text: lines broken at line ends and wrapped at spaces to the
 /// area's width, from its top.
-fn multiline(
-    s: &mut String,
-    field: &Field,
-    area: [f64; 4],
-    text: &[u8],
-    width: &mut impl FnMut(&[u8], &[u8]) -> f64,
-) {
+fn multiline(s: &mut String, field: &Field, area: [f64; 4], text: &str, ts: &mut dyn Typesetter) {
     let size = if field.da.size > 0.0 {
         field.da.size
     } else {
@@ -431,17 +408,12 @@ fn multiline(
         quadding: field.quadding,
         area,
     };
-    block.write(s, text, width);
+    block.write(s, text, ts);
 }
 
 /// A comb field: `/MaxLen` equal cells, one character centred in each.
-fn comb(
-    s: &mut String,
-    field: &Field,
-    area: [f64; 4],
-    text: &[u8],
-    width: &mut impl FnMut(&[u8], &[u8]) -> f64,
-) {
+fn comb(s: &mut String, field: &Field, area: [f64; 4], text: &str, ts: &mut dyn Typesetter) {
+    let font = &field.da.font;
     let cells = field.max_len.unwrap_or(1).max(1);
     #[expect(
         clippy::cast_precision_loss,
@@ -451,15 +423,16 @@ fn comb(
     let size = line_size(
         field,
         [area[0], area[1], area[0] + cell, area[3]],
-        width(&field.da.font, b"W"),
+        ts.width(font, "W"),
     );
     let y = 0.35f64.mul_add(-size, f64::midpoint(area[1], area[3]));
+    let mut buf = [0u8; 4];
     for (i, ch) in text
-        .iter()
+        .chars()
         .take(usize::try_from(cells).unwrap_or(usize::MAX))
         .enumerate()
     {
-        let ch = [*ch];
+        let ch = ch.encode_utf8(&mut buf);
         #[expect(
             clippy::cast_precision_loss,
             reason = "a field holds far fewer than 2^52 characters"
@@ -468,20 +441,15 @@ fn comb(
         let x = aligned_x(
             1,
             [left, area[1], left + cell, area[3]],
-            width(&field.da.font, &ch) * size,
+            ts.width(font, ch) * size,
         );
-        field.da.begin_text(s, &field.da.font, size);
-        let _ = writeln!(s, "{} {} Td {} Tj ET", n(x), n(y), hex(&ch));
+        show_line(s, ts, &field.da, font, size, (x, y), ch);
     }
 }
 
 /// A list box: the options from `/TI` down, selected ones highlighted.
-fn list(
-    s: &mut String,
-    field: &Field,
-    area: [f64; 4],
-    width: &mut impl FnMut(&[u8], &[u8]) -> f64,
-) {
+fn list(s: &mut String, field: &Field, area: [f64; 4], ts: &mut dyn Typesetter) {
+    let font = &field.da.font;
     let size = if field.da.size > 0.0 {
         field.da.size
     } else {
@@ -503,10 +471,9 @@ fn list(
                 n(row)
             );
         }
-        let text = encode_win_ansi(&decode_text_string(display));
-        let x = aligned_x(field.quadding, area, width(&field.da.font, &text) * size);
-        field.da.begin_text(s, &field.da.font, size);
-        let _ = writeln!(s, "{} {} Td {} Tj ET", n(x), n(top - size), hex(&text));
+        let text = decode_text_string(display);
+        let x = aligned_x(field.quadding, area, ts.width(font, &text) * size);
+        show_line(s, ts, &field.da, font, size, (x, top - size), &text);
         top -= row;
     }
 }
@@ -519,7 +486,7 @@ fn check_mark(
     field: &Field,
     inner: [f64; 4],
     radio: bool,
-    width: &mut impl FnMut(&[u8], &[u8]) -> f64,
+    ts: &mut dyn Typesetter,
 ) {
     let glyph = field
         .caption
@@ -532,7 +499,7 @@ fn check_mark(
     } else {
         shorter_side * 0.8
     };
-    let em = width(CHECK_FONT, &[glyph]);
+    let em = ts.advance(CHECK_FONT, &[glyph]);
     let x = aligned_x(1, inner, em * size);
     let y = 0.35f64.mul_add(-size, f64::midpoint(inner[1], inner[3]));
     field.da.begin_text(s, CHECK_FONT, size);

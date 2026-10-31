@@ -17,6 +17,16 @@ const H: u32 = 100;
 /// form with the entries `acroform`.  Object 4 is Helvetica, `/Helv` in
 /// the form's `/DR`.
 fn document(acroform: &str, widgets: &[&str], extra: Vec<Vec<u8>>) -> Vec<u8> {
+    document_with_fonts("", acroform, widgets, extra)
+}
+
+/// [`document`] with the further `/DR` font entries `fonts`.
+fn document_with_fonts(
+    fonts: &str,
+    acroform: &str,
+    widgets: &[&str],
+    extra: Vec<Vec<u8>>,
+) -> Vec<u8> {
     let refs: Vec<String> = (0..widgets.len())
         .map(|i| format!("{} 0 R", i + 5))
         .collect();
@@ -24,7 +34,7 @@ fn document(acroform: &str, widgets: &[&str], extra: Vec<Vec<u8>>) -> Vec<u8> {
     let mut objects = vec![
         format!(
             "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{refs}] \
-             /DR << /Font << /Helv 4 0 R >> >> {acroform} >> >>"
+             /DR << /Font << /Helv 4 0 R {fonts} >> >> {acroform} >> >>"
         )
         .into_bytes(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -240,4 +250,38 @@ fn a_half_turned_push_button_turns_its_caption_upside_down() {
         centre(upright) < 100 && centre(turned) > 100,
         "{upright:?} {turned:?}"
     );
+}
+
+/// The dark bounds of a text field whose `/DA` selects `font` and whose
+/// value is three U+4E00 (a single horizontal stroke each), in a form
+/// whose `/DR` also holds `/HeiGo`, a non-embedded Adobe-Japan1 composite
+/// font encoded by `UniJIS-UCS2-H` (object 6, descendant object 7).
+fn cjk_field(font: &str) -> Option<[u32; 4]> {
+    let widget = format!(
+        "/FT /Tx /T (j) /Rect [10 30 190 70] /V <FEFF4E004E004E00> /DA (/{font} 20 Tf 0 g)"
+    );
+    let extra = vec![
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 \
+          /Encoding /UniJIS-UCS2-H /DescendantFonts [7 0 R] >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HeiseiKakuGo-W5 \
+          /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 5 >> /DW 1000 >>"
+            .to_vec(),
+    ];
+    dark_bounds(document_with_fonts("/HeiGo 6 0 R", "", &[&widget], extra))
+}
+
+#[test]
+fn cjk_values_are_drawn_through_the_field_font_or_a_fallback_font() {
+    // The characters reach a CJK face by the composite /DA font's own
+    // encoding, or, for a /DA font that cannot encode them, by a fallback
+    // composite font; never as the substitution character `?`, whose ink
+    // is taller than a horizontal stroke.  Whether a stroke is drawn
+    // depends on a CJK face being installed, so both fields agree.
+    let composite = cjk_field("HeiGo");
+    let simple = cjk_field("Helv");
+    for b in [composite, simple].into_iter().flatten() {
+        assert!(b[3] - b[1] <= 4 && b[2] - b[0] > 30, "{b:?}");
+    }
+    assert_eq!(composite.is_some(), simple.is_some());
 }
