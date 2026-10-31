@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::bitmap::AaBuf;
 use crate::scanner::XPathScanner;
 use crate::simd;
-use crate::types::{AA_SIZE, splash_ceil, splash_floor};
+use crate::types::{AA_SIZE, ceil_i32, floor_i32};
 use crate::xpath::XPath;
 
 // ── ClipResult ────────────────────────────────────────────────────────────────
@@ -302,10 +302,10 @@ impl Clip {
     }
 
     fn recompute_int_bounds(&mut self) {
-        self.x_min_i = splash_floor(self.x_min);
-        self.y_min_i = splash_floor(self.y_min);
-        self.x_max_i = splash_ceil(self.x_max) - 1;
-        self.y_max_i = splash_ceil(self.y_max) - 1;
+        self.x_min_i = floor_i32(self.x_min);
+        self.y_min_i = floor_i32(self.y_min);
+        self.x_max_i = ceil_i32(self.x_max) - 1;
+        self.y_max_i = ceil_i32(self.y_max) - 1;
     }
 
     fn test_clip_paths(&self, x: i32, y: i32) -> bool {

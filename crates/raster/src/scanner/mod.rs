@@ -38,7 +38,7 @@
 pub mod iter;
 
 use crate::bitmap::{AA_SIZE_USIZE, AaBuf};
-use crate::types::{AA_SIZE, splash_floor};
+use crate::types::{AA_SIZE, floor_i32};
 use crate::xpath::{XPath, XPathFlags};
 
 // ── Fixed-point helpers ───────────────────────────────────────────────────────
@@ -159,10 +159,10 @@ impl XPathScanner {
             return Self::empty(eo);
         }
 
-        let x_min = splash_floor(x_min_fp);
-        let x_max = splash_floor(x_max_fp);
-        let y_min = splash_floor(y_min_fp).max(clip_y_min);
-        let y_max = splash_floor(y_max_fp).min(clip_y_max);
+        let x_min = floor_i32(x_min_fp);
+        let x_max = floor_i32(x_max_fp);
+        let y_min = floor_i32(y_min_fp).max(clip_y_min);
+        let y_max = floor_i32(y_max_fp).min(clip_y_max);
 
         if y_min > y_max {
             return Self::empty(eo);
@@ -516,11 +516,11 @@ fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]
         }
         let seg_y_min = seg.y0.min(seg.y1);
         let seg_y_max = seg.y0.max(seg.y1);
-        let row_y0 = splash_floor(seg_y_min).max(y_min);
-        let row_y1 = splash_floor(seg_y_max).min(y_max);
+        let row_y0 = floor_i32(seg_y_min).max(y_min);
+        let row_y1 = floor_i32(seg_y_max).min(y_max);
 
         if seg.flags.contains(XPathFlags::HORIZ) {
-            let row = splash_floor(seg_y_min);
+            let row = floor_i32(seg_y_min);
             if row >= y_min && row <= y_max {
                 let idx = usize::try_from(row - y_min).expect("row >= y_min");
                 counts[idx] = counts[idx].saturating_add(1);
@@ -558,14 +558,14 @@ fn fill_intersections(
         }
         let seg_y_min = seg.y0.min(seg.y1);
         let seg_y_max = seg.y0.max(seg.y1);
-        let row_y0 = splash_floor(seg_y_min).max(y_min);
-        let row_y1 = splash_floor(seg_y_max).min(y_max);
+        let row_y0 = floor_i32(seg_y_min).max(y_min);
+        let row_y1 = floor_i32(seg_y_max).min(y_max);
 
         if seg.flags.contains(XPathFlags::HORIZ) {
-            let row = splash_floor(seg_y_min);
+            let row = floor_i32(seg_y_min);
             if row >= y_min && row <= y_max {
-                let x0 = splash_floor(seg.x0.min(seg.x1));
-                let x1 = splash_floor(seg.x0.max(seg.x1));
+                let x0 = floor_i32(seg.x0.min(seg.x1));
+                let x1 = floor_i32(seg.x0.max(seg.x1));
                 write_intersect(row, y_min, row_start, cursors, intersects, x0, x1, 0);
             }
         } else if seg.flags.contains(XPathFlags::VERT) {
@@ -574,7 +574,7 @@ fn fill_intersections(
             } else {
                 -1
             };
-            let x = splash_floor(seg.x0);
+            let x = floor_i32(seg.x0);
             for row in row_y0..=row_y1 {
                 let c = if seg_y_min < f64::from(row) { count } else { 0 };
                 write_intersect(row, y_min, row_start, cursors, intersects, x, x, c);
@@ -601,7 +601,7 @@ fn fill_intersections(
             } else {
                 seg.x0
             };
-            let mut px0 = splash_floor(xx_init.clamp(sloped_x_min, sloped_x_max));
+            let mut px0 = floor_i32(xx_init.clamp(sloped_x_min, sloped_x_max));
 
             // 16.16 fixed-point accumulator for the right edge of each span.
             // Initialised from f64 to preserve accuracy at the first row, then

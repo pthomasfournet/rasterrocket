@@ -20,7 +20,7 @@ use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::pipe::{PipeSrc, PipeState, RowPattern, render_bitmap_span};
 use color::Rgb8;
-use color::convert::{lerp_u8, splash_round};
+use color::convert::{lerp_u8, round_half_up_i32};
 
 /// One vertex of a Gouraud-shaded triangle.
 #[derive(Copy, Clone, Debug)]
@@ -45,8 +45,8 @@ struct EdgeMap {
 
 impl EdgeMap {
     fn from_vertices(va: &GouraudVertex, vb: &GouraudVertex) -> Self {
-        let ya = f64::from(splash_round(va.y));
-        let yb = f64::from(splash_round(vb.y));
+        let ya = f64::from(round_half_up_i32(va.y));
+        let yb = f64::from(round_half_up_i32(vb.y));
         let dy = yb - ya;
         if dy.abs() < 1e-9 {
             // Horizontal edge — slope undefined; hold start-vertex values.
@@ -77,7 +77,7 @@ impl EdgeMap {
 
     /// Evaluate the edge at scanline `y` → (pixel x, interpolated RGB).
     fn eval(&self, y: f64) -> (i32, [u8; 3]) {
-        let x = splash_round(self.x_slope.mul_add(y, self.x_off));
+        let x = round_half_up_i32(self.x_slope.mul_add(y, self.x_off));
         let c: [u8; 3] = std::array::from_fn(|ch| {
             #[expect(clippy::cast_possible_truncation, reason = "value clamped to 0..=255")]
             #[expect(clippy::cast_sign_loss, reason = "value clamped to 0.0..=255.0")]
@@ -172,13 +172,13 @@ pub fn gouraud_triangle_fill(
     }
     // v[0].y ≤ v[1].y ≤ v[2].y.
 
-    let [y0, y1, y2] = v.map(|vert| splash_round(vert.y));
+    let [y0, y1, y2] = v.map(|vert| round_half_up_i32(vert.y));
 
     if y0 == y2 {
         return;
     } // all three vertices on the same scanline — degenerate
 
-    let vx = v.map(|vert| splash_round(vert.x));
+    let vx = v.map(|vert| round_half_up_i32(vert.x));
     let x_min = vx[0].min(vx[1]).min(vx[2]);
     let x_max = vx[0].max(vx[1]).max(vx[2]);
     // Single test_rect call; result used for both early-exit and per-scanline clip decisions.

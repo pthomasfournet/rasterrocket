@@ -15,7 +15,7 @@ use crate::clip::{Clip, ClipResult};
 use crate::fill::fill;
 use crate::path::Path;
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
-use crate::types::{LineCap, LineJoin, splash_floor};
+use crate::types::{LineCap, LineJoin, floor_i32};
 use crate::xpath::XPath;
 use color::Pixel;
 
@@ -132,10 +132,10 @@ fn stroke_narrow<P: Pixel>(
             (seg.x1, seg.y1, seg.x0, seg.y0)
         };
 
-        let y0 = splash_floor(sy0);
-        let y1 = splash_floor(sy1);
-        let x0 = splash_floor(sx0);
-        let x1 = splash_floor(sx1);
+        let y0 = floor_i32(sy0);
+        let y1 = floor_i32(sy1);
+        let x0 = floor_i32(sx0);
+        let x1 = floor_i32(sx1);
 
         let (xl, xr) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
         let clip_res = clip.test_rect(xl, y0, xr, y1);
@@ -157,11 +157,11 @@ fn stroke_narrow<P: Pixel>(
 
             if cy0 < clip.y_min_i {
                 cy0 = clip.y_min_i;
-                cx0 = splash_floor((clip.y_min - sy0).mul_add(dxdy, sx0));
+                cx0 = floor_i32((clip.y_min - sy0).mul_add(dxdy, sx0));
             }
             if cy1 > clip.y_max_i {
                 cy1 = clip.y_max_i;
-                cx1 = splash_floor((clip.y_max - sy0).mul_add(dxdy, sx0));
+                cx1 = floor_i32((clip.y_max - sy0).mul_add(dxdy, sx0));
             }
 
             // Hoist the shared initialisation out of both branches.
@@ -169,7 +169,7 @@ fn stroke_narrow<P: Pixel>(
             let left_to_right = cx0 <= cx1;
             for y in cy0..=cy1 {
                 let xb = if y < cy1 {
-                    splash_floor((f64::from(y) + 1.0 - sy0).mul_add(dxdy, sx0))
+                    floor_i32((f64::from(y) + 1.0 - sy0).mul_add(dxdy, sx0))
                 } else if left_to_right {
                     cx1 + 1
                 } else {

@@ -14,9 +14,9 @@
 //! - [`rgb_to_bytes`] — normalised RGB \[0,1\] → 3-byte array
 //!
 //! **Geometry rounding**
-//! - [`splash_floor`] — floor toward −∞, returns i32
-//! - [`splash_ceil`] — ceil toward +∞, returns i32
-//! - [`splash_round`] — round half-integers toward +∞
+//! - [`floor_i32`] — floor toward −∞, returns i32
+//! - [`ceil_i32`] — ceil toward +∞, returns i32
+//! - [`round_half_up_i32`] — round half-integers toward +∞
 
 // ── Integer blend math ────────────────────────────────────────────────────────
 
@@ -190,7 +190,7 @@ fn saturate_f64_to_i32(x: f64) -> i32 {
 /// Never panics.
 #[inline]
 #[must_use]
-pub fn splash_floor(x: f64) -> i32 {
+pub fn floor_i32(x: f64) -> i32 {
     saturate_f64_to_i32(x.floor())
 }
 
@@ -198,11 +198,11 @@ pub fn splash_floor(x: f64) -> i32 {
 ///
 /// # Valid input range
 ///
-/// Any `f64`. See [`splash_floor`] for edge-case behaviour.
+/// Any `f64`. See [`floor_i32`] for edge-case behaviour.
 ///
 /// # Edge cases
 ///
-/// Same as [`splash_floor`]: non-finite inputs return `i32::MAX` (for +∞) or
+/// Same as [`floor_i32`]: non-finite inputs return `i32::MAX` (for +∞) or
 /// `i32::MIN` (for −∞ and NaN).
 ///
 /// # Panic
@@ -210,7 +210,7 @@ pub fn splash_floor(x: f64) -> i32 {
 /// Never panics.
 #[inline]
 #[must_use]
-pub fn splash_ceil(x: f64) -> i32 {
+pub fn ceil_i32(x: f64) -> i32 {
     saturate_f64_to_i32(x.ceil())
 }
 
@@ -222,15 +222,15 @@ pub fn splash_ceil(x: f64) -> i32 {
 ///
 /// # Valid input range
 ///
-/// Any `f64`. See [`splash_floor`] for edge-case behaviour on non-finite inputs.
+/// Any `f64`. See [`floor_i32`] for edge-case behaviour on non-finite inputs.
 ///
 /// # Panic
 ///
 /// Never panics.
 #[inline]
 #[must_use]
-pub fn splash_round(x: f64) -> i32 {
-    splash_floor(x + 0.5)
+pub fn round_half_up_i32(x: f64) -> i32 {
+    floor_i32(x + 0.5)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn splash_floor_ceil_round() {
+    fn floor_ceil_round() {
         let cases = [
             (0.0f64, 0, 0, 0),
             (0.5, 0, 1, 1),
@@ -348,37 +348,41 @@ mod tests {
             (-1.0, -1, -1, -1),
         ];
         for (x, fl, ce, ro) in cases {
-            assert_eq!(splash_floor(x), fl, "floor({x})");
-            assert_eq!(splash_ceil(x), ce, "ceil({x})");
-            assert_eq!(splash_round(x), ro, "round({x})");
+            assert_eq!(floor_i32(x), fl, "floor({x})");
+            assert_eq!(ceil_i32(x), ce, "ceil({x})");
+            assert_eq!(round_half_up_i32(x), ro, "round({x})");
         }
     }
 
     /// Half-integer tie-breaking: 0.5 → 1, −0.5 → 0 (toward +∞).
     #[test]
-    fn splash_round_half_integers() {
-        assert_eq!(splash_round(0.5), 1, "0.5 rounds toward +inf");
-        assert_eq!(splash_round(-0.5), 0, "-0.5 rounds toward +inf (i.e. 0)");
-        assert_eq!(splash_round(1.5), 2);
-        assert_eq!(splash_round(-1.5), -1);
+    fn round_half_up_half_integers() {
+        assert_eq!(round_half_up_i32(0.5), 1, "0.5 rounds toward +inf");
+        assert_eq!(
+            round_half_up_i32(-0.5),
+            0,
+            "-0.5 rounds toward +inf (i.e. 0)"
+        );
+        assert_eq!(round_half_up_i32(1.5), 2);
+        assert_eq!(round_half_up_i32(-1.5), -1);
     }
 
     /// Non-finite inputs must not invoke UB and must return a defined sentinel.
     #[test]
-    fn splash_floor_ceil_round_non_finite() {
-        // +∞ — INFINITY + 0.5 is still INFINITY, so splash_round goes to i32::MAX.
-        assert_eq!(splash_floor(f64::INFINITY), i32::MAX);
-        assert_eq!(splash_ceil(f64::INFINITY), i32::MAX);
-        assert_eq!(splash_round(f64::INFINITY), i32::MAX);
+    fn floor_ceil_round_non_finite() {
+        // +∞ — INFINITY + 0.5 is still INFINITY, so round_half_up_i32 goes to i32::MAX.
+        assert_eq!(floor_i32(f64::INFINITY), i32::MAX);
+        assert_eq!(ceil_i32(f64::INFINITY), i32::MAX);
+        assert_eq!(round_half_up_i32(f64::INFINITY), i32::MAX);
         // −∞
-        assert_eq!(splash_floor(f64::NEG_INFINITY), i32::MIN);
-        assert_eq!(splash_ceil(f64::NEG_INFINITY), i32::MIN);
-        assert_eq!(splash_round(f64::NEG_INFINITY), i32::MIN);
+        assert_eq!(floor_i32(f64::NEG_INFINITY), i32::MIN);
+        assert_eq!(ceil_i32(f64::NEG_INFINITY), i32::MIN);
+        assert_eq!(round_half_up_i32(f64::NEG_INFINITY), i32::MIN);
         // NaN — treated as non-positive (returns i32::MIN). NaN + 0.5 is NaN
-        // so splash_round also returns i32::MIN.
-        assert_eq!(splash_floor(f64::NAN), i32::MIN);
-        assert_eq!(splash_ceil(f64::NAN), i32::MIN);
-        assert_eq!(splash_round(f64::NAN), i32::MIN);
+        // so round_half_up_i32 also returns i32::MIN.
+        assert_eq!(floor_i32(f64::NAN), i32::MIN);
+        assert_eq!(ceil_i32(f64::NAN), i32::MIN);
+        assert_eq!(round_half_up_i32(f64::NAN), i32::MIN);
     }
 
     // ── gray_to_u8 ────────────────────────────────────────────────────────────

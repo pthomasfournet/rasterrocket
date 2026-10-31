@@ -102,7 +102,7 @@ pub(super) fn dash_count(path: &Path, dash: &[f64]) -> f64 {
         .filter(|&k| !path.flags[k].is_first())
         .map(|k| {
             let (a, b) = (path.pts[k - 1], path.pts[k]);
-            splash_dist(a.x, a.y, b.x, b.y)
+            distance(a.x, a.y, b.x, b.y)
         })
         .sum();
     let period: f64 = dash.iter().sum();
@@ -214,7 +214,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
             let y0 = path.pts[k].y;
             let x1 = path.pts[k + 1].x;
             let y1 = path.pts[k + 1].y;
-            let mut seg_len = splash_dist(x0, y0, x1, y1);
+            let mut seg_len = distance(x0, y0, x1, y1);
             let mut xa = x0;
             let mut ya = y0;
 
@@ -372,7 +372,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
         let k0 = if last { subpath_start1 + 1 } else { j1 + 1 };
 
         // ── Compute the unit tangent for segment (i1 → j0) ───────────────────
-        let seg_dist = splash_dist(
+        let seg_dist = distance(
             path.pts[i1].x,
             path.pts[i1].y,
             path.pts[j0].x,
@@ -487,7 +487,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
         if !last || closed {
             // Compute tangent for the *next* segment (j1 → k0).
             let dn = 1.0
-                / splash_dist(
+                / distance(
                     path.pts[j1].x,
                     path.pts[j1].y,
                     path.pts[k0].x,
@@ -544,7 +544,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                         );
                     } else {
                         // Two arcs (> 90°).
-                        let d_join = splash_dist(-wdy, wdx, -wdy_next, wdx_next);
+                        let d_join = distance(-wdy, wdx, -wdy_next, wdx_next);
                         if d_join > 0.0 {
                             let dx_join = (-wdy_next + wdy) / d_join;
                             let dy_join = (wdx_next - wdx) / d_join;
@@ -605,7 +605,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                         );
                     } else {
                         // Two arcs.
-                        let d_join = splash_dist(wdy, -wdx, wdy_next, -wdx_next);
+                        let d_join = distance(wdy, -wdx, wdy_next, -wdx_next);
                         if d_join > 0.0 {
                             let dx_join = (wdy_next - wdy) / d_join;
                             let dy_join = (-wdx_next + wdx) / d_join;
@@ -787,7 +787,7 @@ fn advance_past_coincident(path: &Path, start: usize) -> usize {
 
 /// Euclidean distance between two points.
 #[inline]
-fn splash_dist(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+fn distance(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
     let dx = x1 - x0;
     let dy = y1 - y0;
     dx.hypot(dy)

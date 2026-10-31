@@ -19,7 +19,7 @@
 //! The snap windows are **open** intervals: a coordinate exactly at a boundary
 //! value (e.g. `v == adj0 - 0.01`) is **not** snapped. See [`stroke_adjust`].
 
-use crate::types::splash_round;
+use crate::types::round_half_up_i32;
 
 /// An axis-aligned stroke-adjust hint, derived from a `StrokeAdjustHint`
 /// (see `crate::path::stroke`) after path transformation.
@@ -89,10 +89,10 @@ impl XPathAdjust {
         debug_assert!(adj0 <= adj1, "adj0 must be <= adj1");
 
         let mid = adj0.midpoint(adj1);
-        let mut r0 = f64::from(splash_round(adj0));
-        let mut r1 = f64::from(splash_round(adj1));
+        let mut r0 = f64::from(round_half_up_i32(adj0));
+        let mut r1 = f64::from(round_half_up_i32(adj1));
         // Both `r0` and `r1` are exact f64 representations of i32 values
-        // (from `splash_round`, which returns i32). Every i32 is representable
+        // (from `round_half_up_i32`, which returns i32). Every i32 is representable
         // exactly as f64, so bit-exact comparison correctly detects when both
         // endpoints round to the same integer — no floating-point imprecision
         // can produce a false positive or false negative here.
