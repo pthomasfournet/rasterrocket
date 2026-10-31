@@ -1,12 +1,19 @@
 //! Annotation rendering helpers for [`PageRenderer`].
 //!
 //! Free functions taking `renderer: &mut PageRenderer<'_>`, delegated from
-//! thin wrapper methods in `mod.rs`.
+//! thin wrapper methods in `mod.rs`.  An annotation without a normal
+//! appearance is drawn from an appearance synthesised by [`markup`] or
+//! [`widget`], through the same form path as a stored appearance.
+
+mod content;
+mod markup;
+mod text;
+mod widget;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::super::gstate::{Ctm, ctm_multiply};
-use super::{PageRenderer, annotation_synthesis, widget_appearance};
+use super::PageRenderer;
 use crate::RenderPurpose;
 use crate::resources::dict_ext::DictExt;
 
@@ -62,7 +69,7 @@ pub(super) fn render_annotations(renderer: &mut PageRenderer<'_>, page_id: Objec
         _ => return,
     };
 
-    let form = widget_appearance::AcroForm::of(doc);
+    let form = widget::AcroForm::of(doc);
     for entry in entries {
         match entry {
             Object::Reference(id) => {
@@ -101,11 +108,11 @@ const fn shown_for(flags: i64, purpose: RenderPurpose) -> bool {
 /// Render the annotation dictionary `annot` (object `id`, or direct when
 /// `None`) into `renderer`'s bitmap; `form` is the document's interactive
 /// form, for widget annotations.
-pub(super) fn render_one_annotation(
+fn render_one_annotation(
     renderer: &mut PageRenderer<'_>,
     annot: &Dictionary,
     id: Option<ObjectId>,
-    form: Option<&widget_appearance::AcroForm>,
+    form: Option<&widget::AcroForm>,
 ) {
     let doc = renderer.resources.doc();
     let flags = annot.get_i64(b"F").unwrap_or(0);
@@ -124,8 +131,7 @@ pub(super) fn render_one_annotation(
         .is_some_and(|ap| ap.get(b"N").is_some());
     if annot.get_name(b"Subtype") == Some(b"Widget")
         && let Some(form) = form
-        && let Some(field) =
-            widget_appearance::Field::to_synthesise(doc, annot, form, has_normal_appearance)
+        && let Some(field) = widget::Field::to_synthesise(doc, annot, form, has_normal_appearance)
     {
         if let Some(rect) = read_rect(annot) {
             draw_widget(renderer, form, &field, rect, id);
@@ -134,7 +140,7 @@ pub(super) fn render_one_annotation(
     }
     if !has_normal_appearance {
         if let Some(rect) = read_rect(annot)
-            && let Some(appearance) = annotation_synthesis::markup(doc, annot, rect)
+            && let Some(appearance) = markup::markup(doc, annot, rect)
         {
             let no_rotate = flags & NO_ROTATE != 0;
             draw_synthesized(renderer, appearance, id, no_rotate.then_some(rect));
@@ -183,7 +189,7 @@ pub(super) fn render_one_annotation(
 /// about the upper-left corner of `no_rotate_rect` when given.
 fn draw_synthesized(
     renderer: &mut PageRenderer<'_>,
-    appearance: annotation_synthesis::Synthesized,
+    appearance: markup::Synthesized,
     id: Option<ObjectId>,
     no_rotate_rect: Option<[f64; 4]>,
 ) {
@@ -222,21 +228,21 @@ fn draw_synthesized(
 /// with the form's default resources in effect.
 fn draw_widget(
     renderer: &mut PageRenderer<'_>,
-    form: &widget_appearance::AcroForm,
-    field: &widget_appearance::Field,
+    form: &widget::AcroForm,
+    field: &widget::Field,
     rect: [f64; 4],
     id: Option<ObjectId>,
 ) {
     let doc = renderer.resources.doc();
-    let resources = widget_appearance::resources(doc, form, field);
+    let resources = widget::resources(doc, form, field);
     // The default resources are no object's `/Resources`; object 0, which
     // no document defines, identifies them to the font cache.
     let dr = renderer.resources.with_resources((0, 0), &resources);
     let page_resources = std::mem::replace(&mut renderer.resources, dr);
-    let content = widget_appearance::content(doc, field, rect, |font, bytes| {
+    let content = widget::content(doc, field, rect, |font, bytes| {
         text_width(renderer, font, bytes)
     });
-    let appearance = annotation_synthesis::Synthesized {
+    let appearance = markup::Synthesized {
         content,
         bbox: rect,
         opacity: 1.0,
@@ -362,7 +368,7 @@ fn upright_about(rect: [f64; 4], rotate_cw: u16) -> Ctm {
 /// Read a 4-element rect `[llx, lly, urx, ury]` from a PDF dictionary.
 ///
 /// Returns `None` if the `Rect` key is absent or has fewer than 4 numeric entries.
-pub(super) fn read_rect(dict: &pdf::Dictionary) -> Option<[f64; 4]> {
+fn read_rect(dict: &pdf::Dictionary) -> Option<[f64; 4]> {
     let mut r = crate::resources::read_f64_n::<4>(dict, b"Rect")?;
     // Normalise so llx ≤ urx and lly ≤ ury.
     if r[0] > r[2] {

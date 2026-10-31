@@ -47,7 +47,6 @@
 //! - `ExtGState` blend mode (`BM`) — only `Normal` is currently mapped
 //! - Type 0 named `CMaps` other than `Identity-H`/`V` (e.g. `/GB-EUC-H`)
 
-mod annotation_synthesis;
 mod annotations;
 mod fill_stroke;
 mod gpu_ops;
@@ -66,7 +65,6 @@ mod text_ops;
 mod type3;
 #[cfg(feature = "vulkan")]
 mod vk_ops;
-mod widget_appearance;
 
 use patterns::PatternPaint;
 use pdf::{ContentFailure, Document, ObjectId};

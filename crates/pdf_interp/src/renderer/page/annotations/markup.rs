@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
+use super::content::{colour_op, ellipse, inset, n, number, numbers, rectangle, resolve_array};
 use crate::resources::dict_ext::DictExt;
 
 /// A synthesised appearance.
@@ -36,10 +37,6 @@ const MARKUP_LINE_WIDTH: f64 = 1.0;
 
 /// Period and amplitude of the `Squiggly` zigzag.
 const SQUIGGLE_STEP: f64 = 2.0;
-
-/// The ratio of a cubic Bézier control-point distance to the radius that
-/// approximates a quarter circle: `4 (√2 − 1) / 3`.
-const KAPPA: f64 = 0.552_284_75;
 
 /// The appearance of the markup annotation `annot` with the normalised
 /// rectangle `rect`, or `None` when its subtype has no geometric appearance
@@ -102,14 +99,7 @@ fn closed_shape(
     }
     write_colours(&mut s, fill.as_deref(), stroke.as_deref());
     if subtype == b"Square" {
-        let _ = writeln!(
-            s,
-            "{} {} {} {} re",
-            n(r[0]),
-            n(r[1]),
-            n(r[2] - r[0]),
-            n(r[3] - r[1])
-        );
+        rectangle(&mut s, r);
     } else {
         ellipse(&mut s, r);
     }
@@ -186,14 +176,7 @@ fn text_markup(
         let fill = colour_or(doc, annot.get(b"C"), false, "1 1 0 rg")?;
         let _ = writeln!(s, "{fill}");
         for q in &quads {
-            let _ = writeln!(
-                s,
-                "{} {} {} {} re",
-                n(q[0]),
-                n(q[1]),
-                n(q[2] - q[0]),
-                n(q[3] - q[1])
-            );
+            rectangle(&mut s, *q);
         }
         s.push_str("f\n");
         BlendMode::Multiply
@@ -266,18 +249,7 @@ impl Border {
 /// `None` for an empty array (transparent), an absent entry or another
 /// component count.
 fn colour(doc: &Document, obj: Option<&Object>, stroke: bool) -> Option<String> {
-    let c = numbers(doc, obj);
-    let op = match (c.len(), stroke) {
-        (1, false) => "g",
-        (1, true) => "G",
-        (3, false) => "rg",
-        (3, true) => "RG",
-        (4, false) => "k",
-        (4, true) => "K",
-        _ => return None,
-    };
-    let comps: Vec<String> = c.iter().map(|&v| n(v)).collect();
-    Some(format!("{} {op}", comps.join(" ")))
+    colour_op(&numbers(doc, obj), stroke)
 }
 
 /// [`colour`], with `default` when the entry is absent; `None` when it is
@@ -308,33 +280,6 @@ const fn paint_op(fill: bool, stroke: bool) -> &'static str {
         (true, false) => "f\n",
         _ => "S\n",
     }
-}
-
-/// An ellipse inscribed in `r`, as four Bézier quarter arcs.
-fn ellipse(s: &mut String, r: [f64; 4]) {
-    let (cx, cy) = (f64::midpoint(r[0], r[2]), f64::midpoint(r[1], r[3]));
-    let (rx, ry) = ((r[2] - r[0]) / 2.0, (r[3] - r[1]) / 2.0);
-    let (kx, ky) = (rx * KAPPA, ry * KAPPA);
-    let _ = writeln!(s, "{} {} m", n(cx), n(r[3]));
-    let arcs = [
-        [cx + kx, r[3], r[2], cy + ky, r[2], cy],
-        [r[2], cy - ky, cx + kx, r[1], cx, r[1]],
-        [cx - kx, r[1], r[0], cy - ky, r[0], cy],
-        [r[0], cy + ky, cx - kx, r[3], cx, r[3]],
-    ];
-    for a in arcs {
-        let _ = writeln!(
-            s,
-            "{} {} {} {} {} {} c",
-            n(a[0]),
-            n(a[1]),
-            n(a[2]),
-            n(a[3]),
-            n(a[4]),
-            n(a[5])
-        );
-    }
-    s.push_str("h\n");
 }
 
 /// The line of a text markup over the quadrilateral bounds `q`: along its
@@ -418,95 +363,17 @@ fn quad_boxes(doc: &Document, annot: &Dictionary) -> Vec<[f64; 4]> {
         .collect()
 }
 
-/// `r` moved in by `d` = `[left, bottom, right, top]`; a missing or short
-/// `d` insets nothing.  A side inset past the opposite one collapses to it.
-fn inset(r: [f64; 4], d: &[f64]) -> [f64; 4] {
-    let [left, bottom, right, top] = match d {
-        [left, bottom, right, top, ..] => [*left, *bottom, *right, *top],
-        _ => [0.0; 4],
-    };
-    let x0 = r[0] + left;
-    let y0 = r[1] + bottom;
-    [x0, y0, (r[2] - right).max(x0), (r[3] - top).max(y0)]
-}
-
-/// The array `obj`, following an indirect reference; empty otherwise.
-fn resolve_array(doc: &Document, obj: Option<&Object>) -> Vec<Object> {
-    match obj {
-        Some(Object::Array(a)) => a.clone(),
-        Some(Object::Reference(id)) => doc
-            .get_object(*id)
-            .ok()
-            .and_then(|o| o.as_array().map(<[Object]>::to_vec))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
-}
-
-/// The numbers of the array `obj` (non-numbers skipped).
-fn numbers(doc: &Document, obj: Option<&Object>) -> Vec<f64> {
-    resolve_array(doc, obj)
-        .iter()
-        .filter_map(|o| number(doc, Some(o)))
-        .collect()
-}
-
-/// `obj` as a number, following an indirect reference.
-fn number(doc: &Document, obj: Option<&Object>) -> Option<f64> {
-    match obj? {
-        Object::Reference(id) => {
-            let referent = doc.get_object(*id).ok()?;
-            crate::resources::obj_to_f64(&referent)
-        }
-        o => crate::resources::obj_to_f64(o),
-    }
-    .filter(|v| v.is_finite())
-}
-
-/// `v` formatted for a content stream: at most four decimals, no trailing
-/// zeros.
-fn n(v: f64) -> String {
-    let s = format!("{v:.4}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" {
-        "0".to_owned()
-    } else {
-        s.to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{inset, markup, n};
+    use super::markup;
     use crate::test_helpers::make_doc_with_object;
 
     /// The synthesised content of the annotation dictionary `annot`.
     fn content(annot: &str) -> Option<String> {
         let doc = make_doc_with_object(annot);
         let dict = doc.get_dictionary((2, 0)).expect("a dictionary");
-        let rect = super::super::annotations::read_rect(&dict).expect("a rect");
+        let rect = super::super::read_rect(&dict).expect("a rect");
         markup(&doc, &dict, rect).map(|s| String::from_utf8(s.content).expect("ASCII"))
-    }
-
-    #[test]
-    fn numbers_are_written_compactly() {
-        assert_eq!(n(1.0), "1");
-        assert_eq!(n(0.5), "0.5");
-        assert_eq!(n(-0.000_01), "0");
-        assert_eq!(n(2.123_456), "2.1235");
-    }
-
-    #[test]
-    fn inset_collapses_rather_than_inverts() {
-        assert_eq!(
-            inset([0.0, 0.0, 10.0, 10.0], &[1.0, 2.0, 3.0, 4.0]),
-            [1.0, 2.0, 7.0, 6.0]
-        );
-        assert_eq!(
-            inset([0.0, 0.0, 10.0, 10.0], &[8.0, 0.0, 8.0, 0.0]),
-            [8.0, 0.0, 8.0, 10.0]
-        );
-        assert_eq!(inset([0.0, 0.0, 10.0, 10.0], &[]), [0.0, 0.0, 10.0, 10.0]);
     }
 
     #[test]
