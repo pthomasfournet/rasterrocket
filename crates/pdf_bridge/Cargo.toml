@@ -6,7 +6,6 @@ edition = "2024"
 build   = "build.rs"
 
 [dependencies]
-color = { package = "rasterrocket-color", path = "../color" }
 log   = { workspace = true }
 
 [build-dependencies]

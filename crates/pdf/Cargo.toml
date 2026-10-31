@@ -39,3 +39,8 @@ libdeflate = ["dep:libdeflater"]
 
 [lints]
 workspace = true
+
+# The `md-5` package's library is named `md5`, which cargo-machete does not
+# map back to the package name.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
