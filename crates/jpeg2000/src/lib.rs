@@ -156,6 +156,13 @@ pub struct Image<'a> {
 
 impl<'a> Image<'a> {
     /// Try to create a new JPEG2000 image from the given data.
+    ///
+    /// An image with more than 2^30 samples over all components at the
+    /// decoded resolution, or more than 65 535 tiles, fails with
+    /// [`ValidationError::ImageTooLarge`]; a smaller `target_resolution` in
+    /// `settings` can bring a large image within the sample limit. Decoding
+    /// fails the same way for a tile with more precincts or code-blocks than
+    /// the decoder holds.
     pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
         if data.starts_with(JP2_MAGIC) {
             jp2::parse(data, *settings)

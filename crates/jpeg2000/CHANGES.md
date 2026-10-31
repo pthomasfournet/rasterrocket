@@ -124,7 +124,8 @@ image within the limits is unchanged.
   parameters of every component), or more than 2^30 decoded samples summed
   over its components at the decoded resolution (each is held as an
   `f32`). A few header bytes could otherwise size the tile list or the
-  component buffers at hundreds of gigabytes. Tests:
+  component buffers at hundreds of gigabytes. The limits are documented on
+  `Image::new`. Tests:
   `limits::more_tiles_than_tile_indices`, `limits::more_samples_than_limit`.
 - `j2c/build.rs`: one tile holds at most 2^22 precincts, 2^22 code-blocks
   and 2^25 (code-block, layer) entries over all its components and
