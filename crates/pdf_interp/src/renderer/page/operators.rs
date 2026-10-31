@@ -10,6 +10,40 @@ use crate::resources::ExtGStateParams;
 use crate::resources::colorspace::ColorSpace;
 use crate::resources::transfer::TransferSetting;
 
+/// The open marked-content sequences of a content stream, innermost last.
+///
+/// `BMC` and `BDC` open one sequence each and `EMC` closes the innermost:
+/// hidden for an optional-content sequence whose group is hidden, visible
+/// otherwise.  Content is skipped while any open sequence is hidden; the
+/// count of hidden ones answers that in constant time per operator.
+#[derive(Debug, Default)]
+pub(super) struct MarkedContent {
+    /// Visibility of each open sequence, innermost last.
+    open: Vec<bool>,
+    /// The number of `false` entries of `open`.
+    hidden: usize,
+}
+
+impl MarkedContent {
+    /// Open a sequence, `visible` or hidden.
+    fn open(&mut self, visible: bool) {
+        self.open.push(visible);
+        self.hidden += usize::from(!visible);
+    }
+
+    /// Close the innermost sequence; an unmatched `EMC` closes nothing.
+    fn close(&mut self) {
+        if self.open.pop() == Some(false) {
+            self.hidden -= 1;
+        }
+    }
+
+    /// Whether content is inside a hidden sequence.
+    const fn hidden(&self) -> bool {
+        self.hidden > 0
+    }
+}
+
 impl PageRenderer<'_> {
     pub(super) fn execute_one(&mut self, op: &Operator) {
         // ── Marked content and optional content visibility ─────────────────────
@@ -21,21 +55,20 @@ impl PageRenderer<'_> {
                     .resources
                     .property(key)
                     .is_none_or(|oc| self.oc_visible(&oc));
-                self.ocg_stack.push(visible);
+                self.marked_content.open(visible);
                 return;
             }
             Operator::BeginMarkedContent => {
-                self.ocg_stack.push(true);
+                self.marked_content.open(true);
                 return;
             }
             Operator::EndMarkedContent => {
-                // An unmatched `EMC` closes nothing.
-                let _ = self.ocg_stack.pop();
+                self.marked_content.close();
                 return;
             }
             _ => {}
         }
-        if self.ocg_stack.iter().any(|&v| !v) {
+        if self.marked_content.hidden() {
             return;
         }
         // A `d1` glyph description is a stencil in the text fill colour.
@@ -526,5 +559,28 @@ impl PageRenderer<'_> {
                 String::from_utf8_lossy(kw)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MarkedContent;
+
+    #[test]
+    fn marked_content_is_hidden_while_a_hidden_sequence_is_open() {
+        let mut mc = MarkedContent::default();
+        mc.open(true);
+        mc.open(false);
+        mc.open(true);
+        assert!(mc.hidden());
+        mc.close();
+        assert!(mc.hidden());
+        mc.close();
+        assert!(!mc.hidden());
+        mc.close();
+        mc.close();
+        assert!(!mc.hidden(), "an unmatched EMC closes nothing");
+        mc.open(false);
+        assert!(mc.hidden());
     }
 }

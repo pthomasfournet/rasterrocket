@@ -454,15 +454,10 @@ pub struct PageRenderer<'doc> {
     warned_unknown_ops_capped: bool,
     /// Per-filter blit counts used to compute `diag.dominant_filter`.
     filter_counts: [u32; IMAGE_FILTER_COUNT],
-    /// Open marked-content sequences of the content stream being executed,
-    /// innermost last.
-    ///
-    /// `BMC` and `BDC` push one entry each and `EMC` pops one: `false` for an
-    /// optional-content sequence whose group is hidden, `true` otherwise.
-    /// Content is skipped whenever any entry is `false`.  Each content
-    /// stream starts with an empty stack (see
+    /// Open marked-content sequences of the content stream being executed.
+    /// Each content stream starts with none open (see
     /// [`execute_content_stream`](Self::execute_content_stream)).
-    ocg_stack: Vec<bool>,
+    marked_content: operators::MarkedContent,
     /// The document's optional-content configuration, resolved for the
     /// [`RenderPurpose::View`](crate::RenderPurpose::View) purpose on first
     /// use unless [`set_optional_content`](Self::set_optional_content)
@@ -834,7 +829,7 @@ impl<'doc> PageRenderer<'doc> {
             warned_unknown_ops: std::collections::HashSet::new(),
             warned_unknown_ops_capped: false,
             filter_counts: [0u32; IMAGE_FILTER_COUNT],
-            ocg_stack: Vec::new(),
+            marked_content: operators::MarkedContent::default(),
             optional_content: std::cell::OnceCell::new(),
             #[cfg(feature = "gpu-jpeg-huffman")]
             jpeg_gpu: None,
@@ -1311,9 +1306,9 @@ impl<'doc> PageRenderer<'doc> {
     /// unchanged.
     fn execute_content_stream(&mut self, ops: &[Operator]) {
         let scope = self.gstate.enter_stream();
-        let enclosing = std::mem::take(&mut self.ocg_stack);
+        let enclosing = std::mem::take(&mut self.marked_content);
         self.execute(ops);
-        self.ocg_stack = enclosing;
+        self.marked_content = enclosing;
         self.gstate.leave_stream(scope);
     }
 
@@ -1341,7 +1336,7 @@ impl<'doc> PageRenderer<'doc> {
         );
         self.path = None;
         self.pending_clip = None;
-        self.ocg_stack.clear();
+        self.marked_content = operators::MarkedContent::default();
         annotations::render_annotations(self, page_id);
     }
 
