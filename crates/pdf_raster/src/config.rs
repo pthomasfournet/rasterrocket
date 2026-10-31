@@ -351,10 +351,7 @@ impl SessionConfig {
 
     /// The parser's view of this config's decryption fields.
     pub(crate) fn open_options(&self) -> pdf::OpenOptions {
-        pdf::OpenOptions {
-            decrypt_authorized: self.decrypt_authorized,
-            password: self.password.clone(),
-        }
+        pdf::OpenOptions::new(self.decrypt_authorized, self.password.clone())
     }
 
     /// The Vulkan device selector named by the `PDF_RASTER_VULKAN_DEVICE`

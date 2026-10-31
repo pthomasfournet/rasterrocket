@@ -191,10 +191,7 @@ fn authorised(password: Option<&str>) -> SessionConfig {
 }
 
 fn open_options(authorized: bool, password: Option<&str>) -> OpenOptions {
-    OpenOptions {
-        decrypt_authorized: authorized,
-        password: password.map(Password::from),
-    }
+    OpenOptions::new(authorized, password.map(Password::from))
 }
 
 fn is_encrypted_error(err: &RasterError) -> bool {

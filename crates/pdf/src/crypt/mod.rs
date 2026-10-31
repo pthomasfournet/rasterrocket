@@ -69,6 +69,7 @@ impl std::fmt::Debug for Password {
 /// [`password`](Self::password) as the user password and as the owner
 /// password.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpenOptions {
     /// Whether the caller permits decrypting an encrypted document at all.
     /// Default `false`; no effect on an unencrypted document.
@@ -77,6 +78,17 @@ pub struct OpenOptions {
     /// and then as the owner password.  Has no effect unless
     /// [`decrypt_authorized`](Self::decrypt_authorized) is `true`.
     pub password: Option<Password>,
+}
+
+impl OpenOptions {
+    /// Options with the given decryption authorisation and password.
+    #[must_use]
+    pub const fn new(decrypt_authorized: bool, password: Option<Password>) -> Self {
+        Self {
+            decrypt_authorized,
+            password,
+        }
+    }
 }
 
 /// Error message handed back when decryption of an encrypted document was
