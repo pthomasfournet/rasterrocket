@@ -2,13 +2,13 @@
 
 use std::io::Cursor;
 
-use super::Archive;
+use super::{Archive, DecodedEntries};
 use crate::ComicError;
 
 /// A TAR archive held in memory. Entries are indexed eagerly on open because
 /// `tar::Archive` is a forward-only reader.
 pub(super) struct TarArchive {
-    entries: Vec<(String, Vec<u8>)>,
+    entries: DecodedEntries,
 }
 
 impl TarArchive {
@@ -24,7 +24,7 @@ impl TarArchive {
             .map_err(|e| ComicError::BadArchive(format!("tar: {e}")))?;
         for entry in iter {
             let mut e = entry.map_err(|e| ComicError::BadArchive(format!("tar: {e}")))?;
-            // Skip directory entries so the name list and read_entry only ever
+            // Skip directory entries so the name list and take_entry only ever
             // expose files (matching the 7z impl).
             if e.header().entry_type().is_dir() {
                 continue;
@@ -40,21 +40,19 @@ impl TarArchive {
             let data = super::read_entry_capped(&mut e, &path, size_hint)?;
             entries.push((path, data));
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries: DecodedEntries::new("tar", entries),
+        })
     }
 }
 
 impl Archive for TarArchive {
     fn entry_names(&mut self) -> Vec<String> {
-        self.entries.iter().map(|(n, _)| n.clone()).collect()
+        self.entries.names()
     }
 
-    fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
-        self.entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, d)| d.clone())
-            .ok_or_else(|| ComicError::BadArchive(format!("tar: entry {name} not found")))
+    fn take_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
+        self.entries.take(name)
     }
 }
 
@@ -82,8 +80,18 @@ mod tests {
         let mut names = ar.entry_names();
         names.sort();
         assert_eq!(names, vec!["001.png", "002.png"]);
-        assert_eq!(ar.read_entry("001.png").unwrap(), b"one");
-        assert_eq!(ar.read_entry("002.png").unwrap(), b"two");
+        assert_eq!(ar.take_entry("001.png").unwrap(), b"one");
+        assert_eq!(ar.take_entry("002.png").unwrap(), b"two");
+    }
+
+    #[test]
+    fn an_entry_is_taken_once() {
+        let mut ar = TarArchive::open(make_tar(&[("001.png", b"one")])).unwrap();
+        assert_eq!(ar.take_entry("001.png").unwrap(), b"one");
+        assert!(matches!(
+            ar.take_entry("001.png"),
+            Err(ComicError::BadArchive(msg)) if msg.contains("already read")
+        ));
     }
 
     #[test]
@@ -116,7 +124,7 @@ mod tests {
         let bytes = make_tar(&[("a.png", b"a")]);
         let mut ar = TarArchive::open(bytes).unwrap();
         assert!(matches!(
-            ar.read_entry("nope.png"),
+            ar.take_entry("nope.png"),
             Err(ComicError::BadArchive(_))
         ));
     }

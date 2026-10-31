@@ -304,7 +304,7 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
     // per-page Err in the second pass, preserving its reading-order slot.
     let mut decodable: Vec<(String, Result<Vec<u8>, ComicError>)> = Vec::new();
     for name in image_names {
-        match archive.read_entry(&name) {
+        match archive.take_entry(&name) {
             Ok(raw) if decode::sniff(&raw).is_some() => decodable.push((name, Ok(raw))),
             Ok(_) => log::warn!(
                 "comic: skipping {name}: unrecognised image format; convert it to PNG or JPG"
@@ -406,7 +406,7 @@ fn render_embedded_pdf(
     name: &str,
     opts: &ComicOptions,
 ) -> Result<ComicPages, ComicError> {
-    let bytes = archive.read_entry(name)?;
+    let bytes = archive.take_entry(name)?;
     let session = pdf_raster::open_session_from_bytes(bytes, &pdf_raster::SessionConfig::default())
         .map_err(|e| ComicError::Pdf(format!("embedded PDF {name}: {e}")))?;
     let total = session.total_pages();

@@ -69,11 +69,54 @@ fn read_capped<R: Read>(
 pub(crate) trait Archive {
     /// All entry names in the archive, in stored order (unsorted, unfiltered).
     fn entry_names(&mut self) -> Vec<String>;
-    /// Read one entry's raw bytes by name.
+    /// Take one entry's raw bytes by name.  An implementation that holds the
+    /// decoded entries moves the bytes out, so each entry is taken at most
+    /// once.
     ///
     /// # Errors
-    /// [`ComicError::BadArchive`] if the entry is missing or unreadable.
-    fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError>;
+    /// [`ComicError::BadArchive`] if the entry is missing, unreadable or
+    /// already taken.
+    fn take_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError>;
+}
+
+/// The entries of a container decoded in full on open, in stored order, for
+/// the formats whose readers cannot seek to an entry by name.
+pub(super) struct DecodedEntries {
+    /// Container format, for error messages.
+    format: &'static str,
+    /// Each entry's name and bytes; `None` once the bytes have been taken.
+    entries: Vec<(String, Option<Vec<u8>>)>,
+}
+
+impl DecodedEntries {
+    /// The decoded `entries` of a `format` container.
+    pub(super) fn new(format: &'static str, entries: Vec<(String, Vec<u8>)>) -> Self {
+        Self {
+            format,
+            entries: entries.into_iter().map(|(n, d)| (n, Some(d))).collect(),
+        }
+    }
+
+    /// All entry names, in stored order.
+    pub(super) fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Move the bytes of entry `name` out.
+    ///
+    /// # Errors
+    /// [`ComicError::BadArchive`] if no entry has that name or its bytes
+    /// were already taken.
+    pub(super) fn take(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
+        let format = self.format;
+        let (_, data) = self
+            .entries
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .ok_or_else(|| ComicError::BadArchive(format!("{format}: entry {name} not found")))?;
+        data.take()
+            .ok_or_else(|| ComicError::BadArchive(format!("{format}: entry {name} already read")))
+    }
 }
 
 /// Choose an impl by file extension, taking the already-read archive `bytes`.
@@ -119,7 +162,7 @@ mod tests {
         let mut names = ar.entry_names();
         names.sort();
         assert_eq!(names, vec!["ComicInfo.xml", "a.png", "b.png"]);
-        assert_eq!(ar.read_entry("a.png").unwrap(), b"A");
+        assert_eq!(ar.take_entry("a.png").unwrap(), b"A");
     }
 
     #[test]

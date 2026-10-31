@@ -40,7 +40,7 @@ impl Archive for ZipArchive {
             .collect()
     }
 
-    fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
+    fn take_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
         let f = self
             .inner
             .by_name(name)

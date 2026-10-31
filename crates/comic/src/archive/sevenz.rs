@@ -4,12 +4,12 @@ use std::io::Cursor;
 
 use sevenz_rust2::{ArchiveReader, Password};
 
-use super::Archive;
+use super::{Archive, DecodedEntries};
 use crate::ComicError;
 
 /// A 7-Zip archive decoded eagerly into an in-memory name→bytes table.
 pub(super) struct SevenzArchive {
-    entries: Vec<(String, Vec<u8>)>,
+    entries: DecodedEntries,
 }
 
 impl SevenzArchive {
@@ -57,21 +57,19 @@ impl SevenzArchive {
         if let Some(e) = capped {
             return Err(e);
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries: DecodedEntries::new("7z", entries),
+        })
     }
 }
 
 impl Archive for SevenzArchive {
     fn entry_names(&mut self) -> Vec<String> {
-        self.entries.iter().map(|(n, _)| n.clone()).collect()
+        self.entries.names()
     }
 
-    fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
-        self.entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, d)| d.clone())
-            .ok_or_else(|| ComicError::BadArchive(format!("7z: entry {name} not found")))
+    fn take_entry(&mut self, name: &str) -> Result<Vec<u8>, ComicError> {
+        self.entries.take(name)
     }
 }
 
@@ -104,8 +102,8 @@ mod tests {
         let mut names = ar.entry_names();
         names.sort();
         assert_eq!(names, vec!["001.png", "002.png"]);
-        assert_eq!(ar.read_entry("001.png").unwrap(), b"one");
-        assert_eq!(ar.read_entry("002.png").unwrap(), b"two");
+        assert_eq!(ar.take_entry("001.png").unwrap(), b"one");
+        assert_eq!(ar.take_entry("002.png").unwrap(), b"two");
     }
 
     #[test]
@@ -113,7 +111,7 @@ mod tests {
         let bytes = make_7z(&[("a.png", b"a")]);
         let mut ar = SevenzArchive::open(bytes).unwrap();
         assert!(matches!(
-            ar.read_entry("nope.png"),
+            ar.take_entry("nope.png"),
             Err(ComicError::BadArchive(_))
         ));
     }
