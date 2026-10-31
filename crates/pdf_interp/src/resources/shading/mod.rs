@@ -347,9 +347,13 @@ fn sample_ramp(
     let samples = (0..RAMP_SAMPLES)
         .map(|k| {
             let t = (f64::from(k) / last).mul_add(t1 - t0, t0);
-            function.eval(t, n).map(|c| cs.to_rgb(&c))
+            function.eval(t, n).map(|c| cs.to_rgb(&c)).ok_or(t)
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, f64>>()
+        .map_err(|t| {
+            log::warn!("shading: Function yields no {n}-component colour at t = {t} — skipping");
+        })
+        .ok()?;
     ColorRamp::from_samples(samples)
 }
 

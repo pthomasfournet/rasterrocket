@@ -112,7 +112,7 @@ impl Function {
         let out = match &self.body {
             Body::Array(fns) => {
                 if fns.len() != n {
-                    log::warn!(
+                    log::debug!(
                         "function: Function array has {} entries, {n} outputs needed",
                         fns.len()
                     );
@@ -167,7 +167,7 @@ impl Function {
         let out = match &self.body {
             Body::Array(fns) => {
                 if fns.len() != n {
-                    log::warn!(
+                    log::debug!(
                         "function: Function array has {} entries, {n} outputs needed",
                         fns.len()
                     );
@@ -299,12 +299,29 @@ impl<'d> Compiler<'d> {
                 exponent: dict.get(b"N").and_then(obj_to_f64).unwrap_or(1.0),
             },
             Some(3) => match dict.get(b"Functions").and_then(Object::as_array) {
-                Some(fns) if !fns.is_empty() => Body::Stitching {
-                    domain: read_fn_domain(dict),
-                    functions: fns.iter().map(|f| self.sub(f, depth + 1)).collect(),
-                    bounds: numbers(dict, b"Bounds"),
-                    encode: numbers(dict, b"Encode"),
-                },
+                Some(fns) if !fns.is_empty() => {
+                    let domain = read_fn_domain(dict);
+                    let bounds = numbers(dict, b"Bounds");
+                    // §7.10.4: k sub-functions take k − 1 Bounds.  Otherwise
+                    // the first sub-function covers the Domain unchanged.
+                    let (fns, bounds, encode) = if bounds.len() + 1 == fns.len() {
+                        (fns, bounds, numbers(dict, b"Encode"))
+                    } else {
+                        log::warn!(
+                            "function: Type 3 function has {} sub-functions but {} Bounds \
+                             values — evaluating the first sub-function",
+                            fns.len(),
+                            bounds.len(),
+                        );
+                        (&fns[..1], Vec::new(), vec![domain.0, domain.1])
+                    };
+                    Body::Stitching {
+                        domain,
+                        functions: fns.iter().map(|f| self.sub(f, depth + 1)).collect(),
+                        bounds,
+                        encode,
+                    }
+                }
                 _ => Body::Invalid,
             },
             Some(4) => Body::PostScript {
@@ -351,9 +368,8 @@ fn eval_exponential(
 
 /// Type 3 (Stitching): select the sub-function whose sub-domain holds `t`
 /// (clipped to `Domain`) and map `t` through that sub-domain's `Encode`
-/// pair.  `functions` is non-empty.  `Bounds` must hold one value fewer
-/// than `functions`; otherwise the first sub-function is evaluated at the
-/// clipped `t`.
+/// pair.  `functions` is non-empty and `bounds` holds one value fewer, as
+/// compilation ensures.
 fn stitch<'f>(
     (d0, d1): (f64, f64),
     functions: &'f [Arc<Function>],
@@ -363,16 +379,14 @@ fn stitch<'f>(
 ) -> (&'f Function, f64) {
     let t = if d1 > d0 { t.clamp(d0, d1) } else { d0 };
     let k = functions.len();
-    if bounds.len() != k - 1 {
-        log::warn!(
-            "function: Type 3 function has {k} sub-functions but {} Bounds values; \
-             evaluating the first sub-function",
-            bounds.len(),
-        );
-        return (&functions[0], t);
-    }
-    let lower = |i: usize| if i == 0 { d0 } else { bounds[i - 1] };
-    let upper = |i: usize| if i == k - 1 { d1 } else { bounds[i] };
+    // Sub-domain i is [lower(i), upper(i)]; the outer bounds are the Domain.
+    let lower = |i: usize| {
+        i.checked_sub(1)
+            .and_then(|j| bounds.get(j))
+            .copied()
+            .unwrap_or(d0)
+    };
+    let upper = |i: usize| bounds.get(i).copied().unwrap_or(d1);
     let idx = if t >= d1 {
         k - 1
     } else {
