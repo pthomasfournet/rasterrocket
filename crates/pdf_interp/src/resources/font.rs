@@ -308,9 +308,6 @@ pub struct FontDescriptor {
     /// `[first_char, first_char + widths.len())` range.  Default `0` per PDF
     /// §9.8.2.
     pub missing_width: i32,
-    /// Glyph-index table: `code_to_gid[char_code]` → glyph index.
-    /// Empty means codes resolve through the font program's own charmap.
-    pub code_to_gid: Vec<u32>,
     /// Per-character glyph name overrides from the PDF `Encoding/Differences`
     /// array.  Index = char code (0–255); `None` = inherit from base encoding.
     /// Used by `FontCache` (in `rasterrocket_interp::renderer::font_cache`) to resolve
@@ -394,7 +391,7 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     let (first_char, real_widths) = extract_widths(doc, dict);
     let widths: Vec<i32> = real_widths.into_iter().map(width_units).collect();
     let missing_width = extract_missing_width(doc, dict);
-    let (code_to_gid, differences, mut base_encoding) = extract_encoding(doc, dict, kind);
+    let (differences, mut base_encoding) = extract_encoding(doc, dict);
     let mut substitute = substitute_style(doc, dict, Some(dict));
 
     // A symbolic standard font drawn by its substitute keeps its built-in
@@ -424,7 +421,6 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
         widths,
         first_char,
         missing_width,
-        code_to_gid,
         differences,
         base_encoding,
         cid_encoding: None,
@@ -474,17 +470,10 @@ fn embedded_program(doc: &Document, dict: &Dictionary) -> Option<Arc<FontProgram
         .map(Arc::new)
 }
 
-/// Dereference the `FontDescriptor` entry, which is almost always an indirect
-/// reference in practice.
-///
-/// Returns an owned [`Dictionary`] because `doc.get_dictionary` hands back an
-/// `Arc<Dictionary>` rather than a long-lived borrow.
-fn resolve_fd(doc: &Document, dict: &Dictionary) -> Option<Dictionary> {
-    match dict.get(b"FontDescriptor")? {
-        Object::Reference(id) => doc.get_dictionary(*id).ok().map(|a| (*a).clone()),
-        Object::Dictionary(d) => Some(d.clone()),
-        _ => None,
-    }
+/// The `FontDescriptor` dictionary of the font (or `CIDFont`) dictionary
+/// `dict`, direct or indirect.
+pub(crate) fn resolve_fd(doc: &Document, dict: &Dictionary) -> Option<Dictionary> {
+    super::resolve_dict(doc, dict.get(b"FontDescriptor")?)
 }
 
 /// Maximum decompressed font stream size (64 MiB).
@@ -586,71 +575,29 @@ fn extract_widths(doc: &Document, dict: &Dictionary) -> (u32, Vec<f64>) {
 
 // ── Char → glyph-index mapping ────────────────────────────────────────────────
 
-/// The number of char codes in a single-byte PDF encoding.
-const NUM_CODES: usize = 256;
-
 /// Empty differences table — all `None` (inherit from base encoding).
 fn empty_differences() -> Box<[Option<Box<str>>; 256]> {
-    // Box::new([None; 256]) doesn't work because Option<Box<str>> is not Copy.
-    // We use a Vec collect + try_into.
-    let v: Vec<Option<Box<str>>> = (0..NUM_CODES).map(|_| None).collect();
-    #[expect(
-        clippy::expect_used,
-        reason = "the Vec always has exactly NUM_CODES = 256 elements; conversion cannot fail"
-    )]
-    v.try_into()
-        .map(Box::new)
-        .expect("256-element Vec must convert to [_; 256]")
+    Box::new(std::array::from_fn(|_| None))
 }
 
-/// Extract encoding information from a simple (non-Type0) font dictionary.
-///
-/// Returns `(code_to_gid, differences, base_encoding)`:
-/// - `code_to_gid`: non-empty only for encodings fully resolved at PDF-parse
-///   time (currently none — resolution happens at face-load time).
-/// - `differences`: 256-entry table of glyph-name overrides parsed from the
-///   `Differences` array.  The font cache resolves these to GIDs at face-load
-///   time.
-/// - `base_encoding`: the code→glyph-name table to apply before `Differences`.
-///   `/BaseEncoding` (or the bare encoding name) if named, else
-///   [`BaseEncoding::FontProgram`].
-#[expect(
-    clippy::type_complexity,
-    reason = "private helper; a type alias for the (code_to_gid, differences, base) triple would obscure rather than clarify"
-)]
+/// `Differences` and base encoding of a simple font's `Encoding` entry: a
+/// name or a dictionary, either possibly indirect.  An absent entry, or
+/// one of another type, gives no differences and
+/// [`BaseEncoding::FontProgram`].
 fn extract_encoding(
     doc: &Document,
     dict: &Dictionary,
-    _kind: PdfFontKind,
-) -> (Vec<u32>, Box<[Option<Box<str>>; 256]>, BaseEncoding) {
-    let Some(encoding) = dict.get(b"Encoding") else {
-        return (vec![], empty_differences(), BaseEncoding::FontProgram);
-    };
-
-    match encoding {
-        Object::Reference(id) => doc.get_dictionary(*id).ok().map_or_else(
-            || (vec![], empty_differences(), BaseEncoding::FontProgram),
-            |d| {
-                (
-                    vec![],
-                    parse_differences(doc, &d),
-                    parse_base_encoding(d.get_name(b"BaseEncoding")),
-                )
-            },
-        ),
-        Object::Dictionary(d) => (
-            vec![],
+) -> (Box<[Option<Box<str>>; 256]>, BaseEncoding) {
+    let encoding = dict.get(b"Encoding").and_then(|o| doc.resolve(o).ok());
+    match encoding.as_deref() {
+        Some(Object::Dictionary(d)) => (
             parse_differences(doc, d),
             parse_base_encoding(d.get_name(b"BaseEncoding")),
         ),
         // A bare named encoding (`/WinAnsiEncoding`, `/MacRomanEncoding`, …):
         // no Differences, base encoding selected by the name.
-        Object::Name(n) => (
-            vec![],
-            empty_differences(),
-            parse_base_encoding(Some(n.as_slice())),
-        ),
-        _ => (vec![], empty_differences(), BaseEncoding::FontProgram),
+        Some(Object::Name(n)) => (empty_differences(), parse_base_encoding(Some(n))),
+        _ => (empty_differences(), BaseEncoding::FontProgram),
     }
 }
 
@@ -745,7 +692,6 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         // Type 0 fonts use `CidEncoding::width_for_cid` exclusively;
         // `missing_width` is never consulted but must be initialised.
         missing_width: 0,
-        code_to_gid: vec![],
         differences: empty_differences(),
         // Unused for Type 0 (CID path bypasses name resolution entirely).
         base_encoding: BaseEncoding::Standard,
@@ -786,17 +732,13 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -
     let font_matrix =
         extract_matrix(dict, b"FontMatrix").unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
 
-    // Resolve CharProcs: maps glyph name → stream object.
-    // We need an owned Dictionary because `doc.get_dictionary` returns Arc.
-    let charprocs_obj = dict.get(b"CharProcs");
-    let charprocs_dict: Option<Dictionary> = charprocs_obj.and_then(|o| match o {
-        Object::Dictionary(d) => Some(d.clone()),
-        Object::Reference(id) => doc.get_dictionary(*id).ok().map(|a| (*a).clone()),
-        _ => None,
-    });
+    // CharProcs: glyph name → content stream.
+    let charprocs_dict = dict
+        .get(b"CharProcs")
+        .and_then(|o| super::resolve_dict(doc, o));
 
     // Resolve Encoding/Differences to get char_code → glyph_name mapping.
-    let (_, differences, base_encoding) = extract_encoding(doc, dict, PdfFontKind::Other);
+    let (differences, base_encoding) = extract_encoding(doc, dict);
 
     // Build the glyphs table: 256 entries, one per possible char code.
     let mut glyphs: Vec<Option<Type3Glyph>> = (0..256).map(|_| None).collect();
@@ -884,7 +826,6 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -
         // store. `MissingWidth` doesn't apply (PDF spec §9.6 — Type 3 uses
         // Widths exclusively), so 0 is the correct never-consulted default.
         missing_width: 0,
-        code_to_gid: vec![],
         differences,
         // Type 3 glyphs are content-stream procedures, not a font program;
         // name→GID resolution does not apply.
@@ -1334,7 +1275,6 @@ mod tests {
             widths,
             first_char,
             missing_width,
-            code_to_gid: vec![],
             differences: empty_differences(),
             base_encoding: BaseEncoding::Standard,
             cid_encoding: None,

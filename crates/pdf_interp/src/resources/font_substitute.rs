@@ -251,7 +251,7 @@ pub fn substitute_style(
     // A subset tag (`ABCDEF+`) carries no style information.
     let name = name.split_once('+').map_or(name.as_str(), |(_, rest)| rest);
 
-    let fd = fd_owner.and_then(|d| resolve_descriptor(doc, d));
+    let fd = fd_owner.and_then(|d| super::font::resolve_fd(doc, d));
     let flags = fd.as_ref().and_then(|d| d.get_i64(b"Flags")).unwrap_or(0);
     let weight = fd
         .as_ref()
@@ -322,11 +322,7 @@ fn classify(name: &str, flags: i64, weight: f64, italic_angle: f64) -> Substitut
 /// (`None` for `Identity` or an absent entry).
 #[must_use]
 pub fn ordering_script(doc: &Document, cid_font: &Dictionary) -> Option<Script> {
-    let info = match cid_font.get(b"CIDSystemInfo")? {
-        Object::Reference(id) => doc.get_dictionary(*id).ok().map(|d| (*d).clone())?,
-        Object::Dictionary(d) => d.clone(),
-        _ => return None,
-    };
+    let info = super::resolve_dict(doc, cid_font.get(b"CIDSystemInfo")?)?;
     Script::from_ordering(info.get(b"Ordering")?.as_str()?)
 }
 
@@ -359,15 +355,6 @@ pub fn differences_script(differences: &[Option<Box<str>>], base_codes: usize) -
         .max_by_key(|&(_, n)| n)
         .filter(|&(_, n)| n > latin)
         .map(|(script, _)| script)
-}
-
-/// Dereference the `FontDescriptor` entry of `dict`.
-fn resolve_descriptor(doc: &Document, dict: &Dictionary) -> Option<Dictionary> {
-    match dict.get(b"FontDescriptor")? {
-        Object::Reference(id) => doc.get_dictionary(*id).ok().map(|d| (*d).clone()),
-        Object::Dictionary(d) => Some(d.clone()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

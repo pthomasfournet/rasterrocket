@@ -341,7 +341,7 @@ impl FontCache {
         }
 
         let params = FaceParams {
-            code_to_gid: desc.code_to_gid.clone(),
+            code_to_gid: Vec::new(),
             mat: trm,
         };
         let shared = match key {
@@ -568,7 +568,6 @@ fn resolve_cmapless(
                     (base != BaseEncoding::FontProgram)
                         .then(|| base_encoding_table(base)[idx])
                         .flatten()
-                        .filter(|n| !n.is_empty())
                 })
                 .map(|name| face.raw_get_name_index(name))
                 .filter(|&gid| gid != 0)
@@ -791,7 +790,6 @@ fn resolve_via_unicode_cmap(
                 )
                 .then(|| base_encoding_table(base)[idx])
                 .flatten()
-                .filter(|n| !n.is_empty())
             });
             let unicode = name.and_then(font::glyph_name_to_unicode);
             name.and_then(|name| {
@@ -964,7 +962,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences,
             base_encoding: BaseEncoding::MacRoman,
             cid_encoding: None,
@@ -1000,7 +997,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences,
             base_encoding: BaseEncoding::WinAnsi,
             cid_encoding: None,
@@ -1047,7 +1043,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences,
             base_encoding: BaseEncoding::FontProgram,
             cid_encoding: None,
@@ -1097,7 +1092,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences,
             base_encoding,
             cid_encoding: None,
@@ -1176,7 +1170,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences,
             base_encoding: BaseEncoding::WinAnsi,
             cid_encoding: None,
@@ -1293,7 +1286,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences: Box::new(empty_diffs()),
             base_encoding: BaseEncoding::Standard,
             cid_encoding: Some(CidEncoding {
@@ -1329,7 +1321,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences: Box::new(empty_diffs()),
             base_encoding: BaseEncoding::Standard,
             cid_encoding: Some(CidEncoding {
@@ -1373,7 +1364,6 @@ mod tests {
             widths: vec![],
             first_char: 0,
             missing_width: 0,
-            code_to_gid: vec![],
             differences: Box::new(empty_diffs()),
             base_encoding: BaseEncoding::Standard,
             cid_encoding: Some(CidEncoding {

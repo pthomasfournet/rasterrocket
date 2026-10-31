@@ -13,7 +13,7 @@ pub fn glyph_name_for_code(
 ) -> Option<&str> {
     differences[code]
         .as_deref()
-        .or_else(|| base_encoding_table(base)[code].filter(|n| !n.is_empty()))
+        .or_else(|| base_encoding_table(base)[code])
 }
 
 /// Return the code→glyph-name table for a PDF base encoding (PDF Appendix D).
@@ -1475,6 +1475,21 @@ mod tests {
             glyph_name_for_code(&diffs, BaseEncoding::Standard, 0x80),
             None
         );
+    }
+
+    /// No table holds an empty name: an unused code is `None`, so a
+    /// lookup never needs to filter.
+    #[test]
+    fn no_base_encoding_names_an_empty_glyph() {
+        for table in [
+            &STANDARD_ENCODING,
+            &WIN_ANSI_ENCODING,
+            &MAC_ROMAN_ENCODING,
+            &SYMBOL_ENCODING,
+            &ZAPF_DINGBATS_ENCODING,
+        ] {
+            assert!(table.iter().flatten().all(|name| !name.is_empty()));
+        }
     }
 
     #[test]
