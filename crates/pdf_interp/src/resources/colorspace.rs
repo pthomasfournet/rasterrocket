@@ -527,7 +527,7 @@ fn resolve_array(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
         b"CalRGB" => resolve_cal(doc, arr, 3, ColorSpace::DeviceRgb),
         b"DeviceCMYK" => ColorSpace::DeviceCmyk,
         b"Lab" => ColorSpace::Lab(Box::new(LabSpace::resolve(doc, arr.get(1)))),
-        b"ICCBased" => resolve_icc_based(doc, arr.get(1), depth),
+        b"ICCBased" => resolve_icc_based(doc, arr.get(1)),
         b"Indexed" | b"I" => resolve_indexed(doc, arr, depth),
         b"Pattern" => ColorSpace::Pattern {
             base: arr
@@ -554,7 +554,7 @@ fn resolve_cal(doc: &Document, arr: &[Object], n: u8, device: ColorSpace) -> Col
         .map_or(device, |cal| ColorSpace::Cal(Box::new(cal)))
 }
 
-fn resolve_icc_based(doc: &Document, ref_obj: Option<&Object>, _depth: u8) -> ColorSpace {
+fn resolve_icc_based(doc: &Document, ref_obj: Option<&Object>) -> ColorSpace {
     let Some(ref_obj) = ref_obj else {
         return ColorSpace::DeviceGray;
     };
@@ -635,11 +635,13 @@ fn resolve_device_n(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
     let Some(names) = arr.get(1).and_then(Object::as_array) else {
         return ColorSpace::DeviceGray;
     };
-    let ncomps = u8::try_from(names.len()).unwrap_or(0);
-    if ncomps == 0 {
-        log::debug!("colorspace: DeviceN names array empty — fallback DeviceGray");
+    let Some(ncomps) = u8::try_from(names.len()).ok().filter(|&n| n > 0) else {
+        log::debug!(
+            "colorspace: DeviceN has {} colorant names, not 1–255 — fallback DeviceGray",
+            names.len()
+        );
         return ColorSpace::DeviceGray;
-    }
+    };
     let Some(alt_obj) = arr.get(2) else {
         return ColorSpace::DeviceGray;
     };

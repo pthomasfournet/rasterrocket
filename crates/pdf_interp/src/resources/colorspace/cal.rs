@@ -63,7 +63,7 @@ impl CalSpace {
     /// Resolve the parameter dictionary `params` of a `CalGray` (`n = 1`) or
     /// `CalRGB` (`n = 3`) array.  `None` when `WhitePoint` is missing or
     /// invalid (`Y ≠ 1`, or `X`, `Z` not positive), a `Gamma` entry is not a
-    /// positive number, or the composed matrix is singular.
+    /// positive number, or the composed conversion is not finite.
     pub(super) fn resolve(doc: &Document, params: &Object, n: u8) -> Option<Self> {
         let resolved;
         let dict = match params {
