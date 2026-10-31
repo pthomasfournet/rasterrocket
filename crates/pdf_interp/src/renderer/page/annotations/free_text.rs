@@ -16,7 +16,9 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
-use super::content::{Border, colour, colour_op, inset, n, number, numbers, rectangle, string};
+use super::content::{
+    Border, colour, colour_op, inset, n, number, numbers, rectangle, string, text_or_stream,
+};
 use super::line_ending::LineEnding;
 use super::text::{
     AUTO_MULTILINE_SIZE, DefaultAppearance, TextBlock, decode_text_string, encode_win_ansi,
@@ -70,7 +72,7 @@ impl FreeText {
             .map(|c| decode_text_string(&c))
             .filter(|t| !t.is_empty())
             .or_else(|| {
-                let rc = rich_text(doc, annot.get(b"RC"))?;
+                let rc = text_or_stream(doc, annot.get(b"RC"))?;
                 Some(plain_text(&decode_text_string(&rc)))
             })
             .unwrap_or_default();
@@ -175,21 +177,6 @@ impl FreeText {
             matrix: IDENTITY,
         }
     }
-}
-
-/// The rich text string `obj`: a text string, or a stream holding one.
-fn rich_text(doc: &Document, obj: Option<&Object>) -> Option<Vec<u8>> {
-    if let Some(s) = string(doc, obj) {
-        return Some(s);
-    }
-    let Some(Object::Reference(id)) = obj else {
-        return None;
-    };
-    let object = doc.get_object(*id).ok()?;
-    let Object::Stream(stream) = object.as_ref() else {
-        return None;
-    };
-    stream.decompressed_content().ok()
 }
 
 #[cfg(test)]

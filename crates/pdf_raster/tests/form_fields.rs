@@ -154,6 +154,31 @@ fn a_button_with_an_appearance_keeps_it_under_need_appearances() {
     assert_eq!(dark, 0);
 }
 
+/// A multiline rich text field at `[10 10 190 90]` with the entries
+/// `entries`.
+fn rich_field(entries: &str) -> Vec<u8> {
+    let widget = format!(
+        "/FT /Tx /Ff 33558528 /T (rt) /Rect [10 10 190 90] /DA (/Helv 12 Tf 0 g) {entries}"
+    );
+    document("", &[&widget], vec![])
+}
+
+#[test]
+fn a_rich_text_field_shows_the_plain_text_of_its_rich_value() {
+    let rv = "/RV (<body xmlns=\"http://www.w3.org/1999/xhtml\"><p>First <b>line</b></p>\
+              <p>Second &amp; last</p></body>)";
+    // Two paragraphs: ink on the first and the second line.
+    let first = [12, 72, 188, 88];
+    let second = [12, 56, 188, 72];
+    let pdf = || rich_field(rv);
+    let (top, next) = (dark_in(pdf(), first), dark_in(pdf(), second));
+    assert!(top > 50 && next > 50, "{top} and {next} dark pixels");
+    assert_eq!(dark_in(rich_field(""), [12, 12, 188, 88]), 0);
+    // A rich text field shows /RV even when /V holds the plain text.
+    let with_value = dark_in(rich_field(&format!("{rv} /V (x)")), second);
+    assert!(with_value > 50, "{with_value} dark pixels");
+}
+
 /// The bounds `[x0 y0 x1 y1]` (user space, exclusive upper ends) of the
 /// dark pixels of the page, or `None` when it has none.
 fn dark_bounds(pdf: Vec<u8>) -> Option<[u32; 4]> {

@@ -17,11 +17,11 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::content::{
-    self, circle, colour_op, n, number, numbers, rectangle, resolve_array, string,
+    self, circle, colour_op, n, number, numbers, rectangle, resolve_array, string, text_or_stream,
 };
 use super::text::{
     self, AUTO_MULTILINE_SIZE, DefaultAppearance, LEADING, TextBlock, aligned_x,
-    decode_text_string, encode_win_ansi, hex,
+    decode_text_string, encode_win_ansi, hex, plain_text,
 };
 use crate::resources::dict_ext::DictExt;
 
@@ -32,6 +32,7 @@ const RADIO: i64 = 1 << 15;
 const PUSH_BUTTON: i64 = 1 << 16;
 const COMBO: i64 = 1 << 17;
 const COMB: i64 = 1 << 24;
+const RICH_TEXT: i64 = 1 << 25;
 
 /// The resource name of the font check marks are drawn in.
 const CHECK_FONT: &[u8] = b"ZaDb";
@@ -87,6 +88,8 @@ pub(super) struct Field {
     kind: Kind,
     flags: i64,
     value: Option<Object>,
+    /// The plain text of the rich text value `/RV` of a text field.
+    rich: Option<String>,
     /// Whether a button is in an on state.
     on: bool,
     da: DefaultAppearance,
@@ -158,6 +161,10 @@ impl Field {
             kind,
             flags,
             on: state.is_some_and(|s| s != b"Off"),
+            rich: (kind == Kind::Text)
+                .then(|| text_or_stream(doc, inherited(b"RV").as_ref()))
+                .flatten()
+                .map(|rv| plain_text(&decode_text_string(&rv))),
             value,
             da,
             quadding: annot
@@ -333,8 +340,12 @@ fn frame(s: &mut String, field: &Field, rect: [f64; 4], radio: bool) {
     }
 }
 
-/// The text a text field or combo box shows: its value, or for a choice
-/// the display text of the option whose export value it is.
+/// The text a text field or combo box shows: its value, a text string or
+/// stream, or for a choice the display text of the option whose export
+/// value it is.  A text field shows the plain text of its rich text value
+/// `/RV` instead when it is a rich text field or its value is empty; its
+/// paragraphs are lines of a multiline field and are joined by spaces
+/// otherwise (§12.7.4.3).
 fn display_text(doc: &Document, field: &Field) -> Vec<u8> {
     let raw = match &field.value {
         Some(Object::String(s, _)) => s.clone(),
@@ -343,9 +354,18 @@ fn display_text(doc: &Document, field: &Field) -> Vec<u8> {
             .first()
             .and_then(|o| string(doc, Some(o)))
             .unwrap_or_default(),
-        Some(o @ Object::Reference(_)) => string(doc, Some(o)).unwrap_or_default(),
+        Some(o @ Object::Reference(_)) => text_or_stream(doc, Some(o)).unwrap_or_default(),
         _ => Vec::new(),
     };
+    if let Some(rich) = &field.rich
+        && (field.flags & RICH_TEXT != 0 || raw.is_empty())
+    {
+        return encode_win_ansi(&if field.flags & MULTILINE != 0 {
+            rich.clone()
+        } else {
+            rich.replace('\n', " ")
+        });
+    }
     let raw = field
         .options
         .iter()

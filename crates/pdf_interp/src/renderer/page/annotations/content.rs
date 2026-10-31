@@ -58,6 +58,22 @@ pub(super) fn string(doc: &Document, obj: Option<&Object>) -> Option<Vec<u8>> {
     }
 }
 
+/// The text string `obj`, or the content of the text stream it refers to
+/// (§7.9.3), following an indirect reference.
+pub(super) fn text_or_stream(doc: &Document, obj: Option<&Object>) -> Option<Vec<u8>> {
+    if let Some(s) = string(doc, obj) {
+        return Some(s);
+    }
+    let Some(Object::Reference(id)) = obj else {
+        return None;
+    };
+    let object = doc.get_object(*id).ok()?;
+    let Object::Stream(stream) = object.as_ref() else {
+        return None;
+    };
+    stream.decompressed_content().ok()
+}
+
 /// `v` formatted for a content stream: at most four decimals, no trailing
 /// zeros.
 pub(super) fn n(v: f64) -> String {
