@@ -266,7 +266,10 @@ jobs:
 
       - name: Build fuzz targets
         working-directory: fuzz
-        run: cargo +nightly fuzz build
+        # cargo-fuzz defaults to the target it was itself built for, and the
+        # prebuilt binary the install step fetches is a musl build: name the
+        # glibc target, where the sanitizer runtime and the toolchain's std are.
+        run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
   # ── Format and spelling check ─────────────────────────────────────────────
   fmt:
