@@ -62,6 +62,25 @@ struct State {
     glyphs: HashMap<(u32, bool), Option<FallbackGlyph>>,
 }
 
+/// The Unicode values a shown code stands for, in preference order: at
+/// most one from a name or `ToUnicode` mapping, or a collection CID's list.
+enum Unicodes<'a> {
+    /// A single mapping's value, `None` when the font does not say.
+    One(Option<u32>),
+    /// A collection CID's values.
+    Many(&'a [u32]),
+}
+
+impl Unicodes<'_> {
+    /// The values as a slice, empty when there are none.
+    const fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::One(unicode) => unicode.as_slice(),
+            Self::Many(unicodes) => unicodes,
+        }
+    }
+}
+
 impl FallbackResolver {
     /// The resolver of `desc` drawn by the substitute `primary`, drawing
     /// fallbacks from `library`; `None` when no Unicode value of its codes
@@ -104,15 +123,15 @@ impl FallbackResolver {
     /// The Unicode values the shown `code` (with CID `cid` in a composite
     /// font) stands for, in preference order; empty when the font does not
     /// say.  Only a collection CID has more than one.
-    fn unicodes(&self, code: u32, cid: u32) -> Vec<u32> {
-        let single = |unicode: Option<u32>| unicode.filter(|&u| u != 0).into_iter().collect();
+    fn unicodes(&self, code: u32, cid: u32) -> Unicodes<'_> {
+        let single = |unicode: Option<u32>| Unicodes::One(unicode.filter(|&u| u != 0));
         match &self.source {
             UnicodeSource::Names(names) => single(
                 usize::try_from(code)
                     .ok()
                     .and_then(|code| names.get(code).copied()),
             ),
-            UnicodeSource::Collection(table) => table.get(cid).to_vec(),
+            UnicodeSource::Collection(table) => Unicodes::Many(table.get(cid)),
             UnicodeSource::ToUnicode(map) => {
                 single(map.map.get(&code).copied().and_then(first_scalar))
             }
@@ -125,6 +144,7 @@ impl FallbackResolver {
     /// Each character is resolved once per font.
     pub(crate) fn glyph(&self, code: u32, cid: u32) -> Option<FallbackGlyph> {
         let unicodes = self.unicodes(code, cid);
+        let unicodes = unicodes.as_slice();
         let &first = unicodes.first()?;
         let vertical = self.vertical
             || matches!(&self.source, UnicodeSource::Collection(table) if table.is_vertical(cid));

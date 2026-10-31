@@ -418,25 +418,22 @@ impl FallbackLoader<'_> {
         let Some(resolver) = face.fallback.clone() else {
             return;
         };
-        let codes: Vec<(u32, u32)> = desc.cid_encoding.as_ref().map_or_else(
-            || {
-                bytes
-                    .iter()
-                    .map(|&b| (u32::from(b), u32::from(b)))
-                    .collect()
-            },
-            |enc| enc.codes(bytes).map(|d| (d.code, d.value)).collect(),
-        );
         let simple = desc.cid_encoding.is_none();
-        for (code, cid) in codes {
+        let mut visit = |code: u32, cid: u32| {
             if face.fallback_glyphs.contains_key(&(code, cid)) {
-                continue;
+                return;
             }
             let glyph = (!simple || face.face.glyph_index(code) == 0)
                 .then(|| resolver.glyph(code, cid))
                 .flatten()
                 .filter(|&(slot, _)| self.ensure_face(face, &resolver, slot));
             let _ = face.fallback_glyphs.insert((code, cid), glyph);
+        };
+        match &desc.cid_encoding {
+            None => bytes
+                .iter()
+                .for_each(|&b| visit(u32::from(b), u32::from(b))),
+            Some(enc) => enc.codes(bytes).for_each(|d| visit(d.code, d.value)),
         }
     }
 
