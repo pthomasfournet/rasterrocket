@@ -99,7 +99,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", feature
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
-For reproducible builds pin the dependency to a release tag (`tag = "v1.5.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
+For reproducible builds pin the dependency to a release tag (`tag = "v2.0.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
 
 ## Quickstart
 
@@ -258,13 +258,15 @@ is drawn from its other content streams and the skipped one is listed in
 (a truncated download, a corrupt filter) is drawn from what decoded and listed
 with `partial: true`.
 
-Set `RasterOptions::strict` to make such a page an `Err` instead, the
-behaviour before v1.5.0.
+Set `RasterOptions::strict` to make such a page an `Err` instead
+(`RasterError::ImageDecodeFailed` or `RasterError::ContentDecodeFailed`).
 
 ## Page geometry, regions, non-square pixels and cancellation
 
 The session API opens a document once and renders pages on demand, from any
-number of threads. It returns RGB bitmaps; `rgb_to_gray` converts them.
+number of threads. `render_page_rgb` and `render_page_rgb_with` return RGB
+bitmaps (`rgb_to_gray` converts them); `render_page_gray` returns the
+grayscale `RenderedPage` that `raster_pdf` yields for the page.
 
 ```rust
 use std::path::Path;
@@ -370,8 +372,7 @@ crate needs a poppler source tree (`POPPLER_SRC`).
 and the installed system fonts, and from the faces built into the binary for characters no
 installed face covers. No CJK faces are built in, so CJK text in non-embedded fonts needs an
 installed CJK font. Encrypted documents are decrypted in
-process (`--decrypt-owned`); releases up to v1.5.0 instead ran `qpdf`, which must then be
-on `PATH`.
+process (`--decrypt-owned`), with no external tool.
 
 **To compare and benchmark** (`tests/compare/`, `crates/bench`):
 
