@@ -1340,7 +1340,8 @@ impl<'doc> PageRenderer<'doc> {
     pub fn render_annotations(&mut self, page_id: ObjectId) {
         // PDF §12.5.5: an appearance is drawn in default user space with the
         // initial graphics state, whatever the content stream left behind: an
-        // unbalanced `q`, a clip, a CTM or an open marked-content sequence.
+        // unbalanced `q`, a clip, a CTM, an unterminated text object's
+        // clipping outlines or an open marked-content sequence.
         self.gstate = initial_gstate(
             self.width,
             self.height,
@@ -1349,6 +1350,7 @@ impl<'doc> PageRenderer<'doc> {
         );
         self.path = None;
         self.pending_clip = None;
+        self.text_clip = None;
         self.marked_content = operators::MarkedContent::default();
         annotations::render_annotations(self, page_id);
     }
@@ -4188,5 +4190,16 @@ mod tests {
         renderer.set_antialias(true, false);
         renderer.render_annotations((1, 0));
         assert!(!renderer.gstate.current().clip.antialias);
+    }
+
+    /// The clipping outlines of a text object the page left unterminated
+    /// do not reach the `ET` of an annotation appearance.
+    #[test]
+    fn annotations_start_without_the_page_s_pending_text_clip() {
+        let doc = crate::test_helpers::empty_doc();
+        let mut renderer = PageRenderer::new(8, 8, &doc, (1, 0));
+        renderer.text_clip = Some(PixelRect::new(0, 0, 1, 1).expect("non-empty").to_path());
+        renderer.render_annotations((1, 0));
+        assert!(renderer.text_clip.is_none());
     }
 }
