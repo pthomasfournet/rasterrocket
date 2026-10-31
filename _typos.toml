@@ -1,0 +1,57 @@
+# Spell-check configuration for `typos` (https://github.com/crate-ci/typos).
+#
+# Vendored forks and upstream test data keep upstream's spelling; their
+# changes are tracked in each crate's CHANGES.md, not by this check.
+
+[files]
+extend-exclude = [
+    "crates/ccitt/",
+    "crates/font_test_data/",
+    "crates/jbig2/",
+    "crates/jpeg2000/",
+    "crates/read_fonts/",
+    "crates/skrifa/",
+    # Compressed Adobe CMap resources.
+    "crates/pdf_interp/cmaps/",
+]
+
+[default]
+extend-ignore-re = [
+    # Abbreviated commit hashes (`738ba14`).
+    "\\b[0-9a-f]{7,40}\\b",
+    # JPEG APPn marker family.
+    "\\bAPPn\\b",
+    # Glyph test strings: `café` as a byte or char escape, kerning pairs.
+    "caf\\\\(x[Ee]9|u\\{e9\\})",
+    "AaBb AbBa BaAb",
+]
+
+[default.extend-identifiers]
+# Interpolation indices, a pair distance and a page number.
+iy = "iy"
+iy0 = "iy0"
+iy1 = "iy1"
+d_ba = "d_ba"
+pn = "pn"
+# `/DecodeParms` entry bound to a local.
+parm = "parm"
+
+[default.extend-words]
+# ISO 32000-2 names: /DecodeParms, /FlateDecode, the PNG Paeth predictor,
+# and the /UE (user encryption key) entry of the standard security handler.
+parms = "parms"
+flate = "flate"
+paeth = "paeth"
+ue = "ue"
+# JPEG 2000 SIZ marker segment.
+siz = "siz"
+# TrueType `loca` table; Type 1 `ND` (noaccess def) procedure, also the
+# n-dimensional sampled-function evaluator and a subdivision depth.
+loca = "loca"
+nd = "nd"
+# Prefix in hyphenated compounds (mis-maps, mis-decodes).
+mis = "mis"
+unparseable = "unparseable"
+invokable = "invokable"
+# Font-name fragment matched against "Consolas".
+consol = "consol"
