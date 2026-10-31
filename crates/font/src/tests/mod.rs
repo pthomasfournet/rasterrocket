@@ -425,3 +425,18 @@ fn sfnt_coverage_follows_the_program_charmap() {
     }
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+/// A format 0 Unicode subtable, which has no pair iterator, still yields
+/// the codes it maps.
+#[test]
+fn sfnt_coverage_reads_a_format0_unicode_subtable() {
+    use crate::sfnt_info::unicode_coverage;
+    let dir = std::env::temp_dir().join(format!("rrocket-sfnt-cov0-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("format0.ttf");
+    std::fs::write(&path, sfnt::box_font(&[(0, 3, sfnt::cmap_mac())])).expect("write");
+    let set = unicode_coverage(&path, 0).expect("a Unicode subtable");
+    assert!(set.contains(7), "code 7 maps to GID 1");
+    assert!(!set.contains(8), "code 8 maps to .notdef");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}

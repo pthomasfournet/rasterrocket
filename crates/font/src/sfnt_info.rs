@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use read_fonts::tables::cmap::{Cmap, CmapIterLimits};
+use read_fonts::tables::cmap::{Cmap, CmapIterLimits, CmapSubtable};
 use read_fonts::tables::name::Name;
 use read_fonts::tables::os2::Os2;
 use read_fonts::types::NameId;
@@ -126,12 +126,23 @@ pub fn unicode_coverage(path: &Path, index: u32) -> Option<Coverage> {
     let record = cmap
         .encoding_records()
         .get(unicode_subtable_index(&cmap)?)?;
-    let points = record
-        .subtable(cmap.offset_data())
-        .ok()?
-        .iter_with_limits(limits)
-        .filter(|(_, gid)| gid.to_u32() != 0)
-        .map(|(c, _)| c);
+    let subtable = record.subtable(cmap.offset_data()).ok()?;
+    let mapped = |c: &u32| {
+        subtable
+            .map_codepoint(*c)
+            .is_some_and(|gid| gid.to_u32() != 0)
+    };
+    let points: Vec<u32> = if let CmapSubtable::Format0(_) = subtable {
+        // The format 0 byte table has no pair iterator; its 256 codes are
+        // probed directly.
+        (0..=0xFF).filter(mapped).collect()
+    } else {
+        subtable
+            .iter_with_limits(limits)
+            .filter(|(_, gid)| gid.to_u32() != 0)
+            .map(|(c, _)| c)
+            .collect()
+    };
     Some(Coverage::from_points(points))
 }
 

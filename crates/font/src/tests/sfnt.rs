@@ -74,7 +74,7 @@ fn hhea() -> Vec<u8> {
 }
 
 /// The (1,0) Macintosh Roman subtable: format 0, code 7 → GID 1.
-fn cmap_mac() -> Vec<u8> {
+pub(super) fn cmap_mac() -> Vec<u8> {
     let mut c = Vec::new();
     c.extend_from_slice(&be16(0)); // format
     c.extend_from_slice(&be16(262)); // length
