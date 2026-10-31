@@ -24,8 +24,8 @@ use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
 use crate::content::Operator;
+use crate::resources::ResourceKey;
 use crate::resources::font::{Type3Data, Type3Glyph};
-use crate::resources::{PageResources, ResourceKey};
 
 /// Largest device area, in pixels, of a cached Type 3 glyph; a larger
 /// glyph runs its `CharProc` directly.
@@ -232,7 +232,7 @@ impl PageRenderer<'_> {
         child.adopt_parent_budget(self);
         child.share_memos(self);
         child.set_optional_content(Arc::clone(self.optional_content()));
-        child.resources = PageResources::new(doc, context);
+        child.resources = self.resources.inherited();
         child.gstate.current_mut().ctm = frame.child_ctm;
         child.execute(&glyph.ops);
         child.fold_child_into(self);
@@ -376,6 +376,53 @@ impl GlyphFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cached `d1` glyph of a font without resources of its own resolves
+    /// names in the resources in effect, even when those are a dictionary
+    /// given directly rather than an object's `/Resources`.
+    #[test]
+    fn a_cached_glyph_resolves_names_in_the_resources_in_effect() {
+        let charproc = b"1 0 0 0 1 1 d1 /M Do";
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (4, b"<< /Type /Page >>".to_vec()),
+            (
+                5,
+                b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] \
+                  /FontMatrix [1 0 0 1 0 0] /CharProcs << /a 6 0 R >> \
+                  /Encoding << /Differences [65 /a] >> /FirstChar 65 /LastChar 65 \
+                  /Widths [1] >>"
+                    .to_vec(),
+            ),
+            (
+                6,
+                format!(
+                    "<< /Length {} >>\nstream\n{}\nendstream",
+                    charproc.len(),
+                    String::from_utf8_lossy(charproc)
+                )
+                .into_bytes(),
+            ),
+            (
+                7,
+                b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ImageMask true \
+                  /BitsPerComponent 1 /Length 1 >>\nstream\n\x00\nendstream"
+                    .to_vec(),
+            ),
+        ]);
+        let resources = pdf::parse_object(
+            b"<< /Font << /T 5 0 R >> /XObject << /M 7 0 R >> >>",
+            &mut 0,
+        )
+        .unwrap();
+        let mut renderer = PageRenderer::new(32, 32, &doc, (4, 0));
+        renderer.resources = renderer
+            .resources
+            .with_resources((0, 0), resources.as_dict().unwrap());
+        renderer.execute(&crate::content::parse(b"BT /T 16 Tf 4 4 Td (A) Tj ET"));
+        // The glyph covers device x 4..20, rows 12..28.
+        let row = renderer.bitmap.row_bytes(20);
+        assert_eq!(&row[12 * 3..12 * 3 + 3], &[0, 0, 0], "glyph painted");
+    }
 
     /// A unit-square glyph at 20 px places its bitmap so that the origin
     /// sits at the pen plus its phase, and the box plus margin is covered.
