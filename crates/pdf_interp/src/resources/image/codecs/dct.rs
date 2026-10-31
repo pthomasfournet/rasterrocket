@@ -16,15 +16,31 @@ use gpu::cache::{
 
 // ── JPEG SOF peek ─────────────────────────────────────────────────────────────
 
-/// Scan `data` for the first JPEG SOF marker and return the component count
-/// (`Nf` field). Returns `None` if `data` is not a valid JPEG or the SOF
-/// payload is too short. Zero allocations; stops at the first SOF found.
-///
-/// This avoids a full header-decode probe pass to determine the component count
-/// before calling the main decode. The `gpu` crate has the same logic but is an
-/// optional dependency (requires CUDA at link time), so the CPU path carries
-/// its own copy of the scan.
+/// Frame header fields of a JPEG's first SOF marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JpegSof {
+    /// Number of lines (`Y`); 0 means the height is defined by a later DNL marker.
+    height: u16,
+    /// Number of samples per line (`X`).
+    width: u16,
+    /// Number of image components (`Nf`).
+    components: u8,
+}
+
+/// The component count (`Nf`) of the first SOF marker in `data`.
 fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
+    jpeg_sof(data).map(|sof| sof.components)
+}
+
+/// Scan `data` for the first JPEG SOF marker and return its frame header.
+/// Returns `None` if `data` is not a valid JPEG or the SOF payload is too
+/// short. Zero allocations; stops at the first SOF found.
+///
+/// This avoids a full header-decode probe pass before calling the main
+/// decode. The `gpu` crate has the same logic but is an optional dependency
+/// (requires CUDA at link time), so the CPU path carries its own copy of the
+/// scan.
+fn jpeg_sof(data: &[u8]) -> Option<JpegSof> {
     if data.get(0..2) != Some(&[0xFF, 0xD8]) {
         return None;
     }
@@ -48,10 +64,14 @@ fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
         if seg_len < 2 {
             return None;
         }
-        // SOF markers carry the component count at payload offset +5 (after P, Y, X).
-        // Layout: length(2) P(1) Y(2) X(2) Nf(1) → Nf at pos+7.
+        // SOF layout from the length field: length(2) P(1) Y(2) X(2) Nf(1).
         if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xCC) {
-            return data.get(pos + 7).copied();
+            let frame = data.get(pos + 3..pos + 8)?;
+            return Some(JpegSof {
+                height: u16::from_be_bytes([frame[0], frame[1]]),
+                width: u16::from_be_bytes([frame[2], frame[3]]),
+                components: frame[4],
+            });
         }
         if marker == 0xDA {
             return None;
@@ -185,7 +205,15 @@ pub(in crate::resources::image) fn decode_dct<
     #[cfg(feature = "gpu-jpeg-huffman")]
     if let Some(dec) = jpeg_gpu {
         let area = pdf_w.saturating_mul(pdf_h);
-        if area >= crate::resources::image::huffman_threshold() {
+        // The decoder sizes its device and host RGBA buffers from the frame
+        // header, so the header's dimensions must pass the decode budget
+        // before the decode starts; a stream that fails it takes the CPU path,
+        // which applies its own limit.
+        let within_budget = jpeg_sof(data).is_some_and(|sof| {
+            crate::resources::image::decode_budget(u32::from(sof.width), u32::from(sof.height), 4)
+                .is_ok()
+        });
+        if within_budget && area >= crate::resources::image::huffman_threshold() {
             match dec.decode(data) {
                 Ok(img) => {
                     let w = img.width;
@@ -545,6 +573,37 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
         px[0] = 255 - r;
         px[1] = 255 - g;
         px[2] = 255 - b;
+    }
+}
+
+#[cfg(test)]
+mod sof_tests {
+    use super::{JpegSof, jpeg_sof, jpeg_sof_components};
+
+    /// SOI, an APP0 segment to skip, then a baseline SOF0 frame header.
+    const FRAME: &[u8] = &[
+        0xFF, 0xD8, // SOI
+        0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, // APP0, length 4
+        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x01, 0x2C, 0x02, 0x80, 0x01, 0x01, 0x11, 0x00, // SOF0
+    ];
+
+    #[test]
+    fn sof_yields_the_frame_dimensions() {
+        assert_eq!(
+            jpeg_sof(FRAME),
+            Some(JpegSof {
+                height: 300,
+                width: 640,
+                components: 1
+            })
+        );
+        assert_eq!(jpeg_sof_components(FRAME), Some(1));
+    }
+
+    #[test]
+    fn truncated_sof_yields_none() {
+        assert_eq!(jpeg_sof(&FRAME[..FRAME.len() - 7]), None);
+        assert_eq!(jpeg_sof(b"not a jpeg"), None);
     }
 }
 

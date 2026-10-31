@@ -110,10 +110,17 @@ pub(crate) fn huffman_threshold() -> u32 {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<u32> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
-        std::env::var("PDF_RASTER_HUFFMAN_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(GPU_JPEG_HUFFMAN_THRESHOLD_PX)
+        let Ok(value) = std::env::var("PDF_RASTER_HUFFMAN_THRESHOLD") else {
+            return GPU_JPEG_HUFFMAN_THRESHOLD_PX;
+        };
+        value.trim().parse().unwrap_or_else(|_| {
+            log::warn!(
+                "PDF_RASTER_HUFFMAN_THRESHOLD={value:?} is not a pixel area (0..={}); \
+                 using the default",
+                u32::MAX
+            );
+            GPU_JPEG_HUFFMAN_THRESHOLD_PX
+        })
     })
 }
 
