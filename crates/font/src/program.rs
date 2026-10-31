@@ -19,6 +19,7 @@
 //! ([`FontProgram::requires_hinting`]): those are grid-fitted by the
 //! TrueType interpreter at the size they are drawn at.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -433,7 +434,7 @@ impl FontProgram {
                 Charmap::from_glyph_names(
                     names
                         .iter()
-                        .map(|(gid, name)| (GlyphId::new(*gid), name.as_str())),
+                        .map(|(gid, name)| (GlyphId::new(*gid), name.as_ref())),
                 )
             })
             .map(code)
@@ -449,7 +450,7 @@ impl FontProgram {
             .get_or_init(|| {
                 let mut map = HashMap::new();
                 for (gid, name) in self.glyph_names() {
-                    let _ = map.entry(name.into_boxed_str()).or_insert(gid);
+                    let _ = map.entry(Box::<str>::from(name)).or_insert(gid);
                 }
                 map
             })
@@ -494,14 +495,15 @@ impl FontProgram {
     }
 
     /// Every (glyph index, name) pair the program defines, in glyph order.
-    /// Synthesized names (`gidN`) are not included.
-    fn glyph_names(&self) -> Vec<(u32, String)> {
+    /// Synthesized names (`gidN`) are not included.  CFF and Type 1 names
+    /// are borrowed from the program; `post` names are decoded.
+    fn glyph_names(&self) -> Vec<(u32, Cow<'_, str>)> {
         match &self.outlines {
             Outlines::Sfnt { .. } => self.sfnt().map_or_else(Vec::new, |font| {
                 font.glyph_names()
                     .iter()
                     .filter(|(_, name)| !name.is_synthesized())
-                    .map(|(gid, name)| (gid.to_u32(), name.as_str().to_owned()))
+                    .map(|(gid, name)| (gid.to_u32(), Cow::Owned(name.as_str().to_owned())))
                     .collect()
             }),
             Outlines::Cff => self.cff().map_or_else(Vec::new, |cff| {
@@ -515,13 +517,13 @@ impl FontProgram {
                     .iter()
                     .filter_map(|(gid, sid)| {
                         let name = std::str::from_utf8(cff.string(sid)?).ok()?;
-                        Some((gid.to_u32(), name.to_owned()))
+                        Some((gid.to_u32(), Cow::Borrowed(name)))
                     })
                     .collect()
             }),
             Outlines::Type1(font) => font
                 .glyph_names()
-                .map(|(gid, name)| (gid.to_u32(), name.to_owned()))
+                .map(|(gid, name)| (gid.to_u32(), Cow::Borrowed(name)))
                 .collect(),
             Outlines::CidType1(_) => Vec::new(),
         }
