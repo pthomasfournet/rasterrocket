@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use super::super::gstate::ctm_multiply;
+use super::paint::{int_to_cap, int_to_join};
 use super::text_ops::{translate_text_x, translate_text_y};
-use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer, int_to_cap, int_to_join};
+use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer};
 use crate::content::{Operator, TextArrayElement};
 use crate::resources::ExtGStateParams;
 use crate::resources::colorspace::ColorSpace;
