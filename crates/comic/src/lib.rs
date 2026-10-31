@@ -29,6 +29,7 @@ type ComicPages = Vec<(u32, Result<RenderedPage, ComicError>)>;
 /// Options controlling comic-archive rendering. Mirrors the relevant subset of
 /// `rasterrocket::RasterOptions` so the CLI can pass one config to either path.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ComicOptions {
     /// DPI reported on the produced [`RenderedPage`]. Comic images carry no
     /// physical resolution, so this is a declared value passed through to
@@ -45,6 +46,21 @@ pub struct ComicOptions {
     pub deskew: bool,
 }
 
+impl ComicOptions {
+    /// Options for rendering every page at `dpi`, every other field at its
+    /// [`Default`] value.
+    ///
+    /// The struct is `#[non_exhaustive]`: start from this or from
+    /// [`ComicOptions::default`] and assign the fields to change.
+    #[must_use]
+    pub fn new(dpi: f32) -> Self {
+        Self {
+            dpi,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for ComicOptions {
     fn default() -> Self {
         Self {
@@ -58,6 +74,7 @@ impl Default for ComicOptions {
 
 /// Errors from opening or reading a comic archive.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ComicError {
     /// The archive file could not be opened or read.
     Open(std::io::Error),

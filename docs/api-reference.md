@@ -658,6 +658,9 @@ the rest, matching `raster_pdf`.
 **`ComicOptions`** mirrors the relevant subset of `RasterOptions`: `dpi: f32`,
 `first_page: u32`, `last_page: u32`, `deskew: bool`. The DPI rides along on each
 `RenderedPage` for downstream OCR; comic images carry no intrinsic resolution.
+Both `ComicOptions` and `ComicError` are `#[non_exhaustive]`: build the options
+with `ComicOptions::new(dpi)` or `ComicOptions::default()` and assign the fields
+to change, and give a `match` on `ComicError` a wildcard arm.
 
 **Hardening:** entries are read under a 512 MiB per-entry decompressed-size cap
 (decompression-bomb defence), and image dimensions are validated before a codec

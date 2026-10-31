@@ -44,24 +44,21 @@ pub(crate) fn run(
         )));
     }
 
-    let opts = ComicOptions {
-        // Comics carry no physical resolution, so the user's requested DPI rides
-        // along on each RenderedPage purely for downstream OCR feature scaling;
-        // it never changes the already-rasterised pixel dimensions. When the x
-        // and y DPI differ, x is used (documented behaviour for resolution-less
-        // input).
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "DPI is a small positive value; f64→f32 is exact in practice"
-        )]
-        dpi: args.x_dpi() as f32,
-        // Decode every page; page SELECTION (window, odd/even, single) is done
-        // once, below, by the same selector the PDF path uses. Windowing here
-        // too would double-apply first/last against a shrunken total.
-        first_page: 1,
-        last_page: u32::MAX,
-        deskew: false,
-    };
+    // Comics carry no physical resolution, so the user's requested DPI rides
+    // along on each RenderedPage purely for downstream OCR feature scaling;
+    // it never changes the already-rasterised pixel dimensions. When the x
+    // and y DPI differ, x is used (documented behaviour for resolution-less
+    // input).
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "DPI is a small positive value; f64→f32 is exact in practice"
+    )]
+    let dpi = args.x_dpi() as f32;
+    // The default page window decodes every page; page SELECTION (window,
+    // odd/even, single) is done once, below, by the same selector the PDF
+    // path uses. Windowing here too would double-apply first/last against a
+    // shrunken total.
+    let opts = ComicOptions::new(dpi);
 
     let pages = open_comic(Path::new(&args.input), &opts)?;
 
