@@ -7,8 +7,10 @@
 //! a query for a rectangle gathers the triangles of the bands it spans whose
 //! bounds meet the rectangle and yields them once each, in mesh order, so
 //! that overlapping triangles paint in the order the mesh gives them.  A
-//! triangle with a non-finite vertex has no bounds and is yielded for every
-//! query.
+//! triangle spanning more than [`MAX_TRIANGLE_BANDS`] bands, or lying below
+//! the banded rows, is held once in an unbanded list and tested against
+//! every query; a triangle with a non-finite vertex has no bounds and is
+//! yielded for every query.
 
 use raster::Clip;
 use raster::shading::gouraud::GouraudVertex;
@@ -20,6 +22,11 @@ const BAND_ROWS: i32 = 32;
 /// them is unbanded.
 const MAX_BANDS: u32 = 1 << 14;
 
+/// Bands a triangle may span and still be banded.  The index holds one
+/// entry per band a triangle spans, so without this bound a mesh of tall
+/// triangles costs up to [`MAX_BANDS`] entries per triangle.
+const MAX_TRIANGLE_BANDS: usize = 64;
+
 /// A triangle list with a row index.
 pub struct Mesh {
     triangles: Vec<[GouraudVertex; 3]>,
@@ -27,7 +34,8 @@ pub struct Mesh {
     bounds: Vec<[f64; 4]>,
     /// For each band, the triangles meeting it, in mesh order.
     bands: Vec<Vec<u32>>,
-    /// Triangles with non-finite or out-of-range bounds.
+    /// Triangles with non-finite bounds, bounds below the banded rows, or
+    /// bounds spanning more than [`MAX_TRIANGLE_BANDS`] bands.
     unbanded: Vec<u32>,
 }
 
@@ -57,7 +65,9 @@ impl Mesh {
         let mut bands: Vec<Vec<u32>> = Vec::new();
         let mut unbanded = Vec::new();
         for (i, b) in (0u32..).zip(&bounds) {
-            let Some((first, last)) = band_range(b[1], b[3]) else {
+            let Some((first, last)) =
+                band_range(b[1], b[3]).filter(|(first, last)| last - first < MAX_TRIANGLE_BANDS)
+            else {
                 unbanded.push(i);
                 continue;
             };
@@ -83,21 +93,23 @@ impl Mesh {
     }
 
     /// The triangles whose bounds meet the rectangle of `clip`, and every
-    /// unbanded triangle, each once, in mesh order.
+    /// triangle without bounds, each once, in mesh order.
     pub fn meeting(&self, clip: &Clip) -> impl Iterator<Item = [GouraudVertex; 3]> + '_ {
         let (x0, y0) = (f64::from(clip.x_min_i), f64::from(clip.y_min_i));
         let (x1, y1) = (f64::from(clip.x_max_i) + 1.0, f64::from(clip.y_max_i) + 1.0);
         let range = band_range(y0, y1 - 1.0)
             .map(|(first, last)| (first, last.min(self.bands.len().saturating_sub(1))))
             .filter(|(first, _)| *first < self.bands.len());
+        // Non-finite bounds are NaN throughout.
+        let meets = |&i: &u32| {
+            let b = self.bounds[i as usize];
+            b[0].is_nan() || (b[2] >= x0 && b[0] <= x1 && b[3] >= y0 && b[1] <= y1)
+        };
         let mut found: Vec<u32> = range
             .into_iter()
             .flat_map(|(first, last)| self.bands[first..=last].iter().flatten().copied())
-            .filter(|&i| {
-                let b = self.bounds[i as usize];
-                b[2] >= x0 && b[0] <= x1 && b[3] >= y0 && b[1] <= y1
-            })
             .chain(self.unbanded.iter().copied())
+            .filter(meets)
             .collect();
         found.sort_unstable();
         found.dedup();
@@ -171,6 +183,15 @@ mod tests {
         let mesh = Mesh::new(vec![tri(1.0, -50.0, 10.0, 5.0)]);
         assert_eq!(ids(&mesh, &clip(0.0, 0.0, 100.0, 100.0)), [1.0]);
         assert_eq!(ids(&mesh, &clip(0.0, 10.0, 100.0, 100.0)), []);
+    }
+
+    #[test]
+    fn a_tall_triangle_takes_one_index_entry_and_meets_by_bounds() {
+        let mesh = Mesh::new(vec![tri(3.0, 0.0, 10.0, 400_000.0)]);
+        assert_eq!(mesh.bands.iter().map(Vec::len).sum::<usize>(), 0);
+        assert_eq!(mesh.unbanded, [0]);
+        assert_eq!(ids(&mesh, &clip(0.0, 9_000.0, 5.0, 9_100.0)), [3.0]);
+        assert_eq!(ids(&mesh, &clip(50.0, 9_000.0, 90.0, 9_100.0)), []);
     }
 
     #[test]
