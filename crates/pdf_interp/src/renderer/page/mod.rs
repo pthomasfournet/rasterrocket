@@ -384,6 +384,11 @@ pub struct PageRenderer<'doc> {
     /// region before (or instead of) painting.  `false` = non-zero winding,
     /// `true` = even-odd.  Cleared by every path-terminating operator.
     pending_clip: Option<bool>,
+    /// Union of the device-space glyph outlines that text shown in a
+    /// clipping render mode has added since the last `ET`; `None` when no
+    /// such text has been shown.  `ET` intersects the clip with it
+    /// (PDF §9.3.6).
+    text_clip: Option<raster::path::Path>,
     /// Font face cache for this page.
     font_cache: FontCache,
     /// Rasterise glyphs with 8-bit coverage; `false` draws them bilevel.
@@ -798,6 +803,7 @@ impl<'doc> PageRenderer<'doc> {
             gstate,
             path: None,
             pending_clip: None,
+            text_clip: None,
             font_cache,
             text_antialias: true,
             vector_antialias: true,

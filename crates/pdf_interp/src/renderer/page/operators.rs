@@ -257,7 +257,7 @@ impl PageRenderer<'_> {
 
             // ── Text objects ──────────────────────────────────────────────────
             Operator::BeginText => self.gstate.current_mut().text.begin_text(),
-            Operator::EndText => {}
+            Operator::EndText => self.end_text(),
 
             // ── Text state ────────────────────────────────────────────────────
             Operator::SetFont { name, size } => {

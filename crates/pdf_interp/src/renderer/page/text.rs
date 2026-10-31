@@ -505,13 +505,12 @@ impl PageRenderer<'_> {
             self.stroke_text_outline(&stroke_outline);
         }
 
-        // Phase 3: intersect glyph outlines into the clip path (modes 4–7).
-        //
-        // PDF §9.3.6: glyph outlines from a single text-showing operator are
-        // unioned together first, then the union is intersected with the clip
-        // under the non-zero winding rule.
-        if do_clip && !clip_outline.pts.is_empty() {
-            self.clip_path_into_gstate(&clip_outline, false);
+        // Phase 3: add the glyph outlines to the text object's clip (modes
+        // 4–7), which `ET` applies.
+        if do_clip {
+            self.text_clip
+                .get_or_insert_with(raster::path::Path::new)
+                .append(&clip_outline);
         }
 
         // Write updated text matrix back.
@@ -519,9 +518,78 @@ impl PageRenderer<'_> {
     }
 }
 
+impl PageRenderer<'_> {
+    /// End a text object (`ET`): intersect the clip with the union of the
+    /// glyph outlines that the object's text shown in a clipping render
+    /// mode added, under the non-zero winding rule (PDF §9.3.6).  Glyphs
+    /// painted within the object are not clipped by one another.  Text
+    /// shown in a clipping mode that added no outline leaves an empty clip.
+    pub(super) fn end_text(&mut self) {
+        if let Some(outline) = self.text_clip.take() {
+            self.clip_path_into_gstate(&outline, false);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::PageRenderer;
     use super::TextModeOps;
+
+    /// Run `content` on a 64 × 32 px page whose `/F1` is Helvetica and
+    /// return the number of pixels darker than mid-grey.
+    fn dark_pixels(content: &[u8]) -> usize {
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> >>",
+            ),
+            (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+        ]);
+        let mut renderer = PageRenderer::new(64, 32, &doc, (4, 0));
+        renderer.execute(&crate::content::parse(content));
+        (0..32)
+            .flat_map(|y| renderer.bitmap.row_bytes(y).to_vec())
+            .filter(|&v| v < 128)
+            .count()
+    }
+
+    /// The glyphs of every text-showing operator of a text object in a
+    /// clipping mode clip together at `ET`: two runs clip to their union,
+    /// not to the intersection of two disjoint glyph sets.
+    #[test]
+    fn a_text_object_clips_to_the_union_of_its_runs() {
+        let one_run = dark_pixels(b"BT /F1 24 Tf 7 Tr 4 8 Td (AB) Tj ET 0 0 64 32 re f");
+        let two_runs = dark_pixels(b"BT /F1 24 Tf 7 Tr 4 8 Td [(A) -10 (B)] TJ ET 0 0 64 32 re f");
+        assert!(one_run > 40, "the clip admits the glyphs: {one_run}");
+        assert!(
+            two_runs > one_run / 2,
+            "both runs admit paint: {two_runs} vs {one_run}"
+        );
+    }
+
+    /// A fill-and-clip run is not clipped by the run before it in the same
+    /// text object.
+    #[test]
+    fn a_run_is_not_clipped_by_an_earlier_run_of_its_object() {
+        let first = dark_pixels(b"BT /F1 24 Tf 4 Tr 4 8 Td (A) Tj ET");
+        let both = dark_pixels(b"BT /F1 24 Tf 4 Tr 4 8 Td (A) Tj (B) Tj ET");
+        assert!(first > 20, "{first}");
+        assert!(
+            both > first + 20,
+            "the second run paints: {both} vs {first}"
+        );
+    }
+
+    /// Clipping-mode text that adds no outline leaves an empty clip.
+    #[test]
+    fn clipping_text_without_outlines_empties_the_clip() {
+        assert_eq!(
+            dark_pixels(b"BT /F1 24 Tf 7 Tr 4 8 Td ( ) Tj ET 0 0 64 32 re f"),
+            0
+        );
+        assert_eq!(dark_pixels(b"0 0 64 32 re f").min(1), 1);
+    }
 
     #[test]
     fn text_mode_ops_follow_the_mode_table() {
