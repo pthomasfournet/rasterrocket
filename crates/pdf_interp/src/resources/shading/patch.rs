@@ -1,7 +1,8 @@
-//! Bézier/Coons patch machinery for PDF shading types 6 and 7.
+//! Coons (Type 6, PDF §8.7.4.5.7) and tensor-product (Type 7, §8.7.4.5.8)
+//! patch meshes.
 //!
-//! Provides [`decode_type6_mesh`] and [`decode_type7_mesh`] which parse the
-//! packed bit-stream and adaptively tessellate each patch into Gouraud triangles.
+//! [`decode_patch_mesh`] reads the packed patch records and tessellates each
+//! patch adaptively into Gouraud triangles.
 
 use pdf::Dictionary;
 use raster::shading::gouraud::GouraudVertex;
@@ -9,15 +10,12 @@ use raster::shading::gouraud::GouraudVertex;
 use super::mesh::{
     COLOR_DELTA, Corner, CornerSource, MIN_SUBDIVISION_EXTENT, TriangleSink, extent,
 };
-use super::{BitReader, parse_bits_per_comp, parse_bits_per_coord, transform_point};
+use super::stream::{BitReader, VertexFormat, parse_bits_per_flag};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Maximum adaptive subdivision depth (PDF §8.7.4.5).
+/// Maximum adaptive subdivision depth.
 pub(super) const MAX_PATCH_DEPTH: u8 = 6;
-
-/// PDF-legal values for `BitsPerFlag` in patch mesh shadings (Table 86).
-pub(super) const VALID_FLAG_BITS: &[u8] = &[2, 4, 8];
 
 // ── Patch struct ──────────────────────────────────────────────────────────────
 
@@ -202,70 +200,6 @@ pub(super) fn tessellate_patch<S: CornerSource>(
     }
 }
 
-// ── Stream I/O helpers ────────────────────────────────────────────────────────
-
-/// Read `n_pts` coordinate pairs from the bit stream and convert to device space.
-///
-/// Returns `None` on stream truncation (all previously decoded triangles are
-/// returned by the caller rather than discarding the whole shading).
-pub(super) fn read_patch_points(
-    reader: &mut BitReader<'_>,
-    n_pts: usize,
-    bpc: u8,
-    decode: &[f64],
-    ctm: &[f64; 6],
-    page_h: f64,
-) -> Option<Vec<[f64; 2]>> {
-    // bpc ∈ VALID_BITS ⊆ [1,32]; u64 fits the shift; cast to f64 is exact (≤ 2^32−1 < 2^53).
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "max_coord ≤ 2^32−1; f64 mantissa is 52 bits"
-    )]
-    let max_coord = ((1u64 << bpc) - 1) as f64;
-    let x_min = decode.first().copied().unwrap_or(0.0);
-    let x_max = decode.get(1).copied().unwrap_or(1.0);
-    let y_min = decode.get(2).copied().unwrap_or(0.0);
-    let y_max = decode.get(3).copied().unwrap_or(1.0);
-
-    let mut pts = Vec::with_capacity(n_pts);
-    for _ in 0..n_pts {
-        let raw_x = reader.read_bits(bpc)?;
-        let raw_y = reader.read_bits(bpc)?;
-        // u32 → f64 is always lossless (u32 < 2^32 ≤ 2^53 mantissa bits).
-        let ux = (f64::from(raw_x) / max_coord).mul_add(x_max - x_min, x_min);
-        let uy = (f64::from(raw_y) / max_coord).mul_add(y_max - y_min, y_min);
-        pts.push(<[f64; 2]>::from(transform_point(ctm, ux, uy, page_h)));
-    }
-    Some(pts)
-}
-
-/// Read `n_colors` corner colours of `source.components()` fields each from
-/// the bit stream.
-///
-/// Returns `None` on stream truncation.
-pub(super) fn read_patch_colors<S: CornerSource>(
-    reader: &mut BitReader<'_>,
-    n_colors: usize,
-    bpcomp: u8,
-    decode: &[f64],
-    source: &S,
-) -> Option<Vec<S::Corner>> {
-    let mut raw = vec![0u32; source.components()];
-    let mut colors = Vec::with_capacity(n_colors);
-    for _ in 0..n_colors {
-        for field in &mut raw {
-            *field = reader.read_bits(bpcomp)?;
-        }
-        colors.push(super::decode_corner(source, &raw, bpcomp, decode));
-    }
-    Some(colors)
-}
-
-/// Validate and extract `BitsPerFlag` from a patch mesh shading dictionary.
-pub(super) fn parse_bits_per_flag(sh: &Dictionary, tag: &str) -> Option<u8> {
-    super::parse_bits_field(sh, b"BitsPerFlag", VALID_FLAG_BITS, "BitsPerFlag", tag)
-}
-
 // ── Patch assembly — Type 6 ───────────────────────────────────────────────────
 
 /// Assign the 12 boundary stream points into the Type 6 4×4 grid for flag=0.
@@ -339,7 +273,7 @@ pub(super) fn fill_type6_interior<C>(p: &mut Patch<C>) {
 /// 8 new boundary points from `pts` and 2 new colours from `colors`.
 /// Interior points are derived after all boundary points are placed.
 pub(super) fn apply_flag_type6<C: Corner>(
-    flag: u8,
+    flag: u32,
     prev: &Patch<C>,
     pts: &[[f64; 2]],
     colors: &[C],
@@ -458,7 +392,7 @@ pub(super) fn build_patch_type7<C: Corner>(pts: &[[f64; 2]], colors: &[C]) -> Pa
 /// For Type 7, the 4 interior control points are always read from the stream
 /// (as part of the 12 new points), never copied from the previous patch.
 pub(super) fn apply_flag_type7<C: Corner>(
-    flag: u8,
+    flag: u32,
     prev: &Patch<C>,
     pts: &[[f64; 2]],
     colors: &[C],
@@ -540,133 +474,101 @@ pub(super) fn apply_flag_type7<C: Corner>(
     p
 }
 
-// ── Top-level mesh decoders ───────────────────────────────────────────────────
+// ── Top-level mesh decoder ────────────────────────────────────────────────────
 
-/// Decode a Type 6 (Coons patch mesh) shading stream.
-///
-/// Each record: `BitsPerFlag`-bit flag, then 12 (flag=0) or 8 (flag≥1) coordinate
-/// pairs at `BitsPerCoordinate` bits each, then 4 (flag=0) or 2 (flag≥1) colours
-/// at `BitsPerComponent` bits per channel; every record starts on a byte
-/// boundary. Interior control points are derived from
-/// the boundary using the standard Coons formula. Each patch is tessellated into
-/// Gouraud triangles via adaptive subdivision.
-pub(super) fn decode_type6_mesh<S: CornerSource>(
-    sh: &Dictionary,
-    data: &[u8],
-    source: &S,
-    decode: &[f64],
-    ctm: &[f64; 6],
-    page_h: f64,
-    triangles: &mut TriangleSink,
-) {
-    let Some(bpc) = parse_bits_per_coord(sh, "type6") else {
-        return;
-    };
-    let Some(bpcomp) = parse_bits_per_comp(sh, "type6") else {
-        return;
-    };
-    let Some(bpf) = parse_bits_per_flag(sh, "type6") else {
-        return;
-    };
-    let mut reader = BitReader::new(data);
-    let mut prev: Option<Patch<S::Corner>> = None;
+/// The two patch mesh types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PatchKind {
+    /// Type 6: the 12 boundary control points; the interior is derived.
+    Coons,
+    /// Type 7: all 16 control points.
+    Tensor,
+}
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "bpf ∈ {2,4,8}; value fits u8"
-    )]
-    while !triangles.is_full()
-        && let Some(flag_raw) = reader.read_bits(bpf)
-    {
-        let flag = flag_raw as u8;
+impl PatchKind {
+    const fn shading_type(self) -> u8 {
+        match self {
+            Self::Coons => 6,
+            Self::Tensor => 7,
+        }
+    }
 
-        let (n_pts, n_colors): (usize, usize) = if flag == 0 { (12, 4) } else { (8, 2) };
-
-        let Some(pts) = read_patch_points(&mut reader, n_pts, bpc, decode, ctm, page_h) else {
-            break;
+    /// Control points a record carries: one patch from scratch (flag 0),
+    /// or one sharing an edge, its four points, with the previous patch.
+    const fn points(self, flag: u32) -> usize {
+        let all = match self {
+            Self::Coons => 12,
+            Self::Tensor => 16,
         };
-        let Some(colors) = read_patch_colors(&mut reader, n_colors, bpcomp, decode, source) else {
-            break;
-        };
-        reader.align();
-
-        let patch = match (flag, &prev) {
-            (0, _) => build_patch_type6(&pts, &colors),
-            (1..=3, Some(p)) => apply_flag_type6(flag, p, &pts, &colors),
-            (f, None) => {
-                log::debug!("shading/type6: flag={f} with no previous patch — skipping record");
-                continue;
-            }
-            (f, _) => {
-                log::debug!("shading/type6: unknown flag {f} — skipping record");
-                continue;
-            }
-        };
-
-        tessellate_patch(source, patch, triangles);
-        prev = Some(patch);
+        if flag == 0 { all } else { all - 4 }
     }
 }
 
-/// Decode a Type 7 (tensor-product patch mesh) shading stream.
+/// Decode a Type 6 or 7 patch mesh stream into `out`.
 ///
-/// Like Type 6 but all 16 control points per patch are read directly from the
-/// stream (4 interior points are not derived). Flag semantics, colour handling
-/// and record alignment are identical to Type 6.
-pub(super) fn decode_type7_mesh<S: CornerSource>(
+/// Each record (PDF §8.7.4.5.7) is a `BitsPerFlag`-bit flag, then 12 or 16
+/// control points and 4 corner colours for flag 0, or 8 or 12 points and 2
+/// colours for flags 1–3, which share an edge with the previous patch; every
+/// record starts on a byte boundary.  A record that cannot be placed (a
+/// shared-edge flag with no previous patch, or a flag above 3) is skipped.
+pub(super) fn decode_patch_mesh<S: CornerSource>(
     sh: &Dictionary,
     data: &[u8],
     source: &S,
-    decode: &[f64],
-    ctm: &[f64; 6],
-    page_h: f64,
-    triangles: &mut TriangleSink,
+    format: &VertexFormat<'_>,
+    kind: PatchKind,
+    out: &mut TriangleSink,
 ) {
-    let Some(bpc) = parse_bits_per_coord(sh, "type7") else {
-        return;
-    };
-    let Some(bpcomp) = parse_bits_per_comp(sh, "type7") else {
-        return;
-    };
-    let Some(bpf) = parse_bits_per_flag(sh, "type7") else {
+    let shading_type = kind.shading_type();
+    let Some(bpf) = parse_bits_per_flag(sh, shading_type) else {
         return;
     };
     let mut reader = BitReader::new(data);
+    let mut fields = vec![0.0; source.components()];
+    let mut pts: Vec<[f64; 2]> = Vec::with_capacity(16);
+    let mut colors: Vec<S::Corner> = Vec::with_capacity(4);
     let mut prev: Option<Patch<S::Corner>> = None;
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "bpf ∈ {2,4,8}; value fits u8"
-    )]
-    while !triangles.is_full()
-        && let Some(flag_raw) = reader.read_bits(bpf)
+    while !out.is_full()
+        && let Some(flag) = reader.read_bits(bpf)
     {
-        let flag = flag_raw as u8;
-
-        let (n_pts, n_colors): (usize, usize) = if flag == 0 { (16, 4) } else { (12, 2) };
-
-        let Some(pts) = read_patch_points(&mut reader, n_pts, bpc, decode, ctm, page_h) else {
+        pts.clear();
+        colors.clear();
+        let n_colors = if flag == 0 { 4 } else { 2 };
+        let complete = (0..kind.points(flag)).all(|_| {
+            format
+                .read_point(&mut reader)
+                .map(|pt| pts.push(pt))
+                .is_some()
+        }) && (0..n_colors).all(|_| {
+            format
+                .read_corner(&mut reader, source, &mut fields)
+                .map(|c| colors.push(c))
+                .is_some()
+        });
+        if !complete {
             break;
-        };
-        let Some(colors) = read_patch_colors(&mut reader, n_colors, bpcomp, decode, source) else {
-            break;
-        };
+        }
         reader.align();
 
-        let patch = match (flag, &prev) {
-            (0, _) => build_patch_type7(&pts, &colors),
-            (1..=3, Some(p)) => apply_flag_type7(flag, p, &pts, &colors),
-            (f, None) => {
-                log::debug!("shading/type7: flag={f} with no previous patch — skipping record");
+        let patch = match (flag, &prev, kind) {
+            (0, _, PatchKind::Coons) => build_patch_type6(&pts, &colors),
+            (0, _, PatchKind::Tensor) => build_patch_type7(&pts, &colors),
+            (1..=3, Some(p), PatchKind::Coons) => apply_flag_type6(flag, p, &pts, &colors),
+            (1..=3, Some(p), PatchKind::Tensor) => apply_flag_type7(flag, p, &pts, &colors),
+            (1..=3, None, _) => {
+                log::debug!(
+                    "shading/type{shading_type}: flag {flag} with no previous patch — skipping record"
+                );
                 continue;
             }
-            (f, _) => {
-                log::debug!("shading/type7: unknown flag {f} — skipping record");
+            _ => {
+                log::debug!("shading/type{shading_type}: unknown flag {flag} — skipping record");
                 continue;
             }
         };
 
-        tessellate_patch(source, patch, triangles);
+        tessellate_patch(source, patch, out);
         prev = Some(patch);
     }
 }
