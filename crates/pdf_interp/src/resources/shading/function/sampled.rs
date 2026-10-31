@@ -21,11 +21,13 @@ pub(super) struct Sampled {
     /// `Size`; `None` when absent or holding a non-integer entry.
     size: Option<Vec<usize>>,
     bits_per_sample: Option<u32>,
-    /// Flat `[lo hi …]` numbers of `Domain`, `Encode`, `Decode`, `Range`.
+    /// Flat `[lo hi …]` numbers of `Domain`.
     domain: Vec<f64>,
-    encode: Vec<f64>,
-    decode: Vec<f64>,
-    range: Vec<f64>,
+    /// `Encode` intervals, one per input.
+    encode: Vec<(f64, f64)>,
+    /// Output intervals, one per output: `Decode`, then `Range` for the
+    /// outputs `Decode` does not cover.
+    decode: Vec<(f64, f64)>,
     /// The decoded sample stream; `None` for a dictionary without one.
     samples: Option<Vec<u8>>,
 }
@@ -33,6 +35,8 @@ pub(super) struct Sampled {
 impl Sampled {
     /// Read the entries of `dict`; `samples` is its decoded stream.
     pub(super) fn compile(dict: &Dictionary, samples: Option<Vec<u8>>) -> Self {
+        let decode = pairs(&numbers(dict, b"Decode"));
+        let range = pairs(&numbers(dict, b"Range"));
         Self {
             size: dict
                 .get(b"Size")
@@ -40,9 +44,10 @@ impl Sampled {
                 .and_then(|a| a.iter().map(|o| o.as_u32().map(|v| v as usize)).collect()),
             bits_per_sample: dict.get(b"BitsPerSample").and_then(Object::as_u32),
             domain: numbers(dict, b"Domain"),
-            encode: numbers(dict, b"Encode"),
-            decode: numbers(dict, b"Decode"),
-            range: numbers(dict, b"Range"),
+            encode: pairs(&numbers(dict, b"Encode")),
+            decode: (0..decode.len().max(range.len()))
+                .filter_map(|ch| decode.get(ch).or_else(|| range.get(ch)).copied())
+                .collect(),
             samples,
         }
     }
@@ -76,10 +81,6 @@ impl Sampled {
             return None;
         }
 
-        let encode = pairs(&self.encode);
-        let decode = pairs(&self.decode);
-        let range = pairs(&self.range);
-
         // Per axis: lower grid index, upper grid index, interpolation weight of
         // the upper index, and the axis stride in samples.
         let mut axes = Vec::with_capacity(dims);
@@ -94,7 +95,7 @@ impl Sampled {
                 reason = "a grid axis that fits the sample stream is far below 2^52"
             )]
             let last = (size[axis] - 1) as f64;
-            let (e0, e1) = encode.get(axis).copied().unwrap_or((0.0, last));
+            let (e0, e1) = self.encode.get(axis).copied().unwrap_or((0.0, last));
             let unit = if d1 > d0 {
                 (input.clamp(d0, d1) - d0) / (d1 - d0)
             } else {
@@ -139,11 +140,7 @@ impl Sampled {
             out.into_iter()
                 .enumerate()
                 .map(|(ch, v)| {
-                    let (lo, hi) = decode
-                        .get(ch)
-                        .or_else(|| range.get(ch))
-                        .copied()
-                        .unwrap_or((0.0, 1.0));
+                    let (lo, hi) = self.decode.get(ch).copied().unwrap_or((0.0, 1.0));
                     (v / max_sample).mul_add(hi - lo, lo)
                 })
                 .collect(),
