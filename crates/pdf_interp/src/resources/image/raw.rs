@@ -5,6 +5,8 @@
 //! samples in its own colour space; colour conversion is the caller's
 //! (`ImageColour::convert`).
 
+use std::borrow::Cow;
+
 use pdf::{Dictionary, Object};
 
 use super::bitpack::{downsample_16bpp, expand_nbpp, expand_nbpp_indexed, unpack_packed_bits};
@@ -106,20 +108,27 @@ fn raw_colour_key_mask(
     let Ok(bits @ (1 | 2 | 4 | 8 | 16)) = usize::try_from(bpc) else {
         return None;
     };
-    let data = zero_extended(data, width, height, bpc, components)?;
+    // Every byte offset below is less than the declared length, which
+    // `declared_len` computes without overflow.
+    let total = declared_len(width, height, bpc, components)?;
+    let data = &data[..data.len().min(total)];
+    let row_bytes = declared_len(width, 1, bpc, components)?;
     let w = usize::try_from(width).ok()?;
-    // `zero_extended` checked that this product does not overflow.
-    let row_bytes = (w * components * bits).div_ceil(8);
+    // A byte past the end of short data is 0, as for decoding.
+    let byte = |i: usize| data.get(i).copied().unwrap_or(0);
     colour_key_mask_with(ranges, components, width, height, |p, c| {
-        let row = &data[(p / w) * row_bytes..];
+        let row = (p / w) * row_bytes;
         let i = (p % w) * components + c;
         match bits {
-            8 => u32::from(row[i]),
-            16 => u32::from(u16::from_be_bytes([row[2 * i], row[2 * i + 1]])),
+            8 => u32::from(byte(row + i)),
+            16 => u32::from(u16::from_be_bytes([
+                byte(row + 2 * i),
+                byte(row + 2 * i + 1),
+            ])),
             _ => {
                 let bit = i * bits;
                 let mask = (1u8 << bits) - 1;
-                u32::from((row[bit / 8] >> (8 - bits - bit % 8)) & mask)
+                u32::from((byte(row + bit / 8) >> (8 - bits - bit % 8)) & mask)
             }
         }
     })
@@ -161,35 +170,23 @@ fn short_stream(
     })
 }
 
-/// `data` extended with zero bytes to the length `height` rows of `width`
-/// pixels of `components` samples at `bpc` bits each occupy, each row
-/// padded to a whole byte (PDF §8.9.3).
+/// 8-bit samples of `data`, extended with zero bytes to the length
+/// `height` rows of `width` pixels of `components` samples occupy.
 ///
 /// A raw stream shorter than its dictionary declares (truncated or damaged
 /// transport data) keeps the rows it holds; every missing sample is 0.
-/// Data of at least the full length, or of an unsupported depth, is
-/// borrowed unchanged.  `None` when the length overflows `usize`.
-fn zero_extended(
+/// Data of at least the full length is borrowed unchanged.  `None` when
+/// the length overflows `usize` or the padded copy cannot be allocated.
+fn zero_extended_8bpc(
     data: &[u8],
     width: u32,
     height: u32,
-    bpc: i64,
     components: usize,
-) -> Option<std::borrow::Cow<'_, [u8]>> {
-    use std::borrow::Cow;
-    if !matches!(bpc, 1 | 2 | 4 | 8 | 16) {
-        return Some(Cow::Borrowed(data));
-    }
-    let needed = declared_len(width, height, bpc, components)?;
-    let bits = bpc;
+) -> Option<Cow<'_, [u8]>> {
+    let needed = declared_len(width, height, 8, components)?;
     if data.len() >= needed {
         return Some(Cow::Borrowed(data));
     }
-    log::warn!(
-        "image: raw data short ({} of {needed} bytes for {width}×{height}×{components} \
-         at {bits} bpc), missing samples are 0",
-        data.len()
-    );
     let mut padded = super::try_with_capacity(needed)?;
     padded.extend_from_slice(data);
     padded.resize(needed, 0);
@@ -198,28 +195,23 @@ fn zero_extended(
 
 /// Expand `bpc`-bit samples of `components`-component pixels to one byte
 /// per sample (PDF §8.9.3).  8-bit data of the full length is borrowed
-/// unchanged; short data is first extended by [`zero_extended`].  `None`
-/// for an unsupported depth.
+/// unchanged.  Samples past the end of short data are 0: the expanders
+/// read missing bytes as 0, so no padded copy of the input is made.
+/// `None` for an unsupported depth.
 fn expand_to_8bpc(
     data: &[u8],
     width: u32,
     height: u32,
     bpc: i64,
     components: usize,
-) -> Option<std::borrow::Cow<'_, [u8]>> {
-    use std::borrow::Cow;
-    let full = zero_extended(data, width, height, bpc, components)?;
-    if bpc == 8 {
-        return Some(full);
-    }
-    let data = full.as_ref();
+) -> Option<Cow<'_, [u8]>> {
     Some(match bpc {
+        8 => return zero_extended_8bpc(data, width, height, components),
         // bpc=1 packs one bit per sample, one sample per component.
         // A row holds `width × components` samples (RGB: 3 bits/px,
         // CMYK: 4 bits/px).
         1 => {
-            let width_usize = usize::try_from(width).ok()?;
-            let samples_per_row = width_usize.checked_mul(components)?;
+            let samples_per_row = usize::try_from(width).ok()?.checked_mul(components)?;
             Cow::Owned(unpack_packed_bits(data, 1, samples_per_row, height, |v| {
                 if v == 0 { 0x00 } else { 0xFF }
             })?)
@@ -239,18 +231,11 @@ fn expand_to_8bpc(
 /// `bpc ∈ {1, 2, 4, 8}`); at 8 bits they are the data.  `None` for any
 /// other depth.
 fn expand_indices(data: &[u8], width: u32, height: u32, bpc: i64) -> Option<Vec<u8>> {
-    let full = zero_extended(data, width, height, bpc, 1)?;
     match bpc {
-        1 | 2 | 4 => {
-            #[expect(
-                clippy::cast_sign_loss,
-                clippy::cast_possible_truncation,
-                reason = "bpc ∈ {1, 2, 4} — positive and fits u32"
-            )]
-            let bits = bpc as u32;
-            expand_nbpp_indexed(&full, width, height, bits)
-        }
-        8 => Some(full.into_owned()),
+        1 => expand_nbpp_indexed(data, width, height, 1),
+        2 => expand_nbpp_indexed(data, width, height, 2),
+        4 => expand_nbpp_indexed(data, width, height, 4),
+        8 => Some(zero_extended_8bpc(data, width, height, 1)?.into_owned()),
         other => {
             log::debug!("image: Indexed with {other} bpc not supported");
             None
@@ -516,6 +501,29 @@ mod tests {
         let s = decode_raw(&[0xF0], 2, 1, false, &dict, &colour).unwrap();
         assert_eq!(s.data.as_cpu().unwrap(), &[0xFF, 0x00]);
         assert_eq!(s.smask.unwrap().alpha(), &[0x00, 0xFF]);
+    }
+
+    /// Short data reads as zero samples at every depth, in the samples and
+    /// in the colour-key comparison.
+    #[test]
+    fn short_data_is_zero_at_every_depth() {
+        let s = raw("/DeviceGray", 16, &[0xAB, 0xCD, 0x12], 3, 1);
+        assert_eq!(s.data.as_cpu().unwrap(), &[0xAB, 0x00, 0x00]);
+        let s = raw("/DeviceGray", 4, &[0xF0], 2, 2);
+        assert_eq!(s.data.as_cpu().unwrap(), &[0xFF, 0x00, 0x00, 0x00]);
+        let doc = empty_doc();
+        for bpc in [1, 2, 4, 8, 16] {
+            let mut dict = Dictionary::new();
+            dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            dict.set("BitsPerComponent", Object::Integer(bpc));
+            dict.set(
+                "Mask",
+                Object::Array(vec![Object::Integer(0), Object::Integer(0)]),
+            );
+            let colour = ImageColour::resolve(&doc, &dict, None);
+            let s = decode_raw(&[], 3, 2, false, &dict, &colour).expect("decodes");
+            assert_eq!(s.smask.expect("mask").alpha(), &[0; 6], "{bpc} bpc");
+        }
     }
 
     // ── Stencil masks ─────────────────────────────────────────────────────────

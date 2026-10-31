@@ -121,8 +121,9 @@ pub(super) fn expand_nbpp_indexed(
 /// byte.  A value of 0xFFFF maps to 0xFF; 0x0100 maps to 0x01; 0x00FF maps to 0x00.
 /// `components` is the number of samples per pixel.
 ///
-/// Returns `None` if `width × height × components` overflows `usize`, or if
-/// `data` is too short for the declared image dimensions.
+/// Samples past the end of short `data` are 0.  Returns `None` if
+/// `width × height × components` overflows `usize` or the output cannot be
+/// allocated.
 pub(super) fn downsample_16bpp(
     data: &[u8],
     width: u32,
@@ -133,17 +134,16 @@ pub(super) fn downsample_16bpp(
     let height_usize = usize::try_from(height).ok()?;
     let npixels = width_usize.checked_mul(height_usize)?;
     let n_samples = npixels.checked_mul(components)?;
-    let needed = n_samples.checked_mul(2)?;
-    if data.len() < needed {
-        log::warn!(
-            "image: 16bpp data too short ({} bytes, need {needed} for {width}×{height}×{components}×2)",
-            data.len()
-        );
-        return None;
-    }
     // Each 16-bit sample is big-endian; take the high byte (bytes 0, 2, 4, …).
     let mut out = super::try_with_capacity(n_samples)?;
-    out.extend(data[..needed].as_chunks::<2>().0.iter().map(|pair| pair[0]));
+    out.extend(
+        data.as_chunks::<2>()
+            .0
+            .iter()
+            .take(n_samples)
+            .map(|pair| pair[0]),
+    );
+    out.resize(n_samples, 0);
     Some(out)
 }
 
@@ -248,8 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn downsample_16bpp_short_input_returns_none() {
-        // 1 pixel RGB 16bpp needs 6 bytes; 4 bytes is too short.
-        assert!(downsample_16bpp(&[0u8; 4], 1, 1, 3).is_none());
+    fn downsample_16bpp_short_input_is_zero_extended() {
+        // 1 pixel RGB 16bpp needs 6 bytes; the missing third sample is 0.
+        let out = downsample_16bpp(&[0xAB, 0xCD, 0x12, 0x34, 0x56], 1, 1, 3).unwrap();
+        assert_eq!(out, [0xAB, 0x12, 0x00]);
     }
 }
