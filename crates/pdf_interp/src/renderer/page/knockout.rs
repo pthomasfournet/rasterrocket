@@ -36,13 +36,7 @@ impl PageRenderer<'_> {
     ) -> R {
         let region = region
             .filter(|_| self.group.knockout && alpha > 0 && self.bitmap.has_alpha())
-            .and_then(|r| {
-                r.intersect(PixelRect::of_clip(
-                    &self.gstate.current().clip,
-                    self.width,
-                    self.height,
-                )?)
-            });
+            .and_then(|r| self.within_clip(r));
         let Some(region) = region else {
             return paint(self);
         };

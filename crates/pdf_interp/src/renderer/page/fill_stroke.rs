@@ -17,7 +17,6 @@ use raster::types::BlendMode;
 
 use super::PageRenderer;
 use super::pixel_rect::PixelRect;
-use super::shading_paint;
 use crate::renderer::color::RasterColor;
 
 impl PageRenderer<'_> {
@@ -29,22 +28,14 @@ impl PageRenderer<'_> {
         let rect = self
             .stroke_bounds(path, line_width)
             .filter(|_| knockout)
-            .and_then(|r| {
-                r.intersect(PixelRect::of_clip(
-                    &self.gstate.current().clip,
-                    self.width,
-                    self.height,
-                )?)
-            });
+            .and_then(|r| self.within_clip(r));
         let Some(rect) = rect else {
             self.fill_path(path, even_odd);
             self.stroke_path(path);
             return;
         };
         let coverage = self.stroke_coverage(path, line_width, rect);
-        let (x0, y0) = (f64::from(rect.x0), f64::from(rect.y0));
-        let (x1, y1) = (f64::from(rect.x1), f64::from(rect.y1));
-        let area = shading_paint::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]);
+        let area = rect.to_path();
         self.paint_knocked_out(
             rect,
             &coverage,

@@ -4,16 +4,21 @@
 //! over a decoded operator sequence, and calls into the `raster` crate for
 //! each painting operator.
 //!
-//! Sub-modules (all private; named for orientation only):
-//! - `operators` — `execute_one` operator dispatch table.
-//! - `text` — `show_text` and `show_text_type3` rendering.
-//! - `patterns` — `resolve_pattern`, `resolve_fill_pattern` and `render_pattern_tile`.
+//! Sub-modules (all private):
+//! - `operators` — the operator dispatch table and marked-content tracking.
+//! - `fill_stroke` — the fill-and-stroke operators as one object.
+//! - `text`, `text_ops`, `type3` — text showing, its text-space arithmetic
+//!   and Type 3 glyph descriptions.
+//! - `patterns`, `pattern_memo` — tiling and shading patterns and their
+//!   per-page memo.
 //! - `shading_paint` — the `sh` operator and shading-pattern fills and strokes.
 //! - `soft_mask` — `ExtGState` soft masks and the painting of one object under them.
 //! - `knockout` — the painting of one object in a knockout group.
-//! - `text_ops` — `GlyphRecord` and `text_to_device` helpers.
-//! - `annotations` — annotation appearance stream rendering.
-//! - `gpu_ops` — GPU-accelerated fill dispatch.
+//! - `image_memo`, `image_reduce`, `image_sampler` — image decode memo,
+//!   area-averaged reduction and device-pixel sampling.
+//! - `pixel_rect` — rectangles of device pixels.
+//! - `annotations` — annotation appearances, stored and synthesised.
+//! - `gpu_ops`, `vk_ops` — CUDA and Vulkan antialiased fill dispatch.
 //!
 //! # What is implemented
 //!
@@ -26,26 +31,26 @@
 //! - Text showing: `Tj TJ ' "` (glyphs from the font crate)
 //! - Font encoding `Differences` array — resolved via Adobe Glyph List
 //!
-//! - Type 0 / `CIDFont` composite fonts — `Encoding` `CMap` (including
-//!   embedded stream `CMaps` and `Identity-H`/`V`), `CIDToGIDMap`, `DW`/`W`
-//!   advance widths, and multi-byte character code iteration
+//! - Type 0 / `CIDFont` composite fonts — `Encoding` `CMap` (embedded
+//!   stream `CMaps`, `Identity-H`/`V` and the predefined CJK `CMaps`),
+//!   `CIDToGIDMap`, `DW`/`W` advance widths, vertical writing mode, and
+//!   multi-byte character code iteration
 //!
 //! - Text render modes 4–7 — fill/stroke painting combined with text-as-clip
 //!   (`glyph_path` outlines accumulated into the clip region per PDF §9.3.6)
 //! - `PatternType` 1 tiling patterns and `PatternType` 2 shading patterns via `scn`/`SCN`
 //! - Type 3 paint-procedure fonts — `CharProc` content streams, `d0`/`d1` metrics
+//! - `ExtGState` alpha constants, blend modes, soft masks and transfer
+//!   functions
 //!
 //! - Optional content (layers) — `BDC /OC` sequences and `XObjects` and
 //!   annotations carrying `/OC` are skipped when hidden under the default
 //!   configuration (see [`crate::optional_content`])
-//! - Annotation rendering — `AP/N` normal appearance streams blitted after page content
-//! - Transparency groups — Form `XObjects` with `Group /S /Transparency` rendered into an
-//!   intermediate bitmap via `raster::transparency` and composited back (PDF §11.6.6)
-//!
-//! # Not yet implemented
-//!
-//! - `ExtGState` blend mode (`BM`) — only `Normal` is currently mapped
-//! - Type 0 named `CMaps` other than `Identity-H`/`V` (e.g. `/GB-EUC-H`)
+//! - Annotation rendering — `AP/N` normal appearance streams drawn after page
+//!   content, and synthesised appearances where `/AP` is absent
+//! - Transparency groups — Form `XObjects` with `Group /S /Transparency`, isolated
+//!   and knockout, and the page group, rendered into an intermediate bitmap via
+//!   `raster::transparency` and composited back (PDF §11.6.6)
 
 mod annotations;
 mod fill_stroke;
@@ -240,6 +245,13 @@ fn transform_path(path: &raster::path::Path, m: &[f64; 6]) -> raster::path::Path
             .collect(),
         ..path.clone()
     }
+}
+
+/// The area scale `√|det|` of the linear part of `m`: the factor by which
+/// it scales lengths on average.  `None` for a singular or non-finite `m`,
+/// whose inverse [`invert_affine`] does not give.
+fn area_scale(m: &[f64; 6]) -> Option<f64> {
+    invert_affine(m).map(|_| m[0].mul_add(m[3], -(m[1] * m[2])).abs().sqrt())
 }
 
 /// Device-pixel extent `(width, height)` of an image drawn under `ctm`: the
@@ -1549,8 +1561,7 @@ impl<'doc> PageRenderer<'doc> {
         // colour is already mapped through the transfer function; a
         // pattern's colours map in the pipe.
         let pat_name = gs.fill_pattern.clone();
-        let solid_color = gs.painted_fill_color().to_vec();
-        let _ = gs; // end the immutable gstate borrow before the &mut self pattern resolve
+        let solid_color = gs.painted_fill_color();
 
         // A pattern colour that does not resolve, or whose object lies
         // outside the clip, paints nothing: the fill colour is not a
@@ -1627,7 +1638,6 @@ impl<'doc> PageRenderer<'doc> {
                 self.vector_antialias,
             );
         }
-        drop(tiled);
     }
 
     /// Attempt to rasterise `path` with the GPU scanline-AA kernel.
@@ -1693,13 +1703,7 @@ impl<'doc> PageRenderer<'doc> {
         if line_width <= 0.0 {
             return line_width;
         }
-        let device = self.device_matrix();
-        let scale = invert_affine(&device).map_or(1.0, |_| {
-            device[0]
-                .mul_add(device[3], -(device[1] * device[2]))
-                .abs()
-                .sqrt()
-        });
+        let scale = area_scale(&self.device_matrix()).unwrap_or(1.0);
         line_width.max(1.0 / scale)
     }
 
@@ -1725,7 +1729,6 @@ impl<'doc> PageRenderer<'doc> {
         line_width: f64,
         region: Option<PixelRect>,
     ) {
-        // Clone all graphics state data before any mutable borrow.
         let gs = self.gstate.current();
         if gs.stroke_paints_nothing() {
             return;
@@ -1741,8 +1744,7 @@ impl<'doc> PageRenderer<'doc> {
         let line_dash = gs.dash.0.clone();
         let line_dash_phase = gs.dash.1;
         let pat_name = gs.stroke_pattern.clone();
-        let solid_color = gs.painted_stroke_color().to_vec();
-        // gs immutable borrow ends here.
+        let solid_color = gs.painted_stroke_color();
 
         // PDF §8.4.3.2 / §8.4.3.6: the line width and dash lengths are
         // user-space distances under the CTM at stroke time.  The path is held
@@ -1752,16 +1754,10 @@ impl<'doc> PageRenderer<'doc> {
         // to a line or point, so it is stroked in device space unchanged.
         let device = self.device_matrix();
         let device_flatness = flatness;
-        let (path, matrix, flatness) = invert_affine(&device).map_or_else(
-            || (path.clone(), DEVICE_MATRIX, flatness),
-            |inv| {
-                let scale = device[0]
-                    .mul_add(device[3], -(device[1] * device[2]))
-                    .abs()
-                    .sqrt();
-                (transform_path(path, &inv), device, flatness / scale)
-            },
-        );
+        let (path, matrix, flatness) = match (invert_affine(&device), area_scale(&device)) {
+            (Some(inv), Some(scale)) => (transform_path(path, &inv), device, flatness / scale),
+            _ => (path.clone(), DEVICE_MATRIX, flatness),
+        };
 
         let params = StrokeParams {
             line_width,
@@ -1815,7 +1811,6 @@ impl<'doc> PageRenderer<'doc> {
             &matrix,
             &params,
         );
-        drop(tiled);
     }
 
     // ── XObject rendering ─────────────────────────────────────────────────────
@@ -2340,9 +2335,7 @@ impl<'doc> PageRenderer<'doc> {
                     .map_or(0, |taps| u8::MAX - taps.blend(sample))
             })
             .collect();
-        let (x0, y0) = (f64::from(rect.x0), f64::from(rect.y0));
-        let (x1, y1) = (f64::from(rect.x1), f64::from(rect.y1));
-        let area = shading_paint::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]);
+        let area = rect.to_path();
         self.paint_through_coverage(rect, &coverage, |r| r.fill_path(&area, false));
         true
     }
@@ -2781,14 +2774,14 @@ impl<'a> ImageCompositor<'a> {
 /// in place: each pixel becomes `c·α + 255·(1 − α)`, and the alpha plane is
 /// dropped.  A bitmap without an alpha plane is left as it is.
 fn composite_onto_white(bitmap: &mut Bitmap<Rgb8>) {
-    let Some(alpha) = bitmap.alpha_plane().map(<[u8]>::to_vec) else {
+    if !bitmap.has_alpha() {
         return;
-    };
-    let width = bitmap.width as usize;
+    }
     for y in 0..bitmap.height {
-        let row = bitmap.row_bytes_mut(y);
-        let alpha_row = &alpha[y as usize * width..(y as usize + 1) * width];
-        for (px, &a) in row.as_chunks_mut::<3>().0.iter_mut().zip(alpha_row) {
+        let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
+            return;
+        };
+        for (px, &a) in row.as_chunks_mut::<3>().0.iter_mut().zip(&*alpha_row) {
             if a == u8::MAX {
                 continue;
             }

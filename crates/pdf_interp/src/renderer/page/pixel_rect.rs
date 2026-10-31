@@ -85,6 +85,13 @@ impl PixelRect {
     pub const fn area(self) -> u64 {
         self.width() as u64 * self.height() as u64
     }
+
+    /// The rectangle as a closed device-space path.
+    pub fn to_path(self) -> raster::path::Path {
+        let (x0, y0) = (f64::from(self.x0), f64::from(self.y0));
+        let (x1, y1) = (f64::from(self.x1), f64::from(self.y1));
+        super::shading_paint::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    }
 }
 
 impl PageRenderer<'_> {
@@ -96,8 +103,16 @@ impl PageRenderer<'_> {
         points: impl IntoIterator<Item = (f64, f64)>,
         margin: f64,
     ) -> Option<PixelRect> {
-        let clip = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)?;
-        clip.intersect(PixelRect::around(points, margin, self.width, self.height)?)
+        self.within_clip(PixelRect::around(points, margin, self.width, self.height)?)
+    }
+
+    /// The pixels of `rect` the current clip's rectangle admits.
+    pub(super) fn within_clip(&self, rect: PixelRect) -> Option<PixelRect> {
+        rect.intersect(PixelRect::of_clip(
+            &self.gstate.current().clip,
+            self.width,
+            self.height,
+        )?)
     }
 }
 
