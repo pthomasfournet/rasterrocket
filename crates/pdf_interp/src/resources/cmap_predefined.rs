@@ -9,296 +9,80 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use super::cmap::{CMap, parse_cmap_nested};
 use super::font_substitute::Script;
 
+/// One vendored `CMap`: its name, character collection and the
+/// zlib-compressed resource file `cmaps/<name>.z`.
+macro_rules! cmap {
+    ($name:literal, $script:ident) => {
+        (
+            $name,
+            Script::$script,
+            include_bytes!(concat!("../../cmaps/", $name, ".z")),
+        )
+    };
+}
+
 /// Name, character collection and zlib-compressed source of every
 /// vendored `CMap`.
 static CMAPS: &[(&str, Script, &[u8])] = &[
-    (
-        "83pv-RKSJ-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/83pv-RKSJ-H.z"),
-    ),
-    (
-        "90ms-RKSJ-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/90ms-RKSJ-H.z"),
-    ),
-    (
-        "90ms-RKSJ-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/90ms-RKSJ-V.z"),
-    ),
-    (
-        "90msp-RKSJ-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/90msp-RKSJ-H.z"),
-    ),
-    (
-        "90msp-RKSJ-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/90msp-RKSJ-V.z"),
-    ),
-    (
-        "90pv-RKSJ-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/90pv-RKSJ-H.z"),
-    ),
-    (
-        "Add-RKSJ-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/Add-RKSJ-H.z"),
-    ),
-    (
-        "Add-RKSJ-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/Add-RKSJ-V.z"),
-    ),
-    (
-        "B5pc-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/B5pc-H.z"),
-    ),
-    (
-        "B5pc-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/B5pc-V.z"),
-    ),
-    (
-        "CNS-EUC-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/CNS-EUC-H.z"),
-    ),
-    (
-        "CNS-EUC-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/CNS-EUC-V.z"),
-    ),
-    (
-        "ETen-B5-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/ETen-B5-H.z"),
-    ),
-    (
-        "ETen-B5-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/ETen-B5-V.z"),
-    ),
-    (
-        "ETenms-B5-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/ETenms-B5-H.z"),
-    ),
-    (
-        "ETenms-B5-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/ETenms-B5-V.z"),
-    ),
-    (
-        "EUC-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/EUC-H.z"),
-    ),
-    (
-        "EUC-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/EUC-V.z"),
-    ),
-    (
-        "Ext-RKSJ-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/Ext-RKSJ-H.z"),
-    ),
-    (
-        "Ext-RKSJ-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/Ext-RKSJ-V.z"),
-    ),
-    (
-        "GB-EUC-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GB-EUC-H.z"),
-    ),
-    (
-        "GB-EUC-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GB-EUC-V.z"),
-    ),
-    (
-        "GBK-EUC-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBK-EUC-H.z"),
-    ),
-    (
-        "GBK-EUC-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBK-EUC-V.z"),
-    ),
-    (
-        "GBK2K-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBK2K-H.z"),
-    ),
-    (
-        "GBK2K-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBK2K-V.z"),
-    ),
-    (
-        "GBKp-EUC-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBKp-EUC-H.z"),
-    ),
-    (
-        "GBKp-EUC-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBKp-EUC-V.z"),
-    ),
-    (
-        "GBpc-EUC-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBpc-EUC-H.z"),
-    ),
-    (
-        "GBpc-EUC-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/GBpc-EUC-V.z"),
-    ),
-    ("H", Script::Japanese, include_bytes!("../../cmaps/H.z")),
-    (
-        "HKscs-B5-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/HKscs-B5-H.z"),
-    ),
-    (
-        "HKscs-B5-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/HKscs-B5-V.z"),
-    ),
-    (
-        "KSC-EUC-H",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSC-EUC-H.z"),
-    ),
-    (
-        "KSC-EUC-V",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSC-EUC-V.z"),
-    ),
-    (
-        "KSCms-UHC-H",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSCms-UHC-H.z"),
-    ),
-    (
-        "KSCms-UHC-HW-H",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSCms-UHC-HW-H.z"),
-    ),
-    (
-        "KSCms-UHC-HW-V",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSCms-UHC-HW-V.z"),
-    ),
-    (
-        "KSCms-UHC-V",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSCms-UHC-V.z"),
-    ),
-    (
-        "KSCpc-EUC-H",
-        Script::Korean,
-        include_bytes!("../../cmaps/KSCpc-EUC-H.z"),
-    ),
-    (
-        "UniCNS-UCS2-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/UniCNS-UCS2-H.z"),
-    ),
-    (
-        "UniCNS-UCS2-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/UniCNS-UCS2-V.z"),
-    ),
-    (
-        "UniCNS-UTF16-H",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/UniCNS-UTF16-H.z"),
-    ),
-    (
-        "UniCNS-UTF16-V",
-        Script::TraditionalChinese,
-        include_bytes!("../../cmaps/UniCNS-UTF16-V.z"),
-    ),
-    (
-        "UniGB-UCS2-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/UniGB-UCS2-H.z"),
-    ),
-    (
-        "UniGB-UCS2-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/UniGB-UCS2-V.z"),
-    ),
-    (
-        "UniGB-UTF16-H",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/UniGB-UTF16-H.z"),
-    ),
-    (
-        "UniGB-UTF16-V",
-        Script::SimplifiedChinese,
-        include_bytes!("../../cmaps/UniGB-UTF16-V.z"),
-    ),
-    (
-        "UniJIS-UCS2-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/UniJIS-UCS2-H.z"),
-    ),
-    (
-        "UniJIS-UCS2-HW-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/UniJIS-UCS2-HW-H.z"),
-    ),
-    (
-        "UniJIS-UCS2-HW-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/UniJIS-UCS2-HW-V.z"),
-    ),
-    (
-        "UniJIS-UCS2-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/UniJIS-UCS2-V.z"),
-    ),
-    (
-        "UniJIS-UTF16-H",
-        Script::Japanese,
-        include_bytes!("../../cmaps/UniJIS-UTF16-H.z"),
-    ),
-    (
-        "UniJIS-UTF16-V",
-        Script::Japanese,
-        include_bytes!("../../cmaps/UniJIS-UTF16-V.z"),
-    ),
-    (
-        "UniKS-UCS2-H",
-        Script::Korean,
-        include_bytes!("../../cmaps/UniKS-UCS2-H.z"),
-    ),
-    (
-        "UniKS-UCS2-V",
-        Script::Korean,
-        include_bytes!("../../cmaps/UniKS-UCS2-V.z"),
-    ),
-    (
-        "UniKS-UTF16-H",
-        Script::Korean,
-        include_bytes!("../../cmaps/UniKS-UTF16-H.z"),
-    ),
-    (
-        "UniKS-UTF16-V",
-        Script::Korean,
-        include_bytes!("../../cmaps/UniKS-UTF16-V.z"),
-    ),
-    ("V", Script::Japanese, include_bytes!("../../cmaps/V.z")),
+    cmap!("83pv-RKSJ-H", Japanese),
+    cmap!("90ms-RKSJ-H", Japanese),
+    cmap!("90ms-RKSJ-V", Japanese),
+    cmap!("90msp-RKSJ-H", Japanese),
+    cmap!("90msp-RKSJ-V", Japanese),
+    cmap!("90pv-RKSJ-H", Japanese),
+    cmap!("Add-RKSJ-H", Japanese),
+    cmap!("Add-RKSJ-V", Japanese),
+    cmap!("B5pc-H", TraditionalChinese),
+    cmap!("B5pc-V", TraditionalChinese),
+    cmap!("CNS-EUC-H", TraditionalChinese),
+    cmap!("CNS-EUC-V", TraditionalChinese),
+    cmap!("ETen-B5-H", TraditionalChinese),
+    cmap!("ETen-B5-V", TraditionalChinese),
+    cmap!("ETenms-B5-H", TraditionalChinese),
+    cmap!("ETenms-B5-V", TraditionalChinese),
+    cmap!("EUC-H", Japanese),
+    cmap!("EUC-V", Japanese),
+    cmap!("Ext-RKSJ-H", Japanese),
+    cmap!("Ext-RKSJ-V", Japanese),
+    cmap!("GB-EUC-H", SimplifiedChinese),
+    cmap!("GB-EUC-V", SimplifiedChinese),
+    cmap!("GBK-EUC-H", SimplifiedChinese),
+    cmap!("GBK-EUC-V", SimplifiedChinese),
+    cmap!("GBK2K-H", SimplifiedChinese),
+    cmap!("GBK2K-V", SimplifiedChinese),
+    cmap!("GBKp-EUC-H", SimplifiedChinese),
+    cmap!("GBKp-EUC-V", SimplifiedChinese),
+    cmap!("GBpc-EUC-H", SimplifiedChinese),
+    cmap!("GBpc-EUC-V", SimplifiedChinese),
+    cmap!("H", Japanese),
+    cmap!("HKscs-B5-H", TraditionalChinese),
+    cmap!("HKscs-B5-V", TraditionalChinese),
+    cmap!("KSC-EUC-H", Korean),
+    cmap!("KSC-EUC-V", Korean),
+    cmap!("KSCms-UHC-H", Korean),
+    cmap!("KSCms-UHC-HW-H", Korean),
+    cmap!("KSCms-UHC-HW-V", Korean),
+    cmap!("KSCms-UHC-V", Korean),
+    cmap!("KSCpc-EUC-H", Korean),
+    cmap!("UniCNS-UCS2-H", TraditionalChinese),
+    cmap!("UniCNS-UCS2-V", TraditionalChinese),
+    cmap!("UniCNS-UTF16-H", TraditionalChinese),
+    cmap!("UniCNS-UTF16-V", TraditionalChinese),
+    cmap!("UniGB-UCS2-H", SimplifiedChinese),
+    cmap!("UniGB-UCS2-V", SimplifiedChinese),
+    cmap!("UniGB-UTF16-H", SimplifiedChinese),
+    cmap!("UniGB-UTF16-V", SimplifiedChinese),
+    cmap!("UniJIS-UCS2-H", Japanese),
+    cmap!("UniJIS-UCS2-HW-H", Japanese),
+    cmap!("UniJIS-UCS2-HW-V", Japanese),
+    cmap!("UniJIS-UCS2-V", Japanese),
+    cmap!("UniJIS-UTF16-H", Japanese),
+    cmap!("UniJIS-UTF16-V", Japanese),
+    cmap!("UniKS-UCS2-H", Korean),
+    cmap!("UniKS-UCS2-V", Korean),
+    cmap!("UniKS-UTF16-H", Korean),
+    cmap!("UniKS-UTF16-V", Korean),
+    cmap!("V", Japanese),
 ];
 
 /// The predefined `CMap` `name`, or `None` when no such `CMap` exists.

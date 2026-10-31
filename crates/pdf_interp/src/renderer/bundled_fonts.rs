@@ -22,60 +22,32 @@ struct Bundled {
     serif: bool,
 }
 
+/// One bundled face: the zlib-compressed file `fonts/noto/<file>` and
+/// whether it is a serif design.
+macro_rules! face {
+    ($file:literal, serif: $serif:literal) => {
+        Bundled {
+            data: include_bytes!(concat!("../../fonts/noto/", $file)),
+            serif: $serif,
+        }
+    };
+}
+
 /// The bundled faces; within a serif class, in lookup order.
 const FACES: [Bundled; 13] = [
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSans-GreekCyrillic.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSerif-GreekCyrillic.ttf.z"),
-        serif: true,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansHebrew.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSerifHebrew.ttf.z"),
-        serif: true,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansArabic.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoNaskhArabic.ttf.z"),
-        serif: true,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansDevanagari.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSerifDevanagari.ttf.z"),
-        serif: true,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansThai.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSerifThai.ttf.z"),
-        serif: true,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansMath.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansSymbols.ttf.z"),
-        serif: false,
-    },
-    Bundled {
-        data: include_bytes!("../../fonts/noto/NotoSansSymbols2.ttf.z"),
-        serif: false,
-    },
+    face!("NotoSans-GreekCyrillic.ttf.z", serif: false),
+    face!("NotoSerif-GreekCyrillic.ttf.z", serif: true),
+    face!("NotoSansHebrew.ttf.z", serif: false),
+    face!("NotoSerifHebrew.ttf.z", serif: true),
+    face!("NotoSansArabic.ttf.z", serif: false),
+    face!("NotoNaskhArabic.ttf.z", serif: true),
+    face!("NotoSansDevanagari.ttf.z", serif: false),
+    face!("NotoSerifDevanagari.ttf.z", serif: true),
+    face!("NotoSansThai.ttf.z", serif: false),
+    face!("NotoSerifThai.ttf.z", serif: true),
+    face!("NotoSansMath.ttf.z", serif: false),
+    face!("NotoSansSymbols.ttf.z", serif: false),
+    face!("NotoSansSymbols2.ttf.z", serif: false),
 ];
 
 /// The bundled program of face `index`, inflated and parsed once per
