@@ -21,17 +21,18 @@ or pass the directory as an extra corpus.
 import argparse
 import hashlib
 import pathlib
-import shutil
-import subprocess
 import sys
 import tempfile
 import zlib
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-from pdfgen import assemble_pdf, stream
+# The shared helpers live in scripts/; `python3 -I` puts no script directory on the path.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+from pdfgen import one_page
+from runtool import find, run_checked
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAX_SEED = 1 << 20
+FONT_SUFFIXES = frozenset((".ttf", ".otf", ".ttc", ".cid", ".pfa", ".pfb", ".cff"))
 
 # Encryption variants of crates/pdf_raster/tests/encryption.rs:
 # (encrypt options, general options, user password).
@@ -88,55 +89,51 @@ FUNCTION_SEEDS = [
 ]
 
 
-def write(out, target, data):
-    """Store `data` as a seed of `target` under its content hash."""
+def write(out: pathlib.Path, target: str, data: bytes) -> None:
+    """Store `data` as a seed of `target` under its content hash.
+
+    Empty inputs and inputs above `MAX_SEED` bytes are dropped.
+    """
     if not data or len(data) > MAX_SEED:
         return
     d = out / target
     d.mkdir(parents=True, exist_ok=True)
-    (d / hashlib.sha1(data).hexdigest()).write_bytes(data)
+    (d / hashlib.sha256(data).hexdigest()).write_bytes(data)
 
 
-def plaintext_pdf():
-    """The plaintext page of the encryption integration suite."""
-    content = (
+def plaintext_pdf() -> bytes:
+    """Return the plaintext page of the encryption integration suite."""
+    return one_page(
         b"0.2 0.4 0.8 rg 40 40 120 60 re f\n"
         b"BT /F1 28 Tf 30 150 Td (Encrypted text) Tj ET\n"
-        b"0 g 1 w 20 20 m 180 190 l S\n"
-    )
-    return assemble_pdf(
+        b"0 g 1 w 20 20 m 180 190 l S\n",
+        b"/Font << /F1 5 0 R >>",
         [
-            b"<< /Type /Catalog /Pages 2 0 R >>",
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            (
-                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R "
-                b"/Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>"
-            ),
-            stream(b"", content),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
             (
                 b"<< /Type /Annot /Subtype /FreeText /Rect [100 100 190 130] "
                 b"/Contents (annot string) /DA (/Helv 10 Tf 0 g) /F 4 >>"
             ),
-        ]
+        ],
+        media_box=b"0 0 200 200",
+        page_entries=b"/Annots [6 0 R]",
     )
 
 
-def encrypted_seeds(out):
-    if shutil.which("qpdf") is None:
-        print(
-            "qpdf not found: no fuzz_decrypt seeds from the encryption suite",
-            file=sys.stderr,
-        )
+def encrypted_seeds(out: pathlib.Path, plaintext: bytes) -> None:
+    """Write the encrypted variants of the PDF `plaintext`, produced with qpdf."""
+    qpdf = find("qpdf")
+    if qpdf is None:
+        print("qpdf not found: no fuzz_decrypt seeds from the encryption suite", file=sys.stderr)
         return
     with tempfile.TemporaryDirectory() as tmp:
         plain = pathlib.Path(tmp) / "plain.pdf"
-        plain.write_bytes(plaintext_pdf())
+        plain.write_bytes(plaintext)
         for i, (enc_args, gen_args, user) in enumerate(VARIANTS):
             enc = pathlib.Path(tmp) / f"{i}.pdf"
-            subprocess.run(
+            run_checked(
                 [
-                    "qpdf",
+                    qpdf,
                     "--allow-weak-crypto",
                     "--encrypt",
                     f"--user-password={user}",
@@ -146,24 +143,41 @@ def encrypted_seeds(out):
                     *gen_args,
                     str(plain),
                     str(enc),
-                ],
-                check=True,
+                ]
             )
-            data = enc.read_bytes()
-            write(out, "fuzz_decrypt", data)
-            write(out, "fuzz_document", data)
-            write(out, "fuzz_parse", data)
+            write_pdf(out, enc.read_bytes())
 
 
-def repo_seeds(out):
-    # Images: [filter, colour space, bpc, width-1, height-1, flags, icc_len(2)].
-    for jpg in sorted((ROOT / "tests/fixtures/jpeg").glob("*.jpg")):
+def write_pdf(out: pathlib.Path, data: bytes) -> None:
+    """Store a whole PDF as a seed of every target that takes one."""
+    write(out, "fuzz_document", data)
+    write(out, "fuzz_parse", data)
+    if b"/Encrypt" in data:
+        write(out, "fuzz_decrypt", data)
+
+
+def committed(pattern: str) -> list[pathlib.Path]:
+    """Return the repository files matching `pattern`; exit when there are none.
+
+    An empty match means the layout moved, which would silently thin the
+    corpus.
+    """
+    found = sorted(f for f in ROOT.glob(pattern) if f.is_file())
+    if not found:
+        sys.exit(f"no committed files match {pattern}")
+    return found
+
+
+def image_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_image` seeds.
+
+    Selector: [filter, colour space, bpc, width-1, height-1, flags, icc_len(2)].
+    """
+    for jpg in committed("tests/fixtures/jpeg/*.jpg"):
         data = jpg.read_bytes()
         write(out, "fuzz_image", bytes([1, 1, 3, 31, 31, 0, 0, 0]) + data)
         write(out, "fuzz_image", bytes([1, 0, 3, 63, 63, 0, 0, 0]) + data)
-    for jp2 in sorted(
-        (ROOT / "crates/pdf_interp/src/resources/image/testdata").glob("*.j*2*")
-    ):
+    for jp2 in committed("crates/pdf_interp/src/resources/image/testdata/*.j*2*"):
         data = jp2.read_bytes()
         for space in (0, 1):
             write(out, "fuzz_image", bytes([2, space, 3, 15, 15, 0, 0, 0]) + data)
@@ -171,75 +185,75 @@ def repo_seeds(out):
     raw = bytes(range(256)) * 3
     for space in range(8):
         write(out, "fuzz_image", bytes([0, space, 3, 15, 15, 0, 0, 0]) + raw)
-        write(
-            out,
-            "fuzz_image",
-            bytes([3, space, 3, 15, 15, 2, 0, 0]) + zlib.compress(raw),
-        )
+        write(out, "fuzz_image", bytes([3, space, 3, 15, 15, 2, 0, 0]) + zlib.compress(raw))
     write(out, "fuzz_image", bytes([0, 0, 0, 15, 15, 1, 0, 0]) + raw[:32])
 
-    # Fonts: [face_index, size].
+
+def font_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_font` seeds.  Selector: [face_index, size]."""
     for pattern in (
         "crates/font/src/tests/data/*",
         "crates/font_test_data/test_data/ttf/*",
         "crates/font_test_data/test_data/ttc/*",
         "crates/font_test_data/test_data/type1/*",
     ):
-        for f in sorted(ROOT.glob(pattern)):
-            if f.suffix.lower() in (
-                ".ttf",
-                ".otf",
-                ".ttc",
-                ".cid",
-                ".pfa",
-                ".pfb",
-                ".cff",
-            ):
+        for f in committed(pattern):
+            if f.suffix.lower() in FONT_SUFFIXES:
                 write(out, "fuzz_font", bytes([0, 24]) + f.read_bytes())
 
-    # Filter chains: [count, f0, f1, f2, predictor, colors, bpc, columns, early].
-    text = b"BT /F1 12 Tf (filter chain seed) Tj ET\n" * 8
-    write(out, "fuzz_filters", bytes([0, 0, 0, 0, 0, 0, 3, 7, 1]) + zlib.compress(text))
-    write(
-        out,
-        "fuzz_filters",
-        bytes([1, 2, 0, 0, 0, 0, 3, 7, 1]) + zlib.compress(text).hex().encode(),
-    )
-    rows = b"".join(b"\x02" + bytes(range(i, i + 8)) for i in range(16))
-    write(out, "fuzz_filters", bytes([0, 0, 0, 0, 4, 0, 3, 7, 1]) + zlib.compress(rows))
-    write(out, "fuzz_filters", bytes([0, 4, 0, 0, 0, 0, 3, 7, 1]) + b"\x02abc\xfdz\x80")
 
+def filter_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_filters` seeds.
+
+    Selector: [count, f0, f1, f2, predictor, colors, bpc, columns, early].
+    """
+    text = b"BT /F1 12 Tf (filter chain seed) Tj ET\n" * 8
+    rows = b"".join(b"\x02" + bytes(range(i, i + 8)) for i in range(16))
+    for selector, body in (
+        ([0, 0, 0, 0, 0, 0, 3, 7, 1], zlib.compress(text)),
+        ([1, 2, 0, 0, 0, 0, 3, 7, 1], zlib.compress(text).hex().encode()),
+        ([0, 0, 0, 0, 4, 0, 3, 7, 1], zlib.compress(rows)),
+        ([0, 4, 0, 0, 0, 0, 3, 7, 1], b"\x02abc\xfdz\x80"),
+    ):
+        write(out, "fuzz_filters", bytes(selector) + body)
+
+
+def repo_seeds(out: pathlib.Path) -> None:
+    """Write the seeds built from files committed to this repository."""
+    image_seeds(out)
+    font_seeds(out)
+    filter_seeds(out)
     for c in CONTENT_SEEDS:
         write(out, "fuzz_content", c)
     for c in CMAP_SEEDS:
         write(out, "fuzz_cmap", c)
     for sel, body in FUNCTION_SEEDS:
         write(out, "fuzz_function", sel + body)
-    write(out, "fuzz_document", plaintext_pdf())
-    write(out, "fuzz_parse", plaintext_pdf())
 
 
-def pdf_seeds(out, root):
+def pdf_seeds(out: pathlib.Path, root: pathlib.Path) -> None:
+    """Write every PDF of at most `MAX_SEED` bytes under `root`."""
+    if not root.is_dir():
+        sys.exit(f"not a directory: {root}")
     n = 0
     for pdf in sorted(root.rglob("*.pdf")):
         if pdf.is_file() and pdf.stat().st_size <= MAX_SEED:
-            data = pdf.read_bytes()
-            write(out, "fuzz_document", data)
-            write(out, "fuzz_parse", data)
-            if b"/Encrypt" in data:
-                write(out, "fuzz_decrypt", data)
+            write_pdf(out, pdf.read_bytes())
             n += 1
     print(f"{root}: {n} PDF seeds", file=sys.stderr)
 
 
-def main():
+def main() -> None:
+    """Build the seed corpora under the output directory."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("out", type=pathlib.Path)
     ap.add_argument("--pdfium", type=pathlib.Path, help="pdfium source checkout")
     ap.add_argument("--extra-pdfs", type=pathlib.Path, help="directory of PDFs to add")
     args = ap.parse_args()
+    plaintext = plaintext_pdf()
     repo_seeds(args.out)
-    encrypted_seeds(args.out)
+    write_pdf(args.out, plaintext)
+    encrypted_seeds(args.out, plaintext)
     if args.pdfium:
         pdf_seeds(args.out, args.pdfium / "testing" / "resources")
     if args.extra_pdfs:
