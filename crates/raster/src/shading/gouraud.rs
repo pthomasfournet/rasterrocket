@@ -22,7 +22,7 @@ use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::pipe::{self, PipeSrc, PipeState, RowPattern};
 use color::Pixel;
-use color::convert::lerp_u8;
+use color::convert::{lerp_u8, splash_round};
 
 /// One vertex of a Gouraud-shaded triangle.
 #[derive(Copy, Clone, Debug)]
@@ -47,8 +47,8 @@ struct EdgeMap {
 
 impl EdgeMap {
     fn from_vertices(va: &GouraudVertex, vb: &GouraudVertex) -> Self {
-        let ya = f64::from(round_y(va));
-        let yb = f64::from(round_y(vb));
+        let ya = f64::from(splash_round(va.y));
+        let yb = f64::from(splash_round(vb.y));
         let dy = yb - ya;
         if dy.abs() < 1e-9 {
             // Horizontal edge — slope undefined; hold start-vertex values.
@@ -79,11 +79,7 @@ impl EdgeMap {
 
     /// Evaluate the edge at scanline `y` → (pixel x, interpolated RGB).
     fn eval(&self, y: f64) -> (i32, [u8; 3]) {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "pixel coordinate rounding (+ 0.5 before truncation)"
-        )]
-        let x = (self.x_slope.mul_add(y, self.x_off) + 0.5) as i32;
+        let x = splash_round(self.x_slope.mul_add(y, self.x_off));
         let c: [u8; 3] = std::array::from_fn(|ch| {
             #[expect(clippy::cast_possible_truncation, reason = "value clamped to 0..=255")]
             #[expect(clippy::cast_sign_loss, reason = "value clamped to 0.0..=255.0")]
@@ -94,30 +90,6 @@ impl EdgeMap {
             }
         });
         (x, c)
-    }
-}
-
-/// Round a vertex Y coordinate to the nearest pixel (matches C++ `splashRound`).
-#[inline]
-fn round_y(v: &GouraudVertex) -> i32 {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "splashRound: floor(y + 0.5)"
-    )]
-    {
-        (v.y + 0.5) as i32
-    }
-}
-
-/// Round a vertex X coordinate to the nearest pixel.
-#[inline]
-fn round_x(v: &GouraudVertex) -> i32 {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "splashRound: floor(x + 0.5)"
-    )]
-    {
-        (v.x + 0.5) as i32
     }
 }
 
@@ -214,6 +186,14 @@ pub fn gouraud_triangle_fill<P: Pixel>(
         return;
     }
 
+    // A non-finite coordinate has no pixel position: the triangle is empty.
+    if !v
+        .iter()
+        .all(|vert| vert.x.is_finite() && vert.y.is_finite())
+    {
+        return;
+    }
+
     // --- Sort vertices by Y (insertion sort, 3 elements) ---
     if v[0].y > v[1].y {
         v.swap(0, 1);
@@ -226,16 +206,15 @@ pub fn gouraud_triangle_fill<P: Pixel>(
     }
     // v[0].y ≤ v[1].y ≤ v[2].y.
 
-    let y0 = round_y(&v[0]);
-    let y1 = round_y(&v[1]);
-    let y2 = round_y(&v[2]);
+    let [y0, y1, y2] = v.map(|vert| splash_round(vert.y));
 
     if y0 == y2 {
         return;
     } // all three vertices on the same scanline — degenerate
 
-    let x_min = round_x(&v[0]).min(round_x(&v[1])).min(round_x(&v[2]));
-    let x_max = round_x(&v[0]).max(round_x(&v[1])).max(round_x(&v[2]));
+    let vx = v.map(|vert| splash_round(vert.x));
+    let x_min = vx[0].min(vx[1]).min(vx[2]);
+    let x_max = vx[0].max(vx[1]).max(vx[2]);
     // Single test_rect call; result used for both early-exit and per-scanline clip decisions.
     let clip_bbox = clip.test_rect(x_min, y0, x_max, y2);
     if clip_bbox == ClipResult::AllOutside {
@@ -276,13 +255,12 @@ pub fn gouraud_triangle_fill<P: Pixel>(
     let scan_y0 = y0.max(clip.y_min_i).max(0);
     let scan_y2 = y2.min(clip.y_max_i).min(bmp_h - 1);
 
-    // Span colour buffer — allocated once to the widest possible scanline
-    // (clip width + 1 px for rounding slack).  Never grows inside the loop.
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "max(0) ensures non-negative before cast"
-    )]
-    let max_span = (clip.x_max_i - clip.x_min_i + 2).max(0) as usize;
+    // Span colour buffer, sized to the widest span the loop can emit: the
+    // columns inside both the clip rectangle and the bitmap.
+    let max_span = usize::try_from(
+        i64::from(clip.x_max_i.min(bmp_w - 1)) - i64::from(clip.x_min_i.max(0)) + 1,
+    )
+    .unwrap_or(0);
     let mut span_color = vec![0u8; max_span * 3];
 
     for y in scan_y0..=scan_y2 {
@@ -306,16 +284,16 @@ pub fn gouraud_triangle_fill<P: Pixel>(
 
         #[expect(clippy::cast_sign_loss, reason = "sx1 >= sx0 (guarded above)")]
         let span_len = (sx1 - sx0 + 1) as usize;
-        // span_len ≤ max_span: sx1 - sx0 ≤ clip.x_max_i - clip.x_min_i < max_span.
+        // sx0 ≥ max(clip.x_min_i, 0) and sx1 ≤ min(clip.x_max_i, bmp_w − 1).
         debug_assert!(
             span_len <= max_span,
             "span_len {span_len} exceeds pre-allocated max_span {max_span}"
         );
         let buf = &mut span_color[..span_len * 3];
 
-        let span_width = f64::from((x_right - x_left).max(1));
+        let span_width = (f64::from(x_right) - f64::from(x_left)).max(1.0);
         for (i, px) in (sx0..=sx1).enumerate() {
-            let t = (f64::from(px - x_left) / span_width).clamp(0.0, 1.0);
+            let t = ((f64::from(px) - f64::from(x_left)) / span_width).clamp(0.0, 1.0);
             #[expect(clippy::cast_sign_loss, reason = "t ∈ [0,1]")]
             #[expect(clippy::cast_possible_truncation, reason = "t * 256 ≤ 256")]
             let frac = (t * 256.0) as u32;
@@ -356,6 +334,39 @@ mod tests {
     use crate::bitmap::Bitmap;
     use crate::testutil::{make_clip, simple_pipe};
     use color::Rgb8;
+
+    fn vertex(x: f64, y: f64) -> GouraudVertex {
+        GouraudVertex {
+            x,
+            y,
+            color: [0; 3],
+        }
+    }
+
+    /// Positions round half toward +∞ on both sides of the origin: `-0.7`
+    /// lies nearest pixel `-1`, not `0`.
+    #[test]
+    fn negative_coordinates_round_toward_negative_infinity() {
+        let vertical = EdgeMap::from_vertices(&vertex(-0.7, 0.0), &vertex(-0.7, 10.0));
+        assert_eq!(vertical.eval(5.0).0, -1, "x = -0.7 rounds to -1");
+        // The edge starts at row round(-0.7) = -1, so it spans 11 rows and
+        // advances one pixel per row.
+        let sloped = EdgeMap::from_vertices(&vertex(0.0, -0.7), &vertex(11.0, 10.0));
+        assert_eq!(sloped.eval(4.0).0, 5, "five rows below the start row");
+    }
+
+    /// A vertex with a non-finite coordinate paints nothing.
+    #[test]
+    fn non_finite_vertex_paints_nothing() {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(8, 8, 1, false);
+        let mut tri = [vertex(1.0, 1.0), vertex(6.0, 1.0), vertex(1.0, 6.0)];
+        for v in &mut tri {
+            v.color = [255; 3];
+        }
+        tri[2].x = f64::INFINITY;
+        gouraud_triangle_fill::<Rgb8>(&mut bmp, &make_clip(8, 8), &simple_pipe(), tri);
+        assert!(bmp.data().iter().all(|&b| b == 0), "nothing painted");
+    }
 
     /// All-white vertices: every painted pixel must be white.
     #[test]
