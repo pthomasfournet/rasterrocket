@@ -61,8 +61,7 @@ pub trait Pixel: Copy + Pod + Zeroable + Send + Sync + 'static {
 
 /// 8-bit RGB, 3 bytes/pixel, wire layout `[R, G, B]`.
 ///
-/// The most common rasterizer output format, matching `SplashModRGB8` in the
-/// C++ side.
+/// The rasterizer's default output format.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
 pub struct Rgb8 {
@@ -81,7 +80,7 @@ impl Pixel for Rgb8 {
 
 /// 8-bit grayscale, 1 byte/pixel, wire layout `[Y]`.
 ///
-/// Used for `-gray` output. RGB→luminance uses the PDF `DeviceRGB` → `DeviceGray` weights.
+/// Used for grayscale output. RGB→luminance uses the PDF `DeviceRGB` → `DeviceGray` weights.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
 pub struct Gray8 {
@@ -96,7 +95,7 @@ impl Pixel for Gray8 {
 
 /// 8-bit CMYK, 4 bytes/pixel, wire layout `[C, M, Y, K]`.
 ///
-/// Used for `-jpegcmyk` and overprint modes.
+/// Used for CMYK output.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
 pub struct Cmyk8 {
@@ -117,8 +116,7 @@ impl Pixel for Cmyk8 {
 
 /// CMYK + 4 spot channels, 8 bytes/pixel, wire layout `[C, M, Y, K, S0, S1, S2, S3]`.
 ///
-/// Used with `-overprint`. `SPOT_NCOMPS = 4` is fixed at compile time,
-/// matching the C++ default.
+/// The spot channel count, `SPOT_NCOMPS = 4`, is fixed at compile time.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
 pub struct DeviceN8 {
@@ -135,7 +133,7 @@ impl Pixel for DeviceN8 {
 
 // ── Erased pixel buffer ───────────────────────────────────────────────────────
 
-/// A mode-erased pixel value carrying up to 8 bytes (matching `SplashColor`).
+/// A mode-erased pixel value carrying up to 8 bytes, the widest pixel mode.
 ///
 /// # When to use `AnyColor` vs a concrete `Pixel` type
 ///

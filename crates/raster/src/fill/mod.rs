@@ -1,5 +1,4 @@
-//! Filled-path rasterization — replaces `Splash::fill`, `Splash::eoFill`,
-//! and the core of `Splash::fillWithPattern`.
+//! Filled-path rasterization.
 //!
 //! Two public entry points:
 //! - [`fill`] — non-zero winding fill
@@ -7,17 +6,14 @@
 //!
 //! Both entry points are thin wrappers around the private `fill_impl` which
 //! does the actual work: build `XPath` → optionally AA-scale → build
-//! `XPathScanner` → walk spans → clip → `pipe::render_span`.
+//! `XPathScanner` → walk spans → clip → `pipe::render_bitmap_span`.
 //!
 //! # AA (vector antialias) mode
 //!
-//! When `vector_antialias` is `true` the path is scaled 4× in `XPath` (`aaScale`),
+//! When `vector_antialias` is `true` the path is scaled 4× in `XPath` (`aa_scale`),
 //! the scanner operates in 4× AA coordinates, `render_aa_line` fills the `AaBuf`,
 //! the clip AA-masks the buf, and then `draw_aa_line` reads the 4-bit coverage
-//! count (0..16) through a gamma LUT (`aaGamma`) and calls `render_span_aa`.
-//!
-//! # C++ equivalent
-//! `Splash::fillWithPattern`.
+//! count (0..16) through the gamma LUT `AA_GAMMA` and composites the row.
 
 use crate::bitmap::{AaBuf, Bitmap};
 use crate::clip::{Clip, ClipResult};
@@ -33,7 +29,7 @@ use color::Pixel;
 /// Non-zero winding fill.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors SplashFillWithPattern API; all params necessary"
+    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
 )]
 pub fn fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
@@ -61,7 +57,7 @@ pub fn fill<P: Pixel>(
 /// Even-odd fill.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors SplashFillWithPattern API; all params necessary"
+    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
 )]
 pub fn eo_fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
@@ -88,7 +84,7 @@ pub fn eo_fill<P: Pixel>(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors SplashFillWithPattern API; all params necessary"
+    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
 )]
 fn fill_impl<P: Pixel>(
     bitmap: &mut Bitmap<P>,
@@ -296,7 +292,7 @@ fn draw_aa_line<P: Pixel>(
 /// through `AA_GAMMA` in place and composited via `pipe::render_span` as one
 /// span; a row whose counts are all zero leaves the bitmap untouched.
 ///
-/// This is the compositing half of [`draw_aa_line`]; the GPU fill path
+/// This is the compositing half of `draw_aa_line`; the GPU fill path
 /// supplies counts computed on the device and joins the CPU pipeline here.
 ///
 /// # Panics

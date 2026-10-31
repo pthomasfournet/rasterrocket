@@ -1,6 +1,5 @@
 //! Simple pipe: `a_input == 255`, `BlendMode::Normal`, no soft mask, no shape.
 //!
-//! Equivalent to `Splash::pipeRunSimple{Mono8,RGB8,XBGR8,BGR8,CMYK8,DeviceN8}`.
 //! Mono1 is excluded: 1-bit packed bitmaps require bit-level addressing that
 //! belongs in the fill/stroke caller, not a generic span function.
 

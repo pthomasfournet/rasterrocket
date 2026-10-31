@@ -1,7 +1,6 @@
 //! General pipe: non-normal blend modes and non-isolated groups.
 //!
-//! This is the "everything else" path, matching `Splash::pipeRun` (the general
-//! case, not one of the specialised `pipeRunSimple*` or `pipeRunAA*` variants).
+//! The path for every span the `simple` and `aa` pipes do not take.
 //!
 //! # Compositing formula (PDF spec §11.3)
 //!
@@ -54,7 +53,7 @@ thread_local! {
 /// - If `shape` is `Some`, `shape.len() == x1 - x0 + 1`
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors C++ SplashPipe API; all parameters are necessary"
+    reason = "the destination row, its alpha, the shape and the span position are independent inputs"
 )]
 pub(crate) fn render_span_general<P: Pixel>(
     pipe: &PipeState<'_>,

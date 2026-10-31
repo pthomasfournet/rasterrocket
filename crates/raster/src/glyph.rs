@@ -1,13 +1,10 @@
-//! Glyph bitmap blitting — replaces `Splash::fillGlyph2`.
+//! Glyph bitmap blitting.
 //!
 //! A glyph bitmap is either:
 //! - **AA** (`aa = true`): one byte per pixel, containing a coverage value 0–255.
 //! - **Mono** (`aa = false`): 1-bit-per-pixel, MSB-first packed, `ceil(w/8)` bytes per row.
 //!
 //! The blit clips to the destination bitmap bounds and optionally to the `Clip` region.
-//!
-//! # C++ equivalent
-//! `Splash::fillGlyph2`.
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult, ClipRows, RowClip};
@@ -67,13 +64,9 @@ impl GlyphBitmap<'_> {
 /// antialiased as it is for a path fill.
 ///
 /// The `pipe` and `src` describe the fill colour and compositing parameters.
-///
-/// # C++ equivalent
-///
-/// Matches `Splash::fillGlyph2` with `noClip = clip_all_inside`.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors Splash::fillGlyph2 API; all params necessary"
+    reason = "the destination, clip, compositing state, pen position and glyph are independent inputs"
 )]
 pub fn blit_glyph<P: Pixel>(
     bitmap: &mut Bitmap<P>,
@@ -495,8 +488,8 @@ fn emit_aa_run<P: Pixel>(
 
 /// Clip-test a glyph bbox and blit it.
 ///
-/// Convenience wrapper that performs the `testRect` + `fillGlyph2` pattern from
-/// `Splash::fillGlyph`. Returns the `ClipResult` for the caller to record as `opClipRes`.
+/// Classifies the glyph's bounding box against `clip`, blits the glyph unless
+/// it lies wholly outside, and returns the classification.
 pub fn fill_glyph<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,

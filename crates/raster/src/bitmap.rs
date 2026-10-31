@@ -1,10 +1,9 @@
 //! Pixel buffers and the anti-aliasing scratch buffer.
 //!
-//! [`Bitmap<P>`] replaces `SplashBitmap` with a clean, always-top-down,
-//! typed-generic alternative. Key differences from the C++ original:
-//! - `rowSize` is always positive (no bottom-up layout).
+//! [`Bitmap<P>`] is a top-down pixel buffer, generic over the pixel type:
+//! - Rows are stored top to bottom with a positive stride.
 //! - Typed row access via [`bytemuck::cast_slice`] — zero-copy, no mode switch.
-//! - Alpha is an `Option<Vec<u8>>` separate plane (matching C++ layout).
+//! - Alpha is an optional separate plane, one byte per pixel.
 //!
 //! [`AaBuf`] is the 1-bit supersampled scratch buffer used by the AA fill
 //! path. It is 4 rows × (`bitmap_width` × 4) columns, MSB-first packed.
@@ -40,7 +39,7 @@ const fn u32_to_usize(v: u32) -> usize {
 /// rounded up to the next multiple of `row_pad` (default 4).
 ///
 /// The optional alpha plane is always `width * height` bytes, one byte per pixel,
-/// top-down. It is stored separately from the colour data (matching `SplashBitmap`).
+/// top-down. It is stored separately from the colour data.
 pub struct Bitmap<P: Pixel> {
     /// Width of the bitmap in pixels.
     pub width: u32,
@@ -272,8 +271,7 @@ impl<P: Pixel> Bitmap<P> {
 
 /// Anti-aliasing scratch buffer: 4 rows × (`bitmap_width` × 4) columns, 1 bit/pixel.
 ///
-/// Bit packing is MSB-first (matching `SplashBitmap` `Mono1` layout and the
-/// `renderAALine` / `clipAALine` code in `SplashXPathScanner.cc`):
+/// Bit packing is MSB-first, as in the `Mono1` layout:
 /// - Bit 7 of byte 0 is pixel 0 of the row.
 /// - Left-edge mask for pixel x: `0xff >> (x & 7)`.
 /// - Right-edge mask for pixel x1 (exclusive): `(0xff00u16 >> (x1 & 7)) as u8`.

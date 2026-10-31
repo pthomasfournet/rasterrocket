@@ -1,7 +1,5 @@
 //! AA pipe: shape byte present, `BlendMode::Normal`, no soft mask, isolated group.
 //!
-//! Equivalent to `Splash::pipeRunAA{Mono8,RGB8,XBGR8,BGR8,CMYK8,DeviceN8}`.
-//!
 //! For each pixel:
 //! 1. `a_src = div255(a_input * shape)` — scale source alpha by AA coverage.
 //! 2. If `a_src == 255`: direct write (no read-back needed).
@@ -36,7 +34,7 @@ thread_local! {
 /// - `P::BYTES > 0`.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors C++ SplashPipe API; all parameters are necessary"
+    reason = "the destination row, its alpha, the shape and the span position are independent inputs"
 )]
 pub(crate) fn render_span_aa<P: Pixel>(
     pipe: &PipeState<'_>,

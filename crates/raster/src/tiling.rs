@@ -241,7 +241,7 @@ impl TiledPattern {
     /// returns the cell rasterised at that phase, a bitmap of at most
     /// `cell_w × cell_h` pixels stamped at the whole-pixel part.  `cell` is
     /// called once per phase stamped.  `None` when the lattice is
-    /// degenerate or enumerates more than [`MAX_LATTICE_POINTS`] points over
+    /// degenerate or enumerates more than `MAX_LATTICE_POINTS` (2^26) points over
     /// the rectangle.
     #[must_use]
     pub fn compose(

@@ -25,7 +25,7 @@ pub use color::{
 /// Unit: pixels (linear).
 pub const AA_SIZE: i32 = 4;
 
-/// AA coverage → shape gamma table for `splashAASize=4`, `splashAAGamma=1.5`.
+/// AA coverage → shape gamma table for `AA_SIZE = 4` and gamma 1.5.
 ///
 /// Indexed by the per-pixel coverage count `0..=AA_SIZE²`; entry `i` is
 /// `round((i/16)^1.5 * 255)`.  Entry 0 is 0, so applying the table to a
@@ -254,38 +254,38 @@ impl ScreenParams {
 /// `Normal` is by far the most common; the pipeline fast-paths for it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub enum BlendMode {
-    /// Standard Porter-Duff over (gfxBlendNormal).
+    /// Standard Porter-Duff source-over.
     #[default]
     Normal,
-    /// `Cs × Cd` (gfxBlendMultiply).
+    /// `Cs × Cd`.
     Multiply,
-    /// `Cs + Cd - Cs × Cd` (gfxBlendScreen).
+    /// `Cs + Cd - Cs × Cd`.
     Screen,
-    /// Hard-light of Cd over Cs (gfxBlendOverlay).
+    /// Hard-light of Cd over Cs.
     Overlay,
-    /// `min(Cs, Cd)` (gfxBlendDarken).
+    /// `min(Cs, Cd)`.
     Darken,
-    /// `max(Cs, Cd)` (gfxBlendLighten).
+    /// `max(Cs, Cd)`.
     Lighten,
-    /// Brighten Cd to reflect Cs (gfxBlendColorDodge).
+    /// Brighten Cd to reflect Cs.
     ColorDodge,
-    /// Darken Cd to reflect Cs (gfxBlendColorBurn).
+    /// Darken Cd to reflect Cs.
     ColorBurn,
-    /// Multiply or screen depending on Cs < 0.5 (gfxBlendHardLight).
+    /// Multiply or screen depending on Cs < 0.5.
     HardLight,
-    /// Soft version of `HardLight` (gfxBlendSoftLight).
+    /// Soft version of `HardLight`.
     SoftLight,
-    /// `|Cd - Cs|` (gfxBlendDifference).
+    /// `|Cd - Cs|`.
     Difference,
-    /// `Cs + Cd - 2 × Cs × Cd` (gfxBlendExclusion).
+    /// `Cs + Cd - 2 × Cs × Cd`.
     Exclusion,
-    /// Hue of Cs, saturation and luminosity of Cd (non-separable, gfxBlendHue).
+    /// Hue of Cs, saturation and luminosity of Cd (non-separable).
     Hue,
-    /// Saturation of Cs, hue and luminosity of Cd (non-separable, gfxBlendSaturation).
+    /// Saturation of Cs, hue and luminosity of Cd (non-separable).
     Saturation,
-    /// Hue and saturation of Cs, luminosity of Cd (non-separable, gfxBlendColor).
+    /// Hue and saturation of Cs, luminosity of Cd (non-separable).
     Color,
-    /// Luminosity of Cs, hue and saturation of Cd (non-separable, gfxBlendLuminosity).
+    /// Luminosity of Cs, hue and saturation of Cd (non-separable).
     Luminosity,
 }
 
@@ -422,26 +422,22 @@ mod tests {
 
     #[test]
     fn spot_ncomps_matches_cpp() {
-        // SPOT_NCOMPS = 4, matching #define SPOT_NCOMPS 4 in SplashTypes.h.
         assert_eq!(SPOT_NCOMPS, 4);
     }
 
     #[test]
     fn aa_size_matches_cpp() {
-        // splashAASize = 4 in SplashTypes.h.
         assert_eq!(AA_SIZE, 4);
     }
 
     #[test]
     fn max_curve_splits_matches_cpp() {
-        // splashMaxCurveSplits = 1 << 10 = 1024 in SplashXPath.h.
         assert_eq!(MAX_CURVE_SPLITS, 1 << 10);
     }
 
     #[test]
     fn bezier_circle_matches_cpp() {
-        // bezierCircle = 0.55228475 defined in Splash.cc.
-        // Check to 7 significant figures.
+        // 4 (√2 − 1) / 3, to 8 significant figures.
         assert!((BEZIER_CIRCLE - 0.552_284_75_f64).abs() < 1e-9);
     }
 }

@@ -1,12 +1,10 @@
 //! Clip region: an axis-aligned rectangle intersected with zero or more
 //! arbitrary path clip regions.
 //!
-//! Mirrors `SplashClip` from `splash/SplashClip.h/.cc`.
-//!
 //! ## Sharing semantics
 //!
 //! When a [`Clip`] is cloned (e.g. on a graphics-state save), the path-clip
-//! scanners are shared via [`Arc`] — matching the C++ `shared_ptr` behaviour.
+//! scanners are shared via [`Arc`].
 //! [`XPathScanner`] instances are immutable after construction, so sharing
 //! across threads and across `clone_shared` copies is safe: there is no
 //! interior mutability in the shared objects.
@@ -21,7 +19,7 @@ use crate::xpath::XPath;
 
 // ── ClipResult ────────────────────────────────────────────────────────────────
 
-/// Result of a rectangular or span clip test. Matches `SplashClipResult`.
+/// Result of a rectangular or span clip test.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ClipResult {
     /// The entire tested region lies within the clip boundary.
@@ -68,8 +66,6 @@ pub struct Clip {
 
 impl Clip {
     /// Create a new clip region from a rectangle.
-    ///
-    /// Matches `SplashClip(x0, y0, x1, y1, antialiasA)` in `SplashClip.cc`.
     #[must_use]
     pub fn new(x0: f64, y0: f64, x1: f64, y1: f64, antialias: bool) -> Self {
         let mut clip = Self {
@@ -283,7 +279,7 @@ impl Clip {
 
     /// Clip an AA buffer row, zeroing bits outside the clip region.
     ///
-    /// Matches `SplashClip::clipAALine` in `SplashClip.cc`. Each path-clip
+    /// Each path-clip
     /// scanner intersects its coverage with the sub-samples already in
     /// `aa_buf` over `[*x0, *x1]`, and the output span is then clamped to the
     /// integer clip bounds.
@@ -515,8 +511,6 @@ fn aa_coords(x0: i32, x1: i32, y: i32, antialias: bool) -> (i32, i32, i32) {
 /// Returns `Some((x0, y0, x1, y1))` giving the bounding box of the rectangle
 /// if the path consists of exactly 4 axis-aligned segments (2 vertical + 2
 /// horizontal). Returns `None` for any other path.
-///
-/// Matches the `SplashClip::isRect` logic in `SplashClip.cc`.
 fn detect_rect(xpath: &XPath) -> Option<(f64, f64, f64, f64)> {
     use crate::xpath::XPathFlags;
     if xpath.segs.len() != 4 {

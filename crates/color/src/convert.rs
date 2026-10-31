@@ -144,7 +144,7 @@ pub fn luminosity(r: u8, g: u8, b: u8) -> u8 {
     ((30 * u32::from(r) + 59 * u32::from(g) + 11 * u32::from(b) + 50) / 100) as u8
 }
 
-// ── Geometry rounding (matching SplashMath.h portable fallbacks) ──────────────
+// ── Geometry rounding ─────────────────────────────────────────────────────────
 
 /// Saturating cast of an integer-valued `f64` to `i32`.
 ///
@@ -172,8 +172,6 @@ fn saturate_f64_to_i32(x: f64) -> i32 {
 
 /// Floor toward −∞, returning `i32`.
 ///
-/// Equivalent to C++ `splashFloor` — matches the portable fallback path.
-///
 /// # Valid input range
 ///
 /// Any `f64`. For PDF coordinates, values are always finite and well within
@@ -198,8 +196,6 @@ pub fn splash_floor(x: f64) -> i32 {
 
 /// Ceil toward +∞, returning `i32`.
 ///
-/// Equivalent to C++ `splashCeil` — matches the portable fallback path.
-///
 /// # Valid input range
 ///
 /// Any `f64`. See [`splash_floor`] for edge-case behaviour.
@@ -223,8 +219,6 @@ pub fn splash_ceil(x: f64) -> i32 {
 /// Implements `floor(x + 0.5)`. This means:
 /// - 0.5 rounds to 1 (toward +∞).
 /// - −0.5 rounds to 0 (toward +∞, i.e. not away from zero).
-///
-/// Equivalent to C++ `splashRound`.
 ///
 /// # Valid input range
 ///

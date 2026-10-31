@@ -1,4 +1,4 @@
-//! Gouraud-shaded triangle fill — `Splash::gouraudTriangleShadedFill`.
+//! Gouraud-shaded triangle fill.
 //!
 //! Rasterises a triangle with per-vertex colours by scanline sweep.  Each
 //! scanline linearly interpolates colours from the left edge to the right edge,

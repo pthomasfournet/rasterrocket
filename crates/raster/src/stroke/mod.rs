@@ -4,10 +4,8 @@
 //! `stroke_wide`, and the path-shaping functions in the private `path`
 //! submodule) are crate-internal implementation details.
 //!
-//! Algorithmic provenance: the splitting of stroking into flatten → dash →
-//! narrow/wide → outline-expansion mirrors `Splash::stroke` and friends in
-//! `splash/Splash.cc`; refer there for the spec interpretation if a stroke
-//! edge case looks wrong.
+//! A stroke is flattened, dashed, then either drawn as a hairline (zero
+//! width) or expanded into an outline and filled.
 
 mod path;
 use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, make_stroke_path};
@@ -25,7 +23,7 @@ use color::Pixel;
 
 /// Parameters governing how a stroke is rendered.
 ///
-/// All fields mirror the correspondingly named fields on the C++ `SplashState`.
+/// The fields are the PDF graphics-state stroke parameters (ISO 32000-2 §8.4).
 pub struct StrokeParams<'a> {
     /// Stroke line width in user space.
     pub line_width: f64,
@@ -49,8 +47,6 @@ pub struct StrokeParams<'a> {
 
 /// Top-level stroke entry point.
 ///
-/// Mirrors `Splash::stroke`.
-///
 /// Steps:
 /// 1. Flatten curves.
 /// 2. Apply dashing if a dash array is set.
@@ -68,10 +64,8 @@ pub fn stroke<P: Pixel>(
         return;
     };
 
-    // Compute the approximate device-space line width by transforming a unit
-    // square and taking half the maximum diagonal length. This mirrors the C++
-    // computation in `Splash::stroke` that decides narrow vs wide.
-    // (We skip the minLineWidth check as instructed.)
+    // A zero line width is the thinnest line the device can draw
+    // (ISO 32000-2 §8.4.3.2): a one-pixel hairline.
     if params.line_width == 0.0 {
         stroke_narrow::<P>(bitmap, clip, &path2, pipe, src, matrix, params.flatness);
     } else {

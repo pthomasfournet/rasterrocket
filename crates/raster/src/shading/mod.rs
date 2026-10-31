@@ -1,7 +1,5 @@
 //! Shaded fills — gradient patterns and Gouraud-shaded triangles.
 //!
-//! Replaces `Splash::shadedFill` and `Splash::gouraudTriangleShadedFill`.
-//!
 //! # Module layout (named for orientation; visibility varies)
 //! - `axial`    — [`crate::AxialPattern`]: linear gradient along an axis vector
 //! - `radial`   — [`crate::RadialPattern`]: gradient between two circles
@@ -12,7 +10,7 @@
 //!
 //! [`shaded_fill`] is a thin wrapper around [`fill::fill`] / [`fill::eo_fill`]
 //! that passes the pattern as a [`PipeSrc::Pattern`].  The gradient patterns
-//! implement [`Pattern`] and are injected by the caller (typically `pdf_bridge`).
+//! implement [`Pattern`] and are supplied by the caller.
 
 pub mod axial;
 pub mod function;
@@ -141,7 +139,7 @@ fn fill_ramp_span(
 
 /// Fill `path` using a shading pattern as the colour source.
 ///
-/// Equivalent to `Splash::shadedFill`.  The path defines the shading's bounding
+/// The path defines the shading's bounding
 /// shape; `pattern` supplies per-pixel colour via the [`Pattern`] trait, and
 /// pixels it leaves unpainted keep their backdrop.
 /// `eo` selects even-odd vs. non-zero winding rule.

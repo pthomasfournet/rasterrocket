@@ -2,8 +2,8 @@
 //!
 //! All separable modes operate per-channel with `src` and `dst` in `[0, 255]` and
 //! return a blended value in `[0, 255]`.  For CMYK/DeviceN the caller inverts the
-//! channel values before calling (`255 - v`) and inverts again after — the
-//! subtractive complement trick used by the C++ `splashOutBlend*` functions.
+//! channel values before calling (`255 - v`) and inverts again after, blending
+//! the subtractive complement in additive space.
 //!
 //! Non-separable modes (`Hue`, `Saturation`, `Color`, `Luminosity`) operate on
 //! full RGB triples (always in additive space); CMYK callers convert first.

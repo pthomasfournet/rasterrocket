@@ -1,16 +1,15 @@
-//! Compositing pipeline — replaces `SplashPipe` and its `pipeRun*` family.
+//! Compositing pipeline.
 //!
-//! The C++ design uses a struct with a function-pointer field (`pipe->run`) selected at
-//! `pipeInit` time.  Here each paint operation calls a span-level function that is
-//! monomorphized over `P: Pixel` at compile time, eliminating per-pixel vtable overhead.
+//! Each paint operation composites spans through [`render_span`], which is
+//! monomorphized over `P: Pixel` and selects one of three variants per span.
 //!
 //! # Three pipeline variants
 //!
-//! | Variant | When selected | C++ equivalent |
-//! |---------|--------------|----------------|
-//! | `simple` | `a_input == 255`, `BlendMode::Normal` | `pipeRunSimple*` |
-//! | `aa`     | shape byte present, `BlendMode::Normal`, no group correction | `pipeRunAA*` |
-//! | `general`| everything else — blend modes, non-isolated groups | `pipeRun` |
+//! | Variant | When selected |
+//! |---------|--------------|
+//! | `simple` | `a_input == 255`, `BlendMode::Normal`, no shape, no backdrop |
+//! | `aa`     | shape present, `BlendMode::Normal`, no backdrop |
+//! | `general`| everything else — blend modes, non-isolated groups |
 
 pub mod aa;
 pub mod blend;

@@ -12,18 +12,15 @@ use crate::types::{BEZIER_CIRCLE, LineCap, LineJoin};
 // ── Local constants ───────────────────────────────────────────────────────────
 
 /// Half of `BEZIER_CIRCLE`, used for round-cap / round-join arc approximation.
-/// C++ origin: `#define bezierCircle2 (0.5 * 0.55228475)` in `Splash.cc`.
 const BEZIER_CIRCLE2: f64 = 0.5 * BEZIER_CIRCLE;
 
 /// `dotprod` threshold above which two segments are considered nearly anti-parallel
 /// for miter computation.  When `dotprod > MITER_NEARLY_STRAIGHT` the miter
 /// formula's `1 - dotprod` denominator is too small to use; we force miter > limit²
-/// so the miter join always degrades to bevel.  Value matches the C++ source.
+/// so the miter join always degrades to bevel.
 const MITER_NEARLY_STRAIGHT: f64 = 0.999_9;
 
 /// Flatten all Bezier curves in `path` to straight-line segments.
-///
-/// Mirrors `Splash::flattenPath`.
 ///
 /// Control-point triples (flagged [`crate::PathFlags::CURVE`]) are replaced by
 /// a sequence of straight-line endpoints computed by adaptive De Casteljau
@@ -32,10 +29,8 @@ const MITER_NEARLY_STRAIGHT: f64 = 0.999_9;
 /// The resulting path contains only `FIRST`, `LAST`, and `CLOSED` flags —
 /// no `CURVE` points remain.
 ///
-/// Note: the `matrix` and `flatness` parameters are used by [`crate::XPath`] internally
-/// for device-space deviation; however, `flattenPath` in Splash does its
-/// subdivision in **user space** against `flatness²` without a matrix transform.
-/// We match that behaviour: the flatness is passed through unchanged.
+/// Subdivision runs in the path's own space against `flatness²`; the matrix
+/// is applied later, by [`crate::XPath`].
 #[must_use]
 pub(super) fn flatten_path(path: &Path, _matrix: &[f64; 6], flatness: f64) -> Path {
     use crate::path::flatten::{CurveData, flatten_curve};
@@ -155,24 +150,22 @@ pub(super) fn dash_cycle(
 
 /// Convert a solid-line path into a dashed path.
 ///
-/// Mirrors `Splash::makeDashedPath`.
-///
 /// Each subpath is broken at dash boundaries.  `line_dash` is one full
 /// on/off cycle of positive total length and `line_dash_phase` lies within
 /// it, as [`dash_cycle`] returns them; a cycle of zero length leaves the path
 /// solid.
 ///
 /// If the entire dashed path would be empty but all input points are
-/// coincident, a degenerate (zero-length) subpath is emitted to allow end-caps
-/// to be drawn, matching Acrobat behaviour.
+/// coincident, a degenerate (zero-length) subpath is emitted so the caps of a
+/// zero-length stroke are drawn.
 #[must_use]
 #[expect(
     clippy::suboptimal_flops,
-    reason = "a + b*c expressions match the C++ source; mul_add would obscure the 1:1 correspondence"
+    reason = "mul_add would change the rounding of the dash split points"
 )]
 #[expect(
     clippy::while_float,
-    reason = "direct port of Splash::makeDashedPath; seg_len is decremented toward 0 each iteration"
+    reason = "seg_len is a remaining length decremented toward 0 each iteration"
 )]
 pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: f64) -> Path {
     let line_dash_total: f64 = line_dash.iter().sum();
@@ -268,7 +261,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
     }
 
     // If nothing was drawn but all path points are coincident, emit a
-    // degenerate subpath so end-caps can be rendered (Acrobat behaviour).
+    // degenerate subpath so its caps are rendered.
     let result = builder.build();
     if result.pts.is_empty() && !path.pts.is_empty() {
         let all_same = path.pts.windows(2).all(|w| w[0] == w[1]);
@@ -285,8 +278,6 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
 
 /// Expand a stroked path into a filled outline path.
 ///
-/// Mirrors `Splash::makeStrokePath`.
-///
 /// For each segment in the (already-flattened) input path, this function builds
 /// a rectangular stroke outline with the correct cap and join geometry:
 ///
@@ -301,7 +292,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
 #[must_use]
 #[expect(
     clippy::too_many_lines,
-    reason = "direct port of Splash::makeStrokePath; splitting would obscure the 1:1 correspondence"
+    reason = "one pass over the path builds caps, sides and joins from shared per-segment state"
 )]
 #[expect(
     clippy::similar_names,
@@ -309,7 +300,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
 )]
 #[expect(
     clippy::suboptimal_flops,
-    reason = "a + b*c expressions match the C++ source exactly; mul_add would obscure the 1:1 correspondence"
+    reason = "mul_add would change the rounding of the outline vertices"
 )]
 pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams<'_>) -> Path {
     if path.pts.is_empty() {
@@ -318,7 +309,6 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
 
     let mut out = PathBuilder::new();
 
-    // State variables (mirroring the C++ locals).
     let mut subpath_start0: usize = 0;
     let mut subpath_start1: usize = 0;
     let mut seg: usize = 0;
@@ -776,13 +766,10 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
 /// LAST-flagged index.
 ///
 /// Returns the index of the last point in the run (i.e. the "real" start of the
-/// geometric segment). Mirrors the inner `for (i1 = i0; ...)` loops in
-/// `Splash::makeStrokePath`.
+/// geometric segment).
 #[expect(
     clippy::float_cmp,
-    reason = "exact equality is correct here: the C++ source also uses == to detect coincident \
-              points (degenerate zero-length segments), and floating-point inequality is \
-              intentional — even a tiny numerical difference should not be collapsed"
+    reason = "coincident points are exactly equal; any difference, however small, is a segment"
 )]
 fn advance_past_coincident(path: &Path, start: usize) -> usize {
     let mut i = start;
@@ -799,8 +786,6 @@ fn advance_past_coincident(path: &Path, start: usize) -> usize {
 // ── Private geometry helper ───────────────────────────────────────────────────
 
 /// Euclidean distance between two points.
-///
-/// Equivalent to `splashDist(x0, y0, x1, y1)` in the C++ source.
 #[inline]
 fn splash_dist(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
     let dx = x1 - x0;
