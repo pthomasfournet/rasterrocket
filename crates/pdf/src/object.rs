@@ -323,6 +323,12 @@ const MAX_NESTING: usize = 256;
 ///   3. else first raw `endstream` (degenerate input — recover *something*
 ///      rather than dropping the whole page).
 ///
+/// Once a candidate is known, the scan ends at the next `endobj` or
+/// `stream` keyword: past it lies another object, whose `endstream` cannot
+/// terminate this body.  A file of many streams none of whose terminators
+/// is followed by `endobj` is thereby scanned in time linear in its size
+/// rather than once to the end of the file per stream.
+///
 /// Returns `None` if no `endstream` keyword is found within
 /// [`MAX_STREAM_SCAN`] of `start` (truncated / malformed object, or no
 /// terminator), so the caller fails loudly rather than scanning unbounded.
@@ -337,8 +343,13 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
     let mut first_raw: Option<usize> = None;
     let mut last_eol_preceded: Option<usize> = None;
 
-    for rel in 0..window.len().saturating_sub(KW.len() - 1) {
-        if &window[rel..rel + KW.len()] != KW {
+    for rel in 0..window.len() {
+        let rest = &window[rel..];
+        if !rest.starts_with(KW) {
+            let opens_stream = rest.starts_with(b"stream") && !window[..rel].ends_with(b"end");
+            if first_raw.is_some() && (opens_stream || rest.starts_with(b"endobj")) {
+                break;
+            }
             continue;
         }
         let kw = start + rel;
@@ -907,6 +918,44 @@ mod tests {
         let data = b"data\nendstream more data here\nendstream\nendobj";
         let end = find_endstream(data, 0).expect("found");
         assert_eq!(&data[0..end], b"data\nendstream more data here");
+    }
+
+    /// Without an `endobj`-anchored terminator, the scan ends at the next
+    /// object's keywords: the body is cut at this object's own `endstream`,
+    /// never at a later object's.
+    #[test]
+    fn find_endstream_stops_at_the_next_object() {
+        let data = b"abc\nendstream\n2 0 obj <</Length 1 0 R>> stream\nxyz\nendstream\n";
+        let end = find_endstream(data, 0).expect("found");
+        assert_eq!(&data[..end], b"abc");
+        let data = b"abc\nendstream junk endobj more\nendstream\n";
+        let end = find_endstream(data, 0).expect("found");
+        assert_eq!(&data[..end], b"abc");
+    }
+
+    /// A flood of streams whose terminators are never followed by
+    /// `endobj` parses in time linear in its length.
+    #[test]
+    fn stream_flood_without_endobj_is_linear() {
+        let one = b"1 0 obj <</Length 9 0 R>> stream\nbody\nendstream\n";
+        let src = one.repeat(100_000);
+        let start = std::time::Instant::now();
+        let mut pos = 0;
+        while let Some((_, obj)) = parse_indirect_object(&src, pos) {
+            let Object::Stream(s) = obj else {
+                panic!("a stream");
+            };
+            assert_eq!(s.content, b"body");
+            pos += one.len();
+            if pos >= src.len() {
+                break;
+            }
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
