@@ -62,8 +62,8 @@ pub fn render_page_rgb_with(
 /// Render page `page_num` (1-based) of `session` to the grayscale
 /// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it.
 ///
-/// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi)
-/// and [`deskew`](RasterOptions::deskew).  The page selection fields are
+/// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi),
+/// [`deskew`](RasterOptions::deskew) and [`cancel`](RasterOptions::cancel).  The page selection fields are
 /// the caller's, and the fields mirrored on [`SessionConfig`](crate::SessionConfig)
 /// were fixed when `session` was opened.
 ///
@@ -80,7 +80,8 @@ pub fn render_page_gray(
     let page_id = session.resolve_page(page_num)?;
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
     let user_unit = geom.user_unit;
-    let params = RenderParams::new(f64::from(dpi) / 72.0);
+    let mut params = RenderParams::new(f64::from(dpi) / 72.0);
+    params.cancel.clone_from(&opts.cancel);
     let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
     let mut gray = rgb_to_gray(&rgb);
     drop(rgb);

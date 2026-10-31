@@ -237,6 +237,7 @@ pub struct RasterOptions {
     pub password: Option<Password>,
     pub font_dirs: Vec<PathBuf>,
     pub system_fonts: bool,
+    pub cancel: Option<CancelToken>,
 }
 ```
 
@@ -245,6 +246,7 @@ pub struct RasterOptions {
 | `dpi` | `> 0`, finite | Render resolution. Pass `effective_dpi` (not `dpi`) to Tesseract. |
 | `first_page` | `≥ 1` | 1-based inclusive. Ignored when `pages` is `Some`. |
 | `last_page` | `≥ first_page` | 1-based inclusive. Clamped to document length silently. Ignored when `pages` is `Some`. |
+| `cancel` | — | When `Some` and cancelled, the page in progress stops at its next operator and is yielded as `RasterError::Cancelled`; the iterator or channel then ends. |
 | `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
 | `strict` | — | When `true`, a page with an image that cannot be decoded or drawn, or is drawn only in part, returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded, or decodes only in part, returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped (or drawn from the data that decoded) and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |

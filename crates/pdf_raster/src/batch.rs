@@ -178,7 +178,12 @@ impl Iterator for PageIter {
             self.state = None;
             return None;
         };
-        Some((page_num, render_one(state, page_num)))
+        let rendered = render_one(state, page_num);
+        if matches!(rendered, Err(RasterError::Cancelled)) {
+            // A cancelled run ends with the page that observed it.
+            self.state = None;
+        }
+        Some((page_num, rendered))
     }
 }
 
@@ -276,7 +281,8 @@ fn render_channel_worker(
 
         while let Some(page_num) = state.next_in_range() {
             let item = render_one_caught(&state, page_num);
-            if tx.send(item).is_err() {
+            let cancelled = matches!(item.1, Err(RasterError::Cancelled));
+            if tx.send(item).is_err() || cancelled {
                 return;
             }
         }
@@ -347,19 +353,8 @@ mod channel_tests {
     fn valid_opts() -> RasterOptions {
         RasterOptions {
             dpi: 150.0,
-            first_page: 1,
             last_page: 1,
-            deskew: false,
-            pages: None,
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         }
     }
 
@@ -424,17 +419,8 @@ mod channel_tests {
             dpi: 72.0,
             first_page: 1,  // ignored when pages is Some
             last_page: 100, // ignored when pages is Some
-            deskew: false,
             pages: Some(ps),
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -466,19 +452,9 @@ mod channel_tests {
         let ps = crate::PageSet::new(vec![1, 3]).unwrap();
         let opts = RasterOptions {
             dpi: 72.0,
-            first_page: 1,
             last_page: 100,
-            deskew: false,
             pages: Some(ps),
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -535,17 +511,8 @@ mod channel_tests {
             dpi: 72.0,
             first_page: 0, // would normally be rejected
             last_page: 0,  // would normally be rejected (< first_page after clamping)
-            deskew: false,
             pages: Some(ps),
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -711,17 +678,8 @@ mod channel_tests {
             dpi: 72.0,
             first_page: 0,
             last_page: 0,
-            deskew: false,
             pages: Some(set),
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         }
     }
 
@@ -731,17 +689,7 @@ mod channel_tests {
             dpi: 72.0,
             first_page: 3,
             last_page: 5,
-            deskew: false,
-            pages: None,
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -759,17 +707,7 @@ mod channel_tests {
             dpi: 72.0,
             first_page: u32::MAX - 1,
             last_page: u32::MAX,
-            deskew: false,
-            pages: None,
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));
@@ -813,6 +751,37 @@ mod channel_tests {
 mod from_bytes_tests {
     use super::*;
 
+    /// Two empty 100 × 100 pt pages.
+    fn two_page_pdf() -> Vec<u8> {
+        let objects = [
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids [3 0 R 4 0 R] /Count 2>>",
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]>>",
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]>>",
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes(),
+        );
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref}\n%%EOF",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
     /// A minimal valid single-page PDF (one empty 612×792-pt page).
     fn minimal_pdf() -> Vec<u8> {
         b"%PDF-1.4\n\
@@ -827,6 +796,17 @@ xref\n0 4\n\
 trailer\n<</Size 4 /Root 1 0 R>>\n\
 startxref\n180\n%%EOF"
             .to_vec()
+    }
+
+    #[test]
+    fn cancelled_options_end_the_iteration_after_one_page() {
+        let mut opts = RasterOptions::new(72.0);
+        let token = crate::CancelToken::new();
+        token.cancel();
+        opts.cancel = Some(token);
+        let pages: Vec<_> = render_pages_from_bytes(two_page_pdf(), &opts).collect();
+        assert_eq!(pages.len(), 1, "no page is rendered after cancellation");
+        assert!(matches!(pages[0], (1, Err(RasterError::Cancelled))));
     }
 
     #[test]

@@ -413,6 +413,13 @@ pub struct RasterOptions {
     /// Whether the standard font directories are searched; see
     /// [`SessionConfig::system_fonts`].  Default `true`.
     pub system_fonts: bool,
+
+    /// Cancellation flag polled while each page renders; default `None`.
+    ///
+    /// Once it is raised, the page in progress stops before its next
+    /// content-stream operator and is yielded as [`RasterError::Cancelled`],
+    /// and the iteration (or channel) then ends: no later page is rendered.
+    pub cancel: Option<CancelToken>,
 }
 
 impl RasterOptions {
@@ -447,6 +454,7 @@ impl Default for RasterOptions {
             password: None,
             font_dirs: Vec::new(),
             system_fonts: true,
+            cancel: None,
         }
     }
 }
@@ -670,19 +678,8 @@ mod page_set_tests {
     fn raster_options_with_pages_none_is_valid() {
         let opts = RasterOptions {
             dpi: 150.0,
-            first_page: 1,
             last_page: 5,
-            deskew: false,
-            pages: None,
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -698,19 +695,9 @@ mod page_set_tests {
         let ps = PageSet::new(vec![1, 3, 5]).unwrap();
         let opts = RasterOptions {
             dpi: 150.0,
-            first_page: 1,
             last_page: 5,
-            deskew: false,
             pages: Some(ps),
-            strict: false,
-            purpose: crate::RenderPurpose::View,
-            annotations: true,
-            text_antialias: true,
-            vector_antialias: true,
-            decrypt_authorized: false,
-            password: None,
-            font_dirs: Vec::new(),
-            system_fonts: true,
+            ..RasterOptions::default()
         };
         assert!(opts.pages.is_some());
     }
