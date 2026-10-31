@@ -409,6 +409,65 @@ fn a_free_text_callout_line_runs_to_its_first_point() {
     assert_eq!(px, [RED, RED, WHITE]);
 }
 
+/// A page with a note (object 4) whose pop-up (object 5) has the entries
+/// `popup` and the window `[20 20 80 80]`; the note has the flags
+/// `note_flags`.  Object 6 is a blue appearance.
+fn note_with_popup(popup: &str, note_flags: u32) -> Vec<u8> {
+    page(
+        "[4 0 R 5 0 R]",
+        vec![
+            format!(
+                "<< /Type /Annot /Subtype /Text /Rect [0 80 20 100] /F {note_flags} \
+                 /T (Reviewer) /Contents (Looks good) /Popup 5 0 R >>"
+            )
+            .into_bytes(),
+            format!("<< /Type /Annot /Subtype /Popup /Parent 4 0 R /Rect [20 20 80 80] {popup} >>")
+                .into_bytes(),
+            form("/BBox [0 0 60 60]", b"0 0 1 rg 0 0 60 60 re f"),
+        ],
+    )
+}
+
+#[test]
+fn a_closed_popup_is_not_drawn_even_with_an_appearance() {
+    let probe = &[(50, 30)];
+    let closed = rgb_at(
+        note_with_popup("/AP << /N 6 0 R >>", 0),
+        RenderPurpose::View,
+        probe,
+    );
+    assert_eq!(closed, [WHITE]);
+    let open = rgb_at(
+        note_with_popup("/Open true /AP << /N 6 0 R >>", 0),
+        RenderPurpose::View,
+        probe,
+    );
+    assert_eq!(open, [BLUE]);
+}
+
+#[test]
+fn an_open_popup_without_an_appearance_shows_its_parents_text() {
+    let pdf = || note_with_popup("/Open true", 0);
+    let px = rgb_at(pdf(), RenderPurpose::View, &[(50, 25), (20, 50), (10, 50)]);
+    assert_eq!(px, [YELLOW, BLACK, WHITE]);
+    // The title and contents are set from the top of the window.
+    let points: Vec<(u32, u32)> = (50..77)
+        .flat_map(|y| (24..77).map(move |x| (x, y)))
+        .collect();
+    let dark = rgb_at(pdf(), RenderPurpose::View, &points)
+        .iter()
+        .filter(|p| p[0] < 100)
+        .count();
+    assert!(dark > 60, "{dark} text pixels");
+    // A pop-up of a hidden note is hidden with it.
+    let hidden = rgb_at(
+        note_with_popup("/Open true", HIDDEN),
+        RenderPurpose::View,
+        &[(50, 25)],
+    );
+    assert_eq!(hidden, [WHITE]);
+}
+
 #[test]
 fn an_annotation_with_an_appearance_is_not_synthesised() {
     // The appearance fills blue; a synthesised square would have a red border.

@@ -384,6 +384,8 @@ renderer/
                        /C fill, border in the /DA colour, /Contents (else
                        the plain text of /RC) wrapped in the /RD box,
                        aligned by /Q; /CL callout with its /LE ending
+      popup.rs       — pop-ups: drawn only when /Open; without /AP /N, a
+                       window holding the parent's /T and /Contents
       line_ending.rs — /LE line endings (arrows, square, circle, diamond,
                        butt, slash) in a frame along the line
       text.rs        — /DA parsing, text strings, line wrapping and layout

@@ -2,13 +2,15 @@
 //!
 //! Free functions taking `renderer: &mut PageRenderer<'_>`, delegated from
 //! thin wrapper methods in `mod.rs`.  An annotation without a normal
-//! appearance is drawn from an appearance synthesised by [`markup`] or
-//! [`widget`], through the same form path as a stored appearance.
+//! appearance is drawn from an appearance synthesised by [`markup`],
+//! [`free_text`], [`popup`] or [`widget`], through the same form path as a
+//! stored appearance.  A pop-up is drawn only while open.
 
 mod content;
 mod free_text;
 mod line_ending;
 mod markup;
+mod popup;
 mod text;
 mod widget;
 
@@ -145,6 +147,29 @@ fn render_one_annotation(
         .get(b"AP")
         .and_then(|o| crate::resources::resolve_dict(doc, o))
         .is_some_and(|ap| ap.get(b"N").is_some());
+    if annot.get_name(b"Subtype") == Some(b"Popup") {
+        if !popup::is_open(annot) {
+            return;
+        }
+        let parent = popup::parent(doc, annot);
+        let purpose = renderer.optional_content().purpose();
+        if parent
+            .as_ref()
+            .is_some_and(|p| !shown_for(p.get_i64(b"F").unwrap_or(0), purpose))
+        {
+            return;
+        }
+        if !has_normal_appearance {
+            if let Some(rect) = read_rect(annot) {
+                let resources = text::resources(doc, None, &[(popup::FONT, b"Helvetica")]);
+                let no_rotate_rect = (flags & NO_ROTATE != 0).then_some(rect);
+                draw_text_appearance(renderer, &resources, id, no_rotate_rect, |width| {
+                    popup::appearance(doc, parent.as_ref(), rect, width)
+                });
+            }
+            return;
+        }
+    }
     if annot.get_name(b"Subtype") == Some(b"Widget")
         && let Some(form) = form
         && let Some(field) = widget::Field::to_synthesise(doc, annot, form, has_normal_appearance)
