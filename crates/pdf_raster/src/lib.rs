@@ -105,13 +105,17 @@
 //! }
 //! ```
 
+mod batch;
 mod config;
 #[cfg(feature = "vaapi")]
 pub(crate) mod decode_queue;
+mod decoders;
 pub mod deskew;
+mod error;
 pub mod gcv;
 pub(crate) mod gpu_init;
 mod gray;
+mod open;
 pub mod page;
 mod render;
 mod request;
@@ -121,17 +125,16 @@ mod vk_init;
 use std::path::Path;
 
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
+pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
+pub use open::{RasterSession, open_session, open_session_from_bytes, prescan_session};
 pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
 pub use pdf::Password;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{FormType, PageGeometry, RenderPurpose};
-pub use render::{
-    RasterError, RasterSession, open_session, open_session_from_bytes, prescan_session,
-    render_page_rgb, render_page_rgb_with,
-};
+pub use render::{render_page_rgb, render_page_rgb_with};
 pub use request::{CancelToken, RenderParams, RenderRegion};
 
 /// Session-level API for explicit control over PDF opening and per-page rendering.
@@ -518,7 +521,7 @@ pub fn raster_pdf(
     path: &Path,
     opts: &RasterOptions,
 ) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
-    render::render_pages(path, opts)
+    batch::render_pages(path, opts)
 }
 
 /// Render a range of pages from an in-memory PDF (no file path).
@@ -537,7 +540,7 @@ pub fn raster_pdf_from_bytes(
     bytes: Vec<u8>,
     opts: &RasterOptions,
 ) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
-    render::render_pages_from_bytes(bytes, opts)
+    batch::render_pages_from_bytes(bytes, opts)
 }
 
 /// Render a range of pages concurrently using a bounded sync channel.
@@ -573,7 +576,7 @@ pub fn render_channel(
     opts: &RasterOptions,
     capacity: usize,
 ) -> std::sync::mpsc::Receiver<(u32, Result<RenderedPage, RasterError>)> {
-    render::render_channel(path, opts, capacity)
+    batch::render_channel(path, opts, capacity)
 }
 
 #[cfg(test)]
