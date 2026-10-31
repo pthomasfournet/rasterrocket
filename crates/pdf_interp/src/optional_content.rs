@@ -54,6 +54,10 @@ impl RenderPurpose {
 /// Bounds the recursion of a cyclic expression built from indirect arrays.
 const MAX_VE_DEPTH: u32 = 32;
 
+/// The values of the indirect operands of one visibility expression, by
+/// object.
+type Memo = HashMap<ObjectId, Option<bool>>;
+
 /// A usage dictionary category that sets a group's state: the `/Usage`
 /// sub-dictionary key and its state entry.
 const USAGE_STATES: [(&[u8], &[u8]); 3] = [
@@ -204,7 +208,10 @@ impl OptionalContent {
     /// (§8.11.2.2): its `/VE` expression when usable, otherwise its `/P`
     /// policy over `/OCGs`.  No usable group makes it visible.
     fn membership_visible(&self, doc: &Document, ocmd: &Dictionary) -> bool {
-        if let Some(visible) = ocmd.get(b"VE").and_then(|ve| self.expression(doc, ve, 0)) {
+        if let Some(visible) = ocmd
+            .get(b"VE")
+            .and_then(|ve| self.expression(doc, ve, &mut Memo::new()))
+        {
             return visible;
         }
         let ids: Vec<ObjectId> = match ocmd.get(b"OCGs") {
@@ -232,26 +239,37 @@ impl OptionalContent {
         }
     }
 
-    /// Evaluate the visibility expression `ve` (§8.11.2.2): `[/And e…]`,
-    /// `[/Or e…]` or `[/Not e]`, each operand a group or an expression.
-    /// `None` when it is malformed or nested deeper than [`MAX_VE_DEPTH`].
-    fn expression(&self, doc: &Document, ve: &Object, depth: u32) -> Option<bool> {
+    /// Evaluate the visibility expression `ve` (§8.11.2.2), an array or a
+    /// reference to one: `[/And e…]`, `[/Or e…]` or `[/Not e]`, each operand
+    /// a group or an expression.  `None` when it is malformed or nested
+    /// deeper than [`MAX_VE_DEPTH`].
+    fn expression(&self, doc: &Document, ve: &Object, memo: &mut Memo) -> Option<bool> {
+        match ve {
+            Object::Array(items) => self.evaluate(doc, items, 0, memo),
+            Object::Reference(id) => match doc.get_object(*id).ok()?.as_ref() {
+                Object::Array(items) => self.evaluate(doc, items, 0, memo),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The value of the expression whose operator and operands are `items`,
+    /// at nesting `depth`.
+    fn evaluate(
+        &self,
+        doc: &Document,
+        items: &[Object],
+        depth: u32,
+        memo: &mut Memo,
+    ) -> Option<bool> {
         if depth > MAX_VE_DEPTH {
             return None;
         }
-        let resolved;
-        let items = match ve {
-            Object::Array(a) => a.as_slice(),
-            Object::Reference(id) => {
-                resolved = doc.get_object(*id).ok()?;
-                resolved.as_array()?
-            }
-            _ => return None,
-        };
         let (op, operands) = items.split_first()?;
         let mut values = operands
             .iter()
-            .map(|operand| self.operand(doc, operand, depth));
+            .map(|operand| self.operand(doc, operand, depth, memo));
         match op.as_name()? {
             b"Not" if operands.len() == 1 => values.next()?.map(|v| !v),
             b"And" if !operands.is_empty() => values.try_fold(true, |acc, v| Some(acc & v?)),
@@ -260,16 +278,32 @@ impl OptionalContent {
         }
     }
 
-    /// The value of one operand of a visibility expression: a group or a
-    /// nested expression.
-    fn operand(&self, doc: &Document, operand: &Object, depth: u32) -> Option<bool> {
+    /// The value of one operand of an expression at nesting `depth`: a
+    /// group or a nested expression.  The value of an indirect operand is
+    /// computed once per evaluation and kept in `memo`, so an expression
+    /// that shares subexpressions by reference costs time linear in its
+    /// distinct objects.  A `None` stored there is never read back: it
+    /// makes the whole expression `None`.
+    fn operand(
+        &self,
+        doc: &Document,
+        operand: &Object,
+        depth: u32,
+        memo: &mut Memo,
+    ) -> Option<bool> {
         match operand {
-            Object::Reference(id) => match doc.get_object(*id).ok()?.as_ref() {
-                Object::Dictionary(_) => Some(self.group_on(doc, *id)),
-                Object::Array(_) => self.expression(doc, operand, depth + 1),
-                _ => None,
-            },
-            Object::Array(_) => self.expression(doc, operand, depth + 1),
+            Object::Reference(id) => {
+                if let Some(&value) = memo.get(id) {
+                    return value;
+                }
+                let value = match doc.get_object(*id).ok()?.as_ref() {
+                    Object::Dictionary(_) => Some(self.group_on(doc, *id)),
+                    Object::Array(items) => self.evaluate(doc, items, depth + 1, memo),
+                    _ => None,
+                };
+                *memo.entry(*id).or_insert(value)
+            }
+            Object::Array(items) => self.evaluate(doc, items, depth + 1, memo),
             _ => None,
         }
     }
@@ -359,5 +393,63 @@ fn names(doc: &Document, obj: Option<&Object>) -> Vec<Vec<u8>> {
             .iter()
             .filter_map(|o| o.as_name().map(<[u8]>::to_vec))
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use pdf::Object;
+
+    use super::{Config, OptionalContent, RenderPurpose};
+    use crate::test_helpers::make_doc_with_objects;
+
+    /// A configuration with every group `ON` and no usage rules.
+    fn all_on() -> OptionalContent {
+        OptionalContent {
+            purpose: RenderPurpose::View,
+            config: Some(Config {
+                base_on: true,
+                on: HashSet::new(),
+                off: HashSet::new(),
+                intents: vec![b"View".to_vec()],
+                usage: Vec::new(),
+            }),
+            states: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn shared_subexpressions_are_evaluated_once() {
+        // Object 4 is a group; object 5 the membership dictionary; each of
+        // objects 6..=35 is `[/And next next]`, so the expression unfolds
+        // to 2^30 group operands but has only 31 distinct objects.
+        const LEVELS: u32 = 30;
+        let mut objects: Vec<(u32, String)> = vec![
+            (4, "<< /Type /OCG /Name (G) >>".to_owned()),
+            (5, "<< /Type /OCMD /VE 6 0 R >>".to_owned()),
+        ];
+        for id in 6..6 + LEVELS {
+            let next = if id + 1 < 6 + LEVELS { id + 1 } else { 4 };
+            objects.push((id, format!("[/And {next} 0 R {next} 0 R]")));
+        }
+        let doc = make_doc_with_objects(&objects);
+        assert!(all_on().is_visible(&doc, &Object::Reference((5, 0))));
+    }
+
+    #[test]
+    fn a_cyclic_expression_falls_back_to_the_policy() {
+        // `/VE` refers to itself; the `/P` policy over the OFF group decides.
+        let doc = make_doc_with_objects(&[
+            (4, "<< /Type /OCG /Name (G) >>"),
+            (5, "<< /Type /OCMD /VE 6 0 R /OCGs [4 0 R] /P /AllOff >>"),
+            (6, "[/Not 6 0 R]"),
+        ]);
+        let mut oc = all_on();
+        if let Some(config) = &mut oc.config {
+            config.off = HashSet::from([(4, 0)]);
+        }
+        assert!(oc.is_visible(&doc, &Object::Reference((5, 0))));
     }
 }
