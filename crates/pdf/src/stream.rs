@@ -54,6 +54,7 @@ impl Decoded {
 /// with the first truncation a filter of the chain reported.
 ///
 /// # Errors
+/// - `/Filter` holds a value that is not a filter name.
 /// - The chain exceeds [`MAX_FILTER_CHAIN`] filters.
 /// - Any stage produces more than [`MAX_DECOMPRESSED`] bytes.  Each Flate and LZW
 ///   stage is individually bomb-capped, but a chain of stages could otherwise
@@ -62,7 +63,7 @@ impl Decoded {
 ///   cap.
 /// - Any individual filter step fails (the underlying decoder's error).
 pub(crate) fn decode_stream(raw: &[u8], dict: &Dictionary) -> Result<Decoded, String> {
-    let filters = collect_filters(dict);
+    let filters = collect_filters(dict)?;
     if filters.is_empty() {
         return Ok(Decoded::whole(raw.to_vec()));
     }
@@ -865,12 +866,24 @@ pub const fn filter_full_name(name: &[u8]) -> &[u8] {
     }
 }
 
-fn collect_filters(dict: &Dictionary) -> Vec<Vec<u8>> {
-    let full = |n: &[u8]| filter_full_name(n).to_vec();
+/// The full names of the stream's `/Filter` chain; empty when `/Filter` is
+/// absent or null.
+///
+/// # Errors
+/// `/Filter`, or an element of a `/Filter` array, is not a name: an
+/// unresolved indirect reference or a value of another type names no
+/// filter, and decoding the stream without it would hand on encoded bytes
+/// as decoded ones.
+fn collect_filters(dict: &Dictionary) -> Result<Vec<Vec<u8>>, String> {
+    let full = |o: &Object| {
+        o.as_name()
+            .map(|n| filter_full_name(n).to_vec())
+            .ok_or_else(|| format!("/Filter entry is {}, not a filter name", o.enum_variant()))
+    };
     match dict.get(b"Filter") {
-        Some(Object::Name(n)) => vec![full(n)],
-        Some(Object::Array(a)) => a.iter().filter_map(Object::as_name).map(full).collect(),
-        _ => vec![],
+        None | Some(Object::Null) => Ok(Vec::new()),
+        Some(Object::Array(a)) => a.iter().map(full).collect(),
+        Some(other) => full(other).map(|name| vec![name]),
     }
 }
 
@@ -1226,13 +1239,44 @@ mod tests {
             ]),
         );
         assert_eq!(
-            collect_filters(&dict),
+            collect_filters(&dict).expect("names"),
             [
                 &b"ASCII85Decode"[..],
                 b"FlateDecode",
                 b"DCTDecode",
                 b"Custom"
             ]
+        );
+    }
+
+    /// A `/Filter` value that is not a name, such as an indirect reference
+    /// left unresolved, fails the decode instead of passing the encoded
+    /// bytes through as decoded; an absent or null `/Filter` is no filter.
+    #[test]
+    fn non_name_filter_fails_the_decode() {
+        for filter in [
+            Object::Reference((5, 0)),
+            Object::Integer(3),
+            Object::Array(vec![
+                Object::Name(b"AHx".to_vec()),
+                Object::Reference((5, 0)),
+            ]),
+            Object::Array(vec![Object::Null]),
+        ] {
+            let mut dict = Dictionary::new();
+            dict.set(b"Filter", filter.clone());
+            let err = decode_stream(b"41>", &dict).expect_err("no filter name");
+            assert!(err.contains("not a filter name"), "{filter:?}: {err}");
+        }
+        let mut dict = Dictionary::new();
+        assert_eq!(
+            decode_stream(b"41>", &dict),
+            Ok(Decoded::whole(b"41>".to_vec()))
+        );
+        dict.set(b"Filter", Object::Null);
+        assert_eq!(
+            decode_stream(b"41>", &dict),
+            Ok(Decoded::whole(b"41>".to_vec()))
         );
     }
 
