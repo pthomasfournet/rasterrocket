@@ -44,6 +44,7 @@ use pdf::{Document, OpenOptions};
 
 /// Errors that can occur during PDF loading or content stream interpretation.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum InterpError {
     /// The lazy PDF parser failed to load or parse the document.
     Pdf(pdf::PdfError),
@@ -54,15 +55,9 @@ pub enum InterpError {
         /// Total number of pages in the document.
         total: u32,
     },
-    /// A required resource (font, image, colour space, …) could not be resolved.
-    MissingResource(String),
     /// A Page dictionary entry has a value that is structurally valid PDF but
     /// outside the range permitted by the spec or our safety limits.
     InvalidPageGeometry(String),
-    /// The page render was aborted because it exceeded the per-page operator
-    /// budget or wall-clock deadline.  The page is pathological; the rendered
-    /// bitmap is partial.
-    PageBudget(String),
 }
 
 impl std::fmt::Display for InterpError {
@@ -75,18 +70,17 @@ impl std::fmt::Display for InterpError {
                     "page {page} is out of range (document has {total} pages)"
                 )
             }
-            Self::MissingResource(name) => write!(f, "missing PDF resource: {name}"),
             Self::InvalidPageGeometry(msg) => write!(f, "invalid page geometry: {msg}"),
-            Self::PageBudget(msg) => write!(f, "page render budget exceeded: {msg}"),
         }
     }
 }
 
 impl std::error::Error for InterpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // pdf::PdfError doesn't implement std::error::Error yet; surface it
-        // via Display only.
-        None
+        match self {
+            Self::Pdf(e) => Some(e),
+            Self::PageOutOfRange { .. } | Self::InvalidPageGeometry(_) => None,
+        }
     }
 }
 
@@ -1258,5 +1252,20 @@ startxref\n180\n%%EOF"
             Err(super::InterpError::Pdf(_)) => {}
             Err(other) => panic!("garbage bytes must surface as InterpError::Pdf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_parser_error_is_the_source_of_the_interp_error() {
+        let Err(e) = super::open("/nonexistent/rasterrocket-test.pdf") else {
+            panic!("a missing file must not open");
+        };
+        let source = std::error::Error::source(&e).expect("the parser error is the source");
+        let parser = source
+            .downcast_ref::<pdf::PdfError>()
+            .expect("the source is a pdf::PdfError");
+        assert!(
+            matches!(parser, pdf::PdfError::Io(_)),
+            "a missing file is an I/O error, got {parser:?}"
+        );
     }
 }

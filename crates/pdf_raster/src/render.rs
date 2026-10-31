@@ -171,7 +171,6 @@ impl From<pdf_interp::InterpError> for RasterError {
                 Self::PageOutOfRange { page, total }
             }
             pdf_interp::InterpError::InvalidPageGeometry(msg) => Self::InvalidPageGeometry(msg),
-            pdf_interp::InterpError::PageBudget(msg) => Self::PageBudgetExceeded(msg),
             other => Self::Pdf(other),
         }
     }

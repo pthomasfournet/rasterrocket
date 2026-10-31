@@ -17,16 +17,17 @@ use crate::render::RenderError;
 
 /// Print the `source()` chain of `e` to stderr, one line per level.
 ///
-/// A level whose `Display` is identical to the text already printed is a
-/// transparent wrapper (e.g. `RasterError::Pdf` delegating to its
-/// `InterpError` source) and is skipped — repeating the same sentence under
-/// "caused by:" is noise, not a diagnosis.
+/// A level whose `Display` is contained in the text last printed is skipped:
+/// either a transparent wrapper (e.g. `RasterError::Pdf` delegating to its
+/// `InterpError` source) or a wrapper that embeds its source's message
+/// (`InterpError::Pdf` printing "PDF error: {source}").  Repeating that text
+/// under "caused by:" is noise, not a diagnosis.
 pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
     let mut prev = e.to_string();
     let mut src = e.source();
     while let Some(cause) = src {
         let text = cause.to_string();
-        if text != prev {
+        if !prev.contains(&text) {
             eprintln!("  caused by: {text}");
             prev = text;
         }
