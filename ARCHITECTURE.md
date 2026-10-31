@@ -71,7 +71,7 @@ PDF bytes on disk
 rasterrocket_interp::open()
     │
     ▼ Vec<Operator>
-rasterrocket_interp::parse_page()    content tokenizer → operator decode
+rasterrocket_interp::parse_page_content()    content tokenizer → operator decode (operands borrow the content)
     │
     ▼ Bitmap<Rgb8>  (blank, sized by PageGeometry::size_px)
 rasterrocket_interp::PageRenderer::with_view(&PageView::whole(..))

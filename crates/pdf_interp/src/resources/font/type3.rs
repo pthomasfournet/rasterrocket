@@ -18,7 +18,7 @@ use crate::resources::font_substitute::SubstituteStyle;
 pub struct Type3Glyph {
     /// The glyph's paint procedure, parsed once and shared by every code
     /// whose glyph name selects it.
-    pub ops: Arc<[Operator]>,
+    pub ops: Arc<[Operator<'static>]>,
 }
 
 /// All data extracted from a Type 3 font dictionary.
@@ -196,7 +196,10 @@ fn charproc(doc: &Document, obj: &Object, name: &str, budget: &mut usize) -> Opt
     }
     *budget -= content.len();
     Some(Type3Glyph {
-        ops: crate::content::parse(&content).into(),
+        ops: crate::content::parse(&content)
+            .into_iter()
+            .map(Operator::into_owned)
+            .collect(),
     })
 }
 

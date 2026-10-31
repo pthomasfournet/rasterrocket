@@ -34,7 +34,7 @@
 //!
 //! # Error handling
 //!
-//! Errors from `parse_page` or `page_size_pts` are propagated.  Errors from
+//! Errors reading the page content or its size are propagated.  Errors from
 //! individual resource lookups (missing dict key, corrupt stream header) are
 //! silently skipped — the scan continues.  A partial result is still useful
 //! for routing.
@@ -46,7 +46,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use crate::{
     InterpError,
     content::Operator,
-    page_size_pts_by_id, parse_page_content_by_id,
+    page_size_pts_by_id, parse_page_content,
     renderer::PageDiagnostics,
     resources::image::{
         IMAGE_FILTER_COUNT, ImageFilter, dominant_filter, filter_name, inline::parse_inline_params,
@@ -91,7 +91,8 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
 
     // 2. Walk content stream operators for inline images and text.
     let mut has_vector_text = false;
-    let (ops, content_failures) = parse_page_content_by_id(doc, page_id)?;
+    let content = doc.page_content(page_id)?;
+    let ops = parse_page_content(doc, page_id, &content.bytes);
     for op in &ops {
         match op {
             Operator::InlineImage { params, .. } => {
@@ -113,7 +114,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         dominant_filter: dominant_filter(&scan.filter_counts),
         source_ppi_hint: (scan.max_ppi > 0.0).then_some(scan.max_ppi),
         image_failures: Vec::new(),
-        content_failures,
+        content_failures: content.failures,
         missing_fonts: Vec::new(),
         form_type: crate::form_type(doc),
     })

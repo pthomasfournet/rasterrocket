@@ -22,8 +22,9 @@ pub enum Token<'a> {
     /// Name operand (`/Foo`) without the leading `/`, its `#xx` escapes
     /// decoded (PDF §7.3.5); borrowed from the source when it has none.
     Name(Cow<'a, [u8]>),
-    /// Literal string operand (`(…)`) or hex string (`<…>`), decoded.
-    String(Vec<u8>),
+    /// Literal string operand (`(…)`) or hex string (`<…>`), decoded;
+    /// a literal string without escapes is borrowed from the source.
+    String(Cow<'a, [u8]>),
     /// Array operand (`[…]`), elements already decoded.
     Array(Vec<Self>),
     /// Dictionary operand (`<< … >>`): keys and values alternate, each
@@ -56,17 +57,17 @@ pub type InlineComponents<'a> = &'a dyn Fn(&[u8]) -> Option<usize>;
 ///
 /// The tokenizer borrows its source slice for its lifetime; zero-copy for
 /// names and operator keywords.
-pub struct Tokenizer<'a> {
+pub struct Tokenizer<'a, 'c> {
     src: &'a [u8],
     pos: usize,
     /// Number of arrays and dictionaries currently open.
     depth: usize,
     /// Resolves a named colour space of an inline image to its component
     /// count (see [`inline_data_len`]).
-    inline_components: Option<InlineComponents<'a>>,
+    inline_components: Option<InlineComponents<'c>>,
 }
 
-impl<'a> Tokenizer<'a> {
+impl<'a> Tokenizer<'a, 'static> {
     /// Create a tokenizer over `src`.
     #[must_use]
     pub const fn new(src: &'a [u8]) -> Self {
@@ -77,13 +78,23 @@ impl<'a> Tokenizer<'a> {
             inline_components: None,
         }
     }
+}
 
+impl<'a> Tokenizer<'a, '_> {
     /// The same tokenizer, resolving an inline image's named colour space
-    /// through `components` when computing the image's data length.
+    /// through `components`, when given, in computing the image's data
+    /// length.  The tokens borrow only the source, not `components`.
     #[must_use]
-    pub const fn with_inline_components(mut self, components: InlineComponents<'a>) -> Self {
-        self.inline_components = Some(components);
-        self
+    pub const fn with_inline_components<'d>(
+        self,
+        components: Option<InlineComponents<'d>>,
+    ) -> Tokenizer<'a, 'd> {
+        Tokenizer {
+            src: self.src,
+            pos: self.pos,
+            depth: self.depth,
+            inline_components: components,
+        }
     }
 
     fn remaining(&self) -> &'a [u8] {
@@ -128,9 +139,34 @@ impl<'a> Tokenizer<'a> {
         pdf::decode_name(&self.src[start..self.pos])
     }
 
-    fn read_literal_string(&mut self) -> Vec<u8> {
+    fn read_literal_string(&mut self) -> Cow<'a, [u8]> {
         // Caller has verified the current byte is '('; skip it.
         self.advance();
+        // Without a backslash the string's bytes are its value (parentheses
+        // balanced inside it are literal): borrow them.
+        let start = self.pos;
+        let mut depth = 1usize;
+        for (i, &b) in self.src[start..].iter().enumerate() {
+            match b {
+                b'\\' => break,
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.pos = start + i + 1;
+                        return Cow::Borrowed(&self.src[start..start + i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Cow::Owned(self.decode_literal_string())
+    }
+
+    /// Decode a literal string from the current position (just past its
+    /// opening parenthesis) through its closing parenthesis, applying the
+    /// escapes of PDF §7.3.4.2.
+    fn decode_literal_string(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         let mut depth = 1usize;
         while let Some(b) = self.peek() {
@@ -441,7 +477,7 @@ impl<'a> Tokenizer<'a> {
                     self.depth -= 1;
                     return Some(Token::Dict(items));
                 }
-                b'<' => return Some(Token::String(self.read_hex_string())),
+                b'<' => return Some(Token::String(Cow::Owned(self.read_hex_string()))),
                 b'[' => {
                     if self.depth >= MAX_NESTING {
                         self.advance();
@@ -514,7 +550,7 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-impl<'a> Iterator for Tokenizer<'a> {
+impl<'a> Iterator for Tokenizer<'a, '_> {
     type Item = Token<'a>;
     fn next(&mut self) -> Option<Self::Item> {
         self.next_token()
@@ -588,33 +624,33 @@ mod tests {
     #[test]
     fn literal_string() {
         let t = tokens(b"(hello world)");
-        assert_eq!(t[0], Token::String(b"hello world".to_vec()));
+        assert_eq!(t[0], Token::String(b"hello world".to_vec().into()));
     }
 
     #[test]
     fn literal_string_nested_parens() {
         let t = tokens(b"(a(b)c)");
-        assert_eq!(t[0], Token::String(b"a(b)c".to_vec()));
+        assert_eq!(t[0], Token::String(b"a(b)c".to_vec().into()));
     }
 
     #[test]
     fn literal_string_octal_escape() {
         // \110 = 0o110 = 72 = 'H'
         let t = tokens(b"(\\110i)");
-        assert_eq!(t[0], Token::String(b"Hi".to_vec()));
+        assert_eq!(t[0], Token::String(b"Hi".to_vec().into()));
     }
 
     #[test]
     fn hex_string() {
         let t = tokens(b"<48656c6c6f>");
-        assert_eq!(t[0], Token::String(b"Hello".to_vec()));
+        assert_eq!(t[0], Token::String(b"Hello".to_vec().into()));
     }
 
     #[test]
     fn hex_string_trailing_nibble() {
         // <9> → high nibble 9, low nibble 0 → 0x90
         let t = tokens(b"<9>");
-        assert_eq!(t[0], Token::String(vec![0x90]));
+        assert_eq!(t[0], Token::String(vec![0x90].into()));
     }
 
     #[test]
@@ -780,16 +816,19 @@ mod tests {
         assert_eq!(
             tokens(b"[(a)1]TJ"),
             vec![
-                Token::Array(vec![Token::String(b"a".to_vec()), Token::Number(1.0)]),
+                Token::Array(vec![
+                    Token::String(b"a".to_vec().into()),
+                    Token::Number(1.0)
+                ]),
                 Token::Op(b"TJ"),
             ]
         );
         assert_eq!(
             tokens(b"(a)Tj<62>Tj"),
             vec![
-                Token::String(b"a".to_vec()),
+                Token::String(b"a".to_vec().into()),
                 Token::Op(b"Tj"),
-                Token::String(b"b".to_vec()),
+                Token::String(b"b".to_vec().into()),
                 Token::Op(b"Tj"),
             ]
         );
@@ -805,7 +844,7 @@ mod tests {
                 name_tok(b"Span"),
                 Token::Dict(vec![
                     name_tok(b"ActualText"),
-                    Token::String(vec![0xFE, 0xFF, 0x00, 0xA0]),
+                    Token::String(vec![0xFE, 0xFF, 0x00, 0xA0].into()),
                     name_tok(b"A"),
                     Token::Dict(vec![name_tok(b"B"), Token::Array(vec![Token::Number(1.0)])]),
                 ]),

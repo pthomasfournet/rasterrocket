@@ -849,13 +849,13 @@ Returns geometry for page `page_num` (1-based). `width_pts` and `height_pts` are
 
 Falls back to US Letter (612 × 792 pt) when neither `CropBox` nor `MediaBox` can be read.
 
-### `parse_page`
+### `parse_page_content`
 
 ```rust
-pub fn parse_page(doc: &Document, page_num: u32) -> Result<Vec<Operator>, InterpError>
+pub fn parse_page_content<'a>(doc: &Document, page_id: ObjectId, bytes: &'a [u8]) -> Vec<Operator<'a>>
 ```
 
-Parses the content stream for page `page_num` and returns the decoded operator sequence. Typically called internally by the renderer; exposed for tooling (e.g. `dump_ops` example).
+Parses `bytes`, the page's content from `Document::page_content(page_id)`, into its operator sequence. An inline image that names its colour space from the page's resources has its data length computed through them. The operators borrow `bytes` wherever an operand needs no decoding (`Operator::into_owned` copies them out), so the caller keeps the content alive while it uses them. Typically called internally by the renderer; exposed for tooling (e.g. the `dump_ops` example).
 
 ### `PageGeometry`
 

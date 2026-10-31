@@ -4,6 +4,8 @@
 //! last operand pushed is the rightmost value written in the stream.
 //! All `pop_*` helpers consume the topmost (rightmost) element.
 
+use std::borrow::Cow;
+
 use super::tokenizer::Token;
 
 /// A number token's value: a number, or a boolean as 0 or 1.
@@ -30,23 +32,13 @@ pub(crate) fn pop_i32(stack: &mut Vec<Token<'_>>) -> i32 {
     pop_f64(stack) as i32
 }
 
-/// Pop the topmost token as a name or string byte vector.
-/// Returns an empty `Vec` on underflow or wrong type.
-pub(crate) fn pop_name(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
+/// Pop the topmost token as the bytes of a name or a string; empty on
+/// underflow or another type.  Name and string operands are accepted for
+/// each other, as malformed producers swap them.
+pub(crate) fn pop_bytes<'a>(stack: &mut Vec<Token<'a>>) -> Cow<'a, [u8]> {
     match stack.pop() {
-        Some(Token::Name(n)) => n.to_vec(),
-        Some(Token::String(s)) => s,
-        _ => Vec::new(),
-    }
-}
-
-/// Pop the topmost token as a string byte vector.
-/// Returns an empty `Vec` on underflow or wrong type.
-pub(crate) fn pop_string(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
-    match stack.pop() {
-        Some(Token::String(s)) => s,
-        Some(Token::Name(n)) => n.to_vec(),
-        _ => Vec::new(),
+        Some(Token::Name(bytes) | Token::String(bytes)) => bytes,
+        _ => Cow::Borrowed(&[]),
     }
 }
 
@@ -73,13 +65,13 @@ pub(crate) fn drain_numbers(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
 /// name.  When the last token is a name the colour space is Pattern and the name
 /// selects the pattern resource.  For all other colour spaces only numbers appear.
 #[non_exhaustive]
-pub(crate) enum ScnOperands {
+pub(crate) enum ScnOperands<'a> {
     /// `/PatternName [c1 … cn]` — Pattern colour space; name is the resource key,
     /// components are the underlying non-Pattern colour (may be empty for
     /// `PaintType` 1 / coloured patterns).
     Pattern {
         /// Pattern resource name (key into the page `Pattern` resource dict).
-        name: Vec<u8>,
+        name: Cow<'a, [u8]>,
         /// Optional tint components for uncoloured (`PaintType` 2) patterns.
         components: Vec<f64>,
     },
@@ -93,10 +85,10 @@ pub(crate) enum ScnOperands {
 /// selects a Pattern resource.  The components are the run of numbers
 /// directly beneath the name, or at the top of the stack when there is no
 /// name (see [`drain_numbers`]).
-pub(crate) fn pop_scn(stack: &mut Vec<Token<'_>>) -> ScnOperands {
+pub(crate) fn pop_scn<'a>(stack: &mut Vec<Token<'a>>) -> ScnOperands<'a> {
     let name = if matches!(stack.last(), Some(Token::Name(_))) {
         match stack.pop() {
-            Some(Token::Name(n)) => Some(n.to_vec()),
+            Some(Token::Name(n)) => Some(n),
             _ => None,
         }
     } else {
@@ -160,7 +152,7 @@ mod tests {
     #[test]
     fn colour_components_are_the_numbers_at_the_top_of_the_stack() {
         let mut stack = vec![
-            Token::String(b"stray".to_vec()),
+            Token::String(b"stray".to_vec().into()),
             Token::Number(1.0),
             Token::Number(0.5),
             Token::Number(0.0),
@@ -169,7 +161,7 @@ mod tests {
             panic!("no pattern name");
         };
         assert_eq!(c, [1.0, 0.5, 0.0]);
-        assert_eq!(stack, [Token::String(b"stray".to_vec())]);
+        assert_eq!(stack, [Token::String(b"stray".to_vec().into())]);
 
         let mut stack = vec![
             Token::Name(b"stray".as_slice().into()),
@@ -179,7 +171,7 @@ mod tests {
         let ScnOperands::Pattern { name, components } = pop_scn(&mut stack) else {
             panic!("a pattern name");
         };
-        assert_eq!(name, b"P0");
+        assert_eq!(*name, *b"P0");
         assert_eq!(components, [0.25]);
     }
 

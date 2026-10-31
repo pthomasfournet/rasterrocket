@@ -3,7 +3,7 @@
 //! # Architecture
 //!
 //! ```text
-//! pdf::Document  →  parse_page()  →  Vec<Operator>  →  renderer::PageRenderer
+//! pdf::Document  →  page_content() + parse_page_content()  →  Vec<Operator>  →  renderer::PageRenderer
 //!                →  prescan_page() →  PageDiagnostics  (no pixels decoded)
 //! ```
 //!
@@ -443,7 +443,7 @@ pub fn page_size_pts(doc: &Document, page_num: u32) -> Result<PageGeometry, Inte
 ///
 /// Skips the page-tree descent.  Use when the caller already resolved the id —
 /// the renderer resolves once at its entry point and reuses the id for both
-/// `page_size_pts_by_id` and [`parse_page_by_id`].
+/// `page_size_pts_by_id` and [`parse_page_content`].
 ///
 /// # Errors
 /// [`InterpError::InvalidPageGeometry`] if `UserUnit` is present but outside
@@ -691,46 +691,21 @@ pub fn page_size_pts_by_id(
     })
 }
 
-/// Parse the content stream for page `page_num` (1-based) and return the
-/// decoded operator sequence.
+/// Parse `bytes`, the content of page `page_id` (from
+/// [`pdf::Document::page_content`]), into its operators.
 ///
-/// # Errors
-/// Returns [`InterpError::PageOutOfRange`] if `page_num` is 0 or exceeds the
-/// document page count, or [`InterpError::Pdf`] if the content stream cannot
-/// be read.
-pub fn parse_page(doc: &Document, page_num: u32) -> Result<Vec<content::Operator>, InterpError> {
-    let page_id = resolve_page_id(doc, page_num)?;
-    parse_page_by_id(doc, page_id)
-}
-
-/// Like [`parse_page`] but takes a pre-resolved page object id, skipping
-/// the page-tree descent.
-///
-/// # Errors
-/// [`InterpError::Pdf`] if the content stream cannot be read.
-pub fn parse_page_by_id(
+/// An inline image that names its colour space from the page's resources
+/// has its data length computed through them.  The operators borrow
+/// `bytes` wherever an operand needs no decoding.
+#[must_use]
+pub fn parse_page_content<'a>(
     doc: &Document,
     page_id: pdf::ObjectId,
-) -> Result<Vec<content::Operator>, InterpError> {
-    parse_page_content_by_id(doc, page_id).map(|(ops, _)| ops)
-}
-
-/// Like [`parse_page_by_id`], also returning the `/Contents` elements that
-/// were skipped because they hold no decodable content.
-///
-/// # Errors
-/// [`InterpError::Pdf`] if the content stream cannot be read.
-pub fn parse_page_content_by_id(
-    doc: &Document,
-    page_id: pdf::ObjectId,
-) -> Result<(Vec<content::Operator>, Vec<pdf::ContentFailure>), InterpError> {
-    let content = doc.page_content(page_id)?;
+    bytes: &'a [u8],
+) -> Vec<content::Operator<'a>> {
     let resources = resources::PageResources::new(doc, page_id);
     let components = |name: &[u8]| resources.inline_image_components(name);
-    Ok((
-        content::parse_with(&content.bytes, Some(&components)),
-        content.failures,
-    ))
+    content::parse_with(bytes, Some(&components))
 }
 
 #[cfg(test)]

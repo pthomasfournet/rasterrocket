@@ -56,10 +56,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    let ops = rasterrocket_interp::parse_page_by_id(&doc, page_id).unwrap_or_else(|e| {
+    let content = doc.page_content(page_id).unwrap_or_else(|e| {
         eprintln!("error: failed to parse page {page}: {e}");
         std::process::exit(1);
     });
+    let ops = rasterrocket_interp::parse_page_content(&doc, page_id, &content.bytes);
     println!("Page {page}: {} operators", ops.len());
 
     let view = rasterrocket_interp::renderer::PageView::whole(&geom, (scale, scale));

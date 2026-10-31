@@ -188,7 +188,9 @@ fn render_page_rgb_with_geom(
         );
     }
 
-    let (ops, content_failures) = pdf_interp::parse_page_content_by_id(doc, page_id)?;
+    let content = doc.page_content(page_id)?;
+    let ops = pdf_interp::parse_page_content(doc, page_id, &content.bytes);
+    let content_failures = content.failures;
     if session.strict && !content_failures.is_empty() {
         return Err(RasterError::ContentDecodeFailed(
             content_failures.iter().map(ToString::to_string).collect(),

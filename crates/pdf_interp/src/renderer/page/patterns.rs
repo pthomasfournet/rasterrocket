@@ -98,7 +98,7 @@ pub(super) enum PatternPaint {
 /// The content of a tiling pattern's cell, ready to render.
 struct CellContent<'a> {
     desc: &'a crate::resources::tiling::TilingDescriptor,
-    ops: &'a [crate::content::Operator],
+    ops: &'a [crate::content::Operator<'static>],
     /// The colour of a `PaintType` 2 (uncoloured) pattern; `None` for
     /// `PaintType` 1 (coloured), whose content supplies its own colours.
     tint: Option<&'a RasterColor>,

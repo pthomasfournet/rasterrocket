@@ -806,8 +806,8 @@ fn unknown_op_dedup_set_is_bounded_under_adversarial_input() {
     let mut ops: Vec<Operator> = Vec::with_capacity(distinct * 2);
     for i in 0..distinct {
         let kw = format!("junk{i}").into_bytes();
-        ops.push(Operator::Unknown(kw.clone()));
-        ops.push(Operator::Unknown(kw));
+        ops.push(Operator::Unknown(kw.clone().into()));
+        ops.push(Operator::Unknown(kw.into()));
     }
     renderer.execute(&ops);
 
@@ -835,11 +835,11 @@ fn unknown_op_first_occurrence_is_tracked_per_keyword() {
 
     // Three distinct keywords, the first repeated three times.
     renderer.execute(&[
-        Operator::Unknown(b"foo".to_vec()),
-        Operator::Unknown(b"foo".to_vec()),
-        Operator::Unknown(b"foo".to_vec()),
-        Operator::Unknown(b"bar".to_vec()),
-        Operator::Unknown(b"baz".to_vec()),
+        Operator::Unknown(b"foo"[..].into()),
+        Operator::Unknown(b"foo"[..].into()),
+        Operator::Unknown(b"foo"[..].into()),
+        Operator::Unknown(b"bar"[..].into()),
+        Operator::Unknown(b"baz"[..].into()),
     ]);
 
     let (tracked, capped) = renderer.warned_unknown_ops_state_for_test();

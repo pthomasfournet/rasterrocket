@@ -1,5 +1,7 @@
 //! PDF content stream parsing: tokenizer → operand stack → typed operators.
 
+use std::borrow::Cow;
+
 pub(crate) mod operands;
 pub(crate) mod operator;
 pub(crate) mod tokenizer;
@@ -7,7 +9,8 @@ pub(crate) mod tokenizer;
 pub use operator::{Operator, TextArrayElement};
 pub use tokenizer::{InlineComponents, Tokenizer};
 
-/// Parse a raw content stream byte slice into a `Vec` of decoded operators.
+/// Parse a raw content stream byte slice into a `Vec` of decoded operators,
+/// whose names and strings borrow from `src` where they need no decoding.
 ///
 /// - Unrecognised operator keywords become [`Operator::Unknown`].
 /// - Operand tokens that do not match the expected type for an operator are
@@ -17,7 +20,7 @@ pub use tokenizer::{InlineComponents, Tokenizer};
 /// An inline image whose colour space is named from the resources has its
 /// data length computed only through [`parse_with`].
 #[must_use]
-pub fn parse(src: &[u8]) -> Vec<Operator> {
+pub fn parse(src: &[u8]) -> Vec<Operator<'_>> {
     parse_with(src, None)
 }
 
@@ -25,15 +28,14 @@ pub fn parse(src: &[u8]) -> Vec<Operator> {
 /// component count through `components` (see
 /// [`Tokenizer::with_inline_components`]).
 #[must_use]
-pub fn parse_with(src: &[u8], components: Option<InlineComponents<'_>>) -> Vec<Operator> {
+pub fn parse_with<'a>(
+    src: &'a [u8],
+    components: Option<InlineComponents<'_>>,
+) -> Vec<Operator<'a>> {
     let mut operands: Vec<tokenizer::Token<'_>> = Vec::new();
     let mut ops = Vec::new();
 
-    let mut tokenizer = Tokenizer::new(src);
-    if let Some(components) = components {
-        tokenizer = tokenizer.with_inline_components(components);
-    }
-    for token in tokenizer {
+    for token in Tokenizer::new(src).with_inline_components(components) {
         match token {
             tokenizer::Token::Op(kw) => {
                 ops.push(operator::decode(kw, &mut operands));
@@ -43,8 +45,8 @@ pub fn parse_with(src: &[u8], components: Option<InlineComponents<'_>>) -> Vec<O
                 // any preceding operands are stray — clear them.
                 operands.clear();
                 ops.push(Operator::InlineImage {
-                    params: params.to_vec(),
-                    data: data.to_vec(),
+                    params: Cow::Borrowed(params),
+                    data: Cow::Borrowed(data),
                 });
             }
             other => operands.push(other),

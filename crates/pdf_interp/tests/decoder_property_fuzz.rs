@@ -41,7 +41,7 @@
 //!   given build produces the byte-identical mutant population every run.  A
 //!   failure is reproducible from the reported seed.
 //! * Genuinely exercises the real decoders: each mutant is driven through the
-//!   public `Document::from_bytes_owned` -> `parse_page_by_id` ->
+//!   public `Document::from_bytes_owned` -> `parse_page_content` ->
 //!   `PageRenderer::execute` -> `finish` path — the same path the CLI uses.
 //!   Codec mutants are embedded as image `XObject` streams so `decode_dct`,
 //!   `decode_ccitt`, and `decode_jbig2` are actually invoked.
@@ -459,7 +459,7 @@ enum Outcome {
 /// Run the real public decode+render pipeline on `bytes`, catching any panic.
 ///
 /// This is the SAME sequence the CLI uses (`Document::from_bytes_owned` ->
-/// `get_page` -> `parse_page_by_id` -> `PageRenderer::execute` -> `finish`),
+/// `get_page` -> `parse_page_content` -> `PageRenderer::execute` -> `finish`),
 /// so it genuinely invokes the hardened parser and the JPEG/CCITT/JBIG2
 /// codecs — not a stub.  `catch_unwind` only *observes* a panic so the harness
 /// can report it; it does not mask one (a caught panic is a test FAILURE).
@@ -471,9 +471,10 @@ fn drive(bytes: Vec<u8>) -> Outcome {
         let Ok(page_id) = doc.get_page(0) else {
             return Outcome::CleanErr;
         };
-        let Ok(ops) = rasterrocket_interp::parse_page_by_id(&doc, page_id) else {
+        let Ok(content) = doc.page_content(page_id) else {
             return Outcome::CleanErr;
         };
+        let ops = rasterrocket_interp::parse_page_content(&doc, page_id, &content.bytes);
         // Fixed, valid geometry: the mutated bytes flow into the PDF body /
         // codec stream, never into these dimensions, so `PageRenderer::new`'s
         // scale assertion (a caller-contract precondition, not an

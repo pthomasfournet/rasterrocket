@@ -143,7 +143,7 @@ impl PageRenderer<'_> {
             }
             Operator::SetFillPattern { name, components } => {
                 let gs = self.gstate.current_mut();
-                gs.fill_pattern = Some(Arc::from(name.as_slice()));
+                gs.fill_pattern = Some(Arc::from(&**name));
                 gs.fill_pattern_components.clone_from(components);
             }
 
@@ -173,7 +173,7 @@ impl PageRenderer<'_> {
             }
             Operator::SetStrokePattern { name, components } => {
                 let gs = self.gstate.current_mut();
-                gs.stroke_pattern = Some(Arc::from(name.as_slice()));
+                gs.stroke_pattern = Some(Arc::from(&**name));
                 gs.stroke_pattern_components.clone_from(components);
             }
 
@@ -293,7 +293,7 @@ impl PageRenderer<'_> {
                 }
                 let font = self.font_cache.select(&self.resources, name);
                 let ts = &mut self.gstate.current_mut().text;
-                ts.font_name = Arc::from(name.as_slice());
+                ts.font_name = Arc::from(&**name);
                 ts.font = Some(font);
                 ts.font_size = *size;
             }

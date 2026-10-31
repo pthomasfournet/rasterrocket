@@ -12,10 +12,15 @@ fn main() {
         eprintln!("error: failed to open {path}: {e}");
         std::process::exit(1);
     });
-    let ops = rasterrocket_interp::parse_page(&doc, page).unwrap_or_else(|e| {
+    let page_id = doc.get_page(page - 1).unwrap_or_else(|e| {
         eprintln!("error: failed to parse page {page}: {e}");
         std::process::exit(1);
     });
+    let content = doc.page_content(page_id).unwrap_or_else(|e| {
+        eprintln!("error: failed to parse page {page}: {e}");
+        std::process::exit(1);
+    });
+    let ops = rasterrocket_interp::parse_page_content(&doc, page_id, &content.bytes);
     for op in &ops {
         println!("{op:?}");
     }

@@ -3,9 +3,11 @@
 //! [`decode`] consumes the pending operand stack and produces a strongly-typed
 //! [`Operator`] value ready for dispatch to the renderer.
 
+use std::borrow::Cow;
+
 use super::operands::{
-    ScnOperands, pop_f64, pop_i32, pop_matrix, pop_n, pop_name, pop_number_array, pop_scn,
-    pop_string, pop2, pop3, pop4,
+    ScnOperands, pop_bytes, pop_f64, pop_i32, pop_matrix, pop_n, pop_number_array, pop_scn, pop2,
+    pop3, pop4,
 };
 use super::tokenizer::Token;
 
@@ -15,7 +17,7 @@ use super::tokenizer::Token;
 /// Operand order matches the PDF spec (left-to-right as written in the stream).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum Operator {
+pub enum Operator<'a> {
     // ── Graphics state ────────────────────────────────────────────────────────
     /// `q` — push graphics state.
     Save,
@@ -39,11 +41,11 @@ pub enum Operator {
         phase: f64,
     },
     /// `ri name` — set colour rendering intent.
-    SetRenderingIntent(Vec<u8>),
+    SetRenderingIntent(Cow<'a, [u8]>),
     /// `i` — set flatness tolerance (0–100).
     SetFlatness(f64),
     /// `gs name` — apply named extended graphics state dictionary entry.
-    SetExtGState(Vec<u8>),
+    SetExtGState(Cow<'a, [u8]>),
 
     // ── Path construction ─────────────────────────────────────────────────────
     /// `m x y` — begin new subpath at (x, y).
@@ -97,7 +99,7 @@ pub enum Operator {
     /// `Tf name size` — set font resource and size.
     SetFont {
         /// Font resource name (key into the page Font resource dict).
-        name: Vec<u8>,
+        name: Cow<'a, [u8]>,
         /// Font size in text space units.
         size: f64,
     },
@@ -126,11 +128,11 @@ pub enum Operator {
 
     // ── Text showing ──────────────────────────────────────────────────────────
     /// `Tj string` — show a string of glyphs.
-    ShowText(Vec<u8>),
+    ShowText(Cow<'a, [u8]>),
     /// `TJ array` — show glyphs with individual horizontal adjustments.
-    ShowTextArray(Vec<TextArrayElement>),
+    ShowTextArray(Vec<TextArrayElement<'a>>),
     /// `' string` — move to next line, then show string (equivalent to `T* Tj`).
-    MoveNextLineShow(Vec<u8>),
+    MoveNextLineShow(Cow<'a, [u8]>),
     /// `" aw ac string` — set word/char spacing, move to next line, show string.
     MoveNextLineShowSpaced {
         /// Word spacing to set before showing.
@@ -138,14 +140,14 @@ pub enum Operator {
         /// Character spacing to set before showing.
         ac: f64,
         /// String to show.
-        text: Vec<u8>,
+        text: Cow<'a, [u8]>,
     },
 
     // ── Colour ────────────────────────────────────────────────────────────────
     /// `cs name` — set fill colour space.
-    SetFillColorSpace(Vec<u8>),
+    SetFillColorSpace(Cow<'a, [u8]>),
     /// `CS name` — set stroke colour space.
-    SetStrokeColorSpace(Vec<u8>),
+    SetStrokeColorSpace(Cow<'a, [u8]>),
     /// `sc` / `scn` — set fill colour (components in current fill space).
     SetFillColor(Vec<f64>),
     /// `SC` / `SCN` — set stroke colour (components in current stroke space).
@@ -156,14 +158,14 @@ pub enum Operator {
     /// patterns; it is empty for coloured (`PaintType` 1) patterns.
     SetFillPattern {
         /// Key into the page `Pattern` resource dictionary.
-        name: Vec<u8>,
+        name: Cow<'a, [u8]>,
         /// Tint components for `PaintType` 2 patterns (may be empty).
         components: Vec<f64>,
     },
     /// `SCN /Name [c1…cn]` — activate a named Pattern as the stroke source.
     SetStrokePattern {
         /// Key into the page `Pattern` resource dictionary.
-        name: Vec<u8>,
+        name: Cow<'a, [u8]>,
         /// Tint components for `PaintType` 2 patterns (may be empty).
         components: Vec<f64>,
     },
@@ -182,18 +184,18 @@ pub enum Operator {
 
     // ── XObjects & images ─────────────────────────────────────────────────────
     /// `Do name` — paint an `XObject` (image or form `XObject`).
-    PaintXObject(Vec<u8>),
+    PaintXObject(Cow<'a, [u8]>),
     /// `BI … ID … EI` — paint an inline image.
     InlineImage {
         /// Raw bytes of the inline-image parameter dict (between `BI` and `ID`).
-        params: Vec<u8>,
+        params: Cow<'a, [u8]>,
         /// Raw image data bytes (between `ID` and `EI`).
-        data: Vec<u8>,
+        data: Cow<'a, [u8]>,
     },
 
     // ── Shading ───────────────────────────────────────────────────────────────
     /// `sh name` — paint a shading pattern.
-    PaintShading(Vec<u8>),
+    PaintShading(Cow<'a, [u8]>),
 
     // ── Type 3 glyph metrics ──────────────────────────────────────────────────
     /// `wx wy d0` — Type 3 coloured glyph: declares advance width (wx, wy).
@@ -220,7 +222,7 @@ pub enum Operator {
     /// `Name` is a key into the `Properties` resource dictionary; the
     /// renderer resolves it to an optional content group and skips the
     /// enclosed content when that group is hidden.
-    BeginOptionalContent(Vec<u8>),
+    BeginOptionalContent(Cow<'a, [u8]>),
     /// `EMC` — end the innermost open marked-content sequence, optional or
     /// not.
     EndMarkedContent,
@@ -231,10 +233,10 @@ pub enum Operator {
 
     // ── Unknown / unimplemented ───────────────────────────────────────────────
     /// An operator keyword the decoder does not recognise.
-    Unknown(Vec<u8>),
+    Unknown(Cow<'a, [u8]>),
 }
 
-impl Operator {
+impl Operator<'_> {
     /// `true` for the operators that set a fill or stroke colour, colour
     /// space or pattern (PDF §8.6.8).
     #[must_use]
@@ -260,12 +262,128 @@ impl Operator {
 /// Element of a `TJ` text-showing array.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum TextArrayElement {
+pub enum TextArrayElement<'a> {
     /// A string of glyph codes to render.
-    Text(Vec<u8>),
+    Text(Cow<'a, [u8]>),
     /// Horizontal adjustment in thousandths of a text-space unit.
     /// Negative values move the text origin to the right.
     Offset(f64),
+}
+
+impl TextArrayElement<'_> {
+    /// The element with its string copied out of the content stream.
+    #[must_use]
+    pub fn into_owned(self) -> TextArrayElement<'static> {
+        match self {
+            Self::Text(text) => TextArrayElement::Text(Cow::Owned(text.into_owned())),
+            Self::Offset(offset) => TextArrayElement::Offset(offset),
+        }
+    }
+}
+
+impl Operator<'_> {
+    /// The operator with its names and strings copied out of the content
+    /// stream, for an operator kept beyond the stream's buffer.
+    #[must_use]
+    pub fn into_owned(self) -> Operator<'static> {
+        match self {
+            Self::Save => Operator::Save,
+            Self::Restore => Operator::Restore,
+            Self::ConcatMatrix(a0) => Operator::ConcatMatrix(a0),
+            Self::SetLineWidth(a0) => Operator::SetLineWidth(a0),
+            Self::SetLineCap(a0) => Operator::SetLineCap(a0),
+            Self::SetLineJoin(a0) => Operator::SetLineJoin(a0),
+            Self::SetMiterLimit(a0) => Operator::SetMiterLimit(a0),
+            Self::SetDash { dashes, phase } => Operator::SetDash { dashes, phase },
+            Self::SetRenderingIntent(a0) => {
+                Operator::SetRenderingIntent(Cow::Owned(a0.into_owned()))
+            }
+            Self::SetFlatness(a0) => Operator::SetFlatness(a0),
+            Self::SetExtGState(a0) => Operator::SetExtGState(Cow::Owned(a0.into_owned())),
+            Self::MoveTo(a0, a1) => Operator::MoveTo(a0, a1),
+            Self::LineTo(a0, a1) => Operator::LineTo(a0, a1),
+            Self::CurveTo(a0, a1, a2, a3, a4, a5) => Operator::CurveTo(a0, a1, a2, a3, a4, a5),
+            Self::CurveToV(a0, a1, a2, a3) => Operator::CurveToV(a0, a1, a2, a3),
+            Self::CurveToY(a0, a1, a2, a3) => Operator::CurveToY(a0, a1, a2, a3),
+            Self::ClosePath => Operator::ClosePath,
+            Self::Rectangle(a0, a1, a2, a3) => Operator::Rectangle(a0, a1, a2, a3),
+            Self::Stroke => Operator::Stroke,
+            Self::CloseStroke => Operator::CloseStroke,
+            Self::Fill => Operator::Fill,
+            Self::FillEvenOdd => Operator::FillEvenOdd,
+            Self::FillStroke => Operator::FillStroke,
+            Self::FillStrokeEvenOdd => Operator::FillStrokeEvenOdd,
+            Self::CloseFillStroke => Operator::CloseFillStroke,
+            Self::CloseFillStrokeEvenOdd => Operator::CloseFillStrokeEvenOdd,
+            Self::EndPath => Operator::EndPath,
+            Self::Clip => Operator::Clip,
+            Self::ClipEvenOdd => Operator::ClipEvenOdd,
+            Self::BeginText => Operator::BeginText,
+            Self::EndText => Operator::EndText,
+            Self::SetFont { name, size } => Operator::SetFont {
+                name: Cow::Owned(name.into_owned()),
+                size,
+            },
+            Self::SetCharSpacing(a0) => Operator::SetCharSpacing(a0),
+            Self::SetWordSpacing(a0) => Operator::SetWordSpacing(a0),
+            Self::SetHorizScaling(a0) => Operator::SetHorizScaling(a0),
+            Self::SetLeading(a0) => Operator::SetLeading(a0),
+            Self::SetTextRise(a0) => Operator::SetTextRise(a0),
+            Self::SetTextRenderMode(a0) => Operator::SetTextRenderMode(a0),
+            Self::TextMove(a0, a1) => Operator::TextMove(a0, a1),
+            Self::TextMoveSetLeading(a0, a1) => Operator::TextMoveSetLeading(a0, a1),
+            Self::SetTextMatrix(a0) => Operator::SetTextMatrix(a0),
+            Self::NextLine => Operator::NextLine,
+            Self::ShowText(a0) => Operator::ShowText(Cow::Owned(a0.into_owned())),
+            Self::ShowTextArray(a0) => {
+                Operator::ShowTextArray(a0.into_iter().map(TextArrayElement::into_owned).collect())
+            }
+            Self::MoveNextLineShow(a0) => Operator::MoveNextLineShow(Cow::Owned(a0.into_owned())),
+            Self::MoveNextLineShowSpaced { aw, ac, text } => Operator::MoveNextLineShowSpaced {
+                aw,
+                ac,
+                text: Cow::Owned(text.into_owned()),
+            },
+            Self::SetFillColorSpace(a0) => Operator::SetFillColorSpace(Cow::Owned(a0.into_owned())),
+            Self::SetStrokeColorSpace(a0) => {
+                Operator::SetStrokeColorSpace(Cow::Owned(a0.into_owned()))
+            }
+            Self::SetFillColor(a0) => Operator::SetFillColor(a0),
+            Self::SetStrokeColor(a0) => Operator::SetStrokeColor(a0),
+            Self::SetFillPattern { name, components } => Operator::SetFillPattern {
+                name: Cow::Owned(name.into_owned()),
+                components,
+            },
+            Self::SetStrokePattern { name, components } => Operator::SetStrokePattern {
+                name: Cow::Owned(name.into_owned()),
+                components,
+            },
+            Self::SetFillGray(a0) => Operator::SetFillGray(a0),
+            Self::SetStrokeGray(a0) => Operator::SetStrokeGray(a0),
+            Self::SetFillRgb(a0, a1, a2) => Operator::SetFillRgb(a0, a1, a2),
+            Self::SetStrokeRgb(a0, a1, a2) => Operator::SetStrokeRgb(a0, a1, a2),
+            Self::SetFillCmyk(a0, a1, a2, a3) => Operator::SetFillCmyk(a0, a1, a2, a3),
+            Self::SetStrokeCmyk(a0, a1, a2, a3) => Operator::SetStrokeCmyk(a0, a1, a2, a3),
+            Self::PaintXObject(a0) => Operator::PaintXObject(Cow::Owned(a0.into_owned())),
+            Self::InlineImage { params, data } => Operator::InlineImage {
+                params: Cow::Owned(params.into_owned()),
+                data: Cow::Owned(data.into_owned()),
+            },
+            Self::PaintShading(a0) => Operator::PaintShading(Cow::Owned(a0.into_owned())),
+            Self::Type3GlyphWidth(a0, a1) => Operator::Type3GlyphWidth(a0, a1),
+            Self::Type3GlyphWidthBBox(a0, a1, a2, a3, a4, a5) => {
+                Operator::Type3GlyphWidthBBox(a0, a1, a2, a3, a4, a5)
+            }
+            Self::MarkedContentPoint => Operator::MarkedContentPoint,
+            Self::BeginMarkedContent => Operator::BeginMarkedContent,
+            Self::BeginOptionalContent(a0) => {
+                Operator::BeginOptionalContent(Cow::Owned(a0.into_owned()))
+            }
+            Self::EndMarkedContent => Operator::EndMarkedContent,
+            Self::CompatibilitySection => Operator::CompatibilitySection,
+            Self::Unknown(a0) => Operator::Unknown(Cow::Owned(a0.into_owned())),
+        }
+    }
 }
 
 /// Decode a pending operand stack and operator keyword into an [`Operator`].
@@ -276,7 +394,7 @@ pub enum TextArrayElement {
     clippy::too_many_lines,
     reason = "operator dispatch table — splitting adds no clarity"
 )]
-pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
+pub(crate) fn decode<'a>(op: &'a [u8], operands: &mut Vec<Token<'a>>) -> Operator<'a> {
     let result = match op {
         // ── Graphics state ────────────────────────────────────────────────────
         b"q" => Operator::Save,
@@ -293,9 +411,9 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
             let dashes = pop_number_array(operands);
             Operator::SetDash { dashes, phase }
         }
-        b"ri" => Operator::SetRenderingIntent(pop_name(operands)),
+        b"ri" => Operator::SetRenderingIntent(pop_bytes(operands)),
         b"i" => Operator::SetFlatness(pop_f64(operands)),
-        b"gs" => Operator::SetExtGState(pop_name(operands)),
+        b"gs" => Operator::SetExtGState(pop_bytes(operands)),
 
         // ── Path construction ─────────────────────────────────────────────────
         b"m" => {
@@ -347,7 +465,7 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
         b"Tf" => {
             // Stream order: `name size Tf`
             let size = pop_f64(operands);
-            let name = pop_name(operands);
+            let name = pop_bytes(operands);
             Operator::SetFont { name, size }
         }
         b"Tc" => Operator::SetCharSpacing(pop_f64(operands)),
@@ -370,20 +488,20 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
         b"T*" => Operator::NextLine,
 
         // ── Text showing ──────────────────────────────────────────────────────
-        b"Tj" => Operator::ShowText(pop_string(operands)),
+        b"Tj" => Operator::ShowText(pop_bytes(operands)),
         b"TJ" => Operator::ShowTextArray(pop_text_array(operands)),
-        b"'" => Operator::MoveNextLineShow(pop_string(operands)),
+        b"'" => Operator::MoveNextLineShow(pop_bytes(operands)),
         b"\"" => {
             // Stream order: `aw ac string "`
-            let text = pop_string(operands);
+            let text = pop_bytes(operands);
             let ac = pop_f64(operands);
             let aw = pop_f64(operands);
             Operator::MoveNextLineShowSpaced { aw, ac, text }
         }
 
         // ── Colour ────────────────────────────────────────────────────────────
-        b"cs" => Operator::SetFillColorSpace(pop_name(operands)),
-        b"CS" => Operator::SetStrokeColorSpace(pop_name(operands)),
+        b"cs" => Operator::SetFillColorSpace(pop_bytes(operands)),
+        b"CS" => Operator::SetStrokeColorSpace(pop_bytes(operands)),
         b"sc" | b"scn" => match pop_scn(operands) {
             ScnOperands::Components(c) => Operator::SetFillColor(c),
             ScnOperands::Pattern { name, components } => {
@@ -416,10 +534,10 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
         }
 
         // ── XObjects & images ─────────────────────────────────────────────────
-        b"Do" => Operator::PaintXObject(pop_name(operands)),
+        b"Do" => Operator::PaintXObject(pop_bytes(operands)),
 
         // ── Shading ───────────────────────────────────────────────────────────
-        b"sh" => Operator::PaintShading(pop_name(operands)),
+        b"sh" => Operator::PaintShading(pop_bytes(operands)),
 
         // ── Type 3 glyph metrics ──────────────────────────────────────────────
         b"d0" => {
@@ -439,9 +557,9 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
         b"BDC" => {
             let props = operands.pop();
             let tag = operands.pop();
-            match (&tag, &props) {
-                (Some(Token::Name(t)), Some(Token::Name(k))) if t.as_ref() == b"OC" => {
-                    Operator::BeginOptionalContent(k.to_vec())
+            match (tag, props) {
+                (Some(Token::Name(t)), Some(Token::Name(k))) if *t == *b"OC" => {
+                    Operator::BeginOptionalContent(k)
                 }
                 _ => Operator::BeginMarkedContent,
             }
@@ -453,7 +571,7 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
         // ── PDF compatibility sections (contents opaque to conforming readers) ─
         b"BX" | b"EX" => Operator::CompatibilitySection,
 
-        _ => Operator::Unknown(op.to_vec()),
+        _ => Operator::Unknown(Cow::Borrowed(op)),
     };
 
     operands.clear();
@@ -461,7 +579,7 @@ pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
 }
 
 /// Pop the top of the stack as a `TJ` text array.
-fn pop_text_array(stack: &mut Vec<Token<'_>>) -> Vec<TextArrayElement> {
+fn pop_text_array<'a>(stack: &mut Vec<Token<'a>>) -> Vec<TextArrayElement<'a>> {
     match stack.pop() {
         Some(Token::Array(arr)) => arr
             .into_iter()

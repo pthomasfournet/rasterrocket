@@ -12,10 +12,15 @@ fn main() {
     });
     let total = rasterrocket_interp::page_count(&doc);
     println!("Pages: {total}");
-    let ops = rasterrocket_interp::parse_page(&doc, 1).unwrap_or_else(|e| {
+    let page_id = doc.get_page(0).unwrap_or_else(|e| {
         eprintln!("error: failed to parse page 1: {e}");
         std::process::exit(1);
     });
+    let content = doc.page_content(page_id).unwrap_or_else(|e| {
+        eprintln!("error: failed to parse page 1: {e}");
+        std::process::exit(1);
+    });
+    let ops = rasterrocket_interp::parse_page_content(&doc, page_id, &content.bytes);
     println!("Page 1: {} operators", ops.len());
     for op in ops.iter().take(20) {
         println!("  {op:?}");

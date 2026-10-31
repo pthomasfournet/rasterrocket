@@ -286,7 +286,7 @@ pub(super) fn inline_token_to_object(tok: &crate::content::tokenizer::Token<'_>)
             }
         }
         Token::Bool(b) => Object::Boolean(*b),
-        Token::String(s) => Object::String(s.clone(), pdf::StringFormat::Literal),
+        Token::String(s) => Object::String(s.to_vec(), pdf::StringFormat::Literal),
         Token::Array(items) => Object::Array(items.iter().map(inline_token_to_object).collect()),
         // Inline image `/DP` (DecodeParms) is a dictionary, e.g.
         // `<</K -1 /Columns 277>>` for a CCITT G4 image mask.

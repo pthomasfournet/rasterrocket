@@ -107,7 +107,7 @@ impl RasterKey {
 /// A tiling pattern's descriptor and parsed content.
 pub(super) struct TilingCell {
     pub(super) desc: TilingDescriptor,
-    pub(super) ops: Vec<Operator>,
+    pub(super) ops: Vec<Operator<'static>>,
 }
 
 /// A rasterised tiling cell.
@@ -342,7 +342,10 @@ impl PageRenderer<'_> {
                     self.resources.inherited()
                 };
                 let components = |name: &[u8]| cell_resources.inline_image_components(name);
-                let ops = crate::content::parse_with(&desc.content, Some(&components));
+                let ops = crate::content::parse_with(&desc.content, Some(&components))
+                    .into_iter()
+                    .map(Operator::into_owned)
+                    .collect();
                 Rc::new(TilingCell { desc, ops })
             })
         })
