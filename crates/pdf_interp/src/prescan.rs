@@ -185,9 +185,11 @@ impl<'a> ImageScan<'a> {
         let filter = dict
             .get(b"Filter")
             .and_then(|o| self.doc.resolve(o).ok())
-            .and_then(|o| filter_name(&o).map(std::borrow::Cow::into_owned));
-        let slot =
-            &mut self.filter_counts[ImageFilter::from_filter_str(filter.as_deref()) as usize];
+            .map_or_else(
+                || ImageFilter::from_filter_str(None),
+                |o| ImageFilter::from_filter_str(filter_name(&o).as_deref()),
+            );
+        let slot = &mut self.filter_counts[filter as usize];
         *slot = slot.saturating_add(1);
         if let Some(w_px) = positive_u32(dict, b"Width")
             && self.page_pts_width > 0.0
