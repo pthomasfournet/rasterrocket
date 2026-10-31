@@ -2141,6 +2141,30 @@ No modem code and no internet-fax services.
 
 ---
 
+## Phase 14 — Text shaping for substituted fonts (planned, after v2.0.0)
+
+**Status: planned, not started.** Not part of v2.0.0.
+
+When a PDF does not embed the font for Arabic, Devanagari or another script
+that needs shaping, the substitute (an installed face, or the bundled Noto
+fallbacks shipped in v2.0.0) draws each character in its isolated form:
+letters are not joined, and reordering, conjuncts and mark positioning are
+not applied. The glyphs are correct and the text is readable, but it does not
+look as typeset and recognises worse under OCR. Embedded fonts are not
+affected: the producer has already shaped that text and the content stream
+carries the shaped glyphs.
+
+Plan: shape each run of substituted text with an OpenType shaping engine
+over the substitute face (GSUB/GPOS: joining forms, ligatures, reordering,
+mark attachment) before drawing, keeping the PDF's glyph positions as the
+anchor for each run. The engine choice (a pure-Rust shaper as a local fork,
+in keeping with the read-fonts/skrifa forks) and the run segmentation (by
+script and font, using the `ToUnicode` text) are the open design questions.
+Measure on non-embedded Arabic and Devanagari fixtures against an embedded,
+shaped rendering of the same text.
+
+---
+
 ## Current status (2026-10-30)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
