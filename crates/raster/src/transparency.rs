@@ -28,9 +28,8 @@
 use crate::bitmap::Bitmap;
 use crate::clip::Clip;
 use crate::pipe::general::{MAX_COMPS, union_colour};
-use crate::pipe::{self, GroupBackdrop, PipeSrc, PipeState};
+use crate::pipe::{self, GroupBackdrop, PipeSrc, PipeState, RowPattern};
 use color::Pixel;
-use color::convert::div255;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 /// Parameters for one transparency group, collected before [`begin_group`].
@@ -257,9 +256,8 @@ pub fn begin_group<P: Pixel>(
 ///
 /// `pipe` controls blend mode, opacity, and transfer for the compositing step.
 /// The group's own alpha plane is folded into the effective source alpha as
-/// `eff_a = div255(group_alpha × pipe.a_input)`.
-///
-/// Pixels with `group_alpha == 0` are skipped entirely (no-op fast path).
+/// `div255(group_alpha × pipe.a_input)`; pixels with `group_alpha == 0` leave
+/// the parent unchanged.
 ///
 /// # Panics
 ///
@@ -277,49 +275,38 @@ pub fn paint_group<P: Pixel>(
         .bitmap
         .alpha_plane()
         .expect("group bitmap is allocated with an alpha plane");
-
-    let x_end = (x1 as usize).min(parent.width as usize);
+    let (x0, x_end) = (x0 as usize, (x1 as usize).min(parent.width as usize));
 
     for y in y0..y1.min(parent.height) {
         let g_row = group.bitmap.row_bytes(y);
-        let g_alpha = &alpha[y as usize * width..(y as usize + 1) * width];
-        let (p_row, mut p_alpha) = parent.row_and_alpha_mut(y);
-
-        for x in x0 as usize..x_end {
-            let g_src_a = g_alpha[x];
-            if g_src_a == 0 {
-                continue; // fully transparent — leave parent unchanged
-            }
-
-            let off = x * ncomps;
-
-            // Effective source alpha = group alpha × overall pipe opacity.
-            let eff_a = div255(u32::from(g_src_a) * u32::from(pipe.a_input));
-
-            let pixel_pipe = PipeState {
-                a_input: eff_a,
-                ..*pipe
-            };
-            let src = PipeSrc::Solid(&g_row[off..off + ncomps]);
-            let dst_pix = &mut p_row[off..off + ncomps];
-            let dst_alpha: Option<&mut [u8]> = p_alpha.as_mut().map(|a| &mut a[x..=x]);
-
+        let row_alpha = &alpha[y as usize * width..(y as usize + 1) * width];
+        // Each run of painted group pixels composites as one span whose
+        // shape is the group alpha: the pipe scales the source alpha by it,
+        // `div255(a_input × shape)`.  Unpainted pixels leave the parent as it is.
+        let mut start = x0;
+        while let Some(a) = row_alpha[start..x_end].iter().position(|&g| g != 0) {
+            let a = start + a;
+            let b = row_alpha[a..x_end]
+                .iter()
+                .position(|&g| g == 0)
+                .map_or(x_end, |n| a + n);
             #[expect(
                 clippy::cast_possible_wrap,
                 clippy::cast_possible_truncation,
-                reason = "x and y are below the parent's u32 dimensions, which \
-                          device bitmaps keep under 2^31"
+                reason = "columns and rows lie within the parent, whose dimensions are below 2^31"
             )]
-            pipe::render_span::<P>(
-                &pixel_pipe,
-                &src,
-                dst_pix,
-                dst_alpha,
-                None,
-                x as i32,
-                x as i32,
+            pipe::render_bitmap_span::<P>(
+                parent,
+                pipe,
+                &PipeSrc::Pattern(&RowPattern {
+                    data: &g_row[a * ncomps..b * ncomps],
+                }),
+                Some(&row_alpha[a..b]),
+                a as i32,
+                (b - 1) as i32,
                 y as i32,
             );
+            start = b;
         }
     }
 
@@ -358,6 +345,7 @@ mod tests {
     use crate::bitmap::Bitmap;
     use crate::testutil::{make_clip, simple_pipe};
     use color::Rgb8;
+    use color::convert::div255;
 
     fn default_params(x_min: i32, y_min: i32, x_max: i32, y_max: i32) -> GroupParams {
         GroupParams {
@@ -673,5 +661,87 @@ mod tests {
         );
         // The region is clamped to the parent: 4×4.
         assert_eq!(group.region(), (0, 0, 4, 4));
+    }
+
+    /// Pixel-by-pixel reference for `paint_group`: each painted group pixel
+    /// composited alone with source alpha `div255(group_alpha × a_input)`.
+    fn paint_group_per_pixel(
+        parent: &mut Bitmap<Rgb8>,
+        group: &Bitmap<Rgb8>,
+        pipe: &PipeState<'_>,
+    ) {
+        let alpha = group.alpha_plane().expect("alpha");
+        for y in 0..group.height {
+            for x in 0..group.width as usize {
+                let g = alpha[y as usize * group.width as usize + x];
+                if g == 0 {
+                    continue;
+                }
+                let pixel_pipe = PipeState {
+                    a_input: div255(u32::from(g) * u32::from(pipe.a_input)),
+                    ..*pipe
+                };
+                let src = PipeSrc::Solid(&group.row_bytes(y)[x * 3..x * 3 + 3]);
+                let xi = i32::try_from(x).expect("small");
+                let yi = i32::try_from(y).expect("small");
+                pipe::render_bitmap_span::<Rgb8>(parent, &pixel_pipe, &src, None, xi, xi, yi);
+            }
+        }
+    }
+
+    /// Compositing runs of group pixels with the group alpha as shape gives
+    /// the bytes of compositing each pixel alone, for every pipe variant.
+    #[test]
+    fn paint_group_matches_per_pixel_compositing() {
+        use crate::testutil::make_pipe;
+        use crate::types::BlendMode;
+        let (w, h) = (9u32, 4u32);
+        let fill = |bmp: &mut Bitmap<Rgb8>, seed: u32| {
+            let mut s = seed;
+            let mut next = || {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                s.to_be_bytes()[0]
+            };
+            for b in bmp.data_mut() {
+                *b = next();
+            }
+            if let Some(a) = bmp.alpha_plane_mut() {
+                for (i, v) in a.iter_mut().enumerate() {
+                    // Runs of zero alpha between painted pixels.
+                    *v = if i % 4 == 3 { 0 } else { next() | 1 };
+                }
+            }
+        };
+        for parent_alpha in [false, true] {
+            for (a_input, mode) in [
+                (255, BlendMode::Normal),
+                (200, BlendMode::Normal),
+                (255, BlendMode::Multiply),
+                (90, BlendMode::Luminosity),
+            ] {
+                let pipe = make_pipe(a_input, mode);
+                let mut want: Bitmap<Rgb8> = Bitmap::new(w, h, 1, parent_alpha);
+                fill(&mut want, 7);
+                let mut got: Bitmap<Rgb8> = Bitmap::new(w, h, 1, parent_alpha);
+                fill(&mut got, 7);
+                let clip = make_clip(w, h);
+                let mut group = begin_group::<Rgb8>(
+                    &got,
+                    None,
+                    &clip,
+                    default_params(0, 0, 8, 3),
+                    Bitmap::new(w, h, 1, true),
+                );
+                fill(&mut group.bitmap, 11);
+                paint_group_per_pixel(&mut want, &group.bitmap, &pipe);
+                let _ = paint_group::<Rgb8>(&mut got, group, &pipe);
+                assert_eq!(
+                    got.data(),
+                    want.data(),
+                    "{mode:?} a={a_input} alpha={parent_alpha}"
+                );
+                assert_eq!(got.alpha_plane(), want.alpha_plane());
+            }
+        }
     }
 }
