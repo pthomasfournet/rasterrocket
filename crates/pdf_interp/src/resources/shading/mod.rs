@@ -57,7 +57,7 @@ use super::dict_ext::DictExt;
 use super::{PageResources, read_matrix, resolve_dict};
 use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
-use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, emit_triangle};
+use mesh::{CornerSource, DirectColors, MeshVertex, ParamColors, TriangleSink, emit_triangle};
 use patch::{decode_type6_mesh, decode_type7_mesh};
 pub use triangles::Mesh;
 
@@ -254,12 +254,14 @@ fn decode_mesh<S: CornerSource>(
     ctm: &[f64; 6],
     page_h: f64,
 ) -> Vec<[GouraudVertex; 3]> {
+    let mut sink = TriangleSink::new();
     match shading_type {
-        4 => decode_type4_mesh(sh, data, source, decode, ctm, page_h),
-        5 => decode_type5_mesh(sh, data, source, decode, ctm, page_h),
-        6 => decode_type6_mesh(sh, data, source, decode, ctm, page_h),
-        _ => decode_type7_mesh(sh, data, source, decode, ctm, page_h),
+        4 => decode_type4_mesh(sh, data, source, decode, ctm, page_h, &mut sink),
+        5 => decode_type5_mesh(sh, data, source, decode, ctm, page_h, &mut sink),
+        6 => decode_type6_mesh(sh, data, source, decode, ctm, page_h, &mut sink),
+        _ => decode_type7_mesh(sh, data, source, decode, ctm, page_h, &mut sink),
     }
+    sink.finish()
 }
 
 /// Decompress a stream, logging a warning on failure.
@@ -661,26 +663,28 @@ fn decode_type4_mesh<S: CornerSource>(
     decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
-) -> Vec<[GouraudVertex; 3]> {
+    triangles: &mut TriangleSink,
+) {
     let Some(bpc) = parse_bits_per_coord(sh, "type4") else {
-        return vec![];
+        return;
     };
     let Some(bpcomp) = parse_bits_per_comp(sh, "type4") else {
-        return vec![];
+        return;
     };
     let Some(bpf) = patch::parse_bits_per_flag(sh, "type4") else {
-        return vec![];
+        return;
     };
 
     let mut reader = BitReader::new(data);
-    let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
     // The three vertices of the most recently decoded triangle, for fan continuation.
     let mut prev: Option<[MeshVertex<S::Corner>; 3]> = None;
     // Vertices of a flag-0 triangle read so far.
     let mut opening: Vec<MeshVertex<S::Corner>> = Vec::with_capacity(3);
     let mut raw = vec![0u32; source.components()];
 
-    while let Some(flag) = reader.read_bits(bpf) {
+    while !triangles.is_full()
+        && let Some(flag) = reader.read_bits(bpf)
+    {
         let Some(vertex) = read_mesh_vertex(&mut reader, &mut raw, bpc, bpcomp) else {
             break;
         };
@@ -711,11 +715,9 @@ fn decode_type4_mesh<S: CornerSource>(
 
         if let Some(t) = tri {
             prev = Some(t);
-            emit_triangle(source, t, &mut triangles);
+            emit_triangle(source, t, triangles);
         }
     }
-
-    triangles
 }
 
 // ── Type 5 — Lattice-form Gouraud mesh ───────────────────────────────────────
@@ -733,33 +735,33 @@ fn decode_type5_mesh<S: CornerSource>(
     decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
-) -> Vec<[GouraudVertex; 3]> {
+    triangles: &mut TriangleSink,
+) {
     let Some(bpc) = parse_bits_per_coord(sh, "type5") else {
-        return vec![];
+        return;
     };
     let Some(bpcomp) = parse_bits_per_comp(sh, "type5") else {
-        return vec![];
+        return;
     };
     let Some(verts_per_row) = sh.get_i64(b"VerticesPerRow") else {
         log::warn!("shading/type5: missing VerticesPerRow — skipping");
-        return vec![];
+        return;
     };
     if verts_per_row < 2 {
         log::warn!("shading/type5: VerticesPerRow={verts_per_row} < 2 — skipping");
-        return vec![];
+        return;
     }
     let Ok(vpr) = usize::try_from(verts_per_row) else {
         log::warn!("shading/type5: VerticesPerRow={verts_per_row} overflows usize — skipping");
-        return vec![];
+        return;
     };
 
     let mut reader = BitReader::new(data);
     let mut raw = vec![0u32; source.components()];
     // Keep only two rows at a time; tessellate as we go to avoid storing the entire mesh.
     let mut prev_row: Vec<MeshVertex<S::Corner>> = Vec::with_capacity(vpr);
-    let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
 
-    'rows: loop {
+    'rows: while !triangles.is_full() {
         let mut row = Vec::with_capacity(vpr);
         for _ in 0..vpr {
             let Some(vertex) = read_mesh_vertex(&mut reader, &mut raw, bpc, bpcomp) else {
@@ -779,20 +781,18 @@ fn decode_type5_mesh<S: CornerSource>(
                 emit_triangle(
                     source,
                     [prev_row[col], prev_row[col + 1], row[col]],
-                    &mut triangles,
+                    triangles,
                 );
                 emit_triangle(
                     source,
                     [prev_row[col + 1], row[col + 1], row[col]],
-                    &mut triangles,
+                    triangles,
                 );
             }
         }
 
         prev_row = row;
     }
-
-    triangles
 }
 
 // ── Mesh vertex helpers ───────────────────────────────────────────────────────

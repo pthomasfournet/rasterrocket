@@ -21,6 +21,79 @@ pub(super) const COLOR_DELTA: f64 = 3.0 / 255.0;
 /// Maximum subdivision depth of one mesh triangle.
 const MAX_TRIANGLE_DEPTH: u8 = 6;
 
+/// Subdivision of a mesh triangle or patch stops once its control points
+/// span at most this many device pixels along both axes.
+pub(super) const MIN_SUBDIVISION_EXTENT: f64 = 1.0;
+
+/// Upper bound on the triangles of one mesh shading.  A patch record of a
+/// few bytes subdivides into up to `2 · 4^6` triangles, so the stream length
+/// does not bound the mesh; at about 100 bytes per indexed triangle this
+/// bounds one mesh near 400 MiB.
+pub(super) const MAX_MESH_TRIANGLES: usize = 1 << 22;
+
+/// The triangles of a mesh being decoded, holding at most a fixed number.
+pub(super) struct TriangleSink {
+    triangles: Vec<[GouraudVertex; 3]>,
+    limit: usize,
+    full: bool,
+}
+
+impl TriangleSink {
+    /// A sink holding at most [`MAX_MESH_TRIANGLES`] triangles.
+    pub(super) const fn new() -> Self {
+        Self::with_limit(MAX_MESH_TRIANGLES)
+    }
+
+    /// A sink holding at most `limit` triangles.
+    pub(super) const fn with_limit(limit: usize) -> Self {
+        Self {
+            triangles: Vec::new(),
+            limit,
+            full: false,
+        }
+    }
+
+    /// Append `triangle`, or drop it and mark the sink full when the sink
+    /// holds its limit.
+    pub(super) fn push(&mut self, triangle: [GouraudVertex; 3]) {
+        if self.triangles.len() < self.limit {
+            self.triangles.push(triangle);
+        } else {
+            self.full = true;
+        }
+    }
+
+    /// Whether a triangle has been dropped; decoding stops at this point.
+    pub(super) const fn is_full(&self) -> bool {
+        self.full
+    }
+
+    /// The triangles held, with a warning when some were dropped.
+    pub(super) fn finish(self) -> Vec<[GouraudVertex; 3]> {
+        if self.full {
+            log::warn!(
+                "shading: mesh exceeds {} triangles — the remainder is not painted",
+                self.limit
+            );
+        }
+        self.triangles
+    }
+}
+
+/// The larger of the x and y extents of `points`.
+pub(super) fn extent(points: impl IntoIterator<Item = [f64; 2]>) -> f64 {
+    let [x0, y0, x1, y1] = points.into_iter().fold(
+        [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ],
+        |[x0, y0, x1, y1], [x, y]| [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+    );
+    (x1 - x0).max(y1 - y0)
+}
+
 /// The colour value held at a mesh corner while the mesh is decoded,
 /// subdivided and interpolated.
 pub(super) trait Corner: Copy {
@@ -162,20 +235,27 @@ impl<C: Corner> MeshVertex<C> {
 /// Append triangle `tri` to `out` as Gouraud triangles.
 ///
 /// With [`CornerSource::SUBDIVIDE_TRIANGLES`] the triangle splits at its
-/// edge midpoints into four until its corners are within [`COLOR_DELTA`] or
+/// edge midpoints into four until its corners are within [`COLOR_DELTA`],
+/// it spans at most [`MIN_SUBDIVISION_EXTENT`] pixels, or
 /// [`MAX_TRIANGLE_DEPTH`] is reached; the corner values interpolate linearly
 /// across the triangle, so the midpoints are exact.
 pub(super) fn emit_triangle<S: CornerSource>(
     source: &S,
     tri: [MeshVertex<S::Corner>; 3],
-    out: &mut Vec<[GouraudVertex; 3]>,
+    out: &mut TriangleSink,
 ) {
     let mut stack = vec![(tri, 0u8)];
-    while let Some(([a, b, c], depth)) = stack.pop() {
+    while !out.is_full()
+        && let Some(([a, b, c], depth)) = stack.pop()
+    {
         let spread = S::Corner::delta(a.corner, b.corner)
             .max(S::Corner::delta(b.corner, c.corner))
             .max(S::Corner::delta(c.corner, a.corner));
-        if !S::SUBDIVIDE_TRIANGLES || depth >= MAX_TRIANGLE_DEPTH || spread <= COLOR_DELTA {
+        if !S::SUBDIVIDE_TRIANGLES
+            || depth >= MAX_TRIANGLE_DEPTH
+            || spread <= COLOR_DELTA
+            || extent([a, b, c].map(|v| [v.x, v.y])) <= MIN_SUBDIVISION_EXTENT
+        {
             out.push([a, b, c].map(|v| GouraudVertex {
                 x: v.x,
                 y: v.y,
@@ -221,7 +301,7 @@ mod tests {
             ramp: ColorRamp::from_samples(vec![[255, 0, 0], [0, 255, 0], [0, 0, 255]])
                 .expect("ramp"),
         };
-        let mut out = Vec::new();
+        let mut sink = TriangleSink::new();
         emit_triangle(
             &source,
             [
@@ -229,8 +309,9 @@ mod tests {
                 vertex(64.0, 0.0, 1.0),
                 vertex(0.0, 64.0, 0.0),
             ],
-            &mut out,
+            &mut sink,
         );
+        let out = sink.finish();
         assert!(out.len() > 1, "a full-range triangle subdivides");
         // Some emitted vertex sits at s = 0.5, where the ramp is green.
         assert!(
@@ -239,6 +320,43 @@ mod tests {
                 .any(|v| (v.x - 32.0).abs() < 1e-9 && v.y == 0.0 && v.color == [0, 255, 0]),
             "the edge midpoint takes the middle stop"
         );
+    }
+
+    fn full_range_ramp() -> ParamColors {
+        ParamColors {
+            ramp: ColorRamp::from_samples(vec![[255, 0, 0], [0, 0, 255]]).expect("ramp"),
+        }
+    }
+
+    #[test]
+    fn a_sub_pixel_triangle_is_not_subdivided() {
+        let mut sink = TriangleSink::new();
+        emit_triangle(
+            &full_range_ramp(),
+            [
+                vertex(0.0, 0.0, 0.0),
+                vertex(0.75, 0.0, 1.0),
+                vertex(0.0, 0.75, 0.5),
+            ],
+            &mut sink,
+        );
+        assert_eq!(sink.finish().len(), 1);
+    }
+
+    #[test]
+    fn subdivision_stops_when_the_sink_is_full() {
+        let mut sink = TriangleSink::with_limit(10);
+        emit_triangle(
+            &full_range_ramp(),
+            [
+                vertex(0.0, 0.0, 0.0),
+                vertex(512.0, 0.0, 1.0),
+                vertex(0.0, 512.0, 0.5),
+            ],
+            &mut sink,
+        );
+        assert!(sink.is_full());
+        assert_eq!(sink.finish().len(), 10);
     }
 
     #[test]
@@ -254,7 +372,7 @@ mod tests {
             y: 0.0,
             corner: color,
         };
-        let mut out = Vec::new();
+        let mut sink = TriangleSink::new();
         emit_triangle(
             &source,
             [
@@ -262,8 +380,9 @@ mod tests {
                 v(9.0, [0, 0, 255]),
                 v(4.0, [0, 255, 0]),
             ],
-            &mut out,
+            &mut sink,
         );
+        let out = sink.finish();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0][1].color, [0, 0, 255]);
     }

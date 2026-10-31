@@ -6,7 +6,9 @@
 use pdf::Dictionary;
 use raster::shading::gouraud::GouraudVertex;
 
-use super::mesh::{COLOR_DELTA, Corner, CornerSource};
+use super::mesh::{
+    COLOR_DELTA, Corner, CornerSource, MIN_SUBDIVISION_EXTENT, TriangleSink, extent,
+};
 use super::{BitReader, parse_bits_per_comp, parse_bits_per_coord, transform_point};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -156,12 +158,13 @@ pub(super) fn corner_vertex<S: CornerSource>(
 /// Adaptively subdivide `patch` into Gouraud triangles and append them to `out`.
 ///
 /// Subdivision stops when all corner colours are within [`COLOR_DELTA`] of each
-/// other or [`MAX_PATCH_DEPTH`] is reached (adaptive subdivision per PDF §8.7.4.5).
-/// Uses an explicit work stack (no recursion) to avoid stack overflow.
+/// other, the control points span at most [`MIN_SUBDIVISION_EXTENT`] pixels
+/// (the patch lies in their convex hull), or [`MAX_PATCH_DEPTH`] is reached.
+/// The work stack is explicit, so the native stack depth is constant.
 pub(super) fn tessellate_patch<S: CornerSource>(
     source: &S,
     patch: Patch<S::Corner>,
-    out: &mut Vec<[GouraudVertex; 3]>,
+    out: &mut TriangleSink,
 ) {
     // Pre-allocate the work stack.  In a DFS traversal of a 4-ary tree of depth D,
     // at most 3*D+1 nodes are simultaneously live on the stack (3 siblings waiting
@@ -171,8 +174,13 @@ pub(super) fn tessellate_patch<S: CornerSource>(
         Vec::with_capacity(3 * MAX_PATCH_DEPTH as usize + 1);
     stack.push((patch, 0));
 
-    while let Some((p, depth)) = stack.pop() {
-        if depth >= MAX_PATCH_DEPTH || color_delta(&p) <= COLOR_DELTA {
+    while !out.is_full()
+        && let Some((p, depth)) = stack.pop()
+    {
+        if depth >= MAX_PATCH_DEPTH
+            || color_delta(&p) <= COLOR_DELTA
+            || extent(p.xy.into_iter().flatten()) <= MIN_SUBDIVISION_EXTENT
+        {
             // Leaf: emit 2 triangles covering the patch quad from its 4 corners.
             let v00 = corner_vertex(source, &p, 0, 0);
             let v01 = corner_vertex(source, &p, 0, 1);
@@ -549,25 +557,27 @@ pub(super) fn decode_type6_mesh<S: CornerSource>(
     decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
-) -> Vec<[GouraudVertex; 3]> {
+    triangles: &mut TriangleSink,
+) {
     let Some(bpc) = parse_bits_per_coord(sh, "type6") else {
-        return vec![];
+        return;
     };
     let Some(bpcomp) = parse_bits_per_comp(sh, "type6") else {
-        return vec![];
+        return;
     };
     let Some(bpf) = parse_bits_per_flag(sh, "type6") else {
-        return vec![];
+        return;
     };
     let mut reader = BitReader::new(data);
-    let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
     let mut prev: Option<Patch<S::Corner>> = None;
 
     #[expect(
         clippy::cast_possible_truncation,
         reason = "bpf ∈ {2,4,8}; value fits u8"
     )]
-    while let Some(flag_raw) = reader.read_bits(bpf) {
+    while !triangles.is_full()
+        && let Some(flag_raw) = reader.read_bits(bpf)
+    {
         let flag = flag_raw as u8;
 
         let (n_pts, n_colors): (usize, usize) = if flag == 0 { (12, 4) } else { (8, 2) };
@@ -593,11 +603,9 @@ pub(super) fn decode_type6_mesh<S: CornerSource>(
             }
         };
 
-        tessellate_patch(source, patch, &mut triangles);
+        tessellate_patch(source, patch, triangles);
         prev = Some(patch);
     }
-
-    triangles
 }
 
 /// Decode a Type 7 (tensor-product patch mesh) shading stream.
@@ -612,25 +620,27 @@ pub(super) fn decode_type7_mesh<S: CornerSource>(
     decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
-) -> Vec<[GouraudVertex; 3]> {
+    triangles: &mut TriangleSink,
+) {
     let Some(bpc) = parse_bits_per_coord(sh, "type7") else {
-        return vec![];
+        return;
     };
     let Some(bpcomp) = parse_bits_per_comp(sh, "type7") else {
-        return vec![];
+        return;
     };
     let Some(bpf) = parse_bits_per_flag(sh, "type7") else {
-        return vec![];
+        return;
     };
     let mut reader = BitReader::new(data);
-    let mut triangles: Vec<[GouraudVertex; 3]> = Vec::new();
     let mut prev: Option<Patch<S::Corner>> = None;
 
     #[expect(
         clippy::cast_possible_truncation,
         reason = "bpf ∈ {2,4,8}; value fits u8"
     )]
-    while let Some(flag_raw) = reader.read_bits(bpf) {
+    while !triangles.is_full()
+        && let Some(flag_raw) = reader.read_bits(bpf)
+    {
         let flag = flag_raw as u8;
 
         let (n_pts, n_colors): (usize, usize) = if flag == 0 { (16, 4) } else { (12, 2) };
@@ -656,11 +666,9 @@ pub(super) fn decode_type7_mesh<S: CornerSource>(
             }
         };
 
-        tessellate_patch(source, patch, &mut triangles);
+        tessellate_patch(source, patch, triangles);
         prev = Some(patch);
     }
-
-    triangles
 }
 
 #[cfg(test)]
@@ -802,13 +810,38 @@ mod tests {
                 space: &super::super::ColorSpace::DeviceRgb,
             },
         };
-        let mut out = Vec::new();
-        tessellate_patch(&source, p, &mut out);
+        let mut sink = TriangleSink::new();
+        tessellate_patch(&source, p, &mut sink);
         assert_eq!(
-            out.len(),
+            sink.finish().len(),
             2,
             "expected exactly 2 triangles for uniform-colour patch"
         );
+    }
+
+    #[test]
+    fn tessellate_patch_stops_at_the_pixel() {
+        // Four distinct corner colours over half a pixel: one leaf.
+        let p = flat_patch(
+            0.0,
+            0.0,
+            0.5,
+            0.5,
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        );
+        let doc = crate::test_helpers::empty_doc();
+        let source = super::super::mesh::DirectColors {
+            cs: super::super::ShadingCs {
+                doc: &doc,
+                space: &super::super::ColorSpace::DeviceRgb,
+            },
+        };
+        let mut sink = TriangleSink::new();
+        tessellate_patch(&source, p, &mut sink);
+        assert_eq!(sink.finish().len(), 2);
     }
 
     #[test]
