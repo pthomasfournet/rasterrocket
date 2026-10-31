@@ -81,7 +81,7 @@ fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
 ///   1-D/2-D (T.4 MR).
 /// - `Columns`: pixels per encoded row; defaults to `width`.  Rows are
 ///   clamped or white-padded to `width` in the output.
-/// - `Rows`: rows to decode; defaults to `height`.
+/// - `Rows`: rows to decode; defaults to `height`, and is capped at it.
 /// - `EncodedByteAlign`: each encoded row starts on a byte boundary.  Group 3
 ///   streams honour it.  Group 4 streams that declare it occur both aligned
 ///   and unaligned, so a Group 4 stream is read unaligned and, if that stops
@@ -121,7 +121,10 @@ pub(super) fn decode_ccitt(
     };
     let black_is_1 = flag(b"BlackIs1", false);
     let declared_aligned = flag(b"EncodedByteAlign", false);
-    let rows = positive(b"Rows").unwrap_or(height);
+    // Rows past the image's height are discarded, so the decoder stops
+    // there; a larger `/Rows` would otherwise let a stream of one-bit rows
+    // grow the output without bound.
+    let rows = positive(b"Rows").map_or(height, |r| r.min(height));
     let columns = positive(b"Columns").unwrap_or(width);
 
     let capacity = (width as usize).checked_mul(height as usize)?;
@@ -193,7 +196,9 @@ pub(super) fn decode_ccitt(
 /// byte per pixel: `white` for white runs and its complement for black runs.
 ///
 /// Every row is exactly `width` bytes.  Decoded rows span `columns` pixels:
-/// a narrower row is padded with `white`, a wider one is clipped.
+/// a narrower row is padded with `white`, a wider one is clipped.  Rows
+/// past the reserved capacity are counted but not stored, so the output
+/// never exceeds it.
 struct HayroCcittCollector {
     out: Vec<u8>,
     width: u32,
@@ -226,7 +231,11 @@ impl HayroCcittCollector {
 
 impl hayro_ccitt::Decoder for HayroCcittCollector {
     fn push_row(&mut self, changes: &[u32]) {
+        self.rows += 1;
         let start = self.out.len();
+        if self.out.capacity() - start < self.width as usize {
+            return;
+        }
         self.out.resize(start + self.width as usize, self.white);
         let row = &mut self.out[start..];
         // Changes alternate white→black and black→white; an odd count leaves
@@ -236,7 +245,6 @@ impl hayro_ccitt::Decoder for HayroCcittCollector {
             let to = run.get(1).map_or(self.row_end, |&x| x.min(self.row_end)) as usize;
             row[from..to].fill(!self.white);
         }
-        self.rows += 1;
     }
 }
 
@@ -1258,6 +1266,26 @@ mod tests {
                 0xFF, 0x00, 0x00, 0x00,
             ]
         );
+    }
+
+    /// Rows past the reserved capacity are not stored.
+    #[test]
+    fn ccitt_collector_stops_at_its_capacity() {
+        let mut c = HayroCcittCollector::new(8, 4, 4, 0xFF).expect("collector");
+        for _ in 0..5 {
+            hayro_ccitt::Decoder::push_row(&mut c, &[0, 1]);
+        }
+        assert_eq!(c.finish().len(), 8);
+    }
+
+    /// A `/Rows` larger than the image decodes only the image's rows: one
+    /// Group 4 all-white row per `1` bit, 64 rows in the stream, 2 kept.
+    #[test]
+    fn ccitt_rows_beyond_the_height_are_not_decoded() {
+        let parms = ccitt_parms(&[(b"K", -1), (b"Rows", 1 << 30)], &[]);
+        let img = decode_ccitt(&[0xFF; 8], 8, 2, false, Some(&parms)).expect("decodes");
+        assert_eq!(img.data.as_cpu().map(<[u8]>::len), Some(16));
+        assert!(img.partial.is_none());
     }
 
     #[test]
