@@ -1,7 +1,6 @@
-//! Text-rendering helpers extracted from `page/mod.rs`.
-//!
-//! These types and functions serve text showing: [`super::PageRenderer::show_text`]
-//! and the `TJ` kerning offsets in the operator dispatch.
+//! Text-space arithmetic shared by text showing
+//! ([`super::PageRenderer::show_text`]) and the `TJ` kerning offsets of the
+//! operator dispatch.
 
 use crate::renderer::gstate::ctm_transform;
 use font::key::FRACTION;

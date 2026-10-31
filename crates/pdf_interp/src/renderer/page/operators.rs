@@ -81,10 +81,6 @@ impl PageRenderer<'_> {
 
     #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
     #[expect(
-        clippy::match_same_arms,
-        reason = "intentional stubs for unimplemented operators"
-    )]
-    #[expect(
         clippy::many_single_char_names,
         reason = "PDF matrix components and PDF spec variable names"
     )]
@@ -110,9 +106,6 @@ impl PageRenderer<'_> {
             Operator::SetDash { dashes, phase } => {
                 self.gstate.current_mut().dash = (dashes.clone(), *phase);
             }
-            // Rendering intent is an output-intent hint only; no change to rendering.
-            Operator::SetRenderingIntent(_) => {}
-
             Operator::SetExtGState(name) => {
                 if let Some(params) = self.resources.ext_gstate(name) {
                     self.apply_ext_gstate(&params);
@@ -358,7 +351,7 @@ impl PageRenderer<'_> {
                 self.gstate.current_mut().text.next_line();
                 self.show_text(bytes);
             }
-            Operator::MoveNextLineShowSpaced { aw, ac, text, .. } => {
+            Operator::MoveNextLineShowSpaced { aw, ac, text } => {
                 let gs = self.gstate.current_mut();
                 gs.text.word_spacing = *aw;
                 gs.text.char_spacing = *ac;
@@ -446,40 +439,36 @@ impl PageRenderer<'_> {
             }
 
             // ── Type 3 glyph metrics ──────────────────────────────────────────
-            // `d0`/`d1` declare the glyph advance width and (for `d1`) a bounding
-            // box.  Width is sourced from the font's `Widths` array at call time;
-            // the BBox is informational.  A `d1` description is a stencil: it
-            // paints, fills and strokes alike, in the text fill colour in
-            // effect at the text-showing operator (PDF §9.6.5), so the stroke
-            // colour takes the fill colour and the colour operators that follow
-            // are ignored.
-            Operator::Type3GlyphWidth(..) => {}
+            // A `d1` description is a stencil: it paints, fills and strokes
+            // alike, in the text fill colour in effect at the text-showing
+            // operator (PDF §9.6.5), so the stroke colour takes the fill
+            // colour and the colour operators that follow are ignored.
             Operator::Type3GlyphWidthBBox(..) => {
                 let gs = self.gstate.current_mut();
-                gs.stroke_color = gs.fill_color.clone();
-                gs.stroke_pattern = gs.fill_pattern.clone();
-                gs.stroke_pattern_components = gs.fill_pattern_components.clone();
-                gs.stroke_color_space = gs.fill_color_space.clone();
+                gs.stroke_color.clone_from(&gs.fill_color);
+                gs.stroke_pattern.clone_from(&gs.fill_pattern);
+                gs.stroke_pattern_components
+                    .clone_from(&gs.fill_pattern_components);
+                gs.stroke_color_space.clone_from(&gs.fill_color_space);
                 gs.stroke_alpha = gs.fill_alpha;
                 gs.colour_locked = true;
             }
 
-            // ── No-ops ────────────────────────────────────────────────────────
-            Operator::MarkedContentPoint | Operator::CompatibilitySection => {}
-
-            // Handled in `execute_one` above; unreachable here.
-            Operator::BeginOptionalContent(_)
-            | Operator::BeginMarkedContent
-            | Operator::EndMarkedContent => {}
-
             Operator::Unknown(kw) => self.warn_unknown_operator(kw),
 
-            // Compile-time exhaustiveness guard.
-            #[expect(
-                unreachable_patterns,
-                reason = "future Operator variants are caught here"
-            )]
-            _ => {}
+            // Operators without effect on the pixels.  `ri` selects an
+            // output intent; `d0` declares an advance, taken from the font's
+            // `Widths`; `MP`/`DP` mark a point and `BX`/`EX` a compatibility
+            // section.
+            // The marked-content sequence operators are handled by
+            // `execute_one` before dispatch.
+            Operator::SetRenderingIntent(_)
+            | Operator::Type3GlyphWidth(..)
+            | Operator::MarkedContentPoint
+            | Operator::CompatibilitySection
+            | Operator::BeginOptionalContent(_)
+            | Operator::BeginMarkedContent
+            | Operator::EndMarkedContent => {}
         }
     }
 
