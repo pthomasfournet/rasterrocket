@@ -12,6 +12,15 @@ use crate::reader::BitReader;
 const MAX_LAYER_COUNT: u8 = 32;
 const MAX_RESOLUTION_COUNT: u8 = 32;
 const MAX_PRECINCT_EXPONENT: u8 = 31;
+/// The largest tile count: tile indices (`Isot`, A.4.2) range over 0..=65534.
+const MAX_TILE_COUNT: u32 = 65_535;
+/// The largest number of (tile, component) pairs. Every tile holds its own
+/// copy of each component's coding parameters, so this bounds the memory the
+/// tile list takes before any packet is read.
+const MAX_TILE_COMPONENTS: u64 = 1 << 18;
+/// The largest number of samples, summed over all components, of the decoded
+/// image. Each sample is held as an `f32` while decoding.
+const MAX_DECODED_SAMPLES: u64 = 1 << 30;
 
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -43,7 +52,12 @@ pub(crate) fn read_header<'a>(
     }
 
     let mut size_data = size_marker(reader)?;
-    size_data.num_tiles()?;
+    let num_tiles = size_data.num_tiles()?;
+    if num_tiles > MAX_TILE_COUNT
+        || u64::from(num_tiles) * size_data.component_sizes.len() as u64 > MAX_TILE_COMPONENTS
+    {
+        bail!(ValidationError::ImageTooLarge);
+    }
 
     let mut cod = None;
     let mut qcd = None;
@@ -203,6 +217,13 @@ pub(crate) fn read_header<'a>(
 }
 
 fn validate(header: &Header) -> Result<()> {
+    let decoded_samples = u64::from(header.size_data.image_width())
+        * u64::from(header.size_data.image_height())
+        * header.component_infos.len() as u64;
+    if decoded_samples > MAX_DECODED_SAMPLES {
+        bail!(ValidationError::ImageTooLarge);
+    }
+
     for info in &header.component_infos {
         let max_resolution_idx = info.coding_style.parameters.num_resolution_levels - 1;
         let quantization_style = info.quantization_info.quantization_style;

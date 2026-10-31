@@ -4,10 +4,30 @@ use super::decode::{DecompositionStorage, TileDecompositions};
 use super::rect::IntRect;
 use super::tag_tree::TagTree;
 use super::tile::{ResolutionTile, Tile};
-use crate::error::{DecodingError, Result, ValidationError};
+use crate::error::{DecodingError, Result, ValidationError, bail};
 use alloc::vec;
 use core::iter;
 use core::ops::Range;
+
+/// The largest number of precincts in one tile, over all components and
+/// resolutions.
+const MAX_PRECINCTS: usize = 1 << 24;
+/// The largest number of code-blocks in one tile, over all components and
+/// resolutions.
+const MAX_CODE_BLOCKS: usize = 1 << 24;
+/// The largest number of (code-block, layer) pairs in one tile.
+const MAX_CODE_BLOCK_LAYERS: usize = 1 << 26;
+
+/// Fail unless a store of `len` entries can take `added` more without
+/// exceeding `max`. Bounds the structures sized by the coding parameters of
+/// the headers, which a small codestream can set to describe billions of
+/// precincts or code-blocks.
+fn check_capacity(len: usize, added: usize, max: usize) -> Result<()> {
+    if len.checked_add(added).is_none_or(|total| total > max) {
+        bail!(ValidationError::ImageTooLarge);
+    }
+    Ok(())
+}
 
 /// Build and allocate all necessary structures to process the code-blocks
 /// for a specific tile. Also parses the segments for each code-block.
@@ -131,6 +151,7 @@ fn build_precincts(
         .precincts()
         .ok_or(DecodingError::InvalidPrecinct)?
     {
+        check_capacity(storage.precincts.len(), 1, MAX_PRECINCTS)?;
         let precinct_rect = precinct_data.rect;
 
         let cb_width = resolution_tile.code_block_width();
@@ -168,7 +189,7 @@ fn build_precincts(
             code_blocks_y,
             tile,
             storage,
-        );
+        )?;
 
         let code_inclusion_tree =
             TagTree::new(code_blocks_x, code_blocks_y, &mut storage.tag_tree_nodes);
@@ -195,7 +216,15 @@ fn build_code_blocks(
     code_blocks_y: u32,
     tile: &Tile<'_>,
     storage: &mut DecompositionStorage<'_>,
-) -> Range<usize> {
+) -> Result<Range<usize>> {
+    let count = code_blocks_x as usize * code_blocks_y as usize;
+    check_capacity(storage.code_blocks.len(), count, MAX_CODE_BLOCKS)?;
+    check_capacity(
+        storage.layers.len(),
+        count * tile.num_layers as usize,
+        MAX_CODE_BLOCK_LAYERS,
+    )?;
+
     let mut y = code_block_area.y0;
 
     let code_block_width = tile_instance.code_block_width();
@@ -245,7 +274,7 @@ fn build_code_blocks(
 
     let end = storage.code_blocks.len();
 
-    start..end
+    Ok(start..end)
 }
 
 pub(crate) struct Decomposition {

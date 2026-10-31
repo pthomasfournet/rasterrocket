@@ -6,6 +6,7 @@ mod codestream;
 mod errors;
 mod integration;
 mod jp2;
+mod limits;
 mod mct;
 mod packets;
 mod palette;

@@ -109,3 +109,27 @@ reviewed by commit; the five commits above are every change to
 `hayro-jpeg2000/` after the base, and all are brought over (outside
 the crate, #1618 and #1648 also touch upstream crates this fork does not
 carry).
+
+## Hardening
+
+Limits and checks against codestreams whose header fields make the decoder
+abort the process (by an allocation failure or a panic) instead of
+returning an error. Found by fuzzing `Image::new` with `decode` and
+`decode_u8`, seeded with the test-suite streams. Decoded output of every
+image within the limits is unchanged.
+
+- `j2c/codestream.rs`: an image is refused with `ImageTooLarge` when it
+  has more than 65 535 tiles (tile indices, `Isot`, range over 0..=65534),
+  more than 2^18 (tile, component) pairs (each tile copies the coding
+  parameters of every component), or more than 2^30 decoded samples summed
+  over its components at the decoded resolution (each is held as an
+  `f32`). A few header bytes could otherwise size the tile list or the
+  component buffers at hundreds of gigabytes. Tests:
+  `limits::more_tiles_than_tile_indices`, `limits::more_samples_than_limit`.
+- `j2c/build.rs`: one tile holds at most 2^24 precincts, 2^24 code-blocks
+  and 2^26 (code-block, layer) entries over all its components and
+  resolutions; a tile beyond them fails with `ImageTooLarge`. These
+  structures are built for every resolution, skipped ones included, so
+  small code-blocks or precincts could ask for billions of entries within
+  the sample limit. Tests: `limits::more_code_blocks_than_limit`,
+  `limits::more_code_block_layers_than_limit`.
