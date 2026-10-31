@@ -74,9 +74,11 @@ OUT_DIR=""
 DRY_RUN=false
 SUMMARY=false
 
+# The header comment block, from the line after the shebang to the first
+# line that is not a comment; exits with status $1 (default 0).
 usage() {
-    grep '^#' "$0" | grep -v '^#!/' | sed 's/^# \{0,2\}//'
-    exit 0
+    awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+    exit "${1:-0}"
 }
 
 die() { echo "Error: $*" >&2; exit 1; }
@@ -104,7 +106,7 @@ done
 shift $((OPTIND - 1))
 
 # ── input validation ──────────────────────────────────────────────────────────
-[[ $# -lt 1 ]] && { echo "Error: PDF argument required." >&2; usage; }
+[[ $# -lt 1 ]] && { echo "Error: PDF argument required." >&2; usage 1 >&2; }
 PDF="$1"
 
 is_positive_int "$DPI"   || die "-r DPI must be a positive integer, got: $DPI"
