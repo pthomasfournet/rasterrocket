@@ -104,8 +104,9 @@ impl std::fmt::Display for RasterError {
             ),
             Self::PageTooLarge { width, height } => write!(
                 f,
-                "page pixel dimensions {width}×{height} exceed safety limit \
-                 ({MAX_PX_DIMENSION}); lower the DPI or check the document"
+                "page pixel dimensions {width}×{height} exceed the per-side limit of \
+                 {MAX_PX_DIMENSION} px; lower the resolution, or render the page in \
+                 regions within the limit"
             ),
             Self::PageAreaTooLarge {
                 width,
@@ -113,8 +114,9 @@ impl std::fmt::Display for RasterError {
                 area,
             } => write!(
                 f,
-                "page pixel area {width}×{height} = {area} exceeds safety limit \
-                 (MAX_PX_AREA = {MAX_PX_AREA}); lower the DPI or check the document"
+                "page pixel area {width}×{height} = {area} px exceeds the limit of \
+                 {MAX_PX_AREA} px; lower the resolution, or render the page in regions \
+                 within the limit"
             ),
             Self::Deskew(msg) => write!(f, "deskew failed: {msg}"),
             Self::InvalidPageGeometry(msg) => write!(f, "invalid page geometry: {msg}"),
@@ -169,6 +171,23 @@ impl From<pdf::PdfError> for RasterError {
                 total,
             },
             other => Self::from(pdf_interp::InterpError::from(other)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::validate_dimensions;
+
+    #[test]
+    fn size_limit_messages_name_the_limit_and_region_rendering() {
+        for err in [
+            validate_dimensions(super::MAX_PX_DIMENSION + 1, 1),
+            validate_dimensions(30_000, 30_000),
+        ] {
+            let msg = err.expect_err("over the limit").to_string();
+            assert!(msg.contains("limit of"), "{msg}");
+            assert!(msg.contains("render the page in regions"), "{msg}");
         }
     }
 }

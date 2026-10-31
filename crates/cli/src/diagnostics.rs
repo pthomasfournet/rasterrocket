@@ -15,23 +15,31 @@ use pdf_raster::{BackendPolicy, RasterError};
 use crate::args::Args;
 use crate::render::RenderError;
 
-/// Print the `source()` chain of `e` to stderr, one line per level.
+/// The `source()` chain of `e` below `e` itself, one message per level.
 ///
-/// A level whose `Display` is contained in the text last printed is skipped:
-/// either a transparent wrapper (e.g. `RasterError::Pdf` delegating to its
-/// `InterpError` source) or a wrapper that embeds its source's message
-/// (`InterpError::Pdf` printing "PDF error: {source}").  Repeating that text
-/// under "caused by:" is noise, not a diagnosis.
-pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
-    let mut prev = e.to_string();
+/// A level whose message already appears in the text printed above it is
+/// omitted: a wrapper that formats its source into its own `Display` (e.g.
+/// `RenderError::Raster` printing "render error: {source}") would otherwise
+/// print the same sentence again under "caused by:".
+fn error_chain(e: &dyn std::error::Error) -> Vec<String> {
+    let mut printed = e.to_string();
+    let mut causes = Vec::new();
     let mut src = e.source();
     while let Some(cause) = src {
         let text = cause.to_string();
-        if !prev.contains(&text) {
-            eprintln!("  caused by: {text}");
-            prev = text;
+        if !printed.contains(&text) {
+            printed.clone_from(&text);
+            causes.push(text);
         }
         src = cause.source();
+    }
+    causes
+}
+
+/// Print [`error_chain`] of `e` to stderr, one "caused by:" line per level.
+pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
+    for cause in error_chain(e) {
+        eprintln!("  caused by: {cause}");
     }
 }
 
@@ -129,9 +137,62 @@ pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) {
         return;
     }
     errors.sort_by_key(|(p, _)| *p);
+    let mut size_hint = false;
     for (page, err) in &errors {
         eprintln!("rrocket: page {page}: {err}");
         print_error_chain(err);
+        size_hint |= matches!(
+            err,
+            RenderError::Raster(
+                RasterError::PageTooLarge { .. } | RasterError::PageAreaTooLarge { .. }
+            )
+        );
+    }
+    if size_hint {
+        eprintln!(
+            "  hint: render such a page in tiles with -x/-y/-W/-H, each tile within the limit"
+        );
     }
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_omits_a_cause_its_wrapper_already_printed() {
+        let err = RenderError::Raster(RasterError::PageTooLarge {
+            width: 40_000,
+            height: 10,
+        });
+        assert!(
+            err.to_string().contains(
+                &RasterError::PageTooLarge {
+                    width: 40_000,
+                    height: 10
+                }
+                .to_string()
+            )
+        );
+        assert_eq!(error_chain(&err), Vec::<String>::new());
+    }
+
+    #[test]
+    fn chain_keeps_a_cause_with_new_information() {
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("write failed")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let err = Wrapper(std::io::Error::other("disk full"));
+        assert_eq!(error_chain(&err), vec!["disk full".to_owned()]);
+    }
 }

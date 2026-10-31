@@ -87,10 +87,10 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 **Page raster.** One render is at most 32 768 pixels on a side and
 600 000 000 pixels (600 MP) in area. Both limits are checked from the page
 geometry before any pixel buffer is allocated. A page over either is refused:
-rrocket prints `rrocket: page N: render error: page pixel dimensions W×H exceed safety
-limit (32768); lower the DPI or check the document` (or `page pixel area W×H = A
-exceeds safety limit (MAX_PX_AREA = 600000000); lower the DPI or check the
-document`), the other pages still render, and the run exits with status 1.
+rrocket prints `rrocket: page N: render error: page pixel dimensions W×H exceed the
+per-side limit of 32768 px; …` (or `page pixel area W×H = A px exceeds the limit of
+600000000 px; …`) followed by a hint naming the tile flags, the other pages still
+render, and the run exits with status 1.
 
 The limits apply to what one render draws, not to the page: with the crop
 flags only the selected area is rendered, so output larger than the limits
