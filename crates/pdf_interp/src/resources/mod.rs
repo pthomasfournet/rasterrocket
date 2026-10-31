@@ -108,11 +108,11 @@ impl ExtGStateParams {
         Self {
             fill_alpha: real_to_u8(d, b"ca"),
             stroke_alpha: real_to_u8(d, b"CA"),
-            line_width: real_or_int(d, b"LW"),
+            line_width: read_f64_1(d, b"LW"),
             line_cap: int_val(d, b"LC"),
             line_join: int_val(d, b"LJ"),
-            miter_limit: real_or_int(d, b"ML"),
-            flatness: real_or_int(d, b"FL"),
+            miter_limit: read_f64_1(d, b"ML"),
+            flatness: read_f64_1(d, b"FL"),
             blend_mode: parse_blend_mode(d),
             soft_mask: parse_soft_mask(doc, d),
             transfer: transfer::ext_gstate_transfer(doc, d),
@@ -146,18 +146,7 @@ fn parse_soft_mask(doc: &Document, d: &Dictionary) -> Option<SoftMaskParams> {
         return None;
     };
     let backdrop = match sm.get(b"BC") {
-        Some(Object::Array(a)) => a
-            .iter()
-            .filter_map(|o| match o {
-                Object::Real(r) => Some(f64::from(*r)),
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "colour components are small integers"
-                )]
-                Object::Integer(n) => Some(*n as f64),
-                _ => None,
-            })
-            .collect(),
+        Some(Object::Array(a)) => a.iter().filter_map(obj_to_f64).collect(),
         _ => Vec::new(),
     };
     let transfer = sm
@@ -214,22 +203,9 @@ const fn bm_name_to_mode(name: &[u8]) -> Option<BlendMode> {
     })
 }
 
-/// Read a real or integer key from a dictionary as `f64`.
-fn real_or_int(d: &Dictionary, key: &[u8]) -> Option<f64> {
-    match d.get(key)? {
-        Object::Real(r) => Some(f64::from(*r)),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "ExtGState numeric params are small integers"
-        )]
-        Object::Integer(n) => Some(*n as f64),
-        _ => None,
-    }
-}
-
 /// Read a real-valued opacity key and convert to u8 in [0, 255].
 fn real_to_u8(d: &Dictionary, key: &[u8]) -> Option<u8> {
-    let v = real_or_int(d, key)?.clamp(0.0, 1.0);
+    let v = read_f64_1(d, key)?.clamp(0.0, 1.0);
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -238,13 +214,11 @@ fn real_to_u8(d: &Dictionary, key: &[u8]) -> Option<u8> {
     Some((v * 255.0).round() as u8)
 }
 
-/// Read an integer key.
+/// Read an integer key, saturated to the `i32` range so that an
+/// out-of-range value stays out of range rather than wrapping into it.
 fn int_val(d: &Dictionary, key: &[u8]) -> Option<i32> {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "line cap/join values are 0–2"
-    )]
-    d.get(key)?.as_i64().map(|n| n as i32)
+    let n = d.get(key)?.as_i64()?;
+    Some(i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX }))
 }
 
 /// Parsed Form `XObject` — content bytes and the CTM matrix to apply.
@@ -642,43 +616,32 @@ impl<'doc> PageResources<'doc> {
     pub fn form_xobject(&self, name: &[u8]) -> Option<FormXObject> {
         let stream_id = self.xobject_id(name)?;
         let obj = self.doc.get_object(stream_id).ok()?;
-        let stream = obj.as_stream()?;
-
-        // Must be a Form subtype.
-        if stream.dict.get(b"Subtype")?.as_name()? != b"Form" {
+        if obj.as_stream()?.dict.get(b"Subtype")?.as_name()? != b"Form" {
             return None;
         }
-
-        let content = stream.decompressed_content().ok()?;
-
-        // Optional Matrix — defaults to identity if absent or malformed.
-        let matrix = read_matrix(&stream.dict).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-
-        let bbox = read_bbox(&stream.dict);
-
-        let has_own_resources = stream.dict.get(b"Resources").is_some();
-
-        let transparency = read_transparency_group(self.doc, &stream.dict);
-
-        Some(FormXObject {
-            content,
-            matrix,
-            bbox,
-            resources_id: stream_id,
-            has_own_resources,
-            transparency,
-        })
+        self.form_from_stream_id(stream_id)
     }
 
     /// Build a [`FormXObject`] directly from a stream object ID.
     ///
     /// Used for annotation appearance streams, which are referenced by object ID
-    /// rather than through the page `Resources/XObject` dict.
+    /// rather than through the page `Resources/XObject` dict.  `None` when the
+    /// object is not a stream or its content does not decode (logged).
     #[must_use]
     pub fn form_from_stream_id(&self, stream_id: ObjectId) -> Option<FormXObject> {
         let obj = self.doc.get_object(stream_id).ok()?;
         let stream = obj.as_stream()?;
-        let content = stream.decompressed_content().ok()?;
+        let content = match stream.decompressed_content() {
+            Ok(content) => content,
+            Err(e) => {
+                log::warn!(
+                    "rasterrocket-interp: form object {} does not decode ({e}) — skipping",
+                    stream_id.0
+                );
+                return None;
+            }
+        };
+        // Optional Matrix — defaults to identity if absent or malformed.
         let matrix = read_matrix(&stream.dict).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let bbox = read_bbox(&stream.dict);
         let has_own_resources = stream.dict.get(b"Resources").is_some();
