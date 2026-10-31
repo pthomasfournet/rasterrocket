@@ -141,7 +141,7 @@ impl SpillPolicy {
             if !self.spill_announced.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "rrocket: free memory dropped below safety margin; \
-                     spilling subsequent pages to disk at {disk_prefix}-NNN.*"
+                     writing subsequent pages to disk with prefix {disk_prefix}"
                 );
             }
             disk_prefix
@@ -160,34 +160,28 @@ impl SpillPolicy {
 
 /// Cached `/proc/meminfo` reading. Refreshed on TTL.
 struct MemoryProbe {
-    last_read: Instant,
+    /// When `last_available_bytes` was read; `None` before the first read.
+    last_read: Option<Instant>,
     last_available_bytes: u64,
 }
 
 impl MemoryProbe {
-    fn new() -> Self {
-        // Force initial refresh: an Instant from before the TTL window means
-        // the first call to refresh_if_stale always reads. checked_sub guards
-        // the unlikely case where `Instant::now()` is too close to the
-        // platform's monotonic-clock origin to subtract from (boot < 1s ago).
-        let stale = Instant::now()
-            .checked_sub(PROBE_TTL + Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
+    const fn new() -> Self {
         Self {
-            last_read: stale,
+            last_read: None,
             last_available_bytes: 0,
         }
     }
 
     fn refresh_if_stale(&mut self) {
-        if self.last_read.elapsed() < PROBE_TTL {
+        if self.last_read.is_some_and(|t| t.elapsed() < PROBE_TTL) {
             return;
         }
         // Avoid two threads both refreshing at the same instant: each just
         // does its own read; the cost is bounded (~10µs) and we don't want a
         // global condvar on the hot path.
         self.last_available_bytes = read_mem_available().unwrap_or(0);
-        self.last_read = Instant::now();
+        self.last_read = Some(Instant::now());
     }
 }
 
@@ -390,8 +384,10 @@ mod tests {
     #[test]
     fn probe_caches_within_ttl() {
         let mut probe = MemoryProbe::new();
+        assert!(probe.last_read.is_none());
         probe.refresh_if_stale();
         let first = probe.last_read;
+        assert!(first.is_some(), "the first check reads");
         // Immediately re-checking should NOT update last_read.
         probe.refresh_if_stale();
         assert_eq!(probe.last_read, first);
