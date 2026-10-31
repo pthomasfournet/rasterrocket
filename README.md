@@ -23,7 +23,7 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
-## On master (unreleased; the next release is v2.0.0)
+## What's new in v2.0.0
 
 **More of the PDF is drawn, and drawn as specified; the public API breaks
 once.** The full list, with migration notes, is in
@@ -42,9 +42,13 @@ once.** The full list, with migration notes, is in
   A dynamic XFA form is reported as `FormType::XfaFull`.
 - **Fonts.** Non-embedded fonts are drawn with substitutes of their class
   (bundled base-14 faces, installed CJK, Arabic and Thai faces, predefined
-  CJK CMaps, vertical writing); `RROCKET_FONT_DIR` adds font directories;
-  TrueType programs that need hinting are grid-fitted; CID-keyed Type 1
-  fonts render.
+  CJK CMaps, vertical writing), and a character the substitute lacks with
+  any installed face that covers it, else with the Noto fallback faces of the
+  default `bundled-fonts` feature. `RROCKET_FONT_DIR`,
+  `SessionConfig::font_dirs` / `RasterOptions::font_dirs` add font
+  directories and `--no-system-fonts` / `system_fonts = false` leave the
+  system ones out; TrueType programs that need hinting are grid-fitted;
+  CID-keyed Type 1 fonts render.
 - **Colour and transparency.** DeviceCMYK through a process-ink model,
   ICCBased, CalGray/CalRGB, Lab, Default colour spaces, transfer functions,
   soft masks, shading and tiling patterns, non-isolated and knockout groups,
@@ -52,16 +56,36 @@ once.** The full list, with migration notes, is in
 - **Page geometry, regions, per-axis resolution, cancellation.**
   `RasterSession::page_geometry`, `RenderParams` with a `RenderRegion` and a
   `CancelToken`, `RenderParams::new_xy` for separate horizontal and vertical
-  scales; on the CLI `--rx`/`--ry`, `-x`/`-y`/`-W`/`-H`, `--scale-to*`,
-  `--aa`, `--aaVector` now take effect.
-- **Damaged input.** Broken cross-reference tables and object streams are
-  recovered; a content stream or image whose data ends early is drawn from
-  what decoded and reported (`partial` in `PageDiagnostics`); an image whose
-  decoded samples would exceed 1 GiB is refused before allocation.
+  scales, `RasterOptions::cancel` for the batch entry points, and
+  `render_page_gray` for one grayscale page of a session; `/UserUnit`
+  scales the content as well as the bitmap. On the CLI `--rx`/`--ry`,
+  `-x`/`-y`/`-W`/`-H`, `--scale-to*`, `--aa`, `--aaVector` and
+  `--hide-annotations` take effect.
+- **Damaged and hostile input.** Broken cross-reference tables and object
+  streams are recovered; a content stream or image whose data ends early is
+  drawn from what decoded and reported (`partial` in `PageDiagnostics`); an
+  image whose decoded samples would exceed 1 GiB is refused before
+  allocation; graphics-state nesting, mesh shadings, dash patterns, `CMap`
+  streams, Type 3 glyph procedures and JPEG 2000 headers are bounded (see
+  [Size limits](docs/cli-reference.md#size-limits)).
 - **API breaks.** Public structs and enums are `#[non_exhaustive]`: build
   options with `RasterOptions::new(dpi)` / `::default()` and assign fields,
-  and match errors with a catch-all arm. The CLI flags `--overprint`,
-  `--thinlinemode` and `--jpegopt`, which did nothing, are removed.
+  and match errors with a catch-all arm. `rasterrocket::session` is removed
+  (its functions stay at the crate root), and the internal crates expose
+  only what other crates use. `BackendPolicy`'s `FromStr` error is
+  `ParseBackendPolicyError`; `pdf::OpenOptions` is built with
+  `OpenOptions::new(decrypt_authorized, password)`; `InterpError` lost
+  `MissingResource` and `PageBudget`; `open_comic` returns the lazy
+  `ComicPages` iterator, so memory no longer grows with the page count;
+  `rasterrocket-color` renames `splash_floor` / `splash_ceil` /
+  `splash_round` to `floor_i32` / `ceil_i32` / `round_half_up_i32` and drops
+  `Rgba8`.
+- **CLI.** `--singlefile` writes `<prefix>.<ext>` with no page number;
+  `--jpeg`, `--jpegcmyk` and `--tiff` are refused at startup, before the
+  document is opened; an existing `--ram-path` is refused rather than deleted on
+  exit, and the RAM directory is removed after a failed run too; errors print
+  their cause chain. The flags `--overprint`, `--thinlinemode` and
+  `--jpegopt`, which did nothing, are removed.
 
 ## What's new in v1.5.0
 
@@ -320,7 +344,7 @@ and the page/annotation JavaScript-disclosure work).
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
-- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (On master the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` no longer compiles outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
+- **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (Since v2.0.0 the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` does not compile outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
 
 ```rust
@@ -461,7 +485,7 @@ Shared with any other Rust project on the same machine that opts in — cross-pr
 cargo test -p rasterrocket --lib -- deskew
 cargo test -p rasterrocket-gpu --lib -- icc
 
-# Pixel-diff comparison against pdftoppm (requires release build in PATH)
+# Pixel-diff comparison against pdftoppm (needs target/release/rrocket)
 tests/compare/compare.sh -r 150 tests/fixtures/corpus-01-native-text-small.pdf
 ```
 
@@ -513,8 +537,8 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
 Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full methodology, hardware details, and AVX2 vs AVX-512 comparison in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
 
 > These tables were captured at **v0.9.1** (CPU) and before v0.6.0 (GPU) and
-> have not been re-run since; the current tree is past v1.5.0, and nvJPEG is
-> now disabled by default. Treat them as historical order-of-magnitude
+> have not been re-run since; the current release is v2.0.0, and nvJPEG is
+> disabled by default. Treat them as historical order-of-magnitude
 > figures, not a measurement of today's `master`.
 
 **CPU-only (no GPU), Ryzen 9 9900X3D + AVX-512, v0.9.1, RAM-backed output, cold cache, hyperfine 5 runs:**
