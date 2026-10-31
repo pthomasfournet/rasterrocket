@@ -20,8 +20,7 @@ use crate::{Password, RenderPurpose};
 /// At runtime, [`SessionConfig::default()`] resolves the policy via
 /// [`BackendPolicy::from_env`], so users can switch backends per process by
 /// setting `PDF_RASTER_BACKEND={auto,cpu,cuda,vaapi,vulkan}` without
-/// rebuilding.  Explicit construction (`SessionConfig { policy: ..., .. }`)
-/// bypasses the env var.
+/// rebuilding.  [`SessionConfig::with_policy`] bypasses the env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
@@ -49,9 +48,8 @@ pub enum BackendPolicy {
     /// AA fill and tile fill kernels dispatch through `VulkanBackend`;
     /// the device-resident image cache (`DeviceImageCache`,
     /// `DevicePageBuffer`) is CUDA-only, so under `ForceVulkan` JPEG
-    /// images decode and composite via the CPU path, and ICC CMYK→RGB
-    /// also stays on the CPU AVX-512 fallback (the behaviour from before
-    /// the device-resident cache existed).
+    /// images decode and composite on the CPU, and ICC CMYK→RGB runs on
+    /// the CPU as well.
     ForceVulkan,
 }
 
@@ -60,9 +58,10 @@ impl BackendPolicy {
     ///
     /// Convenience wrapper for [`BackendPolicy::from_env_var`] with the
     /// canonical name.  Accepted values (case-insensitive): `auto`, `cpu`,
-    /// `cuda`, `vaapi`, `vulkan`.  Unset, empty, or unrecognised values
-    /// fall back to [`BackendPolicy::Auto`] — unrecognised values also
-    /// emit a stderr warning so a typo doesn't silently mis-route.
+    /// `cuda`, `vulkan`, and `vaapi` in a build with the `vaapi` feature.
+    /// Unset, empty, or unrecognised values fall back to
+    /// [`BackendPolicy::Auto`] — unrecognised values also emit a
+    /// `log::warn!` so a typo doesn't silently mis-route.
     ///
     /// Precedence: an explicit `--backend` flag (CLI) wins over
     /// `PDF_RASTER_BACKEND`, which in turn wins over the compile-time
@@ -95,15 +94,52 @@ impl BackendPolicy {
             log::warn!("{name} contains non-UTF-8 bytes; using Auto");
             return Self::Auto;
         };
-        s.parse().unwrap_or_else(|()| {
-            log::warn!(
-                "{name}={s:?} not recognised; using Auto. \
-                 Valid values: auto, cpu, cuda, vaapi, vulkan."
-            );
+        s.parse().unwrap_or_else(|e: ParseBackendPolicyError| {
+            log::warn!("{name}: {e}; using auto");
             Self::Auto
         })
     }
+
+    /// Every policy this build accepts, in [`name`](Self::name) order.
+    pub const ALL: &[Self] = &[
+        Self::Auto,
+        Self::CpuOnly,
+        Self::ForceCuda,
+        #[cfg(feature = "vaapi")]
+        Self::ForceVaapi,
+        Self::ForceVulkan,
+    ];
 }
+
+/// A backend name that [`BackendPolicy`]'s `FromStr` does not accept.
+///
+/// Its `Display` names the rejected value and the names this build accepts
+/// (`vaapi` only with the `vaapi` feature).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseBackendPolicyError {
+    value: String,
+}
+
+impl ParseBackendPolicyError {
+    /// The rejected input, as given.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl std::fmt::Display for ParseBackendPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown backend {:?}; expected one of", self.value)?;
+        for (i, policy) in BackendPolicy::ALL.iter().enumerate() {
+            let sep = if i == 0 { " " } else { ", " };
+            write!(f, "{sep}{}", policy.name())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ParseBackendPolicyError {}
 
 impl BackendPolicy {
     /// The name [`FromStr`](std::str::FromStr) and `PDF_RASTER_BACKEND`
@@ -122,20 +158,22 @@ impl BackendPolicy {
 }
 
 impl std::str::FromStr for BackendPolicy {
-    type Err = ();
+    type Err = ParseBackendPolicyError;
 
     /// Parse a backend name.  Whitespace is trimmed and matching is
     /// case-insensitive.  Empty input maps to `Auto`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => Ok(Self::Auto),
-            "cpu" => Ok(Self::CpuOnly),
-            "cuda" => Ok(Self::ForceCuda),
-            #[cfg(feature = "vaapi")]
-            "vaapi" => Ok(Self::ForceVaapi),
-            "vulkan" => Ok(Self::ForceVulkan),
-            _ => Err(()),
+        let name = s.trim();
+        if name.is_empty() {
+            return Ok(Self::Auto);
         }
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|policy| policy.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| ParseBackendPolicyError {
+                value: s.to_owned(),
+            })
     }
 }
 
@@ -400,12 +438,7 @@ mod tests {
     #[test]
     fn backend_policy_name_round_trips() {
         use std::str::FromStr;
-        for policy in [
-            BackendPolicy::Auto,
-            BackendPolicy::CpuOnly,
-            BackendPolicy::ForceCuda,
-            BackendPolicy::ForceVulkan,
-        ] {
+        for &policy in BackendPolicy::ALL {
             assert_eq!(BackendPolicy::from_str(policy.name()), Ok(policy));
         }
     }
@@ -426,8 +459,15 @@ mod tests {
     }
 
     #[test]
-    fn backend_policy_rejects_unknown() {
+    fn backend_policy_rejects_unknown_naming_the_accepted_names() {
         use std::str::FromStr;
-        assert!(BackendPolicy::from_str("metal").is_err());
+        let err = BackendPolicy::from_str("metal").unwrap_err();
+        assert_eq!(err.value(), "metal");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"metal\"") && msg.contains("auto, cpu, cuda"),
+            "{msg}"
+        );
+        assert_eq!(msg.contains("vaapi"), cfg!(feature = "vaapi"), "{msg}");
     }
 }

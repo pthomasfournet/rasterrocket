@@ -124,7 +124,7 @@ mod vk_init;
 
 use std::path::Path;
 
-pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, SessionConfig};
+pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::rgb_to_gray;
