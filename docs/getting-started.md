@@ -358,6 +358,32 @@ The CLI crate forwards each of these feature names to the library.
 
 `CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
 
+### Dependencies
+
+**To build:** a Rust toolchain (1.98 or newer, edition 2024) and the platform's C linker
+(`build-essential` on Debian/Ubuntu, the Xcode Command Line Tools on macOS). The CPU build
+needs nothing else; the GPU features add the CUDA 13 toolkit or the Vulkan SDK (`slangc`).
+Build the CLI with `-p rasterrocket-cli`, not the whole workspace: the `pdf_bridge` reference
+crate needs a poppler source tree (`POPPLER_SRC`).
+
+**To run:** nothing. Fonts that a document does not embed are drawn from `RROCKET_FONT_DIR`
+and the installed system fonts, and from the faces built into the binary for characters no
+installed face covers. No CJK faces are built in, so CJK text in non-embedded fonts needs an
+installed CJK font. Encrypted documents are decrypted in
+process (`--decrypt-owned`); releases up to v1.5.0 instead ran `qpdf`, which must then be
+on `PATH`.
+
+**To compare and benchmark** (`tests/compare/`, `crates/bench`):
+
+| Tool | Used by | Debian/Ubuntu | macOS (Homebrew) |
+|---|---|---|---|
+| `pdftoppm`, `pdfinfo` | reference renders, page counts | `poppler-utils` | `poppler` |
+| `compare`, `identify` | pixel scoring (`score_pair.sh`) | `imagemagick` | `imagemagick` |
+| `bc` | score arithmetic | `bc` | built in |
+| bash ≥ 4.4 | the `.sh` harnesses | built in | `bash` (the system bash is 3.2) |
+| `pypdfium2`, `pillow` | the pdfium reference | in a venv: `uv venv tests/compare/.venv` then `uv pip install --python tests/compare/.venv/bin/python pypdfium2 pillow` | same |
+| `qpdf` | the `contest_v11` bench's archive builder | `qpdf` | `qpdf` |
+
 The release binary lands at `target/release/rrocket`. There is no `cargo install`
 path — the crates.io packages are abandoned at 1.0.1.
 
