@@ -253,7 +253,9 @@ impl PageRenderer<'_> {
         // A `PaintType` 2 (uncoloured) pattern's content paints shapes only,
         // in the tint the `scn` operands give (`fill_pattern_components`);
         // a `PaintType` 1 (coloured) pattern's content sets its own colours.
-        let tint = if desc.paint_type == 2 && !gs.fill_pattern_components.is_empty() {
+        let tint = if desc.paint_type == crate::resources::tiling::PaintType::Uncoloured
+            && !gs.fill_pattern_components.is_empty()
+        {
             Some(resolve_pattern_tint(
                 self.resources.doc(),
                 &gs.fill_color_space,
