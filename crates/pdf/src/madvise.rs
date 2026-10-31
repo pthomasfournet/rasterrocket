@@ -1,6 +1,7 @@
 //! Kernel-hint helpers for the `Document` mmap.
 //!
-//! All helpers are no-ops on non-Unix platforms.  The syscalls go through
+//! All helpers are no-ops on platforms without `posix_fadvise` (Windows and
+//! the Apple systems among them).  The syscalls go through
 //! `rustix`'s safe wrappers, so this module contains no `unsafe` code (the
 //! crate denies `unsafe_code`; the one exception is the file mapping in
 //! `document.rs`).
@@ -8,10 +9,10 @@
 //! The hints are advisory.  A wrong hint never causes a correctness issue;
 //! the worst outcome is suboptimal kernel page-cache behaviour.
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 use std::fs::File;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 use rustix::fs::{Advice, fadvise};
 
 /// Tell the kernel "we will touch arbitrary 4 KB ranges; don't readahead."
@@ -21,7 +22,7 @@ use rustix::fs::{Advice, fadvise};
 /// just means we keep default readahead behaviour.
 ///
 /// The `len` argument is `None`, which the kernel interprets as "to EOF".
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 pub(crate) fn advise_random(file: &File) {
     let _ = fadvise(file, 0, None, Advice::Random);
 }
@@ -34,7 +35,7 @@ pub(crate) fn advise_random(file: &File) {
 /// A zero `len` is treated as a no-op (rustix requires `NonZero` for the
 /// length argument; the kernel's "to EOF" semantics are deliberately not
 /// exposed here, since callers always know the precise byte range).
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 #[cfg_attr(
     not(test),
     expect(
@@ -49,12 +50,19 @@ pub(crate) fn advise_willneed(file: &File, offset: u64, len: u64) {
     let _ = fadvise(file, offset, Some(nz_len), Advice::WillNeed);
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
 pub(crate) fn advise_random(_: &std::fs::File) {}
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exposed for content-stream prefetch; not yet wired in lib builds"
+    )
+)]
 pub(crate) fn advise_willneed(_: &std::fs::File, _: u64, _: u64) {}
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
