@@ -107,14 +107,17 @@ impl GpuBackend for CudaBackend {
     }
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
-        self.recorder.record_icc_clut(params)
+        let grid_n = params.validate(self)?;
+        self.recorder.record_icc_clut(params, grid_n)
     }
 
     fn record_composite(&self, params: params::CompositeParams<'_, Self>) -> Result<()> {
+        params.validate(self)?;
         self.recorder.record_composite(params)
     }
 
     fn record_apply_soft_mask(&self, params: params::SoftMaskParams<'_, Self>) -> Result<()> {
+        params.validate(self)?;
         self.recorder.record_apply_soft_mask(params)
     }
 

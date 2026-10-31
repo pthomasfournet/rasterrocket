@@ -383,19 +383,14 @@ impl PageRecorder {
         )
     }
 
+    /// `grid_n` is the value `IccClutParams::validate` derived from the
+    /// CLUT length; the `VulkanBackend::record_icc_clut` wrapper runs it.
     pub(super) fn record_icc_clut(
         &self,
         p: params::IccClutParams<'_, super::VulkanBackend>,
+        grid_n: u32,
     ) -> Result<()> {
-        // Push: grid_n(u32), n(u32).  Recover grid_n from CLUT length
-        // via the shared helper used by both backends.
-        let clut_bytes = usize::try_from(p.clut.size())
-            .map_err(|_| BackendError::msg("ICC CLUT size does not fit in usize"))?;
-        let grid_n = params::grid_n_from_clut_len(clut_bytes).ok_or_else(|| {
-            BackendError::msg(format!(
-                "ICC CLUT length {clut_bytes} is not a valid grid_n^4 * 3"
-            ))
-        })?;
+        // Push: grid_n(u32), n(u32).
         let mut push = [0u8; 8];
         push[0..4].copy_from_slice(&grid_n.to_ne_bytes());
         push[4..8].copy_from_slice(&p.n_pixels.to_ne_bytes());

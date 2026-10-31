@@ -30,7 +30,7 @@ use cudarc::driver::{CudaEvent, CudaSlice, DevicePtr};
 
 use super::be;
 use crate::GpuCtx;
-use crate::backend::{BackendError, Result, params};
+use crate::backend::{Result, params};
 #[cfg(feature = "cache")]
 use crate::blit::BlitBbox;
 
@@ -167,7 +167,7 @@ impl PageRecorder {
         _ctx: &Arc<GpuCtx>,
         _p: params::BlitParams<'_, super::CudaBackend>,
     ) -> Result<()> {
-        Err(BackendError::msg(
+        Err(crate::backend::BackendError::msg(
             "blit_image requires the gpu crate's `cache` feature",
         ))
     }
@@ -191,16 +191,13 @@ impl PageRecorder {
             .map_err(be)
     }
 
+    /// `grid_n` is the value `IccClutParams::validate` derived from the
+    /// CLUT length; the `CudaBackend::record_icc_clut` wrapper runs it.
     pub(super) fn record_icc_clut(
         &self,
         p: params::IccClutParams<'_, super::CudaBackend>,
+        grid_n: u32,
     ) -> Result<()> {
-        let clut_bytes = p.clut.len();
-        let grid_n = params::grid_n_from_clut_len(clut_bytes).ok_or_else(|| {
-            BackendError::msg(format!(
-                "ICC CLUT length {clut_bytes} is not a valid grid_n^4 * 3"
-            ))
-        })?;
         self.ctx
             .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, grid_n, p.n_pixels)
             .map_err(be)

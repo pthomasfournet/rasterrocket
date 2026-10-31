@@ -181,10 +181,45 @@ impl<B: GpuBackend + ?Sized> AaFillParams<'_, B> {
     }
 }
 
+/// Largest pixel count a per-pixel kernel accepts: the kernels address
+/// pixel `i` at byte `i × 4` in 32-bit arithmetic, which stays exact only
+/// below 2³⁰ pixels.
+pub const MAX_KERNEL_PIXELS: u32 = u32::MAX / 4;
+
+/// Check that `n_pixels` is addressable by a per-pixel kernel and that each
+/// `(buffer, bytes per pixel, message)` holds `n_pixels × bytes` bytes.
+fn validate_per_pixel<B: GpuBackend + ?Sized>(
+    backend: &B,
+    kind: &'static str,
+    n_pixels: u32,
+    buffers: &[(&B::DeviceBuffer, usize, &'static str)],
+) -> super::Result<()> {
+    let invariant = |detail: &'static str| super::BackendError::InvariantViolation { kind, detail };
+    if n_pixels > MAX_KERNEL_PIXELS {
+        return Err(invariant(
+            "n_pixels exceeds MAX_KERNEL_PIXELS (32-bit byte addressing)",
+        ));
+    }
+    for &(buf, bytes_per_pixel, detail) in buffers {
+        if backend.device_buffer_len(buf) < (n_pixels as usize).saturating_mul(bytes_per_pixel) {
+            return Err(invariant(detail));
+        }
+    }
+    Ok(())
+}
+
 /// Parameters for a GPU ICC CMYK→RGB CLUT lookup.
 ///
 /// The matrix fast-path is handled on the CPU (AVX-512); only the CLUT
 /// kernel runs on the GPU, so `clut` is required.
+///
+/// # Invariants enforced by `IccClutParams::validate`
+/// - `n_pixels` ≤ [`MAX_KERNEL_PIXELS`]
+/// - `cmyk` holds at least `n_pixels × 4` bytes and `rgb` at least
+///   `n_pixels × 3`
+/// - `clut` is exactly `grid_n⁴ × 3` bytes for some `grid_n` in `[2, 255]`
+///   (see [`grid_n_from_clut_len`]) and at most `i32::MAX` bytes, the
+///   range of the kernels' 32-bit signed node index
 pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
     /// Input CMYK pixels in device memory.
     pub cmyk: &'a B::DeviceBuffer,
@@ -194,6 +229,34 @@ pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
     pub clut: &'a B::DeviceBuffer,
     /// Number of pixels to transform.
     pub n_pixels: u32,
+}
+
+impl<B: GpuBackend + ?Sized> IccClutParams<'_, B> {
+    /// Check the invariants documented on `IccClutParams` and return the
+    /// CLUT's `grid_n`.
+    ///
+    /// # Errors
+    /// Returns a `BackendError` if any documented invariant is violated.
+    pub fn validate(&self, backend: &B) -> super::Result<u32> {
+        const KIND: &str = "IccClutInvariantViolation";
+        validate_per_pixel(
+            backend,
+            KIND,
+            self.n_pixels,
+            &[
+                (self.cmyk, 4, "cmyk buffer shorter than n_pixels × 4 bytes"),
+                (self.rgb, 3, "rgb buffer shorter than n_pixels × 3 bytes"),
+            ],
+        )?;
+        let clut_len = backend.device_buffer_len(self.clut);
+        let invariant =
+            |detail: &'static str| super::BackendError::InvariantViolation { kind: KIND, detail };
+        if i32::try_from(clut_len).is_err() {
+            return Err(invariant("clut exceeds i32::MAX bytes (32-bit node index)"));
+        }
+        grid_n_from_clut_len(clut_len)
+            .ok_or_else(|| invariant("clut length is not grid_n^4 × 3 for grid_n in [2, 255]"))
+    }
 }
 
 /// Recover `grid_n` such that `clut_byte_len == grid_n^4 * 3`, or `None`
@@ -255,6 +318,25 @@ pub struct CompositeParams<'a, B: GpuBackend + ?Sized> {
     pub n_pixels: u32,
 }
 
+impl<B: GpuBackend + ?Sized> CompositeParams<'_, B> {
+    /// Check that `n_pixels` ≤ [`MAX_KERNEL_PIXELS`] and that `src` and
+    /// `dst` each hold `n_pixels × 4` bytes.
+    ///
+    /// # Errors
+    /// Returns a `BackendError` if either invariant is violated.
+    pub fn validate(&self, backend: &B) -> super::Result<()> {
+        validate_per_pixel(
+            backend,
+            "CompositeInvariantViolation",
+            self.n_pixels,
+            &[
+                (self.src, 4, "src buffer shorter than n_pixels × 4 bytes"),
+                (self.dst, 4, "dst buffer shorter than n_pixels × 4 bytes"),
+            ],
+        )
+    }
+}
+
 /// Parameters for a GPU soft-mask application.
 pub struct SoftMaskParams<'a, B: GpuBackend + ?Sized> {
     /// RGBA pixel buffer to mask in device memory (read-modify-write).
@@ -263,6 +345,29 @@ pub struct SoftMaskParams<'a, B: GpuBackend + ?Sized> {
     pub mask: &'a B::DeviceBuffer,
     /// Number of pixels to process.
     pub n_pixels: u32,
+}
+
+impl<B: GpuBackend + ?Sized> SoftMaskParams<'_, B> {
+    /// Check that `n_pixels` ≤ [`MAX_KERNEL_PIXELS`], that `pixels` holds
+    /// `n_pixels × 4` bytes and `mask` `n_pixels` bytes.
+    ///
+    /// # Errors
+    /// Returns a `BackendError` if either invariant is violated.
+    pub fn validate(&self, backend: &B) -> super::Result<()> {
+        validate_per_pixel(
+            backend,
+            "SoftMaskInvariantViolation",
+            self.n_pixels,
+            &[
+                (
+                    self.pixels,
+                    4,
+                    "pixels buffer shorter than n_pixels × 4 bytes",
+                ),
+                (self.mask, 1, "mask buffer shorter than n_pixels bytes"),
+            ],
+        )
+    }
 }
 
 /// Workgroup size used by every phase of the Blelloch scan kernel.
@@ -1329,6 +1434,65 @@ mod tests {
         p.filter = 4;
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("filter"), "{err}");
+    }
+
+    // --- per-pixel kernels ---
+
+    #[test]
+    fn icc_clut_validate_returns_grid_and_checks_buffers() {
+        static CLUT17: usize = 17 * 17 * 17 * 17 * 3;
+        static SHORT: usize = 11;
+        static ODD_CLUT: usize = 100 * 3;
+        let ok = || IccClutParams::<FakeBackend> {
+            cmyk: &FAKE_BUF,
+            rgb: &FAKE_BUF,
+            clut: &CLUT17,
+            n_pixels: 4,
+        };
+        assert_eq!(ok().validate(&FakeBackend).unwrap(), 17);
+        let err =
+            |p: IccClutParams<'_, FakeBackend>| p.validate(&FakeBackend).unwrap_err().to_string();
+        let e = err(IccClutParams {
+            rgb: &SHORT,
+            ..ok()
+        });
+        assert!(e.contains("rgb buffer"), "{e}");
+        let e = err(IccClutParams {
+            clut: &ODD_CLUT,
+            ..ok()
+        });
+        assert!(e.contains("grid_n"), "{e}");
+        let e = err(IccClutParams {
+            clut: &FAKE_BUF,
+            ..ok()
+        });
+        assert!(e.contains("i32::MAX"), "{e}");
+        let e = err(IccClutParams {
+            n_pixels: MAX_KERNEL_PIXELS + 1,
+            ..ok()
+        });
+        assert!(e.contains("MAX_KERNEL_PIXELS"), "{e}");
+    }
+
+    #[test]
+    fn composite_and_soft_mask_validate_buffer_lengths() {
+        static FOUR_PX: usize = 16;
+        let composite = |n_pixels| CompositeParams::<FakeBackend> {
+            src: &FOUR_PX,
+            dst: &FOUR_PX,
+            n_pixels,
+        };
+        composite(4).validate(&FakeBackend).expect("exact fit");
+        let e = composite(5).validate(&FakeBackend).unwrap_err().to_string();
+        assert!(e.contains("src buffer"), "{e}");
+        let mask = |n_pixels| SoftMaskParams::<FakeBackend> {
+            pixels: &FOUR_PX,
+            mask: &FOUR_PX,
+            n_pixels,
+        };
+        mask(4).validate(&FakeBackend).expect("exact fit");
+        let e = mask(5).validate(&FakeBackend).unwrap_err().to_string();
+        assert!(e.contains("pixels buffer"), "{e}");
     }
 
     // --- ScanParams ---
