@@ -83,9 +83,9 @@ pub trait Pattern: Send + Sync {
 ///
 /// `fill_span` copies `data` into `out`, whose length must equal
 /// `data.len()`: a `RowPattern` is valid only for the span it holds.
-pub(crate) struct RowPattern<'a> {
+pub struct RowPattern<'a> {
     /// Colour bytes of the span, `P::BYTES` per pixel.
-    pub(crate) data: &'a [u8],
+    pub data: &'a [u8],
 }
 
 impl Pattern for RowPattern<'_> {

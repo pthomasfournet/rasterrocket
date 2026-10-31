@@ -79,7 +79,7 @@ use color::{Rgb8, TransferLut};
 use raster::{
     Bitmap, ClipResult, eo_fill, fill,
     path::PathBuilder,
-    pipe::{Pattern, PipeSrc, PipeState, TransferSet},
+    pipe::{Pattern, PipeSrc, PipeState, RowPattern, TransferSet},
     stroke::{StrokeParams, stroke},
     transparency::{Backdrop, GroupParams, begin_group, paint_group},
     types::{BlendMode, LineCap, LineJoin},
@@ -2499,12 +2499,20 @@ impl<'doc> PageRenderer<'doc> {
             backdrop.as_deref(),
         );
 
+        // Each row's samples and their coverage are gathered first and
+        // composited as one row (see `ImageCompositor::paint_row`).
+        let span = (grid.x1 - grid.x0) as usize;
+        let mut colours = vec![0u8; span * 3];
+        let mut shape = vec![0u8; span];
         for dy in grid.y0..grid.y1 {
             let Some(row_clip) = grid_clip.row(dy) else {
                 continue;
             };
-            let (row, mut alpha_row) = self.bitmap.row_and_alpha_mut(dy);
-            for dx in grid.x0..grid.x1 {
+            shape.fill(0);
+            for ((dx, out), shape) in (grid.x0..grid.x1)
+                .zip(colours.as_chunks_mut::<3>().0)
+                .zip(shape.iter_mut())
+            {
                 let coverage = row_clip.coverage(dx);
                 if coverage == 0 {
                     continue;
@@ -2536,8 +2544,11 @@ impl<'doc> PageRenderer<'doc> {
                     ImageColorSpace::Gray => transfer([taps.blend(|x, y| channel(x, y, 0)); 3]),
                     ImageColorSpace::Mask => fill_color,
                 };
-                compositor.paint(row, alpha_row.as_deref_mut(), dx, dy, src, alpha);
+                *out = src;
+                *shape = alpha;
             }
+            let (row, alpha_row) = self.bitmap.row_and_alpha_mut(dy);
+            compositor.paint_row(row, alpha_row, grid.x0, dy, &colours, &shape);
         }
     }
 
@@ -2675,27 +2686,25 @@ fn composite_rgba_rows(
 
     let width = bitmap.width as usize;
     let src_stride = width * RGBA_BPP;
+    let span = (grid.x1 - grid.x0) as usize;
+    let mut colours = vec![0u8; span * 3];
+    let mut shape = vec![0u8; span];
     for (src_row, dy) in rgba.chunks_exact(src_stride.max(1)).zip(y0..) {
         let Some(row_clip) = grid_clip.row(dy) else {
             continue;
         };
-        let (row, mut alpha_row) = bitmap.row_and_alpha_mut(dy);
-        for dx in grid.x0..grid.x1 {
-            let s = &src_row[dx as usize * RGBA_BPP..dx as usize * RGBA_BPP + RGBA_BPP];
-            let coverage = row_clip.coverage(dx);
-            if s[3] == 0 || coverage == 0 {
-                continue;
-            }
+        let samples = &src_row[grid.x0 as usize * RGBA_BPP..grid.x1 as usize * RGBA_BPP];
+        for (((dx, s), out), shape) in (grid.x0..grid.x1)
+            .zip(samples.as_chunks::<RGBA_BPP>().0)
+            .zip(colours.as_chunks_mut::<3>().0)
+            .zip(shape.iter_mut())
+        {
             let rgb = [s[0], s[1], s[2]];
-            compositor.paint(
-                row,
-                alpha_row.as_deref_mut(),
-                dx,
-                dy,
-                transfer.map_or(rgb, |t| t.apply(rgb)),
-                coverage,
-            );
+            *out = transfer.map_or(rgb, |t| t.apply(rgb));
+            *shape = if s[3] == 0 { 0 } else { row_clip.coverage(dx) };
         }
+        let (row, alpha_row) = bitmap.row_and_alpha_mut(dy);
+        compositor.paint_row(row, alpha_row, grid.x0, dy, &colours, &shape);
     }
 }
 
@@ -2727,49 +2736,70 @@ impl<'a> ImageCompositor<'a> {
         }
     }
 
-    /// Paint `src` at column `dx` of row `dy` with coverage `coverage`.
-    /// `row` is the row's pixel bytes and `alpha_row` its alpha plane row,
-    /// if the bitmap has one.  A column past the row's end paints nothing.
-    fn paint(
+    /// Paint the samples of row `y` from column `x0`: `colours` holds the
+    /// RGB of each sample and `shape` its coverage, `0` where the sample
+    /// paints nothing.  `row` is the row's pixel bytes and `alpha_row` its
+    /// alpha plane row, if the bitmap has one.  Columns past the row's end
+    /// paint nothing.
+    ///
+    /// Through the pipe, each run of painted samples composites as one span
+    /// whose shape is the coverage: the pipe takes the source alpha as
+    /// `div255(a_input × shape)`, the alpha a sample painted alone with
+    /// that constant alpha would have.
+    fn paint_row(
         &self,
         row: &mut [u8],
-        alpha_row: Option<&mut [u8]>,
-        dx: u32,
-        dy: u32,
-        src: [u8; 3],
-        coverage: u8,
+        mut alpha_row: Option<&mut [u8]>,
+        x0: u32,
+        y: u32,
+        colours: &[u8],
+        shape: &[u8],
     ) {
-        let x = dx as usize;
-        let Some(dst) = row.get_mut(x * 3..x * 3 + 3) else {
-            return;
-        };
+        let x0 = x0 as usize;
+        let columns = (row.len() / 3).saturating_sub(x0).min(shape.len());
+        let (colours, shape) = (&colours[..columns * 3], &shape[..columns]);
         let Some(pipe) = &self.pipe else {
-            blend_rgb(dst, src, coverage);
+            let dst = &mut row[x0 * 3..(x0 + columns) * 3];
+            for ((dst, src), &coverage) in dst
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(colours.as_chunks::<3>().0)
+                .zip(shape)
+            {
+                if coverage != 0 {
+                    blend_rgb(dst, *src, coverage);
+                }
+            }
             return;
         };
-        let pixel_pipe = PipeState {
-            a_input: div255(u32::from(coverage) * u32::from(pipe.a_input)),
-            ..*pipe
-        };
-        if pixel_pipe.a_input == 0 {
-            return;
+        let mut start = 0;
+        while let Some(offset) = shape[start..].iter().position(|&c| c != 0) {
+            let a = start + offset;
+            let b = shape[a..]
+                .iter()
+                .position(|&c| c == 0)
+                .map_or(columns, |n| a + n);
+            let (c0, c1) = (x0 + a, x0 + b);
+            #[expect(
+                clippy::cast_possible_wrap,
+                clippy::cast_possible_truncation,
+                reason = "columns and rows lie within the bitmap, whose dimensions are below 2^31"
+            )]
+            raster::pipe::render_span::<Rgb8>(
+                pipe,
+                &PipeSrc::Pattern(&RowPattern {
+                    data: &colours[a * 3..b * 3],
+                }),
+                &mut row[c0 * 3..c1 * 3],
+                alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
+                Some(&shape[a..b]),
+                c0 as i32,
+                (c1 - 1) as i32,
+                y as i32,
+            );
+            start = b;
         }
-        let dst_alpha = alpha_row.and_then(|a| a.get_mut(x..=x));
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "dx and dy are below the bitmap's u32 dimensions, which \
-                      device bitmaps keep under 2^31"
-        )]
-        raster::pipe::render_span::<Rgb8>(
-            &pixel_pipe,
-            &PipeSrc::Solid(&src),
-            dst,
-            dst_alpha,
-            None,
-            dx as i32,
-            dx as i32,
-            dy as i32,
-        );
     }
 }
 
@@ -3318,6 +3348,106 @@ mod tests {
     fn check_image_bytes_len_one_by_one_gray() {
         // 1 × 1 × Gray (bpp=1) → expected 1 byte.
         assert_eq!(check_image_bytes_len(1, 1, 1, 1), Ok(1));
+    }
+
+    // ── ImageCompositor ───────────────────────────────────────────────────
+
+    /// Composite one row of samples pixel by pixel: each painted sample
+    /// alone, with source alpha `div255(coverage × a_input)`.
+    fn paint_row_per_pixel(
+        bitmap: &mut Bitmap<Rgb8>,
+        pipe: &PipeState<'_>,
+        y: u32,
+        colours: &[u8],
+        shape: &[u8],
+    ) {
+        for (x, (src, &coverage)) in colours.as_chunks::<3>().0.iter().zip(shape).enumerate() {
+            let a_input = div255(u32::from(coverage) * u32::from(pipe.a_input));
+            if a_input == 0 {
+                continue;
+            }
+            let pixel_pipe = PipeState { a_input, ..*pipe };
+            let x = i32::try_from(x).expect("small");
+            let y = i32::try_from(y).expect("small");
+            raster::pipe::render_bitmap_span::<Rgb8>(
+                bitmap,
+                &pixel_pipe,
+                &PipeSrc::Solid(src),
+                None,
+                x,
+                x,
+                y,
+            );
+        }
+    }
+
+    /// Compositing a row of image samples in runs gives the bytes of
+    /// compositing each sample alone, with and without an alpha plane,
+    /// for constant alpha and a separable and a non-separable blend mode.
+    #[test]
+    fn image_rows_composite_like_single_samples() {
+        let width = 13u32;
+        let mut seed = 7u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed.to_be_bytes()[0]
+        };
+        let colours: Vec<u8> = (0..width * 3).map(|_| next()).collect();
+        // Runs of unpainted samples, and coverages small enough that the
+        // scaled alpha rounds to zero.
+        let shape: Vec<u8> = (0..width)
+            .map(|i| match i % 5 {
+                0 => 0,
+                1 => 1,
+                _ => next(),
+            })
+            .collect();
+        let backdrop: Vec<u8> = (0..width * 3).map(|_| next()).collect();
+        let backdrop_alpha: Vec<u8> = (0..width).map(|_| next()).collect();
+        for has_alpha in [false, true] {
+            for (fill_alpha, mode) in [
+                (255, BlendMode::Normal),
+                (128, BlendMode::Normal),
+                (200, BlendMode::Multiply),
+                (255, BlendMode::Luminosity),
+            ] {
+                let make_base = || {
+                    let mut base = Bitmap::<Rgb8>::new(width, 1, 1, has_alpha);
+                    base.row_bytes_mut(0).copy_from_slice(&backdrop);
+                    if let Some(a) = base.alpha_plane_mut() {
+                        a.copy_from_slice(&backdrop_alpha);
+                    }
+                    base
+                };
+                let base = make_base();
+                let compositor = ImageCompositor::new(&base, fill_alpha, mode, None);
+                let mut runs = make_base();
+                let (row, alpha_row) = runs.row_and_alpha_mut(0);
+                compositor.paint_row(row, alpha_row, 0, 0, &colours, &shape);
+                let mut single = make_base();
+                if let Some(pipe) = &compositor.pipe {
+                    paint_row_per_pixel(&mut single, pipe, 0, &colours, &shape);
+                } else {
+                    let row = single.row_bytes_mut(0);
+                    for (x, &c) in shape.iter().enumerate() {
+                        if c != 0 {
+                            let src = [colours[x * 3], colours[x * 3 + 1], colours[x * 3 + 2]];
+                            blend_rgb(&mut row[x * 3..x * 3 + 3], src, c);
+                        }
+                    }
+                }
+                assert_eq!(
+                    runs.data(),
+                    single.data(),
+                    "{mode:?} at {fill_alpha}, alpha {has_alpha}"
+                );
+                assert_eq!(
+                    runs.alpha_plane(),
+                    single.alpha_plane(),
+                    "{mode:?} at {fill_alpha}, alpha {has_alpha}"
+                );
+            }
+        }
     }
 
     // ── blend_u8 ──────────────────────────────────────────────────────────────
