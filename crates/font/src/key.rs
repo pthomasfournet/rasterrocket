@@ -32,6 +32,9 @@ pub const FRACTION_BITS: u32 = 2;
 /// `1 << FRACTION_BITS` — the denominator for fractional coordinates.
 pub const FRACTION: u32 = 1 << FRACTION_BITS;
 
+/// Mask selecting the sub-pixel x-fraction bits of a `u8`.
+const X_FRAC_MASK: u8 = (1 << FRACTION_BITS) - 1;
+
 /// Full cache key for a single rendered glyph.
 ///
 /// Glyphs are rendered at integral vertical positions, so the key carries
@@ -59,18 +62,11 @@ impl GlyphKey {
     /// range `[0, FRACTION)`.
     #[must_use]
     pub const fn new(face_id: FaceId, glyph_id: u32, size_px: u16, x_frac: u8, aa: bool) -> Self {
-        // FRACTION = 4 = 0b100; FRACTION as u8 - 1 = 3 = 0b11.
-        // FRACTION fits in u8 (it is 4), so the cast is safe.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "FRACTION = 4; FRACTION as u8 = 4 fits in u8 without truncation"
-        )]
-        let mask = FRACTION as u8 - 1;
         Self {
             face_id,
             glyph_id,
             size_px,
-            x_frac: x_frac & mask,
+            x_frac: x_frac & X_FRAC_MASK,
             x_scale: u16::MAX,
             aa,
         }
