@@ -11,8 +11,7 @@ use std::borrow::Cow;
 /// Downstream modules within this crate can import everything they need with
 /// a single `use crate::types::*`.
 pub use color::{
-    AnyColor, Cmyk8, DeviceN8, Gray8, NCOMPS, Pixel, PixelMode, Rgb8, Rgba8, TransferLut,
-    convert::*,
+    AnyColor, Cmyk8, DeviceN8, Gray8, NCOMPS, Pixel, PixelMode, Rgb8, TransferLut, convert::*,
 };
 
 // ── Rasterizer constants ──────────────────────────────────────────────────────

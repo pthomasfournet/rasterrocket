@@ -1,11 +1,12 @@
 //! PNG encoder (via the `png` crate).
 //!
-//! Supports `Rgb8`, `Gray8`, and `Rgba8` bitmaps directly.
-//! Other modes return [`EncodeError::UnsupportedMode`] — convert to one
-//! of the above before encoding.
+//! Grayscale bitmaps are written as 8-bit grayscale; every colour mode is
+//! converted to 8-bit RGB as for PPM (see [`crate::ppm`]).  A bitmap's alpha
+//! plane, when present, becomes the PNG alpha channel.  `Mono1` returns
+//! [`EncodeError::UnsupportedMode`].
 //!
-//! PNG is lossless and handles transparency (alpha plane) correctly.
-//! Use this format in preference to PPM when the bitmap has an alpha plane.
+//! PNG is lossless and carries transparency; prefer it to PPM when the bitmap
+//! has an alpha plane.
 
 use std::io::Write;
 
@@ -13,45 +14,31 @@ use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
 use crate::EncodeError;
+use crate::ppm::RgbSource;
 
 /// Write `bitmap` to `out` as a PNG image.
 ///
 /// The sink `out` is consumed; wrap in `std::io::BufWriter` if buffering is
 /// needed.
 ///
-/// Supported pixel modes:
-///
 /// | Mode | PNG colour type |
 /// |------|----------------|
-/// | `Rgb8` | `RGB` (24-bit) |
-/// | `Gray8` / `Mono8` | `Grayscale` (8-bit) |
-/// | `Rgba8` | `RGBA` (32-bit) |
-///
-/// # Alpha plane
-///
-/// For `Rgb8` bitmaps: if the bitmap has an alpha plane, each RGB row is
-/// interleaved with the corresponding alpha bytes and written as RGBA PNG.
-///
-/// For `Rgba8` bitmaps: the alpha stored within each pixel is used; any
-/// separate alpha plane is ignored.
+/// | `Mono8` | `Grayscale` (8-bit) |
+/// | `Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8`, `DeviceN8` | `RGB`, or `RGBA` with an alpha plane |
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError::UnsupportedMode`] for CMYK, BGR, XBGR, `DeviceN`,
-/// or `Mono1` bitmaps.
+/// Returns [`EncodeError::UnsupportedMode`] for `Mono1` bitmaps, or when the
+/// pixel buffer size overflows `usize`.
 /// Returns [`EncodeError::Io`] or [`EncodeError::PngEncoder`] on failure.
 pub fn write_png<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
-    match P::MODE {
-        PixelMode::Rgb8 => write_png_rgb(bitmap, out),
-        PixelMode::Mono8 => write_png_gray(bitmap, out),
-        // Rgba8 is stored as Xbgr8 in the Pixel trait implementation.
-        PixelMode::Xbgr8 => write_png_rgba(bitmap, out),
-        PixelMode::Bgr8 | PixelMode::Cmyk8 | PixelMode::DeviceN8 | PixelMode::Mono1 => {
-            Err(EncodeError::UnsupportedMode(
-                "unsupported mode for PNG: convert to Rgb8/Gray8/Rgba8 first",
-            ))
-        }
+    if P::MODE == PixelMode::Mono8 {
+        return write_png_gray(bitmap, out);
     }
+    let source = RgbSource::of(P::MODE).ok_or(EncodeError::UnsupportedMode(
+        "1-bit bitmap: PNG output takes Mono8 or a colour mode",
+    ))?;
+    write_png_rgb(bitmap, source, out)
 }
 
 /// Build a configured [`png::Writer`] ready to accept image data.
@@ -80,80 +67,60 @@ fn png_encoder<W: Write>(
     Ok(encoder.write_header()?)
 }
 
-/// Pack pixel rows contiguously (no stride padding) into a new `Vec<u8>`.
-///
-/// `bytes_per_pixel` is the number of source bytes per pixel to copy.
-/// Returns an error if the allocation would overflow `usize`.
-fn pack_rows<P: Pixel>(bitmap: &Bitmap<P>, bytes_per_pixel: usize) -> Result<Vec<u8>, EncodeError> {
-    let w = bitmap.width as usize;
-    let h = bitmap.height as usize;
-    let total = w
-        .checked_mul(h)
-        .and_then(|wh| wh.checked_mul(bytes_per_pixel))
+/// `width × height × channels` bytes, or an error when that overflows `usize`.
+fn image_len<P: Pixel>(bitmap: &Bitmap<P>, channels: usize) -> Result<usize, EncodeError> {
+    (bitmap.width as usize)
+        .checked_mul(bitmap.height as usize)
+        .and_then(|px| px.checked_mul(channels))
         .ok_or(EncodeError::UnsupportedMode(
             "image too large: pixel buffer would overflow usize",
-        ))?;
-    let mut buf = vec![0u8; total];
-    let row_len = w * bytes_per_pixel;
-    for y in 0..bitmap.height {
-        let row = bitmap.row_bytes(y);
-        let dst_off = y as usize * row_len;
-        buf[dst_off..dst_off + row_len].copy_from_slice(&row[..row_len]);
-    }
-    Ok(buf)
+        ))
 }
 
-/// Write an `Rgb8` bitmap as PNG, promoting to RGBA if an alpha plane is present.
-fn write_png_rgb<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
+/// Write a colour bitmap as PNG RGB, or RGBA when it has an alpha plane.
+fn write_png_rgb<P: Pixel, W: Write>(
+    bitmap: &Bitmap<P>,
+    source: RgbSource,
+    out: W,
+) -> Result<(), EncodeError> {
     let w = bitmap.width as usize;
-    let h = bitmap.height as usize;
-
-    if bitmap.has_alpha() {
-        // Promote to RGBA: interleave pixel RGB with alpha plane bytes.
-        let total = w.checked_mul(h).and_then(|wh| wh.checked_mul(4)).ok_or(
-            EncodeError::UnsupportedMode("image too large: RGBA buffer would overflow usize"),
-        )?;
-        let mut buf = vec![0u8; total];
-        for y in 0..bitmap.height {
-            let rgb = bitmap.row_bytes(y);
-            // alpha_row returns None only when has_alpha is false — checked above.
-            let alpha = bitmap
-                .alpha_row(y)
-                .expect("has_alpha is true but alpha_row returned None");
-            let row_off = y as usize * w * 4;
-            for i in 0..w {
-                buf[row_off + i * 4] = rgb[i * 3];
-                buf[row_off + i * 4 + 1] = rgb[i * 3 + 1];
-                buf[row_off + i * 4 + 2] = rgb[i * 3 + 2];
-                buf[row_off + i * 4 + 3] = alpha[i];
-            }
-        }
-        let mut writer = png_encoder(
-            out,
-            bitmap.width,
-            bitmap.height,
-            ::png::ColorType::Rgba,
-            ::png::BitDepth::Eight,
-        )?;
-        writer.write_image_data(&buf)?;
+    let (channels, color_type) = if bitmap.has_alpha() {
+        (4, ::png::ColorType::Rgba)
     } else {
-        let buf = pack_rows(bitmap, 3)?;
-        let mut writer = png_encoder(
-            out,
-            bitmap.width,
-            bitmap.height,
-            ::png::ColorType::Rgb,
-            ::png::BitDepth::Eight,
-        )?;
-        writer.write_image_data(&buf)?;
+        (3, ::png::ColorType::Rgb)
+    };
+    let mut buf = Vec::with_capacity(image_len(bitmap, channels)?);
+    let mut rgb = vec![0u8; w * 3];
+    for y in 0..bitmap.height {
+        source.convert(bitmap.row_bytes(y), &mut rgb);
+        match bitmap.alpha_row(y) {
+            Some(alpha) => {
+                for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha) {
+                    buf.extend_from_slice(px);
+                    buf.push(a);
+                }
+            }
+            None => buf.extend_from_slice(&rgb),
+        }
     }
-
+    let mut writer = png_encoder(
+        out,
+        bitmap.width,
+        bitmap.height,
+        color_type,
+        ::png::BitDepth::Eight,
+    )?;
+    writer.write_image_data(&buf)?;
     Ok(())
 }
 
 /// Write a `Gray8` bitmap as PNG.
 fn write_png_gray<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
-    let buf = pack_rows(bitmap, 1)?;
+    let w = bitmap.width as usize;
+    let mut buf = Vec::with_capacity(image_len(bitmap, 1)?);
+    for y in 0..bitmap.height {
+        buf.extend_from_slice(&bitmap.row_bytes(y)[..w]);
+    }
     let mut writer = png_encoder(
         out,
         bitmap.width,
@@ -165,48 +132,10 @@ fn write_png_gray<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), 
     Ok(())
 }
 
-/// Write an `Rgba8`-equivalent bitmap (stored as `Xbgr8`) as PNG RGBA.
-///
-/// `Rgba8` uses the `Xbgr8` pixel mode internally; the channel layout in memory
-/// is [X(=A), B, G, R] (little-endian 32-bit), so we must swap to [R, G, B, A].
-fn write_png_rgba<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
-    let w = bitmap.width as usize;
-    let h = bitmap.height as usize;
-    let total =
-        w.checked_mul(h)
-            .and_then(|wh| wh.checked_mul(4))
-            .ok_or(EncodeError::UnsupportedMode(
-                "image too large: RGBA buffer would overflow usize",
-            ))?;
-    let mut buf = vec![0u8; total];
-    for y in 0..bitmap.height {
-        let row = bitmap.row_bytes(y);
-        let row_off = y as usize * w * 4;
-        // Source layout: [X/A, B, G, R] per pixel (Xbgr8 / little-endian 32-bit).
-        for i in 0..w {
-            let src = i * 4;
-            let dst = row_off + i * 4;
-            buf[dst] = row[src + 3]; // R ← src[3]
-            buf[dst + 1] = row[src + 2]; // G ← src[2]
-            buf[dst + 2] = row[src + 1]; // B ← src[1]
-            buf[dst + 3] = row[src]; // A ← src[0]  (was X)
-        }
-    }
-    let mut writer = png_encoder(
-        out,
-        bitmap.width,
-        bitmap.height,
-        ::png::ColorType::Rgba,
-        ::png::BitDepth::Eight,
-    )?;
-    writer.write_image_data(&buf)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use color::{Cmyk8, Gray8, Rgb8, Rgba8};
+    use color::{Cmyk8, Gray8, Rgb8};
     use raster::Bitmap;
 
     fn make_rgb_bitmap(w: u32, h: u32, fill: [u8; 3]) -> Bitmap<Rgb8> {
@@ -299,32 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn rgba8_png_roundtrip_asymmetric_2x2() {
-        // 2×2 with four distinct pixels so every byte position is constrained.
-        // Rgba8 stores as Xbgr8 in memory: [X/A, B, G, R] per pixel.
-        let mut bmp: Bitmap<Rgba8> = Bitmap::new(2, 2, 1, false);
-        // (R, G, B, A) per pixel, written into memory as [A, B, G, R]:
-        // p00 = (10, 20, 30, 200), p01 = (40, 50, 60, 210),
-        // p10 = (70, 80, 90, 220), p11 = (100, 110, 120, 230).
-        bmp.row_bytes_mut(0)
-            .copy_from_slice(&[200, 30, 20, 10, 210, 60, 50, 40]);
-        bmp.row_bytes_mut(1)
-            .copy_from_slice(&[220, 90, 80, 70, 230, 120, 110, 100]);
-
-        let mut out = Vec::new();
-        write_png::<Rgba8, _>(&bmp, &mut out).unwrap();
-
-        let (w, h, pixels) = decode_png(&out);
-        assert_eq!((w, h), (2, 2));
-        assert_eq!(pixels.len(), 16, "2×2 pixels × 4 bytes (RGBA)");
-        // Decoded PNG is RGBA in row-major order.
-        assert_eq!(&pixels[0..4], &[10, 20, 30, 200], "row 0 px 0");
-        assert_eq!(&pixels[4..8], &[40, 50, 60, 210], "row 0 px 1");
-        assert_eq!(&pixels[8..12], &[70, 80, 90, 220], "row 1 px 0");
-        assert_eq!(&pixels[12..16], &[100, 110, 120, 230], "row 1 px 1");
-    }
-
-    #[test]
     fn rgb_with_alpha_multi_row_promotion() {
         // The 2×1 rgb_with_alpha_writes_rgba_png test only exercises a single
         // row; this 2×2 fixture verifies the per-row offset math is correct
@@ -349,14 +252,18 @@ mod tests {
         assert_eq!(&pixels[12..16], &[100, 110, 120, 230]);
     }
 
+    /// CMYK converts to RGB through the process-ink model, as for PPM.
     #[test]
-    fn cmyk_returns_unsupported_error() {
-        let bmp: Bitmap<Cmyk8> = Bitmap::new(1, 1, 1, false);
+    fn cmyk_writes_converted_rgb() {
+        let mut bmp: Bitmap<Cmyk8> = Bitmap::new(2, 1, 1, false);
+        bmp.row_bytes_mut(0)
+            .copy_from_slice(&[0, 0, 0, 0, 10, 20, 30, 40]);
         let mut out = Vec::new();
-        let result = write_png::<Cmyk8, _>(&bmp, &mut out);
-        assert!(
-            matches!(result, Err(EncodeError::UnsupportedMode(_))),
-            "Cmyk8 should return UnsupportedMode for PNG"
-        );
+        write_png::<Cmyk8, _>(&bmp, &mut out).unwrap();
+        let (w, h, pixels) = decode_png(&out);
+        assert_eq!((w, h), (2, 1));
+        let mut want = vec![255, 255, 255];
+        want.extend_from_slice(&color::cmyk::cmyk_to_rgb(10, 20, 30, 40));
+        assert_eq!(pixels, want);
     }
 }

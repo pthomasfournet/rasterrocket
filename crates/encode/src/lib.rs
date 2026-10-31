@@ -4,10 +4,10 @@
 //!
 //! | Function | Format | Accepted pixel types |
 //! |----------|--------|--------------------|
-//! | [`write_ppm`] | Netpbm P6 binary | `Rgb8`, `Bgr8`, `Rgba8` (`Xbgr8`), `Cmyk8`, `DeviceN8` |
+//! | [`write_ppm`] | Netpbm P6 binary | colour modes (`Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8`, `DeviceN8`) |
 //! | [`write_pgm`] | Netpbm P5 binary | `Gray8` |
 //! | [`write_pbm`] | Netpbm P4 binary | `Gray8` (0 = white, non-zero = black) |
-//! | [`write_png`] | PNG | `Rgb8`, `Gray8`, `Rgba8` |
+//! | [`write_png`] | PNG | `Gray8` and the colour modes of [`write_ppm`] |
 //! | [`jpeg_gray`] | JPEG (baseline) | `Gray8` |
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in
@@ -15,9 +15,9 @@
 //!
 //! # CMYK handling
 //!
-//! Neither PPM nor PNG natively supports CMYK.  [`write_ppm`] converts
-//! CMYK/`DeviceN` (process channels only) to RGB with the profile-free
-//! process-ink model of `color::cmyk`.  For ICC-accurate colour, convert to
+//! Neither PPM nor PNG natively supports CMYK.  [`write_ppm`] and
+//! [`write_png`] convert CMYK/`DeviceN` (process channels only) to RGB with
+//! the profile-free process-ink model of `color::cmyk`.  For ICC-accurate colour, convert to
 //! `Rgb8` before encoding.
 
 pub mod jpeg;

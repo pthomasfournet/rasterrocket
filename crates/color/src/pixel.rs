@@ -39,7 +39,6 @@ use crate::mode::PixelMode;
 // catch after the binary is built.
 
 const _: () = assert!(std::mem::size_of::<Rgb8>() == Rgb8::BYTES);
-const _: () = assert!(std::mem::size_of::<Rgba8>() == Rgba8::BYTES);
 const _: () = assert!(std::mem::size_of::<Gray8>() == Gray8::BYTES);
 const _: () = assert!(std::mem::size_of::<Cmyk8>() == Cmyk8::BYTES);
 const _: () = assert!(std::mem::size_of::<DeviceN8>() == DeviceN8::BYTES);
@@ -78,34 +77,6 @@ pub struct Rgb8 {
 impl Pixel for Rgb8 {
     const MODE: PixelMode = PixelMode::Rgb8;
     const BYTES: usize = 3;
-}
-
-/// 8-bit RGBA, 4 bytes/pixel, wire layout `[R, G, B, A]`.
-///
-/// This is the working format for transparency groups. The `MODE` constant is
-/// set to [`PixelMode::Xbgr8`] as an intentional approximation: the rasterizer
-/// internally uses this struct for transparency groups and the mode field is
-/// only used for external dispatch (e.g. choosing a blitter). The actual byte
-/// layout is `[R, G, B, A]`, **not** `[X, B, G, R]`; callers that perform
-/// memory-layout-sensitive operations must use the struct fields directly
-/// rather than relying on the `MODE` variant.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
-pub struct Rgba8 {
-    /// Red channel, `0` = minimum, `255` = full intensity.
-    pub r: u8,
-    /// Green channel, `0` = minimum, `255` = full intensity.
-    pub g: u8,
-    /// Blue channel, `0` = minimum, `255` = full intensity.
-    pub b: u8,
-    /// Alpha channel, `0` = fully transparent, `255` = fully opaque.
-    pub a: u8,
-}
-
-impl Pixel for Rgba8 {
-    // Intentional approximation — see struct doc comment above.
-    const MODE: PixelMode = PixelMode::Xbgr8;
-    const BYTES: usize = 4;
 }
 
 /// 8-bit grayscale, 1 byte/pixel, wire layout `[Y]`.
@@ -241,7 +212,6 @@ mod tests {
     #[test]
     fn sizes_match_bytes_const() {
         assert_eq!(std::mem::size_of::<Rgb8>(), Rgb8::BYTES);
-        assert_eq!(std::mem::size_of::<Rgba8>(), Rgba8::BYTES);
         assert_eq!(std::mem::size_of::<Gray8>(), Gray8::BYTES);
         assert_eq!(std::mem::size_of::<Cmyk8>(), Cmyk8::BYTES);
         assert_eq!(std::mem::size_of::<DeviceN8>(), DeviceN8::BYTES);
