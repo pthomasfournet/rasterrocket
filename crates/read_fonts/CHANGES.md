@@ -58,6 +58,21 @@ It is not published and changes are not sent upstream.
   tests for), and a dictionary key outside a declared dictionary or an
   unreadable `FontMatrix` is ignored instead of failing the font. Tests:
   `ps::type1::cid::tests::*` (in `src/tests/test_cid_type1.rs`).
+- `CidType1Font`: decoded subroutines and charstrings are bounded by the
+  length of the data section. The CIDMap and the subroutine maps are
+  offsets into that section, and the ranges of different CIDs (or the
+  subroutine maps of different font dictionaries) may overlap, so
+  decoding each one separately cost memory quadratic in the input (4 096
+  CIDs over a 16 KiB section asked for 30 MiB; a few MiB of input, for
+  terabytes). Font dictionaries with the same subroutine map and `lenIV`
+  share one decoded set, CIDs with the same charstring range share one
+  decoded charstring, and once the distinct ranges exceed the section's
+  length a further charstring leaves its CID without a glyph and further
+  subroutines reject the font. Well-formed fonts decode each byte once
+  and are unaffected. Tests:
+  `overlapping_charstrings_are_bounded_by_the_data_section`,
+  `identical_charstring_ranges_share_one_copy`,
+  `font_dicts_naming_one_subr_map_share_their_subrs`.
 
 ## Upstream fixes brought over
 

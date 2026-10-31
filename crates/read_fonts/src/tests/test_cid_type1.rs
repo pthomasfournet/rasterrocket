@@ -349,3 +349,78 @@ fn excess_dict_markers_are_ignored() {
     let font = CidType1Font::new(&data).unwrap();
     assert!(commands(&font, 3).contains(&line(400, 100)));
 }
+
+/// A font of unencrypted font dictionaries over the given data section,
+/// with FDBytes 0, GDBytes 4 and SDBytes 4; all `dicts` dictionaries name
+/// the subroutine map at `subrmap_offset`.
+fn raw_font(
+    binary: &[u8],
+    cid_count: usize,
+    dicts: usize,
+    subrmap_offset: usize,
+    subr_count: usize,
+) -> Vec<u8> {
+    let mut out = format!(
+        "%!PS-Adobe-3.0 Resource-CIDFont\n/CIDFontName /Test def\n\
+         /CIDMapOffset 0 def\n/FDBytes 0 def\n/GDBytes 4 def\n\
+         /CIDCount {cid_count} def\n/FDArray {dicts} array\n"
+    );
+    for i in 0..dicts {
+        out += &format!(
+            "dup {i}\n%ADOBeginFontDict\n/FontMatrix [{IDENTITY}] def\n/lenIV -1 def\n\
+             /SubrMapOffset {subrmap_offset} def\n/SDBytes 4 def\n\
+             /SubrCount {subr_count} def\n%ADOEndFontDict\nput\n"
+        );
+    }
+    out += &format!("def\n(Binary) {} StartData ", binary.len());
+    let mut out = out.into_bytes();
+    out.extend_from_slice(binary);
+    out
+}
+
+/// A CID map of FDBytes 0, GDBytes 4 holding `offset(i)` for entries
+/// `0..=cid_count`.
+fn cidmap(cid_count: usize, offset: impl Fn(usize) -> usize) -> Vec<u8> {
+    (0..=cid_count)
+        .flat_map(|i| (offset(i) as u32).to_be_bytes())
+        .collect()
+}
+
+#[test]
+fn overlapping_charstrings_are_bounded_by_the_data_section() {
+    // Offsets 0, L, 1, L, 2, L, ...: every even CID's charstring runs from
+    // a distinct start to the end of the data section, so the ranges
+    // overlap and their total length is quadratic in L.
+    let cid_count = 4096;
+    let len = (cid_count + 1) * 4;
+    let binary = cidmap(cid_count, |i| if i % 2 == 0 { i / 2 } else { len });
+    let font = CidType1Font::new(&raw_font(&binary, cid_count, 1, 0, 0)).unwrap();
+    assert!(font.charstrings.len() <= len, "{}", font.charstrings.len());
+    assert_eq!(font.charstring(0).map(<[u8]>::len), Some(len));
+    assert!(font.charstring(2).is_none());
+}
+
+#[test]
+fn identical_charstring_ranges_share_one_copy() {
+    // Offsets 0, L, 0, L, ...: every even CID names the whole section.
+    let cid_count = 64;
+    let len = (cid_count + 1) * 4;
+    let binary = cidmap(cid_count, |i| if i % 2 == 0 { 0 } else { len });
+    let font = CidType1Font::new(&raw_font(&binary, cid_count, 1, 0, 0)).unwrap();
+    assert_eq!(font.charstrings.len(), len);
+    for cid in (0..cid_count as u32).step_by(2) {
+        assert_eq!(font.charstring(cid).map(<[u8]>::len), Some(len));
+    }
+}
+
+#[test]
+fn font_dicts_naming_one_subr_map_share_their_subrs() {
+    // Every font dictionary names the same map, whose one subroutine is
+    // the whole data section.
+    let binary = cidmap(1, |i| i * 8);
+    let dicts = 200;
+    let font = CidType1Font::new(&raw_font(&binary, 0, dicts, 0, 1)).unwrap();
+    assert_eq!(font.num_font_dicts(), dicts as u32);
+    assert_eq!(font.subrs.len(), 1);
+    assert_eq!(font.subrs[0].data.len(), 8);
+}

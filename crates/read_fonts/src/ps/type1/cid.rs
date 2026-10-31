@@ -27,7 +27,7 @@ use crate::{
     types::{Fixed, GlyphId},
     ReadError,
 };
-use alloc::{borrow::ToOwned, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, collections::BTreeMap, string::String, vec::Vec};
 use core::ops::Range;
 
 /// Header that identifies a CID-keyed font resource.
@@ -41,6 +41,9 @@ pub struct CidType1Font {
     name: Option<String>,
     upem: i32,
     dicts: Vec<FontDict>,
+    /// Distinct subroutine sets; font dictionaries that locate theirs with
+    /// the same map and `lenIV` share one.
+    subrs: Vec<Subrs>,
     /// Charstring of each CID, `None` for a CID without a glyph.
     glyphs: Vec<Option<GlyphEntry>>,
     /// Decrypted charstrings, with the `lenIV` prefix removed.
@@ -49,7 +52,8 @@ pub struct CidType1Font {
 
 struct FontDict {
     matrix: FontMatrix,
-    subrs: Subrs,
+    /// Index into `CidType1Font::subrs`.
+    subrs: usize,
 }
 
 struct GlyphEntry {
@@ -130,9 +134,19 @@ impl CidType1Font {
         if cidmap_offset > len || cid_count.checked_mul(entry_len)? > len - cidmap_offset {
             return None;
         }
+        // Every subroutine and charstring is decoded from its own bytes of
+        // the data section, so the decoded total of a well-formed font is
+        // at most the section's length. Font dictionaries or CIDs that name
+        // the same bytes share one decoded copy; a font whose distinct
+        // references still exceed the bound (overlapping ranges, which
+        // would otherwise cost memory quadratic in the input) is rejected
+        // when its subroutines exceed it and loses the glyphs that do.
+        let mut budget = binary.len();
         let mut upem = 1000;
         let mut dicts = Vec::with_capacity(raw_dicts.len());
         let mut len_ivs = Vec::with_capacity(raw_dicts.len());
+        let mut subrs = Vec::new();
+        let mut subrs_by_map = BTreeMap::new();
         for raw in &raw_dicts {
             let matrix = match raw.matrix {
                 Some(scaled) => {
@@ -144,9 +158,18 @@ impl CidType1Font {
                 None => FontMatrix::IDENTITY,
             };
             let len_iv = raw.len_iv.unwrap_or(4);
+            let key = (raw.subrmap_offset, raw.sd_bytes, raw.subr_count, len_iv);
+            let subrs_index = match subrs_by_map.get(&key) {
+                Some(&index) => index,
+                None => {
+                    subrs.push(read_subrs(binary, raw, len_iv, &mut budget)?);
+                    subrs_by_map.insert(key, subrs.len() - 1);
+                    subrs.len() - 1
+                }
+            };
             dicts.push(FontDict {
                 matrix,
-                subrs: read_subrs(binary, raw, len_iv)?,
+                subrs: subrs_index,
             });
             len_ivs.push(len_iv);
         }
@@ -154,6 +177,7 @@ impl CidType1Font {
         let read = |pos: u64, size: u64| read_offset(binary, pos, size);
         let mut glyphs = Vec::with_capacity(cid_count);
         let mut charstrings = Vec::new();
+        let mut decoded: BTreeMap<(u64, u64, i64), Range<usize>> = BTreeMap::new();
         for cid in 0..cid_count as u64 {
             let entry = cidmap_offset + cid * entry_len;
             let glyph = (|| {
@@ -164,21 +188,30 @@ impl CidType1Font {
                 if start >= end || end > len {
                     return None;
                 }
+                if let Some(data) = decoded.get(&(start, end, len_iv)) {
+                    return Some(GlyphEntry {
+                        dict: dict as u32,
+                        data: data.clone(),
+                    });
+                }
                 let encoded = binary.get(start as usize..end as usize)?;
+                if len_iv >= 0 && len_iv as usize > encoded.len() {
+                    return None;
+                }
+                budget = budget.checked_sub(encoded.len())?;
                 let data_start = charstrings.len();
                 if len_iv >= 0 {
-                    if len_iv as usize > encoded.len() {
-                        return None;
-                    }
                     charstrings.extend(
                         decrypt(encoded.iter().copied(), CHARSTRING_SEED).skip(len_iv as usize),
                     );
                 } else {
                     charstrings.extend_from_slice(encoded);
                 }
+                let data = data_start..charstrings.len();
+                decoded.insert((start, end, len_iv), data.clone());
                 Some(GlyphEntry {
                     dict: dict as u32,
-                    data: data_start..charstrings.len(),
+                    data,
                 })
             })();
             glyphs.push(glyph);
@@ -188,6 +221,7 @@ impl CidType1Font {
             name,
             upem,
             dicts,
+            subrs,
             glyphs,
             charstrings,
         })
@@ -313,9 +347,10 @@ impl CharstringContext for FontDictContext<'_> {
 
     fn subr(&self, index: i32) -> Result<&[u8], Error> {
         Ok(self
-            .dict
+            .font
             .subrs
-            .get(index as u32)
+            .get(self.dict.subrs)
+            .and_then(|subrs| subrs.get(index as u32))
             .ok_or(ReadError::OutOfBounds)?)
     }
 
@@ -423,10 +458,11 @@ fn read_unsigned(parser: &mut Parser) -> Option<u64> {
     u64::try_from(parser.read_int()?).ok()
 }
 
-/// Reads the subroutines of one font dictionary from the data section.
+/// Reads the subroutines of one font dictionary from the data section,
+/// deducting their encoded length from `budget`; `None` if they exceed it.
 ///
 /// <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/cid/cidload.c#L420>
-fn read_subrs(binary: &[u8], dict: &RawFontDict, len_iv: i64) -> Option<Subrs> {
+fn read_subrs(binary: &[u8], dict: &RawFontDict, len_iv: i64, budget: &mut usize) -> Option<Subrs> {
     let mut subrs = Subrs {
         is_dense: true,
         ..Subrs::default()
@@ -451,6 +487,7 @@ fn read_subrs(binary: &[u8], dict: &RawFontDict, len_iv: i64) -> Option<Subrs> {
             return None;
         }
         let encoded = binary.get(start as usize..end as usize)?;
+        *budget = budget.checked_sub(encoded.len())?;
         let data_start = subrs.data.len();
         if len_iv >= 0 {
             subrs
