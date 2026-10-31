@@ -26,8 +26,8 @@ the camera-capture flags) behave identically to the PDF path. Pages are decoded
 to grayscale, so colour output carries gray pixels; `-r` only sets the
 resolution recorded for the page, never its pixel size. An archive that
 contains a single PDF instead of loose images renders that PDF. The crop,
-scale-to, rendering, password and backend flags, `--progress` and `--timings`
-apply to PDF input only and have no effect on comic input.
+scale-to, rendering, password and backend flags, `--threads`, `--strict`,
+`--purpose`, `--progress` and `--timings` apply to PDF input only and have no effect on comic input.
 
 ---
 
@@ -88,8 +88,9 @@ MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
 600 000 000 pixels (600 MP) in area. Both limits are checked from the page
 geometry before any pixel buffer is allocated. A page over either is refused:
 rrocket prints `rrocket: page N: render error: page pixel dimensions W×H exceed safety
-limit (32768)` (or `page pixel area W×H = A exceeds safety limit (MAX_PX_AREA =
-600000000)`), the other pages still render, and the run exits with status 1.
+limit (32768); lower the DPI or check the document` (or `page pixel area W×H = A
+exceeds safety limit (MAX_PX_AREA = 600000000); lower the DPI or check the
+document`), the other pages still render, and the run exits with status 1.
 
 The limits apply to what one render draws, not to the page: with the crop
 flags only the selected area is rendered, so output larger than the limits
@@ -119,6 +120,10 @@ page fails instead.
 | `--jpeg` | `.jpg` | JPEG. Not yet supported: the page fails with "output format JPEG is not yet supported". |
 | `--jpegcmyk` | `.jpg` | JPEG in CMYK colour space. Not yet supported, as `--jpeg`. |
 | `--tiff` | `.tif` | TIFF. Not yet supported, as `--jpeg`. |
+
+`--gray` and `--mono` are mutually exclusive, and at most one of `--png`,
+`--jpeg`, `--jpegcmyk` and `--tiff` may be given; a conflicting pair exits
+with status 1.
 
 **Extension matrix:**
 
@@ -245,13 +250,14 @@ A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent 
 | `--prefetch` | off | Prefetch image XObjects into the device-resident image cache when the document is opened. Present only in a binary built with the `cache` feature; worth it for long or repeated renders of one document. |
 
 When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment variable is
-read (same values); if neither is set the backend is `auto`.
+read (same values; `vaapi` only in a build with the `vaapi` feature, and an
+unrecognised value warns and means `auto`); if neither is set the backend is `auto`.
 
 **`auto`** — Vulkan if compiled in and a device is present, else CUDA, else CPU, falling back silently at every step.
 
 **`cpu`** — CPU only. All GPU init is skipped entirely. Use this for benchmarking, debugging, or on machines without a GPU.
 
-**`cuda`** — Require CUDA. Exits with an error if the CUDA context cannot be initialised. Use this to confirm the GPU path is actually active rather than silently falling back.
+**`cuda`** — Require CUDA. Exits with an error if the CUDA context cannot be initialised, or if the binary was built without any of the `gpu-aa`, `gpu-icc` or `cache` features (the CUDA paths that need a context). Use this to confirm the GPU path is actually active rather than silently falling back.
 
 **`vulkan`** — Require the Vulkan compute backend.  Exits with an error if Vulkan initialisation fails or the binary was built without `--features vulkan`.  The AA-fill kernel, and the parallel-Huffman JPEG decode kernels in a build that also has `gpu-jpeg-huffman`, dispatch through `VulkanBackend` (both dormant by default; see `PDF_RASTER_AA_FILL_THRESHOLD` / `PDF_RASTER_HUFFMAN_THRESHOLD`); the device-resident image cache is CUDA-only so the renderer runs uncached under this mode; ICC CMYK→RGB stays on the CPU AVX-512 fallback.  Cross-vendor (NVIDIA, AMD, Intel, Apple via `MoltenVK`).
 

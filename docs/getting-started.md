@@ -19,7 +19,7 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
-- SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` Cargo feature on nightly Rust. Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
+- SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
 - `cargo check --target aarch64-unknown-linux-gnu` is clean; no Apple Metal GPU backend yet.
 
 ### GPU (optional)
@@ -69,7 +69,7 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 | AMD/Radeon ROCm | — | — | Not implemented (Vulkan covers Radeon) |
 | Apple Metal (native) | — | — | Not implemented (Vulkan via `MoltenVK` is the path) |
 
-† SVE2 requires `nightly-sve2` Cargo feature and nightly Rust.
+† SVE2 requires the `rasterrocket-render` feature `nightly-sve2` and nightly Rust.
 
 ## Installation
 

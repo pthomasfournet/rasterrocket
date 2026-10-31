@@ -28,7 +28,7 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 
 **Errors (yielded as iterator items):**
 
-- `RasterError::InvalidOptions` — `opts` violates constraints (e.g. `dpi ≤ 0`, `first_page > last_page`). Yielded as `(1, Err(...))`, iterator ends immediately.
+- `RasterError::InvalidOptions` — `opts` violates constraints (e.g. `dpi ≤ 0`, `first_page > last_page`), or, in a `vulkan` build, `PDF_RASTER_VULKAN_DEVICE` matches no single usable device. Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::Pdf` — document cannot be opened or parsed. Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::BackendUnavailable` — `PDF_RASTER_BACKEND` names a backend (`cuda`, `vaapi`, `vulkan`) that cannot be initialised. Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::PageOutOfRange` — page number exceeds document length.
@@ -111,7 +111,7 @@ pub fn open_session_from_bytes(bytes: Vec<u8>, config: &SessionConfig) -> Result
 
 An encrypted document (Standard security handler, revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters) is refused with `RasterError::Pdf` unless `config.decrypt_authorized` is `true`; with it, the document is decrypted in process — no subprocess, no temporary file. The empty user password is tried first (a permissions-only document needs none), then `config.password` as the user and as the owner password; a wrong password, or none where one is needed, is a `RasterError::Pdf` saying which. A document using another security handler (public-key encryption, `/Adobe.PubSec`) is refused by name.
 
-Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared GPU context (for `gpu-aa` / `gpu-icc` features) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend cannot be initialised (for `ForceVulkan`, also when the crate was built without the `vulkan` feature).
+Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared CUDA context (for the `gpu-aa`, `gpu-icc` or `cache` features; not when Vulkan is chosen under `Auto`) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend cannot be initialised (for `ForceVulkan`, also when the crate was built without the `vulkan` feature; for `ForceCuda`, when it was built without any of `gpu-aa`, `gpu-icc` or `cache`).
 
 ```rust
 pub fn render_page_rgb(
@@ -121,7 +121,7 @@ pub fn render_page_rgb(
 ) -> Result<Bitmap<Rgb8>, RasterError>
 ```
 
-Renders one whole page to an RGB bitmap. `scale` is the pixel-per-point multiplier, `dpi / 72.0`. Equivalent to `render_page_rgb_with(session, page_num, &RenderParams::new(scale))`; for different horizontal and vertical resolutions use `RenderParams::new_xy`.
+Renders one whole page to an RGB bitmap. `Bitmap` is `rasterrocket_render::Bitmap` and `Rgb8` / `Gray8` are `rasterrocket_color` types; `rasterrocket` does not re-export them, so code that names them depends on those crates too. `scale` is the pixel-per-point multiplier, `dpi / 72.0`. Equivalent to `render_page_rgb_with(session, page_num, &RenderParams::new(scale))`; for different horizontal and vertical resolutions use `RenderParams::new_xy`.
 
 Safe to call from multiple Rayon threads concurrently. GPU image decoders are managed per-thread via `thread_local!`.
 
@@ -195,6 +195,8 @@ impl RasterSession {
     pub const fn policy(&self) -> BackendPolicy
     pub const fn form_type(&self) -> FormType
     pub fn page_geometry(&self, page_num: u32) -> Result<PageGeometry, RasterError>
+    #[cfg(feature = "cache")]
+    pub const fn image_cache(&self) -> Option<&Arc<DeviceImageCache>>  // diagnostics
     // doc() and resolve_page() are #[doc(hidden)] — use prescan_session instead
 }
 ```
@@ -260,6 +262,7 @@ Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = fal
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RenderPurpose { View, Print }
 ```
 
@@ -302,6 +305,8 @@ opts.pages = Some(pages); // first_page / last_page are then ignored
 ### `RenderedPage`
 
 ```rust
+#[derive(Debug)]
+#[non_exhaustive]
 pub struct RenderedPage {
     pub page_num: u32,
     pub width: u32,
@@ -430,7 +435,7 @@ Controls which compute backend is used. The `Force*` variants convert silent GPU
 
 `ForceVulkan` runs the AA-fill kernel (and, in a build with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU.  Both GPU paths are dormant by default (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)): `PDF_RASTER_AA_FILL_THRESHOLD=0` enables the AA fill and `PDF_RASTER_HUFFMAN_THRESHOLD=0` the Huffman decode.
 
-`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vaapi` and `vulkan` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling. `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
+`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vaapi` (in a build with the `vaapi` feature) and `vulkan` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling. `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
 
 ---
 
@@ -887,7 +892,7 @@ Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A). No runtime detection needed.
-- SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` Cargo feature on nightly Rust. Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
+- SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
 - `cargo check --target aarch64-unknown-linux-gnu` is clean; no Apple Metal native backend yet (Vulkan via `MoltenVK` covers Apple).
 
 ### GPU
@@ -935,7 +940,7 @@ Under `BackendPolicy::Auto`, GPU initialisation failures at runtime log a warnin
 | AMD/Radeon ROCm | — | — | Not implemented (Vulkan covers Radeon) |
 | Apple Metal (native) | — | — | Not implemented (Vulkan via `MoltenVK` is the path) |
 
-† SVE2 requires `nightly-sve2` Cargo feature and nightly Rust.
+† SVE2 requires the `rasterrocket-render` feature `nightly-sve2` and nightly Rust.
 
 ## Feature flags
 
@@ -944,7 +949,7 @@ Under `BackendPolicy::Auto`, GPU initialisation failures at runtime log a warnin
 | Feature | Requires | Effect |
 |---|---|---|
 | `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Wired but disabled: `GPU_JPEG_THRESHOLD_PX` is `u32::MAX`, so JPEGs decode on the CPU (zune-jpeg). |
-| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to the CPU decoder (pure-Rust `hayro-jpeg2000`) below 512×512 px or for sub-sampled chroma. |
+| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to the CPU decoder (pure-Rust `hayro-jpeg2000`) below 262 144 px in area (`GPU_JPEG2K_THRESHOLD_PX`) or for sub-sampled chroma. |
 | `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Dormant by default: the CPU fill is faster at every size measured, so dispatch is off unless `PDF_RASTER_AA_FILL_THRESHOLD` sets a pixel-area threshold. Path clips and pattern fills always stay on the CPU. |
 | `gpu-icc` | CUDA 13 | GPU ICC CMYK→RGB via 4D CLUT. Falls back to CPU AVX-512 matrix formula below 500 000 px. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
