@@ -21,7 +21,7 @@ rasterrocket-color
   │     │           TrueType / OpenType / CFF / Type 1 parsing and outlines
   │     │
   │     ├── rasterrocket-encode
-  │     │     PPM / PGM / PBM / PNG output
+  │     │     PPM / PGM / PBM / PNG output, baseline grayscale JPEG
   │     │
   │     └── rasterrocket-interp
   │           PDF content stream interpreter + operator dispatcher
@@ -39,7 +39,7 @@ rasterrocket-color
   │                 public OCR library — raster_pdf(), render_channel()
   │                 │
   │                 └── rasterrocket-cli
-  │                       rasterrocket binary (pdftoppm replacement)
+  │                       `rrocket` binary (pdftoppm-style flags)
   │
   ├── rasterrocket-comic  (comic-archive input: .cbz/.cb7/.cbt → RenderedPage;
   │                        depends on rasterrocket + render + color; used by the CLI)
@@ -73,11 +73,11 @@ rasterrocket_interp::open()
     ▼ Vec<Operator>
 rasterrocket_interp::parse_page()    content tokenizer → operator decode
     │
-    ▼ Bitmap<Rgb8>  (blank, DPI-sized)
-rasterrocket_interp::PageRenderer::new()  allocates target bitmap
-    │
+    ▼ Bitmap<Rgb8>  (blank, sized by PageGeometry::size_px)
+rasterrocket_interp::PageRenderer::with_view(&PageView::whole(..))
+    │                                 allocates the target bitmap; initial CTM
     ▼
-render_operators(ops, resources)     dispatch loop:
+PageRenderer::execute(ops)           dispatch loop:
     ├── path ops  ──────────────────▶ raster::fill / stroke / eo_fill
     ├── text ops  ──────────────────▶ font::FontFace → GlyphBitmap
     │                                 raster::fill_glyph
@@ -94,7 +94,7 @@ render_operators(ops, resources)     dispatch loop:
     └── transparency groups ────────▶ raster begin_group / paint_group
     │
     ▼ Bitmap<Rgb8>
-rasterrocket::rgb_to_gray()          BT.709 luma
+rasterrocket::rgb_to_gray()          Y = 0.30 R + 0.59 G + 0.11 B (ISO 32000-1 §10.3.3)
     │
     ▼ Vec<u8>  (width × height, 8-bit grayscale)
 RenderedPage { pixels, width, height, dpi, effective_dpi, diagnostics }
@@ -118,17 +118,23 @@ document is decrypted in process as its objects are parsed.
 
 Single source of truth for pixel types and colour math. No SIMD, no I/O.
 
-**Types**
-- `Pixel` trait — `Copy + Pod + Zeroable + Send + Sync`
-- Concrete: `Rgb8`, `Rgba8`, `Gray8`, `Cmyk8`, `DeviceN8`, `AnyColor`
+**Types** (re-exported at the crate root)
+- `Pixel` trait — `Copy + Pod + Zeroable + Send + Sync + 'static`
+- Concrete: `Rgb8`, `Gray8`, `Cmyk8`, `DeviceN8`, `AnyColor`
 - `PixelMode` enum — `Mono1 | Mono8 | Rgb8 | Bgr8 | Xbgr8 | Cmyk8 | DeviceN8`
-
-**Primitives** (all in `convert`)
-- `div255(u32) → u8` — fast ≈255 division, used throughout compositing
-- `lerp_u8`, `over_u8` — bilinear and Porter-Duff source-over per channel
-- `cmyk_to_rgb`, `cmyk_to_rgb_reflectance` — subtractive complement
-- `byte_to_col` / `col_to_byte` — 16.16 fixed-point GfxColorComp bridge
 - `TransferLut` — `[u8; 256]` newtype for transfer functions
+
+**Primitives** (`convert`)
+- `div255(u32) → u8` — rounded division by 255, used throughout compositing
+- `lerp_u8`, `luminosity`, `ycbcr_to_rgb`, `gray_to_u8`, `rgb_to_bytes`
+- `floor_i32`, `ceil_i32`, `round_half_up_i32` — saturating `f64 → i32`
+
+**DeviceCMYK** (`cmyk`)
+- `cmyk_to_rgb`, `cmyk_f64_to_rgb`, `cmyk_to_rgb_row`, `cmyk_to_rgb_vec` —
+  the process-ink model: multilinear interpolation over the sRGB colours of
+  the sixteen solid and overprint corners, in fixed point, so the scalar
+  code, the SIMD tiers (`cmyk/simd.rs`) and the GPU kernel give identical
+  bytes
 
 ### 3.2 `rasterrocket-render`
 
@@ -207,9 +213,9 @@ only the device rectangle the object can touch (∩ clip), not the page.
 Per-arch dispatch helpers; each arch gets its own function, not a cfg/return chain:
 ```
 blend_solid_rgb8 / blend_solid_gray8  (movdir64b → AVX2 → NEON → scalar)
-composite_aa_rgb8                     (AVX-512 → scalar)
-popcnt_aa_row                         (AVX-512 VPOPCNTDQ → AVX2 → popcnt → SVE2 → NEON → scalar)
+composite_aa_rgb8_opaque              (AVX-512 → scalar)
 aa_coverage_span                      (AVX-512 BITALG → AVX2 → SVE2 → NEON → scalar)
+apply_aa_gamma                        (AVX-512 VBMI → SSSE3 → scalar)
 unpack_mono_row                       (SSE2 → NEON → scalar)
 ```
 SVE2 tier requires `nightly-sve2` Cargo feature (nightly Rust + `stdarch_aarch64_sve`).
@@ -249,10 +255,13 @@ programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
 
 Thin I/O layer. Takes `Bitmap<P>`, writes file format bytes to a `Write` sink.
 
-- `write_ppm` — Netpbm P6, converts CMYK/DeviceN to RGB via subtractive complement
+- `write_ppm` — Netpbm P6 from `Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8` or `DeviceN8`;
+  CMYK and DeviceN process channels convert through the process-ink model
 - `write_pgm` — Netpbm P5 grayscale
 - `write_pbm` — Netpbm P4 1-bit
-- `write_png` — `png` crate; supports Rgb8, Gray8, Rgba8
+- `write_png` — `png` crate; `Gray8` as grayscale, the colour modes of
+  `write_ppm` as RGB (RGBA when the bitmap has an alpha plane)
+- `jpeg_gray` — baseline 8-bit grayscale JPEG of a `Gray8` bitmap
 
 No pixel processing beyond colour-mode conversion at the boundary.
 
@@ -357,21 +366,32 @@ cache/               — device image-cache helpers + background prefetcher
                        (`cache` feature)
 
 renderer/
-  mod.rs             — PageRenderer; render_operators() dispatch loop
-  gstate.rs          — CTM, graphics state, GStateStack
+  mod.rs             — re-exports PageRenderer, PageView, PageDiagnostics
+  gstate.rs          — CTM, graphics state, GStateStack; q depth capped at
+                       16 384, q/Q balanced within each nested stream
   color.rs           — colour values → device components (DeviceCMYK via
                        the process-ink model in `color::cmyk`)
   text.rs            — text state (Tc, Tw, Tz, TL, Ts, Tr)
-  font_cache.rs      — font loading, code → glyph tables; per-page FontCache,
-                       per-document DocumentFonts store and GlyphCache
+  font_cache/        — font loading; per-page FontCache, per-document
+                       DocumentFonts store and GlyphCache; code_to_gid.rs:
+                       the code → glyph table of a loaded face
   encodings.rs       — base encodings of Annex D
   fallback.rs        — per-character fallback of a substitute to installed faces
   substitutes.rs     — substitute programs for non-embedded fonts
   system_fonts.rs    — installed CJK / Arabic / Thai faces; per-character fallback faces
   bundled_fonts.rs   — Noto fallback faces compiled in (`bundled-fonts`)
   page/
-    mod.rs           — per-page entry points, geometry normalisation
+    mod.rs           — PageRenderer: construction, execute(), finish()
+    view.rs          — PageView: device-space placement and initial CTM
+                       (rotation, UserUnit, window)
     operators.rs     — execute_one: one operator → renderer call
+    paint.rs         — path painting: colour, clip, fill and stroke
+    fill_stroke.rs   — B / B* / b / b* as one object (stroke knocks out fill)
+    xobject.rs       — Do: image and form XObjects, form groups
+    image_blit.rs    — a decoded image or stencil mask onto the page through
+                       the clip, on the CPU or the device blit kernel
+    diagnostics.rs   — PageDiagnostics, ImageFailure, RenderAbort
+    devices.rs       — GPU decoders, kernels and image cache of a renderer
     text.rs          — show_text
     type3.rs         — show_text_type3; coverage cache of d1 glyphs
     text_ops.rs      — glyph records, advances, text-space → device
@@ -404,6 +424,7 @@ renderer/
       content.rs     — object access and content-stream fragments shared
                        by the synthesised appearances
     patterns.rs      — tiling patterns on the pattern lattice
+    pattern_memo.rs  — resolved shadings and tiling cells of one page
     shading_paint.rs — `sh` and shading patterns
     soft_mask.rs     — ExtGState SMask: luminosity / alpha masks; one
                        object's painting under the mask in effect
@@ -419,7 +440,9 @@ renderer/
 resources/
   mod.rs             — PageResources; lazy resolve_*
   dict_ext.rs        — typed accessors for `rasterrocket_parser::Dictionary`
-  font.rs            — font dictionaries and descriptors
+  font/              — font dictionaries and descriptors; cid.rs: Type 0
+                       fonts, CIDToGIDMap, W / W2 metrics; type3.rs: Type 3
+                       fonts, each CharProc parsed once
   font_substitute.rs — typeface class of a non-embedded font
   cmap.rs            — CMap / ToUnicode parsing
   cmap_predefined.rs — predefined CMaps compiled into the binary
@@ -432,15 +455,21 @@ resources/
     cal.rs           — CalGray / CalRGB through WhitePoint, Gamma, Matrix
     icc.rs           — ICCBased compiled once per document: matrix/TRC
                        shaper or moxcms transform, else `/Alternate`
+    icc/clut.rs      — CMYK → sRGB lookup table baked from a moxcms
+                       transform for the GPU path, kept with the profile's
+                       per-document conversion
     lab.rs           — Lab through Range and WhitePoint, Bradford-adapted
                        to D65
-  icc.rs             — moxcms CMYK CLUT bake for the GPU path; the table is
-                       kept with the profile's per-document conversion
   icc_shaper.rs      — matrix/TRC ICC input profiles evaluated to sRGB
   tiling.rs          — Type 1 tiling pattern dictionaries
   transfer.rs        — ExtGState /TR and /TR2 tabulated to 256-entry tables,
                        applied to painted colours and image samples
-  shading/           — shading types 1–7, mesh vertices, patches
+  shading/           — shading types 1–7
+    gouraud.rs       — Type 4 / 5 triangle meshes
+    patch.rs         — Type 6 / 7 patch meshes
+    stream.rs        — packed mesh vertex data
+    mesh.rs          — vertex colours; at most 2^22 triangles per mesh
+    triangles.rs     — mesh triangles indexed by device row
     function.rs      — PDF functions compiled once per document, evaluated
                        by arithmetic (Types 0, 2, 3, 4)
     function/        — sampled.rs (Type 0), postscript.rs (Type 4)
@@ -450,7 +479,7 @@ resources/
                        and masks)
     raw.rs           — raw / Flate samples expanded to one byte each
     bitpack.rs       — 1/2/4/16-bpc expansion
-    codecs.rs        — DCT, JPX, CCITT, JBIG2; JPX decodes at
+    codecs/          — dct.rs, jpx.rs, ccitt.rs, jbig2.rs; JPX decodes at
                        `ImageRequest::draw_size` unless masked; CMYK/YCCK
                        JPEG samples are ink
     colorspace.rs    — ImageColour: the samples' colour space and their
@@ -579,16 +608,18 @@ the rayon pool drops — this avoids the CUDA driver teardown race at process ex
 
 **Error handling**
 - Malformed operators — silently discarded (lenient parsing; real PDFs have junk)
-- Missing resources — `InterpError::MissingResource`; page fails, next page continues
+- Missing resources — the operator naming one draws nothing; a font name the
+  resources do not define draws in Helvetica and is listed in
+  `PageDiagnostics::missing_fonts`
 - JavaScript — **not** an error. There is no JavaScript engine and `/JS` is never
   decoded, so a script's structural presence cannot change the static render.
   Detection is structural (`/S /JavaScript` only) and emits a loud `WARN` per
   entry point; the document opens and renders normally. The catalog entry
   points are checked at open; page `/AA` and annotation `/A`/`/AA` are checked
   per rendered page (`pdf_interp::page_has_javascript`), warned once per
-  session. `InterpError` has no
-  `JavaScript` variant — the full list is `Pdf`, `PageOutOfRange`,
-  `MissingResource`, `InvalidPageGeometry`, `PageBudget`.
+  session. `InterpError` (`#[non_exhaustive]`) has no
+  `JavaScript` variant — its variants are `Pdf`, `PageOutOfRange` and
+  `InvalidPageGeometry`.
 - XFA — not processed. `form_type.rs` classifies the catalog's form
   (`/AcroForm`, `/XFA`, `/NeedsRendering`) as `FormType`; a dynamic XFA form
   warns once at open, and the type is carried on the session and in every
@@ -601,7 +632,7 @@ linked unless at least one `gpu-*` / `vaapi` / `vulkan` / `cache` feature is
 active.
 
 **Backend abstraction.**  `crates/gpu/src/backend/` factors the per-page state
-machine out of the legacy `GpuCtx`:
+machine out of `GpuCtx`:
 
 ```text
 GpuBackend trait          (backend/mod.rs)
@@ -612,12 +643,11 @@ GpuBackend trait          (backend/mod.rs)
 The trait surface is `begin_page → record_* → submit_page → wait_page`, with
 six `record_*` methods (one per kernel) plus `alloc_device` / `alloc_host_pinned`
 / `upload_async`.  GATs (`type DeviceBuffer`) make it usable only as a generic
-parameter, not `dyn` — callers monomorphise per backend.  Today the renderer
+parameter, not `dyn` — callers monomorphise per backend.  The renderer
 holds `Option<Arc<GpuCtx>>` for CUDA and `Option<Arc<VulkanBackend>>` for
 Vulkan as parallel fields rather than going through the trait at every call
-site; the trait is the long-term seam, the parallel-field shape is the
-pragmatic Phase 10 close that keeps the Phase 9 cache (which is `CudaSlice<u8>`-typed
-in 33 sites) un-generified.
+site, so the device image cache, whose buffers are `CudaSlice<u8>`, stays
+CUDA-typed.
 
 **`GpuCtx`** (CUDA) — one per process, holds the CUDA context and all compiled
 PTX kernels as `cudarc` modules.  Shared via `Arc<GpuCtx>`.  `cudarc` is pinned
@@ -645,12 +675,12 @@ kernels; the remaining three — `blelloch_scan`, `idct_color`, and
 | `aa_fill` | aa_fill.cu | aa_fill.slang | 4× scanline-AA sub-sample counts from the CPU scanner's intersection table (byte-identical to the CPU fill) | dormant (`usize::MAX`) |
 | `icc_clut` | icc_clut.cu | icc_clut.slang | CMYK→RGB via 4D quadrilinear CLUT | 500K px |
 | `icc_clut` matrix | icc_clut.cu | icc_clut.slang | CMYK→RGB via matrix (always CPU) | — |
-| `blit_image` | blit_image.cu | blit_image.slang | Cached-image source-over composite (Phase 9) | always |
+| `blit_image` | blit_image.cu | blit_image.slang | Cached-image source-over composite (`cache` feature) | always |
 
 † The GPU `composite_rgba8` / `apply_soft_mask` kernels are built and reachable
 through the backend `record_*` surface, but the renderer composites on the CPU
 (`composite_rgba8_cpu` in `crates/gpu/src/composite.rs`). They carry no dispatch
-threshold because nothing in the render path dispatches them today.
+threshold because nothing in the render path dispatches them.
 
 16 kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` confirm
 SPIR-V vs CUDA outputs within ≤ 1 LSB per channel on the dev box.
@@ -668,7 +698,7 @@ compile is gated on `CARGO_FEATURE_VULKAN`.
 - `gpu-deskew` — `npp_rotate()` via `nppiRotate_8u_C1R_Ctx`
 - `vaapi` — `VapiJpegDecoder`; VA-API JPEG baseline decode on Linux iGPU/dGPU (AMD VCN, Intel Quick Sync, Intel Arc); links `libva.so.2` + `libva-drm.so.2`. Dispatch priority: nvJPEG → VA-API → zune-jpeg (CPU). CMYK and progressive JPEG fall through to CPU.
 
-**Phase 9 image cache** (`cache` feature, CUDA-only)
+**Device image cache** (`cache` feature, CUDA-only)
 - `DeviceImageCache` — three tiers: VRAM (refcount-pinned LRU), pinned host RAM (`cuMemAllocHost` slabs, demote-on-evict / promote-on-hit), disk (`<root>/<doc-blake3>/<content-hash>.bin` sidecar files; opt-in via `PDF_RASTER_CACHE_DIR`).
 - `DevicePageBuffer` — zero-init RGBA8 per page; lazy-allocated on first GPU image. Each blit samples the cached image through the same Q32 column/row tables the CPU sampler uses (`renderer/page/image_sampler.rs`), then the touched rows are downloaded, source-over composited onto the host bitmap in content-stream order, and re-zeroed — so cache-on and cache-off renders are byte-identical. A draw that reduces the image (`image_reduce::draw_reduces`) first copies the cached pixels back to the host (`DeviceImageCache::download`) so they are area-averaged exactly as host-resident pixels are; the kernel samples only images drawn at or near full resolution.
 - BLAKE3 content hashing keys cross-document dedup; `(DocId, ObjId)` alias keys same-document fast paths.
@@ -676,23 +706,27 @@ compile is gated on `CARGO_FEATURE_VULKAN`.
 **CPU fallbacks** — every GPU function has a pure-Rust CPU counterpart. The
 dispatch logic is in the same function; the threshold is the only branch.
 
-**CMYK CPU path** — three tiers: AVX-512 (`avx512f+avx512bw`, runtime detection),
-AVX2 (`_mm256_mullo_epi16`, runtime detection), scalar. All three are compiled in
-on x86-64; the correct tier is selected at runtime. ARM uses `vmull_u8` + `vshrn_n_u16`
-(NEON, always-on on aarch64).
+**CMYK CPU path** — the process-ink model of `color::cmyk`, in three tiers on
+x86-64: AVX-512 (`avx512f+avx512bw+avx512vbmi`), AVX2 and scalar, selected by
+runtime detection. aarch64 uses NEON (`vld4q_u8` / `vst3q_u8`), always on.
+The GPU's profile-free CMYK kernel evaluates the same fixed-point arithmetic.
 
 ### 3.7 `rasterrocket`
 
 Public library crate. The stable API surface.
 
 ```rust
-RasterOptions { dpi, first_page, last_page, deskew, pages, strict, purpose }  // pages: Option<PageSet>; purpose: RenderPurpose::{View, Print}
+RasterOptions::new(dpi)   // #[non_exhaustive]; fields: dpi, first_page, last_page, deskew,
+                          // pages, strict, purpose, annotations, text_antialias,
+                          // vector_antialias, decrypt_authorized, password,
+                          // font_dirs, system_fonts, cancel
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 render_channel(path, opts, capacity) → Receiver<(u32, Result<RenderedPage, RasterError>)>
 open_session(path, config) → Result<RasterSession, RasterError>
 open_session_from_bytes(bytes, config) → Result<RasterSession, RasterError>
+render_page_gray(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>
 render_page_rgb(session, page_num, scale) → Result<Bitmap<Rgb8>, RasterError>
 render_page_rgb_with(session, page_num, &RenderParams) → Result<Bitmap<Rgb8>, RasterError>
     // RenderParams { scale_x, scale_y, region: Option<RenderRegion>, policy, cancel: Option<CancelToken> }
@@ -703,7 +737,9 @@ release_gpu_decoders()   // call via pool.broadcast() before pool drops
 ```
 
 The `*_from_bytes` variants render an in-memory PDF with no temp file, with
-the same decryption behaviour as the path variants.
+the same decryption behaviour as the path variants. Every function and type
+is exported at the crate root; the modules that implement them are private,
+except `deskew`.
 
 `RenderedPage` carries: `pixels: Vec<u8>` (8-bit gray, width×height), `width`,
 `height`, `dpi`, `effective_dpi` (= dpi × UserUnit), and `PageDiagnostics`.
@@ -727,7 +763,10 @@ copying) and add `Image::decode_u8`, which fuses the inverse MCT into the
 8-bit output. Each keeps output byte-identical to the vendored baseline.
 HTJ2K codestreams (ISO/IEC 15444-15, signalled by the CAP marker) are refused
 with a diagnostic that names them: the high-throughput block coder exists
-neither upstream nor here, so such an image is skipped and reported.
+neither upstream nor here, so such an image is skipped and reported. A
+codestream whose header asks for more than 2^30 decoded samples over all
+components, or more than 65 535 tiles, is refused before its buffers are
+allocated (`ValidationError::ImageTooLarge`).
 
 ### 3.8a `read-fonts` and `skrifa` (`crates/read_fonts`, `crates/skrifa`)
 
@@ -759,15 +798,18 @@ feature, which makes them `Send + Sync` so they can be shared across pages.
 Binary entry point. Thin glue over `rasterrocket` + `rasterrocket-encode`.
 
 ```
-clap args → RasterOptions → rayon ThreadPool
-  → pool.install(|| render_pages())
+clap args → SessionConfig → open_session → rayon ThreadPool
+  → pool.install(|| per page: prescan_session, render_page_rgb_with,
+                    encode::write_ppm / write_pgm / write_pbm / write_png)
   → pool.broadcast(release_gpu_decoders)    // teardown before pool drops
-  → encode::write_ppm / write_png per page
+  → main returns ExitCode                   // RAM-output guard and pool drop
 ```
 
 All rendering is inside `pool.install()`. The broadcast teardown is the last thing
 that happens before the pool is dropped, ensuring GPU decoders are released while
-the CUDA driver is fully live.
+the CUDA driver is fully live. Every exit path returns from `main` rather than
+calling `process::exit`, so the RAM output directory is removed after a failed
+page too.
 
 `--crop`, `--rectify`, `--split-spreads` and `--dewarp` run `rasterrocket-camera`
 on each rendered page before encoding (PDF and comic input alike). Detection
@@ -805,26 +847,33 @@ it stays in `rasterrocket`.
 ## 4. Feature flag graph
 
 ```
-rasterrocket-cli feature → rasterrocket feature → rasterrocket-interp feature → gpu feature
-────────────────────────────────────────────────────────────────────────────────────────────
-nvjpeg             → nvjpeg             → nvjpeg             → nvjpeg
-nvjpeg2k           → nvjpeg2k           → nvjpeg2k           → nvjpeg2k
-gpu-aa             → gpu-aa             → gpu-aa             → (enables gpu module)
-gpu-icc            → gpu-icc            → gpu-icc            → (enables cmyk module)
-gpu-deskew         → gpu-deskew         →                    → gpu-deskew
-gpu-validation     →                    →                    → gpu-validation
+rasterrocket-cli    → rasterrocket       → rasterrocket-interp → rasterrocket-gpu
+──────────────────────────────────────────────────────────────────────────────────
+nvjpeg              → nvjpeg             → nvjpeg              → nvjpeg
+nvjpeg2k            → nvjpeg2k           → nvjpeg2k            → nvjpeg2k
+vaapi               → vaapi              → vaapi               → vaapi
+gpu-aa              → gpu-aa             → gpu-aa              → (crate only)
+gpu-icc             → gpu-icc            → gpu-icc             → (crate only)
+gpu-deskew          → gpu-deskew         →                     → gpu-deskew
+cache               → cache              → cache               → cache
+vulkan              → vulkan             → vulkan (+ gpu-aa)   → vulkan
+gpu-jpeg-huffman    → gpu-jpeg-huffman   → gpu-jpeg-huffman    → gpu-jpeg-huffman
+gpu-validation      → gpu-validation     →                     → gpu-validation
+bundled-fonts *     → bundled-fonts *    → bundled-fonts       →
+
+* on by default
 
 rasterrocket-render features (orthogonal, no cross-crate effect):
   simd-avx2        default on; enables blend/fill AVX2 paths
-  nightly-sve2     aarch64 only; SVE2 popcount tier (requires nightly Rust)
+  nightly-sve2     aarch64 only; SVE2 coverage tier (requires nightly Rust)
 
-There is no `simd-avx512` feature — it was dead and has been deleted. AVX-512
-tiers are selected at runtime via `is_x86_feature_detected!`, so a
-`-C target-cpu=native` build picks them up with no feature flag.
+AVX-512 tiers are selected at runtime via `is_x86_feature_detected!`, so they
+need no feature flag.
 ```
 
-`dep:gpu` in `rasterrocket-interp` is optional — the `gpu` crate is only compiled when
-at least one `gpu-*` feature is active. CPU-only builds require no CUDA toolkit.
+`dep:gpu` in `rasterrocket` and `rasterrocket-interp` is optional — the `gpu`
+crate is only compiled when at least one GPU feature is active. CPU-only builds
+require no CUDA toolkit.
 
 ---
 
@@ -836,34 +885,44 @@ All public SIMD functions delegate to a private per-arch `dispatch_*` helper.
 Each arch gets its own clean function; no cfg/return fallthrough chains.
 
 ```rust
-pub fn popcnt_aa_row(row: &[u8]) -> u32 { dispatch_popcnt(row) }
+pub(crate) fn aa_coverage_span(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
+    if shape.is_empty() { return; }
+    dispatch_coverage(rows, x0, shape);
+}
 
 #[cfg(target_arch = "x86_64")]
-fn dispatch_popcnt(row: &[u8]) -> u32 { /* avx512 → popcnt → scalar */ }
+fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
+    /* avx512bitalg (≥ 128 px) → avx2 (≥ 64 px) → scalar */
+}
 
 #[cfg(target_arch = "aarch64")]
-fn dispatch_popcnt(row: &[u8]) -> u32 {
-    // SVE2 tier above NEON when `nightly-sve2` feature is active
+fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
+    // SVE2 tier above NEON when the `nightly-sve2` feature is active
     #[cfg(feature = "nightly-sve2")]
-    if is_aarch64_feature_detected!("sve2") { return unsafe { popcnt_aa_row_sve2(row) }; }
-    unsafe { popcnt_aa_row_neon(row) }
+    if is_aarch64_feature_detected!("sve2") {
+        unsafe { aa_coverage_span_sve2(rows, x0, shape) };
+        return;
+    }
+    unsafe { aa_coverage_span_neon(rows, x0, shape) };
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn dispatch_popcnt(row: &[u8]) -> u32 { popcnt_aa_row_scalar(row) }
+fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
+    aa_coverage_span_scalar(rows, x0, shape);
+}
 ```
 
 ### Coverage by operation and platform
 
 | Operation | File | Ryzen (AVX-512) | Intel consumer (AVX2) | ARM NEON | ARM SVE2 |
 |---|---|---|---|---|---|
-| AA row popcount | `raster/simd/popcnt.rs` | VPOPCNTDQ | AVX2 VPSHUFB | `vcntq_u8` | `svcnt_u8_z` † |
-| AA coverage span | `raster/simd/popcnt.rs` | BITALG | AVX2 VPSHUFB | `vcntq_u8` + `vst2q_u8` | `svcnt_u8_z` † |
-| Solid fill (RGB) | `raster/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst3q_u8` | (NEON sufficient) |
-| Solid fill (Gray) | `raster/simd/blend.rs` | AVX2 | AVX2 | `vst1q_u8` | (NEON sufficient) |
-| AA composite | `raster/simd/composite.rs` | AVX-512 | scalar | scalar | scalar |
-| Glyph unpack | `raster/simd/glyph_unpack.rs` | SSE2 | SSE2 | `vtstq_u8` | (NEON sufficient) |
-| CMYK→RGB | `gpu/src/cmyk.rs` | AVX-512 | AVX2 | `vmull_u8` + `vshrn_n_u16` | (NEON sufficient) |
+| AA coverage span | `raster/src/simd/aa_coverage.rs` | BITALG `_mm512_popcnt_epi8` | AVX2 VPSHUFB | `vcntq_u8` + `vst2q_u8` | `svcnt_u8_z` † |
+| AA gamma map | `raster/src/simd/aa_gamma.rs` | AVX-512 VBMI | SSSE3 | scalar | scalar |
+| Solid fill (RGB) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst3q_u8` | (NEON sufficient) |
+| Solid fill (Gray) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst1q_u8` | (NEON sufficient) |
+| AA composite | `raster/src/simd/composite.rs` | AVX-512 | scalar | scalar | scalar |
+| Glyph unpack | `raster/src/simd/glyph_unpack.rs` | SSE2 | SSE2 | `vtstq_u8` | (NEON sufficient) |
+| CMYK→RGB | `color/src/cmyk/simd.rs` | AVX-512 VBMI | AVX2 | `vld4q_u8` + `vst3q_u8` | (NEON sufficient) |
 
 † SVE2 tier requires `nightly-sve2` Cargo feature.
 
@@ -874,9 +933,9 @@ fn dispatch_popcnt(row: &[u8]) -> u32 { popcnt_aa_row_scalar(row) }
   disabled on Arrow Lake; disabled by microcode on Raptor. No current Intel consumer
   CPU has usable AVX-512 — Xeon only.
 - `movdir64b` is present on i9-14900K and Core Ultra 9 285K; absent on i7-8700K.
-- The AVX2 popcount tier (VPSHUFB trick) for AA coverage is implemented
-  (`popcnt_aa_row_avx2`, `aa_coverage_span_avx2`). All Intel consumer CPUs now
-  have a vectorised path.
+- AA coverage has an AVX2 tier (VPSHUFB nibble lookup,
+  `aa_coverage_span_avx2`), so every Intel consumer CPU has a vectorised
+  path.
 
 **ARM / aarch64**
 - NEON is mandatory on all ARMv8-A. No runtime detection needed — `#[cfg(target_arch = "aarch64")]` is sufficient.
@@ -884,8 +943,8 @@ fn dispatch_popcnt(row: &[u8]) -> u32 { popcnt_aa_row_scalar(row) }
   Never use `__builtin_popcountll` on ARM — it compiles to a software sequence.
 - `STNP` is an allocation hint only, not a cache-bypass guarantee. For zero-fill use
   `DC ZVA` (zeros full cacheline without read). For non-zero solid fill: `vst1q_u8`.
-- Apple M4 has SVE2 (128-bit fixed width). An SVE2 popcount tier is implemented
-  behind the `nightly-sve2` feature (`svcnt_u8_z` + `svadd_u8_z`). At 128-bit
+- Apple M4 has SVE2 (128-bit fixed width). An SVE2 coverage tier is implemented
+  behind the `nightly-sve2` feature (`svcnt_u8_z`). At 128-bit
   width it matches NEON throughput; on wide-SVE2 server chips (Graviton4 full
   width) it gives up to 4× NEON throughput.
 
@@ -899,15 +958,12 @@ CMYK and progressive JPEGs fall through to CPU; the `nvjpeg` feature takes
 priority when both are active.
 
 **Apple Silicon (M1–M4)**
-Unified Memory Architecture eliminates PCIe transfer overhead. Metal Compute for
-ICC CLUT lookup and AA fill is worth measuring; VideoToolbox for JPEG decode is a
-zero-copy path. This is a separate work stream (macOS feature flag, `metal` crate).
+No native Metal backend exists; the Vulkan backend runs through `MoltenVK`
+(untested). The CPU paths use NEON.
 
 **Raspberry Pi 4/5**
 VideoCore GPU is not accessible as a general-purpose compute API via a stable
 userspace interface. NEON is the correct answer on Pi.
-
-Full platform roadmap: `ROADMAP_INTEL.md`.
 
 ---
 
@@ -956,14 +1012,27 @@ holds the glyph bitmaps of every page through `quick_cache::sync::Cache`
 
 **Per-page errors** — skip the page, continue rendering:
 - `InterpError::PageOutOfRange`
-- `InterpError::MissingResource`
 - `InterpError::InvalidPageGeometry`
-- `RasterError::PageDegenerate` / `RasterError::PageTooLarge`
+- `RasterError::PageDegenerate` / `RasterError::PageTooLarge` /
+  `RasterError::PageAreaTooLarge`
+- `RasterError::PageBudgetExceeded` — operator budget or wall-clock deadline
+- `RasterError::Cancelled` — stopped through a `CancelToken`
+- `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` —
+  only under `strict`
+
+**Reported degradation** — the page renders, the loss is listed in
+`PageDiagnostics`:
+- an image that cannot be decoded or drawn, or is drawn only in part —
+  `image_failures`
+- a `/Contents` element that cannot be decoded, or decodes only in part —
+  `content_failures`
+- a font name the resources do not define — `missing_fonts`
 
 **Silent degradation** — never exposed to the caller:
 - Unrecognised PDF operators — discarded
 - GPU unavailable / below threshold — CPU path used
-- Unsupported image transform (`ArbitraryTransformSkipped`) — image skipped; rest of page renders
+- Resource bounds (q depth, mesh triangles, dash count, CMap size) — the
+  excess is cut off; see the CLI reference's Size limits
 
 **Invariant violations** — panic (not user-triggerable):
 - CUDA returns success but gives null handle — driver bug only
