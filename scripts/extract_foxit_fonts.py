@@ -12,6 +12,7 @@ pdfium's LICENSE next to them.
 Usage: extract_foxit_fonts.py <pdfium-src> <out-dir>
 """
 
+import argparse
 import pathlib
 import re
 import shutil
@@ -19,21 +20,27 @@ import sys
 
 ARRAY_RE = re.compile(
     r"const std::array<uint8_t, (\d+)> kFoxit(\w+)FontData = \{\{(.*?)\}\};",
-    re.S,
+    re.DOTALL,
 )
 SKIP = {"SansMM", "SerifMM"}
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print(__doc__, file=sys.stderr)
-        return 2
-    src = pathlib.Path(sys.argv[1])
-    out = pathlib.Path(sys.argv[2])
+    """Extract the arrays; return 0, or 1 on a malformed or missing source."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("src", type=pathlib.Path, help="pdfium source checkout")
+    parser.add_argument("out", type=pathlib.Path, help="output directory")
+    args = parser.parse_args()
+    src: pathlib.Path = args.src
+    out: pathlib.Path = args.out
     data_dir = src / "core" / "fxge" / "fontdata" / "chromefontdata"
+    sources = sorted(data_dir.glob("Foxit*.cpp"))
+    if not sources:
+        print(f"{data_dir}: no Foxit*.cpp font data (not a pdfium checkout?)", file=sys.stderr)
+        return 1
     out.mkdir(parents=True, exist_ok=True)
-    for cpp in sorted(data_dir.glob("Foxit*.cpp")):
-        text = cpp.read_text()
+    for cpp in sources:
+        text = cpp.read_text(encoding="utf-8")
         m = ARRAY_RE.search(text)
         if m is None:
             print(f"{cpp}: no font array found", file=sys.stderr)
