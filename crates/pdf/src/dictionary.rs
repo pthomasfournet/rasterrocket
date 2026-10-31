@@ -8,11 +8,10 @@ use std::collections::HashMap;
 
 use crate::object::Object;
 
-/// PDF dictionary: an ordered-by-insertion mapping from byte-string keys to
-/// [`Object`] values.
+/// PDF dictionary: a mapping from byte-string keys to [`Object`] values.
 ///
-/// We store entries in a `HashMap` (insertion order is not preserved, matching
-/// PDF semantics — the spec gives no order guarantee for dict entries).
+/// Entries are unordered, as in the file format (ISO 32000-2 §7.3.7 gives
+/// dictionary entries no order); iteration order is unspecified.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Dictionary(HashMap<Vec<u8>, Object>);
 

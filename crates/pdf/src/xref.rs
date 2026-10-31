@@ -44,8 +44,8 @@ pub(crate) enum XrefEntry {
 #[derive(Debug, Default)]
 pub(crate) struct XrefTable {
     pub entries: HashMap<u32, XrefEntry>,
-    /// The document trailer dictionary bytes.  We keep the raw bytes and parse
-    /// on demand so this module does not depend on a full object graph.
+    /// The trailer dictionaries of every section, merged with the newest
+    /// section's keys winning.
     pub trailer: Dictionary,
 }
 

@@ -41,11 +41,10 @@ pub enum PdfError {
         /// Number of pages in the document.
         total: u32,
     },
-    /// The document is encrypted (PDF Standard Security Handler) and could
-    /// not be transparently decrypted.  The string carries an accurate,
-    /// actionable explanation (qpdf missing, password-protected, or the
-    /// CLI liability gate was declined) — never the misleading
-    /// "document has no pages".
+    /// The document is encrypted and cannot be opened: decryption was not
+    /// authorised, the security handler or one of its parameters is
+    /// unsupported or malformed, or the password is missing or wrong.  The
+    /// string states which, and what the caller can do about it.
     EncryptedDocument(String),
 }
 
