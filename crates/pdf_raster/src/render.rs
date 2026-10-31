@@ -561,12 +561,16 @@ fn open_session_with_doc(
     let prefetch = if config.prefetch
         && let Some(cache) = image_cache.as_ref()
     {
-        Some(pdf_interp::cache::spawn_prefetch(
+        pdf_interp::cache::spawn_prefetch(
             Arc::clone(&doc),
             Arc::clone(cache),
             doc_id,
             pdf_interp::cache::PrefetchConfig::default(),
-        ))
+        )
+        .inspect_err(|e| {
+            log::warn!("image prefetch disabled: cannot start its threads ({e})");
+        })
+        .ok()
     } else {
         None
     };

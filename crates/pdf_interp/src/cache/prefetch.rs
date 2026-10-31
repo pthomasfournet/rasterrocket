@@ -45,28 +45,17 @@ use crate::resources::resolve_image;
 /// anyway.
 pub const MAX_PREFETCH_WORKERS: usize = 16;
 
-// Compile-time invariant: the `clamp(1, MAX_PREFETCH_WORKERS)` in
-// `spawn_prefetch` would panic at runtime if MAX_PREFETCH_WORKERS
-// were ever set to 0 (clamp requires min ≤ max).  Catch that at
-// build time so the panic can't happen.
+// `Ord::clamp` panics when min > max.
 const _: () = assert!(MAX_PREFETCH_WORKERS >= 1);
 
-/// Clamp a caller-supplied worker count to `[1, MAX_PREFETCH_WORKERS]`.
-/// Extracted so the unit-tested clamp is the same code the spawn
-/// site runs — a regression that drops the clamp in one place
-/// alone would only escape detection if both copies were dropped.
-const fn clamp_workers(n: usize) -> usize {
-    if n < 1 {
-        1
-    } else if n > MAX_PREFETCH_WORKERS {
-        MAX_PREFETCH_WORKERS
-    } else {
-        n
-    }
+/// A caller-supplied worker count clamped to `[1, MAX_PREFETCH_WORKERS]`.
+fn clamp_workers(n: usize) -> usize {
+    n.clamp(1, MAX_PREFETCH_WORKERS)
 }
 
 /// Tunables for [`spawn_prefetch`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct PrefetchConfig {
     /// Number of background worker threads.  Default 2; bumping this
     /// only helps if the renderer hasn't started yet (i.e. the
@@ -134,65 +123,72 @@ impl Drop for PrefetchHandle {
 /// to a private `discover_pages` helper; an image referenced from
 /// many pages is only decoded once.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `std::thread::Builder::spawn` fails (typically because
-/// the OS cannot create a new thread).  Treat thread-creation
-/// failure as a hard error rather than silently degrading: the
-/// whole point of a prefetcher is to run threads.
-#[must_use]
+/// The error of `std::thread::Builder::spawn` when the OS cannot create a
+/// thread.  The threads already started are stopped and joined before it
+/// is returned; the caller renders without prefetching.
 pub fn spawn_prefetch(
     doc: Arc<Document>,
     cache: Arc<DeviceImageCache>,
     doc_id: DocId,
     config: PrefetchConfig,
-) -> PrefetchHandle {
+) -> std::io::Result<PrefetchHandle> {
     let state = Arc::new(PrefetchState {
         cache,
         doc,
         doc_id,
         cancel: Arc::new(AtomicBool::new(false)),
     });
+    let workers = clamp_workers(config.workers);
+    let mut handles = Vec::with_capacity(workers + 1);
+    let spawned = spawn_threads(&mut handles, &state, workers, config.max_images);
+    let handle = PrefetchHandle {
+        cancel: Arc::clone(&state.cancel),
+        workers: Mutex::new(handles),
+    };
+    // On failure the channel's sender is already dropped, so dropping the
+    // handle wakes and joins every worker started.
+    spawned.map(|()| handle)
+}
 
-    // Unbounded mpsc; the cap is `config.max_images`, enforced by
-    // the discovery loop, so memory is bounded.
+/// Start `workers` decode workers and the discovery thread, pushing each
+/// handle onto `handles`.
+///
+/// The job channel's sender lives only in the discovery thread (or in
+/// this frame until it starts), so when this returns, by success or
+/// failure, the workers end once the channel is drained.
+fn spawn_threads(
+    handles: &mut Vec<thread::JoinHandle<()>>,
+    state: &Arc<PrefetchState>,
+    workers: usize,
+    max_images: usize,
+) -> std::io::Result<()> {
+    // Unbounded mpsc; the cap is `max_images`, enforced by the discovery
+    // loop, so memory is bounded.
     let (tx, rx) = mpsc::channel::<PrefetchJob>();
     let rx = Arc::new(Mutex::new(rx));
 
-    // Spawn workers first so they're ready when discovery begins.
-    let workers = clamp_workers(config.workers);
-    let mut handles = Vec::with_capacity(workers + 1);
+    // Workers first, so they are ready when discovery begins.
     for worker_idx in 0..workers {
         let rx = Arc::clone(&rx);
-        let state = Arc::clone(&state);
+        let state = Arc::clone(state);
         handles.push(
             thread::Builder::new()
                 .name(format!("pdf-prefetch-{worker_idx}"))
-                .spawn(move || worker_loop(&rx, &state))
-                .expect("spawn prefetch worker"),
+                .spawn(move || worker_loop(&rx, &state))?,
         );
     }
 
-    // Discovery thread.  Walks pages and pushes jobs into the
-    // channel; closes the channel when done so workers exit.
-    let discovery = {
-        let state = Arc::clone(&state);
-        let max_images = config.max_images;
+    // Discovery walks the pages and pushes jobs; its exit drops `tx`,
+    // closing the channel.
+    let state = Arc::clone(state);
+    handles.push(
         thread::Builder::new()
             .name("pdf-prefetch-walk".to_string())
-            .spawn(move || {
-                discover_pages(&state, max_images, &tx);
-                // Dropping `tx` closes the channel and tells
-                // workers to exit once their queues drain.
-            })
-            .expect("spawn prefetch discovery thread")
-    };
-    handles.push(discovery);
-
-    PrefetchHandle {
-        cancel: Arc::clone(&state.cancel),
-        workers: Mutex::new(handles),
-    }
+            .spawn(move || discover_pages(&state, max_images, &tx))?,
+    );
+    Ok(())
 }
 
 /// Job payload passed from the discovery thread to the worker pool.
@@ -302,10 +298,10 @@ fn worker_loop(rx: &Mutex<mpsc::Receiver<PrefetchJob>>, state: &PrefetchState) {
         };
         let Ok(job) = job else { break };
 
-        // Run the decode under `catch_unwind` so a single bad image
-        // can't poison the whole prefetcher.  `resolve_image`
-        // already swallows soft errors (returns `None` and logs at
-        // warn level); we only care about panics here.
+        // Under an unwinding panic strategy a panic in one decode is
+        // contained here and the worker moves on; under `panic = "abort"`
+        // (the release profile) it ends the process before reaching this.
+        // `resolve_image` reports soft failures itself.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             decode_one(&state.doc, state.doc_id, &state.cache, &job);
         }));
