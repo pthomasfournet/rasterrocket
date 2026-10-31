@@ -592,7 +592,6 @@ version = "1.5.0"
 dependencies = [
  "log",
  "quick_cache",
- "rasterrocket-color",
  "rasterrocket-render",
  "read-fonts",
  "self_cell",

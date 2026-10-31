@@ -2,7 +2,7 @@
 //! profiles with a pure power-law tone curve on sRGB primaries.
 
 /// `u8Fixed8Number` 1.8.
-pub(crate) const GAMMA_1_8: u16 = 461;
+pub const GAMMA_1_8: u16 = 461;
 
 /// sRGB primaries adapted to D50, as `s15Fixed16Number` XYZ columns.
 const SRGB_D50_COLORANTS: [[f64; 3]; 3] = [
@@ -72,7 +72,7 @@ fn icc_profile(space: [u8; 4], tags: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
 }
 
 /// An RGB profile with gamma `gamma` (`u8Fixed8Number`) on sRGB primaries.
-pub(crate) fn rgb_profile(gamma: u16) -> Vec<u8> {
+pub fn rgb_profile(gamma: u16) -> Vec<u8> {
     let [r, g, b] = SRGB_D50_COLORANTS;
     icc_profile(
         *b"RGB ",
@@ -89,7 +89,7 @@ pub(crate) fn rgb_profile(gamma: u16) -> Vec<u8> {
 }
 
 /// A gray profile with gamma `gamma` (`u8Fixed8Number`).
-pub(crate) fn gray_profile(gamma: u16) -> Vec<u8> {
+pub fn gray_profile(gamma: u16) -> Vec<u8> {
     icc_profile(
         *b"GRAY",
         &[(b"wtpt", xyz_tag(D50)), (b"kTRC", gamma_curve(gamma))],

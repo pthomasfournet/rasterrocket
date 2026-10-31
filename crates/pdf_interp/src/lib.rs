@@ -28,16 +28,29 @@ pub use optional_content::{OptionalContent, RenderPurpose};
 pub use page_group::page_group;
 pub use prescan::prescan_page;
 
-/// Entry points for fuzz targets: the CCITT and JBIG2 codec wrappers and the
-/// `CMap` parser.
+/// Entry points for fuzz targets: the CCITT and JBIG2 codec wrappers and a
+/// `CMap` parse-and-lookup driver.
 ///
 /// Only compiled when `--cfg fuzzing` is set (cargo-fuzz sets this automatically).
 /// Not part of the public API.
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub mod fuzz_helpers {
-    pub use crate::resources::cmap::parse_cmap;
     pub use crate::resources::image::fuzz_entry::{decode_ccitt, decode_jbig2};
+
+    /// Parse `data` as a `CMap` program, then split `data` itself into codes
+    /// through the parsed code-space ranges and look each one up.
+    pub fn parse_and_map_cmap(data: &[u8]) {
+        let Some(cmap) = crate::resources::cmap::parse_cmap(data) else {
+            return;
+        };
+        let mut rest = data;
+        while !rest.is_empty() {
+            let (code, len) = cmap.next_code(rest);
+            let _ = std::hint::black_box(cmap.lookup(code));
+            rest = &rest[usize::from(len.max(1)).min(rest.len())..];
+        }
+    }
 }
 
 use std::path::Path;

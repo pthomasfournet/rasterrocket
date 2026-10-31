@@ -153,6 +153,7 @@ pub(crate) mod fuzz_entry {
     use super::codecs;
 
     /// Whether the stream decodes.
+    #[must_use]
     pub fn decode_ccitt(
         data: &[u8],
         width: u32,
@@ -164,6 +165,7 @@ pub(crate) mod fuzz_entry {
     }
 
     /// Whether the stream decodes.
+    #[must_use]
     pub fn decode_jbig2(
         doc: &Document,
         data: &[u8],

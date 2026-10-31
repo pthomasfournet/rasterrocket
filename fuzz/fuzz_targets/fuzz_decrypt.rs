@@ -10,10 +10,7 @@ use libfuzzer_sys::fuzz_target;
 use pdf::{Document, OpenOptions};
 
 fuzz_target!(|data: &[u8]| {
-    let options = OpenOptions {
-        decrypt_authorized: true,
-        password: Some("user".into()),
-    };
+    let options = OpenOptions::new(true, Some("user".into()));
     let Ok(doc) = Document::from_bytes_with(data.to_vec(), &options) else {
         return;
     };

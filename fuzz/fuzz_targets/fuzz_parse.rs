@@ -23,7 +23,7 @@ fuzz_target!(|data: &[u8]| {
     for num in 0..OBJECTS {
         drop(doc.get_object((num, 0)));
     }
-    drop(doc.linearization_hints());
+    let _ = std::hint::black_box(doc.linearization_hints());
     for idx in 0..doc.page_count_fast().min(PAGES) {
         drop(doc.get_page(idx));
     }
