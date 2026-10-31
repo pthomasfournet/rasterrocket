@@ -33,9 +33,6 @@ Phase 5 is complete. The API exists and is integrated.
 `--tiff` are accepted but every page fails ("output format … is not yet
 supported"); PPM, PGM, PBM and PNG work.
 
-**Knockout groups.** A transparency group's `/K` flag is not read: objects in
-a knockout group composite over one another.
-
 **GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
 `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
@@ -140,8 +137,11 @@ why this is a major release; the migration notes are under **API changes**.
   lattice at device cell size, with sub-pixel origin, showing the backdrop;
   fill patterns through stencil masks and text; non-isolated groups composited
   as their own colour and alpha, and nested groups composed back to their
-  isolated ancestor; a translucent stroke knocks out its own fill; form
-  XObjects clipped to their `/BBox`.
+  isolated ancestor; knockout groups (`/K true`), each object composited
+  with the group's initial backdrop; a page that blends or carries a
+  knockout `/Group` painted as an isolated page group, so blend modes see
+  only what the page painted, not the paper; a translucent stroke knocks out
+  its own fill; form XObjects clipped to their `/BBox`.
 - *Lines and edges.* Strokes thinner than one device pixel are widened to
   one; degenerate dash arrays stroke solid and an odd-length array's phase
   is reduced over the full cycle; path clips are antialiased at glyph edges;
