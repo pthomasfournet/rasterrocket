@@ -17,8 +17,7 @@
 //                0 = no ink, 255 = full ink for DeviceCMYK).
 // Output layout: `n_pixels` × 3 bytes, interleaved RGB.
 //
-// Thread/block layout: 256 threads/block, ceil(n_pixels/256) blocks —
-// matches the existing composite_rgba8 pattern in composite_rgba8.cu.
+// Thread/block layout: 256 threads/block, ceil(n_pixels/256) blocks.
 
 // ── Matrix kernel ─────────────────────────────────────────────────────────────
 
@@ -116,18 +115,6 @@ __device__ __forceinline__ void clut_node(
     *b = (float)__ldg(&clut[idx + 2]);
 }
 
-// Quadrilinear interpolation in a 4D CLUT.
-//
-// Each input channel is normalised to [0, G-1].  We split each into an integer
-// floor index and a fractional weight, then lerp across the 16 corners of the
-// 4D hypercube cell.
-//
-// cmyk  : interleaved input,  4 bytes per pixel (PDF convention)
-// rgb   : interleaved output, 3 bytes per pixel
-// clut  : flat u8 CLUT, grid_n^4 * 3 bytes
-//         index = (k*G^3 + c*G^2 + m*G + y)*3
-// grid_n: number of grid nodes per axis (typically 17)
-// n     : total pixel count
 // Round-half-up of a value clamped to [0, 255], matching the CPU
 // fallback's clamp-then-round (half away from zero equals half up on a
 // non-negative range). Computed via the floor difference: adding 0.5f
@@ -140,6 +127,19 @@ __device__ __forceinline__ unsigned char round_half_up_byte(float v) {
     return (unsigned char)(int)(fl + ((c - fl) >= 0.5f ? 1.0f : 0.0f));
 }
 
+// Quadrilinear interpolation in a 4D CLUT.
+//
+// Each input channel is normalised to [0, G-1] and split into an integer
+// floor index and a fractional weight; the 16 corners of the 4D hypercube
+// cell are reduced along Y, M, C, then K with fused multiply-adds, the
+// arithmetic of the CPU fallback (`f32::mul_add`).
+//
+// cmyk  : interleaved input,  4 bytes per pixel (PDF convention)
+// rgb   : interleaved output, 3 bytes per pixel
+// clut  : flat u8 CLUT, grid_n^4 * 3 bytes
+//         index = (k*G^3 + c*G^2 + m*G + y)*3
+// grid_n: number of grid nodes per axis (typically 17)
+// n     : total pixel count
 extern "C" __global__ void icc_cmyk_clut(
     const unsigned char* __restrict__ cmyk,
     unsigned char*       __restrict__ rgb,

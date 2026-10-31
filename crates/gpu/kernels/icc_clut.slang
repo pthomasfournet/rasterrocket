@@ -8,9 +8,12 @@
 // The profile-free conversion (the CUDA `icc_cmyk_matrix` entry) always runs
 // on the CPU and has no Slang counterpart.
 //
-// The CUDA source uses `__fmaf_rn` for FMA-with-round-to-nearest semantics.
-// Slang exposes the same via the `precise` keyword on the result variable
-// (suppresses aggressive reassociation) — see SPIR-V `precise` decoration.
+// Each lerp is `w * (b - a) + a` on `precise` values: SPIR-V NoContraction
+// forbids reassociation and fusion, so the product and the sum round
+// separately.  The CUDA kernel and the CPU fallback fuse them (`__fmaf_rn`,
+// `f32::mul_add`) with a single rounding, so results agree to within one
+// output level rather than bit for bit; Vulkan does not guarantee a
+// correctly rounded `fma`, which would be needed to close that gap.
 // CLUT access uses StructuredBuffer<uint8_t> (flat buffer), the layout of
 // the CUDA path.
 
@@ -94,8 +97,6 @@ void icc_cmyk_clut(
     float wk = fk - float(ik0);
 
     // Quadrilinear: 16 corner lookups, lerp along Y → M → C → K.
-    // `precise` on intermediates suppresses LLVM-style reassociation that
-    // would change rounding vs the CUDA __fmaf_rn semantics.
 
     // K = 0 plane
     float rc000, gc000, bc000;  clut_node(clut, ic0, im0, iy0, ik0, G, rc000, gc000, bc000);
