@@ -294,6 +294,9 @@ static STANDARD_ENCODING: [Option<&str>; 256] = [
 ];
 
 /// `WinAnsiEncoding` (Windows CP-1252 superset): char code → glyph name.
+///
+/// The codes above 0x20 that CP-1252 leaves unassigned (0x7F, 0x81, 0x8D,
+/// 0x8F, 0x90, 0x9D) are `bullet`, as Annex D.2 note 6 provides.
 static WIN_ANSI_ENCODING: [Option<&str>; 256] = [
     None,
     None,
@@ -422,9 +425,9 @@ static WIN_ANSI_ENCODING: [Option<&str>; 256] = [
     Some("bar"),
     Some("braceright"),
     Some("asciitilde"),
-    None,
+    Some("bullet"),
     Some("Euro"),
-    None,
+    Some("bullet"),
     Some("quotesinglbase"),
     Some("florin"),
     Some("quotedblbase"),
@@ -436,10 +439,10 @@ static WIN_ANSI_ENCODING: [Option<&str>; 256] = [
     Some("Scaron"),
     Some("guilsinglleft"),
     Some("OE"),
-    None,
+    Some("bullet"),
     Some("Zcaron"),
-    None,
-    None,
+    Some("bullet"),
+    Some("bullet"),
     Some("quoteleft"),
     Some("quoteright"),
     Some("quotedblleft"),
@@ -452,7 +455,7 @@ static WIN_ANSI_ENCODING: [Option<&str>; 256] = [
     Some("scaron"),
     Some("guilsinglright"),
     Some("oe"),
-    None,
+    Some("bullet"),
     Some("zcaron"),
     Some("Ydieresis"),
     // 0xA0: WinAnsiEncoding maps the no-break space to `space` (PDF App. D.2);
@@ -1488,6 +1491,17 @@ mod tests {
             base_encoding_table(BaseEncoding::MacRoman)[0x27],
             Some("quotesingle")
         );
+    }
+
+    /// Annex D.2 note 6: every unassigned `WinAnsi` code above 0x20 draws
+    /// the bullet, the assigned 0x95 included.
+    #[test]
+    fn win_ansi_unassigned_codes_are_bullets() {
+        let bullets: Vec<usize> = (0x21..=0xFF)
+            .filter(|&code| WIN_ANSI_ENCODING[code] == Some("bullet"))
+            .collect();
+        assert_eq!(bullets, [0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x95, 0x9D]);
+        assert!(WIN_ANSI_ENCODING[0x21..].iter().all(Option::is_some));
     }
 
     /// Annex D.5: the Symbol font's Latin letter codes carry Greek, and
