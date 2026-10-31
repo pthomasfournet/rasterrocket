@@ -132,22 +132,27 @@ impl TextBlock<'_> {
 }
 
 /// `text` broken at line ends (CR, LF or CR LF) and wrapped at spaces so
-/// that no line wider than one word exceeds `max`; `width` measures a
-/// line.
+/// that no line wider than one word exceeds `max`.  `width` measures a
+/// word and a space; a line is as wide as its words and the spaces between
+/// them, so each word is measured once.
 pub(super) fn wrap(text: &str, max: f64, mut width: impl FnMut(&str) -> f64) -> Vec<String> {
+    let space = width(" ");
     let mut lines = Vec::new();
     for paragraph in text.split("\r\n").flat_map(|p| p.split(['\r', '\n'])) {
         let mut line = String::new();
+        let mut line_width = 0.0;
         for word in paragraph.split(' ') {
-            let mut candidate = line.clone();
-            if !candidate.is_empty() {
-                candidate.push(' ');
-            }
-            candidate.push_str(word);
-            if !line.is_empty() && width(&candidate) > max {
+            let word_width = width(word);
+            if line.is_empty() {
+                line.push_str(word);
+                line_width = word_width;
+            } else if line_width + space + word_width > max {
                 lines.push(std::mem::replace(&mut line, word.to_owned()));
+                line_width = word_width;
             } else {
-                line = candidate;
+                line.push(' ');
+                line.push_str(word);
+                line_width += space + word_width;
             }
         }
         lines.push(line);
@@ -200,6 +205,20 @@ mod tests {
         assert_eq!(lines, ["longword", "x"]);
         let lines = wrap("日本 語", 2.0, width);
         assert_eq!(lines, ["日本", "語"]);
+        let lines = wrap("a  b", 10.0, width);
+        assert_eq!(lines, ["a  b"], "runs of spaces are kept");
+    }
+
+    #[test]
+    fn wrapping_measures_each_word_once() {
+        let text = "w ".repeat(1000);
+        let mut measured = 0usize;
+        let lines = wrap(&text, f64::INFINITY, |t| {
+            measured += t.len();
+            1.0
+        });
+        assert_eq!(lines.len(), 1);
+        assert!(measured <= 2 * text.len(), "{measured} bytes measured");
     }
 
     /// Sets digits in a second font.
