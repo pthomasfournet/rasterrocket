@@ -511,17 +511,22 @@ impl Document {
     }
 
     /// Resolve a chain of indirect references until a non-Reference object is
-    /// reached, following at most 32 references.
+    /// reached, following at most 32 references.  A direct `obj` is
+    /// returned borrowed and a referenced one as the shared cached object;
+    /// neither is copied.
     ///
     /// # Errors
     /// The errors of [`Self::get_object`], and [`PdfError::BadObject`] when
     /// the chain is longer than 32 references.
-    pub fn resolve(&self, obj: &Object) -> Result<Arc<Object>, PdfError> {
-        let mut current = obj.clone();
+    pub fn resolve<'a>(&self, obj: &'a Object) -> Result<Resolved<'a>, PdfError> {
+        let Object::Reference(mut id) = *obj else {
+            return Ok(Resolved::Direct(obj));
+        };
         for _ in 0..32 {
-            match current {
-                Object::Reference(id) => current = (*self.get_object(id)?).clone(),
-                other => return Ok(Arc::new(other)),
+            let target = self.get_object(id)?;
+            match *target {
+                Object::Reference(next) => id = next,
+                _ => return Ok(Resolved::Shared(target)),
             }
         }
         Err(PdfError::BadObject {
@@ -1302,6 +1307,27 @@ fn validate_pdf_input(data: &[u8]) -> Result<usize, PdfError> {
         .windows(5)
         .position(|w| w == b"%PDF-")
         .ok_or(PdfError::NotPdf)
+}
+
+/// An object reached by [`Document::resolve`]: the caller's direct object,
+/// or the cached object a reference chain ends at.
+#[derive(Debug, Clone)]
+pub enum Resolved<'a> {
+    /// The object passed in, which was not a reference.
+    Direct(&'a Object),
+    /// The object at the end of the reference chain, shared with the cache.
+    Shared(Arc<Object>),
+}
+
+impl std::ops::Deref for Resolved<'_> {
+    type Target = Object;
+
+    fn deref(&self) -> &Object {
+        match self {
+            Self::Direct(obj) => obj,
+            Self::Shared(obj) => obj,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -456,7 +456,7 @@ fn parse_cid_metrics<const N: usize>(
         let Some(second) = arr.get(i + 1).and_then(|o| doc.resolve(o).ok()) else {
             break;
         };
-        let values: Vec<[i32; N]> = match second.as_ref() {
+        let values: Vec<[i32; N]> = match &*second {
             Object::Array(inner) => {
                 i += 2;
                 inner
