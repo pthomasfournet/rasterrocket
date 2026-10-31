@@ -218,6 +218,16 @@ impl Iterator for CMapIter<'_> {
 /// Greatest `usecmap` nesting followed while parsing.
 const MAX_USECMAP_DEPTH: u32 = 4;
 
+/// Greatest `CMap` stream parsed, in bytes.  The largest predefined `CMap`
+/// is about 330 kB; the tokens of a stream take several times its size.
+const MAX_CMAP_BYTES: usize = 16 << 20;
+
+/// Greatest number of code mappings one `CMap` stream materialises.  A
+/// range expands to one mapping per code, so a few bytes of `cidrange` /
+/// `bfrange` could otherwise request billions; the largest predefined
+/// `CMap` defines about 31 000.
+const MAX_CMAP_MAPPINGS: usize = 1 << 18;
+
 /// Parse a `CMap` stream.
 ///
 /// Handles encoding `CMaps` (`begincidchar` / `begincidrange`) and
@@ -225,8 +235,9 @@ const MAX_USECMAP_DEPTH: u32 = 4;
 /// a predefined `CMap`.  A `CMap` that declares no codespace range takes
 /// the full range of every code length its mappings use.
 ///
-/// Returns `None` when the stream contains no recognised directive, in
-/// which case callers fall back to an identity mapping.
+/// Returns `None` when the stream contains no recognised directive or
+/// exceeds [`MAX_CMAP_BYTES`], in which case callers fall back to an
+/// identity mapping.  Mappings past [`MAX_CMAP_MAPPINGS`] are dropped.
 #[must_use]
 pub fn parse_cmap(stream: &[u8]) -> Option<CMap> {
     parse_cmap_nested(stream, 0)
@@ -238,8 +249,17 @@ pub fn parse_cmap(stream: &[u8]) -> Option<CMap> {
     reason = "flat match dispatch over the CMap directives"
 )]
 pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
+    if stream.len() > MAX_CMAP_BYTES {
+        log::warn!(
+            "cmap: stream of {} bytes exceeds {MAX_CMAP_BYTES} — ignoring it",
+            stream.len()
+        );
+        return None;
+    }
     let tokens = tokenise(stream);
     let mut cmap = CMap::default();
+    // Mappings still allowed by `MAX_CMAP_MAPPINGS`.
+    let mut budget = MAX_CMAP_MAPPINGS;
     // Code lengths used by the mappings, for a `CMap` without codespace
     // ranges: bit `n - 1` for an `n`-byte code.
     let mut code_lengths = 0u8;
@@ -273,7 +293,10 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
                         parse_value(tokens.get(i + 1).copied()),
                     ) {
                         code_lengths |= length_bit(&code);
-                        let _ = cmap.map.insert(bytes_to_u32(&code), value);
+                        if let Some(rest) = budget.checked_sub(1) {
+                            budget = rest;
+                            let _ = cmap.map.insert(bytes_to_u32(&code), value);
+                        }
                         i += 2;
                     } else {
                         i += 1;
@@ -301,8 +324,17 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
                         let hi = bytes_to_u32(&hi_b);
                         // A range wider than the 16-bit CID space is corrupt.
                         if hi >= lo && hi - lo < 0x1_0000 {
-                            for offset in 0u32..=(hi - lo) {
-                                let _ = cmap.map.insert(lo + offset, base.saturating_add(offset));
+                            let count = hi - lo + 1;
+                            match budget.checked_sub(count as usize) {
+                                Some(rest) => {
+                                    budget = rest;
+                                    for offset in 0..count {
+                                        let _ = cmap
+                                            .map
+                                            .insert(lo + offset, base.saturating_add(offset));
+                                    }
+                                }
+                                None => budget = 0,
                             }
                         } else {
                             log::warn!("cmap: ignoring degenerate range {lo:04X}–{hi:04X}");
@@ -350,6 +382,9 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
         i += 1;
     }
 
+    if budget == 0 {
+        log::warn!("cmap: more than {MAX_CMAP_MAPPINGS} mappings — ignoring the rest");
+    }
     if let Some(vertical) = declared_mode {
         cmap.vertical = vertical;
     }
@@ -709,6 +744,24 @@ endbfrange
         assert_eq!(cmap.map.get(&0x0041), Some(&0x0041));
         assert_eq!(cmap.map.get(&0x0042), Some(&0x0042));
         assert_eq!(cmap.map.get(&0x0043), Some(&0x0043));
+    }
+
+    /// Ranges of four-byte codes cannot expand past
+    /// [`MAX_CMAP_MAPPINGS`]: each full range adds 65 536 distinct codes,
+    /// so the ranges that fit are kept and the rest dropped.
+    #[test]
+    fn range_expansion_is_capped() {
+        let mut stream = b"1 begincodespacerange\n<00000000> <FFFFFFFF>\nendcodespacerange\n\
+            8 begincidrange\n"
+            .to_vec();
+        for k in 0..8u32 {
+            stream.extend(format!("<{k:04X}0000> <{k:04X}FFFF> 0\n").bytes());
+        }
+        stream.extend(b"endcidrange\n");
+        let cmap = parse_cmap(&stream).expect("should parse");
+        assert_eq!(cmap.map.len(), MAX_CMAP_MAPPINGS);
+        assert_eq!(cmap.lookup(0x0003_FFFF), 0xFFFF);
+        assert_eq!(cmap.lookup(0x0004_0000), 0);
     }
 
     #[test]
