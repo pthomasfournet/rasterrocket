@@ -33,6 +33,17 @@ pub(super) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Whether `a` and `b` are equal, in time that depends only on their
+/// lengths.
+///
+/// Used where a value derived from the password is compared with an entry
+/// of the `/Encrypt` dictionary, so the comparison time does not reveal how
+/// many leading bytes of a candidate hash match.
+pub(super) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && std::hint::black_box(a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y))) == 0
+}
+
 /// Apply the RC4 keystream of `key` to `data` in place.
 ///
 /// # Errors
@@ -243,6 +254,15 @@ mod tests {
         // A trailing partial block is dropped, not a panic.
         let pt = aes_cbc_decrypt(&[0u8; 32], &[0u8; 40]).expect("partial");
         assert!(pt.len() <= 16);
+    }
+
+    #[test]
+    fn ct_eq_compares_whole_slices() {
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"xbc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abcd"));
     }
 
     #[test]

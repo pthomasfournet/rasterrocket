@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use super::{
     Cipher,
-    primitives::{aes256_cbc_decrypt_no_pad_zero_iv, hash_r6, md5, rc4, sha256},
+    primitives::{aes256_cbc_decrypt_no_pad_zero_iv, ct_eq, hash_r6, md5, rc4, sha256},
 };
 use crate::{dictionary::Dictionary, object::Object};
 
@@ -176,7 +176,7 @@ impl StandardSecurity {
     /// Algorithms 4 and 5: `/U` recomputed from a candidate key.
     fn user_entry_matches(&self, key: &[u8]) -> bool {
         if self.revision == 2 {
-            return rc4(key, &PAD).is_ok_and(|u| u == self.u);
+            return rc4(key, &PAD).is_ok_and(|u| ct_eq(&u, &self.u));
         }
         let seed = md5(&[&PAD, &self.id0]);
         let Ok(mut x) = rc4(key, &seed) else {
@@ -189,7 +189,7 @@ impl StandardSecurity {
                 Err(_) => return false,
             };
         }
-        x[..16] == self.u[..16]
+        ct_eq(&x[..16], &self.u[..16])
     }
 
     /// Algorithm 7: the user password that an owner password encrypts.
@@ -236,7 +236,7 @@ impl StandardSecurity {
         udata: &[u8],
     ) -> Option<Vec<u8>> {
         let (hash, validation_salt, key_salt) = (&entry[..32], &entry[32..40], &entry[40..48]);
-        if self.hash_r5_r6(password, validation_salt, udata)? != hash {
+        if !ct_eq(&self.hash_r5_r6(password, validation_salt, udata)?, hash) {
             return None;
         }
         let intermediate = self.hash_r5_r6(password, key_salt, udata)?;
