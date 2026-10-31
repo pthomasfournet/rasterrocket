@@ -23,6 +23,7 @@ use super::super::gstate::ctm_multiply;
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
+use super::text_ops::{glyph_advance, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
 use crate::resources::font::{Type3Data, Type3Glyph};
@@ -90,12 +91,12 @@ impl PageRenderer<'_> {
             }
 
             // Advance the text matrix by the glyph width (PDF §9.4.4).
-            // Widths are in glyph space; scale by FontMatrix[0] × font_size.
-            let glyph_advance = f64::from(t3.width(byte)) * t3.font_matrix[0];
+            // Widths are in glyph space; `FontMatrix[0]` maps them to text
+            // space.
+            let width = f64::from(t3.width(byte)) * t3.font_matrix[0];
             let extra = if byte == b' ' { word_spacing } else { 0.0 };
-            let tx_adv = (glyph_advance.mul_add(font_size, char_spacing) + extra) * horiz_scaling;
-            tm[4] = tx_adv.mul_add(tm[0], tm[4]);
-            tm[5] = tx_adv.mul_add(tm[1], tm[5]);
+            let tx_adv = glyph_advance(width, font_size, char_spacing, extra, horiz_scaling);
+            tm = translate_text_x(tm, tx_adv);
         }
         if let Some(parent) = parent_resources {
             self.resources = parent;
