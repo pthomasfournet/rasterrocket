@@ -30,8 +30,9 @@ Phase 5 is complete. The API exists and is integrated.
 ## Known issues
 
 **JPEG and TIFF output are not implemented.** `--jpeg`, `--jpegcmyk` and
-`--tiff` are accepted but every page fails ("output format … is not yet
-supported"); PPM, PGM, PBM and PNG work.
+`--tiff` are refused at startup ("--jpeg output is not implemented; use
+--png or the default PPM output"), before the document is opened; PPM, PGM,
+PBM and PNG work.
 
 **GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
 `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
