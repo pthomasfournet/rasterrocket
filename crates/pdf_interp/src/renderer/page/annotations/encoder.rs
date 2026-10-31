@@ -105,36 +105,50 @@ impl UnicodeEncoder {
     }
 }
 
-/// The fallback font that shows `c` and its codes there.  The collection
-/// tried first follows `context`, the text `c` is set in: Japanese when it
-/// holds kana, Korean when it holds Hangul, else Simplified Chinese.
-pub(super) fn fallback(c: char, context: &str) -> Option<(&'static [u8], Vec<u8>)> {
-    use crate::resources::font_substitute::Script;
-    let script = context
-        .chars()
-        .find_map(|ch| match Script::of_char(u32::from(ch)) {
-            Some(s @ (Script::Japanese | Script::Korean)) => Some(s),
-            _ => None,
-        });
-    let first = match script {
-        Some(Script::Japanese) => 0,
-        Some(Script::Korean) => 3,
-        _ => 1,
-    };
-    let mut units = [0u16; 2];
-    let units = c.encode_utf16(&mut units);
-    let key = units.iter().fold(0u32, |k, &u| (k << 16) | u32::from(u));
-    let codes: Vec<u8> = units.iter().flat_map(|u| u.to_be_bytes()).collect();
-    let order = std::iter::once(first).chain((0..FALLBACKS.len()).filter(|&i| i != first));
-    for i in order {
-        let (name, _, cmap_name) = FALLBACKS[i];
-        if predefined_cmap(cmap_name)
-            .is_some_and(|cmap| cmap.map.get(&key).is_some_and(|&cid| cid != 0))
-        {
-            return Some((name, codes));
-        }
+/// The fallback fonts in the order they are tried for one text.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Fallbacks {
+    /// Indices into [`FALLBACKS`].
+    order: [usize; FALLBACKS.len()],
+}
+
+impl Fallbacks {
+    /// The order for `text`: Japanese first when it holds kana, Korean
+    /// first when it holds Hangul, else Simplified Chinese first; the other
+    /// collections follow in [`FALLBACKS`] order.
+    pub(super) fn for_text(text: &str) -> Self {
+        use crate::resources::font_substitute::Script;
+        let script = text
+            .chars()
+            .find_map(|ch| match Script::of_char(u32::from(ch)) {
+                Some(s @ (Script::Japanese | Script::Korean)) => Some(s),
+                _ => None,
+            });
+        let first = match script {
+            Some(Script::Japanese) => 0,
+            Some(Script::Korean) => 3,
+            _ => 1,
+        };
+        let mut order = std::array::from_fn(|i| i);
+        order[..=first].rotate_right(1);
+        Self { order }
     }
-    None
+
+    /// The first fallback font that shows `c`, and its codes there.
+    pub(super) fn find(self, c: char) -> Option<(&'static [u8], Vec<u8>)> {
+        let mut units = [0u16; 2];
+        let units = c.encode_utf16(&mut units);
+        let key = units.iter().fold(0u32, |k, &u| (k << 16) | u32::from(u));
+        let (name, _, _) = self
+            .order
+            .iter()
+            .map(|&i| FALLBACKS[i])
+            .find(|(_, _, cmap)| {
+                predefined_cmap(cmap)
+                    .is_some_and(|cmap| cmap.map.get(&key).is_some_and(|&cid| cid != 0))
+            })?;
+        Some((name, units.iter().flat_map(|u| u.to_be_bytes()).collect()))
+    }
 }
 
 /// Add the fallback fonts to the font resource dictionary `fonts`.
@@ -189,32 +203,38 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
 
     /// The encoder of the font resource `font`.
     fn encoder(&mut self, font: &[u8]) -> &UnicodeEncoder {
-        let renderer = &mut *self.renderer;
-        self.encoders.entry(font.to_vec()).or_insert_with(|| {
+        if !self.encoders.contains_key(font) {
+            let renderer = &mut *self.renderer;
             let active = renderer.font_cache.select(&renderer.resources, font);
-            UnicodeEncoder::of(&active.descriptor)
-        })
+            let _ = self
+                .encoders
+                .insert(font.to_vec(), UnicodeEncoder::of(&active.descriptor));
+        }
+        &self.encoders[font]
     }
 }
 
 impl Typesetter for FontTypesetter<'_, '_> {
     fn runs(&mut self, font: &[u8], text: &str) -> Vec<Run> {
+        let fallbacks = Fallbacks::for_text(text);
+        let encoder = self.encoder(font);
+        let question = encoder.encode('?').unwrap_or(b"?");
         let mut runs: Vec<Run> = Vec::new();
         for c in text.chars() {
-            let (run_font, codes): (&[u8], Vec<u8>) = self
-                .encoder(font)
-                .encode(c)
-                .map(|codes| (font, codes.to_vec()))
-                .or_else(|| fallback(c, text))
-                .unwrap_or_else(|| {
-                    let question = self.encoder(font).encode('?').unwrap_or(b"?");
-                    (font, question.to_vec())
-                });
+            let fallback;
+            let (run_font, codes): (&[u8], &[u8]) = if let Some(codes) = encoder.encode(c) {
+                (font, codes)
+            } else if let Some(found) = fallbacks.find(c) {
+                fallback = found;
+                (fallback.0, &fallback.1)
+            } else {
+                (font, question)
+            };
             match runs.last_mut() {
-                Some(run) if run.font == run_font => run.codes.extend_from_slice(&codes),
+                Some(run) if run.font == run_font => run.codes.extend_from_slice(codes),
                 _ => runs.push(Run {
                     font: run_font.to_vec(),
-                    codes,
+                    codes: codes.to_vec(),
                 }),
             }
         }
@@ -272,7 +292,7 @@ fn code_bytes(cmap: &CMap, code: u32) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{UnicodeEncoder, code_bytes, fallback};
+    use super::{Fallbacks, UnicodeEncoder, code_bytes};
     use crate::resources::cmap::CMap;
     use crate::resources::cmap_predefined::predefined_cmap;
     use crate::resources::font::resolve_font;
@@ -328,6 +348,7 @@ mod tests {
 
     #[test]
     fn kana_select_the_japanese_fallback_and_han_alone_the_chinese() {
+        let fallback = |c, text| Fallbacks::for_text(text).find(c);
         let (font, codes) = fallback('日', "日本語の").expect("covered");
         assert_eq!(
             (font, codes.as_slice()),
@@ -341,5 +362,7 @@ mod tests {
             fallback('\u{0627}', "").is_none(),
             "Arabic is in no collection"
         );
+        assert_eq!(Fallbacks::for_text("한").order, [3, 0, 1, 2]);
+        assert_eq!(Fallbacks::for_text("").order, [1, 0, 2, 3]);
     }
 }
