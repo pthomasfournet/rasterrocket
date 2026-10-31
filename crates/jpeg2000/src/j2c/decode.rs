@@ -4,14 +4,13 @@
 //! stages in such a way that a given codestream is decoded into its
 //! component channels.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, SubBandType};
 use super::codestream::{ComponentInfo, Header, QuantizationStyle, WaveletTransform};
 use super::idwt::IDWTOutput;
-use super::progression::{ProgressionData, progression_iterator};
+use super::progression::progression_iterator;
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
@@ -57,12 +56,9 @@ pub(crate) fn decode<'a>(
     ctx.reset(header, &tiles[0])?;
 
     for tile in &tiles {
-        let progression_iterator = progression_iterator(tile, header)?;
-
         decode_tile(
             tile,
             header,
-            progression_iterator,
             &mut ctx.tile_decode_context,
             &mut ctx.channel_data,
             &mut ctx.storage,
@@ -136,10 +132,9 @@ impl DecoderContext<'_> {
     }
 }
 
-fn decode_tile<'a, 'b>(
-    tile: &'b Tile<'a>,
+fn decode_tile<'a>(
+    tile: &Tile<'a>,
     header: &Header,
-    progression_iterator: Box<dyn Iterator<Item = ProgressionData> + '_>,
     tile_ctx: &mut TileDecodeContext,
     channel_data: &mut [ComponentData],
     storage: &mut DecompositionStorage<'a>,
@@ -151,7 +146,10 @@ fn decode_tile<'a, 'b>(
     // First, we build the decompositions, including their sub-bands, precincts
     // and code blocks.
     build::build(tile, storage, header.skipped_resolution_levels)?;
-    // Next, we parse the layers/segments for each code block.
+    // Next, we parse the layers/segments for each code block, in the packet
+    // order of the tile. The iterator lists the precincts that `build` has
+    // bounded, so it is created after it.
+    let progression_iterator = progression_iterator(tile, header)?;
     segment::parse(tile, progression_iterator, header, storage)?;
 
     // Interleave bitplane decoding, IDWT, and storage for each component tile

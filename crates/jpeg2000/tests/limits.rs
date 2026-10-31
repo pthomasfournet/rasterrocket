@@ -61,11 +61,11 @@ fn more_samples_than_limit() {
     ]));
 }
 
-/// 20 000 × 20 000 samples (within the sample limit) in 4 × 4
-/// code-blocks: 25 million code-blocks in the one tile.
+/// 10 000 × 10 000 samples (within the sample limit) in 4 × 4
+/// code-blocks: 6.25 million code-blocks in the one tile.
 #[test]
 fn more_code_blocks_than_limit() {
-    let side = 20_000_u32.to_be_bytes();
+    let side = 10_000_u32.to_be_bytes();
     assert_too_large(&gray_with(&[
         (XSIZ, &side),
         (YSIZ, &side),
@@ -76,19 +76,44 @@ fn more_code_blocks_than_limit() {
     ]));
 }
 
-/// 8 192 × 8 192 samples in 4 × 4 code-blocks with 32 layers: 4.2
-/// million code-blocks (within the code-block limit) but 134 million
+/// 9 000 × 9 000 samples in 8 × 8 code-blocks with 32 layers: 1.27
+/// million code-blocks (within the code-block limit) but 40 million
 /// (code-block, layer) entries.
 #[test]
 fn more_code_block_layers_than_limit() {
-    let side = 8_192_u32.to_be_bytes();
+    let side = 9_000_u32.to_be_bytes();
     assert_too_large(&gray_with(&[
         (XSIZ, &side),
         (YSIZ, &side),
         (XTSIZ, &side),
         (YTSIZ, &side),
         (COD_LAYERS, &32_u16.to_be_bytes()),
-        (COD_XCB, &[0]),
-        (COD_YCB, &[0]),
+        (COD_XCB, &[1]),
+        (COD_YCB, &[1]),
     ]));
+}
+
+/// 16 384 × 16 384 samples in 2 × 2 precincts, in a position-first
+/// progression: 2^26 precincts at the top resolution alone, against a
+/// limit of 2^22.
+#[test]
+fn more_precincts_than_limit() {
+    const COD_LCOD: usize = 0x2f;
+    const COD_SCOD: usize = 0x31;
+    const COD_PROGRESSION: usize = 0x32;
+    const COD_END: usize = 0x3b;
+    let side = 16_384_u32.to_be_bytes();
+    let mut data = gray_with(&[
+        (XSIZ, &side),
+        (YSIZ, &side),
+        (XTSIZ, &side),
+        (YTSIZ, &side),
+        (COD_LCOD, &18_u16.to_be_bytes()),
+        // Precincts defined, resolution-position-component-layer order.
+        (COD_SCOD, &[1]),
+        (COD_PROGRESSION, &[2]),
+    ]);
+    // One precinct size per resolution level, 2^1 × 2^1 each.
+    data.splice(COD_END..COD_END, [0x11; 6]);
+    assert_too_large(&data);
 }

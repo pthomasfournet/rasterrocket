@@ -126,13 +126,23 @@ image within the limits is unchanged.
   `f32`). A few header bytes could otherwise size the tile list or the
   component buffers at hundreds of gigabytes. Tests:
   `limits::more_tiles_than_tile_indices`, `limits::more_samples_than_limit`.
-- `j2c/build.rs`: one tile holds at most 2^24 precincts, 2^24 code-blocks
-  and 2^26 (code-block, layer) entries over all its components and
-  resolutions; a tile beyond them fails with `ImageTooLarge`. These
-  structures are built for every resolution, skipped ones included, so
-  small code-blocks or precincts could ask for billions of entries within
-  the sample limit. Tests: `limits::more_code_blocks_than_limit`,
-  `limits::more_code_block_layers_than_limit`.
+- `j2c/build.rs`: one tile holds at most 2^22 precincts, 2^22 code-blocks
+  and 2^25 (code-block, layer) entries over all its components and
+  resolutions; a tile beyond them fails with `ImageTooLarge`, having used
+  under 1 GB. These structures are built for every resolution, skipped
+  ones included, so small code-blocks or precincts could ask for billions
+  of entries within the sample limit. 64 × 64 code-blocks reach the
+  code-block limit only past 2^30 samples, 16 × 16 ones past about 800
+  million.
+  Tests: `limits::more_code_blocks_than_limit`,
+  `limits::more_code_block_layers_than_limit`,
+  `limits::more_precincts_than_limit`.
+- `j2c/decode.rs`: the packet order of a tile is computed after `build`
+  instead of before it. A position-first progression lists and sorts every
+  precinct of the tile, so it was unbounded where `build` is not (3 GB
+  before the precinct limit failed the tile in
+  `limits::more_precincts_than_limit`, and four times that on an image
+  twice as wide and tall); it now covers only precincts `build` admitted.
 - `lib.rs` (`resolve_palette_indices`): a component mapping box without
   entries, beside a palette, fails with `PaletteResolutionFailed`. The
   palette mapped no component, and `decode` then indexed the first

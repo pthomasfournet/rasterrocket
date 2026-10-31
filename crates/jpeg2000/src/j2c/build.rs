@@ -11,12 +11,12 @@ use core::ops::Range;
 
 /// The largest number of precincts in one tile, over all components and
 /// resolutions.
-const MAX_PRECINCTS: usize = 1 << 24;
+const MAX_PRECINCTS: usize = 1 << 22;
 /// The largest number of code-blocks in one tile, over all components and
 /// resolutions.
-const MAX_CODE_BLOCKS: usize = 1 << 24;
+const MAX_CODE_BLOCKS: usize = 1 << 22;
 /// The largest number of (code-block, layer) pairs in one tile.
-const MAX_CODE_BLOCK_LAYERS: usize = 1 << 26;
+const MAX_CODE_BLOCK_LAYERS: usize = 1 << 25;
 
 /// Fail unless a store of `len` entries can take `added` more without
 /// exceeding `max`. Bounds the structures sized by the coding parameters of
