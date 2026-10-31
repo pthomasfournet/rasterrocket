@@ -114,7 +114,7 @@ impl Field {
         has_normal: bool,
     ) -> Option<Self> {
         let chain = field_chain(doc, annot);
-        let inherited = |key: &[u8]| chain.iter().find_map(|d| d.get(key).cloned());
+        let inherited = |key: &[u8]| inherited(doc, &chain, key);
         let kind = match inherited(b"FT")?.as_name()? {
             b"Tx" => Kind::Text,
             b"Ch" => Kind::Choice,
@@ -497,7 +497,7 @@ fn check_mark(
 
 /// The widget, then each field above it through `/Parent`, as resolved
 /// dictionaries: the order in which an inherited attribute is looked up.
-fn field_chain(doc: &Document, annot: &Dictionary) -> Vec<Dictionary> {
+pub(super) fn field_chain(doc: &Document, annot: &Dictionary) -> Vec<Dictionary> {
     let mut chain = vec![annot.clone()];
     let mut seen: Vec<ObjectId> = Vec::new();
     while chain.len() < MAX_FIELD_DEPTH {
@@ -515,6 +515,21 @@ fn field_chain(doc: &Document, annot: &Dictionary) -> Vec<Dictionary> {
         chain.push((*parent).clone());
     }
     chain
+}
+
+/// The inheritable field attribute `key` (§12.7.4.1): the entry of the
+/// first dictionary of `chain` (from [`field_chain`]) that has it, with an
+/// indirect reference followed unless it refers to a stream, which stays a
+/// reference for [`text_or_stream`].
+pub(super) fn inherited(doc: &Document, chain: &[Dictionary], key: &[u8]) -> Option<Object> {
+    let value = chain.iter().find_map(|d| d.get(key))?;
+    if let Object::Reference(id) = value
+        && let Ok(referent) = doc.get_object(*id)
+        && !matches!(referent.as_ref(), Object::Stream(_))
+    {
+        return Some(referent.as_ref().clone());
+    }
+    Some(value.clone())
 }
 
 /// An `/Opt` entry: `(export value, display text)`, both the string itself

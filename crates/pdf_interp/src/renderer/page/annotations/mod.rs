@@ -361,7 +361,7 @@ fn draw_free_text(
 /// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,
 /// or, when `/N` is a dictionary of appearance states, the entry for the
 /// annotation's appearance state.  The state is `/AS`; without it, the
-/// field value `/V` of the annotation or of its `/Parent` field, which
+/// field value `/V`, inherited through the `/Parent` fields, which
 /// names the appearance state of a check box or radio button (PDF
 /// §12.7.5.3); a value naming no state, or no value, selects `Off`.
 fn normal_appearance(doc: &Document, annot: &Dictionary) -> Option<ObjectId> {
@@ -376,10 +376,8 @@ fn normal_appearance(doc: &Document, annot: &Dictionary) -> Option<ObjectId> {
         _ => return None,
     };
     let value = || {
-        annot.get_name(b"V").map(<[u8]>::to_vec).or_else(|| {
-            let parent = crate::resources::resolve_dict(doc, annot.get(b"Parent")?)?;
-            parent.get_name(b"V").map(<[u8]>::to_vec)
-        })
+        widget::inherited(doc, &widget::field_chain(doc, annot), b"V")
+            .and_then(|v| v.as_name().map(<[u8]>::to_vec))
     };
     let state: Vec<u8> = annot.get_name(b"AS").map_or_else(
         || {
@@ -469,7 +467,25 @@ fn read_rect(dict: &pdf::Dictionary) -> Option<[f64; 4]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_to_rect, upright_about};
+    use super::{fit_to_rect, normal_appearance, upright_about};
+    use crate::test_helpers::make_doc_with_objects;
+
+    #[test]
+    fn the_appearance_state_follows_a_value_inherited_from_a_grandparent() {
+        let stream = "<< /Length 0 >>\nstream\n\nendstream";
+        let doc = make_doc_with_objects(&[
+            (
+                4,
+                "<< /AP << /N << /On 5 0 R /Off 6 0 R >> >> /Parent 7 0 R >>",
+            ),
+            (5, stream),
+            (6, stream),
+            (7, "<< /Parent 8 0 R >>"),
+            (8, "<< /FT /Btn /V /On >>"),
+        ]);
+        let annot = doc.get_dictionary((4, 0)).expect("a dictionary");
+        assert_eq!(normal_appearance(&doc, &annot), Some((5, 0)));
+    }
 
     fn apply(m: &[f64; 6], (x, y): (f64, f64)) -> (f64, f64) {
         (
