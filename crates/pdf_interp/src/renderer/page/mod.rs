@@ -86,6 +86,7 @@ use raster::{
 use super::color::RasterColor;
 use super::font_cache::{DocumentFonts, FontCache};
 use super::gstate::{Ctm, GStateStack, ctm_multiply, ctm_transform, invert_affine};
+use crate::PageGeometry;
 use crate::content::Operator;
 use crate::resources::SoftMask;
 use crate::resources::transfer::Transfer;
@@ -553,8 +554,9 @@ struct CacheState {
 
 /// Build the initial page CTM that maps PDF user space to device pixels.
 ///
-/// `scale_x` and `scale_y` are device pixels per point along the device
-/// axes (`x_dpi / 72`, `y_dpi / 72`), applied after rotation.  `rotate_cw`
+/// `scale_x` and `scale_y` are device pixels per user-space unit along the
+/// device axes (`x_dpi / 72 × UserUnit`, `y_dpi / 72 × UserUnit`), applied
+/// after rotation.  `rotate_cw`
 /// is the page `/Rotate`, which callers must
 /// pass already normalised to one of {0, 90, 180, 270} (the only values ISO
 /// 32000-2 §14.11.6 defines; `page_size_pts_by_id` snaps `/Rotate` to this set
@@ -638,18 +640,25 @@ fn build_initial_ctm(
 /// renderer's bitmap covers the window `[x, x + width) × [y, y + height)`; its
 /// initial CTM is the whole-page CTM translated by the window's offset, so a
 /// window draws exactly the device pixels the whole-page render places there.
+///
+/// The page's pixel extent is its geometry's [`PageGeometry::size_px`] at
+/// the scales, which counts `user_unit` (ISO 32000-2 §14.11.2: one user-space
+/// unit is `user_unit / 72` inch), and the initial CTM maps one user-space
+/// unit to `scale × user_unit` device pixels, so the content fills the extent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageView {
     /// Width of the whole page in device pixels, after rotation.
     pub page_width: u32,
     /// Height of the whole page in device pixels, after rotation.
     pub page_height: u32,
-    /// Device pixels per unit of the page's width (`x_dpi / 72` for the
+    /// Device pixels per point along the page's width (`x_dpi / 72` for the
     /// renderer's callers).  Positive and finite.
     pub scale_x: f64,
-    /// Device pixels per unit of the page's height (`y_dpi / 72` for the
+    /// Device pixels per point along the page's height (`y_dpi / 72` for the
     /// renderer's callers).  Positive and finite.
     pub scale_y: f64,
+    /// Points per user-space unit: the page's `/UserUnit`.
+    pub user_unit: f64,
     /// The page `/Rotate`, clockwise degrees: one of 0, 90, 180, 270.
     pub rotate_cw: u16,
     /// X of the selected page box's lower-left corner in PDF user space.
@@ -667,29 +676,21 @@ pub struct PageView {
 }
 
 impl PageView {
-    /// The view of a whole `page_width × page_height` page drawn at
-    /// `(scale_x, scale_y)` device pixels per point.
-    ///
-    /// `rotate_cw`, `origin_x` and `origin_y` are the page geometry's
-    /// (see `PageGeometry`); `page_width`/`page_height` are already swapped
-    /// for 90°/270°.
+    /// The view of the whole page `geom` drawn at `(scale_x, scale_y)`
+    /// device pixels per point: `geom.size_px(scale_x, scale_y)` pixels,
+    /// with the geometry's rotation, box origin and `user_unit`.
     #[must_use]
-    pub const fn whole(
-        page_width: u32,
-        page_height: u32,
-        (scale_x, scale_y): (f64, f64),
-        rotate_cw: u16,
-        origin_x: f64,
-        origin_y: f64,
-    ) -> Self {
+    pub fn whole(geom: &PageGeometry, (scale_x, scale_y): (f64, f64)) -> Self {
+        let (page_width, page_height) = geom.size_px(scale_x, scale_y);
         Self {
             page_width,
             page_height,
             scale_x,
             scale_y,
-            rotate_cw,
-            origin_x,
-            origin_y,
+            user_unit: geom.user_unit,
+            rotate_cw: geom.rotate_cw,
+            origin_x: geom.origin_x,
+            origin_y: geom.origin_y,
             x: 0,
             y: 0,
             width: page_width,
@@ -713,15 +714,16 @@ impl PageView {
     /// The initial CTM: the whole page's, with the window's top-left corner
     /// moved to the device origin.
     ///
-    /// Device y grows downward from the window's top edge
-    /// (`device_y = height − ctm_y`), so a window `y` pixels below the page
-    /// top and `height` tall shifts the CTM's y translation by
-    /// `page_height − y − height`.
+    /// One user-space unit is `user_unit` points, so the CTM's scale is
+    /// `scale × user_unit` device pixels per unit.  Device y grows downward
+    /// from the window's top edge (`device_y = height − ctm_y`), so a window
+    /// `y` pixels below the page top and `height` tall shifts the CTM's y
+    /// translation by `page_height − y − height`.
     fn initial_ctm(&self) -> Ctm {
         let mut ctm = build_initial_ctm(
             self.page_width,
             self.page_height,
-            (self.scale_x, self.scale_y),
+            (self.scale_x * self.user_unit, self.scale_y * self.user_unit),
             self.rotate_cw,
             self.origin_x,
             self.origin_y,
@@ -746,11 +748,17 @@ impl<'doc> PageRenderer<'doc> {
     /// `doc` and `page_id` are used to resolve font and resource dictionaries.
     #[must_use]
     pub fn new(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
-        Self::with_view(
-            &PageView::whole(width, height, (1.0, 1.0), 0, 0.0, 0.0),
-            doc,
-            page_id,
-        )
+        let geom = PageGeometry {
+            width_pts: f64::from(width),
+            height_pts: f64::from(height),
+            rotate_cw: 0,
+            user_unit: 1.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            media_box: None,
+            crop_box: None,
+        };
+        Self::with_view(&PageView::whole(&geom, (1.0, 1.0)), doc, page_id)
     }
 
     /// Create a renderer for `view`: a white bitmap of the view's window, with
@@ -3248,6 +3256,29 @@ mod tests {
                 &want,
             );
         }
+    }
+
+    /// `/UserUnit` scales the page's pixel extent and the CTM alike: a
+    /// 200 × 100 pt page with `/UserUnit 2` at one pixel per point is
+    /// 400 × 200 px, and its content point (200, 100) lands on the far
+    /// corner.  A window of that page keeps the same scale.
+    #[test]
+    fn page_view_user_unit_scales_the_ctm_with_the_extent() {
+        let geom = PageGeometry {
+            width_pts: 400.0,
+            height_pts: 200.0,
+            rotate_cw: 0,
+            user_unit: 2.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            media_box: Some([0.0, 0.0, 200.0, 100.0]),
+            crop_box: None,
+        };
+        let whole = PageView::whole(&geom, (1.0, 1.0));
+        assert_eq!((whole.page_width, whole.page_height), (400, 200));
+        assert_ctm_eq(whole.initial_ctm(), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        let window = whole.window(100, 50, 200, 100);
+        assert_ctm_eq(window.initial_ctm(), [2.0, 0.0, 0.0, 2.0, -100.0, -50.0]);
     }
 
     #[test]

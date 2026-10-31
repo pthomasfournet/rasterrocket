@@ -62,14 +62,7 @@ fn main() {
     });
     println!("Page {page}: {} operators", ops.len());
 
-    let view = rasterrocket_interp::renderer::PageView::whole(
-        w,
-        h,
-        (scale, scale),
-        geom.rotate_cw,
-        geom.origin_x,
-        geom.origin_y,
-    );
+    let view = rasterrocket_interp::renderer::PageView::whole(&geom, (scale, scale));
     let mut renderer = rasterrocket_interp::renderer::PageRenderer::with_view(&view, &doc, page_id);
     renderer.execute(&ops);
     let (bitmap, _diag) = renderer.finish();

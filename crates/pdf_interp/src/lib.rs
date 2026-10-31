@@ -676,9 +676,9 @@ pub fn page_size_pts_by_id(
         (w_pts * user_unit, h_pts * user_unit)
     };
 
-    // The origin is kept in unscaled PDF user-space coordinates (before UserUnit scaling).
-    // The CTM in `PageRenderer::with_view` applies (scale = dpi/72 * user_unit) already, so the
-    // pre-translation by (-origin_x, -origin_y) in unscaled points is correct there.
+    // The origin is a user-space coordinate: the initial CTM scales user
+    // space by dpi/72 × user_unit, so it pre-translates by (-origin_x,
+    // -origin_y) in user-space units, not in points.
     let (origin_x, origin_y) = (box_left, box_bottom);
 
     Ok(PageGeometry {

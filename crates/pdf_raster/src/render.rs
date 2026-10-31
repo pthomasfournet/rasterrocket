@@ -766,21 +766,14 @@ fn page_view(
     scales: (f64, f64),
     region: Option<RenderRegion>,
 ) -> Result<pdf_interp::renderer::PageView, RasterError> {
-    let (w_px, h_px) = geom.size_px(scales.0, scales.1);
+    let whole = pdf_interp::renderer::PageView::whole(geom, scales);
+    let (w_px, h_px) = (whole.page_width, whole.page_height);
     if w_px == 0 || h_px == 0 {
         return Err(RasterError::PageDegenerate {
             width: w_px,
             height: h_px,
         });
     }
-    let whole = pdf_interp::renderer::PageView::whole(
-        w_px,
-        h_px,
-        scales,
-        geom.rotate_cw,
-        geom.origin_x,
-        geom.origin_y,
-    );
     let Some(r) = region else {
         // Reject oversized pages before the bitmap is allocated, never after,
         // via the shared guard (per-side limit, then total-area limit in u64).
