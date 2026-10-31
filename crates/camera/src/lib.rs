@@ -45,13 +45,6 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "every module is private, so rustc's `unreachable_pub` requires \
-              crate-internal items to be `pub(crate)`, which this lint then \
-              calls redundant; the two lints cannot both hold"
-)]
-
 mod dewarp;
 mod error;
 mod homography;

@@ -1,10 +1,3 @@
-// `pub(crate)` items inside a `pub(crate)` module trigger clippy::redundant_pub_crate
-// when nursery lints are enabled, but the explicitness aids readability in a module
-// that is only conditionally compiled and accessed from a single call site.
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "explicitness aids readability for conditionally-compiled single-call-site module"
-)]
 //! Construction helpers that build [`gpu::DecodeQueue`] instances for each
 //! supported hardware JPEG decoder backend.
 //!

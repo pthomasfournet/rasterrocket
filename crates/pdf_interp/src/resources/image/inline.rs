@@ -1,10 +1,4 @@
 //! Inline image decoding (`BI … ID … EI`) and parameter parsing.
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "parse_inline_params is pub(crate) for prescan.rs; \
-              redundant here because inline is a private module, but explicit visibility aids readability"
-)]
-
 use pdf::{Dictionary, Object};
 
 use super::colorspace::ImageColour;

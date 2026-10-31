@@ -65,6 +65,11 @@ unreachable_pub      = "warn"
 all      = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery  = { level = "warn", priority = -1 }
+# Off: rustc's `unreachable_pub` requires crate-internal items of private
+# modules to be `pub(crate)`, which this nursery lint calls redundant; the
+# two cannot both hold, and `unreachable_pub` is the one that finds dead
+# public surface.
+redundant_pub_crate = "allow"
 
 [profile.release]
 opt-level      = 3

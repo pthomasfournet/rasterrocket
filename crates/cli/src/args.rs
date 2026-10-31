@@ -1,11 +1,5 @@
 //! Command-line argument definitions.
 
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "bin-only crate with private modules: pub(crate) is the real \
-              visibility and cannot escape; widening to pub would misdescribe it"
-)]
-
 use camera::CameraOptions;
 use clap::Parser;
 use pdf_raster::{BackendPolicy, RenderPurpose, RenderRegion, SessionConfig};

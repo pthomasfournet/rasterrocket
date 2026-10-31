@@ -475,10 +475,6 @@ fn dispatch_jpeg_phase1_then_phase2<B: GpuBackend>(
 
 /// Result of one parallel-Huffman decode of a JPEG entropy stream.
 #[derive(Debug)]
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "pub(crate) is intentional: parent module is pub(crate); inner items need explicit visibility for documentation and grepping"
-)]
 pub(crate) struct JpegSymbolDecode {
     /// Decoded Huffman symbol stream, one `u32` per symbol.
     pub symbols: Vec<u32>,
@@ -540,10 +536,6 @@ fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
 /// if the converged chain stalled mid-stream on a decode error
 /// (see [`jpeg_stream_stalled`]); or if Phase 4 reports a per-subseq
 /// decode failure.
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "pub(crate) is intentional: parent module is pub(crate); inner items need explicit visibility for documentation and grepping"
-)]
 pub(crate) fn decode_jpeg_symbols<B: GpuBackend>(
     backend: &B,
     prep: &crate::jpeg_decoder::JpegPreparedInput,

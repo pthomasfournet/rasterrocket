@@ -7,13 +7,6 @@
 //! * All byte scanning uses hand-rolled primitives in the private `lexer`
 //!   submodule.
 
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "every module is private, so rustc's `unreachable_pub` requires \
-              crate-internal items to be `pub(crate)`, which this lint then \
-              calls redundant; the two lints cannot both hold"
-)]
-
 mod crypt;
 mod derived;
 mod dictionary;

@@ -7,12 +7,6 @@
 //! ([`camera::Report::replay`]), so colour is preserved and every channel
 //! is resampled identically.
 
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "bin-only crate with private modules: pub(crate) is the real \
-              visibility and cannot escape; widening to pub would misdescribe it"
-)]
-
 use camera::{CameraOptions, GrayPage, GrayView, Outcome, Report};
 use color::{Gray8, Rgb8};
 use pdf_raster::rgb_to_gray;

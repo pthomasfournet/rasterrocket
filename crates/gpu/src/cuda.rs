@@ -4,12 +4,6 @@
 //! feature).  Extracted to avoid duplicating the eight-symbol FFI block and the
 //! five-step init sequence in each consumer.
 
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "the module is crate-private, so pub(crate) states the real visibility; \
-              widening to pub would misdescribe the intent"
-)]
-
 use std::ffi::c_void;
 use std::ptr;
 

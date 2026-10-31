@@ -579,10 +579,6 @@ impl std::fmt::Debug for DiskTier {
 /// widely — both worse than the lint suppression.
 #[cfg(test)]
 #[derive(Debug)]
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "matches DiskTier::lookup's pub(crate) signature; narrowing to pub(super) creates a privacy mismatch"
-)]
 pub(crate) struct DiskEntry {
     pub(crate) width: u32,
     pub(crate) height: u32,
