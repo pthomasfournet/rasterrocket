@@ -363,6 +363,6 @@ path — the crates.io packages are abandoned at 1.0.1.
 
 ### A note on output destination
 
-The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits**; the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when MemAvailable drops below 1 GiB.
+The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits**; the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when MemAvailable drops below 1 GiB (Linux only, where it reads `/proc/meminfo`). On systems without `/dev/shm` (macOS, the BSDs) there is no default redirect and a bare stem writes to the working directory.
 
 See [cli-reference.md](cli-reference.md) for CLI usage.

@@ -220,7 +220,8 @@ pub(crate) struct Args {
     /// `rrocket doc.pdf out`) to a freshly-created tmpfs directory under
     /// `/dev/shm`, because writing to disk is 10–20× slower than RAM and
     /// dominates wall time. Path-like prefixes (anything with `/` or
-    /// starting with `.`) opt out of that redirect and write to disk.
+    /// starting with `.`) opt out of that redirect and write to disk, as do
+    /// all prefixes on systems without `/dev/shm` (macOS, the BSDs).
     ///
     /// Use `--ram` to override the heuristic: redirect to tmpfs even when
     /// the user-supplied prefix would otherwise be treated as a real path.

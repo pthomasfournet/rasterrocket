@@ -9,6 +9,9 @@
 //! The user's `OUTPUT_PREFIX` becomes the file stem inside that dir, so
 //! downstream consumers that read `out-NNN.ppm` keep working unchanged.
 //!
+//! The default applies only where `/dev/shm` exists; elsewhere (macOS, the
+//! BSDs) a bare stem is written to the working directory like any prefix.
+//!
 //! The redirect is suppressed when `OUTPUT_PREFIX` looks like a path
 //! (contains `/`, starts with `.`) — those are taken literally as the user
 //! asking for a real disk location. See [`should_use_ram`] for the rule.
@@ -211,7 +214,8 @@ fn read_mem_available() -> Option<u64> {
 /// Precedence (highest first):
 /// 1. `--no-ram` → always disk
 /// 2. `--ram` or `--ram-path` → always RAM
-/// 3. Heuristic on `output_prefix`:
+/// 3. Heuristic on `output_prefix`, applied only when [`RAM_ROOT`] exists
+///    (it does not on macOS or the BSDs, nor in some containers):
 ///    - bare stem (e.g. `out`, `p`) → RAM (default)
 ///    - path-like (`./out`, `dir/p`, `/abs/path`) → disk
 ///
@@ -223,20 +227,24 @@ fn read_mem_available() -> Option<u64> {
 fn should_use_ram(args: &Args) -> bool {
     use_ram_for(
         args.no_ram,
-        args.ram,
-        args.ram_path.is_some(),
+        args.ram || args.ram_path.is_some(),
         &args.output_prefix,
+        Path::new(RAM_ROOT).is_dir(),
     )
 }
 
 /// Pure-function form of [`should_use_ram`] for unit testing without an
-/// `Args` value. The four inputs map 1:1 to the policy precedence.
-fn use_ram_for(no_ram: bool, ram: bool, has_ram_path: bool, prefix: &str) -> bool {
+/// `Args` value. `force_ram` is `--ram` or `--ram-path`; `ram_root_present`
+/// gates the heuristic on the existence of [`RAM_ROOT`].
+fn use_ram_for(no_ram: bool, force_ram: bool, prefix: &str, ram_root_present: bool) -> bool {
     if no_ram {
         return false;
     }
-    if ram || has_ram_path {
+    if force_ram {
         return true;
+    }
+    if !ram_root_present {
+        return false;
     }
     // Bare stem: non-empty, doesn't start with '.', no path separators.
     !prefix.is_empty()
@@ -317,6 +325,9 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
     ))
 }
 
+/// tmpfs mount under which the default RAM directories are created.
+const RAM_ROOT: &str = "/dev/shm";
+
 /// Build a default `/dev/shm/rrocket-<pid>-<nanos>` path.
 ///
 /// `pid + nanos since epoch` is enough entropy for parallel CLI invocations
@@ -327,7 +338,7 @@ fn default_ram_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    PathBuf::from(format!("/dev/shm/rrocket-{pid}-{nanos}"))
+    Path::new(RAM_ROOT).join(format!("rrocket-{pid}-{nanos}"))
 }
 
 #[cfg(test)]
@@ -369,18 +380,18 @@ mod tests {
 
     #[test]
     fn heuristic_bare_stem_uses_ram() {
-        assert!(use_ram_for(false, false, false, "out"));
-        assert!(use_ram_for(false, false, false, "p"));
-        assert!(use_ram_for(false, false, false, "page"));
+        assert!(use_ram_for(false, false, "out", true));
+        assert!(use_ram_for(false, false, "p", true));
+        assert!(use_ram_for(false, false, "page", true));
     }
 
     #[test]
     fn heuristic_path_like_prefix_uses_disk() {
-        assert!(!use_ram_for(false, false, false, "./out"));
-        assert!(!use_ram_for(false, false, false, "../out"));
-        assert!(!use_ram_for(false, false, false, "/tmp/out"));
-        assert!(!use_ram_for(false, false, false, "dir/p"));
-        assert!(!use_ram_for(false, false, false, ".hidden"));
+        assert!(!use_ram_for(false, false, "./out", true));
+        assert!(!use_ram_for(false, false, "../out", true));
+        assert!(!use_ram_for(false, false, "/tmp/out", true));
+        assert!(!use_ram_for(false, false, "dir/p", true));
+        assert!(!use_ram_for(false, false, ".hidden", true));
     }
 
     #[test]
@@ -389,25 +400,27 @@ mod tests {
         // accident, but every-page write would land at "-NNN.ppm" in the
         // cwd which is bizarre. Better to fall through to disk and let
         // the user see the obvious-broken behaviour.
-        assert!(!use_ram_for(false, false, false, ""));
+        assert!(!use_ram_for(false, false, "", true));
     }
 
     #[test]
     fn explicit_ram_flag_overrides_path_heuristic() {
         // User typed --ram with a path-like prefix: respect the flag.
-        assert!(use_ram_for(false, true, false, "./out"));
-        assert!(use_ram_for(false, true, false, "/abs/p"));
+        assert!(use_ram_for(false, true, "./out", true));
+        assert!(use_ram_for(false, true, "/abs/p", true));
     }
 
     #[test]
     fn explicit_no_ram_flag_overrides_bare_stem() {
         // User typed --no-ram with a bare stem: respect the flag.
-        assert!(!use_ram_for(true, false, false, "out"));
+        assert!(!use_ram_for(true, false, "out", true));
     }
 
     #[test]
-    fn ram_path_implies_ram() {
-        // --ram-path on its own (without --ram) is enough to opt in.
-        assert!(use_ram_for(false, false, true, "./out"));
+    fn bare_stem_uses_disk_without_ram_root() {
+        // No tmpfs mount (macOS, the BSDs): the heuristic writes where asked,
+        // while an explicit --ram or --ram-path keeps its meaning.
+        assert!(!use_ram_for(false, false, "out", false));
+        assert!(use_ram_for(false, true, "out", false));
     }
 }
