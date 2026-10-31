@@ -4,11 +4,10 @@
 //! intersection spans, which are then consumed by `ScanIterator` (a
 //! private iterator type) to emit `(x0, x1)` spans for compositing.
 //!
-//! ## Design vs. C++ original
+//! ## Layout
 //!
-//! The C++ `SplashXPathScanner` stores `std::vector<SplashIntersect>` (or
-//! `boost::container::small_vector<SplashIntersect, 4>`) per scanline — one
-//! heap allocation per row. This replacement uses a **flat `SoA` layout**:
+//! Intersections are stored in a **flat `SoA` layout** rather than one
+//! vector per scanline, so construction makes no per-row heap allocation:
 //!
 //! - `row_start[i]` is the index into `intersects` of the first intersection
 //!   on scanline `y_min + i`.
@@ -68,8 +67,6 @@ fn fp_from_f64(x: f64) -> i32 {
 // ── Intersect ─────────────────────────────────────────────────────────────────
 
 /// One intersection entry for a scanline.
-///
-/// Matches `SplashIntersect` in `splash/SplashXPathScanner.h`.
 #[derive(Copy, Clone, Debug)]
 pub struct Intersect {
     /// Left pixel of the intersection span, inclusive.
@@ -86,7 +83,7 @@ pub struct Intersect {
 /// Per-scanline intersection table built from an [`XPath`].
 ///
 /// After construction the scanner is read-only; it is cheaply shareable via
-/// `Arc` (matching the C++ `shared_ptr<SplashXPathScanner>` used in `SplashClip`).
+/// `Arc`, as a clip shares it across saved graphics states.
 ///
 /// ## `SoA` layout invariant
 ///
@@ -396,7 +393,7 @@ impl XPathScanner {
 
     /// Render the AA supersampled row to `aa_buf` and update `[x0, x1]` output range.
     ///
-    /// Matches `SplashXPathScanner::renderAALine`. `y` is in device-pixel space;
+    /// `y` is in device-pixel space;
     /// the scanner must have been built from an `aa_scale()`'d `XPath`.
     ///
     /// `x0` and `x1` are updated to the tightest bounding range of pixels
@@ -429,7 +426,7 @@ impl XPathScanner {
     /// Intersect the AA supersampled row already in `aa_buf` with this
     /// scanner's coverage over device pixels `[x0, x1]`.
     ///
-    /// Matches `SplashXPathScanner::clipAALine`. Every sub-sample in the range
+    /// Every sub-sample in the range
     /// that [`render_aa_line`](Self::render_aa_line) would leave unset for this
     /// scanner is cleared; sub-samples it would set keep their current value.
     /// `y` is in device-pixel space; the scanner must have been built from an
@@ -686,7 +683,6 @@ fn write_intersect(
 ///
 /// Two spans are merged when `last.x1 + 1 >= entry.x0` *and*
 /// `last.x0 <= entry.x1 + 1` (i.e. they touch or overlap in either direction).
-/// This matches `SplashXPathScanner::addIntersection` in `SplashXPathScanner.cc`.
 #[cfg(test)]
 fn add_intersection(row: &mut Vec<Intersect>, x0: i32, x1: i32, count: i32, _is_horiz: bool) {
     let (lo, hi) = (x0.min(x1), x0.max(x1));

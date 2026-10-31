@@ -1,7 +1,6 @@
 //! Coalescing span iterator over a scanner's intersection row.
 //!
-//! [`crate::ScanIterator`] mirrors `SplashXPathScanIterator::getNextSpan` from
-//! `splash/SplashXPathScanner.cc`. It merges adjacent and overlapping
+//! [`crate::ScanIterator`] merges adjacent and overlapping
 //! intersections into contiguous `(x0, x1)` spans (inclusive) and handles
 //! both even-odd and non-zero winding fill rules via the `eo_mask`.
 //!
@@ -46,7 +45,7 @@ use super::{Intersect, XPathScanner};
 /// Spans are emitted in left-to-right order with no overlap.
 ///
 /// Constructed via [`ScanIterator::new`]. Out-of-range `y` values produce an
-/// immediately-exhausted iterator (matching the C++ empty-row behaviour).
+/// immediately-exhausted iterator.
 pub struct ScanIterator<'a> {
     /// The sorted intersection list for this scanline.
     row: &'a [Intersect],
@@ -68,8 +67,7 @@ impl<'a> ScanIterator<'a> {
     /// Create an iterator for scanline `y` of `scanner`.
     ///
     /// If `y` is outside the scanner's range, the iterator is immediately
-    /// exhausted (matching C++ behaviour where the empty `allIntersections[0]`
-    /// row is returned with `interIdx = line.size()`).
+    /// exhausted.
     #[must_use]
     pub fn new(scanner: &'a XPathScanner, y: i32) -> Self {
         let row = scanner.row(y);

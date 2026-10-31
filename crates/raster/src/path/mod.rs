@@ -1,8 +1,7 @@
 //! PDF path geometry: points, flags, subpath state machine, and builder API.
 //!
-//! The `pts` and `flags` arrays are parallel `SoA` (one entry per index).  This
-//! layout originates in `SplashPath` from `splash/SplashPath.{h,cc}`, but is
-//! preserved deliberately rather than ported: `xpath::XPath::new` transforms
+//! The `pts` and `flags` arrays are parallel `SoA` (one entry per index).
+//! `xpath::XPath::new` transforms
 //! the entire `pts` array under a CTM in one pass before anything reads
 //! `flags`, and the contiguous f64-pair layout keeps that pre-pass tight.
 //! Walkers that read both arrays together (`xpath.rs`, `stroke/path.rs`)
@@ -10,8 +9,7 @@
 //!
 //! ## Subpath state machine
 //!
-//! A [`Path`] is always in one of three states (matching the C++ comments in
-//! `SplashPath.cc`):
+//! A [`Path`] is always in one of three states:
 //!
 //! | State            | Condition                        | Meaning                          |
 //! |------------------|----------------------------------|----------------------------------|
@@ -30,7 +28,7 @@ use bitflags::bitflags;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/// A 2-D point in path space (f64 coordinates, matching `SplashPathPoint`).
+/// A 2-D point in path space (f64 coordinates).
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PathPoint {
     /// Horizontal coordinate.
@@ -63,9 +61,6 @@ impl From<PathPoint> for (f64, f64) {
 
 bitflags! {
     /// Per-point flags stored in the parallel `flags` array of a [`Path`].
-    ///
-    /// Matches the `splashPathFirst/Last/Closed/Curve` constants in
-    /// `SplashPath.h`.
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
     pub struct PathFlags: u8 {
         /// First point of a subpath (set on the `moveTo` point).
@@ -107,8 +102,6 @@ impl PathFlags {
 
 /// Stroke-adjust hint: a pair of path segments that should be snapped to
 /// integer pixel boundaries to avoid seams between adjacent filled rectangles.
-///
-/// Matches `SplashPathHint` in `SplashPath.h`.
 #[derive(Copy, Clone, Debug)]
 pub struct StrokeAdjustHint {
     /// Index (into [`Path::pts`]) of the first control segment.
@@ -162,8 +155,6 @@ impl std::error::Error for PathError {}
 /// cubic Bezier curves.
 ///
 /// # Invariants
-///
-/// These match `SplashPath.cc`:
 ///
 /// - `pts.len() == flags.len()` at all times.
 /// - `cur_subpath` is the index of the first point of the currently open
@@ -298,7 +289,7 @@ impl Path {
     /// Append all points and hints from `other` into `self`.
     ///
     /// `cur_subpath` is set to `self.pts.len() + other.cur_subpath` **before**
-    /// appending, matching `SplashPath::append`.
+    /// appending.
     ///
     /// # Edge cases
     ///
@@ -332,8 +323,8 @@ impl Path {
 // ── PathBuilder ───────────────────────────────────────────────────────────────
 
 /// Ergonomic builder for [`Path`] implementing the PDF path construction
-/// operators (`m`, `l`, `c`, `h`) with the same state-machine semantics as
-/// `SplashPath::moveTo` / `lineTo` / `curveTo` / `close`.
+/// operators (`m`, `l`, `c`, `h`) over the subpath state machine of
+/// [`Path`].
 pub struct PathBuilder {
     path: Path,
 }
@@ -440,7 +431,7 @@ impl PathBuilder {
     ///   `moveTo` with no drawing operators).  In this degenerate case the
     ///   subpath is trivially "closed" (first == last by identity), so no
     ///   extra `lineTo` is needed — the single point has [`PathFlags::CLOSED`]
-    ///   set on itself.  This matches the C++ `SplashPath::close` behaviour.
+    ///   set on itself.
     /// - Otherwise, a closing `lineTo(first)` is appended only when
     ///   `first != last` (the path is not already closed geometrically).
     ///
@@ -622,7 +613,7 @@ mod tests {
     /// A one-point subpath (`moveTo` with no drawing operators) should have
     /// [`PathFlags::CLOSED`] set on that single point when `close` is called.
     /// The single point acts as both first and last, so both writes target
-    /// `pts[sp]` — which is correct per `SplashPath::close`.
+    /// `pts[sp]`.
     #[test]
     fn close_one_point_subpath_sets_closed_flag() {
         let mut b = PathBuilder::new();

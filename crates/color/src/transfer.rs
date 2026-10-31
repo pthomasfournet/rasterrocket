@@ -19,8 +19,8 @@
 //! PDF transfer functions work per-channel.  The graphics state therefore keeps
 //! one `TransferLut` per channel (R, G, B, gray, and the four CMYK channels).
 //! The CMYK LUTs are derived from the RGB/gray LUT via
-//! [`TransferLut::invert_complement`], matching the logic in
-//! `SplashState::setTransfer`.
+//! [`TransferLut::invert_complement`]: a subtractive channel's transfer is
+//! the complement of the additive one.
 //!
 //! ## Safety / infallibility
 //!
@@ -112,7 +112,7 @@ impl TransferLut {
     /// Produce a new LUT where `output[i] = 255 - self[255 - i]`.
     ///
     /// Used by `GraphicsState::set_transfer` to derive the CMYK LUTs from the
-    /// RGB/gray LUTs, matching `SplashState::setTransfer` in SplashState.cc.
+    /// RGB/gray LUTs.
     ///
     /// # Index safety
     ///

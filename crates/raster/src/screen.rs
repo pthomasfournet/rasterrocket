@@ -1,7 +1,5 @@
 //! Halftone threshold screen for Mono1 (1-bit) output.
 //!
-//! Mirrors `SplashScreen` from `splash/SplashScreen.h/.cc`.
-//!
 //! The screen is a power-of-2 tiled threshold matrix. A pixel with value `v`
 //! is set to white (1) when `v >= mat[y % size][x % size]`, and black (0)
 //! otherwise. The matrix is built lazily on first `test()` call.
@@ -38,8 +36,6 @@ impl HalftoneScreen {
 
     /// Test whether pixel `(x, y)` with intensity `value` (0=black, 255=white)
     /// should be rendered as white (returns `true`) or black (`false`).
-    ///
-    /// Matches `SplashScreen::test` in `SplashScreen.h`.
     #[inline]
     pub fn test(&mut self, x: i32, y: i32, value: u8) -> bool {
         if self.mat.is_none() {
@@ -146,7 +142,6 @@ fn clamp_min_one(mat: &mut [u8]) {
 // ── Dispersed (Bayer) matrix ──────────────────────────────────────────────────
 
 /// Recursive void-pointer dispersed dot (Bayer) matrix construction.
-/// Matches `SplashScreen::buildDispersedMatrix` in `SplashScreen.cc`.
 ///
 /// Fills `mat` (length `size × size`) with threshold values in `[1, 255]`
 /// distributed in the classic Bayer ordered-dither pattern. The pattern
@@ -286,7 +281,6 @@ fn build_clustered(mat: &mut [u8], size: usize) {
 
 /// Stochastic clustered dot screen. Places dots at semi-random positions
 /// with a minimum distance of `dot_radius` between dot centres.
-/// Matches `SplashScreen::buildSCDMatrix` in spirit.
 ///
 /// Cells are sorted by their distance to the nearest jittered dot centre
 /// (using a torus/wrap-around metric so the matrix tiles seamlessly).
@@ -301,9 +295,8 @@ fn build_stochastic_clustered(mat: &mut [u8], size: usize, dot_radius: usize) {
         size >= 2,
         "build_stochastic_clustered: size must be >= 2, got {size}"
     );
-    // Simplified version: place dot centres on a jittered grid and build
-    // a distance-based threshold matrix. The C++ version uses a void-pointer
-    // algorithm with a priority queue; this captures the same visual character.
+    // Dot centres lie on a regular grid; each cell's threshold is ranked by
+    // its distance to the nearest centre, which yields clustered dots.
     let n = size * size;
     // n >= 4 because size >= 2; division by n is safe.
     debug_assert!(n >= 4, "build_stochastic_clustered: n={n} must be >= 4");

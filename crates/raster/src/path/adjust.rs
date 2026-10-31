@@ -1,8 +1,5 @@
 //! Stroke-adjust hint application.
 //!
-//! Mirrors `SplashXPathAdjust` and `SplashXPath::strokeAdjust()` from
-//! `splash/SplashXPath.cc`.
-//!
 //! ## What stroke adjustment does
 //!
 //! PDF stroke adjustment snaps near-axis-aligned path segments to integer
@@ -23,8 +20,6 @@ use crate::types::round_half_up_i32;
 
 /// An axis-aligned stroke-adjust hint, derived from a `StrokeAdjustHint`
 /// (see `crate::path::stroke`) after path transformation.
-///
-/// Matches `SplashXPathAdjust` in `splash/SplashXPath.cc`.
 ///
 /// ## Snap-window fields
 ///
@@ -72,8 +67,8 @@ impl XPathAdjust {
     /// `adj0 <= adj1`. The caller in `build_adjusts` in `xpath.rs` guarantees
     /// this by passing `min`/`max`-reduced values.
     ///
-    /// `adjust_lines` and `line_pos_i` implement the same special-case logic as
-    /// in `SplashXPath` constructor: when the two rounded endpoints coincide and
+    /// `adjust_lines` and `line_pos_i` handle a degenerate hint: when the two
+    /// rounded endpoints coincide and
     /// `adjust_lines` is true, the span is expanded to
     /// `[line_pos_i, line_pos_i + 1]`.
     #[must_use]
@@ -133,8 +128,6 @@ impl XPathAdjust {
 /// Windows are open intervals; boundary values are **not** snapped. For
 /// example, a coordinate equal to exactly `adj.x0a` (= `adj0 - 0.01`) is
 /// outside the window `(x0a, x0b)` and will not be snapped.
-///
-/// Matches `SplashXPath::strokeAdjust()` in `SplashXPath.cc`.
 #[inline]
 pub fn stroke_adjust(adj: &XPathAdjust, x: &mut f64, y: &mut f64) {
     let v = if adj.vert { x } else { y };

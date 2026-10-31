@@ -1,7 +1,6 @@
 //! Flattened, matrix-transformed path edge table.
 //!
-//! [`XPath`] is the Rust equivalent of `SplashXPath` from `splash/SplashXPath.h/.cc`.
-//! It converts a [`Path`] (in user space) into a sorted sequence of line segments
+//! [`XPath`] converts a [`Path`] (in user space) into a sorted sequence of line segments
 //! in device space, ready for scan conversion by [`crate::XPathScanner`].
 //!
 //! ## Typical usage pipeline
@@ -23,8 +22,7 @@
 //!
 //! - For every non-horizontal segment, `y0 ≤ y1` after construction (swapped
 //!   if necessary; [`XPathFlags::FLIPPED`] is set when a swap occurred).
-//! - [`XPathFlags::HORIZ`] is set when `y0 == y1` (despite the misleading
-//!   "vertical" comment in the original C++ header — trust the code).
+//! - [`XPathFlags::HORIZ`] is set when `y0 == y1`.
 //! - [`XPathFlags::VERT`] is set when `x0 == x1`.
 //! - `dxdy = (x1-x0)/(y1-y0)` for sloped segments; 0.0 for horizontal/vertical.
 //!   Division is safe because the HORIZ early-return guarantees `y0 ≠ y1` for
@@ -36,7 +34,7 @@
 //! x_out = x_in * m[0] + y_in * m[2] + m[4]
 //! y_out = x_in * m[1] + y_in * m[3] + m[5]
 //! ```
-//! (column-vector convention matching `SplashXPath::transform`.)
+//! (column-vector convention.)
 
 use crate::path::adjust::{XPathAdjust, stroke_adjust};
 use crate::path::flatten::{CurveData, flatten_curve};
@@ -50,10 +48,9 @@ bitflags! {
     /// Per-segment flags for [`XPathSeg`].
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
     pub struct XPathFlags: u32 {
-        /// Horizontal segment: y0 == y1. (`splashXPathHoriz`)
-        /// NOTE: the C++ header comment says "vertical" — this is wrong.
+        /// Horizontal segment: y0 == y1.
         const HORIZ   = 0x01;
-        /// Vertical segment: x0 == x1. (`splashXPathVert`)
+        /// Vertical segment: x0 == x1.
         const VERT    = 0x02;
         /// Segment was flipped (original y0 > y1) to enforce y0 ≤ y1.
         const FLIPPED = 0x04;
@@ -63,8 +60,6 @@ bitflags! {
 // ── XPathSeg ──────────────────────────────────────────────────────────────────
 
 /// A single line segment in the edge table, in device space.
-///
-/// Matches `SplashXPathSeg` from `splash/SplashXPath.h`.
 ///
 /// # Invariant
 ///
@@ -164,7 +159,7 @@ impl XPath {
     ///   segments. Typical range: `0.1`–`1.0`.
     /// - `close_subpaths`: if `true`, an implicit closing segment is added from
     ///   the last point of each subpath back to its first point when they do not
-    ///   already coincide (matches `SplashXPath` constructor behaviour).
+    ///   already coincide.
     ///
     /// # Ordering constraints
     ///
@@ -280,8 +275,6 @@ impl XPath {
     /// `dxdy` (the slope) is invariant under uniform scaling and is **not** modified —
     /// a uniform scale cancels out in `(x1-x0)/(y1-y0)`.
     ///
-    /// Matches `SplashXPath::aaScale()`.
-    ///
     /// # Ordering constraint
     ///
     /// This method must be called **after** [`XPath::new`] and **at most once**.
@@ -335,8 +328,6 @@ impl XPath {
     /// horizontal nor vertical. The HORIZ early-return guarantees `y0 ≠ y1` for
     /// any segment that reaches this computation, so division by zero cannot
     /// occur. A `debug_assert!` enforces this contract in debug builds.
-    ///
-    /// Matches `SplashXPath::addSegment` in `SplashXPath.cc`.
     fn add_segment(&mut self, mut x0: f64, mut y0: f64, mut x1: f64, mut y1: f64) {
         let mut flags = XPathFlags::empty();
 
@@ -423,7 +414,7 @@ impl XPath {
 /// Apply a 2-D affine matrix to point `(xi, yi)`, returning the transformed
 /// [`PathPoint`] in device space.
 ///
-/// Column-vector convention matching `SplashXPath::transform`:
+/// Column-vector convention:
 ///
 /// ```text
 /// x_out = xi*m[0] + yi*m[2] + m[4]
@@ -445,11 +436,9 @@ pub const fn transform(m: &[f64; 6], xi: f64, yi: f64) -> PathPoint {
 
 /// Build [`XPathAdjust`] records from path hints and transformed points.
 ///
-/// Mirrors the hint-processing loop in the `SplashXPath` constructor.
-///
 /// Only axis-aligned hint pairs (both edges strictly horizontal or both
 /// strictly vertical after transformation) are converted to adjust records;
-/// skewed pairs are silently dropped, matching the C++ behaviour.
+/// skewed pairs are dropped, since snapping applies only to axis-aligned edges.
 ///
 /// Hints whose control-point indices are out of range for `tpts` are also
 /// silently dropped rather than panicking, so that malformed PDF content

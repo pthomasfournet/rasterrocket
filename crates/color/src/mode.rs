@@ -1,4 +1,4 @@
-//! Pixel color modes, mirroring `SplashColorMode` from `SplashTypes.h`.
+//! Pixel color modes: the memory layout of one bitmap pixel.
 //!
 //! # Overview
 //!
@@ -31,8 +31,7 @@
 
 /// Pixel color mode, describing the memory layout of one pixel in a bitmap row.
 ///
-/// The discriminant values mirror `SplashColorMode` in `SplashTypes.h` so that
-/// raw FFI conversions remain stable.
+/// The discriminant values are fixed: [`PixelMode::from_u8`] inverts them.
 ///
 /// # Packed-bits exception
 ///
@@ -60,7 +59,6 @@ pub enum PixelMode {
     /// 4 bytes/pixel: C M Y K.
     Cmyk8 = 5,
     /// 8 bytes/pixel: C M Y K + 4 spot channels.
-    /// Corresponds to `SPOT_NCOMPS = 4` in `SplashTypes.h`.
     DeviceN8 = 6,
 }
 

@@ -1,7 +1,6 @@
 //! Adaptive Bezier curve flattening via De Casteljau subdivision.
 //!
-//! Mirrors `SplashXPath::addCurve` from `splash/SplashXPath.cc` exactly,
-//! including the `cx/cy/cNext` stack representation and the
+//! Subdivision uses an explicit `cx/cy/cNext` stack and is bounded by the
 //! `MAX_CURVE_SPLITS = 1024` hard limit.
 //!
 //! ## Algorithm
@@ -66,7 +65,7 @@ impl CurveData {
     /// # Panics
     ///
     /// Panics if `MAX_CURVE_SPLITS` is negative. It is defined as the positive
-    /// constant `1024` (matching `splashMaxCurveSplits` in `SplashTypes.h`), so
+    /// constant `1024`, so
     /// this branch is unreachable in practice.
     #[must_use]
     pub fn new() -> Box<Self> {
