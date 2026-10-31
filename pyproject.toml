@@ -1,0 +1,62 @@
+# Lint, format and type-check settings for the repository's Python scripts.
+# There is no Python package here: the file carries tool configuration only.
+#
+#     ruff check . && ruff format --check . && pylint $(git ls-files '*.py') && mypy
+#
+# The vendored crates are excluded: their scripts follow their upstreams.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+include = ["*.py"]
+extend-exclude = [
+    "crates/jpeg2000",
+    "crates/jbig2",
+    "crates/ccitt",
+    "crates/read_fonts",
+    "crates/skrifa",
+    "crates/font_test_data",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # trailing commas are the formatter's decision
+    "CPY001",  # no per-file copyright headers in this repository
+    "D203",    # conflicts with D211
+    "D213",    # conflicts with D212
+    "INP001",  # standalone scripts, not a package
+    "T201",    # the scripts report on stdout and stderr
+]
+
+[tool.pylint.main]
+py-version = "3.11"
+# The scripts import the shared helpers in scripts/ by path; resolve them the same way.
+init-hook = "import sys; sys.path.insert(0, \"scripts\")"
+ignore-paths = [
+    "^crates/(jpeg2000|jbig2|ccitt|read_fonts|skrifa|font_test_data)/",
+]
+
+[tool.pylint."messages control"]
+# Import position is ruff's E402, which, unlike this check, admits the
+# `sys.path` insertion that makes scripts/ importable under `python3 -I`.
+disable = ["wrong-import-position"]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = [
+    "crates/font/src/tests/data/generate.py",
+    "fuzz",
+    "scripts",
+    "tests",
+]
+mypy_path = "scripts"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["fontTools.*", "pypdfium2"]
+ignore_missing_imports = true
