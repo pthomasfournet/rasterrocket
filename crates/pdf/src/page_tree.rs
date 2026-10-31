@@ -35,11 +35,9 @@ const MAX_DEPTH: usize = 64;
 /// cyclic, deeper than `MAX_DEPTH`, or its `/Kids` and `/Count` entries are
 /// inconsistent with the requested index.
 //
-// When the linearization Page Offset Hint Table parser ships, a fast
-// path can short-circuit the descent here — `LinearizationHints::page_offset`
-// will resolve idx → byte offset directly.  Today the parser stub returns
-// None on every call, so wiring it in would just add overhead; the fast
-// path lands when the real parser does.
+// The descent does not consult linearization hints: `LinearizationHints`
+// holds only the `/Linearized` dictionary entries, and the page offset
+// hint table, which would map idx to a byte offset, is not parsed.
 pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfError> {
     let pages_root = doc.pages_root_id()?;
     let total = doc.page_count_fast();
