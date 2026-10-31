@@ -34,10 +34,15 @@ pub fn output_path(args: &Args, page_num: i32, total_pages: i32, format: OutputF
 /// (left) or `b` (right) suffix, which sorts the halves after an unsplit
 /// page of the same number and before the next page.
 ///
+/// Under `--singlefile` the page number is omitted, so the one page written
+/// is `{prefix}.{ext}`; a split spread's halves are then `{prefix}{sep}a` and
+/// `{prefix}{sep}b`.
+///
 /// Examples (prefix = "out", sep = '-', format = Ppm):
 /// - page 1, total 10 → `"out-01.ppm"`
 /// - page 1, total 100, `force_num_digits` = Some(3) → `"out-001.ppm"`
 /// - page 7, total 10, left half → `"out-07a.ppm"`
+/// - `--singlefile` → `"out.ppm"`
 pub(crate) fn output_path_with_prefix(
     prefix: &str,
     args: &Args,
@@ -46,10 +51,6 @@ pub(crate) fn output_path_with_prefix(
     format: OutputFormat,
     half: Option<SpreadHalf>,
 ) -> String {
-    let digits = args
-        .force_num_digits
-        .unwrap_or_else(|| digit_width(total_pages));
-
     let sep = args.separator;
     let ext = format.extension_with_mode(args.gray, args.mono);
     let suffix = match half {
@@ -57,6 +58,16 @@ pub(crate) fn output_path_with_prefix(
         Some(SpreadHalf::Left) => "a",
         Some(SpreadHalf::Right) => "b",
     };
+    if args.single_file {
+        return if suffix.is_empty() {
+            format!("{prefix}.{ext}")
+        } else {
+            format!("{prefix}{sep}{suffix}.{ext}")
+        };
+    }
+    let digits = args
+        .force_num_digits
+        .unwrap_or_else(|| digit_width(total_pages));
     format!("{prefix}{sep}{page_num:0digits$}{suffix}.{ext}")
 }
 
@@ -159,6 +170,16 @@ mod tests {
         assert_eq!(path(None), "out-07.png");
         assert_eq!(path(Some(SpreadHalf::Left)), "out-07a.png");
         assert_eq!(path(Some(SpreadHalf::Right)), "out-07b.png");
+    }
+
+    #[test]
+    fn single_file_drops_the_page_number() {
+        let mut a = make_args("cover", '-', Some(3));
+        a.single_file = true;
+        let path = |half| output_path_with_prefix("cover", &a, 4, 10, OutputFormat::Png, half);
+        assert_eq!(path(None), "cover.png");
+        assert_eq!(path(Some(SpreadHalf::Left)), "cover-a.png");
+        assert_eq!(path(Some(SpreadHalf::Right)), "cover-b.png");
     }
 
     #[test]

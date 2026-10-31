@@ -60,7 +60,8 @@ pub(crate) struct Args {
     #[arg(short = 'e', long = "even")]
     pub even_only: bool,
 
-    /// Stop after rendering the first matching page (single-file output).
+    /// Write only the first selected page, named `OUTPUT_PREFIX` plus the
+    /// extension, without a page number.
     #[arg(long = "singlefile")]
     pub single_file: bool,
 

@@ -39,7 +39,7 @@ scale-to, rendering, password and backend flags, `--threads`, `--strict`,
 | `--last-page N` | `-l N` | last page | Last page to render (1-based). |
 | `--odd` | `-o` | off | Render only odd-numbered pages. |
 | `--even` | `-e` | off | Render only even-numbered pages. |
-| `--singlefile` | | off | Stop after the first matching page. |
+| `--singlefile` | | off | Write only the first selected page, as `<prefix>.<ext>` with no page number (`--split-spreads` halves: `<prefix>-a`, `<prefix>-b`). |
 
 `--odd` and `--even` are mutually exclusive.
 
@@ -325,8 +325,8 @@ rrocket -r 300 --threads 4 -P document.pdf out
 # Render only odd pages
 rrocket --odd document.pdf out
 
-# Render first page only (--singlefile stops after first match)
-rrocket --singlefile document.pdf cover
+# Render the first page only, to cover.ppm
+rrocket --singlefile document.pdf ./cover
 
 # Render at 150 DPI, zero-pad page numbers to 3 digits: out-001.ppm
 rrocket -r 150 --forcenum 3 document.pdf out
