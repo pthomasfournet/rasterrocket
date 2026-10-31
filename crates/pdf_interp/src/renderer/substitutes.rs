@@ -18,8 +18,15 @@ use font::program::FontProgram;
 use super::system_fonts::FontLibrary;
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 
-/// Number of rows of [`INSTALLED`].
+/// Number of rows of [`INSTALLED`]: the three Latin family classes in
+/// their four variants.
 pub const INSTALLED_ROWS: usize = 12;
+
+/// Row of [`EMBEDDED`] of the Symbol family.
+const SYMBOL_ROW: usize = INSTALLED_ROWS;
+
+/// Row of [`EMBEDDED`] of the Dingbats family.
+const DINGBATS_ROW: usize = INSTALLED_ROWS + 1;
 
 /// Installed typefaces per [`SubstituteStyle`], indexed by
 /// [`substitute_index`]: `[metric-compatible free family stem, macOS
@@ -49,7 +56,7 @@ const INSTALLED: [[&str; 3]; INSTALLED_ROWS] = [
 
 /// Compiled-in base-14 programs: the twelve rows of [`INSTALLED`], then
 /// Symbol and Dingbats.
-const EMBEDDED: [&[u8]; 14] = [
+const EMBEDDED: [&[u8]; INSTALLED_ROWS + 2] = [
     include_bytes!("../../fonts/foxit/Sans.cff"),
     include_bytes!("../../fonts/foxit/SansItalic.cff"),
     include_bytes!("../../fonts/foxit/SansBold.cff"),
@@ -74,8 +81,8 @@ const fn substitute_index(style: SubstituteStyle) -> usize {
         SubstituteFamily::Sans => 0,
         SubstituteFamily::Serif => 1,
         SubstituteFamily::Mono => 2,
-        SubstituteFamily::Symbol => return 12,
-        SubstituteFamily::Dingbats => return 13,
+        SubstituteFamily::Symbol => return SYMBOL_ROW,
+        SubstituteFamily::Dingbats => return DINGBATS_ROW,
     };
     family * 4 + (style.bold as usize) * 2 + (style.italic as usize)
 }
@@ -101,13 +108,13 @@ fn installed_candidates(
 }
 
 /// The installed face of row `row`, searched for in the extra directories
-/// `dirs` first and then, when `system` is set, the fixed locations,
-/// parsed; `None` when none of its candidates exists or parses.
+/// `dirs` first and then, when `system` is set, the fixed locations: the
+/// first candidate that exists and parses; `None` when none does.
 fn installed_program(row: usize, dirs: &[PathBuf], system: bool) -> Option<Arc<FontProgram>> {
     installed_candidates(INSTALLED[row], dirs, system)
         .into_iter()
-        .find(|p| p.exists())
-        .and_then(|path| {
+        .filter(|path| path.exists())
+        .find_map(|path| {
             std::fs::read(&path)
                 .map_err(font::engine::LoadError::Io)
                 .and_then(|data| FontProgram::parse(data, 0))
@@ -136,8 +143,8 @@ pub fn substitute_program(
     style: SubstituteStyle,
     library: &FontLibrary,
 ) -> Option<Arc<FontProgram>> {
-    static EMBEDDED_CACHE: [OnceLock<Option<Arc<FontProgram>>>; 14] =
-        [const { OnceLock::new() }; 14];
+    static EMBEDDED_CACHE: [OnceLock<Option<Arc<FontProgram>>>; EMBEDDED.len()] =
+        [const { OnceLock::new() }; EMBEDDED.len()];
     if style.script.is_some()
         && let Some(program) = library.system_program(style)
     {
@@ -221,8 +228,8 @@ mod tests {
         for (row, bytes) in EMBEDDED.iter().enumerate() {
             let program = embedded_program(bytes).unwrap_or_else(|| panic!("row {row} parses"));
             let name = match row {
-                12 => "alpha",
-                13 => "a1",
+                SYMBOL_ROW => "alpha",
+                DINGBATS_ROW => "a1",
                 _ => "A",
             };
             let gid = program.name_index(name);
@@ -255,8 +262,8 @@ mod tests {
             ..SubstituteStyle::default()
         })
         .expect("dingbats");
-        assert_eq!(symbol.data(), EMBEDDED[12]);
-        assert_eq!(dingbats.data(), EMBEDDED[13]);
+        assert_eq!(symbol.data(), EMBEDDED[SYMBOL_ROW]);
+        assert_eq!(dingbats.data(), EMBEDDED[DINGBATS_ROW]);
         assert_ne!(symbol.name_index("therefore"), 0);
         assert_ne!(dingbats.name_index("a73"), 0);
     }
