@@ -3862,6 +3862,33 @@ mod tests {
         }
     }
 
+    /// The underlying space of an uncoloured pattern takes the default
+    /// space too (PDF §8.6.5.6): a tint of 0.5 paints 188 in the linear
+    /// `/DefaultGray`.
+    #[test]
+    fn an_uncoloured_pattern_tint_takes_the_default_space() {
+        const CELL: &str = "0 0 8 8 re f";
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                format!(
+                    "<< /Type /Page /Resources << /ColorSpace << /DefaultGray {LINEAR_CAL_GRAY} \
+                     /PG [/Pattern /DeviceGray] >> /Pattern << /U 5 0 R >> >> >>"
+                ),
+            ),
+            (
+                5,
+                format!(
+                    "<< /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 8 8] \
+                     /XStep 8 /YStep 8 /Length {} >>\nstream\n{CELL}\nendstream",
+                    CELL.len()
+                ),
+            ),
+        ]);
+        let px = render_gray_on(&doc, (4, 0), 8, b"/PG cs 0.5 /U scn 0 0 8 8 re f");
+        assert!(px.iter().all(|v| (186..=189).contains(v)), "got {px:?}");
+    }
+
     /// A default space of the wrong component count leaves the device space
     /// in effect.
     #[test]

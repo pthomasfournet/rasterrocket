@@ -500,7 +500,8 @@ impl<'doc> PageResources<'doc> {
     /// resource dict that resolves to a parameterised colour-space array.
     ///
     /// A device-space name selects the space [`Self::device_space`] maps it
-    /// to.
+    /// to, as does the underlying device space of an uncoloured `Pattern`
+    /// space (PDF §8.6.5.6).
     ///
     /// Returns [`ColorSpace::DeviceGray`] when the name isn't found in the
     /// resource dict and isn't a device-space name — the same safe-fallback
@@ -522,7 +523,12 @@ impl<'doc> PageResources<'doc> {
             );
             return ColorSpace::DeviceGray;
         };
-        colorspace::resolve(self.doc, entry)
+        match colorspace::resolve(self.doc, entry) {
+            ColorSpace::Pattern { base: Some(base) } => ColorSpace::Pattern {
+                base: Some(Box::new(self.device_space(*base))),
+            },
+            space => space,
+        }
     }
 
     /// The colour space that selecting the device space `device` yields:
