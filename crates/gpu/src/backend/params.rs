@@ -12,6 +12,25 @@ pub const BLIT_FILTER_X: u32 = 1;
 /// [`BlitParams::filter`] bit: interpolate between source rows.
 pub const BLIT_FILTER_Y: u32 = 2;
 
+/// Byte lengths `(source, destination)` a blit addresses.
+///
+/// `src` and `dst` are (width, height); the destination is RGBA8.  `None`
+/// when the source exceeds `i32::MAX` bytes or the destination `i32::MAX`
+/// pixels.  The blit kernels compute source byte offsets and destination pixel
+/// indices in 32-bit signed arithmetic; within these bounds neither can
+/// wrap.  `src_layout` `0` is RGB (3 bytes per pixel), any other value
+/// Gray (1 byte per pixel).
+#[must_use]
+pub fn blit_extents(src: (u32, u32), src_layout: u32, dst: (u32, u32)) -> Option<(usize, usize)> {
+    let bytes_per_pixel = if src_layout == 0 { 3 } else { 1 };
+    let src_bytes = (src.0 as usize)
+        .checked_mul(src.1 as usize)?
+        .checked_mul(bytes_per_pixel)?;
+    let dst_pixels = (dst.0 as usize).checked_mul(dst.1 as usize)?;
+    let limit = i32::MAX as usize;
+    (src_bytes <= limit && dst_pixels <= limit).then_some((src_bytes, dst_pixels * 4))
+}
+
 /// Parameters for a GPU image blit (table-driven sampling onto the page
 /// buffer).
 ///
@@ -28,6 +47,8 @@ pub const BLIT_FILTER_Y: u32 = 2;
 /// - `cols` holds at least `(x1 - x0)` entries and `rows` at least
 ///   `(y1 - y0)` entries of 16 bytes each
 /// - `filter` has no bits beyond [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`]
+/// - the source and destination fit the kernels' 32-bit offsets and `src`
+///   and `dst` hold the bytes they address (see [`blit_extents`])
 ///
 /// Backends should call `validate()` at record time. Violating these
 /// invariants would read past a sampling table, route Mask images through
@@ -108,6 +129,18 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
             return Err(invariant(
                 "filter has bits beyond BLIT_FILTER_X | BLIT_FILTER_Y",
             ));
+        }
+        let (src_bytes, dst_bytes) = blit_extents(
+            (self.src_w, self.src_h),
+            self.src_layout,
+            (self.dst_w, self.dst_h),
+        )
+        .ok_or_else(|| invariant("src or dst exceeds the kernels' 32-bit offset range"))?;
+        if backend.device_buffer_len(self.src) < src_bytes {
+            return Err(invariant("src buffer shorter than src_w × src_h × bpp"));
+        }
+        if backend.device_buffer_len(self.dst) < dst_bytes {
+            return Err(invariant("dst buffer shorter than dst_w × dst_h × 4"));
         }
         Ok(())
     }
@@ -1434,6 +1467,47 @@ mod tests {
         p.filter = 4;
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("filter"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_short_src_and_dst_buffers() {
+        static SRC_SHORT: usize = 100 * 100 * 3 - 1;
+        static DST_SHORT: usize = 200 * 200 * 4 - 1;
+        let err = BlitParams {
+            src: &SRC_SHORT,
+            ..ok_blit()
+        }
+        .validate(&FakeBackend)
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("src buffer"), "{err}");
+        let err = BlitParams {
+            dst: &DST_SHORT,
+            ..ok_blit()
+        }
+        .validate(&FakeBackend)
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("dst buffer"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_sources_past_32_bit_offsets() {
+        // 30 000 × 30 000 RGB is 2.7 GB: its byte offsets overflow i32.
+        let err = BlitParams {
+            src_w: 30_000,
+            src_h: 30_000,
+            ..ok_blit()
+        }
+        .validate(&FakeBackend)
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("32-bit"), "{err}");
+        assert_eq!(
+            blit_extents((30_000, 30_000), 1, (1, 1)),
+            Some((900_000_000, 4))
+        );
+        assert_eq!(blit_extents((1, 1), 0, (50_000, 50_000)), None);
     }
 
     // --- per-pixel kernels ---

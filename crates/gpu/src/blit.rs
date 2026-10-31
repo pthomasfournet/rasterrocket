@@ -24,6 +24,7 @@
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
 use crate::GpuCtx;
+use crate::backend::params::blit_extents;
 pub use crate::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y};
 use crate::cache::{CachedDeviceImage, DevicePageBuffer, ImageLayout};
 
@@ -87,7 +88,8 @@ impl GpuCtx {
     /// - [`BlitError::TableSize`] if a table doesn't match the bbox.
     /// - [`BlitError::UnknownFilter`] if `filter` has bits beyond
     ///   [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`].
-    /// - [`BlitError::DimensionsTooLarge`] if any dim doesn't fit i32.
+    /// - [`BlitError::DimensionsTooLarge`] if the source exceeds `i32::MAX`
+    ///   bytes or the page `i32::MAX` pixels.
     /// - [`BlitError::Cuda`] for any underlying CUDA failure (PTX
     ///   launch, table upload, etc.).
     pub fn blit_image_to_buffer(
@@ -168,7 +170,10 @@ impl GpuCtx {
     ///
     /// # Errors
     /// - [`BlitError::UnknownFilter`] if `filter` has any other bit set.
-    /// - [`BlitError::DimensionsTooLarge`] if any dim doesn't fit i32.
+    /// - [`BlitError::DimensionsTooLarge`] if the source exceeds `i32::MAX`
+    ///   bytes or the page `i32::MAX` pixels (see [`blit_extents`]).
+    /// - [`BlitError::BufferSize`] if `d_src` or `d_dst` is shorter than
+    ///   its dimensions require.
     /// - [`BlitError::Cuda`] for any underlying cudarc failure.
     #[expect(
         clippy::too_many_arguments,
@@ -207,6 +212,12 @@ impl GpuCtx {
         if d_cols.len() < cols_bytes || d_rows.len() < rows_bytes {
             return Err(BlitError::TableSize);
         }
+        let layout = u32::try_from(layout_code).map_err(|_| BlitError::UnsupportedLayout)?;
+        let (src_bytes, dst_bytes) =
+            blit_extents(src_dims, layout, dst_dims).ok_or(BlitError::DimensionsTooLarge)?;
+        if d_src.len() < src_bytes || d_dst.len() < dst_bytes {
+            return Err(BlitError::BufferSize);
+        }
 
         let grid_x = bw.div_ceil(TILE);
         let grid_y = bh.div_ceil(TILE);
@@ -216,10 +227,10 @@ impl GpuCtx {
             shared_mem_bytes: 0,
         };
 
-        let src_w = i32::try_from(src_dims.0).map_err(|_| BlitError::DimensionsTooLarge)?;
-        let src_h = i32::try_from(src_dims.1).map_err(|_| BlitError::DimensionsTooLarge)?;
-        let dst_w = i32::try_from(dst_dims.0).map_err(|_| BlitError::DimensionsTooLarge)?;
-        let dst_h = i32::try_from(dst_dims.1).map_err(|_| BlitError::DimensionsTooLarge)?;
+        // `blit_extents` bounds each product by i32::MAX, so each factor fits.
+        let dim = |v: u32| i32::try_from(v).map_err(|_| BlitError::DimensionsTooLarge);
+        let (src_w, src_h) = (dim(src_dims.0)?, dim(src_dims.1)?);
+        let (dst_w, dst_h) = (dim(dst_dims.0)?, dim(dst_dims.1)?);
 
         let stream = self.stream();
         let mut builder = stream.launch_builder(&self.kernels.blit_image);
@@ -239,10 +250,12 @@ impl GpuCtx {
             .arg(d_rows)
             .arg(&filter);
 
-        // SAFETY: kernel signature in kernels/blit_image.cu matches
-        // the argument list above; src/dst bounds are validated by the
-        // checked casts on src_w/src_h/dst_w/dst_h and the table
-        // buffers cover the bbox by the length check above.
+        // SAFETY: kernel signature in kernels/blit_image.cu matches the
+        // argument list above.  The kernel rejects samples outside
+        // `[0, src_w) × [0, src_h)` and pixels outside the page; `d_src` and
+        // `d_dst` hold every byte those bounds admit and the offsets stay
+        // within i32 (`blit_extents`), and the tables cover the bbox (length
+        // check above).
         unsafe { builder.launch(cfg) }.map_err(BlitError::cuda)?;
         // Don't synchronise here — the caller decides when to read back.
         Ok(())
@@ -259,10 +272,13 @@ pub enum BlitError {
     TableSize,
     /// The filter has bits beyond [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`].
     UnknownFilter,
-    /// Source or destination dimensions don't fit in `i32`.  Indicates
-    /// a malformed image or page; should never happen at PDF-realistic
-    /// resolutions (max u32 wide ≈ 4.3B px ≫ any real page).
+    /// The source exceeds `i32::MAX` bytes or the page `i32::MAX` pixels,
+    /// the range of the kernel's 32-bit offsets; the caller draws the image
+    /// on the CPU instead.
     DimensionsTooLarge,
+    /// The source or destination device buffer is shorter than its
+    /// dimensions require.
+    BufferSize,
     /// Underlying cudarc driver error.
     Cuda(cudarc::driver::DriverError),
 }
@@ -280,8 +296,9 @@ impl std::fmt::Display for BlitError {
             Self::TableSize => write!(f, "blit sampling tables do not match the bbox"),
             Self::UnknownFilter => write!(f, "blit filter has unknown bits"),
             Self::DimensionsTooLarge => {
-                write!(f, "image or page dimensions exceed i32::MAX")
+                write!(f, "image or page exceeds the blit kernel's 32-bit offsets")
             }
+            Self::BufferSize => write!(f, "blit device buffer shorter than its dimensions"),
             Self::Cuda(e) => write!(f, "cuda: {e}"),
         }
     }
@@ -294,7 +311,8 @@ impl std::error::Error for BlitError {
             Self::UnsupportedLayout
             | Self::TableSize
             | Self::UnknownFilter
-            | Self::DimensionsTooLarge => None,
+            | Self::DimensionsTooLarge
+            | Self::BufferSize => None,
         }
     }
 }
