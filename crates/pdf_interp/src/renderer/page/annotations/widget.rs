@@ -12,6 +12,7 @@
 //! and `ZaDb` for check marks, added as standard fonts when `/DR` lacks
 //! them.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
@@ -94,7 +95,8 @@ pub(super) struct Field {
     max_len: Option<i64>,
     options: Vec<(Vec<u8>, Vec<u8>)>,
     top_index: usize,
-    selected: Vec<usize>,
+    /// The indices `/I` of the selected options.
+    selected: HashSet<usize>,
     background: Option<Vec<f64>>,
     border_colour: Option<Vec<f64>>,
     caption: Option<Vec<u8>>,
@@ -182,7 +184,7 @@ impl Field {
                     #[expect(
                         clippy::cast_possible_truncation,
                         clippy::cast_sign_loss,
-                        reason = "a non-negative option index"
+                        reason = "a finite non-negative index; `as` saturates, and an index past the options selects none"
                     )]
                     let i = i as usize;
                     i
@@ -447,7 +449,7 @@ fn list(s: &mut String, field: &Field, area: [f64; 4], ts: &mut dyn Typesetter) 
     let row = size * LEADING;
     let mut top = area[3];
     for (i, (_, display)) in field.options.iter().enumerate().skip(field.top_index) {
-        if top - row < area[1] - row {
+        if top <= area[1] {
             break;
         }
         if field.selected.contains(&i) {
