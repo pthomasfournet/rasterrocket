@@ -2,20 +2,23 @@
 
 `foxit/` holds the fourteen base-14 substitute faces compiled into the
 renderer (`Sans`, `Serif`, `Fixed` in regular, bold, italic and bold italic,
-plus `Symbol` and `Dingbats`), one bare CFF program each.  They are drawn
-for a font without an embedded program when no metric-compatible face is
-installed, and always for the Symbol and ZapfDingbats families.
+plus `Symbol` and `Dingbats`), one bare CFF program each, embedded by
+`src/renderer/substitutes.rs`.  They are drawn for a font without a usable
+embedded program when no metric-compatible face is installed, and always
+for the Symbol and ZapfDingbats families.
 
 They are the Foxit fonts shipped with PDFium, copyright 2014 Foxit Software
-Inc. and the PDFium Authors, under the BSD 3-Clause licence in
-`foxit/LICENSE`.  `scripts/extract_foxit_fonts.py` regenerates them from a
+Inc. and the PDFium Authors, under the BSD 3-Clause licence that opens
+PDFium's licence file, copied unchanged (with the Apache 2.0 text PDFium
+appends to it) to `foxit/LICENSE`.
+`scripts/extract_foxit_fonts.py` regenerates them from a
 PDFium checkout (`core/fxge/fontdata/chromefontdata/`).  PDFium's two
 multiple-master faces are not bundled.
 
 # Bundled fallback fonts
 
-`noto/` holds thirteen Noto faces compiled into the renderer behind the
-`bundled-fonts` Cargo feature (on by default in `rasterrocket` and
+`noto/` holds thirteen Noto faces compiled into the renderer
+(`src/renderer/bundled_fonts.rs`) behind the `bundled-fonts` Cargo feature (on by default in `rasterrocket` and
 `rasterrocket-cli`).  A character that neither a font's substitute nor any
 installed face covers is drawn from them, the last resort before `.notdef`;
 an installed face that covers the character is always preferred.
