@@ -277,9 +277,9 @@ impl Document {
     /// Reads and parses only the xref table(s) and trailer.  Individual objects
     /// are parsed on first access and cached for subsequent calls.
     ///
-    /// A file of at least [`MMAP_MIN_LEN`] bytes is memory-mapped, so it must
-    /// not be modified or truncated while the returned `Document` is alive
-    /// (see [`map_file`]); a shorter file is copied into memory.
+    /// A file of at least 256 KiB is memory-mapped, so it must not be
+    /// modified or truncated while the returned `Document` is alive; a
+    /// shorter file is copied into memory.
     ///
     /// # Errors
     /// [`PdfError::Io`] if the file cannot be opened, read or mapped;

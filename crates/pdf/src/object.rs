@@ -454,7 +454,7 @@ pub(crate) fn parse_dictionary(data: &[u8], pos: &mut usize) -> Option<Dictionar
 ///
 /// Returns `None` only on genuine EOF or if the first non-whitespace token is
 /// not a valid object start, or when arrays and dictionaries nest deeper
-/// than [`MAX_NESTING`] (an over-deep array keeps the items parsed before
+/// than 256 levels (an over-deep array keeps the items parsed before
 /// the limit).
 pub fn parse_object(data: &[u8], pos: &mut usize) -> Option<Object> {
     parse_object_nested(data, pos, 0)

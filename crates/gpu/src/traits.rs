@@ -20,9 +20,9 @@
 //!
 //! | Trait | Impl | Feature flag |
 //! |---|---|---|
-//! | [`GpuJpegDecoder`] | [`NvJpegDecoder`](crate::nvjpeg::NvJpegDecoder) | `nvjpeg` |
-//! | [`GpuJpegDecoder`] | [`VapiJpegDecoder`](crate::vaapi::VapiJpegDecoder) | `vaapi` |
-//! | [`GpuJpeg2kDecoder`] | [`NvJpeg2kDecoder`](crate::nvjpeg2k::NvJpeg2kDecoder) | `nvjpeg2k` |
+//! | [`GpuJpegDecoder`] | `NvJpegDecoder` | `nvjpeg` |
+//! | [`GpuJpegDecoder`] | `VapiJpegDecoder` | `vaapi` |
+//! | [`GpuJpeg2kDecoder`] | `NvJpeg2kDecoder` | `nvjpeg2k` |
 //! | [`GpuCompute`] | [`GpuCtx`](crate::GpuCtx) | `gpu-aa` or `gpu-icc` |
 //!
 //! Metal (Apple Silicon) is planned — see `ROADMAP_INTEL.md` Phase F.

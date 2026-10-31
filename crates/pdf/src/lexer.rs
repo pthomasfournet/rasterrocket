@@ -206,7 +206,8 @@ pub(crate) const fn is_number_byte(b: u8) -> bool {
 /// The value of a number token, or `None` when `word` is not one.
 ///
 /// A word is a number token when it starts with a digit, sign or decimal
-/// point and consists of [`is_number_byte`] bytes only.  A well-formed token
+/// point and consists of digits, signs, decimal points and the exponent
+/// markers `e`/`E` only.  A well-formed token
 /// has its exact value; a malformed one (`--5`, `.5.`, `5-`, `34.5-6`) has
 /// the value of its longest prefix of the form `[+-]digits[.digits]`, or 0
 /// when that prefix holds no digit.  Values are clamped to the
