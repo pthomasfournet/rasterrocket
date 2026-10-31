@@ -1,4 +1,4 @@
-//! Kernel-hint helpers for the `Document` mmap.
+//! Kernel access-pattern advice for the `Document` mapping.
 //!
 //! All helpers are no-ops on platforms without `posix_fadvise` (Windows and
 //! the Apple systems among them).  The syscalls go through
@@ -15,52 +15,19 @@ use std::fs::File;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 use rustix::fs::{Advice, fadvise};
 
-/// Tell the kernel "we will touch arbitrary 4 KB ranges; don't readahead."
+/// Advise the kernel that `file` is read at random positions, so
+/// readahead is disabled for the whole file (`len` `None` is "to EOF").
 ///
-/// Call once on document open, before any byte access.  Errors are
-/// deliberately ignored — the hint is advisory and a failed `posix_fadvise`
-/// just means we keep default readahead behaviour.
-///
-/// The `len` argument is `None`, which the kernel interprets as "to EOF".
+/// Called once when a document is mapped, before any byte is read.  A
+/// failure is ignored: the advice is optional and its absence leaves the
+/// default readahead in place.
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 pub(crate) fn advise_random(file: &File) {
     let _ = fadvise(file, 0, None, Advice::Random);
 }
 
-/// Tell the kernel "we'll touch this byte range soon; please prefetch."
-///
-/// Useful after the page-tree descent has located a page's content stream
-/// byte range, so kernel readahead overlaps with parse work.
-///
-/// A zero `len` is treated as a no-op (rustix requires `NonZero` for the
-/// length argument; the kernel's "to EOF" semantics are deliberately not
-/// exposed here, since callers always know the precise byte range).
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "exposed for content-stream prefetch; not yet wired in lib builds"
-    )
-)]
-pub(crate) fn advise_willneed(file: &File, offset: u64, len: u64) {
-    let Some(nz_len) = std::num::NonZeroU64::new(len) else {
-        return;
-    };
-    let _ = fadvise(file, offset, Some(nz_len), Advice::WillNeed);
-}
-
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
 pub(crate) fn advise_random(_: &std::fs::File) {}
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "exposed for content-stream prefetch; not yet wired in lib builds"
-    )
-)]
-pub(crate) fn advise_willneed(_: &std::fs::File, _: u64, _: u64) {}
 
 #[cfg(test)]
 mod tests {
@@ -80,15 +47,5 @@ mod tests {
     #[test]
     fn advise_random_does_not_panic() {
         advise_random(&temp_file_with(b"hello world"));
-    }
-
-    #[test]
-    fn advise_willneed_does_not_panic() {
-        advise_willneed(&temp_file_with(b"hello world"), 0, 11);
-    }
-
-    #[test]
-    fn advise_willneed_zero_length_is_no_op() {
-        advise_willneed(&temp_file_with(b"hello"), 0, 0);
     }
 }
