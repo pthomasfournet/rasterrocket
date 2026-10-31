@@ -765,6 +765,7 @@ pub(super) fn decode_jpx(
         ..Default::default()
     };
     let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
+    jpx_budget(&img)?;
     let embedded_profile = match img.color_space() {
         hayro_jpeg2000::ColorSpace::Icc { profile, .. } => Some(profile.clone()),
         _ => None,
@@ -859,6 +860,7 @@ fn decode_jpx_indices(data: &[u8]) -> Result<Samples, String> {
         ..Default::default()
     };
     let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
+    jpx_budget(&img)?;
     let (jw, jh) = (img.width(), img.height());
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
@@ -881,6 +883,15 @@ fn decode_jpx_indices(data: &[u8]) -> Result<Samples, String> {
         .map(|&v| v.round().clamp(0.0, 255.0) as u8)
         .collect();
     Ok(Samples::gray(jw, jh, indices))
+}
+
+/// The decode budget ([`super::decode_budget`]) applied to the
+/// dimensions and channel count a JPEG 2000 codestream declares, which
+/// govern the decoder's allocations and may differ from the image
+/// dictionary's.
+fn jpx_budget(img: &hayro_jpeg2000::Image<'_>) -> Result<(), String> {
+    let channels = usize::from(img.color_space().num_channels()) + usize::from(img.has_alpha());
+    super::decode_budget(img.width(), img.height(), channels).map_err(|e| format!("codestream {e}"))
 }
 
 /// What the image dictionary decides about a JPEG 2000 codestream.
@@ -1010,11 +1021,14 @@ pub(super) fn decode_jbig2(
         );
     }
 
+    // The page size of the stream, not the dictionary's, sizes the
+    // decoder's bitmap and the collected samples.
+    if let Err(e) = super::decode_budget(jw, jh, 1) {
+        log::warn!("image: JBIG2Decode page {e}");
+        return None;
+    }
     let n_pixels = (jw as usize).checked_mul(jh as usize)?;
-    let mut collector = Jbig2Collector {
-        data: Vec::new(),
-        n_pixels,
-    };
+    let mut collector = Jbig2Collector::new(n_pixels);
 
     img.decode(&mut collector)
         .map_err(|e| log::warn!("image: JBIG2Decode decode error: {e}"))
@@ -1049,30 +1063,52 @@ struct Jbig2Collector {
     /// Total expected pixel count — used to cap `push_pixel_chunk` so a stream
     /// whose run lengths aren't a multiple of 8 doesn't overflow the buffer.
     n_pixels: usize,
+    /// The page buffer could not be reserved; every pixel is dropped, so
+    /// the collected length falls short and the image is refused.
+    alloc_failed: bool,
 }
 
 impl Jbig2Collector {
-    /// Reserves the whole page on the first emitted pixel.  The decoder emits
-    /// only after it has allocated the page bitmap, so `n_pixels` — taken
-    /// from the stream's page information segment — is known to be a
-    /// dimension the decoder accepted by the time it is reserved.
-    fn reserve_page(&mut self) {
-        if self.data.capacity() == 0 {
-            self.data.reserve_exact(self.n_pixels);
+    const fn new(n_pixels: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            n_pixels,
+            alloc_failed: false,
         }
+    }
+
+    /// Reserves the whole page on the first emitted pixel, and reports
+    /// whether the page buffer is held.  The decoder emits only after it
+    /// has allocated the page bitmap, so `n_pixels` — taken from the
+    /// stream's page information segment — is known to be a dimension the
+    /// decoder accepted by the time it is reserved.
+    fn reserve_page(&mut self) -> bool {
+        if self.data.capacity() == 0
+            && !self.alloc_failed
+            && self.n_pixels > 0
+            && let Err(e) = self.data.try_reserve_exact(self.n_pixels)
+        {
+            log::warn!(
+                "image: JBIG2Decode: cannot allocate {} bytes: {e}",
+                self.n_pixels
+            );
+            self.alloc_failed = true;
+        }
+        !self.alloc_failed
     }
 }
 
 impl Jbig2Decoder for Jbig2Collector {
     fn push_pixel(&mut self, black: bool) {
-        self.reserve_page();
-        if self.data.len() < self.n_pixels {
+        if self.reserve_page() && self.data.len() < self.n_pixels {
             self.data.push(if black { 0x00 } else { 0xFF });
         }
     }
 
     fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
-        self.reserve_page();
+        if !self.reserve_page() {
+            return;
+        }
         let byte = if black { 0x00 } else { 0xFF };
         // chunk_count is in 8-pixel chunks; cap to the remaining pixels so that
         // run lengths that aren't an exact multiple of 8 don't produce a short
@@ -1227,10 +1263,7 @@ mod tests {
     #[test]
     fn jbig2_collector_push_pixel_grayscale() {
         // JBIG2: black=true → Gray 0x00, black=false → Gray 0xFF.
-        let mut c = Jbig2Collector {
-            data: Vec::new(),
-            n_pixels: 2,
-        };
+        let mut c = Jbig2Collector::new(2);
         Jbig2Decoder::push_pixel(&mut c, true);
         Jbig2Decoder::push_pixel(&mut c, false);
         assert_eq!(c.data, [0x00, 0xFF]);
@@ -1238,10 +1271,7 @@ mod tests {
 
     #[test]
     fn jbig2_collector_push_pixel_chunk() {
-        let mut c = Jbig2Collector {
-            data: Vec::new(),
-            n_pixels: 16,
-        };
+        let mut c = Jbig2Collector::new(16);
         // chunk_count=2 → 16 pixels of white (0xFF each).
         Jbig2Decoder::push_pixel_chunk(&mut c, false, 2);
         assert_eq!(c.data.len(), 16);
@@ -1253,10 +1283,7 @@ mod tests {
         // Regression test: chunk whose byte-count overshoots n_pixels by 7
         // (common when page dimensions aren't a multiple of 8).
         // Before the fix, this produced a short buffer and the image was dropped.
-        let mut c = Jbig2Collector {
-            data: Vec::new(),
-            n_pixels: 10,
-        };
+        let mut c = Jbig2Collector::new(10);
         // chunk_count=2 → 16 pixels, but n_pixels=10 — must cap at 10.
         Jbig2Decoder::push_pixel_chunk(&mut c, false, 2);
         assert_eq!(c.data.len(), 10);
@@ -1285,6 +1312,26 @@ mod tests {
         ];
         data.extend_from_slice(&0xFFFF_FFF0_u32.to_be_bytes()); // width
         data.extend_from_slice(&0x1000_0000_u32.to_be_bytes()); // height
+        data.extend_from_slice(&[0; 8]); // resolutions unknown
+        data.extend_from_slice(&[0x00, 0x00, 0x00]); // flags, striping
+        let doc = crate::test_helpers::empty_doc();
+        assert!(decode_jbig2(&doc, &data, 4, 4, false, None).is_none());
+    }
+
+    #[test]
+    fn jbig2_page_over_the_decode_budget_returns_none() {
+        // A 65 535 × 65 535 page, within the decoder's limits but 4 GiB of
+        // samples, under a dictionary that declares 4 × 4: the stream's
+        // page size is held to the budget before the decoder allocates.
+        let mut data = vec![
+            0x00, 0x00, 0x00, 0x00, // segment number 0
+            0x30, // type 48: page information
+            0x00, // no referred-to segments
+            0x01, // page association 1
+            0x00, 0x00, 0x00, 0x13, // data length 19
+        ];
+        data.extend_from_slice(&0xFFFF_u32.to_be_bytes()); // width
+        data.extend_from_slice(&0xFFFF_u32.to_be_bytes()); // height
         data.extend_from_slice(&[0; 8]); // resolutions unknown
         data.extend_from_slice(&[0x00, 0x00, 0x00]); // flags, striping
         let doc = crate::test_helpers::empty_doc();
@@ -1541,6 +1588,37 @@ mod tests {
         ht.extend_from_slice(&[0xFF, 0xD9]);
         let err = decode_jpx(&ht, 8, 8, None, PLAIN).expect_err("HTJ2K is not decoded");
         assert!(err.contains("HTJ2K"), "{err}");
+    }
+
+    /// A codestream whose SIZ declares 30 000 × 30 000 RGB samples, under a
+    /// dictionary that declares 8 × 8, is refused by the decode budget
+    /// before the decoder allocates its component buffers.
+    #[test]
+    fn jpx_codestream_over_the_decode_budget_is_refused() {
+        let mut j2k = include_bytes!("testdata/rgb8.j2k").to_vec();
+        assert_eq!(&j2k[..4], &[0xFF, 0x4F, 0xFF, 0x51]);
+        // Xsiz, Ysiz, then XTsiz and YTsiz (one tile), after Lsiz and Rsiz.
+        for offset in [8, 12, 24, 28] {
+            j2k[offset..offset + 4].copy_from_slice(&30_000u32.to_be_bytes());
+        }
+        let opts = JpxOptions {
+            indices: false,
+            smask_in_data: 0,
+        };
+        #[cfg(feature = "nvjpeg2k")]
+        let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the budget");
+        #[cfg(not(feature = "nvjpeg2k"))]
+        let err = decode_jpx(&j2k, 8, 8, None, opts).expect_err("over the budget");
+        assert!(err.contains("budget"), "{err}");
+        let indexed = JpxOptions {
+            indices: true,
+            ..opts
+        };
+        #[cfg(feature = "nvjpeg2k")]
+        let err = decode_jpx(&j2k, 8, 8, None, indexed, None).expect_err("over the budget");
+        #[cfg(not(feature = "nvjpeg2k"))]
+        let err = decode_jpx(&j2k, 8, 8, None, indexed).expect_err("over the budget");
+        assert!(err.contains("budget"), "{err}");
     }
 
     #[cfg(not(feature = "nvjpeg2k"))]
