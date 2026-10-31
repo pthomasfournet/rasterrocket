@@ -34,8 +34,8 @@ use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
 ///
 /// This avoids a full header-decode probe pass to determine the component count
 /// before calling the main decode. The `gpu` crate has the same logic but is an
-/// optional dependency (requires CUDA at link time), so we replicate the tiny
-/// scan here for the unconditional CPU path.
+/// optional dependency (requires CUDA at link time), so the CPU path carries
+/// its own copy of the scan.
 fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
     if data.get(0..2) != Some(&[0xFF, 0xD8]) {
         return None;
@@ -477,7 +477,7 @@ pub(super) fn decode_dct<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::G
         return None;
     }
 
-    // Validate the pixel buffer length against the dimensions we are about to use.
+    // Validate the pixel buffer length against the dimensions used below.
     // A mismatch means the JPEG SOF markers misreported dimensions; trust jw/jh
     // only when the buffer is consistent with them.
     let expected_pixels = (jw as usize)
@@ -966,8 +966,8 @@ fn decode_jpx_gpu(
 ///
 /// The decoder produces one byte per pixel: 0x00 = black, 0xFF = white (for
 /// grayscale images) or 0x00 = paint, 0xFF = transparent (for `ImageMask`).
-/// JBIG2 convention is 0 = white, 1 = black; we invert to match the rest of
-/// the image pipeline.
+/// JBIG2 convention is 0 = white, 1 = black, inverted here to the image
+/// pipeline's convention.
 pub(super) fn decode_jbig2(
     doc: &Document,
     data: &[u8],
@@ -1308,9 +1308,8 @@ mod tests {
 
     #[test]
     fn jbig2_collector_push_pixel_chunk_overrun() {
-        // Regression test: chunk whose byte-count overshoots n_pixels by 7
-        // (common when page dimensions aren't a multiple of 8).
-        // Before the fix, this produced a short buffer and the image was dropped.
+        // A chunk whose pixel count overshoots n_pixels (a page width that
+        // is not a multiple of 8) is capped at the page.
         let mut c = Jbig2Collector::new(10);
         // chunk_count=2 → 16 pixels, but n_pixels=10 — must cap at 10.
         Jbig2Decoder::push_pixel_chunk(&mut c, false, 2);

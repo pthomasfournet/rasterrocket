@@ -73,38 +73,19 @@ use gpu::GpuCtx;
 #[path = "../icc.rs"]
 pub(crate) mod icc;
 
-/// Minimum pixel area (width × height) for GPU-accelerated `DCTDecode`.
+/// Minimum pixel area (width × height) for GPU-accelerated `DCTDecode`
+/// (nvJPEG or VA-API).
 ///
-/// **Currently set to `u32::MAX` — nvJPEG dispatch is disabled on consumer
-/// Blackwell.**  Verified on RTX 5070 (Blackwell, one NVJPG engine) running
-/// the v0.6.0 baseline (10-corpus matrix, 2026-05-06): the GPU JPEG path was
-/// 5–13× *slower* than 24-thread CPU zune-jpeg on every DCT-heavy corpus.
-/// The mechanism is documented in the v0.6.0 baseline spec; the short
-/// version is:
+/// `u32::MAX` disables the dispatch: on a GPU with one hardware JPEG
+/// engine, per-image decode calls serialise every worker thread through
+/// that engine, and the hybrid backend decodes a single image on the CPU
+/// behind a stream synchronisation, so both lose to the multithreaded CPU
+/// decoder.  Batched decoding across pages, or a GPU with several JPEG
+/// engines, is the configuration in which a finite threshold (on the order
+/// of 512 × 512) pays off.  Measurements are kept with the project's
+/// benchmarks.
 ///
-/// - `NVJPEG_BACKEND_HARDWARE` would serialise all 24 worker threads
-///   through one on-die engine (consumer Blackwell has 1 NVJPG engine,
-///   not multiple as on A100/H100/Ada datacenter parts).
-/// - `NVJPEG_BACKEND_GPU_HYBRID` (currently selected; see
-///   `crates/gpu/src/nvjpeg.rs`) only uses GPU for Huffman decoding when
-///   batch size > 50–100; for single-image-per-call workloads it falls
-///   back to CPU work behind a CUDA stream-sync wrapper, paying GPU-API
-///   overhead for a CPU decode that is slower than calling zune-jpeg
-///   directly.
-/// - The batched nvJPEG API would fit, but requires collecting images
-///   across pages, decoding them in batches of ≥ 100, then routing
-///   results back to the per-page renderers — a major architectural
-///   change not yet done.
-///
-/// On a datacenter GPU with multiple NVJPG engines (A100, H100, A30),
-/// the `HARDWARE` backend should win at the original 512 × 512 threshold.
-/// When that hardware becomes available the threshold should drop back
-/// to `262_144`, the backend selector should be revisited, and the
-/// matrix re-measured.
-///
-/// nvJPEG2000 (`GPU_JPEG2K_THRESHOLD_PX`) is *not* affected by this:
-/// JPX decode on the same matrix was 1.7× faster on GPU than CPU on
-/// corpus 10, validating the original threshold for JPEG 2000.
+/// `GPU_JPEG2K_THRESHOLD_PX` is independent of this value.
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub const GPU_JPEG_THRESHOLD_PX: u32 = u32::MAX;
 
@@ -364,11 +345,7 @@ impl ImageData {
         match self {
             Self::Cpu(bytes) => bytes.len(),
             #[cfg(feature = "cache")]
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "vram_bytes returns u64 for forward-compat; 32-bit hosts will OOM long before this matters in practice"
-            )]
-            Self::Gpu(cached) => cached.vram_bytes() as usize,
+            Self::Gpu(cached) => usize::try_from(cached.vram_bytes()).unwrap_or(usize::MAX),
         }
     }
 
@@ -548,10 +525,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         if let Some(mask) = smask::decode_smask(ctx, *smask_id) {
             img.smask = Some(mask);
         } else {
-            // SMask decode failed.  Treat as a soft skip: the base image pixels
-            // are valid so we return them without a mask rather than propagating
-            // an error — an SMask failure should not discard an otherwise-correct
-            // image from the page.  The renderer will blit the image fully opaque.
+            // A mask that fails to decode degrades to no mask: the base
+            // image's samples are valid and are drawn fully opaque.
             log::warn!(
                 "image: SMask (object {smask_id:?}) could not be decoded — blitting image without mask"
             );
@@ -1039,9 +1014,8 @@ mod tests {
 
     #[test]
     fn filter_name_chain_returns_terminal_codec() {
-        // The scanned-book corpus case: [/ASCII85Decode /CCITTFaxDecode].
-        // The terminal (last) filter is the image codec and must be dispatched
-        // — previously this returned None and the page rendered blank.
+        // [/ASCII85Decode /CCITTFaxDecode]: the terminal (last) filter is
+        // the image codec.
         let obj = Object::Array(vec![
             Object::Name(b"ASCII85Decode".to_vec()),
             Object::Name(b"CCITTFaxDecode".to_vec()),

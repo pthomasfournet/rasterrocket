@@ -620,10 +620,7 @@ mod tests {
     ///
     /// A `/Mask N 0 R` referencing an `/ImageMask true` stencil must produce a
     /// base-image alpha buffer where the stencil's *paint* points are opaque
-    /// (`0xFF`) and its *masked-out* points are transparent (`0x00`).  The bug
-    /// was that `/Mask` was never resolved at all, leaving `JPXDecode` pages
-    /// (e.g. 1853-ragon-orthodoxie-maconnique p62) blitted fully opaque over
-    /// the whole page and rendering near-all-dark instead of mostly-white.
+    /// (`0xFF`) and its *masked-out* points are transparent (`0x00`).
     ///
     /// Stencil bytes (raw 1-bpp, default `Decode [0 1]`): a `0` bit paints
     /// (decoder → `0x00`), a `1` bit is transparent (decoder → `0xFF`).  Row
@@ -646,9 +643,6 @@ mod tests {
         );
     }
 
-    /// A `/Mask` object that is *not* an `ImageMask` stencil must be rejected
-    /// (returns `None`) so the caller blits the base image unmasked rather
-    /// than mis-applying a non-stencil image as alpha.
     /// An `SMask` stream's `/Decode [1 0]` inverts its samples before they
     /// are read as alpha.
     #[test]
@@ -662,6 +656,9 @@ mod tests {
         assert_eq!(mask.alpha(), &[0xFF, 0x00, 0xBF]);
     }
 
+    /// A `/Mask` object that is *not* an `ImageMask` stencil must be rejected
+    /// (returns `None`) so the caller blits the base image unmasked rather
+    /// than mis-applying a non-stencil image as alpha.
     #[test]
     fn explicit_mask_rejects_non_imagemask() {
         let doc = crate::test_helpers::make_doc_with_stream(
@@ -709,7 +706,7 @@ mod tests {
 
     /// §8.9.6.4 requires `min ≤ max`.  An inverted range must fail loudly-
     /// graceful (`None` → caller blits unmasked) rather than silently leaving
-    /// the whole image opaque, which the v1 sin class would have done.
+    /// the whole image opaque.
     #[test]
     fn colour_key_mask_inverted_range_returns_none() {
         // min=20 > max=10 for a 1-component image ⇒ None, not all-opaque.
