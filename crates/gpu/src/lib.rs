@@ -1,11 +1,12 @@
 //! GPU-accelerated rasterizer helpers (CUDA via cudarc).
 //!
-//! Gate with `feature = "gpu"` in crates that depend on this.
+//! The interpreter depends on this crate through its `gpu-aa` and `gpu-icc`
+//! features.
 //!
 //! # Usage
 //!
 //! ```no_run
-//! use gpu::GpuCtx;
+//! use rasterrocket_gpu::GpuCtx;
 //! let ctx = GpuCtx::init().expect("no CUDA device");
 //! // … call ctx.composite_rgba8(src, dst) etc.
 //! ```
