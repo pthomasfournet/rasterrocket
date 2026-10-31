@@ -259,6 +259,7 @@ impl Operator {
 
 /// Element of a `TJ` text-showing array.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TextArrayElement {
     /// A string of glyph codes to render.
     Text(Vec<u8>),

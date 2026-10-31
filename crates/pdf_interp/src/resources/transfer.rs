@@ -47,6 +47,7 @@ pub fn function_lut(doc: &Document, f: &Object) -> Option<[u8; 256]> {
 /// Transfer tables for the red, green and blue components of the page
 /// bitmap, at least one of which differs from the identity.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Transfer {
     rgb: [[u8; 256]; 3],
 }
@@ -73,6 +74,7 @@ impl Transfer {
 
 /// The transfer function an `ExtGState` installs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransferSetting {
     /// Components pass unchanged: `/Identity`, `/Default`, or functions
     /// that tabulate to the identity.

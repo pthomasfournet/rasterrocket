@@ -24,6 +24,7 @@ use super::{read_bbox, read_f64_1, read_matrix};
 ///
 /// Callers use these to rasterise a tile bitmap and assemble a
 /// `TiledPattern` (private to `crate::renderer::page::patterns`).
+#[non_exhaustive]
 pub struct TilingDescriptor {
     /// Content stream of the pattern tile (already decompressed).
     pub content: Vec<u8>,
@@ -47,6 +48,7 @@ pub struct TilingDescriptor {
 
 /// The `PaintType` of a tiling pattern (PDF §8.7.3.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PaintType {
     /// `1`: the cell's content stream sets its own colours.
     Coloured,

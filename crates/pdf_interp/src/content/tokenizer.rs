@@ -13,6 +13,7 @@ use crate::resources::image::inline::{inline_data_len, parse_inline_params};
 
 /// A single token from a PDF content stream.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Token<'a> {
     /// Integer or real number operand.
     Number(f64),

@@ -47,6 +47,7 @@ pub use image::{
 /// Only the subset needed by the current rasteriser is extracted; unknown keys
 /// are silently ignored so that future additions do not break existing pages.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExtGStateParams {
     /// Non-stroking (fill) opacity `ca` in [0, 255].  `None` = unchanged.
     pub fill_alpha: Option<u8>,
@@ -71,6 +72,7 @@ pub struct ExtGStateParams {
 }
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
+#[non_exhaustive]
 pub struct ShadingPattern {
     /// The pattern's shading, placed by `matrix`.
     pub shading: shading::ResolvedShading,
@@ -85,6 +87,7 @@ pub struct ShadingPattern {
 
 /// The `SMask` entry of an `ExtGState` dictionary (PDF §11.6.5.2).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SoftMaskParams {
     /// `/None`: no soft mask.
     None,
@@ -225,6 +228,7 @@ fn int_val(d: &Dictionary, key: &[u8]) -> Option<i32> {
 ///
 /// The `resources_id` is the `ObjectId` of the form stream itself; callers
 /// construct a child [`PageResources`] from it via [`PageResources::for_form`].
+#[non_exhaustive]
 pub struct FormXObject {
     /// Decoded content bytes of the form's content stream.
     pub content: Vec<u8>,
@@ -246,6 +250,7 @@ pub struct FormXObject {
 /// The attributes of a transparency group dictionary (PDF §11.6.6), of a
 /// form `XObject` or of a page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransparencyGroupParams {
     /// `I`: the group is isolated, so blend modes inside it do not see the
     /// backdrop under it (default: false).
@@ -263,6 +268,7 @@ pub struct TransparencyGroupParams {
 /// and one name bound to different direct objects in different resource
 /// dictionaries has distinct keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ResourceKey {
     /// An indirect object.
     Object(ObjectId),

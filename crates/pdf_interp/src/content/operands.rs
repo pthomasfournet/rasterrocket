@@ -72,6 +72,7 @@ pub fn drain_numbers(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
 /// PDF §8.6.8: `scn` operands are zero or more numbers followed by an optional
 /// name.  When the last token is a name the colour space is Pattern and the name
 /// selects the pattern resource.  For all other colour spaces only numbers appear.
+#[non_exhaustive]
 pub enum ScnOperands {
     /// `/PatternName [c1 … cn]` — Pattern colour space; name is the resource key,
     /// components are the underlying non-Pattern colour (may be empty for
