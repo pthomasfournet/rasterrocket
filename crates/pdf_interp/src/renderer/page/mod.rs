@@ -1297,18 +1297,23 @@ impl<'doc> PageRenderer<'doc> {
     }
 
     /// Execute `ops` as a content stream nested in the current one: a form
-    /// `XObject` or a Type 3 glyph description.
+    /// `XObject`, a Type 3 glyph description or a tiling pattern cell.
     ///
-    /// Marked-content sequences cannot span content streams (PDF §14.6), so
-    /// the nested stream starts with no open sequence and the enclosing
-    /// stream's sequences are restored afterwards, whatever the nested
-    /// stream left open or closed.  A nested stream is executed only while
-    /// every enclosing sequence is visible, so the visibility it inherits is
+    /// The nested stream's `q` and `Q` balance within it (PDF §8.4.2): its
+    /// `Q`s cannot pop the states saved before it, and the states its
+    /// unbalanced `q`s leave are discarded when it ends.  Marked-content
+    /// sequences cannot span content streams (PDF §14.6), so the nested
+    /// stream starts with no open sequence and the enclosing stream's
+    /// sequences are restored afterwards, whatever the nested stream left
+    /// open or closed.  A nested stream is executed only while every
+    /// enclosing sequence is visible, so the visibility it inherits is
     /// unchanged.
     fn execute_content_stream(&mut self, ops: &[Operator]) {
+        let scope = self.gstate.enter_stream();
         let enclosing = std::mem::take(&mut self.ocg_stack);
         self.execute(ops);
         self.ocg_stack = enclosing;
+        self.gstate.leave_stream(scope);
     }
 
     /// Render all annotations on the page (PDF §12.5).
@@ -2046,9 +2051,7 @@ impl<'doc> PageRenderer<'doc> {
         // pop the state saved above.
         let components = |name: &[u8]| self.resources.inline_image_components(name);
         let ops = crate::content::parse_with(&form.content, Some(&components));
-        let floor = self.gstate.raise_floor();
         self.execute_content_stream(&ops);
-        self.gstate.lower_floor(floor);
 
         // Swap the group bitmap back and composite it as one object of the
         // parent group, using the parent's opacity/blend (captured before
@@ -4107,5 +4110,70 @@ mod tests {
         }
         let px = render_gray_on(&doc, (4, 0), 8, b"/Pattern cs /T scn 0 0 8 8 re f");
         assert!(px.iter().all(|&v| v == 51), "without the transfer: {px:?}");
+    }
+
+    // ── Nested content streams ───────────────────────────────────────────────
+
+    /// A stream object `<< dict >>` holding `content`.
+    fn stream_object(dict: &str, content: &str) -> String {
+        format!(
+            "<< {dict} /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+    }
+
+    /// Page `(4, 0)` drawing the form `/F` of content `form`, and the Type 3
+    /// font `/T` whose glyph `a` has the description `glyph`.
+    fn nested_stream_doc(form: &str, glyph: &str) -> Document {
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /XObject << /F 5 0 R >> \
+                 /Font << /T 6 0 R >> >> >>"
+                    .to_owned(),
+            ),
+            (
+                5,
+                stream_object("/Type /XObject /Subtype /Form /BBox [0 0 8 8]", form),
+            ),
+            (
+                6,
+                "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] \
+                 /FontMatrix [1 0 0 1 0 0] /CharProcs << /a 7 0 R >> \
+                 /Encoding << /Type /Encoding /Differences [97 /a] >> \
+                 /FirstChar 97 /LastChar 97 /Widths [1] >>"
+                    .to_owned(),
+            ),
+            (7, stream_object("", glyph)),
+        ])
+    }
+
+    /// The state a form leaves saved by an unbalanced `q` is discarded with
+    /// the form: the fill colour it set does not reach the page.
+    #[test]
+    fn a_form_s_unbalanced_save_does_not_outlive_it() {
+        let doc = nested_stream_doc("1 0 0 rg q", "1 0 d0");
+        let px = render_gray_on(&doc, (4, 0), 8, b"/F Do 0 0 8 8 re f");
+        assert!(
+            px.iter().all(|&v| v == 0),
+            "page fill must stay black: {px:?}"
+        );
+    }
+
+    /// The `Q`s of a Type 3 glyph description cannot pop the states the
+    /// page saved: the red fill set before the text is still in effect.
+    #[test]
+    fn a_glyph_description_s_restores_cannot_pop_the_page_s_states() {
+        let doc = nested_stream_doc("", "1 0 d0 Q Q");
+        let px = render_gray_on(
+            &doc,
+            (4, 0),
+            8,
+            b"q 1 0 0 rg BT /T 1 Tf (a) Tj ET 0 0 8 8 re f Q",
+        );
+        assert!(
+            px.iter().all(|&v| v == 255),
+            "page fill must stay red: {px:?}"
+        );
     }
 }

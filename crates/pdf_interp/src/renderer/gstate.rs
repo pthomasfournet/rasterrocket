@@ -286,16 +286,41 @@ impl InterpGState {
     }
 }
 
+/// Deepest nesting of the `q` operator that [`GStateStack`] holds.
+///
+/// Each saved state is a full [`InterpGState`], so the stack is bounded
+/// independently of the operator budget: a content stream of nothing but
+/// `q` would otherwise allocate one state per operator.  A `q` beyond this
+/// depth is counted rather than pushed (see [`GStateStack::save_op`]).
+pub const MAX_SAVE_DEPTH: usize = 1 << 14;
+
 /// Save/restore stack for [`InterpGState`].
 ///
-/// `q` pushes a clone; `Q` pops. Unmatched `Q` operators are silently ignored
-/// to be lenient with real-world PDFs that have mismatched save/restore counts.
+/// `q` pushes a clone; `Q` pops.  A `Q` that would pop below the floor (the
+/// states of an enclosing content stream) is ignored, as real-world content
+/// streams often have unbalanced save/restore counts.
 pub struct GStateStack {
     /// Index 0 = bottom (page-level) state; last = current.
     stack: Vec<InterpGState>,
     /// The depth `Q` never pops below: the states a content stream being
     /// executed must not reach, at least one.
     floor: usize,
+    /// `q` operators executed at [`MAX_SAVE_DEPTH`] and not yet balanced by
+    /// a `Q`: each shares the current state instead of saving a copy.
+    deferred: usize,
+    /// Whether the overflow of [`MAX_SAVE_DEPTH`] has been reported.
+    overflow_reported: bool,
+}
+
+/// The state of a [`GStateStack`] outside a nested content stream, returned
+/// by [`GStateStack::enter_stream`] and passed back to
+/// [`GStateStack::leave_stream`].
+#[derive(Clone, Copy)]
+#[must_use = "pass the scope back to `leave_stream`"]
+pub struct StreamScope {
+    depth: usize,
+    floor: usize,
+    deferred: usize,
 }
 
 impl GStateStack {
@@ -306,6 +331,8 @@ impl GStateStack {
         Self {
             stack: vec![InterpGState::initial(width, height)],
             floor: 1,
+            deferred: 0,
+            overflow_reported: false,
         }
     }
 
@@ -317,7 +344,6 @@ impl GStateStack {
     /// page-level state pushed by [`GStateStack::new`].
     #[must_use]
     pub fn current(&self) -> &InterpGState {
-        // SAFETY: stack always has at least one element (the page-level state).
         self.stack.last().expect("GStateStack is always non-empty")
     }
 
@@ -333,42 +359,72 @@ impl GStateStack {
             .expect("GStateStack is always non-empty")
     }
 
-    /// `q` — push a copy of the current state.
+    /// Push a copy of the current state, for a save the renderer balances
+    /// itself.  Content-stream `q` goes through [`Self::save_op`].
     pub fn save(&mut self) {
         let clone = self.current().clone();
         self.stack.push(clone);
     }
 
-    /// `Q` — pop the current state. Silently ignores an unmatched `Q`: one
-    /// that would pop below the floor.
+    /// Pop the current state, for a restore balancing [`Self::save`].
+    /// Never pops below the floor.
     pub fn restore(&mut self) {
         if self.stack.len() > self.floor {
             let _ = self.stack.pop();
         }
     }
 
-    /// Raise the floor to the current depth, so that the `Q`s of a content
-    /// stream executed from here cannot pop the states below it; returns
-    /// the previous floor, to pass back to [`Self::lower_floor`].
-    pub const fn raise_floor(&mut self) -> usize {
-        std::mem::replace(&mut self.floor, self.stack.len())
+    /// `q`: [`Self::save`], or at [`MAX_SAVE_DEPTH`] count the save, so that
+    /// the `Q` balancing it restores nothing and the state changes between
+    /// them persist.
+    pub fn save_op(&mut self) {
+        if self.stack.len() < MAX_SAVE_DEPTH {
+            self.save();
+            return;
+        }
+        self.deferred = self.deferred.saturating_add(1);
+        if !self.overflow_reported {
+            self.overflow_reported = true;
+            log::warn!(
+                "rasterrocket-interp: graphics state nesting exceeds {MAX_SAVE_DEPTH} levels; \
+                 deeper q/Q pairs share one state, so the page may render inaccurately"
+            );
+        }
     }
 
-    /// Restore the floor returned by [`Self::raise_floor`].
-    pub fn lower_floor(&mut self, floor: usize) {
-        self.floor = floor.max(1);
+    /// `Q`: balance the innermost [`Self::save_op`].  An unmatched `Q`, one
+    /// that would pop below the floor, is ignored.
+    pub fn restore_op(&mut self) {
+        if self.deferred > 0 {
+            self.deferred -= 1;
+        } else {
+            self.restore();
+        }
+    }
+
+    /// Enter a nested content stream (a form `XObject` or a Type 3 glyph
+    /// description): its `Q`s cannot pop the states saved before it.
+    pub fn enter_stream(&mut self) -> StreamScope {
+        StreamScope {
+            depth: self.stack.len(),
+            floor: std::mem::replace(&mut self.floor, self.stack.len()),
+            deferred: std::mem::take(&mut self.deferred),
+        }
+    }
+
+    /// Leave the nested content stream `scope` was returned for: the states
+    /// its unbalanced `q`s left are discarded, so the stack is as deep as at
+    /// [`Self::enter_stream`].
+    pub fn leave_stream(&mut self, scope: StreamScope) {
+        self.stack.truncate(scope.depth.max(1));
+        self.floor = scope.floor.max(1);
+        self.deferred = scope.deferred;
     }
 
     /// The number of states on the stack, at least one.
     #[must_use]
     pub const fn depth(&self) -> usize {
         self.stack.len()
-    }
-
-    /// Pop states until `depth` remain: the `Q`s that balance every `q`
-    /// since the stack was that deep.  The bottom state is never popped.
-    pub fn restore_to(&mut self, depth: usize) {
-        self.stack.truncate(depth.max(1));
     }
 }
 
@@ -468,6 +524,51 @@ mod tests {
         let mut stack = GStateStack::new(100, 100);
         stack.restore(); // should not panic
         stack.restore(); // still should not panic
+    }
+
+    #[test]
+    fn save_op_beyond_the_depth_cap_defers_and_stays_balanced() {
+        let mut stack = GStateStack::new(10, 10);
+        // The page state and `MAX_SAVE_DEPTH - 1` saves fill the stack;
+        // ten more are deferred.
+        for _ in 0..MAX_SAVE_DEPTH - 1 + 10 {
+            stack.save_op();
+        }
+        assert_eq!(
+            stack.depth(),
+            MAX_SAVE_DEPTH,
+            "states beyond the cap are not pushed"
+        );
+        stack.current_mut().line_width = 7.0;
+        // The ten deferred saves balance first; the state they share persists.
+        for _ in 0..10 {
+            stack.restore_op();
+        }
+        assert_eq!(stack.depth(), MAX_SAVE_DEPTH);
+        assert!((stack.current().line_width - 7.0).abs() < 1e-12);
+        stack.restore_op();
+        assert_eq!(stack.depth(), MAX_SAVE_DEPTH - 1);
+    }
+
+    #[test]
+    fn a_nested_stream_neither_pops_nor_leaves_states() {
+        let mut stack = GStateStack::new(10, 10);
+        stack.save_op();
+        stack.current_mut().line_width = 3.0;
+        stack.save();
+        let scope = stack.enter_stream();
+        // Unbalanced `Q`s cannot reach the states saved before the stream.
+        stack.restore_op();
+        stack.restore_op();
+        assert_eq!(stack.depth(), 3);
+        // Unbalanced `q`s are discarded when the stream ends.
+        stack.save_op();
+        stack.save_op();
+        stack.current_mut().line_width = 9.0;
+        stack.leave_stream(scope);
+        assert_eq!(stack.depth(), 3);
+        stack.restore();
+        assert!((stack.current().line_width - 3.0).abs() < 1e-12);
     }
 
     #[test]

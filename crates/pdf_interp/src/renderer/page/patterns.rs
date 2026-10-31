@@ -477,7 +477,6 @@ impl PageRenderer<'_> {
         for placement in placements {
             let ctm = flip_y(placement, f64::from(height));
             child.pattern_ctm = ctm;
-            let depth = child.gstate.depth();
             child.gstate.save();
             let gs = child.gstate.current_mut();
             gs.ctm = ctm;
@@ -486,8 +485,8 @@ impl PageRenderer<'_> {
                 gs.stroke_color = c.clone();
             }
             child.clip_to_user_rect(&desc.bbox);
-            child.execute(cell.ops);
-            child.gstate.restore_to(depth);
+            child.execute_content_stream(cell.ops);
+            child.gstate.restore();
             if child.budget_exceeded.is_some() {
                 break;
             }

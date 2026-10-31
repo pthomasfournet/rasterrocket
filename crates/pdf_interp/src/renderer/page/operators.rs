@@ -58,8 +58,8 @@ impl PageRenderer<'_> {
     fn dispatch(&mut self, op: &Operator) {
         match op {
             // ── Graphics state ────────────────────────────────────────────────
-            Operator::Save => self.gstate.save(),
-            Operator::Restore => self.gstate.restore(),
+            Operator::Save => self.gstate.save_op(),
+            Operator::Restore => self.gstate.restore_op(),
 
             Operator::ConcatMatrix(m) => {
                 let old = self.gstate.current().ctm;
