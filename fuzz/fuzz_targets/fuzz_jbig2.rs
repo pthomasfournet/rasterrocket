@@ -1,57 +1,27 @@
 #![no_main]
 
+//! JBIG2 decoder through the image path, as an embedded stream without
+//! `/JBIG2Globals` (the common case in PDF files).
+//!
+//! Layout: `[width_lo, width_hi, height_lo, height_hi]`, then the embedded
+//! JBIG2 stream.
+
 use libfuzzer_sys::fuzz_target;
+use rasterrocket_fuzz::common::assemble_pdf;
 
-// Layout: [width_lo(1) width_hi(1) height_lo(1) height_hi(1)] [payload...]
-//
-// We always pass parms=None (no JBIG2Globals), which is the overwhelmingly
-// common case in real PDFs and gives hayro-jbig2 the most direct exposure.
-//
-// The `hayro_jbig2::Image::new_embedded` call goes through the same parser
-// path that `decode_jbig2` uses internally (it is called unconditionally before
-// any dimension checking).  We therefore call `decode_jbig2` only — one call
-// to the full pipeline is sufficient to cover both the PDF wrapper logic and the
-// parser.  A second direct call would duplicate coverage without adding new paths.
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 4 {
+    let Some((dims, payload)) = rasterrocket_fuzz::split_selectors::<4>(data) else {
         return;
-    }
-    let (dims, payload) = data.split_at(4);
-
-    // saturating_add(1): prevents zero dimensions without changing the range
-    // for non-zero inputs.  Cap at 4096 to avoid OOM on large valid streams.
-    let width = u32::from(
-        u16::from_le_bytes([dims[0], dims[1]])
-            .saturating_add(1)
-            .min(4096),
-    );
-    let height = u32::from(
-        u16::from_le_bytes([dims[2], dims[3]])
-            .saturating_add(1)
-            .min(4096),
-    );
-
-    // An empty document satisfies the `&Document` requirement; no globals stream
-    // is looked up because parms=None short-circuits before any document access.
-    // The lazy parser only walks the xref table at construction — no objects
-    // resolve unless we ask for them — so this is cheap to do per iteration.
-    let doc = minimal_doc();
-    let _ = pdf_interp::fuzz_helpers::decode_jbig2(&doc, payload, width, height, false, None);
+    };
+    let (width, height) = rasterrocket_fuzz::image_dimensions(dims);
+    // The decoder takes the document only to resolve `/JBIG2Globals`; without
+    // `parms` an empty page tree suffices, and parsing it resolves no object.
+    let doc = pdf::Document::from_bytes_owned(assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec(),
+    ]))
+    .expect("the empty page tree parses");
+    std::hint::black_box(pdf_interp::fuzz_helpers::decode_jbig2(
+        &doc, payload, width, height, false, None,
+    ));
 });
-
-/// Build the smallest valid PDF the lazy parser accepts: catalog → empty pages
-/// tree.  Offsets are computed from section lengths so the xref stays correct
-/// when the byte layout changes.
-fn minimal_doc() -> pdf::Document {
-    let header = "%PDF-1.4\n";
-    let obj1 = "1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n";
-    let obj2 = "2 0 obj\n<</Type /Pages /Kids [] /Count 0>>\nendobj\n";
-    let off1 = header.len();
-    let off2 = off1 + obj1.len();
-    let xref_start = off2 + obj2.len();
-    let xref =
-        format!("xref\n0 3\n0000000000 65535 f\r\n{off1:010} 00000 n\r\n{off2:010} 00000 n\r\n");
-    let trailer = format!("trailer\n<</Size 3 /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF");
-    let bytes = format!("{header}{obj1}{obj2}{xref}{trailer}").into_bytes();
-    pdf::Document::from_bytes_owned(bytes).expect("hand-built minimal PDF parses")
-}

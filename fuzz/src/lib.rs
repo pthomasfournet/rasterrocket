@@ -51,3 +51,13 @@ pub fn split_selectors<const N: usize>(data: &[u8]) -> Option<([u8; N], &[u8])> 
     let (head, payload) = data.split_first_chunk::<N>()?;
     Some((*head, payload))
 }
+
+/// Largest image side, in pixels, the decoder targets request.
+const MAX_SIDE: u16 = 4096;
+
+/// `(width, height)` from two little-endian `u16`s, each plus one and capped
+/// at [`MAX_SIDE`]: never zero, and a bitmap of at most 16 Mpx.
+pub fn image_dimensions(bytes: [u8; 4]) -> (u32, u32) {
+    let side = |lo, hi| u32::from(u16::from_le_bytes([lo, hi]).saturating_add(1).min(MAX_SIDE));
+    (side(bytes[0], bytes[1]), side(bytes[2], bytes[3]))
+}

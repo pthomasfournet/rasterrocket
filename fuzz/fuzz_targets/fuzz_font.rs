@@ -2,9 +2,11 @@
 
 //! Embedded font programs (TrueType, OpenType/CFF, bare CFF, Type 1,
 //! CID-keyed Type 1): format detection, table and charstring parsing,
-//! charmaps, hinting and glyph rasterisation.
+//! charmaps and glyph rasterisation.
 //!
-//! Layout: `[face_index, size]`, then the font program.
+//! Layout: `[face_index, size]`, then the font program.  The low two bits of
+//! `face_index` select the face; bit 7 of `size` selects anti-aliased
+//! coverage, the low seven bits the pixel size minus one.
 
 use font::engine::{FaceParams, FontEngine};
 use libfuzzer_sys::fuzz_target;
