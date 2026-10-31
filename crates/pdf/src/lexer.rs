@@ -154,6 +154,17 @@ pub(crate) fn read_literal_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
 /// Returns decoded bytes. Trailing unpaired nibble is zero-padded.
 pub(crate) fn read_hex_string(src: &[u8], pos: &mut usize) -> Vec<u8> {
     *pos += 1; // skip '<'
+    decode_hex_digits(src, pos)
+}
+
+/// Decode hexadecimal digit pairs from `pos` up to and including the next
+/// `>`, or to the end of `src`, skipping PDF whitespace; `*pos` ends after
+/// the `>`.  A final unpaired digit is read as if followed by `0`, and a
+/// byte that is not a hex digit reads as `0` (see [`hex_nibble`]).
+///
+/// Shared by hex strings (ISO 32000-2 §7.3.4.3) and the `ASCIIHexDecode`
+/// filter (§7.4.2), which have the same syntax.
+pub(crate) fn decode_hex_digits(src: &[u8], pos: &mut usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut hi: Option<u8> = None;
     while *pos < src.len() {

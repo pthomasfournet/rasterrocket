@@ -1,8 +1,8 @@
 //! Stream filter decoding.
 //!
-//! We support the filters encountered in real renderer workloads.
-//! Image-format filters (DCT, JBIG2, JPX, `CCITTFax`) are intentionally
-//! excluded — those bytes are passed raw to the codec layer in `rasterrocket-interp`.
+//! The general-purpose filters of ISO 32000-2 §7.4 are decoded here.  The
+//! image codecs (DCT, JBIG2, JPX, `CCITTFax`) pass their bytes through
+//! unchanged; the image layer of `rasterrocket-interp` decodes them.
 
 use crate::dictionary::Dictionary;
 use crate::object::Object;
@@ -507,16 +507,9 @@ fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>
             data.len() % row_len,
         );
     }
-    let total = n_rows
-        .checked_mul(stride)
-        .ok_or_else(|| "PNG predictor: output size overflow".to_string())?;
-    // 256 MiB ceiling — well above any realistic predictor output.
-    if total > 256 * 1024 * 1024 {
-        return Err(format!(
-            "PNG predictor output {total} bytes exceeds 256 MiB cap"
-        ));
-    }
-    let mut out = vec![0u8; total];
+    // `n_rows * stride <= data.len()`, so the output is no larger than the
+    // already-bounded input.
+    let mut out = vec![0u8; n_rows * stride];
     let bytes_per_pixel = (colors * bits).div_ceil(8);
 
     for row in 0..n_rows {
@@ -819,30 +812,10 @@ fn decode_run_length(data: &[u8], max_output: usize) -> Decoded {
 
 // ── ASCIIHex ──────────────────────────────────────────────────────────────────
 
+/// Decode `ASCIIHexDecode` data: hex digit pairs up to `>`, whitespace
+/// ignored, a final unpaired digit followed by an implied `0`.
 fn decode_ascii_hex(data: &[u8]) -> Vec<u8> {
-    use crate::lexer::hex_nibble;
-    let mut out = Vec::new();
-    let mut hi: Option<u8> = None;
-    for &b in data {
-        if b == b'>' {
-            break;
-        }
-        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
-            continue;
-        }
-        let nibble = hex_nibble(b);
-        match hi {
-            None => hi = Some(nibble),
-            Some(h) => {
-                out.push((h << 4) | nibble);
-                hi = None;
-            }
-        }
-    }
-    if let Some(h) = hi {
-        out.push(h << 4);
-    }
-    out
+    crate::lexer::decode_hex_digits(data, &mut 0)
 }
 
 // ── Filter/DecodeParms helpers ────────────────────────────────────────────────
@@ -899,11 +872,10 @@ fn collect_decode_parms(dict: &Dictionary, count: usize) -> Vec<Option<Object>> 
     }
 }
 
-// ── DictLookup trait (avoid coupling stream.rs to the full Document) ──────────
+// ── DictLookup ────────────────────────────────────────────────────────────────
 
-/// Minimal dictionary lookup used inside this module to avoid coupling its
-/// callers to a specific dictionary type (it's used by both [`Dictionary`] and
-/// the raw [`Object`] variants returned from xref-stream parsing).
+/// Integer lookup in a filter's parameters, which arrive either as a
+/// [`Dictionary`] or as the [`Object`] that holds one.
 pub(crate) trait DictLookup {
     fn get_i64(&self, key: &[u8]) -> Option<i64>;
 }
@@ -914,15 +886,12 @@ impl DictLookup for Dictionary {
     }
 }
 
-// Blanket impl so we can pass `Option<&HashMap<…>>` transparently.
 impl DictLookup for &dyn DictLookup {
     fn get_i64(&self, key: &[u8]) -> Option<i64> {
         (*self).get_i64(key)
     }
 }
 
-// Allow apply_flate to accept Option<&dyn DictLookup> where params is a raw
-// Object (e.g. from xref stream).
 impl DictLookup for Object {
     fn get_i64(&self, key: &[u8]) -> Option<i64> {
         self.as_dict()?.get(key)?.as_i64()
@@ -1311,6 +1280,9 @@ mod tests {
     fn ascii_hex_decode() {
         let decoded = decode_ascii_hex(b"48656c6c6f>");
         assert_eq!(decoded, b"Hello");
+        // Form feed and NUL are PDF whitespace (ISO 32000-2 Table 1).
+        assert_eq!(decode_ascii_hex(b"48\x0c65\x006c 6c\r\n6f"), b"Hello");
+        assert_eq!(decode_ascii_hex(b"4>41"), [0x40]);
     }
 
     #[test]
