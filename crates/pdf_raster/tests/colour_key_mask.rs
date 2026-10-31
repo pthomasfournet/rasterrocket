@@ -5,11 +5,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Page side in points; it renders at one pixel per point.
@@ -20,8 +20,6 @@ const SIDE: u32 = 16;
 /// were masked (the red page shows through).
 fn masked(entries: &str, data: &[u8]) -> (bool, bool) {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -37,7 +35,7 @@ fn masked(entries: &str, data: &[u8]) -> (bool, bool) {
             data,
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = &bmp.data()[8 * bmp.stride..];
     let red = |x: usize| row[x * 3] > 200 && row[x * 3 + 1] < 60 && row[x * 3 + 2] < 60;

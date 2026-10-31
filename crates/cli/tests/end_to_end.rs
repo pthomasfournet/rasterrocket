@@ -13,14 +13,14 @@ extern crate pdf_raster as rasterrocket;
 #[path = "../../pdf_raster/tests/common/mod.rs"]
 #[expect(
     dead_code,
-    reason = "shared helpers; this suite uses the assembly half"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{assemble_pdf, stream_object};
+use common::{assemble_pdf, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb};
 
 /// Page 1: 100 × 50 pt, a black square at (10, 10) of side 20.
@@ -38,9 +38,7 @@ fn two_page_pdf() -> Vec<u8> {
 
 /// One 40 × 40 pt page drawing an image whose JPEG data is not a JPEG.
 fn broken_image_pdf() -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] \
            /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
@@ -203,9 +201,7 @@ fn strict_fails_a_page_with_an_undecodable_image() {
 /// One 40 × 40 pt white page carrying a `/Square` annotation whose
 /// appearance fills (10, 10)–(30, 30) black.
 fn annotated_pdf() -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Annots [4 0 R] >>".to_vec(),
         b"<< /Type /Annot /Subtype /Square /Rect [10 10 30 30] /AP << /N 5 0 R >> >>".to_vec(),
         stream_object(
@@ -276,9 +272,7 @@ fn scale_to_flags_size_the_page() {
 
 /// One 120 × 60 pt page with a diagonal-edged fill and a line of text.
 fn edges_pdf() -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 60] \
            /Resources << /Font << /F 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),

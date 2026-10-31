@@ -3,7 +3,7 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and ink coverage"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 

@@ -6,11 +6,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// 8 × 8 one-channel 8-bit JP2 with resolution levels below full size.
@@ -28,8 +28,6 @@ const LARGE: &str = "q 8 0 0 8 8 0 cm /Im Do Q\n";
 /// return the page's RGB rows, top first.
 fn render(content: &str, image_dict: &str, data: &[u8]) -> Vec<Vec<u8>> {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
              /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>",
@@ -42,7 +40,7 @@ fn render(content: &str, image_dict: &str, data: &[u8]) -> Vec<Vec<u8>> {
             data,
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     assert_eq!((bmp.width as usize, bmp.height as usize), PAGE);
     (0..PAGE.1)

@@ -12,9 +12,13 @@
 
 #![cfg(all(feature = "cache", feature = "gpu-validation"))]
 
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, assert_identical, corpus_fixture, render, session, stream_object};
+use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
 use jpeg_encoder::{ColorType, Encoder};
 use rasterrocket::{BackendPolicy, SessionConfig, open_session};
 
@@ -90,8 +94,6 @@ BT /F1 18 Tf 30 200 Td (Parity) Tj ET\n"
         .to_vec();
 
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
            /Resources << /XObject << /ImA 5 0 R /ImB 6 0 R /ImC 7 0 R >> \
                          /Font << /F1 9 0 R >> >> \
@@ -121,7 +123,7 @@ BT /F1 18 Tf 30 200 Td (Parity) Tj ET\n"
         ),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
     ];
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -178,8 +180,6 @@ fn interpolated_draws_render_identically_through_the_cache() {
 fn assert_cached_draw_identical(draw: &str) {
     let content = draw.as_bytes();
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
            /Resources << /XObject << /ImB 5 0 R /ImD 6 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
@@ -196,7 +196,7 @@ fn assert_cached_draw_identical(draw: &str) {
             &jpeg(40, 21, false),
         ),
     ];
-    let pdf = assemble_pdf(&objects);
+    let pdf = with_page_tree(&objects);
     let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
     let session = session(pdf, BackendPolicy::ForceCuda);
     let gpu = render(&session, 1);

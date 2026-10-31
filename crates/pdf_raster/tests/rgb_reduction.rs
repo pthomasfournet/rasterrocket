@@ -3,11 +3,14 @@
 //! length: a 4× reduction of alternating black and white columns is a flat
 //! mid gray, not a point-sampled checker.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{render_gray, stream_object, with_page_tree};
+use rasterrocket::RenderedPage;
 
 /// Source samples per side; drawn over the 100 pt page at one pixel per
 /// point, a 4× reduction.
@@ -29,8 +32,6 @@ fn columns(trailing: usize) -> Vec<u8> {
 
 fn render(data: &[u8]) -> RenderedPage {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
            /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
@@ -43,10 +44,7 @@ fn render(data: &[u8]) -> RenderedPage {
             data,
         ),
     ];
-    let opts = RasterOptions::new(72.0);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(assemble_pdf(&objects), &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
+    render_gray(with_page_tree(&objects))
 }
 
 #[test]

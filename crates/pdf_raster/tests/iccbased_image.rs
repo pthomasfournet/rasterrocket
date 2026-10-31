@@ -6,12 +6,15 @@
 //! Treating the samples as sRGB would leave it at 128.  pdfium and poppler
 //! both render such images lighter in the same way.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use common::icc::{GAMMA_1_8, gray_profile, rgb_profile};
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{render_gray, stream_object, with_page_tree};
+use rasterrocket::RenderedPage;
 
 /// One 100 × 100 pt page filled by a 2 × 2 image of mid-gray samples in
 /// `ICCBased` space `/N n` with `profile`.  `inline` draws it as an inline
@@ -30,8 +33,6 @@ fn page(n: u8, profile: &[u8], inline: bool) -> Vec<u8> {
         )
     };
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
              /Resources << {resources} >> /Contents 4 0 R >>"
@@ -45,14 +46,7 @@ fn page(n: u8, profile: &[u8], inline: bool) -> Vec<u8> {
             &samples,
         ),
     ];
-    assemble_pdf(&objects)
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(72.0);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
+    with_page_tree(&objects)
 }
 
 /// The page's centre pixel; the image covers the whole page.
@@ -62,18 +56,18 @@ fn centre(page: &RenderedPage) -> u8 {
 
 #[test]
 fn rgb_profile_lightens_an_xobject_image() {
-    let v = centre(&render(page(3, &rgb_profile(GAMMA_1_8), false)));
+    let v = centre(&render_gray(page(3, &rgb_profile(GAMMA_1_8), false)));
     assert!(v.abs_diff(146) <= 1, "expected ≈146, got {v}");
 }
 
 #[test]
 fn rgb_profile_lightens_an_inline_image() {
-    let v = centre(&render(page(3, &rgb_profile(GAMMA_1_8), true)));
+    let v = centre(&render_gray(page(3, &rgb_profile(GAMMA_1_8), true)));
     assert!(v.abs_diff(146) <= 1, "expected ≈146, got {v}");
 }
 
 #[test]
 fn gray_profile_lightens_an_xobject_image() {
-    let v = centre(&render(page(1, &gray_profile(GAMMA_1_8), false)));
+    let v = centre(&render_gray(page(1, &gray_profile(GAMMA_1_8), false)));
     assert!(v.abs_diff(146) <= 1, "expected ≈146, got {v}");
 }

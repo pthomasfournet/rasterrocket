@@ -2,7 +2,10 @@
 //! every page's diagnostics, so a dynamic XFA form's placeholder page can be
 //! told from real content.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use common::{assemble_pdf, stream_object};

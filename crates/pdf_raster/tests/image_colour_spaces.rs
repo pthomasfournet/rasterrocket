@@ -8,11 +8,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{assert_rgb_near, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Page size in points; rendered at one pixel per point.
@@ -34,8 +34,6 @@ fn halves(
     rest: Vec<Vec<u8>>,
 ) -> ([u8; 3], [u8; 3]) {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /ColorSpace << {color_spaces} >> /XObject << /Im1 5 0 R >> >> \
@@ -46,7 +44,7 @@ fn halves(
         image,
     ];
     objects.extend(rest);
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = &bmp.data()[50 * bmp.stride..];
     let at = |x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
@@ -82,13 +80,6 @@ fn fill_and_inline(fill: &str, params: &str, samples: &[u8]) -> Vec<u8> {
     content
 }
 
-fn assert_close(got: [u8; 3], want: [u8; 3], tol: u8, what: &str) {
-    assert!(
-        got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= tol),
-        "{what}: got {got:?}, want {want:?} ± {tol}"
-    );
-}
-
 #[test]
 fn cal_rgb_image_matches_the_fill() {
     let (fill, img) = halves(
@@ -98,7 +89,7 @@ fn cal_rgb_image_matches_the_fill() {
         vec![],
     );
     assert_ne!(fill, [128, 128, 128], "gamma 1.8 lightens the mid-tone");
-    assert_close(img, fill, 1, "CalRGB image");
+    assert_rgb_near(img, fill, 1, "CalRGB image");
 }
 
 #[test]
@@ -110,7 +101,7 @@ fn cal_gray_image_matches_the_fill() {
         vec![],
     );
     assert_ne!(fill, [128, 128, 128], "gamma 1.8 lightens the mid-tone");
-    assert_close(img, fill, 1, "CalGray image");
+    assert_rgb_near(img, fill, 1, "CalGray image");
 }
 
 #[test]
@@ -128,7 +119,7 @@ fn unusable_icc_profile_image_converts_through_its_alternate() {
         fill.iter().all(|&c| c.abs_diff(119) <= 2),
         "Lab 50 is mid gray, got {fill:?}"
     );
-    assert_close(img, fill, 1, "ICC image through its Lab alternate");
+    assert_rgb_near(img, fill, 1, "ICC image through its Lab alternate");
 
     // A CalGray alternate for a one-component profile.
     let icc = stream_object(&format!("/N 1 /Alternate {CALGRAY}"), b"garbage");
@@ -139,7 +130,7 @@ fn unusable_icc_profile_image_converts_through_its_alternate() {
         vec![icc],
     );
     assert_ne!(fill, [128, 128, 128]);
-    assert_close(img, fill, 1, "ICC image through its CalGray alternate");
+    assert_rgb_near(img, fill, 1, "ICC image through its CalGray alternate");
 }
 
 #[test]
@@ -157,7 +148,7 @@ fn device_space_image_takes_the_default_entry() {
         [128, 128, 128],
         "the default space applies to the fill"
     );
-    assert_close(img, fill, 1, "DeviceGray image under /DefaultGray");
+    assert_rgb_near(img, fill, 1, "DeviceGray image under /DefaultGray");
 
     // `/DefaultRGB` likewise, for an XObject and an inline image.
     let (fill, img) = halves(
@@ -167,14 +158,14 @@ fn device_space_image_takes_the_default_entry() {
         vec![],
     );
     assert_ne!(fill, [128, 128, 128]);
-    assert_close(img, fill, 1, "DeviceRGB image under /DefaultRGB");
+    assert_rgb_near(img, fill, 1, "DeviceRGB image under /DefaultRGB");
     let (fill, inline) = halves(
         &fill_and_inline("0.5 0.5 0.5 rg", "/CS /RGB /BPC 8", &[128, 128, 128]),
         &format!("/DefaultRGB {CALRGB}"),
         image("/DeviceRGB", &[128, 128, 128]),
         vec![],
     );
-    assert_close(inline, fill, 1, "inline /RGB image under /DefaultRGB");
+    assert_rgb_near(inline, fill, 1, "inline /RGB image under /DefaultRGB");
 }
 
 #[test]
@@ -226,7 +217,7 @@ fn indexed_image_converts_its_palette_through_the_base_space() {
         vec![],
     );
     assert_ne!(fill, [128, 128, 128]);
-    assert_close(img, fill, 1, "Indexed over CalRGB");
+    assert_rgb_near(img, fill, 1, "Indexed over CalRGB");
 }
 
 /// A Lab space with `/Range [-50 50 -50 50]`.
@@ -246,7 +237,7 @@ fn lab_image_takes_its_range_as_the_default_decode() {
         fill[0] > 150 && fill[0] < 230,
         "a* 50 is a muted magenta, got {fill:?}"
     );
-    assert_close(img, fill, 2, "Lab image under /Range");
+    assert_rgb_near(img, fill, 2, "Lab image under /Range");
     // The same sample under the default range is a saturated a* +100.
     let (fill, img) = halves(
         &fill_and_image("50.2 100 0"),
@@ -255,7 +246,7 @@ fn lab_image_takes_its_range_as_the_default_decode() {
         vec![],
     );
     assert!(fill[0] > 240, "a* 100 saturates red, got {fill:?}");
-    assert_close(img, fill, 2, "Lab image under the default range");
+    assert_rgb_near(img, fill, 2, "Lab image under the default range");
 }
 
 #[test]
@@ -272,7 +263,7 @@ fn lab_image_decode_array_maps_its_samples() {
         ),
         vec![],
     );
-    assert_close(img, fill, 2, "Lab image under /Decode");
+    assert_rgb_near(img, fill, 2, "Lab image under /Decode");
 }
 
 #[test]
@@ -283,7 +274,7 @@ fn indexed_over_lab_scales_the_palette_to_the_range() {
         image(&format!("[/Indexed {LAB_RANGE} 0 <80ff80>]"), &[0]),
         vec![],
     );
-    assert_close(img, fill, 2, "Indexed over Lab with /Range");
+    assert_rgb_near(img, fill, 2, "Indexed over Lab with /Range");
 }
 
 #[test]
@@ -320,5 +311,5 @@ fn lab_white_point_is_adapted_so_neutrals_stay_neutral() {
         fill[0].abs_diff(fill[2]) <= 2 && fill[0].abs_diff(119) <= 3,
         "neutral mid gray expected, got {fill:?}"
     );
-    assert_close(img, fill, 2, "D50 Lab image");
+    assert_rgb_near(img, fill, 2, "D50 Lab image");
 }

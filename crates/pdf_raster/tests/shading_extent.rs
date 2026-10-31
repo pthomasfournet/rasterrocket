@@ -9,12 +9,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{rgb_at, stream_object, with_page_tree};
 
 /// Page size in points; rendered at one pixel per point.
 const W: u32 = 200;
@@ -31,8 +30,6 @@ const RED_TO_GREEN: &str = "<< /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 
 /// pattern `/P0` (object 6, `pattern`) and `extra` as objects 7, 8, ….
 fn page(content: &str, shading: &[u8], pattern: &str, extra: &[Vec<u8>]) -> Vec<u8> {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /Shading << /Sh0 5 0 R >> /Pattern << /P0 6 0 R >> >> \
@@ -44,27 +41,11 @@ fn page(content: &str, shading: &[u8], pattern: &str, extra: &[Vec<u8>]) -> Vec<
         pattern.as_bytes().to_vec(),
     ];
     objects.extend_from_slice(extra);
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 /// A shading pattern over shading object 5.
 const PATTERN: &str = "<< /PatternType 2 /Shading 5 0 R >>";
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    assert_eq!((bmp.width, bmp.height), (W, H));
-    let data = bmp.data();
-    let stride = bmp.stride;
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
-}
 
 /// Whether `rgb` is a red-to-green ramp colour (no blue).
 fn is_ramp(rgb: [u8; 3]) -> bool {

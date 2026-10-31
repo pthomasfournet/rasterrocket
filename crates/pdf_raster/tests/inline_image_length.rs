@@ -5,11 +5,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{assert_rgb_near, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Page side in points; it renders at one pixel per point.
@@ -29,8 +29,6 @@ fn render_with_resources(params: &str, data: &[u8], resources: &str) -> [[u8; 3]
     content.extend_from_slice(data);
     content.extend_from_slice(b"\nEI Q 1 0 0 rg 0 0 2 2 re f");
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << {resources} >> /Contents 4 0 R >>"
@@ -38,7 +36,7 @@ fn render_with_resources(params: &str, data: &[u8], resources: &str) -> [[u8; 3]
         .into_bytes(),
         stream_object("", &content),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let at = |x: usize, y: usize| {
         let i = y * bmp.stride + x * 3;
@@ -48,9 +46,9 @@ fn render_with_resources(params: &str, data: &[u8], resources: &str) -> [[u8; 3]
     [at(2, 4), at(8, 12), at(1, 15)]
 }
 
+/// [`assert_rgb_near`] within ±2 per channel.
 fn assert_near(name: &str, got: [u8; 3], want: [u8; 3]) {
-    let close = got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 2);
-    assert!(close, "{name}: got {got:?}, want {want:?}");
+    assert_rgb_near(got, want, 2, name);
 }
 
 /// The bytes ` EI ` as image samples.

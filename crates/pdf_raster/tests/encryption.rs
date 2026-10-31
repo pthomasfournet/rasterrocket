@@ -9,13 +9,13 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and renders"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
 use std::{path::Path, process::Command};
 
-use common::{assemble_pdf, render, stream_object};
+use common::{assemble_pdf, render, stream_object, with_page_tree};
 use pdf::{Document, OpenOptions, Password};
 use rasterrocket::{
     BackendPolicy, RasterError, RasterOptions, SessionConfig, open_session,
@@ -34,9 +34,7 @@ const CONTENT: &[u8] = b"0.2 0.4 0.8 rg 40 40 120 60 re f\n\
 /// One page: a filled rectangle, a line of text, a stroked line and a
 /// free-text annotation (so the file holds strings in several objects).
 fn plaintext_pdf() -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R \
            /Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>"
             .to_vec(),

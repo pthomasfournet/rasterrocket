@@ -3,7 +3,10 @@
 //! strokes and clips.  With a switch off, the content it governs is drawn
 //! with bilevel edges: every pixel is either the paint colour or the paper.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use common::{one_page, stream_object};

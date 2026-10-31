@@ -2,7 +2,10 @@
 //! in multiples of 1/72 inch.  A render at a given scale therefore sizes
 //! the bitmap by `UserUnit` and maps the content onto all of it.
 
-#[expect(dead_code, reason = "shared helpers; this test uses a subset")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use common::{one_page, session, stream_object};

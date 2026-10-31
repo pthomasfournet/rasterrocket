@@ -3,11 +3,13 @@
 //! blend mode applied on the page sees only what the page has painted, not
 //! the paper, and a page whose `/Group` has `/K true` is a knockout group.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{one_page, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{one_page, rgb_at, stream_object};
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
 const W: u32 = 100;
@@ -23,20 +25,6 @@ fn page(page_entries: &str, gstates: &str, content: &str) -> Vec<u8> {
         ),
         vec![stream_object("", content.as_bytes())],
     )
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = common::session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 const WHITE: [u8; 3] = [255, 255, 255];

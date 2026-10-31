@@ -1,16 +1,17 @@
 //! Magnified images are interpolated (PDF 32000-1 §8.9.5.3): a draw that
 //! upsamples an image blends neighbouring samples bilinearly when the image
 //! asks for it with `/Interpolate true`, and on its own below fourfold
-//! magnification or when the image is rotated; at larger magnification an
-//! image without the flag keeps its samples as uniform blocks.
+//! magnification, on both axes when the draw is rotated; at larger
+//! magnification an image without the flag keeps its samples as uniform
+//! blocks.
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Page size in points; the page renders at one pixel per point.
@@ -22,8 +23,6 @@ const PAGE: (u32, u32) = (100, 20);
 fn render(content: &str, image_dict: &str, samples: &[u8]) -> Vec<u8> {
     let (w, h) = PAGE;
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] \
              /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
@@ -35,7 +34,7 @@ fn render(content: &str, image_dict: &str, samples: &[u8]) -> Vec<u8> {
             samples,
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     (0..h as usize)
         .flat_map(|y| (0..w as usize).map(move |x| (x, y)))
@@ -54,8 +53,6 @@ fn render_masked(
 ) -> Vec<u8> {
     let (w, h) = PAGE;
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] \
              /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
@@ -76,7 +73,7 @@ fn render_masked(
             mask_samples,
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     (0..h as usize)
         .flat_map(|y| (0..w as usize).map(move |x| (x, y)))
@@ -158,6 +155,35 @@ fn rotated_draw_blends() {
     );
 }
 
+/// Below fourfold magnification a rotated draw blends both axes, even one
+/// that an axis-aligned draw at the same scale would not.
+#[test]
+fn rotated_draw_blends_an_unmagnified_axis() {
+    // A hundred alternating columns drawn 100 px wide: one sample per pixel
+    // across (not blended when axis-aligned), 1.6× down.
+    let samples: Vec<u8> = (0..100 * 10)
+        .map(|i| if i % 2 == 0 { 0x00 } else { 0xFF })
+        .collect();
+    let dict = "/Width 100 /Height 10 /ColorSpace /DeviceGray";
+    let blended = |page: &[u8]| {
+        // Device row 9 (user y 10), columns 20..80: inside the image for
+        // both draws, away from its antialiased edges.
+        row(page, 9)[20..80]
+            .iter()
+            .filter(|&&v| (0x40..=0xC0).contains(&v))
+            .count()
+    };
+    let aligned = render("q 100 0 0 16 0 2 cm /Im Do Q", dict, &samples);
+    assert_eq!(blended(&aligned), 0, "axis-aligned: {:?}", row(&aligned, 9));
+    // The same draw turned by 3°.
+    let rotated = render(
+        "q 0.99863 0.05234 -0.05234 0.99863 0 2 cm 100 0 0 16 0 0 cm /Im Do Q",
+        dict,
+        &samples,
+    );
+    assert!(blended(&rotated) > 10, "rotated: {:?}", row(&rotated, 9));
+}
+
 /// A soft mask's own `/Interpolate` blends its alpha when it is magnified,
 /// whatever the image's flag; without it the alpha keeps whole samples.
 #[test]
@@ -194,13 +220,11 @@ fn inline_image_interpolate_abbreviation_blends() {
     content.extend_from_slice(b"\nEI Q");
     let (w, h) = PAGE;
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R >>")
             .into_bytes(),
         stream_object("", &content),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let mid = bmp.data()[10 * bmp.stride + 50 * 3];
     assert!((120..=136).contains(&mid), "midpoint {mid}");

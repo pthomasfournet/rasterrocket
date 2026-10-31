@@ -4,11 +4,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{font_page, session, stream_object};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 const AHEM: &[u8] = include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf");
@@ -16,61 +16,32 @@ const AHEM: &[u8] = include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf"
 const SPACE: u32 = 3;
 const SQUARE: u32 = 58;
 
-/// `(left, width)` in device pixels of the ink `content` paints on a
-/// 160 × 32 pt page at one pixel per point, with `/F1` bound to the font
-/// dictionary `font` (which may reference objects `6 0 R` onwards from
-/// `extra`).
+/// The 160 × 32 pt page running `content` with `/F1` bound to the font
+/// dictionary `font`, which may reference objects `6 0 R` onwards from
+/// `extra`.
+fn page(font: &str, extra: &[Vec<u8>], content: &str) -> Vec<u8> {
+    font_page((160, 32), font, content, extra)
+}
+
+/// `(left, width)` in device pixels of the ink `content` paints on
+/// [`page`] at one pixel per point.
 fn ink_span(font: &str, extra: &[Vec<u8>], content: &str) -> (usize, usize) {
-    let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 160 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", content.as_bytes()),
-        font.as_bytes().to_vec(),
-    ];
-    objects.extend_from_slice(extra);
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let width = bmp.width as usize;
-    let columns: Vec<usize> = bmp
-        .data()
-        .chunks(3)
-        .enumerate()
-        .filter(|(_, px)| px[0] < 128)
-        .map(|(i, _)| i % width)
-        .collect();
-    let left = columns.iter().copied().min().unwrap_or(0);
-    let right = columns.iter().copied().max().map_or(0, |r| r + 1);
-    (left, right - left)
+    common::ink_span(page(font, extra, content))
 }
 
 /// The coverage-weighted mean column of the ink `content` paints, as
 /// [`ink_span`] renders it.
 fn ink_centroid_x(font: &str, extra: &[Vec<u8>], content: &str) -> f64 {
-    let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 160 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", content.as_bytes()),
-        font.as_bytes().to_vec(),
-    ];
-    objects.extend_from_slice(extra);
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(page(font, extra, content), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let width = bmp.width as usize;
     let (mut weighted, mut total) = (0.0, 0.0);
-    for (i, px) in bmp.data().chunks(3).enumerate() {
-        let coverage = f64::from(255 - px[0]);
-        weighted = f64::mul_add(
-            coverage,
-            f64::from(u32::try_from(i % width).expect("column fits u32")),
-            weighted,
-        );
-        total += coverage;
+    for y in 0..bmp.height {
+        let (px, _) = bmp.row_bytes(y)[..bmp.width as usize * 3].as_chunks::<3>();
+        for (x, p) in (0u32..).zip(px) {
+            let coverage = f64::from(255 - p[0]);
+            weighted = f64::mul_add(coverage, f64::from(x), weighted);
+            total += coverage;
+        }
     }
     weighted / total
 }

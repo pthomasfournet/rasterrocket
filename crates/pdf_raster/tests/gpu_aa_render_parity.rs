@@ -19,9 +19,13 @@
     feature = "vulkan"
 ))]
 
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, assert_identical, corpus_fixture, render, session, stream_object};
+use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, SessionConfig, open_session};
 
 /// A 400×400 pt page whose fills cover every dispatch decision:
@@ -51,15 +55,13 @@ q 200 150 m 260 200 l 200 250 l 140 200 l h W n 0.5 0 0.5 rg 120 140 160 120 re 
         .to_vec();
 
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] \
            /Resources << /ExtGState << /GS1 << /ca 0.5 >> >> >> \
            /Contents 4 0 R >>"
             .to_vec(),
         stream_object("", &content),
     ];
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 /// Panic unless the device fill path is enabled for this process.

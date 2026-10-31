@@ -5,11 +5,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{ascii_hex, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Mask side in samples; the page is the same size in points and renders
@@ -25,16 +25,6 @@ const G4_RIGHT_BLACK: [u8; 9] = [0x33, 0x17, 0xFF, 0xFF, 0xFF, 0xF0, 0x01, 0x00,
 fn raw_left_opaque() -> Vec<u8> {
     let row: Vec<u8> = (0..SIDE).map(|x| if x < 8 { 255 } else { 0 }).collect();
     row.repeat(SIDE as usize)
-}
-
-/// `ASCIIHexDecode` encoding of `data`.
-fn hex(data: &[u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = data
-        .iter()
-        .flat_map(|b| format!("{b:02X}").into_bytes())
-        .collect();
-    out.push(b'>');
-    out
 }
 
 /// `RunLengthDecode` encoding of `data`: one run per row half, each half
@@ -55,8 +45,6 @@ fn run_length(data: &[u8]) -> Vec<u8> {
 /// of the left and right halves of row 8.
 fn masked_halves(entries: &str, data: &[u8]) -> (u8, u8) {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -81,7 +69,7 @@ fn masked_halves(entries: &str, data: &[u8]) -> (u8, u8) {
             data,
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = &bmp.data()[8 * bmp.stride..];
     (row[2 * 3], row[13 * 3])
@@ -96,7 +84,7 @@ fn smask_decodes_through_every_filter_form() {
         (
             "ASCIIHex",
             "/BitsPerComponent 8 /Filter /ASCIIHexDecode".into(),
-            hex(&raw),
+            ascii_hex(&raw),
         ),
         (
             "RunLength",
@@ -106,7 +94,7 @@ fn smask_decodes_through_every_filter_form() {
         (
             "ASCIIHex then RunLength",
             "/BitsPerComponent 8 /Filter [/ASCIIHexDecode /RunLengthDecode]".into(),
-            hex(&run_length(&raw)),
+            ascii_hex(&run_length(&raw)),
         ),
         (
             "CCITT G4, array /DecodeParms",
@@ -119,7 +107,7 @@ fn smask_decodes_through_every_filter_form() {
                 "/BitsPerComponent 1 /Filter [/ASCIIHexDecode /CCITTFaxDecode] \
                  /DecodeParms [null {g4_parms}]"
             ),
-            hex(&G4_RIGHT_BLACK),
+            ascii_hex(&G4_RIGHT_BLACK),
         ),
     ];
     for (name, entries, data) in cases {

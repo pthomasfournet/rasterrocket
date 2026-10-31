@@ -13,11 +13,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Page size in points; rendered at one pixel per point.
@@ -45,8 +45,6 @@ fn page(
         |body| stream_object(pattern, body),
     );
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /Pattern << /P0 5 0 R >> {resources} >> /Contents 4 0 R >>"
@@ -56,7 +54,7 @@ fn page(
         pattern_obj,
     ];
     objects.extend_from_slice(extra);
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 /// A rendered page: its row stride and pixel bytes.

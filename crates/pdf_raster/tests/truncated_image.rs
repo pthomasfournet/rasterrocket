@@ -5,12 +5,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{ascii_hex, render_gray, stream_object, with_page_tree};
 
 /// Image side in samples; the page is the same size in points and renders
 /// at one pixel per point.
@@ -23,8 +22,6 @@ const PRESENT_ROWS: usize = (SIDE / 2) as usize;
 /// stream bytes `data` over the whole page.
 fn page(entries: &str, data: &[u8]) -> Vec<u8> {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -39,24 +36,7 @@ fn page(entries: &str, data: &[u8]) -> Vec<u8> {
             data,
         ),
     ];
-    assemble_pdf(&objects)
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(72.0);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
-}
-
-/// `ASCIIHexDecode` encoding of `data`.
-fn hex(data: &[u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = data
-        .iter()
-        .flat_map(|b| format!("{b:02X}").into_bytes())
-        .collect();
-    out.push(b'>');
-    out
+    with_page_tree(&objects)
 }
 
 /// The top `PRESENT_ROWS` rows of an image whose every pixel is `pixel`.
@@ -109,13 +89,13 @@ fn truncated_raw_images_keep_their_decoded_rows() {
         (
             "Gray 8 behind ASCIIHex",
             "/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode".into(),
-            hex(&top_rows(&[128])),
+            ascii_hex(&top_rows(&[128])),
             128,
             0,
         ),
     ];
     for (name, entries, data, present, missing) in cases {
-        let page = render(page(&entries, &data));
+        let page = render_gray(page(&entries, &data));
         let [failure] = page.diagnostics.image_failures.as_slice() else {
             panic!(
                 "{name}: one partial failure expected, got {:?}",

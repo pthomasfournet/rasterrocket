@@ -4,13 +4,14 @@
 //! `XObject` or an annotation; and every marked-content sequence (§14.6),
 //! optional or not, is closed by exactly one `EMC`.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{
-    BackendPolicy, RenderPurpose, SessionConfig, open_session_from_bytes, render_page_rgb,
-};
+use common::{assemble_pdf, rgb_at, rgb_at_for, stream_object};
+use rasterrocket::RenderPurpose;
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
 const W: u32 = 100;
@@ -36,27 +37,6 @@ fn page(ocprops: &str, resources: &str, content: &str, extra: Vec<Vec<u8>>) -> V
     ];
     objects.extend(extra);
     assemble_pdf(&objects)
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left), rendered for viewing.
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    rgb_at_for(pdf, RenderPurpose::View, points)
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left), rendered for `purpose`.
-fn rgb_at_for(pdf: Vec<u8>, purpose: RenderPurpose, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.purpose = purpose;
-    let s = open_session_from_bytes(pdf, &config).expect("open session");
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 /// Groups 5 (OFF in `/D`) and 6 (ON).
@@ -301,16 +281,27 @@ fn a_membership_dictionary_hides_when_its_group_is_off() {
 
 #[test]
 fn a_membership_dictionary_applies_its_policy() {
+    // One group of each state, then both groups ON (6) and both OFF (5):
+    // the mixed set alone does not tell AnyOn from AnyOff, nor AllOn from
+    // AllOff.
     let cases = [
-        ("/AnyOn", GREEN),
-        ("/AllOn", WHITE),
-        ("/AnyOff", GREEN),
-        ("/AllOff", WHITE),
+        ("[5 0 R 6 0 R]", "/AnyOn", GREEN),
+        ("[5 0 R 6 0 R]", "/AllOn", WHITE),
+        ("[5 0 R 6 0 R]", "/AnyOff", GREEN),
+        ("[5 0 R 6 0 R]", "/AllOff", WHITE),
+        ("[6 0 R 6 0 R]", "/AnyOn", GREEN),
+        ("[6 0 R 6 0 R]", "/AllOn", GREEN),
+        ("[6 0 R 6 0 R]", "/AnyOff", WHITE),
+        ("[6 0 R 6 0 R]", "/AllOff", WHITE),
+        ("[5 0 R 5 0 R]", "/AnyOn", WHITE),
+        ("[5 0 R 5 0 R]", "/AllOn", WHITE),
+        ("[5 0 R 5 0 R]", "/AnyOff", GREEN),
+        ("[5 0 R 5 0 R]", "/AllOff", GREEN),
     ];
-    for (policy, middle) in cases {
-        let ocmd = format!("<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P {policy} >>");
+    for (ocgs, policy, middle) in cases {
+        let ocmd = format!("<< /Type /OCMD /OCGs {ocgs} /P {policy} >>");
         let px = rgb_at(governed_bar(TWO_GROUPS, &ocmd, groups()), &BARS);
-        assert_eq!(px, [RED, middle, BLUE], "/P {policy}");
+        assert_eq!(px, [RED, middle, BLUE], "/OCGs {ocgs} /P {policy}");
     }
 }
 

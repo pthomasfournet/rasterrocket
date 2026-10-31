@@ -5,14 +5,14 @@
 //! The program's glyph names (`C65`, …) are not standard names, so a code
 //! resolved through `StandardEncoding` (`A` for code 65) finds no glyph.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
-
-/// 72 DPI: one pixel per point on the 100 × 100 pt page.
-const DPI: f32 = 72.0;
+use common::{gray_at, render_gray, stream_object, with_page_tree};
+use rasterrocket::RenderedPage;
 
 /// A CFF INDEX (CFF spec §5) with 2-byte offsets.
 fn cff_index(items: &[&[u8]]) -> Vec<u8> {
@@ -108,8 +108,6 @@ fn cff_with_custom_encoding() -> Vec<u8> {
 fn page_showing_code_65(encoding: &str) -> Vec<u8> {
     let content = b"BT /F1 100 Tf 0 0 Td (A) Tj ET";
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
            /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
@@ -125,20 +123,7 @@ fn page_showing_code_65(encoding: &str) -> Vec<u8> {
             .to_vec(),
         stream_object("/Subtype /Type1C", &cff_with_custom_encoding()),
     ];
-    assemble_pdf(&objects)
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(DPI);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
-}
-
-/// Gray value at PDF user-space `(x, y)` (origin bottom-left).
-fn gray_at(page: &RenderedPage, x: u32, y: u32) -> u8 {
-    let row = page.height - 1 - y;
-    page.pixels[(row * page.width + x) as usize]
+    with_page_tree(&objects)
 }
 
 /// The glyph square spans user space 10–60 pt on both axes.
@@ -149,7 +134,7 @@ fn assert_square_painted(page: &RenderedPage, what: &str) {
 
 #[test]
 fn encoding_without_base_uses_builtin_encoding() {
-    let page = render(page_showing_code_65(
+    let page = render_gray(page_showing_code_65(
         "/Encoding << /Type /Encoding /Differences [] >>",
     ));
     assert_square_painted(&page, "Encoding dict without BaseEncoding");
@@ -157,7 +142,7 @@ fn encoding_without_base_uses_builtin_encoding() {
 
 #[test]
 fn absent_encoding_uses_builtin_encoding() {
-    let page = render(page_showing_code_65(""));
+    let page = render_gray(page_showing_code_65(""));
     assert_square_painted(&page, "no Encoding entry");
 }
 
@@ -165,7 +150,7 @@ fn absent_encoding_uses_builtin_encoding() {
 fn differences_override_the_builtin_encoding() {
     // A Differences entry naming a glyph the program lacks wins over the
     // built-in encoding: the code shows `.notdef`, which is empty.
-    let page = render(page_showing_code_65(
+    let page = render_gray(page_showing_code_65(
         "/Encoding << /Type /Encoding /Differences [65 /Missing] >>",
     ));
     assert_eq!(gray_at(&page, 35, 35), 255);
@@ -174,6 +159,6 @@ fn differences_override_the_builtin_encoding() {
 #[test]
 fn explicit_base_encoding_is_honoured() {
     // `/StandardEncoding` names code 65 `A`, which the program lacks.
-    let page = render(page_showing_code_65("/Encoding /StandardEncoding"));
+    let page = render_gray(page_showing_code_65("/Encoding /StandardEncoding"));
     assert_eq!(gray_at(&page, 35, 35), 255);
 }

@@ -1,22 +1,19 @@
 //! Soft masks installed through an `ExtGState` `SMask` entry scale the
 //! opacity of everything painted while they are in effect.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
-
-/// 72 DPI: one pixel per point on the 100 × 100 pt page.
-const DPI: f32 = 72.0;
+use common::{gray_at, render_gray, stream_object, with_page_tree};
 
 /// A one-page document: `content` with `ExtGState` entries `gstates` (the
 /// inner text of the `/ExtGState` dictionary), plus `extra` objects
 /// numbered from 5.
 fn page(gstates: &str, xobjects: &str, content: &[u8], extra: Vec<Vec<u8>>) -> Vec<u8> {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
              /Resources << /ExtGState << {gstates} >> /XObject << {xobjects} >> >> \
@@ -26,7 +23,7 @@ fn page(gstates: &str, xobjects: &str, content: &[u8], extra: Vec<Vec<u8>>) -> V
         stream_object("", content),
     ];
     objects.extend(extra);
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 /// A transparency-group form over the whole page running `content`.
@@ -40,19 +37,6 @@ fn group_form(resources: &str, content: &[u8]) -> Vec<u8> {
     )
 }
 
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(DPI);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
-}
-
-/// Gray value at PDF user-space `(x, y)` (origin bottom-left).
-fn gray_at(page: &RenderedPage, x: u32, y: u32) -> u8 {
-    let row = page.height - 1 - y;
-    page.pixels[(row * page.width + x) as usize]
-}
-
 /// Luminosity mask whose group paints the left half white over the default
 /// black backdrop: a black fill shows on the left only.
 #[test]
@@ -63,7 +47,7 @@ fn luminosity_mask_admits_paint_where_the_group_is_light() {
         b"/GS0 gs 0 g 0 0 100 100 re f",
         vec![group_form("", b"1 g 0 0 50 100 re f")],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     assert_eq!(gray_at(&page, 25, 50), 0, "mask 1: painted");
     assert_eq!(gray_at(&page, 75, 50), 255, "mask 0: backdrop shows");
 }
@@ -95,7 +79,7 @@ fn gradient_mask_fades_an_image_drawn_in_a_group() {
             ),
         ],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     let bottom = gray_at(&page, 50, 1);
     let middle = gray_at(&page, 50, 50);
     let top = gray_at(&page, 50, 98);
@@ -117,7 +101,7 @@ fn alpha_mask_takes_the_group_opacity() {
             b"/H gs 0 g 0 0 50 100 re f",
         )],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     let left = gray_at(&page, 25, 50);
     assert!((125..=130).contains(&left), "left {left}, mask 0.5");
     assert_eq!(
@@ -137,7 +121,7 @@ fn luminosity_backdrop_colour_applies_outside_the_group() {
         b"/GS0 gs 0 g 0 0 100 100 re f",
         vec![group_form("", b"0 g 0 0 50 100 re f")],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     assert_eq!(gray_at(&page, 25, 50), 255, "black group: mask 0");
     assert_eq!(gray_at(&page, 75, 50), 0, "white backdrop: mask 1");
 }
@@ -160,7 +144,7 @@ fn a_mask_applies_to_each_object_of_a_form_without_a_group() {
             ),
         ],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     let twice = gray_at(&page, 50, 50);
     assert!((60..=68).contains(&twice), "two masked objects: {twice}");
     assert_eq!(gray_at(&page, 10, 10), 255, "outside the squares");
@@ -179,7 +163,7 @@ fn a_mask_applies_once_to_a_form_with_a_group() {
             group_form("", b"0 g 20 20 60 60 re f 0 g 20 20 60 60 re f"),
         ],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     let once = gray_at(&page, 50, 50);
     assert!((125..=130).contains(&once), "one masked group: {once}");
 }
@@ -194,7 +178,7 @@ fn a_masked_object_outside_the_clip_paints_nothing() {
         b"q 0 0 50 100 re W n /GS0 gs 0 g 60 0 40 100 re f Q 0 g 0 0 20 20 re f",
         vec![group_form("", b"1 g 0 0 100 100 re f")],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     assert_eq!(gray_at(&page, 80, 50), 255, "clipped away");
     assert_eq!(gray_at(&page, 10, 10), 0, "painted after Q");
 }
@@ -209,7 +193,7 @@ fn soft_mask_is_lifted_by_none_and_by_restore() {
           /GS0 gs /GS1 gs 50 50 50 50 re f",
         vec![group_form("", b"")],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     assert_eq!(
         gray_at(&page, 50, 25),
         255,
@@ -248,7 +232,7 @@ fn an_image_smask_replaces_the_graphics_state_mask() {
             image(""),
         ],
     );
-    let page = render(pdf);
+    let page = render_gray(pdf);
     assert_eq!(gray_at(&page, 25, 50), 0, "own /SMask: image paints");
     assert_eq!(gray_at(&page, 75, 50), 255, "graphics-state mask 0: hidden");
 }

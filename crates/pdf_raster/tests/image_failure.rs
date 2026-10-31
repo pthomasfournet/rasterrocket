@@ -1,14 +1,14 @@
 //! A page whose image cannot be decoded renders everything else and reports
 //! the skipped image in its diagnostics; under `strict` the page fails.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterError, RasterOptions, RenderedPage, raster_pdf_from_bytes};
-
-/// 72 DPI: one pixel per point on the 100 × 100 pt page.
-const DPI: f32 = 72.0;
+use common::{gray_at, render_one, stream_object, with_page_tree};
+use rasterrocket::{RasterError, RasterOptions, RenderedPage};
 
 /// One page: a black 20 × 20 pt square at the origin, a line of text, and a
 /// `FlateDecode` image `/Im0` whose stream is not a zlib stream, drawn over
@@ -20,8 +20,6 @@ fn page_with_corrupt_image(extra_ops: &str) -> Vec<u8> {
          q 50 0 0 50 50 50 cm /Im0 Do Q {extra_ops}"
     );
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
            /Resources << /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> >> \
            /Contents 4 0 R >>"
@@ -34,21 +32,14 @@ fn page_with_corrupt_image(extra_ops: &str) -> Vec<u8> {
             b"this is not a zlib stream",
         ),
     ];
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
+/// The page of `pdf` at 72 dpi, with `strict` set as given.
 fn render(pdf: Vec<u8>, strict: bool) -> Result<RenderedPage, RasterError> {
-    let mut opts = RasterOptions::new(DPI);
+    let mut opts = RasterOptions::new(72.0);
     opts.strict = strict;
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1
-}
-
-/// Gray value at PDF user-space `(x, y)` (origin bottom-left).
-fn gray_at(page: &RenderedPage, x: u32, y: u32) -> u8 {
-    let row = page.height - 1 - y;
-    page.pixels[(row * page.width + x) as usize]
+    render_one(pdf, &opts)
 }
 
 #[test]

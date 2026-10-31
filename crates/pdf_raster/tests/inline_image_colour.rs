@@ -5,11 +5,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{assert_rgb_near, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Page size in points; rendered at one pixel per point.
@@ -25,8 +25,6 @@ fn rgb_of_inline_image(params: &str, data: &[u8]) -> [[u8; 3]; 2] {
     content.extend_from_slice(data);
     content.extend_from_slice(b"\nEI Q");
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /ColorSpace << /CS1 5 0 R /CS2 7 0 R >> >> /Contents 4 0 R >>"
@@ -41,25 +39,18 @@ fn rgb_of_inline_image(params: &str, data: &[u8]) -> [[u8; 3]; 2] {
             b"{ 0 }",
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = &bmp.data()[50 * bmp.stride..];
     let at = |x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
     [at(50), at(150)]
 }
 
-fn assert_close(got: [u8; 3], want: [u8; 3], tol: u8, what: &str) {
-    assert!(
-        got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= tol),
-        "{what}: got {got:?}, want {want:?} ± {tol}"
-    );
-}
-
 #[test]
 fn inline_separation_image_uses_its_tint_transform() {
     let [full, half] = rgb_of_inline_image("/CS /CS1 /BPC 8", &[0xFF, 0x80]);
-    assert_close(full, [255, 0, 0], 1, "tint 1");
-    assert_close(half, [255, 127, 127], 1, "tint 0.5");
+    assert_rgb_near(full, [255, 0, 0], 1, "tint 1");
+    assert_rgb_near(half, [255, 127, 127], 1, "tint 0.5");
 }
 
 #[test]
@@ -85,6 +76,6 @@ fn inline_indexed_image_reads_its_inline_palette() {
 #[test]
 fn inline_indexed_image_over_a_named_separation() {
     let [full, half] = rgb_of_inline_image("/CS [/I /CS1 1 <FF80>] /BPC 8", &[0, 1]);
-    assert_close(full, [255, 0, 0], 1, "palette tint 1");
-    assert_close(half, [255, 127, 127], 1, "palette tint 0.5");
+    assert_rgb_near(full, [255, 0, 0], 1, "palette tint 1");
+    assert_rgb_near(half, [255, 127, 127], 1, "palette tint 0.5");
 }

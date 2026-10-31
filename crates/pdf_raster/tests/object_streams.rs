@@ -5,14 +5,13 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
 use std::fmt::Write as _;
 
-use common::{session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{rgb_at, stream_object};
 
 /// A PDF-1.5 file whose Catalog (1), Pages (2) and Page (3) live in object
 /// stream 5 together with `extra` as object 8, with the page's blue
@@ -92,13 +91,9 @@ fn objstm_pdf_with(extra: &str, startxref: Option<usize>, self_nested: bool) -> 
     pdf
 }
 
-/// The colour at (50, 50) of the page rendered at one pixel per point.
+/// The colour at user-space (50, 50), the centre of the square.
 fn centre_colour(pdf: Vec<u8>) -> [u8; 3] {
-    let s = session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let at = 50 * bmp.stride + 50 * 3;
-    let px = &bmp.data()[at..at + 3];
-    [px[0], px[1], px[2]]
+    rgb_at(pdf, &[(50, 50)])[0]
 }
 
 /// A well-formed object stream resolves the page tree.

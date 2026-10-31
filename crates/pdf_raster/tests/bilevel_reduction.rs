@@ -3,11 +3,14 @@
 //! device pixel in proportion to its painted area instead of point-sampling
 //! one source sample per pixel.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{render_one, stream_object, with_page_tree};
+use rasterrocket::{RasterOptions, RenderedPage};
 
 /// Source samples per side; drawn over the 100 pt page.
 const SIDE: usize = 400;
@@ -30,15 +33,13 @@ fn bilevel_dict(extra: &str) -> String {
 /// colour black; `objects` are numbered from 5, `/Im0` being object 5.
 fn page(objects: Vec<Vec<u8>>) -> Vec<u8> {
     let mut all = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
            /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
         stream_object("", b"0 g q 100 0 0 100 0 0 cm /Im0 Do Q"),
     ];
     all.extend(objects);
-    assemble_pdf(&all)
+    with_page_tree(&all)
 }
 
 fn stencil() -> Vec<u8> {
@@ -70,10 +71,7 @@ fn one_bit_image() -> Vec<u8> {
 }
 
 fn render(pdf: Vec<u8>, dpi: f32) -> RenderedPage {
-    let opts = RasterOptions::new(dpi);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
+    render_one(pdf, &RasterOptions::new(dpi)).expect("page renders")
 }
 
 /// At 288 dpi the source maps 1:1 onto device pixels: no reduction, so

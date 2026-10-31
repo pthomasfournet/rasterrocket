@@ -7,10 +7,13 @@
 //! geometry and colours (§12.5.6).  Appearances are drawn with the initial
 //! graphics state, whatever the page content leaves behind (§12.5.5).
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
+use common::{rgb_at_for, stream_object, with_page_tree};
 use rasterrocket::{
     BackendPolicy, RenderPurpose, SessionConfig, open_session_from_bytes, render_page_rgb,
 };
@@ -32,8 +35,6 @@ fn page(annots: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
 /// [`page`] with additional page dictionary entries `page_entries`.
 fn page_with(annots: &str, page_entries: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Annots {annots} {page_entries} >>"
@@ -41,7 +42,7 @@ fn page_with(annots: &str, page_entries: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
         .into_bytes(),
     ];
     objects.extend(extra);
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 /// A form `XObject` with `dict` entries and `content`.
@@ -52,24 +53,6 @@ fn form(dict: &str, content: &[u8]) -> Vec<u8> {
 /// A 20 × 20 appearance filled blue.
 fn blue_square() -> Vec<u8> {
     form("/BBox [0 0 20 20]", b"0 0 1 rg 0 0 20 20 re f")
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left), rendered for `purpose`.
-fn rgb_at(pdf: Vec<u8>, purpose: RenderPurpose, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.purpose = purpose;
-    let s = open_session_from_bytes(pdf, &config).expect("open session");
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let (w, h) = (bmp.width, bmp.height);
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            assert!(x < w && y < h);
-            let i = (h - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 /// Whether a `/Square` annotation with `/F flags` over (10..30, 10..30) is
@@ -83,7 +66,7 @@ fn drawn_with_flags(flags: u32, purpose: RenderPurpose) -> bool {
             blue_square(),
         ],
     );
-    let px = rgb_at(pdf, purpose, &[(20, 20)])[0];
+    let px = rgb_at_for(pdf, purpose, &[(20, 20)])[0];
     assert!(px == BLUE || px == WHITE, "{px:?}");
     px == BLUE
 }
@@ -143,7 +126,7 @@ fn the_appearance_matrix_transforms_the_bbox_before_it_is_fitted() {
             ),
         ],
     );
-    let px = rgb_at(
+    let px = rgb_at_for(
         pdf,
         RenderPurpose::View,
         &[
@@ -172,7 +155,7 @@ fn state_keyed(entries: &str, extra: Vec<Vec<u8>>) -> [u8; 3] {
         form("/BBox [0 0 20 20]", b"0.5 g 0 0 20 20 re f"),
     ];
     objects.extend(extra);
-    rgb_at(page("[4 0 R]", objects), RenderPurpose::View, &[(20, 20)])[0]
+    rgb_at_for(page("[4 0 R]", objects), RenderPurpose::View, &[(20, 20)])[0]
 }
 
 #[test]
@@ -208,7 +191,7 @@ fn a_direct_annotation_dictionary_is_drawn() {
         "[<< /Type /Annot /Subtype /Square /Rect [10 10 30 30] /AP << /N 4 0 R >> >>]",
         vec![blue_square()],
     );
-    assert_eq!(rgb_at(pdf, RenderPurpose::View, &[(20, 20)]), [BLUE]);
+    assert_eq!(rgb_at_for(pdf, RenderPurpose::View, &[(20, 20)]), [BLUE]);
 }
 
 #[test]
@@ -236,11 +219,11 @@ fn a_no_rotate_annotation_stays_upright_on_a_rotated_page() {
     let dev = |dx: u32, dy: u32| (dx, H - 1 - dy);
     let probes = [dev(10, 45), dev(45, 20)];
     // Turned with the page, the rect spans device x 0..20, y 10..50.
-    let rotated = rgb_at(annot(0), RenderPurpose::View, &probes);
+    let rotated = rgb_at_for(annot(0), RenderPurpose::View, &probes);
     assert_eq!(rotated, [BLUE, WHITE]);
     // The upper-left corner (10, 20) is at device (20, 10); upright, the
     // 40 × 20 appearance spans device x 20..60, y 10..30.
-    let upright = rgb_at(annot(16), RenderPurpose::View, &probes);
+    let upright = rgb_at_for(annot(16), RenderPurpose::View, &probes);
     assert_eq!(upright, [WHITE, BLUE]);
 }
 
@@ -248,7 +231,7 @@ fn a_no_rotate_annotation_stays_upright_on_a_rotated_page() {
 /// dictionary with entries `annot` and no appearance stream.
 fn synthesised(annot: &str, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
     let pdf = page(&format!("[<< /Type /Annot {annot} >>]"), vec![]);
-    rgb_at(pdf, RenderPurpose::View, points)
+    rgb_at_for(pdf, RenderPurpose::View, points)
 }
 
 const RED: [u8; 3] = [255, 0, 0];
@@ -286,11 +269,17 @@ fn an_ink_annotation_without_an_appearance_strokes_its_paths() {
 
 #[test]
 fn a_highlight_without_an_appearance_multiplies_its_colour_over_the_page() {
-    let px = synthesised(
-        "/Subtype /Highlight /Rect [10 40 90 60] /QuadPoints [10 60 90 60 10 40 90 40]",
-        &[(50, 50), (50, 70)],
+    // A mid-grey band across the middle of the highlighted strip: multiply
+    // keeps the band visible under the yellow, where a normal blend would
+    // paint it over.
+    let pdf = page_with(
+        "[<< /Type /Annot /Subtype /Highlight /Rect [10 40 90 60] \
+         /QuadPoints [10 60 90 60 10 40 90 40] >>]",
+        "/Contents 4 0 R",
+        vec![stream_object("", b"0.5 g 10 45 80 10 re f")],
     );
-    assert_eq!(px, [YELLOW, WHITE]);
+    let px = rgb_at_for(pdf, RenderPurpose::View, &[(50, 50), (50, 58), (50, 70)]);
+    assert_eq!(px, [[128, 128, 0], YELLOW, WHITE]);
 }
 
 #[test]
@@ -431,13 +420,13 @@ fn note_with_popup(popup: &str, note_flags: u32) -> Vec<u8> {
 #[test]
 fn a_closed_popup_is_not_drawn_even_with_an_appearance() {
     let probe = &[(50, 30)];
-    let closed = rgb_at(
+    let closed = rgb_at_for(
         note_with_popup("/AP << /N 6 0 R >>", 0),
         RenderPurpose::View,
         probe,
     );
     assert_eq!(closed, [WHITE]);
-    let open = rgb_at(
+    let open = rgb_at_for(
         note_with_popup("/Open true /AP << /N 6 0 R >>", 0),
         RenderPurpose::View,
         probe,
@@ -448,19 +437,19 @@ fn a_closed_popup_is_not_drawn_even_with_an_appearance() {
 #[test]
 fn an_open_popup_without_an_appearance_shows_its_parents_text() {
     let pdf = || note_with_popup("/Open true", 0);
-    let px = rgb_at(pdf(), RenderPurpose::View, &[(50, 25), (20, 50), (10, 50)]);
+    let px = rgb_at_for(pdf(), RenderPurpose::View, &[(50, 25), (20, 50), (10, 50)]);
     assert_eq!(px, [YELLOW, BLACK, WHITE]);
     // The title and contents are set from the top of the window.
     let points: Vec<(u32, u32)> = (50..77)
         .flat_map(|y| (24..77).map(move |x| (x, y)))
         .collect();
-    let dark = rgb_at(pdf(), RenderPurpose::View, &points)
+    let dark = rgb_at_for(pdf(), RenderPurpose::View, &points)
         .iter()
         .filter(|p| p[0] < 100)
         .count();
     assert!(dark > 60, "{dark} text pixels");
     // A pop-up of a hidden note is hidden with it.
-    let hidden = rgb_at(
+    let hidden = rgb_at_for(
         note_with_popup("/Open true", HIDDEN),
         RenderPurpose::View,
         &[(50, 25)],
@@ -479,7 +468,7 @@ fn an_annotation_with_an_appearance_is_not_synthesised() {
             blue_square(),
         ],
     );
-    assert_eq!(rgb_at(pdf, RenderPurpose::View, &[(10, 20)]), [BLUE]);
+    assert_eq!(rgb_at_for(pdf, RenderPurpose::View, &[(10, 20)]), [BLUE]);
 }
 
 /// Page content that leaves an unbalanced `q`, a doubled CTM and a clip of
@@ -497,7 +486,7 @@ fn an_annotation_is_drawn_with_the_initial_graphics_state() {
             stream_object("", b"q 2 0 0 2 0 0 cm 0 0 10 10 re W n 0 g 0 0 10 10 re f"),
         ],
     );
-    let px = rgb_at(pdf, RenderPurpose::View, &[(50, 50), (10, 10), (30, 30)]);
+    let px = rgb_at_for(pdf, RenderPurpose::View, &[(50, 50), (10, 10), (30, 30)]);
     assert_eq!(px[0], BLUE, "the appearance at its rect");
     assert_eq!(px[1], [0, 0, 0], "the content's square, scaled by its CTM");
     assert_eq!(px[2], WHITE, "nothing between them");

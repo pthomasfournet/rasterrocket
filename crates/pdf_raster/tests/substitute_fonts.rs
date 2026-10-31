@@ -5,29 +5,15 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{BackendPolicy, RasterOptions, raster_pdf_from_bytes, render_page_rgb};
+use common::{dark_pixels, font_page, ink_span, render_gray, stream_object, text_page};
 
-/// Render a 64 × 32 pt page at one pixel per point showing `text` in the
-/// non-embedded font `font` (a font dictionary body) at 24 pt, and return
-/// the number of dark pixels.
+/// Dark pixels of [`text_page`] showing `text` in `font`.
 fn ink(font: &str, text: &str) -> usize {
-    let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", format!("BT /F1 24 Tf 4 8 Td {text} Tj ET").as_bytes()),
-        font.as_bytes().to_vec(),
-    ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    bmp.data().chunks(3).filter(|px| px[0] < 128).count()
+    dark_pixels(text_page(font, text)).len()
 }
 
 /// Each standard-14 family class draws its text.
@@ -44,74 +30,42 @@ fn standard_fonts_draw_without_an_embedded_program() {
 #[test]
 fn corrupt_embedded_program_draws_a_substitute() {
     const AHEM: &[u8] = include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf");
-    let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", b"BT /F1 24 Tf 4 8 Td (AB) Tj ET"),
-        b"<< /Type /Font /Subtype /TrueType /BaseFont /Ahem /FirstChar 65 /LastChar 66 \
-          /Widths [600 600] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>"
-            .to_vec(),
-        b"<< /Type /FontDescriptor /FontName /Ahem /Flags 32 /FontBBox [0 -200 1000 800] \
-          /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 \
-          /FontFile2 7 0 R >>"
-            .to_vec(),
-        stream_object("/Length1 100", &AHEM[..100]),
-    ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    assert!(bmp.data().chunks(3).filter(|px| px[0] < 128).count() > 40);
+    let pdf = font_page(
+        (64, 32),
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Ahem /FirstChar 65 /LastChar 66 \
+         /Widths [600 600] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>",
+        "BT /F1 24 Tf 4 8 Td (AB) Tj ET",
+        &[
+            b"<< /Type /FontDescriptor /FontName /Ahem /Flags 32 /FontBBox [0 -200 1000 800] \
+              /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 \
+              /FontFile2 7 0 R >>"
+                .to_vec(),
+            stream_object("/Length1 100", &AHEM[..100]),
+        ],
+    );
+    let dark = dark_pixels(pdf).len();
+    assert!(dark > 40, "AB draws ({dark} dark pixels)");
 }
 
 /// A `Tf` naming a font resource the page does not define draws its text
 /// in Helvetica and reports the name in the page diagnostics.
 #[test]
 fn missing_font_resource_draws_helvetica() {
-    let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", b"BT /F9 24 Tf 4 8 Td (AB) Tj ET"),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-    ];
-    let opts = RasterOptions::new(72.0);
-    let (_, page) = raster_pdf_from_bytes(assemble_pdf(&objects), &opts)
-        .next()
-        .expect("one page");
-    let page = page.expect("page renders");
-    assert!(page.pixels.iter().filter(|&&v| v < 128).count() > 40);
+    // `/F1` is Times, so the fallback is told apart from the page's own font.
+    let times = "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>";
+    let page = render_gray(font_page(
+        (64, 32),
+        times,
+        "BT /F9 24 Tf 4 8 Td (AB) Tj ET",
+        &[],
+    ));
+    let helvetica = render_gray(text_page(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "(AB)",
+    ));
+    assert!(helvetica.pixels.iter().any(|&v| v < 128), "Helvetica draws");
+    assert!(page.pixels == helvetica.pixels, "/F9 draws as Helvetica");
     assert_eq!(page.diagnostics.missing_fonts, ["F9"]);
-}
-
-/// `(left, width)` in device pixels of the ink `text` paints in the
-/// non-embedded font `font` at 24 pt from x = 4 on a 64 × 32 pt page.
-fn ink_span(font: &str, text: &str) -> (usize, usize) {
-    let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", format!("BT /F1 24 Tf 4 8 Td {text} Tj ET").as_bytes()),
-        font.as_bytes().to_vec(),
-    ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let width = bmp.width as usize;
-    let columns: Vec<usize> = bmp
-        .data()
-        .chunks(3)
-        .enumerate()
-        .filter(|(_, px)| px[0] < 128)
-        .map(|(i, _)| i % width)
-        .collect();
-    let left = columns.iter().copied().min().unwrap_or(0);
-    let right = columns.iter().copied().max().map_or(0, |r| r + 1);
-    (left, right - left)
 }
 
 /// A substitute's glyph is fitted to the advance the document specifies:
@@ -126,8 +80,8 @@ fn substitute_glyphs_are_fitted_to_the_pdf_widths() {
                   /CapHeight 700 /StemV 80 >> >>";
     let natural = "<< /Type /Font /Subtype /TrueType /BaseFont /ArialNarrow \
                    /Encoding /WinAnsiEncoding >>";
-    let (_, condensed) = ink_span(narrow, "(M)");
-    let (_, full) = ink_span(natural, "(M)");
+    let (_, condensed) = ink_span(text_page(narrow, "(M)"));
+    let (_, full) = ink_span(text_page(natural, "(M)"));
     assert!(full >= 15, "an unfitted sans M at 24 pt is wide: {full}");
     assert!(condensed <= 9, "M condensed to 300/1000 em: {condensed}");
 
@@ -136,8 +90,8 @@ fn substitute_glyphs_are_fitted_to_the_pdf_widths() {
                 /FontDescriptor << /Type /FontDescriptor /FontName /ArialNarrow /Flags 32 \
                 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 \
                 /CapHeight 700 /StemV 80 >> >>";
-    let (left_natural, _) = ink_span(natural, "(l)");
-    let (left_centred, _) = ink_span(wide, "(l)");
+    let (left_natural, _) = ink_span(text_page(natural, "(l)"));
+    let (left_centred, _) = ink_span(text_page(wide, "(l)"));
     assert!(left_natural <= 8, "{left_natural}");
     assert!(
         left_centred >= left_natural + 12,
@@ -148,32 +102,21 @@ fn substitute_glyphs_are_fitted_to_the_pdf_widths() {
 /// `(width, height, dark pixel count)` of the bounding box of the ink
 /// `ink` would count, for shape checks.
 fn ink_box(font: &str, text: &str) -> (usize, usize, usize) {
-    let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", format!("BT /F1 24 Tf 4 8 Td {text} Tj ET").as_bytes()),
-        font.as_bytes().to_vec(),
-    ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let (mut x0, mut y0, mut x1, mut y1, mut dark) = (usize::MAX, usize::MAX, 0, 0, 0);
-    for (i, px) in bmp.data().chunks(3).enumerate() {
-        if px[0] < 128 {
-            let (x, y) = (i % bmp.width as usize, i / bmp.width as usize);
-            x0 = x0.min(x);
-            y0 = y0.min(y);
-            x1 = x1.max(x);
-            y1 = y1.max(y);
-            dark += 1;
-        }
-    }
-    if dark == 0 {
+    let dark = dark_pixels(text_page(font, text));
+    let (Some(x0), Some(x1)) = (
+        dark.iter().map(|p| p.0).min(),
+        dark.iter().map(|p| p.0).max(),
+    ) else {
         return (0, 0, 0);
-    }
-    (x1 - x0 + 1, y1 - y0 + 1, dark)
+    };
+    let (y0, y1) = (
+        dark.iter().map(|p| p.1).min(),
+        dark.iter().map(|p| p.1).max(),
+    );
+    let (Some(y0), Some(y1)) = (y0, y1) else {
+        unreachable!("x and y extents exist together");
+    };
+    (x1 - x0 + 1, y1 - y0 + 1, dark.len())
 }
 
 /// A non-embedded Symbol font draws Greek: code `a` is `alpha`, not the
@@ -231,26 +174,21 @@ fn winansi_high_codes_resolve_by_name_on_the_substitute() {
 /// substitute carries as a glyph index.
 #[test]
 fn non_embedded_japanese_font_draws_latin_through_cid_to_unicode() {
-    let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", b"BT /F1 24 Tf 4 8 Td (AB) Tj ET"),
-        b"<< /Type /Font /Subtype /Type0 /BaseFont /MS-Mincho /Encoding /90ms-RKSJ-H \
-          /DescendantFonts [6 0 R] >>"
-            .to_vec(),
-        b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MS-Mincho \
-          /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> \
-          /FontDescriptor 7 0 R /DW 1000 /W [231 325 500] >>"
-            .to_vec(),
-        b"<< /Type /FontDescriptor /FontName /MS-Mincho /Flags 6 /FontBBox [0 -141 1000 859] \
-          /ItalicAngle 0 /Ascent 859 /Descent -141 /CapHeight 700 /StemV 80 >>"
-            .to_vec(),
-    ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let dark = bmp.data().chunks(3).filter(|px| px[0] < 128).count();
+    let pdf = font_page(
+        (64, 32),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /MS-Mincho /Encoding /90ms-RKSJ-H \
+         /DescendantFonts [6 0 R] >>",
+        "BT /F1 24 Tf 4 8 Td (AB) Tj ET",
+        &[
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MS-Mincho \
+              /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> \
+              /FontDescriptor 7 0 R /DW 1000 /W [231 325 500] >>"
+                .to_vec(),
+            b"<< /Type /FontDescriptor /FontName /MS-Mincho /Flags 6 /FontBBox [0 -141 1000 859] \
+              /ItalicAngle 0 /Ascent 859 /Descent -141 /CapHeight 700 /StemV 80 >>"
+                .to_vec(),
+        ],
+    );
+    let dark = dark_pixels(pdf).len();
     assert!(dark > 40, "AB draws ({dark} dark pixels)");
 }

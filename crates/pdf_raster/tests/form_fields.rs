@@ -3,7 +3,10 @@
 //! form's `/DR` (ISO 32000-2 §12.7): text and choice fields show their
 //! value, check boxes their mark when on.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use common::{assemble_pdf, stream_object};

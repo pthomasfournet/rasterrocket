@@ -5,12 +5,12 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
 use color::Rgb8;
-use common::{assemble_pdf, session, stream_object};
+use common::{font_page, session, stream_object};
 use raster::bitmap::Bitmap;
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
@@ -18,17 +18,10 @@ use rasterrocket::{BackendPolicy, render_page_rgb};
 /// font dictionary `font`; `extra` holds the objects numbered from 6 that
 /// `font` references.
 fn render(font: &str, extra: &[Vec<u8>], content: &str) -> Bitmap<Rgb8> {
-    let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 32] \
-          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-        stream_object("", content.as_bytes()),
-        font.as_bytes().to_vec(),
-    ];
-    objects.extend_from_slice(extra);
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(
+        font_page((64, 32), font, content, extra),
+        BackendPolicy::CpuOnly,
+    );
     render_page_rgb(&s, 1, 1.0).expect("render page")
 }
 
@@ -219,7 +212,11 @@ fn d1_glyphs_skip_colour_images() {
     let image: &[u8] = b"1000 0 0 1000 0 0 cm BI /W 1 /H 1 /CS /RGB /BPC 8 ID \xff\x00\x00 EI";
     let d1 = [b"1000 0 0 0 1000 1000 d1 ".as_slice(), image].concat();
     let (font, extra) = type3(&d1, "<< >>");
-    assert_eq!(ink(&render(&font, &extra, SHOW_A)), 0);
+    let page = render(&font, &extra, SHOW_A);
+    assert!(
+        page.data().iter().all(|&v| v == 255),
+        "the red image in a d1 description paints nothing"
+    );
 
     let d0 = [b"1000 0 d0 ".as_slice(), image].concat();
     let (font, extra) = type3(&d0, "<< >>");

@@ -7,11 +7,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Ahem: every printing glyph is a full em square; `space` is blank.
@@ -35,8 +35,6 @@ fn ahem_font(glyph: &str) -> Vec<u8> {
 /// half was painted.
 fn painted_halves(page: &str, form_name: &str, form: &str) -> (bool, bool) {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 32 16] \
           /Resources << /Font << /F1 6 0 R >> /XObject << /Fm0 5 0 R >> >> \
           /Contents 4 0 R >>"
@@ -58,7 +56,7 @@ fn painted_halves(page: &str, form_name: &str, form: &str) -> (bool, bool) {
             .to_vec(),
         stream_object("", AHEM),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = &bmp.data()[8 * bmp.stride..];
     (row[8 * 3] < 128, row[24 * 3] < 128)

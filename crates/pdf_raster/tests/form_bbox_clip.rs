@@ -1,11 +1,13 @@
 //! A form `XObject`'s `BBox` clips its content (ISO 32000-2 §8.10.1),
 //! whether or not the form is a transparency group.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{rgb_at, stream_object, with_page_tree};
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
 const W: u32 = 100;
@@ -15,9 +17,7 @@ const H: u32 = 100;
 /// translating by 10 10) whose content fills the whole page red.
 /// `group` is spliced into the form dictionary.
 fn page(group: &str) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /XObject << /F 5 0 R >> >> /Contents 4 0 R >>"
@@ -32,20 +32,6 @@ fn page(group: &str) -> Vec<u8> {
             b"1 0 0 rg -50 -50 200 200 re f",
         ),
     ])
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = common::session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 const RED: [u8; 3] = [255, 0, 0];

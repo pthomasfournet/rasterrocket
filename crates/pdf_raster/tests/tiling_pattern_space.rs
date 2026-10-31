@@ -6,12 +6,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{rgb_at, stream_object, with_page_tree};
 
 /// Page size in points; rendered at one pixel per point.
 const W: u32 = 200;
@@ -20,9 +19,7 @@ const H: u32 = 100;
 /// One `W` × `H` page running `content`, whose pattern `/P0` is the
 /// stream `pattern` (its dictionary entries) painting `cell`.
 fn page_with(content: &str, pattern: &str, cell: &[u8]) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /Pattern << /P0 5 0 R >> >> /Contents 4 0 R >>"
@@ -46,20 +43,6 @@ fn page(content: &str) -> Vec<u8> {
         "/BBox [0 0 20 20] /XStep 20 /YStep 20",
         b"1 0 0 rg 0 0 10 10 re f",
     )
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 const WHITE: [u8; 3] = [255, 255, 255];

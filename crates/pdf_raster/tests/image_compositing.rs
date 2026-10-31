@@ -5,17 +5,12 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{
-    BackendPolicy, RasterOptions, RenderedPage, raster_pdf_from_bytes, render_page_rgb,
-};
-
-/// 72 DPI: one pixel per point on the 100 × 100 pt page.
-const DPI: f32 = 72.0;
+use common::{gray_at, render_gray, session, stream_object, with_page_tree};
+use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// A 2 × 2 black `DeviceGray` image.
 fn black_image() -> Vec<u8> {
@@ -31,8 +26,6 @@ fn black_image() -> Vec<u8> {
 /// `ExtGState` `/Half` (`/ca 0.5`) in its resources.
 fn page(content: &str, form_content: &str, form_extras: &str) -> Vec<u8> {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
            /Resources << /XObject << /Im0 5 0 R /Fm0 6 0 R >> \
                          /ExtGState << /Half << /Type /ExtGState /ca 0.5 >> >> >> \
@@ -48,27 +41,14 @@ fn page(content: &str, form_content: &str, form_extras: &str) -> Vec<u8> {
             form_content.as_bytes(),
         ),
     ];
-    assemble_pdf(&objects)
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(DPI);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
-}
-
-/// Gray value at PDF user-space `(x, y)` (origin bottom-left).
-fn gray_at(page: &RenderedPage, x: u32, y: u32) -> u8 {
-    let row = page.height - 1 - y;
-    page.pixels[(row * page.width + x) as usize]
+    with_page_tree(&objects)
 }
 
 const IMAGE_IN_LEFT_HALF: &str = "q 50 0 0 100 0 0 cm /Im0 Do Q";
 
 #[test]
 fn image_inside_an_isolated_group_is_composited() {
-    let page = render(page(
+    let page = render_gray(page(
         "/Fm0 Do",
         IMAGE_IN_LEFT_HALF,
         "/Group << /S /Transparency /I true /CS /DeviceGray >>",
@@ -79,7 +59,7 @@ fn image_inside_an_isolated_group_is_composited() {
 
 #[test]
 fn image_inside_a_non_isolated_group_is_composited() {
-    let page = render(page(
+    let page = render_gray(page(
         "/Fm0 Do",
         IMAGE_IN_LEFT_HALF,
         "/Group << /S /Transparency >>",
@@ -90,7 +70,7 @@ fn image_inside_a_non_isolated_group_is_composited() {
 
 #[test]
 fn image_honours_the_nonstroking_constant_alpha() {
-    let page = render(page(&format!("q /Half gs {IMAGE_IN_LEFT_HALF} Q"), "", ""));
+    let page = render_gray(page(&format!("q /Half gs {IMAGE_IN_LEFT_HALF} Q"), "", ""));
     let half = gray_at(&page, 25, 50);
     assert!(
         (120..=136).contains(&half),
@@ -100,7 +80,7 @@ fn image_honours_the_nonstroking_constant_alpha() {
 
 #[test]
 fn opaque_image_outside_any_group_is_unchanged() {
-    let page = render(page(IMAGE_IN_LEFT_HALF, "", ""));
+    let page = render_gray(page(IMAGE_IN_LEFT_HALF, "", ""));
     assert_eq!(gray_at(&page, 25, 50), 0);
     assert_eq!(gray_at(&page, 75, 50), 255);
 }
@@ -113,8 +93,6 @@ fn images_over_red(bm: &str) -> [[u8; 3]; 2] {
                     q 50 0 0 100 0 0 cm /Im0 Do Q \
                     q 50 0 0 100 50 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80\nEI Q Q";
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
              /Resources << /XObject << /Im0 5 0 R >> \
@@ -129,7 +107,7 @@ fn images_over_red(bm: &str) -> [[u8; 3]; 2] {
             &[0x80],
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = &bmp.data()[50 * bmp.stride..];
     let at = |x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];

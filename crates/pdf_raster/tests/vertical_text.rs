@@ -6,11 +6,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Ahem: every printing glyph is a full em square (x 0..1000, y −200..800).
@@ -41,8 +41,6 @@ fn ink(
         Encoding::Stream(..) => "9 0 R".to_owned(),
     };
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 48 64] \
           /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
@@ -67,7 +65,7 @@ fn ink(
     if let Encoding::Stream(dict, body) = encoding {
         objects.push(stream_object(&format!("/Type /CMap {dict}"), body));
     }
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let w = bmp.width as usize;
     let (mut x0, mut y0, mut x1, mut y1, mut dark) = (usize::MAX, usize::MAX, 0, 0, 0);

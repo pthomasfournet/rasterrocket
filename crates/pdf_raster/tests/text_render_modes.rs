@@ -8,10 +8,13 @@
 //! 200 × 200 pt page, so the square spans device columns 60..90 and rows
 //! 120..150, centred on (75, 135).
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
+use common::{stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 const PLAIN_TRUETYPE: &[u8] = include_bytes!("../../font/src/tests/data/hint-assembled-plain.ttf");
@@ -29,8 +32,6 @@ fn page(content: &[u8]) -> Vec<u8> {
 /// objects 8 onwards.
 fn page_with(content: &[u8], resources: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
              /Resources << /Font << /F1 5 0 R >> {resources} >> /Contents 4 0 R >>"
@@ -50,7 +51,7 @@ fn page_with(content: &[u8], resources: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
         ),
     ];
     objects.extend(extra);
-    assemble_pdf(&objects)
+    with_page_tree(&objects)
 }
 
 /// A rendered RGB page.

@@ -8,11 +8,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{ascii_hex, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// Stencil side in samples; the page is the same size in points and
@@ -68,16 +68,6 @@ enum Use {
     ExplicitMask,
 }
 
-/// `HexString` encoding for an `/ASCIIHexDecode` stream body.
-fn hex(data: &[u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = data
-        .iter()
-        .flat_map(|b| format!("{b:02X}").into_bytes())
-        .collect();
-    out.push(b'>');
-    out
-}
-
 /// Render the stencil described by `entries` (its `/Filter`, `/DecodeParms`
 /// and `/Decode`, in full-key form) and `data`, and report the red half.
 fn painted(how: Use, entries: &str, data: &[u8]) -> Painted {
@@ -88,7 +78,7 @@ fn painted(how: Use, entries: &str, data: &[u8]) -> Painted {
 /// form, given as `bpc` (empty to omit it).
 fn painted_with_bpc(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Painted {
     let s = session(
-        assemble_pdf(&stencil_objects(how, bpc, entries, data)),
+        with_page_tree(&stencil_objects(how, bpc, entries, data)),
         BackendPolicy::CpuOnly,
     );
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
@@ -105,8 +95,6 @@ fn painted_with_bpc(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Painted 
 /// `bpc`, `entries` and `data` as `how` says.
 fn stencil_objects(how: Use, bpc: &str, entries: &str, data: &[u8]) -> Vec<Vec<u8>> {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -169,7 +157,7 @@ fn sources() -> Vec<(&'static str, String, Vec<u8>, Painted)> {
         (
             "ASCIIHex",
             "/Filter /ASCIIHexDecode".into(),
-            hex(&RAW_LEFT_ONES),
+            ascii_hex(&RAW_LEFT_ONES),
             Painted::Right,
         ),
         (
@@ -195,7 +183,7 @@ fn sources() -> Vec<(&'static str, String, Vec<u8>, Painted)> {
                 "/Filter [/ASCIIHexDecode /CCITTFaxDecode] \
                  /DecodeParms [null << /K -1 /Columns {SIDE} /Rows {SIDE} >>]"
             ),
-            hex(&G4_RIGHT_BLACK),
+            ascii_hex(&G4_RIGHT_BLACK),
             Painted::Right,
         ),
         (
@@ -271,7 +259,7 @@ fn truncated_raw_stencil_leaves_missing_rows_unpainted() {
             decode,
             &RAW_LEFT_ONES[..8],
         );
-        let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+        let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
         let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
         let px = |x: usize, y: usize| &bmp.data()[y * bmp.stride + x * 3..][..3];
         assert_eq!(
@@ -300,8 +288,6 @@ fn indexed_bilevel_images_show_their_palette() {
     const BLUE: [u8; 3] = [0, 0, 255];
     for (name, entries, data, zero_half) in sources() {
         let objects = vec![
-            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
             format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
                  /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -320,7 +306,7 @@ fn indexed_bilevel_images_show_their_palette() {
                 &data,
             ),
         ];
-        let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+        let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
         let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
         let row = &bmp.data()[8 * bmp.stride..];
         let at = |x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];

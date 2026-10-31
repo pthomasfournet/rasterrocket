@@ -2,14 +2,13 @@
 //! (ISO 32000-1 §7.7.3.4).  Every resource category the content stream names
 //! must resolve through that inheritance, not only fonts and colour spaces.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
-
-/// 72 DPI: one pixel per point on the 100 × 100 pt page.
-const DPI: f32 = 72.0;
+use common::{assemble_pdf, gray_at, render_gray, stream_object};
 
 /// One page whose four quadrants are painted through four resource
 /// categories, all defined on the `/Pages` node and none on the page:
@@ -49,22 +48,9 @@ fn page_with_inherited_resources() -> Vec<u8> {
     assemble_pdf(&objects)
 }
 
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(DPI);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
-}
-
-/// Gray value at PDF user-space `(x, y)` (origin bottom-left).
-fn gray_at(page: &RenderedPage, x: u32, y: u32) -> u8 {
-    let row = page.height - 1 - y;
-    page.pixels[(row * page.width + x) as usize]
-}
-
 #[test]
 fn every_resource_category_is_inherited_from_the_page_tree() {
-    let page = render(page_with_inherited_resources());
+    let page = render_gray(page_with_inherited_resources());
 
     assert_eq!(gray_at(&page, 25, 25), 0, "inherited image XObject");
     assert_eq!(gray_at(&page, 75, 25), 0, "inherited form XObject");

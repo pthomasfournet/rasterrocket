@@ -3,12 +3,15 @@
 //! Devanagari still draws its glyphs.
 #![cfg(feature = "bundled-fonts")]
 
-#[expect(dead_code, reason = "shared helpers; this test uses PDF assembly only")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use std::path::PathBuf;
 
-use common::{assemble_pdf, stream_object};
+use common::{stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb};
 
 /// The characters shown, one per 40 pt cell: Greek alpha, Cyrillic zhe,
@@ -32,9 +35,7 @@ fn bundled_faces_draw_scripts_without_installed_fonts() {
         let line = format!("BT /F1 24 Tf {} 8 Td <{:02X}> Tj ET\n", 8 + 40 * i, 65 + i);
         content.push_str(&line);
     }
-    let pdf = assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    let pdf = with_page_tree(&[
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 208 40] \
           /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),

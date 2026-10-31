@@ -5,11 +5,13 @@
 //! knockout group (§11.4.6.2) each object composites with the group's
 //! initial backdrop and, within its shape, replaces the objects before it.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{rgb_at, stream_object, with_page_tree};
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
 const W: u32 = 100;
@@ -19,9 +21,7 @@ const H: u32 = 100;
 /// `gstates` and the form `/F` (object 5): a `/Group` form over the page
 /// painting `form_content`, with the group entries `group`.
 fn page(gstates: &str, content: &str, group: &str, form_content: &str) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /ExtGState << {gstates} >> /XObject << /F 5 0 R >> >> \
@@ -38,20 +38,6 @@ fn page(gstates: &str, content: &str, group: &str, form_content: &str) -> Vec<u8
             form_content.as_bytes(),
         ),
     ])
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = common::session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 const GREY: [u8; 3] = [128, 128, 128];
@@ -153,9 +139,7 @@ fn a_blend_mode_inside_a_non_isolated_group_sees_earlier_group_content() {
 /// lifts the group's clip nor the alpha.
 #[test]
 fn a_later_group_composites_only_its_own_content() {
-    let pdf = assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    let pdf = with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /ExtGState << /A << /ca 0.5 >> >> \
@@ -216,9 +200,7 @@ fn a_blend_mode_in_nested_non_isolated_groups_sees_every_ancestor() {
             content.as_bytes(),
         )
     };
-    let pdf = assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    let pdf = with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /XObject << /A 5 0 R >> >> /Contents 4 0 R >>"

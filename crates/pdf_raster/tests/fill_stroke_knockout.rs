@@ -2,11 +2,13 @@
 //! stroke knocks out the fill (ISO 32000-2 §11.7.4.4): a semi-transparent
 //! stroke composites with the backdrop under the path, not over the fill.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{rgb_at, stream_object, with_page_tree};
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
 const W: u32 = 100;
@@ -14,9 +16,7 @@ const H: u32 = 100;
 
 /// A white page running `content` with the `ExtGState` `/H` (alpha 0.5).
 fn page(content: &str) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /ExtGState << /H << /CA 0.5 /ca 0.5 >> >> >> \
@@ -25,20 +25,6 @@ fn page(content: &str) -> Vec<u8> {
         .into_bytes(),
         stream_object("", content.as_bytes()),
     ])
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = common::session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let data = bmp.data();
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
 }
 
 /// Half-alpha red over white.

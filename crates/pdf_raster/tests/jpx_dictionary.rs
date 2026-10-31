@@ -6,13 +6,13 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
 use std::fmt::Write as _;
 
-use common::{assemble_pdf, session, stream_object};
+use common::{assert_rgb_near, session, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// 8 × 8 one-channel 8-bit JP2; row `r` holds the value of `GRAY8_ROWS[r]`.
@@ -31,8 +31,6 @@ const SIDE: u32 = 8;
 /// white page and return the pixel at column `col` of row `row`.
 fn pixel(entries: &str, data: &[u8], col: usize, row: usize) -> [u8; 3] {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -50,16 +48,16 @@ fn pixel(entries: &str, data: &[u8], col: usize, row: usize) -> [u8; 3] {
             data,
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
+    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let at = row * bmp.stride + col * 3;
     let px = &bmp.data()[at..at + 3];
     [px[0], px[1], px[2]]
 }
 
+/// [`assert_rgb_near`] within ±4 per channel.
 fn assert_near(name: &str, got: [u8; 3], want: [u8; 3]) {
-    let close = got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 4);
-    assert!(close, "{name}: got {got:?}, want about {want:?}");
+    assert_rgb_near(got, want, 4, name);
 }
 
 #[test]

@@ -4,13 +4,15 @@
 //! diagnostics: a truncated inline image reports one partial failure per
 //! decode.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use std::fmt::Write as _;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{render_gray, stream_object, with_page_tree};
 
 /// A page drawing form `/Fm` `draws` times; the form holds one 4 × 4 gray
 /// inline image whose data is short by half (a partial decode) over the
@@ -24,27 +26,18 @@ fn page(draws: usize) -> Vec<u8> {
     form.extend_from_slice(&[0x40; 8]);
     form.extend_from_slice(b" EI Q");
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 10] \
            /Resources << /XObject << /Fm 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
         stream_object("", content.as_bytes()),
         stream_object("/Type /XObject /Subtype /Form /BBox [0 0 1 1]", &form),
     ];
-    assemble_pdf(&objects)
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(72.0);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
+    with_page_tree(&objects)
 }
 
 #[test]
 fn a_repeated_inline_image_decodes_once_per_page() {
-    let page = render(page(10));
+    let page = render_gray(page(10));
     let failures = &page.diagnostics.image_failures;
     assert_eq!(
         failures.len(),

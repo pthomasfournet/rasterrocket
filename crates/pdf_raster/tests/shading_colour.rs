@@ -7,12 +7,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{assert_rgb_near, rgb_at, stream_object, with_page_tree};
 
 /// Page size in points; rendered at one pixel per point.
 const W: u32 = 200;
@@ -49,8 +48,6 @@ fn page(content: &str, shading: &str) -> Vec<u8> {
 /// `extra` appended as objects 7, 8, ….
 fn page_with(content: &str, shading: &[u8], extra: &[Vec<u8>]) -> Vec<u8> {
     let mut objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /Shading << /Sh0 6 0 R >> /ColorSpace << /CS0 {CMY_DEVICEN} >> >> \
@@ -62,30 +59,7 @@ fn page_with(content: &str, shading: &[u8], extra: &[Vec<u8>]) -> Vec<u8> {
         shading.to_vec(),
     ];
     objects.extend_from_slice(extra);
-    assemble_pdf(&objects)
-}
-
-/// RGB at user-space `(x, y)` (origin bottom-left).
-fn rgb_at(pdf: Vec<u8>, points: &[(u32, u32)]) -> Vec<[u8; 3]> {
-    let s = session(pdf, BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    assert_eq!((bmp.width, bmp.height), (W, H));
-    let data = bmp.data();
-    let stride = bmp.stride;
-    points
-        .iter()
-        .map(|&(x, y)| {
-            let i = (H - 1 - y) as usize * stride + x as usize * 3;
-            [data[i], data[i + 1], data[i + 2]]
-        })
-        .collect()
-}
-
-fn assert_close(got: [u8; 3], want: [u8; 3], tol: u8, what: &str) {
-    assert!(
-        got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= tol),
-        "{what}: got {got:?}, want {want:?} ± {tol}"
-    );
+    with_page_tree(&objects)
 }
 
 #[test]
@@ -102,7 +76,7 @@ fn axial_devicen_midpoint_matches_a_flat_fill_of_the_function_value() {
         page(content, &shading),
         &[(100, 75), (100, 25), (0, 75), (199, 75)],
     );
-    assert_close(px[0], px[1], 3, "shading at t = 0.5 vs flat fill");
+    assert_rgb_near(px[0], px[1], 3, "shading at t = 0.5 vs flat fill");
     assert!(px[2][0] > 180 && px[2][1] < 80, "start is red: {:?}", px[2]);
     assert!(px[3][1] > px[3][0], "end is green: {:?}", px[3]);
 }
@@ -114,9 +88,9 @@ fn axial_multi_stop_function_passes_through_every_stop() {
          /Extend [true true] /Function {RED_GREEN_BLUE} >>"
     );
     let px = rgb_at(page("/Sh0 sh", &shading), &[(100, 50), (0, 50), (199, 50)]);
-    assert_close(px[0], [0, 255, 0], 4, "middle stop");
-    assert_close(px[1], [255, 0, 0], 4, "first stop");
-    assert_close(px[2], [0, 0, 255], 4, "last stop");
+    assert_rgb_near(px[0], [0, 255, 0], 4, "middle stop");
+    assert_rgb_near(px[1], [255, 0, 0], 4, "first stop");
+    assert_rgb_near(px[2], [0, 0, 255], 4, "last stop");
 }
 
 #[test]
@@ -130,9 +104,9 @@ fn radial_multi_stop_function_passes_through_every_stop() {
         page("/Sh0 sh", &shading),
         &[(125, 50), (100, 50), (160, 50)],
     );
-    assert_close(px[0], [0, 255, 0], 12, "middle stop at radius 25");
-    assert_close(px[1], [255, 0, 0], 12, "first stop at the centre");
-    assert_close(px[2], [0, 0, 255], 4, "last stop beyond radius 50");
+    assert_rgb_near(px[0], [0, 255, 0], 12, "middle stop at radius 25");
+    assert_rgb_near(px[1], [255, 0, 0], 12, "first stop at the centre");
+    assert_rgb_near(px[2], [0, 0, 255], 4, "last stop beyond radius 50");
 }
 
 /// Type 4 function of `(x, y)` running `program`.
@@ -164,7 +138,7 @@ fn function_based_shading_reads_both_coordinates_through_its_matrix() {
         &TYPE1_PROBES,
     );
     for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
-        assert_close(got, want, 4, "Function(x, y) = (x, y, 0)");
+        assert_rgb_near(got, want, 4, "Function(x, y) = (x, y, 0)");
     }
 }
 
@@ -186,7 +160,7 @@ fn function_based_shading_takes_an_array_of_two_input_functions() {
         &TYPE1_PROBES,
     );
     for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
-        assert_close(got, want, 4, "Function = [x, y, 0]");
+        assert_rgb_near(got, want, 4, "Function = [x, y, 0]");
     }
 }
 
@@ -209,7 +183,7 @@ fn lattice_mesh_with_function_interpolates_t_through_every_stop() {
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
     for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
-        assert_close(got, want, 6, "type 5 mesh, t = x / 200");
+        assert_rgb_near(got, want, 6, "type 5 mesh, t = x / 200");
     }
 }
 
@@ -260,7 +234,7 @@ fn coons_mesh_with_function_interpolates_t_through_every_stop() {
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
     for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
-        assert_close(got, want, 6, "type 6 mesh, t = x / 200");
+        assert_rgb_near(got, want, 6, "type 6 mesh, t = x / 200");
     }
 }
 
@@ -274,8 +248,6 @@ fn mesh_in_a_five_colorant_space_converts_every_vertex() {
         data.extend([x, y, 0, 255, 255, 0, 128]);
     }
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] \
              /Resources << /Shading << /Sh0 6 0 R >> /ColorSpace << /CS5 7 0 R >> >> \
@@ -295,8 +267,8 @@ fn mesh_in_a_five_colorant_space_converts_every_vertex() {
         ),
         b"[/DeviceN [/Cyan /Magenta /Yellow /Black /Spot] /DeviceCMYK 5 0 R]".to_vec(),
     ];
-    let px = rgb_at(assemble_pdf(&objects), &[(100, 80), (100, 20)]);
-    assert_close(px[0], px[1], 2, "mesh vertex colour vs flat fill");
+    let px = rgb_at(with_page_tree(&objects), &[(100, 80), (100, 20)]);
+    assert_rgb_near(px[0], px[1], 2, "mesh vertex colour vs flat fill");
     assert!(px[0][0] > 180 && px[0][1] < 80, "red: {:?}", px[0]);
 }
 
@@ -336,7 +308,7 @@ fn free_form_mesh_reads_a_flag_on_every_byte_aligned_vertex() {
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
     for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
-        assert_close(got, want, 6, "type 4 mesh, t = x / 200");
+        assert_rgb_near(got, want, 6, "type 4 mesh, t = x / 200");
     }
 }
 
@@ -363,7 +335,7 @@ fn lattice_mesh_starts_every_vertex_on_a_byte_boundary() {
     );
     let want = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
     for (got, want) in px.into_iter().zip(want) {
-        assert_close(got, want, 12, "lattice corner");
+        assert_rgb_near(got, want, 12, "lattice corner");
     }
 }
 
@@ -405,6 +377,6 @@ fn patch_mesh_starts_every_patch_on_a_byte_boundary() {
         &data,
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &[(50, 50), (150, 50)]);
-    assert_close(px[0], [255, 0, 0], 2, "first patch");
-    assert_close(px[1], [0, 0, 255], 2, "second patch");
+    assert_rgb_near(px[0], [255, 0, 0], 2, "first patch");
+    assert_rgb_near(px[1], [0, 0, 255], 2, "second patch");
 }

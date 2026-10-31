@@ -3,14 +3,12 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly, sessions and ink coverage"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{SQUARE, assemble_pdf, ink, one_page, session, stream_object};
-use rasterrocket::{
-    BackendPolicy, RasterError, RasterOptions, raster_pdf_from_bytes, render_page_rgb,
-};
+use common::{SQUARE, assemble_pdf, ink, one_page, render_one, session, stream_object};
+use rasterrocket::{BackendPolicy, RasterError, RasterOptions, render_page_rgb};
 
 /// A bare keyword as a page-dictionary value loses that key only; the page
 /// and its content are still read.
@@ -76,9 +74,7 @@ fn undecodable_content_element_is_reported() {
     let render = |strict| {
         let mut opts = RasterOptions::default();
         opts.strict = strict;
-        let mut pages: Vec<_> = raster_pdf_from_bytes(pdf.clone(), &opts).collect();
-        assert_eq!(pages.len(), 1, "one page expected");
-        pages.remove(0).1
+        render_one(pdf.clone(), &opts)
     };
 
     let page = render(false).expect("page renders");
@@ -117,9 +113,7 @@ fn truncated_content_element_is_drawn_and_reported_partial() {
     let render = |strict| {
         let mut opts = RasterOptions::default();
         opts.strict = strict;
-        let mut pages: Vec<_> = raster_pdf_from_bytes(pdf.clone(), &opts).collect();
-        assert_eq!(pages.len(), 1, "one page expected");
-        pages.remove(0).1
+        render_one(pdf.clone(), &opts)
     };
 
     let page = render(false).expect("page renders");

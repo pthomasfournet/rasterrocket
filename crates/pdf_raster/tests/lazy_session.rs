@@ -4,53 +4,45 @@
 //! [`pdf::Document`]) and defers per-page `ObjectId` resolution to first
 //! render via the [`pdf::Document::get_page`] descent.
 
-use std::path::PathBuf;
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
+mod common;
+
+use common::{SQUARE, corpus_fixture, one_page, session, stream_object};
+use rasterrocket::{BackendPolicy, RasterError, SessionConfig, open_session};
 
 #[test]
 fn session_open_reports_correct_total_pages() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/corpus-05-academic-book.pdf");
-    // The corpus fixtures are intentionally gitignored (private corpus);
-    // skip cleanly when absent rather than hard-failing a fresh checkout.
-    // The assertion below is the actual test — it runs whenever the
-    // fixture is provided.
-    if !path.exists() {
-        eprintln!("skipping: corpus fixture absent ({})", path.display());
+    let Some(path) = corpus_fixture("corpus-05-academic-book.pdf") else {
         return;
-    }
-    let session =
-        rasterrocket::open_session(&path, &rasterrocket::SessionConfig::default()).expect("open");
+    };
+    let session = open_session(&path, &SessionConfig::default()).expect("open");
     assert_eq!(session.total_pages(), 601);
 }
 
 #[test]
 fn resolve_page_returns_consistent_object_ids() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/corpus-04-ebook-mixed.pdf");
-    if !path.exists() {
-        eprintln!("skipping: corpus fixture absent ({})", path.display());
-        return;
-    }
-    let session =
-        rasterrocket::open_session(&path, &rasterrocket::SessionConfig::default()).expect("open");
+    let pdf = one_page(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>",
+        vec![stream_object("", SQUARE)],
+    );
+    let session = session(pdf, BackendPolicy::CpuOnly);
+    assert_eq!(session.total_pages(), 1);
 
-    // Two calls for the same page must return the same object id.  The
+    // Two calls for the same page return the same object id: the
     // underlying [`pdf::Document::get_page`] is a pure function of
-    // `(doc, idx)` so the result is deterministic across calls.
+    // `(doc, idx)`.
     let id1 = session.resolve_page(1).expect("page 1 first");
     let id2 = session.resolve_page(1).expect("page 1 second");
     assert_eq!(id1, id2);
+    assert_eq!(id1, (3, 0), "the page object");
 
-    // Out-of-range fails fast with a 1-based PageOutOfRange — the caller
-    // does not have to translate from the descender's 0-based variant.
-    let err = session
-        .resolve_page(session.total_pages() + 1)
-        .expect_err("must error past total_pages");
-    match err {
-        rasterrocket::RasterError::PageOutOfRange { page, total } => {
-            assert_eq!(page, session.total_pages() + 1);
-            assert_eq!(total, session.total_pages());
-        }
-        other => panic!("expected PageOutOfRange, got {other:?}"),
+    // Past the end fails with a 1-based `PageOutOfRange`; the caller does
+    // not translate from the descender's 0-based variant.
+    match session.resolve_page(2) {
+        Err(RasterError::PageOutOfRange { page: 2, total: 1 }) => {}
+        other => panic!("expected PageOutOfRange {{ page: 2, total: 1 }}, got {other:?}"),
     }
 }

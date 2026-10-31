@@ -23,18 +23,18 @@
               is written as plain formulas for review against the camera model"
 )]
 
+#[path = "../common/mod.rs"]
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and fixtures"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
-#[path = "../common/mod.rs"]
 mod common;
 mod metrics;
 mod synth;
 
 use camera::{CameraOptions, GrayView, Processed};
-use common::{assemble_pdf, corpus_fixture, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf, raster_pdf_from_bytes};
+use common::{corpus_fixture, render_one, stream_object, with_page_tree};
+use rasterrocket::{RasterOptions, RenderedPage, raster_pdf};
 use synth::{Gray, Pose};
 
 /// Resolution of the rendered source pages.
@@ -69,9 +69,7 @@ fn image_pdf(img: &Gray) -> Vec<u8> {
         img.h as f64 * 72.0 / f64::from(DPI),
     );
     let content = format!("q {wpt:.4} 0 0 {hpt:.4} 0 0 cm /Im0 Do Q");
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {wpt:.4} {hpt:.4}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -91,12 +89,9 @@ fn image_pdf(img: &Gray) -> Vec<u8> {
 
 /// Render a one-image PDF of `img`.
 fn render_image(img: &Gray) -> Gray {
-    let opts = RasterOptions::new(DPI);
-    let pages: Vec<RenderedPage> = raster_pdf_from_bytes(image_pdf(img), &opts)
-        .map(|(n, r)| r.unwrap_or_else(|e| panic!("capture page {n}: {e}")))
-        .collect();
-    assert_eq!(pages.len(), 1, "one-image PDF renders one page");
-    page_gray(&pages[0])
+    let page = render_one(image_pdf(img), &RasterOptions::new(DPI))
+        .unwrap_or_else(|e| panic!("capture page: {e}"));
+    page_gray(&page)
 }
 
 fn run_camera(img: &Gray, opts: CameraOptions) -> Processed {

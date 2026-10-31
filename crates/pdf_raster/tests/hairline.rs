@@ -2,7 +2,10 @@
 //! pixel wide (ISO 32000-2 §8.4.3.2), including the sides of a rectangle of
 //! zero width or height.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
 use common::{one_page, session, stream_object};

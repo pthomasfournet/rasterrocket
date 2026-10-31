@@ -3,32 +3,25 @@
 //! still renders.  Sides up to 131 071 pixels are accepted when the budget
 //! allows.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{render_gray, stream_object, with_page_tree};
 
 /// One 100 × 100 pt page drawing `/Im0` (dictionary `entries`, stream
 /// `data`) over the whole page.
 fn page(entries: &str, data: &[u8]) -> Vec<u8> {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
            /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
             .to_vec(),
         stream_object("", b"q 100 0 0 100 0 0 cm /Im0 Do Q"),
         stream_object(&format!("/Type /XObject /Subtype /Image {entries}"), data),
     ];
-    assemble_pdf(&objects)
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(72.0);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
+    with_page_tree(&objects)
 }
 
 #[test]
@@ -50,7 +43,7 @@ fn an_image_over_the_decode_budget_is_refused_and_reported() {
         ),
     ];
     for (name, entries) in cases {
-        let page = render(page(entries, &[0xAA; 16]));
+        let page = render_gray(page(entries, &[0xAA; 16]));
         let [failure] = page.diagnostics.image_failures.as_slice() else {
             panic!(
                 "{name}: one failure expected, got {:?}",
@@ -73,7 +66,7 @@ fn a_wide_image_within_the_budget_decodes() {
     // 131 071 × 2 gray samples: wider than 65 536, well under the budget.
     let row = vec![0x40u8; 131_071];
     let data = [row.as_slice(), row.as_slice()].concat();
-    let page = render(page(
+    let page = render_gray(page(
         "/Width 131071 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray",
         &data,
     ));

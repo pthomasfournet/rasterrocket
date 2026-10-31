@@ -5,12 +5,11 @@
 
 #[expect(
     dead_code,
-    reason = "shared helpers; this test uses PDF assembly and sessions"
+    reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
 
-use common::{assemble_pdf, session, stream_object};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use common::{assert_rgb_near, rgb_at, stream_object, with_page_tree};
 
 /// Page side in points; it renders at one pixel per point.
 const SIDE: u32 = 16;
@@ -19,8 +18,6 @@ const SIDE: u32 = 16;
 /// with `/Matte matte` over a white page, and return the centre pixel.
 fn render(cs: &str, base: &[u8], smask_extra: &str) -> [u8; 3] {
     let objects = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
@@ -45,16 +42,12 @@ fn render(cs: &str, base: &[u8], smask_extra: &str) -> [u8; 3] {
             &[128],
         ),
     ];
-    let s = session(assemble_pdf(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let at = 8 * bmp.stride + 8 * 3;
-    let px = &bmp.data()[at..at + 3];
-    [px[0], px[1], px[2]]
+    rgb_at(with_page_tree(&objects), &[(SIDE / 2, SIDE / 2)])[0]
 }
 
+/// [`assert_rgb_near`] within ±6 per channel.
 fn assert_near(name: &str, got: [u8; 3], want: [u8; 3]) {
-    let close = got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 6);
-    assert!(close, "{name}: got {got:?}, want about {want:?}");
+    assert_rgb_near(got, want, 6, name);
 }
 
 #[test]

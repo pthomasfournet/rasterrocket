@@ -2,10 +2,13 @@
 //! is not executed again while it is running: the recursive `Do` draws
 //! nothing and the rest of the page renders.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
+use common::{stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, render_page_rgb};
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
@@ -26,9 +29,7 @@ fn page(a: &[u8], b: &[u8]) -> Vec<u8> {
             content,
         )
     };
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 {H}] {forms} /Contents 4 0 R >>")
             .into_bytes(),
         stream_object(

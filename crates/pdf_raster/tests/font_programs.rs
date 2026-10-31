@@ -7,11 +7,14 @@
 //! a 200 × 100 pt page, so a glyph coordinate of `u` font units (1000 per
 //! em) lands at pixel column `pen + 0.04 u`.
 
-#[expect(dead_code, reason = "shared helpers; this test uses only PDF assembly")]
+#[expect(
+    dead_code,
+    reason = "each test binary compiles all shared helpers and uses a subset"
+)]
 mod common;
 
-use common::{assemble_pdf, stream_object};
-use rasterrocket::{RasterOptions, RenderedPage, raster_pdf_from_bytes};
+use common::{render_gray, stream_object, with_page_tree};
+use rasterrocket::RenderedPage;
 
 const HINT_ASSEMBLED_BY_NAME: &[u8] =
     include_bytes!("../../font/src/tests/data/hint-assembled-by-name.ttf");
@@ -29,9 +32,7 @@ const PAGE: &[u8] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
 
 /// One page showing `AB` in a simple TrueType font embedding `program`.
 fn truetype_page(program: &[u8]) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         PAGE.to_vec(),
         stream_object("", b"BT /F1 40 Tf 10 30 Td (AB) Tj ET"),
         b"<< /Type /Font /Subtype /TrueType /BaseFont /Fixture /FirstChar 65 \
@@ -48,9 +49,7 @@ fn truetype_page(program: &[u8]) -> Vec<u8> {
 /// One page showing the one-byte `code` in a symbolic simple TrueType
 /// font (`Flags` 4, no `Encoding`) embedding `program`.
 fn symbolic_truetype_page(program: &[u8], code: u8) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         PAGE.to_vec(),
         stream_object(
             "",
@@ -72,9 +71,7 @@ fn symbolic_truetype_page(program: &[u8], code: u8) -> Vec<u8> {
 /// One page showing CIDs 1–4 through `Identity-H` in a Type 0 font whose
 /// `CIDFontType0` descendant embeds `program` as `FontFile`.
 fn cid_type1_page(program: &[u8]) -> Vec<u8> {
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+    with_page_tree(&[
         PAGE.to_vec(),
         stream_object("", b"BT /F1 40 Tf 10 30 Td <0001000200030004> Tj ET"),
         b"<< /Type /Font /Subtype /Type0 /BaseFont /RRTest-CID-Identity-H \
@@ -90,13 +87,6 @@ fn cid_type1_page(program: &[u8]) -> Vec<u8> {
             .to_vec(),
         stream_object("", program),
     ])
-}
-
-fn render(pdf: Vec<u8>) -> RenderedPage {
-    let opts = RasterOptions::new(72.0);
-    let mut pages: Vec<_> = raster_pdf_from_bytes(pdf, &opts).collect();
-    assert_eq!(pages.len(), 1, "one page expected");
-    pages.remove(0).1.expect("page renders")
 }
 
 /// Inclusive column runs that contain a pixel darker than mid-gray.
@@ -129,7 +119,7 @@ fn has_run(runs: &[(u32, u32)], lo: u32, hi: u32) -> bool {
 fn instruction_assembled_truetype_glyphs_render_assembled() {
     // `A` is two squares (x 100..400 and 600..900), `B` one square.
     for program in [HINT_ASSEMBLED_BY_NAME, HINT_ASSEMBLED_BY_TABLES] {
-        let runs = ink_columns(&render(truetype_page(program)));
+        let runs = ink_columns(&render_gray(truetype_page(program)));
         assert_eq!(runs.len(), 3, "{runs:?}");
         assert!(has_run(&runs, 14, 25), "first square of A: {runs:?}");
         assert!(has_run(&runs, 34, 45), "second square of A: {runs:?}");
@@ -140,7 +130,7 @@ fn instruction_assembled_truetype_glyphs_render_assembled() {
 #[test]
 fn ordinary_truetype_glyphs_stay_unhinted() {
     // Not recognised: `A`'s components overlap as stored.
-    let runs = ink_columns(&render(truetype_page(HINT_ASSEMBLED_PLAIN)));
+    let runs = ink_columns(&render_gray(truetype_page(HINT_ASSEMBLED_PLAIN)));
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert!(has_run(&runs, 14, 25) && has_run(&runs, 54, 65), "{runs:?}");
 }
@@ -151,7 +141,7 @@ fn symbolic_truetype_code_resolves_through_mac_roman_subtable() {
     // `post` name also yields a Unicode charmap keyed by U+2234.  Code 0x21
     // selects the square (x 100..400); the contourless `.notdef` leaves
     // the page blank.
-    let runs = ink_columns(&render(symbolic_truetype_page(
+    let runs = ink_columns(&render_gray(symbolic_truetype_page(
         SYMBOLIC_MAC_ROMAN_NAMED,
         0x21,
     )));
@@ -163,7 +153,7 @@ fn symbolic_truetype_code_resolves_through_mac_roman_subtable() {
 /// each code to the glyph of that index: code 1 draws GID 1's square.
 #[test]
 fn truetype_without_cmap_or_names_uses_codes_as_glyph_indices() {
-    let runs = ink_columns(&render(symbolic_truetype_page(NO_CMAP, 1)));
+    let runs = ink_columns(&render_gray(symbolic_truetype_page(NO_CMAP, 1)));
     assert!(has_run(&runs, 14, 26), "{runs:?}");
 }
 
@@ -171,7 +161,7 @@ fn truetype_without_cmap_or_names_uses_codes_as_glyph_indices() {
 fn cid_keyed_type1_glyphs_render() {
     // CID 1 square at pen 10, CID 2 triangle at pen 50, CID 3 diamond at
     // pen 90; CID 4 has no glyph.
-    let page = render(cid_type1_page(CID_KEYED_TYPE1));
+    let page = render_gray(cid_type1_page(CID_KEYED_TYPE1));
     let runs = ink_columns(&page);
     assert_eq!(runs.len(), 3, "{runs:?}");
     assert!(has_run(&runs, 14, 25), "CID 1: {runs:?}");
