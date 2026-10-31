@@ -380,6 +380,10 @@ renderer/
                        (text, choice, check/radio, push button) from /V,
                        /DA, /MK and /AcroForm /DR, when /AP /N is absent or,
                        for text and choice fields, /NeedAppearances is set
+      free_text.rs   — appearances synthesised for FreeText without /AP /N:
+                       /C fill, border in the /DA colour, /Contents (else
+                       the plain text of /RC) wrapped in the /RD box,
+                       aligned by /Q; /CL callout with its /LE ending
       line_ending.rs — /LE line endings (arrows, square, circle, diamond,
                        butt, slash) in a frame along the line
       text.rs        — /DA parsing, text strings, line wrapping and layout

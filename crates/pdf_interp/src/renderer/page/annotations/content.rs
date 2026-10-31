@@ -5,7 +5,9 @@
 
 use std::fmt::Write as _;
 
-use pdf::{Document, Object};
+use pdf::{Dictionary, Document, Object};
+
+use crate::resources::dict_ext::DictExt;
 
 /// The ratio of a cubic Bézier control-point distance to the radius that
 /// approximates a quarter circle: `4 (√2 − 1) / 3`.
@@ -142,6 +144,58 @@ pub(super) fn inset(r: [f64; 4], d: &[f64]) -> [f64; 4] {
     let x0 = r[0] + left;
     let y0 = r[1] + bottom;
     [x0, y0, (r[2] - right).max(x0), (r[3] - top).max(y0)]
+}
+
+/// The border of an annotation (§12.5.4): its width from `/BS /W`, else the
+/// third element of `/Border`, else 1; and its dash array from `/BS /D` when
+/// `/BS /S` is `/D`, else the fourth element of `/Border`.
+pub(super) struct Border {
+    pub width: f64,
+    pub dash: Vec<f64>,
+}
+
+impl Border {
+    pub(super) fn of(doc: &Document, annot: &Dictionary) -> Self {
+        let bs = annot
+            .get(b"BS")
+            .and_then(|o| crate::resources::resolve_dict(doc, o));
+        let border = resolve_array(doc, annot.get(b"Border"));
+        let width = bs
+            .as_ref()
+            .and_then(|bs| number(doc, bs.get(b"W")))
+            .or_else(|| border.get(2).and_then(|w| number(doc, Some(w))))
+            .unwrap_or(1.0)
+            .max(0.0);
+        let dash = match &bs {
+            Some(bs) if bs.get_name(b"S") == Some(b"D") => {
+                let d = numbers(doc, bs.get(b"D"));
+                if d.is_empty() { vec![3.0] } else { d }
+            }
+            Some(_) => Vec::new(),
+            None => border
+                .get(3)
+                .map(|d| numbers(doc, Some(d)))
+                .unwrap_or_default(),
+        };
+        Self { width, dash }
+    }
+
+    /// Write the line width and, when dashed, the dash pattern.
+    pub(super) fn write(&self, s: &mut String) {
+        let _ = writeln!(s, "{} w", n(self.width));
+        if self.dash.iter().any(|&d| d > 0.0) {
+            let dash: Vec<String> = self.dash.iter().take(10).map(|&d| n(d)).collect();
+            let _ = writeln!(s, "[{}] 0 d", dash.join(" "));
+        }
+    }
+}
+
+/// The colour operator for the colour array `obj` (§12.5.2 `/C`, `/IC`):
+/// `g`, `rg` or `k` for 1, 3 or 4 components, upper-case when `stroke`.
+/// `None` for an empty array (transparent), an absent entry or another
+/// component count.
+pub(super) fn colour(doc: &Document, obj: Option<&Object>, stroke: bool) -> Option<String> {
+    colour_op(&numbers(doc, obj), stroke)
 }
 
 #[cfg(test)]

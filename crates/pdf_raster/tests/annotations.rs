@@ -353,6 +353,62 @@ fn a_poly_line_carries_open_arrows_along_its_end_segments() {
     assert_eq!(px[2], WHITE);
 }
 
+/// The number of points of the 1 pt grid in the user-space box
+/// `[x0 y0 x1 y1]` of a page whose only annotation is `annot` (direct, no
+/// appearance stream) that `pick` selects.
+fn count_synthesised(annot: &str, b: [u32; 4], pick: impl Fn([u8; 3]) -> bool) -> usize {
+    let points: Vec<(u32, u32)> = (b[1]..b[3])
+        .flat_map(|y| (b[0]..b[2]).map(move |x| (x, y)))
+        .collect();
+    synthesised(annot, &points)
+        .into_iter()
+        .filter(|&p| pick(p))
+        .count()
+}
+
+#[test]
+fn a_free_text_annotation_without_an_appearance_shows_its_text() {
+    let annot = "/Subtype /FreeText /Rect [10 10 90 90] /C [1 1 0] \
+                 /DA (/Helv 12 Tf 0 0 1 rg)";
+    let bluish = |p: [u8; 3]| p[2] > 150 && p[0] < 150;
+    // Text runs from the top of the box, inside the 1 pt border and the
+    // 2 pt margin; the bottom of the box stays the /C fill.
+    let text = [13, 60, 87, 87];
+    let with = count_synthesised(
+        &format!("{annot} /Contents (Hello Hello Hello)"),
+        text,
+        bluish,
+    );
+    let without = count_synthesised(annot, text, bluish);
+    assert!(with > 40, "{with} text pixels");
+    assert_eq!(without, 0);
+    let px = synthesised(
+        &format!("{annot} /Contents (Hello)"),
+        &[(50, 15), (10, 50), (5, 50)],
+    );
+    assert_eq!(px, [YELLOW, BLUE, WHITE]);
+}
+
+#[test]
+fn free_text_falls_back_to_the_plain_text_of_its_rich_text() {
+    let annot = "/Subtype /FreeText /Rect [10 10 90 90] /DA (/Helv 12 Tf 0 g) \
+                 /RC (<body><p>Rich</p><p>text</p></body>)";
+    let dark = count_synthesised(annot, [13, 13, 87, 87], |p| p[0] < 100);
+    assert!(dark > 30, "{dark} text pixels");
+}
+
+#[test]
+fn a_free_text_callout_line_runs_to_its_first_point() {
+    let px = synthesised(
+        "/Subtype /FreeText /Rect [10 10 90 90] /RD [40 40 0 0] /CL [15 15 30 30 50 30] \
+         /DA (/Helv 12 Tf 1 0 0 rg) /BS << /W 2 >> /Contents (x)",
+        &[(22, 22), (40, 30), (20, 40)],
+    );
+    // The callout is stroked in the text colour; the area beside it, outside
+    // the box moved in by /RD, is not painted.
+    assert_eq!(px, [RED, RED, WHITE]);
+}
+
 #[test]
 fn an_annotation_with_an_appearance_is_not_synthesised() {
     // The appearance fills blue; a synthesised square would have a red border.

@@ -6,6 +6,7 @@
 //! [`widget`], through the same form path as a stored appearance.
 
 mod content;
+mod free_text;
 mod line_ending;
 mod markup;
 mod text;
@@ -17,6 +18,19 @@ use super::super::gstate::{Ctm, ctm_multiply};
 use super::PageRenderer;
 use crate::RenderPurpose;
 use crate::resources::dict_ext::DictExt;
+use raster::types::BlendMode;
+
+/// A synthesised appearance.
+struct Synthesized {
+    /// The content stream, in page user space.
+    pub content: Vec<u8>,
+    /// The region the content may paint, in page user space.
+    pub bbox: [f64; 4],
+    /// The constant opacity `/CA` applied to stroking and filling.
+    pub opacity: f64,
+    /// The blend mode the content is painted with.
+    pub blend: BlendMode,
+}
 
 /// Annotation flag bits (PDF §12.5.3, Table 167).
 const HIDDEN: i64 = 1 << 1;
@@ -108,7 +122,8 @@ const fn shown_for(flags: i64, purpose: RenderPurpose) -> bool {
 
 /// Render the annotation dictionary `annot` (object `id`, or direct when
 /// `None`) into `renderer`'s bitmap; `form` is the document's interactive
-/// form, for widget annotations.
+/// form, whose default resources widget and free text appearances draw
+/// with.
 fn render_one_annotation(
     renderer: &mut PageRenderer<'_>,
     annot: &Dictionary,
@@ -140,11 +155,14 @@ fn render_one_annotation(
         return;
     }
     if !has_normal_appearance {
-        if let Some(rect) = read_rect(annot)
-            && let Some(appearance) = markup::markup(doc, annot, rect)
-        {
-            let no_rotate = flags & NO_ROTATE != 0;
-            draw_synthesized(renderer, appearance, id, no_rotate.then_some(rect));
+        let Some(rect) = read_rect(annot) else {
+            return;
+        };
+        let no_rotate_rect = (flags & NO_ROTATE != 0).then_some(rect);
+        if annot.get_name(b"Subtype") == Some(b"FreeText") {
+            draw_free_text(renderer, annot, rect, form, id, no_rotate_rect);
+        } else if let Some(appearance) = markup::markup(doc, annot, rect) {
+            draw_synthesized(renderer, appearance, id, no_rotate_rect);
         }
         return;
     }
@@ -190,7 +208,7 @@ fn render_one_annotation(
 /// about the upper-left corner of `no_rotate_rect` when given.
 fn draw_synthesized(
     renderer: &mut PageRenderer<'_>,
-    appearance: markup::Synthesized,
+    appearance: Synthesized,
     id: Option<ObjectId>,
     no_rotate_rect: Option<[f64; 4]>,
 ) {
@@ -225,8 +243,27 @@ fn draw_synthesized(
     renderer.gstate.restore();
 }
 
-/// Draw the synthesised appearance of the widget of `field` in `rect`,
-/// with the form's default resources in effect.
+/// Draw the synthesised appearance that `build` writes, with `resources`,
+/// derived from the form's default resources, in effect; `build` is given
+/// the measure of a byte string in a font resource ([`text_width`]).  The
+/// remaining arguments are those of [`draw_synthesized`].
+fn draw_text_appearance(
+    renderer: &mut PageRenderer<'_>,
+    resources: &Dictionary,
+    id: Option<ObjectId>,
+    no_rotate_rect: Option<[f64; 4]>,
+    build: impl FnOnce(&mut dyn FnMut(&[u8], &[u8]) -> f64) -> Synthesized,
+) {
+    // The default resources are no object's `/Resources`; object 0, which
+    // no document defines, identifies them to the font cache.
+    let dr = renderer.resources.with_resources((0, 0), resources);
+    let page_resources = std::mem::replace(&mut renderer.resources, dr);
+    let appearance = build(&mut |font, bytes| text_width(renderer, font, bytes));
+    draw_synthesized(renderer, appearance, id, no_rotate_rect);
+    renderer.resources = page_resources;
+}
+
+/// Draw the synthesised appearance of the widget of `field` in `rect`.
 fn draw_widget(
     renderer: &mut PageRenderer<'_>,
     form: &widget::AcroForm,
@@ -236,21 +273,34 @@ fn draw_widget(
 ) {
     let doc = renderer.resources.doc();
     let resources = widget::resources(doc, form, field);
-    // The default resources are no object's `/Resources`; object 0, which
-    // no document defines, identifies them to the font cache.
-    let dr = renderer.resources.with_resources((0, 0), &resources);
-    let page_resources = std::mem::replace(&mut renderer.resources, dr);
-    let content = widget::content(doc, field, rect, |font, bytes| {
-        text_width(renderer, font, bytes)
-    });
-    let appearance = markup::Synthesized {
-        content,
+    draw_text_appearance(renderer, &resources, id, None, |width| Synthesized {
+        content: widget::content(doc, field, rect, width),
         bbox: rect,
         opacity: 1.0,
-        blend: raster::types::BlendMode::Normal,
-    };
-    draw_synthesized(renderer, appearance, id, None);
-    renderer.resources = page_resources;
+        blend: BlendMode::Normal,
+    });
+}
+
+/// Draw the synthesised appearance of the free text annotation `annot`
+/// with the normalised rectangle `rect`.
+fn draw_free_text(
+    renderer: &mut PageRenderer<'_>,
+    annot: &Dictionary,
+    rect: [f64; 4],
+    form: Option<&widget::AcroForm>,
+    id: Option<ObjectId>,
+    no_rotate_rect: Option<[f64; 4]>,
+) {
+    let doc = renderer.resources.doc();
+    let free_text = free_text::FreeText::of(doc, annot, rect, form);
+    let resources = text::resources(
+        doc,
+        form.and_then(widget::AcroForm::default_resources),
+        &[(free_text.font(), b"Helvetica")],
+    );
+    draw_text_appearance(renderer, &resources, id, no_rotate_rect, |width| {
+        free_text.appearance(width)
+    });
 }
 
 /// The advance of the single-byte codes `bytes` in the font resource `font`

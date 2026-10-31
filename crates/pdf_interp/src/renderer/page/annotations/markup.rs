@@ -14,21 +14,12 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
-use super::content::{colour_op, ellipse, inset, n, number, numbers, rectangle, resolve_array};
+use super::Synthesized;
+use super::content::{
+    Border, colour, ellipse, inset, n, number, numbers, rectangle, resolve_array,
+};
 use super::line_ending::LineEnding;
 use crate::resources::dict_ext::DictExt;
-
-/// A synthesised appearance.
-pub(super) struct Synthesized {
-    /// The content stream, in page user space.
-    pub content: Vec<u8>,
-    /// The region the content may paint, in page user space.
-    pub bbox: [f64; 4],
-    /// The constant opacity `/CA` applied to stroking and filling.
-    pub opacity: f64,
-    /// The blend mode the content is painted with.
-    pub blend: BlendMode,
-}
 
 /// Side of the square `Text` annotation icon, in points.
 const NOTE_SIZE: f64 = 20.0;
@@ -237,58 +228,6 @@ fn text_markup(
         ]
     });
     Some((s, inset(bbox, &[-SQUIGGLE_STEP; 4]), blend))
-}
-
-/// The border of an annotation (§12.5.4): its width from `/BS /W`, else the
-/// third element of `/Border`, else 1; and its dash array from `/BS /D` when
-/// `/BS /S` is `/D`, else the fourth element of `/Border`.
-struct Border {
-    width: f64,
-    dash: Vec<f64>,
-}
-
-impl Border {
-    fn of(doc: &Document, annot: &Dictionary) -> Self {
-        let bs = annot
-            .get(b"BS")
-            .and_then(|o| crate::resources::resolve_dict(doc, o));
-        let border = resolve_array(doc, annot.get(b"Border"));
-        let width = bs
-            .as_ref()
-            .and_then(|bs| number(doc, bs.get(b"W")))
-            .or_else(|| border.get(2).and_then(|w| number(doc, Some(w))))
-            .unwrap_or(1.0)
-            .max(0.0);
-        let dash = match &bs {
-            Some(bs) if bs.get_name(b"S") == Some(b"D") => {
-                let d = numbers(doc, bs.get(b"D"));
-                if d.is_empty() { vec![3.0] } else { d }
-            }
-            Some(_) => Vec::new(),
-            None => border
-                .get(3)
-                .map(|d| numbers(doc, Some(d)))
-                .unwrap_or_default(),
-        };
-        Self { width, dash }
-    }
-
-    /// Write the line width and, when dashed, the dash pattern.
-    fn write(&self, s: &mut String) {
-        let _ = writeln!(s, "{} w", n(self.width));
-        if self.dash.iter().any(|&d| d > 0.0) {
-            let dash: Vec<String> = self.dash.iter().take(10).map(|&d| n(d)).collect();
-            let _ = writeln!(s, "[{}] 0 d", dash.join(" "));
-        }
-    }
-}
-
-/// The colour operator for the colour array `obj` (§12.5.2 `/C`, `/IC`):
-/// `g`, `rg` or `k` for 1, 3 or 4 components, upper-case when `stroke`.
-/// `None` for an empty array (transparent), an absent entry or another
-/// component count.
-fn colour(doc: &Document, obj: Option<&Object>, stroke: bool) -> Option<String> {
-    colour_op(&numbers(doc, obj), stroke)
 }
 
 /// [`colour`], with `default` when the entry is absent; `None` when it is

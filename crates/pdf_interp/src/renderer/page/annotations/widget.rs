@@ -18,7 +18,8 @@ use super::content::{
     self, circle, colour_op, n, number, numbers, rectangle, resolve_array, string,
 };
 use super::text::{
-    DefaultAppearance, LEADING, TextBlock, aligned_x, decode_text_string, encode_win_ansi, hex,
+    self, AUTO_MULTILINE_SIZE, DefaultAppearance, LEADING, TextBlock, aligned_x,
+    decode_text_string, encode_win_ansi, hex,
 };
 use crate::resources::dict_ext::DictExt;
 
@@ -35,9 +36,6 @@ const CHECK_FONT: &[u8] = b"ZaDb";
 
 /// Deepest `/Parent` chain followed for inherited field attributes.
 const MAX_FIELD_DEPTH: usize = 32;
-
-/// Font size of multi-line text whose `/DA` asks for automatic sizing.
-const AUTO_MULTILINE_SIZE: f64 = 12.0;
 
 /// The document's interactive form dictionary (§12.7.3).
 pub(super) struct AcroForm {
@@ -60,6 +58,16 @@ impl AcroForm {
                 .get(b"DR")
                 .and_then(|o| crate::resources::resolve_dict(doc, o)),
         })
+    }
+
+    /// The form's default appearance string `/DA`.
+    pub(super) fn default_appearance(&self) -> Option<&[u8]> {
+        self.da.as_deref()
+    }
+
+    /// The form's default resources `/DR`.
+    pub(super) const fn default_resources(&self) -> Option<&Dictionary> {
+        self.dr.as_ref()
     }
 }
 
@@ -184,28 +192,14 @@ impl Field {
 /// `ZaDb` as standard `ZapfDingbats` and the field's font as standard
 /// Helvetica when it lacks them.
 pub(super) fn resources(doc: &Document, form: &AcroForm, field: &Field) -> Dictionary {
-    let mut resources = form.dr.clone().unwrap_or_default();
-    let mut fonts = resources
-        .get(b"Font")
-        .and_then(|o| crate::resources::resolve_dict(doc, o))
-        .unwrap_or_default();
-    for (name, base_font) in [
-        (CHECK_FONT, &b"ZapfDingbats"[..]),
-        (field.da.font.as_slice(), b"Helvetica"),
-    ] {
-        if fonts.get(name).is_none() {
-            let mut font = Dictionary::new();
-            font.set(b"Type", Object::Name(b"Font".to_vec()));
-            font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
-            font.set(b"BaseFont", Object::Name(base_font.to_vec()));
-            if base_font == b"Helvetica" {
-                font.set(b"Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
-            }
-            fonts.set(name, Object::Dictionary(font));
-        }
-    }
-    resources.set(b"Font", Object::Dictionary(fonts));
-    resources
+    text::resources(
+        doc,
+        form.dr.as_ref(),
+        &[
+            (CHECK_FONT, b"ZapfDingbats"),
+            (&field.da.font, b"Helvetica"),
+        ],
+    )
 }
 
 /// The appearance content of `field` in `rect`; `width` measures a byte
