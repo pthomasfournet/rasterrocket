@@ -240,7 +240,7 @@ const MAX_CMAP_MAPPINGS: usize = 1 << 18;
 /// exceeds [`MAX_CMAP_BYTES`], in which case callers fall back to an
 /// identity mapping.  Mappings past [`MAX_CMAP_MAPPINGS`] are dropped.
 #[must_use]
-pub fn parse_cmap(stream: &[u8]) -> Option<CMap> {
+pub(crate) fn parse_cmap(stream: &[u8]) -> Option<CMap> {
     parse_cmap_nested(stream, 0)
 }
 

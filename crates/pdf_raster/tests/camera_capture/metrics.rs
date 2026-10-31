@@ -7,7 +7,7 @@ use crate::synth::Gray;
 /// local mean).  The reduction tolerates the 1–2 px offsets that would
 /// decorrelate individual strokes; the high-pass removes illumination
 /// gradients and shadows, which carry no layout.
-pub fn correlation(a: &Gray, b: &Gray) -> f64 {
+pub(crate) fn correlation(a: &Gray, b: &Gray) -> f64 {
     let (w, h) = (b.w / 3, b.h / 3);
     let (a, b) = (
         high_pass(&area_resize(a, w, h)),
@@ -61,7 +61,7 @@ fn high_pass(g: &Gray) -> Vec<f64> {
 }
 
 /// Largest corner distance between two quads.
-pub fn corner_error(a: &[[f64; 2]; 4], b: &[[f64; 2]; 4]) -> f64 {
+pub(crate) fn corner_error(a: &[[f64; 2]; 4], b: &[[f64; 2]; 4]) -> f64 {
     a.iter()
         .zip(b)
         .map(|(p, q)| (p[0] - q[0]).hypot(p[1] - q[1]))
@@ -78,7 +78,7 @@ pub fn corner_error(a: &[[f64; 2]; 4], b: &[[f64; 2]; 4]) -> f64 {
 /// sub-pixel precision by a parabola through the peak.  Straight,
 /// undistorted lines give offsets that are affine in `y` (zero residual);
 /// curved lines leave a residual.
-pub fn line_displacement(img: &Gray, flat: &Gray) -> (f64, f64) {
+pub(crate) fn line_displacement(img: &Gray, flat: &Gray) -> (f64, f64) {
     assert_eq!((img.w, img.h), (flat.w, flat.h));
     let strips = 16;
     let sw = img.w / strips;

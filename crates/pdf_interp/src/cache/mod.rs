@@ -10,6 +10,6 @@
 
 #![cfg(feature = "cache")]
 
-pub mod prefetch;
+pub(crate) mod prefetch;
 
 pub use prefetch::{MAX_PREFETCH_WORKERS, PrefetchConfig, PrefetchHandle, spawn_prefetch};

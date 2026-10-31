@@ -1,6 +1,6 @@
 //! Per-page operator dispatcher.
 //!
-//! [`PageRenderer`] holds a target [`Bitmap`] and a [`GStateStack`], iterates
+//! [`PageRenderer`] holds a target [`Bitmap`] and a `GStateStack`, iterates
 //! over a decoded operator sequence, and calls into the `raster` crate for
 //! each painting operator.
 //!
@@ -45,7 +45,7 @@
 //!
 //! - Optional content (layers) — `BDC /OC` sequences and `XObjects` and
 //!   annotations carrying `/OC` are skipped when hidden under the default
-//!   configuration (see [`crate::optional_content`])
+//!   configuration (see `crate::optional_content`)
 //! - Annotation rendering — `AP/N` normal appearance streams drawn after page
 //!   content, and synthesised appearances where `/AP` is absent
 //! - Transparency groups — Form `XObjects` with `Group /S /Transparency`, isolated
@@ -472,7 +472,7 @@ impl<'doc> PageRenderer<'doc> {
     /// [`finish`](Self::finish), so that a blend mode sees only what the
     /// page has painted and a knockout page group knocks out.  `None`, the
     /// default, paints onto opaque white, which gives the same pixels when
-    /// nothing on the page blends (see [`crate::page_group`]).  Call before
+    /// nothing on the page blends (see [`crate::page_group()`]).  Call before
     /// execute.
     pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
         self.page_group = group;

@@ -1,12 +1,6 @@
 //! Shared test utilities for the `raster` crate.
 //!
 //! This module is compiled only for tests (`#[cfg(test)]`).
-#![expect(
-    unreachable_pub,
-    reason = "the module is crate-private, so `pub` already means crate-wide; \
-              `pub(crate)` would trip clippy::redundant_pub_crate instead"
-)]
-
 use crate::clip::Clip;
 use crate::path::{Path, PathBuilder};
 use crate::pipe::PipeState;
@@ -14,7 +8,7 @@ use crate::pipe::TransferSet;
 use crate::types::BlendMode;
 
 /// Identity CTM `[a b c d e f] = [1 0 0 1 0 0]`.
-pub fn identity_matrix() -> [f64; 6] {
+pub(crate) fn identity_matrix() -> [f64; 6] {
     [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 }
 
@@ -22,7 +16,7 @@ pub fn identity_matrix() -> [f64; 6] {
 ///
 /// All other fields are set to their neutral defaults (identity transfer,
 /// no backdrop).
-pub fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
+pub(crate) fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
     PipeState {
         blend_mode,
         a_input,
@@ -32,7 +26,7 @@ pub fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static> {
 }
 
 /// Opaque Normal-blend pipe — the simplest possible rendering state.
-pub fn simple_pipe() -> PipeState<'static> {
+pub(crate) fn simple_pipe() -> PipeState<'static> {
     make_pipe(255, BlendMode::Normal)
 }
 
@@ -41,11 +35,11 @@ pub fn simple_pipe() -> PipeState<'static> {
 /// The upper bounds are inset by `0.001` to stay strictly inside the last pixel;
 /// `Clip` uses exclusive-right semantics so a bound exactly at `w` would
 /// exclude the rightmost column on some edge cases.
-pub fn make_clip(w: u32, h: u32) -> Clip {
+pub(crate) fn make_clip(w: u32, h: u32) -> Clip {
     Clip::new(0.0, 0.0, f64::from(w) - 0.001, f64::from(h) - 0.001, false)
 }
 
-pub fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> Path {
+pub(crate) fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> Path {
     let mut b = PathBuilder::new();
     b.move_to(x0, y0).expect("rect_path: move_to failed");
     b.line_to(x1, y0).expect("rect_path: line_to (top) failed");

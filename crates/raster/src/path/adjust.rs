@@ -32,7 +32,7 @@ use crate::types::round_half_up_i32;
 /// | `xma`, `xmb`, `xm` | Mid snap window: coordinate in `(xma, xmb)` snaps to `xm`. |
 /// | `x1a`, `x1b`, `x1` | Right snap window: coordinate in `(x1a, x1b)` snaps to `x1`. |
 #[derive(Clone, Debug)]
-pub struct XPathAdjust {
+pub(crate) struct XPathAdjust {
     /// First path-point index (inclusive) in the range to adjust.
     pub first_pt: usize,
     /// Last path-point index (inclusive) in the range to adjust.
@@ -72,7 +72,7 @@ impl XPathAdjust {
     /// `adjust_lines` is true, the span is expanded to
     /// `[line_pos_i, line_pos_i + 1]`.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         first_pt: usize,
         last_pt: usize,
         vert: bool,
@@ -129,7 +129,7 @@ impl XPathAdjust {
 /// example, a coordinate equal to exactly `adj.x0a` (= `adj0 - 0.01`) is
 /// outside the window `(x0a, x0b)` and will not be snapped.
 #[inline]
-pub fn stroke_adjust(adj: &XPathAdjust, x: &mut f64, y: &mut f64) {
+pub(crate) fn stroke_adjust(adj: &XPathAdjust, x: &mut f64, y: &mut f64) {
     let v = if adj.vert { x } else { y };
     if *v > adj.x0a && *v < adj.x0b {
         *v = adj.x0;

@@ -53,6 +53,7 @@ tempfile = { workspace = true }
 unsafe_code    = "deny"
 missing_docs   = "allow"   # binary crate; public docs are not required
 unused_results = "warn"
+unreachable_pub = "warn"
 
 [lints.clippy]
 all      = { level = "warn", priority = -1 }

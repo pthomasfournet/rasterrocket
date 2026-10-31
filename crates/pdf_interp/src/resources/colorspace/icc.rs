@@ -20,11 +20,11 @@ use super::ColorSpace;
 use crate::resources::icc_shaper::{ProfileConversion, fetch_profile_bytes};
 
 #[cfg(feature = "gpu-icc")]
-pub mod clut;
+pub(crate) mod clut;
 
 /// The compiled sRGB conversion of one ICC profile stream for colour values
 /// of its declared component count.
-pub enum IccConversion {
+pub(crate) enum IccConversion {
     /// A gray (`n = 1`) or RGB (`n = 3`) matrix/TRC profile.
     Shaper(ProfileConversion),
     /// Any other profile with `n` of 1, 3 or 4: an 8-bit transform whose
@@ -47,7 +47,7 @@ impl IccConversion {
     /// compiled on first use and shared for the lifetime of `doc`.  `None`
     /// when neither the profile nor the `/Alternate` space converts `n`
     /// components.
-    pub fn load(doc: &Document, id: ObjectId, n: u8) -> Option<Arc<Self>> {
+    pub(crate) fn load(doc: &Document, id: ObjectId, n: u8) -> Option<Arc<Self>> {
         doc.derived(id, || {
             fetch_profile_bytes(doc, id)
                 .and_then(|bytes| Self::compile(&bytes, n))
@@ -81,7 +81,7 @@ impl IccConversion {
 
     /// Compile profile `bytes` for `n`-component values without consulting
     /// a cache.
-    pub fn compile(bytes: &[u8], n: u8) -> Option<Self> {
+    pub(crate) fn compile(bytes: &[u8], n: u8) -> Option<Self> {
         let shaper = ProfileConversion::from_profile_bytes(bytes);
         if matches!(
             (&shaper, n),
@@ -119,7 +119,7 @@ impl IccConversion {
     /// `DEFAULT_GRID_N` lattice, baked once per conversion and shared;
     /// `None` for any other conversion or when the bake fails.
     #[cfg(feature = "gpu-icc")]
-    pub fn cmyk_clut(&self) -> Option<Arc<[u8]>> {
+    pub(crate) fn cmyk_clut(&self) -> Option<Arc<[u8]>> {
         use clut::{DEFAULT_GRID_N, bake_cmyk_clut_with};
 
         let Self::Transform { n: 4, xform, clut } = self else {
@@ -155,7 +155,7 @@ impl IccConversion {
     /// sRGB bytes of `dst`, which holds three bytes per pixel.  `None` for
     /// a conversion that is not a transform, a length mismatch, or a
     /// transform failure.
-    pub fn transform_pixels(&self, src: &[u8], dst: &mut [u8]) -> Option<()> {
+    pub(crate) fn transform_pixels(&self, src: &[u8], dst: &mut [u8]) -> Option<()> {
         let Self::Transform { n, xform, .. } = self else {
             return None;
         };
@@ -173,7 +173,7 @@ impl IccConversion {
     /// quantised to 8 bits for the shaper and the transform.  `None` when
     /// `comps` does not hold the compiled component count or the transform
     /// fails.
-    pub fn convert(&self, doc: &Document, comps: &[f64]) -> Option<[u8; 3]> {
+    pub(crate) fn convert(&self, doc: &Document, comps: &[f64]) -> Option<[u8; 3]> {
         match self {
             Self::Alternate(space) => {
                 (comps.len() == space.ncomponents()).then(|| space.convert_to_rgb(doc, comps))

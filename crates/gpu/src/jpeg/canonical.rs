@@ -24,7 +24,7 @@ use super::headers::JpegHuffmanTable;
 /// pathological / corrupt streams can produce 0-entries; the decoder must
 /// treat that as a fatal decode error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CanonicalEntry {
+pub(crate) struct CanonicalEntry {
     /// Number of bits the codeword consumes (1..=16).  `0` = unused slot.
     pub num_bits: u8,
     /// Decoded symbol value.
@@ -33,7 +33,7 @@ pub struct CanonicalEntry {
 
 impl CanonicalEntry {
     /// Sentinel for unused slots.
-    pub const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         num_bits: 0,
         symbol: 0,
     };
@@ -44,7 +44,7 @@ impl CanonicalEntry {
 /// Construction is allocation-aware: the 65 536-entry table is heap-allocated
 /// once per codebook, since stack-allocating 128 KB would blow most thread
 /// stacks.  `CanonicalCodebook` owns the table.
-pub struct CanonicalCodebook {
+pub(crate) struct CanonicalCodebook {
     /// 1 << 16 entries, indexed by the next 16 bits of the bitstream MSB-first.
     table: Box<[CanonicalEntry; 65_536]>,
     /// Maximum codeword length actually present in this table (1..=16).
@@ -62,7 +62,7 @@ impl std::fmt::Debug for CanonicalCodebook {
 
 /// Errors emitted by [`CanonicalCodebook::build`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CanonicalCodebookError {
+pub(crate) enum CanonicalCodebookError {
     /// `num_codes` declared zero codewords — empty table is invalid for
     /// JPEG (every scan needs at least one symbol).
     Empty,
@@ -116,7 +116,9 @@ impl std::error::Error for CanonicalCodebookError {}
 /// Returns [`CanonicalCodebookError::Empty`] for a zero-codeword
 /// table, or [`CanonicalCodebookError::LengthMismatch`] when
 /// `sum(num_codes)` disagrees with `values.len()`.
-pub fn validate_canonical_table(table: &JpegHuffmanTable) -> Result<(), CanonicalCodebookError> {
+pub(crate) fn validate_canonical_table(
+    table: &JpegHuffmanTable,
+) -> Result<(), CanonicalCodebookError> {
     let total_codes: usize = table.num_codes.iter().map(|&n| usize::from(n)).sum();
     if total_codes == 0 {
         return Err(CanonicalCodebookError::Empty);
@@ -158,7 +160,7 @@ pub fn validate_canonical_table(table: &JpegHuffmanTable) -> Result<(), Canonica
 /// assert exists to catch a future refactor that drops that check.
 /// `SymbolEncoder::from_table` skips the upstream check because its
 /// synthetic input is valid by construction.
-pub fn visit_canonical_codes<F>(
+pub(crate) fn visit_canonical_codes<F>(
     table: &JpegHuffmanTable,
     mut emit: F,
 ) -> Result<(), CanonicalCodebookError>
@@ -208,7 +210,7 @@ impl CanonicalCodebook {
     /// Panics only on heap-allocation failure of the 128 KB lookup slab,
     /// which is the standard "allocator OOM" panic Rust emits and not a
     /// recoverable error from the caller's perspective.
-    pub fn build(table: &JpegHuffmanTable) -> Result<Self, CanonicalCodebookError> {
+    pub(crate) fn build(table: &JpegHuffmanTable) -> Result<Self, CanonicalCodebookError> {
         validate_canonical_table(table)?;
 
         // Allocate the 128 KB lookup table directly on the heap; constructing
@@ -239,20 +241,21 @@ impl CanonicalCodebook {
     /// entry; if `entry.num_bits == 0` the bit pattern is not a valid code.
     #[must_use]
     #[inline]
-    pub fn lookup(&self, bits: u16) -> CanonicalEntry {
+    pub(crate) fn lookup(&self, bits: u16) -> CanonicalEntry {
         self.table[bits as usize]
     }
 
     /// Maximum codeword length present in this table (1..=16).
+    #[cfg(test)]
     #[must_use]
-    pub const fn max_len(&self) -> u8 {
+    pub(crate) const fn max_len(&self) -> u8 {
         self.max_len
     }
 
     /// Direct read-only access to the lookup table for code that needs to
     /// upload it to the GPU as a flat array.
     #[must_use]
-    pub fn table(&self) -> &[CanonicalEntry; 65_536] {
+    pub(crate) fn table(&self) -> &[CanonicalEntry; 65_536] {
         &self.table
     }
 }

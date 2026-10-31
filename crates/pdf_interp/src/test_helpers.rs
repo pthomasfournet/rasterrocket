@@ -14,7 +14,7 @@ use pdf::Document;
 /// The byte offsets and xref table are computed from the actual section
 /// lengths, so adding entries to `extra_catalog` keeps the xref correct
 /// automatically.
-pub fn make_doc(extra_catalog: &str) -> Document {
+pub(crate) fn make_doc(extra_catalog: &str) -> Document {
     let header = "%PDF-1.4\n";
     let obj1 = format!("1 0 obj\n<</Type /Catalog /Pages 2 0 R{extra_catalog}>>\nendobj\n");
     let obj2 = "2 0 obj\n<</Type /Pages /Kids [] /Count 0>>\nendobj\n";
@@ -30,7 +30,7 @@ pub fn make_doc(extra_catalog: &str) -> Document {
 
 /// `make_doc("")` shorthand — a bare empty document with no Catalog
 /// extras.  Most tests want this form.
-pub fn empty_doc() -> Document {
+pub(crate) fn empty_doc() -> Document {
     make_doc("")
 }
 
@@ -50,7 +50,7 @@ pub fn empty_doc() -> Document {
 ///
 /// Used by tests that need to dereference an indirect stream — e.g. ICC
 /// profile resolution.
-pub fn make_doc_with_stream(stream_bytes: &[u8], dict_extras: &str) -> Document {
+pub(crate) fn make_doc_with_stream(stream_bytes: &[u8], dict_extras: &str) -> Document {
     let header = b"%PDF-1.4\n";
     let obj1 = b"1 0 obj\n<</Type /Catalog /Pages 3 0 R>>\nendobj\n";
     let obj2_dict = format!(
@@ -97,7 +97,7 @@ pub fn make_doc_with_stream(stream_bytes: &[u8], dict_extras: &str) -> Document 
 /// - `1 0 obj` — Catalog with `/Pages 3 0 R`
 /// - `2 0 obj` — the caller's body, written verbatim
 /// - `3 0 obj` — empty Pages tree
-pub fn make_doc_with_object(obj2_body: &str) -> Document {
+pub(crate) fn make_doc_with_object(obj2_body: &str) -> Document {
     let header = "%PDF-1.4\n";
     let obj1 = "1 0 obj\n<</Type /Catalog /Pages 3 0 R>>\nendobj\n";
     let obj2 = format!("2 0 obj\n{obj2_body}\nendobj\n");
@@ -132,7 +132,7 @@ pub fn make_doc_with_object(obj2_body: &str) -> Document {
 /// - `2 0 obj` — empty (reserved; kept so ids line up with the other helpers)
 /// - `3 0 obj` — empty Pages tree
 /// - `4..` — caller's `objects`
-pub fn make_doc_with_objects<B: AsRef<[u8]>>(objects: &[(u32, B)]) -> Document {
+pub(crate) fn make_doc_with_objects<B: AsRef<[u8]>>(objects: &[(u32, B)]) -> Document {
     // The xref is a single `0 N` subsection, so the kth offset is bound to
     // object id k.  Ids must therefore be exactly 4, 5, 6, … in order; a gap
     // would silently bind the wrong object to a reference.  Assert loudly so a

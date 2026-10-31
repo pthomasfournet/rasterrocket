@@ -15,19 +15,19 @@ use color::convert::div255;
 
 /// Normal: result is the source (Porter-Duff over handled in the pipe, not here).
 #[must_use]
-pub const fn blend_normal(src: u8, _dst: u8) -> u8 {
+pub(crate) const fn blend_normal(src: u8, _dst: u8) -> u8 {
     src
 }
 
 /// Multiply: `div255(src * dst)`.
 #[must_use]
-pub fn blend_multiply(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_multiply(src: u8, dst: u8) -> u8 {
     div255(u32::from(src) * u32::from(dst))
 }
 
 /// Screen: `src + dst - div255(src * dst)`.
 #[must_use]
-pub fn blend_screen(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_screen(src: u8, dst: u8) -> u8 {
     let s = u32::from(src);
     let d = u32::from(dst);
     #[expect(
@@ -40,7 +40,7 @@ pub fn blend_screen(src: u8, dst: u8) -> u8 {
 
 /// Overlay: hard-light of dst over src.
 #[must_use]
-pub fn blend_overlay(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_overlay(src: u8, dst: u8) -> u8 {
     if dst < 0x80 {
         div255(u32::from(src) * 2 * u32::from(dst))
     } else {
@@ -52,13 +52,13 @@ pub fn blend_overlay(src: u8, dst: u8) -> u8 {
 
 /// Darken: `min(src, dst)`.
 #[must_use]
-pub fn blend_darken(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_darken(src: u8, dst: u8) -> u8 {
     src.min(dst)
 }
 
 /// Lighten: `max(src, dst)`.
 #[must_use]
-pub fn blend_lighten(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_lighten(src: u8, dst: u8) -> u8 {
     src.max(dst)
 }
 
@@ -69,7 +69,7 @@ pub fn blend_lighten(src: u8, dst: u8) -> u8 {
 /// value, including `src == 255`, mirroring the white backdrop of
 /// [`blend_color_burn`].
 #[must_use]
-pub fn blend_color_dodge(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_color_dodge(src: u8, dst: u8) -> u8 {
     if dst == 0 {
         0
     } else if src == 255 {
@@ -86,7 +86,7 @@ pub fn blend_color_dodge(src: u8, dst: u8) -> u8 {
 /// numerator is 0 whatever the source. Returning 0 there would turn a white
 /// backdrop black under a zero source.
 #[must_use]
-pub fn blend_color_burn(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_color_burn(src: u8, dst: u8) -> u8 {
     if dst == 255 {
         255
     } else if src == 0 {
@@ -103,14 +103,14 @@ pub fn blend_color_burn(src: u8, dst: u8) -> u8 {
 
 /// Hard light: `Overlay(dst, src)` — the src/dst roles are swapped vs Overlay.
 #[must_use]
-pub fn blend_hard_light(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_hard_light(src: u8, dst: u8) -> u8 {
     // hard_light(s, d) == overlay(d, s)
     blend_overlay(dst, src)
 }
 
 /// Soft light (PDF spec §11.3.5.3).
 #[must_use]
-pub fn blend_soft_light(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_soft_light(src: u8, dst: u8) -> u8 {
     let s = i32::from(src);
     let d = i32::from(dst);
     let result = if s < 0x80 {
@@ -138,7 +138,7 @@ pub fn blend_soft_light(src: u8, dst: u8) -> u8 {
 
 /// Difference: `|src - dst|`.
 #[must_use]
-pub const fn blend_difference(src: u8, dst: u8) -> u8 {
+pub(crate) const fn blend_difference(src: u8, dst: u8) -> u8 {
     src.abs_diff(dst)
 }
 
@@ -148,7 +148,7 @@ pub const fn blend_difference(src: u8, dst: u8) -> u8 {
 /// through [`div255`], which saturates at 255. Saturating there would leave
 /// `blend_exclusion(255, 255)` at 255 (white) where the spec requires 0 (black).
 #[must_use]
-pub fn blend_exclusion(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_exclusion(src: u8, dst: u8) -> u8 {
     let s = u32::from(src);
     let d = u32::from(dst);
     // 2·s·d ≤ 130 050; the rounded quotient is exact in u32 and ≤ 510.
@@ -227,7 +227,7 @@ fn set_sat(r_in: i32, g_in: i32, b_in: i32, sat: i32) -> (i32, i32, i32) {
 
 /// Non-separable Hue blend: hue of src, saturation and luminosity of dst.
 #[must_use]
-pub fn blend_hue_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
+pub(crate) fn blend_hue_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
     let [sr, sg, sb] = src.map(i32::from);
     let [dr, dg, db] = dst.map(i32::from);
     let (r0, g0, b0) = set_sat(sr, sg, sb, get_sat(dr, dg, db));
@@ -242,7 +242,7 @@ pub fn blend_hue_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
 
 /// Non-separable Saturation blend: saturation of src, hue and luminosity of dst.
 #[must_use]
-pub fn blend_saturation_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
+pub(crate) fn blend_saturation_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
     let [sr, sg, sb] = src.map(i32::from);
     let [dr, dg, db] = dst.map(i32::from);
     let (r0, g0, b0) = set_sat(dr, dg, db, get_sat(sr, sg, sb));
@@ -257,7 +257,7 @@ pub fn blend_saturation_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
 
 /// Non-separable Color blend: hue and saturation of src, luminosity of dst.
 #[must_use]
-pub fn blend_color_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
+pub(crate) fn blend_color_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
     let [sr, sg, sb] = src.map(i32::from);
     let [dr, dg, db] = dst.map(i32::from);
     let (r, g, b) = set_lum(sr, sg, sb, get_lum(dr, dg, db));
@@ -271,7 +271,7 @@ pub fn blend_color_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
 
 /// Non-separable Luminosity blend: luminosity of src, hue and saturation of dst.
 #[must_use]
-pub fn blend_luminosity_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
+pub(crate) fn blend_luminosity_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
     let [sr, sg, sb] = src.map(i32::from);
     let [dr, dg, db] = dst.map(i32::from);
     let (r, g, b) = set_lum(dr, dg, db, get_lum(sr, sg, sb));
@@ -294,7 +294,7 @@ pub fn blend_luminosity_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
 ///
 /// Panics if `mode` is a non-separable variant (`Hue`, `Saturation`, `Color`,
 /// `Luminosity`).  Use [`apply_nonseparable_rgb`] for those.
-pub fn apply_separable(mode: BlendMode, src: &[u8], dst: &[u8], out: &mut [u8]) {
+pub(crate) fn apply_separable(mode: BlendMode, src: &[u8], dst: &[u8], out: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     debug_assert_eq!(src.len(), out.len());
     let f: fn(u8, u8) -> u8 = match mode {
@@ -329,7 +329,7 @@ pub fn apply_separable(mode: BlendMode, src: &[u8], dst: &[u8], out: &mut [u8]) 
 ///
 /// Panics if `mode` is a separable variant.  Use [`apply_separable`] for those.
 #[must_use]
-pub fn apply_nonseparable_rgb(mode: BlendMode, src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
+pub(crate) fn apply_nonseparable_rgb(mode: BlendMode, src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
     match mode {
         BlendMode::Hue => blend_hue_rgb(src, dst),
         BlendMode::Saturation => blend_saturation_rgb(src, dst),

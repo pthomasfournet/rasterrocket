@@ -7,7 +7,7 @@
 
 /// Packed bitstream ready for upload to the GPU.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackedBitstream {
+pub(crate) struct PackedBitstream {
     /// Big-endian 32-bit words. The first bit of the stream is bit 31
     /// of `words[0]`.
     pub words: Vec<u32>,
@@ -22,7 +22,7 @@ impl PackedBitstream {
     /// word's zero padding is not part of the stream and must not be
     /// readable (it can mask genuine truncation).
     #[must_use]
-    pub fn unpack_bytes(&self) -> Vec<u8> {
+    pub(crate) fn unpack_bytes(&self) -> Vec<u8> {
         let byte_len = (self.length_bits as usize) / 8;
         let mut bytes = Vec::with_capacity(self.words.len() * 4);
         for word in &self.words {
@@ -47,7 +47,7 @@ impl PackedBitstream {
 /// those zeros and almost certainly produce garbage symbols, so the
 /// debug-assert is the line of defence.
 #[must_use]
-pub fn pack_be_words(bits: &[u8], length_bits: u32) -> PackedBitstream {
+pub(crate) fn pack_be_words(bits: &[u8], length_bits: u32) -> PackedBitstream {
     // Source-of-truth check: caller must provide at least
     // ceil(length_bits / 8) bytes. usize::from(length_bits) is safe
     // because length_bits is u32 and we only target 64-bit platforms

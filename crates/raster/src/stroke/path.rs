@@ -37,7 +37,7 @@ pub(super) fn flatten_path(path: &Path, flatness: f64) -> Path {
 
     let flatness_sq = flatness * flatness;
     let mut builder = PathBuilder::new();
-    let mut curve_data: Option<Box<CurveData>> = None;
+    let mut curve_data: Option<CurveData> = None;
 
     let mut i = 0usize;
     while i < path.pts.len() {

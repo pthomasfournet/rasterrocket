@@ -11,7 +11,7 @@
 ///
 /// # Errors
 /// A message naming the violated condition and both values.
-pub fn check_clut(table: &[u8], grid_n: u32) -> Result<(), String> {
+pub(crate) fn check_clut(table: &[u8], grid_n: u32) -> Result<(), String> {
     if !(2..=255).contains(&grid_n) {
         return Err(format!("CLUT grid_n must be in [2, 255], got {grid_n}"));
     }

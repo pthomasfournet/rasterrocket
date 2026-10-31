@@ -21,8 +21,8 @@
 //! `pts.is_empty()` before comparing with `pts.len() - 1`, so neither can
 //! underflow on an empty vector.
 
-pub mod adjust;
-pub mod flatten;
+pub(crate) mod adjust;
+pub(crate) mod flatten;
 
 use bitflags::bitflags;
 

@@ -34,7 +34,7 @@
 //! pair of allocations regardless of path height.
 
 /// The coalescing span iterator for a scanner row.
-pub mod iter;
+pub(crate) mod iter;
 
 use crate::bitmap::{AA_SIZE_USIZE, AaBuf};
 use crate::types::{AA_SIZE, floor_i32};

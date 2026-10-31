@@ -16,7 +16,7 @@ use raster::path::{Path, PathBuilder, PathPoint};
 use skrifa::outline::OutlinePen;
 
 /// Affine map `[a, b, c, d, e, f]`: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`.
-pub type Affine = [f64; 6];
+pub(crate) type Affine = [f64; 6];
 
 /// Outline pen that builds a [`Path`] in transformed coordinates.
 ///
@@ -24,7 +24,7 @@ pub type Affine = [f64; 6];
 /// first drawing command of its contour, so empty contours and repeated
 /// move-tos leave no degenerate one-point subpaths, and a subpath is closed
 /// only when at least one segment was drawn into it.
-pub struct PathPen {
+pub(crate) struct PathPen {
     builder: PathBuilder,
     transform: Affine,
     pending_move: Option<PathPoint>,
@@ -34,7 +34,7 @@ pub struct PathPen {
 impl PathPen {
     /// Create a pen applying `transform` to every point it receives.
     #[must_use]
-    pub fn new(transform: Affine) -> Self {
+    pub(crate) fn new(transform: Affine) -> Self {
         Self {
             builder: PathBuilder::new(),
             transform,
@@ -45,7 +45,7 @@ impl PathPen {
 
     /// Finish the outline and return the path.
     #[must_use]
-    pub fn finish(mut self) -> Path {
+    pub(crate) fn finish(mut self) -> Path {
         self.close_contour();
         self.builder.build()
     }
@@ -126,7 +126,7 @@ impl OutlinePen for PathPen {
 /// cubic control points.  The conversion is exact.
 #[inline]
 #[must_use]
-pub fn quad_to_cubic(p0: PathPoint, pc: PathPoint, p3: PathPoint) -> (PathPoint, PathPoint) {
+pub(crate) fn quad_to_cubic(p0: PathPoint, pc: PathPoint, p3: PathPoint) -> (PathPoint, PathPoint) {
     let x1 = p0.x.mul_add(1.0 / 3.0, pc.x * (2.0 / 3.0));
     let y1 = p0.y.mul_add(1.0 / 3.0, pc.y * (2.0 / 3.0));
     let x2 = pc.x.mul_add(2.0 / 3.0, p3.x * (1.0 / 3.0));

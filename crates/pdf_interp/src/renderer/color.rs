@@ -7,7 +7,7 @@
 //! `rgb_to_bytes` in `color::convert` (re-exported here), `DeviceCMYK` in
 //! `color::cmyk`.
 
-pub use color::convert::{gray_to_u8, rgb_to_bytes};
+pub(crate) use color::convert::{gray_to_u8, rgb_to_bytes};
 
 /// Current fill or stroke colour, in a form the raster pipeline accepts.
 ///
@@ -18,21 +18,21 @@ pub use color::convert::{gray_to_u8, rgb_to_bytes};
 /// `gray()` expands to equal R=G=B channels; `cmyk()` converts through the
 /// process-ink interpolation of `color::cmyk`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RasterColor {
+pub(crate) struct RasterColor {
     bytes: [u8; 3],
 }
 
 impl RasterColor {
     /// Grey [0, 1] — expanded to equal RGB components.
     #[must_use]
-    pub fn gray(g: f64) -> Self {
+    pub(crate) fn gray(g: f64) -> Self {
         let v = gray_to_u8(g);
         Self { bytes: [v, v, v] }
     }
 
     /// RGB [0, 1] each.
     #[must_use]
-    pub fn rgb(r: f64, g: f64, b: f64) -> Self {
+    pub(crate) fn rgb(r: f64, g: f64, b: f64) -> Self {
         Self {
             bytes: rgb_to_bytes(r, g, b),
         }
@@ -40,7 +40,7 @@ impl RasterColor {
 
     /// `DeviceCMYK` [0, 1] each — converted with [`color::cmyk::cmyk_f64_to_rgb`].
     #[must_use]
-    pub fn cmyk(c: f64, m: f64, y: f64, k: f64) -> Self {
+    pub(crate) fn cmyk(c: f64, m: f64, y: f64, k: f64) -> Self {
         Self {
             bytes: color::cmyk::cmyk_f64_to_rgb(c, m, y, k),
         }
@@ -51,13 +51,13 @@ impl RasterColor {
     /// `ColorSpace::convert_to_rgb`) and would otherwise round-trip through
     /// `f64 / 255.0` → `rgb_to_bytes` for no reason.
     #[must_use]
-    pub const fn from_bytes(rgb: [u8; 3]) -> Self {
+    pub(crate) const fn from_bytes(rgb: [u8; 3]) -> Self {
         Self { bytes: rgb }
     }
 
     /// The RGB bytes.
     #[must_use]
-    pub const fn bytes(&self) -> [u8; 3] {
+    pub(crate) const fn bytes(&self) -> [u8; 3] {
         self.bytes
     }
 
@@ -65,7 +65,7 @@ impl RasterColor {
     ///
     /// Always 3 bytes (RGB), matching `Rgb8::BYTES`.
     #[must_use]
-    pub const fn as_slice(&self) -> &[u8] {
+    pub(crate) const fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
 }

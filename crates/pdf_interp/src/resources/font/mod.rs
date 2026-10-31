@@ -37,8 +37,10 @@ use crate::resources::font_substitute::{
 mod cid;
 mod type3;
 
-pub use cid::{CidEncoding, CidMetrics, VerticalMetrics};
-pub use type3::{Type3Data, Type3Glyph};
+pub(crate) use cid::CidEncoding;
+#[cfg(test)]
+pub(crate) use cid::CidMetrics;
+pub(crate) use type3::{Type3Data, Type3Glyph};
 
 use cid::resolve_type0_font;
 use type3::resolve_type3_font;
@@ -157,7 +159,7 @@ impl FontDescriptor {
 /// `/Font` dictionary or names an object that is not a font dictionary:
 /// a non-embedded Helvetica, whose substitute supplies the widths.
 #[must_use]
-pub fn fallback_font(doc: &Document) -> FontDescriptor {
+pub(crate) fn fallback_font(doc: &Document) -> FontDescriptor {
     let mut dict = Dictionary::new();
     dict.set(b"Type", Object::Name(b"Font".to_vec()));
     dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));

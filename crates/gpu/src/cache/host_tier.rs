@@ -55,7 +55,7 @@ impl HostBudget {
 ///
 /// Implementation detail of [`HostTier`]; the parent `host_tier` module
 /// is private, so `pub` here is already crate-bounded.
-pub struct HostEntry {
+pub(crate) struct HostEntry {
     /// Pinned host memory holding the decoded bytes.  Allocated with
     /// `CU_MEMHOSTALLOC_WRITECOMBINED` for fast DMA in both directions.
     pub pinned: PinnedHostSlice<u8>,
@@ -123,7 +123,7 @@ impl std::fmt::Debug for HostEntry {
 /// `host_tier` module is private, and `mod.rs` re-exports this type
 /// as `pub(crate)`, which is where the crate-wide visibility bound
 /// is actually enforced.
-pub struct HostTier {
+pub(crate) struct HostTier {
     entries: DashMap<ContentHash, Arc<HostEntry>>,
     used_bytes: AtomicU64,
     budget: HostBudget,
@@ -144,21 +144,21 @@ impl HostTier {
     /// because production code never inspects the tier directly.
     #[cfg(test)]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the tier currently holds zero entries.
     #[cfg(test)]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Live host RAM usage in bytes — diagnostics / tests only.
     #[cfg(test)]
     #[must_use]
-    pub fn used_bytes(&self) -> u64 {
+    pub(crate) fn used_bytes(&self) -> u64 {
         self.used_bytes.load(Ordering::Relaxed)
     }
 

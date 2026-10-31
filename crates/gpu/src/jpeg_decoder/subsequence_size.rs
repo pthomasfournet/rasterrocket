@@ -3,7 +3,7 @@
 use crate::jpeg_decoder::JpegPreparedInput;
 
 /// Subsequence bit-width [`pick_subsequence_size`] returns.
-pub const JPEG_SUBSEQUENCE_BITS: u32 = 512;
+pub(crate) const JPEG_SUBSEQUENCE_BITS: u32 = 512;
 
 /// Choose the subsequence bit-width for the parallel-Huffman JPEG
 /// dispatcher.
@@ -20,7 +20,7 @@ pub const JPEG_SUBSEQUENCE_BITS: u32 = 512;
 /// whether its walkers synchronise — so the choice is a constant, and
 /// `prep` does not enter it.
 #[must_use]
-pub const fn pick_subsequence_size(_prep: &JpegPreparedInput) -> u32 {
+pub(crate) const fn pick_subsequence_size(_prep: &JpegPreparedInput) -> u32 {
     JPEG_SUBSEQUENCE_BITS
 }
 

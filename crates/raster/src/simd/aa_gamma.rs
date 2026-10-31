@@ -163,7 +163,7 @@ unsafe fn apply_aa_gamma_avx512(shape: &mut [u8]) -> bool {
 /// Every byte of `shape` must be `≤ AA_SIZE²` (16), as produced by
 /// `aa_coverage_span`.  The scalar tier panics on a larger value; the vector
 /// tiers map it to 0.
-pub fn apply_aa_gamma(shape: &mut [u8]) -> bool {
+pub(crate) fn apply_aa_gamma(shape: &mut [u8]) -> bool {
     dispatch_gamma(shape)
 }
 

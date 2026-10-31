@@ -33,7 +33,7 @@ use super::unstuff::{self, RstPosition, UnstuffError};
 /// Owned (not borrowed) so the original `&[u8]` can be released after Phase 0.
 /// Lives until the GPU finishes decoding; typically one per in-flight image.
 #[derive(Debug)]
-pub struct CpuPrepassOutput {
+pub(crate) struct CpuPrepassOutput {
     /// Image dimensions in pixels.
     pub width: u16,
     /// Image dimensions in pixels.
@@ -58,6 +58,7 @@ pub struct CpuPrepassOutput {
     pub scan: super::headers::JpegScanHeader,
     /// Restart interval in MCUs (0 = none).  When > 0, [`Self::rst_positions`]
     /// is non-empty.
+    #[cfg(test)]
     pub restart_interval: u16,
     /// Flat entropy-coded bitstream, byte-stuffing already removed.
     pub unstuffed: Vec<u8>,
@@ -69,23 +70,25 @@ pub struct CpuPrepassOutput {
 }
 
 impl CpuPrepassOutput {
-    /// Convenience accessor: number of pixels in the decoded image.
+    /// Number of pixels in the decoded image.
+    #[cfg(test)]
     #[must_use]
-    pub fn pixel_count(&self) -> u64 {
+    pub(crate) fn pixel_count(&self) -> u64 {
         u64::from(self.width) * u64::from(self.height)
+    }
+
+    /// Number of MCUs in the image, from `width`, `height` and the sampling
+    /// factors.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn num_mcus(&self) -> u32 {
+        super::headers::mcu_count(self.width, self.height, self.active_frame_components())
     }
 
     /// Active per-component frame metadata (slice of length `self.components`).
     #[must_use]
-    pub fn active_frame_components(&self) -> &[super::headers::JpegFrameComponent] {
+    pub(crate) fn active_frame_components(&self) -> &[super::headers::JpegFrameComponent] {
         &self.frame_components[..usize::from(self.components)]
-    }
-
-    /// Number of MCUs in the image.  Computed from `width`/`height`/sampling
-    /// factors on demand — cheap and cache-line-friendly.
-    #[must_use]
-    pub fn num_mcus(&self) -> u32 {
-        super::headers::mcu_count(self.width, self.height, self.active_frame_components())
     }
 }
 
@@ -96,7 +99,7 @@ impl CpuPrepassOutput {
 /// "byte-unstuffing hit unexpected marker" from "DC chain corrupt", and route
 /// to the right fallback.
 #[derive(Debug)]
-pub enum CpuPrepassError {
+pub(crate) enum CpuPrepassError {
     /// Header parsing failed.
     Header(JpegHeaderError),
     /// Byte-unstuffing failed.
@@ -181,7 +184,7 @@ impl From<DcChainError> for CpuPrepassError {
 /// expected to fall back to a CPU JPEG decoder (zune-jpeg) on failure rather
 /// than treating the image as fatal.
 #[must_use = "discarding the prepass output discards all the decoded headers + DC values"]
-pub fn run_cpu_prepass(data: &[u8]) -> Result<CpuPrepassOutput, CpuPrepassError> {
+pub(crate) fn run_cpu_prepass(data: &[u8]) -> Result<CpuPrepassOutput, CpuPrepassError> {
     let headers = JpegHeaders::parse(data)?;
 
     let mut unstuffed = Vec::with_capacity(headers.scan_data.len());
@@ -211,6 +214,7 @@ pub fn run_cpu_prepass(data: &[u8]) -> Result<CpuPrepassOutput, CpuPrepassError>
         dc_codebooks,
         ac_codebooks,
         scan: headers.scan,
+        #[cfg(test)]
         restart_interval: headers.restart_interval,
         unstuffed,
         rst_positions,

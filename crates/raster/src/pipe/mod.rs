@@ -11,11 +11,11 @@
 //! | `aa`     | shape present, `BlendMode::Normal`, no backdrop |
 //! | `general`| everything else — blend modes, non-isolated groups |
 
-pub mod aa;
-pub mod blend;
-pub mod general;
-pub mod simple;
-pub mod transfer;
+pub(crate) mod aa;
+pub(crate) mod blend;
+pub(crate) mod general;
+pub(crate) mod simple;
+pub(crate) mod transfer;
 
 use std::cell::RefCell;
 

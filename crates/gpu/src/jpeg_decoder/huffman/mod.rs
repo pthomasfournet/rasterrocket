@@ -29,7 +29,7 @@ use crate::jpeg::CanonicalCodebook;
 use crate::jpeg_decoder::PackedBitstream;
 use crate::jpeg_decoder::dispatch_util::DeviceBufferGuard;
 use crate::jpeg_decoder::phase1_oracle::SubsequenceState;
-#[cfg(test)]
+#[cfg(all(test, feature = "gpu-validation"))]
 use crate::jpeg_decoder::phase2_oracle::Phase2Outcome;
 
 /// Pass bound for the JPEG-framed Phase 2 propagation loop: the

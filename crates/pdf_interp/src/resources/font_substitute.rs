@@ -239,7 +239,7 @@ const SCRIPT_NAMES: &[(Script, &[&str])] = &[
 /// font descriptor lives in `fd_owner` (the font dictionary itself for a
 /// simple font, the descendant `CIDFont` for a Type 0 font).
 #[must_use]
-pub fn substitute_style(
+pub(crate) fn substitute_style(
     doc: &Document,
     font_dict: &Dictionary,
     fd_owner: Option<&Dictionary>,
@@ -321,7 +321,7 @@ fn classify(name: &str, flags: i64, weight: f64, italic_angle: f64) -> Substitut
 /// The script of the `Ordering` in the `CIDSystemInfo` of `cid_font`
 /// (`None` for `Identity` or an absent entry).
 #[must_use]
-pub fn ordering_script(doc: &Document, cid_font: &Dictionary) -> Option<Script> {
+pub(crate) fn ordering_script(doc: &Document, cid_font: &Dictionary) -> Option<Script> {
     let info = super::resolve_dict(doc, cid_font.get(b"CIDSystemInfo")?)?;
     Script::from_ordering(info.get(b"Ordering")?.as_str()?)
 }
@@ -333,7 +333,10 @@ pub fn ordering_script(doc: &Document, cid_font: &Dictionary) -> Option<Script> 
 /// encoding.  Names outside the identifying blocks and outside Latin do
 /// not count.
 #[must_use]
-pub fn differences_script(differences: &[Option<Box<str>>], base_codes: usize) -> Option<Script> {
+pub(crate) fn differences_script(
+    differences: &[Option<Box<str>>],
+    base_codes: usize,
+) -> Option<Script> {
     let mut counts: Vec<(Script, usize)> = Vec::new();
     let mut latin = base_codes;
     for unicode in differences

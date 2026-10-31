@@ -36,11 +36,11 @@ enum UnicodeSource {
 
 /// A fallback glyph: the slot of its program in
 /// [`FallbackResolver::program`] and its glyph index there.
-pub type FallbackGlyph = (usize, u32);
+pub(crate) type FallbackGlyph = (usize, u32);
 
 /// Fallback state of one font drawn by a substitute, shared by every page
 /// that draws the font.
-pub struct FallbackResolver {
+pub(crate) struct FallbackResolver {
     style: SubstituteStyle,
     /// Vertical writing: a fallback glyph is replaced by its vertical form,
     /// as is the glyph of a collection's vertical-form CID in either mode.
@@ -67,7 +67,7 @@ impl FallbackResolver {
     /// fallbacks from `library`; `None` when no Unicode value of its codes
     /// is known (a composite font of no known collection and without a
     /// `ToUnicode` map).
-    pub fn new(
+    pub(crate) fn new(
         desc: &FontDescriptor,
         primary: Arc<FontProgram>,
         library: Arc<FontLibrary>,
@@ -123,7 +123,7 @@ impl FallbackResolver {
     /// glyph of its character in the first installed program that maps
     /// it, when the substitute maps none of the character's code points.
     /// Each character is resolved once per font.
-    pub fn glyph(&self, code: u32, cid: u32) -> Option<FallbackGlyph> {
+    pub(crate) fn glyph(&self, code: u32, cid: u32) -> Option<FallbackGlyph> {
         let unicodes = self.unicodes(code, cid);
         let &first = unicodes.first()?;
         let vertical = self.vertical
@@ -168,7 +168,7 @@ impl FallbackResolver {
     }
 
     /// The program in `slot`.
-    pub fn program(&self, slot: usize) -> Option<Arc<FontProgram>> {
+    pub(crate) fn program(&self, slot: usize) -> Option<Arc<FontProgram>> {
         self.lock().programs.get(slot).cloned()
     }
 
@@ -180,7 +180,7 @@ impl FallbackResolver {
 /// The first Unicode scalar value of a `ToUnicode` value: a scalar value,
 /// or above U+10FFFF two UTF-16 units packed as `first << 16 | second`;
 /// `None` for an unpaired surrogate.
-pub const fn first_scalar(value: u32) -> Option<u32> {
+pub(crate) const fn first_scalar(value: u32) -> Option<u32> {
     let (first, second) = if value > 0x10_FFFF {
         (value >> 16, value & 0xFFFF)
     } else {

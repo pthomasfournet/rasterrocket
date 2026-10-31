@@ -58,6 +58,7 @@ tempfile     = { workspace = true }
 unsafe_code    = "warn"
 missing_docs   = "warn"
 unused_results = "warn"
+unreachable_pub = "warn"
 
 [lints.clippy]
 all      = { level = "warn", priority = -1 }

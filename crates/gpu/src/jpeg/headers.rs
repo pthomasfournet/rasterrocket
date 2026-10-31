@@ -45,7 +45,7 @@ const MARKER_DRI: u8 = 0xDD;
 /// still intact*. Use [`super::unstuff::unstuff_into`] to materialise a flat
 /// bitstream.
 #[derive(Debug, Clone)]
-pub struct JpegHeaders<'a> {
+pub(crate) struct JpegHeaders<'a> {
     /// Image width in pixels, from SOF0.
     pub width: u16,
     /// Image height in pixels, from SOF0.
@@ -66,12 +66,13 @@ pub struct JpegHeaders<'a> {
     /// Borrow of the entropy-coded segment, byte-stuffing intact.
     pub scan_data: &'a [u8],
     /// Byte offset of `scan_data` within the original input.
+    #[cfg(feature = "vaapi")]
     pub scan_data_offset: usize,
 }
 
 /// Per-component frame metadata from SOF0.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct JpegFrameComponent {
+pub(crate) struct JpegFrameComponent {
     /// Component identifier (1=Y, 2=Cb, 3=Cr by JFIF convention; arbitrary otherwise).
     pub id: u8,
     /// Horizontal sampling factor (1..=4).
@@ -85,14 +86,14 @@ pub struct JpegFrameComponent {
 /// One quantisation table — 64 entries in **zigzag order**, dequantised values
 /// applied directly to the entropy-decoded coefficients before IDCT.
 #[derive(Debug, Clone, Copy)]
-pub struct JpegQuantTable {
+pub(crate) struct JpegQuantTable {
     /// 64 zigzag-ordered quantiser values. 16-bit table values are clamped to `u8`.
     pub values: [u8; 64],
 }
 
 /// Class of a Huffman table — DC differentials or AC run/size pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DhtClass {
+pub(crate) enum DhtClass {
     /// DC differential codes (run length is implicit; `values` are size categories 0..=11).
     Dc,
     /// AC run/size codes (`values` encode `(run << 4) | size`, max 162 distinct codes).
@@ -102,7 +103,7 @@ pub enum DhtClass {
 impl DhtClass {
     /// Short human name used by error messages: `"DC"` or `"AC"`.
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Dc => "DC",
             Self::Ac => "AC",
@@ -121,7 +122,7 @@ impl fmt::Display for DhtClass {
 /// The `(num_codes, values)` pair is the spec-canonical representation:
 /// `num_codes[i]` is the number of codewords with `i+1` bits.
 #[derive(Debug, Clone)]
-pub struct JpegHuffmanTable {
+pub(crate) struct JpegHuffmanTable {
     /// DC or AC.
     pub class: DhtClass,
     /// Table identifier (0..=1 in JPEG baseline; we accept 0..=3 to match DCT-frame max).
@@ -135,7 +136,7 @@ pub struct JpegHuffmanTable {
 /// SOS (Start Of Scan) header — which components participate in this scan and
 /// which Huffman tables they use.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct JpegScanHeader {
+pub(crate) struct JpegScanHeader {
     /// Number of components in the scan (1..=4).
     pub component_count: u8,
     /// Per-scan-component selectors (only the first `component_count` are valid).
@@ -144,7 +145,7 @@ pub struct JpegScanHeader {
 
 /// One component within an SOS header.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct JpegScanComponent {
+pub(crate) struct JpegScanComponent {
     /// Component identifier matching one of the SOF frame components.
     pub id: u8,
     /// DC Huffman table selector (0 or 1 in baseline JPEG).
@@ -157,7 +158,7 @@ pub struct JpegScanComponent {
 
 /// Errors emitted by [`JpegHeaders::parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JpegHeaderError {
+pub(crate) enum JpegHeaderError {
     /// Stream did not begin with `0xFF 0xD8`.
     MissingSoi,
     /// A marker prefix `0xFF` was expected but not found at the parser cursor.
@@ -319,7 +320,7 @@ impl<'a> JpegHeaders<'a> {
     /// Returns a [`JpegHeaderError`] variant describing the first malformed
     /// or unsupported segment encountered. The parser is fail-fast: it does
     /// not attempt to recover from a bad segment.
-    pub fn parse(data: &'a [u8]) -> Result<Self, JpegHeaderError> {
+    pub(crate) fn parse(data: &'a [u8]) -> Result<Self, JpegHeaderError> {
         let mut cursor = ByteCursor::new(data);
 
         // SOI.
@@ -437,14 +438,16 @@ impl<'a> JpegHeaders<'a> {
             scan,
             restart_interval,
             scan_data,
+            #[cfg(feature = "vaapi")]
             scan_data_offset,
         })
     }
 
     /// Look up a Huffman table by class and table ID. Returns `None` if no
     /// matching table was declared in any DHT segment.
+    #[cfg(any(test, feature = "gpu-jpeg-huffman"))]
     #[must_use]
-    pub fn huffman(&self, class: DhtClass, table_id: u8) -> Option<&JpegHuffmanTable> {
+    pub(crate) fn huffman(&self, class: DhtClass, table_id: u8) -> Option<&JpegHuffmanTable> {
         self.huffman_tables
             .iter()
             .find(|t| t.class == class && t.table_id == table_id)
@@ -452,8 +455,9 @@ impl<'a> JpegHeaders<'a> {
 
     /// Number of MCUs (minimum coded units) in this image, computed from
     /// `components`, `width`/`height`, and the per-component sampling factors.
+    #[cfg(any(test, feature = "gpu-jpeg-huffman"))]
     #[must_use]
-    pub fn num_mcus(&self) -> u32 {
+    pub(crate) fn num_mcus(&self) -> u32 {
         mcu_count(
             self.width,
             self.height,
@@ -465,8 +469,9 @@ impl<'a> JpegHeaders<'a> {
 /// Compute the MCU count from raw frame parameters.  Shared between
 /// [`JpegHeaders::num_mcus`] and [`super::CpuPrepassOutput::num_mcus`] so
 /// the formula lives in exactly one place.
+#[cfg(any(test, feature = "gpu-jpeg-huffman"))]
 #[must_use]
-pub fn mcu_count(width: u16, height: u16, frame_components: &[JpegFrameComponent]) -> u32 {
+pub(crate) fn mcu_count(width: u16, height: u16, frame_components: &[JpegFrameComponent]) -> u32 {
     if frame_components.is_empty() {
         return 0;
     }
@@ -482,7 +487,7 @@ pub fn mcu_count(width: u16, height: u16, frame_components: &[JpegFrameComponent
 /// themselves; this entry point lets them avoid rebuilding a
 /// `[JpegFrameComponent; N]`.
 #[must_use]
-pub fn mcu_count_from_max_sampling(width: u16, height: u16, max_h: u8, max_v: u8) -> u32 {
+pub(crate) fn mcu_count_from_max_sampling(width: u16, height: u16, max_h: u8, max_v: u8) -> u32 {
     let mcu_w = u32::from(max_h.max(1)) * 8;
     let mcu_h = u32::from(max_v.max(1)) * 8;
     let w = u32::from(width);

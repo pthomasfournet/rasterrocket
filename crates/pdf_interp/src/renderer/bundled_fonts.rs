@@ -72,7 +72,7 @@ fn program(index: usize) -> Option<Arc<FontProgram>> {
 /// The bundled program that maps the character `c`, for a font of
 /// `style`: faces of the style's serif class first, then the others.
 /// `None` when no bundled face maps `c`.
-pub fn bundled_program(style: SubstituteStyle, c: u32) -> Option<Arc<FontProgram>> {
+pub(crate) fn bundled_program(style: SubstituteStyle, c: u32) -> Option<Arc<FontProgram>> {
     let want_serif = style.family == SubstituteFamily::Serif;
     let preferred = (0..FACES.len()).filter(|&i| FACES[i].serif == want_serif);
     let others = (0..FACES.len()).filter(|&i| FACES[i].serif != want_serif);

@@ -2,15 +2,15 @@
 
 #[cfg(feature = "bundled-fonts")]
 mod bundled_fonts;
-pub mod color;
+pub(crate) mod color;
 pub(crate) mod encodings;
 mod fallback;
-pub mod font_cache;
-pub mod gstate;
+pub(crate) mod font_cache;
+pub(crate) mod gstate;
 pub mod page;
 pub(crate) mod substitutes;
 mod system_fonts;
-pub mod text;
+pub(crate) mod text;
 
 pub use font_cache::DocumentFonts;
 pub use page::{ImageFailure, PageDiagnostics, PageRenderer, PageView, RenderAbort};

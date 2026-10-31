@@ -108,7 +108,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
     }
 }
 
-pub fn render_pages(
+pub(crate) fn render_pages(
     path: &std::path::Path,
     opts: &RasterOptions,
 ) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
@@ -127,7 +127,7 @@ pub fn render_pages(
 /// Identical to [`render_pages`] but opens the session from owned bytes via
 /// [`open_session_from_bytes`] — for callers that already hold the document
 /// (e.g. a PDF extracted from an archive) and want to avoid a temp file.
-pub fn render_pages_from_bytes(
+pub(crate) fn render_pages_from_bytes(
     bytes: Vec<u8>,
     opts: &RasterOptions,
 ) -> impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)> {
@@ -313,7 +313,7 @@ fn panic_payload_to_render_panic(page: u32, payload: &(dyn std::any::Any + Send)
 }
 
 #[must_use]
-pub fn render_channel(
+pub(crate) fn render_channel(
     path: &std::path::Path,
     opts: &RasterOptions,
     capacity: usize,

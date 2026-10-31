@@ -15,7 +15,7 @@ use crate::jpeg_decoder::{PackedBitstream, pack_be_words};
 /// Symbols are 0x00 .. 0x03, so all have `value_bits` = 0 (low nibble
 /// of the symbol is the size). The per-symbol bit advance equals
 /// `code_bits` — easy to reason about in tests.
-pub fn book4_table() -> JpegHuffmanTable {
+pub(crate) fn book4_table() -> JpegHuffmanTable {
     JpegHuffmanTable {
         class: DhtClass::Dc,
         table_id: 0,
@@ -25,12 +25,12 @@ pub fn book4_table() -> JpegHuffmanTable {
 }
 
 /// Canonical lookup built from [`book4_table`].
-pub fn book4_codebook() -> CanonicalCodebook {
+pub(crate) fn book4_codebook() -> CanonicalCodebook {
     CanonicalCodebook::build(&book4_table()).expect("book4 is a valid canonical prefix code")
 }
 
 /// Encode `symbols` against `book4_table` and pack into a stream.
-pub fn book4_stream(symbols: &[u8]) -> PackedBitstream {
+pub(crate) fn book4_stream(symbols: &[u8]) -> PackedBitstream {
     let enc = encode_symbols(&book4_table(), symbols);
     pack_be_words(bytemuck::cast_slice(&enc.words_be), enc.length_bits)
 }

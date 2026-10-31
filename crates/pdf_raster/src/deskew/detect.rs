@@ -57,7 +57,7 @@ const DOWNSAMPLE: u32 = 4;
 /// negative = clockwise tilt).  Returns 0.0 when detection is unreliable
 /// (e.g. blank or near-blank page).
 #[must_use]
-pub fn find_skew_deg(img: &Bitmap<Gray8>) -> f32 {
+pub(crate) fn find_skew_deg(img: &Bitmap<Gray8>) -> f32 {
     if img.width < 8 || img.height < 8 {
         return 0.0;
     }

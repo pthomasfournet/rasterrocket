@@ -9,8 +9,11 @@
 //! associated-type shape of `GpuBackend` rules out a dyn-trait
 //! signature.
 
+#[cfg(all(test, feature = "gpu-validation"))]
 use crate::backend::params::{ScanParams, ScanPhase, scan_block_count};
+#[cfg(all(test, feature = "gpu-validation"))]
 use crate::backend::{BackendError, GpuBackend, Result};
+#[cfg(all(test, feature = "gpu-validation"))]
 use crate::jpeg_decoder::dispatch_util::DeviceBufferGuard;
 
 /// Exclusive prefix sum of `input` via the multi-workgroup Blelloch
@@ -26,7 +29,11 @@ use crate::jpeg_decoder::dispatch_util::DeviceBufferGuard;
 /// # Errors
 /// Returns the underlying `BackendError` if any allocation, upload,
 /// dispatch, or download fails.
-pub fn dispatch_blelloch_scan<B: GpuBackend>(backend: &B, input: &[u32]) -> Result<Vec<u32>> {
+#[cfg(all(test, feature = "gpu-validation"))]
+pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
+    backend: &B,
+    input: &[u32],
+) -> Result<Vec<u32>> {
     let len_elems = u32::try_from(input.len()).map_err(|_| {
         BackendError::msg(format!(
             "dispatch_blelloch_scan: input length {} exceeds u32::MAX",

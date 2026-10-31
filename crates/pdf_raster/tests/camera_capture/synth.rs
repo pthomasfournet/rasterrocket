@@ -12,14 +12,14 @@ use raster::Bitmap;
 
 /// A tightly packed grayscale image.
 #[derive(Clone)]
-pub struct Gray {
+pub(crate) struct Gray {
     pub w: usize,
     pub h: usize,
     pub px: Vec<u8>,
 }
 
 impl Gray {
-    pub fn new(w: usize, h: usize, fill: u8) -> Self {
+    pub(crate) fn new(w: usize, h: usize, fill: u8) -> Self {
         Self {
             w,
             h,
@@ -27,13 +27,13 @@ impl Gray {
         }
     }
 
-    pub fn at(&self, x: usize, y: usize) -> u8 {
+    pub(crate) fn at(&self, x: usize, y: usize) -> u8 {
         self.px[y * self.w + x]
     }
 
     /// Bilinear sample at pixel-centre coordinates; `None` outside the
     /// continuous extent `[-0.5, w - 0.5] × [-0.5, h - 0.5]`.
-    pub fn sample(&self, x: f64, y: f64) -> Option<f64> {
+    pub(crate) fn sample(&self, x: f64, y: f64) -> Option<f64> {
         let (wf, hf) = (self.w as f64, self.h as f64);
         if !(x >= -0.5 && y >= -0.5 && x <= wf - 0.5 && y <= hf - 0.5) {
             return None;
@@ -49,13 +49,13 @@ impl Gray {
         Some(top * (1.0 - fy) + bot * fy)
     }
 
-    pub fn to_bitmap(&self) -> Bitmap<Gray8> {
+    pub(crate) fn to_bitmap(&self) -> Bitmap<Gray8> {
         let mut b = Bitmap::<Gray8>::new(self.w as u32, self.h as u32, 1, false);
         b.data_mut().copy_from_slice(&self.px);
         b
     }
 
-    pub fn from_bitmap(b: &Bitmap<Gray8>) -> Self {
+    pub(crate) fn from_bitmap(b: &Bitmap<Gray8>) -> Self {
         let (w, h) = (b.width as usize, b.height as usize);
         let mut px = Vec::with_capacity(w * h);
         for y in 0..b.height {
@@ -64,11 +64,11 @@ impl Gray {
         Self { w, h, px }
     }
 
-    pub fn view(&self) -> GrayView<'_> {
+    pub(crate) fn view(&self) -> GrayView<'_> {
         GrayView::packed(&self.px, self.w, self.h)
     }
 
-    pub fn from_page(p: GrayPage) -> Self {
+    pub(crate) fn from_page(p: GrayPage) -> Self {
         Self {
             w: p.width,
             h: p.height,
@@ -77,7 +77,7 @@ impl Gray {
     }
 
     /// Bilinear resize to `w × h`.
-    pub fn resize(&self, w: usize, h: usize) -> Self {
+    pub(crate) fn resize(&self, w: usize, h: usize) -> Self {
         let (sx, sy) = (self.w as f64 / w as f64, self.h as f64 / h as f64);
         let mut out = Self::new(w, h, 255);
         for y in 0..h {
@@ -92,7 +92,7 @@ impl Gray {
     }
 
     /// Left-right mirror image.
-    pub fn mirror(&self) -> Self {
+    pub(crate) fn mirror(&self) -> Self {
         let mut out = self.clone();
         for (dst, src) in out
             .px
@@ -107,7 +107,7 @@ impl Gray {
     }
 
     /// Write as binary PGM (for offline inspection / OCR).
-    pub fn write_pgm(&self, path: &std::path::Path) {
+    pub(crate) fn write_pgm(&self, path: &std::path::Path) {
         let mut bytes = format!("P5\n{} {}\n255\n", self.w, self.h).into_bytes();
         bytes.extend_from_slice(&self.px);
         std::fs::write(path, bytes).expect("write pgm");
@@ -135,7 +135,7 @@ fn desk(x: usize, y: usize, w: usize, h: usize) -> f64 {
 
 /// Pose of the page plane in front of the camera.
 #[derive(Clone, Copy, Debug)]
-pub struct Pose {
+pub(crate) struct Pose {
     /// Rotation about the page's horizontal axis (radians): top edge
     /// farther (positive) or nearer.
     pub tilt_x: f64,
@@ -150,7 +150,7 @@ pub struct Pose {
 }
 
 /// A capture and its ground truth.
-pub struct Capture {
+pub(crate) struct Capture {
     pub image: Gray,
     /// Page corners in capture pixel coordinates (TL, TR, BR, BL), at the
     /// page edge.
@@ -163,7 +163,11 @@ pub struct Capture {
 ///
 /// `occluder`: optional finger-like ellipse `(cx, cy, rx, ry)` in capture
 /// coordinates painted on top with skin luma.
-pub fn photograph(page: &Gray, pose: Pose, occluder: Option<(f64, f64, f64, f64)>) -> Capture {
+pub(crate) fn photograph(
+    page: &Gray,
+    pose: Pose,
+    occluder: Option<(f64, f64, f64, f64)>,
+) -> Capture {
     let (pw, ph) = (page.w as f64, page.h as f64);
     let dist = 1.25 * ph;
     let focal = dist; // flat, fronto-parallel page images at scale 1
@@ -261,7 +265,7 @@ pub fn photograph(page: &Gray, pose: Pose, occluder: Option<(f64, f64, f64, f64)
 /// Returns the capture and its horizontal-only counterpart: the same
 /// column mapping without the vertical displacement, i.e. the result of a
 /// perfect vertical dewarp (horizontal foreshortening is not corrected).
-pub fn curl(page: &Gray, depth: f64) -> (Gray, Gray) {
+pub(crate) fn curl(page: &Gray, depth: f64) -> (Gray, Gray) {
     let (pw, ph) = (page.w as f64, page.h as f64);
     let s0 = 0.55 * pw;
     let dist = 2.0 * ph;
@@ -322,7 +326,7 @@ pub fn curl(page: &Gray, depth: f64) -> (Gray, Gray) {
 }
 
 /// Two pages side by side with a gutter shadow at their junction.
-pub fn spread(left: &Gray, right: &Gray) -> Gray {
+pub(crate) fn spread(left: &Gray, right: &Gray) -> Gray {
     let h = left.h.max(right.h);
     let w = left.w + right.w;
     let mut out = Gray::new(w, h, 255);

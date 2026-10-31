@@ -7,10 +7,10 @@ use super::font_cache::ActiveFont;
 
 /// PDF text matrix `[a b c d e f]` (§8.3.3): it maps `(x, y)` to
 /// `(a·x + c·y + e, b·x + d·y + f)`.
-pub type TextMatrix = [f64; 6];
+pub(crate) type TextMatrix = [f64; 6];
 
 /// The identity text matrix.
-pub const TEXT_MATRIX_IDENTITY: TextMatrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+pub(crate) const TEXT_MATRIX_IDENTITY: TextMatrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 /// PDF text state (§8.3, Table 104).
 ///
@@ -18,7 +18,7 @@ pub const TEXT_MATRIX_IDENTITY: TextMatrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// are part of the graphics state that `q`/`Q` save and restore; the text
 /// and line matrices are local to the `BT`/`ET` text object.
 #[derive(Debug, Clone)]
-pub struct TextState {
+pub(crate) struct TextState {
     // ── Text state parameters (persist across BT/ET) ──────────────────────────
     /// Character spacing `Tc` (added after each glyph; 0 = none).
     pub char_spacing: f64,
@@ -69,7 +69,7 @@ impl Default for TextState {
 
 impl TextState {
     /// `BT` — reset text and line matrices to identity.
-    pub const fn begin_text(&mut self) {
+    pub(crate) const fn begin_text(&mut self) {
         self.text_matrix = TEXT_MATRIX_IDENTITY;
         self.line_matrix = TEXT_MATRIX_IDENTITY;
     }
@@ -77,7 +77,7 @@ impl TextState {
     /// `Td tx ty` — move text position by (tx, ty).
     ///
     /// Updates both the text matrix and the line matrix.
-    pub fn move_by(&mut self, tx: f64, ty: f64) {
+    pub(crate) fn move_by(&mut self, tx: f64, ty: f64) {
         // New line matrix = translate(tx, ty) × old line matrix
         self.line_matrix[4] += tx.mul_add(self.line_matrix[0], ty * self.line_matrix[2]);
         self.line_matrix[5] += tx.mul_add(self.line_matrix[1], ty * self.line_matrix[3]);
@@ -85,26 +85,27 @@ impl TextState {
     }
 
     /// `TD tx ty` — move by (tx, ty) and set leading to −ty.
-    pub fn move_by_and_set_leading(&mut self, tx: f64, ty: f64) {
+    pub(crate) fn move_by_and_set_leading(&mut self, tx: f64, ty: f64) {
         self.leading = -ty;
         self.move_by(tx, ty);
     }
 
     /// `T*` — move to start of next line (equivalent to `0 −TL Td`).
-    pub fn next_line(&mut self) {
+    pub(crate) fn next_line(&mut self) {
         self.move_by(0.0, -self.leading);
     }
 
     /// `Tm` — set both text matrix and line matrix directly.
-    pub const fn set_matrix(&mut self, m: TextMatrix) {
+    pub(crate) const fn set_matrix(&mut self, m: TextMatrix) {
         self.text_matrix = m;
         self.line_matrix = m;
     }
 
-    /// Return the current text origin in user space (the `e` and `f` components
-    /// of the text matrix, which encode the translation part).
+    /// The current text origin in user space: the translation (`e`, `f`)
+    /// of the text matrix.
+    #[cfg(test)]
     #[must_use]
-    pub const fn origin(&self) -> (f64, f64) {
+    pub(crate) const fn origin(&self) -> (f64, f64) {
         (self.text_matrix[4], self.text_matrix[5])
     }
 }

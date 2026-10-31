@@ -38,8 +38,8 @@ fn to_idx(v: i32) -> usize {
 
 /// Stack storage for the De Casteljau subdivision loop.
 ///
-/// Lazy-allocated (via `Option<Box<CurveData>>`) because it is ~25 KB —
-/// only needed for paths containing Bezier curves.
+/// Lazy-allocated (via `Option<CurveData>`): its three slices total ~25 KB
+/// and are only needed for paths containing Bezier curves.
 ///
 /// ## Array sizing
 ///
@@ -50,7 +50,7 @@ fn to_idx(v: i32) -> usize {
 ///   which is within bounds (no off-by-one).
 /// * `c_next`: length `n = 1025`.  The maximum index used is `max_u = 1024`,
 ///   which is also within bounds.
-pub struct CurveData {
+pub(crate) struct CurveData {
     /// X coordinates: 3 control points per slot, indexed by `slot * 3 + {0,1,2}`.
     pub cx: Box<[f64]>,
     /// Y coordinates: same layout as `cx`.
@@ -68,15 +68,15 @@ impl CurveData {
     /// constant `1024`, so
     /// this branch is unreachable in practice.
     #[must_use]
-    pub fn new() -> Box<Self> {
+    pub(crate) fn new() -> Self {
         let n = usize::try_from(MAX_CURVE_SPLITS)
             .expect("MAX_CURVE_SPLITS must be non-negative (it is the constant 1024)")
             + 1;
-        Box::new(Self {
+        Self {
             cx: vec![0.0f64; n * 3].into_boxed_slice(),
             cy: vec![0.0f64; n * 3].into_boxed_slice(),
             c_next: vec![0i32; n].into_boxed_slice(),
-        })
+        }
     }
 }
 
@@ -93,7 +93,7 @@ impl CurveData {
 /// curve to a chord. Use `flatness * flatness` when calling from `XPath::new`.
 ///
 /// `curve_data` is lazy-allocated storage reused across multiple calls on the
-/// same `XPath`. Pass `None` on the first call; the `Box<CurveData>` is
+/// same `XPath`. Pass `None` on the first call; the `CurveData` is
 /// returned and should be stored for the next call.
 ///
 /// ## Midpoint arithmetic
@@ -105,14 +105,14 @@ impl CurveData {
 /// # Panics
 ///
 /// Panics if `MAX_CURVE_SPLITS` is negative (it is the positive constant 1024).
-pub fn flatten_curve(
+pub(crate) fn flatten_curve(
     p0: PathPoint,
     p1: PathPoint,
     p2: PathPoint,
     p3: PathPoint,
     flatness_sq: f64,
     out: &mut Vec<PathPoint>,
-    curve_data: &mut Option<Box<CurveData>>,
+    curve_data: &mut Option<CurveData>,
 ) {
     let data = curve_data.get_or_insert_with(CurveData::new);
 

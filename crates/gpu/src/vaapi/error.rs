@@ -51,7 +51,7 @@ impl std::fmt::Display for VapiError {
 
 impl std::error::Error for VapiError {}
 
-pub type Result<T> = std::result::Result<T, VapiError>;
+pub(crate) type Result<T> = std::result::Result<T, VapiError>;
 
 /// Convert a VA-API status code to `Err` with the human-readable error string.
 pub(super) fn check(status: VAStatus, context: &str) -> Result<()> {

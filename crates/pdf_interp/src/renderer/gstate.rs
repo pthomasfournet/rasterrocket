@@ -18,14 +18,14 @@ use crate::resources::colorspace::ColorSpace;
 use crate::resources::transfer::Transfer;
 
 /// PDF current transformation matrix — a 6-element `[a b c d e f]` array.
-pub type Ctm = [f64; 6];
+pub(crate) type Ctm = [f64; 6];
 
 /// The identity CTM.
-pub const CTM_IDENTITY: Ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+pub(crate) const CTM_IDENTITY: Ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 /// Multiply two CTMs: result = `a * b` (both in column-major PDF order).
 #[must_use]
-pub fn ctm_multiply(a: &Ctm, b: &Ctm) -> Ctm {
+pub(crate) fn ctm_multiply(a: &Ctm, b: &Ctm) -> Ctm {
     // PDF matrix multiplication (§8.3.4):
     // | a0 a1 0 |   | b0 b1 0 |
     // | a2 a3 0 | × | b2 b3 0 |
@@ -50,7 +50,7 @@ pub fn ctm_multiply(a: &Ctm, b: &Ctm) -> Ctm {
 /// Used to compute `Trm[2×2] = font_size × Tm[2×2] × CTM[2×2]` — the size and
 /// orientation of rendered glyphs in device space.
 #[must_use]
-pub fn mat2x2_mul(a: &Ctm, b: &Ctm) -> [f64; 4] {
+pub(crate) fn mat2x2_mul(a: &Ctm, b: &Ctm) -> [f64; 4] {
     // Standard row-major 2×2 matrix product:
     // result[row][col] = Σ_k  a[row][k] × b[k][col]
     // With PDF [a,b,c,d] layout: row 0 = [a[0],a[1]], row 1 = [a[2],a[3]].
@@ -64,7 +64,7 @@ pub fn mat2x2_mul(a: &Ctm, b: &Ctm) -> [f64; 4] {
 
 /// Transform a point `(x, y)` by `ctm`, returning `(x', y')`.
 #[must_use]
-pub fn ctm_transform(ctm: &Ctm, x: f64, y: f64) -> (f64, f64) {
+pub(crate) fn ctm_transform(ctm: &Ctm, x: f64, y: f64) -> (f64, f64) {
     (
         ctm[0].mul_add(x, ctm[2] * y) + ctm[4],
         ctm[1].mul_add(x, ctm[3] * y) + ctm[5],
@@ -78,7 +78,7 @@ pub fn ctm_transform(ctm: &Ctm, x: f64, y: f64) -> (f64, f64) {
     clippy::many_single_char_names,
     reason = "matrix entries a–f follow the PDF §8.3.3 notation"
 )]
-pub fn invert_affine(m: &Ctm) -> Option<Ctm> {
+pub(crate) fn invert_affine(m: &Ctm) -> Option<Ctm> {
     let [a, b, c, d, e, f] = *m;
     let det = a.mul_add(d, -(b * c));
     if !det.is_finite() || det.abs() < 1e-12 {
@@ -101,7 +101,7 @@ pub fn invert_affine(m: &Ctm) -> Option<Ctm> {
 ///
 /// `Clone` is implemented manually so that `clip` uses `clone_shared`
 /// (Arc-sharing scanners) rather than a deep copy.
-pub struct InterpGState {
+pub(crate) struct InterpGState {
     /// Current transformation matrix.
     pub ctm: Ctm,
     /// Current clip region (page rect at init; narrowed by `W`/`W*` operators).
@@ -175,7 +175,7 @@ pub struct InterpGState {
 /// `values` is row-major over the page bitmap, `width × height` bytes; each
 /// byte scales the opacity of everything painted at that pixel.
 #[derive(Debug)]
-pub struct SoftMaskPlane {
+pub(crate) struct SoftMaskPlane {
     /// Bitmap width in pixels.
     pub width: u32,
     /// Bitmap height in pixels.
@@ -217,7 +217,7 @@ impl Clone for InterpGState {
 impl InterpGState {
     /// Create the initial graphics state for a page of `width × height` device pixels.
     #[must_use]
-    pub fn initial(width: u32, height: u32) -> Self {
+    pub(crate) fn initial(width: u32, height: u32) -> Self {
         Self {
             ctm: CTM_IDENTITY,
             clip: Clip::new(0.0, 0.0, f64::from(width), f64::from(height), true),
@@ -252,7 +252,7 @@ impl InterpGState {
     /// selected (PDF §8.6.8: the initial colour of a `Pattern` space is a
     /// pattern that paints nothing).
     #[must_use]
-    pub fn fill_paints_nothing(&self) -> bool {
+    pub(crate) fn fill_paints_nothing(&self) -> bool {
         self.fill_color_space.paints_nothing()
             || (matches!(self.fill_color_space, ColorSpace::Pattern { .. })
                 && self.fill_pattern.is_none())
@@ -260,7 +260,7 @@ impl InterpGState {
 
     /// The stroking counterpart of [`Self::fill_paints_nothing`].
     #[must_use]
-    pub fn stroke_paints_nothing(&self) -> bool {
+    pub(crate) fn stroke_paints_nothing(&self) -> bool {
         self.stroke_color_space.paints_nothing()
             || (matches!(self.stroke_color_space, ColorSpace::Pattern { .. })
                 && self.stroke_pattern.is_none())
@@ -272,7 +272,7 @@ impl InterpGState {
     /// a negative width strokes as its magnitude does; the magnitude is
     /// stored so that the stroke's bounds and its one-pixel minimum agree
     /// with what is drawn.  A non-finite width leaves the width unchanged.
-    pub fn set_line_width(&mut self, width: f64) {
+    pub(crate) fn set_line_width(&mut self, width: f64) {
         if width.is_finite() {
             self.line_width = width.abs();
         } else {
@@ -282,19 +282,19 @@ impl InterpGState {
 
     /// `rgb` mapped through the transfer function in effect.
     #[must_use]
-    pub fn transferred(&self, rgb: [u8; 3]) -> [u8; 3] {
+    pub(crate) fn transferred(&self, rgb: [u8; 3]) -> [u8; 3] {
         self.transfer.as_ref().map_or(rgb, |t| t.apply(rgb))
     }
 
     /// The fill colour as painted: mapped through the transfer function.
     #[must_use]
-    pub fn painted_fill_color(&self) -> [u8; 3] {
+    pub(crate) fn painted_fill_color(&self) -> [u8; 3] {
         self.transferred(self.fill_color.bytes())
     }
 
     /// The stroke colour as painted: mapped through the transfer function.
     #[must_use]
-    pub fn painted_stroke_color(&self) -> [u8; 3] {
+    pub(crate) fn painted_stroke_color(&self) -> [u8; 3] {
         self.transferred(self.stroke_color.bytes())
     }
 }
@@ -305,14 +305,14 @@ impl InterpGState {
 /// independently of the operator budget: a content stream of nothing but
 /// `q` would otherwise allocate one state per operator.  A `q` beyond this
 /// depth is counted rather than pushed (see [`GStateStack::save_op`]).
-pub const MAX_SAVE_DEPTH: usize = 1 << 14;
+pub(crate) const MAX_SAVE_DEPTH: usize = 1 << 14;
 
 /// Save/restore stack for [`InterpGState`].
 ///
 /// `q` pushes a clone; `Q` pops.  A `Q` that would pop below the floor (the
 /// states of an enclosing content stream) is ignored, as real-world content
 /// streams often have unbalanced save/restore counts.
-pub struct GStateStack {
+pub(crate) struct GStateStack {
     /// Index 0 = bottom (page-level) state; last = current.
     stack: Vec<InterpGState>,
     /// The depth `Q` never pops below: the states a content stream being
@@ -330,7 +330,7 @@ pub struct GStateStack {
 /// [`GStateStack::leave_stream`].
 #[derive(Clone, Copy)]
 #[must_use = "pass the scope back to `leave_stream`"]
-pub struct StreamScope {
+pub(crate) struct StreamScope {
     depth: usize,
     floor: usize,
     deferred: usize,
@@ -341,7 +341,7 @@ impl GStateStack {
     /// `width × height` device pixels; `antialias` selects the coverage mode
     /// of the initial clip (see [`InterpGState::clip`]).
     #[must_use]
-    pub fn new(width: u32, height: u32, antialias: bool) -> Self {
+    pub(crate) fn new(width: u32, height: u32, antialias: bool) -> Self {
         let mut initial = InterpGState::initial(width, height);
         initial.clip = Clip::new(0.0, 0.0, f64::from(width), f64::from(height), antialias);
         Self {
@@ -359,7 +359,7 @@ impl GStateStack {
     /// Never panics in practice — the stack always contains at least the
     /// page-level state pushed by [`GStateStack::new`].
     #[must_use]
-    pub fn current(&self) -> &InterpGState {
+    pub(crate) fn current(&self) -> &InterpGState {
         self.stack.last().expect("GStateStack is always non-empty")
     }
 
@@ -369,7 +369,7 @@ impl GStateStack {
     ///
     /// Never panics in practice — the stack always contains at least the
     /// page-level state pushed by [`GStateStack::new`].
-    pub fn current_mut(&mut self) -> &mut InterpGState {
+    pub(crate) fn current_mut(&mut self) -> &mut InterpGState {
         self.stack
             .last_mut()
             .expect("GStateStack is always non-empty")
@@ -377,14 +377,14 @@ impl GStateStack {
 
     /// Push a copy of the current state, for a save the renderer balances
     /// itself.  Content-stream `q` goes through [`Self::save_op`].
-    pub fn save(&mut self) {
+    pub(crate) fn save(&mut self) {
         let clone = self.current().clone();
         self.stack.push(clone);
     }
 
     /// Pop the current state, for a restore balancing [`Self::save`].
     /// Never pops below the floor.
-    pub fn restore(&mut self) {
+    pub(crate) fn restore(&mut self) {
         if self.stack.len() > self.floor {
             let _ = self.stack.pop();
         }
@@ -393,7 +393,7 @@ impl GStateStack {
     /// `q`: [`Self::save`], or at [`MAX_SAVE_DEPTH`] count the save, so that
     /// the `Q` balancing it restores nothing and the state changes between
     /// them persist.
-    pub fn save_op(&mut self) {
+    pub(crate) fn save_op(&mut self) {
         if self.stack.len() < MAX_SAVE_DEPTH {
             self.save();
             return;
@@ -410,7 +410,7 @@ impl GStateStack {
 
     /// `Q`: balance the innermost [`Self::save_op`].  An unmatched `Q`, one
     /// that would pop below the floor, is ignored.
-    pub fn restore_op(&mut self) {
+    pub(crate) fn restore_op(&mut self) {
         if self.deferred > 0 {
             self.deferred -= 1;
         } else {
@@ -420,7 +420,7 @@ impl GStateStack {
 
     /// Enter a nested content stream (a form `XObject` or a Type 3 glyph
     /// description): its `Q`s cannot pop the states saved before it.
-    pub fn enter_stream(&mut self) -> StreamScope {
+    pub(crate) fn enter_stream(&mut self) -> StreamScope {
         StreamScope {
             depth: self.stack.len(),
             floor: std::mem::replace(&mut self.floor, self.stack.len()),
@@ -431,15 +431,16 @@ impl GStateStack {
     /// Leave the nested content stream `scope` was returned for: the states
     /// its unbalanced `q`s left are discarded, so the stack is as deep as at
     /// [`Self::enter_stream`].
-    pub fn leave_stream(&mut self, scope: StreamScope) {
+    pub(crate) fn leave_stream(&mut self, scope: StreamScope) {
         self.stack.truncate(scope.depth.max(1));
         self.floor = scope.floor.max(1);
         self.deferred = scope.deferred;
     }
 
     /// The number of states on the stack, at least one.
+    #[cfg(test)]
     #[must_use]
-    pub const fn depth(&self) -> usize {
+    pub(crate) const fn depth(&self) -> usize {
         self.stack.len()
     }
 }

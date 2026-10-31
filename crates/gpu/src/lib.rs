@@ -29,7 +29,7 @@ mod composite;
 pub(crate) mod cuda;
 
 pub mod backend;
-pub mod lib_kernels;
+mod lib_kernels;
 
 #[cfg(feature = "cache")]
 pub mod blit;
@@ -40,12 +40,13 @@ pub mod cache;
 pub mod jpeg_decoder;
 
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
-pub mod decode_queue;
+pub(crate) mod decode_queue;
 mod fill;
-pub mod jpeg;
-pub mod jpeg_sof;
+#[cfg(any(feature = "vaapi", feature = "gpu-jpeg-huffman"))]
+pub(crate) mod jpeg;
+pub(crate) mod jpeg_sof;
 mod staging;
-pub mod traits;
+pub(crate) mod traits;
 
 pub use cmyk::icc_cmyk_to_rgb_cpu;
 pub use composite::{apply_soft_mask_cpu, composite_rgba8_cpu};

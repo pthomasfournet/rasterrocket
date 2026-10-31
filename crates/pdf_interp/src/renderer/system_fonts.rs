@@ -258,7 +258,7 @@ type RankKey = (SubstituteFamily, bool, bool, Option<Script>);
 /// The installed fonts of one list of extra directories and, when
 /// `system` is set, the standard font directories.  See the module
 /// documentation.
-pub struct FontLibrary {
+pub(crate) struct FontLibrary {
     /// Extra directories, walked before the standard ones.
     dirs: Vec<PathBuf>,
     /// Whether the standard font directories and the fixed locations of
@@ -291,7 +291,7 @@ impl FontLibrary {
     /// then, when `system` is set, the standard font directories; shared by
     /// every caller naming the same sources.
     #[must_use]
-    pub fn shared(dirs: &[PathBuf], system: bool) -> Arc<Self> {
+    pub(crate) fn shared(dirs: &[PathBuf], system: bool) -> Arc<Self> {
         static LIBRARIES: OnceLock<Mutex<HashMap<LibraryKey, Arc<FontLibrary>>>> = OnceLock::new();
         let mut libraries = LIBRARIES
             .get_or_init(Mutex::default)
@@ -383,7 +383,7 @@ impl FontLibrary {
 
     /// The installed program for `style`, whose `script` must be set;
     /// `None` when no installed face serves the script.
-    pub fn system_program(&self, style: SubstituteStyle) -> Option<Arc<FontProgram>> {
+    pub(crate) fn system_program(&self, style: SubstituteStyle) -> Option<Arc<FontProgram>> {
         let script = style.script?;
         self.select(script, style)
             .and_then(|index| self.face_program(index))
@@ -396,7 +396,11 @@ impl FontLibrary {
     /// going to the earlier path.  With the `bundled-fonts` feature, a
     /// bundled face that maps `c` when no installed face does.  `None`
     /// when no face maps `c`.
-    pub fn fallback_program(&self, style: SubstituteStyle, c: u32) -> Option<Arc<FontProgram>> {
+    pub(crate) fn fallback_program(
+        &self,
+        style: SubstituteStyle,
+        c: u32,
+    ) -> Option<Arc<FontProgram>> {
         let faces = self.faces();
         let script = Script::of_char(c);
         let key: RankKey = (style.family, style.bold, style.italic, script);

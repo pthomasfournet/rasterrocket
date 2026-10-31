@@ -56,7 +56,7 @@ use super::unstuff::RstPosition;
 /// component `c`.  Allocated up front so the GPU upload is a single
 /// `cudaMemcpyAsync` per component.
 #[derive(Debug, Clone)]
-pub struct DcValues {
+pub(crate) struct DcValues {
     /// Per-component scan-order DC values.  Outer index matches scan order
     /// (`headers.scan.components[i]`), not frame order.
     pub per_component: Vec<Vec<i32>>,
@@ -72,7 +72,7 @@ pub(crate) const MAX_SAFE_MCUS: usize = 8192 * 8192;
 
 /// Errors emitted by [`resolve_dc_chain`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DcChainError {
+pub(crate) enum DcChainError {
     /// Bitstream ended before all expected DC values were decoded.
     UnexpectedEnd {
         /// MCU index where the truncation was observed.
@@ -226,7 +226,7 @@ fn blocks_per_mcu(scan_components: usize, h_sampling: u8, v_sampling: u8) -> usi
 /// components in the worst case, but is gated by the [`DcChainError::TooManyMcus`]
 /// check before any allocation happens, so adversarial input gets a clean
 /// error rather than a panic.
-pub fn resolve_dc_chain(
+pub(crate) fn resolve_dc_chain(
     headers: &JpegHeaders<'_>,
     unstuffed: &[u8],
     rst_positions: &[RstPosition],

@@ -83,7 +83,7 @@ use gpu::GpuCtx;
 ///
 /// `GPU_JPEG2K_THRESHOLD_PX` is independent of this value.
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
-pub const GPU_JPEG_THRESHOLD_PX: u32 = u32::MAX;
+pub(crate) const GPU_JPEG_THRESHOLD_PX: u32 = u32::MAX;
 
 /// Minimum pixel area (width × height) for GPU parallel-Huffman JPEG decode.
 ///
@@ -97,7 +97,7 @@ pub const GPU_JPEG_THRESHOLD_PX: u32 = u32::MAX;
 /// environment variable to a decimal pixel-area value (e.g. `0` = always GPU,
 /// `4294967295` = never GPU).  The env var is read once, lazily, on first use.
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub const GPU_JPEG_HUFFMAN_THRESHOLD_PX: u32 = u32::MAX;
+pub(crate) const GPU_JPEG_HUFFMAN_THRESHOLD_PX: u32 = u32::MAX;
 
 /// Returns the effective parallel-Huffman dispatch threshold: `GPU_JPEG_HUFFMAN_THRESHOLD_PX`
 /// unless `PDF_RASTER_HUFFMAN_THRESHOLD` is set in the environment.
@@ -126,7 +126,7 @@ pub(crate) fn huffman_threshold() -> u32 {
 /// is faster.  512 × 512 = 262 144 pixels — same crossover as nvJPEG; JPEG 2000
 /// decode is CPU-bound at similar pixel counts.
 #[cfg(feature = "nvjpeg2k")]
-pub const GPU_JPEG2K_THRESHOLD_PX: u32 = 262_144;
+pub(crate) const GPU_JPEG2K_THRESHOLD_PX: u32 = 262_144;
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
@@ -138,7 +138,7 @@ pub(crate) mod inline;
 pub(crate) mod raw;
 pub(crate) mod smask;
 
-pub use inline::decode_inline_image;
+pub(crate) use inline::decode_inline_image;
 pub use smask::SoftMask;
 
 // Visible only when cargo-fuzz sets `--cfg fuzzing`.  Not part of the public API.
@@ -147,7 +147,7 @@ pub use smask::SoftMask;
 // builds.
 #[cfg(fuzzing)]
 #[doc(hidden)]
-pub mod fuzz_entry {
+pub(crate) mod fuzz_entry {
     use pdf::{Document, Object};
 
     use super::codecs;
@@ -359,6 +359,13 @@ impl ImageData {
     /// Borrow the host-resident pixel bytes if this is a CPU-backed image.
     /// Returns `None` for variants whose pixels live in device memory.
     #[must_use]
+    #[cfg_attr(
+        not(feature = "cache"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "without the cache feature only the CPU variant exists; keep one signature"
+        )
+    )]
     pub const fn as_cpu(&self) -> Option<&[u8]> {
         match self {
             Self::Cpu(bytes) => Some(bytes.as_slice()),
@@ -620,12 +627,12 @@ fn has_mask_entry(dict: &Dictionary) -> bool {
 // ── Shared helpers (used by multiple sub-modules) ─────────────────────────────
 
 /// Largest `/Width` or `/Height` an image may declare.
-pub const MAX_IMAGE_SIDE: i64 = 131_071;
+pub(crate) const MAX_IMAGE_SIDE: i64 = 131_071;
 
 /// Largest number of 8-bit samples (`width × height × components`) an
 /// image is stored or converted to: 1 GiB.  A larger image is refused before any
 /// allocation and reported as a decode failure.
-pub const MAX_DECODED_BYTES: u64 = 1 << 30;
+pub(crate) const MAX_DECODED_BYTES: u64 = 1 << 30;
 
 /// Validate raw `i64` image dimensions and cast them to `u32`.
 ///

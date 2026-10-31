@@ -15,7 +15,7 @@
 //! [`JpegGpuError::Progressive`] so the caller can fall back to a CPU
 //! decoder without parsing the error string.
 
-use crate::jpeg::headers::{JpegFrameComponent, JpegScanHeader};
+use crate::jpeg::headers::JpegFrameComponent;
 use crate::jpeg::{
     CanonicalCodebook, CpuPrepassError, CpuPrepassOutput, DcValues, DhtClass, JpegHeaderError,
     JpegQuantTable, run_cpu_prepass,
@@ -32,7 +32,7 @@ use crate::jpeg_decoder::{JpegGpuError, PackedBitstream, pack_be_words};
 /// DC counterpart) to materialise the per-component reference slice the
 /// parallel-Huffman dispatcher accepts without copying the 128 KB tables.
 #[derive(Debug)]
-pub struct JpegPreparedInput {
+pub(crate) struct JpegPreparedInput {
     /// Entropy-coded segment packed for the kernel: big-endian 32-bit
     /// words, exact `length_bits` count.
     pub bitstream: PackedBitstream,
@@ -66,10 +66,8 @@ pub struct JpegPreparedInput {
     /// Active per-component frame metadata, length = scan component count
     /// (1, 3, or 4).  Carries sampling factors + quant-table selectors.
     pub components: Vec<JpegFrameComponent>,
-    /// SOS scan header — preserves DC/AC selector mapping for downstream
-    /// component-order checks.
-    pub scan: JpegScanHeader,
     /// Restart interval in MCUs (0 = no restart markers in stream).
+    #[cfg(test)]
     pub restart_interval: u16,
     /// Number of RST markers the entropy scan actually contained.  A
     /// DRI header alone does not imply markers (an image with fewer
@@ -91,7 +89,7 @@ impl JpegPreparedInput {
     /// construction time, so a trip here would mean the struct was
     /// hand-mutated after `prepare_jpeg` returned.
     #[must_use]
-    pub fn ac_codebooks_for_dispatch(&self) -> Vec<&CanonicalCodebook> {
+    pub(crate) fn ac_codebooks_for_dispatch(&self) -> Vec<&CanonicalCodebook> {
         materialise_codebook_slice(&self.ac_codebooks, &self.ac_selectors, DhtClass::Ac)
     }
 
@@ -105,7 +103,7 @@ impl JpegPreparedInput {
     /// [`Self::dc_codebooks`].  `prepare_jpeg` enforces population at
     /// construction time.
     #[must_use]
-    pub fn dc_codebooks_for_dispatch(&self) -> Vec<&CanonicalCodebook> {
+    pub(crate) fn dc_codebooks_for_dispatch(&self) -> Vec<&CanonicalCodebook> {
         materialise_codebook_slice(&self.dc_codebooks, &self.dc_selectors, DhtClass::Dc)
     }
 }
@@ -149,7 +147,7 @@ fn materialise_codebook_slice<'a>(
 ///   DC chain corrupt, unstuffed segment too long to address in u32
 ///   bits). The display of the underlying error is preserved in the
 ///   message so the caller can log it.
-pub fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError> {
+pub(crate) fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError> {
     let prep = match run_cpu_prepass(jpeg_bytes) {
         Ok(out) => out,
         Err(CpuPrepassError::Header(JpegHeaderError::NotBaseline)) => {
@@ -190,7 +188,7 @@ pub fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError
         quant_tables,
         dc_codebooks,
         ac_codebooks,
-        scan,
+        #[cfg(test)]
         restart_interval,
         dc_values,
         rst_positions,
@@ -208,7 +206,7 @@ pub fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError
         width,
         height,
         components,
-        scan,
+        #[cfg(test)]
         restart_interval,
         rst_marker_count: rst_positions.len(),
     })
@@ -266,7 +264,7 @@ fn pack_unstuffed_bitstream(unstuffed: &[u8]) -> Result<PackedBitstream, JpegGpu
 /// Panics if a component index exceeds 3 — impossible for well-formed
 /// JPEG (≤ 4 components, enforced by the pre-pass).
 #[must_use]
-pub fn build_mcu_schedule(prep: &JpegPreparedInput) -> (Vec<u32>, u32) {
+pub(crate) fn build_mcu_schedule(prep: &JpegPreparedInput) -> (Vec<u32>, u32) {
     let num_components = prep.components.len();
 
     let mut schedule: Vec<u32> = Vec::new();

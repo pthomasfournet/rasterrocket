@@ -49,7 +49,7 @@ use super::DeskewError;
     clippy::unnecessary_wraps,
     reason = "Result kept for future GPU-only configurations where CPU fallback may not be available"
 )]
-pub fn rotate_inplace(img: &mut Bitmap<Gray8>, angle_deg: f32) -> Result<(), DeskewError> {
+pub(crate) fn rotate_inplace(img: &mut Bitmap<Gray8>, angle_deg: f32) -> Result<(), DeskewError> {
     #[cfg(feature = "gpu-deskew")]
     match rotate_gpu(img, angle_deg) {
         Ok(rotated) => {
@@ -543,7 +543,7 @@ fn dispatch_rotate_row(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
 /// Out-of-bounds source pixels are filled with 255 (white).  The last valid
 /// sample origin is (w-1, h-1); on that boundary `bilinear_sample` clamps
 /// the 2×2 footprint to the edge.
-pub fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
+pub(crate) fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
     rotate_cpu_with(src, angle_deg, dispatch_rotate_row)
 }
 

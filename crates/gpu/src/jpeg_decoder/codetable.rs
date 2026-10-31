@@ -13,9 +13,9 @@ use crate::jpeg::{JpegHuffmanTable, validate_canonical_table, visit_canonical_co
 use crate::jpeg_decoder::JpegGpuError;
 
 /// Prefix bits indexed by the quick table. Must match the kernel.
-pub const QUICK_CHECK_BITS: u32 = 10;
+pub(crate) const QUICK_CHECK_BITS: u32 = 10;
 /// Size of the quick table (`1 << QUICK_CHECK_BITS`).
-pub const QUICK_TABLE_SIZE: usize = 1 << QUICK_CHECK_BITS;
+pub(crate) const QUICK_TABLE_SIZE: usize = 1 << QUICK_CHECK_BITS;
 
 /// One packed quick-table entry.
 ///
@@ -24,17 +24,17 @@ pub const QUICK_TABLE_SIZE: usize = 1 << QUICK_CHECK_BITS;
 /// - bits 4..9: code bit size (0..=16; 0 ⇒ miss, kernel takes slow path).
 /// - bits 9..16: run-length count + 1 (1..=16 for AC; 1 for DC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QuickEntry(pub u16);
+pub(crate) struct QuickEntry(pub u16);
 
 impl QuickEntry {
     /// Sentinel for "no codeword starts with this prefix; fall back to
     /// the full table".
-    pub const MISS: Self = Self(0);
+    pub(crate) const MISS: Self = Self(0);
 
     /// Pack `(value_bits, code_bits, runlength_plus1)` into the wire
     /// format. Debug-asserts on out-of-range inputs.
     #[must_use]
-    pub fn pack(value_bits: u8, code_bits: u8, runlength_plus1: u8) -> Self {
+    pub(crate) fn pack(value_bits: u8, code_bits: u8, runlength_plus1: u8) -> Self {
         debug_assert!(value_bits <= 15, "value_bits {value_bits} out of range");
         debug_assert!(code_bits <= 16, "code_bits {code_bits} out of range");
         debug_assert!(
@@ -50,25 +50,25 @@ impl QuickEntry {
     /// `true` if this prefix does not match any codeword ≤
     /// `QUICK_CHECK_BITS` bits long.
     #[must_use]
-    pub const fn is_miss(self) -> bool {
+    pub(crate) const fn is_miss(self) -> bool {
         self.code_bits() == 0
     }
 
     /// Decoded `code_bits` field (0 if miss).
     #[must_use]
-    pub const fn code_bits(self) -> u8 {
+    pub(crate) const fn code_bits(self) -> u8 {
         ((self.0 >> 4) & 0x1F) as u8
     }
 
     /// Decoded `value_bits` field (size category, 0..=15).
     #[must_use]
-    pub const fn value_bits(self) -> u8 {
+    pub(crate) const fn value_bits(self) -> u8 {
         (self.0 & 0xF) as u8
     }
 
     /// Decoded `runlength_plus1` field.
     #[must_use]
-    pub const fn runlength_plus1(self) -> u8 {
+    pub(crate) const fn runlength_plus1(self) -> u8 {
         ((self.0 >> 9) & 0x7F) as u8
     }
 }
@@ -78,7 +78,7 @@ impl QuickEntry {
 /// Used by the kernel's slow-path linear search for codewords longer
 /// than [`QUICK_CHECK_BITS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FullEntry {
+pub(crate) struct FullEntry {
     /// Codeword length (1..=16).
     pub code_bits: u8,
     /// Canonical codeword value (right-aligned).
@@ -90,7 +90,7 @@ pub struct FullEntry {
 
 /// GPU-side 2-tier Huffman lookup table.
 #[derive(Debug, Clone)]
-pub struct GpuCodetable {
+pub(crate) struct GpuCodetable {
     /// `QUICK_TABLE_SIZE` direct-indexed entries (top
     /// [`QUICK_CHECK_BITS`] bits of the 16-bit peek).
     pub quick: Vec<QuickEntry>,
@@ -112,7 +112,7 @@ pub struct GpuCodetable {
 /// Returns [`JpegGpuError::InvalidHuffmanTables`] if the DHT does not
 /// form a valid canonical prefix code (empty, code-space overflow at
 /// some length, or `values.len()` mismatches `sum(num_codes)`).
-pub fn build_gpu_codetable(table: &JpegHuffmanTable) -> Result<GpuCodetable, JpegGpuError> {
+pub(crate) fn build_gpu_codetable(table: &JpegHuffmanTable) -> Result<GpuCodetable, JpegGpuError> {
     validate_canonical_table(table)
         .map_err(|e| JpegGpuError::InvalidHuffmanTables(e.to_string()))?;
 

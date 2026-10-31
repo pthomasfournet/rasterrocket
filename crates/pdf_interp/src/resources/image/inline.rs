@@ -41,7 +41,9 @@ use super::ImageColorSpace;
 /// [`ImageResolution::Absent`] for an image whose colour space paints
 /// nothing.
 #[must_use]
-pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
+pub(crate) fn decode_inline_image<
+    #[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend,
+>(
     ctx: &mut ImageDecodeCtx<'_>,
     params: &[u8],
     data: &[u8],

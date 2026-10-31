@@ -65,7 +65,7 @@ pub enum PixelMode {
 /// Bytes per pixel for each [`PixelMode`] variant, indexed by discriminant.
 ///
 /// `NCOMPS[0]` (`Mono1`) is **0** because `Mono1` is a packed-bits format;
-/// see the [module-level documentation](self) for details.
+/// see [`PixelMode::Mono1`].
 ///
 /// This table is kept as a `pub const` for C-interop compatibility and because
 /// the `raster` crate re-exports it. New variants **must** be reflected here
@@ -153,7 +153,7 @@ impl PixelMode {
     /// parsing mode values from untrusted sources (e.g. C FFI, file headers).
     ///
     /// ```
-    /// # use rasterrocket_color::mode::PixelMode;
+    /// # use rasterrocket_color::PixelMode;
     /// assert_eq!(PixelMode::from_u8(2), Some(PixelMode::Rgb8));
     /// assert_eq!(PixelMode::from_u8(99), None);
     /// ```
@@ -180,7 +180,7 @@ impl PixelMode {
     /// silent overflow in release builds.
     ///
     /// ```
-    /// # use rasterrocket_color::mode::PixelMode;
+    /// # use rasterrocket_color::PixelMode;
     /// assert_eq!(PixelMode::Rgb8.pixel_count_to_bytes(10), Some(30));
     /// assert_eq!(PixelMode::Mono1.pixel_count_to_bytes(10), None);
     /// assert_eq!(PixelMode::Rgb8.pixel_count_to_bytes(usize::MAX), None);

@@ -594,7 +594,7 @@ mod tests {
         const H: u32 = 512;
         let black = vec![0u8; (W * H) as usize];
 
-        rotate_gray8(&black, W as usize, W, H, 0.0).expect("priming rotate");
+        let _primed = rotate_gray8(&black, W as usize, W, H, 0.0).expect("priming rotate");
         let out = rotate_gray8(&black, W as usize, W, H, 3.0).expect("rotate");
 
         let (w, h) = (W as usize, H as usize);

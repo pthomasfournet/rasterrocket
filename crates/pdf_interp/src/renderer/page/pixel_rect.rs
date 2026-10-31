@@ -15,12 +15,12 @@ pub(super) struct PixelRect {
 
 impl PixelRect {
     /// The rectangle `x0..x1 × y0..y1`, or `None` when it is empty.
-    pub fn new(x0: u32, y0: u32, x1: u32, y1: u32) -> Option<Self> {
+    pub(crate) fn new(x0: u32, y0: u32, x1: u32, y1: u32) -> Option<Self> {
         (x0 < x1 && y0 < y1).then_some(Self { x0, y0, x1, y1 })
     }
 
     /// The pixels `clip` admits within a `width × height` bitmap.
-    pub fn of_clip(clip: &Clip, width: u32, height: u32) -> Option<Self> {
+    pub(crate) fn of_clip(clip: &Clip, width: u32, height: u32) -> Option<Self> {
         let bound = |v: i64, len: u32| u32::try_from(v.clamp(0, i64::from(len))).ok();
         Self::new(
             bound(i64::from(clip.x_min_i), width)?,
@@ -37,7 +37,7 @@ impl PixelRect {
         clippy::cast_sign_loss,
         reason = "the bounds are clamped to [0, dimension] before the casts"
     )]
-    pub fn around(
+    pub(crate) fn around(
         points: impl IntoIterator<Item = (f64, f64)>,
         margin: f64,
         width: u32,
@@ -65,7 +65,7 @@ impl PixelRect {
     }
 
     /// The pixels in both rectangles.
-    pub fn intersect(self, other: Self) -> Option<Self> {
+    pub(crate) fn intersect(self, other: Self) -> Option<Self> {
         Self::new(
             self.x0.max(other.x0),
             self.y0.max(other.y0),
@@ -74,20 +74,20 @@ impl PixelRect {
         )
     }
 
-    pub const fn width(self) -> u32 {
+    pub(crate) const fn width(self) -> u32 {
         self.x1 - self.x0
     }
 
-    pub const fn height(self) -> u32 {
+    pub(crate) const fn height(self) -> u32 {
         self.y1 - self.y0
     }
 
-    pub const fn area(self) -> u64 {
+    pub(crate) const fn area(self) -> u64 {
         self.width() as u64 * self.height() as u64
     }
 
     /// The rectangle as a closed device-space path.
-    pub fn to_path(self) -> raster::path::Path {
+    pub(crate) fn to_path(self) -> raster::path::Path {
         let (x0, y0) = (f64::from(self.x0), f64::from(self.y0));
         let (x1, y1) = (f64::from(self.x1), f64::from(self.y1));
         super::shading_paint::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)])

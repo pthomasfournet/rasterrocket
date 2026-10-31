@@ -32,7 +32,7 @@ use crate::{BackendPolicy, RasterError, RasterSession};
         reason = "body collapses to a single match when no GPU-decoder feature is on"
     )
 )]
-pub fn lend_decoders(
+pub(crate) fn lend_decoders(
     session: &RasterSession,
     renderer: &mut pdf_interp::renderer::PageRenderer,
     effective_policy: BackendPolicy,
@@ -223,7 +223,7 @@ fn reclaim_decoders(renderer: &mut pdf_interp::renderer::PageRenderer) {
 /// atomic per feature, so earlier features are fully lent and reclaim restores
 /// them, while a feature whose `ensure_*` failed left its TLS cell non-`Ready`
 /// and reclaim's `if let Ready` guard skips it (no clobber).
-pub struct DecoderReclaim<'r, 'doc>(pub &'r mut pdf_interp::renderer::PageRenderer<'doc>);
+pub(crate) struct DecoderReclaim<'r, 'doc>(pub &'r mut pdf_interp::renderer::PageRenderer<'doc>);
 
 impl Drop for DecoderReclaim<'_, '_> {
     fn drop(&mut self) {

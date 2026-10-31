@@ -21,12 +21,12 @@ use std::sync::Arc;
 use cudarc::driver::{CudaContext, CudaEvent, CudaStream, CudaView, DriverError, PinnedHostSlice};
 
 /// Upper bound on the bytes copied per band (rounded down to whole rows).
-pub const BAND_BYTES: usize = 4 << 20;
+pub(crate) const BAND_BYTES: usize = 4 << 20;
 
 /// Largest range copied directly into pageable memory.  Below this size
 /// the driver's bounce copy costs less than allocating page-locked memory
 /// on a thread that has none.
-pub const DIRECT_MAX_BYTES: usize = 256 << 10;
+pub(crate) const DIRECT_MAX_BYTES: usize = 256 << 10;
 
 /// Two page-locked band buffers and the events marking their copies done.
 struct Staging {
@@ -89,7 +89,7 @@ fn return_staging(staging: Staging) {
 ///
 /// # Panics
 /// Panics if `row_bytes` is zero or does not divide `src.len()`.
-pub fn download_banded<F>(
+pub(crate) fn download_banded<F>(
     stream: &Arc<CudaStream>,
     src: &CudaView<'_, u8>,
     row_bytes: usize,

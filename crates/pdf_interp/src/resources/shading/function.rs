@@ -42,7 +42,7 @@ const MAX_FN_DEPTH: u8 = 10;
 /// The output count `n` is supplied at evaluation time by the consumer (the
 /// colour space a shading or tint transform feeds), not read from `Range`.
 #[derive(Debug)]
-pub struct Function {
+pub(crate) struct Function {
     body: Body,
     /// `Range` as flat `[lo0 hi0 lo1 hi1 …]` numbers; empty when absent.
     range: Vec<f64>,
@@ -92,7 +92,7 @@ impl Function {
     /// once per document and shared; the elements of a direct array of
     /// functions are loaded the same way.
     #[must_use]
-    pub fn load(doc: &Document, obj: &Object) -> Arc<Self> {
+    pub(crate) fn load(doc: &Document, obj: &Object) -> Arc<Self> {
         match obj {
             Object::Reference(id) => doc
                 .derived(*id, || Some(Compiler::new(doc).compile(obj, 0)))
@@ -108,7 +108,7 @@ impl Function {
     /// Evaluate at the single input `t`, returning `n` outputs clipped to
     /// `Range`.
     #[must_use]
-    pub fn eval(&self, t: f64, n: usize) -> Option<Vec<f64>> {
+    pub(crate) fn eval(&self, t: f64, n: usize) -> Option<Vec<f64>> {
         let out = match &self.body {
             Body::Array(fns) => {
                 if fns.len() != n {
@@ -160,7 +160,7 @@ impl Function {
     /// definition (§7.10.3, §7.10.4) and yield `None`.  An array of
     /// functions evaluates element `i` for output `i`.
     #[must_use]
-    pub fn eval_n(&self, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
+    pub(crate) fn eval_n(&self, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
         if let [t] = inputs {
             return self.eval(*t, n);
         }

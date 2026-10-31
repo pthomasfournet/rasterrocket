@@ -276,7 +276,7 @@ pub enum TextArrayElement {
     clippy::too_many_lines,
     reason = "operator dispatch table — splitting adds no clarity"
 )]
-pub fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
+pub(crate) fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
     let result = match op {
         // ── Graphics state ────────────────────────────────────────────────────
         b"q" => Operator::Save,

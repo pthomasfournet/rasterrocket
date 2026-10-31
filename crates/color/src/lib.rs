@@ -10,17 +10,17 @@
 //! This is the primary enforcement point of the workspace's shared-helper policy.
 //!
 //! ## Module layout
-//! - [`mode`] — [`PixelMode`] enum + bytes-per-pixel table
-//! - [`pixel`] — [`Pixel`] trait and concrete types: [`Rgb8`], [`Gray8`], [`Cmyk8`], [`DeviceN8`]
+//! - `mode` — [`PixelMode`] enum + bytes-per-pixel table
+//! - `pixel` — [`Pixel`] trait and concrete types: [`Rgb8`], [`Gray8`], [`Cmyk8`], [`DeviceN8`]
 //! - [`cmyk`] — `DeviceCMYK` → sRGB conversion (scalar reference + SIMD rows)
 //! - [`convert`] — all shared math (div255, lerp, Porter-Duff, color conversion, floor/ceil/round)
-//! - [`transfer`] — [`TransferLut`] newtype `([u8; 256])`
+//! - `transfer` — [`TransferLut`] newtype `([u8; 256])`
 
 pub mod cmyk;
 pub mod convert;
-pub mod mode;
-pub mod pixel;
-pub mod transfer;
+pub(crate) mod mode;
+pub(crate) mod pixel;
+pub(crate) mod transfer;
 
 pub use mode::{NCOMPS, PixelMode};
 pub use pixel::{AnyColor, Cmyk8, DeviceN8, Gray8, Pixel, Rgb8};

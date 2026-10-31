@@ -87,7 +87,7 @@ impl Iterator for ScanIterator<'_> {
 
     /// Advance to the next filled span.
     ///
-    /// See the [module-level algorithm description](self) for a precise
+    /// See the `scanner::iter` module documentation for a precise
     /// account of the two-phase skip-then-collect approach and the
     /// winding-rule semantics governing each phase.
     fn next(&mut self) -> Option<(i32, i32)> {

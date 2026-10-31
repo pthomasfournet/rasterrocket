@@ -9,20 +9,20 @@
 //! `pdf::Document` is immutable after load; resource dicts are accessed
 //! via `get_page_fonts()` and friends, which traverse the page tree and
 //! dereference indirect objects.  All caching lives in the caller
-//! ([`super::renderer::font_cache`]) rather than here, so this module
+//! (`super::renderer::font_cache`) rather than here, so this module
 //! stays stateless and easy to test.
 
-pub mod cmap;
-pub mod cmap_predefined;
-pub mod colorspace;
+pub(crate) mod cmap;
+pub(crate) mod cmap_predefined;
+pub(crate) mod colorspace;
 pub(crate) mod dict_ext;
-pub mod font;
-pub mod font_substitute;
+pub(crate) mod font;
+pub(crate) mod font_substitute;
 pub(crate) mod icc_shaper;
-pub mod image;
-pub mod shading;
-pub mod tiling;
-pub mod transfer;
+pub(crate) mod image;
+pub(crate) mod shading;
+pub(crate) mod tiling;
+pub(crate) mod transfer;
 
 use std::sync::{Arc, OnceLock};
 
@@ -572,7 +572,7 @@ impl<'doc> PageResources<'doc> {
     /// an image, and [`image::ImageResolution::DecodeFailed`] if decoding fails.
     ///
     /// `ctx` carries the GPU decoders, ICC handles and image cache the decode
-    /// may use; [`image::ImageDecodeCtx::cpu`] decodes on the CPU only.
+    /// may use; `image::ImageDecodeCtx::cpu` decodes on the CPU only.
     #[must_use]
     pub fn image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
         &self,

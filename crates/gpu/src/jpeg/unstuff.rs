@@ -31,7 +31,7 @@
 
 /// One restart marker stripped from the entropy stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RstPosition {
+pub(crate) struct RstPosition {
     /// Byte offset in the unstuffed output where the next entropy segment begins
     /// (i.e. immediately after the stripped `0xFF 0xDn` pair).
     pub byte_offset_in_dst: usize,
@@ -42,7 +42,7 @@ pub struct RstPosition {
 
 /// Errors returned by [`unstuff_into`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnstuffError {
+pub(crate) enum UnstuffError {
     /// Encountered a `0xFF` followed by something other than `0x00` or a
     /// fill-byte sequence — i.e. an unexpected marker mid-scan. Either the
     /// input was not the entropy-coded segment, or the JPEG is malformed.
@@ -82,7 +82,7 @@ impl std::error::Error for UnstuffError {}
 /// Returns [`UnstuffError`] on a `0xFF` followed by an unexpected byte or
 /// truncated trailing `0xFF`.  The output is left in an indeterminate state
 /// when an error is returned (caller should discard both buffers).
-pub fn unstuff_into(
+pub(crate) fn unstuff_into(
     src: &[u8],
     dst: &mut Vec<u8>,
     rst_positions: &mut Vec<RstPosition>,

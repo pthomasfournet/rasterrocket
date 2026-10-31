@@ -9,7 +9,12 @@ use crate::args::{Args, OutputFormat};
 /// Kept as a thin wrapper around [`output_path_with_prefix`] so existing tests
 /// (and any future callers that don't need to override the prefix) stay simple.
 #[cfg(test)]
-pub fn output_path(args: &Args, page_num: i32, total_pages: i32, format: OutputFormat) -> String {
+pub(crate) fn output_path(
+    args: &Args,
+    page_num: i32,
+    total_pages: i32,
+    format: OutputFormat,
+) -> String {
     output_path_with_prefix(
         &args.output_prefix,
         args,

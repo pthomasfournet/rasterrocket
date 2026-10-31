@@ -4,16 +4,13 @@
 //! backend's `record_*` methods call into these modules; tests call the
 //! same `pub fn` entry points directly.
 
-pub mod aa;
-pub mod composite;
+pub(crate) mod aa;
+pub(crate) mod composite;
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub mod huffman;
-pub mod icc;
+pub(crate) mod huffman;
+pub(crate) mod icc;
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub mod idct;
+pub(crate) mod idct;
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub mod scan;
-pub mod soft_mask;
-
-#[cfg(feature = "cache")]
-pub use crate::blit;
+pub(crate) mod scan;
+pub(crate) mod soft_mask;

@@ -25,7 +25,7 @@ use crate::jpeg::{JpegHuffmanTable, visit_canonical_codes};
 /// 256]` is cheaper than a `HashMap` and lets the encoder branch on
 /// a single `None`.
 #[derive(Debug, Clone)]
-pub struct SymbolEncoder {
+pub(crate) struct SymbolEncoder {
     table: [Option<(u16, u8)>; 256],
 }
 
@@ -42,7 +42,7 @@ impl SymbolEncoder {
     /// validity by construction; an overflow here is a test-fixture
     /// bug, not a runtime condition.
     #[must_use]
-    pub fn from_table(table: &JpegHuffmanTable) -> Self {
+    pub(crate) fn from_table(table: &JpegHuffmanTable) -> Self {
         let mut out = Self { table: [None; 256] };
         visit_canonical_codes(table, |length, code, symbol| {
             #[expect(
@@ -59,7 +59,7 @@ impl SymbolEncoder {
     /// Look up the canonical `(code, code_bits)` for `symbol`, or
     /// `None` if `symbol` is not in the DHT.
     #[must_use]
-    pub fn lookup(&self, symbol: u8) -> Option<(u16, u8)> {
+    pub(crate) fn lookup(&self, symbol: u8) -> Option<(u16, u8)> {
         self.table[usize::from(symbol)]
     }
 }
@@ -67,7 +67,7 @@ impl SymbolEncoder {
 /// Encoded synthetic stream + the original symbols for round-trip
 /// assertions.
 #[derive(Debug, Clone)]
-pub struct SyntheticEncoded {
+pub(crate) struct SyntheticEncoded {
     /// Packed big-endian 32-bit words; first bit of the stream is bit
     /// 31 of `words_be[0]`.
     pub words_be: Vec<u32>,
@@ -82,7 +82,7 @@ pub struct SyntheticEncoded {
 /// Panics if any symbol is not in the DHT — tests are expected to
 /// build the symbol stream from the table's value list.
 #[must_use]
-pub fn encode_symbols(table: &JpegHuffmanTable, symbols: &[u8]) -> SyntheticEncoded {
+pub(crate) fn encode_symbols(table: &JpegHuffmanTable, symbols: &[u8]) -> SyntheticEncoded {
     let enc = SymbolEncoder::from_table(table);
     let mut acc: u64 = 0;
     let mut acc_bits: u32 = 0;

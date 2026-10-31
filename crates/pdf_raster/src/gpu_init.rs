@@ -21,7 +21,7 @@ use std::cell::RefCell;
 
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k"))]
 #[derive(Default)]
-pub enum DecoderInit<T> {
+pub(crate) enum DecoderInit<T> {
     #[default]
     Uninitialised,
     Ready(Option<T>),
@@ -37,7 +37,7 @@ pub enum DecoderInit<T> {
     feature = "vaapi",
     feature = "gpu-jpeg-huffman",
 ))]
-pub static DECODER_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static DECODER_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ── Thread-local decoder slots ────────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ thread_local! {
 /// human-readable message if it fails and `policy` is `ForceCuda`.  On `Auto`
 /// a failure is logged and silently skipped.
 #[cfg(feature = "nvjpeg")]
-pub fn ensure_nvjpeg(policy: BackendPolicy) -> Result<(), String> {
+pub(crate) fn ensure_nvjpeg(policy: BackendPolicy) -> Result<(), String> {
     NVJPEG_DEC.with(|cell| {
         // TLS is per-thread — only this thread writes this slot, so a single
         // check is sufficient before acquiring the construction lock.
@@ -103,7 +103,7 @@ pub fn ensure_nvjpeg(policy: BackendPolicy) -> Result<(), String> {
 
 /// Try to initialise this thread's nvJPEG2000 decoder.
 #[cfg(feature = "nvjpeg2k")]
-pub fn ensure_nvjpeg2k(policy: BackendPolicy) -> Result<(), String> {
+pub(crate) fn ensure_nvjpeg2k(policy: BackendPolicy) -> Result<(), String> {
     NVJPEG2K_DEC.with(|cell| {
         match *cell.borrow() {
             DecoderInit::Uninitialised => {}
@@ -147,14 +147,14 @@ pub fn ensure_nvjpeg2k(policy: BackendPolicy) -> Result<(), String> {
 /// Drop this thread's nvJPEG decoder immediately so the TLS destructor at
 /// process exit is a no-op — avoids the CUDA driver teardown race.
 #[cfg(feature = "nvjpeg")]
-pub fn release_nvjpeg_this_thread() {
+pub(crate) fn release_nvjpeg_this_thread() {
     NVJPEG_DEC.with(|cell| {
         *cell.borrow_mut() = DecoderInit::Uninitialised;
     });
 }
 
 #[cfg(feature = "nvjpeg2k")]
-pub fn release_nvjpeg2k_this_thread() {
+pub(crate) fn release_nvjpeg2k_this_thread() {
     NVJPEG2K_DEC.with(|cell| {
         *cell.borrow_mut() = DecoderInit::Uninitialised;
     });
@@ -167,7 +167,7 @@ pub fn release_nvjpeg2k_this_thread() {
 /// Mirrors [`DecoderInit<T>`] so a failed construction is remembered and not
 /// retried on every subsequent page.
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub enum JpegGpuInit<T> {
+pub(crate) enum JpegGpuInit<T> {
     Uninitialised,
     Ready(Option<T>),
     Failed,
@@ -193,7 +193,7 @@ thread_local! {
 /// `Failed` and the CPU path is used instead. A previous failure is remembered
 /// and not retried on subsequent pages.
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub fn ensure_jpeg_gpu_huffman(policy: BackendPolicy) -> Result<(), String> {
+pub(crate) fn ensure_jpeg_gpu_huffman(policy: BackendPolicy) -> Result<(), String> {
     JPEG_CUDA_DEC.with(|cell| {
         match *cell.borrow() {
             JpegGpuInit::Uninitialised => {}
@@ -240,7 +240,10 @@ pub fn ensure_jpeg_gpu_huffman(policy: BackendPolicy) -> Result<(), String> {
 /// session's own backend has already resolved it, so a selection failure
 /// here means the device list changed in between.
 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-pub fn ensure_jpeg_vk_huffman(policy: BackendPolicy, selector: Option<&str>) -> Result<(), String> {
+pub(crate) fn ensure_jpeg_vk_huffman(
+    policy: BackendPolicy,
+    selector: Option<&str>,
+) -> Result<(), String> {
     JPEG_VK_DEC.with(|cell| {
         match *cell.borrow() {
             JpegGpuInit::Uninitialised => {}
@@ -280,7 +283,7 @@ pub fn ensure_jpeg_vk_huffman(policy: BackendPolicy, selector: Option<&str>) -> 
 /// Drop this thread's Vulkan JPEG decoder immediately so the TLS destructor at
 /// process exit is a no-op — avoids Vulkan device teardown races.
 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-pub fn release_jpeg_vk_this_thread() {
+pub(crate) fn release_jpeg_vk_this_thread() {
     JPEG_VK_DEC.with(|cell| {
         *cell.borrow_mut() = JpegGpuInit::Uninitialised;
     });

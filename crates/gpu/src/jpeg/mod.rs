@@ -9,12 +9,17 @@
 //! | [`dc_chain`] | Resolve per-block absolute DC values across the entropy stream. |
 //! | [`prepass`] | Top-level orchestrator: bytes → [`CpuPrepassOutput`]. |
 
+#[cfg(feature = "gpu-jpeg-huffman")]
 pub(crate) mod bitreader;
-pub mod canonical;
-pub mod dc_chain;
-pub mod headers;
-pub mod prepass;
-pub mod unstuff;
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) mod canonical;
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) mod dc_chain;
+pub(crate) mod headers;
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) mod prepass;
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) mod unstuff;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
@@ -28,6 +33,7 @@ pub(crate) mod test_fixtures;
 ///
 /// Panics if `h × v` overflows `u8` — the header parser caps both
 /// factors at 4, so a trip here means a walker bypassed it.
+#[cfg(feature = "gpu-jpeg-huffman")]
 #[must_use]
 pub(crate) const fn component_blocks_per_mcu(
     scan_components: usize,
@@ -44,12 +50,15 @@ pub(crate) const fn component_blocks_per_mcu(
     }
 }
 
-pub use canonical::{
-    CanonicalCodebook, CanonicalCodebookError, validate_canonical_table, visit_canonical_codes,
-};
-pub use dc_chain::{DcChainError, DcValues};
-pub use headers::{
-    DhtClass, JpegHeaderError, JpegHeaders, JpegHuffmanTable, JpegQuantTable, JpegScanComponent,
-};
-pub use prepass::{CpuPrepassError, CpuPrepassOutput, run_cpu_prepass};
-pub use unstuff::{RstPosition, unstuff_into};
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) use canonical::CanonicalCodebook;
+#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
+pub(crate) use canonical::{validate_canonical_table, visit_canonical_codes};
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) use dc_chain::DcValues;
+#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
+pub(crate) use headers::JpegHuffmanTable;
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) use headers::{DhtClass, JpegHeaderError, JpegQuantTable};
+#[cfg(feature = "gpu-jpeg-huffman")]
+pub(crate) use prepass::{CpuPrepassError, CpuPrepassOutput, run_cpu_prepass};

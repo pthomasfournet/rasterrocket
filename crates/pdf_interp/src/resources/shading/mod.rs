@@ -62,7 +62,7 @@ use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, ParamColors, TriangleSink};
 use patch::PatchKind;
 use stream::{VertexFormat, read_decode_array};
-pub use triangles::Mesh;
+pub(crate) use triangles::Mesh;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -102,7 +102,7 @@ pub struct ResolvedShading {
 /// required key is missing.  A warning is logged for unsupported types so the
 /// caller can fall back gracefully.
 #[must_use]
-pub fn resolve_shading(
+pub(crate) fn resolve_shading(
     resources: &PageResources<'_>,
     shadings: &Dictionary,
     name: &[u8],
@@ -118,7 +118,7 @@ pub fn resolve_shading(
 ///
 /// Returns `None` if the type is unsupported or any required key is missing.
 #[must_use]
-pub fn resolve_shading_object(
+pub(crate) fn resolve_shading_object(
     resources: &PageResources<'_>,
     sh_obj: &Object,
     ctm: &[f64; 6],

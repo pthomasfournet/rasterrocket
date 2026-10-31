@@ -10,11 +10,11 @@ use moxcms::{CmsError, Transform8BitExecutor};
 
 /// Lattice nodes per axis: 17, the ICC minimum, gives a 17^4 × 3 =
 /// 250 563-byte table; 33 nodes (≈ 3.4 MB) exceed the L2 cache of most GPUs.
-pub const DEFAULT_GRID_N: u32 = 17;
+pub(crate) const DEFAULT_GRID_N: u32 = 17;
 
 /// Error returned by [`bake_cmyk_clut_with`].
 #[derive(Debug)]
-pub enum BakeError {
+pub(crate) enum BakeError {
     /// `grid_n` is outside `[2, 255]`, or its table does not fit `usize`.
     InvalidGridSize(u32),
     /// The ICC profile is malformed, uses the wrong colour space, or the
@@ -86,7 +86,7 @@ fn grid_to_u8(i: usize, step: f32) -> u8 {
     clippy::many_single_char_names,
     reason = "g/c/m/y/k are conventional CMYK grid-iteration names — clarity trumps length here"
 )]
-pub fn bake_cmyk_clut_with(
+pub(crate) fn bake_cmyk_clut_with(
     xform: &Transform8BitExecutor,
     grid_n: u32,
 ) -> Result<Vec<u8>, BakeError> {

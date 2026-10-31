@@ -89,18 +89,9 @@ If the `Receiver` is dropped before the producer finishes, the producer exits cl
 
 ---
 
-### `rasterrocket::session` module
+### Session API
 
-Lower-level API for explicit control over PDF opening and per-page rendering. All items are also re-exported at the crate root for backward compatibility.
-
-```rust
-pub mod session {
-    pub use super::{
-        open_session, open_session_from_bytes, prescan_session, render_page_gray,
-        render_page_rgb, render_page_rgb_with, rgb_to_gray,
-    };
-}
-```
+Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with` and `rgb_to_gray`.
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>

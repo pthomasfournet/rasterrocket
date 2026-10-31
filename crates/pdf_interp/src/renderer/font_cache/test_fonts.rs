@@ -11,12 +11,12 @@ use crate::resources::font::{BaseEncoding, CidEncoding, CidMetrics, FontDescript
 use crate::resources::font_substitute::SubstituteStyle;
 
 /// The glyph-name table of a font without `Differences`.
-pub fn empty_diffs() -> Box<[Option<Box<str>>; 256]> {
+pub(crate) fn empty_diffs() -> Box<[Option<Box<str>>; 256]> {
     Box::new(std::array::from_fn(|_| None))
 }
 
 /// A `Differences` table assigning each `(code, name)` of `names`.
-pub fn diffs(names: &[(usize, &str)]) -> Box<[Option<Box<str>>; 256]> {
+pub(crate) fn diffs(names: &[(usize, &str)]) -> Box<[Option<Box<str>>; 256]> {
     let mut table = empty_diffs();
     for &(code, name) in names {
         table[code] = Some(name.into());
@@ -25,14 +25,14 @@ pub fn diffs(names: &[(usize, &str)]) -> Box<[Option<Box<str>>; 256]> {
 }
 
 /// `ahem.ttf`: a TrueType program with a `cmap` and `post` glyph names.
-pub fn ahem() -> Vec<u8> {
+pub(crate) fn ahem() -> Vec<u8> {
     include_bytes!("../../../../font_test_data/test_data/ttf/ahem.ttf").to_vec()
 }
 
 /// [`ahem`] with its `cmap` table hidden: the table-directory tag is
 /// renamed, so the program keeps its `post` names and no code-keyed
 /// subtable.
-pub fn ahem_without_cmap() -> Vec<u8> {
+pub(crate) fn ahem_without_cmap() -> Vec<u8> {
     let mut data = ahem();
     let tables = usize::from(u16::from_be_bytes([data[4], data[5]]));
     let at = (0..tables)
@@ -45,7 +45,7 @@ pub fn ahem_without_cmap() -> Vec<u8> {
 
 /// A simple font of `kind` embedding `program` (none: drawn by a
 /// substitute), under `differences` and `base_encoding`.
-pub fn simple(
+pub(crate) fn simple(
     kind: PdfFontKind,
     program: Option<Vec<u8>>,
     differences: Box<[Option<Box<str>>; 256]>,
@@ -68,7 +68,7 @@ pub fn simple(
 
 /// An `Identity-H` composite font without a program, of the substitute
 /// class `substitute`, with the `ToUnicode` map `to_unicode`.
-pub fn composite_substitute(
+pub(crate) fn composite_substitute(
     to_unicode: Option<CMap>,
     substitute: SubstituteStyle,
 ) -> FontDescriptor {
@@ -96,7 +96,7 @@ pub fn composite_substitute(
 }
 
 /// `desc` selected as the indirect font dictionary `1 0 R`.
-pub fn active(desc: FontDescriptor) -> ActiveFont {
+pub(crate) fn active(desc: FontDescriptor) -> ActiveFont {
     ActiveFont {
         key: ResourceKey::Object((1, 0)),
         descriptor: Arc::new(desc),
@@ -105,7 +105,7 @@ pub fn active(desc: FontDescriptor) -> ActiveFont {
 
 /// The face `cache` loads for `desc` at 20 px, prepared for showing
 /// `bytes`.
-pub fn face_showing<'a>(
+pub(crate) fn face_showing<'a>(
     cache: &'a mut FontCache,
     desc: FontDescriptor,
     bytes: &[u8],
@@ -116,11 +116,11 @@ pub fn face_showing<'a>(
 }
 
 /// [`face_showing`] for no string.
-pub fn face(cache: &mut FontCache, desc: FontDescriptor) -> &PageFace {
+pub(crate) fn face(cache: &mut FontCache, desc: FontDescriptor) -> &PageFace {
     face_showing(cache, desc, &[])
 }
 
 /// A cache drawing substitutes from the standard font directories.
-pub fn cache() -> FontCache {
+pub(crate) fn cache() -> FontCache {
     FontCache::new(Arc::default(), true)
 }

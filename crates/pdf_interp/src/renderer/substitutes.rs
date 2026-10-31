@@ -20,7 +20,7 @@ use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 
 /// Number of rows of [`INSTALLED`]: the three Latin family classes in
 /// their four variants.
-pub const INSTALLED_ROWS: usize = 12;
+pub(crate) const INSTALLED_ROWS: usize = 12;
 
 /// Row of [`EMBEDDED`] of the Symbol family.
 const SYMBOL_ROW: usize = INSTALLED_ROWS;
@@ -139,7 +139,7 @@ fn embedded_program(bytes: &'static [u8]) -> Option<Arc<FontProgram>> {
 /// of its script ([`FontLibrary::system_program`]) when it has one, else
 /// the installed metric-compatible face of that exact family and variant,
 /// else the compiled-in base-14 face.
-pub fn substitute_program(
+pub(crate) fn substitute_program(
     style: SubstituteStyle,
     library: &FontLibrary,
 ) -> Option<Arc<FontProgram>> {

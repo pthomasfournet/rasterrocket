@@ -15,8 +15,8 @@
 //! | [`key`] | [`key::FaceId`] and [`key::GlyphKey`] — cache key types |
 //! | [`bitmap`] | [`bitmap::GlyphBitmap`] — rasterised glyph (owned data) |
 //! | [`program`] | [`program::FontProgram`] — format detection, charmaps, names, outlines |
-//! | [`outline`] | [`outline::PathPen`] — outline commands → `raster::Path` |
-//! | [`coverage`] | [`coverage::rasterize`] — `raster::Path` → coverage bitmap |
+//! | `outline` | `outline::PathPen` — outline commands → `raster::Path` |
+//! | `coverage` | `coverage::rasterize` — `raster::Path` → coverage bitmap |
 //! | [`cache`] | [`cache::GlyphCache`] — concurrent glyph cache |
 //! | [`face`] | [`face::FontFace`] — a program at one text matrix |
 //! | [`engine`] | [`engine::FontEngine`] — parses programs, creates faces |
@@ -46,11 +46,11 @@
 
 pub mod bitmap;
 pub mod cache;
-pub mod coverage;
+pub(crate) mod coverage;
 pub mod engine;
 pub mod face;
 pub mod key;
-pub mod outline;
+pub(crate) mod outline;
 pub mod program;
 pub mod sfnt_info;
 

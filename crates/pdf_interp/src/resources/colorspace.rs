@@ -53,9 +53,9 @@ mod cal;
 pub(crate) mod icc;
 mod lab;
 
-pub use cal::CalSpace;
+pub(crate) use cal::CalSpace;
 use icc::IccConversion;
-pub use lab::LabSpace;
+pub(crate) use lab::LabSpace;
 
 /// Maximum recursion depth for nested colour-space chains
 /// (Indexed/Pattern/Separation/DeviceN's `alternate` base). PDF spec
@@ -199,10 +199,10 @@ impl ColorSpace {
     /// - `DeviceGray/Rgb`: direct conversion via the `color::convert`
     ///   helpers; `DeviceCmyk` via the process-ink model of `color::cmyk`.
     /// - `Cal`: gamma and matrix to XYZ, Bradford adaptation from the
-    ///   space's white point to D65, sRGB encoding (see [`CalSpace`]).
+    ///   space's white point to D65, sRGB encoding (see `CalSpace`).
     /// - `Lab`: `a*` and `b*` clipped to the `Range`, CIE Lab → XYZ relative
     ///   to the `WhitePoint`, Bradford adaptation to D65, sRGB encoding (see
-    ///   [`LabSpace`]).
+    ///   `LabSpace`).
     /// - `IccBased`: converts through the `icc::IccConversion` compiled
     ///   from the profile stream `stream_id`: shaper tables for a gray or
     ///   RGB matrix/TRC profile, otherwise a `moxcms` 8-bit transform of a
@@ -416,7 +416,7 @@ fn icc_fallback_by_n(n: u8, comps: &[f64]) -> [u8; 3] {
 ///   (`[/ICCBased <ref>]`, `[/Indexed base hival lookup]`, etc.), or
 /// - a `Reference` to either of the above.
 #[must_use]
-pub fn resolve(doc: &Document, cs_obj: &Object) -> ColorSpace {
+pub(crate) fn resolve(doc: &Document, cs_obj: &Object) -> ColorSpace {
     resolve_depth(doc, cs_obj, 0)
 }
 
@@ -450,7 +450,7 @@ fn resolve_depth(doc: &Document, cs_obj: &Object, depth: u8) -> ColorSpace {
 /// an `Object::Name`. Internal callers in this module use it directly from
 /// the `resolve_*` dispatch.
 #[must_use]
-pub fn resolve_device_name(name: &[u8]) -> ColorSpace {
+pub(crate) fn resolve_device_name(name: &[u8]) -> ColorSpace {
     match name {
         b"DeviceGray" | b"G" | b"CalGray" => ColorSpace::DeviceGray,
         b"DeviceRGB" | b"RGB" | b"CalRGB" => ColorSpace::DeviceRgb,
@@ -476,7 +476,7 @@ pub fn resolve_device_name(name: &[u8]) -> ColorSpace {
 /// is an ICC-based space whose conversion equals the device conversion, so
 /// the device path stays in effect for sRGB-equivalent profiles.
 #[must_use]
-pub fn default_space(
+pub(crate) fn default_space(
     doc: &Document,
     cs_dict: &Dictionary,
     device: &ColorSpace,

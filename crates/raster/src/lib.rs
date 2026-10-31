@@ -18,18 +18,18 @@
 //! - [`bitmap`] — [`Bitmap<P>`] and [`AaBuf`]
 //! - [`path`] — [`Path`], [`PathBuilder`], Bezier flattening, stroke adjustment
 //! - [`xpath`] — [`XPath`] edge table (flattened, matrix-transformed segments)
-//! - [`scanner`] — [`XPathScanner`] and [`crate::ScanIterator`] (scanline span emission)
+//! - `scanner` — [`XPathScanner`] and [`crate::ScanIterator`] (scanline span emission)
 //! - [`clip`] — [`Clip`] (rect + arbitrary path clip stack)
 //! - [`fill`](mod@fill) — non-zero and even-odd path fill, aliased and 4× antialiased
 //! - [`stroke`](mod@stroke) — stroke-to-path conversion and stroking
 //! - [`glyph`] — glyph bitmap blitting and fill
 //! - [`shading`] — axial, radial, function and Gouraud shadings
-//! - [`tiling`] — [`TiledPattern`]
+//! - `tiling` — [`TiledPattern`]
 //! - [`transparency`] — transparency groups
-//! - [`screen`] — [`HalftoneScreen`] (Bayer / stochastic threshold matrix)
+//! - `screen` — [`HalftoneScreen`] (Bayer / stochastic threshold matrix)
 //! - [`pipe`] — compositing pipeline (simple, AA, general; blend modes;
 //!   [`Pattern`] trait; [`TransferSet`])
-//! - [`simd`] — runtime-dispatched SIMD kernels used by the pipe and fill
+//! - `simd` — runtime-dispatched SIMD kernels used by the pipe and fill
 
 pub mod bitmap;
 pub mod clip;
@@ -37,12 +37,12 @@ pub mod fill;
 pub mod glyph;
 pub mod path;
 pub mod pipe;
-pub mod scanner;
-pub mod screen;
+pub(crate) mod scanner;
+pub(crate) mod screen;
 pub mod shading;
-pub mod simd;
+pub(crate) mod simd;
 pub mod stroke;
-pub mod tiling;
+pub(crate) mod tiling;
 pub mod transparency;
 pub mod types;
 pub mod xpath;

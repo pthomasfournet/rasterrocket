@@ -28,10 +28,15 @@
 //! symbol byte; the upper bits are reserved zero for future per-symbol
 //! metadata (matching the synthetic-stream Phase 4 contract).
 
+#[cfg(test)]
 use crate::jpeg::CanonicalCodebook;
+#[cfg(test)]
 use crate::jpeg::bitreader::BitReader;
+#[cfg(test)]
 use crate::jpeg::headers::{JpegFrameComponent, mcu_count};
-use crate::jpeg_decoder::{JpegGpuError, JpegPreparedInput};
+use crate::jpeg_decoder::JpegGpuError;
+#[cfg(test)]
+use crate::jpeg_decoder::JpegPreparedInput;
 
 /// Errors emitted by [`decode_scan_symbols`].
 ///
@@ -172,11 +177,13 @@ impl From<JpegFramingError> for JpegGpuError {
 /// stream, missing codebook slot, AC overflow, malformed sampling
 /// factors).  All errors are non-fatal at the caller level — they
 /// indicate "fall back to a CPU decoder for this image."
-pub fn decode_scan_symbols(prep: &JpegPreparedInput) -> Result<Vec<u32>, JpegFramingError> {
+#[cfg(test)]
+pub(crate) fn decode_scan_symbols(prep: &JpegPreparedInput) -> Result<Vec<u32>, JpegFramingError> {
     let walker = ScanWalker::new(prep)?;
     walker.run()
 }
 
+#[cfg(test)]
 struct ScanWalker<'a> {
     bitstream_bytes: Vec<u8>,
     components: &'a [JpegFrameComponent],
@@ -189,6 +196,7 @@ struct ScanWalker<'a> {
     num_mcus: u32,
 }
 
+#[cfg(test)]
 impl<'a> ScanWalker<'a> {
     fn new(prep: &'a JpegPreparedInput) -> Result<Self, JpegFramingError> {
         if prep.restart_interval > 0 {
@@ -259,6 +267,7 @@ impl<'a> ScanWalker<'a> {
 /// raw bits that encode the DC magnitude.  The magnitude itself is
 /// dropped — the GPU kernel only emits symbol bytes; downstream
 /// coefficient assembly will re-read the raw bits if needed.
+#[cfg(test)]
 fn emit_dc_symbol(
     bits: &mut BitReader<'_>,
     cb: &CanonicalCodebook,
@@ -305,6 +314,7 @@ fn emit_dc_symbol(
 
 /// Walk one block's 63 AC slots, emitting each Huffman symbol byte
 /// (EOB / ZRL included) until EOB fires or the 63rd slot is reached.
+#[cfg(test)]
 fn emit_ac_symbols(
     bits: &mut BitReader<'_>,
     cb: &CanonicalCodebook,

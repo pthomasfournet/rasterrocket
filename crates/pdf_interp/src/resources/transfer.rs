@@ -27,7 +27,7 @@ const IDENTITY: [u8; 256] = {
 /// Tabulate the one-input, one-output function `f` over the 256 component
 /// values.  `None` when `f` does not compile or an evaluation fails.
 #[must_use]
-pub fn function_lut(doc: &Document, f: &Object) -> Option<[u8; 256]> {
+pub(crate) fn function_lut(doc: &Document, f: &Object) -> Option<[u8; 256]> {
     let function = Function::load(doc, f);
     let mut lut = [0u8; 256];
     for (i, v) in lut.iter_mut().enumerate() {
@@ -93,7 +93,7 @@ pub enum TransferSetting {
 /// present or the value is malformed, which leaves the transfer function
 /// unchanged.
 #[must_use]
-pub fn ext_gstate_transfer(doc: &Document, d: &Dictionary) -> Option<TransferSetting> {
+pub(crate) fn ext_gstate_transfer(doc: &Document, d: &Dictionary) -> Option<TransferSetting> {
     let obj = d.get(b"TR2").or_else(|| d.get(b"TR"))?;
     let setting = match obj {
         Object::Reference(id) => {

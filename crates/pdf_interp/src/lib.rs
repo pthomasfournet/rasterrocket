@@ -9,15 +9,15 @@
 //!
 //! The [`content`] module handles tokenisation and operator decoding.
 //! The [`renderer`] module rasterises operators to a pixel bitmap.
-//! The [`prescan`] module classifies pages cheaply before rendering.
+//! The `prescan` module classifies pages cheaply before rendering.
 
 #[cfg(feature = "cache")]
 pub mod cache;
 pub mod content;
 pub mod form_type;
-pub mod optional_content;
+pub(crate) mod optional_content;
 pub mod page_group;
-pub mod prescan;
+pub(crate) mod prescan;
 pub mod renderer;
 pub mod resources;
 #[cfg(test)]
@@ -28,13 +28,15 @@ pub use optional_content::{OptionalContent, RenderPurpose};
 pub use page_group::page_group;
 pub use prescan::prescan_page;
 
-/// Entry points for fuzz targets — forwards to codec wrappers in `image::fuzz_entry`.
+/// Entry points for fuzz targets: the CCITT and JBIG2 codec wrappers and the
+/// `CMap` parser.
 ///
 /// Only compiled when `--cfg fuzzing` is set (cargo-fuzz sets this automatically).
 /// Not part of the public API.
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub mod fuzz_helpers {
+    pub use crate::resources::cmap::parse_cmap;
     pub use crate::resources::image::fuzz_entry::{decode_ccitt, decode_jbig2};
 }
 
@@ -251,7 +253,7 @@ const MAX_JS_SCAN_ANNOTS: usize = 8192;
 /// validate scripts of a fillable form are annotation `/AA` entries.
 ///
 /// Only `/S` names are read; no script is decoded.  An unreadable page or
-/// annotation counts as carrying none, and at most [`MAX_JS_SCAN_ANNOTS`]
+/// annotation counts as carrying none, and at most 8 192
 /// annotations are inspected.
 #[must_use]
 pub fn page_has_javascript(doc: &Document, page_id: pdf::ObjectId) -> bool {

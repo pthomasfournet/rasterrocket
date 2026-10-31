@@ -1,8 +1,8 @@
 //! PDF content stream parsing: tokenizer → operand stack → typed operators.
 
-pub mod operands;
-pub mod operator;
-pub mod tokenizer;
+pub(crate) mod operands;
+pub(crate) mod operator;
+pub(crate) mod tokenizer;
 
 pub use operator::{Operator, TextArrayElement};
 pub use tokenizer::{InlineComponents, Tokenizer};

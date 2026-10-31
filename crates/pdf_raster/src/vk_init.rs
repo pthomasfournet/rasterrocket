@@ -55,7 +55,7 @@ static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// [`RasterError::InvalidOptions`] for an unresolvable selector;
 /// [`RasterError::BackendUnavailable`] for an unavailable Vulkan under
 /// `ForceVulkan`.
-pub fn init_vk_backend(
+pub(crate) fn init_vk_backend(
     policy: BackendPolicy,
     selector: Option<&str>,
 ) -> Result<Option<Arc<VulkanBackend>>, RasterError> {
@@ -84,7 +84,9 @@ pub fn init_vk_backend(
 /// # Errors
 ///
 /// [`BackendError::DeviceSelection`] for an empty selector.
-pub fn parse_selector(selector: Option<&str>) -> Result<Option<DeviceSelector>, BackendError> {
+pub(crate) fn parse_selector(
+    selector: Option<&str>,
+) -> Result<Option<DeviceSelector>, BackendError> {
     selector.map(str::parse).transpose()
 }
 

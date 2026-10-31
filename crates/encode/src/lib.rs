@@ -20,11 +20,11 @@
 //! the profile-free process-ink model of `color::cmyk`.  For ICC-accurate colour, convert to
 //! `Rgb8` before encoding.
 
-pub mod jpeg;
-pub mod pbm;
-pub mod pgm;
-pub mod png;
-pub mod ppm;
+pub(crate) mod jpeg;
+pub(crate) mod pbm;
+pub(crate) mod pgm;
+pub(crate) mod png;
+pub(crate) mod ppm;
 
 pub use jpeg::jpeg_gray;
 pub use pbm::write_pbm;

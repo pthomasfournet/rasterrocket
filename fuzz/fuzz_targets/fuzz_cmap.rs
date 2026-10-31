@@ -5,7 +5,7 @@
 //! code-space ranges and mapped.
 
 use libfuzzer_sys::fuzz_target;
-use pdf_interp::resources::cmap::parse_cmap;
+use pdf_interp::fuzz_helpers::parse_cmap;
 
 fuzz_target!(|data: &[u8]| {
     let Some(cmap) = parse_cmap(data) else {

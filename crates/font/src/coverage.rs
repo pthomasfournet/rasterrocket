@@ -16,11 +16,11 @@ use raster::path::{Path, PathPoint};
 use crate::bitmap::GlyphBitmap;
 
 /// Largest glyph bitmap width or height, in pixels.
-pub const MAX_GLYPH_DIM: u32 = 8_192;
+pub(crate) const MAX_GLYPH_DIM: u32 = 8_192;
 
 /// Largest glyph bitmap area, in pixels.  The accumulation buffer holds one
 /// `f32` per pixel, so this bounds the transient allocation at 64 MiB.
-pub const MAX_GLYPH_AREA: u64 = 1 << 24;
+pub(crate) const MAX_GLYPH_AREA: u64 = 1 << 24;
 
 /// Maximum distance, in pixels, between a flattened curve and the curve.
 const FLATTEN_TOLERANCE: f64 = 0.05;
@@ -34,7 +34,7 @@ const MAX_CURVE_SEGMENTS: u32 = 256;
 /// contains non-finite coordinates, or exceeds [`MAX_GLYPH_DIM`] /
 /// [`MAX_GLYPH_AREA`].
 #[must_use]
-pub fn rasterize(path: &Path, aa: bool) -> Option<GlyphBitmap> {
+pub(crate) fn rasterize(path: &Path, aa: bool) -> Option<GlyphBitmap> {
     let segments = flatten(path);
     let bounds = Bounds::of(&segments)?;
     let width = bounds.width()?;

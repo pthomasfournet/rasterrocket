@@ -118,7 +118,7 @@ pub struct XPath {
     /// The flattened, transformed edge segments making up this path, in insertion order.
     pub segs: Vec<XPathSeg>,
     /// Lazily allocated (~25 KB) scratch for Bezier subdivision.
-    curve_data: Option<Box<CurveData>>,
+    curve_data: Option<CurveData>,
 }
 
 impl XPath {

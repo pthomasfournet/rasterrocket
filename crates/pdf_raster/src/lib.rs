@@ -112,11 +112,11 @@ pub(crate) mod decode_queue;
 mod decoders;
 pub mod deskew;
 mod error;
-pub mod gcv;
+pub(crate) mod gcv;
 pub(crate) mod gpu_init;
 mod gray;
 mod open;
-pub mod page;
+pub(crate) mod page;
 mod render;
 mod request;
 #[cfg(feature = "vulkan")]
@@ -136,22 +136,6 @@ pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{FormType, PageGeometry, RenderPurpose};
 pub use render::{render_page_gray, render_page_rgb, render_page_rgb_with};
 pub use request::{CancelToken, RenderParams, RenderRegion};
-
-/// Session-level API for explicit control over PDF opening and per-page rendering.
-///
-/// Use these when [`raster_pdf`] or [`render_channel`] don't give you enough
-/// control — e.g. when you need to share one open document across multiple
-/// threads, customise the [`SessionConfig`] (GPU backend, VA-API device, cache
-/// prefetch), or call [`prescan_session`] before deciding how to render each page.
-///
-/// All items in this module are also re-exported at the crate root for backward
-/// compatibility.
-pub mod session {
-    pub use super::{
-        open_session, open_session_from_bytes, prescan_session, render_page_gray, render_page_rgb,
-        render_page_rgb_with, rgb_to_gray,
-    };
-}
 
 /// Eagerly release GPU decoders on every rayon worker thread.
 ///

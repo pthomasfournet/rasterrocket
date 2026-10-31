@@ -6,7 +6,7 @@ use crate::resources::font::BaseEncoding;
 /// Resolve the glyph name for one char code: the `Differences` override if
 /// present, otherwise the `base` encoding's name (PDF §9.6.6 — Differences
 /// take precedence over the base encoding).  `None` = no glyph at this code.
-pub fn glyph_name_for_code(
+pub(crate) fn glyph_name_for_code(
     differences: &[Option<Box<str>>; 256],
     base: BaseEncoding,
     code: usize,
@@ -17,7 +17,9 @@ pub fn glyph_name_for_code(
 }
 
 /// Return the code→glyph-name table for a PDF base encoding (PDF Appendix D).
-pub const fn base_encoding_table(base: BaseEncoding) -> &'static [Option<&'static str>; 256] {
+pub(crate) const fn base_encoding_table(
+    base: BaseEncoding,
+) -> &'static [Option<&'static str>; 256] {
     match base {
         BaseEncoding::Standard | BaseEncoding::FontProgram => &STANDARD_ENCODING,
         BaseEncoding::WinAnsi => &WIN_ANSI_ENCODING,

@@ -158,7 +158,7 @@ impl<'a> BitReader<'a> {
     /// pattern.  The accessor is preserved here to document the
     /// invariant for future readers.
     #[cfg(test)]
-    pub const fn byte_position(&self) -> usize {
+    pub(crate) const fn byte_position(&self) -> usize {
         let bytes_unconsumed = (self.cap as usize).div_ceil(8);
         self.byte_pos.saturating_sub(bytes_unconsumed)
     }

@@ -11,7 +11,7 @@ use pdf::Dictionary;
 
 /// Convenience accessors for [`pdf::Dictionary`] that fold the typical
 /// "get + cast" chain into a single call.
-pub trait DictExt {
+pub(crate) trait DictExt {
     /// Return the value at `key` as a byte-slice name (`/Name`), or `None`.
     fn get_name(&self, key: &[u8]) -> Option<&[u8]>;
 

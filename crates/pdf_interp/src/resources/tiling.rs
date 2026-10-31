@@ -63,7 +63,7 @@ pub enum PaintType {
 /// `None` if the name is absent, the object is not a
 /// tiling pattern, or any required key is missing.
 #[must_use]
-pub fn resolve_tiling(
+pub(crate) fn resolve_tiling(
     doc: &Document,
     patterns: &Dictionary,
     name: &[u8],

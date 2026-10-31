@@ -16,7 +16,7 @@ const fn numeric(token: &Token<'_>) -> Option<f64> {
 }
 
 /// Pop the topmost token as a number. Returns 0.0 on underflow or wrong type.
-pub fn pop_f64(stack: &mut Vec<Token<'_>>) -> f64 {
+pub(crate) fn pop_f64(stack: &mut Vec<Token<'_>>) -> f64 {
     stack.pop().as_ref().and_then(numeric).unwrap_or(0.0)
 }
 
@@ -26,13 +26,13 @@ pub fn pop_f64(stack: &mut Vec<Token<'_>>) -> f64 {
     reason = "f64-to-i32 `as` truncates toward zero and saturates; callers map \
               out-of-range values to their defaults"
 )]
-pub fn pop_i32(stack: &mut Vec<Token<'_>>) -> i32 {
+pub(crate) fn pop_i32(stack: &mut Vec<Token<'_>>) -> i32 {
     pop_f64(stack) as i32
 }
 
 /// Pop the topmost token as a name or string byte vector.
 /// Returns an empty `Vec` on underflow or wrong type.
-pub fn pop_name(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
+pub(crate) fn pop_name(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
     match stack.pop() {
         Some(Token::Name(n)) => n.to_vec(),
         Some(Token::String(s)) => s,
@@ -42,7 +42,7 @@ pub fn pop_name(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
 
 /// Pop the topmost token as a string byte vector.
 /// Returns an empty `Vec` on underflow or wrong type.
-pub fn pop_string(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
+pub(crate) fn pop_string(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
     match stack.pop() {
         Some(Token::String(s)) => s,
         Some(Token::Name(n)) => n.to_vec(),
@@ -55,7 +55,7 @@ pub fn pop_string(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
 ///
 /// The run stops at the topmost non-numeric token, which stays on the
 /// stack with everything beneath it.
-pub fn drain_numbers(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
+pub(crate) fn drain_numbers(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
     let run_start = stack
         .iter()
         .rposition(|t| numeric(t).is_none())
@@ -73,7 +73,7 @@ pub fn drain_numbers(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
 /// name.  When the last token is a name the colour space is Pattern and the name
 /// selects the pattern resource.  For all other colour spaces only numbers appear.
 #[non_exhaustive]
-pub enum ScnOperands {
+pub(crate) enum ScnOperands {
     /// `/PatternName [c1 … cn]` — Pattern colour space; name is the resource key,
     /// components are the underlying non-Pattern colour (may be empty for
     /// `PaintType` 1 / coloured patterns).
@@ -93,7 +93,7 @@ pub enum ScnOperands {
 /// selects a Pattern resource.  The components are the run of numbers
 /// directly beneath the name, or at the top of the stack when there is no
 /// name (see [`drain_numbers`]).
-pub fn pop_scn(stack: &mut Vec<Token<'_>>) -> ScnOperands {
+pub(crate) fn pop_scn(stack: &mut Vec<Token<'_>>) -> ScnOperands {
     let name = if matches!(stack.last(), Some(Token::Name(_))) {
         match stack.pop() {
             Some(Token::Name(n)) => Some(n.to_vec()),
@@ -113,7 +113,7 @@ pub fn pop_scn(stack: &mut Vec<Token<'_>>) -> ScnOperands {
 ///
 /// Returns an empty `Vec`, leaving the stack unchanged, when the top is not
 /// an array.
-pub fn pop_number_array(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
+pub(crate) fn pop_number_array(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
     if !matches!(stack.last(), Some(Token::Array(_))) {
         return Vec::new();
     }
@@ -125,7 +125,7 @@ pub fn pop_number_array(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
 
 /// Pop the top `N` numbers in stream order (leftmost first); each missing
 /// or non-numeric operand reads as 0 (see [`pop_f64`]).
-pub fn pop_n<const N: usize>(stack: &mut Vec<Token<'_>>) -> [f64; N] {
+pub(crate) fn pop_n<const N: usize>(stack: &mut Vec<Token<'_>>) -> [f64; N] {
     let mut out = [0.0; N];
     for v in out.iter_mut().rev() {
         *v = pop_f64(stack);
@@ -134,22 +134,22 @@ pub fn pop_n<const N: usize>(stack: &mut Vec<Token<'_>>) -> [f64; N] {
 }
 
 /// Pop the top 2 numbers as `(first, second)` in stream order.
-pub fn pop2(stack: &mut Vec<Token<'_>>) -> (f64, f64) {
+pub(crate) fn pop2(stack: &mut Vec<Token<'_>>) -> (f64, f64) {
     pop_n::<2>(stack).into()
 }
 
 /// Pop the top 3 numbers as `(first, second, third)` in stream order.
-pub fn pop3(stack: &mut Vec<Token<'_>>) -> (f64, f64, f64) {
+pub(crate) fn pop3(stack: &mut Vec<Token<'_>>) -> (f64, f64, f64) {
     pop_n::<3>(stack).into()
 }
 
 /// Pop the top 4 numbers as `(first, second, third, fourth)` in stream order.
-pub fn pop4(stack: &mut Vec<Token<'_>>) -> (f64, f64, f64, f64) {
+pub(crate) fn pop4(stack: &mut Vec<Token<'_>>) -> (f64, f64, f64, f64) {
     pop_n::<4>(stack).into()
 }
 
 /// Pop the top 6 numbers as a PDF matrix `[a b c d e f]` in stream order.
-pub fn pop_matrix(stack: &mut Vec<Token<'_>>) -> [f64; 6] {
+pub(crate) fn pop_matrix(stack: &mut Vec<Token<'_>>) -> [f64; 6] {
     pop_n(stack)
 }
 

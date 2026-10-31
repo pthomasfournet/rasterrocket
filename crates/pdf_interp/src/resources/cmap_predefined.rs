@@ -89,7 +89,7 @@ static CMAPS: &[(&str, Script, &[u8])] = &[
 /// `Identity-H` and `Identity-V` are not predefined files; see
 /// [`CMap::identity`].
 #[must_use]
-pub fn predefined_cmap(name: &[u8]) -> Option<Arc<CMap>> {
+pub(crate) fn predefined_cmap(name: &[u8]) -> Option<Arc<CMap>> {
     predefined_cmap_nested(name, 0)
 }
 
@@ -122,7 +122,7 @@ pub(super) fn predefined_cmap_nested(name: &[u8], depth: u32) -> Option<Arc<CMap
 /// OPERATOR): each CID keeps all of them, in preference order, so that a
 /// face lacking the first still draws the CID through another.
 #[derive(Debug, Default)]
-pub struct CollectionUnicode {
+pub(crate) struct CollectionUnicode {
     /// Code points of each CID that has any: those outside the
     /// compatibility blocks first, then by value.
     unicode: HashMap<u32, Box<[u32]>>,
@@ -136,24 +136,24 @@ impl CollectionUnicode {
     /// The code points of `cid`, in preference order; empty when it has
     /// none.
     #[must_use]
-    pub fn get(&self, cid: u32) -> &[u32] {
+    pub(crate) fn get(&self, cid: u32) -> &[u32] {
         self.unicode.get(&cid).map_or(&[], |codes| codes)
     }
 
     /// Whether `cid` is the vertical form of its code point.
     #[must_use]
-    pub fn is_vertical(&self, cid: u32) -> bool {
+    pub(crate) fn is_vertical(&self, cid: u32) -> bool {
         self.vertical.contains(&cid)
     }
 
     /// Every CID with its code points, in no fixed order.
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &[u32])> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &[u32])> + '_ {
         self.unicode.iter().map(|(&cid, codes)| (cid, &**codes))
     }
 }
 
 /// A [`CollectionUnicode`] shared process-wide.
-pub type CidToUnicode = Arc<CollectionUnicode>;
+pub(crate) type CidToUnicode = Arc<CollectionUnicode>;
 
 /// CID → Unicode for the character collection of `script`.
 ///
@@ -161,7 +161,7 @@ pub type CidToUnicode = Arc<CollectionUnicode>;
 /// `CMap` for the CIDs only the vertical one reaches.  `None` for a
 /// script without a collection.  Built once per process.
 #[must_use]
-pub fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
+pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
     static CACHE: OnceLock<Mutex<HashMap<Script, CidToUnicode>>> = OnceLock::new();
     let (name, vertical_name): (&[u8], &[u8]) = match script {
         Script::Japanese => (b"UniJIS-UCS2-H", b"UniJIS-UCS2-V"),

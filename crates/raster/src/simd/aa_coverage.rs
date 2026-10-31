@@ -524,7 +524,7 @@ unsafe fn aa_coverage_span_avx512(rows: [&[u8]; 4], x0: usize, shape: &mut [u8])
 ///
 /// Panics if any row slice is shorter than required by the span — i.e. if the
 /// `x0 + shape.len() ≤ bitmap_width` precondition is violated.
-pub fn aa_coverage_span(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
+pub(crate) fn aa_coverage_span(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
     if shape.is_empty() {
         return;
     }

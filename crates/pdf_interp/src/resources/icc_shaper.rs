@@ -224,7 +224,7 @@ fn is_identity(m: &Mat3) -> bool {
 
 /// 8-bit gray → 8-bit sRGB gray: `table[v] = encode(grayTRC(v / 255))`.
 #[derive(Debug, PartialEq, Eq)]
-pub struct GrayShaper {
+pub(crate) struct GrayShaper {
     table: [u8; 256],
 }
 
@@ -236,7 +236,7 @@ impl GrayShaper {
 
 /// 8-bit RGB → 8-bit sRGB through an RGB shaper profile.
 #[derive(Debug, PartialEq)]
-pub enum RgbShaper {
+pub(crate) enum RgbShaper {
     /// The composite matrix is the identity: one table per channel,
     /// `tables[c][v] = encode(TRC_c(v / 255))`.
     PerChannel(Box<[[u8; 256]; 3]>),
@@ -279,7 +279,7 @@ impl RgbShaper {
 
     /// Rewrite packed three-byte-per-pixel samples in place.  A trailing
     /// partial pixel is left untouched.
-    pub fn convert_in_place(&self, samples: &mut [u8]) {
+    pub(crate) fn convert_in_place(&self, samples: &mut [u8]) {
         let pixels = samples.as_chunks_mut::<3>().0;
         match self {
             Self::PerChannel(t) => {
@@ -303,7 +303,7 @@ impl RgbShaper {
 
 /// The evaluated form of one ICC profile for 8-bit input.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ProfileConversion {
+pub(crate) enum ProfileConversion {
     /// Not a matrix/TRC profile, or not a valid profile.
     Unsupported,
     /// A gray TRC profile; `None` when it equals the sRGB encoding at 8 bits.
@@ -450,7 +450,7 @@ impl RgbShaper {
 // ── Profile streams ───────────────────────────────────────────────────────────
 
 /// Decompressed content of the ICC profile stream `stream_id`.
-pub fn fetch_profile_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
+pub(crate) fn fetch_profile_bytes(doc: &Document, stream_id: ObjectId) -> Option<Vec<u8>> {
     let obj = doc.get_object(stream_id).ok()?;
     obj.as_ref()
         .as_stream()?

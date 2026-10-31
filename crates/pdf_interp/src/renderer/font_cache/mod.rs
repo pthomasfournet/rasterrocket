@@ -54,7 +54,7 @@ type FaceKey = (ResourceKey, [u64; 4]);
 /// The font selected by `Tf`: the identity of its dictionary and the
 /// descriptor resolved from it.
 #[derive(Clone, Debug)]
-pub struct ActiveFont {
+pub(crate) struct ActiveFont {
     /// Identity of the font dictionary.
     pub key: ResourceKey,
     /// Descriptor resolved from the dictionary, shared by every selection of
@@ -67,7 +67,7 @@ pub struct ActiveFont {
 /// It holds the [`FontFace`] the font draws with, whether that face is a
 /// substitute program rather than one the document embeds, and, for a
 /// substitute, the installed faces that draw the characters it lacks.
-pub struct PageFace {
+pub(crate) struct PageFace {
     face: FontFace,
     /// `true` when the face draws a substitute: the font has no embedded
     /// program, or its embedded program could not be parsed.
@@ -88,7 +88,7 @@ impl PageFace {
     /// in place of this face, as prepared by [`FontCache::get_or_load_showing`].
     /// `None` when this face draws the code itself.
     #[must_use]
-    pub fn fallback_glyph(&self, code: u32, cid: u32) -> Option<(&FontFace, u32)> {
+    pub(crate) fn fallback_glyph(&self, code: u32, cid: u32) -> Option<(&FontFace, u32)> {
         let (slot, gid) = (*self.fallback_glyphs.get(&(code, cid))?)?;
         Some((self.fallback_faces.get(slot)?.as_ref()?, gid))
     }
@@ -183,7 +183,7 @@ impl SharedFont {
 }
 
 /// Per-page cache of resolved font descriptors and loaded font faces.
-pub struct FontCache {
+pub(crate) struct FontCache {
     engine: FontEngine,
     /// Document-wide store for indirect font dictionaries and the glyph
     /// bitmaps of the document.
@@ -201,7 +201,7 @@ impl FontCache {
     /// rasterising glyphs with 8-bit coverage when `antialias` is set and
     /// bilevel otherwise.
     #[must_use]
-    pub fn new(shared: Arc<DocumentFonts>, antialias: bool) -> Self {
+    pub(crate) fn new(shared: Arc<DocumentFonts>, antialias: bool) -> Self {
         Self {
             engine: FontEngine::with_face_ids(antialias, Arc::clone(&shared.face_ids)),
             shared,
@@ -217,7 +217,7 @@ impl FontCache {
     /// font dictionary, selects [`fallback_font`] under a key private to
     /// the resource context, so the text it shows is drawn rather than
     /// dropped.
-    pub fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> ActiveFont {
+    pub(crate) fn select(&mut self, resources: &PageResources<'_>, name: &[u8]) -> ActiveFont {
         let (key, entry) = resources.font_entry(name).unwrap_or_else(|| {
             let key = ResourceKey::Direct {
                 context: resources.resource_context_id(),
@@ -247,7 +247,7 @@ impl FontCache {
 
     /// The document store this cache resolves indirect fonts through.
     #[must_use]
-    pub const fn document_fonts(&self) -> &Arc<DocumentFonts> {
+    pub(crate) const fn document_fonts(&self) -> &Arc<DocumentFonts> {
         &self.shared
     }
 
@@ -255,7 +255,7 @@ impl FontCache {
     /// dictionary `id`, drawn with the glyph-to-device matrix `matrix`
     /// (2×2 part), is cached; one per document, font and matrix.
     #[must_use]
-    pub fn type3_face_id(&self, id: ObjectId, matrix: [f64; 4]) -> FaceId {
+    pub(crate) fn type3_face_id(&self, id: ObjectId, matrix: [f64; 4]) -> FaceId {
         self.shared
             .font(id)
             .face_id(matrix.map(f64::to_bits), 0, &self.shared.face_ids)
@@ -263,7 +263,7 @@ impl FontCache {
 
     /// Return the glyph bitmap cache shared by every face of the document.
     #[must_use]
-    pub fn glyph_cache(&self) -> &GlyphCache {
+    pub(crate) fn glyph_cache(&self) -> &GlyphCache {
         &self.shared.glyphs
     }
 
@@ -278,7 +278,7 @@ impl FontCache {
     /// `None` (logged once per font and matrix) when the face cannot be
     /// loaded: the matrix is degenerate, or no program, embedded or
     /// substitute, is usable.
-    pub fn get_or_load(
+    pub(crate) fn get_or_load(
         &mut self,
         font: &ActiveFont,
         name: &[u8],
@@ -291,7 +291,7 @@ impl FontCache {
     /// glyph of every code of `bytes` a substitute lacks is resolved, and
     /// its fallback face loaded, so that [`PageFace::fallback_glyph`]
     /// answers for each.
-    pub fn get_or_load_showing(
+    pub(crate) fn get_or_load_showing(
         &mut self,
         font: &ActiveFont,
         name: &[u8],
