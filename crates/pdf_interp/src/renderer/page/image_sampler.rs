@@ -33,9 +33,10 @@
 //! fraction weight the upper of the two samples.
 //!
 //! Integer parts are clamped to ±[`COORD_LIMIT`] at build time, so a
-//! column + row sum can never overflow `i32`; a clamped entry still lies far
-//! outside any image (dimensions are capped at 65 536 px) and is rejected by
-//! the range check.
+//! column + row sum can never overflow `i32`.  The sum of two entries is the
+//! exact coordinate only while neither is clamped; a clamped entry lies
+//! outside every image narrower than [`COORD_LIMIT`] samples unless the
+//! other entry cancels it.
 
 use raster::{Clip, ClipResult, ClipRows, RowClip};
 

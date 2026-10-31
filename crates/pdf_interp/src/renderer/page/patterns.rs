@@ -15,12 +15,11 @@ use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern};
 
 /// Resolve an uncoloured-tiling-pattern tint to a [`RasterColor`].
 ///
-/// Per PDF §8.7.3.3, the tint components on `scn /Name ...` are interpreted
-/// in the *base* colour space declared by the preceding `cs /Pattern <base>`.
-/// When the gstate's fill colour space is `Pattern { base: Some(b) }` we
-/// convert through `b`; otherwise we fall back to the legacy component-count
-/// heuristic (1 → Gray, 3 → RGB, 4 → CMYK) — handles malformed PDFs that
-/// skip the base or set `cs /Pattern` bare.
+/// The tint components of `scn /Name c1 … cn` are colour values in the
+/// underlying colour space of the fill's `[/Pattern base]` space
+/// (PDF §8.7.3.3), and convert through `base`.  A bare `/Pattern` space,
+/// or a component count `base` does not take, is read by its count:
+/// 1 grey, 3 RGB, 4 CMYK.
 fn resolve_pattern_tint(doc: &Document, fill_cs: &ColorSpace, components: &[f64]) -> RasterColor {
     if let ColorSpace::Pattern { base: Some(base) } = fill_cs {
         if components.len() == base.ncomponents() {
@@ -235,11 +234,10 @@ impl PageRenderer<'_> {
         name: &[u8],
         region: PixelRect,
     ) -> Option<TiledPattern> {
-        // Break self-referential / cyclic pattern chains.  Each cell spawns a
-        // fresh PageRenderer with its own pattern_depth seeded one above the
-        // parent (see render_cells below), so reaching the cap means a
-        // pattern's content stream re-invokes a pattern and we'd otherwise
-        // recurse to stack overflow on adversarial input.
+        // Each cell renders in a child renderer whose `pattern_depth` is one
+        // above its parent's (see `render_cells`), so the cap bounds the
+        // recursion of a pattern whose content paints with a pattern,
+        // itself included.
         if self.pattern_depth >= MAX_PATTERN_DEPTH {
             log::warn!(
                 "rasterrocket-interp: Pattern /{} nesting depth {MAX_PATTERN_DEPTH} exceeded — skipping",
@@ -252,16 +250,9 @@ impl PageRenderer<'_> {
         let desc = &tiling.desc;
 
         let gs = self.gstate.current();
-        // PaintType 2 (uncoloured) patterns paint shape-only content streams;
-        // the tint comes from the `scn /Name c1 [c2 c3 [c4]]` arguments captured
-        // here as `fill_pattern_components`.  PaintType 1 (coloured) ignores it.
-        //
-        // PDF §8.7.3.3: the tint is interpreted in whichever colour space was
-        // declared by the preceding `cs /Pattern <base_cs>` operator.  When
-        // we have that base recorded on the gstate, route through it;
-        // otherwise fall back to the legacy component-count heuristic
-        // (1 → Gray, 3 → RGB, 4 → CMYK) for malformed PDFs that skip the
-        // base or use a bare `/Pattern` cs.
+        // A `PaintType` 2 (uncoloured) pattern's content paints shapes only,
+        // in the tint the `scn` operands give (`fill_pattern_components`);
+        // a `PaintType` 1 (coloured) pattern's content sets its own colours.
         let tint = if desc.paint_type == 2 && !gs.fill_pattern_components.is_empty() {
             Some(resolve_pattern_tint(
                 self.resources.doc(),
@@ -460,23 +451,17 @@ impl PageRenderer<'_> {
         placements: &[[f64; 6]],
     ) -> Bitmap<Rgb8> {
         let desc = cell.desc;
-        // Build a temporary child renderer sharing the same document / font engine.
+        // A child renderer sharing the document, its fonts and the page's
+        // memos.
         let doc = self.resources.doc();
         let mut child = PageRenderer::new(width, height, doc, desc.stream_id);
         child.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
         child.set_antialias(self.text_antialias, self.vector_antialias);
         child.bitmap = Bitmap::new(width, height, 1, true);
-        // Propagate pattern_depth so a pattern stream that recursively
-        // invokes another pattern (or itself) hits MAX_PATTERN_DEPTH instead
-        // of unbounded stack recursion.  saturating_add guards against the
-        // (impossible) overflow.
+        // One level deeper, bounded by MAX_PATTERN_DEPTH.
         child.pattern_depth = self.pattern_depth.saturating_add(1);
-        // Share the per-page work watchdog.  A fresh PageRenderer would
-        // otherwise get its own 50 M-op budget and a fresh 60 s deadline,
-        // letting a pathological pattern content stream (nested up to
-        // MAX_PATTERN_DEPTH) escape the page watchdog entirely — the parent's
-        // execute() loop is blocked synchronously here and never gets to tick
-        // its own budget or check its own deadline.
+        // The cell's operators count against the page's operation budget
+        // and deadline, which the parent cannot check while the cell runs.
         child.adopt_parent_budget(self);
         child.share_memos(self);
         child.set_optional_content(std::sync::Arc::clone(self.optional_content()));
@@ -505,9 +490,8 @@ impl PageRenderer<'_> {
                 break;
             }
         }
-        // Account the cells' work against the shared page budget and propagate
-        // any breach so the parent's execute() loop bails loudly on its next
-        // iteration instead of rendering more pattern fills unbounded.
+        // The cells' operations and any budget breach pass to the parent,
+        // whose execution stops on a breach.
         child.fold_child_into(self);
         child.finish().0
     }

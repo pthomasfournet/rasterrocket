@@ -69,7 +69,7 @@ impl PageRenderer<'_> {
         // the glyph loop below, which rasterises nothing it will not use.
         let do_paint = do_fill || do_stroke;
 
-        // Snapshot all state we need before any mutable borrow of font_cache.
+        // The text state, read before `font_cache` is borrowed mutably.
         let font_name = self.gstate.current().text.font_name.clone();
         let font_size = self.gstate.current().text.font_size;
         let char_spacing = self.gstate.current().text.char_spacing;
