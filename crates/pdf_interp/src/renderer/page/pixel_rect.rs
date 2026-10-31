@@ -106,13 +106,14 @@ impl PageRenderer<'_> {
         self.within_clip(PixelRect::around(points, margin, self.width, self.height)?)
     }
 
+    /// The current clip's rectangle within the bitmap.
+    pub(super) fn clip_rect(&self) -> Option<PixelRect> {
+        PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)
+    }
+
     /// The pixels of `rect` the current clip's rectangle admits.
     pub(super) fn within_clip(&self, rect: PixelRect) -> Option<PixelRect> {
-        rect.intersect(PixelRect::of_clip(
-            &self.gstate.current().clip,
-            self.width,
-            self.height,
-        )?)
+        rect.intersect(self.clip_rect()?)
     }
 }
 

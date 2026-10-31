@@ -100,7 +100,7 @@ impl PageRenderer<'_> {
         // to the clip.
         // The glyphs are one object under the soft mask in effect.
         if let Some(t3) = &descriptor.type3 {
-            let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height);
+            let region = self.clip_rect();
             let alpha = self.gstate.current().fill_alpha;
             self.paint_object(region, alpha, |r| {
                 r.show_text_type3(

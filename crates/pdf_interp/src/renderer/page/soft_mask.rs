@@ -161,13 +161,7 @@ impl PageRenderer<'_> {
     ) -> R {
         let region = region
             .filter(|_| mask.width == self.width && mask.height == self.height)
-            .and_then(|r| {
-                r.intersect(PixelRect::of_clip(
-                    &self.gstate.current().clip,
-                    self.width,
-                    self.height,
-                )?)
-            });
+            .and_then(|r| self.within_clip(r));
         let Some(region) = region else {
             return paint(self);
         };
@@ -197,8 +191,7 @@ impl PageRenderer<'_> {
             rect.area(),
             "one coverage value per pixel of the rectangle"
         );
-        let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)
-            .and_then(|clip| clip.intersect(rect));
+        let region = self.within_clip(rect);
         let Some(region) = region else {
             return paint(self);
         };
@@ -234,8 +227,7 @@ impl PageRenderer<'_> {
             rect.area(),
             "one coverage value per pixel of the rectangle"
         );
-        let region = PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)
-            .and_then(|clip| clip.intersect(rect));
+        let region = self.within_clip(rect);
         let Some(region) = region else {
             under(self);
             return;
