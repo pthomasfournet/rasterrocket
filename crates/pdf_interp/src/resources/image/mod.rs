@@ -494,9 +494,10 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     if !is_mask && colour.paints_nothing() {
         return ImageResolution::Absent;
     }
-    if let Err(msg) = decode_budget(w, h, if is_mask { 1 } else { colour.components() }) {
-        return unresolved(&msg);
-    }
+    let src = match dispatch::ImageStream::new(stream, w, h, is_mask, colour) {
+        Ok(src) => src,
+        Err(msg) => return unresolved(&msg),
+    };
 
     // The matte colour of a soft mask the image's samples are pre-blended
     // with (§11.6.5.3).
@@ -520,19 +521,12 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     // another document would drop the mask or the conversion) nor
     // inserted.
     #[cfg(feature = "cache")]
-    let dct_cache = if has_mask_entry(&stream.dict) || !colour.identity() {
+    let dct_cache = if has_mask_entry(&stream.dict) || !src.colour.identity() {
         None
     } else {
         codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
     };
 
-    let src = dispatch::ImageStream {
-        stream,
-        width: w,
-        height: h,
-        is_mask,
-        colour,
-    };
     let (mut img, partial) = match dispatch::decode_image_stream(
         ctx,
         &src,
@@ -933,6 +927,37 @@ mod tests {
             px[1..].iter().all(|&v| v == 255),
             "clear bits = tint 0 = paper"
         );
+    }
+
+    /// Resolve `/Im1`, object 4 of a document holding `image` (the whole
+    /// stream object, dictionary and data).
+    fn resolve_object(image: Vec<u8>) -> ImageResolution {
+        let doc = crate::test_helpers::make_doc_with_objects(&[(4, image)]);
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((4, 0)));
+        resolve_image(
+            &mut ImageDecodeCtx::cpu(&doc),
+            &xobjects,
+            ImageRequest::full(b"Im1"),
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        )
+    }
+
+    /// §8.9.5.1: an image's colour space may be of any type except
+    /// `Pattern`, which has no components; such an image is refused, not
+    /// converted through a zero-component sample layout.
+    #[test]
+    fn pattern_colour_space_image_is_refused() {
+        let image = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+                      /ColorSpace /Pattern /BitsPerComponent 8 /Length 2 >>\n\
+                      stream\n\x10\x20\nendstream"
+            .to_vec();
+        match resolve_object(image) {
+            ImageResolution::DecodeFailed(msg) => assert!(msg.contains("Pattern"), "{msg}"),
+            ImageResolution::Ok(_) => panic!("a Pattern image must not decode"),
+            ImageResolution::Absent => panic!("a Pattern image is a failure, not absent"),
+        }
     }
 
     #[test]

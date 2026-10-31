@@ -12,7 +12,7 @@ use pdf::{Document, Object, ObjectId, Stream};
 use super::colorspace::ImageColour;
 use super::dispatch::{ImageStream, decode_image_stream};
 use super::{ImageColorSpace, ImageData, ImageDecodeCtx, ImageDescriptor};
-use super::{decode_budget, try_with_capacity, validated_dims};
+use super::{try_with_capacity, validated_dims};
 use crate::resources::colorspace::ColorSpace;
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -204,19 +204,12 @@ fn decode_mask_stream(
         log::warn!("image: {what} degenerate dimensions {w_raw}×{h_raw}, skipping mask");
         return None;
     };
-    if let Err(msg) = decode_budget(width, height, 1) {
-        log::warn!("image: {what}: {msg} — skipping mask");
-        return None;
-    }
     // A mask's samples are its own alpha or stencil: the `/Default*`
     // spaces of the page do not apply to them.
-    let src = ImageStream {
-        stream,
-        width,
-        height,
-        is_mask,
-        colour: ImageColour::resolve(ctx.doc, &stream.dict, None),
-    };
+    let colour = ImageColour::resolve(ctx.doc, &stream.dict, None);
+    let src = ImageStream::new(stream, width, height, is_mask, colour)
+        .map_err(|msg| log::warn!("image: {what}: {msg} — skipping mask"))
+        .ok()?;
     decode_image_stream(
         ctx,
         &src,

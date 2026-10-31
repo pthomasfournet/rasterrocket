@@ -17,7 +17,7 @@ use super::colorspace::{ImageColour, Samples};
 use super::raw::{apply_stencil_decode, decode_raw};
 use super::smask::{colour_key_mask, colour_key_mask_with};
 use super::{
-    ImageDecodeCtx, ImageDescriptor, ImageFilter, filter_name, image_filter_chain,
+    ImageDecodeCtx, ImageDescriptor, ImageFilter, decode_budget, filter_name, image_filter_chain,
     is_transport_filter, terminal_decode_parms,
 };
 
@@ -37,6 +37,40 @@ pub(super) struct ImageStream<'a> {
     /// The colour of the samples, resolved from the dictionary and the
     /// colour-space resources in effect.
     pub colour: ImageColour,
+}
+
+impl<'a> ImageStream<'a> {
+    /// The stream of a `width × height` image whose samples are `colour`,
+    /// or stencil bytes when `is_mask`, admitted for decoding.
+    ///
+    /// Refused, with the reason: a non-stencil image in a colour space
+    /// without components (`Pattern`, which PDF §8.9.5.1 excludes from
+    /// images), and an image over the decode budget
+    /// ([`super::MAX_DECODED_BYTES`]).  Nothing is allocated before this
+    /// check.
+    pub(super) fn new(
+        stream: &'a Stream,
+        width: u32,
+        height: u32,
+        is_mask: bool,
+        colour: ImageColour,
+    ) -> Result<Self, String> {
+        let components = if is_mask { 1 } else { colour.components() };
+        if components == 0 {
+            return Err(
+                "a Pattern colour space has no components and cannot colour an image (PDF §8.9.5.1)"
+                    .to_owned(),
+            );
+        }
+        decode_budget(width, height, components)?;
+        Ok(Self {
+            stream,
+            width,
+            height,
+            is_mask,
+            colour,
+        })
+    }
 }
 
 /// A decoded, colour-converted image and what its stream lacked, if

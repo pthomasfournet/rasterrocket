@@ -9,7 +9,7 @@ use pdf::{Dictionary, Object};
 
 use super::colorspace::ImageColour;
 use super::dispatch::{ImageStream, decode_image_stream};
-use super::{DecodedImage, ImageDecodeCtx, ImageResolution, decode_budget, validated_dims};
+use super::{DecodedImage, ImageDecodeCtx, ImageResolution, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
 #[cfg(feature = "gpu-jpeg-huffman")]
@@ -77,16 +77,10 @@ pub fn decode_inline_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend:
     if !is_mask && colour.paints_nothing() {
         return ImageResolution::Absent;
     }
-    if let Err(msg) = decode_budget(w, h, if is_mask { 1 } else { colour.components() }) {
-        return failed(msg);
-    }
     let stream = pdf::Stream::new(dict, data.to_vec());
-    let src = ImageStream {
-        stream: &stream,
-        width: w,
-        height: h,
-        is_mask,
-        colour,
+    let src = match ImageStream::new(&stream, w, h, is_mask, colour) {
+        Ok(src) => src,
+        Err(msg) => return failed(msg),
     };
     // Inline images have no object identity, so the device image cache
     // never holds them.
