@@ -757,7 +757,7 @@ pub(crate) fn image_filter_chain(obj: &Object) -> Vec<Cow<'_, str>> {
 /// returned name is the LAST filter — the terminal image codec.  Earlier
 /// filters in the chain are transport/prefilters (ASCII85, Flate, …) whose
 /// bytes are produced by [`pdf::Stream::decompressed_content`] before the
-/// terminal codec runs; see the dispatch in `resolve_image`.
+/// terminal codec runs; see `dispatch::decode_image_stream`.
 ///
 /// An empty array (`Filter = []`) is treated as no filter (returns `None`)
 /// and a debug message is emitted, matching the behaviour of an absent key.

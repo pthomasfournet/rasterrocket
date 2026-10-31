@@ -17,7 +17,7 @@ use super::colorspace::{ImageColour, Samples};
 use super::raw::{apply_stencil_decode, decode_raw};
 use super::smask::{colour_key_mask, colour_key_mask_with};
 use super::{
-    ImageDecodeCtx, ImageDescriptor, ImageFilter, decode_budget, filter_name, image_filter_chain,
+    ImageDecodeCtx, ImageDescriptor, ImageFilter, decode_budget, image_filter_chain,
     is_transport_filter, terminal_decode_parms,
 };
 
@@ -115,10 +115,13 @@ pub(super) fn decode_image_stream<
     let dict = &src.stream.dict;
     let (w, h, is_mask) = (src.width, src.height, src.is_mask);
 
-    let filter_obj = dict.get(b"Filter");
-    let chain_len = filter_obj.map_or(0, |f| image_filter_chain(f).len());
-    let filter = filter_obj.and_then(filter_name);
-    let terminal_transport = filter.as_deref().is_some_and(is_transport_filter);
+    let chain = dict
+        .get(b"Filter")
+        .map(image_filter_chain)
+        .unwrap_or_default();
+    let chain_len = chain.len();
+    let filter = chain.last().map(AsRef::as_ref);
+    let terminal_transport = filter.is_some_and(is_transport_filter);
 
     // The codec input: the content with every transport filter applied.
     // The pass-through of the terminal image codec in `decompressed_content`
@@ -130,7 +133,7 @@ pub(super) fn decode_image_stream<
                 let stage = if chain_len > 1 {
                     "chained filter".to_owned()
                 } else {
-                    filter.as_deref().unwrap_or_default().to_owned()
+                    filter.unwrap_or_default().to_owned()
                 };
                 return Err(format!("{stage}: {e}"));
             }
@@ -140,7 +143,7 @@ pub(super) fn decode_image_stream<
     };
     let parms = terminal_decode_parms(dict, chain_len);
 
-    let decoded = match filter.as_deref() {
+    let decoded = match filter {
         None => decode_raw(&input, w, h, is_mask, dict, &src.colour),
         Some(f) if is_transport_filter(f) => decode_raw(&input, w, h, is_mask, dict, &src.colour),
         Some("CCITTFaxDecode") => decode_ccitt(&input, w, h, is_mask, parms).map(|mut s| {
@@ -177,13 +180,13 @@ pub(super) fn decode_image_stream<
         Some(other) => return Err(format!("unsupported filter {other:?}")),
     };
 
-    let mut samples = decoded.ok_or_else(|| match filter.as_deref() {
+    let mut samples = decoded.ok_or_else(|| match filter {
         Some(codec @ ("CCITTFaxDecode" | "DCTDecode" | "JPXDecode" | "JBIG2Decode")) => {
             format!("{codec} decode failed")
         }
         _ => "raw/unfiltered decode failed".to_owned(),
     })?;
-    let image_filter = ImageFilter::from_filter_str(filter.as_deref());
+    let image_filter = ImageFilter::from_filter_str(filter);
 
     // A codec's colour key is compared with its decoded samples; a raw
     // image's was compared with its stored samples in `decode_raw`.
