@@ -59,14 +59,18 @@ pub(crate) fn read_name(src: &[u8], pos: &mut usize) -> Vec<u8> {
         }
         *pos += 1;
     }
-    let raw = &src[start..*pos];
+    decode_name(&src[start..*pos]).into_owned()
+}
 
-    // Fast path: no '#' escape sequences (the common case).
+/// The bytes of the name whose source text (without the leading `/`) is
+/// `raw`, with each `#xx` escape decoded (ISO 32000-2 §7.3.5).
+///
+/// Borrows `raw` when it holds no `#`, the common case.
+#[must_use]
+pub fn decode_name(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     if !raw.contains(&b'#') {
-        return raw.to_vec();
+        return std::borrow::Cow::Borrowed(raw);
     }
-
-    // Decode #xx sequences (PDF §7.3.5).
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {
@@ -78,7 +82,7 @@ pub(crate) fn read_name(src: &[u8], pos: &mut usize) -> Vec<u8> {
             i += 1;
         }
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// Read a literal `(string)` starting at `pos` (pointing at `(`).

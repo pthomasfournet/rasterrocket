@@ -439,7 +439,7 @@ pub fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
             let props = operands.pop();
             let tag = operands.pop();
             match (&tag, &props) {
-                (Some(Token::Name(t)), Some(Token::Name(k))) if t == b"OC" => {
+                (Some(Token::Name(t)), Some(Token::Name(k))) if t.as_ref() == b"OC" => {
                     Operator::BeginOptionalContent(k.to_vec())
                 }
                 _ => Operator::BeginMarkedContent,

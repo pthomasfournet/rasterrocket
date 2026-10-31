@@ -7,6 +7,8 @@
 //! Inline image data (`BI … ID … EI`) is handled as a single [`Token::InlineImage`]
 //! so the caller never sees a bare `BI` operator keyword.
 
+use std::borrow::Cow;
+
 use crate::resources::image::inline::{inline_data_len, parse_inline_params};
 
 /// A single token from a PDF content stream.
@@ -16,8 +18,9 @@ pub enum Token<'a> {
     Number(f64),
     /// Boolean literal (`true` / `false`).
     Bool(bool),
-    /// Name operand (`/Foo`) — slice into the source buffer, no leading `/`.
-    Name(&'a [u8]),
+    /// Name operand (`/Foo`) without the leading `/`, its `#xx` escapes
+    /// decoded (PDF §7.3.5); borrowed from the source when it has none.
+    Name(Cow<'a, [u8]>),
     /// Literal string operand (`(…)`) or hex string (`<…>`), decoded.
     String(Vec<u8>),
     /// Array operand (`[…]`), elements already decoded.
@@ -112,7 +115,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    fn read_name(&mut self) -> &'a [u8] {
+    fn read_name(&mut self) -> Cow<'a, [u8]> {
         // Caller has verified the current byte is '/'; skip it.
         self.advance();
         let start = self.pos;
@@ -122,7 +125,7 @@ impl<'a> Tokenizer<'a> {
             }
             self.advance();
         }
-        &self.src[start..self.pos]
+        pdf::decode_name(&self.src[start..self.pos])
     }
 
     fn read_literal_string(&mut self) -> Vec<u8> {
@@ -542,6 +545,16 @@ mod tests {
         Tokenizer::new(src).collect()
     }
 
+    fn name_tok(bytes: &[u8]) -> Token<'_> {
+        Token::Name(Cow::Borrowed(bytes))
+    }
+
+    #[test]
+    fn name_escapes_are_decoded() {
+        assert_eq!(tokens(b"/F#31"), [name_tok(b"F1")]);
+        assert_eq!(tokens(b"/A#20B#2f"), [name_tok(b"A B/")]);
+    }
+
     #[test]
     fn numbers() {
         let t = tokens(b"1 2.5 -3 +4.0");
@@ -561,7 +574,7 @@ mod tests {
     #[test]
     fn name() {
         let t = tokens(b"/Helvetica");
-        assert_eq!(t[0], Token::Name(b"Helvetica"));
+        assert_eq!(t[0], name_tok(b"Helvetica"));
     }
 
     #[test]
@@ -699,7 +712,7 @@ mod tests {
         // the following tokens normally.
         let t = tokens(b"> /Name cm");
         assert_eq!(t.len(), 2);
-        assert_eq!(t[0], Token::Name(b"Name"));
+        assert_eq!(t[0], name_tok(b"Name"));
         assert_eq!(t[1], Token::Op(b"cm"));
     }
 
@@ -737,8 +750,8 @@ mod tests {
         assert_eq!(
             tokens(b"/P <</MCID 0 >>BDC"),
             vec![
-                Token::Name(b"P"),
-                Token::Dict(vec![Token::Name(b"MCID"), Token::Number(0.0)]),
+                name_tok(b"P"),
+                Token::Dict(vec![name_tok(b"MCID"), Token::Number(0.0)]),
                 Token::Op(b"BDC"),
             ]
         );
@@ -767,15 +780,12 @@ mod tests {
         assert_eq!(
             tokens(b"/Span<</ActualText<FEFF00A0>/A<</B[1]>>>>BDC EMC"),
             vec![
-                Token::Name(b"Span"),
+                name_tok(b"Span"),
                 Token::Dict(vec![
-                    Token::Name(b"ActualText"),
+                    name_tok(b"ActualText"),
                     Token::String(vec![0xFE, 0xFF, 0x00, 0xA0]),
-                    Token::Name(b"A"),
-                    Token::Dict(vec![
-                        Token::Name(b"B"),
-                        Token::Array(vec![Token::Number(1.0)])
-                    ]),
+                    name_tok(b"A"),
+                    Token::Dict(vec![name_tok(b"B"), Token::Array(vec![Token::Number(1.0)])]),
                 ]),
                 Token::Op(b"BDC"),
                 Token::Op(b"EMC"),

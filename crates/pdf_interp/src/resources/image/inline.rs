@@ -298,7 +298,7 @@ pub(super) fn inline_token_to_object(tok: &crate::content::tokenizer::Token<'_>)
             let mut dict = Dictionary::new();
             for [key, value] in items.as_chunks::<2>().0 {
                 if let Token::Name(key) = key {
-                    dict.set(*key, inline_token_to_object(value));
+                    dict.set(key.as_ref(), inline_token_to_object(value));
                 }
             }
             Object::Dictionary(dict)

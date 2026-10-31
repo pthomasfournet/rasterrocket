@@ -171,9 +171,9 @@ mod tests {
         assert_eq!(stack, [Token::String(b"stray".to_vec())]);
 
         let mut stack = vec![
-            Token::Name(b"stray"),
+            Token::Name(b"stray".as_slice().into()),
             Token::Number(0.25),
-            Token::Name(b"P0"),
+            Token::Name(b"P0".as_slice().into()),
         ];
         let ScnOperands::Pattern { name, components } = pop_scn(&mut stack) else {
             panic!("a pattern name");

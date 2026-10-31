@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 
 use super::content::{n, string, text_or_stream};
+use super::typeset::name;
 
 /// A default appearance string split into its `Tf` font and size and the
 /// remaining operators (the text colour).
@@ -58,13 +59,7 @@ impl DefaultAppearance {
 
     /// Begin a text object in `font` at `size` with these colours.
     pub(super) fn begin_text(&self, s: &mut String, font: &[u8], size: f64) {
-        let _ = writeln!(
-            s,
-            "BT /{} {} Tf {}",
-            String::from_utf8_lossy(font),
-            n(size),
-            self.rest
-        );
+        let _ = writeln!(s, "BT {} {} Tf {}", name(font), n(size), self.rest);
     }
 
     /// The components of the last `g`, `rg` or `k` operator, the colour

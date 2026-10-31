@@ -49,13 +49,13 @@ pub(super) trait Typesetter {
         let mut current = font.to_vec();
         for run in self.runs(font, text) {
             if run.font != current {
-                let _ = write!(s, "/{} {} Tf ", String::from_utf8_lossy(&run.font), n(size));
+                let _ = write!(s, "{} {} Tf ", name(&run.font), n(size));
                 current.clone_from(&run.font);
             }
             let _ = write!(s, "{} Tj ", hex(&run.codes));
         }
         if current != font {
-            let _ = write!(s, "/{} {} Tf ", String::from_utf8_lossy(font), n(size));
+            let _ = write!(s, "{} {} Tf ", name(font), n(size));
         }
     }
 }
@@ -86,6 +86,22 @@ pub(super) fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02X}");
     }
     s.push('>');
+    s
+}
+
+/// A content-stream name object `/…` of `bytes`, writing as `#xx` every
+/// byte outside `!`..=`~`, every delimiter and `#` itself (PDF §7.3.5), so
+/// that the content-stream tokenizer reads back exactly `bytes`.
+pub(super) fn name(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() + 1);
+    s.push('/');
+    for &b in bytes {
+        if b.is_ascii_graphic() && !b"()<>[]{}/%#".contains(&b) {
+            s.push(char::from(b));
+        } else {
+            let _ = write!(s, "#{b:02X}");
+        }
+    }
     s
 }
 
@@ -194,7 +210,21 @@ fn encode_win_ansi(text: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Run, Typesetter, WinAnsiTypesetter, wrap};
+    use super::{Run, Typesetter, WinAnsiTypesetter, name, wrap};
+
+    #[test]
+    fn a_written_name_reads_back_as_the_same_bytes() {
+        let raw = b"Helv Bold/#(1)\x80";
+        let written = name(raw);
+        assert_eq!(written, "/Helv#20Bold#2F#23#281#29#80");
+        let tokens: Vec<_> = crate::content::Tokenizer::new(written.as_bytes()).collect();
+        assert_eq!(
+            tokens,
+            [crate::content::tokenizer::Token::Name(
+                raw.as_slice().into()
+            )]
+        );
+    }
 
     #[test]
     fn wrapping_breaks_at_line_ends_and_spaces() {

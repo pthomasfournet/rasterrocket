@@ -33,7 +33,7 @@ pub use crypt::{OpenOptions, Password, msg_gate_declined};
 pub use dictionary::Dictionary;
 pub use document::{ContentFailure, Document, PageContent, is_encrypted};
 pub use error::PdfError;
-pub use lexer::parse_number;
+pub use lexer::{decode_name, parse_number};
 pub use linearization::LinearizationHints;
 pub use object::{Object, ObjectId, Stream, StringFormat, parse_object};
 pub use page_tree::descend_to_page_index;
