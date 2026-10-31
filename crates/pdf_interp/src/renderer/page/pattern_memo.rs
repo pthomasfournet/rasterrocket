@@ -6,12 +6,13 @@
 //! exact bits of the matrix that places it and of the page height, and, when
 //! the resources in effect replace a device colour space with a default
 //! space, the resource context, so every use sees what a fresh resolve under
-//! its own matrix and resources returns.  A tiling
-//! cell is keyed by its pattern stream; its raster additionally by the exact
-//! bits of the pattern-to-device matrix, the tint of an uncoloured pattern,
-//! for a pattern without its own resources the resource context the content
-//! resolves names in, and the sub-pixel phase it is rasterised at.  A raster rendered while the page's work
-//! budget ran out is not kept.
+//! its own matrix and resources returns.  A tiling cell is keyed by its
+//! pattern stream and, for a pattern without resources of its own, by the
+//! resource context its content resolves names in, which sizes its inline
+//! images.  A cell's raster is keyed additionally by the exact bits of the
+//! pattern-to-device matrix, the tint of an uncoloured pattern and the
+//! sub-pixel phase it is rasterised at.  A raster rendered while the page's
+//! work budget ran out is not kept.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -123,7 +124,9 @@ pub(super) enum CellRaster {
 pub(super) struct PatternMemo {
     shading_patterns: HashMap<PlacedKey, Option<Rc<ShadingPattern>>>,
     shadings: HashMap<PlacedKey, Option<Rc<ResolvedShading>>>,
-    cells: HashMap<ObjectId, Option<Rc<TilingCell>>>,
+    /// Keyed by pattern stream and, for a pattern without resources of its
+    /// own, by the resource context the content was parsed in.
+    cells: HashMap<(ObjectId, Option<ObjectId>), Option<Rc<TilingCell>>>,
     rasters: HashMap<RasterKey, CellRaster>,
     /// Rasters asked for once without being rendered whole.
     deferred: HashSet<RasterKey>,
@@ -222,14 +225,27 @@ impl PatternMemo {
         )
     }
 
-    /// The descriptor and content of tiling pattern `id`, kept or from
-    /// `resolve`.
+    /// The descriptor and content of tiling pattern `id` used in resource
+    /// context `context`, kept or from `resolve`.  A pattern with resources
+    /// of its own, or one that does not resolve, is kept for every context.
     pub(super) fn cell(
         &mut self,
         id: ObjectId,
+        context: ObjectId,
         resolve: impl FnOnce() -> Option<Rc<TilingCell>>,
     ) -> Option<Rc<TilingCell>> {
-        kept_or(&mut self.cells, &mut self.budget, id, |_| 0, resolve)
+        if let Some(kept) = [(id, None), (id, Some(context))]
+            .iter()
+            .find_map(|key| self.cells.get(key))
+        {
+            return kept.clone();
+        }
+        let cell = resolve();
+        let inherits = cell.as_ref().is_some_and(|c| !c.desc.has_own_resources);
+        let _ = self
+            .cells
+            .insert((id, inherits.then_some(context)), cell.clone());
+        cell
     }
 
     /// The kept raster at `key`.
@@ -314,7 +330,8 @@ impl PageRenderer<'_> {
         let Some(ResourceKey::Object(id)) = self.resources.pattern_key(name) else {
             return None;
         };
-        self.pattern_memo.borrow_mut().cell(id, || {
+        let context = self.resources.resource_context_id();
+        self.pattern_memo.borrow_mut().cell(id, context, || {
             self.resources.tiling_pattern(name).map(|desc| {
                 // The cell's inline images name colour spaces from the
                 // pattern's own resources, or the parent context's when it
@@ -391,6 +408,50 @@ mod tests {
     /// otherwise resolve to `None`.
     fn holds(memo: &mut PatternMemo, key: PlacedKey) -> bool {
         memo.shading(key, || None).is_some()
+    }
+
+    /// The content of a pattern without resources of its own is parsed in
+    /// each resource context it is used in: an inline image naming a colour
+    /// space takes its data length from the context's definition.
+    #[test]
+    fn an_inheriting_cell_is_parsed_per_resource_context() {
+        // One RGB sample whose bytes read `EI`: a one-component space ends
+        // the image data after the first byte.
+        let cell = b"BI /W 1 /H 1 /CS /C /BPC 8 ID  EI\nEI";
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (4, b"<< /Type /Page >>".to_vec()),
+            (
+                5,
+                format!(
+                    "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] \
+                     /XStep 1 /YStep 1 /Length {} >>\nstream\n{}\nendstream",
+                    cell.len(),
+                    String::from_utf8_lossy(cell)
+                )
+                .into_bytes(),
+            ),
+        ]);
+        let resources = |space: &str| {
+            pdf::parse_object(
+                format!("<< /Pattern << /P 5 0 R >> /ColorSpace << /C /{space} >> >>").as_bytes(),
+                &mut 0,
+            )
+            .unwrap()
+        };
+        let (gray, rgb) = (resources("DeviceGray"), resources("DeviceRGB"));
+        let mut renderer = PageRenderer::new(1, 1, &doc, (4, 0));
+        let page = renderer.resources.inherited();
+        let image_len = |renderer: &PageRenderer<'_>| {
+            let cell = renderer.memo_tiling_cell(b"P").expect("cell");
+            match cell.ops.first() {
+                Some(Operator::InlineImage { data, .. }) => data.len(),
+                other => panic!("{other:?}"),
+            }
+        };
+        renderer.resources = page.with_resources((10, 0), gray.as_dict().unwrap());
+        assert_eq!(image_len(&renderer), 1);
+        renderer.resources = page.with_resources((11, 0), rgb.as_dict().unwrap());
+        assert_eq!(image_len(&renderer), 3);
     }
 
     #[test]
