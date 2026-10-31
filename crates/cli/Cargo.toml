@@ -34,12 +34,12 @@ default          = ["bundled-fonts"]
 bundled-fonts    = ["pdf_raster/bundled-fonts"]
 
 [dependencies]
-pdf_raster  = { package = "rasterrocket",        path = "../pdf_raster", version = "1.5", default-features = false }
-comic       = { package = "rasterrocket-comic",  path = "../comic",      version = "1.5" }
-camera      = { package = "rasterrocket-camera", path = "../camera",     version = "1.5" }
-encode      = { package = "rasterrocket-encode", path = "../encode",     version = "1.5" }
-color       = { package = "rasterrocket-color",  path = "../color",      version = "1.5" }
-raster      = { package = "rasterrocket-render", path = "../raster",     version = "1.5" }
+pdf_raster  = { package = "rasterrocket",        path = "../pdf_raster", version = "2.0", default-features = false }
+comic       = { package = "rasterrocket-comic",  path = "../comic",      version = "2.0" }
+camera      = { package = "rasterrocket-camera", path = "../camera",     version = "2.0" }
+encode      = { package = "rasterrocket-encode", path = "../encode",     version = "2.0" }
+color       = { package = "rasterrocket-color",  path = "../color",      version = "2.0" }
+raster      = { package = "rasterrocket-render", path = "../raster",     version = "2.0" }
 clap        = { version = "4", features = ["derive"] }
 rayon       = "1"
 env_logger  = { workspace = true }

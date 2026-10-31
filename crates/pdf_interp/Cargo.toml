@@ -34,11 +34,11 @@ bundled-fonts    = []
 [dependencies]
 gpu      = { package = "rasterrocket-gpu",    path = "../gpu",    optional = true, default-features = false }
 bytemuck = { workspace = true, optional = true }
-raster = { package = "rasterrocket-render", path = "../raster", version = "1.5" }
-color  = { package = "rasterrocket-color",  path = "../color",  version = "1.5" }
-font   = { package = "rasterrocket-font",   path = "../font",   version = "1.5" }
-encode = { package = "rasterrocket-encode", path = "../encode", version = "1.5" }
-pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "1.5" }
+raster = { package = "rasterrocket-render", path = "../raster", version = "2.0" }
+color  = { package = "rasterrocket-color",  path = "../color",  version = "2.0" }
+font   = { package = "rasterrocket-font",   path = "../font",   version = "2.0" }
+encode = { package = "rasterrocket-encode", path = "../encode", version = "2.0" }
+pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "2.0" }
 log    = { workspace = true }
 # CCITT fax: a local fork of hayro-ccitt (crates/ccitt).
 hayro-ccitt = { path = "../ccitt" }
