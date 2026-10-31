@@ -238,13 +238,19 @@ pub(super) fn decode_text_string(bytes: &[u8]) -> String {
 
 /// The character of a `PDFDocEncoding` byte (Annex D.2).
 fn pdf_doc_char(b: u8) -> char {
+    /// The spacing accents of 0x18–0x1F.
+    const ACCENTS: [u16; 8] = [
+        0x02D8, 0x02C7, 0x02C6, 0x02D9, 0x02DD, 0x02DB, 0x02DA, 0x02DC,
+    ];
     const HIGH: [u16; 32] = [
         0x2022, 0x2020, 0x2021, 0x2026, 0x2014, 0x2013, 0x0192, 0x2044, 0x2039, 0x203A, 0x2212,
         0x2030, 0x201E, 0x201C, 0x201D, 0x2018, 0x2019, 0x201A, 0x2122, 0xFB01, 0xFB02, 0x0141,
         0x0152, 0x0160, 0x0178, 0x017D, 0x0131, 0x0142, 0x0153, 0x0161, 0x017E, 0xFFFD,
     ];
+    let table = |t: &[u16], i: u8| char::from_u32(u32::from(t[usize::from(i)])).unwrap_or('?');
     match b {
-        0x80..=0x9F => char::from_u32(u32::from(HIGH[usize::from(b - 0x80)])).unwrap_or('?'),
+        0x18..=0x1F => table(&ACCENTS, b - 0x18),
+        0x80..=0x9F => table(&HIGH, b - 0x80),
         0xA0 => '\u{20AC}',
         _ => char::from(b),
     }
@@ -297,5 +303,6 @@ mod tests {
         assert_eq!(decode_text_string(b"\xFE\xFF\x00H\x00\xE9"), "H\u{e9}");
         assert_eq!(decode_text_string(b"a\x80b"), "a\u{2022}b");
         assert_eq!(decode_text_string(b"caf\xE9"), "caf\u{e9}");
+        assert_eq!(decode_text_string(b"\x18\x1F"), "\u{2d8}\u{2dc}");
     }
 }
