@@ -30,6 +30,12 @@ const MARKUP_LINE_WIDTH: f64 = 1.0;
 /// Period and amplitude of the `Squiggly` zigzag.
 const SQUIGGLE_STEP: f64 = 2.0;
 
+/// Most zigzag steps of one `Squiggly` quadrilateral: those spanning the
+/// largest page side, 14 400 units (Annex C.2).  A wider quadrilateral
+/// reaches past any page, and its steps there would only lengthen the
+/// content stream.
+const MAX_SQUIGGLE_STEPS: f64 = 14_400.0 / SQUIGGLE_STEP;
+
 /// The appearance of the markup annotation `annot` with the normalised
 /// rectangle `rect`, or `None` when its subtype has no geometric appearance
 /// or the geometry it needs is absent.
@@ -271,9 +277,11 @@ fn markup_line(s: &mut String, subtype: &[u8], q: [f64; 4]) {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "a quad is at most a page wide, far below u32::MAX steps"
+            reason = "clamped to [0, MAX_SQUIGGLE_STEPS], an integer below u32::MAX"
         )]
-        let steps = ((q[2] - q[0]) / SQUIGGLE_STEP).floor().max(0.0) as u32;
+        let steps = ((q[2] - q[0]) / SQUIGGLE_STEP)
+            .floor()
+            .clamp(0.0, MAX_SQUIGGLE_STEPS) as u32;
         for i in 1..=steps {
             let x = SQUIGGLE_STEP.mul_add(f64::from(i), q[0]);
             let _ = writeln!(s, "{} {} l", n(x), n(if i % 2 == 0 { top } else { bottom }));
@@ -378,6 +386,16 @@ mod tests {
             .expect("an appearance");
         assert!(c.contains("[2 1] 0 d"), "{c}");
         assert!(c.contains(" c\n"), "{c}");
+    }
+
+    #[test]
+    fn a_squiggle_stops_at_the_largest_page_width() {
+        let c = content(
+            "<< /Subtype /Squiggly /Rect [0 0 10 10] \
+             /QuadPoints [0 10 1000000000000 10 0 0 1000000000000 0] >>",
+        )
+        .expect("an appearance");
+        assert_eq!(c.matches(" l\n").count(), 7_200, "one line per step");
     }
 
     #[test]
