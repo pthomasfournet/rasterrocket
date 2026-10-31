@@ -9,6 +9,15 @@
 #       apt install bolt          # Ubuntu 24.04+
 #       or download a build from  https://github.com/llvm/llvm-project/releases
 #
+# Codegen flags: $RUSTFLAGS when set, else `-C target-cpu=native` (the
+# `.cargo/config.toml` default, which any RUSTFLAGS value replaces).  The
+# PGO flags are appended to them.
+#
+# The BOLT step instruments the PGO binary, replays the training render on
+# it and reorders the binary from that profile.  BOLT needs the symbol table
+# and the static relocations, so that build keeps both (`strip = "none"`,
+# `--emit-relocs`) and the result is stripped afterwards.
+#
 # Output: target/release/rrocket (PGO-optimised; BOLT applied on top if available).
 set -euo pipefail
 
@@ -16,6 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 BINARY="./target/release/rrocket"
+BASE_RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}"
 
 # --- Locate llvm-profdata. -----------------------------------------------------
 # rustup ships it under the toolchain sysroot when `llvm-tools-preview` is added.
@@ -42,19 +52,44 @@ fi
 # --- Scratch dirs cleaned on exit. --------------------------------------------
 PROFDIR="$(mktemp -d -t pdf_raster_pgo.XXXXXX)"
 TRAIN_OUTDIR="$(mktemp -d -t pdf_raster_train.XXXXXX)"
-TRAIN_OUT_PREFIX="$TRAIN_OUTDIR/page"
 cleanup() {
     rm -rf "$PROFDIR" "$TRAIN_OUTDIR"
 }
 trap cleanup EXIT
 
+# train BIN: render the training pages with BIN, discarding the output.
+# Fails when BIN fails or writes no page.
+train() {
+    rm -rf "${TRAIN_OUTDIR:?}"/*
+    if ! "$1" "$TRAINING_PDF" "$TRAIN_OUTDIR/page" -f 1 -l 10 >/dev/null; then
+        echo "error: the training run of $1 failed." >&2
+        return 1
+    fi
+    local pages
+    pages="$(find "$TRAIN_OUTDIR" -type f | wc -l)"
+    if [[ "$pages" -eq 0 ]]; then
+        echo "error: the training run of $1 wrote no pages." >&2
+        return 1
+    fi
+    echo "         rendered $pages page(s)"
+}
+
+if command -v llvm-bolt >/dev/null 2>&1; then
+    BOLT=true
+    # BOLT rewrites relocation-mode binaries only, and refuses stripped ones.
+    PGO_RUSTFLAGS_EXTRA="-C link-arg=-Wl,--emit-relocs"
+    export CARGO_PROFILE_RELEASE_STRIP=none
+else
+    BOLT=false
+    PGO_RUSTFLAGS_EXTRA=""
+fi
+
 echo "==> [1/4] Instrumented build (profile-generate)"
 echo "         PROFDIR=$PROFDIR"
-RUSTFLAGS="-Cprofile-generate=$PROFDIR" cargo build --release -p rasterrocket-cli
+RUSTFLAGS="$BASE_RUSTFLAGS -Cprofile-generate=$PROFDIR" cargo build --release -p rasterrocket-cli
 
 echo "==> [2/4] Profile training: rendering 10 pages of $TRAINING_PDF"
-"$BINARY" "$TRAINING_PDF" "$TRAIN_OUT_PREFIX" -f 1 -l 10 >/dev/null
-ls -1 "$TRAIN_OUTDIR" | head -3
+train "$BINARY" || exit 1
 RAW_PROFILES="$(find "$PROFDIR" -name '*.profraw' | wc -l)"
 if [[ "$RAW_PROFILES" -eq 0 ]]; then
     echo "error: no .profraw files produced — training run did not write profile data." >&2
@@ -66,26 +101,34 @@ echo "==> [3/4] Merging PGO profile data ($PROFDIR -> merged.profdata)"
 "$PROFDATA" merge -o "$PROFDIR/merged.profdata" "$PROFDIR"
 
 echo "==> [4/4] PGO-guided rebuild (profile-use)"
-RUSTFLAGS="-Cprofile-use=$PROFDIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function" \
+RUSTFLAGS="$BASE_RUSTFLAGS -Cprofile-use=$PROFDIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function $PGO_RUSTFLAGS_EXTRA" \
     cargo build --release -p rasterrocket-cli
 
-if command -v llvm-bolt >/dev/null 2>&1; then
+if $BOLT; then
     echo "==> [bonus] BOLT optimisation"
-    BOLT_BACKUP="$(mktemp -t rrocket.pre-bolt.XXXXXX)"
-    cp "$BINARY" "$BOLT_BACKUP"
-    if llvm-bolt "$BOLT_BACKUP" \
-            -o "$BINARY" \
+    BOLT_INSTRUMENTED="$PROFDIR/rrocket.bolt-instrumented"
+    BOLT_OUT="$PROFDIR/rrocket.bolt"
+    BOLT_FDATA="$PROFDIR/rrocket.fdata"
+    if llvm-bolt "$BINARY" -instrument -o "$BOLT_INSTRUMENTED" \
+            --instrumentation-file="$BOLT_FDATA" \
+        && train "$BOLT_INSTRUMENTED" \
+        && llvm-bolt "$BINARY" -o "$BOLT_OUT" -data="$BOLT_FDATA" \
             -reorder-blocks=ext-tsp \
             -reorder-functions=hfsort \
             -split-functions \
             -split-all-cold \
             -dyno-stats; then
+        cp "$BOLT_OUT" "$BINARY"
         echo "    BOLT applied."
     else
-        echo "    BOLT failed; restoring PGO-only binary." >&2
-        cp "$BOLT_BACKUP" "$BINARY"
+        echo "    BOLT failed; keeping the PGO-only binary." >&2
     fi
-    rm -f "$BOLT_BACKUP"
+    # The release profile strips symbols; the BOLT build kept them.
+    if command -v strip >/dev/null 2>&1; then
+        strip "$BINARY"
+    else
+        echo "    strip not on PATH; $BINARY keeps its symbol table." >&2
+    fi
 else
     echo "==> [bonus] BOLT not on PATH — skipping."
     echo "         Install: apt install bolt   (Ubuntu 24.04+)"
