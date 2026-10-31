@@ -335,10 +335,12 @@ mod tests {
     }
 
     /// A codestream whose SIZ declares 30 000 × 30 000 RGB samples, under a
-    /// dictionary that declares 8 × 8, is refused by the decode budget
-    /// before the decoder allocates its component buffers.
+    /// dictionary that declares 8 × 8, is refused before the decoder
+    /// allocates its component buffers.  The decoder's own sample limit
+    /// (2^30, equal to the decode budget for 8-bit output) is checked
+    /// first, when the header is parsed.
     #[test]
-    fn jpx_codestream_over_the_decode_budget_is_refused() {
+    fn jpx_codestream_over_the_sample_limit_is_refused() {
         let mut j2k = include_bytes!("../testdata/rgb8.j2k").to_vec();
         assert_eq!(&j2k[..4], &[0xFF, 0x4F, 0xFF, 0x51]);
         // Xsiz, Ysiz, then XTsiz and YTsiz (one tile), after Lsiz and Rsiz.
@@ -350,19 +352,19 @@ mod tests {
             smask_in_data: 0,
         };
         #[cfg(feature = "nvjpeg2k")]
-        let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the budget");
+        let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the limit");
         #[cfg(not(feature = "nvjpeg2k"))]
-        let err = decode_jpx(&j2k, 8, 8, None, opts).expect_err("over the budget");
-        assert!(err.contains("budget"), "{err}");
+        let err = decode_jpx(&j2k, 8, 8, None, opts).expect_err("over the limit");
+        assert!(err.contains("too large"), "{err}");
         let indexed = JpxOptions {
             indices: true,
             ..opts
         };
         #[cfg(feature = "nvjpeg2k")]
-        let err = decode_jpx(&j2k, 8, 8, None, indexed, None).expect_err("over the budget");
+        let err = decode_jpx(&j2k, 8, 8, None, indexed, None).expect_err("over the limit");
         #[cfg(not(feature = "nvjpeg2k"))]
-        let err = decode_jpx(&j2k, 8, 8, None, indexed).expect_err("over the budget");
-        assert!(err.contains("budget"), "{err}");
+        let err = decode_jpx(&j2k, 8, 8, None, indexed).expect_err("over the limit");
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[cfg(not(feature = "nvjpeg2k"))]
