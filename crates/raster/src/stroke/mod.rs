@@ -10,7 +10,7 @@
 //! edge case looks wrong.
 
 mod path;
-use path::{dash_cycle, flatten_path, make_dashed_path, make_stroke_path};
+use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, make_stroke_path};
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
@@ -106,6 +106,10 @@ fn flattened_dashed(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -
     else {
         return Some(path);
     };
+    let count = dash_count(&path, &dash);
+    if count.is_nan() || count > MAX_DASHES {
+        return Some(path);
+    }
     let dashed = make_dashed_path(&path, &dash, phase);
     (!dashed.pts.is_empty()).then_some(dashed)
 }
@@ -476,6 +480,30 @@ mod tests {
         let dashed = make_dashed_path(&path, &dash, phase);
         let xs: Vec<f64> = dashed.pts.iter().map(|p| p.x).collect();
         assert_eq!(xs, [5.0, 11.0, 17.0, 20.0]);
+    }
+
+    /// A path far longer than its dash cycle strokes solid instead of being
+    /// cut into more than `MAX_DASHES` dashes.
+    #[test]
+    fn dash_count_beyond_the_budget_strokes_solid() {
+        let mut b = PathBuilder::new();
+        b.move_to(0.0, 0.0).unwrap();
+        b.line_to(1e9, 0.0).unwrap();
+        let path = b.build();
+        let params = StrokeParams {
+            line_width: 1.0,
+            line_dash: &[0.5, 0.5],
+            ..default_params()
+        };
+        let stroked = flattened_dashed(&path, &identity_matrix(), &params).expect("solid");
+        assert_eq!(stroked.pts.len(), 2, "the solid line itself");
+
+        // Within the budget the same pattern still dashes.
+        let mut b = PathBuilder::new();
+        b.move_to(0.0, 0.0).unwrap();
+        b.line_to(4.0, 0.0).unwrap();
+        let short = flattened_dashed(&b.build(), &identity_matrix(), &params).expect("dashed");
+        assert_eq!(short.pts.len(), 8, "four dashes of two points");
     }
 
     /// `flatten_path` must convert a curve to only straight segments (no CURVE flags).

@@ -89,6 +89,36 @@ pub(super) fn flatten_path(path: &Path, _matrix: &[f64; 6], flatness: f64) -> Pa
 /// strokes solid.
 const MIN_DASH_CYCLE_PX: f64 = 0.1;
 
+/// Most dashes one stroke is cut into; a path and pattern that would yield
+/// more stroke solid.  Every dash adds at least two points to the dashed
+/// path, so the bound keeps that path to a few tens of megabytes however
+/// long the path is relative to its dash cycle.
+pub(super) const MAX_DASHES: f64 = 1_048_576.0;
+
+/// Number of dashes that dashing `path` with the cycle `dash` produces:
+/// the path length over the cycle length, times the dashes per cycle.
+///
+/// `dash` is a cycle as [`dash_cycle`] returns it: an even number of
+/// entries with a positive sum.  The estimate is exact to within one cycle
+/// per subpath; a non-finite path length gives a non-finite count.
+#[must_use]
+pub(super) fn dash_count(path: &Path, dash: &[f64]) -> f64 {
+    let length: f64 = (1..path.pts.len())
+        .filter(|&k| !path.flags[k].is_first())
+        .map(|k| {
+            let (a, b) = (path.pts[k - 1], path.pts[k]);
+            splash_dist(a.x, a.y, b.x, b.y)
+        })
+        .sum();
+    let period: f64 = dash.iter().sum();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "dash arrays are far shorter than 2^52 entries"
+    )]
+    let per_cycle = (dash.len() / 2) as f64;
+    (length / period + 1.0) * per_cycle
+}
+
 /// The dash pattern of `line_dash` and `line_dash_phase` as the lengths of
 /// one full on/off cycle and the phase reduced into it, or `None` for a solid
 /// stroke.
