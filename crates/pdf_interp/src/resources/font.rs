@@ -102,9 +102,7 @@ pub struct CidEncoding {
     pub default_width: i32,
 
     /// Explicit per-CID advance widths from the `W` array.
-    ///
-    /// Stored as `(first_cid, [widths…])` segments matching the PDF `W` format.
-    pub widths: Vec<(u32, Vec<i32>)>,
+    pub widths: CidMetrics<i32>,
 
     /// Vertical writing mode: the `Encoding` `CMap` has `WMode` 1.
     pub vertical: bool,
@@ -114,9 +112,8 @@ pub struct CidEncoding {
     /// default `[880 -1000]`).
     pub default_vertical: [i32; 2],
 
-    /// `W2`: explicit per-CID vertical metrics `[w1y, vx, vy]`, stored as
-    /// `(first_cid, [metrics…])` segments.
-    pub vertical_metrics: VerticalMetricsSegments,
+    /// `W2`: explicit per-CID vertical metrics `[w1y, vx, vy]`.
+    pub vertical_metrics: CidMetrics<[i32; 3]>,
 
     /// The font's `ToUnicode` `CMap` (code → Unicode), read for a font
     /// without a program: a substitute selects its glyphs by Unicode value,
@@ -124,8 +121,68 @@ pub struct CidEncoding {
     pub to_unicode: Option<Arc<CMap>>,
 }
 
-/// `W2` segments: `(first_cid, [[w1y, vx, vy], …])`.
-pub type VerticalMetricsSegments = Vec<(u32, Vec<[i32; 3]>)>;
+/// Per-CID values of a `W` or `W2` array: `(first_cid, values)` segments,
+/// the value of CID `first_cid + k` at index `k`.  Where segments overlap,
+/// the earlier one in the array applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CidMetrics<T> {
+    segments: Vec<(u32, Vec<T>)>,
+    /// The segments ascend by first CID without overlapping, so a lookup
+    /// bisects instead of scanning.
+    sorted: bool,
+}
+
+impl<T> CidMetrics<T> {
+    /// The metrics of `segments`, in array order.
+    #[must_use]
+    pub fn new(segments: Vec<(u32, Vec<T>)>) -> Self {
+        let sorted = segments.windows(2).all(|pair| {
+            let [(first, values), (next, _)] = pair else {
+                return true;
+            };
+            u64::from(*first) + values.len() as u64 <= u64::from(*next)
+        });
+        Self { segments, sorted }
+    }
+
+    /// The value of `cid`, `None` when no segment covers it.
+    #[must_use]
+    pub fn get(&self, cid: u32) -> Option<&T> {
+        if self.sorted {
+            let after = self.segments.partition_point(|(first, _)| *first <= cid);
+            Self::value_in(self.segments.get(after.checked_sub(1)?)?, cid)
+        } else {
+            self.segments
+                .iter()
+                .find_map(|segment| Self::value_in(segment, cid))
+        }
+    }
+
+    /// The value of `cid` in the segment `(first, values)`, if it covers
+    /// `cid`.
+    fn value_in((first, values): &(u32, Vec<T>), cid: u32) -> Option<&T> {
+        values.get(usize::try_from(cid.checked_sub(*first)?).ok()?)
+    }
+
+    /// The `(first_cid, values)` segments, in array order.
+    #[must_use]
+    pub fn segments(&self) -> &[(u32, Vec<T>)] {
+        &self.segments
+    }
+
+    /// Each value mapped through `f`.
+    #[must_use]
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> CidMetrics<U> {
+        CidMetrics {
+            segments: self
+                .segments
+                .into_iter()
+                .map(|(first, values)| (first, values.into_iter().map(&mut f).collect()))
+                .collect(),
+            sorted: self.sorted,
+        }
+    }
+}
 
 /// The vertical metrics of one CID in thousandths of a text-space unit
 /// (PDF §9.7.4.3): the vertical advance `w1y` and the position vector
@@ -146,12 +203,8 @@ impl CidEncoding {
     /// `vy`.
     #[must_use]
     pub fn vertical_metrics_for_cid(&self, cid: u32) -> VerticalMetrics {
-        for (first, metrics) in &self.vertical_metrics {
-            if cid >= *first
-                && let Some(&[w1y, vx, vy]) = metrics.get((cid - first) as usize)
-            {
-                return VerticalMetrics { w1y, vx, vy };
-            }
+        if let Some(&[w1y, vx, vy]) = self.vertical_metrics.get(cid) {
+            return VerticalMetrics { w1y, vx, vy };
         }
         VerticalMetrics {
             w1y: self.default_vertical[1],
@@ -165,15 +218,7 @@ impl CidEncoding {
     /// Searches the explicit `W` table first; falls back to `default_width`.
     #[must_use]
     pub fn width_for_cid(&self, cid: u32) -> i32 {
-        for (first, ws) in &self.widths {
-            if cid >= *first {
-                let idx = (cid - first) as usize;
-                if idx < ws.len() {
-                    return ws[idx];
-                }
-            }
-        }
-        self.default_width
+        self.widths.get(cid).copied().unwrap_or(self.default_width)
     }
 
     /// Decode `bytes` into character codes through the `Encoding` `CMap`,
@@ -649,13 +694,14 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     let cid_to_gid = descendant.as_ref().and_then(|d| extract_cid_to_gid(doc, d));
 
     // 5. CIDFont metrics: DW and W, and DW2 and W2 for vertical writing.
-    let (default_width, widths) = descendant
-        .as_ref()
-        .map_or((1000, vec![]), |d| extract_cid_widths(doc, d));
-    let (default_vertical, vertical_metrics) =
-        descendant.as_ref().map_or(([880, -1000], vec![]), |d| {
-            extract_cid_vertical_metrics(doc, d)
-        });
+    let (default_width, widths) = descendant.as_ref().map_or_else(
+        || (1000, CidMetrics::new(Vec::new())),
+        |d| extract_cid_widths(doc, d),
+    );
+    let (default_vertical, vertical_metrics) = descendant.as_ref().map_or_else(
+        || ([880, -1000], CidMetrics::new(Vec::new())),
+        |d| extract_cid_vertical_metrics(doc, d),
+    );
 
     // 6. Determine font kind from CIDFont Subtype.
     let kind = descendant
@@ -1039,255 +1085,142 @@ fn extract_cid_to_gid(doc: &Document, descendant: &Dictionary) -> Option<Vec<u32
     }
 }
 
-/// Hard cap on the number of CID→width entries materialised from one `/W`
-/// array.  The range form `cfirst clast w` expands to `clast − cfirst + 1`
-/// width slots; a hostile or corrupt PDF can chain many maximal ranges to
-/// amplify a tiny `/W` array into gigabytes of `Vec<i32>`.  CIDs are 16-bit
-/// (PDF §9.7.4.3 — at most 65 536 distinct CIDs), so a font can never
-/// legitimately need more than this many slots; past it we stop appending
-/// and warn rather than let the allocator OOM the process (fail loud-graceful,
-/// not silent-hang).
-const MAX_CID_WIDTH_ENTRIES: usize = 0x1_0000;
+/// Greatest number of per-CID values materialised from one `W` or `W2`
+/// array.  The range form `cfirst clast v…` expands to `clast − cfirst + 1`
+/// values, so a few bytes of input could otherwise request gigabytes; CIDs
+/// are 16-bit (PDF §9.7.4.3), so no font needs more than this many.
+const MAX_CID_METRIC_ENTRIES: usize = 0x1_0000;
 
-/// Resolve a single `/W` array element (possibly an indirect reference per
-/// PDF §9.7.4.3 — *any* number in `[ c [w…] cfirst clast w … ]` may be
-/// indirect) to its `Object`.  `doc.resolve` is a no-op pass-through for an
-/// inline (non-reference) element and is depth/cycle-bounded, so a self- or
-/// ring-referential `/W` element degrades to `None` (skip) rather than
-/// hanging or panicking.
-fn resolve_w_elem(doc: &Document, elem: &Object) -> Option<Arc<Object>> {
-    doc.resolve(elem).ok()
+/// The CID a `W` / `W2` element denotes: a non-negative integer within
+/// `u32`.
+fn cid_number(doc: &Document, obj: &Object) -> Option<u32> {
+    let n = number(doc, obj)?;
+    (n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n)).then(|| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "n is an integer within the u32 range"
+        )]
+        let cid = n as u32;
+        cid
+    })
 }
 
-/// Parse the `W` array body into `(first_cid, widths)` segments.
+/// Parse a `W` (`N` = 1) or `W2` (`N` = 3) array into `(first_cid,
+/// values)` segments of `N` metrics per CID.
 ///
-/// `w_arr` is the already-resolved top-level array.  Per PDF §9.7.4.3 the
-/// grammar is `[ c [w1 w2 …]  cfirst clast w  … ]` and *every* element — the
-/// leading CID, the nested width array and each of its elements, the range
-/// `cfirst`/`clast`, and the range width — may itself be an indirect
-/// reference.  Resolving only the top-level `/W` still drops widths for a PDF
-/// that emits indirect *inner* elements, re-creating the "every glyph advances
-/// a full em → scrambled body text" defect on a different input.
-/// `resolve_w_elem` is a cycle-bounded no-op for inline elements, so inline-/W
-/// PDFs are unaffected.
-fn parse_w_segments(doc: &Document, w_arr: &[Object]) -> Vec<(u32, Vec<i32>)> {
-    let mut segments: Vec<(u32, Vec<i32>)> = Vec::new();
-    let mut materialised: usize = 0;
+/// The grammar (PDF §9.7.4.3) is `[c [v…]  cfirst clast v1…vN  …]`, and
+/// every element, the inner arrays' included, may be indirect.  A
+/// malformed entry (an element that is no CID, a descending or wider than
+/// 16-bit range) is skipped; an empty inner array yields no segment, so
+/// the segment count stays bounded by [`MAX_CID_METRIC_ENTRIES`].  `key`
+/// names the array in diagnostics.
+fn parse_cid_metrics<const N: usize>(
+    doc: &Document,
+    arr: &[Object],
+    key: &str,
+) -> Vec<(u32, Vec<[i32; N]>)> {
+    let metric = |obj: &Object| number(doc, obj).map_or(0, width_units);
+    let mut segments = Vec::new();
+    let mut materialised = 0usize;
     let mut i = 0;
-
-    while i < w_arr.len() {
-        let Some(first_obj) = resolve_w_elem(doc, &w_arr[i]) else {
+    while i < arr.len() {
+        let Some(first) = cid_number(doc, &arr[i]) else {
+            log::warn!("font: {key} entry {i} is not a CID — skipping it");
             i += 1;
             continue;
         };
-        let Some(first_cid_raw) = first_obj.as_i64() else {
-            i += 1;
-            continue;
-        };
-        if first_cid_raw < 0 {
-            log::warn!("font: W array has negative CID {first_cid_raw}, skipping entry");
-            i += 1;
-            continue;
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "first_cid_raw validated >= 0 and PDF CIDs fit in u32"
-        )]
-        let first_cid = first_cid_raw as u32;
-        i += 1;
-
-        if i >= w_arr.len() {
+        let Some(second) = arr.get(i + 1).and_then(|o| doc.resolve(o).ok()) else {
             break;
-        }
-
-        // The form discriminator (nested width array vs. range `last_cid`) may
-        // itself be indirect, so resolve it before matching on its shape.
-        let Some(second_obj) = resolve_w_elem(doc, &w_arr[i]) else {
-            i += 1;
-            continue;
         };
-        match second_obj.as_ref() {
-            // `first_cid [w0 w1 …]` form.  Each width may be indirect.
-            Object::Array(ws) => {
-                let widths: Vec<i32> = ws
+        let values: Vec<[i32; N]> = match second.as_ref() {
+            Object::Array(inner) => {
+                i += 2;
+                inner
+                    .as_chunks::<N>()
+                    .0
                     .iter()
-                    .map(|o| number(doc, o).map_or(0, width_units))
-                    .collect();
-                if materialised.saturating_add(widths.len()) > MAX_CID_WIDTH_ENTRIES {
-                    log::warn!(
-                        "font: W array exceeds {MAX_CID_WIDTH_ENTRIES} CID width slots \
-                         (16-bit CID space) — truncating remaining segments"
-                    );
-                    break;
-                }
-                materialised += widths.len();
-                segments.push((first_cid, widths));
-                i += 1;
+                    .map(|chunk| chunk.each_ref().map(metric))
+                    .collect()
             }
-            // `first_cid last_cid w` form.
-            Object::Integer(last_cid_raw) => {
-                let last_cid_raw = *last_cid_raw;
-                if last_cid_raw < 0 {
-                    log::warn!(
-                        "font: W array has negative last_cid {last_cid_raw}, skipping entry"
-                    );
-                    i += 1;
-                    continue;
-                }
-                #[expect(
-                    clippy::cast_sign_loss,
-                    clippy::cast_possible_truncation,
-                    reason = "last_cid_raw validated >= 0 and PDF CIDs fit in u32"
-                )]
-                let last_cid = last_cid_raw as u32;
-                i += 1;
-                if i >= w_arr.len() {
+            last if number(doc, last).is_some() => {
+                let Some(value) = arr.get(i + 2..i + 2 + N) else {
                     break;
-                }
-                let w = number(doc, &w_arr[i]).map_or(0, width_units);
-                i += 1;
-
-                if last_cid >= first_cid && last_cid - first_cid < 0x1_0000 {
-                    let count = (last_cid - first_cid + 1) as usize;
-                    if materialised.saturating_add(count) > MAX_CID_WIDTH_ENTRIES {
-                        log::warn!(
-                            "font: W array exceeds {MAX_CID_WIDTH_ENTRIES} CID width slots \
-                             (16-bit CID space) — truncating remaining segments"
-                        );
-                        break;
+                };
+                let value: [i32; N] = std::array::from_fn(|k| metric(&value[k]));
+                i += 2 + N;
+                match cid_number(doc, last).filter(|&last| last >= first) {
+                    Some(last) if last - first < 0x1_0000 => {
+                        vec![value; (last - first) as usize + 1]
                     }
-                    materialised += count;
-                    segments.push((first_cid, vec![w; count]));
-                } else {
-                    log::warn!(
-                        "font: W array degenerate CID range {first_cid}–{last_cid}, skipping"
-                    );
+                    _ => {
+                        log::warn!(
+                            "font: {key} range from CID {first} is degenerate — skipping it"
+                        );
+                        continue;
+                    }
                 }
             }
             _ => {
-                i += 1;
+                i += 2;
+                continue;
             }
-        }
-    }
-
-    segments
-}
-
-/// Parse the `W2` array body into `(first_cid, metrics)` segments of
-/// `[w1y, vx, vy]` triples.  The grammar (PDF §9.7.4.3) is
-/// `[ c [w1y vx vy …]  cfirst clast w1y vx vy … ]`; elements may be
-/// indirect, as in `W`.
-fn parse_w2_segments(doc: &Document, w2: &[Object]) -> VerticalMetricsSegments {
-    let mut segments: VerticalMetricsSegments = Vec::new();
-    let mut materialised: usize = 0;
-    let number = |obj: &Object| number(doc, obj).map(width_units);
-    let cid = |obj: &Object| number(obj).and_then(|n| u32::try_from(n).ok());
-    let mut i = 0;
-    while i < w2.len() {
-        let Some(first) = cid(&w2[i]) else {
-            i += 1;
+        };
+        if values.is_empty() {
             continue;
-        };
-        i += 1;
-        let Some(second) = w2.get(i).and_then(|o| resolve_w_elem(doc, o)) else {
-            break;
-        };
-        match second.as_ref() {
-            Object::Array(triples) => {
-                let metrics: Vec<[i32; 3]> = triples
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|t| {
-                        [
-                            number(&t[0]).unwrap_or(0),
-                            number(&t[1]).unwrap_or(0),
-                            number(&t[2]).unwrap_or(0),
-                        ]
-                    })
-                    .collect();
-                if materialised.saturating_add(metrics.len()) > MAX_CID_WIDTH_ENTRIES {
-                    break;
-                }
-                materialised += metrics.len();
-                segments.push((first, metrics));
-                i += 1;
-            }
-            Object::Integer(_) => {
-                let Some(last) = cid(&second) else {
-                    i += 1;
-                    continue;
-                };
-                let triple = [
-                    w2.get(i + 1).and_then(number),
-                    w2.get(i + 2).and_then(number),
-                    w2.get(i + 3).and_then(number),
-                ];
-                i += 4;
-                let [Some(w1y), Some(vx), Some(vy)] = triple else {
-                    break;
-                };
-                if last >= first && last - first < 0x1_0000 {
-                    let count = (last - first + 1) as usize;
-                    if materialised.saturating_add(count) > MAX_CID_WIDTH_ENTRIES {
-                        break;
-                    }
-                    materialised += count;
-                    segments.push((first, vec![[w1y, vx, vy]; count]));
-                } else {
-                    log::warn!("font: W2 array degenerate CID range {first}–{last}, skipping");
-                }
-            }
-            _ => i += 1,
         }
+        if materialised.saturating_add(values.len()) > MAX_CID_METRIC_ENTRIES {
+            log::warn!(
+                "font: {key} exceeds {MAX_CID_METRIC_ENTRIES} CID entries (the 16-bit CID \
+                 space) — ignoring the rest"
+            );
+            break;
+        }
+        materialised += values.len();
+        segments.push((first, values));
     }
     segments
 }
 
-/// Parse `DW2` and `W2` from a `CIDFont` dictionary: `([vy, w1y],
-/// segments)`, with the spec defaults `[880 -1000]` and no segments.
+/// The array at `dict[key]`, direct or indirect, parsed by
+/// [`parse_cid_metrics`]; no segments when it is absent or no array.
+fn cid_metrics<const N: usize>(
+    doc: &Document,
+    dict: &Dictionary,
+    key: &str,
+) -> CidMetrics<[i32; N]> {
+    let segments = dict
+        .get(key.as_bytes())
+        .and_then(|o| doc.resolve(o).ok())
+        .and_then(|o| {
+            o.as_array()
+                .map(|arr| parse_cid_metrics::<N>(doc, arr, key))
+        })
+        .unwrap_or_default();
+    CidMetrics::new(segments)
+}
+
+/// `DW2` and `W2` of a `CIDFont` dictionary: `([vy, w1y], metrics)`, with
+/// the spec default `[880 -1000]` for an absent or malformed `DW2`.
 fn extract_cid_vertical_metrics(
     doc: &Document,
     dict: &Dictionary,
-) -> ([i32; 2], VerticalMetricsSegments) {
-    let dw2 = dict
-        .get(b"DW2")
-        .and_then(|o| doc.resolve(o).ok())
-        .and_then(|o| {
-            let arr = o.as_array()?;
-            let vy = number(doc, arr.first()?)?;
-            let w1y = number(doc, arr.get(1)?)?;
-            Some([width_units(vy), width_units(w1y)])
-        })
-        .unwrap_or([880, -1000]);
-    let segments = dict
-        .get(b"W2")
-        .and_then(|o| doc.resolve(o).ok())
-        .and_then(|o| o.as_array().map(|arr| parse_w2_segments(doc, arr)))
-        .unwrap_or_default();
-    (dw2, segments)
+) -> ([i32; 2], CidMetrics<[i32; 3]>) {
+    let dw2 = match number_array(doc, dict.get(b"DW2")).as_slice() {
+        &[vy, w1y, ..] => [width_units(vy), width_units(w1y)],
+        _ => [880, -1000],
+    };
+    (dw2, cid_metrics::<3>(doc, dict, "W2"))
 }
 
-/// Parse `DW` and `W` from a `CIDFont` dictionary.
-///
-/// Returns `(default_width, segments)` where segments match the PDF `W` format:
-/// `[first_cid, [w0, w1, …]]` (the `c [w...]` variant only; the `c1 c2 w`
-/// range variant is also handled).
-fn extract_cid_widths(doc: &Document, dict: &Dictionary) -> (i32, Vec<(u32, Vec<i32>)>) {
+/// `DW` and `W` of a `CIDFont` dictionary: `(default_width, widths)`, the
+/// default 1000 when `DW` is absent (PDF §9.7.4.3).
+fn extract_cid_widths(doc: &Document, dict: &Dictionary) -> (i32, CidMetrics<i32>) {
     let dw = dict
         .get(b"DW")
         .and_then(|o| number(doc, o))
         .map_or(1000, width_units);
-
-    let Some(w_obj) = dict.get(b"W").and_then(|o| doc.resolve(o).ok()) else {
-        return (dw, vec![]);
-    };
-    let Some(w_arr) = w_obj.as_array() else {
-        return (dw, vec![]);
-    };
-
-    (dw, parse_w_segments(doc, w_arr))
+    (dw, cid_metrics::<1>(doc, dict, "W").map(|[w]| w))
 }
 
 /// Parse the `Differences` array, direct or indirect, of a dictionary-form
@@ -1594,7 +1527,7 @@ mod tests {
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 1000);
         // `3 3 250` (range form) → CID 3 width 250; `5 [500 600]` → CIDs 5,6.
-        assert_eq!(segs, vec![(3, vec![250]), (5, vec![500, 600])]);
+        assert_eq!(segs.segments(), vec![(3, vec![250]), (5, vec![500, 600])]);
     }
 
     #[test]
@@ -1606,7 +1539,7 @@ mod tests {
         let dict = make_dict(&[(b"DW", Object::Reference((2, 0)))]);
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 742);
-        assert_eq!(segs.len(), 0);
+        assert_eq!(segs.segments().len(), 0);
     }
 
     #[test]
@@ -1628,7 +1561,7 @@ mod tests {
         ]);
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 500);
-        assert_eq!(segs, vec![(10, vec![333, 444])]);
+        assert_eq!(segs.segments(), vec![(10, vec![333, 444])]);
     }
 
     #[test]
@@ -1656,7 +1589,7 @@ mod tests {
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 1000, "DW absent → spec default");
         assert_eq!(
-            segs,
+            segs.segments(),
             vec![(1, vec![333, 444]), (20, vec![555, 555])],
             "indirect inner width-array elements and indirect range last_cid/w \
              must resolve, not collapse to 0"
@@ -1678,7 +1611,7 @@ mod tests {
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 600, "DW still honoured when /W is a broken cycle");
         assert!(
-            segs.is_empty(),
+            segs.segments().is_empty(),
             "cyclic /W must degrade to no per-CID widths, not hang or panic"
         );
     }
@@ -1710,14 +1643,62 @@ mod tests {
         )]);
         let (dw, segs) = extract_cid_widths(&doc, &dict);
         assert_eq!(dw, 1000);
-        assert_eq!(segs, vec![(5, vec![-7, 9])]);
+        assert_eq!(segs.segments(), vec![(5, vec![-7, 9])]);
+    }
+
+    /// Empty inner arrays add no segment (a `W` of a million `c []` pairs
+    /// would otherwise be scanned per glyph), a real-valued `clast` is a
+    /// CID, and where segments overlap the earlier one applies.
+    #[test]
+    fn cid_widths_skip_empty_runs_and_keep_array_precedence() {
+        let doc = empty_doc();
+        let mut w = Vec::new();
+        for _ in 0..1000 {
+            w.extend([Object::Integer(7), Object::Array(vec![])]);
+        }
+        w.extend([
+            Object::Integer(10),
+            Object::Real(12.0),
+            Object::Integer(300),
+            Object::Integer(11),
+            Object::Array(vec![Object::Integer(400), Object::Integer(500)]),
+        ]);
+        let dict = make_dict(&[(b"W", Object::Array(w))]);
+        let (_, widths) = extract_cid_widths(&doc, &dict);
+        assert_eq!(
+            widths.segments(),
+            vec![(10, vec![300; 3]), (11, vec![400, 500])]
+        );
+        assert_eq!(widths.get(11), Some(&300), "the earlier segment applies");
+        assert_eq!(widths.get(13), None);
+    }
+
+    /// A lookup in ascending, disjoint segments bisects to the same
+    /// answer a scan gives, at every boundary.
+    #[test]
+    fn cid_metrics_lookup_matches_a_scan() {
+        let segments = vec![
+            (0, vec![1, 2]),
+            (5, vec![3]),
+            (6, vec![4, 5, 6]),
+            (100, vec![7]),
+        ];
+        let metrics = CidMetrics::new(segments.clone());
+        assert!(metrics.sorted);
+        for cid in 0u32..=101 {
+            let scan = segments.iter().find_map(|(first, values)| {
+                values.get(usize::try_from(cid.checked_sub(*first)?).ok()?)
+            });
+            assert_eq!(metrics.get(cid), scan, "CID {cid}");
+        }
+        assert!(!CidMetrics::new(vec![(5, vec![1, 2]), (6, vec![3])]).sorted);
     }
 
     #[test]
     fn cid_widths_oversized_range_is_capped() {
         // A chain of maximal ranges must not amplify a tiny `/W` into
         // gigabytes of Vec<i32>.  Two back-to-back full-16-bit ranges request
-        // 2 × 65 536 slots; the second crosses MAX_CID_WIDTH_ENTRIES and is
+        // 2 × 65 536 slots; the second crosses MAX_CID_METRIC_ENTRIES and is
         // truncated (loud-graceful) rather than OOMing.
         let doc = empty_doc();
         let dict = make_dict(&[(
@@ -1732,9 +1713,13 @@ mod tests {
             ]),
         )]);
         let (_dw, segs) = extract_cid_widths(&doc, &dict);
-        assert_eq!(segs.len(), 1, "second range exceeds the entry cap");
-        assert_eq!(segs[0].0, 0);
-        assert_eq!(segs[0].1.len(), 0x1_0000);
+        assert_eq!(
+            segs.segments().len(),
+            1,
+            "second range exceeds the entry cap"
+        );
+        assert_eq!(segs.segments()[0].0, 0);
+        assert_eq!(segs.segments()[0].1.len(), 0x1_0000);
     }
 
     #[test]
@@ -1766,14 +1751,14 @@ mod tests {
         let (dw2, segments) = extract_cid_vertical_metrics(&doc, &dict);
         assert_eq!(dw2, [850, -950]);
         assert_eq!(
-            segments,
+            segments.segments(),
             vec![(1, vec![[-900, 500, 800]]), (5, vec![[-1000, 250, 880]; 2])]
         );
         let enc = CidEncoding {
             encoding_cmap: Arc::new(CMap::identity_vertical()),
             cid_to_gid: None,
             default_width: 600,
-            widths: vec![],
+            widths: CidMetrics::new(Vec::new()),
             vertical: true,
             default_vertical: dw2,
             vertical_metrics: segments,
@@ -1804,7 +1789,7 @@ mod tests {
         let doc = empty_doc();
         let (dw2, segments) = extract_cid_vertical_metrics(&doc, &make_dict(&[]));
         assert_eq!(dw2, [880, -1000]);
-        assert_eq!(segments.len(), 0);
+        assert_eq!(segments.segments(), []);
     }
 
     #[test]

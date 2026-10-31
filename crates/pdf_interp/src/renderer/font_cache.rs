@@ -833,6 +833,7 @@ fn resolve_via_unicode_cmap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::font::CidMetrics;
     use crate::resources::font_substitute::SubstituteStyle;
 
     /// `desc` selected as the indirect font dictionary `1 0 R`.
@@ -1305,10 +1306,10 @@ mod tests {
                 encoding_cmap: Arc::new(CMap::identity()),
                 cid_to_gid: None,
                 default_width: 1000,
-                widths: vec![],
+                widths: CidMetrics::new(Vec::new()),
                 vertical: false,
                 default_vertical: [880, -1000],
-                vertical_metrics: vec![],
+                vertical_metrics: CidMetrics::new(Vec::new()),
                 to_unicode: Some(Arc::new(to_unicode)),
             }),
             type3: None,
@@ -1341,10 +1342,10 @@ mod tests {
                 encoding_cmap: Arc::new(CMap::identity()),
                 cid_to_gid: None,
                 default_width: 1000,
-                widths: vec![],
+                widths: CidMetrics::new(Vec::new()),
                 vertical: false,
                 default_vertical: [880, -1000],
-                vertical_metrics: vec![],
+                vertical_metrics: CidMetrics::new(Vec::new()),
                 to_unicode: Some(Arc::new(to_unicode)),
             }),
             type3: None,
@@ -1385,10 +1386,10 @@ mod tests {
                 encoding_cmap: Arc::new(CMap::identity()),
                 cid_to_gid: None,
                 default_width: 1000,
-                widths: vec![],
+                widths: CidMetrics::new(Vec::new()),
                 vertical: false,
                 default_vertical: [880, -1000],
-                vertical_metrics: vec![],
+                vertical_metrics: CidMetrics::new(Vec::new()),
                 to_unicode: None,
             }),
             type3: None,
