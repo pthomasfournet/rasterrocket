@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
 
 use pdf::ObjectId;
@@ -86,23 +87,8 @@ impl ImageMemo {
         key: Box<[u8]>,
         image: DecodedImage,
     ) -> Rc<DecodedImage> {
-        let image = Rc::new(image);
-        let bytes = host_bytes(&image);
-        let replaced = self.inline.get(&key).map_or(0, |e| e.bytes);
-        let old = if bytes <= self.budget - (self.bytes - replaced) {
-            self.bytes += bytes;
-            let entry = Entry {
-                image: Rc::clone(&image),
-                draw_size: None,
-                bytes,
-            };
-            self.inline.insert(key, entry)
-        } else {
-            self.inline.remove(&key)
-        };
-        if let Some(old) = old {
-            self.bytes -= old.bytes;
-        }
+        let (image, entry) = Entry::new(image, None);
+        keep(&mut self.inline, &mut self.bytes, self.budget, key, entry);
         image
     }
 
@@ -128,24 +114,46 @@ impl ImageMemo {
         draw_size: Option<(u32, u32)>,
         image: DecodedImage,
     ) -> Rc<DecodedImage> {
+        let (image, entry) = Entry::new(image, draw_size);
+        keep(&mut self.entries, &mut self.bytes, self.budget, id, entry);
+        image
+    }
+}
+
+impl Entry {
+    /// The shared image and its entry for a decode at `draw_size`.
+    fn new(image: DecodedImage, draw_size: Option<(u32, u32)>) -> (Rc<DecodedImage>, Self) {
         let image = Rc::new(image);
         let bytes = host_bytes(&image);
-        let replaced = self.entries.get(&id).map_or(0, |e| e.bytes);
-        let old = if bytes <= self.budget - (self.bytes - replaced) {
-            self.bytes += bytes;
-            let entry = Entry {
-                image: Rc::clone(&image),
-                draw_size,
-                bytes,
-            };
-            self.entries.insert(id, entry)
-        } else {
-            self.entries.remove(&id)
+        let entry = Self {
+            image: Rc::clone(&image),
+            draw_size,
+            bytes,
         };
-        if let Some(old) = old {
-            self.bytes -= old.bytes;
-        }
-        image
+        (image, entry)
+    }
+}
+
+/// Keep `entry` at `key` in `map` in place of any earlier entry there,
+/// when its bytes fit `budget` beside the other entries counted in `used`;
+/// otherwise drop the earlier entry and keep nothing.  `used` tracks the
+/// change.
+fn keep<K: Eq + Hash>(
+    map: &mut HashMap<K, Entry>,
+    used: &mut usize,
+    budget: usize,
+    key: K,
+    entry: Entry,
+) {
+    let replaced = map.get(&key).map_or(0, |e| e.bytes);
+    let old = if entry.bytes <= budget - (*used - replaced) {
+        *used += entry.bytes;
+        map.insert(key, entry)
+    } else {
+        map.remove(&key)
+    };
+    if let Some(old) = old {
+        *used -= old.bytes;
     }
 }
 
