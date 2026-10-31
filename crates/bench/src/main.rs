@@ -3,7 +3,7 @@
 //! Renders N star polygons into a 1024×1024 buffer and reports throughput.
 //! Both engines get pre-built path objects; only rasterization is timed.
 //!
-//! Run: cargo run -p bench --release -- [--iters N] [--stars N]
+//! Run: cargo run -p bench --bin bench --release -- [--iters N] [--stars N]
 
 use std::f64::consts::PI;
 use std::hint::black_box;

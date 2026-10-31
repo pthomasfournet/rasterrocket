@@ -1565,7 +1565,7 @@ Glyph rasterisation is **not** a GPU target — glyphs are rasterised once per p
 
 ## Benchmarking
 
-**Status: baseline benchmarks complete (Apr 2026).** All GPU features live. Machine: Ryzen 9 9900X3D + RTX 5070, 150 DPI, `--features nvjpeg,nvjpeg2k,gpu-aa,gpu-icc`, `RUSTFLAGS="-C target-cpu=native"`, `--warmup 3 --runs 8`.
+**Status: baseline benchmarks complete (Apr 2026).** Historical: every GPU feature, nvJPEG included, was live in that build. Machine: Ryzen 9 9900X3D + RTX 5070, 150 DPI, `--features nvjpeg,nvjpeg2k,gpu-aa,gpu-icc`, `RUSTFLAGS="-C target-cpu=native"`, `--warmup 3 --runs 8`.
 
 ### Results vs pdftoppm (poppler 24.x)
 
@@ -1614,39 +1614,45 @@ Fixture PDFs are gitignored. Provide your own corpus covering these character cl
 
 ### Commands
 
+The results above were produced with scripts since retired with the
+`pdf-raster` package name (and on a build where nvJPEG was enabled; it is
+now disabled, see the GPU dispatch table); current results and the full
+reproduction notes are in the wiki's Benchmarks page (`wiki/Benchmarks.md`).
+`$PDF` is any PDF; the local corpus is `tests/fixtures/corpus-01` …
+`corpus-10` (gitignored, not in the repository).
+
 ```bash
-# Build with all GPU features
-RUSTFLAGS="-C target-cpu=native" cargo build --release \
-  --manifest-path crates/cli/Cargo.toml \
-  --features nvjpeg,nvjpeg2k,gpu-aa,gpu-icc
-
+# CPU-only release build; add e.g. --features "nvjpeg2k,gpu-icc" or
+# --features vulkan for the GPU backends (CUDA_ARCH=sm_120 for the RTX 5070)
+RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli
 BIN=target/release/rrocket
-LD_LIB=LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libnvjpeg2k/13:/usr/local/cuda/lib64
+mkdir -p /tmp/out /tmp/ref
 
-# Throughput vs pdftoppm
-env $LD_LIB hyperfine --warmup 3 --runs 8 \
-  "$BIN -r 150 tests/fixtures/scan-heavy.pdf /tmp/out" \
-  'pdftoppm -r 150 tests/fixtures/scan-heavy.pdf /tmp/ref'
+# Wall clock vs pdftoppm (pass --backend cuda / vulkan to time a GPU build)
+hyperfine --warmup 3 --runs 8 \
+  "$BIN --no-ram --backend cpu -r 150 $PDF /tmp/out/p" \
+  "pdftoppm -r 150 $PDF /tmp/ref/p"
 
-# Pixel diff vs poppler reference (ImageMagick AE metric)
-pdftoppm -r 150 tests/fixtures/light-vector.pdf /tmp/ref
-env $LD_LIB $BIN -r 150 tests/fixtures/light-vector.pdf /tmp/out
-for i in /tmp/ref-*.ppm; do
-  n=$(basename $i .ppm | sed 's/ref-//')
-  ae=$(compare -metric AE $i /tmp/out-${n}.ppm /dev/null 2>&1)
-  echo "$(basename $i): AE=$ae"
-done
+# Instructions retired per document, two builds compared (without --pdf or
+# --corpus-dir it renders a synthetic set built from files in the repository)
+python3 -I tests/bench/instructions.py BASE_BIN HEAD_BIN --corpus-dir tests/fixtures
 
-# Flamegraph — find the new bottleneck after GPU image decode is wired
-CARGO_PROFILE_RELEASE_DEBUG=true env $LD_LIB \
-flamegraph -o /tmp/flame.svg -- \
-  $BIN -r 150 tests/fixtures/scan-heavy.pdf /tmp/out
+# Per-page latency against pdfium, both in process, one pinned core
+tests/compare/latency.sh -r 150 tests/fixtures/corpus-*.pdf
 
-# Synthetic fill microbenchmark (raster crate path-fill vs vello_cpu)
-RUSTFLAGS="-C target-cpu=native" cargo run -p bench --release -- --iters 30 --stars 200
+# Pixel diff vs pdftoppm / pdfium
+tests/compare/compare.sh -r 150 $PDF
+
+# Flamegraph (cargo-flamegraph; release build with debug info)
+CARGO_PROFILE_RELEASE_DEBUG=true cargo flamegraph -o /tmp/flame.svg \
+  -p rasterrocket-cli --bin rrocket -- --no-ram -r 150 $PDF /tmp/out/p
+
+# Synthetic fill microbenchmark (raster crate path-fill vs vello_cpu);
+# the bench crate has two binaries, so --bin is required
+RUSTFLAGS="-C target-cpu=native" cargo run -p bench --bin bench --release -- --iters 30 --stars 200
 
 # Threshold bench — recalibrate GPU dispatch crossovers after any kernel change
-cargo run -p rasterrocket-gpu --release --bin threshold_bench
+CUDA_ARCH=sm_120 cargo run -p rasterrocket-gpu --release --bin threshold_bench
 
 # L3 occupancy monitoring (9900X3D — requires resctrl mount)
 # mount -t resctrl resctrl /sys/fs/resctrl
@@ -2015,7 +2021,7 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
     - [x] **Step 1 — `BackendPolicy::ForceVulkan` plumbing + loud-error placeholder** (commits `8126100`, `aec2053`, `55b54a0`).  CLI `--backend vulkan` → `BackendArg::Vulkan` → `BackendPolicy::ForceVulkan` → `rasterrocket::render::open_session` returns `BackendUnavailable` with a directive message.  `init_gpu_ctx` short-circuits CUDA init under `ForceVulkan`.  `--vaapi-device` conflict detection extended.  Smoke-tested: `rrocket --backend vulkan <pdf> <prefix>` exits with the explanatory error rather than silently CPU-rendering.
     - [x] **Step 2 — Migrate kernel call sites in `rasterrocket-interp` to the trait surface** (commit `15dd420`, hardened in `1783d66`).  Parallel-Vulkan-branch architecture: `PageRenderer` gains an `Option<Arc<VulkanBackend>>` field beside `gpu_ctx`; the fill dispatch prefers Vulkan when set.  `rasterrocket_interp::renderer::page::vk_ops` wraps the trait surface (`alloc → upload → record_* → submit → wait → download`) for AA fill and tile fill.  Phase 9 cache stays CUDA-only by construction (Vulkan path doesn't touch `DevicePageBuffer`/`DeviceImageCache`).  ICC CMYK→RGB on Vulkan is intentionally deferred — the renderer plumbing (`resolve_image → decode_dct → cmyk_raw_to_rgb`) currently threads only `Option<&GpuCtx>`, and under `ForceVulkan` it falls through to the CPU `cmyk_to_rgb_reflectance` matrix (matches Phase 9-pre-2026-05-07 quality).  Pre-existing `crates/gpu/build.rs` bug found and fixed in the same commit: PTX compilation now keys on a real NVCC probe instead of a feature-flag heuristic that didn't include `rasterrocket-interp/gpu-aa` (the previous heuristic produced 0-byte placeholder PTX for `--features "vulkan,gpu-aa"` builds, then crashed at runtime with `CUDA_ERROR_INVALID_IMAGE`).
     - [x] **Step 3 — End-to-end CLI smoke** (folded into step 2).  The loud-error stub in `rasterrocket::render::open_session` was replaced with real `init_vk_backend` + `RasterSession::vk_backend` + per-page `set_vk_backend` propagation in step 2's commit.  Verified: `rrocket --backend vulkan tests/fixtures/corpus-02-native-vector-text.pdf <prefix>` renders all 16 pages byte-identical to both `--backend cpu` and `--backend cuda`; same on the 358-page corpus-04 mixed-content fixture (Vulkan == CPU on every page).
-    - [x] **Step 4 — Bench gate measurement** (`scripts/bench_v10.sh` + `scripts/aggregate_v10.py`, results in `bench/v10/results.md`).  Vector-heavy subset (corpora 01-05) on RTX 5070; DCT-heavy corpora skipped because the Vulkan binary doesn't include nvjpeg, so 06-10 would compare CPU JPEG decode against silicon and bias the result.
+    - [x] **Step 4 — Bench gate measurement** (`scripts/bench_v10.sh` + `scripts/aggregate_v10.py`, both since deleted in `d53803f`; results in `bench/v10/results.md`).  Vector-heavy subset (corpora 01-05) on RTX 5070; DCT-heavy corpora skipped because the Vulkan binary doesn't include nvjpeg, so 06-10 would compare CPU JPEG decode against silicon and bias the result.
         - **Criterion 1** (CUDA no-regression, threshold +5% slower than v0.7.0): **PASS** on all 5 corpora.  Live-captured baseline (v0.7.0 binary rebuilt on the same hardware) used because `bench/v070/D.txt` is stale relative to current driver state — corpus-02 was 212ms there but ~500ms today on the same v0.7.0 binary, so the old numbers would conflate driver drift with Phase 10 code drift.  Master vs v0.7.0 (live): 01 +0.4%, 02 −11.2%, 03 +2.6%, 04 −3.3%, 05 −6.7%.
         - **Criterion 2** (Vulkan pixel-diff ≤ 1 LSB vs CUDA): verified during step 2 (16/16 pages byte-identical on corpus-02, 358/358 on corpus-04).
         - **Criterion 3** (Vulkan ≤ 1.15× CUDA timing): **PASS** on all 5 corpora — Vulkan is *faster* than CUDA on every one (V/D ratios 0.27–0.82×).  Note: not strictly apples-to-apples either way because CUDA mode D pays nvjpeg / ICC-CLUT init even on vector-heavy corpora that don't decode JPEGs; the Vulkan binary skips those.  The *intent* of criterion 3 — Vulkan within striking distance of CUDA on the kernel paths Phase 10 actually migrated — is satisfied.
