@@ -1,8 +1,7 @@
 //! Liability gate for decrypting an encrypted document on the production
 //! CLI path.
 //!
-//! The QA harness auto-decrypts (private owned-texts tooling); the CLI
-//! must NOT silently strip copy-protection.  An encrypted document here
+//! The CLI never strips copy-protection silently.  An encrypted document
 //! triggers an interactive private-copy / liability confirmation
 //! (default: no), unless the operator has explicitly affirmed
 //! authorisation via `--decrypt-owned` or `RROCKET_DECRYPT_OWNED=1`.

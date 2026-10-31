@@ -46,15 +46,6 @@ pub struct RasterSession {
     /// Set once a rendered page has been found to carry JavaScript, so the
     /// warning is emitted once per document.
     pub(crate) javascript_warned: AtomicBool,
-    /// VA-API DRM render node path. Retained in non-vaapi builds for forward
-    /// compatibility; in vaapi builds the path is consumed during `open_session`
-    /// to construct `vaapi_queue` and is not needed afterward.
-    #[cfg(not(feature = "vaapi"))]
-    #[expect(
-        dead_code,
-        reason = "stored but not read back; retained for SessionConfig symmetry"
-    )]
-    pub(crate) vaapi_device: String,
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     pub(crate) gpu_ctx: Option<Arc<gpu::GpuCtx>>,
     /// Vulkan compute backend.  `Some` when the `vulkan` feature is
@@ -342,10 +333,8 @@ fn open_session_with_doc(
         log_auto_resolution_once(vk_won_auto, false);
     }
 
-    let vaapi_device = config.vaapi_device.clone();
-
     #[cfg(feature = "vaapi")]
-    let vaapi_queue = crate::decode_queue::build_vaapi_queue(&vaapi_device, config.policy)
+    let vaapi_queue = crate::decode_queue::build_vaapi_queue(&config.vaapi_device, config.policy)
         .map_err(RasterError::BackendUnavailable)?
         .map(Arc::new);
 
@@ -402,8 +391,6 @@ fn open_session_with_doc(
         vector_antialias: config.vector_antialias,
         form_type,
         javascript_warned: AtomicBool::new(false),
-        #[cfg(not(feature = "vaapi"))]
-        vaapi_device,
         #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
         gpu_ctx,
         #[cfg(feature = "vulkan")]

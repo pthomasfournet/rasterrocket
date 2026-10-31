@@ -248,8 +248,7 @@ pub struct SessionConfig {
     /// (never the misleading "no pages"), whatever [`password`](Self::password)
     /// holds.  The CLI sets this only after an interactive private-copy /
     /// liability confirmation or an explicit `--decrypt-owned` /
-    /// `RROCKET_DECRYPT_OWNED=1` operator bypass; the private QA harness
-    /// sets it unconditionally for its owned-texts automation.  No effect on
+    /// `RROCKET_DECRYPT_OWNED=1` operator bypass.  No effect on
     /// unencrypted documents.
     pub decrypt_authorized: bool,
     /// Password for an encrypted document, tried as the user password and
