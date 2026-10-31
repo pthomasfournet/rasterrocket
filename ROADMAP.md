@@ -1559,7 +1559,7 @@ RT cores on Blackwell provide hardware BVH traversal. For pages with thousands o
 | OptiX BVH winding test | Low — only extreme geometry | Tile rasteriser |
 | Blend / composite | Low — already fast on CPU | Phase 2 perf work ✓ |
 
-Glyph rasterisation is **not** a GPU target — glyphs are rasterised once per page into the glyph cache. A GPU text path requires a GPU-resident rasteriser (SDF atlas or Slug algorithm) and is a separate major project.
+Glyph rasterisation is **not** a GPU target — glyphs are rasterised once per document into the glyph cache. A GPU text path requires a GPU-resident rasteriser (SDF atlas or Slug algorithm) and is a separate major project.
 
 ---
 

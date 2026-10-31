@@ -224,14 +224,18 @@ programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
   OpenType / collection, bare CFF incl. CID-keyed, Type 1 PFA/PFB), parses it
   once, and answers charmap, glyph-name and CID → GID lookups, advances and
   unhinted outlines
-- `FontEngine` — per page; assigns face IDs and shares one `FontProgram` between
-  faces built from identical bytes or the same file
+- `FontEngine` — one per page renderer; parses programs, sharing one
+  `FontProgram` between faces built from identical bytes or the same file, and
+  draws face IDs from a `FaceIds` source that may be shared across engines
+  (the interpreter shares one per document)
 - `FontFace` — a program at one em → device matrix; `make_glyph*` → `GlyphBitmap`,
   `glyph_path*` → `raster::Path`; faces above 2048 px/em prefer path fill
 - `PathPen` (`outline`) — outline commands → `raster::Path` with the matrix applied
 - `coverage::rasterize` — exact-area, non-zero-winding coverage rasteriser
   (8-bit AA or 1-bit mask), bounded per glyph
-- `GlyphCache` — `quick_cache::sync::Cache<GlyphKey, Arc<GlyphBitmap>>`, one per page
+- `GlyphCache` — `quick_cache::sync::Cache<GlyphKey, Arc<GlyphBitmap>>`, bounded
+  by bitmap bytes; valid for every face whose ID comes from one `FaceIds`
+  source, so the interpreter keeps one per document, shared by all its pages
 - `GlyphKey` — `{ face_id, glyph_id, size_px, x_frac, aa }`
 - `FontProgram::vertical_selector` — maps a glyph to its vertical form through
   the face's `vert` / `vrt2` GSUB features, for vertical writing with a
@@ -358,7 +362,8 @@ renderer/
   color.rs           — colour values → device components (DeviceCMYK via
                        the process-ink model in `color::cmyk`)
   text.rs            — text state (Tc, Tw, Tz, TL, Ts, Tr)
-  font_cache.rs      — font loading, code → glyph tables, GlyphCache
+  font_cache.rs      — font loading, code → glyph tables; per-page FontCache,
+                       per-document DocumentFonts store and GlyphCache
   encodings.rs       — base encodings of Annex D
   fallback.rs        — per-character fallback of a substitute to installed faces
   substitutes.rs     — substitute programs for non-embedded fonts
@@ -933,8 +938,12 @@ This drops each decoder while the driver is still fully live; the TLS destructor
 see `Uninitialised` and are no-ops.
 
 **Font engine**
-Each page renderer owns its `FontEngine`; there is no shared lock. Glyph bitmaps
-go through `quick_cache::sync::Cache` (sharded, no write lock on read hits).
+Each page renderer owns its `FontEngine`. What depends only on an indirect font
+dictionary (descriptor, parsed program, code → glyph table, face IDs) lives in
+the session's `DocumentFonts` store, a `Mutex`-guarded map of entries whose
+fields are `OnceLock`s, so it is resolved once per document; one `GlyphCache` per document
+holds the glyph bitmaps of every page through `quick_cache::sync::Cache`
+(sharded, no write lock on read hits).
 
 ---
 
