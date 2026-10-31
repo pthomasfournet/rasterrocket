@@ -26,6 +26,7 @@
 //! endbfchar
 //! beginbfrange
 //! <0020> <007E> <0020>
+//! <0080> <0082> [<0041> <00660069> <0043>]   % one value per code
 //! endbfrange
 //! ```
 //!
@@ -314,24 +315,22 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
             b"begincidrange" | b"beginbfrange" => {
                 i += 1;
                 while i < tokens.len() && !is_section_boundary(tokens[i]) {
-                    if let (Some(lo_b), Some(hi_b), Some(base)) = (
+                    if let (Some(lo_b), Some(hi_b), Some(dst)) = (
                         parse_hex_string(tokens.get(i).copied()),
                         parse_hex_string(tokens.get(i + 1).copied()),
-                        parse_value(tokens.get(i + 2).copied()),
+                        RangeDestination::parse(tokens.get(i + 2).copied()),
                     ) {
                         code_lengths |= length_bit(&lo_b);
                         let lo = bytes_to_u32(&lo_b);
                         let hi = bytes_to_u32(&hi_b);
                         // A range wider than the 16-bit CID space is corrupt.
                         if hi >= lo && hi - lo < 0x1_0000 {
-                            let count = hi - lo + 1;
+                            let count = dst.len().map_or(hi - lo + 1, |n| n.min(hi - lo + 1));
                             match budget.checked_sub(count as usize) {
                                 Some(rest) => {
                                     budget = rest;
                                     for offset in 0..count {
-                                        let _ = cmap
-                                            .map
-                                            .insert(lo + offset, base.saturating_add(offset));
+                                        let _ = cmap.map.insert(lo + offset, dst.value(offset));
                                     }
                                 }
                                 None => budget = 0,
@@ -401,6 +400,51 @@ pub(super) fn parse_cmap_nested(stream: &[u8], depth: u32) -> Option<CMap> {
             .collect();
     }
     Some(cmap)
+}
+
+/// The destination of a `cidrange` / `bfrange` entry (§9.10.3): the value
+/// of the range's first code, the following codes taking consecutive
+/// values, or (`bfrange` only) an array of one value per code.
+enum RangeDestination {
+    /// Value of the first code; code `lo + k` maps to `base + k`.
+    Base(u32),
+    /// Value of each code from the first; codes past its end are unmapped.
+    List(Vec<u32>),
+}
+
+impl RangeDestination {
+    /// The destination token `tok`: a value, or a `[...]` array of hex
+    /// strings, an element that does not parse mapping to 0.
+    fn parse(tok: Option<&[u8]>) -> Option<Self> {
+        let tok = tok?;
+        let Some(inner) = tok.strip_prefix(b"[") else {
+            return parse_value(Some(tok)).map(Self::Base);
+        };
+        let inner = inner.strip_suffix(b"]").unwrap_or(inner);
+        Some(Self::List(
+            tokenise(inner)
+                .into_iter()
+                .map(|t| parse_value(Some(t)).unwrap_or(0))
+                .collect(),
+        ))
+    }
+
+    /// The number of codes an array destination maps; `None` for a base
+    /// value, which maps the whole range.
+    fn len(&self) -> Option<u32> {
+        match self {
+            Self::Base(_) => None,
+            Self::List(values) => Some(u32::try_from(values.len()).unwrap_or(u32::MAX)),
+        }
+    }
+
+    /// The value of the code `offset` codes past the range's first.
+    fn value(&self, offset: u32) -> u32 {
+        match self {
+            Self::Base(base) => base.saturating_add(offset),
+            Self::List(values) => values.get(offset as usize).copied().unwrap_or(0),
+        }
+    }
 }
 
 /// The `CMap` a `usecmap` at nesting `depth` names: identity, or a
@@ -762,6 +806,20 @@ endbfrange
         assert_eq!(cmap.map.len(), MAX_CMAP_MAPPINGS);
         assert_eq!(cmap.lookup(0x0003_FFFF), 0xFFFF);
         assert_eq!(cmap.lookup(0x0004_0000), 0);
+    }
+
+    /// A `bfrange` may give one destination per code as an array
+    /// (§9.10.3), multi-unit destinations (ligatures) included; codes the
+    /// array does not reach stay unmapped.
+    #[test]
+    fn bfrange_array_destinations_map_each_code() {
+        let stream = b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+            1 beginbfrange\n<0001> <0004> [<0041> <00660069> <0043>]\nendbfrange\n";
+        let cmap = parse_cmap(stream).expect("should parse");
+        assert_eq!(cmap.map.get(&1), Some(&0x41));
+        assert_eq!(cmap.map.get(&2), Some(&0x0066_0069));
+        assert_eq!(cmap.map.get(&3), Some(&0x43));
+        assert_eq!(cmap.map.get(&4), None);
     }
 
     #[test]
