@@ -233,6 +233,23 @@ fn a_rotated_text_field_runs_its_text_along_the_turned_box() {
 }
 
 #[test]
+fn a_push_button_shows_its_caption_centred() {
+    let button = |mk: &str| {
+        let widget = format!(
+            "/FT /Btn /Ff 65536 /T (p) /Rect [20 20 180 80] /DA (/Helv 20 Tf 0 g) /MK << {mk} >>"
+        );
+        dark_bounds(document("", &[&widget], vec![]))
+    };
+    let b = button("/CA (Submit)").expect("the caption is drawn");
+    // Centred: the ink's margins to the field's sides differ by at most a
+    // pixel of rounding, and it lies inside the field.
+    let (left, right) = (b[0] - 20, 180 - b[2]);
+    assert!(left.abs_diff(right) <= 2 && left > 20, "{b:?}");
+    assert!(b[1] > 20 && b[3] < 80, "{b:?}");
+    assert_eq!(button(""), None, "no caption, no text");
+}
+
+#[test]
 fn a_half_turned_push_button_turns_its_caption_upside_down() {
     let button = |r: i64| {
         let widget = format!(
