@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn custom_separator() {
         let a = make_args("file", '_', None);
-        assert_eq!(output_path(&a, 2, 9, OutputFormat::Jpeg), "file_2.jpg");
+        assert_eq!(output_path(&a, 2, 9, OutputFormat::Png), "file_2.png");
     }
 
     #[test]
@@ -164,6 +164,6 @@ mod tests {
     #[test]
     fn three_digit_total() {
         let a = make_args("p", '-', None);
-        assert_eq!(output_path(&a, 99, 100, OutputFormat::Tiff), "p-099.tif");
+        assert_eq!(output_path(&a, 99, 100, OutputFormat::Ppm), "p-099.ppm");
     }
 }

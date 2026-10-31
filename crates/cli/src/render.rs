@@ -34,11 +34,6 @@ pub(crate) enum RenderError {
     Encode(EncodeError),
     /// The camera-capture cleanup rejected the page.
     Camera(String),
-    /// The requested format + colour-mode combination is not supported.
-    UnsupportedFormatCombination {
-        /// The output format requested by the user.
-        output: OutputFormat,
-    },
 }
 
 impl std::fmt::Display for RenderError {
@@ -48,9 +43,6 @@ impl std::fmt::Display for RenderError {
             Self::Raster(e) => write!(f, "render error: {e}"),
             Self::Encode(e) => write!(f, "encode error: {e}"),
             Self::Camera(e) => write!(f, "camera cleanup error: {e}"),
-            Self::UnsupportedFormatCombination { output } => {
-                write!(f, "output format {output} is not yet supported")
-            }
         }
     }
 }
@@ -61,7 +53,7 @@ impl std::error::Error for RenderError {
             Self::Io(e) => Some(e),
             Self::Raster(e) => Some(e),
             Self::Encode(e) => Some(e),
-            Self::Camera(_) | Self::UnsupportedFormatCombination { .. } => None,
+            Self::Camera(_) => None,
         }
     }
 }
@@ -96,9 +88,6 @@ impl From<camera::CameraError> for RenderError {
 /// GPU decoder initialisation on this thread.  The prescan runs on the same
 /// worker thread as the render, so its cost is hidden inside parallel render
 /// time rather than adding a serial phase before the pool starts.
-///
-/// JPEG and TIFF output are not yet implemented and return
-/// [`RenderError::UnsupportedFormatCombination`].
 pub(crate) fn render_page(
     session: &RasterSession,
     page_num: u32,
@@ -107,10 +96,6 @@ pub(crate) fn render_page(
     spill: &SpillPolicy,
 ) -> Result<(), RenderError> {
     let format = args.output_format();
-
-    if matches!(format, OutputFormat::Jpeg | OutputFormat::Tiff) {
-        return Err(RenderError::UnsupportedFormatCombination { output: format });
-    }
 
     // Prescan only when a GPU decoder is compiled in — otherwise it's pure overhead
     // with no benefit (CpuOnly is already the effective policy for every page).
@@ -214,7 +199,6 @@ pub(crate) fn encode_to_path(
     match format {
         OutputFormat::Ppm => write_ppm(rgb, &mut out)?,
         OutputFormat::Png => write_png(rgb, &mut out)?,
-        OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
     }
     out.flush()?;
     Ok(())
@@ -234,13 +218,11 @@ fn encode_gray_to_path(
         match format {
             OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, &mut out)?,
             OutputFormat::Png => write_png::<Gray8, _>(&mono, &mut out)?,
-            OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
         }
     } else {
         match format {
             OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, &mut out)?,
             OutputFormat::Png => write_png::<Gray8, _>(gray, &mut out)?,
-            OutputFormat::Jpeg | OutputFormat::Tiff => unreachable!("rejected above"),
         }
     }
     out.flush()?;

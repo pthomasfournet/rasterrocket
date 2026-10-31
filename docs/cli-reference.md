@@ -117,9 +117,9 @@ page fails instead.
 | `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B). Can combine with `--png`. |
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4, 50% threshold). Can combine with `--png`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG. |
-| `--jpeg` | `.jpg` | JPEG. Not yet supported: the page fails with "output format JPEG is not yet supported". |
-| `--jpegcmyk` | `.jpg` | JPEG in CMYK colour space. Not yet supported, as `--jpeg`. |
-| `--tiff` | `.tif` | TIFF. Not yet supported, as `--jpeg`. |
+| `--jpeg` | | JPEG. Not implemented: refused at startup ("--jpeg output is not implemented; use --png or the default PPM output"), exit status 1, nothing rendered. |
+| `--jpegcmyk` | | JPEG in CMYK colour space. Not implemented, refused as `--jpeg`. |
+| `--tiff` | | TIFF. Not implemented, refused as `--jpeg`. |
 
 `--gray` and `--mono` are mutually exclusive, and at most one of `--png`,
 `--jpeg`, `--jpegcmyk` and `--tiff` may be given; a conflicting pair exits
@@ -131,10 +131,6 @@ with status 1.
 |---|---|---|---|
 | _(default / PPM)_ | `.pbm` | `.pgm` | `.ppm` |
 | `--png` | `.png` | `.png` | `.png` |
-| `--jpeg` | `.jpg` | `.jpg` | `.jpg` |
-| `--tiff` | `.tif` | `.tif` | `.tif` |
-
-The `--jpeg` and `--tiff` rows give the names those formats will use; today both are refused (every page fails, exit status 1), and comic input refuses them before decoding.
 
 ---
 

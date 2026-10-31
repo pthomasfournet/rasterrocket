@@ -124,15 +124,15 @@ pub(crate) struct Args {
     #[arg(long)]
     pub png: bool,
 
-    /// Output JPEG.
+    /// JPEG output: not implemented; refused at startup.
     #[arg(long)]
     pub jpeg: bool,
 
-    /// Output JPEG in CMYK colour space.
+    /// CMYK JPEG output: not implemented; refused at startup.
     #[arg(long)]
     pub jpegcmyk: bool,
 
-    /// Output TIFF.
+    /// TIFF output: not implemented; refused at startup.
     #[arg(long)]
     pub tiff: bool,
 
@@ -445,42 +445,33 @@ impl Args {
         Ok(Some(RenderRegion::new(x, y, width, height)))
     }
 
-    /// Validate mutually-exclusive output-format flags.
+    /// Validate the output-format flags: refuse the formats that are not
+    /// implemented and the mutually exclusive combinations.
     ///
-    /// Returns `Err` with a human-readable message if any incompatible
-    /// combination is present.  Call this once at startup.
+    /// Returns `Err` with a human-readable message naming the alternative.
+    /// Call this once at startup, before any page is rendered.
     pub(crate) fn validate_format_flags(&self) -> Result<(), String> {
-        if self.jpeg && self.jpegcmyk {
-            return Err("--jpeg and --jpegcmyk are mutually exclusive".to_owned());
+        for (set, flag) in [
+            (self.jpeg, "--jpeg"),
+            (self.jpegcmyk, "--jpegcmyk"),
+            (self.tiff, "--tiff"),
+        ] {
+            if set {
+                return Err(format!(
+                    "{flag} output is not implemented; use --png or the default PPM output"
+                ));
+            }
         }
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
-        }
-        // Count exclusive format flags; at most one may be set.
-        let format_count = usize::from(self.png)
-            + usize::from(self.jpeg)
-            + usize::from(self.jpegcmyk)
-            + usize::from(self.tiff);
-        if format_count > 1 {
-            return Err(
-                "at most one output format flag may be used (--png, --jpeg, --jpegcmyk, --tiff)"
-                    .to_owned(),
-            );
         }
         Ok(())
     }
 
     /// Resolved output format.
-    ///
-    /// Assumes [`validate_format_flags`](Self::validate_format_flags) has
-    /// already been called — conflicting flags are not possible here.
     pub(crate) const fn output_format(&self) -> OutputFormat {
         if self.png {
             OutputFormat::Png
-        } else if self.jpeg || self.jpegcmyk {
-            OutputFormat::Jpeg
-        } else if self.tiff {
-            OutputFormat::Tiff
         } else {
             OutputFormat::Ppm
         }
@@ -490,25 +481,10 @@ impl Args {
 /// Output image format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
-    /// Raw PPM/PGM (default).
+    /// Netpbm: PPM, PGM under `--gray`, PBM under `--mono` (default).
     Ppm,
     /// PNG.
     Png,
-    /// JPEG.
-    Jpeg,
-    /// TIFF.
-    Tiff,
-}
-
-impl std::fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ppm => f.write_str("PPM"),
-            Self::Png => f.write_str("PNG"),
-            Self::Jpeg => f.write_str("JPEG"),
-            Self::Tiff => f.write_str("TIFF"),
-        }
-    }
 }
 
 impl OutputFormat {
@@ -524,8 +500,6 @@ impl OutputFormat {
             (Self::Ppm, false, true) => "pgm",
             (Self::Ppm, false, false) => "ppm",
             (Self::Png, _, _) => "png",
-            (Self::Jpeg, _, _) => "jpg",
-            (Self::Tiff, _, _) => "tif",
         }
     }
 }
@@ -904,6 +878,17 @@ mod page_list_tests {
             .session_config()
             .unwrap();
         assert!(config.text_antialias && !config.vector_antialias);
+    }
+
+    #[test]
+    fn unimplemented_formats_are_refused_up_front() {
+        for flag in ["--jpeg", "--jpegcmyk", "--tiff"] {
+            let err = Args::parse_from(["rrocket", flag, "in.pdf", "out"])
+                .validate_format_flags()
+                .unwrap_err();
+            assert!(err.starts_with(flag) && err.contains("--png"), "{err}");
+        }
+        assert!(base_args().validate_format_flags().is_ok());
     }
 
     #[test]

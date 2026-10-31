@@ -10,7 +10,7 @@ target/release/rrocket -r 300 --gray --png document.pdf ./out
 
 A bare output prefix such as `out` writes to a temporary RAM directory that is
 removed when `rrocket` exits; use a path (`./out`) or `--no-ram` to keep the
-files. JPEG and TIFF output are not implemented yet.
+files. JPEG and TIFF output are not implemented; their flags are refused at startup.
 
 GPU features are passed by name and forwarded to the library
 (`--features "nvjpeg2k,gpu-icc,cache"`, `--features vulkan`). The default

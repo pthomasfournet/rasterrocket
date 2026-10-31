@@ -16,7 +16,7 @@ use color::Rgb8;
 use comic::{ComicError, ComicOptions, RenderedPage, open_comic};
 use raster::Bitmap;
 
-use crate::args::{Args, OutputFormat};
+use crate::args::Args;
 use crate::render::{self, RenderError};
 
 /// Render a comic archive, writing each decodable page via the shared encoder.
@@ -26,24 +26,12 @@ use crate::render::{self, RenderError};
 /// errors are reported to stderr as they occur and skipped (one bad page never
 /// aborts the rest); the caller maps a non-zero `failed` to a non-zero exit code
 /// so a partial failure is observable via `$?`, matching the PDF path.
-/// Whole-archive failures (including a `.cbr` input, or an unsupported output
-/// format) surface as the outer `Err`, whose `Display` carries the user-facing
+/// Whole-archive failures (including a `.cbr` input) surface as the outer `Err`, whose `Display` carries the user-facing
 /// message.
 pub(crate) fn run(
     args: &Args,
     spill: &crate::ram::SpillPolicy,
 ) -> Result<(usize, usize), ComicError> {
-    // Reject JPEG/TIFF once, up front, before opening or decoding the archive.
-    // The PDF path's `render_page` rejects per page, but a comic with hundreds
-    // of pages would print one identical line per page; failing fast here emits
-    // exactly one message. `write_page` keeps its own guard as defense-in-depth.
-    let format = args.output_format();
-    if matches!(format, OutputFormat::Jpeg | OutputFormat::Tiff) {
-        return Err(ComicError::BadArchive(format!(
-            "output format {format} is not supported (comic output supports ppm/png)"
-        )));
-    }
-
     // Comics carry no physical resolution, so the user's requested DPI rides
     // along on each RenderedPage purely for downstream OCR feature scaling;
     // it never changes the already-rasterised pixel dimensions. When the x
@@ -113,15 +101,6 @@ fn write_page(
     total_pages: i32,
 ) -> Result<(), RenderError> {
     let format = args.output_format();
-
-    // Defense-in-depth reject of JPEG/TIFF before allocating the bitmap.
-    // `run` already fails fast on these formats up front (so this never fires
-    // in practice), and `encode_to_path` guards too; keeping the check here
-    // mirrors `render_page` and avoids the wasted luma→RGB expansion should a
-    // future caller reach `write_page` directly.
-    if matches!(format, OutputFormat::Jpeg | OutputFormat::Tiff) {
-        return Err(RenderError::UnsupportedFormatCombination { output: format });
-    }
 
     let mut rgb = Bitmap::<Rgb8>::new(page.width, page.height, 1, false);
     let w = page.width as usize;
