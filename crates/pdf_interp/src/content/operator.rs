@@ -4,8 +4,8 @@
 //! [`Operator`] value ready for dispatch to the renderer.
 
 use super::operands::{
-    ScnOperands, pop_f64, pop_i32, pop_matrix, pop_name, pop_number_array, pop_scn, pop_string,
-    pop2, pop3, pop4,
+    ScnOperands, pop_f64, pop_i32, pop_matrix, pop_n, pop_name, pop_number_array, pop_scn,
+    pop_string, pop2, pop3, pop4,
 };
 use super::tokenizer::Token;
 
@@ -275,7 +275,6 @@ pub enum TextArrayElement {
     clippy::too_many_lines,
     reason = "operator dispatch table — splitting adds no clarity"
 )]
-#[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
 pub fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
     let result = match op {
         // ── Graphics state ────────────────────────────────────────────────────
@@ -307,15 +306,7 @@ pub fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
             Operator::LineTo(x, y)
         }
         b"c" => {
-            let (x1, y1, x2, y2, x3, y3) = {
-                let f = pop_f64(operands);
-                let e = pop_f64(operands);
-                let d = pop_f64(operands);
-                let c = pop_f64(operands);
-                let b = pop_f64(operands);
-                let a = pop_f64(operands);
-                (a, b, c, d, e, f)
-            };
+            let [x1, y1, x2, y2, x3, y3] = pop_n(operands);
             Operator::CurveTo(x1, y1, x2, y2, x3, y3)
         }
         b"v" => {
@@ -435,20 +426,15 @@ pub fn decode(op: &[u8], operands: &mut Vec<Token<'_>>) -> Operator {
             Operator::Type3GlyphWidth(wx, wy)
         }
         b"d1" => {
-            // Stream order: wx wy llx lly urx ury d1
-            let ury = pop_f64(operands);
-            let urx = pop_f64(operands);
-            let lly = pop_f64(operands);
-            let llx = pop_f64(operands);
-            let wy = pop_f64(operands);
-            let wx = pop_f64(operands);
+            let [wx, wy, llx, lly, urx, ury] = pop_n(operands);
             Operator::Type3GlyphWidthBBox(wx, wy, llx, lly, urx, ury)
         }
 
         // ── Marked content ────────────────────────────────────────────────────
         // BDC with tag /OC begins an Optional Content Group region.
         // Operands on stack: /Tag (bottom) /PropertiesKey (top), or /Tag <<dict>>.
-        // We only handle the name case (overwhelmingly common in practice).
+        // An optional-content property list is always named, because an
+        // optional content group is an indirect object (PDF §8.11.3.2).
         b"BDC" => {
             let props = operands.pop();
             let tag = operands.pop();

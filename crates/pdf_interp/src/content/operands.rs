@@ -6,19 +6,25 @@
 
 use super::tokenizer::Token;
 
+/// A number token's value: a number, or a boolean as 0 or 1.
+const fn numeric(token: &Token<'_>) -> Option<f64> {
+    match token {
+        Token::Number(n) => Some(*n),
+        Token::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
 /// Pop the topmost token as a number. Returns 0.0 on underflow or wrong type.
 pub fn pop_f64(stack: &mut Vec<Token<'_>>) -> f64 {
-    match stack.pop() {
-        Some(Token::Number(n)) => n,
-        Some(Token::Bool(b)) => f64::from(u8::from(b)),
-        _ => 0.0,
-    }
+    stack.pop().as_ref().and_then(numeric).unwrap_or(0.0)
 }
 
 /// Pop the topmost token as a truncated integer. Returns 0 on underflow.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "intentional truncating cast: PDF integers are used as small values (cap style, render mode, etc.)"
+    reason = "f64-to-i32 `as` truncates toward zero and saturates; callers map \
+              out-of-range values to their defaults"
 )]
 pub fn pop_i32(stack: &mut Vec<Token<'_>>) -> i32 {
     pop_f64(stack) as i32
@@ -44,25 +50,19 @@ pub fn pop_string(stack: &mut Vec<Token<'_>>) -> Vec<u8> {
     }
 }
 
-/// Drain all contiguous numbers (and booleans) from the top of the stack,
-/// returning them in stream order (leftmost first).
+/// Drain the contiguous run of numbers (and booleans) at the top of the
+/// stack, returning them in stream order (leftmost first).
 ///
-/// Stops at the first non-numeric token, leaving it on the stack.
+/// The run stops at the topmost non-numeric token, which stays on the
+/// stack with everything beneath it.
 pub fn drain_numbers(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
-    // Find how many leading numeric tokens sit at the bottom of the stack
-    // (they were pushed left-to-right, so the first stream operand is at
-    // index 0 and the last is at the top).
-    let first_non_num = stack
+    let run_start = stack
         .iter()
-        .position(|t| !matches!(t, Token::Number(_) | Token::Bool(_)))
-        .unwrap_or(stack.len());
+        .rposition(|t| numeric(t).is_none())
+        .map_or(0, |i| i + 1);
     stack
-        .drain(..first_non_num)
-        .map(|t| match t {
-            Token::Number(n) => n,
-            Token::Bool(b) => f64::from(u8::from(b)),
-            _ => unreachable!(),
-        })
+        .drain(run_start..)
+        .filter_map(|t| numeric(&t))
         .collect()
 }
 
@@ -88,87 +88,103 @@ pub enum ScnOperands {
 
 /// Parse the operand stack for `scn` / `SCN`.
 ///
-/// The PDF grammar is `c1 … cn name?`, where the optional trailing `name` selects
-/// a Pattern resource.  Numbers are consumed left-to-right; if the topmost token
-/// is a Name the result is `ScnOperands::Pattern`.
+/// The PDF grammar is `c1 … cn name?`, where the optional trailing `name`
+/// selects a Pattern resource.  The components are the run of numbers
+/// directly beneath the name, or at the top of the stack when there is no
+/// name (see [`drain_numbers`]).
 pub fn pop_scn(stack: &mut Vec<Token<'_>>) -> ScnOperands {
-    // Check whether the top token is a name — if so it is the pattern key.
-    let name = match stack.last() {
-        Some(Token::Name(_)) => {
-            if let Some(Token::Name(n)) = stack.pop() {
-                Some(n.to_vec())
-            } else {
-                unreachable!()
-            }
+    let name = if matches!(stack.last(), Some(Token::Name(_))) {
+        match stack.pop() {
+            Some(Token::Name(n)) => Some(n.to_vec()),
+            _ => None,
         }
-        _ => None,
+    } else {
+        None
     };
     let components = drain_numbers(stack);
     match name {
-        Some(n) => ScnOperands::Pattern {
-            name: n,
-            components,
-        },
+        Some(name) => ScnOperands::Pattern { name, components },
         None => ScnOperands::Components(components),
     }
 }
 
-/// Pop the topmost token as a flat array of numbers.
+/// Pop an array on top of the stack as its numeric elements, in order.
 ///
-/// If the top is a `Token::Array`, extract numbers from it.
-/// If the top is a bare number, treat the entire numeric prefix as the array.
-/// Returns an empty `Vec` on underflow.
+/// Returns an empty `Vec`, leaving the stack unchanged, when the top is not
+/// an array.
 pub fn pop_number_array(stack: &mut Vec<Token<'_>>) -> Vec<f64> {
-    match stack.last() {
-        Some(Token::Array(_)) => {
-            if let Some(Token::Array(arr)) = stack.pop() {
-                arr.into_iter()
-                    .filter_map(|t| match t {
-                        Token::Number(n) => Some(n),
-                        Token::Bool(b) => Some(f64::from(u8::from(b))),
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                unreachable!()
-            }
-        }
+    if !matches!(stack.last(), Some(Token::Array(_))) {
+        return Vec::new();
+    }
+    match stack.pop() {
+        Some(Token::Array(arr)) => arr.iter().filter_map(numeric).collect(),
         _ => Vec::new(),
     }
 }
 
+/// Pop the top `N` numbers in stream order (leftmost first); each missing
+/// or non-numeric operand reads as 0 (see [`pop_f64`]).
+pub fn pop_n<const N: usize>(stack: &mut Vec<Token<'_>>) -> [f64; N] {
+    let mut out = [0.0; N];
+    for v in out.iter_mut().rev() {
+        *v = pop_f64(stack);
+    }
+    out
+}
+
 /// Pop the top 2 numbers as `(first, second)` in stream order.
 pub fn pop2(stack: &mut Vec<Token<'_>>) -> (f64, f64) {
-    let b = pop_f64(stack);
-    let a = pop_f64(stack);
-    (a, b)
+    pop_n::<2>(stack).into()
 }
 
 /// Pop the top 3 numbers as `(first, second, third)` in stream order.
 pub fn pop3(stack: &mut Vec<Token<'_>>) -> (f64, f64, f64) {
-    let c = pop_f64(stack);
-    let b = pop_f64(stack);
-    let a = pop_f64(stack);
-    (a, b, c)
+    pop_n::<3>(stack).into()
 }
 
 /// Pop the top 4 numbers as `(first, second, third, fourth)` in stream order.
 pub fn pop4(stack: &mut Vec<Token<'_>>) -> (f64, f64, f64, f64) {
-    let d = pop_f64(stack);
-    let c = pop_f64(stack);
-    let b = pop_f64(stack);
-    let a = pop_f64(stack);
-    (a, b, c, d)
+    pop_n::<4>(stack).into()
 }
 
 /// Pop the top 6 numbers as a PDF matrix `[a b c d e f]` in stream order.
-#[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
 pub fn pop_matrix(stack: &mut Vec<Token<'_>>) -> [f64; 6] {
-    let f = pop_f64(stack);
-    let e = pop_f64(stack);
-    let d = pop_f64(stack);
-    let c = pop_f64(stack);
-    let b = pop_f64(stack);
-    let a = pop_f64(stack);
-    [a, b, c, d, e, f]
+    pop_n(stack)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colour_components_are_the_numbers_at_the_top_of_the_stack() {
+        let mut stack = vec![
+            Token::String(b"stray".to_vec()),
+            Token::Number(1.0),
+            Token::Number(0.5),
+            Token::Number(0.0),
+        ];
+        let ScnOperands::Components(c) = pop_scn(&mut stack) else {
+            panic!("no pattern name");
+        };
+        assert_eq!(c, [1.0, 0.5, 0.0]);
+        assert_eq!(stack, [Token::String(b"stray".to_vec())]);
+
+        let mut stack = vec![
+            Token::Name(b"stray"),
+            Token::Number(0.25),
+            Token::Name(b"P0"),
+        ];
+        let ScnOperands::Pattern { name, components } = pop_scn(&mut stack) else {
+            panic!("a pattern name");
+        };
+        assert_eq!(name, b"P0");
+        assert_eq!(components, [0.25]);
+    }
+
+    #[test]
+    fn pop_n_reads_stream_order_and_zero_fills() {
+        let mut stack = vec![Token::Number(1.0), Token::Number(2.0)];
+        assert_eq!(pop_n::<3>(&mut stack), [0.0, 1.0, 2.0]);
+    }
 }
