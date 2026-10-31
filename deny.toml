@@ -8,8 +8,8 @@
 # permissive / public-domain-equivalent.
 
 [graph]
-# Evaluate the full host target set the project supports. all-features so a
-# feature-gated dependency's license is not silently skipped.
+# Every target (no `targets` filter) with all features enabled, so neither
+# a platform-specific nor a feature-gated dependency escapes the checks.
 all-features = true
 
 [licenses]

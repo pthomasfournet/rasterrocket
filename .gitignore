@@ -10,9 +10,6 @@
 /fuzz/artifacts/
 /fuzz/coverage/
 
-# Cargo lock — committed for binaries, not for libs
-# Cargo.lock
-
 # ── IDE / editor ──────────────────────────────────────────────────────────────
 .idea/
 .vscode/
@@ -47,9 +44,6 @@ compile_commands.json
 CLAUDE.md
 # Superpowers plugin runtime dirs (plans, memory, etc.)
 superpowers/
-# Serena MCP memory and cache dirs
-.serena/cache/
-.serena/memories/
 # Any other plugin runtime directories
 .aider/
 .continue/
@@ -79,9 +73,6 @@ bench/v060/*.txt
 # ── Test fixtures ─────────────────────────────────────────────────────────────
 # Add your own PDFs locally; do not commit fixture documents to the repo.
 tests/fixtures/*.pdf
-tests/bench/bins/
-tests/bench/bench-results.json
-tests/bench/bench-features-results.json
 
 # ── Git worktrees ─────────────────────────────────────────────────────────────
 .worktrees/
