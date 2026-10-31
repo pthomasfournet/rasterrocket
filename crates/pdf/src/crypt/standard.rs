@@ -337,7 +337,8 @@ type CryptFilters = HashMap<Vec<u8>, (Cipher, Option<usize>)>;
 /// The `/CF` dictionary.
 ///
 /// `/Length` is in bytes per the specification, but producers also write
-/// it in bits; a value above 40 is taken as bits.
+/// it in bits; a value of 40 or more is taken as bits, since no key is 40
+/// bytes long.
 fn parse_crypt_filters(dict: &Dictionary) -> Result<CryptFilters, String> {
     let mut out = HashMap::new();
     let Some(cf) = dict.get(b"CF").and_then(Object::as_dict) else {
@@ -361,8 +362,8 @@ fn parse_crypt_filters(dict: &Dictionary) -> Result<CryptFilters, String> {
             }
         };
         let len = match filter.get(b"Length").and_then(Object::as_i64) {
-            Some(n) if n > 40 && n % 8 == 0 => usize::try_from(n / 8).ok(),
-            Some(n) if (1..=40).contains(&n) => usize::try_from(n).ok(),
+            Some(n) if n >= 40 && n % 8 == 0 => usize::try_from(n / 8).ok(),
+            Some(n) if (1..40).contains(&n) => usize::try_from(n).ok(),
             _ => None,
         };
         let _ = out.insert(name.clone(), (cipher, len));
@@ -372,7 +373,13 @@ fn parse_crypt_filters(dict: &Dictionary) -> Result<CryptFilters, String> {
 
 /// The file key length in bytes: fixed by `/V` 1 (40 bits) and `/V` 5
 /// (256 bits); `/Length` bits for `/V` 2–3; for `/V` 4 the crypt filter's
-/// length, falling back to `/Length`.  AES fixes the length of its key.
+/// length, falling back to `/Length`.  AES fixes the length of its key, and
+/// revision 2 always uses 5 bytes (Algorithm 2, step h).
+///
+/// Revisions 2–4 derive at most 16 bytes from MD5 and revisions 5–6 unwrap
+/// exactly 32, so a length outside that range for the revision (AESV3
+/// under revision 4, say) is an error rather than a key that every object
+/// would then fail to decrypt under.
 fn key_length(
     dict: &Dictionary,
     version: i64,
@@ -403,11 +410,18 @@ fn key_length(
         Cipher::AesV2 => 16,
         Cipher::AesV3 => 32,
         Cipher::Rc4 | Cipher::Identity if revision >= 5 => 32,
+        Cipher::Rc4 | Cipher::Identity if revision == 2 => 5,
         Cipher::Rc4 | Cipher::Identity => declared,
     };
-    if !(5..=16).contains(&key_len) && key_len != 32 {
+    let valid = if revision >= 5 {
+        key_len == 32
+    } else {
+        (5..=16).contains(&key_len)
+    };
+    if !valid {
         return Err(format!(
-            "key length of {key_len} bytes is outside 5..=16 and not 32"
+            "key length of {key_len} bytes is not valid for revision {revision} \
+             (5..=16 bytes for revisions 2-4, 32 for revisions 5-6)"
         ));
     }
     Ok(key_len)
@@ -712,6 +726,47 @@ mod tests {
         // A missing /Length defaults to 40 bits.
         let mut d = r3_dict();
         let _ = d.remove(b"Length");
+        assert_eq!(StandardSecurity::parse(&d, &[]).expect("parse").key_len, 5);
+    }
+
+    /// Revision 2 keys are 5 bytes whatever `/Length` says; a key length
+    /// that the revision cannot derive is refused; a crypt filter
+    /// `/Length 40` is 40 bits.
+    #[test]
+    fn key_length_follows_the_revision() {
+        let mut d = r3_dict();
+        d.set("R", Object::Integer(2));
+        assert_eq!(StandardSecurity::parse(&d, &[]).expect("parse").key_len, 5);
+
+        let mut d = r3_dict();
+        d.set("Length", Object::Integer(256));
+        assert!(
+            StandardSecurity::parse(&d, &[]).is_err(),
+            "32-byte RC4 key at R3"
+        );
+
+        let mut d = r6_dict();
+        d.set("V", Object::Integer(4));
+        d.set("R", Object::Integer(4));
+        d.set("O", string(O_LEGACY));
+        d.set("U", string(O_LEGACY));
+        assert!(StandardSecurity::parse(&d, &[]).is_err(), "AESV3 at R4");
+
+        let mut d = r3_dict();
+        d.set("V", Object::Integer(4));
+        d.set("R", Object::Integer(4));
+        d.set("StmF", name("StdCF"));
+        d.set("StrF", name("StdCF"));
+        d.set(
+            "CF",
+            Object::Dictionary(dict(&[(
+                "StdCF",
+                Object::Dictionary(dict(&[
+                    ("CFM", name("V2")),
+                    ("Length", Object::Integer(40)),
+                ])),
+            )])),
+        );
         assert_eq!(StandardSecurity::parse(&d, &[]).expect("parse").key_len, 5);
     }
 
