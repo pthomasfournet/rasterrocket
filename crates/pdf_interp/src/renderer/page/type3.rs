@@ -93,7 +93,7 @@ impl PageRenderer<'_> {
             // Advance the text matrix by the glyph width (PDF §9.4.4).
             // Widths are in glyph space; `FontMatrix[0]` maps them to text
             // space.
-            let width = f64::from(t3.width(byte)) * t3.font_matrix[0];
+            let width = t3.width(byte) * t3.font_matrix[0];
             let extra = if byte == b' ' { word_spacing } else { 0.0 };
             let tx_adv = glyph_advance(width, font_size, char_spacing, extra, horiz_scaling);
             tm = translate_text_x(tm, tx_adv);

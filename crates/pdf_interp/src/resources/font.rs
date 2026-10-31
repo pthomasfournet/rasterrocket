@@ -214,8 +214,10 @@ pub struct Type3Data {
     pub glyphs: Vec<Option<Type3Glyph>>,
     /// Advance width of every char code in glyph space, from the `Widths`
     /// array; 0 for a code outside `[FirstChar, LastChar]`.  A code without
-    /// a `CharProc` advances by its width all the same (PDF §9.4.4).
-    pub widths: Vec<i32>,
+    /// a `CharProc` advances by its width all the same (PDF §9.4.4).  Real
+    /// valued: under a unit `FontMatrix` a width is a fraction of a
+    /// text-space unit.
+    pub widths: Vec<f64>,
     /// 6-element `FontMatrix` (user-space → glyph-space transform).
     /// Default is `[0.001, 0, 0, 0.001, 0, 0]` per PDF spec §9.6.5.
     pub font_matrix: [f64; 6],
@@ -234,11 +236,11 @@ impl Type3Data {
 
     /// Advance width of `char_code` in glyph space.
     #[must_use]
-    pub fn width(&self, char_code: u8) -> i32 {
+    pub fn width(&self, char_code: u8) -> f64 {
         self.widths
             .get(usize::from(char_code))
             .copied()
-            .unwrap_or(0)
+            .unwrap_or(0.0)
     }
 }
 
@@ -343,7 +345,8 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
 
     let kind = classify_kind(dict);
     let bytes = extract_bytes(doc, dict);
-    let (first_char, widths) = extract_widths(dict);
+    let (first_char, real_widths) = extract_widths(doc, dict);
+    let widths: Vec<i32> = real_widths.into_iter().map(width_units).collect();
     let missing_width = extract_missing_width(doc, dict);
     let (code_to_gid, differences, mut base_encoding) = extract_encoding(doc, dict, kind);
     let mut substitute = substitute_style(doc, dict, Some(dict));
@@ -384,15 +387,14 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     }
 }
 
-/// Extract `MissingWidth` from the `FontDescriptor` sub-dict.  Returns `0`
-/// when absent (PDF §9.8.2 default).  PDF stores `MissingWidth` inside the
-/// `FontDescriptor` sub-dict, not the parent font dict — this helper handles
-/// the indirect-reference resolution that `extract_widths` does not need.
+/// `MissingWidth` of the font descriptor (not of the font dictionary
+/// itself); 0 when absent (PDF §9.8.2).
 fn extract_missing_width(doc: &Document, dict: &Dictionary) -> i32 {
     resolve_fd(doc, dict)
         .as_ref()
-        .and_then(|fd| fd.get_i64(b"MissingWidth"))
-        .map_or(0, pdf_width_to_i32)
+        .and_then(|fd| fd.get(b"MissingWidth"))
+        .and_then(|w| number(doc, w))
+        .map_or(0, width_units)
 }
 
 // ── Kind classification ───────────────────────────────────────────────────────
@@ -469,53 +471,66 @@ fn read_stream(doc: &Document, dict: &Dictionary, key: &[u8]) -> Option<Vec<u8>>
 
 // ── Advance-width extraction ──────────────────────────────────────────────────
 
-/// Clamp a PDF integer width value to `i32`, saturating on overflow.
-///
-/// PDF advance-width values come from adversarial input and are not bound
-/// by the spec to any particular range; the `Widths` array is `[i64]` at the
-/// lopdf layer.  Real font widths sit in `[0, 4096]` (thousandths-of-em, font
-/// sizes never exceed 1000em in practice), so any i64 that fits in i32 is the
-/// real answer.  Out-of-range values are pathological and we clamp instead of
-/// wrapping with `as i32` — a malformed `MissingWidth: i64::MIN` would
-/// otherwise silently propagate to text-matrix arithmetic.
-///
-/// Used by every PDF-width parse site: `Widths` array elements, `MissingWidth`,
-/// `DW` (Type 0 default width), and Type 0 `W` array entries.
-#[must_use]
-pub(crate) fn pdf_width_to_i32(v: i64) -> i32 {
-    match i32::try_from(v) {
-        Ok(w) => w,
-        // Saturation direction depends on the sign of the overflow; v < 0 ⇒ underflow.
-        Err(_) if v < 0 => i32::MIN,
-        Err(_) => i32::MAX,
+/// The finite number `obj` holds, through an indirect reference when it
+/// is one; `None` for a non-number, a non-finite real or a broken
+/// reference.  Any number of a font dictionary may be indirect.
+fn number(doc: &Document, obj: &Object) -> Option<f64> {
+    match obj {
+        Object::Reference(_) => doc.resolve(obj).ok()?.as_f64(),
+        direct => direct.as_f64(),
     }
+    .filter(|n| n.is_finite())
 }
 
-/// Extract `(FirstChar, Widths[])` from the font dict.
-///
-/// Returns `(0, vec![])` if either key is absent.
-fn extract_widths(dict: &Dictionary) -> (u32, Vec<i32>) {
+/// The numbers of the array `obj`, itself possibly indirect, each read by
+/// [`number`]; 0 for an element that is no number.  Empty when `obj` is
+/// absent or no array.
+fn number_array(doc: &Document, obj: Option<&Object>) -> Vec<f64> {
+    obj.and_then(|o| doc.resolve(o).ok())
+        .and_then(|arr| {
+            arr.as_array()
+                .map(|arr| arr.iter().map(|o| number(doc, o).unwrap_or(0.0)).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// A glyph metric in thousandths of a text-space unit, rounded to the
+/// nearest unit and saturated to the `i32` range.
+#[must_use]
+pub(crate) const fn width_units(w: f64) -> i32 {
     #[expect(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "FirstChar is filtered to >= 0 and < 256; safe to cast to u32"
+        reason = "a float-to-int `as` saturates at the target range, the clamp intended here"
     )]
-    let first = dict
-        .get_i64(b"FirstChar")
-        .filter(|&v| v >= 0)
-        .map_or(0u32, |v| v as u32);
+    let units = w.round() as i32;
+    units
+}
 
-    let widths = dict
-        .get(b"Widths")
-        .and_then(Object::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|o| o.as_i64().map_or(0, pdf_width_to_i32))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    (first, widths)
+/// `FirstChar` and `Widths` of a simple font dictionary, the widths in
+/// glyph space (thousandths of a text-space unit except for Type 3).
+///
+/// `(0, [])` when `Widths` is absent; also when `FirstChar` is not a code
+/// of a single-byte encoding (0–255), since the array cannot then be
+/// aligned to the codes it describes.
+fn extract_widths(doc: &Document, dict: &Dictionary) -> (u32, Vec<f64>) {
+    let first = dict.get(b"FirstChar").map(|o| number(doc, o));
+    let first = match first {
+        None => 0,
+        Some(Some(n)) if n.fract() == 0.0 && (0.0..=255.0).contains(&n) => {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "n is an integer in 0..=255"
+            )]
+            let code = n as u32;
+            code
+        }
+        Some(invalid) => {
+            log::warn!("font: FirstChar {invalid:?} is not a code in 0..=255 — ignoring Widths");
+            return (0, Vec::new());
+        }
+    };
+    (first, number_array(doc, dict.get(b"Widths")))
 }
 
 // ── Char → glyph-index mapping ────────────────────────────────────────────────
@@ -714,7 +729,7 @@ const MAX_CHARPROC_BYTES: usize = 4 * 1024 * 1024;
 /// `Differences`, else by the base encoding (`/Encoding /WinAnsiEncoding`,
 /// `/BaseEncoding`), else by `StandardEncoding` (PDF §9.6.6.1).
 fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> FontDescriptor {
-    let (first_char, widths) = extract_widths(dict);
+    let (first_char, real_widths) = extract_widths(doc, dict);
 
     // FontMatrix transforms glyph space to text space.
     // PDF default is [0.001 0 0 0.001 0 0] (i.e. 1000 units = 1 text-space unit).
@@ -792,8 +807,8 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -
     let code_widths = (0u32..256)
         .map(|code| {
             code.checked_sub(first_char)
-                .and_then(|i| widths.get(i as usize).copied())
-                .unwrap_or(0)
+                .and_then(|i| real_widths.get(i as usize).copied())
+                .unwrap_or(0.0)
         })
         .collect();
 
@@ -812,7 +827,7 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -
     FontDescriptor {
         kind: PdfFontKind::Other,
         bytes: None,
-        widths,
+        widths: real_widths.iter().copied().map(width_units).collect(),
         first_char,
         // Type 3 glyphs carry their own widths via `Type3Glyph::width_units`;
         // the top-level Widths array is the same source the d0/d1 operators
@@ -1097,11 +1112,7 @@ fn parse_w_segments(doc: &Document, w_arr: &[Object]) -> Vec<(u32, Vec<i32>)> {
             Object::Array(ws) => {
                 let widths: Vec<i32> = ws
                     .iter()
-                    .map(|o| {
-                        resolve_w_elem(doc, o)
-                            .and_then(|r| r.as_i64())
-                            .map_or(0, pdf_width_to_i32)
-                    })
+                    .map(|o| number(doc, o).map_or(0, width_units))
                     .collect();
                 if materialised.saturating_add(widths.len()) > MAX_CID_WIDTH_ENTRIES {
                     log::warn!(
@@ -1134,9 +1145,7 @@ fn parse_w_segments(doc: &Document, w_arr: &[Object]) -> Vec<(u32, Vec<i32>)> {
                 if i >= w_arr.len() {
                     break;
                 }
-                let w = resolve_w_elem(doc, &w_arr[i])
-                    .and_then(|r| r.as_i64())
-                    .map_or(0, pdf_width_to_i32);
+                let w = number(doc, &w_arr[i]).map_or(0, width_units);
                 i += 1;
 
                 if last_cid >= first_cid && last_cid - first_cid < 0x1_0000 {
@@ -1172,11 +1181,7 @@ fn parse_w_segments(doc: &Document, w_arr: &[Object]) -> Vec<(u32, Vec<i32>)> {
 fn parse_w2_segments(doc: &Document, w2: &[Object]) -> VerticalMetricsSegments {
     let mut segments: VerticalMetricsSegments = Vec::new();
     let mut materialised: usize = 0;
-    let number = |obj: &Object| {
-        resolve_w_elem(doc, obj)
-            .and_then(|r| r.as_i64())
-            .map(pdf_width_to_i32)
-    };
+    let number = |obj: &Object| number(doc, obj).map(width_units);
     let cid = |obj: &Object| number(obj).and_then(|n| u32::try_from(n).ok());
     let mut i = 0;
     while i < w2.len() {
@@ -1251,9 +1256,9 @@ fn extract_cid_vertical_metrics(
         .and_then(|o| doc.resolve(o).ok())
         .and_then(|o| {
             let arr = o.as_array()?;
-            let vy = resolve_w_elem(doc, arr.first()?)?.as_i64()?;
-            let w1y = resolve_w_elem(doc, arr.get(1)?)?.as_i64()?;
-            Some([pdf_width_to_i32(vy), pdf_width_to_i32(w1y)])
+            let vy = number(doc, arr.first()?)?;
+            let w1y = number(doc, arr.get(1)?)?;
+            Some([width_units(vy), width_units(w1y)])
         })
         .unwrap_or([880, -1000]);
     let segments = dict
@@ -1270,15 +1275,10 @@ fn extract_cid_vertical_metrics(
 /// `[first_cid, [w0, w1, …]]` (the `c [w...]` variant only; the `c1 c2 w`
 /// range variant is also handled).
 fn extract_cid_widths(doc: &Document, dict: &Dictionary) -> (i32, Vec<(u32, Vec<i32>)>) {
-    // `DW`/`W` may be indirect references; MuPDF's `pdf_dict_get` resolves them
-    // transparently (source_pdf/pdf-font.c load_cid_font), so we must too — an
-    // unresolved `/W 119 0 R` would otherwise drop every per-CID width and make
-    // all glyphs advance by `DW` (1000/em), spreading text far too wide.
     let dw = dict
         .get(b"DW")
-        .and_then(|o| doc.resolve(o).ok())
-        .and_then(|o| o.as_i64())
-        .map_or(1000, pdf_width_to_i32);
+        .and_then(|o| number(doc, o))
+        .map_or(1000, width_units);
 
     let Some(w_obj) = dict.get(b"W").and_then(|o| doc.resolve(o).ok()) else {
         return (dw, vec![]);
@@ -1375,15 +1375,15 @@ mod tests {
                 ]),
             ),
         ]);
-        let (fc, ws) = extract_widths(&d);
+        let (fc, ws) = extract_widths(&empty_doc(), &d);
         assert_eq!(fc, 32);
-        assert_eq!(ws, vec![278, 500, 556]);
+        assert_eq!(ws, vec![278.0, 500.0, 556.0]);
     }
 
     #[test]
     fn widths_absent_returns_empty() {
         let d = make_dict(&[]);
-        let (fc, ws) = extract_widths(&d);
+        let (fc, ws) = extract_widths(&empty_doc(), &d);
         assert_eq!(fc, 0);
         assert_eq!(ws.len(), 0);
     }
@@ -1444,22 +1444,74 @@ mod tests {
     }
 
     #[test]
-    fn pdf_width_to_i32_in_range_pass_through() {
-        assert_eq!(pdf_width_to_i32(0), 0);
-        assert_eq!(pdf_width_to_i32(500), 500);
-        assert_eq!(pdf_width_to_i32(-1000), -1000);
-        assert_eq!(pdf_width_to_i32(i64::from(i32::MAX)), i32::MAX);
-        assert_eq!(pdf_width_to_i32(i64::from(i32::MIN)), i32::MIN);
+    fn width_units_round_and_saturate() {
+        assert_eq!(width_units(0.0), 0);
+        assert_eq!(width_units(277.832), 278);
+        assert_eq!(width_units(-1000.0), -1000);
+        assert_eq!(width_units(1e300), i32::MAX);
+        assert_eq!(width_units(-1e300), i32::MIN);
     }
 
+    /// `Widths` written as an indirect array, the form most producers
+    /// emit, and indirect elements inside it are read; a real-valued
+    /// width keeps its value rather than truncating.
     #[test]
-    fn pdf_width_to_i32_saturates_on_overflow() {
-        // Adversarial input must clamp, not wrap.  An i64::MAX width that
-        // wraps with `as i32` would become -1, silently corrupting text.
-        assert_eq!(pdf_width_to_i32(i64::MAX), i32::MAX);
-        assert_eq!(pdf_width_to_i32(i64::MIN), i32::MIN);
-        assert_eq!(pdf_width_to_i32(i64::from(i32::MAX) + 1), i32::MAX);
-        assert_eq!(pdf_width_to_i32(i64::from(i32::MIN) - 1), i32::MIN);
+    fn widths_resolve_indirect_arrays_and_elements() {
+        let doc =
+            crate::test_helpers::make_doc_with_objects(&[(4, "[ 278 5 0 R 556.5 ]"), (5, "500")]);
+        let d = make_dict(&[
+            (b"FirstChar", Object::Integer(32)),
+            (b"Widths", Object::Reference((4, 0))),
+        ]);
+        assert_eq!(extract_widths(&doc, &d), (32, vec![278.0, 500.0, 556.5]));
+    }
+
+    /// A `FirstChar` that is no single-byte code cannot align `Widths`:
+    /// the widths are dropped rather than shifted onto other codes.
+    #[test]
+    fn widths_with_an_out_of_range_first_char_are_ignored() {
+        for first in [
+            Object::Integer(-1),
+            Object::Integer(1 << 32),
+            Object::Real(3.5),
+        ] {
+            let d = make_dict(&[
+                (b"FirstChar", first.clone()),
+                (b"Widths", Object::Array(vec![Object::Integer(500)])),
+            ]);
+            assert_eq!(extract_widths(&empty_doc(), &d), (0, vec![]), "{first:?}");
+        }
+    }
+
+    /// The fractional widths of a Type 3 font drawn under a unit
+    /// `FontMatrix` keep their value: truncated to integers they would
+    /// all be 0, stacking every glyph at one position.
+    #[test]
+    fn type3_widths_are_real_valued() {
+        let doc = empty_doc();
+        let d = make_dict(&[
+            (b"Subtype", Object::Name(b"Type3".to_vec())),
+            (b"FirstChar", Object::Integer(65)),
+            (
+                b"Widths",
+                Object::Array(vec![Object::Real(0.5), Object::Real(0.25)]),
+            ),
+            (
+                b"FontMatrix",
+                Object::Array(vec![
+                    Object::Integer(1),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(1),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                ]),
+            ),
+        ]);
+        let t3 = resolve_font(&doc, &d, None).type3.expect("Type 3 data");
+        assert!((t3.width(65) - 0.5).abs() < 1e-6);
+        assert!((t3.width(66) - 0.25).abs() < 1e-6);
+        assert!(t3.width(67).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1614,7 +1666,7 @@ mod tests {
         // §9.7.4.3 grammar.  Sequence (with how the cursor consumes it):
         //   Name        → bad leading element, skip 1
         //   5 [ -7 9 ]  → well-formed width-array form: CID 5 widths [-7, 9]
-        //                 (negative width saturates via pdf_width_to_i32, it is
+        //                 (a negative width is kept as is, it is
         //                 NOT silently zeroed or panicked)
         //   50 40 200   → range form, cfirst(50) > clast(40) → degenerate,
         //                 logged + skipped, all 3 consumed
