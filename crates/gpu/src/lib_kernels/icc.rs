@@ -2,7 +2,21 @@
 
 use cudarc::driver::{CudaSlice, PushKernelArg};
 
-use crate::{GPU_ICC_CLUT_THRESHOLD, GpuCtx, cmyk::icc_cmyk_to_rgb_cpu, launch_cfg};
+use crate::backend::params::MAX_KERNEL_PIXELS;
+use crate::cmyk::{check_clut, icc_cmyk_to_rgb_cpu};
+use crate::{GPU_ICC_CLUT_THRESHOLD, GpuCtx, launch_cfg};
+
+/// Check that `cmyk` holds whole 4-byte pixels.
+fn check_cmyk_len(cmyk: &[u8]) -> Result<(), String> {
+    if cmyk.len().is_multiple_of(4) {
+        Ok(())
+    } else {
+        Err(format!(
+            "CMYK buffer length {} is not a multiple of 4",
+            cmyk.len()
+        ))
+    }
+}
 
 impl GpuCtx {
     /// Convert CMYK pixels to RGB using a GPU kernel.
@@ -23,54 +37,30 @@ impl GpuCtx {
     ///
     /// # Errors
     ///
-    /// Returns an error if GPU data transfer or kernel launch fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `cmyk.len()` is not a multiple of 4, or if `clut` is `Some` and
-    /// `table.len() != grid_n^4 * 3`.
+    /// Returns an error if `cmyk.len()` is not a multiple of 4, if `clut` is
+    /// `Some` with `grid_n` outside `[2, 255]` or `table.len() != grid_n⁴ × 3`,
+    /// or if GPU data transfer or kernel launch fails.
     pub fn icc_cmyk_to_rgb(
         &self,
         cmyk: &[u8],
         clut: Option<(&[u8], u32)>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        assert!(
-            cmyk.len().is_multiple_of(4),
-            "cmyk.len() must be a multiple of 4 (got {})",
-            cmyk.len()
-        );
-
+        check_cmyk_len(cmyk)?;
         // Early-out before any CLUT validation: empty input always produces empty output.
         let n = cmyk.len() / 4;
         if n == 0 {
             return Ok(Vec::new());
         }
-
-        if let Some((table, grid_n)) = clut {
-            // grid_n ≤ 255 is enforced by the baking API; checked_pow guards future misuse.
-            let expected = (grid_n as usize)
-                .checked_pow(4)
-                .and_then(|n| n.checked_mul(3))
-                .unwrap_or_else(|| {
-                    panic!("grid_n({grid_n})^4*3 overflows usize — grid_n must be ≤ 255")
-                });
-            assert_eq!(
-                table.len(),
-                expected,
-                "CLUT table length {got} ≠ grid_n({grid_n})^4*3={expected}",
-                got = table.len(),
-            );
-        }
-        // Profile-free path (clut=None): the CPU SIMD path always beats GPU on this machine —
-        // threshold_bench showed the PCIe round-trip cost exceeds the compute cost
-        // at all measured sizes (256–4M pixels).  Always use the CPU path here.
-        if clut.is_none() {
+        let Some((table, grid_n)) = clut else {
+            // Profile-free path: the CPU SIMD path always beats GPU on this machine —
+            // threshold_bench showed the PCIe round-trip cost exceeds the compute cost
+            // at all measured sizes (256–4M pixels).
             return Ok(icc_cmyk_to_rgb_cpu(cmyk, None));
-        }
+        };
+        check_clut(table, grid_n)?;
         if n < GPU_ICC_CLUT_THRESHOLD {
             return Ok(icc_cmyk_to_rgb_cpu(cmyk, clut));
         }
-
         self.icc_cmyk_to_rgb_gpu(cmyk, clut)
     }
 
@@ -81,29 +71,39 @@ impl GpuCtx {
     ///
     /// # Errors
     ///
-    /// Returns an error if GPU data transfer or kernel launch fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `cmyk.len()` is not a multiple of 4 or if the pixel count
-    /// overflows `u32::MAX`.
+    /// Returns an error if `cmyk.len()` is not a multiple of 4, if the pixel
+    /// count exceeds [`MAX_KERNEL_PIXELS`], if `clut` is `Some` and fails the
+    /// [`icc_cmyk_to_rgb`](Self::icc_cmyk_to_rgb) table check or exceeds
+    /// `i32::MAX` bytes (the kernel's 32-bit node index), or if GPU data
+    /// transfer or kernel launch fails.
     pub fn icc_cmyk_to_rgb_gpu(
         &self,
         cmyk: &[u8],
         clut: Option<(&[u8], u32)>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        assert!(
-            cmyk.len().is_multiple_of(4),
-            "cmyk.len() must be a multiple of 4 (got {})",
-            cmyk.len()
-        );
+        check_cmyk_len(cmyk)?;
         let n = cmyk.len() / 4;
         if n == 0 {
             // Match the sibling wrappers: zero pixels is a no-op, not a
             // zero-size device-allocation error.
             return Ok(Vec::new());
         }
-        let n_u32 = u32::try_from(n).expect("pixel count exceeds u32::MAX");
+        let n_u32 = u32::try_from(n)
+            .ok()
+            .filter(|&n| n <= MAX_KERNEL_PIXELS)
+            .ok_or_else(|| {
+                format!("{n} CMYK pixels exceed the kernel limit {MAX_KERNEL_PIXELS}")
+            })?;
+        if let Some((table, grid_n)) = clut {
+            check_clut(table, grid_n)?;
+            if i32::try_from(table.len()).is_err() {
+                return Err(format!(
+                    "CLUT of {} bytes exceeds the kernel's 32-bit node index",
+                    table.len()
+                )
+                .into());
+            }
+        }
         let stream = self.stream();
 
         let d_cmyk = stream.clone_htod(cmyk)?;
@@ -195,6 +195,48 @@ impl GpuCtx {
 #[cfg(all(test, feature = "gpu-validation"))]
 mod tests {
     use crate::GpuCtx;
+
+    /// Malformed buffers and tables are errors, not panics or device reads
+    /// past a buffer.
+    #[test]
+    fn icc_rejects_malformed_input_with_errors() {
+        let gpu = GpuCtx::init().expect("gpu init");
+        let table = vec![0u8; 17usize.pow(4) * 3];
+        for (cmyk, clut, what) in [
+            (&[0u8; 3][..], None, "multiple of 4"),
+            (&[0u8; 4][..], Some((&table[..], 33)), "table length"),
+            (&[0u8; 4][..], Some((&[][..], 0)), "grid_n"),
+        ] {
+            let e = gpu.icc_cmyk_to_rgb(cmyk, clut).unwrap_err().to_string();
+            assert!(e.contains(what), "{e}");
+            let e = gpu.icc_cmyk_to_rgb_gpu(cmyk, clut).unwrap_err().to_string();
+            assert!(e.contains(what), "{e}");
+        }
+    }
+
+    /// The CUDA CLUT kernel is byte-identical to the CPU evaluator on a
+    /// pseudo-random 17-node table, at the lattice nodes and between them.
+    #[test]
+    fn icc_clut_kernel_matches_cpu() {
+        let gpu = GpuCtx::init().expect("gpu init");
+        let mut s = 0x0bad_5eed_u32;
+        let mut next = move || {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            s.to_be_bytes()[0]
+        };
+        let table: Vec<u8> = (0..17usize.pow(4) * 3).map(|_| next()).collect();
+        let mut cmyk: Vec<u8> = (0u32..=255)
+            .flat_map(|v| {
+                let v = u8::try_from(v).expect("byte");
+                [v, v, v, v]
+            })
+            .collect();
+        cmyk.extend((0..4 * 200_000).map(|_| next()));
+        let got = gpu
+            .icc_cmyk_to_rgb_gpu(&cmyk, Some((&table, 17)))
+            .expect("clut kernel");
+        assert_eq!(got, crate::icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, 17))));
+    }
 
     /// The CUDA profile-free kernel is byte-identical to the CPU conversion
     /// over every (ink, K) byte pair plus pseudo-random pixels.

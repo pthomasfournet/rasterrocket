@@ -6,27 +6,44 @@
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// Check that `table` is a CLUT of `grid_n` nodes per axis: `grid_n` in
+/// `[2, 255]` and `table.len() == grid_n⁴ × 3`.
+///
+/// # Errors
+/// A message naming the violated condition and both values.
+pub fn check_clut(table: &[u8], grid_n: u32) -> Result<(), String> {
+    if !(2..=255).contains(&grid_n) {
+        return Err(format!("CLUT grid_n must be in [2, 255], got {grid_n}"));
+    }
+    let expected = (grid_n as usize)
+        .checked_pow(4)
+        .and_then(|nodes| nodes.checked_mul(3))
+        .ok_or_else(|| format!("CLUT grid_n({grid_n})^4*3 overflows usize"))?;
+    if table.len() != expected {
+        return Err(format!(
+            "CLUT table length {} ≠ grid_n({grid_n})^4*3={expected}",
+            table.len()
+        ));
+    }
+    Ok(())
+}
+
 /// CPU fallback for [`crate::GpuCtx::icc_cmyk_to_rgb`].
 ///
 /// When `clut` is `None`, converts with the profile-free process-ink model
 /// [`color::cmyk::cmyk_to_rgb_row`] (runtime-dispatched SIMD).
 ///
 /// When `clut` is `Some((table, grid_n))`, evaluates the 4D CLUT using
-/// quadrilinear interpolation — the same algorithm as the GPU kernel.
+/// quadrilinear interpolation — the arithmetic of the CUDA kernel.
 ///
 /// # Panics
 ///
-/// Panics if `clut` is `Some((table, grid_n))` and either `grid_n < 2`
-/// (fewer than 2 nodes per axis is degenerate and unusable for
-/// interpolation) or `table.len() != grid_n⁴ × 3` (the table and grid size
-/// disagree — reading through the mismatch would index out of bounds for a
-/// short table and silently sample garbage for a long one).
+/// Panics if `clut` is `Some((table, grid_n))` and either `grid_n` lies
+/// outside `[2, 255]` (fewer than 2 nodes per axis cannot be interpolated)
+/// or `table.len() != grid_n⁴ × 3` (the table and grid size disagree —
+/// reading through the mismatch would index out of bounds for a short table
+/// and silently sample garbage for a long one).
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one function per CLUT/matrix branch with the interpolation inline — \
-              splitting would scatter the shared index arithmetic"
-)]
 pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
     let n = cmyk.len() / 4;
     let mut rgb = vec![0u8; n * 3];
@@ -36,125 +53,99 @@ pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
             color::cmyk::cmyk_to_rgb_row(&cmyk[..n * 4], &mut rgb);
         }
         Some((table, grid_n)) => {
-            // grid_n = 0 would cause underflow in `grid_n - 1` and panic via
-            // `g - 1` index arithmetic below.  Public function: guard explicitly.
-            assert!(
-                grid_n >= 2,
-                "icc_cmyk_to_rgb_cpu: grid_n must be ≥ 2, got {grid_n}"
-            );
-            let expected_len = (grid_n as usize)
-                .checked_pow(4)
-                .and_then(|nodes| nodes.checked_mul(3))
-                .unwrap_or_else(|| {
-                    panic!("grid_n({grid_n})^4*3 overflows usize — grid_n must be ≤ 255")
-                });
-            assert_eq!(
-                table.len(),
-                expected_len,
-                "CLUT table length {got} ≠ grid_n({grid_n})^4*3={expected_len}",
-                got = table.len(),
-            );
-            let g = grid_n as usize; // grid_n ≤ 255 from caller validation
-            let g2 = g * g;
-            let g3 = g2 * g;
-            // grid_n ≤ 255 → (grid_n - 1) ≤ 254, exact in f32 (needs ≤ 8 mantissa bits).
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "grid_n ≤ 255, fits exactly in f32 (8 bits < 23-bit mantissa)"
-            )]
-            let g1 = (grid_n - 1) as f32;
-            let scale = g1 / 255.0;
+            if let Err(e) = check_clut(table, grid_n) {
+                panic!("icc_cmyk_to_rgb_cpu: {e}");
+            }
+            let lattice = Lattice::new(table, grid_n);
             for (src, dst) in cmyk
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .zip(rgb.as_chunks_mut::<3>().0)
             {
-                let fc = f32::from(src[0]) * scale;
-                let fm = f32::from(src[1]) * scale;
-                let fy = f32::from(src[2]) * scale;
-                let fk = f32::from(src[3]) * scale;
-
-                // fc ∈ [0.0, g1] ⊂ [0.0, 254.0]; floor is non-negative and ≤ 254.
-                // The sign-loss and truncation lints fire because `as usize` is UB
-                // for negative or >usize::MAX floats; here neither can happen.
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "fc/fm/fy/fk are in [0.0, 254.0]; floor is exact and non-negative"
-                )]
-                let (ic0, im0, iy0, ik0) = (
-                    (fc as usize).min(g - 1),
-                    (fm as usize).min(g - 1),
-                    (fy as usize).min(g - 1),
-                    (fk as usize).min(g - 1),
-                );
-                let ic1 = (ic0 + 1).min(g - 1);
-                let im1 = (im0 + 1).min(g - 1);
-                let iy1 = (iy0 + 1).min(g - 1);
-                let ik1 = (ik0 + 1).min(g - 1);
-
-                // Fractional weights: difference between float position and floored index.
-                // ic0 ≤ 254 → ic0 as f32 is exact (fits in 8 mantissa bits).
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "ic0/im0/iy0/ik0 ≤ 254, exact in f32"
-                )]
-                let (wc, wm, wy, wk) = (
-                    fc - ic0 as f32,
-                    fm - im0 as f32,
-                    fy - iy0 as f32,
-                    fk - ik0 as f32,
-                );
-
-                let node = |ci: usize, mi: usize, yi: usize, ki: usize| -> [f32; 3] {
-                    let idx = (ki * g3 + ci * g2 + mi * g + yi) * 3;
-                    [
-                        f32::from(table[idx]),
-                        f32::from(table[idx + 1]),
-                        f32::from(table[idx + 2]),
-                    ]
-                };
-
-                let lerp = |a: f32, b: f32, t: f32| t.mul_add(b - a, a);
-                let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
-                    [
-                        lerp(a[0], b[0], t),
-                        lerp(a[1], b[1], t),
-                        lerp(a[2], b[2], t),
-                    ]
-                };
-
-                // K=0 face: lerp Y → M → C
-                let c0m0k0 = lerp3(node(ic0, im0, iy0, ik0), node(ic0, im0, iy1, ik0), wy);
-                let c0m1k0 = lerp3(node(ic0, im1, iy0, ik0), node(ic0, im1, iy1, ik0), wy);
-                let c1m0k0 = lerp3(node(ic1, im0, iy0, ik0), node(ic1, im0, iy1, ik0), wy);
-                let c1m1k0 = lerp3(node(ic1, im1, iy0, ik0), node(ic1, im1, iy1, ik0), wy);
-                let rk0 = lerp3(lerp3(c0m0k0, c0m1k0, wm), lerp3(c1m0k0, c1m1k0, wm), wc);
-
-                // K=1 face: lerp Y → M → C
-                let c0m0k1 = lerp3(node(ic0, im0, iy0, ik1), node(ic0, im0, iy1, ik1), wy);
-                let c0m1k1 = lerp3(node(ic0, im1, iy0, ik1), node(ic0, im1, iy1, ik1), wy);
-                let c1m0k1 = lerp3(node(ic1, im0, iy0, ik1), node(ic1, im0, iy1, ik1), wy);
-                let c1m1k1 = lerp3(node(ic1, im1, iy0, ik1), node(ic1, im1, iy1, ik1), wy);
-                let rk1 = lerp3(lerp3(c0m0k1, c0m1k1, wm), lerp3(c1m0k1, c1m1k1, wm), wc);
-
-                let out = lerp3(rk0, rk1, wk);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "clamped to [0,255] before cast"
-                )]
-                {
-                    dst[0] = out[0].clamp(0.0, 255.0).round() as u8;
-                    dst[1] = out[1].clamp(0.0, 255.0).round() as u8;
-                    dst[2] = out[2].clamp(0.0, 255.0).round() as u8;
-                }
+                *dst = lattice.eval(*src);
             }
         }
     }
 
     rgb
+}
+
+/// A validated `grid_n⁴` RGB CLUT, indexed `(k·G³ + c·G² + m·G + y) · 3`.
+struct Lattice<'a> {
+    table: &'a [u8],
+    /// Nodes per axis, in `[2, 255]`.
+    g: usize,
+    /// `(g − 1) / 255`: input byte to lattice coordinate.
+    scale: f32,
+}
+
+impl<'a> Lattice<'a> {
+    /// `table` and `grid_n` must have passed [`check_clut`].
+    fn new(table: &'a [u8], grid_n: u32) -> Self {
+        // grid_n ≤ 255 → (grid_n - 1) ≤ 254, exact in f32 (needs ≤ 8 mantissa bits).
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "grid_n ≤ 255, fits exactly in f32 (8 bits < 23-bit mantissa)"
+        )]
+        let g1 = (grid_n - 1) as f32;
+        Self {
+            table,
+            g: grid_n as usize,
+            scale: g1 / 255.0,
+        }
+    }
+
+    /// The RGB node at lattice indices `[c, m, y, k]`.
+    fn node(&self, [ci, mi, yi, ki]: [usize; 4]) -> [f32; 3] {
+        let g = self.g;
+        let idx = (((ki * g + ci) * g + mi) * g + yi) * 3;
+        [
+            f32::from(self.table[idx]),
+            f32::from(self.table[idx + 1]),
+            f32::from(self.table[idx + 2]),
+        ]
+    }
+
+    /// Interpolate the CMYK pixel `px`: lerp along Y, then M, then C, then K
+    /// with fused multiply-adds, round half up and clamp to a byte.
+    fn eval(&self, px: [u8; 4]) -> [u8; 3] {
+        let last = self.g - 1;
+        // Lattice coordinate, floor index (≤ last) and weight per channel.
+        let axis = |v: u8| {
+            let f = f32::from(v) * self.scale;
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "f ∈ [0.0, 254.0]; the truncation is the floor"
+            )]
+            let i0 = (f as usize).min(last);
+            #[expect(clippy::cast_precision_loss, reason = "i0 ≤ 254, exact in f32")]
+            let w = f - i0 as f32;
+            (i0, (i0 + 1).min(last), w)
+        };
+        let [c, m, y, k] = px.map(axis);
+        let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
+            std::array::from_fn(|ch| t.mul_add(b[ch] - a[ch], a[ch]))
+        };
+        let pick = |(lo, hi, _): (usize, usize, f32), upper: bool| if upper { hi } else { lo };
+        let face = |kk: bool| {
+            let ym = |cc: bool, mm: bool| {
+                let at = |yy| self.node([pick(c, cc), pick(m, mm), pick(y, yy), pick(k, kk)]);
+                lerp3(at(false), at(true), y.2)
+            };
+            let c0 = lerp3(ym(false, false), ym(false, true), m.2);
+            let c1 = lerp3(ym(true, false), ym(true, true), m.2);
+            lerp3(c0, c1, c.2)
+        };
+        let out = lerp3(face(false), face(true), k.2);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to [0,255] before cast"
+        )]
+        out.map(|v| v.clamp(0.0, 255.0).round() as u8)
+    }
 }
 
 #[cfg(test)]
