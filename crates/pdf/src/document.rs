@@ -110,16 +110,11 @@ fn append_content_stream(out: &mut Vec<u8>, decoded: &[u8]) {
     out.extend_from_slice(decoded);
 }
 
-/// Collect the indirect references from a `/Contents` array.
+/// The indirect references of a `/Contents` array.
 ///
-/// Shared by the indirect-ref-to-array and direct-array arms of
-/// [`Document::get_page_content`] so the extraction (and its diagnostics)
-/// exist in exactly one place.  ISO 32000-2 §7.7.3.3 says every element of a
-/// `/Contents` array is an indirect reference to a content stream, so any
-/// element that is *not* a reference (an inline object, a nested array, a
-/// number) cannot contribute renderable bytes.  Silently filtering such an
-/// element is the v1 partial-blank failure mode, so each one is logged before
-/// it is dropped; `page_id` is threaded purely so the message names the page.
+/// Every element of such an array is an indirect reference to a content
+/// stream (ISO 32000-2 §7.7.3.3); any other element cannot contribute
+/// content and is dropped with a warning naming `page_id`.
 fn collect_content_refs(arr: &[Object], page_id: ObjectId) -> Vec<ObjectId> {
     arr.iter()
         .filter_map(|el| {
@@ -816,24 +811,14 @@ impl Document {
         Ok(id)
     }
 
-    /// Return parsed linearization hints, or `None` if the document is
-    /// not linearized.  Parsed once on first call and cached.
-    ///
-    /// `LinearizationHints` is `Copy` (24 bytes), so callers receive an
-    /// owned value rather than a borrow that would tie up the document
-    /// for its lifetime.
-    ///
-    /// # Errors
-    /// Currently never errors — `try_load` collapses every failure mode
-    /// (missing object 1, malformed dict, missing keys, invalid offsets)
-    /// into `Ok(None)`.  The `Result` return type is reserved for the
-    /// future hint-stream parser, which will gain real failure modes;
-    /// the call site can switch to `OnceLock::get_or_try_init` when
-    /// stable (rust-lang/rust#109737).
-    pub fn linearization_hints(&self) -> Result<Option<LinearizationHints>, PdfError> {
-        Ok(*self
+    /// The document's linearization parameters, or `None` when it is not
+    /// linearized or its `/Linearized` dictionary lacks a required entry.
+    /// Read once and memoised.
+    #[must_use]
+    pub fn linearization_hints(&self) -> Option<LinearizationHints> {
+        *self
             .lin_hints
-            .get_or_init(|| LinearizationHints::try_load(self).ok().flatten()))
+            .get_or_init(|| LinearizationHints::load(self))
     }
 
     /// Raw byte view of the underlying file.  Used by hint-table parsing
@@ -879,7 +864,7 @@ impl Document {
     fn read_page_count_uncached(&self) -> u32 {
         // Linearized PDFs declare /N up front; trust it without descending
         // into the catalog dict.
-        if let Ok(Some(hints)) = self.linearization_hints() {
+        if let Some(hints) = self.linearization_hints() {
             return hints.page_count;
         }
         let Ok(pages_root) = self.pages_root_id() else {
@@ -965,24 +950,11 @@ impl Document {
             Some(obj) => obj.clone(),
         };
 
-        // /Contents (ISO 32000-2 §7.7.3.3) is either a single content stream
-        // or an array of streams whose decoded bytes are concatenated.  Either
-        // form may itself be reached through an indirect reference, so a
-        // reference can resolve to a *stream* OR to an *array of stream
-        // references* — modern producers (LibreOffice, many imposition tools)
-        // emit `/Contents N 0 R` where object N is `[a 0 R b 0 R c 0 R]`.
-        // The previous code treated such a reference as a single stream;
-        // `get_object` returned the Array, the `Object::Stream` match failed,
-        // and the page rendered blank.  Resolve one indirection level so a
-        // ref-to-array expands into its element references.
-        //
-        // This expansion is intentionally a single, non-recursive pass: the
-        // spec permits exactly one array of *direct stream references*, never
-        // an array nested inside an array, so a flat collection both matches
-        // the spec and makes a cyclic/self-referential `/Contents` ring
-        // (an element ref pointing back at the array object) structurally
-        // impossible to loop on — each `get_object` is visited at most once
-        // and non-streams are diagnosed and skipped in the decode loop below.
+        // /Contents (ISO 32000-2 §7.7.3.3) is a content stream or an array
+        // of references to content streams, and either may be reached
+        // through an indirect reference.  One level of indirection is
+        // expanded: arrays do not nest, so each element is fetched once and
+        // a reference cycle through the array cannot loop.
         let refs: Vec<ObjectId> = match &contents {
             Object::Reference(id) => match self.get_object(*id).as_deref() {
                 Ok(Object::Array(arr)) => collect_content_refs(arr, page_id),
@@ -1014,13 +986,8 @@ impl Document {
                 }
             };
             let Object::Stream(s) = stream_obj.as_ref() else {
-                // A `/Contents` array element that does not resolve to a
-                // stream (a dict, null, number, or — non-conformant — a
-                // nested array) is not renderable content.  Dropping it
-                // silently is the v1 blank/partial-page failure: the page
-                // would render with missing operators and EXIT 0.  Surface
-                // it loudly and continue with the streams that *are* valid
-                // so the page degrades gracefully instead of vanishing.
+                // An element that is not a stream holds no content; it is
+                // reported, and the remaining elements still render.
                 log::warn!(
                     "get_page_content: page {} /Contents element obj {} is {}, \
                      not a stream — skipping (page may be missing content)",

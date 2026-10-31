@@ -4,18 +4,13 @@
 //! first indirect object in the file.  This dict + hint streams together
 //! let a reader jump to any page by index without walking the page tree.
 //!
-//! This module supports the detection layer: parse the dict and expose the
-//! `/N`, `/O`, and `/H` (hint stream offsets) values.  The Page Offset
-//! Hint Table contents (PDF § F.4.5, bit-packed) are NOT parsed yet — see
-//! `ROADMAP.md` for the hint-stream parser follow-up.  Until that ships,
-//! callers detect linearization purely for telemetry / future fast paths
-//! and continue using the logarithmic page-tree descent for all lookups.
+//! This module reads the dictionary's `/N`, `/O` and `/H` entries.  The
+//! contents of the Page Offset Hint Table (§ F.4.5) are not parsed; page
+//! lookup always descends the page tree.
 
-use crate::{document::Document, error::PdfError, object::Object};
+use crate::{document::Document, object::Object};
 
-/// Parsed `/Linearized` parameters.  All fields are public because the
-/// future hint-stream parser will read `hint_stream_offset` /
-/// `hint_stream_length` directly from the cached struct.
+/// Parsed `/Linearized` parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct LinearizationHints {
     /// `/N` — total number of pages.
@@ -31,33 +26,20 @@ pub struct LinearizationHints {
 }
 
 impl LinearizationHints {
-    /// Try to load linearization hints from the document.  Returns
-    /// `Ok(None)` for non-linearized PDFs or when required fields are
-    /// missing / malformed.  Returns `Ok(Some(_))` only when a valid
-    /// `/Linearized` dict is present with the minimum mandatory keys
-    /// (`/N`, `/O`, `/H[0]`, `/H[1]`).
-    ///
-    /// # Errors
-    /// Currently never errors — every malformed-or-absent case collapses
-    /// to `Ok(None)` so callers can transparently fall back to the
-    /// page-tree descent.  Returned as `Result` so the signature stays
-    /// stable when the hint-stream parser ships and gains real failure
-    /// modes (truncated stream, bad bit-widths, …).
-    pub fn try_load(doc: &Document) -> Result<Option<Self>, PdfError> {
-        let Some(lin_obj) = find_linearized_object(doc) else {
-            return Ok(None);
-        };
-        let Some(lin_dict) = lin_obj.as_dict() else {
-            return Ok(None);
-        };
-        let hints = parse_dict(lin_dict, doc.base());
+    /// The linearization parameters of `doc`: `Some` only when object 1 is
+    /// a `/Linearized` dictionary carrying `/N`, `/O`, `/H[0]` and `/H[1]`.
+    /// A document that is not linearized, or whose dictionary lacks one of
+    /// those entries, yields `None`.
+    pub(crate) fn load(doc: &Document) -> Option<Self> {
+        let lin_obj = find_linearized_object(doc)?;
+        let hints = parse_dict(lin_obj.as_dict()?, doc.base());
         if hints.is_none() {
             log::debug!(
                 "LinearizationHints: /Linearized dict present but required keys missing; \
                  falling back to descent",
             );
         }
-        Ok(hints)
+        hints
     }
 }
 
@@ -124,7 +106,7 @@ startxref\n180\n%%EOF"
     #[test]
     fn non_linearized_returns_none() {
         let doc = Document::from_bytes_owned(non_linearized_pdf()).unwrap();
-        let hints = LinearizationHints::try_load(&doc).expect("ok");
+        let hints = LinearizationHints::load(&doc);
         assert!(hints.is_none(), "non-linearized PDF should return None");
     }
 
@@ -153,9 +135,7 @@ trailer\n<</Size 4 /Root 2 0 R>>\n\
 startxref\n166\n%%EOF"
             .to_vec();
         let doc = Document::from_bytes_owned(bytes.clone()).unwrap();
-        let hints = LinearizationHints::try_load(&doc)
-            .expect("ok")
-            .expect("Some(hints)");
+        let hints = LinearizationHints::load(&doc).expect("Some(hints)");
         assert_eq!(hints.page_count, 100);
         assert_eq!(hints.first_page_obj, 5);
         assert_eq!(hints.hint_stream_offset, 12345);
@@ -166,15 +146,13 @@ startxref\n166\n%%EOF"
         // them.
         let prefix = b"Header: x\n";
         let doc = Document::from_bytes_owned([&prefix[..], &bytes].concat()).unwrap();
-        let hints = LinearizationHints::try_load(&doc)
-            .expect("ok")
-            .expect("Some(hints) behind a prefix");
+        let hints = LinearizationHints::load(&doc).expect("Some(hints) behind a prefix");
         assert_eq!(hints.hint_stream_offset, 12345 + prefix.len() as u64);
         assert_eq!(hints.hint_stream_length, 678);
     }
 
     /// `/Linearized` dict with the marker key present but a required field
-    /// missing.  Detection must collapse to `Ok(None)` rather than producing
+    /// missing.  Detection must yield `None` rather than producing
     /// a `LinearizationHints` with garbage values — the contract says
     /// "minimum mandatory keys present" before returning `Some`.
     #[test]
@@ -197,7 +175,7 @@ trailer\n<</Size 4 /Root 2 0 R>>\n\
 startxref\n139\n%%EOF"
             .to_vec();
         let doc = Document::from_bytes_owned(bytes).unwrap();
-        let hints = LinearizationHints::try_load(&doc).expect("ok");
+        let hints = LinearizationHints::load(&doc);
         assert!(
             hints.is_none(),
             "malformed /Linearized dict should return None"
