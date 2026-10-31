@@ -75,8 +75,12 @@ pub(super) fn text_or_stream(doc: &Document, obj: Option<&Object>) -> Option<Vec
 }
 
 /// `v` formatted for a content stream: at most four decimals, no trailing
-/// zeros.
+/// zeros.  A non-finite `v`, which no content-stream number expresses, is
+/// written as 0.
 pub(super) fn n(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_owned();
+    }
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" {
@@ -224,6 +228,8 @@ mod tests {
         assert_eq!(n(0.5), "0.5");
         assert_eq!(n(-0.000_01), "0");
         assert_eq!(n(2.123_456), "2.1235");
+        assert_eq!(n(f64::INFINITY), "0");
+        assert_eq!(n(f64::NAN), "0");
     }
 
     #[test]

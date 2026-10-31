@@ -451,9 +451,11 @@ fn upright_about(rect: [f64; 4], rotate_cw: u16) -> Ctm {
 
 /// Read a 4-element rect `[llx, lly, urx, ury]` from a PDF dictionary.
 ///
-/// Returns `None` if the `Rect` key is absent or has fewer than 4 numeric entries.
+/// Returns `None` if the `Rect` key is absent or has fewer than 4 finite
+/// numeric entries.
 fn read_rect(dict: &pdf::Dictionary) -> Option<[f64; 4]> {
-    let mut r = crate::resources::read_f64_n::<4>(dict, b"Rect")?;
+    let mut r = crate::resources::read_f64_n::<4>(dict, b"Rect")
+        .filter(|r| r.iter().all(|v| v.is_finite()))?;
     // Normalise so llx ≤ urx and lly ≤ ury.
     if r[0] > r[2] {
         r.swap(0, 2);
