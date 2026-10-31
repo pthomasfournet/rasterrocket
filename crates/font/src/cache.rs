@@ -4,12 +4,11 @@
 //!
 //! # Concurrency
 //!
-//! `quick_cache` uses sharded locking internally.  Unlike the previous
-//! `DashMap<FaceId, lru::LruCache>` design, reads do not acquire a write lock
-//! — `lru::LruCache::get` requires `&mut self` to update MRU order, which
-//! forced every hit to take a write lock on the shard.  `quick_cache` updates
-//! recency atomically without exclusive shard access, so concurrent reads from
-//! multiple Rayon threads no longer serialise within a shard.
+//! `quick_cache` shards its table and records recency atomically, so a hit
+//! takes a shard's read lock only: concurrent lookups from the page-render
+//! threads do not serialise within a shard.  Two threads missing on one key
+//! may both render the glyph; the later insert replaces the earlier, and
+//! both bitmaps are identical.
 //!
 //! # Scope
 //!
@@ -29,8 +28,8 @@
 //!
 //! # Key shape
 //!
-//! [`GlyphKey`] is `(face_id, glyph_id, size_px, x_frac, aa)`: it describes
-//! outline glyphs of a font program at one matrix.  Glyphs from other
+//! [`GlyphKey`] is `(face_id, glyph_id, size_px, x_frac, x_scale, aa)`: it
+//! describes outline glyphs of a font program at one matrix.  Glyphs from other
 //! sources (Type 3 `CharProcs`, colour glyphs) have no such key and are not
 //! cached here; caching them calls for a key derived from the source.
 

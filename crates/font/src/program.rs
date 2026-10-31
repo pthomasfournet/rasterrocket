@@ -745,8 +745,6 @@ fn parse_type1(data: &[u8]) -> Result<(Outlines, i32), LoadError> {
     }
 }
 
-/// CID → glyph index table of a CID-keyed CFF program, `None` for a
-/// name-keyed one.
 /// Glyph index → vertical form from the single substitutions the `vert`
 /// and `vrt2` features of `font`'s `GSUB` table apply (the first feature
 /// listing a glyph wins).
@@ -804,6 +802,8 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
     forms
 }
 
+/// CID → glyph index table of a CID-keyed CFF program, `None` for a
+/// name-keyed one.
 fn cid_charset_map(cff: &CffFontRef<'_>) -> Option<HashMap<u32, u32>> {
     if !cff.is_cid() {
         return None;
