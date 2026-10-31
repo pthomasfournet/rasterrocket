@@ -10,7 +10,7 @@
 //! |---------|--------------|----------------|
 //! | `simple` | `a_input == 255`, `BlendMode::Normal` | `pipeRunSimple*` |
 //! | `aa`     | shape byte present, `BlendMode::Normal`, no group correction | `pipeRunAA*` |
-//! | `general`| everything else — blend mode, non-isolated groups, overprint | `pipeRun` |
+//! | `general`| everything else — blend modes, non-isolated groups | `pipeRun` |
 
 pub mod aa;
 pub mod blend;
@@ -133,14 +133,6 @@ pub struct PipeState<'bmp> {
     /// For stroke operations the caller passes `stroke_alpha * 255.0`.
     pub a_input: u8,
 
-    /// Overprint mask: bit `k` set means channel `k` is painted.
-    /// `0xFFFF_FFFF` means all channels are painted (the default).
-    pub overprint_mask: u32,
-
-    /// If `true`, overprinted channels are additively blended (ink accumulation)
-    /// rather than replaced.  Corresponds to `state.overprint_additive`.
-    pub overprint_additive: bool,
-
     /// Transfer function tables for the current pixel mode.  Applied to the
     /// composited result before writing.
     pub transfer: TransferSet<'bmp>,
@@ -197,15 +189,9 @@ impl PipeState<'_> {
     /// Returns `true` when the simple (no-transparency) fast path is applicable.
     ///
     /// Applicable when `a_input == 255`, there is no shape and no backdrop.
-    ///
-    /// Overprint must be excluded: the simple path overwrites `dst_pixels` before
-    /// reading the original destination, making channel-selective restore impossible.
     #[must_use]
     pub const fn no_transparency(&self, uses_shape: bool) -> bool {
-        self.a_input == 255
-            && !uses_shape
-            && self.backdrop.is_none()
-            && self.overprint_mask == 0xFFFF_FFFF
+        self.a_input == 255 && !uses_shape && self.backdrop.is_none()
     }
 
     /// Returns `true` when the AA (shape-only) fast path is applicable.
@@ -688,16 +674,5 @@ mod tests {
             let v = dst[i * 3];
             assert!(v > 100 && v < 160, "pixel {i} R={v} expected ~128");
         }
-    }
-
-    #[test]
-    fn no_transparency_false_with_overprint() {
-        // Overprint must not use the simple path (dst channels already overwritten).
-        let mut pipe = make_pipe(255, BlendMode::Normal);
-        pipe.overprint_mask = 0x0000_0001; // only channel 0 painted
-        assert!(
-            !pipe.no_transparency(false),
-            "overprint must route to general pipe"
-        );
     }
 }

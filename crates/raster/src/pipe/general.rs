@@ -44,7 +44,7 @@ thread_local! {
 
 /// General-purpose compositing span function.
 ///
-/// Handles blend modes, non-isolated groups and overprint.
+/// Handles blend modes and non-isolated groups.
 /// Slower than `simple` or `aa` but covers every case.
 ///
 /// # Preconditions (checked with `debug_assert!`)
@@ -247,7 +247,7 @@ fn render_span_general_inner<'src, 'bd>(
                             dst_px[j] = c as u8;
                         }
                     }
-                    finish_pixel(pipe, dst_px, src_px, ncomps);
+                    pipe::apply_transfer_in_place(pipe, dst_px);
                 }
 
                 #[expect(
@@ -311,7 +311,7 @@ fn render_span_general_inner<'src, 'bd>(
                         dst_px[j] = c as u8;
                     }
                 }
-                finish_pixel(pipe, dst_px, src_px, ncomps);
+                pipe::apply_transfer_in_place(pipe, dst_px);
             }
         }
     }
@@ -433,56 +433,6 @@ fn apply_blend_fn(
     }
 }
 
-/// Apply transfer and conditional overprint at the end of each pixel's colour computation.
-///
-/// Called after the colour formula writes all channels of `dst_px` but before
-/// the alpha plane is updated.  Order matters: transfer must precede overprint
-/// so the transfer LUT sees the blended colour, not the restored source.
-#[inline]
-fn finish_pixel(pipe: &PipeState<'_>, dst_px: &mut [u8], src_px: &[u8], ncomps: usize) {
-    pipe::apply_transfer_in_place(pipe, dst_px);
-    if pipe.overprint_mask != 0xFFFF_FFFF {
-        apply_overprint(pipe, dst_px, src_px, ncomps);
-    }
-}
-
-/// Apply overprint: for channels where the bit in `overprint_mask` is 0,
-/// the channel is not painted.
-///
-/// Only `overprint_additive = true` is implemented.  Replace-mode overprint
-/// requires the caller to preserve the pre-blend destination bytes, which the
-/// current call structure does not support.
-///
-/// # Panics
-///
-/// Panics if `pipe.overprint_additive` is `false`; replace-mode overprint is
-/// not yet implemented.
-fn apply_overprint(pipe: &PipeState<'_>, dst_px: &mut [u8], src_px: &[u8], ncomps: usize) {
-    if pipe.overprint_additive {
-        for j in 0..ncomps {
-            // Channels whose bit is 0 in the mask are not painted; dst already holds
-            // the correct value, so skip them.
-            if pipe.overprint_mask & (1 << j) == 0 {
-                continue;
-            }
-            // Additive overprint: accumulate into the destination, clamped to 255.
-            dst_px[j] = (u16::from(dst_px[j]) + u16::from(src_px[j])).min(255) as u8;
-        }
-    } else {
-        // Replace overprint: channels not in mask should keep the original dst value,
-        // but the pre-blend destination has already been overwritten.  Restoring it
-        // here would require the caller to pass the pre-blend dst separately.
-        // Panic loudly (in both debug and release) rather than silently producing
-        // wrong output.  Callers must either set overprint_additive=true or pass the
-        // original dst bytes before calling apply_overprint.
-        panic!(
-            "general pipe: replace overprint (mask={:#010x}) is not yet implemented; \
-             use overprint_additive=true or preserve pre-blend dst in the caller",
-            pipe.overprint_mask,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,8 +461,6 @@ mod tests {
         PipeState {
             blend_mode: BlendMode::Normal,
             a_input: a,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
         }
@@ -658,8 +606,6 @@ mod tests {
         let pipe = PipeState {
             blend_mode: BlendMode::Normal,
             a_input: 255,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer,
             backdrop: None,
         };

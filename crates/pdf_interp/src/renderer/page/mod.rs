@@ -1477,8 +1477,6 @@ impl<'doc> PageRenderer<'doc> {
         PipeState {
             blend_mode,
             a_input,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             backdrop: backdrop.map(Backdrop::as_pipe_backdrop),
         }

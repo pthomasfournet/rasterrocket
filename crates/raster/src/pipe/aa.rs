@@ -217,8 +217,6 @@ mod tests {
         PipeState {
             blend_mode: BlendMode::Normal,
             a_input: 255,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
         }
@@ -316,8 +314,6 @@ mod tests {
         let pipe = PipeState {
             blend_mode: BlendMode::Normal,
             a_input: 255,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer: TransferSet::new([inv; 3], id, [id; 4], &DN_ID),
             backdrop: None,
         };

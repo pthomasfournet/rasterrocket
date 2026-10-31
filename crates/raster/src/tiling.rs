@@ -140,8 +140,6 @@ fn source_over() -> PipeState<'static> {
     PipeState {
         blend_mode: BlendMode::Normal,
         a_input: 255,
-        overprint_mask: 0xFFFF_FFFF,
-        overprint_additive: false,
         transfer: TransferSet::identity_rgb(),
         backdrop: None,
     }

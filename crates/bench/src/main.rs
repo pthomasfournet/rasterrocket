@@ -227,8 +227,6 @@ fn bench_ours(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
     let pipe = PipeState {
         blend_mode: BlendMode::Normal,
         a_input: 255,
-        overprint_mask: 0xFFFF_FFFF,
-        overprint_additive: false,
         transfer,
         backdrop: None,
     };

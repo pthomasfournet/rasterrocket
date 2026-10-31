@@ -93,14 +93,6 @@ pub(crate) fn render_span_simple<P: Pixel>(
         }
     }
 
-    // Overprint: excluded by no_transparency(); this branch is unreachable in
-    // a correct caller.  Panic loudly rather than silently dropping overprint.
-    debug_assert_eq!(
-        pipe.overprint_mask, 0xFFFF_FFFF,
-        "simple pipe reached with overprint_mask {:#010x}; route through render_span_general",
-        pipe.overprint_mask,
-    );
-
     // Set destination alpha to fully opaque.
     if let Some(alpha) = dst_alpha {
         debug_assert_eq!(alpha.len(), count);
@@ -120,8 +112,6 @@ mod tests {
         PipeState {
             blend_mode: BlendMode::Normal,
             a_input: 255,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
         }
@@ -158,8 +148,6 @@ mod tests {
         let pipe = PipeState {
             blend_mode: BlendMode::Normal,
             a_input: 255,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer,
             backdrop: None,
         };

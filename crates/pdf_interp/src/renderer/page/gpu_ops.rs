@@ -282,8 +282,6 @@ mod tests {
         PipeState {
             blend_mode: BlendMode::Normal,
             a_input,
-            overprint_mask: 0xFFFF_FFFF,
-            overprint_additive: false,
             transfer: raster::TransferSet::identity_rgb(),
             backdrop: None,
         }
