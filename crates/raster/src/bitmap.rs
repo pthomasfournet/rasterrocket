@@ -62,7 +62,7 @@ impl<P: Pixel> Bitmap<P> {
     ///
     /// # Panics
     ///
-    /// Panics if `row_pad` is 0.
+    /// Panics if `row_pad` is 0 or the buffer size overflows `usize`.
     #[must_use]
     pub fn new(width: u32, height: u32, row_pad: usize, with_alpha: bool) -> Self {
         assert!(row_pad >= 1, "row_pad must be ≥ 1");
@@ -72,12 +72,11 @@ impl<P: Pixel> Bitmap<P> {
         } else {
             raw_stride.div_ceil(row_pad) * row_pad
         };
-        let data = vec![0u8; stride * u32_to_usize(height)];
-        let alpha = if with_alpha {
-            Some(vec![0u8; u32_to_usize(width) * u32_to_usize(height)])
-        } else {
-            None
-        };
+        let data_len = stride
+            .checked_mul(u32_to_usize(height))
+            .expect("Bitmap::new: colour buffer size overflows usize");
+        let data = vec![0u8; data_len];
+        let alpha = with_alpha.then(|| vec![0u8; u32_to_usize(width) * u32_to_usize(height)]);
         Self {
             width,
             height,
@@ -236,7 +235,8 @@ impl<P: Pixel> Bitmap<P> {
             let w = u32_to_usize(self.width);
             let n = w * P::BYTES;
             let stride = self.stride;
-            for row in self.data.chunks_exact_mut(stride) {
+            // A zero-width bitmap has no pixels and a zero stride.
+            for row in self.data.chunks_exact_mut(stride.max(1)) {
                 // `as_chunks_mut::<P::BYTES>()` would need an associated const as a
                 // const-generic argument, which stable Rust does not accept.
                 for dst in row[..n].chunks_exact_mut(P::BYTES) {
@@ -642,5 +642,13 @@ mod tests {
         for i in 0..buf.row_bytes() {
             assert_eq!(buf.get_byte(0, i), 0xff, "byte {i} changed");
         }
+    }
+
+    /// Clearing a zero-width bitmap of multi-byte pixels is a no-op.
+    #[test]
+    fn clear_zero_width_bitmap() {
+        let mut bm = Bitmap::<Rgb8>::new(0, 3, 1, true);
+        bm.clear(Rgb8 { r: 1, g: 2, b: 3 }, 9);
+        assert_eq!(bm.data_len(), 0);
     }
 }

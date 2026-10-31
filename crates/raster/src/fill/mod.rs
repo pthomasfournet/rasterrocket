@@ -119,10 +119,10 @@ fn fill_impl<P: Pixel>(
     // Compute pixel-space bbox from scanner.
     let (x_min_i, y_min_i, x_max_i, y_max_i) = if vector_antialias {
         (
-            scanner.x_min / AA_SIZE,
-            scanner.y_min / AA_SIZE,
-            scanner.x_max / AA_SIZE,
-            scanner.y_max / AA_SIZE,
+            scanner.x_min.div_euclid(AA_SIZE),
+            scanner.y_min.div_euclid(AA_SIZE),
+            scanner.x_max.div_euclid(AA_SIZE),
+            scanner.y_max.div_euclid(AA_SIZE),
         )
     } else {
         (scanner.x_min, scanner.y_min, scanner.x_max, scanner.y_max)
@@ -145,9 +145,8 @@ fn fill_impl<P: Pixel>(
         // it into the four AA sub-rows internally. `scanner` is built from an
         // `aa_scale()`'d path, so its bounds are in AA space and divide down to
         // pixel rows here.
-        for y in (scanner.y_min / AA_SIZE)..=(scanner.y_max / AA_SIZE) {
-            let mut x0 = scanner.x_min / AA_SIZE;
-            let mut x1 = scanner.x_max / AA_SIZE;
+        for y in y_min_i..=y_max_i {
+            let (mut x0, mut x1) = (x_min_i, x_max_i);
 
             // Clears `aa_buf` on entry, then writes all four sub-rows of row `y`.
             scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
@@ -179,26 +178,27 @@ fn fill_impl<P: Pixel>(
                 continue;
             }
             for (x0, x1) in ScanIterator::new(&scanner, y) {
-                let (mut sx0, mut sx1) = (x0, x1);
-                let inner_clip = if clip_res == ClipResult::AllInside {
-                    // Clamp to bitmap bounds only.
-                    sx0 = sx0.max(0);
-                    sx1 = sx1.min(width_i - 1);
-                    true
+                // The span is clamped to the bitmap in both branches: a clip
+                // rectangle need not lie within it.
+                let (sx0, sx1) = if clip_res == ClipResult::AllInside {
+                    (x0.max(0), x1.min(width_i - 1))
                 } else {
-                    sx0 = sx0.max(clip.x_min_i);
-                    sx1 = sx1.min(clip.x_max_i);
-                    clip.test_span(sx0, sx1, y) == ClipResult::AllInside
+                    (
+                        x0.max(clip.x_min_i).max(0),
+                        x1.min(clip.x_max_i).min(width_i - 1),
+                    )
                 };
-
                 if sx0 > sx1 {
                     continue;
                 }
-
-                if inner_clip {
-                    draw_span(bitmap, pipe, src, sx0, sx1, y);
+                if clip_res == ClipResult::AllInside
+                    || clip.test_span(sx0, sx1, y) == ClipResult::AllInside
+                {
+                    pipe::render_bitmap_span(bitmap, pipe, src, None, sx0, sx1, y);
                 } else {
-                    draw_span_clipped(bitmap, clip, pipe, src, sx0, sx1, y);
+                    for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
+                        pipe::render_bitmap_span(bitmap, pipe, src, None, rx0, rx1, y);
+                    }
                 }
             }
         }
@@ -232,80 +232,12 @@ pub fn aa_scanner(
     }
     let mut xpath = XPath::new(path, matrix, flatness, true);
     xpath.aa_scale();
-    let y_min = clip
-        .y_min_i
-        .checked_mul(AA_SIZE)
-        .expect("AA y_lo overflows i32: clip.y_min_i is unreasonably large");
-    let y_max = clip
-        .y_max_i
-        .checked_add(1)
-        .and_then(|v| v.checked_mul(AA_SIZE))
-        .map(|v| v - 1)
-        .expect("AA y_hi overflows i32: clip.y_max_i is unreasonably large");
+    let (y_min, y_max) = clip.aa_row_range();
     let scanner = XPathScanner::new(&xpath, eo, y_min, y_max);
     (!scanner.is_empty()).then_some(scanner)
 }
 
 // ── Span drawing helpers ──────────────────────────────────────────────────────
-
-/// Emit a solid span into `bitmap` that is fully inside the clip — no per-pixel test.
-fn draw_span<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    x0: i32,
-    x1: i32,
-    y: i32,
-) {
-    debug_assert!(x0 <= x1, "draw_span: x0={x0} > x1={x1}");
-    debug_assert!(
-        x0 >= 0,
-        "draw_span: x0={x0} is negative (caller must clamp before calling)"
-    );
-    debug_assert!(y >= 0, "draw_span: y={y} is negative");
-    #[expect(clippy::cast_sign_loss, reason = "y >= 0 asserted above")]
-    let y_u = y as u32;
-    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0 asserted above")]
-    let byte_off = x0 as usize * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0 asserted above")]
-    let byte_end = (x1 as usize + 1) * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0, x1 >= x0 asserted above")]
-    let alpha_range = x0 as usize..=x1 as usize;
-
-    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
-    let dst_pixels = &mut row[byte_off..byte_end];
-    let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
-
-    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, None, x0, x1, y);
-}
-
-/// Emit a span with per-pixel clip test (partial clip region).
-fn draw_span_clipped<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
-    clip: &Clip,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    x0: i32,
-    x1: i32,
-    y: i32,
-) {
-    // Walk pixel by pixel, skipping those outside the clip.
-    // Batch contiguous inside-clip runs into single render_span calls.
-    let mut run_start: Option<i32> = None;
-
-    for x in x0..=x1 {
-        if clip.test(x, y) {
-            if run_start.is_none() {
-                run_start = Some(x);
-            }
-        } else if let Some(rs) = run_start.take() {
-            draw_span(bitmap, pipe, src, rs, x - 1, y);
-        }
-    }
-    if let Some(rs) = run_start {
-        draw_span(bitmap, pipe, src, rs, x1, y);
-    }
-}
 
 /// Emit one composited output pixel row from the 4-row `AaBuf`.
 ///
@@ -397,21 +329,7 @@ pub fn draw_aa_counts<P: Pixel>(
         return;
     }
 
-    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0: asserted above")]
-    let x0_usize = x0 as usize;
-    #[expect(clippy::cast_sign_loss, reason = "y >= 0")]
-    let y_u = y as u32;
-    let byte_off = x0_usize * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0")]
-    let byte_end = (x1 as usize + 1) * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0")]
-    let alpha_range = x0_usize..=x1 as usize;
-
-    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
-    let dst_pixels = &mut row[byte_off..byte_end];
-    let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
-
-    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, Some(&*shape), x0, x1, y);
+    pipe::render_bitmap_span::<P>(bitmap, pipe, src, Some(&*shape), x0, x1, y);
 }
 
 #[cfg(test)]

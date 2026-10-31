@@ -86,8 +86,10 @@ pub fn blit_glyph<P: Pixel>(
     glyph: &GlyphBitmap<'_>,
 ) {
     // Compute the top-left destination pixel.
-    let x_start_raw = pen_x - glyph.x;
-    let y_start_raw = pen_y - glyph.y;
+    // Saturating: a far-off pen position clamps to the i32 range and then
+    // misses the bitmap instead of wrapping around onto it.
+    let x_start_raw = pen_x.saturating_sub(glyph.x);
+    let y_start_raw = pen_y.saturating_sub(glyph.y);
 
     // Clamp to bitmap bounds.
     #[expect(
@@ -103,8 +105,8 @@ pub fn blit_glyph<P: Pixel>(
 
     let x_clip = x_start_raw.max(0);
     let y_clip = y_start_raw.max(0);
-    let x_end = (x_start_raw + glyph.w).min(bmp_w);
-    let y_end = (y_start_raw + glyph.h).min(bmp_h);
+    let x_end = x_start_raw.saturating_add(glyph.w).min(bmp_w);
+    let y_end = y_start_raw.saturating_add(glyph.h).min(bmp_h);
 
     if x_clip >= x_end || y_clip >= y_end {
         return;
@@ -331,7 +333,7 @@ fn blit_mono<P: Pixel>(
                     }
                 } else if let Some(rs) = run_start.take() {
                     let rx1 = x - 1;
-                    emit_solid_run::<P>(bitmap, pipe, src, rs, rx1, y);
+                    pipe::render_bitmap_span::<P>(bitmap, pipe, src, None, rs, rx1, y);
                 }
             }
             if let Some(rs) = run_start.take() {
@@ -344,7 +346,7 @@ fn blit_mono<P: Pixel>(
                     reason = "xx_limit < bitmap.width ≤ i32::MAX"
                 )]
                 let rx1 = x_start + xx_limit as i32 - 1;
-                emit_solid_run::<P>(bitmap, pipe, src, rs, rx1, y);
+                pipe::render_bitmap_span::<P>(bitmap, pipe, src, None, rs, rx1, y);
             }
             continue;
         }
@@ -387,7 +389,7 @@ fn blit_mono<P: Pixel>(
                     }
                 } else if let Some(rs) = run_start.take() {
                     let rx1 = x - 1;
-                    emit_solid_run::<P>(bitmap, pipe, src, rs, rx1, y);
+                    pipe::render_bitmap_span::<P>(bitmap, pipe, src, None, rs, rx1, y);
                 }
             }
             xx += bits_this_byte;
@@ -402,7 +404,7 @@ fn blit_mono<P: Pixel>(
                 reason = "xx_limit < bitmap.width ≤ i32::MAX"
             )]
             let rx1 = x_start + xx_limit as i32 - 1;
-            emit_solid_run::<P>(bitmap, pipe, src, rs, rx1, y);
+            pipe::render_bitmap_span::<P>(bitmap, pipe, src, None, rs, rx1, y);
         }
     }
 }
@@ -472,7 +474,7 @@ fn blit_mono_row_clipped<P: Pixel>(
     }
 }
 
-/// Emit one AA-shaped span via `render_span`.
+/// Emit one AA-shaped span starting at `x0`.
 fn emit_aa_run<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     pipe: &PipeState<'_>,
@@ -482,56 +484,13 @@ fn emit_aa_run<P: Pixel>(
     shape: &[u8],
 ) {
     debug_assert_ne!(shape, []);
-    // shape.len() ≤ bitmap.width ≤ i32::MAX in practice.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "shape.len() ≤ bitmap.width ≤ i32::MAX"
-    )]
-    #[expect(
         clippy::cast_possible_wrap,
         reason = "shape.len() ≤ bitmap.width ≤ i32::MAX"
     )]
     let x1 = x0 + shape.len() as i32 - 1;
-    #[expect(clippy::cast_sign_loss, reason = "y ≥ 0 by construction")]
-    let y_u = y as u32;
-    #[expect(clippy::cast_sign_loss, reason = "x0 ≥ 0")]
-    let byte_off = x0 as usize * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x1 ≥ x0 ≥ 0")]
-    let byte_end = (x1 as usize + 1) * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x0 ≥ 0, x1 ≥ x0")]
-    let alpha_range = x0 as usize..=x1 as usize;
-
-    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
-    let dst_pixels = &mut row[byte_off..byte_end];
-    let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
-
-    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, Some(shape), x0, x1, y);
-}
-
-/// Emit a fully opaque span (mono glyph pixels) via `render_span`.
-fn emit_solid_run<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    x0: i32,
-    x1: i32,
-    y: i32,
-) {
-    debug_assert!(x0 <= x1);
-    #[expect(clippy::cast_sign_loss, reason = "y ≥ 0 by construction")]
-    let y_u = y as u32;
-    #[expect(clippy::cast_sign_loss, reason = "x0 ≥ 0")]
-    let byte_off = x0 as usize * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x1 ≥ x0 ≥ 0")]
-    let byte_end = (x1 as usize + 1) * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x0 ≥ 0, x1 ≥ x0")]
-    let alpha_range = x0 as usize..=x1 as usize;
-
-    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
-    let dst_pixels = &mut row[byte_off..byte_end];
-    let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
-
-    pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, None, x0, x1, y);
+    pipe::render_bitmap_span::<P>(bitmap, pipe, src, Some(shape), x0, x1, y);
 }
 
 /// Clip-test a glyph bbox and blit it.
@@ -547,10 +506,10 @@ pub fn fill_glyph<P: Pixel>(
     pen_y: i32,
     glyph: &GlyphBitmap<'_>,
 ) -> ClipResult {
-    let x0 = pen_x - glyph.x;
-    let y0 = pen_y - glyph.y;
-    let x1 = x0 + glyph.w - 1;
-    let y1 = y0 + glyph.h - 1;
+    let x0 = pen_x.saturating_sub(glyph.x);
+    let y0 = pen_y.saturating_sub(glyph.y);
+    let x1 = x0.saturating_add(glyph.w).saturating_sub(1);
+    let y1 = y0.saturating_add(glyph.h).saturating_sub(1);
 
     let clip_res = clip.test_rect(x0, y0, x1, y1);
     if clip_res != ClipResult::AllOutside {
@@ -882,5 +841,35 @@ mod tests {
             aa: false,
         };
         assert_eq!(g9.row_bytes(), 2); // ceil(9/8) = 2
+    }
+
+    /// A pen position at the edge of the i32 range misses the bitmap
+    /// instead of overflowing the glyph placement.
+    #[test]
+    fn far_pen_position_paints_nothing() {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(4, 4, 1, false);
+        let data = [255u8; 4];
+        let glyph = GlyphBitmap {
+            data: &data,
+            x: -2,
+            y: -2,
+            w: 2,
+            h: 2,
+            aa: true,
+        };
+        let src = PipeSrc::Solid(&[255, 255, 255]);
+        for (px, py) in [(i32::MAX, 0), (0, i32::MAX), (i32::MIN, i32::MIN)] {
+            let res = fill_glyph::<Rgb8>(
+                &mut bmp,
+                &make_clip(4, 4),
+                &simple_pipe(),
+                &src,
+                px,
+                py,
+                &glyph,
+            );
+            assert_eq!(res, ClipResult::AllOutside, "pen ({px}, {py})");
+        }
+        assert!(bmp.data().iter().all(|&b| b == 0));
     }
 }

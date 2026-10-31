@@ -206,8 +206,9 @@ impl<P: Pixel> GroupBitmap<P> {
 ///
 /// # Panics
 ///
-/// Panics (in debug mode) if the bounding box is inverted (`x_min` > `x_max`
-/// or `y_min` > `y_max`), or if `bitmap` is not the parent's size.
+/// Panics if `bitmap` is not the parent's size or has no alpha plane, and in
+/// debug builds if the bounding box is inverted (`x_min` > `x_max` or
+/// `y_min` > `y_max`); a release build promotes an inverted box to one pixel.
 #[must_use]
 pub fn begin_group<P: Pixel>(
     parent: &Bitmap<P>,
@@ -228,7 +229,7 @@ pub fn begin_group<P: Pixel>(
         params.y_min,
         params.y_max
     );
-    debug_assert!(
+    assert!(
         bitmap.width == parent.width && bitmap.height == parent.height && bitmap.has_alpha(),
         "begin_group: the group bitmap must be the parent's size, with an alpha plane"
     );

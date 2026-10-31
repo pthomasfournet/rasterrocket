@@ -20,6 +20,7 @@ pub mod transfer;
 
 use std::cell::RefCell;
 
+use crate::bitmap::Bitmap;
 use crate::types::BlendMode;
 use color::Pixel;
 use color::convert::div255;
@@ -208,27 +209,24 @@ impl PipeState<'_> {
 ///
 /// - `pipe`: compositing parameters for this paint operation.
 /// - `src`: source colour (solid or pattern).
-/// - `dst_pixels`: raw pixel bytes for the destination row, starting at `x0`.
-/// - `dst_alpha`: alpha plane bytes for the destination row, starting at `x0`.
-///   `None` means the destination has no separate alpha (Mono1, or solid-color bitmaps
-///   without transparency).
-/// - `shape`: per-pixel AA shape byte, or `None` for the simple path.
-/// - `screen`: optional halftone screen for Mono1 dithering.
-/// - `x0`, `x1`: inclusive pixel coordinate range within the row.
-/// - `y`: scanline y coordinate (used by pattern and halftone screen).
-/// - `ncomps`: bytes per pixel (must match `P::BYTES`).
+/// - `dst_pixels`: the destination row's pixel bytes for `x0..=x1`.
+/// - `dst_alpha`: the destination row's alpha bytes for `x0..=x1`, or `None`
+///   for a bitmap without an alpha plane, which is opaque.
+/// - `shape`: per-pixel coverage of `x0..=x1`, or `None` for full coverage.
+/// - `x0`, `x1`: inclusive device column range of the span.
+/// - `y`: device row, at which a pattern source is evaluated.
 ///
 /// A pattern source that [may leave pixels unpainted](Pattern::may_leave_unpainted)
 /// is composited over its painted pixels only.
 ///
 /// # Panics
 ///
-/// Panics in debug mode if `x0 > x1` or `P::BYTES == 0` (Mono1 must be handled
-/// by the caller).  Also panics if `dst_pixels.len()` does not equal
-/// `(x1 - x0 + 1) * P::BYTES`.
+/// Panics if `x0 > x1`, if `P::BYTES == 0` (`Mono1` is not composited by the
+/// pipe), or if `dst_pixels`, `dst_alpha` or `shape` does not hold exactly
+/// the span's `x1 − x0 + 1` pixels.
 #[expect(
     clippy::too_many_arguments,
-    reason = "render_span mirrors the C++ SplashPipe API; all arguments are necessary"
+    reason = "the destination row, its alpha, the shape and the span position are independent inputs"
 )]
 pub fn render_span<P: Pixel>(
     pipe: &PipeState<'_>,
@@ -240,18 +238,23 @@ pub fn render_span<P: Pixel>(
     x1: i32,
     y: i32,
 ) {
-    debug_assert!(x0 <= x1, "render_span: x0={x0} > x1={x1}");
-    debug_assert!(P::BYTES > 0, "render_span: Mono1 must be handled by caller");
-
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "x1 >= x0 is a precondition, so x1 - x0 + 1 >= 1 > 0"
-    )]
-    let count = (x1 - x0 + 1) as usize;
-    debug_assert_eq!(
+    assert!(x0 <= x1, "render_span: x0={x0} > x1={x1}");
+    assert!(
+        P::BYTES > 0,
+        "render_span: Mono1 is not composited by the pipe"
+    );
+    let count = usize::try_from(i64::from(x1) - i64::from(x0) + 1)
+        .expect("render_span: span length fits usize");
+    assert_eq!(
         dst_pixels.len(),
         count * P::BYTES,
-        "render_span: dst_pixels length mismatch"
+        "render_span: dst_pixels holds {} bytes for a {count}-pixel span",
+        dst_pixels.len()
+    );
+    assert!(
+        dst_alpha.as_ref().is_none_or(|a| a.len() == count)
+            && shape.is_none_or(|s| s.len() == count),
+        "render_span: alpha or shape length differs from the {count}-pixel span"
     );
 
     if let PipeSrc::Pattern(pat) = src
@@ -261,6 +264,45 @@ pub fn render_span<P: Pixel>(
         return;
     }
     dispatch_span::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
+}
+
+/// Composite the pixels `x0..=x1` of row `y` of `bitmap` through
+/// [`render_span`], with the row's alpha when the bitmap has an alpha plane.
+///
+/// # Panics
+///
+/// Panics if `x0 > x1`, if a coordinate is negative, or if the span leaves
+/// the bitmap.
+pub fn render_bitmap_span<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    shape: Option<&[u8]>,
+    x0: i32,
+    x1: i32,
+    y: i32,
+) {
+    let (Ok(col0), Ok(col1), Ok(row)) =
+        (usize::try_from(x0), usize::try_from(x1), u32::try_from(y))
+    else {
+        panic!("render_bitmap_span: span {x0}..={x1} on row {y} has a negative coordinate");
+    };
+    assert!(
+        col0 <= col1 && col1 < bitmap.width as usize,
+        "render_bitmap_span: span {x0}..={x1} outside a bitmap {} pixels wide",
+        bitmap.width
+    );
+    let (pixels, alpha) = bitmap.row_and_alpha_mut(row);
+    render_span::<P>(
+        pipe,
+        src,
+        &mut pixels[col0 * P::BYTES..(col1 + 1) * P::BYTES],
+        alpha.map(|a| &mut a[col0..=col1]),
+        shape,
+        x0,
+        x1,
+        y,
+    );
 }
 
 /// Composite the covered runs of a span whose pattern may leave pixels

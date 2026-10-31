@@ -20,7 +20,7 @@
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::pipe::{self, PipeSrc, PipeState, RowPattern};
+use crate::pipe::{PipeSrc, PipeState, RowPattern, render_bitmap_span};
 use color::Pixel;
 use color::convert::{lerp_u8, splash_round};
 
@@ -134,21 +134,10 @@ fn emit_run<P: Pixel>(
         data: &span_color[buf_off..buf_end],
     };
 
-    #[expect(clippy::cast_sign_loss, reason = "y >= 0")]
-    let y_u = y as u32;
-    #[expect(clippy::cast_sign_loss, reason = "run_x0 >= 0")]
-    let byte_off = run_x0 as usize * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "run_x1 >= run_x0 >= 0")]
-    let byte_end = (run_x1 as usize + 1) * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "run_x0 >= 0")]
-    let alpha_range = run_x0 as usize..=run_x1 as usize;
-
-    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
-    pipe::render_span::<P>(
+    render_bitmap_span::<P>(
+        bitmap,
         pipe,
         &PipeSrc::Pattern(&src),
-        &mut row[byte_off..byte_end],
-        alpha.map(|a| &mut a[alpha_range]),
         None,
         run_x0,
         run_x1,
@@ -308,19 +297,8 @@ pub fn gouraud_triangle_fill<P: Pixel>(
             && clip.test_span(sx0, sx1, y) != ClipResult::AllInside;
 
         if needs_per_pixel_clip {
-            // Walk pixel-by-pixel; batch contiguous inside-clip pixels into runs.
-            let mut run_start: Option<i32> = None;
-            for px in sx0..=sx1 {
-                if clip.test(px, y) {
-                    if run_start.is_none() {
-                        run_start = Some(px);
-                    }
-                } else if let Some(rs) = run_start.take() {
-                    emit_run::<P>(bitmap, pipe, &span_color, sx0, rs, px - 1, y);
-                }
-            }
-            if let Some(rs) = run_start {
-                emit_run::<P>(bitmap, pipe, &span_color, sx0, rs, sx1, y);
+            for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
+                emit_run::<P>(bitmap, pipe, &span_color, sx0, rx0, rx1, y);
             }
         } else {
             emit_run::<P>(bitmap, pipe, &span_color, sx0, sx0, sx1, y);

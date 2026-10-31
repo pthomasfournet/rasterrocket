@@ -16,7 +16,7 @@ use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::fill::fill;
 use crate::path::Path;
-use crate::pipe::{PipeSrc, PipeState};
+use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
 use crate::types::{LineCap, LineJoin, splash_floor};
 use crate::xpath::XPath;
 use color::Pixel;
@@ -251,61 +251,26 @@ fn draw_narrow_span<P: Pixel>(
     )]
     let width_i = bitmap.width as i32;
 
+    // The span is clamped to the bitmap in both branches: a clip rectangle
+    // need not lie within it.
     let (sx0, sx1) = if clip_res == ClipResult::AllInside {
         (x0.max(0), x1.min(width_i - 1))
     } else {
-        (x0.max(clip.x_min_i), x1.min(clip.x_max_i))
+        (
+            x0.max(clip.x_min_i).max(0),
+            x1.min(clip.x_max_i).min(width_i - 1),
+        )
     };
-
     if sx0 > sx1 {
         return;
     }
-
     if clip_res == ClipResult::AllInside {
-        draw_span_unchecked::<P>(bitmap, pipe, src, sx0, sx1, y);
+        render_bitmap_span::<P>(bitmap, pipe, src, None, sx0, sx1, y);
     } else {
-        // Per-pixel clip test for partial regions.
-        let mut run_start: Option<i32> = None;
-        for x in sx0..=sx1 {
-            if clip.test(x, y) {
-                if run_start.is_none() {
-                    run_start = Some(x);
-                }
-            } else if let Some(rs) = run_start.take() {
-                draw_span_unchecked::<P>(bitmap, pipe, src, rs, x - 1, y);
-            }
-        }
-        if let Some(rs) = run_start {
-            draw_span_unchecked::<P>(bitmap, pipe, src, rs, sx1, y);
+        for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
+            render_bitmap_span::<P>(bitmap, pipe, src, None, rx0, rx1, y);
         }
     }
-}
-
-/// Write one span of pixels directly to the bitmap (no clip check).
-fn draw_span_unchecked<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    x0: i32,
-    x1: i32,
-    y: i32,
-) {
-    debug_assert!(x0 <= x1);
-    debug_assert!(y >= 0);
-    #[expect(clippy::cast_sign_loss, reason = "y >= 0")]
-    let y_u = y as u32;
-    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0 after clamping")]
-    let byte_off = x0 as usize * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0")]
-    let byte_end = (x1 as usize + 1) * P::BYTES;
-    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0, x1 >= x0")]
-    let alpha_range = x0 as usize..=x1 as usize;
-
-    let (row, alpha) = bitmap.row_and_alpha_mut(y_u);
-    let dst_pixels = &mut row[byte_off..byte_end];
-    let dst_alpha = alpha.map(|a| &mut a[alpha_range]);
-
-    crate::pipe::render_span::<P>(pipe, src, dst_pixels, dst_alpha, None, x0, x1, y);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

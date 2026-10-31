@@ -142,7 +142,7 @@ impl Clip {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if the AA y-range arithmetic overflows `i32`.
+    /// Panics if the AA y-range arithmetic overflows `i32`.
     /// In practice `y_max_i` is bounded by the bitmap height (≪ `i32::MAX / AA_SIZE`).
     pub fn clip_to_path(&mut self, xpath: &XPath, eo: bool) {
         if xpath.segs.is_empty() {
@@ -159,20 +159,7 @@ impl Clip {
         }
         // General path clip: compute scanline range in (possibly scaled) space.
         let (y_lo, y_hi) = if self.antialias {
-            // Invariant: y_max_i is a pixel coordinate bounded by bitmap height,
-            // which is far below i32::MAX / AA_SIZE. The additions below cannot
-            // realistically overflow, but we assert in debug builds.
-            let lo = self
-                .y_min_i
-                .checked_mul(AA_SIZE)
-                .expect("AA y_lo overflows i32: y_min_i is unreasonably large");
-            let hi = self
-                .y_max_i
-                .checked_add(1)
-                .and_then(|v| v.checked_mul(AA_SIZE))
-                .map(|v| v - 1)
-                .expect("AA y_hi overflows i32: y_max_i is unreasonably large");
-            (lo, hi)
+            self.aa_row_range()
         } else {
             (self.y_min_i, self.y_max_i)
         };
@@ -186,6 +173,51 @@ impl Clip {
             XPathScanner::new(xpath, eo, y_lo, y_hi)
         };
         self.scanners.push(Arc::new(scanner));
+    }
+
+    /// The clip's rows in the supersampled AA grid, inclusive:
+    /// `[y_min_i × AA_SIZE, (y_max_i + 1) × AA_SIZE − 1]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range overflows `i32`; the clip rows are bounded by the
+    /// bitmap height, far below `i32::MAX / AA_SIZE`.
+    #[must_use]
+    pub fn aa_row_range(&self) -> (i32, i32) {
+        let lo = self
+            .y_min_i
+            .checked_mul(AA_SIZE)
+            .expect("AA row range: y_min_i × AA_SIZE overflows i32");
+        let hi = self
+            .y_max_i
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(AA_SIZE))
+            .map(|v| v - 1)
+            .expect("AA row range: (y_max_i + 1) × AA_SIZE overflows i32");
+        (lo, hi)
+    }
+
+    /// The maximal runs `(a, b)`, inclusive and left to right, of the pixels
+    /// `x0..=x1` on row `y` that pass [`Self::test`].
+    pub fn inside_runs(&self, x0: i32, x1: i32, y: i32) -> impl Iterator<Item = (i32, i32)> + '_ {
+        // The next column to examine; always within `x0..=x1`.
+        let mut next = (x0 <= x1).then_some(x0);
+        std::iter::from_fn(move || {
+            let mut x = next?;
+            while !self.test(x, y) {
+                if x == x1 {
+                    next = None;
+                    return None;
+                }
+                x += 1;
+            }
+            let start = x;
+            while x < x1 && self.test(x + 1, y) {
+                x += 1;
+            }
+            next = (x < x1).then(|| x + 1);
+            Some((start, x))
+        })
     }
 
     // ── Pixel-level tests ─────────────────────────────────────────────────────
@@ -210,17 +242,17 @@ impl Clip {
     pub fn test_rect(&self, left: i32, top: i32, right: i32, bottom: i32) -> ClipResult {
         // Half-open pixel rect: [left, right+1) × [top, bottom+1).
         // Clip rect: [x_min, x_max) × [y_min, y_max).
-        if f64::from(right + 1) <= self.x_min
+        if (f64::from(right) + 1.0) <= self.x_min
             || f64::from(left) >= self.x_max
-            || f64::from(bottom + 1) <= self.y_min
+            || (f64::from(bottom) + 1.0) <= self.y_min
             || f64::from(top) >= self.y_max
         {
             return ClipResult::AllOutside;
         }
         if f64::from(left) >= self.x_min
-            && f64::from(right + 1) <= self.x_max
+            && (f64::from(right) + 1.0) <= self.x_max
             && f64::from(top) >= self.y_min
-            && f64::from(bottom + 1) <= self.y_max
+            && (f64::from(bottom) + 1.0) <= self.y_max
             && self.scanners.is_empty()
         {
             return ClipResult::AllInside;
@@ -312,7 +344,7 @@ pub struct ClipRows<'a> {
 
 impl<'a> ClipRows<'a> {
     /// Coverage of `clip` over the inclusive rectangle `[x0, x1] × [y0, y1]`.
-    /// Columns left of zero are outside.
+    /// Columns left of zero and right of the clip rectangle are outside.
     #[must_use]
     pub fn new(clip: &'a Clip, x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
         let x0 = x0.max(0);
@@ -360,14 +392,23 @@ impl<'a> ClipRows<'a> {
     /// Fill `self.coverage` for a row the clip edge crosses.
     #[expect(
         clippy::cast_sign_loss,
-        reason = "x0 ≥ 0 and the clipped span lies within [x0, x1]"
+        reason = "0 ≤ x0 ≤ lo ≤ hi, and the clipped span lies within [lo, hi]"
     )]
     fn partial_coverage(&mut self, y: i32) {
-        let width = (self.x1 - self.x0 + 1) as usize;
         self.coverage.clear();
-        self.coverage.resize(width, 0);
+        // Columns outside the clip rectangle have no coverage, and
+        // `RowClip::coverage` reads columns past the vector as 0, so the work
+        // and the scratch are bounded by the rectangle, not by the span.
+        let (lo, hi) = (
+            self.x0.max(self.clip.x_min_i),
+            self.x1.min(self.clip.x_max_i),
+        );
+        if lo > hi {
+            return;
+        }
+        self.coverage.resize((hi - self.x0 + 1) as usize, 0);
         if !self.clip.antialias {
-            for (x, cov) in (self.x0..=self.x1).zip(self.coverage.iter_mut()) {
+            for (x, cov) in (lo..=hi).zip(&mut self.coverage[(lo - self.x0) as usize..]) {
                 if self.clip.test(x, y) {
                     *cov = 255;
                 }
@@ -377,18 +418,14 @@ impl<'a> ClipRows<'a> {
         let aa_size = AA_SIZE as usize;
         let buf = self
             .aa_buf
-            .get_or_insert_with(|| AaBuf::new(self.x1 as usize + 1));
+            .get_or_insert_with(|| AaBuf::new(hi as usize + 1));
         buf.clear();
         for sub_row in 0..buf.height {
-            buf.set_span(
-                sub_row,
-                self.x0 as usize * aa_size,
-                (self.x1 as usize + 1) * aa_size,
-            );
+            buf.set_span(sub_row, lo as usize * aa_size, (hi as usize + 1) * aa_size);
         }
-        let (mut cx0, mut cx1) = (self.x0, self.x1);
+        let (mut cx0, mut cx1) = (lo, hi);
         self.clip.clip_aa_line(buf, &mut cx0, &mut cx1, y);
-        let (cx0, cx1) = (cx0.max(self.x0), cx1.min(self.x1));
+        let (cx0, cx1) = (cx0.max(lo), cx1.min(hi));
         if cx0 > cx1 {
             return;
         }
@@ -450,7 +487,7 @@ impl RowClip<'_> {
 ///
 /// # Panics
 ///
-/// Panics in debug builds on overflow; in practice pixel coordinates are bounded
+/// Panics if a scaled coordinate overflows `i32`; pixel coordinates are bounded
 /// by the bitmap dimensions, which are far below `i32::MAX / AA_SIZE`.
 #[inline]
 fn aa_coords(x0: i32, x1: i32, y: i32, antialias: bool) -> (i32, i32, i32) {
@@ -689,5 +726,36 @@ mod tests {
         // sx1 = 7 * 4 + 3 = 31
         // sy  = 5 * 4 = 20
         assert_eq!(aa_coords(3, 7, 5, true), (12, 31, 20));
+    }
+
+    /// `inside_runs` yields the maximal runs inside the clip, including runs
+    /// touching either end of the span, and nothing for an empty span.
+    #[test]
+    fn inside_runs_are_maximal_and_ordered() {
+        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, false);
+        clip_to_diamond(&mut clip, 16.0, 16.0, 6.0);
+        let runs: Vec<_> = clip.inside_runs(0, 63, 16).collect();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let (a, b) = runs[0];
+        assert!((10..=11).contains(&a) && (21..=22).contains(&b), "{runs:?}");
+        assert!((a..=b).all(|x| clip.test(x, 16)));
+        assert_eq!(clip.inside_runs(a, b, 16).collect::<Vec<_>>(), [(a, b)]);
+        assert_eq!(clip.inside_runs(5, 4, 16).count(), 0);
+        assert_eq!(clip.inside_runs(0, 5, 16).count(), 0);
+
+        let rect = Clip::new(0.0, 0.0, 8.0, 8.0, false);
+        assert_eq!(rect.inside_runs(-3, 20, 2).collect::<Vec<_>>(), [(0, 7)]);
+    }
+
+    /// A rectangle reaching `i32::MAX`, a saturated non-finite coordinate,
+    /// is classified without overflowing.
+    #[test]
+    fn test_rect_accepts_i32_max_edges() {
+        let c = Clip::new(0.0, 0.0, 10.0, 10.0, false);
+        assert_eq!(c.test_rect(2, 2, i32::MAX, i32::MAX), ClipResult::Partial);
+        assert_eq!(
+            c.test_rect(i32::MAX, 2, i32::MAX, 3),
+            ClipResult::AllOutside
+        );
     }
 }
