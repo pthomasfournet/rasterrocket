@@ -60,7 +60,7 @@ impl UnicodeEncoder {
                 if let Some(to_unicode) = &enc.to_unicode {
                     for (&code, &value) in &to_unicode.map {
                         if let (Some(u), Some(bytes)) =
-                            (first_scalar(value), code_bytes(cmap, code))
+                            (single_scalar(value), code_bytes(cmap, code))
                         {
                             pairs.push((u, bytes));
                         }
@@ -268,6 +268,16 @@ impl Typesetter for FontTypesetter<'_, '_> {
     }
 }
 
+/// The Unicode scalar value of a `ToUnicode` value that maps its code to
+/// one character; `None` for a value of several characters, such as a
+/// ligature's, whose code does not show its first character alone.
+fn single_scalar(value: u32) -> Option<u32> {
+    let scalar = first_scalar(value)?;
+    // Above U+10FFFF the value packs two UTF-16 units; they are one
+    // character only as a surrogate pair, which decodes above U+FFFF.
+    (value <= 0x10_FFFF || scalar > 0xFFFF).then_some(scalar)
+}
+
 /// The bytes of `code` in a codespace range of `cmap` of its length; the
 /// code as two bytes for an identity `CMap`.
 fn code_bytes(cmap: &CMap, code: u32) -> Option<Vec<u8>> {
@@ -292,11 +302,11 @@ fn code_bytes(cmap: &CMap, code: u32) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fallbacks, UnicodeEncoder, code_bytes};
+    use super::{Fallbacks, UnicodeEncoder, code_bytes, single_scalar};
     use crate::resources::cmap::CMap;
     use crate::resources::cmap_predefined::predefined_cmap;
     use crate::resources::font::resolve_font;
-    use crate::test_helpers::make_doc_with_object;
+    use crate::test_helpers::{make_doc_with_object, make_doc_with_objects};
 
     /// The encoder of the font dictionary `font`.
     fn encoder(font: &str) -> UnicodeEncoder {
@@ -335,6 +345,35 @@ mod tests {
             assert_eq!(cmap.lookup(code), cmap.lookup(u32::from(c)), "{c}");
         }
         assert_eq!(e.encode('한'), None, "Hangul is not in Adobe-Japan1");
+    }
+
+    #[test]
+    fn a_ligature_code_does_not_encode_its_first_character() {
+        let to_unicode = "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+                          3 beginbfchar\n<0001> <00660069>\n<0002> <0066>\n\
+                          <0003> <D83DDE00>\nendbfchar\n";
+        let doc = make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Font /Subtype /Type0 /BaseFont /F /Encoding /Identity-H \
+                 /ToUnicode 5 0 R /DescendantFonts [<< /Type /Font /Subtype \
+                 /CIDFontType2 /BaseFont /F /CIDSystemInfo << /Registry (Adobe) \
+                 /Ordering (Identity) /Supplement 0 >> >>] >>"
+                    .to_owned(),
+            ),
+            (
+                5,
+                format!(
+                    "<< /Length {} >>\nstream\n{to_unicode}\nendstream",
+                    to_unicode.len()
+                ),
+            ),
+        ]);
+        let dict = doc.get_dictionary((4, 0)).expect("a dictionary");
+        let e = UnicodeEncoder::of(&resolve_font(&doc, &dict, Some((4, 0))));
+        assert_eq!(e.encode('f'), Some(&[0, 2][..]), "not the fi ligature");
+        assert_eq!(e.encode('\u{1F600}'), Some(&[0, 3][..]), "a surrogate pair");
+        assert_eq!(single_scalar(0x0066_0069), None);
     }
 
     #[test]
