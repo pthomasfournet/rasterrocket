@@ -95,9 +95,7 @@ pub(crate) fn render_span_simple<P: Pixel>(
     // Set destination alpha to fully opaque.
     if let Some(alpha) = dst_alpha {
         debug_assert_eq!(alpha.len(), count);
-        for a in alpha.iter_mut() {
-            *a = 255;
-        }
+        alpha.fill(255);
     }
 }
 

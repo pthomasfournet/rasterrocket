@@ -91,7 +91,7 @@ fn flattened_dashed(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -
     if path.pts.is_empty() {
         return None;
     }
-    let path = flatten_path(path, matrix, params.flatness);
+    let path = flatten_path(path, params.flatness);
     let device_scale = matrix[0]
         .mul_add(matrix[3], -(matrix[1] * matrix[2]))
         .abs()
@@ -308,7 +308,7 @@ mod tests {
         let path = b.build();
 
         // Flatten (it's already flat) and draw hairline.
-        let flat = flatten_path(&path, &identity_matrix(), 1.0);
+        let flat = flatten_path(&path, 1.0);
         stroke_narrow::<Rgb8>(&mut bmp, &clip, &flat, &pipe, &src, &identity_matrix(), 1.0);
 
         // At least one pixel on the diagonal should be painted.
@@ -476,7 +476,7 @@ mod tests {
         // The original path has CURVE flags.
         assert!(path.flags.iter().any(|f| f.is_curve()));
 
-        let flat = flatten_path(&path, &identity_matrix(), 1.0);
+        let flat = flatten_path(&path, 1.0);
         // The flattened path must have no CURVE flags.
         assert!(
             flat.flags.iter().all(|f| !f.is_curve()),

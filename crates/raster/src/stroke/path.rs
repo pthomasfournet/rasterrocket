@@ -32,7 +32,7 @@ const MITER_NEARLY_STRAIGHT: f64 = 0.999_9;
 /// Subdivision runs in the path's own space against `flatness²`; the matrix
 /// is applied later, by [`crate::XPath`].
 #[must_use]
-pub(super) fn flatten_path(path: &Path, _matrix: &[f64; 6], flatness: f64) -> Path {
+pub(super) fn flatten_path(path: &Path, flatness: f64) -> Path {
     use crate::path::flatten::{CurveData, flatten_curve};
 
     let flatness_sq = flatness * flatness;
