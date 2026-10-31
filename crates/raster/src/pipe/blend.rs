@@ -63,9 +63,16 @@ pub fn blend_lighten(src: u8, dst: u8) -> u8 {
 }
 
 /// Color dodge: brighten dst to reflect src.
+///
+/// ISO 32000-2 §11.3.5.2: `0` when `cb == 0`, `1` when `cb ≥ 1 − cs`, and
+/// `cb / (1 − cs)` otherwise.  A black backdrop is preserved for every source
+/// value, including `src == 255`, mirroring the white backdrop of
+/// [`blend_color_burn`].
 #[must_use]
 pub fn blend_color_dodge(src: u8, dst: u8) -> u8 {
-    if src == 255 {
+    if dst == 0 {
+        0
+    } else if src == 255 {
         255
     } else {
         ((u32::from(dst) * 255) / u32::from(255 - src)).min(255) as u8
@@ -439,6 +446,18 @@ mod tests {
     #[test]
     fn color_dodge_saturates_at_src_255() {
         assert_eq!(blend_color_dodge(255, 100), 255);
+    }
+
+    /// A black backdrop survives colour dodge at every source value.
+    #[test]
+    fn color_dodge_preserves_a_black_backdrop() {
+        for s in 0..=255u8 {
+            assert_eq!(
+                blend_color_dodge(s, 0),
+                0,
+                "color_dodge({s},0) must leave a black backdrop black"
+            );
+        }
     }
 
     #[test]
