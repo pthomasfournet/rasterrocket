@@ -7,23 +7,19 @@
 //! Every stage that decides a pixel's value is therefore the CPU's code or a
 //! byte-exact twin of it.
 //!
-//! All functions in this module are gated on `#[cfg(feature = "gpu-aa")]`.
+//! The module is compiled only with the `gpu-aa` feature.
 
-#[cfg(feature = "gpu-aa")]
+#![cfg(feature = "gpu-aa")]
+
 use gpu::{AaFillRect, AaScanTable, ScanIntersect};
-#[cfg(feature = "gpu-aa")]
 use raster::clip::Clip;
-#[cfg(feature = "gpu-aa")]
 use raster::pipe::{PipeSrc, PipeState};
-#[cfg(feature = "gpu-aa")]
 use raster::types::AA_SIZE;
 
-#[cfg(feature = "gpu-aa")]
 use super::{DEVICE_MATRIX, PageRenderer};
 
 /// A fill prepared for device evaluation: the CPU scanner's intersection
 /// table plus the pixel rectangle it is evaluated over.
-#[cfg(feature = "gpu-aa")]
 pub(super) struct GpuAaFill {
     /// Intersections grouped by AA row, sorted by `x0` within a row.
     pub(super) intersects: Vec<ScanIntersect>,
@@ -37,7 +33,6 @@ pub(super) struct GpuAaFill {
     pub(super) aa_width: u32,
 }
 
-#[cfg(feature = "gpu-aa")]
 impl GpuAaFill {
     pub(super) fn table(&self) -> AaScanTable<'_> {
         AaScanTable {
@@ -51,15 +46,20 @@ impl GpuAaFill {
 /// Effective GPU AA-fill dispatch threshold: [`gpu::GPU_AA_FILL_THRESHOLD`]
 /// unless `PDF_RASTER_AA_FILL_THRESHOLD` holds a decimal pixel area (`0` =
 /// every eligible fill on the device).  Read once, on first use.
-#[cfg(feature = "gpu-aa")]
 pub(super) fn aa_fill_threshold() -> usize {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<usize> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
-        std::env::var("PDF_RASTER_AA_FILL_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(gpu::GPU_AA_FILL_THRESHOLD)
+        let Ok(value) = std::env::var("PDF_RASTER_AA_FILL_THRESHOLD") else {
+            return gpu::GPU_AA_FILL_THRESHOLD;
+        };
+        value.trim().parse().unwrap_or_else(|_| {
+            log::warn!(
+                "PDF_RASTER_AA_FILL_THRESHOLD={value:?} is not a pixel area \
+                 (a non-negative integer); using the default"
+            );
+            gpu::GPU_AA_FILL_THRESHOLD
+        })
     })
 }
 
@@ -77,7 +77,6 @@ pub(super) fn aa_fill_threshold() -> usize {
 /// to the bitmap.  It is not clamped to the clip rectangle: the CPU applies
 /// that clamp per row after finding the painted range, and
 /// [`paint_coverage`] does the same.
-#[cfg(feature = "gpu-aa")]
 pub(super) fn prepare_aa_fill(
     clip: &Clip,
     bitmap_width: u32,
@@ -145,7 +144,6 @@ pub(super) fn prepare_aa_fill(
 ///
 /// `counts` must be exactly `rect.width × rect.height` bytes of sub-sample
 /// counts (`0..=AA_SIZE²`); the slice is consumed as scratch.
-#[cfg(feature = "gpu-aa")]
 pub(super) fn gpu_coverage_to_bitmap(
     renderer: &mut PageRenderer<'_>,
     counts: &mut [u8],
@@ -164,7 +162,6 @@ pub(super) fn gpu_coverage_to_bitmap(
 ///
 /// `rect` must lie within `bitmap` and the clip must be a rectangle within
 /// the bitmap (both guaranteed by [`prepare_aa_fill`]).
-#[cfg(feature = "gpu-aa")]
 fn paint_coverage(
     bitmap: &mut raster::Bitmap<color::Rgb8>,
     clip: &Clip,
@@ -209,7 +206,6 @@ fn paint_coverage(
 /// Returns `true` if the GPU path was taken (caller skips the CPU fill).
 /// Returns `false` if [`prepare_aa_fill`] declines the fill or the GPU call
 /// fails (warning logged; CPU fill used as fallback).
-#[cfg(feature = "gpu-aa")]
 pub(super) fn try_gpu_aa_fill(
     renderer: &mut PageRenderer<'_>,
     path: &raster::path::Path,
@@ -263,7 +259,7 @@ pub(super) fn try_gpu_aa_fill(
     }
 }
 
-#[cfg(all(test, feature = "gpu-aa"))]
+#[cfg(test)]
 mod tests {
     use raster::clip::Clip;
     use raster::path::{Path, PathBuilder};
