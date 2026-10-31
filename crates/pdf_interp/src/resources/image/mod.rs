@@ -284,11 +284,44 @@ impl ImageFilter {
             _ => Self::Raw,
         }
     }
+
+    /// Every variant, indexed by its discriminant.
+    pub const ALL: [Self; IMAGE_FILTER_COUNT] = [
+        Self::Dct,
+        Self::Jpx,
+        Self::CcittFax,
+        Self::Jbig2,
+        Self::Flate,
+        Self::Raw,
+    ];
 }
 
-/// Number of [`ImageFilter`] variants — must match `filter_counts` array size in
-/// `PageRenderer`.  The const assert in that module enforces this at compile time.
+const _: () = {
+    let mut i = 0;
+    while i < IMAGE_FILTER_COUNT {
+        assert!(
+            ImageFilter::ALL[i] as usize == i,
+            "ImageFilter::ALL is indexed by discriminant"
+        );
+        i += 1;
+    }
+};
+
+/// Number of [`ImageFilter`] variants, the length of a per-filter count
+/// array indexed by discriminant.
 pub const IMAGE_FILTER_COUNT: usize = 6;
+
+/// The filter with the highest non-zero count in `counts` (indexed by
+/// discriminant), the later variant on a tie; `None` when every count is 0.
+#[must_use]
+pub(crate) fn dominant_filter(counts: &[u32; IMAGE_FILTER_COUNT]) -> Option<ImageFilter> {
+    counts
+        .iter()
+        .zip(ImageFilter::ALL)
+        .filter(|&(&count, _)| count > 0)
+        .max_by_key(|&(&count, _)| count)
+        .map(|(_, filter)| filter)
+}
 
 /// Backing storage for decoded image pixels.
 ///

@@ -39,6 +39,8 @@
 //! silently skipped — the scan continues.  A partial result is still useful
 //! for routing.
 
+use std::collections::HashSet;
+
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::{
@@ -46,7 +48,9 @@ use crate::{
     content::Operator,
     page_size_pts_by_id, parse_page_content_by_id,
     renderer::PageDiagnostics,
-    resources::image::{IMAGE_FILTER_COUNT, ImageFilter, filter_name, inline::parse_inline_params},
+    resources::image::{
+        IMAGE_FILTER_COUNT, ImageFilter, dominant_filter, filter_name, inline::parse_inline_params,
+    },
 };
 
 /// Maximum Form `XObject` recursion depth during the pre-scan.
@@ -73,9 +77,6 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 /// Any per-resource lookup error (corrupt dict, missing filter key) is
 /// silently skipped so that a partial classification is still returned.
 pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, InterpError> {
-    // Resolve the page id once and reuse it for both the geometry read and
-    // the content-stream parse — the previous shape descended the page tree
-    // three times (page_size_pts, resolve_page_id, parse_page).
     let page_id = crate::resolve_page_id(doc, page_num)?;
 
     let geom = page_size_pts_by_id(doc, page_id)?;
@@ -83,22 +84,10 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         clippy::cast_possible_truncation,
         reason = "page width in PDF points (≤ ~10 000 pts); f32 is sufficient for PPI routing"
     )]
-    let page_pts_width = geom.width_pts as f32;
-
-    let mut filter_counts = [0u32; IMAGE_FILTER_COUNT];
-    let mut has_images = false;
-    let mut max_ppi: f32 = 0.0;
+    let mut scan = ImageScan::new(doc, geom.width_pts as f32);
 
     // 1. Walk XObject resource dictionary (no decoding).
-    scan_xobjects(
-        doc,
-        page_id,
-        0,
-        &mut filter_counts,
-        &mut has_images,
-        &mut max_ppi,
-        page_pts_width,
-    );
+    scan.xobjects(page_id, 0);
 
     // 2. Walk content stream operators for inline images and text.
     let mut has_vector_text = false;
@@ -106,9 +95,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
     for op in &ops {
         match op {
             Operator::InlineImage { params, .. } => {
-                has_images = true;
-                let dict = parse_inline_params(params);
-                scan_inline_image(&dict, &mut filter_counts, &mut max_ppi, page_pts_width);
+                scan.image(&parse_inline_params(params));
             }
             Operator::ShowText(_)
             | Operator::ShowTextArray(_)
@@ -120,25 +107,11 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         }
     }
 
-    // 3. Compute dominant_filter (same logic as PageRenderer::finish).
-    let dominant_filter = if has_images {
-        filter_counts
-            .iter()
-            .enumerate()
-            .filter(|&(_, c)| *c > 0)
-            .max_by_key(|&(_, c)| c)
-            .map(|(idx, _)| idx_to_filter(idx))
-    } else {
-        None
-    };
-
-    let source_ppi_hint = if max_ppi > 0.0 { Some(max_ppi) } else { None };
-
     Ok(PageDiagnostics {
-        has_images,
+        has_images: scan.has_images,
         has_vector_text,
-        dominant_filter,
-        source_ppi_hint,
+        dominant_filter: dominant_filter(&scan.filter_counts),
+        source_ppi_hint: (scan.max_ppi > 0.0).then_some(scan.max_ppi),
         image_failures: Vec::new(),
         content_failures,
         missing_fonts: Vec::new(),
@@ -146,181 +119,102 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
     })
 }
 
-// ── XObject walker ────────────────────────────────────────────────────────────
+// ── Image statistics ──────────────────────────────────────────────────────────
 
-/// Walk the `XObject` resource dict of `context_id`, accumulating image stats.
-///
-/// Recurses into Form `XObject`s up to `depth` = [`MAX_PRESCAN_DEPTH`].
-fn scan_xobjects(
-    doc: &Document,
-    context_id: ObjectId,
-    depth: u32,
-    filter_counts: &mut [u32; IMAGE_FILTER_COUNT],
-    has_images: &mut bool,
-    max_ppi: &mut f32,
+/// The image statistics of one page, accumulated over its image `XObject`s,
+/// the images of its forms, and its inline images.
+struct ImageScan<'a> {
+    doc: &'a Document,
+    /// Width of the page in PDF points, the denominator of the PPI estimate.
     page_pts_width: f32,
-) {
-    // `/Resources` is inherited down the page tree when a page has none.
-    let Ok(xobj_dict) = doc.get_page_resource_dict(context_id, b"XObject") else {
-        return;
-    };
+    /// Images seen per filter, indexed by [`ImageFilter`] discriminant.
+    filter_counts: [u32; IMAGE_FILTER_COUNT],
+    has_images: bool,
+    /// Largest PPI estimate so far; 0 when none.
+    max_ppi: f32,
+    /// Forms already walked: each is walked once however many resource
+    /// dictionaries name it, so the walk is linear in the number of forms
+    /// rather than exponential in the nesting depth.
+    forms_seen: HashSet<ObjectId>,
+}
 
-    for (_name, obj) in &xobj_dict {
-        // All XObject entries are References to stream objects.
-        let &Object::Reference(xobj_id) = obj else {
-            continue;
-        };
-        let Ok(xobj_stream) = doc.get_object(xobj_id) else {
-            continue;
-        };
-        let Object::Stream(stream) = xobj_stream.as_ref() else {
-            continue;
-        };
+impl<'a> ImageScan<'a> {
+    fn new(doc: &'a Document, page_pts_width: f32) -> Self {
+        Self {
+            doc,
+            page_pts_width,
+            filter_counts: [0; IMAGE_FILTER_COUNT],
+            has_images: false,
+            max_ppi: 0.0,
+            forms_seen: HashSet::new(),
+        }
+    }
 
-        let subtype = stream
-            .dict
-            .get(b"Subtype")
-            .and_then(Object::as_name)
-            .map(<[u8]>::to_vec);
-
-        match subtype.as_deref() {
-            Some(b"Image") => {
-                *has_images = true;
-                scan_image_dict(&stream.dict, filter_counts, max_ppi, page_pts_width);
+    /// Walk the `XObject` resource dict of `context_id`, recursing into
+    /// Form `XObject`s up to [`MAX_PRESCAN_DEPTH`].
+    fn xobjects(&mut self, context_id: ObjectId, depth: u32) {
+        // `/Resources` is inherited down the page tree when a page has none.
+        let Ok(xobj_dict) = self.doc.get_page_resource_dict(context_id, b"XObject") else {
+            return;
+        };
+        for (_name, obj) in &xobj_dict {
+            // XObjects are streams, so every usable entry is a reference.
+            let &Object::Reference(xobj_id) = obj else {
+                continue;
+            };
+            let Ok(xobj) = self.doc.get_object(xobj_id) else {
+                continue;
+            };
+            let Object::Stream(stream) = xobj.as_ref() else {
+                continue;
+            };
+            match stream.dict.get(b"Subtype").and_then(Object::as_name) {
+                Some(b"Image") => self.image(&stream.dict),
+                Some(b"Form") if depth < MAX_PRESCAN_DEPTH && self.forms_seen.insert(xobj_id) => {
+                    self.xobjects(xobj_id, depth + 1);
+                }
+                _ => {}
             }
-            Some(b"Form") if depth < MAX_PRESCAN_DEPTH => {
-                scan_xobjects(
-                    doc,
-                    xobj_id,
-                    depth + 1,
-                    filter_counts,
-                    has_images,
-                    max_ppi,
-                    page_pts_width,
-                );
-            }
-            _ => {}
+        }
+    }
+
+    /// Count the image whose dictionary (an image `XObject`'s, or an inline
+    /// image's with its keys expanded) is `dict`.
+    fn image(&mut self, dict: &Dictionary) {
+        self.has_images = true;
+        let filter = dict
+            .get(b"Filter")
+            .and_then(|o| self.doc.resolve(o).ok())
+            .and_then(|o| filter_name(&o).map(std::borrow::Cow::into_owned));
+        let slot =
+            &mut self.filter_counts[ImageFilter::from_filter_str(filter.as_deref()) as usize];
+        *slot = slot.saturating_add(1);
+        if let Some(w_px) = positive_u32(dict, b"Width")
+            && self.page_pts_width > 0.0
+        {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "an image width is far below 2^24 in practice; f32 is sufficient for PPI routing"
+            )]
+            let ppi = (w_px as f32 / self.page_pts_width) * 72.0;
+            self.max_ppi = self.max_ppi.max(ppi);
         }
     }
 }
 
-// ── Per-image dict scanners ───────────────────────────────────────────────────
-
-/// Extract filter and PPI hint from an image `XObject` stream dictionary.
-fn scan_image_dict(
-    dict: &Dictionary,
-    filter_counts: &mut [u32; IMAGE_FILTER_COUNT],
-    max_ppi: &mut f32,
-    page_pts_width: f32,
-) {
-    let filter = dict.get(b"Filter").and_then(|o| {
-        // Filter may be a Reference → Name; follow it.
-        let resolved = match o {
-            Object::Reference(id) => {
-                // Rare: Filter as an indirect reference.  `scan_image_dict`
-                // does not have access to `doc` so the reference cannot be
-                // resolved here.  Fall back to Raw, which means this image
-                // will not be counted as a JPEG/JPX candidate — pessimistic
-                // for GPU routing but never causes a misrender.
-                let _ = id;
-                return None;
-            }
-            other => other,
-        };
-        filter_name(resolved)
-    });
-
-    let img_filter = ImageFilter::from_filter_str(filter.as_deref());
-    count_filter(filter_counts, img_filter);
-    if let Some(w_px) = dict_integer(dict, b"Width") {
-        update_max_ppi(max_ppi, w_px, page_pts_width);
-    }
-}
-
-/// Extract filter and PPI hint from a parsed inline-image parameter dictionary.
-fn scan_inline_image(
-    dict: &Dictionary,
-    filter_counts: &mut [u32; IMAGE_FILTER_COUNT],
-    max_ppi: &mut f32,
-    page_pts_width: f32,
-) {
-    // `parse_inline_params` has already expanded abbreviated keys (b"F" → b"Filter",
-    // b"W" → b"Width") so we only need the full names here.
-    let filter = dict.get(b"Filter").and_then(filter_name);
-    let img_filter = ImageFilter::from_filter_str(filter.as_deref());
-    count_filter(filter_counts, img_filter);
-    if let Some(w_px) = dict_integer(dict, b"Width") {
-        update_max_ppi(max_ppi, w_px, page_pts_width);
-    }
-}
-
-// ── Utility helpers ───────────────────────────────────────────────────────────
-
-/// Map a `filter_counts` array index back to [`ImageFilter`].
-///
-/// Each arm must match the `ImageFilter` discriminant of the same value.
-/// If a new `ImageFilter` variant is added:
-///   1. `IMAGE_FILTER_COUNT` must be bumped (compile-time assert guards this).
-///   2. A new arm must be added here — the `unreachable!` wildcard will panic
-///      in tests if index 6+ appears without a matching arm.
-///
-/// The `idx_to_filter_round_trips` test verifies all `IMAGE_FILTER_COUNT`
-/// indices round-trip correctly.
-const fn idx_to_filter(idx: usize) -> ImageFilter {
-    match idx {
-        0 => ImageFilter::Dct,
-        1 => ImageFilter::Jpx,
-        2 => ImageFilter::CcittFax,
-        3 => ImageFilter::Jbig2,
-        4 => ImageFilter::Flate,
-        5 => ImageFilter::Raw,
-        // Any index ≥ IMAGE_FILTER_COUNT is a logic bug — the caller always
-        // iterates 0..IMAGE_FILTER_COUNT, so this is unreachable in practice.
-        _ => unreachable!(),
-    }
-}
-
-/// Read a positive integer value (Integer or Real) from a dictionary key.
-///
-/// Returns `None` if the key is absent, zero, negative, or non-numeric.
-/// PDF image dimensions (Width, Height) are always positive and fit comfortably
-/// in `u32`; the guards `*i > 0` and `*r > 0.0` enforce this before the cast.
-fn dict_integer(dict: &Dictionary, key: &[u8]) -> Option<u32> {
-    #[expect(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "guarded by *i > 0; PDF image dimensions fit in u32 (max ~65 535 px)"
-    )]
-    match dict.get(key)? {
-        Object::Integer(i) if *i > 0 => Some(*i as u32),
-        Object::Real(r) if *r > 0.0 => Some(*r as u32),
-        _ => None,
-    }
-}
-
-/// Increment the filter count slot for `filter`, saturating at `u32::MAX`.
-#[inline]
-const fn count_filter(filter_counts: &mut [u32; IMAGE_FILTER_COUNT], filter: ImageFilter) {
-    filter_counts[filter as usize] = filter_counts[filter as usize].saturating_add(1);
-}
-
-/// Update `max_ppi` with the PPI implied by an image of width `w_px` on a
-/// page of width `page_pts_width` PDF points.  No-op if `page_pts_width` is
-/// zero (degenerate page) or if the computed PPI is not larger than the
-/// current maximum.
-#[inline]
-fn update_max_ppi(max_ppi: &mut f32, w_px: u32, page_pts_width: f32) {
-    if page_pts_width <= 0.0 {
-        return;
-    }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "image width ≤ ~65 535 px; f32 is sufficient for PPI routing"
-    )]
-    let ppi = (w_px as f32 / page_pts_width) * 72.0;
-    if ppi > *max_ppi {
-        *max_ppi = ppi;
-    }
+/// A positive integer value (Integer, or Real truncated) of `key`; `None`
+/// when absent, not positive, non-numeric, or beyond `u32`.
+fn positive_u32(dict: &Dictionary, key: &[u8]) -> Option<u32> {
+    let n = match dict.get(key)? {
+        Object::Integer(i) => *i,
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "f32-to-i64 `as` truncates toward zero and saturates, NaN to 0"
+        )]
+        Object::Real(r) => *r as i64,
+        _ => return None,
+    };
+    u32::try_from(n).ok().filter(|&n| n > 0)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -448,83 +342,51 @@ mod tests {
     }
 
     #[test]
-    fn idx_to_filter_round_trips() {
-        for idx in 0..IMAGE_FILTER_COUNT {
-            let f = idx_to_filter(idx);
-            assert_eq!(
-                f as usize, idx,
-                "idx_to_filter({idx}) discriminant mismatch"
-            );
-        }
-    }
-
-    #[test]
-    fn dict_integer_reads_integer_and_real() {
+    fn positive_u32_reads_integer_and_real_and_rejects_out_of_range() {
         let mut dict = Dictionary::new();
         dict.set(b"Width", Object::Integer(640));
         dict.set(b"Height", Object::Real(480.0));
-        assert_eq!(dict_integer(&dict, b"Width"), Some(640));
-        assert_eq!(dict_integer(&dict, b"Height"), Some(480));
-        assert_eq!(dict_integer(&dict, b"Missing"), None);
+        dict.set(b"Huge", Object::Integer(i64::from(u32::MAX) + 2));
+        dict.set(b"Negative", Object::Integer(-3));
+        assert_eq!(positive_u32(&dict, b"Width"), Some(640));
+        assert_eq!(positive_u32(&dict, b"Height"), Some(480));
+        assert_eq!(positive_u32(&dict, b"Huge"), None);
+        assert_eq!(positive_u32(&dict, b"Negative"), None);
+        assert_eq!(positive_u32(&dict, b"Missing"), None);
     }
 
     #[test]
-    fn scan_image_dict_increments_dct_filter_count() {
+    fn an_image_counts_its_filter_and_ppi() {
+        let doc = crate::test_helpers::empty_doc();
         let mut dict = Dictionary::new();
         dict.set(b"Filter", Object::Name(b"DCTDecode".to_vec()));
-        dict.set(b"Width", Object::Integer(1024));
-
-        let mut filter_counts = [0u32; IMAGE_FILTER_COUNT];
-        let mut max_ppi = 0.0f32;
-        scan_image_dict(&dict, &mut filter_counts, &mut max_ppi, 612.0);
-
-        assert_eq!(filter_counts[ImageFilter::Dct as usize], 1);
-        assert!(max_ppi > 0.0, "PPI should be computed for wide image");
+        dict.set(b"Width", Object::Integer(1224));
+        let mut scan = ImageScan::new(&doc, 612.0);
+        scan.image(&dict);
+        scan.image(&dict);
+        assert!(scan.has_images);
+        assert_eq!(scan.filter_counts[ImageFilter::Dct as usize], 2);
+        assert!((scan.max_ppi - 144.0).abs() < 1e-3, "got {}", scan.max_ppi);
+        assert_eq!(dominant_filter(&scan.filter_counts), Some(ImageFilter::Dct));
     }
 
     #[test]
-    fn update_max_ppi_updates_when_larger() {
-        let mut max_ppi = 72.0f32;
-        update_max_ppi(&mut max_ppi, 1440, 612.0); // 1440/612*72 ≈ 169 ppi
-        assert!(
-            max_ppi > 150.0,
-            "expected max_ppi to increase, got {max_ppi}"
-        );
-    }
-
-    #[test]
-    fn update_max_ppi_ignores_when_smaller() {
-        let mut max_ppi = 300.0f32;
-        update_max_ppi(&mut max_ppi, 72, 612.0); // 72/612*72 ≈ 8.5 ppi
-        assert!(
-            (max_ppi - 300.0).abs() < 0.001,
-            "expected max_ppi unchanged, got {max_ppi}"
-        );
-    }
-
-    #[test]
-    fn update_max_ppi_zero_page_width_is_noop() {
-        let mut max_ppi = 0.0f32;
-        update_max_ppi(&mut max_ppi, 1000, 0.0);
-        assert_eq!(max_ppi, 0.0);
-    }
-
-    #[test]
-    fn count_filter_increments_correct_slot() {
-        let mut counts = [0u32; IMAGE_FILTER_COUNT];
-        count_filter(&mut counts, ImageFilter::Dct);
-        count_filter(&mut counts, ImageFilter::Dct);
-        count_filter(&mut counts, ImageFilter::Flate);
-        assert_eq!(counts[ImageFilter::Dct as usize], 2);
-        assert_eq!(counts[ImageFilter::Flate as usize], 1);
-        assert_eq!(counts[ImageFilter::Jpx as usize], 0);
-    }
-
-    #[test]
-    fn count_filter_saturates_at_u32_max() {
-        let mut counts = [0u32; IMAGE_FILTER_COUNT];
-        counts[ImageFilter::Raw as usize] = u32::MAX;
-        count_filter(&mut counts, ImageFilter::Raw);
-        assert_eq!(counts[ImageFilter::Raw as usize], u32::MAX);
+    fn a_form_named_many_times_is_walked_once() {
+        let image = "<< /Type /XObject /Subtype /Image /Filter /DCTDecode /Width 8 /Height 8 \
+                     /Length 0 >>\nstream\n\nendstream";
+        let form = "<< /Type /XObject /Subtype /Form \
+                    /Resources << /XObject << /A 5 0 R /B 5 0 R /C 5 0 R /I 6 0 R >> >> \
+                    /Length 0 >>\nstream\n\nendstream";
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /XObject << /F 5 0 R /G 5 0 R >> >> >>",
+            ),
+            (5, form),
+            (6, image),
+        ]);
+        let mut scan = ImageScan::new(&doc, 612.0);
+        scan.xobjects((4, 0), 0);
+        assert_eq!(scan.filter_counts[ImageFilter::Dct as usize], 1);
     }
 }

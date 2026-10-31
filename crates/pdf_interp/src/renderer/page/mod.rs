@@ -112,11 +112,6 @@ use pixel_rect::PixelRect;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const _: () = assert!(
-    IMAGE_FILTER_COUNT == 6,
-    "ImageFilter variant count changed — update filter_counts array size and FILTERS in finish()"
-);
-
 /// Lightweight page metadata collected at zero extra cost during rendering.
 ///
 /// Returned alongside the finished bitmap from [`PageRenderer::finish`].
@@ -1244,23 +1239,7 @@ impl<'doc> PageRenderer<'doc> {
     /// Consume the renderer and return the finished bitmap and page diagnostics.
     #[must_use]
     pub fn finish(mut self) -> (Bitmap<Rgb8>, PageDiagnostics) {
-        // Resolve dominant_filter from per-filter blit counts.
-        // Order matches the ImageFilter discriminants (Dct=0, Jpx=1, CcittFax=2, Jbig2=3, Flate=4, Raw=5).
-        const FILTERS: [ImageFilter; 6] = [
-            ImageFilter::Dct,
-            ImageFilter::Jpx,
-            ImageFilter::CcittFax,
-            ImageFilter::Jbig2,
-            ImageFilter::Flate,
-            ImageFilter::Raw,
-        ];
-        self.diag.dominant_filter = self
-            .filter_counts
-            .iter()
-            .zip(FILTERS.iter())
-            .filter(|(count, _)| **count > 0)
-            .max_by_key(|(count, _)| *count)
-            .map(|(_, filter)| *filter);
+        self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
 
         if self.page_group.is_some() {
             composite_onto_white(&mut self.bitmap);
