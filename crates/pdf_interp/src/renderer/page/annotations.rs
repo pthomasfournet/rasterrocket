@@ -270,8 +270,9 @@ fn text_width(renderer: &mut PageRenderer<'_>, font: &[u8], bytes: &[u8]) -> f64
 /// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,
 /// or, when `/N` is a dictionary of appearance states, the entry for the
 /// annotation's appearance state.  The state is `/AS`; without it, the
-/// field value `/V` of the annotation or of its `/Parent` field, and
-/// otherwise `Off`.
+/// field value `/V` of the annotation or of its `/Parent` field, which
+/// names the appearance state of a check box or radio button (PDF
+/// §12.7.5.3); a value naming no state, or no value, selects `Off`.
 fn normal_appearance(doc: &Document, annot: &Dictionary) -> Option<ObjectId> {
     let ap = crate::resources::resolve_dict(doc, annot.get(b"AP")?)?;
     let states = match ap.get(b"N")? {
@@ -283,15 +284,20 @@ fn normal_appearance(doc: &Document, annot: &Dictionary) -> Option<ObjectId> {
         Object::Dictionary(d) => d.clone(),
         _ => return None,
     };
-    let state: Vec<u8> = annot
-        .get_name(b"AS")
-        .or_else(|| annot.get_name(b"V"))
-        .map(<[u8]>::to_vec)
-        .or_else(|| {
+    let value = || {
+        annot.get_name(b"V").map(<[u8]>::to_vec).or_else(|| {
             let parent = crate::resources::resolve_dict(doc, annot.get(b"Parent")?)?;
             parent.get_name(b"V").map(<[u8]>::to_vec)
         })
-        .unwrap_or_else(|| b"Off".to_vec());
+    };
+    let state: Vec<u8> = annot.get_name(b"AS").map_or_else(
+        || {
+            value()
+                .filter(|v| states.contains_key(v))
+                .unwrap_or_else(|| b"Off".to_vec())
+        },
+        <[u8]>::to_vec,
+    );
     match states.get(&state)? {
         Object::Reference(id) => Some(*id),
         _ => None,

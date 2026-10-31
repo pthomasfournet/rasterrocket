@@ -190,9 +190,16 @@ fn a_state_keyed_appearance_without_a_state_uses_the_field_value() {
     );
 }
 
+/// Without `/AS`, a field value that names no appearance state selects
+/// `Off`, as does no value at all.
 #[test]
 fn a_state_keyed_appearance_without_a_state_or_value_uses_off() {
     assert_eq!(state_keyed("", vec![]), GREY);
+    assert_eq!(state_keyed("/V /Maybe", vec![]), GREY);
+    assert_eq!(
+        state_keyed("/Parent 7 0 R", vec![b"<< /FT /Btn /V /Maybe >>".to_vec()]),
+        GREY
+    );
 }
 
 #[test]
