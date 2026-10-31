@@ -25,8 +25,8 @@ use super::PageRenderer;
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
-use crate::resources::SoftMaskParams;
 use crate::resources::transfer::function_lut;
+use crate::resources::{SoftMaskParams, colorspace, resolve_dict};
 
 impl PageRenderer<'_> {
     /// Apply an `ExtGState` `SMask` entry to the current graphics state.
@@ -83,8 +83,7 @@ impl PageRenderer<'_> {
 
         let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
         let values = if luminosity {
-            let bc = backdrop_rgb(backdrop);
-            luminosity_values(&canvas, bc)
+            luminosity_values(&canvas, self.mask_backdrop_rgb(group, backdrop))
         } else {
             canvas.alpha_plane()?.to_vec()
         };
@@ -97,6 +96,25 @@ impl PageRenderer<'_> {
             height: self.height,
             values,
         })
+    }
+
+    /// The backdrop colour `BC` of the mask group `group` as sRGB bytes:
+    /// `BC` is given in the group's colour space (`/Group /CS`, PDF
+    /// §11.6.5.2).  A group without a space of `BC`'s component count reads
+    /// `BC` by its count (see [`backdrop_rgb`]).
+    fn mask_backdrop_rgb(&self, group: pdf::ObjectId, bc: &[f64]) -> [u8; 3] {
+        let doc = self.resources.doc();
+        let space = doc.get_object(group).ok().and_then(|obj| {
+            let group_dict = obj.as_stream()?.dict.get(b"Group")?;
+            let cs = resolve_dict(doc, group_dict)?.get(b"CS")?.clone();
+            Some(colorspace::resolve(doc, &cs))
+        });
+        match space {
+            Some(space) if !bc.is_empty() && space.ncomponents() == bc.len() => {
+                space.convert_to_rgb(doc, bc)
+            }
+            _ => backdrop_rgb(bc),
+        }
     }
 
     /// Run `paint` — the painting of one object of constant alpha `alpha`
@@ -496,6 +514,30 @@ mod tests {
         // White, pure red, and a transparent pixel showing the backdrop.
         assert_eq!(luminosity_values(&bmp, [0, 0, 0]), [255, 77, 0]);
         assert_eq!(luminosity_values(&bmp, [255, 255, 255]), [255, 77, 255]);
+    }
+
+    /// `BC` is read in the mask group's colour space: Lab white is white,
+    /// where read by its component count it would be RGB (100, 0, 0).
+    #[test]
+    fn the_backdrop_is_read_in_the_group_colour_space() {
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (4, b"<< /Type /Page >>".to_vec()),
+            (
+                5,
+                b"<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Group << /S /Transparency \
+                  /CS [/Lab << /WhitePoint [0.9505 1 1.089] >>] >> /Length 0 >>\nstream\n\nendstream"
+                    .to_vec(),
+            ),
+        ]);
+        let renderer = PageRenderer::new(1, 1, &doc, (4, 0));
+        let white = renderer.mask_backdrop_rgb((5, 0), &[100.0, 0.0, 0.0]);
+        assert!(white.iter().all(|&v| v >= 250), "{white:?}");
+        // A count that does not match the group's space falls back to it.
+        assert_eq!(renderer.mask_backdrop_rgb((5, 0), &[1.0]), [255, 255, 255]);
+        assert_eq!(
+            renderer.mask_backdrop_rgb((9, 0), &[1.0, 0.0, 0.0]),
+            [255, 0, 0]
+        );
     }
 
     #[test]
