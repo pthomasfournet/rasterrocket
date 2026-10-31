@@ -6,6 +6,7 @@
 //! [`widget`], through the same form path as a stored appearance.
 
 mod content;
+mod line_ending;
 mod markup;
 mod text;
 mod widget;

@@ -380,6 +380,8 @@ renderer/
                        (text, choice, check/radio, push button) from /V,
                        /DA, /MK and /AcroForm /DR, when /AP /N is absent or,
                        for text and choice fields, /NeedAppearances is set
+      line_ending.rs — /LE line endings (arrows, square, circle, diamond,
+                       butt, slash) in a frame along the line
       text.rs        — /DA parsing, text strings, line wrapping and layout
       content.rs     — object access and content-stream fragments shared
                        by the synthesised appearances

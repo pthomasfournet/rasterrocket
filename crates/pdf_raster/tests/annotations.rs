@@ -321,6 +321,39 @@ fn a_constant_opacity_applies_to_a_synthesised_appearance() {
 }
 
 #[test]
+fn line_endings_are_drawn_at_both_ends_of_a_line() {
+    // A 2 pt line from x 20 to 80 at y 50: a closed arrow filled blue at
+    // its start and a 12 pt square at its end.  The arrow's wings reach
+    // 12 pt back along the line and 6.9 pt either side of it.
+    let px = synthesised(
+        "/Subtype /Line /Rect [10 30 90 70] /L [20 50 80 50] /BS << /W 2 >> \
+         /C [1 0 0] /IC [0 0 1] /LE [/ClosedArrow /Square]",
+        &[(29, 53), (29, 60), (80, 53), (50, 55)],
+    );
+    assert_eq!(px, [BLUE, WHITE, BLUE, WHITE]);
+    let none = synthesised(
+        "/Subtype /Line /Rect [10 30 90 70] /L [20 50 80 50] /BS << /W 2 >> \
+         /C [1 0 0] /IC [0 0 1]",
+        &[(29, 53), (80, 53)],
+    );
+    assert_eq!(none, [WHITE, WHITE]);
+}
+
+#[test]
+fn a_poly_line_carries_open_arrows_along_its_end_segments() {
+    // The last segment runs up from (50 20) to (50 80); its open arrow's
+    // wings run back down to y 74, 3.5 pt either side.
+    let px = synthesised(
+        "/Subtype /PolyLine /Rect [10 10 90 90] /Vertices [20 20 50 20 50 80] \
+         /C [0 0 1] /LE [/None /OpenArrow]",
+        &[(47, 75), (52, 75), (50, 85)],
+    );
+    let inked = |p: [u8; 3]| p[0] < 200;
+    assert!(inked(px[0]) && inked(px[1]), "{px:?}");
+    assert_eq!(px[2], WHITE);
+}
+
+#[test]
 fn an_annotation_with_an_appearance_is_not_synthesised() {
     // The appearance fills blue; a synthesised square would have a red border.
     let pdf = page(

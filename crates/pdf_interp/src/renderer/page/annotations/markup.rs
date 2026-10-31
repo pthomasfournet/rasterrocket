@@ -15,6 +15,7 @@ use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
 use super::content::{colour_op, ellipse, inset, n, number, numbers, rectangle, resolve_array};
+use super::line_ending::LineEnding;
 use crate::resources::dict_ext::DictExt;
 
 /// A synthesised appearance.
@@ -110,7 +111,10 @@ fn closed_shape(
 /// A `Line` (`/L`), `PolyLine` or `Polygon` (`/Vertices`), or `Ink`
 /// (`/InkList`) (§12.5.6.7, §12.5.6.9, §12.5.6.13): the paths stroked with
 /// `/C` (default black) with round joins and caps, a polygon closed and
-/// filled with `/IC`.  Also returns the border width.
+/// filled with `/IC`.  The ends of a stroked `Line` or `PolyLine` carry
+/// the `/LE` line endings, closed ones filled with `/IC`.  Also returns how
+/// far the drawing may reach outside `/Rect`: the border width and the
+/// largest ending.
 fn polylines(doc: &Document, annot: &Dictionary, subtype: &[u8]) -> Option<(String, f64)> {
     let border = Border::of(doc, annot);
     let stroke = colour_or_black(doc, annot.get(b"C"), true).filter(|_| border.width > 0.0);
@@ -154,7 +158,42 @@ fn polylines(doc: &Document, annot: &Dictionary, subtype: &[u8]) -> Option<(Stri
         return None;
     }
     s.push_str(paint_op(fill.is_some(), stroke.is_some()));
-    Some((s, border.width))
+    let mut reach = border.width;
+    if stroke.is_some()
+        && matches!(subtype, b"Line" | b"PolyLine")
+        && let Some(path) = paths.first()
+    {
+        let interior = colour(doc, annot.get(b"IC"), false);
+        let endings = line_endings(doc, annot.get(b"LE"));
+        let (points, _) = path.as_chunks::<2>();
+        if let [[x0, y0], [x1, y1], ..] = points
+            && let Some(ending) = endings[0]
+        {
+            let size = LineEnding::size(border.width, (x1 - x0).hypot(y1 - y0));
+            ending.write(&mut s, (*x0, *y0), (*x1, *y1), size, interior.as_deref());
+            reach = reach.max(border.width + size);
+        }
+        if let [.., [x0, y0], [x1, y1]] = points
+            && let Some(ending) = endings[1]
+        {
+            let size = LineEnding::size(border.width, (x1 - x0).hypot(y1 - y0));
+            ending.write(&mut s, (*x1, *y1), (*x0, *y0), size, interior.as_deref());
+            reach = reach.max(border.width + size);
+        }
+    }
+    Some((s, reach))
+}
+
+/// The start and end line endings of the `/LE` array `obj`.
+fn line_endings(doc: &Document, obj: Option<&Object>) -> [Option<LineEnding>; 2] {
+    let names = resolve_array(doc, obj);
+    let ending = |i: usize| {
+        names
+            .get(i)
+            .and_then(Object::as_name)
+            .and_then(LineEnding::from_name)
+    };
+    [ending(0), ending(1)]
 }
 
 /// A text markup over the boxes of `/QuadPoints` (§12.5.6.10): `Highlight`
