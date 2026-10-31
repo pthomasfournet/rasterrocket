@@ -2100,6 +2100,13 @@ impl<'doc> PageRenderer<'doc> {
         if img.width == 0 || img.height == 0 {
             return;
         }
+        // A shape-only (`d1`) glyph description is a stencil in the text
+        // fill colour (PDF §9.6.5): an image mask paints in that colour, and
+        // an image carrying its own colours, which the description may not
+        // contain, paints nothing.
+        if self.gstate.current().colour_locked && img.color_space != ImageColorSpace::Mask {
+            return;
+        }
         // A stencil mask paints the fill colour, which may paint nothing.
         if img.color_space == ImageColorSpace::Mask
             && self.gstate.current().fill_color_space.paints_nothing()

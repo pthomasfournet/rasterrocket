@@ -209,3 +209,19 @@ fn repeated_d1_glyphs_draw_alike() {
         "{inked} dark pixels"
     );
 }
+
+/// An image carrying its own colours inside a `d1` description paints
+/// nothing, as pdftoppm and pdfium draw it: the description is a stencil
+/// and may hold only image masks.  The same image in a `d0` description
+/// paints in its own colour.
+#[test]
+fn d1_glyphs_skip_colour_images() {
+    let image: &[u8] = b"1000 0 0 1000 0 0 cm BI /W 1 /H 1 /CS /RGB /BPC 8 ID \xff\x00\x00 EI";
+    let d1 = [b"1000 0 0 0 1000 1000 d1 ".as_slice(), image].concat();
+    let (font, extra) = type3(&d1, "<< >>");
+    assert_eq!(ink(&render(&font, &extra, SHOW_A)), 0);
+
+    let d0 = [b"1000 0 d0 ".as_slice(), image].concat();
+    let (font, extra) = type3(&d0, "<< >>");
+    assert_eq!(pixel(&render(&font, &extra, SHOW_A), 16, 16), [255, 0, 0]);
+}
