@@ -270,6 +270,16 @@ pub struct SessionConfig {
     /// [`SessionConfig::font_dirs_from_env`]).  Sessions naming the same
     /// directories share one index of the installed fonts.
     pub font_dirs: Vec<PathBuf>,
+    /// Whether the standard font directories (and the fixed locations of
+    /// the metric-compatible Liberation, Arial, Times New Roman and Courier
+    /// New faces) are searched after [`font_dirs`](Self::font_dirs).
+    ///
+    /// Default `true`.  `false` draws non-embedded fonts from the
+    /// directories in `font_dirs` and the faces compiled into the library
+    /// only: the base-14 substitutes and, with the `bundled-fonts` feature
+    /// (on by default), the bundled Greek, Cyrillic, Hebrew, Arabic,
+    /// Devanagari, Thai and symbol fallback faces.
+    pub system_fonts: bool,
 }
 
 impl SessionConfig {
@@ -298,6 +308,7 @@ impl SessionConfig {
             text_antialias: true,
             vector_antialias: true,
             font_dirs: Vec::new(),
+            system_fonts: true,
         }
     }
 

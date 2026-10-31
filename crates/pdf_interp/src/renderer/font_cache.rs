@@ -119,19 +119,19 @@ pub struct DocumentFonts {
 impl Default for DocumentFonts {
     /// A store drawing substitutes from the standard font directories.
     fn default() -> Self {
-        Self::with_font_dirs(&[])
+        Self::new(&[], true)
     }
 }
 
 impl DocumentFonts {
     /// A store drawing substitutes and fallbacks from the fonts in
-    /// `font_dirs` (searched in order) and then the standard font
-    /// directories.
+    /// `font_dirs` (searched in order) and then, when `system_fonts` is
+    /// set, the standard font directories.
     #[must_use]
-    pub fn with_font_dirs(font_dirs: &[PathBuf]) -> Self {
+    pub fn new(font_dirs: &[PathBuf], system_fonts: bool) -> Self {
         Self {
             fonts: Mutex::default(),
-            library: FontLibrary::for_dirs(font_dirs),
+            library: FontLibrary::shared(font_dirs, system_fonts),
             face_ids: Arc::default(),
             glyphs: GlyphCache::default(),
         }
@@ -1156,7 +1156,7 @@ mod tests {
     /// Whether an installed face maps U+0915 (Devanagari KA), the probe of
     /// the fallback tests; they are skipped on a host without one.
     fn devanagari_installed() -> bool {
-        let found = FontLibrary::for_dirs(&[])
+        let found = FontLibrary::shared(&[], true)
             .fallback_program(SubstituteStyle::default(), 0x0915)
             .is_some();
         if !found {

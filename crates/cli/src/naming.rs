@@ -101,6 +101,7 @@ mod tests {
             antialias: AaFlag::Yes,
             vector_antialias: AaFlag::Yes,
             hide_annotations: false,
+            no_system_fonts: false,
             password: None,
             decrypt_owned: false,
             num_threads: 0,

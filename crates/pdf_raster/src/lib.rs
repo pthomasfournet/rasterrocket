@@ -406,6 +406,10 @@ pub struct RasterOptions {
     /// `RROCKET_FONT_DIR` names and the standard ones; see
     /// [`SessionConfig::font_dirs`].  Default empty.
     pub font_dirs: Vec<std::path::PathBuf>,
+
+    /// Whether the standard font directories are searched; see
+    /// [`SessionConfig::system_fonts`].  Default `true`.
+    pub system_fonts: bool,
 }
 
 impl RasterOptions {
@@ -439,6 +443,7 @@ impl Default for RasterOptions {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         }
     }
 }
@@ -674,6 +679,7 @@ mod page_set_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         assert!(opts.pages.is_none());
         let default_opts = RasterOptions::default();
@@ -701,6 +707,7 @@ mod page_set_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         assert!(opts.pages.is_some());
     }

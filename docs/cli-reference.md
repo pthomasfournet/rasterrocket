@@ -140,6 +140,7 @@ The `--jpeg` and `--tiff` rows give the names those formats will use; today both
 | `--aa yes\|no` | `yes` | Antialias text. `no` draws glyphs with hard, bilevel edges. |
 | `--aaVector yes\|no` | `yes` | Antialias path fills, strokes and clips. `no` draws them with hard, bilevel edges. |
 | `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
+| `--no-system-fonts` | off | Do not search the system font directories for fonts the document does not embed: draw them from `RROCKET_FONT_DIR` and the faces compiled into the binary only. |
 
 Fonts a document does not embed are drawn with substitutes: the installed
 Liberation (or Arial / Times New Roman / Courier New) family when found,
@@ -148,7 +149,10 @@ installed face of that script, and any character the substitute lacks is
 drawn from an installed face that covers it. `RROCKET_FONT_DIR` names extra directories
 to search first, in `PATH` syntax (`RROCKET_FONT_DIR=/opt/fonts:$HOME/fonts`), for both
 the substitutes and the per-character faces; library callers set the same list through
-`SessionConfig::font_dirs`.
+`SessionConfig::font_dirs`. A character no installed face covers is drawn from the Noto
+fallback faces compiled into the binary (Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai,
+symbols; the default `bundled-fonts` feature), so these scripts draw on a server with no
+fonts installed; a build with `--no-default-features` omits them.
 
 ---
 

@@ -417,6 +417,7 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
 | `vulkan` | Vulkan compute backend for the AA fill (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
 | `gpu-jpeg-huffman` | Custom parallel-Huffman GPU JPEG decode, on CUDA or (with `vulkan`) Vulkan (dormant; `PDF_RASTER_HUFFMAN_THRESHOLD=0` enables it) | CUDA or Vulkan |
+| `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai and symbols compiled into the binary (~0.33 MB, SIL OFL 1.1), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
 

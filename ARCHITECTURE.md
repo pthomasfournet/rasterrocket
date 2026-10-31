@@ -347,6 +347,7 @@ renderer/
   fallback.rs        — per-character fallback of a substitute to installed faces
   substitutes.rs     — substitute programs for non-embedded fonts
   system_fonts.rs    — installed CJK / Arabic / Thai faces; per-character fallback faces
+  bundled_fonts.rs   — Noto fallback faces compiled in (`bundled-fonts`)
   page/
     mod.rs           — per-page entry points, geometry normalisation
     operators.rs     — execute_one: one operator → renderer call
@@ -464,10 +465,11 @@ image, not the process.
   always draw with their compiled-in faces and built-in encodings.
 - **Installed fonts.** A `FontLibrary` (`renderer/system_fonts.rs`) walks
   the session's font directories (`SessionConfig::font_dirs`, from
-  `RROCKET_FONT_DIR` by default), then the standard font directories, on
-  first use, and indexes every sfnt face by family and `OS/2` code-page
-  range. Libraries are shared process-wide per directory list; each holds
-  its parsed programs, fallback rankings and installed substitutes.
+  `RROCKET_FONT_DIR` by default), then, unless `SessionConfig::system_fonts`
+  is off, the standard font directories, on first use, and indexes every
+  sfnt face by family and `OS/2` code-page range. Libraries are shared
+  process-wide per directory list and switch; each holds its parsed
+  programs, fallback rankings and installed substitutes.
 - **Scripts the bundled faces do not cover.** For CJK, Arabic and Thai the
   library selects a face by script, serif class, weight and slant. A non-embedded CID
   font whose ordering is Japan1, GB1, CNS1 or Korea1 maps CID → Unicode →
@@ -482,6 +484,12 @@ image, not the process.
   looked up before its glyph loop, each character once per font, and the
   fallback face is loaded at the font's matrix. Every script an installed
   font covers draws, whatever the font's classified script.
+- **Bundled fallback faces.** With the `bundled-fonts` feature (on by
+  default in `rasterrocket` and the CLI), Noto subsets for Greek and
+  Cyrillic, Hebrew, Arabic, Devanagari and Thai (sans-serif and serif) and
+  three symbol faces are compiled in (`crates/pdf_interp/fonts/noto/`,
+  zlib-compressed, ~0.33 MB; `renderer/bundled_fonts.rs`). They are the
+  last resort of the per-character fallback, after every installed face.
 - **Composite fonts.** `resources/cmap.rs` parses `CMap` streams: codespace
   ranges of mixed width, `usecmap`, and `ToUnicode`. The predefined `CMaps`
   of ISO 32000-2 Table 116 are compressed into the binary

@@ -28,8 +28,9 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 
 Public types are `#[non_exhaustive]`: start from `RasterOptions::new(dpi)`,
 `SessionConfig::default()` or `RenderParams::new(scale)` and assign or chain.
-The GPU features are listed in the
-[API reference](../../docs/api-reference.md#feature-flags).
+The GPU features, and the default `bundled-fonts` feature (Noto fallback
+faces for non-CJK scripts, ~0.33 MB; `default-features = false` omits them),
+are listed in the [API reference](../../docs/api-reference.md#feature-flags).
 
 Distributed from GitHub only; depend on it with
 `rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket" }`.

@@ -12,7 +12,7 @@ keywords             = ["cbz", "comic", "ocr", "image", "archive"]
 categories           = ["multimedia::images"]
 
 [dependencies]
-pdf_raster = { package = "rasterrocket",        path = "../pdf_raster", version = "1.5" }
+pdf_raster = { package = "rasterrocket",        path = "../pdf_raster", version = "1.5", default-features = false }
 color      = { package = "rasterrocket-color",  path = "../color",      version = "1.5" }
 raster     = { package = "rasterrocket-render", path = "../raster",     version = "1.5" }
 log        = { workspace = true }

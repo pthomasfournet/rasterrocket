@@ -26,6 +26,10 @@ gpu-icc          = ["dep:gpu"]
 cache            = ["dep:gpu", "gpu/cache"]
 vulkan           = ["dep:gpu", "gpu/vulkan", "dep:bytemuck", "gpu-aa"]
 gpu-jpeg-huffman = ["dep:gpu", "gpu/gpu-jpeg-huffman"]
+# Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai
+# and symbols compiled into the binary (fonts/noto/, ~0.34 MB), drawn when
+# no installed face covers a character.
+bundled-fonts    = []
 
 [dependencies]
 gpu      = { package = "rasterrocket-gpu",    path = "../gpu",    optional = true, default-features = false }

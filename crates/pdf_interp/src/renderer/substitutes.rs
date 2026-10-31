@@ -81,28 +81,30 @@ const fn substitute_index(style: SubstituteStyle) -> usize {
 }
 
 /// Candidate paths for one [`INSTALLED`] row, in search order: the free
-/// family's file in each of the extra directories `dirs`, then the fixed
-/// locations.
-fn installed_candidates([stem, mac, win]: [&str; 3], dirs: &[PathBuf]) -> Vec<PathBuf> {
+/// family's file in each of the extra directories `dirs`, then, when
+/// `system` is set, the fixed locations.
+fn installed_candidates(
+    [stem, mac, win]: [&str; 3],
+    dirs: &[PathBuf],
+    system: bool,
+) -> Vec<PathBuf> {
+    let fixed = [
+        format!("/usr/share/fonts/truetype/liberation/{stem}.ttf"),
+        format!("/usr/share/fonts/liberation/{stem}.ttf"),
+        format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
+        format!("C:/Windows/Fonts/{win}.ttf"),
+    ];
     dirs.iter()
         .map(|dir| dir.join(format!("{stem}.ttf")))
-        .chain(
-            [
-                format!("/usr/share/fonts/truetype/liberation/{stem}.ttf"),
-                format!("/usr/share/fonts/liberation/{stem}.ttf"),
-                format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
-                format!("C:/Windows/Fonts/{win}.ttf"),
-            ]
-            .map(PathBuf::from),
-        )
+        .chain(fixed.into_iter().filter(|_| system).map(PathBuf::from))
         .collect()
 }
 
 /// The installed face of row `row`, searched for in the extra directories
-/// `dirs` first, parsed; `None` when none of its candidates exists or
-/// parses.
-fn installed_program(row: usize, dirs: &[PathBuf]) -> Option<Arc<FontProgram>> {
-    installed_candidates(INSTALLED[row], dirs)
+/// `dirs` first and then, when `system` is set, the fixed locations,
+/// parsed; `None` when none of its candidates exists or parses.
+fn installed_program(row: usize, dirs: &[PathBuf], system: bool) -> Option<Arc<FontProgram>> {
+    installed_candidates(INSTALLED[row], dirs, system)
         .into_iter()
         .find(|p| p.exists())
         .and_then(|path| {
@@ -143,7 +145,7 @@ pub fn substitute_program(
     }
     let row = substitute_index(style);
     (row < INSTALLED_ROWS)
-        .then(|| library.substitute(row, |dirs| installed_program(row, dirs)))
+        .then(|| library.substitute(row, |dirs, system| installed_program(row, dirs, system)))
         .flatten()
         .or_else(|| {
             EMBEDDED_CACHE[row]
@@ -159,7 +161,7 @@ mod tests {
 
     /// [`substitute_program`] from the library of the standard directories.
     fn substitute_program_default(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
-        substitute_program(style, &FontLibrary::for_dirs(&[]))
+        substitute_program(style, &FontLibrary::shared(&[], true))
     }
 
     /// The Latin family classes in every variant.

@@ -576,8 +576,9 @@ fn open_session_with_doc(
     let form_type = pdf_interp::form_type(&doc);
     Ok(RasterSession {
         doc,
-        fonts: Arc::new(pdf_interp::renderer::DocumentFonts::with_font_dirs(
+        fonts: Arc::new(pdf_interp::renderer::DocumentFonts::new(
             &config.font_dirs,
+            config.system_fonts,
         )),
         total_pages,
         policy: config.policy,
@@ -1263,6 +1264,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
             .cloned()
             .chain(env_font_dirs)
             .collect(),
+        system_fonts: opts.system_fonts,
         ..defaults
     }
 }
@@ -1550,6 +1552,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         }
     }
 
@@ -1624,6 +1627,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1667,6 +1671,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let path = std::path::Path::new(&manifest_dir)
@@ -1733,6 +1738,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         assert!(
             validate_opts(&opts).is_none(),
@@ -1908,6 +1914,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         }
     }
 
@@ -1927,6 +1934,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(3));
@@ -1954,6 +1962,7 @@ mod channel_tests {
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
+            system_fonts: true,
         };
         let mut c = PageCursor::new(&opts);
         assert_eq!(c.next_page(), Some(u32::MAX - 1));

@@ -1,5 +1,7 @@
 //! Page rendering: operator dispatch → raster crate calls.
 
+#[cfg(feature = "bundled-fonts")]
+mod bundled_fonts;
 pub mod color;
 pub(crate) mod encodings;
 mod fallback;

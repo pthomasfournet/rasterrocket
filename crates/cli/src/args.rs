@@ -160,6 +160,12 @@ pub(crate) struct Args {
     #[arg(long = "hide-annotations")]
     pub hide_annotations: bool,
 
+    /// Do not search the system font directories for fonts the document
+    /// does not embed: draw them from `RROCKET_FONT_DIR` and the faces
+    /// compiled into the binary only.
+    #[arg(long = "no-system-fonts")]
+    pub no_system_fonts: bool,
+
     // ── Encrypted-document decryption ────────────────────────────────────────
     /// Password for an encrypted PDF, tried as the user password and then
     /// as the owner password (`--upw` and `--opw` are aliases).
@@ -602,6 +608,7 @@ impl Args {
             .clone()
             .or_else(SessionConfig::vulkan_device_from_env);
         config.font_dirs = SessionConfig::font_dirs_from_env();
+        config.system_fonts = !self.no_system_fonts;
         config.strict = self.strict;
         config.purpose = self.purpose.into();
         config.annotations = !self.hide_annotations;

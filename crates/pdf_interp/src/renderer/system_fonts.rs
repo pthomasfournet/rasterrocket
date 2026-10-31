@@ -1,8 +1,9 @@
 //! Installed fonts: the faces substitutes and per-character fallbacks are
 //! drawn from.
 //!
-//! A [`FontLibrary`] walks a list of extra directories, then the standard
-//! font directories, on first use and indexes every sfnt face by family
+//! A [`FontLibrary`] walks a list of extra directories, then (unless
+//! system fonts are off) the standard font directories, on first use and
+//! indexes every sfnt face by family
 //! name and `OS/2` code-page ranges.  A request for a script the
 //! compiled-in substitutes do not cover ([`Script`]: CJK, Arabic, Thai)
 //! selects, among the faces whose code-page bit covers the script, the
@@ -13,8 +14,10 @@
 //! that reaches it.
 //!
 //! Libraries are shared process-wide, one per list of extra directories
-//! ([`FontLibrary::for_dirs`]), so documents rendered with the same
-//! directories index the installed fonts and parse each program once.
+//! and system-font switch ([`FontLibrary::shared`]), so documents rendered
+//! with the same sources index the installed fonts and parse each program
+//! once.  With the `bundled-fonts` feature, faces compiled into the binary
+//! are the last resort of a per-character request.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -244,15 +247,23 @@ impl Face {
     }
 }
 
+/// Key of one library: its extra directories and whether the standard
+/// font directories are searched.
+type LibraryKey = (Vec<PathBuf>, bool);
+
 /// Key of one fallback ranking: the family class, weight and slant asked
 /// for, and the script of the character.
 type RankKey = (SubstituteFamily, bool, bool, Option<Script>);
 
-/// The installed fonts of one list of extra directories and the standard
-/// font directories.  See the module documentation.
+/// The installed fonts of one list of extra directories and, when
+/// `system` is set, the standard font directories.  See the module
+/// documentation.
 pub struct FontLibrary {
     /// Extra directories, walked before the standard ones.
     dirs: Vec<PathBuf>,
+    /// Whether the standard font directories and the fixed locations of
+    /// the metric-compatible substitutes are searched.
+    system: bool,
     /// Every sfnt face found, sorted by path; built on first use.
     faces: OnceLock<Vec<Face>>,
     /// Program of each face, by index into `faces`, parsed on first use.
@@ -265,9 +276,10 @@ pub struct FontLibrary {
 }
 
 impl FontLibrary {
-    fn new(dirs: Vec<PathBuf>) -> Self {
+    fn new(dirs: Vec<PathBuf>, system: bool) -> Self {
         Self {
             dirs,
+            system,
             faces: OnceLock::new(),
             programs: Mutex::default(),
             orders: Mutex::default(),
@@ -275,21 +287,20 @@ impl FontLibrary {
         }
     }
 
-    /// The library searching the extra directories `dirs` (in order)
-    /// before the standard ones, shared by every caller naming the same
-    /// list.
+    /// The library searching the extra directories `dirs` (in order) and
+    /// then, when `system` is set, the standard font directories; shared by
+    /// every caller naming the same sources.
     #[must_use]
-    pub fn for_dirs(dirs: &[PathBuf]) -> Arc<Self> {
-        static LIBRARIES: OnceLock<Mutex<HashMap<Vec<PathBuf>, Arc<FontLibrary>>>> =
-            OnceLock::new();
+    pub fn shared(dirs: &[PathBuf], system: bool) -> Arc<Self> {
+        static LIBRARIES: OnceLock<Mutex<HashMap<LibraryKey, Arc<FontLibrary>>>> = OnceLock::new();
         let mut libraries = LIBRARIES
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         Arc::clone(
             libraries
-                .entry(dirs.to_vec())
-                .or_insert_with(|| Arc::new(Self::new(dirs.to_vec()))),
+                .entry((dirs.to_vec(), system))
+                .or_insert_with(|| Arc::new(Self::new(dirs.to_vec(), system))),
         )
     }
 
@@ -301,7 +312,7 @@ impl FontLibrary {
             for dir in &self.dirs {
                 walk(dir, 0, &mut faces);
             }
-            for dir in FONT_DIRS {
+            for dir in FONT_DIRS.iter().filter(|_| self.system) {
                 let dir = match (dir.strip_prefix("~/"), &home) {
                     (Some(rest), Some(home)) => home.join(rest),
                     (Some(_), None) => continue,
@@ -382,7 +393,9 @@ impl FontLibrary {
     /// `style` whose substitute lacks it: among the faces whose `cmap` maps
     /// `c`, the first by the ranking of [`Self::select`] (serif class, the
     /// preference list of the character's script, weight, slant), ties
-    /// going to the earlier path.  `None` when no installed face maps `c`.
+    /// going to the earlier path.  With the `bundled-fonts` feature, a
+    /// bundled face that maps `c` when no installed face does.  `None`
+    /// when no face maps `c`.
     pub fn fallback_program(&self, style: SubstituteStyle, c: u32) -> Option<Arc<FontProgram>> {
         let faces = self.faces();
         let script = Script::of_char(c);
@@ -396,22 +409,26 @@ impl FontLibrary {
                 order.into()
             }))
         };
-        order.iter().filter(|&&i| faces[i].maps(c)).find_map(|&i| {
+        let installed = order.iter().filter(|&&i| faces[i].maps(c)).find_map(|&i| {
             self.face_program(i)
                 .filter(|program| program.char_index(c) != 0)
-        })
+        });
+        #[cfg(feature = "bundled-fonts")]
+        let installed = installed.or_else(|| super::bundled_fonts::bundled_program(style, c));
+        installed
     }
 
     /// The installed substitute of row `row` of the substitute table,
-    /// located by `locate` from the extra directories on first use.
+    /// located by `locate` from the extra directories and the system-font
+    /// switch on first use.
     pub(super) fn substitute(
         &self,
         row: usize,
-        locate: impl FnOnce(&[PathBuf]) -> Option<Arc<FontProgram>>,
+        locate: impl FnOnce(&[PathBuf], bool) -> Option<Arc<FontProgram>>,
     ) -> Option<Arc<FontProgram>> {
         self.substitutes
             .get(row)?
-            .get_or_init(|| locate(&self.dirs))
+            .get_or_init(|| locate(&self.dirs, self.system))
             .clone()
     }
 }
@@ -502,7 +519,7 @@ mod tests {
             family: SubstituteFamily::Serif,
             ..sans
         };
-        let library = FontLibrary::for_dirs(&[]);
+        let library = FontLibrary::shared(&[], true);
         let (Some(sans_face), Some(serif_face)) = (
             library.select(Script::Japanese, sans),
             library.select(Script::Japanese, serif),
@@ -530,13 +547,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../font_test_data/test_data/ttf"
         ));
-        let standard = FontLibrary::for_dirs(&[]);
-        assert!(Arc::ptr_eq(&standard, &FontLibrary::for_dirs(&[])));
-        let extra = FontLibrary::for_dirs(std::slice::from_ref(&dir));
+        let standard = FontLibrary::shared(&[], true);
+        assert!(Arc::ptr_eq(&standard, &FontLibrary::shared(&[], true)));
+        let extra = FontLibrary::shared(std::slice::from_ref(&dir), true);
         assert!(!Arc::ptr_eq(&standard, &extra));
         assert!(Arc::ptr_eq(
             &extra,
-            &FontLibrary::for_dirs(std::slice::from_ref(&dir))
+            &FontLibrary::shared(std::slice::from_ref(&dir), true)
         ));
         assert_eq!(extra.dirs, std::slice::from_ref(&dir));
         assert!(

@@ -13,7 +13,10 @@ removed when `rrocket` exits; use a path (`./out`) or `--no-ram` to keep the
 files. JPEG and TIFF output are not implemented yet.
 
 GPU features are passed by name and forwarded to the library
-(`--features "nvjpeg2k,gpu-icc,cache"`, `--features vulkan`). Every flag, the
+(`--features "nvjpeg2k,gpu-icc,cache"`, `--features vulkan`). The default
+`bundled-fonts` feature compiles in Noto fallback faces for Greek, Cyrillic,
+Hebrew, Arabic, Devanagari, Thai and symbols (~0.33 MB); build with
+`--no-default-features` to omit them. Every flag, the
 size limits and the exit codes are in the
 [CLI reference](../../docs/cli-reference.md). Build from this repository;
 the crates.io release (1.0.1) is abandoned.
