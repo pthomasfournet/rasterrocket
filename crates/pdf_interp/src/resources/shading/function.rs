@@ -17,9 +17,10 @@
 //! PDF §7.10.5 (see [`postscript`]); a malformed program or stack underflow
 //! evaluates to `None` so the caller falls back loudly.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use pdf::{Dictionary, Document, Object};
+use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::resources::dict_ext::DictExt;
 use crate::resources::obj_to_f64;
@@ -63,7 +64,7 @@ enum Body {
     /// through its `Encode` pair onto a sub-function.
     Stitching {
         domain: (f64, f64),
-        functions: Vec<Function>,
+        functions: Vec<Arc<Function>>,
         bounds: Vec<f64>,
         encode: Vec<f64>,
     },
@@ -94,102 +95,14 @@ impl Function {
     pub fn load(doc: &Document, obj: &Object) -> Arc<Self> {
         match obj {
             Object::Reference(id) => doc
-                .derived(*id, || Some(Self::compile(doc, obj, 0)))
+                .derived(*id, || Some(Compiler::new(doc).compile(obj, 0)))
                 .unwrap_or_else(|| Arc::new(Self::INVALID)),
             Object::Array(elems) => Arc::new(Self {
                 body: Body::Array(elems.iter().map(|e| Self::load(doc, e)).collect()),
                 range: Vec::new(),
             }),
-            direct => Arc::new(Self::compile(doc, direct, 0)),
+            direct => Arc::new(Compiler::new(doc).compile(direct, 0)),
         }
-    }
-
-    /// Compile `obj` at sub-function nesting `depth`.  Never consults the
-    /// document cache, so a function that refers to itself is bounded by
-    /// [`MAX_FN_DEPTH`] rather than by re-entering its own cache cell.
-    fn compile(doc: &Document, obj: &Object, depth: u8) -> Self {
-        let referent;
-        let target = match obj {
-            Object::Reference(id) => {
-                let Ok(o) = doc.get_object(*id) else {
-                    return Self::INVALID;
-                };
-                referent = o;
-                referent.as_ref()
-            }
-            direct => direct,
-        };
-        let (dict, stream) = match target {
-            Object::Array(elems) => {
-                if depth >= MAX_FN_DEPTH {
-                    return Self::INVALID;
-                }
-                return Self {
-                    body: Body::Array(
-                        elems
-                            .iter()
-                            .map(|e| Arc::new(Self::compile(doc, e, depth + 1)))
-                            .collect(),
-                    ),
-                    range: Vec::new(),
-                };
-            }
-            Object::Dictionary(d) => (d, None),
-            Object::Stream(s) => (&s.dict, Some(s)),
-            _ => return Self::INVALID,
-        };
-        let range = numbers(dict, b"Range");
-        if depth >= MAX_FN_DEPTH {
-            log::warn!(
-                "function: nesting depth {depth} exceeds limit {MAX_FN_DEPTH} — \
-                 evaluating as C0"
-            );
-            return Self {
-                body: Body::Constant(read_color(dict, b"C0")),
-                range,
-            };
-        }
-        let stream_bytes = || {
-            stream?
-                .decompressed_content()
-                .map_err(|e| log::debug!("function: stream decode failed: {e}"))
-                .ok()
-        };
-        let body = match dict.get_i64(b"FunctionType") {
-            None => Body::Invalid,
-            Some(0) => Body::Sampled(Sampled::compile(dict, stream_bytes())),
-            Some(2) => Body::Exponential {
-                domain: read_fn_domain(dict),
-                c0: read_color(dict, b"C0"),
-                c1: read_color(dict, b"C1"),
-                exponent: dict.get(b"N").and_then(obj_to_f64).unwrap_or(1.0),
-            },
-            Some(3) => match dict.get(b"Functions").and_then(Object::as_array) {
-                Some(fns) if !fns.is_empty() => Body::Stitching {
-                    domain: read_fn_domain(dict),
-                    functions: fns
-                        .iter()
-                        .map(|f| Self::compile(doc, f, depth + 1))
-                        .collect(),
-                    bounds: numbers(dict, b"Bounds"),
-                    encode: numbers(dict, b"Encode"),
-                },
-                _ => Body::Invalid,
-            },
-            Some(4) => Body::PostScript {
-                domain: numbers(dict, b"Domain"),
-                program: stream_bytes().and_then(|src| {
-                    Program::parse(&src)
-                        .map_err(|e| log::warn!("function: Type 4 program rejected: {e}"))
-                        .ok()
-                }),
-            },
-            Some(other) => {
-                log::debug!("function: FunctionType {other} not implemented — evaluating as C0");
-                Body::Constant(read_color(dict, b"C0"))
-            }
-        };
-        Self { body, range }
     }
 
     /// Evaluate at the single input `t`, returning `n` outputs clipped to
@@ -295,6 +208,122 @@ impl Function {
     }
 }
 
+/// One compilation of a top-level function object.
+///
+/// Sub-functions named by reference are compiled once per compilation and
+/// shared, so an object that several `Functions` entries name — directly or
+/// through further sub-functions — costs one compilation rather than one
+/// per path to it.  The document cache is not consulted below the top
+/// level: a function that refers to itself would re-enter its own cache
+/// cell.  A cycle is instead cut at [`MAX_FN_DEPTH`], and every later
+/// reference to an object on the cycle reuses the result first recorded
+/// for it.
+struct Compiler<'d> {
+    doc: &'d Document,
+    compiled: HashMap<ObjectId, Arc<Function>>,
+}
+
+impl<'d> Compiler<'d> {
+    fn new(doc: &'d Document) -> Self {
+        Self {
+            doc,
+            compiled: HashMap::new(),
+        }
+    }
+
+    /// The sub-function `obj` at nesting `depth`, shared when `obj` is a
+    /// reference compiled before.
+    fn sub(&mut self, obj: &Object, depth: u8) -> Arc<Function> {
+        let Object::Reference(id) = obj else {
+            return Arc::new(self.compile(obj, depth));
+        };
+        if let Some(f) = self.compiled.get(id) {
+            return Arc::clone(f);
+        }
+        let f = Arc::new(self.compile(obj, depth));
+        Arc::clone(self.compiled.entry(*id).or_insert(f))
+    }
+
+    /// Compile `obj` at sub-function nesting `depth`.
+    fn compile(&mut self, obj: &Object, depth: u8) -> Function {
+        let doc = self.doc;
+        let referent;
+        let target = match obj {
+            Object::Reference(id) => {
+                let Ok(o) = doc.get_object(*id) else {
+                    return Function::INVALID;
+                };
+                referent = o;
+                referent.as_ref()
+            }
+            direct => direct,
+        };
+        let (dict, stream) = match target {
+            Object::Array(elems) => {
+                if depth >= MAX_FN_DEPTH {
+                    return Function::INVALID;
+                }
+                return Function {
+                    body: Body::Array(elems.iter().map(|e| self.sub(e, depth + 1)).collect()),
+                    range: Vec::new(),
+                };
+            }
+            Object::Dictionary(d) => (d, None),
+            Object::Stream(s) => (&s.dict, Some(s)),
+            _ => return Function::INVALID,
+        };
+        let range = numbers(dict, b"Range");
+        if depth >= MAX_FN_DEPTH {
+            log::warn!(
+                "function: nesting depth {depth} exceeds limit {MAX_FN_DEPTH} — \
+                 evaluating as C0"
+            );
+            return Function {
+                body: Body::Constant(read_color(dict, b"C0")),
+                range,
+            };
+        }
+        let stream_bytes = || {
+            stream?
+                .decompressed_content()
+                .map_err(|e| log::debug!("function: stream decode failed: {e}"))
+                .ok()
+        };
+        let body = match dict.get_i64(b"FunctionType") {
+            None => Body::Invalid,
+            Some(0) => Body::Sampled(Sampled::compile(dict, stream_bytes())),
+            Some(2) => Body::Exponential {
+                domain: read_fn_domain(dict),
+                c0: read_color(dict, b"C0"),
+                c1: read_color(dict, b"C1"),
+                exponent: dict.get(b"N").and_then(obj_to_f64).unwrap_or(1.0),
+            },
+            Some(3) => match dict.get(b"Functions").and_then(Object::as_array) {
+                Some(fns) if !fns.is_empty() => Body::Stitching {
+                    domain: read_fn_domain(dict),
+                    functions: fns.iter().map(|f| self.sub(f, depth + 1)).collect(),
+                    bounds: numbers(dict, b"Bounds"),
+                    encode: numbers(dict, b"Encode"),
+                },
+                _ => Body::Invalid,
+            },
+            Some(4) => Body::PostScript {
+                domain: numbers(dict, b"Domain"),
+                program: stream_bytes().and_then(|src| {
+                    Program::parse(&src)
+                        .map_err(|e| log::warn!("function: Type 4 program rejected: {e}"))
+                        .ok()
+                }),
+            },
+            Some(other) => {
+                log::debug!("function: FunctionType {other} not implemented — evaluating as C0");
+                Body::Constant(read_color(dict, b"C0"))
+            }
+        };
+        Function { body, range }
+    }
+}
+
 /// Type 2 (Exponential, PDF §7.10.3): `C0 + x^N × (C1 − C0)` with `x` the
 /// input clipped to `Domain`, `C0` default 0 and `C1` default 1 per output.
 /// A power with no finite real value (a negative `x` with a non-integer
@@ -327,7 +356,7 @@ fn eval_exponential(
 /// clipped `t`.
 fn stitch<'f>(
     (d0, d1): (f64, f64),
-    functions: &'f [Function],
+    functions: &'f [Arc<Function>],
     bounds: &[f64],
     encode: &[f64],
     t: f64,
@@ -612,6 +641,28 @@ mod tests {
         let doc = crate::test_helpers::make_doc_with_objects(&[(
             4,
             "<< /FunctionType 3 /Domain [0 1] /Functions [4 0 R] /Bounds [] /Encode [0 1] /C0 [0.25] >>",
+        )]);
+        let f = Function::load(&doc, &Object::Reference((4, 0)));
+        let out = f.eval(0.5, 1).expect("innermost level evaluates as C0");
+        assert!((out[0] - 0.25).abs() < 1e-12, "got {out:?}");
+    }
+
+    /// A stitching function naming itself in each of 16 sub-functions would
+    /// compile 16^10 nodes if each path to it were compiled separately.
+    #[test]
+    fn repeated_sub_function_references_compile_once() {
+        let refs = "4 0 R ".repeat(16);
+        let bounds = (1..16)
+            .map(|i| (f64::from(i) / 16.0).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let encode = "0 1 ".repeat(16);
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            &format!(
+                "<< /FunctionType 3 /Domain [0 1] /Functions [{refs}] /Bounds [{bounds}] \
+                 /Encode [{encode}] /C0 [0.25] >>"
+            ),
         )]);
         let f = Function::load(&doc, &Object::Reference((4, 0)));
         let out = f.eval(0.5, 1).expect("innermost level evaluates as C0");
