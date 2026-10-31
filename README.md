@@ -47,7 +47,8 @@ once.** The full list, with migration notes, is in
   fonts render.
 - **Colour and transparency.** DeviceCMYK through a process-ink model,
   ICCBased, CalGray/CalRGB, Lab, Default colour spaces, transfer functions,
-  soft masks, shading and tiling patterns, non-isolated groups.
+  soft masks, shading and tiling patterns, non-isolated and knockout groups,
+  and a page that blends painted as an isolated page group.
 - **Page geometry, regions, per-axis resolution, cancellation.**
   `RasterSession::page_geometry`, `RenderParams` with a `RenderRegion` and a
   `CancelToken`, `RenderParams::new_xy` for separate horizontal and vertical
@@ -446,7 +447,8 @@ On a host with more than one Vulkan device, `--vulkan-device <index|name>` (or `
 `.cargo/config.toml` sets `SCCACHE_CACHE_MULTIARCH=1` so `-C target-cpu=native` builds *can* be cached, but the wrapper itself is opt-in: plain `cargo build` works without sccache.  To enable:
 
 ```bash
-cargo install sccache       # one-time install
+# one-time: install sccache from your distribution's packages or a release
+# binary from https://github.com/mozilla/sccache/releases
 export RUSTC_WRAPPER=sccache # add to ~/.bashrc to make it permanent
 ```
 
@@ -494,9 +496,10 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   among the highest-CVE inputs of any PDF stack, are parsed by local forks of
   `read-fonts` / `skrifa` and rasterised by rasterrocket's own coverage
   rasteriser; no C font library is linked. JPEG 2000 is decoded in pure Rust
-  (`hayro-jpeg2000`). The only C code in the default build is libdeflate,
-  compiled from vendored source; the optional `nvjpeg` / `nvjpeg2k` GPU paths
-  call NVIDIA's libraries. `cargo audit` covers the registry dependency tree;
+  (`hayro-jpeg2000`). The only C code in the default build is libdeflate
+  and, in the `rrocket` binary, the mimalloc allocator, both compiled from
+  vendored source; the optional `nvjpeg` / `nvjpeg2k` GPU paths
+  call NVIDIA's libraries and the optional `vaapi` path calls libva. `cargo audit` covers the registry dependency tree;
   the vendored forks are checked weekly against upstream commits, releases
   and RustSec advisories (`scripts/check_vendored.py`).
 - **Encrypted input.** Documents protected by the Standard security
