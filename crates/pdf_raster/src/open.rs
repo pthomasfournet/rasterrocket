@@ -12,7 +12,7 @@ use crate::{BackendPolicy, FormType, RasterError, SessionConfig};
 ///
 /// Constructed via [`open_session`].  Provides both a sequential iterator
 /// ([`raster_pdf`](crate::raster_pdf)) and a direct per-page call
-/// ([`render_page_rgb`]) for parallel consumers such as the CLI.
+/// ([`render_page_rgb`](crate::render_page_rgb)) for parallel consumers such as the CLI.
 ///
 /// `Sync` because the document is read-only after construction, the GPU context
 /// is `Arc`-wrapped, and the VA-API decode queue is `Arc`-wrapped (its inner
@@ -158,7 +158,7 @@ impl RasterSession {
     /// cold-read on every contest event (each page rendered once) and was
     /// dropped.
     ///
-    /// Prefer [`prescan_session`] and [`render_page_rgb`] over calling this
+    /// Prefer [`prescan_session`] and [`render_page_rgb`](crate::render_page_rgb) over calling this
     /// directly — they avoid exposing `pdf::ObjectId` in your call graph.
     ///
     /// # Errors

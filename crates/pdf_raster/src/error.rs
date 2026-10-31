@@ -47,7 +47,7 @@ pub enum RasterError {
     /// A Page dictionary entry is structurally valid but outside permitted range
     /// (e.g. `UserUnit` outside `[0.1, 10.0]`).
     InvalidPageGeometry(String),
-    /// A backend was required via [`BackendPolicy`] but could not be initialised.
+    /// A backend was required via [`BackendPolicy`](crate::BackendPolicy) but could not be initialised.
     BackendUnavailable(String),
     /// One or more images on the page could not be decoded or drawn, and the
     /// session is [strict](crate::SessionConfig::strict).  Carries one message

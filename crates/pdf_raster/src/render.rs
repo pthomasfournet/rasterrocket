@@ -63,9 +63,10 @@ pub fn render_page_rgb_with(
 /// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it.
 ///
 /// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi),
-/// [`deskew`](RasterOptions::deskew) and [`cancel`](RasterOptions::cancel).  The page selection fields are
-/// the caller's, and the fields mirrored on [`SessionConfig`](crate::SessionConfig)
-/// were fixed when `session` was opened.
+/// [`deskew`](RasterOptions::deskew) and [`cancel`](RasterOptions::cancel).
+/// The page selection fields are the caller's, and the fields mirrored on
+/// [`SessionConfig`](crate::SessionConfig) were fixed when `session` was
+/// opened.
 ///
 /// # Errors
 ///
@@ -155,7 +156,7 @@ fn page_view(
     Ok(whole.window(r.x, r.y, r.width, r.height))
 }
 
-/// Inner implementation shared by [`render_page_rgb_with`] and [`render_one`].
+/// Inner implementation shared by [`render_page_rgb_with`] and [`render_page_gray`].
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
 /// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
