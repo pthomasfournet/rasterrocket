@@ -200,40 +200,110 @@ pub(super) fn tessellate_patch<S: CornerSource>(
     }
 }
 
-// ── Patch assembly — Type 6 ───────────────────────────────────────────────────
+// ── Patch assembly ────────────────────────────────────────────────────────────
 
-/// Assign the 12 boundary stream points into the Type 6 4×4 grid for flag=0.
-///
-/// Stream order traces the boundary clockwise:
-/// top row (left→right), right col (down), bottom row (right→left), left col (up).
-/// Interior points `[1][1]`, `[1][2]`, `[2][1]`, `[2][2]` are computed from the boundary.
-pub(super) fn build_patch_type6<C: Corner>(pts: &[[f64; 2]], colors: &[C]) -> Patch<C> {
-    debug_assert_eq!(pts.len(), 12);
-    debug_assert_eq!(colors.len(), 4);
-    let mut p = Patch::zero();
+/// Grid positions of the boundary control points in stream order:
+/// `p00 p01 p02 p03 p13 p23 p33 p32 p31 p30 p20 p10` (PDF §8.7.4.5.7).
+const BOUNDARY: [(usize, usize); 12] = [
+    (0, 0),
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (1, 3),
+    (2, 3),
+    (3, 3),
+    (3, 2),
+    (3, 1),
+    (3, 0),
+    (2, 0),
+    (1, 0),
+];
 
-    // Boundary point assignment (PDF §8.7.4.5.6 Table 87, flag=0).
-    p.xy[0][0] = pts[0];
-    p.xy[0][1] = pts[1];
-    p.xy[0][2] = pts[2];
-    p.xy[0][3] = pts[3];
-    p.xy[1][3] = pts[4];
-    p.xy[2][3] = pts[5];
-    p.xy[3][3] = pts[6];
-    p.xy[3][2] = pts[7];
-    p.xy[3][1] = pts[8];
-    p.xy[3][0] = pts[9];
-    p.xy[2][0] = pts[10];
-    p.xy[1][0] = pts[11];
+/// Grid positions of a tensor patch's interior points in stream order:
+/// `p11 p12 p22 p21` (PDF §8.7.4.5.8).
+const INTERIOR: [(usize, usize); 4] = [(1, 1), (1, 2), (2, 2), (2, 1)];
 
-    // Corner colours: [0][0]=c0, [0][1]=c1, [1][1]=c2, [1][0]=c3.
-    p.color[0][0] = colors[0];
-    p.color[0][1] = colors[1];
-    p.color[1][1] = colors[2];
-    p.color[1][0] = colors[3];
+/// `Patch::color` positions of the corner colours in stream order, the
+/// colours of `p00 p03 p33 p30`: colour `k` belongs to boundary point `3k`.
+const CORNERS: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 1), (1, 0)];
 
-    fill_type6_interior(&mut p);
-    p
+/// A patch as its stream records give it: the boundary control points and
+/// corner colours in stream order, and the interior points of a tensor
+/// patch.
+#[derive(Clone, Copy)]
+pub(super) struct Outline<C> {
+    boundary: [[f64; 2]; 12],
+    interior: Option<[[f64; 2]; 4]>,
+    colors: [C; 4],
+}
+
+impl<C: Corner> Outline<C> {
+    /// The outline of a flag-0 record: `points` holds the 12 boundary
+    /// points, then for a tensor patch the 4 interior points; `colors`
+    /// holds the 4 corner colours.  `None` when a slice is short.
+    pub(super) fn new(kind: PatchKind, points: &[[f64; 2]], colors: &[C]) -> Option<Self> {
+        Some(Self {
+            boundary: points.get(..12)?.try_into().ok()?,
+            interior: kind.interior(points.get(12..)?),
+            colors: colors.get(..4)?.try_into().ok()?,
+        })
+    }
+
+    /// The outline of a record with flag `edge` (1–3) that continues this
+    /// patch (PDF §8.7.4.5.7): its first four boundary points are this
+    /// patch's boundary points `3·edge … 3·edge + 3` (cyclically) and its
+    /// first two colours this patch's colours `edge` and `edge + 1`.
+    /// `points` holds the other 8 boundary points, then for a tensor patch
+    /// the 4 interior points; `colors` holds the other 2 colours.  `None`
+    /// when a slice is short.
+    pub(super) fn continued(
+        &self,
+        kind: PatchKind,
+        edge: usize,
+        points: &[[f64; 2]],
+        colors: &[C],
+    ) -> Option<Self> {
+        let rest = points.get(..8)?;
+        let mut boundary = [[0.0; 2]; 12];
+        for (i, pt) in boundary.iter_mut().enumerate() {
+            *pt = if i < 4 {
+                self.boundary[(3 * edge + i) % 12]
+            } else {
+                rest[i - 4]
+            };
+        }
+        Some(Self {
+            boundary,
+            interior: kind.interior(points.get(8..)?),
+            colors: [
+                self.colors[edge % 4],
+                self.colors[(edge + 1) % 4],
+                *colors.first()?,
+                *colors.get(1)?,
+            ],
+        })
+    }
+
+    /// The control grid and corner colours, with a Coons patch's interior
+    /// derived from its boundary.
+    pub(super) fn patch(&self) -> Patch<C> {
+        let mut p = Patch::zero();
+        for (&(r, c), &pt) in BOUNDARY.iter().zip(&self.boundary) {
+            p.xy[r][c] = pt;
+        }
+        for (&(u, v), &color) in CORNERS.iter().zip(&self.colors) {
+            p.color[u][v] = color;
+        }
+        match self.interior {
+            Some(interior) => {
+                for (&(r, c), &pt) in INTERIOR.iter().zip(&interior) {
+                    p.xy[r][c] = pt;
+                }
+            }
+            None => fill_type6_interior(&mut p),
+        }
+        p
+    }
 }
 
 /// Derive the 4 interior control points of a Coons patch from its boundary.
@@ -267,213 +337,6 @@ pub(super) fn fill_type6_interior<C>(p: &mut Patch<C>) {
     }
 }
 
-/// Apply shared-edge continuation for Type 6, flags 1–3.
-///
-/// Copies 4 control points and 2 corner colours from `prev`, then places the
-/// 8 new boundary points from `pts` and 2 new colours from `colors`.
-/// Interior points are derived after all boundary points are placed.
-pub(super) fn apply_flag_type6<C: Corner>(
-    flag: u32,
-    prev: &Patch<C>,
-    pts: &[[f64; 2]],
-    colors: &[C],
-) -> Patch<C> {
-    debug_assert_eq!(pts.len(), 8);
-    debug_assert_eq!(colors.len(), 2);
-    let mut p = Patch::zero();
-
-    match flag {
-        1 => {
-            // Shared: prev right edge → new left edge (col 0 of new patch = col 3 of prev).
-            for row in 0..4 {
-                p.xy[row][0] = prev.xy[row][3];
-            }
-            p.color[0][0] = prev.color[0][1];
-            p.color[1][0] = prev.color[1][1];
-            // New boundary: right edge (col 3), then bottom (row 3) and top (row 0) partial.
-            p.xy[0][1] = pts[0];
-            p.xy[0][2] = pts[1];
-            p.xy[0][3] = pts[2];
-            p.xy[1][3] = pts[3];
-            p.xy[2][3] = pts[4];
-            p.xy[3][3] = pts[5];
-            p.xy[3][2] = pts[6];
-            p.xy[3][1] = pts[7];
-            p.color[0][1] = colors[0];
-            p.color[1][1] = colors[1];
-        }
-        2 => {
-            // Shared: prev bottom edge → new top edge (row 0 of new = row 3 of prev).
-            for col in 0..4 {
-                p.xy[0][col] = prev.xy[3][col];
-            }
-            p.color[0][0] = prev.color[1][0];
-            p.color[0][1] = prev.color[1][1];
-            // New boundary.
-            p.xy[1][3] = pts[0];
-            p.xy[2][3] = pts[1];
-            p.xy[3][3] = pts[2];
-            p.xy[3][2] = pts[3];
-            p.xy[3][1] = pts[4];
-            p.xy[3][0] = pts[5];
-            p.xy[2][0] = pts[6];
-            p.xy[1][0] = pts[7];
-            p.color[1][1] = colors[0];
-            p.color[1][0] = colors[1];
-        }
-        3 => {
-            // Shared: prev left edge → new right edge (col 3 of new = col 0 of prev).
-            for row in 0..4 {
-                p.xy[row][3] = prev.xy[row][0];
-            }
-            p.color[0][1] = prev.color[0][0];
-            p.color[1][1] = prev.color[1][0];
-            // New boundary: left edge (col 0), then top (row 0) and bottom (row 3) partial.
-            p.xy[3][2] = pts[0];
-            p.xy[3][1] = pts[1];
-            p.xy[3][0] = pts[2];
-            p.xy[2][0] = pts[3];
-            p.xy[1][0] = pts[4];
-            p.xy[0][0] = pts[5];
-            p.xy[0][1] = pts[6];
-            p.xy[0][2] = pts[7];
-            p.color[0][0] = colors[0];
-            p.color[1][0] = colors[1];
-        }
-        _ => unreachable!("apply_flag_type6 called with flag={flag}; only 1–3 are valid"),
-    }
-
-    fill_type6_interior(&mut p);
-    p
-}
-
-// ── Patch assembly — Type 7 ───────────────────────────────────────────────────
-
-/// Assign the 16 stream points into the Type 7 4×4 grid for flag=0.
-///
-/// Unlike Type 6, all 16 points (12 boundary + 4 interior) are read from the stream.
-/// Stream order: top row, right col, bottom row (reversed), left col (reversed),
-/// then 4 interior points in a specific order.
-pub(super) fn build_patch_type7<C: Corner>(pts: &[[f64; 2]], colors: &[C]) -> Patch<C> {
-    debug_assert_eq!(pts.len(), 16);
-    debug_assert_eq!(colors.len(), 4);
-    let mut p = Patch::zero();
-
-    // Boundary (same layout as Type 6).
-    p.xy[0][0] = pts[0];
-    p.xy[0][1] = pts[1];
-    p.xy[0][2] = pts[2];
-    p.xy[0][3] = pts[3];
-    p.xy[1][3] = pts[4];
-    p.xy[2][3] = pts[5];
-    p.xy[3][3] = pts[6];
-    p.xy[3][2] = pts[7];
-    p.xy[3][1] = pts[8];
-    p.xy[3][0] = pts[9];
-    p.xy[2][0] = pts[10];
-    p.xy[1][0] = pts[11];
-
-    // Interior points (PDF §8.7.4.5.7 Table 89, flag=0, pts 12–15).
-    p.xy[1][1] = pts[12];
-    p.xy[1][2] = pts[13];
-    p.xy[2][2] = pts[14];
-    p.xy[2][1] = pts[15];
-
-    // Corner colours.
-    p.color[0][0] = colors[0];
-    p.color[0][1] = colors[1];
-    p.color[1][1] = colors[2];
-    p.color[1][0] = colors[3];
-    p
-}
-
-/// Apply shared-edge continuation for Type 7, flags 1–3.
-///
-/// For Type 7, the 4 interior control points are always read from the stream
-/// (as part of the 12 new points), never copied from the previous patch.
-pub(super) fn apply_flag_type7<C: Corner>(
-    flag: u32,
-    prev: &Patch<C>,
-    pts: &[[f64; 2]],
-    colors: &[C],
-) -> Patch<C> {
-    debug_assert_eq!(pts.len(), 12);
-    debug_assert_eq!(colors.len(), 2);
-    let mut p = Patch::zero();
-
-    match flag {
-        1 => {
-            // Shared: prev right edge → new left edge.
-            for row in 0..4 {
-                p.xy[row][0] = prev.xy[row][3];
-            }
-            p.color[0][0] = prev.color[0][1];
-            p.color[1][0] = prev.color[1][1];
-            // 8 new boundary points + 4 interior.
-            p.xy[0][1] = pts[0];
-            p.xy[0][2] = pts[1];
-            p.xy[0][3] = pts[2];
-            p.xy[1][3] = pts[3];
-            p.xy[2][3] = pts[4];
-            p.xy[3][3] = pts[5];
-            p.xy[3][2] = pts[6];
-            p.xy[3][1] = pts[7];
-            p.xy[1][1] = pts[8];
-            p.xy[1][2] = pts[9];
-            p.xy[2][2] = pts[10];
-            p.xy[2][1] = pts[11];
-            p.color[0][1] = colors[0];
-            p.color[1][1] = colors[1];
-        }
-        2 => {
-            // Shared: prev bottom edge → new top edge.
-            for col in 0..4 {
-                p.xy[0][col] = prev.xy[3][col];
-            }
-            p.color[0][0] = prev.color[1][0];
-            p.color[0][1] = prev.color[1][1];
-            p.xy[1][3] = pts[0];
-            p.xy[2][3] = pts[1];
-            p.xy[3][3] = pts[2];
-            p.xy[3][2] = pts[3];
-            p.xy[3][1] = pts[4];
-            p.xy[3][0] = pts[5];
-            p.xy[2][0] = pts[6];
-            p.xy[1][0] = pts[7];
-            p.xy[1][1] = pts[8];
-            p.xy[1][2] = pts[9];
-            p.xy[2][2] = pts[10];
-            p.xy[2][1] = pts[11];
-            p.color[1][1] = colors[0];
-            p.color[1][0] = colors[1];
-        }
-        3 => {
-            // Shared: prev left edge → new right edge.
-            for row in 0..4 {
-                p.xy[row][3] = prev.xy[row][0];
-            }
-            p.color[0][1] = prev.color[0][0];
-            p.color[1][1] = prev.color[1][0];
-            p.xy[3][2] = pts[0];
-            p.xy[3][1] = pts[1];
-            p.xy[3][0] = pts[2];
-            p.xy[2][0] = pts[3];
-            p.xy[1][0] = pts[4];
-            p.xy[0][0] = pts[5];
-            p.xy[0][1] = pts[6];
-            p.xy[0][2] = pts[7];
-            p.xy[1][1] = pts[8];
-            p.xy[1][2] = pts[9];
-            p.xy[2][2] = pts[10];
-            p.xy[2][1] = pts[11];
-            p.color[0][0] = colors[0];
-            p.color[1][0] = colors[1];
-        }
-        _ => unreachable!("apply_flag_type7 called with flag={flag}; only 1–3 are valid"),
-    }
-    p
-}
-
 // ── Top-level mesh decoder ────────────────────────────────────────────────────
 
 /// The two patch mesh types.
@@ -495,12 +358,22 @@ impl PatchKind {
 
     /// Control points a record carries: one patch from scratch (flag 0),
     /// or one sharing an edge, its four points, with the previous patch.
-    const fn points(self, flag: u32) -> usize {
+    const fn points(self, flag: u8) -> usize {
         let all = match self {
             Self::Coons => 12,
             Self::Tensor => 16,
         };
         if flag == 0 { all } else { all - 4 }
+    }
+
+    /// The interior points of a record whose points after the boundary
+    /// are `rest`: the first four for a tensor patch, none for a Coons
+    /// patch, whose interior derives from its boundary.
+    fn interior(self, rest: &[[f64; 2]]) -> Option<[[f64; 2]; 4]> {
+        match self {
+            Self::Coons => None,
+            Self::Tensor => rest.get(..4)?.try_into().ok(),
+        }
     }
 }
 
@@ -509,8 +382,10 @@ impl PatchKind {
 /// Each record (PDF §8.7.4.5.7) is a `BitsPerFlag`-bit flag, then 12 or 16
 /// control points and 4 corner colours for flag 0, or 8 or 12 points and 2
 /// colours for flags 1–3, which share an edge with the previous patch; every
-/// record starts on a byte boundary.  A record that cannot be placed (a
-/// shared-edge flag with no previous patch, or a flag above 3) is skipped.
+/// record starts on a byte boundary.  A record with flag `f` in 1–3
+/// continues the boundary of the previous patch from its corner `f`.  A
+/// record that cannot be placed (a shared-edge flag with no previous patch,
+/// or a flag above 3) is skipped.
 pub(super) fn decode_patch_mesh<S: CornerSource>(
     sh: &Dictionary,
     data: &[u8],
@@ -527,11 +402,15 @@ pub(super) fn decode_patch_mesh<S: CornerSource>(
     let mut fields = vec![0.0; source.components()];
     let mut pts: Vec<[f64; 2]> = Vec::with_capacity(16);
     let mut colors: Vec<S::Corner> = Vec::with_capacity(4);
-    let mut prev: Option<Patch<S::Corner>> = None;
+    let mut prev: Option<Outline<S::Corner>> = None;
 
     while !out.is_full()
         && let Some(flag) = reader.read_bits(bpf)
     {
+        // BitsPerFlag is at most 8.
+        let Ok(flag) = u8::try_from(flag) else {
+            break;
+        };
         pts.clear();
         colors.clear();
         let n_colors = if flag == 0 { 4 } else { 2 };
@@ -551,12 +430,10 @@ pub(super) fn decode_patch_mesh<S: CornerSource>(
         }
         reader.align();
 
-        let patch = match (flag, &prev, kind) {
-            (0, _, PatchKind::Coons) => build_patch_type6(&pts, &colors),
-            (0, _, PatchKind::Tensor) => build_patch_type7(&pts, &colors),
-            (1..=3, Some(p), PatchKind::Coons) => apply_flag_type6(flag, p, &pts, &colors),
-            (1..=3, Some(p), PatchKind::Tensor) => apply_flag_type7(flag, p, &pts, &colors),
-            (1..=3, None, _) => {
+        let outline = match (flag, &prev) {
+            (0, _) => Outline::new(kind, &pts, &colors),
+            (1..=3, Some(p)) => p.continued(kind, usize::from(flag), &pts, &colors),
+            (1..=3, None) => {
                 log::debug!(
                     "shading/type{shading_type}: flag {flag} with no previous patch — skipping record"
                 );
@@ -568,8 +445,11 @@ pub(super) fn decode_patch_mesh<S: CornerSource>(
             }
         };
 
-        tessellate_patch(source, patch, out);
-        prev = Some(patch);
+        let Some(outline) = outline else {
+            break;
+        };
+        tessellate_patch(source, outline.patch(), out);
+        prev = Some(outline);
     }
 }
 
@@ -746,6 +626,139 @@ mod tests {
         assert_eq!(sink.finish().len(), 2);
     }
 
+    /// The boundary of the square `[x0, x0 + 3] × [y0, y0 + 3]` in stream
+    /// order, one control point per unit.
+    fn square(x0: f64, y0: f64) -> Vec<[f64; 2]> {
+        [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (3, 1),
+            (3, 2),
+            (3, 3),
+            (2, 3),
+            (1, 3),
+            (0, 3),
+            (0, 2),
+            (0, 1),
+        ]
+        .map(|(x, y)| [x0 + f64::from(x), y0 + f64::from(y)])
+        .to_vec()
+    }
+
+    /// Flags 1, 2 and 3 continue the boundary from corners p03, p33 and
+    /// p30 of the previous patch, with that corner's colour and the next.
+    #[test]
+    fn continued_outline_shares_the_flagged_edge() {
+        let prev = Outline::new(
+            PatchKind::Coons,
+            &square(0.0, 0.0),
+            &[[10u8; 3], [20; 3], [30; 3], [40; 3]],
+        )
+        .expect("outline");
+        for (edge, shared, colors) in [
+            (
+                1,
+                [[3.0, 0.0], [3.0, 1.0], [3.0, 2.0], [3.0, 3.0]],
+                [20, 30],
+            ),
+            (
+                2,
+                [[3.0, 3.0], [2.0, 3.0], [1.0, 3.0], [0.0, 3.0]],
+                [30, 40],
+            ),
+            (
+                3,
+                [[0.0, 3.0], [0.0, 2.0], [0.0, 1.0], [0.0, 0.0]],
+                [40, 10],
+            ),
+        ] {
+            let next = prev
+                .continued(
+                    PatchKind::Coons,
+                    edge,
+                    &[[9.0, 9.0]; 8],
+                    &[[50u8; 3], [60; 3]],
+                )
+                .expect("outline");
+            assert_eq!(next.boundary[..4], shared, "flag {edge}");
+            assert_eq!(
+                next.colors,
+                [[colors[0]; 3], [colors[1]; 3], [50; 3], [60; 3]],
+                "flag {edge}"
+            );
+        }
+    }
+
+    /// A Coons patch beside a unit square, sharing its right edge: the
+    /// continuation record lists the rest of the boundary from the end of
+    /// the shared edge, so the patch is the square `[3, 6] × [0, 3]`.
+    #[test]
+    fn a_flag_1_record_continues_from_the_shared_edge() {
+        let mut sh = Dictionary::new();
+        for (k, v) in [
+            ("BitsPerCoordinate", 8),
+            ("BitsPerComponent", 8),
+            ("BitsPerFlag", 8),
+        ] {
+            sh.set(k, pdf::Object::Integer(v));
+        }
+        let coord = |pts: &[[f64; 2]]| -> Vec<u8> {
+            pts.iter()
+                .flatten()
+                .map(|&v| {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "test coordinates are small non-negative integers"
+                    )]
+                    let b = v as u8;
+                    b
+                })
+                .collect()
+        };
+        let mut data = vec![0];
+        data.extend(coord(&square(0.0, 0.0)));
+        data.extend([128; 4]);
+        data.push(1);
+        data.extend(coord(&[
+            [4.0, 3.0],
+            [5.0, 3.0],
+            [6.0, 3.0],
+            [6.0, 2.0],
+            [6.0, 1.0],
+            [6.0, 0.0],
+            [5.0, 0.0],
+            [4.0, 0.0],
+        ]));
+        data.extend([128; 2]);
+
+        let doc = crate::test_helpers::empty_doc();
+        let source = super::super::mesh::DirectColors {
+            cs: super::super::ShadingCs {
+                doc: &doc,
+                space: &super::super::ColorSpace::DeviceGray,
+            },
+        };
+        let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
+        // page_h = 0: device y is the negated shading y.
+        let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let format = VertexFormat::parse(&sh, 6, &decode, &ctm, 0.0).expect("format");
+        let mut sink = TriangleSink::new();
+        decode_patch_mesh(&sh, &data, &source, &format, PatchKind::Coons, &mut sink);
+        let tris = sink.finish();
+        assert_eq!(tris.len(), 4, "two uniform patches, two triangles each");
+        let corners = |t: &[GouraudVertex; 3]| t.map(|v| [v.x, -v.y]);
+        // Leaf triangles are (p00, p03, p30) and (p03, p33, p30).
+        assert_eq!(
+            corners(&tris[2]),
+            [[3.0, 0.0], [3.0, 3.0], [6.0, 0.0]],
+            "the second patch covers [3, 6] × [0, 3]"
+        );
+        assert_eq!(corners(&tris[3]), [[3.0, 3.0], [6.0, 3.0], [6.0, 0.0]]);
+    }
+
     #[test]
     fn build_patch_type6_interior_formula() {
         // Use a simple square boundary with known analytic interior.
@@ -771,7 +784,9 @@ mod tests {
             [0.0, 1.0], // p[2][0], p[1][0]
         ];
         let colors: Vec<[u8; 3]> = vec![[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
-        let p = build_patch_type6(&pts, &colors);
+        let p = Outline::new(PatchKind::Coons, &pts, &colors)
+            .expect("12 points and 4 colours")
+            .patch();
         for (r, c, ex, ey) in [
             (1, 1, 1.0, 1.0),
             (1, 2, 2.0, 1.0),
