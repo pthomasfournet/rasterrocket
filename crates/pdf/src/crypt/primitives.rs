@@ -260,7 +260,7 @@ mod tests {
     fn ct_eq_compares_whole_slices() {
         assert!(ct_eq(b"", b""));
         assert!(ct_eq(b"abc", b"abc"));
-        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"abz"));
         assert!(!ct_eq(b"xbc", b"abc"));
         assert!(!ct_eq(b"abc", b"abcd"));
     }
