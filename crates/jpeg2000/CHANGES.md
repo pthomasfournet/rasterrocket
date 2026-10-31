@@ -133,3 +133,13 @@ image within the limits is unchanged.
   small code-blocks or precincts could ask for billions of entries within
   the sample limit. Tests: `limits::more_code_blocks_than_limit`,
   `limits::more_code_block_layers_than_limit`.
+- `lib.rs` (`resolve_palette_indices`): a component mapping box without
+  entries, beside a palette, fails with `PaletteResolutionFailed`. The
+  palette mapped no component, and `decode` then indexed the first
+  component of an empty list (a panic). Test: `palette::empty_cmap`.
+- `jp2/pclr.rs`: a palette column deeper than 31 bits makes the palette
+  box unreadable (in non-strict mode it is ignored, and the indices decode
+  as grayscale). The 8-bit conversion computed `1 << depth` in `u32`,
+  which overflows from 32 bits on (a panic with overflow checks, an
+  infinite scale and saturated samples without). The codestream's own components are limited
+  to 31 bits in the same way. Test: `palette::palette_deeper_than_supported`.

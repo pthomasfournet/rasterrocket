@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{FormatError, Result, bail};
+use crate::j2c::BITPLANE_BIT_SIZE;
 use crate::jp2::ImageBoxes;
 use crate::reader::BitReader;
 
@@ -23,7 +24,9 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
             .ok_or(FormatError::InvalidBox)?;
         let is_signed = (descriptor & 0x80) != 0;
 
-        if is_signed {
+        // Up to 38 bits are allowed (I.5.3.4), but the sample conversions
+        // support at most the codestream's own limit.
+        if is_signed || u32::from(bit_depth) > BITPLANE_BIT_SIZE {
             bail!(FormatError::InvalidBox);
         }
 

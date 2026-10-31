@@ -669,7 +669,11 @@ fn resolve_palette_indices(
         return Ok(components);
     };
 
-    let mapping = boxes.component_mapping.as_ref().unwrap();
+    let mapping = boxes
+        .component_mapping
+        .as_ref()
+        .filter(|mapping| !mapping.entries.is_empty())
+        .ok_or(ColorError::PaletteResolutionFailed)?;
     let max_index = palette.entries.len() as i64 - 1;
     let mut resolved = Vec::with_capacity(mapping.entries.len());
 

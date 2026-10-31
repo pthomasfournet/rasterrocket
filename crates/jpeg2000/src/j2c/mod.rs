@@ -19,6 +19,7 @@ use crate::reader::BitReader;
 use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
 
 use crate::math::{SIMD_WIDTH, SimdBuffer};
+pub(crate) use bitplane::BITPLANE_BIT_SIZE;
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
 pub(crate) use decode::{Deferred, decode};
