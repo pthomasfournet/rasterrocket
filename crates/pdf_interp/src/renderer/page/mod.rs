@@ -659,6 +659,7 @@ fn initial_gstate(width: u32, height: u32, ctm: Ctm, antialias: bool) -> GStateS
 /// unit is `user_unit / 72` inch), and the initial CTM maps one user-space
 /// unit to `scale × user_unit` device pixels, so the content fills the extent.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PageView {
     /// Width of the whole page in device pixels, after rotation.
     pub page_width: u32,
