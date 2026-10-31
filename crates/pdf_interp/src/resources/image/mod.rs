@@ -612,7 +612,7 @@ fn has_mask_entry(dict: &Dictionary) -> bool {
 pub const MAX_IMAGE_SIDE: i64 = 131_071;
 
 /// Largest number of 8-bit samples (`width × height × components`) an
-/// image is decoded to: 1 GiB.  A larger image is refused before any
+/// image is stored or converted to: 1 GiB.  A larger image is refused before any
 /// allocation and reported as a decode failure.
 pub const MAX_DECODED_BYTES: u64 = 1 << 30;
 
@@ -957,6 +957,22 @@ mod tests {
             ImageResolution::DecodeFailed(msg) => assert!(msg.contains("Pattern"), "{msg}"),
             ImageResolution::Ok(_) => panic!("a Pattern image must not decode"),
             ImageResolution::Absent => panic!("a Pattern image is a failure, not absent"),
+        }
+    }
+
+    /// The budget charges the converted samples: 20 000 × 20 000 palette
+    /// indices are 381 MiB, their RGB colours 1 144 MiB, over the 1 GiB
+    /// budget, so the image is refused before any buffer is allocated.
+    #[test]
+    fn indexed_image_is_budgeted_by_its_rgb_output() {
+        let image = b"<< /Type /XObject /Subtype /Image /Width 20000 /Height 20000 \
+                      /ColorSpace [/Indexed /DeviceRGB 1 <ff000000ff00>] \
+                      /BitsPerComponent 8 /Length 1 >>\nstream\n\x00\nendstream"
+            .to_vec();
+        match resolve_object(image) {
+            ImageResolution::DecodeFailed(msg) => assert!(msg.contains("budget"), "{msg}"),
+            ImageResolution::Ok(_) => panic!("the RGB output exceeds the budget"),
+            ImageResolution::Absent => panic!("the image is a failure, not absent"),
         }
     }
 

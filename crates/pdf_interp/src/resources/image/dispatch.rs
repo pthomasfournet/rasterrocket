@@ -45,8 +45,8 @@ impl<'a> ImageStream<'a> {
     ///
     /// Refused, with the reason: a non-stencil image in a colour space
     /// without components (`Pattern`, which PDF §8.9.5.1 excludes from
-    /// images), and an image over the decode budget
-    /// ([`super::MAX_DECODED_BYTES`]).  Nothing is allocated before this
+    /// images), and an image whose stored or converted samples exceed the
+    /// decode budget ([`super::MAX_DECODED_BYTES`]).  Nothing is allocated before this
     /// check.
     pub(super) fn new(
         stream: &'a Stream,
@@ -55,14 +55,21 @@ impl<'a> ImageStream<'a> {
         is_mask: bool,
         colour: ImageColour,
     ) -> Result<Self, String> {
-        let components = if is_mask { 1 } else { colour.components() };
-        if components == 0 {
+        if !is_mask && colour.components() == 0 {
             return Err(
                 "a Pattern colour space has no components and cannot colour an image (PDF §8.9.5.1)"
                     .to_owned(),
             );
         }
-        decode_budget(width, height, components)?;
+        decode_budget(
+            width,
+            height,
+            if is_mask {
+                1
+            } else {
+                colour.budget_components()
+            },
+        )?;
         Ok(Self {
             stream,
             width,

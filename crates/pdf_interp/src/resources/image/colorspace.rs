@@ -181,6 +181,26 @@ impl ImageColour {
         self.space.as_ref().map_or(1, ColorSpace::ncomponents)
     }
 
+    /// Bytes per pixel the decode budget charges: the larger of the stored
+    /// components and the converted bytes per pixel, an upper bound on the
+    /// buffer [`convert`](Self::convert) produces.  One-component samples
+    /// of a palette or a spot colour may widen to RGB (three bytes); every
+    /// count of two or more converts to RGB; gray-family samples stay one
+    /// byte.
+    pub(super) fn budget_components(&self) -> usize {
+        let n = self.components();
+        let widens = n > 1
+            || matches!(
+                self.space,
+                Some(
+                    ColorSpace::Indexed { .. }
+                        | ColorSpace::Separation { .. }
+                        | ColorSpace::DeviceN { .. }
+                )
+            );
+        if widens { n.max(3) } else { n }
+    }
+
     /// Whether the samples are palette indices (`Indexed`).
     pub(super) const fn indexed(&self) -> bool {
         matches!(self.space, Some(ColorSpace::Indexed { .. }))
