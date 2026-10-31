@@ -18,7 +18,19 @@ pub(crate) struct ArithmeticDecoder<'a> {
     base_pointer: u32,
     /// The bit shift counter.
     shift_count: u32,
+    /// The number of bytes supplied at a marker or past the end of the data,
+    /// where BYTEIN feeds 1-bits instead of encoded data (T.88 E.3.4).
+    overrun: u32,
 }
+
+/// The number of bytes a decoder may supply past the end of its data before
+/// it counts as exhausted. Data terminated by the FLUSH procedure (T.88
+/// E.2.9) needs no more than a few of them, two more for each trailing
+/// 0xFF 0x7F pair an encoder has removed. Beyond the limit the output no
+/// longer depends on the data, so bitmap decoding stops there, which keeps
+/// the number of pixels decoded from a segment proportional to its length
+/// instead of to the dimensions in its header.
+const MAX_OVERRUN_BYTES: u32 = 64;
 
 impl<'a> ArithmeticDecoder<'a> {
     pub(crate) fn new(data: &'a [u8]) -> Self {
@@ -28,11 +40,20 @@ impl<'a> ArithmeticDecoder<'a> {
             a: 0,
             base_pointer: 0,
             shift_count: 0,
+            overrun: 0,
         };
 
         decoder.initialize();
 
         decoder
+    }
+
+    /// Whether the decoder has supplied more than [`MAX_OVERRUN_BYTES`] bytes
+    /// past the end of its data, after which its output no longer depends on
+    /// the data.
+    #[inline(always)]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.overrun > MAX_OVERRUN_BYTES
     }
 
     /// Read the next bit using the given context label.
@@ -63,6 +84,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
             if b1 > 0x8f {
                 self.shift_count = 8;
+                self.overrun = self.overrun.saturating_add(1);
             } else {
                 self.base_pointer += 1;
                 self.c = self

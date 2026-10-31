@@ -133,6 +133,10 @@ fn decode_arithmetic(
                 let mut gatherer = ContextGatherer::new(template, &at_pixels);
 
                 for y in 0..height {
+                    if decoder.is_exhausted() {
+                        break;
+                    }
+
                     gatherer.start_row(bitplane, y);
                     for x in 0..width {
                         gatherer.maybe_reload_buffers(bitplane, x);

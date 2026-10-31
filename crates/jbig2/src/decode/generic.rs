@@ -356,6 +356,10 @@ macro_rules! decode_loop {
 
         // "3) Decode each row as follows:" (6.2.5.7)
         for y in 0..height {
+            if decoder.is_exhausted() {
+                break;
+            }
+
             // "b) If TPGDON is 1, then decode a bit using the arithmetic entropy
             // coder" (6.2.5.7)
             if $tpgdon {
@@ -431,6 +435,10 @@ macro_rules! decode_default_template_fast_loop {
         let last_byte_bits = (($bitmap.width - 1) & (BYTE_BITS - 1)) + 1;
 
         for y in 0..$bitmap.height {
+            if $decoder.is_exhausted() {
+                break;
+            }
+
             if $tpgdon {
                 let sltp = $decoder.read_bit(&mut $contexts[$sltp_context as usize]);
                 ltp = ltp != (sltp != 0);
@@ -538,6 +546,9 @@ macro_rules! decode_default_template_fast_loop {
 }
 
 /// Decode a bitmap using arithmetic coding (6.2.5).
+///
+/// Rows after the decoder is exhausted (see
+/// [`ArithmeticDecoder::is_exhausted`]) keep their initial value.
 pub(crate) fn decode_bitmap_arithmetic_coding(
     bitmap: &mut Bitmap,
     decoder: &mut ArithmeticDecoder<'_>,
