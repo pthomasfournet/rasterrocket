@@ -1,6 +1,6 @@
 //! Page striping (7.4.8.6, 7.4.10).
 
-use crate::check;
+use crate::{check, page_information};
 
 #[test]
 fn striped() {
@@ -25,16 +25,6 @@ fn striped_single_stripe() {
 #[test]
 fn striped_no_end_of_stripe() {
     check("page_striped_no_end_of_stripe", "truchet");
-}
-
-/// An embedded page information segment (7.4.8) declaring `width` × `height`.
-fn page_information(width: u32, height: u32) -> Vec<u8> {
-    let mut data = vec![0, 0, 0, 0, 48, 0, 1, 0, 0, 0, 19];
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&[0; 8]);
-    data.extend_from_slice(&[0, 0, 0]);
-    data
 }
 
 /// A page wider or taller than the largest bitmap is rejected when the page

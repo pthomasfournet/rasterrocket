@@ -151,6 +151,36 @@ fn compare_page(stream: &str, page: &hayro_jbig2::Page<'_>, reference: Bitmap) {
     }
 }
 
+/// An embedded page information segment (7.4.8) declaring `width` × `height`,
+/// with segment number 0, page 1 and every flag clear.
+fn page_information(width: u32, height: u32) -> Vec<u8> {
+    let mut data = vec![0, 0, 0, 0, 48, 0, 1, 0, 0, 0, 19];
+    data.extend_from_slice(&width.to_be_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(&[0; 8]);
+    data.extend_from_slice(&[0, 0, 0]);
+    data
+}
+
+/// An embedded segment (7.2) with segment number `number`, type
+/// `segment_type`, no referred-to segments, page 1 and the given data.
+fn segment(number: u32, segment_type: u8, data: &[u8]) -> Vec<u8> {
+    let mut segment = number.to_be_bytes().to_vec();
+    segment.extend_from_slice(&[segment_type, 0, 1]);
+    segment.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+    segment.extend_from_slice(data);
+    segment
+}
+
+/// A region segment information field (7.4.1).
+fn region_info(width: u32, height: u32, x: u32, y: u32, combination_operator: u8) -> Vec<u8> {
+    [width, height, x, y]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .chain([combination_operator])
+        .collect()
+}
+
 /// Decode `stream`, which is malformed, and check that it doesn't panic.
 fn check_malformed(stream: &str) {
     let data = read_stream(stream);

@@ -23,6 +23,22 @@ pub(crate) struct RegionBitmap {
     pub(crate) combination_operator: CombinationOperator,
 }
 
+impl RegionBitmap {
+    /// Combine the region into `page` at the region's location (7.4.1.3,
+    /// 7.4.1.4). The location is unsigned; one beyond `i32::MAX` lies outside
+    /// every page bitmap.
+    pub(crate) fn combine_into(&self, page: &mut Bitmap) {
+        let offset = |location: u32| i32::try_from(location).unwrap_or(i32::MAX);
+
+        page.combine(
+            &self.bitmap,
+            offset(self.bitmap.x_location),
+            offset(self.bitmap.y_location),
+            self.combination_operator,
+        );
+    }
+}
+
 /// "These operators describe how the segment's bitmap is to be combined with
 /// the page bitmap." (7.4.1.5)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

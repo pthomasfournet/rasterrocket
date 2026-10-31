@@ -535,12 +535,7 @@ fn decode_segment(
                 generic::decode_into(&header, page_bitmap, scratch_buffers)?;
             } else {
                 let region = generic::decode(&header, scratch_buffers)?;
-                page_bitmap.combine(
-                    &region.bitmap,
-                    region.bitmap.x_location as i32,
-                    region.bitmap.y_location as i32,
-                    region.combination_operator,
-                );
+                region.combine_into(page_bitmap);
             }
             page_state.page_pristine = false;
         }
@@ -591,12 +586,7 @@ fn decode_segment(
                     &page_state.standard_tables,
                     scratch_buffers,
                 )?;
-                page_bitmap.combine(
-                    &region.bitmap,
-                    region.bitmap.x_location as i32,
-                    region.bitmap.y_location as i32,
-                    region.combination_operator,
-                );
+                region.combine_into(page_bitmap);
             }
             page_state.page_pristine = false;
         }
@@ -635,12 +625,7 @@ fn decode_segment(
                 halftone::decode_into(&header, pattern_dict, page_bitmap, scratch_buffers)?;
             } else {
                 let region = halftone::decode(&header, pattern_dict, scratch_buffers)?;
-                page_bitmap.combine(
-                    &region.bitmap,
-                    region.bitmap.x_location as i32,
-                    region.bitmap.y_location as i32,
-                    region.combination_operator,
-                );
+                region.combine_into(page_bitmap);
             }
             page_state.page_pristine = false;
         }
@@ -713,12 +698,7 @@ fn decode_segment(
                     }
                 };
                 let region = generic_refinement::decode(&header, reference, scratch_buffers)?;
-                page_bitmap.combine(
-                    &region.bitmap,
-                    region.bitmap.x_location as i32,
-                    region.bitmap.y_location as i32,
-                    region.combination_operator,
-                );
+                region.combine_into(page_bitmap);
             }
 
             page_state.page_pristine = false;
