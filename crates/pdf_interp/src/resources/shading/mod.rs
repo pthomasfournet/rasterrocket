@@ -168,7 +168,10 @@ pub fn resolve_shading_object(
         2 => resolve_axial(doc, &sh_dict, cs, n_channels, ctm, page_h).map(ShadingResult::Pattern),
         3 => resolve_radial(doc, &sh_dict, cs, n_channels, ctm, page_h).map(ShadingResult::Pattern),
         4..=7 => {
-            let data = stream_data?;
+            let Some(data) = stream_data else {
+                log::warn!("shading: ShadingType {shading_type} must be a stream — skipping");
+                return None;
+            };
             let mesh_type = u8::try_from(shading_type).ok()?;
             // PDF §8.7.4.5.5: with a Function, each vertex carries one
             // parametric value t, mapped through the function; its Decode
@@ -200,7 +203,7 @@ pub fn resolve_shading_object(
             Some(ShadingResult::Mesh(Mesh::new(mesh)))
         }
         other => {
-            log::warn!("shading: ShadingType {other} not yet implemented — skipping sh operator");
+            log::warn!("shading: ShadingType {other} is not a shading type (1–7) — skipping");
             None
         }
     }?;
@@ -450,17 +453,30 @@ fn resolve_function_based(
     // conversion of Function(x, y).  Row r of the grid holds y at r / (g − 1)
     // of the Domain's y range, column c holds x likewise.
     let mut grid: Vec<[u8; 3]> = Vec::with_capacity(g * g);
+    let mut failures = 0usize;
     for row in 0..g {
         #[expect(clippy::cast_precision_loss, reason = "row < 64; exact in f64")]
         let sy = (row as f64 / gf).mul_add(yd1 - yd0, yd0);
         for col in 0..g {
             #[expect(clippy::cast_precision_loss, reason = "col < 64; exact in f64")]
             let sx = (col as f64 / gf).mul_add(xd1 - xd0, xd0);
-            let channels = function
-                .eval_n(&[sx, sy], n)
-                .unwrap_or_else(|| vec![0.0; n]);
+            let channels = function.eval_n(&[sx, sy], n).unwrap_or_else(|| {
+                failures += 1;
+                vec![0.0; n]
+            });
             grid.push(cs.to_rgb(&channels));
         }
+    }
+    if failures == g * g {
+        log::warn!("shading/type1: Function evaluates at no grid point — skipping");
+        return None;
+    }
+    if failures > 0 {
+        log::warn!(
+            "shading/type1: Function fails at {failures} of {} grid points — \
+             painting their colour components as 0",
+            g * g
+        );
     }
     let grid: Arc<[[u8; 3]]> = Arc::from(grid.into_boxed_slice());
 
@@ -594,6 +610,26 @@ mod tests {
     use super::*;
 
     use crate::test_helpers::empty_doc;
+
+    /// A Type 1 shading whose function evaluates nowhere paints nothing
+    /// rather than a black rectangle.
+    #[test]
+    fn type1_with_an_unusable_function_is_skipped() {
+        let doc = empty_doc();
+        let mut exponential = Dictionary::new();
+        exponential.set("FunctionType", Object::Integer(2));
+        exponential.set("N", Object::Integer(1));
+        let mut sh = Dictionary::new();
+        sh.set("ShadingType", Object::Integer(1));
+        // A Type 2 function takes one input; Type 1 supplies two.
+        sh.set("Function", Object::Dictionary(exponential));
+        let cs = ShadingCs {
+            doc: &doc,
+            space: &ColorSpace::DeviceGray,
+        };
+        let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert!(resolve_function_based(&doc, &sh, cs, 1, &ctm, 10.0).is_none());
+    }
 
     fn to_rgb(space: &ColorSpace, channels: &[f64]) -> [u8; 3] {
         let doc = empty_doc();
