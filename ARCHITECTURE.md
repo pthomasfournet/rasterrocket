@@ -97,7 +97,7 @@ PageRenderer::execute(ops)           dispatch loop:
 rasterrocket::rgb_to_gray()          Y = 0.30 R + 0.59 G + 0.11 B (ISO 32000-1 §10.3.3)
     │
     ▼ Vec<u8>  (width × height, 8-bit grayscale)
-RenderedPage { pixels, width, height, dpi, effective_dpi, diagnostics }
+RenderedPage { pixels, width, height, dpi, diagnostics }
     │
     ▼
 deskew (optional)                    projection-profile sweep ±7°
@@ -742,7 +742,7 @@ is exported at the crate root; the modules that implement them are private,
 except `deskew`.
 
 `RenderedPage` carries: `pixels: Vec<u8>` (8-bit gray, width×height), `width`,
-`height`, `dpi`, `effective_dpi` (= dpi × UserUnit), and `PageDiagnostics`.
+`height`, `dpi` (pixels per physical inch), and `PageDiagnostics`.
 
 `PageDiagnostics::suggested_dpi(min, max)` — hint for re-rendering at native image
 resolution. Returns `None` for vector/text-only pages.

@@ -71,7 +71,6 @@ pub fn gray8_to_rendered_page(
     bmp: &Bitmap<Gray8>,
     page_num: u32,
     dpi: f32,
-    effective_dpi: f32,
     diagnostics: PageDiagnostics,
 ) -> RenderedPage {
     let w = bmp.width as usize;
@@ -85,7 +84,6 @@ pub fn gray8_to_rendered_page(
         height: bmp.height,
         pixels,
         dpi,
-        effective_dpi,
         diagnostics,
     }
 }
@@ -123,7 +121,7 @@ mod tests {
         let mut bmp = Bitmap::<Gray8>::new(2, 2, 4, false); // row_pad 4 -> padded stride
         bmp.row_bytes_mut(0)[..2].copy_from_slice(&[10, 20]);
         bmp.row_bytes_mut(1)[..2].copy_from_slice(&[30, 40]);
-        let page = gray8_to_rendered_page(&bmp, 7, 300.0, 312.0, PageDiagnostics::default());
+        let page = gray8_to_rendered_page(&bmp, 7, 300.0, PageDiagnostics::default());
         assert_eq!(page.page_num, 7);
         assert_eq!((page.width, page.height), (2, 2));
         assert_eq!(

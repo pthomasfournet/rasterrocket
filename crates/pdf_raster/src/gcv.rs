@@ -364,7 +364,6 @@ mod tests {
             height: h,
             pixels,
             dpi: 300.0,
-            effective_dpi: 300.0,
             diagnostics: crate::PageDiagnostics::default(),
         }
     }

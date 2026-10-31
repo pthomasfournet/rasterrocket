@@ -237,7 +237,7 @@ pub struct RasterOptions {
 
 | Field | Constraints | Notes |
 |---|---|---|
-| `dpi` | `> 0`, finite | Render resolution. Pass `effective_dpi` (not `dpi`) to Tesseract. |
+| `dpi` | `> 0`, finite | Render resolution in pixels per physical inch. |
 | `first_page` | `≥ 1` | 1-based inclusive. Ignored when `pages` is `Some`. |
 | `last_page` | `≥ first_page` | 1-based inclusive. Clamped to document length silently. Ignored when `pages` is `Some`. |
 | `cancel` | — | When `Some` and cancelled, the page in progress stops at its next operator and is yielded as `RasterError::Cancelled`; the iterator or channel then ends. |
@@ -322,7 +322,6 @@ pub struct RenderedPage {
     pub height: u32,
     pub pixels: Vec<u8>,
     pub dpi: f32,
-    pub effective_dpi: f32,
     pub diagnostics: PageDiagnostics,
 }
 ```
@@ -332,8 +331,7 @@ pub struct RenderedPage {
 | `page_num` | 1-based page number. |
 | `width`, `height` | Output bitmap dimensions in pixels. |
 | `pixels` | 8-bit grayscale, tightly packed (`stride == width`), top-to-bottom. Length is exactly `width * height`. |
-| `dpi` | Raw render DPI (`opts.dpi`). |
-| `effective_dpi` | `opts.dpi × UserUnit`. Pass this to `tesseract::set_source_resolution`. For the vast majority of documents `UserUnit = 1.0` and this equals `dpi`. |
+| `dpi` | Pixels per physical inch (`opts.dpi`). The page size includes its `/UserUnit`, so this holds for any unit. Pass it to `tesseract::set_source_resolution`. |
 | `diagnostics` | Lightweight rendering metadata — see `PageDiagnostics`. |
 
 ### `PageDiagnostics`

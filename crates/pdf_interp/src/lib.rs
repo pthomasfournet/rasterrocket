@@ -362,9 +362,8 @@ pub(crate) fn resolve_page_id(doc: &Document, page_num: u32) -> Result<pdf::Obje
 /// output bitmap dimensions, not the raw `MediaBox`.  For example a landscape page with
 /// `/Rotate 270` has `width_pts > height_pts` even though its `MediaBox` may be portrait.
 ///
-/// Both dimensions are also already scaled by `user_unit` (PDF 1.6+ `UserUnit` key).
-/// Multiply the render DPI by `user_unit` to get the true physical resolution of the
-/// rendered bitmap (i.e. the value to pass to `tesseract::set_source_resolution`).
+/// Both dimensions are also already scaled by `user_unit` (PDF 1.6+ `UserUnit` key),
+/// so they are physical points: a render at `dpi` has `dpi` pixels per physical inch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct PageGeometry {

@@ -356,7 +356,7 @@ let opts = RasterOptions::new(300.0);
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     let page = result?;
     // page.pixels — Vec<u8>, 8-bit greyscale, width × height, top-to-bottom
-    // page.effective_dpi — pass to your OCR engine (accounts for PDF UserUnit scaling)
+    // page.dpi — pixels per physical inch; pass it to your OCR engine
     // See the OCR Integration wiki for Tesseract, ocrs, Google Cloud Vision, and GPT-5 patterns.
 }
 ```

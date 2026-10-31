@@ -557,7 +557,6 @@ mod channel_tests {
             height: 1,
             pixels: vec![128u8],
             dpi: 72.0,
-            effective_dpi: 72.0,
             diagnostics: crate::PageDiagnostics::default(),
         };
         let (pn, res) = catch_page_panic(3u32, move || -> Result<RenderedPage, RasterError> {
@@ -582,7 +581,6 @@ mod channel_tests {
                     height: 1,
                     pixels: vec![0u8],
                     dpi: 72.0,
-                    effective_dpi: 72.0,
                     diagnostics: crate::PageDiagnostics::default(),
                 })
             });

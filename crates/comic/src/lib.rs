@@ -107,7 +107,7 @@ impl std::fmt::Debug for ComicPages {
 pub struct ComicOptions {
     /// DPI reported on the produced [`RenderedPage`]. Comic images carry no
     /// physical resolution, so this is a declared value passed through to
-    /// `RenderedPage::dpi` / `effective_dpi` for downstream OCR (Tesseract uses
+    /// `RenderedPage::dpi` for downstream OCR (Tesseract uses
     /// it for feature scaling); an embedded PDF is rendered at it. Must be
     /// positive and finite.
     pub dpi: f32,
@@ -393,7 +393,6 @@ fn render_one(
         &bmp,
         page_num,
         opts.dpi,
-        opts.dpi, // comics carry no UserUnit; effective_dpi == dpi
         pdf_raster::PageDiagnostics::default(),
     ))
 }

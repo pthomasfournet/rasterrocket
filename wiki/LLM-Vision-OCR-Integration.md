@@ -176,7 +176,7 @@ def ocr_page(client, pixels: bytes, width: int, height: int) -> str:
     return response.full_text_annotation.text
 
 def ocr_pdf_cloud(pages):
-    """pages: list of (page_num, pixels, width, height, effective_dpi)"""
+    """pages: list of (page_num, pixels, width, height, dpi)"""
     client = vision.ImageAnnotatorClient()
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         futures = {

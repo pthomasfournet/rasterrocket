@@ -80,7 +80,6 @@ pub fn render_page_gray(
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
-    let user_unit = geom.user_unit;
     let mut params = RenderParams::new(f64::from(dpi) / 72.0);
     params.cancel.clone_from(&opts.cancel);
     let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
@@ -91,19 +90,10 @@ pub fn render_page_gray(
         crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
     }
 
-    // `dpi` has passed the positive-finite scale check above; a product
-    // beyond `f32::MAX` saturates to infinity rather than wrapping.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "f64 → f32 of a positive finite value saturates; UserUnit is within [0.1, 10]"
-    )]
-    let effective_dpi = (f64::from(dpi) * user_unit) as f32;
-
     Ok(crate::page::gray8_to_rendered_page(
         &gray,
         page_num,
         dpi,
-        effective_dpi,
         diagnostics,
     ))
 }

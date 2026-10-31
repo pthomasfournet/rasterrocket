@@ -149,10 +149,10 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     //   width, height   = page.width, page.height
     //   bytes per pixel = 1 (8-bit grayscale)
     //   bytes per line  = page.width (stride == width, no padding)
-    //   resolution      = page.effective_dpi
+    //   resolution      = page.dpi
     //
-    // Always pass effective_dpi, not dpi: it includes the page's UserUnit,
-    // and a wrong resolution degrades recognition.
+    // page.dpi is pixels per physical inch (the page's UserUnit included);
+    // a wrong resolution degrades recognition.
 }
 ```
 

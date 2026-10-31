@@ -456,22 +456,14 @@ pub struct RenderedPage {
     /// Raw pixel bytes: 8-bit grayscale, tightly packed (`stride == width`),
     /// top-to-bottom, left-to-right.  Length is `width * height`.
     pub pixels: Vec<u8>,
-    /// The DPI at which this page was rendered (`opts.dpi`).
+    /// Physical resolution of the bitmap in pixels per inch (`opts.dpi`).
     ///
-    /// This is the raw render resolution, ignoring any `UserUnit` scaling in the
-    /// document.  Use [`effective_dpi`](Self::effective_dpi) — not this field — when
-    /// reporting resolution to downstream consumers such as Tesseract.
+    /// The page's size includes its `/UserUnit` (ISO 32000-2 §14.11.2), so a
+    /// render at `opts.dpi` has `opts.dpi` pixels per physical inch whatever
+    /// the unit.  Pass this value to `tesseract::set_source_resolution`:
+    /// Tesseract scales its features by it, and without the call it assumes
+    /// 70 DPI, which severely degrades recognition.
     pub dpi: f32,
-    /// Physical resolution of the rendered bitmap, accounting for `UserUnit` scaling.
-    ///
-    /// `effective_dpi = opts.dpi × UserUnit`.  For the vast majority of documents
-    /// `UserUnit` is 1.0 and this equals `dpi`.  Always pass this value to
-    /// `tesseract::set_source_resolution`; lying about DPI degrades OCR accuracy
-    /// because Tesseract uses it for internal feature scaling.
-    ///
-    /// Omitting the resolution call causes Tesseract to fall back to 70 DPI, which
-    /// severely degrades recognition accuracy.
-    pub effective_dpi: f32,
     /// Lightweight metadata collected at zero extra cost during rendering.
     ///
     /// Use this to route pages to different OCR configurations — e.g. skip deskew

@@ -10,7 +10,8 @@ mod common;
 
 use common::{one_page, session, stream_object};
 use rasterrocket::{
-    BackendPolicy, RenderParams, RenderRegion, render_page_rgb, render_page_rgb_with,
+    BackendPolicy, RasterOptions, RenderParams, RenderRegion, render_page_gray, render_page_rgb,
+    render_page_rgb_with,
 };
 
 const BLACK: [u8; 3] = [0, 0, 0];
@@ -75,4 +76,17 @@ fn user_unit_applies_to_each_axis_scale_and_to_a_region() {
             assert_eq!(px(&tile, x, y), px(&whole, 340 + x, y), "pixel ({x}, {y})");
         }
     }
+}
+
+/// The page is 200 × 2 / 72 = 5.5̅ inches wide; rendered at 72 dpi it is 400
+/// pixels, 72 per physical inch, which is the resolution the page reports.
+#[test]
+fn reported_dpi_is_pixels_per_physical_inch() {
+    let s = session(page(), BackendPolicy::CpuOnly);
+    let mut opts = RasterOptions::default();
+    opts.dpi = 72.0;
+    let page = render_page_gray(&s, 1, &opts).expect("page renders");
+    assert_eq!(page.width, 400);
+    let inches = 200.0 * 2.0 / 72.0;
+    assert!((f64::from(page.width) / inches - f64::from(page.dpi)).abs() < 1e-9);
 }

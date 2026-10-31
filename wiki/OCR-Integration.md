@@ -14,18 +14,13 @@ For cloud vision APIs (Google Cloud Vision, GPT-5), see [LLM Vision OCR Integrat
 | **System deps** | Requires `libtesseract`, `libleptonica` + language data files installed | Pure Rust — no system deps, WASM-compatible |
 | **Ingestion** | Raw pixels through `set_frame`; Tesseract copies them once into its own image | One `u8→f32` normalisation pass |
 | **Threading model** | One `Tesseract` instance per thread (`Send`, not `Sync`) | Single `Arc<OcrEngine>` shared across threads (`Send + Sync`) |
-| **DPI required** | Yes — pass `page.effective_dpi` or accuracy degrades | No — character size inferred from pixel dimensions |
+| **DPI required** | Yes — pass `page.dpi` or accuracy degrades | No — character size inferred from pixel dimensions |
 
 ---
 
 ## DPI guidance
 
-`RenderedPage` carries two DPI fields:
-
-- `dpi` — the render resolution you passed in `RasterOptions`
-- `effective_dpi` — `dpi × UserUnit`, accounting for PDF `UserUnit` scaling
-
-**Always pass `effective_dpi` to downstream consumers.** For the vast majority of PDFs `UserUnit` is 1.0 and both fields are equal, but when they differ, using `dpi` instead of `effective_dpi` misreports the resolution and degrades OCR accuracy.
+`RenderedPage::dpi` is the render resolution you passed in `RasterOptions`, in pixels per physical inch. A page's size includes its PDF `UserUnit`, so the value is correct for every page; pass it to downstream consumers.
 
 Recommended render DPI for OCR: **300**. Character x-height should be 20–30 px at that resolution. 150 DPI is acceptable for large-print documents; below 150 DPI accuracy drops sharply.
 
@@ -93,8 +88,8 @@ fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
         let width = i32::try_from(page.width)?;
         let height = i32::try_from(page.height)?;
 
-        // effective_dpi includes the page's UserUnit — always use it.
-        let ppi = page.effective_dpi.round() as i32;
+        // Pixels per physical inch, the page's UserUnit included.
+        let ppi = page.dpi.round() as i32;
 
         tess = tess
             .set_frame(&page.pixels, width, height, 1, width)?
@@ -142,7 +137,7 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
                     tess = tess
                         .set_frame(&page.pixels, w, h, 1, w)
                         .expect("set_frame")
-                        .set_source_resolution(page.effective_dpi.round() as i32);
+                        .set_source_resolution(page.dpi.round() as i32);
                     let text = tess.get_text().unwrap_or_default();
                     tx_out.send((page_num, text)).ok();
                 }

@@ -12,7 +12,7 @@ let mut opts = RasterOptions::new(300.0); // every other option at its default
 opts.deskew = true;
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     match result {
-        Ok(page) => { /* page.pixels: width × height bytes; page.effective_dpi */ }
+        Ok(page) => { /* page.pixels: width × height bytes; page.dpi */ }
         Err(e) => eprintln!("page {page_num}: {e}"),
     }
 }
