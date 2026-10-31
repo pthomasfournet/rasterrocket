@@ -374,7 +374,7 @@ impl PageRenderer<'_> {
                 );
                 let memoized = self.image_memo.borrow().get_inline(&key);
                 if let Some(decoded) = memoized {
-                    self.blit_image(&decoded);
+                    self.blit_image(&decoded, None);
                     return;
                 }
                 let color_spaces = self.resources.color_space_dict();
@@ -427,7 +427,7 @@ impl PageRenderer<'_> {
                             self.record_partial_image(None, reason.clone());
                         }
                         let decoded = self.image_memo.borrow_mut().insert_inline(key, decoded);
-                        self.blit_image(&decoded);
+                        self.blit_image(&decoded, None);
                     }
                     crate::resources::ImageResolution::DecodeFailed(msg) => {
                         self.record_image_failure(None, msg);

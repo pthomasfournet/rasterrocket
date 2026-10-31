@@ -185,9 +185,9 @@ impl PageRenderer<'_> {
 
     /// Record an image that could not be drawn.  The image is skipped and the
     /// page render continues.
-    pub(super) fn record_image_failure(&mut self, name: Option<String>, reason: String) {
+    pub(super) fn record_image_failure(&mut self, name: Option<&[u8]>, reason: String) {
         let failure = ImageFailure {
-            name,
+            name: name.map(|n| String::from_utf8_lossy(n).into_owned()),
             reason,
             partial: false,
         };
@@ -197,9 +197,9 @@ impl PageRenderer<'_> {
 
     /// Record an image drawn from a stream that lacked samples (see
     /// [`DecodedImage::partial`](crate::resources::DecodedImage::partial)).
-    pub(super) fn record_partial_image(&mut self, name: Option<String>, reason: String) {
+    pub(super) fn record_partial_image(&mut self, name: Option<&[u8]>, reason: String) {
         let failure = ImageFailure {
-            name,
+            name: name.map(|n| String::from_utf8_lossy(n).into_owned()),
             reason,
             partial: true,
         };

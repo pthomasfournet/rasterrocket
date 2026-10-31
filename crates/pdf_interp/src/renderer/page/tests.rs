@@ -690,7 +690,7 @@ fn child_diagnostics_fold_into_parent_once() {
 
     let doc = empty_doc();
     let mut parent = PageRenderer::new(1, 1, &doc, (1, 0));
-    parent.record_image_failure(Some("Im0".to_owned()), "parent".to_owned());
+    parent.record_image_failure(Some(b"Im0"), "parent".to_owned());
     let mut child = PageRenderer::new(1, 1, &doc, (1, 0));
     child.record_image_failure(None, "child".to_owned());
     child.record_missing_font(b"F9");

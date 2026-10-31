@@ -115,10 +115,7 @@ impl PageRenderer<'_> {
         match resolution {
             ImageResolution::Ok(decoded) => {
                 if let Some(reason) = &decoded.partial {
-                    self.record_partial_image(
-                        Some(String::from_utf8_lossy(name).into_owned()),
-                        reason.clone(),
-                    );
+                    self.record_partial_image(Some(name), reason.clone());
                 }
                 match memo_key {
                     Some((id, draw_size)) => {
@@ -129,7 +126,7 @@ impl PageRenderer<'_> {
                 }
             }
             ImageResolution::DecodeFailed(msg) => {
-                self.record_image_failure(Some(String::from_utf8_lossy(name).into_owned()), msg);
+                self.record_image_failure(Some(name), msg);
             }
             ImageResolution::Absent => {
                 log::debug!(
@@ -147,9 +144,7 @@ impl PageRenderer<'_> {
         name: &[u8],
         decoded: &crate::resources::DecodedImage,
     ) {
-        self.current_image = Some(String::from_utf8_lossy(name).into_owned());
-        self.blit_image(decoded);
-        self.current_image = None;
+        self.blit_image(decoded, Some(name));
     }
 
     /// Execute a Form `XObject`'s content stream in the current graphics context.

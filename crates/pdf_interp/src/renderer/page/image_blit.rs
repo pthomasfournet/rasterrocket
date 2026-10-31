@@ -38,7 +38,11 @@ impl PageRenderer<'_> {
     /// `decoded.source_width` is the stream's own pixel width, which the
     /// image's width falls below when it was decoded at reduced resolution;
     /// it feeds the `source_ppi_hint` diagnostic.
-    pub(super) fn blit_image(&mut self, decoded: &crate::resources::DecodedImage) {
+    pub(super) fn blit_image(
+        &mut self,
+        decoded: &crate::resources::DecodedImage,
+        name: Option<&[u8]>,
+    ) {
         let img = &decoded.image;
         let source_width = decoded.source_width;
         // Degenerate image — nothing to blit.
@@ -148,13 +152,15 @@ impl PageRenderer<'_> {
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
         let paint = |r: &mut Self| {
-            r.composite_image(
+            if let Err(reason) = r.composite_image(
                 img,
                 &ctm,
                 mask_src.map(|m| (m, mask_ctm)),
                 &grid,
                 &mut grid_clip,
-            );
+            ) {
+                r.record_image_failure(name, reason);
+            }
         };
         let region = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1);
         let alpha = self.gstate.current().fill_alpha;
@@ -243,7 +249,8 @@ impl PageRenderer<'_> {
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap
     /// within `grid_clip`; `mask` is its soft mask with the matrix that
-    /// draws it.
+    /// draws it.  `Err` carries the reason a decoded image cannot be drawn,
+    /// for the caller to record against the image's name.
     #[expect(
         clippy::too_many_lines,
         reason = "GPU dispatch, decoder-contract checks, the mask sampler and the per-pixel loop share the grid and CTM state"
@@ -255,7 +262,7 @@ impl PageRenderer<'_> {
         mask: Option<(&SoftMask, Ctm)>,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
-    ) {
+    ) -> Result<(), String> {
         // GPU image-blit path: device-resident pixels sampled by the CUDA
         // kernel through the same grid, composited onto `bitmap` before
         // this call returns so later operators paint over the image in
@@ -268,7 +275,7 @@ impl PageRenderer<'_> {
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
             if self.try_gpu_blit_image(cached, grid, grid_clip) {
-                return;
+                return Ok(());
             }
             // Promotion or kernel dispatch failed and there are no host
             // bytes to fall back to.  The image decoded successfully but
@@ -276,22 +283,14 @@ impl PageRenderer<'_> {
             // `ImageResolution` contract eradicates upstream, so record it
             // as an image failure rather than dropping the image with only a
             // log line.
-            self.record_image_failure(
-                self.current_image.clone(),
-                "GPU blit failed, no host fallback".to_owned(),
-            );
-            return;
+            return Err("GPU blit failed, no host fallback".to_owned());
         }
 
         // CPU path: needs host-resident pixels.
         let Some(img_bytes) = img.data.as_cpu() else {
             // Decoded pixels exist but are device-resident with no GPU
             // dispatch available to blit them — unrenderable, not absent.
-            self.record_image_failure(
-                self.current_image.clone(),
-                "pixels device-resident but GPU dispatch unavailable".to_owned(),
-            );
-            return;
+            return Err("pixels device-resident but GPU dispatch unavailable".to_owned());
         };
         // Decoder contract: bytes.len() == width × height × bpp.  Promote
         // the contract to a release-mode check so a truncated buffer (an
@@ -308,16 +307,14 @@ impl PageRenderer<'_> {
                     "dimensions overflow usize ({}×{}×{bpp} bpp)",
                     img.width, img.height,
                 );
-                self.record_image_failure(self.current_image.clone(), msg);
-                return;
+                return Err(msg);
             }
             Err(ImageLenError::ShortBuffer { expected }) => {
                 let msg = format!(
                     "decoder produced short buffer ({} bytes, expected {expected})",
                     img_bytes.len(),
                 );
-                self.record_image_failure(self.current_image.clone(), msg);
-                return;
+                return Err(msg);
             }
         }
 
@@ -334,7 +331,7 @@ impl PageRenderer<'_> {
                     img.width,
                     img.height,
                 ) else {
-                    return;
+                    return Ok(());
                 };
                 Some(sampler)
             }
@@ -411,6 +408,7 @@ impl PageRenderer<'_> {
             let (row, alpha_row) = self.bitmap.row_and_alpha_mut(dy);
             compositor.paint_row(row, alpha_row, grid.x0, dy, &colours, &shape);
         }
+        Ok(())
     }
 
     /// GPU image blit: sample `cached` through `grid` on the device, then

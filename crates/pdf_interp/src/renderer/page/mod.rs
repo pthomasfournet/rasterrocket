@@ -236,10 +236,6 @@ pub struct PageRenderer<'doc> {
     group_pool: Vec<Bitmap<Rgb8>>,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
-    /// Resource name of the image `XObject` being drawn, set for the duration
-    /// of its blit so a blit failure is attributed to it; `None` while an
-    /// inline image is drawn.
-    current_image: Option<String>,
     /// Image `XObjects` already decoded on this page, shared with the
     /// renderers of its pattern cells.
     image_memo: image_memo::SharedImageMemo,
@@ -408,7 +404,6 @@ impl<'doc> PageRenderer<'doc> {
             page_group: None,
             group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
-            current_image: None,
             image_memo: image_memo::ImageMemo::shared(),
             pattern_memo: pattern_memo::PatternMemo::shared(),
             op_budget: MAX_PAGE_OPS,
