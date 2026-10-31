@@ -59,35 +59,38 @@ cid-keyed-type1.cid
     font dicts' matrices do.
 """
 
-import os
+import pathlib
 import struct
 
 from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
-from fontTools.ttLib import newTable
+from fontTools.ttLib import TTFont, newTable
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 from fontTools.ttLib.tables._g_l_y_f import Glyph, GlyphComponent
 from fontTools.ttLib.tables.ttProgram import Program
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = pathlib.Path(__file__).resolve().parent
 
 # ── TrueType ────────────────────────────────────────────────────────────────
 
 # PUSHB[4] 4 5 6 7 4; SVTCA[x]; SLOOP; MPPEM; PUSHW[0] 2048; MUL; SHPIX
-PAIR_INSTRUCTIONS = bytes(
-    [0xB4, 4, 5, 6, 7, 4, 0x01, 0x17, 0x4B, 0xB8, 0x08, 0x00, 0x63, 0x38]
-)
+PAIR_INSTRUCTIONS = bytes([0xB4, 4, 5, 6, 7, 4, 0x01, 0x17, 0x4B, 0xB8, 0x08, 0x00, 0x63, 0x38])
 
 
-def checksum(data):
+def checksum(data: bytes) -> int:
+    """Return the OpenType table checksum of `data` (big-endian u32 sum, zero padded)."""
     data = data + b"\0" * (-len(data) % 4)
-    return sum(struct.unpack(f">{len(data) // 4}I", data)) & 0xFFFFFFFF
+    words: tuple[int, ...] = struct.unpack(f">{len(data) // 4}I", data)
+    return sum(words) & 0xFFFFFFFF
 
 
-def forged_program(length, target):
-    """Bytecode of `length` bytes summing to `target`: an optional leading
-    SVTCA[y] for odd lengths, then NPUSHB n <n bytes> + n POPs blocks."""
+def forged_program(length: int, target: int) -> bytes:
+    """Return bytecode of `length` bytes whose table checksum is `target`.
+
+    The program is an optional leading SVTCA[y] for odd lengths, then blocks
+    of NPUSHB n <n bytes> followed by n POPs.
+    """
     code = bytearray()
     if length % 2:
         code.append(0x00)
@@ -104,27 +107,40 @@ def forged_program(length, target):
             data_start = len(code)
         code += bytes(n)
         code += bytes([0x21]) * n
-    assert len(code) == length
+    if data_start is None or len(code) != length:
+        msg = f"cannot lay out a {length}-byte program"
+        raise ValueError(msg)
     # Adjust the first word-aligned four data bytes of the first block.
     at = data_start + (-data_start % 4)
-    assert at + 4 <= data_start + blocks[0]
+    if at + 4 > data_start + blocks[0]:
+        msg = f"the first push block of a {length}-byte program holds no aligned word"
+        raise ValueError(msg)
     word = (target - checksum(bytes(code))) & 0xFFFFFFFF
     code[at : at + 4] = struct.pack(">I", word)
-    assert checksum(bytes(code)) == target
+    if checksum(bytes(code)) != target:
+        msg = "checksum adjustment failed"
+        raise ValueError(msg)
     return bytes(code)
 
 
-def square_glyph():
+def rect_glyph(x0: int, y0: int, x1: int, y1: int) -> Glyph:
+    """Return a one-contour glyph covering x `x0..x1`, y `y0..y1`."""
     pen = TTGlyphPen(None)
-    pen.moveTo((100, 0))
-    pen.lineTo((100, 300))
-    pen.lineTo((400, 300))
-    pen.lineTo((400, 0))
+    pen.moveTo((x0, y0))
+    pen.lineTo((x0, y1))
+    pen.lineTo((x1, y1))
+    pen.lineTo((x1, y0))
     pen.closePath()
     return pen.glyph()
 
 
-def pair_glyph():
+def square_glyph() -> Glyph:
+    """Return the square shared by every TrueType fixture (x 100..400, y 0..300)."""
+    return rect_glyph(100, 0, 400, 300)
+
+
+def pair_glyph() -> Glyph:
+    """Return the composite of `square` twice, shaped only by `PAIR_INSTRUCTIONS`."""
     glyph = Glyph()
     glyph.numberOfContours = -1
     glyph.components = []
@@ -139,19 +155,38 @@ def pair_glyph():
     return glyph
 
 
-def build_truetype(family, fpgm=None, prep=None):
+def base_font(
+    family: str,
+    glyphs: dict[str, tuple[Glyph, int, int]],
+    cmap: dict[int, str],
+    *,
+    keep_glyph_names: bool = True,
+) -> TTFont:
+    """Return a 1000-unit TrueType font of `glyphs` (`name: (glyph, advance, lsb)`).
+
+    `.notdef` comes first, empty, with advance 1000; `cmap` maps code points
+    to glyph names.
+    """
     fb = FontBuilder(1000, isTTF=True)
-    order = [".notdef", "square", "pair"]
-    fb.setupGlyphOrder(order)
-    fb.setupCharacterMap({0x41: "pair", 0x42: "square"})
-    empty = TTGlyphPen(None).glyph()
-    fb.setupGlyf({".notdef": empty, "square": square_glyph(), "pair": pair_glyph()})
-    fb.setupHorizontalMetrics({".notdef": (1000, 0), "square": (1000, 100), "pair": (1000, 100)})
+    all_glyphs = {".notdef": (TTGlyphPen(None).glyph(), 1000, 0), **glyphs}
+    fb.setupGlyphOrder(list(all_glyphs))
+    fb.setupCharacterMap(cmap)
+    fb.setupGlyf({name: glyph for name, (glyph, _, _) in all_glyphs.items()})
+    fb.setupHorizontalMetrics({name: (adv, lsb) for name, (_, adv, lsb) in all_glyphs.items()})
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupNameTable({"familyName": family, "styleName": "Regular"})
     fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
-    fb.setupPost()
-    font = fb.font
+    fb.setupPost(keepGlyphNames=keep_glyph_names)
+    return fb.font
+
+
+def build_truetype(family: str, fpgm: bytes | None = None, prep: bytes | None = None) -> TTFont:
+    """Return a hint-assembled fixture named `family`, with optional `fpgm` / `prep`."""
+    font = base_font(
+        family,
+        {"square": (square_glyph(), 1000, 100), "pair": (pair_glyph(), 1000, 100)},
+        {0x41: "pair", 0x42: "square"},
+    )
     font["head"].flags |= 0x0008  # integer ppem
     for tag, code in (("fpgm", fpgm), ("prep", prep)):
         if code is not None:
@@ -172,103 +207,84 @@ def build_truetype(family, fpgm=None, prep=None):
     return font
 
 
-def build_symbolic_mac_roman_named():
-    fb = FontBuilder(1000, isTTF=True)
-    fb.setupGlyphOrder([".notdef", "therefore"])
-    fb.setupCharacterMap({})
-    empty = TTGlyphPen(None).glyph()
-    fb.setupGlyf({".notdef": empty, "therefore": square_glyph()})
-    fb.setupHorizontalMetrics({".notdef": (1000, 0), "therefore": (1000, 100)})
-    fb.setupHorizontalHeader(ascent=800, descent=-200)
-    fb.setupNameTable({"familyName": "SymbolicMac", "styleName": "Regular"})
-    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
-    fb.setupPost(keepGlyphNames=True)
+def build_symbolic_mac_roman_named() -> TTFont:
+    """Return the symbolic subset reachable only through a (1,0) format 6 cmap."""
+    font = base_font("SymbolicMac", {"therefore": (square_glyph(), 1000, 100)}, {})
     mac = CmapSubtable.newSubtable(6)
     mac.platformID, mac.platEncID, mac.language = 1, 0, 0
     mac.cmap = {0x21: "therefore"}
-    fb.font["cmap"].tables = [mac]
-    return fb.font
+    font["cmap"].tables = [mac]
+    return font
 
 
-def tall_glyph():
-    pen = TTGlyphPen(None)
-    pen.moveTo((0, 100))
-    pen.lineTo((0, 400))
-    pen.lineTo((300, 400))
-    pen.lineTo((300, 100))
-    pen.closePath()
-    return pen.glyph()
+def build_vertical_forms() -> TTFont:
+    """Return the font whose `vert` feature substitutes `square` by `tall`."""
+    font = base_font(
+        "VerticalForms",
+        {
+            "square": (square_glyph(), 1000, 100),
+            "tall": (rect_glyph(0, 100, 300, 400), 1000, 0),
+            "other": (square_glyph(), 1000, 100),
+        },
+        {0x41: "square", 0x42: "other"},
+    )
+    addOpenTypeFeaturesFromString(font, "feature vert { sub square by tall; } vert;")
+    return font
 
 
-def build_vertical_forms():
-    fb = FontBuilder(1000, isTTF=True)
-    fb.setupGlyphOrder([".notdef", "square", "tall", "other"])
-    fb.setupCharacterMap({0x41: "square", 0x42: "other"})
-    empty = TTGlyphPen(None).glyph()
-    fb.setupGlyf({".notdef": empty, "square": square_glyph(), "tall": tall_glyph(), "other": square_glyph()})
-    fb.setupHorizontalMetrics({".notdef": (1000, 0), "square": (1000, 100), "tall": (1000, 0), "other": (1000, 100)})
-    fb.setupHorizontalHeader(ascent=800, descent=-200)
-    fb.setupNameTable({"familyName": "VerticalForms", "styleName": "Regular"})
-    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
-    fb.setupPost()
-    addOpenTypeFeaturesFromString(fb.font, "feature vert { sub square by tall; } vert;")
-    return fb.font
+def build_no_cmap() -> TTFont:
+    """Return the subset with no `cmap` and a format 3 `post` table."""
+    font = base_font("NoCmap", {"square": (square_glyph(), 1000, 100)}, {}, keep_glyph_names=False)
+    del font["cmap"]
+    return font
 
 
-def build_no_cmap():
-    fb = FontBuilder(1000, isTTF=True)
-    fb.setupGlyphOrder([".notdef", "square"])
-    fb.setupCharacterMap({})
-    empty = TTGlyphPen(None).glyph()
-    fb.setupGlyf({".notdef": empty, "square": square_glyph()})
-    fb.setupHorizontalMetrics({".notdef": (1000, 0), "square": (1000, 100)})
-    fb.setupHorizontalHeader(ascent=800, descent=-200)
-    fb.setupNameTable({"familyName": "NoCmap", "styleName": "Regular"})
-    fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
-    fb.setupPost(keepGlyphNames=False)
-    del fb.font["cmap"]
-    return fb.font
-
-
-def write_truetype(name, font):
-    path = os.path.join(HERE, name)
-    font.save(path)
-    return path
+def write_truetype(name: str, font: TTFont) -> None:
+    """Save `font` as `name` next to this script."""
+    font.save(HERE / name)
 
 
 # ── CID-keyed Type 1 ────────────────────────────────────────────────────────
 
 
-def cs_num(v):
-    if -107 <= v <= 107:
+# Type 1 charstring number encoding (Type 1 Font Format, section 6.2): one
+# byte for |v| <= 107, two bytes up to 1131, else 255 and a 32-bit integer.
+ONE_BYTE_MAX = 107
+TWO_BYTE_MAX = 1131
+
+
+def cs_num(v: int) -> bytes:
+    """Return the charstring encoding of the integer `v`."""
+    if -ONE_BYTE_MAX <= v <= ONE_BYTE_MAX:
         return bytes([v + 139])
-    if 108 <= v <= 1131:
-        v -= 108
+    if ONE_BYTE_MAX < v <= TWO_BYTE_MAX:
+        v -= ONE_BYTE_MAX + 1
         return bytes([(v >> 8) + 247, v & 0xFF])
-    if -1131 <= v <= -108:
-        v = -v - 108
+    if -TWO_BYTE_MAX <= v < -ONE_BYTE_MAX:
+        v = -v - (ONE_BYTE_MAX + 1)
         return bytes([(v >> 8) + 251, v & 0xFF])
     return bytes([255]) + struct.pack(">i", v)
 
 
-HSBW, RMOVETO, RLINETO, CLOSEPATH, ENDCHAR, CALLSUBR, RETURN = 13, 21, 5, 9, 14, 10, 11
+# One-byte charstring operators; operands are `int`, so the two never mix.
+HSBW, RMOVETO, RLINETO, CLOSEPATH, ENDCHAR, CALLSUBR, RETURN = (
+    b"\x0d",
+    b"\x15",
+    b"\x05",
+    b"\x09",
+    b"\x0e",
+    b"\x0a",
+    b"\x0b",
+)
 
 
-def charstring(*items):
-    out = bytearray()
-    for item in items:
-        if isinstance(item, tuple):  # operator
-            out += bytes(item)
-        else:
-            out += cs_num(item)
-    return bytes(out)
+def charstring(*items: int | bytes) -> bytes:
+    """Return the charstring of operands (integers) and operators (bytes), in order."""
+    return b"".join(item if isinstance(item, bytes) else cs_num(item) for item in items)
 
 
-def op(code):
-    return (code,)
-
-
-def encrypt(plain, key=4330, len_iv=4):
+def encrypt(plain: bytes, key: int = 4330, len_iv: int = 4) -> bytes:
+    """Return `plain` encrypted with the Type 1 cipher after `len_iv` zero bytes."""
     r = key
     out = bytearray()
     for p in bytes(len_iv) + plain:
@@ -278,28 +294,87 @@ def encrypt(plain, key=4330, len_iv=4):
     return bytes(out)
 
 
-def polygon(sbx, points):
-    """hsbw, then a closed polygon through absolute `points`."""
-    items = [sbx, 1000, op(HSBW)]
+def polygon(sbx: int, points: list[tuple[int, int]]) -> bytes:
+    """Return hsbw, then a closed polygon through absolute `points`."""
+    items: list[int | bytes] = [sbx, 1000, HSBW]
     x, y = sbx, 0
-    first = True
-    for px, py in points:
-        items += [px - x, py - y, op(RMOVETO if first else RLINETO)]
-        first = False
+    for i, (px, py) in enumerate(points):
+        items += [px - x, py - y, RMOVETO if i == 0 else RLINETO]
         x, y = px, py
-    items += [op(CLOSEPATH), op(ENDCHAR)]
+    items += [CLOSEPATH, ENDCHAR]
     return charstring(*items)
 
 
-def build_cid_type1():
-    notdef = charstring(0, 1000, op(HSBW), op(ENDCHAR))
+FD_BYTES, GD_BYTES, SD_BYTES = 1, 4, 4  # widths of the FD index and of every offset
+
+
+def offset_table(base: int, chunks: list[bytes]) -> tuple[list[int], bytes]:
+    """Lay out `chunks` contiguously from offset `base`.
+
+    Returns the start offset of each chunk followed by the end offset, and
+    the concatenated data.
+    """
+    offsets, data = [], bytearray()
+    for chunk in chunks:
+        offsets.append(base + len(data))
+        data += chunk
+    offsets.append(base + len(data))
+    return offsets, bytes(data)
+
+
+def cidmap_len(cid_count: int) -> int:
+    """Return the CIDMap length: one FD index and offset per CID, plus the end offset."""
+    return (cid_count + 1) * (FD_BYTES + GD_BYTES)
+
+
+def start_data(glyphs: list[tuple[int, bytes]], subrs: list[bytes]) -> bytes:
+    """Return the StartData section: CIDMap, SubrMap, subroutines, charstrings.
+
+    `glyphs` holds `(fd_index, charstring)` per CID; the SubrMap belongs to
+    FD 0 and follows the CIDMap.
+    """
+    data_offset = cidmap_len(len(glyphs)) + (len(subrs) + 1) * SD_BYTES
+    subr_offsets, subr_data = offset_table(data_offset, subrs)
+    glyph_offsets, glyph_data = offset_table(subr_offsets[-1], [g for _, g in glyphs])
+    fds = [fd for fd, _ in glyphs] + [0]
+    cidmap = b"".join(
+        bytes([fd]) + struct.pack(">I", o) for fd, o in zip(fds, glyph_offsets, strict=True)
+    )
+    subrmap = b"".join(struct.pack(">I", o) for o in subr_offsets)
+    return cidmap + subrmap + subr_data + glyph_data
+
+
+def font_dict(index: int, private: str) -> str:
+    """Return FDArray entry `index`, whose private dict ends with `private`."""
+    return (
+        f"dup {index}\n"
+        "%ADOBeginFontDict\n"
+        "14 dict begin\n"
+        f"/FontName /RRTest-CID-FD{index} def\n"
+        "/FontType 1 def\n"
+        "/FontMatrix [0.001 0 0 0.001 0 0] def\n"
+        "/PaintType 0 def\n"
+        "/Private 18 dict dup begin\n"
+        "/MinFeature {16 16} def\n"
+        "/BlueValues [-10 0 700 710] def\n"
+        "/StdHW [50] def\n"
+        "/StdVW [50] def\n"
+        f"{private}"
+        "end def\n"
+        "currentdict end\n"
+        "%ADOEndFontDict\n"
+        "put\n"
+    )
+
+
+def build_cid_type1() -> bytes:
+    """Return the CID-keyed Type 1 fixture described in the module docstring."""
+    notdef = charstring(0, 1000, HSBW, ENDCHAR)
     square = polygon(100, [(100, 0), (400, 0), (400, 300), (100, 300)])
     # The subroutine draws two sides from the current point (50, 0).
-    triangle = charstring(
-        50, 1000, op(HSBW), 0, 0, op(RMOVETO), 4, op(CALLSUBR), op(CLOSEPATH), op(ENDCHAR)
-    )
-    subr4 = charstring(400, 0, op(RLINETO), -200, 400, op(RLINETO), op(RETURN))
-    stub = charstring(op(RETURN))
+    triangle = charstring(50, 1000, HSBW, 0, 0, RMOVETO, 4, CALLSUBR, CLOSEPATH, ENDCHAR)
+    subr4 = charstring(400, 0, RLINETO, -200, 400, RLINETO, RETURN)
+    stub = charstring(RETURN)
     diamond = polygon(500, [(500, 0), (700, 200), (500, 400), (300, 200)])
 
     fd0_subrs = [encrypt(s) for s in (stub, stub, stub, stub, subr4)]
@@ -310,50 +385,9 @@ def build_cid_type1():
         (1, diamond),  # FD 1: lenIV -1, unencrypted
         (0xFF, b""),
     ]
+    binary = start_data(glyphs, fd0_subrs)
+    subrmap_offset = cidmap_len(len(glyphs))
     cid_count = len(glyphs)
-    fd_bytes, gd_bytes, sd_bytes = 1, 4, 4
-    cidmap_len = (cid_count + 1) * (fd_bytes + gd_bytes)
-    subrmap_offset = cidmap_len
-    subrmap_len = (len(fd0_subrs) + 1) * sd_bytes
-    data_offset = subrmap_offset + subrmap_len
-
-    subr_offsets, subr_data = [], bytearray()
-    for s in fd0_subrs:
-        subr_offsets.append(data_offset + len(subr_data))
-        subr_data += s
-    subr_offsets.append(data_offset + len(subr_data))
-    glyph_base = data_offset + len(subr_data)
-
-    cidmap, glyph_data = bytearray(), bytearray()
-    for fd, data in glyphs:
-        cidmap += bytes([fd]) + struct.pack(">I", glyph_base + len(glyph_data))
-        glyph_data += data
-    cidmap += bytes([0]) + struct.pack(">I", glyph_base + len(glyph_data))
-
-    binary = bytes(cidmap) + b"".join(struct.pack(">I", o) for o in subr_offsets)
-    binary += bytes(subr_data) + bytes(glyph_data)
-    assert len(cidmap) == cidmap_len
-
-    def font_dict(index, private):
-        return (
-            f"dup {index}\n"
-            "%ADOBeginFontDict\n"
-            "14 dict begin\n"
-            f"/FontName /RRTest-CID-FD{index} def\n"
-            "/FontType 1 def\n"
-            "/FontMatrix [0.001 0 0 0.001 0 0] def\n"
-            "/PaintType 0 def\n"
-            "/Private 18 dict dup begin\n"
-            "/MinFeature {16 16} def\n"
-            "/BlueValues [-10 0 700 710] def\n"
-            "/StdHW [50] def\n"
-            "/StdVW [50] def\n"
-            f"{private}"
-            "end def\n"
-            "currentdict end\n"
-            "%ADOEndFontDict\n"
-            "put\n"
-        )
 
     header = (
         "%!PS-Adobe-3.0 Resource-CIDFont\n"
@@ -379,32 +413,29 @@ def build_cid_type1():
         "  /FullName (RRTest CID) def\n"
         "end def\n"
         "/CIDMapOffset 0 def\n"
-        f"/FDBytes {fd_bytes} def\n"
-        f"/GDBytes {gd_bytes} def\n"
+        f"/FDBytes {FD_BYTES} def\n"
+        f"/GDBytes {GD_BYTES} def\n"
         f"/CIDCount {cid_count} def\n"
         "/FDArray 2 array\n"
         + font_dict(
             0,
-            f"/SubrMapOffset {subrmap_offset} def\n/SDBytes {sd_bytes} def\n"
+            f"/SubrMapOffset {subrmap_offset} def\n/SDBytes {SD_BYTES} def\n"
             f"/SubrCount {len(fd0_subrs)} def\n",
         )
         + font_dict(
             1,
-            "/lenIV -1 def\n/SubrMapOffset 0 def\n/SDBytes 4 def\n/SubrCount 0 def\n",
+            f"/lenIV -1 def\n/SubrMapOffset 0 def\n/SDBytes {SD_BYTES} def\n/SubrCount 0 def\n",
         )
         + "def\n"
         f"%%BeginData: {len(binary) + 26} Binary Bytes\n"
         f"(Binary) {len(binary)} StartData "
     )
-    trailer = (
-        "\n%%EndData\n"
-        "%%EndResource\n"
-        "%%EOF\n"
-    )
+    trailer = "\n%%EndData\n%%EndResource\n%%EOF\n"
     return header.encode("ascii") + binary + trailer.encode("ascii")
 
 
-def main():
+def main() -> None:
+    """Rewrite every fixture next to this script."""
     write_truetype("hint-assembled-by-name.ttf", build_truetype("PMingLiU"))
     write_truetype(
         "hint-assembled-by-tables.ttf",
@@ -418,8 +449,7 @@ def main():
     write_truetype("symbolic-mac-roman-named.ttf", build_symbolic_mac_roman_named())
     write_truetype("vertical-forms.ttf", build_vertical_forms())
     write_truetype("no-cmap.ttf", build_no_cmap())
-    with open(os.path.join(HERE, "cid-keyed-type1.cid"), "wb") as f:
-        f.write(build_cid_type1())
+    (HERE / "cid-keyed-type1.cid").write_bytes(build_cid_type1())
 
 
 if __name__ == "__main__":
