@@ -17,6 +17,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # The flags of CI's fuzz-build job, which saves the build cache under the
+  # same key: matching flags let a fuzzing run reuse those artifacts instead
+  # of rebuilding every crate, and keep them free of host-CPU instructions.
+  RUSTFLAGS: "-C target-cpu=generic"
+
 jobs:
   fuzz:
     name: ${{ matrix.target }}
