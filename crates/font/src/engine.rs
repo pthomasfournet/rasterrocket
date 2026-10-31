@@ -33,9 +33,10 @@ pub struct FontEngine {
     ids: Arc<FaceIds>,
     /// Whether glyph bitmaps carry 8-bit coverage.
     aa: bool,
-    /// Programs parsed from memory, keyed by a hash of their bytes.  Hash
-    /// collisions are resolved by comparing the bytes.
-    memory_programs: HashMap<u64, Vec<Arc<FontProgram>>>,
+    /// Programs parsed from memory with their face index, keyed by a hash
+    /// of both.  Hash collisions are resolved by comparing the face index
+    /// and the bytes.
+    memory_programs: HashMap<u64, Vec<(u32, Arc<FontProgram>)>>,
     /// Programs parsed from files, keyed by path and face index.
     file_programs: HashMap<(PathBuf, u32), Arc<FontProgram>>,
 }
@@ -80,8 +81,12 @@ impl FontEngine {
         let cached = self
             .memory_programs
             .get(&key)
-            .and_then(|bucket| bucket.iter().find(|p| p.data() == font_data.as_slice()))
-            .cloned();
+            .and_then(|bucket| {
+                bucket.iter().find(|(index, program)| {
+                    *index == face_index && program.data().eq(font_data.as_slice())
+                })
+            })
+            .map(|(_, p)| Arc::clone(p));
         let program = if let Some(program) = cached {
             program
         } else {
@@ -89,7 +94,7 @@ impl FontEngine {
             self.memory_programs
                 .entry(key)
                 .or_default()
-                .push(Arc::clone(&program));
+                .push((face_index, Arc::clone(&program)));
             program
         };
         self.load_program_face(program, params)
