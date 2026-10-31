@@ -148,8 +148,8 @@ pub trait GpuCompute: Send + Sync {
     /// success, the buffer is overwritten with interleaved `R G B …` bytes
     /// (3 bytes/pixel) and the buffer is resized accordingly.
     ///
-    /// `clut` is the baked CLUT as returned by `bake_cmyk_clut`; `grid_n` is
-    /// the number of grid points per axis (typically 17).
+    /// `clut` is the baked lattice of `grid_n`⁴ RGB triples (`grid_n` points
+    /// per axis, typically 17), indexed by `(k·G³ + c·G² + m·G + y) · 3`.
     ///
     /// # Errors
     ///
