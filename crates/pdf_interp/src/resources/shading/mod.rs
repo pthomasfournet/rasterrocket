@@ -759,10 +759,13 @@ fn decode_type5_mesh<S: CornerSource>(
     let mut reader = BitReader::new(data);
     let mut raw = vec![0u32; source.components()];
     // Keep only two rows at a time; tessellate as we go to avoid storing the entire mesh.
-    let mut prev_row: Vec<MeshVertex<S::Corner>> = Vec::with_capacity(vpr);
+    // Every vertex record occupies at least one byte, so no row holds more
+    // vertices than the stream has bytes.
+    let row_capacity = vpr.min(data.len());
+    let mut prev_row: Vec<MeshVertex<S::Corner>> = Vec::with_capacity(row_capacity);
 
     'rows: while !triangles.is_full() {
-        let mut row = Vec::with_capacity(vpr);
+        let mut row = Vec::with_capacity(row_capacity);
         for _ in 0..vpr {
             let Some(vertex) = read_mesh_vertex(&mut reader, &mut raw, bpc, bpcomp) else {
                 break 'rows;
@@ -1024,6 +1027,36 @@ mod tests {
         assert_eq!(r.read_bits(4), Some(0x5));
         r.align();
         assert_eq!(r.read_bits(1), None);
+    }
+
+    /// `VerticesPerRow` sizes no allocation beyond what the stream can hold.
+    #[test]
+    fn type5_huge_vertices_per_row_reads_the_stream_it_has() {
+        let mut sh = Dictionary::new();
+        sh.set("VerticesPerRow", Object::Integer(1 << 60));
+        sh.set("BitsPerCoordinate", Object::Integer(8));
+        sh.set("BitsPerComponent", Object::Integer(8));
+        let doc = empty_doc();
+        let source = DirectColors {
+            cs: ShadingCs {
+                doc: &doc,
+                space: &ColorSpace::DeviceGray,
+            },
+        };
+        let mut sink = TriangleSink::new();
+        decode_type5_mesh(
+            &sh,
+            &[0, 0, 0, 255, 0, 128, 0, 255, 255],
+            &source,
+            &default_decode(1),
+            &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            1.0,
+            &mut sink,
+        );
+        assert!(
+            sink.finish().is_empty(),
+            "one partial row forms no triangle"
+        );
     }
 
     fn to_rgb(space: &ColorSpace, channels: &[f64]) -> [u8; 3] {
