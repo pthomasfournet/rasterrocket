@@ -24,15 +24,21 @@ use raster::types::BlendMode;
 
 /// A synthesised appearance.
 struct Synthesized {
-    /// The content stream, in page user space.
+    /// The content stream, in form space.
     pub content: Vec<u8>,
-    /// The region the content may paint, in page user space.
+    /// The region the content may paint, in form space.
     pub bbox: [f64; 4],
     /// The constant opacity `/CA` applied to stroking and filling.
     pub opacity: f64,
     /// The blend mode the content is painted with.
     pub blend: BlendMode,
+    /// The form matrix, from form space to page user space; [`IDENTITY`]
+    /// for content written in page user space.
+    pub matrix: Ctm,
 }
+
+/// The identity matrix.
+const IDENTITY: Ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 /// Annotation flag bits (PDF §12.5.3, Table 167).
 const HIDDEN: i64 = 1 << 1;
@@ -229,18 +235,20 @@ fn render_one_annotation(
 }
 
 /// Draw the synthesised appearance `appearance` of the annotation `id`
-/// (direct when `None`) with its opacity and blend mode; turned upright
-/// about the upper-left corner of `no_rotate_rect` when given.
+/// (direct when `None`) with its form matrix, opacity and blend mode;
+/// turned upright about the upper-left corner of `no_rotate_rect` when
+/// given.
 fn draw_synthesized(
     renderer: &mut PageRenderer<'_>,
     appearance: Synthesized,
     id: Option<ObjectId>,
     no_rotate_rect: Option<[f64; 4]>,
 ) {
-    const IDENTITY: Ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
     let matrix = match no_rotate_rect {
-        Some(rect) if renderer.rotate_cw != 0 => upright_about(rect, renderer.rotate_cw),
-        _ => IDENTITY,
+        Some(rect) if renderer.rotate_cw != 0 => {
+            ctm_multiply(&appearance.matrix, &upright_about(rect, renderer.rotate_cw))
+        }
+        _ => appearance.matrix,
     };
     // The form has no stream object; the annotation (or, for a direct
     // annotation, the page) stands in for it in the active-form stack, and
@@ -288,7 +296,8 @@ fn draw_text_appearance(
     renderer.resources = page_resources;
 }
 
-/// Draw the synthesised appearance of the widget of `field` in `rect`.
+/// Draw the synthesised appearance of the widget of `field` in `rect`,
+/// turned by its `/MK /R` rotation.
 fn draw_widget(
     renderer: &mut PageRenderer<'_>,
     form: &widget::AcroForm,
@@ -298,12 +307,29 @@ fn draw_widget(
 ) {
     let doc = renderer.resources.doc();
     let resources = widget::resources(doc, form, field);
+    let (local, matrix) = rotated_box(rect, field.rotation());
     draw_text_appearance(renderer, &resources, id, None, |width| Synthesized {
-        content: widget::content(doc, field, rect, width),
-        bbox: rect,
+        content: widget::content(doc, field, local, width),
+        bbox: local,
         opacity: 1.0,
         blend: BlendMode::Normal,
+        matrix,
     });
+}
+
+/// The box an appearance rotated by `rotation` degrees counter-clockwise
+/// (a multiple of 90) is laid out in, with its lower-left corner at the
+/// origin and its sides swapped for a quarter turn, and the matrix that
+/// turns it and places it on `rect` (ISO 32000-2 §12.5.6.19, `/MK /R`).
+fn rotated_box(rect: [f64; 4], rotation: u16) -> ([f64; 4], Ctm) {
+    let [x0, y0, x1, y1] = rect;
+    let (w, h) = (x1 - x0, y1 - y0);
+    match rotation % 360 {
+        90 => ([0.0, 0.0, h, w], [0.0, 1.0, -1.0, 0.0, x1, y0]),
+        180 => ([0.0, 0.0, w, h], [-1.0, 0.0, 0.0, -1.0, x1, y1]),
+        270 => ([0.0, 0.0, h, w], [0.0, -1.0, 1.0, 0.0, x0, y1]),
+        _ => ([0.0, 0.0, w, h], [1.0, 0.0, 0.0, 1.0, x0, y0]),
+    }
 }
 
 /// Draw the synthesised appearance of the free text annotation `annot`

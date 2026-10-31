@@ -14,11 +14,11 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
-use super::Synthesized;
 use super::content::{
     Border, colour, ellipse, inset, n, number, numbers, rectangle, resolve_array,
 };
 use super::line_ending::LineEnding;
+use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
 
 /// Side of the square `Text` annotation icon, in points.
@@ -62,6 +62,7 @@ pub(super) fn markup(doc: &Document, annot: &Dictionary, rect: [f64; 4]) -> Opti
         bbox,
         opacity: number(doc, annot.get(b"CA")).unwrap_or(1.0).clamp(0.0, 1.0),
         blend,
+        matrix: IDENTITY,
     })
 }
 

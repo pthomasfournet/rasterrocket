@@ -378,8 +378,9 @@ renderer/
                        without /AP /N, from geometry and colours
       widget.rs      — appearances synthesised for form field widgets
                        (text, choice, check/radio, push button) from /V,
-                       /DA, /MK and /AcroForm /DR, when /AP /N is absent or,
-                       for text and choice fields, /NeedAppearances is set
+                       /DA, /MK (with its /R rotation) and /AcroForm /DR,
+                       when /AP /N is absent or, for text and choice
+                       fields, /NeedAppearances is set
       free_text.rs   — appearances synthesised for FreeText without /AP /N:
                        /C fill, border in the /DA colour, /Contents (else
                        the plain text of /RC) wrapped in the /RD box,

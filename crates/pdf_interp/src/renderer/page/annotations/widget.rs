@@ -5,10 +5,12 @@
 //!
 //! A widget is synthesised when it has no normal appearance, and a text or
 //! choice field also when the form sets `/NeedAppearances`, since its
-//! stored appearance may not show its value.  The content is written in
-//! page user space and drawn with the resources of [`resources`]: `/DR`
-//! with the `/DA` font, and `ZaDb` for check marks, added as standard
-//! fonts when `/DR` lacks them.
+//! stored appearance may not show its value.  The content is written in a
+//! box of the widget's size, its sides swapped when `/MK /R` turns it a
+//! quarter turn, which the form matrix turns and places on `/Rect`.  It is
+//! drawn with the resources of [`resources`]: `/DR` with the `/DA` font,
+//! and `ZaDb` for check marks, added as standard fonts when `/DR` lacks
+//! them.
 
 use std::fmt::Write as _;
 
@@ -97,6 +99,8 @@ pub(super) struct Field {
     border_colour: Option<Vec<f64>>,
     caption: Option<Vec<u8>>,
     border_width: f64,
+    /// The `/MK /R` rotation: 0, 90, 180 or 270 degrees counter-clockwise.
+    rotation: u16,
 }
 
 impl Field {
@@ -184,7 +188,28 @@ impl Field {
             border_colour: colour(b"BC"),
             caption: mk.as_ref().and_then(|mk| string(doc, mk.get(b"CA"))),
             border_width,
+            rotation: mk
+                .as_ref()
+                .and_then(|mk| mk.get_i64(b"R"))
+                .map_or(0, quarter_turns),
         })
+    }
+
+    /// The `/MK /R` rotation of the widget's appearance, in degrees
+    /// counter-clockwise: 0, 90, 180 or 270.
+    pub(super) const fn rotation(&self) -> u16 {
+        self.rotation
+    }
+}
+
+/// The rotation `degrees`, which `/MK /R` requires to be a multiple of 90,
+/// reduced to 0, 90, 180 or 270; 0 for another value.
+const fn quarter_turns(degrees: i64) -> u16 {
+    match degrees.rem_euclid(360) {
+        90 => 90,
+        180 => 180,
+        270 => 270,
+        _ => 0,
     }
 }
 

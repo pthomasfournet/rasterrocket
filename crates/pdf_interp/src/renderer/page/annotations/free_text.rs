@@ -16,7 +16,6 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
-use super::Synthesized;
 use super::content::{Border, colour, colour_op, inset, n, number, numbers, rectangle, string};
 use super::line_ending::LineEnding;
 use super::text::{
@@ -24,6 +23,7 @@ use super::text::{
     plain_text,
 };
 use super::widget::AcroForm;
+use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
 
 /// The default appearance of a free text annotation that has none and
@@ -172,6 +172,7 @@ impl FreeText {
             bbox: inset(self.rect, &[-(bw + reach); 4]),
             opacity: self.opacity,
             blend: BlendMode::Normal,
+            matrix: IDENTITY,
         }
     }
 }

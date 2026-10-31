@@ -153,3 +153,66 @@ fn a_button_with_an_appearance_keeps_it_under_need_appearances() {
     );
     assert_eq!(dark, 0);
 }
+
+/// The bounds `[x0 y0 x1 y1]` (user space, exclusive upper ends) of the
+/// dark pixels of the page, or `None` when it has none.
+fn dark_bounds(pdf: Vec<u8>) -> Option<[u32; 4]> {
+    let s = common::session(pdf, BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    let data = bmp.data();
+    let mut b: Option<[u32; 4]> = None;
+    for y in 0..H {
+        for x in 0..W {
+            let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
+            if data[i..i + 3].iter().all(|&c| c < 100) {
+                let r = b.get_or_insert([x, y, x + 1, y + 1]);
+                *r = [r[0].min(x), r[1].min(y), r[2].max(x + 1), r[3].max(y + 1)];
+            }
+        }
+    }
+    b
+}
+
+#[test]
+fn a_rotated_text_field_runs_its_text_along_the_turned_box() {
+    // A tall, narrow field whose appearance is turned a quarter turn: the
+    // text runs along the field's length.
+    let field = |r: i64| {
+        let widget = format!(
+            "/FT /Tx /T (r) /Rect [80 5 110 95] /V (Rotated text) /DA (/Helv 12 Tf 0 g) \
+             /MK << /R {r} >>"
+        );
+        dark_bounds(document("", &[&widget], vec![])).expect("text is drawn")
+    };
+    for r in [90, 270, -90] {
+        let b = field(r);
+        assert!(b[3] - b[1] > 50 && b[2] - b[0] < 15, "/R {r}: {b:?}");
+        assert!(
+            b[0] >= 80 && b[2] <= 110 && b[1] >= 5 && b[3] <= 95,
+            "/R {r}: {b:?}"
+        );
+    }
+    // Upright, the text is a single horizontal line clipped to the field.
+    let b = field(0);
+    assert!(b[3] - b[1] < 15, "{b:?}");
+}
+
+#[test]
+fn a_half_turned_push_button_turns_its_caption_upside_down() {
+    let button = |r: i64| {
+        let widget = format!(
+            "/FT /Btn /Ff 65536 /T (p) /Rect [20 20 180 80] /DA (/Helv 20 Tf 0 g) \
+             /MK << /CA (Push gp) /R {r} >>"
+        );
+        dark_bounds(document("", &[&widget], vec![])).expect("caption is drawn")
+    };
+    let (upright, turned) = (button(0), button(180));
+    // The descenders of "gp" hang below the caption's body upright and
+    // rise above it turned, so twice the ink's vertical centre lies below
+    // the field's doubled middle (100) upright and above it turned.
+    let centre = |b: [u32; 4]| b[1] + b[3];
+    assert!(
+        centre(upright) < 100 && centre(turned) > 100,
+        "{upright:?} {turned:?}"
+    );
+}

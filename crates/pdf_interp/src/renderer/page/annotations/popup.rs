@@ -11,9 +11,9 @@
 use pdf::{Dictionary, Document};
 use raster::types::BlendMode;
 
-use super::Synthesized;
 use super::content::{inset, rectangle, string};
 use super::text::{DefaultAppearance, TextBlock, decode_text_string, encode_win_ansi, plain_text};
+use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
 
 /// The resource name of the window's font, standard Helvetica.
@@ -84,5 +84,6 @@ pub(super) fn appearance(
         bbox: rect,
         opacity: 1.0,
         blend: BlendMode::Normal,
+        matrix: IDENTITY,
     }
 }
