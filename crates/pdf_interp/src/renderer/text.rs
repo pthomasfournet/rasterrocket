@@ -3,6 +3,8 @@
 //! Tracks the parameters that control text positioning and appearance within
 //! a BT/ET text object. These are a subset of the PDF graphics state (§8.3).
 
+use std::sync::Arc;
+
 use super::font_cache::ActiveFont;
 
 /// PDF text matrix `[a b c d e f]` (§8.3.3): it maps `(x, y)` to
@@ -34,8 +36,8 @@ pub(crate) struct TextState {
     pub render_mode: i32,
 
     // ── Font ─────────────────────────────────────────────────────────────────
-    /// Font resource name from `Tf`.
-    pub font_name: Vec<u8>,
+    /// Font resource name from `Tf`, shared by the saved states.
+    pub font_name: Arc<[u8]>,
     /// The font `Tf` selected, resolved in the resources in effect at the
     /// `Tf`; `None` before any `Tf` or when the name did not resolve.
     pub font: Option<ActiveFont>,
@@ -58,7 +60,7 @@ impl Default for TextState {
             leading: 0.0,
             rise: 0.0,
             render_mode: 0,
-            font_name: Vec::new(),
+            font_name: Arc::from([].as_slice()),
             font: None,
             font_size: 0.0,
             text_matrix: TEXT_MATRIX_IDENTITY,
