@@ -96,7 +96,7 @@ Lower-level API for explicit control over PDF opening and per-page rendering. Al
 ```rust
 pub mod session {
     pub use super::{
-        open_session, open_session_from_bytes, prescan_session,
+        open_session, open_session_from_bytes, prescan_session, render_page_gray,
         render_page_rgb, render_page_rgb_with, rgb_to_gray,
     };
 }
@@ -124,6 +124,16 @@ pub fn render_page_rgb(
 Renders one whole page to an RGB bitmap. `Bitmap` is `rasterrocket_render::Bitmap` and `Rgb8` / `Gray8` are `rasterrocket_color` types; `rasterrocket` does not re-export them, so code that names them depends on those crates too. `scale` is the pixel-per-point multiplier, `dpi / 72.0`. Equivalent to `render_page_rgb_with(session, page_num, &RenderParams::new(scale))`; for different horizontal and vertical resolutions use `RenderParams::new_xy`.
 
 Safe to call from multiple Rayon threads concurrently. GPU image decoders are managed per-thread via `thread_local!`.
+
+```rust
+pub fn render_page_gray(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<RenderedPage, RasterError>
+```
+
+Renders one page to the grayscale `RenderedPage` that `raster_pdf` yields for it: `opts.dpi` and `opts.deskew` apply; the page-selection fields are ignored, and the fields mirrored on `SessionConfig` were fixed when the session was opened.
 
 ```rust
 pub fn render_page_rgb_with(
@@ -634,30 +644,39 @@ it when your input is an image archive rather than a PDF.
 ### `open_comic`
 
 ```rust
-pub fn open_comic(
-    path: &Path,
-    opts: &ComicOptions,
-) -> Result<Vec<(u32, Result<RenderedPage, ComicError>)>, ComicError>
+pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicError>
+
+pub struct ComicPages { /* … */ }
+impl Iterator for ComicPages { type Item = (u32, Result<RenderedPage, ComicError>); }
+impl ExactSizeIterator for ComicPages {}
+impl ComicPages {
+    pub fn retain(&mut self, keep: impl FnMut(u32) -> bool);
+}
 ```
 
-Opens an archive and renders its pages. Returns a `Vec` of `(page_num, result)`
-in reading order; a per-page decode failure is an inner `Err` and does not abort
-the rest, matching `raster_pdf`.
+Opens an archive. `ComicPages` yields `(page_num, result)` in reading order and
+decodes each page only when it is reached, so memory does not grow with the
+page count; a per-page decode failure is an inner `Err` and does not abort the
+rest, matching `raster_pdf`. `len()` is the number of pages still to come, and
+`retain` drops pages before any is decoded.
 
 **Content routing** (decided after the entry list is built):
 
 - **Page images present** → render the images (numeric-aware natural sort by
   filename, magic-byte format detection over JPEG/PNG/WebP/TIFF). Any PDF entry
   is ignored with a warning — images always win.
-- **No images, exactly one PDF** → render that PDF via `raster_pdf_from_bytes`
-  (the PDF's own page numbering).
+- **No images, exactly one PDF** → render that PDF's pages via
+  `open_session_from_bytes` and `render_page_gray` (the PDF's own page
+  numbering).
 - **No images, two or more PDFs** → `ComicError::AmbiguousArchive`, naming the
   PDFs rather than guessing.
 - **No images, no PDF** → `ComicError::NoImages`.
 
-**Whole-archive errors (outer `Err`):** `RarUnsupported` (a `.cbr` input),
-`Open`/`BadArchive` (unreadable or malformed container), `AmbiguousArchive`,
-`NoImages`. **Per-page errors (inner `Err`):** `Decode`, `TooLarge`, `Deskew`,
+**Whole-archive errors (outer `Err`):** `InvalidOptions` (a non-finite or
+non-positive `dpi`, `first_page` 0 or after `last_page`), `RarUnsupported` (a
+`.cbr` input), `Open`/`BadArchive` (unreadable or malformed container),
+`AmbiguousArchive`, `Pdf` (an embedded PDF that cannot be opened or has no
+page in the window), `NoImages`. **Per-page errors (inner `Err`):** `Decode`, `TooLarge`, `Deskew`,
 `Pdf`.
 
 **`ComicOptions`** mirrors the relevant subset of `RasterOptions`: `dpi: f32`,

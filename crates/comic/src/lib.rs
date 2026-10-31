@@ -16,15 +16,89 @@ mod order;
 #[cfg(test)]
 mod test_helpers;
 
+use std::collections::VecDeque;
 use std::path::Path;
 
 pub use pdf_raster::RenderedPage;
 
-/// A comic archive rendered to pages: each is its 1-based page number paired
-/// with the page or the per-page error that replaced it. Whole-archive failures
-/// are the outer `Err`; one corrupt page is an inner `Err` and never aborts the
-/// run.
-type ComicPages = Vec<(u32, Result<RenderedPage, ComicError>)>;
+/// The pages of an opened comic archive, rendered one at a time as the
+/// iterator advances.
+///
+/// Each item is a 1-based page number paired with the page or the per-page
+/// error that replaced it; one corrupt page never ends the iteration.  Only
+/// the archive's compressed entries (or the embedded PDF) are held between
+/// pages, so memory does not grow with the page count.  [`len`](ExactSizeIterator::len)
+/// is the number of pages still to be yielded, and [`retain`](Self::retain)
+/// drops pages before any of them is rendered.
+pub struct ComicPages {
+    opts: ComicOptions,
+    source: Source,
+}
+
+/// What [`ComicPages`] renders its pages from.
+enum Source {
+    /// Page images in reading order: page number, entry name, entry bytes
+    /// (or the error reading them).
+    Images(VecDeque<(u32, String, Result<Vec<u8>, ComicError>)>),
+    /// The archive's single embedded PDF and the page numbers to render.
+    Pdf {
+        session: Box<pdf_raster::RasterSession>,
+        pages: VecDeque<u32>,
+    },
+}
+
+impl ComicPages {
+    /// Keep only the pages whose number satisfies `keep`; the others are
+    /// discarded unrendered.
+    pub fn retain(&mut self, mut keep: impl FnMut(u32) -> bool) {
+        match &mut self.source {
+            Source::Images(entries) => entries.retain(|(page, _, _)| keep(*page)),
+            Source::Pdf { pages, .. } => pages.retain(|page| keep(*page)),
+        }
+    }
+}
+
+impl Iterator for ComicPages {
+    type Item = (u32, Result<RenderedPage, ComicError>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.source {
+            Source::Images(entries) => {
+                let (page, name, raw) = entries.pop_front()?;
+                let rendered = raw.and_then(|bytes| render_one(&name, &bytes, page, &self.opts));
+                Some((page, rendered))
+            }
+            Source::Pdf { session, pages } => {
+                let page = pages.pop_front()?;
+                let mut ropts = pdf_raster::RasterOptions::new(self.opts.dpi);
+                ropts.deskew = self.opts.deskew;
+                let rendered = pdf_raster::render_page_gray(session, page, &ropts)
+                    .map_err(|e| ComicError::Pdf(e.to_string()));
+                Some((page, rendered))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = match &self.source {
+            Source::Images(entries) => entries.len(),
+            Source::Pdf { pages, .. } => pages.len(),
+        };
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for ComicPages {}
+
+impl std::iter::FusedIterator for ComicPages {}
+
+impl std::fmt::Debug for ComicPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComicPages")
+            .field("remaining", &self.len())
+            .finish_non_exhaustive()
+    }
+}
 
 /// Options controlling comic-archive rendering. Mirrors the relevant subset of
 /// `rasterrocket::RasterOptions` so the CLI can pass one config to either path.
@@ -34,7 +108,8 @@ pub struct ComicOptions {
     /// DPI reported on the produced [`RenderedPage`]. Comic images carry no
     /// physical resolution, so this is a declared value passed through to
     /// `RenderedPage::dpi` / `effective_dpi` for downstream OCR (Tesseract uses
-    /// it for feature scaling). Must be > 0.
+    /// it for feature scaling); an embedded PDF is rendered at it. Must be
+    /// positive and finite.
     pub dpi: f32,
     /// First page (1-based, inclusive), counted over decodable images in
     /// reading order. Must be ≥ 1.
@@ -76,6 +151,8 @@ impl Default for ComicOptions {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ComicError {
+    /// [`ComicOptions`] fields violate their documented constraints.
+    InvalidOptions(String),
     /// The archive file could not be opened or read.
     Open(std::io::Error),
     /// The container exists but could not be parsed as its claimed format.
@@ -111,6 +188,7 @@ pub enum ComicError {
 impl std::fmt::Display for ComicError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidOptions(m) => write!(f, "invalid comic options: {m}"),
             Self::Open(e) => write!(f, "cannot open comic archive: {e}"),
             Self::BadArchive(m) => write!(f, "malformed comic archive: {m}"),
             Self::RarUnsupported => write!(
@@ -148,9 +226,10 @@ impl std::error::Error for ComicError {
     }
 }
 
-/// Open a comic archive and render its pages as grayscale [`RenderedPage`]s.
+/// Open a comic archive for rendering its pages as grayscale [`RenderedPage`]s.
 ///
-/// Yields `(page_num, Result<RenderedPage, ComicError>)` in reading order. A
+/// The returned [`ComicPages`] yields `(page_num, Result<RenderedPage,
+/// ComicError>)` in reading order, decoding each page when it is reached. A
 /// per-page decode failure is yielded as `Err` and iteration continues — one
 /// corrupt image never aborts the archive (matching `rasterrocket::raster_pdf`).
 ///
@@ -165,14 +244,14 @@ impl std::error::Error for ComicError {
 ///
 /// # Errors
 ///
-/// Returns `Err` *before* iteration for whole-archive failures: a `.cbr` input
+/// Returns `Err` *before* iteration for whole-archive failures: options that
+/// violate their constraints ([`ComicError::InvalidOptions`]), a `.cbr` input
 /// ([`ComicError::RarUnsupported`]), an unreadable/malformed container, an
-/// ambiguous PDF-only archive ([`ComicError::AmbiguousArchive`]), or an archive
-/// with no decodable content ([`ComicError::NoImages`]).
+/// ambiguous PDF-only archive ([`ComicError::AmbiguousArchive`]), an embedded
+/// PDF that cannot be opened ([`ComicError::Pdf`]), or an archive with no
+/// decodable content in the page window ([`ComicError::NoImages`]).
 pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicError> {
-    if opts.dpi <= 0.0 {
-        return Err(ComicError::BadArchive("dpi must be > 0".to_owned()));
-    }
+    validate_options(opts)?;
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -237,26 +316,43 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
         return Err(ComicError::NoImages);
     }
 
-    // Second pass: assign 1-based page numbers over kept entries, apply the
-    // window, and render each. Per-page errors are yielded (not panicked) and
-    // iteration continues.
-    let first = opts.first_page.max(1);
-    let last = opts.last_page;
-    let mut out: ComicPages = Vec::new();
-    let mut page_num: u32 = 0;
-    for (name, raw) in decodable {
-        page_num = page_num.saturating_add(1);
-        if page_num < first || page_num > last {
-            continue;
-        }
-        let page = raw.and_then(|bytes| render_one(&name, &bytes, page_num, opts));
-        out.push((page_num, page));
-    }
-    if out.is_empty() {
+    // Second pass: assign 1-based page numbers over kept entries and apply
+    // the window. Decoding is deferred to `ComicPages::next`.
+    let entries: VecDeque<_> = (1..=u32::MAX)
+        .zip(decodable)
+        .filter(|(page, _)| (opts.first_page..=opts.last_page).contains(page))
+        .map(|(page, (name, raw))| (page, name, raw))
+        .collect();
+    if entries.is_empty() {
         // The window excluded every kept page.
         return Err(ComicError::NoImages);
     }
-    Ok(out)
+    Ok(ComicPages {
+        opts: opts.clone(),
+        source: Source::Images(entries),
+    })
+}
+
+/// Reject options outside their documented constraints.
+fn validate_options(opts: &ComicOptions) -> Result<(), ComicError> {
+    if !(opts.dpi.is_finite() && opts.dpi > 0.0) {
+        return Err(ComicError::InvalidOptions(format!(
+            "dpi must be a positive finite number, got {}",
+            opts.dpi
+        )));
+    }
+    if opts.first_page == 0 {
+        return Err(ComicError::InvalidOptions(
+            "first_page must be ≥ 1 (pages are 1-based)".to_owned(),
+        ));
+    }
+    if opts.first_page > opts.last_page {
+        return Err(ComicError::InvalidOptions(format!(
+            "first_page ({}) > last_page ({})",
+            opts.first_page, opts.last_page
+        )));
+    }
+    Ok(())
 }
 
 /// Decode, guard, deskew, and assemble one page from already-read bytes. Errors
@@ -302,8 +398,8 @@ fn render_one(
     ))
 }
 
-/// Extract a single PDF entry's bytes and render it via the in-memory PDF
-/// pipeline, mapping render errors into [`ComicError::Pdf`]. Page numbers are the
+/// Open a single PDF entry as a session whose pages [`ComicPages`] renders
+/// on demand, mapping errors into [`ComicError::Pdf`]. Page numbers are the
 /// PDF's own 1-based page sequence — they are not renumbered.
 fn render_embedded_pdf(
     archive: &mut dyn archive::Archive,
@@ -311,21 +407,26 @@ fn render_embedded_pdf(
     opts: &ComicOptions,
 ) -> Result<ComicPages, ComicError> {
     let bytes = archive.read_entry(name)?;
-    let mut ropts = pdf_raster::RasterOptions::new(opts.dpi);
-    ropts.first_page = opts.first_page;
-    ropts.last_page = opts.last_page;
-    ropts.deskew = opts.deskew;
-    let out: ComicPages = pdf_raster::raster_pdf_from_bytes(bytes, &ropts)
-        .map(|(n, r)| (n, r.map_err(|e| ComicError::Pdf(e.to_string()))))
-        .collect();
-    if out.is_empty() {
-        // A valid PDF with zero pages yields nothing — surface that as a clear
-        // error rather than a silent empty success. A PDF whose pages all *error*
-        // still produces per-page `Err` items here (out is non-empty), so those
-        // failures surface individually and are not masked by this check.
+    let session = pdf_raster::open_session_from_bytes(bytes, &pdf_raster::SessionConfig::default())
+        .map_err(|e| ComicError::Pdf(format!("embedded PDF {name}: {e}")))?;
+    let total = session.total_pages();
+    if total == 0 {
         return Err(ComicError::Pdf(format!("embedded PDF {name} has no pages")));
     }
-    Ok(out)
+    let pages: VecDeque<u32> = (opts.first_page..=opts.last_page.min(total)).collect();
+    if pages.is_empty() {
+        return Err(ComicError::Pdf(format!(
+            "embedded PDF {name} has {total} pages, none in {}..={}",
+            opts.first_page, opts.last_page
+        )));
+    }
+    Ok(ComicPages {
+        opts: opts.clone(),
+        source: Source::Pdf {
+            session: Box::new(session),
+            pages,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -398,7 +499,9 @@ startxref\n180\n%%EOF"
         ]);
         let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
 
-        let pages = open_comic(&path, &ComicOptions::default()).unwrap();
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .unwrap()
+            .collect();
         assert_eq!(pages.len(), 2, "two images, xml filtered out");
         // page2 (value ~100) must come before page10 (value ~200): natural sort.
         let (n1, r1) = &pages[0];
@@ -408,6 +511,43 @@ startxref\n180\n%%EOF"
         let p2 = r2.as_ref().unwrap();
         assert!(p1.pixels[0] < p2.pixels[0], "page2 darker than page10");
         assert_eq!((p1.width, p1.height), (4, 4));
+    }
+
+    #[test]
+    fn invalid_options_are_refused_before_the_archive_is_read() {
+        let (_dir, path) = write_temp_cbz("book.cbz", &make_cbz(&[("1.jpg", &jpeg_page(4, 4, 9))]));
+        let mut nan = ComicOptions::new(f32::NAN);
+        let mut inverted = ComicOptions::new(300.0);
+        inverted.first_page = 5;
+        inverted.last_page = 3;
+        let mut zero = ComicOptions::new(300.0);
+        zero.first_page = 0;
+        for opts in [&mut nan, &mut inverted, &mut zero] {
+            assert!(
+                matches!(open_comic(&path, opts), Err(ComicError::InvalidOptions(_))),
+                "{opts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_decode_lazily_and_retain_skips_unwanted_ones() {
+        let cbz = make_cbz(&[
+            ("1.jpg", &jpeg_page(4, 4, 10)),
+            ("2.jpg", b"\xFF\xD8\xFF corrupt after the marker"),
+            ("3.jpg", &jpeg_page(4, 4, 30)),
+        ]);
+        let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
+        let mut pages = open_comic(&path, &ComicOptions::default()).unwrap();
+        assert_eq!(pages.len(), 3);
+        pages.retain(|page| page != 2);
+        assert_eq!(pages.len(), 2);
+        let got: Vec<_> = pages.map(|(n, r)| (n, r.is_ok())).collect();
+        assert_eq!(
+            got,
+            [(1, true), (3, true)],
+            "the corrupt page was never decoded"
+        );
     }
 
     #[test]
@@ -439,7 +579,9 @@ startxref\n180\n%%EOF"
         ]);
         let (_dir, path) = write_temp_cbz("mixed.cbz", &cbz);
 
-        let pages = open_comic(&path, &ComicOptions::default()).unwrap();
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .unwrap()
+            .collect();
         assert_eq!(
             pages.len(),
             1,
@@ -453,7 +595,9 @@ startxref\n180\n%%EOF"
     fn cbz_with_only_a_pdf_renders_it() {
         let cbz = make_cbz(&[("book.pdf", &minimal_pdf())]);
         let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
-        let pages = open_comic(&path, &ComicOptions::default()).unwrap();
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .unwrap()
+            .collect();
         assert!(!pages.is_empty(), "the embedded PDF must yield pages");
         assert_eq!(pages[0].0, 1, "PDF's own 1-based page numbering");
         assert!(pages[0].1.is_ok());
@@ -477,7 +621,9 @@ startxref\n180\n%%EOF"
             ("book.pdf", &minimal_pdf()),
         ]);
         let (_dir, path) = write_temp_cbz("both.cbz", &cbz);
-        let pages = open_comic(&path, &ComicOptions::default()).unwrap();
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .unwrap()
+            .collect();
         assert_eq!(pages.len(), 1, "only the image page is rendered");
         let page = pages[0].1.as_ref().unwrap();
         assert_eq!(

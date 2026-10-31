@@ -1,11 +1,9 @@
 //! The [`RasterOptions`]-driven entry points: the sequential page iterator
 //! and the channel-fed background render.
 
-use crate::gray::rgb_to_gray;
-use crate::render::render_page_rgb_with_geom;
 use crate::{
-    PageSet, RasterError, RasterOptions, RasterSession, RenderParams, RenderedPage, SessionConfig,
-    open_session, open_session_from_bytes,
+    PageSet, RasterError, RasterOptions, RasterSession, RenderedPage, SessionConfig, open_session,
+    open_session_from_bytes, render_page_gray,
 };
 
 // ── Sequential iterator ───────────────────────────────────────────────────────
@@ -337,39 +335,7 @@ pub fn render_channel(
 // ── Single-page render (gray + deskew) ───────────────────────────────────────
 
 fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, RasterError> {
-    let dpi = state.opts.dpi;
-    let scale = f64::from(dpi) / 72.0;
-
-    let page_id = state.session.resolve_page(page_num)?;
-    let geom = pdf_interp::page_size_pts_by_id(&state.session.doc, page_id)?;
-
-    let (rgb, diagnostics) = render_page_rgb_with_geom(
-        &state.session,
-        page_num,
-        page_id,
-        geom,
-        &RenderParams::new(scale),
-    )?;
-    let mut gray = rgb_to_gray(&rgb);
-
-    if state.opts.deskew {
-        crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
-    }
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "dpi is an f32 (≤ ~3400 in practice); user_unit is validated to [0.1, 10.0]; \
-                  the product is at most ~34 000, well within f32 range"
-    )]
-    let effective_dpi = (f64::from(dpi) * geom.user_unit) as f32;
-
-    Ok(crate::page::gray8_to_rendered_page(
-        &gray,
-        page_num,
-        dpi,
-        effective_dpi,
-        diagnostics,
-    ))
+    render_page_gray(&state.session, page_num, &state.opts)
 }
 
 #[cfg(test)]

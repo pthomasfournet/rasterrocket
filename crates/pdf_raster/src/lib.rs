@@ -134,7 +134,7 @@ pub use pdf::Password;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{FormType, PageGeometry, RenderPurpose};
-pub use render::{render_page_rgb, render_page_rgb_with};
+pub use render::{render_page_gray, render_page_rgb, render_page_rgb_with};
 pub use request::{CancelToken, RenderParams, RenderRegion};
 
 /// Session-level API for explicit control over PDF opening and per-page rendering.
@@ -148,7 +148,7 @@ pub use request::{CancelToken, RenderParams, RenderRegion};
 /// compatibility.
 pub mod session {
     pub use super::{
-        open_session, open_session_from_bytes, prescan_session, render_page_rgb,
+        open_session, open_session_from_bytes, prescan_session, render_page_gray, render_page_rgb,
         render_page_rgb_with, rgb_to_gray,
     };
 }

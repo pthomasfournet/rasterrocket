@@ -7,7 +7,8 @@ use color::Rgb8;
 use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
-use crate::{RasterError, RasterSession, RenderParams, RenderRegion};
+use crate::gray::rgb_to_gray;
+use crate::{RasterError, RasterOptions, RasterSession, RenderParams, RenderRegion, RenderedPage};
 
 /// Render one whole page to an RGB bitmap at `scale` device pixels per point.
 ///
@@ -56,6 +57,53 @@ pub fn render_page_rgb_with(
     let page_id = session.resolve_page(page_num)?;
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
     render_page_rgb_with_geom(session, page_num, page_id, geom, params).map(|(bmp, _diag)| bmp)
+}
+
+/// Render page `page_num` (1-based) of `session` to the grayscale
+/// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it.
+///
+/// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi)
+/// and [`deskew`](RasterOptions::deskew).  The page selection fields are
+/// the caller's, and the fields mirrored on [`SessionConfig`](crate::SessionConfig)
+/// were fixed when `session` was opened.
+///
+/// # Errors
+///
+/// As [`render_page_rgb_with`], plus [`RasterError::Deskew`] when deskew
+/// rotation fails.
+pub fn render_page_gray(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<RenderedPage, RasterError> {
+    let dpi = opts.dpi;
+    let page_id = session.resolve_page(page_num)?;
+    let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
+    let user_unit = geom.user_unit;
+    let params = RenderParams::new(f64::from(dpi) / 72.0);
+    let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
+    let mut gray = rgb_to_gray(&rgb);
+    drop(rgb);
+
+    if opts.deskew {
+        crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
+    }
+
+    // `dpi` has passed the positive-finite scale check above; a product
+    // beyond `f32::MAX` saturates to infinity rather than wrapping.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "f64 → f32 of a positive finite value saturates; UserUnit is within [0.1, 10]"
+    )]
+    let effective_dpi = (f64::from(dpi) * user_unit) as f32;
+
+    Ok(crate::page::gray8_to_rendered_page(
+        &gray,
+        page_num,
+        dpi,
+        effective_dpi,
+        diagnostics,
+    ))
 }
 
 /// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
@@ -110,7 +158,7 @@ fn page_view(
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
 /// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
-pub fn render_page_rgb_with_geom(
+fn render_page_rgb_with_geom(
     session: &RasterSession,
     page_num: u32,
     page_id: pdf::ObjectId,

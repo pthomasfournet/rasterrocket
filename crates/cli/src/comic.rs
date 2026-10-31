@@ -48,7 +48,7 @@ pub(crate) fn run(
     // shrunken total.
     let opts = ComicOptions::new(dpi);
 
-    let pages = open_comic(Path::new(&args.input), &opts)?;
+    let mut pages = open_comic(Path::new(&args.input), &opts)?;
 
     // A comic with more pages than `i32::MAX` cannot be page-listed or named;
     // fail hard rather than silently mis-number, matching the PDF path.
@@ -66,14 +66,13 @@ pub(crate) fn run(
     for w in &warnings {
         eprintln!("rrocket: warning: {w}");
     }
+    // Drop the pages the selector excluded (odd/even/single/window) before
+    // any is decoded; `selected` is ascending.
+    pages.retain(|page| i32::try_from(page).is_ok_and(|p| selected.binary_search(&p).is_ok()));
 
     let mut written = 0usize;
     let mut failed = 0usize;
     for (page_num, result) in pages {
-        // Skip pages the selector excluded (odd/even/single/window).
-        if i32::try_from(page_num).is_ok_and(|p| !selected.contains(&p)) {
-            continue;
-        }
         match result {
             Ok(page) => match write_page(args, spill, &page, total) {
                 Ok(()) => written += 1,
