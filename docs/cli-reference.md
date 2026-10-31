@@ -97,7 +97,7 @@ flags only the selected area is rendered, so output larger than the limits
 (a poster or map at high resolution, a 64K-class frame) is produced as tiles,
 one run per tile with `-x`/`-y`/`-W`/`-H`. In the library the same is done
 with `RenderParams::with_region` and `RenderRegion`; see the
-[API reference](api-reference.md#rasterrocketsession-module). A page whose pixel size
+[API reference](api-reference.md#session-api). A page whose pixel size
 at the chosen resolution does not fit in 32 bits cannot be tiled either.
 
 **Images.** An image may declare at most 131 071 pixels on a side and decode
@@ -105,7 +105,21 @@ to at most 1 GiB of samples (width × height × components). An image over
 either is refused before it is decompressed: it is skipped, the page renders
 without it, and a warning naming the page and image goes to stderr; the
 library reports it in `PageDiagnostics::image_failures`. With `--strict` the
-page fails instead.
+page fails instead. A JPEG 2000 codestream is further limited to 2³⁰ decoded
+samples over all components and 65 535 tiles.
+
+**Other bounds.** The interpreter bounds the work and memory one page can
+demand. None of these bounds fails the page; the rest of the page renders:
+
+| Bound | Limit | Beyond it |
+|---|---|---|
+| Graphics-state saves (`q`) | 16 384 nested | deeper `q`/`Q` pairs share one state (one warning) |
+| Array and dictionary nesting in a content stream | 256 levels | a deeper container is read as empty and its contents as elements of the enclosing one |
+| Triangles decoded from one mesh shading | 2²² | the rest of the mesh is not drawn (one warning) |
+| Dashes in one stroke | 2²⁰ | the stroke is drawn solid |
+| `CMap` stream | 16 MiB | the stream is ignored and codes map by identity (warning) |
+| Mappings of one `CMap` | 2¹⁸ | the rest are ignored (warning) |
+| Type 3 `CharProc` | 4 MiB each, 64 MiB per font | the glyph is skipped (warning) |
 
 ---
 
@@ -228,11 +242,11 @@ that says so.
 
 By default `rrocket` redirects rendered pages to a freshly-created tmpfs directory under `/dev/shm` whenever the output prefix is a bare stem, because writing to disk is 10–20× slower than RAM and dominates wall time on JPEG-heavy workloads. The directory is printed on stderr at startup and on stdout (so `dir=$(rrocket doc.pdf out)` captures it), and the prefix's file name is the stem inside it (`<dir>/out-1.ppm`, …). On systems without `/dev/shm` (macOS, the BSDs) there is no default redirect: a bare stem writes to the working directory, and only `--ram` or `--ram-path` select RAM-backed output.
 
-**The RAM directory is removed when rrocket exits normally.** RAM output is for a consumer that reads pages while rrocket is still running; to keep the pages, give a path-like prefix (`./out`, `/data/out`) or pass `--no-ram`. A run that ends with a failed page exits without removing the directory.
+**The RAM directory is removed when rrocket exits**, whether every page rendered or not. RAM output is for a consumer that reads pages while rrocket is still running; to keep the pages, give a path-like prefix (`./out`, `/data/out`) or pass `--no-ram`. A process killed by a signal, or aborted by a panic, leaves the directory behind; `/dev/shm` is cleared at reboot.
 
 **Bare stem vs path heuristic:** prefixes containing `/` or starting with `.` (e.g. `./out`, `/tmp/p`, `out/dir/p`) are treated as path-like and write to disk literally. Bare stems (e.g. `out`, `p`, `cover`) are redirected to tmpfs. `--ram` overrides the heuristic to redirect anyway; `--no-ram` overrides it to write to disk anyway.
 
-A built-in spill policy polls `/proc/meminfo` every 100 ms and falls subsequent pages through to disk when MemAvailable drops below 1 GiB, with a one-shot warning printed to stderr.
+A built-in spill policy reads `MemAvailable` from `/proc/meminfo` before each page is written (at most once per 100 ms) and writes subsequent pages to disk, at `OUTPUT_PREFIX`, once it drops below 1 GiB, with a one-shot warning printed to stderr.
 
 ---
 
@@ -307,6 +321,11 @@ rrocket --backend vaapi --vaapi-device /dev/dri/renderD129 document.pdf out
 |---|---|
 | `0` | All pages rendered. A page with a skipped image or content stream counts as rendered unless `--strict` is set; the warning is on stderr. |
 | `1` | One or more pages failed (errors printed to stderr), the document could not be opened (or its decryption was not authorised), or the arguments are invalid. Clap's own argument errors exit `2`. |
+
+Errors go to stderr as `rrocket: <message>` (`rrocket: page N: <message>` for a
+page), sorted by page number, each followed by one `  caused by: <cause>` line
+per level of its source chain that adds information the message does not
+already contain.
 
 ---
 
