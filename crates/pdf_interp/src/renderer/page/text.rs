@@ -70,7 +70,6 @@ impl PageRenderer<'_> {
         let do_paint = do_fill || do_stroke;
 
         // The text state, read before `font_cache` is borrowed mutably.
-        let font_name = self.gstate.current().text.font_name.clone();
         let font_size = self.gstate.current().text.font_size;
         let char_spacing = self.gstate.current().text.char_spacing;
         let word_spacing = self.gstate.current().text.word_spacing;
@@ -84,7 +83,7 @@ impl PageRenderer<'_> {
         let Some(font) = self.gstate.current().text.font.clone() else {
             log::debug!(
                 "rasterrocket-interp: no font dict for /{}",
-                String::from_utf8_lossy(&font_name)
+                String::from_utf8_lossy(&self.gstate.current().text.font_name)
             );
             return;
         };
@@ -168,8 +167,9 @@ impl PageRenderer<'_> {
             let face = if singular {
                 None
             } else {
+                let font_name = &self.gstate.current().text.font_name;
                 self.font_cache
-                    .get_or_load_showing(&font, &font_name, trm, bytes)
+                    .get_or_load_showing(&font, font_name, trm, bytes)
             };
             let fill_as_path =
                 do_fill && face.is_some_and(|f| pattern_fill || f.prefers_path_fill());
