@@ -1,9 +1,13 @@
 //! Type 3 fonts: glyphs drawn by content streams (PDF §9.6.5).
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::{
-    BaseEncoding, FontDescriptor, PdfFontKind, extract_encoding, extract_widths, width_units,
+    BaseEncoding, FontDescriptor, PdfFontKind, extract_encoding, extract_widths, number,
+    width_units,
 };
 use crate::content::Operator;
 use crate::renderer::encodings::glyph_name_for_code;
@@ -12,9 +16,9 @@ use crate::resources::font_substitute::SubstituteStyle;
 /// Decoded `CharProc` entry for a single Type 3 glyph.
 #[derive(Debug, Clone)]
 pub struct Type3Glyph {
-    /// The glyph's paint procedure, parsed once: every occurrence of the
-    /// glyph executes the same operator sequence.
-    pub ops: Vec<Operator>,
+    /// The glyph's paint procedure, parsed once and shared by every code
+    /// whose glyph name selects it.
+    pub ops: Arc<[Operator]>,
 }
 
 /// All data extracted from a Type 3 font dictionary.
@@ -34,8 +38,8 @@ pub struct Type3Data {
     /// valued: under a unit `FontMatrix` a width is a fraction of a
     /// text-space unit.
     pub widths: Vec<f64>,
-    /// 6-element `FontMatrix` (user-space → glyph-space transform).
-    /// Default is `[0.001, 0, 0, 0.001, 0, 0]` per PDF spec §9.6.5.
+    /// `FontMatrix`, mapping glyph space to text space; `[0.001 0 0
+    /// 0.001 0 0]` when absent or malformed.
     pub font_matrix: [f64; 6],
     /// The font dictionary, when it is an indirect object carrying its own
     /// `/Resources`: the `CharProcs` resolve their named resources there
@@ -60,10 +64,13 @@ impl Type3Data {
     }
 }
 
-/// Maximum decompressed size for a single Type 3 `CharProc` stream (4 MiB).
-///
-/// Real Type 3 glyphs are tiny path/image sequences; 4 MiB is a generous cap.
-const MAX_CHARPROC_BYTES: usize = 4 * 1024 * 1024;
+/// Greatest decompressed size of one `CharProc` stream.
+const MAX_CHARPROC_BYTES: usize = 4 << 20;
+
+/// Greatest decompressed size of the `CharProcs` of one font together:
+/// 256 glyphs of 256 KiB each, where a glyph is a few kilobytes of path or
+/// inline-image operators.
+const MAX_CHARPROCS_BYTES: usize = 64 << 20;
 
 /// Extract [`FontDescriptor`] for a Type 3 font.
 ///
@@ -78,75 +85,19 @@ pub(super) fn resolve_type3_font(
     id: Option<ObjectId>,
 ) -> FontDescriptor {
     let (first_char, real_widths) = extract_widths(doc, dict);
-
-    // FontMatrix transforms glyph space to text space.
-    // PDF default is [0.001 0 0 0.001 0 0] (i.e. 1000 units = 1 text-space unit).
     let font_matrix =
-        extract_matrix(dict, b"FontMatrix").unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
-
-    // CharProcs: glyph name → content stream.
-    let charprocs_dict = dict
-        .get(b"CharProcs")
-        .and_then(|o| crate::resources::resolve_dict(doc, o));
-
-    // Resolve Encoding/Differences to get char_code → glyph_name mapping.
+        extract_matrix(doc, dict, b"FontMatrix").unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
     let (differences, base_encoding) = extract_encoding(doc, dict);
-
-    // Build the glyphs table: 256 entries, one per possible char code.
-    let mut glyphs: Vec<Option<Type3Glyph>> = (0..256).map(|_| None).collect();
-
-    if let Some(cp) = charprocs_dict {
-        for code in 0u8..=255 {
-            let Some(glyph_name) =
-                glyph_name_for_code(&differences, base_encoding, usize::from(code))
-            else {
-                continue; // No name → no glyph for this code.
-            };
-            let glyph_name = glyph_name.as_bytes();
-
-            // Look up the CharProc stream.
-            let Some(stream_obj) = cp.get(glyph_name) else {
-                continue;
-            };
-            let resolved;
-            let stream = match stream_obj {
-                Object::Stream(s) => s,
-                Object::Reference(id) => {
-                    let Some(arc) = doc.get_object(*id).ok() else {
-                        continue;
-                    };
-                    resolved = arc;
-                    match resolved.as_ref() {
-                        Object::Stream(s) => s,
-                        _ => continue,
-                    }
-                }
-                _ => continue,
-            };
-
-            let content = match stream.decompressed_content() {
-                Ok(b) if b.len() <= MAX_CHARPROC_BYTES => b,
-                Ok(b) => {
-                    log::warn!(
-                        "font/type3: CharProc for code {code} is {} bytes (limit {}), skipping",
-                        b.len(),
-                        MAX_CHARPROC_BYTES
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    log::warn!("font/type3: failed to decompress CharProc for code {code}: {e}");
-                    continue;
-                }
-            };
-
-            glyphs[usize::from(code)] = Some(Type3Glyph {
-                ops: crate::content::parse(&content),
-            });
-        }
-    } else {
-        log::warn!("font/type3: CharProcs dict missing or unresolvable — no glyphs");
-    }
+    let glyphs = dict
+        .get(b"CharProcs")
+        .and_then(|o| crate::resources::resolve_dict(doc, o))
+        .map_or_else(
+            || {
+                log::warn!("font/type3: CharProcs dict missing or unresolvable — no glyphs");
+                vec![None; 256]
+            },
+            |charprocs| charproc_glyphs(doc, &charprocs, &differences, base_encoding),
+        );
 
     let code_widths = (0u32..256)
         .map(|code| {
@@ -173,14 +124,11 @@ pub(super) fn resolve_type3_font(
         program: None,
         widths: real_widths.iter().copied().map(width_units).collect(),
         first_char,
-        // Type 3 glyphs carry their own widths via `Type3Glyph::width_units`;
-        // the top-level Widths array is the same source the d0/d1 operators
-        // store. `MissingWidth` doesn't apply (PDF spec §9.6 — Type 3 uses
-        // Widths exclusively), so 0 is the correct never-consulted default.
+        // A Type 3 font advances by `Type3Data::widths` alone (PDF §9.6.5).
         missing_width: 0,
         differences,
-        // Type 3 glyphs are content-stream procedures, not a font program;
-        // name→GID resolution does not apply.
+        // The encoding selected the procedures of `type3.glyphs`; no
+        // program resolves the codes again.
         base_encoding: BaseEncoding::Standard,
         cid_encoding: None,
         type3: Some(Type3Data {
@@ -193,25 +141,77 @@ pub(super) fn resolve_type3_font(
     }
 }
 
-/// Read a 6-element matrix from `dict[key]`.  Returns `None` if missing or malformed.
-fn extract_matrix(dict: &Dictionary, key: &[u8]) -> Option<[f64; 6]> {
-    let arr = dict.get(key)?.as_array()?;
-    if arr.len() < 6 {
+/// The glyph of each code 0–255 from the `CharProcs` dictionary
+/// `charprocs`: the procedure its glyph name selects.  Each distinct
+/// procedure is parsed once and shared by every code that names it, and
+/// the procedures together decompress to at most [`MAX_CHARPROCS_BYTES`].
+fn charproc_glyphs(
+    doc: &Document,
+    charprocs: &Dictionary,
+    differences: &[Option<Box<str>>; 256],
+    base_encoding: BaseEncoding,
+) -> Vec<Option<Type3Glyph>> {
+    let mut by_name: HashMap<&str, Option<Type3Glyph>> = HashMap::new();
+    let mut budget = MAX_CHARPROCS_BYTES;
+    let mut glyphs = Vec::with_capacity(256);
+    for code in 0..256 {
+        let glyph = glyph_name_for_code(differences, base_encoding, code).and_then(|name| {
+            by_name
+                .entry(name)
+                .or_insert_with(|| {
+                    let stream = charprocs.get(name.as_bytes())?;
+                    charproc(doc, stream, name, &mut budget)
+                })
+                .clone()
+        });
+        glyphs.push(glyph);
+    }
+    glyphs
+}
+
+/// The procedure of glyph `name`, parsed from the stream `obj` (direct or
+/// indirect); `None`, logged, when it does not decompress or exceeds
+/// [`MAX_CHARPROC_BYTES`] or the font's remaining `budget`, which it
+/// draws down.
+fn charproc(doc: &Document, obj: &Object, name: &str, budget: &mut usize) -> Option<Type3Glyph> {
+    let content = match obj {
+        Object::Stream(s) => s.decompressed_content(),
+        Object::Reference(id) => doc
+            .get_object(*id)
+            .ok()?
+            .as_stream()?
+            .decompressed_content(),
+        _ => return None,
+    };
+    let content = content
+        .inspect_err(|e| log::warn!("font/type3: CharProc /{name} does not decompress: {e}"))
+        .ok()?;
+    let limit = MAX_CHARPROC_BYTES.min(*budget);
+    if content.len() > limit {
+        log::warn!(
+            "font/type3: CharProc /{name} is {} bytes, over the {limit}-byte limit — skipping it",
+            content.len()
+        );
         return None;
     }
-    let mut m = [0.0f64; 6];
-    for (i, obj) in arr.iter().enumerate().take(6) {
-        m[i] = match obj {
-            Object::Real(r) => f64::from(*r),
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "PDF matrix values are small integers"
-            )]
-            Object::Integer(n) => *n as f64,
-            _ => return None,
-        };
-    }
-    Some(m)
+    *budget -= content.len();
+    Some(Type3Glyph {
+        ops: crate::content::parse(&content).into(),
+    })
+}
+
+/// The six numbers of the matrix at `dict[key]`, the array or its
+/// elements possibly indirect; `None` when absent, shorter than six or
+/// holding a non-number.
+fn extract_matrix(doc: &Document, dict: &Dictionary, key: &[u8]) -> Option<[f64; 6]> {
+    let arr = doc.resolve(dict.get(key)?).ok()?;
+    let values: Vec<f64> = arr
+        .as_array()?
+        .iter()
+        .take(6)
+        .map(|o| number(doc, o))
+        .collect::<Option<_>>()?;
+    values.try_into().ok()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -222,6 +222,34 @@ mod tests {
     use super::super::tests::make_dict;
     use crate::test_helpers::empty_doc;
     use pdf::Object;
+
+    /// Codes whose glyph names select one `CharProc` share one parsed
+    /// procedure.
+    #[test]
+    fn codes_naming_one_charproc_share_its_procedure() {
+        let doc = crate::test_helpers::make_doc_with_stream(b"0 0 d0 0 0 1 1 re f", "");
+        let mut charprocs = pdf::Dictionary::new();
+        charprocs.set(b"g", Object::Reference((2, 0)));
+        let encoding = make_dict(&[(
+            b"Differences",
+            Object::Array(vec![
+                Object::Integer(65),
+                Object::Name(b"g".to_vec()),
+                Object::Name(b"g".to_vec()),
+                Object::Name(b"missing".to_vec()),
+            ]),
+        )]);
+        let d = make_dict(&[
+            (b"Subtype", Object::Name(b"Type3".to_vec())),
+            (b"CharProcs", Object::Dictionary(charprocs)),
+            (b"Encoding", Object::Dictionary(encoding)),
+        ]);
+        let t3 = resolve_font(&doc, &d, None).type3.expect("Type 3 data");
+        let (a, b) = (t3.glyph(65).expect("A"), t3.glyph(66).expect("B"));
+        assert!(std::sync::Arc::ptr_eq(&a.ops, &b.ops));
+        assert!(!a.ops.is_empty());
+        assert!(t3.glyph(67).is_none(), "no CharProc of that name");
+    }
 
     /// The fractional widths of a Type 3 font drawn under a unit
     /// `FontMatrix` keep their value: truncated to integers they would
