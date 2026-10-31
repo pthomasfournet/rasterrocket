@@ -237,6 +237,8 @@ pub(crate) struct Args {
 
     /// Override the tmpfs directory used by RAM-backed output. Implies the
     /// RAM redirect. Default is a fresh `/dev/shm/rrocket-<pid>-<nanos>/`.
+    /// The path must not exist: the directory is created for the run and
+    /// removed, with its contents, on exit.
     #[arg(long = "ram-path", value_name = "PATH", conflicts_with = "no_ram")]
     pub ram_path: Option<String>,
 

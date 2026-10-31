@@ -269,23 +269,12 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
         ));
     }
 
-    // Auto-generated paths use create_dir_all (parent dirs may need creation
-    // on exotic /dev/shm setups). User-supplied --ram-path uses create_dir so
-    // pre-existing dirs surface as a warning rather than silently mixing the
-    // user's pages with leftover files from a previous crashed run.
+    // The directory is removed recursively on exit, so it must be one this
+    // run creates: an existing `--ram-path` is refused rather than adopted,
+    // since adopting it would delete whatever it held before the run.
     let dir = if let Some(p) = &args.ram_path {
         let dir = PathBuf::from(p);
-        if let Err(e) = fs::create_dir(&dir) {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                eprintln!(
-                    "rrocket: warning: --ram-path {} already exists; \
-                     leftover files will be removed alongside this run's output",
-                    dir.display()
-                );
-            } else {
-                return Err(e);
-            }
-        }
+        create_owned_dir(&dir)?;
         dir
     } else {
         let dir = default_ram_dir();
@@ -325,6 +314,28 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
     ))
 }
 
+/// Create `dir` for `--ram-path`, failing if anything already exists there.
+///
+/// # Errors
+/// [`std::io::ErrorKind::AlreadyExists`] naming the path and the remedy when
+/// it exists; any other error of [`fs::create_dir`] otherwise.
+fn create_owned_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir(dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "--ram-path {} already exists; rrocket removes the directory and \
+                     everything in it on exit, so pass a path that does not exist yet",
+                    dir.display()
+                ),
+            )
+        } else {
+            e
+        }
+    })
+}
+
 /// tmpfs mount under which the default RAM directories are created.
 const RAM_ROOT: &str = "/dev/shm";
 
@@ -344,6 +355,20 @@ fn default_ram_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ram_path_refuses_an_existing_directory_and_keeps_its_contents() {
+        let parent = tempfile::tempdir().unwrap();
+        let keep = parent.path().join("keep.txt");
+        fs::write(&keep, b"user data").unwrap();
+        let err = create_owned_dir(parent.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(err.to_string().contains("does not exist yet"), "{err}");
+        assert!(keep.exists());
+        let fresh = parent.path().join("fresh");
+        create_owned_dir(&fresh).unwrap();
+        assert!(fresh.is_dir());
+    }
 
     #[test]
     fn default_dir_is_under_dev_shm() {

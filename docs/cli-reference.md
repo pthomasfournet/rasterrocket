@@ -228,7 +228,7 @@ that says so.
 |---|---|---|
 | `--ram` | (heuristic) | Force RAM-backed output even when `OUTPUT_PREFIX` looks like a path. Mutually exclusive with `--no-ram`. |
 | `--no-ram` | (heuristic) | Force on-disk output. Disables the default tmpfs redirect for bare stems and writes pages exactly at `OUTPUT_PREFIX`. Mutually exclusive with `--ram`. |
-| `--ram-path PATH` | `/dev/shm/rrocket-<pid>-<nanos>/` | Override the tmpfs directory used by RAM-backed output. Implies `--ram`. The directory is removed on exit like the default one, including anything that was in it before the run. |
+| `--ram-path PATH` | `/dev/shm/rrocket-<pid>-<nanos>/` | Override the tmpfs directory used by RAM-backed output. Implies `--ram`. The path must not exist: rrocket creates the directory and removes it, with everything in it, on exit like the default one; an existing path is refused. |
 
 By default `rrocket` redirects rendered pages to a freshly-created tmpfs directory under `/dev/shm` whenever the output prefix is a bare stem, because writing to disk is 10–20× slower than RAM and dominates wall time on JPEG-heavy workloads. The directory is printed on stderr at startup and on stdout (so `dir=$(rrocket doc.pdf out)` captures it), and the prefix's file name is the stem inside it (`<dir>/out-1.ppm`, …). On systems without `/dev/shm` (macOS, the BSDs) there is no default redirect: a bare stem writes to the working directory, and only `--ram` or `--ram-path` select RAM-backed output.
 
