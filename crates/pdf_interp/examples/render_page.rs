@@ -37,7 +37,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let geom = rasterrocket_interp::page_size_pts(&doc, page).unwrap_or_else(|e| {
+    let geom = rasterrocket_interp::page_size_pts_by_id(&doc, page_id).unwrap_or_else(|e| {
         eprintln!("error: could not determine size of page {page}: {e}");
         std::process::exit(1);
     });
@@ -56,7 +56,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let ops = rasterrocket_interp::parse_page(&doc, page).unwrap_or_else(|e| {
+    let ops = rasterrocket_interp::parse_page_by_id(&doc, page_id).unwrap_or_else(|e| {
         eprintln!("error: failed to parse page {page}: {e}");
         std::process::exit(1);
     });

@@ -103,8 +103,7 @@ impl<'a> Tokenizer<'a> {
     fn skip_whitespace_and_comments(&mut self) {
         loop {
             match self.peek() {
-                // PDF §7.2.2: NUL (0x00) is also whitespace.
-                Some(b' ' | b'\t' | b'\r' | b'\n' | b'\x0C' | b'\0') => self.advance(),
+                Some(b) if is_whitespace(b) => self.advance(),
                 Some(b'%') => {
                     // Comment runs to end of line (CR, LF, or CRLF).
                     while !matches!(self.peek(), None | Some(b'\r' | b'\n')) {

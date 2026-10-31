@@ -3,8 +3,6 @@
 
 use pdf::Document;
 
-use crate::resources::dict_ext::DictExt;
-
 /// The interactive form a document carries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -40,7 +38,12 @@ pub fn form_type(doc: &Document) -> FormType {
     };
     if acroform.get(b"XFA").is_none() {
         FormType::AcroForm
-    } else if catalog.get_bool(b"NeedsRendering") == Some(true) {
+    } else if catalog
+        .get(b"NeedsRendering")
+        .and_then(|o| doc.resolve(o).ok())
+        .and_then(|o| o.as_bool())
+        == Some(true)
+    {
         FormType::XfaFull
     } else {
         FormType::XfaForeground
