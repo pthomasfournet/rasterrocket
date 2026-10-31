@@ -11,17 +11,15 @@
 //! 3. Sweep scanlines Y ∈ [y0, y2]; switch the active short edge at `y == y1`.
 //! 4. Interpolate colour across each scanline and call `render_span`.
 //!
-//! # Colour space constraint
+//! # Colour space
 //!
-//! Only RGB (`P::BYTES == 3`) is supported.  For CMYK/Gray/DeviceN the caller
-//! must perform colour-space conversion before invoking this function.
-//! Passing a non-RGB pixel type is a **logic error**; it triggers `debug_assert!`
-//! in debug builds and returns without painting in release builds.
+//! Vertex colours are RGB and the target is an [`Rgb8`] bitmap; a caller
+//! painting another colour space converts the vertex colours first.
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::pipe::{PipeSrc, PipeState, RowPattern, render_bitmap_span};
-use color::Pixel;
+use color::Rgb8;
 use color::convert::{lerp_u8, splash_round};
 
 /// One vertex of a Gouraud-shaded triangle.
@@ -97,8 +95,8 @@ impl EdgeMap {
 ///
 /// `buf_x0` is the leftmost x whose colour is stored at `span_color[0]`.
 /// `run_x0 >= buf_x0` must hold; violated only by a logic error in the caller.
-fn emit_run<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
+fn emit_run(
+    bitmap: &mut Bitmap<Rgb8>,
     pipe: &PipeState<'_>,
     span_color: &[u8],
     buf_x0: i32,
@@ -134,7 +132,7 @@ fn emit_run<P: Pixel>(
         data: &span_color[buf_off..buf_end],
     };
 
-    render_bitmap_span::<P>(
+    render_bitmap_span::<Rgb8>(
         bitmap,
         pipe,
         &PipeSrc::Pattern(&src),
@@ -148,33 +146,12 @@ fn emit_run<P: Pixel>(
 /// Fill a single Gouraud-shaded triangle into `bitmap`.
 ///
 /// Pixels are clipped to `clip` and composited via `pipe`.
-///
-/// # Colour space
-///
-/// Only `P::BYTES == 3` (RGB) is supported.  Callers with CMYK/Gray/DeviceN
-/// bitmaps **must** convert vertex colours to device RGB before calling this
-/// function.  Violating this constraint triggers `debug_assert!` in debug
-/// builds; release builds return silently without painting.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-function triangle rasterizer; extracted helpers would obscure the scan-conversion algorithm"
-)]
-pub fn gouraud_triangle_fill<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
+pub fn gouraud_triangle_fill(
+    bitmap: &mut Bitmap<Rgb8>,
     clip: &Clip,
     pipe: &PipeState<'_>,
     mut v: [GouraudVertex; 3],
 ) {
-    debug_assert_eq!(
-        P::BYTES,
-        3,
-        "gouraud_triangle_fill: P::BYTES={} but only RGB (3) is supported",
-        P::BYTES,
-    );
-    if P::BYTES != 3 {
-        return;
-    }
-
     // A non-finite coordinate has no pixel position: the triangle is empty.
     if !v
         .iter()
@@ -298,10 +275,10 @@ pub fn gouraud_triangle_fill<P: Pixel>(
 
         if needs_per_pixel_clip {
             for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
-                emit_run::<P>(bitmap, pipe, &span_color, sx0, rx0, rx1, y);
+                emit_run(bitmap, pipe, &span_color, sx0, rx0, rx1, y);
             }
         } else {
-            emit_run::<P>(bitmap, pipe, &span_color, sx0, sx0, sx1, y);
+            emit_run(bitmap, pipe, &span_color, sx0, sx0, sx1, y);
         }
     }
 }
@@ -311,7 +288,6 @@ mod tests {
     use super::*;
     use crate::bitmap::Bitmap;
     use crate::testutil::{make_clip, simple_pipe};
-    use color::Rgb8;
 
     fn vertex(x: f64, y: f64) -> GouraudVertex {
         GouraudVertex {
@@ -342,7 +318,7 @@ mod tests {
             v.color = [255; 3];
         }
         tri[2].x = f64::INFINITY;
-        gouraud_triangle_fill::<Rgb8>(&mut bmp, &make_clip(8, 8), &simple_pipe(), tri);
+        gouraud_triangle_fill(&mut bmp, &make_clip(8, 8), &simple_pipe(), tri);
         assert!(bmp.data().iter().all(|&b| b == 0), "nothing painted");
     }
 
@@ -370,7 +346,7 @@ mod tests {
                 color: [255, 255, 255],
             },
         ];
-        gouraud_triangle_fill::<Rgb8>(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
 
         let row = bmp.row(3);
         assert_eq!(row[5].r, 255, "centroid R");
@@ -402,7 +378,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill::<Rgb8>(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
 
         let px = bmp.row(3)[5];
         assert!(px.r > 50 && px.r < 150, "centroid R={} expected ~85", px.r);
@@ -434,7 +410,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill::<Rgb8>(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
 
         for y in 0..8u32 {
             for x in 0..8usize {
@@ -467,7 +443,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill::<Rgb8>(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
 
         for y in 0..8u32 {
             for x in 0..8usize {
@@ -503,8 +479,8 @@ mod tests {
         let clip = make_clip(12, 10);
         let pipe = simple_pipe();
 
-        gouraud_triangle_fill::<Rgb8>(&mut bmp1, &clip, &pipe, tri_abc);
-        gouraud_triangle_fill::<Rgb8>(&mut bmp2, &clip, &pipe, tri_cba);
+        gouraud_triangle_fill(&mut bmp1, &clip, &pipe, tri_abc);
+        gouraud_triangle_fill(&mut bmp2, &clip, &pipe, tri_cba);
 
         let interior_painted = |bmp: &Bitmap<Rgb8>| {
             (3..7u32).any(|y| {
@@ -543,7 +519,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill::<Rgb8>(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
 
         // Midpoint row should be painted.
         let mid = bmp.row(4);
