@@ -6,7 +6,7 @@
 //!
 //! **Integer blend math**
 //! - [`div255`] — fast approximate division by 255
-//! - [`lerp_u8`] — bilinear interpolation between two bytes
+//! - [`lerp_u8`] — linear interpolation between two bytes
 //!
 //! **Color-space conversion (f64 → u8, normalised PDF values)**
 //! (`DeviceCMYK` conversion lives in [`crate::cmyk`].)
@@ -52,34 +52,30 @@ pub fn div255(x: u32) -> u8 {
     shifted.min(255) as u8
 }
 
-/// Bilinear interpolation between two `u8` values.
+/// Linear interpolation between two bytes at weight `t` on the scale `[0, 256]`.
 ///
-/// Computes `a * (1 − t/256) + b * (t/256)` using integer arithmetic via
-/// [`div255`].
+/// Computes `(a · (256 − t) + b · t + 128) >> 8`: the weights sum to 256, so
+/// the result is `a + (b − a) · t / 256` rounded half up, and every output lies
+/// between `a` and `b`.
 ///
 /// # Valid input range
 ///
-/// `t` must be in \[0, 256\]. Values outside this range are a caller bug:
-/// `256 - t` would wrap (u32 subtraction), producing a nonsensical result.
-/// A `debug_assert!` catches this in debug builds.
-///
-/// # Output range
-///
-/// Always \[0, 255\].
+/// `t` must be in \[0, 256\]; a larger `t` is a caller bug and is caught by a
+/// `debug_assert!`.
 ///
 /// # Endpoints
 ///
-/// - `t = 0` → `div255(a * 256)`, which equals `a` within ±1.  The `div255`
-///   approximation means the result can be off by 1 for some values of `a`
-///   (e.g. `lerp_u8(128, _, 0)` returns 129). If callers need exact identity
-///   at `t = 0` they should special-case it.
-/// - `t = 256` → `a * 0 + b * 256`; after `div255` this rounds to `b` within
-///   ±1 (inherent to the `div255` approximation).
+/// `t = 0` returns `a` and `t = 256` returns `b` exactly; `t = 128` returns
+/// the midpoint `(a + b + 1) / 2`.
 #[inline]
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a convex combination of two bytes, shifted down by 8 bits, is at most 255"
+)]
 pub fn lerp_u8(a: u8, b: u8, t: u32) -> u8 {
     debug_assert!(t <= 256, "lerp_u8: t={t} out of range [0, 256]");
-    div255(u32::from(a) * (256 - t) + u32::from(b) * t)
+    ((u32::from(a) * (256 - t) + u32::from(b) * t + 128) >> 8) as u8
 }
 
 // ── Color space conversion ────────────────────────────────────────────────────
@@ -310,37 +306,39 @@ mod tests {
         }
     }
 
+    /// Endpoints are exact and every interpolant lies between them.
     #[test]
-    fn lerp_endpoints() {
-        // t=0 must return exactly a.
-        assert_eq!(lerp_u8(100, 200, 0), 100);
-        // t=256: a*(256-256) + b*256; div255(200*256) = div255(51200).
-        // 51200/255 ≈ 200.78, rounds to 201 — within ±1 of b=200.
-        let v = lerp_u8(100, 200, 256);
-        assert!(
-            (i32::from(v) - 200).abs() <= 1,
-            "lerp t=256 gave {v}, expected ≈200"
-        );
+    fn lerp_is_exact_at_the_endpoints_and_bounded() {
+        for a in 0u8..=255 {
+            for b in 0u8..=255 {
+                assert_eq!(lerp_u8(a, b, 0), a, "lerp_u8({a}, {b}, 0)");
+                assert_eq!(lerp_u8(a, b, 256), b, "lerp_u8({a}, {b}, 256)");
+                for t in [1, 64, 128, 200, 255] {
+                    let v = lerp_u8(a, b, t);
+                    assert!(
+                        a.min(b) <= v && v <= a.max(b),
+                        "lerp_u8({a}, {b}, {t}) = {v} outside [{a}, {b}]"
+                    );
+                }
+            }
+        }
     }
 
-    /// `lerp_u8` with `t=0` returns `div255(a * 256)`, which is within ±1 of `a`.
-    /// The result must not depend on `b`.
+    /// Interpolating between equal bytes returns that byte at every weight.
     #[test]
-    fn lerp_t0_near_a() {
+    fn lerp_between_equal_bytes_is_constant() {
         for a in 0u8..=255 {
-            let v0 = lerp_u8(a, 0, 0);
-            let v255 = lerp_u8(a, 255, 0);
-            // Result must be independent of b.
-            assert_eq!(
-                v0, v255,
-                "lerp_u8({a}, b, 0) must not depend on b: got {v0} vs {v255}"
-            );
-            // Result must be within ±1 of a (div255 approximation).
-            assert!(
-                (i32::from(v0) - i32::from(a)).abs() <= 1,
-                "lerp_u8({a}, _, 0) = {v0}, expected within ±1 of {a}"
-            );
+            for t in 0..=256 {
+                assert_eq!(lerp_u8(a, a, t), a, "lerp_u8({a}, {a}, {t})");
+            }
         }
+    }
+
+    #[test]
+    fn lerp_midpoint_rounds_half_up() {
+        assert_eq!(lerp_u8(0, 255, 128), 128);
+        assert_eq!(lerp_u8(10, 11, 128), 11);
+        assert_eq!(lerp_u8(200, 100, 128), 150);
     }
 
     #[test]
