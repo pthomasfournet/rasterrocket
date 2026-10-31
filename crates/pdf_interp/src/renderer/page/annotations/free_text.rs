@@ -16,11 +16,9 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
-use super::content::{
-    Border, colour, colour_op, inset, n, number, numbers, rectangle, string, text_or_stream,
-};
+use super::content::{Border, colour, colour_op, inset, n, numbers, opacity, rectangle, string};
 use super::line_ending::LineEnding;
-use super::text::{DefaultAppearance, decode_text_string, plain_text};
+use super::text::{DefaultAppearance, markup_text};
 use super::typeset::{AUTO_MULTILINE_SIZE, TextBlock, Typesetter};
 use super::widget::AcroForm;
 use super::{IDENTITY, Synthesized};
@@ -66,14 +64,6 @@ impl FreeText {
                     .map(<[u8]>::to_vec)
             })
             .unwrap_or_else(|| DEFAULT_DA.to_vec());
-        let text = string(doc, annot.get(b"Contents"))
-            .map(|c| decode_text_string(&c))
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                let rc = text_or_stream(doc, annot.get(b"RC"))?;
-                Some(plain_text(&decode_text_string(&rc)))
-            })
-            .unwrap_or_default();
         let callout: Vec<(f64, f64)> = numbers(doc, annot.get(b"CL"))
             .as_chunks::<2>()
             .0
@@ -90,7 +80,7 @@ impl FreeText {
         Self {
             da: DefaultAppearance::parse(&da),
             quadding: annot.get_i64(b"Q").unwrap_or(0),
-            text,
+            text: markup_text(doc, annot),
             fill: colour(doc, annot.get(b"C"), false),
             interior: colour(doc, annot.get(b"IC"), false),
             border: Border::of(doc, annot),
@@ -102,7 +92,7 @@ impl FreeText {
                 Vec::new()
             },
             ending,
-            opacity: number(doc, annot.get(b"CA")).unwrap_or(1.0).clamp(0.0, 1.0),
+            opacity: opacity(doc, annot),
         }
     }
 

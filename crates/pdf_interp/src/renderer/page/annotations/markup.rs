@@ -15,7 +15,7 @@ use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
 use super::content::{
-    Border, colour, ellipse, inset, n, number, numbers, rectangle, resolve_array,
+    Border, colour, ellipse, inset, n, numbers, opacity, rectangle, resolve_array,
 };
 use super::line_ending::LineEnding;
 use super::{IDENTITY, Synthesized};
@@ -66,7 +66,7 @@ pub(super) fn markup(doc: &Document, annot: &Dictionary, rect: [f64; 4]) -> Opti
     Some(Synthesized {
         content: content.into_bytes(),
         bbox,
-        opacity: number(doc, annot.get(b"CA")).unwrap_or(1.0).clamp(0.0, 1.0),
+        opacity: opacity(doc, annot),
         blend,
         matrix: IDENTITY,
     })

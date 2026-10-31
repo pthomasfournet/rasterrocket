@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::resources::dict_ext::DictExt;
+use crate::resources::{resolve_array, resolve_dict};
 
 /// The use a rendering is made for, which selects the optional-content usage
 /// event (§8.11.4.4) and the annotation flags (§12.5.3) that apply.
@@ -347,25 +348,6 @@ impl Config {
         }
         let all = |v: &[Vec<u8>]| v.iter().any(|n| n == b"All");
         all(&self.intents) || all(&intents) || intents.iter().any(|n| self.intents.contains(n))
-    }
-}
-
-/// `obj` as a dictionary, following one indirect reference.
-fn resolve_dict(doc: &Document, obj: &Object) -> Option<Dictionary> {
-    crate::resources::resolve_dict(doc, obj)
-}
-
-/// The elements of the array `obj`, following one indirect reference; empty
-/// when it is absent or not an array.
-fn resolve_array(doc: &Document, obj: Option<&Object>) -> Vec<Object> {
-    match obj {
-        Some(Object::Array(a)) => a.clone(),
-        Some(Object::Reference(id)) => doc
-            .get_object(*id)
-            .ok()
-            .and_then(|o| o.as_array().map(<[Object]>::to_vec))
-            .unwrap_or_default(),
-        _ => Vec::new(),
     }
 }
 

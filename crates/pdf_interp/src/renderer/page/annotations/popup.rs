@@ -5,14 +5,14 @@
 //! nothing, whatever appearance it carries.  An open pop-up without a
 //! normal appearance is drawn as a window filled yellow and outlined
 //! in black, holding the parent's title `/T` and, on the following lines,
-//! its `/Contents` (else the plain text of its `/RC`), in black 12 pt
+//! its text (`/Contents`, else the plain text of `/RC`), in black 12 pt
 //! Helvetica from the window's upper-left corner.
 
 use pdf::{Dictionary, Document};
 use raster::types::BlendMode;
 
 use super::content::{inset, rectangle, string};
-use super::text::{DefaultAppearance, decode_text_string, plain_text};
+use super::text::{DefaultAppearance, decode_text_string, markup_text};
 use super::typeset::{TextBlock, Typesetter};
 use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
@@ -45,17 +45,11 @@ pub(super) fn appearance(
     let mut s = String::from("1 1 0 rg 0 G 1 w\n");
     rectangle(&mut s, inset(rect, &[0.5; 4]));
     s.push_str("b\n");
-    let text_of = |key: &[u8]| {
-        parent
-            .and_then(|p| string(doc, p.get(key)))
-            .map(|t| decode_text_string(&t))
-            .unwrap_or_default()
-    };
-    let mut contents = text_of(b"Contents");
-    if contents.is_empty() {
-        contents = plain_text(&text_of(b"RC"));
-    }
-    let title = text_of(b"T");
+    let contents = parent.map(|p| markup_text(doc, p)).unwrap_or_default();
+    let title = parent
+        .and_then(|p| string(doc, p.get(b"T")))
+        .map(|t| decode_text_string(&t))
+        .unwrap_or_default();
     let text = match (title.is_empty(), contents.is_empty()) {
         (false, false) => format!("{title}\n{contents}"),
         (false, true) => title,
@@ -86,5 +80,38 @@ pub(super) fn appearance(
         opacity: 1.0,
         blend: BlendMode::Normal,
         matrix: IDENTITY,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::appearance;
+    use crate::renderer::page::annotations::typeset::WinAnsiTypesetter;
+    use crate::test_helpers::make_doc_with_objects;
+
+    #[test]
+    fn the_window_shows_the_title_and_a_rich_text_stream() {
+        let rc = "<body><p>Note</p></body>";
+        let doc = make_doc_with_objects(&[
+            (4, "<< /Subtype /Text /T (Ann) /RC 5 0 R >>".to_owned()),
+            (
+                5,
+                format!("<< /Length {} >>\nstream\n{rc}\nendstream", rc.len()),
+            ),
+        ]);
+        let parent = doc.get_dictionary((4, 0)).expect("a dictionary");
+        let content = appearance(
+            &doc,
+            Some(&parent),
+            [0.0, 0.0, 200.0, 100.0],
+            &mut WinAnsiTypesetter,
+        )
+        .content;
+        let content = String::from_utf8(content).expect("ASCII");
+        assert!(content.contains("<416E6E> Tj"), "the title: {content}");
+        assert!(
+            content.contains("<4E6F7465> Tj"),
+            "the rich text: {content}"
+        );
     }
 }

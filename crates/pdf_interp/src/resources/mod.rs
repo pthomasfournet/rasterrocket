@@ -905,6 +905,20 @@ pub(crate) fn resolve_dict(doc: &Document, obj: &Object) -> Option<Dictionary> {
     }
 }
 
+/// The elements of the array `obj`, following one indirect reference;
+/// empty when it is absent or not an array.
+pub(crate) fn resolve_array(doc: &Document, obj: Option<&Object>) -> Vec<Object> {
+    match obj {
+        Some(Object::Array(a)) => a.clone(),
+        Some(Object::Reference(id)) => doc
+            .get_object(*id)
+            .ok()
+            .and_then(|o| o.as_array().map(<[Object]>::to_vec))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// Like [`resolve_dict`] but also handles `Reference → Stream → stream.dict`.
 ///
 /// Needed for `ICCBased` colour spaces where the second array element is a

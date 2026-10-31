@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use pdf::{Dictionary, Document, Object};
 
-use super::content::n;
+use super::content::{n, string, text_or_stream};
 
 /// A default appearance string split into its `Tf` font and size and the
 /// remaining operators (the text colour).
@@ -117,6 +117,20 @@ pub(super) fn resources(
     super::encoder::add_fallback_fonts(&mut fonts);
     resources.set(b"Font", Object::Dictionary(fonts));
     resources
+}
+
+/// The text of the markup annotation `annot` (§12.5.6.2): `/Contents`,
+/// or when it is absent or empty the plain text of the rich text `/RC`, a
+/// text string or stream.
+pub(super) fn markup_text(doc: &Document, annot: &Dictionary) -> String {
+    string(doc, annot.get(b"Contents"))
+        .map(|c| decode_text_string(&c))
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            let rc = text_or_stream(doc, annot.get(b"RC"))?;
+            Some(plain_text(&decode_text_string(&rc)))
+        })
+        .unwrap_or_default()
 }
 
 /// The plain text of a rich text string (§12.7.4.3.4), an XHTML fragment:

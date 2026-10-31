@@ -13,18 +13,7 @@ use crate::resources::dict_ext::DictExt;
 /// approximates a quarter circle: `4 (√2 − 1) / 3`.
 const KAPPA: f64 = 0.552_284_75;
 
-/// The array `obj`, following an indirect reference; empty otherwise.
-pub(super) fn resolve_array(doc: &Document, obj: Option<&Object>) -> Vec<Object> {
-    match obj {
-        Some(Object::Array(a)) => a.clone(),
-        Some(Object::Reference(id)) => doc
-            .get_object(*id)
-            .ok()
-            .and_then(|o| o.as_array().map(<[Object]>::to_vec))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
-}
+pub(super) use crate::resources::resolve_array;
 
 /// The numbers of the array `obj` (non-numbers skipped).
 pub(super) fn numbers(doc: &Document, obj: Option<&Object>) -> Vec<f64> {
@@ -72,6 +61,12 @@ pub(super) fn text_or_stream(doc: &Document, obj: Option<&Object>) -> Option<Vec
         return None;
     };
     stream.decompressed_content().ok()
+}
+
+/// The constant opacity `/CA` of the annotation `annot` (§12.5.2), clamped
+/// to [0, 1]; 1 when absent.
+pub(super) fn opacity(doc: &Document, annot: &Dictionary) -> f64 {
+    number(doc, annot.get(b"CA")).unwrap_or(1.0).clamp(0.0, 1.0)
 }
 
 /// `v` formatted for a content stream: at most four decimals, no trailing
