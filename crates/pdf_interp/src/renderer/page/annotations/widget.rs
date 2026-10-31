@@ -19,7 +19,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use super::content::{
     self, circle, colour_op, n, number, numbers, rectangle, resolve_array, string, text_or_stream,
 };
-use super::text::{self, DefaultAppearance, decode_text_string, plain_text};
+use super::text::{self, CHECK_FONT, DefaultAppearance, decode_text_string, plain_text};
 use super::typeset::{
     AUTO_MULTILINE_SIZE, LEADING, TextBlock, Typesetter, aligned_x, hex, show_line,
 };
@@ -33,9 +33,6 @@ const PUSH_BUTTON: i64 = 1 << 16;
 const COMBO: i64 = 1 << 17;
 const COMB: i64 = 1 << 24;
 const RICH_TEXT: i64 = 1 << 25;
-
-/// The resource name of the font check marks are drawn in.
-const CHECK_FONT: &[u8] = b"ZaDb";
 
 /// Deepest `/Parent` chain followed for inherited field attributes.
 const MAX_FIELD_DEPTH: usize = 32;
@@ -220,18 +217,10 @@ const fn quarter_turns(degrees: i64) -> u16 {
     }
 }
 
-/// The resources a field's appearance is drawn with: the form's `/DR`, with
-/// `ZaDb` as standard `ZapfDingbats` and the field's font as standard
-/// Helvetica when it lacks them.
+/// The resources a field's appearance is drawn with: [`text::resources`]
+/// over the form's `/DR` with the field's `/DA` font.
 pub(super) fn resources(doc: &Document, form: &AcroForm, field: &Field) -> Dictionary {
-    text::resources(
-        doc,
-        form.dr.as_ref(),
-        &[
-            (CHECK_FONT, b"ZapfDingbats"),
-            (&field.da.font, b"Helvetica"),
-        ],
-    )
+    text::resources(doc, form.dr.as_ref(), &[&field.da.font])
 }
 
 /// The appearance content of `field` in `rect`, its text set by `ts`.

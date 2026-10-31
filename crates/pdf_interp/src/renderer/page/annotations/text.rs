@@ -88,22 +88,27 @@ impl DefaultAppearance {
     }
 }
 
+/// The resource name of the font check marks are drawn in.
+pub(super) const CHECK_FONT: &[u8] = b"ZaDb";
+
 /// The resources text is drawn with: `dr`, a copy of the form's default
-/// resources, with each `(name, base font)` of `standard` added to its
-/// fonts as that standard font when it lacks the name.  Helvetica is given
-/// `WinAnsiEncoding`.
-pub(super) fn resources(
-    doc: &Document,
-    dr: Option<&Dictionary>,
-    standard: &[(&[u8], &[u8])],
-) -> Dictionary {
+/// resources, and in its fonts, where it lacks the name, [`CHECK_FONT`] as
+/// standard `ZapfDingbats` and each name of `fonts` as standard Helvetica
+/// in `WinAnsiEncoding`; and the fallback fonts.
+///
+/// A name selects one font in every synthesised appearance of a document,
+/// whichever names each requests: the font cache identifies the fonts of
+/// these resources by name alone.
+pub(super) fn resources(doc: &Document, dr: Option<&Dictionary>, fonts: &[&[u8]]) -> Dictionary {
     let mut resources = dr.cloned().unwrap_or_default();
-    let mut fonts = resources
+    let mut font_dict = resources
         .get(b"Font")
         .and_then(|o| crate::resources::resolve_dict(doc, o))
         .unwrap_or_default();
-    for &(name, base_font) in standard {
-        if fonts.get(name).is_none() {
+    let standard = std::iter::once((CHECK_FONT, &b"ZapfDingbats"[..]))
+        .chain(fonts.iter().map(|&name| (name, &b"Helvetica"[..])));
+    for (name, base_font) in standard {
+        if font_dict.get(name).is_none() {
             let mut font = Dictionary::new();
             font.set(b"Type", Object::Name(b"Font".to_vec()));
             font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
@@ -111,11 +116,11 @@ pub(super) fn resources(
             if base_font == b"Helvetica" {
                 font.set(b"Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
             }
-            fonts.set(name, Object::Dictionary(font));
+            font_dict.set(name, Object::Dictionary(font));
         }
     }
-    super::encoder::add_fallback_fonts(&mut fonts);
-    resources.set(b"Font", Object::Dictionary(fonts));
+    super::encoder::add_fallback_fonts(&mut font_dict);
+    resources.set(b"Font", Object::Dictionary(font_dict));
     resources
 }
 
@@ -272,7 +277,40 @@ fn pdf_doc_char(b: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefaultAppearance, decode_text_string, plain_text};
+    use pdf::Dictionary;
+
+    use super::{DefaultAppearance, decode_text_string, plain_text, resources};
+    use crate::test_helpers::make_doc_with_object;
+
+    #[test]
+    fn a_font_name_selects_one_font_whatever_the_request() {
+        let doc = make_doc_with_object(
+            "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >> >> >>",
+        );
+        let dr = doc.get_dictionary((2, 0)).expect("a dictionary");
+        let base_font = |res: &Dictionary, name: &[u8]| {
+            res.get(b"Font")
+                .and_then(pdf::Object::as_dict)
+                .and_then(|fonts| fonts.get(name))
+                .and_then(pdf::Object::as_dict)
+                .and_then(|font| font.get(b"BaseFont"))
+                .and_then(pdf::Object::as_name)
+                .map(<[u8]>::to_vec)
+        };
+        let as_text = resources(&doc, Some(&dr), &[b"ZaDb", b"F1", b"Helv"]);
+        let plain = resources(&doc, Some(&dr), &[]);
+        for res in [&as_text, &plain] {
+            assert_eq!(
+                base_font(res, b"ZaDb").as_deref(),
+                Some(&b"ZapfDingbats"[..])
+            );
+            assert_eq!(base_font(res, b"F1").as_deref(), Some(&b"Times-Roman"[..]));
+        }
+        assert_eq!(
+            base_font(&as_text, b"Helv").as_deref(),
+            Some(&b"Helvetica"[..])
+        );
+    }
 
     #[test]
     fn the_default_appearance_splits_into_font_size_and_colours() {

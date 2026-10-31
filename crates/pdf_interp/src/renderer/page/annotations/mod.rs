@@ -170,7 +170,8 @@ fn render_one_annotation(
         }
         if !has_normal_appearance {
             if let Some(rect) = read_rect(annot) {
-                let resources = text::resources(doc, None, &[(popup::FONT, b"Helvetica")]);
+                let dr = form.and_then(widget::AcroForm::default_resources);
+                let resources = text::resources(doc, dr, &[popup::FONT]);
                 let no_rotate_rect = (flags & NO_ROTATE != 0).then_some(rect);
                 draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
                     popup::appearance(doc, parent.as_ref(), rect, ts)
@@ -350,7 +351,7 @@ fn draw_free_text(
     let resources = text::resources(
         doc,
         form.and_then(widget::AcroForm::default_resources),
-        &[(free_text.font(), b"Helvetica")],
+        &[free_text.font()],
     );
     draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
         free_text.appearance(ts)

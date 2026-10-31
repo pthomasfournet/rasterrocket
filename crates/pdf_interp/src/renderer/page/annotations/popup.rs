@@ -17,7 +17,8 @@ use super::typeset::{TextBlock, Typesetter};
 use super::{IDENTITY, Synthesized};
 use crate::resources::dict_ext::DictExt;
 
-/// The resource name of the window's font, standard Helvetica.
+/// The resource name of the window's font, standard Helvetica unless the
+/// form's default resources define the name.
 pub(super) const FONT: &[u8] = b"Helvetica";
 
 /// Distance of the text from the window's edges.
