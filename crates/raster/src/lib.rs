@@ -25,7 +25,7 @@
 //! - [`glyph`] — glyph bitmap blitting and fill
 //! - [`shading`] — axial, radial, function and Gouraud shadings
 //! - [`tiling`] — [`TiledPattern`]
-//! - [`transparency`] — transparency groups and soft masks
+//! - [`transparency`] — transparency groups
 //! - [`screen`] — [`HalftoneScreen`] (Bayer / stochastic threshold matrix)
 //! - [`pipe`] — compositing pipeline (simple, AA, general; blend modes;
 //!   [`Pattern`] trait; [`TransferSet`])

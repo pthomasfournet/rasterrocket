@@ -1,5 +1,5 @@
-//! Transparency group compositing — replaces `Splash::beginTransparencyGroup`,
-//! `Splash::endTransparencyGroup`, and `Splash::paintTransparencyGroup`.
+//! Transparency group compositing: opening a group over a parent bitmap,
+//! compositing it back, and discarding it.
 //!
 //! # PDF transparency model (§11.3–11.4)
 //!
@@ -24,18 +24,6 @@
 //! parent is itself a non-isolated group, the backdrop is the parent's
 //! content composited over the parent's own backdrop, so it reaches back to
 //! the nearest isolated ancestor or the page (§11.4.8).
-//!
-//! # Soft masks
-//!
-//! When `soft_mask_type != SoftMaskType::None`, the group is later used as a
-//! luminosity or alpha soft mask rather than being composited directly.  Call
-//! [`extract_soft_mask`] on the finished [`GroupBitmap`] to obtain the mask bytes.
-//!
-//! # C++ equivalents
-//!
-//! - `Splash::beginTransparencyGroup`
-//! - `Splash::endTransparencyGroup`
-//! - `Splash::paintTransparencyGroup`
 
 use crate::bitmap::Bitmap;
 use crate::clip::Clip;
@@ -45,21 +33,6 @@ use color::Pixel;
 use color::convert::div255;
 
 // ── Public types ──────────────────────────────────────────────────────────────
-
-/// Whether the group's soft-mask channel is alpha-based or luminosity-based.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SoftMaskType {
-    /// Not a soft mask — group is composited normally.
-    None,
-    /// Soft mask based on the group's alpha channel.
-    Alpha,
-    /// Soft mask based on the perceived luminance of the group's RGB pixels.
-    ///
-    /// Only meaningful for RGB (3-byte) groups.  For all other pixel modes
-    /// [`extract_soft_mask`] falls back to the alpha plane.
-    Luminosity,
-}
-
 /// Parameters for one transparency group, collected before [`begin_group`].
 #[derive(Clone, Debug)]
 pub struct GroupParams {
@@ -74,8 +47,6 @@ pub struct GroupParams {
     /// `false` → the backdrop under the group is kept for blend modes
     /// applied inside it.
     pub isolated: bool,
-    /// Role of this group's output — controls [`extract_soft_mask`] behaviour.
-    pub soft_mask_type: SoftMaskType,
 }
 
 /// A group bitmap together with its compositing metadata.
@@ -378,85 +349,6 @@ pub fn discard_group<P: Pixel>(group: GroupBitmap<P>) -> (Clip, Bitmap<P>) {
     (saved_clip, bitmap)
 }
 
-// ── Soft mask extraction ──────────────────────────────────────────────────────
-
-/// Convert a finished group bitmap into a single-channel soft mask.
-///
-/// Returns one byte per pixel (`width × height` bytes, row-major, top-down):
-///
-/// | `soft_mask_type`         | Output                                        |
-/// |--------------------------|-----------------------------------------------|
-/// | [`SoftMaskType::None`]   | All 255 (fully opaque — no masking).          |
-/// | [`SoftMaskType::Alpha`]  | Group alpha plane, verbatim.                  |
-/// | [`SoftMaskType::Luminosity`] | Luma `(77R + 151G + 28B + 128) >> 8` (weights 0.30/0.59/0.11) per RGB pixel. Fallback to alpha for non-RGB groups. |
-///
-/// For [`SoftMaskType::Luminosity`], only 3-byte RGB groups compute a true luma
-/// value.  All other pixel modes (gray, CMYK, `DeviceN`) fall back to the alpha
-/// plane because their channel bytes do not map to R, G, B.
-///
-/// # Panics
-///
-/// Panics if `group.bitmap` has no alpha plane; a group from [`begin_group`]
-/// always has one.
-#[must_use]
-pub fn extract_soft_mask<P: Pixel>(group: &GroupBitmap<P>) -> Vec<u8> {
-    let GroupBitmap { bitmap, params, .. } = group;
-    let pixel_count = bitmap.width as usize * bitmap.height as usize;
-    let alpha = || {
-        bitmap
-            .alpha_plane()
-            .expect("group bitmap is allocated with an alpha plane")
-            .to_vec()
-    };
-
-    match params.soft_mask_type {
-        SoftMaskType::None => vec![255u8; pixel_count],
-
-        SoftMaskType::Alpha => alpha(),
-
-        SoftMaskType::Luminosity => {
-            // Only true RGB (exactly 3 bytes/pixel = Rgb8) carries R, G, B in
-            // channels 0, 1, 2.  CMYK and DeviceN also have ≥ 3 bytes but their
-            // channels are ink densities, not light intensities — computing luma
-            // from them would be wrong.  Fall back to alpha for all non-RGB modes.
-            if P::BYTES != 3 {
-                return alpha();
-            }
-
-            let mut mask = Vec::with_capacity(pixel_count);
-            for y in 0..bitmap.height {
-                let row = bitmap.row_bytes(y);
-                for x in 0..bitmap.width as usize {
-                    let off = x * 3;
-                    let r = i32::from(row[off]);
-                    let g = i32::from(row[off + 1]);
-                    let b = i32::from(row[off + 2]);
-                    // Integer luma with weights 0.30/0.59/0.11; coefficients sum to 256, so the result
-                    // is always in [0, 255] — the cast is exact.
-                    // Max value: (256*255 + 0x80) >> 8 = (65280 + 128) >> 8 = 255.
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss,
-                        reason = "77+151+28 = 256; luma = weighted sum of [0,255] values; \
-                                  max = (256*255+128)>>8 = 255, min = 0"
-                    )]
-                    mask.push(((77 * r + 151 * g + 28 * b + 0x80) >> 8) as u8);
-                }
-            }
-            debug_assert_eq!(
-                mask.len(),
-                pixel_count,
-                "extract_soft_mask: loop produced {} bytes, expected {} ({w}×{h})",
-                mask.len(),
-                pixel_count,
-                w = bitmap.width,
-                h = bitmap.height,
-            );
-            mask
-        }
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -473,7 +365,6 @@ mod tests {
             x_max,
             y_max,
             isolated: true,
-            soft_mask_type: SoftMaskType::None,
         }
     }
 
@@ -740,65 +631,6 @@ mod tests {
         assert_eq!(group.region(), (2, 1, 5, 5));
     }
 
-    /// `extract_soft_mask` with `SoftMaskType::Alpha` returns the group's alpha plane.
-    #[test]
-    fn extract_soft_mask_alpha_returns_alpha_plane() {
-        let parent: Bitmap<Rgb8> = Bitmap::new(4, 4, 4, true);
-        let clip = make_clip(4, 4);
-        let mut params = default_params(0, 0, 3, 3);
-        params.soft_mask_type = SoftMaskType::Alpha;
-        let mut group = begin_group::<Rgb8>(
-            &parent,
-            None,
-            &clip,
-            params,
-            Bitmap::new(parent.width, parent.height, 1, true),
-        );
-        group
-            .bitmap
-            .alpha_plane_mut()
-            .expect("alpha plane")
-            .fill(200);
-
-        let mask = extract_soft_mask::<Rgb8>(&group);
-        assert!(
-            mask.iter().all(|&v| v == 200),
-            "alpha soft mask must match alpha plane"
-        );
-    }
-
-    /// `extract_soft_mask` with `SoftMaskType::Luminosity` computes luma from RGB.
-    #[test]
-    fn extract_soft_mask_luminosity_computes_luma() {
-        let parent: Bitmap<Rgb8> = Bitmap::new(2, 1, 4, true);
-        let clip = make_clip(2, 1);
-        let mut params = default_params(0, 0, 1, 0);
-        params.soft_mask_type = SoftMaskType::Luminosity;
-        let mut group = begin_group::<Rgb8>(
-            &parent,
-            None,
-            &clip,
-            params,
-            Bitmap::new(parent.width, parent.height, 1, true),
-        );
-
-        // Pixel 0: white (255, 255, 255) → luma = 255.
-        // Pixel 1: black (0, 0, 0)      → luma = 0.
-        let row = group.bitmap.row_bytes_mut(0);
-        row[..3].copy_from_slice(&[255, 255, 255]);
-        row[3..6].copy_from_slice(&[0, 0, 0]);
-        group
-            .bitmap
-            .alpha_plane_mut()
-            .expect("alpha plane")
-            .fill(255);
-
-        let mask = extract_soft_mask::<Rgb8>(&group);
-        assert_eq!(mask.len(), 2);
-        assert_eq!(mask[0], 255, "white → luma=255");
-        assert_eq!(mask[1], 0, "black → luma=0");
-    }
-
     /// A transparent group pixel (alpha=0) leaves the parent unchanged.
     #[test]
     fn transparent_group_pixel_is_skipped() {
@@ -821,35 +653,6 @@ mod tests {
             parent.row(0)[0].b,
             255,
             "transparent group pixel must not paint"
-        );
-    }
-
-    /// `extract_soft_mask` luminosity falls back to alpha for non-RGB modes (CMYK).
-    #[test]
-    fn extract_soft_mask_luminosity_fallback_for_cmyk() {
-        use color::Cmyk8;
-        let parent: Bitmap<Cmyk8> = Bitmap::new(2, 1, 4, true);
-        let clip = Clip::new(0.0, 0.0, 1.999, 0.999, false);
-        let mut params = default_params(0, 0, 1, 0);
-        params.soft_mask_type = SoftMaskType::Luminosity;
-        let mut group = begin_group::<Cmyk8>(
-            &parent,
-            None,
-            &clip,
-            params,
-            Bitmap::new(parent.width, parent.height, 1, true),
-        );
-        group
-            .bitmap
-            .alpha_plane_mut()
-            .expect("alpha plane")
-            .fill(77);
-
-        let mask = extract_soft_mask::<Cmyk8>(&group);
-        // For CMYK, luminosity falls back to alpha.
-        assert!(
-            mask.iter().all(|&v| v == 77),
-            "CMYK luminosity soft mask must fall back to alpha"
         );
     }
 

@@ -2126,7 +2126,6 @@ impl<'doc> PageRenderer<'doc> {
                 x_max: i32::try_from(self.width).unwrap_or(i32::MAX),
                 y_max: i32::try_from(self.height).unwrap_or(i32::MAX),
                 isolated: tg.isolated,
-                soft_mask_type: raster::transparency::SoftMaskType::None,
             });
         };
         let ctm = self.gstate.current().ctm;
@@ -2179,7 +2178,6 @@ impl<'doc> PageRenderer<'doc> {
             x_max: right as i32,
             y_max: bottom as i32,
             isolated: tg.isolated,
-            soft_mask_type: raster::transparency::SoftMaskType::None,
         };
         Some(params)
     }
