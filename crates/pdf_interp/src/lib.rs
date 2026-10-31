@@ -267,8 +267,10 @@ pub fn page_has_javascript(doc: &Document, page_id: pdf::ObjectId) -> bool {
     {
         return true;
     }
-    let any_js = |annots: &[pdf::Object]| {
-        annots.iter().take(MAX_JS_SCAN_ANNOTS).any(|annot| {
+    resources::resolve_array(doc, page.get(b"Annots"))
+        .iter()
+        .take(MAX_JS_SCAN_ANNOTS)
+        .any(|annot| {
             resources::resolve_dict(doc, annot).is_some_and(|annot| {
                 annot.get(b"A").is_some_and(|a| action_is_js(doc, a))
                     || annot
@@ -276,16 +278,6 @@ pub fn page_has_javascript(doc: &Document, page_id: pdf::ObjectId) -> bool {
                         .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
             })
         })
-    };
-    match page.get(b"Annots") {
-        Some(pdf::Object::Array(annots)) => any_js(annots),
-        Some(pdf::Object::Reference(id)) => doc
-            .get_object(*id)
-            .ok()
-            .and_then(|o| o.as_array().map(any_js))
-            .unwrap_or(false),
-        _ => false,
-    }
 }
 
 /// Return `true` if `obj` (or the dict it resolves to) has `/S /JavaScript`.

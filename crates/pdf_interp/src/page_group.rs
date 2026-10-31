@@ -21,7 +21,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use raster::types::BlendMode;
 
 use crate::resources::dict_ext::DictExt;
-use crate::resources::{TransparencyGroupParams, parse_blend_mode, resolve_dict};
+use crate::resources::{TransparencyGroupParams, parse_blend_mode, resolve_array, resolve_dict};
 
 /// Resource dictionaries are followed through forms, patterns and fonts
 /// at most this deep.
@@ -53,16 +53,7 @@ pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroup
 /// The `/Resources` of `page_id` or of its nearest ancestor that has one
 /// (ISO 32000-2 §7.7.3.4).
 fn inherited_resources(doc: &Document, page_id: ObjectId) -> Option<Dictionary> {
-    let mut id = Some(page_id);
-    let mut seen = HashSet::new();
-    while let Some(current) = id.filter(|id| seen.insert(*id)) {
-        let node = doc.get_dictionary(current).ok()?;
-        if let Some(resources) = node.get(b"Resources") {
-            return resolve_dict(doc, resources);
-        }
-        id = node.get(b"Parent").and_then(Object::as_reference);
-    }
-    None
+    resolve_dict(doc, &doc.get_inherited_page_attr(page_id, b"Resources")?)
 }
 
 /// A walk over resource dictionaries that stops at the first blend mode.
@@ -145,41 +136,33 @@ impl Scan<'_> {
     /// Whether an appearance stream of an annotation of `page` reaches a
     /// blend mode.
     fn annotations_blend(&mut self, page: &Dictionary) -> bool {
-        let annots = match page.get(b"Annots") {
-            Some(Object::Array(a)) => a.clone(),
-            Some(Object::Reference(id)) => self
-                .doc
-                .get_object(*id)
-                .ok()
-                .and_then(|o| o.as_array().map(<[Object]>::to_vec))
-                .unwrap_or_default(),
-            _ => return false,
-        };
-        annots.iter().any(|annot| {
-            let Some(normal) = resolve_dict(self.doc, annot)
-                .and_then(|a| resolve_dict(self.doc, a.get(b"AP")?))
-                .and_then(|ap| ap.get(b"N").cloned())
-            else {
-                return false;
-            };
-            match &normal {
-                Object::Reference(_) => {
-                    if self.stream_resources_blend(&normal, 0) {
-                        return true;
+        resolve_array(self.doc, page.get(b"Annots"))
+            .iter()
+            .any(|annot| {
+                let Some(normal) = resolve_dict(self.doc, annot)
+                    .and_then(|a| resolve_dict(self.doc, a.get(b"AP")?))
+                    .and_then(|ap| ap.get(b"N").cloned())
+                else {
+                    return false;
+                };
+                match &normal {
+                    Object::Reference(_) => {
+                        if self.stream_resources_blend(&normal, 0) {
+                            return true;
+                        }
+                        // A dictionary of appearance states.
+                        resolve_dict(self.doc, &normal).is_some_and(|states| {
+                            states
+                                .iter()
+                                .any(|(_, s)| self.stream_resources_blend(s, 0))
+                        })
                     }
-                    // A dictionary of appearance states.
-                    resolve_dict(self.doc, &normal).is_some_and(|states| {
-                        states
-                            .iter()
-                            .any(|(_, s)| self.stream_resources_blend(s, 0))
-                    })
+                    Object::Dictionary(states) => states
+                        .iter()
+                        .any(|(_, s)| self.stream_resources_blend(s, 0)),
+                    _ => false,
                 }
-                Object::Dictionary(states) => states
-                    .iter()
-                    .any(|(_, s)| self.stream_resources_blend(s, 0)),
-                _ => false,
-            }
-        })
+            })
     }
 
     /// The dictionary of `obj` — a stream's or a plain one — the first time
