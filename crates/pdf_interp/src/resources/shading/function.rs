@@ -179,11 +179,9 @@ impl Function {
             Some(4) => Body::PostScript {
                 domain: numbers(dict, b"Domain"),
                 program: stream_bytes().and_then(|src| {
-                    let program = Program::parse(&src);
-                    if program.is_none() {
-                        log::warn!("function: Type 4 program is malformed");
-                    }
-                    program
+                    Program::parse(&src)
+                        .map_err(|e| log::warn!("function: Type 4 program rejected: {e}"))
+                        .ok()
                 }),
             },
             Some(other) => {
