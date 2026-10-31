@@ -150,6 +150,9 @@ impl RenderParams {
 }
 
 pub struct RenderRegion { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
+impl RenderRegion {
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self
+}
 
 #[derive(Clone, Default)]
 pub struct CancelToken { /* Arc<AtomicBool> */ }
@@ -257,7 +260,7 @@ let mut opts = RasterOptions::new(150.0);
 opts.deskew = true;
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`, `cancel = None`.
 
 ---
 
@@ -289,7 +292,10 @@ impl PageSet {
     pub fn last(&self) -> u32
     pub fn len(&self) -> usize
     pub fn is_empty(&self) -> bool  // always false by invariant
+    pub fn iter(&self) -> impl Iterator<Item = u32>  // ascending
+    pub fn as_slice(&self) -> &[u32]
 }
+impl<'a> IntoIterator for &'a PageSet { type Item = u32; /* … */ }
 ```
 
 A validated, sorted, deduplicated set of 1-based page numbers. The internal storage is reference-counted (`Arc<[u32]>`); `clone()` is O(1). Used in `RasterOptions::pages` to render a sparse subset of pages without visiting intermediate ones.
@@ -438,7 +444,7 @@ Controls which compute backend is used. The `Force*` variants convert silent GPU
 
 `ForceVulkan` runs the AA-fill kernel (and, in a build with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU.  Both GPU paths are dormant by default (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)): `PDF_RASTER_AA_FILL_THRESHOLD=0` enables the AA fill and `PDF_RASTER_HUFFMAN_THRESHOLD=0` the Huffman decode.
 
-`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vulkan` and, with the `vaapi` feature, `vaapi` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling; `BackendPolicy::ALL` lists the policies of the build. A name it does not accept is a `ParseBackendPolicyError`, whose message lists the accepted names. `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
+`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vulkan` and, with the `vaapi` feature, `vaapi` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling; `BackendPolicy::ALL` lists the policies of the build. A name it does not accept is a `ParseBackendPolicyError`: `value()` returns the rejected input, and its `Display` names it and lists the accepted names (`unknown backend "cdua"; expected one of auto, cpu, cuda, vulkan`). `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
 
 ---
 
@@ -557,11 +563,12 @@ Both are checked before the bitmap is allocated, and they bound what one call
 draws: with a `RenderParams::region` they apply to the region, so a page larger
 than either can be rendered as tiles.
 
-Images inside a page have their own budget, in `rasterrocket-interp`
-(`resources::image::MAX_IMAGE_SIDE` = 131 071 px per declared side,
-`MAX_DECODED_BYTES` = 1 GiB of decoded samples, width × height × components):
-an image over it is refused before decompression and reported in
-`PageDiagnostics::image_failures`, or fails the page under `strict`.
+Images inside a page have their own budget, fixed in `rasterrocket-interp`
+(not configurable): at most 131 071 px per declared side and 1 GiB of decoded
+samples (width × height × components). An image over it is refused before
+decompression and reported in `PageDiagnostics::image_failures`, or fails the
+page under `strict`. The other resource bounds of the interpreter are listed
+under [Size limits](cli-reference.md#size-limits) in the CLI reference.
 
 ---
 
@@ -824,7 +831,7 @@ Opens and validates a PDF, from a path or from bytes. `open` and `open_bytes` re
 
  If a catalog JavaScript entry point is detected (checked locations: `/OpenAction`, catalog `/AA`, `/Names/JavaScript`, `/AcroForm/AA`, each flagged only when genuinely a `/S /JavaScript` action), a loud `WARN` is emitted per location and the document still opens — rasterrocket has no JavaScript engine and never executes `/JS`, so a script's structural presence cannot change the static rendered page. No JS is parsed or evaluated. No page object is read at open; page-level `/AA` and annotation `/A`/`/AA` are checked per page by `page_has_javascript(doc, page_id) -> bool`, which the render path calls before each page and warns on once per session.
 
-The returned `pdf::Document` comes from the in-tree `pdf` crate (replaced lopdf 0.40 in v0.6.0). It is a lazy, mmap-backed reader: opening the file parses only the xref table and trailer; individual objects resolve on demand via byte-offset seek with a per-object `Arc` cache shared safely across worker threads. Object stream (`ObjStm`) decompression is cached once and reused. The API mirrors the lopdf method names previously used here.
+The returned `pdf::Document` comes from the in-tree parser crate (`rasterrocket-parser`, imported as `pdf`). It is a lazy, mmap-backed reader: opening the file parses only the xref table and trailer; individual objects resolve on demand via byte-offset seek with a per-object `Arc` cache shared safely across worker threads. Each object stream (`ObjStm`) is decompressed once and its directory reused. `Document::linearization_hints()` returns `Option<LinearizationHints>` (the `/Linearized` dictionary of a Fast Web View file, or `None`).
 
 ### `page_count`
 
@@ -878,16 +885,19 @@ Dimensions are swapped for 90°/270° rotations so that `width_pts` always corre
 ### `InterpError`
 
 ```rust
+#[non_exhaustive]
 pub enum InterpError {
     Pdf(pdf::PdfError),
     PageOutOfRange { page: u32, total: u32 },
-    MissingResource(String),
     InvalidPageGeometry(String),
-    PageBudget(String),
 }
 ```
 
-Implements `std::error::Error`. `InterpError::Pdf(e)` chains to `pdf::PdfError`.
+Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`. A `match` on it needs a wildcard arm. A missing resource is not an error: the operator that names it draws nothing (a missing font draws in Helvetica and is listed in `PageDiagnostics::missing_fonts`), and the per-page operator budget is reported by the `rasterrocket` crate as `RasterError::PageBudgetExceeded`.
+
+### Other public types
+
+`PageView`, `PrefetchConfig` and the resource and content types (`ExtGStateParams`, `ShadingPattern`, `SoftMaskParams`, `FormXObject`, `TransparencyGroupParams`, `ResourceKey`, `Operator`, `TextArrayElement`) are `#[non_exhaustive]`: they cannot be built with a struct literal or matched exhaustively outside the crate. A `PageView` is built with `PageView::whole(&geometry, (scale_x, scale_y))`, the whole page with an initial CTM of `scale × UserUnit` device pixels per unit, and narrowed with `.window(x, y, width, height)` to a device-pixel window of it; `PageRenderer::with_view(&view, doc, page_id)` renders it. `cache::spawn_prefetch` (`cache` feature) returns `io::Result<PrefetchHandle>`: a prefetch thread that cannot be started is an error, not a panic.
 
 ---
 
