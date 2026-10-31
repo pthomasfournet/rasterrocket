@@ -3997,6 +3997,14 @@ mod tests {
         );
     }
 
+    /// A negative line width strokes as its magnitude, widened to one
+    /// device pixel like any thin stroke.
+    #[test]
+    fn negative_thin_stroke_widens_to_one_device_pixel() {
+        let px = render_gray(16, b"0 G -0.1 w 0 4.5 m 16 4.5 l S");
+        assert_eq!(px[11 * 16 + 8], 0, "rule row solid");
+    }
+
     /// An image whose bounding box misses the clip entirely paints nothing.
     #[test]
     fn image_blit_outside_clip_paints_nothing() {

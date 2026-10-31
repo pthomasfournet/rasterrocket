@@ -69,7 +69,7 @@ impl PageRenderer<'_> {
                 self.gstate.current_mut().ctm = ctm_multiply(m, &old);
             }
 
-            Operator::SetLineWidth(w) => self.gstate.current_mut().line_width = *w,
+            Operator::SetLineWidth(w) => self.gstate.current_mut().set_line_width(*w),
             Operator::SetLineCap(c) => self.gstate.current_mut().line_cap = int_to_cap(*c),
             Operator::SetLineJoin(j) => self.gstate.current_mut().line_join = int_to_join(*j),
             Operator::SetMiterLimit(m) => self.gstate.current_mut().miter_limit = *m,
@@ -461,7 +461,7 @@ impl PageRenderer<'_> {
             gs.stroke_alpha = a;
         }
         if let Some(w) = params.line_width {
-            gs.line_width = w;
+            gs.set_line_width(w);
         }
         if let Some(c) = params.line_cap {
             gs.line_cap = int_to_cap(c);

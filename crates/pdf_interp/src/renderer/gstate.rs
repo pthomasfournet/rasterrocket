@@ -266,6 +266,20 @@ impl InterpGState {
                 && self.stroke_pattern.is_none())
     }
 
+    /// Set the line width from a `w` operand or an `ExtGState` `/LW`.
+    ///
+    /// The stroker offsets the outline by half the width on either side, so
+    /// a negative width strokes as its magnitude does; the magnitude is
+    /// stored so that the stroke's bounds and its one-pixel minimum agree
+    /// with what is drawn.  A non-finite width leaves the width unchanged.
+    pub fn set_line_width(&mut self, width: f64) {
+        if width.is_finite() {
+            self.line_width = width.abs();
+        } else {
+            log::debug!("rasterrocket-interp: non-finite line width {width} ignored");
+        }
+    }
+
     /// `rgb` mapped through the transfer function in effect.
     #[must_use]
     pub fn transferred(&self, rgb: [u8; 3]) -> [u8; 3] {
@@ -576,6 +590,15 @@ mod tests {
     #[test]
     fn initial_clip_follows_the_antialias_mode() {
         assert!(!GStateStack::new(10, 10, false).current().clip.antialias);
+    }
+
+    #[test]
+    fn set_line_width_stores_the_magnitude_of_a_finite_width() {
+        let mut gs = InterpGState::initial(10, 10);
+        gs.set_line_width(-2.5);
+        assert!((gs.line_width - 2.5).abs() < 1e-12);
+        gs.set_line_width(f64::NAN);
+        assert!((gs.line_width - 2.5).abs() < 1e-12);
     }
 
     #[test]
