@@ -20,9 +20,9 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 
 - `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`: page iterators
   and a bounded background channel.
-- `open_session` + `render_page_rgb_with`: one open document, per-page
-  renders from any thread, with `RenderParams` for per-axis scale, a
-  `RenderRegion` window and a `CancelToken`.
+- `open_session` + `render_page_rgb_with` / `render_page_gray`: one open
+  document, per-page renders from any thread, with `RenderParams` for
+  per-axis scale, a `RenderRegion` window and a `CancelToken`.
 - `encode_for_gcv`: a size-fitted grayscale JPEG for Google Cloud Vision.
 - Encrypted documents are decrypted in process when `decrypt_authorized` is set.
 

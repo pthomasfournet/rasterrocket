@@ -25,7 +25,8 @@ fn ocr_archive(path: &Path) -> Result<(), ComicError> {
 ```
 
 `open_comic` returns an iterator that decodes each page when it is reached;
-its `len()` is the page count and `retain` drops pages before decoding. Entries are read under a
+its `len()` is the number of pages still to come and `retain` drops pages
+before any is decoded. Entries are read under a
 512 MiB decompressed-size cap and image dimensions are checked before
 decoding. `rrocket` uses this crate for archive input. See the
 [API reference](../../docs/api-reference.md#rasterrocket-comic-crate--comic-archive-input).
