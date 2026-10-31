@@ -582,14 +582,14 @@ fn extract_encoding(
             |d| {
                 (
                     vec![],
-                    parse_differences(&d),
+                    parse_differences(doc, &d),
                     parse_base_encoding(d.get_name(b"BaseEncoding")),
                 )
             },
         ),
         Object::Dictionary(d) => (
             vec![],
-            parse_differences(d),
+            parse_differences(doc, d),
             parse_base_encoding(d.get_name(b"BaseEncoding")),
         ),
         // A bare named encoding (`/WinAnsiEncoding`, `/MacRomanEncoding`, …):
@@ -1290,40 +1290,44 @@ fn extract_cid_widths(doc: &Document, dict: &Dictionary) -> (i32, Vec<(u32, Vec<
     (dw, parse_w_segments(doc, w_arr))
 }
 
-/// Parse the `Differences` array from a dictionary-form `Encoding` object.
+/// Parse the `Differences` array, direct or indirect, of a dictionary-form
+/// `Encoding` object.
 ///
-/// The array has the form `[base_code /Name /Name ... base_code /Name ...]`.
-/// Each integer resets the current char code; each name assigns a glyph name
-/// to that code and advances the counter.  Codes outside `[0, 255]` are ignored.
-fn parse_differences(dict: &Dictionary) -> Box<[Option<Box<str>>; 256]> {
+/// The array has the form `[code /Name /Name … code /Name …]`: each number
+/// sets the code of the next name, and each name is assigned to the
+/// current code, which then advances (PDF §9.6.6.1).  A number that is no
+/// code of a single-byte encoding (0–255) discards the names after it up
+/// to the next number, as does running past code 255.
+fn parse_differences(doc: &Document, dict: &Dictionary) -> Box<[Option<Box<str>>; 256]> {
     let mut table = empty_differences();
-
-    let Some(arr_obj) = dict.get(b"Differences") else {
+    let Some(arr) = dict.get(b"Differences").and_then(|o| doc.resolve(o).ok()) else {
         return table;
     };
-    let Some(arr) = arr_obj.as_array() else {
+    let Some(arr) = arr.as_array() else {
         return table;
     };
 
-    let mut code: usize = 0;
+    // The code of the next name; `None` while names are being discarded.
+    let mut code: Option<usize> = Some(0);
     for obj in arr {
-        match obj {
-            Object::Integer(n) if *n >= 0 && *n < 256 => {
+        if let Object::Name(name) = obj {
+            if let Some(slot) = code.and_then(|c| table.get_mut(c)) {
+                *slot = Some(String::from_utf8_lossy(name).into());
+            }
+            code = code.map(|c| c + 1);
+        } else if let Some(n) = number(doc, obj) {
+            code = (n.fract() == 0.0 && (0.0..256.0).contains(&n)).then(|| {
                 #[expect(
-                    clippy::cast_sign_loss,
                     clippy::cast_possible_truncation,
-                    reason = "n validated ≥ 0 and < 256 above; safe cast to usize"
+                    clippy::cast_sign_loss,
+                    reason = "n is an integer in 0..256"
                 )]
-                {
-                    code = *n as usize;
-                }
+                let c = n as usize;
+                c
+            });
+            if code.is_none() {
+                log::warn!("font: Differences code {n} is outside 0..=255 — skipping its names");
             }
-            Object::Name(name) if code < NUM_CODES => {
-                let s = String::from_utf8_lossy(name).into_owned().into_boxed_str();
-                table[code] = Some(s);
-                code += 1;
-            }
-            _ => {}
         }
     }
 
@@ -1554,6 +1558,25 @@ mod tests {
     }
 
     use crate::test_helpers::{empty_doc, make_doc_with_object};
+
+    /// `Differences` assigns names from each code on; an out-of-range
+    /// code discards its names instead of letting them overwrite the
+    /// previous run, and an indirect array is read.
+    #[test]
+    fn differences_follow_codes_and_skip_out_of_range_runs() {
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            "[ 65 /A /B 300 /X /Y 254 /y /z /overflow ]",
+        )]);
+        let enc = make_dict(&[(b"Differences", Object::Reference((4, 0)))]);
+        let table = parse_differences(&doc, &enc);
+        assert_eq!(table[65].as_deref(), Some("A"));
+        assert_eq!(table[66].as_deref(), Some("B"));
+        assert_eq!(table[67], None, "the names after 300 are discarded");
+        assert_eq!(table[254].as_deref(), Some("y"));
+        assert_eq!(table[255].as_deref(), Some("z"));
+        assert_eq!(table.iter().flatten().count(), 4);
+    }
 
     #[test]
     fn cid_widths_resolve_indirect_w_array() {
