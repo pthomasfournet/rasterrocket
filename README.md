@@ -80,6 +80,9 @@ once.** The full list, with migration notes, is in
   `rasterrocket-color` renames `splash_floor` / `splash_ceil` /
   `splash_round` to `floor_i32` / `ceil_i32` / `round_half_up_i32` and drops
   `Rgba8`.
+  `RenderedPage::effective_dpi` is removed: `RenderedPage::dpi` is pixels
+  per physical inch, `/UserUnit` included, and is the value to give an OCR
+  engine.
 - **CLI.** `--singlefile` writes `<prefix>.<ext>` with no page number;
   `--jpeg`, `--jpegcmyk` and `--tiff` are refused at startup, before the
   document is opened; an existing `--ram-path` is refused rather than deleted on

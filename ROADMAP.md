@@ -55,15 +55,17 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
-### Unreleased (next: v2.0.0)
+### v2.0.0 (October 2026)
 
 **More of the PDF drawn, and drawn as the specification says; one API
 break.** Every capability that poppler or pdfium renders and rasterrocket did
 not was reproduced with a fixture and implemented from ISO 32000-2. The
 result touches every stage, from the cross-reference reader to the
 compositor, and adds in-process decryption, optional content, annotations
-and region rendering. The public types become `#[non_exhaustive]`, which is
-why this is a major release; the migration notes are under **API changes**.
+and region rendering. The release closes with a review of every file the
+cycle touched (security, edge cases, failure handling, shared helpers,
+allocations). The public types become `#[non_exhaustive]`, which is why this
+is a major release; the migration notes are under **API changes**.
 
 **New capabilities.**
 - **Encrypted documents decrypt in process.** The Standard security handler
@@ -187,6 +189,21 @@ why this is a major release; the migration notes are under **API changes**.
   overflow and unbounded-work fixes are brought into the read-fonts and
   skrifa forks; a 1 000 000-deep Type 1 procedure no longer overflows the
   stack. A refused HTJ2K codestream is named as such.
+- *Review fixes.* A form's or Type 3 glyph's unbalanced `q`/`Q` no longer
+  leaks into or pops the page's graphics states; a form named N times by
+  itself is prescanned once instead of N⁴ times; `sc` takes its components
+  from the top of the operand stack; content-stream names decode `#xx`
+  escapes; page boxes, `/UserUnit` and `/Rotate` are read through references
+  and as reals; a JPEG whose frame header overruns the decode budget is
+  refused before the GPU decoder allocates; GPU parameter records and blit
+  buffers are validated before launch; a prefetch thread that cannot start
+  is reported instead of aborting the process.
+- *Bounds added in review.* Graphics-state nesting is capped at 16 384
+  saves; mesh shadings at 2²² triangles; dash patterns at 2²⁰ entries (the
+  stroke is drawn solid); `CMap` streams at 16 MiB and 2¹⁸ mappings; Type 3
+  `CharProc`s at 4 MiB each and 64 MiB per font; JPEG 2000 images at 2³⁰
+  samples and 65 535 tiles. See
+  [Size limits](docs/cli-reference.md#size-limits).
 
 **Performance.** Fonts resolved once per document, glyph bitmaps shared
 across pages, outline tables parsed once per program, Type 3 CharProcs
@@ -200,6 +217,12 @@ time; the jpeg2000 fork takes upstream's SIMD sample conversion. Document
 open no longer touches page objects (21 archive documents: 87 → 10 ms
 summed), and page JavaScript is checked per rendered page. Per-page latency
 over a 14 028-page archive sample is lower than pdfium's on 12 519 pages.
+Content-stream names and strings, and inline-image data, are borrowed from
+the stream rather than copied; a saved graphics state shares its font and
+pattern names; object resolution, font resource entries, glyph names and
+fallback-font lookups no longer copy; tar and 7z comic pages are moved out of
+the archive rather than duplicated; and `open_comic` decodes pages lazily,
+so a comic's memory no longer grows with its page count.
 
 **API changes** (breaking; migration notes in italics).
 - `#[non_exhaustive]` on `RasterError`, `BackendPolicy`, `RenderPurpose`,
@@ -232,8 +255,52 @@ over a 14 028-page archive sample is lower than pdfium's on 12 519 pages.
   `fill_image_mask` and their scalers), the band-parallel `fill_parallel` /
   `eo_fill_parallel` with the `rayon` feature, and `state::GraphicsState` /
   `StateStack` are deleted; nothing in the workspace used them.
+- `RenderedPage::effective_dpi` is removed: a page's size already includes
+  its `/UserUnit`, so `RenderedPage::dpi` is the physical resolution, and
+  `effective_dpi` (`dpi × UserUnit`) overstated it on such pages. *Pass
+  `page.dpi` to `tesseract::set_source_resolution`.*
+- The `rasterrocket::session` module is removed; its functions remain at
+  the crate root. `rasterrocket::{gcv, page}` are private, their items
+  re-exported at the root as before. `render_page_gray` is public, and
+  `RasterOptions::cancel` cancels the batch entry points.
+- `BackendPolicy`'s `FromStr` error is `ParseBackendPolicyError` (its
+  message lists the accepted names), and `BackendPolicy::ALL` lists the
+  policies of the build.
+- `pdf::OpenOptions` is `#[non_exhaustive]`: *build it with
+  `OpenOptions::new(decrypt_authorized, password)` or `default()`.*
+  `Document::resolve` returns a `pdf::Resolved` that derefs to the object
+  instead of an `Arc<Object>`.
+- `rasterrocket-comic`: `open_comic` returns the lazy `ComicPages`
+  iterator; `ComicOptions` and `ComicError` are `#[non_exhaustive]`.
+- `rasterrocket-color`: `splash_floor` / `splash_ceil` / `splash_round` are
+  `floor_i32` / `ceil_i32` / `round_half_up_i32`; `Rgba8` is removed.
+- The internal crates expose only what another crate uses: modules used
+  inside their own crate (e.g. `color::mode`, `render::scanner`,
+  `gpu::jpeg`) are private, their items re-exported where other crates
+  need them.
+- `rasterrocket-interp`: `InterpError` loses `MissingResource` and
+  `PageBudget` and is `#[non_exhaustive]`, with its parser error as
+  `source()`; `Operator`, `TextArrayElement` and `Tokenizer` take a
+  lifetime and borrow their operands (`Operator::into_owned` copies them);
+  `parse_page_content(doc, page_id, bytes)` replaces `parse_page`,
+  `parse_page_by_id` and `parse_page_content_by_id`; `spawn_prefetch`
+  returns an `io::Result`; `PageView` and the resource types are
+  `#[non_exhaustive]`.
 - CLI: `--overprint`, `--thinlinemode` and `--jpegopt` are removed (nothing
-  read them); they now fail at argument parsing.
+  read them); they now fail at argument parsing. `--singlefile` writes
+  `<prefix>.<ext>`; `--jpeg`, `--jpegcmyk` and `--tiff` are refused at
+  startup; an existing `--ram-path` is refused instead of being deleted at
+  exit, and the RAM directory is removed after a failed run too; errors
+  print their cause chain once.
+
+**Archive check of the review.** The 1 087-document archive (224 373 pages
+at 40 dpi) was rendered before and after the review. 215 192 pages are
+byte-identical; 9 181 pages in 137 documents differ, and the sampled ones
+differ by rounding (at most two levels), by sub-pixel glyph positions, or by
+glyphs now drawn that were blank before (the `fi` and `fl` ligatures of
+scanned-book front matter). No document renders fewer pages or fails where
+it did not; the 54 that exit 1 are encrypted and were rendered without
+authorisation to decrypt.
 
 **Tooling and CI.** CI runs the integration suites (47 in-memory pixel
 suites), the vendored decoder suites and a bench-crate check, and lints test
