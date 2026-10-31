@@ -106,10 +106,9 @@ pub struct InterpGState {
     pub ctm: Ctm,
     /// Current clip region (page rect at init; narrowed by `W`/`W*` operators).
     ///
-    /// Constructed with `antialias: true` so path-clip scanners are built in
-    /// AA-scaled coordinates, matching the `vector_antialias = true` mode used
-    /// by fill and stroke; `PageRenderer::set_antialias` replaces it when
-    /// vector antialiasing is off.
+    /// Its coverage mode is the renderer's vector antialiasing mode, so that
+    /// path-clip scanners are built in the coordinates fills and strokes
+    /// query (AA-scaled when antialiasing).
     pub clip: Clip,
     /// Current fill colour.
     pub fill_color: RasterColor,
@@ -325,11 +324,14 @@ pub struct StreamScope {
 
 impl GStateStack {
     /// Create a new stack with the initial PDF graphics state for a page of
-    /// `width × height` device pixels.
+    /// `width × height` device pixels; `antialias` selects the coverage mode
+    /// of the initial clip (see [`InterpGState::clip`]).
     #[must_use]
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, antialias: bool) -> Self {
+        let mut initial = InterpGState::initial(width, height);
+        initial.clip = Clip::new(0.0, 0.0, f64::from(width), f64::from(height), antialias);
         Self {
-            stack: vec![InterpGState::initial(width, height)],
+            stack: vec![initial],
             floor: 1,
             deferred: 0,
             overflow_reported: false,
@@ -510,7 +512,7 @@ mod tests {
 
     #[test]
     fn save_restore_roundtrip() {
-        let mut stack = GStateStack::new(100, 100);
+        let mut stack = GStateStack::new(100, 100, true);
         stack.current_mut().line_width = 5.0;
         stack.save();
         stack.current_mut().line_width = 10.0;
@@ -521,14 +523,14 @@ mod tests {
 
     #[test]
     fn restore_unmatched_is_silent() {
-        let mut stack = GStateStack::new(100, 100);
+        let mut stack = GStateStack::new(100, 100, true);
         stack.restore(); // should not panic
         stack.restore(); // still should not panic
     }
 
     #[test]
     fn save_op_beyond_the_depth_cap_defers_and_stays_balanced() {
-        let mut stack = GStateStack::new(10, 10);
+        let mut stack = GStateStack::new(10, 10, true);
         // The page state and `MAX_SAVE_DEPTH - 1` saves fill the stack;
         // ten more are deferred.
         for _ in 0..MAX_SAVE_DEPTH - 1 + 10 {
@@ -552,7 +554,7 @@ mod tests {
 
     #[test]
     fn a_nested_stream_neither_pops_nor_leaves_states() {
-        let mut stack = GStateStack::new(10, 10);
+        let mut stack = GStateStack::new(10, 10, true);
         stack.save_op();
         stack.current_mut().line_width = 3.0;
         stack.save();
@@ -569,6 +571,11 @@ mod tests {
         assert_eq!(stack.depth(), 3);
         stack.restore();
         assert!((stack.current().line_width - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn initial_clip_follows_the_antialias_mode() {
+        assert!(!GStateStack::new(10, 10, false).current().clip.antialias);
     }
 
     #[test]
@@ -609,7 +616,7 @@ mod tests {
 
     #[test]
     fn initial_clip_covers_page() {
-        let stack = GStateStack::new(200, 100);
+        let stack = GStateStack::new(200, 100, true);
         let clip = &stack.current().clip;
         // Initial clip rect should span the full page in device pixels.
         assert!(clip.x_min < 1.0);
@@ -622,13 +629,13 @@ mod tests {
     fn initial_clip_uses_antialias() {
         // Clip must be created with antialias=true so path-clip scanners are
         // built in AA-scaled coordinates, matching vector_antialias=true in fill/stroke.
-        let stack = GStateStack::new(100, 100);
+        let stack = GStateStack::new(100, 100, true);
         assert!(stack.current().clip.antialias);
     }
 
     #[test]
     fn clip_narrows_on_save_restore() {
-        let mut stack = GStateStack::new(100, 100);
+        let mut stack = GStateStack::new(100, 100, true);
         let original_xmax = stack.current().clip.x_max;
 
         // Narrow the clip in the current state.

@@ -631,6 +631,14 @@ fn build_initial_ctm(
     }
 }
 
+/// The initial graphics state of a `width × height` window drawn under
+/// `ctm`, clipping in the coverage mode `antialias`.
+fn initial_gstate(width: u32, height: u32, ctm: Ctm, antialias: bool) -> GStateStack {
+    let mut gstate = GStateStack::new(width, height, antialias);
+    gstate.current_mut().ctm = ctm;
+    gstate
+}
+
 /// The device-space placement of a page render: the page's pixel extent and
 /// initial-CTM parameters, and the window of that extent the renderer draws.
 ///
@@ -783,9 +791,8 @@ impl<'doc> PageRenderer<'doc> {
         let mut bitmap = Bitmap::<Rgb8>::new(width, height, 1, false);
         bitmap.data_mut().fill(255u8); // white background
 
-        let mut gstate = GStateStack::new(width, height);
         let initial_ctm = view.initial_ctm();
-        gstate.current_mut().ctm = initial_ctm;
+        let gstate = initial_gstate(width, height, initial_ctm, true);
 
         let font_cache = FontCache::new(Arc::default(), true);
         let resources = PageResources::new(doc, page_id);
@@ -1010,13 +1017,7 @@ impl<'doc> PageRenderer<'doc> {
         self.text_antialias = text;
         self.vector_antialias = vector;
         self.font_cache = FontCache::new(Arc::clone(self.font_cache.document_fonts()), text);
-        self.gstate.current_mut().clip = raster::Clip::new(
-            0.0,
-            0.0,
-            f64::from(self.width),
-            f64::from(self.height),
-            vector,
-        );
+        self.gstate = initial_gstate(self.width, self.height, self.initial_ctm, vector);
     }
 
     /// Draw optional content as `optional_content` configures it, and
@@ -1332,8 +1333,12 @@ impl<'doc> PageRenderer<'doc> {
         // PDF §12.5.5: an appearance is drawn in default user space with the
         // initial graphics state, whatever the content stream left behind: an
         // unbalanced `q`, a clip, a CTM or an open marked-content sequence.
-        self.gstate = GStateStack::new(self.width, self.height);
-        self.gstate.current_mut().ctm = self.initial_ctm;
+        self.gstate = initial_gstate(
+            self.width,
+            self.height,
+            self.initial_ctm,
+            self.vector_antialias,
+        );
         self.path = None;
         self.pending_clip = None;
         self.ocg_stack.clear();
@@ -4175,5 +4180,16 @@ mod tests {
             px.iter().all(|&v| v == 255),
             "page fill must stay red: {px:?}"
         );
+    }
+
+    /// Annotations are drawn in the initial graphics state of the vector
+    /// antialiasing mode selected for the page, not the default mode.
+    #[test]
+    fn annotations_clip_in_the_page_s_antialiasing_mode() {
+        let doc = crate::test_helpers::empty_doc();
+        let mut renderer = PageRenderer::new(8, 8, &doc, (1, 0));
+        renderer.set_antialias(true, false);
+        renderer.render_annotations((1, 0));
+        assert!(!renderer.gstate.current().clip.antialias);
     }
 }
