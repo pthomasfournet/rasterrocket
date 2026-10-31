@@ -5,7 +5,8 @@
 
 use super::font_cache::ActiveFont;
 
-/// PDF text matrix — a 6-element `[a b c d e f]` column-major matrix.
+/// PDF text matrix `[a b c d e f]` (§8.3.3): it maps `(x, y)` to
+/// `(a·x + c·y + e, b·x + d·y + f)`.
 pub type TextMatrix = [f64; 6];
 
 /// The identity text matrix.
@@ -13,8 +14,9 @@ pub const TEXT_MATRIX_IDENTITY: TextMatrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 /// PDF text state (§8.3, Table 104).
 ///
-/// Reset to default values at the start of each page; `q`/`Q` does *not*
-/// save/restore the text matrix (it is local to the BT/ET text object).
+/// Reset to default values at the start of each page.  The parameters
+/// are part of the graphics state that `q`/`Q` save and restore; the text
+/// and line matrices are local to the `BT`/`ET` text object.
 #[derive(Debug, Clone)]
 pub struct TextState {
     // ── Text state parameters (persist across BT/ET) ──────────────────────────

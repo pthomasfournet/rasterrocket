@@ -29,9 +29,8 @@ pub const fn base_encoding_table(base: BaseEncoding) -> &'static [Option<&'stati
 
 // ── PDF base-encoding code → glyph-name tables (PDF 32000-1 Annex D) ──────────
 //
-// Static arrays, not `match`: a 256-arm `match` per encoding compiles to a
-// large LLVM decision tree that OOMs debug codegen on this box.  These are
-// pure data, zero LLVM IR.
+// Static arrays indexed by code: pure data, where a 256-arm `match` per
+// encoding would compile to a large decision tree.
 
 /// Adobe `StandardEncoding`: char code → glyph name (`None` = unused code).
 static STANDARD_ENCODING: [Option<&str>; 256] = [
@@ -562,13 +561,12 @@ static WIN_ANSI_ENCODING: [Option<&str>; 256] = [
 
 /// `MacRomanEncoding` (Mac OS Roman): char code → glyph name.
 ///
-/// The C2–D7 mathematical-symbol slots (notequal, infinity, lessequal,
-/// greaterequal, partialdiff, summation, product, pi, integral, Omega,
-/// radical, approxequal, Delta, lozenge) and the 0xCA no-break space are
-/// part of PDF Appendix D.2; leaving them unmapped silently routed those
-/// glyphs to `.notdef` in MacRoman-encoded text.  0xF0 (the Apple-logo
-/// glyph) is intentionally absent: it is a non-spec vendor extension with
-/// no Adobe-Glyph-List name, so it can never resolve regardless.
+/// Annex D.2 includes the mathematical symbols of the 0xAD–0xD7 range
+/// (notequal, infinity, lessequal, greaterequal, partialdiff, summation,
+/// product, pi, integral, Omega, radical, approxequal, Delta, lozenge) and
+/// the 0xCA no-break space as `space`.  0xF0, the Apple logo of Mac OS
+/// Roman, is not in Annex D.2 and has no Adobe Glyph List name: it stays
+/// unmapped.
 static MAC_ROMAN_ENCODING: [Option<&str>; 256] = [
     None,
     None,
@@ -1409,9 +1407,9 @@ mod tests {
         assert_eq!(STANDARD_ENCODING[0x80], None);
         assert_eq!(MAC_ROMAN_ENCODING[0x80], Some("Adieresis"));
 
-        // Spec-mandated slots that were previously unmapped (the bug this
-        // hardening pass fixed): WinAnsi NBSP/soft-hyphen and the MacRoman
-        // C2–D7 math symbols + 0xCA no-break space.
+        // Annex D.2 slots that are easy to miss: the WinAnsi NBSP and soft
+        // hyphen (named `space` and `hyphen`), the MacRoman mathematical
+        // symbols and its 0xCA no-break space.
         assert_eq!(WIN_ANSI_ENCODING[0xA0], Some("space"));
         assert_eq!(WIN_ANSI_ENCODING[0xAD], Some("hyphen"));
         assert_eq!(MAC_ROMAN_ENCODING[0xAD], Some("notequal"));
