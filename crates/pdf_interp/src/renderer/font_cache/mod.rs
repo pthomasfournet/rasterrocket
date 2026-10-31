@@ -223,7 +223,7 @@ impl FontCache {
                 context: resources.resource_context_id(),
                 name: name.into(),
             };
-            (key, pdf::Object::Null)
+            (key, &pdf::Object::Null)
         });
         let shared = &self.shared;
         let descriptor = self
@@ -233,7 +233,7 @@ impl FontCache {
                 let resolve = || {
                     Arc::new(
                         resources
-                            .resolve_font_entry(&entry)
+                            .resolve_font_entry(entry)
                             .unwrap_or_else(|| fallback_font(resources.doc())),
                     )
                 };

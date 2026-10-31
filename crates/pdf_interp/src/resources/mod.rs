@@ -457,9 +457,9 @@ impl<'doc> PageResources<'doc> {
     ///
     /// Returns `None` if the resource name is not present in the resource dict.
     #[must_use]
-    pub fn font_entry(&self, name: &[u8]) -> Option<(ResourceKey, Object)> {
-        let entry = self.resource_subdict(Category::Font)?.get(name)?.clone();
-        Some((self.key_of(&entry, name), entry))
+    pub fn font_entry(&self, name: &[u8]) -> Option<(ResourceKey, &Object)> {
+        let entry = self.resource_subdict(Category::Font)?.get(name)?;
+        Some((self.key_of(entry, name), entry))
     }
 
     /// Resolve a font resource entry returned by [`Self::font_entry`].
