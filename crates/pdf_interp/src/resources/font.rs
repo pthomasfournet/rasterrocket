@@ -1,9 +1,8 @@
 //! PDF font resource extraction.
 //!
-//! Given a PDF font dictionary (as returned by `pdf::Document::get_page_fonts`),
-//! [`resolve_font`] extracts everything the rendering pipeline needs to load a
-//! font face: the raw font bytes (from an embedded stream or a standard
-//! substitute), the font kind, and the char-to-glyph-index map.
+//! Given a PDF font dictionary, [`resolve_font`] extracts everything the
+//! renderer needs to draw with it: the embedded program, parsed, the font
+//! kind, the encoding, the widths and the class of its substitute.
 //!
 //! # PDF font taxonomy
 //!
@@ -20,13 +19,14 @@
 //! Embedded bytes live under `FontDescriptor` → `FontFile` (Type 1),
 //! `FontFile2` (TrueType), or `FontFile3` (CFF/OpenType-CFF).
 //!
-//! When no bytes are embedded (standard 14, or unembedded third-party fonts)
-//! the renderer draws a substitute of the same family class and variant:
-//! an installed metric-compatible face, else a base-14 face compiled into
-//! the binary.
+//! When no program is embedded (standard 14, or unembedded third-party
+//! fonts), or the embedded one does not parse, the renderer draws a
+//! substitute of the same family class and variant: an installed
+//! metric-compatible face, else a base-14 face compiled into the binary.
 
 use std::sync::Arc;
 
+use font::program::FontProgram;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::content::Operator;
@@ -294,9 +294,10 @@ impl Type3Data {
 pub struct FontDescriptor {
     /// PDF font subtype family; selects the code → glyph resolution path.
     pub kind: PdfFontKind,
-    /// Raw font bytes.  `Some` if embedded in the PDF, `None` if we must fall
-    /// back to a substitute.
-    pub bytes: Option<Vec<u8>>,
+    /// The embedded font program, parsed once for every page that draws
+    /// the font; `None` when the font embeds none or its program does not
+    /// parse, and a substitute draws it.
+    pub program: Option<Arc<FontProgram>>,
     /// Per-character advance widths in thousandths of a text-space unit,
     /// indexed by `char_code - first_char`.  Empty for CID/Type0 fonts.
     pub widths: Vec<i32>,
@@ -324,10 +325,10 @@ pub struct FontDescriptor {
     /// `Type0`; `None` for all simple fonts (Type1, TrueType, `MMType1`).
     pub cid_encoding: Option<CidEncoding>,
     /// Type 3 glyph data.  `Some` only when `Subtype` is `Type3`; `None` for
-    /// all fonts with a font program.  When `Some`, `bytes` is `None` and `kind`
+    /// all fonts with a font program.  When `Some`, `program` is `None` and `kind`
     /// is `Other` (Type 3 has no font program; glyphs are content streams).
     pub type3: Option<Type3Data>,
-    /// Typeface class of the substitute drawn when `bytes` is `None`.
+    /// Typeface class of the substitute drawn when `program` is `None`.
     pub substitute: SubstituteStyle,
 }
 
@@ -389,7 +390,7 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     }
 
     let kind = classify_kind(dict);
-    let bytes = extract_bytes(doc, dict);
+    let program = embedded_program(doc, dict);
     let (first_char, real_widths) = extract_widths(doc, dict);
     let widths: Vec<i32> = real_widths.into_iter().map(width_units).collect();
     let missing_width = extract_missing_width(doc, dict);
@@ -400,7 +401,7 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     // encoding as the base: its codes denote symbols, not Latin letters,
     // and only `Differences` may reassign them.  A substitute's script is
     // also read from the glyph names `Differences` assigns.
-    if bytes.is_none() {
+    if program.is_none() {
         match substitute.family {
             SubstituteFamily::Symbol => base_encoding = BaseEncoding::Symbol,
             SubstituteFamily::Dingbats => base_encoding = BaseEncoding::ZapfDingbats,
@@ -419,7 +420,7 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
 
     FontDescriptor {
         kind,
-        bytes,
+        program,
         widths,
         first_char,
         missing_width,
@@ -456,16 +457,21 @@ fn classify_kind(dict: &Dictionary) -> PdfFontKind {
 
 // ── Embedded byte extraction ──────────────────────────────────────────────────
 
-/// Try to read embedded font bytes from the `FontDescriptor` sub-dict.
+/// The embedded program of the font (or `CIDFont`) dictionary `dict`,
+/// parsed; `None` when it embeds none, or (logged) when it does not parse.
 ///
 /// Every `FontFile*` key is tried, the one the subtype names first
 /// (`FontFile` for Type 1, `FontFile2` otherwise): the program loader
 /// sniffs the actual format, so a Type 1 dictionary whose descriptor holds
 /// a TrueType program under `FontFile2` still draws with it.
-///
-/// Returns `None` if nothing is embedded.
-fn extract_bytes(doc: &Document, dict: &Dictionary) -> Option<Vec<u8>> {
-    extract_bytes_with_kind(doc, dict, classify_kind(dict))
+fn embedded_program(doc: &Document, dict: &Dictionary) -> Option<Arc<FontProgram>> {
+    let bytes = extract_bytes(doc, dict)?;
+    FontProgram::parse(bytes, 0)
+        .inspect_err(|e| {
+            log::warn!("font: embedded font program unusable ({e}) — drawing a substitute");
+        })
+        .ok()
+        .map(Arc::new)
 }
 
 /// Dereference the `FontDescriptor` entry, which is almost always an indirect
@@ -685,10 +691,8 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
     // 2. DescendantFonts: the actual CIDFont dict with bytes and widths.
     let descendant = extract_descendant(doc, dict);
 
-    // 3. Extract bytes from the CIDFont's FontDescriptor.
-    let bytes = descendant
-        .as_ref()
-        .and_then(|d| extract_bytes_from_descendant(doc, d));
+    // 3. The program embedded in the CIDFont's FontDescriptor.
+    let program = descendant.as_ref().and_then(|d| embedded_program(doc, d));
 
     // 4. CIDToGIDMap (CIDFontType2 only; CIDFontType0/CFF uses identity).
     let cid_to_gid = descendant.as_ref().and_then(|d| extract_cid_to_gid(doc, d));
@@ -709,7 +713,7 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
         .map_or(PdfFontKind::Other, classify_kind);
 
     // 7. The `ToUnicode` map a substitute draws through.
-    let to_unicode = if bytes.is_none() {
+    let to_unicode = if program.is_none() {
         dict.get(b"ToUnicode")
             .and_then(|obj| embedded_cmap(doc, obj, 0))
             .map(Arc::new)
@@ -735,7 +739,7 @@ fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescriptor {
 
     FontDescriptor {
         kind,
-        bytes,
+        program,
         widths: vec![],
         first_char: 0,
         // Type 0 fonts use `CidEncoding::width_for_cid` exclusively;
@@ -872,7 +876,7 @@ fn resolve_type3_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -
 
     FontDescriptor {
         kind: PdfFontKind::Other,
-        bytes: None,
+        program: None,
         widths: real_widths.iter().copied().map(width_units).collect(),
         first_char,
         // Type 3 glyphs carry their own widths via `Type3Glyph::width_units`;
@@ -1016,21 +1020,12 @@ fn extract_descendant(doc: &Document, dict: &Dictionary) -> Option<Dictionary> {
     }
 }
 
-/// Extract embedded font bytes from the `FontDescriptor` of a `CIDFont` dict.
-fn extract_bytes_from_descendant(doc: &Document, descendant: &Dictionary) -> Option<Vec<u8>> {
-    // CIDFont kind determines file key priority.
-    let kind = classify_kind(descendant);
-    extract_bytes_with_kind(doc, descendant, kind)
-}
-
-/// Shared byte-extraction logic that works on any font dict (direct or descendant).
-fn extract_bytes_with_kind(
-    doc: &Document,
-    dict: &Dictionary,
-    kind: PdfFontKind,
-) -> Option<Vec<u8>> {
+/// The bytes of the program embedded in the font descriptor of the font
+/// (or `CIDFont`) dictionary `dict`, in the key order of
+/// [`embedded_program`]; `None` when it embeds none.
+fn extract_bytes(doc: &Document, dict: &Dictionary) -> Option<Vec<u8>> {
     let fd = resolve_fd(doc, dict)?;
-    let priority: &[&[u8]] = match kind {
+    let priority: &[&[u8]] = match classify_kind(dict) {
         PdfFontKind::Type1 => &[b"FontFile", b"FontFile3", b"FontFile2"],
         _ => &[b"FontFile2", b"FontFile3", b"FontFile"],
     };
@@ -1335,7 +1330,7 @@ mod tests {
     ) -> FontDescriptor {
         FontDescriptor {
             kind: PdfFontKind::Type1,
-            bytes: None,
+            program: None,
             widths,
             first_char,
             missing_width,
@@ -1790,6 +1785,24 @@ mod tests {
         let (dw2, segments) = extract_cid_vertical_metrics(&doc, &make_dict(&[]));
         assert_eq!(dw2, [880, -1000]);
         assert_eq!(segments.segments(), []);
+    }
+
+    /// An embedded program that does not parse leaves the descriptor
+    /// without one, so it is drawn, and classified, as a font without a
+    /// program: a symbolic standard font keeps its built-in encoding.
+    #[test]
+    fn unparseable_embedded_program_is_drawn_as_a_substitute() {
+        let doc = crate::test_helpers::make_doc_with_stream(b"not a font program", "");
+        let fd = make_dict(&[(b"FontFile2", Object::Reference((2, 0)))]);
+        let d = make_dict(&[
+            (b"Subtype", Object::Name(b"TrueType".to_vec())),
+            (b"BaseFont", Object::Name(b"Symbol".to_vec())),
+            (b"FontDescriptor", Object::Dictionary(fd)),
+        ]);
+        assert!(extract_bytes(&doc, &d).is_some(), "the stream is embedded");
+        let desc = resolve_font(&doc, &d, None);
+        assert!(desc.program.is_none());
+        assert_eq!(desc.base_encoding, BaseEncoding::Symbol);
     }
 
     #[test]

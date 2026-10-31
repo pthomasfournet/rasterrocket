@@ -4,7 +4,7 @@
 //! [`FontFace`].  Faces are loaded on first use during rendering, then reused
 //! for all subsequent glyphs in the same page.
 //!
-//! When a font has no embedded bytes, or its embedded program cannot be
+//! When a font has no embedded program, or its embedded program cannot be
 //! parsed, the cache draws it with a substitute of the same family class
 //! and variant (sans-serif, serif or monospaced; regular, bold, italic or
 //! bold italic), located by [`super::substitutes`].
@@ -13,8 +13,9 @@
 //!
 //! One instance is created per page renderer (one per thread when pages are
 //! rendered in parallel) and owns that page's [`FontEngine`].  What depends
-//! only on an indirect font dictionary — its descriptor, its parsed program,
-//! its code → glyph table and the identifier of its face at each matrix — is
+//! only on an indirect font dictionary — its descriptor (which holds the
+//! parsed program), its code → glyph table, its fallback resolver and the
+//! identifier of its face at each matrix — is
 //! kept in a [`DocumentFonts`] shared by every page of the document, with the
 //! glyph bitmaps of those faces.
 
@@ -150,7 +151,6 @@ impl DocumentFonts {
 #[derive(Default)]
 struct SharedFont {
     descriptor: OnceLock<Arc<FontDescriptor>>,
-    program: OnceLock<Option<ResolvedProgram>>,
     /// The `code_to_gid` table computed from the program, `None` when the
     /// descriptor's own table (or the program's charmap) applies.
     code_to_gid: OnceLock<Option<Vec<u32>>>,
@@ -349,13 +349,7 @@ impl FontCache {
             ResourceKey::Direct { .. } => None,
         };
 
-        let (program, substitute) = match &shared {
-            Some(shared) => shared
-                .program
-                .get_or_init(|| parse_program(desc, &self.shared.library))
-                .clone()?,
-            None => parse_program(desc, &self.shared.library)?,
-        };
+        let (program, substitute) = resolve_program(desc, &self.shared.library)?;
         let mut face = match &shared {
             Some(shared) => {
                 let id = shared.face_id(trm.map(f64::to_bits), 0, &self.shared.face_ids);
@@ -368,7 +362,7 @@ impl FontCache {
         .ok()?;
 
         // A substitute resolves codes as the program of a non-embedded font.
-        let embedded = desc.bytes.is_some() && !substitute;
+        let embedded = !substitute;
         let table = shared.as_ref().map_or_else(
             || resolved_code_to_gid(&face, desc, embedded),
             |shared| {
@@ -477,21 +471,14 @@ impl FallbackLoader<'_> {
     }
 }
 
-/// Parse the program a descriptor draws with: its embedded font program,
-/// else the substitute of its style — for a font without a program, and
-/// for one whose program does not parse (truncated stream, unsupported
-/// format), which is logged.  `None` when no substitute is available
-/// either.
-fn parse_program(desc: &FontDescriptor, library: &FontLibrary) -> Option<ResolvedProgram> {
-    if let Some(bytes) = &desc.bytes {
-        match FontProgram::parse(bytes.clone(), 0) {
-            Ok(program) => return Some((Arc::new(program), false)),
-            Err(e) => log::warn!(
-                "font_cache: embedded font program unusable ({e}) — drawing a substitute"
-            ),
-        }
-    }
-    substitute_program(desc.substitute, library).map(|program| (program, true))
+/// The program a descriptor draws with: its embedded program, else the
+/// substitute of its style from `library`, for a font without a usable
+/// program.  `None` when no substitute is available either.
+fn resolve_program(desc: &FontDescriptor, library: &FontLibrary) -> Option<ResolvedProgram> {
+    desc.program.clone().map_or_else(
+        || substitute_program(desc.substitute, library).map(|program| (program, true)),
+        |program| Some((program, false)),
+    )
 }
 
 /// The `code_to_gid` table a face of `desc` needs in place of the
@@ -848,6 +835,11 @@ mod tests {
         std::array::from_fn(|_| None)
     }
 
+    /// The program `bytes`, parsed.
+    fn parsed(bytes: Vec<u8>) -> Arc<FontProgram> {
+        Arc::new(FontProgram::parse(bytes, 0).expect("test program parses"))
+    }
+
     /// The name-resolution path must fire ONLY for a simple embedded
     /// Type1/Type1C/CFF font.  A misfire would steal resolution from CID,
     /// symbolic TrueType, Type 3, or the non-embedded standard-14 path.
@@ -968,7 +960,7 @@ mod tests {
         differences[1] = Some("eacute".into());
         let desc = FontDescriptor {
             kind: PdfFontKind::Type1,
-            bytes: None,
+            program: None,
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1004,7 +996,7 @@ mod tests {
         differences[66] = Some("afii10017".into());
         let desc = FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: None,
+            program: None,
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1049,7 +1041,9 @@ mod tests {
         }
         let desc = FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: Some(include_bytes!("../../../font_test_data/test_data/ttf/ahem.ttf").to_vec()),
+            program: Some(parsed(
+                include_bytes!("../../../font_test_data/test_data/ttf/ahem.ttf").to_vec(),
+            )),
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1099,7 +1093,7 @@ mod tests {
     ) -> FontDescriptor {
         FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: Some(bytes),
+            program: Some(parsed(bytes)),
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1178,7 +1172,7 @@ mod tests {
         differences[65] = Some("uni0915".into());
         let desc = FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: None,
+            program: None,
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1295,7 +1289,7 @@ mod tests {
     fn cid_substitute(to_unicode: CMap) -> FontDescriptor {
         FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: None,
+            program: None,
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1331,7 +1325,7 @@ mod tests {
         .expect("parses");
         let desc = FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: None,
+            program: None,
             widths: vec![],
             first_char: 0,
             missing_width: 0,
@@ -1375,7 +1369,7 @@ mod tests {
         use crate::resources::font_substitute::Script;
         let desc = FontDescriptor {
             kind: PdfFontKind::TrueType,
-            bytes: None,
+            program: None,
             widths: vec![],
             first_char: 0,
             missing_width: 0,
