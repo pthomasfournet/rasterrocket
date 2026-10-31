@@ -35,6 +35,14 @@ use crate::{
 /// bound. This cap mirrors the per-stream `MAX_DECOMPRESSED` discipline.
 const MAX_PAGE_CONTENT: usize = 512 * 1024 * 1024; // 512 MiB
 
+/// Deepest chain of object-stream containers resolved while resolving one
+/// object.
+///
+/// A container's `/Filter` or `/DecodeParms` may be stored in another
+/// object stream, whose own filters may be stored in a third; each such
+/// step resolves one more container before the first can be decoded.
+const MAX_OBJSTM_NESTING: u8 = 8;
+
 /// Smallest file [`Document::open`] memory-maps; shorter files are read into
 /// an owned buffer.
 ///
@@ -406,6 +414,12 @@ impl Document {
     /// [`PdfError::BadObject`] when neither the xref entry for `id` nor the
     /// header scan of the file leads to a parseable object `id`.
     pub fn get_object(&self, id: ObjectId) -> Result<Arc<Object>, PdfError> {
+        self.get_object_at(id, 0)
+    }
+
+    /// [`Self::get_object`] at object-stream nesting `depth`: the number of
+    /// object-stream containers being resolved further up the call chain.
+    fn get_object_at(&self, id: ObjectId, depth: u8) -> Result<Arc<Object>, PdfError> {
         {
             // Poison recovery: a previous panic while holding the lock left the
             // mutex poisoned. The cache is just a memo of immutable parses, so
@@ -419,11 +433,8 @@ impl Document {
             }
         }
 
-        let mut obj = self.parse_object_uncached(id)?;
-        if let Object::Stream(stream) = &mut obj {
-            self.inline_filter_references(&mut stream.dict);
-        }
-        let arc = Arc::new(obj);
+        let obj = self.parse_object_uncached(id, depth)?;
+        let arc = Arc::new(self.with_direct_filters(obj, depth));
         let _ = self
             .cache
             .lock()
@@ -453,8 +464,11 @@ impl Document {
     /// Referents are read with the uncached parser and accepted only as a
     /// name, array, dictionary or null, which no stream can be: a reference
     /// back to a stream (even this one) stays unresolved, without recursion.
-    fn inline_filter_references(&self, dict: &mut Dictionary) {
-        let direct = |id: ObjectId| match self.parse_object_uncached(id) {
+    /// A referent stored in an object stream is read at `depth`, so a cycle
+    /// of object streams whose filters are stored in one another ends at
+    /// [`MAX_OBJSTM_NESTING`].
+    fn inline_filter_references(&self, dict: &mut Dictionary, depth: u8) {
+        let direct = |id: ObjectId| match self.parse_object_uncached(id, depth) {
             Ok(o @ (Object::Name(_) | Object::Array(_) | Object::Dictionary(_) | Object::Null)) => {
                 Some(o)
             }
@@ -491,6 +505,16 @@ impl Document {
         }
     }
 
+    /// `obj` with the indirect references of its stream dictionary's
+    /// `/Filter` and `/DecodeParms` inlined (see
+    /// [`Self::inline_filter_references`]); any other object unchanged.
+    fn with_direct_filters(&self, mut obj: Object, depth: u8) -> Object {
+        if let Object::Stream(stream) = &mut obj {
+            self.inline_filter_references(&mut stream.dict, depth);
+        }
+        obj
+    }
+
     /// Resolve a chain of indirect references until a non-Reference object is
     /// reached, following at most 32 references.
     ///
@@ -511,12 +535,12 @@ impl Document {
         })
     }
 
-    fn parse_object_uncached(&self, id: ObjectId) -> Result<Object, PdfError> {
+    fn parse_object_uncached(&self, id: ObjectId, depth: u8) -> Result<Object, PdfError> {
         // A referenced object the xref does not list, or lists as free, is
         // what the header scan finds for its number, or nothing.
         let Some(entry) = self.xref.get(id.0) else {
             return self
-                .recover_object(id.0, None)
+                .recover_object(id.0, None, depth)
                 .ok_or_else(|| PdfError::BadObject {
                     id: id.0,
                     detail: "not in xref table".into(),
@@ -532,33 +556,31 @@ impl Document {
                     // different object.  The object is what the header scan
                     // finds for its number, or nothing; what the entry led
                     // to is never returned under this number.
-                    parsed => {
-                        self.recover_object(id.0, Some(entry))
-                            .ok_or_else(|| PdfError::BadObject {
-                                id: id.0,
-                                detail: parsed.map_or_else(
-                                    || format!("parse failed at offset {offset}"),
-                                    |(found, _)| {
-                                        format!("xref offset {offset} holds object {}", found.0)
-                                    },
-                                ),
-                            })
-                    }
+                    parsed => self
+                        .recover_object(id.0, Some(entry), depth)
+                        .ok_or_else(|| PdfError::BadObject {
+                            id: id.0,
+                            detail: parsed.map_or_else(
+                                || format!("parse failed at offset {offset}"),
+                                |(found, _)| {
+                                    format!("xref offset {offset} holds object {}", found.0)
+                                },
+                            ),
+                        }),
                 }
             }
             // An object the container does not hold, or holds in an
             // unparseable form, or a container that is no object stream,
             // may still have a body elsewhere in the file.
             XrefEntry::InObjStm { container, index } => self
-                .parse_compressed(container, index, id.0)
-                .or_else(|e| self.recover_object(id.0, Some(entry)).ok_or(e)),
-            XrefEntry::Free => {
-                self.recover_object(id.0, Some(entry))
-                    .ok_or_else(|| PdfError::BadObject {
-                        id: id.0,
-                        detail: "free in xref table".into(),
-                    })
-            }
+                .parse_compressed(container, index, id.0, depth)
+                .or_else(|e| self.recover_object(id.0, Some(entry), depth).ok_or(e)),
+            XrefEntry::Free => self
+                .recover_object(id.0, Some(entry), depth)
+                .ok_or_else(|| PdfError::BadObject {
+                    id: id.0,
+                    detail: "free in xref table".into(),
+                }),
         }
     }
 
@@ -568,14 +590,36 @@ impl Document {
     ///
     /// No stream, an object stream included, is stored in an object stream
     /// (ISO 32000-2 §7.5.7): a container whose own entry is not direct is
-    /// read from the header the scan finds for it.  The container must be an object stream by
-    /// [`is_object_stream`]; any other stream is not decoded.
-    fn parse_compressed(&self, container: u32, index: u32, num: u32) -> Result<Object, PdfError> {
+    /// read from the header the scan finds for it.  The container must be an
+    /// object stream by [`is_object_stream`]; any other stream is not
+    /// decoded.
+    ///
+    /// `depth` counts the containers already being resolved up the call
+    /// chain; at [`MAX_OBJSTM_NESTING`] the object is an error, which ends
+    /// a cycle of object streams whose `/Filter` or `/DecodeParms` are
+    /// stored in one another.
+    fn parse_compressed(
+        &self,
+        container: u32,
+        index: u32,
+        num: u32,
+        depth: u8,
+    ) -> Result<Object, PdfError> {
+        if depth >= MAX_OBJSTM_NESTING {
+            return Err(PdfError::BadObject {
+                id: num,
+                detail: format!(
+                    "object stream {container} is reached through more than \
+                     {MAX_OBJSTM_NESTING} object streams' filters (cyclic /Filter or /DecodeParms)"
+                ),
+            });
+        }
+        let depth = depth + 1;
         let container_obj = match self.xref.get(container) {
-            Some(XrefEntry::Direct { .. }) => self.get_object((container, 0))?,
+            Some(XrefEntry::Direct { .. }) => self.get_object_at((container, 0), depth)?,
             _ => self
                 .recover_direct(container, None)
-                .map(Arc::new)
+                .map(|obj| Arc::new(self.with_direct_filters(obj, depth)))
                 .ok_or_else(|| PdfError::BadObject {
                     id: container,
                     detail: "object stream has no direct xref entry or header".into(),
@@ -639,7 +683,7 @@ impl Document {
     /// A direct location is a header that must parse as object `num`; a
     /// compressed one is an object stream whose own scanned entry is
     /// direct, so recovery never descends through more than one stream.
-    fn recover_object(&self, num: u32, failed: Option<XrefEntry>) -> Option<Object> {
+    fn recover_object(&self, num: u32, failed: Option<XrefEntry>, depth: u8) -> Option<Object> {
         let scanned = self.scanned_entries()?;
         let obj = match (scanned.get(&num).copied()?, failed) {
             (XrefEntry::Direct { .. }, _) => self.recover_direct(num, failed)?,
@@ -653,7 +697,7 @@ impl Document {
                 if !matches!(scanned.get(&container), Some(XrefEntry::Direct { .. })) {
                     return None;
                 }
-                let obj = self.parse_compressed(container, index, num).ok()?;
+                let obj = self.parse_compressed(container, index, num, depth).ok()?;
                 log::debug!("pdf: object {num} recovered from object stream {container}");
                 obj
             }
@@ -1661,6 +1705,61 @@ mod tests {
             doc.get_object((4, 0)).expect("object 4").as_ref(),
             Object::Stream(_)
         ));
+    }
+
+    /// An object stream whose `/Filter` names an object stored in that same
+    /// object stream (or in a second one whose `/Filter` names an object of
+    /// the first) cannot be decoded; resolving either is an error, not an
+    /// unbounded recursion.
+    #[test]
+    fn object_stream_filter_stored_in_an_object_stream_terminates() {
+        let bytes = xref_stream_pdf(
+            &[(
+                4,
+                objstm_body("/Type /ObjStm /Filter 2 0 R", &[(2, "/FlateDecode")]),
+            )],
+            &[(2, 4, 0)],
+            5,
+        );
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert!(doc.get_object((2, 0)).is_err());
+        assert!(doc.get_object((4, 0)).is_ok());
+
+        let bytes = xref_stream_pdf(
+            &[
+                (
+                    4,
+                    objstm_body("/Type /ObjStm /Filter 3 0 R", &[(2, "/FlateDecode")]),
+                ),
+                (
+                    5,
+                    objstm_body("/Type /ObjStm /Filter 2 0 R", &[(3, "/FlateDecode")]),
+                ),
+            ],
+            &[(2, 4, 0), (3, 5, 0)],
+            6,
+        );
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        assert!(doc.get_object((2, 0)).is_err());
+        assert!(doc.get_object((3, 0)).is_err());
+    }
+
+    /// A stream whose `/Filter` is stored in an object stream is decoded
+    /// through it.
+    #[test]
+    fn stream_filter_stored_in_an_object_stream_is_resolved() {
+        let bytes = xref_stream_pdf(
+            &[
+                (4, objstm_body("/Type /ObjStm", &[(2, "/ASCIIHexDecode")])),
+                (5, hex_stream("2 0 R")),
+            ],
+            &[(2, 4, 0)],
+            6,
+        );
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let obj = doc.get_object((5, 0)).expect("object 5");
+        let stream = obj.as_stream().expect("a stream");
+        assert_eq!(stream.decompressed_content().expect("decodes"), b"Hello");
     }
 
     fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
