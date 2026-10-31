@@ -198,6 +198,21 @@ fn strict_fails_a_page_with_an_undecodable_image() {
     assert!(!out.status.success(), "--strict accepts a failed image");
 }
 
+#[test]
+fn failed_run_removes_its_ram_directory() {
+    let (dir, input) = workdir(&broken_image_pdf());
+    let ram = dir.path().join("ram");
+    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .args(["--backend", "cpu", "--strict", "-r", "72", "--ram-path"])
+        .arg(&ram)
+        .arg(&input)
+        .arg("out")
+        .output()
+        .expect("run rrocket");
+    assert!(!out.status.success(), "--strict fails the page");
+    assert!(!ram.exists(), "the RAM directory outlived a failed run");
+}
+
 /// One 40 × 40 pt white page carrying a `/Square` annotation whose
 /// appearance fills (10, 10)–(30, 30) black.
 fn annotated_pdf() -> Vec<u8> {

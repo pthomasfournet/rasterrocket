@@ -7,6 +7,7 @@ mod naming;
 mod ram;
 mod render;
 
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
@@ -18,11 +19,20 @@ use rayon::prelude::*;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// Print `rrocket: {message}` to stderr and yield the failure exit status.
+fn fail(message: impl std::fmt::Display) -> ExitCode {
+    eprintln!("rrocket: {message}");
+    ExitCode::FAILURE
+}
+
+/// Every exit path returns through here rather than `std::process::exit`,
+/// so the RAM output guard and the thread pool are dropped before the
+/// process ends.
 #[expect(
     clippy::too_many_lines,
     reason = "linear startup sequence: arg parse → session open → page list → parallel render"
 )]
-fn main() {
+fn main() -> ExitCode {
     // Default to `warn` so misconfiguration (e.g. PDF_RASTER_BACKEND=cdua,
     // silent GPU init fallback) is visible without RUST_LOG opt-in.
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -31,12 +41,10 @@ fn main() {
     let mut args = Args::parse();
 
     if args.odd_only && args.even_only {
-        eprintln!("rrocket: --odd and --even are mutually exclusive");
-        std::process::exit(1);
+        return fail("--odd and --even are mutually exclusive");
     }
     if let Err(e) = args.validate_format_flags() {
-        eprintln!("rrocket: {e}");
-        std::process::exit(1);
+        return fail(e);
     }
 
     // When --ram is set, redirect output_prefix into a fresh tmpfs directory.
@@ -44,10 +52,10 @@ fn main() {
     // crash the dir is left behind but /dev/shm is tmpfs and clears on reboot.
     // The SpillPolicy is consulted per-page: when free memory tightens, the
     // writer falls back to the original on-disk prefix automatically.
-    let (_ram_guard, spill_policy) = ram::redirect_to_ram(&mut args).unwrap_or_else(|e| {
-        eprintln!("rrocket: --ram setup failed: {e}");
-        std::process::exit(1);
-    });
+    let (_ram_guard, spill_policy) = match ram::redirect_to_ram(&mut args) {
+        Ok(redirect) => redirect,
+        Err(e) => return fail(format_args!("--ram setup failed: {e}")),
+    };
 
     // Dispatch on the input extension. Comic archives render via the comic crate
     // and share the PDF path's output encoder; everything else (incl. `.pdf` and
@@ -60,27 +68,21 @@ fn main() {
         .unwrap_or_default()
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "cbz" | "cb7" | "cbt" | "cbr") {
-        match comic::run(&args, &spill_policy) {
-            Ok((0, _)) => {
-                eprintln!("rrocket: no pages rendered");
-                std::process::exit(1);
-            }
+        return match comic::run(&args, &spill_policy) {
+            Ok((0, _)) => fail("no pages rendered"),
             // Per-page errors were already printed to stderr inside `run`; a
             // non-zero exit makes the partial failure observable via `$?`,
             // matching the PDF path's `report_errors`.
-            Ok((_, failed)) if failed > 0 => std::process::exit(1),
-            Ok((_, _)) => return,
-            Err(e) => {
-                eprintln!("rrocket: {e}");
-                std::process::exit(1);
-            }
-        }
+            Ok((_, failed)) if failed > 0 => ExitCode::FAILURE,
+            Ok((_, _)) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        };
     }
 
-    let mut session_config = args.session_config().unwrap_or_else(|e| {
-        eprintln!("rrocket: {e}");
-        std::process::exit(1);
-    });
+    let mut session_config = match args.session_config() {
+        Ok(config) => config,
+        Err(e) => return fail(e),
+    };
 
     // Encrypted-document liability gate (production/CLI path only). Probe
     // the input cheaply; only an encrypted document triggers the gate, so
@@ -94,8 +96,7 @@ fn main() {
         if !authorized {
             // Abort with the accurate, actionable error — not the
             // misleading "document has no pages", not a silent strip.
-            eprintln!("rrocket: {}", pdf_raster::decrypt_gate_declined_message());
-            std::process::exit(1);
+            return fail(pdf_raster::decrypt_gate_declined_message());
         }
         session_config.decrypt_authorized = true;
     }
@@ -103,35 +104,39 @@ fn main() {
     // passed whether or not the gate ran, and does nothing without it.
     session_config.password = args.password.as_deref().map(pdf_raster::Password::from);
 
-    let pool = rayon::ThreadPoolBuilder::new()
+    let pool = match rayon::ThreadPoolBuilder::new()
         .num_threads(args.num_threads)
         .thread_name(|i| format!("raster-worker-{i}"))
         // 8 MiB per worker: path flattening and Bézier subdivision recurse deeply
         // on degenerate inputs and overflow the 2 MiB rayon default.
         .stack_size(8 * 1024 * 1024)
         .build()
-        .expect("failed to build thread pool");
+    {
+        Ok(pool) => pool,
+        Err(e) => return fail(format_args!("cannot start the render thread pool: {e}")),
+    };
 
-    let session = pdf_raster::open_session(std::path::Path::new(&args.input), &session_config)
-        .unwrap_or_else(|e| {
+    let session = match pdf_raster::open_session(std::path::Path::new(&args.input), &session_config)
+    {
+        Ok(session) => session,
+        Err(e) => {
             diagnostics::report_open_error(&e, &args, session_config.policy);
-            std::process::exit(1);
-        });
+            return ExitCode::FAILURE;
+        }
+    };
 
     let n = session.total_pages();
     if n == 0 {
-        eprintln!("rrocket: document has no pages");
-        std::process::exit(1);
+        return fail("document has no pages");
     }
-    let total = i32::try_from(n).unwrap_or_else(|_| {
-        eprintln!("rrocket: document has too many pages ({n} > i32::MAX)");
-        std::process::exit(1);
-    });
+    let Ok(total) = i32::try_from(n) else {
+        return fail(format_args!("document has too many pages ({n} > i32::MAX)"));
+    };
 
-    let (pages, page_warnings) = args.build_page_list(total).unwrap_or_else(|e| {
-        eprintln!("rrocket: {e}");
-        std::process::exit(1);
-    });
+    let (pages, page_warnings) = match args.build_page_list(total) {
+        Ok(selection) => selection,
+        Err(e) => return fail(e),
+    };
     for w in &page_warnings {
         eprintln!("rrocket: warning: {w}");
     }
@@ -204,5 +209,5 @@ fn main() {
     // driver that has already started its own atexit shutdown sequence.
     let _ = pool.broadcast(|_| pdf_raster::release_gpu_decoders());
 
-    diagnostics::report_errors(errors);
+    diagnostics::report_errors(errors)
 }

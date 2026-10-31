@@ -129,12 +129,13 @@ fn print_vulkan_hint() {
     );
 }
 
-/// Sort errors by page number, print each with its cause chain, then exit 1.
+/// Sort errors by page number and print each with its cause chain.
 ///
-/// No-op if `errors` is empty.
-pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) {
+/// Returns the run's exit status: success when `errors` is empty, failure
+/// otherwise.
+pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) -> std::process::ExitCode {
     if errors.is_empty() {
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
     errors.sort_by_key(|(p, _)| *p);
     let mut size_hint = false;
@@ -153,7 +154,7 @@ pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) {
             "  hint: render such a page in tiles with -x/-y/-W/-H, each tile within the limit"
         );
     }
-    std::process::exit(1);
+    std::process::ExitCode::FAILURE
 }
 
 #[cfg(test)]
