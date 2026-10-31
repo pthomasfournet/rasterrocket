@@ -321,7 +321,15 @@ impl<'a> Tokenizer<'a> {
             if self.pos >= self.src.len() {
                 break self.pos;
             }
-            if self.remaining().starts_with(b"ID")
+            // `ID` is a keyword only as a whole token: not the tail of a
+            // name such as `/RGBID` or of a number-like word.
+            let starts_token = self
+                .pos
+                .checked_sub(1)
+                .and_then(|i| self.src.get(i))
+                .is_none_or(|&b| is_whitespace(b) || (is_delimiter(b) && b != b'/'));
+            if starts_token
+                && self.remaining().starts_with(b"ID")
                 && self
                     .remaining()
                     .get(2)
@@ -652,6 +660,20 @@ mod tests {
         assert_eq!(t.len(), 1);
         match &t[0] {
             Token::InlineImage { data, .. } => assert_eq!(*data, b"\xFF"),
+            other => panic!("expected InlineImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_image_params_end_at_a_whole_id_token() {
+        let src = b"BI /W 1 /H 1 /CS /RGBID /BPC 8 ID \xFF\x00\x00 EI";
+        let t = tokens(src);
+        assert_eq!(t.len(), 1);
+        match &t[0] {
+            Token::InlineImage { params, data } => {
+                assert_eq!(*params, b" /W 1 /H 1 /CS /RGBID /BPC 8 ");
+                assert_eq!(*data, b"\xFF\x00\x00");
+            }
             other => panic!("expected InlineImage, got {other:?}"),
         }
     }
