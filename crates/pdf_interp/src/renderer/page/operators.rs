@@ -303,7 +303,6 @@ impl PageRenderer<'_> {
                             // Displacement = -(w/1000) * Th * Tfs, where Th is horizontal
                             // scaling (Tz as a fraction, default 1.0) and Tfs is font size;
                             // in vertical writing mode -(w/1000) * Tfs along y, without Th.
-                            // Tz=0 is degenerate (invisible text); treat as 1.0 like show_text.
                             let ts = &mut self.gstate.current_mut().text;
                             let vertical = ts
                                 .font
@@ -314,11 +313,7 @@ impl PageRenderer<'_> {
                                 let shift = -kern / 1000.0 * ts.font_size;
                                 ts.text_matrix = translate_text_y(ts.text_matrix, shift);
                             } else {
-                                let hz = if ts.horiz_scaling.abs() < f64::EPSILON {
-                                    1.0
-                                } else {
-                                    ts.horiz_scaling / 100.0
-                                };
+                                let hz = ts.horiz_scaling / 100.0;
                                 let shift = -kern / 1000.0 * ts.font_size * hz;
                                 ts.text_matrix = translate_text_x(ts.text_matrix, shift);
                             }

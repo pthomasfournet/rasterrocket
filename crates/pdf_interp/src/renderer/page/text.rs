@@ -74,21 +74,9 @@ impl PageRenderer<'_> {
         let font_size = self.gstate.current().text.font_size;
         let char_spacing = self.gstate.current().text.char_spacing;
         let word_spacing = self.gstate.current().text.word_spacing;
-        // PDF Tz is a percentage (default 100 %).  A value of 0 % is degenerate
-        // (zero horizontal advance); we map it to 100 % to avoid invisible text.
-        // This overrides an explicit `Tz 0` instruction — rare in practice.
-        let raw_hz = self.gstate.current().text.horiz_scaling;
-        let horiz_scaling = if raw_hz.abs() < f64::EPSILON {
-            // Tz=0 % is degenerate (zero-width advance = invisible text).
-            // Substitute 100 % so text remains visible; warn because this
-            // overrides explicit PDF authoring intent.
-            log::warn!(
-                "rasterrocket-interp: Tz is 0 %, substituting 100 % to avoid invisible text"
-            );
-            1.0
-        } else {
-            raw_hz / 100.0
-        };
+        // `Tz` is a percentage; `Tz 0` collapses the glyphs and the
+        // horizontal advances to zero width.
+        let horiz_scaling = self.gstate.current().text.horiz_scaling / 100.0;
         let ctm = self.gstate.current().ctm;
         let rise = self.gstate.current().text.rise;
         let mut tm = self.gstate.current().text.text_matrix;
@@ -170,14 +158,21 @@ impl PageRenderer<'_> {
             let glyph_cache = self.font_cache.glyph_cache().clone();
             let glyph_cache = &glyph_cache;
 
-            // Load (or retrieve cached) face — mutable borrow of font_cache.
-            let Some(face) = self
-                .font_cache
-                .get_or_load_showing(&font, &font_name, trm, bytes)
-            else {
-                return;
+            // The face that draws the run — a mutable borrow of font_cache.
+            // A singular text rendering matrix (`Tz 0`, a degenerate `Tm`)
+            // maps every glyph to zero area, and a face that cannot load
+            // (below one device pixel, an unreadable program) draws nothing;
+            // either way the run draws no glyph and the pen still advances
+            // by the document's widths (PDF §9.4.4).
+            let singular = trm[0].mul_add(trm[3], -(trm[1] * trm[2])) == 0.0;
+            let face = if singular {
+                None
+            } else {
+                self.font_cache
+                    .get_or_load_showing(&font, &font_name, trm, bytes)
             };
-            let fill_as_path = do_fill && (pattern_fill || face.prefers_path_fill());
+            let fill_as_path =
+                do_fill && face.is_some_and(|f| pattern_fill || f.prefers_path_fill());
             let fill_as_bitmap = do_fill && !fill_as_path;
             let need_outline = do_clip || do_stroke || fill_as_path;
 
@@ -189,7 +184,7 @@ impl PageRenderer<'_> {
             // specifies: condensed when wider, centred when narrower.  An
             // embedded program's glyphs are the document's own, and a
             // standard family's substitute already has its advances.
-            let fit = face.substitute
+            let fit = face.is_some_and(|f| f.substitute)
                 && !descriptor.substitute.standard
                 && !cid_enc.is_some_and(|enc| enc.vertical);
             let face_width = |advance: Option<f64>| -> i32 {
@@ -304,22 +299,23 @@ impl PageRenderer<'_> {
                     // charset, with its vertical form substituted here.  A
                     // substitute's `.notdef` is never the document's glyph:
                     // a CID neither it nor a fallback draws leaves a gap.
-                    let drawn = face
-                        .fallback_glyph(code, cid)
-                        .map(|(fallback, gid)| (fallback, gid, true))
-                        .or_else(|| {
-                            let by_gid = face.code_to_gid.is_empty();
-                            let mut gid = if by_gid { enc.gid_for_cid(cid) } else { cid };
-                            if by_gid && enc.vertical {
-                                gid = face.program().vertical_selector(gid);
-                            }
-                            let notdef = if by_gid {
-                                gid == 0
-                            } else {
-                                face.glyph_index(gid) == 0
-                            };
-                            (!(face.substitute && notdef)).then_some((&**face, gid, by_gid))
-                        });
+                    let drawn = face.and_then(|face| {
+                        face.fallback_glyph(code, cid)
+                            .map(|(fallback, gid)| (fallback, gid, true))
+                            .or_else(|| {
+                                let by_gid = face.code_to_gid.is_empty();
+                                let mut gid = if by_gid { enc.gid_for_cid(cid) } else { cid };
+                                if by_gid && enc.vertical {
+                                    gid = face.program().vertical_selector(gid);
+                                }
+                                let notdef = if by_gid {
+                                    gid == 0
+                                } else {
+                                    face.glyph_index(gid) == 0
+                                };
+                                (!(face.substitute && notdef)).then_some((&**face, gid, by_gid))
+                            })
+                    });
                     let (x_scale, centre) = match drawn {
                         Some(drawn) if fit => {
                             fit_to_advance(enc.width_for_cid(cid), face_width(advance_of(drawn)))
@@ -383,13 +379,14 @@ impl PageRenderer<'_> {
                     // A substitute's `.notdef` is never the document's
                     // glyph: a code neither it nor a fallback draws leaves
                     // a gap.
-                    let drawn = face
-                        .fallback_glyph(code, code)
-                        .map(|(fallback, gid)| (fallback, gid, true))
-                        .or_else(|| {
-                            let notdef = face.glyph_index(code) == 0;
-                            (!(face.substitute && notdef)).then_some((&**face, code, false))
-                        });
+                    let drawn = face.and_then(|face| {
+                        face.fallback_glyph(code, code)
+                            .map(|(fallback, gid)| (fallback, gid, true))
+                            .or_else(|| {
+                                let notdef = face.glyph_index(code) == 0;
+                                (!(face.substitute && notdef)).then_some((&**face, code, false))
+                            })
+                    });
                     let (x_scale, centre) = match (pdf_width, drawn) {
                         (Some(width), Some(drawn)) if fit => {
                             fit_to_advance(width, face_width(advance_of(drawn)))
@@ -406,7 +403,10 @@ impl PageRenderer<'_> {
                     let advance_glyph = pdf_width.map_or_else(
                         || {
                             drawn
-                                .map_or_else(|| face.glyph_advance(code), advance_of)
+                                .map_or_else(
+                                    || face.and_then(|face| face.glyph_advance(code)),
+                                    advance_of,
+                                )
                                 .unwrap_or(0.0)
                         },
                         |w| f64::from(w) / 1000.0,
@@ -420,7 +420,8 @@ impl PageRenderer<'_> {
         } // font_cache borrow released here
 
         // Phase 2: fill the glyphs, then stroke their outlines.
-        if do_fill && !self.gstate.current().fill_paints_nothing() {
+        let painted_glyphs = !(records.is_empty() && fill_paths.is_empty());
+        if painted_glyphs && !self.gstate.current().fill_paints_nothing() {
             let fill_bytes = self.gstate.current().painted_fill_color().to_vec();
             let clip = self.gstate.current().clip.clone_shared();
             let blend_mode = self.gstate.current().blend_mode;
@@ -579,6 +580,34 @@ mod tests {
             both > first + 20,
             "the second run paints: {both} vs {first}"
         );
+    }
+
+    /// `Tz 0` collapses the glyphs to zero width: the run paints nothing.
+    #[test]
+    fn zero_horizontal_scaling_paints_nothing() {
+        assert!(dark_pixels(b"BT /F1 24 Tf 4 8 Td (AB) Tj ET") > 40);
+        assert_eq!(dark_pixels(b"BT /F1 24 Tf 0 Tz 4 8 Td (AB) Tj ET"), 0);
+    }
+
+    /// A run in a face too small to load still advances the pen by the
+    /// document's widths.
+    #[test]
+    fn a_run_below_one_pixel_advances_the_pen() {
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> >>",
+            ),
+            (
+                5,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                 /FirstChar 65 /LastChar 66 /Widths [600 400] >>",
+            ),
+        ]);
+        let mut renderer = PageRenderer::new(64, 32, &doc, (4, 0));
+        renderer.execute(&crate::content::parse(b"BT /F1 0.5 Tf (AB) Tj"));
+        let tm = renderer.gstate.current().text.text_matrix;
+        assert!((tm[4] - 0.5).abs() < 1e-9, "{tm:?}");
     }
 
     /// Clipping-mode text that adds no outline leaves an empty clip.
