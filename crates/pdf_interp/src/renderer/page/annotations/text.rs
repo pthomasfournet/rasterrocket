@@ -168,6 +168,10 @@ pub(super) fn plain_text(rich: &str) -> String {
     out
 }
 
+/// Greatest offset of the `;` of a reference from its `&` that
+/// [`decode_entities`] resolves; `&#x10FFFF;` needs 9.
+const MAX_SEMICOLON_OFFSET: usize = 10;
+
 /// `s` with the XML character references and the predefined entities
 /// resolved; an unknown reference is kept as written.
 fn decode_entities(s: &str) -> String {
@@ -176,7 +180,11 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let Some(semi) = rest.find(';').filter(|&i| i <= 10) else {
+        let Some(semi) = rest
+            .bytes()
+            .take(MAX_SEMICOLON_OFFSET + 1)
+            .position(|b| b == b';')
+        else {
             out.push('&');
             rest = &rest[1..];
             continue;
