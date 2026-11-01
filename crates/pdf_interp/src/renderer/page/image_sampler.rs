@@ -158,21 +158,142 @@ impl Taps {
 
     /// The weighted mean of `fetch(x, y)` over the taps, rounded to nearest.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "a weighted mean of u8 values with weights summing to 2^16 is at most 255 after the shift"
-    )]
     pub(super) fn blend(&self, fetch: impl Fn(u32, u32) -> u8) -> u8 {
+        let [v] = self.blend_px(|x, y| [fetch(x, y)]);
+        v
+    }
+
+    /// [`Self::blend`] of each of the `N` channels `fetch(x, y)` returns,
+    /// fetching each tap once.
+    #[inline]
+    pub(super) fn blend_px<const N: usize>(&self, fetch: impl Fn(u32, u32) -> [u8; N]) -> [u8; N] {
         if self.wx == 0 && self.wy == 0 {
             return fetch(self.x[0], self.y[0]);
         }
-        let one = 1 << WEIGHT_BITS;
-        let row = |y| {
-            u32::from(fetch(self.x[0], y)) * (one - self.wx)
-                + u32::from(fetch(self.x[1], y)) * self.wx
-        };
-        let sum = row(self.y[0]) * (one - self.wy) + row(self.y[1]) * self.wy;
+        let row = |y| horizontal_blend(fetch(self.x[0], y), fetch(self.x[1], y), self.wx);
+        vertical_blend(&row(self.y[0]), &row(self.y[1]), self.wy)
+    }
+}
+
+/// `left × (1 − wx) + right × wx` per channel, in units of `2^-WEIGHT_BITS`:
+/// a row's horizontal blend before the vertical one.
+#[inline]
+fn horizontal_blend<const N: usize>(left: [u8; N], right: [u8; N], wx: u32) -> [u32; N] {
+    let one = 1 << WEIGHT_BITS;
+    std::array::from_fn(|ch| u32::from(left[ch]) * (one - wx) + u32::from(right[ch]) * wx)
+}
+
+/// The blend of two horizontal blends `top` and `bottom` with `bottom`
+/// weighted `wy`, rounded to nearest.
+#[inline]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a weighted mean of u8 values with weights summing to 2^16 is at most 255 after the shift"
+)]
+fn vertical_blend<const N: usize>(top: &[u32; N], bottom: &[u32; N], wy: u32) -> [u8; N] {
+    let one = 1 << WEIGHT_BITS;
+    std::array::from_fn(|ch| {
+        let sum = top[ch] * (one - wy) + bottom[ch] * wy;
         ((sum + (1 << (2 * WEIGHT_BITS - 1))) >> (2 * WEIGHT_BITS)) as u8
+    })
+}
+
+/// The taps of one axis: the two samples and the weight of the second.
+type AxisTaps = ([u32; 2], u32);
+
+/// The taps of a [`SampleGrid`] whose source x depends on the device column
+/// alone and whose source y depends on the device row alone, as one entry
+/// per column, combined with a row's taps by [`Self::taps`].  Equal to
+/// [`SampleGrid::sample`] at every pixel.
+pub(super) struct SeparableTaps {
+    /// Per bounding-box column: its x taps, or `None` when its source x
+    /// lies off the image.
+    cols: Vec<Option<AxisTaps>>,
+}
+
+/// [`Taps::blend_px`] of a whole row of a separable grid, in two passes:
+/// each source row is blended horizontally once, at every bounding-box
+/// column, and kept while the device rows that read it are produced; each
+/// device row is then the vertical blend of its two source rows.  The
+/// arithmetic is [`Taps::blend_px`]'s, so the samples are identical.
+pub(super) struct BlendedRows<'a, const N: usize> {
+    cols: &'a SeparableTaps,
+    /// Two horizontally blended source rows, each with its row index;
+    /// `None` before the slot is first filled.
+    slots: [(Option<u32>, Vec<[u32; N]>); 2],
+}
+
+impl<'a, const N: usize> BlendedRows<'a, N> {
+    pub(super) fn new(cols: &'a SeparableTaps) -> Self {
+        let n = cols.cols.len();
+        Self {
+            cols,
+            slots: [(None, vec![[0; N]; n]), (None, vec![[0; N]; n])],
+        }
+    }
+
+    /// The samples of the device row whose y taps are `row`, one per
+    /// bounding-box column, into `out`; `fetch(x, y)` reads one source
+    /// sample.  A column whose taps lie off the image gets an unspecified
+    /// value.
+    pub(super) fn blend_row(
+        &mut self,
+        row: AxisTaps,
+        fetch: impl Fn(u32, u32) -> [u8; N],
+        out: &mut [[u8; N]],
+    ) {
+        let ([upper, lower], wy) = row;
+        if self.slots[0].0 != Some(upper) && self.slots[1].0 == Some(upper) {
+            self.slots.swap(0, 1);
+        }
+        if self.slots[0].0 != Some(upper) {
+            self.fill(0, upper, &fetch);
+        }
+        // An unweighted lower row contributes nothing.
+        if wy != 0 && self.slots[1].0 != Some(lower) {
+            self.fill(1, lower, &fetch);
+        }
+        let [(_, top), (_, bottom)] = &self.slots;
+        if wy == 0 {
+            for (o, t) in out.iter_mut().zip(top) {
+                *o = vertical_blend(t, t, 0);
+            }
+        } else {
+            for ((o, t), b) in out.iter_mut().zip(top).zip(bottom) {
+                *o = vertical_blend(t, b, wy);
+            }
+        }
+    }
+
+    /// Blend source row `y` horizontally into slot `slot`.
+    fn fill(&mut self, slot: usize, y: u32, fetch: &impl Fn(u32, u32) -> [u8; N]) {
+        let (held, blended) = &mut self.slots[slot];
+        for (h, col) in blended.iter_mut().zip(&self.cols.cols) {
+            *h = match *col {
+                Some(([left, right], wx)) => {
+                    let l = fetch(left, y);
+                    let r = if wx == 0 { l } else { fetch(right, y) };
+                    horizontal_blend(l, r, wx)
+                }
+                None => [0; N],
+            };
+        }
+        *held = Some(y);
+    }
+}
+
+impl SeparableTaps {
+    /// Taps of the pixel in bounding-box column `col` of a row whose y taps
+    /// are `row`; `None` when the pixel centre falls outside the image.
+    #[inline]
+    pub(super) fn taps(&self, col: usize, row: AxisTaps) -> Option<Taps> {
+        let (x, wx) = (*self.cols.get(col)?)?;
+        Some(Taps {
+            x,
+            y: row.0,
+            wx,
+            wy: row.1,
+        })
     }
 }
 
@@ -376,6 +497,48 @@ impl SampleGrid {
             return None;
         }
         Some(self.taps(x, y))
+    }
+
+    /// Per-column taps when the grid is separable: every row entry holds
+    /// the same x words and every column entry the same y words, so the
+    /// source x of a pixel is a function of its column and its source y of
+    /// its row (an unrotated, unskewed draw).  `None` otherwise.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the range check proves the coordinate non-negative before the u32 cast"
+    )]
+    pub(super) fn separable(&self) -> Option<SeparableTaps> {
+        let uniform = |table: &[u32], word: usize| {
+            let first = &table[word..word + 2];
+            table
+                .as_chunks::<ENTRY_WORDS>()
+                .0
+                .iter()
+                .all(|e| &e[word..word + 2] == first)
+        };
+        if !uniform(&self.rows, 0) || !uniform(&self.cols, 2) {
+            return None;
+        }
+        let cols = (self.x0..self.x1)
+            .map(|dx| {
+                let (x, _) = self.coord(dx, self.y0);
+                (x.0 >= 0 && (x.0 as u32) < self.img_w)
+                    .then(|| axis_taps(x.0, x.1, self.img_w, self.filter.x))
+            })
+            .collect();
+        Some(SeparableTaps { cols })
+    }
+
+    /// The y taps of bounding-box row `dy` of a separable grid (see
+    /// [`Self::separable`]), or `None` when its source y lies off the image.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the range check proves the coordinate non-negative before the u32 cast"
+    )]
+    pub(super) fn row_taps(&self, dy: u32) -> Option<AxisTaps> {
+        let (_, y) = self.coord(self.x0, dy);
+        (y.0 >= 0 && (y.0 as u32) < self.img_h)
+            .then(|| axis_taps(y.0, y.1, self.img_h, self.filter.y))
     }
 
     /// Source taps for device pixel `(dx, dy)`, clamped onto the image.
@@ -924,5 +1087,115 @@ mod tests {
         // 0.25 · 0.75 of the (1, 1) sample.
         let v = corner.blend(|x, y| if (x, y) == (1, 1) { 255 } else { 0 });
         assert_eq!(v, 48);
+    }
+
+    #[test]
+    fn separable_taps_equal_per_pixel_taps() {
+        // Scales above and below one sample per pixel, flips, fractional
+        // offsets, and an image overhanging the page edges.
+        let ctms: [Ctm; 6] = [
+            [213.4, 0.0, 0.0, 331.7, 12.25, 40.5],
+            [40.0, 0.0, 0.0, 30.0, 3.3, 7.9],
+            [-97.0, 0.0, 0.0, 120.0, 150.2, -10.0],
+            [80.0, 0.0, 0.0, -64.0, -20.6, 90.1],
+            [300.0, 0.0, 0.0, 300.0, -50.0, -50.0],
+            [17.0, 0.0, 0.0, 9.0, 60.0, 60.0],
+        ];
+        for ctm in &ctms {
+            for (img_w, img_h) in [(37, 53), (400, 300), (1, 1)] {
+                for filter in [
+                    Filter::NEAREST,
+                    Filter { x: true, y: true },
+                    Filter { x: true, y: false },
+                ] {
+                    let grid = SampleGrid::new(ctm, 200, 160, img_w, img_h, filter).unwrap();
+                    let cols = grid.separable().expect("an unrotated draw is separable");
+                    for dy in grid.y0..grid.y1 {
+                        let row = grid.row_taps(dy);
+                        for (col, dx) in (0..).zip(grid.x0..grid.x1) {
+                            let fast = row.and_then(|r| cols.taps(col, r));
+                            assert_eq!(
+                                fast,
+                                grid.sample(dx, dy),
+                                "{ctm:?} {img_w}x{img_h} ({dx},{dy})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blended_rows_equal_per_pixel_blends() {
+        let (img_w, img_h) = (23_u32, 17_u32);
+        let px = |x: u32, y: u32| {
+            [0_u32, 1, 2].map(|ch| u8::try_from((x * 89 + y * 37 + ch * 113) % 256).unwrap())
+        };
+        // Magnified (rows reused), reduced (rows skipped), flipped, and
+        // nearest on one axis.
+        let cases: [(Ctm, Filter); 4] = [
+            (
+                [90.0, 0.0, 0.0, 70.0, 5.3, 8.1],
+                Filter { x: true, y: true },
+            ),
+            ([15.0, 0.0, 0.0, 11.0, 20.0, 20.0], Filter::NEAREST),
+            (
+                [-80.0, 0.0, 0.0, -60.0, 95.0, 75.0],
+                Filter { x: true, y: true },
+            ),
+            (
+                [70.0, 0.0, 0.0, 90.0, 2.0, 1.0],
+                Filter { x: false, y: true },
+            ),
+        ];
+        for (ctm, filter) in &cases {
+            let grid = SampleGrid::new(ctm, 120, 100, img_w, img_h, *filter).unwrap();
+            let cols = grid.separable().unwrap();
+            let mut rows = BlendedRows::<3>::new(&cols);
+            let mut out = vec![[0; 3]; (grid.x1 - grid.x0) as usize];
+            for dy in grid.y0..grid.y1 {
+                let Some(row) = grid.row_taps(dy) else {
+                    continue;
+                };
+                rows.blend_row(row, px, &mut out);
+                for (col, dx) in (0..).zip(grid.x0..grid.x1) {
+                    if let Some(taps) = grid.sample(dx, dy) {
+                        assert_eq!(out[col], taps.blend_px(px), "{ctm:?} ({dx},{dy})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_draw_is_not_separable() {
+        let grid = SampleGrid::new(
+            &[60.0, 25.0, -25.0, 60.0, 50.0, 40.0],
+            200,
+            160,
+            40,
+            40,
+            Filter { x: true, y: true },
+        )
+        .unwrap();
+        assert!(grid.separable().is_none());
+    }
+
+    #[test]
+    fn blend_px_matches_per_channel_blend() {
+        let taps = Taps {
+            x: [3, 4],
+            y: [7, 8],
+            wx: 77,
+            wy: 201,
+        };
+        let px = |x: u32, y: u32| {
+            [0_u32, 1, 2].map(|ch| u8::try_from((x * 53 + y * 31 + ch * 97) % 256).unwrap())
+        };
+        let joint = taps.blend_px(px);
+        for (ch, &v) in joint.iter().enumerate() {
+            assert_eq!(v, taps.blend(|x, y| px(x, y)[ch]));
+        }
     }
 }

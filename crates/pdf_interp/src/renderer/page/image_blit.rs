@@ -16,7 +16,7 @@ use raster::{
 use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::image_reduce;
-use super::image_sampler::{Filter, GridClip, MaskSampler, SampleGrid};
+use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid};
 use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, SoftMask};
 #[cfg(feature = "cache")]
@@ -339,15 +339,10 @@ impl PageRenderer<'_> {
         };
         let img_w = img.width as usize;
         let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
-        // Channel `ch` of sample `(x, y)`.  Taps lie on the image, so the
-        // index is inside the buffer by the length check above; the `get`
-        // keeps the loop panic-free regardless.
-        let channel = |x: u32, y: u32, ch: usize| {
-            img_bytes
-                .get((y as usize * img_w + x as usize) * bpp + ch)
-                .copied()
-                .unwrap_or(u8::MAX)
-        };
+        // Taps lie on the image, so every sample is inside the buffer by
+        // the length check above.
+        let gray = |x, y| pixel::<1>(img_bytes, img_w, bpp, x, y);
+        let rgb = |x, y| pixel::<3>(img_bytes, img_w, bpp, x, y);
         let gs_transfer = self.gstate.current().transfer.clone();
         let transfer = |px: [u8; 3]| gs_transfer.as_ref().map_or(px, |t| t.apply(px));
         let compositor = ImageCompositor::new(
@@ -362,12 +357,37 @@ impl PageRenderer<'_> {
         let span = (grid.x1 - grid.x0) as usize;
         let mut colours = vec![0u8; span * 3];
         let mut shape = vec![0u8; span];
+        // An unrotated draw's taps are built once per column and once per
+        // row instead of once per pixel, and without a soft mask, which
+        // reads each pixel's taps, its samples are blended a row at a time.
+        // The row buffers stay empty when unused, and each pixel then
+        // blends its own taps.
+        let separable = grid.separable();
+        let rows = separable.as_ref().filter(|_| mask.is_none());
+        let mut rgb_rows = rows
+            .filter(|_| img.color_space == ImageColorSpace::Rgb)
+            .map(BlendedRows::<3>::new);
+        let mut gray_rows = rows
+            .filter(|_| img.color_space != ImageColorSpace::Rgb)
+            .map(BlendedRows::<1>::new);
+        let mut rgb_row = vec![[0; 3]; if rgb_rows.is_some() { span } else { 0 }];
+        let mut gray_row = vec![[0; 1]; if gray_rows.is_some() { span } else { 0 }];
         for dy in grid.y0..grid.y1 {
             let Some(row_clip) = grid_clip.row(dy) else {
                 continue;
             };
+            let row_taps = separable.as_ref().map(|_| grid.row_taps(dy));
+            if let Some(Some(taps)) = row_taps {
+                if let Some(rows) = rgb_rows.as_mut() {
+                    rows.blend_row(taps, rgb, &mut rgb_row);
+                }
+                if let Some(rows) = gray_rows.as_mut() {
+                    rows.blend_row(taps, gray, &mut gray_row);
+                }
+            }
             shape.fill(0);
-            for ((dx, out), shape) in (grid.x0..grid.x1)
+            for (((col, dx), out), shape) in (0..)
+                .zip(grid.x0..grid.x1)
                 .zip(colours.as_chunks_mut::<3>().0)
                 .zip(shape.iter_mut())
             {
@@ -375,16 +395,24 @@ impl PageRenderer<'_> {
                 if coverage == 0 {
                     continue;
                 }
-                let Some(taps) = grid.sample(dx, dy) else {
+                let taps = match (&separable, row_taps) {
+                    (Some(cols), Some(row)) => row.and_then(|row| cols.taps(col, row)),
+                    _ => grid.sample(dx, dy),
+                };
+                let Some(taps) = taps else {
                     continue;
+                };
+                let gray_at = || {
+                    gray_row
+                        .get(col)
+                        .map_or_else(|| taps.blend_px(gray)[0], |p| p[0])
                 };
                 // Stencil masks paint the fill colour with coverage
                 // `255 − sample` and carry no soft mask (asserted at entry).
                 let alpha = match img.color_space {
-                    ImageColorSpace::Mask => div255(
-                        u32::from(u8::MAX - taps.blend(|x, y| channel(x, y, 0)))
-                            * u32::from(coverage),
-                    ),
+                    ImageColorSpace::Mask => {
+                        div255(u32::from(u8::MAX - gray_at()) * u32::from(coverage))
+                    }
                     ImageColorSpace::Rgb | ImageColorSpace::Gray => div255(
                         u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, &taps)))
                             * u32::from(coverage),
@@ -396,10 +424,13 @@ impl PageRenderer<'_> {
                 // Image samples map through the transfer function; the
                 // stencil colour is already the painted fill colour.
                 let src = match img.color_space {
-                    ImageColorSpace::Rgb => {
-                        transfer([0, 1, 2].map(|ch| taps.blend(|x, y| channel(x, y, ch))))
-                    }
-                    ImageColorSpace::Gray => transfer([taps.blend(|x, y| channel(x, y, 0)); 3]),
+                    ImageColorSpace::Rgb => transfer(
+                        rgb_row
+                            .get(col)
+                            .copied()
+                            .unwrap_or_else(|| taps.blend_px(rgb)),
+                    ),
+                    ImageColorSpace::Gray => transfer([gray_at(); 3]),
                     ImageColorSpace::Mask => fill_color,
                 };
                 *out = src;
@@ -660,6 +691,17 @@ impl<'a> ImageCompositor<'a> {
             start = b;
         }
     }
+}
+
+/// The first `N` channels of sample `(x, y)` of a `width`-sample-wide image
+/// of `bpp` bytes per sample; `u8::MAX` in each channel when the sample lies
+/// past the end of `bytes`.
+fn pixel<const N: usize>(bytes: &[u8], width: usize, bpp: usize, x: u32, y: u32) -> [u8; N] {
+    let at = (y as usize * width + x as usize) * bpp;
+    bytes
+        .get(at..at + N)
+        .and_then(|px| px.try_into().ok())
+        .unwrap_or([u8::MAX; N])
 }
 
 /// Composite `bitmap`, a page group with an alpha plane, onto opaque white
