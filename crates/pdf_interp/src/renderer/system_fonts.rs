@@ -61,6 +61,9 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "hiragino mincho pro",
             "yu gothic",
             "yu mincho",
+            "meiryo",
+            "ms gothic",
+            "ms mincho",
             "ipaexgothic",
             "ipaexmincho",
             "ipagothic",
@@ -82,6 +85,10 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "hiragino sans gb",
             "heiti sc",
             "songti sc",
+            "microsoft yahei",
+            "dengxian",
+            "simhei",
+            "simsun",
             "wenquanyi",
             "ar pl ukai cn",
             "ar pl uming cn",
@@ -99,6 +106,8 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "pingfang tc",
             "heiti tc",
             "songti tc",
+            "microsoft jhenghei",
+            "mingliu",
             "ar pl ukai tw",
             "ar pl uming tw",
             "ar pl kaitim big5",
@@ -115,6 +124,10 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "source han serif kr",
             "apple sd gothic neo",
             "applemyungjo",
+            "malgun gothic",
+            "batang",
+            "gulim",
+            "dotum",
             "nanumgothic",
             "nanummyeongjo",
             "nanumbarungothic",
@@ -132,6 +145,9 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto kufi arabic",
             "geeza pro",
             "al bayan",
+            "arabic typesetting",
+            "traditional arabic",
+            "simplified arabic",
             "amiri",
             "scheherazade",
             "kacstone",
@@ -146,6 +162,8 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto looped thai",
             "thonburi",
             "sukhumvit set",
+            "leelawadee ui",
+            "leelawadee",
             "garuda",
             "norasi",
             "tlwg typo",
@@ -170,13 +188,19 @@ const PREFERRED_ANY: &[&str] = &[
     "freeserif",
 ];
 
+/// Families (lower case) whose glyphs are placeholders standing for a
+/// character's block, not drawings of it: never a substitute.
+const PLACEHOLDER_FAMILIES: &[&str] = &[".lastresort", "lastresort"];
+
 /// Family-name fragments that mark a serif design.
 const SERIF_NAMES: &[&str] = &[
-    "serif", "mincho", "ming", "song", "sung", "batang", "myeongjo", "naskh", "norasi", "kinnari",
+    "serif", "mincho", "ming", "song", "sung", "batang", "myeongjo", "myungjo", "naskh", "norasi",
+    "kinnari",
 ];
 /// Family-name fragments that mark a sans-serif design.
 const SANS_NAMES: &[&str] = &[
-    "sans", "gothic", "hei", "dotum", "gulim", "garuda", "loma", "waree", "kufi",
+    "sans", "gothic", "hei", "dotum", "gulim", "garuda", "loma", "waree", "kufi", "pingfang",
+    "thonburi",
 ];
 
 /// One installed face.
@@ -191,6 +215,9 @@ struct Face {
     italic: bool,
     /// Serif design, when the name or `OS/2` class says.
     serif: Option<bool>,
+    /// The longest fragment of any script's preference list that the
+    /// family name contains as whole words: the design the face is.
+    listed_as: Option<&'static str>,
     /// Unicode coverage of the face's `cmap`, read on first use; `None`
     /// for a face without outlines or a Unicode subtable.
     coverage: OnceLock<Option<Coverage>>,
@@ -200,6 +227,11 @@ impl Face {
     fn new(path: &Path, info: FaceInfo) -> Self {
         let mut family = info.family;
         family.make_ascii_lowercase();
+        let listed_as = PREFERRED
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .filter(|name| names_words(&family, name))
+            .max_by_key(|name| name.len());
         let serif = if SERIF_NAMES.iter().any(|f| family.contains(f)) {
             Some(true)
         } else if SANS_NAMES.iter().any(|f| family.contains(f)) {
@@ -219,6 +251,7 @@ impl Face {
             weight_class: info.weight_class,
             italic: info.italic,
             serif,
+            listed_as,
             coverage: OnceLock::new(),
         }
     }
@@ -231,11 +264,33 @@ impl Face {
             .is_some_and(|coverage| coverage.contains(c))
     }
 
+    /// Whether the face is one of the platform's private faces, whose
+    /// family names start with `.`.
+    fn hidden(&self) -> bool {
+        self.family.starts_with('.')
+    }
+
+    /// Position of the face in the family-name preference list of
+    /// `script` (see [`preferred_names`]), or the list's length when it is
+    /// not listed.  For a script the face is the design it is listed as, so
+    /// a family whose name extends a listed one by a further word
+    /// ("hiragino sans gb" of "hiragino sans") is the longer design; for a
+    /// character of no script, any listed name the family contains as
+    /// whole words places it.
+    fn preference(&self, script: Option<Script>) -> usize {
+        let preferred = preferred_names(script);
+        let position = match script {
+            None => preferred.iter().position(|p| names_words(&self.family, p)),
+            Some(_) => self
+                .listed_as
+                .and_then(|listed| preferred.iter().position(|p| *p == listed)),
+        };
+        position.unwrap_or(preferred.len())
+    }
+
     /// Ranking key of the face for `style` under the family-name
-    /// preference list `preferred`; the least key is the best face.  A
-    /// hidden face (family name starting with `.`, the platform's private
-    /// interface faces) ranks after every visible one.
-    fn rank(&self, style: SubstituteStyle, preferred: &[&str]) -> (bool, u8, usize, u16, bool) {
+    /// preference list of `script`; the least key is the best face.
+    fn rank(&self, style: SubstituteStyle, script: Option<Script>) -> (u8, usize, u16, bool) {
         let want_serif = style.family == SubstituteFamily::Serif;
         let want_weight: u16 = if style.bold { 700 } else { 400 };
         let serif_rank = match self.serif {
@@ -243,14 +298,9 @@ impl Face {
             None => 1,
             Some(_) => 2,
         };
-        let preference = preferred
-            .iter()
-            .position(|p| self.family.contains(p))
-            .unwrap_or(preferred.len());
         (
-            self.family.starts_with('.'),
             serif_rank,
-            preference,
+            self.preference(script),
             self.weight_class.abs_diff(want_weight),
             self.italic != style.italic,
         )
@@ -353,18 +403,20 @@ impl FontLibrary {
     }
 
     /// The installed face that best serves `style` for `script`: among
-    /// the faces covering the script (all faces when none declares it),
-    /// the one with the closest serif class, then the earliest in the
-    /// script's preference list, then the nearest weight and slant.
+    /// the faces covering the script (the listed faces of the script when
+    /// none declares it), a visible face before a hidden one, then for
+    /// Arabic and Thai one that also covers Latin-1, then by
+    /// [`Face::rank`]: the closest serif class, the earliest in the
+    /// script's preference list, the nearest weight and slant.
     fn select(&self, script: Script, style: SubstituteStyle) -> Option<usize> {
         let faces = self.faces();
-        let preferred = preferred_names(Some(script));
+        let listed = preferred_names(Some(script)).len();
         let covering: Vec<usize> = (0..faces.len())
             .filter(|&i| faces[i].covers(script))
             .collect();
         let pool: Vec<usize> = if covering.is_empty() {
             (0..faces.len())
-                .filter(|&i| preferred.iter().any(|p| faces[i].family.contains(p)))
+                .filter(|&i| faces[i].preference(Some(script)) < listed)
                 .collect()
         } else {
             covering
@@ -375,8 +427,9 @@ impl FontLibrary {
         pool.into_iter().min_by_key(|&i| {
             let face = &faces[i];
             (
+                face.hidden(),
                 want_latin && face.code_page_ranges[0] & 1 == 0,
-                face.rank(style, preferred),
+                face.rank(style, Some(script)),
             )
         })
     }
@@ -414,10 +467,10 @@ impl FontLibrary {
 
     /// The installed program that draws the character `c` for a font of
     /// `style` whose substitute lacks it: among the faces whose `cmap` maps
-    /// `c`, the first by the ranking of [`Self::select`] (serif class, the
+    /// `c`, the first visible one by [`Face::rank`] (serif class, the
     /// preference list of the character's script, weight, slant), ties
-    /// going to the earlier path.  With the `bundled-fonts` feature, a
-    /// bundled face that maps `c` when no installed face does.  `None`
+    /// going to the earlier path; then, with the `bundled-fonts` feature,
+    /// a bundled face that maps `c`; then a hidden installed face.  `None`
     /// when no face maps `c`.
     pub(crate) fn fallback_program(
         &self,
@@ -430,19 +483,24 @@ impl FontLibrary {
         let order = {
             let mut orders = self.orders.lock().unwrap_or_else(PoisonError::into_inner);
             Arc::clone(orders.entry(key).or_insert_with(|| {
-                let preferred = preferred_names(script);
                 let mut order: Vec<usize> = (0..faces.len()).collect();
-                order.sort_by_key(|&i| faces[i].rank(style, preferred));
+                order.sort_by_key(|&i| faces[i].rank(style, script));
                 order.into()
             }))
         };
-        let installed = order.iter().filter(|&&i| faces[i].maps(c)).find_map(|&i| {
-            self.face_program(i)
-                .filter(|program| program.char_index(c) != 0)
-        });
+        let installed = |hidden: bool| {
+            order
+                .iter()
+                .filter(|&&i| faces[i].hidden() == hidden && faces[i].maps(c))
+                .find_map(|&i| {
+                    self.face_program(i)
+                        .filter(|program| program.char_index(c) != 0)
+                })
+        };
+        let visible = installed(false);
         #[cfg(feature = "bundled-fonts")]
-        let installed = installed.or_else(|| super::bundled_fonts::bundled_program(style, c));
-        installed
+        let visible = visible.or_else(|| super::bundled_fonts::bundled_program(style, c));
+        visible.or_else(|| installed(true))
     }
 
     /// The installed substitute of row `row` of the substitute table,
@@ -482,10 +540,21 @@ fn walk(dir: &Path, depth: u32, faces: &mut Vec<Face>) {
             faces.extend(
                 face_infos(&path)
                     .into_iter()
-                    .map(|info| Face::new(&path, info)),
+                    .map(|info| Face::new(&path, info))
+                    .filter(|face| !PLACEHOLDER_FAMILIES.contains(&face.family.as_str())),
             );
         }
     }
+}
+
+/// Whether `family` contains `name` as whole words: bounded on each side
+/// by the string's end or a space.
+fn names_words(family: &str, name: &str) -> bool {
+    family.match_indices(name).any(|(at, _)| {
+        let before = family[..at].chars().next_back();
+        let after = family[at + name.len()..].chars().next();
+        before.is_none_or(|c| c == ' ') && after.is_none_or(|c| c == ' ')
+    })
 }
 
 /// The family-name preference list for script `script`, or for a
@@ -527,13 +596,9 @@ mod tests {
     /// The best face of a candidate list for `style` under the preference
     /// list of `script`.
     fn best(faces: &[Face], script: Script, style: SubstituteStyle) -> &str {
-        let preferred = PREFERRED
-            .iter()
-            .find(|(s, _)| *s == script)
-            .map_or(&[][..], |(_, p)| p);
         &faces
             .iter()
-            .min_by_key(|f| f.rank(style, preferred))
+            .min_by_key(|f| (f.hidden(), f.rank(style, Some(script))))
             .expect("candidates")
             .family
     }
@@ -571,6 +636,21 @@ mod tests {
             face("Arial Unicode MS", 8 << 8, 400, jp),
         ];
         assert_eq!(best(&faces, Script::Japanese, sans), "arial unicode ms");
+    }
+
+    /// A family extending a listed name by a word is the longer design:
+    /// "Hiragino Sans GB", a Chinese design, is not the Japanese "Hiragino
+    /// Sans"; and a name matches only as whole words.
+    #[test]
+    fn listed_designs_match_whole_names() {
+        let (japanese, chinese) = (Some(Script::Japanese), Some(Script::SimplifiedChinese));
+        let unlisted = |script| preferred_names(script).len();
+        let gb = face("Hiragino Sans GB", 0, 400, 0);
+        assert_eq!(gb.preference(japanese), unlisted(japanese));
+        assert!(gb.preference(chinese) < unlisted(chinese));
+        assert!(face("Hiragino Sans", 0, 400, 0).preference(japanese) < unlisted(japanese));
+        assert!(!names_words("notosans", "noto sans"));
+        assert!(names_words("noto sans cjk jp", "noto sans"));
     }
 
     #[test]

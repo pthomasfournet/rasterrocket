@@ -493,17 +493,17 @@ mod tests {
             "the Latin substitute has no CJK"
         );
         assert_eq!(face.code_to_gid.get(65), Some(&0));
-        // The Cyrillic glyph comes from an installed Latin face; the bundled
-        // base-14 faces have none.
-        let cyrillic_a = face.raw_get_char_index(0x0410);
-        if cyrillic_a == 0 {
-            eprintln!("no installed Latin face maps U+0410; skipping the Cyrillic glyph");
-            return;
-        }
-        assert_eq!(face.code_to_gid.get(66), Some(&cyrillic_a));
         assert_eq!(
             face.code_to_gid.get(67),
             Some(&face.raw_get_char_index(u32::from('C')))
+        );
+        // A named glyph draws the substitute's glyph for its character:
+        // a Cyrillic one where the substitute is an installed Latin face
+        // that has it, `.notdef` where it is a bundled base-14 face, which
+        // has none.
+        assert_eq!(
+            face.code_to_gid.get(66),
+            Some(&face.raw_get_char_index(0x0410))
         );
     }
 
@@ -624,15 +624,19 @@ mod tests {
         // The vertical-form CIDs a `-V` `CMap` selects (long-vowel mark
         // 7891, ideographic comma 7887, wave dash 7894) draw the vertical
         // form of their character, in horizontal mode too.  The forms come
-        // from an installed Japanese face; the bundled faces have none.
-        if face.raw_get_char_index(0x30FC) == 0 {
-            eprintln!("no installed Japanese face maps U+30FC; skipping the vertical forms");
-            return;
-        }
+        // from an installed Japanese face; the bundled faces have none, and
+        // draw `.notdef`.
+        let installed = crate::renderer::system_fonts::FontLibrary::shared(&[], true)
+            .system_program(japanese)
+            .is_some_and(|program| program.char_index(0x30FC) != 0);
         for (cid, unicode) in [(7891, 0x30FC), (7887, 0x3001), (7894, 0x301C)] {
             let gid = face.raw_get_char_index(unicode);
-            let vertical = face.program().vertical_gid(gid);
-            assert_ne!(gid, 0, "U+{unicode:04X}");
+            assert_eq!(gid != 0, installed, "U+{unicode:04X}");
+            let vertical = if gid == 0 {
+                0
+            } else {
+                face.program().vertical_gid(gid)
+            };
             assert_eq!(face.code_to_gid[cid], vertical, "CID {cid}");
         }
     }

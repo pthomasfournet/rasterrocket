@@ -21,7 +21,9 @@ use crate::program::unicode_subtable_index;
 pub struct FaceInfo {
     /// Index of the face in its file (0 outside a collection).
     pub index: u32,
-    /// Family name (`name` ID 16, else ID 1), as the file spells it.
+    /// Family name (`name` ID 16, else ID 1), English where the face
+    /// carries an English record (see `family_name`), as the file spells
+    /// it.
     pub family: String,
     /// `OS/2` `ulCodePageRange1` and `ulCodePageRange2`; zero when the
     /// table predates them.
@@ -50,14 +52,10 @@ pub fn face_infos(path: &Path) -> Vec<FaceInfo> {
     let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
-    face_offsets(&mut file)
-        .into_iter()
-        .enumerate()
+    (0u32..)
+        .zip(face_offsets(&mut file))
         .filter_map(|(index, offset)| {
-            face_info(&mut file, offset).map(|mut info| {
-                info.index = u32::try_from(index).unwrap_or(u32::MAX);
-                info
-            })
+            face_info(&mut file, offset).map(|info| FaceInfo { index, ..info })
         })
         .collect()
 }
@@ -158,7 +156,7 @@ fn face_offsets(file: &mut File) -> Vec<u32> {
         let count =
             u32::from_be_bytes([header[8], header[9], header[10], header[11]]).min(MAX_FACES);
         let mut table = vec![0u8; 4 * count as usize];
-        if file.read_exact(&mut table).is_err() {
+        if read_at(file, 12, &mut table).is_none() {
             return Vec::new();
         }
         table
@@ -221,19 +219,25 @@ fn face_info(file: &mut File, offset: u32) -> Option<FaceInfo> {
 }
 
 /// The typographic family name (ID 16) of `name`, else its family name
-/// (ID 1): from an English record first (the language-neutral Unicode
-/// platform, Windows en-US, or Macintosh Roman English), then from a
-/// Unicode record of any language.
+/// (ID 1): the first non-empty one from an English record (the
+/// language-neutral Unicode platform, a Windows language whose primary
+/// language is English, or Macintosh Roman English), then from a Unicode
+/// record of any language.
 ///
-/// Records are sorted by language ID, so a localised name (zh-TW `0x0404`)
-/// precedes the en-US one (`0x0409`) in the table; some faces carry their
-/// English name in a Macintosh record only.
+/// Records are sorted by platform, encoding and language ID, so a
+/// localised Windows name (zh-TW `0x0404`) precedes the en-US one
+/// (`0x0409`); some faces carry their English name in a Macintosh record
+/// only.
 fn family_name(name: &Name<'_>) -> Option<String> {
+    /// Windows LANGID primary-language bits and the primary language
+    /// English.
+    const PRIMARY_LANGUAGE: u16 = 0x3FF;
+    const ENGLISH: u16 = 0x09;
     let data = name.string_data();
     let english = |r: &NameRecord| match r.platform_id() {
         0 => true,
         1 => r.encoding_id() == 0 && r.language_id() == 0,
-        3 => r.is_unicode() && r.language_id() == 0x0409,
+        3 => r.is_unicode() && r.language_id() & PRIMARY_LANGUAGE == ENGLISH,
         _ => false,
     };
     let record_named = |id: u16, english_only: bool| {
@@ -247,9 +251,10 @@ fn family_name(name: &Name<'_>) -> Option<String> {
                     r.is_unicode()
                 }
             })
-            .find_map(|r| r.string(data).ok())
-            .map(|s| s.chars().collect::<String>())
-            .filter(|s| !s.is_empty())
+            .find_map(|r| {
+                let text: String = r.string(data).ok()?.chars().collect();
+                (!text.is_empty()).then_some(text)
+            })
     };
     record_named(16, true)
         .or_else(|| record_named(1, true))
@@ -351,6 +356,22 @@ mod tests {
             family_name(&name).as_deref(),
             Some("Al Bayan"),
             "a Macintosh English record outranks a localised Unicode one",
+        );
+
+        let bytes = name_table(&[(3, 0x0404, 1, "本地"), (3, 0x0809, 1, "British")]);
+        let name = Name::read(FontData::new(&bytes)).expect("parses");
+        assert_eq!(
+            family_name(&name).as_deref(),
+            Some("British"),
+            "every English variant is English",
+        );
+
+        let bytes = name_table(&[(3, 0x0409, 16, ""), (3, 0x0809, 16, "Typographic")]);
+        let name = Name::read(FontData::new(&bytes)).expect("parses");
+        assert_eq!(
+            family_name(&name).as_deref(),
+            Some("Typographic"),
+            "an empty record does not end the search",
         );
     }
 

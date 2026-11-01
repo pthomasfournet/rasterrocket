@@ -217,16 +217,14 @@ pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
 }
 
 /// The CID → code points map of `(cid, class, code)` triples: per CID, the
-/// codes by [`preference_class`], each class by value.
+/// codes by [`preference_class`], each class by value.  A code's class is a
+/// function of the code, so removing equal triples leaves each code once.
 fn invert(mut pairs: Vec<(u32, u8, u32)>) -> HashMap<u32, Box<[u32]>> {
     pairs.sort_unstable();
     pairs.dedup();
     let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
     for (cid, _, code) in pairs {
-        let codes = map.entry(cid).or_default();
-        if !codes.contains(&code) {
-            codes.push(code);
-        }
+        map.entry(cid).or_default().push(code);
     }
     map.into_iter()
         .map(|(cid, codes)| (cid, codes.into_boxed_slice()))
