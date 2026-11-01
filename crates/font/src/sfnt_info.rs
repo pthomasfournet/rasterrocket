@@ -221,18 +221,27 @@ fn face_info(file: &mut File, offset: u32) -> Option<FaceInfo> {
 }
 
 /// The typographic family name (ID 16) of `name`, else its family name
-/// (ID 1), from a Unicode record.
+/// (ID 1), from a Unicode record: an English one (Windows en-US, or the
+/// language-neutral Unicode platform) first, then one of any language.
+///
+/// Records are sorted by language ID, so a localised name (zh-TW `0x0404`)
+/// precedes the en-US one (`0x0409`) in the table.
 fn family_name(name: &Name<'_>) -> Option<String> {
+    const WINDOWS_EN_US: u16 = 0x0409;
     let data = name.string_data();
-    let record_named = |id: u16| {
+    let record_named = |id: u16, english_only: bool| {
         name.name_record()
             .iter()
             .filter(|r| r.name_id() == NameId::new(id) && r.is_unicode())
+            .filter(|r| !english_only || r.platform_id() == 0 || r.language_id() == WINDOWS_EN_US)
             .find_map(|r| r.string(data).ok())
             .map(|s| s.chars().collect::<String>())
             .filter(|s| !s.is_empty())
     };
-    record_named(16).or_else(|| record_named(1))
+    record_named(16, true)
+        .or_else(|| record_named(1, true))
+        .or_else(|| record_named(16, false))
+        .or_else(|| record_named(1, false))
 }
 
 /// Read `len` bytes at `at` into a new buffer; `None` for an empty table
@@ -266,6 +275,57 @@ mod tests {
             assert!(!set.contains(c), "{c}");
         }
         assert!(Coverage::default().is_empty());
+    }
+
+    /// A format-0 `name` table of Windows Unicode BMP records
+    /// `(language, name ID, string)`, in the order given.
+    fn name_table(records: &[(u16, u16, &str)]) -> Vec<u8> {
+        let strings: Vec<Vec<u8>> = records
+            .iter()
+            .map(|(_, _, s)| s.encode_utf16().flat_map(u16::to_be_bytes).collect())
+            .collect();
+        let count = u16::try_from(records.len()).expect("few records");
+        let mut out = Vec::new();
+        for v in [0, count, 6 + 12 * count] {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut offset = 0u16;
+        for ((language, id, _), s) in records.iter().zip(&strings) {
+            let len = u16::try_from(s.len()).expect("short string");
+            for v in [3, 1, *language, *id, len, offset] {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            offset += len;
+        }
+        for s in &strings {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    /// The en-US family name wins over a localised one that precedes it
+    /// in the language-sorted record list; a name with no English record
+    /// still resolves.
+    #[test]
+    fn family_name_prefers_english_records() {
+        let bytes = name_table(&[
+            (0x0404, 1, "冬青黑體簡體中文"),
+            (0x0409, 1, "Hiragino Sans GB"),
+        ]);
+        let name = Name::read(FontData::new(&bytes)).expect("parses");
+        assert_eq!(family_name(&name).as_deref(), Some("Hiragino Sans GB"));
+
+        let bytes = name_table(&[(0x0404, 16, "Typo"), (0x0409, 1, "Legacy")]);
+        let name = Name::read(FontData::new(&bytes)).expect("parses");
+        assert_eq!(
+            family_name(&name).as_deref(),
+            Some("Legacy"),
+            "an English ID 1 outranks a localised ID 16",
+        );
+
+        let bytes = name_table(&[(0x0411, 1, "ヒラギノ")]);
+        let name = Name::read(FontData::new(&bytes)).expect("parses");
+        assert_eq!(family_name(&name).as_deref(), Some("ヒラギノ"));
     }
 
     /// The coverage of a test face is the set of code points its Unicode
