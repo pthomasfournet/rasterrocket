@@ -363,7 +363,7 @@ The CLI crate forwards each of these feature names to the library.
 
 ### Dependencies
 
-**To build:** a Rust toolchain (1.98 or newer, edition 2024) and the platform's C linker
+**To build:** a Rust toolchain (1.99 or newer, edition 2024) and the platform's C linker
 (`build-essential` on Debian/Ubuntu, the Xcode Command Line Tools on macOS). The CPU build
 needs nothing else; the GPU features add the CUDA 13 toolkit or the Vulkan SDK (`slangc`).
 Build the CLI with `-p rasterrocket-cli`, not the whole workspace: the `pdf_bridge` reference

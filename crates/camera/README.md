@@ -3,7 +3,7 @@
 Cleanup of camera-captured pages on 8-bit grayscale images: page crop,
 perspective rectification, double-page spread splitting and an experimental
 dewarp. It has no dependencies beyond `std`, runs on the calling thread, keeps
-no global state and returns on any input without panicking (MSRV 1.98).
+no global state and returns on any input without panicking (MSRV 1.99).
 
 Each stage detects before it resamples; a stage that is not confident leaves
 the page unchanged and records why in the `Report`, so flatbed scans and

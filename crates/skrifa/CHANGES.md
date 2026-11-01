@@ -12,7 +12,9 @@ It is not published and changes are not sent upstream.
   newer crates.io releases and RustSec advisories after that base. Bring
   wanted upstream changes over by hand and update `UPSTREAM.toml`.
 
-- `Cargo.toml`: workspace-inherited fields resolved to values; `publish =
+- `Cargo.toml`: `rust-version` is inherited from the workspace (1.99), so
+  every crate of the repository builds with the same minimum toolchain;
+  the other workspace-inherited fields are resolved to values; `publish =
   false`; `read-fonts` is the fork in `crates/read_fonts` and
   `font-test-data` the copy in `crates/font_test_data`.
 

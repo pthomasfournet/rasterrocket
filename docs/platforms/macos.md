@@ -19,7 +19,7 @@ cores. It needs no Homebrew packages and no extra fonts.
    xcode-select --install
    ```
 
-2. Install Rust 1.98 or newer, from [rustup.rs](https://rustup.rs). With
+2. Install Rust 1.99 or newer, from [rustup.rs](https://rustup.rs). With
    Homebrew instead, run `brew install rustup`, put
    `/opt/homebrew/opt/rustup/bin` on your `PATH` (Homebrew prints the line
    to add to `~/.zshrc`), and run `rustup default stable`.

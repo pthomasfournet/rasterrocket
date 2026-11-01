@@ -3,6 +3,7 @@ publish = false
 name    = "rasterrocket-gpu"
 version = "2.0.0"
 edition = "2024"
+rust-version.workspace = true
 
 [[bin]]
 name = "threshold_bench"

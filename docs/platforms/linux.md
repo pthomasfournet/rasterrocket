@@ -20,7 +20,7 @@ cd rasterrocket
 cargo build --release -p rasterrocket-cli
 ```
 
-You also need Rust 1.98 or newer, from [rustup.rs](https://rustup.rs). The
+You also need Rust 1.99 or newer, from [rustup.rs](https://rustup.rs). The
 binary is `target/release/rrocket`.
 
 ## GPU

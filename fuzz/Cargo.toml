@@ -3,6 +3,8 @@ name = "rasterrocket-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+# The main workspace's minimum toolchain; the fuzz targets build on nightly.
+rust-version = "1.99"
 
 [package.metadata]
 cargo-fuzz = true

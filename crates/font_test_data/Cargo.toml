@@ -4,13 +4,14 @@
 # b373cdbc6043a791fb23b3e0f413649458f5e63a (2026-07-04, crate version 0.7.0).
 # Only test suites (theirs and rasterrocket-font's) depend on it.
 # Licence: MIT OR Apache-2.0 (see LICENSE-APACHE, LICENSE-MIT).
+# Changed from upstream: rust-version is inherited from the workspace.
 [package]
 name = "font-test-data"
 version = "0.7.0"
 description = "Test data for the fontations crates"
 readme = "README.md"
 
-rust-version = "1.85"
+rust-version.workspace = true
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/googlefonts/fontations"
