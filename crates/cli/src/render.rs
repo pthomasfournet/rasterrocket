@@ -176,6 +176,19 @@ pub(crate) fn write_cleaned(
     Ok(())
 }
 
+/// Write-buffer size of a page output file: the encoders emit a row at a
+/// time, and the file receives them in `write` calls of this size.
+const OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Create the page output file `out_path` behind an
+/// [`OUTPUT_BUFFER_BYTES`] write buffer.
+fn create_output(out_path: &str) -> std::io::Result<BufWriter<File>> {
+    Ok(BufWriter::with_capacity(
+        OUTPUT_BUFFER_BYTES,
+        File::create(out_path)?,
+    ))
+}
+
 /// Encode `rgb` to `out_path` honouring `--mono` / `--gray` and the resolved format.
 ///
 /// Shared by the PDF render path and the comic-archive path so colour-mode and
@@ -189,7 +202,7 @@ pub(crate) fn encode_to_path(
     if args.mono || args.gray {
         return encode_gray_to_path(out_path, &rgb_to_gray(rgb), args, format);
     }
-    let mut out = BufWriter::new(File::create(out_path)?);
+    let mut out = create_output(out_path)?;
     match format {
         OutputFormat::Ppm => write_ppm(rgb, &mut out)?,
         OutputFormat::Png => write_png(rgb, &mut out)?,
@@ -206,7 +219,7 @@ fn encode_gray_to_path(
     args: &Args,
     format: OutputFormat,
 ) -> Result<(), RenderError> {
-    let mut out = BufWriter::new(File::create(out_path)?);
+    let mut out = create_output(out_path)?;
     if args.mono {
         let mono = gray_to_mono(gray);
         match format {
