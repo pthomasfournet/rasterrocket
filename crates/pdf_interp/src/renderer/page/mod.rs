@@ -372,8 +372,7 @@ impl<'doc> PageRenderer<'doc> {
         );
         let (width, height, rotate_cw) = (view.width, view.height, view.rotate_cw);
 
-        let mut bitmap = Bitmap::<Rgb8>::new(width, height, 1, false);
-        bitmap.data_mut().fill(255u8); // white background
+        let bitmap = Bitmap::<Rgb8>::new_filled(width, height, 1, false, u8::MAX);
 
         let initial_ctm = view.initial_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);
@@ -472,10 +471,13 @@ impl<'doc> PageRenderer<'doc> {
     pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
         self.page_group = group;
         self.group.knockout = group.is_some_and(|g| g.knockout);
-        self.bitmap = Bitmap::new(self.width, self.height, 1, group.is_some());
-        if group.is_none() {
-            self.bitmap.data_mut().fill(u8::MAX);
+        if group.is_some() {
+            self.bitmap = Bitmap::new(self.width, self.height, 1, true);
+        } else if self.bitmap.alpha_plane().is_some() {
+            self.bitmap = Bitmap::new_filled(self.width, self.height, 1, false, u8::MAX);
         }
+        // Otherwise the bitmap is the opaque white page `with_view` made:
+        // nothing has been painted before `execute`.
     }
 
     /// The document's optional-content configuration in effect.

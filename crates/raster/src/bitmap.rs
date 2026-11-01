@@ -64,6 +64,20 @@ impl<P: Pixel> Bitmap<P> {
     /// Panics if `row_pad` is 0 or the buffer size overflows `usize`.
     #[must_use]
     pub fn new(width: u32, height: u32, row_pad: usize, with_alpha: bool) -> Self {
+        Self::new_filled(width, height, row_pad, with_alpha, 0)
+    }
+
+    /// Allocate a new bitmap whose colour bytes are all `fill` (row padding
+    /// included), written once as the buffer is allocated.
+    ///
+    /// `row_pad` and `with_alpha` are as for [`Bitmap::new`]; the alpha
+    /// plane, when allocated, is initialised to 0.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row_pad` is 0 or the buffer size overflows `usize`.
+    #[must_use]
+    pub fn new_filled(width: u32, height: u32, row_pad: usize, with_alpha: bool, fill: u8) -> Self {
         assert!(row_pad >= 1, "row_pad must be ≥ 1");
         let raw_stride = u32_to_usize(width) * P::BYTES;
         let stride = if row_pad <= 1 {
@@ -74,7 +88,7 @@ impl<P: Pixel> Bitmap<P> {
         let data_len = stride
             .checked_mul(u32_to_usize(height))
             .expect("Bitmap::new: colour buffer size overflows usize");
-        let data = vec![0u8; data_len];
+        let data = vec![fill; data_len];
         let alpha = with_alpha.then(|| vec![0u8; u32_to_usize(width) * u32_to_usize(height)]);
         Self {
             width,
