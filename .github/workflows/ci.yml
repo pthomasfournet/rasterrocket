@@ -107,39 +107,6 @@ jobs:
       - name: Test rasterrocket-color, rasterrocket-encode, rasterrocket-comic
         run: cargo test -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic
 
-      - name: Clippy (no GPU features)
-        run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
-
-      # Test targets are linted one crate per invocation: a combined
-      # `--all-targets` run exceeds runner memory.
-      # Three small crates whose test targets fit in one invocation.
-      - name: Clippy (rasterrocket-color, -encode, -comic tests)
-        run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-parser tests)
-        run: cargo clippy -p rasterrocket-parser --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-render tests)
-        run: cargo clippy -p rasterrocket-render --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-font tests)
-        run: cargo clippy -p rasterrocket-font --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-interp tests)
-        run: cargo clippy -p rasterrocket-interp --tests -- -D warnings
-
-      - name: Clippy (rasterrocket tests)
-        run: cargo clippy -p rasterrocket --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-cli tests)
-        run: cargo clippy -p rasterrocket-cli --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-camera, lib and tests)
-        run: cargo clippy -p rasterrocket-camera --tests -- -D warnings
-
-      - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
-        run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
-
       # The cache is saved after a successful run.  Test executables relink
       # in seconds; leaving them out keeps it within the repository's quota.
       - name: Drop test executables from the build cache
@@ -198,55 +165,21 @@ jobs:
       - name: Check rasterrocket (stable, NEON deskew path)
         run: cargo check -p rasterrocket --target aarch64-unknown-linux-gnu
 
-  # ── aarch64 native execution ──────────────────────────────────────────────
+  # ── Clippy on every platform, and the platform-dependent tests ──────────
   #
-  # Runs the NEON test suites on a native arm64 hosted runner (free for
-  # public repositories).  The cross-check job above only compiles; this job
-  # actually executes the NEON tiers — the rotate-row parity test, the glyph
-  # unpack kernels, and the coverage tiers — which otherwise ship untested.
-  aarch64-test:
-    name: aarch64 native tests (NEON execution)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry and build artifacts
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-generic-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-generic-arm64-cargo-
-
-      - name: Test rasterrocket-render (NEON tiers)
-        run: cargo test -p rasterrocket-render --lib
-
-      - name: Test rasterrocket-gpu (NEON CMYK path)
-        run: cargo test -p rasterrocket-gpu --lib -- cmyk
-
-      - name: Test rasterrocket (NEON deskew rotate + parity)
-        run: cargo test -p rasterrocket --lib
-
-  # ── Clippy on aarch64 Linux and macOS ─────────────────────────────────────
-  #
-  # Code gated on `target_arch = "aarch64"` (the NEON tiers) or on the target
-  # OS (memory probes, file hints, system font discovery) compiles only
-  # there, so the x86-64 clippy run never lints it.  Same invocations as the
-  # CPU-only job, one crate per `--tests` run for runner memory.  The macOS
-  # leg also runs the tests whose behaviour depends on the OS: font
-  # discovery and the predefined CID CMaps.
-  clippy-platforms:
-    name: Clippy (${{ matrix.os }})
+  # Code gated on `target_arch = "aarch64"` (the NEON tiers) or on the
+  # target OS (memory probes, file hints, system font discovery) compiles
+  # only there, so each platform is linted on its own runner; test targets
+  # are linted one crate per invocation, since a combined `--all-targets`
+  # run exceeds runner memory.  The arm64 Linux leg also executes the NEON
+  # tiers, which the cross-check above only compiles, and the macOS leg the
+  # tests whose behaviour depends on the OS.
+  platforms:
+    name: Clippy and platform tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -263,9 +196,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-platforms-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-clippy-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-platforms-
 
       - name: Clippy (no GPU features)
         run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
@@ -285,6 +218,9 @@ jobs:
       - name: Clippy (rasterrocket-interp tests)
         run: cargo clippy -p rasterrocket-interp --tests -- -D warnings
 
+      - name: Clippy (rasterrocket-interp, gpu-aa tests)
+        run: cargo clippy -p rasterrocket-interp --features gpu-aa --tests -- -D warnings
+
       - name: Clippy (rasterrocket tests)
         run: cargo clippy -p rasterrocket --tests -- -D warnings
 
@@ -297,6 +233,18 @@ jobs:
       - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
         run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
 
+      - name: Test rasterrocket-render (NEON tiers)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: cargo test -p rasterrocket-render --lib
+
+      - name: Test rasterrocket-gpu (NEON CMYK path)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: cargo test -p rasterrocket-gpu --lib -- cmyk
+
+      - name: Test rasterrocket (NEON deskew rotate + parity)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: cargo test -p rasterrocket --lib
+
       - name: Test rasterrocket-font (system font discovery)
         if: runner.os == 'macOS'
         run: cargo test -p rasterrocket-font --lib
@@ -308,6 +256,10 @@ jobs:
       - name: Test rasterrocket-cli (memory probe, RAM output)
         if: runner.os == 'macOS'
         run: cargo test -p rasterrocket-cli --bin rrocket -- ram
+
+      # As in the CPU-only job: test executables stay out of the cache.
+      - name: Drop test executables from the build cache
+        run: find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
 
   # ── Fuzz target build ─────────────────────────────────────────────────────
   #
@@ -339,6 +291,12 @@ jobs:
           key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-fuzz-
+
+      # The fuzz workspace keeps its own lock file, which a release bump of
+      # the workspace crates leaves stale; the build below would rewrite it
+      # silently.
+      - name: Check the fuzz lock file is current
+        run: cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 
       - name: Build fuzz targets
         working-directory: fuzz

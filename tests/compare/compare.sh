@@ -84,6 +84,21 @@ usage() {
 die() { echo "Error: $*" >&2; exit 1; }
 
 is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+
+# The page range FIRST-END for a reference renderer that takes one: -l
+# clamped to the document's page count $1 (as pdftoppm and rrocket clamp
+# it), as reported by $2.  Run in a command substitution, so the caller
+# follows it with `|| exit 1`.
+ref_page_range() {
+    local count="$1" source="$2" end
+    is_positive_int "$count" || die "could not determine the page count with $source"
+    (( FIRST <= count )) || die "-f $FIRST exceeds the page count $count"
+    end="$count"
+    if [[ -n "$LAST" ]] && (( LAST < count )); then
+        end="$LAST"
+    fi
+    echo "${FIRST}-${end}"
+}
 is_pos_number()   { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 
 while getopts ":r:f:l:t:k:R:vo:nsh" opt; do
@@ -168,6 +183,7 @@ if $DRY_RUN; then
         echo "  [render ref]  $OXIDE_BIN ${oxide_args[*]} -o <OUT>/ref $PDF"
     elif [[ "$REFERENCE" == pdfium ]]; then
         echo "  [render ref]  $PDFIUM_BIN ${pdfium_args[*]} --pages ${FIRST}-${LAST:-<N>} -o <OUT>/ref $PDF"
+        echo "                (the end page clamped to the page count <N>)"
     else
         echo "  [render ref]  pdftoppm ${ref_args[*]} $PDF <OUT>/ref/page"
     fi
@@ -218,14 +234,12 @@ if [[ "$REFERENCE" == oxide ]]; then
     # normalise to the page-NNN.ppm layout the diff loop below expects.
     OX_RAW="${WORK_DIR}/ox_raw"
     mkdir -p "$OX_RAW"
-    if [[ -n "$LAST" ]]; then
-        oxide_args+=(--pages "${FIRST}-${LAST}")
-    elif [[ "$FIRST" -ne 1 ]]; then
+    if [[ -n "$LAST" || "$FIRST" -ne 1 ]]; then
         ox_count="$("$OXIDE_BIN" info --json "$PDF" 2>/dev/null \
             | grep -Eo '"page_count"[[:space:]]*:[[:space:]]*[0-9]+' \
             | grep -Eo '[0-9]+$')"
-        [[ -n "$ox_count" ]] || die "could not determine page count from $OXIDE_BIN info"
-        oxide_args+=(--pages "${FIRST}-${ox_count}")
+        ox_range="$(ref_page_range "$ox_count" "$OXIDE_BIN info")" || exit 1
+        oxide_args+=(--pages "$ox_range")
     fi
 
     if ! "$OXIDE_BIN" "${oxide_args[@]}" -o "$OX_RAW" "$PDF" \
@@ -249,15 +263,10 @@ elif [[ "$REFERENCE" == pdfium ]]; then
     # pypdfium2 names outputs "page_<n>.png", n zero-padded like pdf-oxide's.
     PF_RAW="${WORK_DIR}/pf_raw"
     mkdir -p "$PF_RAW"
-    # pypdfium2 rejects a range past the last page; -l is clamped to the
-    # page count, as pdftoppm and rrocket clamp it.
-    pf_count="$("$PDFIUM_PY" -c 'import sys, pypdfium2; print(len(pypdfium2.PdfDocument(sys.argv[1])))' "$PDF" 2>/dev/null)" \
-        || die "could not determine page count with pypdfium2"
-    pf_last="$pf_count"
-    if [[ -n "$LAST" && "$LAST" -lt "$pf_count" ]]; then
-        pf_last="$LAST"
-    fi
-    if ! "$PDFIUM_BIN" "${pdfium_args[@]}" --pages "${FIRST}-${pf_last}" -o "$PF_RAW" "$PDF" \
+    # pypdfium2 rejects a range past the last page.
+    pf_count="$("$PDFIUM_PY" -c 'import sys, pypdfium2; print(len(pypdfium2.PdfDocument(sys.argv[1])))' "$PDF" 2>/dev/null)"
+    pf_range="$(ref_page_range "$pf_count" pypdfium2)" || exit 1
+    if ! "$PDFIUM_BIN" "${pdfium_args[@]}" --pages "$pf_range" -o "$PF_RAW" "$PDF" \
             >"${WORK_DIR}/ref.log" 2>&1; then
         echo "Error: pypdfium2 failed — see log:" >&2
         cat "${WORK_DIR}/ref.log" >&2
