@@ -329,10 +329,23 @@ fn draw_widget(
     });
 }
 
+/// The rotation `degrees`, which `/MK /R` and the free text `/Rotate`
+/// require to be a multiple of 90, reduced to 0, 90, 180 or 270; 0 for
+/// another value.
+const fn quarter_turns(degrees: i64) -> u16 {
+    match degrees.rem_euclid(360) {
+        90 => 90,
+        180 => 180,
+        270 => 270,
+        _ => 0,
+    }
+}
+
 /// The box an appearance rotated by `rotation` degrees counter-clockwise
 /// (a multiple of 90) is laid out in, with its lower-left corner at the
 /// origin and its sides swapped for a quarter turn, and the matrix that
-/// turns it and places it on `rect` (ISO 32000-2 §12.5.6.19, `/MK /R`).
+/// turns it and places it on `rect` (ISO 32000-2 §12.5.6.19, `/MK /R`;
+/// the free text `/Rotate`).
 fn rotated_box(rect: [f64; 4], rotation: u16) -> ([f64; 4], Ctm) {
     let [x0, y0, x1, y1] = rect;
     let (w, h) = (x1 - x0, y1 - y0);

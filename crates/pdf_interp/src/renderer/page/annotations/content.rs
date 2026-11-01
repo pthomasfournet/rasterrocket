@@ -69,6 +69,13 @@ pub(super) fn opacity(doc: &Document, annot: &Dictionary) -> f64 {
     number(doc, annot.get(b"CA")).unwrap_or(1.0).clamp(0.0, 1.0)
 }
 
+/// The `cm` operator concatenating the matrix `[a b c d e f]`.
+pub(super) fn cm(m: [f64; 6]) -> String {
+    let mut s = m.map(n).join(" ");
+    s.push_str(" cm");
+    s
+}
+
 /// `v` formatted for a content stream: at most four decimals, no trailing
 /// zeros.  A non-finite `v`, which no content-stream number expresses, is
 /// written as 0.

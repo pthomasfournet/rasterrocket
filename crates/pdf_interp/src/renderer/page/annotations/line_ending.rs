@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 use pdf::{Document, Object};
 
-use super::content::{circle, n, rectangle, resolve_array};
+use super::content::{circle, cm, n, rectangle, resolve_array};
 
 /// Ratio of the ending size to the border width.
 const SIZE_PER_WIDTH: f64 = 6.0;
@@ -114,16 +114,7 @@ impl LineEnding {
             return;
         }
         let (cos, sin) = (dx / length, dy / length);
-        let _ = writeln!(
-            s,
-            "q [] 0 d {} {} {} {} {} {} cm",
-            n(cos),
-            n(sin),
-            n(-sin),
-            n(cos),
-            n(tip.0),
-            n(tip.1)
-        );
+        let _ = writeln!(s, "q [] 0 d {}", cm([cos, sin, -sin, cos, tip.0, tip.1]));
         let fill = fill.filter(|_| self.closed());
         if let Some(fill) = fill {
             let _ = writeln!(s, "{fill}");

@@ -197,7 +197,7 @@ impl Field {
             rotation: mk
                 .as_ref()
                 .and_then(|mk| mk.get_i64(b"R"))
-                .map_or(0, quarter_turns),
+                .map_or(0, super::quarter_turns),
         })
     }
 
@@ -205,17 +205,6 @@ impl Field {
     /// counter-clockwise: 0, 90, 180 or 270.
     pub(super) const fn rotation(&self) -> u16 {
         self.rotation
-    }
-}
-
-/// The rotation `degrees`, which `/MK /R` requires to be a multiple of 90,
-/// reduced to 0, 90, 180 or 270; 0 for another value.
-const fn quarter_turns(degrees: i64) -> u16 {
-    match degrees.rem_euclid(360) {
-        90 => 90,
-        180 => 180,
-        270 => 270,
-        _ => 0,
     }
 }
 

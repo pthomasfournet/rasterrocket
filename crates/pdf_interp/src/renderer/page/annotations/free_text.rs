@@ -6,7 +6,9 @@
 //! `/DA`.  The text, `/Contents` or else the plain text of the rich text
 //! string `/RC`, is set in the `/DA` font, size and colour, wrapped to the
 //! box less a margin of twice the border width, aligned by `/Q` and run
-//! from the top; it is clipped to that area.  A callout (`/CL`, two or
+//! from the top; it is clipped to that area.  `/Rotate`, a multiple of 90
+//! degrees, turns the box and its text counter-clockwise within the text
+//! box, its sides swapped for a quarter turn.  A callout (`/CL`, two or
 //! three points) is stroked from its first point, which carries the `/LE`
 //! line ending.  The `/DA` font comes from the form's default resources,
 //! standard Helvetica when they lack it.
@@ -16,7 +18,9 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 use raster::types::BlendMode;
 
-use super::content::{Border, colour, colour_op, inset, n, numbers, opacity, rectangle, string};
+use super::content::{
+    Border, cm, colour, colour_op, inset, n, numbers, opacity, rectangle, string,
+};
 use super::line_ending::LineEnding;
 use super::text::{DefaultAppearance, markup_text};
 use super::typeset::{AUTO_MULTILINE_SIZE, TextBlock, Typesetter};
@@ -41,6 +45,8 @@ pub(super) struct FreeText {
     border: Border,
     /// The text box: `/Rect` moved in by `/RD`.
     text_box: [f64; 4],
+    /// `/Rotate`: 0, 90, 180 or 270 degrees counter-clockwise.
+    rotation: u16,
     /// The normalised `/Rect`.
     rect: [f64; 4],
     /// The callout points.
@@ -85,6 +91,7 @@ impl FreeText {
             interior: colour(doc, annot.get(b"IC"), false),
             border: Border::of(doc, annot),
             text_box: inset(rect, &numbers(doc, annot.get(b"RD"))),
+            rotation: annot.get_i64(b"Rotate").map_or(0, super::quarter_turns),
             rect,
             callout: if matches!(callout.len(), 2 | 3) {
                 callout
@@ -105,37 +112,42 @@ impl FreeText {
     pub(super) fn appearance(&self, ts: &mut dyn Typesetter) -> Synthesized {
         let mut s = String::new();
         let bw = self.border.width;
-        let frame = inset(self.text_box, &[bw / 2.0; 4]);
         let stroke = self
             .da
             .colour()
             .and_then(|c| colour_op(&c, true))
             .unwrap_or_else(|| "0 G".to_owned());
-        s.push_str("q\n");
+        let mut reach = 0.0f64;
+        if bw > 0.0
+            && let [first, second, rest @ ..] = self.callout.as_slice()
+        {
+            let _ = writeln!(s, "q\n{stroke}");
+            self.border.write(&mut s);
+            let _ = writeln!(s, "{} {} m", n(first.0), n(first.1));
+            for (x, y) in std::iter::once(second).chain(rest) {
+                let _ = writeln!(s, "{} {} l", n(*x), n(*y));
+            }
+            s.push_str("S\n");
+            if let Some(ending) = self.ending {
+                reach = ending.draw(&mut s, *first, *second, bw, self.interior.as_deref());
+            }
+            s.push_str("Q\n");
+        }
+        let (text_box, matrix) = super::rotated_box(self.text_box, self.rotation);
+        let _ = writeln!(s, "q {}", cm(matrix));
+        let frame = inset(text_box, &[bw / 2.0; 4]);
         if let Some(fill) = &self.fill {
             let _ = writeln!(s, "{fill}");
             rectangle(&mut s, frame);
             s.push_str("f\n");
         }
-        let mut reach = 0.0f64;
         if bw > 0.0 {
             let _ = writeln!(s, "{stroke}");
             self.border.write(&mut s);
             rectangle(&mut s, frame);
             s.push_str("S\n");
-            if let [first, second, rest @ ..] = self.callout.as_slice() {
-                let _ = writeln!(s, "{} {} m", n(first.0), n(first.1));
-                for (x, y) in std::iter::once(second).chain(rest) {
-                    let _ = writeln!(s, "{} {} l", n(*x), n(*y));
-                }
-                s.push_str("S\n");
-                if let Some(ending) = self.ending {
-                    reach = ending.draw(&mut s, *first, *second, bw, self.interior.as_deref());
-                }
-            }
         }
-        s.push_str("Q\n");
-        let area = inset(self.text_box, &[2.0 * bw; 4]);
+        let area = inset(text_box, &[2.0 * bw; 4]);
         if !self.text.is_empty() {
             s.push_str("q\n");
             rectangle(&mut s, area);
@@ -153,6 +165,7 @@ impl FreeText {
             block.write(&mut s, &self.text, ts);
             s.push_str("Q\n");
         }
+        s.push_str("Q\n");
         Synthesized {
             content: s.into_bytes(),
             bbox: inset(self.rect, &[-(bw + reach); 4]),
@@ -185,13 +198,29 @@ mod tests {
             "<< /Subtype /FreeText /Rect [100 50 150 75] /C [1 0 0] /Contents (Hello!) \
              /DA (0 0 1 rg /F1 8 Tf) >>",
         );
-        assert!(c.contains("1 0 0 rg\n100.5 50.5 49 24 re\nf"), "{c}");
-        assert!(c.contains("0 0 1 RG\n1 w\n100.5 50.5 49 24 re\nS"), "{c}");
+        assert!(c.starts_with("q 1 0 0 1 100 50 cm\n"), "{c}");
+        assert!(c.contains("1 0 0 rg\n0.5 0.5 49 24 re\nf"), "{c}");
+        assert!(c.contains("0 0 1 RG\n1 w\n0.5 0.5 49 24 re\nS"), "{c}");
         // The first baseline is one font size below the top less the margin.
         assert!(
-            c.contains("BT /F1 8 Tf 0 0 1 rg\n102 65 Td <48656C6C6F21> Tj ET"),
+            c.contains("BT /F1 8 Tf 0 0 1 rg\n2 15 Td <48656C6C6F21> Tj ET"),
             "{c}"
         );
+    }
+
+    #[test]
+    fn rotate_turns_the_box_and_its_text_within_the_text_box() {
+        let c = content(
+            "<< /Subtype /FreeText /Rect [0 0 50 100] /Rotate 90 /DA (/Helv 10 Tf 0 g) \
+             /Contents (x) >>",
+        );
+        assert!(c.starts_with("q 0 1 -1 0 50 0 cm\n"), "{c}");
+        assert!(c.contains("0.5 0.5 99 49 re\nS"), "{c}");
+        let c = content(
+            "<< /Subtype /FreeText /Rect [0 0 50 100] /Rotate 45 /DA (/Helv 10 Tf 0 g) \
+             /Contents (x) >>",
+        );
+        assert!(c.starts_with("q 1 0 0 1 0 0 cm\n"), "{c}");
     }
 
     #[test]
@@ -214,7 +243,7 @@ mod tests {
         );
         assert!(c.contains("10 10 m\n50 50 l\n100 50 l\nS"), "{c}");
         assert!(
-            c.contains("100.5 0.5 99 99 re"),
+            c.contains("q 1 0 0 1 100 0 cm\n") && c.contains("0.5 0.5 99 99 re"),
             "the box is inset by /RD: {c}"
         );
         assert!(c.contains("cm\n-6 3.4641 m"), "{c}");
