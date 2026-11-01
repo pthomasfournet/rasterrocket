@@ -20,7 +20,7 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
 - SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
-- `cargo check --target aarch64-unknown-linux-gnu` is clean; no Apple Metal GPU backend yet.
+- Tested in CI on arm64 Linux and on macOS (Apple silicon); no Apple Metal GPU backend.
 
 ### GPU (optional)
 
@@ -59,17 +59,18 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 
 ## Platform support
 
-| Platform | CPU SIMD | GPU acceleration | Status |
-|---|---|---|---|
-| x86-64 AMD (Ryzen) | AVX-512 + AVX2 | NVIDIA CUDA + AMD VA-API + Vulkan | **Supported** |
-| x86-64 Intel (consumer) | AVX2 | NVIDIA CUDA + Intel VA-API + Vulkan | **Supported** |
-| x86-64 Intel (Xeon) | AVX-512 + AVX2 | NVIDIA CUDA + Intel VA-API + Vulkan | **Supported** |
-| aarch64 Linux (Graviton, RPi) | NEON + SVE2† | Vulkan (Mesa) | CPU full, Vulkan untested on aarch64 |
-| Apple Silicon (M1–M4) | NEON | Vulkan via `MoltenVK` (untested) | CPU full, Vulkan untested |
-| AMD/Radeon ROCm | — | — | Not implemented (Vulkan covers Radeon) |
-| Apple Metal (native) | — | — | Not implemented (Vulkan via `MoltenVK` is the path) |
+| Operating system | CPU | GPU | Status | Guide |
+|---|---|---|---|---|
+| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**, tested in CI | [Linux](platforms/linux.md) |
+| Linux aarch64 | NEON (+ SVE2 on nightly) | Vulkan (untested) | **Supported**, tested in CI | [Linux](platforms/linux.md) |
+| macOS on Apple silicon | NEON | none (Metal not implemented) | **Supported**, tested in CI | [macOS](platforms/macos.md) |
+| macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
+| FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
+| Windows | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
 
-† SVE2 requires the `rasterrocket-render` feature `nightly-sve2` and nightly Rust.
+AMD ROCm and a native Apple Metal backend are not implemented; Vulkan covers
+Radeon GPUs.  SVE2 requires the `rasterrocket-render` feature `nightly-sve2`
+and nightly Rust.
 
 ## Installation
 
@@ -390,6 +391,6 @@ path — the crates.io packages are abandoned at 1.0.1.
 
 ### A note on output destination
 
-The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits**; the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when MemAvailable drops below 1 GiB (Linux only, where it reads `/proc/meminfo`). On systems without `/dev/shm` (macOS, the BSDs) there is no default redirect and a bare stem writes to the working directory.
+The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits**; the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when available memory drops below 1 GiB. On systems without `/dev/shm` (macOS, the BSDs, Windows) there is no default redirect and a bare stem writes to the working directory; see the [macOS guide](platforms/macos.md#writing-output-to-ram) for RAM disks there.
 
 See [cli-reference.md](cli-reference.md) for CLI usage.

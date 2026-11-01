@@ -15,6 +15,8 @@ git clone https://github.com/pthomasfournet/rasterrocket
 cd rasterrocket && cargo build --release -p rasterrocket-cli
 ```
 
+**Platform guides:** [Linux](docs/platforms/linux.md) · [macOS](docs/platforms/macos.md) · [BSD and Windows](docs/platforms/other.md)
+
 > **This project is distributed via GitHub, not crates.io.** Two crates were
 > published there once (`rasterrocket` and `rasterrocket-cli`, both at 1.0.1)
 > before the registry was abandoned; those versions are frozen, unmaintained,
@@ -369,6 +371,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | Document | Contents |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Installation, quickstart, Tesseract integration, DPI guidance, error handling, security |
+| Platform guides: [Linux](docs/platforms/linux.md), [macOS](docs/platforms/macos.md), [BSD and Windows](docs/platforms/other.md) | Installing, fonts, RAM output, GPU support and known gaps on each operating system |
 | [API Reference](docs/api-reference.md) | Full signatures for `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage`, `RasterError`, `PageDiagnostics`, `rasterrocket-comic`'s `open_comic`, `rasterrocket-camera`, feature flags, GPU dispatch thresholds |
 | [CLI Reference](docs/cli-reference.md) | All `rrocket` command-line flags, output format matrix, size limits, examples, pixel-diff comparison |
 | [Benchmarks](../../wiki/Benchmarks) | Methodology, 10-document corpus results, CPU-only AVX-512 vs AVX2, GPU-accelerated, reproduction steps |
@@ -389,7 +392,7 @@ crates.io (see the note at the top).
 
 ## Hardware compatibility
 
-**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width.
+**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. Linux and macOS are tested in CI; see the platform guides above.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG and the AA fill, which are wired but dormant by default because the CPU paths beat them.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.

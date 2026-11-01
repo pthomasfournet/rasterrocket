@@ -950,17 +950,9 @@ Under `BackendPolicy::Auto`, GPU initialisation failures at runtime log a warnin
 
 ### Platform support
 
-| Platform | CPU SIMD | GPU acceleration | Status |
-|---|---|---|---|
-| x86-64 AMD (Ryzen) | AVX-512 + AVX2 | NVIDIA CUDA + AMD VA-API + Vulkan | **Supported** |
-| x86-64 Intel (consumer) | AVX2 | NVIDIA CUDA + Intel VA-API + Vulkan | **Supported** |
-| x86-64 Intel (Xeon) | AVX-512 + AVX2 | NVIDIA CUDA + Intel VA-API + Vulkan | **Supported** |
-| aarch64 Linux (Graviton, RPi) | NEON + SVE2 † | Vulkan (Mesa) | CPU full, Vulkan untested on aarch64 |
-| Apple Silicon (M1–M4) | NEON | Vulkan via `MoltenVK` (untested) | CPU full, Vulkan untested |
-| AMD/Radeon ROCm | — | — | Not implemented (Vulkan covers Radeon) |
-| Apple Metal (native) | — | — | Not implemented (Vulkan via `MoltenVK` is the path) |
-
-† SVE2 requires the `rasterrocket-render` feature `nightly-sve2` and nightly Rust.
+See the platform table in [Getting Started](getting-started.md#platform-support)
+and the guides for [Linux](platforms/linux.md), [macOS](platforms/macos.md) and
+[BSD and Windows](platforms/other.md).
 
 ## Feature flags
 
