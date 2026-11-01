@@ -123,8 +123,8 @@ pub(super) fn predefined_cmap_nested(name: &[u8], depth: u32) -> Option<Arc<CMap
 /// face lacking the first still draws the CID through another.
 #[derive(Debug, Default)]
 pub(crate) struct CollectionUnicode {
-    /// Code points of each CID that has any: those outside the
-    /// compatibility blocks first, then by value.
+    /// Code points of each CID that has any, ordered by
+    /// [`preference_class`], then by value.
     unicode: HashMap<u32, Box<[u32]>>,
     /// CIDs reached only through the vertical `UCS2-V` `CMap`: the
     /// vertical forms (rotated or repositioned glyphs) of their code
@@ -179,10 +179,10 @@ pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
         return Some(Arc::clone(table));
     }
     let cmap = predefined_cmap(name)?;
-    let mut pairs: Vec<(u32, bool, u32)> = cmap
+    let mut pairs: Vec<(u32, u8, u32)> = cmap
         .map
         .iter()
-        .map(|(&code, &cid)| (cid, is_compatibility_block(code), code))
+        .map(|(&code, &cid)| (cid, preference_class(code), code))
         .collect();
     // The collection's legacy encodings map single-byte ASCII to half-width
     // Roman CIDs the Unicode `CMap` does not reach; those codes are their
@@ -194,17 +194,17 @@ pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
                     .map
                     .iter()
                     .filter(|&(&code, _)| (0x20..=0x7E).contains(&code))
-                    .map(|(&code, &cid)| (cid, false, code)),
+                    .map(|(&code, &cid)| (cid, preference_class(code), code)),
             );
         }
     }
     let mut unicode = invert(pairs);
-    let vertical_pairs: Vec<(u32, bool, u32)> = predefined_cmap(vertical_name)
+    let vertical_pairs: Vec<(u32, u8, u32)> = predefined_cmap(vertical_name)
         .map(|cmap| {
             cmap.map
                 .iter()
                 .filter(|&(_, cid)| !unicode.contains_key(cid))
-                .map(|(&code, &cid)| (cid, is_compatibility_block(code), code))
+                .map(|(&code, &cid)| (cid, preference_class(code), code))
                 .collect()
         })
         .unwrap_or_default();
@@ -216,10 +216,9 @@ pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
     Some(Arc::clone(cache.entry(script).or_insert(table)))
 }
 
-/// The CID → code points map of `(cid, compatibility, code)` triples: per
-/// CID, the codes outside the compatibility blocks before those inside
-/// them, each group by value.
-fn invert(mut pairs: Vec<(u32, bool, u32)>) -> HashMap<u32, Box<[u32]>> {
+/// The CID → code points map of `(cid, class, code)` triples: per CID, the
+/// codes by [`preference_class`], each class by value.
+fn invert(mut pairs: Vec<(u32, u8, u32)>) -> HashMap<u32, Box<[u32]>> {
     pairs.sort_unstable();
     pairs.dedup();
     let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -234,13 +233,32 @@ fn invert(mut pairs: Vec<(u32, bool, u32)>) -> HashMap<u32, Box<[u32]>> {
         .collect()
 }
 
-/// Whether `code` lies in a block of radicals, compatibility ideographs or
-/// full-width forms, whose characters duplicate unified ones.
-const fn is_compatibility_block(code: u32) -> bool {
-    matches!(
-        code,
-        0x2E80..=0x2FDF | 0x3190..=0x319F | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF
-    )
+/// Rank of `code` among the code points that share a CID; the least is
+/// preferred.
+///
+/// 0. Every other character.
+/// 1. Mathematical operators (`U+2200`–`22FF`, `U+2A00`–`2AFF`): a CID
+///    shared with one is a typographic character it aliases (WAVE DASH
+///    and TILDE OPERATOR).
+/// 2. Radicals, compatibility ideographs and full-width forms, which
+///    duplicate unified characters.
+/// 3. Combining marks, drawn relative to a preceding base rather than as a
+///    glyph of their own (COMBINING LONG STROKE OVERLAY and EM DASH), and
+///    private-use code points, whose glyphs are face-specific.
+const fn preference_class(code: u32) -> u8 {
+    match code {
+        0x0300..=0x036F
+        | 0x1AB0..=0x1AFF
+        | 0x1DC0..=0x1DFF
+        | 0x20D0..=0x20FF
+        | 0xFE20..=0xFE2F
+        | 0xE000..=0xF8FF => 3,
+        0x2E80..=0x2FDF | 0x3190..=0x319F | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF => {
+            2
+        }
+        0x2200..=0x22FF | 0x2A00..=0x2AFF => 1,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -256,8 +274,17 @@ mod tests {
         // Half-width `A`, reached only through the legacy encodings.
         assert_eq!(japan1.get(264).first(), Some(&0x41));
         assert!(!japan1.is_vertical(3284));
-        // WAVE DASH keeps every code point of its CID, unified first.
-        assert_eq!(japan1.get(665), &[0x223C, 0x301C, 0xFF5E]);
+        // WAVE DASH keeps every code point of its CID: the wave dash, the
+        // TILDE OPERATOR it aliases, then FULLWIDTH TILDE.
+        assert_eq!(japan1.get(665), &[0x301C, 0x223C, 0xFF5E]);
+        assert_eq!(japan1.get(7894).first(), Some(&0x301C));
+        // A spacing character precedes the combining mark sharing its CID.
+        assert_eq!(japan1.get(138).first(), Some(&0x2014), "EM DASH");
+        assert_eq!(japan1.get(758).first(), Some(&0x2312), "ARC");
+        assert_eq!(japan1.get(779).first(), Some(&0x25EF), "LARGE CIRCLE");
+        // Characters already preferred keep their place.
+        assert_eq!(japan1.get(666).first(), Some(&0x2016));
+        assert_eq!(japan1.get(668).first(), Some(&0x2026));
         let gb1 = cid_to_unicode(Script::SimplifiedChinese).expect("GB1");
         assert_eq!(gb1.get(34).first(), Some(&0x41));
         assert!(cid_to_unicode(Script::Thai).is_none());
