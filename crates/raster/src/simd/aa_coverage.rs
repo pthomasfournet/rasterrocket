@@ -844,8 +844,8 @@ mod tests {
             let mut got = vec![0u8; TIER_TEST_N];
             // SAFETY: sve2 confirmed present above.
             unsafe {
-                aa_coverage_span_sve2([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
-            };
+                aa_coverage_span_sve2([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got);
+            }
 
             assert_eq!(got, expected, "SVE2 coverage mismatch vs scalar at x0={x0}");
         }
@@ -863,8 +863,8 @@ mod tests {
             let mut got = vec![0u8; TIER_TEST_N];
             // SAFETY: aarch64 always has NEON.
             unsafe {
-                aa_coverage_span_neon([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got)
-            };
+                aa_coverage_span_neon([&rows[0], &rows[1], &rows[2], &rows[3]], x0, &mut got);
+            }
 
             assert_eq!(got, expected, "NEON coverage mismatch vs scalar at x0={x0}");
         }

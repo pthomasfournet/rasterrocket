@@ -27,7 +27,7 @@ pub(crate) fn advise_random(file: &File) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
-pub(crate) fn advise_random(_: &std::fs::File) {}
+pub(crate) const fn advise_random(_: &std::fs::File) {}
 
 #[cfg(test)]
 mod tests {
