@@ -78,7 +78,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/artifacts"
           seeds=()
           [[ -d "$RUNNER_TEMP/seeds/${{ matrix.target }}" ]] && seeds=("$RUNNER_TEMP/seeds/${{ matrix.target }}")
-          cargo +nightly fuzz run "${{ matrix.target }}" "$RUNNER_TEMP/corpus" "${seeds[@]}" -- \
+          # cargo-fuzz defaults to the target it was itself built for, and the
+          # prebuilt binary the install step fetches is a musl build, where the
+          # sanitizer cannot link: name the glibc target.
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" \
+            "$RUNNER_TEMP/corpus" "${seeds[@]}" -- \
             -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=4096 -timeout=30 \
             -max_len=1048576 -artifact_prefix="$RUNNER_TEMP/artifacts/"
 
