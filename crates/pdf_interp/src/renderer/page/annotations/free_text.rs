@@ -130,9 +130,7 @@ impl FreeText {
                 }
                 s.push_str("S\n");
                 if let Some(ending) = self.ending {
-                    let size = LineEnding::size(bw, (first.0 - second.0).hypot(first.1 - second.1));
-                    ending.write(&mut s, *first, *second, size, self.interior.as_deref());
-                    reach = size;
+                    reach = ending.draw(&mut s, *first, *second, bw, self.interior.as_deref());
                 }
             }
         }

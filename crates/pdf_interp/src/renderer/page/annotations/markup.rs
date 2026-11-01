@@ -5,9 +5,9 @@
 //! The generated content is in page user space: it is drawn with the
 //! identity form matrix, not fitted to `/Rect`.  [`markup`] covers the
 //! subtypes whose appearance follows from their geometry alone: `Square`,
-//! `Circle`, `Line`, `Polygon`, `PolyLine`, `Ink`, the text markups
-//! `Highlight`, `Underline`, `StrikeOut` and `Squiggly`, and the `Text` note
-//! icon.
+//! `Circle`, `Polygon`, `PolyLine`, `Ink`, the text markups `Highlight`,
+//! `Underline`, `StrikeOut` and `Squiggly`, and the `Text` note icon.  A
+//! `Line`, which may carry a caption, is synthesised by its own module.
 
 use std::fmt::Write as _;
 
@@ -47,7 +47,7 @@ pub(super) fn markup(doc: &Document, annot: &Dictionary, rect: [f64; 4]) -> Opti
             rect,
             BlendMode::Normal,
         ),
-        b"Line" | b"PolyLine" | b"Polygon" | b"Ink" => {
+        b"PolyLine" | b"Polygon" | b"Ink" => {
             let (content, width) = polylines(doc, annot, subtype)?;
             (content, inset(rect, &[-width; 4]), BlendMode::Normal)
         }
@@ -106,11 +106,11 @@ fn closed_shape(
     Some(s)
 }
 
-/// A `Line` (`/L`), `PolyLine` or `Polygon` (`/Vertices`), or `Ink`
-/// (`/InkList`) (§12.5.6.7, §12.5.6.9, §12.5.6.13): the paths stroked with
-/// `/C` (default black) with round joins and caps, a polygon closed and
-/// filled with `/IC`.  The ends of a stroked `Line` or `PolyLine` carry
-/// the `/LE` line endings, closed ones filled with `/IC`.  Also returns how
+/// A `PolyLine` or `Polygon` (`/Vertices`), or `Ink` (`/InkList`)
+/// (§12.5.6.9, §12.5.6.13): the paths stroked with `/C` (default black)
+/// with round joins and caps, a polygon closed and filled with `/IC`.  The
+/// ends of a stroked `PolyLine` carry the `/LE` line endings, closed ones
+/// filled with `/IC`.  Also returns how
 /// far the drawing may reach outside `/Rect`: the border width and the
 /// largest ending.
 fn polylines(doc: &Document, annot: &Dictionary, subtype: &[u8]) -> Option<(String, f64)> {
@@ -124,7 +124,6 @@ fn polylines(doc: &Document, annot: &Dictionary, subtype: &[u8]) -> Option<(Stri
         return None;
     }
     let paths: Vec<Vec<f64>> = match subtype {
-        b"Line" => vec![numbers(doc, annot.get(b"L"))],
         b"Ink" => resolve_array(doc, annot.get(b"InkList"))
             .iter()
             .map(|p| numbers(doc, Some(p)))
@@ -158,40 +157,30 @@ fn polylines(doc: &Document, annot: &Dictionary, subtype: &[u8]) -> Option<(Stri
     s.push_str(paint_op(fill.is_some(), stroke.is_some()));
     let mut reach = border.width;
     if stroke.is_some()
-        && matches!(subtype, b"Line" | b"PolyLine")
+        && subtype == b"PolyLine"
         && let Some(path) = paths.first()
     {
         let interior = colour(doc, annot.get(b"IC"), false);
-        let endings = line_endings(doc, annot.get(b"LE"));
+        let [start, end] = LineEnding::pair(doc, annot.get(b"LE"));
         let (points, _) = path.as_chunks::<2>();
-        if let [[x0, y0], [x1, y1], ..] = points
-            && let Some(ending) = endings[0]
-        {
-            let size = LineEnding::size(border.width, (x1 - x0).hypot(y1 - y0));
-            ending.write(&mut s, (*x0, *y0), (*x1, *y1), size, interior.as_deref());
+        let mut draw = |ending: LineEnding, &tip: &[f64; 2], &from: &[f64; 2]| {
+            let size = ending.draw(
+                &mut s,
+                tip.into(),
+                from.into(),
+                border.width,
+                interior.as_deref(),
+            );
             reach = reach.max(border.width + size);
+        };
+        if let (Some(ending), [first, second, ..]) = (start, points) {
+            draw(ending, first, second);
         }
-        if let [.., [x0, y0], [x1, y1]] = points
-            && let Some(ending) = endings[1]
-        {
-            let size = LineEnding::size(border.width, (x1 - x0).hypot(y1 - y0));
-            ending.write(&mut s, (*x1, *y1), (*x0, *y0), size, interior.as_deref());
-            reach = reach.max(border.width + size);
+        if let (Some(ending), [.., second_last, last]) = (end, points) {
+            draw(ending, last, second_last);
         }
     }
     Some((s, reach))
-}
-
-/// The start and end line endings of the `/LE` array `obj`.
-fn line_endings(doc: &Document, obj: Option<&Object>) -> [Option<LineEnding>; 2] {
-    let names = resolve_array(doc, obj);
-    let ending = |i: usize| {
-        names
-            .get(i)
-            .and_then(Object::as_name)
-            .and_then(LineEnding::from_name)
-    };
-    [ending(0), ending(1)]
 }
 
 /// A text markup over the boxes of `/QuadPoints` (§12.5.6.10): `Highlight`

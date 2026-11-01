@@ -9,7 +9,9 @@
 
 use std::fmt::Write as _;
 
-use super::content::{circle, n, rectangle};
+use pdf::{Document, Object};
+
+use super::content::{circle, n, rectangle, resolve_array};
 
 /// Ratio of the ending size to the border width.
 const SIZE_PER_WIDTH: f64 = 6.0;
@@ -61,10 +63,38 @@ impl LineEnding {
         )
     }
 
+    /// The start and end line endings of the `/LE` array `obj`.
+    pub(super) fn pair(doc: &Document, obj: Option<&Object>) -> [Option<Self>; 2] {
+        let names = resolve_array(doc, obj);
+        let ending = |i: usize| {
+            names
+                .get(i)
+                .and_then(Object::as_name)
+                .and_then(Self::from_name)
+        };
+        [ending(0), ending(1)]
+    }
+
     /// The size of an ending on a segment `length` long with border
     /// `width`.
     pub(super) fn size(width: f64, length: f64) -> f64 {
         (SIZE_PER_WIDTH * width).min(length / 2.0).max(0.0)
+    }
+
+    /// Append the ending at `tip`, the end of a segment coming from `from`,
+    /// at the size for that segment and border `width`; returns the size.
+    /// See [`Self::write`].
+    pub(super) fn draw(
+        self,
+        s: &mut String,
+        tip: (f64, f64),
+        from: (f64, f64),
+        width: f64,
+        fill: Option<&str>,
+    ) -> f64 {
+        let size = Self::size(width, (tip.0 - from.0).hypot(tip.1 - from.1));
+        self.write(s, tip, from, size, fill);
+        size
     }
 
     /// Append the ending at `tip`, the end of a segment coming from `from`,

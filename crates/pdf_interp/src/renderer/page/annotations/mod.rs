@@ -3,12 +3,13 @@
 //! Free functions taking `renderer: &mut PageRenderer<'_>`, delegated from
 //! thin wrapper methods in `mod.rs`.  An annotation without a normal
 //! appearance is drawn from an appearance synthesised by [`markup`],
-//! [`free_text`], [`popup`] or [`widget`], through the same form path as a
-//! stored appearance.  A pop-up is drawn only while open.
+//! [`line`], [`free_text`], [`popup`] or [`widget`], through the same form
+//! path as a stored appearance.  A pop-up is drawn only while open.
 
 mod content;
 mod encoder;
 mod free_text;
+mod line;
 mod line_ending;
 mod markup;
 mod popup;
@@ -174,7 +175,7 @@ fn render_one_annotation(
                 let resources = text::resources(doc, dr, &[popup::FONT]);
                 let no_rotate_rect = (flags & NO_ROTATE != 0).then_some(rect);
                 draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
-                    popup::appearance(doc, parent.as_ref(), rect, ts)
+                    Some(popup::appearance(doc, parent.as_ref(), rect, ts))
                 });
             }
             return;
@@ -194,10 +195,14 @@ fn render_one_annotation(
             return;
         };
         let no_rotate_rect = (flags & NO_ROTATE != 0).then_some(rect);
-        if annot.get_name(b"Subtype") == Some(b"FreeText") {
-            draw_free_text(renderer, annot, rect, form, id, no_rotate_rect);
-        } else if let Some(appearance) = markup::markup(doc, annot, rect) {
-            draw_synthesized(renderer, appearance, id, no_rotate_rect);
+        match annot.get_name(b"Subtype") {
+            Some(b"FreeText") => draw_free_text(renderer, annot, rect, form, id, no_rotate_rect),
+            Some(b"Line") => draw_line(renderer, annot, form, id, no_rotate_rect),
+            _ => {
+                if let Some(appearance) = markup::markup(doc, annot, rect) {
+                    draw_synthesized(renderer, appearance, id, no_rotate_rect);
+                }
+            }
         }
         return;
     }
@@ -280,7 +285,7 @@ fn draw_synthesized(
     renderer.gstate.restore();
 }
 
-/// Draw the synthesised appearance that `build` writes, with `resources`,
+/// Draw the synthesised appearance that `build` writes, if any, with `resources`,
 /// derived from the form's default resources, in effect; `build` sets its
 /// text with a [`encoder::FontTypesetter`] over those resources.  The
 /// remaining arguments are those of [`draw_synthesized`].
@@ -289,14 +294,15 @@ fn draw_text_appearance(
     resources: &Dictionary,
     id: Option<ObjectId>,
     no_rotate_rect: Option<[f64; 4]>,
-    build: impl FnOnce(&mut dyn Typesetter) -> Synthesized,
+    build: impl FnOnce(&mut dyn Typesetter) -> Option<Synthesized>,
 ) {
     // The default resources are no object's `/Resources`; object 0, which
     // no document defines, identifies them to the font cache.
     let dr = renderer.resources.with_resources((0, 0), resources);
     let page_resources = std::mem::replace(&mut renderer.resources, dr);
-    let appearance = build(&mut encoder::FontTypesetter::new(renderer));
-    draw_synthesized(renderer, appearance, id, no_rotate_rect);
+    if let Some(appearance) = build(&mut encoder::FontTypesetter::new(renderer)) {
+        draw_synthesized(renderer, appearance, id, no_rotate_rect);
+    }
     renderer.resources = page_resources;
 }
 
@@ -312,12 +318,14 @@ fn draw_widget(
     let doc = renderer.resources.doc();
     let resources = widget::resources(doc, form, field);
     let (local, matrix) = rotated_box(rect, field.rotation());
-    draw_text_appearance(renderer, &resources, id, None, |ts| Synthesized {
-        content: widget::content(doc, field, local, ts),
-        bbox: local,
-        opacity: 1.0,
-        blend: BlendMode::Normal,
-        matrix,
+    draw_text_appearance(renderer, &resources, id, None, |ts| {
+        Some(Synthesized {
+            content: widget::content(doc, field, local, ts),
+            bbox: local,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            matrix,
+        })
     });
 }
 
@@ -354,8 +362,35 @@ fn draw_free_text(
         &[free_text.font()],
     );
     draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
-        free_text.appearance(ts)
+        Some(free_text.appearance(ts))
     });
+}
+
+/// Draw the synthesised appearance of the line annotation `annot`, its
+/// caption set in the form's default resources.
+fn draw_line(
+    renderer: &mut PageRenderer<'_>,
+    annot: &Dictionary,
+    form: Option<&widget::AcroForm>,
+    id: Option<ObjectId>,
+    no_rotate_rect: Option<[f64; 4]>,
+) {
+    let doc = renderer.resources.doc();
+    let Some(line) = line::Line::of(doc, annot) else {
+        return;
+    };
+    if line.has_caption() {
+        let resources = text::resources(
+            doc,
+            form.and_then(widget::AcroForm::default_resources),
+            &[line::FONT],
+        );
+        draw_text_appearance(renderer, &resources, id, no_rotate_rect, |ts| {
+            line.appearance(Some(ts))
+        });
+    } else if let Some(appearance) = line.appearance(None) {
+        draw_synthesized(renderer, appearance, id, no_rotate_rect);
+    }
 }
 
 /// The normal appearance stream of `annot` (PDF §12.5.5): `/AP /N` itself,
