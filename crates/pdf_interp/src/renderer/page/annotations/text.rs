@@ -8,7 +8,8 @@ use std::fmt::Write as _;
 use pdf::{Dictionary, Document, Object};
 
 use super::content::{n, string, text_or_stream};
-use super::typeset::name;
+use super::rich;
+use super::typeset::{Paragraph, Style, name};
 
 /// A default appearance string split into its `Tf` font and size and the
 /// remaining operators (the text colour).
@@ -88,8 +89,9 @@ pub(super) const CHECK_FONT: &[u8] = b"ZaDb";
 
 /// The resources text is drawn with: `dr`, a copy of the form's default
 /// resources, and in its fonts, where it lacks the name, [`CHECK_FONT`] as
-/// standard `ZapfDingbats` and each name of `fonts` as standard Helvetica
-/// in `WinAnsiEncoding`; and the fallback fonts.
+/// standard `ZapfDingbats`, each standard face name of
+/// [`rich::STANDARD_FONTS`] as its face and each other name of `fonts` as
+/// standard Helvetica, these in `WinAnsiEncoding`; and the fallback fonts.
 ///
 /// A name selects one font in every synthesised appearance of a document,
 /// whichever names each requests: the font cache identifies the fonts of
@@ -101,14 +103,19 @@ pub(super) fn resources(doc: &Document, dr: Option<&Dictionary>, fonts: &[&[u8]]
         .and_then(|o| crate::resources::resolve_dict(doc, o))
         .unwrap_or_default();
     let standard = std::iter::once((CHECK_FONT, &b"ZapfDingbats"[..]))
-        .chain(fonts.iter().map(|&name| (name, &b"Helvetica"[..])));
+        .chain(rich::STANDARD_FONTS.iter().flatten().copied())
+        .chain(
+            fonts
+                .iter()
+                .map(|&name| (name, rich::standard_base_font(name).unwrap_or(b"Helvetica"))),
+        );
     for (name, base_font) in standard {
         if font_dict.get(name).is_none() {
             let mut font = Dictionary::new();
             font.set(b"Type", Object::Name(b"Font".to_vec()));
             font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
             font.set(b"BaseFont", Object::Name(base_font.to_vec()));
-            if base_font == b"Helvetica" {
+            if name != CHECK_FONT {
                 font.set(b"Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
             }
             font_dict.set(name, Object::Dictionary(font));
@@ -134,52 +141,23 @@ pub(super) fn markup_text(doc: &Document, annot: &Dictionary) -> String {
 }
 
 /// The plain text of a rich text string (§12.7.4.3.4), an XHTML fragment:
-/// markup removed, character references resolved, white space collapsed,
-/// and a line break at each paragraph (`p`, `div`, `li`) and `br`.
+/// its paragraphs, as [`rich::paragraphs`] reads them, joined by line
+/// breaks.
 pub(super) fn plain_text(rich: &str) -> String {
-    let mut out = String::new();
-    let mut rest = rich;
-    let mut pending_space = false;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix('<') {
-            let end = after.find('>').map_or(after.len(), |e| e + 1);
-            let tag = &after[..end.saturating_sub(1)];
-            rest = &after[end..];
-            let name = tag
-                .trim_start_matches('/')
-                .split(|c: char| c.is_ascii_whitespace() || c == '/')
-                .next()
-                .unwrap_or("");
-            let name = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
-            let opening = !tag.starts_with('/');
-            let breaks = match name.as_str() {
-                "br" => true,
-                "p" | "div" | "li" => opening && !out.is_empty(),
-                _ => false,
-            };
-            if breaks {
-                if name == "br" || !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                pending_space = false;
-            }
-            continue;
-        }
-        let end = rest.find('<').unwrap_or(rest.len());
-        for c in decode_entities(&rest[..end]).chars() {
-            if c.is_whitespace() && c != '\u{a0}' {
-                pending_space = !out.is_empty() && !out.ends_with('\n');
-            } else {
-                if pending_space {
-                    out.push(' ');
-                    pending_space = false;
-                }
-                out.push(c);
-            }
-        }
-        rest = &rest[end..];
-    }
-    out
+    let style = Style {
+        font: Vec::new(),
+        size: 1.0,
+        paint: String::new(),
+    };
+    let base = rich::Base {
+        style: &style,
+        quadding: 0,
+    };
+    rich::paragraphs(rich, None, &base)
+        .iter()
+        .map(Paragraph::text)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Greatest offset of the `;` of a reference from its `&` that
@@ -188,7 +166,7 @@ const MAX_SEMICOLON_OFFSET: usize = 10;
 
 /// `s` with the XML character references and the predefined entities
 /// resolved; an unknown reference is kept as written.
-fn decode_entities(s: &str) -> String {
+pub(super) fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(amp) = rest.find('&') {

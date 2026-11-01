@@ -13,6 +13,7 @@ mod line;
 mod line_ending;
 mod markup;
 mod popup;
+mod rich;
 mod text;
 mod typeset;
 mod widget;

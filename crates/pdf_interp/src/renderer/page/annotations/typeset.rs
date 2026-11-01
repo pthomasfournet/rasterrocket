@@ -115,6 +115,243 @@ pub(super) fn aligned_x(q: i64, area: [f64; 4], line_width: f64) -> f64 {
     }
 }
 
+/// The font, size and colour a span of text is set in.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Style {
+    /// The font resource name.
+    pub font: Vec<u8>,
+    pub size: f64,
+    /// The operators other than `Tf` that apply to the text, such as its
+    /// fill colour; may be empty.
+    pub paint: String,
+}
+
+impl Style {
+    /// The font, size and remaining operators of the default appearance
+    /// `da`, at `size`.
+    pub(super) fn of(da: &DefaultAppearance, size: f64) -> Self {
+        Self {
+            font: da.font.clone(),
+            size,
+            paint: da.rest.clone(),
+        }
+    }
+
+    /// Append the operators selecting this style inside a text object.
+    fn select(&self, s: &mut String) {
+        let _ = write!(s, "{} {} Tf", name(&self.font), n(self.size));
+        if !self.paint.is_empty() {
+            let _ = write!(s, " {}", self.paint);
+        }
+    }
+}
+
+/// A paragraph: spans of styled text, aligned by `quadding` (0 left,
+/// 1 centred, 2 right).  An empty paragraph is a blank line as high as
+/// `style` sets it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Paragraph {
+    pub quadding: i64,
+    pub style: Style,
+    pub spans: Vec<(Style, String)>,
+}
+
+impl Paragraph {
+    /// `text` broken into paragraphs at line ends (CR, LF or CR LF), each
+    /// one span in `style` aligned by `quadding`.
+    pub(super) fn plain(text: &str, style: &Style, quadding: i64) -> Vec<Self> {
+        text.split("\r\n")
+            .flat_map(|p| p.split(['\r', '\n']))
+            .map(|line| Self {
+                quadding,
+                style: style.clone(),
+                spans: vec![(style.clone(), line.to_owned())],
+            })
+            .collect()
+    }
+
+    /// The paragraph's text without its styles.
+    pub(super) fn text(&self) -> String {
+        self.spans.iter().map(|(_, t)| t.as_str()).collect()
+    }
+}
+
+/// A line laid out from a paragraph: runs of text in one style, its width,
+/// and the largest font size on it.
+struct LaidLine<'a> {
+    runs: Vec<(&'a Style, String)>,
+    width: f64,
+    size: f64,
+}
+
+impl<'a> LaidLine<'a> {
+    const fn new(size: f64) -> Self {
+        Self {
+            runs: Vec::new(),
+            width: 0.0,
+            size,
+        }
+    }
+
+    /// Append `text` in `style`, `width` wide, to the line.
+    fn push(&mut self, style: &'a Style, text: &str, width: f64) {
+        match self.runs.last_mut() {
+            Some((last, run)) if *last == style => run.push_str(text),
+            _ => self.runs.push((style, text.to_owned())),
+        }
+        self.width += width;
+        self.size = self.size.max(style.size);
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+}
+
+/// The lines of `paragraph` wrapped at spaces so that no line wider than
+/// one word exceeds `max`.  A word is a maximal run of characters without
+/// a space, possibly in several styles; a space takes the style it was
+/// written in.  The first line is as high as the paragraph's style even
+/// when empty.
+fn lay_out<'a>(paragraph: &'a Paragraph, max: f64, ts: &mut dyn Typesetter) -> Vec<LaidLine<'a>> {
+    let mut lines = vec![LaidLine::new(paragraph.style.size)];
+    // The pending word's pieces and width, and the space before it.
+    let mut word: Vec<(&Style, &str, f64)> = Vec::new();
+    let mut word_width = 0.0;
+    let mut space: Option<(&Style, f64)> = None;
+    let flush = |lines: &mut Vec<LaidLine<'a>>,
+                 word: &mut Vec<(&'a Style, &str, f64)>,
+                 word_width: &mut f64,
+                 space: Option<(&'a Style, f64)>| {
+        let line = lines.last_mut().expect("at least one line");
+        let gap = space.filter(|_| !line.is_empty());
+        let gap_width = gap.map_or(0.0, |(_, w)| w);
+        if !line.is_empty() && line.width + gap_width + *word_width > max {
+            lines.push(LaidLine::new(0.0));
+        } else if let Some((style, w)) = gap {
+            line.push(style, " ", w);
+        }
+        let line = lines.last_mut().expect("at least one line");
+        for (style, piece, w) in word.drain(..) {
+            line.push(style, piece, w);
+        }
+        *word_width = 0.0;
+    };
+    for (style, text) in &paragraph.spans {
+        for (i, piece) in text.split(' ').enumerate() {
+            if i > 0 {
+                flush(&mut lines, &mut word, &mut word_width, space);
+                space = Some((style, ts.width(&style.font, " ") * style.size));
+            }
+            if !piece.is_empty() {
+                let w = ts.width(&style.font, piece) * style.size;
+                word.push((style, piece, w));
+                word_width += w;
+            }
+        }
+    }
+    flush(&mut lines, &mut word, &mut word_width, space);
+    lines
+}
+
+/// Append the runs of `line` in a new text object, its baseline starting
+/// at `(x, y)`.
+fn show_runs(
+    s: &mut String,
+    ts: &mut dyn Typesetter,
+    runs: &[(&Style, String)],
+    (x, y): (f64, f64),
+) {
+    let mut first = true;
+    for (style, text) in runs {
+        if first {
+            s.push_str("BT ");
+            style.select(s);
+            let _ = write!(s, "\n{} {} Td ", n(x), n(y));
+            first = false;
+        } else {
+            style.select(s);
+            s.push(' ');
+        }
+        ts.show(s, &style.font, style.size, text);
+    }
+    if !first {
+        s.push_str("ET\n");
+    }
+}
+
+/// Append `paragraphs` in `area`, each wrapped at spaces to the area's
+/// width and aligned by its quadding.  The first baseline is the first
+/// line's largest font size below the top, and each following one
+/// [`LEADING`] times its own line's largest size below the one before;
+/// lines stop when one falls a full line below the bottom.
+pub(super) fn write_block(
+    s: &mut String,
+    paragraphs: &[Paragraph],
+    area: [f64; 4],
+    ts: &mut dyn Typesetter,
+) {
+    let max = area[2] - area[0];
+    let mut y = area[3];
+    let mut first = true;
+    for paragraph in paragraphs {
+        for line in lay_out(paragraph, max, ts) {
+            y -= if first {
+                line.size
+            } else {
+                LEADING * line.size
+            };
+            first = false;
+            if y < area[1] - line.size {
+                return;
+            }
+            if !line.is_empty() {
+                let x = aligned_x(paragraph.quadding, area, line.width);
+                show_runs(s, ts, &line.runs, (x, y));
+            }
+        }
+    }
+}
+
+/// Append `paragraphs` as one line, the paragraphs joined by spaces and
+/// not wrapped, aligned in `area` by `quadding` and centred vertically:
+/// the body of the line, taken as 0.7 of its largest font size above the
+/// baseline, is centred.
+pub(super) fn write_single_line(
+    s: &mut String,
+    paragraphs: &[Paragraph],
+    quadding: i64,
+    area: [f64; 4],
+    ts: &mut dyn Typesetter,
+) {
+    let joined = Paragraph {
+        quadding,
+        style: paragraphs.first().map_or_else(
+            || Style {
+                font: Vec::new(),
+                size: 0.0,
+                paint: String::new(),
+            },
+            |p| p.style.clone(),
+        ),
+        spans: paragraphs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, p)| {
+                let gap = (i > 0).then(|| (p.style.clone(), " ".to_owned()));
+                gap.into_iter().chain(p.spans.iter().cloned())
+            })
+            .collect(),
+    };
+    let lines = lay_out(&joined, f64::INFINITY, ts);
+    let Some(line) = lines.first().filter(|l| !l.is_empty()) else {
+        return;
+    };
+    let x = aligned_x(quadding, area, line.width);
+    let y = 0.35f64.mul_add(-line.size, f64::midpoint(area[1], area[3]));
+    show_runs(s, ts, &line.runs, (x, y));
+}
+
 /// A block of lines in a box: the default appearance's font and colours
 /// at `size`, aligned by `quadding`, from the top of `area` down.
 pub(super) struct TextBlock<'a> {
@@ -126,24 +363,15 @@ pub(super) struct TextBlock<'a> {
 
 impl TextBlock<'_> {
     /// Append `text`, broken at line ends and wrapped at spaces to the
-    /// area's width.  The first baseline is one font size below the top;
-    /// lines follow at [`LEADING`] until one falls a full line below the
-    /// bottom.
+    /// area's width, as [`write_block`] lays it out.
     pub(super) fn write(&self, s: &mut String, text: &str, ts: &mut dyn Typesetter) {
-        let (font, size, area) = (&self.da.font, self.size, self.area);
-        let max = (area[2] - area[0]) / size;
-        let lines = wrap(text, max, |line| ts.width(font, line));
-        let mut y = area[3] - size;
-        for line in lines {
-            if y < area[1] - size {
-                break;
-            }
-            if !line.is_empty() {
-                let x = aligned_x(self.quadding, area, ts.width(font, &line) * size);
-                show_line(s, ts, self.da, font, size, (x, y), &line);
-            }
-            y = size.mul_add(-LEADING, y);
-        }
+        let style = Style::of(self.da, self.size);
+        write_block(
+            s,
+            &Paragraph::plain(text, &style, self.quadding),
+            self.area,
+            ts,
+        );
     }
 }
 

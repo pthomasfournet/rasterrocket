@@ -57,6 +57,12 @@ fn document_with_fonts(
 
 /// The number of dark pixels in the user-space box `[x0 y0 x1 y1]`.
 fn dark_in(pdf: Vec<u8>, b: [u32; 4]) -> usize {
+    pixels_in(pdf, b, |p| p.iter().all(|&c| c < 100))
+}
+
+/// The number of pixels in the user-space box `[x0 y0 x1 y1]` whose RGB
+/// value satisfies `matches`.
+fn pixels_in(pdf: Vec<u8>, b: [u32; 4], matches: impl Fn(&[u8]) -> bool) -> usize {
     let s = common::session(pdf, BackendPolicy::CpuOnly);
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let data = bmp.data();
@@ -64,7 +70,7 @@ fn dark_in(pdf: Vec<u8>, b: [u32; 4]) -> usize {
     for y in b[1]..b[3] {
         for x in b[0]..b[2] {
             let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
-            if data[i..i + 3].iter().all(|&c| c < 100) {
+            if matches(&data[i..i + 3]) {
                 n += 1;
             }
         }
@@ -190,6 +196,25 @@ fn a_rich_text_field_shows_the_plain_text_of_its_rich_value() {
     // A rich text field shows /RV even when /V holds the plain text.
     let with_value = dark_in(rich_field(&format!("{rv} /V (x)")), second);
     assert!(with_value > 50, "{with_value} dark pixels");
+}
+
+#[test]
+fn a_rich_text_field_sets_the_weight_colour_and_size_of_its_styles() {
+    let inside = [12, 12, 188, 88];
+    let dark = |entries: &str| dark_in(rich_field(entries), inside);
+    let regular = dark("/RV (<p>Weight</p>)");
+    let bold = dark("/RV (<p><b>Weight</b></p>)");
+    assert!(bold * 5 > regular * 6, "bold {bold}, regular {regular}");
+    let large = dark("/DS (font-size:24pt) /RV (<p>Weight</p>)");
+    assert!(large > regular * 2, "24 pt {large}, 12 pt {regular}");
+    let red = |p: &[u8]| p[0] > 200 && p[1] < 80 && p[2] < 80;
+    let styled = pixels_in(
+        rich_field("/RV (<p>x <span style=\"color:#FF0000\">Red</span></p>)"),
+        inside,
+        red,
+    );
+    assert!(styled > 30, "{styled} red pixels");
+    assert_eq!(pixels_in(rich_field("/RV (<p>x Red</p>)"), inside, red), 0);
 }
 
 /// The bounds `[x0 y0 x1 y1]` (user space, exclusive upper ends) of the

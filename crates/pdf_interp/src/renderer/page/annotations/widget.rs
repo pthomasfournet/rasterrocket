@@ -20,9 +20,11 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use super::content::{
     self, circle, colour_op, n, number, numbers, rectangle, resolve_array, string, text_or_stream,
 };
+use super::rich::{self, Base};
 use super::text::{self, CHECK_FONT, DefaultAppearance, decode_text_string, plain_text};
 use super::typeset::{
-    AUTO_MULTILINE_SIZE, LEADING, TextBlock, Typesetter, aligned_x, hex, show_line,
+    AUTO_MULTILINE_SIZE, LEADING, Style, TextBlock, Typesetter, aligned_x, hex, show_line,
+    write_block, write_single_line,
 };
 use crate::resources::dict_ext::DictExt;
 
@@ -86,8 +88,10 @@ pub(super) struct Field {
     kind: Kind,
     flags: i64,
     value: Option<Object>,
-    /// The plain text of the rich text value `/RV` of a text field.
+    /// The rich text value `/RV` of a text field, decoded.
     rich: Option<String>,
+    /// The default style string `/DS`, decoded.
+    default_style: Option<String>,
     /// Whether a button is in an on state.
     on: bool,
     da: DefaultAppearance,
@@ -163,7 +167,9 @@ impl Field {
             rich: (kind == Kind::Text)
                 .then(|| text_or_stream(doc, inherited(b"RV").as_ref()))
                 .flatten()
-                .map(|rv| plain_text(&decode_text_string(&rv))),
+                .map(|rv| decode_text_string(&rv)),
+            default_style: text_or_stream(doc, inherited(b"DS").as_ref())
+                .map(|ds| decode_text_string(&ds)),
             value,
             da,
             quadding: annot
@@ -242,18 +248,25 @@ pub(super) fn content(
     match field.kind {
         Kind::Choice if field.flags & COMBO == 0 => list(&mut s, field, text_area, ts),
         Kind::Text | Kind::Choice => {
-            let text = display_text(doc, field);
-            let text = if field.flags & PASSWORD != 0 {
-                "*".repeat(text.chars().count())
-            } else {
-                text
+            let rich = (field.kind == Kind::Text && field.flags & (PASSWORD | COMB) == 0)
+                .then(|| rich_shown(doc, field))
+                .flatten();
+            let text = || {
+                let text = display_text(doc, field);
+                if field.flags & PASSWORD != 0 {
+                    "*".repeat(text.chars().count())
+                } else {
+                    text
+                }
             };
-            if field.flags & MULTILINE != 0 && field.kind == Kind::Text {
-                multiline(&mut s, field, text_area, &text, ts);
+            if let Some(rich) = rich {
+                styled(&mut s, field, text_area, rich, ts);
+            } else if field.flags & MULTILINE != 0 && field.kind == Kind::Text {
+                multiline(&mut s, field, text_area, &text(), ts);
             } else if field.flags & COMB != 0 && field.max_len.is_some_and(|m| m > 0) {
-                comb(&mut s, field, text_area, &text, ts);
+                comb(&mut s, field, text_area, &text(), ts);
             } else {
-                single_line(&mut s, field, field.quadding, text_area, &text, ts);
+                single_line(&mut s, field, field.quadding, text_area, &text(), ts);
             }
         }
         Kind::Button if field.flags & PUSH_BUTTON != 0 => {
@@ -301,14 +314,10 @@ fn frame(s: &mut String, field: &Field, rect: [f64; 4], radio: bool) {
     }
 }
 
-/// The text a text field or combo box shows: its value, a text string or
-/// stream, or for a choice the display text of the option whose export
-/// value it is.  A text field shows the plain text of its rich text value
-/// `/RV` instead when it is a rich text field or its value is empty; its
-/// paragraphs are lines of a multiline field and are joined by spaces
-/// otherwise (§12.7.4.3).
-fn display_text(doc: &Document, field: &Field) -> String {
-    let raw = match &field.value {
+/// The value of `field` as bytes: a text string or stream, a name, or the
+/// first string of an array.
+fn raw_value(doc: &Document, field: &Field) -> Vec<u8> {
+    match &field.value {
         Some(Object::String(s, _)) => s.clone(),
         Some(Object::Name(n)) => n.clone(),
         Some(Object::Array(a)) => a
@@ -317,16 +326,32 @@ fn display_text(doc: &Document, field: &Field) -> String {
             .unwrap_or_default(),
         Some(o @ Object::Reference(_)) => text_or_stream(doc, Some(o)).unwrap_or_default(),
         _ => Vec::new(),
-    };
-    if let Some(rich) = &field.rich
-        && (field.flags & RICH_TEXT != 0 || raw.is_empty())
-    {
+    }
+}
+
+/// The rich text value `/RV` a text field shows (§12.7.4.3): when it is a
+/// rich text field or its value is empty.
+fn rich_shown<'f>(doc: &Document, field: &'f Field) -> Option<&'f str> {
+    field
+        .rich
+        .as_deref()
+        .filter(|_| field.flags & RICH_TEXT != 0 || raw_value(doc, field).is_empty())
+}
+
+/// The text a text field or combo box shows: its value, or for a choice
+/// the display text of the option whose export value it is.  A text field
+/// that shows its rich text value shows its plain text; its paragraphs are
+/// lines of a multiline field and are joined by spaces otherwise.
+fn display_text(doc: &Document, field: &Field) -> String {
+    if let Some(rich) = rich_shown(doc, field) {
+        let plain = plain_text(rich);
         return if field.flags & MULTILINE != 0 {
-            rich.clone()
+            plain
         } else {
-            rich.replace('\n', " ")
+            plain.replace('\n', " ")
         };
     }
+    let raw = raw_value(doc, field);
     let raw = field
         .options
         .iter()
@@ -389,6 +414,35 @@ fn multiline(s: &mut String, field: &Field, area: [f64; 4], text: &str, ts: &mut
         area,
     };
     block.write(s, text, ts);
+}
+
+/// The rich text value `rich` with the styles of its markup and of the
+/// default style string over the field's `/DA`: wrapped from the top of
+/// `area` in a multiline field, one line centred vertically otherwise.  An
+/// automatic `/DA` size is that of the plain text in [`multiline`] or
+/// [`single_line`].
+fn styled(s: &mut String, field: &Field, area: [f64; 4], rich: &str, ts: &mut dyn Typesetter) {
+    let multi = field.flags & MULTILINE != 0;
+    let size = if field.da.size > 0.0 {
+        field.da.size
+    } else if multi {
+        AUTO_MULTILINE_SIZE
+    } else {
+        let plain = plain_text(rich).replace('\n', " ");
+        line_size(field, area, ts.width(&field.da.font, &plain))
+    };
+    let style = Style::of(&field.da, size);
+    let base = Base {
+        style: &style,
+        quadding: field.quadding,
+    };
+    let paragraphs = rich::paragraphs(rich, field.default_style.as_deref(), &base);
+    if multi {
+        write_block(s, &paragraphs, area, ts);
+    } else {
+        let quadding = paragraphs.first().map_or(field.quadding, |p| p.quadding);
+        write_single_line(s, &paragraphs, quadding, area, ts);
+    }
 }
 
 /// A comb field: `/MaxLen` equal cells, one character centred in each.
