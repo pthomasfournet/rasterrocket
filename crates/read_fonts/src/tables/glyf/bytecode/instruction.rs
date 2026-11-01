@@ -56,14 +56,13 @@ impl<'a> InlineOperands<'a> {
         } else {
             (self.bytes, &[][..])
         };
-        bytes
-            .iter()
-            .map(|byte| *byte as u32 as i32)
-            .chain(words.chunks_exact(2).map(|chunk| {
-                let word = ((chunk[0] as u16) << 8) | chunk[1] as u16;
-                // Double cast to ensure sign extension
-                word as i16 as i32
-            }))
+        bytes.iter().map(|byte| *byte as u32 as i32).chain(
+            words
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&pair| i16::from_be_bytes(pair) as i32),
+        )
     }
 }
 

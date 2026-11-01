@@ -1240,7 +1240,7 @@ mod test {
         }
 
         fn contains(value: u32) -> bool {
-            (value % 2) == 0
+            value.is_multiple_of(2)
         }
 
         fn from_u32(member: InDomain) -> EvenInts {

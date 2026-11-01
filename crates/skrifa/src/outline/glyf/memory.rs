@@ -184,12 +184,12 @@ mod tests {
         let addr = buf.as_ptr() as usize;
         let mut unaligned_addr = addr;
         // Force an unaligned offset
-        if unaligned_addr % alignment == 0 {
+        if unaligned_addr.is_multiple_of(alignment) {
             unaligned_addr += 1;
         }
         let unaligned_offset = unaligned_addr - addr;
         let unaligned = &mut buf[unaligned_offset..];
-        assert!(unaligned.as_ptr() as usize % alignment != 0);
+        assert!(!(unaligned.as_ptr() as usize).is_multiple_of(alignment));
         let (slice, _) = alloc_slice::<i32>(unaligned, 8).unwrap();
         assert_eq!(slice.as_ptr() as usize % alignment, 0);
     }
@@ -201,7 +201,7 @@ mod tests {
         let addr = buf.as_ptr() as usize;
         let mut unaligned_addr = addr;
         // Force an unaligned offset
-        if unaligned_addr % alignment == 0 {
+        if unaligned_addr.is_multiple_of(alignment) {
             unaligned_addr += 1;
         }
         let unaligned_offset = unaligned_addr - addr;

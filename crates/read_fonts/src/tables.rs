@@ -61,14 +61,12 @@ pub mod ift;
 /// for details.
 pub fn compute_checksum(table: &[u8]) -> u32 {
     let mut sum = 0u32;
-    let mut iter = table.chunks_exact(4);
-    for quad in &mut iter {
-        // this can't fail, and we trust the compiler to avoid a branch
-        let array: [u8; 4] = quad.try_into().unwrap_or_default();
-        sum = sum.wrapping_add(u32::from_be_bytes(array));
+    let (quads, remainder) = table.as_chunks::<4>();
+    for &quad in quads {
+        sum = sum.wrapping_add(u32::from_be_bytes(quad));
     }
 
-    let rem = match *iter.remainder() {
+    let rem = match *remainder {
         [a] => u32::from_be_bytes([a, 0, 0, 0]),
         [a, b] => u32::from_be_bytes([a, b, 0, 0]),
         [a, b, c] => u32::from_be_bytes([a, b, c, 0]),

@@ -602,8 +602,8 @@ impl<'a> PackedDeltaFetcher<'a> {
                 }
                 DeltaRunType::I16 => {
                     let bytes = &self.data[self.pos..self.pos + take * 2];
-                    for chunk in bytes.chunks_exact(2) {
-                        let delta = i16::from_be_bytes([chunk[0], chunk[1]]) as f32;
+                    for &pair in bytes.as_chunks::<2>().0 {
+                        let delta = i16::from_be_bytes(pair) as f32;
                         out[idx] += delta * scale;
                         idx += 1;
                     }
@@ -611,9 +611,8 @@ impl<'a> PackedDeltaFetcher<'a> {
                 }
                 DeltaRunType::I32 => {
                     let bytes = &self.data[self.pos..self.pos + take * 4];
-                    for chunk in bytes.chunks_exact(4) {
-                        let delta =
-                            i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32;
+                    for &quad in bytes.as_chunks::<4>().0 {
+                        let delta = i32::from_be_bytes(quad) as f32;
                         out[idx] += delta * scale;
                         idx += 1;
                     }

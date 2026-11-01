@@ -452,7 +452,9 @@ mod tests {
             panic!("expected subtable 4 control points action");
         };
         let values = action
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(FOUR_OUTLINE_ANKR_EXPECTED.len())
             .map(|values| (values[0].get(), values[1].get()))
             .collect::<Vec<_>>();
@@ -467,7 +469,9 @@ mod tests {
             panic!("expected subtable 4 anchor points action");
         };
         let values = action
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(FOUR_OUTLINE_ANKR_EXPECTED.len())
             .map(|values| (values[0].get(), values[1].get()))
             .collect::<Vec<_>>();
@@ -482,7 +486,9 @@ mod tests {
             panic!("expected subtable 4 coords action");
         };
         let values = action
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(FOUR_COORDS_EXPECTED.len())
             .map(|values| {
                 [
