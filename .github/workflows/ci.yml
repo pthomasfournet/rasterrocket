@@ -233,6 +233,82 @@ jobs:
       - name: Test rasterrocket (NEON deskew rotate + parity)
         run: cargo test -p rasterrocket --lib
 
+  # ── Clippy on aarch64 Linux and macOS ─────────────────────────────────────
+  #
+  # Code gated on `target_arch = "aarch64"` (the NEON tiers) or on the target
+  # OS (memory probes, file hints, system font discovery) compiles only
+  # there, so the x86-64 clippy run never lints it.  Same invocations as the
+  # CPU-only job, one crate per `--tests` run for runner memory.  The macOS
+  # leg also runs the tests whose behaviour depends on the OS: font
+  # discovery and the predefined CID CMaps.
+  clippy-platforms:
+    name: Clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-clippy-
+
+      - name: Clippy (no GPU features)
+        run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
+
+      - name: Clippy (rasterrocket-color, -encode, -comic tests)
+        run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-parser tests)
+        run: cargo clippy -p rasterrocket-parser --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-render tests)
+        run: cargo clippy -p rasterrocket-render --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-font tests)
+        run: cargo clippy -p rasterrocket-font --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-interp tests)
+        run: cargo clippy -p rasterrocket-interp --tests -- -D warnings
+
+      - name: Clippy (rasterrocket tests)
+        run: cargo clippy -p rasterrocket --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-cli tests)
+        run: cargo clippy -p rasterrocket-cli --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-camera, lib and tests)
+        run: cargo clippy -p rasterrocket-camera --tests -- -D warnings
+
+      - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
+        run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
+
+      - name: Test rasterrocket-font (system font discovery)
+        if: runner.os == 'macOS'
+        run: cargo test -p rasterrocket-font --lib
+
+      - name: Test rasterrocket-interp (system fonts, predefined CMaps)
+        if: runner.os == 'macOS'
+        run: cargo test -p rasterrocket-interp --lib -- cmap_predefined system_fonts
+
+      - name: Test rasterrocket-cli (memory probe, RAM output)
+        if: runner.os == 'macOS'
+        run: cargo test -p rasterrocket-cli --bin rrocket -- ram
+
   # ── Fuzz target build ─────────────────────────────────────────────────────
   #
   # `fuzz/` is a workspace of its own (cargo-fuzz builds it on nightly with
