@@ -249,10 +249,13 @@ elif [[ "$REFERENCE" == pdfium ]]; then
     # pypdfium2 names outputs "page_<n>.png", n zero-padded like pdf-oxide's.
     PF_RAW="${WORK_DIR}/pf_raw"
     mkdir -p "$PF_RAW"
-    pf_last="$LAST"
-    if [[ -z "$pf_last" ]]; then
-        pf_last="$("$PDFIUM_PY" -c 'import sys, pypdfium2; print(len(pypdfium2.PdfDocument(sys.argv[1])))' "$PDF" 2>/dev/null)" \
-            || die "could not determine page count with pypdfium2"
+    # pypdfium2 rejects a range past the last page; -l is clamped to the
+    # page count, as pdftoppm and rrocket clamp it.
+    pf_count="$("$PDFIUM_PY" -c 'import sys, pypdfium2; print(len(pypdfium2.PdfDocument(sys.argv[1])))' "$PDF" 2>/dev/null)" \
+        || die "could not determine page count with pypdfium2"
+    pf_last="$pf_count"
+    if [[ -n "$LAST" && "$LAST" -lt "$pf_count" ]]; then
+        pf_last="$LAST"
     fi
     if ! "$PDFIUM_BIN" "${pdfium_args[@]}" --pages "${FIRST}-${pf_last}" -o "$PF_RAW" "$PDF" \
             >"${WORK_DIR}/ref.log" 2>&1; then
