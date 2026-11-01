@@ -54,6 +54,13 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto serif cjk jp",
             "source han sans jp",
             "source han serif jp",
+            "hiragino sans",
+            "hiragino kaku gothic pron",
+            "hiragino kaku gothic pro",
+            "hiragino mincho pron",
+            "hiragino mincho pro",
+            "yu gothic",
+            "yu mincho",
             "ipaexgothic",
             "ipaexmincho",
             "ipagothic",
@@ -71,6 +78,10 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto serif cjk sc",
             "source han sans sc",
             "source han serif sc",
+            "pingfang sc",
+            "hiragino sans gb",
+            "heiti sc",
+            "songti sc",
             "wenquanyi",
             "ar pl ukai cn",
             "ar pl uming cn",
@@ -85,6 +96,9 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto serif cjk tc",
             "source han sans tc",
             "source han serif tc",
+            "pingfang tc",
+            "heiti tc",
+            "songti tc",
             "ar pl ukai tw",
             "ar pl uming tw",
             "ar pl kaitim big5",
@@ -99,6 +113,8 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto serif cjk kr",
             "source han sans kr",
             "source han serif kr",
+            "apple sd gothic neo",
+            "applemyungjo",
             "nanumgothic",
             "nanummyeongjo",
             "nanumbarungothic",
@@ -114,6 +130,8 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto sans arabic",
             "noto naskh arabic",
             "noto kufi arabic",
+            "geeza pro",
+            "al bayan",
             "amiri",
             "scheherazade",
             "kacstone",
@@ -126,6 +144,8 @@ const PREFERRED: &[(Script, &[&str])] = &[
             "noto sans thai",
             "noto serif thai",
             "noto looped thai",
+            "thonburi",
+            "sukhumvit set",
             "garuda",
             "norasi",
             "tlwg typo",
@@ -212,8 +232,10 @@ impl Face {
     }
 
     /// Ranking key of the face for `style` under the family-name
-    /// preference list `preferred`; the least key is the best face.
-    fn rank(&self, style: SubstituteStyle, preferred: &[&str]) -> (u8, usize, u16, bool) {
+    /// preference list `preferred`; the least key is the best face.  A
+    /// hidden face (family name starting with `.`, the platform's private
+    /// interface faces) ranks after every visible one.
+    fn rank(&self, style: SubstituteStyle, preferred: &[&str]) -> (bool, u8, usize, u16, bool) {
         let want_serif = style.family == SubstituteFamily::Serif;
         let want_weight: u16 = if style.bold { 700 } else { 400 };
         let serif_rank = match self.serif {
@@ -226,6 +248,7 @@ impl Face {
             .position(|p| self.family.contains(p))
             .unwrap_or(preferred.len());
         (
+            self.family.starts_with('.'),
             serif_rank,
             preference,
             self.weight_class.abs_diff(want_weight),
@@ -499,6 +522,55 @@ mod tests {
         assert_eq!(face("Unknown", 2 << 8, 400, 0).serif, Some(true));
         assert_eq!(face("Unknown", 8 << 8, 400, 0).serif, Some(false));
         assert_eq!(face("Unknown", 0, 400, 0).serif, None);
+    }
+
+    /// The best face of a candidate list for `style` under the preference
+    /// list of `script`.
+    fn best(faces: &[Face], script: Script, style: SubstituteStyle) -> &str {
+        let preferred = PREFERRED
+            .iter()
+            .find(|(s, _)| *s == script)
+            .map_or(&[][..], |(_, p)| p);
+        &faces
+            .iter()
+            .min_by_key(|f| f.rank(style, preferred))
+            .expect("candidates")
+            .family
+    }
+
+    /// The installed Japanese faces of macOS: a named Hiragino family wins
+    /// over Arial Unicode MS, which ties with it on class and weight, and
+    /// over the hidden interface face of the same design.
+    #[test]
+    fn macos_japanese_faces_rank_hiragino_first() {
+        let jp = 1 << 17;
+        let faces = [
+            face("Arial Unicode MS", 8 << 8, 400, jp),
+            face(".Hiragino Kaku Gothic Interface", 0, 400, jp),
+            face("Hiragino Sans GB", 0, 300, jp),
+            face("Hiragino Sans", 0, 400, jp),
+            face("Hiragino Mincho ProN", 0, 300, jp),
+        ];
+        let sans = SubstituteStyle {
+            script: Some(Script::Japanese),
+            ..SubstituteStyle::default()
+        };
+        let serif = SubstituteStyle {
+            family: SubstituteFamily::Serif,
+            ..sans
+        };
+        assert_eq!(best(&faces, Script::Japanese, sans), "hiragino sans");
+        assert_eq!(
+            best(&faces, Script::Japanese, serif),
+            "hiragino mincho pron"
+        );
+        // With only a hidden face and an unlisted visible one, the visible
+        // one is drawn.
+        let faces = [
+            face(".Hiragino Kaku Gothic Interface", 0, 400, jp),
+            face("Arial Unicode MS", 8 << 8, 400, jp),
+        ];
+        assert_eq!(best(&faces, Script::Japanese, sans), "arial unicode ms");
     }
 
     #[test]
