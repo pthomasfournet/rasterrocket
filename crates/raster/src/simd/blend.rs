@@ -176,8 +176,12 @@ fn has_movdir64b() -> bool {
     use std::sync::OnceLock;
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        // leaf 7 / subleaf 0: on CPUs that don't support leaf 7 this returns
-        // all-zeros, which correctly produces `false`.
+        // A leaf above the processor's highest basic leaf returns the data
+        // of that highest leaf, not zeros, so leaf 7 is read only where
+        // leaf 0 reports it.
+        if std::arch::x86_64::__cpuid(0).eax < 7 {
+            return false;
+        }
         let result = std::arch::x86_64::__cpuid_count(7, 0);
         // ECX bit 28 = MOVDIR64B (Intel SDM vol. 2A, CPUID.07H.00H:ECX[28])
         (result.ecx >> 28) & 1 != 0
@@ -203,6 +207,10 @@ fn preamble_len(ptr: *const u8, limit: usize, align: usize) -> usize {
 
 #[cfg(target_arch = "x86_64")]
 /// Fill `count` RGB pixels in `dst` using `movdir64b` non-temporal 64-byte stores.
+///
+/// The stores are weakly ordered; an `sfence` after the last one orders
+/// them before every later store, so a thread that acquires the buffer
+/// through a later release reads the filled bytes.
 ///
 /// The tile is 192 bytes (`LCM(3, 64) = 192`): three consecutive `movdir64b`
 /// stores advance the destination by 192 bytes (64 pixels) while reading from
@@ -231,16 +239,17 @@ unsafe fn blend_solid_rgb8_movdir64b(dst: &mut [u8], color: [u8; 3], count: usiz
         dst.len(),
         byte_count,
     );
-    let dst_ptr = dst.as_mut_ptr();
-
     // ── Preamble ──────────────────────────────────────────────────────────────
-    // Fill bytes [0, preamble) so that dst_ptr + preamble is 64-byte aligned.
+    // Fill bytes [0, preamble) so that dst + preamble is 64-byte aligned.
     // Each byte is indexed by its absolute position mod 3 so the RGB pattern
     // remains continuous across the preamble / block boundary.
-    let preamble = preamble_len(dst_ptr.cast_const(), byte_count, 64);
-    for i in 0..preamble {
-        dst[i] = color[i % 3];
+    let preamble = preamble_len(dst.as_ptr(), byte_count, 64);
+    for (i, byte) in dst[..preamble].iter_mut().enumerate() {
+        *byte = color[i % 3];
     }
+    // Taken after the preamble's writes through `dst`, which would
+    // otherwise invalidate it.
+    let dst_ptr = dst.as_mut_ptr();
 
     // ── Aligned blocks ────────────────────────────────────────────────────────
     // Build a 192-byte tile phase-shifted by `preamble % 3` so that
@@ -289,6 +298,10 @@ unsafe fn blend_solid_rgb8_movdir64b(dst: &mut [u8], color: [u8; 3], count: usiz
             );
         }
     }
+    if blocks > 0 {
+        // SAFETY: SSE is part of the x86-64 baseline.
+        unsafe { std::arch::x86_64::_mm_sfence() };
+    }
 
     // ── Tail ──────────────────────────────────────────────────────────────────
     // Bytes after the last complete 192-byte block.  `off - blocks_start` is
@@ -304,7 +317,8 @@ unsafe fn blend_solid_rgb8_movdir64b(dst: &mut [u8], color: [u8; 3], count: usiz
 /// Fill `count` grayscale pixels in `dst` using `movdir64b` non-temporal stores.
 ///
 /// Each `movdir64b` writes 64 bytes = 64 pixels.  A scalar preamble aligns the
-/// destination to 64 bytes; a scalar tail handles the remainder.
+/// destination to 64 bytes; a scalar tail handles the remainder.  The stores
+/// are fenced as in [`blend_solid_rgb8_movdir64b`].
 ///
 /// # Safety
 ///
@@ -322,11 +336,13 @@ unsafe fn blend_solid_gray8_movdir64b(dst: &mut [u8], color: u8, count: usize) {
     );
 
     let tile = Tile([color; 64]);
-    let dst_ptr = dst.as_mut_ptr();
 
     // ── Preamble ──────────────────────────────────────────────────────────────
-    let preamble = preamble_len(dst_ptr.cast_const(), count, 64);
+    let preamble = preamble_len(dst.as_ptr(), count, 64);
     dst[..preamble].fill(color);
+    // Taken after the preamble's writes through `dst`, which would
+    // otherwise invalidate it.
+    let dst_ptr = dst.as_mut_ptr();
 
     // ── Aligned blocks ────────────────────────────────────────────────────────
     debug_assert!(preamble <= count, "preamble_len exceeded count");
@@ -348,6 +364,10 @@ unsafe fn blend_solid_gray8_movdir64b(dst: &mut [u8], color: u8, count: usize) {
                 options(nostack, preserves_flags),
             );
         }
+    }
+    if blocks > 0 {
+        // SAFETY: SSE is part of the x86-64 baseline.
+        unsafe { std::arch::x86_64::_mm_sfence() };
     }
 
     // ── Tail ──────────────────────────────────────────────────────────────────
@@ -682,6 +702,77 @@ mod tests {
         let mut got = vec![0u8; count];
         blend_solid_gray8(&mut got, 99, count);
         assert_eq!(got, expected, "large gray dispatch mismatch");
+    }
+
+    /// Pixel counts that cross every tier's threshold and block size.
+    const PHASE_COUNTS: [usize; 11] = [1, 15, 16, 31, 32, 33, 255, 256, 257, 300, 640];
+
+    /// Run `fill` at every 64-byte alignment phase of the destination and
+    /// every count in [`PHASE_COUNTS`], requiring the scalar fill's bytes
+    /// in the span and the guard bytes on either side untouched.
+    fn check_every_phase(
+        bpp: usize,
+        fill: impl Fn(&mut [u8], usize),
+        scalar: impl Fn(&mut [u8], usize),
+    ) {
+        const GUARD: u8 = 0xA5;
+        for count in PHASE_COUNTS {
+            let len = count * bpp;
+            let mut expected = vec![GUARD; len];
+            scalar(&mut expected, count);
+            for off in 0..64 {
+                let mut buf = vec![GUARD; off + len + 64];
+                fill(&mut buf[off..off + len], count);
+                assert_eq!(
+                    &buf[off..off + len],
+                    &expected[..],
+                    "count {count}, offset {off}"
+                );
+                assert!(
+                    buf[..off]
+                        .iter()
+                        .chain(&buf[off + len..])
+                        .all(|&b| b == GUARD),
+                    "count {count}, offset {off}: a guard byte changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_fills_match_scalar_at_every_phase() {
+        let color = [11u8, 22, 33];
+        check_every_phase(
+            3,
+            |dst, n| blend_solid_rgb8(dst, color, n),
+            |dst, n| blend_solid_rgb8_scalar(dst, color, n),
+        );
+        check_every_phase(
+            1,
+            |dst, n| blend_solid_gray8(dst, 77, n),
+            |dst, n| blend_solid_gray8_scalar(dst, 77, n),
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn movdir64b_fills_match_scalar_at_every_phase() {
+        if !has_movdir64b() {
+            return;
+        }
+        let color = [3u8, 7, 11];
+        check_every_phase(
+            3,
+            // SAFETY: has_movdir64b() confirmed CPUID.07H.00H:ECX[28] = 1.
+            |dst, n| unsafe { blend_solid_rgb8_movdir64b(dst, color, n) },
+            |dst, n| blend_solid_rgb8_scalar(dst, color, n),
+        );
+        check_every_phase(
+            1,
+            // SAFETY: as above.
+            |dst, n| unsafe { blend_solid_gray8_movdir64b(dst, 200, n) },
+            |dst, n| blend_solid_gray8_scalar(dst, 200, n),
+        );
     }
 
     /// Exercise the movdir64b RGB path directly on capable machines.

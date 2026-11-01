@@ -360,6 +360,23 @@ impl<'doc> PageRenderer<'doc> {
     /// number.
     #[must_use]
     pub fn with_view(view: &PageView, doc: &'doc Document, page_id: ObjectId) -> Self {
+        Self::with_page_group(view, doc, page_id, None)
+    }
+
+    /// [`Self::with_view`] for a page painted as the transparency group
+    /// `group` (see [`Self::set_page_group`]): the bitmap is allocated once,
+    /// transparent for a group and opaque white otherwise.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_view`].
+    #[must_use]
+    pub fn with_page_group(
+        view: &PageView,
+        doc: &'doc Document,
+        page_id: ObjectId,
+        group: Option<crate::resources::TransparencyGroupParams>,
+    ) -> Self {
         let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
             sx.is_finite() && sx > 0.0 && sy.is_finite() && sy > 0.0,
@@ -372,7 +389,7 @@ impl<'doc> PageRenderer<'doc> {
         );
         let (width, height, rotate_cw) = (view.width, view.height, view.rotate_cw);
 
-        let bitmap = Bitmap::<Rgb8>::new_filled(width, height, 1, false, u8::MAX);
+        let bitmap = page_bitmap(width, height, group.is_some());
 
         let initial_ctm = view.initial_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);
@@ -399,8 +416,11 @@ impl<'doc> PageRenderer<'doc> {
             pattern_depth: 0,
             initial_ctm,
             pattern_ctm: initial_ctm,
-            group: GroupContext::default(),
-            page_group: None,
+            group: GroupContext {
+                knockout: group.is_some_and(|g| g.knockout),
+                ..GroupContext::default()
+            },
+            page_group: group,
             group_pool: Vec::new(),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(),
@@ -469,15 +489,16 @@ impl<'doc> PageRenderer<'doc> {
     /// nothing on the page blends (see [`crate::page_group()`]).  Call before
     /// execute.
     pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
+        debug_assert_eq!(
+            self.ops_executed, 0,
+            "set_page_group must precede execute: the page bitmap is replaced"
+        );
+        let was_group = self.page_group.is_some();
         self.page_group = group;
         self.group.knockout = group.is_some_and(|g| g.knockout);
-        if group.is_some() {
-            self.bitmap = Bitmap::new(self.width, self.height, 1, true);
-        } else if self.bitmap.alpha_plane().is_some() {
-            self.bitmap = Bitmap::new_filled(self.width, self.height, 1, false, u8::MAX);
+        if group.is_some() != was_group {
+            self.bitmap = page_bitmap(self.width, self.height, group.is_some());
         }
-        // Otherwise the bitmap is the opaque white page `with_view` made:
-        // nothing has been painted before `execute`.
     }
 
     /// The document's optional-content configuration in effect.
@@ -732,5 +753,15 @@ impl<'doc> PageRenderer<'doc> {
     }
 }
 
+/// The unpainted bitmap of a `width × height` page: transparent, with an
+/// alpha plane, for a page painted as a transparency group; opaque white
+/// otherwise.
+fn page_bitmap(width: u32, height: u32, group: bool) -> Bitmap<Rgb8> {
+    if group {
+        Bitmap::new(width, height, 1, true)
+    } else {
+        Bitmap::new_filled(width, height, 1, false, u8::MAX)
+    }
+}
 #[cfg(test)]
 mod tests;

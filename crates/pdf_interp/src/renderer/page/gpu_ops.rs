@@ -284,9 +284,7 @@ mod tests {
     }
 
     fn white_bitmap() -> raster::Bitmap<color::Rgb8> {
-        let mut bitmap = raster::Bitmap::<color::Rgb8>::new(W, H, 1, false);
-        bitmap.data_mut().fill(255);
-        bitmap
+        raster::Bitmap::<color::Rgb8>::new_filled(W, H, 1, false, u8::MAX)
     }
 
     fn page_clip() -> Clip {

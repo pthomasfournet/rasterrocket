@@ -89,7 +89,12 @@ impl<P: Pixel> Bitmap<P> {
             .checked_mul(u32_to_usize(height))
             .expect("Bitmap::new: colour buffer size overflows usize");
         let data = vec![fill; data_len];
-        let alpha = with_alpha.then(|| vec![0u8; u32_to_usize(width) * u32_to_usize(height)]);
+        let alpha = with_alpha.then(|| {
+            let len = u32_to_usize(width)
+                .checked_mul(u32_to_usize(height))
+                .expect("Bitmap::new: alpha plane size overflows usize");
+            vec![0u8; len]
+        });
         Self {
             width,
             height,
