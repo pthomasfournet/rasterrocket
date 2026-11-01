@@ -288,23 +288,59 @@ fn draw_synthesized(
 
 /// Draw the synthesised appearance that `build` writes, if any, with `resources`,
 /// derived from the form's default resources, in effect; `build` sets its
-/// text with a [`encoder::FontTypesetter`] over those resources.  The
-/// remaining arguments are those of [`draw_synthesized`].
+/// text with a [`encoder::FontTypesetter`] over those resources.  When the
+/// text needs fallback fonts of Unicode blocks the resources lack, they
+/// are added and `build` sets it again.  The remaining arguments are those
+/// of [`draw_synthesized`].
 fn draw_text_appearance(
     renderer: &mut PageRenderer<'_>,
     resources: &Dictionary,
     id: Option<ObjectId>,
     no_rotate_rect: Option<[f64; 4]>,
-    build: impl FnOnce(&mut dyn Typesetter) -> Option<Synthesized>,
+    build: impl Fn(&mut dyn Typesetter) -> Option<Synthesized>,
 ) {
+    let missing = with_resources(renderer, resources, |renderer| {
+        let mut ts = encoder::FontTypesetter::new(renderer);
+        let appearance = build(&mut ts);
+        let missing = ts.missing_blocks();
+        if missing.is_empty()
+            && let Some(appearance) = appearance
+        {
+            draw_synthesized(renderer, appearance, id, no_rotate_rect);
+        }
+        missing
+    });
+    if missing.is_empty() {
+        return;
+    }
+    let mut resources = resources.clone();
+    let mut fonts = match resources.get(b"Font") {
+        Some(Object::Dictionary(fonts)) => fonts.clone(),
+        _ => Dictionary::new(),
+    };
+    encoder::add_block_fonts(&mut fonts, missing);
+    resources.set(b"Font", Object::Dictionary(fonts));
+    with_resources(renderer, &resources, |renderer| {
+        if let Some(appearance) = build(&mut encoder::FontTypesetter::new(renderer)) {
+            draw_synthesized(renderer, appearance, id, no_rotate_rect);
+        }
+    });
+}
+
+/// Run `f` with `resources`, derived from the form's default resources,
+/// in effect in `renderer` instead of the page's.
+fn with_resources<R>(
+    renderer: &mut PageRenderer<'_>,
+    resources: &Dictionary,
+    f: impl FnOnce(&mut PageRenderer<'_>) -> R,
+) -> R {
     // The default resources are no object's `/Resources`; object 0, which
     // no document defines, identifies them to the font cache.
     let dr = renderer.resources.with_resources((0, 0), resources);
     let page_resources = std::mem::replace(&mut renderer.resources, dr);
-    if let Some(appearance) = build(&mut encoder::FontTypesetter::new(renderer)) {
-        draw_synthesized(renderer, appearance, id, no_rotate_rect);
-    }
+    let result = f(renderer);
     renderer.resources = page_resources;
+    result
 }
 
 /// Draw the synthesised appearance of the widget of `field` in `rect`,

@@ -330,3 +330,17 @@ fn cjk_values_are_drawn_through_the_field_font_or_a_fallback_font() {
     }
     assert_eq!(composite.is_some(), simple.is_some());
 }
+
+#[test]
+fn characters_outside_the_cjk_collections_are_drawn_through_their_block_font() {
+    // The Arabic tatweel (U+0640), which no CJK collection holds, and the
+    // minus sign (U+2212), which one does but full width, are drawn as
+    // horizontal strokes through the fallback font of their Unicode
+    // block, never as the substitution character `?`.
+    for value in ["<FEFF064006400640>", "<FEFF221222122212>"] {
+        let widget =
+            format!("/FT /Tx /T (b) /Rect [10 30 190 70] /V {value} /DA (/Helv 20 Tf 0 g)");
+        let b = dark_bounds(document("", &[&widget], vec![])).expect("ink");
+        assert!(b[3] - b[1] <= 4 && b[2] - b[0] > 15, "{value}: {b:?}");
+    }
+}

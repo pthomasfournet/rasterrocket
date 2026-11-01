@@ -8,11 +8,16 @@
 //! with its `CMap`.  A character with several codes takes the lowest.
 //!
 //! The fallback fonts are non-embedded Type 0 fonts of the four Adobe
-//! CJK character collections, encoded by their `UTF16-H` `CMaps`; they are
-//! drawn by the substitute and fallback faces like any non-embedded
-//! composite font.
+//! CJK character collections, encoded by their `UTF16-H` `CMaps`, and for
+//! the characters these lack, a non-embedded simple font per block of 256
+//! Unicode scalar values whose code `c` is the glyph named for the block's
+//! scalar value `c` (`uniXXXX`, `uXXXXX`).  They are drawn by the
+//! substitute and fallback faces like any non-embedded font.  The block
+//! fonts a text needs are known only once it is set, so they are added to
+//! the resources on demand: [`FontTypesetter::missing_blocks`] names those
+//! that were missing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use pdf::{Dictionary, Object};
 
@@ -134,20 +139,88 @@ impl Fallbacks {
         Self { order }
     }
 
-    /// The first fallback font that shows `c`, and its codes there.
-    pub(super) fn find(self, c: char) -> Option<(&'static [u8], Vec<u8>)> {
+    /// The first fallback font that shows `c`, its codes there, and the
+    /// Unicode block when it is a block font: for an East Asian character,
+    /// a CJK collection font that maps it to a glyph, else the block font
+    /// of `c`.  Other characters the collections also hold, such as Greek,
+    /// Cyrillic and symbols, are set in their block font, whose glyphs are
+    /// proportional rather than the collections' full width.
+    pub(super) fn find(self, c: char) -> (Vec<u8>, Vec<u8>, Option<u32>) {
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         let key = units.iter().fold(0u32, |k, &u| (k << 16) | u32::from(u));
-        let (name, _, _) = self
-            .order
-            .iter()
-            .map(|&i| FALLBACKS[i])
-            .find(|(_, _, cmap)| {
-                predefined_cmap(cmap)
-                    .is_some_and(|cmap| cmap.map.get(&key).is_some_and(|&cid| cid != 0))
-            })?;
-        Some((name, units.iter().flat_map(|u| u.to_be_bytes()).collect()))
+        let collection = east_asian(c)
+            .then(|| {
+                self.order
+                    .iter()
+                    .map(|&i| FALLBACKS[i])
+                    .find(|(_, _, cmap)| {
+                        predefined_cmap(cmap)
+                            .is_some_and(|cmap| cmap.map.get(&key).is_some_and(|&cid| cid != 0))
+                    })
+            })
+            .flatten();
+        if let Some((name, _, _)) = collection {
+            let codes = units.iter().flat_map(|u| u.to_be_bytes()).collect();
+            return (name.to_vec(), codes, None);
+        }
+        let [.., low] = u32::from(c).to_be_bytes();
+        let block = u32::from(c) >> 8;
+        (block_font_name(block), vec![low], Some(block))
+    }
+}
+
+/// Whether `c` belongs to an East Asian script or the symbols and forms
+/// that accompany it: Han, kana, Hangul, Bopomofo, CJK punctuation,
+/// enclosed and compatibility characters, and half- and full-width forms.
+const fn east_asian(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1100..=0x11FF
+            | 0x2E80..=0x2FDF
+            | 0x3000..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFFEF
+            | 0x2_0000..=0x3_FFFF
+    )
+}
+
+/// The resource name of the fallback font of the Unicode block `block`,
+/// the scalar values `block << 8` to `block << 8 | 0xFF`.
+fn block_font_name(block: u32) -> Vec<u8> {
+    format!("FallbackU{block:04X}").into_bytes()
+}
+
+/// Add the fallback fonts of the Unicode blocks `blocks` to the font
+/// resource dictionary `fonts`: standard Helvetica re-encoded by
+/// `Differences` so that code `c` is the glyph named for the block's
+/// scalar value `c`.
+pub(super) fn add_block_fonts(fonts: &mut Dictionary, blocks: impl IntoIterator<Item = u32>) {
+    for block in blocks {
+        let mut differences = vec![Object::Integer(0)];
+        differences.extend((0..=0xFFu32).map(|low| {
+            let scalar = block << 8 | low;
+            let name = if scalar <= 0xFFFF {
+                format!("uni{scalar:04X}")
+            } else {
+                format!("u{scalar:X}")
+            };
+            Object::Name(name.into_bytes())
+        }));
+        let mut encoding = Dictionary::new();
+        encoding.set(b"Type", Object::Name(b"Encoding".to_vec()));
+        encoding.set(b"Differences", Object::Array(differences));
+        let mut font = Dictionary::new();
+        font.set(b"Type", Object::Name(b"Font".to_vec()));
+        font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        font.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+        font.set(b"Encoding", Object::Dictionary(encoding));
+        fonts.set(block_font_name(block), Object::Dictionary(font));
     }
 }
 
@@ -190,6 +263,9 @@ pub(super) struct FontTypesetter<'r, 'p> {
     renderer: &'r mut PageRenderer<'p>,
     /// Encoders by font resource name.
     encoders: HashMap<Vec<u8>, UnicodeEncoder>,
+    /// The Unicode blocks whose fallback font text was set in but the
+    /// resources lack.
+    missing: BTreeSet<u32>,
 }
 
 impl<'r, 'p> FontTypesetter<'r, 'p> {
@@ -198,7 +274,15 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
         Self {
             renderer,
             encoders: HashMap::new(),
+            missing: BTreeSet::new(),
         }
+    }
+
+    /// The Unicode blocks whose fallback font text was set in but the
+    /// resources lack; text set with any of them must be set again with
+    /// their fonts added by [`add_block_fonts`].
+    pub(super) fn missing_blocks(self) -> BTreeSet<u32> {
+        self.missing
     }
 
     /// The encoder of the font resource `font`.
@@ -220,15 +304,17 @@ impl Typesetter for FontTypesetter<'_, '_> {
         let encoder = self.encoder(font);
         let question = encoder.encode('?').unwrap_or(b"?");
         let mut runs: Vec<Run> = Vec::new();
+        let mut blocks = BTreeSet::new();
         for c in text.chars() {
             let fallback;
             let (run_font, codes): (&[u8], &[u8]) = if let Some(codes) = encoder.encode(c) {
                 (font, codes)
-            } else if let Some(found) = fallbacks.find(c) {
-                fallback = found;
-                (fallback.0, &fallback.1)
-            } else {
+            } else if c.is_control() {
                 (font, question)
+            } else {
+                fallback = fallbacks.find(c);
+                blocks.extend(fallback.2);
+                (&fallback.0, &fallback.1)
             };
             match runs.last_mut() {
                 Some(run) if run.font == run_font => run.codes.extend_from_slice(codes),
@@ -238,13 +324,24 @@ impl Typesetter for FontTypesetter<'_, '_> {
                 }),
             }
         }
+        let resources = &self.renderer.resources;
+        self.missing.extend(
+            blocks
+                .into_iter()
+                .filter(|&b| resources.font_entry(&block_font_name(b)).is_none()),
+        );
         runs
     }
 
     /// The font's `/Widths` (or `/W` for a composite font), else its
-    /// program's advances.
+    /// program's advances.  A font the resources lack is not selected,
+    /// since the font cache would keep the default font under its name;
+    /// its codes advance half an em, for a layout that is set again.
     fn advance(&mut self, font: &[u8], codes: &[u8]) -> f64 {
         let renderer = &mut *self.renderer;
+        if renderer.resources.font_entry(font).is_none() {
+            return f64::from(u32::try_from(codes.len()).unwrap_or(u32::MAX)) / 2.0;
+        }
         let active = renderer.font_cache.select(&renderer.resources, font);
         if let Some(enc) = &active.descriptor.cid_encoding {
             return enc
@@ -388,18 +485,18 @@ mod tests {
     #[test]
     fn kana_select_the_japanese_fallback_and_han_alone_the_chinese() {
         let fallback = |c, text| Fallbacks::for_text(text).find(c);
-        let (font, codes) = fallback('日', "日本語の").expect("covered");
+        let (font, codes, block) = fallback('日', "日本語の");
         assert_eq!(
-            (font, codes.as_slice()),
-            (&b"FallbackJapan1"[..], &[0x65, 0xE5][..])
+            (font.as_slice(), codes.as_slice(), block),
+            (&b"FallbackJapan1"[..], &[0x65, 0xE5][..], None)
         );
-        let (font, _) = fallback('日', "日本").expect("covered");
-        assert_eq!(font, b"FallbackGB1");
-        let (font, _) = fallback('한', "한국").expect("covered");
-        assert_eq!(font, b"FallbackKorea1");
-        assert!(
-            fallback('\u{0627}', "").is_none(),
-            "Arabic is in no collection"
+        assert_eq!(fallback('日', "日本").0, b"FallbackGB1");
+        assert_eq!(fallback('한', "한국").0, b"FallbackKorea1");
+        // Arabic is in no collection: its block font, coded by the low byte.
+        let (font, codes, block) = fallback('\u{0627}', "");
+        assert_eq!(
+            (font.as_slice(), codes.as_slice(), block),
+            (&b"FallbackU0006"[..], &[0x27][..], Some(6))
         );
         assert_eq!(Fallbacks::for_text("한").order, [3, 0, 1, 2]);
         assert_eq!(Fallbacks::for_text("").order, [1, 0, 2, 3]);
