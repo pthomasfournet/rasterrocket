@@ -157,7 +157,8 @@ fn with_default_style(root: &Computed, ds: Option<&str>) -> Computed {
 }
 
 /// The paragraphs of the rich text string `rich` over `base`, with the
-/// default style string `ds` applied first.
+/// default style string `ds` applied first.  Elements nested deeper than
+/// [`MAX_DEPTH`] take the style of their deepest enclosing element.
 pub(super) fn paragraphs(rich: &str, ds: Option<&str>, base: &Base<'_>) -> Vec<Paragraph> {
     let root = base.computed();
     let top = with_default_style(&root, ds);
@@ -170,20 +171,24 @@ pub(super) fn paragraphs(rich: &str, ds: Option<&str>, base: &Base<'_>) -> Vec<P
     // The style of a collapsed run of white space not yet written: the
     // style it began in.
     let mut pending_space: Option<Style> = None;
+    // A `p`, `div` or `li` element has ended: text that follows begins a
+    // paragraph.
+    let mut block_ended = false;
     let mut rest = rich;
     while !rest.is_empty() {
         let current = stack.last().map_or(&top, |(_, c)| c);
         if let Some(after) = rest.strip_prefix('<') {
-            let end = after.find('>').map_or(after.len(), |e| e + 1);
-            let tag = &after[..end.saturating_sub(1)];
-            rest = &after[end..];
+            let (tag, tail) = after.split_once('>').unwrap_or((after, ""));
+            rest = tail;
             let Some(element) = Tag::parse(tag) else {
                 continue;
             };
+            let block = matches!(element.name.as_str(), "p" | "div" | "li");
             if element.closing {
                 if let Some(at) = stack.iter().rposition(|(n, _)| *n == element.name) {
                     stack.truncate(at);
                 }
+                block_ended |= block;
                 continue;
             }
             let mut computed = current.clone();
@@ -195,16 +200,12 @@ pub(super) fn paragraphs(rich: &str, ds: Option<&str>, base: &Base<'_>) -> Vec<P
             if let Some(style) = element.style {
                 apply(&mut computed, &style);
             }
-            let new_paragraph = match element.name.as_str() {
-                "br" => true,
-                "p" | "div" | "li" => out.last().is_some_and(|p| !p.spans.is_empty()),
-                _ => false,
-            };
-            if new_paragraph {
-                let quadding = if element.name == "br" {
-                    out.last().map_or(top.quadding, |p| p.quadding)
-                } else {
+            let paragraph = out.last_mut().expect("at least one paragraph");
+            if element.name == "br" || (block && !paragraph.spans.is_empty()) {
+                let quadding = if block {
                     computed.quadding
+                } else {
+                    paragraph.quadding
                 };
                 out.push(Paragraph {
                     quadding,
@@ -212,43 +213,56 @@ pub(super) fn paragraphs(rich: &str, ds: Option<&str>, base: &Base<'_>) -> Vec<P
                     spans: Vec::new(),
                 });
                 pending_space = None;
-            } else if matches!(element.name.as_str(), "p" | "div" | "li")
-                && let Some(p) = out.last_mut()
-            {
-                p.quadding = computed.quadding;
-                p.style = base.style(&computed, &root);
+                block_ended = false;
+            } else if block {
+                paragraph.quadding = computed.quadding;
+                paragraph.style = base.style(&computed, &root);
+                block_ended = false;
             }
-            if element.name != "br" && !element.self_closing {
+            if element.name != "br" && !element.self_closing && stack.len() < MAX_DEPTH {
                 stack.push((element.name, computed));
             }
             continue;
         }
         let end = rest.find('<').unwrap_or(rest.len());
         let style = base.style(current, &root);
-        let paragraph = out.last_mut().expect("at least one paragraph");
         for c in decode_entities(&rest[..end]).chars() {
+            let paragraph = out.last_mut().expect("at least one paragraph");
             if c.is_whitespace() && c != '\u{a0}' {
                 if !paragraph.spans.is_empty() && pending_space.is_none() {
                     pending_space = Some(style.clone());
                 }
-            } else {
-                if let Some(space) = pending_space.take() {
-                    push_text(paragraph, space, ' ');
-                }
-                push_text(paragraph, style.clone(), c);
+                continue;
             }
+            if block_ended && !paragraph.spans.is_empty() {
+                out.push(Paragraph {
+                    quadding: current.quadding,
+                    style: style.clone(),
+                    spans: Vec::new(),
+                });
+                pending_space = None;
+            }
+            block_ended = false;
+            let paragraph = out.last_mut().expect("at least one paragraph");
+            if let Some(space) = pending_space.take() {
+                push_text(paragraph, &space, ' ');
+            }
+            push_text(paragraph, &style, c);
         }
         rest = &rest[end..];
     }
     out
 }
 
+/// Greatest depth of nested elements whose styles are kept.
+const MAX_DEPTH: usize = 256;
+
 /// Append `c` in `style` to `paragraph`, to its last span when that is
 /// in the same style.
-fn push_text(paragraph: &mut Paragraph, style: Style, c: char) {
+fn push_text(paragraph: &mut Paragraph, style: &Style, c: char) {
     match paragraph.spans.last_mut() {
-        Some((last, text)) if *last == style => text.push(c),
-        _ => paragraph.spans.push((style, c.to_string())),
+        Some((last, text)) if last == style => text.push(c),
+        _ => paragraph.spans.push((style.clone(), c.to_string())),
     }
 }
 
@@ -286,24 +300,41 @@ impl Tag {
     }
 }
 
-/// The value of the attribute `name` in `attributes`, quoted with `"` or
-/// `'`.
+/// The value of the attribute `name` (its local name, any case) in
+/// `attributes`: quoted with `"` or `'`, or unquoted up to white space.
+/// An attribute without a value is skipped.
 fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
-    let mut rest = attributes;
-    loop {
-        rest = rest.trim_start();
-        let eq = rest.find('=')?;
-        let key = rest[..eq].trim();
-        let after = rest[eq + 1..].trim_start();
-        let quote = after.chars().next().filter(|q| matches!(q, '"' | '\''))?;
-        let value_end = after[1..].find(quote)? + 1;
-        let value = &after[1..value_end];
-        let key = key.rsplit(':').next().unwrap_or(key);
-        if key.eq_ignore_ascii_case(name) {
+    let mut rest = attributes.trim_start();
+    while !rest.is_empty() {
+        let key_end = rest
+            .find(|c: char| c == '=' || c.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let key = &rest[..key_end];
+        rest = rest[key_end..].trim_start();
+        let Some(after) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let after = after.trim_start();
+        let (value, tail) = match after.chars().next() {
+            Some(quote @ ('"' | '\'')) => {
+                let quoted = &after[1..];
+                quoted.split_once(quote).unwrap_or((quoted, ""))
+            }
+            _ => after
+                .split_once(|c: char| c.is_ascii_whitespace())
+                .unwrap_or((after, "")),
+        };
+        rest = tail.trim_start();
+        if key
+            .rsplit(':')
+            .next()
+            .unwrap_or(key)
+            .eq_ignore_ascii_case(name)
+        {
             return Some(value);
         }
-        rest = &after[value_end + 1..];
     }
+    None
 }
 
 /// Apply the CSS declarations `css` to `c`.
@@ -592,6 +623,27 @@ mod tests {
         assert_eq!(p[0].1[0].2, "0 g 0 0 0.502 rg");
         assert_eq!(p[0].1[1].1, 15.0);
         assert_eq!(p[0].1[1].2, "0 g 0 0.5 1 rg");
+    }
+
+    #[test]
+    fn malformed_markup_neither_panics_nor_loses_text() {
+        let texts = |rich: &str| -> Vec<String> {
+            spans(rich, None)
+                .into_iter()
+                .map(|(_, s)| s.into_iter().map(|(.., t)| t).collect())
+                .collect()
+        };
+        // A tag left open at the end, even after a multibyte character.
+        assert_eq!(texts("a<é"), ["a"]);
+        assert_eq!(texts("a<"), ["a"]);
+        // Unquoted and valueless attributes do not hide the style.
+        let p = spans("<span hidden style=color:red>r</span>", None);
+        assert_eq!(p[0].1[0].2, "0 g 1 0 0 rg");
+        // Text after a closed block begins a paragraph.
+        assert_eq!(texts("<p>a</p>b"), ["a", "b"]);
+        // Deep nesting is bounded and keeps the text.
+        let deep = format!("{}x{}", "<b>".repeat(10_000), "</b>".repeat(10_000));
+        assert_eq!(texts(&deep), ["x"]);
     }
 
     #[test]

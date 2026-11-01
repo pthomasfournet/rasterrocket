@@ -160,8 +160,7 @@ impl Paragraph {
     /// `text` broken into paragraphs at line ends (CR, LF or CR LF), each
     /// one span in `style` aligned by `quadding`.
     pub(super) fn plain(text: &str, style: &Style, quadding: i64) -> Vec<Self> {
-        text.split("\r\n")
-            .flat_map(|p| p.split(['\r', '\n']))
+        lines(text)
             .map(|line| Self {
                 quadding,
                 style: style.clone(),
@@ -214,44 +213,59 @@ impl<'a> LaidLine<'a> {
 /// written in.  The first line is as high as the paragraph's style even
 /// when empty.
 fn lay_out<'a>(paragraph: &'a Paragraph, max: f64, ts: &mut dyn Typesetter) -> Vec<LaidLine<'a>> {
-    let mut lines = vec![LaidLine::new(paragraph.style.size)];
-    // The pending word's pieces and width, and the space before it.
-    let mut word: Vec<(&Style, &str, f64)> = Vec::new();
-    let mut word_width = 0.0;
-    let mut space: Option<(&Style, f64)> = None;
-    let flush = |lines: &mut Vec<LaidLine<'a>>,
-                 word: &mut Vec<(&'a Style, &str, f64)>,
-                 word_width: &mut f64,
-                 space: Option<(&'a Style, f64)>| {
-        let line = lines.last_mut().expect("at least one line");
-        let gap = space.filter(|_| !line.is_empty());
-        let gap_width = gap.map_or(0.0, |(_, w)| w);
-        if !line.is_empty() && line.width + gap_width + *word_width > max {
-            lines.push(LaidLine::new(0.0));
-        } else if let Some((style, w)) = gap {
-            line.push(style, " ", w);
-        }
-        let line = lines.last_mut().expect("at least one line");
-        for (style, piece, w) in word.drain(..) {
-            line.push(style, piece, w);
-        }
-        *word_width = 0.0;
+    let mut wrapper = Wrapper {
+        lines: vec![LaidLine::new(paragraph.style.size)],
+        word: Vec::new(),
+        word_width: 0.0,
+        max,
     };
+    // The space before the pending word: its style and width.
+    let mut space: Option<(&Style, f64)> = None;
     for (style, text) in &paragraph.spans {
         for (i, piece) in text.split(' ').enumerate() {
             if i > 0 {
-                flush(&mut lines, &mut word, &mut word_width, space);
+                wrapper.place_word(space);
                 space = Some((style, ts.width(&style.font, " ") * style.size));
             }
             if !piece.is_empty() {
                 let w = ts.width(&style.font, piece) * style.size;
-                word.push((style, piece, w));
-                word_width += w;
+                wrapper.word.push((style, piece, w));
+                wrapper.word_width += w;
             }
         }
     }
-    flush(&mut lines, &mut word, &mut word_width, space);
-    lines
+    wrapper.place_word(space);
+    wrapper.lines
+}
+
+/// The state of [`lay_out`]: the lines so far, and the pieces and width of
+/// the word being read.
+struct Wrapper<'a> {
+    lines: Vec<LaidLine<'a>>,
+    word: Vec<(&'a Style, &'a str, f64)>,
+    word_width: f64,
+    max: f64,
+}
+
+impl<'a> Wrapper<'a> {
+    /// Place the pending word, preceded by `space` unless it begins a
+    /// line: on the last line when it fits or the line is empty, else on a
+    /// new line.
+    fn place_word(&mut self, space: Option<(&'a Style, f64)>) {
+        let line = self.lines.last_mut().expect("at least one line");
+        let gap = space.filter(|_| !line.is_empty());
+        let gap_width = gap.map_or(0.0, |(_, w)| w);
+        if !line.is_empty() && line.width + gap_width + self.word_width > self.max {
+            self.lines.push(LaidLine::new(0.0));
+        } else if let Some((style, w)) = gap {
+            line.push(style, " ", w);
+        }
+        let line = self.lines.last_mut().expect("at least one line");
+        for (style, piece, w) in self.word.drain(..) {
+            line.push(style, piece, w);
+        }
+        self.word_width = 0.0;
+    }
 }
 
 /// Append the runs of `line` in a new text object, its baseline starting
@@ -375,33 +389,9 @@ impl TextBlock<'_> {
     }
 }
 
-/// `text` broken at line ends (CR, LF or CR LF) and wrapped at spaces so
-/// that no line wider than one word exceeds `max`.  `width` measures a
-/// word and a space; a line is as wide as its words and the spaces between
-/// them, so each word is measured once.
-pub(super) fn wrap(text: &str, max: f64, mut width: impl FnMut(&str) -> f64) -> Vec<String> {
-    let space = width(" ");
-    let mut lines = Vec::new();
-    for paragraph in text.split("\r\n").flat_map(|p| p.split(['\r', '\n'])) {
-        let mut line = String::new();
-        let mut line_width = 0.0;
-        for word in paragraph.split(' ') {
-            let word_width = width(word);
-            if line.is_empty() {
-                line.push_str(word);
-                line_width = word_width;
-            } else if line_width + space + word_width > max {
-                lines.push(std::mem::replace(&mut line, word.to_owned()));
-                line_width = word_width;
-            } else {
-                line.push(' ');
-                line.push_str(word);
-                line_width += space + word_width;
-            }
-        }
-        lines.push(line);
-    }
-    lines
+/// The lines of `text`, broken at line ends: CR, LF or CR LF.
+pub(super) fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split("\r\n").flat_map(|p| p.split(['\r', '\n']))
 }
 
 /// A typesetter for tests: every character in `WinAnsiEncoding` (`?` for
@@ -438,7 +428,7 @@ fn encode_win_ansi(text: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Run, Typesetter, WinAnsiTypesetter, name, wrap};
+    use super::{Paragraph, Run, Style, Typesetter, WinAnsiTypesetter, name, write_block};
 
     #[test]
     fn a_written_name_reads_back_as_the_same_bytes() {
@@ -454,29 +444,91 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wrapping_breaks_at_line_ends_and_spaces() {
-        let width = |t: &str| f64::from(u32::try_from(t.chars().count()).unwrap_or(0));
-        let lines = wrap("aa bb cc\r\ndd\ree", 5.0, width);
-        assert_eq!(lines, ["aa bb", "cc", "dd", "ee"]);
-        let lines = wrap("longword x", 3.0, width);
-        assert_eq!(lines, ["longword", "x"]);
-        let lines = wrap("日本 語", 2.0, width);
-        assert_eq!(lines, ["日本", "語"]);
-        let lines = wrap("a  b", 10.0, width);
-        assert_eq!(lines, ["a  b"], "runs of spaces are kept");
+    fn style(font: &[u8], size: f64) -> Style {
+        Style {
+            font: font.to_vec(),
+            size,
+            paint: String::new(),
+        }
+    }
+
+    /// The text shown by each text object of `content`, decoded from the
+    /// hexadecimal strings of [`WinAnsiTypesetter`], and its `Td` origin.
+    fn shown(content: &str) -> Vec<(String, String)> {
+        content
+            .split("BT ")
+            .skip(1)
+            .map(|object| {
+                let td = object
+                    .split_once('\n')
+                    .and_then(|(_, rest)| rest.split_once(" Td"))
+                    .map_or_else(String::new, |(xy, _)| xy.to_owned());
+                let text = object
+                    .split('<')
+                    .skip(1)
+                    .filter_map(|h| h.split_once('>'))
+                    .flat_map(|(h, _)| {
+                        h.as_bytes()
+                            .chunks(2)
+                            .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap_or(""), 16))
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap_or_default()
+                    })
+                    .map(char::from)
+                    .collect();
+                (text, td)
+            })
+            .collect()
+    }
+
+    /// The lines `write_block` sets `paragraphs` in, `width` wide.
+    fn block(paragraphs: &[Paragraph], width: f64) -> Vec<(String, String)> {
+        let mut s = String::new();
+        write_block(
+            &mut s,
+            paragraphs,
+            [0.0, -100.0, width, 0.0],
+            &mut WinAnsiTypesetter,
+        );
+        shown(&s)
     }
 
     #[test]
-    fn wrapping_measures_each_word_once() {
-        let text = "w ".repeat(1000);
-        let mut measured = 0usize;
-        let lines = wrap(&text, f64::INFINITY, |t| {
-            measured += t.len();
-            1.0
-        });
-        assert_eq!(lines.len(), 1);
-        assert!(measured <= 2 * text.len(), "{measured} bytes measured");
+    fn plain_text_breaks_at_line_ends_and_wraps_at_spaces() {
+        // Each character is half an em wide; at 1 pt, "aa bb" is 2.5 wide.
+        let text = |t: &str, width: f64| -> Vec<String> {
+            block(&Paragraph::plain(t, &style(b"F", 1.0), 0), width)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect()
+        };
+        assert_eq!(text("aa bb cc\r\ndd\ree", 2.5), ["aa bb", "cc", "dd", "ee"]);
+        assert_eq!(text("longword x", 1.5), ["longword", "x"]);
+        assert_eq!(text("a  b", 10.0), ["a  b"], "runs of spaces are kept");
+    }
+
+    #[test]
+    fn a_word_in_two_styles_stays_whole_and_the_largest_size_sets_the_line() {
+        let small = style(b"F", 1.0);
+        let large = style(b"F", 4.0);
+        let paragraph = Paragraph {
+            quadding: 0,
+            style: small.clone(),
+            spans: vec![
+                (small.clone(), "x bo".to_owned()),
+                (large, "ld".to_owned()),
+                (small, " y".to_owned()),
+            ],
+        };
+        // "bo" is 1 wide and "ld" at 4 pt is 4: the word "bold", 5 wide,
+        // does not fit after "x " in 5 and is not broken after "bo".
+        let lines = block(&[paragraph], 5.0);
+        let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(texts, ["x", "bold", "y"]);
+        // Each baseline is 1.15 times its own line's largest size below
+        // the one before; the first is that size below the top.
+        let origins: Vec<&str> = lines.iter().map(|(_, o)| o.as_str()).collect();
+        assert_eq!(origins, ["0 -1", "0 -5.6", "0 -6.75"]);
     }
 
     /// Sets digits in a second font.

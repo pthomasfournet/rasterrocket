@@ -391,3 +391,31 @@ fn an_identity_h_field_font_without_to_unicode_encodes_through_its_program() {
     let shifted = identity_h_field("10 0 R", Some(stream_object("", &map)));
     assert!(shifted > 900, "{shifted} dark pixels");
 }
+
+#[test]
+fn block_fonts_are_shared_by_the_appearances_of_a_page() {
+    // Both fields set the minus sign through the same block font; the
+    // second also needs the Arabic block, set in a further pass.  Each
+    // draws only horizontal strokes, as the font cache keeps the block
+    // font, not a default one, under its name.
+    let first = "/FT /Tx /T (m) /Rect [10 60 190 90] /V <FEFF22122212> /DA (/Helv 20 Tf 0 g)";
+    let second =
+        "/FT /Tx /T (n) /Rect [10 10 190 40] /V <FEFF2212064006402212> /DA (/Helv 20 Tf 0 g)";
+    let pdf = || document("", &[first, second], vec![]);
+    for (field, name) in [([12, 62, 188, 88], "first"), ([12, 12, 188, 38], "second")] {
+        let s = common::session(pdf(), BackendPolicy::CpuOnly);
+        let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+        let rows: Vec<u32> = (field[1]..field[3])
+            .filter(|&y| {
+                (field[0]..field[2]).any(|x| {
+                    let i = (H - 1 - y) as usize * bmp.stride + x as usize * 3;
+                    bmp.data()[i..i + 3].iter().all(|&c| c < 100)
+                })
+            })
+            .collect();
+        assert!(
+            !rows.is_empty() && rows.len() <= 4,
+            "{name}: ink on rows {rows:?}"
+        );
+    }
+}

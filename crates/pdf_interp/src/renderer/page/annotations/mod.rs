@@ -299,32 +299,34 @@ fn draw_text_appearance(
     no_rotate_rect: Option<[f64; 4]>,
     build: impl Fn(&mut dyn Typesetter) -> Option<Synthesized>,
 ) {
-    let missing = with_resources(renderer, resources, |renderer| {
-        let mut ts = encoder::FontTypesetter::new(renderer);
-        let appearance = build(&mut ts);
-        let missing = ts.missing_blocks();
-        if missing.is_empty()
-            && let Some(appearance) = appearance
-        {
-            draw_synthesized(renderer, appearance, id, no_rotate_rect);
+    // Each pass that finds block fonts missing adds at least one, and an
+    // appearance uses at most `MAX_BLOCK_FONTS`, so the passes end.  Only
+    // a pass with every font present draws, so no content selects a font
+    // the resources lack.
+    let mut resources = std::borrow::Cow::Borrowed(resources);
+    loop {
+        let missing = with_resources(renderer, &resources, |renderer| {
+            let mut ts = encoder::FontTypesetter::new(renderer);
+            let appearance = build(&mut ts);
+            let missing = ts.missing_blocks();
+            if missing.is_empty()
+                && let Some(appearance) = appearance
+            {
+                draw_synthesized(renderer, appearance, id, no_rotate_rect);
+            }
+            missing
+        });
+        if missing.is_empty() {
+            return;
         }
-        missing
-    });
-    if missing.is_empty() {
-        return;
+        let resources = resources.to_mut();
+        let mut fonts = match resources.get(b"Font") {
+            Some(Object::Dictionary(fonts)) => fonts.clone(),
+            _ => Dictionary::new(),
+        };
+        encoder::add_block_fonts(&mut fonts, missing);
+        resources.set(b"Font", Object::Dictionary(fonts));
     }
-    let mut resources = resources.clone();
-    let mut fonts = match resources.get(b"Font") {
-        Some(Object::Dictionary(fonts)) => fonts.clone(),
-        _ => Dictionary::new(),
-    };
-    encoder::add_block_fonts(&mut fonts, missing);
-    resources.set(b"Font", Object::Dictionary(fonts));
-    with_resources(renderer, &resources, |renderer| {
-        if let Some(appearance) = build(&mut encoder::FontTypesetter::new(renderer)) {
-            draw_synthesized(renderer, appearance, id, no_rotate_rect);
-        }
-    });
 }
 
 /// Run `f` with `resources`, derived from the form's default resources,

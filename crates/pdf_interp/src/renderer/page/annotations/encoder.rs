@@ -145,8 +145,10 @@ impl Fallbacks {
     /// a CJK collection font that maps it to a glyph, else the block font
     /// of `c`.  Other characters the collections also hold, such as Greek,
     /// Cyrillic and symbols, are set in their block font, whose glyphs are
-    /// proportional rather than the collections' full width.
-    pub(super) fn find(self, c: char) -> (Vec<u8>, Vec<u8>, Option<u32>) {
+    /// proportional rather than the collections' full width.  `None` for a
+    /// private-use character or a noncharacter, which no face is known to
+    /// show.
+    pub(super) fn find(self, c: char) -> Option<(Vec<u8>, Vec<u8>, Option<u32>)> {
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         let key = units.iter().fold(0u32, |k, &u| (k << 16) | u32::from(u));
@@ -163,11 +165,16 @@ impl Fallbacks {
             .flatten();
         if let Some((name, _, _)) = collection {
             let codes = units.iter().flat_map(|u| u.to_be_bytes()).collect();
-            return (name.to_vec(), codes, None);
+            return Some((name.to_vec(), codes, None));
         }
-        let [.., low] = u32::from(c).to_be_bytes();
-        let block = u32::from(c) >> 8;
-        (block_font_name(block), vec![low], Some(block))
+        let scalar = u32::from(c);
+        let private_or_non = matches!(scalar, 0xE000..=0xF8FF | 0xF_0000.. | 0xFDD0..=0xFDEF)
+            || scalar & 0xFFFE == 0xFFFE;
+        if private_or_non {
+            return None;
+        }
+        let [.., low] = scalar.to_be_bytes();
+        Some((block_font_name(scalar >> 8), vec![low], Some(scalar >> 8)))
     }
 }
 
@@ -264,9 +271,29 @@ pub(super) struct FontTypesetter<'r, 'p> {
     renderer: &'r mut PageRenderer<'p>,
     /// Encoders by font resource name.
     encoders: HashMap<Vec<u8>, UnicodeEncoder>,
-    /// The Unicode blocks whose fallback font text was set in but the
-    /// resources lack.
+    /// The Unicode blocks whose fallback font text was set in, at most
+    /// [`MAX_BLOCK_FONTS`].
+    blocks: BTreeSet<u32>,
+    /// Those of [`Self::blocks`] the resources lack.
     missing: BTreeSet<u32>,
+    /// The state of inverting each font's embedded program.
+    inversions: HashMap<Vec<u8>, Inversion>,
+}
+
+/// Most Unicode block fonts the text of one appearance is set in; a
+/// character of a further block is set as `?`.
+const MAX_BLOCK_FONTS: usize = 64;
+
+/// The state of inverting one font's embedded program (see
+/// [`FontTypesetter::invert_program`]).
+#[derive(Default)]
+struct Inversion {
+    /// Whether the inversion applies to the font; `None` until checked.
+    applies: Option<bool>,
+    /// The characters already looked up in the program.
+    tried: std::collections::HashSet<char>,
+    /// The inverse of the font's `CIDToGIDMap`, built when first needed.
+    cid_of_gid: Option<HashMap<u32, u32>>,
 }
 
 impl<'r, 'p> FontTypesetter<'r, 'p> {
@@ -275,7 +302,9 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
         Self {
             renderer,
             encoders: HashMap::new(),
+            blocks: BTreeSet::new(),
             missing: BTreeSet::new(),
+            inversions: HashMap::new(),
         }
     }
 
@@ -310,12 +339,18 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
     /// is its code.  A glyph the program reaches only through its own CID
     /// mapping, as in a CID-keyed CFF program, is not inverted.
     fn invert_program(&mut self, font: &[u8], text: &str) {
+        let inversion = self.inversions.entry(font.to_vec()).or_default();
         let Some(encoder) = self.encoders.get_mut(font) else {
             return;
         };
+        if inversion.applies == Some(false) {
+            return;
+        }
         let wanted: Vec<char> = text
             .chars()
-            .filter(|&c| !c.is_control() && encoder.encode(c).is_none())
+            .filter(|&c| {
+                !c.is_control() && encoder.encode(c).is_none() && inversion.tried.insert(c)
+            })
             .collect();
         if wanted.is_empty() {
             return;
@@ -323,30 +358,30 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
         let renderer = &mut *self.renderer;
         let active = renderer.font_cache.select(&renderer.resources, font);
         let descriptor = Arc::clone(&active.descriptor);
-        let Some(enc) = descriptor.cid_encoding.as_ref() else {
+        let enc = descriptor.cid_encoding.as_ref().filter(|enc| {
+            enc.encoding_cmap.identity
+                && enc.to_unicode.is_none()
+                && descriptor.substitute.script.is_none()
+        });
+        let face = enc.and_then(|_| {
+            renderer
+                .font_cache
+                .get_or_load(&active, font, [12.0, 0.0, 0.0, 12.0])
+                .filter(|face| !face.substitute && face.has_unicode_cmap())
+        });
+        let (Some(enc), Some(face)) = (enc, face) else {
+            inversion.applies = Some(false);
             return;
         };
-        if !enc.encoding_cmap.identity
-            || enc.to_unicode.is_some()
-            || descriptor.substitute.script.is_some()
-        {
-            return;
-        }
-        let Some(face) = renderer
-            .font_cache
-            .get_or_load(&active, font, [12.0, 0.0, 0.0, 12.0])
-            .filter(|face| !face.substitute && face.has_unicode_cmap())
-        else {
-            return;
-        };
-        let mut cid_of_gid: Option<HashMap<u32, u32>> = None;
+        inversion.applies = Some(true);
         for c in wanted {
             let gid = face.raw_get_char_index(u32::from(c));
             if gid == 0 || face.program().cid_to_gid(gid) != Some(gid) {
                 continue;
             }
             let cid = enc.cid_to_gid.as_ref().map_or(Some(gid), |table| {
-                cid_of_gid
+                inversion
+                    .cid_of_gid
                     .get_or_insert_with(|| {
                         let mut inverse = HashMap::new();
                         for (cid, &g) in (0u32..).zip(table.iter()).skip(1) {
@@ -367,20 +402,27 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
 impl Typesetter for FontTypesetter<'_, '_> {
     fn runs(&mut self, font: &[u8], text: &str) -> Vec<Run> {
         let fallbacks = Fallbacks::for_text(text);
+        let mut blocks = std::mem::take(&mut self.blocks);
         let encoder = self.encoder(font, text);
         let question = encoder.encode('?').unwrap_or(b"?");
         let mut runs: Vec<Run> = Vec::new();
-        let mut blocks = BTreeSet::new();
         for c in text.chars() {
             let fallback;
+            let found = if c.is_control() {
+                None
+            } else {
+                fallbacks.find(c)
+            };
             let (run_font, codes): (&[u8], &[u8]) = if let Some(codes) = encoder.encode(c) {
                 (font, codes)
-            } else if c.is_control() {
-                (font, question)
-            } else {
-                fallback = fallbacks.find(c);
+            } else if let Some(found) = found.filter(|(.., block)| {
+                block.is_none_or(|b| blocks.contains(&b) || blocks.len() < MAX_BLOCK_FONTS)
+            }) {
+                fallback = found;
                 blocks.extend(fallback.2);
                 (&fallback.0, &fallback.1)
+            } else {
+                (font, question)
             };
             match runs.last_mut() {
                 Some(run) if run.font == run_font => run.codes.extend_from_slice(codes),
@@ -390,11 +432,12 @@ impl Typesetter for FontTypesetter<'_, '_> {
                 }),
             }
         }
+        self.blocks = blocks;
         let resources = &self.renderer.resources;
         self.missing.extend(
-            blocks
-                .into_iter()
-                .filter(|&b| resources.font_entry(&block_font_name(b)).is_none()),
+            self.blocks
+                .iter()
+                .filter(|&&b| resources.font_entry(&block_font_name(b)).is_none()),
         );
         runs
     }
@@ -550,7 +593,7 @@ mod tests {
 
     #[test]
     fn kana_select_the_japanese_fallback_and_han_alone_the_chinese() {
-        let fallback = |c, text| Fallbacks::for_text(text).find(c);
+        let fallback = |c, text| Fallbacks::for_text(text).find(c).expect("a fallback");
         let (font, codes, block) = fallback('日', "日本語の");
         assert_eq!(
             (font.as_slice(), codes.as_slice(), block),
@@ -564,6 +607,10 @@ mod tests {
             (font.as_slice(), codes.as_slice(), block),
             (&b"FallbackU0006"[..], &[0x27][..], Some(6))
         );
+        // Private-use characters and noncharacters have no fallback.
+        for c in ['\u{E000}', '\u{F0000}', '\u{FDD0}', '\u{FFFF}', '\u{1FFFE}'] {
+            assert!(Fallbacks::for_text("").find(c).is_none(), "{c:?}");
+        }
         assert_eq!(Fallbacks::for_text("한").order, [3, 0, 1, 2]);
         assert_eq!(Fallbacks::for_text("").order, [1, 0, 2, 3]);
     }

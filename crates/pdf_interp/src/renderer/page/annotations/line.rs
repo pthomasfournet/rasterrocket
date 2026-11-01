@@ -32,7 +32,7 @@ use super::Synthesized;
 use super::content::{Border, colour, n, number, numbers, opacity};
 use super::line_ending::LineEnding;
 use super::text::{DefaultAppearance, markup_text};
-use super::typeset::{LEADING, Typesetter, show_line, wrap};
+use super::typeset::{LEADING, Typesetter, lines, show_line};
 use crate::resources::dict_ext::DictExt;
 
 /// The resource name of the caption font, standard Helvetica unless the
@@ -87,7 +87,9 @@ pub(super) struct Line {
 
 impl Line {
     /// The line annotation `annot`; `None` when `/L` does not hold two
-    /// points.
+    /// points.  Document numbers are finite single-precision reals or
+    /// 64-bit integers, so the sums and products of a few of them taken
+    /// here are finite in `f64`.
     pub(super) fn of(doc: &Document, annot: &Dictionary) -> Option<Self> {
         let &[x0, y0, x1, y1, ..] = numbers(doc, annot.get(b"L")).as_slice() else {
             return None;
@@ -162,8 +164,8 @@ impl Line {
             self.write_lines(&mut s, &mut bounds, stroke, gap);
         }
         Some(Synthesized {
-            content: s.into_bytes(),
             bbox: bounds.rect(),
+            content: s.into_bytes(),
             opacity: self.opacity,
             blend: BlendMode::Normal,
             matrix: self.frame,
@@ -225,7 +227,7 @@ impl Line {
         ts: &mut dyn Typesetter,
     ) -> Option<(f64, f64)> {
         let size = CAPTION_SIZE;
-        let lines = wrap(&caption.text, f64::INFINITY, |_| 0.0);
+        let lines: Vec<&str> = lines(&caption.text).collect();
         let widths: Vec<f64> = lines.iter().map(|l| ts.width(FONT, l) * size).collect();
         let block = widths.iter().copied().fold(0.0, f64::max);
         let inline = !caption.top && CAPTION_GAP.mul_add(2.0, block) <= self.length;
@@ -262,12 +264,18 @@ impl Line {
             baseline -= leading;
         }
         let (left, right) = (centre - block / 2.0, centre + block / 2.0);
-        bounds.include(left, BELOW_BASELINE.mul_add(-size, last_baseline));
-        bounds.include(right, ABOVE_BASELINE.mul_add(size, last_baseline + below));
-        inline.then(|| {
+        let (bottom, top) = (
+            BELOW_BASELINE.mul_add(-size, last_baseline),
+            ABOVE_BASELINE.mul_add(size, last_baseline + below),
+        );
+        bounds.include(left, bottom);
+        bounds.include(right, top);
+        // The line is cut where an inline caption, moved by `/CO`, still
+        // crosses it.
+        (inline && (bottom..=top).contains(&self.offset)).then(|| {
             (
-                (left - CAPTION_GAP).max(0.0),
-                (right + CAPTION_GAP).min(self.length),
+                (left - CAPTION_GAP).clamp(0.0, self.length),
+                (right + CAPTION_GAP).clamp(0.0, self.length),
             )
         })
     }
@@ -408,6 +416,24 @@ mod tests {
             .is_none()
         );
         assert!(appearance("<< /Subtype /Line /Rect [0 0 1 1] /L [0 0] >>").is_none());
+    }
+
+    #[test]
+    fn the_cut_stays_on_the_line_and_follows_the_caption_off_it() {
+        // Moved past the end, the caption cuts the line only up to its end.
+        let (_, c) = appearance(
+            "<< /Subtype /Line /Rect [0 0 1 1] /L [0 0 100 0] /Cap true /Contents (ab) \
+             /CO [48 0] >>",
+        )
+        .expect("an appearance");
+        assert!(c.contains("0 0 m 91.5 0 l") && !c.contains("104.5"), "{c}");
+        // Moved off the line, the caption leaves it whole.
+        let (_, c) = appearance(
+            "<< /Subtype /Line /Rect [0 0 1 1] /L [0 0 100 0] /Cap true /Contents (ab) \
+             /CO [0 30] >>",
+        )
+        .expect("an appearance");
+        assert!(c.contains("0 0 m 100 0 l"), "{c}");
     }
 
     #[test]

@@ -7,12 +7,13 @@
 //! `/Contents`, is set in the `/DA` font, size and colour as modified by
 //! the default style string `/DS` and the styles of `/RC`, wrapped to the
 //! box less a margin of twice the border width, aligned by `/Q` (or a
-//! `text-align` style) and run from the top; it is clipped to that area.  `/Rotate`, a multiple of 90
-//! degrees, turns the box and its text counter-clockwise within the text
-//! box, its sides swapped for a quarter turn.  A callout (`/CL`, two or
-//! three points) is stroked from its first point, which carries the `/LE`
-//! line ending.  The `/DA` font comes from the form's default resources,
-//! standard Helvetica when they lack it.
+//! `text-align` style) and run from the top; it is clipped to that area.
+//! `/Rotate`, a multiple of 90 degrees, turns the box and its text
+//! counter-clockwise within the text box, its sides swapped for a quarter
+//! turn.  A callout (`/CL`, two or three points) is stroked from its first
+//! point, which carries the `/LE` line ending.  The `/DA` font comes from
+//! the form's default resources; when they lack it, a standard face name
+//! selects that face and any other name standard Helvetica.
 
 use std::fmt::Write as _;
 
