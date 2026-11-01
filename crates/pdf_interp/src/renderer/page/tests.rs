@@ -1423,3 +1423,36 @@ fn annotations_start_without_the_page_s_pending_text_clip() {
     renderer.render_annotations((1, 0));
     assert!(renderer.text_clip.is_none());
 }
+
+/// A stencil drawn through a pattern whose samples cannot hold its
+/// dimensions fails as an image, as it does through the colour path,
+/// rather than painting the missing samples as uncovered.
+#[test]
+fn short_stencil_through_a_pattern_is_an_image_failure() {
+    use crate::resources::DecodedImage;
+    use crate::resources::image::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
+    use crate::test_helpers::empty_doc;
+
+    let doc = empty_doc();
+    let mut renderer = PageRenderer::new(4, 4, &doc, (1, 0));
+    renderer.gstate.current_mut().ctm = [4.0, 0.0, 0.0, 4.0, 0.0, 0.0];
+    renderer.gstate.current_mut().fill_pattern = Some(Arc::from(&b"P0"[..]));
+    let stencil = DecodedImage {
+        image: ImageDescriptor {
+            width: 4,
+            height: 4,
+            color_space: ImageColorSpace::Mask,
+            data: ImageData::Cpu(vec![0; 5]),
+            smask: None,
+            filter: ImageFilter::Raw,
+        },
+        source_width: 4,
+        interpolate: false,
+        own_soft_mask: false,
+        partial: None,
+    };
+    renderer.blit_image(&stencil, Some(b"Im0"));
+    let failures = renderer.finish().1.image_failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].reason.contains("short buffer"), "{failures:?}");
+}

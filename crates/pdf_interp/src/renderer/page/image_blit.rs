@@ -16,7 +16,7 @@ use raster::{
 use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::image_reduce;
-use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid};
+use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
 use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, SoftMask};
 #[cfg(feature = "cache")]
@@ -144,9 +144,15 @@ impl PageRenderer<'_> {
 
         if matches!(img.color_space, ImageColorSpace::Mask)
             && self.gstate.current().fill_pattern.is_some()
-            && self.fill_stencil_with_pattern(img, &grid)
         {
-            return;
+            match self.fill_stencil_with_pattern(img, &grid) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(reason) => {
+                    self.record_image_failure(name, reason);
+                    return;
+                }
+            }
         }
 
         // The image is one object under the soft mask in effect, unless its
@@ -178,36 +184,35 @@ impl PageRenderer<'_> {
     /// tiling or shading pattern of any kind — with its `Background`, `BBox`
     /// and `ExtGState` — paints exactly as it does through a path fill.
     ///
-    /// Returns `false`, painting nothing, when the stencil is not host
+    /// Returns `Ok(false)`, painting nothing, when the stencil is not host
     /// resident.
+    ///
+    /// # Errors
+    /// The reason, when the stencil's samples cannot hold its dimensions.
     pub(super) fn fill_stencil_with_pattern(
         &mut self,
         img: &crate::resources::ImageDescriptor,
         grid: &SampleGrid,
-    ) -> bool {
+    ) -> Result<bool, String> {
         let Some(bytes) = img.data.as_cpu() else {
-            return false;
+            return Ok(false);
         };
+        verify_sample_len(img, bytes.len())?;
         let Some(rect) = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1) else {
-            return true;
+            return Ok(true);
         };
         let img_w = img.width as usize;
-        let sample = |x: u32, y: u32| {
-            bytes
-                .get(y as usize * img_w + x as usize)
-                .copied()
-                .unwrap_or(u8::MAX)
-        };
         let coverage: Vec<u8> = (rect.y0..rect.y1)
             .flat_map(|dy| (rect.x0..rect.x1).map(move |dx| (dx, dy)))
             .map(|(dx, dy)| {
-                grid.sample(dx, dy)
-                    .map_or(0, |taps| u8::MAX - taps.blend(sample))
+                grid.sample(dx, dy).map_or(0, |taps| {
+                    u8::MAX - taps.blend_px(|x, y| sample_bytes::<1>(bytes, img_w, 1, x, y))[0]
+                })
             })
             .collect();
         let area = rect.to_path();
         self.paint_through_coverage(rect, &coverage, |r| r.fill_path(&area, false));
-        true
+        Ok(true)
     }
 
     /// A host-resident copy of `img` when its samples are device-resident
@@ -292,31 +297,8 @@ impl PageRenderer<'_> {
             // dispatch available to blit them — unrenderable, not absent.
             return Err("pixels device-resident but GPU dispatch unavailable".to_owned());
         };
-        // Decoder contract: bytes.len() == width × height × bpp.  Promote
-        // the contract to a release-mode check so a truncated buffer (an
-        // adversarial PDF reporting larger dims than the decoder produced)
-        // skips the image cleanly instead of indexing past the buffer in
-        // the inner loop.
+        verify_sample_len(img, img_bytes.len())?;
         let bpp = img.color_space.bytes_per_pixel();
-        match check_image_bytes_len(img.width, img.height, bpp, img_bytes.len()) {
-            Ok(_) => {}
-            Err(ImageLenError::DimensionOverflow) => {
-                // A decoder-contract violation on an image the codec
-                // reported as decoded — surface, never silently blank.
-                let msg = format!(
-                    "dimensions overflow usize ({}×{}×{bpp} bpp)",
-                    img.width, img.height,
-                );
-                return Err(msg);
-            }
-            Err(ImageLenError::ShortBuffer { expected }) => {
-                let msg = format!(
-                    "decoder produced short buffer ({} bytes, expected {expected})",
-                    img_bytes.len(),
-                );
-                return Err(msg);
-            }
-        }
 
         let fill_color = self.gstate.current().painted_fill_color();
         let mask = match mask {
@@ -341,8 +323,8 @@ impl PageRenderer<'_> {
         let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
-        let gray = |x, y| pixel::<1>(img_bytes, img_w, bpp, x, y);
-        let rgb = |x, y| pixel::<3>(img_bytes, img_w, bpp, x, y);
+        let gray = |x, y| sample_bytes::<1>(img_bytes, img_w, bpp, x, y);
+        let rgb = |x, y| sample_bytes::<3>(img_bytes, img_w, bpp, x, y);
         let gs_transfer = self.gstate.current().transfer.clone();
         let transfer = |px: [u8; 3]| gs_transfer.as_ref().map_or(px, |t| t.apply(px));
         let compositor = ImageCompositor::new(
@@ -357,34 +339,36 @@ impl PageRenderer<'_> {
         let span = (grid.x1 - grid.x0) as usize;
         let mut colours = vec![0u8; span * 3];
         let mut shape = vec![0u8; span];
-        // An unrotated draw's taps are built once per column and once per
-        // row instead of once per pixel, and without a soft mask, which
-        // reads each pixel's taps, its samples are blended a row at a time.
-        // The row buffers stay empty when unused, and each pixel then
-        // blends its own taps.
+        // A separable draw's taps are built once per column and once per
+        // row instead of once per pixel.  Without a soft mask, which reads
+        // each pixel's taps, its samples are also blended a row at a time.
         let separable = grid.separable();
-        let rows = separable.as_ref().filter(|_| mask.is_none());
-        let mut rgb_rows = rows
-            .filter(|_| img.color_space == ImageColorSpace::Rgb)
-            .map(BlendedRows::<3>::new);
-        let mut gray_rows = rows
-            .filter(|_| img.color_space != ImageColorSpace::Rgb)
-            .map(BlendedRows::<1>::new);
-        let mut rgb_row = vec![[0; 3]; if rgb_rows.is_some() { span } else { 0 }];
-        let mut gray_row = vec![[0; 1]; if gray_rows.is_some() { span } else { 0 }];
+        let mut row_blend =
+            separable
+                .as_ref()
+                .filter(|_| mask.is_none())
+                .map(|cols| match img.color_space {
+                    ImageColorSpace::Rgb => RowBlend::Rgb(BlendedRows::new(cols)),
+                    ImageColorSpace::Gray | ImageColorSpace::Mask => {
+                        RowBlend::Gray(BlendedRows::new(cols))
+                    }
+                });
         for dy in grid.y0..grid.y1 {
             let Some(row_clip) = grid_clip.row(dy) else {
                 continue;
             };
-            let row_taps = separable.as_ref().map(|_| grid.row_taps(dy));
-            if let Some(Some(taps)) = row_taps {
-                if let Some(rows) = rgb_rows.as_mut() {
-                    rows.blend_row(taps, rgb, &mut rgb_row);
+            // `Some((columns, row taps))` for a separable grid; a row whose
+            // source y lies off the image admits no pixel.
+            let separable_row = separable.as_ref().map(|cols| (cols, grid.row_taps(dy)));
+            let samples = match (row_blend.as_mut(), separable_row) {
+                (Some(RowBlend::Rgb(rows)), Some((_, Some(row)))) => {
+                    RowSamples::Rgb(rows.blend_row(row, rgb))
                 }
-                if let Some(rows) = gray_rows.as_mut() {
-                    rows.blend_row(taps, gray, &mut gray_row);
+                (Some(RowBlend::Gray(rows)), Some((_, Some(row)))) => {
+                    RowSamples::Gray(rows.blend_row(row, gray))
                 }
-            }
+                _ => RowSamples::PerPixel,
+            };
             shape.fill(0);
             for (((col, dx), out), shape) in (0..)
                 .zip(grid.x0..grid.x1)
@@ -395,17 +379,16 @@ impl PageRenderer<'_> {
                 if coverage == 0 {
                     continue;
                 }
-                let taps = match (&separable, row_taps) {
-                    (Some(cols), Some(row)) => row.and_then(|row| cols.taps(col, row)),
-                    _ => grid.sample(dx, dy),
+                let taps = match separable_row {
+                    Some((cols, row)) => row.and_then(|row| cols.taps(col, row)),
+                    None => grid.sample(dx, dy),
                 };
                 let Some(taps) = taps else {
                     continue;
                 };
-                let gray_at = || {
-                    gray_row
-                        .get(col)
-                        .map_or_else(|| taps.blend_px(gray)[0], |p| p[0])
+                let gray_at = || match samples {
+                    RowSamples::Gray(row) => row.get(col).map_or(u8::MAX, |p| p[0]),
+                    _ => taps.blend_px(gray)[0],
                 };
                 // Stencil masks paint the fill colour with coverage
                 // `255 − sample` and carry no soft mask (asserted at entry).
@@ -424,12 +407,10 @@ impl PageRenderer<'_> {
                 // Image samples map through the transfer function; the
                 // stencil colour is already the painted fill colour.
                 let src = match img.color_space {
-                    ImageColorSpace::Rgb => transfer(
-                        rgb_row
-                            .get(col)
-                            .copied()
-                            .unwrap_or_else(|| taps.blend_px(rgb)),
-                    ),
+                    ImageColorSpace::Rgb => transfer(match samples {
+                        RowSamples::Rgb(row) => row.get(col).copied().unwrap_or([u8::MAX; 3]),
+                        _ => taps.blend_px(rgb),
+                    }),
                     ImageColorSpace::Gray => transfer([gray_at(); 3]),
                     ImageColorSpace::Mask => fill_color,
                 };
@@ -693,15 +674,39 @@ impl<'a> ImageCompositor<'a> {
     }
 }
 
-/// The first `N` channels of sample `(x, y)` of a `width`-sample-wide image
-/// of `bpp` bytes per sample; `u8::MAX` in each channel when the sample lies
-/// past the end of `bytes`.
-fn pixel<const N: usize>(bytes: &[u8], width: usize, bpp: usize, x: u32, y: u32) -> [u8; N] {
-    let at = (y as usize * width + x as usize) * bpp;
-    bytes
-        .get(at..at + N)
-        .and_then(|px| px.try_into().ok())
-        .unwrap_or([u8::MAX; N])
+/// The per-row sample cache of a separable image draw, by channel count.
+enum RowBlend<'a> {
+    Rgb(BlendedRows<'a, 3>),
+    Gray(BlendedRows<'a, 1>),
+}
+
+/// The samples of one device row: blended a row at a time, or left to each
+/// pixel's own taps.
+#[derive(Clone, Copy)]
+enum RowSamples<'a> {
+    Rgb(&'a [[u8; 3]]),
+    Gray(&'a [[u8; 1]]),
+    PerPixel,
+}
+
+/// Checks the decoder contract that `len` bytes hold `img`'s samples, so
+/// that a truncated buffer (a stream declaring larger dimensions than its
+/// data) fails the image instead of painting a partly blank one.
+///
+/// # Errors
+/// The reason, when the dimensions overflow `usize` or `len` is short.
+fn verify_sample_len(img: &crate::resources::ImageDescriptor, len: usize) -> Result<(), String> {
+    let bpp = img.color_space.bytes_per_pixel();
+    match check_image_bytes_len(img.width, img.height, bpp, len) {
+        Ok(_) => Ok(()),
+        Err(ImageLenError::DimensionOverflow) => Err(format!(
+            "dimensions overflow usize ({}×{}×{bpp} bpp)",
+            img.width, img.height,
+        )),
+        Err(ImageLenError::ShortBuffer { expected }) => Err(format!(
+            "decoder produced short buffer ({len} bytes, expected {expected})"
+        )),
+    }
 }
 
 /// Composite `bitmap`, a page group with an alpha plane, onto opaque white
