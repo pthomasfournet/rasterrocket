@@ -158,20 +158,12 @@ pub(crate) fn write_cleaned(
             half,
         );
 
-        // Write directly to the final path. The previous temp-file +
-        // atomic-rename dance triggered ext4 auto_da_alloc on every page,
-        // which forces dirty data out before the rename can complete —
-        // turning batch render into a serial disk-flush wait. For a many-page
-        // batch the safety guarantee (no partial file on encode failure)
-        // isn't worth that cost; the user re-runs on error anyway. We delete
-        // a partial file on encode failure to preserve the spirit.
-        let written = match &page {
+        // Pages are written in place, not renamed into place, so that no
+        // per-page rename waits on the file system's flush of the data.
+        match &page {
             Page::Rgb(rgb) => encode_to_path(&out_path, rgb, args, format),
             Page::Gray(gray) => encode_gray_to_path(&out_path, gray, args, format),
-        };
-        written.inspect_err(|_| {
-            let _ = fs::remove_file(&out_path);
-        })?;
+        }?;
     }
     Ok(())
 }
@@ -180,13 +172,28 @@ pub(crate) fn write_cleaned(
 /// time, and the file receives them in `write` calls of this size.
 const OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Create the page output file `out_path` behind an
-/// [`OUTPUT_BUFFER_BYTES`] write buffer.
-fn create_output(out_path: &str) -> std::io::Result<BufWriter<File>> {
-    Ok(BufWriter::with_capacity(
-        OUTPUT_BUFFER_BYTES,
-        File::create(out_path)?,
-    ))
+/// Create the page output file `out_path` and fill it through an
+/// [`OUTPUT_BUFFER_BYTES`] write buffer with `encode`.  A file this call
+/// created and failed to complete is removed; a file that could not be
+/// created is left as it was.
+///
+/// # Errors
+/// The creation, encoding or final flush failed.
+fn write_output(
+    out_path: &str,
+    encode: impl FnOnce(&mut BufWriter<File>) -> Result<(), RenderError>,
+) -> Result<(), RenderError> {
+    let file = File::create(out_path)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create {out_path}: {e}")))?;
+    let mut out = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
+    let written = encode(&mut out).and_then(|()| out.flush().map_err(RenderError::from));
+    if written.is_err() {
+        drop(out);
+        if let Err(e) = fs::remove_file(out_path) {
+            eprintln!("rrocket: warning: could not remove the incomplete {out_path}: {e}");
+        }
+    }
+    written
 }
 
 /// Encode `rgb` to `out_path` honouring `--mono` / `--gray` and the resolved format.
@@ -202,13 +209,13 @@ pub(crate) fn encode_to_path(
     if args.mono || args.gray {
         return encode_gray_to_path(out_path, &rgb_to_gray(rgb), args, format);
     }
-    let mut out = create_output(out_path)?;
-    match format {
-        OutputFormat::Ppm => write_ppm(rgb, &mut out)?,
-        OutputFormat::Png => write_png(rgb, &mut out)?,
-    }
-    out.flush()?;
-    Ok(())
+    write_output(out_path, |out| {
+        match format {
+            OutputFormat::Ppm => write_ppm(rgb, out)?,
+            OutputFormat::Png => write_png(rgb, out)?,
+        }
+        Ok(())
+    })
 }
 
 /// Encode a luma page to `out_path`: thresholded to two levels under
@@ -219,21 +226,21 @@ fn encode_gray_to_path(
     args: &Args,
     format: OutputFormat,
 ) -> Result<(), RenderError> {
-    let mut out = create_output(out_path)?;
-    if args.mono {
-        let mono = gray_to_mono(gray);
-        match format {
-            OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, &mut out)?,
-            OutputFormat::Png => write_png::<Gray8, _>(&mono, &mut out)?,
+    write_output(out_path, |out| {
+        if args.mono {
+            let mono = gray_to_mono(gray);
+            match format {
+                OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, out)?,
+                OutputFormat::Png => write_png::<Gray8, _>(&mono, out)?,
+            }
+        } else {
+            match format {
+                OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, out)?,
+                OutputFormat::Png => write_png::<Gray8, _>(gray, out)?,
+            }
         }
-    } else {
-        match format {
-            OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, &mut out)?,
-            OutputFormat::Png => write_png::<Gray8, _>(gray, &mut out)?,
-        }
-    }
-    out.flush()?;
-    Ok(())
+        Ok(())
+    })
 }
 
 // ── Pixel helpers ─────────────────────────────────────────────────────────────

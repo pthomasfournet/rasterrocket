@@ -47,14 +47,11 @@ fn main() -> ExitCode {
         return fail(e);
     }
 
-    // When --ram is set, redirect output_prefix into a fresh tmpfs directory.
-    // The guard removes the directory on Drop so a clean exit cleans up; on
-    // crash the dir is left behind but /dev/shm is tmpfs and clears on reboot.
-    // The SpillPolicy is consulted per-page: when free memory tightens, the
-    // writer falls back to the original on-disk prefix automatically.
+    // RAM output (see `ram`): the guard removes the RAM directory when it
+    // drops, and the spill policy chooses each page's directory.
     let (_ram_guard, spill_policy) = match ram::redirect_to_ram(&mut args) {
         Ok(redirect) => redirect,
-        Err(e) => return fail(format_args!("--ram setup failed: {e}")),
+        Err(e) => return fail(e),
     };
 
     // Dispatch on the input extension. Comic archives render via the comic crate

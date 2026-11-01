@@ -26,10 +26,11 @@
 //!
 //! 1. A [`RamDirGuard`] that removes the tmpfs dir on drop (no-op when on disk).
 //! 2. A [`SpillPolicy`] queried per-page: returns the RAM prefix while free
-//!    memory is comfortable, the disk prefix once it tightens.
+//!    memory is comfortable, and the disk prefix from the first page that
+//!    finds it tight.
 //!
-//! The chosen path is printed on stderr at startup and on stdout at the end
-//! so callers can capture it via `out=$(rrocket doc.pdf p)`.
+//! The chosen directory is printed on stderr and on stdout at startup, so
+//! callers can capture it via `out=$(rrocket doc.pdf p)`.
 //!
 //! # Why dynamic instead of pre-flight?
 //!
@@ -85,66 +86,63 @@ impl Drop for RamDirGuard {
     }
 }
 
-/// Per-page write-target policy: RAM (the tmpfs dir) or disk (the user's
-/// original `OUTPUT_PREFIX` location). When `--ram` is off, this still wraps
-/// the user's prefix and is a no-op — `ram_prefix == disk_prefix` so every
-/// page lands on disk regardless of memory conditions.
+/// Per-page write-target policy: RAM (the RAM directory) or disk (the
+/// user's original `OUTPUT_PREFIX` location).
 ///
-/// One instance is shared across all worker threads via a borrowed reference;
-/// the inner state (atomics + mutex) is cheap to read concurrently.
+/// One instance is shared by all worker threads.
 pub(crate) struct SpillPolicy {
-    /// `(ram_prefix, disk_prefix)`. When `--ram` is off both slots hold the
-    /// user's original prefix and `next_prefix` short-circuits.
-    targets: (String, String),
-    /// Cached available-memory reading + when it was taken. Refreshed on TTL
-    /// expiry; the lock is contended only when the cached value is older
-    /// than [`PROBE_TTL`].
+    targets: Targets,
+    /// The cached available-memory reading, taken under the lock by the
+    /// first caller after it expires.
     probe: Mutex<MemoryProbe>,
-    /// Latched once we spill the first page so the warning prints exactly
-    /// once across all worker threads.
-    spill_announced: AtomicBool,
+    /// Set by the first page sent to disk; every later page goes there too.
+    spilled: AtomicBool,
+}
+
+/// Where a [`SpillPolicy`] writes pages.
+enum Targets {
+    /// Every page to the user's prefix: RAM output is off.
+    Disk(String),
+    /// Pages to `ram` while memory allows, then to `disk`.
+    Ram { ram: String, disk: String },
 }
 
 impl SpillPolicy {
-    /// Build a passthrough policy that always returns `disk_prefix` (used
-    /// when `--ram` is off — keeps the renderer-side API uniform).
-    fn passthrough(disk_prefix: String) -> Self {
-        // Both slots hold the user's prefix so next_prefix() short-circuits.
+    /// A policy writing pages to `targets`.
+    const fn new(targets: Targets) -> Self {
         Self {
-            targets: (disk_prefix.clone(), disk_prefix),
+            targets,
             probe: Mutex::new(MemoryProbe::new()),
-            spill_announced: AtomicBool::new(false),
+            spilled: AtomicBool::new(false),
         }
     }
 
-    /// Returns the prefix that should be used for the next page write.
-    /// `--ram` off: always the original prefix. `--ram` on: `ram_prefix`
-    /// while free RAM is comfortable, `disk_prefix` once it tightens.
+    /// The prefix for the next page write: the user's prefix when RAM
+    /// output is off; otherwise the RAM prefix until available memory is
+    /// below [`RAM_SAFETY_MARGIN`] or unreadable, and the disk prefix from
+    /// then on.
     #[must_use]
     pub(crate) fn next_prefix(&self) -> &str {
-        let (ram_prefix, disk_prefix) = &self.targets;
-
-        // Passthrough fast path: --ram off means both prefixes are equal,
-        // so skip the memory probe entirely.
-        if ram_prefix == disk_prefix {
-            return ram_prefix;
+        let (ram, disk) = match &self.targets {
+            Targets::Disk(prefix) => return prefix,
+            Targets::Ram { ram, disk } => (ram, disk),
+        };
+        if self.spilled.load(Ordering::Relaxed) {
+            return disk;
         }
-
         let available = self.available_bytes();
         if available.is_some_and(|bytes| bytes >= RAM_SAFETY_MARGIN) {
-            return ram_prefix;
+            return ram;
         }
-        if !self.spill_announced.swap(true, Ordering::Relaxed) {
+        if !self.spilled.swap(true, Ordering::Relaxed) {
             let reason = if available.is_some() {
                 "free memory dropped below safety margin"
             } else {
-                "cannot read free memory on this platform"
+                "free memory can no longer be read"
             };
-            eprintln!(
-                "rrocket: {reason}; writing subsequent pages to disk with prefix {disk_prefix}"
-            );
+            eprintln!("rrocket: {reason}; writing subsequent pages to disk with prefix {disk}");
         }
-        disk_prefix
+        disk
     }
 
     /// Available memory in bytes, re-probed at most once per [`PROBE_TTL`];
@@ -179,9 +177,6 @@ impl MemoryProbe {
         if self.last_read.is_some_and(|t| t.elapsed() < PROBE_TTL) {
             return;
         }
-        // Avoid two threads both refreshing at the same instant: each just
-        // does its own read; the cost is bounded (~10µs) and we don't want a
-        // global condvar on the hot path.
         self.last_available_bytes = available_memory();
         self.last_read = Some(Instant::now());
     }
@@ -297,45 +292,48 @@ fn use_ram_for(no_ram: bool, force_ram: bool, prefix: &str, ram_root_present: bo
 }
 
 /// Apply the RAM/disk policy: when [`should_use_ram`] returns true, create a
-/// tmpfs directory and rewrite `args.output_prefix` to live inside it.
-/// Always returns a [`SpillPolicy`] — when on disk it's a passthrough.
+/// RAM directory and rewrite `args.output_prefix` to live inside it.
+/// Always returns a [`SpillPolicy`]; when on disk it passes the prefix
+/// through.  Where available memory cannot be read, the heuristic writes
+/// to disk and an explicit `--ram` or `--ram-path` is refused, since pages
+/// could not be spilled before memory ran out.
 ///
 /// # Errors
-/// - directory creation failed (permissions, ENOSPC on /dev/shm at startup).
+/// The directory cannot be created (see [`create_ram_dir`]), or RAM output
+/// was requested where available memory cannot be read.
 pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, SpillPolicy)> {
     let original_prefix = args.output_prefix.clone();
-
-    if !should_use_ram(args) {
-        return Ok((
+    let passthrough = |prefix| {
+        (
             RamDirGuard { dir: None },
-            SpillPolicy::passthrough(original_prefix),
-        ));
-    }
-
-    // The directory is removed recursively on exit, so it must be one this
-    // run creates: an existing `--ram-path` is refused rather than adopted,
-    // since adopting it would delete whatever it held before the run.
-    let dir = if let Some(p) = &args.ram_path {
-        let dir = PathBuf::from(p);
-        create_owned_dir(&dir)?;
-        dir
-    } else {
-        let dir = default_ram_dir(Path::new(RAM_ROOT))?;
-        fs::create_dir_all(&dir)?;
-        dir
+            SpillPolicy::new(Targets::Disk(prefix)),
+        )
     };
 
-    // Preserve the basename of the user's prefix as the file stem inside the
-    // tmpfs dir so naming stays predictable. Falls back to "out" if the user
-    // gave something pathological like "/" or empty.
+    if !should_use_ram(args) {
+        return Ok(passthrough(original_prefix));
+    }
+    if available_memory().is_none() {
+        if args.ram || args.ram_path.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "RAM output needs the system's available memory, which cannot be read \
+                 here; write to disk with --no-ram or a path prefix",
+            ));
+        }
+        return Ok(passthrough(original_prefix));
+    }
+
+    let dir = create_ram_dir(args.ram_path.as_deref().map(Path::new), Path::new(RAM_ROOT))?;
+
+    // The stem of the user's prefix names the files inside the directory;
+    // a prefix with no file name ("/", "") falls back to "out".
     let stem = Path::new(&original_prefix)
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("out");
-
-    let ram_prefix_pb = dir.join(stem);
-    let ram_prefix = ram_prefix_pb.to_string_lossy().into_owned();
+    let ram_prefix = dir.join(stem).to_string_lossy().into_owned();
 
     eprintln!(
         "rrocket: writing to RAM at {} (auto-removed on exit; use --no-ram to write to disk)",
@@ -343,70 +341,75 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
     );
     println!("{}", dir.display());
 
-    // Renderer sees the RAM prefix as the "default" path. The SpillPolicy
-    // overrides per-page when memory tightens.
     args.output_prefix.clone_from(&ram_prefix);
-
     Ok((
         RamDirGuard { dir: Some(dir) },
-        SpillPolicy {
-            targets: (ram_prefix, original_prefix),
-            probe: Mutex::new(MemoryProbe::new()),
-            spill_announced: AtomicBool::new(false),
-        },
+        SpillPolicy::new(Targets::Ram {
+            ram: ram_prefix,
+            disk: original_prefix,
+        }),
     ))
 }
 
-/// Create `dir` for `--ram-path`, failing if anything already exists there.
+/// Create the RAM directory: `explicit` (`--ram-path`) when given,
+/// otherwise a fresh `rrocket-<pid>-<nanos>` under `root`.  The directory
+/// is created, never adopted, since it is removed with its contents on
+/// exit; and it is readable by its owner alone, since the pages of the
+/// document are written into it.
 ///
 /// # Errors
-/// [`std::io::ErrorKind::AlreadyExists`] naming the path and the remedy when
-/// it exists; any other error of [`fs::create_dir`] otherwise.
-fn create_owned_dir(dir: &Path) -> std::io::Result<()> {
-    fs::create_dir(dir).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            std::io::Error::new(
+/// [`std::io::ErrorKind::AlreadyExists`] when `explicit` exists;
+/// [`std::io::ErrorKind::NotFound`] naming the remedy when `root` does not;
+/// any other error of the creation, naming the directory.
+fn create_ram_dir(explicit: Option<&Path>, root: &Path) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+
+    let dir = explicit.map_or_else(|| default_ram_dir(root), Path::to_path_buf);
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let _ = builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
+        .map_err(|e| match (explicit, e.kind()) {
+            (Some(path), ErrorKind::AlreadyExists) => Error::new(
                 e.kind(),
                 format!(
                     "--ram-path {} already exists; rrocket removes the directory and \
-                     everything in it on exit, so pass a path that does not exist yet",
-                    dir.display()
+                 everything in it on exit, so pass a path that does not exist yet",
+                    path.display()
                 ),
-            )
-        } else {
-            e
-        }
-    })
+            ),
+            (None, ErrorKind::NotFound) => Error::new(
+                e.kind(),
+                format!(
+                    "--ram writes under {}, which this system does not have; \
+                 pass --ram-path DIR on a RAM disk instead",
+                    root.display()
+                ),
+            ),
+            _ => Error::new(
+                e.kind(),
+                format!("cannot create RAM directory {}: {e}", dir.display()),
+            ),
+        })?;
+    Ok(dir)
 }
 
 /// tmpfs mount under which the default RAM directories are created.
 const RAM_ROOT: &str = "/dev/shm";
 
-/// Build a default `<root>/rrocket-<pid>-<nanos>` path.
-///
-/// `pid + nanos since epoch` is enough entropy for parallel CLI invocations
-/// to never collide in practice — the only collision risk is two invocations
-/// in the same nanosecond from the same pid, which is impossible.
-///
-/// # Errors
-/// [`std::io::ErrorKind::NotFound`] naming `root` and the remedy when `root`
-/// is not a directory.
-fn default_ram_dir(root: &Path) -> std::io::Result<PathBuf> {
-    if !root.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "--ram writes under {}, which this system does not have; \
-                 pass --ram-path DIR on a RAM disk instead",
-                root.display()
-            ),
-        ));
-    }
+/// A default `<root>/rrocket-<pid>-<nanos>` path.  The process id and the
+/// time in nanoseconds distinguish concurrent runs; a collision fails the
+/// creation instead of sharing a directory.
+fn default_ram_dir(root: &Path) -> PathBuf {
     let pid = std::process::id();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    Ok(root.join(format!("rrocket-{pid}-{nanos}")))
+    root.join(format!("rrocket-{pid}-{nanos}"))
 }
 
 #[cfg(test)]
@@ -418,29 +421,40 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let keep = parent.path().join("keep.txt");
         fs::write(&keep, b"user data").unwrap();
-        let err = create_owned_dir(parent.path()).unwrap_err();
+        let err = create_ram_dir(Some(parent.path()), Path::new(RAM_ROOT)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(err.to_string().contains("does not exist yet"), "{err}");
         assert!(keep.exists());
         let fresh = parent.path().join("fresh");
-        create_owned_dir(&fresh).unwrap();
+        assert_eq!(
+            create_ram_dir(Some(&fresh), Path::new(RAM_ROOT)).unwrap(),
+            fresh
+        );
         assert!(fresh.is_dir());
     }
 
     #[test]
-    fn default_dir_is_under_its_root() {
+    fn default_dir_is_created_under_its_root_for_its_owner_alone() {
         let root = tempfile::tempdir().unwrap();
-        let p = default_ram_dir(root.path()).unwrap();
-        assert!(p.starts_with(root.path()), "got {}", p.display());
+        let dir = create_ram_dir(None, root.path()).unwrap();
+        assert!(dir.starts_with(root.path()), "got {}", dir.display());
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "mode {mode:o}");
+        }
     }
 
     #[test]
     fn default_dir_without_its_root_names_the_remedy() {
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join("absent");
-        let err = default_ram_dir(&missing).unwrap_err();
+        let err = create_ram_dir(None, &missing).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(err.to_string().contains("--ram-path"), "{err}");
+        assert!(!missing.exists(), "the root is not created");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -454,31 +468,40 @@ mod tests {
         );
     }
 
+    /// A RAM policy whose cached memory reading is `reading`.
+    fn policy_with(reading: Option<u64>) -> SpillPolicy {
+        let policy = SpillPolicy::new(Targets::Ram {
+            ram: "/ram/out".into(),
+            disk: "/disk/out".into(),
+        });
+        *policy.probe.lock().unwrap() = MemoryProbe {
+            last_read: Some(Instant::now()),
+            last_available_bytes: reading,
+        };
+        policy
+    }
+
     #[test]
     fn unreadable_memory_spills_to_disk() {
-        let policy = SpillPolicy {
-            targets: ("/ram/out".into(), "/disk/out".into()),
-            probe: Mutex::new(MemoryProbe {
-                last_read: Some(Instant::now()),
-                last_available_bytes: None,
-            }),
-            spill_announced: AtomicBool::new(false),
-        };
+        let policy = policy_with(None);
         assert_eq!(policy.next_prefix(), "/disk/out");
-        assert!(policy.spill_announced.load(Ordering::Relaxed));
+        assert!(policy.spilled.load(Ordering::Relaxed));
     }
 
     #[test]
     fn comfortable_memory_keeps_pages_in_ram() {
-        let policy = SpillPolicy {
-            targets: ("/ram/out".into(), "/disk/out".into()),
-            probe: Mutex::new(MemoryProbe {
-                last_read: Some(Instant::now()),
-                last_available_bytes: Some(RAM_SAFETY_MARGIN),
-            }),
-            spill_announced: AtomicBool::new(false),
-        };
-        assert_eq!(policy.next_prefix(), "/ram/out");
+        assert_eq!(
+            policy_with(Some(RAM_SAFETY_MARGIN)).next_prefix(),
+            "/ram/out"
+        );
+    }
+
+    #[test]
+    fn a_spill_is_kept_when_memory_recovers() {
+        let policy = policy_with(Some(RAM_SAFETY_MARGIN - 1));
+        assert_eq!(policy.next_prefix(), "/disk/out");
+        policy.probe.lock().unwrap().last_available_bytes = Some(RAM_SAFETY_MARGIN);
+        assert_eq!(policy.next_prefix(), "/disk/out");
     }
 
     #[test]
@@ -495,7 +518,7 @@ mod tests {
 
     #[test]
     fn passthrough_policy_returns_original_prefix() {
-        let p = SpillPolicy::passthrough("/foo/bar".into());
+        let p = SpillPolicy::new(Targets::Disk("/foo/bar".into()));
         assert_eq!(p.next_prefix(), "/foo/bar");
     }
 
