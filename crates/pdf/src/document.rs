@@ -404,8 +404,10 @@ impl Document {
     /// not list it in use and a whole-file header scan finds no header for
     /// it.  A reference to such an object is the null object (ISO 32000-2
     /// §7.3.10); an object the xref lists but that does not parse is
-    /// damaged, not undefined.  `false` when the scan exceeds its sanity
-    /// limit and the answer is unknown.
+    /// damaged, not undefined.  A number the xref marks free counts as
+    /// defined while a header for it remains in the file, since
+    /// [`Self::get_object`] then returns that body.  `false` when the scan
+    /// exceeds its sanity limit and the answer is unknown.
     #[must_use]
     pub fn is_undefined(&self, num: u32) -> bool {
         let in_use = |entry: Option<XrefEntry>| {
@@ -2377,14 +2379,34 @@ startxref\n180\n%%EOF"
         );
     }
 
+    /// Objects 1 and 3 are listed in use; 2 and 4 are free, and only 4
+    /// keeps a header in the file; 5 is unlisted but has a header; 7 is
+    /// neither listed nor found.
     #[test]
     fn undefined_objects_are_those_neither_listed_nor_found() {
-        let body = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n\
-                     5 0 obj\n42\nendobj\n\
-                     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
-                     trailer\n<</Size 2 /Root 1 0 R>>\nstartxref\n53\n%%EOF\n";
-        let doc = Document::from_bytes_owned(body.to_vec()).expect("opens");
-        assert!(!doc.is_undefined(1), "listed in the xref");
+        let mut body = b"%PDF-1.4\n".to_vec();
+        let offset = |body: &mut Vec<u8>, text: &str| {
+            let at = body.len();
+            body.extend_from_slice(text.as_bytes());
+            at
+        };
+        let catalog = offset(&mut body, "1 0 obj\n<</Type /Catalog>>\nendobj\n");
+        let three = offset(&mut body, "3 0 obj\n3\nendobj\n");
+        body.extend_from_slice(b"4 0 obj\n4\nendobj\n5 0 obj\n5\nendobj\n");
+        let xref = offset(
+            &mut body,
+            &format!(
+                "xref\n0 5\n0000000000 65535 f \n{catalog:010} 00000 n \n\
+                 0000000000 00001 f \n{three:010} 00000 n \n0000000000 00001 f \n\
+                 trailer\n<</Size 5 /Root 1 0 R>>\n"
+            ),
+        );
+        body.extend_from_slice(format!("startxref\n{xref}\n%%EOF\n").as_bytes());
+        let doc = Document::from_bytes_owned(body).expect("opens");
+        assert!(!doc.is_undefined(1), "listed in use");
+        assert!(!doc.is_undefined(3), "listed in use");
+        assert!(doc.is_undefined(2), "free, and no header in the file");
+        assert!(!doc.is_undefined(4), "free, but its header is in the file");
         assert!(
             !doc.is_undefined(5),
             "unlisted, but its header is in the file"

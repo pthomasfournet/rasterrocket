@@ -183,27 +183,32 @@ impl PageRenderer<'_> {
         self.diag.content_failures.extend(failures);
     }
 
-    /// Record an image that could not be drawn.  The image is skipped and the
-    /// page render continues.
+    /// Record an image that could not be drawn, once per page.  The image
+    /// is skipped and the page render continues.
     pub(super) fn record_image_failure(&mut self, name: Option<&[u8]>, reason: String) {
-        let failure = ImageFailure {
-            name: name.map(|n| String::from_utf8_lossy(n).into_owned()),
-            reason,
-            partial: false,
-        };
-        log::debug!("rasterrocket-interp: skipped {failure}");
-        self.diag.image_failures.push(failure);
+        self.push_image_failure(name, reason, false);
     }
 
     /// Record an image drawn from a stream that lacked samples (see
-    /// [`DecodedImage::partial`](crate::resources::DecodedImage::partial)).
+    /// [`DecodedImage::partial`](crate::resources::DecodedImage::partial)),
+    /// once per page.
     pub(super) fn record_partial_image(&mut self, name: Option<&[u8]>, reason: String) {
+        self.push_image_failure(name, reason, true);
+    }
+
+    /// Add an [`ImageFailure`] unless the page already records an equal one:
+    /// an image drawn repeatedly fails the same way each time.
+    fn push_image_failure(&mut self, name: Option<&[u8]>, reason: String, partial: bool) {
         let failure = ImageFailure {
             name: name.map(|n| String::from_utf8_lossy(n).into_owned()),
             reason,
-            partial: true,
+            partial,
         };
-        log::debug!("rasterrocket-interp: {failure}");
+        if self.diag.image_failures.contains(&failure) {
+            return;
+        }
+        let skipped = if partial { "" } else { "skipped " };
+        log::debug!("rasterrocket-interp: {skipped}{failure}");
         self.diag.image_failures.push(failure);
     }
 

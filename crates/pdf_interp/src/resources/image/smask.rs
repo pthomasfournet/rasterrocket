@@ -106,21 +106,19 @@ pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Result
         ImageColorSpace::Gray => alpha_from_decoded(&desc)?,
         ImageColorSpace::Rgb => {
             log::debug!(
-                "image: SMask (object {id:?}) holds three components; using its luminosity"
+                "image: /SMask (object {} {}) holds three components; using its luminosity",
+                id.0,
+                id.1
             );
-            let bytes = desc.data.as_cpu().ok_or(NOT_HOST_RESIDENT)?;
-            let expected = (desc.width as usize)
-                .checked_mul(desc.height as usize)
-                .ok_or(DIMENSION_OVERFLOW)?;
-            if bytes.len() < expected * 3 {
-                return Err(short_buffer(bytes.len(), expected * 3, &desc));
-            }
-            bytes[..expected * 3]
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|&[r, g, b]| color::convert::luminosity(r, g, b))
-                .collect()
+            let rgb = host_samples(&desc, 3)?;
+            let mut alpha = try_with_capacity(rgb.len() / 3).ok_or(ALLOCATION_FAILED)?;
+            alpha.extend(
+                rgb.as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|&[r, g, b]| color::convert::luminosity(r, g, b)),
+            );
+            alpha
         }
         ImageColorSpace::Mask => return Err("decoded as a stencil".to_owned()),
     };
@@ -161,8 +159,12 @@ pub(super) fn decode_explicit_mask(
     let obj_arc = ctx.doc.get_object(id).map_err(|e| e.to_string())?;
     let stream = obj_arc.as_ref().as_stream().ok_or("not a stream")?;
 
-    // §8.9.6.3: an explicit mask must be an image with ImageMask true.
-    if !stream.dict.get_bool(b"ImageMask").unwrap_or(false) {
+    // §8.9.6.3: an explicit mask is an image with `/ImageMask true`.  A
+    // one-bit image without the flag is read as the stencil its samples
+    // can only be.
+    if !stream.dict.get_bool(b"ImageMask").unwrap_or(false)
+        && stream.dict.get_i64(b"BitsPerComponent") != Some(1)
+    {
         return Err("not an ImageMask stencil".to_owned());
     }
 
@@ -225,47 +227,58 @@ fn decode_mask_stream(
     .map(|decoded| decoded.image)
 }
 
-/// A decoded mask held on the device, where its alpha cannot be read.
-const NOT_HOST_RESIDENT: &str = "decoded samples are not host-resident";
+/// A mask buffer that could not be allocated.
+const ALLOCATION_FAILED: &str = "allocation failed";
 
-/// A mask whose sample count overflows `usize`.
-const DIMENSION_OVERFLOW: &str = "dimensions overflow usize";
-
-/// The reason for a decoded mask of `got` bytes where `expected` were due.
-fn short_buffer(got: usize, expected: usize, desc: &ImageDescriptor) -> String {
-    format!(
-        "decoded {got} bytes, expected {expected} for {}×{}",
-        desc.width, desc.height
-    )
-}
-
-/// The [`SoftMask`] of `alpha` on `desc`'s grid.
+/// The first `width × height × components` host-resident bytes of a
+/// decoded mask.
 ///
 /// # Errors
-/// The reason, when `alpha` does not hold one byte per sample of a
-/// non-empty grid.
-fn soft_mask(desc: &ImageDescriptor, alpha: Vec<u8>) -> Result<SoftMask, String> {
-    let got = alpha.len();
-    SoftMask::new(desc.width, desc.height, alpha)
-        .ok_or_else(|| short_buffer(got, desc.width as usize * desc.height as usize, desc))
-}
-
-/// Extract exactly `width × height` host-resident bytes from a decoded mask
-/// descriptor.
-///
-/// # Errors
-/// The reason, when the buffer is short: a decode failure, never
+/// The reason, when the samples are not host-resident, their count
+/// overflows `usize`, or the buffer is short: a decode failure, never
 /// silently-wrong alpha.
-fn alpha_from_decoded(desc: &ImageDescriptor) -> Result<Vec<u8>, String> {
-    let bytes = desc.data.as_cpu().ok_or(NOT_HOST_RESIDENT)?;
+fn host_samples(desc: &ImageDescriptor, components: usize) -> Result<&[u8], String> {
+    let bytes = desc
+        .data
+        .as_cpu()
+        .ok_or("decoded samples are not host-resident")?;
     let expected = (desc.width as usize)
         .checked_mul(desc.height as usize)
-        .ok_or(DIMENSION_OVERFLOW)?;
-    if bytes.len() < expected {
-        return Err(short_buffer(bytes.len(), expected, desc));
-    }
-    let mut alpha = try_with_capacity(expected).ok_or("allocation failed")?;
-    alpha.extend_from_slice(&bytes[..expected]);
+        .and_then(|n| n.checked_mul(components))
+        .ok_or("dimensions overflow usize")?;
+    bytes.get(..expected).ok_or_else(|| {
+        format!(
+            "decoded {} bytes, expected {expected} for {}×{}",
+            bytes.len(),
+            desc.width,
+            desc.height
+        )
+    })
+}
+
+/// The [`SoftMask`] of `alpha`, one byte per sample of `desc`'s grid.
+///
+/// # Errors
+/// The reason, when the grid is empty or `alpha` does not match it.
+fn soft_mask(desc: &ImageDescriptor, alpha: Vec<u8>) -> Result<SoftMask, String> {
+    let got = alpha.len();
+    SoftMask::new(desc.width, desc.height, alpha).ok_or_else(|| {
+        format!(
+            "{got} alpha bytes for a {}×{} mask",
+            desc.width, desc.height
+        )
+    })
+}
+
+/// Exactly `width × height` host-resident bytes of a decoded one-component
+/// mask, copied.
+///
+/// # Errors
+/// The errors of [`host_samples`], and the allocation failing.
+fn alpha_from_decoded(desc: &ImageDescriptor) -> Result<Vec<u8>, String> {
+    let bytes = host_samples(desc, 1)?;
+    let mut alpha = try_with_capacity(bytes.len()).ok_or(ALLOCATION_FAILED)?;
+    alpha.extend_from_slice(bytes);
     Ok(alpha)
 }
 

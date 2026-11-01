@@ -57,6 +57,16 @@ impl PageRenderer<'_> {
             self.draw_image_xobject(name, &decoded);
             return;
         }
+        let failed = id.and_then(|id| {
+            self.image_memo
+                .borrow()
+                .failure(id, draw_size)
+                .map(str::to_owned)
+        });
+        if let Some(reason) = failed {
+            self.record_image_failure(Some(name), reason);
+            return;
+        }
         let request = crate::resources::ImageRequest { name, draw_size };
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
@@ -126,6 +136,11 @@ impl PageRenderer<'_> {
                 }
             }
             ImageResolution::DecodeFailed(msg) => {
+                if let Some((id, draw_size)) = memo_key {
+                    self.image_memo
+                        .borrow_mut()
+                        .insert_failure(id, draw_size, msg.clone());
+                }
                 self.record_image_failure(Some(name), msg);
             }
             ImageResolution::Absent => {

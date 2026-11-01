@@ -209,8 +209,9 @@ pub struct DecodedImage {
     /// `/Interpolate`: the image asks to be interpolated when magnified
     /// (PDF 32000-1 §8.9.5.3).
     pub interpolate: bool,
-    /// The image dictionary has an `/SMask` entry, which replaces the soft
-    /// mask of the graphics state for this image (PDF 32000-1 Table 89).
+    /// The image dictionary's `/SMask` refers to a soft-mask stream, which
+    /// replaces the soft mask of the graphics state for this image (PDF
+    /// 32000-1 Table 89).
     pub own_soft_mask: bool,
     /// What the stream lacked when `image` holds padding in place of
     /// samples the stream does not have (a stream shorter than its
@@ -483,8 +484,15 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         return unresolved("resource entry is not an indirect reference");
     };
     // Bind the Arc to a local so the borrow into the stream below stays alive.
-    let Ok(obj_arc) = doc.get_object(stream_id) else {
-        return unresolved("object unreadable");
+    let obj_arc = match doc.get_object(stream_id) {
+        Ok(obj) => obj,
+        Err(_) if doc.is_undefined(stream_id.0) => {
+            return unresolved(&format!(
+                "object {} {} is not defined in the file",
+                stream_id.0, stream_id.1
+            ));
+        }
+        Err(e) => return unresolved(&format!("object unreadable: {e}")),
     };
     let Some(stream) = obj_arc.as_ref().as_stream() else {
         return unresolved("object is not a stream");
@@ -518,10 +526,13 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         Err(msg) => return unresolved(&msg),
     };
 
+    let (smask_entry, mask_entry) = mask_entries(doc, &stream.dict, is_mask);
+    let colour_key = smask_entry.is_none() && matches!(mask_entry, Some(Object::Array(_)));
+
     // The matte colour of a soft mask the image's samples are pre-blended
     // with (§11.6.5.3).
-    let matte = match stream.dict.get(b"SMask") {
-        Some(Object::Reference(id)) if !is_mask => smask::matte(doc, *id),
+    let matte = match smask_entry {
+        Some(Object::Reference(id)) => smask::matte(doc, *id),
         _ => None,
     };
 
@@ -529,9 +540,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     // averages, and a matte is removed pixel by pixel on the mask's grid,
     // so such an image decodes in full.  A mask stream otherwise keeps its
     // own resolution and needs no such exclusion.
-    let draw_size = request
-        .draw_size
-        .filter(|_| matte.is_none() && !matches!(stream.dict.get(b"Mask"), Some(Object::Array(_))));
+    let draw_size = request.draw_size.filter(|_| matte.is_none() && !colour_key);
 
     // The GPU blit composites cached images fully opaque and reads their
     // samples verbatim, so an image carrying a soft mask, an explicit mask,
@@ -540,20 +549,16 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     // another document would drop the mask or the conversion) nor
     // inserted.
     #[cfg(feature = "cache")]
-    let dct_cache = if has_mask_entry(&stream.dict) || !src.colour.identity() {
+    let dct_cache = if smask_entry.is_some() || mask_entry.is_some() || !src.colour.identity() {
         None
     } else {
         codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
     };
 
     // The mask decodes first, so that its failure costs no base decode.
-    let smask_entry = defined(ctx.doc, stream.dict.get(b"SMask"));
-    let mask = match own_mask(ctx, smask_entry, defined(ctx.doc, stream.dict.get(b"Mask"))) {
+    let mask = match own_mask(ctx, smask_entry, mask_entry) {
         Ok(mask) => mask,
-        Err(msg) => {
-            log::warn!("image: /{}: {msg}", String::from_utf8_lossy(name));
-            return ImageResolution::DecodeFailed(msg);
-        }
+        Err(msg) => return unresolved(&msg),
     };
 
     let (mut img, partial) = match dispatch::decode_image_stream(
@@ -586,15 +591,35 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         image: img,
         source_width: w,
         interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
-        own_soft_mask: !is_mask && matches!(smask_entry, Some(Object::Reference(_))),
+        own_soft_mask: matches!(smask_entry, Some(Object::Reference(_))),
         partial,
     })
 }
 
-/// `entry`, unless it is a reference to an object `doc` does not define:
-/// the null object (PDF §7.3.10), read as an absent entry.
+/// The `/SMask` and `/Mask` entries of an image dictionary `dict`.  A
+/// stencil (`is_mask`) has none (§8.9.6.2), and an entry that is null or
+/// refers to an object the file does not define is absent (§7.3.10).  An
+/// `/SMask` replaces a `/Mask` (§11.6.5.3).
+fn mask_entries<'d>(
+    doc: &Document,
+    dict: &'d Dictionary,
+    is_mask: bool,
+) -> (Option<&'d Object>, Option<&'d Object>) {
+    if is_mask {
+        return (None, None);
+    }
+    (
+        defined(doc, dict.get(b"SMask")),
+        defined(doc, dict.get(b"Mask")),
+    )
+}
+
+/// `entry`, unless it is the null object, written as `null` or as a
+/// reference to an object `doc` does not define (PDF §7.3.10): an entry
+/// whose value is null is absent (§7.3.7).
 fn defined<'o>(doc: &Document, entry: Option<&'o Object>) -> Option<&'o Object> {
     match entry {
+        Some(Object::Null) => None,
         Some(Object::Reference(id)) if doc.is_undefined(id.0) => None,
         other => other,
     }
@@ -618,28 +643,16 @@ fn own_mask(
     match (smask, mask) {
         (Some(Object::Reference(id)), _) => smask::decode_smask(ctx, *id)
             .map(Some)
-            .map_err(named("SMask", *id)),
+            .map_err(named("/SMask", *id)),
         (_, Some(Object::Reference(id))) => smask::decode_explicit_mask(ctx, *id)
             .map(Some)
             .map_err(named("/Mask", *id)),
         (_, Some(Object::Array(_)) | None) => Ok(None),
         (_, Some(_)) => {
-            log::warn!("image: /Mask is neither a reference nor an array — ignoring");
+            log::warn!("image: /Mask is neither a reference nor an array; ignored");
             Ok(None)
         }
     }
-}
-
-/// Whether an image dictionary carries a mask the blit must honour: an
-/// `/SMask` stream reference, or a `/Mask` given as a stencil-mask stream
-/// reference or a colour-key range array (PDF §8.9.6).
-#[cfg(feature = "cache")]
-fn has_mask_entry(dict: &Dictionary) -> bool {
-    matches!(dict.get(b"SMask"), Some(Object::Reference(_)))
-        || matches!(
-            dict.get(b"Mask"),
-            Some(Object::Reference(_) | Object::Array(_))
-        )
 }
 
 // ── Shared helpers (used by multiple sub-modules) ─────────────────────────────
@@ -1031,7 +1044,7 @@ mod tests {
         mask.extend_from_slice(b"\nendstream");
         match resolve_with_mask("/SMask 4 0 R", mask) {
             ImageResolution::DecodeFailed(msg) => {
-                assert!(msg.starts_with("SMask (object 4 0): "), "{msg}");
+                assert!(msg.starts_with("/SMask (object 4 0): "), "{msg}");
             }
             ImageResolution::Ok(_) => panic!("an image whose SMask fails must not be drawn"),
             ImageResolution::Absent => panic!("the image is a failure, not absent"),
@@ -1069,6 +1082,66 @@ mod tests {
         )]);
         let mut xobjects = Dictionary::new();
         xobjects.set("Im1", Object::Reference((4, 0)));
+        match resolve_image(
+            &mut ImageDecodeCtx::cpu(&doc),
+            &xobjects,
+            ImageRequest::full(b"Im1"),
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        ) {
+            ImageResolution::Ok(decoded) => {
+                assert!(decoded.image.smask.is_none());
+                assert!(!decoded.own_soft_mask);
+            }
+            ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
+            ImageResolution::Absent => panic!("image resource not found"),
+        }
+    }
+
+    /// A one-bit `/Mask` stream without `/ImageMask true` is read as the
+    /// stencil its samples can only be.
+    #[test]
+    fn one_bit_mask_without_the_image_mask_flag_is_a_stencil() {
+        let mask = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+                     /ColorSpace /DeviceGray /BitsPerComponent 1 /Length 1 >>\n\
+                     stream\n\x40\nendstream"
+            .to_vec();
+        match resolve_with_mask("/Mask 4 0 R", mask) {
+            ImageResolution::Ok(decoded) => {
+                let mask = decoded.image.smask.expect("the stencil is attached");
+                assert_eq!(mask.alpha(), &[0xFF, 0x00]);
+            }
+            ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
+            ImageResolution::Absent => panic!("image resource not found"),
+        }
+    }
+
+    /// A `null` `/Mask` is absent (§7.3.7): the image is drawn unmasked.
+    #[test]
+    fn null_mask_entry_is_no_mask() {
+        match resolve_with_mask("/Mask null", b"null".to_vec()) {
+            ImageResolution::Ok(decoded) => assert!(decoded.image.smask.is_none()),
+            ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
+            ImageResolution::Absent => panic!("image resource not found"),
+        }
+    }
+
+    /// A stencil carries no mask (§8.9.6.2): a stray `/SMask` on one is
+    /// ignored, even one that does not decode.
+    #[test]
+    fn stencil_ignores_a_stray_smask() {
+        let mut mask = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+                         /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode \
+                         /Length 3 >>\nstream\n"
+            .to_vec();
+        mask.extend_from_slice(CORRUPT_DCT);
+        mask.extend_from_slice(b"\nendstream");
+        let stencil = b"<< /Type /XObject /Subtype /Image /Width 8 /Height 1 /ImageMask true \
+                        /SMask 4 0 R /Length 1 >>\nstream\n\x0F\nendstream"
+            .to_vec();
+        let doc = crate::test_helpers::make_doc_with_objects(&[(4, mask), (5, stencil)]);
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((5, 0)));
         match resolve_image(
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,

@@ -1456,3 +1456,18 @@ fn short_stencil_through_a_pattern_is_an_image_failure() {
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(failures[0].reason.contains("short buffer"), "{failures:?}");
 }
+
+/// An image that fails the same way at every draw is recorded once.
+#[test]
+fn repeated_image_failure_is_recorded_once() {
+    use crate::test_helpers::empty_doc;
+
+    let doc = empty_doc();
+    let mut renderer = PageRenderer::new(1, 1, &doc, (1, 0));
+    for _ in 0..3 {
+        renderer.record_image_failure(Some(b"Im0"), "broken".to_owned());
+    }
+    renderer.record_image_failure(Some(b"Im1"), "broken".to_owned());
+    let failures = renderer.finish().1.image_failures;
+    assert_eq!(failures.len(), 2, "{failures:?}");
+}

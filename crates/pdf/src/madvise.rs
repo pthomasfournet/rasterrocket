@@ -1,6 +1,6 @@
 //! Kernel access-pattern advice for the `Document` mapping.
 //!
-//! All helpers are no-ops on platforms without `posix_fadvise` (Windows and
+//! The advice is a no-op on platforms without `posix_fadvise` (Windows and
 //! the Apple systems among them).  The syscalls go through
 //! `rustix`'s safe wrappers, so this module contains no `unsafe` code (the
 //! crate denies `unsafe_code`; the one exception is the file mapping in
@@ -16,7 +16,7 @@ use std::fs::File;
 use rustix::fs::{Advice, fadvise};
 
 /// Advise the kernel that `file` is read at random positions, so
-/// readahead is disabled for the whole file (`len` `None` is "to EOF").
+/// readahead is disabled for the whole file.
 ///
 /// Called once when a document is mapped, before any byte is read.  A
 /// failure is ignored: the advice is optional and its absence leaves the

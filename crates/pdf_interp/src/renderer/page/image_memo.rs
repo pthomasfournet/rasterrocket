@@ -32,6 +32,10 @@ pub(super) type SharedImageMemo = Rc<RefCell<ImageMemo>>;
 /// Decoded images keyed by stream object or by inline-image bytes.
 pub(super) struct ImageMemo {
     entries: HashMap<ObjectId, Entry>,
+    /// The reason each stream object failed to decode, by the draw size of
+    /// the request: a failure at one resolution level of a JPEG 2000 image
+    /// says nothing of another.
+    failures: HashMap<(ObjectId, Option<(u32, u32)>), String>,
     inline: HashMap<Box<[u8]>, Entry>,
     /// Sum of the entries' [`Entry::bytes`].
     bytes: usize,
@@ -55,6 +59,7 @@ impl ImageMemo {
     fn with_budget(budget: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            failures: HashMap::new(),
             inline: HashMap::new(),
             bytes: 0,
             budget,
@@ -102,6 +107,22 @@ impl ImageMemo {
         let entry = self.entries.get(&id)?;
         (entry.image.image.filter != ImageFilter::Jpx || entry.draw_size == draw_size)
             .then(|| Rc::clone(&entry.image))
+    }
+
+    /// Why decoding `id` for a request at `draw_size` failed, when it has.
+    pub(super) fn failure(&self, id: ObjectId, draw_size: Option<(u32, u32)>) -> Option<&str> {
+        self.failures.get(&(id, draw_size)).map(String::as_str)
+    }
+
+    /// Keep `reason`, why decoding `id` for a request at `draw_size`
+    /// failed, so that a later request reports it without decoding again.
+    pub(super) fn insert_failure(
+        &mut self,
+        id: ObjectId,
+        draw_size: Option<(u32, u32)>,
+        reason: String,
+    ) {
+        let _ = self.failures.insert((id, draw_size), reason);
     }
 
     /// Keep `image`, the decode of `id` for a request at `draw_size`, in
