@@ -400,6 +400,26 @@ impl Document {
 
     // ── Object resolution ────────────────────────────────────────────────────
 
+    /// Whether object `num` has no definition in the file: the xref does
+    /// not list it in use and a whole-file header scan finds no header for
+    /// it.  A reference to such an object is the null object (ISO 32000-2
+    /// §7.3.10); an object the xref lists but that does not parse is
+    /// damaged, not undefined.  `false` when the scan exceeds its sanity
+    /// limit and the answer is unknown.
+    #[must_use]
+    pub fn is_undefined(&self, num: u32) -> bool {
+        let in_use = |entry: Option<XrefEntry>| {
+            matches!(
+                entry,
+                Some(XrefEntry::Direct { .. } | XrefEntry::InObjStm { .. })
+            )
+        };
+        !in_use(self.xref.get(num))
+            && self
+                .scanned_entries()
+                .is_some_and(|scanned| !in_use(scanned.get(&num).copied()))
+    }
+
     /// Resolve an indirect reference and return a shared reference to its value.
     ///
     /// First call parses the object from the file; subsequent calls return the
@@ -2355,5 +2375,20 @@ startxref\n180\n%%EOF"
                 .to_string()
                 .starts_with("content stream obj 3 (partial): ")
         );
+    }
+
+    #[test]
+    fn undefined_objects_are_those_neither_listed_nor_found() {
+        let body = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n\
+                     5 0 obj\n42\nendobj\n\
+                     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+                     trailer\n<</Size 2 /Root 1 0 R>>\nstartxref\n53\n%%EOF\n";
+        let doc = Document::from_bytes_owned(body.to_vec()).expect("opens");
+        assert!(!doc.is_undefined(1), "listed in the xref");
+        assert!(
+            !doc.is_undefined(5),
+            "unlisted, but its header is in the file"
+        );
+        assert!(doc.is_undefined(7), "neither listed nor found");
     }
 }
