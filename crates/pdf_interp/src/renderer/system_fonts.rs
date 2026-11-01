@@ -38,6 +38,7 @@ const FONT_DIRS: &[&str] = &[
     "~/.local/share/fonts",
     "/System/Library/Fonts",
     "/Library/Fonts",
+    "~/Library/Fonts",
     "C:/Windows/Fonts",
 ];
 
@@ -289,8 +290,12 @@ impl Face {
     }
 
     /// Ranking key of the face for `style` under the family-name
-    /// preference list of `script`; the least key is the best face.
-    fn rank(&self, style: SubstituteStyle, script: Option<Script>) -> (u8, usize, u16, bool) {
+    /// preference list of `script`; the least key is the best face.  A
+    /// listed face ranks before every unlisted one: a face listed for the
+    /// script is a design made for it, which an unlisted face of the
+    /// requested serif class (a monospace or script face that happens to
+    /// carry the characters) is not.
+    fn rank(&self, style: SubstituteStyle, script: Option<Script>) -> (bool, u8, usize, u16, bool) {
         let want_serif = style.family == SubstituteFamily::Serif;
         let want_weight: u16 = if style.bold { 700 } else { 400 };
         let serif_rank = match self.serif {
@@ -298,9 +303,11 @@ impl Face {
             None => 1,
             Some(_) => 2,
         };
+        let preference = self.preference(script);
         (
+            preference == preferred_names(script).len(),
             serif_rank,
-            self.preference(script),
+            preference,
             self.weight_class.abs_diff(want_weight),
             self.italic != style.italic,
         )
@@ -403,33 +410,37 @@ impl FontLibrary {
     }
 
     /// The installed face that best serves `style` for `script`: among
-    /// the faces covering the script (the listed faces of the script when
-    /// none declares it), a visible face before a hidden one, then for
-    /// Arabic and Thai one that also covers Latin-1, then by
-    /// [`Face::rank`]: the closest serif class, the earliest in the
-    /// script's preference list, the nearest weight and slant.
+    /// the faces whose `cmap` maps the script's sample character (those
+    /// declaring the script's code page first, every face when none of
+    /// those maps it), a visible face before a hidden one, then by
+    /// [`Face::rank`] (listed for the script, serif class, preference,
+    /// weight, slant), with Arabic and Thai preferring, after the listing,
+    /// a face that also maps Latin.  Code-page bits alone are not trusted:
+    /// faces declare scripts they carry no glyphs for.
     fn select(&self, script: Script, style: SubstituteStyle) -> Option<usize> {
         let faces = self.faces();
-        let listed = preferred_names(Some(script)).len();
-        let covering: Vec<usize> = (0..faces.len())
-            .filter(|&i| faces[i].covers(script))
+        let sample = script_sample(script);
+        let declaring: Vec<usize> = (0..faces.len())
+            .filter(|&i| faces[i].covers(script) && faces[i].maps(sample))
             .collect();
-        let pool: Vec<usize> = if covering.is_empty() {
+        let pool: Vec<usize> = if declaring.is_empty() {
             (0..faces.len())
-                .filter(|&i| faces[i].preference(Some(script)) < listed)
+                .filter(|&i| faces[i].maps(sample))
                 .collect()
         } else {
-            covering
+            declaring
         };
         // A simple font of a non-CJK script mixes its script with Latin; a
-        // face that also covers Latin-1 (code page bit 0) keeps both drawing.
+        // face that also maps Latin keeps both drawing.
         let want_latin = matches!(script, Script::Arabic | Script::Thai);
         pool.into_iter().min_by_key(|&i| {
             let face = &faces[i];
+            let (unlisted, serif, preference, weight, slant) = face.rank(style, Some(script));
             (
                 face.hidden(),
-                want_latin && face.code_page_ranges[0] & 1 == 0,
-                face.rank(style, Some(script)),
+                unlisted,
+                want_latin && !face.maps(u32::from('A')),
+                (serif, preference, weight, slant),
             )
         })
     }
@@ -544,6 +555,18 @@ fn walk(dir: &Path, depth: u32, faces: &mut Vec<Face>) {
                     .filter(|face| !PLACEHOLDER_FAMILIES.contains(&face.family.as_str())),
             );
         }
+    }
+}
+
+/// A character every face serving `script` maps: a kana, a common
+/// ideograph, a syllable or a letter of the script.
+const fn script_sample(script: Script) -> u32 {
+    match script {
+        Script::Japanese => 0x3042,
+        Script::SimplifiedChinese | Script::TraditionalChinese => 0x4E2D,
+        Script::Korean => 0xAC00,
+        Script::Arabic => 0x0627,
+        Script::Thai => 0x0E01,
     }
 }
 
