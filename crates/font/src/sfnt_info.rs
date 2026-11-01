@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use read_fonts::tables::cmap::{Cmap, CmapIterLimits, CmapSubtable};
-use read_fonts::tables::name::Name;
+use read_fonts::tables::name::{Name, NameRecord};
 use read_fonts::tables::os2::Os2;
 use read_fonts::types::NameId;
 use read_fonts::{FontData, FontRead};
@@ -221,19 +221,32 @@ fn face_info(file: &mut File, offset: u32) -> Option<FaceInfo> {
 }
 
 /// The typographic family name (ID 16) of `name`, else its family name
-/// (ID 1), from a Unicode record: an English one (Windows en-US, or the
-/// language-neutral Unicode platform) first, then one of any language.
+/// (ID 1): from an English record first (the language-neutral Unicode
+/// platform, Windows en-US, or Macintosh Roman English), then from a
+/// Unicode record of any language.
 ///
 /// Records are sorted by language ID, so a localised name (zh-TW `0x0404`)
-/// precedes the en-US one (`0x0409`) in the table.
+/// precedes the en-US one (`0x0409`) in the table; some faces carry their
+/// English name in a Macintosh record only.
 fn family_name(name: &Name<'_>) -> Option<String> {
-    const WINDOWS_EN_US: u16 = 0x0409;
     let data = name.string_data();
+    let english = |r: &NameRecord| match r.platform_id() {
+        0 => true,
+        1 => r.encoding_id() == 0 && r.language_id() == 0,
+        3 => r.is_unicode() && r.language_id() == 0x0409,
+        _ => false,
+    };
     let record_named = |id: u16, english_only: bool| {
         name.name_record()
             .iter()
-            .filter(|r| r.name_id() == NameId::new(id) && r.is_unicode())
-            .filter(|r| !english_only || r.platform_id() == 0 || r.language_id() == WINDOWS_EN_US)
+            .filter(|r| r.name_id() == NameId::new(id))
+            .filter(|r| {
+                if english_only {
+                    english(r)
+                } else {
+                    r.is_unicode()
+                }
+            })
             .find_map(|r| r.string(data).ok())
             .map(|s| s.chars().collect::<String>())
             .filter(|s| !s.is_empty())
@@ -277,12 +290,16 @@ mod tests {
         assert!(Coverage::default().is_empty());
     }
 
-    /// A format-0 `name` table of Windows Unicode BMP records
-    /// `(language, name ID, string)`, in the order given.
-    fn name_table(records: &[(u16, u16, &str)]) -> Vec<u8> {
+    /// A format-0 `name` table of records `(platform, language, name ID,
+    /// string)`, in the order given: Windows Unicode BMP (platform 3) as
+    /// UTF-16BE, Macintosh Roman (platform 1) as ASCII.
+    fn name_table(records: &[(u16, u16, u16, &str)]) -> Vec<u8> {
         let strings: Vec<Vec<u8>> = records
             .iter()
-            .map(|(_, _, s)| s.encode_utf16().flat_map(u16::to_be_bytes).collect())
+            .map(|&(platform, _, _, s)| match platform {
+                1 => s.bytes().collect(),
+                _ => s.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            })
             .collect();
         let count = u16::try_from(records.len()).expect("few records");
         let mut out = Vec::new();
@@ -290,9 +307,10 @@ mod tests {
             out.extend_from_slice(&v.to_be_bytes());
         }
         let mut offset = 0u16;
-        for ((language, id, _), s) in records.iter().zip(&strings) {
+        for (&(platform, language, id, _), s) in records.iter().zip(&strings) {
             let len = u16::try_from(s.len()).expect("short string");
-            for v in [3, 1, *language, *id, len, offset] {
+            let encoding = u16::from(platform == 3);
+            for v in [platform, encoding, language, id, len, offset] {
                 out.extend_from_slice(&v.to_be_bytes());
             }
             offset += len;
@@ -309,13 +327,13 @@ mod tests {
     #[test]
     fn family_name_prefers_english_records() {
         let bytes = name_table(&[
-            (0x0404, 1, "冬青黑體簡體中文"),
-            (0x0409, 1, "Hiragino Sans GB"),
+            (3, 0x0404, 1, "冬青黑體簡體中文"),
+            (3, 0x0409, 1, "Hiragino Sans GB"),
         ]);
         let name = Name::read(FontData::new(&bytes)).expect("parses");
         assert_eq!(family_name(&name).as_deref(), Some("Hiragino Sans GB"));
 
-        let bytes = name_table(&[(0x0404, 16, "Typo"), (0x0409, 1, "Legacy")]);
+        let bytes = name_table(&[(3, 0x0404, 16, "Typo"), (3, 0x0409, 1, "Legacy")]);
         let name = Name::read(FontData::new(&bytes)).expect("parses");
         assert_eq!(
             family_name(&name).as_deref(),
@@ -323,9 +341,17 @@ mod tests {
             "an English ID 1 outranks a localised ID 16",
         );
 
-        let bytes = name_table(&[(0x0411, 1, "ヒラギノ")]);
+        let bytes = name_table(&[(3, 0x0411, 1, "ヒラギノ")]);
         let name = Name::read(FontData::new(&bytes)).expect("parses");
         assert_eq!(family_name(&name).as_deref(), Some("ヒラギノ"));
+
+        let bytes = name_table(&[(1, 0, 1, "Al Bayan"), (3, 0x0401, 1, "البيان")]);
+        let name = Name::read(FontData::new(&bytes)).expect("parses");
+        assert_eq!(
+            family_name(&name).as_deref(),
+            Some("Al Bayan"),
+            "a Macintosh English record outranks a localised Unicode one",
+        );
     }
 
     /// The coverage of a test face is the set of code points its Unicode
