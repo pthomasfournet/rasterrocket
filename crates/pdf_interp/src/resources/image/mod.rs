@@ -44,7 +44,7 @@
 
 use std::borrow::Cow;
 
-use pdf::{Dictionary, Document, Object};
+use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::resources::dict_ext::DictExt;
 
@@ -461,12 +461,9 @@ pub struct ImageDescriptor {
 ///   nothing (nothing to draw — skip silently),
 /// - [`ImageResolution::DecodeFailed`] when the name does not resolve to a
 ///   readable `XObject` stream, the image dictionary is incomplete, or the
-///   codec fails (content is lost — surface to the caller).
+///   codec fails on the image or on its `/SMask` or stencil `/Mask`
+///   (content is lost — surface to the caller).
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "resource lookup, decode and mask attachment read as one sequence"
-)]
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
     xobjects: &Dictionary,
@@ -549,6 +546,16 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)
     };
 
+    // The mask decodes first, so that its failure costs no base decode.
+    let smask_entry = defined(ctx.doc, stream.dict.get(b"SMask"));
+    let mask = match own_mask(ctx, smask_entry, defined(ctx.doc, stream.dict.get(b"Mask"))) {
+        Ok(mask) => mask,
+        Err(msg) => {
+            log::warn!("image: /{}: {msg}", String::from_utf8_lossy(name));
+            return ImageResolution::DecodeFailed(msg);
+        }
+    };
+
     let (mut img, partial) = match dispatch::decode_image_stream(
         ctx,
         &src,
@@ -565,40 +572,10 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         }
     };
 
-    // Resolve and decode the soft mask (`SMask`), if present.
-    if let Some(Object::Reference(smask_id)) = stream.dict.get(b"SMask") {
-        if let Some(mask) = smask::decode_smask(ctx, *smask_id) {
-            img.smask = Some(mask);
-        } else {
-            // A mask that fails to decode degrades to no mask: the base
-            // image's samples are valid and are drawn fully opaque.
-            log::warn!(
-                "image: SMask (object {smask_id:?}) could not be decoded — blitting image without mask"
-            );
-        }
-    } else if let Some(mask_obj) = stream.dict.get(b"Mask") {
-        // PDF §8.9.6: an explicit /Mask, distinct from /SMask.  Two forms:
-        //  - /Mask N 0 R           — §8.9.6.3 stencil mask image
-        //  - /Mask [min max …]     — §8.9.6.4 colour-key masking, compared
-        //    with the stored samples by the decode itself
-        // SMask takes precedence (handled above); /Mask is only consulted when
-        // no /SMask is present.  A decode failure is a soft skip — the base
-        // image is still valid, so it is blitted fully opaque.
-        match mask_obj {
-            Object::Reference(mask_id) => {
-                if let Some(mask) = smask::decode_explicit_mask(ctx, *mask_id) {
-                    img.smask = Some(mask);
-                } else {
-                    log::warn!(
-                        "image: explicit /Mask (object {mask_id:?}) could not be decoded — blitting image without mask"
-                    );
-                }
-            }
-            Object::Array(_) => {}
-            _ => {
-                log::warn!("image: /Mask is neither a reference nor an array — ignoring");
-            }
-        }
+    // A colour-key mask, attached by the decode, is kept when no mask
+    // stream replaces it.
+    if mask.is_some() {
+        img.smask = mask;
     }
 
     if let Some(matte) = &matte {
@@ -609,9 +586,48 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         image: img,
         source_width: w,
         interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
-        own_soft_mask: !is_mask && matches!(stream.dict.get(b"SMask"), Some(Object::Reference(_))),
+        own_soft_mask: !is_mask && matches!(smask_entry, Some(Object::Reference(_))),
         partial,
     })
+}
+
+/// `entry`, unless it is a reference to an object `doc` does not define:
+/// the null object (PDF §7.3.10), read as an absent entry.
+fn defined<'o>(doc: &Document, entry: Option<&'o Object>) -> Option<&'o Object> {
+    match entry {
+        Some(Object::Reference(id)) if doc.is_undefined(id.0) => None,
+        other => other,
+    }
+}
+
+/// The image's own mask, from its `/SMask` entry `smask` or its stencil
+/// `/Mask` entry `mask` (PDF §8.9.6, §11.6.5.2); `None` when it has none.
+/// A colour-key `/Mask` array is applied by the base decode itself.
+///
+/// # Errors
+/// The reason, naming the mask, when the mask fails to decode.  The mask is
+/// part of the image's definition, so such an image cannot be drawn.
+fn own_mask(
+    ctx: &mut ImageDecodeCtx<'_>,
+    smask: Option<&Object>,
+    mask: Option<&Object>,
+) -> Result<Option<SoftMask>, String> {
+    let named = |kind: &'static str, id: ObjectId| {
+        move |e: String| format!("{kind} (object {} {}): {e}", id.0, id.1)
+    };
+    match (smask, mask) {
+        (Some(Object::Reference(id)), _) => smask::decode_smask(ctx, *id)
+            .map(Some)
+            .map_err(named("SMask", *id)),
+        (_, Some(Object::Reference(id))) => smask::decode_explicit_mask(ctx, *id)
+            .map(Some)
+            .map_err(named("/Mask", *id)),
+        (_, Some(Object::Array(_)) | None) => Ok(None),
+        (_, Some(_)) => {
+            log::warn!("image: /Mask is neither a reference nor an array — ignoring");
+            Ok(None)
+        }
+    }
 }
 
 /// Whether an image dictionary carries a mask the blit must honour: an
@@ -977,6 +993,113 @@ mod tests {
             ImageResolution::DecodeFailed(msg) => assert!(msg.contains("Pattern"), "{msg}"),
             ImageResolution::Ok(_) => panic!("a Pattern image must not decode"),
             ImageResolution::Absent => panic!("a Pattern image is a failure, not absent"),
+        }
+    }
+
+    /// Resolve `/Im1`, object 5: a 2 × 1 gray image whose dictionary
+    /// carries `mask_entry`, over object 4, the mask stream `mask`.
+    fn resolve_with_mask(mask_entry: &str, mask: Vec<u8>) -> ImageResolution {
+        let image = format!(
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray \
+             /BitsPerComponent 8 {mask_entry} /Length 2 >>\nstream\n\x10\x20\nendstream"
+        )
+        .into_bytes();
+        let doc = crate::test_helpers::make_doc_with_objects(&[(4, mask), (5, image)]);
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((5, 0)));
+        resolve_image(
+            &mut ImageDecodeCtx::cpu(&doc),
+            &xobjects,
+            ImageRequest::full(b"Im1"),
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        )
+    }
+
+    /// A truncated `DCTDecode` stream.
+    const CORRUPT_DCT: &[u8] = &[0xFF, 0xD8, 0xFF];
+
+    /// An image whose `/SMask` fails to decode is an undecodable image,
+    /// never drawn unmasked; the reason names the mask.
+    #[test]
+    fn undecodable_smask_fails_the_image() {
+        let mut mask = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+                         /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode \
+                         /Length 3 >>\nstream\n"
+            .to_vec();
+        mask.extend_from_slice(CORRUPT_DCT);
+        mask.extend_from_slice(b"\nendstream");
+        match resolve_with_mask("/SMask 4 0 R", mask) {
+            ImageResolution::DecodeFailed(msg) => {
+                assert!(msg.starts_with("SMask (object 4 0): "), "{msg}");
+            }
+            ImageResolution::Ok(_) => panic!("an image whose SMask fails must not be drawn"),
+            ImageResolution::Absent => panic!("the image is a failure, not absent"),
+        }
+    }
+
+    /// A stencil `/Mask` reference that is no stencil fails the image.
+    #[test]
+    fn unusable_stencil_mask_fails_the_image() {
+        let mask = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 2 >>\n\
+                     stream\n\x00\x00\nendstream"
+            .to_vec();
+        match resolve_with_mask("/Mask 4 0 R", mask) {
+            ImageResolution::DecodeFailed(msg) => {
+                assert!(
+                    msg.contains("/Mask (object 4 0): not an ImageMask"),
+                    "{msg}"
+                );
+            }
+            ImageResolution::Ok(_) => panic!("an image whose /Mask fails must not be drawn"),
+            ImageResolution::Absent => panic!("the image is a failure, not absent"),
+        }
+    }
+
+    /// A mask reference to an object the file does not define is the null
+    /// object: no mask, and the image is drawn (§7.3.10).
+    #[test]
+    fn mask_reference_to_an_undefined_object_is_no_mask() {
+        let doc = crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+               /BitsPerComponent 8 /SMask 99 0 R /Length 1 >>\nstream\n\x10\nendstream"
+                .to_vec(),
+        )]);
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((4, 0)));
+        match resolve_image(
+            &mut ImageDecodeCtx::cpu(&doc),
+            &xobjects,
+            ImageRequest::full(b"Im1"),
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        ) {
+            ImageResolution::Ok(decoded) => {
+                assert!(decoded.image.smask.is_none());
+                assert!(!decoded.own_soft_mask);
+            }
+            ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
+            ImageResolution::Absent => panic!("image resource not found"),
+        }
+    }
+
+    /// A decodable `/SMask` is attached to the image.
+    #[test]
+    fn decodable_smask_is_attached() {
+        let mask = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 2 >>\n\
+                     stream\n\x40\xC0\nendstream"
+            .to_vec();
+        match resolve_with_mask("/SMask 4 0 R", mask) {
+            ImageResolution::Ok(decoded) => {
+                let mask = decoded.image.smask.expect("the SMask is attached");
+                assert_eq!(mask.alpha(), &[0x40, 0xC0]);
+                assert!(decoded.own_soft_mask);
+            }
+            ImageResolution::DecodeFailed(msg) => panic!("decode failed: {msg}"),
+            ImageResolution::Absent => panic!("image resource not found"),
         }
     }
 

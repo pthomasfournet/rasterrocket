@@ -91,26 +91,29 @@ impl SoftMask {
 /// three components (a producer's RGB JPEG) yields its luminosity
 /// (§11.3.5.3).  The mask's own `/Interpolate` is kept with it.
 ///
-/// Returns `None` when the stream is unresolvable, fails to decode, decodes
-/// to a stencil, or its dimensions are degenerate; the caller then blits
-/// the image unmasked.
-pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option<SoftMask> {
+/// # Errors
+/// The reason, when the stream is unresolvable, fails to decode, decodes to
+/// a stencil, or its dimensions are degenerate.  The mask is part of the
+/// image's definition, so the image cannot be drawn without it.
+pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Result<SoftMask, String> {
     use crate::resources::dict_ext::DictExt as _;
 
     // Bind the Arc to a local so the borrow into the stream below stays alive.
-    let obj_arc = ctx.doc.get_object(id).ok()?;
-    let stream = obj_arc.as_ref().as_stream()?;
-    let desc = decode_mask_stream(ctx, stream, false, "SMask")?;
+    let obj_arc = ctx.doc.get_object(id).map_err(|e| e.to_string())?;
+    let stream = obj_arc.as_ref().as_stream().ok_or("not a stream")?;
+    let desc = decode_mask_stream(ctx, stream, false)?;
     let alpha = match desc.color_space {
-        ImageColorSpace::Gray => alpha_from_decoded("SMask", &desc)?,
+        ImageColorSpace::Gray => alpha_from_decoded(&desc)?,
         ImageColorSpace::Rgb => {
             log::debug!(
                 "image: SMask (object {id:?}) holds three components; using its luminosity"
             );
-            let bytes = desc.data.as_cpu()?;
-            let expected = (desc.width as usize).checked_mul(desc.height as usize)?;
+            let bytes = desc.data.as_cpu().ok_or(NOT_HOST_RESIDENT)?;
+            let expected = (desc.width as usize)
+                .checked_mul(desc.height as usize)
+                .ok_or(DIMENSION_OVERFLOW)?;
             if bytes.len() < expected * 3 {
-                return None;
+                return Err(short_buffer(bytes.len(), expected * 3, &desc));
             }
             bytes[..expected * 3]
                 .as_chunks::<3>()
@@ -119,13 +122,10 @@ pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option
                 .map(|&[r, g, b]| color::convert::luminosity(r, g, b))
                 .collect()
         }
-        ImageColorSpace::Mask => {
-            log::warn!("image: SMask (object {id:?}) decoded as a stencil — skipping mask");
-            return None;
-        }
+        ImageColorSpace::Mask => return Err("decoded as a stencil".to_owned()),
     };
     let interpolate = stream.dict.get_bool(b"Interpolate").unwrap_or(false);
-    Some(SoftMask::new(desc.width, desc.height, alpha)?.interpolated(interpolate))
+    Ok(soft_mask(&desc, alpha)?.interpolated(interpolate))
 }
 
 /// Decode an explicit `/Mask N 0 R` stencil-mask image into an alpha buffer.
@@ -146,22 +146,27 @@ pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option
 /// [1 0]` on the mask is already folded into the decoder output, so no extra
 /// inversion is applied here.
 ///
-/// The mask keeps the stencil's decoded resolution.  Returns `None` if the
-/// referenced object is not a usable stencil image so the caller can blit the
-/// base image unmasked rather than discard it.
-pub(super) fn decode_explicit_mask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Option<SoftMask> {
+/// The mask keeps the stencil's decoded resolution.
+///
+/// # Errors
+/// The reason, when the referenced object is not a stencil image that
+/// decodes.  The mask is part of the image's definition, so the image
+/// cannot be drawn without it.
+pub(super) fn decode_explicit_mask(
+    ctx: &mut ImageDecodeCtx<'_>,
+    id: ObjectId,
+) -> Result<SoftMask, String> {
     use crate::resources::dict_ext::DictExt as _;
 
-    let obj_arc = ctx.doc.get_object(id).ok()?;
-    let stream = obj_arc.as_ref().as_stream()?;
+    let obj_arc = ctx.doc.get_object(id).map_err(|e| e.to_string())?;
+    let stream = obj_arc.as_ref().as_stream().ok_or("not a stream")?;
 
     // §8.9.6.3: an explicit mask must be an image with ImageMask true.
     if !stream.dict.get_bool(b"ImageMask").unwrap_or(false) {
-        log::warn!("image: /Mask object {id:?} is not an ImageMask stencil — skipping mask");
-        return None;
+        return Err("not an ImageMask stencil".to_owned());
     }
 
-    let desc = decode_mask_stream(ctx, stream, true, "/Mask")?;
+    let desc = decode_mask_stream(ctx, stream, true)?;
 
     // A stencil decoded with is_mask=true must yield ImageColorSpace::Mask.
     // If it does not, the bytes are *not* the §8.9.6.1 paint/transparent
@@ -169,47 +174,45 @@ pub(super) fn decode_explicit_mask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -
     // exactly the silent-wrong mask-polarity class.  Reject loudly instead of
     // a debug-only assert that vanishes in release builds.
     if desc.color_space != ImageColorSpace::Mask {
-        log::warn!(
-            "image: /Mask object {id:?} decoded as {:?}, expected Mask stencil — skipping mask",
-            desc.color_space
-        );
-        return None;
+        return Err(format!("decoded as {:?}, not a stencil", desc.color_space));
     }
 
     // §8.9.6.3: paint marker (0x00) → base image opaque (alpha 0xFF);
     // transparent marker (0xFF) → background shows (alpha 0x00).
-    let mut alpha = alpha_from_decoded("/Mask", &desc)?;
+    let mut alpha = alpha_from_decoded(&desc)?;
     for b in &mut alpha {
         *b = !*b;
     }
-    SoftMask::new(desc.width, desc.height, alpha)
+    soft_mask(&desc, alpha)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Decode a mask stream (an `SMask` when `is_mask` is false, an explicit
-/// stencil `/Mask` when true) through the shared image dispatch.  `what`
-/// names the mask kind in log messages.
+/// stencil `/Mask` when true) through the shared image dispatch.
+///
+/// # Errors
+/// The reason, when the dimensions are missing or degenerate or the stream
+/// fails to decode.
 fn decode_mask_stream(
     ctx: &mut ImageDecodeCtx<'_>,
     stream: &Stream,
     is_mask: bool,
-    what: &str,
-) -> Option<ImageDescriptor> {
+) -> Result<ImageDescriptor, String> {
     use crate::resources::dict_ext::DictExt as _;
 
-    let w_raw = stream.dict.get_i64(b"Width")?;
-    let h_raw = stream.dict.get_i64(b"Height")?;
-    let Some((width, height)) = validated_dims(w_raw, h_raw) else {
-        log::warn!("image: {what} degenerate dimensions {w_raw}×{h_raw}, skipping mask");
-        return None;
+    let (Some(w_raw), Some(h_raw)) = (
+        stream.dict.get_i64(b"Width"),
+        stream.dict.get_i64(b"Height"),
+    ) else {
+        return Err("missing /Width or /Height".to_owned());
     };
+    let (width, height) = validated_dims(w_raw, h_raw)
+        .ok_or_else(|| format!("degenerate dimensions {w_raw}×{h_raw}"))?;
     // A mask's samples are its own alpha or stencil: the `/Default*`
     // spaces of the page do not apply to them.
     let colour = ImageColour::resolve(ctx.doc, &stream.dict, None);
-    let src = ImageStream::new(stream, width, height, is_mask, colour)
-        .map_err(|msg| log::warn!("image: {what}: {msg} — skipping mask"))
-        .ok()?;
+    let src = ImageStream::new(stream, width, height, is_mask, colour)?;
     decode_image_stream(
         ctx,
         &src,
@@ -219,30 +222,51 @@ fn decode_mask_stream(
         #[cfg(feature = "gpu-jpeg-huffman")]
         None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
     )
-    .map_err(|e| log::warn!("image: {what}: {e} — skipping mask"))
-    .ok()
     .map(|decoded| decoded.image)
 }
 
-/// Extract exactly `width × height` host-resident bytes from a decoded mask
-/// descriptor; `what` names the mask kind when the buffer is short.
+/// A decoded mask held on the device, where its alpha cannot be read.
+const NOT_HOST_RESIDENT: &str = "decoded samples are not host-resident";
+
+/// A mask whose sample count overflows `usize`.
+const DIMENSION_OVERFLOW: &str = "dimensions overflow usize";
+
+/// The reason for a decoded mask of `got` bytes where `expected` were due.
+fn short_buffer(got: usize, expected: usize, desc: &ImageDescriptor) -> String {
+    format!(
+        "decoded {got} bytes, expected {expected} for {}×{}",
+        desc.width, desc.height
+    )
+}
+
+/// The [`SoftMask`] of `alpha` on `desc`'s grid.
 ///
-/// A short buffer is a decode failure, never silently-wrong alpha.
-fn alpha_from_decoded(what: &str, desc: &ImageDescriptor) -> Option<Vec<u8>> {
-    let bytes = desc.data.as_cpu()?;
-    let expected = (desc.width as usize).checked_mul(desc.height as usize)?;
+/// # Errors
+/// The reason, when `alpha` does not hold one byte per sample of a
+/// non-empty grid.
+fn soft_mask(desc: &ImageDescriptor, alpha: Vec<u8>) -> Result<SoftMask, String> {
+    let got = alpha.len();
+    SoftMask::new(desc.width, desc.height, alpha)
+        .ok_or_else(|| short_buffer(got, desc.width as usize * desc.height as usize, desc))
+}
+
+/// Extract exactly `width × height` host-resident bytes from a decoded mask
+/// descriptor.
+///
+/// # Errors
+/// The reason, when the buffer is short: a decode failure, never
+/// silently-wrong alpha.
+fn alpha_from_decoded(desc: &ImageDescriptor) -> Result<Vec<u8>, String> {
+    let bytes = desc.data.as_cpu().ok_or(NOT_HOST_RESIDENT)?;
+    let expected = (desc.width as usize)
+        .checked_mul(desc.height as usize)
+        .ok_or(DIMENSION_OVERFLOW)?;
     if bytes.len() < expected {
-        log::warn!(
-            "image: {what} decoded {} bytes, expected {expected} for {}×{} — skipping mask",
-            bytes.len(),
-            desc.width,
-            desc.height
-        );
-        return None;
+        return Err(short_buffer(bytes.len(), expected, desc));
     }
-    let mut alpha = try_with_capacity(expected)?;
+    let mut alpha = try_with_capacity(expected).ok_or("allocation failed")?;
     alpha.extend_from_slice(&bytes[..expected]);
-    Some(alpha)
+    Ok(alpha)
 }
 
 /// Build an alpha buffer from a `/Mask [colour-key]` array (§8.9.6.4) over
@@ -421,12 +445,12 @@ mod tests {
     use crate::test_helpers::make_doc_with_stream;
 
     /// Decode object (2, 0) of `doc` as an `SMask`.
-    fn smask_of(doc: &pdf::Document) -> Option<SoftMask> {
+    fn smask_of(doc: &pdf::Document) -> Result<SoftMask, String> {
         decode_smask(&mut ImageDecodeCtx::cpu(doc), (2, 0))
     }
 
     /// Decode object (2, 0) of `doc` as an explicit stencil `/Mask`.
-    fn explicit_of(doc: &pdf::Document) -> Option<SoftMask> {
+    fn explicit_of(doc: &pdf::Document) -> Result<SoftMask, String> {
         decode_explicit_mask(&mut ImageDecodeCtx::cpu(doc), (2, 0))
     }
 
@@ -461,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn alpha_from_decoded_short_buffer_returns_none() {
+    fn alpha_from_decoded_short_buffer_is_an_error() {
         // A bitonal codec that reports 4×4 but produced only 3 bytes must be
         // skipped loudly with the codec named.
         let desc = ImageDescriptor {
@@ -472,7 +496,8 @@ mod tests {
             smask: None,
             filter: crate::resources::image::ImageFilter::Raw,
         };
-        assert!(alpha_from_decoded("JBIG2Decode", &desc).is_none());
+        let err = alpha_from_decoded(&desc).unwrap_err();
+        assert!(err.contains("decoded 3 bytes, expected 16"), "{err}");
     }
 
     #[test]
@@ -488,7 +513,7 @@ mod tests {
             filter: crate::resources::image::ImageFilter::Raw,
         };
         assert_eq!(
-            alpha_from_decoded("CCITTFaxDecode", &desc).unwrap(),
+            alpha_from_decoded(&desc).unwrap(),
             vec![0x00, 0xFF, 0x10, 0xF0]
         );
     }
@@ -523,7 +548,7 @@ mod tests {
         ];
         for (filter, data) in cases {
             let doc = make_doc_with_stream(data, &smask_dict(2, 2, filter));
-            let m = smask_of(&doc).unwrap_or_else(|| panic!("{filter}: SMask must decode"));
+            let m = smask_of(&doc).unwrap_or_else(|e| panic!("{filter}: SMask must decode: {e}"));
             assert_eq!(m.alpha(), &[10, 20, 30, 40], "{filter}");
         }
     }
@@ -608,10 +633,10 @@ mod tests {
 
     /// A truncated (corrupt) `DCTDecode` `SMask` is rejected, not a panic.
     #[test]
-    fn decode_smask_dct_corrupt_returns_none() {
+    fn decode_smask_dct_corrupt_is_an_error() {
         let doc =
             make_doc_with_stream(&[0xFF, 0xD8, 0xFF], &smask_dict(1, 1, "/Filter /DCTDecode"));
-        assert!(smask_of(&doc).is_none());
+        assert!(smask_of(&doc).is_err());
     }
 
     // ── Explicit /Mask (§8.9.6.3) regression ─────────────────────────────────
@@ -656,9 +681,8 @@ mod tests {
         assert_eq!(mask.alpha(), &[0xFF, 0x00, 0xBF]);
     }
 
-    /// A `/Mask` object that is *not* an `ImageMask` stencil must be rejected
-    /// (returns `None`) so the caller blits the base image unmasked rather
-    /// than mis-applying a non-stencil image as alpha.
+    /// A `/Mask` object that is *not* an `ImageMask` stencil is rejected
+    /// rather than applied as alpha.
     #[test]
     fn explicit_mask_rejects_non_imagemask() {
         let doc = crate::test_helpers::make_doc_with_stream(
@@ -666,7 +690,7 @@ mod tests {
             " /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        assert!(explicit_of(&doc).is_none());
+        assert!(explicit_of(&doc).is_err());
     }
 
     // ── Colour-key /Mask (§8.9.6.4) ──────────────────────────────────────────
@@ -729,6 +753,6 @@ mod tests {
             " /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 \
               /ColorSpace /DeviceGray",
         );
-        assert!(explicit_of(&doc).is_none());
+        assert!(explicit_of(&doc).is_err());
     }
 }
