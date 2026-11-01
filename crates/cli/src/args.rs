@@ -18,7 +18,7 @@ fn parse_positive_dpi(s: &str) -> Result<f64, String> {
 
 /// Renders PDF pages to images.
 #[derive(Parser, Debug)]
-#[command(name = "rrocket", about, long_about = None)]
+#[command(name = "rrocket", version, about, long_about = None)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each bool maps to a distinct CLI flag"
