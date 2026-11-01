@@ -289,7 +289,7 @@ impl PageRecorder {
     ///
     /// `wait_page` enforces `state == Submitted` because page rendering
     /// is a strict begin/record/submit/wait cycle.  Transfer-queue
-    /// fences (returned by `submit_transfer`, `upload_async`,
+    /// fences (returned by `submit_transfer` and
     /// `download_async`) ride the same timeline semaphore but DON'T
     /// participate in the page state machine — `submit_transfer` does
     /// not transition the recorder.  Use this method to wait on those

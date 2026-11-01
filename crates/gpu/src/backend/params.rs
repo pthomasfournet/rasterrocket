@@ -1312,11 +1312,7 @@ mod tests {
         fn wait_page(&self, _fence: Self::PageFence) -> super::super::Result<()> {
             unreachable!()
         }
-        fn upload_async(
-            &self,
-            _dst: &Self::DeviceBuffer,
-            _src: &[u8],
-        ) -> super::super::Result<Self::PageFence> {
+        fn upload(&self, _dst: &Self::DeviceBuffer, _src: &[u8]) -> super::super::Result<()> {
             unreachable!()
         }
         fn alloc_device_zeroed(&self, _size: usize) -> super::super::Result<Self::DeviceBuffer> {

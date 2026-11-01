@@ -36,7 +36,7 @@ use super::error::vk_err;
 /// Buffer usage shared by every device buffer in this backend.
 ///
 /// `STORAGE_BUFFER` covers every read/write the compute kernels do.
-/// `TRANSFER_SRC` + `TRANSFER_DST` lets `upload_async` and any
+/// `TRANSFER_SRC` + `TRANSFER_DST` lets `upload` and any
 /// host-readback path use the same buffer without a re-allocation.
 /// `SHADER_DEVICE_ADDRESS` is required for `vkGetBufferDeviceAddress`.
 const DEVICE_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(

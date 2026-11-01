@@ -52,8 +52,8 @@ fn upload_or_warn(
     what: &'static str,
 ) -> bool {
     backend
-        .upload_sync(dst, bytes)
-        .map_err(|e| log::warn!("{op_name}: upload_sync({what}) failed: {e}"))
+        .upload(dst, bytes)
+        .map_err(|e| log::warn!("{op_name}: upload({what}) failed: {e}"))
         .is_ok()
 }
 

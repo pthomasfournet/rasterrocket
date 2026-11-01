@@ -55,11 +55,8 @@ pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
     let data = DeviceBufferGuard::alloc(backend, data_bytes)?;
     let block_sums = DeviceBufferGuard::alloc(backend, block_sums_bytes)?;
 
-    // The upload is ordered before the page's first dispatch by the
-    // backend (same CUDA stream; Vulkan cross-queue barrier at submit),
-    // so its fence is not awaited.
     let input_bytes = bytemuck::cast_slice::<u32, u8>(input);
-    let _upload = backend.upload_async(data.as_ref(), input_bytes)?;
+    backend.upload(data.as_ref(), input_bytes)?;
 
     backend.begin_page()?;
     for phase in [

@@ -226,14 +226,13 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         // all-unsynced, never as spurious convergence.
         let sync_flags = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
 
-        let _up1 = backend.upload_async(
+        backend.upload(
             bitstream.as_ref(),
             bytemuck::cast_slice(&prep.bitstream.words),
         )?;
-        let _up2 = backend.upload_async(codebook.as_ref(), bytemuck::cast_slice(&ac_flat))?;
-        let _up3 = backend.upload_async(dc_codebook.as_ref(), bytemuck::cast_slice(&dc_flat))?;
-        let _up4 =
-            backend.upload_async(mcu_schedule.as_ref(), bytemuck::cast_slice(&mcu_sched_host))?;
+        backend.upload(codebook.as_ref(), bytemuck::cast_slice(&ac_flat))?;
+        backend.upload(dc_codebook.as_ref(), bytemuck::cast_slice(&dc_flat))?;
+        backend.upload(mcu_schedule.as_ref(), bytemuck::cast_slice(&mcu_sched_host))?;
 
         Ok(Self {
             bitstream,
@@ -610,7 +609,7 @@ pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
 
     let flags_bytes = (setup.num_subsequences as usize) * 4;
     let offsets_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
-    let _up5 = backend.upload_async(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
+    backend.upload(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
 
     let symbols_buf = DeviceBufferGuard::alloc_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel

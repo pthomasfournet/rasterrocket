@@ -257,9 +257,7 @@ fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
     let (backend, _serial) = shared_backend();
     let buf = backend.alloc_device(SIZE).expect("alloc_device");
     let sentinel = vec![0xCDu8; SIZE];
-    backend
-        .upload_sync(&buf, &sentinel)
-        .expect("upload sentinel");
+    backend.upload(&buf, &sentinel).expect("upload sentinel");
 
     backend.begin_page().expect("begin_page");
     backend

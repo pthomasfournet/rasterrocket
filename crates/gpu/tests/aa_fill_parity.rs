@@ -218,10 +218,10 @@ mod vulkan {
             .expect("alloc row_starts");
         let d_cov = backend.alloc_device(n_pixels).expect("alloc coverage");
         backend
-            .upload_sync(&d_intersects, intersect_bytes)
+            .upload(&d_intersects, intersect_bytes)
             .expect("upload intersects");
         backend
-            .upload_sync(&d_row_starts, row_start_bytes)
+            .upload(&d_row_starts, row_start_bytes)
             .expect("upload row_starts");
 
         backend.begin_page().expect("begin_page");

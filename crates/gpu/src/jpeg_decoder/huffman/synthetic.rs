@@ -81,8 +81,8 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
         // Uploads are ordered before the first recorded kernel by the
         // backend (same CUDA stream; Vulkan cross-queue barrier at
         // submit), so the fences are not awaited.
-        let _up1 = backend.upload_async(bitstream.as_ref(), bytemuck::cast_slice(&stream.words))?;
-        let _up2 = backend.upload_async(codebook.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
+        backend.upload(bitstream.as_ref(), bytemuck::cast_slice(&stream.words))?;
+        backend.upload(codebook.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
 
         Ok(Self {
             bitstream,
@@ -295,7 +295,7 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
     }
 
     let offsets = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
-    let _up = backend.upload_async(offsets.as_ref(), bytemuck::cast_slice(&offsets_host))?;
+    backend.upload(offsets.as_ref(), bytemuck::cast_slice(&offsets_host))?;
     let symbols = DeviceBufferGuard::alloc_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel
     // does not reach reads back clean.

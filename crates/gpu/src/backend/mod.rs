@@ -226,7 +226,7 @@ pub trait GpuBackend: Send + Sync {
     /// An opaque host-pinned buffer handle.
     type HostBuffer: Send + Sync;
     /// A synchronisation primitive returned by `submit_page` /
-    /// `submit_transfer` / `upload_async`.
+    /// `submit_transfer`.
     ///
     /// `Clone` is required so callers can stash a fence inside a long-
     /// lived structure (e.g. `DeviceImageCache` keeps one per cached
@@ -277,7 +277,7 @@ pub trait GpuBackend: Send + Sync {
     /// `alloc_device_zeroed`.
     ///
     /// **Deferred-free contract:** the caller must ensure no
-    /// outstanding `PageFence` (from `upload_async`, `download_async`,
+    /// outstanding `PageFence` (from `download_async`,
     /// `submit_transfer`, or `submit_page`) still references this
     /// buffer. CUDA's stream-recorded events make a same-stream free
     /// always safe; Vulkan has no equivalent and `vkDestroyBuffer`
@@ -300,7 +300,7 @@ pub trait GpuBackend: Send + Sync {
     /// Free a host-pinned buffer previously returned by `alloc_host_pinned`.
     ///
     /// Same deferred-free contract as `free_device`: the caller must
-    /// ensure no outstanding `PageFence` (from `upload_async`,
+    /// ensure no outstanding `PageFence` (from
     /// `download_async`, `submit_transfer`, or `submit_page`) still
     /// references this buffer.
     fn free_host_pinned(&self, buf: Self::HostBuffer);
@@ -406,22 +406,21 @@ pub trait GpuBackend: Send + Sync {
     /// Returns `BackendError` if the fence wait fails or the GPU raised an error.
     fn wait_page(&self, fence: Self::PageFence) -> Result<()>;
 
-    /// Initiate an asynchronous host-to-device upload; returns a fence.
+    /// Copy `src` into `dst[..src.len()]`.
     ///
-    /// `src.len()` must not exceed the device-side capacity of `dst`.
-    /// Implementations should reject the call rather than truncate.
+    /// Returns once the copy has completed: `src` may be overwritten or
+    /// freed as soon as the call returns, whatever kind of host memory
+    /// backs it, including memory from [`Self::alloc_host_pinned`]. Device
+    /// work recorded afterwards reads the copied bytes.
     ///
-    /// **Submission timing.** Vulkan accumulates the copy on the
-    /// transfer queue and does NOT submit until `submit_transfer` is
-    /// called; the returned fence still becomes valid at that point.
-    /// CUDA enqueues on the calling thread's stream, equivalent to
-    /// immediate submission. Either way, callers wait on the fence rather than
-    /// caring which model is in play.
+    /// `src.len()` must not exceed the device-side capacity of `dst`;
+    /// an oversize source is rejected, never truncated. An empty `src`
+    /// is a no-op.
     ///
     /// # Errors
-    /// Returns `BackendError` if the upload cannot be enqueued, or if
-    /// `src.len()` exceeds `dst`'s device capacity.
-    fn upload_async(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<Self::PageFence>;
+    /// Returns `BackendError` if the copy fails, or if `src.len()`
+    /// exceeds `dst`'s device capacity.
+    fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()>;
 
     /// Initiate an asynchronous device-to-host download; returns a
     /// handle that ties the user-visible `dst` buffer's lifetime to the
@@ -460,8 +459,8 @@ pub trait GpuBackend: Send + Sync {
     where
         Self: Sized;
 
-    /// Submit any work accumulated by `upload_async`,
-    /// `download_async`, or `alloc_device_zeroed` on the transfer
+    /// Submit any work accumulated by `download_async` or
+    /// `alloc_device_zeroed` on the transfer
     /// queue/stream. Returns a fence whose signal indicates that all
     /// transfers issued since the last `submit_transfer` have
     /// completed.
@@ -471,12 +470,10 @@ pub trait GpuBackend: Send + Sync {
     /// recorded event. Vulkan implementations end and submit the
     /// transfer command buffer here.
     ///
-    /// Callers don't need to invoke this between `upload_async` and a
-    /// later `submit_page` that reads the same buffer — the per-page
-    /// recorder inserts the right cross-queue barriers. It exists for
-    /// the cache's bulk-promotion paths that need to flush a batch of
-    /// uploads/downloads without immediately consuming the result on
-    /// the compute queue.
+    /// Work recorded by a later `submit_page` is ordered after these
+    /// transfers without this call; it exists for paths that flush a
+    /// batch of transfers without consuming the result on the compute
+    /// queue.
     ///
     /// # Errors
     /// Returns `BackendError` if the submission fails or no work is
@@ -484,7 +481,7 @@ pub trait GpuBackend: Send + Sync {
     fn submit_transfer(&self) -> Result<Self::PageFence>;
 
     /// Block the calling thread until a transfer fence (from
-    /// `upload_async`, `submit_transfer`, or `alloc_device_zeroed`)
+    /// `submit_transfer` or `alloc_device_zeroed`)
     /// signals.
     ///
     /// Distinct from `wait_page` only because Vulkan tracks the

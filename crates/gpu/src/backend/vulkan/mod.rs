@@ -13,7 +13,7 @@
 //! - `pipeline` — descriptor set layouts + pipeline cache (lazy SPIR-V compile).
 //! - `select` — device selector parsing and physical-device ranking.
 //! - `recorder` — per-page command buffer + timeline-semaphore fence.
-//! - `transfer` — `upload_async` helper (probes for dedicated transfer queue).
+//! - `transfer` — synchronous staged upload and download.
 
 mod device;
 mod error;
@@ -83,19 +83,6 @@ impl VulkanBackend {
             memory,
             device,
         })
-    }
-
-    /// Synchronously upload `src` into `dst[0..src.len()]`.
-    ///
-    /// Used by tests and short-running setup paths where blocking is OK.
-    /// The async version (`upload_async`) is the trait method; it returns
-    /// a fence the caller must wait on.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if `src.len()` exceeds `dst.size()` or if
-    /// any underlying Vulkan call fails.
-    pub fn upload_sync(&self, dst: &memory::DeviceBuffer, src: &[u8]) -> Result<()> {
-        self.transfer.upload_sync(&self.memory, dst, src)
     }
 
     /// Synchronously download `src[0..dst.len()]` into `dst`.
@@ -259,10 +246,8 @@ impl GpuBackend for VulkanBackend {
         self.recorder.wait_page(fence)
     }
 
-    fn upload_async(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<Self::PageFence> {
-        // Sync today; ROADMAP tracks the async transfer-queue follow-up.
-        self.transfer.upload_sync(&self.memory, dst, src)?;
-        Ok(PageFence::immediate())
+    fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
+        self.transfer.upload_sync(&self.memory, dst, src)
     }
 
     fn download_async<'a>(

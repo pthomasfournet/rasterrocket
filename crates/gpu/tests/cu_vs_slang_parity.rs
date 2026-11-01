@@ -46,8 +46,8 @@ fn run_composite_vulkan(src: &[u8], dst_in: &[u8]) -> Vec<u8> {
     let backend = VulkanBackend::new().expect("VulkanBackend::new");
     let d_src = backend.alloc_device(src.len()).expect("alloc src");
     let d_dst = backend.alloc_device(dst_in.len()).expect("alloc dst");
-    backend.upload_sync(&d_src, src).expect("upload src");
-    backend.upload_sync(&d_dst, dst_in).expect("upload dst");
+    backend.upload(&d_src, src).expect("upload src");
+    backend.upload(&d_dst, dst_in).expect("upload dst");
 
     backend.begin_page().expect("begin_page");
     backend
@@ -176,10 +176,8 @@ fn run_soft_mask_vulkan(pixels_in: &[u8], mask: &[u8]) -> Vec<u8> {
     let backend = VulkanBackend::new().expect("VulkanBackend::new");
     let d_pixels = backend.alloc_device(pixels_in.len()).expect("alloc pixels");
     let d_mask = backend.alloc_device(mask.len()).expect("alloc mask");
-    backend
-        .upload_sync(&d_pixels, pixels_in)
-        .expect("upload pixels");
-    backend.upload_sync(&d_mask, mask).expect("upload mask");
+    backend.upload(&d_pixels, pixels_in).expect("upload pixels");
+    backend.upload(&d_mask, mask).expect("upload mask");
 
     backend.begin_page().expect("begin_page");
     backend
@@ -288,8 +286,8 @@ fn run_icc_clut_vulkan(cmyk: &[u8], clut: &[u8]) -> Vec<u8> {
     let d_cmyk = backend.alloc_device(cmyk.len()).expect("alloc cmyk");
     let d_rgb = backend.alloc_device(cmyk.len() / 4 * 3).expect("alloc rgb");
     let d_clut = backend.alloc_device(clut.len()).expect("alloc clut");
-    backend.upload_sync(&d_cmyk, cmyk).expect("upload cmyk");
-    backend.upload_sync(&d_clut, clut).expect("upload clut");
+    backend.upload(&d_cmyk, cmyk).expect("upload cmyk");
+    backend.upload(&d_clut, clut).expect("upload clut");
 
     backend.begin_page().expect("begin_page");
     backend
@@ -499,15 +497,11 @@ fn run_blit_vulkan(
     let d_dst = backend.alloc_device(dst_bytes).expect("alloc dst");
     let d_cols = backend.alloc_device(cols_bytes.len()).expect("alloc cols");
     let d_rows = backend.alloc_device(rows_bytes.len()).expect("alloc rows");
-    backend.upload_sync(&d_src, src).expect("upload src");
+    backend.upload(&d_src, src).expect("upload src");
     let zeros = vec![0u8; dst_bytes];
-    backend.upload_sync(&d_dst, &zeros).expect("zero dst");
-    backend
-        .upload_sync(&d_cols, cols_bytes)
-        .expect("upload cols");
-    backend
-        .upload_sync(&d_rows, rows_bytes)
-        .expect("upload rows");
+    backend.upload(&d_dst, &zeros).expect("zero dst");
+    backend.upload(&d_cols, cols_bytes).expect("upload cols");
+    backend.upload(&d_rows, rows_bytes).expect("upload rows");
 
     backend.begin_page().expect("begin_page");
     backend

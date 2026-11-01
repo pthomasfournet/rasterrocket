@@ -175,8 +175,8 @@ impl GpuBackend for CudaBackend {
         self.recorder.wait_page(fence)
     }
 
-    fn upload_async(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<Self::PageFence> {
-        transfer::upload_async(&self.ctx, dst, src)
+    fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
+        transfer::upload(&self.ctx, dst, src)
     }
 
     fn download_async<'a>(

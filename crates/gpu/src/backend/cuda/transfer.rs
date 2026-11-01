@@ -1,6 +1,6 @@
 //! CUDA host↔device transfer helpers.
 //!
-//! `upload_async` / `download_async` are implemented here so the trait
+//! `upload` / `download_async` are implemented here so the trait
 //! impl in `mod.rs` stays a thin dispatch table. Both queue on the
 //! calling thread's stream alongside its compute work, so a later
 //! `record_*` kernel launch from the same thread observes the transfer
@@ -41,37 +41,32 @@ fn check_transfer_len(src_len: usize, dst_capacity: usize, op_label: &'static st
     Ok(())
 }
 
-/// Initiate an asynchronous host→device upload on the calling thread's
-/// stream and return a fence that signals when the copy
-/// completes.
+/// Copy `src` into `dst` on the calling thread's stream and return
+/// once the copy has completed.
 ///
-/// Empty `src` is a no-op: cudarc rejects zero-byte transfers and the
-/// trait contract is satisfied by returning an immediately-signalled
-/// fence (one recorded after no preceding work).
-pub(super) fn upload_async(
-    ctx: &Arc<GpuCtx>,
-    dst: &CudaSlice<u8>,
-    src: &[u8],
-) -> Result<PageFence> {
-    check_transfer_len(src.len(), dst.len(), "upload_async")?;
+/// `cuMemcpyHtoDAsync` reads a page-locked source by DMA after the call
+/// returns, and the driver does not guarantee that a pageable source is
+/// staged before return either. Waiting on an event recorded after the
+/// copy is therefore what ends the read of `src` within its borrow.
+/// The event also orders every earlier item on the stream, so the call
+/// returns after previously queued kernels as well.
+///
+/// Empty `src` is a no-op, since cudarc rejects zero-byte transfers.
+pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &CudaSlice<u8>, src: &[u8]) -> Result<()> {
+    check_transfer_len(src.len(), dst.len(), "upload")?;
     if src.is_empty() {
-        return PageRecorder::record_fence(ctx);
+        return Ok(());
     }
     let stream = ctx.stream();
     let (dptr, _sync) = dst.device_ptr(&stream);
-    // Safety: `dptr` came from cudarc for `dst` on `stream`;
-    // src.as_ptr() is borrowed for the duration of this call (cudarc
-    // copies the bytes asynchronously but the caller-supplied src is
-    // valid through `src`'s lifetime in this function — the trait
-    // contract requires callers to keep `src` alive until the fence
-    // signals, but cudarc actually performs the copy eagerly into
-    // pinned-host-driver-mapped memory if `src` is unpinned, so the
-    // safety property reduces to "src is valid right now", which the
-    // borrow checker guarantees.
+    // SAFETY: `dptr` addresses `dst` on `stream` and `src.len()` does
+    // not exceed `dst.len()` (checked above). The fence wait below
+    // returns only after the copy has finished reading `src`, which is
+    // borrowed for the whole call.
     unsafe {
         cudarc::driver::result::memcpy_htod_async(dptr, src, stream.cu_stream()).map_err(be)?;
     }
-    PageRecorder::record_fence(ctx)
+    PageRecorder::record_fence(ctx)?.synchronize()
 }
 
 /// Initiate an asynchronous device→host download on the calling
@@ -150,8 +145,7 @@ mod tests {
         };
         let payload: Vec<u8> = (0u8..=255).collect();
         let dst = b.alloc_device(payload.len()).expect("alloc");
-        let upload_fence = b.upload_async(&dst, &payload).expect("upload");
-        b.wait_transfer(upload_fence).expect("wait upload");
+        b.upload(&dst, &payload).expect("upload");
 
         let mut readback = vec![0u8; payload.len()];
         let handle = b.download_async(&dst, &mut readback).expect("download");
@@ -166,12 +160,10 @@ mod tests {
             return;
         };
         let dst = b.alloc_device(4).expect("alloc");
-        let err = b
-            .upload_async(&dst, &[0u8; 8])
-            .expect_err("oversize must fail");
+        let err = b.upload(&dst, &[0u8; 8]).expect_err("oversize must fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("upload_async") && msg.contains("exceeds"),
+            msg.contains("upload") && msg.contains("exceeds"),
             "unexpected error: {msg}"
         );
     }
@@ -199,16 +191,36 @@ mod tests {
     }
 
     #[test]
-    fn empty_upload_returns_immediate_fence() {
+    fn empty_upload_is_a_no_op() {
         let Some(b) = try_backend() else {
             eprintln!("skipping: no CUDA device");
             return;
         };
-        // Can't alloc a zero-byte device buffer — but we can prove the
-        // empty-src path returns Ok against any non-zero dst.
+        // A zero-byte device buffer cannot be allocated; the empty source
+        // is checked against a non-empty destination instead.
         let dst = b.alloc_device(4).expect("alloc");
-        let fence = b.upload_async(&dst, &[]).expect("empty upload ok");
-        b.wait_transfer(fence).expect("wait empty fence");
+        b.upload(&dst, &[]).expect("empty upload ok");
+    }
+
+    /// A page-locked source is read by DMA after `cuMemcpyHtoDAsync`
+    /// returns; `upload` must not return before that read has finished.
+    #[test]
+    fn pinned_source_is_reusable_when_upload_returns() {
+        const LEN: usize = 16 << 20;
+        let Some(b) = try_backend() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let mut pinned = b.alloc_host_pinned(LEN).expect("pinned");
+        let host = pinned.as_mut_slice().expect("pinned slice");
+        host.fill(0x5A);
+        let dst = b.alloc_device(LEN).expect("alloc");
+        b.upload(&dst, host).expect("upload");
+        host.fill(0xC3);
+        let mut readback = vec![0u8; LEN];
+        let handle = b.download_async(&dst, &mut readback).expect("download");
+        b.wait_download(handle).expect("wait download");
+        assert!(readback.iter().all(|&v| v == 0x5A));
     }
 
     #[test]
@@ -218,9 +230,7 @@ mod tests {
             return;
         };
         let dst = b.alloc_device(64).expect("alloc");
-        b.upload_async(&dst, &[0xAB; 64])
-            .and_then(|f| b.wait_transfer(f))
-            .expect("setup");
+        b.upload(&dst, &[0xAB; 64]).expect("setup");
         let mut readback = vec![0u8; 64];
         let handle: DownloadHandle<'_, CudaBackend> =
             b.download_async(&dst, &mut readback).expect("download");

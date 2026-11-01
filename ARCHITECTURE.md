@@ -642,7 +642,7 @@ GpuBackend trait          (backend/mod.rs)
 
 The trait surface is `begin_page → record_* → submit_page → wait_page`, with
 six `record_*` methods (one per kernel) plus `alloc_device` / `alloc_host_pinned`
-/ `upload_async`.  GATs (`type DeviceBuffer`) make it usable only as a generic
+/ `upload`.  GATs (`type DeviceBuffer`) make it usable only as a generic
 parameter, not `dyn` — callers monomorphise per backend.  The renderer
 holds `Option<Arc<GpuCtx>>` for CUDA and `Option<Arc<VulkanBackend>>` for
 Vulkan as parallel fields rather than going through the trait at every call

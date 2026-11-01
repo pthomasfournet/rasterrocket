@@ -4,9 +4,6 @@
 //! buffer (grown to the high-water-mark of any transfer seen so far)
 //! and a one-time-submit command buffer on the compute queue, with
 //! `vkQueueWaitIdle` for completion.
-//!
-//! The dedicated-transfer-queue path (overlap DMA with rendering) is a
-//! follow-up — see ROADMAP Phase 10 Task 3 follow-ups.
 
 #![expect(
     clippy::significant_drop_tightening,
@@ -94,9 +91,8 @@ impl TransferContext {
         })
     }
 
-    /// Synchronous upload: copy `src` into `dst[0..src.len()]`, block
-    /// until complete.  Used by the trait's `upload_async` (which hands
-    /// back an already-signalled fence today) and by tests.
+    /// Copy `src` into `dst[0..src.len()]` through the staging buffer and
+    /// block until the copy has completed; backs the trait's `upload`.
     pub(super) fn upload_sync(
         &self,
         allocator: &SlabAllocator,

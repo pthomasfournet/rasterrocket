@@ -242,22 +242,14 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
         let dc_buf = DeviceBufferGuard::alloc(&self.backend, dc_bytes).map_err(be)?;
         let px_buf = DeviceBufferGuard::alloc_zeroed(&self.backend, px_bytes).map_err(be)?;
 
-        // Fences from upload_async are intentionally dropped: on CUDA, uploads
-        // enqueue on the same stream as the subsequent kernel launch, so stream
-        // ordering guarantees the data is visible before the kernel reads it.
-        // On Vulkan, the per-page recorder inserts the required cross-queue
-        // barriers between the transfer and compute queues.
-        let _u1 = self
-            .backend
-            .upload_async(coef_buf.as_ref(), bytemuck::cast_slice(coefficients))
+        self.backend
+            .upload(coef_buf.as_ref(), bytemuck::cast_slice(coefficients))
             .map_err(be)?;
-        let _u2 = self
-            .backend
-            .upload_async(qt_buf.as_ref(), bytemuck::cast_slice(qtables))
+        self.backend
+            .upload(qt_buf.as_ref(), bytemuck::cast_slice(qtables))
             .map_err(be)?;
-        let _u3 = self
-            .backend
-            .upload_async(dc_buf.as_ref(), bytemuck::cast_slice(dc_values))
+        self.backend
+            .upload(dc_buf.as_ref(), bytemuck::cast_slice(dc_values))
             .map_err(be)?;
 
         self.backend.begin_page().map_err(be)?;
