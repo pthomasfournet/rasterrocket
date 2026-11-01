@@ -344,3 +344,50 @@ fn characters_outside_the_cjk_collections_are_drawn_through_their_block_font() {
         assert!(b[3] - b[1] <= 4 && b[2] - b[0] > 15, "{value}: {b:?}");
     }
 }
+
+/// The Ahem test font, every glyph a full-em square.
+const AHEM: &[u8] = include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf");
+
+/// The dark pixels of a text field showing `XXX` in an embedded `Ahem`
+/// composite font with the `Identity-H` encoding and no `ToUnicode` map,
+/// whose `CIDToGIDMap` is `cid_to_gid` (`/Identity` or a stream reference).
+fn identity_h_field(cid_to_gid: &str, extra_map: Option<Vec<u8>>) -> usize {
+    let widget = "/FT /Tx /T (a) /Rect [10 30 190 70] /V (XXX) /DA (/Ahem 20 Tf 0 g)";
+    let mut extra = vec![
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /Ahem /Encoding /Identity-H \
+          /DescendantFonts [7 0 R] >>"
+            .to_vec(),
+        format!(
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Ahem \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+             /FontDescriptor 8 0 R /DW 1000 /CIDToGIDMap {cid_to_gid} >>"
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /Ahem /Flags 4 /FontBBox [0 -200 1000 800] \
+          /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 \
+          /FontFile2 9 0 R >>"
+            .to_vec(),
+        stream_object("", AHEM),
+    ];
+    extra.extend(extra_map);
+    dark_in(
+        document_with_fonts("/Ahem 6 0 R", "", &[widget], extra),
+        [12, 32, 188, 68],
+    )
+}
+
+#[test]
+fn an_identity_h_field_font_without_to_unicode_encodes_through_its_program() {
+    // Three 20 pt squares hold about 1200 dark pixels; the letters of a
+    // fallback font far fewer.
+    let identity = identity_h_field("/Identity", None);
+    assert!(identity > 900, "{identity} dark pixels");
+    // CID 300 + g selects glyph g: the inverse map gives each glyph's CID.
+    let map: Vec<u8> = (0u16..300)
+        .map(|_| 0)
+        .chain(0u16..256)
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    let shifted = identity_h_field("10 0 R", Some(stream_object("", &map)));
+    assert!(shifted > 900, "{shifted} dark pixels");
+}

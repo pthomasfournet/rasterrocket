@@ -18,6 +18,7 @@
 //! that were missing.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use pdf::{Dictionary, Object};
 
@@ -285,8 +286,10 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
         self.missing
     }
 
-    /// The encoder of the font resource `font`.
-    fn encoder(&mut self, font: &[u8]) -> &UnicodeEncoder {
+    /// The encoder of the font resource `font`, holding the codes of the
+    /// characters of `text` its encoding does not invert but its embedded
+    /// program does (see [`Self::invert_program`]).
+    fn encoder(&mut self, font: &[u8], text: &str) -> &UnicodeEncoder {
         if !self.encoders.contains_key(font) {
             let renderer = &mut *self.renderer;
             let active = renderer.font_cache.select(&renderer.resources, font);
@@ -294,14 +297,77 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
                 .encoders
                 .insert(font.to_vec(), UnicodeEncoder::of(&active.descriptor));
         }
+        self.invert_program(font, text);
         &self.encoders[font]
+    }
+
+    /// Add to the encoder of `font` the codes of the characters of `text`
+    /// it lacks, found through the font's embedded program, when `font` is
+    /// a composite font with the identity `CMap`, no `ToUnicode` map and no
+    /// character collection, whose codes therefore name glyphs alone: the
+    /// program's Unicode charmap gives a character's glyph, and the
+    /// inverse of `CIDToGIDMap` (the identity when absent) its CID, which
+    /// is its code.  A glyph the program reaches only through its own CID
+    /// mapping, as in a CID-keyed CFF program, is not inverted.
+    fn invert_program(&mut self, font: &[u8], text: &str) {
+        let Some(encoder) = self.encoders.get_mut(font) else {
+            return;
+        };
+        let wanted: Vec<char> = text
+            .chars()
+            .filter(|&c| !c.is_control() && encoder.encode(c).is_none())
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let renderer = &mut *self.renderer;
+        let active = renderer.font_cache.select(&renderer.resources, font);
+        let descriptor = Arc::clone(&active.descriptor);
+        let Some(enc) = descriptor.cid_encoding.as_ref() else {
+            return;
+        };
+        if !enc.encoding_cmap.identity
+            || enc.to_unicode.is_some()
+            || descriptor.substitute.script.is_some()
+        {
+            return;
+        }
+        let Some(face) = renderer
+            .font_cache
+            .get_or_load(&active, font, [12.0, 0.0, 0.0, 12.0])
+            .filter(|face| !face.substitute && face.has_unicode_cmap())
+        else {
+            return;
+        };
+        let mut cid_of_gid: Option<HashMap<u32, u32>> = None;
+        for c in wanted {
+            let gid = face.raw_get_char_index(u32::from(c));
+            if gid == 0 || face.program().cid_to_gid(gid) != Some(gid) {
+                continue;
+            }
+            let cid = enc.cid_to_gid.as_ref().map_or(Some(gid), |table| {
+                cid_of_gid
+                    .get_or_insert_with(|| {
+                        let mut inverse = HashMap::new();
+                        for (cid, &g) in (0u32..).zip(table.iter()).skip(1) {
+                            let _ = inverse.entry(g).or_insert(cid);
+                        }
+                        inverse
+                    })
+                    .get(&gid)
+                    .copied()
+            });
+            if let Some(bytes) = cid.and_then(|cid| code_bytes(&enc.encoding_cmap, cid)) {
+                let _ = encoder.codes.insert(c, bytes);
+            }
+        }
     }
 }
 
 impl Typesetter for FontTypesetter<'_, '_> {
     fn runs(&mut self, font: &[u8], text: &str) -> Vec<Run> {
         let fallbacks = Fallbacks::for_text(text);
-        let encoder = self.encoder(font);
+        let encoder = self.encoder(font, text);
         let question = encoder.encode('?').unwrap_or(b"?");
         let mut runs: Vec<Run> = Vec::new();
         let mut blocks = BTreeSet::new();
