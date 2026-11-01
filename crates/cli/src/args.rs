@@ -220,6 +220,7 @@ pub(crate) struct Args {
     ///
     /// Use `--ram` to override the heuristic: redirect to tmpfs even when
     /// the user-supplied prefix would otherwise be treated as a real path.
+    /// Without `/dev/shm`, `--ram` is refused; pass `--ram-path` instead.
     /// Mutually exclusive with `--no-ram`.
     #[arg(long = "ram", conflicts_with = "no_ram")]
     pub ram: bool,
@@ -232,6 +233,7 @@ pub(crate) struct Args {
 
     /// Override the tmpfs directory used by RAM-backed output. Implies the
     /// RAM redirect. Default is a fresh `/dev/shm/rrocket-<pid>-<nanos>/`.
+    /// On systems without `/dev/shm` (macOS), point it into a RAM disk.
     /// The path must not exist: the directory is created for the run and
     /// removed, with its contents, on exit.
     #[arg(long = "ram-path", value_name = "PATH", conflicts_with = "no_ram")]

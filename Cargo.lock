@@ -1267,6 +1267,7 @@ version = "2.0.0"
 dependencies = [
  "clap",
  "env_logger",
+ "libc",
  "mimalloc",
  "rasterrocket",
  "rasterrocket-camera",

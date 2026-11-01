@@ -45,11 +45,14 @@ rayon       = "1"
 env_logger  = { workspace = true }
 mimalloc    = { version = "0.1", default-features = false }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc        = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [lints.rust]
-# cli binary: unsafe_code only allowed in pdf_bridge (the FFI crate)
+# One scoped `#[expect]` reads the macOS memory sysctls; nothing else is unsafe.
 unsafe_code    = "deny"
 missing_docs   = "allow"   # binary crate; public docs are not required
 unused_results = "warn"

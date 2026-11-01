@@ -236,17 +236,17 @@ that says so.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--ram` | (heuristic) | Force RAM-backed output even when `OUTPUT_PREFIX` looks like a path. Mutually exclusive with `--no-ram`. |
+| `--ram` | (heuristic) | Force RAM-backed output even when `OUTPUT_PREFIX` looks like a path. Refused on systems without `/dev/shm`; use `--ram-path` there. Mutually exclusive with `--no-ram`. |
 | `--no-ram` | (heuristic) | Force on-disk output. Disables the default tmpfs redirect for bare stems and writes pages exactly at `OUTPUT_PREFIX`. Mutually exclusive with `--ram`. |
 | `--ram-path PATH` | `/dev/shm/rrocket-<pid>-<nanos>/` | Override the tmpfs directory used by RAM-backed output. Implies `--ram`. The path must not exist: rrocket creates the directory and removes it, with everything in it, on exit like the default one; an existing path is refused. |
 
-By default `rrocket` redirects rendered pages to a freshly-created tmpfs directory under `/dev/shm` whenever the output prefix is a bare stem, because writing to disk is 10–20× slower than RAM and dominates wall time on JPEG-heavy workloads. The directory is printed on stderr at startup and on stdout (so `dir=$(rrocket doc.pdf out)` captures it), and the prefix's file name is the stem inside it (`<dir>/out-1.ppm`, …). On systems without `/dev/shm` (macOS, the BSDs) there is no default redirect: a bare stem writes to the working directory, and only `--ram` or `--ram-path` select RAM-backed output.
+By default `rrocket` redirects rendered pages to a freshly-created tmpfs directory under `/dev/shm` whenever the output prefix is a bare stem, because writing to disk is 10–20× slower than RAM and dominates wall time on JPEG-heavy workloads. The directory is printed on stderr at startup and on stdout (so `dir=$(rrocket doc.pdf out)` captures it), and the prefix's file name is the stem inside it (`<dir>/out-1.ppm`, …). On systems without `/dev/shm` (macOS, the BSDs) there is no default redirect: a bare stem writes to the working directory, `--ram` is refused, and RAM-backed output needs `--ram-path` pointing into a RAM disk you have mounted. On macOS, `diskutil erasevolume APFS rrocket $(diskutil image attach --noMount ram://4194304)` mounts a 2 GiB one at `/Volumes/rrocket`; there it measured no faster than the internal SSD, which is already close to memory speed for page-sized writes.
 
 **The RAM directory is removed when rrocket exits**, whether every page rendered or not. RAM output is for a consumer that reads pages while rrocket is still running; to keep the pages, give a path-like prefix (`./out`, `/data/out`) or pass `--no-ram`. A process killed by a signal, or aborted by a panic, leaves the directory behind; `/dev/shm` is cleared at reboot.
 
 **Bare stem vs path heuristic:** prefixes containing `/` or starting with `.` (e.g. `./out`, `/tmp/p`, `out/dir/p`) are treated as path-like and write to disk literally. Bare stems (e.g. `out`, `p`, `cover`) are redirected to tmpfs. `--ram` overrides the heuristic to redirect anyway; `--no-ram` overrides it to write to disk anyway.
 
-A built-in spill policy reads `MemAvailable` from `/proc/meminfo` before each page is written (at most once per 100 ms) and writes subsequent pages to disk, at `OUTPUT_PREFIX`, once it drops below 1 GiB, with a one-shot warning printed to stderr.
+A built-in spill policy reads the kernel's available-memory estimate before each page is written (at most once per 100 ms) and writes subsequent pages to disk, at `OUTPUT_PREFIX`, once it drops below 1 GiB, with a one-shot warning printed to stderr. The estimate is `MemAvailable` from `/proc/meminfo` on Linux and `kern.memorystatus_level` × `hw.memsize` on macOS; elsewhere there is none, and every page is written to disk with a warning that says so.
 
 ---
 

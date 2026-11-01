@@ -10,7 +10,8 @@
 //! downstream consumers that read `out-NNN.ppm` keep working unchanged.
 //!
 //! The default applies only where `/dev/shm` exists; elsewhere (macOS, the
-//! BSDs) a bare stem is written to the working directory like any prefix.
+//! BSDs) a bare stem is written to the working directory like any prefix,
+//! and RAM output needs `--ram-path` on a RAM disk the user has mounted.
 //!
 //! The redirect is suppressed when `OUTPUT_PREFIX` looks like a path
 //! (contains `/`, starts with `.`) — those are taken literally as the user
@@ -54,9 +55,9 @@ use crate::args::Args;
 const RAM_SAFETY_MARGIN: u64 = 1024 * 1024 * 1024;
 
 /// How long a memory-availability reading is cached before being re-probed.
-/// Re-reading `/proc/meminfo` is ~10µs but happens N×M times per render
+/// A probe costs ~10µs but would otherwise run N×M times per render
 /// (N pages × M threads); 100ms is fast enough to react to a sudden memory
-/// crunch and slow enough that the syscall cost is negligible.
+/// crunch and slow enough that the probe cost is negligible.
 const PROBE_TTL: Duration = Duration::from_millis(100);
 
 /// RAII handle to a tmpfs directory created for `--ram` mode.
@@ -95,7 +96,7 @@ pub(crate) struct SpillPolicy {
     /// `(ram_prefix, disk_prefix)`. When `--ram` is off both slots hold the
     /// user's original prefix and `next_prefix` short-circuits.
     targets: (String, String),
-    /// Cached `MemAvailable` reading + when it was taken. Refreshed on TTL
+    /// Cached available-memory reading + when it was taken. Refreshed on TTL
     /// expiry; the lock is contended only when the cached value is older
     /// than [`PROBE_TTL`].
     probe: Mutex<MemoryProbe>,
@@ -129,41 +130,48 @@ impl SpillPolicy {
             return ram_prefix;
         }
 
-        if self.ram_has_room() {
-            ram_prefix
-        } else {
-            if !self.spill_announced.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "rrocket: free memory dropped below safety margin; \
-                     writing subsequent pages to disk with prefix {disk_prefix}"
-                );
-            }
-            disk_prefix
+        let available = self.available_bytes();
+        if available.is_some_and(|bytes| bytes >= RAM_SAFETY_MARGIN) {
+            return ram_prefix;
         }
+        if !self.spill_announced.swap(true, Ordering::Relaxed) {
+            let reason = if available.is_some() {
+                "free memory dropped below safety margin"
+            } else {
+                "cannot read free memory on this platform"
+            };
+            eprintln!(
+                "rrocket: {reason}; writing subsequent pages to disk with prefix {disk_prefix}"
+            );
+        }
+        disk_prefix
     }
 
-    fn ram_has_room(&self) -> bool {
+    /// Available memory in bytes, re-probed at most once per [`PROBE_TTL`];
+    /// `None` when the platform offers no reading.
+    fn available_bytes(&self) -> Option<u64> {
         let mut probe = self
             .probe
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         probe.refresh_if_stale();
-        probe.last_available_bytes >= RAM_SAFETY_MARGIN
+        probe.last_available_bytes
     }
 }
 
-/// Cached `/proc/meminfo` reading. Refreshed on TTL.
+/// Cached [`available_memory`] reading. Refreshed on TTL.
 struct MemoryProbe {
     /// When `last_available_bytes` was read; `None` before the first read.
     last_read: Option<Instant>,
-    last_available_bytes: u64,
+    /// The last reading; `None` when the platform offers none.
+    last_available_bytes: Option<u64>,
 }
 
 impl MemoryProbe {
     const fn new() -> Self {
         Self {
             last_read: None,
-            last_available_bytes: 0,
+            last_available_bytes: None,
         }
     }
 
@@ -174,17 +182,64 @@ impl MemoryProbe {
         // Avoid two threads both refreshing at the same instant: each just
         // does its own read; the cost is bounded (~10µs) and we don't want a
         // global condvar on the hot path.
-        self.last_available_bytes = read_mem_available().unwrap_or(0);
+        self.last_available_bytes = available_memory();
         self.last_read = Some(Instant::now());
     }
 }
 
+/// The kernel's estimate, in bytes, of the memory a new workload can
+/// allocate without swapping; `None` where the platform offers no such
+/// estimate or it cannot be read.
+#[cfg(target_os = "linux")]
+fn available_memory() -> Option<u64> {
+    read_mem_available()
+}
+
+/// The kernel's estimate, in bytes, of the memory a new workload can
+/// allocate without swapping: `kern.memorystatus_level`, the percentage of
+/// memory that is free or reclaimable (file cache, compressible pages), of
+/// `hw.memsize`.  The free-page count alone is no such estimate: the file
+/// cache and the compressor keep it near zero on a healthy system.
+#[cfg(target_os = "macos")]
+fn available_memory() -> Option<u64> {
+    let level = u32::from_ne_bytes(sysctl_bytes(c"kern.memorystatus_level")?);
+    let total = u64::from_ne_bytes(sysctl_bytes(c"hw.memsize")?);
+    (level <= 100).then(|| total / 100 * u64::from(level))
+}
+
+/// No available-memory estimate on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const fn available_memory() -> Option<u64> {
+    None
+}
+
+/// The value of sysctl `name`, when it is exactly `N` bytes long.
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "sysctlbyname is the only interface to the kernel's memory statistics"
+)]
+fn sysctl_bytes<const N: usize>(name: &std::ffi::CStr) -> Option<[u8; N]> {
+    let mut buf = [0_u8; N];
+    let mut len = N;
+    // SAFETY: `name` is NUL-terminated; `buf` is writable for `len` bytes,
+    // and the kernel writes at most `len` bytes, storing the count written
+    // in `len`; a null `newp` with `newlen` 0 sets nothing.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && len == N).then_some(buf)
+}
+
 /// Read `MemAvailable` from `/proc/meminfo` (in bytes). Returns `None` if
-/// the file is missing or malformed (non-Linux, container without /proc, …).
-///
-/// `MemAvailable` is the kernel's own estimate of how much memory can be
-/// allocated by a new workload without swapping — strictly better than
-/// `MemFree` for this kind of admission control.
+/// the file is missing or malformed (a container without /proc, …).
+#[cfg(target_os = "linux")]
 fn read_mem_available() -> Option<u64> {
     let text = fs::read_to_string("/proc/meminfo").ok()?;
     for line in text.lines() {
@@ -265,7 +320,7 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
         create_owned_dir(&dir)?;
         dir
     } else {
-        let dir = default_ram_dir();
+        let dir = default_ram_dir(Path::new(RAM_ROOT))?;
         fs::create_dir_all(&dir)?;
         dir
     };
@@ -327,17 +382,31 @@ fn create_owned_dir(dir: &Path) -> std::io::Result<()> {
 /// tmpfs mount under which the default RAM directories are created.
 const RAM_ROOT: &str = "/dev/shm";
 
-/// Build a default `/dev/shm/rrocket-<pid>-<nanos>` path.
+/// Build a default `<root>/rrocket-<pid>-<nanos>` path.
 ///
 /// `pid + nanos since epoch` is enough entropy for parallel CLI invocations
 /// to never collide in practice — the only collision risk is two invocations
 /// in the same nanosecond from the same pid, which is impossible.
-fn default_ram_dir() -> PathBuf {
+///
+/// # Errors
+/// [`std::io::ErrorKind::NotFound`] naming `root` and the remedy when `root`
+/// is not a directory.
+fn default_ram_dir(root: &Path) -> std::io::Result<PathBuf> {
+    if !root.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "--ram writes under {}, which this system does not have; \
+                 pass --ram-path DIR on a RAM disk instead",
+                root.display()
+            ),
+        ));
+    }
     let pid = std::process::id();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    Path::new(RAM_ROOT).join(format!("rrocket-{pid}-{nanos}"))
+    Ok(root.join(format!("rrocket-{pid}-{nanos}")))
 }
 
 #[cfg(test)]
@@ -359,20 +428,57 @@ mod tests {
     }
 
     #[test]
-    fn default_dir_is_under_dev_shm() {
-        let p = default_ram_dir();
-        assert!(p.starts_with("/dev/shm"), "got {}", p.display());
+    fn default_dir_is_under_its_root() {
+        let root = tempfile::tempdir().unwrap();
+        let p = default_ram_dir(root.path()).unwrap();
+        assert!(p.starts_with(root.path()), "got {}", p.display());
     }
 
     #[test]
-    fn read_mem_available_returns_plausible_value_on_linux() {
-        // On any Linux host this should yield a positive value; on other
-        // platforms it returns None, which is fine — the SpillPolicy treats
-        // 0 as "tight" and falls back to disk, which is the safe behaviour.
-        if let Some(bytes) = read_mem_available() {
-            assert!(bytes > 0, "MemAvailable parsed as zero");
-            assert!(bytes < 1024_u64.pow(5), "implausibly large MemAvailable");
-        }
+    fn default_dir_without_its_root_names_the_remedy() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("absent");
+        let err = default_ram_dir(&missing).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("--ram-path"), "{err}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_memory_is_plausible() {
+        let bytes = available_memory().expect("this platform has a memory estimate");
+        assert!(bytes > 0, "available memory read as zero");
+        assert!(
+            bytes < 1024_u64.pow(5),
+            "implausibly large available memory"
+        );
+    }
+
+    #[test]
+    fn unreadable_memory_spills_to_disk() {
+        let policy = SpillPolicy {
+            targets: ("/ram/out".into(), "/disk/out".into()),
+            probe: Mutex::new(MemoryProbe {
+                last_read: Some(Instant::now()),
+                last_available_bytes: None,
+            }),
+            spill_announced: AtomicBool::new(false),
+        };
+        assert_eq!(policy.next_prefix(), "/disk/out");
+        assert!(policy.spill_announced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn comfortable_memory_keeps_pages_in_ram() {
+        let policy = SpillPolicy {
+            targets: ("/ram/out".into(), "/disk/out".into()),
+            probe: Mutex::new(MemoryProbe {
+                last_read: Some(Instant::now()),
+                last_available_bytes: Some(RAM_SAFETY_MARGIN),
+            }),
+            spill_announced: AtomicBool::new(false),
+        };
+        assert_eq!(policy.next_prefix(), "/ram/out");
     }
 
     #[test]
