@@ -86,12 +86,14 @@ fn outputs(dir: &Path) -> Vec<String> {
     names
 }
 
-/// `(magic, width, height, pixel bytes)` of a binary PNM file.
+/// `(magic, width, height, pixel bytes)` of a binary PNM file; a P4 bitmap
+/// has no maximum value.
 fn read_pnm(path: &Path) -> (String, u32, u32, Vec<u8>) {
     let bytes = std::fs::read(path).expect("read PNM");
+    let header_fields = if bytes.starts_with(b"P4") { 3 } else { 4 };
     let mut fields = Vec::new();
     let mut pos = 0;
-    while fields.len() < 4 {
+    while fields.len() < header_fields {
         while bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
@@ -101,10 +103,12 @@ fn read_pnm(path: &Path) -> (String, u32, u32, Vec<u8>) {
         }
         fields.push(String::from_utf8_lossy(&bytes[start..pos]).into_owned());
     }
-    // One whitespace byte separates the maximum value from the raster.
+    // One whitespace byte separates the header from the raster.
     let data = bytes[pos + 1..].to_vec();
     let num = |s: &str| s.parse::<u32>().expect("PNM header number");
-    assert_eq!(fields[3], "255", "maximum value");
+    if header_fields == 4 {
+        assert_eq!(fields[3], "255", "maximum value");
+    }
     (fields[0].clone(), num(&fields[1]), num(&fields[2]), data)
 }
 
@@ -176,6 +180,43 @@ fn png_output_has_the_png_signature() {
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     // IHDR: width and height, big-endian, at bytes 16..24.
     assert_eq!(&png[16..24], &[0, 0, 0, 100, 0, 0, 0, 50]);
+}
+
+#[test]
+fn mono_tiff_carries_the_pbm_bits_under_every_compression() {
+    let (dir, input) = workdir(&two_page_pdf());
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["-r", "72", "--mono", "-l", "1"],
+    ));
+    let (magic, width, height, pbm) = read_pnm(&dir.path().join("out-1.pbm"));
+    assert_eq!((magic.as_str(), width, height), ("P4", 100, 50));
+    for method in ["none", "packbits", "lzw", "deflate", "g4"] {
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &[
+                "-r",
+                "72",
+                "--mono",
+                "-l",
+                "1",
+                "--tiff",
+                "--tiffcompression",
+                method,
+            ],
+        ));
+        let file = std::fs::read(dir.path().join("out-1.tif")).expect("read TIFF");
+        let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+        assert_eq!(decoder.dimensions().expect("dimensions"), (100, 50));
+        let tiff::decoder::DecodingResult::U8(bits) = decoder.read_image().expect("decodes") else {
+            panic!("1-bit samples read as bytes");
+        };
+        // The reader inverts WhiteIsZero; PBM stores 1 for black.
+        let black: Vec<u8> = bits.iter().map(|b| !b).collect();
+        assert_eq!(black, pbm, "{method}");
+    }
 }
 
 #[test]

@@ -51,6 +51,8 @@ libc        = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Reads TIFF output back in the end-to-end tests: an independent decoder.
+tiff = { workspace = true }
 
 [lints.rust]
 # One scoped `#[expect]` reads the macOS memory sysctls; nothing else is unsafe.

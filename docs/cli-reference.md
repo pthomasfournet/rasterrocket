@@ -129,16 +129,16 @@ demand. None of these bounds fails the page; the rest of the page renders:
 |---|---|---|
 | _(default)_ | `.ppm` | RGB PPM (Netpbm P6). |
 | `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B). Can combine with `--png`. |
-| `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4, 50% threshold). Can combine with `--png` and `--jpeg`. |
+| `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4, 50% threshold). Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG. |
 | `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. |
 | `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg`. |
-| `--jpegcmyk` | | JPEG in CMYK colour space. Not implemented: refused at startup ("--jpegcmyk output is not implemented; use --png or the default PPM output"), exit status 1, nothing rendered. |
-| `--tiff` | | TIFF. Not implemented, refused as `--jpegcmyk`. |
+| `--jpegcmyk` | | JPEG in CMYK colour space. Not implemented: refused at startup ("--jpegcmyk output is not implemented; use --jpeg, --png or the default PPM output"), exit status 1, nothing rendered. |
+| `--tiff` | `.tif` | Baseline TIFF, one file per page: RGB, gray with `--gray`, or 1 bit per pixel with `--mono` (`WhiteIsZero`, as fax readers expect). The resolution tags carry `-r` / `--rx` / `--ry`. |
+| `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
 
 `--gray` and `--mono` are mutually exclusive, and at most one of `--png`,
-`--jpeg`, `--jpegcmyk` and `--tiff` may be given; a conflicting pair exits
-with status 1.
+`--jpeg` and `--tiff` may be given; a conflicting pair exits with status 1.
 
 **Extension matrix:**
 
@@ -147,6 +147,7 @@ with status 1.
 | _(default / PPM)_ | `.pbm` | `.pgm` | `.ppm` |
 | `--png` | `.png` | `.png` | `.png` |
 | `--jpeg` | `.jpg` | `.jpg` | `.jpg` |
+| `--tiff` | `.tif` | `.tif` | `.tif` |
 
 ---
 

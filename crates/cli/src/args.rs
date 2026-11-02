@@ -4,7 +4,6 @@ use camera::CameraOptions;
 use clap::Parser;
 use pdf_raster::{BackendPolicy, RenderPurpose, RenderRegion, SessionConfig};
 
-/// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
 /// Parse `--jpegopt`: comma-separated `quality=N` (0–100),
 /// `progressive=y|n` and `optimize=y|n`, as `pdftoppm -jpegopt` takes them.
 fn parse_jpeg_options(s: &str) -> Result<encode::JpegOptions, String> {
@@ -38,6 +37,7 @@ fn parse_jpeg_options(s: &str) -> Result<encode::JpegOptions, String> {
     Ok(options)
 }
 
+/// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
 fn parse_positive_dpi(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .parse()
@@ -165,15 +165,21 @@ pub(crate) struct Args {
     #[arg(long)]
     pub jpegcmyk: bool,
 
-    /// TIFF output: not implemented; refused at startup.
+    /// Output TIFF.
     #[arg(long)]
     pub tiff: bool,
+
+    /// TIFF compression: `none` (default), `packbits`, `lzw`, `deflate`,
+    /// or, with --mono, the fax codings `g3` (one-dimensional), `g3-2d`
+    /// and `g4`.
+    #[arg(long = "tiffcompression", value_name = "METHOD", value_enum)]
+    pub tiffcompression: Option<TiffMethod>,
 
     /// Output grey-scale PPM/PNG.
     #[arg(long = "gray")]
     pub gray: bool,
 
-    /// Output 1-bit mono PPM/PNG.
+    /// Output 1-bit mono: PBM, or a two-level PNG, JPEG or TIFF.
     #[arg(long = "mono")]
     pub mono: bool,
 
@@ -433,6 +439,12 @@ impl Args {
         self.resolution_y.or(self.resolution).unwrap_or(150.0)
     }
 
+    /// The resolution `(x, y)` recorded in output files that carry one:
+    /// the resolution flags, also under the `--scale-to` flags.
+    pub(crate) fn dpi(&self) -> (f64, f64) {
+        (self.x_dpi(), self.y_dpi())
+    }
+
     /// Device pixels per point `(x, y)` for a page of `width_pts × height_pts`
     /// (after `/Rotate`): from `--scale-to` when given, else from
     /// `--scale-to-x` / `--scale-to-y`, an axis given neither taking the
@@ -486,23 +498,43 @@ impl Args {
     /// Returns `Err` with a human-readable message naming the alternative.
     /// Call this once at startup, before any page is rendered.
     pub(crate) fn validate_format_flags(&self) -> Result<(), String> {
-        for (set, flag) in [(self.jpegcmyk, "--jpegcmyk"), (self.tiff, "--tiff")] {
-            if set {
-                return Err(format!(
-                    "{flag} output is not implemented; use --png or the default PPM output"
-                ));
-            }
+        if self.jpegcmyk {
+            return Err(
+                "--jpegcmyk output is not implemented; use --jpeg, --png or the default PPM output"
+                    .to_owned(),
+            );
         }
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
-        if self.png && self.jpeg {
-            return Err("--png and --jpeg are mutually exclusive".to_owned());
+        if [self.png, self.jpeg, self.tiff]
+            .iter()
+            .filter(|&&f| f)
+            .count()
+            > 1
+        {
+            return Err("--png, --jpeg and --tiff are mutually exclusive".to_owned());
         }
         if self.jpegopt.is_some() && !self.jpeg {
             return Err("--jpegopt applies to --jpeg output only".to_owned());
         }
-        Ok(())
+        match self.tiffcompression {
+            Some(_) if !self.tiff => {
+                Err("--tiffcompression applies to --tiff output only".to_owned())
+            }
+            Some(TiffMethod::Jpeg) => Err(
+                "JPEG-compressed TIFF is not written; use --jpeg for JPEG files, \
+                 or --tiffcompression deflate for compact lossless TIFF"
+                    .to_owned(),
+            ),
+            Some(method @ (TiffMethod::G3 | TiffMethod::G3TwoD | TiffMethod::G4)) if !self.mono => {
+                Err(format!(
+                    "--tiffcompression {} codes bilevel pages; add --mono",
+                    method.name()
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Resolved output format.
@@ -511,8 +543,65 @@ impl Args {
             OutputFormat::Png
         } else if self.jpeg {
             OutputFormat::Jpeg(self.jpegopt.unwrap_or_default())
+        } else if self.tiff {
+            OutputFormat::Tiff(
+                self.tiffcompression
+                    .unwrap_or(TiffMethod::None)
+                    .compression(self.y_dpi()),
+            )
         } else {
             OutputFormat::Ppm
+        }
+    }
+}
+
+/// `--tiffcompression` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum TiffMethod {
+    /// Uncompressed.
+    None,
+    /// `PackBits` run-length coding.
+    #[value(name = "packbits")]
+    PackBits,
+    /// LZW.
+    Lzw,
+    /// Deflate (zlib).
+    Deflate,
+    /// CCITT Group 3, one-dimensional (MH); needs --mono.
+    #[value(name = "g3")]
+    G3,
+    /// CCITT Group 3, two-dimensional (MR); needs --mono.
+    #[value(name = "g3-2d")]
+    G3TwoD,
+    /// CCITT Group 4 (MMR); needs --mono.
+    #[value(name = "g4")]
+    G4,
+    /// JPEG-in-TIFF: accepted for a clear refusal, not written.
+    #[value(hide = true)]
+    Jpeg,
+}
+
+impl TiffMethod {
+    /// The name the method is given on the command line.
+    fn name(self) -> String {
+        clap::ValueEnum::to_possible_value(&self)
+            .map_or_else(String::new, |v| v.get_name().to_owned())
+    }
+
+    /// The writer's compression at `y_dpi` vertical resolution.  Group 3
+    /// two-dimensional coding takes the ITU-T T.4 period: 4 at fine
+    /// resolution (at least 150 lines per inch), 2 at standard.
+    fn compression(self, y_dpi: f64) -> encode::TiffCompression {
+        match self {
+            Self::None | Self::Jpeg => encode::TiffCompression::None,
+            Self::PackBits => encode::TiffCompression::PackBits,
+            Self::Lzw => encode::TiffCompression::Lzw,
+            Self::Deflate => encode::TiffCompression::Deflate,
+            Self::G3 => encode::TiffCompression::Group3 { k: None },
+            Self::G3TwoD => encode::TiffCompression::Group3 {
+                k: Some(if y_dpi >= 150.0 { 4 } else { 2 }),
+            },
+            Self::G4 => encode::TiffCompression::Group4,
         }
     }
 }
@@ -526,6 +615,8 @@ pub(crate) enum OutputFormat {
     Png,
     /// JPEG, gray under `--gray` and `--mono`.
     Jpeg(encode::JpegOptions),
+    /// TIFF, gray under `--gray` and bilevel under `--mono`.
+    Tiff(encode::TiffCompression),
 }
 
 impl OutputFormat {
@@ -535,6 +626,7 @@ impl OutputFormat {
     /// - PPM + gray → `.pgm` (P5 grayscale Netpbm, 8-bit)
     /// - PNG + gray/mono → `.png` (grayscale PNG)
     /// - JPEG → `.jpg`, gray or colour
+    /// - TIFF → `.tif`, colour, gray or bilevel
     /// - All other combinations use the format's natural extension.
     pub(crate) const fn extension_with_mode(self, gray: bool, mono: bool) -> &'static str {
         match (self, mono, gray) {
@@ -543,6 +635,7 @@ impl OutputFormat {
             (Self::Ppm, false, false) => "ppm",
             (Self::Png, _, _) => "png",
             (Self::Jpeg(_), _, _) => "jpg",
+            (Self::Tiff(_), _, _) => "tif",
         }
     }
 }
@@ -925,13 +1018,50 @@ mod page_list_tests {
 
     #[test]
     fn unimplemented_formats_are_refused_up_front() {
-        for flag in ["--jpegcmyk", "--tiff"] {
-            let err = Args::parse_from(["rrocket", flag, "in.pdf", "out"])
-                .validate_format_flags()
-                .unwrap_err();
-            assert!(err.starts_with(flag) && err.contains("--png"), "{err}");
-        }
+        let err = Args::parse_from(["rrocket", "--jpegcmyk", "in.pdf", "out"])
+            .validate_format_flags()
+            .unwrap_err();
+        assert!(
+            err.starts_with("--jpegcmyk") && err.contains("--jpeg,"),
+            "{err}"
+        );
         assert!(base_args().validate_format_flags().is_ok());
+    }
+
+    /// `flags` parsed between the program name and the operands.
+    fn args_with(flags: &[&str]) -> Args {
+        let mut argv = vec!["rrocket"];
+        argv.extend_from_slice(flags);
+        argv.extend(["in.pdf", "out"]);
+        Args::parse_from(argv)
+    }
+
+    #[test]
+    fn tiff_compression_resolves_and_its_misuse_is_refused() {
+        let tiff = args_with(&["--tiff"]);
+        assert!(tiff.validate_format_flags().is_ok());
+        assert_eq!(
+            tiff.output_format(),
+            OutputFormat::Tiff(encode::TiffCompression::None)
+        );
+        assert_eq!(tiff.output_format().extension_with_mode(false, true), "tif");
+        for (dpi, k) in [("196", 4), ("98", 2)] {
+            let fax = args_with(&["--tiff", "--mono", "--tiffcompression", "g3-2d", "-r", dpi]);
+            assert!(fax.validate_format_flags().is_ok());
+            assert_eq!(
+                fax.output_format(),
+                OutputFormat::Tiff(encode::TiffCompression::Group3 { k: Some(k) })
+            );
+        }
+        for (flags, needle) in [
+            (&["--tiffcompression", "lzw"][..], "--tiff output only"),
+            (&["--tiff", "--tiffcompression", "jpeg"], "--jpeg"),
+            (&["--tiff", "--tiffcompression", "g4"], "g4 codes bilevel"),
+            (&["--tiff", "--png"], "mutually exclusive"),
+        ] {
+            let err = args_with(flags).validate_format_flags().unwrap_err();
+            assert!(err.contains(needle), "{flags:?}: {err}");
+        }
     }
 
     #[test]
@@ -969,11 +1099,8 @@ mod page_list_tests {
         assert!(jpeg.validate_format_flags().is_ok());
         assert!(matches!(jpeg.output_format(), OutputFormat::Jpeg(o) if o.quality == 40));
         for flags in [&["--jpegopt", "quality=40"][..], &["--jpeg", "--png"]] {
-            let mut argv = vec!["rrocket"];
-            argv.extend_from_slice(flags);
-            argv.extend(["in.pdf", "out"]);
             assert!(
-                Args::parse_from(argv).validate_format_flags().is_err(),
+                args_with(flags).validate_format_flags().is_err(),
                 "{flags:?}"
             );
         }

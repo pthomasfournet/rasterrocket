@@ -29,10 +29,9 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**JPEG and TIFF output are not implemented.** `--jpeg`, `--jpegcmyk` and
-`--tiff` are refused at startup ("--jpeg output is not implemented; use
---png or the default PPM output"), before the document is opened; PPM, PGM,
-PBM and PNG work.
+**CMYK JPEG output is not implemented.** `--jpegcmyk` is refused at
+startup, before the document is opened; PPM, PGM, PBM, PNG, JPEG (`--jpeg`)
+and TIFF (`--tiff`) work, the last also fax-coded (on master).
 
 **GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
 `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
@@ -2193,8 +2192,8 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ## Phase 13 — Output to the operating system: print and fax (planned, after v2.0.0)
 
-**Status: planned, not started.** Nothing below exists in the tree, and none
-of it is part of v2.0.0.
+**Status: in progress on master, unreleased.** Fax layers 1 and 2 are on
+master (2026-11-01); layers 3 and 4 and printing are not started.
 
 **Printing through the OS spooler.** No device or driver code of our own.
 `rrocket --print [--printer NAME] [--copies N]` renders each page at the
@@ -2205,9 +2204,11 @@ spooler, behind a feature, on Windows. Parity gap: poppler's `pdftocairo` has
 context.
 
 **Fax, in layers.**
-1. TIFF output with compression none, PackBits, Deflate, LZW, G3 or G4. This
-   fills today's refused `--tiff` and matches `pdftoppm -tiff`.
-2. A CCITT Group 3 / Group 4 encoder (the `crates/ccitt` fork decodes only).
+1. **Done.** TIFF output (`--tiff`, `--tiffcompression none|packbits|lzw|
+   deflate|g3|g3-2d|g4`), as `pdftoppm -tiff`; fax-coded pages read back
+   pixel-exact through libtiff and the `tiff` crate.
+2. **Done.** A CCITT Group 3 (MH, MR) and Group 4 encoder in the
+   `crates/ccitt` fork, round-tripped through its decoder.
 3. A `--fax` preset writing TIFF Class F: 1728 px wide, 204 × 196 dpi (fine)
    or 204 × 98 dpi (standard) through the per-axis resolution, 1 bit, G4 by
    default.

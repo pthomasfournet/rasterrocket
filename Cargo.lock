@@ -1290,6 +1290,7 @@ dependencies = [
  "rasterrocket-render",
  "rayon",
  "tempfile",
+ "tiff",
 ]
 
 [[package]]

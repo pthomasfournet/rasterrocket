@@ -4,7 +4,9 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write as _};
 
 use color::{Gray8, Rgb8};
-use encode::{EncodeError, write_jpeg, write_pbm, write_pgm, write_png, write_ppm};
+use encode::{
+    EncodeError, TiffImage, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
+};
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
 use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with, rgb_to_gray};
@@ -214,6 +216,9 @@ pub(crate) fn encode_to_path(
             OutputFormat::Ppm => write_ppm(rgb, out)?,
             OutputFormat::Png => write_png(rgb, out)?,
             OutputFormat::Jpeg(options) => write_jpeg(rgb, options, out)?,
+            OutputFormat::Tiff(compression) => {
+                write_tiff(TiffImage::Rgb(rgb), args.dpi(), compression, out)?;
+            }
         }
         Ok(())
     })
@@ -234,12 +239,18 @@ fn encode_gray_to_path(
                 OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, out)?,
                 OutputFormat::Png => write_png::<Gray8, _>(&mono, out)?,
                 OutputFormat::Jpeg(options) => write_jpeg(&mono, options, out)?,
+                OutputFormat::Tiff(compression) => {
+                    write_tiff(TiffImage::Bilevel(&mono), args.dpi(), compression, out)?;
+                }
             }
         } else {
             match format {
                 OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, out)?,
                 OutputFormat::Png => write_png::<Gray8, _>(gray, out)?,
                 OutputFormat::Jpeg(options) => write_jpeg(gray, options, out)?,
+                OutputFormat::Tiff(compression) => {
+                    write_tiff(TiffImage::Gray(gray), args.dpi(), compression, out)?;
+                }
             }
         }
         Ok(())
