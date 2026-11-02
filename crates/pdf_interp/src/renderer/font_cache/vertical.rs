@@ -19,25 +19,40 @@ pub(crate) enum VerticalFallback {
     /// vertical em box: a mark in the lower-left quarter moves to the
     /// upper-right one, a centred mark stays.
     Reposition,
+    /// Moved [`SMALL_KANA_SHIFT_EM`] right and up.
+    Raise,
 }
+
+/// The translation, in em along each axis, of a small kana standing in
+/// for its vertical form.  The `vert` forms of the small kana of Noto Sans
+/// CJK JP move them by 0.11–0.17 em right and 0.10–0.13 em up, those of
+/// Noto Serif CJK JP by 0.15–0.16 em right and 0.13–0.15 em up.
+pub(crate) const SMALL_KANA_SHIFT_EM: f64 = 0.12;
 
 /// How the horizontal glyph of `code` stands in for the vertical form of
 /// `code`; `None` when it is drawn as it is.
 ///
 /// The classes follow the vertical orientation of Unicode Standard Annex
-/// #50: code points with a transformed-upright vertical form (ideographic
-/// comma and full stop, their full-width and half-width forms, small kana,
-/// spacing sound marks) are repositioned; upright ones (vertical
-/// presentation forms, which are already vertical, degree and prime signs,
-/// pointing hands, scissors, geta mark, squared words, full-width
-/// exclamation and question marks) are drawn as they are; every other
-/// character with a vertical form (brackets, dashes, arrows, box drawing,
-/// the long-vowel mark, the wave dash) is rotated.
+/// #50:
+///
+/// - [`VerticalFallback::Reposition`]: the ideographic comma and full
+///   stop, their full-width and half-width forms, and the spacing sound
+///   marks (U+3001, 3002, FF0C, FF0E, FF61, FF64, 309B, 309C).
+/// - [`VerticalFallback::Raise`]: the small kana (hiragana, katakana, the
+///   phonetic extensions U+31F0–31FF and the half-width small katakana
+///   U+FF67–FF6F).
+/// - `None`, drawn as it is: the vertical presentation forms (U+FE10–FE19,
+///   FE30–FE48), which are already vertical, the degree and prime signs,
+///   the pointing hands, scissors, geta mark, squared words and the
+///   full-width exclamation and question marks.
+/// - [`VerticalFallback::Rotate`]: every other character, among them the
+///   brackets, dashes, arrows, box drawing, the long-vowel mark, the wave
+///   dash and the horizontal compatibility forms U+FE49–FE4F.
 #[must_use]
 pub(crate) const fn vertical_fallback(code: u32) -> Option<VerticalFallback> {
     match code {
         0xFE10..=0xFE19
-        | 0xFE30..=0xFE4F
+        | 0xFE30..=0xFE48
         | 0x00B0
         | 0x2032
         | 0x2033
@@ -47,15 +62,10 @@ pub(crate) const fn vertical_fallback(code: u32) -> Option<VerticalFallback> {
         | 0x3300..=0x33FF
         | 0xFF01
         | 0xFF1F => None,
-        0x3001
-        | 0x3002
-        | 0xFF0C
-        | 0xFF0E
-        | 0xFF61
-        | 0xFF64
-        | 0xFF67..=0xFF6F
-        | 0x309B
-        | 0x309C
+        0x3001 | 0x3002 | 0xFF0C | 0xFF0E | 0xFF61 | 0xFF64 | 0x309B | 0x309C => {
+            Some(VerticalFallback::Reposition)
+        }
+        0xFF67..=0xFF6F
         | 0x3041
         | 0x3043
         | 0x3045
@@ -80,7 +90,7 @@ pub(crate) const fn vertical_fallback(code: u32) -> Option<VerticalFallback> {
         | 0x30EE
         | 0x30F5
         | 0x30F6
-        | 0x31F0..=0x31FF => Some(VerticalFallback::Reposition),
+        | 0x31F0..=0x31FF => Some(VerticalFallback::Raise),
         _ => Some(VerticalFallback::Rotate),
     }
 }
@@ -93,7 +103,8 @@ const NEGLIGIBLE_EM: f64 = 1e-3;
 /// that draws a horizontal glyph as `fallback` for a CID of vertical
 /// metrics `metrics`.  `bounds` is the glyph's box in em units, which
 /// [`VerticalFallback::Reposition`] needs; `None` when the transform moves
-/// the glyph by less than [`NEGLIGIBLE_EM`].
+/// the glyph by less than [`NEGLIGIBLE_EM`], or `bounds` is `None` for a
+/// glyph to reposition.
 ///
 /// The vertical em box of the CID spans `w1y` downwards from its vertical
 /// origin, which lies at `(vx, vy)` from the horizontal origin (PDF
@@ -116,6 +127,9 @@ pub(crate) fn glyph_transform(
                 2.0f64.mul_add(cy, -(y0 + y1)),
             );
             (dx.abs().max(dy.abs()) >= NEGLIGIBLE_EM).then_some([1.0, 0.0, 0.0, 1.0, dx, dy])
+        }
+        VerticalFallback::Raise => {
+            Some([1.0, 0.0, 0.0, 1.0, SMALL_KANA_SHIFT_EM, SMALL_KANA_SHIFT_EM])
         }
     }
 }
@@ -145,7 +159,7 @@ mod tests {
     /// The classes of the characters with vertical forms.
     #[test]
     fn code_points_classify_by_vertical_orientation() {
-        use VerticalFallback::{Reposition, Rotate};
+        use VerticalFallback::{Raise, Reposition, Rotate};
         for (code, class) in [
             (0x30FC, Some(Rotate)),
             (0x301C, Some(Rotate)),
@@ -154,9 +168,16 @@ mod tests {
             (0x2192, Some(Rotate)),
             (0x3001, Some(Reposition)),
             (0x3002, Some(Reposition)),
-            (0x3041, Some(Reposition)),
-            (0x30C3, Some(Reposition)),
+            (0x309B, Some(Reposition)),
+            (0xFF61, Some(Reposition)),
+            (0x3041, Some(Raise)),
+            (0x30C3, Some(Raise)),
+            (0x31F0, Some(Raise)),
+            (0xFF67, Some(Raise)),
             (0xFE41, None),
+            (0xFE48, None),
+            (0xFE49, Some(Rotate)),
+            (0xFE4F, Some(Rotate)),
             (0x00B0, None),
             (0x3300, None),
             (0xFF01, None),
@@ -198,5 +219,13 @@ mod tests {
             glyph_transform(VerticalFallback::Reposition, FULL_WIDTH, None),
             None
         );
+    }
+
+    /// A small kana is raised by a fixed translation, whatever its box.
+    #[test]
+    fn small_kana_rise_by_a_fixed_shift() {
+        let t = glyph_transform(VerticalFallback::Raise, FULL_WIDTH, None).expect("moves");
+        let shift = SMALL_KANA_SHIFT_EM;
+        assert!(close(apply(t, (0.2, 0.0)), (0.2 + shift, shift)));
     }
 }

@@ -167,9 +167,9 @@ pub(crate) type CidToUnicode = Arc<CollectionUnicode>;
 ///
 /// The table inverts the collection's `UCS2-H` `CMap`.  A vertical-form
 /// CID — one the `UCS2-V` `CMap` maps a code point to in place of the
-/// `UCS2-H` one, and whose own code points it leaves in place — keeps the code points the horizontal one
-/// gives it (vertical presentation forms) followed by the code point it
-/// is the vertical form of.  `None` for a
+/// `UCS2-H` one, and whose own code points it leaves in place — keeps the
+/// code points the horizontal one gives it (vertical presentation forms)
+/// followed by the code point it is the vertical form of.  `None` for a
 /// script without a collection.  Built once per process.
 #[must_use]
 pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
