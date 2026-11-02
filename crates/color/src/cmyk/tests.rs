@@ -366,7 +366,6 @@ fn rgb_to_cmyk_white_is_no_ink() {
 
 #[test]
 fn rgb_to_cmyk_round_trips_in_gamut() {
-    let mut worst = 0;
     for c in (0..=255u8).step_by(32) {
         for m in (0..=255u8).step_by(32) {
             for y in (0..=255u8).step_by(32) {
@@ -375,13 +374,11 @@ fn rgb_to_cmyk_round_trips_in_gamut() {
                 let again = cmyk_to_rgb(back[0], back[1], back[2], back[3]);
                 for i in 0..3 {
                     let d = rgb[i].abs_diff(again[i]);
-                    worst = worst.max(d);
                     assert!(d <= 2, "{rgb:?} -> {back:?} -> {again:?}");
                 }
             }
         }
     }
-    eprintln!("worst round-trip error: {worst}");
 }
 
 #[test]
@@ -436,4 +433,59 @@ fn ink_to_rgb_row_spans_multiple_chunks() {
 #[should_panic(expected = "multiple of 8")]
 fn ink_to_rgb_row_rejects_ragged_input() {
     ink_to_rgb_row(&[0; 9], &[None; 4], &mut [0; 3]);
+}
+
+/// Squared RGB distance between the forward image of `cmy` (K = 0) and `rgb`.
+fn dist2(cmy: [u8; 3], rgb: [u8; 3]) -> f64 {
+    let got = cmyk_to_rgb(cmy[0], cmy[1], cmy[2], 0);
+    (0..3)
+        .map(|i| (f64::from(got[i]) - f64::from(rgb[i])).powi(2))
+        .sum()
+}
+
+#[test]
+fn rgb_to_cmyk_out_of_gamut_is_locally_nearest() {
+    // The table stores real-valued minima; the answer is rounded to bytes
+    // (each channel moves the image by at most ~1 unit per byte) and the
+    // table is interpolated, so a unit step may gain at most 2 RGB units of
+    // distance.  Failures of the previous scheme exceeded 5 units.
+    const ALLOWANCE: f64 = 2.0;
+    let mut samples = vec![
+        [1, 45, 218],
+        [0, 0, 255],
+        [40, 0, 255],
+        [100, 0, 255],
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 255, 255],
+        [255, 0, 255],
+        [255, 255, 0],
+        [0, 0, 0],
+        [128, 0, 200],
+    ];
+    let noise = bytes(300, 99);
+    // [1, 45, 218]: the previous scheme stalled at distance 86; nearest is ~68.
+    let blue = rgb_to_cmyk([1, 45, 218]);
+    assert!(
+        dist2([blue[0], blue[1], blue[2]], [1, 45, 218]).sqrt() < 70.0,
+        "{blue:?}"
+    );
+    samples.extend(noise.as_chunks::<3>().0.iter().copied());
+    for rgb in samples {
+        let cmy = rgb_to_cmyk(rgb);
+        let base = dist2([cmy[0], cmy[1], cmy[2]], rgb).sqrt();
+        for ch in 0..3 {
+            for delta in [-1i16, 1] {
+                let moved = i16::from(cmy[ch]) + delta;
+                let Ok(v) = u8::try_from(moved) else { continue };
+                let mut other = [cmy[0], cmy[1], cmy[2]];
+                other[ch] = v;
+                let d = dist2(other, rgb).sqrt();
+                assert!(
+                    d >= base - ALLOWANCE,
+                    "{rgb:?}: {cmy:?} at {base:.1}, channel {ch} {delta:+} gives {d:.1}"
+                );
+            }
+        }
+    }
 }

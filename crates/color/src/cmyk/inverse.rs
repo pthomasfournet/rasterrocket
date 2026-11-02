@@ -2,23 +2,23 @@
 //!
 //! The forward model restricted to `K = 0` is the trilinear interpolation of
 //! the eight `K = 0` entries of [`CORNERS`](super::CORNERS).  [`rgb_to_cmyk`]
-//! inverts it through a 33³ table over the sRGB cube: each node holds the
-//! CMY triple whose forward image is the node, found by damped Newton
-//! iteration in `f64`; a query is the trilinear interpolation of the eight
-//! surrounding nodes.  Nodes outside the forward gamut hold the clamped
-//! least-residual CMY found by the iteration, so out-of-gamut colours map to
-//! the nearest printable ink amounts rather than failing.
+//! inverts it through a 65³ table over the sRGB cube: each node holds the
+//! CMY triple in `[0, 1]³` minimising the squared RGB distance between its
+//! forward image and the node, found by projected Gauss-Newton in `f64`
+//! (channels at a bound with an outward-pointing gradient are frozen and
+//! the step is solved on the free channels).  In-gamut nodes are exact
+//! preimages; out-of-gamut nodes are the box-constrained least-squares
+//! minimum, a local one since the model is multilinear.  A query is the
+//! trilinear interpolation of the eight surrounding nodes and nothing else.
 
 use std::sync::LazyLock;
 
 use super::{CORNERS, cmyk_to_rgb_row};
 
 /// Nodes per axis of the inverse table.
-const GRID: u8 = 33;
-/// Newton iterations per node.
-const MAX_STEPS: usize = 8;
-/// Newton iterations applied to an interpolated table result.
-const POLISH_STEPS: usize = 1;
+const GRID: u8 = 65;
+/// Projected Gauss-Newton iterations per node.
+const MAX_STEPS: usize = 40;
 /// Pixels converted per stack buffer in [`ink_to_rgb_row`].
 const CHUNK: usize = 256;
 
@@ -79,23 +79,24 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     Some(x)
 }
 
-/// CMY whose forward image best matches `target` (RGB bytes as `f64`),
-/// iterating from the additive complement.
-fn invert_node(target: [f64; 3]) -> [f64; 3] {
-    refine(target.map(|v| 1.0 - v / 255.0), target, MAX_STEPS)
-}
-
-/// Up to `steps` damped, clamped Newton iterations from `x` towards `target`.
+/// CMY in `[0, 1]³` minimising the squared distance of the forward image to
+/// `target` (RGB bytes as `f64`), by projected Gauss-Newton from the
+/// additive complement.
 ///
-/// The residual is non-increasing, so the result is never worse than `x`.
-fn refine(mut x: [f64; 3], target: [f64; 3], steps: usize) -> [f64; 3] {
+/// The residual is non-increasing across iterations.  A channel sitting at a
+/// bound whose cost gradient points out of the box is frozen for the
+/// iteration; the Gauss-Newton system is solved on the remaining channels
+/// and the step is projected back into the box under a halving line search.
+fn invert_node(target: [f64; 3]) -> [f64; 3] {
     const H: f64 = 1.0 / 64.0;
+    let mut x = target.map(|v| 1.0 - v / 255.0);
     let mut err = residual(x, target);
-    for _ in 0..steps {
+    for _ in 0..MAX_STEPS {
         let f0 = forward(x);
+        // The model is affine in each channel separately, so an inward
+        // one-sided difference over any width is exact.
         let mut jac = [[0.0; 3]; 3];
         for col in 0..3 {
-            // One-sided difference stepping inward so the probe stays in [0, 1].
             let dir = if x[col] > 0.5 { -H } else { H };
             let mut probe = x;
             probe[col] += dir;
@@ -104,29 +105,51 @@ fn refine(mut x: [f64; 3], target: [f64; 3], steps: usize) -> [f64; 3] {
                 jac[row][col] = (f1[row] - f0[row]) / dir;
             }
         }
-        let rhs = [0, 1, 2].map(|i| target[i] - f0[i]);
-        let Some(step) = solve3(jac, rhs) else { break };
+        let res = [0, 1, 2].map(|i| f0[i] - target[i]);
+        let grad = [0, 1, 2].map(|c| (0..3).map(|r| jac[r][c] * res[r]).sum::<f64>());
+        let free =
+            [0, 1, 2].map(|c| !((x[c] <= 0.0 && grad[c] > 0.0) || (x[c] >= 1.0 && grad[c] < 0.0)));
+        // Normal equations on the free channels; frozen ones get an identity row.
+        let mut normal = [[0.0; 3]; 3];
+        let mut rhs = [0.0; 3];
+        for i in 0..3 {
+            if free[i] {
+                for j in 0..3 {
+                    if free[j] {
+                        normal[i][j] = (0..3).map(|r| jac[r][i] * jac[r][j]).sum();
+                    }
+                }
+                // Levenberg term keeps near-singular reduced systems solvable.
+                normal[i][i] += 1e-9;
+                rhs[i] = -grad[i];
+            } else {
+                normal[i][i] = 1.0;
+            }
+        }
+        let Some(step) = solve3(normal, rhs) else {
+            break;
+        };
         let mut scale = 1.0;
         let mut improved = false;
-        for _ in 0..4 {
+        for _ in 0..10 {
             let cand = [0, 1, 2].map(|i| step[i].mul_add(scale, x[i]).clamp(0.0, 1.0));
             let e = residual(cand, target);
             if e < err {
+                improved = err - e > 1e-12;
                 x = cand;
                 err = e;
-                improved = true;
                 break;
             }
             scale *= 0.5;
         }
-        if !improved || err < 1e-6 {
+        if !improved || err < 1e-9 {
             break;
         }
     }
     x
 }
 
-/// Inverse table, node `(r, g, b)` at index `(r·33 + g)·33 + b`, CMY in `[0, 1]`.
+/// Inverse table, node `(r, g, b)` at index `(r·65 + g)·65 + b`, CMY in `[0, 1]`.
 static INVERSE: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
     let step = 255.0 / f64::from(GRID - 1);
     let axis = || (0..GRID).map(|i| (f64::from(i) * step).round());
@@ -147,11 +170,11 @@ static INVERSE: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
 
 /// Convert sRGB to CMYK ink bytes with `K = 0`.
 ///
-/// Trilinear lookup in a 33³ inverse of the forward model (built on first
-/// use), followed by one Newton step against the exact target.  The result
-/// maps back through [`cmyk_to_rgb`](super::cmyk_to_rgb) to within two
-/// counts for in-gamut colours; out-of-gamut colours map to the nearest
-/// printable CMY.
+/// Trilinear lookup in a 65³ inverse of the forward model (built on first
+/// use).  The result maps back through [`cmyk_to_rgb`](super::cmyk_to_rgb)
+/// to within two counts for in-gamut colours; out-of-gamut colours map to
+/// the printable CMY minimising the RGB distance, up to table
+/// interpolation.
 #[must_use]
 pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
     let table = &*INVERSE;
@@ -175,17 +198,12 @@ pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
             *o = w.mul_add(v, *o);
         }
     }
-    // Interpolating across the gamut-boundary kink of the inverse leaves a
-    // few counts of error on the boundary axes; one Newton step from the
-    // interpolant removes it.
-    let target = rgb.map(f64::from);
-    let polished = refine(cmy.map(f64::from), target, POLISH_STEPS);
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the value is clamped to [0, 255] and rounded first"
     )]
-    let [c, m, y] = polished.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+    let [c, m, y] = cmy.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
     [c, m, y, 0]
 }
 
