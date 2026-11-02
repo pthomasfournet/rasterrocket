@@ -46,6 +46,9 @@ pub trait Pattern: Send + Sync {
     /// Fill `out` with colour bytes for pixels `x0..=x1` on scanline `y`.
     ///
     /// `out.len()` is guaranteed to be `(x1 - x0 + 1) * ncomps`.
+    ///
+    /// Must not composite: `fill_span` runs while the pipe holds its
+    /// thread-local span buffers, so a nested composite would re-enter them.
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]);
 
     /// Return `true` if this pattern yields the same colour at every coordinate.
@@ -144,11 +147,19 @@ pub struct PipeState<'bmp> {
 
     /// The backdrop of the non-isolated group being painted into, consulted
     /// by the blend function; `None` outside such a group, and for
-    /// `BlendMode::Normal`, which does not consult it.
+    /// `BlendMode::Normal`, which does not consult it -- except that a paint
+    /// with an [`overprint`](Self::overprint) mask inside such a group must
+    /// supply it whatever the blend mode, since the unpainted channels are
+    /// kept relative to it.
     pub backdrop: Option<GroupBackdrop<'bmp>>,
 
     /// The colour channels this paint writes; `None` writes all of them.
-    /// A mask of [`ChannelMask::ALL`] is equivalent to `None`.
+    /// A mask covering every channel of the pixel is equivalent to `None`.
+    ///
+    /// Inside a non-isolated group the group bitmap holds only the group's own
+    /// colour, so the caller must also set [`backdrop`](Self::backdrop); the
+    /// unpainted channels then keep the colour the group composites to over
+    /// that backdrop.
     pub overprint: Option<ChannelMask>,
 }
 
@@ -275,7 +286,7 @@ pub fn render_span<P: Pixel>(
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
     dst_pixels: &mut [u8],
-    dst_alpha: Option<&mut [u8]>,
+    mut dst_alpha: Option<&mut [u8]>,
     shape: Option<&[u8]>,
     x0: i32,
     x1: i32,
@@ -300,23 +311,106 @@ pub fn render_span<P: Pixel>(
         "render_span: alpha or shape length differs from the {count}-pixel span"
     );
 
+    // A mask covering every channel of `P` writes the whole pixel.
+    let full = u8::MAX >> (8 - P::BYTES);
     match pipe.overprint {
-        Some(mask) if mask != ChannelMask::ALL => MASKED_SPAN.with_borrow_mut(|saved| {
+        Some(mask) if mask.bits() & full != full => MASKED_SPAN.with_borrow_mut(|saved| {
             saved.clear();
             saved.extend_from_slice(dst_pixels);
-            render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
-            for (px, old) in dst_pixels
-                .chunks_exact_mut(P::BYTES)
-                .zip(saved.chunks_exact(P::BYTES))
-            {
-                for (channel, (new, old)) in px.iter_mut().zip(old).enumerate() {
-                    if !mask.paints(channel) {
-                        *new = *old;
-                    }
-                }
+            if let Some(a) = dst_alpha.as_deref() {
+                saved.extend_from_slice(a);
             }
+            render_unmasked::<P>(
+                pipe,
+                src,
+                dst_pixels,
+                dst_alpha.as_deref_mut(),
+                shape,
+                x0,
+                x1,
+                y,
+            );
+            let (old_colour, old_alpha) = saved.split_at(dst_pixels.len());
+            restore_unpainted::<P>(
+                pipe,
+                mask,
+                &SpanBefore {
+                    colour: old_colour,
+                    alpha: dst_alpha.as_deref().map(|new| (old_alpha, new)),
+                },
+                dst_pixels,
+                (x0, y),
+            );
         }),
         _ => render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y),
+    }
+}
+
+/// A span's state before a masked paint.
+struct SpanBefore<'a> {
+    /// Colour bytes before the paint.
+    colour: &'a [u8],
+    /// With an alpha plane: its bytes before and after the paint.
+    alpha: Option<(&'a [u8], &'a [u8])>,
+}
+
+/// Give the channels `mask` does not paint the value they had before the
+/// paint.
+///
+/// `old` is the span's state before the paint.  Outside a non-isolated group (`pipe.backdrop`
+/// is `None`) or without an alpha plane the stored bytes are restored
+/// directly.  Inside one the stored colour is the group's own, and an
+/// unpainted channel must keep the colour the group yields over its backdrop:
+/// with `u` the union colour of the group and backdrop before the paint,
+/// `c_bd` the backdrop and `a'` the new group alpha, the stored value becomes
+/// `(u − (1 − a')·c_bd) / a'` clamped to `0..=255`, which composites over
+/// `c_bd` back to `u`.  Where the new alpha is zero, or the backdrop is
+/// transparent, the old bytes are restored.
+fn restore_unpainted<P: Pixel>(
+    pipe: &PipeState<'_>,
+    mask: ChannelMask,
+    old: &SpanBefore<'_>,
+    dst_pixels: &mut [u8],
+    (x0, y): (i32, i32),
+) {
+    let (old_colour, alpha) = (old.colour, old.alpha);
+    let ncomps = P::BYTES;
+    for (i, (px, old_px)) in dst_pixels
+        .chunks_exact_mut(ncomps)
+        .zip(old_colour.chunks_exact(ncomps))
+        .enumerate()
+    {
+        let x = x0.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
+        let group = pipe
+            .backdrop
+            .as_ref()
+            .zip(alpha)
+            .and_then(|(bd, (a_old, a_new))| {
+                let (c_bd, a_bd) = bd.pixel(x, y, ncomps)?;
+                (a_bd > 0 && a_new[i] > 0).then_some((c_bd, a_bd, a_old[i], a_new[i]))
+            });
+        let mut union = [0u8; 8];
+        if let Some((c_bd, a_bd, a_old, _)) = group {
+            let _ = general::union_colour(
+                old_px,
+                u32::from(a_old),
+                c_bd,
+                u32::from(a_bd),
+                &mut union[..ncomps],
+            );
+        }
+        for (channel, (new, &old)) in px.iter_mut().zip(old_px).enumerate() {
+            if mask.paints(channel) {
+                continue;
+            }
+            *new = group.map_or(old, |(c_bd, _, _, a_new)| {
+                let a_new = i32::from(a_new);
+                let num =
+                    i32::from(union[channel]) * 255 - (255 - a_new) * i32::from(c_bd[channel]);
+                let c = (num + a_new / 2) / a_new;
+                u8::try_from(c.clamp(0, 255)).unwrap_or(u8::MAX)
+            });
+        }
     }
 }
 
@@ -877,5 +971,90 @@ mod tests {
         assert!(!m.paints(8));
         assert_eq!(m.bits(), 0b1010);
         assert!((0..8).all(|c| ChannelMask::ALL.paints(c)));
+    }
+
+    /// Paint K through mask `0b1000` into one `DeviceN8` pixel of group-own colour
+    /// `own` / alpha `a_dst`, over an opaque cyan backdrop when `with_backdrop`.
+    fn group_paint(a_dst: u8, a_input: u8, with_backdrop: bool) -> ([u8; 8], u8) {
+        let colour = [200u8, 0, 0, 0, 0, 0, 0, 0];
+        let backdrop = GroupBackdrop {
+            colour: &colour,
+            alpha: None,
+            x0: 0,
+            y0: 0,
+            width: 1,
+            height: 1,
+        };
+        let pipe = PipeState {
+            backdrop: with_backdrop.then_some(backdrop),
+            overprint: Some(ChannelMask::new(0b1000)),
+            ..make_pipe(a_input, BlendMode::Normal)
+        };
+        let mut dst = [100u8, 0, 0, 0, 0, 0, 0, 0];
+        let mut alpha = [a_dst];
+        render_span::<DeviceN8>(
+            &pipe,
+            &PipeSrc::Solid(&INK_K),
+            &mut dst,
+            Some(&mut alpha),
+            None,
+            0,
+            0,
+            0,
+        );
+        (dst, alpha[0])
+    }
+
+    #[test]
+    fn overprint_in_an_empty_group_keeps_the_backdrop_colour() {
+        let (dst, alpha) = group_paint(0, 255, true);
+        assert_eq!(dst[0], 200, "C composites to the backdrop's cyan");
+        assert_eq!(dst[3], 255);
+        assert_eq!(alpha, 255);
+    }
+
+    #[test]
+    fn overprint_in_a_partial_group_preserves_the_composited_colour() {
+        // Own C = 100 at alpha 128 over C = 200: union 149.  After a paint
+        // that lifts alpha to 192, own C = (149*255 - 63*200) / 192 = 132.
+        let (dst, alpha) = group_paint(128, 128, true);
+        assert!(alpha.abs_diff(192) <= 1, "alpha = {alpha}");
+        assert!(dst[0].abs_diff(132) <= 1, "own C = {}", dst[0]);
+        let a = u32::from(alpha);
+        let composited = (a * u32::from(dst[0]) + (255 - a) * 200) / 255;
+        assert!(composited.abs_diff(149) <= 1, "composited C = {composited}");
+    }
+
+    #[test]
+    fn overprint_without_a_backdrop_restores_the_stored_colour() {
+        let (dst, alpha) = group_paint(0, 255, false);
+        assert_eq!(dst[0], 100, "C restored");
+        assert_eq!(dst[3], 255);
+        assert_eq!(alpha, 255, "alpha takes the painted shape");
+    }
+
+    #[test]
+    fn a_mask_covering_the_pixel_width_writes_every_channel() {
+        let colour = [9u8, 9, 9];
+        let paint = |overprint| {
+            let pipe = PipeState {
+                overprint,
+                ..make_pipe(255, BlendMode::Normal)
+            };
+            let mut dst = [1u8, 2, 3];
+            render_span::<Rgb8>(
+                &pipe,
+                &PipeSrc::Solid(&colour),
+                &mut dst,
+                None,
+                None,
+                0,
+                0,
+                0,
+            );
+            dst
+        };
+        assert_eq!(paint(Some(ChannelMask::new(0b111))), [9, 9, 9]);
+        assert_eq!(paint(Some(ChannelMask::new(0b101))), [9, 2, 9]);
     }
 }
