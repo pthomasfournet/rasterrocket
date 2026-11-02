@@ -13,8 +13,9 @@
 //!
 //! # Colour space
 //!
-//! Vertex colours are RGB and the target is an [`Rgb8`] bitmap; a caller
-//! painting another colour space converts the vertex colours first.
+//! Vertex colours are RGB.  [`gouraud_triangle_fill`] composites onto an
+//! [`Rgb8`] bitmap; [`gouraud_triangle_spans`] yields the interpolated RGB
+//! spans for a caller painting another pixel type, which converts them.
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
@@ -91,13 +92,12 @@ impl EdgeMap {
     }
 }
 
-/// Emit one pre-coloured span `[run_x0, run_x1]` from `span_color` into `bitmap`.
+/// Pass the run `[run_x0, run_x1]` of `span_color` to `emit`.
 ///
 /// `buf_x0` is the leftmost x whose colour is stored at `span_color[0]`.
 /// `run_x0 >= buf_x0` must hold; violated only by a logic error in the caller.
 fn emit_run(
-    bitmap: &mut Bitmap<Rgb8>,
-    pipe: &PipeState<'_>,
+    emit: &mut impl FnMut(&[u8], i32, i32, i32),
     span_color: &[u8],
     buf_x0: i32,
     run_x0: i32,
@@ -128,19 +128,7 @@ fn emit_run(
          (run_x0={run_x0} run_x1={run_x1} buf_x0={buf_x0})",
         span_color.len(),
     );
-    let src = RowPattern {
-        data: &span_color[buf_off..buf_end],
-    };
-
-    render_bitmap_span::<Rgb8>(
-        bitmap,
-        pipe,
-        &PipeSrc::Pattern(&src),
-        None,
-        run_x0,
-        run_x1,
-        y,
-    );
+    emit(&span_color[buf_off..buf_end], run_x0, run_x1, y);
 }
 
 /// Fill a single Gouraud-shaded triangle into `bitmap`.
@@ -150,7 +138,33 @@ pub fn gouraud_triangle_fill(
     bitmap: &mut Bitmap<Rgb8>,
     clip: &Clip,
     pipe: &PipeState<'_>,
+    v: [GouraudVertex; 3],
+) {
+    let (width, height) = (bitmap.width, bitmap.height);
+    gouraud_triangle_spans(width, height, clip, v, |colour, x0, x1, y| {
+        render_bitmap_span::<Rgb8>(
+            bitmap,
+            pipe,
+            &PipeSrc::Pattern(&RowPattern { data: colour }),
+            None,
+            x0,
+            x1,
+            y,
+        );
+    });
+}
+
+/// The spans of a single Gouraud-shaded triangle, clipped to `clip`.
+///
+/// On a `width × height` bitmap, `emit(colour, x0, x1, y)` receives the RGB
+/// bytes of the pixels `x0..=x1` of row `y`, three per pixel, in scanline
+/// order.  [`gouraud_triangle_fill`] composites exactly these spans.
+pub fn gouraud_triangle_spans(
+    width: u32,
+    height: u32,
+    clip: &Clip,
     mut v: [GouraudVertex; 3],
+    mut emit: impl FnMut(&[u8], i32, i32, i32),
 ) {
     // A non-finite coordinate has no pixel position: the triangle is empty.
     if !v
@@ -212,12 +226,12 @@ pub fn gouraud_triangle_fill(
         clippy::cast_possible_wrap,
         reason = "bitmap dims are bounded by platform address space"
     )]
-    let bmp_h = bitmap.height as i32;
+    let bmp_h = height as i32;
     #[expect(
         clippy::cast_possible_wrap,
         reason = "bitmap dims are bounded by platform address space"
     )]
-    let bmp_w = bitmap.width as i32;
+    let bmp_w = width as i32;
     let scan_y0 = y0.max(clip.y_min_i).max(0);
     let scan_y2 = y2.min(clip.y_max_i).min(bmp_h - 1);
 
@@ -275,10 +289,10 @@ pub fn gouraud_triangle_fill(
 
         if needs_per_pixel_clip {
             for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
-                emit_run(bitmap, pipe, &span_color, sx0, rx0, rx1, y);
+                emit_run(&mut emit, &span_color, sx0, rx0, rx1, y);
             }
         } else {
-            emit_run(bitmap, pipe, &span_color, sx0, sx0, sx1, y);
+            emit_run(&mut emit, &span_color, sx0, sx0, sx1, y);
         }
     }
 }

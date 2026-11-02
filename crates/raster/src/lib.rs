@@ -62,7 +62,7 @@ pub use screen::HalftoneScreen;
 pub use shading::ColorRamp;
 pub use shading::axial::AxialPattern;
 pub use shading::function::FunctionPattern;
-pub use shading::gouraud::{GouraudVertex, gouraud_triangle_fill};
+pub use shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
 pub use shading::radial::RadialPattern;
 pub use shading::shaded_fill;
 pub use simd::{blend_solid_gray8, blend_solid_rgb8, composite_aa_rgb8_opaque, unpack_mono_row};
