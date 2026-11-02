@@ -18,7 +18,7 @@
 //!   area-averaged reduction and device-pixel sampling.
 //! - `pixel_rect` — rectangles of device pixels.
 //! - `annotations` — annotation appearances, stored and synthesised.
-//! - `gpu_ops`, `vk_ops` — CUDA and Vulkan antialiased fill dispatch.
+//! - `gpu_ops` — antialiased fill dispatch to a GPU backend.
 //!
 //! # What is implemented
 //!
@@ -73,8 +73,6 @@ mod text;
 mod text_ops;
 mod type3;
 mod view;
-#[cfg(feature = "vulkan")]
-mod vk_ops;
 mod xobject;
 
 #[cfg(feature = "cache")]
@@ -301,15 +299,10 @@ pub struct PageRenderer<'doc> {
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     gpu_ctx: Option<Arc<GpuCtx>>,
     /// Vulkan compute backend, attached when the session was opened with
-    /// [`BackendPolicy::ForceVulkan`].  When set, the AA fill dispatch
-    /// and the ICC CMYK→RGB path prefer the Vulkan
-    /// trait surface (`alloc → upload → record_* → submit → wait → download`)
-    /// over the CUDA `GpuCtx` path.  Mutually exclusive with `gpu_ctx` in
-    /// practice — the device image cache is CUDA-only, so opening a session under
-    /// `ForceVulkan` skips CUDA init entirely (`rasterrocket::render::open_session`).
-    /// The image-blit path (`DevicePageBuffer`) stays CUDA-only and is gated
-    /// behind `gpu_ctx`, so under Vulkan blits silently land on the CPU
-    /// fallback inside the renderer.
+    /// [`BackendPolicy::ForceVulkan`]; the AA fill dispatch then runs on it.
+    /// Such a session initialises no CUDA context, so `gpu_ctx` is `None`
+    /// and every `gpu_ctx` consumer (image blits, the device image cache,
+    /// the ICC CMYK→RGB CLUT) takes its CPU path.
     #[cfg(feature = "vulkan")]
     vk_backend: Option<Arc<VulkanBackend>>,
     /// Device-image-cache state.  `Some` only when the `cache` feature is

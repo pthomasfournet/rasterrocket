@@ -21,8 +21,6 @@ use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::resources::ColorSpace;
 use crate::resources::transfer::Transfer;
-#[cfg(feature = "vulkan")]
-use gpu::backend::vulkan::VulkanBackend;
 
 /// `path` with every point mapped through `m`.  An affine map carries Bézier
 /// control points to the control points of the mapped curve, so flags and
@@ -285,30 +283,14 @@ impl PageRenderer<'_> {
             PipeSrc::Pattern(p as &dyn Pattern)
         });
 
-        // GPU fill dispatch — solid-colour fills only (patterns not yet
-        // GPU-accelerated).  Cloning the `Arc` releases the immutable borrow
-        // before the mutable `self` borrow inside the helpers.
-        //
-        // The device evaluates the CPU scanner's intersection table with
-        // the CPU's span walk and composites through the CPU pipeline, so
-        // either branch yields the bytes the CPU fill below would.  The
-        // Vulkan branch fires before the CUDA branch when both are present,
-        // but in practice `rasterrocket::render::open_session` wires only
-        // one of them based on `BackendPolicy`, so the second branch only
-        // runs under `Auto` / `ForceCuda`.
-        #[cfg(feature = "vulkan")]
-        if tiled.is_none()
-            && self.vector_antialias
-            && let Some(vk) = self.vk_backend.clone()
-            && self.try_vk_aa_fill(path, even_odd, flatness, &pipe, &src, &vk)
-        {
-            return;
-        }
+        // Solid-colour fills only. The device evaluates the CPU scanner's
+        // intersection table and the counts are composited through the CPU
+        // pipeline, so either backend yields the bytes the CPU fill below
+        // would. A session attaches at most one of the two backends.
         #[cfg(feature = "gpu-aa")]
         if tiled.is_none()
             && self.vector_antialias
-            && let Some(ctx) = self.gpu_ctx.clone()
-            && self.try_gpu_aa_fill(path, even_odd, flatness, &pipe, &src, &ctx)
+            && self.try_device_aa_fill(path, even_odd, flatness, &pipe, &src)
         {
             return;
         }
@@ -338,37 +320,45 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// Attempt to rasterise `path` with the GPU scanline-AA kernel.
-    ///
-    /// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-    /// Returns `false` if the fill is not device-eligible (see
-    /// `gpu_ops::prepare_aa_fill`) or the GPU call fails (warning logged;
-    /// CPU fill used as fallback).
+    /// Fill `path` on the attached GPU backend, if any; `true` when the
+    /// device painted it. See `gpu_ops::try_backend_aa_fill`.
     #[cfg(feature = "gpu-aa")]
-    pub(super) fn try_gpu_aa_fill(
+    fn try_device_aa_fill(
         &mut self,
         path: &raster::path::Path,
         even_odd: bool,
         flatness: f64,
         pipe: &raster::pipe::PipeState<'_>,
         src: &raster::pipe::PipeSrc<'_>,
-        ctx: &gpu::GpuCtx,
     ) -> bool {
-        super::gpu_ops::try_gpu_aa_fill(self, path, even_odd, flatness, pipe, src, ctx)
-    }
-
-    /// Vulkan twin of [`Self::try_gpu_aa_fill`].  See [`vk_ops::try_vk_aa_fill`].
-    #[cfg(feature = "vulkan")]
-    pub(super) fn try_vk_aa_fill(
-        &mut self,
-        path: &raster::path::Path,
-        even_odd: bool,
-        flatness: f64,
-        pipe: &raster::pipe::PipeState<'_>,
-        src: &raster::pipe::PipeSrc<'_>,
-        backend: &Arc<VulkanBackend>,
-    ) -> bool {
-        super::vk_ops::try_vk_aa_fill(self, backend, path, even_odd, flatness, pipe, src)
+        use super::gpu_ops::try_backend_aa_fill;
+        #[cfg(feature = "vulkan")]
+        if let Some(vk) = self.vk_backend.clone() {
+            return try_backend_aa_fill(
+                self,
+                &*vk,
+                "vulkan aa_fill",
+                path,
+                even_odd,
+                flatness,
+                pipe,
+                src,
+            );
+        }
+        let Some(ctx) = self.gpu_ctx.clone() else {
+            return false;
+        };
+        let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
+        try_backend_aa_fill(
+            self,
+            &cuda,
+            "cuda aa_fill",
+            path,
+            even_odd,
+            flatness,
+            pipe,
+            src,
+        )
     }
 
     /// Stroke `path` with the current line width, widened to at least one

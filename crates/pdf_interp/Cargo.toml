@@ -22,10 +22,10 @@ categories  = ["parser-implementations", "rendering", "multimedia::images"]
 nvjpeg           = ["dep:gpu", "gpu/nvjpeg"]
 nvjpeg2k         = ["dep:gpu", "gpu/nvjpeg2k"]
 vaapi            = ["dep:gpu", "gpu/vaapi"]
-gpu-aa           = ["dep:gpu"]
+gpu-aa           = ["dep:gpu", "dep:bytemuck"]
 gpu-icc          = ["dep:gpu"]
 cache            = ["dep:gpu", "gpu/cache"]
-vulkan           = ["dep:gpu", "gpu/vulkan", "dep:bytemuck", "gpu-aa"]
+vulkan           = ["dep:gpu", "gpu/vulkan", "gpu-aa"]
 gpu-jpeg-huffman = ["dep:gpu", "gpu/gpu-jpeg-huffman"]
 # Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai
 # and symbols compiled into the binary (fonts/noto/, ~0.34 MB), drawn when

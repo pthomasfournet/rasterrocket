@@ -7,10 +7,14 @@
 //! Every stage that decides a pixel's value is therefore the CPU's code or a
 //! byte-exact twin of it.
 //!
-//! The module is compiled only with the `gpu-aa` feature.
+//! Dispatch is generic over [`GpuBackend`], so the CUDA and Vulkan backends
+//! run the same sequence: upload, one recorded page, download. The module is
+//! compiled only with the `gpu-aa` feature, which `vulkan` implies.
 
 #![cfg(feature = "gpu-aa")]
 
+use gpu::backend::params::AaFillParams;
+use gpu::backend::{GpuBackend, Result as BackendResult};
 use gpu::{AaFillRect, AaScanTable, ScanIntersect};
 use raster::clip::Clip;
 use raster::pipe::{PipeSrc, PipeState};
@@ -20,21 +24,21 @@ use super::{DEVICE_MATRIX, PageRenderer};
 
 /// A fill prepared for device evaluation: the CPU scanner's intersection
 /// table plus the pixel rectangle it is evaluated over.
-pub(super) struct GpuAaFill {
+struct GpuAaFill {
     /// Intersections grouped by AA row, sorted by `x0` within a row.
-    pub(super) intersects: Vec<ScanIntersect>,
+    intersects: Vec<ScanIntersect>,
     /// Row offsets into `intersects`; `n_rows + 1` entries.
-    pub(super) row_starts: Vec<u32>,
+    row_starts: Vec<u32>,
     /// AA row index of table row 0.
-    pub(super) table_y0: i32,
+    table_y0: i32,
     /// Pixel rectangle the kernel evaluates; within the bitmap.
-    pub(super) rect: AaFillRect,
+    rect: AaFillRect,
     /// Bitmap width × `AA_SIZE`.
-    pub(super) aa_width: u32,
+    aa_width: u32,
 }
 
 impl GpuAaFill {
-    pub(super) fn table(&self) -> AaScanTable<'_> {
+    fn table(&self) -> AaScanTable<'_> {
         AaScanTable {
             intersects: &self.intersects,
             row_starts: &self.row_starts,
@@ -46,7 +50,7 @@ impl GpuAaFill {
 /// Effective GPU AA-fill dispatch threshold: [`gpu::GPU_AA_FILL_THRESHOLD`]
 /// unless `PDF_RASTER_AA_FILL_THRESHOLD` holds a decimal pixel area (`0` =
 /// every eligible fill on the device).  Read once, on first use.
-pub(super) fn aa_fill_threshold() -> usize {
+fn aa_fill_threshold() -> usize {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<usize> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
@@ -77,7 +81,7 @@ pub(super) fn aa_fill_threshold() -> usize {
 /// to the bitmap.  It is not clamped to the clip rectangle: the CPU applies
 /// that clamp per row after finding the painted range, and
 /// [`paint_coverage`] does the same.
-pub(super) fn prepare_aa_fill(
+fn prepare_aa_fill(
     clip: &Clip,
     bitmap_width: u32,
     bitmap_height: u32,
@@ -144,7 +148,7 @@ pub(super) fn prepare_aa_fill(
 ///
 /// `counts` must be exactly `rect.width × rect.height` bytes of sub-sample
 /// counts (`0..=AA_SIZE²`); the slice is consumed as scratch.
-pub(super) fn gpu_coverage_to_bitmap(
+fn gpu_coverage_to_bitmap(
     renderer: &mut PageRenderer<'_>,
     counts: &mut [u8],
     rect: AaFillRect,
@@ -201,19 +205,37 @@ fn paint_coverage(
     }
 }
 
-/// Attempt to rasterise `path` with the GPU scanline-AA kernel.
+/// Map a backend result to `Option`, logging a failure as
+/// `"{op}: {step} failed: {e}"` at `warn`.
+fn warn_err<T>(r: BackendResult<T>, op: &'static str, step: &'static str) -> Option<T> {
+    r.map_err(|e| log::warn!("{op}: {step} failed: {e}")).ok()
+}
+
+/// Rasterise `path` through `backend`'s scanline-AA fill kernel.
 ///
-/// Returns `true` if the GPU path was taken (caller skips the CPU fill).
-/// Returns `false` if [`prepare_aa_fill`] declines the fill or the GPU call
-/// fails (warning logged; CPU fill used as fallback).
-pub(super) fn try_gpu_aa_fill(
+/// The table is uploaded, the kernel recorded as a one-kernel page, and the
+/// counts downloaded and composited by [`gpu_coverage_to_bitmap`]. `op`
+/// prefixes every log line (`"cuda aa_fill"`, `"vulkan aa_fill"`).
+///
+/// Returns `true` when the fill was painted from device counts, so the
+/// caller skips the CPU fill. Returns `false`, leaving the bitmap untouched,
+/// when [`prepare_aa_fill`] declines the fill, the table has no
+/// intersections (it paints nothing, and the backend rejects zero-size
+/// buffers) or more rows than `u32` holds, or any backend call fails; the
+/// failure is logged and the CPU fill is the exact fallback.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fill's inputs are the CPU fill's own; bundling them would add a type used once"
+)]
+pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     renderer: &mut PageRenderer<'_>,
+    backend: &B,
+    op: &'static str,
     path: &raster::path::Path,
     even_odd: bool,
     flatness: f64,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
-    ctx: &gpu::GpuCtx,
 ) -> bool {
     let Some(fill) = prepare_aa_fill(
         &renderer.gstate.current().clip,
@@ -226,37 +248,76 @@ pub(super) fn try_gpu_aa_fill(
     ) else {
         return false;
     };
-
-    let mut painted_any = false;
-    let result = ctx.aa_fill_with(
-        &fill.table(),
-        fill.rect,
-        fill.aa_width,
-        even_odd,
-        |row, counts| {
-            let band = AaFillRect {
-                y: fill.rect.y + i32::try_from(row).expect("row fits i32"),
-                height: u32::try_from(counts.len() / fill.rect.width as usize)
-                    .expect("band rows fit u32"),
-                ..fill.rect
-            };
-            gpu_coverage_to_bitmap(renderer, counts, band, pipe, src);
-            painted_any = true;
-        },
-    );
-    match result {
-        Ok(()) => true,
-        // Compositing is not idempotent at partial coverage, so a CPU
-        // fallback is only taken while no band has been painted.
-        Err(e) if painted_any => {
-            log::warn!("GPU AA fill failed part-way; the fill is incomplete: {e}");
-            true
-        }
-        Err(e) => {
-            log::warn!("GPU AA fill failed, falling back to CPU: {e}");
-            false
-        }
+    if fill.intersects.is_empty() {
+        return false;
     }
+    let Ok(n_rows) = u32::try_from(fill.table().n_rows()) else {
+        log::warn!("{op}: table row count exceeds u32::MAX; falling back to CPU");
+        return false;
+    };
+    let Some(mut counts) = run_aa_fill(backend, op, &fill, n_rows, even_odd) else {
+        return false;
+    };
+    gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
+    true
+}
+
+/// Upload `fill`'s table, run the kernel as one page and download the
+/// counts; `None` (logged) on any backend failure.
+fn run_aa_fill<B: GpuBackend>(
+    backend: &B,
+    op: &'static str,
+    fill: &GpuAaFill,
+    n_rows: u32,
+    even_odd: bool,
+) -> Option<Vec<u8>> {
+    let n_pixels = fill.rect.pixel_count()?;
+    let intersects: &[u8] = bytemuck::cast_slice(&fill.intersects);
+    let row_starts: &[u8] = bytemuck::cast_slice(&fill.row_starts);
+
+    let d_intersects = warn_err(
+        backend.alloc_device(intersects.len()),
+        op,
+        "alloc(intersects)",
+    )?;
+    let d_row_starts = warn_err(
+        backend.alloc_device(row_starts.len()),
+        op,
+        "alloc(row_starts)",
+    )?;
+    let d_coverage = warn_err(backend.alloc_device(n_pixels), op, "alloc(coverage)")?;
+    warn_err(
+        backend.upload(&d_intersects, intersects),
+        op,
+        "upload(intersects)",
+    )?;
+    warn_err(
+        backend.upload(&d_row_starts, row_starts),
+        op,
+        "upload(row_starts)",
+    )?;
+
+    warn_err(backend.begin_page(), op, "begin_page")?;
+    warn_err(
+        backend.record_aa_fill(AaFillParams {
+            intersects: &d_intersects,
+            row_starts: &d_row_starts,
+            coverage: &d_coverage,
+            n_rows,
+            table_y0: fill.table_y0,
+            rect: fill.rect,
+            aa_width: fill.aa_width,
+            fill_rule: u8::from(even_odd),
+        }),
+        op,
+        "record_aa_fill",
+    )?;
+    let fence = warn_err(backend.submit_page(), op, "submit_page")?;
+    warn_err(backend.wait_page(fence), op, "wait_page")?;
+
+    let mut counts = vec![0u8; n_pixels];
+    warn_err(backend.download(&d_coverage, &mut counts), op, "download")?;
+    Some(counts)
 }
 
 #[cfg(test)]

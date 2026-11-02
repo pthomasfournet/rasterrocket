@@ -35,11 +35,17 @@ impl CudaBackend {
     /// # Errors
     /// Returns `BackendError` if no CUDA device is present or kernel load fails.
     pub fn new() -> Result<Self> {
-        let ctx = Arc::new(GpuCtx::init().map_err(be)?);
-        Ok(Self {
-            recorder: page_recorder::PageRecorder::new(ctx.clone()),
+        Ok(Self::from_ctx(Arc::new(GpuCtx::init().map_err(be)?)))
+    }
+
+    /// A backend over an initialised context, sharing its kernels and its
+    /// per-thread streams.
+    #[must_use]
+    pub fn from_ctx(ctx: Arc<GpuCtx>) -> Self {
+        Self {
+            recorder: page_recorder::PageRecorder::new(Arc::clone(&ctx)),
             ctx,
-        })
+        }
     }
 }
 

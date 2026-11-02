@@ -148,16 +148,9 @@ impl PageRenderer<'_> {
 
     /// Attach a Vulkan compute backend for kernel dispatch.
     ///
-    /// When set, GPU-eligible AA fill and ICC CMYK→RGB calls
-    /// are routed through the [`gpu::backend::GpuBackend`] trait surface
-    /// (`alloc → upload → record_* → submit → wait → download`) on the
-    /// Vulkan recorder rather than the CUDA `GpuCtx`.  The CUDA path is
-    /// not removed; it remains live for sessions opened with
-    /// `BackendPolicy::Auto` / `BackendPolicy::ForceCuda` (defined in `rasterrocket`).
-    ///
-    /// The device-resident image cache (`DeviceImageCache`,
-    /// `DevicePageBuffer`) is CUDA-only — under Vulkan the renderer
-    /// runs uncached (CPU-resident image decode + blit).
+    /// When set, GPU-eligible AA fills run on it, ahead of any CUDA
+    /// context. Image blits, the device image cache and the ICC CMYK→RGB
+    /// CLUT are CUDA-only and stay on the CPU under Vulkan.
     #[cfg(feature = "vulkan")]
     pub fn set_vk_backend(&mut self, backend: Option<Arc<VulkanBackend>>) {
         self.vk_backend = backend;
