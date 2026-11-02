@@ -290,12 +290,14 @@ impl Face {
     }
 
     /// Ranking key of the face for `style` under the family-name
-    /// preference list of `script`; the least key is the best face.  A
-    /// listed face ranks before every unlisted one: a face listed for the
-    /// script is a design made for it, which an unlisted face of the
-    /// requested serif class (a monospace or script face that happens to
-    /// carry the characters) is not.
-    fn rank(&self, style: SubstituteStyle, script: Option<Script>) -> (bool, u8, usize, u16, bool) {
+    /// preference list of `script`; the least key is the best face.  For a
+    /// script, a listed face ranks before every unlisted one: a face listed
+    /// for the script is a design made for it, which an unlisted face of
+    /// the requested serif class (a monospace or script face that happens
+    /// to carry the characters) is not.  With `latin`, a face that also
+    /// maps Latin comes next.  Then come the serif class, the preference,
+    /// the weight and the slant.
+    fn rank(&self, style: SubstituteStyle, script: Option<Script>, latin: bool) -> FaceRank {
         let want_serif = style.family == SubstituteFamily::Serif;
         let want_weight: u16 = if style.bold { 700 } else { 400 };
         let serif_rank = match self.serif {
@@ -305,7 +307,8 @@ impl Face {
         };
         let preference = self.preference(script);
         (
-            preference == preferred_names(script).len(),
+            script.is_some() && preference == preferred_names(script).len(),
+            latin && !self.maps(u32::from('A')),
             serif_rank,
             preference,
             self.weight_class.abs_diff(want_weight),
@@ -325,6 +328,18 @@ impl Face {
         };
         self.code_page_ranges[range] & bits != 0
     }
+}
+
+/// The ranking key of [`Face::rank`]: unlisted for the script, lacking
+/// Latin, serif class, preference, weight distance, slant mismatch.
+type FaceRank = (bool, bool, u8, usize, u16, bool);
+
+/// The key by which [`FontLibrary::select`] chooses the face for `script`: a
+/// visible face before a hidden one, then [`Face::rank`], asking for Latin
+/// for Arabic and Thai, whose simple fonts mix the script with Latin.
+fn select_key(face: &Face, style: SubstituteStyle, script: Script) -> (bool, FaceRank) {
+    let latin = matches!(script, Script::Arabic | Script::Thai);
+    (face.hidden(), face.rank(style, Some(script), latin))
 }
 
 /// Key of one library: its extra directories and whether the standard
@@ -412,11 +427,8 @@ impl FontLibrary {
     /// The installed face that best serves `style` for `script`: among
     /// the faces whose `cmap` maps the script's sample character (those
     /// declaring the script's code page first, every face when none of
-    /// those maps it), a visible face before a hidden one, then by
-    /// [`Face::rank`] (listed for the script, serif class, preference,
-    /// weight, slant), with Arabic and Thai preferring, after the listing,
-    /// a face that also maps Latin.  Code-page bits alone are not trusted:
-    /// faces declare scripts they carry no glyphs for.
+    /// those maps it), the least by [`select_key`].  Code-page bits alone
+    /// are not trusted: faces declare scripts they carry no glyphs for.
     fn select(&self, script: Script, style: SubstituteStyle) -> Option<usize> {
         let faces = self.faces();
         let sample = script_sample(script);
@@ -430,19 +442,8 @@ impl FontLibrary {
         } else {
             declaring
         };
-        // A simple font of a non-CJK script mixes its script with Latin; a
-        // face that also maps Latin keeps both drawing.
-        let want_latin = matches!(script, Script::Arabic | Script::Thai);
-        pool.into_iter().min_by_key(|&i| {
-            let face = &faces[i];
-            let (unlisted, serif, preference, weight, slant) = face.rank(style, Some(script));
-            (
-                face.hidden(),
-                unlisted,
-                want_latin && !face.maps(u32::from('A')),
-                (serif, preference, weight, slant),
-            )
-        })
+        pool.into_iter()
+            .min_by_key(|&i| select_key(&faces[i], style, script))
     }
 
     /// The program of face `index`, parsed once and shared by every
@@ -478,8 +479,9 @@ impl FontLibrary {
 
     /// The installed program that draws the character `c` for a font of
     /// `style` whose substitute lacks it: among the faces whose `cmap` maps
-    /// `c`, the first visible one by [`Face::rank`] (serif class, the
-    /// preference list of the character's script, weight, slant), ties
+    /// `c`, the first visible one by [`Face::rank`] for the character's
+    /// script (listed for the script when it has one, serif class,
+    /// preference, weight, slant), ties
     /// going to the earlier path; then, with the `bundled-fonts` feature,
     /// a bundled face that maps `c`; then a hidden installed face.  `None`
     /// when no face maps `c`.
@@ -495,7 +497,7 @@ impl FontLibrary {
             let mut orders = self.orders.lock().unwrap_or_else(PoisonError::into_inner);
             Arc::clone(orders.entry(key).or_insert_with(|| {
                 let mut order: Vec<usize> = (0..faces.len()).collect();
-                order.sort_by_key(|&i| faces[i].rank(style, script));
+                order.sort_by_key(|&i| faces[i].rank(style, script, false));
                 order.into()
             }))
         };
@@ -621,7 +623,7 @@ mod tests {
     fn best(faces: &[Face], script: Script, style: SubstituteStyle) -> &str {
         &faces
             .iter()
-            .min_by_key(|f| (f.hidden(), f.rank(style, Some(script))))
+            .min_by_key(|f| select_key(f, style, script))
             .expect("candidates")
             .family
     }
@@ -684,6 +686,26 @@ mod tests {
         assert!(face("x", 0, 400, 1 << 21).covers(Script::Korean));
         assert!(face("x", 0, 400, 1 << 6).covers(Script::Arabic));
         assert!(face("x", 0, 400, 1 << 16).covers(Script::Thai));
+    }
+
+    /// For a character of no script, the serif class leads the fallback
+    /// order: a listed sans-serif family does not displace an unlisted
+    /// serif one for serif text.
+    #[test]
+    fn a_character_of_no_script_falls_back_by_serif_class_first() {
+        let serif = SubstituteStyle {
+            family: SubstituteFamily::Serif,
+            ..SubstituteStyle::default()
+        };
+        let faces = [
+            face("DejaVu Sans", 8 << 8, 400, 0),
+            face("Liberation Serif", 2 << 8, 400, 0),
+        ];
+        let first = faces
+            .iter()
+            .min_by_key(|f| f.rank(serif, None, false))
+            .expect("candidates");
+        assert_eq!(first.family, "liberation serif");
     }
 
     /// With a Japanese face installed, both serif and sans requests
