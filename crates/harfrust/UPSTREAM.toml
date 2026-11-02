@@ -1,0 +1,13 @@
+# Where this local fork came from.  Read by scripts/check_vendored.py, which
+# reports upstream commits, crates.io releases and RustSec advisories that
+# appeared after this base, or after the last review when `reviewed` is set.
+# Update `commit`, `date` and `version` when the fork is rebased; set the
+# `reviewed*` fields when upstream history up to a later commit has been
+# examined and every change in it brought over or deliberately left out
+# (CHANGES.md records which).
+crate = "harfrust"
+version = "0.12.0"
+repository = "harfbuzz/harfrust"
+path = "harfrust"
+commit = "60b28ea22b5261710018d69c168a762bcb28794c"
+date = "2026-07-03T19:27:35Z"

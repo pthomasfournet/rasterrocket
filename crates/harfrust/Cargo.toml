@@ -1,0 +1,33 @@
+# Local fork of harfrust (https://github.com/harfbuzz/harfrust, directory
+# `harfrust/`), vendored from upstream commit
+# 60b28ea22b5261710018d69c168a762bcb28794c (2026-07-03, crate version 0.12.0).
+# Licence: MIT (see LICENSE).  Changes made here are ours; see CHANGES.md.
+[package]
+name = "harfrust"
+version = "0.12.0"
+description = "A complete HarfBuzz shaping algorithm port to Rust."
+readme = "README.md"
+keywords = ["text", "shaping", "opentype", "truetype"]
+categories = ["text-processing"]
+
+rust-version.workspace = true
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/harfbuzz/harfrust"
+publish = false
+
+[dependencies]
+read-fonts = { version = "0.41.0", path = "../read_fonts", default-features = false, features = ["experimental_font_api"] }
+bitflags = "2.9"
+bytemuck = { version = "1.22", features = ["extern_crate_alloc"] }
+core_maths = { version = "0.1", optional = true }
+smallvec = "1.14"
+
+[features]
+default = ["std"]
+std = ["read-fonts/std"]
+libm = ["dep:core_maths", "read-fonts/libm"]
+experimental_font_api = []
+
+[lib]
+bench = false
