@@ -435,20 +435,57 @@ fn ink_to_rgb_row_rejects_ragged_input() {
     ink_to_rgb_row(&[0; 9], &[None; 4], &mut [0; 3]);
 }
 
-/// Squared RGB distance between the forward image of `cmy` (K = 0) and `rgb`.
-fn dist2(cmy: [u8; 3], rgb: [u8; 3]) -> f64 {
-    let got = cmyk_to_rgb(cmy[0], cmy[1], cmy[2], 0);
+/// Euclidean distance between the unrounded forward image of `cmy` (K = 0) and `rgb`.
+fn dist(cmy: [u8; 3], rgb: [u8; 3]) -> f64 {
+    let got = exact([cmy[0], cmy[1], cmy[2], 0]);
     (0..3)
-        .map(|i| (f64::from(got[i]) - f64::from(rgb[i])).powi(2))
-        .sum()
+        .map(|i| (got[i] - f64::from(rgb[i])).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Smallest distance to `rgb` over byte CMY: a coarse 33³ grid (step 8), then
+/// ±1-byte coordinate descent from the best grid point.
+fn nearest_distance(rgb: [u8; 3]) -> f64 {
+    let mut best = ([0u8; 3], f64::INFINITY);
+    for c in (0..=255u8).step_by(8).chain([255]) {
+        for m in (0..=255u8).step_by(8).chain([255]) {
+            for y in (0..=255u8).step_by(8).chain([255]) {
+                let d = dist([c, m, y], rgb);
+                if d < best.1 {
+                    best = ([c, m, y], d);
+                }
+            }
+        }
+    }
+    let (mut at, mut d) = best;
+    loop {
+        let mut moved = false;
+        for ch in 0..3 {
+            for delta in [-1i16, 1] {
+                let Ok(v) = u8::try_from(i16::from(at[ch]) + delta) else {
+                    continue;
+                };
+                let mut cand = at;
+                cand[ch] = v;
+                let dc = dist(cand, rgb);
+                if dc < d {
+                    (at, d, moved) = (cand, dc, true);
+                }
+            }
+        }
+        if !moved {
+            return d;
+        }
+    }
 }
 
 #[test]
-fn rgb_to_cmyk_out_of_gamut_is_locally_nearest() {
-    // The table stores real-valued minima; the answer is rounded to bytes
-    // (each channel moves the image by at most ~1 unit per byte) and the
-    // table is interpolated, so a unit step may gain at most 2 RGB units of
-    // distance.  Failures of the previous scheme exceeded 5 units.
+fn rgb_to_cmyk_out_of_gamut_is_nearest() {
+    // The answer is a byte-rounded table interpolant of the real-valued
+    // minimiser, so its excess distance over the byte-grid nearest is bounded
+    // by the rounding (at most ~1.1 RGB units per channel step) and the
+    // interpolation residual; a stalled solver exceeds this by 5 units or more.
     const ALLOWANCE: f64 = 2.0;
     let mut samples = vec![
         [1, 45, 218],
@@ -463,29 +500,14 @@ fn rgb_to_cmyk_out_of_gamut_is_locally_nearest() {
         [0, 0, 0],
         [128, 0, 200],
     ];
-    let noise = bytes(300, 99);
-    // [1, 45, 218]: the previous scheme stalled at distance 86; nearest is ~68.
-    let blue = rgb_to_cmyk([1, 45, 218]);
-    assert!(
-        dist2([blue[0], blue[1], blue[2]], [1, 45, 218]).sqrt() < 70.0,
-        "{blue:?}"
-    );
-    samples.extend(noise.as_chunks::<3>().0.iter().copied());
+    samples.extend(bytes(60, 99).as_chunks::<3>().0.iter().copied());
     for rgb in samples {
         let cmy = rgb_to_cmyk(rgb);
-        let base = dist2([cmy[0], cmy[1], cmy[2]], rgb).sqrt();
-        for ch in 0..3 {
-            for delta in [-1i16, 1] {
-                let moved = i16::from(cmy[ch]) + delta;
-                let Ok(v) = u8::try_from(moved) else { continue };
-                let mut other = [cmy[0], cmy[1], cmy[2]];
-                other[ch] = v;
-                let d = dist2(other, rgb).sqrt();
-                assert!(
-                    d >= base - ALLOWANCE,
-                    "{rgb:?}: {cmy:?} at {base:.1}, channel {ch} {delta:+} gives {d:.1}"
-                );
-            }
-        }
+        let got = dist([cmy[0], cmy[1], cmy[2]], rgb);
+        let best = nearest_distance(rgb);
+        assert!(
+            got <= best + ALLOWANCE,
+            "{rgb:?}: {cmy:?} at {got:.1}, nearest {best:.1}"
+        );
     }
 }

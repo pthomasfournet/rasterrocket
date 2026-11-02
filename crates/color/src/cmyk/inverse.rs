@@ -179,7 +179,7 @@ static INVERSE: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
 pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
     let table = &*INVERSE;
     let span = u16::from(GRID - 1);
-    // Exact grid coordinate of each channel is `v · 32 / 255`: integer cell
+    // Exact grid coordinate of each channel is `v · (GRID − 1) / 255`: integer cell
     // index and fraction numerator over 255.
     let scaled = rgb.map(|v| u16::from(v) * span);
     let cell = scaled.map(|s| (s / 255).min(span - 1));
