@@ -11,9 +11,8 @@ use raster::pipe::{PipeSrc, PipeState};
 use raster::types::BlendMode;
 
 use super::super::gstate::{Ctm, ctm_transform};
-use super::image_blit::{
-    ImageCompositor, ImageLenError, blend_rgb, blend_u8, check_image_bytes_len,
-};
+use super::canvas::blend_u8;
+use super::image_blit::{ImageCompositor, ImageLenError, blend_rgb, check_image_bytes_len};
 use super::pixel_rect::PixelRect;
 use super::view::build_initial_ctm;
 use super::xobject::image_draw_size;
@@ -515,8 +514,7 @@ fn image_rows_composite_like_single_samples() {
             let base = make_base();
             let compositor = ImageCompositor::new(&base, fill_alpha, mode, None);
             let mut runs = make_base();
-            let (row, alpha_row) = runs.row_and_alpha_mut(0);
-            compositor.paint_row(row, alpha_row, 0, 0, &colours, &shape);
+            compositor.paint_row(&mut runs, 0, 0, &colours, &shape);
             let mut single = make_base();
             if let Some(pipe) = &compositor.pipe {
                 paint_row_per_pixel(&mut single, pipe, 0, &colours, &shape);
@@ -877,8 +875,8 @@ fn render_gray(size: u32, content: &[u8]) -> Vec<u8> {
 fn render_gray_on(doc: &Document, page_id: ObjectId, size: u32, content: &[u8]) -> Vec<u8> {
     let mut renderer = PageRenderer::new(size, size, doc, page_id);
     renderer.execute(&crate::content::parse(content));
-    let stride = renderer.bitmap.stride;
-    let data = renderer.bitmap.data();
+    let stride = renderer.rgb_canvas().stride;
+    let data = renderer.rgb_canvas().data();
     (0..size)
         .flat_map(|y| (0..size).map(move |x| (x, y)))
         .map(|(x, y)| data[y as usize * stride + x as usize * 3])
@@ -1470,4 +1468,143 @@ fn repeated_image_failure_is_recorded_once() {
     renderer.record_image_failure(Some(b"Im1"), "broken".to_owned());
     let failures = renderer.finish().1.image_failures;
     assert_eq!(failures.len(), 2, "{failures:?}");
+}
+
+// ── Ink canvas ────────────────────────────────────────────────────────────
+
+/// Render `content` on page `(4, 0)` of `doc`, `size` pixels square, onto an
+/// RGB canvas or, when `ink`, onto an ink canvas; the finished RGB bytes.
+fn render_canvas(doc: &Document, size: u32, content: &[u8], ink: bool) -> Vec<u8> {
+    let mut renderer = PageRenderer::new(size, size, doc, (4, 0));
+    if ink {
+        renderer.force_ink_canvas();
+    }
+    renderer.execute(&crate::content::parse(content));
+    renderer.finish().0.data().to_vec()
+}
+
+/// Assert that `content` renders on the ink canvas within `tolerance` per
+/// channel of the RGB canvas, and that it paints something.
+fn assert_ink_matches_rgb(doc: &Document, content: &[u8], tolerance: u8) {
+    let rgb = render_canvas(doc, 10, content, false);
+    let ink = render_canvas(doc, 10, content, true);
+    assert_eq!(rgb.len(), ink.len());
+    assert!(
+        rgb.iter().any(|&v| v != u8::MAX),
+        "{} paints",
+        String::from_utf8_lossy(content)
+    );
+    for (i, (&a, &b)) in rgb.iter().zip(&ink).enumerate() {
+        assert!(
+            a.abs_diff(b) <= tolerance,
+            "{}: byte {i}: RGB canvas {a}, ink canvas {b}",
+            String::from_utf8_lossy(content)
+        );
+    }
+}
+
+#[test]
+fn ink_canvas_blank_page_is_white() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let page = render_canvas(&doc, 6, b"", true);
+    assert_eq!(page.len(), 6 * 6 * 3);
+    assert!(page.iter().all(|&v| v == u8::MAX), "{page:?}");
+}
+
+#[test]
+fn ink_canvas_cmyk_fill_matches_rgb_canvas() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let content = b"0.2 0.5 0.1 0.3 k 0 0 10 10 re f";
+    let rgb = render_canvas(&doc, 10, content, false);
+    let ink = render_canvas(&doc, 10, content, true);
+    assert!(rgb.iter().any(|&v| v != u8::MAX), "the fill paints");
+    assert_eq!(rgb, ink);
+}
+
+#[test]
+fn ink_canvas_soft_mask_renders() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /M << /SMask << \
+             /S /Luminosity /G 5 0 R >> >> >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency /CS /DeviceGray >>",
+                "1 g 0 0 10 4 re f 0.5 g 0 4 10 3 re f",
+            ),
+        ),
+    ]);
+    assert_ink_matches_rgb(&doc, b"/M gs 0 0 0 0.8 k 0 0 10 10 re f", 2);
+}
+
+#[test]
+fn ink_canvas_transparency_group() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /H << /ca 0.5 >> >> \
+             /XObject << /F 5 0 R >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency >>",
+                "0 0 0 1 k 0 0 10 6 re f 1 0 0 0 k 2 2 6 6 re f",
+            ),
+        ),
+    ]);
+    // Each pixel composites one ink over paper, where ink and RGB
+    // interpolation agree; inks composited over other inks mix in ink.
+    assert_ink_matches_rgb(&doc, b"/H gs /F Do", 2);
+}
+
+/// Shadings, tiling patterns, mesh triangles, images and glyphs reach the
+/// ink canvas as ink.  Every pixel is one opaque colour, or one ink over
+/// paper, so the two canvases agree within the inversion's rounding; a
+/// mixture of inks at partial coverage interpolates in ink and may not.
+/// Greys stay above the darkest CMY grey, which `rgb_to_cmyk` reaches.
+#[test]
+fn ink_canvas_paints_shadings_patterns_images_and_text() {
+    let doc = shading_doc("", "/DeviceGray", 0.2);
+    for content in [
+        b"/Sh sh".as_slice(),
+        b"/Pattern cs /P scn 0 0 8 8 re f",
+        b"/Pattern cs /T scn 0 0 8 8 re f",
+        b"/Pattern CS /T SCN 8 w 0 4 m 10 4 l S",
+        b"q 8 0 0 8 1 1 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x40\x80\xc0\x60 EI Q",
+        b"0 0 0 1 k q 8 0 0 8 1 1 cm BI /W 2 /H 2 /IM true ID \x50\xa0 EI Q",
+    ] {
+        assert_ink_matches_rgb(&doc, content, 2);
+    }
+
+    let mesh: &[u8] = b"\x00\x00\x00\x33\x00\xff\x00\x33\x00\x00\xff\x33";
+    let mut shading = b"<< /ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 8 \
+        /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 10 0 10 0 1] /Length 12 >>\nstream\n"
+        .to_vec();
+    shading.extend_from_slice(mesh);
+    shading.extend_from_slice(b"\nendstream");
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /Shading << /M 5 0 R >> >> >>".to_vec(),
+        ),
+        (5, shading),
+    ]);
+    assert_ink_matches_rgb(&doc, b"/M sh", 2);
+
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> >>",
+        ),
+        (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    ]);
+    assert_ink_matches_rgb(&doc, b"0 0 0 1 k BT /F1 9 Tf 1 2 Td (Hi) Tj ET", 2);
 }

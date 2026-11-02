@@ -8,17 +8,18 @@
 //! before the shading when, and only when, the shading is used through a
 //! shading pattern (§8.7.4.3).
 
-use color::Rgb8;
 use raster::clip::Clip;
 use raster::path::{Path, PathBuilder};
 use raster::pipe::{PipeSrc, PipeState};
-use raster::shading::{gouraud::gouraud_triangle_fill, shaded_fill};
+use raster::shading::shaded_fill;
 use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
-use raster::{Bitmap, eo_fill, fill};
+use raster::{eo_fill, fill};
 
+use super::canvas::{CanvasPattern, with_canvas};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
+use crate::renderer::color::RasterColor;
 use crate::resources::ShadingPattern;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 use crate::resources::transfer::Transfer;
@@ -160,21 +161,22 @@ impl PageRenderer<'_> {
                     (clip.x_max, clip.y_max),
                     (clip.x_min, clip.y_max),
                 ]);
-                shaded_fill::<Rgb8>(
-                    &mut r.bitmap,
+                let pattern = CanvasPattern::new(r.canvas.kind(), pattern.as_ref());
+                with_canvas!(&mut r.canvas, |b| shaded_fill(
+                    b,
                     &clip,
                     &area,
                     &pipe,
-                    pattern.as_ref(),
+                    pattern.as_dyn(),
                     &DEVICE_MATRIX,
                     flatness,
                     true,
                     false,
-                );
+                ));
             }
             ShadingResult::Mesh(mesh) => {
                 for tri in mesh.meeting(&clip) {
-                    gouraud_triangle_fill(&mut r.bitmap, &clip, &pipe, tri);
+                    r.canvas.gouraud_triangle(&clip, &pipe, tri);
                 }
             }
         });
@@ -192,36 +194,37 @@ impl PageRenderer<'_> {
         shading: &ResolvedShading,
     ) {
         let antialias = self.vector_antialias;
-        let paint = |bitmap: &mut Bitmap<Rgb8>, clip: &Clip, src: &PipeSrc<'_>| {
-            let fill_fn = if even_odd {
-                eo_fill::<Rgb8>
-            } else {
-                fill::<Rgb8>
-            };
-            fill_fn(
-                bitmap,
-                clip,
-                path,
-                pipe,
-                src,
-                &DEVICE_MATRIX,
-                flatness,
-                antialias,
-            );
+        let kind = self.canvas.kind();
+        let paint = |r: &mut Self, clip: &Clip, src: &PipeSrc<'_>| {
+            with_canvas!(&mut r.canvas, |b| {
+                let fill_fn = if even_odd { eo_fill } else { fill };
+                fill_fn(
+                    b,
+                    clip,
+                    path,
+                    pipe,
+                    src,
+                    &DEVICE_MATRIX,
+                    flatness,
+                    antialias,
+                );
+            });
         };
         if let Some(bg) = shading.background {
-            paint(&mut self.bitmap, &clip, &PipeSrc::Solid(&bg));
+            let bg = RasterColor::from_bytes(bg);
+            paint(self, &clip, &PipeSrc::Solid(bg.bytes_for(kind.mode())));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
         match &shading.result {
             ShadingResult::Pattern(pattern) => {
-                paint(&mut self.bitmap, &clip, &PipeSrc::Pattern(pattern.as_ref()));
+                let pattern = CanvasPattern::new(kind, pattern.as_ref());
+                paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
             }
             ShadingResult::Mesh(mesh) => {
                 let mut clip = clip;
                 clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
                 for tri in mesh.meeting(&clip) {
-                    gouraud_triangle_fill(&mut self.bitmap, &clip, pipe, tri);
+                    self.canvas.gouraud_triangle(&clip, pipe, tri);
                 }
             }
         }
@@ -246,28 +249,23 @@ impl PageRenderer<'_> {
         flatness: f64,
         shading: &ResolvedShading,
     ) {
+        let kind = self.canvas.kind();
         if let Some(bg) = shading.background {
-            stroke(
-                &mut self.bitmap,
-                &clip,
-                path,
-                pipe,
-                &PipeSrc::Solid(&bg),
-                matrix,
-                params,
-            );
+            let bg = RasterColor::from_bytes(bg);
+            let src = PipeSrc::Solid(bg.bytes_for(kind.mode()));
+            with_canvas!(&mut self.canvas, |b| stroke(
+                b, &clip, path, pipe, &src, matrix, params
+            ));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
         match &shading.result {
-            ShadingResult::Pattern(pattern) => stroke(
-                &mut self.bitmap,
-                &clip,
-                path,
-                pipe,
-                &PipeSrc::Pattern(pattern.as_ref()),
-                matrix,
-                params,
-            ),
+            ShadingResult::Pattern(pattern) => {
+                let pattern = CanvasPattern::new(kind, pattern.as_ref());
+                let src = PipeSrc::Pattern(pattern.as_dyn());
+                with_canvas!(&mut self.canvas, |b| stroke(
+                    b, &clip, path, pipe, &src, matrix, params
+                ));
+            }
             ShadingResult::Mesh(mesh) => {
                 let device_scale = matrix[0]
                     .mul_add(matrix[3], -(matrix[1] * matrix[2]))
@@ -288,7 +286,7 @@ impl PageRenderer<'_> {
                 let mut clip = clip;
                 clip.clip_to_path(&outline, false);
                 for tri in mesh.meeting(&clip) {
-                    gouraud_triangle_fill(&mut self.bitmap, &clip, pipe, tri);
+                    self.canvas.gouraud_triangle(&clip, pipe, tri);
                 }
             }
         }

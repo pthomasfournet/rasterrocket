@@ -16,6 +16,7 @@ use raster::path::Path;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
+use super::canvas::PageCanvas;
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 
@@ -56,10 +57,11 @@ impl PageRenderer<'_> {
             gs.stroke_pattern = None;
             gs.stroke_color = RasterColor::from_bytes([u8::MAX; 3]);
         }
-        let mut canvas = Bitmap::<Rgb8>::new(self.width, self.height, 1, false);
-        std::mem::swap(&mut self.bitmap, &mut canvas);
+        // White on black on an RGB canvas: the red channel is the coverage.
+        let black = PageCanvas::Rgb(Bitmap::<Rgb8>::new(self.width, self.height, 1, false));
+        let page = std::mem::replace(&mut self.canvas, black);
         self.stroke_within(path, line_width, Some(rect));
-        std::mem::swap(&mut self.bitmap, &mut canvas);
+        let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
         self.gstate.restore();
 
         let (cx0, cx1) = (rect.x0 as usize * 3, rect.x1 as usize * 3);

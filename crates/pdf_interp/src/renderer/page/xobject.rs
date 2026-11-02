@@ -2,15 +2,11 @@
 
 use std::sync::Arc;
 
-use color::Rgb8;
 use pdf::ObjectId;
-use raster::{
-    Bitmap,
-    transparency::{GroupParams, begin_group, paint_group},
-    types::BlendMode,
-};
+use raster::{transparency::GroupParams, types::BlendMode};
 
 use super::super::gstate::{ctm_multiply, ctm_transform};
+use super::canvas::PageCanvas;
 use super::pixel_rect::PixelRect;
 use super::{GroupContext, MAX_FORM_DEPTH, PageRenderer, RenderAbort};
 
@@ -234,8 +230,7 @@ impl PageRenderer<'_> {
             .and_then(|tg| self.group_params(form.bbox, tg))
             .map(|params| {
                 let bitmap = self.group_bitmap();
-                begin_group(
-                    &self.bitmap,
+                self.canvas.begin_group(
                     self.group.backdrop.as_deref(),
                     &self.gstate.current().clip,
                     params,
@@ -258,7 +253,7 @@ impl PageRenderer<'_> {
         // its objects knock out one another when it is a knockout group,
         // whatever the enclosing group is.
         let parent_group = group.as_mut().map(|g| {
-            std::mem::swap(&mut self.bitmap, &mut g.bitmap);
+            self.canvas.swap_group(g);
             let (x0, y0, x1, y1) = g.region();
             let gs = self.gstate.current_mut();
             gs.fill_alpha = 255;
@@ -269,7 +264,7 @@ impl PageRenderer<'_> {
             gs.clip
                 .clip_to_rect(f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1));
             let context = GroupContext {
-                backdrop: g.backdrop.take().map(Arc::new),
+                backdrop: g.take_backdrop().map(Arc::new),
                 knockout: form.transparency.is_some_and(|tg| tg.knockout),
             };
             std::mem::replace(&mut self.group, context)
@@ -285,20 +280,18 @@ impl PageRenderer<'_> {
         // parent group, using the parent's opacity/blend (captured before
         // gstate.save() — the form's own state is irrelevant here).
         if let (Some(mut g), Some(parent_group)) = (group, parent_group) {
-            std::mem::swap(&mut self.bitmap, &mut g.bitmap);
+            self.canvas.swap_group(&mut g);
             self.group = parent_group;
             let backdrop = self.blend_backdrop(parent_blend_mode);
             let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode, backdrop.as_deref());
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);
-            // Residual Clip is unused — parent gstate is restored immediately below.
-            let (_, bitmap) =
-                self.paint_knocking_out(region, parent_fill_alpha, |r| match group_mask {
-                    Some(mask) => r.paint_through_soft_mask(&mask, region, |r| {
-                        paint_group(&mut r.bitmap, g, &pipe)
-                    }),
-                    None => paint_group(&mut r.bitmap, g, &pipe),
-                });
+            let bitmap = self.paint_knocking_out(region, parent_fill_alpha, |r| match group_mask {
+                Some(mask) => {
+                    r.paint_through_soft_mask(&mask, region, |r| r.canvas.paint_group(g, &pipe))
+                }
+                None => r.canvas.paint_group(g, &pipe),
+            });
             self.group_pool.push(bitmap);
         }
 
@@ -310,14 +303,14 @@ impl PageRenderer<'_> {
         self.gstate.restore();
     }
 
-    /// A transparent bitmap of the current bitmap's size for a transparency
-    /// group: one from the pool, or a fresh one.
-    pub(super) fn group_bitmap(&mut self) -> Bitmap<Rgb8> {
-        let (width, height) = (self.bitmap.width, self.bitmap.height);
+    /// A transparent canvas of the current canvas's kind and size for a
+    /// transparency group: one from the pool, or a fresh one.
+    pub(super) fn group_bitmap(&mut self) -> PageCanvas {
+        let (kind, (width, height)) = (self.canvas.kind(), self.canvas.dims());
         self.group_pool
             .pop()
-            .filter(|b| b.width == width && b.height == height)
-            .unwrap_or_else(|| Bitmap::new(width, height, 1, true))
+            .filter(|b| b.kind() == kind && b.dims() == (width, height))
+            .unwrap_or_else(|| PageCanvas::new(kind, width, height, true))
     }
 
     /// The parameters of a transparency group `tg` whose form has `bbox`:

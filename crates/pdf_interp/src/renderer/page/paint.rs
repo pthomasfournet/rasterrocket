@@ -16,6 +16,7 @@ use raster::{
 
 use super::super::color::RasterColor;
 use super::super::gstate::{ctm_transform, invert_affine};
+use super::canvas::{CanvasPattern, with_canvas};
 use super::patterns::PatternPaint;
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -94,6 +95,15 @@ impl PageRenderer<'_> {
             // Pattern operands are handled by the pattern dispatch, not here;
             // fall back to the legacy heuristic for any stray component.
             ColorSpace::Pattern { .. } => components_to_color(comps),
+            // A four-component ICC space is a process CMYK space: its
+            // components are the ink.
+            ColorSpace::IccBased { n: 4, .. } => match comps {
+                &[c, m, y, k] => RasterColor::with_process_inks(
+                    cs.convert_to_rgb(self.resources.doc(), comps),
+                    [c, m, y, k],
+                ),
+                _ => RasterColor::from_bytes(cs.convert_to_rgb(self.resources.doc(), comps)),
+            },
             _ => RasterColor::from_bytes(cs.convert_to_rgb(self.resources.doc(), comps)),
         }
     }
@@ -280,9 +290,14 @@ impl PageRenderer<'_> {
         if let (Some(_), Some(transfer)) = (&tiled, &transfer) {
             pipe.transfer = Self::transfer_set(transfer);
         }
-        let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
-            PipeSrc::Pattern(p as &dyn Pattern)
-        });
+        let kind = self.canvas.kind();
+        let tiled = tiled
+            .as_ref()
+            .map(|p| CanvasPattern::new(kind, p as &dyn Pattern));
+        let src = tiled.as_ref().map_or_else(
+            || PipeSrc::Solid(solid_color.bytes_for(kind.mode())),
+            |p| PipeSrc::Pattern(p.as_dyn()),
+        );
 
         // Solid-colour fills only. The device evaluates the CPU scanner's
         // intersection table and the counts are composited through the CPU
@@ -296,29 +311,20 @@ impl PageRenderer<'_> {
             return;
         }
 
-        if even_odd {
-            eo_fill(
-                &mut self.bitmap,
+        let antialias = self.vector_antialias;
+        with_canvas!(&mut self.canvas, |b| {
+            let fill_fn = if even_odd { eo_fill } else { fill };
+            fill_fn(
+                b,
                 &clip,
                 path,
                 &pipe,
                 &src,
                 &DEVICE_MATRIX,
                 flatness,
-                self.vector_antialias,
+                antialias,
             );
-        } else {
-            fill(
-                &mut self.bitmap,
-                &clip,
-                path,
-                &pipe,
-                &src,
-                &DEVICE_MATRIX,
-                flatness,
-                self.vector_antialias,
-            );
-        }
+        });
     }
 
     /// Fill `path` on the attached GPU backend, if any; `true` when the
@@ -473,19 +479,18 @@ impl PageRenderer<'_> {
         if let (Some(_), Some(transfer)) = (&tiled, &transfer) {
             pipe.transfer = Self::transfer_set(transfer);
         }
-        let src = tiled.as_ref().map_or(PipeSrc::Solid(&solid_color), |p| {
-            PipeSrc::Pattern(p as &dyn Pattern)
-        });
-
-        stroke(
-            &mut self.bitmap,
-            &clip,
-            &path,
-            &pipe,
-            &src,
-            &matrix,
-            &params,
+        let kind = self.canvas.kind();
+        let tiled = tiled
+            .as_ref()
+            .map(|p| CanvasPattern::new(kind, p as &dyn Pattern));
+        let src = tiled.as_ref().map_or_else(
+            || PipeSrc::Solid(solid_color.bytes_for(kind.mode())),
+            |p| PipeSrc::Pattern(p.as_dyn()),
         );
+
+        with_canvas!(&mut self.canvas, |b| stroke(
+            b, &clip, &path, &pipe, &src, &matrix, &params
+        ));
     }
 }
 

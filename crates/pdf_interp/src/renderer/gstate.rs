@@ -292,22 +292,16 @@ impl InterpGState {
         }
     }
 
-    /// `rgb` mapped through the transfer function in effect.
-    #[must_use]
-    pub(crate) fn transferred(&self, rgb: [u8; 3]) -> [u8; 3] {
-        self.transfer.as_ref().map_or(rgb, |t| t.apply(rgb))
-    }
-
     /// The fill colour as painted: mapped through the transfer function.
     #[must_use]
-    pub(crate) fn painted_fill_color(&self) -> [u8; 3] {
-        self.transferred(self.fill_color.bytes())
+    pub(crate) fn painted_fill_color(&self) -> RasterColor {
+        self.fill_color.transferred(self.transfer.as_deref())
     }
 
     /// The stroke colour as painted: mapped through the transfer function.
     #[must_use]
-    pub(crate) fn painted_stroke_color(&self) -> [u8; 3] {
-        self.transferred(self.stroke_color.bytes())
+    pub(crate) fn painted_stroke_color(&self) -> RasterColor {
+        self.stroke_color.transferred(self.transfer.as_deref())
     }
 }
 

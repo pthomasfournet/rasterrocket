@@ -22,6 +22,7 @@ use raster::clip::Clip;
 use raster::pipe::{PipeSrc, PipeState};
 use raster::types::AA_SIZE;
 
+use super::canvas::PageCanvas;
 use super::{DEVICE_MATRIX, PageRenderer};
 
 /// A fill prepared for device evaluation: the CPU scanner's intersection
@@ -146,7 +147,8 @@ fn prepare_aa_fill(
     })
 }
 
-/// Composite device-computed coverage counts into `renderer.bitmap`.
+/// Composite device-computed coverage counts into the renderer's RGB
+/// canvas; an ink canvas is left as it is.
 ///
 /// `counts` must be exactly `rect.width × rect.height` bytes of sub-sample
 /// counts (`0..=AA_SIZE²`); the slice is consumed as scratch.
@@ -158,7 +160,9 @@ fn gpu_coverage_to_bitmap(
     src: &PipeSrc<'_>,
 ) {
     let clip = renderer.gstate.current().clip.clone_shared();
-    paint_coverage(&mut renderer.bitmap, &clip, counts, rect, pipe, src);
+    if let PageCanvas::Rgb(bitmap) = &mut renderer.canvas {
+        paint_coverage(bitmap, &clip, counts, rect, pipe, src);
+    }
 }
 
 /// Composite one rectangle of coverage counts, row by row, exactly as the
@@ -227,7 +231,8 @@ fn report_failure(backend: &'static str, e: &dyn std::fmt::Display) {
 ///
 /// Returns `true` when the fill was painted from device counts, so the
 /// caller skips the CPU fill.  Returns `false`, leaving the bitmap
-/// untouched, when the device fill is disabled (the threshold is
+/// untouched, on a canvas of ink (the counts composite onto RGB pixels
+/// only), when the device fill is disabled (the threshold is
 /// `usize::MAX`, checked before the path is scan-converted),
 /// [`prepare_aa_fill`] declines the fill, the table has no intersections
 /// (it paints nothing), or the device fails; a failure is logged (see
@@ -241,14 +246,17 @@ pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
 ) -> bool {
+    let PageCanvas::Rgb(bitmap) = &renderer.canvas else {
+        return false;
+    };
     let threshold = aa_fill_threshold();
     if threshold == usize::MAX {
         return false;
     }
     let Some(fill) = prepare_aa_fill(
         &renderer.gstate.current().clip,
-        renderer.bitmap.width,
-        renderer.bitmap.height,
+        bitmap.width,
+        bitmap.height,
         path,
         flatness,
         even_odd,
