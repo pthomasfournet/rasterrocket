@@ -316,6 +316,10 @@ fn resolve_simple_to_gid(
 /// point, the identity that holds for the ASCII and Latin-1 ranges of those
 /// encodings.
 ///
+/// An `embedded` program that maps no glyph to the name's Unicode value
+/// (or the name has none: `glyph243`, a producer's own name) selects the
+/// glyph of that name in its `post` table (PDF §9.6.6.4).
+///
 /// A substitute that lacks the glyph of a name it does understand draws
 /// nothing for the code: the glyph at the raw code point would be an
 /// unrelated character (`uni4E2D` at code 65 is not `A`).
@@ -349,14 +353,16 @@ fn resolve_via_unicode_cmap(
             });
             let unicode = name.and_then(font::glyph_name_to_unicode);
             name.and_then(|name| {
+                let by_name = || nonzero(face.raw_get_name_index(name));
                 (!embedded)
-                    .then(|| face.raw_get_name_index(name))
-                    .and_then(nonzero)
+                    .then(by_name)
+                    .flatten()
                     .or_else(|| {
                         unicode
                             .map(|u| face.raw_get_char_index(u))
                             .and_then(nonzero)
                     })
+                    .or_else(|| embedded.then(by_name).flatten())
             })
             .or_else(|| {
                 (embedded || unicode.is_none())
@@ -593,6 +599,33 @@ mod tests {
         for code in [2usize, 3, 7, 0x41, 0xFF] {
             assert_eq!(face.code_to_gid[code] as usize, code, "code {code:#04x}");
         }
+    }
+
+    /// An embedded TrueType program with a Unicode `cmap` resolves a
+    /// `Differences` name the `cmap` cannot reach through its `post`
+    /// table: Ahem's `glyph243` (glyph 2) has no Unicode value, so code
+    /// 0x41 draws it rather than the `A` at the raw code.
+    #[test]
+    fn embedded_truetype_resolves_unmapped_names_through_post() {
+        let desc = simple(
+            PdfFontKind::TrueType,
+            Some(ahem()),
+            diffs(&[(0x41, "glyph243"), (0x42, "nosuchglyph"), (0x43, "dollar")]),
+            BaseEncoding::WinAnsi,
+        );
+        let mut cache = cache();
+        let face = face(&mut cache, desc);
+        assert_eq!(face.raw_get_name_index("glyph243"), 2);
+        assert_eq!(face.code_to_gid[0x41], 2, "post name");
+        assert_eq!(
+            face.code_to_gid[0x42],
+            face.raw_get_char_index(0x42),
+            "an unknown name keeps the raw-code reading"
+        );
+        assert_eq!(
+            face.code_to_gid[0x43],
+            face.raw_get_char_index(u32::from('$'))
+        );
     }
 
     /// A cmap-less subset under a declared encoding resolves each named
