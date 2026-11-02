@@ -2213,7 +2213,7 @@ context.
    204 × 196 dpi (fine) or 204 × 98 dpi (`--fax-resolution standard`), 1
    bit, landscape pages turned. Group 3 one-dimensional by default, the
    Class F baseline every reader takes (`g3-2d` and `g4` on request), not
-   G4 as first planned. Mostly dark pages are inverted (`--invert`), and
+   G4 as first planned. Pages reversed out of a flat dark ground are inverted (`--invert`), and
    `--dither halftone` serves photographs.
 4. **Done.** `--fax-to NUMBER [--fax-queue NAME]` hands the document to a
    CUPS fax queue (`lp -o phone=`) or to HylaFAX `sendfax`. On Windows it

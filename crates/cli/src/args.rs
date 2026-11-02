@@ -186,7 +186,7 @@ pub(crate) struct Args {
     /// Write a fax document: one TIFF Class F file, `OUTPUT_PREFIX.tif`,
     /// every page 1728 pixels wide (landscape pages turned), bilevel, at
     /// the --fax-resolution, coded as --tiffcompression `g3` (default),
-    /// `g3-2d` or `g4`.  Mostly dark pages are inverted unless --invert
+    /// `g3-2d` or `g4`.  Pages reversed out of a dark ground are inverted unless --invert
     /// says otherwise.
     #[arg(long)]
     pub fax: bool,
@@ -220,8 +220,9 @@ pub(crate) struct Args {
     pub dither: DitherArg,
 
     /// Invert the page's tones, as a negative: `always`, `never`, or
-    /// `auto`, only pages that are mostly dark (over three fifths of the
-    /// pixels below mid-gray), such as light text on a dark ground.
+    /// `auto`, only pages reversed out of a flat dark ground (over three
+    /// fifths of the pixels within one dark tone band), such as light text
+    /// on black; dark photographs are left as they are.
     /// `--invert` alone is `always`.  Default: `never`.
     #[arg(
         long = "invert",
@@ -491,7 +492,7 @@ pub(crate) enum DitherArg {
 pub(crate) enum InvertWhen {
     /// Every page.
     Always,
-    /// Pages that are mostly dark.
+    /// Pages reversed out of a flat dark ground.
     Auto,
     /// No page.
     Never,

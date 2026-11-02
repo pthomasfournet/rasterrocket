@@ -13,12 +13,18 @@ use crate::cleanup::Page;
 /// light side).
 const MONO_THRESHOLD: u8 = 128;
 
-/// A page is dark when more than `DARK_NUMERATOR / DARK_DENOMINATOR` of its
-/// pixels lie below [`MONO_THRESHOLD`].  A page of dense black text inks
-/// well under a quarter of its area; light text reversed out of a dark
-/// ground leaves the ground well over this fraction.
-const DARK_NUMERATOR: u64 = 3;
-const DARK_DENOMINATOR: u64 = 5;
+/// A page is reversed out when more than `GROUND_NUMERATOR /
+/// GROUND_DENOMINATOR` of its pixels share one dark tone band: a luma range
+/// of [`GROUND_BAND`] levels below [`MONO_THRESHOLD`].  Light content on a
+/// flat dark ground leaves the ground well over this fraction; a page of
+/// dense black text inks well under a quarter of its area, and a dark
+/// photograph or a page of saturated colours spreads its dark pixels over
+/// many bands.
+const GROUND_NUMERATOR: u64 = 3;
+const GROUND_DENOMINATOR: u64 = 5;
+
+/// The width in luma levels of the tone band of a dark ground.
+const GROUND_BAND: usize = 32;
 
 /// `page` made ready for encoding under `args`: in luma when the output is
 /// gray or bilevel, and inverted as `--invert` selects.
@@ -30,7 +36,7 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
     let invert = match args.invert_when() {
         InvertWhen::Never => false,
         InvertWhen::Always => true,
-        InvertWhen::Auto => is_dark(&page),
+        InvertWhen::Auto => is_reversed_out(&page),
     };
     if invert {
         match &mut page {
@@ -41,8 +47,9 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
     page
 }
 
-/// Whether `page` is dark: see [`DARK_NUMERATOR`].
-fn is_dark(page: &Page) -> bool {
+/// Whether `page` is light content on a flat dark ground: see
+/// [`GROUND_NUMERATOR`].
+fn is_reversed_out(page: &Page) -> bool {
     let converted;
     let gray = match page {
         Page::Gray(gray) => gray,
@@ -52,16 +59,19 @@ fn is_dark(page: &Page) -> bool {
         }
     };
     let w = gray.width as usize;
-    let dark: u64 = (0..gray.height)
-        .map(|y| {
-            gray.row_bytes(y)[..w]
-                .iter()
-                .filter(|&&luma| luma < MONO_THRESHOLD)
-                .count() as u64
-        })
-        .sum();
+    let mut histogram = [0u64; 256];
+    for y in 0..gray.height {
+        for &luma in &gray.row_bytes(y)[..w] {
+            histogram[usize::from(luma)] += 1;
+        }
+    }
+    let ground = histogram[..usize::from(MONO_THRESHOLD)]
+        .windows(GROUND_BAND)
+        .map(|band| band.iter().sum::<u64>())
+        .max()
+        .unwrap_or(0);
     let total = u64::from(gray.width) * u64::from(gray.height);
-    dark * DARK_DENOMINATOR > total * DARK_NUMERATOR
+    ground * GROUND_DENOMINATOR > total * GROUND_NUMERATOR
 }
 
 /// Complement every sample of `bmp`: the negative of an additive or luma
@@ -177,7 +187,8 @@ mod tests {
     #[test]
     fn invert_auto_turns_only_mostly_dark_pages() {
         let auto = args(&["--gray", "--invert=auto"]);
-        // Six of ten dark is not more than three fifths; seven is.
+        // Six of ten on a black ground is not more than three fifths; seven
+        // is.
         assert_eq!(luma(&prepare(page(6), &auto)), luma(&page(6)));
         assert_eq!(
             luma(&prepare(page(7), &auto)),
@@ -186,6 +197,21 @@ mod tests {
         assert_eq!(luma(&prepare(page(7), &args(&["--gray"]))), luma(&page(7)));
         let always = args(&["--gray", "--invert"]);
         assert_eq!(luma(&prepare(page(2), &always))[..3], [255, 255, 0]);
+    }
+
+    #[test]
+    fn invert_auto_leaves_dark_pages_without_a_flat_ground() {
+        // Ten dark pixels spread over 100 luma levels: dark, but no ground.
+        let spread: Vec<u8> = (0..10).map(|i| i * 11).collect();
+        let mut gray: Bitmap<Gray8> = Bitmap::new(10, 1, 4, false);
+        gray.row_bytes_mut(0)[..10].copy_from_slice(&spread);
+        let out = prepare(Page::Gray(gray), &args(&["--gray", "--invert=auto"]));
+        assert_eq!(luma(&out), spread);
+        // A dark navy ground, not black, still counts.
+        let mut gray: Bitmap<Gray8> = Bitmap::new(10, 1, 4, false);
+        gray.row_bytes_mut(0)[..10].copy_from_slice(&[40, 45, 50, 40, 44, 52, 41, 255, 255, 255]);
+        let out = prepare(Page::Gray(gray), &args(&["--gray", "--invert=auto"]));
+        assert_eq!(luma(&out)[7], 0);
     }
 
     #[test]
