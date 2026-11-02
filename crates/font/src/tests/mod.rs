@@ -365,6 +365,47 @@ fn vertical_forms_come_from_gsub() {
     assert_eq!(cid.vertical_selector(34), 34);
 }
 
+/// A transformed face draws each glyph mapped by its em-space affine
+/// before the face matrix; `bounds` is the em-unit box of the outline.
+#[test]
+fn transformed_faces_map_glyphs_in_em_space() {
+    let face = face_at(font_test_data::AHEM, 100.0);
+    let gid = face.raw_get_char_index(u32::from('p'));
+    assert_ne!(gid, 0);
+    let [x0, y0, x1, y1] = face.program().bounds(gid).expect("bounds");
+    let (px0, py0, px1, py1) = bounds(&face.glyph_path_by_gid(gid).expect("outline"));
+    for (em, px) in [(x0, px0), (y0, py0), (x1, px1), (y1, py1)] {
+        assert!(em.mul_add(100.0, -px).abs() < 1e-6, "{em} em vs {px} px");
+    }
+    // A quarter turn clockwise, then half an em right.
+    let turned = face
+        .transformed(
+            crate::key::FaceIds::default().next(),
+            [0.0, -1.0, 1.0, 0.0, 0.5, 0.0],
+        )
+        .expect("finite");
+    let (tx0, ty0, tx1, ty1) = bounds(&turned.glyph_path_by_gid(gid).expect("outline"));
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    assert!(
+        close(tx0, py0 + 50.0) && close(tx1, py1 + 50.0),
+        "x {tx0}..{tx1}"
+    );
+    assert!(close(ty0, -px1) && close(ty1, -px0), "y {ty0}..{ty1}");
+    let bitmap = turned.make_glyph_by_gid(gid, 0).expect("bitmap");
+    let upright = face.make_glyph_by_gid(gid, 0).expect("bitmap");
+    assert_eq!(
+        (bitmap.width, bitmap.height),
+        (upright.height, upright.width)
+    );
+    assert!(
+        face.transformed(
+            crate::key::FaceIds::default().next(),
+            [f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]
+        )
+        .is_none()
+    );
+}
+
 /// The `OS/2` and `name` summary of a file's faces is read without
 /// loading the file; a file that is not an sfnt yields nothing.
 #[test]

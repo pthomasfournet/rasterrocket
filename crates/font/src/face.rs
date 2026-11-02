@@ -20,7 +20,7 @@ use crate::cache::GlyphCache;
 use crate::coverage::rasterize;
 use crate::engine::FaceParams;
 use crate::key::{FRACTION, FaceId, GlyphKey};
-use crate::outline::PathPen;
+use crate::outline::{Affine, PathPen};
 use crate::program::FontProgram;
 
 /// 2×2 matrix `[a, b, c, d]` mapping em units to device pixels:
@@ -45,6 +45,9 @@ pub struct FontFace {
     pub aa: bool,
     program: Arc<FontProgram>,
     matrix: FontMatrix,
+    /// Affine map applied to each glyph in em units, before `matrix`; see
+    /// [`Self::transformed`].
+    glyph_transform: Affine,
     /// Interpreter state at `size_px` pixels per em for a program that
     /// requires hinting ([`FontProgram::requires_hinting`]), built on first
     /// use; `None` inside when the program needs none or it cannot be set
@@ -96,6 +99,28 @@ impl FontFace {
             aa,
             program,
             matrix: mat,
+            glyph_transform: IDENTITY,
+            hinting: OnceLock::new(),
+        })
+    }
+
+    /// This face with each glyph first mapped by the em-space affine
+    /// `transform` `[a, b, c, d, e, f]` (`x' = a·x + c·y + e`,
+    /// `y' = b·x + d·y + f`, composed after any transform the face already
+    /// has), identified by `id`.  Its bitmaps and outlines are of the
+    /// mapped glyph; advances are the program's.  The face selects glyphs
+    /// through the program alone: its `code_to_gid` is empty.  `None` when
+    /// `transform` has a non-finite entry.
+    #[must_use]
+    pub fn transformed(&self, id: FaceId, transform: [f64; 6]) -> Option<Self> {
+        transform.iter().all(|v| v.is_finite()).then(|| Self {
+            id,
+            code_to_gid: Vec::new(),
+            size_px: self.size_px,
+            aa: self.aa,
+            program: Arc::clone(&self.program),
+            matrix: self.matrix,
+            glyph_transform: compose(transform, self.glyph_transform),
             hinting: OnceLock::new(),
         })
     }
@@ -296,12 +321,21 @@ impl FontFace {
         rasterize(&self.outline(gid, shift, x_scale)?, self.aa)
     }
 
-    /// The matrix mapping glyph units at `units_per_em` to device pixels,
-    /// the glyph condensed horizontally by `x_scale`, translated right by
-    /// `shift`.
-    fn pen_matrix(&self, units_per_em: f64, x_scale: f64, shift: f64) -> [f64; 6] {
-        let [a, b, c, d] = self.matrix.map(|v| v / units_per_em);
-        [a * x_scale, b * x_scale, c, d, shift, 0.0]
+    /// The matrix mapping glyph units at `units_per_em` to device pixels:
+    /// the glyph transform, then the face matrix with the glyph condensed
+    /// horizontally by `x_scale`, translated right by `shift` pixels.
+    fn pen_matrix(&self, units_per_em: f64, x_scale: f64, shift: f64) -> Affine {
+        let [a, b, c, d] = self.matrix;
+        let [ga, gb, gc, gd, ge, gf] = self.glyph_transform;
+        let units = [
+            ga / units_per_em,
+            gb / units_per_em,
+            gc / units_per_em,
+            gd / units_per_em,
+            ge,
+            gf,
+        ];
+        compose([a * x_scale, b * x_scale, c, d, shift, 0.0], units)
     }
 
     /// Outline of glyph `gid` in device pixels, condensed horizontally by
@@ -333,6 +367,23 @@ impl FontFace {
         let path = pen.finish();
         (!path.pts.is_empty()).then_some(path)
     }
+}
+
+/// The identity [`Affine`].
+const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// The affine map applying `inner`, then `outer`.
+fn compose(outer: Affine, inner: Affine) -> Affine {
+    let [xx, yx, xy, yy, dx, dy] = outer;
+    let [ixx, iyx, ixy, iyy, idx, idy] = inner;
+    [
+        xx.mul_add(ixx, xy * iyx),
+        yx.mul_add(ixx, yy * iyx),
+        xx.mul_add(ixy, xy * iyy),
+        yx.mul_add(ixy, yy * iyy),
+        xx.mul_add(idx, xy.mul_add(idy, dx)),
+        yx.mul_add(idx, yy.mul_add(idy, dy)),
+    ]
 }
 
 /// `x_scale` in `(0, 1]` as a [`GlyphKey::x_scale`] value.

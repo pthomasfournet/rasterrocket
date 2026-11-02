@@ -37,9 +37,9 @@ use crate::resources::font_substitute::{
 mod cid;
 mod type3;
 
-pub(crate) use cid::CidEncoding;
 #[cfg(test)]
 pub(crate) use cid::CidMetrics;
+pub(crate) use cid::{CidEncoding, VerticalMetrics};
 pub(crate) use type3::{Type3Data, Type3Glyph};
 
 use cid::resolve_type0_font;

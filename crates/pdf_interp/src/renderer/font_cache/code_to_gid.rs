@@ -8,13 +8,39 @@
 //! cmap-less TrueType subset, and through the character collection or
 //! the `ToUnicode` map for a composite font drawn by a substitute.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use font::face::FontFace;
+
+use super::vertical::{VerticalFallback, vertical_fallback};
 
 use crate::renderer::encodings::{base_encoding_table, glyph_name_for_code};
 use crate::renderer::fallback::first_scalar;
 use crate::resources::cmap::CMap;
 use crate::resources::cmap_predefined::{CollectionUnicode, cid_to_unicode};
 use crate::resources::font::{BaseEncoding, CidEncoding, FontDescriptor, PdfFontKind};
+
+/// A face's code → glyph table with the vertical-form CIDs it draws from
+/// horizontal glyphs.
+#[derive(Clone)]
+pub(super) struct ResolvedTable {
+    /// The `code_to_gid` table of the face.
+    pub code_to_gid: Vec<u32>,
+    /// Each vertical-form CID of a composite font that the face draws by a
+    /// horizontal glyph, with the mapping that stands in for its vertical
+    /// form.
+    pub vertical_fallbacks: Arc<HashMap<u32, VerticalFallback>>,
+}
+
+impl From<Vec<u32>> for ResolvedTable {
+    fn from(code_to_gid: Vec<u32>) -> Self {
+        Self {
+            code_to_gid,
+            vertical_fallbacks: Arc::default(),
+        }
+    }
+}
 
 /// The `code_to_gid` table a face of `desc` needs in place of the
 /// descriptor's, or `None` when the descriptor's table (or the program's own
@@ -38,30 +64,17 @@ pub(super) fn resolved_code_to_gid(
     face: &FontFace,
     desc: &FontDescriptor,
     embedded: bool,
-) -> Option<Vec<u32>> {
+) -> Option<ResolvedTable> {
     let simple = desc.cid_encoding.is_none();
     let outline = desc.type3.is_none();
     if embedded && simple && outline && face.program().lacks_cmap() {
-        Some(resolve_cmapless(
-            face,
-            &desc.differences,
-            desc.base_encoding,
-        ))
+        Some(resolve_cmapless(face, &desc.differences, desc.base_encoding).into())
     } else if wants_name_resolution(embedded, simple, outline, desc.kind) {
-        Some(resolve_simple_to_gid(
-            face,
-            &desc.differences,
-            desc.base_encoding,
-        ))
+        Some(resolve_simple_to_gid(face, &desc.differences, desc.base_encoding).into())
     } else if wants_unicode_resolution(embedded, simple, outline, desc.kind)
         && (!embedded || face.has_unicode_cmap())
     {
-        Some(resolve_via_unicode_cmap(
-            face,
-            &desc.differences,
-            desc.base_encoding,
-            embedded,
-        ))
+        Some(resolve_via_unicode_cmap(face, &desc.differences, desc.base_encoding, embedded).into())
     } else if !embedded
         && !simple
         && let Some(enc) = &desc.cid_encoding
@@ -70,7 +83,7 @@ pub(super) fn resolved_code_to_gid(
             || {
                 enc.to_unicode
                     .as_ref()
-                    .map(|to_unicode| resolve_cids_via_to_unicode(face, enc, to_unicode))
+                    .map(|to_unicode| resolve_cids_via_to_unicode(face, enc, to_unicode).into())
             },
             |table| Some(resolve_cids_via_unicode(face, &table, enc.vertical)),
         )
@@ -142,33 +155,58 @@ fn resolve_cids_via_to_unicode(face: &FontFace, enc: &CidEncoding, to_unicode: &
 
 /// Build a 65 536-entry CID → glyph table for a composite font drawn by a
 /// substitute, through the CID → Unicode table of its character
-/// collection and the substitute's Unicode charmap: the glyph of the
-/// first of a CID's code points the substitute maps.  In `vertical`
-/// writing mode, and for a CID that is the collection's vertical form of
-/// its code point in either mode, each glyph is replaced by its vertical
-/// form.  The table spans the whole CID space so that no CID falls
-/// through to the charmap.
+/// collection and the substitute's charmap: the glyph of the first of a
+/// CID's code points the substitute maps.  The table spans the whole CID
+/// space so that no CID falls through to the charmap.
+///
+/// A vertical-form CID draws the vertical form of its glyph through the
+/// substitute's `GSUB` table, in either writing mode; in `vertical` mode
+/// every CID does, and a CID with a vertical-form CID draws as that one.
+/// A vertical-form CID drawn by a horizontal glyph that has no vertical
+/// form is recorded in [`ResolvedTable::vertical_fallbacks`] with the
+/// mapping that stands in for one.
 fn resolve_cids_via_unicode(
     face: &FontFace,
     collection: &CollectionUnicode,
     vertical: bool,
-) -> Vec<u32> {
+) -> ResolvedTable {
+    let program = face.program();
     let mut table = vec![0u32; 1 << 16];
-    for (cid, codes) in collection.iter() {
-        if let Some(slot) = table.get_mut(cid as usize) {
-            let gid = codes
-                .iter()
-                .map(|&unicode| face.raw_get_char_index(unicode))
-                .find(|&gid| gid != 0)
-                .unwrap_or(0);
-            *slot = if vertical || collection.is_vertical(cid) {
-                face.program().vertical_gid(gid)
-            } else {
-                gid
-            };
-        }
+    let mut vertical_fallbacks = HashMap::new();
+    for (cid, _) in collection.iter() {
+        let Some(slot) = table.get_mut(cid as usize) else {
+            continue;
+        };
+        let form = if vertical {
+            collection.vertical_form(cid).unwrap_or(cid)
+        } else {
+            cid
+        };
+        let Some((unicode, gid)) = collection
+            .get(form)
+            .iter()
+            .map(|&unicode| (unicode, face.raw_get_char_index(unicode)))
+            .find(|&(_, gid)| gid != 0)
+        else {
+            continue;
+        };
+        *slot = if vertical || collection.is_vertical(form) {
+            let vertical_gid = program.vertical_gid(gid);
+            if vertical_gid == gid
+                && collection.is_vertical(form)
+                && let Some(fallback) = vertical_fallback(unicode)
+            {
+                let _ = vertical_fallbacks.insert(cid, fallback);
+            }
+            vertical_gid
+        } else {
+            gid
+        };
     }
-    table
+    ResolvedTable {
+        code_to_gid: table,
+        vertical_fallbacks: Arc::new(vertical_fallbacks),
+    }
 }
 
 /// Whether a face resolves codes through glyph names in the program's
@@ -639,5 +677,103 @@ mod tests {
             };
             assert_eq!(face.code_to_gid[cid], vertical, "CID {cid}");
         }
+    }
+
+    /// A vertical-form CID drawn by a horizontal glyph without a `GSUB`
+    /// vertical form is recorded with the mapping that stands in for one,
+    /// and draws from a face mapping the glyph in em space: Ahem maps the
+    /// HORIZONTAL ELLIPSIS of Adobe-Japan1's vertical ellipsis (CID 7897)
+    /// and has no `GSUB` table, so the CID is rotated, as is its horizontal
+    /// CID 668 in vertical writing; in horizontal writing CID 668 is drawn
+    /// as it is.
+    #[test]
+    fn vertical_forms_without_gsub_forms_rotate_the_horizontal_glyph() {
+        use std::collections::HashMap;
+
+        use font::engine::{FaceParams, FontEngine};
+
+        use crate::renderer::font_cache::vertical::VerticalFallback;
+        use crate::renderer::font_cache::{FallbackLoader, PageFace};
+
+        let japan1 = cid_to_unicode(Script::Japanese).expect("Japan1");
+        let ids = Arc::new(font::key::FaceIds::default());
+        let engine = FontEngine::with_face_ids(true, Arc::clone(&ids));
+        let params = || FaceParams {
+            code_to_gid: Vec::new(),
+            mat: [20.0, 0.0, 0.0, 20.0],
+        };
+        let ahem = engine
+            .load_program_face(
+                Arc::new(font::program::FontProgram::parse(ahem(), 0).expect("parses")),
+                params(),
+            )
+            .expect("loads");
+        let ellipsis = ahem.raw_get_char_index(0x2026);
+        assert_ne!(ellipsis, 0);
+
+        let horizontal = resolve_cids_via_unicode(&ahem, &japan1, false);
+        assert_eq!(horizontal.code_to_gid[7897], ellipsis);
+        assert_eq!(horizontal.code_to_gid[668], ellipsis);
+        assert_eq!(
+            horizontal.vertical_fallbacks.get(&7897),
+            Some(&VerticalFallback::Rotate)
+        );
+        assert!(!horizontal.vertical_fallbacks.contains_key(&668));
+        let vertical = resolve_cids_via_unicode(&ahem, &japan1, true);
+        assert_eq!(
+            vertical.vertical_fallbacks.get(&668),
+            Some(&VerticalFallback::Rotate)
+        );
+
+        let mut desc = composite_substitute(None, SubstituteStyle::default());
+        let enc = desc.cid_encoding.as_mut().expect("composite");
+        enc.vertical = true;
+        let mut face = PageFace {
+            face: ahem,
+            substitute: true,
+            fallback: None,
+            fallback_faces: Vec::new(),
+            fallback_glyphs: HashMap::new(),
+            vertical_fallbacks: vertical.vertical_fallbacks,
+            vertical_faces: HashMap::new(),
+        };
+        face.face.code_to_gid = vertical.code_to_gid;
+        let loader = FallbackLoader {
+            engine: &engine,
+            ids: &ids,
+            shared: None,
+            trm: [20.0, 0.0, 0.0, 20.0],
+        };
+        // Identity-H codes: CID 668, then `A` (CID 34).
+        loader.prepare_vertical(&mut face, enc, &[0x02, 0x9C, 0x00, 0x22]);
+        let (turned, selector, by_gid) = face.glyph_for(Some(enc), 0x29C, 668).expect("drawn");
+        assert!(by_gid);
+        assert_eq!(selector, ellipsis);
+        assert_ne!(turned.id, face.face.id);
+        // A quarter turn clockwise about the centre (0.5, 0.38) em of the
+        // full-width vertical em box: `(x, y) → (y + 0.12, 0.88 − x)`.
+        let [x0, y0, x1, y1] = face.face.program().bounds(ellipsis).expect("bounds");
+        let path = turned.glyph_path_by_gid(selector).expect("outline");
+        let (min, max) = path.pts.iter().fold(
+            (
+                (f64::INFINITY, f64::INFINITY),
+                (f64::NEG_INFINITY, f64::NEG_INFINITY),
+            ),
+            |(min, max), p| {
+                (
+                    (min.0.min(p.x), min.1.min(p.y)),
+                    (max.0.max(p.x), max.1.max(p.y)),
+                )
+            },
+        );
+        let expected = [y0 + 0.12, 0.88 - x1, y1 + 0.12, 0.88 - x0].map(|v| v * 20.0);
+        for (got, want) in [min.0, min.1, max.0, max.1].into_iter().zip(expected) {
+            assert!((got - want).abs() < 1e-6, "{got} vs {want}");
+        }
+        let (own, _, by_gid) = face.glyph_for(Some(enc), 0x22, 34).expect("drawn");
+        assert!(
+            !by_gid && own.id == face.face.id,
+            "no vertical form: own face"
+        );
     }
 }

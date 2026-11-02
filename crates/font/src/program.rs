@@ -612,6 +612,18 @@ impl FontProgram {
         Some(units / self.upem)
     }
 
+    /// Bounding box `[x_min, y_min, x_max, y_max]` of the unhinted outline
+    /// of glyph `gid` in em units, y up: the box of its on-curve and
+    /// control points, which contains the outline.  `None` when the glyph
+    /// cannot be drawn or has no outline.
+    #[must_use]
+    pub fn bounds(&self, gid: u32) -> Option<[f64; 4]> {
+        let mut pen = BoundsPen::default();
+        let _advance = self.draw(gid, &mut pen)?;
+        let [x0, y0, x1, y1] = pen.bounds?;
+        Some([x0, y0, x1, y1].map(|v| f64::from(v) / self.upem))
+    }
+
     /// Emit the unhinted outline of glyph `gid` to `pen` in font units
     /// (divide by [`Self::upem`] for em units, y up).
     ///
@@ -912,6 +924,42 @@ fn post_name_charmap(font: &FontRef<'_>) -> Option<Charmap> {
         .collect();
     let map = Charmap::from_glyph_names(pairs.iter().map(|(gid, name)| (*gid, name.as_str())));
     map.iter().next().is_some().then_some(map)
+}
+
+/// Pen accumulating the box of every point it receives.
+#[derive(Default)]
+struct BoundsPen {
+    /// `[x_min, y_min, x_max, y_max]`; `None` before the first point.
+    bounds: Option<[f32; 4]>,
+}
+
+impl BoundsPen {
+    fn add(&mut self, x: f32, y: f32) {
+        let [x0, y0, x1, y1] = self.bounds.get_or_insert([x, y, x, y]);
+        *x0 = x0.min(x);
+        *y0 = y0.min(y);
+        *x1 = x1.max(x);
+        *y1 = y1.max(y);
+    }
+}
+
+impl OutlinePen for BoundsPen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.add(x, y);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.add(x, y);
+    }
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.add(cx0, cy0);
+        self.add(x, y);
+    }
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.add(cx0, cy0);
+        self.add(cx1, cy1);
+        self.add(x, y);
+    }
+    fn close(&mut self) {}
 }
 
 /// Pen that discards every command; used to evaluate charstring widths.

@@ -126,10 +126,12 @@ pub(crate) struct CollectionUnicode {
     /// Code points of each CID that has any, ordered by
     /// [`preference_class`], then by value.
     unicode: HashMap<u32, Box<[u32]>>,
-    /// CIDs reached only through the vertical `UCS2-V` `CMap`: the
-    /// vertical forms (rotated or repositioned glyphs) of their code
-    /// points.
+    /// The vertical-form CIDs (rotated or repositioned glyphs): those the
+    /// `UCS2-V` `CMap` maps a code point to in place of the `UCS2-H` one,
+    /// and whose own code points it leaves in place.
     vertical: HashSet<u32>,
+    /// The vertical-form CID of each CID that has one.
+    vertical_of: HashMap<u32, u32>,
 }
 
 impl CollectionUnicode {
@@ -140,10 +142,16 @@ impl CollectionUnicode {
         self.unicode.get(&cid).map_or(&[], |codes| codes)
     }
 
-    /// Whether `cid` is the vertical form of its code point.
+    /// Whether `cid` is the vertical form of a code point.
     #[must_use]
     pub(crate) fn is_vertical(&self, cid: u32) -> bool {
         self.vertical.contains(&cid)
+    }
+
+    /// The vertical-form CID of `cid`, `None` when it has none.
+    #[must_use]
+    pub(crate) fn vertical_form(&self, cid: u32) -> Option<u32> {
+        self.vertical_of.get(&cid).copied()
     }
 
     /// Every CID with its code points, in no fixed order.
@@ -157,8 +165,11 @@ pub(crate) type CidToUnicode = Arc<CollectionUnicode>;
 
 /// CID → Unicode for the character collection of `script`.
 ///
-/// The table inverts the collection's `UCS2-H` `CMap`, then its `UCS2-V`
-/// `CMap` for the CIDs only the vertical one reaches.  `None` for a
+/// The table inverts the collection's `UCS2-H` `CMap`.  A vertical-form
+/// CID — one the `UCS2-V` `CMap` maps a code point to in place of the
+/// `UCS2-H` one, and whose own code points it leaves in place — keeps the code points the horizontal one
+/// gives it (vertical presentation forms) followed by the code point it
+/// is the vertical form of.  `None` for a
 /// script without a collection.  Built once per process.
 #[must_use]
 pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
@@ -199,19 +210,45 @@ pub(crate) fn cid_to_unicode(script: Script) -> Option<CidToUnicode> {
         }
     }
     let mut unicode = invert(pairs);
-    let vertical_pairs: Vec<(u32, u8, u32)> = predefined_cmap(vertical_name)
-        .map(|cmap| {
-            cmap.map
-                .iter()
-                .filter(|&(_, cid)| !unicode.contains_key(cid))
-                .map(|(&code, &cid)| (cid, preference_class(code), code))
-                .collect()
-        })
-        .unwrap_or_default();
-    let vertical_only = invert(vertical_pairs);
-    let vertical = vertical_only.keys().copied().collect();
-    unicode.extend(vertical_only);
-    let table = Arc::new(CollectionUnicode { unicode, vertical });
+    let mut vertical = HashSet::new();
+    let mut vertical_of = HashMap::new();
+    if let Some(vertical_cmap) = predefined_cmap(vertical_name) {
+        let mut forms: Vec<(u32, u8, u32)> = vertical_cmap
+            .map
+            .iter()
+            .filter(|&(code, cid)| cmap.map.get(code) != Some(cid))
+            // A CID whose own code point the vertical `CMap` remaps is a
+            // horizontal character standing in for another (a down arrow
+            // for a right arrow, a vertical line for a horizontal one),
+            // not a vertical form.
+            .filter(|&(_, cid)| {
+                unicode.get(cid).is_none_or(|codes| {
+                    codes
+                        .iter()
+                        .all(|code| vertical_cmap.map.get(code).is_none_or(|v| v == cid))
+                })
+            })
+            .map(|(&code, &cid)| (cid, preference_class(code), code))
+            .collect();
+        forms.sort_unstable();
+        for &(cid, _, code) in &forms {
+            let _ = vertical.insert(cid);
+            if let Some(&horizontal) = cmap.map.get(&code) {
+                let _ = vertical_of.entry(horizontal).or_insert(cid);
+            }
+            let codes = unicode.entry(cid).or_default();
+            if !codes.contains(&code) {
+                let mut extended = codes.to_vec();
+                extended.push(code);
+                *codes = extended.into_boxed_slice();
+            }
+        }
+    }
+    let table = Arc::new(CollectionUnicode {
+        unicode,
+        vertical,
+        vertical_of,
+    });
     let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
     Some(Arc::clone(cache.entry(script).or_insert(table)))
 }
@@ -288,20 +325,43 @@ mod tests {
         assert!(cid_to_unicode(Script::Thai).is_none());
     }
 
-    /// A CID only the `UCS2-V` `CMap` reaches maps to its code point and is
-    /// marked vertical: the vertical long-vowel mark, ideographic comma and
-    /// full stop of Adobe-Japan1.
+    /// A vertical-form CID of the `UCS2-V` `CMap` maps to the code point it
+    /// is the vertical form of, after any vertical presentation form the
+    /// `UCS2-H` `CMap` gives it, is marked vertical, and is the vertical
+    /// form of the code point's horizontal CID: the long-vowel mark,
+    /// ideographic comma and full stop and the left corner bracket of
+    /// Adobe-Japan1.
     #[test]
-    fn vertical_only_cids_map_to_their_code_points() {
+    fn vertical_form_cids_map_to_their_code_points() {
         let japan1 = cid_to_unicode(Script::Japanese).expect("Japan1");
         let v = predefined_cmap(b"UniJIS-UCS2-V").expect("UniJIS-UCS2-V");
         let h = predefined_cmap(b"UniJIS-UCS2-H").expect("UniJIS-UCS2-H");
-        for unicode in [0x30FC, 0x3001, 0x3002] {
+        for unicode in [0x30FC, 0x3001, 0x3002, 0x300C] {
             let cid = v.lookup(unicode);
             assert_ne!(cid, h.lookup(unicode), "U+{unicode:04X} has a vertical CID");
-            assert!(japan1.get(cid).contains(&unicode), "CID {cid}");
+            assert_eq!(japan1.get(cid).last(), Some(&unicode), "CID {cid}");
             assert!(japan1.is_vertical(cid), "CID {cid}");
+            assert_eq!(japan1.vertical_form(h.lookup(unicode)), Some(cid));
+            assert!(!japan1.is_vertical(h.lookup(unicode)));
         }
+        let bracket = v.lookup(0x300C);
+        assert_eq!(
+            japan1.get(bracket),
+            &[0xFE41, 0x300C],
+            "presentation form first"
+        );
+        assert_eq!(
+            japan1.vertical_form(3284),
+            None,
+            "an ideograph has no vertical form"
+        );
+        // RIGHTWARDS ARROW's vertical CID is DOWNWARDS ARROW's horizontal
+        // one, which is no vertical form and draws its own character.
+        let down = v.lookup(0x2192);
+        assert_eq!(down, h.lookup(0x2193));
+        assert!(!japan1.is_vertical(down));
+        assert_eq!(japan1.get(down), &[0x2193]);
+        assert_eq!(japan1.vertical_form(h.lookup(0x2192)), None);
     }
 
     /// Every vendored `CMap` inflates and parses to a usable mapping.

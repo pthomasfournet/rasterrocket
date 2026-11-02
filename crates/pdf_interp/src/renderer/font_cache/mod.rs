@@ -42,8 +42,10 @@ use crate::resources::{PageResources, ResourceKey};
 mod code_to_gid;
 #[cfg(test)]
 mod test_fonts;
+mod vertical;
 
-use code_to_gid::resolved_code_to_gid;
+use code_to_gid::{ResolvedTable, resolved_code_to_gid};
+use vertical::{VerticalFallback, glyph_transform};
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
@@ -80,6 +82,13 @@ pub(crate) struct PageFace {
     fallback_faces: Vec<Option<FontFace>>,
     /// The fallback glyph of each (code, CID) shown with this face.
     fallback_glyphs: HashMap<(u32, u32), Option<FallbackGlyph>>,
+    /// The vertical-form CIDs this face draws by a horizontal glyph, with
+    /// the mapping that stands in for the vertical form.
+    vertical_fallbacks: Arc<HashMap<u32, VerticalFallback>>,
+    /// The face drawing each such CID shown with this face, with its
+    /// glyph's selector there; `None` inside when the glyph is drawn as it
+    /// is.
+    vertical_faces: HashMap<u32, Option<(FontFace, u32)>>,
 }
 
 impl PageFace {
@@ -124,6 +133,11 @@ impl PageFace {
     ) -> Option<(&FontFace, u32, bool)> {
         if let Some((fallback, selector)) = self.fallback_glyph(code, cid) {
             return Some((fallback, selector, true));
+        }
+        if enc.is_some()
+            && let Some(Some((face, selector))) = self.vertical_faces.get(&cid)
+        {
+            return Some((face, *selector, true));
         }
         let (selector, by_gid, notdef) = match enc {
             Some(enc) if self.code_to_gid.is_empty() => {
@@ -210,19 +224,30 @@ struct SharedFont {
     descriptor: OnceLock<Arc<FontDescriptor>>,
     /// The `code_to_gid` table computed from the program, `None` when the
     /// descriptor's own table (or the program's charmap) applies.
-    code_to_gid: OnceLock<Option<Vec<u32>>>,
+    code_to_gid: OnceLock<Option<ResolvedTable>>,
     /// Fallback resolver of a font drawn by a substitute.
     fallback: OnceLock<Option<Arc<FallbackResolver>>>,
-    /// Face identifier per Trm bit pattern and face slot (0 for the font's
-    /// own face, `k + 1` for fallback program `k`), so every page draws the
-    /// font at one matrix from the same cached bitmaps.
-    face_ids: Mutex<HashMap<([u64; 4], usize), FaceId>>,
+    /// Face identifier per Trm bit pattern and face slot, so every page
+    /// draws the font at one matrix from the same cached bitmaps.
+    face_ids: Mutex<HashMap<([u64; 4], FaceSlot), FaceId>>,
+}
+
+/// Which of the faces of one font at one matrix a face identifier names.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FaceSlot {
+    /// The font's own face.
+    Own,
+    /// The face of fallback program `k`.
+    Fallback(usize),
+    /// The face drawing the vertical form of a CID from its horizontal
+    /// glyph.
+    Vertical(u32),
 }
 
 impl SharedFont {
     /// The identifier of face `slot` at the matrix `trm`, drawn from `ids`
     /// on first use.
-    fn face_id(&self, trm: [u64; 4], slot: usize, ids: &FaceIds) -> FaceId {
+    fn face_id(&self, trm: [u64; 4], slot: FaceSlot, ids: &FaceIds) -> FaceId {
         let mut face_ids = self.face_ids.lock().unwrap_or_else(PoisonError::into_inner);
         *face_ids.entry((trm, slot)).or_insert_with(|| ids.next())
     }
@@ -302,9 +327,11 @@ impl FontCache {
     /// (2×2 part), is cached; one per document, font and matrix.
     #[must_use]
     pub(crate) fn type3_face_id(&self, id: ObjectId, matrix: [f64; 4]) -> FaceId {
-        self.shared
-            .font(id)
-            .face_id(matrix.map(f64::to_bits), 0, &self.shared.face_ids)
+        self.shared.font(id).face_id(
+            matrix.map(f64::to_bits),
+            FaceSlot::Own,
+            &self.shared.face_ids,
+        )
     }
 
     /// Return the glyph bitmap cache shared by every face of the document.
@@ -359,7 +386,9 @@ impl FontCache {
             let _ = self.faces.insert(key.clone(), face);
         }
         let face = self.faces.get_mut(&key)?.as_mut()?;
-        if !bytes.is_empty() && face.fallback.is_some() {
+        let fallback = face.fallback.is_some();
+        let vertical = !face.vertical_fallbacks.is_empty();
+        if !bytes.is_empty() && (fallback || vertical) {
             let shared = self.shared.entry(&font.key);
             let loader = FallbackLoader {
                 engine: &self.engine,
@@ -367,7 +396,12 @@ impl FontCache {
                 shared: shared.as_deref(),
                 trm,
             };
-            loader.prepare(face, &font.descriptor, bytes);
+            if fallback {
+                loader.prepare(face, &font.descriptor, bytes);
+            }
+            if vertical && let Some(enc) = &font.descriptor.cid_encoding {
+                loader.prepare_vertical(face, enc, bytes);
+            }
         }
         self.faces.get(&key)?.as_ref()
     }
@@ -398,7 +432,8 @@ impl FontCache {
         let (program, substitute) = resolve_program(desc, &self.shared.library)?;
         let mut face = match &shared {
             Some(shared) => {
-                let id = shared.face_id(trm.map(f64::to_bits), 0, &self.shared.face_ids);
+                let id =
+                    shared.face_id(trm.map(f64::to_bits), FaceSlot::Own, &self.shared.face_ids);
                 self.engine
                     .load_program_face_as(id, Arc::clone(&program), params)
             }
@@ -418,9 +453,10 @@ impl FontCache {
                     .clone()
             },
         );
-        if let Some(table) = table {
-            face.code_to_gid = table;
-        }
+        let vertical_fallbacks = table.map_or_else(Arc::default, |table| {
+            face.code_to_gid = table.code_to_gid;
+            table.vertical_fallbacks
+        });
         let resolve = || {
             (!embedded)
                 .then(|| {
@@ -439,6 +475,8 @@ impl FontCache {
             fallback,
             fallback_faces: Vec::new(),
             fallback_glyphs: HashMap::new(),
+            vertical_fallbacks,
+            vertical_faces: HashMap::new(),
         })
     }
 }
@@ -479,6 +517,39 @@ impl FallbackLoader<'_> {
             .for_each(|d| visit(d.code, d.value));
     }
 
+    /// Make the face drawing each vertical-form CID of `bytes` (shown in a
+    /// font encoded by `enc`) that `face` draws by a horizontal glyph, not
+    /// yet seen: `face` with the glyph mapped in em space to stand in for
+    /// its vertical form ([`glyph_transform`]).
+    fn prepare_vertical(&self, face: &mut PageFace, enc: &CidEncoding, bytes: &[u8]) {
+        for decoded in enc.codes(bytes) {
+            let cid = decoded.value;
+            if face.vertical_faces.contains_key(&cid) {
+                continue;
+            }
+            let made = face.vertical_fallbacks.get(&cid).and_then(|&fallback| {
+                let gid = face.face.glyph_index(cid);
+                let program = face.face.program();
+                let bounds = program.bounds(gid);
+                let transform =
+                    glyph_transform(fallback, enc.vertical_metrics_for_cid(cid), bounds)?;
+                let selector = program.gid_to_selector(gid)?;
+                let id = self.shared.map_or_else(
+                    || self.ids.next(),
+                    |shared| {
+                        shared.face_id(
+                            self.trm.map(f64::to_bits),
+                            FaceSlot::Vertical(cid),
+                            self.ids,
+                        )
+                    },
+                );
+                Some((face.face.transformed(id, transform)?, selector))
+            });
+            let _ = face.vertical_faces.insert(cid, made);
+        }
+    }
+
     /// Load the face of fallback program `slot` at this matrix into
     /// `face`, once; `false` when it cannot be loaded.
     fn ensure_face(&self, face: &mut PageFace, resolver: &FallbackResolver, slot: usize) -> bool {
@@ -497,7 +568,11 @@ impl FallbackLoader<'_> {
         };
         let loaded = match self.shared {
             Some(shared) => {
-                let id = shared.face_id(self.trm.map(f64::to_bits), slot + 1, self.ids);
+                let id = shared.face_id(
+                    self.trm.map(f64::to_bits),
+                    FaceSlot::Fallback(slot),
+                    self.ids,
+                );
                 self.engine.load_program_face_as(id, program, params)
             }
             None => self.engine.load_program_face(program, params),
