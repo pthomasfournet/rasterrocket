@@ -144,9 +144,8 @@ pub enum Colorant {
     /// `/All`: the tint paints every colorant of the device (a
     /// registration colour).
     All,
-    /// A process colorant, `/Cyan`, `/Magenta`, `/Yellow` or `/Black`, as
-    /// its channel index 0–3 in that order.
-    Process(u8),
+    /// A process colorant, `/Cyan`, `/Magenta`, `/Yellow` or `/Black`.
+    Process(ProcessInk),
     /// Any other name: a spot colorant.
     Spot(Arc<[u8]>),
 }
@@ -158,11 +157,33 @@ impl Colorant {
         match name {
             b"None" => Self::None,
             b"All" => Self::All,
-            b"Cyan" => Self::Process(0),
-            b"Magenta" => Self::Process(1),
-            b"Yellow" => Self::Process(2),
-            b"Black" => Self::Process(3),
+            b"Cyan" => Self::Process(ProcessInk::Cyan),
+            b"Magenta" => Self::Process(ProcessInk::Magenta),
+            b"Yellow" => Self::Process(ProcessInk::Yellow),
+            b"Black" => Self::Process(ProcessInk::Black),
             spot => Self::Spot(Arc::from(spot)),
+        }
+    }
+}
+
+/// A process ink of a CMYK device, in the channel order of `DeviceCMYK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessInk {
+    Cyan,
+    Magenta,
+    Yellow,
+    Black,
+}
+
+impl ProcessInk {
+    /// The ink's channel, 0–3, in a `DeviceCMYK` colour or an ink pixel.
+    #[must_use]
+    pub const fn channel(self) -> usize {
+        match self {
+            Self::Cyan => 0,
+            Self::Magenta => 1,
+            Self::Yellow => 2,
+            Self::Black => 3,
         }
     }
 }
@@ -969,8 +990,8 @@ mod tests {
         assert_eq!(
             *colorants,
             [
-                Colorant::Process(0),
-                Colorant::Process(1),
+                Colorant::Process(ProcessInk::Cyan),
+                Colorant::Process(ProcessInk::Magenta),
                 Colorant::parse(b"Spot1")
             ]
         );
