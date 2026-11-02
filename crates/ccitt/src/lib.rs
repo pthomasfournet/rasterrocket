@@ -1,4 +1,4 @@
-//! A decoder for CCITT fax-encoded images.
+//! A decoder and an encoder for CCITT fax-encoded images.
 //!
 //! This crate implements the CCITT Group 3 and Group 4 fax compression algorithms
 //! as defined in ITU-T Recommendations T.4 and T.6. These encodings are commonly
@@ -7,6 +7,7 @@
 //! The main entry point is the [`decode`] function, which takes encoded data, a
 //! [`DecoderContext`], and outputs each decoded row as a list of color changes
 //! through a [`Decoder`] trait that can be implemented according to your needs.
+//! [`Encoder`] codes rows given in that same form.
 //!
 //! The crate is `no_std` compatible but requires an allocator to be available.
 //!
@@ -35,12 +36,14 @@ use crate::bit_reader::BitReader;
 mod bit_reader;
 mod codes;
 mod context;
+mod encode;
 mod error;
 mod group3;
 mod group4;
 mod tables;
 
 pub use context::DecoderContext;
+pub use encode::{EncodeScheme, Encoder, changes_of_row};
 pub use error::{DecodeError, Result};
 
 /// Decode the given image using the provided decoder context and decoder.

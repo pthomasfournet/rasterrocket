@@ -7,6 +7,16 @@ and changes are not sent upstream.
 Every change keeps decoded output byte-identical to the vendored baseline
 unless the entry says otherwise.
 
+## Encoder
+
+- `encode.rs` (new): `Encoder` codes rows given as colour-change positions,
+  the form `Decoder::push_row` receives, as Group 3 one-dimensional (MH),
+  Group 3 two-dimensional (MR, period `k`) with an EOL before every row
+  (optionally byte-aligned), or Group 4 (MMR) ended by EOFB.
+  `changes_of_row` derives the changes from packed pixels.  The run-length
+  tables in `tables.rs` are shared with the decoder and became
+  `pub(crate)`; the decoder is unchanged.
+
 ## Vendoring
 
 - `UPSTREAM.toml` records the base (repository, path, commit, date,
