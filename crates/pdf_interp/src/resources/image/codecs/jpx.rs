@@ -11,7 +11,7 @@ use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
 /// Decode a `JPXDecode` (JPEG 2000) stream.
 ///
 /// When the `nvjpeg2k` feature is active and `gpu` is `Some`, large images
-/// (pixel area ≥ [`crate::resources::image::GPU_JPEG2K_THRESHOLD_PX`]) are decoded on the GPU via
+/// (pixel area ≥ `GPU_JPEG2K_THRESHOLD_PX`) are decoded on the GPU via
 /// nvJPEG2000.  All other images, and any image for which the GPU path fails
 /// (unsupported component count, CUDA error, etc.), fall through to the CPU path.
 ///

@@ -262,7 +262,7 @@ pub(super) const fn expand_inline_key(key: &[u8]) -> &[u8] {
     }
 }
 
-/// Convert a content-stream [`Token`] to a `pdf::Object`.
+/// Convert a content-stream [`Token`](crate::content::tokenizer::Token) to a `pdf::Object`.
 pub(super) fn inline_token_to_object(tok: &crate::content::tokenizer::Token<'_>) -> Object {
     use crate::content::tokenizer::Token;
     match tok {

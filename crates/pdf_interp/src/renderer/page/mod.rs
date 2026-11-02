@@ -226,7 +226,7 @@ pub struct PageRenderer<'doc> {
     pub(super) pattern_ctm: Ctm,
     /// The transparency group being painted into.
     group: GroupContext,
-    /// The page group the page is painted as (see [`crate::page_group`]):
+    /// The page group the page is painted as (see [`mod@crate::page_group`]):
     /// the bitmap is then transparent and is composited onto white by
     /// [`finish`](Self::finish).  `None` paints onto opaque white directly.
     page_group: Option<crate::resources::TransparencyGroupParams>,

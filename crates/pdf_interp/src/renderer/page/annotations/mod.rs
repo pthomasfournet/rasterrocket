@@ -3,7 +3,7 @@
 //! Free functions taking `renderer: &mut PageRenderer<'_>`, delegated from
 //! thin wrapper methods in `mod.rs`.  An annotation without a normal
 //! appearance is drawn from an appearance synthesised by [`markup`],
-//! [`line`], [`free_text`], [`popup`] or [`widget`], through the same form
+//! [`mod@line`], [`free_text`], [`popup`] or [`widget`], through the same form
 //! path as a stored appearance.  A pop-up is drawn only while open.
 
 mod content;

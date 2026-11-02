@@ -37,7 +37,7 @@ impl PageRenderer<'_> {
     ///
     /// An `XObject` whose `/OC` is hidden is neither decoded nor drawn.
     /// Image `XObjects` are blitted directly.  Form `XObjects` are executed
-    /// recursively via [`do_form_xobject`].
+    /// recursively via [`Self::do_form_xobject`].
     pub(super) fn do_xobject(&mut self, name: &[u8]) {
         if let Some(oc) = self.resources.xobject_optional_content(name)
             && !self.oc_visible(&oc)
@@ -106,7 +106,8 @@ impl PageRenderer<'_> {
         self.handle_image_resolution(name, resolution, id.map(|id| (id, draw_size)));
     }
 
-    /// Dispatch on an [`ImageResolution`] returned from [`PageResources::image`].
+    /// Dispatch on an [`ImageResolution`](crate::resources::image::ImageResolution) returned from
+    /// [`PageResources::image`](crate::resources::PageResources::image).
     ///
     /// - `Ok` → blit the image, keeping it in the page's image memo under
     ///   `memo_key` (the stream object and the draw size it was decoded
