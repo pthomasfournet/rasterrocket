@@ -108,6 +108,8 @@ mod tests {
             tiffcompression: None,
             invert: None,
             dither: crate::args::DitherArg::None,
+            fax: false,
+            fax_resolution: None,
             jpegcmyk: false,
             tiff: false,
             gray: false,

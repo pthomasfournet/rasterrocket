@@ -2192,8 +2192,8 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ## Phase 13 — Output to the operating system: print and fax (planned, after v2.0.0)
 
-**Status: in progress on master, unreleased.** Fax layers 1 and 2 are on
-master (2026-11-01); layers 3 and 4 and printing are not started.
+**Status: in progress on master, unreleased.** Fax layers 1 to 3 are on
+master (2026-11-01); layer 4 and printing are not started.
 
 **Printing through the OS spooler.** No device or driver code of our own.
 `rrocket --print [--printer NAME] [--copies N]` renders each page at the
@@ -2209,9 +2209,12 @@ context.
    pixel-exact through libtiff and the `tiff` crate.
 2. **Done.** A CCITT Group 3 (MH, MR) and Group 4 encoder in the
    `crates/ccitt` fork, round-tripped through its decoder.
-3. A `--fax` preset writing TIFF Class F: 1728 px wide, 204 × 196 dpi (fine)
-   or 204 × 98 dpi (standard) through the per-axis resolution, 1 bit, G4 by
-   default.
+3. **Done.** `--fax` writes one TIFF Class F document: 1728 px wide,
+   204 × 196 dpi (fine) or 204 × 98 dpi (`--fax-resolution standard`), 1
+   bit, landscape pages turned. Group 3 one-dimensional by default, the
+   Class F baseline every reader takes (`g3-2d` and `g4` on request), not
+   G4 as first planned. Mostly dark pages are inverted (`--invert`), and
+   `--dither halftone` serves photographs.
 4. `--fax-to NUMBER`, handing the file to a CUPS fax queue or HylaFAX
    `sendfax`, or to the Windows Fax service.
 

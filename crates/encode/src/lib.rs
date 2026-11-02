@@ -34,7 +34,7 @@ pub use pbm::write_pbm;
 pub use pgm::write_pgm;
 pub use png::write_png;
 pub use ppm::write_ppm;
-pub use tiff::{TiffCompression, TiffImage, TiffWriter, write_tiff};
+pub use tiff::{TiffCompression, TiffImage, TiffPage, TiffWriter, write_tiff};
 
 use std::io;
 

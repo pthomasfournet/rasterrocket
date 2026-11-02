@@ -3,6 +3,7 @@ mod cleanup;
 mod comic;
 mod decrypt_gate;
 mod diagnostics;
+mod fax;
 mod naming;
 mod ram;
 mod render;
@@ -47,6 +48,7 @@ fn main() -> ExitCode {
     if let Err(e) = args.validate_format_flags() {
         return fail(e);
     }
+    args.apply_fax_preset();
 
     // RAM output (see `ram`): the guard removes the RAM directory when it
     // drops, and the spill policy chooses each page's directory.
@@ -66,6 +68,9 @@ fn main() -> ExitCode {
         .unwrap_or_default()
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "cbz" | "cb7" | "cbt" | "cbr") {
+        if args.fax {
+            return fail("--fax renders PDF input; a comic archive's pages have no page size");
+        }
         return match comic::run(&args, &spill_policy) {
             Ok((0, _)) => fail("no pages rendered"),
             // Per-page errors were already printed to stderr inside `run`; a
@@ -150,6 +155,9 @@ fn main() -> ExitCode {
     let total_u32 = total as u32;
 
     let timings = args.timings;
+    let fax = args
+        .fax
+        .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
 
     let errors: Vec<(i32, render::RenderError)> = pool.install(|| {
         pages
@@ -162,8 +170,14 @@ fn main() -> ExitCode {
                 let page_u32 = page_num as u32;
 
                 let t0 = timings.then(Instant::now);
-                let result =
-                    render::render_page(&session, page_u32, total_u32, &args, &spill_policy);
+                let result = render::render_page(
+                    &session,
+                    page_u32,
+                    total_u32,
+                    &args,
+                    &spill_policy,
+                    fax.as_ref(),
+                );
                 if let Some(t0) = t0 {
                     let ms = t0.elapsed().as_secs_f64() * 1000.0;
                     let tid = rayon::current_thread_index().unwrap_or(99);
@@ -207,5 +221,17 @@ fn main() -> ExitCode {
     // driver that has already started its own atexit shutdown sequence.
     let _ = pool.broadcast(|_| pdf_raster::release_gpu_decoders());
 
+    if let Some(document) = fax {
+        // A fax missing pages would read as complete: none is written.
+        if !errors.is_empty() {
+            let status = diagnostics::report_errors(errors);
+            eprintln!("rrocket: no fax document written: pages failed to render");
+            return status;
+        }
+        let path = format!("{}.tif", spill_policy.next_prefix());
+        if let Err(e) = document.write(&path) {
+            return fail(format_args!("cannot write the fax document {path}: {e}"));
+        }
+    }
     diagnostics::report_errors(errors)
 }

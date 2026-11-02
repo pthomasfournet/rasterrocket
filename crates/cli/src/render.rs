@@ -14,6 +14,7 @@ use raster::Bitmap;
 
 use crate::args::{Args, OutputFormat};
 use crate::cleanup::{self, Page};
+use crate::fax::{self, FaxDocument};
 use crate::naming::output_path_with_prefix;
 use crate::ram::SpillPolicy;
 use crate::tone;
@@ -91,6 +92,7 @@ pub(crate) fn render_page(
     total_pages: u32,
     args: &Args,
     spill: &SpillPolicy,
+    fax: Option<&FaxDocument>,
 ) -> Result<(), RenderError> {
     let format = args.output_format();
 
@@ -117,37 +119,55 @@ pub(crate) fn render_page(
         params = params.with_region(region);
     }
     let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
+    let sink = fax.map_or(Sink::Files(spill), |document| Sink::Fax {
+        document,
+        turn: fax::layout((geom.width_pts, geom.height_pts), args.y_dpi()).turn,
+    });
 
     #[expect(
         clippy::cast_possible_wrap,
         reason = "total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
-    write_cleaned(
-        rgb,
-        args,
-        spill,
-        page_num as i32,
-        total_pages as i32,
-        format,
-    )
+    write_cleaned(rgb, args, sink, page_num as i32, total_pages as i32, format)
+}
+
+/// Where a cleaned page goes.
+#[derive(Clone, Copy)]
+pub(crate) enum Sink<'a> {
+    /// One file per page, under the prefix the spill policy chooses.
+    Files(&'a SpillPolicy),
+    /// A page of the fax document, turned a quarter when `turn`.
+    Fax {
+        document: &'a FaxDocument,
+        turn: bool,
+    },
 }
 
 /// Run the camera stages selected on the command line on `rgb` (see
 /// [`cleanup::clean`]) and the tone operations (see [`tone::prepare`]),
-/// then write each resulting page: one file, or the `a`/`b` halves of a
-/// split spread (see [`output_path_with_prefix`]).
+/// then hand each resulting page, one or the `a`/`b` halves of a split
+/// spread, to `sink`: a file each (see [`output_path_with_prefix`]), or
+/// the fax document.
 ///
 /// Shared by the PDF render path and the comic-archive path.
 pub(crate) fn write_cleaned(
     rgb: Bitmap<Rgb8>,
     args: &Args,
-    spill: &SpillPolicy,
+    sink: Sink<'_>,
     page_num: i32,
     total_pages: i32,
     format: OutputFormat,
 ) -> Result<(), RenderError> {
     let pages = cleanup::clean(rgb, args.camera_options(), args.gray || args.mono)?;
-    for (page, half) in pages {
+    for (index, (page, half)) in pages.into_iter().enumerate() {
+        let page = tone::prepare(page, args);
+        let spill = match sink {
+            Sink::Files(spill) => spill,
+            Sink::Fax { document, turn } => {
+                document.add(page_num, index, page, turn, args)?;
+                continue;
+            }
+        };
         // Pick RAM vs disk per file: when --ram is active, the SpillPolicy
         // hands back the tmpfs prefix until free memory drops below the
         // safety margin, then transparently spills the rest of the run to the
@@ -164,7 +184,7 @@ pub(crate) fn write_cleaned(
 
         // Pages are written in place, not renamed into place, so that no
         // per-page rename waits on the file system's flush of the data.
-        match &tone::prepare(page, args) {
+        match &page {
             Page::Rgb(rgb) => encode_to_path(&out_path, rgb, args, format),
             Page::Gray(gray) => encode_gray_to_path(&out_path, gray, args, format),
         }?;
@@ -183,7 +203,7 @@ const OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 ///
 /// # Errors
 /// The creation, encoding or final flush failed.
-fn write_output(
+pub(crate) fn write_output(
     out_path: &str,
     encode: impl FnOnce(&mut BufWriter<File>) -> Result<(), RenderError>,
 ) -> Result<(), RenderError> {

@@ -124,8 +124,10 @@ const PHOTOMETRIC_RGB: u16 = 2;
 /// Target size of a strip before compression.
 const STRIP_BYTES: usize = 64 * 1024;
 
-/// A page encoded into strips, waiting for its directory.
-struct Page {
+/// A page encoded into strips, waiting for its directory: encoded on its
+/// own, in any order or thread, and laid out when pushed to a
+/// [`TiffWriter`].
+pub struct TiffPage {
     width: u32,
     height: u32,
     /// Samples per pixel, bits per sample, photometric interpretation.
@@ -137,44 +139,33 @@ struct Page {
     resolution: [(u32, u32); 2],
 }
 
-/// A TIFF file built page by page.
-pub struct TiffWriter {
-    compression: TiffCompression,
-    pages: Vec<Page>,
-}
-
-impl TiffWriter {
-    /// A file whose pages are compressed with `compression`.
-    #[must_use]
-    pub const fn new(compression: TiffCompression) -> Self {
-        Self {
-            compression,
-            pages: Vec::new(),
-        }
-    }
-
-    /// Encode `image` as the next page, at `dpi` (horizontal, vertical)
-    /// pixels per inch.
+impl TiffPage {
+    /// Encode `image` at `dpi` (horizontal, vertical) pixels per inch,
+    /// compressed with `compression`.
     ///
     /// # Errors
     ///
     /// [`EncodeError::UnsupportedMode`] for an empty image, a resolution
     /// that is not finite and positive, CCITT compression of a page that is
     /// not bilevel, or a Group 3 period `k` of 0.
-    pub fn add_page(&mut self, image: TiffImage<'_>, dpi: (f64, f64)) -> Result<(), EncodeError> {
+    pub fn encode(
+        image: TiffImage<'_>,
+        dpi: (f64, f64),
+        compression: TiffCompression,
+    ) -> Result<Self, EncodeError> {
         let (width, height) = image.size();
         if width == 0 || height == 0 {
             return Err(EncodeError::UnsupportedMode(
                 "zero-width or zero-height bitmap: TIFF cannot encode an empty image",
             ));
         }
-        let fax = self.compression.is_fax();
+        let fax = compression.is_fax();
         if fax && !matches!(image, TiffImage::Bilevel(_)) {
             return Err(EncodeError::UnsupportedMode(
                 "CCITT fax compression codes bilevel pages only",
             ));
         }
-        if self.compression == (TiffCompression::Group3 { k: Some(0) }) {
+        if compression == (TiffCompression::Group3 { k: Some(0) }) {
             return Err(EncodeError::UnsupportedMode(
                 "the Group 3 period k is at least 1",
             ));
@@ -199,18 +190,52 @@ impl TiffWriter {
             for y in first..height.min(first.saturating_add(rows_per_strip)) {
                 image.row(y, &mut raw);
             }
-            strips.push(compress(&raw, row_bytes, width, self.compression)?);
+            strips.push(compress(&raw, row_bytes, width, compression)?);
         }
-        self.pages.push(Page {
+        Ok(Self {
             width,
             height,
             layout: image.layout(),
-            compression: self.compression,
+            compression,
             rows_per_strip,
             strips,
             resolution,
-        });
+        })
+    }
+}
+
+/// A TIFF file built page by page.
+pub struct TiffWriter {
+    compression: TiffCompression,
+    pages: Vec<TiffPage>,
+}
+
+impl TiffWriter {
+    /// A file whose pages added by [`Self::add_page`] are compressed with
+    /// `compression`.
+    #[must_use]
+    pub const fn new(compression: TiffCompression) -> Self {
+        Self {
+            compression,
+            pages: Vec::new(),
+        }
+    }
+
+    /// Encode `image` as the next page, at `dpi` (horizontal, vertical)
+    /// pixels per inch.
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffPage::encode`].
+    pub fn add_page(&mut self, image: TiffImage<'_>, dpi: (f64, f64)) -> Result<(), EncodeError> {
+        self.pages
+            .push(TiffPage::encode(image, dpi, self.compression)?);
         Ok(())
+    }
+
+    /// Append `page`, encoded beforehand, as the next page.
+    pub fn push_page(&mut self, page: TiffPage) {
+        self.pages.push(page);
     }
 
     /// Write the file to `out`.
@@ -408,7 +433,7 @@ fn longs(tag: u16, values: &[u32]) -> Entry {
 /// position of the directory's next-directory link.
 fn write_ifd(
     file: &mut Vec<u8>,
-    page: &Page,
+    page: &TiffPage,
     offsets: &[u32],
     (number, count): (u16, u16),
 ) -> Result<usize, EncodeError> {
@@ -424,8 +449,11 @@ fn write_ifd(
         count: 1,
         bytes: [n.to_le_bytes(), d.to_le_bytes()].concat(),
     };
+    // NewSubfileType bit 1: a page of a multi-page document.  The fax
+    // profile of TIFF (RFC 2306) sets it on every fax page.
+    let one_of_many = count > 1 || page.compression.is_fax();
     let mut entries = vec![
-        longs(254, &[if count > 1 { 2 } else { 0 }]),
+        longs(254, &[if one_of_many { 2 } else { 0 }]),
         longs(256, &[page.width]),
         longs(257, &[page.height]),
         shorts(258, &vec![bits; usize::from(samples)]),
@@ -488,7 +516,7 @@ mod tests {
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
 
-    use super::{TiffCompression, TiffImage, TiffWriter, pack_bits, write_tiff};
+    use super::{TiffCompression, TiffImage, TiffPage, TiffWriter, pack_bits, write_tiff};
 
     const ALL: [TiffCompression; 4] = [
         TiffCompression::None,
@@ -630,6 +658,11 @@ mod tests {
         let mut decoder = decode(&out);
         assert_eq!(decoder.get_tag_u32(Tag::Unknown(293)).unwrap(), 0);
         assert_eq!(
+            decoder.get_tag_u32(Tag::NewSubfileType).unwrap(),
+            2,
+            "a fax page is a page of a document"
+        );
+        assert_eq!(
             decoder.get_tag_u32(Tag::RowsPerStrip).unwrap(),
             120,
             "one strip"
@@ -749,6 +782,36 @@ mod tests {
                 decoder.next_image().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn pages_encoded_apart_are_laid_out_in_push_order() {
+        let (a, b) = (drawing(40, 30), gray(40, 30));
+        let pages = std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                TiffPage::encode(TiffImage::Gray(&b), (100.0, 100.0), TiffCompression::Lzw)
+            });
+            let first = TiffPage::encode(
+                TiffImage::Bilevel(&a),
+                (204.0, 196.0),
+                TiffCompression::Group4,
+            );
+            [first.unwrap(), second.join().unwrap().unwrap()]
+        });
+        let mut writer = TiffWriter::new(TiffCompression::None);
+        for page in pages {
+            writer.push_page(page);
+        }
+        let mut out = Vec::new();
+        writer.write(&mut out).unwrap();
+        let mut decoder = decode(&out);
+        assert_eq!(decoder.get_tag_u32(Tag::Compression).unwrap(), 4);
+        decoder.next_image().unwrap();
+        assert_eq!(decoder.get_tag_u32(Tag::Compression).unwrap(), 5);
+        let want: Vec<u8> = (0..30)
+            .flat_map(|y| b.row_bytes(y)[..40].to_vec())
+            .collect();
+        assert_eq!(bytes(decoder.read_image().unwrap()), want);
     }
 
     #[test]

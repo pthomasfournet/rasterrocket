@@ -111,5 +111,12 @@ fn write_page(
     let page_i32 = i32::try_from(page.page_num).unwrap_or(total_pages);
     // The shared writer applies the camera stages and routes through the
     // spill policy, exactly as the PDF path does.
-    render::write_cleaned(rgb, args, spill, page_i32, total_pages, format)
+    render::write_cleaned(
+        rgb,
+        args,
+        render::Sink::Files(spill),
+        page_i32,
+        total_pages,
+        format,
+    )
 }

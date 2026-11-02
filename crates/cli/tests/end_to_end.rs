@@ -244,6 +244,101 @@ fn invert_auto_turns_a_dark_page_to_ink_on_paper() {
     assert_eq!(data[25 * 100 + 15], 0, "the black square stays black");
 }
 
+/// The pages of a Group 4 fax document: `(width, height, ink fraction)`
+/// each, from the tiff crate, which decodes Group 4 but not Group 3.
+fn fax_pages(path: &Path) -> Vec<(u32, u32, f64)> {
+    let file = std::fs::read(path).expect("read the fax document");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    let mut pages = Vec::new();
+    loop {
+        let (w, h) = decoder.dimensions().expect("dimensions");
+        let tiff::decoder::DecodingResult::U8(bits) = decoder.read_image().expect("decodes") else {
+            panic!("1-bit samples read as bytes");
+        };
+        // The reader inverts WhiteIsZero: its 0 bits are ink.
+        let ink: u32 = bits.iter().map(|b| b.count_zeros()).sum();
+        pages.push((w, h, f64::from(ink) / f64::from(w * h)));
+        if !decoder.more_images() {
+            return pages;
+        }
+        decoder.next_image().expect("next page");
+    }
+}
+
+#[test]
+fn fax_writes_one_document_of_fax_width_pages() {
+    // A portrait page with a small square, a landscape page, a dark page.
+    let pdf = assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 150] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 150] /Contents 7 0 R >>".to_vec(),
+        stream_object("", b"0 g 10 10 20 20 re f"),
+        stream_object("", b"0 g 0 0 100 150 re f"),
+    ]);
+    let (dir, input) = workdir(&pdf);
+    assert_success(&rrocket(dir.path(), &input, &["--fax"]));
+    assert_eq!(outputs(dir.path()), ["out.tif"]);
+    let file = std::fs::read(dir.path().join("out.tif")).expect("read the fax document");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    for page in 0..3 {
+        let compression = decoder.get_tag_u32(tiff::tags::Tag::Compression).unwrap();
+        assert_eq!(compression, 3, "page {page}: Group 3 by default");
+        if page < 2 {
+            decoder.next_image().expect("next page");
+        }
+    }
+    assert!(!decoder.more_images());
+
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["--fax", "--tiffcompression", "g4"],
+    ));
+    let pages = fax_pages(&dir.path().join("out.tif"));
+    assert_eq!(pages.len(), 3);
+    // 1728 pixels across: the portrait page by its width, the landscape
+    // page turned and spanned by its height; 196/204 as many lines per
+    // point along: 150 and 200 points at 17.28 × 196/204 lines each.
+    let lines = |pts: f64| pts * 17.28 * 196.0 / 204.0;
+    for ((w, h, _), pts) in pages.iter().zip([150.0, 200.0, 150.0]) {
+        assert_eq!(*w, 1728);
+        assert!(
+            (f64::from(*h) - lines(pts)).abs() <= 1.0,
+            "{h} lines for {pts} pt"
+        );
+    }
+    // The square inks 400 of the page's 15000 square points; the black
+    // page is inverted to blank.
+    assert!(
+        (pages[0].2 - 400.0 / 15000.0).abs() < 0.002,
+        "{}",
+        pages[0].2
+    );
+    assert!(
+        pages[2].2 < 0.001,
+        "the dark page is inverted: {}",
+        pages[2].2
+    );
+
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &[
+            "--fax",
+            "--tiffcompression",
+            "g4",
+            "--invert=never",
+            "-f",
+            "3",
+        ],
+    ));
+    let pages = fax_pages(&dir.path().join("out.tif"));
+    assert_eq!(pages.len(), 1);
+    assert!(pages[0].2 > 0.999, "the dark page kept: {}", pages[0].2);
+}
+
 #[test]
 fn missing_input_fails_without_output() {
     let dir = tempfile::tempdir().expect("create temp dir");

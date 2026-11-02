@@ -183,6 +183,19 @@ pub(crate) struct Args {
     #[arg(long = "mono")]
     pub mono: bool,
 
+    /// Write a fax document: one TIFF Class F file, `OUTPUT_PREFIX.tif`,
+    /// every page 1728 pixels wide (landscape pages turned), bilevel, at
+    /// the --fax-resolution, coded as --tiffcompression `g3` (default),
+    /// `g3-2d` or `g4`.  Mostly dark pages are inverted unless --invert
+    /// says otherwise.
+    #[arg(long)]
+    pub fax: bool,
+
+    /// Fax resolution: `fine` (204 × 196 dpi, default) or `standard`
+    /// (204 × 98 dpi).
+    #[arg(long = "fax-resolution", value_name = "RESOLUTION", value_enum)]
+    pub fax_resolution: Option<FaxResolution>,
+
     /// How --mono renders intermediate grays: `none` (default), a 50%
     /// threshold that keeps text and line art sharp, or `halftone`, dot
     /// patterns that keep photographs and shading legible: a dispersed
@@ -435,6 +448,25 @@ impl From<PurposeArg> for RenderPurpose {
     }
 }
 
+/// `--fax-resolution` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum FaxResolution {
+    /// 196 lines per inch.
+    Fine,
+    /// 98 lines per inch.
+    Standard,
+}
+
+impl FaxResolution {
+    /// Lines per inch.
+    const fn y_dpi(self) -> f64 {
+        match self {
+            Self::Fine => 196.0,
+            Self::Standard => 98.0,
+        }
+    }
+}
+
 /// `--dither` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum DitherArg {
@@ -518,11 +550,16 @@ impl Args {
     }
 
     /// Device pixels per point `(x, y)` for a page of `width_pts × height_pts`
-    /// (after `/Rotate`): from `--scale-to` when given, else from
+    /// (after `/Rotate`): under `--fax` the fax layout (see
+    /// [`crate::fax::layout`]), else from `--scale-to` when given, else from
     /// `--scale-to-x` / `--scale-to-y`, an axis given neither taking the
     /// other's scale when only one is set, and otherwise from the resolution
     /// flags.
     pub(crate) fn scales(&self, (width_pts, height_pts): (f64, f64)) -> (f64, f64) {
+        if self.fax {
+            let layout = crate::fax::layout((width_pts, height_pts), self.y_dpi());
+            return (layout.scale_x, layout.scale_y);
+        }
         if let Some(n) = self.scale_to {
             let s = f64::from(n) / width_pts.max(height_pts);
             return (s, s);
@@ -576,6 +613,7 @@ impl Args {
                     .to_owned(),
             );
         }
+        self.validate_fax_flags()?;
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
@@ -587,14 +625,14 @@ impl Args {
         {
             return Err("--png, --jpeg and --tiff are mutually exclusive".to_owned());
         }
-        if self.dither != DitherArg::None && !self.mono {
-            return Err("--dither applies to --mono output only".to_owned());
+        if self.dither != DitherArg::None && !(self.mono || self.fax) {
+            return Err("--dither applies to --mono and --fax output only".to_owned());
         }
         if self.jpegopt.is_some() && !self.jpeg {
             return Err("--jpegopt applies to --jpeg output only".to_owned());
         }
         match self.tiffcompression {
-            Some(_) if !self.tiff => {
+            Some(_) if !(self.tiff || self.fax) => {
                 Err("--tiffcompression applies to --tiff output only".to_owned())
             }
             Some(TiffMethod::Jpeg) => Err(
@@ -602,7 +640,9 @@ impl Args {
                  or --tiffcompression deflate for compact lossless TIFF"
                     .to_owned(),
             ),
-            Some(method @ (TiffMethod::G3 | TiffMethod::G3TwoD | TiffMethod::G4)) if !self.mono => {
+            Some(method @ (TiffMethod::G3 | TiffMethod::G3TwoD | TiffMethod::G4))
+                if !(self.mono || self.fax) =>
+            {
                 Err(format!(
                     "--tiffcompression {} codes bilevel pages; add --mono",
                     method.name()
@@ -612,6 +652,70 @@ impl Args {
         }
     }
 
+    /// Refuse the flags `--fax` fixes or excludes, and the fax-only flags
+    /// without it.
+    fn validate_fax_flags(&self) -> Result<(), String> {
+        if !self.fax {
+            return if self.fax_resolution.is_some() {
+                Err("--fax-resolution applies to --fax output only".to_owned())
+            } else {
+                Ok(())
+            };
+        }
+        let fixed = [
+            (self.png, "--png"),
+            (self.jpeg, "--jpeg"),
+            (self.gray, "--gray"),
+            (self.resolution.is_some(), "-r"),
+            (self.resolution_x.is_some(), "--rx"),
+            (self.resolution_y.is_some(), "--ry"),
+            (self.scale_to.is_some(), "--scale-to"),
+            (self.scale_to_x.is_some(), "--scale-to-x"),
+            (self.scale_to_y.is_some(), "--scale-to-y"),
+            (self.crop_x.is_some(), "-x"),
+            (self.crop_y.is_some(), "-y"),
+            (self.crop_w.is_some(), "-W"),
+            (self.crop_h.is_some(), "-H"),
+        ];
+        if let Some((_, flag)) = fixed.iter().find(|(set, _)| *set) {
+            return Err(format!(
+                "--fax fixes the format, size and resolution of its pages; drop {flag} \
+                 (--fax-resolution chooses fine or standard)"
+            ));
+        }
+        match self.tiffcompression {
+            None | Some(TiffMethod::G3 | TiffMethod::G3TwoD | TiffMethod::G4) => Ok(()),
+            Some(method) => Err(format!(
+                "--fax codes its pages g3, g3-2d or g4, not {}",
+                method.name()
+            )),
+        }
+    }
+
+    /// Expand `--fax` into the flags it implies: bilevel TIFF, Group 3
+    /// one-dimensional coding unless another fax coding is chosen, the fax
+    /// resolution, and `--invert=auto` unless `--invert` is given.  Call
+    /// after [`Self::validate_format_flags`].
+    pub(crate) fn apply_fax_preset(&mut self) {
+        if !self.fax {
+            return;
+        }
+        self.tiff = true;
+        self.mono = true;
+        self.tiffcompression = Some(self.tiffcompression.unwrap_or(TiffMethod::G3));
+        self.invert = Some(self.invert.unwrap_or(InvertWhen::Auto));
+        self.resolution_x = Some(crate::fax::FAX_X_DPI);
+        self.resolution_y = Some(self.fax_resolution.unwrap_or(FaxResolution::Fine).y_dpi());
+    }
+
+    /// The TIFF compression `--tiffcompression` selects at the vertical
+    /// resolution.
+    pub(crate) fn tiff_compression(&self) -> encode::TiffCompression {
+        self.tiffcompression
+            .unwrap_or(TiffMethod::None)
+            .compression(self.y_dpi())
+    }
+
     /// Resolved output format.
     pub(crate) fn output_format(&self) -> OutputFormat {
         if self.png {
@@ -619,11 +723,7 @@ impl Args {
         } else if self.jpeg {
             OutputFormat::Jpeg(self.jpegopt.unwrap_or_default())
         } else if self.tiff {
-            OutputFormat::Tiff(
-                self.tiffcompression
-                    .unwrap_or(TiffMethod::None)
-                    .compression(self.y_dpi()),
-            )
+            OutputFormat::Tiff(self.tiff_compression())
         } else {
             OutputFormat::Ppm
         }
@@ -1109,6 +1209,40 @@ mod page_list_tests {
         argv.extend_from_slice(flags);
         argv.extend(["in.pdf", "out"]);
         Args::parse_from(argv)
+    }
+
+    #[test]
+    fn fax_expands_to_bilevel_fax_coded_tiff_and_refuses_what_it_fixes() {
+        let mut fax = args_with(&["--fax", "--fax-resolution", "standard"]);
+        assert!(fax.validate_format_flags().is_ok());
+        fax.apply_fax_preset();
+        assert!(fax.mono && fax.tiff);
+        assert_eq!(fax.invert_when(), InvertWhen::Auto);
+        assert_eq!(fax.dpi(), (204.0, 98.0));
+        assert_eq!(
+            fax.output_format(),
+            OutputFormat::Tiff(encode::TiffCompression::Group3 { k: None })
+        );
+        let mut g4 = args_with(&["--fax", "--tiffcompression", "g4", "--invert=never"]);
+        assert!(g4.validate_format_flags().is_ok());
+        g4.apply_fax_preset();
+        assert_eq!(g4.invert_when(), InvertWhen::Never);
+        assert_eq!(g4.dpi(), (204.0, 196.0));
+        assert_eq!(
+            g4.output_format(),
+            OutputFormat::Tiff(encode::TiffCompression::Group4)
+        );
+        for (flags, needle) in [
+            (&["--fax", "--png"][..], "drop --png"),
+            (&["--fax", "-r", "300"], "drop -r"),
+            (&["--fax", "--scale-to", "800"], "drop --scale-to"),
+            (&["--fax", "--gray"], "drop --gray"),
+            (&["--fax", "--tiffcompression", "lzw"], "not lzw"),
+            (&["--fax-resolution", "fine"], "--fax output only"),
+        ] {
+            let err = args_with(flags).validate_format_flags().unwrap_err();
+            assert!(err.contains(needle), "{flags:?}: {err}");
+        }
     }
 
     #[test]
