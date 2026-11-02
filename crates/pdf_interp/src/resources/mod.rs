@@ -69,6 +69,14 @@ pub struct ExtGStateParams {
     pub soft_mask: Option<SoftMaskParams>,
     /// Transfer function `TR2`, else `TR`.  `None` = unchanged.
     pub transfer: Option<transfer::TransferSetting>,
+    /// Stroking overprint `OP`.  `None` = unchanged.
+    pub overprint_stroke: Option<bool>,
+    /// Non-stroking overprint `op`, which defaults to `OP` when absent.
+    /// `None` = unchanged.
+    pub overprint_fill: Option<bool>,
+    /// Overprint mode `OPM`: 0 or 1, the only defined values.  `None` =
+    /// unchanged.
+    pub overprint_mode: Option<u8>,
 }
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
@@ -108,6 +116,7 @@ pub enum SoftMaskParams {
 
 impl ExtGStateParams {
     fn from_dict(doc: &Document, d: &Dictionary) -> Self {
+        let overprint_stroke = d.get_bool(b"OP");
         Self {
             fill_alpha: real_to_u8(d, b"ca"),
             stroke_alpha: real_to_u8(d, b"CA"),
@@ -119,6 +128,12 @@ impl ExtGStateParams {
             blend_mode: parse_blend_mode(d),
             soft_mask: parse_soft_mask(doc, d),
             transfer: transfer::ext_gstate_transfer(doc, d),
+            overprint_stroke,
+            overprint_fill: d.get_bool(b"op").or(overprint_stroke),
+            overprint_mode: d
+                .get_i64(b"OPM")
+                .and_then(|m| u8::try_from(m).ok())
+                .filter(|m| *m <= 1),
         }
     }
 }
@@ -910,6 +925,46 @@ pub(crate) fn resolve_stream_dict(doc: &Document, obj: &Object) -> Option<Dictio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `ExtGState` parameters of the dictionary `body`.
+    fn ext_gstate(body: &str) -> ExtGStateParams {
+        let doc = crate::test_helpers::make_doc_with_object(body);
+        let d = doc.get_dictionary((2, 0)).expect("dictionary");
+        ExtGStateParams::from_dict(&doc, &d)
+    }
+
+    #[test]
+    fn op_defaults_to_op_stroke() {
+        let p = ext_gstate("<< /OP true >>");
+        assert_eq!(p.overprint_stroke, Some(true));
+        assert_eq!(p.overprint_fill, Some(true));
+    }
+
+    #[test]
+    fn op_false_overrides() {
+        let p = ext_gstate("<< /OP true /op false >>");
+        assert_eq!(p.overprint_stroke, Some(true));
+        assert_eq!(p.overprint_fill, Some(false));
+        let p = ext_gstate("<< /op true >>");
+        assert_eq!(p.overprint_stroke, None);
+        assert_eq!(p.overprint_fill, Some(true));
+    }
+
+    #[test]
+    fn non_boolean_overprint_is_ignored() {
+        let p = ext_gstate("<< /OP 1 /op (x) >>");
+        assert_eq!(p.overprint_stroke, None);
+        assert_eq!(p.overprint_fill, None);
+    }
+
+    #[test]
+    fn opm_parsed() {
+        assert_eq!(ext_gstate("<< /OPM 1 >>").overprint_mode, Some(1));
+        assert_eq!(ext_gstate("<< /OPM 0 >>").overprint_mode, Some(0));
+        assert_eq!(ext_gstate("<< /OPM 7 >>").overprint_mode, None);
+        assert_eq!(ext_gstate("<< /OPM -1 >>").overprint_mode, None);
+        assert_eq!(ext_gstate("<< >>").overprint_mode, None);
+    }
 
     #[test]
     fn bm_name_all_variants_round_trip() {

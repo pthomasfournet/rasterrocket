@@ -14,6 +14,9 @@
 //! is reachable from its resources: through its `ExtGState`s, its form
 //! `XObject`s' and Type 3 fonts' resources, its patterns, and the appearance
 //! streams of its annotations.
+//!
+//! The same walk finds the pages that set overprint, which are painted into
+//! a separable-ink buffer when overprint is simulated.
 
 use std::collections::HashSet;
 
@@ -37,17 +40,45 @@ const MAX_SCAN_DEPTH: u32 = 8;
 pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroupParams> {
     let page = doc.get_dictionary(page_id).ok()?;
     let group = crate::resources::read_transparency_group(doc, &page).unwrap_or_default();
-    let mut scan = Scan {
-        doc,
-        visited: HashSet::new(),
-    };
-    let blends = group.knockout
-        || inherited_resources(doc, page_id).is_some_and(|r| scan.resources_blend(&r, 0))
-        || scan.annotations_blend(&page);
+    let blends = group.knockout || page_reaches(doc, page_id, &page, &sets_blend_mode);
     blends.then_some(TransparencyGroupParams {
         isolated: true,
         knockout: group.knockout,
     })
+}
+
+/// Whether some `ExtGState` reachable from the page's resources or
+/// annotations sets stroking or non-stroking overprint.
+#[must_use]
+pub fn page_uses_overprint(doc: &Document, page_id: ObjectId) -> bool {
+    doc.get_dictionary(page_id)
+        .is_ok_and(|page| page_reaches(doc, page_id, &page, &sets_overprint))
+}
+
+/// Whether `pred` holds for an `ExtGState` dictionary reachable from the
+/// resources or the annotation appearance streams of `page`.
+fn page_reaches(
+    doc: &Document,
+    page_id: ObjectId,
+    page: &Dictionary,
+    pred: &dyn Fn(&Dictionary) -> bool,
+) -> bool {
+    let mut scan = Scan {
+        doc,
+        visited: HashSet::new(),
+    };
+    inherited_resources(doc, page_id).is_some_and(|r| scan.resources_reach(&r, 0, pred))
+        || scan.annotations_reach(page, pred)
+}
+
+/// Whether an `ExtGState` names a blend mode other than `Normal`.
+fn sets_blend_mode(gs: &Dictionary) -> bool {
+    parse_blend_mode(gs).is_some_and(|bm| bm != BlendMode::Normal)
+}
+
+/// Whether an `ExtGState` turns stroking or non-stroking overprint on.
+fn sets_overprint(gs: &Dictionary) -> bool {
+    gs.get_bool(b"OP") == Some(true) || gs.get_bool(b"op") == Some(true)
 }
 
 /// The `/Resources` of `page_id` or of its nearest ancestor that has one
@@ -56,7 +87,7 @@ fn inherited_resources(doc: &Document, page_id: ObjectId) -> Option<Dictionary> 
     resolve_dict(doc, &doc.get_inherited_page_attr(page_id, b"Resources")?)
 }
 
-/// A walk over resource dictionaries that stops at the first blend mode.
+/// A walk over resource dictionaries that stops at the first `ExtGState` a predicate accepts.
 struct Scan<'a> {
     doc: &'a Document,
     /// Indirect objects already walked, so shared forms are read once and
@@ -65,31 +96,36 @@ struct Scan<'a> {
 }
 
 impl Scan<'_> {
-    /// Whether a blend mode other than `Normal` is set by an `ExtGState`
-    /// of `resources` or of the resources reachable from it.
-    fn resources_blend(&mut self, resources: &Dictionary, depth: u32) -> bool {
+    /// Whether `pred` holds for an `ExtGState` of `resources` or of the
+    /// resources reachable from it.
+    fn resources_reach(
+        &mut self,
+        resources: &Dictionary,
+        depth: u32,
+        pred: &dyn Fn(&Dictionary) -> bool,
+    ) -> bool {
         if depth > MAX_SCAN_DEPTH {
             return false;
         }
         let sub = |key: &[u8]| resources.get(key).and_then(|o| resolve_dict(self.doc, o));
         if let Some(gstates) = sub(b"ExtGState")
-            && gstates.iter().any(|(_, o)| {
-                resolve_dict(self.doc, o)
-                    .and_then(|gs| parse_blend_mode(&gs))
-                    .is_some_and(|bm| bm != BlendMode::Normal)
-            })
+            && gstates
+                .iter()
+                .any(|(_, o)| resolve_dict(self.doc, o).is_some_and(|gs| pred(&gs)))
         {
             return true;
         }
         if let Some(xobjects) = sub(b"XObject")
             && xobjects
                 .iter()
-                .any(|(_, o)| self.stream_resources_blend(o, depth))
+                .any(|(_, o)| self.stream_resources_reach(o, depth, pred))
         {
             return true;
         }
         if let Some(patterns) = sub(b"Pattern")
-            && patterns.iter().any(|(_, o)| self.pattern_blends(o, depth))
+            && patterns
+                .iter()
+                .any(|(_, o)| self.pattern_reaches(o, depth, pred))
         {
             return true;
         }
@@ -98,44 +134,54 @@ impl Scan<'_> {
                 self.first_visit(o)
                     .and_then(|font| font.get(b"Resources").cloned())
                     .and_then(|r| resolve_dict(self.doc, &r))
-                    .is_some_and(|r| self.resources_blend(&r, depth + 1))
+                    .is_some_and(|r| self.resources_reach(&r, depth + 1, pred))
             })
         })
     }
 
     /// Whether the resources of the form `XObject` or appearance stream
-    /// `obj` names reach a blend mode.
-    fn stream_resources_blend(&mut self, obj: &Object, depth: u32) -> bool {
+    /// `obj` names reach an `ExtGState` accepted by `pred`.
+    fn stream_resources_reach(
+        &mut self,
+        obj: &Object,
+        depth: u32,
+        pred: &dyn Fn(&Dictionary) -> bool,
+    ) -> bool {
         self.first_visit(obj)
             .filter(|dict| dict.get_name(b"Subtype") != Some(b"Image"))
             .and_then(|dict| dict.get(b"Resources").cloned())
             .and_then(|r| resolve_dict(self.doc, &r))
-            .is_some_and(|r| self.resources_blend(&r, depth + 1))
+            .is_some_and(|r| self.resources_reach(&r, depth + 1, pred))
     }
 
-    /// Whether the pattern `obj` names reaches a blend mode: a shading
-    /// pattern through its `ExtGState`, a tiling pattern through its
-    /// resources.
-    fn pattern_blends(&mut self, obj: &Object, depth: u32) -> bool {
+    /// Whether the pattern `obj` names reaches an `ExtGState` accepted by
+    /// `pred`: a shading pattern through its `ExtGState`, a tiling pattern
+    /// through its resources.
+    fn pattern_reaches(
+        &mut self,
+        obj: &Object,
+        depth: u32,
+        pred: &dyn Fn(&Dictionary) -> bool,
+    ) -> bool {
         let Some(pattern) = self.first_visit(obj) else {
             return false;
         };
         if let Some(gs) = pattern
             .get(b"ExtGState")
             .and_then(|o| resolve_dict(self.doc, o))
-            && parse_blend_mode(&gs).is_some_and(|bm| bm != BlendMode::Normal)
+            && pred(&gs)
         {
             return true;
         }
         pattern
             .get(b"Resources")
             .and_then(|r| resolve_dict(self.doc, r))
-            .is_some_and(|r| self.resources_blend(&r, depth + 1))
+            .is_some_and(|r| self.resources_reach(&r, depth + 1, pred))
     }
 
-    /// Whether an appearance stream of an annotation of `page` reaches a
-    /// blend mode.
-    fn annotations_blend(&mut self, page: &Dictionary) -> bool {
+    /// Whether an appearance stream of an annotation of `page` reaches an
+    /// `ExtGState` accepted by `pred`.
+    fn annotations_reach(&mut self, page: &Dictionary, pred: &dyn Fn(&Dictionary) -> bool) -> bool {
         resolve_array(self.doc, page.get(b"Annots"))
             .iter()
             .any(|annot| {
@@ -147,19 +193,19 @@ impl Scan<'_> {
                 };
                 match &normal {
                     Object::Reference(_) => {
-                        if self.stream_resources_blend(&normal, 0) {
+                        if self.stream_resources_reach(&normal, 0, pred) {
                             return true;
                         }
                         // A dictionary of appearance states.
                         resolve_dict(self.doc, &normal).is_some_and(|states| {
                             states
                                 .iter()
-                                .any(|(_, s)| self.stream_resources_blend(s, 0))
+                                .any(|(_, s)| self.stream_resources_reach(s, 0, pred))
                         })
                     }
                     Object::Dictionary(states) => states
                         .iter()
-                        .any(|(_, s)| self.stream_resources_blend(s, 0)),
+                        .any(|(_, s)| self.stream_resources_reach(s, 0, pred)),
                     _ => false,
                 }
             })
@@ -191,6 +237,47 @@ mod tests {
         )];
         all.extend(objects.iter().cloned());
         make_doc_with_objects(&all)
+    }
+
+    #[test]
+    fn page_uses_overprint_finds_nested_form() {
+        let doc = doc_with(
+            "/XObject << /F 5 0 R >>",
+            "",
+            &[(
+                5,
+                "<< /Type /XObject /Subtype /Form /Resources << /ExtGState << /O << /op true >> >> >> \
+                 /Length 0 >>\nstream\n\nendstream"
+                    .to_owned(),
+            )],
+        );
+        assert!(page_uses_overprint(&doc, (4, 0)));
+        let doc = doc_with("/ExtGState << /O << /OP false /op false >> >>", "", &[]);
+        assert!(!page_uses_overprint(&doc, (4, 0)));
+        let doc = doc_with("/ExtGState << /O << /OP true >> >>", "", &[]);
+        assert!(page_uses_overprint(&doc, (4, 0)), "page resources");
+    }
+
+    #[test]
+    fn page_uses_overprint_finds_pattern_and_appearance_stream() {
+        let doc = doc_with(
+            "/Pattern << /P << /PatternType 2 /ExtGState << /OP true >> >> >>",
+            "",
+            &[],
+        );
+        assert!(page_uses_overprint(&doc, (4, 0)), "shading pattern");
+        let doc = doc_with(
+            "",
+            "/Annots [<< /Subtype /Square /AP << /N 5 0 R >> >>]",
+            &[(
+                5,
+                "<< /Type /XObject /Subtype /Form /Resources << /ExtGState << /S << /op true >> >> >> \
+                 /Length 0 >>\nstream\n\nendstream"
+                    .to_owned(),
+            )],
+        );
+        assert!(page_uses_overprint(&doc, (4, 0)), "appearance stream");
+        assert!(page_group(&doc, (4, 0)).is_none(), "not a blend");
     }
 
     #[test]

@@ -120,6 +120,12 @@ pub(crate) struct InterpGState {
     pub stroke_alpha: u8,
     /// Compositing blend mode (PDF `BM`).  Defaults to `Normal`.
     pub blend_mode: BlendMode,
+    /// Stroking overprint (PDF `OP`).
+    pub overprint_stroke: bool,
+    /// Non-stroking overprint (PDF `op`).
+    pub overprint_fill: bool,
+    /// Overprint mode (PDF `OPM`): 0 or 1.
+    pub overprint_mode: u8,
     /// Line width in user-space units.
     pub line_width: f64,
     /// Line cap style.
@@ -194,6 +200,9 @@ impl Clone for InterpGState {
             fill_alpha: self.fill_alpha,
             stroke_alpha: self.stroke_alpha,
             blend_mode: self.blend_mode,
+            overprint_stroke: self.overprint_stroke,
+            overprint_fill: self.overprint_fill,
+            overprint_mode: self.overprint_mode,
             line_width: self.line_width,
             line_cap: self.line_cap,
             line_join: self.line_join,
@@ -226,6 +235,9 @@ impl InterpGState {
             fill_alpha: 255,
             stroke_alpha: 255,
             blend_mode: BlendMode::Normal,
+            overprint_stroke: false,
+            overprint_fill: false,
+            overprint_mode: 0,
             line_width: 1.0,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
@@ -523,6 +535,26 @@ mod tests {
         let (x, y) = ctm_transform(&ctm, 0.0, 0.0);
         assert!((x - 100.0).abs() < 1e-9);
         assert!((y - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overprint_defaults_and_survives_save_restore() {
+        let mut stack = GStateStack::new(100, 100, true);
+        let gs = stack.current();
+        assert!(!gs.overprint_stroke && !gs.overprint_fill);
+        assert_eq!(gs.overprint_mode, 0);
+        stack.save();
+        let gs = stack.current_mut();
+        gs.overprint_stroke = true;
+        gs.overprint_fill = true;
+        gs.overprint_mode = 1;
+        stack.save();
+        assert!(stack.current().overprint_fill, "copied into the new level");
+        stack.restore();
+        stack.restore();
+        let gs = stack.current();
+        assert!(!gs.overprint_stroke && !gs.overprint_fill);
+        assert_eq!(gs.overprint_mode, 0);
     }
 
     #[test]
