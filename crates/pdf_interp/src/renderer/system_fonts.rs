@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::SystemTime;
 
 use font::program::FontProgram;
 use font::sfnt_info::{Coverage, FaceInfo, face_infos, unicode_coverage};
@@ -359,8 +360,9 @@ pub(crate) struct FontLibrary {
     /// Whether the standard font directories and the fixed locations of
     /// the metric-compatible substitutes are searched.
     system: bool,
-    /// Every sfnt face found, sorted by path; built on first use.
-    faces: OnceLock<Vec<Face>>,
+    /// Every sfnt face found, sorted by path, and the directories walked
+    /// to find them; built on first use.
+    index: OnceLock<Index>,
     /// Program of each face, by index into `faces`, parsed on first use.
     programs: Mutex<HashMap<usize, Option<Arc<FontProgram>>>>,
     /// Face order of each fallback ranking, by index into `faces`.
@@ -375,7 +377,7 @@ impl FontLibrary {
         Self {
             dirs,
             system,
-            faces: OnceLock::new(),
+            index: OnceLock::new(),
             programs: Mutex::default(),
             orders: Mutex::default(),
             substitutes: [const { OnceLock::new() }; INSTALLED_ROWS],
@@ -386,42 +388,74 @@ impl FontLibrary {
     /// then, when `system` is set, the standard font directories; shared by
     /// every caller naming the same sources.
     #[must_use]
+    ///
+    /// A library whose index is out of date — a directory it walked, or a
+    /// root it found missing, has changed since — is replaced by a fresh
+    /// one, so fonts installed or removed while the process runs are seen
+    /// by the documents opened afterwards.  Callers holding the old library
+    /// keep it.
     pub(crate) fn shared(dirs: &[PathBuf], system: bool) -> Arc<Self> {
         static LIBRARIES: OnceLock<Mutex<HashMap<LibraryKey, Arc<FontLibrary>>>> = OnceLock::new();
         let mut libraries = LIBRARIES
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(
-            libraries
-                .entry((dirs.to_vec(), system))
-                .or_insert_with(|| Arc::new(Self::new(dirs.to_vec(), system))),
-        )
+        let library = libraries
+            .entry((dirs.to_vec(), system))
+            .or_insert_with(|| Arc::new(Self::new(dirs.to_vec(), system)));
+        if library.is_stale() {
+            log::debug!("system_fonts: font directories changed; re-indexing");
+            *library = Arc::new(Self::new(dirs.to_vec(), system));
+        }
+        let library = Arc::clone(library);
+        drop(libraries);
+        library
+    }
+
+    /// Whether the library was indexed and a directory it walked has
+    /// changed since: its modification time differs, or it appeared or
+    /// vanished.
+    fn is_stale(&self) -> bool {
+        self.index.get().is_some_and(|index| {
+            index
+                .directories
+                .iter()
+                .any(|(dir, stamp)| modified(dir) != *stamp)
+        })
     }
 
     /// Every face of the library's directories, indexed on first use.
     fn faces(&self) -> &[Face] {
-        self.faces.get_or_init(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from);
-            let mut faces = Vec::new();
-            for dir in &self.dirs {
-                walk(dir, 0, &mut faces);
-            }
-            for dir in FONT_DIRS.iter().filter(|_| self.system) {
-                let dir = match (dir.strip_prefix("~/"), &home) {
-                    (Some(rest), Some(home)) => home.join(rest),
-                    (Some(_), None) => continue,
-                    (None, _) => PathBuf::from(dir),
-                };
-                walk(&dir, 0, &mut faces);
-            }
-            // Directory listings come in no fixed order; ties in every
-            // ranking below resolve by path, so selection is the same on
-            // every run.
-            faces.sort_by(|a, b| a.path.cmp(&b.path).then(a.index.cmp(&b.index)));
-            log::debug!("system_fonts: indexed {} faces", faces.len());
-            faces
-        })
+        &self
+            .index
+            .get_or_init(|| {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let mut index = Index::default();
+                for dir in &self.dirs {
+                    index.walk(dir, 0);
+                }
+                for dir in FONT_DIRS.iter().filter(|_| self.system) {
+                    let dir = match (dir.strip_prefix("~/"), &home) {
+                        (Some(rest), Some(home)) => home.join(rest),
+                        (Some(_), None) => continue,
+                        (None, _) => PathBuf::from(dir),
+                    };
+                    index.walk(&dir, 0);
+                }
+                // Directory listings come in no fixed order; ties in every
+                // ranking below resolve by path, so selection is the same
+                // on every run.
+                index
+                    .faces
+                    .sort_by(|a, b| a.path.cmp(&b.path).then(a.index.cmp(&b.index)));
+                log::debug!(
+                    "system_fonts: indexed {} faces in {} directories",
+                    index.faces.len(),
+                    index.directories.len()
+                );
+                index
+            })
+            .faces
     }
 
     /// The installed face that best serves `style` for `script`: among
@@ -531,33 +565,52 @@ impl FontLibrary {
     }
 }
 
-/// Index every sfnt file below `dir`, at most [`MAX_DEPTH`] levels down.
-fn walk(dir: &Path, depth: u32, faces: &mut Vec<Face>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if depth < MAX_DEPTH {
-                walk(&path, depth + 1, faces);
+/// The faces of a library and the directories walked to find them.
+#[derive(Default)]
+struct Index {
+    /// Every sfnt face found.
+    faces: Vec<Face>,
+    /// Each directory walked, with its modification time then; `None` for
+    /// a root that could not be read.
+    directories: Vec<(PathBuf, Option<SystemTime>)>,
+}
+
+impl Index {
+    /// Add the faces of the font files in `dir` and, to [`MAX_DEPTH`],
+    /// its subdirectories, recording each directory walked.
+    fn walk(&mut self, dir: &Path, depth: u32) {
+        self.directories.push((dir.to_path_buf(), modified(dir)));
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < MAX_DEPTH {
+                    self.walk(&path, depth + 1);
+                }
+                continue;
             }
-            continue;
-        }
-        let is_sfnt = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-            e.eq_ignore_ascii_case("ttf")
-                || e.eq_ignore_ascii_case("otf")
-                || e.eq_ignore_ascii_case("ttc")
-        });
-        if is_sfnt {
-            faces.extend(
-                face_infos(&path)
-                    .into_iter()
-                    .map(|info| Face::new(&path, info))
-                    .filter(|face| !PLACEHOLDER_FAMILIES.contains(&face.family.as_str())),
-            );
+            let is_sfnt = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                e.eq_ignore_ascii_case("ttf")
+                    || e.eq_ignore_ascii_case("otf")
+                    || e.eq_ignore_ascii_case("ttc")
+            });
+            if is_sfnt {
+                self.faces.extend(
+                    face_infos(&path)
+                        .into_iter()
+                        .map(|info| Face::new(&path, info))
+                        .filter(|face| !PLACEHOLDER_FAMILIES.contains(&face.family.as_str())),
+                );
+            }
         }
     }
+}
+
+/// The modification time of `dir`, `None` when it cannot be read.
+fn modified(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir).and_then(|m| m.modified()).ok()
 }
 
 /// A character every face serving `script` maps: a kana, a common
@@ -762,5 +815,42 @@ mod tests {
             "the extra directory is indexed"
         );
         assert!(!standard.faces().iter().any(|f| f.path.starts_with(&dir)));
+    }
+
+    /// A font installed into a library's directory while the process runs
+    /// is seen by the next caller: the directory's change makes the
+    /// indexed library stale, and `shared` replaces it.  An unchanged
+    /// directory keeps its library.
+    #[test]
+    fn fonts_installed_after_indexing_are_seen() {
+        let dir = std::env::temp_dir().join(format!("rr-font-install-{}", std::process::id()));
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).expect("dir");
+        // A modification time in the past, so that the install below
+        // changes it whatever the file system's timestamp granularity.
+        for d in [&dir, &sub] {
+            std::fs::File::open(d)
+                .and_then(|f| {
+                    f.set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+                })
+                .expect("set mtime");
+        }
+        let before = FontLibrary::shared(std::slice::from_ref(&dir), false);
+        assert!(before.faces().is_empty());
+        assert!(Arc::ptr_eq(
+            &before,
+            &FontLibrary::shared(std::slice::from_ref(&dir), false)
+        ));
+        let ahem = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../font_test_data/test_data/ttf/ahem.ttf"
+        );
+        let _bytes = std::fs::copy(ahem, sub.join("ahem.ttf")).expect("install");
+        let after = FontLibrary::shared(std::slice::from_ref(&dir), false);
+        let indexed = after.faces().len();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!Arc::ptr_eq(&before, &after), "re-indexed");
+        assert_eq!(indexed, 1);
+        assert!(before.faces().is_empty(), "the old library is unchanged");
     }
 }
