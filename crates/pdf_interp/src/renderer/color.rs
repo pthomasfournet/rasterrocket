@@ -25,9 +25,9 @@ pub(crate) const PROCESS_CHANNELS: ChannelMask = ChannelMask::new(0b1111);
 /// canvas.  A colour given in a four-component process space keeps its
 /// components as the ink, and a colour given in a `Separation` or `DeviceN`
 /// space its colorants' tints; any other colour's ink is
-/// [`color::cmyk::rgb_to_ink`] of its sRGB bytes — black alone for a grey,
-/// the nearest in-gamut CMY otherwise — with no spot ink, computed on first
-/// use so that a page painted on an RGB canvas never evaluates it.
+/// [`color::cmyk::rgb_to_ink`] of its sRGB bytes — the inks printing the
+/// colour with the most black — with no spot ink, computed on first use so
+/// that a page painted on an RGB canvas never evaluates it.
 ///
 /// On an ink canvas the colour paints the channels of [`Self::paints`] and
 /// keeps the backdrop in the others: the process channels for a
@@ -240,8 +240,12 @@ mod tests {
         assert_eq!(c.bytes_for(PixelMode::Rgb8), c.as_slice());
         let white = RasterColor::gray(1.0);
         assert_eq!(white.ink(), &[0; 8]);
-        // A grey prints in black ink alone.
-        assert_eq!(RasterColor::gray(0.2).ink(), &[0, 0, 0, 204, 0, 0, 0, 0]);
+        // A grey prints in black ink alone, the black printing that grey.
+        let grey = RasterColor::gray(0.2);
+        let grey = grey.ink();
+        assert_eq!(grey[..3], [0, 0, 0]);
+        assert_eq!(grey[4..], [0; 4]);
+        assert!(color::cmyk::cmyk_to_rgb(0, 0, 0, grey[3])[0].abs_diff(51) <= 1);
         // Equal RGB given as process inks differs from the derived colour.
         let given = RasterColor::with_process_inks([255; 3], [0.0; 4]);
         assert_eq!(given.ink(), white.ink());

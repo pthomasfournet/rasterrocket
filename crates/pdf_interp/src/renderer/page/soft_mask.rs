@@ -77,8 +77,8 @@ impl PageRenderer<'_> {
         let knockout = std::mem::replace(&mut self.group.knockout, false);
         // A mask group yields mask values, not printed colorants, so it is
         // painted in sRGB whatever the page's canvas: its luminosity is
-        // that of its colours (PDF §11.6.5.2), which ink, whose greys print
-        // in black alone, would not reproduce.
+        // that of its colours (PDF §11.6.5.2), not of the inks that print
+        // them, which reproduce a colour only within the process gamut.
         let mask = PageCanvas::new(CanvasKind::Rgb, self.width, self.height, true);
         let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);

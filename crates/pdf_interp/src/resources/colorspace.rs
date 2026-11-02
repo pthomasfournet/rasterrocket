@@ -253,7 +253,7 @@ impl ColorSpace {
     /// themselves in `DeviceCMYK` or a four-component ICC space; the ink of
     /// the alternate colour for a `Separation` or `DeviceN` space whose tint
     /// transform evaluates; otherwise [`color::cmyk::rgb_to_ink`] of the
-    /// sRGB conversion, black alone for a neutral.  A component count other
+    /// sRGB conversion.  A component count other
     /// than [`ncomponents`](Self::ncomponents) converts as
     /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.
     #[must_use]

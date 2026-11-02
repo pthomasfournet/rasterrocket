@@ -1614,25 +1614,54 @@ fn assert_ink_pixels(ink: &[u8], want: [u8; 8]) {
     }
 }
 
-/// Black and other greys, as `DeviceGray` or as equal RGB components,
-/// print in black ink alone (`K = 1 − gray`).
+/// Greys, as `DeviceGray` or as equal RGB components, print in black ink
+/// alone down to the grey solid black prints; black itself is solid black
+/// with C, M and Y on top.
 #[test]
-fn ink_canvas_greys_print_in_black_ink() {
+fn ink_canvas_greys_are_black_ink_down_to_the_floor() {
     let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let [c, m, y, k] = color::cmyk::rgb_to_ink([0; 3]);
+    assert!(k == 255 && c > 0 && m > 0 && y > 0);
     for content in [b"0 g 0 0 10 10 re f".as_slice(), b"0 0 0 rg 0 0 10 10 re f"] {
-        assert_ink_pixels(&render_ink(&doc, content), [0, 0, 0, 255, 0, 0, 0, 0]);
+        assert_ink_pixels(&render_ink(&doc, content), [c, m, y, 255, 0, 0, 0, 0]);
     }
+    let [.., k] = color::cmyk::rgb_to_ink([51; 3]);
     assert_ink_pixels(
         &render_ink(&doc, b"0.2 g 0 0 10 10 re f"),
-        [0, 0, 0, 204, 0, 0, 0, 0],
+        [0, 0, 0, k, 0, 0, 0, 0],
     );
-    // The samples of a grey image print in black ink alone.
+    // The samples of a grey image print the same way.
     let ink = render_ink(
         &doc,
         b"q 8 0 0 8 1 1 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x00\x40\x80\xc0 EI Q",
     );
-    assert!(ink.as_chunks::<8>().0.iter().any(|px| px[3] == 255));
-    assert!(ink.as_chunks::<8>().0.iter().all(|px| px[..3] == [0, 0, 0]));
+    let pixels = ink.as_chunks::<8>().0;
+    assert!(pixels.iter().any(|px| px[3] == 255 && px[..3] != [0, 0, 0]));
+    assert!(
+        pixels
+            .iter()
+            .filter(|px| px[3] < 255)
+            .all(|px| px[..3] == [0, 0, 0])
+    );
+}
+
+/// Greys and RGB colours render on the ink canvas as on the RGB canvas:
+/// black is black, a mid grey a mid grey; a `DeviceCMYK` black keeps its
+/// own ink and prints the solid-black grey.
+#[test]
+fn ink_canvas_greys_render_as_on_rgb() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    for content in [b"0 g 0 0 10 10 re f".as_slice(), b"0 0 0 rg 0 0 10 10 re f"] {
+        let rgb = render_canvas(&doc, 10, content, true);
+        assert!(rgb.iter().all(|&v| v == 0), "{content:?}: {rgb:?}");
+    }
+    let rgb = render_canvas(&doc, 10, b"0.5 g 0 0 10 10 re f", true);
+    assert!(rgb.iter().all(|&v| v.abs_diff(128) <= 2), "{rgb:?}");
+    let rgb = render_canvas(&doc, 10, b"0 0 0 1 k 0 0 10 10 re f", true);
+    assert!(
+        rgb.iter().all(|&v| v == color::cmyk::BLACK_FLOOR),
+        "{rgb:?}"
+    );
 }
 
 /// Shadings and tiling patterns reach the ink canvas as the ink of their
@@ -1668,7 +1697,7 @@ fn ink_canvas_shadings_and_patterns_paint_their_colours_transferred() {
 /// pixel is one opaque colour, or one ink over paper, so the canvases agree
 /// within the inversion's rounding; a mixture of inks at partial coverage
 /// interpolates in ink and may not.  The colours are not neutral, and the
-/// RGB ones lie inside the CMY gamut that `rgb_to_cmyk` reaches.
+/// RGB ones lie inside the gamut the four-ink model reaches.
 #[test]
 fn ink_canvas_paints_meshes_images_and_text() {
     let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);

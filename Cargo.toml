@@ -90,3 +90,9 @@ inherits   = "release"
 debug      = 1
 strip      = "none"
 
+# The colour crate builds its RGB → CMYK inverse table (a quarter of a
+# million least-squares solves) on first use; unoptimised that takes a
+# minute in every test binary that converts a colour.
+[profile.dev.package.rasterrocket-color]
+opt-level = 3
+

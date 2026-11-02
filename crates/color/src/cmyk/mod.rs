@@ -39,7 +39,7 @@ mod inverse;
 #[cfg(test)]
 mod tests;
 
-pub use inverse::{SpotLut, ink_to_rgb_row, rgb_to_cmyk, rgb_to_ink};
+pub use inverse::{BLACK_FLOOR, SpotLut, ink_to_rgb_row, rgb_to_ink};
 
 /// sRGB colour of each solid / overprint corner, indexed `k·8 + c·4 + m·2 + y`
 /// with every index in `{0, 1}` (0 = no ink, 1 = solid ink).

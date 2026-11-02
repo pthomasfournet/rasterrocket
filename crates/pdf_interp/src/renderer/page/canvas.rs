@@ -584,14 +584,17 @@ mod tests {
         assert_eq!(bitmap.row_bytes(0), &[0, 0, 0, 100, 0, 0, 0, 0]);
     }
 
-    /// A pattern of sRGB white and black becomes no ink and black ink.
+    /// A pattern of sRGB white and black becomes no ink and the ink of
+    /// black: solid black with C, M and Y on top.
     #[test]
     fn an_ink_pattern_converts_each_pixel() {
         let rgb = [255, 255, 255, 0, 0, 0, 0, 0, 0];
         let row = RowPattern { data: &rgb };
         let mut out = [9u8; 24];
         InkPattern::new(&row, None).fill_span(0, 0, 2, &mut out);
-        let black = [0, 0, 0, 255, 0, 0, 0, 0];
+        let [c, m, y, k] = rgb_to_ink([0; 3]);
+        assert_eq!(k, 255);
+        let black = [c, m, y, k, 0, 0, 0, 0];
         assert_eq!(out[..8], [0; 8]);
         assert_eq!(out[8..16], black);
         assert_eq!(out[16..], black);

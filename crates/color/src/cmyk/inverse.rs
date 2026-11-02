@@ -1,52 +1,96 @@
 //! RGB → CMYK inverse of the process-ink model, and ink-canvas → RGB conversion.
 //!
-//! The forward model restricted to `K = 0` is the trilinear interpolation of
-//! the eight `K = 0` entries of [`CORNERS`](super::CORNERS).  [`rgb_to_cmyk`]
-//! inverts it through a 65³ table over the sRGB cube: each node holds the
-//! CMY triple in `[0, 1]³` minimising the squared RGB distance between its
-//! forward image and the node, found by projected Gauss-Newton in `f64`
-//! (channels at a bound with an outward-pointing gradient are frozen and
-//! the step is solved on the free channels).  In-gamut nodes are exact
-//! preimages; out-of-gamut nodes are the box-constrained least-squares
-//! minimum, a local one since the model is multilinear.  A query is the
-//! trilinear interpolation of the eight surrounding nodes and nothing else.
+//! [`rgb_to_ink`] inverts the quadrilinear model of [`CORNERS`](super::CORNERS)
+//! with grey-component replacement: of the inks printing a colour it
+//! chooses ones with the most black.  The black axis of the model is
+//! neutral and affine — black alone prints the grey `255 − (255 − F)·k`,
+//! `F` the solid-black corner — and C, M and Y only darken, so a colour
+//! whose lightest channel is `L` admits at most the black `k_L` printing
+//! the grey `L`.  The blacks reproducing a colour form bands within
+//! `[0, k_L]`, not always reaching 0: in the dark slices adding cyan
+//! lightens blue, so a dark colour may print only within a narrow band.
+//! A node's black is found by sampling a ladder of slices down from `k_L`
+//! and bisecting the upper edge of the band around the highest reproducing
+//! sample, then stepping [`MARGIN`] inside the band where the band allows,
+//! since at the edge the CMY sit on a bound of the slice; the colour's
+//! CMY is the preimage on that slice.  A colour nothing prints takes the
+//! ladder sample whose least-squares CMY comes closest.
+//!
+//! Each slice is the trilinear interpolation of the eight corners at that
+//! black, inverted by projected Gauss-Newton in `f64` (channels at a bound
+//! with an outward-pointing gradient are frozen and the step is solved on
+//! the free channels).  The inverse is tabulated on a 65³ grid over the
+//! sRGB cube; where adjacent nodes chose different bands, relaxation
+//! passes re-solve a node far from its neighbours' mean on their band.  A
+//! query is the trilinear interpolation of the eight surrounding nodes,
+//! except that a neutral takes the inks of its grey from a 256-entry
+//! table — black alone down to the floor ([`BLACK_FLOOR`]), solid black
+//! with C, M and Y below it — since interpolating the chromatic neighbours
+//! of the grey axis would add C, M and Y to it.
+//!
+//! The table reproduces every colour the model prints within two counts
+//! per channel, except for about one in two thousand dark colours
+//! (channel mean below 64) at the edge of a thin band, within four.
 
 use std::sync::LazyLock;
 
-use super::{CORNERS, cmyk_to_rgb_row};
+use super::{CORNERS, cmyk_to_rgb, cmyk_to_rgb_row};
 
 /// Nodes per axis of the inverse table.
 const GRID: u8 = 65;
-/// Projected Gauss-Newton iterations per node.
+/// Projected Gauss-Newton iterations per slice solve.
 const MAX_STEPS: usize = 40;
+/// Bisection steps for the largest reproducing black.
+const BISECTIONS: usize = 6;
+/// Squared residual below which a slice solve reproduces the colour.
+const EXACT: f64 = 0.25;
+/// Black stepped back from the edge of a band of reproducing blacks.
+const MARGIN: f64 = 0.03;
+/// Relaxation passes over the table after the node solves.
+const PASSES: usize = 3;
+/// Ink distance from the neighbours' mean at which a node is re-solved.
+const OUTLIER: f64 = 0.08;
 /// Pixels converted per stack buffer in [`ink_to_rgb_row`].
 const CHUNK: usize = 256;
+
+/// The darkest grey black ink alone prints: the solid-black corner.
+pub const BLACK_FLOOR: u8 = CORNERS[8][0];
 
 /// Process-ink equivalent of each tint (0–255) of one spot colorant:
 /// entry `t` is the `[C, M, Y, K]` bytes printing the same colour as the
 /// spot at tint `t`.
 pub type SpotLut = [[u8; 4]; 256];
 
-/// Forward `K = 0` model on `[0, 1]³`, unrounded: trilinear over
-/// `CORNERS[0..8]`, index `c·4 + m·2 + y`.
-fn forward(cmy: [f64; 3]) -> [f64; 3] {
+/// The eight CMY corners of the model at black `k`: `CORNERS[i]` and
+/// `CORNERS[8 + i]` interpolated, index `c·4 + m·2 + y`.
+fn slice_corners(k: f64) -> [[f64; 3]; 8] {
+    std::array::from_fn(|i| {
+        std::array::from_fn(|ch| {
+            let (no_k, solid_k) = (f64::from(CORNERS[i][ch]), f64::from(CORNERS[8 + i][ch]));
+            (solid_k - no_k).mul_add(k, no_k)
+        })
+    })
+}
+
+/// Forward model on a black slice, unrounded: trilinear over `corners`.
+fn forward(corners: &[[f64; 3]; 8], cmy: [f64; 3]) -> [f64; 3] {
     let mut out = [0.0; 3];
-    for (i, corner) in CORNERS[..8].iter().enumerate() {
+    for (i, corner) in corners.iter().enumerate() {
         let w: f64 = [(i >> 2) & 1, (i >> 1) & 1, i & 1]
             .iter()
             .zip(cmy)
             .map(|(&bit, t)| if bit == 1 { t } else { 1.0 - t })
             .product();
         for (o, &v) in out.iter_mut().zip(corner) {
-            *o = w.mul_add(f64::from(v), *o);
+            *o = w.mul_add(v, *o);
         }
     }
     out
 }
 
-/// Sum of squared residuals of `forward(cmy)` against `target`.
-fn residual(cmy: [f64; 3], target: [f64; 3]) -> f64 {
-    forward(cmy)
+/// Sum of squared residuals of `forward(corners, cmy)` against `target`.
+fn residual(corners: &[[f64; 3]; 8], cmy: [f64; 3], target: [f64; 3]) -> f64 {
+    forward(corners, cmy)
         .iter()
         .zip(target)
         .map(|(a, b)| (a - b) * (a - b))
@@ -79,20 +123,23 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     Some(x)
 }
 
-/// CMY in `[0, 1]³` minimising the squared distance of the forward image to
-/// `target` (RGB bytes as `f64`), by projected Gauss-Newton from the
-/// additive complement.
+/// CMY in `[0, 1]³` minimising the squared distance of the slice image to
+/// `target` (RGB bytes as `f64`), by projected Gauss-Newton from `start`;
+/// the minimiser and its squared residual.
 ///
 /// The residual is non-increasing across iterations.  A channel sitting at a
 /// bound whose cost gradient points out of the box is frozen for the
 /// iteration; the Gauss-Newton system is solved on the remaining channels
 /// and the step is projected back into the box under a halving line search.
-fn invert_node(target: [f64; 3]) -> [f64; 3] {
+fn invert_slice(corners: &[[f64; 3]; 8], target: [f64; 3], start: [f64; 3]) -> ([f64; 3], f64) {
     const H: f64 = 1.0 / 64.0;
-    let mut x = target.map(|v| 1.0 - v / 255.0);
-    let mut err = residual(x, target);
+    let mut x = start.map(|v| v.clamp(0.0, 1.0));
+    let mut err = residual(corners, x, target);
     for _ in 0..MAX_STEPS {
-        let f0 = forward(x);
+        if err < 1e-9 {
+            break;
+        }
+        let f0 = forward(corners, x);
         // The model is affine in each channel separately, so an inward
         // one-sided difference over any width is exact.
         let mut jac = [[0.0; 3]; 3];
@@ -100,7 +147,7 @@ fn invert_node(target: [f64; 3]) -> [f64; 3] {
             let dir = if x[col] > 0.5 { -H } else { H };
             let mut probe = x;
             probe[col] += dir;
-            let f1 = forward(probe);
+            let f1 = forward(corners, probe);
             for row in 0..3 {
                 jac[row][col] = (f1[row] - f0[row]) / dir;
             }
@@ -133,7 +180,7 @@ fn invert_node(target: [f64; 3]) -> [f64; 3] {
         let mut improved = false;
         for _ in 0..10 {
             let cand = [0, 1, 2].map(|i| step[i].mul_add(scale, x[i]).clamp(0.0, 1.0));
-            let e = residual(cand, target);
+            let e = residual(corners, cand, target);
             if e < err {
                 improved = err - e > 1e-12;
                 x = cand;
@@ -142,42 +189,212 @@ fn invert_node(target: [f64; 3]) -> [f64; 3] {
             }
             scale *= 0.5;
         }
-        if !improved || err < 1e-9 {
+        if !improved {
             break;
         }
     }
-    x
+    (x, err)
 }
 
-/// Inverse table, node `(r, g, b)` at index `(r·65 + g)·65 + b`, CMY in `[0, 1]`.
-static INVERSE: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
-    let step = 255.0 / f64::from(GRID - 1);
-    let axis = || (0..GRID).map(|i| (f64::from(i) * step).round());
-    let mut table = Vec::with_capacity(usize::from(GRID).pow(3));
-    for r in axis() {
-        for g in axis() {
-            for b in axis() {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "ink amounts lie in [0, 1]; f32 resolution exceeds a byte"
-                )]
-                table.push(invert_node([r, g, b]).map(|v| v as f32));
+/// The slice solve of `target` at black `k` from `start`: `(cmy, k, err)`.
+fn solve_at(target: [f64; 3], k: f64, start: [f64; 3]) -> ([f64; 3], f64, f64) {
+    let (cmy, err) = invert_slice(&slice_corners(k), target, start);
+    (cmy, k, err)
+}
+
+/// The black alone printing the grey `lightest`: black prints the grey
+/// `paper − (paper − floor)·k`, so no colour whose lightest channel is
+/// `lightest` takes more black than this.
+fn black_for(lightest: f64) -> f64 {
+    let paper = f64::from(CORNERS[0][0]);
+    ((paper - lightest) / (paper - f64::from(BLACK_FLOOR))).clamp(0.0, 1.0)
+}
+
+/// The inks `[c, m, y, k]` in `[0, 1]⁴` of `target` (RGB bytes as `f64`)
+/// with the most black that reproduces it; the nearest printable colour's
+/// inks when none does.
+///
+/// The blacks reproducing a colour need not reach down to 0 (in the dark
+/// slices adding cyan lightens blue, so a dark colour may be printable
+/// only within a band of blacks), so the slice solve is sampled on a
+/// ladder of `LADDER` steps from the black bound down to 0, each solve
+/// warm-started from the one above, and the upper edge of the band around
+/// the highest reproducing sample is bisected.  With no reproducing sample
+/// the sample of least residual is the answer.
+fn invert_node(target: [f64; 3]) -> [f64; 4] {
+    const LADDER: usize = 8;
+    let k_max = black_for(target.iter().copied().fold(0.0, f64::max));
+    let mut start = target.map(|v| 1.0 - v / f64::from(CORNERS[0][0]));
+    let mut nearest: Option<([f64; 3], f64, f64)> = None;
+    let mut above = k_max;
+    for step in 0..=LADDER {
+        #[expect(clippy::cast_precision_loss, reason = "step ≤ 8")]
+        let k = k_max * (LADDER - step) as f64 / LADDER as f64;
+        let at = solve_at(target, k, start);
+        start = at.0;
+        if at.2 <= EXACT {
+            // The band's upper edge lies in `[k, above]`.
+            let (mut lo, mut hi) = (at, above);
+            for _ in 0..BISECTIONS {
+                let mid = f64::midpoint(lo.1, hi);
+                let at_mid = solve_at(target, mid, lo.0);
+                if at_mid.2 <= EXACT {
+                    lo = at_mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            // At the edge the CMY sit on a bound of the slice; a step
+            // inside the band keeps the node solution interior, where
+            // neighbouring nodes interpolate to a reproducing ink.
+            for margin in [MARGIN, MARGIN / 2.0] {
+                if lo.1 - margin >= k {
+                    let inside = solve_at(target, lo.1 - margin, lo.0);
+                    if inside.2 <= EXACT {
+                        return inks(inside);
+                    }
+                }
+            }
+            return inks(lo);
+        }
+        if nearest.is_none_or(|best| at.2 < best.2) {
+            nearest = Some(at);
+        }
+        above = k;
+    }
+    inks(nearest.unwrap_or(([0.0; 3], 0.0, 0.0)))
+}
+
+/// `[c, m, y, k]` of a slice solve.
+const fn inks((cmy, k, _): ([f64; 3], f64, f64)) -> [f64; 4] {
+    [cmy[0], cmy[1], cmy[2], k]
+}
+
+/// The inverse tables.
+struct Inverse {
+    /// Node `(r, g, b)` at index `(r·GRID + g)·GRID + b`, inks in `[0, 1]`.
+    nodes: Vec<[f32; 4]>,
+    /// The inks of each grey: at or above the floor, the black alone
+    /// printing the nearest grey; below it, solid black with the C, M and
+    /// Y reproducing the grey on the solid-black slice.
+    neutral: [[u8; 4]; 256],
+}
+
+/// `[0, 1]` ink amounts as bytes.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is clamped to [0, 255] and rounded first"
+)]
+fn ink_bytes<const N: usize>(inks: [f64; N]) -> [u8; N] {
+    inks.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+/// Re-solve the nodes whose inks lie far from the mean of their six axis
+/// neighbours, from that mean on its black, keeping the result when it
+/// reproduces the node's colour.
+///
+/// Where several bands of black reproduce a colour, adjacent nodes may
+/// pick different bands, and the interpolant between two bands prints
+/// nothing near either; the mean of the neighbours lies on the band most
+/// of them chose.  `axis[i]` is the RGB value of grid coordinate `i`.
+fn relax(nodes: &mut [[f64; 4]], axis: &[f64]) {
+    let n = axis.len();
+    let index = |r: usize, g: usize, b: usize| (r * n + g) * n + b;
+    for _ in 0..PASSES {
+        for r in 0..n {
+            for g in 0..n {
+                for b in 0..n {
+                    let mut mean = [0.0; 4];
+                    let mut count = 0.0;
+                    for (dr, dg, db) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+                        for sign in [-1isize, 1] {
+                            let at =
+                                |v: usize, d: usize| v.checked_add_signed(sign * d.cast_signed());
+                            if let (Some(nr), Some(ng), Some(nb)) =
+                                (at(r, dr), at(g, dg), at(b, db))
+                                && nr < n
+                                && ng < n
+                                && nb < n
+                            {
+                                for (m, v) in mean.iter_mut().zip(nodes[index(nr, ng, nb)]) {
+                                    *m += v;
+                                }
+                                count += 1.0;
+                            }
+                        }
+                    }
+                    let mean = mean.map(|v| v / count);
+                    let node = nodes[index(r, g, b)];
+                    let far = node.iter().zip(mean).any(|(a, b)| (a - b).abs() > OUTLIER);
+                    if !far {
+                        continue;
+                    }
+                    let target = [axis[r], axis[g], axis[b]];
+                    let k = mean[3].clamp(0.0, 1.0);
+                    let (cmy, err) =
+                        invert_slice(&slice_corners(k), target, [mean[0], mean[1], mean[2]]);
+                    if err <= EXACT {
+                        nodes[index(r, g, b)] = [cmy[0], cmy[1], cmy[2], k];
+                    }
+                }
             }
         }
     }
-    table
+}
+
+static INVERSE: LazyLock<Inverse> = LazyLock::new(|| {
+    let step = 255.0 / f64::from(GRID - 1);
+    let axis: Vec<f64> = (0..GRID).map(|i| (f64::from(i) * step).round()).collect();
+    let mut raw = Vec::with_capacity(usize::from(GRID).pow(3));
+    for &r in &axis {
+        for &g in &axis {
+            for &b in &axis {
+                raw.push(invert_node([r, g, b]));
+            }
+        }
+    }
+    relax(&mut raw, &axis);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ink amounts lie in [0, 1]; f32 resolution exceeds a byte"
+    )]
+    let nodes: Vec<[f32; 4]> = raw.iter().map(|inks| inks.map(|v| v as f32)).collect();
+    let solid = slice_corners(1.0);
+    let mut neutral = [[0u8; 4]; 256];
+    for (g, inks) in neutral.iter_mut().enumerate() {
+        let grey = u8::try_from(g).unwrap_or(u8::MAX);
+        *inks = if grey >= BLACK_FLOOR {
+            // Black alone prints a grey that falls with k.
+            let k = (0..=u8::MAX)
+                .min_by_key(|&k| cmyk_to_rgb(0, 0, 0, k)[0].abs_diff(grey))
+                .unwrap_or(u8::MAX);
+            [0, 0, 0, k]
+        } else {
+            let target = [f64::from(grey); 3];
+            let (cmy, _) = invert_slice(&solid, target, [0.5; 3]);
+            let [c, m, y] = ink_bytes(cmy);
+            [c, m, y, u8::MAX]
+        };
+    }
+    Inverse { nodes, neutral }
 });
 
-/// Convert sRGB to CMYK ink bytes with `K = 0`.
+/// Convert sRGB to CMYK ink bytes.
 ///
-/// Trilinear lookup in a 65³ inverse of the forward model (built on first
-/// use).  The result maps back through [`cmyk_to_rgb`](super::cmyk_to_rgb)
-/// to within two counts for in-gamut colours; out-of-gamut colours map to
-/// the printable CMY minimising the RGB distance, up to table
-/// interpolation.
+/// Of the inks printing a colour, the ones with the most black
+/// (grey-component replacement): a neutral at or above [`BLACK_FLOOR`] is
+/// black ink alone; a darker neutral is solid black with C, M and Y on
+/// top; a solid process colour has no black.  The result maps back
+/// through [`cmyk_to_rgb`] to within two counts per channel for every
+/// colour the four-ink model prints, and to the nearest printable colour
+/// otherwise, up to table interpolation.
 #[must_use]
-pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
+pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
     let table = &*INVERSE;
+    if rgb[0] == rgb[1] && rgb[1] == rgb[2] {
+        return table.neutral[usize::from(rgb[0])];
+    }
     let span = u16::from(GRID - 1);
     // Exact grid coordinate of each channel is `v · (GRID − 1) / 255`: integer cell
     // index and fraction numerator over 255.
@@ -185,7 +402,7 @@ pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
     let cell = scaled.map(|s| (s / 255).min(span - 1));
     let frac = [0, 1, 2].map(|i| f32::from(scaled[i] - cell[i] * 255) / 255.0);
     let lo = cell.map(usize::from);
-    let mut cmy = [0.0f32; 3];
+    let mut inks = [0.0f32; 4];
     for corner in 0..8usize {
         let bits = [(corner >> 2) & 1, (corner >> 1) & 1, corner & 1];
         let mut w = 1.0f32;
@@ -193,35 +410,12 @@ pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
             w *= if bits[i] == 1 { frac[i] } else { 1.0 - frac[i] };
         }
         let n = usize::from(GRID);
-        let node = table[((lo[0] + bits[0]) * n + lo[1] + bits[1]) * n + lo[2] + bits[2]];
-        for (o, v) in cmy.iter_mut().zip(node) {
+        let node = table.nodes[((lo[0] + bits[0]) * n + lo[1] + bits[1]) * n + lo[2] + bits[2]];
+        for (o, v) in inks.iter_mut().zip(node) {
             *o = w.mul_add(v, *o);
         }
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the value is clamped to [0, 255] and rounded first"
-    )]
-    let [c, m, y] = cmy.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
-    [c, m, y, 0]
-}
-
-/// The process ink of sRGB `rgb`: black ink alone for a neutral, the
-/// nearest in-gamut CMY ([`rgb_to_cmyk`]) for any other colour.
-///
-/// A neutral (`r = g = b`) is the grey `g` of `DeviceGray` and converts as
-/// `DeviceGray` does to `DeviceCMYK`, `K = 1 − g` with no C, M or Y
-/// (ISO 32000-2 §10.4.2.3).  Black therefore prints as K alone, not as a
-/// mixture of C, M and Y.
-#[must_use]
-pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
-    let [r, g, b] = rgb;
-    if r == g && g == b {
-        [0, 0, 0, u8::MAX - r]
-    } else {
-        rgb_to_cmyk(rgb)
-    }
+    ink_bytes(inks.map(f64::from))
 }
 
 /// Convert an ink canvas row to sRGB.
