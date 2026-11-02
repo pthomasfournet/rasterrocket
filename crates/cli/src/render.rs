@@ -9,13 +9,14 @@ use encode::{
 };
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
-use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with, rgb_to_gray};
+use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with};
 use raster::Bitmap;
 
 use crate::args::{Args, OutputFormat};
 use crate::cleanup::{self, Page};
 use crate::naming::output_path_with_prefix;
 use crate::ram::SpillPolicy;
+use crate::tone;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -132,8 +133,9 @@ pub(crate) fn render_page(
 }
 
 /// Run the camera stages selected on the command line on `rgb` (see
-/// [`cleanup::clean`]), then write each resulting page: one file, or the
-/// `a`/`b` halves of a split spread (see [`output_path_with_prefix`]).
+/// [`cleanup::clean`]) and the tone operations (see [`tone::prepare`]),
+/// then write each resulting page: one file, or the `a`/`b` halves of a
+/// split spread (see [`output_path_with_prefix`]).
 ///
 /// Shared by the PDF render path and the comic-archive path.
 pub(crate) fn write_cleaned(
@@ -162,7 +164,7 @@ pub(crate) fn write_cleaned(
 
         // Pages are written in place, not renamed into place, so that no
         // per-page rename waits on the file system's flush of the data.
-        match &page {
+        match &tone::prepare(page, args) {
             Page::Rgb(rgb) => encode_to_path(&out_path, rgb, args, format),
             Page::Gray(gray) => encode_gray_to_path(&out_path, gray, args, format),
         }?;
@@ -198,19 +200,13 @@ fn write_output(
     written
 }
 
-/// Encode `rgb` to `out_path` honouring `--mono` / `--gray` and the resolved format.
-///
-/// Shared by the PDF render path and the comic-archive path so colour-mode and
-/// format handling stay defined in exactly one place.
-pub(crate) fn encode_to_path(
+/// Encode a colour page to `out_path` in `format`.
+fn encode_to_path(
     out_path: &str,
     rgb: &Bitmap<Rgb8>,
     args: &Args,
     format: OutputFormat,
 ) -> Result<(), RenderError> {
-    if args.mono || args.gray {
-        return encode_gray_to_path(out_path, &rgb_to_gray(rgb), args, format);
-    }
     write_output(out_path, |out| {
         match format {
             OutputFormat::Ppm => write_ppm(rgb, out)?,
@@ -234,7 +230,7 @@ fn encode_gray_to_path(
 ) -> Result<(), RenderError> {
     write_output(out_path, |out| {
         if args.mono {
-            let mono = gray_to_mono(gray);
+            let mono = tone::gray_to_mono(gray);
             match format {
                 OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, out)?,
                 OutputFormat::Png => write_png::<Gray8, _>(&mono, out)?,
@@ -255,35 +251,4 @@ fn encode_gray_to_path(
         }
         Ok(())
     })
-}
-
-// ── Pixel helpers ─────────────────────────────────────────────────────────────
-
-/// Luma threshold separating dark ink from light paper (inclusive on the light side).
-const MONO_THRESHOLD: u8 = 128;
-
-/// Threshold a grayscale bitmap to two levels at the 50% midpoint, as luma:
-/// values below [`MONO_THRESHOLD`] become 0 (black), the others 255 (white).
-fn gray_to_mono(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
-    let mut dst: Bitmap<Gray8> = Bitmap::new(src.width, src.height, 1, false);
-    let w = src.width as usize;
-    for y in 0..src.height {
-        let src_row = &src.row_bytes(y)[..w];
-        let dst_row = &mut dst.row_bytes_mut(y)[..w];
-        for (dst_px, &luma) in dst_row.iter_mut().zip(src_row.iter()) {
-            *dst_px = if luma < MONO_THRESHOLD { 0 } else { 255 };
-        }
-    }
-    dst
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn mono_is_luma_black_ink_on_white() {
-        let mut gray: raster::Bitmap<color::Gray8> = raster::Bitmap::new(3, 1, 1, false);
-        gray.row_bytes_mut(0)[..3].copy_from_slice(&[0, 127, 128]);
-        let mono = super::gray_to_mono(&gray);
-        assert_eq!(&mono.row_bytes(0)[..3], &[0, 0, 255]);
-    }
 }

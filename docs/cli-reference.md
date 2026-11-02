@@ -137,6 +137,8 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--tiff` | `.tif` | Baseline TIFF, one file per page: RGB, gray with `--gray`, or 1 bit per pixel with `--mono` (`WhiteIsZero`, as fax readers expect). The resolution tags carry `-r` / `--rx` / `--ry`. |
 | `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
 
+| `--invert[=WHEN]` | | Invert the page's tones, as a negative, before encoding: `always` (also `--invert` alone), `never` (default), or `auto`, only pages that are mostly dark — over three fifths of the pixels below mid-gray, such as light text on a dark ground. Applies to every format; with `--gray` / `--mono` the test and the inversion use the luma. The value takes `=`: `--invert auto` reads `auto` as the input file. |
+
 `--gray` and `--mono` are mutually exclusive, and at most one of `--png`,
 `--jpeg` and `--tiff` may be given; a conflicting pair exits with status 1.
 

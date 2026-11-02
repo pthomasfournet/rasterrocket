@@ -106,6 +106,7 @@ mod tests {
             jpeg: false,
             jpegopt: None,
             tiffcompression: None,
+            invert: None,
             jpegcmyk: false,
             tiff: false,
             gray: false,

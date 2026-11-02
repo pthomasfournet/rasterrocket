@@ -183,6 +183,20 @@ pub(crate) struct Args {
     #[arg(long = "mono")]
     pub mono: bool,
 
+    /// Invert the page's tones, as a negative: `always`, `never`, or
+    /// `auto`, only pages that are mostly dark (over three fifths of the
+    /// pixels below mid-gray), such as light text on a dark ground.
+    /// `--invert` alone is `always`.  Default: `never`.
+    #[arg(
+        long = "invert",
+        value_name = "WHEN",
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "always"
+    )]
+    pub invert: Option<InvertWhen>,
+
     // ── Rendering options ────────────────────────────────────────────────────
     /// Antialias text (default yes).  `no` draws glyphs with hard,
     /// bilevel edges.
@@ -408,6 +422,17 @@ impl From<PurposeArg> for RenderPurpose {
     }
 }
 
+/// `--invert` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum InvertWhen {
+    /// Every page.
+    Always,
+    /// Pages that are mostly dark.
+    Auto,
+    /// No page.
+    Never,
+}
+
 /// Yes/no flag for anti-aliasing options.
 #[derive(Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum AaFlag {
@@ -427,6 +452,11 @@ impl Args {
         camera.dewarp = self.dewarp;
         camera.split_spreads = self.split_spreads;
         camera
+    }
+
+    /// Which pages `--invert` turns.
+    pub(crate) fn invert_when(&self) -> InvertWhen {
+        self.invert.unwrap_or(InvertWhen::Never)
     }
 
     /// Effective horizontal DPI.

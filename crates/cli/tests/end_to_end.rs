@@ -220,6 +220,31 @@ fn mono_tiff_carries_the_pbm_bits_under_every_compression() {
 }
 
 #[test]
+fn invert_auto_turns_a_dark_page_to_ink_on_paper() {
+    // A black page with a white square: the reversed-out case.
+    let pdf = with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] /Contents 4 0 R >>".to_vec(),
+        stream_object("", b"0 g 0 0 100 50 re f 1 g 10 10 20 20 re f"),
+    ]);
+    let (dir, input) = workdir(&pdf);
+    for (flag, inside, outside) in [("--invert=never", 255, 0), ("--invert=auto", 0, 255)] {
+        assert_success(&rrocket(dir.path(), &input, &["-r", "72", "--gray", flag]));
+        let (_, _, _, data) = read_pnm(&dir.path().join("out-1.pgm"));
+        assert_eq!(data[25 * 100 + 15], inside, "{flag}: inside the square");
+        assert_eq!(data[5 * 100 + 50], outside, "{flag}: the ground");
+    }
+    // The light page of two_page_pdf is left alone by auto.
+    let (dir, input) = workdir(&two_page_pdf());
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["-r", "72", "--gray", "-l", "1", "--invert=auto"],
+    ));
+    let (_, _, _, data) = read_pnm(&dir.path().join("out-1.pgm"));
+    assert_eq!(data[25 * 100 + 15], 0, "the black square stays black");
+}
+
+#[test]
 fn missing_input_fails_without_output() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let out = rrocket(dir.path(), &dir.path().join("absent.pdf"), &[]);

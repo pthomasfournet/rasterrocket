@@ -6,6 +6,7 @@ mod diagnostics;
 mod naming;
 mod ram;
 mod render;
+mod tone;
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
