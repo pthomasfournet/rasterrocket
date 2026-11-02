@@ -311,6 +311,10 @@ pub fn render_span<P: Pixel>(
         "render_span: alpha or shape length differs from the {count}-pixel span"
     );
 
+    debug_assert!(
+        pipe.backdrop.is_none() || pipe.overprint.is_none() || dst_alpha.is_some(),
+        "render_span: a masked paint inside a non-isolated group needs the group's alpha plane"
+    );
     // A mask covering every channel of `P` writes the whole pixel.
     let full = u8::MAX >> (8 - P::BYTES);
     match pipe.overprint {
@@ -381,37 +385,63 @@ fn restore_unpainted<P: Pixel>(
         .enumerate()
     {
         let x = x0.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
-        let group = pipe
+        let solved = pipe
             .backdrop
             .as_ref()
             .zip(alpha)
             .and_then(|(bd, (a_old, a_new))| {
                 let (c_bd, a_bd) = bd.pixel(x, y, ncomps)?;
-                (a_bd > 0 && a_new[i] > 0).then_some((c_bd, a_bd, a_old[i], a_new[i]))
+                solve_own_colour(old_px, (a_old[i], a_new[i]), (c_bd, a_bd))
             });
-        let mut union = [0u8; 8];
-        if let Some((c_bd, a_bd, a_old, _)) = group {
-            let _ = general::union_colour(
-                old_px,
-                u32::from(a_old),
-                c_bd,
-                u32::from(a_bd),
-                &mut union[..ncomps],
-            );
-        }
         for (channel, (new, &old)) in px.iter_mut().zip(old_px).enumerate() {
-            if mask.paints(channel) {
-                continue;
+            if !mask.paints(channel) {
+                *new = solved.map_or(old, |s| s[channel]);
             }
-            *new = group.map_or(old, |(c_bd, _, _, a_new)| {
-                let a_new = i32::from(a_new);
-                let num =
-                    i32::from(union[channel]) * 255 - (255 - a_new) * i32::from(c_bd[channel]);
-                let c = (num + a_new / 2) / a_new;
-                u8::try_from(c.clamp(0, 255)).unwrap_or(u8::MAX)
-            });
         }
     }
+}
+
+/// The own colour `c'` of a group pixel that, at its new alpha `a'`,
+/// composites over the backdrop (`c_bd`, `a_bd`) to the colour `u` that the
+/// pixel's old own colour and alpha composited to.
+///
+/// [`general::union_colour`] defines `u` and satisfies
+/// `u·255·a_union = a'·c'·255 + (255 − a')·a_bd·c_bd`, with `a_union` the
+/// union alpha, so `c' = (255·a_union'·u − (255 − a')·a_bd·c_bd) / (255·a')`,
+/// rounded to nearest and clamped to `0..=255`.  `None` where the new alpha
+/// is zero or nothing was visible before (`a_union = 0`): the old bytes
+/// stand.
+fn solve_own_colour(
+    old: &[u8],
+    (a_old, a_new): (u8, u8),
+    (c_bd, a_bd): (&[u8], u8),
+) -> Option<[u8; 8]> {
+    if a_new == 0 {
+        return None;
+    }
+    let mut union = [0u8; 8];
+    let ncomps = old.len();
+    let a_union_old = general::union_colour(
+        old,
+        u32::from(a_old),
+        c_bd,
+        u32::from(a_bd),
+        &mut union[..ncomps],
+    );
+    if a_union_old == 0 {
+        return None;
+    }
+    let a_new = u32::from(a_new);
+    let a_union_new = general::compute_a_result(a_new, u32::from(a_bd));
+    let den = 255 * a_new;
+    let mut out = [0u8; 8];
+    for ((o, &u), &c) in out.iter_mut().zip(&union[..ncomps]).zip(c_bd) {
+        let num = i64::from(255 * a_union_new * u32::from(u))
+            - i64::from((255 - a_new) * u32::from(a_bd) * u32::from(c));
+        let c = (num + i64::from(den / 2)).div_euclid(i64::from(den));
+        *o = u8::try_from(c.clamp(0, 255)).unwrap_or(u8::MAX);
+    }
+    Some(out)
 }
 
 /// Composite a validated span, writing every colour channel.
@@ -1023,6 +1053,49 @@ mod tests {
         let a = u32::from(alpha);
         let composited = (a * u32::from(dst[0]) + (255 - a) * 200) / 255;
         assert!(composited.abs_diff(149) <= 1, "composited C = {composited}");
+    }
+
+    #[test]
+    fn overprint_over_a_translucent_backdrop_preserves_the_composited_colour() {
+        let bd_colour = [200u8, 0, 0, 0, 0, 0, 0, 0];
+        let bd_alpha = [128u8];
+        let backdrop = GroupBackdrop {
+            colour: &bd_colour,
+            alpha: Some(&bd_alpha),
+            x0: 0,
+            y0: 0,
+            width: 1,
+            height: 1,
+        };
+        let pipe = PipeState {
+            backdrop: Some(backdrop),
+            overprint: Some(ChannelMask::new(0b1000)),
+            ..make_pipe(128, BlendMode::Normal)
+        };
+        let mut dst = [100u8, 0, 0, 0, 0, 0, 0, 0];
+        let mut alpha = [128u8];
+        let mut before = [0u8; 8];
+        let _ = general::union_colour(&dst, 128, &bd_colour, 128, &mut before);
+        render_span::<DeviceN8>(
+            &pipe,
+            &PipeSrc::Solid(&INK_K),
+            &mut dst,
+            Some(&mut alpha),
+            None,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(before[0], 133);
+        assert!(alpha[0].abs_diff(192) <= 1, "alpha = {}", alpha[0]);
+        let mut after = [0u8; 8];
+        let _ = general::union_colour(&dst, u32::from(alpha[0]), &bd_colour, 128, &mut after);
+        assert!(
+            after[0].abs_diff(before[0]) <= 1,
+            "{} vs {}",
+            after[0],
+            before[0]
+        );
     }
 
     #[test]
