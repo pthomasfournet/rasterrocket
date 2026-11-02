@@ -2,6 +2,7 @@ use super::{
     CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
     convert_scalar, unit_weight, weight,
 };
+use super::{SpotLut, ink_to_rgb_row, rgb_to_cmyk};
 
 /// Corner index `k·8 + c·4 + m·2 + y` → ink bytes `[c, m, y, k]`.
 fn corner_inks(i: usize) -> [u8; 4] {
@@ -356,4 +357,83 @@ fn neon_block_matches_scalar() {
         }
     }
     assert_eq!(got, want);
+}
+
+#[test]
+fn rgb_to_cmyk_white_is_no_ink() {
+    assert_eq!(rgb_to_cmyk([255, 255, 255]), [0, 0, 0, 0]);
+}
+
+#[test]
+fn rgb_to_cmyk_round_trips_in_gamut() {
+    let mut worst = 0;
+    for c in (0..=255u8).step_by(32) {
+        for m in (0..=255u8).step_by(32) {
+            for y in (0..=255u8).step_by(32) {
+                let rgb = cmyk_to_rgb(c, m, y, 0);
+                let back = rgb_to_cmyk(rgb);
+                let again = cmyk_to_rgb(back[0], back[1], back[2], back[3]);
+                for i in 0..3 {
+                    let d = rgb[i].abs_diff(again[i]);
+                    worst = worst.max(d);
+                    assert!(d <= 2, "{rgb:?} -> {back:?} -> {again:?}");
+                }
+            }
+        }
+    }
+    eprintln!("worst round-trip error: {worst}");
+}
+
+#[test]
+fn rgb_to_cmyk_out_of_gamut_is_clamped() {
+    let k = rgb_to_cmyk([255, 0, 0]);
+    assert_eq!(k[3], 0);
+    assert!(k[1] > 200 && k[2] > 200 && k[0] < 40, "{k:?}");
+}
+
+#[test]
+fn ink_to_rgb_row_without_spots_matches_cmyk_to_rgb() {
+    let ink = [10, 200, 30, 40, 0, 0, 0, 0];
+    let mut out = [0; 3];
+    ink_to_rgb_row(&ink, &[None; 4], &mut out);
+    assert_eq!(out, cmyk_to_rgb(10, 200, 30, 40));
+}
+
+#[test]
+fn ink_to_rgb_row_adds_spot_process_equivalent() {
+    let mut lut: SpotLut = [[0; 4]; 256];
+    lut[255] = [0, 255, 0, 0];
+    let ink = [255, 0, 0, 0, 255, 0, 0, 0];
+    let mut out = [0; 3];
+    ink_to_rgb_row(&ink, &[Some(&lut), None, None, None], &mut out);
+    assert_eq!(out, cmyk_to_rgb(255, 255, 0, 0));
+}
+
+#[test]
+fn ink_to_rgb_row_spans_multiple_chunks() {
+    let n = 600;
+    let ink: Vec<u8> = bytes(n * 8, 7);
+    let mut lut: SpotLut = [[0; 4]; 256];
+    for (t, e) in (0..=255u8).zip(lut.iter_mut()) {
+        *e = [t, 0, 255 - t, t / 2];
+    }
+    let spots = [Some(&lut), None, Some(&lut), None];
+    let mut out = vec![0u8; n * 3];
+    ink_to_rgb_row(&ink, &spots, &mut out);
+    for (px, got) in ink.as_chunks::<8>().0.iter().zip(out.as_chunks::<3>().0) {
+        let mut q = [px[0], px[1], px[2], px[3]];
+        for s in [4, 6] {
+            for (c, &l) in q.iter_mut().zip(&lut[usize::from(px[s])]) {
+                let (a, b) = (u16::from(*c), u16::from(l));
+                *c = u8::try_from(a + b - (a * b + 127) / 255).unwrap();
+            }
+        }
+        assert_eq!(*got, cmyk_to_rgb(q[0], q[1], q[2], q[3]));
+    }
+}
+
+#[test]
+#[should_panic(expected = "multiple of 8")]
+fn ink_to_rgb_row_rejects_ragged_input() {
+    ink_to_rgb_row(&[0; 9], &[None; 4], &mut [0; 3]);
 }
