@@ -479,10 +479,11 @@ fn rgb_to_ink_white_is_no_ink() {
 }
 
 /// Every colour the four-ink model prints comes back within tolerance:
-/// the inks of a 18⁴ grid, converted forward and inverted.
+/// the 18⁴ = 104 976 inks of a step-15 grid, converted forward and
+/// inverted.
 #[test]
 fn rgb_to_ink_round_trips_every_reachable_colour() {
-    let axis = || (0..=255u8).step_by(15).chain([255]);
+    let axis = || (0..=255u8).step_by(15);
     for c in axis() {
         for m in axis() {
             for y in axis() {
@@ -508,6 +509,11 @@ fn rgb_to_ink_round_trips_every_reachable_colour() {
 /// A colour the model cannot print comes back as the nearest one it can,
 /// within the rounding of a byte-grid search; every colour of a 16³ grid
 /// of the sRGB cube is either reproduced or nearest.
+///
+/// The allowance covers the interpolant's distance from a node solution:
+/// `[0, 0, 34]` comes back 9.5 from itself against 7.3 for the byte-grid
+/// nearest, its table nodes lying on a thin band of the dark slices,
+/// so an allowance of 2.0 fails it.
 #[test]
 fn rgb_to_ink_is_nearest_where_the_colour_is_unreachable() {
     const ALLOWANCE: f64 = 2.5;
@@ -524,7 +530,7 @@ fn rgb_to_ink_is_nearest_where_the_colour_is_unreachable() {
                 let got = dist(rgb_to_ink(rgb), rgb);
                 let best = nearest_distance(rgb);
                 assert!(
-                    got <= best + ALLOWANCE + f64::from(tolerance(rgb) - 2),
+                    got <= best + ALLOWANCE,
                     "{rgb:?}: {:?} at {got:.1}, nearest {best:.1}",
                     rgb_to_ink(rgb)
                 );

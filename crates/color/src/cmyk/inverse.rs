@@ -233,9 +233,13 @@ fn invert_node(target: [f64; 3]) -> [f64; 4] {
         let at = solve_at(target, k, start);
         start = at.0;
         if at.2 <= EXACT {
-            // The band's upper edge lies in `[k, above]`.
+            // The band's upper edge lies in `[k, above]`; at the top of
+            // the ladder the interval is empty.
             let (mut lo, mut hi) = (at, above);
             for _ in 0..BISECTIONS {
+                if hi <= lo.1 {
+                    break;
+                }
                 let mid = f64::midpoint(lo.1, hi);
                 let at_mid = solve_at(target, mid, lo.0);
                 if at_mid.2 <= EXACT {
@@ -382,8 +386,9 @@ static INVERSE: LazyLock<Inverse> = LazyLock::new(|| {
 
 /// Convert sRGB to CMYK ink bytes.
 ///
-/// Of the inks printing a colour, the ones with the most black
-/// (grey-component replacement): a neutral at or above [`BLACK_FLOOR`] is
+/// Of the inks printing a colour, ones with the most black
+/// (grey-component replacement), except where relaxation kept a node on
+/// the band of its neighbours: a neutral at or above [`BLACK_FLOOR`] is
 /// black ink alone; a darker neutral is solid black with C, M and Y on
 /// top; a solid process colour has no black.  The result maps back
 /// through [`cmyk_to_rgb`] to within two counts per channel for every
