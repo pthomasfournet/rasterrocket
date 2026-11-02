@@ -392,7 +392,7 @@ crates.io (see the note at the top).
 
 ## Hardware compatibility
 
-**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. Linux and macOS are tested in CI; see the platform guides above.
+**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux, and clippy with the platform-specific tests on arm64 Linux and macOS; see the platform guides above.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG and the AA fill, which are wired but dormant by default because the CPU paths beat them.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.

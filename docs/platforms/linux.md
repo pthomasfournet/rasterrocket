@@ -3,9 +3,9 @@
 Linux is the primary platform: every feature, including every GPU backend,
 is developed and tested on it.
 
-- **CI:** each push runs the full test suite on x86-64 (`ubuntu-latest`).
-  The NEON code paths are tested on arm64 (`ubuntu-24.04-arm`), and clippy
-  runs on both.
+- **CI:** each push runs the test suite on x86-64 (`ubuntu-latest`),
+  except the GPU tests, which need a device. On arm64 (`ubuntu-24.04-arm`)
+  it runs clippy and the tests of the NEON code paths.
 - **CPU:** x86-64 uses AVX2, or AVX-512 when built with
   `-C target-cpu=native` on a CPU that has it, with a scalar fallback.
   aarch64 uses NEON, plus SVE2 behind the nightly-only `nightly-sve2`
@@ -49,10 +49,12 @@ rrocket searches:
 - any directory named by `RROCKET_FONT_DIR`
 
 The standard PDF fonts are drawn with the metric-compatible Liberation
-faces (`fonts-liberation`) when installed, or with Arial, Times New Roman
-and Courier New, and otherwise from faces built into the binary. CJK text
-needs an installed CJK font such as Noto Sans CJK (`fonts-noto-cjk`), since
-no CJK faces are built into the binary.
+faces when they are installed (`fonts-liberation` on Debian and Ubuntu,
+`liberation-fonts` on Fedora, `ttf-liberation` on Arch), in whichever
+subdirectory of `/usr/share/fonts` or `/usr/local/share/fonts` the
+distribution puts them, and otherwise with faces built into the binary.
+CJK text needs an installed CJK font such as Noto Sans CJK
+(`fonts-noto-cjk`), since no CJK faces are built into the binary.
 
 ## Writing output to RAM
 

@@ -20,7 +20,7 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
 - SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
-- Tested in CI on arm64 Linux and on macOS (Apple silicon); no Apple Metal GPU backend.
+- CI runs clippy and the NEON tests on arm64 Linux, and clippy and the macOS-specific tests on macOS (Apple silicon); no Apple Metal GPU backend.
 
 ### GPU (optional)
 
@@ -61,9 +61,9 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 
 | Operating system | CPU | GPU | Status | Guide |
 |---|---|---|---|---|
-| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**, tested in CI | [Linux](platforms/linux.md) |
-| Linux aarch64 | NEON (+ SVE2 on nightly) | Vulkan (untested) | **Supported**, tested in CI | [Linux](platforms/linux.md) |
-| macOS on Apple silicon | NEON | none (Metal not implemented) | **Supported**, tested in CI | [macOS](platforms/macos.md) |
+| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; CI runs the test suite | [Linux](platforms/linux.md) |
+| Linux aarch64 | NEON (+ SVE2 on nightly) | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests | [Linux](platforms/linux.md) |
+| macOS on Apple silicon | NEON | none (Metal not implemented) | **Supported**; CI runs clippy and the macOS-specific tests | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
 | FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
 | Windows | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |

@@ -23,7 +23,9 @@ It is not published and changes are not sent upstream.
   Rust 1.88) instead of `chunks_exact` with a constant size, as clippy
   requires once the minimum toolchain allows it: the checksum in
   `tables.rs`, inline instruction operands, and the `I16` / `I32` delta
-  runs in `tables/variations.rs`. Behaviour is unchanged.
+  runs in `tables/variations.rs`; in tests, the `kerx` anchor and
+  coordinate readers. `int_set`'s test domain uses `is_multiple_of`.
+  Behaviour is unchanged.
 
 - The licence files replace upstream's symlinks to the repository root.
 

@@ -1,8 +1,9 @@
 # rasterrocket on the BSDs and Windows
 
 These platforms are not tested, and no CI job covers them. The code has no
-Linux-only dependency in its render path: it is Rust, plus a C compression
-library built by `cargo`. It is expected to build anywhere Rust and a C
+Linux-only dependency in its render path: it is Rust, plus two C libraries
+that `cargo` builds, libdeflate for compression and mimalloc, the
+command-line tool's allocator. It is expected to build anywhere Rust and a C
 compiler are available, but expected is not tested. Please report what you
 find.
 

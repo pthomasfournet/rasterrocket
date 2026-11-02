@@ -20,6 +20,12 @@ It is not published and changes are not sent upstream.
 
 - The licence files replace upstream's symlinks to the repository root.
 
+- The UTF-16 name reader in `outline/hint_reliant.rs` reads its code
+  units with `slice::as_chunks` instead of `chunks_exact(2)`, and the
+  alignment tests in `outline/glyf/memory.rs` use `is_multiple_of`, as
+  clippy requires under the 1.99 minimum toolchain. Behaviour is
+  unchanged.
+
 ## Font programs embedded in PDF
 
 - `outline::metrics::GlyphHMetrics`: a font without a readable `hmtx` or
