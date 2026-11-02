@@ -207,6 +207,23 @@ pub fn rgb_to_cmyk(rgb: [u8; 3]) -> [u8; 4] {
     [c, m, y, 0]
 }
 
+/// The process ink of sRGB `rgb`: black ink alone for a neutral, the
+/// nearest in-gamut CMY ([`rgb_to_cmyk`]) for any other colour.
+///
+/// A neutral (`r = g = b`) is the grey `g` of `DeviceGray` and converts as
+/// `DeviceGray` does to `DeviceCMYK`, `K = 1 − g` with no C, M or Y
+/// (ISO 32000-2 §10.4.2.3).  Black therefore prints as K alone, not as a
+/// mixture of C, M and Y.
+#[must_use]
+pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
+    let [r, g, b] = rgb;
+    if r == g && g == b {
+        [0, 0, 0, u8::MAX - r]
+    } else {
+        rgb_to_cmyk(rgb)
+    }
+}
+
 /// Convert an ink canvas row to sRGB.
 ///
 /// `ink` holds 8 bytes per pixel `[C, M, Y, K, S0, S1, S2, S3]` (0 = no

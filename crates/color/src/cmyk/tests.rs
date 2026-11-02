@@ -2,7 +2,7 @@ use super::{
     CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
     convert_scalar, unit_weight, weight,
 };
-use super::{SpotLut, ink_to_rgb_row, rgb_to_cmyk};
+use super::{SpotLut, ink_to_rgb_row, rgb_to_cmyk, rgb_to_ink};
 
 /// Corner index `k·8 + c·4 + m·2 + y` → ink bytes `[c, m, y, k]`.
 fn corner_inks(i: usize) -> [u8; 4] {
@@ -378,6 +378,16 @@ fn rgb_to_cmyk_round_trips_in_gamut() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn rgb_to_ink_prints_neutrals_in_black_alone() {
+    assert_eq!(rgb_to_ink([0, 0, 0]), [0, 0, 0, 255]);
+    assert_eq!(rgb_to_ink([51, 51, 51]), [0, 0, 0, 204]);
+    assert_eq!(rgb_to_ink([255, 255, 255]), [0, 0, 0, 0]);
+    for rgb in [[0, 0, 1], [200, 150, 100], [255, 0, 0]] {
+        assert_eq!(rgb_to_ink(rgb), rgb_to_cmyk(rgb), "{rgb:?}");
     }
 }
 
