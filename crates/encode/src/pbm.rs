@@ -2,19 +2,20 @@
 //!
 //! PBM stores 1-bit monochrome pixels, MSB first, rows padded to whole bytes.
 //! Only `Gray8` / `Mono8` bitmaps are accepted.  Their values are luma, as
-//! for every other encoder of this crate: a pixel darker than half (below
-//! 128) is black (a 1 bit, per the P4 spec), any other white.
+//! for every other encoder of this crate: a pixel below
+//! [`crate::BLACK_BELOW`] is black (a 1 bit, per the P4 spec), any other
+//! white.
 
 use std::io::{self, Write};
 
 use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
-use crate::EncodeError;
+use crate::{EncodeError, pack_bilevel_row};
 
 /// Write `bitmap` to `out` as a binary PBM (`P4`) image.
 ///
-/// Input pixels are `Gray8` luma: 0–127 → black (1 bit), 128–255 → white
+/// Input pixels are `Gray8` luma: below [`crate::BLACK_BELOW`] → black (1 bit), others → white
 /// (0 bit).  Rows are MSB-packed and padded to whole bytes, matching the P4 spec.
 ///
 /// # Errors
@@ -46,13 +47,7 @@ pub fn write_pbm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
         let row = bitmap.row_bytes(y);
         let pixels = &row[..w]; // live pixels only (exclude stride padding)
 
-        packed.fill(0);
-        for (i, &px) in pixels.iter().enumerate() {
-            if px < 128 {
-                // MSB first: pixel 0 → bit 7, pixel 7 → bit 0.
-                packed[i / 8] |= 0x80 >> (i % 8);
-            }
-        }
+        pack_bilevel_row(pixels, &mut packed);
         out.write_all(&packed)?;
     }
 

@@ -11,14 +11,18 @@ unless the entry says otherwise.
 
 - `encode.rs` (new): `Encoder` codes rows given as colour-change positions,
   the form `Decoder::push_row` receives, as Group 3 one-dimensional (MH),
-  Group 3 two-dimensional (MR, period `k`) with an EOL before every row
-  (optionally byte-aligned), or Group 4 (MMR) ended by EOFB.
-  `changes_of_row` derives the changes from packed pixels, skipping whole
-  bytes of one colour, and `Encoder::encode_packed_row` codes a packed row
-  through a reused change buffer.  Two-dimensional coding finds b1 with a
-  cursor that only advances, linear in the row's changes.  The run-length
-  tables in `tables.rs` are shared with the decoder and became
-  `pub(crate)`; the decoder is unchanged.
+  Group 3 two-dimensional (MR, period `k: NonZeroU32`) with an EOL before
+  every row (optionally byte-aligned), or Group 4 (MMR) ended by EOFB.  No
+  RTC is written.  The width is a `NonZeroU32`, so construction cannot
+  fail.  `changes_of_row` derives the changes from packed pixels, skipping
+  whole bytes of one colour, and `Encoder::encode_packed_row` codes a
+  packed row through a reused change buffer.  Two-dimensional coding finds
+  b1 with a cursor that only advances, linear in the row's changes.  Run
+  codes are indexed by run in the shared tables, whose layout a constant
+  assertion checks.  The run-length tables in `tables.rs` are shared with
+  the decoder and became `pub(crate)`; the decoder is unchanged.  Tests
+  compare the output with bit strings written from the T.4 and T.6 code
+  tables, independent of `tables.rs`.
 
 ## Vendoring
 

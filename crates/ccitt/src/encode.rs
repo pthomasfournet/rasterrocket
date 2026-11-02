@@ -6,8 +6,14 @@
 //! [`crate::Decoder::push_row`] receives them in; [`changes_of_row`]
 //! derives them from packed pixels.  Bits are written most significant
 //! first (`FillOrder` 1).
+//!
+//! The output is the coded rows alone: Group 3 output carries no
+//! return-to-control sequence (six EOLs), which a container that records
+//! the row count, such as TIFF, does not use; a standalone T.4 stream
+//! appends it.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use crate::tables::{
     BLACK_MAKEUP, BLACK_TERMINATING, COMMON_MAKEUP, WHITE_MAKEUP, WHITE_TERMINATING,
@@ -27,7 +33,7 @@ pub enum EncodeScheme {
     /// Without `k`, every row is coded one-dimensionally (MH).
     Group3 {
         /// The period of one-dimensional rows in two-dimensional coding.
-        k: Option<u32>,
+        k: Option<NonZeroU32>,
         /// Whether each EOL is padded to end on a byte boundary.
         byte_aligned_eol: bool,
     },
@@ -40,6 +46,40 @@ pub enum EncodeScheme {
 /// The end-of-line code, eleven zeros and a one.
 const EOL: (u32, u8) = (1, 12);
 
+/// The vertical-mode codes `(code, length)` of `a1 − b1` from −3 to 3
+/// (T.4 Table 4): VL3, VL2, VL1, V0, VR1, VR2, VR3.
+const VERTICAL: [(u32, u8); 7] = [
+    (0b000_0010, 7),
+    (0b00_0010, 6),
+    (0b010, 3),
+    (0b1, 1),
+    (0b011, 3),
+    (0b00_0011, 6),
+    (0b000_0011, 7),
+];
+
+/// The run of the make-up codes of the colour tables, 64 to 1728 in steps
+/// of 64, and of the common make-up codes, 1792 to 2560: the encoder
+/// indexes them by run.
+const _: () = {
+    let mut i = 0;
+    while i < 64 {
+        assert!(WHITE_TERMINATING[i].0 as usize == i && BLACK_TERMINATING[i].0 as usize == i);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 27 {
+        assert!(WHITE_MAKEUP[i].0 as usize == 64 * (i + 1));
+        assert!(BLACK_MAKEUP[i].0 as usize == 64 * (i + 1));
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 13 {
+        assert!(COMMON_MAKEUP[i].0 as usize == 64 * (i + 28));
+        i += 1;
+    }
+};
+
 /// A CCITT encoder for an image `width` pixels wide.
 #[derive(Debug)]
 pub struct Encoder {
@@ -47,7 +87,9 @@ pub struct Encoder {
     scheme: EncodeScheme,
     /// The changes of the previous row; empty for the all-white row.
     reference: Vec<u32>,
-    rows: u32,
+    /// The index of the next row within the period `k` of Group 3
+    /// two-dimensional coding: 0 for a one-dimensional row.
+    phase: u32,
     /// The changes of the row being coded by [`Self::encode_packed_row`].
     scratch: Vec<u32>,
     out: BitWriter,
@@ -55,22 +97,13 @@ pub struct Encoder {
 
 impl Encoder {
     /// An encoder for rows of `width` pixels coded by `scheme`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `width` is 0, or `k` is `Some(0)`.
     #[must_use]
-    pub fn new(width: u32, scheme: EncodeScheme) -> Self {
-        assert!(width > 0, "a CCITT image has at least one column");
-        assert!(
-            !matches!(scheme, EncodeScheme::Group3 { k: Some(0), .. }),
-            "the period k of two-dimensional coding is at least 1"
-        );
+    pub fn new(width: NonZeroU32, scheme: EncodeScheme) -> Self {
         Self {
-            width,
+            width: width.get(),
             scheme,
             reference: Vec::new(),
-            rows: 0,
+            phase: 0,
             scratch: Vec::new(),
             out: BitWriter::default(),
         }
@@ -97,20 +130,21 @@ impl Encoder {
             } => {
                 if byte_aligned_eol {
                     // Fill bits so that the EOL's last bit ends a byte.
-                    let used = (self.out.len + u32::from(EOL.1)) % 8;
-                    self.out.push(0, ((8 - used) % 8) as u8);
+                    let used = (self.out.pending + EOL.1) % 8;
+                    self.out.push(0, (8 - used) % 8);
                 }
                 self.out.push(EOL.0, EOL.1);
                 match k {
                     None => self.code_one_d(changes),
                     Some(k) => {
-                        let one_d = self.rows.is_multiple_of(k);
+                        let one_d = self.phase == 0;
                         self.out.push(u32::from(one_d), 1);
                         if one_d {
                             self.code_one_d(changes);
                         } else {
                             self.code_two_d(changes);
                         }
+                        self.phase = (self.phase + 1) % k.get();
                     }
                 }
             }
@@ -118,7 +152,6 @@ impl Encoder {
         }
         self.reference.clear();
         self.reference.extend_from_slice(changes);
-        self.rows = self.rows.saturating_add(1);
     }
 
     /// Code the next row, packed one bit per pixel, most significant first,
@@ -193,16 +226,9 @@ impl Encoder {
             if b2 < a1 {
                 self.out.push(0b0001, 4);
                 a0 = b2;
-            } else if (a1 - b1).abs() <= 3 {
-                let (code, len) = match a1 - b1 {
-                    0 => (0b1, 1),
-                    1 => (0b011, 3),
-                    2 => (0b00_0011, 6),
-                    3 => (0b000_0011, 7),
-                    -1 => (0b010, 3),
-                    -2 => (0b00_0010, 6),
-                    _ => (0b000_0010, 7),
-                };
+            } else if let Ok(offset) = usize::try_from(a1 - b1 + 3)
+                && let Some(&(code, len)) = VERTICAL.get(offset)
+            {
                 self.out.push(code, len);
                 a0 = a1;
                 black = !black;
@@ -269,9 +295,9 @@ struct BitWriter {
     bytes: Vec<u8>,
     /// Pending bits, right-aligned.
     acc: u32,
+    /// The number of pending bits, below 8 between calls: the bits written
+    /// so far modulo 8.
     pending: u8,
-    /// Bits written so far.
-    len: u32,
 }
 
 impl BitWriter {
@@ -283,7 +309,6 @@ impl BitWriter {
         }
         self.acc = (self.acc << n) | (code & ((1 << n) - 1));
         self.pending += n;
-        self.len = self.len.wrapping_add(u32::from(n));
         while self.pending >= 8 {
             self.pending -= 8;
             self.bytes.push((self.acc >> self.pending) as u8);
@@ -293,7 +318,8 @@ impl BitWriter {
 
     /// Append the code of a run of `len` pixels of one colour: make-up
     /// codes for its multiples of 64 (at most 2560 each), then the
-    /// terminating code of the rest.
+    /// terminating code of the rest.  The tables are indexed by run (see
+    /// the assertion on their layout above).
     fn run(&mut self, mut len: u32, black: bool) {
         let (terminating, makeup) = if black {
             (&BLACK_TERMINATING, &BLACK_MAKEUP)
@@ -301,19 +327,15 @@ impl BitWriter {
             (&WHITE_TERMINATING, &WHITE_MAKEUP)
         };
         while len >= 64 {
-            let chunk = (len.min(2560) / 64 * 64) as u16;
-            let &(_, n, code) = makeup
-                .iter()
-                .chain(COMMON_MAKEUP.iter())
-                .find(|&&(run, ..)| run == chunk)
-                .expect("every multiple of 64 up to 2560 has a make-up code");
+            let sixty_fours = len.min(2560) / 64;
+            let (_, n, code) = match sixty_fours {
+                1..=27 => makeup[sixty_fours as usize - 1],
+                _ => COMMON_MAKEUP[sixty_fours as usize - 28],
+            };
             self.push(u32::from(code), n);
-            len -= u32::from(chunk);
+            len -= sixty_fours * 64;
         }
-        let &(_, n, code) = terminating
-            .iter()
-            .find(|&&(run, ..)| u32::from(run) == len)
-            .expect("every run below 64 has a terminating code");
+        let (_, n, code) = terminating[len as usize];
         self.push(u32::from(code), n);
     }
 
@@ -330,6 +352,7 @@ impl BitWriter {
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
+    use core::num::NonZeroU32;
 
     use super::{EncodeScheme, Encoder, changes_of_row};
     use crate::{DecodeSettings, Decoder, DecoderContext, EncodingMode, decode};
@@ -340,6 +363,14 @@ mod tests {
         fn push_row(&mut self, changes: &[u32]) {
             self.0.push(changes.to_vec());
         }
+    }
+
+    const K2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    const K4: NonZeroU32 = NonZeroU32::new(4).unwrap();
+
+    /// `n` columns.
+    fn width(n: u32) -> NonZeroU32 {
+        NonZeroU32::new(n).expect("a test image has columns")
     }
 
     const SCHEMES: [EncodeScheme; 5] = [
@@ -353,18 +384,18 @@ mod tests {
             byte_aligned_eol: true,
         },
         EncodeScheme::Group3 {
-            k: Some(2),
+            k: Some(K2),
             byte_aligned_eol: false,
         },
         EncodeScheme::Group3 {
-            k: Some(4),
+            k: Some(K4),
             byte_aligned_eol: true,
         },
     ];
 
     /// `rows` coded by `scheme` and decoded again.
     fn round_trip(width: u32, rows: &[Vec<u32>], scheme: EncodeScheme) -> Vec<Vec<u32>> {
-        let mut encoder = Encoder::new(width, scheme);
+        let mut encoder = Encoder::new(self::width(width), scheme);
         for row in rows {
             encoder.encode_row(row);
         }
@@ -458,7 +489,7 @@ mod tests {
     #[test]
     fn eols_end_on_byte_boundaries_when_aligned() {
         let mut encoder = Encoder::new(
-            100,
+            width(100),
             EncodeScheme::Group3 {
                 k: None,
                 byte_aligned_eol: true,
@@ -499,13 +530,68 @@ mod tests {
             })
             .collect();
         for scheme in SCHEMES {
-            let mut by_changes = Encoder::new(width, scheme);
-            let mut packed = Encoder::new(width, scheme);
+            let mut by_changes = Encoder::new(self::width(width), scheme);
+            let mut packed = Encoder::new(self::width(width), scheme);
             for row in &rows {
                 by_changes.encode_row(&changes_of_row(row, width));
                 packed.encode_packed_row(row);
             }
             assert_eq!(packed.finish(), by_changes.finish(), "{scheme:?}");
         }
+    }
+
+    /// `rows` of `columns` pixels coded by `scheme`.
+    fn coded(columns: u32, rows: &[&[u32]], scheme: EncodeScheme) -> Vec<u8> {
+        let mut encoder = Encoder::new(width(columns), scheme);
+        for row in rows {
+            encoder.encode_row(row);
+        }
+        encoder.finish()
+    }
+
+    /// Bit strings written out from the code tables of T.4 (Tables 1–4)
+    /// and T.6, independent of `tables.rs`, which encoder and decoder share.
+    #[test]
+    fn output_matches_the_recommendations_code_tables() {
+        let mh = EncodeScheme::Group3 {
+            k: None,
+            byte_aligned_eol: false,
+        };
+        // EOL 000000000001, white 3 = 1000, black 2 = 11, white 15 = 110101.
+        assert_eq!(coded(20, &[&[3, 5]], mh), [0x00, 0x18, 0xF5]);
+        // EOL, white make-up 1728 = 010011011, white 0 = 00110101.
+        assert_eq!(coded(1728, &[&[]], mh), [0x00, 0x14, 0xD9, 0xA8]);
+        // MR, k = 2: EOL, tag 1, the row one-dimensionally; EOL, tag 0, the
+        // same row as three V0 = 1.
+        let mr = EncodeScheme::Group3 {
+            k: Some(K2),
+            byte_aligned_eol: false,
+        };
+        assert_eq!(
+            coded(20, &[&[3, 5], &[3, 5]], mr),
+            [0x00, 0x1C, 0x7A, 0x80, 0x0B, 0x80]
+        );
+        // MMR against the white row: horizontal 001, white 3, black 2; V0;
+        // EOFB, two EOLs.
+        assert_eq!(
+            coded(20, &[&[3, 5]], EncodeScheme::Group4),
+            [0x31, 0xC0, 0x04, 0x00, 0x40]
+        );
+    }
+
+    #[test]
+    fn the_one_dimensional_period_restarts_every_k_rows() {
+        let mr = EncodeScheme::Group3 {
+            k: Some(K2),
+            byte_aligned_eol: true,
+        };
+        // Blank rows of 8: each EOL padded to end a byte, then tag 1 and
+        // white 8 = 10011 on rows 0 and 2, tag 0 and V0 = 1 on rows 1 and 3.
+        assert_eq!(
+            coded(8, &[&[], &[], &[], &[]], mr),
+            [
+                0x00, 0x01, 0xCC, 0x00, 0x01, 0x40, 0x01, 0xCC, 0x00, 0x01, 0x40
+            ]
+        );
     }
 }

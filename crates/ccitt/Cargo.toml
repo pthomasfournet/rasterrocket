@@ -6,7 +6,7 @@
 [package]
 name = "hayro-ccitt"
 version = "0.4.0"
-description = "A decoder for group 3 and group 4 CCITT images (local fork)."
+description = "A decoder and encoder for group 3 and group 4 CCITT images (local fork)."
 authors = ["Laurenz Stampfl <laurenz.stampfl@gmail.com>"]
 edition = "2024"
 rust-version.workspace = true

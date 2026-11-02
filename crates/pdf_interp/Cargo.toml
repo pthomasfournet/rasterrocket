@@ -45,7 +45,7 @@ log    = { workspace = true }
 hayro-ccitt = { path = "../ccitt" }
 # Pure-Rust JPEG 2000: a local fork of hayro-jpeg2000 (crates/jpeg2000).
 hayro-jpeg2000 = { path = "../jpeg2000", default-features = false, features = ["simd"] }
-zune-jpeg = "0.5.15"
+zune-jpeg = { workspace = true }
 zune-core = "0.5.1"
 # JBIG2: a local fork of hayro-jbig2 (crates/jbig2).
 hayro-jbig2 = { path = "../jbig2", default-features = false, features = ["std"] }

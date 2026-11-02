@@ -50,6 +50,11 @@ sevenz-rust2 = { version = "0.24", default-features = false }
 tar          = { version = "0.4" }
 image-webp   = { version = "0.2" }
 tiff         = { version = "0.11" }
+# Zlib and LZW streams: decoded by the parser, encoded by the TIFF writer.
+flate2       = { version = "1", features = ["zlib-rs"] }
+weezl        = { version = "0.2" }
+# JPEG decoding: images in documents and archives, and encoder tests.
+zune-jpeg    = { version = "0.5.15" }
 
 # The local read-fonts and skrifa forks replace the registry crates for every
 # dependent, including the bench crate's vello_common.

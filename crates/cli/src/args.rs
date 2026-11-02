@@ -1,5 +1,7 @@
 //! Command-line argument definitions.
 
+use std::num::NonZeroU32;
+
 use camera::CameraOptions;
 use clap::Parser;
 use pdf_raster::{BackendPolicy, RenderPurpose, RenderRegion, SessionConfig};
@@ -748,6 +750,11 @@ impl Args {
     }
 }
 
+/// The ITU-T T.4 period of two-dimensional Group 3 coding at fine
+/// resolution (at least 150 lines per inch) and at standard resolution.
+const K_FINE: NonZeroU32 = NonZeroU32::new(4).expect("4 is not zero");
+const K_STANDARD: NonZeroU32 = NonZeroU32::new(2).expect("2 is not zero");
+
 /// `--tiffcompression` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum TiffMethod {
@@ -782,8 +789,8 @@ impl TiffMethod {
     }
 
     /// The writer's compression at `y_dpi` vertical resolution.  Group 3
-    /// two-dimensional coding takes the ITU-T T.4 period: 4 at fine
-    /// resolution (at least 150 lines per inch), 2 at standard.
+    /// two-dimensional coding takes the period [`K_FINE`] or
+    /// [`K_STANDARD`].
     fn compression(self, y_dpi: f64) -> encode::TiffCompression {
         match self {
             Self::None | Self::Jpeg => encode::TiffCompression::None,
@@ -792,7 +799,7 @@ impl TiffMethod {
             Self::Deflate => encode::TiffCompression::Deflate,
             Self::G3 => encode::TiffCompression::Group3 { k: None },
             Self::G3TwoD => encode::TiffCompression::Group3 {
-                k: Some(if y_dpi >= 150.0 { 4 } else { 2 }),
+                k: Some(if y_dpi >= 150.0 { K_FINE } else { K_STANDARD }),
             },
             Self::G4 => encode::TiffCompression::Group4,
         }
@@ -1291,7 +1298,7 @@ mod page_list_tests {
             assert!(fax.validate_format_flags().is_ok());
             assert_eq!(
                 fax.output_format(),
-                OutputFormat::Tiff(encode::TiffCompression::Group3 { k: Some(k) })
+                OutputFormat::Tiff(encode::TiffCompression::Group3 { k: NonZeroU32::new(k) })
             );
         }
         for (flags, needle) in [

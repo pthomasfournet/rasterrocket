@@ -5,17 +5,19 @@
 //!
 //! The file is little-endian.  Each page's strips are followed by its image
 //! file directory (IFD), whose values that do not fit in an entry follow
-//! the directory.  Pages are encoded when they are added and the file is
-//! laid out when it is written, so every page carries its page number and
-//! the page count (`PageNumber`).
+//! the directory.  Pages are encoded when they are added; the file is laid
+//! out when it is written, every offset computed and the size checked
+//! against the 4 GiB a TIFF addresses before the first byte goes out, then
+//! streamed to the sink.
 
 use std::io::Write;
+use std::num::NonZeroU32;
 
 use color::{Gray8, Rgb8};
 use hayro_ccitt::{EncodeScheme, Encoder};
 use raster::Bitmap;
 
-use crate::EncodeError;
+use crate::{EncodeError, pack_bilevel_row};
 
 /// The compression of a TIFF's strips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,7 +28,7 @@ pub enum TiffCompression {
     PackBits,
     /// LZW with the TIFF code-size switch (5).
     Lzw,
-    /// zlib-wrapped Deflate, Adobe's code (8).
+    /// zlib-wrapped Deflate, the code TIFF assigns it (8).
     Deflate,
     /// CCITT Group 3 fax coding (3), bilevel pages only: every row after an
     /// end-of-line code padded to end on a byte boundary, coded
@@ -34,7 +36,7 @@ pub enum TiffCompression {
     /// ITU-T T.4 sets `k` to 2 at standard and 4 at fine resolution.
     Group3 {
         /// The period of one-dimensional rows in two-dimensional coding.
-        k: Option<u32>,
+        k: Option<NonZeroU32>,
     },
     /// CCITT Group 4 fax coding (4), bilevel pages only.
     Group4,
@@ -76,8 +78,9 @@ pub enum TiffImage<'a> {
     Rgb(&'a Bitmap<Rgb8>),
     /// 8-bit gray, 0 black.
     Gray(&'a Bitmap<Gray8>),
-    /// One bit per pixel from gray luma: below 128 black, else white.
-    /// Written `WhiteIsZero`, a 1 bit black, as fax readers expect.
+    /// One bit per pixel from gray luma, black below
+    /// [`crate::BLACK_BELOW`].  Written `WhiteIsZero`, a 1 bit black, the
+    /// interpretation the fax profile of TIFF (RFC 2306) prescribes.
     Bilevel(&'a Bitmap<Gray8>),
 }
 
@@ -98,8 +101,14 @@ impl TiffImage<'_> {
         }
     }
 
-    /// The bytes of row `y` as stored: live pixels only, bilevel rows
-    /// packed most significant bit first and padded to a byte.
+    /// The length of a stored row: its samples' bits padded to a byte.
+    fn row_bytes(&self) -> usize {
+        let (samples, bits, _) = self.layout();
+        (self.size().0 as usize * usize::from(samples) * usize::from(bits)).div_ceil(8)
+    }
+
+    /// Append the bytes of row `y` as stored: live pixels only, bilevel
+    /// rows packed most significant bit first and padded to a byte.
     fn row(&self, y: u32, out: &mut Vec<u8>) {
         match self {
             Self::Rgb(b) => out.extend_from_slice(&b.row_bytes(y)[..b.width as usize * 3]),
@@ -107,11 +116,7 @@ impl TiffImage<'_> {
             Self::Bilevel(b) => {
                 let start = out.len();
                 out.resize(start + (b.width as usize).div_ceil(8), 0);
-                for (x, &luma) in b.row_bytes(y)[..b.width as usize].iter().enumerate() {
-                    if luma < 128 {
-                        out[start + x / 8] |= 0x80 >> (x % 8);
-                    }
-                }
+                pack_bilevel_row(&b.row_bytes(y)[..b.width as usize], &mut out[start..]);
             }
         }
     }
@@ -120,6 +125,10 @@ impl TiffImage<'_> {
 const PHOTOMETRIC_WHITE_IS_ZERO: u16 = 0;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
 const PHOTOMETRIC_RGB: u16 = 2;
+
+/// The refusal of a file beyond the 32-bit offsets of TIFF.
+const TOO_LARGE: EncodeError =
+    EncodeError::InvalidInput("TIFF file exceeds 4 GiB; BigTIFF is not written");
 
 /// Target size of a strip before compression.
 const STRIP_BYTES: usize = 64 * 1024;
@@ -145,35 +154,29 @@ impl TiffPage {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::UnsupportedMode`] for an empty image, a resolution
-    /// that is not finite and positive, CCITT compression of a page that is
-    /// not bilevel, or a Group 3 period `k` of 0.
+    /// [`EncodeError::InvalidInput`] for an empty image or a resolution
+    /// outside what a TIFF rational holds; [`EncodeError::UnsupportedMode`]
+    /// for CCITT compression of a page that is not bilevel.
     pub fn encode(
         image: TiffImage<'_>,
         dpi: (f64, f64),
         compression: TiffCompression,
     ) -> Result<Self, EncodeError> {
         let (width, height) = image.size();
-        if width == 0 || height == 0 {
-            return Err(EncodeError::UnsupportedMode(
-                "zero-width or zero-height bitmap: TIFF cannot encode an empty image",
-            ));
-        }
+        let columns =
+            NonZeroU32::new(width)
+                .filter(|_| height > 0)
+                .ok_or(EncodeError::InvalidInput(
+                    "zero-width or zero-height bitmap: TIFF cannot encode an empty image",
+                ))?;
         let fax = compression.is_fax();
         if fax && !matches!(image, TiffImage::Bilevel(_)) {
             return Err(EncodeError::UnsupportedMode(
                 "CCITT fax compression codes bilevel pages only",
             ));
         }
-        if compression == (TiffCompression::Group3 { k: Some(0) }) {
-            return Err(EncodeError::UnsupportedMode(
-                "the Group 3 period k is at least 1",
-            ));
-        }
         let resolution = [rational(dpi.0)?, rational(dpi.1)?];
-        let mut row = Vec::new();
-        image.row(0, &mut row);
-        let row_bytes = row.len();
+        let row_bytes = image.row_bytes();
         // A CCITT page is one strip, as the fax profile of TIFF (RFC 2306)
         // recommends; each strip would restart the coding's reference row.
         let rows_per_strip = if fax {
@@ -190,7 +193,7 @@ impl TiffPage {
             for y in first..height.min(first.saturating_add(rows_per_strip)) {
                 image.row(y, &mut raw);
             }
-            strips.push(compress(&raw, row_bytes, width, compression)?);
+            strips.push(compress(&raw, row_bytes, columns, compression)?);
         }
         Ok(Self {
             width,
@@ -205,31 +208,45 @@ impl TiffPage {
 }
 
 /// A TIFF file built page by page.
+#[derive(Default)]
 pub struct TiffWriter {
-    compression: TiffCompression,
     pages: Vec<TiffPage>,
+    /// Whether every page is marked a page of a multi-page document, as
+    /// the fax profile of TIFF (RFC 2306) requires; otherwise only the
+    /// pages of a file of more than one are.
+    fax_document: bool,
 }
 
 impl TiffWriter {
-    /// A file whose pages added by [`Self::add_page`] are compressed with
-    /// `compression`.
+    /// An empty file.
     #[must_use]
-    pub const fn new(compression: TiffCompression) -> Self {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An empty fax document: every page, even a single one, is marked a
+    /// page of a multi-page document (`NewSubfileType` bit 1).
+    #[must_use]
+    pub const fn fax_document() -> Self {
         Self {
-            compression,
             pages: Vec::new(),
+            fax_document: true,
         }
     }
 
     /// Encode `image` as the next page, at `dpi` (horizontal, vertical)
-    /// pixels per inch.
+    /// pixels per inch, compressed with `compression`.
     ///
     /// # Errors
     ///
     /// As [`TiffPage::encode`].
-    pub fn add_page(&mut self, image: TiffImage<'_>, dpi: (f64, f64)) -> Result<(), EncodeError> {
-        self.pages
-            .push(TiffPage::encode(image, dpi, self.compression)?);
+    pub fn add_page(
+        &mut self,
+        image: TiffImage<'_>,
+        dpi: (f64, f64),
+        compression: TiffCompression,
+    ) -> Result<(), EncodeError> {
+        self.pages.push(TiffPage::encode(image, dpi, compression)?);
         Ok(())
     }
 
@@ -242,40 +259,73 @@ impl TiffWriter {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::UnsupportedMode`] without pages or when the file
-    /// would exceed the 4 GiB a TIFF can address; [`EncodeError::Io`] on a
-    /// write failure.
+    /// [`EncodeError::InvalidInput`] without pages, with more than 65535,
+    /// or when the file would exceed the 4 GiB a TIFF can address, all
+    /// found before anything is written; [`EncodeError::Io`] on a write
+    /// failure.
     pub fn write<W: Write>(self, mut out: W) -> Result<(), EncodeError> {
         if self.pages.is_empty() {
-            return Err(EncodeError::UnsupportedMode(
-                "a TIFF needs at least one page",
-            ));
+            return Err(EncodeError::InvalidInput("a TIFF needs at least one page"));
         }
         let count = u16::try_from(self.pages.len())
-            .map_err(|_| EncodeError::UnsupportedMode("a TIFF holds at most 65535 pages"))?;
-        let mut file = Vec::new();
-        file.extend_from_slice(b"II*\0");
-        // The offset of the first directory, patched below.
-        let mut next_link = file.len();
-        file.extend_from_slice(&[0; 4]);
-        for (number, page) in (0..count).zip(&self.pages) {
-            let offsets: Vec<u32> = page
-                .strips
-                .iter()
-                .map(|strip| {
-                    let offset = offset(file.len())?;
-                    file.extend_from_slice(strip);
-                    Ok(offset)
-                })
-                .collect::<Result<_, EncodeError>>()?;
-            if file.len() % 2 == 1 {
-                file.push(0);
+            .map_err(|_| EncodeError::InvalidInput("a TIFF holds at most 65535 pages"))?;
+        let one_of_many = self.fax_document || count > 1;
+
+        // Lay the file out: header, then per page its strips, a pad byte
+        // to an even offset, and its directory with the values that
+        // overflow it.
+        let mut layouts = Vec::with_capacity(self.pages.len());
+        let mut end: u64 = 8;
+        for page in &self.pages {
+            let mut strip_offsets = Vec::with_capacity(page.strips.len());
+            for strip in &page.strips {
+                strip_offsets.push(end);
+                end += strip.len() as u64;
             }
-            let ifd = offset(file.len())?;
-            file[next_link..next_link + 4].copy_from_slice(&ifd.to_le_bytes());
-            next_link = write_ifd(&mut file, page, &offsets, (number, count))?;
+            end += end % 2;
+            let ifd = end;
+            end += directory_len(page) as u64;
+            layouts.push((strip_offsets, ifd));
         }
-        out.write_all(&file)?;
+        let file_offset = |at: u64| u32::try_from(at).map_err(|_| TOO_LARGE);
+        if u32::try_from(end).is_err() {
+            return Err(TOO_LARGE);
+        }
+
+        out.write_all(b"II*\0")?;
+        out.write_all(&file_offset(layouts[0].1)?.to_le_bytes())?;
+        let mut at: u64 = 8;
+        for (number, (page, (strip_offsets, ifd))) in
+            (0..count).zip(self.pages.iter().zip(&layouts))
+        {
+            for strip in &page.strips {
+                out.write_all(strip)?;
+                at += strip.len() as u64;
+            }
+            if at % 2 == 1 {
+                out.write_all(&[0])?;
+                at += 1;
+            }
+            debug_assert_eq!(at, *ifd, "the directory lands where it was laid out");
+            let offsets = strip_offsets
+                .iter()
+                .map(|&o| file_offset(o))
+                .collect::<Result<Vec<_>, _>>()?;
+            let next = match layouts.get(usize::from(number) + 1) {
+                Some(&(_, next)) => file_offset(next)?,
+                None => 0,
+            };
+            let directory = directory(
+                page,
+                &offsets,
+                file_offset(*ifd)?,
+                next,
+                (number, count),
+                one_of_many,
+            );
+            out.write_all(&directory)?;
+            at += directory.len() as u64;
+        }
         out.flush()?;
         Ok(())
     }
@@ -285,40 +335,32 @@ impl TiffWriter {
 ///
 /// # Errors
 ///
-/// As [`TiffWriter::add_page`] and [`TiffWriter::write`].
+/// As [`TiffPage::encode`] and [`TiffWriter::write`].
 pub fn write_tiff<W: Write>(
     image: TiffImage<'_>,
     dpi: (f64, f64),
     compression: TiffCompression,
     out: W,
 ) -> Result<(), EncodeError> {
-    let mut writer = TiffWriter::new(compression);
-    writer.add_page(image, dpi)?;
+    let mut writer = TiffWriter::new();
+    writer.add_page(image, dpi, compression)?;
     writer.write(out)
 }
 
-/// Packed bilevel rows of `width` pixels, `row_bytes` each, fax-coded by
-/// `scheme`.
-fn fax_code(bytes: &[u8], row_bytes: usize, width: u32, scheme: EncodeScheme) -> Vec<u8> {
-    let mut encoder = Encoder::new(width, scheme);
-    for row in bytes.chunks(row_bytes) {
-        encoder.encode_packed_row(row);
-    }
-    encoder.finish()
-}
-
-/// `bytes`, stored rows of `row_bytes` each and `width` pixels, compressed
-/// with `compression`.  `PackBits` runs do not cross a row.
+/// `bytes`, stored rows of `row_bytes` each and `columns` pixels,
+/// compressed with `compression`.  `PackBits` runs do not cross a row.
 fn compress(
     bytes: &[u8],
     row_bytes: usize,
-    width: u32,
+    columns: NonZeroU32,
     compression: TiffCompression,
 ) -> Result<Vec<u8>, EncodeError> {
     Ok(match compression {
         TiffCompression::None => bytes.to_vec(),
         TiffCompression::PackBits => {
-            let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 128 + 1);
+            let mut out = Vec::with_capacity(
+                bytes.len() + bytes.len().div_ceil(row_bytes) * row_bytes.div_ceil(128),
+            );
             for row in bytes.chunks(row_bytes) {
                 pack_bits(row, &mut out);
             }
@@ -327,7 +369,7 @@ fn compress(
         TiffCompression::Lzw => {
             weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
                 .encode(bytes)
-                .map_err(|_| EncodeError::UnsupportedMode("LZW encoder rejected its input"))?
+                .expect("every byte is a symbol of an 8-bit LZW alphabet")
         }
         TiffCompression::Deflate => {
             let mut encoder =
@@ -338,36 +380,50 @@ fn compress(
         TiffCompression::Group3 { k } => fax_code(
             bytes,
             row_bytes,
-            width,
+            columns,
             EncodeScheme::Group3 {
                 k,
                 byte_aligned_eol: true,
             },
         ),
-        TiffCompression::Group4 => fax_code(bytes, row_bytes, width, EncodeScheme::Group4),
+        TiffCompression::Group4 => fax_code(bytes, row_bytes, columns, EncodeScheme::Group4),
     })
+}
+
+/// Packed bilevel rows of `columns` pixels, `row_bytes` each, fax-coded by
+/// `scheme`.
+fn fax_code(bytes: &[u8], row_bytes: usize, columns: NonZeroU32, scheme: EncodeScheme) -> Vec<u8> {
+    let mut encoder = Encoder::new(columns, scheme);
+    for row in bytes.chunks(row_bytes) {
+        encoder.encode_packed_row(row);
+    }
+    encoder.finish()
 }
 
 /// Append `row` `PackBits`-coded to `out`: runs of 2 to 128 equal bytes as
 /// `1 - n` and the byte, other bytes in literal blocks of up to 128 as
-/// `n - 1` and the bytes.
+/// `n - 1` and the bytes.  A literal block absorbs a pair of equal bytes,
+/// which coded as a run would cost a header more; a run of three or more,
+/// or a pair at the start of a block, is coded as a run.
 fn pack_bits(row: &[u8], out: &mut Vec<u8>) {
-    let mut i = 0;
-    while i < row.len() {
-        let run = row[i..]
+    let run_at = |i: usize| {
+        row[i..]
             .iter()
             .take(128)
             .take_while(|&&b| b == row[i])
-            .count();
+            .count()
+    };
+    let mut i = 0;
+    while i < row.len() {
+        let run = run_at(i);
         if run >= 2 {
             out.push((1 - i16::try_from(run).expect("run ≤ 128")).to_le_bytes()[0]);
             out.push(row[i]);
             i += run;
             continue;
         }
-        // A literal block ends before the next run of two or more.
         let start = i;
-        while i < row.len() && i - start < 128 && !(i + 1 < row.len() && row[i] == row[i + 1]) {
+        while i < row.len() && i - start < 128 && (i == start || run_at(i) < 3) {
             i += 1;
         }
         out.push(u8::try_from(i - start - 1).expect("literal block ≤ 128"));
@@ -375,12 +431,13 @@ fn pack_bits(row: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// `dpi` as a TIFF rational with denominator 1000.
+/// `dpi` as a TIFF rational: a whole number of pixels per inch over 1, or
+/// thousandths reduced by their common divisor.
 fn rational(dpi: f64) -> Result<(u32, u32), EncodeError> {
     let scaled = (dpi * 1000.0).round();
     if !(dpi.is_finite() && scaled >= 1.0 && scaled <= f64::from(u32::MAX)) {
-        return Err(EncodeError::UnsupportedMode(
-            "TIFF resolution must be finite and positive",
+        return Err(EncodeError::InvalidInput(
+            "TIFF resolution must lie between 0.001 and 4294967 pixels per inch",
         ));
     }
     #[expect(
@@ -388,14 +445,17 @@ fn rational(dpi: f64) -> Result<(u32, u32), EncodeError> {
         clippy::cast_sign_loss,
         reason = "scaled is a whole number within 1..=u32::MAX, checked above"
     )]
-    Ok((scaled as u32, 1000))
+    let thousandths = scaled as u32;
+    let divisor = gcd(thousandths, 1000);
+    Ok((thousandths / divisor, 1000 / divisor))
 }
 
-/// `len` as a 32-bit file offset.
-fn offset(len: usize) -> Result<u32, EncodeError> {
-    u32::try_from(len).map_err(|_| {
-        EncodeError::UnsupportedMode("TIFF file exceeds 4 GiB; BigTIFF is not written")
-    })
+/// The greatest common divisor of `a` and `b`.
+const fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 /// A directory entry's value: its type code and the bytes of its values.
@@ -428,30 +488,27 @@ fn longs(tag: u16, values: &[u32]) -> Entry {
     }
 }
 
-/// Append the directory of `page`, whose strips start at `offsets`, to
-/// `file`, then the values that do not fit in their entries.  Returns the
-/// position of the directory's next-directory link.
-fn write_ifd(
-    file: &mut Vec<u8>,
-    page: &TiffPage,
-    offsets: &[u32],
-    (number, count): (u16, u16),
-) -> Result<usize, EncodeError> {
-    let (samples, bits, photometric) = page.layout;
-    let byte_counts: Vec<u32> = page
-        .strips
-        .iter()
-        .map(|s| offset(s.len()))
-        .collect::<Result<_, _>>()?;
-    let rational_entry = |tag, (n, d): (u32, u32)| Entry {
+fn rational_entry(tag: u16, (n, d): (u32, u32)) -> Entry {
+    Entry {
         tag,
         kind: RATIONAL,
         count: 1,
         bytes: [n.to_le_bytes(), d.to_le_bytes()].concat(),
-    };
-    // NewSubfileType bit 1: a page of a multi-page document.  The fax
-    // profile of TIFF (RFC 2306) sets it on every fax page.
-    let one_of_many = count > 1 || page.compression.is_fax();
+    }
+}
+
+/// The directory entries of `page`, whose strips start at `offsets` and
+/// hold `byte_counts` bytes, sorted by tag.  Their sizes do not depend on
+/// the offset and count values.
+fn entries(
+    page: &TiffPage,
+    offsets: &[u32],
+    byte_counts: &[u32],
+    position: (u16, u16),
+    one_of_many: bool,
+) -> Vec<Entry> {
+    let (samples, bits, photometric) = page.layout;
+    // NewSubfileType bit 1: a page of a multi-page document.
     let mut entries = vec![
         longs(254, &[if one_of_many { 2 } else { 0 }]),
         longs(256, &[page.width]),
@@ -462,12 +519,12 @@ fn write_ifd(
         longs(273, offsets),
         shorts(277, &[samples]),
         longs(278, &[page.rows_per_strip]),
-        longs(279, &byte_counts),
+        longs(279, byte_counts),
         rational_entry(282, page.resolution[0]),
         rational_entry(283, page.resolution[1]),
         shorts(284, &[1]),
         shorts(296, &[2]),
-        shorts(297, &[number, count]),
+        shorts(297, &<[u16; 2]>::from(position)),
     ];
     if bits == 1 {
         entries.push(shorts(266, &[1]));
@@ -476,24 +533,59 @@ fn write_ifd(
         entries.push(longs(tag, &[options]));
     }
     entries.sort_by_key(|e| e.tag);
+    entries
+}
 
+/// The length in bytes of `page`'s directory with its overflowing values:
+/// two bytes of count, twelve per entry, four of link, then each value
+/// longer than four bytes padded to an even length.
+fn directory_len(page: &TiffPage) -> usize {
+    let placeholder = vec![0; page.strips.len()];
+    let entries = entries(page, &placeholder, &placeholder, (0, 1), false);
+    2 + 12 * entries.len()
+        + 4
+        + entries
+            .iter()
+            .filter(|e| e.bytes.len() > 4)
+            .map(|e| e.bytes.len() + e.bytes.len() % 2)
+            .sum::<usize>()
+}
+
+/// The directory of `page` placed at file offset `at`, its strips at
+/// `offsets`, linking to the directory at `next` (0 for none), followed by
+/// its overflowing values.  The caller has checked that the file, the
+/// directory included, ends within 4 GiB.
+fn directory(
+    page: &TiffPage,
+    offsets: &[u32],
+    at: u32,
+    next: u32,
+    position: (u16, u16),
+    one_of_many: bool,
+) -> Vec<u8> {
+    let byte_counts: Vec<u32> = page
+        .strips
+        .iter()
+        .map(|s| u32::try_from(s.len()).expect("a strip lies within the 4 GiB file"))
+        .collect();
+    let entries = entries(page, offsets, &byte_counts, position, one_of_many);
     let n = u16::try_from(entries.len()).expect("fewer than 65536 entries");
-    let start = file.len();
-    // The values that do not fit in four bytes follow the directory: two
-    // bytes of count, twelve per entry, four of link.
-    let mut overflow = start + 2 + 12 * entries.len() + 4;
+    let mut overflow = at as usize + 2 + 12 * entries.len() + 4;
+    let mut directory = Vec::with_capacity(directory_len(page));
     let mut spilled = Vec::new();
-    file.extend_from_slice(&n.to_le_bytes());
+    directory.extend_from_slice(&n.to_le_bytes());
     for e in &entries {
-        file.extend_from_slice(&e.tag.to_le_bytes());
-        file.extend_from_slice(&e.kind.to_le_bytes());
-        file.extend_from_slice(&e.count.to_le_bytes());
+        directory.extend_from_slice(&e.tag.to_le_bytes());
+        directory.extend_from_slice(&e.kind.to_le_bytes());
+        directory.extend_from_slice(&e.count.to_le_bytes());
         if e.bytes.len() <= 4 {
             let mut inline = [0u8; 4];
             inline[..e.bytes.len()].copy_from_slice(&e.bytes);
-            file.extend_from_slice(&inline);
+            directory.extend_from_slice(&inline);
         } else {
-            file.extend_from_slice(&offset(overflow)?.to_le_bytes());
+            let value_at =
+                u32::try_from(overflow).expect("the directory's values lie within the 4 GiB file");
+            directory.extend_from_slice(&value_at.to_le_bytes());
             overflow += e.bytes.len() + e.bytes.len() % 2;
             spilled.extend_from_slice(&e.bytes);
             if e.bytes.len() % 2 == 1 {
@@ -501,10 +593,9 @@ fn write_ifd(
             }
         }
     }
-    let link = file.len();
-    file.extend_from_slice(&[0; 4]);
-    file.extend_from_slice(&spilled);
-    Ok(link)
+    directory.extend_from_slice(&next.to_le_bytes());
+    directory.extend_from_slice(&spilled);
+    directory
 }
 
 #[cfg(test)]
@@ -516,7 +607,10 @@ mod tests {
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
 
+    use std::num::NonZeroU32;
+
     use super::{TiffCompression, TiffImage, TiffPage, TiffWriter, pack_bits, write_tiff};
+    use crate::EncodeError;
 
     const ALL: [TiffCompression; 4] = [
         TiffCompression::None,
@@ -659,8 +753,8 @@ mod tests {
         assert_eq!(decoder.get_tag_u32(Tag::Unknown(293)).unwrap(), 0);
         assert_eq!(
             decoder.get_tag_u32(Tag::NewSubfileType).unwrap(),
-            2,
-            "a fax page is a page of a document"
+            0,
+            "a single page outside a fax document is not marked"
         );
         assert_eq!(
             decoder.get_tag_u32(Tag::RowsPerStrip).unwrap(),
@@ -703,7 +797,7 @@ mod tests {
         }
 
         let g = drawing(203, 77);
-        for (k, options) in [(None, 4), (Some(2), 5), (Some(4), 5)] {
+        for (k, options) in [(None, 4), (NonZeroU32::new(2), 5), (NonZeroU32::new(4), 5)] {
             let mut out = Vec::new();
             write_tiff(
                 TiffImage::Bilevel(&g),
@@ -742,28 +836,39 @@ mod tests {
     fn fax_coding_refuses_pages_that_are_not_bilevel() {
         let g = gray(16, 4);
         for compression in [TiffCompression::Group4, TiffCompression::Group3 { k: None }] {
-            let mut writer = TiffWriter::new(compression);
-            assert!(
-                writer
-                    .add_page(TiffImage::Gray(&g), (204.0, 196.0))
-                    .is_err()
-            );
+            let result = TiffPage::encode(TiffImage::Gray(&g), (204.0, 196.0), compression);
+            assert!(matches!(result, Err(EncodeError::UnsupportedMode(_))));
         }
-        let mut writer = TiffWriter::new(TiffCompression::Group3 { k: Some(0) });
-        assert!(
+    }
+
+    #[test]
+    fn a_fax_document_marks_even_a_single_page() {
+        let g = drawing(16, 4);
+        for (mut writer, flag) in [(TiffWriter::new(), 0), (TiffWriter::fax_document(), 2)] {
             writer
-                .add_page(TiffImage::Bilevel(&g), (204.0, 196.0))
-                .is_err()
-        );
+                .add_page(
+                    TiffImage::Bilevel(&g),
+                    (204.0, 196.0),
+                    TiffCompression::Group4,
+                )
+                .unwrap();
+            let mut out = Vec::new();
+            writer.write(&mut out).unwrap();
+            assert_eq!(decode(&out).get_tag_u32(Tag::NewSubfileType).unwrap(), flag);
+        }
     }
 
     #[test]
     fn pages_carry_their_number_and_resolution() {
         let g = gray(8, 8);
-        let mut writer = TiffWriter::new(TiffCompression::Deflate);
+        let mut writer = TiffWriter::new();
         for _ in 0..3 {
             writer
-                .add_page(TiffImage::Bilevel(&g), (204.0, 97.5))
+                .add_page(
+                    TiffImage::Bilevel(&g),
+                    (204.0, 97.5),
+                    TiffCompression::Deflate,
+                )
                 .unwrap();
         }
         let mut out = Vec::new();
@@ -776,7 +881,7 @@ mod tests {
             );
             assert_eq!(decoder.get_tag_u32(Tag::NewSubfileType).unwrap(), 2);
             let y_res = decoder.get_tag_u32_vec(Tag::YResolution).unwrap();
-            assert_eq!(y_res, [97_500, 1000]);
+            assert_eq!(y_res, [195, 2], "97.5 as a reduced fraction");
             assert_eq!(decoder.more_images(), page < 2);
             if page < 2 {
                 decoder.next_image().unwrap();
@@ -798,7 +903,7 @@ mod tests {
             );
             [first.unwrap(), second.join().unwrap().unwrap()]
         });
-        let mut writer = TiffWriter::new(TiffCompression::None);
+        let mut writer = TiffWriter::new();
         for page in pages {
             writer.push_page(page);
         }
@@ -818,19 +923,31 @@ mod tests {
     fn invalid_pages_are_refused() {
         let empty: Bitmap<Gray8> = Bitmap::new(0, 4, 1, false);
         let g = gray(4, 4);
-        let mut writer = TiffWriter::new(TiffCompression::None);
-        assert!(
-            writer
-                .add_page(TiffImage::Gray(&empty), (72.0, 72.0))
-                .is_err()
-        );
-        assert!(writer.add_page(TiffImage::Gray(&g), (0.0, 72.0)).is_err());
-        assert!(
-            writer
-                .add_page(TiffImage::Gray(&g), (f64::NAN, 72.0))
-                .is_err()
-        );
-        assert!(writer.write(Vec::new()).is_err(), "no page");
+        let invalid = |image, dpi| {
+            matches!(
+                TiffPage::encode(image, dpi, TiffCompression::None),
+                Err(EncodeError::InvalidInput(_))
+            )
+        };
+        assert!(invalid(TiffImage::Gray(&empty), (72.0, 72.0)));
+        assert!(invalid(TiffImage::Gray(&g), (0.0, 72.0)));
+        assert!(invalid(TiffImage::Gray(&g), (f64::NAN, 72.0)));
+        assert!(invalid(TiffImage::Gray(&g), (5e6, 72.0)));
+        assert!(matches!(
+            TiffWriter::new().write(Vec::new()),
+            Err(EncodeError::InvalidInput(_))
+        ));
+        let mut file = Vec::new();
+        write_tiff(
+            TiffImage::Gray(&g),
+            (72.0, 204.0),
+            TiffCompression::None,
+            &mut file,
+        )
+        .unwrap();
+        let decoder = &mut decode(&file);
+        assert_eq!(decoder.get_tag_u32_vec(Tag::XResolution).unwrap(), [72, 1]);
+        assert_eq!(decoder.get_tag_u32_vec(Tag::YResolution).unwrap(), [204, 1]);
     }
 
     /// Decode `PackBits` per the TIFF 6.0 description.
@@ -853,6 +970,19 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn pack_bits_keeps_a_pair_inside_a_literal_block() {
+        // "ab cc de": one literal block of six bytes, not three blocks.
+        let mut out = Vec::new();
+        pack_bits(b"abccde", &mut out);
+        assert_eq!(out, b"\x05abccde");
+        // A pair at the start of a block and a run of three are runs.
+        let mut out = Vec::new();
+        pack_bits(b"aabcccd", &mut out);
+        assert_eq!(unpack(&out), b"aabcccd");
+        assert_eq!(out, [0xFF, b'a', 0x00, b'b', 0xFE, b'c', 0x00, b'd']);
     }
 
     #[test]

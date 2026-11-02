@@ -119,7 +119,7 @@ impl FaxDocument {
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         pages.sort_unstable_by_key(|&(page, index, _)| (page, index));
-        let mut writer = TiffWriter::new(self.compression);
+        let mut writer = TiffWriter::fax_document();
         for (_, _, page) in pages {
             writer.push_page(page);
         }

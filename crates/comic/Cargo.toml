@@ -26,7 +26,7 @@ sevenz-rust2 = { workspace = true, features = ["bzip2", "ppmd"] }
 tar          = { workspace = true }
 
 # Image decode — pure-Rust, no system libs.
-zune-jpeg  = "0.5"
+zune-jpeg  = { workspace = true }
 png        = "0.18"
 image-webp = { workspace = true }
 tiff       = { workspace = true }

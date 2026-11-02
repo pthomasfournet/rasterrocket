@@ -38,6 +38,28 @@ pub use tiff::{TiffCompression, TiffImage, TiffPage, TiffWriter, write_tiff};
 
 use std::io;
 
+/// Luma below which a pixel is black in bilevel output, the midpoint of
+/// the 8-bit range; lighter pixels are white.
+pub const BLACK_BELOW: u8 = 128;
+
+/// Pack the luma of a row into `out`, one bit per pixel, most significant
+/// first, 1 for black (below [`BLACK_BELOW`]).  `out` holds
+/// `luma.len().div_ceil(8)` bytes and is overwritten.
+pub(crate) fn pack_bilevel_row(luma: &[u8], out: &mut [u8]) {
+    let (whole, tail) = luma.as_chunks::<8>();
+    for (byte, pixels) in out.iter_mut().zip(whole) {
+        *byte = pixels
+            .iter()
+            .fold(0, |bits, &l| (bits << 1) | u8::from(l < BLACK_BELOW));
+    }
+    if !tail.is_empty() {
+        let bits = tail
+            .iter()
+            .fold(0u8, |bits, &l| (bits << 1) | u8::from(l < BLACK_BELOW));
+        out[whole.len()] = bits << (8 - tail.len());
+    }
+}
+
 /// Errors that can occur during encoding.
 #[derive(Debug)]
 pub enum EncodeError {
@@ -47,6 +69,10 @@ pub enum EncodeError {
     ///
     /// The message describes what the caller should do instead.
     UnsupportedMode(&'static str),
+    /// The image or its parameters lie outside what the format holds: an
+    /// empty image, a dimension, page count, resolution or file size beyond
+    /// the format's limits.
+    InvalidInput(&'static str),
     /// An internal error from the `png` encoder (non-I/O).
     PngEncoder(::png::EncodingError),
     /// An internal error from the JPEG encoder.
@@ -58,6 +84,7 @@ impl std::fmt::Display for EncodeError {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::UnsupportedMode(m) => write!(f, "pixel mode not supported: {m}"),
+            Self::InvalidInput(m) => write!(f, "cannot encode: {m}"),
             Self::PngEncoder(e) => write!(f, "PNG encoder error: {e}"),
             Self::Jpeg(e) => write!(f, "JPEG encoder error: {e}"),
         }
@@ -70,7 +97,7 @@ impl std::error::Error for EncodeError {
             Self::Io(e) => Some(e),
             Self::PngEncoder(e) => Some(e),
             Self::Jpeg(e) => Some(e),
-            Self::UnsupportedMode(_) => None,
+            Self::UnsupportedMode(_) | Self::InvalidInput(_) => None,
         }
     }
 }
@@ -78,6 +105,16 @@ impl std::error::Error for EncodeError {
 impl From<io::Error> for EncodeError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<::jpeg_encoder::EncodingError> for EncodeError {
+    fn from(e: ::jpeg_encoder::EncodingError) -> Self {
+        // Unwrap the I/O layer so EncodeError::Io is the canonical I/O path.
+        match e {
+            ::jpeg_encoder::EncodingError::IoError(io_err) => Self::Io(io_err),
+            other => Self::Jpeg(other),
+        }
     }
 }
 

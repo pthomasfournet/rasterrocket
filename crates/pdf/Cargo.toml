@@ -15,10 +15,10 @@ categories  = ["parser-implementations", "encoding"]
 [dependencies]
 # zlib-rs pinned so the fallback inflater, whose partial output on corrupt
 # streams is backend-dependent, is the same in every build.
-flate2      = { version = "1", features = ["zlib-rs"] }
+flate2      = { workspace = true }
 libdeflater = { version = "1", optional = true }
 memmap2     = { version = "0.9" }
-weezl       = { version = "0.2" }
+weezl       = { workspace = true }
 brotli-decompressor = { version = "6" }
 log         = { workspace = true }
 # Standard security handler: RC4 and AES-CBC ciphers, MD5 and SHA-2 digests.

@@ -23,14 +23,14 @@ png = "0.18"
 jpeg-encoder = "0.7"
 
 # TIFF strip compression: zlib Deflate and TIFF-variant LZW, pure Rust.
-flate2 = "1"
-weezl = "0.2"
+flate2 = { workspace = true }
+weezl = { workspace = true }
 # CCITT Group 3 and Group 4 fax coding: the local ccitt fork.
 hayro-ccitt = { path = "../ccitt" }
 
 [dev-dependencies]
 # Decodes the JPEG output in tests.
-zune-jpeg = "0.5.15"
+zune-jpeg = { workspace = true }
 # Reads the TIFF output back in tests: an independent decoder.
 tiff = { workspace = true }
 

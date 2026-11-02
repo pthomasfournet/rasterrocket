@@ -22,7 +22,8 @@ pub struct JpegOptions {
 }
 
 impl Default for JpegOptions {
-    /// Quality 75, baseline, standard Huffman tables: the IJG defaults.
+    /// Quality 75, baseline, the standard Huffman tables of ITU-T T.81
+    /// Annex K.
     fn default() -> Self {
         Self {
             quality: 75,
@@ -39,15 +40,16 @@ impl Default for JpegOptions {
 ///
 /// # Errors
 ///
-/// - [`EncodeError::UnsupportedMode`] for other pixel modes, for a
-///   zero-width or zero-height bitmap (JPEG has no empty-image encoding),
-///   or when a dimension exceeds `u16::MAX` (the JPEG format ceiling,
-///   65535 px/side).
-/// - [`EncodeError::Jpeg`] on an encoder failure, I/O errors included.
+/// - [`EncodeError::UnsupportedMode`] for other pixel modes.
+/// - [`EncodeError::InvalidInput`] for a zero-width or zero-height bitmap
+///   (JPEG has no empty-image encoding), or when a dimension exceeds
+///   `u16::MAX` (the JPEG format ceiling, 65535 px/side).
+/// - [`EncodeError::Io`] when writing or flushing `out` fails.
+/// - [`EncodeError::Jpeg`] on another encoder failure.
 pub fn write_jpeg<P: Pixel, W: Write>(
     bitmap: &Bitmap<P>,
     options: JpegOptions,
-    out: W,
+    mut out: W,
 ) -> Result<(), EncodeError> {
     let (color, bytes_per_pixel) = match P::MODE {
         PixelMode::Mono8 => (ColorType::Luma, 1),
@@ -60,16 +62,16 @@ pub fn write_jpeg<P: Pixel, W: Write>(
         }
     };
     if bitmap.width == 0 || bitmap.height == 0 {
-        return Err(EncodeError::UnsupportedMode(
+        return Err(EncodeError::InvalidInput(
             "zero-width or zero-height bitmap: JPEG cannot encode an empty image",
         ));
     }
     let width = u16::try_from(bitmap.width)
-        .map_err(|_| EncodeError::UnsupportedMode("width exceeds JPEG limit (65535 px)"))?;
+        .map_err(|_| EncodeError::InvalidInput("width exceeds the JPEG limit of 65535 px"))?;
     let height = u16::try_from(bitmap.height)
-        .map_err(|_| EncodeError::UnsupportedMode("height exceeds JPEG limit (65535 px)"))?;
+        .map_err(|_| EncodeError::InvalidInput("height exceeds the JPEG limit of 65535 px"))?;
 
-    let mut encoder = Encoder::new(out, options.quality.clamp(1, 100));
+    let mut encoder = Encoder::new(&mut out, options.quality.clamp(1, 100));
     encoder.set_progressive(options.progressive);
     encoder.set_optimized_huffman_tables(options.optimize);
     // Both dimensions fit `u16`, so the row length and image size fit `usize`.
@@ -85,7 +87,9 @@ pub fn write_jpeg<P: Pixel, W: Write>(
         }
         encoder.encode(&packed, width, height, color)
     };
-    result.map_err(EncodeError::Jpeg)
+    result?;
+    out.flush()?;
+    Ok(())
 }
 
 /// Encode an 8-bit grayscale (`Gray8`/`Mono8`) bitmap to baseline JPEG
@@ -225,13 +229,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_dimension_returns_unsupported_error() {
+    fn zero_dimension_is_invalid_input() {
         for (w, h) in [(0, 4), (4, 0), (0, 0)] {
             let bmp: Bitmap<Gray8> = Bitmap::new(w, h, 1, false);
             let result = jpeg_gray::<Gray8>(&bmp, 85);
             assert!(
-                matches!(result, Err(EncodeError::UnsupportedMode(_))),
-                "{w}x{h} bitmap must return UnsupportedMode, got {result:?}"
+                matches!(result, Err(EncodeError::InvalidInput(_))),
+                "{w}x{h} bitmap must return InvalidInput, got {result:?}"
             );
         }
     }
@@ -241,8 +245,30 @@ mod tests {
         let bmp: Bitmap<Gray8> = Bitmap::new(70_000, 1, 1, false);
         let result = jpeg_gray::<Gray8>(&bmp, 85);
         assert!(
-            matches!(result, Err(EncodeError::UnsupportedMode(_))),
-            "dimension > u16::MAX must return UnsupportedMode, got {result:?}"
+            matches!(result, Err(EncodeError::InvalidInput(_))),
+            "dimension > u16::MAX must return InvalidInput, got {result:?}"
+        );
+    }
+
+    /// A sink whose every write fails.
+    struct Full;
+
+    impl std::io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::StorageFull, "full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failing_sink_is_an_io_error() {
+        let bmp = make_gray_bitmap(16, 16, 200);
+        let result = write_jpeg(&bmp, JpegOptions::default(), Full);
+        assert!(
+            matches!(&result, Err(EncodeError::Io(e)) if e.kind() == std::io::ErrorKind::StorageFull),
+            "{result:?}"
         );
     }
 
