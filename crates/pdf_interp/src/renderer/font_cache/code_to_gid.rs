@@ -74,7 +74,16 @@ pub(super) fn resolved_code_to_gid(
     } else if wants_unicode_resolution(embedded, simple, outline, desc.kind)
         && (!embedded || face.has_unicode_cmap())
     {
-        Some(resolve_via_unicode_cmap(face, &desc.differences, desc.base_encoding, embedded).into())
+        Some(
+            resolve_via_unicode_cmap(
+                face,
+                &desc.differences,
+                desc.base_encoding,
+                embedded,
+                desc.symbolic,
+            )
+            .into(),
+        )
     } else if !embedded
         && !simple
         && let Some(enc) = &desc.cid_encoding
@@ -316,9 +325,12 @@ fn resolve_simple_to_gid(
 /// point, the identity that holds for the ASCII and Latin-1 ranges of those
 /// encodings.
 ///
-/// An `embedded` program that maps no glyph to the name's Unicode value
-/// (or the name has none: `glyph243`, a producer's own name) selects the
-/// glyph of that name in its `post` table (PDF §9.6.6.4).
+/// An `embedded` program of a font whose `Symbolic` flag is clear
+/// (`symbolic` false) that maps no glyph to the name's Unicode value (or
+/// the name has none: `glyph243`, a producer's own name) selects the glyph
+/// of that name in its `post` table (PDF §9.6.6.4).  A symbolic font's
+/// codes go to the readings below instead, its code-keyed subtables
+/// among them.
 ///
 /// A substitute that lacks the glyph of a name it does understand draws
 /// nothing for the code: the glyph at the raw code point would be an
@@ -335,6 +347,7 @@ fn resolve_via_unicode_cmap(
     differences: &[Option<Box<str>>; 256],
     base: BaseEncoding,
     embedded: bool,
+    symbolic: bool,
 ) -> Vec<u32> {
     let nonzero = |gid: u32| (gid != 0).then_some(gid);
     (0..=u8::MAX)
@@ -362,7 +375,7 @@ fn resolve_via_unicode_cmap(
                             .map(|u| face.raw_get_char_index(u))
                             .and_then(nonzero)
                     })
-                    .or_else(|| embedded.then(by_name).flatten())
+                    .or_else(|| (embedded && !symbolic).then(by_name).flatten())
             })
             .or_else(|| {
                 (embedded || unicode.is_none())
@@ -626,6 +639,24 @@ mod tests {
             face.code_to_gid[0x43],
             face.raw_get_char_index(u32::from('$'))
         );
+    }
+
+    /// A symbolic embedded TrueType font does not resolve names through
+    /// `post`: Ahem's `glyph243` at code 0x41 keeps the code's own reading.
+    #[test]
+    fn symbolic_embedded_truetype_skips_post_names() {
+        let mut desc = simple(
+            PdfFontKind::TrueType,
+            Some(ahem()),
+            diffs(&[(0x41, "glyph243")]),
+            BaseEncoding::WinAnsi,
+        );
+        desc.symbolic = true;
+        let mut cache = cache();
+        let face = face(&mut cache, desc);
+        let raw = face.raw_get_char_index(0x41);
+        assert_ne!(raw, 2);
+        assert_eq!(face.code_to_gid[0x41], raw, "the code's own reading");
     }
 
     /// A cmap-less subset under a declared encoding resolves each named

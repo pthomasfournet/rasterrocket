@@ -124,6 +124,10 @@ pub struct FontDescriptor {
     pub type3: Option<Type3Data>,
     /// Typeface class of the substitute drawn when `program` is `None`.
     pub substitute: SubstituteStyle,
+    /// The `Symbolic` flag (bit 3) of a simple font's font descriptor
+    /// (PDF §9.8.2): its codes select glyphs of the program's own
+    /// encoding.  `false` for composite and Type 3 fonts.
+    pub symbolic: bool,
 }
 
 impl FontDescriptor {
@@ -190,6 +194,9 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     let missing_width = extract_missing_width(doc, dict);
     let (differences, mut base_encoding) = extract_encoding(doc, dict);
     let mut substitute = substitute_style(doc, dict, Some(dict));
+    let symbolic = resolve_fd(doc, dict)
+        .and_then(|fd| fd.get_i64(b"Flags"))
+        .is_some_and(|flags| flags & FLAG_SYMBOLIC != 0);
 
     // A symbolic standard font drawn by its substitute keeps its built-in
     // encoding as the base: its codes denote symbols, not Latin letters,
@@ -223,8 +230,13 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
         cid_encoding: None,
         type3: None,
         substitute,
+        symbolic,
     }
 }
+
+/// `Symbolic` flag (bit 3) of a font descriptor's `Flags`, PDF §9.8.2
+/// Table 121.
+const FLAG_SYMBOLIC: i64 = 1 << 2;
 
 /// `MissingWidth` of the font descriptor (not of the font dictionary
 /// itself); 0 when absent (PDF §9.8.2).
@@ -549,6 +561,7 @@ mod tests {
             cid_encoding: None,
             type3: None,
             substitute: SubstituteStyle::default(),
+            symbolic: false,
         }
     }
 

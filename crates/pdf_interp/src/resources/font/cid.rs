@@ -285,6 +285,7 @@ pub(super) fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescr
         }),
         type3: None,
         substitute,
+        symbolic: false,
     }
 }
 
