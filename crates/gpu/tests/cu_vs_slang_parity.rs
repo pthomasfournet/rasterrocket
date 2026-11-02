@@ -61,7 +61,7 @@ fn run_composite_vulkan(src: &[u8], dst_in: &[u8]) -> Vec<u8> {
     backend.wait_page(fence).expect("wait_page");
 
     let mut out = vec![0u8; dst_in.len()];
-    backend.download_sync(&d_dst, &mut out).expect("download");
+    backend.download(&d_dst, &mut out).expect("download");
     out
 }
 
@@ -191,9 +191,7 @@ fn run_soft_mask_vulkan(pixels_in: &[u8], mask: &[u8]) -> Vec<u8> {
     backend.wait_page(fence).expect("wait_page");
 
     let mut out = vec![0u8; pixels_in.len()];
-    backend
-        .download_sync(&d_pixels, &mut out)
-        .expect("download");
+    backend.download(&d_pixels, &mut out).expect("download");
     out
 }
 
@@ -302,7 +300,7 @@ fn run_icc_clut_vulkan(cmyk: &[u8], clut: &[u8]) -> Vec<u8> {
     backend.wait_page(fence).expect("wait_page");
 
     let mut out = vec![0u8; cmyk.len() / 4 * 3];
-    backend.download_sync(&d_rgb, &mut out).expect("download");
+    backend.download(&d_rgb, &mut out).expect("download");
     out
 }
 
@@ -523,7 +521,7 @@ fn run_blit_vulkan(
     backend.wait_page(fence).expect("wait_page");
 
     let mut out = vec![0u8; dst_bytes];
-    backend.download_sync(&d_dst, &mut out).expect("download");
+    backend.download(&d_dst, &mut out).expect("download");
     out
 }
 

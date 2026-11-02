@@ -43,6 +43,8 @@ impl CudaBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for CudaBackend {}
+
 impl GpuBackend for CudaBackend {
     type DeviceBuffer = CudaSlice<u8>;
     type HostBuffer = PinnedHostSlice<u8>;
@@ -63,8 +65,8 @@ impl GpuBackend for CudaBackend {
 
     fn alloc_device_zeroed(&self, size: usize) -> Result<Self::DeviceBuffer> {
         reject_zero_size(size, "alloc_device_zeroed")?;
-        // The memset is queued on the calling thread's stream; later work
-        // on that stream reads zeros without needing wait_transfer.
+        // The memset is queued on the calling thread's stream, ahead of
+        // that thread's later kernels and copies.
         self.ctx.stream().alloc_zeros::<u8>(size).map_err(be)
     }
 
@@ -179,37 +181,8 @@ impl GpuBackend for CudaBackend {
         transfer::upload(&self.ctx, dst, src)
     }
 
-    fn download_async<'a>(
-        &self,
-        src: &'a Self::DeviceBuffer,
-        dst: &'a mut [u8],
-    ) -> Result<crate::backend::DownloadHandle<'a, Self>> {
-        let (inner, fence) = transfer::download_async(&self.ctx, src, dst)?;
-        Ok(crate::backend::DownloadHandle {
-            inner: Box::new(inner),
-            _borrow: std::marker::PhantomData,
-            fence,
-        })
-    }
-
-    fn wait_download(&self, mut handle: crate::backend::DownloadHandle<'_, Self>) -> Result<()> {
-        // CudaDownloadInner::finish disarms itself after the first
-        // successful wait; the post-return Drop calling finish() again
-        // is a no-op.
-        handle.inner.finish()
-    }
-
-    fn submit_transfer(&self) -> Result<Self::PageFence> {
-        // CUDA: a thread's stream already orders its uploads/downloads
-        // with its compute, so "submit transfer" only records an event
-        // for callers that want a fence to wait on.
-        page_recorder::PageRecorder::record_fence(&self.ctx)
-    }
-
-    fn wait_transfer(&self, fence: Self::PageFence) -> Result<()> {
-        // Same primitive as wait_page on CUDA — both wait on a
-        // CudaEvent recorded on the same stream.
-        self.recorder.wait_page(fence)
+    fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()> {
+        transfer::download(&self.ctx, src, dst)
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {

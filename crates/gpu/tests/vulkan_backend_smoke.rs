@@ -122,8 +122,8 @@ fn assert_zeroed_round_trip(backend: &VulkanBackend, size: usize, tag: &str) {
         .unwrap_or_else(|e| panic!("{tag}: alloc_device_zeroed({size}) failed: {e}"));
     let mut readback = vec![0xAAu8; size];
     backend
-        .download_sync(&buf, &mut readback)
-        .unwrap_or_else(|e| panic!("{tag}: download_sync failed: {e}"));
+        .download(&buf, &mut readback)
+        .unwrap_or_else(|e| panic!("{tag}: download failed: {e}"));
     if let Some(bad) = readback.iter().position(|&b| b != 0) {
         panic!(
             "{tag}: alloc_device_zeroed({size}) leaked non-zero byte 0x{:02x} at index {bad}",
@@ -232,19 +232,6 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
 }
 
 #[test]
-fn vulkan_backend_immediate_fence_round_trips() {
-    // submit_transfer returns PageFence::immediate() (a structural None
-    // sentinel); wait_transfer must return Ok without driving a Vulkan
-    // FFI call.  Exercises the wait_timeline(None) short-circuit added
-    // in the Option<NonZeroU64> rework.
-    let (backend, _serial) = shared_backend();
-    let fence = backend.submit_transfer().expect("submit_transfer");
-    backend
-        .wait_transfer(fence)
-        .expect("wait_transfer on immediate fence should succeed");
-}
-
-#[test]
 fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
     // alloc_device returns a buffer with undefined contents; upload a
     // sentinel pattern, then record_zero_buffer inside a page submission,
@@ -267,9 +254,7 @@ fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
     backend.wait_page(fence).expect("wait_page");
 
     let mut readback = vec![0xAAu8; SIZE];
-    backend
-        .download_sync(&buf, &mut readback)
-        .expect("download");
+    backend.download(&buf, &mut readback).expect("download");
     if let Some(bad) = readback.iter().position(|&b| b != 0) {
         panic!(
             "record_zero_buffer left non-zero byte 0x{:02x} at index {bad}",

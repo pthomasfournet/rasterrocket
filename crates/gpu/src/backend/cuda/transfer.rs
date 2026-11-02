@@ -1,10 +1,13 @@
 //! CUDA host↔device transfer helpers.
 //!
-//! `upload` / `download_async` are implemented here so the trait
-//! impl in `mod.rs` stays a thin dispatch table. Both queue on the
-//! calling thread's stream alongside its compute work, so a later
-//! `record_*` kernel launch from the same thread observes the transfer
-//! without an explicit barrier.
+//! `upload` / `download` are implemented here so the trait impl in
+//! `mod.rs` stays a thin dispatch table.  Both queue the copy on the
+//! calling thread's stream and synchronise the stream before returning:
+//! an asynchronous copy reads (or writes) a page-locked host buffer by
+//! DMA after the call that queued it returns, and the driver does not
+//! guarantee that a pageable buffer is staged before return either, so
+//! the wait is what keeps every access to the host slice within its
+//! borrow.  The wait also covers the work queued before the copy.
 //!
 //! Drops down to cudarc's raw `result::memcpy_*_async` entry points
 //! rather than the safe `CudaStream::memcpy_htod` wrapper because the
@@ -16,13 +19,12 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, DevicePtr};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DriverError};
 
 use crate::GpuCtx;
-use crate::backend::{BackendError, DownloadInner, Result};
+use crate::backend::{BackendError, Result};
 
 use super::be;
-use super::page_recorder::{PageFence, PageRecorder};
 
 /// Verify `src_len ≤ dst_capacity` and emit a uniform error message
 /// with the operation label for diagnostic clarity.
@@ -41,17 +43,8 @@ fn check_transfer_len(src_len: usize, dst_capacity: usize, op_label: &'static st
     Ok(())
 }
 
-/// Copy `src` into `dst` on the calling thread's stream and return
-/// once the copy has completed.
-///
-/// `cuMemcpyHtoDAsync` reads a page-locked source by DMA after the call
-/// returns, and the driver does not guarantee that a pageable source is
-/// staged before return either. Waiting on an event recorded after the
-/// copy is therefore what ends the read of `src` within its borrow.
-/// The event also orders every earlier item on the stream, so the call
-/// returns after previously queued kernels as well.
-///
-/// Empty `src` is a no-op, since cudarc rejects zero-byte transfers.
+/// Copy `src` into `dst` and return once the copy has completed.  Empty
+/// `src` is a no-op, since cudarc rejects zero-byte transfers.
 pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &CudaSlice<u8>, src: &[u8]) -> Result<()> {
     check_transfer_len(src.len(), dst.len(), "upload")?;
     if src.is_empty() {
@@ -60,78 +53,47 @@ pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &CudaSlice<u8>, src: &[u8]) -> Resu
     let stream = ctx.stream();
     let (dptr, _sync) = dst.device_ptr(&stream);
     // SAFETY: `dptr` addresses `dst` on `stream` and `src.len()` does
-    // not exceed `dst.len()` (checked above). The fence wait below
-    // returns only after the copy has finished reading `src`, which is
-    // borrowed for the whole call.
-    unsafe {
-        cudarc::driver::result::memcpy_htod_async(dptr, src, stream.cu_stream()).map_err(be)?;
-    }
-    PageRecorder::record_fence(ctx)?.synchronize()
+    // not exceed `dst.len()` (checked above).  `src` is borrowed for the
+    // whole call, and `finish_copy` returns only once the stream, and
+    // with it the copy, has completed.
+    let queued =
+        unsafe { cudarc::driver::result::memcpy_htod_async(dptr, src, stream.cu_stream()) };
+    finish_copy(&stream, queued)
 }
 
-/// Initiate an asynchronous device→host download on the calling
-/// thread's stream. Returns a download inner that holds the fence; the
-/// caller wraps it in a `DownloadHandle` and either waits on it via
-/// `wait_download` or lets it block-and-discard on Drop.
+/// Copy the first `dst.len()` bytes of `src` into `dst` and return once
+/// the copy has completed.  Empty `dst` is a no-op.
+pub(super) fn download(ctx: &Arc<GpuCtx>, src: &CudaSlice<u8>, dst: &mut [u8]) -> Result<()> {
+    check_transfer_len(dst.len(), src.len(), "download")?;
+    if dst.is_empty() {
+        return Ok(());
+    }
+    let stream = ctx.stream();
+    let (dptr, _sync) = src.device_ptr(&stream);
+    // SAFETY: `dptr` addresses `src` on `stream` and `dst.len()` does
+    // not exceed `src.len()` (checked above).  `dst` is borrowed for the
+    // whole call, and `finish_copy` returns only once the copy has
+    // completed.
+    let queued =
+        unsafe { cudarc::driver::result::memcpy_dtoh_async(dst, dptr, stream.cu_stream()) };
+    finish_copy(&stream, queued)
+}
+
+/// Wait for `stream`, on which a copy was queued with result `queued`.
 ///
-/// The dtoh copy writes directly into `dst` (no staging buffer); the
-/// caller-provided `&mut [u8]` lifetime is held by the
-/// `DownloadHandle` for the duration of the in-flight DMA.
-pub(super) fn download_async(
-    ctx: &Arc<GpuCtx>,
-    src: &CudaSlice<u8>,
-    dst: &mut [u8],
-) -> Result<(CudaDownloadInner, PageFence)> {
-    check_transfer_len(dst.len(), src.len(), "download_async")?;
-    // Empty `dst` path: skip the cudarc call (which would reject zero
-    // bytes), but still record a fence so the trait's "callable, then
-    // wait_download or wait on fence()" contract holds uniformly.
-    if !dst.is_empty() {
-        let stream = ctx.stream();
-        let (dptr, _sync) = src.device_ptr(&stream);
-        // Safety: `dptr` from cudarc for `src` on `stream`; `dst` is
-        // borrowed by the returned `DownloadHandle` for the in-flight
-        // DMA's lifetime via the trait's PhantomData; cudarc's async
-        // dtoh takes the host pointer at call time and the driver
-        // retains the address (not the slice metadata) until the
-        // stream catches up.
-        unsafe {
-            cudarc::driver::result::memcpy_dtoh_async(dst, dptr, stream.cu_stream()).map_err(be)?;
-        }
-    }
-    let fence = PageRecorder::record_fence(ctx)?;
-    Ok((CudaDownloadInner::new(fence.clone()), fence))
-}
-
-/// Backend-internal download-completion state for CUDA.
-///
-/// Wraps the post-copy `PageFence`. `finish()` blocks on the fence;
-/// after a successful wait the inner becomes a no-op so `Drop` (which
-/// also calls `finish()`) doesn't re-block.
-pub(super) struct CudaDownloadInner {
-    /// `None` after `finish()` returns Ok — disarms the Drop path.
-    fence: Option<PageFence>,
-}
-
-impl CudaDownloadInner {
-    const fn new(fence: PageFence) -> Self {
-        Self { fence: Some(fence) }
-    }
-}
-
-impl DownloadInner for CudaDownloadInner {
-    fn finish(&mut self) -> Result<()> {
-        if let Some(fence) = self.fence.take() {
-            fence.synchronize()?;
-        }
-        Ok(())
-    }
+/// The stream is synchronised even when queueing reported an error, so
+/// that no copy the driver did accept outlives the host borrow; the
+/// queueing error takes precedence over a synchronisation error.
+fn finish_copy(stream: &CudaStream, queued: std::result::Result<(), DriverError>) -> Result<()> {
+    let waited = stream.synchronize();
+    queued.map_err(be)?;
+    waited.map_err(be)
 }
 
 #[cfg(all(test, feature = "gpu-validation"))]
 mod tests {
+    use crate::backend::GpuBackend;
     use crate::backend::cuda::CudaBackend;
-    use crate::backend::{DownloadHandle, GpuBackend};
 
     fn try_backend() -> Option<CudaBackend> {
         CudaBackend::new().ok()
@@ -148,8 +110,7 @@ mod tests {
         b.upload(&dst, &payload).expect("upload");
 
         let mut readback = vec![0u8; payload.len()];
-        let handle = b.download_async(&dst, &mut readback).expect("download");
-        b.wait_download(handle).expect("wait download");
+        b.download(&dst, &mut readback).expect("download");
         assert_eq!(readback, payload);
     }
 
@@ -163,7 +124,7 @@ mod tests {
         let err = b.upload(&dst, &[0u8; 8]).expect_err("oversize must fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("upload") && msg.contains("exceeds"),
+            msg.starts_with("upload:") && msg.contains("exceeds"),
             "unexpected error: {msg}"
         );
     }
@@ -176,18 +137,14 @@ mod tests {
         };
         let src = b.alloc_device(4).expect("alloc");
         let mut dst = vec![0u8; 8];
-        // DownloadHandle is not Debug; expect_err would need it. Match
-        // manually instead.
-        match b.download_async(&src, &mut dst) {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("download_async") && msg.contains("exceeds"),
-                    "unexpected error: {msg}"
-                );
-            }
-            Ok(_) => panic!("oversize download must fail"),
-        }
+        let msg = b
+            .download(&src, &mut dst)
+            .expect_err("oversize must fail")
+            .to_string();
+        assert!(
+            msg.starts_with("download:") && msg.contains("exceeds"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -218,25 +175,7 @@ mod tests {
         b.upload(&dst, host).expect("upload");
         host.fill(0xC3);
         let mut readback = vec![0u8; LEN];
-        let handle = b.download_async(&dst, &mut readback).expect("download");
-        b.wait_download(handle).expect("wait download");
+        b.download(&dst, &mut readback).expect("download");
         assert!(readback.iter().all(|&v| v == 0x5A));
-    }
-
-    #[test]
-    fn drop_without_wait_does_not_panic() {
-        let Some(b) = try_backend() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        let dst = b.alloc_device(64).expect("alloc");
-        b.upload(&dst, &[0xAB; 64]).expect("setup");
-        let mut readback = vec![0u8; 64];
-        let handle: DownloadHandle<'_, CudaBackend> =
-            b.download_async(&dst, &mut readback).expect("download");
-        // Drop without calling wait_download — CudaDownloadInner::finish
-        // is idempotent (fence.take() arms it for exactly one
-        // synchronize()), so Drop's block-and-discard runs cleanly.
-        drop(handle);
     }
 }

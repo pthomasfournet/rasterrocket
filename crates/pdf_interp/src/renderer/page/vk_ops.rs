@@ -92,11 +92,7 @@ fn run_one_kernel(
     warn_err(backend.wait_page(fence), op_name, "wait_page")?;
 
     let mut out = vec![0u8; out_len];
-    warn_err(
-        backend.download_sync(output, &mut out),
-        op_name,
-        "download_sync",
-    )?;
+    warn_err(backend.download(output, &mut out), op_name, "download")?;
     Some(out)
 }
 

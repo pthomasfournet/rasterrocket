@@ -78,9 +78,6 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
         let s_info = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
         let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
 
-        // Uploads are ordered before the first recorded kernel by the
-        // backend (same CUDA stream; Vulkan cross-queue barrier at
-        // submit), so the fences are not awaited.
         backend.upload(bitstream.as_ref(), bytemuck::cast_slice(&stream.words))?;
         backend.upload(codebook.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
 
@@ -135,8 +132,7 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
             self.num_subsequences as usize
         ];
         let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut out);
-        let handle = backend.download_async(self.s_info.as_ref(), dst)?;
-        backend.wait_download(handle)?;
+        backend.download(self.s_info.as_ref(), dst)?;
         Ok(out)
     }
 }
@@ -170,8 +166,7 @@ fn run_phase1_and_phase2<B: GpuBackend>(
         backend.wait_page(fence)?;
 
         let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
-        let handle = backend.download_async(sync_flags.as_ref(), dst)?;
-        backend.wait_download(handle)?;
+        backend.download(sync_flags.as_ref(), dst)?;
 
         std::mem::swap(&mut setup.s_info, &mut setup.s_info_scratch);
         if flags_host.iter().all(|&f| f == 1) {

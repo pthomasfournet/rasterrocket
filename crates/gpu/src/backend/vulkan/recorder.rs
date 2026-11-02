@@ -47,23 +47,10 @@ use super::device::DeviceCtx;
 use super::error::vk_err;
 use super::pipeline::{KernelId, PipelineCache};
 
-/// Synchronisation token for a queue submission.
-///
-/// `Some(v)` carries the timeline-semaphore value to wait on; `None`
-/// is the "no work to wait on" sentinel returned by paths that
-/// completed synchronously.  Encoding the sentinel as `None` makes
-/// "real submission ⇒ real fence" a type-system invariant rather
-/// than the previous "value 0 means already-signalled" convention.
+/// Synchronisation token for a page submission: the timeline-semaphore
+/// value the submission signals.
 #[derive(Debug, Clone, Copy)]
-pub struct PageFence(Option<NonZeroU64>);
-
-impl PageFence {
-    /// A fence that has already signalled — caller has nothing to wait
-    /// on.  Returned by sync paths that completed inline.
-    pub(super) const fn immediate() -> Self {
-        Self(None)
-    }
-}
+pub struct PageFence(NonZeroU64);
 
 /// State machine for the recorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,7 +254,7 @@ impl PageRecorder {
             }
         })?;
         s.state = State::Submitted;
-        Ok(PageFence(Some(value)))
+        Ok(PageFence(value))
     }
 
     pub(super) fn wait_page(&self, fence: PageFence) -> Result<()> {
@@ -285,27 +272,9 @@ impl PageRecorder {
         Ok(())
     }
 
-    /// Wait on a transfer fence without the page state-machine check.
-    ///
-    /// `wait_page` enforces `state == Submitted` because page rendering
-    /// is a strict begin/record/submit/wait cycle.  Transfer-queue
-    /// fences (returned by `submit_transfer` and
-    /// `download_async`) ride the same timeline semaphore but DON'T
-    /// participate in the page state machine — `submit_transfer` does
-    /// not transition the recorder.  Use this method to wait on those
-    /// fences without tripping the state check.
-    pub(super) fn wait_transfer_fence(&self, fence: PageFence) -> Result<()> {
-        self.wait_timeline(fence.0)
-    }
-
-    /// `vkWaitSemaphores` with `u64::MAX` timeout.  `None` short-
-    /// circuits without an FFI call (the immediate-fence sentinel).
-    /// See [`Self::wait_transfer_fence`] for the wait_page-vs-transfer
-    /// split.
-    fn wait_timeline(&self, value: Option<NonZeroU64>) -> Result<()> {
-        let Some(value) = value else {
-            return Ok(());
-        };
+    /// `vkWaitSemaphores` on the timeline reaching `value`, with no
+    /// timeout.
+    fn wait_timeline(&self, value: NonZeroU64) -> Result<()> {
         let semaphores = [self.timeline];
         let values = [value.get()];
         let wait_info = vk::SemaphoreWaitInfo::default()

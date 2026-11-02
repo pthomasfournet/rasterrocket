@@ -995,14 +995,11 @@ mod tests {
         dec.decode().expect("zune-jpeg decode")
     }
 
-    /// Download RGBA8 bytes from a `DeviceImage` via `download_async`.
+    /// The RGBA8 bytes of a `DeviceImage`.
     fn download_image(backend: &CudaBackend, img: &DeviceImage<CudaBackend>) -> Vec<u8> {
         let n = (img.width as usize) * (img.height as usize) * 4;
         let mut buf = vec![0u8; n];
-        let handle = backend
-            .download_async(&img.buffer, &mut buf)
-            .expect("download_async");
-        backend.wait_download(handle).expect("wait_download");
+        backend.download(&img.buffer, &mut buf).expect("download");
         buf
     }
 

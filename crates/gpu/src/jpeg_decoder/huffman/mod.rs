@@ -292,8 +292,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
             self.num_subsequences as usize
         ];
         let dst = bytemuck::cast_slice_mut::<SubsequenceState, u8>(&mut out);
-        let handle = backend.download_async(self.s_info.as_ref(), dst)?;
-        backend.wait_download(handle)?;
+        backend.download(self.s_info.as_ref(), dst)?;
         Ok(out)
     }
 
@@ -353,8 +352,7 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
         backend.wait_page(fence)?;
 
         let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
-        let handle = backend.download_async(setup.sync_flags.as_ref(), dst)?;
-        backend.wait_download(handle)?;
+        backend.download(setup.sync_flags.as_ref(), dst)?;
 
         std::mem::swap(&mut setup.s_info, &mut setup.s_info_scratch);
         if flags_host.contains(&JPEG_PHASE2_OVER_BUDGET) {
@@ -429,8 +427,7 @@ fn dispatch_jpeg_phase1_memo<B: GpuBackend>(
         setup.num_subsequences as usize
     ];
     let dst = bytemuck::cast_slice_mut::<[SubsequenceState; 4], u8>(&mut out);
-    let handle = backend.download_async(setup.memo.as_ref(), dst)?;
-    backend.wait_download(handle)?;
+    backend.download(setup.memo.as_ref(), dst)?;
     setup.free_all(backend);
     Ok(out)
 }
@@ -654,8 +651,7 @@ fn download_u32s<B: GpuBackend>(
 ) -> Result<Vec<u32>> {
     let mut host = vec![0u32; len];
     let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut host);
-    let handle = backend.download_async(buf.as_ref(), dst)?;
-    backend.wait_download(handle)?;
+    backend.download(buf.as_ref(), dst)?;
     Ok(host)
 }
 

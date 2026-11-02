@@ -241,7 +241,7 @@ mod vulkan {
         backend.wait_page(fence).expect("wait_page");
 
         let mut out = vec![0u8; n_pixels];
-        backend.download_sync(&d_cov, &mut out).expect("download");
+        backend.download(&d_cov, &mut out).expect("download");
         out
     }
 

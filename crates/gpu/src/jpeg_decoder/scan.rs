@@ -75,8 +75,7 @@ pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
     backend.wait_page(fence)?;
 
     let mut out_bytes = vec![0u8; data_bytes];
-    let handle = backend.download_async(data.as_ref(), &mut out_bytes)?;
-    backend.wait_download(handle)?;
+    backend.download(data.as_ref(), &mut out_bytes)?;
 
     backend.free_device(data.take());
     backend.free_device(block_sums.take());

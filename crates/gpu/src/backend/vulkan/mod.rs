@@ -84,15 +84,6 @@ impl VulkanBackend {
             device,
         })
     }
-
-    /// Synchronously download `src[0..dst.len()]` into `dst`.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if `dst.len()` exceeds `src.size()` or if
-    /// any underlying Vulkan call fails.
-    pub fn download_sync(&self, src: &memory::DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-        self.transfer.download_sync(&self.memory, src, dst)
-    }
 }
 
 impl Drop for VulkanBackend {
@@ -109,6 +100,8 @@ impl Drop for VulkanBackend {
         }
     }
 }
+
+impl crate::backend::sealed::Sealed for VulkanBackend {}
 
 impl GpuBackend for VulkanBackend {
     type DeviceBuffer = memory::DeviceBuffer;
@@ -247,46 +240,11 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
-        self.transfer.upload_sync(&self.memory, dst, src)
+        self.transfer.upload(&self.memory, dst, src)
     }
 
-    fn download_async<'a>(
-        &self,
-        src: &'a Self::DeviceBuffer,
-        dst: &'a mut [u8],
-    ) -> Result<crate::backend::DownloadHandle<'a, Self>> {
-        // Sync today; ROADMAP tracks the async transfer-queue follow-up.
-        self.transfer.download_sync(&self.memory, src, dst)?;
-        Ok(crate::backend::DownloadHandle {
-            inner: Box::new(NoopDownloadInner),
-            _borrow: std::marker::PhantomData,
-            fence: PageFence::immediate(),
-        })
-    }
-
-    fn wait_download(&self, mut handle: crate::backend::DownloadHandle<'_, Self>) -> Result<()> {
-        // NoopDownloadInner::finish is idempotent (returns Ok(())), so
-        // the post-finish Drop calling finish() again is a no-op.  When
-        // the async impl lands and finish() is no longer idempotent,
-        // disarm the handle here.
-        handle.inner.finish()
-    }
-
-    fn submit_transfer(&self) -> Result<Self::PageFence> {
-        // Nothing to flush while transfers are sync; `immediate` keeps
-        // the trait contract (wait_transfer on it returns at once).
-        // ROADMAP tracks the async transfer-queue follow-up.
-        Ok(PageFence::immediate())
-    }
-
-    fn wait_transfer(&self, fence: Self::PageFence) -> Result<()> {
-        // Transfers ride the same timeline-semaphore wait path as
-        // page submissions today; future split-queue work may add a
-        // second timeline.  Use the recorder's no-state-check variant:
-        // `submit_transfer` doesn't transition the recorder out of
-        // Idle, so going through `wait_page` would trip its state
-        // assertion every time.
-        self.recorder.wait_transfer_fence(fence)
+    fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()> {
+        self.transfer.download(&self.memory, src, dst)
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {
@@ -298,18 +256,5 @@ impl GpuBackend for VulkanBackend {
         // so this holds; clamp anyway in case a driver reports an
         // inconsistent budget.
         Ok(VramBudget::new(total, usable.min(total)))
-    }
-}
-
-/// No-op `DownloadInner` for the sync-download path — the
-/// device→host copy already happened inside `download_sync`, so the
-/// handle's `finish` has nothing to do.  Replaced by a real impl
-/// (staging→dst memcpy under fence wait) when the async transfer
-/// queue lands.
-struct NoopDownloadInner;
-
-impl crate::backend::DownloadInner for NoopDownloadInner {
-    fn finish(&mut self) -> crate::backend::Result<()> {
-        Ok(())
     }
 }

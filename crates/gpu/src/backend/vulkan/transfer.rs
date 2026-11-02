@@ -22,7 +22,7 @@ use super::memory::{DeviceBuffer, FillAction, HostBuffer, SlabAllocator, validat
 
 /// Convert a host-side `usize` length to `u64` and verify it doesn't
 /// exceed the device-side buffer capacity.  `op_label` and `cap_label`
-/// only show up in the error message, e.g. `("upload_sync", "dst capacity")`.
+/// only show up in the error message, e.g. `("upload", "dst capacity")`.
 fn check_len(len: usize, capacity: u64, op_label: &str, cap_label: &str) -> Result<u64> {
     let len_u64 = u64::try_from(len)
         .map_err(|_| BackendError::msg(format!("{op_label}: length ({len}) exceeds u64")))?;
@@ -53,7 +53,7 @@ pub(super) struct TransferContext {
     /// upload/download seen so far.  `None` until the first transfer;
     /// reallocated only when a request exceeds the current capacity.
     /// The `Mutex` guards the staging payload: a concurrent
-    /// `upload_sync` would otherwise observe the same staging buffer
+    /// `upload` would otherwise observe the same staging buffer
     /// mid-DMA.  Command-pool / queue external-sync are NOT this
     /// lock's job — see `cmd_pool` and `DeviceCtx::with_queue`.
     staging: Mutex<Option<HostBuffer>>,
@@ -93,7 +93,7 @@ impl TransferContext {
 
     /// Copy `src` into `dst[0..src.len()]` through the staging buffer and
     /// block until the copy has completed; backs the trait's `upload`.
-    pub(super) fn upload_sync(
+    pub(super) fn upload(
         &self,
         allocator: &SlabAllocator,
         dst: &DeviceBuffer,
@@ -102,7 +102,7 @@ impl TransferContext {
         if src.is_empty() {
             return Ok(());
         }
-        let len = check_len(src.len(), dst.size(), "upload_sync", "dst capacity")?;
+        let len = check_len(src.len(), dst.size(), "upload", "dst capacity")?;
         // Hold the staging slot for the entire operation: write the
         // payload, kick off the GPU copy, wait for completion.  Releasing
         // the lock between write and wait would let a second upload
@@ -120,7 +120,7 @@ impl TransferContext {
 
     /// Synchronous download: copy `src[0..dst.len()]` into `dst`, block
     /// until complete.
-    pub(super) fn download_sync(
+    pub(super) fn download(
         &self,
         allocator: &SlabAllocator,
         src: &DeviceBuffer,
@@ -129,7 +129,7 @@ impl TransferContext {
         if dst.is_empty() {
             return Ok(());
         }
-        let len = check_len(dst.len(), src.size(), "download_sync", "src size")?;
+        let len = check_len(dst.len(), src.size(), "download", "src size")?;
         let mut staging_slot = self
             .staging
             .lock()

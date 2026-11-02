@@ -53,23 +53,6 @@ pub(super) struct PageRecorder {
 #[derive(Debug, Clone)]
 pub struct PageFence(Arc<CudaEvent>);
 
-impl PageFence {
-    /// Block the calling thread until the wrapped `CudaEvent` signals.
-    ///
-    /// Exposed for backend-internal helpers that need to drive an
-    /// event-bound completion outside the `wait_page` / `wait_transfer`
-    /// trait paths — notably `transfer::CudaDownloadInner::finish`,
-    /// which must satisfy the `DownloadInner` trait without holding a
-    /// `&PageRecorder` of its own.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the underlying `cuEventSynchronize`
-    /// call fails (driver error or device fault).
-    pub(super) fn synchronize(&self) -> Result<()> {
-        self.0.synchronize().map_err(be)
-    }
-}
-
 impl PageRecorder {
     pub(super) const fn new(ctx: Arc<GpuCtx>) -> Self {
         Self { ctx }
@@ -98,17 +81,7 @@ impl PageRecorder {
     /// the event.  The host can then block on the event with
     /// `wait_page` instead of synchronising the whole stream.
     pub(super) fn submit_page(&self) -> Result<PageFence> {
-        Self::record_fence(&self.ctx)
-    }
-
-    /// Record a fresh fence on the calling thread's stream without going
-    /// through the per-page state machine.  Used by
-    /// `CudaBackend::submit_transfer` since the CUDA path has no
-    /// distinct transfer queue — a thread's transfers and kernels share
-    /// its stream, and an event recorded there signals once everything
-    /// queued before it has completed.
-    pub(super) fn record_fence(ctx: &Arc<GpuCtx>) -> Result<PageFence> {
-        let event = ctx.stream().record_event(None).map_err(be)?;
+        let event = self.ctx.stream().record_event(None).map_err(be)?;
         Ok(PageFence(Arc::new(event)))
     }
 

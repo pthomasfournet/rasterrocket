@@ -1263,6 +1263,8 @@ mod tests {
     /// route through them.
     struct FakeBackend;
 
+    impl super::super::sealed::Sealed for FakeBackend {}
+
     impl GpuBackend for FakeBackend {
         type DeviceBuffer = usize;
         type HostBuffer = ();
@@ -1321,23 +1323,7 @@ mod tests {
         fn device_buffer_len(&self, buf: &Self::DeviceBuffer) -> usize {
             *buf
         }
-        fn download_async<'a>(
-            &self,
-            _src: &'a Self::DeviceBuffer,
-            _dst: &'a mut [u8],
-        ) -> super::super::Result<super::super::DownloadHandle<'a, Self>> {
-            unreachable!()
-        }
-        fn wait_download(
-            &self,
-            _handle: super::super::DownloadHandle<'_, Self>,
-        ) -> super::super::Result<()> {
-            unreachable!()
-        }
-        fn submit_transfer(&self) -> super::super::Result<Self::PageFence> {
-            unreachable!()
-        }
-        fn wait_transfer(&self, _fence: Self::PageFence) -> super::super::Result<()> {
+        fn download(&self, _src: &Self::DeviceBuffer, _dst: &mut [u8]) -> super::super::Result<()> {
             unreachable!()
         }
         fn detect_vram_budget(&self) -> super::super::Result<super::super::VramBudget> {

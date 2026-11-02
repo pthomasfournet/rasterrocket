@@ -225,10 +225,7 @@ pub(in crate::resources::image) fn decode_dct<
                     } else {
                         let n = (w as usize) * (h as usize) * 4;
                         let mut rgba = vec![0u8; n];
-                        let downloaded = dec
-                            .backend()
-                            .download_async(&img.buffer, &mut rgba)
-                            .and_then(|fence| dec.backend().wait_download(fence));
+                        let downloaded = dec.backend().download(&img.buffer, &mut rgba);
                         match downloaded {
                             Ok(()) => {
                                 // The IDCT kernel always writes RGBA8. For
