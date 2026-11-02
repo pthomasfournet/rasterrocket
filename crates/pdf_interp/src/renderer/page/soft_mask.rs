@@ -22,7 +22,7 @@ use raster::Bitmap;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
-use super::canvas::{PageCanvas, Snapshot, with_canvas};
+use super::canvas::{CanvasKind, PageCanvas, Snapshot, with_canvas};
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
@@ -75,7 +75,11 @@ impl PageRenderer<'_> {
             gs.blend_mode = BlendMode::Normal;
         }
         let knockout = std::mem::replace(&mut self.group.knockout, false);
-        let mask = PageCanvas::new(self.canvas.kind(), self.width, self.height, true);
+        // A mask group yields mask values, not printed colorants, so it is
+        // painted in sRGB whatever the page's canvas: its luminosity is
+        // that of its colours (PDF §11.6.5.2), which ink, whose greys print
+        // in black alone, would not reproduce.
+        let mask = PageCanvas::new(CanvasKind::Rgb, self.width, self.height, true);
         let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);
         let canvas = std::mem::replace(&mut self.canvas, page);

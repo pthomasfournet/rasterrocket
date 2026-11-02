@@ -16,7 +16,7 @@ use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
 use raster::{eo_fill, fill};
 
-use super::canvas::{CanvasPattern, with_canvas};
+use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::renderer::color::RasterColor;
@@ -51,18 +51,32 @@ pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
     pb.build()
 }
 
+/// A shading's `Background` `bg` as painted on a canvas of `kind`: on an
+/// ink canvas mapped through `transfer`, which the pipe applies on an RGB
+/// canvas (see `PageRenderer::shading_pipe`).
+fn background(kind: CanvasKind, bg: [u8; 3], transfer: Option<&Transfer>) -> RasterColor {
+    let bg = RasterColor::from_bytes(bg);
+    match kind {
+        CanvasKind::Rgb => bg,
+        CanvasKind::Ink => bg.transferred(transfer),
+    }
+}
+
 impl PageRenderer<'_> {
-    /// The compositing state for a shading: `make_pipe` with `transfer`,
-    /// the transfer function in effect, applied to the shading's colours.
+    /// The compositing state for a shading on a canvas of `kind`:
+    /// `make_pipe`, applying `transfer`, the transfer function in effect,
+    /// to the shading's colours on an RGB canvas.  On an ink canvas the
+    /// shading's sources apply it before their conversion to ink.
     fn shading_pipe<'a>(
+        kind: CanvasKind,
         alpha: u8,
         blend_mode: BlendMode,
         backdrop: Option<&'a Backdrop>,
         transfer: Option<&'a Transfer>,
     ) -> PipeState<'a> {
         let mut pipe = Self::make_pipe(alpha, blend_mode, backdrop);
-        if let Some(transfer) = transfer {
-            pipe.transfer = Self::transfer_set(transfer);
+        if let Some(set) = CanvasPattern::pipe_transfer(kind, transfer) {
+            pipe.transfer = set;
         }
         pipe
     }
@@ -103,8 +117,13 @@ impl PageRenderer<'_> {
         };
         let Some(ext) = ext_gstate else {
             let (alpha, blend_mode, backdrop, transfer) = pipe_of(self);
-            let pipe =
-                Self::shading_pipe(alpha, blend_mode, backdrop.as_deref(), transfer.as_deref());
+            let pipe = Self::shading_pipe(
+                self.canvas.kind(),
+                alpha,
+                blend_mode,
+                backdrop.as_deref(),
+                transfer.as_deref(),
+            );
             return paint(self, &pipe, shading);
         };
         self.gstate.save();
@@ -112,7 +131,13 @@ impl PageRenderer<'_> {
         self.apply_ext_gstate(ext);
         self.gstate.current_mut().ctm = ctm;
         let (alpha, blend_mode, backdrop, transfer) = pipe_of(self);
-        let pipe = Self::shading_pipe(alpha, blend_mode, backdrop.as_deref(), transfer.as_deref());
+        let pipe = Self::shading_pipe(
+            self.canvas.kind(),
+            alpha,
+            blend_mode,
+            backdrop.as_deref(),
+            transfer.as_deref(),
+        );
         let result = match self.gstate.current_mut().soft_mask.take() {
             Some(mask) => self.paint_through_soft_mask(&mask, region, |r| paint(r, &pipe, shading)),
             None => paint(self, &pipe, shading),
@@ -130,6 +155,7 @@ impl PageRenderer<'_> {
         let backdrop = self.blend_backdrop(gs.blend_mode);
         let transfer = gs.transfer.clone();
         let pipe = Self::shading_pipe(
+            self.canvas.kind(),
             gs.fill_alpha,
             gs.blend_mode,
             backdrop.as_deref(),
@@ -161,7 +187,8 @@ impl PageRenderer<'_> {
                     (clip.x_max, clip.y_max),
                     (clip.x_min, clip.y_max),
                 ]);
-                let pattern = CanvasPattern::new(r.canvas.kind(), pattern.as_ref());
+                let pattern =
+                    CanvasPattern::new(r.canvas.kind(), pattern.as_ref(), transfer.as_deref());
                 with_canvas!(&mut r.canvas, |b| shaded_fill(
                     b,
                     &clip,
@@ -176,7 +203,8 @@ impl PageRenderer<'_> {
             }
             ShadingResult::Mesh(mesh) => {
                 for tri in mesh.meeting(&clip) {
-                    r.canvas.gouraud_triangle(&clip, &pipe, tri);
+                    r.canvas
+                        .gouraud_triangle(&clip, &pipe, transfer.as_deref(), tri);
                 }
             }
         });
@@ -195,6 +223,7 @@ impl PageRenderer<'_> {
     ) {
         let antialias = self.vector_antialias;
         let kind = self.canvas.kind();
+        let transfer = self.gstate.current().transfer.clone();
         let paint = |r: &mut Self, clip: &Clip, src: &PipeSrc<'_>| {
             with_canvas!(&mut r.canvas, |b| {
                 let fill_fn = if even_odd { eo_fill } else { fill };
@@ -211,20 +240,21 @@ impl PageRenderer<'_> {
             });
         };
         if let Some(bg) = shading.background {
-            let bg = RasterColor::from_bytes(bg);
+            let bg = background(kind, bg, transfer.as_deref());
             paint(self, &clip, &PipeSrc::Solid(bg.bytes_for(kind.mode())));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
         match &shading.result {
             ShadingResult::Pattern(pattern) => {
-                let pattern = CanvasPattern::new(kind, pattern.as_ref());
+                let pattern = CanvasPattern::new(kind, pattern.as_ref(), transfer.as_deref());
                 paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
             }
             ShadingResult::Mesh(mesh) => {
                 let mut clip = clip;
                 clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
                 for tri in mesh.meeting(&clip) {
-                    self.canvas.gouraud_triangle(&clip, pipe, tri);
+                    self.canvas
+                        .gouraud_triangle(&clip, pipe, transfer.as_deref(), tri);
                 }
             }
         }
@@ -250,8 +280,9 @@ impl PageRenderer<'_> {
         shading: &ResolvedShading,
     ) {
         let kind = self.canvas.kind();
+        let transfer = self.gstate.current().transfer.clone();
         if let Some(bg) = shading.background {
-            let bg = RasterColor::from_bytes(bg);
+            let bg = background(kind, bg, transfer.as_deref());
             let src = PipeSrc::Solid(bg.bytes_for(kind.mode()));
             with_canvas!(&mut self.canvas, |b| stroke(
                 b, &clip, path, pipe, &src, matrix, params
@@ -260,7 +291,7 @@ impl PageRenderer<'_> {
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
         match &shading.result {
             ShadingResult::Pattern(pattern) => {
-                let pattern = CanvasPattern::new(kind, pattern.as_ref());
+                let pattern = CanvasPattern::new(kind, pattern.as_ref(), transfer.as_deref());
                 let src = PipeSrc::Pattern(pattern.as_dyn());
                 with_canvas!(&mut self.canvas, |b| stroke(
                     b, &clip, path, pipe, &src, matrix, params
@@ -286,7 +317,8 @@ impl PageRenderer<'_> {
                 let mut clip = clip;
                 clip.clip_to_path(&outline, false);
                 for tri in mesh.meeting(&clip) {
-                    self.canvas.gouraud_triangle(&clip, pipe, tri);
+                    self.canvas
+                        .gouraud_triangle(&clip, pipe, transfer.as_deref(), tri);
                 }
             }
         }

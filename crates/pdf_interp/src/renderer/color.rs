@@ -19,9 +19,10 @@ use crate::resources::transfer::Transfer;
 /// The colour is held as sRGB bytes, painted on an RGB canvas, and as ink
 /// amounts `[C, M, Y, K, S0, S1, S2, S3]` (0 = no ink), painted on an ink
 /// canvas.  A colour given in a four-component process space keeps its
-/// components as the ink; any other colour's ink is the nearest in-gamut
-/// CMY of its sRGB bytes with K and the spots 0, computed on first use so
-/// that a page painted on an RGB canvas never evaluates it.
+/// components as the ink; any other colour's ink is
+/// [`color::cmyk::rgb_to_ink`] of its sRGB bytes — black alone for a grey,
+/// the nearest in-gamut CMY otherwise — with no spot ink, computed on first
+/// use so that a page painted on an RGB canvas never evaluates it.
 ///
 /// `PipeSrc::Solid` takes `&[u8]` and asserts its length equals the pixel
 /// component count; [`Self::bytes_for`] returns the slice for a mode.
@@ -112,7 +113,7 @@ impl RasterColor {
     #[must_use]
     pub(crate) fn ink(&self) -> &[u8; 8] {
         self.ink.get_or_init(|| {
-            let [c, m, y, k] = color::cmyk::rgb_to_cmyk(self.bytes);
+            let [c, m, y, k] = color::cmyk::rgb_to_ink(self.bytes);
             [c, m, y, k, 0, 0, 0, 0]
         })
     }
@@ -179,6 +180,8 @@ mod tests {
         assert_eq!(c.bytes_for(PixelMode::Rgb8), c.as_slice());
         let white = RasterColor::gray(1.0);
         assert_eq!(white.ink(), &[0; 8]);
+        // A grey prints in black ink alone.
+        assert_eq!(RasterColor::gray(0.2).ink(), &[0, 0, 0, 204, 0, 0, 0, 0]);
         // Equal RGB given as process inks differs from the derived colour.
         let given = RasterColor::with_process_inks([255; 3], [0.0; 4]);
         assert_eq!(given.ink(), white.ink());

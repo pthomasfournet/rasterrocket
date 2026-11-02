@@ -13,16 +13,17 @@
 
 use std::cell::RefCell;
 
-use color::cmyk::{SpotLut, ink_to_rgb_row, rgb_to_cmyk};
+use color::cmyk::{SpotLut, ink_to_rgb_row, rgb_to_ink};
 use color::{DeviceN8, Pixel, PixelMode, Rgb8};
 use raster::Bitmap;
 use raster::clip::Clip;
-use raster::pipe::{Pattern, PipeSrc, PipeState, RowPattern, render_bitmap_span};
+use raster::pipe::{Pattern, PipeSrc, PipeState, RowPattern, TransferSet, render_bitmap_span};
 use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
 use raster::transparency::{Backdrop, GroupBitmap, GroupParams, begin_group, paint_group};
 
 use super::PageRenderer;
 use super::pixel_rect::PixelRect;
+use crate::resources::transfer::Transfer;
 
 /// Run `$body` with `$b` bound to the bitmap of `$canvas`, of either pixel
 /// type: `with_canvas!(&mut self.canvas, |b| fill(b, ..))` binds `b` as
@@ -112,7 +113,11 @@ impl PageCanvas {
         let mut rgb = Bitmap::<Rgb8>::new(ink.width, ink.height, 1, ink.has_alpha());
         let n = ink.width as usize;
         for y in 0..ink.height {
-            ink_to_rgb_row(&ink.row_bytes(y)[..n * 8], spots, rgb.row_bytes_mut(y));
+            ink_to_rgb_row(
+                &ink.row_bytes(y)[..n * 8],
+                spots,
+                &mut rgb.row_bytes_mut(y)[..n * 3],
+            );
         }
         if let (Some(src), Some(dst)) = (ink.alpha_plane(), rgb.alpha_plane_mut()) {
             dst.copy_from_slice(src);
@@ -151,11 +156,14 @@ impl PageCanvas {
     }
 
     /// Fill one Gouraud-shaded triangle through `pipe`, clipped to `clip`.
-    /// The interpolated sRGB spans reach an ink canvas converted to ink.
+    /// The interpolated sRGB spans reach an ink canvas mapped through
+    /// `transfer` and converted to ink; on an RGB canvas `pipe` carries the
+    /// transfer function.
     pub(super) fn gouraud_triangle(
         &mut self,
         clip: &Clip,
         pipe: &PipeState<'_>,
+        transfer: Option<&Transfer>,
         tri: [GouraudVertex; 3],
     ) {
         match self {
@@ -167,7 +175,7 @@ impl PageCanvas {
                     render_bitmap_span::<DeviceN8>(
                         b,
                         pipe,
-                        &PipeSrc::Pattern(&InkPattern(&row)),
+                        &PipeSrc::Pattern(&InkPattern::new(&row, transfer)),
                         None,
                         x0,
                         x1,
@@ -439,21 +447,31 @@ impl PageRenderer<'_> {
 
 thread_local! {
     /// The sRGB span an [`InkPattern`] converts.  Separate from the pipe's
-    /// own span buffers, which are held while a pattern fills a span.
+    /// own span buffers, which are held while a pattern fills a span.  It
+    /// is borrowed while the inner pattern fills it, so an `InkPattern`
+    /// never wraps another: the inner pattern yields sRGB, never ink.
     /// Grow-never-shrink.
     static RGB_SPAN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A [`Pattern`] of sRGB bytes served as ink: each pixel the inner pattern
-/// yields becomes the ink [`rgb_to_cmyk`] gives it, with no spot ink.  The
-/// pattern only converts; coverage and the static-colour hint are the inner
-/// pattern's.
-pub(super) struct InkPattern<'a>(pub(super) &'a dyn Pattern);
+/// yields is mapped through the transfer function, if any, and becomes the
+/// ink [`rgb_to_ink`] gives it, with no spot ink.  The pattern only
+/// converts; coverage and the static-colour hint are the inner pattern's.
+pub(super) struct InkPattern<'a> {
+    pattern: &'a dyn Pattern,
+    transfer: Option<&'a Transfer>,
+}
 
-impl InkPattern<'_> {
+impl<'a> InkPattern<'a> {
+    /// `pattern` served as ink, its colours mapped through `transfer`.
+    pub(super) fn new(pattern: &'a dyn Pattern, transfer: Option<&'a Transfer>) -> Self {
+        Self { pattern, transfer }
+    }
+
     /// Fill `out` with ink by running `fill` on an sRGB span of the same
     /// pixel count.
-    fn convert(out: &mut [u8], fill: impl FnOnce(&mut [u8])) {
+    fn convert(&self, out: &mut [u8], fill: impl FnOnce(&mut [u8])) {
         RGB_SPAN.with_borrow_mut(|rgb| {
             rgb.resize(out.len() / 8 * 3, 0);
             fill(rgb);
@@ -467,7 +485,8 @@ impl InkPattern<'_> {
                 *dst = match last {
                     Some((seen, ink)) if seen == *src => ink,
                     _ => {
-                        let [c, m, y, k] = rgb_to_cmyk(*src);
+                        let mapped = self.transfer.map_or(*src, |t| t.apply(*src));
+                        let [c, m, y, k] = rgb_to_ink(mapped);
                         let ink = [c, m, y, k, 0, 0, 0, 0];
                         last = Some((*src, ink));
                         ink
@@ -480,26 +499,27 @@ impl InkPattern<'_> {
 
 impl Pattern for InkPattern<'_> {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        Self::convert(out, |rgb| self.0.fill_span(y, x0, x1, rgb));
+        self.convert(out, |rgb| self.pattern.fill_span(y, x0, x1, rgb));
     }
 
     fn is_static_color(&self) -> bool {
-        self.0.is_static_color()
+        self.pattern.is_static_color()
     }
 
     fn may_leave_unpainted(&self) -> bool {
-        self.0.may_leave_unpainted()
+        self.pattern.may_leave_unpainted()
     }
 
     fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
-        Self::convert(out, |rgb| {
-            self.0.fill_span_coverage(y, x0, x1, rgb, coverage);
+        self.convert(out, |rgb| {
+            self.pattern.fill_span_coverage(y, x0, x1, rgb, coverage);
         });
     }
 }
 
 /// A pattern of sRGB bytes as a canvas of a given kind takes it: as it is
-/// on an RGB canvas, through [`InkPattern`] on an ink canvas.
+/// on an RGB canvas, where the pipe applies the transfer function, and
+/// through [`InkPattern`], which applies it, on an ink canvas.
 pub(super) enum CanvasPattern<'a> {
     /// The pattern itself.
     Rgb(&'a dyn Pattern),
@@ -508,12 +528,29 @@ pub(super) enum CanvasPattern<'a> {
 }
 
 impl<'a> CanvasPattern<'a> {
-    /// `pattern` for a canvas of `kind`.
-    pub(super) fn new(kind: CanvasKind, pattern: &'a dyn Pattern) -> Self {
+    /// `pattern` for a canvas of `kind`, its colours mapped through
+    /// `transfer` on an ink canvas.
+    pub(super) fn new(
+        kind: CanvasKind,
+        pattern: &'a dyn Pattern,
+        transfer: Option<&'a Transfer>,
+    ) -> Self {
         match kind {
             CanvasKind::Rgb => Self::Rgb(pattern),
-            CanvasKind::Ink => Self::Ink(InkPattern(pattern)),
+            CanvasKind::Ink => Self::Ink(InkPattern::new(pattern, transfer)),
         }
+    }
+
+    /// The transfer set `pipe` applies for a pattern on a canvas of `kind`:
+    /// the tables of `transfer` on an RGB canvas; on an ink canvas the
+    /// pattern itself applies them (see [`InkPattern`]), so none.
+    pub(super) fn pipe_transfer(
+        kind: CanvasKind,
+        transfer: Option<&Transfer>,
+    ) -> Option<TransferSet<'_>> {
+        transfer
+            .filter(|_| kind == CanvasKind::Rgb)
+            .map(PageRenderer::transfer_set)
     }
 
     /// The pattern to hand to the pipe.
@@ -564,16 +601,14 @@ mod tests {
         assert_eq!(bitmap.row_bytes(0), &[0, 0, 0, 100, 0, 0, 0, 0]);
     }
 
-    /// A solid pattern of sRGB white and black becomes no ink and the ink
-    /// [`rgb_to_cmyk`] gives black.
+    /// A pattern of sRGB white and black becomes no ink and black ink.
     #[test]
     fn an_ink_pattern_converts_each_pixel() {
         let rgb = [255, 255, 255, 0, 0, 0, 0, 0, 0];
         let row = RowPattern { data: &rgb };
         let mut out = [9u8; 24];
-        InkPattern(&row).fill_span(0, 0, 2, &mut out);
-        let [c, m, y, k] = rgb_to_cmyk([0, 0, 0]);
-        let black = [c, m, y, k, 0, 0, 0, 0];
+        InkPattern::new(&row, None).fill_span(0, 0, 2, &mut out);
+        let black = [0, 0, 0, 255, 0, 0, 0, 0];
         assert_eq!(out[..8], [0; 8]);
         assert_eq!(out[8..16], black);
         assert_eq!(out[16..], black);

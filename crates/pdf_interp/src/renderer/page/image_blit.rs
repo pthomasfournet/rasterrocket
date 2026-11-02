@@ -114,10 +114,12 @@ impl PageRenderer<'_> {
             None => (img.smask.as_ref(), page_ctm),
         };
         // A device-resident image is sampled at full resolution by the
-        // blit kernel; a draw that reduces it takes a host copy so that it
-        // is area-averaged as a host-resident image is.
+        // blit kernel, which writes sRGB.  A draw that reduces it takes a
+        // host copy so that it is area-averaged as a host-resident image
+        // is, and so does any draw onto an ink canvas, which the kernel
+        // cannot write.
         #[cfg(feature = "cache")]
-        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm);
+        let host_copy = self.host_copy_for_cpu_draw(img, &page_ctm);
         #[cfg(feature = "cache")]
         let img = host_copy.as_ref().unwrap_or(img);
         let reduced = image_reduce::reduce_for_draw(img, &page_ctm);
@@ -217,12 +219,12 @@ impl PageRenderer<'_> {
     }
 
     /// A host-resident copy of `img` when its samples are device-resident
-    /// and drawing them through `ctm` reduces the image, or the canvas holds
-    /// ink; `None` otherwise,
-    /// or when the copy fails, in which case the device samples are drawn
-    /// as they are.
+    /// and the draw takes the CPU path: drawing them through `ctm` reduces
+    /// the image, or the canvas holds ink.  `None` otherwise, or when the
+    /// copy fails; the device samples are then drawn as they are, which on
+    /// an ink canvas fails the image.
     #[cfg(feature = "cache")]
-    pub(super) fn host_copy_for_reduced_draw(
+    pub(super) fn host_copy_for_cpu_draw(
         &self,
         img: &crate::resources::ImageDescriptor,
         ctm: &Ctm,
@@ -232,17 +234,22 @@ impl PageRenderer<'_> {
         let ImageData::Gpu(cached) = &img.data else {
             return None;
         };
-        // The blit kernel writes sRGB, so an ink canvas draws a host copy.
         let ink = self.canvas.kind() == CanvasKind::Ink;
-        if !ink && !image_reduce::draw_reduces(ctm, img.width, img.height) {
+        let reduces = image_reduce::draw_reduces(ctm, img.width, img.height);
+        if !ink && !reduces {
             return None;
         }
         let cache = &self.cache_state.as_ref()?.cache;
         let pixels = cache
             .download(cached)
             .map_err(|e| {
+                let draw = if reduces {
+                    "a reduced draw"
+                } else {
+                    "an ink canvas"
+                };
                 log::warn!(
-                    "rasterrocket-interp: reading a cached image back for a reduced draw failed: {e}"
+                    "rasterrocket-interp: reading a cached image back for {draw} failed: {e}"
                 );
             })
             .ok()?;
@@ -677,7 +684,7 @@ impl<'a> ImageCompositor<'a> {
             let samples = RowPattern {
                 data: &colours[a * 3..b * 3],
             };
-            let ink = InkPattern(&samples);
+            let ink = InkPattern::new(&samples, None);
             let src = match self.solid {
                 Some(solid) => PipeSrc::Solid(solid),
                 None if P::MODE == PixelMode::DeviceN8 => PipeSrc::Pattern(&ink),

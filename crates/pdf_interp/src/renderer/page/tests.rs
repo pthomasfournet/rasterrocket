@@ -11,6 +11,7 @@ use raster::pipe::{PipeSrc, PipeState};
 use raster::types::BlendMode;
 
 use super::super::gstate::{Ctm, ctm_transform};
+use super::canvas::PageCanvas;
 use super::canvas::blend_u8;
 use super::image_blit::{ImageCompositor, ImageLenError, blend_rgb, check_image_bytes_len};
 use super::pixel_rect::PixelRect;
@@ -1565,30 +1566,129 @@ fn ink_canvas_transparency_group() {
     assert_ink_matches_rgb(&doc, b"/H gs /F Do", 2);
 }
 
-/// Shadings, tiling patterns, mesh triangles, images and glyphs reach the
-/// ink canvas as ink.  Every pixel is one opaque colour, or one ink over
-/// paper, so the two canvases agree within the inversion's rounding; a
-/// mixture of inks at partial coverage interpolates in ink and may not.
-/// Greys stay above the darkest CMY grey, which `rgb_to_cmyk` reaches.
+/// Render `content` on page `(4, 0)` of `doc`, 10 pixels square, onto an
+/// ink canvas; the canvas's ink bytes, eight per pixel.
+fn render_ink(doc: &Document, content: &[u8]) -> Vec<u8> {
+    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
+    renderer.force_ink_canvas();
+    renderer.execute(&crate::content::parse(content));
+    let PageCanvas::Ink(ink) = &renderer.canvas else {
+        panic!("an ink canvas");
+    };
+    ink.data().to_vec()
+}
+
+/// Assert that `a` and `b` paint the same ink, within `tolerance` per
+/// channel, and that they paint some.
+fn assert_same_ink(doc: &Document, a: &[u8], b: &[u8], tolerance: u8) {
+    let (ink_a, ink_b) = (render_ink(doc, a), render_ink(doc, b));
+    let name = || {
+        format!(
+            "{} / {}",
+            String::from_utf8_lossy(a),
+            String::from_utf8_lossy(b)
+        )
+    };
+    assert!(ink_a.iter().any(|&v| v != 0), "{} paints", name());
+    for (i, (&x, &y)) in ink_a.iter().zip(&ink_b).enumerate() {
+        assert!(
+            x.abs_diff(y) <= tolerance,
+            "{}: byte {i}: {x} vs {y}",
+            name()
+        );
+    }
+}
+
+/// Every pixel of `ink` is unpainted or the ink `want`.
+fn assert_ink_pixels(ink: &[u8], want: [u8; 8]) {
+    let painted: Vec<_> = ink
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .filter(|px| px.iter().any(|&v| v != 0))
+        .collect();
+    assert!(!painted.is_empty(), "the content paints");
+    for px in painted {
+        assert_eq!(*px, want);
+    }
+}
+
+/// Black and other greys, as `DeviceGray` or as equal RGB components,
+/// print in black ink alone (`K = 1 − gray`).
 #[test]
-fn ink_canvas_paints_shadings_patterns_images_and_text() {
+fn ink_canvas_greys_print_in_black_ink() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    for content in [b"0 g 0 0 10 10 re f".as_slice(), b"0 0 0 rg 0 0 10 10 re f"] {
+        assert_ink_pixels(&render_ink(&doc, content), [0, 0, 0, 255, 0, 0, 0, 0]);
+    }
+    assert_ink_pixels(
+        &render_ink(&doc, b"0.2 g 0 0 10 10 re f"),
+        [0, 0, 0, 204, 0, 0, 0, 0],
+    );
+    // The samples of a grey image print in black ink alone.
+    let ink = render_ink(
+        &doc,
+        b"q 8 0 0 8 1 1 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x00\x40\x80\xc0 EI Q",
+    );
+    assert!(ink.as_chunks::<8>().0.iter().any(|px| px[3] == 255));
+    assert!(ink.as_chunks::<8>().0.iter().all(|px| px[..3] == [0, 0, 0]));
+}
+
+/// Shadings and tiling patterns reach the ink canvas as the ink of their
+/// colours, mapped through the transfer function in effect: the 0.2 grey
+/// of `shading_doc` paints as a 0.2 grey fill does, and under the
+/// inverting transfer as a 0.8 grey fill.
+#[test]
+fn ink_canvas_shadings_and_patterns_paint_their_colours_transferred() {
     let doc = shading_doc("", "/DeviceGray", 0.2);
+    for (transfer, solid) in [("", "0.2"), ("/Inv gs ", "0.8")] {
+        for (content, fill) in [
+            ("/Sh sh", format!("{solid} g 0 0 10 10 re f")),
+            (
+                "/Pattern cs /P scn 0 0 8 8 re f",
+                format!("{solid} g 0 0 8 8 re f"),
+            ),
+            (
+                "/Pattern cs /T scn 0 0 8 8 re f",
+                format!("{solid} g 0 0 8 8 re f"),
+            ),
+            (
+                "/Pattern CS /T SCN 8 w 0 4 m 10 4 l S",
+                format!("{solid} G 8 w 0 4 m 10 4 l S"),
+            ),
+        ] {
+            let content = format!("{transfer}{content}");
+            assert_same_ink(&doc, content.as_bytes(), fill.as_bytes(), 0);
+        }
+    }
+}
+
+/// Mesh triangles, images and glyphs reach the ink canvas as ink.  Every
+/// pixel is one opaque colour, or one ink over paper, so the canvases agree
+/// within the inversion's rounding; a mixture of inks at partial coverage
+/// interpolates in ink and may not.  The colours are not neutral, and the
+/// RGB ones lie inside the CMY gamut that `rgb_to_cmyk` reaches.
+#[test]
+fn ink_canvas_paints_meshes_images_and_text() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
     for content in [
-        b"/Sh sh".as_slice(),
-        b"/Pattern cs /P scn 0 0 8 8 re f",
-        b"/Pattern cs /T scn 0 0 8 8 re f",
-        b"/Pattern CS /T SCN 8 w 0 4 m 10 4 l S",
-        b"q 8 0 0 8 1 1 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x40\x80\xc0\x60 EI Q",
+        b"q 8 0 0 8 1 1 cm BI /W 2 /H 1 /CS /RGB /BPC 8 ID \xc8\x96\x64\xb4\x78\x5a EI Q"
+            .as_slice(),
         b"0 0 0 1 k q 8 0 0 8 1 1 cm BI /W 2 /H 2 /IM true ID \x50\xa0 EI Q",
     ] {
         assert_ink_matches_rgb(&doc, content, 2);
     }
 
-    let mesh: &[u8] = b"\x00\x00\x00\x33\x00\xff\x00\x33\x00\x00\xff\x33";
-    let mut shading = b"<< /ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 8 \
-        /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 10 0 10 0 1] /Length 12 >>\nstream\n"
-        .to_vec();
-    shading.extend_from_slice(mesh);
+    let vertex = |x: u8, y: u8| [0, x, y, 200, 150, 100];
+    let mesh: Vec<u8> = [vertex(0, 0), vertex(255, 0), vertex(0, 255)].concat();
+    let mut shading = format!(
+        "<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+         /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 10 0 10 0 1 0 1 0 1] \
+         /Length {} >>\nstream\n",
+        mesh.len()
+    )
+    .into_bytes();
+    shading.extend_from_slice(&mesh);
     shading.extend_from_slice(b"\nendstream");
     let doc = crate::test_helpers::make_doc_with_objects(&[
         (
@@ -1607,4 +1707,47 @@ fn ink_canvas_paints_shadings_patterns_images_and_text() {
         (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
     ]);
     assert_ink_matches_rgb(&doc, b"0 0 0 1 k BT /F1 9 Tf 1 2 Td (Hi) Tj ET", 2);
+}
+
+/// Ink composites over ink in ink: solid cyan in a group painted at
+/// `/ca 0.5` over 30 % black.  The page has no alpha, so each ink is
+/// `(a·src + (255 − a)·dst) / 255` with `a = 128` (0.5 rounded to a byte):
+/// cyan `128·255 / 255 = 128`, black `127·77 / 255 = 38.35 → 38`.
+#[test]
+fn ink_canvas_ink_over_ink_at_partial_alpha() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /H << /ca 0.5 >> >> \
+             /XObject << /F 5 0 R >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency >>",
+                "1 0 0 0 k 0 0 10 10 re f",
+            ),
+        ),
+    ]);
+    let ink = render_ink(&doc, b"0 0 0 0.3 k 0 0 10 10 re f /H gs /F Do");
+    assert_ink_pixels(&ink, [128, 0, 0, 38, 0, 0, 0, 0]);
+}
+
+/// `Multiply` on ink multiplies the complements, the additive values
+/// (PDF §11.3.5): opaque 100 % cyan and 50 % black over 30 % black give
+/// cyan `1 − (1 − 1)·(1 − 0) = 1 → 255` and black
+/// `1 − (1 − 128/255)·(1 − 77/255) = 0.6506 → 166`.
+#[test]
+fn ink_canvas_multiply_multiplies_the_complements() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(
+        4,
+        "<< /Type /Page /Resources << /ExtGState << /B << /BM /Multiply >> >> >> >>",
+    )]);
+    let ink = render_ink(
+        &doc,
+        b"0 0 0 0.3 k 0 0 10 10 re f /B gs 1 0 0 0.5 k 0 0 10 10 re f",
+    );
+    assert_ink_pixels(&ink, [255, 0, 0, 166, 0, 0, 0, 0]);
 }

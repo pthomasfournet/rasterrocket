@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use color::TransferLut;
 use raster::{
-    eo_fill, fill,
+    TiledPattern, eo_fill, fill,
     path::PathBuilder,
     pipe::{Pattern, PipeSrc, PipeState, TransferSet},
     stroke::{StrokeParams, stroke},
@@ -16,7 +16,7 @@ use raster::{
 
 use super::super::color::RasterColor;
 use super::super::gstate::{ctm_transform, invert_affine};
-use super::canvas::{CanvasPattern, with_canvas};
+use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
 use super::patterns::PatternPaint;
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -287,24 +287,21 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
-        if let (Some(_), Some(transfer)) = (&tiled, &transfer) {
-            pipe.transfer = Self::transfer_set(transfer);
-        }
-        let kind = self.canvas.kind();
-        let tiled = tiled
-            .as_ref()
-            .map(|p| CanvasPattern::new(kind, p as &dyn Pattern));
-        let src = tiled.as_ref().map_or_else(
-            || PipeSrc::Solid(solid_color.bytes_for(kind.mode())),
-            |p| PipeSrc::Pattern(p.as_dyn()),
+        let source = PaintSource::new(
+            self.canvas.kind(),
+            tiled.as_ref(),
+            &solid_color,
+            transfer.as_deref(),
+            &mut pipe,
         );
+        let src = source.src();
 
         // Solid-colour fills only. The device evaluates the CPU scanner's
         // intersection table and the counts are composited through the CPU
         // pipeline, so either backend yields the bytes the CPU fill below
         // would. A session attaches at most one of the two backends.
         #[cfg(feature = "gpu-aa")]
-        if tiled.is_none()
+        if source.pattern.is_none()
             && self.vector_antialias
             && self.try_device_aa_fill(path, even_odd, flatness, &pipe, &src)
         {
@@ -476,21 +473,56 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
-        if let (Some(_), Some(transfer)) = (&tiled, &transfer) {
-            pipe.transfer = Self::transfer_set(transfer);
-        }
-        let kind = self.canvas.kind();
-        let tiled = tiled
-            .as_ref()
-            .map(|p| CanvasPattern::new(kind, p as &dyn Pattern));
-        let src = tiled.as_ref().map_or_else(
-            || PipeSrc::Solid(solid_color.bytes_for(kind.mode())),
-            |p| PipeSrc::Pattern(p.as_dyn()),
+        let source = PaintSource::new(
+            self.canvas.kind(),
+            tiled.as_ref(),
+            &solid_color,
+            transfer.as_deref(),
+            &mut pipe,
         );
+        let src = source.src();
 
         with_canvas!(&mut self.canvas, |b| stroke(
             b, &clip, &path, &pipe, &src, &matrix, &params
         ));
+    }
+}
+
+/// What a fill or stroke paints, as the canvas takes it: a tiling pattern
+/// or a solid colour.
+struct PaintSource<'a> {
+    /// The tiling pattern, if the paint has one.
+    pattern: Option<CanvasPattern<'a>>,
+    /// The solid colour's bytes for the canvas.
+    solid: &'a [u8],
+}
+
+impl<'a> PaintSource<'a> {
+    /// The source of a paint of `tiled`, or else of `solid`, on a canvas of
+    /// `kind`.  A pattern's colours map through `transfer`, which `pipe`
+    /// takes on an RGB canvas; the solid colour is already mapped.
+    fn new(
+        kind: CanvasKind,
+        tiled: Option<&'a TiledPattern>,
+        solid: &'a RasterColor,
+        transfer: Option<&'a Transfer>,
+        pipe: &mut PipeState<'a>,
+    ) -> Self {
+        if let Some(set) = tiled.and_then(|_| CanvasPattern::pipe_transfer(kind, transfer)) {
+            pipe.transfer = set;
+        }
+        Self {
+            pattern: tiled.map(|p| CanvasPattern::new(kind, p as &dyn Pattern, transfer)),
+            solid: solid.bytes_for(kind.mode()),
+        }
+    }
+
+    /// The source as the pipe takes it.
+    fn src(&self) -> PipeSrc<'_> {
+        self.pattern.as_ref().map_or_else(
+            || PipeSrc::Solid(self.solid),
+            |p| PipeSrc::Pattern(p.as_dyn()),
+        )
     }
 }
 
