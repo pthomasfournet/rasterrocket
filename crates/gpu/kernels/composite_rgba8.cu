@@ -1,7 +1,20 @@
 // Porter-Duff source-over compositing for RGBA8 pixels.
-// src_pixels: RGBA interleaved (R,G,B,A per pixel)
-// dst_pixels: RGBA interleaved (R,G,B,A per pixel)
+// src_pixels, dst_pixels: RGBA interleaved, 4-byte aligned (one uchar4 per pixel).
 // n_pixels: total pixel count
+//
+// With a_src in [1, 254], a_out = a_src + round(a_dst * (255 - a_src) / 255)
+// lies in [1, 255], so the division by a_out is defined and a_out fits a byte.
+
+__device__ __forceinline__ unsigned char blend_channel(
+    unsigned int s, unsigned int d,
+    unsigned int a_src, unsigned int a_dst, unsigned int inv, unsigned int a_out
+) {
+    // Floor truncation in the d*a_dst*inv/255 term can push the quotient
+    // past 255 (max 261); clamp before the narrowing cast.
+    unsigned int v = (s * a_src + d * a_dst * inv / 255 + a_out / 2) / a_out;
+    return (unsigned char)min(v, 255u);
+}
+
 extern "C" __global__ void composite_rgba8(
     const unsigned char* __restrict__ src_pixels,
     unsigned char* __restrict__ dst_pixels,
@@ -9,27 +22,21 @@ extern "C" __global__ void composite_rgba8(
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_pixels) return;
-    unsigned int base = i * 4;
-    unsigned int a_src = src_pixels[base + 3];
-    if (a_src == 0) return;
-    if (a_src == 255) {
-        dst_pixels[base]     = src_pixels[base];
-        dst_pixels[base + 1] = src_pixels[base + 1];
-        dst_pixels[base + 2] = src_pixels[base + 2];
-        dst_pixels[base + 3] = 255;
+    const uchar4 s = reinterpret_cast<const uchar4*>(src_pixels)[i];
+    if (s.w == 0) return;
+    uchar4* dst = reinterpret_cast<uchar4*>(dst_pixels);
+    if (s.w == 255) {
+        dst[i] = s;
         return;
     }
-    unsigned int a_dst  = dst_pixels[base + 3];
-    unsigned int inv    = 255 - a_src;
-    unsigned int a_out  = a_src + ((a_dst * inv + 127) / 255);
-    if (a_out == 0) return;
-    for (int c = 0; c < 3; c++) {
-        unsigned int s = src_pixels[base + c];
-        unsigned int d = dst_pixels[base + c];
-        // Floor truncation in the d*a_dst*inv/255 term can push the quotient
-        // past 255 (max 261); clamp before the narrowing cast.
-        unsigned int v = (s * a_src + d * a_dst * inv / 255 + a_out / 2) / a_out;
-        dst_pixels[base + c] = (unsigned char)min(v, 255u);
-    }
-    dst_pixels[base + 3] = (unsigned char)a_out;
+    const uchar4 d = dst[i];
+    unsigned int a_src = s.w;
+    unsigned int a_dst = d.w;
+    unsigned int inv   = 255 - a_src;
+    unsigned int a_out = a_src + ((a_dst * inv + 127) / 255);
+    dst[i] = make_uchar4(
+        blend_channel(s.x, d.x, a_src, a_dst, inv, a_out),
+        blend_channel(s.y, d.y, a_src, a_dst, inv, a_out),
+        blend_channel(s.z, d.z, a_src, a_dst, inv, a_out),
+        (unsigned char)a_out);
 }
