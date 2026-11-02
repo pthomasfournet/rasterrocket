@@ -1322,10 +1322,13 @@ dependencies = [
 name = "rasterrocket-encode"
 version = "2.0.0"
 dependencies = [
+ "flate2",
  "jpeg-encoder",
  "png",
  "rasterrocket-color",
  "rasterrocket-render",
+ "tiff",
+ "weezl 0.2.1",
  "zune-jpeg",
 ]
 

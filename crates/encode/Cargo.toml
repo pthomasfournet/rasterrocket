@@ -22,9 +22,15 @@ png = "0.18"
 # JPEG output — pure Rust, no system libs. (MIT OR Apache-2.0) AND IJG.
 jpeg-encoder = "0.7"
 
+# TIFF strip compression: zlib Deflate and TIFF-variant LZW, pure Rust.
+flate2 = "1"
+weezl = "0.2"
+
 [dev-dependencies]
 # Decodes the JPEG output in tests.
 zune-jpeg = "0.5.15"
+# Reads the TIFF output back in tests: an independent decoder.
+tiff = { workspace = true }
 
 [lints]
 workspace = true
