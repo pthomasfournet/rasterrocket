@@ -230,7 +230,7 @@ fn encode_gray_to_path(
 ) -> Result<(), RenderError> {
     write_output(out_path, |out| {
         if args.mono {
-            let mono = tone::gray_to_mono(gray);
+            let mono = tone::gray_to_mono(gray, args.screen());
             match format {
                 OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, out)?,
                 OutputFormat::Png => write_png::<Gray8, _>(&mono, out)?,

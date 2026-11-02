@@ -183,6 +183,19 @@ pub(crate) struct Args {
     #[arg(long = "mono")]
     pub mono: bool,
 
+    /// How --mono renders intermediate grays: `none` (default), a 50%
+    /// threshold that keeps text and line art sharp, or `halftone`, dot
+    /// patterns that keep photographs and shading legible: a dispersed
+    /// ordered dither below 300 dpi, a stochastic clustered dot at 300 dpi
+    /// or more.
+    #[arg(
+        long = "dither",
+        value_name = "METHOD",
+        value_enum,
+        default_value = "none"
+    )]
+    pub dither: DitherArg,
+
     /// Invert the page's tones, as a negative: `always`, `never`, or
     /// `auto`, only pages that are mostly dark (over three fifths of the
     /// pixels below mid-gray), such as light text on a dark ground.
@@ -422,6 +435,15 @@ impl From<PurposeArg> for RenderPurpose {
     }
 }
 
+/// `--dither` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum DitherArg {
+    /// Threshold at mid-gray.
+    None,
+    /// Halftone screen.
+    Halftone,
+}
+
 /// `--invert` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum InvertWhen {
@@ -452,6 +474,26 @@ impl Args {
         camera.dewarp = self.dewarp;
         camera.split_spreads = self.split_spreads;
         camera
+    }
+
+    /// The halftone screen of `--dither halftone` at the output
+    /// resolution, or `None` for thresholding.
+    pub(crate) fn screen(&self) -> Option<raster::ScreenParams> {
+        (self.dither == DitherArg::Halftone).then(|| {
+            if self.x_dpi().min(self.y_dpi()) < 300.0 {
+                raster::ScreenParams {
+                    kind: raster::ScreenType::Dispersed,
+                    size: 4,
+                    dot_radius: 2,
+                }
+            } else {
+                raster::ScreenParams {
+                    kind: raster::ScreenType::StochasticClustered,
+                    size: 64,
+                    dot_radius: 2,
+                }
+            }
+        })
     }
 
     /// Which pages `--invert` turns.
@@ -544,6 +586,9 @@ impl Args {
             > 1
         {
             return Err("--png, --jpeg and --tiff are mutually exclusive".to_owned());
+        }
+        if self.dither != DitherArg::None && !self.mono {
+            return Err("--dither applies to --mono output only".to_owned());
         }
         if self.jpegopt.is_some() && !self.jpeg {
             return Err("--jpegopt applies to --jpeg output only".to_owned());

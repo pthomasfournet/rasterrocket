@@ -4,7 +4,7 @@
 
 use color::{Gray8, Pixel};
 use pdf_raster::rgb_to_gray;
-use raster::Bitmap;
+use raster::{Bitmap, HalftoneScreen, ScreenParams};
 
 use crate::args::{Args, InvertWhen};
 use crate::cleanup::Page;
@@ -75,16 +75,31 @@ fn complement<P: Pixel>(bmp: &mut Bitmap<P>) {
     }
 }
 
-/// Threshold a grayscale bitmap to two levels at the 50% midpoint, as luma:
-/// values below [`MONO_THRESHOLD`] become 0 (black), the others 255 (white).
-pub(crate) fn gray_to_mono(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
+/// Reduce a grayscale bitmap to two levels, as luma 0 (black) and 255
+/// (white): through the halftone `screen` when given, which renders
+/// intermediate grays as dot patterns, else at the 50% midpoint, values
+/// below [`MONO_THRESHOLD`] black.
+pub(crate) fn gray_to_mono(src: &Bitmap<Gray8>, screen: Option<ScreenParams>) -> Bitmap<Gray8> {
     let mut dst: Bitmap<Gray8> = Bitmap::new(src.width, src.height, 1, false);
     let w = src.width as usize;
+    let mut screen = screen.map(HalftoneScreen::new);
     for y in 0..src.height {
         let src_row = &src.row_bytes(y)[..w];
         let dst_row = &mut dst.row_bytes_mut(y)[..w];
-        for (dst_px, &luma) in dst_row.iter_mut().zip(src_row.iter()) {
-            *dst_px = if luma < MONO_THRESHOLD { 0 } else { 255 };
+        match &mut screen {
+            None => {
+                for (dst_px, &luma) in dst_row.iter_mut().zip(src_row) {
+                    *dst_px = if luma < MONO_THRESHOLD { 0 } else { 255 };
+                }
+            }
+            Some(screen) => {
+                // The screen tiles with a power-of-two period, so the
+                // coordinates enter it modulo that period and may wrap.
+                let row = y.cast_signed();
+                for ((x, dst_px), &luma) in (0i32..).zip(dst_row.iter_mut()).zip(src_row) {
+                    *dst_px = if screen.test(x, row, luma) { 255 } else { 0 };
+                }
+            }
         }
     }
     dst
@@ -104,8 +119,36 @@ mod tests {
     fn mono_is_luma_black_ink_on_white() {
         let mut gray: Bitmap<Gray8> = Bitmap::new(3, 1, 1, false);
         gray.row_bytes_mut(0)[..3].copy_from_slice(&[0, 127, 128]);
-        let mono = gray_to_mono(&gray);
+        let mono = gray_to_mono(&gray, None);
         assert_eq!(&mono.row_bytes(0)[..3], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn halftone_renders_gray_as_a_proportion_of_dots() {
+        let screen = Args::parse_from([
+            "rrocket", "--mono", "--dither", "halftone", "-r", "200", "in.pdf", "out",
+        ])
+        .screen();
+        assert!(screen.is_some());
+        for (level, low, high) in [(0u8, 0, 0), (64, 40, 90), (128, 100, 156), (255, 256, 256)] {
+            let mut gray: Bitmap<Gray8> = Bitmap::new(16, 16, 1, false);
+            for y in 0..16 {
+                gray.row_bytes_mut(y)[..16].fill(level);
+            }
+            let mono = gray_to_mono(&gray, screen);
+            let white: usize = (0..16)
+                .map(|y| {
+                    mono.row_bytes(y)[..16]
+                        .iter()
+                        .map(|&v| usize::from(v / 255))
+                        .sum::<usize>()
+                })
+                .sum();
+            assert!(
+                (low..=high).contains(&white),
+                "level {level}: {white} of 256 white"
+            );
+        }
     }
 
     /// A gray page of ten pixels, `dark` of them black and the rest white.

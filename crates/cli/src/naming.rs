@@ -107,6 +107,7 @@ mod tests {
             jpegopt: None,
             tiffcompression: None,
             invert: None,
+            dither: crate::args::DitherArg::None,
             jpegcmyk: false,
             tiff: false,
             gray: false,
