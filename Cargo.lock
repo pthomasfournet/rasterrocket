@@ -1326,6 +1326,7 @@ dependencies = [
  "png",
  "rasterrocket-color",
  "rasterrocket-render",
+ "zune-jpeg",
 ]
 
 [[package]]

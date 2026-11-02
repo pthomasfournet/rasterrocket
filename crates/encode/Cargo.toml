@@ -22,5 +22,9 @@ png = "0.18"
 # JPEG output — pure Rust, no system libs. (MIT OR Apache-2.0) AND IJG.
 jpeg-encoder = "0.7"
 
+[dev-dependencies]
+# Decodes the JPEG output in tests.
+zune-jpeg = "0.5.15"
+
 [lints]
 workspace = true

@@ -5,6 +5,39 @@ use clap::Parser;
 use pdf_raster::{BackendPolicy, RenderPurpose, RenderRegion, SessionConfig};
 
 /// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
+/// Parse `--jpegopt`: comma-separated `quality=N` (0–100),
+/// `progressive=y|n` and `optimize=y|n`, as `pdftoppm -jpegopt` takes them.
+fn parse_jpeg_options(s: &str) -> Result<encode::JpegOptions, String> {
+    let mut options = encode::JpegOptions::default();
+    for item in s.split(',').filter(|item| !item.is_empty()) {
+        let (key, value) = item
+            .split_once('=')
+            .ok_or_else(|| format!("{item:?} is not KEY=VALUE"))?;
+        let yes_no = || match value {
+            "y" => Ok(true),
+            "n" => Ok(false),
+            _ => Err(format!("{key} takes y or n, not {value:?}")),
+        };
+        match key {
+            "quality" => {
+                options.quality = value
+                    .parse()
+                    .ok()
+                    .filter(|q| *q <= 100)
+                    .ok_or_else(|| format!("quality takes 0 to 100, not {value:?}"))?;
+            }
+            "progressive" => options.progressive = yes_no()?,
+            "optimize" => options.optimize = yes_no()?,
+            _ => {
+                return Err(format!(
+                    "unknown JPEG option {key:?}; the options are quality, progressive and optimize"
+                ));
+            }
+        }
+    }
+    Ok(options)
+}
+
 fn parse_positive_dpi(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .parse()
@@ -119,9 +152,14 @@ pub(crate) struct Args {
     #[arg(long)]
     pub png: bool,
 
-    /// JPEG output: not implemented; refused at startup.
+    /// Output JPEG.
     #[arg(long)]
     pub jpeg: bool,
+
+    /// JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default
+    /// 75), `progressive=y|n`, `optimize=y|n`, comma-separated.
+    #[arg(long = "jpegopt", value_name = "OPTIONS", value_parser = parse_jpeg_options)]
+    pub jpegopt: Option<encode::JpegOptions>,
 
     /// CMYK JPEG output: not implemented; refused at startup.
     #[arg(long)]
@@ -448,11 +486,7 @@ impl Args {
     /// Returns `Err` with a human-readable message naming the alternative.
     /// Call this once at startup, before any page is rendered.
     pub(crate) fn validate_format_flags(&self) -> Result<(), String> {
-        for (set, flag) in [
-            (self.jpeg, "--jpeg"),
-            (self.jpegcmyk, "--jpegcmyk"),
-            (self.tiff, "--tiff"),
-        ] {
+        for (set, flag) in [(self.jpegcmyk, "--jpegcmyk"), (self.tiff, "--tiff")] {
             if set {
                 return Err(format!(
                     "{flag} output is not implemented; use --png or the default PPM output"
@@ -462,13 +496,21 @@ impl Args {
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
+        if self.png && self.jpeg {
+            return Err("--png and --jpeg are mutually exclusive".to_owned());
+        }
+        if self.jpegopt.is_some() && !self.jpeg {
+            return Err("--jpegopt applies to --jpeg output only".to_owned());
+        }
         Ok(())
     }
 
     /// Resolved output format.
-    pub(crate) const fn output_format(&self) -> OutputFormat {
+    pub(crate) fn output_format(&self) -> OutputFormat {
         if self.png {
             OutputFormat::Png
+        } else if self.jpeg {
+            OutputFormat::Jpeg(self.jpegopt.unwrap_or_default())
         } else {
             OutputFormat::Ppm
         }
@@ -482,6 +524,8 @@ pub(crate) enum OutputFormat {
     Ppm,
     /// PNG.
     Png,
+    /// JPEG, gray under `--gray` and `--mono`.
+    Jpeg(encode::JpegOptions),
 }
 
 impl OutputFormat {
@@ -490,6 +534,7 @@ impl OutputFormat {
     /// - PPM + mono → `.pbm` (P4 binary Netpbm, 1-bit)
     /// - PPM + gray → `.pgm` (P5 grayscale Netpbm, 8-bit)
     /// - PNG + gray/mono → `.png` (grayscale PNG)
+    /// - JPEG → `.jpg`, gray or colour
     /// - All other combinations use the format's natural extension.
     pub(crate) const fn extension_with_mode(self, gray: bool, mono: bool) -> &'static str {
         match (self, mono, gray) {
@@ -497,6 +542,7 @@ impl OutputFormat {
             (Self::Ppm, false, true) => "pgm",
             (Self::Ppm, false, false) => "ppm",
             (Self::Png, _, _) => "png",
+            (Self::Jpeg(_), _, _) => "jpg",
         }
     }
 }
@@ -879,13 +925,58 @@ mod page_list_tests {
 
     #[test]
     fn unimplemented_formats_are_refused_up_front() {
-        for flag in ["--jpeg", "--jpegcmyk", "--tiff"] {
+        for flag in ["--jpegcmyk", "--tiff"] {
             let err = Args::parse_from(["rrocket", flag, "in.pdf", "out"])
                 .validate_format_flags()
                 .unwrap_err();
             assert!(err.starts_with(flag) && err.contains("--png"), "{err}");
         }
         assert!(base_args().validate_format_flags().is_ok());
+    }
+
+    #[test]
+    fn jpeg_options_parse_as_pdftoppm_takes_them() {
+        let options = parse_jpeg_options("quality=90,progressive=y,optimize=y").unwrap();
+        assert_eq!(
+            options,
+            encode::JpegOptions {
+                quality: 90,
+                progressive: true,
+                optimize: true
+            }
+        );
+        assert_eq!(
+            parse_jpeg_options("").unwrap(),
+            encode::JpegOptions::default()
+        );
+        for bad in [
+            "quality=101",
+            "quality=x",
+            "progressive=yes",
+            "speed=1",
+            "quality",
+        ] {
+            assert!(parse_jpeg_options(bad).is_err(), "{bad}");
+        }
+        let jpeg = Args::parse_from([
+            "rrocket",
+            "--jpeg",
+            "--jpegopt",
+            "quality=40",
+            "in.pdf",
+            "out",
+        ]);
+        assert!(jpeg.validate_format_flags().is_ok());
+        assert!(matches!(jpeg.output_format(), OutputFormat::Jpeg(o) if o.quality == 40));
+        for flags in [&["--jpegopt", "quality=40"][..], &["--jpeg", "--png"]] {
+            let mut argv = vec!["rrocket"];
+            argv.extend_from_slice(flags);
+            argv.extend(["in.pdf", "out"]);
+            assert!(
+                Args::parse_from(argv).validate_format_flags().is_err(),
+                "{flags:?}"
+            );
+        }
     }
 
     #[test]

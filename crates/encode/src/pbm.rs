@@ -1,8 +1,9 @@
 //! Netpbm P4 (binary PBM) encoder.
 //!
 //! PBM stores 1-bit monochrome pixels, MSB first, rows padded to whole bytes.
-//! Only `Gray8` / `Mono8` bitmaps are accepted; 0 maps to white (0 bit),
-//! non-zero maps to black (1 bit), per the P4 spec.
+//! Only `Gray8` / `Mono8` bitmaps are accepted.  Their values are luma, as
+//! for every other encoder of this crate: a pixel darker than half (below
+//! 128) is black (a 1 bit, per the P4 spec), any other white.
 
 use std::io::{self, Write};
 
@@ -13,8 +14,8 @@ use crate::EncodeError;
 
 /// Write `bitmap` to `out` as a binary PBM (`P4`) image.
 ///
-/// Input pixels are `Gray8`: 0 → white (0 bit), 1–255 → black (1 bit).
-/// Rows are MSB-packed and padded to whole bytes, matching the P4 spec.
+/// Input pixels are `Gray8` luma: 0–127 → black (1 bit), 128–255 → white
+/// (0 bit).  Rows are MSB-packed and padded to whole bytes, matching the P4 spec.
 ///
 /// # Errors
 ///
@@ -47,7 +48,7 @@ pub fn write_pbm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
 
         packed.fill(0);
         for (i, &px) in pixels.iter().enumerate() {
-            if px != 0 {
+            if px < 128 {
                 // MSB first: pixel 0 → bit 7, pixel 7 → bit 0.
                 packed[i / 8] |= 0x80 >> (i % 8);
             }
@@ -71,8 +72,13 @@ mod tests {
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
 
+    /// A `w × h` white bitmap.
     fn make_gray_bitmap(w: u32, h: u32) -> Bitmap<Gray8> {
-        Bitmap::new(w, h, 1, false)
+        let mut bmp = Bitmap::new(w, h, 1, false);
+        for y in 0..h {
+            bmp.row_bytes_mut(y).fill(255);
+        }
+        bmp
     }
 
     fn gray_fill(bmp: &mut Bitmap<Gray8>, row: u32, values: &[u8]) {
@@ -94,7 +100,7 @@ mod tests {
 
     #[test]
     fn all_white_is_zero_byte() {
-        // All pixels = 0 → all white → packed byte = 0x00
+        // All pixels white (255) → packed byte = 0x00
         let bmp = make_gray_bitmap(8, 1);
         let mut out = Vec::new();
         write_pbm::<Gray8, _>(&bmp, &mut out).unwrap();
@@ -105,7 +111,7 @@ mod tests {
     #[test]
     fn all_black_is_ff_byte() {
         let mut bmp = make_gray_bitmap(8, 1);
-        gray_fill(&mut bmp, 0, &[255u8; 8]);
+        gray_fill(&mut bmp, 0, &[0u8; 8]);
         let mut out = Vec::new();
         write_pbm::<Gray8, _>(&bmp, &mut out).unwrap();
         let header_len = b"P4\n8 1\n".len();
@@ -114,9 +120,10 @@ mod tests {
 
     #[test]
     fn alternating_checkerboard() {
-        // Pixels: 255, 0, 255, 0, 255, 0, 255, 0 → bits: 1010_1010 = 0xAA
+        // Luma 0, 255, 0, 255, … → black, white, … → bits 1010_1010 = 0xAA;
+        // 127 is the lightest black and 128 the darkest white.
         let mut bmp = make_gray_bitmap(8, 1);
-        gray_fill(&mut bmp, 0, &[255, 0, 255, 0, 255, 0, 255, 0]);
+        gray_fill(&mut bmp, 0, &[0, 255, 127, 128, 0, 200, 50, 255]);
         let mut out = Vec::new();
         write_pbm::<Gray8, _>(&bmp, &mut out).unwrap();
         let header_len = b"P4\n8 1\n".len();
@@ -127,7 +134,7 @@ mod tests {
     fn row_padding_when_width_not_multiple_of_8() {
         // 3 pixels wide → 1 packed byte per row; bits beyond pixel 2 must be 0.
         let mut bmp = make_gray_bitmap(3, 1);
-        gray_fill(&mut bmp, 0, &[255, 255, 255]);
+        gray_fill(&mut bmp, 0, &[0, 0, 0]);
         let mut out = Vec::new();
         write_pbm::<Gray8, _>(&bmp, &mut out).unwrap();
         let header_len = b"P4\n3 1\n".len();

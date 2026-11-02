@@ -1,8 +1,6 @@
-//! Baseline JPEG encoder for 8-bit grayscale (`Gray8`/`Mono8`) bitmaps.
-//!
-//! JPEG is absent from the Netpbm/PNG set because cloud OCR consumers
-//! (Google Cloud Vision, GPT-5, Mistral) want a compact lossy payload.
-//! This is a plain codec — no consumer-specific policy lives here.
+//! Baseline and progressive JPEG encoding of 8-bit gray and RGB bitmaps.
+
+use std::io::Write;
 
 use color::{Pixel, PixelMode};
 use raster::Bitmap;
@@ -11,75 +9,106 @@ use crate::EncodeError;
 
 use jpeg_encoder::{ColorType, Encoder};
 
-/// Encode an 8-bit grayscale (`Gray8`/`Mono8`) bitmap to baseline JPEG bytes.
+/// How [`write_jpeg`] encodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JpegOptions {
+    /// Quality, `1..=100`; values outside are clamped.
+    pub quality: u8,
+    /// Write a progressive JPEG instead of a baseline one.
+    pub progressive: bool,
+    /// Compute Huffman tables optimal for the image instead of the
+    /// standard tables.
+    pub optimize: bool,
+}
+
+impl Default for JpegOptions {
+    /// Quality 75, baseline, standard Huffman tables: the IJG defaults.
+    fn default() -> Self {
+        Self {
+            quality: 75,
+            progressive: false,
+            optimize: false,
+        }
+    }
+}
+
+/// Encode a gray (`Gray8`/`Mono8`), `Rgb8` or `Bgr8` bitmap as JPEG into `out`.
 ///
-/// `quality` is clamped to `1..=100`. Stride padding is excluded — only the
-/// live `width` pixels of each row are encoded.
+/// Stride padding is excluded: only the live `width` pixels of each row
+/// are encoded.
 ///
 /// # Errors
 ///
-/// - [`EncodeError::UnsupportedMode`] for non-grayscale modes (use
-///   [`write_ppm`][crate::write_ppm]/[`write_png`][crate::write_png]), for a
-///   zero-width or zero-height bitmap (JPEG has no empty-image encoding), or
-///   when a dimension exceeds `u16::MAX` (the JPEG format ceiling,
+/// - [`EncodeError::UnsupportedMode`] for other pixel modes, for a
+///   zero-width or zero-height bitmap (JPEG has no empty-image encoding),
+///   or when a dimension exceeds `u16::MAX` (the JPEG format ceiling,
 ///   65535 px/side).
-/// - [`EncodeError::Jpeg`] on an internal encoder failure.
-pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, EncodeError> {
-    match P::MODE {
-        PixelMode::Mono8 => {}
-        PixelMode::Mono1
-        | PixelMode::Rgb8
-        | PixelMode::Bgr8
-        | PixelMode::Xbgr8
-        | PixelMode::Cmyk8
-        | PixelMode::DeviceN8 => {
+/// - [`EncodeError::Jpeg`] on an encoder failure, I/O errors included.
+pub fn write_jpeg<P: Pixel, W: Write>(
+    bitmap: &Bitmap<P>,
+    options: JpegOptions,
+    out: W,
+) -> Result<(), EncodeError> {
+    let (color, bytes_per_pixel) = match P::MODE {
+        PixelMode::Mono8 => (ColorType::Luma, 1),
+        PixelMode::Rgb8 => (ColorType::Rgb, 3),
+        PixelMode::Bgr8 => (ColorType::Bgr, 3),
+        PixelMode::Mono1 | PixelMode::Xbgr8 | PixelMode::Cmyk8 | PixelMode::DeviceN8 => {
             return Err(EncodeError::UnsupportedMode(
-                "non-grayscale bitmap: jpeg_gray accepts Gray8/Mono8 only",
+                "JPEG accepts Gray8, Rgb8 and Bgr8: convert other modes to Rgb8 first",
             ));
         }
-    }
-
-    // Reject empty images here rather than letting the encoder surface a
-    // library-internal `ZeroImageDimensions` as `EncodeError::Jpeg`: a
-    // zero-sized bitmap is a caller-side input-shape violation, so it belongs
-    // with the other `UnsupportedMode` precondition rejections.
+    };
     if bitmap.width == 0 || bitmap.height == 0 {
         return Err(EncodeError::UnsupportedMode(
             "zero-width or zero-height bitmap: JPEG cannot encode an empty image",
         ));
     }
-
     let width = u16::try_from(bitmap.width)
         .map_err(|_| EncodeError::UnsupportedMode("width exceeds JPEG limit (65535 px)"))?;
     let height = u16::try_from(bitmap.height)
         .map_err(|_| EncodeError::UnsupportedMode("height exceeds JPEG limit (65535 px)"))?;
 
-    let q = quality.clamp(1, 100);
-
-    // `width`/`height` are now proven to fit in `u16`, so the row count and
-    // row length below fit in `usize` on every supported platform without a
-    // lossy `as` cast.
-    let w = usize::from(width);
-
-    let mut out = Vec::new();
-    let encoder = Encoder::new(&mut out, q);
-    let result = if bitmap.stride == w {
-        // No row padding: the backing buffer is already the contiguous pixel
-        // stream the encoder wants, so feed it directly without a copy.
-        encoder.encode(
-            &bitmap.data()[..w * usize::from(height)],
-            width,
-            height,
-            ColorType::Luma,
-        )
+    let mut encoder = Encoder::new(out, options.quality.clamp(1, 100));
+    encoder.set_progressive(options.progressive);
+    encoder.set_optimized_huffman_tables(options.optimize);
+    // Both dimensions fit `u16`, so the row length and image size fit `usize`.
+    let row = usize::from(width) * bytes_per_pixel;
+    let size = row * usize::from(height);
+    let result = if bitmap.stride == row {
+        // No row padding: the backing buffer is the contiguous pixel stream.
+        encoder.encode(&bitmap.data()[..size], width, height, color)
     } else {
-        let mut packed = Vec::with_capacity(w * usize::from(height));
+        let mut packed = Vec::with_capacity(size);
         for y in 0..bitmap.height {
-            packed.extend_from_slice(&bitmap.row_bytes(y)[..w]);
+            packed.extend_from_slice(&bitmap.row_bytes(y)[..row]);
         }
-        encoder.encode(&packed, width, height, ColorType::Luma)
+        encoder.encode(&packed, width, height, color)
     };
-    result.map_err(EncodeError::Jpeg)?;
+    result.map_err(EncodeError::Jpeg)
+}
+
+/// Encode an 8-bit grayscale (`Gray8`/`Mono8`) bitmap to baseline JPEG
+/// bytes at `quality` (clamped to `1..=100`).
+///
+/// # Errors
+///
+/// As [`write_jpeg`]; a colour bitmap is [`EncodeError::UnsupportedMode`].
+pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, EncodeError> {
+    if P::MODE != PixelMode::Mono8 {
+        return Err(EncodeError::UnsupportedMode(
+            "non-grayscale bitmap: jpeg_gray accepts Gray8/Mono8 only",
+        ));
+    }
+    let mut out = Vec::new();
+    write_jpeg(
+        bitmap,
+        JpegOptions {
+            quality,
+            ..JpegOptions::default()
+        },
+        &mut out,
+    )?;
     Ok(out)
 }
 
@@ -95,6 +124,63 @@ mod tests {
             bmp.row_bytes_mut(y).fill(fill);
         }
         bmp
+    }
+
+    /// A solid `w × h` RGB bitmap of `rgb`.
+    fn solid_rgb(w: u32, h: u32, rgb: [u8; 3]) -> Bitmap<Rgb8> {
+        let mut bmp = Bitmap::new(w, h, 1, false);
+        for y in 0..h {
+            for px in bmp.row_bytes_mut(y).as_chunks_mut::<3>().0 {
+                *px = rgb;
+            }
+        }
+        bmp
+    }
+
+    fn encode(bmp: &Bitmap<Rgb8>, options: JpegOptions) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_jpeg(bmp, options, &mut out).expect("encodes");
+        out
+    }
+
+    #[test]
+    fn rgb_decodes_back_to_its_colour() {
+        let bytes = encode(&solid_rgb(16, 8, [200, 40, 90]), JpegOptions::default());
+        let mut decoder =
+            zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(&bytes));
+        let pixels = decoder.decode().expect("decodes");
+        assert_eq!(decoder.dimensions(), Some((16, 8)));
+        for px in pixels.as_chunks::<3>().0 {
+            for (got, want) in px.iter().zip([200u8, 40, 90]) {
+                assert!(got.abs_diff(want) <= 3, "{px:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn progressive_writes_a_progressive_frame() {
+        let bmp = solid_rgb(16, 16, [10, 120, 250]);
+        let has_marker = |bytes: &[u8], m: u8| bytes.windows(2).any(|w| w == [0xFF, m]);
+        let baseline = encode(&bmp, JpegOptions::default());
+        let progressive = encode(
+            &bmp,
+            JpegOptions {
+                progressive: true,
+                ..JpegOptions::default()
+            },
+        );
+        assert!(has_marker(&baseline, 0xC0) && !has_marker(&baseline, 0xC2));
+        assert!(
+            has_marker(&progressive, 0xC2),
+            "SOF2 marks a progressive frame"
+        );
+    }
+
+    #[test]
+    fn cmyk_bitmaps_are_refused() {
+        let bmp: Bitmap<color::Cmyk8> = Bitmap::new(8, 1, 1, false);
+        let result = write_jpeg(&bmp, JpegOptions::default(), Vec::new());
+        assert!(matches!(result, Err(EncodeError::UnsupportedMode(_))));
     }
 
     #[test]

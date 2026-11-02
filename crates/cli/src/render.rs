@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write as _};
 
 use color::{Gray8, Rgb8};
-use encode::{EncodeError, write_pbm, write_pgm, write_png, write_ppm};
+use encode::{EncodeError, write_jpeg, write_pbm, write_pgm, write_png, write_ppm};
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
 use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with, rgb_to_gray};
@@ -213,6 +213,7 @@ pub(crate) fn encode_to_path(
         match format {
             OutputFormat::Ppm => write_ppm(rgb, out)?,
             OutputFormat::Png => write_png(rgb, out)?,
+            OutputFormat::Jpeg(options) => write_jpeg(rgb, options, out)?,
         }
         Ok(())
     })
@@ -232,11 +233,13 @@ fn encode_gray_to_path(
             match format {
                 OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, out)?,
                 OutputFormat::Png => write_png::<Gray8, _>(&mono, out)?,
+                OutputFormat::Jpeg(options) => write_jpeg(&mono, options, out)?,
             }
         } else {
             match format {
                 OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, out)?,
                 OutputFormat::Png => write_png::<Gray8, _>(gray, out)?,
+                OutputFormat::Jpeg(options) => write_jpeg(gray, options, out)?,
             }
         }
         Ok(())
@@ -246,14 +249,10 @@ fn encode_gray_to_path(
 // ── Pixel helpers ─────────────────────────────────────────────────────────────
 
 /// Luma threshold separating dark ink from light paper (inclusive on the light side).
-///
-/// Values below this → 255 (black ink); values at or above → 0 (white paper).
 const MONO_THRESHOLD: u8 = 128;
 
-/// Threshold a grayscale bitmap to 2-level monochrome at the 50% midpoint.
-///
-/// Values < [`MONO_THRESHOLD`] (dark) → 255 (black ink);
-/// values ≥ [`MONO_THRESHOLD`] (light) → 0 (white paper).
+/// Threshold a grayscale bitmap to two levels at the 50% midpoint, as luma:
+/// values below [`MONO_THRESHOLD`] become 0 (black), the others 255 (white).
 fn gray_to_mono(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
     let mut dst: Bitmap<Gray8> = Bitmap::new(src.width, src.height, 1, false);
     let w = src.width as usize;
@@ -261,8 +260,19 @@ fn gray_to_mono(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
         let src_row = &src.row_bytes(y)[..w];
         let dst_row = &mut dst.row_bytes_mut(y)[..w];
         for (dst_px, &luma) in dst_row.iter_mut().zip(src_row.iter()) {
-            *dst_px = if luma < MONO_THRESHOLD { 255 } else { 0 };
+            *dst_px = if luma < MONO_THRESHOLD { 0 } else { 255 };
         }
     }
     dst
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mono_is_luma_black_ink_on_white() {
+        let mut gray: raster::Bitmap<color::Gray8> = raster::Bitmap::new(3, 1, 1, false);
+        gray.row_bytes_mut(0)[..3].copy_from_slice(&[0, 127, 128]);
+        let mono = super::gray_to_mono(&gray);
+        assert_eq!(&mono.row_bytes(0)[..3], &[0, 0, 255]);
+    }
 }

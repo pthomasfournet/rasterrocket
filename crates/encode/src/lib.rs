@@ -6,9 +6,10 @@
 //! |----------|--------|--------------------|
 //! | [`write_ppm`] | Netpbm P6 binary | colour modes (`Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8`, `DeviceN8`) |
 //! | [`write_pgm`] | Netpbm P5 binary | `Gray8` |
-//! | [`write_pbm`] | Netpbm P4 binary | `Gray8` (0 = white, non-zero = black) |
+//! | [`write_pbm`] | Netpbm P4 binary | `Gray8` (luma below 128 = black) |
 //! | [`write_png`] | PNG | `Gray8` and the colour modes of [`write_ppm`] |
-//! | [`jpeg_gray`] | JPEG (baseline) | `Gray8` |
+//! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8` |
+//! | [`jpeg_gray`] | JPEG (baseline), to a byte vector | `Gray8` |
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in
 //! [`std::io::BufWriter`] at the call site if buffering is needed.
@@ -26,7 +27,7 @@ pub(crate) mod pgm;
 pub(crate) mod png;
 pub(crate) mod ppm;
 
-pub use jpeg::jpeg_gray;
+pub use jpeg::{JpegOptions, jpeg_gray, write_jpeg};
 pub use pbm::write_pbm;
 pub use pgm::write_pgm;
 pub use png::write_png;

@@ -104,6 +104,7 @@ mod tests {
             crop_h: None,
             png: false,
             jpeg: false,
+            jpegopt: None,
             jpegcmyk: false,
             tiff: false,
             gray: false,
