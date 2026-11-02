@@ -6,8 +6,8 @@ installed face covers from these faces, compiled into the binary behind the
 `bundled-fonts` Cargo feature.  Each is a Noto face (SIL Open Font License
 1.1) subset to the code ranges listed below, without hinting, and stored
 zlib-compressed at level 9 as `<name>.ttf.z`.  The Hebrew, Arabic,
-Devanagari and Thai faces keep their layout tables, which the renderer
-shapes with; the others keep none.
+Devanagari, Thai, Bengali and Tamil faces keep their layout tables, which
+the renderer shapes with; the others keep none.
 
 Usage:
     python3 scripts/build_bundled_fonts.py [--src DIR]
@@ -57,6 +57,14 @@ ARABIC = ranges(
 )
 DEVANAGARI = ranges((0x0900, 0x097F), (0xA8E0, 0xA8FF))
 THAI = ranges((0x0E00, 0x0E7F))
+ARMENIAN = ranges((0x0530, 0x058F), (0xFB13, 0xFB17))
+# Georgian, Georgian Extended, Georgian Supplement
+GEORGIAN = ranges((0x10A0, 0x10FF), (0x1C90, 0x1CBF), (0x2D00, 0x2D2F))
+BENGALI = ranges((0x0980, 0x09FF))
+# Tamil, Tamil Supplement
+TAMIL = ranges((0x0B80, 0x0BFF), (0x11FC0, 0x11FFF))
+# Ethiopic, Supplement, Extended, Extended-A
+ETHIOPIC = ranges((0x1200, 0x139F), (0x2D80, 0x2DDF), (0xAB00, 0xAB2F))
 SYMBOLS = ranges(
     # letterlike symbols, number forms
     (0x2100, 0x218F),
@@ -89,6 +97,16 @@ FACES = [
     ("NotoSerifDevanagari", "NotoSerifDevanagari-Regular.ttf", DEVANAGARI, True),
     ("NotoSansThai", "NotoSansThai-Regular.ttf", THAI, True),
     ("NotoSerifThai", "NotoSerifThai-Regular.ttf", THAI, True),
+    ("NotoSansBengali", "NotoSansBengali-Regular.ttf", BENGALI, True),
+    ("NotoSerifBengali", "NotoSerifBengali-Regular.ttf", BENGALI, True),
+    ("NotoSansTamil", "NotoSansTamil-Regular.ttf", TAMIL, True),
+    ("NotoSerifTamil", "NotoSerifTamil-Regular.ttf", TAMIL, True),
+    ("NotoSansArmenian", "NotoSansArmenian-Regular.ttf", ARMENIAN, False),
+    ("NotoSerifArmenian", "NotoSerifArmenian-Regular.ttf", ARMENIAN, False),
+    ("NotoSansGeorgian", "NotoSansGeorgian-Regular.ttf", GEORGIAN, False),
+    ("NotoSerifGeorgian", "NotoSerifGeorgian-Regular.ttf", GEORGIAN, False),
+    ("NotoSansEthiopic", "NotoSansEthiopic-Regular.ttf", ETHIOPIC, False),
+    ("NotoSerifEthiopic", "NotoSerifEthiopic-Regular.ttf", ETHIOPIC, False),
     ("NotoSansMath", "NotoSansMath-Regular.ttf", SYMBOLS, False),
     ("NotoSansSymbols", "NotoSansSymbols-Regular.ttf", SYMBOLS, False),
     ("NotoSansSymbols2", "NotoSansSymbols2-Regular.ttf", SYMBOLS, False),

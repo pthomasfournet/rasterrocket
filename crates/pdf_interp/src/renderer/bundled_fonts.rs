@@ -1,6 +1,7 @@
 //! Fallback faces compiled into the binary: script subsets of Noto faces
-//! for Greek and Cyrillic, Hebrew, Arabic, Devanagari and Thai, sans-serif
-//! and serif, and three symbol faces (`fonts/noto/`, SIL Open Font
+//! for Greek and Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali,
+//! Tamil, Armenian, Georgian and Ethiopic, sans-serif and serif, and three
+//! symbol faces (`fonts/noto/`, SIL Open Font
 //! License 1.1).
 //!
 //! They draw a character that neither a font's substitute nor any
@@ -34,7 +35,7 @@ macro_rules! face {
 }
 
 /// The bundled faces; within a serif class, in lookup order.
-const FACES: [Bundled; 13] = [
+const FACES: [Bundled; 23] = [
     face!("NotoSans-GreekCyrillic.ttf.z", serif: false),
     face!("NotoSerif-GreekCyrillic.ttf.z", serif: true),
     face!("NotoSansHebrew.ttf.z", serif: false),
@@ -45,6 +46,16 @@ const FACES: [Bundled; 13] = [
     face!("NotoSerifDevanagari.ttf.z", serif: true),
     face!("NotoSansThai.ttf.z", serif: false),
     face!("NotoSerifThai.ttf.z", serif: true),
+    face!("NotoSansBengali.ttf.z", serif: false),
+    face!("NotoSerifBengali.ttf.z", serif: true),
+    face!("NotoSansTamil.ttf.z", serif: false),
+    face!("NotoSerifTamil.ttf.z", serif: true),
+    face!("NotoSansArmenian.ttf.z", serif: false),
+    face!("NotoSerifArmenian.ttf.z", serif: true),
+    face!("NotoSansGeorgian.ttf.z", serif: false),
+    face!("NotoSerifGeorgian.ttf.z", serif: true),
+    face!("NotoSansEthiopic.ttf.z", serif: false),
+    face!("NotoSerifEthiopic.ttf.z", serif: true),
     face!("NotoSansMath.ttf.z", serif: false),
     face!("NotoSansSymbols.ttf.z", serif: false),
     face!("NotoSansSymbols2.ttf.z", serif: false),
@@ -103,14 +114,17 @@ mod tests {
             ..sans
         };
         for c in [
-            0x03B1, 0x0416, 0x05D0, 0x0627, 0x0915, 0x0E01, 0x2192, 0x2211,
+            0x03B1, 0x0416, 0x05D0, 0x0627, 0x0915, 0x0E01, 0x0995, 0x0B95, 0x0531, 0x10D0, 0x1200,
+            0x2192, 0x2211,
         ] {
             let program = bundled_program(sans, c).unwrap_or_else(|| panic!("U+{c:04X}"));
             assert_ne!(program.char_index(c), 0, "U+{c:04X}");
         }
-        let sans_alpha = bundled_program(sans, 0x03B1).expect("alpha");
-        let serif_alpha = bundled_program(serif, 0x03B1).expect("alpha");
-        assert!(!Arc::ptr_eq(&sans_alpha, &serif_alpha));
+        for c in [0x03B1, 0x0995, 0x0B95, 0x0531, 0x10D0, 0x1200] {
+            let sans = bundled_program(sans, c).expect("sans");
+            let serif = bundled_program(serif, c).expect("serif");
+            assert!(!Arc::ptr_eq(&sans, &serif), "U+{c:04X} has both classes");
+        }
         assert!(bundled_program(sans, 0x4E2D).is_none(), "no CJK is bundled");
     }
 }

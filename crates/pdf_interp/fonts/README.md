@@ -17,7 +17,7 @@ multiple-master faces are not bundled.
 
 # Bundled fallback fonts
 
-`noto/` holds thirteen Noto faces compiled into the renderer
+`noto/` holds twenty-three Noto faces compiled into the renderer
 (`src/renderer/bundled_fonts.rs`) behind the `bundled-fonts` Cargo feature (on by default in `rasterrocket` and
 `rasterrocket-cli`).  A character that neither a font's substitute nor any
 installed face covers is drawn from them, the last resort before `.notdef`;
@@ -35,6 +35,16 @@ an installed face that covers the character is always preferred.
 | `NotoSerifDevanagari.ttf.z` | Noto Serif Devanagari Regular (2.001) | as above |
 | `NotoSansThai.ttf.z` | Noto Sans Thai Regular (2.000) | Thai |
 | `NotoSerifThai.ttf.z` | Noto Serif Thai Regular (2.000) | Thai |
+| `NotoSansBengali.ttf.z` | Noto Sans Bengali Regular (2.001) | Bengali |
+| `NotoSerifBengali.ttf.z` | Noto Serif Bengali Regular (2.001) | Bengali |
+| `NotoSansTamil.ttf.z` | Noto Sans Tamil Regular (2.001) | Tamil, Tamil Supplement |
+| `NotoSerifTamil.ttf.z` | Noto Serif Tamil Regular (2.001) | as above |
+| `NotoSansArmenian.ttf.z` | Noto Sans Armenian Regular (2.005) | Armenian, Armenian ligatures |
+| `NotoSerifArmenian.ttf.z` | Noto Serif Armenian Regular (2.005) | as above |
+| `NotoSansGeorgian.ttf.z` | Noto Sans Georgian Regular (2.001) | Georgian, Georgian Extended and Supplement |
+| `NotoSerifGeorgian.ttf.z` | Noto Serif Georgian Regular (2.001) | as above |
+| `NotoSansEthiopic.ttf.z` | Noto Sans Ethiopic Regular (2.000) | Ethiopic, Ethiopic Supplement, Extended and Extended-A |
+| `NotoSerifEthiopic.ttf.z` | Noto Serif Ethiopic Regular (2.000) | as above |
 | `NotoSansMath.ttf.z` | Noto Sans Math Regular (2.001) | letterlike symbols, number forms, arrows, mathematical operators and symbols, technical, geometric shapes, miscellaneous symbols, dingbats |
 | `NotoSansSymbols.ttf.z` | Noto Sans Symbols Regular (2.001) | as above |
 | `NotoSansSymbols2.ttf.z` | Noto Sans Symbols 2 Regular (2.003) | as above |
@@ -52,9 +62,9 @@ Reserved Font Name.
 
 It subsets each face to the exact ranges listed in the script, without
 hinting, keeps the layout features (and the glyphs they reach, such as
-joining forms and conjuncts) of the Hebrew, Arabic, Devanagari and Thai
-faces, which the renderer shapes, and none of the others, keeps the
-`.notdef` outline, the source's timestamp and the copyright, licence and
+joining forms and conjuncts) of the Hebrew, Arabic, Devanagari, Thai,
+Bengali and Tamil faces, which the renderer shapes, and none of the others,
+keeps the `.notdef` outline, the source's timestamp and the copyright, licence and
 naming records (`name` IDs 0–6, 13, 14), and stores the result
 zlib-compressed at level 9.  The output is byte-for-byte reproducible from
 the same sources.
