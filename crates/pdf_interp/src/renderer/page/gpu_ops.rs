@@ -8,13 +8,15 @@
 //! byte-exact twin of it.
 //!
 //! Dispatch is generic over [`GpuBackend`], so the CUDA and Vulkan backends
-//! run the same sequence: upload, one recorded page, download. The module is
-//! compiled only with the `gpu-aa` feature, which `vulkan` implies.
+//! run the same sequence, [`gpu::backend::aa_fill_page`]: upload, one page,
+//! download. The module is compiled only with the `gpu-aa` feature, which
+//! `vulkan` implies.
 
 #![cfg(feature = "gpu-aa")]
 
-use gpu::backend::params::AaFillParams;
-use gpu::backend::{GpuBackend, Result as BackendResult};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use gpu::backend::{GpuBackend, aa_fill_page};
 use gpu::{AaFillRect, AaScanTable, ScanIntersect};
 use raster::clip::Clip;
 use raster::pipe::{PipeSrc, PipeState};
@@ -205,38 +207,44 @@ fn paint_coverage(
     }
 }
 
-/// Map a backend result to `Option`, logging a failure as
-/// `"{op}: {step} failed: {e}"` at `warn`.
-fn warn_err<T>(r: BackendResult<T>, op: &'static str, step: &'static str) -> Option<T> {
-    r.map_err(|e| log::warn!("{op}: {step} failed: {e}")).ok()
+/// Log a failed device fill: once per session at `warn`, after that at
+/// `debug`, since a failure that recurs for every fill would otherwise
+/// flood the log.  The CPU fill paints the path either way.
+fn report_failure(backend: &'static str, e: &dyn std::fmt::Display) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.swap(true, Ordering::Relaxed) {
+        log::debug!("{backend} aa_fill failed: {e}; CPU fill used");
+    } else {
+        log::warn!(
+            "{backend} aa_fill failed: {e}; CPU fill used (later failures are logged at debug)"
+        );
+    }
 }
 
-/// Rasterise `path` through `backend`'s scanline-AA fill kernel.
-///
-/// The table is uploaded, the kernel recorded as a one-kernel page, and the
-/// counts downloaded and composited by [`gpu_coverage_to_bitmap`]. `op`
-/// prefixes every log line (`"cuda aa_fill"`, `"vulkan aa_fill"`).
+/// Rasterise `path` through `backend`'s scanline-AA fill kernel
+/// ([`gpu::backend::aa_fill_page`]) and composite the counts by
+/// [`gpu_coverage_to_bitmap`].
 ///
 /// Returns `true` when the fill was painted from device counts, so the
-/// caller skips the CPU fill. Returns `false`, leaving the bitmap untouched,
-/// when [`prepare_aa_fill`] declines the fill, the table has no
-/// intersections (it paints nothing, and the backend rejects zero-size
-/// buffers) or more rows than `u32` holds, or any backend call fails; the
-/// failure is logged and the CPU fill is the exact fallback.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the fill's inputs are the CPU fill's own; bundling them would add a type used once"
-)]
+/// caller skips the CPU fill.  Returns `false`, leaving the bitmap
+/// untouched, when the device fill is disabled (the threshold is
+/// `usize::MAX`, checked before the path is scan-converted),
+/// [`prepare_aa_fill`] declines the fill, the table has no intersections
+/// (it paints nothing), or the device fails; a failure is logged (see
+/// [`report_failure`]) and the CPU fill is the exact fallback.
 pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     renderer: &mut PageRenderer<'_>,
     backend: &B,
-    op: &'static str,
     path: &raster::path::Path,
     even_odd: bool,
     flatness: f64,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
 ) -> bool {
+    let threshold = aa_fill_threshold();
+    if threshold == usize::MAX {
+        return false;
+    }
     let Some(fill) = prepare_aa_fill(
         &renderer.gstate.current().clip,
         renderer.bitmap.width,
@@ -244,80 +252,23 @@ pub(super) fn try_backend_aa_fill<B: GpuBackend>(
         path,
         flatness,
         even_odd,
-        aa_fill_threshold(),
+        threshold,
     ) else {
         return false;
     };
     if fill.intersects.is_empty() {
         return false;
     }
-    let Ok(n_rows) = u32::try_from(fill.table().n_rows()) else {
-        log::warn!("{op}: table row count exceeds u32::MAX; falling back to CPU");
-        return false;
-    };
-    let Some(mut counts) = run_aa_fill(backend, op, &fill, n_rows, even_odd) else {
-        return false;
-    };
-    gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
-    true
-}
-
-/// Upload `fill`'s table, run the kernel as one page and download the
-/// counts; `None` (logged) on any backend failure.
-fn run_aa_fill<B: GpuBackend>(
-    backend: &B,
-    op: &'static str,
-    fill: &GpuAaFill,
-    n_rows: u32,
-    even_odd: bool,
-) -> Option<Vec<u8>> {
-    let n_pixels = fill.rect.pixel_count()?;
-    let intersects: &[u8] = bytemuck::cast_slice(&fill.intersects);
-    let row_starts: &[u8] = bytemuck::cast_slice(&fill.row_starts);
-
-    let d_intersects = warn_err(
-        backend.alloc_device(intersects.len()),
-        op,
-        "alloc(intersects)",
-    )?;
-    let d_row_starts = warn_err(
-        backend.alloc_device(row_starts.len()),
-        op,
-        "alloc(row_starts)",
-    )?;
-    let d_coverage = warn_err(backend.alloc_device(n_pixels), op, "alloc(coverage)")?;
-    warn_err(
-        backend.upload(&d_intersects, intersects),
-        op,
-        "upload(intersects)",
-    )?;
-    warn_err(
-        backend.upload(&d_row_starts, row_starts),
-        op,
-        "upload(row_starts)",
-    )?;
-
-    warn_err(backend.begin_page(), op, "begin_page")?;
-    warn_err(
-        backend.record_aa_fill(AaFillParams {
-            intersects: &d_intersects,
-            row_starts: &d_row_starts,
-            coverage: &d_coverage,
-            n_rows,
-            table_y0: fill.table_y0,
-            rect: fill.rect,
-            aa_width: fill.aa_width,
-            fill_rule: u8::from(even_odd),
-        }),
-        op,
-        "record_aa_fill",
-    )?;
-    let fence = warn_err(backend.submit_page(), op, "submit_page")?;
-    warn_err(backend.wait_page(fence), op, "wait_page")?;
-
-    let mut counts = vec![0u8; n_pixels];
-    warn_err(backend.download(&d_coverage, &mut counts), op, "download")?;
-    Some(counts)
+    match aa_fill_page(backend, &fill.table(), fill.rect, fill.aa_width, even_odd) {
+        Ok(mut counts) => {
+            gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
+            true
+        }
+        Err(e) => {
+            report_failure(B::NAME, &e);
+            false
+        }
+    }
 }
 
 #[cfg(test)]

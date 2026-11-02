@@ -196,10 +196,12 @@ impl<B: GpuBackend + ?Sized> AaFillParams<'_, B> {
         if backend.device_buffer_len(self.row_starts) < offsets_needed {
             return Err(invariant("row_starts shorter than (n_rows + 1) × 4 bytes"));
         }
+        // The kernel indexes coverage pixels in 32-bit arithmetic.
         let pixels = self
             .rect
             .pixel_count()
-            .ok_or_else(|| invariant("rect.width × rect.height overflows usize"))?;
+            .filter(|&n| u32::try_from(n).is_ok())
+            .ok_or_else(|| invariant("rect.width × rect.height exceeds the 32-bit pixel index"))?;
         if backend.device_buffer_len(self.coverage) < pixels {
             return Err(invariant(
                 "coverage buffer shorter than rect.width × rect.height",
@@ -1266,6 +1268,7 @@ mod tests {
     impl super::super::sealed::Sealed for FakeBackend {}
 
     impl GpuBackend for FakeBackend {
+        const NAME: &'static str = "fake";
         type DeviceBuffer = usize;
         type HostBuffer = ();
         type PageFence = ();

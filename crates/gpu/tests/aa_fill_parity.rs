@@ -168,18 +168,27 @@ fn assert_identical(expected: &[u8], actual: &[u8], what: &str) {
 
 #[cfg(feature = "gpu-validation")]
 mod cuda {
+    use std::sync::Arc;
+
     use super::{aa_fill_cpu, assert_identical, cases};
     use rasterrocket_gpu::GpuCtx;
+    use rasterrocket_gpu::backend::aa_fill_page;
+    use rasterrocket_gpu::backend::cuda::CudaBackend;
+
+    /// The CUDA backend on a fresh context.
+    pub(super) fn backend() -> CudaBackend {
+        let ctx = GpuCtx::init().expect("gpu-validation tests require a CUDA device");
+        CudaBackend::from_ctx(Arc::new(ctx))
+    }
 
     #[test]
     fn cuda_kernel_matches_host_twin() {
-        let ctx = GpuCtx::init().expect("gpu-validation tests require a CUDA device");
+        let backend = backend();
         for case in cases() {
             for eo in [false, true] {
                 let table = case.table();
                 let expected = aa_fill_cpu(&table, case.rect, case.aa_width, eo);
-                let actual = ctx
-                    .aa_fill(&table, case.rect, case.aa_width, eo)
+                let actual = aa_fill_page(&backend, &table, case.rect, case.aa_width, eo)
                     .unwrap_or_else(|e| panic!("{}: CUDA aa_fill failed: {e}", case.name));
                 assert_identical(
                     &expected,
@@ -201,48 +210,12 @@ mod cuda {
 #[cfg(feature = "vulkan")]
 mod vulkan {
     use super::{Case, aa_fill_cpu, assert_identical, cases};
-    use rasterrocket_gpu::backend::GpuBackend;
-    use rasterrocket_gpu::backend::params::AaFillParams;
+    use rasterrocket_gpu::backend::aa_fill_page;
     use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
     fn run_vulkan(backend: &VulkanBackend, case: &Case, eo: bool) -> Vec<u8> {
-        let n_pixels = case.rect.pixel_count().expect("pixel count");
-        let intersect_bytes: &[u8] = bytemuck::cast_slice(&case.intersects);
-        let row_start_bytes: &[u8] = bytemuck::cast_slice(&case.row_starts);
-
-        let d_intersects = backend
-            .alloc_device(intersect_bytes.len())
-            .expect("alloc intersects");
-        let d_row_starts = backend
-            .alloc_device(row_start_bytes.len())
-            .expect("alloc row_starts");
-        let d_cov = backend.alloc_device(n_pixels).expect("alloc coverage");
-        backend
-            .upload(&d_intersects, intersect_bytes)
-            .expect("upload intersects");
-        backend
-            .upload(&d_row_starts, row_start_bytes)
-            .expect("upload row_starts");
-
-        backend.begin_page().expect("begin_page");
-        backend
-            .record_aa_fill(AaFillParams {
-                intersects: &d_intersects,
-                row_starts: &d_row_starts,
-                coverage: &d_cov,
-                n_rows: u32::try_from(case.table().n_rows()).expect("rows fit u32"),
-                table_y0: case.y_min,
-                rect: case.rect,
-                aa_width: case.aa_width,
-                fill_rule: u8::from(eo),
-            })
-            .expect("record_aa_fill");
-        let fence = backend.submit_page().expect("submit_page");
-        backend.wait_page(fence).expect("wait_page");
-
-        let mut out = vec![0u8; n_pixels];
-        backend.download(&d_cov, &mut out).expect("download");
-        out
+        aa_fill_page(backend, &case.table(), case.rect, case.aa_width, eo)
+            .unwrap_or_else(|e| panic!("{}: Vulkan aa_fill failed: {e}", case.name))
     }
 
     #[test]
@@ -261,16 +234,57 @@ mod vulkan {
         }
     }
 
+    /// Pages from several threads on one backend: each runs whole, none
+    /// fails on another's recording state.
+    #[test]
+    fn a_shared_backend_runs_pages_from_several_threads() {
+        let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let cases = cases();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for case in &cases {
+                        for eo in [false, true] {
+                            let expected = aa_fill_cpu(&case.table(), case.rect, case.aa_width, eo);
+                            assert_identical(
+                                &expected,
+                                &run_vulkan(&backend, case, eo),
+                                &format!("{} (eo={eo}) from a thread", case.name),
+                            );
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// A page that fails while recording is abandoned, and the next page
+    /// runs.
+    #[test]
+    fn a_failed_page_leaves_the_backend_usable() {
+        use rasterrocket_gpu::backend::{BackendError, GpuBackend};
+
+        let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let failed = backend.run_page(|_| Err(BackendError::msg("injected")));
+        assert!(failed.is_err());
+        let case = &cases()[0];
+        let expected = aa_fill_cpu(&case.table(), case.rect, case.aa_width, false);
+        assert_identical(
+            &expected,
+            &run_vulkan(&backend, case, false),
+            "the page after a failed one",
+        );
+    }
+
     /// The two device kernels against each other, independent of the twin.
     #[cfg(feature = "gpu-validation")]
     #[test]
     fn vulkan_kernel_matches_cuda_kernel() {
         let backend = VulkanBackend::new().expect("VulkanBackend::new");
-        let ctx = rasterrocket_gpu::GpuCtx::init().expect("CUDA device");
+        let cuda_backend = super::cuda::backend();
         for case in cases() {
             for eo in [false, true] {
-                let cuda = ctx
-                    .aa_fill(&case.table(), case.rect, case.aa_width, eo)
+                let cuda = aa_fill_page(&cuda_backend, &case.table(), case.rect, case.aa_width, eo)
                     .unwrap_or_else(|e| panic!("{}: CUDA aa_fill failed: {e}", case.name));
                 let vk = run_vulkan(&backend, &case, eo);
                 assert_identical(

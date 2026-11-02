@@ -3,80 +3,13 @@
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
 use crate::GpuCtx;
-use crate::fill::{AaFillRect, AaScanTable};
+use crate::fill::AaFillRect;
 
 /// Threads per block edge for the `aa_fill` launch (`BLOCK_W` / `BLOCK_H`
 /// in `aa_fill.cu`).
 const BLOCK_EDGE: u32 = 16;
 
 impl GpuCtx {
-    /// Compute per-pixel AA sub-sample counts for `rect` from a scanline
-    /// intersection table.
-    ///
-    /// The output is `rect.width × rect.height` bytes, row-major, each the
-    /// count `0..=AA_SIZE²` of the pixel's covered sub-samples — the same
-    /// values [`crate::aa_fill_cpu`] produces.  `aa_width` is the bitmap
-    /// width × `AA_SIZE`.
-    ///
-    /// The caller decides whether the fill is worth a GPU round trip
-    /// (see [`crate::GPU_AA_FILL_THRESHOLD`]); this always dispatches.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if GPU data transfer or the kernel launch fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `table` is malformed ([`AaScanTable::assert_well_formed`]),
-    /// the table has more than `u32::MAX` rows, or `rect`'s pixel count
-    /// exceeds `u32::MAX`.
-    pub fn aa_fill(
-        &self,
-        table: &AaScanTable<'_>,
-        rect: AaFillRect,
-        aa_width: u32,
-        eo: bool,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        table.assert_well_formed();
-        let n_pixels = rect.pixel_count().expect("width × height overflows usize");
-        assert!(
-            u32::try_from(n_pixels).is_ok(),
-            "width × height = {n_pixels} pixels exceeds the kernel's 32-bit index range"
-        );
-        if n_pixels == 0 || table.intersects.is_empty() {
-            // No intersections means no spans: every count is zero.
-            return Ok(vec![0u8; n_pixels]);
-        }
-        let n_rows = u32::try_from(table.n_rows()).expect("row count exceeds u32::MAX");
-
-        let stream = self.stream();
-        let d_intersects = stream.clone_htod(bytemuck::cast_slice(table.intersects))?;
-        let d_row_starts = stream.clone_htod(bytemuck::cast_slice::<u32, u8>(table.row_starts))?;
-        // Device-side zero alloc — the kernel overwrites every in-bounds
-        // pixel, so nothing is gained by shipping a zero Vec over PCIe.
-        let d_coverage = stream.alloc_zeros::<u8>(n_pixels)?;
-
-        self.launch_aa_fill_async(
-            &d_intersects,
-            &d_row_starts,
-            n_rows,
-            table.y_min,
-            rect,
-            aa_width,
-            eo,
-            &d_coverage,
-        )?;
-
-        let mut counts = Vec::with_capacity(n_pixels);
-        crate::staging::download_banded(
-            &stream,
-            &d_coverage.as_view(),
-            rect.width as usize,
-            |_, band| counts.extend_from_slice(band),
-        )?;
-        Ok(counts)
-    }
-
     /// Async kernel launch for the scanline-AA fill kernel.
     ///
     /// Caller is responsible for stream ordering and any final D→H

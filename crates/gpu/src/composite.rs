@@ -24,8 +24,9 @@ pub fn composite_rgba8_cpu(src: &[u8], dst: &mut [u8]) {
         for c in 0..3 {
             let blended =
                 (u32::from(s[c]) * a_src + u32::from(d[c]) * a_dst * inv / 255 + a_out / 2) / a_out;
-            // blended can reach 256 via floor truncation in the d[c]*a_dst*inv/255 term;
-            // clamp to 255 to stay in u8 range.
+            // Floor truncation in the d[c]*a_dst*inv/255 term can push
+            // blended past 255 (at most 261, at a_src 8, a_dst 16); the
+            // clamp keeps it in u8 range.
             d[c] = blended.min(255) as u8;
         }
         #[expect(

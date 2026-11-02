@@ -58,21 +58,21 @@ pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
     let input_bytes = bytemuck::cast_slice::<u32, u8>(input);
     backend.upload(data.as_ref(), input_bytes)?;
 
-    backend.begin_page()?;
-    for phase in [
-        ScanPhase::PerWorkgroup,
-        ScanPhase::BlockSums,
-        ScanPhase::ScatterBlockSums,
-    ] {
-        backend.record_scan(ScanParams {
-            data: data.as_ref(),
-            block_sums: block_sums.as_ref(),
-            len_elems,
-            phase,
-        })?;
-    }
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
+    backend.run_page(|backend| {
+        for phase in [
+            ScanPhase::PerWorkgroup,
+            ScanPhase::BlockSums,
+            ScanPhase::ScatterBlockSums,
+        ] {
+            backend.record_scan(ScanParams {
+                data: data.as_ref(),
+                block_sums: block_sums.as_ref(),
+                len_elems,
+                phase,
+            })?;
+        }
+        Ok(())
+    })?;
 
     let mut out_bytes = vec![0u8; data_bytes];
     backend.download(data.as_ref(), &mut out_bytes)?;

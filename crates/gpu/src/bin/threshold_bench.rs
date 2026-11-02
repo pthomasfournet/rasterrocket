@@ -18,15 +18,19 @@
 //!
 //! Output: a table per kernel and a recommended threshold per constant.
 
+use std::fmt::Display;
+use std::sync::Arc;
 use std::time::Instant;
 
+use rasterrocket_gpu::backend::aa_fill_page;
+use rasterrocket_gpu::backend::cuda::CudaBackend;
 use rasterrocket_gpu::{
     AA_SIZE, AaFillRect, AaScanTable, GpuCtx, ScanIntersect, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
 };
 
 /// Unwrap a GPU `Result`, printing the error with context and exiting with
 /// status 1.  Used inside timing closures where `?` is not available.
-fn gpu_unwrap<T>(res: Result<T, Box<dyn std::error::Error>>, ctx: &str) -> T {
+fn gpu_unwrap<T, E: Display>(res: Result<T, E>, ctx: &str) -> T {
     res.unwrap_or_else(|e| {
         eprintln!("threshold_bench: GPU error in {ctx}: {e}");
         std::process::exit(1);
@@ -150,7 +154,8 @@ fn rect_table(w: u32, h: u32) -> (Vec<ScanIntersect>, Vec<u32>) {
 
 // ── AA fill benchmark ───────────────────────────────────────────────────────
 
-fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
+fn bench_aa_fill(ctx: &Arc<GpuCtx>, cfg: &Config) {
+    let backend = CudaBackend::from_ctx(Arc::clone(ctx));
     println!("\n══ aa_fill: GPU scanline walk vs host twin (informational) ══");
     println!(
         "{:>10}  {:>12}  {:>12}  {:>8}  winner",
@@ -184,7 +189,10 @@ fn bench_aa_fill(ctx: &GpuCtx, cfg: &Config) {
 
         let gpu_ns = time_ns(
             || {
-                let _ = gpu_unwrap(ctx.aa_fill(&table, rect, aa_width, false), "aa_fill");
+                let _ = gpu_unwrap(
+                    aa_fill_page(&backend, &table, rect, aa_width, false),
+                    "aa_fill",
+                );
             },
             cfg.warmup,
             cfg.iters,
@@ -304,11 +312,11 @@ fn main() {
     println!("iters={}, warmup={}", cfg.iters, cfg.warmup);
     println!("Machine: Ryzen 9 9900X3D + RTX 5070 (CC 12.0, PCIe 5.0)");
 
-    let ctx = GpuCtx::init().unwrap_or_else(|e| {
+    let ctx = Arc::new(GpuCtx::init().unwrap_or_else(|e| {
         eprintln!("threshold_bench: GPU init failed: {e}");
         eprintln!("Run `nvidia-smi` to verify the driver is loaded.");
         std::process::exit(1);
-    });
+    }));
 
     bench_aa_fill(&ctx, &cfg);
     bench_icc_cmyk(&ctx, &cfg);

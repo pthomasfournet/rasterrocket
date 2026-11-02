@@ -52,6 +52,7 @@ impl CudaBackend {
 impl crate::backend::sealed::Sealed for CudaBackend {}
 
 impl GpuBackend for CudaBackend {
+    const NAME: &'static str = "cuda";
     type DeviceBuffer = CudaSlice<u8>;
     type HostBuffer = PinnedHostSlice<u8>;
     type PageFence = page_recorder::PageFence;

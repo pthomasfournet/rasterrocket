@@ -119,10 +119,9 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
 
     /// Record and run Phase 1 into `s_info`.
     fn run_phase1(&self, backend: &B) -> Result<()> {
-        backend.begin_page()?;
-        backend.record_huffman(self.base_params(HuffmanPhase::Phase1IntraSync))?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)
+        backend.run_page(|backend| {
+            backend.record_huffman(self.base_params(HuffmanPhase::Phase1IntraSync))
+        })
     }
 
     /// Download the current `s_info` states.
@@ -153,17 +152,17 @@ fn run_phase1_and_phase2<B: GpuBackend>(
     let bound = retry_bound(setup.num_subsequences as usize);
     let mut flags_host = vec![0u32; setup.num_subsequences as usize];
     for iter in 0..=bound {
-        backend.begin_page()?;
-        if iter == 0 {
-            backend.record_huffman(setup.base_params(HuffmanPhase::Phase1IntraSync))?;
-        }
-        let mut params = setup.base_params(HuffmanPhase::Phase2InterSync);
-        params.s_info = setup.s_info_scratch.as_ref();
-        params.s_info_prev = Some(setup.s_info.as_ref());
-        params.sync_flags = Some(sync_flags.as_ref());
-        backend.record_huffman(params)?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)?;
+        backend.run_page(|backend| {
+            if iter == 0 {
+                backend.record_huffman(setup.base_params(HuffmanPhase::Phase1IntraSync))?;
+            }
+            let mut params = setup.base_params(HuffmanPhase::Phase2InterSync);
+            params.s_info = setup.s_info_scratch.as_ref();
+            params.s_info_prev = Some(setup.s_info.as_ref());
+            params.sync_flags = Some(sync_flags.as_ref());
+            backend.record_huffman(params)?;
+            Ok(())
+        })?;
 
         let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
         backend.download(sync_flags.as_ref(), dst)?;
@@ -296,15 +295,14 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
     // does not reach reads back clean.
     let decode_status = DeviceBufferGuard::alloc_zeroed(backend, per_subseq_bytes)?;
 
-    backend.begin_page()?;
-    let mut params = setup.base_params(HuffmanPhase::Phase4Redecode);
-    params.offsets = Some(offsets.as_ref());
-    params.symbols_out = Some(symbols.as_ref());
-    params.decode_status = Some(decode_status.as_ref());
-    params.total_symbols = total_symbols;
-    backend.record_huffman(params)?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
+    backend.run_page(|backend| {
+        let mut params = setup.base_params(HuffmanPhase::Phase4Redecode);
+        params.offsets = Some(offsets.as_ref());
+        params.symbols_out = Some(symbols.as_ref());
+        params.decode_status = Some(decode_status.as_ref());
+        params.total_symbols = total_symbols;
+        backend.record_huffman(params)
+    })?;
 
     super::check_phase4_status(
         backend,

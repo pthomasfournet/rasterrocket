@@ -252,23 +252,22 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
             .upload(dc_buf.as_ref(), bytemuck::cast_slice(dc_values))
             .map_err(be)?;
 
-        self.backend.begin_page().map_err(be)?;
         self.backend
-            .record_idct(IdctParams {
-                coefficients: coef_buf.as_ref(),
-                qtables: qt_buf.as_ref(),
-                dc_values: dc_buf.as_ref(),
-                pixels_rgba: px_buf.as_ref(),
-                width,
-                height,
-                num_components,
-                blocks_wide,
-                blocks_high,
-                num_qtables,
+            .run_page(|backend| {
+                backend.record_idct(IdctParams {
+                    coefficients: coef_buf.as_ref(),
+                    qtables: qt_buf.as_ref(),
+                    dc_values: dc_buf.as_ref(),
+                    pixels_rgba: px_buf.as_ref(),
+                    width,
+                    height,
+                    num_components,
+                    blocks_wide,
+                    blocks_high,
+                    num_qtables,
+                })
             })
             .map_err(be)?;
-        let fence = self.backend.submit_page().map_err(be)?;
-        self.backend.wait_page(fence).map_err(be)?;
 
         self.backend.free_device(coef_buf.take());
         self.backend.free_device(qt_buf.take());

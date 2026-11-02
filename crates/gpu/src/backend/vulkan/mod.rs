@@ -41,6 +41,10 @@ pub struct VulkanBackend {
     // / hold pool handles must drop before the device they were created on.
     transfer: transfer::TransferContext,
     recorder: recorder::PageRecorder,
+    /// Held for the whole of a [`GpuBackend::run_page`]: the recorder has
+    /// one recording state, so pages from several threads run one at a
+    /// time.
+    page: std::sync::Mutex<()>,
     #[expect(
         dead_code,
         reason = "kept for explicit drop ordering; readers go via recorder's Arc clone"
@@ -79,6 +83,7 @@ impl VulkanBackend {
         Ok(Self {
             transfer,
             recorder,
+            page: std::sync::Mutex::new(()),
             pipelines,
             memory,
             device,
@@ -104,6 +109,7 @@ impl Drop for VulkanBackend {
 impl crate::backend::sealed::Sealed for VulkanBackend {}
 
 impl GpuBackend for VulkanBackend {
+    const NAME: &'static str = "vulkan";
     type DeviceBuffer = memory::DeviceBuffer;
     type HostBuffer = memory::HostBuffer;
     type PageFence = recorder::PageFence;
@@ -237,6 +243,25 @@ impl GpuBackend for VulkanBackend {
 
     fn wait_page(&self, fence: Self::PageFence) -> Result<()> {
         self.recorder.wait_page(fence)
+    }
+
+    fn run_page<F>(&self, record: F) -> Result<()>
+    where
+        F: FnOnce(&Self) -> Result<()>,
+    {
+        let _page = self
+            .page
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = self.begin_page().and_then(|()| {
+            record(self)?;
+            let fence = self.submit_page()?;
+            self.wait_page(fence)
+        });
+        if result.is_err() {
+            self.recorder.abort_page();
+        }
+        result
     }
 
     fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {

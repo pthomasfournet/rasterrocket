@@ -60,22 +60,25 @@ impl AaScanTable<'_> {
     ///
     /// # Panics
     ///
-    /// Panics with a description of the violated invariant.
+    /// Panics when they do not hold.
     pub fn assert_well_formed(&self) {
         assert!(
-            !self.row_starts.is_empty(),
-            "AaScanTable: row_starts needs at least the trailing sentinel"
-        );
-        assert!(
-            self.row_starts.windows(2).all(|w| w[0] <= w[1]),
-            "AaScanTable: row_starts must be non-decreasing"
-        );
-        let last = self.row_starts[self.row_starts.len() - 1] as usize;
-        assert!(
-            last <= self.intersects.len(),
-            "AaScanTable: row_starts sentinel {last} exceeds {} intersections",
+            self.is_well_formed(),
+            "AaScanTable: row_starts must hold a trailing sentinel, be non-decreasing and end \
+             within the {} intersections",
             self.intersects.len()
         );
+    }
+
+    /// Whether the table satisfies the invariants of
+    /// [`Self::assert_well_formed`].
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.row_starts.windows(2).all(|w| w[0] <= w[1])
+            && self
+                .row_starts
+                .last()
+                .is_some_and(|&last| last as usize <= self.intersects.len())
     }
 
     /// The intersections of table row `r`, or an empty slice outside the table.

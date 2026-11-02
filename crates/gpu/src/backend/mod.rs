@@ -12,6 +12,8 @@
 //! `record_*` calls; the backend resolves them to native pointers (CUDA) or
 //! buffer-device-addresses (Vulkan) at record time.
 
+mod aa_fill;
+pub use aa_fill::aa_fill_page;
 pub mod cuda;
 pub mod params;
 #[cfg(feature = "vulkan")]
@@ -206,9 +208,9 @@ impl VramBudget {
 /// Calling `record_*` outside a `begin_page` / `submit_page` pair, or calling
 /// `submit_page` twice without an intervening `begin_page`, is implementation-
 /// defined behaviour: backends may panic, return an error, or silently produce
-/// incorrect results. Single-threaded usage is the supported pattern; cross-
-/// thread interleaving requires external synchronisation even though the trait
-/// is `Send + Sync`.
+/// incorrect results. [`GpuBackend::run_page`] runs a whole page and is safe
+/// from several threads; the individual calls require external
+/// synchronisation even though the trait is `Send + Sync`.
 ///
 /// # Stability — closed implementation set
 ///
@@ -231,6 +233,9 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// completes) while a separate render path also waits on it.
     /// CUDA wraps `Arc<cudaEvent_t>`; Vulkan wraps `Arc<VkFence>`.
     type PageFence: Send + Sync + Clone;
+
+    /// The backend's name in diagnostics: `"cuda"`, `"vulkan"`.
+    const NAME: &'static str;
 
     /// Allocate `size` bytes of device memory.
     ///
@@ -399,6 +404,28 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// # Errors
     /// Returns `BackendError` if the fence wait fails or the GPU raised an error.
     fn wait_page(&self, fence: Self::PageFence) -> Result<()>;
+
+    /// Run one page: `begin_page`, the work `record` records, `submit_page`
+    /// and `wait_page`, returning once the device has finished it.
+    ///
+    /// This is the page lifecycle for a backend shared between threads: a
+    /// backend with one recording state serialises whole pages, so a
+    /// second thread's page waits instead of failing, and a failure at any
+    /// step abandons the page and returns the backend to idle, so one
+    /// failed page does not fail every later one.
+    ///
+    /// # Errors
+    /// The first error of any step.
+    fn run_page<F>(&self, record: F) -> Result<()>
+    where
+        F: FnOnce(&Self) -> Result<()>,
+        Self: Sized,
+    {
+        self.begin_page()?;
+        record(self)?;
+        let fence = self.submit_page()?;
+        self.wait_page(fence)
+    }
 
     /// Copy `src` into `dst[..src.len()]`.
     ///

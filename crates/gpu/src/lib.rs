@@ -45,6 +45,7 @@ mod fill;
 #[cfg(any(feature = "vaapi", feature = "gpu-jpeg-huffman"))]
 pub(crate) mod jpeg;
 pub(crate) mod jpeg_sof;
+#[cfg(feature = "cache")]
 mod staging;
 pub(crate) mod traits;
 

@@ -334,31 +334,13 @@ impl PageRenderer<'_> {
         use super::gpu_ops::try_backend_aa_fill;
         #[cfg(feature = "vulkan")]
         if let Some(vk) = self.vk_backend.clone() {
-            return try_backend_aa_fill(
-                self,
-                &*vk,
-                "vulkan aa_fill",
-                path,
-                even_odd,
-                flatness,
-                pipe,
-                src,
-            );
+            return try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src);
         }
         let Some(ctx) = self.gpu_ctx.clone() else {
             return false;
         };
         let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
-        try_backend_aa_fill(
-            self,
-            &cuda,
-            "cuda aa_fill",
-            path,
-            even_odd,
-            flatness,
-            pipe,
-            src,
-        )
+        try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
     }
 
     /// Stroke `path` with the current line width, widened to at least one

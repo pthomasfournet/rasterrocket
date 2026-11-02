@@ -257,6 +257,22 @@ impl PageRecorder {
         Ok(PageFence(value))
     }
 
+    /// Abandon the current page and return to `Idle`: a recording page is
+    /// discarded (the next `begin_page` resets its pools), a submitted one
+    /// is waited for first, so that no in-flight work outlives the page.
+    /// The wait's own failure leaves the device's state to its error and is
+    /// logged.
+    pub(super) fn abort_page(&self) {
+        let mut s = self.inner.lock().expect("recorder mutex poisoned");
+        if s.state == State::Submitted
+            && let Some(last) = NonZeroU64::new(s.next_value - 1)
+            && let Err(e) = self.wait_timeline(last)
+        {
+            log::warn!("abandoning a submitted page: waiting for it failed: {e}");
+        }
+        s.state = State::Idle;
+    }
+
     pub(super) fn wait_page(&self, fence: PageFence) -> Result<()> {
         // Hold the mutex across the wait so the Submitted → Idle
         // transition is atomic w.r.t. concurrent begin_page calls.

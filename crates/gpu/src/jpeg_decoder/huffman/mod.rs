@@ -279,10 +279,9 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
     /// Record and run JPEG Phase 1 into `s_info`.
     #[cfg(all(test, feature = "gpu-validation"))]
     fn run_phase1(&self, backend: &B) -> Result<()> {
-        backend.begin_page()?;
-        backend.record_huffman(self.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)
+        backend.run_page(|backend| {
+            backend.record_huffman(self.base_params(HuffmanPhase::JpegPhase1IntraSync))
+        })
     }
 
     /// Download the current `s_info` states.
@@ -338,18 +337,18 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
     let passes = jpeg_phase2_retry_bound(setup.num_subsequences).min(budget.passes);
     let mut flags_host = vec![0u32; setup.num_subsequences as usize];
     for iter in 0..passes {
-        backend.begin_page()?;
-        if iter == 0 {
-            backend.record_huffman(setup.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
-        }
-        let mut params = setup.base_params(HuffmanPhase::JpegPhase2InterSync);
-        params.s_info = setup.s_info_scratch.as_ref();
-        params.s_info_prev = Some(setup.s_info.as_ref());
-        params.sync_flags = Some(setup.sync_flags.as_ref());
-        params.redecode_budget = budget.redecodes;
-        backend.record_huffman(params)?;
-        let fence = backend.submit_page()?;
-        backend.wait_page(fence)?;
+        backend.run_page(|backend| {
+            if iter == 0 {
+                backend.record_huffman(setup.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
+            }
+            let mut params = setup.base_params(HuffmanPhase::JpegPhase2InterSync);
+            params.s_info = setup.s_info_scratch.as_ref();
+            params.s_info_prev = Some(setup.s_info.as_ref());
+            params.sync_flags = Some(setup.sync_flags.as_ref());
+            params.redecode_budget = budget.redecodes;
+            backend.record_huffman(params)?;
+            Ok(())
+        })?;
 
         let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut flags_host);
         backend.download(setup.sync_flags.as_ref(), dst)?;
@@ -614,15 +613,14 @@ pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
     let decode_status_buf = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
 
     // Phase 4.
-    backend.begin_page()?;
-    let mut params = setup.base_params(HuffmanPhase::JpegPhase4Redecode);
-    params.offsets = Some(offsets_buf.as_ref());
-    params.symbols_out = Some(symbols_buf.as_ref());
-    params.decode_status = Some(decode_status_buf.as_ref());
-    params.total_symbols = total_symbols;
-    backend.record_huffman(params)?;
-    let fence = backend.submit_page()?;
-    backend.wait_page(fence)?;
+    backend.run_page(|backend| {
+        let mut params = setup.base_params(HuffmanPhase::JpegPhase4Redecode);
+        params.offsets = Some(offsets_buf.as_ref());
+        params.symbols_out = Some(symbols_buf.as_ref());
+        params.decode_status = Some(decode_status_buf.as_ref());
+        params.total_symbols = total_symbols;
+        backend.record_huffman(params)
+    })?;
 
     check_phase4_status(
         backend,

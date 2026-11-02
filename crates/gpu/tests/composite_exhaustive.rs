@@ -1,5 +1,6 @@
 //! `composite_rgba8` and `apply_soft_mask` against their CPU references over
-//! every alpha pair, on each backend built in.
+//! every alpha pair, on each backend built in, with a partial last thread
+//! block whose out-of-range threads must not write past the buffer.
 //!
 //! The CUDA module needs `gpu-validation` (a CUDA device); the Vulkan module
 //! needs `vulkan`:
@@ -12,6 +13,15 @@ use rasterrocket_gpu::backend::params::{CompositeParams, SoftMaskParams};
 
 /// One pixel per (alpha, other) pair: `alpha` in the high byte of the index.
 const PAIRS: usize = 256 * 256;
+
+/// Pixels after the pairs, so that the last thread block is partial and its
+/// out-of-range threads must return without writing.
+const TAIL: usize = 37;
+
+/// Bytes past the last pixel of each written buffer, filled with
+/// [`GUARD_BYTE`] and checked untouched.
+const GUARD: usize = 16;
+const GUARD_BYTE: u8 = 0xA5;
 
 /// Colour bytes from a 32-bit LCG; deterministic across runs.
 fn colours(seed: u32) -> impl FnMut() -> u8 {
@@ -28,9 +38,13 @@ fn colours(seed: u32) -> impl FnMut() -> u8 {
 /// overshoots 255 and the clamp decides the result; the rest use LCG colours.
 fn composite_inputs() -> (Vec<u8>, Vec<u8>) {
     let mut next = colours(0xdead_beef);
-    let mut src = Vec::with_capacity(PAIRS * 4);
-    let mut dst = Vec::with_capacity(PAIRS * 4);
-    for (a_src, a_dst) in (0..=255u8).flat_map(|a| (0..=255u8).map(move |b| (a, b))) {
+    let mut src = Vec::with_capacity((PAIRS + TAIL) * 4);
+    let mut dst = Vec::with_capacity((PAIRS + TAIL) * 4);
+    let tail = (0..TAIL).map(|i| (u8::try_from(i * 7).expect("small"), 200));
+    for (a_src, a_dst) in (0..=255u8)
+        .flat_map(|a| (0..=255u8).map(move |b| (a, b)))
+        .chain(tail)
+    {
         let (s, d) = if src.len() % 28 == 0 {
             ([255; 3], [255; 3])
         } else {
@@ -45,9 +59,13 @@ fn composite_inputs() -> (Vec<u8>, Vec<u8>) {
 /// Pixels and mask covering every (alpha, mask) pair.
 fn soft_mask_inputs() -> (Vec<u8>, Vec<u8>) {
     let mut next = colours(0x0bad_cafe);
-    let mut pixels = Vec::with_capacity(PAIRS * 4);
-    let mut mask = Vec::with_capacity(PAIRS);
-    for (alpha, m) in (0..=255u8).flat_map(|a| (0..=255u8).map(move |b| (a, b))) {
+    let mut pixels = Vec::with_capacity((PAIRS + TAIL) * 4);
+    let mut mask = Vec::with_capacity(PAIRS + TAIL);
+    let tail = (0..TAIL).map(|i| (100, u8::try_from(i * 5).expect("small")));
+    for (alpha, m) in (0..=255u8)
+        .flat_map(|a| (0..=255u8).map(move |b| (a, b)))
+        .chain(tail)
+    {
         pixels.extend_from_slice(&[next(), next(), next(), alpha]);
         mask.push(m);
     }
@@ -64,16 +82,24 @@ fn upload<B: GpuBackend>(backend: &B, bytes: &[u8]) -> B::DeviceBuffer {
     buf
 }
 
-fn run_page<B: GpuBackend>(backend: &B, record: impl FnOnce(&B)) {
-    backend.begin_page().expect("begin_page");
-    record(backend);
-    let fence = backend.submit_page().expect("submit_page");
-    backend.wait_page(fence).expect("wait_page");
+/// `bytes` uploaded with a [`GUARD`]-byte tail of [`GUARD_BYTE`].
+fn upload_guarded<B: GpuBackend>(backend: &B, bytes: &[u8]) -> B::DeviceBuffer {
+    let mut guarded = bytes.to_vec();
+    guarded.extend_from_slice(&[GUARD_BYTE; GUARD]);
+    upload(backend, &guarded)
 }
 
-fn download<B: GpuBackend>(backend: &B, buf: &B::DeviceBuffer, len: usize) -> Vec<u8> {
-    let mut out = vec![0u8; len];
+/// The `len` bytes of a guarded buffer, after asserting its guard tail is
+/// as uploaded.
+fn download_guarded<B: GpuBackend>(backend: &B, buf: &B::DeviceBuffer, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len + GUARD];
     backend.download(buf, &mut out).expect("download");
+    assert!(
+        out[len..].iter().all(|&b| b == GUARD_BYTE),
+        "a thread past the last pixel wrote the guard: {:02X?}",
+        &out[len..]
+    );
+    out.truncate(len);
     out
 }
 
@@ -89,16 +115,17 @@ fn first_mismatch<'a>(device: &'a [u8], cpu: &'a [u8]) -> Option<(usize, &'a [u8
 fn composite_matches_cpu<B: GpuBackend>(backend: &B) {
     let (src, dst) = composite_inputs();
     let d_src = upload(backend, &src);
-    let d_dst = upload(backend, &dst);
-    run_page(backend, |b| {
-        b.record_composite(CompositeParams {
-            src: &d_src,
-            dst: &d_dst,
-            n_pixels: n_pixels(PAIRS),
+    let d_dst = upload_guarded(backend, &dst);
+    backend
+        .run_page(|b| {
+            b.record_composite(CompositeParams {
+                src: &d_src,
+                dst: &d_dst,
+                n_pixels: n_pixels(PAIRS + TAIL),
+            })
         })
-        .expect("record_composite");
-    });
-    let device = download(backend, &d_dst, dst.len());
+        .expect("composite page");
+    let device = download_guarded(backend, &d_dst, dst.len());
 
     let mut cpu = dst;
     rasterrocket_gpu::composite_rgba8_cpu(&src, &mut cpu);
@@ -113,17 +140,18 @@ fn composite_matches_cpu<B: GpuBackend>(backend: &B) {
 
 fn soft_mask_matches_cpu<B: GpuBackend>(backend: &B) {
     let (pixels, mask) = soft_mask_inputs();
-    let d_pixels = upload(backend, &pixels);
+    let d_pixels = upload_guarded(backend, &pixels);
     let d_mask = upload(backend, &mask);
-    run_page(backend, |b| {
-        b.record_apply_soft_mask(SoftMaskParams {
-            pixels: &d_pixels,
-            mask: &d_mask,
-            n_pixels: n_pixels(PAIRS),
+    backend
+        .run_page(|b| {
+            b.record_apply_soft_mask(SoftMaskParams {
+                pixels: &d_pixels,
+                mask: &d_mask,
+                n_pixels: n_pixels(PAIRS + TAIL),
+            })
         })
-        .expect("record_apply_soft_mask");
-    });
-    let device = download(backend, &d_pixels, pixels.len());
+        .expect("soft mask page");
+    let device = download_guarded(backend, &d_pixels, pixels.len());
 
     let mut cpu = pixels;
     rasterrocket_gpu::apply_soft_mask_cpu(&mut cpu, &mask);
