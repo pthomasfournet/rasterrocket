@@ -13,7 +13,10 @@ unless the entry says otherwise.
   the form `Decoder::push_row` receives, as Group 3 one-dimensional (MH),
   Group 3 two-dimensional (MR, period `k`) with an EOL before every row
   (optionally byte-aligned), or Group 4 (MMR) ended by EOFB.
-  `changes_of_row` derives the changes from packed pixels.  The run-length
+  `changes_of_row` derives the changes from packed pixels, skipping whole
+  bytes of one colour, and `Encoder::encode_packed_row` codes a packed row
+  through a reused change buffer.  Two-dimensional coding finds b1 with a
+  cursor that only advances, linear in the row's changes.  The run-length
   tables in `tables.rs` are shared with the decoder and became
   `pub(crate)`; the decoder is unchanged.
 

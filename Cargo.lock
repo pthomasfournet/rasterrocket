@@ -1323,6 +1323,7 @@ name = "rasterrocket-encode"
 version = "2.0.0"
 dependencies = [
  "flate2",
+ "hayro-ccitt",
  "jpeg-encoder",
  "png",
  "rasterrocket-color",

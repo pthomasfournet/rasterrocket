@@ -1,6 +1,7 @@
 //! Baseline TIFF 6.0 writer: one or more pages of RGB, gray or bilevel
 //! pixels, each in strips, uncompressed or compressed with `PackBits`, LZW
-//! or Deflate.
+//! or Deflate, and bilevel pages also with CCITT Group 3 or Group 4 fax
+//! coding.
 //!
 //! The file is little-endian.  Each page's strips are followed by its image
 //! file directory (IFD), whose values that do not fit in an entry follow
@@ -11,6 +12,7 @@
 use std::io::Write;
 
 use color::{Gray8, Rgb8};
+use hayro_ccitt::{EncodeScheme, Encoder};
 use raster::Bitmap;
 
 use crate::EncodeError;
@@ -26,6 +28,16 @@ pub enum TiffCompression {
     Lzw,
     /// zlib-wrapped Deflate, Adobe's code (8).
     Deflate,
+    /// CCITT Group 3 fax coding (3), bilevel pages only: every row after an
+    /// end-of-line code padded to end on a byte boundary, coded
+    /// two-dimensionally with period `k` when set, else one-dimensionally.
+    /// ITU-T T.4 sets `k` to 2 at standard and 4 at fine resolution.
+    Group3 {
+        /// The period of one-dimensional rows in two-dimensional coding.
+        k: Option<u32>,
+    },
+    /// CCITT Group 4 fax coding (4), bilevel pages only.
+    Group4,
 }
 
 impl TiffCompression {
@@ -35,6 +47,24 @@ impl TiffCompression {
             Self::PackBits => 32773,
             Self::Lzw => 5,
             Self::Deflate => 8,
+            Self::Group3 { .. } => 3,
+            Self::Group4 => 4,
+        }
+    }
+
+    /// Whether this is a CCITT fax coding.
+    const fn is_fax(self) -> bool {
+        matches!(self, Self::Group3 { .. } | Self::Group4)
+    }
+
+    /// The options tag of a CCITT page: `T4Options` (292), bit 0 for
+    /// two-dimensional coding and bit 2 for fill bits before each EOL, or
+    /// `T6Options` (293), no options.
+    const fn options_tag(self) -> Option<(u16, u32)> {
+        match self {
+            Self::Group3 { k } => Some((292, 4 | k.is_some() as u32)),
+            Self::Group4 => Some((293, 0)),
+            Self::None | Self::PackBits | Self::Lzw | Self::Deflate => None,
         }
     }
 }
@@ -100,7 +130,7 @@ struct Page {
     height: u32,
     /// Samples per pixel, bits per sample, photometric interpretation.
     layout: (u16, u16, u16),
-    compression: u16,
+    compression: TiffCompression,
     rows_per_strip: u32,
     strips: Vec<Vec<u8>>,
     /// Resolution in pixels per inch, as rationals.
@@ -128,8 +158,9 @@ impl TiffWriter {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::UnsupportedMode`] for an empty image or a resolution
-    /// that is not finite and positive.
+    /// [`EncodeError::UnsupportedMode`] for an empty image, a resolution
+    /// that is not finite and positive, CCITT compression of a page that is
+    /// not bilevel, or a Group 3 period `k` of 0.
     pub fn add_page(&mut self, image: TiffImage<'_>, dpi: (f64, f64)) -> Result<(), EncodeError> {
         let (width, height) = image.size();
         if width == 0 || height == 0 {
@@ -137,13 +168,30 @@ impl TiffWriter {
                 "zero-width or zero-height bitmap: TIFF cannot encode an empty image",
             ));
         }
+        let fax = self.compression.is_fax();
+        if fax && !matches!(image, TiffImage::Bilevel(_)) {
+            return Err(EncodeError::UnsupportedMode(
+                "CCITT fax compression codes bilevel pages only",
+            ));
+        }
+        if self.compression == (TiffCompression::Group3 { k: Some(0) }) {
+            return Err(EncodeError::UnsupportedMode(
+                "the Group 3 period k is at least 1",
+            ));
+        }
         let resolution = [rational(dpi.0)?, rational(dpi.1)?];
         let mut row = Vec::new();
         image.row(0, &mut row);
         let row_bytes = row.len();
-        let rows_per_strip = u32::try_from((STRIP_BYTES / row_bytes).max(1))
-            .unwrap_or(u32::MAX)
-            .min(height);
+        // A CCITT page is one strip, as the fax profile of TIFF (RFC 2306)
+        // recommends; each strip would restart the coding's reference row.
+        let rows_per_strip = if fax {
+            height
+        } else {
+            u32::try_from((STRIP_BYTES / row_bytes).max(1))
+                .unwrap_or(u32::MAX)
+                .min(height)
+        };
         let mut strips = Vec::new();
         let mut raw = Vec::with_capacity(row_bytes * rows_per_strip as usize);
         for first in (0..height).step_by(rows_per_strip as usize) {
@@ -151,13 +199,13 @@ impl TiffWriter {
             for y in first..height.min(first.saturating_add(rows_per_strip)) {
                 image.row(y, &mut raw);
             }
-            strips.push(compress(&raw, row_bytes, self.compression)?);
+            strips.push(compress(&raw, row_bytes, width, self.compression)?);
         }
         self.pages.push(Page {
             width,
             height,
             layout: image.layout(),
-            compression: self.compression.code(),
+            compression: self.compression,
             rows_per_strip,
             strips,
             resolution,
@@ -224,11 +272,22 @@ pub fn write_tiff<W: Write>(
     writer.write(out)
 }
 
-/// `bytes` compressed with `compression`; `row_bytes` is the length of
-/// one stored row, the unit `PackBits` runs may not cross.
+/// Packed bilevel rows of `width` pixels, `row_bytes` each, fax-coded by
+/// `scheme`.
+fn fax_code(bytes: &[u8], row_bytes: usize, width: u32, scheme: EncodeScheme) -> Vec<u8> {
+    let mut encoder = Encoder::new(width, scheme);
+    for row in bytes.chunks(row_bytes) {
+        encoder.encode_packed_row(row);
+    }
+    encoder.finish()
+}
+
+/// `bytes`, stored rows of `row_bytes` each and `width` pixels, compressed
+/// with `compression`.  `PackBits` runs do not cross a row.
 fn compress(
     bytes: &[u8],
     row_bytes: usize,
+    width: u32,
     compression: TiffCompression,
 ) -> Result<Vec<u8>, EncodeError> {
     Ok(match compression {
@@ -251,6 +310,16 @@ fn compress(
             encoder.write_all(bytes)?;
             encoder.finish()?
         }
+        TiffCompression::Group3 { k } => fax_code(
+            bytes,
+            row_bytes,
+            width,
+            EncodeScheme::Group3 {
+                k,
+                byte_aligned_eol: true,
+            },
+        ),
+        TiffCompression::Group4 => fax_code(bytes, row_bytes, width, EncodeScheme::Group4),
     })
 }
 
@@ -360,7 +429,7 @@ fn write_ifd(
         longs(256, &[page.width]),
         longs(257, &[page.height]),
         shorts(258, &vec![bits; usize::from(samples)]),
-        shorts(259, &[page.compression]),
+        shorts(259, &[page.compression.code()]),
         shorts(262, &[photometric]),
         longs(273, offsets),
         shorts(277, &[samples]),
@@ -374,6 +443,9 @@ fn write_ifd(
     ];
     if bits == 1 {
         entries.push(shorts(266, &[1]));
+    }
+    if let Some((tag, options)) = page.compression.options_tag() {
+        entries.push(longs(tag, &[options]));
     }
     entries.sort_by_key(|e| e.tag);
 
@@ -516,6 +588,142 @@ mod tests {
         }
     }
 
+    /// A bilevel test page: a black frame, a diagonal and bands of short
+    /// strokes, so fax coding meets every mode.
+    fn drawing(w: u32, h: u32) -> Bitmap<Gray8> {
+        let mut bmp = Bitmap::new(w, h, 4, false);
+        for y in 0..h {
+            for (x, px) in bmp.row_bytes_mut(y)[..w as usize].iter_mut().enumerate() {
+                let x = u32::try_from(x).expect("small");
+                let ink = x < 3
+                    || y < 3
+                    || x + 3 >= w
+                    || y + 3 >= h
+                    || x.abs_diff(y) < 2
+                    || (y % 9 < 4 && (x / 3 + y / 2) % 5 == 0);
+                *px = if ink { 0 } else { 255 };
+            }
+        }
+        bmp
+    }
+
+    /// The packed rows of `g` as stored bilevel: 1 black.
+    fn packed(g: &Bitmap<Gray8>) -> Vec<u8> {
+        let mut rows = Vec::new();
+        for y in 0..g.height {
+            TiffImage::Bilevel(g).row(y, &mut rows);
+        }
+        rows
+    }
+
+    #[test]
+    fn group4_pages_read_back_through_an_independent_decoder() {
+        let g = drawing(1728, 120);
+        let mut out = Vec::new();
+        write_tiff(
+            TiffImage::Bilevel(&g),
+            (204.0, 196.0),
+            TiffCompression::Group4,
+            &mut out,
+        )
+        .unwrap();
+        let mut decoder = decode(&out);
+        assert_eq!(decoder.get_tag_u32(Tag::Unknown(293)).unwrap(), 0);
+        assert_eq!(
+            decoder.get_tag_u32(Tag::RowsPerStrip).unwrap(),
+            120,
+            "one strip"
+        );
+        // The reader inverts WhiteIsZero: its 1 bits are white.
+        let pixels: Vec<u8> = bytes(decoder.read_image().unwrap())
+            .into_iter()
+            .map(|b| !b)
+            .collect();
+        assert_eq!(pixels, packed(&g));
+        assert!(
+            out.len() * 3 < pixels.len(),
+            "{} of {} bytes",
+            out.len(),
+            pixels.len()
+        );
+    }
+
+    #[test]
+    fn group3_pages_decode_and_declare_their_options() {
+        use hayro_ccitt::{DecodeSettings, Decoder as Fax, DecoderContext, EncodingMode};
+
+        /// Rows decoded to packed bits, 1 black.
+        struct Packed(Vec<u8>, u32);
+        impl Fax for Packed {
+            fn push_row(&mut self, changes: &[u32]) {
+                let start = self.0.len();
+                self.0.resize(start + self.1.div_ceil(8) as usize, 0);
+                let ends = changes.iter().copied().chain([self.1]);
+                for (i, (from, to)) in changes.iter().copied().zip(ends.skip(1)).enumerate() {
+                    if i % 2 == 0 {
+                        for x in from..to {
+                            self.0[start + (x / 8) as usize] |= 0x80 >> (x % 8);
+                        }
+                    }
+                }
+            }
+        }
+
+        let g = drawing(203, 77);
+        for (k, options) in [(None, 4), (Some(2), 5), (Some(4), 5)] {
+            let mut out = Vec::new();
+            write_tiff(
+                TiffImage::Bilevel(&g),
+                (204.0, 98.0),
+                TiffCompression::Group3 { k },
+                &mut out,
+            )
+            .unwrap();
+            let mut decoder = decode(&out);
+            assert_eq!(decoder.get_tag_u32(Tag::Compression).unwrap(), 3);
+            assert_eq!(decoder.get_tag_u32(Tag::Unknown(292)).unwrap(), options);
+            let offset = decoder.get_tag_u32(Tag::StripOffsets).unwrap() as usize;
+            let len = decoder.get_tag_u32(Tag::StripByteCounts).unwrap() as usize;
+
+            let mut settings = DecodeSettings::new(203, 77);
+            settings.strict = true;
+            settings.end_of_line = true;
+            settings.rows_are_byte_aligned = true;
+            settings.encoding = if k.is_some() {
+                EncodingMode::Group3_2D
+            } else {
+                EncodingMode::Group3_1D
+            };
+            let mut rows = Packed(Vec::new(), 203);
+            let _consumed = hayro_ccitt::decode(
+                &out[offset..offset + len],
+                &mut rows,
+                &mut DecoderContext::new(settings),
+            )
+            .expect("the strip decodes");
+            assert_eq!(rows.0, packed(&g), "k = {k:?}");
+        }
+    }
+
+    #[test]
+    fn fax_coding_refuses_pages_that_are_not_bilevel() {
+        let g = gray(16, 4);
+        for compression in [TiffCompression::Group4, TiffCompression::Group3 { k: None }] {
+            let mut writer = TiffWriter::new(compression);
+            assert!(
+                writer
+                    .add_page(TiffImage::Gray(&g), (204.0, 196.0))
+                    .is_err()
+            );
+        }
+        let mut writer = TiffWriter::new(TiffCompression::Group3 { k: Some(0) });
+        assert!(
+            writer
+                .add_page(TiffImage::Bilevel(&g), (204.0, 196.0))
+                .is_err()
+        );
+    }
+
     #[test]
     fn pages_carry_their_number_and_resolution() {
         let g = gray(8, 8);
@@ -529,7 +737,10 @@ mod tests {
         writer.write(&mut out).unwrap();
         let mut decoder = decode(&out);
         for page in 0..3u16 {
-            assert_eq!(decoder.get_tag_u16_vec(Tag::Unknown(297)).unwrap(), [page, 3]);
+            assert_eq!(
+                decoder.get_tag_u16_vec(Tag::Unknown(297)).unwrap(),
+                [page, 3]
+            );
             assert_eq!(decoder.get_tag_u32(Tag::NewSubfileType).unwrap(), 2);
             let y_res = decoder.get_tag_u32_vec(Tag::YResolution).unwrap();
             assert_eq!(y_res, [97_500, 1000]);

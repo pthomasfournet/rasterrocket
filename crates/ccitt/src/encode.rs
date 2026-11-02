@@ -48,6 +48,8 @@ pub struct Encoder {
     /// The changes of the previous row; empty for the all-white row.
     reference: Vec<u32>,
     rows: u32,
+    /// The changes of the row being coded by [`Self::encode_packed_row`].
+    scratch: Vec<u32>,
     out: BitWriter,
 }
 
@@ -69,6 +71,7 @@ impl Encoder {
             scheme,
             reference: Vec::new(),
             rows: 0,
+            scratch: Vec::new(),
             out: BitWriter::default(),
         }
     }
@@ -118,6 +121,20 @@ impl Encoder {
         self.rows = self.rows.saturating_add(1);
     }
 
+    /// Code the next row, packed one bit per pixel, most significant first,
+    /// 1 black.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row` holds fewer bits than the width.
+    pub fn encode_packed_row(&mut self, row: &[u8]) {
+        let mut changes = core::mem::take(&mut self.scratch);
+        changes.clear();
+        push_changes(row, self.width, &mut changes);
+        self.encode_row(&changes);
+        self.scratch = changes;
+    }
+
     /// The coded image: for Group 4 ended by EOFB, padded to a byte.
     #[must_use]
     pub fn finish(mut self) -> Vec<u8> {
@@ -151,21 +168,22 @@ impl Encoder {
         // a0 starts on an imaginary white pixel before the row.
         let mut a0: i64 = -1;
         let mut black = false;
-        // Index of the first coding change after a0.
+        // Indices of the first coding and reference changes after a0; a0
+        // only advances, so both cursors do.
         let mut next = 0;
+        let mut after = 0;
         loop {
             while next < changes.len() && i64::from(changes[next]) <= a0 {
                 next += 1;
+            }
+            while after < self.reference.len() && i64::from(self.reference[after]) <= a0 {
+                after += 1;
             }
             let a1 = at(changes, next);
             let a2 = at(changes, next + 1);
             // b1: the first reference change after a0 to the colour
             // opposite a0's.  Changes at even indices turn the row black.
-            let mut j = self
-                .reference
-                .iter()
-                .position(|&c| i64::from(c) > a0)
-                .unwrap_or(self.reference.len());
+            let mut j = after;
             if j % 2 != usize::from(black) {
                 j += 1;
             }
@@ -215,21 +233,34 @@ fn run_length(len: i64) -> u32 {
 /// Panics if `row` holds fewer than `width` bits.
 #[must_use]
 pub fn changes_of_row(row: &[u8], width: u32) -> Vec<u32> {
+    let mut changes = Vec::new();
+    push_changes(row, width, &mut changes);
+    changes
+}
+
+/// Append the colour changes of the first `width` bits of `row` to
+/// `changes`.  A byte all of the current colour holds no change and is
+/// skipped whole.
+fn push_changes(row: &[u8], width: u32, changes: &mut Vec<u32>) {
     assert!(
         row.len() as u64 * 8 >= u64::from(width),
         "the row holds fewer bits than its width"
     );
-    let mut changes = Vec::new();
     let mut black = false;
-    for x in 0..width {
+    let mut x = 0;
+    while x < width {
         let byte = row[(x / 8) as usize];
+        if x % 8 == 0 && width - x >= 8 && byte == if black { 0xFF } else { 0 } {
+            x += 8;
+            continue;
+        }
         let bit = byte & (0x80 >> (x % 8)) != 0;
         if bit != black {
             changes.push(x);
             black = bit;
         }
+        x += 1;
     }
-    changes
 }
 
 /// Bits written most significant first.
@@ -445,5 +476,36 @@ mod tests {
         assert_eq!(changes_of_row(&[0b0011_1000, 0b0000_0001], 16), [2, 5, 15]);
         assert_eq!(changes_of_row(&[0xFF], 5), [0]);
         assert!(changes_of_row(&[0x00], 8).is_empty());
+        // Whole bytes of the current colour are skipped, including across
+        // a change at a byte boundary and in a final partial byte.
+        assert_eq!(changes_of_row(&[0x00, 0xFF, 0xFF, 0x0F], 32), [8, 24, 28]);
+        assert_eq!(changes_of_row(&[0xFF, 0xFF, 0xFE], 23), [0]);
+        assert_eq!(changes_of_row(&[0xFF, 0xFF, 0xFE], 24), [0, 23]);
+    }
+
+    #[test]
+    fn packed_rows_code_as_their_changes() {
+        // A deterministic mix of whole-byte runs and scattered bits.
+        let width: u32 = 203;
+        let rows: Vec<Vec<u8>> = (0u32..40)
+            .map(|y| {
+                (0..width.div_ceil(8))
+                    .map(|i| match (i + y) % 5 {
+                        0 => 0x00,
+                        1 => 0xFF,
+                        _ => (i * 37 + y * 11).to_le_bytes()[0],
+                    })
+                    .collect()
+            })
+            .collect();
+        for scheme in SCHEMES {
+            let mut by_changes = Encoder::new(width, scheme);
+            let mut packed = Encoder::new(width, scheme);
+            for row in &rows {
+                by_changes.encode_row(&changes_of_row(row, width));
+                packed.encode_packed_row(row);
+            }
+            assert_eq!(packed.finish(), by_changes.finish(), "{scheme:?}");
+        }
     }
 }
