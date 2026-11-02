@@ -395,6 +395,8 @@ renderer/
     text.rs          — show_text
     type3.rs         — show_text_type3; coverage cache of d1 glyphs
     text_ops.rs      — glyph records, advances, text-space → device
+    text_shaping.rs  — runs of substitute-drawn text shaped with the face's
+                       GSUB/GPOS
     annotations/
       mod.rs         — annotation appearance streams: /F flags, /OC,
                        appearance state, Algorithm 8.1 fit, NoRotate;
@@ -417,7 +419,8 @@ renderer/
       text.rs        — /DA parsing, the /DR-derived resources, text strings
                        and rich text reduced to plain text
       typeset.rs     — Unicode text set as runs of codes in font resources;
-                       line wrapping and layout
+                       line wrapping and layout; each line in visual
+                       order (UAX #9), mirrored at right-to-left levels
       encoder.rs     — Unicode → codes of a font (inverse of its encoding,
                        ToUnicode or collection); CJK fallback Type 0 fonts
                        for characters the /DA font cannot encode

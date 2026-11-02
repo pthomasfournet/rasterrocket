@@ -74,8 +74,51 @@ pub(super) fn show_line(
 ) {
     da.begin_text(s, font, size);
     let _ = write!(s, "{} {} Td ", n(x), n(y));
-    ts.show(s, font, size, text);
+    match visual_order(text, right_to_left(text)) {
+        Some(visual) => {
+            let visual: String = visual.into_iter().map(|(_, c)| c).collect();
+            ts.show(s, font, size, &visual);
+        }
+        None => ts.show(s, font, size, text),
+    }
     s.push_str("ET\n");
+}
+
+/// Whether a paragraph of `text` is right to left: its first strong
+/// character is (UAX #9 rules P2 and P3).  Text without one is left to
+/// right.
+pub(super) fn right_to_left(text: &str) -> bool {
+    unicode_bidi::get_base_direction(text) == unicode_bidi::Direction::Rtl
+}
+
+/// The characters of the line `text` in visual order (UAX #9 rules L1 to
+/// L4) in a paragraph that is right to left when `rtl`, each with the byte
+/// offset of the character it shows; a character at a right-to-left level
+/// shows its mirrored form when it has one.  `None` when the visual order
+/// is the logical order.
+fn visual_order(text: &str, rtl: bool) -> Option<Vec<(usize, char)>> {
+    use unicode_bidi::{Level, ParagraphBidiInfo};
+    let info = ParagraphBidiInfo::new(text, Some(if rtl { Level::rtl() } else { Level::ltr() }));
+    if !info.has_rtl() {
+        return None;
+    }
+    let (levels, runs) = info.visual_runs(0..text.len());
+    let mut visual = Vec::with_capacity(text.len());
+    for run in runs {
+        let chars = text[run.clone()]
+            .char_indices()
+            .map(|(i, c)| (run.start + i, c));
+        if levels[run.start].is_rtl() {
+            visual.extend(
+                chars
+                    .rev()
+                    .map(|(i, c)| (i, unicode_bidi_mirroring::get_mirrored(c).unwrap_or(c))),
+            );
+        } else {
+            visual.extend(chars);
+        }
+    }
+    Some(visual)
 }
 
 /// A content-stream hexadecimal string of `bytes`.
@@ -268,16 +311,44 @@ impl<'a> Wrapper<'a> {
     }
 }
 
+/// `runs`, the styled text of a line in logical order, in visual order
+/// (see [`visual_order`]) in a paragraph that is right to left when `rtl`.
+fn visual_runs<'a>(runs: &[(&'a Style, String)], rtl: bool) -> Vec<(&'a Style, String)> {
+    let text: String = runs.iter().map(|(_, t)| t.as_str()).collect();
+    let Some(visual) = visual_order(&text, rtl) else {
+        return runs.to_vec();
+    };
+    // The byte offset in `text` at which each run ends.
+    let ends: Vec<usize> = runs
+        .iter()
+        .scan(0, |end, (_, t)| {
+            *end += t.len();
+            Some(*end)
+        })
+        .collect();
+    let mut out: Vec<(&Style, String)> = Vec::new();
+    for (offset, c) in visual {
+        let style = runs[ends.partition_point(|&end| end <= offset)].0;
+        match out.last_mut() {
+            Some((last, t)) if std::ptr::eq(*last, style) => t.push(c),
+            _ => out.push((style, c.to_string())),
+        }
+    }
+    out
+}
+
 /// Append the runs of `line` in a new text object, its baseline starting
-/// at `(x, y)`.
+/// at `(x, y)`, in visual order in a paragraph that is right to left when
+/// `rtl`.
 fn show_runs(
     s: &mut String,
     ts: &mut dyn Typesetter,
     runs: &[(&Style, String)],
     (x, y): (f64, f64),
+    rtl: bool,
 ) {
     let mut first = true;
-    for (style, text) in runs {
+    for (style, text) in &visual_runs(runs, rtl) {
         if first {
             s.push_str("BT ");
             style.select(s);
@@ -309,6 +380,7 @@ pub(super) fn write_block(
     let mut y = area[3];
     let mut first = true;
     for paragraph in paragraphs {
+        let rtl = right_to_left(&paragraph.text());
         for line in lay_out(paragraph, max, ts) {
             y -= if first {
                 line.size
@@ -321,7 +393,7 @@ pub(super) fn write_block(
             }
             if !line.is_empty() {
                 let x = aligned_x(paragraph.quadding, area, line.width);
-                show_runs(s, ts, &line.runs, (x, y));
+                show_runs(s, ts, &line.runs, (x, y), rtl);
             }
         }
     }
@@ -363,7 +435,7 @@ pub(super) fn write_single_line(
     };
     let x = aligned_x(quadding, area, line.width);
     let y = 0.35f64.mul_add(-line.size, f64::midpoint(area[1], area[3]));
-    show_runs(s, ts, &line.runs, (x, y));
+    show_runs(s, ts, &line.runs, (x, y), right_to_left(&joined.text()));
 }
 
 /// A block of lines in a box: the default appearance's font and colours
@@ -428,7 +500,63 @@ fn encode_win_ansi(text: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Paragraph, Run, Style, Typesetter, WinAnsiTypesetter, name, write_block};
+    use super::{
+        Paragraph, Run, Style, Typesetter, WinAnsiTypesetter, name, right_to_left, visual_order,
+        visual_runs, write_block,
+    };
+
+    /// The visual order of `text` as a string.
+    fn visual(text: &str, rtl: bool) -> Option<String> {
+        visual_order(text, rtl).map(|v| v.into_iter().map(|(_, c)| c).collect())
+    }
+
+    #[test]
+    fn left_to_right_text_keeps_its_order() {
+        assert_eq!(visual("abc def", false), None);
+        assert!(!right_to_left("abc \u{05D0}"));
+        assert!(right_to_left("12 \u{05D0}bc"), "digits are not strong");
+    }
+
+    #[test]
+    fn right_to_left_text_is_reversed_and_numbers_are_not() {
+        assert_eq!(
+            visual("abc \u{05D0}\u{05D1}\u{05D2}", false).as_deref(),
+            Some("abc \u{05D2}\u{05D1}\u{05D0}")
+        );
+        assert_eq!(
+            visual("\u{05D0}\u{05D1} 12", true).as_deref(),
+            Some("12 \u{05D1}\u{05D0}")
+        );
+    }
+
+    #[test]
+    fn brackets_at_a_right_to_left_level_are_mirrored() {
+        assert_eq!(
+            visual("\u{05D0}(\u{05D1})", true).as_deref(),
+            Some("(\u{05D1})\u{05D0}")
+        );
+    }
+
+    #[test]
+    fn styles_follow_their_characters_into_visual_order() {
+        let (a, b) = (style(b"A", 10.0), style(b"B", 10.0));
+        let mixed = [(&a, "ab ".to_owned()), (&b, "\u{05D0}\u{05D1}".to_owned())];
+        assert_eq!(
+            visual_runs(&mixed, false),
+            [(&a, "ab ".to_owned()), (&b, "\u{05D1}\u{05D0}".to_owned())]
+        );
+        let hebrew = [
+            (&a, "\u{05D0}\u{05D1}".to_owned()),
+            (&b, "\u{05D2}".to_owned()),
+        ];
+        assert_eq!(
+            visual_runs(&hebrew, true),
+            [
+                (&b, "\u{05D2}".to_owned()),
+                (&a, "\u{05D1}\u{05D0}".to_owned())
+            ]
+        );
+    }
 
     #[test]
     fn a_written_name_reads_back_as_the_same_bytes() {

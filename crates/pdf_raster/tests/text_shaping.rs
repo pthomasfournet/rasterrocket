@@ -4,7 +4,9 @@
 //! The faces are the bundled ones (no installed fonts are searched), so the
 //! glyphs are fixed.  Showing a word one code per `Tj` places every code at
 //! the same pen position as one `Tj` but shapes nothing, which gives the
-//! unshaped drawing to compare with.
+//! unshaped drawing to compare with.  A text field's value, in logical
+//! order, is drawn through the same path once its appearance has put each
+//! line in visual order.
 #![cfg(feature = "bundled-fonts")]
 
 #[expect(
@@ -15,18 +17,35 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{stream_object, with_page_tree};
+use common::{assemble_pdf, stream_object, with_page_tree};
 use rasterrocket::{BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb};
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 60;
 
-/// Render `show`, a text object body, with a font whose codes from 65 on
-/// are the glyphs `names`, using the bundled faces alone.  The page as
-/// rows of booleans, `true` where inked.
-fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
+/// The first page of `pdf` rendered with the bundled faces alone, as rows
+/// of booleans, `true` where inked.
+fn rendered(pdf: Vec<u8>) -> Vec<Vec<bool>> {
     let empty = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("text-shaping-empty");
     std::fs::create_dir_all(&empty).expect("creates the empty font directory");
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.font_dirs = vec![empty];
+    config.system_fonts = false;
+    let session = open_session_from_bytes(pdf, &config).expect("session");
+    let page = render_page_rgb(&session, 1, 1.0).expect("render page");
+    let width = page.width as usize;
+    (0..page.height as usize)
+        .map(|y| {
+            (0..width)
+                .map(|x| page.data()[(y * width + x) * 3] < 128)
+                .collect()
+        })
+        .collect()
+}
+
+/// Render `show`, a text object body, with a font whose codes from 65 on
+/// are the glyphs `names`.
+fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
     let differences = names
         .iter()
         .map(|n| format!("/{n}"))
@@ -46,19 +65,7 @@ fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
         stream_object("", content.as_bytes()),
         font.into_bytes(),
     ]);
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.font_dirs = vec![empty];
-    config.system_fonts = false;
-    let session = open_session_from_bytes(pdf, &config).expect("session");
-    let page = render_page_rgb(&session, 1, 1.0).expect("render page");
-    let width = page.width as usize;
-    (0..page.height as usize)
-        .map(|y| {
-            (0..width)
-                .map(|x| page.data()[(y * width + x) * 3] < 128)
-                .collect()
-        })
-        .collect()
+    rendered(pdf)
 }
 
 /// The codes 65.. of `n` glyphs as one show string, and as one per `Tj`.
@@ -104,9 +111,34 @@ fn arabic_letters_of_one_string_join() {
         gaps(&isolated) > 0,
         "isolated forms leave gaps between letters"
     );
-    assert_eq!(gaps(&joined), 0, "the shaped word is connected");
-    // Teh's two dots, the word's highest ink, sit over its final form at
-    // the left end; a run shaped in the wrong order puts teh at the right.
+    assert_joined_beh_yeh_teh(&joined);
+}
+
+/// A text field whose value is beh, yeh, teh in logical order: its
+/// appearance shows the word right to left, joined.
+#[test]
+fn an_arabic_field_value_is_reordered_and_joined() {
+    let pdf = assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] \
+          /DR << /Font << /Helv 5 0 R >> >> >> >>"
+            .to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {WIDTH} {HEIGHT}] /Annots [4 0 R] >>")
+            .into_bytes(),
+        b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (a) /Rect [10 5 150 55] \
+          /V <FEFF0628064A062A> /DA (/Helv 36 Tf 0 g) >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_vec(),
+    ]);
+    assert_joined_beh_yeh_teh(&rendered(pdf));
+}
+
+/// `page` shows beh, yeh, teh as one connected word with teh at the left
+/// end: teh's two dots, the word's highest ink, sit over its final form.
+/// A word shaped or ordered left to right puts teh at the right.
+fn assert_joined_beh_yeh_teh(joined: &[Vec<bool>]) {
+    assert_eq!(gaps(joined), 0, "the shaped word is connected");
     let top = joined
         .iter()
         .position(|row| row.contains(&true))
