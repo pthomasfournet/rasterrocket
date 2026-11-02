@@ -61,8 +61,7 @@ ARMENIAN = ranges((0x0530, 0x058F), (0xFB13, 0xFB17))
 # Georgian, Georgian Extended, Georgian Supplement
 GEORGIAN = ranges((0x10A0, 0x10FF), (0x1C90, 0x1CBF), (0x2D00, 0x2D2F))
 BENGALI = ranges((0x0980, 0x09FF))
-# Tamil, Tamil Supplement
-TAMIL = ranges((0x0B80, 0x0BFF), (0x11FC0, 0x11FFF))
+TAMIL = ranges((0x0B80, 0x0BFF))
 # Ethiopic, Supplement, Extended, Extended-A
 ETHIOPIC = ranges((0x1200, 0x139F), (0x2D80, 0x2DDF), (0xAB00, 0xAB2F))
 SYMBOLS = ranges(

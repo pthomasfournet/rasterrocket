@@ -37,7 +37,7 @@ an installed face that covers the character is always preferred.
 | `NotoSerifThai.ttf.z` | Noto Serif Thai Regular (2.000) | Thai |
 | `NotoSansBengali.ttf.z` | Noto Sans Bengali Regular (2.001) | Bengali |
 | `NotoSerifBengali.ttf.z` | Noto Serif Bengali Regular (2.001) | Bengali |
-| `NotoSansTamil.ttf.z` | Noto Sans Tamil Regular (2.001) | Tamil, Tamil Supplement |
+| `NotoSansTamil.ttf.z` | Noto Sans Tamil Regular (2.001) | Tamil |
 | `NotoSerifTamil.ttf.z` | Noto Serif Tamil Regular (2.001) | as above |
 | `NotoSansArmenian.ttf.z` | Noto Sans Armenian Regular (2.005) | Armenian, Armenian ligatures |
 | `NotoSerifArmenian.ttf.z` | Noto Serif Armenian Regular (2.005) | as above |
