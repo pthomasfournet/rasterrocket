@@ -111,6 +111,11 @@ struct CoverageScratch {
 }
 
 thread_local! {
+    /// Destination colour bytes saved across a masked composite.  Separate from
+    /// `COVERAGE_SPAN` because the masked composite encloses the use of that
+    /// scratch.  Grow-never-shrink.
+    static MASKED_SPAN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+
     static COVERAGE_SPAN: RefCell<CoverageScratch> = const {
         RefCell::new(CoverageScratch {
             colour: Vec::new(),
@@ -141,6 +146,42 @@ pub struct PipeState<'bmp> {
     /// by the blend function; `None` outside such a group, and for
     /// `BlendMode::Normal`, which does not consult it.
     pub backdrop: Option<GroupBackdrop<'bmp>>,
+
+    /// The colour channels this paint writes; `None` writes all of them.
+    /// A mask of [`ChannelMask::ALL`] is equivalent to `None`.
+    pub overprint: Option<ChannelMask>,
+}
+
+/// The set of colour channels a paint operation writes.
+///
+/// Bit `i` is set when channel `i` (the `i`-th byte of a pixel) is painted.
+/// Channels outside the mask keep their destination value exactly; the
+/// destination alpha is composited regardless, since the object's shape is
+/// painted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ChannelMask(u8);
+
+impl ChannelMask {
+    /// Every channel is painted.
+    pub const ALL: Self = Self(u8::MAX);
+
+    /// The mask whose painted channels are the set bits of `bits`.
+    #[must_use]
+    pub const fn new(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// The mask as a bit set; bit `i` is channel `i`.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether `channel` is painted; `false` for `channel >= 8`.
+    #[must_use]
+    pub const fn paints(self, channel: usize) -> bool {
+        channel < 8 && (self.0 >> channel) & 1 == 1
+    }
 }
 
 /// The backdrop of a non-isolated transparency group (ISO 32000-2 §11.4.7):
@@ -215,6 +256,9 @@ impl PipeState<'_> {
 /// - `x0`, `x1`: inclusive device column range of the span.
 /// - `y`: device row, at which a pattern source is evaluated.
 ///
+/// When `pipe.overprint` masks out channels, those channels of every pixel
+/// keep their destination value and the others are composited as usual.
+///
 /// A pattern source that [may leave pixels unpainted](Pattern::may_leave_unpainted)
 /// is composited over its painted pixels only.
 ///
@@ -256,6 +300,41 @@ pub fn render_span<P: Pixel>(
         "render_span: alpha or shape length differs from the {count}-pixel span"
     );
 
+    match pipe.overprint {
+        Some(mask) if mask != ChannelMask::ALL => MASKED_SPAN.with_borrow_mut(|saved| {
+            saved.clear();
+            saved.extend_from_slice(dst_pixels);
+            render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
+            for (px, old) in dst_pixels
+                .chunks_exact_mut(P::BYTES)
+                .zip(saved.chunks_exact(P::BYTES))
+            {
+                for (channel, (new, old)) in px.iter_mut().zip(old).enumerate() {
+                    if !mask.paints(channel) {
+                        *new = *old;
+                    }
+                }
+            }
+        }),
+        _ => render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y),
+    }
+}
+
+/// Composite a validated span, writing every colour channel.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the render_span arguments"
+)]
+fn render_unmasked<P: Pixel>(
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    dst_pixels: &mut [u8],
+    dst_alpha: Option<&mut [u8]>,
+    shape: Option<&[u8]>,
+    x0: i32,
+    x1: i32,
+    y: i32,
+) {
     if let PipeSrc::Pattern(pat) = src
         && pat.may_leave_unpainted()
     {
@@ -489,7 +568,7 @@ mod tests {
     use super::*;
     use crate::testutil::make_pipe;
     use crate::types::BlendMode;
-    use color::Rgb8;
+    use color::{DeviceN8, Rgb8};
 
     /// Paints `[x, 200, 50]` at every even `x` and nothing at odd `x`.
     struct EvenColumns;
@@ -715,5 +794,88 @@ mod tests {
             let v = dst[i * 3];
             assert!(v > 100 && v < 160, "pixel {i} R={v} expected ~128");
         }
+    }
+
+    const OLD: [u8; 8] = [200, 0, 0, 0, 0, 0, 0, 0];
+    const INK_K: [u8; 8] = [0, 0, 0, 255, 0, 0, 0, 0];
+
+    fn overprint_pipe(a_input: u8, overprint: Option<ChannelMask>) -> PipeState<'static> {
+        PipeState {
+            overprint,
+            ..make_pipe(a_input, BlendMode::Normal)
+        }
+    }
+
+    /// Paint `INK_K` over four `OLD` pixels, returning the pixels.
+    fn paint_devicen(pipe: &PipeState<'_>, shape: Option<&[u8]>) -> Vec<u8> {
+        let mut dst = OLD.repeat(4);
+        render_span::<DeviceN8>(
+            pipe,
+            &PipeSrc::Solid(&INK_K),
+            &mut dst,
+            None,
+            shape,
+            0,
+            3,
+            0,
+        );
+        dst
+    }
+
+    #[test]
+    fn overprint_mask_keeps_unpainted_channels() {
+        let pipe = overprint_pipe(255, Some(ChannelMask::new(0b1000)));
+        let dst = paint_devicen(&pipe, None);
+        for px in dst.as_chunks::<8>().0 {
+            assert_eq!(*px, [200, 0, 0, 255, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn overprint_mask_with_alpha_blends_only_painted() {
+        let pipe = overprint_pipe(128, Some(ChannelMask::new(0b1000)));
+        let dst = paint_devicen(&pipe, None);
+        for px in dst.as_chunks::<8>().0 {
+            assert_eq!(px[0], 200, "unpainted C");
+            assert!(px[3].abs_diff(128) <= 1, "K = {}", px[3]);
+        }
+    }
+
+    #[test]
+    fn overprint_mask_with_aa_shape() {
+        let pipe = overprint_pipe(255, Some(ChannelMask::new(0b1000)));
+        let dst = paint_devicen(&pipe, Some(&[255, 128, 0, 255]));
+        assert_eq!(dst[16..24], OLD, "uncovered pixel unchanged");
+        assert_eq!(dst[8], 200, "half-covered pixel keeps C");
+        assert!(dst[8 + 3] > 0 && dst[8 + 3] < 255, "K = {}", dst[8 + 3]);
+    }
+
+    #[test]
+    fn overprint_none_equals_all() {
+        let shape = [255, 128, 0, 77];
+        let cases: [(u8, BlendMode, Option<&[u8]>); 3] = [
+            (255, BlendMode::Normal, None),
+            (200, BlendMode::Normal, Some(&shape)),
+            (200, BlendMode::Multiply, Some(&shape)),
+        ];
+        for (a, mode, shape) in cases {
+            let render = |overprint| {
+                let pipe = PipeState {
+                    overprint,
+                    ..make_pipe(a, mode)
+                };
+                paint_devicen(&pipe, shape)
+            };
+            assert_eq!(render(None), render(Some(ChannelMask::ALL)), "{a} {mode:?}");
+        }
+    }
+
+    #[test]
+    fn channel_mask_paints_reports_bits() {
+        let m = ChannelMask::new(0b1010);
+        assert!(!m.paints(0) && m.paints(1) && !m.paints(2) && m.paints(3));
+        assert!(!m.paints(8));
+        assert_eq!(m.bits(), 0b1010);
+        assert!((0..8).all(|c| ChannelMask::ALL.paints(c)));
     }
 }

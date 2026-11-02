@@ -292,6 +292,7 @@ mod tests {
             a_input,
             transfer: raster::TransferSet::identity_rgb(),
             backdrop: None,
+            overprint: None,
         }
     }
 

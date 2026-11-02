@@ -55,7 +55,7 @@ pub use clip::{Clip, ClipResult, ClipRows, RowClip};
 pub use fill::{eo_fill, fill};
 pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};
 pub use path::{Path, PathBuilder, PathFlags, PathPoint, StrokeAdjustHint};
-pub use pipe::{Pattern, PipeSrc, PipeState, TransferSet};
+pub use pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet};
 pub use scanner::iter::ScanIterator;
 pub use scanner::{Intersect, XPathScanner};
 pub use screen::HalftoneScreen;

@@ -217,6 +217,7 @@ mod tests {
             a_input: 255,
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
+            overprint: None,
         }
     }
 
@@ -314,6 +315,7 @@ mod tests {
             a_input: 255,
             transfer: TransferSet::new([inv; 3], id, [id; 4], &DN_ID),
             backdrop: None,
+            overprint: None,
         };
         assert!(
             !pipe.transfer.is_identity_rgb(),

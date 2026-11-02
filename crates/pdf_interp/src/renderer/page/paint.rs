@@ -171,6 +171,7 @@ impl PageRenderer<'_> {
             a_input,
             transfer: TransferSet::identity_rgb(),
             backdrop: backdrop.map(Backdrop::as_pipe_backdrop),
+            overprint: None,
         }
     }
 
