@@ -36,7 +36,7 @@ use pdf::ObjectId;
 use super::fallback::{FallbackGlyph, FallbackResolver};
 use super::substitutes::substitute_program;
 use super::system_fonts::FontLibrary;
-use crate::resources::font::{FontDescriptor, fallback_font};
+use crate::resources::font::{CidEncoding, FontDescriptor, fallback_font};
 use crate::resources::{PageResources, ResourceKey};
 
 mod code_to_gid;
@@ -91,6 +91,50 @@ impl PageFace {
     pub(crate) fn fallback_glyph(&self, code: u32, cid: u32) -> Option<(&FontFace, u32)> {
         let (slot, gid) = (*self.fallback_glyphs.get(&(code, cid))?)?;
         Some((self.fallback_faces.get(slot)?.as_ref()?, gid))
+    }
+}
+
+impl PageFace {
+    /// The Unicode value the shown `code` (CID `cid` of a composite font)
+    /// stands for, when the face is a substitute and the font says.
+    #[must_use]
+    pub(crate) fn unicode(&self, code: u32, cid: u32) -> Option<char> {
+        char::from_u32(self.fallback.as_ref()?.unicode(code, cid)?)
+    }
+
+    /// The glyph that draws the shown `code` (CID `cid` of a composite font
+    /// encoded by `enc`): the face that draws it, its selector there and
+    /// whether the selector is a glyph index (`true`) or a code resolved
+    /// through the face's own tables (`false`).
+    ///
+    /// A code a fallback draws takes the fallback's glyph.  A composite
+    /// font's glyph is selected through `CIDToGIDMap` or the program's
+    /// charset when the face has no code table, in its vertical form in
+    /// vertical writing; a simple font's code resolves through the face.
+    /// `None` when a substitute would draw `.notdef`, which is never the
+    /// document's glyph.
+    #[must_use]
+    pub(crate) fn glyph_for(
+        &self,
+        enc: Option<&CidEncoding>,
+        code: u32,
+        cid: u32,
+    ) -> Option<(&FontFace, u32, bool)> {
+        if let Some((fallback, gid)) = self.fallback_glyph(code, cid) {
+            return Some((fallback, gid, true));
+        }
+        let (selector, by_gid, notdef) = match enc {
+            Some(enc) if self.code_to_gid.is_empty() => {
+                let mut gid = enc.gid_for_cid(cid);
+                if enc.vertical {
+                    gid = self.program().vertical_selector(gid);
+                }
+                (gid, true, gid == 0)
+            }
+            Some(_) => (cid, false, self.glyph_index(cid) == 0),
+            None => (code, false, self.glyph_index(code) == 0),
+        };
+        (!(self.substitute && notdef)).then_some((&self.face, selector, by_gid))
     }
 }
 

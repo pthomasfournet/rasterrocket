@@ -138,6 +138,12 @@ impl FallbackResolver {
         }
     }
 
+    /// The first Unicode value the shown `code` (CID `cid`) stands for;
+    /// `None` when the font does not say.
+    pub(crate) fn unicode(&self, code: u32, cid: u32) -> Option<u32> {
+        self.unicodes(code, cid).as_slice().first().copied()
+    }
+
     /// The fallback glyph that draws the shown `code` (CID `cid`): the
     /// glyph of its character in the first installed program that maps
     /// it, when the substitute maps none of the character's code points.

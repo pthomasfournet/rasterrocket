@@ -19,6 +19,8 @@ raster   = { package = "rasterrocket-render", path = "../raster", version = "2.0
 # provides the Adobe Glyph List used to map glyph names to Unicode.
 read-fonts = { path = "../read_fonts", version = "0.41.0", default-features = false, features = ["std", "agl"] }
 skrifa     = { path = "../skrifa",     version = "0.44.0", default-features = false, features = ["std"] }
+# Local fork (crates/harfrust): OpenType shaping of text drawn by substitutes.
+harfrust   = { path = "../harfrust", version = "0.12.0", default-features = false, features = ["std"] }
 log        = { workspace = true }
 # quick_cache gives a sharded concurrent LRU cache where reads do not
 # require write locks (unlike dashmap + lru::LruCache, where get() takes

@@ -560,8 +560,18 @@ image, not the process.
   default in `rasterrocket` and the CLI), Noto subsets for Greek and
   Cyrillic, Hebrew, Arabic, Devanagari and Thai (sans-serif and serif) and
   three symbol faces are compiled in (`crates/pdf_interp/fonts/noto/`,
-  zlib-compressed, ~0.33 MB; `renderer/bundled_fonts.rs`). They are the
+  zlib-compressed, ~0.48 MB; `renderer/bundled_fonts.rs`). They are the
   last resort of the per-character fallback, after every installed face.
+  The Hebrew, Arabic, Devanagari and Thai faces keep their layout features.
+- **Shaping.** In a string shown with a substitute, the codes of a run in a
+  script that needs shaping (right-to-left: Hebrew, Arabic, Syriac and
+  neighbours; left-to-right: the Indic scripts, Thai, Lao, Tibetan, Myanmar,
+  Khmer, Mongolian) drawn by one face are shaped together with that face's
+  `GSUB`/`GPOS` (`renderer/page/text_shaping.rs`, through the harfrust fork
+  in `crates/harfrust`). A right-to-left run, in visual order in the string,
+  is reversed to logical order first. The shaped glyphs fill the advance
+  the document gives the run's codes, condensed when wider and centred when
+  narrower, so the pen moves exactly as without shaping.
 - **Composite fonts.** `resources/cmap.rs` parses `CMap` streams: codespace
   ranges of mixed width, `usecmap`, and `ToUnicode`. The predefined `CMaps`
   of ISO 32000-2 Table 116 are compressed into the binary

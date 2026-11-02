@@ -1333,6 +1333,7 @@ name = "rasterrocket-font"
 version = "2.0.0"
 dependencies = [
  "font-test-data",
+ "harfrust",
  "log",
  "quick_cache",
  "rasterrocket-render",

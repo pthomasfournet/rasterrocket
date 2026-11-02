@@ -7,6 +7,7 @@ use super::text_ops::{
     GlyphRecord, fit_to_advance, glyph_advance, glyph_placement, text_to_device, translate_text_x,
     translate_text_y,
 };
+use super::text_shaping::{Drawn, shaped_runs};
 use crate::resources::cmap::DecodedCode;
 use color::Rgb8;
 use font::face::FontFace;
@@ -176,8 +177,6 @@ impl PageRenderer<'_> {
             let fill_as_bitmap = do_fill && !fill_as_path;
             let need_outline = do_clip || do_stroke || fill_as_path;
 
-            // Iterate character codes.  Simple fonts use one byte per character;
-            // Type 0 composite fonts use 1–4 bytes determined by the Encoding CMap.
             let cid_enc = descriptor.cid_encoding.as_ref();
 
             // A substitute's glyphs are fitted to the advances the document
@@ -284,41 +283,57 @@ impl PageRenderer<'_> {
                 }
             };
 
-            if let Some(enc) = cid_enc {
-                // Type 0 composite font: the Encoding CMap splits the string
-                // into 1–4-byte codes and maps each to a CID (PDF §9.7.6.3).
-                for DecodedCode {
-                    code,
-                    value: cid,
-                    len,
-                } in enc.codes(bytes)
-                {
-                    // A substitute face for a composite font carries a
-                    // CID-indexed glyph table (vertical forms included); an
-                    // embedded one is selected through `CIDToGIDMap` / its
-                    // charset, with its vertical form substituted here.  A
-                    // substitute's `.notdef` is never the document's glyph:
-                    // a CID neither it nor a fallback draws leaves a gap.
-                    let drawn = face.and_then(|face| {
-                        face.fallback_glyph(code, cid)
-                            .map(|(fallback, gid)| (fallback, gid, true))
-                            .or_else(|| {
-                                let by_gid = face.code_to_gid.is_empty();
-                                let mut gid = if by_gid { enc.gid_for_cid(cid) } else { cid };
-                                if by_gid && enc.vertical {
-                                    gid = face.program().vertical_selector(gid);
-                                }
-                                let notdef = if by_gid {
-                                    gid == 0
-                                } else {
-                                    face.glyph_index(gid) == 0
-                                };
-                                (!(face.substitute && notdef)).then_some((&**face, gid, by_gid))
-                            })
-                    });
-                    let (x_scale, centre) = match drawn {
-                        Some(drawn) if fit => {
-                            fit_to_advance(enc.width_for_cid(cid), face_width(advance_of(drawn)))
+            // The shown codes as (code, CID): a Type 0 font's Encoding CMap
+            // splits the string into 1–4-byte codes and maps each to a CID
+            // (PDF §9.7.6.3); a simple font's code is one byte, its own CID.
+            let decoded: Vec<DecodedCode> = cid_enc.map_or_else(
+                || {
+                    bytes
+                        .iter()
+                        .map(|&b| DecodedCode {
+                            code: u32::from(b),
+                            value: u32::from(b),
+                            len: 1,
+                        })
+                        .collect()
+                },
+                |enc| enc.codes(bytes).collect(),
+            );
+            let codes: Vec<(u32, u32)> = decoded.iter().map(|d| (d.code, d.value)).collect();
+            let drawn: Vec<Option<Drawn<'_>>> = codes
+                .iter()
+                .map(|&(code, cid)| face.and_then(|face| face.glyph_for(cid_enc, code, cid)))
+                .collect();
+            let vertical = cid_enc.is_some_and(|enc| enc.vertical);
+            let runs = match face {
+                Some(face) if !vertical => shaped_runs(face, &codes, &drawn),
+                _ => Vec::new(),
+            };
+            let mut runs = runs.iter().peekable();
+            // The text matrix at the start of the run being shown, and the
+            // run's advance so far in text space.
+            let mut run_origin = tm;
+            let mut run_width = 0.0;
+
+            for (i, (d, &drawn)) in decoded.iter().zip(&drawn).enumerate() {
+                let (code, cid) = (d.code, d.value);
+                while runs.next_if(|run| run.end <= i).is_some() {}
+                let run = runs.peek().filter(|run| run.start <= i);
+                if run.is_some_and(|run| run.start == i) {
+                    run_origin = tm;
+                    run_width = 0.0;
+                }
+                // The document's advance of the code in glyph space, `None`
+                // for a simple font without a width for it.
+                let pdf_width = cid_enc.map_or_else(
+                    || descriptor.width_for_code(code),
+                    |enc| Some(enc.width_for_cid(cid)),
+                );
+
+                if run.is_none() {
+                    let (x_scale, centre) = match (pdf_width, drawn) {
+                        (Some(width), Some(drawn)) if fit => {
+                            fit_to_advance(width, face_width(advance_of(drawn)))
                         }
                         _ => (1.0, 0.0),
                     };
@@ -326,95 +341,77 @@ impl PageRenderer<'_> {
                     // sits at the pen: its horizontal origin is displaced
                     // by the position vector −v, in glyph units scaled by
                     // the font size (PDF §9.7.4.3).
-                    let (dx, dy) = if enc.vertical {
-                        let v = enc.vertical_metrics_for_cid(cid);
-                        let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
-                        let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
-                        text_to_device(&ctm, &tm, tx, ty, self.height)
-                    } else {
-                        let tx = centre / 1000.0 * font_size * horiz_scaling;
-                        text_to_device(&ctm, &tm, tx, rise, self.height)
-                    };
-                    if let Some((drawn, selector, by_gid)) = drawn {
-                        push_glyph(drawn, cid, selector, by_gid, dx, dy, x_scale);
-                    }
-
-                    // The advance (PDF §9.4.4): horizontally
-                    // `(w0 × Tfs + Tc + Tw) × Th`; vertically
-                    // `w1 × Tfs + Tc + Tw`, along the text matrix's y axis.
-                    // Word spacing applies to the byte 32 when the `CMap`
-                    // reads it as a one-byte code, never to a multi-byte code
-                    // (PDF §9.3.3).
-                    let extra = if code == 32 && len == 1 {
-                        word_spacing
-                    } else {
-                        0.0
-                    };
-                    if enc.vertical {
-                        let w1 = f64::from(enc.vertical_metrics_for_cid(cid).w1y) / 1000.0;
-                        let ty_adv = glyph_advance(w1, font_size, char_spacing, extra, 1.0);
-                        tm = translate_text_y(tm, ty_adv);
-                    } else {
-                        let advance_glyph = f64::from(enc.width_for_cid(cid)) / 1000.0;
-                        let tx_adv = glyph_advance(
-                            advance_glyph,
-                            font_size,
-                            char_spacing,
-                            extra,
-                            horiz_scaling,
-                        );
-                        tm = translate_text_x(tm, tx_adv);
-                    }
-                }
-            } else {
-                // Simple font: one byte per character code.
-                // PDF §9.2.4: the Widths array is the authoritative advance source
-                // for simple fonts (within [FirstChar, LastChar]); MissingWidth
-                // applies out-of-range.  The font program's advance is consulted
-                // ONLY when Widths is absent entirely (e.g. the 14 standard fonts
-                // pre-PDF 1.5, where a substitute face supplies metrics).
-                for &byte in bytes {
-                    let code = u32::from(byte);
-                    let pdf_width = descriptor.width_for_code(code);
-                    // A substitute's `.notdef` is never the document's
-                    // glyph: a code neither it nor a fallback draws leaves
-                    // a gap.
-                    let drawn = face.and_then(|face| {
-                        face.fallback_glyph(code, code)
-                            .map(|(fallback, gid)| (fallback, gid, true))
-                            .or_else(|| {
-                                let notdef = face.glyph_index(code) == 0;
-                                (!(face.substitute && notdef)).then_some((&**face, code, false))
-                            })
-                    });
-                    let (x_scale, centre) = match (pdf_width, drawn) {
-                        (Some(width), Some(drawn)) if fit => {
-                            fit_to_advance(width, face_width(advance_of(drawn)))
+                    let (dx, dy) = match cid_enc {
+                        Some(enc) if enc.vertical => {
+                            let v = enc.vertical_metrics_for_cid(cid);
+                            let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
+                            let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
+                            text_to_device(&ctm, &tm, tx, ty, self.height)
                         }
-                        _ => (1.0, 0.0),
+                        _ => {
+                            let tx = centre / 1000.0 * font_size * horiz_scaling;
+                            text_to_device(&ctm, &tm, tx, rise, self.height)
+                        }
                     };
-                    let tx = centre / 1000.0 * font_size * horiz_scaling;
-                    let (dx, dy) = text_to_device(&ctm, &tm, tx, rise, self.height);
                     if let Some((drawn, selector, by_gid)) = drawn {
                         push_glyph(drawn, code, selector, by_gid, dx, dy, x_scale);
                     }
+                }
 
-                    // PDF §9.4.4: pen advances even for missing/invisible glyphs.
-                    let advance_glyph = pdf_width.map_or_else(
-                        || {
-                            drawn
-                                .map_or_else(
-                                    || face.and_then(|face| face.glyph_advance(code)),
-                                    advance_of,
-                                )
-                                .unwrap_or(0.0)
-                        },
-                        |w| f64::from(w) / 1000.0,
-                    );
-                    let extra = if byte == b' ' { word_spacing } else { 0.0 };
-                    let tx_adv =
-                        glyph_advance(advance_glyph, font_size, char_spacing, extra, horiz_scaling);
-                    tm = translate_text_x(tm, tx_adv);
+                // The advance (PDF §9.4.4): horizontally
+                // `(w0 × Tfs + Tc + Tw) × Th`; vertically
+                // `w1 × Tfs + Tc + Tw`, along the text matrix's y axis.  Word
+                // spacing applies to the byte 32 when it is a one-byte code,
+                // never to a multi-byte code (PDF §9.3.3).  A simple font's
+                // code without a width advances by its drawn glyph's (PDF
+                // §9.2.4), and the pen advances for a glyph that draws nothing.
+                let extra = if code == 32 && d.len == 1 {
+                    word_spacing
+                } else {
+                    0.0
+                };
+                if let Some(enc) = cid_enc.filter(|enc| enc.vertical) {
+                    let w1 = f64::from(enc.vertical_metrics_for_cid(cid).w1y) / 1000.0;
+                    let ty_adv = glyph_advance(w1, font_size, char_spacing, extra, 1.0);
+                    tm = translate_text_y(tm, ty_adv);
+                    continue;
+                }
+                let advance_glyph = pdf_width.map_or_else(
+                    || {
+                        drawn
+                            .map_or_else(
+                                || face.and_then(|face| face.glyph_advance(code)),
+                                advance_of,
+                            )
+                            .unwrap_or(0.0)
+                    },
+                    |w| f64::from(w) / 1000.0,
+                );
+                let tx_adv =
+                    glyph_advance(advance_glyph, font_size, char_spacing, extra, horiz_scaling);
+                tm = translate_text_x(tm, tx_adv);
+
+                // A run's glyphs are spread over the advance of its codes,
+                // condensed when wider and centred when narrower.
+                let Some(run) = run else { continue };
+                run_width += tx_adv;
+                if i + 1 != run.end {
+                    continue;
+                }
+                let em_x = font_size * horiz_scaling;
+                let natural: f64 = run.glyphs.iter().map(|g| g.advance).sum::<f64>() * em_x;
+                let (scale, mut pen) = if run_width > 0.0 && natural > 0.0 {
+                    let scale = (run_width / natural).min(1.0);
+                    (scale, natural.mul_add(-scale, run_width) / 2.0)
+                } else {
+                    (1.0, 0.0)
+                };
+                for g in &run.glyphs {
+                    let tx = (g.offset.0 * em_x).mul_add(scale, pen);
+                    let ty = g.offset.1.mul_add(font_size, rise);
+                    let (dx, dy) = text_to_device(&ctm, &run_origin, tx, ty, self.height);
+                    push_glyph(run.face, g.selector, g.selector, true, dx, dy, scale);
+                    pen = (g.advance * em_x).mul_add(scale, pen);
                 }
             }
         } // font_cache borrow released here

@@ -75,26 +75,28 @@ SYMBOLS = ranges(
     (0x2B00, 0x2BFF),
 )
 
-# (output name, source file, code points)
+# (output name, source file, code points, whether the face is shaped)
 FACES = [
-    ("NotoSans-GreekCyrillic", "NotoSans-Regular.ttf", GREEK_CYRILLIC),
-    ("NotoSerif-GreekCyrillic", "NotoSerif-Regular.ttf", GREEK_CYRILLIC),
-    ("NotoSansHebrew", "NotoSansHebrew-Regular.ttf", HEBREW),
-    ("NotoSerifHebrew", "NotoSerifHebrew-Regular.ttf", HEBREW),
-    ("NotoSansArabic", "NotoSansArabic-Regular.ttf", ARABIC),
-    ("NotoNaskhArabic", "NotoNaskhArabic-Regular.ttf", ARABIC),
-    ("NotoSansDevanagari", "NotoSansDevanagari-Regular.ttf", DEVANAGARI),
-    ("NotoSerifDevanagari", "NotoSerifDevanagari-Regular.ttf", DEVANAGARI),
-    ("NotoSansThai", "NotoSansThai-Regular.ttf", THAI),
-    ("NotoSerifThai", "NotoSerifThai-Regular.ttf", THAI),
-    ("NotoSansMath", "NotoSansMath-Regular.ttf", SYMBOLS),
-    ("NotoSansSymbols", "NotoSansSymbols-Regular.ttf", SYMBOLS),
-    ("NotoSansSymbols2", "NotoSansSymbols2-Regular.ttf", SYMBOLS),
+    ("NotoSans-GreekCyrillic", "NotoSans-Regular.ttf", GREEK_CYRILLIC, False),
+    ("NotoSerif-GreekCyrillic", "NotoSerif-Regular.ttf", GREEK_CYRILLIC, False),
+    ("NotoSansHebrew", "NotoSansHebrew-Regular.ttf", HEBREW, True),
+    ("NotoSerifHebrew", "NotoSerifHebrew-Regular.ttf", HEBREW, True),
+    ("NotoSansArabic", "NotoSansArabic-Regular.ttf", ARABIC, True),
+    ("NotoNaskhArabic", "NotoNaskhArabic-Regular.ttf", ARABIC, True),
+    ("NotoSansDevanagari", "NotoSansDevanagari-Regular.ttf", DEVANAGARI, True),
+    ("NotoSerifDevanagari", "NotoSerifDevanagari-Regular.ttf", DEVANAGARI, True),
+    ("NotoSansThai", "NotoSansThai-Regular.ttf", THAI, True),
+    ("NotoSerifThai", "NotoSerifThai-Regular.ttf", THAI, True),
+    ("NotoSansMath", "NotoSansMath-Regular.ttf", SYMBOLS, False),
+    ("NotoSansSymbols", "NotoSansSymbols-Regular.ttf", SYMBOLS, False),
+    ("NotoSansSymbols2", "NotoSansSymbols2-Regular.ttf", SYMBOLS, False),
 ]
 
 
-def build(src: pathlib.Path, codes: Iterable[int]) -> bytes:
-    """Return the face `src` subset to those of `codes` it maps.
+def build(src: pathlib.Path, codes: Iterable[int], shaped: bool) -> bytes:
+    """Return the face `src` subset to those of `codes` it maps, with all
+    its layout features and the glyphs they reach when `shaped`, else with
+    none.
 
     The source's `head.modified` is kept, so the output depends on the
     source and this script only.
@@ -102,7 +104,7 @@ def build(src: pathlib.Path, codes: Iterable[int]) -> bytes:
     font = TTFont(src, recalcTimestamp=False)
     cmap = font.getBestCmap()
     opts = subset.Options()
-    opts.layout_features = []
+    opts.layout_features = ["*"] if shaped else []
     opts.hinting = False
     opts.notdef_outline = True
     opts.name_IDs = [0, 1, 2, 3, 4, 5, 6, 13, 14]
@@ -120,13 +122,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--src", default="/usr/share/fonts/truetype/noto", type=pathlib.Path)
     args = parser.parse_args()
-    missing = [file for _, file, _ in FACES if not (args.src / file).is_file()]
+    missing = [file for _, file, _, _ in FACES if not (args.src / file).is_file()]
     if missing:
         sys.exit(f"missing under {args.src}: {', '.join(missing)}")
     OUT.mkdir(parents=True, exist_ok=True)
     total = 0
-    for name, file, codes in FACES:
-        data = build(args.src / file, codes)
+    for name, file, codes, shaped in FACES:
+        data = build(args.src / file, codes, shaped)
         packed = zlib.compress(data, 9)
         (OUT / f"{name}.ttf.z").write_bytes(packed)
         total += len(packed)
