@@ -370,6 +370,9 @@ pub(crate) struct FontLibrary {
     /// The installed metric-compatible substitute of each row of the
     /// substitute table, located on first use.
     substitutes: [OnceLock<Option<Arc<FontProgram>>>; INSTALLED_ROWS],
+    /// The directories the substitute searches looked in, with their
+    /// modification times then.
+    searched: Mutex<Vec<DirStamp>>,
 }
 
 impl FontLibrary {
@@ -381,19 +384,20 @@ impl FontLibrary {
             programs: Mutex::default(),
             orders: Mutex::default(),
             substitutes: [const { OnceLock::new() }; INSTALLED_ROWS],
+            searched: Mutex::default(),
         }
     }
 
     /// The library searching the extra directories `dirs` (in order) and
     /// then, when `system` is set, the standard font directories; shared by
     /// every caller naming the same sources.
-    #[must_use]
     ///
-    /// A library whose index is out of date — a directory it walked, or a
-    /// root it found missing, has changed since — is replaced by a fresh
-    /// one, so fonts installed or removed while the process runs are seen
-    /// by the documents opened afterwards.  Callers holding the old library
-    /// keep it.
+    /// A library that is out of date — a directory its index walked or a
+    /// substitute search looked in, present or missing, has changed since
+    /// — is replaced by a fresh one, so fonts installed or removed while
+    /// the process runs are seen by the documents opened afterwards.
+    /// Callers holding the old library keep it.
+    #[must_use]
     pub(crate) fn shared(dirs: &[PathBuf], system: bool) -> Arc<Self> {
         static LIBRARIES: OnceLock<Mutex<HashMap<LibraryKey, Arc<FontLibrary>>>> = OnceLock::new();
         let mut libraries = LIBRARIES
@@ -412,16 +416,16 @@ impl FontLibrary {
         library
     }
 
-    /// Whether the library was indexed and a directory it walked has
-    /// changed since: its modification time differs, or it appeared or
-    /// vanished.
+    /// Whether a directory the library's index walked or a substitute
+    /// search looked in has changed since: its modification time differs,
+    /// or it appeared or vanished.
     fn is_stale(&self) -> bool {
-        self.index.get().is_some_and(|index| {
-            index
-                .directories
-                .iter()
-                .any(|(dir, stamp)| modified(dir) != *stamp)
-        })
+        let changed =
+            |stamps: &[DirStamp]| stamps.iter().any(|(dir, stamp)| modified(dir) != *stamp);
+        self.index
+            .get()
+            .is_some_and(|index| changed(&index.directories))
+            || changed(&self.searched.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Every face of the library's directories, indexed on first use.
@@ -552,18 +556,34 @@ impl FontLibrary {
 
     /// The installed substitute of row `row` of the substitute table,
     /// located by `locate` from the extra directories and the system-font
-    /// switch on first use.
+    /// switch on first use.  `locate` reports each directory it looks in
+    /// through its third argument, before reading it; a later change to
+    /// one makes the library stale.
     pub(super) fn substitute(
         &self,
         row: usize,
-        locate: impl FnOnce(&[PathBuf], bool) -> Option<Arc<FontProgram>>,
+        locate: impl FnOnce(&[PathBuf], bool, &mut dyn FnMut(&Path)) -> Option<Arc<FontProgram>>,
     ) -> Option<Arc<FontProgram>> {
         self.substitutes
             .get(row)?
-            .get_or_init(|| locate(&self.dirs, self.system))
+            .get_or_init(|| {
+                let mut searched = Vec::new();
+                let found = locate(&self.dirs, self.system, &mut |dir| {
+                    searched.push((dir.to_path_buf(), modified(dir)));
+                });
+                self.searched
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(searched);
+                found
+            })
             .clone()
     }
 }
+
+/// A directory and its modification time when it was read; `None` when
+/// it could not be read.
+type DirStamp = (PathBuf, Option<SystemTime>);
 
 /// The faces of a library and the directories walked to find them.
 #[derive(Default)]
@@ -572,12 +592,19 @@ struct Index {
     faces: Vec<Face>,
     /// Each directory walked, with its modification time then; `None` for
     /// a root that could not be read.
-    directories: Vec<(PathBuf, Option<SystemTime>)>,
+    directories: Vec<DirStamp>,
 }
 
 impl Index {
     /// Add the faces of the font files in `dir` and, to [`MAX_DEPTH`],
-    /// its subdirectories, recording each directory walked.
+    /// its subdirectories, recording each directory walked with its
+    /// modification time, taken before it is read.
+    ///
+    /// A directory's modification time changes when an entry is added,
+    /// removed or renamed, not when a file is overwritten in place, so a
+    /// font replaced under the same name is not noticed.  On a file system
+    /// with coarse timestamps (1–2 s), a font added in the same tick after
+    /// the directory was read is missed until the directory next changes.
     fn walk(&mut self, dir: &Path, depth: u32) {
         self.directories.push((dir.to_path_buf(), modified(dir)));
         let Ok(entries) = std::fs::read_dir(dir) else {

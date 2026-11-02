@@ -7,11 +7,11 @@
 //! else the base-14 face compiled into the binary (`fonts/foxit/`).  The
 //! Symbol and Dingbats families always draw with the compiled-in faces,
 //! whose charsets carry the glyph names of their encodings.  An installed
-//! substitute is resolved once per library, a compiled-in one once per
-//! process.
+//! substitute is resolved once per library (a library whose search
+//! directories change is replaced), a compiled-in one once per process.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use font::program::FontProgram;
@@ -91,11 +91,13 @@ const fn substitute_index(style: SubstituteStyle) -> usize {
 /// Candidate paths for one [`INSTALLED`] row, in search order: the free
 /// family's file in each of the extra directories `dirs`, then, when
 /// `system` is set, the fixed locations and the free family's file found
-/// under [`UNIX_FONT_ROOTS`].
+/// under [`UNIX_FONT_ROOTS`].  Each directory a candidate lies in, and
+/// each directory searched below the roots, is reported to `watch`.
 fn installed_candidates(
     [stem, mac, win]: [&str; 3],
     dirs: &[PathBuf],
     system: bool,
+    watch: &mut dyn FnMut(&Path),
 ) -> Vec<PathBuf> {
     let file = format!("{stem}.ttf");
     let fixed = [
@@ -104,18 +106,21 @@ fn installed_candidates(
         format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
         format!("C:/Windows/Fonts/{win}.ttf"),
     ];
-    let found = || {
-        static FOUND: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
-        FOUND
-            .get_or_init(|| files_under(&UNIX_FONT_ROOTS.map(PathBuf::from), "Liberation", ".ttf"))
-            .get(&file)
-            .cloned()
-    };
-    dirs.iter()
+    let mut candidates: Vec<PathBuf> = dirs
+        .iter()
         .map(|dir| dir.join(&file))
         .chain(fixed.into_iter().filter(|_| system).map(PathBuf::from))
-        .chain(system.then(found).flatten())
-        .collect()
+        .collect();
+    for candidate in &candidates {
+        if let Some(dir) = candidate.parent() {
+            watch(dir);
+        }
+    }
+    if system {
+        let roots = UNIX_FONT_ROOTS.map(PathBuf::from);
+        candidates.extend(files_under(&roots, "Liberation", ".ttf", watch).remove(&file));
+    }
+    candidates
 }
 
 /// The directories whose subdirectories distributions install font
@@ -129,11 +134,17 @@ const MAX_FONT_DIR_DEPTH: usize = 3;
 /// The files under `roots`, to [`MAX_FONT_DIR_DEPTH`] levels of
 /// directories, whose names start with `prefix` and end with `suffix`, by
 /// file name; the first found keeps a name.  Unreadable directories are
-/// skipped.
-fn files_under(roots: &[PathBuf], prefix: &str, suffix: &str) -> HashMap<String, PathBuf> {
+/// skipped.  Each directory is reported to `watch` before it is read.
+fn files_under(
+    roots: &[PathBuf],
+    prefix: &str,
+    suffix: &str,
+    watch: &mut dyn FnMut(&Path),
+) -> HashMap<String, PathBuf> {
     let mut found = HashMap::new();
     let mut pending: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
     while let Some((dir, depth)) = pending.pop() {
+        watch(&dir);
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -156,9 +167,15 @@ fn files_under(roots: &[PathBuf], prefix: &str, suffix: &str) -> HashMap<String,
 
 /// The installed face of row `row`, searched for in the extra directories
 /// `dirs` first and then, when `system` is set, the fixed locations: the
-/// first candidate that exists and parses; `None` when none does.
-fn installed_program(row: usize, dirs: &[PathBuf], system: bool) -> Option<Arc<FontProgram>> {
-    installed_candidates(INSTALLED[row], dirs, system)
+/// first candidate that exists and parses; `None` when none does.  The
+/// directories searched are reported to `watch`.
+fn installed_program(
+    row: usize,
+    dirs: &[PathBuf],
+    system: bool,
+    watch: &mut dyn FnMut(&Path),
+) -> Option<Arc<FontProgram>> {
+    installed_candidates(INSTALLED[row], dirs, system, watch)
         .into_iter()
         .filter(|path| path.exists())
         .find_map(|path| {
@@ -199,7 +216,11 @@ pub(crate) fn substitute_program(
     }
     let row = substitute_index(style);
     (row < INSTALLED_ROWS)
-        .then(|| library.substitute(row, |dirs, system| installed_program(row, dirs, system)))
+        .then(|| {
+            library.substitute(row, |dirs, system, watch| {
+                installed_program(row, dirs, system, watch)
+            })
+        })
         .flatten()
         .or_else(|| {
             EMBEDDED_CACHE[row]
@@ -265,13 +286,57 @@ mod tests {
         ] {
             std::fs::write(path, b"").expect("file");
         }
-        let found = files_under(std::slice::from_ref(&root), "Liberation", ".ttf");
+        let found = files_under(
+            std::slice::from_ref(&root),
+            "Liberation",
+            ".ttf",
+            &mut |_| {},
+        );
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             found.get("LiberationSans-Regular.ttf"),
             Some(&root.join("liberation-sans/LiberationSans-Regular.ttf"))
         );
         assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    /// A metric-compatible face installed into a searched directory after
+    /// a substitute search came up empty is found by the next caller: the
+    /// directory's change makes the library stale, though the library
+    /// never built its face index.
+    #[test]
+    fn substitutes_installed_after_a_failed_search_are_found() {
+        let dir =
+            std::env::temp_dir().join(format!("rr-substitute-install-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        // A modification time in the past, so that the install below
+        // changes it whatever the file system's timestamp granularity.
+        std::fs::File::open(&dir)
+            .and_then(|f| {
+                f.set_times(
+                    std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH),
+                )
+            })
+            .expect("set mtime");
+        let style = SubstituteStyle::default();
+        let before = FontLibrary::shared(std::slice::from_ref(&dir), false);
+        let compiled_in = substitute_program(style, &before).expect("compiled-in face");
+        assert_eq!(compiled_in.name_index("glyph243"), 0);
+        let ahem = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../font_test_data/test_data/ttf/ahem.ttf"
+        );
+        let _bytes = std::fs::copy(ahem, dir.join("LiberationSans-Regular.ttf")).expect("install");
+        let after = FontLibrary::shared(std::slice::from_ref(&dir), false);
+        let installed = substitute_program(style, &after);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!Arc::ptr_eq(&before, &after), "the library was replaced");
+        let installed = installed.expect("installed face");
+        assert_ne!(
+            installed.name_index("glyph243"),
+            0,
+            "the installed file draws"
+        );
     }
 
     #[test]
