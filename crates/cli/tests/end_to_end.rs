@@ -339,6 +339,73 @@ fn fax_writes_one_document_of_fax_width_pages() {
     assert!(pages[0].2 > 0.999, "the dark page kept: {}", pages[0].2);
 }
 
+/// `--fax-to` hands the written document to the fax service: here a
+/// stand-in `sendfax` on `PATH` that records its arguments and the document,
+/// then exits with `status`.
+#[cfg(unix)]
+fn fax_to_through(status: u8) -> (tempfile::TempDir, Output) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (dir, input) = workdir(&two_page_pdf());
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("create bin dir");
+    let script = bin.join("sendfax");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{dir}/args\"\ncp \"$5\" \"{dir}/sent.tif\"\nexit {status}\n",
+            dir = dir.path().display()
+        ),
+    )
+    .expect("write sendfax");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make sendfax executable");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .env("PATH", path)
+        .args(["--no-ram", "--backend", "cpu", "--fax-to", "+1 555 0100"])
+        .arg(&input)
+        .arg(dir.path().join("out"))
+        .output()
+        .expect("run rrocket");
+    (dir, out)
+}
+
+#[cfg(unix)]
+#[test]
+fn fax_to_submits_the_document_to_sendfax() {
+    let (dir, out) = fax_to_through(0);
+    assert_success(&out);
+    let args = std::fs::read_to_string(dir.path().join("args")).expect("sendfax ran");
+    let out_tif = dir.path().join("out.tif");
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "-n",
+            "-d",
+            "+1 555 0100",
+            "--",
+            out_tif.to_str().expect("UTF-8 path")
+        ]
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("sent.tif")).expect("the document was handed over"),
+        std::fs::read(&out_tif).expect("the document was written")
+    );
+
+    let (_dir, out) = fax_to_through(1);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not sent") && stderr.contains("sendfax refused"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn missing_input_fails_without_output() {
     let dir = tempfile::tempdir().expect("create temp dir");

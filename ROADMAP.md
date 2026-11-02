@@ -2192,8 +2192,8 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ## Phase 13 — Output to the operating system: print and fax (planned, after v2.0.0)
 
-**Status: in progress on master, unreleased.** Fax layers 1 to 3 are on
-master (2026-11-01); layer 4 and printing are not started.
+**Status: in progress on master, unreleased.** The four fax layers are on
+master (2026-11-01); printing is not started.
 
 **Printing through the OS spooler.** No device or driver code of our own.
 `rrocket --print [--printer NAME] [--copies N]` renders each page at the
@@ -2215,8 +2215,10 @@ context.
    Class F baseline every reader takes (`g3-2d` and `g4` on request), not
    G4 as first planned. Mostly dark pages are inverted (`--invert`), and
    `--dither halftone` serves photographs.
-4. `--fax-to NUMBER`, handing the file to a CUPS fax queue or HylaFAX
-   `sendfax`, or to the Windows Fax service.
+4. **Done.** `--fax-to NUMBER [--fax-queue NAME]` hands the document to a
+   CUPS fax queue (`lp -o phone=`) or to HylaFAX `sendfax`. On Windows it
+   points to Windows Fax and Scan; driving the Windows Fax service API is
+   not done.
 
 No modem code and no internet-fax services.
 

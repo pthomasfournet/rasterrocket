@@ -110,6 +110,8 @@ mod tests {
             dither: crate::args::DitherArg::None,
             fax: false,
             fax_resolution: None,
+            fax_to: None,
+            fax_queue: None,
             jpegcmyk: false,
             tiff: false,
             gray: false,

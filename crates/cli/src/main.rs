@@ -232,6 +232,11 @@ fn main() -> ExitCode {
         if let Err(e) = document.write(&path) {
             return fail(format_args!("cannot write the fax document {path}: {e}"));
         }
+        if let Some(number) = &args.fax_to
+            && let Err(e) = fax::submit(&path, number, args.fax_queue.as_deref())
+        {
+            return fail(format_args!("fax to {number} not sent: {e}"));
+        }
     }
     diagnostics::report_errors(errors)
 }

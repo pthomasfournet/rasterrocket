@@ -6,8 +6,10 @@
 //! A page is laid across the fax width by its shorter side: a landscape
 //! page is turned a quarter counterclockwise, its top edge to the left.
 //! Pages are coded on the worker that rendered them and written in page
-//! order once all are done.
+//! order once all are done.  The written document can be handed to the
+//! system's fax service through its submission command, `lp` or `sendfax`.
 
+use std::process::Command;
 use std::sync::Mutex;
 
 use color::Gray8;
@@ -125,6 +127,83 @@ impl FaxDocument {
     }
 }
 
+/// Parse a fax number: dial digits, `+`, `*`, `#`, the pause `,` and the
+/// separators space, `-`, `.`, `(` and `)`, beginning with a dial
+/// character, so that it is never read as an option of the command it is
+/// passed to.
+pub(crate) fn parse_number(s: &str) -> Result<String, String> {
+    let dial = |c: char| c.is_ascii_digit() || matches!(c, '+' | '*' | '#');
+    if !s.starts_with(dial) {
+        return Err(format!(
+            "{s:?} is not a fax number: it begins with a digit, +, * or #"
+        ));
+    }
+    if let Some(c) = s
+        .chars()
+        .find(|&c| !(dial(c) || matches!(c, ',' | ' ' | '-' | '.' | '(' | ')')))
+    {
+        return Err(format!("{s:?} is not a fax number: {c:?} is not dialled"));
+    }
+    Ok(s.to_owned())
+}
+
+/// What to do when the submitting command is not installed.
+#[cfg(not(windows))]
+const MISSING_SERVICE: &str =
+    "name a CUPS fax queue with --fax-queue, or install HylaFAX for sendfax";
+#[cfg(windows)]
+const MISSING_SERVICE: &str =
+    "Windows has neither CUPS nor HylaFAX; send the document with Windows Fax and Scan";
+
+/// The program and arguments that submit the fax document at `path` to
+/// `number`: `lp` to the print queue `queue` when one is named, its phone
+/// option carrying the number, else `sendfax` without a cover page.
+fn submission(path: &str, number: &str, queue: Option<&str>) -> (&'static str, Vec<String>) {
+    queue.map_or_else(
+        || {
+            (
+                "sendfax",
+                ["-n", "-d", number, "--", path].map(str::to_owned).to_vec(),
+            )
+        },
+        |queue| {
+            (
+                "lp",
+                vec![
+                    "-d".to_owned(),
+                    queue.to_owned(),
+                    "-o".to_owned(),
+                    format!("phone={number}"),
+                    "--".to_owned(),
+                    path.to_owned(),
+                ],
+            )
+        },
+    )
+}
+
+/// Submit the fax document at `path` to `number` through the system's fax
+/// service (see [`submission`]) and wait for the service to accept it.
+///
+/// # Errors
+///
+/// The command could not be run or reported a failure.
+pub(crate) fn submit(path: &str, number: &str, queue: Option<&str>) -> Result<(), String> {
+    let (program, argv) = submission(path, number, queue);
+    let status = Command::new(program).args(&argv).status().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("{program} is not installed: {MISSING_SERVICE}")
+        } else {
+            format!("cannot run {program}: {e}")
+        }
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} refused the fax ({status})"))
+    }
+}
+
 /// `src` turned a quarter counterclockwise: its top row becomes the left
 /// column, read upward.
 fn quarter_turn(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
@@ -163,7 +242,27 @@ mod tests {
     use color::Gray8;
     use raster::Bitmap;
 
-    use super::{FAX_WIDTH, fit_width, layout, quarter_turn};
+    use super::{FAX_WIDTH, fit_width, layout, parse_number, quarter_turn, submission};
+
+    #[test]
+    fn fax_numbers_are_dial_strings_that_cannot_pass_for_options() {
+        for good in ["+1 (555) 010-9999", "0033,,123.45", "*67#5550100"] {
+            assert_eq!(parse_number(good).as_deref(), Ok(good));
+        }
+        for bad in ["-o", "", " 555", "555; rm", "555x12", "(555) 0100"] {
+            assert!(parse_number(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_named_queue_submits_through_lp_else_through_sendfax() {
+        let (program, argv) = submission("out.tif", "5550100", Some("Fax"));
+        assert_eq!(program, "lp");
+        assert_eq!(argv, ["-d", "Fax", "-o", "phone=5550100", "--", "out.tif"]);
+        let (program, argv) = submission("out.tif", "5550100", None);
+        assert_eq!(program, "sendfax");
+        assert_eq!(argv, ["-n", "-d", "5550100", "--", "out.tif"]);
+    }
 
     fn bitmap(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Bitmap<Gray8> {
         let mut bmp: Bitmap<Gray8> = Bitmap::new(w, h, 4, false);

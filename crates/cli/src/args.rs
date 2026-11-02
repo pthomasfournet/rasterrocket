@@ -196,6 +196,16 @@ pub(crate) struct Args {
     #[arg(long = "fax-resolution", value_name = "RESOLUTION", value_enum)]
     pub fax_resolution: Option<FaxResolution>,
 
+    /// Send the fax document to NUMBER once written: through the CUPS fax
+    /// queue --fax-queue names, else through `HylaFAX`'s `sendfax`.  Implies
+    /// --fax.
+    #[arg(long = "fax-to", value_name = "NUMBER", value_parser = crate::fax::parse_number)]
+    pub fax_to: Option<String>,
+
+    /// The CUPS fax queue --fax-to submits to (`lp -d NAME -o phone=NUMBER`).
+    #[arg(long = "fax-queue", value_name = "NAME", requires = "fax_to")]
+    pub fax_queue: Option<String>,
+
     /// How --mono renders intermediate grays: `none` (default), a 50%
     /// threshold that keeps text and line art sharp, or `halftone`, dot
     /// patterns that keep photographs and shading legible: a dispersed
@@ -625,14 +635,14 @@ impl Args {
         {
             return Err("--png, --jpeg and --tiff are mutually exclusive".to_owned());
         }
-        if self.dither != DitherArg::None && !(self.mono || self.fax) {
+        if self.dither != DitherArg::None && !(self.mono || self.faxing()) {
             return Err("--dither applies to --mono and --fax output only".to_owned());
         }
         if self.jpegopt.is_some() && !self.jpeg {
             return Err("--jpegopt applies to --jpeg output only".to_owned());
         }
         match self.tiffcompression {
-            Some(_) if !(self.tiff || self.fax) => {
+            Some(_) if !(self.tiff || self.faxing()) => {
                 Err("--tiffcompression applies to --tiff output only".to_owned())
             }
             Some(TiffMethod::Jpeg) => Err(
@@ -641,7 +651,7 @@ impl Args {
                     .to_owned(),
             ),
             Some(method @ (TiffMethod::G3 | TiffMethod::G3TwoD | TiffMethod::G4))
-                if !(self.mono || self.fax) =>
+                if !(self.mono || self.faxing()) =>
             {
                 Err(format!(
                     "--tiffcompression {} codes bilevel pages; add --mono",
@@ -652,10 +662,16 @@ impl Args {
         }
     }
 
+    /// Whether a fax document is written: `--fax`, or `--fax-to`, which
+    /// implies it.
+    pub(crate) const fn faxing(&self) -> bool {
+        self.fax || self.fax_to.is_some()
+    }
+
     /// Refuse the flags `--fax` fixes or excludes, and the fax-only flags
     /// without it.
     fn validate_fax_flags(&self) -> Result<(), String> {
-        if !self.fax {
+        if !self.faxing() {
             return if self.fax_resolution.is_some() {
                 Err("--fax-resolution applies to --fax output only".to_owned())
             } else {
@@ -697,9 +713,10 @@ impl Args {
     /// resolution, and `--invert=auto` unless `--invert` is given.  Call
     /// after [`Self::validate_format_flags`].
     pub(crate) fn apply_fax_preset(&mut self) {
-        if !self.fax {
+        if !self.faxing() {
             return;
         }
+        self.fax = true;
         self.tiff = true;
         self.mono = true;
         self.tiffcompression = Some(self.tiffcompression.unwrap_or(TiffMethod::G3));
@@ -1243,6 +1260,20 @@ mod page_list_tests {
             let err = args_with(flags).validate_format_flags().unwrap_err();
             assert!(err.contains(needle), "{flags:?}: {err}");
         }
+    }
+
+    #[test]
+    fn fax_to_implies_fax_and_a_queue_needs_a_number() {
+        let mut to = args_with(&["--fax-to", "+1 555 0100", "--fax-queue", "Fax"]);
+        assert!(to.validate_format_flags().is_ok());
+        to.apply_fax_preset();
+        assert!(to.fax && to.mono && to.tiff);
+        assert!(Args::try_parse_from(["rrocket", "--fax-queue", "Fax", "in.pdf", "out"]).is_err());
+        assert!(Args::try_parse_from(["rrocket", "--fax-to", "-x", "in.pdf", "out"]).is_err());
+        let err = args_with(&["--fax-to", "5550100", "--png"])
+            .validate_format_flags()
+            .unwrap_err();
+        assert!(err.contains("drop --png"), "{err}");
     }
 
     #[test]
