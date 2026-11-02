@@ -87,7 +87,12 @@ impl PageRenderer<'_> {
     /// space's tint/profile transform (PDF §8.6.6): treating a Separation
     /// tint of `1.0` as a grey of `1.0` paints white and silently drops all
     /// content on spot-colour pages.
-    pub(super) fn color_for_components(&self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
+    ///
+    /// On an ink canvas a `Separation` or `DeviceN` colour is given as its
+    /// colorants' tints, each in its own channel (see `InkMap`); on an RGB
+    /// canvas it is its sRGB conversion, like every other colour.
+    pub(super) fn color_for_components(&mut self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
+        let doc = self.resources.doc();
         match cs {
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {
                 components_to_color(comps)
@@ -98,13 +103,18 @@ impl PageRenderer<'_> {
             // A four-component ICC space is a process CMYK space: its
             // components are the ink.
             ColorSpace::IccBased { n: 4, .. } => match comps {
-                &[c, m, y, k] => RasterColor::with_process_inks(
-                    cs.convert_to_rgb(self.resources.doc(), comps),
-                    [c, m, y, k],
-                ),
-                _ => RasterColor::from_bytes(cs.convert_to_rgb(self.resources.doc(), comps)),
+                &[c, m, y, k] => {
+                    RasterColor::with_process_inks(cs.convert_to_rgb(doc, comps), [c, m, y, k])
+                }
+                _ => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
             },
-            _ => RasterColor::from_bytes(cs.convert_to_rgb(self.resources.doc(), comps)),
+            ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
+                if self.canvas.kind() == CanvasKind::Ink =>
+            {
+                let (ink, paints) = self.ink_map.colorant_ink(doc, cs, comps);
+                RasterColor::with_ink(cs.convert_to_rgb(doc, comps), ink, paints)
+            }
+            _ => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
         }
     }
 

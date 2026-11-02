@@ -7,9 +7,10 @@ use color::Rgb8;
 use color::convert::div255;
 use pdf::{Document, ObjectId};
 use raster::Bitmap;
-use raster::pipe::{PipeSrc, PipeState};
+use raster::pipe::{ChannelMask, PipeSrc, PipeState};
 use raster::types::BlendMode;
 
+use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform};
 use super::canvas::PageCanvas;
 use super::canvas::blend_u8;
@@ -1750,4 +1751,149 @@ fn ink_canvas_multiply_multiplies_the_complements() {
         b"0 0 0 0.3 k 0 0 10 10 re f /B gs 1 0 0 0.5 k 0 0 10 10 re f",
     );
     assert_ink_pixels(&ink, [255, 0, 0, 166, 0, 0, 0, 0]);
+}
+
+// ── Colorants and spot slots ──────────────────────────────────────────────
+
+/// Page `(4, 0)` whose `/ColorSpace` resources are the entries `spaces`.
+fn colorant_doc(spaces: &str) -> Document {
+    crate::test_helpers::make_doc_with_objects(&[(
+        4,
+        format!("<< /Type /Page /Resources << /ColorSpace << {spaces} >> >> >>"),
+    )])
+}
+
+/// A one-input tint transform to `DeviceCMYK`, linear from no ink at tint 0
+/// to the inks `c1` at tint 1.
+fn tint_to_cmyk(c1: &str) -> String {
+    format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>")
+}
+
+/// Render `content` on page `(4, 0)` of `doc`, 10 pixels square, onto an
+/// ink canvas; the fill colour left in the graphics state and the canvas's
+/// ink bytes, eight per pixel.
+fn ink_fill(doc: &Document, content: &[u8]) -> (RasterColor, Vec<u8>) {
+    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
+    renderer.force_ink_canvas();
+    renderer.execute(&crate::content::parse(content));
+    let fill = renderer.gstate.current().fill_color.clone();
+    let PageCanvas::Ink(ink) = &renderer.canvas else {
+        panic!("an ink canvas");
+    };
+    (fill, ink.data().to_vec())
+}
+
+#[test]
+fn separation_cyan_paints_process_bit() {
+    let doc = colorant_doc(&format!(
+        "/Cy [/Separation /Cyan /DeviceCMYK {}]",
+        tint_to_cmyk("1 0 0 0")
+    ));
+    let (fill, ink) = ink_fill(&doc, b"/Cy cs 0.6 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::new(0b0001));
+    assert!(!fill.opm_eligible());
+    assert_ink_pixels(&ink, [153, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn separation_spot_takes_slot() {
+    let doc = colorant_doc(&format!(
+        "/Sp [/Separation /PANTONE#20185#20C /DeviceCMYK {}]",
+        tint_to_cmyk("0 0.91 0.76 0")
+    ));
+    let (fill, ink) = ink_fill(&doc, b"/Sp cs 0.6 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::new(0b1_0000));
+    assert_ink_pixels(&ink, [0, 0, 0, 0, 153, 0, 0, 0]);
+}
+
+#[test]
+fn separation_all_paints_every_channel() {
+    let doc = colorant_doc(&format!(
+        "/Reg [/Separation /All /DeviceCMYK {}]",
+        tint_to_cmyk("1 1 1 1")
+    ));
+    let (fill, ink) = ink_fill(&doc, b"/Reg cs 0.6 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+    assert_ink_pixels(&ink, [153; 8]);
+}
+
+#[test]
+fn devicen_mixed_names() {
+    // The tint transform drops the `/None` tint and keeps the other two as
+    // C and M of the alternate space.
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ColorSpace << \
+             /Dn [/DeviceN [/Cyan /Spot1 /None] /DeviceCMYK 5 0 R] >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+                "{ pop 0 0 }",
+            ),
+        ),
+    ]);
+    let (fill, ink) = ink_fill(&doc, b"/Dn cs 0.5 0.8 1 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::new(0b1_0001));
+    assert_ink_pixels(&ink, [128, 0, 0, 0, 204, 0, 0, 0]);
+}
+
+#[test]
+fn fifth_spot_falls_back_to_process() {
+    let inks = ["1 0 0 0", "0 1 0 0", "0 0 0 1", "1 1 0 0", "0 0 1 0"];
+    let spaces: Vec<String> = inks
+        .iter()
+        .enumerate()
+        .map(|(i, c1)| {
+            format!(
+                "/S{i} [/Separation /Spot{i} /DeviceCMYK {}]",
+                tint_to_cmyk(c1)
+            )
+        })
+        .collect();
+    let doc = colorant_doc(&spaces.join(" "));
+    // Five two-pixel strips, one spot each, left to right.
+    let content: Vec<String> = (0..5)
+        .map(|i| format!("/S{i} cs 1 scn {} 0 2 10 re f", i * 2))
+        .collect();
+    let content = content.join(" ");
+    let rgb = render_canvas(&doc, 10, content.as_bytes(), true);
+    let pixel = |x: usize| &rgb[(5 * 10 + x) * 3..(5 * 10 + x) * 3 + 3];
+    for (i, c1) in inks.iter().enumerate() {
+        let comps: Vec<f64> = c1.split(' ').map(|v| v.parse().unwrap()).collect();
+        let want = color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3]);
+        let got = pixel(i * 2 + 1);
+        assert!(got.iter().any(|&v| v != u8::MAX), "strip {i} is not white");
+        for (ch, (&g, &w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                g.abs_diff(w) <= 2,
+                "strip {i} channel {ch}: got {g}, alternate colour {w}"
+            );
+        }
+    }
+    // The fifth spot has no slot: it paints its alternate in process ink.
+    let (fill, _) = ink_fill(&doc, format!("{content} /S4 cs 0.5 scn").as_bytes());
+    assert_eq!(fill.paints(), ChannelMask::new(0b1111));
+    assert_eq!(fill.ink(), &[0, 0, 128, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn rgb_colour_knocks_out_spots() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let (fill, _) = ink_fill(&doc, b"0.2 0.4 0.6 rg 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+    assert!(!fill.opm_eligible());
+    let (fill, _) = ink_fill(&doc, b"0.2 g");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+}
+
+#[test]
+fn cmyk_colour_paints_process_inks_and_is_opm_eligible() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let (fill, _) = ink_fill(&doc, b"0.2 0 0.6 0 k");
+    assert_eq!(fill.paints(), ChannelMask::new(0b1111));
+    assert!(fill.opm_eligible());
 }

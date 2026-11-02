@@ -64,6 +64,7 @@ mod image_blit;
 mod image_memo;
 mod image_reduce;
 mod image_sampler;
+mod ink_map;
 mod knockout;
 mod operators;
 mod paint;
@@ -237,6 +238,8 @@ pub struct PageRenderer<'doc> {
     /// returned cleared when its group is composited; one per nesting level
     /// is allocated over the page's life.
     group_pool: Vec<PageCanvas>,
+    /// The spot colorants of the page and their channels on an ink canvas.
+    ink_map: ink_map::InkMap,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Image `XObjects` already decoded on this page, shared with the
@@ -420,6 +423,7 @@ impl<'doc> PageRenderer<'doc> {
             },
             page_group: group,
             group_pool: Vec::new(),
+            ink_map: ink_map::InkMap::default(),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(),
             pattern_memo: pattern_memo::PatternMemo::shared(),
@@ -642,7 +646,8 @@ impl<'doc> PageRenderer<'doc> {
     }
 
     /// Consume the renderer and return the finished bitmap, in sRGB, and
-    /// page diagnostics.
+    /// page diagnostics.  An ink canvas converts with the process
+    /// equivalents of the page's spot colorants.
     #[must_use]
     pub fn finish(mut self) -> (Bitmap<Rgb8>, PageDiagnostics) {
         self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
@@ -650,7 +655,13 @@ impl<'doc> PageRenderer<'doc> {
         if self.page_group.is_some() {
             self.canvas.composite_onto_white();
         }
-        (self.canvas.into_rgb(&[None; 4]), self.diag)
+        let Self {
+            canvas,
+            ink_map,
+            diag,
+            ..
+        } = self;
+        (canvas.into_rgb(&ink_map.luts()), diag)
     }
 
     /// Execute a slice of decoded operators in order.
