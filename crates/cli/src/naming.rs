@@ -81,67 +81,19 @@ const fn digit_width(n: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{AaFlag, Args};
+    use clap::Parser as _;
+
+    use crate::args::Args;
 
     fn make_args(prefix: &str, sep: char, force: Option<usize>) -> Args {
-        Args {
-            input: "in.pdf".into(),
-            output_prefix: prefix.into(),
-            first_page: 1,
-            last_page: None,
-            odd_only: false,
-            even_only: false,
-            single_file: false,
-            resolution: None,
-            resolution_x: None,
-            resolution_y: None,
-            scale_to: None,
-            scale_to_x: None,
-            scale_to_y: None,
-            crop_x: None,
-            crop_y: None,
-            crop_w: None,
-            crop_h: None,
-            png: false,
-            jpeg: false,
-            jpegopt: None,
-            tiffcompression: None,
-            invert: None,
-            dither: crate::args::DitherArg::None,
-            fax: false,
-            fax_resolution: None,
-            fax_to: None,
-            fax_queue: None,
-            jpegcmyk: false,
-            tiff: false,
-            gray: false,
-            mono: false,
-            antialias: AaFlag::Yes,
-            vector_antialias: AaFlag::Yes,
-            hide_annotations: false,
-            no_system_fonts: false,
-            password: None,
-            decrypt_owned: false,
-            num_threads: 0,
-            separator: sep,
-            force_num_digits: force,
-            progress: false,
-            timings: false,
-            backend: None,
-            vaapi_device: None,
-            vulkan_device: None,
-            strict: false,
-            purpose: crate::args::PurposeArg::View,
-            crop: false,
-            rectify: false,
-            dewarp: false,
-            split_spreads: false,
-            ram: false,
-            no_ram: false,
-            ram_path: None,
-            #[cfg(feature = "cache")]
-            prefetch: false,
+        let sep = sep.to_string();
+        let digits = force.map(|n| n.to_string());
+        let mut argv = vec!["rrocket", "--sep", &sep];
+        if let Some(digits) = &digits {
+            argv.extend(["--forcenum", digits]);
         }
+        argv.extend(["in.pdf", prefix]);
+        Args::parse_from(argv)
     }
 
     #[test]

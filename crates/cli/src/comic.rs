@@ -6,11 +6,12 @@
 
 use std::path::Path;
 
-use color::Rgb8;
+use color::Gray8;
 use comic::{ComicError, ComicOptions, RenderedPage, open_comic};
 use raster::Bitmap;
 
 use crate::args::Args;
+use crate::cleanup::Page;
 use crate::render::{self, RenderError};
 
 /// Render a comic archive, writing each decodable page via the shared encoder.
@@ -84,39 +85,29 @@ pub(crate) fn run(
     Ok((written, failed))
 }
 
-/// Wrap a grayscale [`RenderedPage`] into an [`Rgb8`] bitmap (luma replicated to
-/// R=G=B) and write it via the shared [`render::encode_to_path`], so colour-mode
-/// and format reuse the PDF path's single writer.
+/// Write the luma [`RenderedPage`] `page` through the shared page writer
+/// ([`render::write_cleaned`]), which applies the camera stages, the tone
+/// operations and the output format exactly as the PDF path does.
 fn write_page(
     args: &Args,
     spill: &crate::ram::SpillPolicy,
     page: &RenderedPage,
     total_pages: i32,
 ) -> Result<(), RenderError> {
-    let format = args.output_format();
-
-    let mut rgb = Bitmap::<Rgb8>::new(page.width, page.height, 1, false);
+    let mut luma = Bitmap::<Gray8>::new(page.width, page.height, 1, false);
     let w = page.width as usize;
     for y in 0..page.height {
-        let src = &page.pixels[(y as usize * w)..((y as usize + 1) * w)];
-        let row = rgb.row_bytes_mut(y);
-        for (x, &luma) in src.iter().enumerate() {
-            row[x * 3..x * 3 + 3].copy_from_slice(&[luma, luma, luma]);
-        }
+        let start = y as usize * w;
+        luma.row_bytes_mut(y)[..w].copy_from_slice(&page.pixels[start..start + w]);
     }
 
     // `page.page_num` is selected from `build_page_list`'s output, which is
     // bounded by `total_pages` (≤ i32::MAX, checked in `run`), so the cast back
     // to i32 cannot overflow.
     let page_i32 = i32::try_from(page.page_num).unwrap_or(total_pages);
-    // The shared writer applies the camera stages and routes through the
-    // spill policy, exactly as the PDF path does.
-    render::write_cleaned(
-        rgb,
-        args,
-        render::Sink::Files(spill),
-        page_i32,
-        total_pages,
-        format,
-    )
+    let sink = render::Sink::Files {
+        spill,
+        format: args.output_format(),
+    };
+    render::write_cleaned(Page::Gray(luma), args, sink, page_i32, total_pages)
 }

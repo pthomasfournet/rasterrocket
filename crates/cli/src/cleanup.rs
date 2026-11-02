@@ -23,38 +23,75 @@ pub(crate) enum SpreadHalf {
     Right,
 }
 
-/// One output page in the colour model it is written from.
+/// One page in the colour model it is written from.
 pub(crate) enum Page {
-    /// Colour pixels; converted to gray at encode time for `--gray` /
-    /// `--mono`.
+    /// Colour pixels.
     Rgb(Bitmap<Rgb8>),
-    /// Luma pixels, written only for `--gray` / `--mono`.
+    /// Luma pixels.
     Gray(Bitmap<Gray8>),
+    /// Luma pixels of two levels, 0 and 255: bilevel output.
+    Mono(Bitmap<Gray8>),
 }
 
-/// Run the stages in `opts` on `rgb`.  Returns one page, or the left then
-/// right page of a split spread.  When no stage changes the page, `rgb` is
-/// returned as is.  `gray_output` selects luma output pages.
+impl Page {
+    /// The page's luma: converted from colour, or the page itself.
+    pub(crate) fn into_luma(self) -> Bitmap<Gray8> {
+        match self {
+            Self::Rgb(rgb) => rgb_to_gray(&rgb),
+            Self::Gray(luma) | Self::Mono(luma) => luma,
+        }
+    }
+
+    /// Run `f` on the page's luma, converting a colour page for the call.
+    pub(crate) fn with_luma<R>(&self, f: impl FnOnce(&Bitmap<Gray8>) -> R) -> R {
+        match self {
+            Self::Rgb(rgb) => f(&rgb_to_gray(rgb)),
+            Self::Gray(luma) | Self::Mono(luma) => f(luma),
+        }
+    }
+
+    /// The page in colour: a luma page with its value in every channel.
+    pub(crate) fn into_rgb(self) -> Bitmap<Rgb8> {
+        match self {
+            Self::Rgb(rgb) => rgb,
+            Self::Gray(luma) | Self::Mono(luma) => {
+                let mut rgb = Bitmap::<Rgb8>::new(luma.width, luma.height, 1, false);
+                let w = luma.width as usize;
+                for y in 0..luma.height {
+                    let src = &luma.row_bytes(y)[..w];
+                    let dst = rgb.row_bytes_mut(y)[..3 * w].as_chunks_mut::<3>().0;
+                    for (px, &l) in dst.iter_mut().zip(src) {
+                        *px = [l; 3];
+                    }
+                }
+                rgb
+            }
+        }
+    }
+}
+
+/// Run the stages in `opts` on `page`.  Returns one page, or the left then
+/// right page of a split spread.  When no stage changes the page, it is
+/// returned as is.  A luma page, or any page when `luma_output`, yields
+/// luma pages; a colour page otherwise yields colour pages, every channel
+/// resampled through the geometry computed on its luma.
 pub(crate) fn clean(
-    rgb: Bitmap<Rgb8>,
+    page: Page,
     opts: CameraOptions,
-    gray_output: bool,
+    luma_output: bool,
 ) -> Result<Vec<(Page, Option<SpreadHalf>)>, RenderError> {
     if !opts.any() {
-        return Ok(vec![(Page::Rgb(rgb), None)]);
+        return Ok(vec![(page, None)]);
     }
-    let luma = rgb_to_gray(&rgb);
+    let (luma, rgb) = match page {
+        Page::Rgb(rgb) if !luma_output => (rgb_to_gray(&rgb), Some(rgb)),
+        page => (page.into_luma(), None),
+    };
     let processed = camera::process(view(&luma), &opts)?;
     if !changed(&processed.report) {
-        return Ok(vec![(Page::Rgb(rgb), None)]);
+        return Ok(vec![(rgb.map_or(Page::Gray(luma), Page::Rgb), None)]);
     }
-    let pages: Vec<Page> = if gray_output {
-        processed
-            .pages
-            .iter()
-            .map(|p| gray_bitmap(p).map(Page::Gray))
-            .collect::<Result<_, _>>()?
-    } else {
+    let pages: Vec<Page> = if let Some(rgb) = rgb {
         let [r, g, b] = split_channels(&rgb);
         let replay = |plane: &[u8]| {
             processed.report.replay(GrayView::packed(
@@ -68,6 +105,12 @@ pub(crate) fn clean(
             .zip(&g)
             .zip(&b)
             .map(|((r, g), b)| rgb_bitmap(r, g, b).map(Page::Rgb))
+            .collect::<Result<_, _>>()?
+    } else {
+        processed
+            .pages
+            .iter()
+            .map(|p| gray_bitmap(p).map(Page::Gray))
             .collect::<Result<_, _>>()?
     };
     let halves = if pages.len() == 2 {
@@ -191,7 +234,7 @@ mod tests {
     fn rgb_crop_keeps_colour() {
         let mut opts = CameraOptions::default();
         opts.crop = true;
-        let pages = clean(page_on_desk(800, 1000), opts, false).expect("clean");
+        let pages = clean(Page::Rgb(page_on_desk(800, 1000)), opts, false).expect("clean");
         assert_eq!(pages.len(), 1);
         let (Page::Rgb(bmp), None) = &pages[0] else {
             panic!("one RGB page");
@@ -208,7 +251,7 @@ mod tests {
         let rgb = page_on_desk(800, 1000);
         let luma = rgb_to_gray(&rgb);
         let want = camera::process(view(&luma), &opts).expect("process");
-        let pages = clean(rgb, opts, true).expect("clean");
+        let pages = clean(Page::Rgb(rgb), opts, true).expect("clean");
         let (Page::Gray(bmp), None) = &pages[0] else {
             panic!("one gray page");
         };
@@ -224,7 +267,7 @@ mod tests {
     fn unchanged_page_is_returned_as_is() {
         let mut flat = Bitmap::<Rgb8>::new(300, 200, 1, false);
         flat.data_mut().fill(240);
-        let pages = clean(flat, CameraOptions::all(), false).expect("clean");
+        let pages = clean(Page::Rgb(flat), CameraOptions::all(), false).expect("clean");
         let (Page::Rgb(bmp), None) = &pages[0] else {
             panic!("one RGB page");
         };

@@ -1,9 +1,9 @@
 //! Per-page rendering: call `rasterrocket` library → apply colour mode → write file.
 
 use std::fs::{self, File};
-use std::io::{BufWriter, Write as _};
+use std::io::{BufWriter, Write};
 
-use color::{Gray8, Rgb8};
+use color::Rgb8;
 use encode::{
     EncodeError, TiffImage, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
 };
@@ -94,8 +94,6 @@ pub(crate) fn render_page(
     spill: &SpillPolicy,
     fax: Option<&FaxDocument>,
 ) -> Result<(), RenderError> {
-    let format = args.output_format();
-
     // Prescan only when a GPU decoder is compiled in — otherwise it's pure overhead
     // with no benefit (CpuOnly is already the effective policy for every page).
     #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
@@ -110,7 +108,10 @@ pub(crate) fn render_page(
     let effective_policy = session.policy();
 
     let geom = session.page_geometry(page_num)?;
-    let (scale_x, scale_y) = args.scales((geom.width_pts, geom.height_pts));
+    let dims = (geom.width_pts, geom.height_pts);
+    let fax_layout = fax.map(|_| fax::layout(dims, args.y_dpi()));
+    let (scale_x, scale_y) =
+        fax_layout.map_or_else(|| args.scales(dims), |l| (l.scale_x, l.scale_y));
     let mut params = RenderParams::new_xy(scale_x, scale_y).with_policy(effective_policy);
     if let Some(region) = args
         .crop_region(geom.size_px(scale_x, scale_y))
@@ -119,23 +120,39 @@ pub(crate) fn render_page(
         params = params.with_region(region);
     }
     let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
-    let sink = fax.map_or(Sink::Files(spill), |document| Sink::Fax {
-        document,
-        turn: fax::layout((geom.width_pts, geom.height_pts), args.y_dpi()).turn,
-    });
+    let sink = match (fax, fax_layout) {
+        (Some(document), Some(layout)) => Sink::Fax {
+            document,
+            turn: layout.turn,
+        },
+        _ => Sink::Files {
+            spill,
+            format: args.output_format(),
+        },
+    };
 
     #[expect(
         clippy::cast_possible_wrap,
         reason = "total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
-    write_cleaned(rgb, args, sink, page_num as i32, total_pages as i32, format)
+    write_cleaned(
+        Page::Rgb(rgb),
+        args,
+        sink,
+        page_num as i32,
+        total_pages as i32,
+    )
 }
 
 /// Where a cleaned page goes.
 #[derive(Clone, Copy)]
 pub(crate) enum Sink<'a> {
-    /// One file per page, under the prefix the spill policy chooses.
-    Files(&'a SpillPolicy),
+    /// One file per page in `format`, under the prefix the spill policy
+    /// chooses.
+    Files {
+        spill: &'a SpillPolicy,
+        format: OutputFormat,
+    },
     /// A page of the fax document, turned a quarter when `turn`.
     Fax {
         document: &'a FaxDocument,
@@ -143,7 +160,7 @@ pub(crate) enum Sink<'a> {
     },
 }
 
-/// Run the camera stages selected on the command line on `rgb` (see
+/// Run the camera stages selected on the command line on `page` (see
 /// [`cleanup::clean`]) and the tone operations (see [`tone::prepare`]),
 /// then hand each resulting page, one or the `a`/`b` halves of a split
 /// spread, to `sink`: a file each (see [`output_path_with_prefix`]), or
@@ -151,20 +168,19 @@ pub(crate) enum Sink<'a> {
 ///
 /// Shared by the PDF render path and the comic-archive path.
 pub(crate) fn write_cleaned(
-    rgb: Bitmap<Rgb8>,
+    page: Page,
     args: &Args,
     sink: Sink<'_>,
     page_num: i32,
     total_pages: i32,
-    format: OutputFormat,
 ) -> Result<(), RenderError> {
-    let pages = cleanup::clean(rgb, args.camera_options(), args.gray || args.mono)?;
-    for (index, (page, half)) in pages.into_iter().enumerate() {
+    let pages = cleanup::clean(page, args.camera_options(), args.luma_output())?;
+    for (page, half) in pages {
         let page = tone::prepare(page, args);
-        let spill = match sink {
-            Sink::Files(spill) => spill,
+        let (spill, format) = match sink {
+            Sink::Files { spill, format } => (spill, format),
             Sink::Fax { document, turn } => {
-                document.add(page_num, index, page, turn, args)?;
+                document.add(page_num, page, turn)?;
                 continue;
             }
         };
@@ -184,10 +200,9 @@ pub(crate) fn write_cleaned(
 
         // Pages are written in place, not renamed into place, so that no
         // per-page rename waits on the file system's flush of the data.
-        match &page {
-            Page::Rgb(rgb) => encode_to_path(&out_path, rgb, args, format),
-            Page::Gray(gray) => encode_gray_to_path(&out_path, gray, args, format),
-        }?;
+        write_output(&out_path, |out| {
+            encode_page(&page, format, args.dpi(), out).map_err(RenderError::from)
+        })?;
     }
     Ok(())
 }
@@ -220,55 +235,32 @@ pub(crate) fn write_output(
     written
 }
 
-/// Encode a colour page to `out_path` in `format`.
-fn encode_to_path(
-    out_path: &str,
-    rgb: &Bitmap<Rgb8>,
-    args: &Args,
+/// Encode `page` in `format` to `out`: colour, gray or bilevel as the
+/// page is, Netpbm choosing PPM, PGM or PBM by it.  `dpi` is recorded by
+/// the formats that carry a resolution.
+fn encode_page<W: Write>(
+    page: &Page,
     format: OutputFormat,
-) -> Result<(), RenderError> {
-    write_output(out_path, |out| {
-        match format {
-            OutputFormat::Ppm => write_ppm(rgb, out)?,
-            OutputFormat::Png => write_png(rgb, out)?,
-            OutputFormat::Jpeg(options) => write_jpeg(rgb, options, out)?,
-            OutputFormat::Tiff(compression) => {
-                write_tiff(TiffImage::Rgb(rgb), args.dpi(), compression, out)?;
-            }
+    dpi: (f64, f64),
+    out: W,
+) -> Result<(), EncodeError> {
+    match (format, page) {
+        (OutputFormat::Ppm, Page::Rgb(rgb)) => write_ppm(rgb, out),
+        (OutputFormat::Ppm, Page::Gray(luma)) => write_pgm(luma, out),
+        (OutputFormat::Ppm, Page::Mono(luma)) => write_pbm(luma, out),
+        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, out),
+        (OutputFormat::Png, Page::Gray(luma) | Page::Mono(luma)) => write_png(luma, out),
+        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, out),
+        (OutputFormat::Jpeg(options), Page::Gray(luma) | Page::Mono(luma)) => {
+            write_jpeg(luma, options, out)
         }
-        Ok(())
-    })
-}
-
-/// Encode a luma page to `out_path`: thresholded to two levels under
-/// `--mono`, as gray otherwise.
-fn encode_gray_to_path(
-    out_path: &str,
-    gray: &Bitmap<Gray8>,
-    args: &Args,
-    format: OutputFormat,
-) -> Result<(), RenderError> {
-    write_output(out_path, |out| {
-        if args.mono {
-            let mono = tone::gray_to_mono(gray, args.screen());
-            match format {
-                OutputFormat::Ppm => write_pbm::<Gray8, _>(&mono, out)?,
-                OutputFormat::Png => write_png::<Gray8, _>(&mono, out)?,
-                OutputFormat::Jpeg(options) => write_jpeg(&mono, options, out)?,
-                OutputFormat::Tiff(compression) => {
-                    write_tiff(TiffImage::Bilevel(&mono), args.dpi(), compression, out)?;
-                }
-            }
-        } else {
-            match format {
-                OutputFormat::Ppm => write_pgm::<Gray8, _>(gray, out)?,
-                OutputFormat::Png => write_png::<Gray8, _>(gray, out)?,
-                OutputFormat::Jpeg(options) => write_jpeg(gray, options, out)?,
-                OutputFormat::Tiff(compression) => {
-                    write_tiff(TiffImage::Gray(gray), args.dpi(), compression, out)?;
-                }
-            }
+        (OutputFormat::Tiff(compression), page) => {
+            let image = match page {
+                Page::Rgb(rgb) => TiffImage::Rgb(rgb),
+                Page::Gray(luma) => TiffImage::Gray(luma),
+                Page::Mono(luma) => TiffImage::Bilevel(luma),
+            };
+            write_tiff(image, dpi, compression, out)
         }
-        Ok(())
-    })
+    }
 }

@@ -9,18 +9,15 @@
 //! order once all are done.  The written document can be handed to the
 //! system's fax service through its submission command, `lp` or `sendfax`.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use color::Gray8;
 use encode::{TiffCompression, TiffImage, TiffPage, TiffWriter};
-use pdf_raster::rgb_to_gray;
 use raster::Bitmap;
 
-use crate::args::Args;
 use crate::cleanup::Page;
 use crate::render::{RenderError, write_output};
-use crate::tone;
 
 /// The width of a fax page in pixels: ITU-T T.4's 215 mm scan line.
 pub(crate) const FAX_WIDTH: u32 = 1728;
@@ -61,13 +58,11 @@ pub(crate) fn layout((width_pts, height_pts): (f64, f64), y_dpi: f64) -> FaxLayo
     }
 }
 
-/// The pages of the fax document, coded and keyed by their order.
+/// The pages of the fax document, coded and keyed by page number.
 pub(crate) struct FaxDocument {
     compression: TiffCompression,
     dpi: (f64, f64),
-    /// `(page number, index within the page, coded page)`: a split spread
-    /// yields two pages under one number.
-    pages: Mutex<Vec<(i32, usize, TiffPage)>>,
+    pages: Mutex<Vec<(i32, TiffPage)>>,
 }
 
 impl FaxDocument {
@@ -80,31 +75,22 @@ impl FaxDocument {
         }
     }
 
-    /// Turn `page` when `turn`, fit it to the fax width, reduce it to two
-    /// levels and code it as page `index` of document page `page_num`.
+    /// Turn `page` when `turn`, fit it to the fax width and code it,
+    /// bilevel, as document page `page_num`.  The page is the two-level
+    /// luma of [`crate::tone::prepare`]; any luma is thresholded.
     ///
     /// # Errors
     ///
     /// The encoder refused the page.
-    pub(crate) fn add(
-        &self,
-        page_num: i32,
-        index: usize,
-        page: Page,
-        turn: bool,
-        args: &Args,
-    ) -> Result<(), RenderError> {
-        let gray = match page {
-            Page::Gray(gray) => gray,
-            Page::Rgb(rgb) => rgb_to_gray(&rgb),
-        };
-        let gray = if turn { quarter_turn(&gray) } else { gray };
-        let mono = tone::gray_to_mono(&fit_width(&gray, FAX_WIDTH), args.screen());
-        let coded = TiffPage::encode(TiffImage::Bilevel(&mono), self.dpi, self.compression)?;
+    pub(crate) fn add(&self, page_num: i32, page: Page, turn: bool) -> Result<(), RenderError> {
+        let luma = page.into_luma();
+        let luma = if turn { quarter_turn(&luma) } else { luma };
+        let fitted = fit_width(&luma, FAX_WIDTH);
+        let coded = TiffPage::encode(TiffImage::Bilevel(&fitted), self.dpi, self.compression)?;
         self.pages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((page_num, index, coded));
+            .push((page_num, coded));
         Ok(())
     }
 
@@ -118,19 +104,21 @@ impl FaxDocument {
             .pages
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pages.sort_unstable_by_key(|&(page, index, _)| (page, index));
+        pages.sort_unstable_by_key(|&(page, _)| page);
         let mut writer = TiffWriter::fax_document();
-        for (_, _, page) in pages {
+        for (_, page) in pages {
             writer.push_page(page);
         }
         write_output(path, |out| writer.write(out).map_err(RenderError::from))
     }
 }
 
-/// Parse a fax number: dial digits, `+`, `*`, `#`, the pause `,` and the
-/// separators space, `-`, `.`, `(` and `)`, beginning with a dial
-/// character, so that it is never read as an option of the command it is
-/// passed to.
+/// Parse a fax number into its dial string: the number is dial digits,
+/// `+`, `*`, `#`, the pause `,` and the separators space, `-`, `.`, `(` and
+/// `)`, beginning with a dial character; the dial string drops the
+/// separators.  It never begins with `-`, so no command reads it as an
+/// option, and holds no space, which would split the `name=value` options
+/// of `lp`.
 pub(crate) fn parse_number(s: &str) -> Result<String, String> {
     let dial = |c: char| c.is_ascii_digit() || matches!(c, '+' | '*' | '#');
     if !s.starts_with(dial) {
@@ -144,16 +132,8 @@ pub(crate) fn parse_number(s: &str) -> Result<String, String> {
     {
         return Err(format!("{s:?} is not a fax number: {c:?} is not dialled"));
     }
-    Ok(s.to_owned())
+    Ok(s.chars().filter(|&c| dial(c) || c == ',').collect())
 }
-
-/// What to do when the submitting command is not installed.
-#[cfg(not(windows))]
-const MISSING_SERVICE: &str =
-    "name a CUPS fax queue with --fax-queue, or install HylaFAX for sendfax";
-#[cfg(windows)]
-const MISSING_SERVICE: &str =
-    "Windows has neither CUPS nor HylaFAX; send the document with Windows Fax and Scan";
 
 /// The program and arguments that submit the fax document at `path` to
 /// `number`: `lp` to the print queue `queue` when one is named, its phone
@@ -182,25 +162,38 @@ fn submission(path: &str, number: &str, queue: Option<&str>) -> (&'static str, V
     )
 }
 
-/// Submit the fax document at `path` to `number` through the system's fax
-/// service (see [`submission`]) and wait for the service to accept it.
+/// Submit the fax document at `path` to the dial string `number` through
+/// the system's fax service (see [`submission`]) and wait for the service
+/// to accept it.  The command's output goes to standard error, keeping
+/// standard output for rrocket's own.
 ///
 /// # Errors
 ///
-/// The command could not be run or reported a failure.
+/// The command could not be run or reported a failure; the message names
+/// the document, which stays at `path`.
 pub(crate) fn submit(path: &str, number: &str, queue: Option<&str>) -> Result<(), String> {
     let (program, argv) = submission(path, number, queue);
-    let status = Command::new(program).args(&argv).status().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            format!("{program} is not installed: {MISSING_SERVICE}")
-        } else {
-            format!("cannot run {program}: {e}")
-        }
-    })?;
+    let status = Command::new(program)
+        .args(&argv)
+        .stdin(Stdio::null())
+        .stdout(std::io::stderr())
+        .status()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "{program} is not installed: name a CUPS fax queue with --fax-queue, or \
+                     install HylaFAX for sendfax; the document is at {path}"
+                )
+            } else {
+                format!("cannot run {program}: {e}; the document is at {path}")
+            }
+        })?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} refused the fax ({status})"))
+        Err(format!(
+            "{program} refused the fax ({status}); the document is at {path}"
+        ))
     }
 }
 
@@ -246,8 +239,12 @@ mod tests {
 
     #[test]
     fn fax_numbers_are_dial_strings_that_cannot_pass_for_options() {
-        for good in ["+1 (555) 010-9999", "0033,,123.45", "*67#5550100"] {
-            assert_eq!(parse_number(good).as_deref(), Ok(good));
+        for (number, dial) in [
+            ("+1 (555) 010-9999", "+15550109999"),
+            ("0033,,123.45", "0033,,12345"),
+            ("*67#5550100", "*67#5550100"),
+        ] {
+            assert_eq!(parse_number(number).as_deref(), Ok(dial));
         }
         for bad in ["-o", "", " 555", "555; rm", "555x12", "(555) 0100"] {
             assert!(parse_number(bad).is_err(), "{bad:?}");
@@ -262,6 +259,10 @@ mod tests {
         let (program, argv) = submission("out.tif", "5550100", None);
         assert_eq!(program, "sendfax");
         assert_eq!(argv, ["-n", "-d", "5550100", "--", "out.tif"]);
+        // A spaced number reaches lp as one option value.
+        let dial = parse_number("+1 555 0100").unwrap();
+        let (_, argv) = submission("out.tif", &dial, Some("Fax"));
+        assert_eq!(argv[3], "phone=+15550100");
     }
 
     fn bitmap(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Bitmap<Gray8> {

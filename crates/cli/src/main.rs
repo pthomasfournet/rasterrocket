@@ -10,7 +10,7 @@ mod render;
 mod tone;
 
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 use args::Args;
@@ -62,15 +62,7 @@ fn main() -> ExitCode {
     // unknown extensions) falls through to the native PDF interpreter below. The
     // `--ram` redirect above already applies, so comic output honours it too;
     // the PDF-only session/decrypt code below is skipped for comics.
-    let ext = std::path::Path::new(&args.input)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(ext.as_str(), "cbz" | "cb7" | "cbt" | "cbr") {
-        if args.fax {
-            return fail("--fax renders PDF input; a comic archive's pages have no page size");
-        }
+    if args.is_comic_input() {
         return match comic::run(&args, &spill_policy) {
             Ok((0, _)) => fail("no pages rendered"),
             // Per-page errors were already printed to stderr inside `run`; a
@@ -155,9 +147,17 @@ fn main() -> ExitCode {
     let total_u32 = total as u32;
 
     let timings = args.timings;
+    if args.fax && u16::try_from(n_pages).is_err() {
+        return fail(format_args!(
+            "a fax document holds at most 65535 pages; {n_pages} are selected"
+        ));
+    }
     let fax = args
         .fax
         .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
+    // A fax document is written whole or not at all: once a page has
+    // failed, the pages not yet started are skipped.
+    let fax_failed = AtomicBool::new(false);
 
     let errors: Vec<(i32, render::RenderError)> = pool.install(|| {
         pages
@@ -168,6 +168,9 @@ fn main() -> ExitCode {
                     reason = "page_num ≥ 1, enforced by build_page_list"
                 )]
                 let page_u32 = page_num as u32;
+                if fax_failed.load(Ordering::Relaxed) {
+                    return None;
+                }
 
                 let t0 = timings.then(Instant::now);
                 let result = render::render_page(
@@ -178,6 +181,9 @@ fn main() -> ExitCode {
                     &spill_policy,
                     fax.as_ref(),
                 );
+                if fax.is_some() && result.is_err() {
+                    fax_failed.store(true, Ordering::Relaxed);
+                }
                 if let Some(t0) = t0 {
                     let ms = t0.elapsed().as_secs_f64() * 1000.0;
                     let tid = rayon::current_thread_index().unwrap_or(99);
@@ -230,7 +236,7 @@ fn main() -> ExitCode {
         }
         let path = format!("{}.tif", spill_policy.next_prefix());
         if let Err(e) = document.write(&path) {
-            return fail(format_args!("cannot write the fax document {path}: {e}"));
+            return fail(format_args!("fax document not written: {e}"));
         }
         if let Some(number) = &args.fax_to
             && let Err(e) = fax::submit(&path, number, args.fax_queue.as_deref())

@@ -61,7 +61,13 @@ fn workdir(pdf: &[u8]) -> (tempfile::TempDir, PathBuf) {
 
 /// Run `rrocket` on `input` with `args`, writing under `<dir>/out`.
 fn rrocket(dir: &Path, input: &Path, args: &[&str]) -> Output {
+    rrocket_with_env(dir, input, args, &[])
+}
+
+/// [`rrocket`] with the environment variables `env` set.
+fn rrocket_with_env(dir: &Path, input: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .envs(env.iter().copied())
         .args(["--no-ram", "--backend", "cpu"])
         .args(args)
         .arg(input)
@@ -365,13 +371,12 @@ fn fax_to_through(status: u8) -> (tempfile::TempDir, Output) {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
-        .env("PATH", path)
-        .args(["--no-ram", "--backend", "cpu", "--fax-to", "+1 555 0100"])
-        .arg(&input)
-        .arg(dir.path().join("out"))
-        .output()
-        .expect("run rrocket");
+    let out = rrocket_with_env(
+        dir.path(),
+        &input,
+        &["--fax-to", "+1 555 0100"],
+        &[("PATH", &path)],
+    );
     (dir, out)
 }
 
@@ -387,7 +392,7 @@ fn fax_to_submits_the_document_to_sendfax() {
         [
             "-n",
             "-d",
-            "+1 555 0100",
+            "+15550100",
             "--",
             out_tif.to_str().expect("UTF-8 path")
         ]
@@ -401,8 +406,28 @@ fn fax_to_submits_the_document_to_sendfax() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("not sent") && stderr.contains("sendfax refused"),
+        stderr.contains("not sent")
+            && stderr.contains("sendfax refused")
+            && stderr.contains("the document is at"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn fax_with_a_bare_stem_writes_the_document_to_disk() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .current_dir(dir.path())
+        .args(["--backend", "cpu", "--fax"])
+        .arg(&input)
+        .arg("fax")
+        .output()
+        .expect("run rrocket");
+    assert_success(&out);
+    assert!(
+        dir.path().join("fax.tif").is_file(),
+        "the document outlives the run: {:?}",
+        outputs(dir.path())
     );
 }
 

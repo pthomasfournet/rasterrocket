@@ -1,21 +1,17 @@
 //! Tone operations on a page between rendering and encoding: conversion to
-//! luma for the gray and bilevel outputs, inversion, and the reduction to
-//! two levels.
+//! the colour model of the output, inversion, and the reduction to two
+//! levels.
 
 use color::{Gray8, Pixel};
-use pdf_raster::rgb_to_gray;
+use encode::BLACK_BELOW;
 use raster::{Bitmap, HalftoneScreen, ScreenParams};
 
 use crate::args::{Args, InvertWhen};
 use crate::cleanup::Page;
 
-/// Luma threshold separating dark ink from light paper (inclusive on the
-/// light side).
-const MONO_THRESHOLD: u8 = 128;
-
 /// A page is reversed out when more than `GROUND_NUMERATOR /
 /// GROUND_DENOMINATOR` of its pixels share one dark tone band: a luma range
-/// of [`GROUND_BAND`] levels below [`MONO_THRESHOLD`].  Light content on a
+/// of [`GROUND_BAND`] levels below [`BLACK_BELOW`].  Light content on a
 /// flat dark ground leaves the ground well over this fraction; a page of
 /// dense black text inks well under a quarter of its area, and a dark
 /// photograph or a page of saturated colours spreads its dark pixels over
@@ -26,51 +22,50 @@ const GROUND_DENOMINATOR: u64 = 5;
 /// The width in luma levels of the tone band of a dark ground.
 const GROUND_BAND: usize = 32;
 
-/// `page` made ready for encoding under `args`: in luma when the output is
-/// gray or bilevel, and inverted as `--invert` selects.
+/// `page` made ready for encoding under `args`: in the colour model of the
+/// output (luma for `--gray` and `--mono`, colour otherwise), inverted as
+/// `--invert` selects, and for `--mono` reduced to two levels (see
+/// [`two_levels`]).
 pub(crate) fn prepare(page: Page, args: &Args) -> Page {
-    let mut page = match page {
-        Page::Rgb(rgb) if args.gray || args.mono => Page::Gray(rgb_to_gray(&rgb)),
-        page => page,
+    let mut page = if args.luma_output() {
+        Page::Gray(page.into_luma())
+    } else {
+        Page::Rgb(page.into_rgb())
     };
     let invert = match args.invert_when() {
         InvertWhen::Never => false,
         InvertWhen::Always => true,
-        InvertWhen::Auto => is_reversed_out(&page),
+        InvertWhen::Auto => page.with_luma(is_reversed_out),
     };
     if invert {
         match &mut page {
             Page::Rgb(rgb) => complement(rgb),
-            Page::Gray(gray) => complement(gray),
+            Page::Gray(luma) | Page::Mono(luma) => complement(luma),
         }
     }
-    page
+    if args.mono {
+        Page::Mono(two_levels(&page.into_luma(), args.screen()))
+    } else {
+        page
+    }
 }
 
-/// Whether `page` is light content on a flat dark ground: see
-/// [`GROUND_NUMERATOR`].
-fn is_reversed_out(page: &Page) -> bool {
-    let converted;
-    let gray = match page {
-        Page::Gray(gray) => gray,
-        Page::Rgb(rgb) => {
-            converted = rgb_to_gray(rgb);
-            &converted
-        }
-    };
-    let w = gray.width as usize;
+/// Whether `luma` is light content on a flat dark ground: see
+/// [`GROUND_NUMERATOR`].  An empty page is not.
+fn is_reversed_out(luma: &Bitmap<Gray8>) -> bool {
+    let w = luma.width as usize;
     let mut histogram = [0u64; 256];
-    for y in 0..gray.height {
-        for &luma in &gray.row_bytes(y)[..w] {
-            histogram[usize::from(luma)] += 1;
+    for y in 0..luma.height {
+        for &level in &luma.row_bytes(y)[..w] {
+            histogram[usize::from(level)] += 1;
         }
     }
-    let ground = histogram[..usize::from(MONO_THRESHOLD)]
+    let ground = histogram[..usize::from(BLACK_BELOW)]
         .windows(GROUND_BAND)
         .map(|band| band.iter().sum::<u64>())
         .max()
         .unwrap_or(0);
-    let total = u64::from(gray.width) * u64::from(gray.height);
+    let total = u64::from(luma.width) * u64::from(luma.height);
     ground * GROUND_DENOMINATOR > total * GROUND_NUMERATOR
 }
 
@@ -85,11 +80,10 @@ fn complement<P: Pixel>(bmp: &mut Bitmap<P>) {
     }
 }
 
-/// Reduce a grayscale bitmap to two levels, as luma 0 (black) and 255
-/// (white): through the halftone `screen` when given, which renders
-/// intermediate grays as dot patterns, else at the 50% midpoint, values
-/// below [`MONO_THRESHOLD`] black.
-pub(crate) fn gray_to_mono(src: &Bitmap<Gray8>, screen: Option<ScreenParams>) -> Bitmap<Gray8> {
+/// Reduce a luma bitmap to two levels, 0 (black) and 255 (white): through
+/// the halftone `screen` when given, which renders intermediate grays as
+/// dot patterns, else at the midpoint, values below [`BLACK_BELOW`] black.
+pub(crate) fn two_levels(src: &Bitmap<Gray8>, screen: Option<ScreenParams>) -> Bitmap<Gray8> {
     let mut dst: Bitmap<Gray8> = Bitmap::new(src.width, src.height, 1, false);
     let w = src.width as usize;
     let mut screen = screen.map(HalftoneScreen::new);
@@ -99,7 +93,7 @@ pub(crate) fn gray_to_mono(src: &Bitmap<Gray8>, screen: Option<ScreenParams>) ->
         match &mut screen {
             None => {
                 for (dst_px, &luma) in dst_row.iter_mut().zip(src_row) {
-                    *dst_px = if luma < MONO_THRESHOLD { 0 } else { 255 };
+                    *dst_px = if luma < BLACK_BELOW { 0 } else { 255 };
                 }
             }
             Some(screen) => {
@@ -117,35 +111,31 @@ pub(crate) fn gray_to_mono(src: &Bitmap<Gray8>, screen: Option<ScreenParams>) ->
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
 
-    use super::{gray_to_mono, prepare};
-    use crate::args::Args;
+    use super::{prepare, two_levels};
+    use crate::args::args_with as args;
     use crate::cleanup::Page;
 
     #[test]
     fn mono_is_luma_black_ink_on_white() {
         let mut gray: Bitmap<Gray8> = Bitmap::new(3, 1, 1, false);
         gray.row_bytes_mut(0)[..3].copy_from_slice(&[0, 127, 128]);
-        let mono = gray_to_mono(&gray, None);
+        let mono = two_levels(&gray, None);
         assert_eq!(&mono.row_bytes(0)[..3], &[0, 0, 255]);
     }
 
     #[test]
     fn halftone_renders_gray_as_a_proportion_of_dots() {
-        let screen = Args::parse_from([
-            "rrocket", "--mono", "--dither", "halftone", "-r", "200", "in.pdf", "out",
-        ])
-        .screen();
+        let screen = args(&["--mono", "--dither", "halftone", "-r", "200"]).screen();
         assert!(screen.is_some());
         for (level, low, high) in [(0u8, 0, 0), (64, 40, 90), (128, 100, 156), (255, 256, 256)] {
             let mut gray: Bitmap<Gray8> = Bitmap::new(16, 16, 1, false);
             for y in 0..16 {
                 gray.row_bytes_mut(y)[..16].fill(level);
             }
-            let mono = gray_to_mono(&gray, screen);
+            let mono = two_levels(&gray, screen);
             let white: usize = (0..16)
                 .map(|y| {
                     mono.row_bytes(y)[..16]
@@ -172,16 +162,25 @@ mod tests {
 
     fn luma(page: &Page) -> Vec<u8> {
         match page {
-            Page::Gray(g) => g.row_bytes(0)[..10].to_vec(),
-            Page::Rgb(_) => panic!("a gray page"),
+            Page::Gray(g) | Page::Mono(g) => g.row_bytes(0)[..10].to_vec(),
+            Page::Rgb(_) => panic!("a luma page"),
         }
     }
 
-    fn args(flags: &[&str]) -> Args {
-        let mut argv = vec!["rrocket"];
-        argv.extend_from_slice(flags);
-        argv.extend(["in.pdf", "out"]);
-        Args::parse_from(argv)
+    #[test]
+    fn pages_take_the_colour_model_of_the_output() {
+        assert!(matches!(
+            prepare(page(2), &args(&["--mono"])),
+            Page::Mono(_)
+        ));
+        assert!(matches!(
+            prepare(page(2), &args(&["--gray"])),
+            Page::Gray(_)
+        ));
+        let Page::Rgb(rgb) = prepare(page(2), &args(&[])) else {
+            panic!("colour output takes a colour page");
+        };
+        assert_eq!(&rgb.row_bytes(0)[..9], &[0, 0, 0, 0, 0, 0, 255, 255, 255]);
     }
 
     #[test]
@@ -221,10 +220,10 @@ mod tests {
             rgb.row_bytes_mut(0)[..3].copy_from_slice(&[10, 200, 0]);
             Page::Rgb(rgb)
         };
-        match prepare(rgb(), &args(&["--invert"])) {
-            Page::Rgb(out) => assert_eq!(&out.row_bytes(0)[..3], &[245, 55, 255]),
-            Page::Gray(_) => panic!("colour output stays colour"),
-        }
-        assert!(matches!(prepare(rgb(), &args(&["--mono"])), Page::Gray(_)));
+        let Page::Rgb(out) = prepare(rgb(), &args(&["--invert"])) else {
+            panic!("colour output stays colour");
+        };
+        assert_eq!(&out.row_bytes(0)[..3], &[245, 55, 255]);
+        assert!(matches!(prepare(rgb(), &args(&["--gray"])), Page::Gray(_)));
     }
 }

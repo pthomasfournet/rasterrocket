@@ -177,7 +177,7 @@ pub(crate) struct Args {
     #[arg(long = "tiffcompression", value_name = "METHOD", value_enum)]
     pub tiffcompression: Option<TiffMethod>,
 
-    /// Output grey-scale PPM/PNG.
+    /// Output gray: PGM, or a gray PNG, JPEG or TIFF.
     #[arg(long = "gray")]
     pub gray: bool,
 
@@ -208,7 +208,7 @@ pub(crate) struct Args {
     #[arg(long = "fax-queue", value_name = "NAME", requires = "fax_to")]
     pub fax_queue: Option<String>,
 
-    /// How --mono renders intermediate grays: `none` (default), a 50%
+    /// How --mono and --fax render intermediate grays: `none` (default), a 50%
     /// threshold that keeps text and line art sharp, or `halftone`, dot
     /// patterns that keep photographs and shading legible: a dispersed
     /// ordered dither below 300 dpi, a stochastic clustered dot at 300 dpi
@@ -563,16 +563,11 @@ impl Args {
     }
 
     /// Device pixels per point `(x, y)` for a page of `width_pts × height_pts`
-    /// (after `/Rotate`): under `--fax` the fax layout (see
-    /// [`crate::fax::layout`]), else from `--scale-to` when given, else from
+    /// (after `/Rotate`): from `--scale-to` when given, else from
     /// `--scale-to-x` / `--scale-to-y`, an axis given neither taking the
     /// other's scale when only one is set, and otherwise from the resolution
-    /// flags.
+    /// flags.  A fax page takes its scales from [`crate::fax::layout`].
     pub(crate) fn scales(&self, (width_pts, height_pts): (f64, f64)) -> (f64, f64) {
-        if self.fax {
-            let layout = crate::fax::layout((width_pts, height_pts), self.y_dpi());
-            return (layout.scale_x, layout.scale_y);
-        }
         if let Some(n) = self.scale_to {
             let s = f64::from(n) / width_pts.max(height_pts);
             return (s, s);
@@ -665,6 +660,23 @@ impl Args {
         }
     }
 
+    /// Whether the input is a comic archive, by its extension.
+    pub(crate) fn is_comic_input(&self) -> bool {
+        std::path::Path::new(&self.input)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| {
+                ["cbz", "cb7", "cbt", "cbr"]
+                    .iter()
+                    .any(|comic| e.eq_ignore_ascii_case(comic))
+            })
+    }
+
+    /// Whether pages are written in luma: `--gray` or `--mono`.
+    pub(crate) const fn luma_output(&self) -> bool {
+        self.gray || self.mono
+    }
+
     /// Whether a fax document is written: `--fax`, or `--fax-to`, which
     /// implies it.
     pub(crate) const fn faxing(&self) -> bool {
@@ -681,6 +693,25 @@ impl Args {
                 Ok(())
             };
         }
+        if self.is_comic_input() {
+            return Err(
+                "--fax renders PDF input; a comic archive's pages have no page size".to_owned(),
+            );
+        }
+        if self.ram || self.ram_path.is_some() {
+            return Err(
+                "--fax writes its document after the last page; RAM output serves page files \
+                 read during the run, so drop --ram / --ram-path"
+                    .to_owned(),
+            );
+        }
+        if cfg!(windows) && self.fax_to.is_some() {
+            return Err(
+                "--fax-to submits through lp or sendfax, which Windows has neither of; write the \
+                 document with --fax and send it with Windows Fax and Scan"
+                    .to_owned(),
+            );
+        }
         let fixed = [
             (self.png, "--png"),
             (self.jpeg, "--jpeg"),
@@ -695,10 +726,14 @@ impl Args {
             (self.crop_y.is_some(), "-y"),
             (self.crop_w.is_some(), "-W"),
             (self.crop_h.is_some(), "-H"),
+            (self.crop, "--crop"),
+            (self.rectify, "--rectify"),
+            (self.dewarp, "--dewarp"),
+            (self.split_spreads, "--split-spreads"),
         ];
         if let Some((_, flag)) = fixed.iter().find(|(set, _)| *set) {
             return Err(format!(
-                "--fax fixes the format, size and resolution of its pages; drop {flag} \
+                "--fax fixes the format, geometry and resolution of its pages; drop {flag} \
                  (--fax-resolution chooses fine or standard)"
             ));
         }
@@ -986,12 +1021,21 @@ impl Args {
     }
 }
 
+/// `flags` parsed between the program name and the operands `in.pdf out`.
+#[cfg(test)]
+pub(crate) fn args_with(flags: &[&str]) -> Args {
+    let mut argv = vec!["rrocket"];
+    argv.extend_from_slice(flags);
+    argv.extend(["in.pdf", "out"]);
+    Args::parse_from(argv)
+}
+
 #[cfg(test)]
 mod page_list_tests {
     use super::*;
 
     fn base_args() -> Args {
-        Args::parse_from(["rrocket", "in.pdf", "out"])
+        args_with(&[])
     }
 
     #[test]
@@ -1069,21 +1113,13 @@ mod page_list_tests {
 
     #[test]
     fn vulkan_device_flag_reaches_session_config() {
-        let config = Args::parse_from(["rrocket", "--vulkan-device", "5070", "in.pdf", "out"])
+        let config = args_with(&["--vulkan-device", "5070"])
             .session_config()
             .unwrap();
         assert_eq!(config.vulkan_device.as_deref(), Some("5070"));
-        let config = Args::parse_from([
-            "rrocket",
-            "--backend",
-            "vulkan",
-            "--vulkan-device",
-            "0",
-            "in.pdf",
-            "out",
-        ])
-        .session_config()
-        .unwrap();
+        let config = args_with(&["--backend", "vulkan", "--vulkan-device", "0"])
+            .session_config()
+            .unwrap();
         assert_eq!(config.vulkan_device.as_deref(), Some("0"));
     }
 
@@ -1095,17 +1131,9 @@ mod page_list_tests {
         );
         // Passing the default spelling explicitly is still a user choice
         // and is rejected where VA-API is never opened.
-        let err = Args::parse_from([
-            "rrocket",
-            "--backend",
-            "cpu",
-            "--vaapi-device",
-            "auto",
-            "in.pdf",
-            "out",
-        ])
-        .session_config()
-        .unwrap_err();
+        let err = args_with(&["--backend", "cpu", "--vaapi-device", "auto"])
+            .session_config()
+            .unwrap_err();
         assert!(
             err.contains("--vaapi-device has no effect with --backend cpu"),
             "{err}"
@@ -1115,17 +1143,9 @@ mod page_list_tests {
     #[test]
     fn vulkan_device_rejected_with_non_vulkan_backends() {
         for backend in ["cpu", "cuda"] {
-            let err = Args::parse_from([
-                "rrocket",
-                "--backend",
-                backend,
-                "--vulkan-device",
-                "0",
-                "in.pdf",
-                "out",
-            ])
-            .session_config()
-            .unwrap_err();
+            let err = args_with(&["--backend", backend, "--vulkan-device", "0"])
+                .session_config()
+                .unwrap_err();
             assert!(
                 err.contains(&format!(
                     "--vulkan-device has no effect with --backend {backend}"
@@ -1139,21 +1159,14 @@ mod page_list_tests {
     fn strict_flag_reaches_session_config() {
         let lenient = base_args().session_config().unwrap();
         assert!(!lenient.strict);
-        let strict = Args::parse_from(["rrocket", "--strict", "in.pdf", "out"])
-            .session_config()
-            .unwrap();
+        let strict = args_with(&["--strict"]).session_config().unwrap();
         assert!(strict.strict);
     }
 
     #[test]
     fn scale_to_flags_set_the_page_scales() {
         let page = (200.0, 100.0);
-        let scales = |argv: &[&str]| {
-            let mut full = vec!["rrocket"];
-            full.extend_from_slice(argv);
-            full.extend_from_slice(&["in.pdf", "out"]);
-            Args::parse_from(full).scales(page)
-        };
+        let scales = |argv: &[&str]| args_with(argv).scales(page);
         assert_eq!(scales(&["-r", "144"]), (2.0, 2.0));
         assert_eq!(scales(&["--rx", "144", "--ry", "36"]), (2.0, 0.5));
         assert_eq!(scales(&["--scale-to", "400", "-r", "300"]), (2.0, 2.0));
@@ -1171,12 +1184,7 @@ mod page_list_tests {
 
     #[test]
     fn crop_flags_select_a_clipped_region() {
-        let region = |argv: &[&str]| {
-            let mut full = vec!["rrocket"];
-            full.extend_from_slice(argv);
-            full.extend_from_slice(&["in.pdf", "out"]);
-            Args::parse_from(full).crop_region((100, 50))
-        };
+        let region = |argv: &[&str]| args_with(argv).crop_region((100, 50));
         assert_eq!(region(&[]), Ok(None));
         assert_eq!(
             region(&["-x", "10", "-y", "5", "-W", "20", "-H", "30"]),
@@ -1196,9 +1204,7 @@ mod page_list_tests {
     #[test]
     fn hide_annotations_flag_reaches_session_config() {
         assert!(base_args().session_config().unwrap().annotations);
-        let hidden = Args::parse_from(["rrocket", "--hide-annotations", "in.pdf", "out"])
-            .session_config()
-            .unwrap();
+        let hidden = args_with(&["--hide-annotations"]).session_config().unwrap();
         assert!(!hidden.annotations);
     }
 
@@ -1206,19 +1212,15 @@ mod page_list_tests {
     fn antialias_flags_reach_session_config() {
         let config = base_args().session_config().unwrap();
         assert!(config.text_antialias && config.vector_antialias);
-        let config = Args::parse_from(["rrocket", "--aa", "no", "in.pdf", "out"])
-            .session_config()
-            .unwrap();
+        let config = args_with(&["--aa", "no"]).session_config().unwrap();
         assert!(!config.text_antialias && config.vector_antialias);
-        let config = Args::parse_from(["rrocket", "--aaVector", "no", "in.pdf", "out"])
-            .session_config()
-            .unwrap();
+        let config = args_with(&["--aaVector", "no"]).session_config().unwrap();
         assert!(config.text_antialias && !config.vector_antialias);
     }
 
     #[test]
     fn unimplemented_formats_are_refused_up_front() {
-        let err = Args::parse_from(["rrocket", "--jpegcmyk", "in.pdf", "out"])
+        let err = args_with(&["--jpegcmyk"])
             .validate_format_flags()
             .unwrap_err();
         assert!(
@@ -1226,14 +1228,6 @@ mod page_list_tests {
             "{err}"
         );
         assert!(base_args().validate_format_flags().is_ok());
-    }
-
-    /// `flags` parsed between the program name and the operands.
-    fn args_with(flags: &[&str]) -> Args {
-        let mut argv = vec!["rrocket"];
-        argv.extend_from_slice(flags);
-        argv.extend(["in.pdf", "out"]);
-        Args::parse_from(argv)
     }
 
     #[test]
@@ -1264,10 +1258,21 @@ mod page_list_tests {
             (&["--fax", "--gray"], "drop --gray"),
             (&["--fax", "--tiffcompression", "lzw"], "not lzw"),
             (&["--fax-resolution", "fine"], "--fax output only"),
+            (&["--fax", "--split-spreads"], "drop --split-spreads"),
+            (&["--fax", "--crop"], "drop --crop"),
+            (&["--fax", "--ram"], "drop --ram"),
         ] {
             let err = args_with(flags).validate_format_flags().unwrap_err();
             assert!(err.contains(needle), "{flags:?}: {err}");
         }
+    }
+
+    #[test]
+    fn fax_refuses_comic_input() {
+        let comic = Args::parse_from(["rrocket", "--fax", "book.CBZ", "out"]);
+        assert!(comic.is_comic_input());
+        let err = comic.validate_format_flags().unwrap_err();
+        assert!(err.contains("PDF input"), "{err}");
     }
 
     #[test]
@@ -1298,7 +1303,9 @@ mod page_list_tests {
             assert!(fax.validate_format_flags().is_ok());
             assert_eq!(
                 fax.output_format(),
-                OutputFormat::Tiff(encode::TiffCompression::Group3 { k: NonZeroU32::new(k) })
+                OutputFormat::Tiff(encode::TiffCompression::Group3 {
+                    k: NonZeroU32::new(k)
+                })
             );
         }
         for (flags, needle) in [
@@ -1336,14 +1343,7 @@ mod page_list_tests {
         ] {
             assert!(parse_jpeg_options(bad).is_err(), "{bad}");
         }
-        let jpeg = Args::parse_from([
-            "rrocket",
-            "--jpeg",
-            "--jpegopt",
-            "quality=40",
-            "in.pdf",
-            "out",
-        ]);
+        let jpeg = args_with(&["--jpeg", "--jpegopt", "quality=40"]);
         assert!(jpeg.validate_format_flags().is_ok());
         assert!(matches!(jpeg.output_format(), OutputFormat::Jpeg(o) if o.quality == 40));
         for flags in [&["--jpegopt", "quality=40"][..], &["--jpeg", "--png"]] {
@@ -1358,9 +1358,7 @@ mod page_list_tests {
     fn purpose_flag_reaches_session_config() {
         let view = base_args().session_config().unwrap();
         assert_eq!(view.purpose, RenderPurpose::View);
-        let print = Args::parse_from(["rrocket", "--purpose", "print", "in.pdf", "out"])
-            .session_config()
-            .unwrap();
+        let print = args_with(&["--purpose", "print"]).session_config().unwrap();
         assert_eq!(print.purpose, RenderPurpose::Print);
     }
 }

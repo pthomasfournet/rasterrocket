@@ -15,7 +15,8 @@
 //!
 //! The redirect is suppressed when `OUTPUT_PREFIX` looks like a path
 //! (contains `/`, starts with `.`) — those are taken literally as the user
-//! asking for a real disk location. See [`should_use_ram`] for the rule.
+//! asking for a real disk location, and under `--fax`, whose one document
+//! is written after the last page. See [`should_use_ram`] for the rule.
 //!
 //! Flags:
 //! - `--no-ram` forces disk regardless of prefix shape
@@ -263,12 +264,16 @@ fn read_mem_available() -> Option<u64> {
 /// `rrocket doc.pdf ./out` or `rrocket doc.pdf /data/x` gets the
 /// path they asked for.
 fn should_use_ram(args: &Args) -> bool {
-    use_ram_for(
-        args.no_ram,
-        args.ram || args.ram_path.is_some(),
-        &args.output_prefix,
-        Path::new(RAM_ROOT).is_dir(),
-    )
+    // A fax document is one file written after the last page, which no
+    // reader consumes during the run: it stays on disk (`--ram` with
+    // `--fax` is refused at validation).
+    !args.faxing()
+        && use_ram_for(
+            args.no_ram,
+            args.ram || args.ram_path.is_some(),
+            &args.output_prefix,
+            Path::new(RAM_ROOT).is_dir(),
+        )
 }
 
 /// Pure-function form of [`should_use_ram`] for unit testing without an
