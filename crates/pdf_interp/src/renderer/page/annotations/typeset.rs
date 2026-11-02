@@ -91,15 +91,23 @@ pub(super) fn right_to_left(text: &str) -> bool {
     unicode_bidi::get_base_direction(text) == unicode_bidi::Direction::Rtl
 }
 
-/// The characters of the line `text` in visual order (UAX #9 rules L1 to
-/// L4) in a paragraph that is right to left when `rtl`, each with the byte
-/// offset of the character it shows; a character at a right-to-left level
-/// shows its mirrored form when it has one.  `None` when the visual order
-/// is the logical order.
+/// The characters of the line `text` in visual order (UAX #9 rules L1, L2
+/// and L4) in a paragraph that is right to left when `rtl`, each with the
+/// byte offset of the character it shows; a character at a right-to-left
+/// level shows its mirrored form when it has one.  `None` when the visual
+/// order is the logical order: a left-to-right paragraph without
+/// right-to-left characters.  A line of a right-to-left paragraph is
+/// reordered even without one, its neutrals and numbers resolving against
+/// the paragraph level.
+///
+/// L3 is not applied: a combining mark at a right-to-left level stays
+/// before its base, the order of the whole run reversed, which the
+/// interpreter's shaping of a right-to-left run reverses back to the
+/// logical order it shapes.
 fn visual_order(text: &str, rtl: bool) -> Option<Vec<(usize, char)>> {
     use unicode_bidi::{Level, ParagraphBidiInfo};
     let info = ParagraphBidiInfo::new(text, Some(if rtl { Level::rtl() } else { Level::ltr() }));
-    if !info.has_rtl() {
+    if !rtl && !info.has_rtl() {
         return None;
     }
     let (levels, runs) = info.visual_runs(0..text.len());
@@ -119,6 +127,15 @@ fn visual_order(text: &str, rtl: bool) -> Option<Vec<(usize, char)>> {
         }
     }
     Some(visual)
+}
+
+/// The characters of the line `text` in visual order in a paragraph that
+/// is right to left when `rtl` (see [`visual_order`]).
+pub(super) fn visual_chars(text: &str, rtl: bool) -> Vec<char> {
+    visual_order(text, rtl).map_or_else(
+        || text.chars().collect(),
+        |visual| visual.into_iter().map(|(_, c)| c).collect(),
+    )
 }
 
 /// A content-stream hexadecimal string of `bytes`.
@@ -527,6 +544,15 @@ mod tests {
             visual("\u{05D0}\u{05D1} 12", true).as_deref(),
             Some("12 \u{05D1}\u{05D0}")
         );
+    }
+
+    #[test]
+    fn a_line_without_right_to_left_characters_follows_its_paragraph() {
+        // A wrapped line of a Hebrew paragraph holding only a Latin word
+        // or a number: its final period resolves to the paragraph level.
+        assert_eq!(visual("abc.", true).as_deref(), Some(".abc"));
+        assert_eq!(visual("123.", true).as_deref(), Some(".123"));
+        assert_eq!(visual("(abc)", true).as_deref(), Some("(abc)"));
     }
 
     #[test]

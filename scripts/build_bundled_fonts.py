@@ -4,8 +4,10 @@
 The renderer draws a character that neither a font's substitute nor any
 installed face covers from these faces, compiled into the binary behind the
 `bundled-fonts` Cargo feature.  Each is a Noto face (SIL Open Font License
-1.1) subset to the code ranges listed below, without layout tables or
-hinting, and stored zlib-compressed at level 9 as `<name>.ttf.z`.
+1.1) subset to the code ranges listed below, without hinting, and stored
+zlib-compressed at level 9 as `<name>.ttf.z`.  The Hebrew, Arabic,
+Devanagari and Thai faces keep their layout tables, which the renderer
+shapes with; the others keep none.
 
 Usage:
     python3 scripts/build_bundled_fonts.py [--src DIR]

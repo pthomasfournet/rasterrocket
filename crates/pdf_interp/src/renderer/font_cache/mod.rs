@@ -83,23 +83,25 @@ pub(crate) struct PageFace {
 }
 
 impl PageFace {
-    /// The fallback face and its glyph index that draw the shown `code`
+    /// The fallback face and its selector there that draw the shown `code`
     /// (CID `cid` of a composite font; the code itself for a simple font)
     /// in place of this face, as prepared by [`FontCache::get_or_load_showing`].
     /// `None` when this face draws the code itself.
     #[must_use]
     pub(crate) fn fallback_glyph(&self, code: u32, cid: u32) -> Option<(&FontFace, u32)> {
-        let (slot, gid) = (*self.fallback_glyphs.get(&(code, cid))?)?;
-        Some((self.fallback_faces.get(slot)?.as_ref()?, gid))
+        let (slot, selector) = (*self.fallback_glyphs.get(&(code, cid))?)?;
+        Some((self.fallback_faces.get(slot)?.as_ref()?, selector))
     }
 }
 
 impl PageFace {
-    /// The Unicode value the shown `code` (CID `cid` of a composite font)
-    /// stands for, when the face is a substitute and the font says.
+    /// The text the shown `code` (CID `cid` of a composite font) stands
+    /// for, one character or two (see [`FallbackResolver::text`]), when the
+    /// face is a substitute and the font says.
     #[must_use]
-    pub(crate) fn unicode(&self, code: u32, cid: u32) -> Option<char> {
-        char::from_u32(self.fallback.as_ref()?.unicode(code, cid)?)
+    pub(crate) fn text(&self, code: u32, cid: u32) -> Option<(char, Option<char>)> {
+        let (first, second) = self.fallback.as_ref()?.text(code, cid)?;
+        Some((char::from_u32(first)?, second.and_then(char::from_u32)))
     }
 
     /// The glyph that draws the shown `code` (CID `cid` of a composite font
@@ -120,8 +122,8 @@ impl PageFace {
         code: u32,
         cid: u32,
     ) -> Option<(&FontFace, u32, bool)> {
-        if let Some((fallback, gid)) = self.fallback_glyph(code, cid) {
-            return Some((fallback, gid, true));
+        if let Some((fallback, selector)) = self.fallback_glyph(code, cid) {
+            return Some((fallback, selector, true));
         }
         let (selector, by_gid, notdef) = match enc {
             Some(enc) if self.code_to_gid.is_empty() => {
@@ -473,12 +475,8 @@ impl FallbackLoader<'_> {
                 .filter(|&(slot, _)| self.ensure_face(face, &resolver, slot));
             let _ = face.fallback_glyphs.insert((code, cid), glyph);
         };
-        match &desc.cid_encoding {
-            None => bytes
-                .iter()
-                .for_each(|&b| visit(u32::from(b), u32::from(b))),
-            Some(enc) => enc.codes(bytes).for_each(|d| visit(d.code, d.value)),
-        }
+        CidEncoding::shown_codes(desc.cid_encoding.as_ref(), bytes)
+            .for_each(|d| visit(d.code, d.value));
     }
 
     /// Load the face of fallback program `slot` at this matrix into

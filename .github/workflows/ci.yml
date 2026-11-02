@@ -98,8 +98,8 @@ jobs:
       - name: Test rasterrocket-font (font programs, glyph rasteriser)
         run: cargo test -p rasterrocket-font
 
-      - name: Test vendored read-fonts / skrifa forks (upstream suites)
-        run: cargo test -p read-fonts -p skrifa --lib
+      - name: Test vendored read-fonts / skrifa / harfrust forks (upstream suites)
+        run: cargo test -p read-fonts -p skrifa -p harfrust --lib
 
       - name: Test rasterrocket-camera (stages, no-panic sweep)
         run: cargo test -p rasterrocket-camera --release

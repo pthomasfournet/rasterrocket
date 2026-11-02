@@ -42,7 +42,7 @@ use crate::engine::LoadError;
 
 mod shape;
 
-pub use shape::ShapedGlyph;
+pub use shape::{ShapeError, ShapedGlyph};
 
 /// The container format of a font program.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -172,9 +172,9 @@ pub struct FontProgram {
     vertical_forms: OnceLock<HashMap<u32, u32>>,
     /// Glyph index → CID, the inverse of `cid_to_gid`.  Built on first use.
     gid_to_cid: OnceLock<HashMap<u32, u32>>,
-    /// The layout-table state [`Self::shape`] reads, built on first use;
-    /// `None` inside for a program that is not an sfnt.
-    shaper: OnceLock<Option<harfrust::ShaperData>>,
+    /// The layout-table state and the shape plans [`Self::shape`] reads,
+    /// built on first use by an sfnt program.
+    shaper: OnceLock<shape::Shaping>,
 }
 
 impl std::fmt::Debug for FontProgram {
@@ -585,7 +585,8 @@ impl FontProgram {
     /// The composite-font selector of glyph `gid`, the inverse of
     /// [`Self::cid_to_gid`]: its CID for a CID-keyed CFF program (`None`
     /// when the charset assigns it none), else `gid` itself.
-    fn gid_to_selector(&self, gid: u32) -> Option<u32> {
+    #[must_use]
+    pub fn gid_to_selector(&self, gid: u32) -> Option<u32> {
         self.cid_to_gid.as_ref().map_or(Some(gid), |map| {
             self.gid_to_cid
                 .get_or_init(|| map.iter().map(|(&cid, &gid)| (gid, cid)).collect())

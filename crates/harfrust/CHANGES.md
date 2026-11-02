@@ -20,7 +20,10 @@ fork.
   every crate of the repository builds with the same minimum toolchain;
   the other workspace-inherited fields are resolved to values; `publish =
   false`; `read-fonts` is the fork in `crates/read_fonts`. The benchmarks
-  and their dev-dependencies are dropped.
+  and their dev-dependencies are dropped. `[lints] workspace = true` is
+  removed, so the repository's own lint levels do not apply to upstream's
+  code; `exclude` is removed, nothing outside the crate being vendored;
+  `readme` points at the crate's own `README.md`.
 
 - Upstream's test suite (`harfrust/tests`, about 6 000 shaping cases with
   their fonts) is not vendored. It passed in full on this fork's sources
@@ -34,4 +37,8 @@ Behaviour is unchanged by each of these.
   is compiled only under that feature.
 - `hb/glyph_metrics.rs`: two side-bearing lookups return through `?`.
 - `hb/unicode.rs`: `compose` returns through `?` and initialises its result
-  in one expression; the Hangul composition tests use `is_multiple_of`.
+  in one expression; `compose_hangul` and `decompose_hangul` test their
+  index arithmetic with `is_multiple_of`.
+
+The crate's own unit tests, which need no external fonts and cover these
+functions, run in CI with the read-fonts and skrifa fork tests.

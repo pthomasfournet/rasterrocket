@@ -9,6 +9,7 @@ use super::text_ops::{
 };
 use super::text_shaping::{Drawn, shaped_runs};
 use crate::resources::cmap::DecodedCode;
+use crate::resources::font::CidEncoding;
 use color::Rgb8;
 use font::face::FontFace;
 use raster::{
@@ -178,6 +179,9 @@ impl PageRenderer<'_> {
             let need_outline = do_clip || do_stroke || fill_as_path;
 
             let cid_enc = descriptor.cid_encoding.as_ref();
+            // Vertical writing mode (PDF §9.7.4.3): a composite font whose
+            // CMap writes top to bottom.
+            let vertical_enc = cid_enc.filter(|enc| enc.vertical);
 
             // A substitute's glyphs are fitted to the advances the document
             // specifies: condensed when wider, centred when narrower.  An
@@ -185,7 +189,7 @@ impl PageRenderer<'_> {
             // standard family's substitute already has its advances.
             let fit = face.is_some_and(|f| f.substitute)
                 && !descriptor.substitute.standard
-                && !cid_enc.is_some_and(|enc| enc.vertical);
+                && vertical_enc.is_none();
             let face_width = |advance: Option<f64>| -> i32 {
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -283,30 +287,15 @@ impl PageRenderer<'_> {
                 }
             };
 
-            // The shown codes as (code, CID): a Type 0 font's Encoding CMap
-            // splits the string into 1–4-byte codes and maps each to a CID
-            // (PDF §9.7.6.3); a simple font's code is one byte, its own CID.
-            let decoded: Vec<DecodedCode> = cid_enc.map_or_else(
-                || {
-                    bytes
-                        .iter()
-                        .map(|&b| DecodedCode {
-                            code: u32::from(b),
-                            value: u32::from(b),
-                            len: 1,
-                        })
-                        .collect()
-                },
-                |enc| enc.codes(bytes).collect(),
-            );
-            let codes: Vec<(u32, u32)> = decoded.iter().map(|d| (d.code, d.value)).collect();
-            let drawn: Vec<Option<Drawn<'_>>> = codes
+            let decoded: Vec<DecodedCode> = CidEncoding::shown_codes(cid_enc, bytes).collect();
+            let drawn: Vec<Option<Drawn<'_>>> = decoded
                 .iter()
-                .map(|&(code, cid)| face.and_then(|face| face.glyph_for(cid_enc, code, cid)))
+                .map(|d| face.and_then(|face| face.glyph_for(cid_enc, d.code, d.value)))
                 .collect();
-            let vertical = cid_enc.is_some_and(|enc| enc.vertical);
+            // Vertical text is drawn glyph by glyph: runs are shaped
+            // horizontally.
             let runs = match face {
-                Some(face) if !vertical => shaped_runs(face, &codes, &drawn),
+                Some(face) if vertical_enc.is_none() => shaped_runs(face, &decoded, &drawn),
                 _ => Vec::new(),
             };
             let mut runs = runs.iter().peekable();
@@ -341,17 +330,14 @@ impl PageRenderer<'_> {
                     // sits at the pen: its horizontal origin is displaced
                     // by the position vector −v, in glyph units scaled by
                     // the font size (PDF §9.7.4.3).
-                    let (dx, dy) = match cid_enc {
-                        Some(enc) if enc.vertical => {
-                            let v = enc.vertical_metrics_for_cid(cid);
-                            let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
-                            let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
-                            text_to_device(&ctm, &tm, tx, ty, self.height)
-                        }
-                        _ => {
-                            let tx = centre / 1000.0 * font_size * horiz_scaling;
-                            text_to_device(&ctm, &tm, tx, rise, self.height)
-                        }
+                    let (dx, dy) = if let Some(enc) = vertical_enc {
+                        let v = enc.vertical_metrics_for_cid(cid);
+                        let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
+                        let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
+                        text_to_device(&ctm, &tm, tx, ty, self.height)
+                    } else {
+                        let tx = centre / 1000.0 * font_size * horiz_scaling;
+                        text_to_device(&ctm, &tm, tx, rise, self.height)
                     };
                     if let Some((drawn, selector, by_gid)) = drawn {
                         push_glyph(drawn, code, selector, by_gid, dx, dy, x_scale);
@@ -370,7 +356,8 @@ impl PageRenderer<'_> {
                 } else {
                     0.0
                 };
-                if let Some(enc) = cid_enc.filter(|enc| enc.vertical) {
+                if let Some(enc) = vertical_enc {
+                    debug_assert!(run.is_none(), "vertical text is not shaped");
                     let w1 = f64::from(enc.vertical_metrics_for_cid(cid).w1y) / 1000.0;
                     let ty_adv = glyph_advance(w1, font_size, char_spacing, extra, 1.0);
                     tm = translate_text_y(tm, ty_adv);
@@ -391,8 +378,10 @@ impl PageRenderer<'_> {
                     glyph_advance(advance_glyph, font_size, char_spacing, extra, horiz_scaling);
                 tm = translate_text_x(tm, tx_adv);
 
-                // A run's glyphs are spread over the advance of its codes,
-                // condensed when wider and centred when narrower.
+                // A run's glyphs are fitted to the advance of its codes as
+                // one glyph is to its code's: condensed when wider and
+                // centred when narrower, under `fit`; else at their own
+                // advances from the run's start.
                 let Some(run) = run else { continue };
                 run_width += tx_adv;
                 if i + 1 != run.end {
@@ -400,7 +389,7 @@ impl PageRenderer<'_> {
                 }
                 let em_x = font_size * horiz_scaling;
                 let natural: f64 = run.glyphs.iter().map(|g| g.advance).sum::<f64>() * em_x;
-                let (scale, mut pen) = if run_width > 0.0 && natural > 0.0 {
+                let (scale, mut pen) = if fit && run_width > 0.0 && natural > 0.0 {
                     let scale = (run_width / natural).min(1.0);
                     (scale, natural.mul_add(-scale, run_width) / 2.0)
                 } else {

@@ -55,5 +55,6 @@ hinting, keeps the layout features (and the glyphs they reach, such as
 joining forms and conjuncts) of the Hebrew, Arabic, Devanagari and Thai
 faces, which the renderer shapes, and none of the others, keeps the
 `.notdef` outline, the source's timestamp and the copyright, licence and
-naming records (`name` IDs 0–6, 13, 14), and stores the result zlib-compressed at level 9.  The output is
-byte-for-byte reproducible from the same sources.
+naming records (`name` IDs 0–6, 13, 14), and stores the result
+zlib-compressed at level 9.  The output is byte-for-byte reproducible from
+the same sources.

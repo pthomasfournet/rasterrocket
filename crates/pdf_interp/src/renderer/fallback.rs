@@ -35,7 +35,9 @@ enum UnicodeSource {
 }
 
 /// A fallback glyph: the slot of its program in
-/// [`FallbackResolver::program`] and its glyph index there.
+/// [`FallbackResolver::program`] and its composite-font selector there, as
+/// the `*_by_gid` methods of a face take it (a CID for a CID-keyed CFF
+/// program, else the glyph index; see `FontProgram::gid_to_selector`).
 pub(crate) type FallbackGlyph = (usize, u32);
 
 /// Fallback state of one font drawn by a substitute, shared by every page
@@ -138,10 +140,23 @@ impl FallbackResolver {
         }
     }
 
-    /// The first Unicode value the shown `code` (CID `cid`) stands for;
-    /// `None` when the font does not say.
-    pub(crate) fn unicode(&self, code: u32, cid: u32) -> Option<u32> {
-        self.unicodes(code, cid).as_slice().first().copied()
+    /// The text the shown `code` (CID `cid`) stands for, one character or
+    /// the two of a `ToUnicode` value that maps the code to two (a
+    /// ligature, a lam-alef); `None` when the font does not say.
+    pub(crate) fn text(&self, code: u32, cid: u32) -> Option<(u32, Option<u32>)> {
+        match &self.source {
+            UnicodeSource::ToUnicode(map) => map
+                .map
+                .get(&code)
+                .copied()
+                .and_then(scalars)
+                .filter(|&(first, _)| first != 0),
+            UnicodeSource::Names(_) | UnicodeSource::Collection(_) => self
+                .unicodes(code, cid)
+                .as_slice()
+                .first()
+                .map(|&u| (u, None)),
+        }
     }
 
     /// The fallback glyph that draws the shown `code` (CID `cid`): the
@@ -174,11 +189,12 @@ impl FallbackResolver {
         if let Some(&known) = state.glyphs.get(&key) {
             return known;
         }
-        let resolved = found.map(|(program, unicode)| {
+        let resolved = found.and_then(|(program, unicode)| {
             let mut gid = program.char_index(unicode);
             if vertical {
                 gid = program.vertical_gid(gid);
             }
+            let selector = program.gid_to_selector(gid)?;
             let slot = state
                 .programs
                 .iter()
@@ -187,7 +203,7 @@ impl FallbackResolver {
                     state.programs.push(program);
                     state.programs.len() - 1
                 });
-            (slot, gid)
+            Some((slot, selector))
         });
         let _ = state.glyphs.insert(key, resolved);
         resolved
@@ -203,21 +219,36 @@ impl FallbackResolver {
     }
 }
 
-/// The first Unicode scalar value of a `ToUnicode` value: a scalar value,
-/// or above U+10FFFF two UTF-16 units packed as `first << 16 | second`;
-/// `None` for an unpaired surrogate.
-pub(crate) const fn first_scalar(value: u32) -> Option<u32> {
-    let (first, second) = if value > 0x10_FFFF {
-        (value >> 16, value & 0xFFFF)
-    } else {
-        (value, 0)
-    };
+/// The Unicode scalar values of a `ToUnicode` value: a scalar value, or
+/// above U+10FFFF two UTF-16 units packed as `first << 16 | second`, one
+/// supplementary character as a surrogate pair or two BMP characters.
+/// `None` when the first unit is an unpaired surrogate; an unpaired
+/// surrogate after a character is dropped.
+pub(crate) const fn scalars(value: u32) -> Option<(u32, Option<u32>)> {
+    if value <= 0x10_FFFF {
+        return match value {
+            0xD800..=0xDFFF => None,
+            _ => Some((value, None)),
+        };
+    }
+    let (first, second) = (value >> 16, value & 0xFFFF);
     match (first, second) {
-        (0xD800..=0xDBFF, 0xDC00..=0xDFFF) => {
-            Some(0x1_0000 + ((first - 0xD800) << 10) + (second - 0xDC00))
-        }
+        (0xD800..=0xDBFF, 0xDC00..=0xDFFF) => Some((
+            0x1_0000 + ((first - 0xD800) << 10) + (second - 0xDC00),
+            None,
+        )),
         (0xD800..=0xDFFF, _) => None,
-        _ => Some(first),
+        (_, 0xD800..=0xDFFF) => Some((first, None)),
+        _ => Some((first, Some(second))),
+    }
+}
+
+/// The first Unicode scalar value of a `ToUnicode` value (see
+/// [`scalars`]).
+pub(crate) const fn first_scalar(value: u32) -> Option<u32> {
+    match scalars(value) {
+        Some((first, _)) => Some(first),
+        None => None,
     }
 }
 
@@ -233,5 +264,16 @@ mod tests {
         assert_eq!(first_scalar(0xD83D_DE00), Some(0x1_F600), "surrogate pair");
         assert_eq!(first_scalar(0xD83D), None, "unpaired high surrogate");
         assert_eq!(first_scalar(0xDE00_0041), None, "unpaired low surrogate");
+    }
+
+    #[test]
+    fn to_unicode_values_yield_both_characters_of_a_pair() {
+        assert_eq!(scalars(0x0644_0627), Some((0x644, Some(0x627))), "lam-alef");
+        assert_eq!(scalars(0xD83D_DE00), Some((0x1_F600, None)));
+        assert_eq!(
+            scalars(0x0041_DE00),
+            Some((0x41, None)),
+            "unpaired second unit"
+        );
     }
 }

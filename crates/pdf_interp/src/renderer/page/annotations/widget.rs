@@ -23,8 +23,8 @@ use super::content::{
 use super::rich::{self, Base};
 use super::text::{self, CHECK_FONT, DefaultAppearance, decode_text_string, plain_text};
 use super::typeset::{
-    AUTO_MULTILINE_SIZE, LEADING, Style, TextBlock, Typesetter, aligned_x, hex, show_line,
-    write_block, write_single_line,
+    AUTO_MULTILINE_SIZE, LEADING, Style, TextBlock, Typesetter, aligned_x, hex, right_to_left,
+    show_line, visual_chars, write_block, write_single_line,
 };
 use crate::resources::dict_ext::DictExt;
 
@@ -460,12 +460,21 @@ fn comb(s: &mut String, field: &Field, area: [f64; 4], text: &str, ts: &mut dyn 
         ts.width(font, "W"),
     );
     let y = 0.35f64.mul_add(-size, f64::midpoint(area[1], area[3]));
-    let mut buf = [0u8; 4];
-    for (i, ch) in text
+    // The value's characters in visual order, one per cell from the left;
+    // a right-to-left value fills the cells from the right.
+    let shown: String = text
         .chars()
         .take(usize::try_from(cells).unwrap_or(usize::MAX))
-        .enumerate()
-    {
+        .collect();
+    let rtl = right_to_left(&shown);
+    let visual = visual_chars(&shown, rtl);
+    let first = if rtl {
+        usize::try_from(cells).unwrap_or(usize::MAX) - visual.len()
+    } else {
+        0
+    };
+    let mut buf = [0u8; 4];
+    for (i, ch) in (first..).zip(visual) {
         let ch = ch.encode_utf8(&mut buf);
         #[expect(
             clippy::cast_precision_loss,

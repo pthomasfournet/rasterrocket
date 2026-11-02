@@ -421,3 +421,33 @@ fn block_fonts_are_shared_by_the_appearances_of_a_page() {
         );
     }
 }
+
+/// A comb field (`/Ff` bit 25) of five cells, `/Rect` 10..190 wide, with
+/// `value`: the dark pixel count of each 36-point cell.
+fn comb_cells(value: &str) -> Vec<usize> {
+    let widget = format!(
+        "/FT /Tx /T (k) /Ff 16777216 /MaxLen 5 /Rect [10 30 190 70] /V {value} \
+         /DA (/Helv 20 Tf 0 g)"
+    );
+    let pdf = document("", &[&widget], vec![]);
+    (0..5u32)
+        .map(|cell| {
+            dark_in(
+                pdf.clone(),
+                [10 + 36 * cell + 2, 32, 46 + 36 * cell - 2, 68],
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "bundled-fonts")]
+#[test]
+fn a_comb_field_fills_its_cells_in_the_value_s_direction() {
+    // Latin from the left cell, Hebrew from the right.
+    let latin = comb_cells("(ab)");
+    assert!(latin[0] > 0 && latin[1] > 0, "{latin:?}");
+    assert!(latin[3] == 0 && latin[4] == 0, "{latin:?}");
+    let hebrew = comb_cells("<FEFF05D005D1>");
+    assert!(hebrew[3] > 0 && hebrew[4] > 0, "{hebrew:?}");
+    assert!(hebrew[0] == 0 && hebrew[1] == 0, "{hebrew:?}");
+}

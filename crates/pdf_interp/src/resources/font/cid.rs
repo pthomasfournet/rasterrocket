@@ -161,6 +161,28 @@ impl CidEncoding {
         self.encoding_cmap.iter_codes(bytes)
     }
 
+    /// The codes a string of `bytes` shows in a font encoded by `enc`: a
+    /// composite font's `Encoding` `CMap` splits it into 1–4-byte codes
+    /// and maps each to a CID (PDF §9.7.6.3); a simple font's code is one
+    /// byte, its own CID.
+    pub fn shown_codes<'a>(
+        enc: Option<&'a Self>,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = DecodedCode> + 'a {
+        let simple = enc.is_none().then(|| {
+            bytes.iter().map(|&b| DecodedCode {
+                code: u32::from(b),
+                value: u32::from(b),
+                len: 1,
+            })
+        });
+        let composite = enc.map(|enc| enc.codes(bytes));
+        simple
+            .into_iter()
+            .flatten()
+            .chain(composite.into_iter().flatten())
+    }
+
     /// The glyph index `cid` selects through `cid_to_gid`; identity without
     /// a table, 0 (`.notdef`) for a CID past the table's end.
     #[must_use]
