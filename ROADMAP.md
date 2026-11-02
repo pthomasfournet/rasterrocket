@@ -2218,40 +2218,40 @@ No modem code and no internet-fax services.
 
 ---
 
-## Phase 14 — Text shaping for substituted fonts (planned, after v2.0.0)
+## Phase 14 — Text shaping for substituted fonts (on master, unreleased)
 
-**Status: planned, not started.** Not part of v2.0.0.
+**Status: shipped on master (2026-11-01), not yet released.**
 
 When a PDF does not embed the font for Arabic, Devanagari or another script
 that needs shaping, the substitute (an installed face, or the bundled Noto
-fallbacks shipped in v2.0.0) draws each character in its isolated form:
-letters are not joined, and reordering, conjuncts and mark positioning are
-not applied. The glyphs are correct and the text is readable, but it does not
-look as typeset and recognises worse under OCR. Embedded fonts are not
-affected: the producer has already shaped that text and the content stream
-carries the shaped glyphs.
+fallbacks) drew each character in its isolated form. Now, within one show
+string, the codes of a run in such a script drawn by one face are shaped
+together with that face's `GSUB`/`GPOS` through `harfrust`, vendored as a
+local fork in `crates/harfrust` (release 0.12.0, the one built on the
+read-fonts fork's base). A right-to-left run, in visual order in the string,
+is reversed to logical order first; the shaped glyphs fill the advance the
+document gives the run's codes, so the pen moves exactly as before. The
+bundled Hebrew, Arabic, Devanagari and Thai faces keep their layout features
+for this. Synthesised annotation and field text is put in visual order by
+the Unicode bidirectional algorithm, then shaped the same way.
 
-Plan: shape each run of substituted text with an OpenType shaping engine
-over the substitute face (GSUB/GPOS: joining forms, ligatures, reordering,
-mark attachment) before drawing, keeping the PDF's glyph positions as the
-anchor for each run. The engine choice (a pure-Rust shaper as a local fork,
-in keeping with the read-fonts/skrifa forks) and the run segmentation (by
-script and font, using the `ToUnicode` text) are the open design questions.
-Measure on non-embedded Arabic and Devanagari fixtures against an embedded,
-shaped rendering of the same text.
+Not done: the comparison the plan called for, of non-embedded Arabic and
+Devanagari archive documents against an embedded, shaped rendering of the
+same text. The tests cover joining, letter order and vowel-sign reordering
+on the bundled faces. Runs do not cross show strings, so a word split
+across `Tj` operators is shaped piecewise.
 
 ---
 
-## Current status (2026-10-30)
+## Current status (2026-11-01)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
-planned Phases 13 and 14 above; no phase-level engineering is in flight.
-Phase 7's last item, the mode E re-bench, is closed as moot. Master
-carries the unreleased work for v2.0.0 (see the release history), which is
-gated on a full review of everything since v1.5.0. Open beyond that: the CUDA
-performance inventory's remaining items (fills on the recorder model,
-genuinely async transfers, two kernels without a production caller), all on
-paths that are dormant or deferred.
+planned Phase 13 above; Phase 14 is on master, unreleased.
+Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
+released (see the release history); master carries the work since. The CUDA performance
+inventory is closed (2026-11-01): fills run on the backend recorder, transfers
+are blocking by design, and the composite and soft-mask kernels use one
+32-bit access per pixel.
 
 Deferred/blocked items, in full:
 
