@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use color::Pixel;
+use color::{Pixel, Rgb8};
 use raster::Bitmap;
 use raster::types::BlendMode;
 
@@ -82,7 +82,7 @@ impl PageRenderer<'_> {
         let mask = PageCanvas::new(CanvasKind::Rgb, self.width, self.height, true);
         let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);
-        let canvas = std::mem::replace(&mut self.canvas, page);
+        let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
         self.group.knockout = knockout;
         self.gstate.restore();
 
@@ -90,7 +90,7 @@ impl PageRenderer<'_> {
         let values = if luminosity {
             luminosity_values(&canvas, self.mask_backdrop_rgb(group, backdrop))
         } else {
-            with_canvas!(&canvas, |b| b.alpha_plane())?.to_vec()
+            canvas.alpha_plane()?.to_vec()
         };
         let values = match lut {
             Some(lut) => values.into_iter().map(|v| lut[usize::from(v)]).collect(),
@@ -389,14 +389,12 @@ fn backdrop_rgb(bc: &[f64]) -> [u8; 3] {
 
 /// Luminosity mask values: each pixel of `group` composited over the opaque
 /// backdrop `bc`, reduced to its luminosity by [`color::convert::luminosity`]
-/// (PDF §11.3.5.3).  An ink group is read as sRGB.
-fn luminosity_values(group: &PageCanvas, bc: [u8; 3]) -> Vec<u8> {
-    let (width, height) = group.dims();
-    let w = width as usize;
-    let mut out = Vec::with_capacity(w * height as usize);
-    let mut scratch = Vec::new();
-    for y in 0..height {
-        let row = group.row_rgb(y, &mut scratch);
+/// (PDF §11.3.5.3).
+fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
+    let (w, h) = (group.width as usize, group.height as usize);
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..group.height {
+        let row = group.row_bytes(y);
         let alpha = group.alpha_row(y);
         for x in 0..w {
             let a = alpha.map_or(255, |r| u32::from(r[x]));
@@ -450,13 +448,12 @@ mod tests {
 
     #[test]
     fn luminosity_composites_over_the_backdrop() {
-        let mut bmp = Bitmap::<color::Rgb8>::new(3, 1, 1, true);
+        let mut bmp = Bitmap::<Rgb8>::new(3, 1, 1, true);
         bmp.row_bytes_mut(0)
             .copy_from_slice(&[255, 255, 255, 255, 0, 0, 0, 0, 0]);
         bmp.alpha_plane_mut()
             .unwrap()
             .copy_from_slice(&[255, 255, 0]);
-        let bmp = PageCanvas::Rgb(bmp);
         // White, pure red, and a transparent pixel showing the backdrop.
         assert_eq!(luminosity_values(&bmp, [0, 0, 0]), [255, 77, 0]);
         assert_eq!(luminosity_values(&bmp, [255, 255, 255]), [255, 77, 255]);

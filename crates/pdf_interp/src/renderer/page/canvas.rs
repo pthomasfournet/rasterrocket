@@ -125,25 +125,6 @@ impl PageCanvas {
         rgb
     }
 
-    /// The sRGB bytes of row `y`, three per pixel; an ink row is converted
-    /// into `scratch` without spot colourants.
-    pub(super) fn row_rgb<'a>(&'a self, y: u32, scratch: &'a mut Vec<u8>) -> &'a [u8] {
-        match self {
-            Self::Rgb(b) => &b.row_bytes(y)[..b.width as usize * 3],
-            Self::Ink(b) => {
-                let n = b.width as usize;
-                scratch.resize(n * 3, 0);
-                ink_to_rgb_row(&b.row_bytes(y)[..n * 8], &[None; 4], scratch);
-                scratch
-            }
-        }
-    }
-
-    /// The alpha of row `y`, if the canvas has an alpha plane.
-    pub(super) fn alpha_row(&self, y: u32) -> Option<&[u8]> {
-        with_canvas!(self, |b| b.alpha_row(y))
-    }
-
     /// Composite the canvas, a page group with an alpha plane, onto opaque
     /// paper in place (see [`composite_onto_white`]).
     pub(super) fn composite_onto_white(&mut self) {
@@ -581,8 +562,10 @@ mod tests {
                 .iter()
                 .all(|&v| v == u8::MAX)
         );
-        let group = PageCanvas::new(CanvasKind::Ink, 2, 1, true);
-        assert_eq!(group.alpha_row(0), Some([0, 0].as_slice()));
+        let PageCanvas::Ink(group) = PageCanvas::new(CanvasKind::Ink, 2, 1, true) else {
+            panic!("an ink canvas");
+        };
+        assert_eq!(group.alpha_plane(), Some([0, 0].as_slice()));
     }
 
     #[test]

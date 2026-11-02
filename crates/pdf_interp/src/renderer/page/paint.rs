@@ -499,8 +499,10 @@ struct PaintSource<'a> {
 
 impl<'a> PaintSource<'a> {
     /// The source of a paint of `tiled`, or else of `solid`, on a canvas of
-    /// `kind`.  A pattern's colours map through `transfer`, which `pipe`
-    /// takes on an RGB canvas; the solid colour is already mapped.
+    /// `kind`.  `solid` is already mapped through the transfer function on
+    /// either canvas.  `transfer` applies to the pattern's colours only:
+    /// `pipe` takes its tables on an RGB canvas, the pattern applies it
+    /// before conversion on an ink canvas.
     fn new(
         kind: CanvasKind,
         tiled: Option<&'a TiledPattern>,
