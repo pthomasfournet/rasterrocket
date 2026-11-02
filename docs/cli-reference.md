@@ -175,7 +175,7 @@ to search first, in `PATH` syntax (`RROCKET_FONT_DIR=/opt/fonts:$HOME/fonts`), f
 the substitutes and the per-character faces; library callers set the same list through
 `SessionConfig::font_dirs`. A character no installed face covers is drawn from the Noto
 fallback faces compiled into the binary (Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai,
-symbols; the default `bundled-fonts` feature), so these scripts draw on a server with no
+Bengali, Tamil, Armenian, Georgian, Ethiopic, symbols; the default `bundled-fonts` feature), so these scripts draw on a server with no
 fonts installed; a build with `--no-default-features` omits them.
 
 ---

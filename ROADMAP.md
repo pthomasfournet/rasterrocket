@@ -2247,12 +2247,36 @@ same text. The tests cover joining, letter order and vowel-sign reordering
 on the bundled faces. Runs do not cross show strings, so a word split
 across `Tj` operators is shaped piecewise.
 
+**Substitution follow-ups, also on master (2026-11-02).** A vertical-form
+CID drawn by a substitute without a `vert`/`vrt2` form is rotated or
+shifted from its horizontal glyph (brackets, dashes, the long-vowel mark,
+small kana) instead of drawn upright; an embedded TrueType name the cmap
+misses resolves through the `post` table (non-symbolic fonts only); the
+installed-font index is rebuilt when a font directory changes, substitute
+searches included; and the bundled fallbacks gain Bengali, Tamil,
+Armenian, Georgian and Ethiopic (0.49 → 0.75 MB). Verified on Linux and on
+a stock macOS 27 install.
+
 ---
 
-## Current status (2026-11-01)
+## Current status (2026-11-02)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 planned Phase 13 above; Phase 14 is on master, unreleased.
+
+**Overprint simulation, in progress on a branch.** `OP`/`op`/`OPM`
+(ISO 32000-2 §8.6.7, §11.7.4) on a page that sets overprint render to a
+CMYK-plus-four-spot ink buffer, converted to RGB at the end of the page, so
+an object leaves alone the inks it does not use. Done: the ink buffer,
+colorant masks for Separation and DeviceN (four spot slots a page, further
+spots through their alternate), an RGB-to-ink inverse that returns a grey or
+RGB colour as its own screen colour (black text stays black), and soft
+masks. Remaining: applying the mask at paint time, the `--overprint` CLI
+flag and `RasterOptions` field (removed in v2.0.0 as a no-op), and
+verification. Pages without overprint render byte-identically. Planned
+limits: Separation and DeviceN images and shadings, tiling cells and
+transparency groups composite every channel, and the GPU backends are not
+used on overprint pages.
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder, transfers
@@ -2266,7 +2290,7 @@ Deferred/blocked items, in full:
 - **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.
 
-The implementation plans under `docs/superpowers/plans/` (gitignored) are all completed or superseded — none describe live work. They are kept as historical execution logs, not as a backlog.
+The implementation plans under `docs/superpowers/plans/` (gitignored) are completed or superseded, apart from `2026-11-01-overprint-simulation.md`, the live plan for the overprint branch. The rest are kept as historical execution logs, not as a backlog.
 
 ---
 

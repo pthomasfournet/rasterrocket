@@ -74,7 +74,8 @@ drawn with:
 | Thai | Sukhumvit Set |
 
 Characters that no installed face has come from the faces built into the
-binary: Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai and symbols. Fonts
+binary: Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil,
+Armenian, Georgian, Ethiopic and symbols. Fonts
 embedded in the PDF are always used as they are.
 
 ## Writing output to RAM
