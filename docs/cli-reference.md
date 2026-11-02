@@ -129,11 +129,12 @@ demand. None of these bounds fails the page; the rest of the page renders:
 |---|---|---|
 | _(default)_ | `.ppm` | RGB PPM (Netpbm P6). |
 | `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B). Can combine with `--png`. |
-| `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4, 50% threshold). Can combine with `--png`. |
+| `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4, 50% threshold). Can combine with `--png` and `--jpeg`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG. |
-| `--jpeg` | | JPEG. Not implemented: refused at startup ("--jpeg output is not implemented; use --png or the default PPM output"), exit status 1, nothing rendered. |
-| `--jpegcmyk` | | JPEG in CMYK colour space. Not implemented, refused as `--jpeg`. |
-| `--tiff` | | TIFF. Not implemented, refused as `--jpeg`. |
+| `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. |
+| `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg`. |
+| `--jpegcmyk` | | JPEG in CMYK colour space. Not implemented: refused at startup ("--jpegcmyk output is not implemented; use --png or the default PPM output"), exit status 1, nothing rendered. |
+| `--tiff` | | TIFF. Not implemented, refused as `--jpegcmyk`. |
 
 `--gray` and `--mono` are mutually exclusive, and at most one of `--png`,
 `--jpeg`, `--jpegcmyk` and `--tiff` may be given; a conflicting pair exits
@@ -145,6 +146,7 @@ with status 1.
 |---|---|---|---|
 | _(default / PPM)_ | `.pbm` | `.pgm` | `.ppm` |
 | `--png` | `.png` | `.png` | `.png` |
+| `--jpeg` | `.jpg` | `.jpg` | `.jpg` |
 
 ---
 
