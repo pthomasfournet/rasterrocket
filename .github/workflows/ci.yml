@@ -305,6 +305,25 @@ jobs:
         # glibc target, where the sanitizer runtime and the toolchain's std are.
         run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
+  # ── Minimum supported toolchain ───────────────────────────────────────────
+  # Every crate declares rust-version 1.99; the other jobs build with the
+  # latest stable, so this one holds the declared floor.
+  msrv:
+    name: Minimum toolchain (Rust 1.99)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.99
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check the CLI, the library and the camera crate
+        run: cargo check --locked -p rasterrocket-cli -p rasterrocket -p rasterrocket-camera
+
   # ── Format and spelling check ─────────────────────────────────────────────
   fmt:
     name: Formatting and spelling
