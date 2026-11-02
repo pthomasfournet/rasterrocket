@@ -188,9 +188,11 @@ impl PageRenderer<'_> {
             return true;
         }
         let fill = self.gstate.current().painted_fill_color();
+        let overprint = self.overprint_mask(false, &fill);
         let fill = fill.bytes_for(self.canvas.kind().mode());
         let clip = self.gstate.current().clip.clone_shared();
-        let pipe = Self::make_pipe(255, BlendMode::Normal, None);
+        let backdrop = self.paint_backdrop(BlendMode::Normal, overprint);
+        let pipe = Self::make_pipe(255, BlendMode::Normal, backdrop.as_deref(), overprint);
         #[expect(
             clippy::cast_possible_wrap,
             reason = "a cached glyph is at most MAX_CACHED_AREA pixels; its sides fit i32"

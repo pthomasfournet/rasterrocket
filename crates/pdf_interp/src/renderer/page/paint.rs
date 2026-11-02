@@ -7,7 +7,7 @@ use color::TransferLut;
 use raster::{
     TiledPattern, eo_fill, fill,
     path::PathBuilder,
-    pipe::{Pattern, PipeSrc, PipeState, TransferSet},
+    pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet},
     stroke::{StrokeParams, stroke},
     transparency::Backdrop,
     types::{BlendMode, LineCap, LineJoin},
@@ -178,20 +178,22 @@ impl PageRenderer<'_> {
             .clip_to_path(&xpath, even_odd);
     }
 
-    /// Build a [`PipeState`] with the given opacity and blend mode;
-    /// `backdrop` is the enclosing non-isolated group's, for a blend mode
-    /// that consults it (see [`Self::blend_backdrop`]).
+    /// Build a [`PipeState`] with the given opacity and blend mode that
+    /// writes the channels `overprint` (`None` writes every channel);
+    /// `backdrop` is the enclosing non-isolated group's, for a paint that
+    /// consults it (see [`Self::paint_backdrop`]).
     pub(super) fn make_pipe(
         a_input: u8,
         blend_mode: BlendMode,
         backdrop: Option<&Backdrop>,
+        overprint: Option<ChannelMask>,
     ) -> PipeState<'_> {
         PipeState {
             blend_mode,
             a_input,
             transfer: TransferSet::identity_rgb(),
             backdrop: backdrop.map(Backdrop::as_pipe_backdrop),
-            overprint: None,
+            overprint,
         }
     }
 
@@ -206,13 +208,49 @@ impl PageRenderer<'_> {
         TransferSet::new(transfer.tables(), id, [id; 4], &DN)
     }
 
-    /// The backdrop a paint under `blend_mode` blends with: the enclosing
-    /// non-isolated group's, unless the mode is `Normal`, whose result does
-    /// not depend on it.
-    pub(super) fn blend_backdrop(&self, blend_mode: BlendMode) -> Option<Arc<Backdrop>> {
-        (blend_mode != BlendMode::Normal)
+    /// The backdrop a paint under `blend_mode` writing the channels
+    /// `overprint` consults: the enclosing non-isolated group's, unless the
+    /// mode is `Normal` and the paint writes every channel.  A `Normal`
+    /// paint of every channel does not depend on the backdrop; a masked
+    /// paint keeps its unpainted channels relative to it whatever the mode.
+    pub(super) fn paint_backdrop(
+        &self,
+        blend_mode: BlendMode,
+        overprint: Option<ChannelMask>,
+    ) -> Option<Arc<Backdrop>> {
+        (blend_mode != BlendMode::Normal || overprint.is_some())
             .then(|| self.group.backdrop.clone())
             .flatten()
+    }
+
+    /// The channels a paint of the stroking (`stroke`) or non-stroking
+    /// operation writes when its source paints the channels `paints`
+    /// (PDF §8.6.7): `paints` with overprint set for the operation on an
+    /// ink canvas; otherwise `None`, every channel — on an RGB canvas,
+    /// with overprint off, and when `paints` covers every channel.
+    pub(super) fn overprint_channels(
+        &self,
+        stroke: bool,
+        paints: ChannelMask,
+    ) -> Option<ChannelMask> {
+        if self.canvas.kind() != CanvasKind::Ink {
+            return None;
+        }
+        let gs = self.gstate.current();
+        let overprint = if stroke {
+            gs.overprint_stroke
+        } else {
+            gs.overprint_fill
+        };
+        (overprint && paints != ChannelMask::ALL).then_some(paints)
+    }
+
+    /// The channels a fill or stroke of the solid colour `colour` writes
+    /// under the overprint state and mode in effect (see
+    /// [`Self::overprint_channels`] and [`RasterColor::paints_with_opm`]).
+    pub(super) fn overprint_mask(&self, stroke: bool, colour: &RasterColor) -> Option<ChannelMask> {
+        let mode = self.gstate.current().overprint_mode;
+        self.overprint_channels(stroke, colour.paints_with_opm(mode))
     }
 
     pub(super) fn do_fill(&mut self, even_odd: bool) {
@@ -270,9 +308,8 @@ impl PageRenderer<'_> {
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
         let flatness = gs.flatness.max(0.1);
-        let backdrop = self.blend_backdrop(gs.blend_mode);
+        let (fill_alpha, blend_mode) = (gs.fill_alpha, gs.blend_mode);
         let transfer = gs.transfer.clone();
-        let mut pipe = Self::make_pipe(gs.fill_alpha, gs.blend_mode, backdrop.as_deref());
 
         // Resolve the fill source — pattern or solid colour.  The solid
         // colour is already mapped through the transfer function; a
@@ -297,6 +334,14 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
+        // A tiling pattern writes every channel; a solid colour the
+        // channels of its space under the overprint state in effect.
+        let overprint = tiled
+            .is_none()
+            .then(|| self.overprint_mask(false, &solid_color))
+            .flatten();
+        let backdrop = self.paint_backdrop(blend_mode, overprint);
+        let mut pipe = Self::make_pipe(fill_alpha, blend_mode, backdrop.as_deref(), overprint);
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),
@@ -422,9 +467,8 @@ impl PageRenderer<'_> {
             return;
         }
         let clip = gs.clip.clone_shared();
-        let backdrop = self.blend_backdrop(gs.blend_mode);
+        let (stroke_alpha, blend_mode) = (gs.stroke_alpha, gs.blend_mode);
         let transfer = gs.transfer.clone();
-        let mut pipe = Self::make_pipe(gs.stroke_alpha, gs.blend_mode, backdrop.as_deref());
         let line_cap = gs.line_cap;
         let line_join = gs.line_join;
         let miter_limit = gs.miter_limit;
@@ -483,6 +527,12 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
+        let overprint = tiled
+            .is_none()
+            .then(|| self.overprint_mask(true, &solid_color))
+            .flatten();
+        let backdrop = self.paint_backdrop(blend_mode, overprint);
+        let mut pipe = Self::make_pipe(stroke_alpha, blend_mode, backdrop.as_deref(), overprint);
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),

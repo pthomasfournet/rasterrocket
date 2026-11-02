@@ -49,16 +49,21 @@ pub(crate) struct RasterColor {
     /// Whether nonzero overprint mode (PDF §8.6.7) applies to the colour:
     /// it is a solid colour given in a four-component process space.
     opm_eligible: bool,
+    /// The process channels whose component is exactly 0, bit `i` for
+    /// channel `i`; nonzero overprint mode leaves them unpainted.  Zero
+    /// for a colour that is not eligible.
+    zero_components: u8,
 }
 
 impl PartialEq for RasterColor {
     /// The ink is a function of `bytes` and `given`, so they decide
-    /// equality with the channel mask and the overprint eligibility.
+    /// equality with the channel mask and the overprint fields.
     fn eq(&self, other: &Self) -> bool {
         self.bytes == other.bytes
             && self.given == other.given
             && self.paints == other.paints
             && self.opm_eligible == other.opm_eligible
+            && self.zero_components == other.zero_components
     }
 }
 
@@ -70,6 +75,7 @@ impl std::hash::Hash for RasterColor {
         self.given.hash(state);
         self.paints.bits().hash(state);
         self.opm_eligible.hash(state);
+        self.zero_components.hash(state);
     }
 }
 
@@ -83,6 +89,7 @@ impl RasterColor {
             ink: OnceLock::new(),
             paints: ChannelMask::ALL,
             opm_eligible: false,
+            zero_components: 0,
         }
     }
 
@@ -109,12 +116,19 @@ impl RasterColor {
     /// The colour of sRGB `rgb` given in a process space as the inks `cmyk`
     /// ([0, 1] each, clamped; NaN is no ink), which are the colour's ink.
     /// It paints the process channels and is eligible for nonzero
-    /// overprint mode.
+    /// overprint mode, which leaves the channels of its zero components
+    /// unpainted.
     #[must_use]
     pub(crate) fn with_process_inks(rgb: [u8; 3], cmyk: [f64; 4]) -> Self {
         let [c, m, y, k] = cmyk.map(gray_to_u8);
+        let zero_components = cmyk
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v == 0.0)
+            .fold(0u8, |bits, (i, _)| bits | 1 << i);
         Self {
             opm_eligible: true,
+            zero_components,
             ..Self::with_ink(rgb, [c, m, y, k, 0, 0, 0, 0], PROCESS_CHANNELS)
         }
     }
@@ -130,6 +144,7 @@ impl RasterColor {
             ink: OnceLock::from(ink),
             paints,
             opm_eligible: false,
+            zero_components: 0,
         }
     }
 
@@ -158,23 +173,27 @@ impl RasterColor {
     }
 
     /// The channels the colour paints on an ink canvas.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read when a paint's channel mask is built")
-    )]
     #[must_use]
     pub(crate) const fn paints(&self) -> ChannelMask {
         self.paints
     }
 
     /// Whether nonzero overprint mode applies to the colour.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read when a paint's channel mask is built")
-    )]
     #[must_use]
     pub(crate) const fn opm_eligible(&self) -> bool {
         self.opm_eligible
+    }
+
+    /// The channels the colour paints on an ink canvas under overprint
+    /// mode `mode` (PDF §8.6.7): under a nonzero mode an eligible colour
+    /// leaves unpainted the process channels whose component is exactly 0.
+    #[must_use]
+    pub(crate) const fn paints_with_opm(&self, mode: u8) -> ChannelMask {
+        if mode != 0 && self.opm_eligible() {
+            ChannelMask::new(self.paints().bits() & !self.zero_components)
+        } else {
+            self.paints()
+        }
     }
 
     /// The colour's bytes for a pixel of `mode`: the ink amounts for
@@ -282,6 +301,22 @@ mod tests {
             assert_eq!(derived.paints(), ChannelMask::ALL);
             assert!(!derived.opm_eligible());
         }
+    }
+
+    #[test]
+    fn raster_color_nonzero_overprint_mode_skips_zero_components() {
+        let black = RasterColor::cmyk(0.0, 0.0, 0.0, 1.0);
+        assert_eq!(black.paints_with_opm(0), PROCESS_CHANNELS);
+        assert_eq!(black.paints_with_opm(1), ChannelMask::new(0b1000));
+        // A component however small is painted; only an exact 0 is not.
+        let faint = RasterColor::cmyk(0.001, 0.0, 0.5, 0.0);
+        assert_eq!(faint.ink()[0], 0);
+        assert_eq!(faint.paints_with_opm(1), ChannelMask::new(0b0101));
+        assert_ne!(faint, RasterColor::cmyk(0.0, 0.0, 0.5, 0.0));
+        // Only a process colour is eligible.
+        let spot = RasterColor::with_ink([200, 30, 60], [0; 8], ChannelMask::new(0b1_0000));
+        assert_eq!(spot.paints_with_opm(1), ChannelMask::new(0b1_0000));
+        assert_eq!(RasterColor::gray(1.0).paints_with_opm(1), ChannelMask::ALL);
     }
 
     #[test]

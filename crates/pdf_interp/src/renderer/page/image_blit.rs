@@ -8,7 +8,7 @@ use color::convert::div255;
 use color::{Pixel, PixelMode};
 use raster::{
     Bitmap, ClipResult,
-    pipe::{Pattern, PipeSrc, PipeState, RowPattern},
+    pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern},
     transparency::Backdrop,
     types::BlendMode,
 };
@@ -332,7 +332,14 @@ impl PageRenderer<'_> {
             None => None,
         };
         let img_w = img.width as usize;
-        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
+        // A stencil paints the fill colour under the fill's overprint; an
+        // image's samples write every channel.
+        let stencil = img.color_space == ImageColorSpace::Mask;
+        let overprint = stencil
+            .then(|| self.overprint_mask(false, &painted_fill))
+            .flatten();
+        let blend_mode = self.gstate.current().blend_mode;
+        let backdrop = self.paint_backdrop(blend_mode, overprint);
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
         let gray = |x, y| sample_bytes::<1>(img_bytes, img_w, bpp, x, y);
@@ -342,12 +349,13 @@ impl PageRenderer<'_> {
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(
             b,
             self.gstate.current().fill_alpha,
-            self.gstate.current().blend_mode,
+            blend_mode,
             backdrop.as_deref(),
+            overprint,
         ));
-        // A stencil paints the fill colour, on an ink canvas as its ink.
+        // On an ink canvas a stencil paints the fill colour as its ink.
         let kind = self.canvas.kind();
-        if img.color_space == ImageColorSpace::Mask && kind == CanvasKind::Ink {
+        if stencil && kind == CanvasKind::Ink {
             compositor.solid = Some(painted_fill.bytes_for(kind.mode()));
         }
 
@@ -463,7 +471,7 @@ impl PageRenderer<'_> {
         if self.canvas.kind() != CanvasKind::Rgb {
             return false;
         }
-        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
+        let backdrop = self.paint_backdrop(self.gstate.current().blend_mode, None);
         let Some(gpu_ctx) = self.gpu_ctx.as_deref() else {
             log::debug!("blit_image: GPU image blit skipped — no GpuCtx attached");
             return false;
@@ -527,6 +535,7 @@ impl PageRenderer<'_> {
             self.gstate.current().fill_alpha,
             self.gstate.current().blend_mode,
             backdrop.as_deref(),
+            None,
         );
         let transfer = self.gstate.current().transfer.clone();
         let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
@@ -620,18 +629,24 @@ pub(super) struct ImageCompositor<'a> {
 }
 
 impl<'a> ImageCompositor<'a> {
+    /// The compositor of samples painted onto `bitmap` with `fill_alpha`
+    /// under `blend_mode`, writing the channels `overprint` (`None` for
+    /// all); `backdrop` and `overprint` are as `PageRenderer::make_pipe`
+    /// takes them.
     pub(super) fn new<P: Pixel>(
         bitmap: &Bitmap<P>,
         fill_alpha: u8,
         blend_mode: BlendMode,
         backdrop: Option<&'a Backdrop>,
+        overprint: Option<ChannelMask>,
     ) -> Self {
         let direct = P::MODE == PixelMode::Rgb8
             && bitmap.alpha_plane().is_none()
             && fill_alpha == 255
             && blend_mode == BlendMode::Normal;
         Self {
-            pipe: (!direct).then(|| PageRenderer::make_pipe(fill_alpha, blend_mode, backdrop)),
+            pipe: (!direct)
+                .then(|| PageRenderer::make_pipe(fill_alpha, blend_mode, backdrop, overprint)),
             solid: None,
         }
     }

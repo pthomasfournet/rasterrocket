@@ -412,11 +412,13 @@ impl PageRenderer<'_> {
             let fill_bytes = fill_color.bytes_for(self.canvas.kind().mode());
             let clip = self.gstate.current().clip.clone_shared();
             let blend_mode = self.gstate.current().blend_mode;
-            let backdrop = self.blend_backdrop(blend_mode);
+            let overprint = self.overprint_mask(false, &fill_color);
+            let backdrop = self.paint_backdrop(blend_mode, overprint);
             let pipe = Self::make_pipe(
                 self.gstate.current().fill_alpha,
                 blend_mode,
                 backdrop.as_deref(),
+                overprint,
             );
             let src = PipeSrc::Solid(fill_bytes);
 

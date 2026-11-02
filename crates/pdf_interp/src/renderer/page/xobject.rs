@@ -282,8 +282,13 @@ impl PageRenderer<'_> {
         if let (Some(mut g), Some(parent_group)) = (group, parent_group) {
             self.canvas.swap_group(&mut g);
             self.group = parent_group;
-            let backdrop = self.blend_backdrop(parent_blend_mode);
-            let pipe = Self::make_pipe(parent_fill_alpha, parent_blend_mode, backdrop.as_deref());
+            let backdrop = self.paint_backdrop(parent_blend_mode, None);
+            let pipe = Self::make_pipe(
+                parent_fill_alpha,
+                parent_blend_mode,
+                backdrop.as_deref(),
+                None,
+            );
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);
             let bitmap = self.paint_knocking_out(region, parent_fill_alpha, |r| match group_mask {

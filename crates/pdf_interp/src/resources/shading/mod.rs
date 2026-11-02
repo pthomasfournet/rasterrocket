@@ -57,10 +57,12 @@ use raster::shading::radial::RadialPattern;
 use super::colorspace::{self, ColorSpace};
 use super::dict_ext::DictExt;
 use super::{PageResources, read_matrix, resolve_dict};
+use crate::renderer::color::PROCESS_CHANNELS;
 use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, ParamColors, TriangleSink};
 use patch::PatchKind;
+use raster::pipe::ChannelMask;
 use stream::{VertexFormat, read_decode_array};
 pub(crate) use triangles::Mesh;
 
@@ -90,6 +92,12 @@ pub struct ResolvedShading {
     /// `Background` converted to sRGB.  It applies only when the shading is
     /// painted as a shading pattern, never through the `sh` operator.
     pub background: Option<[u8; 3]>,
+    /// The channels the shading paints on an ink canvas: the process
+    /// channels for a shading in a process CMYK space, every channel
+    /// otherwise.  A shading's colours reach the ink canvas through their
+    /// sRGB conversion, so a `Separation` or `DeviceN` shading paints
+    /// process ink and writes every channel.
+    pub paints: ChannelMask,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -148,12 +156,18 @@ pub(crate) fn resolve_shading_object(
         log::warn!("shading: Pattern colour space is not valid for a shading — skipping");
         return None;
     }
+    let paints = if cs_space.is_process_cmyk() {
+        PROCESS_CHANNELS
+    } else {
+        ChannelMask::ALL
+    };
     if cs_space.paints_nothing() {
         log::debug!("shading: every colorant is /None — the shading paints nothing");
         return Some(ResolvedShading {
             result: ShadingResult::Mesh(Mesh::new(Vec::new())),
             bbox: None,
             background: None,
+            paints,
         });
     }
     let cs = ShadingCs {
@@ -212,6 +226,7 @@ pub(crate) fn resolve_shading_object(
         result,
         bbox: read_bbox(&sh_dict, ctm, page_h),
         background: read_background(&sh_dict, cs, n_channels),
+        paints,
     })
 }
 

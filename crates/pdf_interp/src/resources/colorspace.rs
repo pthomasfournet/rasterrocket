@@ -208,6 +208,14 @@ impl ColorSpace {
         }
     }
 
+    /// Whether the space is a process CMYK space — `DeviceCMYK` or a
+    /// four-component ICC space — whose components are the inks of a CMYK
+    /// device.
+    #[must_use]
+    pub const fn is_process_cmyk(&self) -> bool {
+        matches!(self, Self::DeviceCmyk | Self::IccBased { n: 4, .. })
+    }
+
     /// The colorants of a `Separation` or `DeviceN` space, one per tint
     /// component; empty for every other space.
     #[must_use]
