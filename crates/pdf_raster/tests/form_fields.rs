@@ -341,7 +341,9 @@ fn characters_outside_the_cjk_collections_are_drawn_through_their_block_font() {
         let widget =
             format!("/FT /Tx /T (b) /Rect [10 30 190 70] /V {value} /DA (/Helv 20 Tf 0 g)");
         let b = dark_bounds(document("", &[&widget], vec![])).expect("ink");
-        assert!(b[3] - b[1] <= 4 && b[2] - b[0] > 15, "{value}: {b:?}");
+        // The strokes' length depends on the face drawing them (a tatweel
+        // is narrow in some Arabic faces); a `?` would be taller.
+        assert!(b[3] - b[1] <= 4 && b[2] - b[0] >= 4, "{value}: {b:?}");
     }
 }
 
