@@ -12,6 +12,11 @@ use raster::Bitmap;
 
 use crate::EncodeError;
 
+/// Slice length in which a packed bitmap (`stride == width`) is written.
+/// A `BufWriter` whose capacity is at most this passes each slice to its
+/// sink without copying it into the buffer.
+const PACKED_WRITE_BYTES: usize = 64 * 1024;
+
 /// Write `bitmap` to `out` as a binary PGM (`P5`) image.
 ///
 /// The sink `out` is consumed; wrap in `std::io::BufWriter` if buffering is
@@ -39,12 +44,15 @@ pub fn write_pgm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
 
     write_pgm_header(&mut out, bitmap.width, bitmap.height)?;
 
-    // Each row may be wider than `width` bytes (stride padding).
-    // Write only the live pixel bytes.
     let w = bitmap.width as usize;
-    for y in 0..bitmap.height {
-        let row = bitmap.row_bytes(y);
-        out.write_all(&row[..w])?;
+    if bitmap.stride == w {
+        for chunk in bitmap.data().chunks(PACKED_WRITE_BYTES) {
+            out.write_all(chunk)?;
+        }
+    } else {
+        for y in 0..bitmap.height {
+            out.write_all(&bitmap.row_bytes(y)[..w])?;
+        }
     }
 
     out.flush()?;
@@ -120,5 +128,18 @@ mod tests {
             matches!(result, Err(EncodeError::UnsupportedMode(_))),
             "Rgb8 should return UnsupportedMode for PGM"
         );
+    }
+
+    #[test]
+    fn packed_bitmap_past_one_slice_is_written_whole() {
+        let (w, h) = (300u32, 300u32);
+        let pixels: Vec<u8> = (0..w * h).map(|i| (i % 251) as u8).collect();
+        assert!(pixels.len() > PACKED_WRITE_BYTES);
+        let bmp = Bitmap::<Gray8>::from_packed(w, h, pixels.clone());
+        let mut out = Vec::new();
+        write_pgm::<Gray8, _>(&bmp, &mut out).unwrap();
+        let header = "P5\n300 300\n255\n";
+        assert_eq!(&out[..header.len()], header.as_bytes());
+        assert_eq!(&out[header.len()..], &pixels[..]);
     }
 }
