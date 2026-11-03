@@ -209,6 +209,7 @@ fn render_page_rgb_with_geom(
         renderer.set_cancel(cancel.flag());
     }
     renderer.set_antialias(session.text_antialias, session.vector_antialias);
+    renderer.set_overprint(session.overprint);
     renderer.set_document_fonts(Arc::clone(&session.fonts));
     renderer.set_optional_content(Arc::clone(&session.optional_content));
 

@@ -95,6 +95,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
         annotations: opts.annotations,
         text_antialias: opts.text_antialias,
         vector_antialias: opts.vector_antialias,
+        overprint: opts.overprint,
         decrypt_authorized: opts.decrypt_authorized,
         password: opts.password.clone(),
         font_dirs: opts

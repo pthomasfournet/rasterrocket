@@ -40,6 +40,8 @@ pub struct RasterSession {
     pub(crate) text_antialias: bool,
     /// Antialias paths ([`crate::SessionConfig::vector_antialias`]).
     pub(crate) vector_antialias: bool,
+    /// Simulate overprint ([`crate::SessionConfig::overprint`]).
+    pub(crate) overprint: bool,
     /// The document's interactive form type, reported in every page's
     /// [`PageDiagnostics::form_type`](crate::PageDiagnostics::form_type).
     pub(crate) form_type: pdf_interp::FormType,
@@ -389,6 +391,7 @@ fn open_session_with_doc(
         annotations: config.annotations,
         text_antialias: config.text_antialias,
         vector_antialias: config.vector_antialias,
+        overprint: config.overprint,
         form_type,
         javascript_warned: AtomicBool::new(false),
         #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]

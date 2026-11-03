@@ -61,8 +61,8 @@ once.** The full list, with migration notes, is in
   scales, `RasterOptions::cancel` for the batch entry points, and
   `render_page_gray` for one grayscale page of a session; `/UserUnit`
   scales the content as well as the bitmap. On the CLI `--rx`/`--ry`,
-  `-x`/`-y`/`-W`/`-H`, `--scale-to*`, `--aa`, `--aaVector` and
-  `--hide-annotations` take effect.
+  `-x`/`-y`/`-W`/`-H`, `--scale-to*`, `--aa`, `--aaVector`, `--overprint`
+  and `--hide-annotations` take effect.
 - **Damaged and hostile input.** Broken cross-reference tables and object
   streams are recovered; a content stream or image whose data ends early is
   drawn from what decoded and reported (`partial` in `PageDiagnostics`); an

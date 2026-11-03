@@ -295,6 +295,14 @@ pub struct SessionConfig {
     /// `false` scan-converts at pixel centres, giving hard bilevel edges;
     /// such fills always run on the CPU.
     pub vector_antialias: bool,
+    /// Whether overprint (`OP`, `op`, `OPM`; ISO 32000-2 §8.6.7) is simulated.
+    ///
+    /// Default `false`: every object knocks out what lies beneath it.  `true`
+    /// paints a page whose graphics states set overprint on a canvas of
+    /// process and spot inks, so that an overprinting object leaves the inks
+    /// it does not paint, and converts the result to RGB; pages without
+    /// overprint render unchanged.
+    pub overprint: bool,
     /// Extra directories of installed fonts, searched in order before the
     /// standard font directories.
     ///
@@ -344,6 +352,7 @@ impl SessionConfig {
             annotations: true,
             text_antialias: true,
             vector_antialias: true,
+            overprint: false,
             font_dirs: Vec::new(),
             system_fonts: true,
         }
