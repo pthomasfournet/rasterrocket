@@ -82,3 +82,46 @@ fn raster_options_overprint_reaches_the_renderer() {
     );
     assert_eq!(px(&on, 5, 7), px(&default, 5, 7), "right half unchanged");
 }
+
+/// A 10 pt square page filled with an RGB colour, whose resources hold
+/// `resources` and whose only annotation's appearance sets overprint.
+fn annotated_page(resources: &str) -> Vec<u8> {
+    with_page_tree(&[
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] \
+             /Resources << {resources} >> /Contents 4 0 R \
+             /Annots [<< /Type /Annot /Subtype /Square /Rect [0 0 1 1] /AP << /N 5 0 R >> >>] >>"
+        )
+        .into_bytes(),
+        stream_object("", b"0.3 0.6 0.9 rg 0 0 10 10 re f"),
+        stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 1 1] \
+             /Resources << /ExtGState << /GS << /OP true >> >> >>",
+            b"/GS gs",
+        ),
+    ])
+}
+
+/// The RGB page content of `pdf` rendered with overprint `on` and
+/// annotations drawn when `annotations`.
+fn render_with(pdf: Vec<u8>, on: bool, annotations: bool) -> Vec<u8> {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.overprint = on;
+    config.annotations = annotations;
+    let s = open_session_from_bytes(pdf, &config).expect("open session");
+    render_page_rgb(&s, 1, 1.0)
+        .expect("render page")
+        .data()
+        .to_vec()
+}
+
+/// A page whose overprint is set only in an annotation that is not drawn
+/// renders as with overprint off.
+#[test]
+fn overprint_in_a_hidden_annotation_leaves_the_page_alone() {
+    let off = render_with(annotated_page(""), false, false);
+    // The page content alone renders differently on the ink canvas.
+    let unused_op = "/ExtGState << /U << /OP true >> >>";
+    assert_ne!(render_with(annotated_page(unused_op), true, false), off);
+    assert_eq!(render_with(annotated_page(""), true, false), off);
+}

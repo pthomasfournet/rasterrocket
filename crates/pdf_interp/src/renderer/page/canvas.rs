@@ -384,28 +384,6 @@ impl PageRenderer<'_> {
         with_canvas!(&mut self.canvas, |b| snapshot.restore(b));
     }
 
-    /// Paint the page on an ink canvas, so that overprint (PDF §8.6.7) is
-    /// simulated, when `on` and some graphics state of the page sets
-    /// overprint; otherwise the canvas is left as it is.  Call before
-    /// execute: the page canvas is replaced.
-    pub fn set_overprint(&mut self, on: bool) {
-        let page = self.resources.resource_context_id();
-        if on && crate::page_group::page_uses_overprint(self.resources.doc(), page, true) {
-            self.use_ink_canvas();
-        }
-    }
-
-    /// Replace the fresh canvas with an ink canvas of the same size and
-    /// alpha plane.
-    fn use_ink_canvas(&mut self) {
-        debug_assert_eq!(
-            self.ops_executed, 0,
-            "the canvas is replaced before anything is painted"
-        );
-        let (width, height) = self.canvas.dims();
-        self.canvas = PageCanvas::new(CanvasKind::Ink, width, height, self.canvas.has_alpha());
-    }
-
     /// The canvas as an RGB bitmap.
     ///
     /// # Panics
@@ -417,12 +395,6 @@ impl PageRenderer<'_> {
             PageCanvas::Rgb(b) => b,
             PageCanvas::Ink(_) => panic!("rgb_canvas: the canvas holds ink"),
         }
-    }
-
-    /// Paint on an ink canvas whatever the page's graphics states.
-    #[cfg(test)]
-    pub(super) fn force_ink_canvas(&mut self) {
-        self.use_ink_canvas();
     }
 }
 

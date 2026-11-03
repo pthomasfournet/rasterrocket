@@ -74,9 +74,20 @@ pub struct ExtGStateParams {
     /// Non-stroking overprint `op`, which defaults to `OP` when absent.
     /// `None` = unchanged.
     pub overprint_fill: Option<bool>,
-    /// Overprint mode `OPM`: 0 or 1, the only defined values.  `None` =
-    /// unchanged.
-    pub overprint_mode: Option<u8>,
+    /// Overprint mode `OPM`.  `None` = unchanged, also for a value other
+    /// than 0 and 1, the only defined ones.
+    pub overprint_mode: Option<OverprintMode>,
+}
+
+/// The overprint mode `OPM` (ISO 32000-1 §8.6.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverprintMode {
+    /// `OPM 0`: an overprinting colour paints every component of its space.
+    #[default]
+    Zero,
+    /// `OPM 1`: an overprinting colour of a process CMYK space leaves the
+    /// components it gives as exactly 0 unpainted.
+    NonZero,
 }
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
@@ -130,10 +141,11 @@ impl ExtGStateParams {
             transfer: transfer::ext_gstate_transfer(doc, d),
             overprint_stroke,
             overprint_fill: d.get_bool(b"op").or(overprint_stroke),
-            overprint_mode: d
-                .get_i64(b"OPM")
-                .and_then(|m| u8::try_from(m).ok())
-                .filter(|m| *m <= 1),
+            overprint_mode: d.get_i64(b"OPM").and_then(|m| match m {
+                0 => Some(OverprintMode::Zero),
+                1 => Some(OverprintMode::NonZero),
+                _ => None,
+            }),
         }
     }
 }
@@ -959,11 +971,12 @@ mod tests {
 
     #[test]
     fn opm_parsed() {
-        assert_eq!(ext_gstate("<< /OPM 1 >>").overprint_mode, Some(1));
-        assert_eq!(ext_gstate("<< /OPM 0 >>").overprint_mode, Some(0));
-        assert_eq!(ext_gstate("<< /OPM 7 >>").overprint_mode, None);
-        assert_eq!(ext_gstate("<< /OPM -1 >>").overprint_mode, None);
-        assert_eq!(ext_gstate("<< >>").overprint_mode, None);
+        let opm = |src| ext_gstate(src).overprint_mode;
+        assert_eq!(opm("<< /OPM 1 >>"), Some(OverprintMode::NonZero));
+        assert_eq!(opm("<< /OPM 0 >>"), Some(OverprintMode::Zero));
+        assert_eq!(opm("<< /OPM 7 >>"), None);
+        assert_eq!(opm("<< /OPM -1 >>"), None);
+        assert_eq!(opm("<< >>"), None);
     }
 
     #[test]

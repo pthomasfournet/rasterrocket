@@ -212,14 +212,14 @@ impl ColorSpace {
     /// four-component ICC space — whose components are the inks of a CMYK
     /// device.
     #[must_use]
-    pub const fn is_process_cmyk(&self) -> bool {
+    pub(crate) const fn is_process_cmyk(&self) -> bool {
         matches!(self, Self::DeviceCmyk | Self::IccBased { n: 4, .. })
     }
 
     /// The colorants of a `Separation` or `DeviceN` space, one per tint
     /// component; empty for every other space.
     #[must_use]
-    pub fn colorants(&self) -> &[Colorant] {
+    pub(crate) fn colorants(&self) -> &[Colorant] {
         match self {
             Self::Separation { colorant, .. } => std::slice::from_ref(colorant),
             Self::DeviceN { colorants, .. } => colorants,
@@ -265,7 +265,7 @@ impl ColorSpace {
     /// than [`ncomponents`](Self::ncomponents) converts as
     /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.
     #[must_use]
-    pub fn process_ink(&self, doc: &Document, comps: &[f64]) -> [u8; 4] {
+    pub(crate) fn process_ink(&self, doc: &Document, comps: &[f64]) -> [u8; 4] {
         match self {
             Self::DeviceCmyk | Self::IccBased { n: 4, .. } => {
                 if let &[c, m, y, k] = comps {

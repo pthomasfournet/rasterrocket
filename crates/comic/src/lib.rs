@@ -119,6 +119,10 @@ pub struct ComicOptions {
     pub last_page: u32,
     /// Run deskew on each decoded page before producing the `RenderedPage`.
     pub deskew: bool,
+    /// The session an embedded PDF is opened with: its overprint,
+    /// antialiasing, annotation, font, decryption and backend settings.
+    /// Default [`SessionConfig::default`](pdf_raster::SessionConfig::default).
+    pub session: pdf_raster::SessionConfig,
 }
 
 impl ComicOptions {
@@ -143,6 +147,7 @@ impl Default for ComicOptions {
             first_page: 1,
             last_page: u32::MAX,
             deskew: false,
+            session: pdf_raster::SessionConfig::default(),
         }
     }
 }
@@ -406,7 +411,7 @@ fn render_embedded_pdf(
     opts: &ComicOptions,
 ) -> Result<ComicPages, ComicError> {
     let bytes = archive.take_entry(name)?;
-    let session = pdf_raster::open_session_from_bytes(bytes, &pdf_raster::SessionConfig::default())
+    let session = pdf_raster::open_session_from_bytes(bytes, &opts.session)
         .map_err(|e| ComicError::Pdf(format!("embedded PDF {name}: {e}")))?;
     let total = session.total_pages();
     if total == 0 {
@@ -600,6 +605,60 @@ startxref\n180\n%%EOF"
         assert!(!pages.is_empty(), "the embedded PDF must yield pages");
         assert_eq!(pages[0].0, 1, "PDF's own 1-based page numbering");
         assert!(pages[0].1.is_ok());
+    }
+
+    /// A PDF of the objects `objects`, numbered from 1; object 1 is the
+    /// catalog.
+    fn pdf_of(objects: &[&str]) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref}\n%%EOF",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    /// An embedded PDF is rendered with the options' session: a page whose
+    /// only content is a black annotation renders black with annotations
+    /// drawn and white with them hidden.
+    #[test]
+    fn embedded_pdf_uses_the_session_options() {
+        let pdf = pdf_of(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids [3 0 R] /Count 1>>",
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 8 8] \
+             /Annots [<</Type /Annot /Subtype /Square /Rect [0 0 8 8] /AP <</N 4 0 R>> >>]>>",
+            "<</Type /XObject /Subtype /Form /BBox [0 0 8 8] /Length 16>>\nstream\n0 g 0 0 8 8 re f\nendstream",
+        ]);
+        let (_dir, path) = write_temp_cbz("book.cbz", &make_cbz(&[("book.pdf", &pdf)]));
+        let render = |annotations: bool| {
+            let mut opts = ComicOptions::new(72.0);
+            opts.session.annotations = annotations;
+            let (_, page) = open_comic(&path, &opts).unwrap().next().unwrap();
+            page.unwrap().pixels
+        };
+        let shown = render(true);
+        assert!(
+            !shown.is_empty() && shown.iter().all(|&v| v == 0),
+            "{shown:?}"
+        );
+        let hidden = render(false);
+        assert!(hidden.iter().all(|&v| v == 255), "{hidden:?}");
     }
 
     #[test]

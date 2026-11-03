@@ -14,7 +14,8 @@ use crate::args::Args;
 use crate::cleanup::Page;
 use crate::render::{self, RenderError};
 
-/// Render a comic archive, writing each decodable page via the shared encoder.
+/// Render a comic archive, writing each decodable page via the shared encoder;
+/// an embedded PDF opens with `session`, the PDF path's session settings.
 ///
 /// Returns `(written, failed)`: the count of pages successfully written and the
 /// count of pages that decoded-or-rendered-but-could-not-be-written. Per-page
@@ -26,6 +27,7 @@ use crate::render::{self, RenderError};
 pub(crate) fn run(
     args: &Args,
     spill: &crate::ram::SpillPolicy,
+    session: pdf_raster::SessionConfig,
 ) -> Result<(usize, usize), ComicError> {
     // Comics carry no physical resolution, so the user's requested DPI rides
     // along on each RenderedPage purely for downstream OCR feature scaling;
@@ -41,7 +43,8 @@ pub(crate) fn run(
     // odd/even, single) is done once, below, by the same selector the PDF
     // path uses. Windowing here too would double-apply first/last against a
     // shrunken total.
-    let opts = ComicOptions::new(dpi);
+    let mut opts = ComicOptions::new(dpi);
+    opts.session = session;
 
     let mut pages = open_comic(Path::new(&args.input), &opts)?;
 

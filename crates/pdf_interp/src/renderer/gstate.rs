@@ -14,6 +14,7 @@ use raster::types::{BlendMode, LineCap, LineJoin};
 
 use super::color::RasterColor;
 use super::text::TextState;
+use crate::resources::OverprintMode;
 use crate::resources::colorspace::ColorSpace;
 use crate::resources::transfer::Transfer;
 
@@ -124,8 +125,8 @@ pub(crate) struct InterpGState {
     pub overprint_stroke: bool,
     /// Non-stroking overprint (PDF `op`).
     pub overprint_fill: bool,
-    /// Overprint mode (PDF `OPM`): 0 or 1.
-    pub overprint_mode: u8,
+    /// Overprint mode (PDF `OPM`).
+    pub overprint_mode: OverprintMode,
     /// Line width in user-space units.
     pub line_width: f64,
     /// Line cap style.
@@ -237,7 +238,7 @@ impl InterpGState {
             blend_mode: BlendMode::Normal,
             overprint_stroke: false,
             overprint_fill: false,
-            overprint_mode: 0,
+            overprint_mode: OverprintMode::Zero,
             line_width: 1.0,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
@@ -536,19 +537,19 @@ mod tests {
         let mut stack = GStateStack::new(100, 100, true);
         let gs = stack.current();
         assert!(!gs.overprint_stroke && !gs.overprint_fill);
-        assert_eq!(gs.overprint_mode, 0);
+        assert_eq!(gs.overprint_mode, OverprintMode::Zero);
         stack.save();
         let gs = stack.current_mut();
         gs.overprint_stroke = true;
         gs.overprint_fill = true;
-        gs.overprint_mode = 1;
+        gs.overprint_mode = OverprintMode::NonZero;
         stack.save();
         assert!(stack.current().overprint_fill, "copied into the new level");
         stack.restore();
         stack.restore();
         let gs = stack.current();
         assert!(!gs.overprint_stroke && !gs.overprint_fill);
-        assert_eq!(gs.overprint_mode, 0);
+        assert_eq!(gs.overprint_mode, OverprintMode::Zero);
     }
 
     #[test]

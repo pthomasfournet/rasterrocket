@@ -161,24 +161,14 @@ fn translucent_fill_and_stroke_uses_op_stroke() {
     }
 }
 
-/// The overprint option leaves a page with no overprint on the RGB
-/// canvas, rendered byte for byte as without the option.
+/// A page whose graphics states do not set overprint is not put on the
+/// ink canvas, whatever else it paints.
 #[test]
-fn overprint_option_without_op_is_identical() {
-    let doc = overprint_doc("/GS << /ca 1 >>", &spot_space());
-    let content = b"0.2 0.5 0.1 0.3 k 0 0 10 10 re f /GS gs 1 0 0 rg 2 2 4 4 re f \
-                    /Spot cs 0.7 scn 6 6 3 3 re f";
-    let render = |overprint: bool| {
-        let mut renderer = PageRenderer::new(10, 10, &doc, (4, 0));
-        renderer.set_overprint(overprint);
-        renderer.execute(&crate::content::parse(content));
-        // An RGB canvas, whatever the option.
-        assert!(matches!(renderer.canvas, PageCanvas::Rgb(_)));
-        renderer.finish().0.data().to_vec()
-    };
-    let (on, off) = (render(true), render(false));
-    assert!(on.iter().any(|&v| v != u8::MAX), "the content paints");
-    assert_eq!(on, off);
+fn a_page_without_op_does_not_use_overprint() {
+    let doc = overprint_doc("/GS << /ca 1 /OPM 1 >>", &spot_space());
+    assert!(!crate::page_uses_overprint(&doc, (4, 0), true));
+    let doc = overprint_doc("/GS << /op true >>", &spot_space());
+    assert!(crate::page_uses_overprint(&doc, (4, 0), true));
 }
 
 /// Page `(4, 0)` of a solid cyan fill followed by the form `/F`, a
@@ -410,16 +400,8 @@ fn masked_group_doc(blend: &str) -> Document {
 fn soft_mask_in_a_group_ignores_the_group_backdrop() {
     let render = |blend: &str| {
         let doc = masked_group_doc(blend);
-        let mut renderer = PageRenderer::new(10, 10, &doc, (4, 0));
-        renderer.set_overprint(true);
-        assert!(matches!(renderer.canvas, PageCanvas::Ink(_)));
-        renderer.execute(&crate::content::parse(
-            format!("{CYAN_PAGE} /F Do").as_bytes(),
-        ));
-        let PageCanvas::Ink(ink) = &renderer.canvas else {
-            panic!("an ink canvas");
-        };
-        ink.data().to_vec()
+        assert!(crate::page_uses_overprint(&doc, (4, 0), true));
+        render_ink(&doc, format!("{CYAN_PAGE} /F Do").as_bytes())
     };
     let (multiply, normal) = (render("Multiply"), render("Normal"));
     for (x, y) in [(0, 0), (1, 0), (2, 0), (5, 5), (9, 9)] {

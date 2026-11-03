@@ -1514,10 +1514,11 @@ fn repeated_image_failure_is_recorded_once() {
 /// Render `content` on page `(4, 0)` of `doc`, `size` pixels square, onto an
 /// RGB canvas or, when `ink`, onto an ink canvas; the finished RGB bytes.
 fn render_canvas(doc: &Document, size: u32, content: &[u8], ink: bool) -> Vec<u8> {
-    let mut renderer = PageRenderer::new(size, size, doc, (4, 0));
-    if ink {
-        renderer.force_ink_canvas();
-    }
+    let mut renderer = if ink {
+        PageRenderer::new_ink(size, size, doc, (4, 0))
+    } else {
+        PageRenderer::new(size, size, doc, (4, 0))
+    };
     renderer.execute(&crate::content::parse(content));
     renderer.finish().0.data().to_vec()
 }
@@ -1607,21 +1608,13 @@ fn ink_canvas_transparency_group() {
 /// A renderer of page `(4, 0)` of `doc`, 10 pixels square, on an ink
 /// canvas.
 fn ink_renderer(doc: &Document) -> PageRenderer<'_> {
-    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
-    renderer.force_ink_canvas();
-    renderer
+    PageRenderer::new_ink(10, 10, doc, (4, 0))
 }
 
 /// Render `content` on page `(4, 0)` of `doc`, 10 pixels square, onto an
 /// ink canvas; the canvas's ink bytes, eight per pixel.
 fn render_ink(doc: &Document, content: &[u8]) -> Vec<u8> {
-    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
-    renderer.force_ink_canvas();
-    renderer.execute(&crate::content::parse(content));
-    let PageCanvas::Ink(ink) = &renderer.canvas else {
-        panic!("an ink canvas");
-    };
-    ink.data().to_vec()
+    ink_fill(doc, content).1
 }
 
 /// Assert that `a` and `b` paint the same ink, within `tolerance` per
@@ -1847,8 +1840,7 @@ fn tint_to_cmyk(c1: &str) -> String {
 /// ink canvas; the fill colour left in the graphics state and the canvas's
 /// ink bytes, eight per pixel.
 fn ink_fill(doc: &Document, content: &[u8]) -> (RasterColor, Vec<u8>) {
-    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
-    renderer.force_ink_canvas();
+    let mut renderer = ink_renderer(doc);
     renderer.execute(&crate::content::parse(content));
     let fill = renderer.gstate.current().fill_color.clone();
     let PageCanvas::Ink(ink) = &renderer.canvas else {

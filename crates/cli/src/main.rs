@@ -57,13 +57,23 @@ fn main() -> ExitCode {
         Err(e) => return fail(e),
     };
 
+    let mut session_config = match args.session_config() {
+        Ok(config) => config,
+        Err(e) => return fail(e),
+    };
+
+    // The password is an input to decryption, not an authorisation: it is
+    // passed whether or not the gate ran, and does nothing without it.
+    session_config.password = args.password.as_deref().map(pdf_raster::Password::from);
+
     // Dispatch on the input extension. Comic archives render via the comic crate
     // and share the PDF path's output encoder; everything else (incl. `.pdf` and
     // unknown extensions) falls through to the native PDF interpreter below. The
     // `--ram` redirect above already applies, so comic output honours it too;
-    // the PDF-only session/decrypt code below is skipped for comics.
+    // the decryption gate below is skipped for comics, whose embedded PDF
+    // opens with the same session settings otherwise.
     if args.is_comic_input() {
-        return match comic::run(&args, &spill_policy) {
+        return match comic::run(&args, &spill_policy, session_config) {
             Ok((0, _)) => fail("no pages rendered"),
             // Per-page errors were already printed to stderr inside `run`; a
             // non-zero exit makes the partial failure observable via `$?`,
@@ -73,11 +83,6 @@ fn main() -> ExitCode {
             Err(e) => fail(e),
         };
     }
-
-    let mut session_config = match args.session_config() {
-        Ok(config) => config,
-        Err(e) => return fail(e),
-    };
 
     // Encrypted-document liability gate (production/CLI path only). Probe
     // the input cheaply; only an encrypted document triggers the gate, so
@@ -95,9 +100,6 @@ fn main() -> ExitCode {
         }
         session_config.decrypt_authorized = true;
     }
-    // The password is an input to decryption, not an authorisation: it is
-    // passed whether or not the gate ran, and does nothing without it.
-    session_config.password = args.password.as_deref().map(pdf_raster::Password::from);
 
     let pool = match rayon::ThreadPoolBuilder::new()
         .num_threads(args.num_threads)

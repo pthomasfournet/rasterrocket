@@ -198,17 +198,21 @@ fn render_page_rgb_with_geom(
 
     // The view carries the full-precision scales that also sized the page,
     // so the CTM's translation terms are consistent with the bitmap extent.
+    // Overprint is simulated on an ink canvas, chosen for a page on which
+    // some graphics state that is drawn sets it.
+    let ink =
+        session.overprint && pdf_interp::page_uses_overprint(doc, page_id, session.annotations);
     let mut renderer = pdf_interp::renderer::PageRenderer::with_page_group(
         &view,
         doc,
         page_id,
         pdf_interp::page_group(doc, page_id),
+        ink,
     );
     if let Some(cancel) = &params.cancel {
         renderer.set_cancel(cancel.flag());
     }
     renderer.set_antialias(session.text_antialias, session.vector_antialias);
-    renderer.set_overprint(session.overprint);
     renderer.set_document_fonts(Arc::clone(&session.fonts));
     renderer.set_optional_content(Arc::clone(&session.optional_content));
 

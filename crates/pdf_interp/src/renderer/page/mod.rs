@@ -341,6 +341,17 @@ impl<'doc> PageRenderer<'doc> {
     /// `doc` and `page_id` are used to resolve font and resource dictionaries.
     #[must_use]
     pub fn new(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
+        Self::with_view(&Self::unit_view(width, height), doc, page_id)
+    }
+
+    /// [`Self::new`] on an ink canvas, whatever the page's graphics states.
+    #[cfg(test)]
+    pub(crate) fn new_ink(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
+        Self::with_page_group(&Self::unit_view(width, height), doc, page_id, None, true)
+    }
+
+    /// The whole of a `width` × `height`-point page at one pixel per point.
+    fn unit_view(width: u32, height: u32) -> PageView {
         let geom = PageGeometry {
             width_pts: f64::from(width),
             height_pts: f64::from(height),
@@ -351,7 +362,7 @@ impl<'doc> PageRenderer<'doc> {
             media_box: None,
             crop_box: None,
         };
-        Self::with_view(&PageView::whole(&geom, (1.0, 1.0)), doc, page_id)
+        PageView::whole(&geom, (1.0, 1.0))
     }
 
     /// Create a renderer for `view`: a white bitmap of the view's window, with
@@ -363,12 +374,17 @@ impl<'doc> PageRenderer<'doc> {
     /// number.
     #[must_use]
     pub fn with_view(view: &PageView, doc: &'doc Document, page_id: ObjectId) -> Self {
-        Self::with_page_group(view, doc, page_id, None)
+        Self::with_page_group(view, doc, page_id, None, false)
     }
 
     /// [`Self::with_view`] for a page painted as the transparency group
-    /// `group` (see [`Self::set_page_group`]): the bitmap is allocated once,
-    /// transparent for a group and opaque white otherwise.
+    /// `group` (see [`Self::set_page_group`]), and, when `ink`, on a canvas
+    /// of process and spot inks on which overprint (ISO 32000-1 §8.6.7) is
+    /// simulated.  The canvas is allocated once: transparent for a group
+    /// and opaque white otherwise.  An ink canvas renders a page without
+    /// overprint as overprint off does, at the cost of the ink model, so
+    /// `ink` is meant for pages for which [`crate::page_uses_overprint`]
+    /// holds.
     ///
     /// # Panics
     ///
@@ -379,6 +395,7 @@ impl<'doc> PageRenderer<'doc> {
         doc: &'doc Document,
         page_id: ObjectId,
         group: Option<crate::resources::TransparencyGroupParams>,
+        ink: bool,
     ) -> Self {
         let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
@@ -392,7 +409,12 @@ impl<'doc> PageRenderer<'doc> {
         );
         let (width, height, rotate_cw) = (view.width, view.height, view.rotate_cw);
 
-        let canvas = PageCanvas::new(CanvasKind::Rgb, width, height, group.is_some());
+        let kind = if ink {
+            CanvasKind::Ink
+        } else {
+            CanvasKind::Rgb
+        };
+        let canvas = PageCanvas::new(kind, width, height, group.is_some());
 
         let initial_ctm = view.initial_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);

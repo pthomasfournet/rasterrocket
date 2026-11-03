@@ -591,3 +591,48 @@ fn hide_annotations_draws_the_page_content_alone() {
         "--hide-annotations leaves the page blank"
     );
 }
+
+/// A `.cbt` (tar) archive holding the single file `name` of contents `data`.
+fn tar_of(name: &str, data: &[u8]) -> Vec<u8> {
+    let mut header = [0u8; 512];
+    let mut put = |at: usize, field: &[u8]| header[at..at + field.len()].copy_from_slice(field);
+    put(0, name.as_bytes());
+    put(100, b"0000644\0");
+    put(108, b"0000000\0");
+    put(116, b"0000000\0");
+    put(124, format!("{:011o}\0", data.len()).as_bytes());
+    put(136, b"00000000000\0");
+    put(148, b"        ");
+    put(156, b"0");
+    put(257, b"ustar\x0000");
+    let sum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+    header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    let mut tar = header.to_vec();
+    tar.extend_from_slice(data);
+    tar.resize(tar.len().next_multiple_of(512) + 1024, 0);
+    tar
+}
+
+/// A PDF inside a comic archive is rendered with the session flags of the
+/// PDF path: `--hide-annotations` leaves the annotated page blank.
+#[test]
+fn comic_embedded_pdf_honours_session_flags() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let input = dir.path().join("in.cbt");
+    std::fs::write(&input, tar_of("book.pdf", &annotated_pdf())).expect("write archive");
+    let page = |args: &[&str]| {
+        let mut all = vec!["-r", "72", "--gray"];
+        all.extend_from_slice(args);
+        assert_success(&rrocket(dir.path(), &input, &all));
+        read_pnm(&dir.path().join("out-1.pgm")).3
+    };
+    assert_eq!(
+        page(&[])[20 * 40 + 20],
+        0,
+        "the annotation is drawn by default"
+    );
+    assert!(
+        page(&["--hide-annotations"]).iter().all(|&v| v == 255),
+        "--hide-annotations leaves the page blank"
+    );
+}
