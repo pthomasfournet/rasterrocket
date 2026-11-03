@@ -96,6 +96,27 @@ fn spot_overprints_process() {
     assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0]);
 }
 
+/// An indexed colour paints as its palette entry in the base space: a
+/// black entry of a `DeviceCMYK` palette overprints the cyan under
+/// nonzero overprint mode, and an entry of a spot palette paints the
+/// spot's channel alone.
+#[test]
+fn indexed_colour_paints_as_its_base_space() {
+    let spaces = format!(
+        "/Ix [/Indexed /DeviceCMYK 0 <000000FF>] /Is [/Indexed {} 0 <FF>] {}",
+        spot_space().trim_start_matches("/Spot "),
+        spot_space()
+    );
+    let doc = overprint_doc("/GS_op << /OP true /OPM 1 >>", &spaces);
+    let content = format!("{CYAN_PAGE} /GS_op gs /Ix cs 0 sc 0 0 5 10 re f");
+    let ink = render_ink(&doc, content.as_bytes());
+    assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 255, 0, 0, 0, 0]);
+    assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0]);
+    let content = format!("{CYAN_PAGE} /GS_op gs /Is cs 0 sc 0 0 5 10 re f");
+    let ink = render_ink(&doc, content.as_bytes());
+    assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 0, 255, 0, 0, 0]);
+}
+
 /// An RGB colour paints every channel: with overprint on it still
 /// knocks the cyan out.
 #[test]
@@ -120,6 +141,24 @@ fn stroke_uses_op_stroke() {
     assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 255, 0, 0, 0, 0], "stroke");
     assert_eq!(ink_at(&ink, 8, 5), [0, 0, 0, 255, 0, 0, 0, 0], "fill");
     assert_eq!(ink_at(&ink, 5, 0), [255, 0, 0, 0, 0, 0, 0, 0], "untouched");
+}
+
+/// The translucent stroke of a fill-and-stroke overprints under `OP`, not
+/// `op`: a half-opaque black stroke keeps the cyan under `OP true` and
+/// knocks half of it out under `op true` alone.
+#[test]
+fn translucent_fill_and_stroke_uses_op_stroke() {
+    for (states, cyan) in [
+        ("/GS << /OP true /op false /OPM 1 /CA 0.5 >>", 255),
+        ("/GS << /OP false /op true /OPM 1 /CA 0.5 >>", 127),
+    ] {
+        let doc = overprint_doc(states, "");
+        let content = format!("{CYAN_PAGE} /GS gs 0 0 0 1 K 0 0 0 1 k 4 w 0 5 m 4 5 l B");
+        let ink = render_ink(&doc, content.as_bytes());
+        let [c, m, y, k, ..] = ink_at(&ink, 2, 5);
+        assert_eq!((c, m, y), (cyan, 0, 0), "{states}");
+        assert!((127..=128).contains(&k), "{states}: black at {k}");
+    }
 }
 
 /// The overprint option leaves a page with no overprint on the RGB

@@ -107,7 +107,8 @@ impl PageRenderer<'_> {
     ///
     /// - `Ok` → blit the image, keeping it in the page's image memo under
     ///   `memo_key` (the stream object and the draw size it was decoded
-    ///   for) when given.
+    ///   for) when given; on an ink canvas device-resident samples are
+    ///   read back to the host first.
     /// - `DecodeFailed` → record the failure in the page diagnostics and skip
     ///   the image; the pixel region keeps what was painted beneath it.
     /// - `Absent` → a non-image `XObject` subtype with no raster appearance;
@@ -121,6 +122,8 @@ impl PageRenderer<'_> {
         use crate::resources::image::ImageResolution;
         match resolution {
             ImageResolution::Ok(decoded) => {
+                #[cfg(feature = "cache")]
+                let decoded = self.host_resident_for_ink(decoded);
                 if let Some(reason) = &decoded.partial {
                     self.record_partial_image(Some(name), reason.clone());
                 }

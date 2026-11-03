@@ -1194,6 +1194,42 @@ fn transfer_function_leaves_the_backdrop_alone() {
     assert!(px.iter().all(|&v| v == 255), "got {px:?}");
 }
 
+/// The stroke of a translucent fill-and-stroke covers the pixels its
+/// shape covers whatever its paint: a shading-pattern stroke, and a white
+/// stroke inverted to black by the transfer function, both paint black at
+/// half opacity over the white page.
+#[test]
+fn translucent_fill_and_stroke_coverage_ignores_the_stroke_paint() {
+    const PS: &str = "{ 1 exch sub }";
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /H << /CA 0.5 >> \
+             /HInv << /CA 0.5 /TR 5 0 R >> >> \
+             /Pattern << /P << /PatternType 2 /Shading << /ShadingType 2 \
+             /ColorSpace /DeviceGray /Coords [0 0 8 0] \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1 >> \
+             /Extend [true true] >> >> >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object("/FunctionType 4 /Domain [0 1] /Range [0 1]", PS),
+        ),
+    ]);
+    for content in [
+        b"/H gs /Pattern CS /P SCN 8 w 0 4 m 8 4 l B".as_slice(),
+        b"/HInv gs 1 G 8 w 0 4 m 8 4 l B",
+    ] {
+        let px = render_gray_on(&doc, (4, 0), 8, content);
+        assert!(
+            px.iter().all(|v| (126..=129).contains(v)),
+            "{}: {px:?}",
+            String::from_utf8_lossy(content)
+        );
+    }
+}
+
 /// A stroke thinner than a device pixel is widened to one pixel: a
 /// 0.1-unit rule centred in a pixel row paints that row solid.
 #[test]
@@ -1568,6 +1604,14 @@ fn ink_canvas_transparency_group() {
     assert_ink_matches_rgb(&doc, b"/H gs /F Do", 2);
 }
 
+/// A renderer of page `(4, 0)` of `doc`, 10 pixels square, on an ink
+/// canvas.
+fn ink_renderer(doc: &Document) -> PageRenderer<'_> {
+    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
+    renderer.force_ink_canvas();
+    renderer
+}
+
 /// Render `content` on page `(4, 0)` of `doc`, 10 pixels square, onto an
 /// ink canvas; the canvas's ink bytes, eight per pixel.
 fn render_ink(doc: &Document, content: &[u8]) -> Vec<u8> {
@@ -1908,6 +1952,12 @@ fn fifth_spot_falls_back_to_process() {
     let (fill, _) = ink_fill(&doc, format!("{content} /S4 cs 0.5 scn").as_bytes());
     assert_eq!(fill.paints(), ChannelMask::new(0b1111));
     assert_eq!(fill.ink(), &[0, 0, 128, 0, 0, 0, 0, 0]);
+    // The page's diagnostics name it, once.
+    let mut renderer = ink_renderer(&doc);
+    renderer.execute(&crate::content::parse(
+        format!("{content} /S4 cs 0.5 scn 0 0 1 1 re f").as_bytes(),
+    ));
+    assert_eq!(renderer.finish().1.unslotted_spots, ["Spot4"]);
 }
 
 #[test]

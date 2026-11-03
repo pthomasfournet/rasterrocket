@@ -352,14 +352,9 @@ impl ColorSpace {
                 .and_then(|id| IccConversion::load(doc, id, *n))
                 .and_then(|conv| conv.convert(doc, comps))
                 .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
-            Self::Indexed {
-                base,
-                hival,
-                lookup,
-            } => lookup
-                .as_deref()
-                .and_then(|bytes| indexed_to_rgb(doc, bytes, base, *hival, comps[0]))
-                .unwrap_or([0, 0, 0]),
+            Self::Indexed { .. } => self
+                .indexed_base_components(comps)
+                .map_or([0, 0, 0], |(base, entry)| base.convert_to_rgb(doc, &entry)),
             Self::Pattern { .. } => [0, 0, 0],
             Self::Separation {
                 alternate, tint, ..
@@ -455,44 +450,49 @@ impl ColorSpace {
     }
 }
 
-/// Convert palette index `index` of an `Indexed` space to sRGB.
-///
-/// PDF §8.6.6.3: the lookup holds `hival + 1` entries of
-/// `base.ncomponents()` bytes; byte `b` of an entry maps linearly onto the
-/// base component's range (`[0, 1]` for device and tint spaces, `L*` in
-/// `[0, 100]` and `a*`, `b*` over the Lab `Range`).  `None` when `lookup`
-/// is shorter than the entry.
-fn indexed_to_rgb(
-    doc: &Document,
-    lookup: &[u8],
-    base: &ColorSpace,
-    hival: u8,
-    index: f64,
-) -> Option<[u8; 3]> {
-    let n = base.ncomponents();
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clamped to [0, hival] ⊂ [0, 255] first"
-    )]
-    let entry = index.round().clamp(0.0, f64::from(hival)) as usize;
-    let raw = lookup.get(entry * n..(entry + 1) * n)?;
-    Some(samples_to_rgb(doc, base, raw))
+impl ColorSpace {
+    /// The base space of an `Indexed` space and the components in it of
+    /// the palette entry the index `comps` selects (ISO 32000-1 §8.6.6.3):
+    /// the index is rounded and clamped to `hival`, and byte `b` of the
+    /// entry maps linearly onto the base component's range (`[0, 1]` for
+    /// device and tint spaces, `L*` in `[0, 100]` and `a*`, `b*` over the
+    /// Lab `Range`).  `None` for any other space, for a component count
+    /// other than 1, and when the lookup is missing or shorter than the
+    /// entry.
+    #[must_use]
+    pub(crate) fn indexed_base_components(&self, comps: &[f64]) -> Option<(&Self, Vec<f64>)> {
+        let Self::Indexed {
+            base,
+            hival,
+            lookup,
+        } = self
+        else {
+            return None;
+        };
+        let &[index] = comps else {
+            return None;
+        };
+        let n = base.ncomponents();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to [0, hival] ⊂ [0, 255] first"
+        )]
+        let entry = index.round().clamp(0.0, f64::from(*hival)) as usize;
+        let raw = lookup.as_deref()?.get(entry * n..(entry + 1) * n)?;
+        Some((base, sample_components(base, raw)))
+    }
 }
 
-/// Convert one 8-bit sample tuple of `space` to sRGB.
-///
-/// Sample byte `b` of component `i` maps linearly onto that component's
-/// default range ([`ColorSpace::default_decode`] at 8 bits).
-/// `samples.len()` must equal `space.ncomponents()`; a mismatch converts to
-/// black, as [`ColorSpace::convert_to_rgb`] does.
-pub(crate) fn samples_to_rgb(doc: &Document, space: &ColorSpace, samples: &[u8]) -> [u8; 3] {
-    let comps: Vec<f64> = samples
+/// The components of one 8-bit sample tuple of `space`: sample byte `b`
+/// of component `i` maps linearly onto that component's default range
+/// ([`ColorSpace::default_decode`] at 8 bits).
+fn sample_components(space: &ColorSpace, samples: &[u8]) -> Vec<f64> {
+    samples
         .iter()
         .zip(space.default_decode(8))
         .map(|(&b, (dmin, dmax))| decoded_sample(b, (dmin, dmax), 255.0))
-        .collect();
-    space.convert_to_rgb(doc, &comps)
+        .collect()
 }
 
 /// The component value of sample `s` under the `Decode` pair

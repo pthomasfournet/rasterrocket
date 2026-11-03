@@ -35,8 +35,9 @@ const SPOT_CHANNEL: usize = 4;
 pub(super) struct InkMap {
     /// The assigned slots, slot `s` at index `s`; at most [`SLOTS`].
     slots: Vec<Slot>,
-    /// Whether a spot beyond the slots has been reported for this page.
-    overflow_reported: bool,
+    /// The distinct spot colorants that found no slot, in order of first
+    /// sight.
+    unslotted: Vec<String>,
 }
 
 /// A spot colorant holding a slot.
@@ -53,17 +54,11 @@ impl InkMap {
     /// page's slots are all held by other colorants.  The same name in
     /// several spaces shares one slot and the table of the space it was
     /// first met in.
-    pub(super) fn slot(
-        &mut self,
-        doc: &Document,
-        name: &[u8],
-        space: &ColorSpace,
-    ) -> Option<usize> {
+    fn slot(&mut self, doc: &Document, name: &[u8], space: &ColorSpace) -> Option<usize> {
         if let Some(slot) = self.slots.iter().position(|s| *s.name == *name) {
             return Some(slot);
         }
         if self.slots.len() == SLOTS {
-            self.report_overflow(name);
             return None;
         }
         self.slots.push(Slot {
@@ -89,17 +84,35 @@ impl InkMap {
         unseen.len() <= SLOTS - self.slots.len()
     }
 
-    /// Log once per page that spot colorants beyond the slots paint their
-    /// alternate colour.
-    fn report_overflow(&mut self, name: &[u8]) {
-        if !self.overflow_reported {
-            self.overflow_reported = true;
-            log::debug!(
-                "rasterrocket-interp: more than {SLOTS} spot colorants on the page; \
-                 {:?} and later spots paint their alternate colour in process ink",
-                String::from_utf8_lossy(name)
-            );
+    /// Record the spot colorants of `space` that hold no slot, which paint
+    /// their alternate colour in process ink; the first is logged as a
+    /// warning once per page.
+    fn report_overflow(&mut self, space: &ColorSpace) {
+        for colorant in space.colorants() {
+            let Colorant::Spot(name) = colorant else {
+                continue;
+            };
+            if self.slots.iter().any(|s| s.name == *name) {
+                continue;
+            }
+            let name = String::from_utf8_lossy(name);
+            if self.unslotted.iter().any(|n| *n == name) {
+                continue;
+            }
+            if self.unslotted.is_empty() {
+                log::warn!(
+                    "rasterrocket-interp: more than {SLOTS} spot colorants on the page; \
+                     {name:?} and later spots paint their alternate colour in process ink"
+                );
+            }
+            self.unslotted.push(name.into_owned());
         }
+    }
+
+    /// The spot colorants that found no slot and painted their alternate
+    /// colour in process ink, in order of first sight.
+    pub(super) fn into_unslotted(self) -> Vec<String> {
+        self.unslotted
     }
 
     /// The process-equivalent table of each slot, `None` for a free slot.
@@ -120,19 +133,13 @@ impl InkMap {
         space: &ColorSpace,
         comps: &[f64],
     ) -> ([u8; 8], ChannelMask) {
-        let process_fallback = |map: &mut Self, name: &[u8]| {
-            map.report_overflow(name);
+        let process_fallback = |map: &mut Self| {
+            map.report_overflow(space);
             let [c, m, y, k] = space.process_ink(doc, comps);
             ([c, m, y, k, 0, 0, 0, 0], PROCESS_CHANNELS)
         };
         if !self.fits(space) {
-            let name = space.colorants().iter().find_map(|c| match c {
-                Colorant::Spot(name) if !self.slots.iter().any(|s| s.name == *name) => {
-                    Some(&**name)
-                }
-                _ => None,
-            });
-            return process_fallback(self, name.unwrap_or_default());
+            return process_fallback(self);
         }
         let mut ink = [0u8; 8];
         let mut bits = 0u8;
@@ -151,7 +158,7 @@ impl InkMap {
                 Colorant::Spot(name) => {
                     // Every spot fits, so the slot is given.
                     let Some(slot) = self.slot(doc, name, space) else {
-                        return process_fallback(self, name);
+                        return process_fallback(self);
                     };
                     SPOT_CHANNEL + slot
                 }

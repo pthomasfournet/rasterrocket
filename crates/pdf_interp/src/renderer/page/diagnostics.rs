@@ -48,6 +48,12 @@ pub struct PageDiagnostics {
     /// the `/Font` resources in effect do not define.  Their text is drawn
     /// in Helvetica.  Empty when every font resolved.
     pub missing_fonts: Vec<String>,
+    /// Spot colorants painted on a page simulating overprint that found no
+    /// spot channel, the four channels being held by other spots.  Each
+    /// painted its alternate colour in process ink, so it overprints as
+    /// that process colour rather than as a separate ink.  Empty when
+    /// every spot had a channel, and on a page without overprint.
+    pub unslotted_spots: Vec<String>,
     /// The document's interactive form type.  [`FormType::XfaFull`] marks
     /// a dynamic XFA form, whose rendered pages are the placeholder content
     /// stored in the file rather than the form.

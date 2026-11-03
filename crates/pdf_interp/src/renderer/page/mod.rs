@@ -659,10 +659,12 @@ impl<'doc> PageRenderer<'doc> {
         let Self {
             canvas,
             ink_map,
-            diag,
+            mut diag,
             ..
         } = self;
-        (canvas.into_rgb(&ink_map.luts()), diag)
+        let rgb = canvas.into_rgb(&ink_map.luts());
+        diag.unslotted_spots = ink_map.into_unslotted();
+        (rgb, diag)
     }
 
     /// Execute a slice of decoded operators in order.

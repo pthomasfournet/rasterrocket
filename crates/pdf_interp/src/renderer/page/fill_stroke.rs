@@ -19,6 +19,7 @@ use super::PageRenderer;
 use super::canvas::PageCanvas;
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
+use crate::resources::ColorSpace;
 
 impl PageRenderer<'_> {
     /// Fill `path` (by the even-odd rule when `even_odd`) and stroke it as
@@ -55,9 +56,12 @@ impl PageRenderer<'_> {
             gs.stroke_alpha = u8::MAX;
             gs.blend_mode = BlendMode::Normal;
             gs.stroke_pattern = None;
+            gs.stroke_color_space = ColorSpace::DeviceGray;
             gs.stroke_color = RasterColor::from_bytes([u8::MAX; 3]);
+            gs.transfer = None;
         }
-        // White on black on an RGB canvas: the red channel is the coverage.
+        // White on black on an RGB canvas: the red channel is the coverage,
+        // whatever the stroke's colour space, pattern or transfer function.
         let black = PageCanvas::Rgb(Bitmap::<Rgb8>::new(self.width, self.height, 1, false));
         let page = std::mem::replace(&mut self.canvas, black);
         self.stroke_within(path, line_width, Some(rect));
@@ -70,7 +74,8 @@ impl PageRenderer<'_> {
             .collect()
     }
 
-    /// Fill `area` with the stroke's colour or pattern and alpha.
+    /// Fill `area` with the stroke's colour or pattern, alpha and
+    /// overprint.
     fn fill_with_stroke_paint(&mut self, area: &Path) {
         self.gstate.save();
         {
@@ -81,6 +86,7 @@ impl PageRenderer<'_> {
                 .clone_from(&gs.stroke_pattern_components);
             gs.fill_color_space = gs.stroke_color_space.clone();
             gs.fill_alpha = gs.stroke_alpha;
+            gs.overprint_fill = gs.overprint_stroke;
         }
         self.fill_path(area, false);
         self.gstate.restore();

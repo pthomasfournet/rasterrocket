@@ -90,7 +90,8 @@ impl PageRenderer<'_> {
     ///
     /// On an ink canvas a `Separation` or `DeviceN` colour is given as its
     /// colorants' tints, each in its own channel (see `InkMap`); on an RGB
-    /// canvas it is its sRGB conversion, like every other colour.
+    /// canvas it is its sRGB conversion, like every other colour.  An
+    /// `Indexed` colour resolves as its palette entry in the base space.
     pub(super) fn color_for_components(&mut self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
         let doc = self.resources.doc();
         match cs {
@@ -114,6 +115,12 @@ impl PageRenderer<'_> {
                 let (ink, paints) = self.ink_map.colorant_ink(doc, cs, comps);
                 RasterColor::with_ink(cs.convert_to_rgb(doc, comps), ink, paints)
             }
+            // An indexed colour is its palette entry's colour in the base
+            // space.
+            ColorSpace::Indexed { .. } => match cs.indexed_base_components(comps) {
+                Some((base, entry)) => self.color_for_components(base, &entry),
+                None => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
+            },
             _ => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
         }
     }

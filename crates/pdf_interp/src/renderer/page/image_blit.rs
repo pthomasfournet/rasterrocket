@@ -111,12 +111,10 @@ impl PageRenderer<'_> {
             None => (img.smask.as_ref(), page_ctm),
         };
         // A device-resident image is sampled at full resolution by the
-        // blit kernel, which writes sRGB.  A draw that reduces it takes a
-        // host copy so that it is area-averaged as a host-resident image
-        // is, and so does any draw onto an ink canvas, which the kernel
-        // cannot write.
+        // blit kernel.  A draw that reduces it takes a host copy so that it
+        // is area-averaged as a host-resident image is.
         #[cfg(feature = "cache")]
-        let host_copy = self.host_copy_for_cpu_draw(img, &page_ctm);
+        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm);
         #[cfg(feature = "cache")]
         let img = host_copy.as_ref().unwrap_or(img);
         let reduced = image_reduce::reduce_for_draw(img, &page_ctm);
@@ -216,37 +214,59 @@ impl PageRenderer<'_> {
     }
 
     /// A host-resident copy of `img` when its samples are device-resident
-    /// and the draw takes the CPU path: drawing them through `ctm` reduces
-    /// the image, or the canvas holds ink.  `None` otherwise, or when the
-    /// copy fails; the device samples are then drawn as they are, which on
-    /// an ink canvas fails the image.
+    /// and drawing them through `ctm` reduces the image, so that it is
+    /// area-averaged as a host-resident image is.  `None` otherwise, or
+    /// when the copy fails; the device samples are then drawn as they are.
     #[cfg(feature = "cache")]
-    pub(super) fn host_copy_for_cpu_draw(
+    pub(super) fn host_copy_for_reduced_draw(
         &self,
         img: &crate::resources::ImageDescriptor,
         ctm: &Ctm,
+    ) -> Option<crate::resources::ImageDescriptor> {
+        if !image_reduce::draw_reduces(ctm, img.width, img.height) {
+            return None;
+        }
+        self.host_copy(img, "a reduced draw")
+    }
+
+    /// `decoded` with its samples host-resident when they are
+    /// device-resident and the canvas holds ink, which the blit kernel
+    /// cannot write; unchanged otherwise, or when the copy fails.  Applied
+    /// before the image enters the image memo, so the samples are read
+    /// back once per page however often the image is drawn.
+    #[cfg(feature = "cache")]
+    pub(super) fn host_resident_for_ink(
+        &self,
+        mut decoded: crate::resources::DecodedImage,
+    ) -> crate::resources::DecodedImage {
+        if self.canvas.kind() == CanvasKind::Ink
+            && let Some(host) = self.host_copy(&decoded.image, "an ink canvas")
+        {
+            decoded.image = host;
+        }
+        decoded
+    }
+
+    /// A host-resident copy of `img` when its samples are device-resident,
+    /// read back from the image cache for `purpose`; `None` when they are
+    /// host-resident or the read-back fails.
+    #[cfg(feature = "cache")]
+    fn host_copy(
+        &self,
+        img: &crate::resources::ImageDescriptor,
+        purpose: &str,
     ) -> Option<crate::resources::ImageDescriptor> {
         use crate::resources::image::ImageData;
 
         let ImageData::Gpu(cached) = &img.data else {
             return None;
         };
-        let ink = self.canvas.kind() == CanvasKind::Ink;
-        let reduces = image_reduce::draw_reduces(ctm, img.width, img.height);
-        if !ink && !reduces {
-            return None;
-        }
         let cache = &self.cache_state.as_ref()?.cache;
         let pixels = cache
             .download(cached)
             .map_err(|e| {
-                let draw = if reduces {
-                    "a reduced draw"
-                } else {
-                    "an ink canvas"
-                };
                 log::warn!(
-                    "rasterrocket-interp: reading a cached image back for {draw} failed: {e}"
+                    "rasterrocket-interp: reading a cached image back for {purpose} failed: {e}"
                 );
             })
             .ok()?;
@@ -287,6 +307,11 @@ impl PageRenderer<'_> {
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
+            if self.canvas.kind() == CanvasKind::Ink {
+                return Err(
+                    "device-resident image could not be read back for the ink canvas".to_owned(),
+                );
+            }
             if self.try_gpu_blit_image(cached, grid, grid_clip) {
                 return Ok(());
             }
