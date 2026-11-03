@@ -211,6 +211,23 @@ mod tests {
     }
 
     #[test]
+    fn predefined_codes_stop_at_the_glyph_count() {
+        let charset = Charset::new(Default::default(), 0, 20).unwrap();
+        let encoding = Encoding::Predefined(PredefinedEncoding::Standard);
+        // 'B' is SID 35, which the ISOAdobe charset places at glyph 35.
+        assert_eq!(encoding.map(&charset, b'B'), None);
+        // '!' is SID 2, glyph 2.
+        assert_eq!(encoding.map(&charset, b'!'), Some(GlyphId::new(2)));
+        // A supplement naming SID 91 ('z', glyph 91) maps to nothing.
+        let supplement = [Supplement {
+            code: 40,
+            glyph: 91.into(),
+        }];
+        let encoding = Encoding::Custom(CustomEncoding::Format0(&[], &supplement));
+        assert_eq!(encoding.map(&charset, 40), None);
+    }
+
+    #[test]
     fn supplemental() {
         // map 40 -> z and 122 -> parenleft
         let supplement = [(40, 91), (122, 9)].map(|(code, glyph)| Supplement {

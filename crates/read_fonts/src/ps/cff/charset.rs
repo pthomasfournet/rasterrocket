@@ -82,9 +82,12 @@ impl<'a> Charset<'a> {
     }
 
     /// Returns the glyph identifier for the given string identifier.
+    ///
+    /// A glyph identifier at or past the glyph count is out of bounds, as
+    /// in [`Self::string_id`].
     pub fn glyph_id(&self, string_id: Sid) -> Result<GlyphId, ReadError> {
         let sid = string_id.to_u16();
-        match &self.kind {
+        let gid = match &self.kind {
             CharsetKind::IsoAdobe => {
                 // The ISOAdobe charset is an identity mapping of gid->sid up
                 // to 228 entries
@@ -110,6 +113,11 @@ impl<'a> Charset<'a> {
                 CustomCharset::Format1(fmt) => fmt.glyph_id(string_id),
                 CustomCharset::Format2(fmt) => fmt.glyph_id(string_id),
             },
+        }?;
+        if gid.to_u32() < self.num_glyphs {
+            Ok(gid)
+        } else {
+            Err(ReadError::OutOfBounds)
         }
     }
 

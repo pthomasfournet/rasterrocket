@@ -126,6 +126,13 @@ was examined.
   glyph lies past the font's glyph count maps to nothing, as in FreeType,
   instead of to a glyph index the font does not have. The PDF simple-font
   resolver then falls through to the code's glyph name.
+  Extended in this fork to every code-to-glyph path: `Charset::glyph_id`
+  returns `OutOfBounds` for a glyph index at or past the glyph count, as
+  `string_id` does, so a predefined (Standard, Expert) encoding and a
+  supplement naming a SID whose charset position lies past the font's
+  glyphs map to nothing as well. This covers the predefined ISOAdobe,
+  Expert and ExpertSubset charsets and a custom charset whose last range
+  overshoots the glyph count.
 
 ## Upstream review (2026-10-30, extended 2026-11-03)
 
