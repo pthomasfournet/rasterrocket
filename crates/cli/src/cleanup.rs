@@ -9,7 +9,7 @@
 
 use camera::{CameraOptions, GrayPage, GrayView, Outcome, Report};
 use color::{Gray8, Rgb8};
-use pdf_raster::rgb_to_gray;
+use pdf_raster::{rgb_into_gray, rgb_to_gray};
 use raster::Bitmap;
 
 use crate::render::RenderError;
@@ -37,7 +37,7 @@ impl Page {
     /// The page's luma: converted from colour, or the page itself.
     pub(crate) fn into_luma(self) -> Bitmap<Gray8> {
         match self {
-            Self::Rgb(rgb) => rgb_to_gray(&rgb),
+            Self::Rgb(rgb) => rgb_into_gray(rgb),
             Self::Gray(luma) | Self::Mono(luma) => luma,
         }
     }

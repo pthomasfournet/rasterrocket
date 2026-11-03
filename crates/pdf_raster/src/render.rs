@@ -7,7 +7,7 @@ use color::Rgb8;
 use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
-use crate::gray::rgb_to_gray;
+use crate::gray::rgb_into_gray;
 use crate::{RasterError, RasterOptions, RasterSession, RenderParams, RenderRegion, RenderedPage};
 
 /// Render one whole page to an RGB bitmap at `scale` device pixels per point.
@@ -83,15 +83,14 @@ pub fn render_page_gray(
     let mut params = RenderParams::new(f64::from(dpi) / 72.0);
     params.cancel.clone_from(&opts.cancel);
     let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
-    let mut gray = rgb_to_gray(&rgb);
-    drop(rgb);
+    let mut gray = rgb_into_gray(rgb);
 
     if opts.deskew {
         crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
     }
 
-    Ok(crate::page::gray8_to_rendered_page(
-        &gray,
+    Ok(crate::page::gray8_into_rendered_page(
+        gray,
         page_num,
         dpi,
         diagnostics,

@@ -127,9 +127,12 @@ use std::path::Path;
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
-pub use gray::rgb_to_gray;
+pub use gray::{rgb_into_gray, rgb_to_gray};
 pub use open::{RasterSession, open_session, open_session_from_bytes, prescan_session};
-pub use page::{MAX_PX_AREA, MAX_PX_DIMENSION, gray8_to_rendered_page, validate_dimensions};
+pub use page::{
+    MAX_PX_AREA, MAX_PX_DIMENSION, gray8_into_rendered_page, gray8_to_rendered_page,
+    validate_dimensions,
+};
 pub use pdf::Password;
 pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
 pub use pdf_interp::resources::ImageFilter;

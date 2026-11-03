@@ -284,6 +284,37 @@ impl<P: Pixel> Bitmap<P> {
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
+
+    /// Consume the bitmap and return its colour buffer (`stride * height`
+    /// bytes); the alpha plane, if any, is dropped.
+    #[must_use]
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
+    /// A bitmap without an alpha plane over `data`, rows packed with no
+    /// padding (`stride == width * P::BYTES`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len() != width * height * P::BYTES`.
+    #[must_use]
+    pub fn from_packed(width: u32, height: u32, data: Vec<u8>) -> Self {
+        let stride = u32_to_usize(width) * P::BYTES;
+        assert_eq!(
+            Some(data.len()),
+            stride.checked_mul(u32_to_usize(height)),
+            "Bitmap::from_packed: data must hold exactly width * height pixels",
+        );
+        Self {
+            width,
+            height,
+            stride,
+            data,
+            alpha: None,
+            _marker: PhantomData,
+        }
+    }
 }
 
 // ── AaBuf ─────────────────────────────────────────────────────────────────────

@@ -389,8 +389,8 @@ fn render_one(
         pdf_raster::deskew::apply(&mut bmp).map_err(|e| ComicError::Deskew(e.to_string()))?;
     }
 
-    Ok(pdf_raster::gray8_to_rendered_page(
-        &bmp,
+    Ok(pdf_raster::gray8_into_rendered_page(
+        bmp,
         page_num,
         opts.dpi,
         pdf_raster::PageDiagnostics::default(),

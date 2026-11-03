@@ -41,6 +41,33 @@ pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
     dst
 }
 
+/// [`rgb_to_gray`] in the RGB bitmap's own allocation.
+///
+/// The packed gray rows are written over the front of the colour buffer,
+/// which is truncated to `width * height` bytes and keeps its capacity. The
+/// alpha plane, if any, is dropped.
+///
+/// Gray row `y` occupies bytes `[y·w, y·w + w)` and RGB row `y` starts at
+/// `y·stride ≥ 3·y·w`, so for `y ≥ 1` the destination row ends at or before
+/// the source row begins and the two are disjoint halves of one
+/// `split_at_mut`. Row 0 overlaps itself and is converted from a copy.
+#[must_use]
+pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8> {
+    let (width, height, stride) = (src.width, src.height, src.stride);
+    let w = width as usize;
+    let mut data = src.into_data();
+    if height > 0 && w > 0 {
+        let row0 = data[..w * 3].to_vec();
+        convert_row(&row0, &mut data[..w]);
+        for y in 1..height as usize {
+            let (dst, src) = data.split_at_mut(y * stride);
+            convert_row(&src[..w * 3], &mut dst[y * w..(y + 1) * w]);
+        }
+    }
+    data.truncate(w * height as usize);
+    Bitmap::from_packed(width, height, data)
+}
+
 /// Per-row dispatch.
 ///
 /// The explicit kernel is 128-bit; when the build statically enables
@@ -353,5 +380,45 @@ mod tests {
                 "width {w} must convert fully"
             );
         }
+    }
+
+    /// The in-place conversion must match [`rgb_to_gray`] byte for byte
+    /// for every row padding, including widths that leave the SIMD tail and
+    /// one-row and one-column pages.
+    #[test]
+    fn in_place_matches_copying_conversion() {
+        let mut seed = 0x2545_f491_u32;
+        for (w, h) in [(1, 1), (1, 9), (7, 1), (17, 5), (33, 4), (100, 3)] {
+            for row_pad in [1, 3, 4, 64] {
+                for with_alpha in [false, true] {
+                    let mut bmp = Bitmap::<Rgb8>::new(w, h, row_pad, with_alpha);
+                    for byte in bmp.data_mut() {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        *byte = seed.to_le_bytes()[0];
+                    }
+                    let want = rgb_to_gray(&bmp);
+                    let got = rgb_into_gray(bmp);
+                    assert_eq!((got.width, got.height, got.stride), (w, h, w as usize));
+                    assert!(got.alpha_plane().is_none());
+                    for y in 0..h {
+                        assert_eq!(
+                            got.row_bytes(y),
+                            &want.row_bytes(y)[..w as usize],
+                            "{w}x{h} pad {row_pad} row {y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn in_place_accepts_an_empty_page() {
+        let got = rgb_into_gray(Bitmap::<Rgb8>::new(0, 4, 1, false));
+        assert_eq!((got.width, got.height, got.data_len()), (0, 4, 0));
+        let got = rgb_into_gray(Bitmap::<Rgb8>::new(5, 0, 1, false));
+        assert_eq!((got.width, got.height, got.data_len()), (5, 0, 0));
     }
 }

@@ -90,16 +90,11 @@ pub(crate) fn decode_image(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         ImageFormat::WebP => webp::decode(bytes)?,
         ImageFormat::Tiff => tiff::decode(bytes)?,
     };
-    let gray_bmp = pdf_raster::rgb_to_gray(&rgb);
-    let w = gray_bmp.width as usize;
-    let mut gray = Vec::with_capacity(w * gray_bmp.height as usize);
-    for y in 0..gray_bmp.height {
-        gray.extend_from_slice(&gray_bmp.row_bytes(y)[..w]);
-    }
+    let gray = pdf_raster::rgb_into_gray(rgb);
     Ok(DecodedImage {
-        width: gray_bmp.width,
-        height: gray_bmp.height,
-        gray,
+        width: gray.width,
+        height: gray.height,
+        gray: gray.into_data(),
     })
 }
 

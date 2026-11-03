@@ -88,6 +88,34 @@ pub fn gray8_to_rendered_page(
     }
 }
 
+/// [`gray8_to_rendered_page`] taking the bitmap by value.
+///
+/// A packed bitmap (`stride == width`, as
+/// [`rgb_into_gray`](crate::rgb_into_gray) returns) hands its buffer to the
+/// page without a copy, its spare capacity released.
+#[must_use]
+pub fn gray8_into_rendered_page(
+    bmp: Bitmap<Gray8>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    if bmp.stride != bmp.width as usize {
+        return gray8_to_rendered_page(&bmp, page_num, dpi, diagnostics);
+    }
+    let (width, height) = (bmp.width, bmp.height);
+    let mut pixels = bmp.into_data();
+    pixels.shrink_to_fit();
+    RenderedPage {
+        page_num,
+        width,
+        height,
+        pixels,
+        dpi,
+        diagnostics,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +158,18 @@ mod tests {
             "must be tight, padding stripped"
         );
         assert_eq!(page.pixels.len(), 4);
+    }
+
+    #[test]
+    fn owned_constructor_matches_borrowing_one() {
+        for row_pad in [1, 4] {
+            let mut bmp = Bitmap::<Gray8>::new(3, 2, row_pad, false);
+            bmp.row_bytes_mut(0)[..3].copy_from_slice(&[1, 2, 3]);
+            bmp.row_bytes_mut(1)[..3].copy_from_slice(&[4, 5, 6]);
+            let want = gray8_to_rendered_page(&bmp, 2, 150.0, PageDiagnostics::default());
+            let got = gray8_into_rendered_page(bmp, 2, 150.0, PageDiagnostics::default());
+            assert_eq!((got.page_num, got.width, got.height), (2, 3, 2));
+            assert_eq!(got.pixels, want.pixels, "row_pad {row_pad}");
+        }
     }
 }
