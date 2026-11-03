@@ -60,3 +60,8 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
 Upstream history through `a543cdba5` (2026-10-29, crates.io 0.3.1) was
 reviewed by commit; the five commits above are every change to
 `hayro-jbig2/` after the base, and all are brought over.
+
+On 2026-11-03 it was reviewed through `3f3825c3e` (2026-11-02, crates.io
+0.4.0). Nothing is brought over: #1731 adapts the MMR region decoder to
+an upstream `hayro-ccitt` API change that the ccitt fork leaves out, and
+#1732 is a version bump and changelog.

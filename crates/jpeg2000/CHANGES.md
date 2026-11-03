@@ -112,6 +112,10 @@ reviewed by commit; the five commits above are every change to
 the crate, #1618 and #1648 also touch upstream crates this fork does not
 carry).
 
+On 2026-11-03 it was reviewed through `3f3825c3e` (2026-11-02, crates.io
+0.5.0). Nothing is brought over: #1732 is a version bump and a changelog
+of changes already reviewed above.
+
 ## Hardening
 
 Limits and checks against codestreams whose header fields make the decoder

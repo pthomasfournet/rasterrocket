@@ -41,6 +41,7 @@ mod error;
 mod group3;
 mod group4;
 mod tables;
+mod util;
 
 pub use context::DecoderContext;
 pub use encode::{EncodeScheme, Encoder, changes_of_row};

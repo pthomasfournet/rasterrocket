@@ -8,6 +8,8 @@ pub enum DecodeError {
     InvalidCode,
     /// Arithmetic overflow in run length or position calculation.
     Overflow,
+    /// Memory for the decoded data couldn't be allocated.
+    OutOfMemory,
 }
 
 impl core::fmt::Display for DecodeError {
@@ -16,6 +18,7 @@ impl core::fmt::Display for DecodeError {
             Self::UnexpectedEof => write!(f, "unexpected end of input"),
             Self::InvalidCode => write!(f, "invalid CCITT code sequence"),
             Self::Overflow => write!(f, "arithmetic overflow in position calculation"),
+            Self::OutOfMemory => write!(f, "out of memory"),
         }
     }
 }

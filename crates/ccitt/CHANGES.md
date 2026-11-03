@@ -24,6 +24,17 @@ unless the entry says otherwise.
   compare the output with bit strings written from the T.4 and T.6 code
   tables, independent of `tables.rs`.
 
+## Upstream changes brought over
+
+- `4f7d16fab` (#1733): the decoder's per-row colour-change list grows
+  with `try_reserve`, and a failed allocation is the new
+  `DecodeError::OutOfMemory` instead of an abort.
+
+Upstream history through `4f7d16fab` (2026-11-02) was reviewed on
+2026-11-03. Left out: #1731 (`DecodeSettings` made explicit, its types
+exhaustive: an API change with no decoding change) and #1732 (version
+bumps and changelogs).
+
 ## Vendoring
 
 - `UPSTREAM.toml` records the base (repository, path, commit, date,
