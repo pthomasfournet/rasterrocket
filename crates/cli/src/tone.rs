@@ -44,7 +44,7 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
         }
     }
     if args.mono {
-        Page::Mono(two_levels(&page.into_luma(), args.screen()))
+        Page::Mono(two_levels(page.into_luma(), args.screen()))
     } else {
         page
     }
@@ -80,33 +80,33 @@ fn complement<P: Pixel>(bmp: &mut Bitmap<P>) {
     }
 }
 
-/// Reduce a luma bitmap to two levels, 0 (black) and 255 (white): through
-/// the halftone `screen` when given, which renders intermediate grays as
-/// dot patterns, else at the midpoint, values below [`BLACK_BELOW`] black.
-pub(crate) fn two_levels(src: &Bitmap<Gray8>, screen: Option<ScreenParams>) -> Bitmap<Gray8> {
-    let mut dst: Bitmap<Gray8> = Bitmap::new(src.width, src.height, 1, false);
-    let w = src.width as usize;
+/// Reduce a luma bitmap to two levels, 0 (black) and 255 (white), in its
+/// own buffer: through the halftone `screen` when given, which renders
+/// intermediate grays as dot patterns, else at the midpoint, values below
+/// [`BLACK_BELOW`] black. Each output sample depends only on its own input
+/// sample and position.
+pub(crate) fn two_levels(mut luma: Bitmap<Gray8>, screen: Option<ScreenParams>) -> Bitmap<Gray8> {
+    let w = luma.width as usize;
     let mut screen = screen.map(HalftoneScreen::new);
-    for y in 0..src.height {
-        let src_row = &src.row_bytes(y)[..w];
-        let dst_row = &mut dst.row_bytes_mut(y)[..w];
+    for y in 0..luma.height {
+        let row = &mut luma.row_bytes_mut(y)[..w];
         match &mut screen {
             None => {
-                for (dst_px, &luma) in dst_row.iter_mut().zip(src_row) {
-                    *dst_px = if luma < BLACK_BELOW { 0 } else { 255 };
+                for px in row.iter_mut() {
+                    *px = if *px < BLACK_BELOW { 0 } else { 255 };
                 }
             }
             Some(screen) => {
                 // The screen tiles with a power-of-two period, so the
                 // coordinates enter it modulo that period and may wrap.
-                let row = y.cast_signed();
-                for ((x, dst_px), &luma) in (0i32..).zip(dst_row.iter_mut()).zip(src_row) {
-                    *dst_px = if screen.test(x, row, luma) { 255 } else { 0 };
+                let y = y.cast_signed();
+                for (x, px) in (0i32..).zip(row.iter_mut()) {
+                    *px = if screen.test(x, y, *px) { 255 } else { 0 };
                 }
             }
         }
     }
-    dst
+    luma
 }
 
 #[cfg(test)]
@@ -122,8 +122,10 @@ mod tests {
     fn mono_is_luma_black_ink_on_white() {
         let mut gray: Bitmap<Gray8> = Bitmap::new(3, 1, 1, false);
         gray.row_bytes_mut(0)[..3].copy_from_slice(&[0, 127, 128]);
-        let mono = two_levels(&gray, None);
+        let buffer = gray.data().as_ptr();
+        let mono = two_levels(gray, None);
         assert_eq!(&mono.row_bytes(0)[..3], &[0, 0, 255]);
+        assert_eq!(mono.data().as_ptr(), buffer, "converted in the luma buffer");
     }
 
     #[test]
@@ -135,7 +137,7 @@ mod tests {
             for y in 0..16 {
                 gray.row_bytes_mut(y)[..16].fill(level);
             }
-            let mono = two_levels(&gray, screen);
+            let mono = two_levels(gray, screen);
             let white: usize = (0..16)
                 .map(|y| {
                     mono.row_bytes(y)[..16]

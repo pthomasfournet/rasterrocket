@@ -7,7 +7,7 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use rasterrocket::{BackendPolicy, SessionConfig, open_session, render_page_rgb, rgb_to_gray};
+use rasterrocket::{BackendPolicy, SessionConfig, open_session, render_page_rgb, rgb_into_gray};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -32,7 +32,7 @@ fn main() -> ExitCode {
         let open_us = t.elapsed().as_micros();
         for page in 1..=session.total_pages() {
             let t = Instant::now();
-            let rendered = render_page_rgb(&session, page, dpi / 72.0).map(|bmp| rgb_to_gray(&bmp));
+            let rendered = render_page_rgb(&session, page, dpi / 72.0).map(rgb_into_gray);
             let us = t.elapsed().as_micros();
             match rendered {
                 Ok(_) => println!("{pdf}\t{page}\t{open_us}\t{us}"),

@@ -90,9 +90,10 @@ pub fn gray8_to_rendered_page(
 
 /// [`gray8_to_rendered_page`] taking the bitmap by value.
 ///
-/// A packed bitmap (`stride == width`, as
-/// [`rgb_into_gray`](crate::rgb_into_gray) returns) hands its buffer to the
-/// page without a copy, its spare capacity released.
+/// The page takes over a packed bitmap's buffer (`stride == width`, as
+/// [`rgb_into_gray`](crate::rgb_into_gray) returns); `shrink_to_fit` then
+/// releases its spare capacity, which an allocator may implement as a copy
+/// into a `width * height` allocation. A padded bitmap is copied row by row.
 #[must_use]
 pub fn gray8_into_rendered_page(
     bmp: Bitmap<Gray8>,
