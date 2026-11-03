@@ -104,7 +104,8 @@ fn fill_impl<P: Pixel>(
     let scanner = if vector_antialias {
         aa_scanner(path, matrix, flatness, clip, eo)
     } else {
-        let xpath = XPath::new(path, matrix, flatness, true);
+        let mut xpath = XPath::new(path, matrix, flatness, true);
+        xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
         let scanner = XPathScanner::new(&xpath, eo, clip.y_min_i, clip.y_max_i);
         (!scanner.is_empty()).then_some(scanner)
     };
@@ -229,6 +230,8 @@ pub fn aa_scanner(
     let mut xpath = XPath::new(path, matrix, flatness, true);
     xpath.aa_scale();
     let (y_min, y_max) = clip.aa_row_range();
+    let (x_min, x_max) = clip.aa_column_range();
+    xpath.cull_subpaths_outside(x_min, x_max, y_min, y_max);
     let scanner = XPathScanner::new(&xpath, eo, y_min, y_max);
     (!scanner.is_empty()).then_some(scanner)
 }

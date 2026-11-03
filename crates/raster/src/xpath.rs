@@ -39,7 +39,7 @@
 use crate::path::adjust::{XPathAdjust, stroke_adjust};
 use crate::path::flatten::{CurveData, flatten_curve};
 use crate::path::{Path, PathFlags, PathPoint, StrokeAdjustHint};
-use crate::types::AA_SIZE;
+use crate::types::{AA_SIZE, floor_i32};
 use bitflags::bitflags;
 
 // ── XPathFlags ────────────────────────────────────────────────────────────────
@@ -117,6 +117,9 @@ pub struct XPathSeg {
 pub struct XPath {
     /// The flattened, transformed edge segments making up this path, in insertion order.
     pub segs: Vec<XPathSeg>,
+    /// Index in `segs` of the first segment of each subpath, in order, when
+    /// every subpath is closed; empty otherwise.
+    closed_subpaths: Vec<usize>,
     /// Lazily allocated (~25 KB) scratch for Bezier subdivision.
     curve_data: Option<CurveData>,
 }
@@ -132,6 +135,7 @@ impl XPath {
     pub(crate) fn aa_scaled_copy(&self) -> Self {
         let mut scaled = Self {
             segs: self.segs.clone(),
+            closed_subpaths: self.closed_subpaths.clone(),
             curve_data: None,
         };
         scaled.aa_scale();
@@ -143,6 +147,7 @@ impl XPath {
     pub(crate) const fn empty() -> Self {
         Self {
             segs: Vec::new(),
+            closed_subpaths: Vec::new(),
             curve_data: None,
         }
     }
@@ -174,6 +179,7 @@ impl XPath {
         let flatness_sq = flatness * flatness;
         let mut xpath = Self {
             segs: Vec::new(),
+            closed_subpaths: Vec::new(),
             curve_data: None,
         };
 
@@ -212,6 +218,9 @@ impl XPath {
         while i < n {
             if path.flags[i].contains(PathFlags::FIRST) {
                 // Start of a new subpath.
+                if close_subpaths {
+                    xpath.closed_subpaths.push(xpath.segs.len());
+                }
                 let sp_x = tpts[i].x;
                 let sp_y = tpts[i].y;
                 let mut cur_x = sp_x;
@@ -309,6 +318,66 @@ impl XPath {
             seg.x1 *= s;
             seg.y1 *= s;
         }
+    }
+
+    /// Remove the subpaths whose segments all lie in the columns left of
+    /// `x_min` or right of `x_max`, or in the rows above `y_min` or below
+    /// `y_max` (integer bounds, inclusive, in the path's coordinates).
+    ///
+    /// Only a path built with `close_subpaths` is changed.  A closed
+    /// subpath crosses each scanline as often upwards as downwards, so its
+    /// crossings sum to zero on every row: removing one that lies wholly
+    /// outside the bounds changes neither the coverage nor the winding
+    /// number of any point within them.  A subpath with a non-finite
+    /// coordinate is kept, since the scanner skips its NaN segments and its
+    /// remaining crossings need not sum to zero.
+    pub fn cull_subpaths_outside(&mut self, x_min: i32, x_max: i32, y_min: i32, y_max: i32) {
+        if self.closed_subpaths.is_empty() {
+            return;
+        }
+        let ends = self
+            .closed_subpaths
+            .iter()
+            .skip(1)
+            .copied()
+            .chain(std::iter::once(self.segs.len()));
+        let ranges: Vec<(usize, usize)> = self.closed_subpaths.iter().copied().zip(ends).collect();
+        let outside = |segs: &[XPathSeg]| {
+            let (mut lx, mut hx, mut ly, mut hy) = (
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            );
+            for seg in segs {
+                let coords = [seg.x0, seg.y0, seg.x1, seg.y1];
+                if !coords.iter().all(|c| c.is_finite()) {
+                    return false;
+                }
+                lx = lx.min(seg.x0).min(seg.x1);
+                hx = hx.max(seg.x0).max(seg.x1);
+                ly = ly.min(seg.y0).min(seg.y1);
+                hy = hy.max(seg.y0).max(seg.y1);
+            }
+            !segs.is_empty()
+                && (floor_i32(hx) < x_min
+                    || floor_i32(lx) > x_max
+                    || floor_i32(hy) < y_min
+                    || floor_i32(ly) > y_max)
+        };
+        if !ranges.iter().any(|&(a, b)| outside(&self.segs[a..b])) {
+            return;
+        }
+        let mut segs = Vec::with_capacity(self.segs.len());
+        let mut starts = Vec::with_capacity(ranges.len());
+        for (a, b) in ranges {
+            if !outside(&self.segs[a..b]) {
+                starts.push(segs.len());
+                segs.extend_from_slice(&self.segs[a..b]);
+            }
+        }
+        self.segs = segs;
+        self.closed_subpaths = starts;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -510,10 +579,7 @@ mod tests {
 
     #[test]
     fn horizontal_segment_not_flipped() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(0.0, 5.0, 10.0, 5.0);
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::HORIZ));
@@ -524,10 +590,7 @@ mod tests {
 
     #[test]
     fn downward_segment_flipped() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(0.0, 10.0, 0.0, 0.0); // y0 > y1 → flip
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::FLIPPED));
@@ -536,10 +599,7 @@ mod tests {
 
     #[test]
     fn aa_scale_multiplies_coords() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(1.0, 0.0, 3.0, 2.0);
         let orig_dxdy = xpath.segs[0].dxdy;
         xpath.aa_scale();
@@ -556,10 +616,7 @@ mod tests {
 
     #[test]
     fn vertical_segment_dxdy_zero() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(5.0, 0.0, 5.0, 10.0);
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::VERT));
@@ -584,10 +641,7 @@ mod tests {
     /// VERT flags and not panic.
     #[test]
     fn degenerate_point_segment() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(3.0, 7.0, 3.0, 7.0);
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::HORIZ));
@@ -599,10 +653,7 @@ mod tests {
     /// `dxdy` must equal `(x1-x0)/(y1-y0)` for a sloped segment.
     #[test]
     fn sloped_segment_dxdy() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         // y0 < y1, not vertical → dxdy = (6-2)/(5-1) = 1.0
         xpath.add_segment(2.0, 1.0, 6.0, 5.0);
         let s = &xpath.segs[0];
@@ -616,10 +667,7 @@ mod tests {
     /// unflipped counterpart, and must satisfy y0 ≤ y1 after construction.
     #[test]
     fn flipped_sloped_segment_dxdy_consistent() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         // Supply (x0=6, y0=5) → (x1=2, y1=1): y0 > y1, so it will be flipped.
         xpath.add_segment(6.0, 5.0, 2.0, 1.0);
         let s = &xpath.segs[0];
@@ -637,10 +685,7 @@ mod tests {
     #[test]
     fn dxdy_fp_matches_dxdy_for_slope_one() {
         // Slope = 1.0 → dxdy_fp should be 65536.
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(0.0, 0.0, 4.0, 4.0);
         let s = &xpath.segs[0];
         assert!((s.dxdy - 1.0).abs() < f64::EPSILON, "dxdy={}", s.dxdy);
@@ -650,10 +695,7 @@ mod tests {
     #[test]
     fn dxdy_fp_matches_dxdy_for_half_slope() {
         // Slope = 0.5 → dxdy_fp should be 32768.
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(0.0, 0.0, 2.0, 4.0);
         let s = &xpath.segs[0];
         assert!((s.dxdy - 0.5).abs() < f64::EPSILON, "dxdy={}", s.dxdy);
@@ -662,10 +704,7 @@ mod tests {
 
     #[test]
     fn dxdy_fp_zero_for_horizontal() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(0.0, 2.0, 5.0, 2.0);
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::HORIZ));
@@ -674,13 +713,73 @@ mod tests {
 
     #[test]
     fn dxdy_fp_zero_for_vertical() {
-        let mut xpath = XPath {
-            segs: Vec::new(),
-            curve_data: None,
-        };
+        let mut xpath = XPath::empty();
         xpath.add_segment(3.0, 0.0, 3.0, 5.0);
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::VERT));
         assert_eq!(s.dxdy_fp, 0);
+    }
+
+    /// Subpaths: four rectangles wholly outside `[0, 15]²` (left, right,
+    /// above, below), one straddling its left edge, a triangle inside, and a
+    /// rectangle overlapping the triangle.
+    fn culling_test_path() -> Path {
+        let mut b = PathBuilder::new();
+        let rects = [
+            (-30.0, 2.0, -20.0, 12.0),
+            (20.0, 2.0, 28.0, 12.0),
+            (2.0, -12.0, 12.0, -3.0),
+            (2.0, 17.0, 12.0, 25.0),
+            (-6.0, 5.0, 4.5, 9.5),
+            (6.0, 6.0, 13.0, 14.0),
+        ];
+        for (x0, y0, x1, y1) in rects {
+            b.move_to(x0, y0).unwrap();
+            b.line_to(x1, y0).unwrap();
+            b.line_to(x1, y1).unwrap();
+            b.line_to(x0, y1).unwrap();
+            b.close(false).unwrap();
+        }
+        b.move_to(1.0, 1.0).unwrap();
+        b.line_to(14.0, 3.0).unwrap();
+        b.line_to(8.0, 12.0).unwrap();
+        b.build()
+    }
+
+    #[test]
+    fn culling_drops_only_subpaths_outside_the_bounds() {
+        let path = culling_test_path();
+        let full = XPath::new(&path, &identity(), 1.0, true);
+        let mut culled = XPath::new(&path, &identity(), 1.0, true);
+        culled.cull_subpaths_outside(0, 15, 0, 15);
+        assert_eq!(full.segs.len(), 6 * 4 + 3);
+        assert_eq!(culled.segs.len(), 2 * 4 + 3);
+        for eo in [false, true] {
+            let a = crate::XPathScanner::new(&full, eo, 0, 15);
+            let b = crate::XPathScanner::new(&culled, eo, 0, 15);
+            for y in 0..=15 {
+                for x in 0..=15 {
+                    assert_eq!(a.test(x, y), b.test(x, y), "eo={eo} ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn culling_keeps_open_and_non_finite_subpaths() {
+        let path = culling_test_path();
+        let mut open = XPath::new(&path, &identity(), 1.0, false);
+        let n = open.segs.len();
+        open.cull_subpaths_outside(0, 15, 0, 15);
+        assert_eq!(open.segs.len(), n, "an unclosed path is not culled");
+
+        let mut b = PathBuilder::new();
+        b.move_to(-30.0, 2.0).unwrap();
+        b.line_to(-20.0, f64::NAN).unwrap();
+        b.line_to(-25.0, 9.0).unwrap();
+        let mut nan = XPath::new(&b.build(), &identity(), 1.0, true);
+        let n = nan.segs.len();
+        nan.cull_subpaths_outside(0, 15, 0, 15);
+        assert_eq!(nan.segs.len(), n, "a subpath with a NaN point is kept");
     }
 }
