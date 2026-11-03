@@ -501,8 +501,13 @@ fn decode_segments(
             Ok(ControlFlow::Continue(())) => {}
             Ok(ControlFlow::Break(())) => break,
             // No other segment can refer to an immediate region, so the rest of
-            // the page doesn't depend on it.
-            Err(_) if !strict && seg.header.segment_type.is_immediate_region() => {
+            // the page doesn't depend on it. An allocation failure is not
+            // recovered.
+            Err(e)
+                if !strict
+                    && e != DecodeError::OutOfMemory
+                    && seg.header.segment_type.is_immediate_region() =>
+            {
                 // It might have been decoded directly into the page.
                 page_state.page_pristine = false;
             }

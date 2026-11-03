@@ -33,6 +33,17 @@ fast path for uniform runs in generic regions, a strict mode, and a changed
 API: embedded global segments are parsed once into `Globals` and an image
 is opened with `Page::new_embedded`.
 
+## Changes in this fork
+
+- An MMR-coded generic region whose decoder fails to allocate memory
+  (`hayro_ccitt::DecodeError::OutOfMemory`) fails with the new
+  `DecodeError::OutOfMemory` in strict and lenient mode alike, and the
+  page loop does not recover an immediate region that failed this way;
+  the error reaches `Page::decode`'s caller. Other MMR failures keep
+  upstream's behaviour: an error in strict mode, the rows decoded so far
+  in lenient mode. Output changes only when an allocation fails. Tests:
+  `decode::generic::tests`.
+
 ## Upstream fixes brought over
 
 Upstream commits to `hayro-jbig2/` after the base, applied as upstream

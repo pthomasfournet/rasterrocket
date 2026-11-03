@@ -6,7 +6,7 @@ use super::{
 use crate::ScratchBuffers;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::{Bitmap, WORD_BITS, WORD_BYTES, WORD_SHIFT, Word};
-use crate::error::{ParseError, RegionError, Result, TemplateError, bail};
+use crate::error::{DecodeError, ParseError, RegionError, Result, TemplateError, bail, err};
 use crate::reader::Reader;
 
 /// Generic region decoding procedure (6.2).
@@ -301,12 +301,25 @@ pub(crate) fn decode_bitmap_mmr(bitmap: &mut Bitmap, data: &[u8], strict: bool) 
     // nothing else to do here.
     let mut context = hayro_ccitt::DecoderContext::new(settings);
     let result = hayro_ccitt::decode(data, &mut decoder, &mut context);
+    mmr_consumed(result, decoder.y == height, strict, data.len())
+}
 
-    if strict && (result.is_err() || decoder.y < height) {
-        bail!(RegionError::InvalidMmrData);
+/// The bytes an MMR region consumed, given the coder's `result` and
+/// whether every row was decoded. A failed or short decode is an error in
+/// strict mode and otherwise consumes the whole `data_len`, leaving the rows
+/// already decoded in place; an allocation failure is an error in both.
+fn mmr_consumed(
+    result: core::result::Result<usize, hayro_ccitt::DecodeError>,
+    complete: bool,
+    strict: bool,
+    data_len: usize,
+) -> Result<usize> {
+    match result {
+        Err(hayro_ccitt::DecodeError::OutOfMemory) => Err(DecodeError::OutOfMemory),
+        _ if strict && (result.is_err() || !complete) => err!(RegionError::InvalidMmrData),
+        Ok(consumed) => Ok(consumed),
+        Err(_) => Ok(data_len),
     }
-
-    Ok(result.unwrap_or(data.len()))
 }
 
 #[inline(always)]
@@ -1069,3 +1082,34 @@ const DEFAULT_TEMPLATE3_FAST_PARAMS: DefaultTemplateFastParams = DefaultTemplate
     prev1_next_mask: 0x0010,
     full_context: 0x03ff,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mmr_out_of_memory_is_an_error_in_both_modes() {
+        for strict in [false, true] {
+            assert_eq!(
+                mmr_consumed(Err(hayro_ccitt::DecodeError::OutOfMemory), false, strict, 9),
+                Err(DecodeError::OutOfMemory)
+            );
+        }
+    }
+
+    #[test]
+    fn mmr_corrupt_data_is_recovered_only_when_lenient() {
+        let corrupt = Err(hayro_ccitt::DecodeError::InvalidCode);
+        assert_eq!(mmr_consumed(corrupt, false, false, 9), Ok(9));
+        assert_eq!(
+            mmr_consumed(corrupt, false, true, 9),
+            Err(DecodeError::Region(RegionError::InvalidMmrData))
+        );
+        assert_eq!(mmr_consumed(Ok(4), false, false, 9), Ok(4));
+        assert_eq!(
+            mmr_consumed(Ok(4), false, true, 9),
+            Err(DecodeError::Region(RegionError::InvalidMmrData))
+        );
+        assert_eq!(mmr_consumed(Ok(4), true, true, 9), Ok(4));
+    }
+}
