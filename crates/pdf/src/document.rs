@@ -23,7 +23,7 @@ use crate::{
     objstm::ObjStmCache,
     repair::scan_objects,
     stream::decode_stream,
-    xref::{XrefEntry, XrefTable, read_xref},
+    xref::{XrefEntries, XrefEntry, XrefTable, read_xref},
 };
 
 // ── Limits ───────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ pub struct Document {
     /// Object headers found by scanning the whole file, built the first time
     /// an xref entry does not lead to its object.  `None` when the scan
     /// exceeded its sanity limit.
-    scanned_offsets: OnceLock<Option<HashMap<u32, XrefEntry>>>,
+    scanned_offsets: OnceLock<Option<XrefEntries>>,
     /// Values derived from objects by higher layers ([`Self::derived`]).
     derived: DerivedCache,
     /// The authenticated security handler of an encrypted document; `None`
@@ -419,7 +419,7 @@ impl Document {
         !in_use(self.xref.get(num))
             && self
                 .scanned_entries()
-                .is_some_and(|scanned| !in_use(scanned.get(&num).copied()))
+                .is_some_and(|scanned| !in_use(scanned.get(num)))
     }
 
     /// Resolve an indirect reference and return a shared reference to its value.
@@ -693,7 +693,7 @@ impl Document {
     }
 
     /// The entries a whole-file header scan finds, computed on first use.
-    fn scanned_entries(&self) -> Option<&HashMap<u32, XrefEntry>> {
+    fn scanned_entries(&self) -> Option<&XrefEntries> {
         self.scanned_offsets
             .get_or_init(|| scan_objects(self.body()).ok().map(|scan| scan.entries))
             .as_ref()
@@ -707,7 +707,7 @@ impl Document {
     /// direct, so recovery never descends through more than one stream.
     fn recover_object(&self, num: u32, failed: Option<XrefEntry>, depth: u8) -> Option<Object> {
         let scanned = self.scanned_entries()?;
-        let obj = match (scanned.get(&num).copied()?, failed) {
+        let obj = match (scanned.get(num)?, failed) {
             (XrefEntry::Direct { .. }, _) => self.recover_direct(num, failed)?,
             (
                 XrefEntry::InObjStm { container, .. },
@@ -716,7 +716,7 @@ impl Document {
                 }),
             ) if container == tried => return None,
             (XrefEntry::InObjStm { container, index }, _) => {
-                if !matches!(scanned.get(&container), Some(XrefEntry::Direct { .. })) {
+                if !matches!(scanned.get(container), Some(XrefEntry::Direct { .. })) {
                     return None;
                 }
                 let obj = self.parse_compressed(container, index, num, depth).ok()?;
@@ -732,8 +732,7 @@ impl Document {
     /// when that header is not at the offset of `failed` and parses as
     /// object `num`.
     fn recover_direct(&self, num: u32, failed: Option<XrefEntry>) -> Option<Object> {
-        let Some(XrefEntry::Direct { offset, .. }) = self.scanned_entries()?.get(&num).copied()
-        else {
+        let Some(XrefEntry::Direct { offset, .. }) = self.scanned_entries()?.get(num) else {
             return None;
         };
         if matches!(failed, Some(XrefEntry::Direct { offset: tried, .. }) if tried == offset) {

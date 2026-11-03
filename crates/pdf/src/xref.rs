@@ -43,7 +43,7 @@ pub(crate) enum XrefEntry {
 /// number — in-use or free — is the one kept.
 #[derive(Debug, Default)]
 pub(crate) struct XrefTable {
-    pub entries: HashMap<u32, XrefEntry>,
+    pub entries: XrefEntries,
     /// The trailer dictionaries of every section, merged with the newest
     /// section's keys winning.
     pub trailer: Dictionary,
@@ -51,7 +51,97 @@ pub(crate) struct XrefTable {
 
 impl XrefTable {
     pub(crate) fn get(&self, id: u32) -> Option<XrefEntry> {
-        self.entries.get(&id).copied()
+        self.entries.get(id)
+    }
+}
+
+/// Smallest length the dense part of [`XrefEntries`] grows to.
+const MIN_DENSE: usize = 1024;
+
+/// Cross-reference entries by object number.
+///
+/// Numbers below `dense.len()` are held in `dense`, indexed by number; the
+/// others in `sparse`.  The dense part grows to cover a number only while
+/// it stays at most twice the entry count (and at least [`MIN_DENSE`]), so
+/// its memory is linear in the entries held, whatever the numbers.
+#[derive(Debug, Default)]
+pub(crate) struct XrefEntries {
+    dense: Vec<Option<XrefEntry>>,
+    /// Entries numbered at or above `dense.len()`; every value is `Some`
+    /// once its insertion returns.
+    sparse: HashMap<u32, Option<XrefEntry>>,
+    len: usize,
+}
+
+impl XrefEntries {
+    /// The entry of object `num`.
+    pub(crate) fn get(&self, num: u32) -> Option<XrefEntry> {
+        self.dense
+            .get(num as usize)
+            .map_or_else(|| self.sparse.get(&num).copied().flatten(), |entry| *entry)
+    }
+
+    /// Whether object `num` has an entry.
+    pub(crate) fn contains(&self, num: u32) -> bool {
+        self.get(num).is_some()
+    }
+
+    /// Number of entries.
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether there are no entries.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Set the entry of object `num` to `entry`, replacing any earlier one.
+    pub(crate) fn insert(&mut self, num: u32, entry: XrefEntry) {
+        let slot = self.slot(num);
+        if slot.replace(entry).is_none() {
+            self.len += 1;
+        }
+    }
+
+    /// Set the entry of object `num` to `entry` unless it has one.
+    pub(crate) fn insert_if_absent(&mut self, num: u32, entry: XrefEntry) {
+        let slot = self.slot(num);
+        if slot.is_none() {
+            *slot = Some(entry);
+            self.len += 1;
+        }
+    }
+
+    /// The place of object `num`'s entry, growing the dense part over it
+    /// when that keeps the dense part within its bound.
+    fn slot(&mut self, num: u32) -> &mut Option<XrefEntry> {
+        let index = num as usize;
+        if index >= self.dense.len() {
+            let bound = (2 * (self.len + 1)).max(MIN_DENSE);
+            if index < bound {
+                self.grow((index + 1).max(2 * self.dense.len()).min(bound));
+            }
+        }
+        match self.dense.get_mut(index) {
+            Some(slot) => slot,
+            None => self.sparse.entry(num).or_insert(None),
+        }
+    }
+
+    /// Extend the dense part to `len` slots, moving the sparse entries it
+    /// now covers into it.
+    fn grow(&mut self, len: usize) {
+        self.dense.resize(len, None);
+        let covered: Vec<u32> = self
+            .sparse
+            .keys()
+            .copied()
+            .filter(|&num| (num as usize) < len)
+            .collect();
+        for num in covered {
+            self.dense[num as usize] = self.sparse.remove(&num).flatten();
+        }
     }
 }
 
@@ -221,7 +311,7 @@ fn read_traditional_xref(
                 _ => None,
             };
             if let Some(entry) = entry {
-                let _ = table.entries.entry(obj_num).or_insert(entry);
+                table.entries.insert_if_absent(obj_num, entry);
             }
         }
     }
@@ -362,7 +452,7 @@ fn read_xref_stream(
             let Some(obj_num) = first_obj.checked_add(i) else {
                 break; // object number overflow — stop processing this subsection
             };
-            if table.entries.contains_key(&obj_num) {
+            if table.entries.contains(obj_num) {
                 continue; // newer xref section already has this
             }
 
@@ -383,7 +473,7 @@ fn read_xref_stream(
                 _ => None,
             };
             if let Some(entry) = entry {
-                let _ = table.entries.insert(obj_num, entry);
+                table.entries.insert(obj_num, entry);
             }
         }
     }
@@ -492,6 +582,58 @@ mod tests {
 
     use super::*;
 
+    fn direct(offset: u64) -> XrefEntry {
+        XrefEntry::Direct {
+            offset,
+            generation: 0,
+        }
+    }
+
+    fn offset_of(entries: &XrefEntries, num: u32) -> Option<u64> {
+        match entries.get(num)? {
+            XrefEntry::Direct { offset, .. } => Some(offset),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn entries_insert_replaces_and_insert_if_absent_keeps() {
+        let mut entries = XrefEntries::default();
+        assert!(entries.is_empty());
+        entries.insert_if_absent(3, direct(30));
+        entries.insert_if_absent(3, direct(31));
+        assert_eq!(offset_of(&entries, 3), Some(30));
+        entries.insert(3, direct(32));
+        assert_eq!(offset_of(&entries, 3), Some(32));
+        entries.insert_if_absent(3, XrefEntry::Free);
+        assert_eq!(offset_of(&entries, 3), Some(32));
+        assert_eq!(entries.len(), 1);
+        assert!(!entries.contains(4));
+        assert!(entries.get(u32::MAX).is_none());
+    }
+
+    #[test]
+    fn entries_far_numbers_stay_sparse_until_covered() {
+        let mut entries = XrefEntries::default();
+        // A lone number far past the entry count is not given a dense slot.
+        entries.insert(9_999_999, direct(1));
+        entries.insert(5_000, direct(2));
+        assert!(entries.dense.len() <= MIN_DENSE);
+        assert_eq!(entries.sparse.len(), 2);
+        // Filling the numbers below grows the dense part over 5000 and moves
+        // its entry there; the newer section's entry for 5000 is kept.
+        for num in 0..6_000 {
+            entries.insert_if_absent(num, direct(u64::from(num) + 100));
+        }
+        assert_eq!(offset_of(&entries, 5_000), Some(2));
+        assert_eq!(offset_of(&entries, 4_999), Some(5_099));
+        assert_eq!(offset_of(&entries, 9_999_999), Some(1));
+        assert!(entries.dense.len() > 5_000);
+        assert_eq!(entries.sparse.len(), 1);
+        assert_eq!(entries.len(), 6_001);
+        assert!(entries.dense.len() <= 2 * (entries.len() + 1));
+    }
+
     #[test]
     fn find_startxref_basic() {
         let data = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\nxref\n0 1\n0000000009 65535 f\r\ntrailer\n<<>>\nstartxref\n9\n%%EOF";
@@ -509,7 +651,7 @@ mod tests {
     #[test]
     fn xref_subsection_count_capped() {
         // count = 99_999_999 exceeds the 10 M sanity limit and must error,
-        // not allocate ~2 GB of HashMap entries.
+        // not allocate ~2 GB of entries.
         let data = b"\
 %PDF-1.4
 xref

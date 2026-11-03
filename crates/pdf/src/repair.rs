@@ -9,7 +9,7 @@
 //! streams are merged into one trailer.  Later bytes supersede earlier ones,
 //! the incremental-update rule.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::{
     dictionary::Dictionary,
@@ -19,7 +19,7 @@ use crate::{
         MAX_STREAM_SCAN, Object, ObjectId, StreamBody, parse_dictionary, parse_object, stream_body,
     },
     objstm::ObjStm,
-    xref::{XrefEntry, XrefTable},
+    xref::{XrefEntries, XrefEntry, XrefTable},
 };
 
 /// Most entries a reconstruction records; the strict parser's sanity limit.
@@ -28,7 +28,7 @@ const SANITY_LIMIT: usize = 10_000_000;
 /// What a scan of the file body found.
 pub(crate) struct Scan {
     /// Every object number seen, mapped to its last definition.
-    pub entries: HashMap<u32, XrefEntry>,
+    pub entries: XrefEntries,
     /// The `trailer` and `/Type /XRef` dictionaries merged in file order.
     pub trailer: Dictionary,
     /// The last usable catalogue (`/Type /Catalog` with `/Pages`) seen.
@@ -56,7 +56,7 @@ pub(crate) fn reconstruct_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         ));
     }
     let named = match scan.trailer.get(b"Root") {
-        Some(Object::Reference(id)) if scan.entries.contains_key(&id.0) => Some(*id),
+        Some(Object::Reference(id)) if scan.entries.contains(id.0) => Some(*id),
         _ => None,
     };
     let Some(root) = named.or(scan.catalog) else {
@@ -84,7 +84,7 @@ pub(crate) fn reconstruct_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
 /// the sanity limit.
 pub(crate) fn scan_objects(data: &[u8]) -> Result<Scan, PdfError> {
     let mut scan = Scan {
-        entries: HashMap::new(),
+        entries: XrefEntries::default(),
         trailer: Dictionary::new(),
         catalog: None,
         containers: HashSet::new(),
@@ -128,7 +128,7 @@ impl Scan {
         header_start: usize,
         pos: usize,
     ) -> Result<usize, PdfError> {
-        let _ = self.entries.insert(
+        self.entries.insert(
             id.0,
             XrefEntry::Direct {
                 offset: header_start as u64,
@@ -194,14 +194,13 @@ impl Scan {
             };
             if self.containers.contains(&num)
                 || matches!(
-                    self.entries.get(&num),
-                    Some(XrefEntry::Direct { generation, .. }) if *generation > 0
+                    self.entries.get(num),
+                    Some(XrefEntry::Direct { generation, .. }) if generation > 0
                 )
             {
                 continue;
             }
-            let _ = self
-                .entries
+            self.entries
                 .insert(num, XrefEntry::InObjStm { container, index });
             if let Some(Object::Dictionary(d)) = objstm.parse_at(index as usize) {
                 self.note_catalog((num, 0), &d);
@@ -497,11 +496,11 @@ trailer\n<</Root 77 0 R/Info 8 0 R>>\n";
         body.extend_from_slice(b"7 0 obj(after)endobj\n");
         let scan = scan_objects(&body).expect("scan");
         assert!(matches!(
-            scan.entries.get(&6),
+            scan.entries.get(6),
             Some(XrefEntry::InObjStm { .. })
         ));
         assert!(matches!(
-            scan.entries.get(&7),
+            scan.entries.get(7),
             Some(XrefEntry::Direct { .. })
         ));
     }
