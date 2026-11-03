@@ -19,7 +19,7 @@
 //! once.  With the `bundled-fonts` feature, faces compiled into the binary
 //! are the last resort of a per-character request.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
@@ -30,21 +30,44 @@ use font::sfnt_info::{Coverage, FaceInfo, face_infos, unicode_coverage};
 use super::substitutes::INSTALLED_ROWS;
 use crate::resources::font_substitute::{Script, SubstituteFamily, SubstituteStyle};
 
-/// Standard directories walked for fonts, in search order; `~` is the
-/// home directory.
+/// Standard directories walked for fonts on the build target, in search
+/// order; `~` is the home directory.  Every entry is absolute or below the
+/// home directory: none depends on the working directory.
 const FONT_DIRS: &[&str] = &[
+    #[cfg(unix)]
     "/usr/share/fonts",
+    #[cfg(unix)]
     "/usr/local/share/fonts",
+    #[cfg(unix)]
     "~/.fonts",
+    #[cfg(unix)]
     "~/.local/share/fonts",
+    #[cfg(target_os = "macos")]
     "/System/Library/Fonts",
+    #[cfg(target_os = "macos")]
     "/Library/Fonts",
+    #[cfg(target_os = "macos")]
     "~/Library/Fonts",
+    #[cfg(windows)]
     "C:/Windows/Fonts",
+];
+
+/// The directories of [`FONT_DIRS`] whose subdirectories distributions
+/// install font packages in, each under its own name
+/// (`truetype/liberation2`, `liberation-sans`, …).
+const UNIX_FONT_ROOTS: &[&str] = &[
+    #[cfg(unix)]
+    "/usr/share/fonts",
+    #[cfg(unix)]
+    "/usr/local/share/fonts",
 ];
 
 /// Greatest directory nesting walked below a font directory.
 const MAX_DEPTH: u32 = 6;
+
+/// Most directories one library walks; the walk stops, with a warning,
+/// when it reaches this many.
+const MAX_FONT_DIRS: usize = 10_000;
 
 /// Family-name fragments (lower case) of preferred faces per script, in
 /// preference order.
@@ -360,9 +383,12 @@ pub(crate) struct FontLibrary {
     /// Whether the standard font directories and the fixed locations of
     /// the metric-compatible substitutes are searched.
     system: bool,
-    /// Every sfnt face found, sorted by path, and the directories walked
-    /// to find them; built on first use.
-    index: OnceLock<Index>,
+    /// Every sfnt file below the library's directories, sorted by path;
+    /// listed on first use.
+    files: OnceLock<Vec<PathBuf>>,
+    /// Every sfnt face of `files`, in the order of `files`; built on first
+    /// use.
+    index: OnceLock<Vec<Face>>,
     /// Program of each face, by index into `faces`, parsed on first use.
     programs: Mutex<HashMap<usize, Option<Arc<FontProgram>>>>,
     /// Face order of each fallback ranking, by index into `faces`.
@@ -370,9 +396,9 @@ pub(crate) struct FontLibrary {
     /// The installed metric-compatible substitute of each row of the
     /// substitute table, located on first use.
     substitutes: [OnceLock<Option<Arc<FontProgram>>>; INSTALLED_ROWS],
-    /// The directories the substitute searches looked in, with their
-    /// modification times then.
-    searched: Mutex<Vec<DirStamp>>,
+    /// Each directory the listing walked or a substitute search looked
+    /// in, once, with its modification time when it was first read.
+    stamps: Mutex<DirStamps>,
 }
 
 impl FontLibrary {
@@ -380,11 +406,12 @@ impl FontLibrary {
         Self {
             dirs,
             system,
+            files: OnceLock::new(),
             index: OnceLock::new(),
             programs: Mutex::default(),
             orders: Mutex::default(),
             substitutes: [const { OnceLock::new() }; INSTALLED_ROWS],
-            searched: Mutex::default(),
+            stamps: Mutex::default(),
         }
     }
 
@@ -392,74 +419,121 @@ impl FontLibrary {
     /// then, when `system` is set, the standard font directories; shared by
     /// every caller naming the same sources.
     ///
-    /// A library that is out of date — a directory its index walked or a
-    /// substitute search looked in, present or missing, has changed since
-    /// — is replaced by a fresh one, so fonts installed or removed while
-    /// the process runs are seen by the documents opened afterwards.
-    /// Callers holding the old library keep it.
+    /// A library that is out of date — a directory its listing walked or
+    /// a substitute search looked in, present or missing, has changed
+    /// since — is replaced by a fresh one, so fonts installed or removed
+    /// while the process runs are seen by the documents opened afterwards.
+    /// Callers holding the old library keep it.  The directories are
+    /// examined outside the lock on the process-wide map; of concurrent
+    /// replacements of one library, the first stored is returned to all.
     #[must_use]
     pub(crate) fn shared(dirs: &[PathBuf], system: bool) -> Arc<Self> {
         static LIBRARIES: OnceLock<Mutex<HashMap<LibraryKey, Arc<FontLibrary>>>> = OnceLock::new();
-        let mut libraries = LIBRARIES
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let library = libraries
-            .entry((dirs.to_vec(), system))
-            .or_insert_with(|| Arc::new(Self::new(dirs.to_vec(), system)));
-        if library.is_stale() {
-            log::debug!("system_fonts: font directories changed; re-indexing");
-            *library = Arc::new(Self::new(dirs.to_vec(), system));
+        let libraries = LIBRARIES.get_or_init(Mutex::default);
+        let lock = || libraries.lock().unwrap_or_else(PoisonError::into_inner);
+        let key: LibraryKey = (dirs.to_vec(), system);
+        let current = Arc::clone(
+            lock()
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Self::new(dirs.to_vec(), system))),
+        );
+        if !current.is_stale() {
+            return current;
         }
-        let library = Arc::clone(library);
-        drop(libraries);
+        log::debug!("system_fonts: font directories changed; re-indexing");
+        let fresh = Arc::new(Self::new(dirs.to_vec(), system));
+        let mut map = lock();
+        let slot = map.entry(key).or_insert_with(|| Arc::clone(&fresh));
+        if Arc::ptr_eq(slot, &current) {
+            *slot = fresh;
+        }
+        let library = Arc::clone(slot);
+        drop(map);
         library
     }
 
-    /// Whether a directory the library's index walked or a substitute
+    /// Whether a directory the library's listing walked or a substitute
     /// search looked in has changed since: its modification time differs,
     /// or it appeared or vanished.
     fn is_stale(&self) -> bool {
-        let changed =
-            |stamps: &[DirStamp]| stamps.iter().any(|(dir, stamp)| modified(dir) != *stamp);
-        self.index
-            .get()
-            .is_some_and(|index| changed(&index.directories))
-            || changed(&self.searched.lock().unwrap_or_else(PoisonError::into_inner))
+        let stamps: Vec<(PathBuf, Option<SystemTime>)> = self
+            .stamps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(dir, stamp)| (dir.clone(), *stamp))
+            .collect();
+        stamps.iter().any(|(dir, stamp)| modified(dir) != *stamp)
+    }
+
+    /// Record `stamps`; a directory already recorded keeps its earlier
+    /// stamp.
+    fn record(&self, stamps: impl IntoIterator<Item = (PathBuf, Option<SystemTime>)>) {
+        let mut recorded = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+        for (dir, stamp) in stamps {
+            let _ = recorded.entry(dir).or_insert(stamp);
+        }
+    }
+
+    /// The extra directories, in search order.
+    pub(super) fn dirs(&self) -> &[PathBuf] {
+        &self.dirs
+    }
+
+    /// Whether the standard font directories and the fixed locations of
+    /// the metric-compatible substitutes are searched.
+    pub(super) const fn searches_system(&self) -> bool {
+        self.system
+    }
+
+    /// Every sfnt file of the library's directories, listed on first use
+    /// by [`walk_font_dirs`].
+    fn files(&self) -> &[PathBuf] {
+        self.files.get_or_init(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let standard = FONT_DIRS.iter().filter(|_| self.system).filter_map(|dir| {
+                match (dir.strip_prefix("~/"), &home) {
+                    (Some(rest), Some(home)) => Some(home.join(rest)),
+                    (Some(_), None) => None,
+                    (None, _) => Some(PathBuf::from(dir)),
+                }
+            });
+            let roots: Vec<PathBuf> = self.dirs.iter().cloned().chain(standard).collect();
+            let walk = walk_font_dirs(&roots, MAX_FONT_DIRS);
+            log::debug!(
+                "system_fonts: listed {} font files in {} directories",
+                walk.files.len(),
+                walk.directories.len()
+            );
+            self.record(walk.directories);
+            walk.files
+        })
     }
 
     /// Every face of the library's directories, indexed on first use.
     fn faces(&self) -> &[Face] {
-        &self
-            .index
-            .get_or_init(|| {
-                let home = std::env::var_os("HOME").map(PathBuf::from);
-                let mut index = Index::default();
-                for dir in &self.dirs {
-                    index.walk(dir, 0);
-                }
-                for dir in FONT_DIRS.iter().filter(|_| self.system) {
-                    let dir = match (dir.strip_prefix("~/"), &home) {
-                        (Some(rest), Some(home)) => home.join(rest),
-                        (Some(_), None) => continue,
-                        (None, _) => PathBuf::from(dir),
-                    };
-                    index.walk(&dir, 0);
-                }
-                // Directory listings come in no fixed order; ties in every
-                // ranking below resolve by path, so selection is the same
-                // on every run.
-                index
-                    .faces
-                    .sort_by(|a, b| a.path.cmp(&b.path).then(a.index.cmp(&b.index)));
-                log::debug!(
-                    "system_fonts: indexed {} faces in {} directories",
-                    index.faces.len(),
-                    index.directories.len()
-                );
-                index
-            })
-            .faces
+        self.index.get_or_init(|| {
+            self.files()
+                .iter()
+                .flat_map(|path| {
+                    face_infos(path)
+                        .into_iter()
+                        .map(|info| Face::new(path, info))
+                })
+                .filter(|face| !PLACEHOLDER_FAMILIES.contains(&face.family.as_str()))
+                .collect()
+        })
+    }
+
+    /// The first file, by path, named `name` below one of the
+    /// distribution font roots ([`UNIX_FONT_ROOTS`]); `None` when the
+    /// library does not search the standard directories or no such file
+    /// is listed.
+    pub(super) fn system_file(&self, name: &str) -> Option<&Path> {
+        if !self.system {
+            return None;
+        }
+        first_named(self.files(), UNIX_FONT_ROOTS, name)
     }
 
     /// The installed face that best serves `style` for `script`: among
@@ -555,84 +629,134 @@ impl FontLibrary {
     }
 
     /// The installed substitute of row `row` of the substitute table,
-    /// located by `locate` from the extra directories and the system-font
-    /// switch on first use.  `locate` reports each directory it looks in
-    /// through its third argument, before reading it; a later change to
-    /// one makes the library stale.
+    /// located by `locate` on first use.  `locate` reports each directory
+    /// it looks in through its argument, before reading it; a later change
+    /// to one makes the library stale.
     pub(super) fn substitute(
         &self,
         row: usize,
-        locate: impl FnOnce(&[PathBuf], bool, &mut dyn FnMut(&Path)) -> Option<Arc<FontProgram>>,
+        locate: impl FnOnce(&mut dyn FnMut(&Path)) -> Option<Arc<FontProgram>>,
     ) -> Option<Arc<FontProgram>> {
         self.substitutes
             .get(row)?
             .get_or_init(|| {
                 let mut searched = Vec::new();
-                let found = locate(&self.dirs, self.system, &mut |dir| {
-                    searched.push((dir.to_path_buf(), modified(dir)));
-                });
-                self.searched
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .extend(searched);
+                let found = locate(&mut |dir| searched.push((dir.to_path_buf(), modified(dir))));
+                self.record(searched);
                 found
             })
             .clone()
     }
 }
 
-/// A directory and its modification time when it was read; `None` when
-/// it could not be read.
-type DirStamp = (PathBuf, Option<SystemTime>);
+/// Each directory examined, with its modification time when it was first
+/// read; `None` when it could not be read.
+type DirStamps = BTreeMap<PathBuf, Option<SystemTime>>;
 
-/// The faces of a library and the directories walked to find them.
-#[derive(Default)]
-struct Index {
-    /// Every sfnt face found.
-    faces: Vec<Face>,
-    /// Each directory walked, with its modification time then; `None` for
-    /// a root that could not be read.
-    directories: Vec<DirStamp>,
+/// The result of [`walk_font_dirs`].
+struct Walk {
+    /// Every sfnt file found (by extension `ttf`, `otf` or `ttc`), sorted
+    /// by path.
+    files: Vec<PathBuf>,
+    /// Each directory walked, once, with its modification time taken
+    /// before it was read; `None` for one that could not be read.
+    directories: Vec<(PathBuf, Option<SystemTime>)>,
 }
 
-impl Index {
-    /// Add the faces of the font files in `dir` and, to [`MAX_DEPTH`],
-    /// its subdirectories, recording each directory walked with its
-    /// modification time, taken before it is read.
-    ///
-    /// A directory's modification time changes when an entry is added,
-    /// removed or renamed, not when a file is overwritten in place, so a
-    /// font replaced under the same name is not noticed.  On a file system
-    /// with coarse timestamps (1–2 s), a font added in the same tick after
-    /// the directory was read is missed until the directory next changes.
-    fn walk(&mut self, dir: &Path, depth: u32) {
-        self.directories.push((dir.to_path_buf(), modified(dir)));
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+/// Identity of a directory, the same through every path that reaches it.
+#[cfg(unix)]
+type DirId = (u64, u64);
+#[cfg(not(unix))]
+type DirId = PathBuf;
+
+/// The identity of directory `dir` with metadata `meta`: device and inode
+/// number where the platform has them, else the canonical path (the path
+/// itself when it has none).
+#[cfg(unix)]
+fn dir_id(_dir: &Path, meta: &std::fs::Metadata) -> DirId {
+    use std::os::unix::fs::MetadataExt as _;
+    (meta.dev(), meta.ino())
+}
+#[cfg(not(unix))]
+fn dir_id(dir: &Path, _meta: &std::fs::Metadata) -> DirId {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// List the font files under `roots` and, to [`MAX_DEPTH`], their
+/// subdirectories.  A symbolic link to a directory is followed, but each
+/// directory is read once whatever the paths reaching it, and at most
+/// `max_dirs` directories are read, with a warning when the limit stops
+/// the walk.  Entries are visited in name order, so the path under which
+/// a directory reached by several paths is listed does not depend on
+/// directory-listing order.
+///
+/// A directory's modification time changes when an entry is added,
+/// removed or renamed, not when a file is overwritten in place, so a font
+/// replaced under the same name is not noticed.  On a file system with
+/// coarse timestamps (1–2 s), a font added in the same tick after the
+/// directory was read is missed until the directory next changes.
+fn walk_font_dirs(roots: &[PathBuf], max_dirs: usize) -> Walk {
+    let mut walk = Walk {
+        files: Vec::new(),
+        directories: Vec::new(),
+    };
+    let mut seen: HashSet<DirId> = HashSet::new();
+    let mut pending: Vec<(PathBuf, u32)> = roots.iter().rev().map(|r| (r.clone(), 0)).collect();
+    while let Some((dir, depth)) = pending.pop() {
+        let meta = std::fs::metadata(&dir).ok();
+        if let Some(meta) = &meta
+            && !seen.insert(dir_id(&dir, meta))
+        {
+            continue;
+        }
+        if walk.directories.len() == max_dirs {
+            log::warn!(
+                "system_fonts: stopped after {max_dirs} font directories; {} not read",
+                dir.display()
+            );
+            break;
+        }
+        walk.directories
+            .push((dir.clone(), meta.and_then(|m| m.modified().ok())));
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
         };
-        for entry in entries.flatten() {
+        let mut entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut subdirs = Vec::new();
+        for entry in entries {
             let path = entry.path();
-            if path.is_dir() {
+            let is_dir = entry.file_type().is_ok_and(|t| {
+                t.is_dir() || (t.is_symlink() && std::fs::metadata(&path).is_ok_and(|m| m.is_dir()))
+            });
+            if is_dir {
                 if depth < MAX_DEPTH {
-                    self.walk(&path, depth + 1);
+                    subdirs.push((path, depth + 1));
                 }
-                continue;
-            }
-            let is_sfnt = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                 e.eq_ignore_ascii_case("ttf")
                     || e.eq_ignore_ascii_case("otf")
                     || e.eq_ignore_ascii_case("ttc")
-            });
-            if is_sfnt {
-                self.faces.extend(
-                    face_infos(&path)
-                        .into_iter()
-                        .map(|info| Face::new(&path, info))
-                        .filter(|face| !PLACEHOLDER_FAMILIES.contains(&face.family.as_str())),
-                );
+            }) {
+                walk.files.push(path);
             }
         }
+        pending.extend(subdirs.into_iter().rev());
     }
+    walk.files.sort();
+    walk
+}
+
+/// The first of the sorted `files`, by path, named `name` and lying below
+/// one of `roots`.
+fn first_named<'a>(files: &'a [PathBuf], roots: &[&str], name: &str) -> Option<&'a Path> {
+    files
+        .iter()
+        .find(|path| {
+            path.file_name().is_some_and(|n| n == name)
+                && roots.iter().any(|root| path.starts_with(root))
+        })
+        .map(PathBuf::as_path)
 }
 
 /// The modification time of `dir`, `None` when it cannot be read.
@@ -879,5 +1003,117 @@ mod tests {
         assert!(!Arc::ptr_eq(&before, &after), "re-indexed");
         assert_eq!(indexed, 1);
         assert!(before.faces().is_empty(), "the old library is unchanged");
+    }
+
+    /// A temporary directory, removed when dropped.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A symbolic link to a directory is followed, but a directory reached
+    /// through several paths, or through a link to an ancestor, is read
+    /// once.
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_reads_each_directory_once() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new("rr-font-walk");
+        let (root, other) = (tmp.0.join("root"), tmp.0.join("other"));
+        std::fs::create_dir_all(root.join("a")).expect("dir");
+        std::fs::create_dir_all(&other).expect("dir");
+        std::fs::write(root.join("a/x.ttf"), b"").expect("file");
+        std::fs::write(root.join("a/notes.txt"), b"").expect("file");
+        std::fs::write(other.join("y.OTF"), b"").expect("file");
+        symlink(&root, root.join("a/up")).expect("link");
+        symlink(root.join("a"), root.join("b")).expect("link");
+        symlink(&other, root.join("c")).expect("link");
+        let walk = walk_font_dirs(&[root.clone(), root.join("a")], MAX_FONT_DIRS);
+        let dirs: Vec<&Path> = walk.directories.iter().map(|(d, _)| d.as_path()).collect();
+        assert_eq!(dirs, [root.as_path(), &root.join("a"), &root.join("c")]);
+        assert!(walk.directories.iter().all(|(_, stamp)| stamp.is_some()));
+        assert_eq!(walk.files, [root.join("a/x.ttf"), root.join("c/y.OTF")]);
+    }
+
+    /// The walk stops at its directory limit.
+    #[test]
+    fn the_walk_stops_at_the_directory_limit() {
+        let tmp = TempDir::new("rr-font-walk-limit");
+        std::fs::create_dir_all(tmp.0.join("a/b")).expect("dir");
+        std::fs::write(tmp.0.join("top.ttc"), b"").expect("file");
+        std::fs::write(tmp.0.join("a/b/deep.ttf"), b"").expect("file");
+        let walk = walk_font_dirs(std::slice::from_ref(&tmp.0), 2);
+        assert_eq!(walk.directories.len(), 2);
+        assert_eq!(walk.files, [tmp.0.join("top.ttc")]);
+        let walk = walk_font_dirs(std::slice::from_ref(&tmp.0), MAX_FONT_DIRS);
+        assert_eq!(
+            walk.files,
+            [tmp.0.join("a/b/deep.ttf"), tmp.0.join("top.ttc")]
+        );
+    }
+
+    /// A file is taken by its exact name, below a root only, the first by
+    /// path.
+    #[test]
+    fn named_files_are_found_below_the_roots() {
+        let files = [
+            "/elsewhere/LiberationSans-Regular.ttf",
+            "/r/a/LiberationSans-Regular.ttf",
+            "/r/b/LiberationSans-Regular.ttf",
+            "/r/b/LiberationSansNarrow-Regular.ttf",
+        ]
+        .map(PathBuf::from);
+        let found = first_named(&files, &["/r"], "LiberationSans-Regular.ttf");
+        assert_eq!(found, Some(Path::new("/r/a/LiberationSans-Regular.ttf")));
+        assert_eq!(first_named(&files, &["/r"], "Liberation"), None);
+        assert_eq!(first_named(&files, &[], "LiberationSans-Regular.ttf"), None);
+    }
+
+    /// No standard directory depends on the working directory.
+    #[test]
+    fn standard_directories_are_absolute() {
+        for dir in FONT_DIRS.iter().chain(UNIX_FONT_ROOTS) {
+            assert!(
+                dir.starts_with("~/") || Path::new(dir).is_absolute(),
+                "{dir}"
+            );
+        }
+    }
+
+    /// Every substitute search of a library records the directories it
+    /// looks in once between them.
+    #[test]
+    fn substitute_searches_stamp_each_directory_once() {
+        let tmp = TempDir::new("rr-font-stamps");
+        let library = FontLibrary::new(vec![tmp.0.clone()], false);
+        for family in [
+            SubstituteFamily::Sans,
+            SubstituteFamily::Serif,
+            SubstituteFamily::Mono,
+        ] {
+            for (bold, italic) in [(false, false), (false, true), (true, false), (true, true)] {
+                let style = SubstituteStyle {
+                    family,
+                    bold,
+                    italic,
+                    ..SubstituteStyle::default()
+                };
+                let _program = super::super::substitutes::substitute_program(style, &library);
+            }
+        }
+        let stamps = library.stamps.lock().expect("stamps");
+        assert_eq!(stamps.keys().collect::<Vec<_>>(), [&tmp.0]);
     }
 }

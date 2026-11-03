@@ -10,7 +10,6 @@
 //! substitute is resolved once per library (a library whose search
 //! directories change is replaced), a compiled-in one once per process.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -88,94 +87,65 @@ const fn substitute_index(style: SubstituteStyle) -> usize {
     family * 4 + (style.bold as usize) * 2 + (style.italic as usize)
 }
 
-/// Candidate paths for one [`INSTALLED`] row, in search order: the free
-/// family's file in each of the extra directories `dirs`, then, when
-/// `system` is set, the fixed locations and the free family's file found
-/// under [`UNIX_FONT_ROOTS`].  Each directory a candidate lies in, and
-/// each directory searched below the roots, is reported to `watch`.
+/// Candidate paths for one [`INSTALLED`] row `names`, in search order:
+/// the free family's file in each extra directory of `library`, then,
+/// when the library searches the standard directories, the fixed
+/// locations of the build target and the free family's file listed below
+/// the distribution font roots ([`FontLibrary::system_file`]).  The
+/// directory of each extra-directory and fixed-location candidate is
+/// reported to `watch`; the library records the directories its listing
+/// walks itself.
 fn installed_candidates(
-    [stem, mac, win]: [&str; 3],
-    dirs: &[PathBuf],
-    system: bool,
+    names: [&str; 3],
+    library: &FontLibrary,
     watch: &mut dyn FnMut(&Path),
 ) -> Vec<PathBuf> {
-    let file = format!("{stem}.ttf");
-    let fixed = [
-        format!("/usr/share/fonts/truetype/liberation/{file}"),
-        format!("/usr/share/fonts/liberation/{file}"),
-        format!("/System/Library/Fonts/Supplemental/{mac}.ttf"),
-        format!("C:/Windows/Fonts/{win}.ttf"),
-    ];
-    let mut candidates: Vec<PathBuf> = dirs
+    let file = format!("{}.ttf", names[0]);
+    let system = library.searches_system();
+    let mut candidates: Vec<PathBuf> = library
+        .dirs()
         .iter()
         .map(|dir| dir.join(&file))
-        .chain(fixed.into_iter().filter(|_| system).map(PathBuf::from))
+        .chain(fixed_locations(names, &file).into_iter().filter(|_| system))
         .collect();
     for candidate in &candidates {
         if let Some(dir) = candidate.parent() {
             watch(dir);
         }
     }
-    if system {
-        let roots = UNIX_FONT_ROOTS.map(PathBuf::from);
-        candidates.extend(files_under(&roots, "Liberation", ".ttf", watch).remove(&file));
-    }
+    candidates.extend(library.system_file(&file).map(Path::to_path_buf));
     candidates
 }
 
-/// The directories whose subdirectories distributions install font
-/// packages in, each under its own name (`truetype/liberation2`,
-/// `liberation-sans`, …).
-const UNIX_FONT_ROOTS: [&str; 2] = ["/usr/share/fonts", "/usr/local/share/fonts"];
-
-/// Deepest directory level below a root that [`files_under`] reads.
-const MAX_FONT_DIR_DEPTH: usize = 3;
-
-/// The files under `roots`, to [`MAX_FONT_DIR_DEPTH`] levels of
-/// directories, whose names start with `prefix` and end with `suffix`, by
-/// file name; the first found keeps a name.  Unreadable directories are
-/// skipped.  Each directory is reported to `watch` before it is read.
-fn files_under(
-    roots: &[PathBuf],
-    prefix: &str,
-    suffix: &str,
-    watch: &mut dyn FnMut(&Path),
-) -> HashMap<String, PathBuf> {
-    let mut found = HashMap::new();
-    let mut pending: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
-    while let Some((dir, depth)) = pending.pop() {
-        watch(&dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                if depth < MAX_FONT_DIR_DEPTH {
-                    pending.push((path, depth + 1));
-                }
-            } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && name.starts_with(prefix)
-                && name.ends_with(suffix)
-            {
-                let _ = found.entry(name.to_owned()).or_insert(path);
-            }
-        }
-    }
-    found
+/// The fixed locations of the build target for the [`INSTALLED`] row
+/// `names`, whose free family's file is named `file`.
+fn fixed_locations(names: [&str; 3], file: &str) -> Vec<PathBuf> {
+    [
+        (
+            cfg!(unix),
+            format!("/usr/share/fonts/truetype/liberation/{file}"),
+        ),
+        (cfg!(unix), format!("/usr/share/fonts/liberation/{file}")),
+        (
+            cfg!(target_os = "macos"),
+            format!("/System/Library/Fonts/Supplemental/{}.ttf", names[1]),
+        ),
+        (cfg!(windows), format!("C:/Windows/Fonts/{}.ttf", names[2])),
+    ]
+    .into_iter()
+    .filter_map(|(target, path)| target.then(|| PathBuf::from(path)))
+    .collect()
 }
 
-/// The installed face of row `row`, searched for in the extra directories
-/// `dirs` first and then, when `system` is set, the fixed locations: the
-/// first candidate that exists and parses; `None` when none does.  The
-/// directories searched are reported to `watch`.
+/// The installed face of row `row` from `library`: the first candidate
+/// ([`installed_candidates`]) that exists and parses; `None` when none
+/// does.  The directories searched are reported to `watch`.
 fn installed_program(
     row: usize,
-    dirs: &[PathBuf],
-    system: bool,
+    library: &FontLibrary,
     watch: &mut dyn FnMut(&Path),
 ) -> Option<Arc<FontProgram>> {
-    installed_candidates(INSTALLED[row], dirs, system, watch)
+    installed_candidates(INSTALLED[row], library, watch)
         .into_iter()
         .filter(|path| path.exists())
         .find_map(|path| {
@@ -216,11 +186,7 @@ pub(crate) fn substitute_program(
     }
     let row = substitute_index(style);
     (row < INSTALLED_ROWS)
-        .then(|| {
-            library.substitute(row, |dirs, system, watch| {
-                installed_program(row, dirs, system, watch)
-            })
-        })
+        .then(|| library.substitute(row, |watch| installed_program(row, library, watch)))
         .flatten()
         .or_else(|| {
             EMBEDDED_CACHE[row]
@@ -271,33 +237,16 @@ mod tests {
         )
     }
 
-    /// Font files are found in the subdirectories distributions use, to
-    /// the depth limit, and the first found keeps its name.
+    /// Every candidate location of an installed substitute in the standard
+    /// directories is absolute: none depends on the working directory.
     #[test]
-    fn font_files_are_found_in_package_subdirectories() {
-        let root = std::env::temp_dir().join(format!("rr-font-roots-{}", std::process::id()));
-        let deep = root.join("a/b/c/d");
-        std::fs::create_dir_all(root.join("liberation-sans")).expect("dir");
-        std::fs::create_dir_all(&deep).expect("dir");
-        for path in [
-            root.join("liberation-sans/LiberationSans-Regular.ttf"),
-            root.join("liberation-sans/Other.ttf"),
-            deep.join("LiberationMono-Regular.ttf"),
-        ] {
-            std::fs::write(path, b"").expect("file");
+    fn installed_candidates_are_absolute() {
+        let library = FontLibrary::shared(&[], true);
+        for names in INSTALLED {
+            for path in installed_candidates(names, &library, &mut |_| {}) {
+                assert!(path.is_absolute(), "{}", path.display());
+            }
         }
-        let found = files_under(
-            std::slice::from_ref(&root),
-            "Liberation",
-            ".ttf",
-            &mut |_| {},
-        );
-        let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(
-            found.get("LiberationSans-Regular.ttf"),
-            Some(&root.join("liberation-sans/LiberationSans-Regular.ttf"))
-        );
-        assert_eq!(found.len(), 1, "{found:?}");
     }
 
     /// A metric-compatible face installed into a searched directory after
