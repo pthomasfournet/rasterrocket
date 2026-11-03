@@ -36,7 +36,39 @@ pub use png::write_png;
 pub use ppm::write_ppm;
 pub use tiff::{TiffCompression, TiffImage, TiffPage, TiffWriter, write_tiff};
 
-use std::io;
+use std::io::{self, Write};
+
+use color::Pixel;
+use raster::Bitmap;
+
+/// Slice length in which a packed bitmap is written.
+///
+/// A bitmap is packed when `stride == width * P::BYTES`. This is also the
+/// largest write-buffer capacity at which those slices bypass the buffer: a
+/// `BufWriter` whose capacity is at most this passes each slice to its sink
+/// without copying it into the buffer.
+pub const PACKED_WRITE_BYTES: usize = 64 * 1024;
+
+/// Write the live bytes of every row of `bitmap` (`width * P::BYTES` per
+/// row, stride padding excluded) to `out`, top to bottom. A packed bitmap is
+/// written straight from its buffer in [`PACKED_WRITE_BYTES`] slices, a
+/// padded one row by row.
+pub(crate) fn write_live_rows<P: Pixel, W: Write>(
+    bitmap: &Bitmap<P>,
+    out: &mut W,
+) -> io::Result<()> {
+    let live = bitmap.width as usize * P::BYTES;
+    if bitmap.stride == live {
+        for chunk in bitmap.data().chunks(PACKED_WRITE_BYTES) {
+            out.write_all(chunk)?;
+        }
+    } else {
+        for y in 0..bitmap.height {
+            out.write_all(&bitmap.row_bytes(y)[..live])?;
+        }
+    }
+    Ok(())
+}
 
 /// Luma below which a pixel is black in bilevel output, the midpoint of
 /// the 8-bit range; lighter pixels are white.

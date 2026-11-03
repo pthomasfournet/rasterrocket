@@ -10,12 +10,7 @@ use std::io::{self, Write};
 use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
-use crate::EncodeError;
-
-/// Slice length in which a packed bitmap (`stride == width`) is written.
-/// A `BufWriter` whose capacity is at most this passes each slice to its
-/// sink without copying it into the buffer.
-const PACKED_WRITE_BYTES: usize = 64 * 1024;
+use crate::{EncodeError, write_live_rows};
 
 /// Write `bitmap` to `out` as a binary PGM (`P5`) image.
 ///
@@ -44,17 +39,7 @@ pub fn write_pgm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
 
     write_pgm_header(&mut out, bitmap.width, bitmap.height)?;
 
-    let w = bitmap.width as usize;
-    if bitmap.stride == w {
-        for chunk in bitmap.data().chunks(PACKED_WRITE_BYTES) {
-            out.write_all(chunk)?;
-        }
-    } else {
-        for y in 0..bitmap.height {
-            out.write_all(&bitmap.row_bytes(y)[..w])?;
-        }
-    }
-
+    write_live_rows(bitmap, &mut out)?;
     out.flush()?;
     Ok(())
 }
@@ -70,6 +55,7 @@ fn write_pgm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PACKED_WRITE_BYTES;
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
 

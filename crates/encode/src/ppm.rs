@@ -19,7 +19,7 @@ use color::cmyk::{cmyk_to_rgb, cmyk_to_rgb_row};
 use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
-use crate::EncodeError;
+use crate::{EncodeError, write_live_rows};
 
 /// Write `bitmap` to `out` as a binary PPM (`P6`) image.
 ///
@@ -36,10 +36,14 @@ pub fn write_ppm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
         "grayscale/mono bitmap: use write_pgm instead",
     ))?;
     write_ppm_header(&mut out, bitmap.width, bitmap.height)?;
-    let mut rgb_row = vec![0u8; bitmap.width as usize * 3];
-    for y in 0..bitmap.height {
-        source.convert(bitmap.row_bytes(y), &mut rgb_row);
-        out.write_all(&rgb_row)?;
+    if source == RgbSource::Rgb {
+        write_live_rows(bitmap, &mut out)?;
+    } else {
+        let mut rgb_row = vec![0u8; bitmap.width as usize * 3];
+        for y in 0..bitmap.height {
+            source.convert(bitmap.row_bytes(y), &mut rgb_row);
+            out.write_all(&rgb_row)?;
+        }
     }
     out.flush()?;
     Ok(())
@@ -236,6 +240,18 @@ mod tests {
             3,
             "stride padding must not appear in PPM output"
         );
+    }
+
+    #[test]
+    fn packed_rgb_past_one_slice_is_written_whole() {
+        let (w, h) = (200u32, 150u32);
+        let pixels: Vec<u8> = (0..w * h * 3).map(|i| (i % 251) as u8).collect();
+        assert!(pixels.len() > crate::PACKED_WRITE_BYTES);
+        let bmp = Bitmap::<Rgb8>::from_packed(w, h, pixels.clone());
+        let mut out = Vec::new();
+        write_ppm::<Rgb8, _>(&bmp, &mut out).unwrap();
+        let hlen = header_len(&out);
+        assert_eq!(&out[hlen..], &pixels[..]);
     }
 
     #[test]
