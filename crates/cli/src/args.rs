@@ -247,6 +247,12 @@ pub(crate) struct Args {
     #[arg(long = "aaVector", value_name = "yes|no", default_value = "yes")]
     pub vector_antialias: AaFlag,
 
+    /// Simulate overprint (`OP`, `op`, `OPM`) for pages that use it
+    /// (default off).  Without it every object knocks out what lies
+    /// beneath it.
+    #[arg(long)]
+    pub overprint: bool,
+
     /// Do not draw annotations (form fields, comments, stamps and other
     /// PDF annotations); render the page content alone.
     #[arg(long = "hide-annotations")]
@@ -962,6 +968,7 @@ impl Args {
         config.annotations = !self.hide_annotations;
         config.text_antialias = self.antialias == AaFlag::Yes;
         config.vector_antialias = self.vector_antialias == AaFlag::Yes;
+        config.overprint = self.overprint;
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -1206,6 +1213,13 @@ mod page_list_tests {
         assert!(base_args().session_config().unwrap().annotations);
         let hidden = args_with(&["--hide-annotations"]).session_config().unwrap();
         assert!(!hidden.annotations);
+    }
+
+    #[test]
+    fn overprint_flag_reaches_session_config() {
+        assert!(!base_args().session_config().unwrap().overprint);
+        let config = args_with(&["--overprint"]).session_config().unwrap();
+        assert!(config.overprint);
     }
 
     #[test]

@@ -7,42 +7,144 @@
 //! `rgb_to_bytes` in `color::convert` (re-exported here), `DeviceCMYK` in
 //! `color::cmyk`.
 
-pub(crate) use color::convert::{gray_to_u8, rgb_to_bytes};
+use std::sync::OnceLock;
 
-/// Current fill or stroke colour, in a form the raster pipeline accepts.
+use color::PixelMode;
+pub(crate) use color::convert::{gray_to_u8, rgb_to_bytes};
+use raster::pipe::ChannelMask;
+
+use crate::resources::transfer::Transfer;
+
+/// The process channels C, M, Y and K of an ink canvas.
+pub(crate) const PROCESS_CHANNELS: ChannelMask = ChannelMask::new(0b1111);
+
+/// Current fill or stroke colour, in the forms the raster pipeline accepts.
 ///
-/// We target `Bitmap<Rgb8>` throughout, so all colours are stored as 3-byte
-/// RGB values.  `PipeSrc::Solid` takes `&[u8]` and asserts its length equals
-/// the pixel component count, so passing a 1-byte gray value would panic.
+/// The colour is held as sRGB bytes, painted on an RGB canvas, and as ink
+/// amounts `[C, M, Y, K, S0, S1, S2, S3]` (0 = no ink), painted on an ink
+/// canvas.  A colour given in a four-component process space keeps its
+/// components as the ink, and a colour given in a `Separation` or `DeviceN`
+/// space its colorants' tints; any other colour's ink is
+/// [`color::cmyk::rgb_to_ink`] of its sRGB bytes — the inks printing the
+/// colour with the most black — with no spot ink, computed on first use so
+/// that a page painted on an RGB canvas never evaluates it.
 ///
-/// `gray()` expands to equal R=G=B channels; `cmyk()` converts through the
-/// process-ink interpolation of `color::cmyk`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// On an ink canvas the colour paints the channels of [`Self::paints`] and
+/// keeps the backdrop in the others: the process channels for a
+/// four-component process colour, the colorants' channels for a
+/// `Separation` or `DeviceN` colour, every channel for any other colour.
+///
+/// `PipeSrc::Solid` takes `&[u8]` and asserts its length equals the pixel
+/// component count; [`Self::bytes_for`] returns the slice for a mode.
+#[derive(Debug, Clone)]
 pub(crate) struct RasterColor {
     bytes: [u8; 3],
+    /// The ink the colour was given in, if any.
+    given: Option<[u8; 8]>,
+    /// The ink amounts: `given`, otherwise derived from `bytes` on first
+    /// use.
+    ink: OnceLock<[u8; 8]>,
+    /// The channels the colour paints on an ink canvas.
+    paints: ChannelMask,
+    /// Whether nonzero overprint mode (PDF §8.6.7) applies to the colour:
+    /// it is a solid colour given in a four-component process space.
+    opm_eligible: bool,
+    /// The process channels whose component is exactly 0, bit `i` for
+    /// channel `i`; nonzero overprint mode leaves them unpainted.  Zero
+    /// for a colour that is not eligible.
+    zero_components: u8,
+}
+
+impl PartialEq for RasterColor {
+    /// The ink is a function of `bytes` and `given`, so they decide
+    /// equality with the channel mask and the overprint fields.
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+            && self.given == other.given
+            && self.paints == other.paints
+            && self.opm_eligible == other.opm_eligible
+            && self.zero_components == other.zero_components
+    }
+}
+
+impl Eq for RasterColor {}
+
+impl std::hash::Hash for RasterColor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+        self.given.hash(state);
+        self.paints.bits().hash(state);
+        self.opm_eligible.hash(state);
+        self.zero_components.hash(state);
+    }
 }
 
 impl RasterColor {
+    /// A colour of sRGB `bytes` whose ink derives from them; it paints
+    /// every channel.
+    const fn derived(bytes: [u8; 3]) -> Self {
+        Self {
+            bytes,
+            given: None,
+            ink: OnceLock::new(),
+            paints: ChannelMask::ALL,
+            opm_eligible: false,
+            zero_components: 0,
+        }
+    }
+
     /// Grey [0, 1] — expanded to equal RGB components.
     #[must_use]
     pub(crate) fn gray(g: f64) -> Self {
         let v = gray_to_u8(g);
-        Self { bytes: [v, v, v] }
+        Self::derived([v, v, v])
     }
 
     /// RGB [0, 1] each.
     #[must_use]
     pub(crate) fn rgb(r: f64, g: f64, b: f64) -> Self {
+        Self::derived(rgb_to_bytes(r, g, b))
+    }
+
+    /// `DeviceCMYK` [0, 1] each — converted with [`color::cmyk::cmyk_f64_to_rgb`];
+    /// the components are the ink.
+    #[must_use]
+    pub(crate) fn cmyk(c: f64, m: f64, y: f64, k: f64) -> Self {
+        Self::with_process_inks(color::cmyk::cmyk_f64_to_rgb(c, m, y, k), [c, m, y, k])
+    }
+
+    /// The colour of sRGB `rgb` given in a process space as the inks `cmyk`
+    /// ([0, 1] each, clamped; NaN is no ink), which are the colour's ink.
+    /// It paints the process channels and is eligible for nonzero
+    /// overprint mode, which leaves the channels of its zero components
+    /// unpainted.
+    #[must_use]
+    pub(crate) fn with_process_inks(rgb: [u8; 3], cmyk: [f64; 4]) -> Self {
+        let [c, m, y, k] = cmyk.map(gray_to_u8);
+        let zero_components = cmyk
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v.is_nan() || v <= 0.0)
+            .fold(0u8, |bits, (i, _)| bits | 1 << i);
         Self {
-            bytes: rgb_to_bytes(r, g, b),
+            opm_eligible: true,
+            zero_components,
+            ..Self::with_ink(rgb, [c, m, y, k, 0, 0, 0, 0], PROCESS_CHANNELS)
         }
     }
 
-    /// `DeviceCMYK` [0, 1] each — converted with [`color::cmyk::cmyk_f64_to_rgb`].
+    /// The colour of sRGB `rgb` whose ink is `ink` and which paints the
+    /// channels `paints`: a `Separation` or `DeviceN` colour, given as its
+    /// colorants' tints.
     #[must_use]
-    pub(crate) fn cmyk(c: f64, m: f64, y: f64, k: f64) -> Self {
+    pub(crate) fn with_ink(rgb: [u8; 3], ink: [u8; 8], paints: ChannelMask) -> Self {
         Self {
-            bytes: color::cmyk::cmyk_f64_to_rgb(c, m, y, k),
+            bytes: rgb,
+            given: Some(ink),
+            ink: OnceLock::from(ink),
+            paints,
+            opm_eligible: false,
+            zero_components: 0,
         }
     }
 
@@ -52,7 +154,7 @@ impl RasterColor {
     /// `f64 / 255.0` → `rgb_to_bytes` for no reason.
     #[must_use]
     pub(crate) const fn from_bytes(rgb: [u8; 3]) -> Self {
-        Self { bytes: rgb }
+        Self::derived(rgb)
     }
 
     /// The RGB bytes.
@@ -61,7 +163,58 @@ impl RasterColor {
         self.bytes
     }
 
-    /// Raw bytes slice for `PipeSrc::Solid`.
+    /// The ink amounts `[C, M, Y, K, S0, S1, S2, S3]`.
+    #[must_use]
+    pub(crate) fn ink(&self) -> &[u8; 8] {
+        self.ink.get_or_init(|| {
+            let [c, m, y, k] = color::cmyk::rgb_to_ink(self.bytes);
+            [c, m, y, k, 0, 0, 0, 0]
+        })
+    }
+
+    /// The channels the colour paints on an ink canvas.
+    #[must_use]
+    pub(crate) const fn paints(&self) -> ChannelMask {
+        self.paints
+    }
+
+    /// Whether nonzero overprint mode applies to the colour.
+    #[must_use]
+    pub(crate) const fn opm_eligible(&self) -> bool {
+        self.opm_eligible
+    }
+
+    /// The channels the colour paints on an ink canvas under overprint
+    /// mode `mode` (PDF §8.6.7): under a nonzero mode an eligible colour
+    /// leaves unpainted the process channels whose component is exactly 0.
+    #[must_use]
+    pub(crate) const fn paints_with_opm(&self, mode: u8) -> ChannelMask {
+        if mode != 0 && self.opm_eligible() {
+            ChannelMask::new(self.paints().bits() & !self.zero_components)
+        } else {
+            self.paints()
+        }
+    }
+
+    /// The colour's bytes for a pixel of `mode`: the ink amounts for
+    /// [`PixelMode::DeviceN8`], the RGB bytes for every other mode.
+    #[must_use]
+    pub(crate) fn bytes_for(&self, mode: PixelMode) -> &[u8] {
+        match mode {
+            PixelMode::DeviceN8 => self.ink(),
+            _ => &self.bytes,
+        }
+    }
+
+    /// The colour mapped through the RGB transfer tables `transfer`.  A
+    /// mapped colour is in no colour space of its own: its ink derives
+    /// from its mapped RGB bytes and it paints every channel.
+    #[must_use]
+    pub(crate) fn transferred(&self, transfer: Option<&Transfer>) -> Self {
+        transfer.map_or_else(|| self.clone(), |t| Self::derived(t.apply(self.bytes)))
+    }
+
+    /// Raw bytes slice for `PipeSrc::Solid` on an RGB canvas.
     ///
     /// Always 3 bytes (RGB), matching `Rgb8::BYTES`.
     #[must_use]
@@ -94,6 +247,114 @@ mod tests {
         assert_eq!(black.as_slice(), &[0, 0, 0]);
         let white = RasterColor::gray(1.0);
         assert_eq!(white.as_slice(), &[255, 255, 255]);
+    }
+
+    #[test]
+    fn raster_color_ink_is_given_cmyk_or_derived() {
+        let c = RasterColor::cmyk(0.2, 0.5, 0.1, 0.3);
+        assert_eq!(
+            c.bytes_for(PixelMode::DeviceN8),
+            &[51, 128, 26, 77, 0, 0, 0, 0]
+        );
+        assert_eq!(c.bytes_for(PixelMode::Rgb8), c.as_slice());
+        let white = RasterColor::gray(1.0);
+        assert_eq!(white.ink(), &[0; 8]);
+        // A grey prints in black ink alone, the black printing that grey.
+        let grey = RasterColor::gray(0.2);
+        let grey = grey.ink();
+        assert_eq!(grey[..3], [0, 0, 0]);
+        assert_eq!(grey[4..], [0; 4]);
+        assert!(color::cmyk::cmyk_to_rgb(0, 0, 0, grey[3])[0].abs_diff(51) <= 1);
+        // Equal RGB given as process inks differs from the derived colour.
+        let given = RasterColor::with_process_inks([255; 3], [0.0; 4]);
+        assert_eq!(given.ink(), white.ink());
+        assert_ne!(given, white);
+    }
+
+    #[test]
+    fn raster_color_paints_its_space_channels() {
+        let process = RasterColor::cmyk(0.2, 0.0, 0.6, 0.0);
+        assert_eq!(process.paints(), PROCESS_CHANNELS);
+        assert!(process.opm_eligible());
+        let spot = RasterColor::with_ink(
+            [200, 30, 60],
+            [0, 0, 0, 0, 153, 0, 0, 0],
+            ChannelMask::new(0b1_0000),
+        );
+        assert_eq!(spot.paints(), ChannelMask::new(0b1_0000));
+        assert!(!spot.opm_eligible());
+        assert_eq!(spot.ink(), &[0, 0, 0, 0, 153, 0, 0, 0]);
+        // The same ink in a different channel is a different colour.
+        assert_ne!(
+            spot,
+            RasterColor::with_ink(
+                [200, 30, 60],
+                [0, 0, 0, 0, 153, 0, 0, 0],
+                ChannelMask::new(0b1_0001)
+            )
+        );
+        for derived in [
+            RasterColor::gray(0.3),
+            RasterColor::rgb(0.1, 0.2, 0.3),
+            RasterColor::from_bytes([1, 2, 3]),
+        ] {
+            assert_eq!(derived.paints(), ChannelMask::ALL);
+            assert!(!derived.opm_eligible());
+        }
+    }
+
+    #[test]
+    fn raster_color_nonzero_overprint_mode_skips_zero_components() {
+        let black = RasterColor::cmyk(0.0, 0.0, 0.0, 1.0);
+        assert_eq!(black.paints_with_opm(0), PROCESS_CHANNELS);
+        assert_eq!(black.paints_with_opm(1), ChannelMask::new(0b1000));
+        // A component however small is painted; only an exact 0 is not.
+        let faint = RasterColor::cmyk(0.001, 0.0, 0.5, 0.0);
+        assert_eq!(faint.ink()[0], 0);
+        assert_eq!(faint.paints_with_opm(1), ChannelMask::new(0b0101));
+        assert_ne!(faint, RasterColor::cmyk(0.0, 0.0, 0.5, 0.0));
+        // A component that clamps to no ink counts as zero.
+        let clamped = RasterColor::cmyk(-0.25, f64::NAN, 0.5, 0.0);
+        assert_eq!(clamped.ink()[..2], [0, 0]);
+        assert_eq!(clamped.paints_with_opm(1), ChannelMask::new(0b0100));
+        assert_eq!(clamped, RasterColor::cmyk(0.0, 0.0, 0.5, 0.0));
+        // Only a process colour is eligible.
+        let spot = RasterColor::with_ink([200, 30, 60], [0; 8], ChannelMask::new(0b1_0000));
+        assert_eq!(spot.paints_with_opm(1), ChannelMask::new(0b1_0000));
+        assert_eq!(RasterColor::gray(1.0).paints_with_opm(1), ChannelMask::ALL);
+    }
+
+    #[test]
+    fn raster_color_transferred_is_derived() {
+        use crate::resources::transfer::{TransferSetting, ext_gstate_transfer};
+
+        // The inverting transfer function.
+        let doc = crate::test_helpers::empty_doc();
+        let gs = pdf::parse_object(
+            b"<< /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> >>",
+            &mut 0,
+        )
+        .expect("the dictionary parses");
+        let pdf::Object::Dictionary(gs) = gs else {
+            panic!("a dictionary");
+        };
+        let Some(TransferSetting::Functions(transfer)) = ext_gstate_transfer(&doc, &gs) else {
+            panic!("a transfer function");
+        };
+        let spot = RasterColor::with_ink(
+            [200, 30, 60],
+            [0, 0, 0, 0, 153, 0, 0, 0],
+            ChannelMask::new(0b1_0000),
+        );
+        let mapped = spot.transferred(Some(&transfer));
+        assert_eq!(mapped.bytes(), [55, 225, 195]);
+        assert_eq!(mapped.paints(), ChannelMask::ALL);
+        assert!(!mapped.opm_eligible());
+        assert_eq!(
+            mapped.ink(),
+            &RasterColor::from_bytes([55, 225, 195]).ink()[..]
+        );
+        assert_eq!(spot.transferred(None), spot);
     }
 
     #[test]

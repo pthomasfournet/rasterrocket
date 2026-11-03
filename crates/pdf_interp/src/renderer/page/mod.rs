@@ -1,8 +1,8 @@
 //! Per-page operator dispatcher.
 //!
-//! [`PageRenderer`] holds a target [`Bitmap`] and a `GStateStack`, iterates
-//! over a decoded operator sequence, and calls into the `raster` crate for
-//! each painting operator.
+//! [`PageRenderer`] holds a target canvas (an RGB or ink [`Bitmap`]) and a
+//! `GStateStack`, iterates over a decoded operator sequence, and calls into the
+//! `raster` crate for each painting operator.
 //!
 //! Sub-modules (all private):
 //! - `operators` — the operator dispatch table and marked-content tracking.
@@ -17,6 +17,8 @@
 //! - `image_memo`, `image_reduce`, `image_sampler` — image decode memo,
 //!   area-averaged reduction and device-pixel sampling.
 //! - `pixel_rect` — rectangles of device pixels.
+//! - `canvas` — the page bitmap, of RGB or ink pixels, and the dispatch of
+//!   paint calls to either.
 //! - `annotations` — annotation appearances, stored and synthesised.
 //! - `gpu_ops` — antialiased fill dispatch to a GPU backend.
 //!
@@ -53,14 +55,17 @@
 //!   `raster::transparency` and composited back (PDF §11.6.6)
 
 mod annotations;
+mod canvas;
 mod devices;
 mod diagnostics;
 mod fill_stroke;
 mod gpu_ops;
 mod image_blit;
+mod image_compositor;
 mod image_memo;
 mod image_reduce;
 mod image_sampler;
+mod ink_map;
 mod knockout;
 mod operators;
 mod paint;
@@ -76,10 +81,10 @@ mod type3;
 mod view;
 mod xobject;
 
+use canvas::{CanvasKind, PageCanvas};
 #[cfg(feature = "cache")]
 use devices::CacheState;
 pub use diagnostics::{ImageFailure, PageDiagnostics, RenderAbort};
-use image_blit::composite_onto_white;
 use paint::components_to_color;
 pub use view::PageView;
 use view::initial_gstate;
@@ -169,10 +174,11 @@ const DEADLINE_CHECK_INTERVAL: u64 = 4_096;
 /// gigabytes before the operator budget aborts the page.  Not a tuning knob.
 pub(super) const MAX_WARNED_UNKNOWN_OPS: usize = 256;
 
-/// Renders a decoded operator sequence onto a `Bitmap<Rgb8>`.
+/// Renders a decoded operator sequence onto a page canvas of RGB or ink
+/// pixels, finished as a `Bitmap<Rgb8>`.
 pub struct PageRenderer<'doc> {
     /// Target pixel buffer.
-    pub(super) bitmap: Bitmap<Rgb8>,
+    canvas: PageCanvas,
     /// Width of the drawn window (the bitmap) in device pixels.
     width: u32,
     /// Height of the drawn window (the bitmap) in device pixels.
@@ -229,10 +235,12 @@ pub struct PageRenderer<'doc> {
     /// the bitmap is then transparent and is composited onto white by
     /// [`finish`](Self::finish).  `None` paints onto opaque white directly.
     page_group: Option<crate::resources::TransparencyGroupParams>,
-    /// Transparent page-sized bitmaps for transparency groups, each
+    /// Transparent page-sized canvases for transparency groups, each
     /// returned cleared when its group is composited; one per nesting level
     /// is allocated over the page's life.
-    group_pool: Vec<Bitmap<Rgb8>>,
+    group_pool: Vec<PageCanvas>,
+    /// The spot colorants of the page and their channels on an ink canvas.
+    ink_map: ink_map::InkMap,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Image `XObjects` already decoded on this page, shared with the
@@ -383,7 +391,7 @@ impl<'doc> PageRenderer<'doc> {
         );
         let (width, height, rotate_cw) = (view.width, view.height, view.rotate_cw);
 
-        let bitmap = page_bitmap(width, height, group.is_some());
+        let canvas = PageCanvas::new(CanvasKind::Rgb, width, height, group.is_some());
 
         let initial_ctm = view.initial_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);
@@ -392,7 +400,7 @@ impl<'doc> PageRenderer<'doc> {
         let resources = PageResources::new(doc, page_id);
 
         Self {
-            bitmap,
+            canvas,
             width,
             height,
             page_width: view.page_width,
@@ -416,6 +424,7 @@ impl<'doc> PageRenderer<'doc> {
             },
             page_group: group,
             group_pool: Vec::new(),
+            ink_map: ink_map::InkMap::default(),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(),
             pattern_memo: pattern_memo::PatternMemo::shared(),
@@ -485,13 +494,14 @@ impl<'doc> PageRenderer<'doc> {
     pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
         debug_assert_eq!(
             self.ops_executed, 0,
-            "set_page_group must precede execute: the page bitmap is replaced"
+            "set_page_group must precede execute: the page canvas is replaced"
         );
         let was_group = self.page_group.is_some();
         self.page_group = group;
         self.group.knockout = group.is_some_and(|g| g.knockout);
         if group.is_some() != was_group {
-            self.bitmap = page_bitmap(self.width, self.height, group.is_some());
+            let kind = self.canvas.kind();
+            self.canvas = PageCanvas::new(kind, self.width, self.height, group.is_some());
         }
     }
 
@@ -636,15 +646,23 @@ impl<'doc> PageRenderer<'doc> {
         )
     }
 
-    /// Consume the renderer and return the finished bitmap and page diagnostics.
+    /// Consume the renderer and return the finished bitmap, in sRGB, and
+    /// page diagnostics.  An ink canvas converts with the process
+    /// equivalents of the page's spot colorants.
     #[must_use]
     pub fn finish(mut self) -> (Bitmap<Rgb8>, PageDiagnostics) {
         self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
 
         if self.page_group.is_some() {
-            composite_onto_white(&mut self.bitmap);
+            self.canvas.composite_onto_white();
         }
-        (self.bitmap, self.diag)
+        let Self {
+            canvas,
+            ink_map,
+            diag,
+            ..
+        } = self;
+        (canvas.into_rgb(&ink_map.luts()), diag)
     }
 
     /// Execute a slice of decoded operators in order.
@@ -747,15 +765,5 @@ impl<'doc> PageRenderer<'doc> {
     }
 }
 
-/// The unpainted bitmap of a `width × height` page: transparent, with an
-/// alpha plane, for a page painted as a transparency group; opaque white
-/// otherwise.
-fn page_bitmap(width: u32, height: u32, group: bool) -> Bitmap<Rgb8> {
-    if group {
-        Bitmap::new(width, height, 1, true)
-    } else {
-        Bitmap::new_filled(width, height, 1, false, u8::MAX)
-    }
-}
 #[cfg(test)]
 mod tests;

@@ -99,6 +99,7 @@ mod tests {
             a_input: 255,
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
+            overprint: None,
         }
     }
 
@@ -135,6 +136,7 @@ mod tests {
             a_input: 255,
             transfer,
             backdrop: None,
+            overprint: None,
         };
 
         let color = [100u8, 150, 200];

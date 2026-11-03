@@ -2,6 +2,7 @@
 
 use super::super::gstate::mat2x2_mul;
 use super::PageRenderer;
+use super::canvas::with_canvas;
 use super::pixel_rect::PixelRect;
 use super::text_ops::{
     GlyphRecord, fit_to_advance, glyph_advance, glyph_placement, text_to_device, translate_text_x,
@@ -10,7 +11,6 @@ use super::text_ops::{
 use super::text_shaping::{Drawn, shaped_runs};
 use crate::resources::cmap::DecodedCode;
 use crate::resources::font::CidEncoding;
-use color::Rgb8;
 use font::face::FontFace;
 use raster::{
     glyph::{GlyphBitmap, fill_glyph},
@@ -124,7 +124,7 @@ impl PageRenderer<'_> {
         // Phase 1: rasterize glyphs and collect the outlines the mode needs.
         //
         // Two-phase design: borrow `font_cache` here (read-only after load), then
-        // release it before touching `self.bitmap` or `self.gstate` in phase 2.
+        // release it before touching `self.canvas` or `self.gstate` in phase 2.
         let mut records: Vec<GlyphRecord> = Vec::with_capacity(bytes.len());
         // Union of the device-space glyph outlines, built when `do_clip`.
         let mut clip_outline = raster::path::Path::new();
@@ -408,16 +408,19 @@ impl PageRenderer<'_> {
         // Phase 2: fill the glyphs, then stroke their outlines.
         let painted_glyphs = !(records.is_empty() && fill_paths.is_empty());
         if painted_glyphs && !self.gstate.current().fill_paints_nothing() {
-            let fill_bytes = self.gstate.current().painted_fill_color().to_vec();
+            let fill_color = self.gstate.current().painted_fill_color();
+            let fill_bytes = fill_color.bytes_for(self.canvas.kind().mode());
             let clip = self.gstate.current().clip.clone_shared();
             let blend_mode = self.gstate.current().blend_mode;
-            let backdrop = self.blend_backdrop(blend_mode);
+            let overprint = self.overprint_mask(false, &fill_color);
+            let backdrop = self.paint_backdrop(blend_mode, overprint);
             let pipe = Self::make_pipe(
                 self.gstate.current().fill_alpha,
                 blend_mode,
                 backdrop.as_deref(),
+                overprint,
             );
-            let src = PipeSrc::Solid(&fill_bytes);
+            let src = PipeSrc::Solid(fill_bytes);
 
             // The glyphs, as bitmaps or filled outlines, are one object under
             // the soft mask in effect; the outline fills lie within one pixel
@@ -460,15 +463,9 @@ impl PageRenderer<'_> {
                     // The ClipResult return value is only relevant for accumulating
                     // text-as-clip paths (text render modes 4–7), which Phase 3 below
                     // handles separately via glyph_path; per-glyph fill output is unused.
-                    let _ = fill_glyph::<Rgb8>(
-                        &mut r.bitmap,
-                        &clip,
-                        &pipe,
-                        &src,
-                        rec.pen_x,
-                        rec.pen_y,
-                        &glyph,
-                    );
+                    let _ = with_canvas!(&mut r.canvas, |b| fill_glyph(
+                        b, &clip, &pipe, &src, rec.pen_x, rec.pen_y, &glyph
+                    ));
                 }
                 if pattern_fill {
                     let mut union = raster::path::Path::new();
@@ -536,7 +533,7 @@ mod tests {
         let mut renderer = PageRenderer::new(64, 32, &doc, (4, 0));
         renderer.execute(&crate::content::parse(content));
         (0..32)
-            .flat_map(|y| renderer.bitmap.row_bytes(y).to_vec())
+            .flat_map(|y| renderer.rgb_canvas().row_bytes(y).to_vec())
             .filter(|&v| v < 128)
             .count()
     }

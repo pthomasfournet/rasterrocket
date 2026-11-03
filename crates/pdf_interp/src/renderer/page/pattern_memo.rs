@@ -397,6 +397,7 @@ mod tests {
             ])),
             bbox: None,
             background: None,
+            paints: raster::pipe::ChannelMask::ALL,
         })
     }
 

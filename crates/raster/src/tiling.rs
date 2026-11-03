@@ -142,6 +142,7 @@ fn source_over() -> PipeState<'static> {
         a_input: 255,
         transfer: TransferSet::identity_rgb(),
         backdrop: None,
+        overprint: None,
     }
 }
 

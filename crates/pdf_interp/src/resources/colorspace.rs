@@ -118,23 +118,74 @@ pub enum ColorSpace {
         alternate: Box<Self>,
         /// The compiled tint transform; `None` when the array has none.
         tint: Option<TintTransform>,
-        /// The colorant is `/None`: painting produces no output.
-        none: bool,
+        /// The colorant the tint paints.
+        colorant: Colorant,
     },
-    /// Multi-channel spot-colour set. PDF §8.6.6.5. `ncomps` is the
-    /// number of tint inputs; `alternate` and `tint` mirror
-    /// `Separation`.
+    /// Multi-channel spot-colour set. PDF §8.6.6.5. One tint input per
+    /// colorant; `alternate` and `tint` mirror `Separation`.
     DeviceN {
-        /// Number of tint components — from the `Names` array length.
-        ncomps: u8,
+        /// The colorants, one per tint component, from the `Names` array;
+        /// 1 to 255 of them.
+        colorants: Arc<[Colorant]>,
         /// Device space the tint converts into when spot colorants
         /// aren't available.
         alternate: Box<Self>,
         /// The compiled tint transform; `None` when the array has none.
         tint: Option<TintTransform>,
-        /// Every colorant is `/None`: painting produces no output.
-        none: bool,
     },
+}
+
+/// A colorant of a `Separation` or `DeviceN` space (PDF §8.6.6.4,
+/// §8.6.6.5), classified by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Colorant {
+    /// `/None`: the tint paints nothing.
+    None,
+    /// `/All`: the tint paints every colorant of the device (a
+    /// registration colour).
+    All,
+    /// A process colorant, `/Cyan`, `/Magenta`, `/Yellow` or `/Black`.
+    Process(ProcessInk),
+    /// Any other name: a spot colorant.
+    Spot(Arc<[u8]>),
+}
+
+impl Colorant {
+    /// Classify the colorant `name`.
+    #[must_use]
+    pub fn parse(name: &[u8]) -> Self {
+        match name {
+            b"None" => Self::None,
+            b"All" => Self::All,
+            b"Cyan" => Self::Process(ProcessInk::Cyan),
+            b"Magenta" => Self::Process(ProcessInk::Magenta),
+            b"Yellow" => Self::Process(ProcessInk::Yellow),
+            b"Black" => Self::Process(ProcessInk::Black),
+            spot => Self::Spot(Arc::from(spot)),
+        }
+    }
+}
+
+/// A process ink of a CMYK device, in the channel order of `DeviceCMYK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessInk {
+    Cyan,
+    Magenta,
+    Yellow,
+    Black,
+}
+
+impl ProcessInk {
+    /// The ink's channel, 0–3, in a `DeviceCMYK` colour or an ink pixel.
+    #[must_use]
+    pub const fn channel(self) -> usize {
+        match self {
+            Self::Cyan => 0,
+            Self::Magenta => 1,
+            Self::Yellow => 2,
+            Self::Black => 3,
+        }
+    }
 }
 
 impl ColorSpace {
@@ -153,7 +204,26 @@ impl ColorSpace {
             Self::Cal(cal) => cal.ncomponents(),
             Self::IccBased { n, .. } => usize::from(*n),
             Self::Pattern { .. } => 0,
-            Self::DeviceN { ncomps, .. } => usize::from(*ncomps),
+            Self::DeviceN { colorants, .. } => colorants.len(),
+        }
+    }
+
+    /// Whether the space is a process CMYK space — `DeviceCMYK` or a
+    /// four-component ICC space — whose components are the inks of a CMYK
+    /// device.
+    #[must_use]
+    pub const fn is_process_cmyk(&self) -> bool {
+        matches!(self, Self::DeviceCmyk | Self::IccBased { n: 4, .. })
+    }
+
+    /// The colorants of a `Separation` or `DeviceN` space, one per tint
+    /// component; empty for every other space.
+    #[must_use]
+    pub fn colorants(&self) -> &[Colorant] {
+        match self {
+            Self::Separation { colorant, .. } => std::slice::from_ref(colorant),
+            Self::DeviceN { colorants, .. } => colorants,
+            _ => &[],
         }
     }
 
@@ -178,10 +248,47 @@ impl ColorSpace {
     #[must_use]
     pub fn paints_nothing(&self) -> bool {
         match self {
-            Self::Separation { none, .. } | Self::DeviceN { none, .. } => *none,
+            Self::Separation { .. } | Self::DeviceN { .. } => {
+                self.colorants().iter().all(|c| *c == Colorant::None)
+            }
             Self::Pattern { base: Some(base) } => base.paints_nothing(),
             _ => false,
         }
+    }
+
+    /// The process ink `[C, M, Y, K]` (0 = no ink) of the colour `comps`
+    /// in this space, as a CMYK device would print it: the components
+    /// themselves in `DeviceCMYK` or a four-component ICC space; the ink of
+    /// the alternate colour for a `Separation` or `DeviceN` space whose tint
+    /// transform evaluates; otherwise [`color::cmyk::rgb_to_ink`] of the
+    /// sRGB conversion.  A component count other
+    /// than [`ncomponents`](Self::ncomponents) converts as
+    /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.
+    #[must_use]
+    pub fn process_ink(&self, doc: &Document, comps: &[f64]) -> [u8; 4] {
+        match self {
+            Self::DeviceCmyk | Self::IccBased { n: 4, .. } => {
+                if let &[c, m, y, k] = comps {
+                    return [c, m, y, k].map(color::convert::gray_to_u8);
+                }
+            }
+            Self::Separation {
+                alternate,
+                tint: Some(tint),
+                ..
+            }
+            | Self::DeviceN {
+                alternate,
+                tint: Some(tint),
+                ..
+            } if comps.len() == self.ncomponents() => {
+                if let Some(alt) = tint.alternate_components(alternate, comps) {
+                    return alternate.process_ink(doc, &alt);
+                }
+            }
+            _ => {}
+        }
+        color::cmyk::rgb_to_ink(self.convert_to_rgb(doc, comps))
     }
 
     /// Convert a tint-component slice to an sRGB byte triple per PDF §8.6.
@@ -219,7 +326,7 @@ impl ColorSpace {
     /// - `Separation`: passes the tint through the tint transform `tint`
     ///   and converts the result via the alternate colour space.  A missing
     ///   function or a failed evaluation drops back to `1 - tint` as gray.
-    /// - `DeviceN`: passes all `ncomps` tints through the tint-transform
+    /// - `DeviceN`: passes one tint per colorant through the tint-transform
     ///   function and converts the result via the alternate colour space.
     ///   Any failure drops back to `1 - comps[0]` as gray.
     #[must_use]
@@ -303,10 +410,20 @@ impl TintTransform {
         Self(Function::load(doc, obj))
     }
 
+    /// The components in `alternate` of the colour of `tints`: `tints`
+    /// passed through the function.  `None` when evaluation fails.
+    pub(crate) fn alternate_components(
+        &self,
+        alternate: &ColorSpace,
+        tints: &[f64],
+    ) -> Option<Vec<f64>> {
+        self.0.eval_n(tints, alternate.ncomponents())
+    }
+
     /// Pass `tints` through the function and convert the result in
     /// `alternate`.  `None` when evaluation fails.
     fn to_rgb(&self, doc: &Document, alternate: &ColorSpace, tints: &[f64]) -> Option<[u8; 3]> {
-        let outputs = self.0.eval_n(tints, alternate.ncomponents())?;
+        let outputs = self.alternate_components(alternate, tints)?;
         Some(alternate.convert_to_rgb(doc, &outputs))
     }
 }
@@ -626,8 +743,14 @@ fn resolve_separation(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
     ColorSpace::Separation {
         alternate,
         tint: arr.get(3).map(|o| TintTransform::load(doc, o)),
-        none: arr.get(1).is_some_and(is_none_colorant),
+        colorant: colorant_of(arr.get(1)),
     }
+}
+
+/// The colorant the name object `name` declares; a spot colorant with an
+/// empty name when the object is missing or not a name.
+fn colorant_of(name: Option<&Object>) -> Colorant {
+    Colorant::parse(name.and_then(Object::as_name).unwrap_or_default())
 }
 
 fn resolve_device_n(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
@@ -635,29 +758,22 @@ fn resolve_device_n(doc: &Document, arr: &[Object], depth: u8) -> ColorSpace {
     let Some(names) = arr.get(1).and_then(Object::as_array) else {
         return ColorSpace::DeviceGray;
     };
-    let Some(ncomps) = u8::try_from(names.len()).ok().filter(|&n| n > 0) else {
+    if names.is_empty() || u8::try_from(names.len()).is_err() {
         log::debug!(
             "colorspace: DeviceN has {} colorant names, not 1–255 — fallback DeviceGray",
             names.len()
         );
         return ColorSpace::DeviceGray;
-    };
+    }
     let Some(alt_obj) = arr.get(2) else {
         return ColorSpace::DeviceGray;
     };
     let alternate = Box::new(resolve_depth(doc, alt_obj, depth + 1));
     ColorSpace::DeviceN {
-        ncomps,
+        colorants: names.iter().map(|n| colorant_of(Some(n))).collect(),
         alternate,
         tint: arr.get(3).map(|o| TintTransform::load(doc, o)),
-        none: names.iter().all(is_none_colorant),
     }
-}
-
-/// Whether `name` is the colorant `/None`, which never produces visible
-/// output (PDF §8.6.6.4, §8.6.6.5).
-fn is_none_colorant(name: &Object) -> bool {
-    name.as_name() == Some(b"None".as_slice())
 }
 
 const fn reference_id(obj: &Object) -> Option<ObjectId> {
@@ -674,6 +790,16 @@ mod tests {
 
     fn name_obj(s: &[u8]) -> Object {
         Object::Name(s.to_vec())
+    }
+
+    /// A spot colorant.
+    fn spot() -> Colorant {
+        Colorant::parse(b"Spot")
+    }
+
+    /// `n` spot colorants.
+    fn spots(n: usize) -> Arc<[Colorant]> {
+        vec![spot(); n].into()
     }
 
     #[test]
@@ -835,18 +961,18 @@ mod tests {
         let ColorSpace::Separation {
             alternate,
             tint,
-            none,
+            colorant,
         } = resolve(&doc, &Object::Array(arr))
         else {
             panic!("expected Separation");
         };
         assert_eq!(*alternate, ColorSpace::DeviceCmyk);
         assert!(tint.is_some());
-        assert!(!none);
+        assert_eq!(colorant, Colorant::parse(b"PANTONE_185_C"));
     }
 
     #[test]
-    fn device_n_extracts_ncomps_from_names_array() {
+    fn device_n_takes_a_colorant_per_name() {
         let doc = empty_doc();
         let names = Object::Array(vec![
             name_obj(b"Cyan"),
@@ -860,17 +986,23 @@ mod tests {
             Object::Reference((7, 0)),
         ];
         let ColorSpace::DeviceN {
-            ncomps,
+            colorants,
             alternate,
             tint,
-            none,
         } = resolve(&doc, &Object::Array(arr))
         else {
             panic!("expected DeviceN");
         };
-        assert_eq!((ncomps, *alternate), (3, ColorSpace::DeviceCmyk));
+        assert_eq!(*alternate, ColorSpace::DeviceCmyk);
         assert!(tint.is_some());
-        assert!(!none);
+        assert_eq!(
+            *colorants,
+            [
+                Colorant::Process(ProcessInk::Cyan),
+                Colorant::Process(ProcessInk::Magenta),
+                Colorant::parse(b"Spot1")
+            ]
+        );
     }
 
     #[test]
@@ -914,17 +1046,16 @@ mod tests {
             ColorSpace::Separation {
                 alternate: Box::new(ColorSpace::DeviceCmyk),
                 tint: None,
-                none: false,
+                colorant: spot(),
             }
             .ncomponents(),
             1,
         );
         assert_eq!(
             ColorSpace::DeviceN {
-                ncomps: 5,
+                colorants: spots(5),
                 alternate: Box::new(ColorSpace::DeviceCmyk),
                 tint: None,
-                none: false,
             }
             .ncomponents(),
             5,
@@ -1144,7 +1275,7 @@ mod tests {
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: None,
-            none: false,
+            colorant: spot(),
         };
         assert_eq!(sep.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]); // no ink
         assert_eq!(sep.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]); // full ink
@@ -1158,7 +1289,7 @@ mod tests {
         let sep = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: Some(TintTransform::load(&doc, &Object::Reference((999, 0)))),
-            none: false,
+            colorant: spot(),
         };
         assert_eq!(sep.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
     }
@@ -1182,10 +1313,9 @@ mod tests {
     fn convert_devicen_multi_input_evaluates_the_tint_transform() {
         let doc = devicen_teal_doc();
         let dn = ColorSpace::DeviceN {
-            ncomps: 2,
+            colorants: spots(2),
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: Some(TintTransform::load(&doc, &Object::Reference((4, 0)))),
-            none: false,
         };
         // Full spot, no black: the teal CMYK, not the gray of comps[0].
         let teal = dn.convert_to_rgb(&doc, &[0.0, 1.0]);
@@ -1256,24 +1386,22 @@ mod tests {
         // No tint transform → gray heuristic on comps[0].
         let doc = empty_doc();
         let dn = ColorSpace::DeviceN {
-            ncomps: 3,
+            colorants: spots(3),
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: None,
-            none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[1.0, 0.5, 0.5]), [0, 0, 0]);
     }
 
     #[test]
     fn convert_devicen_single_input_no_tint_fn_falls_back_to_gray() {
-        // ncomps=1 with no resolvable tint function → gray heuristic on the
+        // One colorant with no resolvable tint function → gray heuristic on the
         // single tint component (1.0 → "full ink" → black).
         let doc = empty_doc();
         let dn = ColorSpace::DeviceN {
-            ncomps: 1,
+            colorants: spots(1),
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: None,
-            none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]);
         assert_eq!(dn.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]);
@@ -1281,14 +1409,13 @@ mod tests {
 
     #[test]
     fn convert_devicen_single_input_unresolvable_tint_fn_falls_back() {
-        // ncomps=1 with a tint reference that doesn't resolve → evaluation
+        // One colorant with a tint reference that doesn't resolve → evaluation
         // returns None → fall back to the gray heuristic.
         let doc = empty_doc();
         let dn = ColorSpace::DeviceN {
-            ncomps: 1,
+            colorants: spots(1),
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: Some(TintTransform::load(&doc, &Object::Reference((999, 0)))),
-            none: false,
         };
         assert_eq!(dn.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
     }
@@ -1304,12 +1431,12 @@ mod tests {
         let inner = ColorSpace::Separation {
             alternate: Box::new(ColorSpace::DeviceGray),
             tint: None,
-            none: false,
+            colorant: spot(),
         };
         let outer = ColorSpace::Separation {
             alternate: Box::new(inner),
             tint: None,
-            none: false,
+            colorant: spot(),
         };
         // No infinite loop, deterministic byte triple.
         let result = outer.convert_to_rgb(&doc, &[0.5]);

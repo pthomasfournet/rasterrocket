@@ -25,7 +25,7 @@ mod test_helpers;
 
 pub use form_type::{FormType, form_type};
 pub use optional_content::{OptionalContent, RenderPurpose};
-pub use page_group::page_group;
+pub use page_group::{page_group, page_uses_overprint};
 pub use prescan::prescan_page;
 
 /// Entry points for fuzz targets: the CCITT and JBIG2 codec wrappers and a

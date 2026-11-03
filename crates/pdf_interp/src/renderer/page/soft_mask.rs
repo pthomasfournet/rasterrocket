@@ -17,11 +17,12 @@
 
 use std::sync::Arc;
 
-use color::Rgb8;
+use color::{Pixel, Rgb8};
 use raster::Bitmap;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
+use super::canvas::{CanvasKind, PageCanvas, Snapshot, with_canvas};
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
@@ -63,8 +64,10 @@ impl PageRenderer<'_> {
 
         // The mask group is painted with the graphics state in effect at
         // `gs`, except that the soft mask is `None`, the alpha constants are
-        // 1 and the blend mode is `Normal`.  The canvas is a group of its
-        // own, not the knockout group that may be in effect.
+        // 1 and the blend mode is `Normal`.  It is composited against an
+        // opaque backdrop of `BC` (PDF §11.6.5.2), so it sees nothing of the
+        // enclosing group: neither its backdrop, whose pixels are of the
+        // page canvas's kind, nor its knockout.
         self.gstate.save();
         {
             let gs = self.gstate.current_mut();
@@ -73,12 +76,16 @@ impl PageRenderer<'_> {
             gs.stroke_alpha = 255;
             gs.blend_mode = BlendMode::Normal;
         }
-        let knockout = std::mem::replace(&mut self.group.knockout, false);
-        let mut canvas = Bitmap::<Rgb8>::new(self.width, self.height, 1, true);
-        std::mem::swap(&mut self.bitmap, &mut canvas);
+        let enclosing = std::mem::take(&mut self.group);
+        // A mask group yields mask values, not printed colorants, so it is
+        // painted in sRGB whatever the page's canvas: its luminosity is
+        // that of its colours (PDF §11.6.5.2), not of the inks that print
+        // them, which reproduce a colour only within the process gamut.
+        let mask = PageCanvas::new(CanvasKind::Rgb, self.width, self.height, true);
+        let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);
-        std::mem::swap(&mut self.bitmap, &mut canvas);
-        self.group.knockout = knockout;
+        let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
+        self.group = enclosing;
         self.gstate.restore();
 
         let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
@@ -171,9 +178,9 @@ impl PageRenderer<'_> {
             x0: 0,
             y0: 0,
         };
-        let before = Snapshot::take(&self.bitmap, region);
+        let before = self.take_region(region);
         let result = paint(self);
-        before.blend_back(&mut self.bitmap, &view);
+        with_canvas!(&mut self.canvas, |b| before.blend_back(b, &view));
         result
     }
 
@@ -201,9 +208,9 @@ impl PageRenderer<'_> {
             x0: rect.x0,
             y0: rect.y0,
         };
-        let before = Snapshot::take(&self.bitmap, region);
+        let before = self.take_region(region);
         let result = paint(self);
-        before.blend_back(&mut self.bitmap, &view);
+        with_canvas!(&mut self.canvas, |b| before.blend_back(b, &view));
         result
     }
 }
@@ -238,12 +245,12 @@ impl PageRenderer<'_> {
             x0: rect.x0,
             y0: rect.y0,
         };
-        let backdrop = Snapshot::take(&self.bitmap, region);
+        let backdrop = self.take_region(region);
         under(self);
-        let painted = Snapshot::take(&self.bitmap, region);
-        backdrop.restore(&mut self.bitmap);
+        let painted = self.take_region(region);
+        self.restore_region(backdrop);
         over(self);
-        painted.blend_back(&mut self.bitmap, &view);
+        with_canvas!(&mut self.canvas, |b| painted.blend_back(b, &view));
     }
 }
 
@@ -256,68 +263,16 @@ struct MaskView<'a> {
     y0: u32,
 }
 
-/// The pixels of a rectangle of the bitmap, captured before an object is
-/// painted.
-pub(super) struct Snapshot {
-    pub(super) x0: u32,
-    pub(super) y0: u32,
-    pub(super) x1: u32,
-    /// Colour bytes, three per pixel, row-major over the rectangle.
-    pub(super) color: Vec<u8>,
-    /// Alpha per pixel, or `None` for a bitmap without an alpha plane.
-    pub(super) alpha: Option<Vec<u8>>,
-}
-
 impl Snapshot {
-    pub(super) fn take(bitmap: &Bitmap<Rgb8>, region: PixelRect) -> Self {
-        let PixelRect { x0, y0, x1, y1 } = region;
-        let (cx0, cx1) = (x0 as usize * 3, x1 as usize * 3);
-        let (ax0, ax1) = (x0 as usize, x1 as usize);
-        let mut color = Vec::with_capacity((cx1 - cx0) * (y1 - y0) as usize);
-        let mut alpha = bitmap
-            .has_alpha()
-            .then(|| Vec::with_capacity((ax1 - ax0) * (y1 - y0) as usize));
-        for y in y0..y1 {
-            color.extend_from_slice(&bitmap.row_bytes(y)[cx0..cx1]);
-            if let (Some(a), Some(row)) = (alpha.as_mut(), bitmap.alpha_row(y)) {
-                a.extend_from_slice(&row[ax0..ax1]);
-            }
-        }
-        Self {
-            x0,
-            y0,
-            x1,
-            color,
-            alpha,
-        }
-    }
-
-    /// Write the snapshot back over its rectangle.
-    fn restore(self, bitmap: &mut Bitmap<Rgb8>) {
-        let span = (self.x1 - self.x0) as usize;
-        let (cx0, ax0) = (self.x0 as usize * 3, self.x0 as usize);
-        for (i, prior) in self.color.chunks_exact(span * 3).enumerate() {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
-            )]
-            let y = self.y0 + i as u32;
-            let (row, alpha_row) = bitmap.row_and_alpha_mut(y);
-            row[cx0..cx0 + span * 3].copy_from_slice(prior);
-            if let (Some(prior_a), Some(alpha_row)) = (self.alpha.as_ref(), alpha_row) {
-                alpha_row[ax0..ax0 + span].copy_from_slice(&prior_a[i * span..(i + 1) * span]);
-            }
-        }
-    }
-
     /// Replace each pixel of the rectangle by its interpolation between the
     /// snapshot and its current value, weighted by the mask.
     /// The snapshot lies within the mask's rectangle.
-    fn blend_back(self, bitmap: &mut Bitmap<Rgb8>, mask: &MaskView<'_>) {
-        let span = (self.x1 - self.x0) as usize;
-        let (cx0, ax0) = (self.x0 as usize * 3, self.x0 as usize);
+    fn blend_back<P: Pixel>(self, bitmap: &mut Bitmap<P>, mask: &MaskView<'_>) {
+        debug_assert_eq!(self.bpp, P::BYTES, "a snapshot blends onto its own canvas");
+        let (span, n) = (self.span(), P::BYTES);
+        let (cx0, ax0) = (self.x0 as usize * n, self.x0 as usize);
         let mx0 = (self.x0 - mask.x0) as usize;
-        for (i, prior) in self.color.chunks_exact(span * 3).enumerate() {
+        for (i, prior) in self.color.chunks_exact(span * n).enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
@@ -326,29 +281,28 @@ impl Snapshot {
             let m_off = (y - mask.y0) as usize * mask.width + mx0;
             let m = &mask.values[m_off..m_off + span];
             let (row, alpha_row) = bitmap.row_and_alpha_mut(y);
-            let row = &mut row[cx0..cx0 + span * 3];
+            let row = &mut row[cx0..cx0 + span * n];
             match (self.alpha.as_ref(), alpha_row) {
                 (Some(prior_a), Some(alpha_row)) => blend_back_premultiplied(
+                    n,
                     prior,
                     &prior_a[i * span..(i + 1) * span],
                     row,
                     &mut alpha_row[ax0..ax0 + span],
                     m,
                 ),
-                _ => blend_back_opaque(prior, row, m),
+                _ => blend_back_opaque(n, prior, row, m),
             }
         }
     }
 }
 
 /// `painted ← prior + (painted − prior) × m / 255` per channel, for a
-/// bitmap without alpha.
-fn blend_back_opaque(prior: &[u8], painted: &mut [u8], mask: &[u8]) {
+/// bitmap without alpha whose pixels are `n` bytes.
+fn blend_back_opaque(n: usize, prior: &[u8], painted: &mut [u8], mask: &[u8]) {
     for ((p, c), &m) in prior
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .zip(painted.as_chunks_mut::<3>().0)
+        .chunks_exact(n)
+        .zip(painted.chunks_exact_mut(n))
         .zip(mask)
     {
         if m == 255 {
@@ -364,6 +318,7 @@ fn blend_back_opaque(prior: &[u8], painted: &mut [u8], mask: &[u8]) {
 /// The interpolation of [`blend_back_opaque`] on alpha-premultiplied
 /// colour, for a bitmap that stores straight colour beside an alpha plane.
 fn blend_back_premultiplied(
+    n: usize,
     prior: &[u8],
     prior_a: &[u8],
     painted: &mut [u8],
@@ -371,11 +326,9 @@ fn blend_back_premultiplied(
     mask: &[u8],
 ) {
     for ((((p, &pa), c), ca), &m) in prior
-        .as_chunks::<3>()
-        .0
-        .iter()
+        .chunks_exact(n)
         .zip(prior_a)
-        .zip(painted.as_chunks_mut::<3>().0)
+        .zip(painted.chunks_exact_mut(n))
         .zip(painted_a.iter_mut())
         .zip(mask)
     {
@@ -469,7 +422,7 @@ mod tests {
     fn opaque_blend_back_scales_the_change_by_the_mask() {
         let prior = [200, 100, 0, 200, 100, 0, 200, 100, 0];
         let mut painted = [0, 0, 255, 0, 0, 255, 0, 0, 255];
-        blend_back_opaque(&prior, &mut painted, &[0, 255, 128]);
+        blend_back_opaque(3, &prior, &mut painted, &[0, 255, 128]);
         assert_eq!(painted, [200, 100, 0, 0, 0, 255, 100, 50, 128]);
     }
 
@@ -479,19 +432,19 @@ mod tests {
         // Painting black at alpha 64 gives black at alpha 64.
         let mut c = [0, 0, 0];
         let mut a = [255];
-        blend_back_premultiplied(&[255, 255, 255], &[0], &mut c, &mut a, &[64]);
+        blend_back_premultiplied(3, &[255, 255, 255], &[0], &mut c, &mut a, &[64]);
         assert_eq!((c, a), ([0, 0, 0], [64]));
 
         // Opaque white backdrop; black painted; mask 50 %: mid-grey, opaque.
         let mut c = [0, 0, 0];
         let mut a = [255];
-        blend_back_premultiplied(&[255, 255, 255], &[255], &mut c, &mut a, &[128]);
+        blend_back_premultiplied(3, &[255, 255, 255], &[255], &mut c, &mut a, &[128]);
         assert_eq!((c, a), ([127, 127, 127], [255]));
 
         // Mask zero restores the prior pixel, including a transparent one.
         let mut c = [9, 9, 9];
         let mut a = [255];
-        blend_back_premultiplied(&[1, 2, 3], &[0], &mut c, &mut a, &[0]);
+        blend_back_premultiplied(3, &[1, 2, 3], &[0], &mut c, &mut a, &[0]);
         assert_eq!((c, a), ([1, 2, 3], [0]));
     }
 

@@ -7,13 +7,15 @@ use color::Rgb8;
 use color::convert::div255;
 use pdf::{Document, ObjectId};
 use raster::Bitmap;
-use raster::pipe::{PipeSrc, PipeState};
+use raster::pipe::{ChannelMask, PipeSrc, PipeState};
 use raster::types::BlendMode;
 
+use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform};
-use super::image_blit::{
-    ImageCompositor, ImageLenError, blend_rgb, blend_u8, check_image_bytes_len,
-};
+use super::canvas::PageCanvas;
+use super::canvas::blend_u8;
+use super::image_blit::{ImageLenError, blend_rgb, check_image_bytes_len};
+use super::image_compositor::ImageCompositor;
 use super::pixel_rect::PixelRect;
 use super::view::build_initial_ctm;
 use super::xobject::image_draw_size;
@@ -513,10 +515,9 @@ fn image_rows_composite_like_single_samples() {
                 base
             };
             let base = make_base();
-            let compositor = ImageCompositor::new(&base, fill_alpha, mode, None);
+            let compositor = ImageCompositor::new(&base, fill_alpha, mode, None, None);
             let mut runs = make_base();
-            let (row, alpha_row) = runs.row_and_alpha_mut(0);
-            compositor.paint_row(row, alpha_row, 0, 0, &colours, &shape);
+            compositor.paint_row(&mut runs, 0, 0, &colours, &shape);
             let mut single = make_base();
             if let Some(pipe) = &compositor.pipe {
                 paint_row_per_pixel(&mut single, pipe, 0, &colours, &shape);
@@ -877,8 +878,8 @@ fn render_gray(size: u32, content: &[u8]) -> Vec<u8> {
 fn render_gray_on(doc: &Document, page_id: ObjectId, size: u32, content: &[u8]) -> Vec<u8> {
     let mut renderer = PageRenderer::new(size, size, doc, page_id);
     renderer.execute(&crate::content::parse(content));
-    let stride = renderer.bitmap.stride;
-    let data = renderer.bitmap.data();
+    let stride = renderer.rgb_canvas().stride;
+    let data = renderer.rgb_canvas().data();
     (0..size)
         .flat_map(|y| (0..size).map(move |x| (x, y)))
         .map(|(x, y)| data[y as usize * stride + x as usize * 3])
@@ -1471,3 +1472,460 @@ fn repeated_image_failure_is_recorded_once() {
     let failures = renderer.finish().1.image_failures;
     assert_eq!(failures.len(), 2, "{failures:?}");
 }
+
+// ── Ink canvas ────────────────────────────────────────────────────────────
+
+/// Render `content` on page `(4, 0)` of `doc`, `size` pixels square, onto an
+/// RGB canvas or, when `ink`, onto an ink canvas; the finished RGB bytes.
+fn render_canvas(doc: &Document, size: u32, content: &[u8], ink: bool) -> Vec<u8> {
+    let mut renderer = PageRenderer::new(size, size, doc, (4, 0));
+    if ink {
+        renderer.force_ink_canvas();
+    }
+    renderer.execute(&crate::content::parse(content));
+    renderer.finish().0.data().to_vec()
+}
+
+/// Assert that `content` renders on the ink canvas within `tolerance` per
+/// channel of the RGB canvas, and that it paints something.
+fn assert_ink_matches_rgb(doc: &Document, content: &[u8], tolerance: u8) {
+    let rgb = render_canvas(doc, 10, content, false);
+    let ink = render_canvas(doc, 10, content, true);
+    assert_eq!(rgb.len(), ink.len());
+    assert!(
+        rgb.iter().any(|&v| v != u8::MAX),
+        "{} paints",
+        String::from_utf8_lossy(content)
+    );
+    for (i, (&a, &b)) in rgb.iter().zip(&ink).enumerate() {
+        assert!(
+            a.abs_diff(b) <= tolerance,
+            "{}: byte {i}: RGB canvas {a}, ink canvas {b}",
+            String::from_utf8_lossy(content)
+        );
+    }
+}
+
+#[test]
+fn ink_canvas_blank_page_is_white() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let page = render_canvas(&doc, 6, b"", true);
+    assert_eq!(page.len(), 6 * 6 * 3);
+    assert!(page.iter().all(|&v| v == u8::MAX), "{page:?}");
+}
+
+#[test]
+fn ink_canvas_cmyk_fill_matches_rgb_canvas() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let content = b"0.2 0.5 0.1 0.3 k 0 0 10 10 re f";
+    let rgb = render_canvas(&doc, 10, content, false);
+    let ink = render_canvas(&doc, 10, content, true);
+    assert!(rgb.iter().any(|&v| v != u8::MAX), "the fill paints");
+    assert_eq!(rgb, ink);
+}
+
+#[test]
+fn ink_canvas_soft_mask_renders() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /M << /SMask << \
+             /S /Luminosity /G 5 0 R >> >> >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency /CS /DeviceGray >>",
+                "1 g 0 0 10 4 re f 0.5 g 0 4 10 3 re f",
+            ),
+        ),
+    ]);
+    assert_ink_matches_rgb(&doc, b"/M gs 0 0 0 0.8 k 0 0 10 10 re f", 2);
+}
+
+#[test]
+fn ink_canvas_transparency_group() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /H << /ca 0.5 >> >> \
+             /XObject << /F 5 0 R >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency >>",
+                "0 0 0 1 k 0 0 10 6 re f 1 0 0 0 k 2 2 6 6 re f",
+            ),
+        ),
+    ]);
+    // Each pixel composites one ink over paper, where ink and RGB
+    // interpolation agree; inks composited over other inks mix in ink.
+    assert_ink_matches_rgb(&doc, b"/H gs /F Do", 2);
+}
+
+/// Render `content` on page `(4, 0)` of `doc`, 10 pixels square, onto an
+/// ink canvas; the canvas's ink bytes, eight per pixel.
+fn render_ink(doc: &Document, content: &[u8]) -> Vec<u8> {
+    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
+    renderer.force_ink_canvas();
+    renderer.execute(&crate::content::parse(content));
+    let PageCanvas::Ink(ink) = &renderer.canvas else {
+        panic!("an ink canvas");
+    };
+    ink.data().to_vec()
+}
+
+/// Assert that `a` and `b` paint the same ink, within `tolerance` per
+/// channel, and that they paint some.
+fn assert_same_ink(doc: &Document, a: &[u8], b: &[u8], tolerance: u8) {
+    let (ink_a, ink_b) = (render_ink(doc, a), render_ink(doc, b));
+    let name = || {
+        format!(
+            "{} / {}",
+            String::from_utf8_lossy(a),
+            String::from_utf8_lossy(b)
+        )
+    };
+    assert!(ink_a.iter().any(|&v| v != 0), "{} paints", name());
+    for (i, (&x, &y)) in ink_a.iter().zip(&ink_b).enumerate() {
+        assert!(
+            x.abs_diff(y) <= tolerance,
+            "{}: byte {i}: {x} vs {y}",
+            name()
+        );
+    }
+}
+
+/// Every pixel of `ink` is unpainted or the ink `want`.
+fn assert_ink_pixels(ink: &[u8], want: [u8; 8]) {
+    let painted: Vec<_> = ink
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .filter(|px| px.iter().any(|&v| v != 0))
+        .collect();
+    assert!(!painted.is_empty(), "the content paints");
+    for px in painted {
+        assert_eq!(*px, want);
+    }
+}
+
+/// Greys, as `DeviceGray` or as equal RGB components, print in black ink
+/// alone down to the grey solid black prints; black itself is solid black
+/// with C, M and Y on top.
+#[test]
+fn ink_canvas_greys_are_black_ink_down_to_the_floor() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let [c, m, y, k] = color::cmyk::rgb_to_ink([0; 3]);
+    assert!(k == 255 && c > 0 && m > 0 && y > 0);
+    for content in [b"0 g 0 0 10 10 re f".as_slice(), b"0 0 0 rg 0 0 10 10 re f"] {
+        assert_ink_pixels(&render_ink(&doc, content), [c, m, y, 255, 0, 0, 0, 0]);
+    }
+    let [.., k] = color::cmyk::rgb_to_ink([51; 3]);
+    assert_ink_pixels(
+        &render_ink(&doc, b"0.2 g 0 0 10 10 re f"),
+        [0, 0, 0, k, 0, 0, 0, 0],
+    );
+    // The samples of a grey image print the same way.
+    let ink = render_ink(
+        &doc,
+        b"q 8 0 0 8 1 1 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x00\x40\x80\xc0 EI Q",
+    );
+    let pixels = ink.as_chunks::<8>().0;
+    assert!(pixels.iter().any(|px| px[3] == 255 && px[..3] != [0, 0, 0]));
+    assert!(
+        pixels
+            .iter()
+            .filter(|px| px[3] < 255)
+            .all(|px| px[..3] == [0, 0, 0])
+    );
+}
+
+/// Greys and RGB colours render on the ink canvas as on the RGB canvas:
+/// black is black, a mid grey a mid grey; a `DeviceCMYK` black keeps its
+/// own ink and prints the solid-black grey.
+#[test]
+fn ink_canvas_greys_render_as_on_rgb() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    for content in [b"0 g 0 0 10 10 re f".as_slice(), b"0 0 0 rg 0 0 10 10 re f"] {
+        let rgb = render_canvas(&doc, 10, content, true);
+        assert!(rgb.iter().all(|&v| v == 0), "{content:?}: {rgb:?}");
+    }
+    let rgb = render_canvas(&doc, 10, b"0.5 g 0 0 10 10 re f", true);
+    assert!(rgb.iter().all(|&v| v.abs_diff(128) <= 2), "{rgb:?}");
+    let rgb = render_canvas(&doc, 10, b"0 0 0 1 k 0 0 10 10 re f", true);
+    assert!(
+        rgb.iter().all(|&v| v == color::cmyk::BLACK_FLOOR),
+        "{rgb:?}"
+    );
+}
+
+/// Shadings and tiling patterns reach the ink canvas as the ink of their
+/// colours, mapped through the transfer function in effect: the 0.2 grey
+/// of `shading_doc` paints as a 0.2 grey fill does, and under the
+/// inverting transfer as a 0.8 grey fill.
+#[test]
+fn ink_canvas_shadings_and_patterns_paint_their_colours_transferred() {
+    let doc = shading_doc("", "/DeviceGray", 0.2);
+    for (transfer, solid) in [("", "0.2"), ("/Inv gs ", "0.8")] {
+        for (content, fill) in [
+            ("/Sh sh", format!("{solid} g 0 0 10 10 re f")),
+            (
+                "/Pattern cs /P scn 0 0 8 8 re f",
+                format!("{solid} g 0 0 8 8 re f"),
+            ),
+            (
+                "/Pattern cs /T scn 0 0 8 8 re f",
+                format!("{solid} g 0 0 8 8 re f"),
+            ),
+            (
+                "/Pattern CS /T SCN 8 w 0 4 m 10 4 l S",
+                format!("{solid} G 8 w 0 4 m 10 4 l S"),
+            ),
+        ] {
+            let content = format!("{transfer}{content}");
+            assert_same_ink(&doc, content.as_bytes(), fill.as_bytes(), 0);
+        }
+    }
+}
+
+/// Mesh triangles, images and glyphs reach the ink canvas as ink.  Every
+/// pixel is one opaque colour, or one ink over paper, so the canvases agree
+/// within the inversion's rounding; a mixture of inks at partial coverage
+/// interpolates in ink and may not.  The colours are not neutral, and the
+/// RGB ones lie inside the gamut the four-ink model reaches.
+#[test]
+fn ink_canvas_paints_meshes_images_and_text() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    for content in [
+        b"q 8 0 0 8 1 1 cm BI /W 2 /H 1 /CS /RGB /BPC 8 ID \xc8\x96\x64\xb4\x78\x5a EI Q"
+            .as_slice(),
+        b"0 0 0 1 k q 8 0 0 8 1 1 cm BI /W 2 /H 2 /IM true ID \x50\xa0 EI Q",
+    ] {
+        assert_ink_matches_rgb(&doc, content, 2);
+    }
+
+    let vertex = |x: u8, y: u8| [0, x, y, 200, 150, 100];
+    let mesh: Vec<u8> = [vertex(0, 0), vertex(255, 0), vertex(0, 255)].concat();
+    let mut shading = format!(
+        "<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+         /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 10 0 10 0 1 0 1 0 1] \
+         /Length {} >>\nstream\n",
+        mesh.len()
+    )
+    .into_bytes();
+    shading.extend_from_slice(&mesh);
+    shading.extend_from_slice(b"\nendstream");
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /Shading << /M 5 0 R >> >> >>".to_vec(),
+        ),
+        (5, shading),
+    ]);
+    assert_ink_matches_rgb(&doc, b"/M sh", 2);
+
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> >>",
+        ),
+        (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    ]);
+    assert_ink_matches_rgb(&doc, b"0 0 0 1 k BT /F1 9 Tf 1 2 Td (Hi) Tj ET", 2);
+}
+
+/// Ink composites over ink in ink: solid cyan in a group painted at
+/// `/ca 0.5` over 30 % black.  The page has no alpha, so each ink is
+/// `(a·src + (255 − a)·dst) / 255` with `a = 128` (0.5 rounded to a byte):
+/// cyan `128·255 / 255 = 128`, black `127·77 / 255 = 38.35 → 38`.
+#[test]
+fn ink_canvas_ink_over_ink_at_partial_alpha() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ExtGState << /H << /ca 0.5 >> >> \
+             /XObject << /F 5 0 R >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency >>",
+                "1 0 0 0 k 0 0 10 10 re f",
+            ),
+        ),
+    ]);
+    let ink = render_ink(&doc, b"0 0 0 0.3 k 0 0 10 10 re f /H gs /F Do");
+    assert_ink_pixels(&ink, [128, 0, 0, 38, 0, 0, 0, 0]);
+}
+
+/// `Multiply` on ink multiplies the complements, the additive values
+/// (PDF §11.3.5): opaque 100 % cyan and 50 % black over 30 % black give
+/// cyan `1 − (1 − 1)·(1 − 0) = 1 → 255` and black
+/// `1 − (1 − 128/255)·(1 − 77/255) = 0.6506 → 166`.
+#[test]
+fn ink_canvas_multiply_multiplies_the_complements() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(
+        4,
+        "<< /Type /Page /Resources << /ExtGState << /B << /BM /Multiply >> >> >> >>",
+    )]);
+    let ink = render_ink(
+        &doc,
+        b"0 0 0 0.3 k 0 0 10 10 re f /B gs 1 0 0 0.5 k 0 0 10 10 re f",
+    );
+    assert_ink_pixels(&ink, [255, 0, 0, 166, 0, 0, 0, 0]);
+}
+
+// ── Colorants and spot slots ──────────────────────────────────────────────
+
+/// Page `(4, 0)` whose `/ColorSpace` resources are the entries `spaces`.
+fn colorant_doc(spaces: &str) -> Document {
+    crate::test_helpers::make_doc_with_objects(&[(
+        4,
+        format!("<< /Type /Page /Resources << /ColorSpace << {spaces} >> >> >>"),
+    )])
+}
+
+/// A one-input tint transform to `DeviceCMYK`, linear from no ink at tint 0
+/// to the inks `c1` at tint 1.
+fn tint_to_cmyk(c1: &str) -> String {
+    format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>")
+}
+
+/// Render `content` on page `(4, 0)` of `doc`, 10 pixels square, onto an
+/// ink canvas; the fill colour left in the graphics state and the canvas's
+/// ink bytes, eight per pixel.
+fn ink_fill(doc: &Document, content: &[u8]) -> (RasterColor, Vec<u8>) {
+    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
+    renderer.force_ink_canvas();
+    renderer.execute(&crate::content::parse(content));
+    let fill = renderer.gstate.current().fill_color.clone();
+    let PageCanvas::Ink(ink) = &renderer.canvas else {
+        panic!("an ink canvas");
+    };
+    (fill, ink.data().to_vec())
+}
+
+#[test]
+fn separation_cyan_paints_process_bit() {
+    let doc = colorant_doc(&format!(
+        "/Cy [/Separation /Cyan /DeviceCMYK {}]",
+        tint_to_cmyk("1 0 0 0")
+    ));
+    let (fill, ink) = ink_fill(&doc, b"/Cy cs 0.6 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::new(0b0001));
+    assert!(!fill.opm_eligible());
+    assert_ink_pixels(&ink, [153, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn separation_spot_takes_slot() {
+    let doc = colorant_doc(&format!(
+        "/Sp [/Separation /PANTONE#20185#20C /DeviceCMYK {}]",
+        tint_to_cmyk("0 0.91 0.76 0")
+    ));
+    let (fill, ink) = ink_fill(&doc, b"/Sp cs 0.6 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::new(0b1_0000));
+    assert_ink_pixels(&ink, [0, 0, 0, 0, 153, 0, 0, 0]);
+}
+
+#[test]
+fn separation_all_paints_every_channel() {
+    let doc = colorant_doc(&format!(
+        "/Reg [/Separation /All /DeviceCMYK {}]",
+        tint_to_cmyk("1 1 1 1")
+    ));
+    let (fill, ink) = ink_fill(&doc, b"/Reg cs 0.6 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+    assert_ink_pixels(&ink, [153; 8]);
+}
+
+#[test]
+fn devicen_mixed_names() {
+    // The tint transform drops the `/None` tint and keeps the other two as
+    // C and M of the alternate space.
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /ColorSpace << \
+             /Dn [/DeviceN [/Cyan /Spot1 /None] /DeviceCMYK 5 0 R] >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+                "{ pop 0 0 }",
+            ),
+        ),
+    ]);
+    let (fill, ink) = ink_fill(&doc, b"/Dn cs 0.5 0.8 1 scn 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::new(0b1_0001));
+    assert_ink_pixels(&ink, [128, 0, 0, 0, 204, 0, 0, 0]);
+}
+
+#[test]
+fn fifth_spot_falls_back_to_process() {
+    let inks = ["1 0 0 0", "0 1 0 0", "0 0 0 1", "1 1 0 0", "0 0 1 0"];
+    let spaces: Vec<String> = inks
+        .iter()
+        .enumerate()
+        .map(|(i, c1)| {
+            format!(
+                "/S{i} [/Separation /Spot{i} /DeviceCMYK {}]",
+                tint_to_cmyk(c1)
+            )
+        })
+        .collect();
+    let doc = colorant_doc(&spaces.join(" "));
+    // Five two-pixel strips, one spot each, left to right.
+    let content: Vec<String> = (0..5)
+        .map(|i| format!("/S{i} cs 1 scn {} 0 2 10 re f", i * 2))
+        .collect();
+    let content = content.join(" ");
+    let rgb = render_canvas(&doc, 10, content.as_bytes(), true);
+    let pixel = |x: usize| &rgb[(5 * 10 + x) * 3..(5 * 10 + x) * 3 + 3];
+    for (i, c1) in inks.iter().enumerate() {
+        let comps: Vec<f64> = c1.split(' ').map(|v| v.parse().unwrap()).collect();
+        let want = color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3]);
+        let got = pixel(i * 2 + 1);
+        assert!(got.iter().any(|&v| v != u8::MAX), "strip {i} is not white");
+        for (ch, (&g, &w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                g.abs_diff(w) <= 2,
+                "strip {i} channel {ch}: got {g}, alternate colour {w}"
+            );
+        }
+    }
+    // The fifth spot has no slot: it paints its alternate in process ink.
+    let (fill, _) = ink_fill(&doc, format!("{content} /S4 cs 0.5 scn").as_bytes());
+    assert_eq!(fill.paints(), ChannelMask::new(0b1111));
+    assert_eq!(fill.ink(), &[0, 0, 128, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn rgb_colour_knocks_out_spots() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let (fill, _) = ink_fill(&doc, b"0.2 0.4 0.6 rg 0 0 10 10 re f");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+    assert!(!fill.opm_eligible());
+    let (fill, _) = ink_fill(&doc, b"0.2 g");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+}
+
+#[test]
+fn cmyk_colour_paints_process_inks_and_is_opm_eligible() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
+    let (fill, _) = ink_fill(&doc, b"0.2 0 0.6 0 k");
+    assert_eq!(fill.paints(), ChannelMask::new(0b1111));
+    assert!(fill.opm_eligible());
+}
+
+mod overprint;

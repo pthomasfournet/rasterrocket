@@ -1,3 +1,4 @@
+use super::{BLACK_FLOOR, SpotLut, ink_to_rgb_row, rgb_to_ink};
 use super::{
     CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
     convert_scalar, unit_weight, weight,
@@ -356,4 +357,243 @@ fn neon_block_matches_scalar() {
         }
     }
     assert_eq!(got, want);
+}
+
+#[test]
+fn ink_to_rgb_row_without_spots_matches_cmyk_to_rgb() {
+    let ink = [10, 200, 30, 40, 0, 0, 0, 0];
+    let mut out = [0; 3];
+    ink_to_rgb_row(&ink, &[None; 4], &mut out);
+    assert_eq!(out, cmyk_to_rgb(10, 200, 30, 40));
+}
+
+#[test]
+fn ink_to_rgb_row_adds_spot_process_equivalent() {
+    let mut lut: SpotLut = [[0; 4]; 256];
+    lut[255] = [0, 255, 0, 0];
+    let ink = [255, 0, 0, 0, 255, 0, 0, 0];
+    let mut out = [0; 3];
+    ink_to_rgb_row(&ink, &[Some(&lut), None, None, None], &mut out);
+    assert_eq!(out, cmyk_to_rgb(255, 255, 0, 0));
+}
+
+#[test]
+fn ink_to_rgb_row_spans_multiple_chunks() {
+    let n = 600;
+    let ink: Vec<u8> = bytes(n * 8, 7);
+    let mut lut: SpotLut = [[0; 4]; 256];
+    for (t, e) in (0..=255u8).zip(lut.iter_mut()) {
+        *e = [t, 0, 255 - t, t / 2];
+    }
+    let spots = [Some(&lut), None, Some(&lut), None];
+    let mut out = vec![0u8; n * 3];
+    ink_to_rgb_row(&ink, &spots, &mut out);
+    for (px, got) in ink.as_chunks::<8>().0.iter().zip(out.as_chunks::<3>().0) {
+        let mut q = [px[0], px[1], px[2], px[3]];
+        for s in [4, 6] {
+            for (c, &l) in q.iter_mut().zip(&lut[usize::from(px[s])]) {
+                let (a, b) = (u16::from(*c), u16::from(l));
+                *c = u8::try_from(a + b - (a * b + 127) / 255).unwrap();
+            }
+        }
+        assert_eq!(*got, cmyk_to_rgb(q[0], q[1], q[2], q[3]));
+    }
+}
+
+#[test]
+#[should_panic(expected = "multiple of 8")]
+fn ink_to_rgb_row_rejects_ragged_input() {
+    ink_to_rgb_row(&[0; 9], &[None; 4], &mut [0; 3]);
+}
+
+/// Euclidean distance between the unrounded forward image of `ink` and `rgb`.
+fn dist(ink: [u8; 4], rgb: [u8; 3]) -> f64 {
+    let got = exact(ink);
+    (0..3)
+        .map(|i| (got[i] - f64::from(rgb[i])).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Smallest distance to `rgb` over byte CMYK: a coarse 9⁴ grid (step 32),
+/// then ±1-byte coordinate descent from the best grid point.
+fn nearest_distance(rgb: [u8; 3]) -> f64 {
+    let axis = || (0..=255u8).step_by(32).chain([255]);
+    let mut best = ([0u8; 4], f64::INFINITY);
+    for c in axis() {
+        for m in axis() {
+            for y in axis() {
+                for k in axis() {
+                    let d = dist([c, m, y, k], rgb);
+                    if d < best.1 {
+                        best = ([c, m, y, k], d);
+                    }
+                }
+            }
+        }
+    }
+    let (mut at, mut d) = best;
+    loop {
+        let mut moved = false;
+        for ch in 0..4 {
+            for delta in [-1i16, 1] {
+                let Ok(v) = u8::try_from(i16::from(at[ch]) + delta) else {
+                    continue;
+                };
+                let mut cand = at;
+                cand[ch] = v;
+                let dc = dist(cand, rgb);
+                if dc < d {
+                    (at, d, moved) = (cand, dc, true);
+                }
+            }
+        }
+        if !moved {
+            return d;
+        }
+    }
+}
+
+/// The round-trip tolerance for `rgb`: two counts, four for a dark colour
+/// (channel mean below 64), where the inverse is a thin band of inks and
+/// the table's interpolant may miss it by more.
+fn tolerance(rgb: [u8; 3]) -> u8 {
+    if rgb.iter().map(|&v| u16::from(v)).sum::<u16>() < 3 * 64 {
+        4
+    } else {
+        2
+    }
+}
+
+/// The largest per-channel difference between `rgb` and the forward image
+/// of `rgb_to_ink(rgb)`.
+fn round_trip_error(rgb: [u8; 3]) -> u8 {
+    let [c, m, y, k] = rgb_to_ink(rgb);
+    let back = cmyk_to_rgb(c, m, y, k);
+    (0..3).map(|i| rgb[i].abs_diff(back[i])).max().unwrap()
+}
+
+#[test]
+fn rgb_to_ink_white_is_no_ink() {
+    assert_eq!(rgb_to_ink([255, 255, 255]), [0, 0, 0, 0]);
+}
+
+/// Every colour the four-ink model prints comes back within tolerance:
+/// the 18⁴ = 104 976 inks of a step-15 grid, converted forward and
+/// inverted.
+#[test]
+fn rgb_to_ink_round_trips_every_reachable_colour() {
+    let axis = || (0..=255u8).step_by(15);
+    for c in axis() {
+        for m in axis() {
+            for y in axis() {
+                for k in axis() {
+                    let rgb = cmyk_to_rgb(c, m, y, k);
+                    let err = round_trip_error(rgb);
+                    assert!(
+                        err <= tolerance(rgb),
+                        "{:?} -> {rgb:?} -> {:?} -> {:?} (error {err})",
+                        [c, m, y, k],
+                        rgb_to_ink(rgb),
+                        {
+                            let [a, b, d, e] = rgb_to_ink(rgb);
+                            cmyk_to_rgb(a, b, d, e)
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A colour the model cannot print comes back as the nearest one it can,
+/// within the rounding of a byte-grid search; every colour of a 16³ grid
+/// of the sRGB cube is either reproduced or nearest.
+///
+/// The allowance covers the interpolant's distance from a node solution:
+/// `[0, 0, 34]` comes back 9.5 from itself against 7.3 for the byte-grid
+/// nearest, its table nodes lying on a thin band of the dark slices,
+/// so an allowance of 2.0 fails it.
+#[test]
+fn rgb_to_ink_is_nearest_where_the_colour_is_unreachable() {
+    const ALLOWANCE: f64 = 2.5;
+    let axis = || (0..=255u8).step_by(17);
+    let mut unreachable = 0;
+    for r in axis() {
+        for g in axis() {
+            for b in axis() {
+                let rgb = [r, g, b];
+                if round_trip_error(rgb) <= tolerance(rgb) {
+                    continue;
+                }
+                unreachable += 1;
+                let got = dist(rgb_to_ink(rgb), rgb);
+                let best = nearest_distance(rgb);
+                assert!(
+                    got <= best + ALLOWANCE,
+                    "{rgb:?}: {:?} at {got:.1}, nearest {best:.1}",
+                    rgb_to_ink(rgb)
+                );
+            }
+        }
+    }
+    assert!(unreachable > 0, "the sRGB cube exceeds the gamut somewhere");
+}
+
+/// A neutral at or above the floor black ink alone prints is black ink
+/// alone, within one count; below it black is solid and C, M and Y fill in.
+#[test]
+fn rgb_to_ink_neutrals_are_black_alone_down_to_the_floor() {
+    assert_eq!(BLACK_FLOOR, cmyk_to_rgb(0, 0, 0, 255)[0]);
+    for g in BLACK_FLOOR..=255 {
+        let ink = rgb_to_ink([g; 3]);
+        assert_eq!(ink[..3], [0, 0, 0], "{g}: {ink:?}");
+        assert!(round_trip_error([g; 3]) <= 1, "{g}: {ink:?}");
+    }
+    for g in 0..BLACK_FLOOR {
+        let ink = rgb_to_ink([g; 3]);
+        assert_eq!(ink[3], 255, "{g}: {ink:?}");
+        assert!(ink[..3].iter().all(|&v| v > 0), "{g}: {ink:?}");
+        assert!(round_trip_error([g; 3]) <= 2, "{g}: {ink:?}");
+    }
+    // The darkest printable colour is black.
+    assert_eq!(cmyk_to_rgb(255, 255, 255, 255), [0, 0, 0]);
+    assert_eq!(cmyk_to_rgb(0, 0, 0, 255), [BLACK_FLOOR; 3]);
+    let [c, m, y, k] = rgb_to_ink([0, 0, 0]);
+    assert_eq!(cmyk_to_rgb(c, m, y, k), [0, 0, 0]);
+}
+
+/// Black ink replaces the grey component: a dark desaturated colour uses
+/// black, a solid primary or secondary none.
+#[test]
+fn rgb_to_ink_replaces_the_grey_component_with_black() {
+    let [c, m, y, k] = rgb_to_ink([60, 50, 40]);
+    assert!(k > 150, "{:?}", [c, m, y, k]);
+    assert!(round_trip_error([60, 50, 40]) <= 2);
+    // The C + M + Y corner is a near-neutral and prints mostly in black.
+    assert!(rgb_to_ink(CORNERS[7])[3] > 150);
+    for &rgb in CORNERS.iter().take(7).skip(1) {
+        // The corners are not table nodes: the interpolant reproduces the
+        // solid within two counts and uses no more than a trace of black.
+        let ink = rgb_to_ink(rgb);
+        assert!(ink[3] <= 2, "{rgb:?}: {ink:?}");
+        assert!(round_trip_error(rgb) <= 2, "{rgb:?}: {ink:?}");
+    }
+}
+
+/// Table build and per-call cost; run with `--release -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing report, not a check"]
+fn rgb_to_ink_timing() {
+    let start = std::time::Instant::now();
+    let _ = rgb_to_ink([1, 2, 3]);
+    let build = start.elapsed();
+    let inputs = bytes(3_000_000, 5);
+    let start = std::time::Instant::now();
+    let mut acc = 0u64;
+    for px in inputs.as_chunks::<3>().0 {
+        acc += u64::from(rgb_to_ink(*px)[3]);
+    }
+    let per_call = start.elapsed() / 1_000_000;
+    println!("rgb_to_ink: table {build:?}, {per_call:?} per call ({acc})");
 }

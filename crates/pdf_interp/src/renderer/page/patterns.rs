@@ -2,6 +2,7 @@
 
 use super::super::color::RasterColor;
 use super::super::gstate::ctm_multiply;
+use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey};
 use super::pixel_rect::PixelRect;
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
@@ -459,7 +460,7 @@ impl PageRenderer<'_> {
         let mut child = PageRenderer::new(width, height, doc, desc.stream_id);
         child.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
         child.set_antialias(self.text_antialias, self.vector_antialias);
-        child.bitmap = Bitmap::new(width, height, 1, true);
+        child.canvas = PageCanvas::new(CanvasKind::Rgb, width, height, true);
         // One level deeper, bounded by MAX_PATTERN_DEPTH.
         child.pattern_depth = self.pattern_depth.saturating_add(1);
         // The cell's operators count against the page's operation budget
@@ -613,7 +614,9 @@ mod tests {
             .resources
             .with_resources((0, 0), resources.as_dict().unwrap());
         renderer.execute(&crate::content::parse(b"/Pattern cs /P scn 0 0 8 8 re f"));
-        let px: Vec<u8> = (0..8).map(|y| renderer.bitmap.row_bytes(y)[12]).collect();
+        let px: Vec<u8> = (0..8)
+            .map(|y| renderer.rgb_canvas().row_bytes(y)[12])
+            .collect();
         assert!(px.iter().all(|&v| v == 0), "cell image painted: {px:?}");
     }
 

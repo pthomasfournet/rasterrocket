@@ -22,6 +22,7 @@ pub(crate) fn make_pipe(a_input: u8, blend_mode: BlendMode) -> PipeState<'static
         a_input,
         transfer: TransferSet::identity_rgb(),
         backdrop: None,
+        overprint: None,
     }
 }
 

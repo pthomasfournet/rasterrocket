@@ -17,9 +17,9 @@
 //! thereby shape the object.
 
 use super::PageRenderer;
+use super::canvas::{Snapshot, with_canvas};
 use super::pixel_rect::PixelRect;
-use super::soft_mask::Snapshot;
-use color::Rgb8;
+use color::Pixel;
 use raster::Bitmap;
 
 impl PageRenderer<'_> {
@@ -35,28 +35,16 @@ impl PageRenderer<'_> {
         paint: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let region = region
-            .filter(|_| self.group.knockout && alpha > 0 && self.bitmap.has_alpha())
+            .filter(|_| self.group.knockout && alpha > 0 && self.canvas.has_alpha())
             .and_then(|r| self.within_clip(r));
         let Some(region) = region else {
             return paint(self);
         };
-        let prior = Snapshot::take(&self.bitmap, region);
-        clear(&mut self.bitmap, region);
+        let prior = self.take_region(region);
+        self.canvas.clear(region);
         let result = paint(self);
-        prior.merge_under(&mut self.bitmap, alpha);
+        with_canvas!(&mut self.canvas, |b| prior.merge_under(b, alpha));
         result
-    }
-}
-
-/// Make the pixels of `region` transparent.
-fn clear(bitmap: &mut Bitmap<Rgb8>, region: PixelRect) {
-    let PixelRect { x0, y0, x1, y1 } = region;
-    for y in y0..y1 {
-        let (row, alpha) = bitmap.row_and_alpha_mut(y);
-        row[x0 as usize * 3..x1 as usize * 3].fill(0);
-        if let Some(alpha) = alpha {
-            alpha[x0 as usize..x1 as usize].fill(0);
-        }
     }
 }
 
@@ -65,14 +53,15 @@ impl Snapshot {
     /// `alpha`, under the object as painted onto the cleared region: each
     /// pixel becomes `painted + (1 − f)·prior` on premultiplied colour and
     /// alpha, `f` being the painted alpha over `alpha`.
-    fn merge_under(self, bitmap: &mut Bitmap<Rgb8>, alpha: u8) {
+    fn merge_under<P: Pixel>(self, bitmap: &mut Bitmap<P>, alpha: u8) {
+        debug_assert_eq!(self.bpp, P::BYTES, "a snapshot merges onto its own canvas");
         let Some(prior_a) = self.alpha.as_ref() else {
             return;
         };
-        let span = (self.x1 - self.x0) as usize;
-        let (cx0, ax0) = (self.x0 as usize * 3, self.x0 as usize);
+        let (span, n) = (self.span(), P::BYTES);
+        let (cx0, ax0) = (self.x0 as usize * n, self.x0 as usize);
         let alpha = u32::from(alpha);
-        for (i, prior) in self.color.chunks_exact(span * 3).enumerate() {
+        for (i, prior) in self.color.chunks_exact(span * n).enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
@@ -81,14 +70,12 @@ impl Snapshot {
             let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
                 return;
             };
-            let painted = &mut row[cx0..cx0 + span * 3];
+            let painted = &mut row[cx0..cx0 + span * n];
             let painted_a = &mut alpha_row[ax0..ax0 + span];
             for (((p, &pa), c), ca) in prior
-                .as_chunks::<3>()
-                .0
-                .iter()
+                .chunks_exact(n)
                 .zip(&prior_a[i * span..(i + 1) * span])
-                .zip(painted.as_chunks_mut::<3>().0)
+                .zip(painted.chunks_exact_mut(n))
                 .zip(painted_a.iter_mut())
             {
                 if pa == 0 {
@@ -126,6 +113,8 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::page::canvas::clear;
+    use color::Rgb8;
 
     /// A 2 × 1 bitmap with alpha: pixel 0 holds `prior`, then the region is
     /// cleared and `painted` written; the merge is checked against the

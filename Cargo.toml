@@ -90,3 +90,8 @@ inherits   = "release"
 debug      = 1
 strip      = "none"
 
+# The colour crate builds a 65³ RGB → CMYK inverse table at first use;
+# the build is compute-bound.
+[profile.dev.package.rasterrocket-color]
+opt-level = 3
+

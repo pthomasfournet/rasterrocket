@@ -4,17 +4,15 @@
 #[cfg(feature = "cache")]
 use std::sync::Arc;
 
-use color::Rgb8;
 use color::convert::div255;
-use raster::{
-    Bitmap, ClipResult,
-    pipe::{PipeSrc, PipeState, RowPattern},
-    transparency::Backdrop,
-    types::BlendMode,
-};
+use raster::ClipResult;
 
 use super::super::gstate::Ctm;
 use super::PageRenderer;
+use super::canvas::{CanvasKind, blend_u8, with_canvas};
+use super::image_compositor::ImageCompositor;
+#[cfg(feature = "cache")]
+use super::image_compositor::composite_rgba_rows;
 use super::image_reduce;
 use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
 use super::pixel_rect::PixelRect;
@@ -113,10 +111,12 @@ impl PageRenderer<'_> {
             None => (img.smask.as_ref(), page_ctm),
         };
         // A device-resident image is sampled at full resolution by the
-        // blit kernel; a draw that reduces it takes a host copy so that it
-        // is area-averaged as a host-resident image is.
+        // blit kernel, which writes sRGB.  A draw that reduces it takes a
+        // host copy so that it is area-averaged as a host-resident image
+        // is, and so does any draw onto an ink canvas, which the kernel
+        // cannot write.
         #[cfg(feature = "cache")]
-        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm);
+        let host_copy = self.host_copy_for_cpu_draw(img, &page_ctm);
         #[cfg(feature = "cache")]
         let img = host_copy.as_ref().unwrap_or(img);
         let reduced = image_reduce::reduce_for_draw(img, &page_ctm);
@@ -216,11 +216,12 @@ impl PageRenderer<'_> {
     }
 
     /// A host-resident copy of `img` when its samples are device-resident
-    /// and drawing them through `ctm` reduces the image; `None` otherwise,
-    /// or when the copy fails, in which case the device samples are drawn
-    /// as they are.
+    /// and the draw takes the CPU path: drawing them through `ctm` reduces
+    /// the image, or the canvas holds ink.  `None` otherwise, or when the
+    /// copy fails; the device samples are then drawn as they are, which on
+    /// an ink canvas fails the image.
     #[cfg(feature = "cache")]
-    pub(super) fn host_copy_for_reduced_draw(
+    pub(super) fn host_copy_for_cpu_draw(
         &self,
         img: &crate::resources::ImageDescriptor,
         ctm: &Ctm,
@@ -230,15 +231,22 @@ impl PageRenderer<'_> {
         let ImageData::Gpu(cached) = &img.data else {
             return None;
         };
-        if !image_reduce::draw_reduces(ctm, img.width, img.height) {
+        let ink = self.canvas.kind() == CanvasKind::Ink;
+        let reduces = image_reduce::draw_reduces(ctm, img.width, img.height);
+        if !ink && !reduces {
             return None;
         }
         let cache = &self.cache_state.as_ref()?.cache;
         let pixels = cache
             .download(cached)
             .map_err(|e| {
+                let draw = if reduces {
+                    "a reduced draw"
+                } else {
+                    "an ink canvas"
+                };
                 log::warn!(
-                    "rasterrocket-interp: reading a cached image back for a reduced draw failed: {e}"
+                    "rasterrocket-interp: reading a cached image back for {draw} failed: {e}"
                 );
             })
             .ok()?;
@@ -300,7 +308,8 @@ impl PageRenderer<'_> {
         verify_sample_len(img, img_bytes.len())?;
         let bpp = img.color_space.bytes_per_pixel();
 
-        let fill_color = self.gstate.current().painted_fill_color();
+        let painted_fill = self.gstate.current().painted_fill_color();
+        let fill_color = painted_fill.bytes();
         let mask = match mask {
             Some((m, mask_ctm)) => {
                 let Some(sampler) = MaskSampler::new(
@@ -320,19 +329,32 @@ impl PageRenderer<'_> {
             None => None,
         };
         let img_w = img.width as usize;
-        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
+        // A stencil paints the fill colour under the fill's overprint; an
+        // image's samples write every channel.
+        let stencil = img.color_space == ImageColorSpace::Mask;
+        let overprint = stencil
+            .then(|| self.overprint_mask(false, &painted_fill))
+            .flatten();
+        let blend_mode = self.gstate.current().blend_mode;
+        let backdrop = self.paint_backdrop(blend_mode, overprint);
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
         let gray = |x, y| sample_bytes::<1>(img_bytes, img_w, bpp, x, y);
         let rgb = |x, y| sample_bytes::<3>(img_bytes, img_w, bpp, x, y);
         let gs_transfer = self.gstate.current().transfer.clone();
         let transfer = |px: [u8; 3]| gs_transfer.as_ref().map_or(px, |t| t.apply(px));
-        let compositor = ImageCompositor::new(
-            &self.bitmap,
+        let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(
+            b,
             self.gstate.current().fill_alpha,
-            self.gstate.current().blend_mode,
+            blend_mode,
             backdrop.as_deref(),
-        );
+            overprint,
+        ));
+        // On an ink canvas a stencil paints the fill colour as its ink.
+        let kind = self.canvas.kind();
+        if stencil && kind == CanvasKind::Ink {
+            compositor.solid = Some(painted_fill.bytes_for(kind.mode()));
+        }
 
         // Each row's samples and their coverage are gathered first and
         // composited as one row (see `ImageCompositor::paint_row`).
@@ -417,8 +439,8 @@ impl PageRenderer<'_> {
                 *out = src;
                 *shape = alpha;
             }
-            let (row, alpha_row) = self.bitmap.row_and_alpha_mut(dy);
-            compositor.paint_row(row, alpha_row, grid.x0, dy, &colours, &shape);
+            with_canvas!(&mut self.canvas, |b| compositor
+                .paint_row(b, grid.x0, dy, &colours, &shape));
         }
         Ok(())
     }
@@ -442,7 +464,11 @@ impl PageRenderer<'_> {
     ) -> bool {
         use gpu::blit::BlitBbox;
 
-        let backdrop = self.blend_backdrop(self.gstate.current().blend_mode);
+        // The kernel's samples are sRGB, composited onto an RGB canvas only.
+        if self.canvas.kind() != CanvasKind::Rgb {
+            return false;
+        }
+        let backdrop = self.paint_backdrop(self.gstate.current().blend_mode, None);
         let Some(gpu_ctx) = self.gpu_ctx.as_deref() else {
             log::debug!("blit_image: GPU image blit skipped — no GpuCtx attached");
             return false;
@@ -498,14 +524,17 @@ impl PageRenderer<'_> {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
+        let super::canvas::PageCanvas::Rgb(bitmap) = &mut self.canvas else {
+            return false;
+        };
         let compositor = ImageCompositor::new(
-            &self.bitmap,
+            bitmap,
             self.gstate.current().fill_alpha,
             self.gstate.current().blend_mode,
             backdrop.as_deref(),
+            None,
         );
         let transfer = self.gstate.current().transfer.clone();
-        let bitmap = &mut self.bitmap;
         let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
             composite_rgba_rows(
                 bitmap,
@@ -534,143 +563,6 @@ impl PageRenderer<'_> {
             cache_state.page_buffer = None;
         }
         true
-    }
-}
-
-/// Source-over whole rows of a downloaded RGBA8 page buffer, the first of
-/// which is page row `y0`, onto `bitmap`, restricted to the grid's columns
-/// and to the pixels `grid_clip` covers.  Alpha is `255` where the blit
-/// kernel wrote a sample and `0` elsewhere, so the composite copies each
-/// written sample, blended by the clip coverage on rows the clip edge
-/// crosses.  Samples map through `transfer` when one is in effect.
-#[cfg(feature = "cache")]
-fn composite_rgba_rows(
-    bitmap: &mut Bitmap<Rgb8>,
-    rgba: &[u8],
-    y0: u32,
-    grid: &SampleGrid,
-    grid_clip: &mut GridClip<'_>,
-    compositor: ImageCompositor<'_>,
-    transfer: Option<&crate::resources::transfer::Transfer>,
-) {
-    use gpu::cache::RGBA_BPP;
-
-    let width = bitmap.width as usize;
-    let src_stride = width * RGBA_BPP;
-    let span = (grid.x1 - grid.x0) as usize;
-    let mut colours = vec![0u8; span * 3];
-    let mut shape = vec![0u8; span];
-    for (src_row, dy) in rgba.chunks_exact(src_stride.max(1)).zip(y0..) {
-        let Some(row_clip) = grid_clip.row(dy) else {
-            continue;
-        };
-        let samples = &src_row[grid.x0 as usize * RGBA_BPP..grid.x1 as usize * RGBA_BPP];
-        for (((dx, s), out), shape) in (grid.x0..grid.x1)
-            .zip(samples.as_chunks::<RGBA_BPP>().0)
-            .zip(colours.as_chunks_mut::<3>().0)
-            .zip(shape.iter_mut())
-        {
-            let rgb = [s[0], s[1], s[2]];
-            *out = transfer.map_or(rgb, |t| t.apply(rgb));
-            *shape = if s[3] == 0 { 0 } else { row_clip.coverage(dx) };
-        }
-        let (row, alpha_row) = bitmap.row_and_alpha_mut(dy);
-        compositor.paint_row(row, alpha_row, grid.x0, dy, &colours, &shape);
-    }
-}
-
-/// Composites image samples onto a page or group bitmap.
-///
-/// An image paints with the nonstroking constant alpha and the blend mode in
-/// effect (ISO 32000-1 §11.6.4.4, §11.3.5), and inside a transparency group
-/// its shape accumulates into the group's alpha plane like any other object.
-/// When none of these apply (no alpha plane, `ca` = 1, `Normal`), a sample is
-/// blended onto the destination by its coverage alone; otherwise every sample
-/// runs through the raster pipe that fills use.
-#[derive(Clone, Copy)]
-pub(super) struct ImageCompositor<'a> {
-    /// `None` selects the direct coverage blend.
-    pub(super) pipe: Option<PipeState<'a>>,
-}
-
-impl<'a> ImageCompositor<'a> {
-    pub(super) fn new(
-        bitmap: &Bitmap<Rgb8>,
-        fill_alpha: u8,
-        blend_mode: BlendMode,
-        backdrop: Option<&'a Backdrop>,
-    ) -> Self {
-        let direct =
-            bitmap.alpha_plane().is_none() && fill_alpha == 255 && blend_mode == BlendMode::Normal;
-        Self {
-            pipe: (!direct).then(|| PageRenderer::make_pipe(fill_alpha, blend_mode, backdrop)),
-        }
-    }
-
-    /// Paint the samples of row `y` from column `x0`: `colours` holds the
-    /// RGB of each sample and `shape` its coverage, `0` where the sample
-    /// paints nothing.  `row` is the row's pixel bytes and `alpha_row` its
-    /// alpha plane row, if the bitmap has one.  Columns past the row's end
-    /// paint nothing.
-    ///
-    /// Through the pipe, each run of painted samples composites as one span
-    /// whose shape is the coverage: the pipe takes the source alpha as
-    /// `div255(a_input × shape)`, the alpha a sample painted alone with
-    /// that constant alpha would have.
-    pub(super) fn paint_row(
-        &self,
-        row: &mut [u8],
-        mut alpha_row: Option<&mut [u8]>,
-        x0: u32,
-        y: u32,
-        colours: &[u8],
-        shape: &[u8],
-    ) {
-        let x0 = x0 as usize;
-        let columns = (row.len() / 3).saturating_sub(x0).min(shape.len());
-        let (colours, shape) = (&colours[..columns * 3], &shape[..columns]);
-        let Some(pipe) = &self.pipe else {
-            let dst = &mut row[x0 * 3..(x0 + columns) * 3];
-            for ((dst, src), &coverage) in dst
-                .as_chunks_mut::<3>()
-                .0
-                .iter_mut()
-                .zip(colours.as_chunks::<3>().0)
-                .zip(shape)
-            {
-                if coverage != 0 {
-                    blend_rgb(dst, *src, coverage);
-                }
-            }
-            return;
-        };
-        let mut start = 0;
-        while let Some(offset) = shape[start..].iter().position(|&c| c != 0) {
-            let a = start + offset;
-            let b = shape[a..]
-                .iter()
-                .position(|&c| c == 0)
-                .map_or(columns, |n| a + n);
-            let (c0, c1) = (x0 + a, x0 + b);
-            #[expect(
-                clippy::cast_possible_wrap,
-                clippy::cast_possible_truncation,
-                reason = "columns and rows lie within the bitmap, whose dimensions are below 2^31"
-            )]
-            raster::pipe::render_span::<Rgb8>(
-                pipe,
-                &PipeSrc::Pattern(&RowPattern {
-                    data: &colours[a * 3..b * 3],
-                }),
-                &mut row[c0 * 3..c1 * 3],
-                alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
-                Some(&shape[a..b]),
-                c0 as i32,
-                (c1 - 1) as i32,
-                y as i32,
-            );
-            start = b;
-        }
     }
 }
 
@@ -709,29 +601,6 @@ fn verify_sample_len(img: &crate::resources::ImageDescriptor, len: usize) -> Res
     }
 }
 
-/// Composite `bitmap`, a page group with an alpha plane, onto opaque white
-/// in place: each pixel becomes `c·α + 255·(1 − α)`, and the alpha plane is
-/// dropped.  A bitmap without an alpha plane is left as it is.
-pub(super) fn composite_onto_white(bitmap: &mut Bitmap<Rgb8>) {
-    if !bitmap.has_alpha() {
-        return;
-    }
-    for y in 0..bitmap.height {
-        let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
-            return;
-        };
-        for (px, &a) in row.as_chunks_mut::<3>().0.iter_mut().zip(&*alpha_row) {
-            if a == u8::MAX {
-                continue;
-            }
-            for c in px {
-                *c = blend_u8(*c, u8::MAX, u16::from(a));
-            }
-        }
-    }
-    bitmap.drop_alpha_plane();
-}
-
 /// Paint `src` onto the RGB triple `dst` with coverage `alpha`; an opaque
 /// sample copies, anything else blends per channel.
 #[inline]
@@ -746,21 +615,6 @@ pub(super) fn blend_rgb(dst: &mut [u8], src: [u8; 3], alpha: u8) {
         dst[1] = blend_u8(src[1], dst[1], a);
         dst[2] = blend_u8(src[2], dst[2], a);
     }
-}
-
-/// Porter-Duff source-over blend for a single 8-bit channel.
-///
-/// Formula: `(src * alpha + dst * (255 - alpha)) / 255`.
-///
-/// Maximum intermediate value: `255 * 255 = 65025 < u16::MAX`, so no overflow
-/// is possible regardless of the alpha split.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "result is (x*a + y*ia)/255 where a+ia=255; max value is 255*255/255=255, always fits u8"
-)]
-pub(super) fn blend_u8(src: u8, dst: u8, alpha: u16) -> u8 {
-    let ia = 255_u16 - alpha;
-    ((u16::from(src) * alpha + u16::from(dst) * ia) / 255) as u8
 }
 
 /// Reason `blit_image`'s decoder-contract check rejected an image.

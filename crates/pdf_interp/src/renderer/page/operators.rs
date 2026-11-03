@@ -501,6 +501,15 @@ impl PageRenderer<'_> {
         if let Some(bm) = params.blend_mode {
             gs.blend_mode = bm;
         }
+        if let Some(o) = params.overprint_stroke {
+            gs.overprint_stroke = o;
+        }
+        if let Some(o) = params.overprint_fill {
+            gs.overprint_fill = o;
+        }
+        if let Some(m) = params.overprint_mode {
+            gs.overprint_mode = m;
+        }
         match &params.transfer {
             Some(TransferSetting::Identity) => gs.transfer = None,
             Some(TransferSetting::Functions(t)) => gs.transfer = Some(Arc::clone(t)),

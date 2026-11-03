@@ -163,6 +163,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 |---|---|---|
 | `--aa yes\|no` | `yes` | Antialias text. `no` draws glyphs with hard, bilevel edges. |
 | `--aaVector yes\|no` | `yes` | Antialias path fills, strokes and clips. `no` draws them with hard, bilevel edges. |
+| `--overprint` | off | Simulate overprint (`OP`, `op`, `OPM`) for pages that use it. Without it every object knocks out what lies beneath it. |
 | `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
 | `--no-system-fonts` | off | Do not search the system font directories for fonts the document does not embed: draw them from `RROCKET_FONT_DIR` and the faces compiled into the binary only. |
 

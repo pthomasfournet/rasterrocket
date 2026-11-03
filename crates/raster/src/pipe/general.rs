@@ -329,7 +329,7 @@ fn compute_a_src(a_input: u32, shape_v: u32, has_shape: bool) -> u32 {
 
 /// The result alpha of a source of alpha `a_src` over a destination of
 /// alpha `a_dst`: their union.
-fn compute_a_result(a_src: u32, a_dst: u32) -> u32 {
+pub(crate) fn compute_a_result(a_src: u32, a_dst: u32) -> u32 {
     (a_src + a_dst - u32::from(div255(a_src * a_dst))).min(255)
 }
 
@@ -462,6 +462,7 @@ mod tests {
             a_input: a,
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
+            overprint: None,
         }
     }
 
@@ -607,6 +608,7 @@ mod tests {
             a_input: 255,
             transfer,
             backdrop: None,
+            overprint: None,
         };
 
         // Opaque gray source value 100; after inverting transfer: 155.

@@ -11,10 +11,8 @@
 
 use std::sync::Arc;
 
-use color::Rgb8;
 use font::bitmap::GlyphBitmap as CachedGlyph;
 use font::key::GlyphKey;
-use raster::bitmap::Bitmap;
 use raster::glyph::{GlyphBitmap, fill_glyph};
 use raster::pipe::PipeSrc;
 use raster::types::BlendMode;
@@ -23,6 +21,7 @@ use super::super::gstate::ctm_multiply;
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
+use super::canvas::{CanvasKind, PageCanvas, with_canvas};
 use super::text_ops::{glyph_advance, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
@@ -188,9 +187,12 @@ impl PageRenderer<'_> {
         if self.gstate.current().fill_color_space.paints_nothing() {
             return true;
         }
-        let fill = self.gstate.current().painted_fill_color().to_vec();
+        let fill = self.gstate.current().painted_fill_color();
+        let overprint = self.overprint_mask(false, &fill);
+        let fill = fill.bytes_for(self.canvas.kind().mode());
         let clip = self.gstate.current().clip.clone_shared();
-        let pipe = Self::make_pipe(255, BlendMode::Normal, None);
+        let backdrop = self.paint_backdrop(BlendMode::Normal, overprint);
+        let pipe = Self::make_pipe(255, BlendMode::Normal, backdrop.as_deref(), overprint);
         #[expect(
             clippy::cast_possible_wrap,
             reason = "a cached glyph is at most MAX_CACHED_AREA pixels; its sides fit i32"
@@ -203,15 +205,16 @@ impl PageRenderer<'_> {
             h: coverage.height as i32,
             aa: coverage.aa,
         };
-        let _ = fill_glyph::<Rgb8>(
-            &mut self.bitmap,
+        let src = PipeSrc::Solid(fill);
+        let _ = with_canvas!(&mut self.canvas, |b| fill_glyph(
+            b,
             &clip,
             &pipe,
-            &PipeSrc::Solid(&fill),
+            &src,
             frame.pen_x,
             frame.pen_y,
-            &bitmap,
-        );
+            &bitmap
+        ));
         true
     }
 
@@ -227,7 +230,7 @@ impl PageRenderer<'_> {
         let mut child = PageRenderer::new(width, height, doc, context);
         child.set_document_fonts(Arc::clone(self.font_cache.document_fonts()));
         child.set_antialias(self.text_antialias, self.vector_antialias);
-        child.bitmap = Bitmap::new(width, height, 1, true);
+        child.canvas = PageCanvas::new(CanvasKind::Rgb, width, height, true);
         child.pattern_depth = self.pattern_depth;
         child.form_depth = self.form_depth + 1;
         child.adopt_parent_budget(self);
@@ -421,7 +424,7 @@ mod tests {
             .with_resources((0, 0), resources.as_dict().unwrap());
         renderer.execute(&crate::content::parse(b"BT /T 16 Tf 4 4 Td (A) Tj ET"));
         // The glyph covers device x 4..20, rows 12..28.
-        let row = renderer.bitmap.row_bytes(20);
+        let row = renderer.rgb_canvas().row_bytes(20);
         assert_eq!(&row[12 * 3..12 * 3 + 3], &[0, 0, 0], "glyph painted");
     }
 

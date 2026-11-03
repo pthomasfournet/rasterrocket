@@ -379,6 +379,10 @@ pub struct RasterOptions {
     /// Default `true`.
     pub vector_antialias: bool,
 
+    /// Whether overprint is simulated; see [`SessionConfig::overprint`].
+    /// Default `false`.
+    pub overprint: bool,
+
     /// Whether an encrypted document may be decrypted; see
     /// [`SessionConfig::decrypt_authorized`].  Default `false`: an encrypted
     /// document is an error.
@@ -434,6 +438,7 @@ impl Default for RasterOptions {
             annotations: true,
             text_antialias: true,
             vector_antialias: true,
+            overprint: false,
             decrypt_authorized: false,
             password: None,
             font_dirs: Vec::new(),
