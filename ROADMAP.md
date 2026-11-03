@@ -2292,8 +2292,21 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `PageRenderer::with_page_group(view, doc, page, group, ink)`,
 `page_uses_overprint(doc, page, annotations)` and
 `ExtGStateParams::{overprint_stroke, overprint_fill, overprint_mode}` (an
-`Option<OverprintMode>`). The canvas kind is fixed when the renderer is
-built; there is no setter.
+`Option<OverprintMode>`), and `DocumentImages`,
+`DOCUMENT_IMAGE_BUDGET_BYTES` and `PageRenderer::set_document_images`. The
+canvas kind is fixed when the renderer is built; there is no setter.
+
+**Document-wide image decodes, on master, unreleased.** An image `XObject`
+drawn on two pages or more is decoded once per session rather than once per
+page: a store shared by the session's pages keeps it once a second page asks
+for it, up to 256 MiB of host-resident decodes (device-resident decodes stay
+with the device image cache). Output is byte-identical; a 48-page document
+sharing one 3000×3000 JPEG background renders 1.6× faster (4.5 → 1.9 s CPU)
+at under half the peak memory (1.22 → 0.51 GB), while corpus-06, whose
+shared images are small, is unchanged. Image decodes on a page are now also
+kept per default-colour-space context, so a form whose resources define no
+`/DefaultGray` no longer draws an image as the page's `/DefaultGray`
+decoded it.
 
 **Overprint simulation, on master (merged 2026-11-03), unreleased.**
 `--overprint` / `RasterOptions::overprint` (default off). With it, a page on

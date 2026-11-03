@@ -214,6 +214,7 @@ fn render_page_rgb_with_geom(
     }
     renderer.set_antialias(session.text_antialias, session.vector_antialias);
     renderer.set_document_fonts(Arc::clone(&session.fonts));
+    renderer.set_document_images(Arc::clone(&session.images));
     renderer.set_optional_content(Arc::clone(&session.optional_content));
 
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]

@@ -245,7 +245,7 @@ pub struct PageRenderer<'doc> {
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Image `XObjects` already decoded on this page, shared with the
-    /// renderers of its pattern cells.
+    /// renderers of its pattern cells, and the document's shared decodes.
     image_memo: image_memo::SharedImageMemo,
     /// Shadings and tiling cells already resolved on this page, shared with
     /// the renderers of its pattern cells.
@@ -449,7 +449,7 @@ impl<'doc> PageRenderer<'doc> {
             group_pool: Vec::new(),
             ink_map: ink_map::InkMap::default(),
             diag: PageDiagnostics::default(),
-            image_memo: image_memo::ImageMemo::shared(),
+            image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
             pattern_memo: pattern_memo::PatternMemo::shared(),
             op_budget: MAX_PAGE_OPS,
             deadline: Some(
@@ -488,6 +488,14 @@ impl<'doc> PageRenderer<'doc> {
     /// Call before execute.
     pub fn set_document_fonts(&mut self, fonts: Arc<DocumentFonts>) {
         self.font_cache = FontCache::new(fonts, self.text_antialias);
+    }
+
+    /// Decode image `XObjects` drawn on several pages once through
+    /// `images`, a store shared by every page of this renderer's document,
+    /// instead of once per page.  Call before execute.
+    pub fn set_document_images(&mut self, images: Arc<super::DocumentImages>) {
+        let page = self.image_memo.borrow().page();
+        self.image_memo = image_memo::ImageMemo::shared(page, images);
     }
 
     /// Select antialiasing: `text` for glyph bitmaps, `vector` for path

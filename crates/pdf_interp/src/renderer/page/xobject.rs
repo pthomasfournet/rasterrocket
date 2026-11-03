@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
-use pdf::ObjectId;
 use raster::{transparency::GroupParams, types::BlendMode};
 
+use super::super::document_images::{self, ImageKey, Lookup, Outcome};
 use super::super::gstate::{ctm_multiply, ctm_transform};
 use super::canvas::PageCanvas;
 use super::pixel_rect::PixelRect;
 use super::{GroupContext, MAX_FORM_DEPTH, PageRenderer, RenderAbort};
+use crate::resources::image::ImageResolution;
 
 /// Device-pixel extent `(width, height)` of an image drawn under `ctm`: the
 /// lengths of the images of its unit x and y vectors, rounded up.  Correct
@@ -45,24 +46,122 @@ impl PageRenderer<'_> {
             self.do_form_xobject(&form);
             return;
         }
-        // Try Image, decoding it only when this page has not already.
         let draw_size = image_draw_size(&self.gstate.current().ctm);
-        let id = self.resources.xobject_id(name);
-        let memoized = id.and_then(|id| self.image_memo.borrow().get(id, draw_size));
+        let key = self.resources.xobject_id(name).map(|id| ImageKey {
+            id,
+            context: self.default_spaces_context(),
+        });
+        let Some(key) = key else {
+            let resolution = self.decode_image_xobject(name, draw_size);
+            self.handle_image_resolution(name, resolution, None);
+            return;
+        };
+        // Decode the image only when neither this page nor, for an image
+        // other pages draw too, the document holds a decode.
+        let memoized = self.image_memo.borrow().get(key, draw_size);
         if let Some(decoded) = memoized {
             self.draw_image_xobject(name, &decoded);
             return;
         }
-        let failed = id.and_then(|id| {
-            self.image_memo
-                .borrow()
-                .failure(id, draw_size)
-                .map(str::to_owned)
-        });
+        let failed = self
+            .image_memo
+            .borrow()
+            .failure(key, draw_size)
+            .map(str::to_owned);
         if let Some(reason) = failed {
             self.record_image_failure(Some(name), reason);
             return;
         }
+        if self.draw_shared_image(name, key, draw_size) {
+            return;
+        }
+        let resolution = self.decode_image_xobject(name, draw_size);
+        self.handle_image_resolution(name, resolution, Some((key, draw_size)));
+    }
+
+    /// Draw the image `XObject` `name` (`key`) at `draw_size` from the
+    /// document's shared decodes when it is drawn on another page too,
+    /// decoding it there first when no page has; `false` when the page is
+    /// to decode it itself.  A page drawing a shared decode records its
+    /// partial-decode or failure diagnostic and keeps it in its own memo,
+    /// as a decode on the page does.
+    fn draw_shared_image(
+        &mut self,
+        name: &[u8],
+        key: ImageKey,
+        draw_size: Option<(u32, u32)>,
+    ) -> bool {
+        let (document, page) = {
+            let memo = self.image_memo.borrow();
+            (Arc::clone(memo.document()), memo.page())
+        };
+        let Lookup::Shared(cell) = document.lookup(key, page) else {
+            return false;
+        };
+        let mut device = None;
+        let outcome = document.resolve(key, &cell, || {
+            match self.decode_image_xobject(name, draw_size) {
+                ImageResolution::Ok(decoded) if decoded.image.data.as_cpu().is_none() => {
+                    device = Some(decoded);
+                    Outcome::Device
+                }
+                ImageResolution::Ok(decoded) => Outcome::Image {
+                    image: Arc::new(decoded),
+                    draw_size,
+                },
+                ImageResolution::DecodeFailed(reason) => Outcome::Failed(reason),
+                ImageResolution::Absent => Outcome::Absent,
+            }
+        });
+        match outcome {
+            Outcome::Image {
+                image,
+                draw_size: kept,
+            } if document_images::serves(&image, kept, draw_size) => {
+                if let Some(reason) = &image.partial {
+                    self.record_partial_image(Some(name), reason.clone());
+                }
+                self.image_memo
+                    .borrow_mut()
+                    .insert_shared(key, draw_size, &image);
+                self.draw_image_xobject(name, &image);
+            }
+            // A JPEG 2000 decode at another resolution level.
+            Outcome::Image { .. } => return false,
+            Outcome::Device => match device {
+                // This page made the decode; the store does not keep it.
+                Some(decoded) => self.handle_image_resolution(
+                    name,
+                    ImageResolution::Ok(decoded),
+                    Some((key, draw_size)),
+                ),
+                None => return false,
+            },
+            Outcome::Failed(reason) => self.handle_image_resolution(
+                name,
+                ImageResolution::DecodeFailed(reason),
+                Some((key, draw_size)),
+            ),
+            Outcome::Absent => {
+                self.handle_image_resolution(name, ImageResolution::Absent, None);
+            }
+        }
+        true
+    }
+
+    /// Decode the image `XObject` `name` for a draw at `draw_size`.
+    #[cfg_attr(
+        not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "the GPU decoders, each behind its feature, are borrowed mutably"
+        )
+    )]
+    fn decode_image_xobject(
+        &mut self,
+        name: &[u8],
+        draw_size: Option<(u32, u32)>,
+    ) -> ImageResolution {
         let request = crate::resources::ImageRequest { name, draw_size };
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
@@ -99,16 +198,16 @@ impl PageRenderer<'_> {
             #[cfg(feature = "gpu-jpeg-huffman")]
             self.jpeg_gpu.as_mut(),
         );
-        self.handle_image_resolution(name, resolution, id.map(|id| (id, draw_size)));
+        resolution
     }
 
-    /// Dispatch on an [`ImageResolution`](crate::resources::image::ImageResolution) returned from
+    /// Dispatch on an [`ImageResolution`] returned from
     /// [`PageResources::image`](crate::resources::PageResources::image).
     ///
     /// - `Ok` → blit the image, keeping it in the page's image memo under
-    ///   `memo_key` (the stream object and the draw size it was decoded
-    ///   for) when given; on an ink canvas device-resident samples are
-    ///   read back to the host first.
+    ///   `memo_key` (the image and the draw size it was decoded for) when
+    ///   given; on an ink canvas device-resident samples are read back to
+    ///   the host first.
     /// - `DecodeFailed` → record the failure in the page diagnostics and skip
     ///   the image; the pixel region keeps what was painted beneath it.
     /// - `Absent` → a non-image `XObject` subtype with no raster appearance;
@@ -116,10 +215,9 @@ impl PageRenderer<'_> {
     pub(super) fn handle_image_resolution(
         &mut self,
         name: &[u8],
-        resolution: crate::resources::image::ImageResolution,
-        memo_key: Option<(ObjectId, Option<(u32, u32)>)>,
+        resolution: ImageResolution,
+        memo_key: Option<(ImageKey, Option<(u32, u32)>)>,
     ) {
-        use crate::resources::image::ImageResolution;
         match resolution {
             ImageResolution::Ok(decoded) => {
                 #[cfg(feature = "cache")]
@@ -128,18 +226,18 @@ impl PageRenderer<'_> {
                     self.record_partial_image(Some(name), reason.clone());
                 }
                 match memo_key {
-                    Some((id, draw_size)) => {
-                        let decoded = self.image_memo.borrow_mut().insert(id, draw_size, decoded);
+                    Some((key, draw_size)) => {
+                        let decoded = self.image_memo.borrow_mut().insert(key, draw_size, decoded);
                         self.draw_image_xobject(name, &decoded);
                     }
                     None => self.draw_image_xobject(name, &decoded),
                 }
             }
             ImageResolution::DecodeFailed(msg) => {
-                if let Some((id, draw_size)) = memo_key {
+                if let Some((key, draw_size)) = memo_key {
                     self.image_memo
                         .borrow_mut()
-                        .insert_failure(id, draw_size, msg.clone());
+                        .insert_failure(key, draw_size, msg.clone());
                 }
                 self.record_image_failure(Some(name), msg);
             }

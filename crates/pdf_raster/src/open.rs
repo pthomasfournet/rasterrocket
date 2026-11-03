@@ -25,6 +25,9 @@ pub struct RasterSession {
     pub(crate) doc: Arc<pdf::Document>,
     /// Fonts of `doc` resolved once and shared by every page rendered.
     pub(crate) fonts: Arc<pdf_interp::renderer::DocumentFonts>,
+    /// Image `XObjects` decoded once for every page of `doc` that draws
+    /// them, up to [`pdf_interp::renderer::DOCUMENT_IMAGE_BUDGET_BYTES`].
+    pub(crate) images: Arc<pdf_interp::renderer::DocumentImages>,
     pub(crate) total_pages: u32,
     pub(crate) policy: BackendPolicy,
     /// Fail a page on an image failure instead of skipping the image
@@ -384,6 +387,7 @@ fn open_session_with_doc(
             &config.font_dirs,
             config.system_fonts,
         )),
+        images: Arc::default(),
         total_pages,
         policy: config.policy,
         strict: config.strict,

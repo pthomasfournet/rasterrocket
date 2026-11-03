@@ -315,9 +315,10 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// The resource context whose default colour spaces a shading resolved
-    /// here takes; `None` when the resources in effect have none.
-    fn default_spaces_context(&self) -> Option<ObjectId> {
+    /// The resource context whose default colour spaces a shading or an
+    /// image resolved here takes; `None` when the resources in effect have
+    /// none.
+    pub(super) fn default_spaces_context(&self) -> Option<ObjectId> {
         self.resources
             .has_default_spaces()
             .then(|| self.resources.resource_context_id())

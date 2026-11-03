@@ -1129,6 +1129,139 @@ fn an_uncoloured_pattern_tint_takes_the_default_space() {
 
 /// A default space of the wrong component count leaves the device space
 /// in effect.
+/// Page `(4, 0)`, whose resources map `/DefaultGray` to `default_gray`,
+/// with the 1×1 `DeviceGray` image `/Im` of sample 0x80 (object 5) and
+/// the form `/F` (object 6), whose own resources name the same image and
+/// no default space.  The form draws `/Im` over the right half of an
+/// 8 pt page.
+fn image_in_two_contexts_doc(default_gray: &str) -> Document {
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            format!(
+                "<< /Type /Page /Resources << /ColorSpace << /DefaultGray {default_gray} >> \
+                 /XObject << /Im 5 0 R /F 6 0 R >> >> >>"
+            ),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                "80>",
+            ),
+        ),
+        (
+            6,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 8 8] \
+                 /Resources << /XObject << /Im 5 0 R >> >>",
+                "q 4 0 0 8 4 0 cm /Im Do Q",
+            ),
+        ),
+    ])
+}
+
+/// An image decoded under the page's `/DefaultGray` is not drawn from
+/// that decode in a form whose resources have no default space: each
+/// half of the page shows the image in its own context's colour space.
+#[test]
+fn image_decode_is_kept_per_default_space_context() {
+    let doc = image_in_two_contexts_doc(LINEAR_CAL_GRAY);
+    for content in [
+        b"q 4 0 0 8 0 0 cm /Im Do Q /F Do".as_slice(),
+        b"/F Do q 4 0 0 8 0 0 cm /Im Do Q",
+    ] {
+        let px = render_gray_on(&doc, (4, 0), 8, content);
+        let (left, right): (Vec<_>, Vec<_>) =
+            px.chunks(4).enumerate().partition(|(i, _)| i % 2 == 0);
+        let content = String::from_utf8_lossy(content);
+        assert!(
+            left.iter()
+                .flat_map(|(_, c)| c.iter())
+                .all(|v| (186..=189).contains(v)),
+            "{content}: the page's draw takes DefaultGray: {px:?}"
+        );
+        assert!(
+            right.iter().flat_map(|(_, c)| c.iter()).all(|&v| v == 128),
+            "{content}: the form's draw is DeviceGray: {px:?}"
+        );
+    }
+}
+
+/// Pages `(4, 0)` and `(5, 0)`, each naming the 2×2 `DeviceGray` image
+/// `/Im` (object 6), whose stream holds two of its four samples, and the
+/// image `/Bad` (object 7), whose stream does not decode.
+fn images_on_two_pages_doc() -> Document {
+    let page = "<< /Type /Page /Resources << /XObject << /Im 6 0 R /Bad 7 0 R >> >> >>";
+    crate::test_helpers::make_doc_with_objects(&[
+        (4, page.to_owned()),
+        (5, page.to_owned()),
+        (
+            6,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                "40C0>",
+            ),
+        ),
+        (
+            7,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+                "not a zlib stream",
+            ),
+        ),
+    ])
+}
+
+const DRAW_TWO_IMAGES: &[u8] = b"q 8 0 0 8 0 0 cm /Im Do /Bad Do Q";
+
+/// Pages drawing an image from the document's shared decodes render and
+/// report it as pages decoding it themselves do: the same pixels, and the
+/// partial-decode and failure diagnostics on every page, whether the
+/// first page still holds its decode when the next asks or not.
+#[test]
+fn shared_image_decodes_render_and_report_as_page_decodes() {
+    let doc = images_on_two_pages_doc();
+    let page = |id: ObjectId, images: Option<&Arc<super::super::DocumentImages>>| {
+        let mut renderer = PageRenderer::new(8, 8, &doc, id);
+        if let Some(images) = images {
+            renderer.set_document_images(Arc::clone(images));
+        }
+        renderer.execute(&crate::content::parse(DRAW_TWO_IMAGES));
+        renderer
+    };
+    let output = |renderer: PageRenderer<'_>| {
+        let (bitmap, diag) = renderer.finish();
+        (bitmap.data().to_vec(), diag.image_failures)
+    };
+    let alone = output(page((4, 0), None));
+    assert_eq!(alone.1.len(), 2, "{:?}", alone.1);
+    assert!(alone.1.iter().any(|f| f.partial), "{:?}", alone.1);
+    assert!(alone.1.iter().any(|f| !f.partial), "{:?}", alone.1);
+
+    // The first page's decode is gone when the second page asks.
+    let images: Arc<super::super::DocumentImages> = Arc::default();
+    assert_eq!(output(page((4, 0), Some(&images))), alone);
+    assert_eq!(images.kept_bytes(), 0, "one page's images are not kept");
+    for id in [(5, 0), (4, 0), (5, 0)] {
+        assert_eq!(output(page(id, Some(&images))), alone, "page {id:?}");
+    }
+    assert_eq!(images.kept_bytes(), 4, "the 2×2 image is kept once");
+
+    // The first page still holds its decode when the second page asks.
+    let images: Arc<super::super::DocumentImages> = Arc::default();
+    let first = page((4, 0), Some(&images));
+    let second = page((5, 0), Some(&images));
+    assert_eq!(images.kept_bytes(), 4);
+    assert_eq!(output(second), alone);
+    assert_eq!(output(first), alone);
+    assert_eq!(output(page((5, 0), Some(&images))), alone);
+    assert_eq!(images.kept_bytes(), 4);
+}
+
 #[test]
 fn default_space_of_another_component_count_is_ignored() {
     let doc = default_gray_doc("[/CalRGB << /WhitePoint [0.9505 1 1.089] >>]");

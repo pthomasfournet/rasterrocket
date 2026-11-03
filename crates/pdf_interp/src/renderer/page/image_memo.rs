@@ -1,28 +1,35 @@
-//! Decoded images of one page — image `XObjects` keyed by stream object,
-//! inline images keyed by their bytes — so an image drawn several times
-//! (by `Do` operators in the page, its forms and its pattern cells, or by
-//! the same `BI … EI` block in a form drawn repeatedly) is decoded once.
+//! Decoded images of one page — image `XObjects` keyed by stream object
+//! and default-colour-space context, inline images keyed by their bytes —
+//! so an image drawn several times (by `Do` operators in the page, its
+//! forms and its pattern cells, or by the same `BI … EI` block in a form
+//! drawn repeatedly) is decoded once.
 //!
-//! A decode depends on the stream and, for JPEG 2000 alone, on the
-//! requested draw size, which selects the resolution level.  An entry is
-//! therefore returned for any request when it is not JPEG 2000 and only
-//! for an equal draw size when it is, so every draw renders exactly as a
-//! fresh decode would.  An inline image's key holds the resource context
-//! it was decoded under with its parameters and data, since a named
-//! colour space resolves through that context.
+//! A decode depends on the stream, on the default colour spaces of the
+//! resources in effect and, for JPEG 2000 alone, on the requested draw
+//! size, which selects the resolution level.  An entry is therefore
+//! returned for any request in its context when it is not JPEG 2000 and
+//! only for an equal draw size when it is, so every draw renders exactly
+//! as a fresh decode would.  An inline image's key holds the resource
+//! context it was decoded under with its parameters and data, since a
+//! named colour space resolves through that context.
+//!
+//! The memo holds the document's [`DocumentImages`], through which image
+//! `XObjects` drawn on several pages are decoded once for the document.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use pdf::ObjectId;
 
+use crate::renderer::document_images::{self, DocumentImages, ImageKey, host_bytes};
 use crate::resources::DecodedImage;
-use crate::resources::image::ImageFilter;
 
 /// Host bytes of decoded pixels and masks the memo holds at most.  A decode
-/// that would exceed it is drawn without being kept.
+/// that would exceed it is drawn without being kept.  Decodes the document
+/// store also holds count nothing.
 const BUDGET_BYTES: usize = 64 << 20;
 
 /// The memo shared by a page renderer and the renderers of its pattern
@@ -31,39 +38,60 @@ pub(super) type SharedImageMemo = Rc<RefCell<ImageMemo>>;
 
 /// Decoded images keyed by stream object or by inline-image bytes.
 pub(super) struct ImageMemo {
-    entries: HashMap<ObjectId, Entry>,
-    /// The reason each stream object failed to decode, by the draw size of
-    /// the request: a failure at one resolution level of a JPEG 2000 image
+    entries: HashMap<ImageKey, Entry>,
+    /// The reason each image failed to decode, by the draw size of the
+    /// request: a failure at one resolution level of a JPEG 2000 image
     /// says nothing of another.
-    failures: HashMap<(ObjectId, Option<(u32, u32)>), String>,
+    failures: HashMap<(ImageKey, Option<(u32, u32)>), String>,
     inline: HashMap<Box<[u8]>, Entry>,
     /// Sum of the entries' [`Entry::bytes`].
     bytes: usize,
     budget: usize,
+    /// The page the memo belongs to, as the document store knows it.
+    page: ObjectId,
+    /// The decodes shared by the pages of the document.
+    document: Arc<DocumentImages>,
 }
 
 struct Entry {
-    image: Rc<DecodedImage>,
+    image: Arc<DecodedImage>,
     /// The draw size the image was decoded for.
     draw_size: Option<(u32, u32)>,
-    /// Host bytes the entry holds.
+    /// Host bytes the entry holds beyond the document store.
     bytes: usize,
 }
 
 impl ImageMemo {
-    /// An empty memo holding at most [`BUDGET_BYTES`].
-    pub(super) fn shared() -> SharedImageMemo {
-        Rc::new(RefCell::new(Self::with_budget(BUDGET_BYTES)))
+    /// An empty memo of page `page` holding at most [`BUDGET_BYTES`],
+    /// sharing decodes with the other pages of `document`.
+    pub(super) fn shared(page: ObjectId, document: Arc<DocumentImages>) -> SharedImageMemo {
+        Rc::new(RefCell::new(Self::with_budget(
+            BUDGET_BYTES,
+            page,
+            document,
+        )))
     }
 
-    fn with_budget(budget: usize) -> Self {
+    fn with_budget(budget: usize, page: ObjectId, document: Arc<DocumentImages>) -> Self {
         Self {
             entries: HashMap::new(),
             failures: HashMap::new(),
             inline: HashMap::new(),
             bytes: 0,
             budget,
+            page,
+            document,
         }
+    }
+
+    /// The page the memo belongs to.
+    pub(super) const fn page(&self) -> ObjectId {
+        self.page
+    }
+
+    /// The decodes shared by the pages of the document.
+    pub(super) const fn document(&self) -> &Arc<DocumentImages> {
+        &self.document
     }
 
     /// The key of an inline image: `context` (the object whose resources
@@ -81,8 +109,8 @@ impl ImageMemo {
 
     /// The decode kept for the inline image `key` (see
     /// [`Self::inline_key`]); an inline image has no draw size.
-    pub(super) fn get_inline(&self, key: &[u8]) -> Option<Rc<DecodedImage>> {
-        self.inline.get(key).map(|e| Rc::clone(&e.image))
+    pub(super) fn get_inline(&self, key: &[u8]) -> Option<Arc<DecodedImage>> {
+        self.inline.get(key).map(|e| Arc::clone(&e.image))
     }
 
     /// Keep `image`, the decode of the inline image `key`, as
@@ -91,67 +119,82 @@ impl ImageMemo {
         &mut self,
         key: Box<[u8]>,
         image: DecodedImage,
-    ) -> Rc<DecodedImage> {
-        let (image, entry) = Entry::new(image, None);
+    ) -> Arc<DecodedImage> {
+        let image = Arc::new(image);
+        let entry = Entry::new(Arc::clone(&image), None, host_bytes(&image));
         keep(&mut self.inline, &mut self.bytes, self.budget, key, entry);
         image
     }
 
-    /// The decode of `id` kept for a request at `draw_size`, when it equals
-    /// what decoding the stream for that request returns.
+    /// The decode of `key` kept for a request at `draw_size`, when it
+    /// equals what decoding the stream for that request returns.
     pub(super) fn get(
         &self,
-        id: ObjectId,
+        key: ImageKey,
         draw_size: Option<(u32, u32)>,
-    ) -> Option<Rc<DecodedImage>> {
-        let entry = self.entries.get(&id)?;
-        (entry.image.image.filter != ImageFilter::Jpx || entry.draw_size == draw_size)
-            .then(|| Rc::clone(&entry.image))
+    ) -> Option<Arc<DecodedImage>> {
+        let entry = self.entries.get(&key)?;
+        document_images::serves(&entry.image, entry.draw_size, draw_size)
+            .then(|| Arc::clone(&entry.image))
     }
 
-    /// Why decoding `id` for a request at `draw_size` failed, when it has.
-    pub(super) fn failure(&self, id: ObjectId, draw_size: Option<(u32, u32)>) -> Option<&str> {
-        self.failures.get(&(id, draw_size)).map(String::as_str)
+    /// Why decoding `key` for a request at `draw_size` failed, when it has.
+    pub(super) fn failure(&self, key: ImageKey, draw_size: Option<(u32, u32)>) -> Option<&str> {
+        self.failures.get(&(key, draw_size)).map(String::as_str)
     }
 
-    /// Keep `reason`, why decoding `id` for a request at `draw_size`
+    /// Keep `reason`, why decoding `key` for a request at `draw_size`
     /// failed, so that a later request reports it without decoding again.
     pub(super) fn insert_failure(
         &mut self,
-        id: ObjectId,
+        key: ImageKey,
         draw_size: Option<(u32, u32)>,
         reason: String,
     ) {
-        let _ = self.failures.insert((id, draw_size), reason);
+        let _ = self.failures.insert((key, draw_size), reason);
     }
 
-    /// Keep `image`, the decode of `id` for a request at `draw_size`, in
-    /// place of any earlier decode of `id`.  When it would exceed the
-    /// budget, the earlier decode is dropped and `image` is not kept.
-    /// Returns the image for drawing either way.
+    /// Keep `image`, the page's decode of `key` for a request at
+    /// `draw_size`, in place of any earlier decode of `key`, and offer it
+    /// to the document store.  When it would exceed the budget, the
+    /// earlier decode is dropped and `image` is not kept.  Returns the
+    /// image for drawing either way.
     pub(super) fn insert(
         &mut self,
-        id: ObjectId,
+        key: ImageKey,
         draw_size: Option<(u32, u32)>,
         image: DecodedImage,
-    ) -> Rc<DecodedImage> {
-        let (image, entry) = Entry::new(image, draw_size);
-        keep(&mut self.entries, &mut self.bytes, self.budget, id, entry);
+    ) -> Arc<DecodedImage> {
+        let image = Arc::new(image);
+        let entry = Entry::new(Arc::clone(&image), draw_size, host_bytes(&image));
+        keep(&mut self.entries, &mut self.bytes, self.budget, key, entry);
+        if self.entries.contains_key(&key) {
+            self.document.offer(key, self.page, &image, draw_size);
+        }
         image
+    }
+
+    /// Keep `image`, the document store's decode of `key` for a request at
+    /// `draw_size`, in place of any earlier decode of `key`.  It charges
+    /// the budget nothing, as the store holds it.
+    pub(super) fn insert_shared(
+        &mut self,
+        key: ImageKey,
+        draw_size: Option<(u32, u32)>,
+        image: &Arc<DecodedImage>,
+    ) {
+        let entry = Entry::new(Arc::clone(image), draw_size, 0);
+        keep(&mut self.entries, &mut self.bytes, self.budget, key, entry);
     }
 }
 
 impl Entry {
-    /// The shared image and its entry for a decode at `draw_size`.
-    fn new(image: DecodedImage, draw_size: Option<(u32, u32)>) -> (Rc<DecodedImage>, Self) {
-        let image = Rc::new(image);
-        let bytes = host_bytes(&image);
-        let entry = Self {
-            image: Rc::clone(&image),
+    const fn new(image: Arc<DecodedImage>, draw_size: Option<(u32, u32)>, bytes: usize) -> Self {
+        Self {
+            image,
             draw_size,
             bytes,
-        };
-        (image, entry)
+        }
     }
 }
 
@@ -178,18 +221,10 @@ fn keep<K: Eq + Hash>(
     }
 }
 
-/// Host bytes of `image`'s pixels and mask; device-resident pixels count
-/// nothing.
-fn host_bytes(image: &DecodedImage) -> usize {
-    let pixels = image.image.data.as_cpu().map_or(0, <[u8]>::len);
-    let mask = image.image.smask.as_ref().map_or(0, |m| m.alpha().len());
-    pixels + mask
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::image::{ImageColorSpace, ImageData, ImageDescriptor};
+    use crate::resources::image::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
 
     fn decoded(filter: ImageFilter, width: u32) -> DecodedImage {
         DecodedImage {
@@ -208,47 +243,75 @@ mod tests {
         }
     }
 
-    const ID: ObjectId = (5, 0);
+    const KEY: ImageKey = ImageKey {
+        id: (5, 0),
+        context: None,
+    };
+
+    fn memo(budget: usize) -> ImageMemo {
+        ImageMemo::with_budget(budget, (1, 0), Arc::default())
+    }
 
     #[test]
     fn non_jpx_decode_serves_every_draw_size() {
-        let mut memo = ImageMemo::with_budget(BUDGET_BYTES);
-        assert!(memo.get(ID, None).is_none());
-        let kept = memo.insert(ID, Some((4, 4)), decoded(ImageFilter::Dct, 8));
+        let mut memo = memo(BUDGET_BYTES);
+        assert!(memo.get(KEY, None).is_none());
+        let kept = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Dct, 8));
         for size in [None, Some((4, 4)), Some((100, 3))] {
-            let hit = memo.get(ID, size).expect("hit");
-            assert!(Rc::ptr_eq(&hit, &kept));
+            let hit = memo.get(KEY, size).expect("hit");
+            assert!(Arc::ptr_eq(&hit, &kept));
         }
-        assert!(memo.get((6, 0), None).is_none(), "other objects miss");
+        let other_object = ImageKey { id: (6, 0), ..KEY };
+        assert!(memo.get(other_object, None).is_none(), "other objects miss");
+        let other_context = ImageKey {
+            context: Some((4, 0)),
+            ..KEY
+        };
+        assert!(
+            memo.get(other_context, None).is_none(),
+            "other contexts miss"
+        );
     }
 
     #[test]
     fn jpx_decode_serves_only_its_draw_size() {
-        let mut memo = ImageMemo::with_budget(BUDGET_BYTES);
-        let _ = memo.insert(ID, Some((4, 4)), decoded(ImageFilter::Jpx, 4));
-        assert!(memo.get(ID, Some((4, 4))).is_some());
-        assert!(memo.get(ID, Some((8, 8))).is_none());
-        assert!(memo.get(ID, None).is_none());
+        let mut memo = memo(BUDGET_BYTES);
+        let _ = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Jpx, 4));
+        assert!(memo.get(KEY, Some((4, 4))).is_some());
+        assert!(memo.get(KEY, Some((8, 8))).is_none());
+        assert!(memo.get(KEY, None).is_none());
 
         // A decode for another size replaces it.
-        let _ = memo.insert(ID, Some((8, 8)), decoded(ImageFilter::Jpx, 8));
-        assert!(memo.get(ID, Some((4, 4))).is_none());
-        assert_eq!(memo.get(ID, Some((8, 8))).expect("hit").image.width, 8);
+        let _ = memo.insert(KEY, Some((8, 8)), decoded(ImageFilter::Jpx, 8));
+        assert!(memo.get(KEY, Some((4, 4))).is_none());
+        assert_eq!(memo.get(KEY, Some((8, 8))).expect("hit").image.width, 8);
         assert_eq!(memo.bytes, 8);
     }
 
     #[test]
     fn decodes_beyond_the_budget_are_not_kept() {
-        let mut memo = ImageMemo::with_budget(10);
-        let drawn = memo.insert(ID, None, decoded(ImageFilter::Raw, 8));
+        let mut memo = memo(10);
+        let drawn = memo.insert(KEY, None, decoded(ImageFilter::Raw, 8));
         assert_eq!(drawn.image.width, 8);
         assert_eq!(memo.bytes, 8);
-        let over = memo.insert((6, 0), None, decoded(ImageFilter::Raw, 3));
+        let other = ImageKey { id: (6, 0), ..KEY };
+        let over = memo.insert(other, None, decoded(ImageFilter::Raw, 3));
         assert_eq!(over.image.width, 3, "an image over budget is still drawn");
-        assert!(memo.get((6, 0), None).is_none());
+        assert!(memo.get(other, None).is_none());
         assert_eq!(memo.bytes, 8);
         // Replacing an entry frees its bytes first.
-        let _ = memo.insert(ID, None, decoded(ImageFilter::Raw, 10));
+        let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10));
+        assert_eq!(memo.bytes, 10);
+    }
+
+    #[test]
+    fn shared_decodes_charge_nothing() {
+        let mut memo = memo(10);
+        let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10));
+        let other = ImageKey { id: (6, 0), ..KEY };
+        let shared = Arc::new(decoded(ImageFilter::Raw, 50));
+        memo.insert_shared(other, None, &shared);
+        assert!(Arc::ptr_eq(&memo.get(other, None).expect("hit"), &shared));
         assert_eq!(memo.bytes, 10);
     }
 }
