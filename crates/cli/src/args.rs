@@ -248,7 +248,7 @@ pub(crate) struct Args {
     pub vector_antialias: AaFlag,
 
     /// Simulate overprint (`OP`, `op`, `OPM`) for pages that use it
-    /// (default off).  Without it every object knocks out what is
+    /// (default off).  Without it every object knocks out what lies
     /// beneath it.
     #[arg(long)]
     pub overprint: bool,

@@ -12,7 +12,8 @@ mod common;
 use color::cmyk::cmyk_to_rgb;
 use common::{render_one, stream_object, with_page_tree};
 use rasterrocket::{
-    BackendPolicy, RasterOptions, SessionConfig, open_session_from_bytes, render_page_rgb,
+    BackendPolicy, RasterOptions, RenderedPage, SessionConfig, open_session_from_bytes,
+    render_page_rgb,
 };
 
 /// A 10 pt square page: solid cyan, then a black overprinting fill over
@@ -38,7 +39,8 @@ fn probes(on: bool) -> ([u8; 3], [u8; 3]) {
     let s = open_session_from_bytes(page(), &config).expect("open session");
     let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
     let row = bmp.row_bytes(5);
-    ([row[6], row[7], row[8]], [row[21], row[22], row[23]])
+    let rgb = |x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
+    (rgb(2), rgb(7))
 }
 
 #[test]
@@ -52,6 +54,16 @@ fn overprint_changes_only_when_enabled() {
     assert_eq!(probes(true), (cyan_black, cyan), "on: cyan survives");
 }
 
+/// Gray value at row `row`, column `x` of `page`.
+fn px(page: &RenderedPage, row: u32, x: u32) -> u8 {
+    page.pixels[(row * page.width + x) as usize]
+}
+
+#[test]
+fn overprint_defaults_to_off() {
+    assert!(!RasterOptions::default().overprint);
+}
+
 #[test]
 fn raster_options_overprint_reaches_the_renderer() {
     let default = render_one(page(), &RasterOptions::new(72.0)).expect("default render");
@@ -59,10 +71,14 @@ fn raster_options_overprint_reaches_the_renderer() {
     off.overprint = false;
     let off = render_one(page(), &off).expect("off render");
     assert_eq!(off.pixels, default.pixels, "off equals the default");
-    assert!(!RasterOptions::default().overprint);
 
     let mut on = RasterOptions::new(72.0);
     on.overprint = true;
     let on = render_one(page(), &on).expect("on render");
     assert_eq!((on.width, on.height), (default.width, default.height));
+    assert!(
+        px(&on, 5, 2) < px(&default, 5, 2),
+        "cyan under the black darkens the left half"
+    );
+    assert_eq!(px(&on, 5, 7), px(&default, 5, 7), "right half unchanged");
 }
