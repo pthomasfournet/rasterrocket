@@ -10,6 +10,9 @@
 use pdf::{Dictionary, Document, Object};
 
 use crate::resources::dict_ext::DictExt as _;
+use crate::resources::font::{
+    FLAG_FIXED_PITCH, FLAG_FORCE_BOLD, FLAG_ITALIC, FLAG_SERIF, descriptor_flags,
+};
 
 /// Family class of a substitute typeface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -93,15 +96,6 @@ pub struct SubstituteStyle {
     /// are the font's own, so its glyphs are drawn unfitted.
     pub standard: bool,
 }
-
-/// `FixedPitch` flag (bit 1), PDF §9.8.2 Table 121.
-const FLAG_FIXED_PITCH: i64 = 1;
-/// `Serif` flag (bit 2).
-const FLAG_SERIF: i64 = 1 << 1;
-/// `Italic` flag (bit 7).
-const FLAG_ITALIC: i64 = 1 << 6;
-/// `ForceBold` flag (bit 19).
-const FLAG_FORCE_BOLD: i64 = 1 << 18;
 
 /// Family names (lower case, separators removed, style suffix cut at the
 /// first `,` or `-`) of the standard 14 fonts and their metric-compatible
@@ -236,14 +230,10 @@ const SCRIPT_NAMES: &[(Script, &[&str])] = &[
 ];
 
 /// Classify the substitute for the font described by `font_dict`, whose
-/// font descriptor lives in `fd_owner` (the font dictionary itself for a
-/// simple font, the descendant `CIDFont` for a Type 0 font).
+/// resolved font descriptor is `fd` (that of the font dictionary itself
+/// for a simple font, of the descendant `CIDFont` for a Type 0 font).
 #[must_use]
-pub(crate) fn substitute_style(
-    doc: &Document,
-    font_dict: &Dictionary,
-    fd_owner: Option<&Dictionary>,
-) -> SubstituteStyle {
+pub(crate) fn substitute_style(font_dict: &Dictionary, fd: Option<&Dictionary>) -> SubstituteStyle {
     let name = font_dict
         .get_name(b"BaseFont")
         .map(|n| String::from_utf8_lossy(n).to_ascii_lowercase())
@@ -251,15 +241,12 @@ pub(crate) fn substitute_style(
     // A subset tag (`ABCDEF+`) carries no style information.
     let name = name.split_once('+').map_or(name.as_str(), |(_, rest)| rest);
 
-    let fd = fd_owner.and_then(|d| super::font::resolve_fd(doc, d));
-    let flags = fd.as_ref().and_then(|d| d.get_i64(b"Flags")).unwrap_or(0);
+    let flags = descriptor_flags(fd);
     let weight = fd
-        .as_ref()
         .and_then(|d| d.get(b"FontWeight"))
         .and_then(Object::as_f64)
         .unwrap_or(0.0);
     let italic_angle = fd
-        .as_ref()
         .and_then(|d| d.get(b"ItalicAngle"))
         .and_then(Object::as_f64)
         .unwrap_or(0.0);
@@ -545,12 +532,8 @@ mod tests {
 
     #[test]
     fn subset_tag_is_ignored() {
-        let doc = crate::test_helpers::empty_doc();
         let mut dict = Dictionary::new();
         dict.set("BaseFont", Object::Name(b"ABCDEF+Courier".to_vec()));
-        assert_eq!(
-            substitute_style(&doc, &dict, None).family,
-            SubstituteFamily::Mono
-        );
+        assert_eq!(substitute_style(&dict, None).family, SubstituteFamily::Mono);
     }
 }

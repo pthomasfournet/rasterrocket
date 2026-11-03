@@ -193,10 +193,9 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     let widths: Vec<i32> = real_widths.into_iter().map(width_units).collect();
     let missing_width = extract_missing_width(doc, dict);
     let (differences, mut base_encoding) = extract_encoding(doc, dict);
-    let mut substitute = substitute_style(doc, dict, Some(dict));
-    let symbolic = resolve_fd(doc, dict)
-        .and_then(|fd| fd.get_i64(b"Flags"))
-        .is_some_and(|flags| flags & FLAG_SYMBOLIC != 0);
+    let fd = resolve_fd(doc, dict);
+    let mut substitute = substitute_style(dict, fd.as_ref());
+    let symbolic = descriptor_flags(fd.as_ref()) & FLAG_SYMBOLIC != 0;
 
     // A symbolic standard font drawn by its substitute keeps its built-in
     // encoding as the base: its codes denote symbols, not Latin letters,
@@ -234,9 +233,23 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
     }
 }
 
-/// `Symbolic` flag (bit 3) of a font descriptor's `Flags`, PDF §9.8.2
-/// Table 121.
-const FLAG_SYMBOLIC: i64 = 1 << 2;
+/// `FixedPitch` flag (bit 1) of a font descriptor's `Flags`, ISO 32000-1
+/// §9.8.2.
+pub(crate) const FLAG_FIXED_PITCH: i64 = 1;
+/// `Serif` flag (bit 2).
+pub(crate) const FLAG_SERIF: i64 = 1 << 1;
+/// `Symbolic` flag (bit 3).
+pub(crate) const FLAG_SYMBOLIC: i64 = 1 << 2;
+/// `Italic` flag (bit 7).
+pub(crate) const FLAG_ITALIC: i64 = 1 << 6;
+/// `ForceBold` flag (bit 19).
+pub(crate) const FLAG_FORCE_BOLD: i64 = 1 << 18;
+
+/// The `Flags` entry of the resolved font descriptor `fd`; 0 when there
+/// is no descriptor or no integer entry.
+pub(crate) fn descriptor_flags(fd: Option<&Dictionary>) -> i64 {
+    fd.and_then(|fd| fd.get_i64(b"Flags")).unwrap_or(0)
+}
 
 /// `MissingWidth` of the font descriptor (not of the font dictionary
 /// itself); 0 when absent (PDF §9.8.2).

@@ -7,7 +7,7 @@ use pdf::{Dictionary, Document, Object};
 
 use super::{
     BaseEncoding, FontDescriptor, PdfFontKind, classify_kind, embedded_program, empty_differences,
-    number, number_array, width_units,
+    number, number_array, resolve_fd, width_units,
 };
 use crate::resources::cmap::{CMap, DecodedCode, parse_cmap};
 use crate::resources::cmap_predefined::predefined_cmap;
@@ -248,7 +248,8 @@ pub(super) fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescr
 
     // 8. The script of a substitute: the CIDFont's ordering, else the
     // CMap's, else the family name.
-    let mut substitute = substitute_style(doc, dict, descendant.as_ref());
+    let fd = descendant.as_ref().and_then(|d| resolve_fd(doc, d));
+    let mut substitute = substitute_style(dict, fd.as_ref());
     if let Some(script) = descendant
         .as_ref()
         .and_then(|d| ordering_script(doc, d))
