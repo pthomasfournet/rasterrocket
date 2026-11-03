@@ -4,19 +4,21 @@
 //! one-image-per-entry, so only the first IFD is decoded; a warning fires if
 //! the file carries additional pages.
 
-use color::Rgb8;
-use raster::Bitmap;
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
 
-use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
+use super::{
+    CodecPixels, DecodeError, drop_alpha_in_place, gray_from_tight, guard_dimensions,
+    rgb_from_tight,
+};
 
-/// Decode the first page of a TIFF to an `Rgb8` bitmap.
+/// Decode the first page of a TIFF: a gray page yields a `Gray8` bitmap, an
+/// RGB or RGBA page an `Rgb8` bitmap with alpha dropped.
 ///
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on malformed/unsupported streams.
-pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     let mut dec = Decoder::new(std::io::Cursor::new(bytes))
         .map_err(|e| DecodeError::Codec(format!("tiff: {e}")))?;
     if dec.more_images() {
@@ -38,7 +40,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let img = dec
         .read_image()
         .map_err(|e| DecodeError::Codec(format!("tiff: {e}")))?;
-    let u8s: Vec<u8> = match img {
+    let mut u8s: Vec<u8> = match img {
         DecodingResult::U8(v) => v,
         // 16-bit → 8-bit: keep the high byte (the standard sample reduction).
         DecodingResult::U16(v) => v.iter().map(|&x| (x >> 8) as u8).collect(),
@@ -48,27 +50,15 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
             ));
         }
     };
-    let rgb = match color {
-        ColorType::RGB(_) => u8s,
+    match color {
+        ColorType::RGB(_) => rgb_from_tight(w, h, u8s),
         ColorType::RGBA(_) => {
-            let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3);
-            for px in u8s.as_chunks::<4>().0 {
-                out.extend_from_slice(&px[..3]);
-            }
-            out
+            drop_alpha_in_place(&mut u8s, 4);
+            rgb_from_tight(w, h, u8s)
         }
-        ColorType::Gray(_) => {
-            let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3);
-            for &g in &u8s {
-                out.extend_from_slice(&[g, g, g]);
-            }
-            out
-        }
-        other => {
-            return Err(DecodeError::Codec(format!(
-                "tiff: unsupported color type {other:?}"
-            )));
-        }
-    };
-    rgb_bitmap_from_tight(w, h, &rgb)
+        ColorType::Gray(_) => gray_from_tight(w, h, u8s),
+        other => Err(DecodeError::Codec(format!(
+            "tiff: unsupported color type {other:?}"
+        ))),
+    }
 }

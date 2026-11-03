@@ -369,26 +369,16 @@ fn render_one(
     page_num: u32,
     opts: &ComicOptions,
 ) -> Result<RenderedPage, ComicError> {
-    let decoded = decode::decode_image(raw).map_err(|e| ComicError::Decode {
+    let mut bmp = decode::decode_image(raw).map_err(|e| ComicError::Decode {
         entry: name.to_owned(),
         reason: e.to_string(),
     })?;
 
-    pdf_raster::validate_dimensions(decoded.width, decoded.height).map_err(|_| {
-        ComicError::TooLarge {
-            entry: name.to_owned(),
-            width: decoded.width,
-            height: decoded.height,
-        }
+    pdf_raster::validate_dimensions(bmp.width, bmp.height).map_err(|_| ComicError::TooLarge {
+        entry: name.to_owned(),
+        width: bmp.width,
+        height: bmp.height,
     })?;
-
-    // Rebuild a Gray8 bitmap so deskew + the shared constructor apply uniformly.
-    let mut bmp = raster::Bitmap::<color::Gray8>::new(decoded.width, decoded.height, 1, false);
-    let w = decoded.width as usize;
-    for y in 0..decoded.height {
-        let src = &decoded.gray[(y as usize * w)..((y as usize + 1) * w)];
-        bmp.row_bytes_mut(y)[..w].copy_from_slice(src);
-    }
 
     if opts.deskew {
         pdf_raster::deskew::apply(&mut bmp).map_err(|e| ComicError::Deskew(e.to_string()))?;

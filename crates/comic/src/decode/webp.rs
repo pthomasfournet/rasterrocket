@@ -1,16 +1,13 @@
 //! WebP decode for comic pages, via the pure-Rust `image-webp` crate.
 
-use color::Rgb8;
-use raster::Bitmap;
-
-use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
+use super::{CodecPixels, DecodeError, drop_alpha_in_place, guard_dimensions, rgb_from_tight};
 
 /// Decode WebP bytes (lossy or lossless) to an `Rgb8` bitmap, dropping alpha.
 ///
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on malformed/unsupported streams.
-pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))
         .map_err(|e| DecodeError::Codec(format!("webp: {e}")))?;
     let (w, h) = dec.dimensions();
@@ -27,14 +24,8 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let mut buf = vec![0u8; buf_len];
     dec.read_image(&mut buf)
         .map_err(|e| DecodeError::Codec(format!("webp: {e}")))?;
-    let rgb = if has_alpha {
-        let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3);
-        for px in buf.as_chunks::<4>().0 {
-            out.extend_from_slice(&px[..3]);
-        }
-        out
-    } else {
-        buf
-    };
-    rgb_bitmap_from_tight(w, h, &rgb)
+    if has_alpha {
+        drop_alpha_in_place(&mut buf, 4);
+    }
+    rgb_from_tight(w, h, buf)
 }

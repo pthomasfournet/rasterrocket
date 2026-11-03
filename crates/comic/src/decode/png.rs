@@ -1,17 +1,18 @@
 //! PNG decode for comic pages, via the `png` crate's reader.
 
-use color::Rgb8;
-use raster::Bitmap;
+use super::{
+    CodecPixels, DecodeError, drop_alpha_in_place, gray_from_tight, guard_dimensions,
+    rgb_from_tight,
+};
 
-use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
-
-/// Decode PNG bytes to an `Rgb8` bitmap, expanding palette/gray/16-bit and
-/// dropping alpha to opaque RGB.
+/// Decode PNG bytes, expanding palette and 16-bit samples and dropping alpha:
+/// gray and gray+alpha streams yield a `Gray8` bitmap, every other colour
+/// type an `Rgb8` bitmap.
 ///
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on any malformed-stream or unsupported-config error.
-pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     // `png` 0.18 requires `Read + Seek`; `&[u8]` is only `Read`, so wrap it.
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -33,35 +34,20 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| DecodeError::Codec(format!("png: {e}")))?;
-    let frame = &buf[..info.buffer_size()];
-    let rgb = match info.color_type {
-        png::ColorType::Rgb => frame.to_vec(),
-        png::ColorType::Rgba => drop_alpha(frame, 4),
-        png::ColorType::Grayscale => expand_gray(frame, 1),
-        png::ColorType::GrayscaleAlpha => expand_gray(frame, 2),
-        png::ColorType::Indexed => {
-            return Err(DecodeError::Codec(
-                "png: palette not expanded (unexpected with EXPAND)".to_owned(),
-            ));
+    buf.truncate(info.buffer_size());
+    match info.color_type {
+        png::ColorType::Rgb => rgb_from_tight(w, h, buf),
+        png::ColorType::Rgba => {
+            drop_alpha_in_place(&mut buf, 4);
+            rgb_from_tight(w, h, buf)
         }
-    };
-    rgb_bitmap_from_tight(w, h, &rgb)
-}
-
-/// Drop the trailing alpha byte from each `stride`-byte pixel, keeping 3 RGB.
-fn drop_alpha(src: &[u8], stride: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len() / stride * 3);
-    for px in src.chunks_exact(stride) {
-        out.extend_from_slice(&px[..3]);
+        png::ColorType::Grayscale => gray_from_tight(w, h, buf),
+        png::ColorType::GrayscaleAlpha => {
+            drop_alpha_in_place(&mut buf, 2);
+            gray_from_tight(w, h, buf)
+        }
+        png::ColorType::Indexed => Err(DecodeError::Codec(
+            "png: palette not expanded (unexpected with EXPAND)".to_owned(),
+        )),
     }
-    out
-}
-
-/// Expand a 1- or 2-channel gray(+alpha) buffer to RGB by replicating luma.
-fn expand_gray(src: &[u8], stride: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len() / stride * 3);
-    for px in src.chunks_exact(stride) {
-        out.extend_from_slice(&[px[0], px[0], px[0]]);
-    }
-    out
 }

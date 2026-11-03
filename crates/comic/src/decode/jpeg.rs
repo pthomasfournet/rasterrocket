@@ -5,14 +5,12 @@
 //! page needs only "JPEG bytes -> RGB", so this is a thin `zune-jpeg` wrapper —
 //! shared dependency, not shared logic.
 
-use color::Rgb8;
-use raster::Bitmap;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
-use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
+use super::{CodecPixels, DecodeError, guard_dimensions, rgb_from_tight};
 
 /// Decode baseline/progressive JPEG bytes to an `Rgb8` bitmap.
 ///
@@ -25,7 +23,7 @@ use super::{DecodeError, guard_dimensions, rgb_bitmap_from_tight};
 ///
 /// [`DecodeError::Codec`] if the stream is not decodable, reports zero dims,
 /// or declares dimensions beyond the rendered-page limits.
-pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     let side_cap = pdf_raster::MAX_PX_DIMENSION as usize;
     let opts = DecoderOptions::default()
         .jpeg_set_out_colorspace(ColorSpace::RGB)
@@ -45,5 +43,5 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
     let pixels = dec
         .decode()
         .map_err(|e| DecodeError::Codec(format!("jpeg: {e}")))?;
-    rgb_bitmap_from_tight(w, h, &pixels)
+    rgb_from_tight(w, h, pixels)
 }

@@ -11,17 +11,15 @@ mod png;
 mod tiff;
 mod webp;
 
-use color::Rgb8;
+use color::{Gray8, Pixel, Rgb8};
 use raster::Bitmap;
 
-/// A decoded page in OCR-ready grayscale, plus its pixel dimensions.
-pub(crate) struct DecodedImage {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// Tight `width*height` 8-bit grayscale buffer, top-to-bottom.
-    pub gray: Vec<u8>,
+/// A codec's output in the colour model the stream carries.
+enum CodecPixels {
+    /// Single-channel luma.
+    Gray(Bitmap<Gray8>),
+    /// Interleaved RGB.
+    Rgb(Bitmap<Rgb8>),
 }
 
 /// Recognised container formats.
@@ -77,24 +75,24 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-/// Decode arbitrary image bytes to grayscale, sniffing the format first.
+/// Decode arbitrary image bytes to a packed grayscale bitmap, sniffing the
+/// format first. Gray streams are returned as decoded; RGB streams are
+/// converted in their own allocation by [`pdf_raster::rgb_into_gray`].
 ///
 /// # Errors
 ///
 /// [`DecodeError::Unsupported`] if no codec matches the magic bytes;
 /// [`DecodeError::Codec`] if the matched codec rejects the stream.
-pub(crate) fn decode_image(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
-    let rgb = match sniff(bytes).ok_or(DecodeError::Unsupported)? {
+pub(crate) fn decode_image(bytes: &[u8]) -> Result<Bitmap<Gray8>, DecodeError> {
+    let pixels = match sniff(bytes).ok_or(DecodeError::Unsupported)? {
         ImageFormat::Jpeg => jpeg::decode(bytes)?,
         ImageFormat::Png => png::decode(bytes)?,
         ImageFormat::WebP => webp::decode(bytes)?,
         ImageFormat::Tiff => tiff::decode(bytes)?,
     };
-    let gray = pdf_raster::rgb_into_gray(rgb);
-    Ok(DecodedImage {
-        width: gray.width,
-        height: gray.height,
-        gray: gray.into_data(),
+    Ok(match pixels {
+        CodecPixels::Gray(gray) => gray,
+        CodecPixels::Rgb(rgb) => pdf_raster::rgb_into_gray(rgb),
     })
 }
 
@@ -110,24 +108,47 @@ fn guard_dimensions(codec: &str, w: u32, h: u32) -> Result<(), DecodeError> {
         .map_err(|_| DecodeError::Codec(format!("{codec}: image too large ({w}x{h})")))
 }
 
-/// Build an `Rgb8` bitmap from a tight interleaved RGB buffer. Shared by the
-/// per-codec wrappers so each only has to produce `(w, h, Vec<u8>)`.
-fn rgb_bitmap_from_tight(w: u32, h: u32, rgb: &[u8]) -> Result<Bitmap<Rgb8>, DecodeError> {
+/// Wrap a tight interleaved RGB buffer as an `Rgb8` bitmap without copying.
+fn rgb_from_tight(w: u32, h: u32, rgb: Vec<u8>) -> Result<CodecPixels, DecodeError> {
+    packed_from_tight(w, h, rgb).map(CodecPixels::Rgb)
+}
+
+/// Wrap a tight 8-bit luma buffer as a `Gray8` bitmap without copying.
+fn gray_from_tight(w: u32, h: u32, gray: Vec<u8>) -> Result<CodecPixels, DecodeError> {
+    packed_from_tight(w, h, gray).map(CodecPixels::Gray)
+}
+
+/// Take over a tight `w·h·P::BYTES` buffer as a packed bitmap, rejecting a
+/// buffer whose length disagrees with the dimensions.
+fn packed_from_tight<P: Pixel>(w: u32, h: u32, data: Vec<u8>) -> Result<Bitmap<P>, DecodeError> {
     let expected = (w as usize)
         .checked_mul(h as usize)
-        .and_then(|n| n.checked_mul(3));
-    if expected != Some(rgb.len()) {
+        .and_then(|n| n.checked_mul(P::BYTES));
+    if expected != Some(data.len()) {
         return Err(DecodeError::Codec(format!(
-            "pixel buffer {} bytes inconsistent with {w}x{h}x3",
-            rgb.len()
+            "pixel buffer {} bytes inconsistent with {w}x{h}x{}",
+            data.len(),
+            P::BYTES
         )));
     }
-    let mut bmp = Bitmap::<Rgb8>::new(w, h, 1, false);
-    for y in 0..h {
-        let src = &rgb[(y as usize * w as usize * 3)..((y as usize + 1) * w as usize * 3)];
-        bmp.row_bytes_mut(y)[..src.len()].copy_from_slice(src);
+    Ok(Bitmap::from_packed(w, h, data))
+}
+
+/// Drop the trailing alpha channel of every `channels`-byte pixel in place,
+/// keeping the first `channels - 1` bytes of each. Pixel `i` moves from
+/// `i·channels` to `i·(channels - 1)`, never past its source, so a forward
+/// pass reads each pixel before it is overwritten.
+fn drop_alpha_in_place(buf: &mut Vec<u8>, channels: usize) {
+    debug_assert!(
+        channels >= 2,
+        "an alpha channel needs at least two channels"
+    );
+    let keep = channels - 1;
+    let n = buf.len() / channels;
+    for i in 0..n {
+        buf.copy_within(i * channels..i * channels + keep, i * keep);
     }
-    Ok(bmp)
+    buf.truncate(n * keep);
 }
 
 #[cfg(test)]
@@ -193,12 +214,12 @@ mod tests {
         let png = solid_png(2, 2, [10, 200, 30]);
         let img = decode_image(&png).expect("png decodes");
         assert_eq!((img.width, img.height), (2, 2));
-        assert_eq!(img.gray.len(), 4);
+        assert_eq!(img.data().len(), 4);
         assert!(
-            img.gray.iter().all(|&p| p == img.gray[0]),
+            img.data().iter().all(|&p| p == img.data()[0]),
             "solid stays solid"
         );
-        assert!(img.gray[0] > 30 && img.gray[0] < 200);
+        assert!(img.data()[0] > 30 && img.data()[0] < 200);
     }
 
     #[test]
@@ -206,7 +227,7 @@ mod tests {
         let jpg = solid_jpeg_gray(4, 4, 137);
         let img = decode_image(&jpg).expect("jpeg decodes");
         assert_eq!((img.width, img.height), (4, 4));
-        assert!(img.gray.iter().all(|&p| (i16::from(p) - 137).abs() <= 4));
+        assert!(img.data().iter().all(|&p| (i16::from(p) - 137).abs() <= 4));
     }
 
     #[test]
@@ -216,12 +237,56 @@ mod tests {
         let tif = solid_tiff_gray(3, 2, 90);
         let img = decode_image(&tif).expect("tiff decodes");
         assert_eq!((img.width, img.height), (3, 2));
-        assert_eq!(img.gray.len(), 6);
+        assert_eq!(img.data().len(), 6);
         assert!(
-            img.gray.iter().all(|&p| p == 90),
+            img.data().iter().all(|&p| p == 90),
             "solid gray 90 must round-trip exactly (lossless), got {:?}",
-            img.gray
+            img.data()
         );
+    }
+
+    /// A PNG of colour type `color` over the raw interleaved `samples`.
+    fn raw_png(w: u32, h: u32, color: ::png::ColorType, samples: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = ::png::Encoder::new(&mut out, w, h);
+        enc.set_color(color);
+        enc.set_depth(::png::BitDepth::Eight);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(samples).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn png_gray_decodes_straight_to_gray() {
+        let luma = [0u8, 7, 128, 255, 33, 90];
+        let png = raw_png(3, 2, ::png::ColorType::Grayscale, &luma);
+        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png) else {
+            panic!("a grayscale PNG must decode to a Gray8 bitmap");
+        };
+        assert_eq!((bmp.width, bmp.height), (3, 2));
+        assert_eq!(bmp.data(), luma);
+        assert_eq!(decode_image(&png).unwrap().data(), luma);
+    }
+
+    #[test]
+    fn png_gray_alpha_keeps_luma_drops_alpha() {
+        let samples = [10u8, 255, 20, 0, 30, 128, 40, 1];
+        let png = raw_png(2, 2, ::png::ColorType::GrayscaleAlpha, &samples);
+        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png) else {
+            panic!("a gray+alpha PNG must decode to a Gray8 bitmap");
+        };
+        assert_eq!(bmp.data(), [10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn drop_alpha_in_place_compacts_pixels() {
+        let mut rgba = vec![1, 2, 3, 9, 4, 5, 6, 9, 7, 8, 9, 9];
+        drop_alpha_in_place(&mut rgba, 4);
+        assert_eq!(rgba, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut ga = vec![1, 9, 2, 9, 3, 9];
+        drop_alpha_in_place(&mut ga, 2);
+        assert_eq!(ga, [1, 2, 3]);
     }
 
     #[test]

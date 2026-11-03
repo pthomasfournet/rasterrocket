@@ -72,7 +72,7 @@ pub(crate) fn run(
     let mut failed = 0usize;
     for (page_num, result) in pages {
         match result {
-            Ok(page) => match write_page(args, spill, &page, total) {
+            Ok(page) => match write_page(args, spill, page, total) {
                 Ok(()) => written += 1,
                 Err(e) => {
                     eprintln!("rrocket: page {page_num}: {e}");
@@ -90,20 +90,14 @@ pub(crate) fn run(
 
 /// Write the luma [`RenderedPage`] `page` through the shared page writer
 /// ([`render::write_cleaned`]), which applies the camera stages, the tone
-/// operations and the output format exactly as the PDF path does.
+/// operations and the output format exactly as the PDF path does. The page's
+/// packed pixel buffer becomes the bitmap's buffer.
 fn write_page(
     args: &Args,
     spill: &crate::ram::SpillPolicy,
-    page: &RenderedPage,
+    page: RenderedPage,
     total_pages: i32,
 ) -> Result<(), RenderError> {
-    let mut luma = Bitmap::<Gray8>::new(page.width, page.height, 1, false);
-    let w = page.width as usize;
-    for y in 0..page.height {
-        let start = y as usize * w;
-        luma.row_bytes_mut(y)[..w].copy_from_slice(&page.pixels[start..start + w]);
-    }
-
     // `page.page_num` is selected from `build_page_list`'s output, which is
     // bounded by `total_pages` (≤ i32::MAX, checked in `run`), so the cast back
     // to i32 cannot overflow.
@@ -112,5 +106,6 @@ fn write_page(
         spill,
         format: args.output_format(),
     };
+    let luma = Bitmap::<Gray8>::from_packed(page.width, page.height, page.pixels);
     render::write_cleaned(Page::Gray(luma), args, sink, page_i32, total_pages)
 }
