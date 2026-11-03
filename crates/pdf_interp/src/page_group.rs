@@ -18,17 +18,14 @@
 //! The same walk finds the pages that set overprint, which are painted into
 //! a separable-ink buffer when overprint is simulated.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 use raster::types::BlendMode;
 
+use crate::renderer::page::MAX_FORM_DEPTH;
 use crate::resources::dict_ext::DictExt;
 use crate::resources::{TransparencyGroupParams, parse_blend_mode, resolve_array, resolve_dict};
-
-/// Resource dictionaries are followed through forms, patterns and fonts
-/// at most this deep.
-const MAX_SCAN_DEPTH: u32 = 8;
 
 /// The page group of `page_id` when the page is to be painted as a group.
 ///
@@ -40,35 +37,38 @@ const MAX_SCAN_DEPTH: u32 = 8;
 pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroupParams> {
     let page = doc.get_dictionary(page_id).ok()?;
     let group = crate::resources::read_transparency_group(doc, &page).unwrap_or_default();
-    let blends = group.knockout || page_reaches(doc, page_id, &page, &sets_blend_mode);
+    let blends = group.knockout || page_reaches(doc, page_id, &page, true, &sets_blend_mode);
     blends.then_some(TransparencyGroupParams {
         isolated: true,
         knockout: group.knockout,
     })
 }
 
-/// Whether some `ExtGState` reachable from the page's resources or
-/// annotations sets stroking or non-stroking overprint.
+/// Whether some `ExtGState` reachable from the page's resources, or from
+/// its annotations' appearance streams when `annotations` (the
+/// annotations are drawn), sets stroking or non-stroking overprint.
 #[must_use]
-pub fn page_uses_overprint(doc: &Document, page_id: ObjectId) -> bool {
+pub fn page_uses_overprint(doc: &Document, page_id: ObjectId, annotations: bool) -> bool {
     doc.get_dictionary(page_id)
-        .is_ok_and(|page| page_reaches(doc, page_id, &page, &sets_overprint))
+        .is_ok_and(|page| page_reaches(doc, page_id, &page, annotations, &sets_overprint))
 }
 
 /// Whether `pred` holds for an `ExtGState` dictionary reachable from the
-/// resources or the annotation appearance streams of `page`.
+/// resources of `page` or, when `annotations`, from the appearance
+/// streams of its annotations.
 fn page_reaches(
     doc: &Document,
     page_id: ObjectId,
     page: &Dictionary,
+    annotations: bool,
     pred: &dyn Fn(&Dictionary) -> bool,
 ) -> bool {
     let mut scan = Scan {
         doc,
-        visited: HashSet::new(),
+        visited: HashMap::new(),
     };
     inherited_resources(doc, page_id).is_some_and(|r| scan.resources_reach(&r, 0, pred))
-        || scan.annotations_reach(page, pred)
+        || (annotations && scan.annotations_reach(page, pred))
 }
 
 /// Whether an `ExtGState` names a blend mode other than `Normal`.
@@ -87,12 +87,19 @@ fn inherited_resources(doc: &Document, page_id: ObjectId) -> Option<Dictionary> 
     resolve_dict(doc, &doc.get_inherited_page_attr(page_id, b"Resources")?)
 }
 
-/// A walk over resource dictionaries that stops at the first `ExtGState` a predicate accepts.
+/// A walk over resource dictionaries that stops at the first `ExtGState` a
+/// predicate accepts.
+///
+/// The resources of the page are at depth 0, those of a form, pattern or
+/// Type 3 font named at depth `d` at depth `d + 1`; resources deeper than
+/// [`MAX_FORM_DEPTH`], which the renderer does not execute, are not read.
 struct Scan<'a> {
     doc: &'a Document,
-    /// Indirect objects already walked, so shared forms are read once and
-    /// a cycle ends.
-    visited: HashSet<ObjectId>,
+    /// The indirect objects already walked, each with the shallowest depth
+    /// of its resources so far.  An object is walked again only from a
+    /// shallower depth, where more of what it names lies within the bound,
+    /// so shared forms are read a bounded number of times and a cycle ends.
+    visited: HashMap<ObjectId, u32>,
 }
 
 impl Scan<'_> {
@@ -104,7 +111,7 @@ impl Scan<'_> {
         depth: u32,
         pred: &dyn Fn(&Dictionary) -> bool,
     ) -> bool {
-        if depth > MAX_SCAN_DEPTH {
+        if depth > MAX_FORM_DEPTH {
             return false;
         }
         let sub = |key: &[u8]| resources.get(key).and_then(|o| resolve_dict(self.doc, o));
@@ -131,7 +138,7 @@ impl Scan<'_> {
         }
         sub(b"Font").is_some_and(|fonts| {
             fonts.iter().any(|(_, o)| {
-                self.first_visit(o)
+                self.visit(o, depth + 1)
                     .and_then(|font| font.get(b"Resources").cloned())
                     .and_then(|r| resolve_dict(self.doc, &r))
                     .is_some_and(|r| self.resources_reach(&r, depth + 1, pred))
@@ -140,30 +147,31 @@ impl Scan<'_> {
     }
 
     /// Whether the resources of the form `XObject` or appearance stream
-    /// `obj` names reach an `ExtGState` accepted by `pred`.
+    /// `obj`, named by resources at `depth`, reach an `ExtGState` accepted
+    /// by `pred`.
     fn stream_resources_reach(
         &mut self,
         obj: &Object,
         depth: u32,
         pred: &dyn Fn(&Dictionary) -> bool,
     ) -> bool {
-        self.first_visit(obj)
+        self.visit(obj, depth + 1)
             .filter(|dict| dict.get_name(b"Subtype") != Some(b"Image"))
             .and_then(|dict| dict.get(b"Resources").cloned())
             .and_then(|r| resolve_dict(self.doc, &r))
             .is_some_and(|r| self.resources_reach(&r, depth + 1, pred))
     }
 
-    /// Whether the pattern `obj` names reaches an `ExtGState` accepted by
-    /// `pred`: a shading pattern through its `ExtGState`, a tiling pattern
-    /// through its resources.
+    /// Whether the pattern `obj`, named by resources at `depth`, reaches an
+    /// `ExtGState` accepted by `pred`: a shading pattern through its
+    /// `ExtGState`, a tiling pattern through its resources.
     fn pattern_reaches(
         &mut self,
         obj: &Object,
         depth: u32,
         pred: &dyn Fn(&Dictionary) -> bool,
     ) -> bool {
-        let Some(pattern) = self.first_visit(obj) else {
+        let Some(pattern) = self.visit(obj, depth + 1) else {
             return false;
         };
         if let Some(gs) = pattern
@@ -211,14 +219,17 @@ impl Scan<'_> {
             })
     }
 
-    /// The dictionary of `obj` — a stream's or a plain one — the first time
-    /// the indirect object is met; `None` on a repeat visit or when it is
-    /// not a dictionary.
-    fn first_visit(&mut self, obj: &Object) -> Option<Dictionary> {
-        if let Object::Reference(id) = obj
-            && !self.visited.insert(*id)
-        {
-            return None;
+    /// The dictionary of `obj` — a stream's or a plain one — whose
+    /// resources lie at `depth`, unless the indirect object was already met
+    /// with its resources at `depth` or shallower; `None` then, or when it
+    /// is not a dictionary.
+    fn visit(&mut self, obj: &Object, depth: u32) -> Option<Dictionary> {
+        if let Object::Reference(id) = obj {
+            let seen = self.visited.entry(*id).or_insert(u32::MAX);
+            if *seen <= depth {
+                return None;
+            }
+            *seen = depth;
         }
         crate::resources::resolve_stream_dict(self.doc, obj)
     }
@@ -251,11 +262,65 @@ mod tests {
                     .to_owned(),
             )],
         );
-        assert!(page_uses_overprint(&doc, (4, 0)));
+        assert!(page_uses_overprint(&doc, (4, 0), true));
         let doc = doc_with("/ExtGState << /O << /OP false /op false >> >>", "", &[]);
-        assert!(!page_uses_overprint(&doc, (4, 0)));
+        assert!(!page_uses_overprint(&doc, (4, 0), true));
         let doc = doc_with("/ExtGState << /O << /OP true >> >>", "", &[]);
-        assert!(page_uses_overprint(&doc, (4, 0)), "page resources");
+        assert!(page_uses_overprint(&doc, (4, 0), true), "page resources");
+    }
+
+    /// A form whose resources are `resources`, as an object body.
+    fn form(resources: &str) -> String {
+        format!(
+            "<< /Type /XObject /Subtype /Form /Resources << {resources} >> \
+             /Length 0 >>\nstream\n\nendstream"
+        )
+    }
+
+    /// Forms `first`, `first + 1`, … `first + n - 1`, each naming the next
+    /// as `/N`; the last names `last` instead.
+    fn form_chain(first: u32, n: u32, last: &str) -> Vec<(u32, String)> {
+        (first..first + n)
+            .map(|id| {
+                let next = if id + 1 == first + n {
+                    last.to_owned()
+                } else {
+                    format!("/XObject << /N {} 0 R >>", id + 1)
+                };
+                (id, form(&next))
+            })
+            .collect()
+    }
+
+    /// The scan follows forms as deep as the renderer executes them, and
+    /// no deeper.
+    #[test]
+    fn page_uses_overprint_follows_forms_to_the_render_depth() {
+        let op = "/ExtGState << /O << /OP true >> >>";
+        let doc = doc_with("/XObject << /F 5 0 R >>", "", &form_chain(5, 32, op));
+        assert!(page_uses_overprint(&doc, (4, 0), true), "32 deep");
+        let doc = doc_with("/XObject << /F 5 0 R >>", "", &form_chain(5, 33, op));
+        assert!(!page_uses_overprint(&doc, (4, 0), true), "33 deep");
+    }
+
+    /// A tiling pattern first met beyond the depth bound, through the
+    /// page's forms, is still walked when the page names it directly: the
+    /// page's patterns are scanned after its forms.
+    #[test]
+    fn a_pattern_met_too_deep_first_is_walked_from_a_shallower_path() {
+        let mut objects = form_chain(5, 32, "/Pattern << /P 37 0 R >>");
+        objects.push((
+            37,
+            "<< /PatternType 1 /Resources << /ExtGState << /O << /op true >> >> >> \
+             /Length 0 >>\nstream\n\nendstream"
+                .to_owned(),
+        ));
+        let doc = doc_with(
+            "/XObject << /A 5 0 R >> /Pattern << /P 37 0 R >>",
+            "",
+            &objects,
+        );
+        assert!(page_uses_overprint(&doc, (4, 0), true));
     }
 
     #[test]
@@ -265,7 +330,7 @@ mod tests {
             "",
             &[],
         );
-        assert!(page_uses_overprint(&doc, (4, 0)), "shading pattern");
+        assert!(page_uses_overprint(&doc, (4, 0), true), "shading pattern");
         let doc = doc_with(
             "",
             "/Annots [<< /Subtype /Square /AP << /N 5 0 R >> >>]",
@@ -276,7 +341,11 @@ mod tests {
                     .to_owned(),
             )],
         );
-        assert!(page_uses_overprint(&doc, (4, 0)), "appearance stream");
+        assert!(page_uses_overprint(&doc, (4, 0), true), "appearance stream");
+        assert!(
+            !page_uses_overprint(&doc, (4, 0), false),
+            "annotations not drawn"
+        );
         assert!(page_group(&doc, (4, 0)).is_none(), "not a blend");
     }
 

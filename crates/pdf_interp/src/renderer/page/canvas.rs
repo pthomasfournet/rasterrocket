@@ -390,7 +390,7 @@ impl PageRenderer<'_> {
     /// execute: the page canvas is replaced.
     pub fn set_overprint(&mut self, on: bool) {
         let page = self.resources.resource_context_id();
-        if on && crate::page_group::page_uses_overprint(self.resources.doc(), page) {
+        if on && crate::page_group::page_uses_overprint(self.resources.doc(), page, true) {
             self.use_ink_canvas();
         }
     }

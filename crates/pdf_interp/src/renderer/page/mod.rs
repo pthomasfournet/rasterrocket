@@ -123,8 +123,9 @@ const DEVICE_MATRIX: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// Maximum nesting depth for Form `XObjects`.
 ///
 /// A form never re-enters itself (see `PageRenderer::active_forms`), so this
-/// bounds the nesting of distinct forms.
-const MAX_FORM_DEPTH: u32 = 32;
+/// bounds the nesting of distinct forms.  The page-group and overprint
+/// scans follow resources to the same depth.
+pub(crate) const MAX_FORM_DEPTH: u32 = 32;
 
 /// Maximum side, in device pixels, of the bitmap on which a sub-pixel
 /// pattern cell is sampled for its mean.
