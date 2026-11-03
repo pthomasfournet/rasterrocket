@@ -122,11 +122,21 @@ was examined.
   before indexing the kerning array. Not reached by this fork's users
   (glyph positions come from the PDF); brought over to keep the AAT
   reader correct.
+- `fd5d51999` (#2398) CFF custom encoding: a code whose format 0 or 1
+  glyph lies past the font's glyph count maps to nothing, as in FreeType,
+  instead of to a glyph index the font does not have. The PDF simple-font
+  resolver then falls through to the code's glyph name.
 
-## Upstream review (2026-10-30)
+## Upstream review (2026-10-30, extended 2026-11-03)
 
 Upstream history through `42e0f877d` (2026-10-27, crates.io 0.46.0) was
-reviewed by commit, and through `7bdbbde1d` (2026-10-30) on that date. Besides the fixes above, nothing is brought over:
+reviewed by commit, and through `7bdbbde1d` (2026-10-30) on that date.
+On 2026-11-03 it was reviewed through `1d1672367` (2026-11-02): of the
+commits after `7bdbbde1d`, #2398 and #2433 touch `read-fonts`. #2433
+bounds a scan over every VARC axis-index list when the outlines are set
+up; that scan arrived with the 0.46 `model` restructure, and this fork
+reads one list per component at draw time, already returning its error.
+Besides the fixes above, nothing is brought over:
 
 - The rebase onto 0.46 is deferred to the next font work. Upstream has
   restructured the crate since the base (`model` / `OutlineGlyphs`, the
