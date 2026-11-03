@@ -2,19 +2,20 @@
 //!
 //! [`rgb_to_ink`] inverts the quadrilinear model of [`CORNERS`](super::CORNERS)
 //! with grey-component replacement: of the inks printing a colour it
-//! chooses ones with the most black.  The black axis of the model is
-//! neutral and affine — black alone prints the grey `255 − (255 − F)·k`,
-//! `F` the solid-black corner — and C, M and Y only darken, so a colour
-//! whose lightest channel is `L` admits at most the black `k_L` printing
-//! the grey `L`.  The blacks reproducing a colour form bands within
-//! `[0, k_L]`, not always reaching 0: in the dark slices adding cyan
-//! lightens blue, so a dark colour may print only within a narrow band.
-//! A node's black is found by sampling a ladder of slices down from `k_L`
-//! and bisecting the upper edge of the band around the highest reproducing
-//! sample, then stepping [`MARGIN`] inside the band where the band allows,
-//! since at the edge the CMY sit on a bound of the slice; the colour's
-//! CMY is the preimage on that slice.  A colour nothing prints takes the
-//! ladder sample whose least-squares CMY comes closest.
+//! chooses ones with the most black.  A slice of the model at black `k` is
+//! a convex combination of its eight corners, so a colour it prints has
+//! no channel above that channel's largest corner value; the largest `k`
+//! meeting this bound on every channel ([`black_bound`]) caps the black.
+//! The bound is not the grey of the lightest channel: the M + K and
+//! M + Y + K corners are redder than K alone.  The blacks reproducing a
+//! colour form bands below the bound, not always reaching 0: in the dark
+//! slices adding cyan lightens blue, so a dark colour may print only
+//! within a narrow band.  A node's black is found by sampling a ladder of
+//! slices down from the bound and bisecting the upper edge of the band
+//! around the highest reproducing sample, then stepping [`MARGIN`] inside
+//! the band where the band allows, since at the edge the CMY sit on a
+//! bound of the slice; the colour's CMY is the preimage on that slice.  A colour nothing
+//! prints takes the ladder sample whose least-squares CMY comes closest.
 //!
 //! Each slice is the trilinear interpolation of the eight corners at that
 //! black, inverted by projected Gauss-Newton in `f64` (channels at a bound
@@ -72,15 +73,26 @@ fn slice_corners(k: f64) -> [[f64; 3]; 8] {
     })
 }
 
+/// The offsets `[c, m, y]` (each 0 or 1) of trilinear corner `corner`,
+/// indexed `c·4 + m·2 + y`.
+const fn corner_bits(corner: usize) -> [usize; 3] {
+    [(corner >> 2) & 1, (corner >> 1) & 1, corner & 1]
+}
+
+/// The trilinear weight of corner `corner` at fractional position `t`.
+fn corner_weight(corner: usize, t: [f64; 3]) -> f64 {
+    corner_bits(corner)
+        .iter()
+        .zip(t)
+        .map(|(&bit, t)| if bit == 1 { t } else { 1.0 - t })
+        .product()
+}
+
 /// Forward model on a black slice, unrounded: trilinear over `corners`.
 fn forward(corners: &[[f64; 3]; 8], cmy: [f64; 3]) -> [f64; 3] {
     let mut out = [0.0; 3];
     for (i, corner) in corners.iter().enumerate() {
-        let w: f64 = [(i >> 2) & 1, (i >> 1) & 1, i & 1]
-            .iter()
-            .zip(cmy)
-            .map(|(&bit, t)| if bit == 1 { t } else { 1.0 - t })
-            .product();
+        let w = corner_weight(i, cmy);
         for (o, &v) in out.iter_mut().zip(corner) {
             *o = w.mul_add(v, *o);
         }
@@ -202,12 +214,43 @@ fn solve_at(target: [f64; 3], k: f64, start: [f64; 3]) -> ([f64; 3], f64, f64) {
     (cmy, k, err)
 }
 
-/// The black alone printing the grey `lightest`: black prints the grey
-/// `paper − (paper − floor)·k`, so no colour whose lightest channel is
-/// `lightest` takes more black than this.
-fn black_for(lightest: f64) -> f64 {
-    let paper = f64::from(CORNERS[0][0]);
-    ((paper - lightest) / (paper - f64::from(BLACK_FLOOR))).clamp(0.0, 1.0)
+/// Whether every channel of `target` lies within the corner hull of the
+/// slice at black `k`, up to the reproduction tolerance.
+fn within_hull(target: [f64; 3], k: f64) -> bool {
+    let corners = slice_corners(k);
+    (0..3).all(|ch| {
+        let top = corners.iter().map(|c| c[ch]).fold(f64::MIN, f64::max);
+        target[ch] <= top + EXACT.sqrt()
+    })
+}
+
+/// The largest black whose slice can print `target`: the largest
+/// `k ∈ [0, 1]` with `target` inside the slice's corner hull on every
+/// channel (see the module documentation).
+///
+/// Each channel's hull top is a maximum of affine functions of `k`, so
+/// convex; the black-alone corner reaches 255 at `k = 0`, so `k = 0`
+/// always qualifies.  The bound is found on a ladder of `HULL_STEPS`
+/// blacks down from 1 and refined by bisection.
+fn black_bound(target: [f64; 3]) -> f64 {
+    const HULL_STEPS: u8 = 32;
+    let at = |step: u8| f64::from(step) / f64::from(HULL_STEPS);
+    let Some(top) = (0..=HULL_STEPS).rev().find(|&s| within_hull(target, at(s))) else {
+        return 0.0;
+    };
+    if top == HULL_STEPS {
+        return 1.0;
+    }
+    let (mut lo, mut hi) = (at(top), at(top + 1));
+    for _ in 0..BISECTIONS {
+        let mid = f64::midpoint(lo, hi);
+        if within_hull(target, mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// The inks `[c, m, y, k]` in `[0, 1]⁴` of `target` (RGB bytes as `f64`)
@@ -217,20 +260,23 @@ fn black_for(lightest: f64) -> f64 {
 /// The blacks reproducing a colour need not reach down to 0 (in the dark
 /// slices adding cyan lightens blue, so a dark colour may be printable
 /// only within a band of blacks), so the slice solve is sampled on a
-/// ladder of `LADDER` steps from the black bound down to 0, each solve
+/// ladder of `LADDER` steps from [`black_bound`] down to 0, each solve
 /// warm-started from the one above, and the upper edge of the band around
 /// the highest reproducing sample is bisected.  With no reproducing sample
 /// the sample of least residual is the answer.
 fn invert_node(target: [f64; 3]) -> [f64; 4] {
-    const LADDER: usize = 8;
-    let k_max = black_for(target.iter().copied().fold(0.0, f64::max));
+    const LADDER: u8 = 12;
+    let k_max = black_bound(target);
     let mut start = target.map(|v| 1.0 - v / f64::from(CORNERS[0][0]));
-    let mut nearest: Option<([f64; 3], f64, f64)> = None;
+    let mut nearest = solve_at(target, k_max, start);
     let mut above = k_max;
     for step in 0..=LADDER {
-        #[expect(clippy::cast_precision_loss, reason = "step ≤ 8")]
-        let k = k_max * (LADDER - step) as f64 / LADDER as f64;
-        let at = solve_at(target, k, start);
+        let k = k_max * f64::from(LADDER - step) / f64::from(LADDER);
+        let at = if step == 0 {
+            nearest
+        } else {
+            solve_at(target, k, start)
+        };
         start = at.0;
         if at.2 <= EXACT {
             // The band's upper edge lies in `[k, above]`; at the top of
@@ -261,12 +307,12 @@ fn invert_node(target: [f64; 3]) -> [f64; 4] {
             }
             return inks(lo);
         }
-        if nearest.is_none_or(|best| at.2 < best.2) {
-            nearest = Some(at);
+        if at.2 < nearest.2 {
+            nearest = at;
         }
         above = k;
     }
-    inks(nearest.unwrap_or(([0.0; 3], 0.0, 0.0)))
+    inks(nearest)
 }
 
 /// `[c, m, y, k]` of a slice solve.
@@ -366,8 +412,7 @@ static INVERSE: LazyLock<Inverse> = LazyLock::new(|| {
     let nodes: Vec<[f32; 4]> = raw.iter().map(|inks| inks.map(|v| v as f32)).collect();
     let solid = slice_corners(1.0);
     let mut neutral = [[0u8; 4]; 256];
-    for (g, inks) in neutral.iter_mut().enumerate() {
-        let grey = u8::try_from(g).unwrap_or(u8::MAX);
+    for (grey, inks) in (0..=u8::MAX).zip(neutral.iter_mut()) {
         *inks = if grey >= BLACK_FLOOR {
             // Black alone prints a grey that falls with k.
             let k = (0..=u8::MAX)
@@ -390,10 +435,12 @@ static INVERSE: LazyLock<Inverse> = LazyLock::new(|| {
 /// (grey-component replacement), except where relaxation kept a node on
 /// the band of its neighbours: a neutral at or above [`BLACK_FLOOR`] is
 /// black ink alone; a darker neutral is solid black with C, M and Y on
-/// top; a solid process colour has no black.  The result maps back
-/// through [`cmyk_to_rgb`] to within two counts per channel for every
-/// colour the four-ink model prints, and to the nearest printable colour
-/// otherwise, up to table interpolation.
+/// top; a solid process colour has at most a trace of black (two counts),
+/// from table interpolation.  The result maps back through
+/// [`cmyk_to_rgb`] to within two counts per channel for every colour the
+/// four-ink model prints, except for about one in two thousand dark
+/// colours (channel mean below 64), within four; and to the nearest
+/// printable colour otherwise, up to table interpolation.
 #[must_use]
 pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
     let table = &*INVERSE;
@@ -405,22 +452,19 @@ pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
     // index and fraction numerator over 255.
     let scaled = rgb.map(|v| u16::from(v) * span);
     let cell = scaled.map(|s| (s / 255).min(span - 1));
-    let frac = [0, 1, 2].map(|i| f32::from(scaled[i] - cell[i] * 255) / 255.0);
+    let frac = [0, 1, 2].map(|i| f64::from(scaled[i] - cell[i] * 255) / 255.0);
     let lo = cell.map(usize::from);
-    let mut inks = [0.0f32; 4];
-    for corner in 0..8usize {
-        let bits = [(corner >> 2) & 1, (corner >> 1) & 1, corner & 1];
-        let mut w = 1.0f32;
-        for i in 0..3 {
-            w *= if bits[i] == 1 { frac[i] } else { 1.0 - frac[i] };
-        }
-        let n = usize::from(GRID);
+    let n = usize::from(GRID);
+    let mut inks = [0.0f64; 4];
+    for corner in 0..8 {
+        let w = corner_weight(corner, frac);
+        let bits = corner_bits(corner);
         let node = table.nodes[((lo[0] + bits[0]) * n + lo[1] + bits[1]) * n + lo[2] + bits[2]];
         for (o, v) in inks.iter_mut().zip(node) {
-            *o = w.mul_add(v, *o);
+            *o = w.mul_add(f64::from(v), *o);
         }
     }
-    ink_bytes(inks.map(f64::from))
+    ink_bytes(inks)
 }
 
 /// Convert an ink canvas row to sRGB.
@@ -428,7 +472,7 @@ pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
 /// `ink` holds 8 bytes per pixel `[C, M, Y, K, S0, S1, S2, S3]` (0 = no
 /// ink).  Each spot with a [`SpotLut`] contributes its process equivalent at
 /// the pixel's tint, combined with the running process value as a
-/// probabilistic union `c' = c + q − (c·q + 127) / 255` per channel; spots
+/// probabilistic union ([`ink_union`]) per channel; spots
 /// without a table are ignored.  The combined CMYK row is converted by
 /// [`cmyk_to_rgb_row`] in stack-buffered chunks.
 ///
@@ -445,7 +489,8 @@ pub fn ink_to_rgb_row(ink: &[u8], spots: &[Option<&SpotLut>; 4], out: &mut [u8])
     assert_eq!(
         out.len(),
         ink.len() / 8 * 3,
-        "ink_to_rgb_row: output length must be 3 bytes per ink pixel"
+        "ink_to_rgb_row: output length must be 3 bytes per ink pixel ({} ink bytes)",
+        ink.len()
     );
     let mut cmyk = [0u8; CHUNK * 4];
     for (src, dst) in ink.chunks(CHUNK * 8).zip(out.chunks_mut(CHUNK * 3)) {
@@ -460,13 +505,28 @@ pub fn ink_to_rgb_row(ink: &[u8], spots: &[Option<&SpotLut>; 4], out: &mut [u8])
             for (lut, &tint) in spots.iter().zip(&px[4..]) {
                 if let Some(lut) = lut {
                     for (c, &q) in quad.iter_mut().zip(&lut[usize::from(tint)]) {
-                        let (c0, q) = (u16::from(*c), u16::from(q));
-                        // c + q − c·q/255 ≤ 255 for c, q ≤ 255, so the sum fits a byte.
-                        *c = u8::try_from(c0 + q - (c0 * q + 127) / 255).unwrap_or(u8::MAX);
+                        *c = ink_union(*c, q);
                     }
                 }
             }
         }
         cmyk_to_rgb_row(&cmyk[..n * 4], dst);
     }
+}
+
+/// The probabilistic union of two ink coverages `a` and `b` (0 = no ink):
+/// `a + b − a·b/255`, rounded to nearest, computed as the complement of
+/// the product of the uncovered fractions.
+///
+/// `a·b/255` never has a fractional part of exactly one half (255 is odd),
+/// so the rounding is unambiguous.
+#[must_use]
+pub(crate) fn ink_union(a: u8, b: u8) -> u8 {
+    let uncovered = u32::from(255 - a) * u32::from(255 - b);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "uncovered ≤ 255², so (uncovered + 127) / 255 ≤ 255"
+    )]
+    let paper = ((uncovered + 127) / 255) as u8;
+    255 - paper
 }

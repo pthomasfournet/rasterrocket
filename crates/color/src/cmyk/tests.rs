@@ -392,8 +392,8 @@ fn ink_to_rgb_row_spans_multiple_chunks() {
         let mut q = [px[0], px[1], px[2], px[3]];
         for s in [4, 6] {
             for (c, &l) in q.iter_mut().zip(&lut[usize::from(px[s])]) {
-                let (a, b) = (u16::from(*c), u16::from(l));
-                *c = u8::try_from(a + b - (a * b + 127) / 255).unwrap();
+                let (a, b) = (u32::from(*c), u32::from(l));
+                *c = u8::try_from((255 * (a + b) - a * b + 127) / 255).unwrap();
             }
         }
         assert_eq!(*got, cmyk_to_rgb(q[0], q[1], q[2], q[3]));
@@ -579,6 +579,20 @@ fn rgb_to_ink_replaces_the_grey_component_with_black() {
         assert!(ink[3] <= 2, "{rgb:?}: {ink:?}");
         assert!(round_trip_error(rgb) <= 2, "{rgb:?}: {ink:?}");
     }
+}
+
+/// A colour printed only with solid black takes solid black: the M + Y + K
+/// corner is redder than black alone, so the bound on black is the slice's
+/// corner hull, not the grey of the lightest channel.
+#[test]
+fn rgb_to_ink_reaches_solid_black_above_the_grey_bound() {
+    let rgb = CORNERS[11];
+    assert_eq!(rgb, [30, 0, 0]);
+    let ink = rgb_to_ink(rgb);
+    // Table interpolation may stop short of the solid by a few counts; the
+    // grey of the lightest channel would cap black at 247.
+    assert!(ink[3] >= 250, "{rgb:?}: {ink:?}");
+    assert!(round_trip_error(rgb) <= 2, "{rgb:?}: {ink:?}");
 }
 
 /// Table build and per-call cost; run with `--release -- --ignored --nocapture`.
