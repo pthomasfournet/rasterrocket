@@ -55,7 +55,7 @@ pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
 
 /// A shading's `Background` `bg` as painted on a canvas of `kind`: on an
 /// ink canvas mapped through `transfer`, which the pipe applies on an RGB
-/// canvas (see `PageRenderer::shading_pipe`).
+/// canvas (see `ShadingPaint::pipe`).
 fn background(kind: CanvasKind, bg: [u8; 3], transfer: Option<&Transfer>) -> RasterColor {
     let bg = RasterColor::from_bytes(bg);
     match kind {
@@ -185,8 +185,7 @@ impl PageRenderer<'_> {
         // The shading is one object under the soft mask in effect; it can
         // paint the whole clip.
         let region = PixelRect::of_clip(&clip, self.width, self.height);
-        let alpha = self.gstate.current().fill_alpha;
-        self.paint_object(region, alpha, |r| match &shading.result {
+        self.paint_object(region, state.alpha, |r| match &shading.result {
             ShadingResult::Pattern(pattern) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),

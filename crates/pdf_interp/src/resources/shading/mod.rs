@@ -47,7 +47,7 @@ mod triangles;
 use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object, Stream};
-use raster::pipe::Pattern;
+use raster::pipe::{ChannelMask, Pattern};
 use raster::shading::ColorRamp;
 use raster::shading::axial::AxialPattern;
 use raster::shading::function::FunctionPattern;
@@ -62,7 +62,6 @@ use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, ParamColors, TriangleSink};
 use patch::PatchKind;
-use raster::pipe::ChannelMask;
 use stream::{VertexFormat, read_decode_array};
 pub(crate) use triangles::Mesh;
 

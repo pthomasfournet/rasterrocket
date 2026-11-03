@@ -61,6 +61,7 @@ mod diagnostics;
 mod fill_stroke;
 mod gpu_ops;
 mod image_blit;
+mod image_compositor;
 mod image_memo;
 mod image_reduce;
 mod image_sampler;

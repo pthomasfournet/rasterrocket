@@ -124,7 +124,7 @@ impl RasterColor {
         let zero_components = cmyk
             .iter()
             .enumerate()
-            .filter(|&(_, &v)| v == 0.0)
+            .filter(|&(_, &v)| v.is_nan() || v <= 0.0)
             .fold(0u8, |bits, (i, _)| bits | 1 << i);
         Self {
             opm_eligible: true,
@@ -313,6 +313,11 @@ mod tests {
         assert_eq!(faint.ink()[0], 0);
         assert_eq!(faint.paints_with_opm(1), ChannelMask::new(0b0101));
         assert_ne!(faint, RasterColor::cmyk(0.0, 0.0, 0.5, 0.0));
+        // A component that clamps to no ink counts as zero.
+        let clamped = RasterColor::cmyk(-0.25, f64::NAN, 0.5, 0.0);
+        assert_eq!(clamped.ink()[..2], [0, 0]);
+        assert_eq!(clamped.paints_with_opm(1), ChannelMask::new(0b0100));
+        assert_eq!(clamped, RasterColor::cmyk(0.0, 0.0, 0.5, 0.0));
         // Only a process colour is eligible.
         let spot = RasterColor::with_ink([200, 30, 60], [0; 8], ChannelMask::new(0b1_0000));
         assert_eq!(spot.paints_with_opm(1), ChannelMask::new(0b1_0000));
