@@ -64,8 +64,10 @@ impl PageRenderer<'_> {
 
         // The mask group is painted with the graphics state in effect at
         // `gs`, except that the soft mask is `None`, the alpha constants are
-        // 1 and the blend mode is `Normal`.  The canvas is a group of its
-        // own, not the knockout group that may be in effect.
+        // 1 and the blend mode is `Normal`.  It is composited against an
+        // opaque backdrop of `BC` (PDF §11.6.5.2), so it sees nothing of the
+        // enclosing group: neither its backdrop, whose pixels are of the
+        // page canvas's kind, nor its knockout.
         self.gstate.save();
         {
             let gs = self.gstate.current_mut();
@@ -74,7 +76,7 @@ impl PageRenderer<'_> {
             gs.stroke_alpha = 255;
             gs.blend_mode = BlendMode::Normal;
         }
-        let knockout = std::mem::replace(&mut self.group.knockout, false);
+        let enclosing = std::mem::take(&mut self.group);
         // A mask group yields mask values, not printed colorants, so it is
         // painted in sRGB whatever the page's canvas: its luminosity is
         // that of its colours (PDF §11.6.5.2), not of the inks that print
@@ -83,7 +85,7 @@ impl PageRenderer<'_> {
         let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);
         let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
-        self.group.knockout = knockout;
+        self.group = enclosing;
         self.gstate.restore();
 
         let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));

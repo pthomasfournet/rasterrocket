@@ -405,12 +405,13 @@ fn restore_unpainted<P: Pixel>(
 /// composites over the backdrop (`c_bd`, `a_bd`) to the colour `u` that the
 /// pixel's old own colour and alpha composited to.
 ///
-/// [`general::union_colour`] defines `u` and satisfies
+/// [`general::union_colour`] defines `u` and satisfies, up to rounding,
 /// `u·255·a_union = a'·c'·255 + (255 − a')·a_bd·c_bd`, with `a_union` the
 /// union alpha, so `c' = (255·a_union'·u − (255 − a')·a_bd·c_bd) / (255·a')`,
-/// rounded to nearest and clamped to `0..=255`.  `None` where the new alpha
-/// is zero or nothing was visible before (`a_union = 0`): the old bytes
-/// stand.
+/// rounded to nearest and clamped to `0..=255`; `c'` composited back over
+/// the backdrop reproduces `u` within one count per channel.  `None` where
+/// the new alpha is zero or nothing was visible before (`a_union = 0`): the
+/// old bytes stand.
 fn solve_own_colour(
     old: &[u8],
     (a_old, a_new): (u8, u8),

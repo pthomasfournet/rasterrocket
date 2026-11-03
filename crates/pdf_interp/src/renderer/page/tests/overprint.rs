@@ -328,3 +328,65 @@ fn all_zero_cmyk_under_opm1_paints_nothing() {
     assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0]);
 }
+
+/// Page `(4, 0)` of a solid cyan fill followed by the form `/F`, a
+/// non-isolated group whose content paints black under overprint through
+/// the luminosity mask `/M`; the mask group's content is 50 % grey painted
+/// under the blend mode `blend`.
+fn masked_group_doc(blend: &str) -> Document {
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /XObject << /F 5 0 R >> >> >>".to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency /I false >> \
+                 /Resources << /ExtGState << /GS_op << /OP true /OPM 1 >> \
+                 /M << /SMask << /S /Luminosity /G 6 0 R /BC [0] >> >> >> >>",
+                "/GS_op gs /M gs 0 0 0 1 k 0 0 10 10 re f",
+            ),
+        ),
+        (
+            6,
+            stream_object(
+                &format!(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                     /Group << /S /Transparency /CS /DeviceGray >> \
+                     /Resources << /ExtGState << /B << /BM /{blend} >> >> >>"
+                ),
+                "/B gs 0.5 g 0 0 10 10 re f",
+            ),
+        ),
+    ])
+}
+
+/// A soft mask set inside a non-isolated group is rendered against its own
+/// backdrop `BC`, not the group's: a blend mode in the mask content has
+/// nothing to blend with, so the mask is the 50 % grey it paints and the
+/// masked black prints at half strength over the cyan it overprints.
+#[test]
+fn soft_mask_in_a_group_ignores_the_group_backdrop() {
+    let render = |blend: &str| {
+        let doc = masked_group_doc(blend);
+        let mut renderer = PageRenderer::new(10, 10, &doc, (4, 0));
+        renderer.set_overprint(true);
+        assert!(matches!(renderer.canvas, PageCanvas::Ink(_)));
+        renderer.execute(&crate::content::parse(
+            format!("{CYAN_PAGE} /F Do").as_bytes(),
+        ));
+        let PageCanvas::Ink(ink) = &renderer.canvas else {
+            panic!("an ink canvas");
+        };
+        ink.data().to_vec()
+    };
+    let (multiply, normal) = (render("Multiply"), render("Normal"));
+    for (x, y) in [(0, 0), (1, 0), (2, 0), (5, 5), (9, 9)] {
+        let [c, m, yl, k, s @ ..] = ink_at(&multiply, x, y);
+        assert_eq!((c, m, yl, s), (255, 0, 0, [0; 4]), "({x}, {y}): {k}");
+        assert!((126..=129).contains(&k), "({x}, {y}): black at {k}");
+    }
+    assert_eq!(multiply, normal);
+}
