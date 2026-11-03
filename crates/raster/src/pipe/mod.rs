@@ -18,6 +18,7 @@ pub(crate) mod simple;
 pub(crate) mod transfer;
 
 use std::cell::RefCell;
+use std::ops::RangeInclusive;
 
 use crate::bitmap::Bitmap;
 use crate::types::BlendMode;
@@ -158,17 +159,19 @@ pub struct PipeState<'bmp> {
     ///
     /// Inside a non-isolated group the group bitmap holds only the group's own
     /// colour, so the caller must also set [`backdrop`](Self::backdrop); the
-    /// unpainted channels then keep the colour the group composites to over
-    /// that backdrop.
+    /// unpainted channels then keep the premultiplied colour the group
+    /// composites to over that backdrop.
     pub overprint: Option<ChannelMask>,
 }
 
 /// The set of colour channels a paint operation writes.
 ///
 /// Bit `i` is set when channel `i` (the `i`-th byte of a pixel) is painted.
-/// Channels outside the mask keep their destination value exactly; the
-/// destination alpha is composited regardless, since the object's shape is
-/// painted.
+/// The destination alpha is composited regardless, since the object's shape
+/// is painted.  A channel outside the mask receives no ink from the source
+/// and keeps its premultiplied value: over an opaque destination it keeps
+/// its value exactly, and over a translucent one its value scales by the
+/// ratio of the old alpha to the new (see `restore_unpainted`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ChannelMask(u8);
 
@@ -268,7 +271,8 @@ impl PipeState<'_> {
 /// - `y`: device row, at which a pattern source is evaluated.
 ///
 /// When `pipe.overprint` masks out channels, those channels of every pixel
-/// keep their destination value and the others are composited as usual.
+/// keep their premultiplied destination value (their value exactly where
+/// the destination is opaque) and the others are composited as usual.
 ///
 /// A pattern source that [may leave pixels unpainted](Pattern::may_leave_unpainted)
 /// is composited over its painted pixels only.
@@ -343,7 +347,7 @@ pub fn render_span<P: Pixel>(
                     alpha: dst_alpha.as_deref().map(|new| (old_alpha, new)),
                 },
                 dst_pixels,
-                (x0, y),
+                (x0..=x1, y),
             );
         }),
         _ => render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y),
@@ -358,41 +362,45 @@ struct SpanBefore<'a> {
     alpha: Option<(&'a [u8], &'a [u8])>,
 }
 
-/// Give the channels `mask` does not paint the value they had before the
-/// paint.
+/// Write the channels `mask` does not paint as the `CompatibleOverprint`
+/// blend function composites them (ISO 32000-1 §11.7.4.3).
 ///
-/// `old` is the span's state before the paint.  Outside a non-isolated group (`pipe.backdrop`
-/// is `None`) or without an alpha plane the stored bytes are restored
-/// directly.  Inside one the stored colour is the group's own, and an
-/// unpainted channel must keep the colour the group yields over its backdrop:
-/// with `u` the union colour of the group and backdrop before the paint,
-/// `c_bd` the backdrop and `a'` the new group alpha, the stored value becomes
-/// `(u − (1 − a')·c_bd) / a'` clamped to `0..=255`, which composites over
-/// `c_bd` back to `u`.  Where the new alpha is zero, or the backdrop is
-/// transparent, the old bytes are restored.
+/// For an unpainted channel the blend function is `B(c_b, c_s) = c_b`, and
+/// the source carries no ink in it (`c_s = 0`): the channel is either a
+/// process component that nonzero overprint mode leaves unpainted because
+/// it is zero (§8.6.7), or a colorant absent from the source colour space
+/// (§11.7.4).  The general compositing formula (§11.3.6),
+/// `c_r = (1 − α_s/α_r)·c_b + (α_s/α_r)·((1 − α_b)·c_s + α_b·B(c_b, c_s))`
+/// with `α_r = α_s + α_b − α_s·α_b`, then reduces to `α_r·c_r = α_b·c_b`:
+/// the paint leaves the channel's premultiplied value unchanged, whatever
+/// the source alpha.  The stored value is [`solve_own_colour`]'s `c'`, with
+/// the backdrop of `pipe.backdrop` at the pixel, or a transparent one
+/// outside a non-isolated group and outside the backdrop's rectangle.
+///
+/// `old` is the span's state before the paint and `xs` its device columns.
+/// The old bytes stand where the paint leaves the alpha unchanged, which
+/// includes every pixel of a bitmap without an alpha plane (opaque before
+/// and after).
 fn restore_unpainted<P: Pixel>(
     pipe: &PipeState<'_>,
     mask: ChannelMask,
     old: &SpanBefore<'_>,
     dst_pixels: &mut [u8],
-    (x0, y): (i32, i32),
+    (xs, y): (RangeInclusive<i32>, i32),
 ) {
-    let (old_colour, alpha) = (old.colour, old.alpha);
     let ncomps = P::BYTES;
-    for (i, (px, old_px)) in dst_pixels
-        .chunks_exact_mut(ncomps)
-        .zip(old_colour.chunks_exact(ncomps))
+    for (i, (x, (px, old_px))) in xs
+        .zip(
+            dst_pixels
+                .chunks_exact_mut(ncomps)
+                .zip(old.colour.chunks_exact(ncomps)),
+        )
         .enumerate()
     {
-        let x = x0.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
-        let solved = pipe
-            .backdrop
-            .as_ref()
-            .zip(alpha)
-            .and_then(|(bd, (a_old, a_new))| {
-                let (c_bd, a_bd) = bd.pixel(x, y, ncomps)?;
-                solve_own_colour(old_px, (a_old[i], a_new[i]), (c_bd, a_bd))
-            });
+        let solved = old.alpha.and_then(|(a_old, a_new)| {
+            let backdrop = pipe.backdrop.as_ref().and_then(|bd| bd.pixel(x, y, ncomps));
+            solve_own_colour(old_px, (a_old[i], a_new[i]), backdrop)
+        });
         for (channel, (new, &old)) in px.iter_mut().zip(old_px).enumerate() {
             if !mask.paints(channel) {
                 *new = solved.map_or(old, |s| s[channel]);
@@ -401,46 +409,38 @@ fn restore_unpainted<P: Pixel>(
     }
 }
 
-/// The own colour `c'` of a group pixel that, at its new alpha `a'`,
-/// composites over the backdrop (`c_bd`, `a_bd`) to the colour `u` that the
-/// pixel's old own colour and alpha composited to.
+/// The colour `c'` an unpainted channel stores at the pixel's new alpha
+/// `a'`, given its old colour `c` at alpha `a`, inside a group over the
+/// backdrop `(c_bd, a_bd)` (`None` for a transparent backdrop, `a_bd = 0`).
 ///
-/// [`general::union_colour`] defines `u` and satisfies, up to rounding,
-/// `u·255·a_union = a'·c'·255 + (255 − a')·a_bd·c_bd`, with `a_union` the
-/// union alpha, so `c' = (255·a_union'·u − (255 − a')·a_bd·c_bd) / (255·a')`,
-/// rounded to nearest and clamped to `0..=255`; `c'` composited back over
-/// the backdrop reproduces `u` within one count per channel.  `None` where
-/// the new alpha is zero or nothing was visible before (`a_union = 0`): the
-/// old bytes stand.
+/// The premultiplied colour of the group over its backdrop is unchanged by
+/// the paint (see [`restore_unpainted`]):
+/// `a'·c' + (1 − a')·a_bd·c_bd = a·c + (1 − a)·a_bd·c_bd`, so, with alphas
+/// in `0..=255`, `c' = (255·a·c + (a' − a)·a_bd·c_bd) / (255·a')`, rounded
+/// to nearest once.  Compositing never lowers alpha (`a' ≥ a`), so `c'` is
+/// a weighted mean of `c` and `c_bd` and lies in `0..=255`; the clamp
+/// enforces that range for any input.  Outside a group (`a_bd = 0`) the
+/// formula is `c' = a·c / a'`.
+///
+/// `None` where `a' = a`, for which `c' = c` exactly, and where `a' = 0`,
+/// for which the pixel is transparent and its colour has no effect: the old
+/// bytes stand.
 fn solve_own_colour(
     old: &[u8],
     (a_old, a_new): (u8, u8),
-    (c_bd, a_bd): (&[u8], u8),
+    backdrop: Option<(&[u8], u8)>,
 ) -> Option<[u8; 8]> {
-    if a_new == 0 {
+    if a_new == a_old || a_new == 0 {
         return None;
     }
-    let mut union = [0u8; 8];
-    let ncomps = old.len();
-    let a_union_old = general::union_colour(
-        old,
-        u32::from(a_old),
-        c_bd,
-        u32::from(a_bd),
-        &mut union[..ncomps],
-    );
-    if a_union_old == 0 {
-        return None;
-    }
-    let a_new = u32::from(a_new);
-    let a_union_new = general::compute_a_result(a_new, u32::from(a_bd));
+    let (c_bd, a_bd) = backdrop.unwrap_or((&[0; 8], 0));
+    let (a_old, a_new, a_bd) = (i32::from(a_old), i32::from(a_new), i32::from(a_bd));
     let den = 255 * a_new;
     let mut out = [0u8; 8];
-    for ((o, &u), &c) in out.iter_mut().zip(&union[..ncomps]).zip(c_bd) {
-        let num = i64::from(255 * a_union_new * u32::from(u))
-            - i64::from((255 - a_new) * u32::from(a_bd) * u32::from(c));
-        let c = (num + i64::from(den / 2)).div_euclid(i64::from(den));
-        *o = u8::try_from(c.clamp(0, 255)).unwrap_or(u8::MAX);
+    for ((o, &c), &c_b) in out.iter_mut().zip(old).zip(c_bd) {
+        let num = 255 * a_old * i32::from(c) + (a_new - a_old) * a_bd * i32::from(c_b);
+        let c = (num + den / 2).div_euclid(den).clamp(0, 255);
+        *o = u8::try_from(c).expect("clamped to 0..=255");
     }
     Some(out)
 }
@@ -1016,22 +1016,14 @@ mod tests {
             width: 1,
             height: 1,
         };
-        let pipe = PipeState {
-            backdrop: with_backdrop.then_some(backdrop),
-            overprint: Some(ChannelMask::new(0b1000)),
-            ..make_pipe(a_input, BlendMode::Normal)
-        };
         let mut dst = [100u8, 0, 0, 0, 0, 0, 0, 0];
         let mut alpha = [a_dst];
-        render_span::<DeviceN8>(
-            &pipe,
-            &PipeSrc::Solid(&INK_K),
-            &mut dst,
-            Some(&mut alpha),
+        masked_paint(
+            a_input,
+            with_backdrop.then_some(backdrop),
             None,
-            0,
-            0,
-            0,
+            &mut dst,
+            &mut alpha,
         );
         (dst, alpha[0])
     }
@@ -1056,55 +1048,97 @@ mod tests {
         assert!(composited.abs_diff(149) <= 1, "composited C = {composited}");
     }
 
+    /// Paint `INK_K` through mask `0b1000` with source alpha `a_input` and
+    /// `shape` over a span of `DeviceN8` pixels of colour `dst` and alpha
+    /// `alpha`, inside a group over `backdrop` when given.
+    fn masked_paint(
+        a_input: u8,
+        backdrop: Option<GroupBackdrop<'_>>,
+        shape: Option<&[u8]>,
+        dst: &mut [u8],
+        alpha: &mut [u8],
+    ) {
+        let pipe = PipeState {
+            backdrop,
+            overprint: Some(ChannelMask::new(0b1000)),
+            ..make_pipe(a_input, BlendMode::Normal)
+        };
+        let x1 = i32::try_from(alpha.len()).expect("test span fits i32") - 1;
+        render_span::<DeviceN8>(
+            &pipe,
+            &PipeSrc::Solid(&INK_K),
+            dst,
+            Some(alpha),
+            shape,
+            0,
+            x1,
+            0,
+        );
+    }
+
     #[test]
-    fn overprint_over_a_translucent_backdrop_preserves_the_composited_colour() {
+    fn overprint_over_a_translucent_backdrop_preserves_the_premultiplied_colour() {
+        // Own C = 100 at alpha 128 over C = 200 at alpha 128: union alpha
+        // 192, premultiplied union C = (128*255*100 + 127*128*200) / 255^2
+        // = 100.2.  The paint lifts the own alpha to 192 and the union alpha
+        // to 224; own C = (255*128*100 + 64*128*200) / (255*192) = 100.2.
         let bd_colour = [200u8, 0, 0, 0, 0, 0, 0, 0];
-        let bd_alpha = [128u8];
         let backdrop = GroupBackdrop {
             colour: &bd_colour,
-            alpha: Some(&bd_alpha),
+            alpha: Some(&[128]),
             x0: 0,
             y0: 0,
             width: 1,
             height: 1,
         };
-        let pipe = PipeState {
-            backdrop: Some(backdrop),
-            overprint: Some(ChannelMask::new(0b1000)),
-            ..make_pipe(128, BlendMode::Normal)
-        };
         let mut dst = [100u8, 0, 0, 0, 0, 0, 0, 0];
         let mut alpha = [128u8];
-        let mut before = [0u8; 8];
-        let _ = general::union_colour(&dst, 128, &bd_colour, 128, &mut before);
-        render_span::<DeviceN8>(
-            &pipe,
-            &PipeSrc::Solid(&INK_K),
-            &mut dst,
-            Some(&mut alpha),
-            None,
-            0,
-            0,
-            0,
-        );
-        assert_eq!(before[0], 133);
-        assert!(alpha[0].abs_diff(192) <= 1, "alpha = {}", alpha[0]);
-        let mut after = [0u8; 8];
-        let _ = general::union_colour(&dst, u32::from(alpha[0]), &bd_colour, 128, &mut after);
-        assert!(
-            after[0].abs_diff(before[0]) <= 1,
-            "{} vs {}",
-            after[0],
-            before[0]
-        );
+        masked_paint(128, Some(backdrop), None, &mut dst, &mut alpha);
+        assert_eq!(alpha[0], 192);
+        assert_eq!(dst[0], 100, "own C");
+        assert_eq!(dst[3], 170, "K = 128*255 / 192");
     }
 
     #[test]
-    fn overprint_without_a_backdrop_restores_the_stored_colour() {
+    fn untouched_translucent_pixels_keep_their_colour_across_masked_spans() {
+        // Pixel 1 has shape 0 in every span: its alpha never changes, so
+        // its own colour must not drift however many spans pass over it.
+        let bd_colour = [200u8, 0, 0, 0, 0, 0, 0, 0].repeat(2);
+        let backdrop = GroupBackdrop {
+            colour: &bd_colour,
+            alpha: None,
+            x0: 0,
+            y0: 0,
+            width: 2,
+            height: 1,
+        };
+        let mut dst = [[0u8; 8], [100, 0, 0, 0, 0, 0, 0, 0]].concat();
+        let mut alpha = [0u8, 128];
+        for _ in 0..200 {
+            masked_paint(255, Some(backdrop), Some(&[255, 0]), &mut dst, &mut alpha);
+        }
+        assert_eq!(dst[8..], [100, 0, 0, 0, 0, 0, 0, 0], "untouched pixel");
+        assert_eq!(alpha[1], 128);
+        assert_eq!(dst[..8], [200, 0, 0, 255, 0, 0, 0, 0], "painted pixel");
+    }
+
+    #[test]
+    fn overprint_without_a_backdrop_adds_no_ink_to_a_transparent_pixel() {
         let (dst, alpha) = group_paint(0, 255, false);
-        assert_eq!(dst[0], 100, "C restored");
+        assert_eq!(dst[0], 0, "C takes the source's absent ink");
         assert_eq!(dst[3], 255);
         assert_eq!(alpha, 255, "alpha takes the painted shape");
+    }
+
+    #[test]
+    fn overprint_without_a_backdrop_keeps_the_premultiplied_colour() {
+        // Own C = 200 at alpha 128 under an opaque K paint: C·alpha is
+        // kept, so C = 200*128/255 = 100.4 at alpha 255.
+        let mut dst = [200u8, 0, 0, 0, 0, 0, 0, 0];
+        let mut alpha = [128u8];
+        masked_paint(255, None, None, &mut dst, &mut alpha);
+        assert_eq!(alpha[0], 255);
+        assert_eq!(dst, [100, 0, 0, 255, 0, 0, 0, 0]);
     }
 
     #[test]

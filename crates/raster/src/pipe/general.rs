@@ -185,9 +185,13 @@ fn render_span_general_inner<'src, 'bd>(
 
                 // The pixel the blend function sees and the alpha weighting
                 // it: the destination, or in a non-isolated group the
-                // group's content over the backdrop.
+                // group's content over the backdrop.  `Normal` reads
+                // neither, so the backdrop is consulted only for other modes.
                 let mut c_union: [u8; MAX_COMPS] = [0; MAX_COMPS];
-                let (c_blend_dst, alpha_im1): (&[u8], u32) = match backdrop_at(i) {
+                let backdrop = (pipe.blend_mode != BlendMode::Normal)
+                    .then(|| backdrop_at(i))
+                    .flatten();
+                let (c_blend_dst, alpha_im1): (&[u8], u32) = match backdrop {
                     Some((c_0, a_0)) => {
                         let a_union = union_colour(
                             dst_px,
@@ -337,7 +341,7 @@ pub(crate) fn compute_a_result(a_src: u32, a_dst: u32) -> u32 {
 /// composited over its backdrop (`c_0`, alpha `a_0`) and return the alpha
 /// of that union.  Black where the union is transparent.
 pub(crate) fn union_colour(c_dst: &[u8], a_dst: u32, c_0: &[u8], a_0: u32, out: &mut [u8]) -> u32 {
-    let a_union = (a_dst + a_0 - u32::from(div255(a_dst * a_0))).min(255);
+    let a_union = compute_a_result(a_dst, a_0);
     if a_union == 0 {
         out.fill(0);
         return 0;

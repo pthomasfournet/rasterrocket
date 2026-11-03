@@ -222,16 +222,10 @@ pub fn gouraud_triangle_spans(
         xl <= xs
     };
 
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "bitmap dims are bounded by platform address space"
-    )]
-    let bmp_h = height as i32;
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "bitmap dims are bounded by platform address space"
-    )]
-    let bmp_w = width as i32;
+    // Columns and rows beyond `i32::MAX` lie outside the `i32` scan range,
+    // so clamping the dimensions leaves the painted pixels unchanged.
+    let bmp_h = i32::try_from(height).unwrap_or(i32::MAX);
+    let bmp_w = i32::try_from(width).unwrap_or(i32::MAX);
     let scan_y0 = y0.max(clip.y_min_i).max(0);
     let scan_y2 = y2.min(clip.y_max_i).min(bmp_h - 1);
 
