@@ -16,9 +16,11 @@ use font::program::FontProgram;
 
 use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
 
-/// One bundled face: its compressed program and whether it is a serif
-/// design.
+/// One bundled face: its file name under `fonts/noto/`, its compressed
+/// program and whether it is a serif design.
 struct Bundled {
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests only"))]
+    file: &'static str,
     data: &'static [u8],
     serif: bool,
 }
@@ -28,6 +30,7 @@ struct Bundled {
 macro_rules! face {
     ($file:literal, serif: $serif:literal) => {
         Bundled {
+            file: $file,
             data: include_bytes!(concat!("../../fonts/noto/", $file)),
             serif: $serif,
         }
@@ -126,5 +129,48 @@ mod tests {
             assert!(!Arc::ptr_eq(&sans, &serif), "U+{c:04X} has both classes");
         }
         assert!(bundled_program(sans, 0x4E2D).is_none(), "no CJK is bundled");
+    }
+
+    /// The compiled-in faces are exactly the `.ttf.z` files of
+    /// `fonts/noto/`.
+    #[test]
+    fn every_bundled_file_is_compiled_in() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/noto");
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .expect("fonts/noto")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8")
+            })
+            .filter(|name| name.ends_with(".ttf.z"))
+            .collect();
+        files.sort();
+        let mut compiled: Vec<&str> = FACES.iter().map(|face| face.file).collect();
+        compiled.sort_unstable();
+        assert_eq!(files, compiled);
+    }
+
+    /// The Indic faces map the dotted circle the shaper inserts for a
+    /// broken cluster, and the Bengali and Tamil faces the danda and double
+    /// danda that end their sentences.
+    #[test]
+    fn indic_faces_map_their_punctuation() {
+        for (file, chars) in [
+            ("NotoSansDevanagari.ttf.z", &[0x25CC][..]),
+            ("NotoSerifDevanagari.ttf.z", &[0x25CC]),
+            ("NotoSansBengali.ttf.z", &[0x0964, 0x0965, 0x25CC]),
+            ("NotoSerifBengali.ttf.z", &[0x0964, 0x0965, 0x25CC]),
+            ("NotoSansTamil.ttf.z", &[0x0964, 0x0965, 0x25CC]),
+            ("NotoSerifTamil.ttf.z", &[0x0964, 0x0965, 0x25CC]),
+        ] {
+            let index = FACES.iter().position(|face| face.file == file).expect(file);
+            let program = program(index).expect("parses");
+            for &c in chars {
+                assert_ne!(program.char_index(c), 0, "{file} maps U+{c:04X}");
+            }
+        }
     }
 }
