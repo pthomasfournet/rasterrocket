@@ -51,8 +51,9 @@ pub struct FontFace {
     /// Interpreter state at `size_px` pixels per em for a program that
     /// requires hinting ([`FontProgram::requires_hinting`]), built on first
     /// use; `None` inside when the program needs none or it cannot be set
-    /// up.
-    hinting: OnceLock<Option<HintingInstance>>,
+    /// up.  Shared with every face derived by [`Self::transformed`], whose
+    /// program and `size_px` are this face's.
+    hinting: Arc<OnceLock<Option<HintingInstance>>>,
 }
 
 impl std::fmt::Debug for FontFace {
@@ -100,7 +101,7 @@ impl FontFace {
             program,
             matrix: mat,
             glyph_transform: IDENTITY,
-            hinting: OnceLock::new(),
+            hinting: Arc::default(),
         })
     }
 
@@ -121,7 +122,7 @@ impl FontFace {
             program: Arc::clone(&self.program),
             matrix: self.matrix,
             glyph_transform: compose(transform, self.glyph_transform),
-            hinting: OnceLock::new(),
+            hinting: Arc::clone(&self.hinting),
         })
     }
 
@@ -395,4 +396,41 @@ fn quantise_scale(x_scale: f64) -> u16 {
     )]
     let quantised = (x_scale.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
     quantised
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::{FaceParams, FontEngine};
+    use crate::key::FaceIds;
+
+    /// A face derived by [`super::FontFace::transformed`] shares the
+    /// hinting state of its source: the instance set up for one is the
+    /// other's, and the derived face draws grid-fitted.
+    #[test]
+    fn transformed_faces_share_the_hinting_instance() {
+        let data = include_bytes!("tests/data/hint-assembled-by-tables.ttf");
+        let face = FontEngine::new(true)
+            .load_memory_face(
+                data.to_vec(),
+                0,
+                FaceParams {
+                    code_to_gid: Vec::new(),
+                    mat: [40.0, 0.0, 0.0, 40.0],
+                },
+            )
+            .expect("font loads");
+        assert!(face.program().requires_hinting());
+        let shifted = face
+            .transformed(FaceIds::default().next(), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+            .expect("finite");
+        assert!(std::sync::Arc::ptr_eq(&face.hinting, &shifted.hinting));
+        let _path = face.glyph_path(0x41).expect("outline");
+        assert!(shifted.hinting.get().is_some_and(Option::is_some));
+        let path = shifted.glyph_path(0x41).expect("outline");
+        let contours = path.flags.iter().filter(|f| f.is_first()).count();
+        assert_eq!(
+            contours, 2,
+            "the composite is assembled by its instructions"
+        );
+    }
 }

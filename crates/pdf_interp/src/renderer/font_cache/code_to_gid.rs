@@ -811,6 +811,10 @@ mod tests {
         // Identity codes, with the vertical writing mode forced on the
         // encoding above: CID 668, then `A` (CID 34).
         loader.prepare_vertical(&mut face, enc, &[0x02, 0x9C, 0x00, 0x22]);
+        assert!(
+            !face.vertical_faces.contains_key(&34),
+            "a CID without a vertical fallback is not recorded"
+        );
         let (turned, selector, by_gid) = face.glyph_for(Some(enc), 0x29C, 668).expect("drawn");
         assert!(by_gid);
         assert_eq!(selector, ellipsis);

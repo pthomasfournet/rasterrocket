@@ -86,8 +86,9 @@ pub(crate) struct PageFace {
     /// the mapping that stands in for the vertical form.
     vertical_fallbacks: Arc<HashMap<u32, VerticalFallback>>,
     /// The face drawing each such CID shown with this face, with its
-    /// glyph's selector there; `None` inside when the glyph is drawn as it
-    /// is.
+    /// glyph's selector there; `None` inside when the mapped glyph cannot
+    /// be made and the glyph is drawn as it is.  Holds only keys of
+    /// `vertical_fallbacks`.
     vertical_faces: HashMap<u32, Option<(FontFace, u32)>>,
 }
 
@@ -524,30 +525,43 @@ impl FallbackLoader<'_> {
     fn prepare_vertical(&self, face: &mut PageFace, enc: &CidEncoding, bytes: &[u8]) {
         for decoded in enc.codes(bytes) {
             let cid = decoded.value;
+            let Some(&fallback) = face.vertical_fallbacks.get(&cid) else {
+                continue;
+            };
             if face.vertical_faces.contains_key(&cid) {
                 continue;
             }
-            let made = face.vertical_fallbacks.get(&cid).and_then(|&fallback| {
-                let gid = face.face.glyph_index(cid);
-                let program = face.face.program();
-                let bounds = program.bounds(gid);
-                let transform =
-                    glyph_transform(fallback, enc.vertical_metrics_for_cid(cid), bounds)?;
-                let selector = program.gid_to_selector(gid)?;
-                let id = self.shared.map_or_else(
-                    || self.ids.next(),
-                    |shared| {
-                        shared.face_id(
-                            self.trm.map(f64::to_bits),
-                            FaceSlot::Vertical(cid),
-                            self.ids,
-                        )
-                    },
-                );
-                Some((face.face.transformed(id, transform)?, selector))
-            });
+            let made = self.vertical_face(&face.face, enc, cid, fallback);
             let _ = face.vertical_faces.insert(cid, made);
         }
+    }
+
+    /// `face` with glyph `cid` mapped in em space by `fallback` to stand in
+    /// for its vertical form, with the glyph's selector there; `None` when
+    /// the mapping is degenerate or the glyph has no selector.
+    fn vertical_face(
+        &self,
+        face: &FontFace,
+        enc: &CidEncoding,
+        cid: u32,
+        fallback: VerticalFallback,
+    ) -> Option<(FontFace, u32)> {
+        let gid = face.glyph_index(cid);
+        let program = face.program();
+        let bounds = program.bounds(gid);
+        let transform = glyph_transform(fallback, enc.vertical_metrics_for_cid(cid), bounds)?;
+        let selector = program.gid_to_selector(gid)?;
+        let id = self.shared.map_or_else(
+            || self.ids.next(),
+            |shared| {
+                shared.face_id(
+                    self.trm.map(f64::to_bits),
+                    FaceSlot::Vertical(cid),
+                    self.ids,
+                )
+            },
+        );
+        Some((face.transformed(id, transform)?, selector))
     }
 
     /// Load the face of fallback program `slot` at this matrix into
