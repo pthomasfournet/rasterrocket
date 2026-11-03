@@ -25,11 +25,15 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
   per-axis scale, a `RenderRegion` window and a `CancelToken`.
 - `encode_for_gcv`: a size-fitted grayscale JPEG for Google Cloud Vision.
 - Encrypted documents are decrypted in process when `decrypt_authorized` is set.
+- `overprint` (off by default) simulates overprint and spot inks on pages
+  that set it; see the [API reference](../../docs/api-reference.md#sessionconfig).
+- `rgb_to_gray` / `rgb_into_gray` (in place, no second buffer) and
+  `gray8_into_rendered_page` for callers that build their own gray pages.
 
 Public types are `#[non_exhaustive]`: start from `RasterOptions::new(dpi)`,
 `SessionConfig::default()` or `RenderParams::new(scale)` and assign or chain.
 The GPU features, and the default `bundled-fonts` feature (Noto fallback
-faces for non-CJK scripts, ~0.33 MB; `default-features = false` omits them),
+faces for non-CJK scripts, ~0.75 MB; `default-features = false` omits them),
 are listed in the [API reference](../../docs/api-reference.md#feature-flags).
 
 Distributed from GitHub only; depend on it with

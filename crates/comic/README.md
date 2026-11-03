@@ -28,5 +28,8 @@ fn ocr_archive(path: &Path) -> Result<(), ComicError> {
 its `len()` is the number of pages still to come and `retain` drops pages
 before any is decoded. Entries are read under a
 512 MiB decompressed-size cap and image dimensions are checked before
-decoding. `rrocket` uses this crate for archive input. See the
+decoding. An embedded PDF opens with `ComicOptions::session`, a
+`SessionConfig` (overprint, antialiasing, annotations, fonts, decryption,
+backend); `rrocket` fills it from the same flags as for PDF input and uses
+this crate for archive input. See the
 [API reference](../../docs/api-reference.md#rasterrocket-comic-crate--comic-archive-input).

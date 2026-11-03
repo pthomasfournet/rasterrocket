@@ -38,6 +38,11 @@ and TIFF (`--tiff`) work, the last also fax-coded (on master).
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
 
+**Overprint simulation has gaps (on master).** Under `--overprint`,
+`Separation` / `DeviceN` images and shadings, tiling-pattern cells and
+transparency groups as a whole knock out instead of overprinting; see
+[Current status](#current-status-2026-11-03).
+
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
 
@@ -2193,7 +2198,8 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 ## Phase 13 — Output to the operating system: print and fax (planned, after v2.0.0)
 
 **Status: in progress on master, unreleased.** The four fax layers are on
-master (2026-11-01); printing is not started.
+master (2026-11-01), with `--jpeg` and `--jpegopt` (as `pdftoppm -jpeg`,
+colour or gray); printing is not started.
 
 **Printing through the OS spooler.** No device or driver code of our own.
 `rrocket --print [--printer NAME] [--copies N]` renders each page at the
@@ -2257,26 +2263,61 @@ searches included; and the bundled fallbacks gain Bengali, Tamil,
 Armenian, Georgian and Ethiopic (0.49 → 0.75 MB). Verified on Linux and on
 a stock macOS 27 install.
 
+**Font-discovery review, also on master (2026-11-03).** One walk lists the
+font files of a library, its Liberation substitutes included: a directory
+reached through several paths or a symbolic link is read once, and the walk
+stops at 10 000 directories with a warning. The Windows and macOS font
+directories are searched only on those targets. The bundled Devanagari,
+Bengali and Tamil faces carry U+25CC, the dotted circle the shaper inserts
+for a broken cluster, and the Bengali and Tamil ones the danda and double
+danda (U+0964, U+0965). A font's hinting set-up is shared by the faces
+derived from it for vertical forms.
+
 ---
 
-## Current status (2026-11-02)
+## Current status (2026-11-03)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 planned Phase 13 above; Phase 14 is on master, unreleased.
 
-**Overprint simulation, in progress on a branch.** `OP`/`op`/`OPM`
-(ISO 32000-2 §8.6.7, §11.7.4) on a page that sets overprint render to a
-CMYK-plus-four-spot ink buffer, converted to RGB at the end of the page, so
-an object leaves alone the inks it does not use. Done: the ink buffer,
-colorant masks for Separation and DeviceN (four spot slots a page, further
-spots through their alternate), an RGB-to-ink inverse that returns a grey or
-RGB colour as its own screen colour (black text stays black), and soft
-masks. Remaining: applying the mask at paint time, the `--overprint` CLI
-flag and `RasterOptions` field (removed in v2.0.0 as a no-op), and
-verification. Pages without overprint render byte-identically. Planned
-limits: Separation and DeviceN images and shadings, tiling cells and
-transparency groups composite every channel, and the GPU backends are not
-used on overprint pages.
+**Unreleased on master since v2.0.0 (2026-10-31):** Phase 13's fax output
+and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
+follow-ups, overprint simulation (below), and a hardening review pass
+(2026-11-03) over the overprint work, gray output and the vendored forks.
+Public API added since v2.0.0, none of it breaking a v2.0.0 caller:
+`RasterOptions::overprint`, `SessionConfig::overprint`,
+`PageDiagnostics::unslotted_spots`, `ComicOptions::session` (the session an
+embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
+`Bitmap::into_data` and `Bitmap::from_packed`; in `rasterrocket-interp`,
+`PageRenderer::with_page_group(view, doc, page, group, ink)`,
+`page_uses_overprint(doc, page, annotations)` and
+`ExtGStateParams::{overprint_stroke, overprint_fill, overprint_mode}` (an
+`Option<OverprintMode>`). The canvas kind is fixed when the renderer is
+built; there is no setter.
+
+**Overprint simulation, on master (merged 2026-11-03), unreleased.**
+`--overprint` / `RasterOptions::overprint` (default off). With it, a page on
+which some `ExtGState` reachable from its resources, or from the appearance
+streams of annotations that are drawn, sets `OP` or `op` is painted on a
+CMYK-plus-four-spot ink canvas instead of RGB (ISO 32000-1 §8.6.7,
+§11.7.4); an overprinting object leaves the channels it does not paint as
+they were, and the canvas is converted to RGB when the page is finished.
+`Separation` and `DeviceN` colours paint their colorants' channels (the
+first four distinct spots of a page take the spot channels, further spots
+paint their alternate in process ink and are listed in
+`PageDiagnostics::unslotted_spots`); under `OPM 1` an overprinting process CMYK
+colour leaves its zero components unpainted. Grey and RGB colours print through an
+RGB-to-ink inverse of the process-ink model, so they render as on the RGB
+canvas; the inverse table takes about 0.75 s to build, once per process.
+Pages without overprint, and every page with the option off, render
+byte-identically. Known gaps: images and shadings in `Separation` /
+`DeviceN` spaces, tiling-pattern cells and transparency groups as a whole
+paint every channel; an object under a non-identity transfer function
+knocks out; `ICCBased` CMYK converts through the process-ink model rather
+than its profile; antialiased edges of RGB or grey black text take a slight
+colour cast; and fills and image composites on an overprint page run on
+the CPU.
+
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder, transfers
@@ -2290,7 +2331,7 @@ Deferred/blocked items, in full:
 - **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.
 
-The implementation plans under `docs/superpowers/plans/` (gitignored) are completed or superseded, apart from `2026-11-01-overprint-simulation.md`, the live plan for the overprint branch. The rest are kept as historical execution logs, not as a backlog.
+The implementation plans under `docs/superpowers/plans/` (gitignored) are completed or superseded; they are kept as historical execution logs, not as a backlog.
 
 ---
 

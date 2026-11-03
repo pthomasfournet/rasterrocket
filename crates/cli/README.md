@@ -16,7 +16,8 @@ files; a `--fax` document is always written to disk.
 GPU features are passed by name and forwarded to the library
 (`--features "nvjpeg2k,gpu-icc,cache"`, `--features vulkan`). The default
 `bundled-fonts` feature compiles in Noto fallback faces for Greek, Cyrillic,
-Hebrew, Arabic, Devanagari, Thai and symbols (~0.48 MB); build with
+Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian,
+Ethiopic and symbols (~0.75 MB); build with
 `--no-default-features` to omit them. Every flag, the
 size limits and the exit codes are in the
 [CLI reference](../../docs/cli-reference.md). Build from this repository;

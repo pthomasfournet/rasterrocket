@@ -9,6 +9,8 @@ wherever rrocket has the same feature, so most `pdftoppm` command lines run
 unchanged; the differences are listed under each section (CMYK JPEG output is
 not implemented, and the CropBox is always rendered).
 
+`-h` / `--help` lists the flags and `-V` / `--version` prints the version.
+
 **Arguments:**
 
 - `<INPUT>` — path to the input file. A PDF, or a comic/scan archive whose
@@ -25,9 +27,12 @@ below (page range, format, `--gray`/`--mono`, `--odd`/`--even`, `--singlefile`,
 the camera-capture flags) behave identically to the PDF path. Pages are decoded
 to grayscale, so colour output carries gray pixels; `-r` only sets the
 resolution recorded for the page, never its pixel size. An archive that
-contains a single PDF instead of loose images renders that PDF. The crop,
-scale-to, rendering, password and backend flags, `--threads`, `--strict`,
-`--purpose`, `--progress` and `--timings` apply to PDF input only and have no effect on comic input.
+contains a single PDF instead of loose images renders that PDF, with the
+rendering flags (`--aa`, `--aaVector`, `--overprint`, `--hide-annotations`,
+`--no-system-fonts`), `--strict`, `--purpose` and the backend flags; an
+invalid backend combination is refused for comic input as for a PDF. The
+crop, scale-to and password flags, `--threads`, `--progress` and
+`--timings` apply to PDF input only and have no effect on comic input.
 
 ---
 
@@ -128,7 +133,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | Flag | Extension | Description |
 |---|---|---|
 | _(default)_ | `.ppm` | RGB PPM (Netpbm P6). |
-| `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B). Can combine with `--png`, `--jpeg` and `--tiff`. |
+| `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B). The page is rendered in RGB and converted in place, so peak memory is that of the RGB render. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG. |
 | `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. |
@@ -163,7 +168,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 |---|---|---|
 | `--aa yes\|no` | `yes` | Antialias text. `no` draws glyphs with hard, bilevel edges. |
 | `--aaVector yes\|no` | `yes` | Antialias path fills, strokes and clips. `no` draws them with hard, bilevel edges. |
-| `--overprint` | off | Simulate overprint (`OP`, `op`, `OPM`) for pages that use it. Without it every object knocks out what lies beneath it. |
+| `--overprint` | off | Simulate overprint (`OP`, `op`, `OPM`; ISO 32000-1 §8.6.7) for pages that use it. Without it every object knocks out what lies beneath it. A page on which some graphics state reachable from its content or from a drawn annotation sets `OP` or `op` is painted in four process and four spot inks and converted to RGB at the end of the page; an overprinting object leaves the inks it does not paint. The first four spot colorants of a page take the spot inks; further ones print their alternate colour in process ink and are named in a warning. Other pages render exactly as without the flag. The first overprint page builds a colour table once per process (about 0.75 s). Not simulated: images and shadings in `Separation` / `DeviceN` spaces, tiling-pattern cells and transparency groups as a whole paint every ink; an object under a transfer function knocks out; `ICCBased` CMYK colours convert through the built-in CMYK model rather than their profile, so they can shift slightly against a render without the flag, as can the antialiased edges of black RGB or gray text; GPU fills and image composites are not used on such pages. |
 | `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
 | `--no-system-fonts` | off | Do not search the system font directories for fonts the document does not embed: draw them from `RROCKET_FONT_DIR` and the faces compiled into the binary only. |
 
@@ -178,6 +183,13 @@ the substitutes and the per-character faces; library callers set the same list t
 fallback faces compiled into the binary (Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai,
 Bengali, Tamil, Armenian, Georgian, Ethiopic, symbols; the default `bundled-fonts` feature), so these scripts draw on a server with no
 fonts installed; a build with `--no-default-features` omits them.
+
+The font directories are read once per process and directory list, including
+their subdirectories; a directory reached through more than one path or a
+symbolic link is read once, and the walk stops after 10 000 directories with
+a warning. The system directories searched are those of the operating
+system rrocket was built for: the Windows and macOS font directories are
+searched only on Windows and macOS.
 
 ---
 
@@ -374,6 +386,9 @@ rrocket --decrypt-owned --password secret document.pdf out
 
 # Print rendering: layers in their Print state, print-flagged annotations only
 rrocket --purpose print document.pdf out
+
+# Print-production file: simulate overprint and spot inks, PNG on disk
+rrocket --overprint -r 300 --png document.pdf ./proof
 
 # Compare output against pdftoppm (pixel-diff test)
 tests/compare/compare.sh -r 150 -f 1 -l 5 document.pdf

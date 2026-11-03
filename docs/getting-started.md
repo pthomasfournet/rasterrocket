@@ -266,7 +266,8 @@ Set `RasterOptions::strict` to make such a page an `Err` instead
 
 The session API opens a document once and renders pages on demand, from any
 number of threads. `render_page_rgb` and `render_page_rgb_with` return RGB
-bitmaps (`rgb_to_gray` converts them); `render_page_gray` returns the
+bitmaps (`rgb_to_gray` converts them, `rgb_into_gray` in the RGB buffer
+itself); `render_page_gray` returns the
 grayscale `RenderedPage` that `raster_pdf` yields for the page.
 
 ```rust

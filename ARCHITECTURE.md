@@ -73,9 +73,11 @@ rasterrocket_interp::open()
     ▼ Vec<Operator>
 rasterrocket_interp::parse_page_content()    content tokenizer → operator decode (operands borrow the content)
     │
-    ▼ Bitmap<Rgb8>  (blank, sized by PageGeometry::size_px)
-rasterrocket_interp::PageRenderer::with_view(&PageView::whole(..))
-    │                                 allocates the target bitmap; initial CTM
+    ▼ PageCanvas  (blank, sized by PageGeometry::size_px): Bitmap<Rgb8>, or
+    │             Bitmap<DeviceN8> of CMYK + four spot inks when overprint is
+    │             simulated and page_uses_overprint holds
+rasterrocket_interp::PageRenderer::with_page_group(&PageView::whole(..), .., ink)
+    │                                 allocates the canvas once; initial CTM
     ▼
 PageRenderer::execute(ops)           dispatch loop:
     ├── path ops  ──────────────────▶ raster::fill / stroke / eo_fill
@@ -93,8 +95,12 @@ PageRenderer::execute(ops)           dispatch loop:
     ├── tiling ops  ────────────────▶ raster::TiledPattern
     └── transparency groups ────────▶ raster begin_group / paint_group
     │
+    ▼ PageRenderer::finish()         page group onto white; an ink canvas is
+    │                                 converted to sRGB (color::cmyk::ink_to_rgb_row,
+    │                                 spots through their process equivalents)
     ▼ Bitmap<Rgb8>
-rasterrocket::rgb_to_gray()          Y = 0.30 R + 0.59 G + 0.11 B (ISO 32000-1 §10.3.3)
+rasterrocket::rgb_into_gray()        Y = 0.30 R + 0.59 G + 0.11 B (ISO 32000-1 §10.3.3),
+    │                                 written over the RGB buffer in place
     │
     ▼ Vec<u8>  (width × height, 8-bit grayscale)
 RenderedPage { pixels, width, height, dpi, diagnostics }
@@ -135,6 +141,11 @@ Single source of truth for pixel types and colour math. No SIMD, no I/O.
   the sixteen solid and overprint corners, in fixed point, so the scalar
   code, the SIMD tiers (`cmyk/simd.rs`) and the GPU kernel give identical
   bytes
+- `rgb_to_ink` (`cmyk/inverse.rs`) — the inverse of that model with
+  grey-component replacement, tabulated on a 65³ grid built once per
+  process on first use (about 0.75 s); neutrals come from a 256-entry grey
+  table. `ink_to_rgb_row` converts a row of `[C, M, Y, K, S0..S3]` ink
+  pixels to sRGB, folding each spot in through its `SpotLut`
 
 ### 3.2 `rasterrocket-render`
 
@@ -183,6 +194,19 @@ modes inside the group consult (ISO 32000-2 §11.4.7). In a knockout group
 cleared to transparent and merges the result with the group as it was,
 interpolating by the object's shape (`renderer/page/knockout.rs`), so every
 object composites with the group's initial backdrop.
+
+**Overprint** (ISO 32000-1 §8.6.7, §11.7.4)
+A paint may carry a channel mask (`PipeState::overprint`, a
+`pipe::ChannelMask`) naming the channels it writes. `render_span` composites
+the span as usual, then restores every channel outside the mask
+(`restore_unpainted`) under the `CompatibleOverprint` rule, source value 0:
+the channel keeps its premultiplied value, exactly over an opaque pixel;
+inside a non-isolated group the stored value is solved so that the group
+over its backdrop keeps the pre-paint colour. A mask of every channel, or none, takes the unmasked
+path. The interpreter derives the mask per paint on an ink canvas: process
+CMYK writes C, M, Y and K (under `OPM 1` without its zero components), a
+`Separation` / `DeviceN` colour its colorants' channels, anything else every
+channel; with overprint off, or on an RGB canvas, there is no mask.
 
 **Page group** (ISO 32000-2 §11.4.7)
 The page's content is itself a transparency group, composited onto the
@@ -257,11 +281,16 @@ Thin I/O layer. Takes `Bitmap<P>`, writes file format bytes to a `Write` sink.
 
 - `write_ppm` — Netpbm P6 from `Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8` or `DeviceN8`;
   CMYK and DeviceN process channels convert through the process-ink model
-- `write_pgm` — Netpbm P5 grayscale
+- `write_pgm` — Netpbm P5 grayscale; a packed bitmap (`stride == width`) is
+  written in 64 KiB slices, a padded one row by row
 - `write_pbm` — Netpbm P4 1-bit
 - `write_png` — `png` crate; `Gray8` as grayscale, the colour modes of
   `write_ppm` as RGB (RGBA when the bitmap has an alpha plane)
-- `jpeg_gray` — baseline 8-bit grayscale JPEG of a `Gray8` bitmap
+- `write_jpeg` — JPEG of a `Gray8`, `Rgb8` or `Bgr8` bitmap under
+  `JpegOptions` (quality, progressive, optimised tables); `jpeg_gray` is the
+  baseline grayscale form used by `encode_for_gcv`
+- `write_tiff` / `TiffWriter` — baseline TIFF, uncompressed, PackBits, LZW,
+  Deflate or, for bilevel pages, CCITT G3 / G4
 
 No pixel processing beyond colour-mode conversion at the boundary.
 
@@ -360,7 +389,10 @@ optional_content.rs  — OptionalContent: the /OCProperties /D configuration
                        annotation /OC
 page_group.rs        — the page group (§11.4.7): whether a page is painted as
                        an isolated group over white (a knockout page group, or
-                       a blend mode reachable from its resources or annotations)
+                       a blend mode reachable from its resources or annotations);
+                       page_uses_overprint: whether an ExtGState reachable the
+                       same way sets OP or op. Both walk forms to the
+                       renderer's form depth
 prescan.rs           — classify page content without rendering pixels
 cache/               — device image-cache helpers + background prefetcher
                        (`cache` feature)
@@ -382,6 +414,12 @@ renderer/
   bundled_fonts.rs   — Noto fallback faces compiled in (`bundled-fonts`)
   page/
     mod.rs           — PageRenderer: construction, execute(), finish()
+    canvas.rs        — PageCanvas: an RGB or an ink (DeviceN8) bitmap;
+                       with_canvas! dispatch; InkPattern converts sRGB
+                       sources (shadings, tiling cells, images, meshes) to ink
+    ink_map.rs       — spot colorants of a page assigned to the four spot
+                       channels, each with its SpotLut
+    image_compositor.rs — image samples onto a page or group bitmap
     view.rs          — PageView: device-space placement and initial CTM
                        (rotation, UserUnit, window)
     operators.rs     — execute_one: one operator → renderer call
@@ -541,8 +579,13 @@ image, not the process.
 - **Installed fonts.** A `FontLibrary` (`renderer/system_fonts.rs`) walks
   the session's font directories (`SessionConfig::font_dirs`, from
   `RROCKET_FONT_DIR` by default), then, unless `SessionConfig::system_fonts`
-  is off, the standard font directories, on first use, and indexes every
-  sfnt face by family and `OS/2` code-page range. Libraries are shared
+  is off, the standard font directories of the build target (the Windows
+  and macOS ones only on those targets), on first use, and indexes every
+  sfnt face by family and `OS/2` code-page range. One walk lists the font
+  files of a library: a directory reached through several paths or a
+  symbolic link is read once (keyed by device and inode on Unix), and the
+  walk stops at 10 000 directories with a warning. The installed
+  metric-compatible substitutes are looked up in the same listing. Libraries are shared
   process-wide per directory list and switch; each holds its parsed
   programs, fallback rankings and installed substitutes.
 - **Scripts the bundled faces do not cover.** For CJK, Arabic and Thai the
@@ -561,11 +604,15 @@ image, not the process.
   font covers draws, whatever the font's classified script.
 - **Bundled fallback faces.** With the `bundled-fonts` feature (on by
   default in `rasterrocket` and the CLI), Noto subsets for Greek and
-  Cyrillic, Hebrew, Arabic, Devanagari and Thai (sans-serif and serif) and
-  three symbol faces are compiled in (`crates/pdf_interp/fonts/noto/`,
-  zlib-compressed, ~0.48 MB; `renderer/bundled_fonts.rs`). They are the
-  last resort of the per-character fallback, after every installed face.
-  The Hebrew, Arabic, Devanagari and Thai faces keep their layout features.
+  Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian,
+  Georgian and Ethiopic (sans-serif and serif) and three symbol faces are
+  compiled in (`crates/pdf_interp/fonts/noto/`, zlib-compressed, ~0.75 MB;
+  `renderer/bundled_fonts.rs`). They are the last resort of the
+  per-character fallback, after every installed face. The faces of scripts
+  that need shaping keep their layout features; the Devanagari, Bengali
+  and Tamil faces also carry U+25CC, the dotted circle the shaper inserts
+  for a broken cluster, and the Bengali and Tamil ones the danda and
+  double danda.
 - **Shaping.** In a string shown with a substitute, the codes of a run in a
   script that needs shaping (right-to-left: Hebrew, Arabic, Syriac and
   neighbours; left-to-right: the Indic scripts, Thai, Lao, Tibetan, Myanmar,
@@ -731,7 +778,7 @@ Public library crate. The stable API surface.
 ```rust
 RasterOptions::new(dpi)   // #[non_exhaustive]; fields: dpi, first_page, last_page, deskew,
                           // pages, strict, purpose, annotations, text_antialias,
-                          // vector_antialias, decrypt_authorized, password,
+                          // vector_antialias, overprint, decrypt_authorized, password,
                           // font_dirs, system_fonts, cancel
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
@@ -813,7 +860,8 @@ Binary entry point. Thin glue over `rasterrocket` + `rasterrocket-encode`.
 ```
 clap args → SessionConfig → open_session → rayon ThreadPool
   → pool.install(|| per page: prescan_session, render_page_rgb_with,
-                    encode::write_ppm / write_pgm / write_pbm / write_png)
+                    encode::write_ppm / write_pgm / write_pbm / write_png /
+                    write_jpeg / write_tiff)
   → pool.broadcast(release_gpu_decoders)    // teardown before pool drops
   → main returns ExitCode                   // RAM-output guard and pool drop
 ```

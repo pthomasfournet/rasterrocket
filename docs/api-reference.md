@@ -91,7 +91,7 @@ If the `Receiver` is dropped before the producer finishes, the producer exits cl
 
 ### Session API
 
-Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with` and `rgb_to_gray`.
+Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `rgb_to_gray` and `rgb_into_gray`.
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>
@@ -174,7 +174,13 @@ Renders page `page_num` as `params` describes:
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
 ```
 
-`DeviceRGB` → `DeviceGray` conversion with the weights of ISO 32000-1 §10.3.3, `Y = 0.30·R + 0.59·G + 0.11·B`, in 15-bit fixed point with round-half-up (`(9830·R + 19333·G + 3605·B + 16384) >> 15`), so `R = G = B` maps to itself. `raster_pdf`, `render_channel` and the CLI's `--gray` / `--mono` all use it.
+`DeviceRGB` → `DeviceGray` conversion with the weights of ISO 32000-1 §10.3.3, `Y = 0.30·R + 0.59·G + 0.11·B`, in 15-bit fixed point with round-half-up (`(9830·R + 19333·G + 3605·B + 16384) >> 15`), so `R = G = B` maps to itself.
+
+```rust
+pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8>
+```
+
+The same conversion, byte for byte, in the RGB bitmap's own allocation: the gray rows are written packed (`stride == width`) over the front of the colour buffer, which keeps its capacity; an alpha plane is dropped. No second buffer is allocated, so a gray render peaks at the memory of the RGB render. `raster_pdf`, `render_channel`, `render_page_gray`, the comic decoder and the CLI's `--gray` / `--mono` use it. `rasterrocket_render::Bitmap::into_data` (the colour buffer, `stride × height` bytes) and `Bitmap::from_packed(width, height, data)` (a packed bitmap over a buffer of exactly `width × height × bytes-per-pixel`; panics otherwise) move a buffer out of and into a bitmap without a copy.
 
 ```rust
 pub fn prescan_session(
@@ -227,6 +233,7 @@ pub struct RasterOptions {
     pub annotations: bool,
     pub text_antialias: bool,
     pub vector_antialias: bool,
+    pub overprint: bool,
     pub decrypt_authorized: bool,
     pub password: Option<Password>,
     pub font_dirs: Vec<PathBuf>,
@@ -248,6 +255,7 @@ pub struct RasterOptions {
 | `annotations` | — | When `false`, annotations (form-field widgets included) are not drawn and pages show their content alone. |
 | `text_antialias` | — | When `false`, glyphs are rasterised bilevel (no partial coverage). Text drawn as paths follows `vector_antialias`. |
 | `vector_antialias` | — | When `false`, path fills, strokes and clips are scan-converted at pixel centres with hard edges, always on the CPU. |
+| `overprint` | — | When `true`, overprint (`OP`, `op`, `OPM`) is simulated on pages that set it; see [`SessionConfig`](#sessionconfig). |
 | `decrypt_authorized` | — | Whether an encrypted document may be decrypted; see [`SessionConfig`](#sessionconfig). `false` makes an encrypted document an error. |
 | `password` | — | Password for an encrypted document, tried as user then owner password after the empty user password. No effect unless `decrypt_authorized` is `true`. |
 | `font_dirs` | — | Extra directories of installed fonts, searched before those `RROCKET_FONT_DIR` names and the standard ones; see [`SessionConfig`](#sessionconfig). |
@@ -260,7 +268,7 @@ let mut opts = RasterOptions::new(150.0);
 opts.deskew = true;
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`, `cancel = None`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`, `cancel = None`.
 
 ---
 
@@ -351,6 +359,7 @@ Collected at zero extra cost during rendering.
 | `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn (skipped, so the region shows whatever was painted beneath), and images drawn only partly because their stream lacked samples (`partial`). Empty on a complete render. Includes images inside tiling-pattern tiles. An image whose decoded samples would exceed 1 GiB (width × height × components) is refused before anything is allocated and listed here. |
 | `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams), each skipped while the page is drawn from the others, and elements that decoded only in part (`partial`), executed up to where their data was lost. Either way whatever the lost data held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 | `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
+| `unslotted_spots` | `Vec<String>` | Spot colorants that found no spot ink on a page rendered with overprint simulation (the four spot inks being held by the page's first four spots). Each printed its alternate colour in process ink, so it overprints as that process colour rather than as a separate ink. Empty on every other page. |
 | `form_type` | `FormType` | The document's interactive form type (the same on every page). `XfaFull` means a dynamic XFA form: XFA is not processed, so the page is the placeholder content stored in the file, often a notice asking for an XFA-capable viewer, and its text is not the form's. |
 
 ```rust
@@ -463,6 +472,7 @@ pub struct SessionConfig {
     pub annotations: bool,         // default: true
     pub text_antialias: bool,      // default: true
     pub vector_antialias: bool,    // default: true
+    pub overprint: bool,           // default: false
     pub font_dirs: Vec<PathBuf>,   // default: RROCKET_FONT_DIR (Default), empty (with_policy)
     pub system_fonts: bool,        // default: true
 }
@@ -476,7 +486,7 @@ impl SessionConfig {
 }
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `annotations = false` renders page content without annotations and mirrors `RasterOptions::annotations`. `text_antialias` and `vector_antialias` (both default `true`) switch antialiasing of glyph bitmaps and of path fills, strokes and clips, and mirror the `RasterOptions` fields of the same names. `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it. `font_dirs` lists extra directories of installed fonts, searched in order before the standard font directories: a font the document does not embed draws with an installed substitute (the metric-compatible Liberation family, or a face of the font's script) and, for a character the substitute lacks, with an installed face that covers it, and both are looked up there first. `SessionConfig::default()` reads them from `RROCKET_FONT_DIR` (`PATH` syntax), `with_policy` sets none; sessions naming the same directories share one index of the installed fonts. `RasterOptions::font_dirs` is searched before the `RROCKET_FONT_DIR` directories by `raster_pdf`, `raster_pdf_from_bytes` and `render_channel`. `system_fonts = false` (mirrored by `RasterOptions::system_fonts`) stops the search of the standard font directories and of the fixed locations of the Liberation, Arial, Times New Roman and Courier New faces: non-embedded fonts then draw from `font_dirs` and the faces compiled into the library only, the base-14 substitutes and, with the default `bundled-fonts` feature, the bundled Noto fallback faces. Lookup order for a non-embedded font: an installed substitute of its class and script, then for a character it lacks an installed face that covers it, then a bundled face, then nothing.
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `annotations = false` renders page content without annotations and mirrors `RasterOptions::annotations`. `text_antialias` and `vector_antialias` (both default `true`) switch antialiasing of glyph bitmaps and of path fills, strokes and clips, and mirror the `RasterOptions` fields of the same names. `overprint` (default `false`, mirrored by `RasterOptions::overprint`) simulates overprint (ISO 32000-1 §8.6.7): a page on which some `ExtGState` reachable from its resources, or from the appearance streams of annotations that are drawn, sets `OP` or `op` is painted on a canvas of four process and four spot inks, where an overprinting object leaves the inks it does not paint (under `OPM 1`, also the zero components of a process CMYK colour), and is converted to RGB when finished. The first four distinct spot colorants of a page take the spot inks; a colour with spots that do not fit prints its alternate colour in process ink and is listed in `PageDiagnostics::unslotted_spots`. Other pages render byte-identically to `overprint = false`. The RGB-to-ink table is built once per process on first use (about 0.75 s; concurrent renders wait for it). Not simulated: sampled images and shadings in `Separation` / `DeviceN` spaces, tiling-pattern cells and transparency groups as a whole paint every ink; an object under a non-identity transfer function knocks out; `ICCBased` CMYK colours convert through the process-ink model rather than their profile; the antialiased edges of black RGB or gray text take a slight colour cast; GPU fills and image composites are not used on these pages. `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it. `font_dirs` lists extra directories of installed fonts, searched in order before the standard font directories: a font the document does not embed draws with an installed substitute (the metric-compatible Liberation family, or a face of the font's script) and, for a character the substitute lacks, with an installed face that covers it, and both are looked up there first. `SessionConfig::default()` reads them from `RROCKET_FONT_DIR` (`PATH` syntax), `with_policy` sets none; sessions naming the same directories share one index of the installed fonts, built from one walk of the directories and their subdirectories (a directory reached through several paths or a symbolic link is read once; the walk stops after 10 000 directories with a warning) and rebuilt when a directory changes. `RasterOptions::font_dirs` is searched before the `RROCKET_FONT_DIR` directories by `raster_pdf`, `raster_pdf_from_bytes` and `render_channel`. The standard font directories are those of the build target (the Windows and macOS ones only on those targets). `system_fonts = false` (mirrored by `RasterOptions::system_fonts`) stops the search of the standard font directories and of the fixed locations of the Liberation, Arial, Times New Roman and Courier New faces: non-embedded fonts then draw from `font_dirs` and the faces compiled into the library only, the base-14 substitutes and, with the default `bundled-fonts` feature, the bundled Noto fallback faces. Lookup order for a non-embedded font: an installed substitute of its class and script, then for a character it lacks an installed face that covers it, then a bundled face, then nothing.
 
 ---
 
@@ -581,7 +591,7 @@ pub use rasterrocket_parser::Password;
 
 `ImageFilter` identifies which decode filter was used for an embedded image (`Dct`, `Jpx`, `CcittFax`, `Jbig2`, `Flate`, `Raw`). Available through `PageDiagnostics` for routing decisions.
 
-The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `validate_dimensions`, the helpers every `RenderedPage` producer shares.
+The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `gray8_into_rendered_page` / `validate_dimensions`, the helpers every `RenderedPage` producer shares. `gray8_into_rendered_page(bmp, page_num, dpi, diagnostics)` takes the bitmap by value and hands a packed buffer (as `rgb_into_gray` returns) to the page without a copy; a padded one is copied row by row as by `gray8_to_rendered_page`.
 
 ---
 
@@ -678,7 +688,10 @@ page in the window), `NoImages`. **Per-page errors (inner `Err`):** `Decode`, `T
 `Pdf`.
 
 **`ComicOptions`** mirrors the relevant subset of `RasterOptions`: `dpi: f32`,
-`first_page: u32`, `last_page: u32`, `deskew: bool`. The DPI rides along on each
+`first_page: u32`, `last_page: u32`, `deskew: bool`, and `session:
+SessionConfig` (default `SessionConfig::default()`), the session an embedded
+PDF is opened with: its overprint, antialiasing, annotation, purpose, font,
+decryption and backend settings. The DPI rides along on each
 `RenderedPage` for downstream OCR; comic images carry no intrinsic resolution.
 Both `ComicOptions` and `ComicError` are `#[non_exhaustive]`: build the options
 with `ComicOptions::new(dpi)` or `ComicOptions::default()` and assign the fields
@@ -895,7 +908,7 @@ Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`.
 
 ### Other public types
 
-`PageView`, `PrefetchConfig` and the resource and content types (`ExtGStateParams`, `ShadingPattern`, `SoftMaskParams`, `FormXObject`, `TransparencyGroupParams`, `ResourceKey`, `Operator`, `TextArrayElement`) are `#[non_exhaustive]`: they cannot be built with a struct literal or matched exhaustively outside the crate. A `PageView` is built with `PageView::whole(&geometry, (scale_x, scale_y))`, the whole page with an initial CTM of `scale × UserUnit` device pixels per unit, and narrowed with `.window(x, y, width, height)` to a device-pixel window of it; `PageRenderer::with_view(&view, doc, page_id)` renders it. `cache::spawn_prefetch` (`cache` feature) returns `io::Result<PrefetchHandle>`: a prefetch thread that cannot be started is an error, not a panic.
+`PageView`, `PrefetchConfig` and the resource and content types (`ExtGStateParams`, `ShadingPattern`, `SoftMaskParams`, `FormXObject`, `TransparencyGroupParams`, `ResourceKey`, `Operator`, `TextArrayElement`) are `#[non_exhaustive]`: they cannot be built with a struct literal or matched exhaustively outside the crate. A `PageView` is built with `PageView::whole(&geometry, (scale_x, scale_y))`, the whole page with an initial CTM of `scale × UserUnit` device pixels per unit, and narrowed with `.window(x, y, width, height)` to a device-pixel window of it; `PageRenderer::with_view(&view, doc, page_id)` renders it on an RGB canvas. `PageRenderer::with_page_group(&view, doc, page_id, group, ink)` also takes the page group (`page_group(doc, page_id)`, ISO 32000-1 §11.4.7) and the canvas kind: with `ink`, the page is painted on a canvas of four process and four spot inks on which overprint is simulated, converted to RGB by `finish`. The canvas is allocated once and its kind cannot change afterwards. `page_uses_overprint(doc, page_id, annotations) -> bool` reports whether an `ExtGState` reachable from the page's resources (through forms, patterns and Type 3 fonts, to the renderer's form depth) or, when `annotations`, from its annotations' appearance streams sets `OP` or `op`; the `rasterrocket` crate passes `ink = overprint && page_uses_overprint(..)`. `ExtGStateParams` carries `overprint_stroke` (`OP`), `overprint_fill` (`op`, defaulting to `OP`) and `overprint_mode: Option<OverprintMode>` (`OPM`: `OverprintMode::Zero` or `NonZero`; `None` when absent or not 0 or 1). `cache::spawn_prefetch` (`cache` feature) returns `io::Result<PrefetchHandle>`: a prefetch thread that cannot be started is an error, not a panic.
 
 ---
 
