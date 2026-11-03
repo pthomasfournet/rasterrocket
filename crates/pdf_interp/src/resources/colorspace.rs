@@ -121,8 +121,8 @@ pub enum ColorSpace {
         /// The colorant the tint paints.
         colorant: Colorant,
     },
-    /// Multi-channel spot-colour set. PDF §8.6.6.5. One tint input per
-    /// colorant; `alternate` and `tint` mirror `Separation`.
+    /// Multi-channel spot-colour set. ISO 32000-1 §8.6.6.5. One tint input
+    /// per colorant; `alternate` and `tint` mirror `Separation`.
     DeviceN {
         /// The colorants, one per tint component, from the `Names` array;
         /// 1 to 255 of them.
@@ -135,7 +135,7 @@ pub enum ColorSpace {
     },
 }
 
-/// A colorant of a `Separation` or `DeviceN` space (PDF §8.6.6.4,
+/// A colorant of a `Separation` or `DeviceN` space (ISO 32000-1 §8.6.6.4,
 /// §8.6.6.5), classified by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Colorant {

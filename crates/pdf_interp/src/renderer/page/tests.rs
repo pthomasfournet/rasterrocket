@@ -16,6 +16,7 @@ use super::canvas::PageCanvas;
 use super::canvas::blend_u8;
 use super::image_blit::{ImageLenError, blend_rgb, check_image_bytes_len};
 use super::image_compositor::ImageCompositor;
+use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
 use super::view::build_initial_ctm;
 use super::xobject::image_draw_size;
@@ -515,7 +516,13 @@ fn image_rows_composite_like_single_samples() {
                 base
             };
             let base = make_base();
-            let compositor = ImageCompositor::new(&base, fill_alpha, mode, None, None);
+            let paint = PaintParams {
+                alpha: fill_alpha,
+                blend_mode: mode,
+                overprint: None,
+                backdrop: None,
+            };
+            let compositor = ImageCompositor::new(&base, &paint);
             let mut runs = make_base();
             compositor.paint_row(&mut runs, 0, 0, &colours, &shape);
             let mut single = make_base();
@@ -1950,16 +1957,6 @@ fn fifth_spot_falls_back_to_process() {
         format!("{content} /S4 cs 0.5 scn 0 0 1 1 re f").as_bytes(),
     ));
     assert_eq!(renderer.finish().1.unslotted_spots, ["Spot4"]);
-}
-
-#[test]
-fn rgb_colour_knocks_out_spots() {
-    let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
-    let (fill, _) = ink_fill(&doc, b"0.2 0.4 0.6 rg 0 0 10 10 re f");
-    assert_eq!(fill.paints(), ChannelMask::ALL);
-    assert!(!fill.opm_eligible());
-    let (fill, _) = ink_fill(&doc, b"0.2 g");
-    assert_eq!(fill.paints(), ChannelMask::ALL);
 }
 
 #[test]

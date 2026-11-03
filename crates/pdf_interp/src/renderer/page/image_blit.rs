@@ -357,24 +357,22 @@ impl PageRenderer<'_> {
         // A stencil paints the fill colour under the fill's overprint; an
         // image's samples write every channel.
         let stencil = img.color_space == ImageColorSpace::Mask;
-        let overprint = stencil
-            .then(|| self.overprint_mask(false, &painted_fill))
-            .flatten();
-        let blend_mode = self.gstate.current().blend_mode;
-        let backdrop = self.paint_backdrop(blend_mode, overprint);
+        let (fill_alpha, blend_mode) = {
+            let gs = self.gstate.current();
+            (gs.fill_alpha, gs.blend_mode)
+        };
+        let paint = if stencil {
+            self.solid_paint(false, &painted_fill, fill_alpha, blend_mode)
+        } else {
+            self.paint_params(fill_alpha, blend_mode, None)
+        };
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
         let gray = |x, y| sample_bytes::<1>(img_bytes, img_w, bpp, x, y);
         let rgb = |x, y| sample_bytes::<3>(img_bytes, img_w, bpp, x, y);
         let gs_transfer = self.gstate.current().transfer.clone();
         let transfer = |px: [u8; 3]| gs_transfer.as_ref().map_or(px, |t| t.apply(px));
-        let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(
-            b,
-            self.gstate.current().fill_alpha,
-            blend_mode,
-            backdrop.as_deref(),
-            overprint,
-        ));
+        let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
         // On an ink canvas a stencil paints the fill colour as its ink.
         let kind = self.canvas.kind();
         if stencil && kind == CanvasKind::Ink {
@@ -493,7 +491,10 @@ impl PageRenderer<'_> {
         if self.canvas.kind() != CanvasKind::Rgb {
             return false;
         }
-        let backdrop = self.paint_backdrop(self.gstate.current().blend_mode, None);
+        let paint = {
+            let gs = self.gstate.current();
+            self.paint_params(gs.fill_alpha, gs.blend_mode, None)
+        };
         let Some(gpu_ctx) = self.gpu_ctx.as_deref() else {
             log::debug!("blit_image: GPU image blit skipped — no GpuCtx attached");
             return false;
@@ -552,13 +553,7 @@ impl PageRenderer<'_> {
         let super::canvas::PageCanvas::Rgb(bitmap) = &mut self.canvas else {
             return false;
         };
-        let compositor = ImageCompositor::new(
-            bitmap,
-            self.gstate.current().fill_alpha,
-            self.gstate.current().blend_mode,
-            backdrop.as_deref(),
-            None,
-        );
+        let compositor = ImageCompositor::new(bitmap, &paint);
         let transfer = self.gstate.current().transfer.clone();
         let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
             composite_rgba_rows(
@@ -633,12 +628,11 @@ pub(super) fn blend_rgb(dst: &mut [u8], src: [u8; 3], alpha: u8) {
     if alpha == 255 {
         dst.copy_from_slice(&src);
     } else {
-        let a = u16::from(alpha);
         // Each output channel blends against its own existing value —
         // the destination is RGB and channels may differ.
-        dst[0] = blend_u8(src[0], dst[0], a);
-        dst[1] = blend_u8(src[1], dst[1], a);
-        dst[2] = blend_u8(src[2], dst[2], a);
+        dst[0] = blend_u8(src[0], dst[0], alpha);
+        dst[1] = blend_u8(src[1], dst[1], alpha);
+        dst[2] = blend_u8(src[2], dst[2], alpha);
     }
 }
 

@@ -96,6 +96,22 @@ fn spot_overprints_process() {
     assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0]);
 }
 
+/// An RGB or grey colour paints every channel and is not eligible for
+/// nonzero overprint mode: under overprint an RGB fill over a spot knocks
+/// the spot out where it paints and leaves it beside.
+#[test]
+fn rgb_colour_knocks_out_spots() {
+    let doc = overprint_doc("/GS << /op true /OPM 1 >>", &spot_space());
+    let content = "/GS gs /Spot cs 1 scn 0 0 10 10 re f 0.2 0.4 0.6 rg 0 0 5 10 re f";
+    let (fill, ink) = ink_fill(&doc, content.as_bytes());
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+    assert!(!fill.opm_eligible());
+    assert_eq!(ink_at(&ink, 2, 5)[4], 0, "the spot under the RGB fill");
+    assert_eq!(ink_at(&ink, 7, 5)[4], 255, "the spot beside it");
+    let (fill, _) = ink_fill(&doc, b"0.2 g");
+    assert_eq!(fill.paints(), ChannelMask::ALL);
+}
+
 /// An indexed colour paints as its palette entry in the base space: a
 /// black entry of a `DeviceCMYK` palette overprints the cyan under
 /// nonzero overprint mode, and an entry of a spot palette paints the

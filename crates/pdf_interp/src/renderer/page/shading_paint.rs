@@ -12,21 +12,20 @@ use std::sync::Arc;
 
 use raster::clip::Clip;
 use raster::path::{Path, PathBuilder};
-use raster::pipe::{ChannelMask, PipeSrc, PipeState};
+use raster::pipe::{PipeSrc, PipeState};
 use raster::shading::shaded_fill;
 use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
 use raster::{eo_fill, fill};
 
 use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
+use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::renderer::color::RasterColor;
 use crate::resources::ShadingPattern;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 use crate::resources::transfer::Transfer;
-use raster::transparency::Backdrop;
-use raster::types::BlendMode;
 
 /// Return `clip` intersected with the device-space quadrilateral `bbox`.
 fn clip_to_bbox(mut clip: Clip, bbox: Option<[(f64, f64); 4]>, flatness: f64) -> Clip {
@@ -67,30 +66,19 @@ fn background(kind: CanvasKind, bg: [u8; 3], transfer: Option<&Transfer>) -> Ras
 /// The compositing parameters of one shading paint, read from the graphics
 /// state in effect; the pipe borrows them.
 struct ShadingPaint {
-    /// The constant alpha of the painting operation.
-    alpha: u8,
-    /// The blend mode in effect.
-    blend_mode: BlendMode,
-    /// The backdrop the paint consults (see `PageRenderer::paint_backdrop`).
-    backdrop: Option<Arc<Backdrop>>,
+    /// The alpha, blend mode, channels and backdrop of the paint.
+    paint: PaintParams,
     /// The transfer function in effect.
     transfer: Option<Arc<Transfer>>,
-    /// The channels the paint writes; `None` for all.
-    overprint: Option<ChannelMask>,
 }
 
 impl ShadingPaint {
-    /// The pipe for a canvas of `kind`: `make_pipe`, applying the transfer
+    /// The pipe for a canvas of `kind`: the paint's pipe, applying the transfer
     /// function to the shading's colours on an RGB canvas.  On an ink
     /// canvas the shading's sources apply it before their conversion to
     /// ink.
     fn pipe(&self, kind: CanvasKind) -> PipeState<'_> {
-        let mut pipe = PageRenderer::make_pipe(
-            self.alpha,
-            self.blend_mode,
-            self.backdrop.as_deref(),
-            self.overprint,
-        );
+        let mut pipe = self.paint.pipe();
         if let Some(set) = CanvasPattern::pipe_transfer(kind, self.transfer.as_deref()) {
             pipe.transfer = set;
         }
@@ -112,11 +100,8 @@ impl PageRenderer<'_> {
         };
         let overprint = self.overprint_channels(stroke, shading.paints);
         ShadingPaint {
-            alpha,
-            blend_mode: gs.blend_mode,
-            backdrop: self.paint_backdrop(gs.blend_mode, overprint),
+            paint: self.paint_params(alpha, gs.blend_mode, overprint),
             transfer: gs.transfer.clone(),
-            overprint,
         }
     }
 
@@ -185,7 +170,7 @@ impl PageRenderer<'_> {
         // The shading is one object under the soft mask in effect; it can
         // paint the whole clip.
         let region = PixelRect::of_clip(&clip, self.width, self.height);
-        self.paint_object(region, state.alpha, |r| match &shading.result {
+        self.paint_object(region, state.paint.alpha, |r| match &shading.result {
             ShadingResult::Pattern(pattern) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),

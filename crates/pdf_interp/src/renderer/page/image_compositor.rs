@@ -4,16 +4,15 @@
 use color::{Pixel, PixelMode};
 use raster::{
     Bitmap,
-    pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern},
-    transparency::Backdrop,
+    pipe::{Pattern, PipeSrc, PipeState, RowPattern},
     types::BlendMode,
 };
 
-use super::PageRenderer;
 use super::canvas::InkPattern;
 use super::image_blit::blend_rgb;
 #[cfg(feature = "cache")]
 use super::image_sampler::{GridClip, SampleGrid};
+use super::paint::PaintParams;
 
 /// Source-over whole rows of a downloaded RGBA8 page buffer, the first of
 /// which is page row `y0`, onto `bitmap`, restricted to the grid's columns
@@ -75,24 +74,15 @@ pub(super) struct ImageCompositor<'a> {
 }
 
 impl<'a> ImageCompositor<'a> {
-    /// The compositor of samples painted onto `bitmap` with `fill_alpha`
-    /// under `blend_mode`, writing the channels `overprint` (`None` for
-    /// all); `backdrop` and `overprint` are as `PageRenderer::make_pipe`
-    /// takes them.
-    pub(super) fn new<P: Pixel>(
-        bitmap: &Bitmap<P>,
-        fill_alpha: u8,
-        blend_mode: BlendMode,
-        backdrop: Option<&'a Backdrop>,
-        overprint: Option<ChannelMask>,
-    ) -> Self {
+    /// The compositor of samples painted onto `bitmap` with the
+    /// parameters `paint`.
+    pub(super) fn new<P: Pixel>(bitmap: &Bitmap<P>, paint: &'a PaintParams) -> Self {
         let direct = P::MODE == PixelMode::Rgb8
             && bitmap.alpha_plane().is_none()
-            && fill_alpha == 255
-            && blend_mode == BlendMode::Normal;
+            && paint.alpha == u8::MAX
+            && paint.blend_mode == BlendMode::Normal;
         Self {
-            pipe: (!direct)
-                .then(|| PageRenderer::make_pipe(fill_alpha, blend_mode, backdrop, overprint)),
+            pipe: (!direct).then(|| paint.pipe()),
             solid: None,
         }
     }

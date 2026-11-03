@@ -47,8 +47,9 @@ pub(crate) struct RasterColor {
     ink: OnceLock<[u8; 8]>,
     /// The channels the colour paints on an ink canvas.
     paints: ChannelMask,
-    /// Whether nonzero overprint mode (PDF §8.6.7) applies to the colour:
-    /// it is a solid colour given in a four-component process space.
+    /// Whether nonzero overprint mode (ISO 32000-1 §8.6.7) applies to the
+    /// colour: it is a solid colour given in a four-component process
+    /// space.
     opm_eligible: bool,
     /// The process channels whose component is exactly 0, bit `i` for
     /// channel `i`; nonzero overprint mode leaves them unpainted.  Zero

@@ -37,6 +37,34 @@ fn transform_path(path: &raster::path::Path, m: &[f64; 6]) -> raster::path::Path
     }
 }
 
+/// The compositing parameters of one paint: its constant alpha and blend
+/// mode, the channels it writes, and the backdrop of the enclosing
+/// non-isolated group that a paint consults (see
+/// [`PageRenderer::paint_backdrop`]).  The pipe borrows them.
+pub(super) struct PaintParams {
+    /// The constant alpha of the painting operation.
+    pub(super) alpha: u8,
+    /// The blend mode in effect.
+    pub(super) blend_mode: BlendMode,
+    /// The channels the paint writes; `None` for all.
+    pub(super) overprint: Option<ChannelMask>,
+    /// The group backdrop the paint consults, if any.
+    pub(super) backdrop: Option<Arc<Backdrop>>,
+}
+
+impl PaintParams {
+    /// The pipe of the paint, with the identity transfer.
+    pub(super) fn pipe(&self) -> PipeState<'_> {
+        PipeState {
+            blend_mode: self.blend_mode,
+            a_input: self.alpha,
+            transfer: TransferSet::identity_rgb(),
+            backdrop: self.backdrop.as_deref().map(Backdrop::as_pipe_backdrop),
+            overprint: self.overprint,
+        }
+    }
+}
+
 /// The area scale `√|det|` of the linear part of `m`: the factor by which
 /// it scales lengths on average.  `None` for a singular or non-finite `m`,
 /// whose inverse [`invert_affine`] does not give.
@@ -185,25 +213,6 @@ impl PageRenderer<'_> {
             .clip_to_path(&xpath, even_odd);
     }
 
-    /// Build a [`PipeState`] with the given opacity and blend mode that
-    /// writes the channels `overprint` (`None` writes every channel);
-    /// `backdrop` is the enclosing non-isolated group's, for a paint that
-    /// consults it (see [`Self::paint_backdrop`]).
-    pub(super) fn make_pipe(
-        a_input: u8,
-        blend_mode: BlendMode,
-        backdrop: Option<&Backdrop>,
-        overprint: Option<ChannelMask>,
-    ) -> PipeState<'_> {
-        PipeState {
-            blend_mode,
-            a_input,
-            transfer: TransferSet::identity_rgb(),
-            backdrop: backdrop.map(Backdrop::as_pipe_backdrop),
-            overprint,
-        }
-    }
-
     /// The tables of `transfer` as the pipe applies them to a source that
     /// is not mapped beforehand: a pattern's colours, a shading and its
     /// background.  A solid fill or stroke colour is mapped before painting
@@ -230,9 +239,40 @@ impl PageRenderer<'_> {
             .flatten()
     }
 
+    /// The parameters of a paint at constant alpha `alpha` under
+    /// `blend_mode` that writes the channels `overprint` (`None` for
+    /// all), with the backdrop it consults.
+    pub(super) fn paint_params(
+        &self,
+        alpha: u8,
+        blend_mode: BlendMode,
+        overprint: Option<ChannelMask>,
+    ) -> PaintParams {
+        PaintParams {
+            alpha,
+            blend_mode,
+            overprint,
+            backdrop: self.paint_backdrop(blend_mode, overprint),
+        }
+    }
+
+    /// The parameters of a paint of the solid colour `colour` by the
+    /// stroking (`stroke`) or non-stroking operation at constant alpha
+    /// `alpha` under `blend_mode`: it writes the channels of
+    /// [`Self::overprint_mask`].
+    pub(super) fn solid_paint(
+        &self,
+        stroke: bool,
+        colour: &RasterColor,
+        alpha: u8,
+        blend_mode: BlendMode,
+    ) -> PaintParams {
+        self.paint_params(alpha, blend_mode, self.overprint_mask(stroke, colour))
+    }
+
     /// The channels a paint of the stroking (`stroke`) or non-stroking
     /// operation writes when its source paints the channels `paints`
-    /// (PDF §8.6.7): `paints` with overprint set for the operation on an
+    /// (ISO 32000-1 §8.6.7): `paints` with overprint set for the operation on an
     /// ink canvas; otherwise `None`, every channel — on an RGB canvas,
     /// with overprint off, and when `paints` covers every channel.
     pub(super) fn overprint_channels(
@@ -343,12 +383,12 @@ impl PageRenderer<'_> {
         };
         // A tiling pattern writes every channel; a solid colour the
         // channels of its space under the overprint state in effect.
-        let overprint = tiled
-            .is_none()
-            .then(|| self.overprint_mask(false, &solid_color))
-            .flatten();
-        let backdrop = self.paint_backdrop(blend_mode, overprint);
-        let mut pipe = Self::make_pipe(fill_alpha, blend_mode, backdrop.as_deref(), overprint);
+        let paint = if tiled.is_some() {
+            self.paint_params(fill_alpha, blend_mode, None)
+        } else {
+            self.solid_paint(false, &solid_color, fill_alpha, blend_mode)
+        };
+        let mut pipe = paint.pipe();
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),
@@ -534,12 +574,12 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
-        let overprint = tiled
-            .is_none()
-            .then(|| self.overprint_mask(true, &solid_color))
-            .flatten();
-        let backdrop = self.paint_backdrop(blend_mode, overprint);
-        let mut pipe = Self::make_pipe(stroke_alpha, blend_mode, backdrop.as_deref(), overprint);
+        let paint = if tiled.is_some() {
+            self.paint_params(stroke_alpha, blend_mode, None)
+        } else {
+            self.solid_paint(true, &solid_color, stroke_alpha, blend_mode)
+        };
+        let mut pipe = paint.pipe();
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),

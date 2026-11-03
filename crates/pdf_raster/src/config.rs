@@ -295,7 +295,7 @@ pub struct SessionConfig {
     /// `false` scan-converts at pixel centres, giving hard bilevel edges;
     /// such fills always run on the CPU.
     pub vector_antialias: bool,
-    /// Whether overprint (`OP`, `op`, `OPM`; ISO 32000-2 §8.6.7) is simulated.
+    /// Whether overprint (`OP`, `op`, `OPM`; PDF 2.0 §8.6.7) is simulated.
     ///
     /// Default `false`: every object knocks out what lies beneath it.  `true`
     /// paints a page whose graphics states set overprint on a canvas of

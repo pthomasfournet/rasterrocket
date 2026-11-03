@@ -267,26 +267,25 @@ pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) {
                 continue;
             }
             for c in px {
-                *c = blend_u8(*c, white, u16::from(a));
+                *c = blend_u8(*c, white, a);
             }
         }
     }
     bitmap.drop_alpha_plane();
 }
 
-/// Porter-Duff source-over blend for a single 8-bit channel.
+/// Porter-Duff source-over blend for a single 8-bit channel:
+/// `(src × alpha + dst × (255 − alpha)) / 255`.
 ///
-/// Formula: `(src * alpha + dst * (255 - alpha)) / 255`.
-///
-/// Maximum intermediate value: `255 * 255 = 65025 < u16::MAX`, so no overflow
-/// is possible regardless of the alpha split.
+/// The two weights sum to 255, so the sum of products is at most
+/// `255 × 255 = 65025`, within `u16`.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "result is (x*a + y*ia)/255 where a+ia=255; max value is 255*255/255=255, always fits u8"
+    reason = "the sum of products is at most 255 × 255, so the quotient is at most 255"
 )]
-pub(super) fn blend_u8(src: u8, dst: u8, alpha: u16) -> u8 {
-    let ia = 255_u16 - alpha;
-    ((u16::from(src) * alpha + u16::from(dst) * ia) / 255) as u8
+pub(super) fn blend_u8(src: u8, dst: u8, alpha: u8) -> u8 {
+    let (a, ia) = (u16::from(alpha), u16::from(u8::MAX - alpha));
+    ((u16::from(src) * a + u16::from(dst) * ia) / 255) as u8
 }
 
 /// Make the pixels of `region` transparent: colour and alpha zero.
