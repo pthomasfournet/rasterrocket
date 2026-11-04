@@ -28,22 +28,25 @@ use read_fonts::ps::cff::charset::Charset;
 use read_fonts::ps::cff::{CffFontRef, Subfont};
 use read_fonts::ps::type1::Type1Font;
 use read_fonts::ps::type1::cid::CidType1Font;
-use read_fonts::tables::cmap::{Cmap, CmapSubtable, PlatformId};
-use read_fonts::tables::gsub::{SingleSubst, SubstitutionSubtables};
-use read_fonts::tables::layout::CoverageTable;
-use read_fonts::types::{BigEndian, GlyphId, Tag};
+use read_fonts::types::{GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
+use skrifa::MetadataProvider;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{
     DrawSettings, Engine, HintingInstance, HintingOptions, OutlineGlyphCollection,
     OutlineGlyphFormat, OutlinePen, Target,
 };
-use skrifa::{GlyphNameSource, MetadataProvider};
 
 use crate::engine::LoadError;
 
+mod charmap;
+mod pens;
 mod shape;
+mod vertical;
 
+pub(crate) use charmap::unicode_subtable_index;
+use charmap::{SfntCmap, named_glyphs, select_sfnt_cmap};
+use pens::{BoundsPen, NullPen};
 pub use shape::{ShapeError, ShapedGlyph};
 
 /// The container format of a font program.
@@ -78,24 +81,6 @@ impl FontFormat {
             _ => None,
         }
     }
-}
-
-/// The sfnt `cmap` subtable a character code resolves through.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum SfntCmap {
-    /// A Unicode subtable: codes are Unicode scalar values.
-    Unicode(usize),
-    /// No Unicode or Microsoft Symbol subtable, but `post` glyph names of
-    /// which at least one maps to Unicode through the Adobe Glyph List:
-    /// Unicode values resolve through those names.
-    UnicodeFromNames,
-    /// A (1,0) Macintosh Roman subtable: codes index it directly.
-    MacRoman(usize),
-    /// A (3,0) Microsoft Symbol subtable, whose entries usually sit in the
-    /// 0xF000–0xF0FF private-use range (PDF §9.6.6.4).
-    Symbol(usize),
-    /// No usable subtable: every code resolves to `.notdef`.
-    None,
 }
 
 /// Format-specific outline source.
@@ -319,152 +304,6 @@ impl FontProgram {
         Arc::clone(self.data.borrow_owner())
     }
 
-    /// `true` when this is an sfnt whose charmap is Unicode (a Unicode
-    /// `cmap` subtable, or one derived from `post` glyph names), so
-    /// [`Self::char_index`] takes Unicode scalar values.
-    #[must_use]
-    pub const fn has_unicode_cmap(&self) -> bool {
-        matches!(
-            self.outlines,
-            Outlines::Sfnt {
-                cmap: SfntCmap::Unicode(_) | SfntCmap::UnicodeFromNames,
-                ..
-            }
-        )
-    }
-
-    /// `true` when the program is an sfnt with no `cmap` subtable keyed by
-    /// character code (Unicode, (1,0) Macintosh Roman or (3,0) Microsoft
-    /// Symbol).  Its glyphs are then reachable only by glyph index or
-    /// through their `post` names; any Unicode charmap it answers
-    /// [`Self::char_index`] with is derived from those names.
-    #[must_use]
-    pub fn lacks_cmap(&self) -> bool {
-        match self.outlines {
-            Outlines::Sfnt {
-                cmap: SfntCmap::None,
-                ..
-            } => true,
-            // Selected only when no Unicode or (3,0) subtable exists.
-            Outlines::Sfnt {
-                cmap: SfntCmap::UnicodeFromNames,
-                ..
-            } => !self
-                .sfnt()
-                .and_then(|font| font.cmap().ok())
-                .is_some_and(|cmap| {
-                    cmap.encoding_records()
-                        .iter()
-                        .any(|r| r.platform_id() == PlatformId::Macintosh && r.encoding_id() == 0)
-                }),
-            _ => false,
-        }
-    }
-
-    /// Glyph index of character code `code` through the program's charmap,
-    /// or 0 (`.notdef`) when it has none.
-    ///
-    /// The charmap is the one a simple font's codes resolve through when
-    /// the PDF supplies no code → glyph table:
-    ///
-    /// - sfnt: a Unicode subtable (32-bit before 16-bit, last listed
-    ///   first); else Unicode values derived from `post` names when the
-    ///   font has no (3,0) subtable; else (1,0) Macintosh Roman, looked up
-    ///   directly; else (3,0) Microsoft Symbol, looked up directly and then
-    ///   with the 0xF000 private-use offset (PDF §9.6.6.4).
-    /// - Type 1 and bare CFF: Unicode values derived from glyph names.
-    #[must_use]
-    pub fn char_index(&self, code: u32) -> u32 {
-        match usize::try_from(code)
-            .ok()
-            .and_then(|i| self.byte_charmap.get(i))
-        {
-            Some(&gid) => gid,
-            None => self.charmap_lookup(code),
-        }
-    }
-
-    fn charmap_lookup(&self, code: u32) -> u32 {
-        match &self.outlines {
-            Outlines::Sfnt { cmap, .. } => match *cmap {
-                SfntCmap::Unicode(record) | SfntCmap::MacRoman(record) => {
-                    self.cmap_subtable_lookup(record, code)
-                }
-                SfntCmap::Symbol(record) => match self.cmap_subtable_lookup(record, code) {
-                    0 if code <= 0xFF => self.cmap_subtable_lookup(record, 0xF000 | code),
-                    gid => gid,
-                },
-                SfntCmap::UnicodeFromNames => self.name_charmap_lookup(code),
-                SfntCmap::None => 0,
-            },
-            Outlines::Cff => self.name_charmap_lookup(code),
-            Outlines::Type1(font) => font.unicode_charmap().map(code).map_or(0, GlyphId::to_u32),
-            // Glyphs are selected by CID only.
-            Outlines::CidType1(_) => 0,
-        }
-    }
-
-    /// Glyph index of the single-byte code `code` through the sfnt's
-    /// byte-keyed `cmap` subtables, independent of the charmap
-    /// [`Self::char_index`] uses: the (3,0) Microsoft Symbol subtable at
-    /// `code`, then at `0xF000 + code`, then the (1,0) Macintosh Roman
-    /// subtable at `code` (PDF §9.6.6.4, symbolic TrueType font).  0 when
-    /// no such subtable maps the code, and for every non-sfnt program.
-    #[must_use]
-    pub fn code_index(&self, code: u8) -> u32 {
-        let Some(cmap) = self.sfnt().and_then(|font| font.cmap().ok()) else {
-            return 0;
-        };
-        let records = cmap.encoding_records();
-        let find = |platform: PlatformId, encoding: u16| {
-            records
-                .iter()
-                .position(|r| r.platform_id() == platform && r.encoding_id() == encoding)
-        };
-        let code = u32::from(code);
-        let symbol = find(PlatformId::Windows, 0).map_or(0, |record| {
-            match self.cmap_subtable_lookup(record, code) {
-                0 => self.cmap_subtable_lookup(record, 0xF000 | code),
-                gid => gid,
-            }
-        });
-        if symbol != 0 {
-            return symbol;
-        }
-        find(PlatformId::Macintosh, 0).map_or(0, |record| self.cmap_subtable_lookup(record, code))
-    }
-
-    fn cmap_subtable_lookup(&self, record: usize, code: u32) -> u32 {
-        let Some(font) = self.sfnt() else {
-            return 0;
-        };
-        font.cmap()
-            .ok()
-            .and_then(|cmap| {
-                let subtable = cmap
-                    .encoding_records()
-                    .get(record)?
-                    .subtable(cmap.offset_data())
-                    .ok()?;
-                subtable.map_codepoint(code)
-            })
-            .map_or(0, GlyphId::to_u32)
-    }
-
-    fn name_charmap_lookup(&self, code: u32) -> u32 {
-        self.name_charmap
-            .get_or_init(|| {
-                let names = self.glyph_names();
-                Charmap::from_glyph_names(
-                    names
-                        .iter()
-                        .map(|(gid, name)| (GlyphId::new(*gid), name.as_ref())),
-                )
-            })
-            .map(code)
-            .map_or(0, GlyphId::to_u32)
-    }
-
     /// Glyph index of the glyph named `name` in the program's own glyph
     /// names (Type 1 `CharStrings`, CFF charset, sfnt `post` or CFF table),
     /// or 0 when absent.  The first glyph carrying the name wins.
@@ -532,10 +371,8 @@ impl FontProgram {
     fn glyph_names(&self) -> Vec<(u32, Cow<'_, str>)> {
         match &self.outlines {
             Outlines::Sfnt { .. } => self.sfnt().map_or_else(Vec::new, |font| {
-                font.glyph_names()
-                    .iter()
-                    .filter(|(_, name)| !name.is_synthesized())
-                    .map(|(gid, name)| (gid.to_u32(), Cow::Owned(name.as_str().to_owned())))
+                named_glyphs(&font.glyph_names())
+                    .map(|(gid, name)| (gid.to_u32(), Cow::Owned(name)))
                     .collect()
             }),
             Outlines::Cff => self.cff().map_or_else(Vec::new, |cff| {
@@ -573,40 +410,6 @@ impl FontProgram {
             Some(map) => map.get(&selector).copied(),
             None => Some(selector),
         }
-    }
-
-    /// The vertical form of glyph `gid` through the `GSUB` `vert` / `vrt2`
-    /// single substitutions (rotated brackets and punctuation of vertical
-    /// writing), or `gid` itself when the program defines none or the form
-    /// it names is not a glyph of the program.
-    #[must_use]
-    pub fn vertical_gid(&self, gid: u32) -> u32 {
-        self.vertical_forms
-            .get_or_init(|| match self.data.borrow_dependent() {
-                Views::Sfnt { font, outlines } => {
-                    vertical_forms(font, &|gid| outlines.get(GlyphId::new(gid)).is_some())
-                }
-                _ => HashMap::new(),
-            })
-            .get(&gid)
-            .copied()
-            .unwrap_or(gid)
-    }
-
-    /// The composite-font selector of the vertical form of the glyph
-    /// `selector` selects (see [`Self::cid_to_gid`]): a CID for a
-    /// CID-keyed CFF program, else the glyph index.  `selector` itself
-    /// when the glyph has no vertical form.
-    #[must_use]
-    pub fn vertical_selector(&self, selector: u32) -> u32 {
-        let Some(gid) = self.cid_to_gid(selector) else {
-            return selector;
-        };
-        let vertical = self.vertical_gid(gid);
-        if vertical == gid {
-            return selector;
-        }
-        self.gid_to_selector(vertical).unwrap_or(selector)
     }
 
     /// The composite-font selector of glyph `gid`, the inverse of
@@ -801,116 +604,6 @@ fn parse_type1(data: &[u8]) -> Result<(Outlines, i32), LoadError> {
     }
 }
 
-/// Glyph index → vertical form from the single substitutions the `vert`
-/// and `vrt2` features of `font`'s `GSUB` table apply (the first feature
-/// listing a glyph with a form for which `is_glyph` holds wins).
-fn vertical_forms(font: &FontRef<'_>, is_glyph: &dyn Fn(u32) -> bool) -> HashMap<u32, u32> {
-    let mut forms = HashMap::new();
-    let Ok(gsub) = font.gsub() else {
-        return forms;
-    };
-    let (Ok(features), Ok(lookups)) = (gsub.feature_list(), gsub.lookup_list()) else {
-        return forms;
-    };
-    let mut lookup_indices: Vec<u16> = Vec::new();
-    for record in features.feature_records() {
-        let tag = record.feature_tag();
-        if (tag == Tag::new(b"vert") || tag == Tag::new(b"vrt2"))
-            && let Ok(feature) = record.feature(features.offset_data())
-        {
-            lookup_indices.extend(feature.lookup_list_indices().iter().map(BigEndian::get));
-        }
-    }
-    lookup_indices.sort_unstable();
-    lookup_indices.dedup();
-    for index in lookup_indices {
-        let Ok(lookup) = lookups.lookups().get(usize::from(index)) else {
-            continue;
-        };
-        let Ok(SubstitutionSubtables::Single(subtables)) = lookup.subtables() else {
-            continue;
-        };
-        for subtable in subtables.iter().flatten() {
-            match subtable {
-                SingleSubst::Format1(single) => {
-                    if let Ok(coverage) = single.coverage() {
-                        let delta = single.delta_glyph_id().into();
-                        add_forms(
-                            &mut forms,
-                            is_glyph,
-                            &coverage,
-                            delta_targets(&coverage, delta, 0xFFFF),
-                        );
-                    }
-                }
-                SingleSubst::Format3(single) => {
-                    if let Ok(coverage) = single.coverage() {
-                        let delta = single.delta_glyph_id().into();
-                        add_forms(
-                            &mut forms,
-                            is_glyph,
-                            &coverage,
-                            delta_targets(&coverage, delta, 0xFF_FFFF),
-                        );
-                    }
-                }
-                SingleSubst::Format2(single) => {
-                    if let Ok(coverage) = single.coverage() {
-                        let targets = single.substitute_glyph_ids().iter();
-                        add_forms(
-                            &mut forms,
-                            is_glyph,
-                            &coverage,
-                            targets.map(|to| to.get().to_u32()),
-                        );
-                    }
-                }
-                SingleSubst::Format4(single) => {
-                    if let Ok(coverage) = single.coverage() {
-                        let targets = single.substitute_glyph_ids().iter();
-                        add_forms(
-                            &mut forms,
-                            is_glyph,
-                            &coverage,
-                            targets.map(|to| to.get().to_u32()),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    forms
-}
-
-/// Adds the forms of a single substitution: the covered glyphs, in
-/// coverage order, map to `targets`.  A target for which `is_glyph` fails
-/// is skipped; a glyph already mapped keeps its earlier form.
-fn add_forms(
-    forms: &mut HashMap<u32, u32>,
-    is_glyph: &dyn Fn(u32) -> bool,
-    coverage: &CoverageTable<'_>,
-    targets: impl IntoIterator<Item = u32>,
-) {
-    for (glyph, to) in coverage.iter().zip(targets) {
-        if is_glyph(to) {
-            let _ = forms.entry(glyph.to_u32()).or_insert(to);
-        }
-    }
-}
-
-/// The targets of a delta single substitution, in coverage order: each
-/// covered glyph plus `delta`, reduced to the glyph-index range of the
-/// subtable format, whose largest index is the all-ones `mask`.
-fn delta_targets<'a>(
-    coverage: &CoverageTable<'a>,
-    delta: i32,
-    mask: u32,
-) -> impl Iterator<Item = u32> + 'a {
-    coverage
-        .iter()
-        .map(move |glyph| glyph.to_u32().wrapping_add_signed(delta) & mask)
-}
-
 /// Lowest glyph index carrying each string identifier below
 /// [`PREDEFINED_SID_LIMIT`] in `charset`, indexed by string identifier;
 /// the inverse that [`Charset::glyph_id`] computes one identifier at a
@@ -945,133 +638,6 @@ fn cid_charset_map(cff: &CffFontRef<'_>) -> Option<HashMap<u32, u32>> {
             .or_insert_with(|| gid.to_u32());
     }
     Some(map)
-}
-
-/// Choose the `cmap` subtable character codes resolve through.  When the
-/// choice is [`SfntCmap::UnicodeFromNames`], the Unicode map built from the
-/// `post` names comes back with it.
-fn select_sfnt_cmap(font: &FontRef<'_>) -> (SfntCmap, Option<Charmap>) {
-    let Ok(cmap) = font.cmap() else {
-        return post_name_charmap(font).map_or((SfntCmap::None, None), |map| {
-            (SfntCmap::UnicodeFromNames, Some(map))
-        });
-    };
-    if let Some(i) = unicode_subtable_index(&cmap) {
-        return (SfntCmap::Unicode(i), None);
-    }
-    let records = cmap.encoding_records();
-    let find = |platform: PlatformId, encoding: u16| {
-        records
-            .iter()
-            .position(|r| r.platform_id() == platform && r.encoding_id() == encoding)
-    };
-    let symbol = find(PlatformId::Windows, 0);
-    if symbol.is_none()
-        && let Some(map) = post_name_charmap(font)
-    {
-        return (SfntCmap::UnicodeFromNames, Some(map));
-    }
-    let choice = find(PlatformId::Macintosh, 0)
-        .map(SfntCmap::MacRoman)
-        .or_else(|| symbol.map(SfntCmap::Symbol))
-        .unwrap_or(SfntCmap::None);
-    (choice, None)
-}
-
-/// Index of the encoding record of `cmap` whose subtable maps Unicode
-/// scalar values: among the readable Unicode-platform, ISO, (3,1) and
-/// (3,10) records, a full-repertoire subtable before a BMP one and, within
-/// each class, the last listed.  Variation-sequence (format 14) subtables
-/// map no characters and are skipped.
-pub(crate) fn unicode_subtable_index(cmap: &Cmap<'_>) -> Option<usize> {
-    let records = cmap.encoding_records();
-    let format = |i: usize| records[i].subtable(cmap.offset_data()).ok();
-    let is_unicode = |i: usize| {
-        let r = &records[i];
-        matches!(
-            (r.platform_id(), r.encoding_id()),
-            (PlatformId::Unicode | PlatformId::ISO, _) | (PlatformId::Windows, 1 | 10)
-        ) && !matches!(format(i), Some(CmapSubtable::Format14(_)) | None)
-    };
-    let is_ucs4 = |i: usize| {
-        let r = &records[i];
-        match (r.platform_id(), r.encoding_id()) {
-            (PlatformId::Windows, 10) | (PlatformId::Unicode, 4) => true,
-            (PlatformId::Unicode, 6) => matches!(format(i), Some(CmapSubtable::Format13(_))),
-            _ => false,
-        }
-    };
-    (0..records.len())
-        .rev()
-        .find(|&i| is_unicode(i) && is_ucs4(i))
-        .or_else(|| (0..records.len()).rev().find(|&i| is_unicode(i)))
-}
-
-/// Unicode map derived from the `post` glyph names, `None` when the table
-/// names no glyph or no name maps to Unicode.
-fn post_name_charmap(font: &FontRef<'_>) -> Option<Charmap> {
-    if !font.post().is_ok_and(|post| post.num_names() != 0) {
-        return None;
-    }
-    let names = font.glyph_names();
-    if names.source() != GlyphNameSource::Post {
-        return None;
-    }
-    let pairs: Vec<(GlyphId, String)> = names
-        .iter()
-        .filter(|(_, name)| !name.is_synthesized())
-        .map(|(gid, name)| (gid, name.as_str().to_owned()))
-        .collect();
-    let map = Charmap::from_glyph_names(pairs.iter().map(|(gid, name)| (*gid, name.as_str())));
-    let maps_any = map.iter().next().is_some();
-    maps_any.then_some(map)
-}
-
-/// Pen accumulating the box of every point it receives.
-#[derive(Default)]
-struct BoundsPen {
-    /// `[x_min, y_min, x_max, y_max]`; `None` before the first point.
-    bounds: Option<[f32; 4]>,
-}
-
-impl BoundsPen {
-    fn add(&mut self, x: f32, y: f32) {
-        let [x0, y0, x1, y1] = self.bounds.get_or_insert([x, y, x, y]);
-        *x0 = x0.min(x);
-        *y0 = y0.min(y);
-        *x1 = x1.max(x);
-        *y1 = y1.max(y);
-    }
-}
-
-impl OutlinePen for BoundsPen {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.add(cx0, cy0);
-        self.add(x, y);
-    }
-    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        self.add(cx0, cy0);
-        self.add(cx1, cy1);
-        self.add(x, y);
-    }
-    fn close(&mut self) {}
-}
-
-/// Pen that discards every command; used to evaluate charstring widths.
-struct NullPen;
-
-impl OutlinePen for NullPen {
-    fn move_to(&mut self, _x: f32, _y: f32) {}
-    fn line_to(&mut self, _x: f32, _y: f32) {}
-    fn quad_to(&mut self, _cx0: f32, _cy0: f32, _x: f32, _y: f32) {}
-    fn curve_to(&mut self, _cx0: f32, _cy0: f32, _cx1: f32, _cy1: f32, _x: f32, _y: f32) {}
-    fn close(&mut self) {}
 }
 
 #[cfg(test)]
