@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use read_fonts::ps::cff::charset::Charset;
 use read_fonts::ps::cff::{CffFontRef, Subfont};
 use read_fonts::ps::charmap::Charmap;
 use read_fonts::ps::type1::Type1Font;
@@ -488,7 +489,15 @@ impl FontProgram {
                     if let Some(cff) = self.cff().filter(|cff| !cff.is_cid())
                         && let Some(encoding) = cff.encoding()
                     {
-                        fill(&|code| encoding.map(code));
+                        if let Some(predefined) = encoding.predefined() {
+                            let by_sid = first_glyph_by_sid(encoding.charset());
+                            fill(&|code| {
+                                let sid = usize::from(predefined.sid(code)?.to_u16());
+                                by_sid.get(sid).copied().flatten()
+                            });
+                        } else {
+                            fill(&|code| encoding.map(code));
+                        }
                     }
                 }
                 Outlines::Type1(font) => {
@@ -830,6 +839,26 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
     }
     forms
 }
+
+/// Lowest glyph index carrying each string identifier below
+/// [`PREDEFINED_SID_LIMIT`] in `charset`, indexed by string identifier;
+/// the inverse that [`Charset::glyph_id`] computes one identifier at a
+/// time.
+fn first_glyph_by_sid(charset: &Charset<'_>) -> Vec<Option<GlyphId>> {
+    let mut by_sid = vec![None; PREDEFINED_SID_LIMIT];
+    for (gid, sid) in charset.iter() {
+        if let Some(slot) = by_sid.get_mut(usize::from(sid.to_u16()))
+            && slot.is_none()
+        {
+            *slot = Some(gid);
+        }
+    }
+    by_sid
+}
+
+/// One past the largest string identifier that a predefined CFF encoding
+/// (Standard or Expert) assigns to a character code.
+const PREDEFINED_SID_LIMIT: usize = 379;
 
 /// CID → glyph index table of a CID-keyed CFF program, `None` for a
 /// name-keyed one.

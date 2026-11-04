@@ -176,6 +176,26 @@ fn bare_cff_matches_its_opentype_wrapper() {
     assert_eq!(bare.raw_get_name_index("A"), 0);
 }
 
+#[test]
+fn bare_cff_standard_encoding_maps_each_code_through_the_charset() {
+    use read_fonts::ps::cff::CffFontRef;
+
+    let cff = sfnt::table(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, *b"CFF ");
+    let font = CffFontRef::new_cff(&cff, 0, None).unwrap();
+    let encoding = font.encoding().unwrap();
+    assert!(encoding.predefined().is_some(), "Standard encoding");
+    let face = face_at(&cff, 40.0);
+    for code in 0..=u8::MAX {
+        let expected = encoding
+            .map(code)
+            .map(read_fonts::types::GlyphId::to_u32)
+            .filter(|&gid| gid != 0);
+        assert_eq!(face.raw_get_builtin_index(code), expected, "code {code}");
+    }
+    // Standard encoding: `i` through `l` at their ASCII codes.
+    assert_eq!(face.raw_get_builtin_index(b'k'), Some(3));
+}
+
 // ── CID-keyed CFF (FontFile3 /CIDFontType0C) ─────────────────────────────────
 
 /// Glyph index and CID of the glyph the Unicode charmap maps `code` to.
