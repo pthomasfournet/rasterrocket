@@ -138,9 +138,12 @@ the Vulkan SDK's (`$VULKAN_SDK/lib`) without `DYLD_LIBRARY_PATH`. On the
 Apple GPU device buffers live in shared memory, which the CPU reads and
 writes in place, so no data is copied to or from the GPU.
 
-What runs on the GPU is the antialiased path fill (solid colour, rectangular
-clip), and it is off by default: `PDF_RASTER_AA_FILL_THRESHOLD=0` sends
-every eligible fill to the device. Under the default `--backend auto`, no
+What runs on the GPU in this build is the antialiased path fill (solid
+colour, rectangular clip), and it is off by default:
+`PDF_RASTER_AA_FILL_THRESHOLD=0` sends every eligible fill to the device. A
+`vulkan,gpu-jpeg-huffman` build also runs the parallel-Huffman JPEG
+decoder, off by default as well (`PDF_RASTER_HUFFMAN_THRESHOLD=0` enables
+it). Under the default `--backend auto`, no
 Vulkan device is opened while every Vulkan kernel is off.
 
 Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
@@ -165,8 +168,8 @@ bash takes precedence once installed. See
 ## Printing and fax
 
 macOS prints through CUPS, so `--print` works with the built-in `lp`;
-`--printer NAME` takes a queue name from `lpstat -p`, else the default
-destination. The pages are spooled in an anonymous file under the per-user
+`--printer NAME` takes a destination that `rrocket --list-printers` lists,
+else the default destination. The pages are spooled in an anonymous file under the per-user
 `$TMPDIR`. `--fax-to` needs a CUPS fax queue (`--fax-queue NAME`) or
 HylaFAX's `sendfax`; macOS ships neither, so write the document with `--fax`
 and send it another way. See the [CLI reference](../cli-reference.md#printing).

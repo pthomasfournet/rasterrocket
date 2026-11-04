@@ -309,7 +309,7 @@ When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment variable is
 read (same values; `vaapi` only in a build with the `vaapi` feature, and an
 unrecognised value warns and means `auto`); if neither is set the backend is `auto`.
 
-**`auto`** — Vulkan if compiled in, a device is present and one of its kernels is enabled, else CUDA, else CPU, falling back silently at every step. Both Vulkan kernels, the AA fill and the parallel-Huffman JPEG decoder, are dormant by default, so `auto` initialises no Vulkan device unless `PDF_RASTER_AA_FILL_THRESHOLD` or `PDF_RASTER_HUFFMAN_THRESHOLD` is set; `--backend vulkan` always does.
+**`auto`** — Vulkan if compiled in, a device is present and one of its kernels is enabled, else CUDA, else CPU, falling back silently at every step. Both Vulkan kernels, the AA fill and the parallel-Huffman JPEG decoder, are dormant by default, so `auto` initialises no Vulkan device unless `PDF_RASTER_AA_FILL_THRESHOLD` or `PDF_RASTER_HUFFMAN_THRESHOLD` is set to a pixel area below its type's maximum (the Huffman one only in a `gpu-jpeg-huffman` build; a value that does not parse warns and leaves its kernel dormant); `--backend vulkan` always does.
 
 **`cpu`** — CPU only. All GPU init is skipped entirely. Use this for benchmarking, debugging, or on machines without a GPU.
 
@@ -340,7 +340,7 @@ available Vulkan devices:
   2: llvmpipe (LLVM 21.1.8, 256 bits) (CPU, 30471 MiB device-local)
 ```
 
-That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. Among devices of the same type it takes the one with more device-local memory, then the lower PCI address, then the lower device UUID, so the choice does not depend on the order the driver lists devices in. No vendor is preferred: on a host with an NVIDIA and a non-NVIDIA discrete GPU, pass `--vulkan-device` (or use `--backend cuda`) if you need the CUDA-only features such as the image cache. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
+That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. Among devices of the same type it takes the one with more device-local memory, then the lower PCI address, then the lower device UUID, so the choice does not depend on the order the driver lists devices in. No vendor is preferred: on a host with an NVIDIA and a non-NVIDIA discrete GPU with a Vulkan kernel enabled, pass `--vulkan-device` (or use `--backend cuda`) if you need the CUDA-only features such as the image cache. With every Vulkan kernel dormant, `auto` leaves Vulkan idle and uses CUDA anyway. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
 
 ```bash
 # Confirm CUDA is active (fails loudly if no NVIDIA GPU)
