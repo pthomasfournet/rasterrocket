@@ -53,7 +53,7 @@ impl GpuAaFill {
 /// Effective GPU AA-fill dispatch threshold: [`gpu::GPU_AA_FILL_THRESHOLD`]
 /// unless `PDF_RASTER_AA_FILL_THRESHOLD` holds a decimal pixel area (`0` =
 /// every eligible fill on the device).  Read once, on first use.
-fn aa_fill_threshold() -> usize {
+pub(crate) fn aa_fill_threshold() -> usize {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<usize> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {

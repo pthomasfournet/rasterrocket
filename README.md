@@ -353,7 +353,7 @@ and the page/annotation JavaScript-disclosure work).
 ## What's new in v1.0.0
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
-- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels (both dormant by default) on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. Under `auto`, Vulkan is preferred over CUDA when both are compiled in (faster process init on single-session workloads).
+- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels (both dormant by default) on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. Under `auto`, Vulkan is preferred over CUDA when both are compiled in and a Vulkan kernel is enabled by its threshold environment variable; with both dormant, `auto` initialises no Vulkan device.
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
@@ -468,7 +468,7 @@ The runtime backend is chosen from three sources, in priority order:
 2. The `PDF_RASTER_BACKEND` environment variable (same valid values).
 3. The compile-time default — `auto`.
 
-Under `auto`, when both backends are compiled in, **Vulkan is preferred over CUDA**. Vulkan's per-process init is faster and the kernel dispatch is comparable on the workloads that matter; CUDA wins narrowly when the device-resident `cache` feature is firing and amortising across many pages from one session.  Both backends fall through to CPU when their runtime is unavailable; `--backend cuda` / `--backend vulkan` make the failure loud instead.
+Under `auto`, when both backends are compiled in and one of Vulkan's kernels is enabled (`PDF_RASTER_AA_FILL_THRESHOLD` or `PDF_RASTER_HUFFMAN_THRESHOLD`; both are dormant by default), **Vulkan is preferred over CUDA**; otherwise `auto` initialises no Vulkan device. Vulkan's per-process init is faster and the kernel dispatch is comparable on the workloads that matter; CUDA wins narrowly when the device-resident `cache` feature is firing and amortising across many pages from one session.  Both backends fall through to CPU when their runtime is unavailable; `--backend cuda` / `--backend vulkan` make the failure loud instead.
 
 ```bash
 # Ship a Vulkan-default binary, override per-process when you need CUDA:

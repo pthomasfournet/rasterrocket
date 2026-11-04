@@ -440,7 +440,7 @@ if !page.diagnostics.has_images && page.diagnostics.has_vector_text {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
-    Auto,        // Vulkan if compiled in and present, else CUDA, else CPU; silent fallback (default)
+    Auto,        // Vulkan if compiled in, present and a Vulkan kernel is enabled, else CUDA, else CPU; silent fallback (default)
     CpuOnly,     // Skip all GPU init entirely
     ForceCuda,   // Require CUDA; error if unavailable
     #[cfg(feature = "vaapi")]

@@ -12,8 +12,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+use pdf_interp::aa_fill_threshold;
+#[cfg(feature = "gpu-jpeg-huffman")]
+use pdf_interp::huffman_threshold;
 
+use crate::config::auto_wants_vulkan;
 use crate::{BackendPolicy, RasterError};
+
+/// The parallel-Huffman threshold of a build without the decoder: dormant.
+#[cfg(not(feature = "gpu-jpeg-huffman"))]
+const fn huffman_threshold() -> u32 {
+    u32::MAX
+}
 
 /// Why a backend could not be constructed.
 #[derive(Debug, Clone)]
@@ -45,7 +55,8 @@ static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// Return the Vulkan backend for `selector` under `policy`.
 ///
 /// Policies other than `Auto` and `ForceVulkan` return `Ok(None)` without
-/// touching Vulkan.  An unavailable Vulkan is `Ok(None)` under `Auto` (the
+/// touching Vulkan, and so does `Auto` while every Vulkan kernel is dormant
+/// (see [`auto_wants_vulkan`]).  An unavailable Vulkan is `Ok(None)` under `Auto` (the
 /// caller falls through to CUDA, then CPU) and an error under
 /// `ForceVulkan`.  A selector that does not resolve is an error under both,
 /// since it is a configuration mistake rather than missing hardware.
@@ -60,6 +71,12 @@ pub(crate) fn init_vk_backend(
     selector: Option<&str>,
 ) -> Result<Option<Arc<VulkanBackend>>, RasterError> {
     if !matches!(policy, BackendPolicy::Auto | BackendPolicy::ForceVulkan) {
+        return Ok(None);
+    }
+    if matches!(policy, BackendPolicy::Auto)
+        && !auto_wants_vulkan(aa_fill_threshold(), huffman_threshold())
+    {
+        log::debug!("rasterrocket: every Vulkan kernel is dormant; Auto leaves Vulkan idle");
         return Ok(None);
     }
     match cached_backend(selector) {

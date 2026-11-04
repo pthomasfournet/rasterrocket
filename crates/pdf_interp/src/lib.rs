@@ -28,6 +28,24 @@ pub use optional_content::{OptionalContent, RenderPurpose};
 pub use page_group::{page_group, page_uses_overprint};
 pub use prescan::prescan_page;
 
+/// The effective device AA-fill dispatch threshold in pixels:
+/// `gpu::GPU_AA_FILL_THRESHOLD` unless `PDF_RASTER_AA_FILL_THRESHOLD`
+/// overrides it.  `usize::MAX` means no fill runs on a device.
+#[cfg(feature = "gpu-aa")]
+#[must_use]
+pub fn aa_fill_threshold() -> usize {
+    renderer::page::gpu_ops::aa_fill_threshold()
+}
+
+/// The effective parallel-Huffman JPEG dispatch threshold in pixels, unless
+/// `PDF_RASTER_HUFFMAN_THRESHOLD` overrides it.  `u32::MAX` means no JPEG
+/// decodes on a device.
+#[cfg(feature = "gpu-jpeg-huffman")]
+#[must_use]
+pub fn huffman_threshold() -> u32 {
+    resources::image::huffman_threshold()
+}
+
 /// Entry points for fuzz targets: the CCITT and JBIG2 codec wrappers and a
 /// `CMap` parse-and-lookup driver.
 ///

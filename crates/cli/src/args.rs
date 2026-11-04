@@ -983,7 +983,8 @@ impl OutputFormat {
 /// `--backend` argument value parsed by clap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum BackendArg {
-    /// Auto-select: Vulkan if compiled in and present, else CUDA, else CPU.
+    /// Auto-select: Vulkan if compiled in, present and one of its kernels is
+    /// enabled, else CUDA, else CPU.
     /// Silent fallback at every step.  This is the default; when omitted,
     /// `PDF_RASTER_BACKEND` is also consulted.
     Auto,

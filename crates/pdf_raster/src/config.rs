@@ -12,8 +12,8 @@ use crate::{Password, RenderPurpose};
 /// Controls which compute backend is used for image decoding and GPU fills.
 ///
 /// The default is [`Auto`](BackendPolicy::Auto), which prefers Vulkan when
-/// compiled in, falls through to CUDA when Vulkan is unavailable, and finally
-/// to the CPU paths.  The `Force*` variants turn silent fallbacks into hard
+/// compiled in and one of its kernels is enabled, falls through to CUDA, and
+/// finally to the CPU paths.  The `Force*` variants turn silent fallbacks into hard
 /// errors so you can tell immediately whether the expected hardware path is
 /// actually being taken.
 ///
@@ -24,8 +24,9 @@ use crate::{Password, RenderPurpose};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
-    /// Auto: prefer Vulkan when present, fall through to CUDA, then CPU.
-    /// Silent fallback at every step.
+    /// Auto: prefer Vulkan when present and one of its kernels (the AA fill,
+    /// the parallel-Huffman JPEG decoder) is enabled by its threshold, fall
+    /// through to CUDA, then CPU.  Silent fallback at every step.
     #[default]
     Auto,
     /// CPU only.  All GPU init is skipped; no CUDA or VA-API calls are made.
@@ -425,9 +426,33 @@ impl Default for SessionConfig {
     }
 }
 
+/// Whether [`BackendPolicy::Auto`] initialises the Vulkan backend: only
+/// when a kernel that runs on it in production is enabled, the AA fill
+/// (`aa_fill_threshold`) or the parallel-Huffman JPEG decoder
+/// (`huffman_threshold`).  A threshold equal to its type's maximum disables
+/// its kernel.
+///
+/// A Vulkan backend that wins `Auto` also keeps the CUDA context from
+/// initialising, so with every Vulkan kernel dormant `Auto` falls through to
+/// CUDA (whose CLUT kernel is live), then the CPU.
+#[cfg(feature = "vulkan")]
+pub(crate) const fn auto_wants_vulkan(aa_fill_threshold: usize, huffman_threshold: u32) -> bool {
+    aa_fill_threshold != usize::MAX || huffman_threshold != u32::MAX
+}
+
 #[cfg(test)]
 mod tests {
     use super::BackendPolicy;
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn auto_leaves_vulkan_idle_while_its_kernels_are_dormant() {
+        use super::auto_wants_vulkan;
+        assert!(!auto_wants_vulkan(usize::MAX, u32::MAX));
+        assert!(auto_wants_vulkan(0, u32::MAX));
+        assert!(auto_wants_vulkan(usize::MAX, 0));
+        assert!(auto_wants_vulkan(4096, 262_144));
+    }
 
     #[test]
     fn backend_policy_parses_known_names() {

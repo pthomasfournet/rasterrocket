@@ -305,7 +305,7 @@ When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment variable is
 read (same values; `vaapi` only in a build with the `vaapi` feature, and an
 unrecognised value warns and means `auto`); if neither is set the backend is `auto`.
 
-**`auto`** — Vulkan if compiled in and a device is present, else CUDA, else CPU, falling back silently at every step.
+**`auto`** — Vulkan if compiled in, a device is present and one of its kernels is enabled, else CUDA, else CPU, falling back silently at every step. Both Vulkan kernels, the AA fill and the parallel-Huffman JPEG decoder, are dormant by default, so `auto` initialises no Vulkan device unless `PDF_RASTER_AA_FILL_THRESHOLD` or `PDF_RASTER_HUFFMAN_THRESHOLD` is set; `--backend vulkan` always does.
 
 **`cpu`** — CPU only. All GPU init is skipped entirely. Use this for benchmarking, debugging, or on machines without a GPU.
 

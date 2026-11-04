@@ -61,7 +61,7 @@ mod devices;
 mod diagnostics;
 mod fill_stroke;
 mod form_memo;
-mod gpu_ops;
+pub(crate) mod gpu_ops;
 mod image_blit;
 mod image_compositor;
 mod image_memo;
