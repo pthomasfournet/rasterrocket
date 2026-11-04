@@ -627,6 +627,7 @@ fn setup_syllables(
     buffer.allocate_var(GlyphInfo::SYLLABLE_VAR);
 
     super::ot_shaper_indic_machine::find_syllables_indic(buffer);
+    limit_syllable_length(buffer);
 
     let mut start = 0;
     let mut end = buffer.next_syllable(0);
@@ -661,6 +662,10 @@ fn initial_reordering(
     ) {
         ret = true;
     }
+
+    // Inserted dotted-circles may have pushed a piece over the limit again;
+    // final reordering needs to see the same pieces we see here.
+    limit_syllable_length(buffer);
 
     let mut start = 0;
     let mut end = buffer.next_syllable(0);

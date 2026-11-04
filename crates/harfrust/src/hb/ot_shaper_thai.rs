@@ -410,7 +410,8 @@ fn preprocess_text(
             // Move Nikhahit (end-2) to the beginning
             buffer.merge_out_clusters(start, end);
             let t = buffer.out_info()[end - 2];
-            for i in 0..(end - start - 2) {
+            // Shift from the end so each mark moves before it is overwritten.
+            for i in (0..(end - start - 2)).rev() {
                 buffer.out_info_mut()[i + start + 1] = buffer.out_info()[i + start];
             }
             buffer.out_info_mut()[start] = t;

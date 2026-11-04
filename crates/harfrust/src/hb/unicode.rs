@@ -230,9 +230,9 @@ pub mod modified_combining_class {
     // Modify Telugu length marks (ccc=84, ccc=91).
     // These are the only matras in the main Indic scripts range that have
     // a non-zero ccc.  That makes them reorder with the Halant that is
-    // ccc=9.  Just zero them, we don't need them in our Indic shaper.
-    pub const CCC84: u8 = 0; // length mark
-    pub const CCC91: u8 = 0; // ai length mark
+    // ccc=9. Assign 4 and 5, which are otherwise unassigned.
+    pub const CCC84: u8 = 4; // length mark
+    pub const CCC91: u8 = 5; // ai length mark
 
     // Thai
     //
@@ -501,7 +501,7 @@ impl CharExt for Codepoint {
                 0x03 => ch == 0x034F,
                 0x06 => ch == 0x061C,
                 0x17 => (0x17B4..=0x17B5).contains(&ch),
-                0x18 => (0x180B..=0x180E).contains(&ch),
+                0x18 => (0x180B..=0x180F).contains(&ch),
                 0x20 => {
                     (0x200B..=0x200F).contains(&ch)
                         || (0x202A..=0x202E).contains(&ch)
@@ -738,4 +738,25 @@ pub mod hb_gc {
     pub const HB_UNICODE_GENERAL_CATEGORY_LINE_SEPARATOR: u32 = 27;
     pub const HB_UNICODE_GENERAL_CATEGORY_PARAGRAPH_SEPARATOR: u32 = 28;
     pub const HB_UNICODE_GENERAL_CATEGORY_SPACE_SEPARATOR: u32 = 29;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn telugu_length_marks_reorder_before_virama() {
+        use super::CharExt;
+        assert_eq!(0x0C55u32.modified_combining_class(), 4);
+        assert_eq!(0x0C56u32.modified_combining_class(), 5);
+        assert_eq!(0x0C4Du32.modified_combining_class(), 9);
+        assert_eq!(0x0C55u32.combining_class(), 84);
+        assert_eq!(0x0C56u32.combining_class(), 91);
+    }
+
+    #[test]
+    fn mongolian_free_variation_selectors_are_default_ignorable() {
+        use super::CharExt;
+        for c in 0x180B..=0x180F_u32 {
+            assert!(c.is_default_ignorable(), "{c:#X}");
+        }
+    }
 }

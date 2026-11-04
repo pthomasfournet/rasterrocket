@@ -124,6 +124,7 @@ fn setup_syllables(
     buffer.allocate_var(GlyphInfo::SYLLABLE_VAR);
 
     super::ot_shaper_myanmar_machine::find_syllables_myanmar(buffer);
+    limit_syllable_length(buffer);
 
     let mut start = 0;
     let mut end = buffer.next_syllable(0);

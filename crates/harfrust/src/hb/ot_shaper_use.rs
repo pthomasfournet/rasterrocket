@@ -243,6 +243,7 @@ fn setup_syllables(
     buffer.allocate_var(GlyphInfo::SYLLABLE_VAR);
 
     super::ot_shaper_use_machine::find_syllables(buffer);
+    limit_syllable_length(buffer);
 
     foreach_syllable!(buffer, start, end, {
         buffer.unsafe_to_break(Some(start), Some(end));
@@ -455,6 +456,7 @@ fn reorder_syllable_use(start: usize, end: usize, buffer: &mut hb_buffer_t) {
         & (rb_flag(SyllableType::ViramaTerminatedCluster as u32)
             | rb_flag(SyllableType::SakotTerminatedCluster as u32)
             | rb_flag(SyllableType::StandardCluster as u32)
+            | rb_flag(SyllableType::SymbolCluster as u32)
             | rb_flag(SyllableType::BrokenCluster as u32)
             | 0))
         == 0
@@ -586,5 +588,41 @@ fn setup_masks(plan: &hb_ot_shape_plan_t, _: &mut FontFuncsDispatch, buffer: &mu
         info.set_use_category(super::ot_shaper_use_table::hb_use_get_category(
             info.glyph_id as usize,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::ot_shaper_use_machine::{find_syllables, SyllableType};
+    use super::*;
+
+    #[test]
+    fn symbol_clusters_reorder_prebase_marks() {
+        for base in [category::O, category::GB, category::SB] {
+            for mark in [category::VPre, category::VMPre] {
+                let mut buffer = hb_buffer_t::new();
+                buffer.info.resize(2, GlyphInfo::default());
+                buffer.len = 2;
+                buffer.info[0].glyph_id = 0x111CD;
+                buffer.info[1].glyph_id = 0x111CE;
+                buffer.info[1].cluster = 4;
+                buffer.info[0].set_use_category(base);
+                buffer.info[1].set_use_category(mark);
+                find_syllables(&mut buffer);
+                assert_eq!(
+                    buffer.info[0].syllable() & 0x0F,
+                    if base == category::GB {
+                        SyllableType::StandardCluster
+                    } else {
+                        SyllableType::SymbolCluster
+                    } as u8
+                );
+                reorder_syllable_use(0, 2, &mut buffer);
+                assert_eq!(buffer.info[0].glyph_id, 0x111CE);
+                assert_eq!(buffer.info[1].glyph_id, 0x111CD);
+                assert_eq!(buffer.info[0].cluster, 0);
+                assert_eq!(buffer.info[1].cluster, 0);
+            }
+        }
     }
 }

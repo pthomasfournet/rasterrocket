@@ -1,4 +1,5 @@
 use super::hb_mask_t;
+use super::ot_layout::MAX_SYLLABLE_LENGTH;
 use super::unicode::CharExt;
 use crate::hb::face::BasicFontMetrics;
 use crate::hb::glyph_metrics::GlyphMetrics;
@@ -1016,7 +1017,10 @@ impl hb_buffer_t {
         cluster_start: u32,
         cluster_end: u32,
     ) {
-        if mask == 0 {
+        // Every call walks the whole buffer, once per ranged feature; once
+        // the operation limit is spent, stop walking (and charging) like
+        // move_to() and shift_forward() do.
+        if mask == 0 || self.max_ops < 0 {
             return;
         }
 
@@ -1026,6 +1030,7 @@ impl hb_buffer_t {
         self.max_ops -= self.len as i32;
         if self.max_ops < 0 {
             self.successful = false;
+            return;
         }
 
         if cluster_start == 0 && cluster_end == u32::MAX {
@@ -1414,6 +1419,12 @@ impl hb_buffer_t {
                 return false;
             }
 
+            self.max_ops -= count as i32;
+            if self.max_ops < 0 {
+                self.successful = false;
+                return false;
+            }
+
             for j in 0..count {
                 self.set_out_info(self.out_len + j, self.info[self.idx + j]);
             }
@@ -1436,6 +1447,12 @@ impl hb_buffer_t {
             }
 
             debug_assert!(self.idx >= count);
+
+            self.max_ops -= count as i32;
+            if self.max_ops < 0 {
+                self.successful = false;
+                return false;
+            }
 
             self.idx -= count;
             self.out_len -= count;
@@ -1715,9 +1732,10 @@ impl hb_buffer_t {
             return start;
         }
 
+        let end = start + min(self.len - start, MAX_SYLLABLE_LENGTH);
         let syllable = self.info[start].syllable();
         start += 1;
-        while start < self.len && syllable == self.info[start].syllable() {
+        while start < end && syllable == self.info[start].syllable() {
             start += 1;
         }
 
@@ -2202,5 +2220,64 @@ impl core::fmt::Debug for GlyphBuffer {
             .field("glyph_positions", &self.glyph_positions())
             .field("glyph_infos", &self.glyph_infos())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_syllable_is_bounded() {
+        let mut buffer = hb_buffer_t::new();
+        buffer
+            .info
+            .resize(MAX_SYLLABLE_LENGTH + 1, GlyphInfo::default());
+        buffer.len = buffer.info.len();
+        for info in &mut buffer.info {
+            info.set_syllable(1);
+        }
+
+        assert_eq!(buffer.next_syllable(0), MAX_SYLLABLE_LENGTH);
+        assert_eq!(buffer.next_syllable(MAX_SYLLABLE_LENGTH), buffer.len);
+    }
+
+    #[test]
+    fn set_masks_stops_once_the_operation_limit_is_spent() {
+        let mut buffer = hb_buffer_t::new();
+        buffer.push_str("abcd");
+        let len = buffer.len as i32;
+        // Room for one full pass; the second one overruns the limit.
+        buffer.max_ops = 2 * len - 1;
+
+        buffer.set_masks(1, 1, 0, u32::MAX);
+        assert!(buffer.successful);
+        assert!(buffer.info_slice_mut().iter().all(|info| info.mask == 1));
+
+        // The pass that spends the limit fails the buffer without scanning...
+        buffer.set_masks(2, 2, 0, u32::MAX);
+        assert!(!buffer.successful);
+        assert!(buffer.info_slice_mut().iter().all(|info| info.mask == 1));
+        let spent = buffer.max_ops;
+
+        // ...and later passes neither scan nor charge, so `max_ops` cannot
+        // keep sinking (and wrapping) under a long list of ranged features.
+        for value in [4, 8] {
+            buffer.set_masks(value, value, 0, u32::MAX);
+        }
+        assert_eq!(buffer.max_ops, spent);
+        assert!(buffer.info_slice_mut().iter().all(|info| info.mask == 1));
+    }
+
+    #[test]
+    fn move_to_charges_the_operation_limit() {
+        let mut buffer = hb_buffer_t::new();
+        buffer.push_str("abcdefgh");
+        buffer.clear_output();
+        buffer.max_ops = 5;
+
+        // Copying six glyphs forward overruns a limit of five.
+        assert!(!buffer.move_to(6));
+        assert!(!buffer.successful);
     }
 }
