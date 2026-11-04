@@ -36,7 +36,7 @@
 //! ```
 //! (column-vector convention.)
 
-use crate::path::adjust::{XPathAdjust, stroke_adjust};
+use crate::path::adjust::{XPathAdjust, stroke_adjust_point};
 use crate::path::flatten::{CurveData, flatten_curve};
 use crate::path::{Path, PathFlags, PathPoint, StrokeAdjustHint};
 use crate::types::{AA_SIZE, floor_i32};
@@ -208,9 +208,8 @@ impl XPath {
                 adj.last_pt,
                 tpts.len()
             );
-            for pt in &mut tpts[adj.first_pt..=adj.last_pt] {
-                let (x, y) = (&mut pt.x, &mut pt.y);
-                stroke_adjust(adj, x, y);
+            for (idx, pt) in (adj.first_pt..).zip(&mut tpts[adj.first_pt..=adj.last_pt]) {
+                stroke_adjust_point(adj, idx, &mut pt.x, &mut pt.y);
             }
         }
 
@@ -540,21 +539,33 @@ fn build_adjusts(
         if !vert && !horiz {
             continue;
         }
+        // Edges of zero length are both: the pair lies apart across the
+        // axis on which the edges differ, and is adjusted on that one.
+        let vert = vert && !(horiz && (p10.y - p00.y).abs() > (p10.x - p00.x).abs());
         // The two coordinates to snap: take min/max so adj0 ≤ adj1 always.
         let (a0, a1) = if vert {
             (p00.x.min(p10.x), p00.x.max(p10.x))
         } else {
             (p00.y.min(p10.y), p00.y.max(p10.y))
         };
-        adjusts.push(XPathAdjust::new(
-            h.first_pt,
-            h.last_pt,
-            vert,
-            a0,
-            a1,
-            adjust_lines,
-            line_pos_i,
-        ));
+        // The edge at a1, the larger coordinate, takes the right target.
+        let edge1 = if (if vert { p10.x } else { p10.y }) >= (if vert { p00.x } else { p00.y }) {
+            h.ctrl1
+        } else {
+            h.ctrl0
+        };
+        adjusts.push(
+            XPathAdjust::new(
+                h.first_pt,
+                h.last_pt,
+                vert,
+                a0,
+                a1,
+                adjust_lines,
+                line_pos_i,
+            )
+            .with_edge1(edge1),
+        );
     }
     adjusts
 }
@@ -590,6 +601,47 @@ mod tests {
 
     fn identity() -> [f64; 6] {
         [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    }
+
+    /// The device segments of the closed rectangle `x0,y0`–`x0+w,y1`, fill
+    /// adjusted.
+    fn adjusted_rect(x0: f64, w: f64, y0: f64, y1: f64) -> Vec<(f64, f64, f64, f64)> {
+        let mut b = PathBuilder::new();
+        b.move_to(x0, y0).unwrap();
+        b.line_to(x0 + w, y0).unwrap();
+        b.line_to(x0 + w, y1).unwrap();
+        b.line_to(x0, y1).unwrap();
+        b.close(true).unwrap();
+        let path = b.build().with_fill_adjust_hints().unwrap();
+        XPath::new(&path, &identity(), 0.1, true)
+            .segs
+            .iter()
+            .map(|s| (s.x0, s.y0, s.x1, s.y1))
+            .collect()
+    }
+
+    #[test]
+    fn a_zero_width_rectangle_fills_one_pixel_column() {
+        // Its vertical edges coincide; they snap apart to the column's two
+        // sides, and its zero-length top and bottom edges stay rows.
+        for w in [0.0, 0.01] {
+            let segs = adjusted_rect(10.2, w, 10.0, 70.0);
+            let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+            let xs: Vec<f64> = segs.iter().flat_map(|s| [s.0, s.2]).collect();
+            assert!(
+                xs.iter().all(|&x| near(x, 10.0) || near(x, 10.99)),
+                "{w}: {segs:?}"
+            );
+            assert!(
+                xs.iter().any(|&x| near(x, 10.0)) && xs.iter().any(|&x| near(x, 10.99)),
+                "{w}: {segs:?}"
+            );
+            // No edge runs diagonally.
+            assert!(
+                segs.iter().all(|s| near(s.0, s.2) || near(s.1, s.3)),
+                "{w}: {segs:?}"
+            );
+        }
     }
 
     #[test]
