@@ -292,7 +292,7 @@ impl PageRecorder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.state == State::Submitted
-            && let Some(last) = NonZeroU64::new(s.next_value - 1)
+            && let Some(last) = s.last_submitted
             && let Err(e) = self.wait_timeline(last)
         {
             log::warn!("abandoning a submitted page: waiting for it failed: {e}");
