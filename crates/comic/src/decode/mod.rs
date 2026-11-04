@@ -2,9 +2,10 @@
 //!
 //! One place that sniffs an image's format by magic bytes, dispatches to the
 //! per-codec wrapper, and normalises the result to grayscale — the single
-//! decode→bitmap→gray sequence shared by every format. The per-page size guard
-//! lives in `rasterrocket` and is applied by the caller so the size error can
-//! name the offending archive entry.
+//! decode→bitmap→gray sequence shared by every format.  Every codec checks
+//! the header dimensions against the rendered-page limits before it
+//! allocates pixels ([`guard_dimensions`]); the caller names the archive entry
+//! in the resulting [`DecodeError::TooLarge`].
 
 mod jpeg;
 mod png;
@@ -40,6 +41,8 @@ pub(crate) enum ImageFormat {
 pub(crate) enum DecodeError {
     /// No recognised image magic bytes.
     Unsupported,
+    /// The header dimensions exceed the rendered-page limits.
+    TooLarge { width: u32, height: u32 },
     /// The codec rejected the byte stream.
     Codec(String),
 }
@@ -48,6 +51,9 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unsupported => write!(f, "unrecognised image format"),
+            Self::TooLarge { width, height } => {
+                write!(f, "image too large ({width}x{height})")
+            }
             Self::Codec(m) => write!(f, "{m}"),
         }
     }
@@ -96,16 +102,47 @@ pub(crate) fn decode_image(bytes: &[u8]) -> Result<Bitmap<Gray8>, DecodeError> {
     })
 }
 
-/// Reject an image whose header dimensions exceed the rendered-page size limits
-/// BEFORE the codec allocates its full pixel buffer (a decode-bomb guard).
-///
-/// `validate_dimensions` enforces the same per-side and total-area caps the PDF
-/// render path uses; calling it here, on the header dims, stops a hostile image
-/// from forcing a multi-gigabyte allocation that the post-decode check would
-/// only catch after the memory was already taken.
-fn guard_dimensions(codec: &str, w: u32, h: u32) -> Result<(), DecodeError> {
-    pdf_raster::validate_dimensions(w, h)
-        .map_err(|_| DecodeError::Codec(format!("{codec}: image too large ({w}x{h})")))
+/// Reject an image whose header dimensions exceed the rendered-page size
+/// limits (the per-side and total-area caps of the PDF render path) before
+/// the codec allocates its pixel buffer.
+fn guard_dimensions(w: u32, h: u32) -> Result<(), DecodeError> {
+    pdf_raster::validate_dimensions(w, h).map_err(|_| DecodeError::TooLarge {
+        width: w,
+        height: h,
+    })
+}
+
+/// Unpack gray samples of `bits` (1, 2 or 4) bits, most significant first
+/// with each of the `h` rows padded to a byte, into 8-bit luma: sample `v`
+/// becomes `v · 255 / (2^bits − 1)`.
+fn unpack_gray_bits(packed: &[u8], w: u32, h: u32, bits: u8) -> Result<Vec<u8>, DecodeError> {
+    debug_assert!(
+        matches!(bits, 1 | 2 | 4),
+        "{bits} bits do not pack a byte evenly"
+    );
+    let per_byte = 8 / usize::from(bits);
+    let row_bytes = (w as usize).div_ceil(per_byte);
+    let rows = packed.len() / row_bytes.max(1);
+    if rows < h as usize {
+        return Err(DecodeError::Codec(format!(
+            "{} bytes hold {rows} of {h} rows of {w} {bits}-bit samples",
+            packed.len()
+        )));
+    }
+    let max = (1u16 << bits) - 1;
+    let mask = u8::try_from(max).unwrap_or(u8::MAX);
+    let mut out = Vec::with_capacity(w as usize * h as usize);
+    for row in packed.chunks_exact(row_bytes).take(h as usize) {
+        let samples = row.iter().flat_map(|&byte| {
+            (0..per_byte).map(move |i| (byte >> (8 - usize::from(bits) * (i + 1))) & mask)
+        });
+        out.extend(
+            samples
+                .take(w as usize)
+                .map(|v| u8::try_from(u16::from(v) * 255 / max).unwrap_or(u8::MAX)),
+        );
+    }
+    Ok(out)
 }
 
 /// Wrap a tight interleaved RGB buffer as an `Rgb8` bitmap without copying.
@@ -134,19 +171,20 @@ fn packed_from_tight<P: Pixel>(w: u32, h: u32, data: Vec<u8>) -> Result<Bitmap<P
     Ok(Bitmap::from_packed(w, h, data))
 }
 
-/// Drop the trailing alpha channel of every `channels`-byte pixel in place,
-/// keeping the first `channels - 1` bytes of each. Pixel `i` moves from
-/// `i·channels` to `i·(channels - 1)`, never past its source, so a forward
-/// pass reads each pixel before it is overwritten.
-fn drop_alpha_in_place(buf: &mut Vec<u8>, channels: usize) {
+/// Keep the first `keep` of every `channels`-byte pixel in place, dropping
+/// the rest (an alpha channel, or a gray image's extra samples).  Byte `c` of
+/// pixel `i` moves from `i·channels + c` to `i·keep + c`, never past its
+/// source, so a forward pass reads each byte before it is overwritten.
+fn keep_leading_samples(buf: &mut Vec<u8>, channels: usize, keep: usize) {
     debug_assert!(
-        channels >= 2,
-        "an alpha channel needs at least two channels"
+        0 < keep && keep < channels,
+        "keep {keep} of {channels} samples"
     );
-    let keep = channels - 1;
     let n = buf.len() / channels;
     for i in 0..n {
-        buf.copy_within(i * channels..i * channels + keep, i * keep);
+        for c in 0..keep {
+            buf[i * keep + c] = buf[i * channels + c];
+        }
     }
     buf.truncate(n * keep);
 }
@@ -194,6 +232,113 @@ mod tests {
             .write_image::<colortype::Gray8>(w, h, &pixels)
             .unwrap();
         out.into_inner()
+    }
+
+    /// An uncompressed little-endian TIFF of one strip per plane:
+    /// `bits` per sample, `samples` per pixel (photometric `BlackIsZero` for
+    /// one or two, RGB for three or four), chunky or `planar`, over `data`.
+    fn raw_tiff(w: u32, h: u32, bits: u16, samples: u16, planar: bool, data: &[u8]) -> Vec<u8> {
+        let planes = if planar { u32::from(samples) } else { 1 };
+        let plane_len = u32::try_from(data.len()).unwrap() / planes;
+        let photometric = if samples >= 3 { 2 } else { 1 };
+        // Header, then the pixel data, then the arrays, then the directory.
+        let mut out = b"II*\0\0\0\0\0".to_vec();
+        let data_at = u32::try_from(out.len()).unwrap();
+        out.extend_from_slice(data);
+        let array = |out: &mut Vec<u8>, values: &[u32], short: bool| {
+            let at = u32::try_from(out.len()).unwrap();
+            for &v in values {
+                if short {
+                    out.extend_from_slice(&u16::try_from(v).unwrap().to_le_bytes());
+                } else {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            at
+        };
+        let bits_at = array(&mut out, &vec![u32::from(bits); usize::from(samples)], true);
+        let offsets: Vec<u32> = (0..planes).map(|p| data_at + p * plane_len).collect();
+        let offsets_at = array(&mut out, &offsets, false);
+        let counts_at = array(&mut out, &vec![plane_len; planes as usize], false);
+        if out.len() % 2 == 1 {
+            out.push(0);
+        }
+        let ifd = u32::try_from(out.len()).unwrap();
+        out[4..8].copy_from_slice(&ifd.to_le_bytes());
+        // (tag, type, count, value-or-offset); type 3 SHORT, 4 LONG.
+        let inline = |v: u32, n: u32, at: u32| if n == 1 { v } else { at };
+        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+            (256, 4, 1, w),
+            (257, 4, 1, h),
+            (
+                258,
+                3,
+                u32::from(samples),
+                if samples <= 2 {
+                    u32::from(bits) | (u32::from(bits) << 16) * u32::from(samples - 1)
+                } else {
+                    bits_at
+                },
+            ),
+            (259, 3, 1, 1),
+            (262, 3, 1, photometric),
+            (273, 4, planes, inline(data_at, planes, offsets_at)),
+            (277, 3, 1, u32::from(samples)),
+            (278, 4, 1, h),
+            (279, 4, planes, inline(plane_len, planes, counts_at)),
+            (284, 3, 1, if planar { 2 } else { 1 }),
+        ];
+        if samples % 2 == 0 {
+            // ExtraSamples: the last sample is unassociated alpha.
+            entries.push((338, 3, 1, 2));
+        }
+        out.extend_from_slice(&u16::try_from(entries.len()).unwrap().to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn low_bit_gray_tiffs_unpack_to_luma() {
+        // 1 bit, 10 px wide: rows of two bytes, the second padded.
+        let tif = raw_tiff(10, 2, 1, 1, false, &[0b1010_0000, 0b1100_0000, 0xFF, 0x00]);
+        let img = decode_image(&tif).expect("1-bit tiff decodes");
+        assert_eq!(
+            img.data(),
+            [
+                255, 0, 255, 0, 0, 0, 0, 0, 255, 255, //
+                255, 255, 255, 255, 255, 255, 255, 255, 0, 0
+            ]
+        );
+        // 4 bits: samples 0, 5 and 15 scale to 0, 85 and 255.
+        let tif = raw_tiff(3, 1, 4, 1, false, &[0x05, 0xF0]);
+        assert_eq!(decode_image(&tif).unwrap().data(), [0, 85, 255]);
+    }
+
+    #[test]
+    fn gray_alpha_and_planar_rgb_tiffs_decode() {
+        let tif = raw_tiff(2, 1, 8, 2, false, &[10, 255, 200, 0]);
+        let Ok(CodecPixels::Gray(bmp)) = tiff::decode(&tif) else {
+            panic!("a gray+alpha TIFF must decode to Gray8");
+        };
+        assert_eq!(bmp.data(), [10, 200]);
+        // Planes R, G, B of two pixels.
+        let tif = raw_tiff(2, 1, 8, 3, true, &[1, 2, 10, 20, 100, 200]);
+        let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif) else {
+            panic!("a planar RGB TIFF must decode to Rgb8");
+        };
+        assert_eq!(bmp.data(), [1, 10, 100, 2, 20, 200]);
+    }
+
+    #[test]
+    fn a_gray_jpeg_decodes_to_gray() {
+        let jpg = solid_jpeg_gray(8, 8, 90);
+        assert!(matches!(jpeg::decode(&jpg), Ok(CodecPixels::Gray(_))));
     }
 
     #[test]
@@ -280,12 +425,12 @@ mod tests {
     }
 
     #[test]
-    fn drop_alpha_in_place_compacts_pixels() {
+    fn leading_samples_compact_in_place() {
         let mut rgba = vec![1, 2, 3, 9, 4, 5, 6, 9, 7, 8, 9, 9];
-        drop_alpha_in_place(&mut rgba, 4);
+        keep_leading_samples(&mut rgba, 4, 3);
         assert_eq!(rgba, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let mut ga = vec![1, 9, 2, 9, 3, 9];
-        drop_alpha_in_place(&mut ga, 2);
+        keep_leading_samples(&mut ga, 2, 1);
         assert_eq!(ga, [1, 2, 3]);
     }
 
@@ -353,11 +498,10 @@ mod tests {
         // 30000×30000 = 9e8 px exceeds the area cap; at 3 B/px the decode would
         // allocate ~2.7 GB.  The guard fires on the SOF dims first.
         match jpeg::decode(&jpeg_bomb(30_000, 30_000)) {
-            Err(DecodeError::Codec(m)) => {
-                assert!(m.contains("too large"), "message names the cause: {m}");
-                assert!(m.contains("30000x30000"), "message names the dims: {m}");
+            Err(DecodeError::TooLarge { width, height }) => {
+                assert_eq!((width, height), (30_000, 30_000));
             }
-            Err(other) => panic!("expected Codec(too large), got {other:?}"),
+            Err(other) => panic!("expected TooLarge, got {other:?}"),
             Ok(_) => panic!("decode bomb was not rejected"),
         }
     }
@@ -365,11 +509,11 @@ mod tests {
     #[test]
     fn guard_dimensions_rejects_huge_accepts_small() {
         assert!(
-            guard_dimensions("png", 100_000, 100_000).is_err(),
+            guard_dimensions(100_000, 100_000).is_err(),
             "100000x100000 must be rejected"
         );
         assert!(
-            guard_dimensions("png", 1024, 768).is_ok(),
+            guard_dimensions(1024, 768).is_ok(),
             "ordinary page size must pass"
         );
     }
@@ -386,11 +530,10 @@ mod tests {
             bomb.len()
         );
         match png::decode(&bomb) {
-            Err(DecodeError::Codec(m)) => {
-                assert!(m.contains("too large"), "message names the cause: {m}");
-                assert!(m.contains("100000x100000"), "message names the dims: {m}");
+            Err(DecodeError::TooLarge { width, height }) => {
+                assert_eq!((width, height), (100_000, 100_000));
             }
-            Err(other) => panic!("expected Codec(too large), got {other:?}"),
+            Err(other) => panic!("expected TooLarge, got {other:?}"),
             Ok(_) => panic!("decode bomb was not rejected"),
         }
     }

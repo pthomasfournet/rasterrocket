@@ -230,12 +230,9 @@ pub(crate) fn write_cleaned(
     Ok(())
 }
 
-/// Write-buffer size of a page output file. The encoders emit rows, or
-/// slices of [`encode::PACKED_WRITE_BYTES`] for a packed bitmap. A write
-/// shorter than the buffer's capacity is copied into the buffer; a write at
-/// least as long passes straight to the file once the buffer is flushed.
-/// The capacity equals `PACKED_WRITE_BYTES`, so every full packed slice
-/// takes the second path.
+/// Write-buffer size of an output file: at most
+/// [`encode::PACKED_WRITE_BYTES`], so every full packed slice an encoder
+/// writes bypasses the buffer.
 pub(crate) const OUTPUT_BUFFER_BYTES: usize = encode::PACKED_WRITE_BYTES;
 
 /// Create the page output file `out_path` and fill it through an

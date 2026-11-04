@@ -369,15 +369,16 @@ fn render_one(
     page_num: u32,
     opts: &ComicOptions,
 ) -> Result<RenderedPage, ComicError> {
-    let mut bmp = decode::decode_image(raw).map_err(|e| ComicError::Decode {
-        entry: name.to_owned(),
-        reason: e.to_string(),
-    })?;
-
-    pdf_raster::validate_dimensions(bmp.width, bmp.height).map_err(|_| ComicError::TooLarge {
-        entry: name.to_owned(),
-        width: bmp.width,
-        height: bmp.height,
+    let mut bmp = decode::decode_image(raw).map_err(|e| match e {
+        decode::DecodeError::TooLarge { width, height } => ComicError::TooLarge {
+            entry: name.to_owned(),
+            width,
+            height,
+        },
+        other => ComicError::Decode {
+            entry: name.to_owned(),
+            reason: other.to_string(),
+        },
     })?;
 
     if opts.deskew {

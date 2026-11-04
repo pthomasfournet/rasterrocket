@@ -98,10 +98,9 @@ fn write_page(
     page: RenderedPage,
     total_pages: i32,
 ) -> Result<(), RenderError> {
-    // `page.page_num` is selected from `build_page_list`'s output, which is
-    // bounded by `total_pages` (≤ i32::MAX, checked in `run`), so the cast back
-    // to i32 cannot overflow.
-    let page_i32 = i32::try_from(page.page_num).unwrap_or(total_pages);
+    // Page numbers come from `build_page_list`, bounded by `total_pages`.
+    let page_i32 =
+        i32::try_from(page.page_num).expect("comic page numbers are bounded by the i32 page count");
     let sink = render::Sink::Files {
         spill,
         format: args.output_format(),

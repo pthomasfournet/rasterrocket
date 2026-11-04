@@ -51,10 +51,10 @@ pub fn write_jpeg<P: Pixel, W: Write>(
     options: JpegOptions,
     mut out: W,
 ) -> Result<(), EncodeError> {
-    let (color, bytes_per_pixel) = match P::MODE {
-        PixelMode::Mono8 => (ColorType::Luma, 1),
-        PixelMode::Rgb8 => (ColorType::Rgb, 3),
-        PixelMode::Bgr8 => (ColorType::Bgr, 3),
+    let color = match P::MODE {
+        PixelMode::Mono8 => ColorType::Luma,
+        PixelMode::Rgb8 => ColorType::Rgb,
+        PixelMode::Bgr8 => ColorType::Bgr,
         PixelMode::Mono1 | PixelMode::Xbgr8 | PixelMode::Cmyk8 | PixelMode::DeviceN8 => {
             return Err(EncodeError::UnsupportedMode(
                 "JPEG accepts Gray8, Rgb8 and Bgr8: convert other modes to Rgb8 first",
@@ -74,20 +74,7 @@ pub fn write_jpeg<P: Pixel, W: Write>(
     let mut encoder = Encoder::new(&mut out, options.quality.clamp(1, 100));
     encoder.set_progressive(options.progressive);
     encoder.set_optimized_huffman_tables(options.optimize);
-    // Both dimensions fit `u16`, so the row length and image size fit `usize`.
-    let row = usize::from(width) * bytes_per_pixel;
-    let size = row * usize::from(height);
-    let result = if bitmap.stride == row {
-        // No row padding: the backing buffer is the contiguous pixel stream.
-        encoder.encode(&bitmap.data()[..size], width, height, color)
-    } else {
-        let mut packed = Vec::with_capacity(size);
-        for y in 0..bitmap.height {
-            packed.extend_from_slice(&bitmap.row_bytes(y)[..row]);
-        }
-        encoder.encode(&packed, width, height, color)
-    };
-    result?;
+    encoder.encode(&crate::live_bytes(bitmap), width, height, color)?;
     out.flush()?;
     Ok(())
 }

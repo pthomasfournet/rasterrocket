@@ -1,7 +1,7 @@
 //! PNG decode for comic pages, via the `png` crate's reader.
 
 use super::{
-    CodecPixels, DecodeError, drop_alpha_in_place, gray_from_tight, guard_dimensions,
+    CodecPixels, DecodeError, gray_from_tight, guard_dimensions, keep_leading_samples,
     rgb_from_tight,
 };
 
@@ -26,7 +26,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("png: zero dimensions {w}x{h}")));
     }
-    guard_dimensions("png", w, h)?;
+    guard_dimensions(w, h)?;
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| DecodeError::Codec("png: output buffer size overflows".to_owned()))?;
@@ -38,12 +38,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     match info.color_type {
         png::ColorType::Rgb => rgb_from_tight(w, h, buf),
         png::ColorType::Rgba => {
-            drop_alpha_in_place(&mut buf, 4);
+            keep_leading_samples(&mut buf, 4, 3);
             rgb_from_tight(w, h, buf)
         }
         png::ColorType::Grayscale => gray_from_tight(w, h, buf),
         png::ColorType::GrayscaleAlpha => {
-            drop_alpha_in_place(&mut buf, 2);
+            keep_leading_samples(&mut buf, 2, 1);
             gray_from_tight(w, h, buf)
         }
         png::ColorType::Indexed => Err(DecodeError::Codec(

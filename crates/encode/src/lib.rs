@@ -40,6 +40,7 @@ pub use png::write_png;
 pub use ppm::write_ppm;
 pub use tiff::{TiffCompression, TiffImage, TiffPage, TiffWriter, write_tiff};
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use color::Pixel;
@@ -72,6 +73,22 @@ pub(crate) fn write_live_rows<P: Pixel, W: Write>(
         }
     }
     Ok(())
+}
+
+/// The live bytes of every row of `bitmap`, top to bottom: its buffer when
+/// packed, else a copy without the stride padding.
+pub(crate) fn live_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> Cow<'_, [u8]> {
+    let live = bitmap.width as usize * P::BYTES;
+    if bitmap.stride == live {
+        Cow::Borrowed(&bitmap.data()[..live * bitmap.height as usize])
+    } else {
+        Cow::Owned(
+            (0..bitmap.height)
+                .flat_map(|y| &bitmap.row_bytes(y)[..live])
+                .copied()
+                .collect(),
+        )
+    }
 }
 
 /// Luma below which a pixel is black in bilevel output, the midpoint of

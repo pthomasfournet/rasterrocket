@@ -116,11 +116,6 @@ fn write_png_rgb<P: Pixel, W: Write>(
 
 /// Write a `Gray8` bitmap as PNG.
 fn write_png_gray<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
-    let w = bitmap.width as usize;
-    let mut buf = Vec::with_capacity(image_len(bitmap, 1)?);
-    for y in 0..bitmap.height {
-        buf.extend_from_slice(&bitmap.row_bytes(y)[..w]);
-    }
     let mut writer = png_encoder(
         out,
         bitmap.width,
@@ -128,7 +123,7 @@ fn write_png_gray<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), 
         ::png::ColorType::Grayscale,
         ::png::BitDepth::Eight,
     )?;
-    writer.write_image_data(&buf)?;
+    writer.write_image_data(&crate::live_bytes(bitmap))?;
     Ok(())
 }
 
