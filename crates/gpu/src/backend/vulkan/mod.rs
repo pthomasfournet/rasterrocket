@@ -7,6 +7,7 @@
 //! so the host waits exactly once per page.
 //!
 //! Module split (all private; named here for orientation only):
+//! - `barrier` — global memory barriers by stage/access scope.
 //! - `device` — loader, physical-device pick, logical device + queue.
 //! - `error` — `vk::Result → BackendError` adaptor.
 //! - `memory` — slab sub-allocator, host-visible staging pool.
@@ -15,6 +16,7 @@
 //! - `recorder` — per-page command buffer + timeline-semaphore fence.
 //! - `transfer` — synchronous staged upload and download.
 
+mod barrier;
 mod device;
 mod error;
 mod memory;

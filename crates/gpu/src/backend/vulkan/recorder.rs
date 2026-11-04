@@ -43,6 +43,7 @@ use ash::vk;
 use crate::backend::params;
 use crate::backend::{BackendError, Result};
 
+use super::barrier::{self, Scope};
 use super::device::DeviceCtx;
 use super::error::vk_err;
 use super::pipeline::{KernelId, PipelineCache};
@@ -103,6 +104,18 @@ const MAX_DESC_SETS_PER_PAGE: u32 = 64;
 /// kernel: seven `u32`s, in the order of the Slang `PushParams`.
 #[cfg(feature = "gpu-jpeg-huffman")]
 const HUFFMAN_PUSH_BYTES: usize = 28;
+
+/// Destination scope of the barrier after a dispatch.
+const AFTER_DISPATCH: Scope = Scope::new(
+    vk::PipelineStageFlags2::from_raw(
+        vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw() | vk::PipelineStageFlags2::COPY.as_raw(),
+    ),
+    vk::AccessFlags2::from_raw(
+        vk::AccessFlags2::SHADER_STORAGE_READ.as_raw()
+            | vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw()
+            | vk::AccessFlags2::TRANSFER_READ.as_raw(),
+    ),
+);
 
 /// Initial timeline-semaphore signal value.  Must be > 0 so
 /// `submit_page`'s `NonZeroU64::new(signal_value)` is `Some` by
@@ -226,15 +239,12 @@ impl PageRecorder {
         // follow the wait on the page's fence: a semaphore signal makes
         // writes available to the device domain only, and buffers of an
         // integrated GPU are read by the host in place.
-        let to_host = [vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
         unsafe {
-            self.device.device.cmd_pipeline_barrier2(
+            barrier::global(
+                &self.device.device,
                 s.cmd,
-                &vk::DependencyInfo::default().memory_barriers(&to_host),
+                barrier::ALL_WRITES,
+                barrier::HOST_READS,
             );
             self.device
                 .device
@@ -841,42 +851,15 @@ impl PageRecorder {
                 s.state
             )));
         }
-        let before = [vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_TRANSFER,
-            )
-            .src_access_mask(
-                vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
-            )
-            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE)];
-        let after = [vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_TRANSFER,
-            )
-            .dst_access_mask(
-                vk::AccessFlags2::SHADER_STORAGE_READ
-                    | vk::AccessFlags2::SHADER_STORAGE_WRITE
-                    | vk::AccessFlags2::TRANSFER_READ
-                    | vk::AccessFlags2::TRANSFER_WRITE,
-            )];
         let region = [vk::BufferCopy::default().size(len)];
         // Safety: cmd is in the Recording state (checked above); both
         // buffers carry TRANSFER_SRC | TRANSFER_DST usage and the callers
         // checked `len` against both sizes.
         unsafe {
             let d = &self.device.device;
-            d.cmd_pipeline_barrier2(
-                s.cmd,
-                &vk::DependencyInfo::default().memory_barriers(&before),
-            );
+            barrier::global(d, s.cmd, barrier::PAGE_WRITES, barrier::COPY_ACCESS);
             d.cmd_copy_buffer(s.cmd, src, dst, &region);
-            d.cmd_pipeline_barrier2(
-                s.cmd,
-                &vk::DependencyInfo::default().memory_barriers(&after),
-            );
+            barrier::global(d, s.cmd, barrier::COPY_WRITES, barrier::PAGE_COMMANDS);
         }
         Ok(())
     }
@@ -919,20 +902,12 @@ impl PageRecorder {
             // must be visible to SHADER_STORAGE_READ before the next
             // dispatch.  Pessimistic (covers any later kernel that
             // reads buf) but cheap relative to the fill itself.
-            let mem_barrier = [vk::MemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::CLEAR)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_TRANSFER,
-                )
-                .dst_access_mask(
-                    vk::AccessFlags2::SHADER_STORAGE_READ
-                        | vk::AccessFlags2::SHADER_STORAGE_WRITE
-                        | vk::AccessFlags2::TRANSFER_READ
-                        | vk::AccessFlags2::TRANSFER_WRITE,
-                )];
-            let dep_info = vk::DependencyInfo::default().memory_barriers(&mem_barrier);
-            self.device.device.cmd_pipeline_barrier2(s.cmd, &dep_info);
+            barrier::global(
+                &self.device.device,
+                s.cmd,
+                barrier::FILL_WRITES,
+                barrier::PAGE_COMMANDS,
+            );
         }
         Ok(())
     }
@@ -1083,19 +1058,12 @@ impl PageRecorder {
             //
             // Pessimistic but correct (the CUDA backend serialises the
             // same way via stream ordering + implicit memcpy fences).
-            let mem_barrier = [vk::MemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                .dst_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY,
-                )
-                .dst_access_mask(
-                    vk::AccessFlags2::SHADER_STORAGE_READ
-                        | vk::AccessFlags2::SHADER_STORAGE_WRITE
-                        | vk::AccessFlags2::TRANSFER_READ,
-                )];
-            let dep_info = vk::DependencyInfo::default().memory_barriers(&mem_barrier);
-            self.device.device.cmd_pipeline_barrier2(s.cmd, &dep_info);
+            barrier::global(
+                &self.device.device,
+                s.cmd,
+                barrier::DISPATCH_WRITES,
+                AFTER_DISPATCH,
+            );
         }
 
         // Increment under the same lock so two concurrent record_* calls
