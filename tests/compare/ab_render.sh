@@ -17,9 +17,10 @@
 #   AB_TIMEOUT    per-render limit in seconds (default 300)
 #
 # Output: one "DIFF <pdf> <mode> <file>" line per differing file, one
-# "COUNT <pdf> <mode> <n> vs <m>" line when the two produced different page
-# counts, one "EXIT <pdf> <mode> <s> vs <t>" line when their exit statuses
-# differ, one "FAILED <pdf> <mode> <s>" line when both failed alike, then
+# "EXIT <pdf> <mode> <s> vs <t>" line when the two exit statuses differ, one
+# "COUNT <pdf> <mode> <n> vs <m>" line when they exited alike but produced
+# different page counts (an EXIT line already covers the pages a failure
+# leaves out), one "FAILED <pdf> <mode> <s>" line when both failed alike, then
 # "<N> outputs compared, <M> differ", where N counts the file pairs present
 # on both sides and M the DIFF, COUNT and EXIT lines.
 #
@@ -79,7 +80,7 @@ for pdf in "$@"; do
                 echo "DIFF $pdf $mode ${file##*/}"
             fi
         done
-        if ((${#b_files[@]} != ${#a_files[@]})); then
+        if [[ $b_status == "$a_status" ]] && ((${#b_files[@]} != ${#a_files[@]})); then
             differ=$((differ + 1))
             echo "COUNT $pdf $mode ${#b_files[@]} vs ${#a_files[@]}"
         fi

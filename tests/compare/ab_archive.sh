@@ -21,8 +21,10 @@
 # per difference) and OUTPREFIX.errors (the output of every render that
 # exited non-zero, each under a "== <side> <status> <pdf>" line); renders go
 # to a temporary directory beside them, removed on exit.  Differences are
-# "PAGE <pdf> <page>" (pixels differ), "COUNT <pdf>" (page counts differ) and
-# "EXIT <pdf> <before> <after>" (exit statuses differ).  A file both builds
+# "PAGE <pdf> <page>" (pixels differ), "EXIT <pdf> <before> <after>" (exit
+# statuses differ) and "COUNT <pdf>" (page counts differ though the exit
+# statuses agree; an EXIT line already covers the pages a failure leaves out).
+# Only pages present on both sides are compared.  A file both builds
 # fail on with the same status prints "FAILED <pdf> <status>: <first line of
 # AFTER's output>" on standard output.  The summary line counts the page
 # pairs present on both sides and compared, and the differences.
@@ -43,7 +45,7 @@ archive=${AB_ARCHIVE:-$HOME/mss-content/archives}
 
 if [[ -n $list ]]; then
     [[ -r $list ]] || ab_usage_error "cannot read list: $list"
-    cp "$list" "$prefix.list"
+    [[ $list -ef $prefix.list ]] || cp "$list" "$prefix.list"
 else
     {
         printf '%s\n' "$repo"/tests/fixtures/*.pdf
@@ -65,11 +67,12 @@ ab_limiter "${AB_TIMEOUT:-120}"
 work=$(mktemp -d "$prefix.work.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-# Renders into $work/<tag>-NNN.pgm and stores the exit status in
-# $work/<tag>.status; a non-zero exit appends the render's output to $errors.
+# render TAG BIN PDF [FLAG...] renders PDF into $work/<TAG>-NNN.pgm and
+# stores the exit status in $work/<TAG>.status; a non-zero exit appends the
+# render's output to $errors.
 render() {
-    local tag=$1 bin=$2 status=0
-    shift 2
+    local tag=$1 bin=$2 pdf=$3 status=0
+    shift 3
     "${limiter[@]}" "$bin" --no-ram -r 50 --gray -l 4 --threads 4 "$@" "$pdf" "$work/$tag" \
         </dev/null >"$work/$tag.err" 2>&1 || status=$?
     echo "$status" >"$work/$tag.status"
@@ -87,8 +90,8 @@ while IFS= read -r pdf; do
     [[ -n $pdf ]] || continue
     scanned=$((scanned + 1))
     rm -f "$work"/*
-    render B "$before" "${before_flags[@]}"
-    render A "$after" "${after_flags[@]}"
+    render B "$before" "$pdf" "${before_flags[@]}"
+    render A "$after" "$pdf" "${after_flags[@]}"
     shopt -s nullglob
     b_pages=("$work"/B-*.pgm) a_pages=("$work"/A-*.pgm)
     shopt -u nullglob
@@ -97,12 +100,12 @@ while IFS= read -r pdf; do
         compared=$((compared + 1))
         cmp -s "$page" "$work/A-${page##*/B-}" || echo "PAGE $pdf ${page##*-}" >>"$diffs"
     done
-    ((${#b_pages[@]} == ${#a_pages[@]})) || echo "COUNT $pdf" >>"$diffs"
     b_status=$(<"$work/B.status") a_status=$(<"$work/A.status")
     if [[ $b_status != "$a_status" ]]; then
         echo "EXIT $pdf $b_status $a_status" >>"$diffs"
-    elif [[ $b_status != 0 ]]; then
-        echo "FAILED $pdf $b_status: $(head -n 1 "$work/A.err")"
+    else
+        ((${#b_pages[@]} == ${#a_pages[@]})) || echo "COUNT $pdf" >>"$diffs"
+        [[ $b_status == 0 ]] || echo "FAILED $pdf $b_status: $(head -n 1 "$work/A.err")"
     fi
 done <"$prefix.list"
 
