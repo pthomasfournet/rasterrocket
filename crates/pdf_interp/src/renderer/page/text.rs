@@ -12,10 +12,29 @@ use super::text_shaping::{Drawn, shaped_runs};
 use crate::resources::cmap::DecodedCode;
 use crate::resources::font::CidEncoding;
 use font::face::FontFace;
+use raster::Clip;
+use raster::pipe::PipeState;
 use raster::{
     glyph::{GlyphBitmap, fill_glyph},
     pipe::PipeSrc,
 };
+
+/// The top-left and bottom-right corners of the bitmaps of `records`, as
+/// [`fill_glyph`] places them: a bitmap's left edge lies `x_off` pixels left
+/// of the pen and its top edge `y_off` pixels above it.
+fn glyph_corners(records: &[GlyphRecord]) -> impl Iterator<Item = (f64, f64)> + '_ {
+    records.iter().flat_map(|rec| {
+        let x = f64::from(rec.pen_x) - f64::from(rec.bitmap.x_off);
+        let y = f64::from(rec.pen_y) - f64::from(rec.bitmap.y_off);
+        [
+            (x, y),
+            (
+                x + f64::from(rec.bitmap.width),
+                y + f64::from(rec.bitmap.height),
+            ),
+        ]
+    })
+}
 
 /// The painting operations of a text rendering mode (PDF §9.3.6, Table 106).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,48 +438,18 @@ impl PageRenderer<'_> {
             // The glyphs, as bitmaps or filled outlines, are one object under
             // the soft mask in effect; the outline fills lie within one pixel
             // of their points.
-            let bitmap_corners = records.iter().flat_map(|rec| {
-                let x = f64::from(rec.pen_x) + f64::from(rec.bitmap.x_off);
-                let y = f64::from(rec.pen_y) + f64::from(rec.bitmap.y_off);
-                [
-                    (x, y),
-                    (
-                        x + f64::from(rec.bitmap.width),
-                        y + f64::from(rec.bitmap.height),
-                    ),
-                ]
-            });
             let outline_points = fill_paths
                 .iter()
                 .flat_map(|path| path.pts.iter().map(|p| (p.x, p.y)));
             let region = PixelRect::around(
-                bitmap_corners.chain(outline_points),
+                glyph_corners(&records).chain(outline_points),
                 1.0,
                 self.width,
                 self.height,
             );
             let alpha = self.gstate.current().fill_alpha;
             self.paint_object(region, alpha, |r| {
-                for rec in &records {
-                    #[expect(
-                        clippy::cast_possible_wrap,
-                        reason = "glyph dimensions are always small (sub-pixel-sized); cannot exceed i32::MAX"
-                    )]
-                    let glyph = GlyphBitmap {
-                        data: &rec.bitmap.data,
-                        x: rec.bitmap.x_off,
-                        y: rec.bitmap.y_off,
-                        w: rec.bitmap.width as i32,
-                        h: rec.bitmap.height as i32,
-                        aa: rec.bitmap.aa,
-                    };
-                    // The ClipResult return value is only relevant for accumulating
-                    // text-as-clip paths (text render modes 4–7), which Phase 3 below
-                    // handles separately via glyph_path; per-glyph fill output is unused.
-                    let _ = with_canvas!(&mut r.canvas, |b| fill_glyph(
-                        b, &clip, &pipe, &src, rec.pen_x, rec.pen_y, &glyph
-                    ));
-                }
+                r.blit_glyph_records(&records, &clip, &pipe, &src);
                 if pattern_fill {
                     let mut union = raster::path::Path::new();
                     for path in &fill_paths {
@@ -497,6 +486,36 @@ impl PageRenderer<'_> {
 }
 
 impl PageRenderer<'_> {
+    /// Composite the glyph bitmaps of `records` through `clip` with `pipe`
+    /// and `src`.
+    fn blit_glyph_records(
+        &mut self,
+        records: &[GlyphRecord],
+        clip: &Clip,
+        pipe: &PipeState<'_>,
+        src: &PipeSrc<'_>,
+    ) {
+        for rec in records {
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "glyph bitmaps are at most a few hundred pixels a side"
+            )]
+            let glyph = GlyphBitmap {
+                data: &rec.bitmap.data,
+                x: rec.bitmap.x_off,
+                y: rec.bitmap.y_off,
+                w: rec.bitmap.width as i32,
+                h: rec.bitmap.height as i32,
+                aa: rec.bitmap.aa,
+            };
+            // Whether the glyph lay inside the clip matters only to a
+            // clipping render mode, whose clip is built from the outlines.
+            let _ = with_canvas!(&mut self.canvas, |b| fill_glyph(
+                b, clip, pipe, src, rec.pen_x, rec.pen_y, &glyph
+            ));
+        }
+    }
+
     /// End a text object (`ET`): intersect the clip with the union of the
     /// glyph outlines that the object's text shown in a clipping render
     /// mode added, under the non-zero winding rule (PDF §9.3.6).  Glyphs
@@ -515,14 +534,30 @@ mod tests {
     use super::TextModeOps;
 
     /// Run `content` on a 64 × 32 px page whose `/F1` is Helvetica and
-    /// return the number of pixels darker than mid-grey.
+    /// return the number of pixels darker than mid-grey.  The graphics
+    /// state `/Hidden` sets a soft mask that is zero over the whole page.
     fn dark_pixels(content: &[u8]) -> usize {
+        let mask = "0 g 0 0 64 32 re f";
         let doc = crate::test_helpers::make_doc_with_objects(&[
             (
                 4,
-                "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> >>",
+                "<< /Type /Page /Resources << /Font << /F1 5 0 R >> \
+                 /ExtGState << /Hidden << /SMask << /S /Luminosity /G 6 0 R >> >> >> >> >>"
+                    .to_owned(),
             ),
-            (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+            (
+                5,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            ),
+            (
+                6,
+                format!(
+                    "<< /Type /XObject /Subtype /Form /BBox [0 0 64 32] \
+                     /Group << /S /Transparency /CS /DeviceGray >> /Length {} >>\n\
+                     stream\n{mask}\nendstream",
+                    mask.len()
+                ),
+            ),
         ]);
         let mut renderer = PageRenderer::new(64, 32, &doc, (4, 0));
         renderer.execute(&crate::content::parse(content));
@@ -530,6 +565,18 @@ mod tests {
             .flat_map(|y| renderer.rgb_canvas().row_bytes(y).to_vec())
             .filter(|&v| v < 128)
             .count()
+    }
+
+    /// Glyphs painted under a soft mask are masked over their whole
+    /// extent, above the baseline as below it.
+    #[test]
+    fn a_soft_mask_masks_whole_glyphs() {
+        let shown = b"BT /F1 24 Tf 4 8 Td (AB) Tj ET";
+        assert!(dark_pixels(shown) > 40, "the glyphs paint");
+        for mode in [0, 2] {
+            let content = format!("/Hidden gs BT /F1 24 Tf {mode} Tr 4 8 Td (AB) Tj ET");
+            assert_eq!(dark_pixels(content.as_bytes()), 0, "mode {mode}");
+        }
     }
 
     /// The glyphs of every text-showing operator of a text object in a
