@@ -28,7 +28,7 @@ use super::PageRenderer;
 use crate::content::Operator;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 use crate::resources::tiling::TilingDescriptor;
-use crate::resources::{ResourceKey, ShadingPattern};
+use crate::resources::{ResourceIdentity, ResourceKey, ShadingPattern};
 
 /// Host bytes of meshes and cell rasters the memo holds at most.  An entry
 /// that would exceed it is used without being kept.
@@ -72,19 +72,19 @@ pub(super) struct RasterKey {
     id: ObjectId,
     device: [u64; 6],
     tint: Option<RasterColor>,
-    context: Option<ObjectId>,
+    context: Option<ResourceIdentity>,
     phase: CellPhase,
 }
 
 impl RasterKey {
     /// The key of pattern stream `id` under `device` with `tint`;
-    /// `context` is the resource context of a pattern without its own
-    /// resources.
+    /// `context` is the identity of the resources a pattern without its
+    /// own inherits.
     pub(super) fn new(
         id: ObjectId,
         device: &[f64; 6],
         tint: Option<&RasterColor>,
-        context: Option<ObjectId>,
+        context: Option<ResourceIdentity>,
     ) -> Self {
         Self {
             id,
@@ -126,7 +126,7 @@ pub(super) struct PatternMemo {
     shadings: HashMap<PlacedKey, Option<Rc<ResolvedShading>>>,
     /// Keyed by pattern stream and, for a pattern without resources of its
     /// own, by the resource context the content was parsed in.
-    cells: HashMap<(ObjectId, Option<ObjectId>), Option<Rc<TilingCell>>>,
+    cells: HashMap<(ObjectId, Option<ResourceIdentity>), Option<Rc<TilingCell>>>,
     rasters: HashMap<RasterKey, CellRaster>,
     /// Rasters asked for once without being rendered whole.
     deferred: HashSet<RasterKey>,
@@ -225,13 +225,14 @@ impl PatternMemo {
         )
     }
 
-    /// The descriptor and content of tiling pattern `id` used in resource
-    /// context `context`, kept or from `resolve`.  A pattern with resources
-    /// of its own, or one that does not resolve, is kept for every context.
+    /// The descriptor and content of tiling pattern `id` used under the
+    /// resources `context` identifies, kept or from `resolve`.  A pattern
+    /// with resources of its own, or one that does not resolve, is kept
+    /// for every context.
     pub(super) fn cell(
         &mut self,
         id: ObjectId,
-        context: ObjectId,
+        context: ResourceIdentity,
         resolve: impl FnOnce() -> Option<Rc<TilingCell>>,
     ) -> Option<Rc<TilingCell>> {
         if let Some(kept) = [(id, None), (id, Some(context))]
@@ -335,7 +336,7 @@ impl PageRenderer<'_> {
         let Some(ResourceKey::Object(id)) = self.resources.pattern_key(name) else {
             return None;
         };
-        let context = self.resources.resource_context_id();
+        let context = self.resources.identity();
         self.pattern_memo.borrow_mut().cell(id, context, || {
             self.resources.tiling_pattern(name).map(|desc| {
                 // The cell's inline images name colour spaces from the
@@ -462,6 +463,13 @@ mod tests {
         assert_eq!(image_len(&renderer), 1);
         renderer.resources = page.with_resources((11, 0), rgb.as_dict().unwrap());
         assert_eq!(image_len(&renderer), 3);
+
+        // Sets built over dictionaries share their font-cache context, not
+        // their cells.
+        renderer.resources = page.with_resources((0, 0), gray.as_dict().unwrap());
+        assert_eq!(image_len(&renderer), 1);
+        renderer.resources = page.with_resources((0, 0), rgb.as_dict().unwrap());
+        assert_eq!(image_len(&renderer), 3);
     }
 
     #[test]
@@ -518,8 +526,13 @@ mod tests {
                 .is_none()
         );
         assert!(
-            memo.raster(&RasterKey::new(ID, &IDENTITY, Some(&red), Some((1, 0))))
-                .is_none()
+            memo.raster(&RasterKey::new(
+                ID,
+                &IDENTITY,
+                Some(&red),
+                Some(ResourceIdentity::Object((1, 0)))
+            ))
+            .is_none()
         );
         assert!(memo.raster(&key.at_phase((1, 0))).is_none());
     }

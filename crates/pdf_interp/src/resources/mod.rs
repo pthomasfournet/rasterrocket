@@ -325,6 +325,28 @@ pub enum ResourceKey {
     },
 }
 
+/// The identity of the resource dictionaries in effect.
+///
+/// It keys memos of content that resolves names through them: the object
+/// whose `/Resources` they are, or, for a set built over a dictionary
+/// itself ([`PageResources::with_resources`]), an identity unique to that
+/// set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ResourceIdentity {
+    /// The `/Resources` of this object (page, form, pattern or font).
+    Object(ObjectId),
+    /// A set built over a dictionary, numbered in creation order.
+    Synthetic(u64),
+}
+
+impl ResourceIdentity {
+    /// A synthetic identity no earlier set holds.
+    fn synthetic() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self::Synthetic(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// Thin accessor wrapping a `(Document, resource_context_id)` pair.
 ///
 /// `resource_context_id` is the `ObjectId` of the object (page or form stream)
@@ -334,6 +356,8 @@ pub struct PageResources<'doc> {
     doc: &'doc Document,
     /// Object whose `Resources` key is consulted for font/XObject lookups.
     resource_context_id: ObjectId,
+    /// See [`ResourceIdentity`].
+    identity: ResourceIdentity,
     /// Each category sub-dictionary, resolved on first use; `None` when the
     /// category is absent or empty.
     subdicts: [OnceLock<Option<Arc<Dictionary>>>; Category::COUNT],
@@ -391,6 +415,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc,
             resource_context_id: page_id,
+            identity: ResourceIdentity::Object(page_id),
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
             color_space_source: OnceLock::new(),
@@ -409,6 +434,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc: self.doc,
             resource_context_id: form.resources_id,
+            identity: ResourceIdentity::Object(form.resources_id),
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
             color_space_source: OnceLock::new(),
@@ -424,6 +450,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc: self.doc,
             resource_context_id: self.resource_context_id,
+            identity: self.identity,
             subdicts: self.subdicts.clone(),
             default_spaces: self.default_spaces.clone(),
             color_space_source: self.color_space_source.clone(),
@@ -452,6 +479,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc: self.doc,
             resource_context_id: context,
+            identity: ResourceIdentity::synthetic(),
             subdicts,
             default_spaces: OnceLock::new(),
             color_space_source: OnceLock::from(color_space_source),
@@ -465,6 +493,7 @@ impl<'doc> PageResources<'doc> {
         Self {
             doc: self.doc,
             resource_context_id: context,
+            identity: ResourceIdentity::Object(context),
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
             color_space_source: OnceLock::new(),
@@ -477,13 +506,19 @@ impl<'doc> PageResources<'doc> {
         self.doc
     }
 
-    /// The object ID of the current resource context (page or form stream).
-    ///
-    /// Used by tiling-pattern rendering to inherit the parent context when the
-    /// pattern stream carries no own `Resources` dict.
+    /// The object ID of the current resource context (page or form stream);
+    /// every set built over a dictionary itself shares the `context` it was
+    /// given (see [`Self::with_resources`]).
     #[must_use]
     pub const fn resource_context_id(&self) -> ObjectId {
         self.resource_context_id
+    }
+
+    /// The identity of the dictionaries in effect (see [`ResourceIdentity`]),
+    /// distinct for every set [`Self::with_resources`] builds.
+    #[must_use]
+    pub const fn identity(&self) -> ResourceIdentity {
+        self.identity
     }
 
     /// The `category` sub-dictionary (`XObject`, `ExtGState`, `Pattern`, …) of

@@ -288,7 +288,7 @@ impl PageRenderer<'_> {
             desc.stream_id,
             &device,
             tint.as_ref(),
-            (!desc.has_own_resources).then(|| self.resources.resource_context_id()),
+            (!desc.has_own_resources).then(|| self.resources.identity()),
         );
 
         // A lattice cell below one pixel in area repeats more than once per
