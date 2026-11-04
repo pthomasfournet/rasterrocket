@@ -137,32 +137,38 @@ impl GpuBackend for CudaBackend {
     }
 
     fn record_blit_image(&self, params: params::BlitParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_blit_image")?;
         params.validate(self)?;
         self.recorder.record_blit_image(params)
     }
 
     fn record_aa_fill(&self, params: params::AaFillParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_aa_fill")?;
         params.validate(self)?;
         self.recorder.record_aa_fill(params)
     }
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_icc_clut")?;
         let grid_n = params.validate(self)?;
         self.recorder.record_icc_clut(params, grid_n)
     }
 
     fn record_composite(&self, params: params::CompositeParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_composite")?;
         params.validate(self)?;
         self.recorder.record_composite(params)
     }
 
     fn record_apply_soft_mask(&self, params: params::SoftMaskParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_apply_soft_mask")?;
         params.validate(self)?;
         self.recorder.record_apply_soft_mask(params)
     }
 
     #[cfg(feature = "gpu-jpeg-huffman")]
     fn record_scan(&self, params: params::ScanParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_scan")?;
         params.validate(self)?;
         self.recorder.record_scan(params)
     }
@@ -179,6 +185,7 @@ impl GpuBackend for CudaBackend {
 
     #[cfg(feature = "gpu-jpeg-huffman")]
     fn record_huffman(&self, params: params::HuffmanParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_huffman")?;
         params.validate(self)?;
         self.recorder.record_huffman(params)
     }
@@ -192,6 +199,7 @@ impl GpuBackend for CudaBackend {
 
     #[cfg(feature = "gpu-jpeg-huffman")]
     fn record_idct(&self, params: params::IdctParams<'_, Self>) -> Result<()> {
+        self.recorder.check_recording("record_idct")?;
         params.validate(self)?;
         self.recorder.record_idct(params)
     }
@@ -204,6 +212,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()> {
+        self.recorder.check_recording("record_zero_buffer")?;
         self.recorder.record_zero_buffer(buf)
     }
 
@@ -216,6 +225,7 @@ impl GpuBackend for CudaBackend {
         dst: &Self::DeviceBuffer,
         len: usize,
     ) -> Result<()> {
+        self.recorder.check_recording("record_copy_to_device")?;
         transfer::queue_htod(&self.ctx, src, len, dst)
     }
 
@@ -226,6 +236,7 @@ impl GpuBackend for CudaBackend {
         dst: &mut Self::HostBuffer,
         len: usize,
     ) -> Result<()> {
+        self.recorder.check_recording("record_copy_to_host")?;
         transfer::queue_dtoh(&self.ctx, src, dst, len)
     }
 
@@ -262,6 +273,7 @@ impl GpuBackend for CudaBackend {
     /// queued run until the stream has passed them, whether or not the
     /// page was submitted.
     fn abandon_page(&self) {
+        self.recorder.end_page();
         if let Err(e) = self.ctx.stream().synchronize() {
             log::warn!("abandoning a page: synchronising its stream failed: {e}");
         }

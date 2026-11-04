@@ -24,18 +24,24 @@
     reason = "record_* methods take params by value to mirror the GpuBackend trait shape; the trait could take &Params, but every backend would still want to destructure, so the by-value form is canonical"
 )]
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::ThreadId;
 
 use cudarc::driver::{CudaEvent, CudaSlice, DevicePtr};
 
 use super::be;
 use crate::GpuCtx;
-use crate::backend::{Result, params};
+use crate::backend::{BackendError, Result, params};
 #[cfg(feature = "cache")]
 use crate::blit::BlitBbox;
 
 pub(super) struct PageRecorder {
     pub(super) ctx: Arc<GpuCtx>,
+    /// Threads between `begin_page` and `submit_page` (or
+    /// `abandon_page`): a page is recorded on its thread's stream, so the
+    /// recording state is per thread.
+    recording: Mutex<HashSet<ThreadId>>,
 }
 
 /// A synchronisation token returned by [`PageRecorder::submit_page`].
@@ -54,25 +60,49 @@ pub(super) struct PageRecorder {
 pub struct PageFence(Arc<CudaEvent>);
 
 impl PageRecorder {
-    pub(super) const fn new(ctx: Arc<GpuCtx>) -> Self {
-        Self { ctx }
+    pub(super) fn new(ctx: Arc<GpuCtx>) -> Self {
+        Self {
+            ctx,
+            recording: Mutex::new(HashSet::new()),
+        }
     }
 
-    /// Begin a new page.
+    fn recording(&self) -> MutexGuard<'_, HashSet<ThreadId>> {
+        self.recording
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Begin a page on the calling thread.  Recording queues onto the
+    /// thread's stream, so only the thread's state changes.
     ///
-    /// The CUDA backend has nothing to do here: recording means queuing
-    /// onto the calling thread's stream.  The method exists to mirror the `GpuBackend` trait shape so the
-    /// Vulkan backend (which **does** allocate a per-page command
-    /// buffer) and the CUDA backend share the same call site in
-    /// callers.
-    #[expect(
-        clippy::unused_self,
-        clippy::unnecessary_wraps,
-        clippy::missing_const_for_fn,
-        reason = "shape-only impl; the Vulkan equivalent will allocate a command buffer here"
-    )]
+    /// # Errors
+    /// The thread is already recording a page.
     pub(super) fn begin_page(&self) -> Result<()> {
-        Ok(())
+        if self.recording().insert(std::thread::current().id()) {
+            Ok(())
+        } else {
+            Err(BackendError::msg(
+                "begin_page called while this thread records a page; expected Idle",
+            ))
+        }
+    }
+
+    /// Fail unless the calling thread is recording a page; `op` names the
+    /// rejected call.
+    pub(super) fn check_recording(&self, op: &'static str) -> Result<()> {
+        if self.recording().contains(&std::thread::current().id()) {
+            Ok(())
+        } else {
+            Err(BackendError::msg(format!(
+                "{op} called outside a page on this thread; expected Recording"
+            )))
+        }
+    }
+
+    /// Leave the calling thread's page, recorded or not.
+    pub(super) fn end_page(&self) {
+        let _ = self.recording().remove(&std::thread::current().id());
     }
 
     /// Record a stream event for the current page's queued work.
@@ -80,7 +110,13 @@ impl PageRecorder {
     /// All prior `record_*` launches on this stream are ordered before
     /// the event.  The host can then block on the event with
     /// `wait_page` instead of synchronising the whole stream.
+    ///
+    /// # Errors
+    /// The thread records no page, or the event cannot be recorded; the
+    /// page is left in either case.
     pub(super) fn submit_page(&self) -> Result<PageFence> {
+        self.check_recording("submit_page")?;
+        self.end_page();
         let event = self.ctx.stream().record_event(None).map_err(be)?;
         Ok(PageFence(Arc::new(event)))
     }
@@ -416,5 +452,63 @@ impl PageRecorder {
         unsafe { cudarc::driver::result::memset_d8_async(dptr, 0, num_bytes, stream.cu_stream()) }
             .map_err(be)?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "gpu-validation"))]
+mod tests {
+    use crate::backend::cuda::CudaBackend;
+    use crate::backend::{BackendError, GpuBackend};
+
+    #[test]
+    fn page_calls_outside_a_page_are_rejected() {
+        let Ok(b) = CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let device = b.alloc_device(64).expect("alloc");
+        let host = b.alloc_host_pinned(64).expect("pinned");
+        let outside = |r: Result<(), BackendError>| {
+            let msg = r.expect_err("accepted outside a page").to_string();
+            assert!(msg.contains("expected Recording"), "{msg}");
+        };
+        outside(b.record_zero_buffer(&device));
+        // SAFETY: the copy is rejected before anything is queued.
+        outside(unsafe { b.record_copy_to_device(&host, &device, 64) });
+        outside(b.submit_page().map(drop));
+
+        b.begin_page().expect("begin_page");
+        let msg = b.begin_page().expect_err("nested page").to_string();
+        assert!(msg.contains("expected Idle"), "{msg}");
+        b.record_zero_buffer(&device).expect("inside the page");
+        let fence = b.submit_page().expect("submit_page");
+        b.wait_page(fence).expect("wait_page");
+        outside(b.record_zero_buffer(&device));
+
+        let failed = b.run_page(|_| Err(BackendError::msg("injected")));
+        assert!(failed.is_err());
+        b.run_page(|b| b.record_zero_buffer(&device))
+            .expect("a failed page leaves the thread idle");
+    }
+
+    #[test]
+    fn the_recording_state_is_per_thread() {
+        let Ok(b) = CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        b.begin_page().expect("begin_page");
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let device = b.alloc_device(64).expect("alloc");
+                    b.run_page(|b| b.record_zero_buffer(&device))
+                        .expect("another thread's page is independent");
+                })
+                .join()
+                .expect("page thread");
+        });
+        let fence = b.submit_page().expect("submit_page");
+        b.wait_page(fence).expect("wait_page");
     }
 }

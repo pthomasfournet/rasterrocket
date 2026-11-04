@@ -237,11 +237,12 @@ impl VramBudget {
 /// begin_page() → [record_*()…] → submit_page() → wait_page(fence)
 /// ```
 ///
-/// Calling `record_*` outside a `begin_page` / `submit_page` pair, or calling
-/// `submit_page` twice without an intervening `begin_page`, is implementation-
-/// defined behaviour: backends may panic, return an error, or silently produce
-/// incorrect results. [`GpuBackend::run_page`] runs a whole page and is safe
-/// from several threads; the individual calls require external
+/// Calling `record_*` outside a `begin_page` / `submit_page` pair, calling
+/// `begin_page` while a page is being recorded, or calling `submit_page`
+/// without a page is rejected with an error.  CUDA keeps that state per
+/// thread, since a page is recorded on its thread's stream; Vulkan keeps
+/// one state for the backend. [`GpuBackend::run_page`] runs a whole page
+/// and is safe from several threads; the individual calls require external
 /// synchronisation even though the trait is `Send + Sync`.
 ///
 /// # Stability — closed implementation set
