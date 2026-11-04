@@ -453,15 +453,27 @@ mod tests {
         first.zip(last)
     }
 
-    /// An AA fill must land where the geometry is, not scaled toward the origin.
-    ///
-    /// `render_aa_line` takes a device-pixel row and expands it to the four AA
-    /// sub-rows itself, so the caller must not hand it an AA-space index. When
-    /// it did, output row `y` was composited from the coverage of row
-    /// `y * AA_SIZE + 3`, squashing every fill into the top quarter of its own
-    /// bounding box.
     /// The coverage of an outline is the shape an antialiased fill of it
     /// composites: white filled onto black carries the shape byte as is.
+    #[test]
+    fn sloped_edges_fill_far_right_on_a_wide_page() {
+        // A triangle past device column 8192, where antialiased coordinates
+        // exceed 16.16 fixed point.
+        let mut b = PathBuilder::new();
+        b.move_to(9000.0, 10.0).unwrap();
+        b.line_to(9100.0, 10.0).unwrap();
+        b.line_to(9050.0, 100.0).unwrap();
+        b.close(false).unwrap();
+        let path = b.build();
+        let xpath = XPath::new(&path, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true);
+        let (w, h) = (9200, 120);
+        let coverage = aa_coverage(xpath, w, h);
+        let at = |x: usize, y: usize| coverage[y * w as usize + x];
+        assert_eq!(at(9050, 50), 255, "inside the triangle");
+        assert_eq!(at(8191, 50), 0, "far left of it");
+        assert_eq!(at(9150, 50), 0, "right of it");
+    }
+
     #[test]
     fn aa_coverage_matches_an_aa_fill() {
         let mut b = PathBuilder::new();
@@ -493,6 +505,8 @@ mod tests {
         assert_eq!(coverage, filled);
     }
 
+    /// An AA fill lands where its geometry is: `render_aa_line` takes a
+    /// device-pixel row and expands it to the four AA sub-rows itself.
     #[test]
     fn aa_fill_rect_lands_on_its_own_geometry() {
         const W: u32 = 64;

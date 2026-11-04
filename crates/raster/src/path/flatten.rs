@@ -25,17 +25,6 @@ use crate::types::MAX_CURVE_SPLITS;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Convert a non-negative `i32` slot index to `usize`.
-///
-/// # Panics
-///
-/// Panics in debug builds if `v < 0`. By construction every value passed here
-/// starts at 0 and is only ever increased, so this invariant always holds.
-#[inline]
-fn to_idx(v: i32) -> usize {
-    usize::try_from(v).expect("curve stack index must be non-negative")
-}
-
 /// Squared distance from `(px, py)` to the segment from `(ax, ay)` to
 /// `(bx, by)`: to the nearer endpoint when the point projects outside the
 /// segment, so that a curve doubling back along its chord is not taken for
@@ -69,9 +58,9 @@ fn dist_sq_to_segment(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f
 /// `MAX_CURVE_SPLITS = 1024`, so the slot count is `n = 1025`.
 ///
 /// * `cx` / `cy`: length `n * 3 = 3075`.  The maximum slot index used is
-///   `max_u = 1024`, giving a maximum array index of `1024 * 3 + 2 = 3074`,
+///   `MAX_CURVE_SPLITS = 1024`, giving a maximum array index of `1024 * 3 + 2 = 3074`,
 ///   which is within bounds (no off-by-one).
-/// * `c_next`: length `n = 1025`.  The maximum index used is `max_u = 1024`,
+/// * `c_next`: length `n = 1025`.  The maximum index used is `MAX_CURVE_SPLITS = 1024`,
 ///   which is also within bounds.
 pub(crate) struct CurveData {
     /// X coordinates: 3 control points per slot, indexed by `slot * 3 + {0,1,2}`.
@@ -79,26 +68,18 @@ pub(crate) struct CurveData {
     /// Y coordinates: same layout as `cx`.
     pub cy: Box<[f64]>,
     /// `cNext[p1]` = index of the next segment's first slot after `p1`.
-    pub c_next: Box<[i32]>,
+    pub c_next: Box<[usize]>,
 }
 
 impl CurveData {
     /// Allocate a new `CurveData`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `MAX_CURVE_SPLITS` is negative. It is defined as the positive
-    /// constant `1024`, so
-    /// this branch is unreachable in practice.
     #[must_use]
     pub(crate) fn new() -> Self {
-        let n = usize::try_from(MAX_CURVE_SPLITS)
-            .expect("MAX_CURVE_SPLITS must be non-negative (it is the constant 1024)")
-            + 1;
+        let n = MAX_CURVE_SPLITS + 1;
         Self {
             cx: vec![0.0f64; n * 3].into_boxed_slice(),
             cy: vec![0.0f64; n * 3].into_boxed_slice(),
-            c_next: vec![0i32; n].into_boxed_slice(),
+            c_next: vec![0; n].into_boxed_slice(),
         }
     }
 }
@@ -120,15 +101,8 @@ impl CurveData {
 /// same `XPath`. Pass `None` on the first call; the `CurveData` is
 /// returned and should be stored for the next call.
 ///
-/// ## Midpoint arithmetic
-///
-/// All midpoints are computed with `f64::midpoint` / `i32::midpoint` (stable
-/// since Rust 1.85). These methods guarantee a correctly-rounded result and
-/// never overflow, unlike the naive `(a + b) / 2`.
-///
-/// # Panics
-///
-/// Panics if `MAX_CURVE_SPLITS` is negative (it is the positive constant 1024).
+/// Midpoints are computed with `f64::midpoint` / `usize::midpoint`, which are
+/// correctly rounded and cannot overflow.
 pub(crate) fn flatten_curve(
     p0: PathPoint,
     p1: PathPoint,
@@ -138,15 +112,22 @@ pub(crate) fn flatten_curve(
     out: &mut Vec<PathPoint>,
     curve_data: &mut Option<CurveData>,
 ) {
+    // A curve with a non-finite point has no shape to approximate: its
+    // chord stands for it, without subdividing.
+    if ![p0, p1, p2, p3]
+        .iter()
+        .all(|p| p.x.is_finite() && p.y.is_finite())
+    {
+        out.push(p3);
+        return;
+    }
     let data = curve_data.get_or_insert_with(CurveData::new);
 
     let max = MAX_CURVE_SPLITS;
-    let max_u = usize::try_from(max)
-        .expect("MAX_CURVE_SPLITS must be non-negative (it is the constant 1024)");
 
     // Initialise the stack: one segment covering [0, max].
     let i0 = 0usize;
-    let i2 = max_u;
+    let i2 = max;
     // Slot 0: control points (x0/y0, x1/y1, x2/y2).
     data.cx[0] = p0.x;
     data.cy[0] = p0.y;
@@ -159,26 +140,22 @@ pub(crate) fn flatten_curve(
     data.cy[i2 * 3] = p3.y;
     data.c_next[i0] = max;
 
-    // Loop invariant: `pp1 >= 0` always, because it starts at 0 and is only
-    // ever set to `pp2` (which comes from `c_next`, initialised to non-negative
-    // values) or to `pp3 = i32::midpoint(pp1, pp2)` (always in [pp1, pp2]).
-    // Therefore `pp2 >= pp1 >= 0` throughout, so `pp2 - pp1` never underflows.
-    let mut pp1 = 0i32; // current left slot
+    // Invariant: `pp1 <= pp2` for the segment `[pp1, pp2]`, since `pp2` is a
+    // later slot linked from `pp1` and a split point lies between them.
+    let mut pp1 = 0usize; // current left slot
 
     while pp1 < max {
-        let pp1u = to_idx(pp1);
-        let pp2 = data.c_next[pp1u];
-        let pp2u = to_idx(pp2);
+        let pp2 = data.c_next[pp1];
 
         // Read this segment's endpoints and control points.
-        let xl0 = data.cx[pp1u * 3];
-        let yl0 = data.cy[pp1u * 3];
-        let xx1 = data.cx[pp1u * 3 + 1];
-        let yy1 = data.cy[pp1u * 3 + 1];
-        let xx2 = data.cx[pp1u * 3 + 2];
-        let yy2 = data.cy[pp1u * 3 + 2];
-        let xr3 = data.cx[pp2u * 3];
-        let yr3 = data.cy[pp2u * 3];
+        let xl0 = data.cx[pp1 * 3];
+        let yl0 = data.cy[pp1 * 3];
+        let xx1 = data.cx[pp1 * 3 + 1];
+        let yy1 = data.cy[pp1 * 3 + 1];
+        let xx2 = data.cx[pp1 * 3 + 2];
+        let yy2 = data.cy[pp1 * 3 + 2];
+        let xr3 = data.cx[pp2 * 3];
+        let yr3 = data.cy[pp2 * 3];
 
         // Squared distances of the two control points from the chord.
         let d1 = dist_sq_to_segment(xx1, yy1, xl0, yl0, xr3, yr3);
@@ -190,7 +167,6 @@ pub(crate) fn flatten_curve(
             pp1 = pp2;
         } else {
             // De Casteljau midpoint subdivision.
-            // All midpoint calls use f64::midpoint (stable Rust 1.85).
             let xl1 = xl0.midpoint(xx1);
             let yl1 = yl0.midpoint(yy1);
             let xh = xx1.midpoint(xx2);
@@ -204,26 +180,25 @@ pub(crate) fn flatten_curve(
             let xr0 = xl2.midpoint(xr1);
             let yr0 = yl2.midpoint(yr1);
 
-            // i32::midpoint (stable Rust 1.85) gives the floor of the average,
-            // always in [pp1, pp2], so pp3u is a valid slot index.
-            let pp3 = i32::midpoint(pp1, pp2);
-            let pp3u = to_idx(pp3);
+            // usize::midpoint gives the floor of the average,
+            // always in [pp1, pp2], so pp3 is a valid slot index.
+            let pp3 = usize::midpoint(pp1, pp2);
 
             // Update left segment: [pp1, pp3] with left sub-curve controls.
-            data.cx[pp1u * 3 + 1] = xl1;
-            data.cy[pp1u * 3 + 1] = yl1;
-            data.cx[pp1u * 3 + 2] = xl2;
-            data.cy[pp1u * 3 + 2] = yl2;
-            data.c_next[pp1u] = pp3;
+            data.cx[pp1 * 3 + 1] = xl1;
+            data.cy[pp1 * 3 + 1] = yl1;
+            data.cx[pp1 * 3 + 2] = xl2;
+            data.cy[pp1 * 3 + 2] = yl2;
+            data.c_next[pp1] = pp3;
 
             // New right sub-curve at pp3: [xr0, xr1, xr2] then endpoint at pp2.
-            data.cx[pp3u * 3] = xr0;
-            data.cy[pp3u * 3] = yr0;
-            data.cx[pp3u * 3 + 1] = xr1;
-            data.cy[pp3u * 3 + 1] = yr1;
-            data.cx[pp3u * 3 + 2] = xr2;
-            data.cy[pp3u * 3 + 2] = yr2;
-            data.c_next[pp3u] = pp2;
+            data.cx[pp3 * 3] = xr0;
+            data.cy[pp3 * 3] = yr0;
+            data.cx[pp3 * 3 + 1] = xr1;
+            data.cy[pp3 * 3 + 1] = yr1;
+            data.cx[pp3 * 3 + 2] = xr2;
+            data.cy[pp3 * 3 + 2] = yr2;
+            data.c_next[pp3] = pp2;
             // (endpoint at pp2 is already set from a prior iteration or init)
         }
     }
@@ -283,7 +258,7 @@ mod tests {
         let mut data = None;
         flatten_curve(p0, p1, p2, p3, 0.5 * 0.5, &mut out, &mut data);
         // Must terminate and emit ≤ MAX_CURVE_SPLITS segments.
-        assert!(out.len() <= usize::try_from(MAX_CURVE_SPLITS).expect("non-negative"));
+        assert!(out.len() <= MAX_CURVE_SPLITS);
     }
 
     #[test]

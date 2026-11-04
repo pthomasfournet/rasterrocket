@@ -21,6 +21,7 @@ nightly-sve2 = []                  # SVE2 popcount tier (aarch64 only; requires 
 color    = { package = "rasterrocket-color", path = "../color", version = "2.0" }
 bytemuck = { workspace = true }
 bitflags = { workspace = true }
+log      = { workspace = true }
 
 [lints]
 workspace = true

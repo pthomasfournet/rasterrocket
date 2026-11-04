@@ -42,26 +42,23 @@ use crate::xpath::{XPath, XPathFlags};
 
 // ── Fixed-point helpers ───────────────────────────────────────────────────────
 
-/// Convert an `f64` device-space coordinate to 16.16 fixed-point (`i32`).
-///
-/// Values outside the i32 range are saturated — in practice this only happens
-/// for degenerate coordinates beyond ±32 768 px (impossible for a real page).
+/// Convert an `f64` device-space coordinate to 48.16 fixed point, saturating
+/// at the `i64` range (`as` saturates; NaN converts to 0).
 #[inline]
-fn fp_from_f64(x: f64) -> i32 {
-    let fp = x * 65536.0;
-    if fp >= f64::from(i32::MAX) {
-        i32::MAX
-    } else if fp <= f64::from(i32::MIN) {
-        i32::MIN
-    } else {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "fp is bounds-checked to [i32::MIN, i32::MAX] by the branches above"
-        )]
-        {
-            fp as i32
-        }
-    }
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the conversion saturates, far beyond any coordinate the scanner keeps"
+)]
+const fn fp_from_f64(x: f64) -> i64 {
+    (x * 65536.0) as i64
+}
+
+/// The pixel column of the 48.16 fixed-point `fp`: its floor, saturated to
+/// `i32`.
+#[inline]
+fn fp_column(fp: i64) -> i32 {
+    // Arithmetic right shift is floor for either sign.
+    i32::try_from(fp >> 16).unwrap_or(if fp < 0 { i32::MIN } else { i32::MAX })
 }
 
 // ── Intersect ─────────────────────────────────────────────────────────────────
@@ -138,7 +135,7 @@ impl XPathScanner {
         let mut y_max_fp = f64::NEG_INFINITY;
 
         for seg in &xpath.segs {
-            if seg.x0.is_nan() || seg.y0.is_nan() || seg.x1.is_nan() || seg.y1.is_nan() {
+            if seg.has_nan() {
                 continue;
             }
             let sy_min = seg.y0.min(seg.y1);
@@ -508,7 +505,7 @@ fn aa_sub_rows(y: i32) -> impl Iterator<Item = (usize, i32)> {
 /// anything, so the two passes must stay in sync.
 fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]) {
     for seg in &xpath.segs {
-        if seg.x0.is_nan() || seg.y0.is_nan() {
+        if seg.has_nan() {
             continue;
         }
         let seg_y_min = seg.y0.min(seg.y1);
@@ -537,10 +534,11 @@ fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]
 /// `cursors` starts at all-zero and is incremented per row as entries are written —
 /// so `row_start[i] + cursors[i]` is the next free slot for row `i`.
 ///
-/// Sloped segments use a 16.16 fixed-point integer accumulator (`xx1_fp += dxdy_fp`)
+/// Sloped segments use a 48.16 fixed-point integer accumulator (`xx1_fp += dxdy_fp`)
 /// for the per-scanline step.  The accumulator is initialised from f64 for the
-/// first row to preserve accuracy, then stepped by the pre-computed `i32` slope
-/// — eliminating all f64 arithmetic from the inner loop.
+/// first row to preserve accuracy, then stepped by the pre-computed slope —
+/// no f64 arithmetic in the inner loop.  Its range covers every coordinate a
+/// page bitmap holds, antialiased included.
 fn fill_intersections(
     xpath: &XPath,
     y_min: i32,
@@ -550,7 +548,7 @@ fn fill_intersections(
     intersects: &mut [Intersect],
 ) {
     for seg in &xpath.segs {
-        if seg.x0.is_nan() || seg.y0.is_nan() {
+        if seg.has_nan() {
             continue;
         }
         let seg_y_min = seg.y0.min(seg.y1);
@@ -586,9 +584,7 @@ fn fill_intersections(
             let sloped_x_min = seg.x0.min(seg.x1);
             let sloped_x_max = seg.x0.max(seg.x1);
 
-            // Clamp bounds in 16.16 fixed-point for the integer inner loop.
-            // Shift left 16 bits; saturate to i32 range (overflows only for
-            // geometrically impossible coordinates, >32k px).
+            // Clamp bounds in 48.16 fixed point for the integer inner loop.
             let fp_clamp_min = fp_from_f64(sloped_x_min);
             let fp_clamp_max = fp_from_f64(sloped_x_max);
 
@@ -600,7 +596,7 @@ fn fill_intersections(
             };
             let mut px0 = floor_i32(xx_init.clamp(sloped_x_min, sloped_x_max));
 
-            // 16.16 fixed-point accumulator for the right edge of each span.
+            // 48.16 fixed-point accumulator for the right edge of each span.
             // Initialised from f64 to preserve accuracy at the first row, then
             // stepped by `dxdy_fp` (integer add) per scanline — no f64 arithmetic
             // inside the hot loop.
@@ -608,8 +604,7 @@ fn fill_intersections(
 
             for row in row_y0..=row_y1 {
                 let xx1_fp_clamped = xx1_fp.clamp(fp_clamp_min, fp_clamp_max);
-                // Arithmetic right-shift gives floor() for both positive and negative.
-                let px1 = xx1_fp_clamped >> 16;
+                let px1 = fp_column(xx1_fp_clamped);
                 let c = if seg_y_min < f64::from(row) { count } else { 0 };
                 write_intersect(row, y_min, row_start, cursors, intersects, px0, px1, c);
                 px0 = px1;

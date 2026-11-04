@@ -57,25 +57,17 @@ pub(crate) struct XPathAdjust {
     pub x1b: f64,
     /// Right snap target (`rounded_adj1 - 0.01`).
     pub x1: f64,
-    /// The first of the two points of the edge at `adj1`, when the hint
-    /// names it.  Where the left and right windows overlap — edges less
-    /// than 0.02 pixels apart — a coordinate cannot tell its edge, and the
-    /// points of this edge take the right target by index instead.
-    pub edge1: Option<usize>,
+    /// The first of the two points of the edge at `adj1`.  Where the left
+    /// and right windows overlap (edges less than 0.02 pixels apart) a
+    /// coordinate cannot tell its edge, and the points of this edge take the
+    /// right target by index instead.
+    pub edge1: usize,
 }
 
 impl XPathAdjust {
-    /// Construct an adjust record for two endpoint values `adj0 ≤ adj1`.
-    ///
-    /// # Precondition
-    ///
-    /// `adj0 <= adj1`. The caller in `build_adjusts` in `xpath.rs` guarantees
-    /// this by passing `min`/`max`-reduced values.
-    ///
-    /// `adjust_lines` and `line_pos_i` handle a degenerate hint: when the two
-    /// rounded endpoints coincide and
-    /// `adjust_lines` is true, the span is expanded to
-    /// `[line_pos_i, line_pos_i + 1]`.
+    /// Construct an adjust record for two endpoint values `adj0 ≤ adj1`,
+    /// the edge at `adj1` beginning at point `edge1`.  When both round to the
+    /// same pixel boundary, the span is widened to the pixel after it.
     #[must_use]
     pub(crate) fn new(
         first_pt: usize,
@@ -83,26 +75,16 @@ impl XPathAdjust {
         vert: bool,
         adj0: f64,
         adj1: f64,
-        adjust_lines: bool,
-        line_pos_i: i32,
+        edge1: usize,
     ) -> Self {
         debug_assert!(adj0 <= adj1, "adj0 must be <= adj1");
 
         let mid = adj0.midpoint(adj1);
-        let mut r0 = f64::from(round_half_up_i32(adj0));
+        let r0 = f64::from(round_half_up_i32(adj0));
         let mut r1 = f64::from(round_half_up_i32(adj1));
-        // Both `r0` and `r1` are exact f64 representations of i32 values
-        // (from `round_half_up_i32`, which returns i32). Every i32 is representable
-        // exactly as f64, so bit-exact comparison correctly detects when both
-        // endpoints round to the same integer — no floating-point imprecision
-        // can produce a false positive or false negative here.
+        // Both are exact f64 images of i32 values, so bit equality is exact.
         if r0.to_bits() == r1.to_bits() {
-            if adjust_lines {
-                r0 = f64::from(line_pos_i);
-                r1 = f64::from(line_pos_i) + 1.0;
-            } else {
-                r1 += 1.0;
-            }
+            r1 += 1.0;
         }
         Self {
             first_pt,
@@ -117,15 +99,8 @@ impl XPathAdjust {
             x1a: adj1 - 0.01,
             x1b: adj1 + 0.01,
             x1: r1 - 0.01,
-            edge1: None,
+            edge1,
         }
-    }
-
-    /// The same record, the edge at `adj1` beginning at point `edge1`.
-    #[must_use]
-    pub(crate) const fn with_edge1(mut self, edge1: usize) -> Self {
-        self.edge1 = Some(edge1);
-        self
     }
 
     /// Whether the left and right snap windows overlap.
@@ -134,12 +109,13 @@ impl XPathAdjust {
     }
 
     /// Whether point `idx` lies on the edge at `adj1`: one of its two
-    /// points, or the first point of the range when the range closes on
-    /// that edge, the first and last points of a closed subpath being one.
-    fn on_edge1(&self, idx: usize) -> bool {
-        self.edge1.is_some_and(|e| {
-            idx == e || idx == e + 1 || (idx == self.first_pt && self.last_pt == e + 1)
-        })
+    /// points, or the first point of the range when the range ends on that
+    /// edge, the first and last points of a fill's closed rectangle being
+    /// one.  (A stroke's range spans several subpaths and never ends on a
+    /// hint edge this way.)
+    const fn on_edge1(&self, idx: usize) -> bool {
+        let e = self.edge1;
+        idx == e || idx == e + 1 || (idx == self.first_pt && self.last_pt == e + 1)
     }
 }
 
@@ -148,7 +124,7 @@ impl XPathAdjust {
 /// points of each edge take that edge's target.
 #[inline]
 pub(crate) fn stroke_adjust_point(adj: &XPathAdjust, idx: usize, x: &mut f64, y: &mut f64) {
-    if adj.edge1.is_some() && adj.edges_coincide() {
+    if adj.edges_coincide() {
         let v = if adj.vert { x } else { y };
         if *v > adj.x0a && *v < adj.x1b {
             *v = if adj.on_edge1(idx) { adj.x1 } else { adj.x0 };
@@ -188,7 +164,7 @@ mod tests {
 
     #[test]
     fn snaps_to_x0() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, false, 0);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
         let mut x = 1.005;
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -197,7 +173,7 @@ mod tests {
 
     #[test]
     fn snaps_to_xm() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, false, 0);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
         let mut x = 2.0; // midpoint of [1,3]
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -206,7 +182,7 @@ mod tests {
 
     #[test]
     fn snaps_to_x1() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, false, 0);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
         let mut x = 3.005;
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -216,7 +192,7 @@ mod tests {
 
     #[test]
     fn no_snap_outside_windows() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, false, 0);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
         let mut x = 5.0;
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -225,7 +201,7 @@ mod tests {
 
     #[test]
     fn horizontal_adjusts_y() {
-        let adj = XPathAdjust::new(0, 1, false, 2.0, 4.0, false, 0);
+        let adj = XPathAdjust::new(0, 1, false, 2.0, 4.0, 1);
         let mut x = 0.0;
         let mut y = 2.005;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -237,7 +213,7 @@ mod tests {
     fn coinciding_edges_snap_apart_by_point() {
         // A zero-width rectangle's vertical edges: points 1–2 and 3–4, the
         // range 0..=4 closing on the second edge.
-        let adj = XPathAdjust::new(0, 4, true, 5.3, 5.3, false, 0).with_edge1(3);
+        let adj = XPathAdjust::new(0, 4, true, 5.3, 5.3, 3);
         let snapped: Vec<f64> = (0..=4)
             .map(|i| {
                 let (mut x, mut y) = (5.3, 0.0);
@@ -247,7 +223,7 @@ mod tests {
             .collect();
         assert_eq!(snapped, [5.99, 5.0, 5.0, 5.99, 5.99]);
         // Apart edges snap by value, as before.
-        let apart = XPathAdjust::new(0, 4, true, 1.0, 3.0, false, 0).with_edge1(3);
+        let apart = XPathAdjust::new(0, 4, true, 1.0, 3.0, 3);
         let (mut x, mut y) = (1.0, 0.0);
         stroke_adjust_point(&apart, 3, &mut x, &mut y);
         assert!((x - 1.0).abs() < 1e-10, "x={x}");
@@ -257,7 +233,7 @@ mod tests {
     fn snaps_only_within_open_interval() {
         // A coordinate exactly on the window boundary must NOT be snapped,
         // because the windows are open intervals: v ∈ (x0a, x0b), not [x0a, x0b].
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, false, 0);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
         // x0a = adj0 - 0.01 = 0.99 — exactly on the boundary, must not snap.
         let boundary = adj.x0a;
         let mut x = boundary;

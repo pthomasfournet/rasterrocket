@@ -41,7 +41,7 @@ pub const AA_GAMMA: [u8; (AA_SIZE * AA_SIZE + 1) as usize] = [
 /// quadratically; decreasing it degrades curve quality.
 ///
 /// Unit: dimensionless iteration count.
-pub const MAX_CURVE_SPLITS: i32 = 1024;
+pub const MAX_CURVE_SPLITS: usize = 1024;
 
 /// Control-point ratio for approximating a quarter-circle with a cubic Bézier.
 ///
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn max_curve_splits_matches_cpp() {
+    fn max_curve_splits_is_a_power_of_two() {
         assert_eq!(MAX_CURVE_SPLITS, 1 << 10);
     }
 

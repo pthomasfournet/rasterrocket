@@ -84,23 +84,38 @@ pub struct XPathSeg {
     /// Always `y0 ≤ y1` for non-horizontal segments after construction.
     pub y1: f64,
     /// Slope `(x1-x0)/(y1-y0)`, stored as both `f64` (for initialising the
-    /// fixed-point accumulator) and as a **16.16 fixed-point `i32`** (`dxdy_fp`)
+    /// fixed-point accumulator) and as a **48.16 fixed-point `i64`** (`dxdy_fp`)
     /// for the per-scanline stepping hot loop.
     ///
     /// Set to `0.0` / `0` for horizontal and vertical segments.
     pub dxdy: f64,
-    /// Slope in 16.16 fixed-point: `(dxdy * 65536.0).round() as i32`.
+    /// Slope in 48.16 fixed-point: `(dxdy * 65536.0).round()`, saturated.
     ///
     /// Used by the scanner's incremental x-accumulator: `xx_fp += dxdy_fp` per
-    /// scanline.  Integer addition instead of f64 addition eliminates floating-
-    /// point dependency chains in the inner loop and is trivially vectorizable.
-    ///
-    /// Precision: 1/65536 ≈ 1.5 × 10⁻⁵ device pixels per scanline — sufficient
-    /// for any realistic document (the error accumulates as at most one pixel per
-    /// ~65536 scanlines, far beyond any real page height).
-    pub dxdy_fp: i32,
+    /// scanline.  The rounding error is at most 2⁻¹⁷ pixel per scanline, so
+    /// under one pixel over the 32 768 rows (×4 under antialiasing) of the
+    /// tallest page.
+    pub dxdy_fp: i64,
     /// Orientation and flip flags; see [`XPathFlags`] for the set of valid bits.
     pub flags: XPathFlags,
+}
+
+impl XPathSeg {
+    /// Whether any coordinate is NaN.
+    #[must_use]
+    pub fn has_nan(&self) -> bool {
+        [self.x0, self.y0, self.x1, self.y1]
+            .iter()
+            .any(|v| v.is_nan())
+    }
+
+    /// Whether every coordinate is finite.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        [self.x0, self.y0, self.x1, self.y1]
+            .iter()
+            .all(|v| v.is_finite())
+    }
 }
 
 // ── XPath ─────────────────────────────────────────────────────────────────────
@@ -192,30 +207,23 @@ impl XPath {
             .map(|p| transform(matrix, p.x, p.y))
             .collect();
 
-        // Thin-line stroke adjustment (the `adjust_lines=true` branch of
-        // `XPathAdjust::new`) has no caller today; pass the no-op values.
-        let adjusts = build_adjusts(&path.hints, &tpts, false, 0);
+        let adjusts = build_adjusts(&path.hints, &tpts);
 
         // Apply stroke adjustments to the transformed points.
         let mut tpts = tpts;
         for adj in &adjusts {
-            // Safety: build_adjusts validates that first_pt and last_pt are
-            // within bounds before constructing the XPathAdjust records, so
-            // this slice index cannot panic.
-            debug_assert!(
-                adj.last_pt < tpts.len(),
-                "adj.last_pt ({}) out of bounds (tpts.len() = {})",
-                adj.last_pt,
-                tpts.len()
-            );
+            // `build_adjusts` keeps only ranges within `tpts`.
             for (idx, pt) in (adj.first_pt..).zip(&mut tpts[adj.first_pt..=adj.last_pt]) {
                 stroke_adjust_point(adj, idx, &mut pt.x, &mut pt.y);
             }
         }
 
-        // Walk the path and emit segments.
+        // Walk the path and emit segments; one flattening buffer serves
+        // every curve.
         let n = path.pts.len();
         let mut i = 0usize;
+        let mut flat_pts = Vec::new();
+        let mut budget_spent = false;
         while i < n {
             if path.flags[i].contains(PathFlags::FIRST) {
                 // Start of a new subpath.
@@ -225,7 +233,9 @@ impl XPath {
                 let mut cur_x = sp_x;
                 let mut cur_y = sp_y;
                 i += 1;
-                while i < n {
+                // The subpath ends at a point flagged `LAST`, a curve whose
+                // endpoint is, or the next subpath's first point.
+                while i < n && !path.flags[i].contains(PathFlags::FIRST) {
                     if path.flags[i].contains(PathFlags::CURVE) {
                         // Cubic Bezier: consume 3 points (2 control + 1 endpoint).
                         if i + 2 >= n {
@@ -235,22 +245,37 @@ impl XPath {
                         let p1 = tpts[i];
                         let p2 = tpts[i + 1];
                         let p3 = tpts[i + 2];
-                        let mut flat_pts = Vec::new();
-                        flatten_curve(
-                            p0,
-                            p1,
-                            p2,
-                            p3,
-                            flatness_sq,
-                            &mut flat_pts,
-                            &mut xpath.curve_data,
-                        );
+                        flat_pts.clear();
+                        if xpath.segs.len() < MAX_FLATTENED_SEGMENTS {
+                            flatten_curve(
+                                p0,
+                                p1,
+                                p2,
+                                p3,
+                                flatness_sq,
+                                &mut flat_pts,
+                                &mut xpath.curve_data,
+                            );
+                        } else {
+                            if !budget_spent {
+                                log::warn!(
+                                    "a path flattens to over {MAX_FLATTENED_SEGMENTS} \
+                                     segments; its remaining curves are drawn as chords"
+                                );
+                                budget_spent = true;
+                            }
+                            flat_pts.push(p3);
+                        }
                         for fp in &flat_pts {
                             xpath.add_segment(cur_x, cur_y, fp.x, fp.y);
                             cur_x = fp.x;
                             cur_y = fp.y;
                         }
+                        let is_last = path.flags[i + 2].contains(PathFlags::LAST);
                         i += 3;
+                        if is_last {
+                            break;
+                        }
                     } else {
                         // Line segment.
                         let nx = tpts[i].x;
@@ -265,9 +290,15 @@ impl XPath {
                         }
                     }
                 }
-                // Closing segment if requested and the subpath is not already closed.
-                if close_subpaths && ((cur_x - sp_x).abs() > 1e-10 || (cur_y - sp_y).abs() > 1e-10)
-                {
+                // A closing segment back to the start whenever the end
+                // differs from it at all: every crossing of a closed subpath
+                // then has its opposite on each scanline.
+                #[expect(
+                    clippy::float_cmp,
+                    reason = "any difference, however small, leaves a crossing unbalanced"
+                )]
+                let open = cur_x != sp_x || cur_y != sp_y;
+                if close_subpaths && open {
                     xpath.add_segment(cur_x, cur_y, sp_x, sp_y);
                 }
                 if close_subpaths && let Some(seg) = xpath.segs.get_mut(first_seg) {
@@ -293,28 +324,11 @@ impl XPath {
     /// which will produce incorrect scan-conversion results. There is no runtime
     /// guard against double-scaling.
     ///
-    /// # Panics
-    ///
-    /// Does not panic in practice. However, if any coordinate is so large that
-    /// multiplying by [`AA_SIZE`] would overflow to `f64::INFINITY`, subsequent
-    /// scan-conversion arithmetic will silently produce wrong results. A
-    /// `debug_assert!` fires in debug builds if any coordinate is non-finite
-    /// before scaling.
+    /// Non-finite coordinates (from an overflowing or degenerate transform)
+    /// stay non-finite; the scanner skips segments with a NaN coordinate.
     pub fn aa_scale(&mut self) {
         let s = f64::from(AA_SIZE);
         for seg in &mut self.segs {
-            debug_assert!(
-                seg.x0.is_finite()
-                    && seg.y0.is_finite()
-                    && seg.x1.is_finite()
-                    && seg.y1.is_finite(),
-                "aa_scale: segment coordinates must be finite before scaling \
-                 (x0={}, y0={}, x1={}, y1={})",
-                seg.x0,
-                seg.y0,
-                seg.x1,
-                seg.y1,
-            );
             seg.x0 *= s;
             seg.y0 *= s;
             seg.x1 *= s;
@@ -343,16 +357,13 @@ impl XPath {
                 && floor_i32(ly) >= y_min
                 && floor_i32(hy) <= y_max
         };
-        // When the box of the finite coordinates lies within the bounds, so
+        // When the box of the non-NaN coordinates lies within the bounds, so
         // does every subpath that could be removed.
         if inside(bounding_box(&self.segs)) {
             return;
         }
         let outside = |segs: &[XPathSeg]| {
-            let finite = segs.iter().all(|s| {
-                s.x0.is_finite() && s.y0.is_finite() && s.x1.is_finite() && s.y1.is_finite()
-            });
-            if !finite || segs.is_empty() {
+            if segs.is_empty() || !segs.iter().all(XPathSeg::is_finite) {
                 return false;
             }
             let (lx, hx, ly, hy) = bounding_box(segs);
@@ -436,25 +447,12 @@ impl XPath {
             flags.insert(XPathFlags::FLIPPED);
         }
 
-        // Clamp dxdy_fp to i32 range.  The only way `dxdy * 65536` overflows i32
-        // is if the segment spans more than ~32768 pixels horizontally per pixel
-        // vertically — physically impossible for any realistic page.
-        let dxdy_fp = {
-            let fp = dxdy * 65536.0;
-            if fp >= f64::from(i32::MAX) {
-                i32::MAX
-            } else if fp <= f64::from(i32::MIN) {
-                i32::MIN
-            } else {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "fp is bounds-checked to [i32::MIN, i32::MAX] by the branches above"
-                )]
-                {
-                    fp.round() as i32
-                }
-            }
-        };
+        // `as` saturates a float to the integer range.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the conversion saturates; a slope past 2^47 pixels per row is clamped"
+        )]
+        let dxdy_fp = (dxdy * 65536.0).round() as i64;
 
         self.segs.push(XPathSeg {
             x0,
@@ -498,41 +496,29 @@ pub const fn transform(m: &[f64; 6], xi: f64, yi: f64) -> PathPoint {
 /// Only axis-aligned hint pairs (both edges strictly horizontal or both
 /// strictly vertical after transformation) are converted to adjust records;
 /// skewed pairs are dropped, since snapping applies only to axis-aligned edges.
-///
-/// Hints whose control-point indices are out of range for `tpts` are also
-/// silently dropped rather than panicking, so that malformed PDF content
-/// cannot cause crashes.
-///
-/// # Parameters `adjust_lines` and `line_pos_i`
-///
-/// Forwarded verbatim to [`XPathAdjust::new`], where they drive the thin-line
-/// snap branch (when both rounded endpoints coincide and `adjust_lines` is
-/// true, the span is expanded to `[line_pos_i, line_pos_i + 1]`). Every
-/// caller in the tree passes `(false, 0)`, which is the no-op configuration;
-/// the assert below pins that contract so an unexpected caller surfaces in
-/// debug builds rather than silently producing thin-line-snapped output.
-fn build_adjusts(
-    hints: &[StrokeAdjustHint],
-    tpts: &[PathPoint],
-    adjust_lines: bool,
-    line_pos_i: i32,
-) -> Vec<XPathAdjust> {
-    debug_assert!(
-        !adjust_lines && line_pos_i == 0,
-        "build_adjusts: only the no-op configuration (false, 0) is reachable today; \
-         got adjust_lines={adjust_lines} line_pos_i={line_pos_i}"
-    );
+/// A hint whose indices fall outside `tpts`, whose range is inverted, or whose
+/// edge points are not finite is dropped too.
+fn build_adjusts(hints: &[StrokeAdjustHint], tpts: &[PathPoint]) -> Vec<XPathAdjust> {
     let mut adjusts = Vec::with_capacity(hints.len());
     for h in hints {
-        // Validate indices: each hint references two consecutive point pairs.
-        // ctrl0+1 and ctrl1+1 must both be valid indices into tpts.
-        if h.ctrl0 + 1 >= tpts.len() || h.ctrl1 + 1 >= tpts.len() {
+        // Each hint names two consecutive point pairs within its range.
+        if h.ctrl0 + 1 >= tpts.len()
+            || h.ctrl1 + 1 >= tpts.len()
+            || h.last_pt >= tpts.len()
+            || h.first_pt > h.last_pt
+        {
             continue;
         }
         let p00 = tpts[h.ctrl0];
         let p01 = tpts[h.ctrl0 + 1];
         let p10 = tpts[h.ctrl1];
         let p11 = tpts[h.ctrl1 + 1];
+        if ![p00, p01, p10, p11]
+            .iter()
+            .all(|p| p.x.is_finite() && p.y.is_finite())
+        {
+            continue;
+        }
         // Determine orientation using bit-exact comparison (axis-aligned check).
         let vert = (p00.x.to_bits() == p01.x.to_bits()) && (p10.x.to_bits() == p11.x.to_bits());
         let horiz = (p00.y.to_bits() == p01.y.to_bits()) && (p10.y.to_bits() == p11.y.to_bits());
@@ -542,33 +528,24 @@ fn build_adjusts(
         // Edges of zero length are both: the pair lies apart across the
         // axis on which the edges differ, and is adjusted on that one.
         let vert = vert && !(horiz && (p10.y - p00.y).abs() > (p10.x - p00.x).abs());
-        // The two coordinates to snap: take min/max so adj0 ≤ adj1 always.
-        let (a0, a1) = if vert {
-            (p00.x.min(p10.x), p00.x.max(p10.x))
-        } else {
-            (p00.y.min(p10.y), p00.y.max(p10.y))
-        };
-        // The edge at a1, the larger coordinate, takes the right target.
-        let edge1 = if (if vert { p10.x } else { p10.y }) >= (if vert { p00.x } else { p00.y }) {
-            h.ctrl1
-        } else {
-            h.ctrl0
-        };
-        adjusts.push(
-            XPathAdjust::new(
-                h.first_pt,
-                h.last_pt,
-                vert,
-                a0,
-                a1,
-                adjust_lines,
-                line_pos_i,
-            )
-            .with_edge1(edge1),
-        );
+        let (c0, c1) = if vert { (p00.x, p10.x) } else { (p00.y, p10.y) };
+        // The edge at the larger coordinate takes the right target.
+        let edge1 = if c1 >= c0 { h.ctrl1 } else { h.ctrl0 };
+        adjusts.push(XPathAdjust::new(
+            h.first_pt,
+            h.last_pt,
+            vert,
+            c0.min(c1),
+            c0.max(c1),
+            edge1,
+        ));
     }
     adjusts
 }
+
+/// Segments a path's curves are flattened into at most; past it each curve
+/// is its chord, so a path's memory stays bounded whatever its curves.
+const MAX_FLATTENED_SEGMENTS: usize = 1 << 22;
 
 /// The bounds of no points: every point extends them.
 const NO_BOUNDS: (f64, f64, f64, f64) = (
@@ -581,15 +558,13 @@ const NO_BOUNDS: (f64, f64, f64, f64) = (
 /// The smallest box `(x_min, x_max, y_min, y_max)` holding the endpoints of
 /// `segs`, NaN coordinates aside; [`NO_BOUNDS`] when there are none.
 fn bounding_box(segs: &[XPathSeg]) -> (f64, f64, f64, f64) {
-    // A comparison with NaN is false, so NaN never replaces a bound.
-    let lo = |a: f64, b: f64| if b < a { b } else { a };
-    let hi = |a: f64, b: f64| if b > a { b } else { a };
+    // `f64::min` and `max` return the other operand of a NaN.
     segs.iter().fold(NO_BOUNDS, |(lx, hx, ly, hy), s| {
         (
-            lo(lo(lx, s.x0), s.x1),
-            hi(hi(hx, s.x0), s.x1),
-            lo(lo(ly, s.y0), s.y1),
-            hi(hi(hy, s.y0), s.y1),
+            lx.min(s.x0).min(s.x1),
+            hx.max(s.x0).max(s.x1),
+            ly.min(s.y0).min(s.y1),
+            hy.max(s.y0).max(s.y1),
         )
     })
 }
@@ -618,6 +593,31 @@ mod tests {
             .iter()
             .map(|s| (s.x0, s.y0, s.x1, s.y1))
             .collect()
+    }
+
+    #[test]
+    fn subpaths_ending_in_curves_stay_apart() {
+        // Two closed loops drawn with curves alone, 100 px apart: no segment
+        // may join them.
+        let mut b = PathBuilder::new();
+        for x in [0.0, 100.0] {
+            b.move_to(x, 0.0).unwrap();
+            b.curve_to(x + 10.0, 0.0, x + 10.0, 10.0, x, 10.0).unwrap();
+            b.curve_to(x - 10.0, 10.0, x - 10.0, 0.0, x, 0.0).unwrap();
+            b.close(false).unwrap();
+        }
+        let path = b.build();
+        let xpath = XPath::new(&path, &identity(), 0.1, true);
+        for s in &xpath.segs {
+            assert!(
+                (s.x0 < 50.0) == (s.x1 < 50.0),
+                "segment {:.1},{:.1} -> {:.1},{:.1} joins the loops",
+                s.x0,
+                s.y0,
+                s.x1,
+                s.y1
+            );
+        }
     }
 
     #[test]
