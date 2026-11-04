@@ -5,6 +5,7 @@
 //! - Reports `VK_API_VERSION_1_3` or higher (so we can rely on Vulkan 1.3
 //!   core for `synchronization2`, `timelineSemaphore`, 8-bit storage,
 //!   and buffer-device-address without enabling them as discrete extensions).
+//! - Supports every one of those features (`vkGetPhysicalDeviceFeatures2`).
 //!
 //! The device is either named by a [`DeviceSelector`] or chosen by the
 //! ranking in [`select`](super::select).
@@ -135,7 +136,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
 
     let (device, compute_queue, setup) = destroy_instance_on_err(
         &instance,
-        create_device(&instance, phys, compute_queue_family),
+        create_device(&instance, phys, compute_queue_family, chosen.int64),
     )?;
 
     let integrated = dev_props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU;
@@ -325,19 +326,16 @@ impl DeviceSetup {
     }
 }
 
-/// [`DeviceSetup`] for a device offering the extensions `available` and the
-/// core features `supported`: memory budget when offered, the portability
-/// subset whenever advertised (its enabling is then required), and
-/// `shaderInt64` when supported.
-fn device_setup(available: &[&CStr], supported: &vk::PhysicalDeviceFeatures) -> DeviceSetup {
+/// [`DeviceSetup`] for a device offering the extensions `available`, with
+/// `int64` whether it supports `shaderInt64`: memory budget when offered,
+/// the portability subset whenever advertised (its enabling is then
+/// required), and `shaderInt64` when supported.
+fn device_setup(available: &[&CStr], int64: bool) -> DeviceSetup {
     let extensions = [memory_budget::NAME, portability_subset::NAME]
         .into_iter()
         .filter(|name| available.contains(name))
         .collect();
-    DeviceSetup {
-        extensions,
-        int64: supported.shader_int64 == vk::TRUE,
-    }
+    DeviceSetup { extensions, int64 }
 }
 
 /// The names of `properties`, NUL-terminated per the specification.
@@ -393,11 +391,69 @@ fn pick_physical_device(
         .iter()
         .map(|&p| describe_physical_device(instance, p))
         .collect::<Result<Vec<_>>>()?;
+    if selector.is_none() {
+        for (i, c) in candidates.iter().enumerate() {
+            if let Err(why) = c.compute_queue {
+                log::info!("vulkan: device {i} \"{}\" skipped: {why}", c.name);
+            }
+        }
+    }
     let idx = select::pick(&candidates, selector)?;
     let chosen = candidates.into_iter().nth(idx).ok_or_else(|| {
         BackendError::msg("device selection returned an index past the enumerated devices")
     })?;
     Ok((physicals[idx], chosen))
+}
+
+/// Feature support of a device, as far as the backend reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SupportedFeatures {
+    /// The first feature [`create_device`] enables unconditionally that the
+    /// device does not support, by its Vulkan name.
+    missing_required: Option<&'static str>,
+    /// Whether `shaderInt64` is supported.
+    int64: bool,
+}
+
+impl SupportedFeatures {
+    /// `vkGetPhysicalDeviceFeatures2` with the 1.2 and 1.3 structures
+    /// chained; valid for a device reporting API 1.3 or higher.
+    fn query(instance: &ash::Instance, phys: vk::PhysicalDevice) -> Self {
+        let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut v13 = vk::PhysicalDeviceVulkan13Features::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut v12)
+            .push_next(&mut v13);
+        // Safety: every chained structure is live for the call and core in
+        // the device's API version.
+        unsafe { instance.get_physical_device_features2(phys, &mut features2) };
+        let int64 = features2.features.shader_int64 == vk::TRUE;
+        Self {
+            missing_required: missing_required(&v12, &v13),
+            int64,
+        }
+    }
+}
+
+/// The Vulkan name of the first feature [`create_device`] enables
+/// unconditionally that `v12` / `v13` do not report as supported.
+fn missing_required(
+    v12: &vk::PhysicalDeviceVulkan12Features<'_>,
+    v13: &vk::PhysicalDeviceVulkan13Features<'_>,
+) -> Option<&'static str> {
+    [
+        ("bufferDeviceAddress", v12.buffer_device_address),
+        ("timelineSemaphore", v12.timeline_semaphore),
+        ("storageBuffer8BitAccess", v12.storage_buffer8_bit_access),
+        (
+            "uniformAndStorageBuffer8BitAccess",
+            v12.uniform_and_storage_buffer8_bit_access,
+        ),
+        ("shaderInt8", v12.shader_int8),
+        ("synchronization2", v13.synchronization2),
+    ]
+    .into_iter()
+    .find_map(|(name, supported)| (supported != vk::TRUE).then_some(name))
 }
 
 /// Query the properties [`select`] ranks and matches on.
@@ -412,18 +468,23 @@ fn describe_physical_device(
     // BDA, and 8-bit storage are used as core features.  `api_version` is
     // the maximum version the driver supports, so one packed-integer
     // comparison suffices.
-    let compute_queue = if props.api_version < vk::API_VERSION_1_3 {
-        Err(Ineligible::ApiBelow13)
+    let (features, compute_queue) = if props.api_version < vk::API_VERSION_1_3 {
+        (None, Err(Ineligible::ApiBelow13))
     } else {
+        let features = SupportedFeatures::query(instance, phys);
         let queue_families = unsafe { instance.get_physical_device_queue_family_properties(phys) };
-        match queue_families
-            .iter()
-            .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
-        {
-            Some(idx) => Ok(u32::try_from(idx)
-                .map_err(|_| BackendError::msg("queue family index does not fit in u32"))?),
-            None => Err(Ineligible::NoComputeQueue),
-        }
+        let queue = match features.missing_required {
+            Some(name) => Err(Ineligible::MissingFeature(name)),
+            None => match queue_families
+                .iter()
+                .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
+            {
+                Some(idx) => Ok(u32::try_from(idx)
+                    .map_err(|_| BackendError::msg("queue family index does not fit in u32"))?),
+                None => Err(Ineligible::NoComputeQueue),
+            },
+        };
+        (Some(features), queue)
     };
 
     let mem_props = unsafe { instance.get_physical_device_memory_properties(phys) };
@@ -433,6 +494,7 @@ fn describe_physical_device(
         name,
         device_type: props.device_type,
         compute_queue,
+        int64: features.is_some_and(|f| f.int64),
         device_local_bytes: total_device_local_bytes(&mem_props),
         pci,
         uuid,
@@ -489,15 +551,19 @@ fn device_name(props: &vk::PhysicalDeviceProperties) -> String {
     )
 }
 
+/// Create the logical device and its compute queue.  The required features
+/// were checked against the device's support at selection
+/// ([`missing_required`]); `int64` is whether
+/// `shaderInt64` is supported.
 fn create_device(
     instance: &ash::Instance,
     phys: vk::PhysicalDevice,
     queue_family: u32,
+    int64: bool,
 ) -> Result<(ash::Device, vk::Queue, DeviceSetup)> {
     let available_exts = unsafe { instance.enumerate_device_extension_properties(phys) }
         .map_err(vk_err("vkEnumerateDeviceExtensionProperties"))?;
-    let supported = unsafe { instance.get_physical_device_features(phys) };
-    let setup = device_setup(&extension_names(&available_exts), &supported);
+    let setup = device_setup(&extension_names(&available_exts), int64);
     let enabled_exts: Vec<*const c_char> = setup.extensions.iter().map(|e| e.as_ptr()).collect();
 
     let priorities = [1.0_f32];
@@ -702,19 +768,41 @@ mod tests {
 
     #[test]
     fn portability_subset_and_memory_budget_are_enabled_when_advertised() {
-        let none = vk::PhysicalDeviceFeatures::default();
-        let setup = device_setup(&[portability_subset::NAME, memory_budget::NAME], &none);
+        let setup = device_setup(&[portability_subset::NAME, memory_budget::NAME], false);
         assert!(setup.extensions.contains(&portability_subset::NAME));
         assert!(setup.has_memory_budget());
-        let bare = device_setup(&[], &none);
+        let bare = device_setup(&[], false);
         assert!(bare.extensions.is_empty() && !bare.has_memory_budget());
     }
 
     #[test]
     fn int64_is_enabled_exactly_when_supported() {
-        let yes = vk::PhysicalDeviceFeatures::default().shader_int64(true);
-        assert!(device_setup(&[], &yes).int64);
-        assert!(!device_setup(&[], &vk::PhysicalDeviceFeatures::default()).int64);
+        assert!(device_setup(&[], true).int64);
+        assert!(!device_setup(&[], false).int64);
+    }
+
+    #[test]
+    fn a_missing_required_feature_is_named() {
+        let v12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(true)
+            .timeline_semaphore(true)
+            .storage_buffer8_bit_access(true)
+            .uniform_and_storage_buffer8_bit_access(true)
+            .shader_int8(true);
+        let v13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+        assert_eq!(missing_required(&v12, &v13), None);
+        assert_eq!(
+            missing_required(&v12.shader_int8(false), &v13),
+            Some("shaderInt8")
+        );
+        assert_eq!(
+            missing_required(&v12, &v13.synchronization2(false)),
+            Some("synchronization2")
+        );
+        assert_eq!(
+            missing_required(&v12.buffer_device_address(false), &v13),
+            Some("bufferDeviceAddress")
+        );
     }
 
     /// Memory properties with the heaps `heaps` (size, flags) and the types

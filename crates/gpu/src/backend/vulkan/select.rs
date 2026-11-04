@@ -54,14 +54,18 @@ pub(super) enum Ineligible {
     ApiBelow13,
     /// No queue family advertises `VK_QUEUE_COMPUTE_BIT`.
     NoComputeQueue,
+    /// A feature the backend enables at device creation is not supported;
+    /// the field is its Vulkan name.
+    MissingFeature(&'static str),
 }
 
 impl fmt::Display for Ineligible {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::ApiBelow13 => "Vulkan API below 1.3",
-            Self::NoComputeQueue => "no compute queue family",
-        })
+        match self {
+            Self::ApiBelow13 => f.write_str("Vulkan API below 1.3"),
+            Self::NoComputeQueue => f.write_str("no compute queue family"),
+            Self::MissingFeature(name) => write!(f, "required feature {name} not supported"),
+        }
     }
 }
 
@@ -75,6 +79,8 @@ pub(super) struct Candidate {
     /// Index of the first compute-capable queue family, or the reason the
     /// device is unusable.
     pub(super) compute_queue: Result<u32, Ineligible>,
+    /// Whether `shaderInt64` is supported.
+    pub(super) int64: bool,
     /// Sum of the `DEVICE_LOCAL` memory heap sizes, in bytes.
     pub(super) device_local_bytes: u64,
     /// PCI address, when the driver exposes `VK_EXT_pci_bus_info`.
@@ -136,7 +142,7 @@ pub(super) fn pick(
         || {
             pick_auto(cands).ok_or_else(|| {
                 BackendError::msg(format!(
-                    "no Vulkan 1.3+ device with a compute queue family was found; enumerated:\n{}",
+                    "no Vulkan device with API 1.3+, a compute queue family and the required features was found; enumerated:\n{}",
                     describe(cands)
                 ))
             })
@@ -264,6 +270,7 @@ mod tests {
             name: name.to_owned(),
             device_type,
             compute_queue: Ok(0),
+            int64: false,
             device_local_bytes: 0,
             pci: None,
             uuid: [0; 16],
@@ -487,6 +494,18 @@ mod tests {
             cand("Radeon RX 7900", DISCRETE),
         ];
         assert_eq!(pick(&cands, Some(&sel("radeon rx 7900"))).unwrap(), 1);
+    }
+
+    #[test]
+    fn auto_skips_a_device_missing_a_feature() {
+        let mut cands = vec![gpu("big", 16, 1, 1), gpu("small", 8, 2, 2)];
+        cands[0].compute_queue = Err(Ineligible::MissingFeature("shaderInt8"));
+        assert_eq!(cands[pick(&cands, None).unwrap()].name, "small");
+        let err = selection_error(&cands, "big");
+        assert!(
+            err.contains("required feature shaderInt8 not supported"),
+            "{err}"
+        );
     }
 
     #[test]
