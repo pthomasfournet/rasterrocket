@@ -23,6 +23,13 @@ pub(super) fn be(e: impl std::fmt::Display) -> BackendError {
     BackendError::msg(e.to_string())
 }
 
+/// `size > 0` bytes of zeroed device memory.  The memset is queued on the
+/// calling thread's stream, ahead of that thread's later kernels and copies.
+fn alloc_zeroed(ctx: &GpuCtx, size: usize, what: &'static str) -> Result<CudaSlice<u8>> {
+    reject_zero_size(size, what)?;
+    ctx.stream().alloc_zeros::<u8>(size).map_err(be)
+}
+
 /// `size > 0` bytes of zeroed, page-locked host memory in `ctx`, allocated
 /// without `CU_MEMHOSTALLOC_WRITECOMBINED`, so host reads are cached.
 fn alloc_pinned(
@@ -79,30 +86,19 @@ impl GpuBackend for CudaBackend {
     type HostBuffer = PinnedHostSlice<u8>;
     type PageFence = page_recorder::PageFence;
 
+    /// Zeroed, as [`Self::alloc_device_zeroed`].
     fn alloc_device(&self, size: usize) -> Result<Self::DeviceBuffer> {
-        reject_zero_size(size, "alloc_device")?;
-        // cudarc 0.19 does expose an unzeroed path (the unsafe
-        // stream-ordered `CudaStream::alloc`), but we deliberately
-        // over-deliver the trait contract (which makes no promise
-        // about contents) with `alloc_zeros`: the memset is device-side
-        // and cheap, and a caller bug that reads before writing sees
-        // deterministic zeros instead of nondeterministic garbage.
-        // Callers that rely on zeroing must still use
-        // `alloc_device_zeroed` — the contract is the weaker one.
-        self.ctx.stream().alloc_zeros::<u8>(size).map_err(be)
+        alloc_zeroed(&self.ctx, size, "alloc_device")
     }
 
     fn alloc_device_zeroed(&self, size: usize) -> Result<Self::DeviceBuffer> {
-        reject_zero_size(size, "alloc_device_zeroed")?;
-        // The memset is queued on the calling thread's stream, ahead of
-        // that thread's later kernels and copies.
-        self.ctx.stream().alloc_zeros::<u8>(size).map_err(be)
+        alloc_zeroed(&self.ctx, size, "alloc_device_zeroed")
     }
 
+    /// The same memory as [`Self::alloc_device`]: CUDA device memory is not
+    /// host-mapped, the host reads it only through copies.
     fn alloc_device_readback(&self, size: usize) -> Result<Self::DeviceBuffer> {
-        // CUDA device memory is not host-mapped: the host reads it only
-        // through copies, so the read-back intent selects nothing.
-        self.alloc_device(size)
+        alloc_zeroed(&self.ctx, size, "alloc_device_readback")
     }
 
     fn device_buffer_len(&self, buf: &Self::DeviceBuffer) -> usize {
