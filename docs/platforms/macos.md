@@ -134,7 +134,10 @@ target/release/rrocket --backend vulkan document.pdf out
 ```
 
 rrocket finds Homebrew's loader (`/opt/homebrew/lib/libvulkan.1.dylib`) or
-the Vulkan SDK's (`$VULKAN_SDK/lib`) without `DYLD_LIBRARY_PATH`. On the
+the Vulkan SDK's (`$VULKAN_SDK/lib`, when `$VULKAN_SDK` is an absolute path;
+a relative or empty one is ignored with a warning) without
+`DYLD_LIBRARY_PATH`. When no loader loads, the error lists each path tried
+and why it failed. On the
 Apple GPU device buffers live in shared memory, which the CPU reads and
 writes in place, so no data is copied to or from the GPU.
 

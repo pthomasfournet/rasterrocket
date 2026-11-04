@@ -404,7 +404,7 @@ crates.io (see the note at the top).
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG and the AA fill, which are wired but dormant by default because the CPU paths beat them.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`.  No nvJPEG / cache support under Vulkan.
+- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  No nvJPEG / cache support under Vulkan.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
