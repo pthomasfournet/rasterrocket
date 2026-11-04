@@ -3,6 +3,7 @@
 ```
 rrocket [OPTIONS] <INPUT> <OUTPUT_PREFIX>
 rrocket --print [OPTIONS] <INPUT>
+rrocket --list-printers
 ```
 
 Renders pages to image files. Flag names and output naming follow `pdftoppm`
@@ -126,6 +127,9 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `CMap` stream | 16 MiB | the stream is ignored and codes map by identity (warning) |
 | Mappings of one `CMap` | 2¹⁸ | the rest are ignored (warning) |
 | Type 3 `CharProc` | 4 MiB each, 64 MiB per font | the glyph is skipped (warning) |
+| Tint-transform work of one image (`Separation`, `DeviceN` and the other spaces converted colour by colour) | 2²⁸ interpreted operations, and 2³² for the images of a page together | the image converts through a lattice of exact conversions with multilinear interpolation (warning); when no lattice fits what is left, the image is not drawn (warning) |
+| One run of a Type 4 (PostScript calculator) function | 2²⁰ operations, `copy` and `roll` counting each entry they move | the evaluation fails (one warning per function) |
+| JBIG2 page decode | memory besides the page bitmap: 16 × the page area + 2²⁶ bits, at most 2³³ bits (1 GiB); compositing work: 64 page areas + 2²⁸ pixels, at most 2³⁶ | the image fails (warning), as an image over the image limits does |
 
 ---
 
