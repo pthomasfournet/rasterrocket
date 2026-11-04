@@ -13,7 +13,7 @@
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
-use crate::bitmap::Bitmap;
+use crate::bitmap::{Bitmap, BitmapAllocError};
 use crate::pipe::TransferSet;
 use crate::pipe::{self, Pattern, PipeSrc, PipeState, RowPattern};
 use crate::types::BlendMode;
@@ -241,10 +241,14 @@ impl TiledPattern {
     /// its lattice position rounded to `1 / CELL_PHASES` pixel: `cell`
     /// returns the cell rasterised at that phase, a bitmap of at most
     /// `cell_w × cell_h` pixels stamped at the whole-pixel part.  `cell` is
-    /// called once per phase stamped.  `None` when the lattice is
+    /// called once per phase stamped.  `Ok(None)` when the lattice is
     /// degenerate or enumerates more than `MAX_LATTICE_POINTS` (2^26) points over
     /// the rectangle, or when `cell` gives no bitmap for a phase.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`BitmapAllocError`] when the `width × height` screen cannot be
+    /// allocated.
     pub fn compose(
         mut cell: impl FnMut(CellPhase) -> Option<Rc<Bitmap<Rgb8>>>,
         (cell_w, cell_h): (u32, u32),
@@ -253,17 +257,20 @@ impl TiledPattern {
         y0: i32,
         width: u32,
         height: u32,
-    ) -> Option<Self> {
-        let x1 = x0.checked_add(i32::try_from(width).ok()?)?;
-        let y1 = y0.checked_add(i32::try_from(height).ok()?)?;
-        let (cols, rows) = lattice.cells_meeting((x0, y0, x1, y1), cell_w, cell_h)?;
+    ) -> Result<Option<Self>, BitmapAllocError> {
         let span = |r: &RangeInclusive<i32>| {
             u64::try_from(i64::from(*r.end()) - i64::from(*r.start()) + 1).ok()
         };
-        if span(&cols)?.checked_mul(span(&rows)?)? > MAX_LATTICE_POINTS {
-            return None;
-        }
-        let mut screen = Bitmap::new(width, height, 1, true);
+        let lattice_points = || {
+            let x1 = x0.checked_add(i32::try_from(width).ok()?)?;
+            let y1 = y0.checked_add(i32::try_from(height).ok()?)?;
+            let (cols, rows) = lattice.cells_meeting((x0, y0, x1, y1), cell_w, cell_h)?;
+            (span(&cols)?.checked_mul(span(&rows)?)? <= MAX_LATTICE_POINTS).then_some((cols, rows))
+        };
+        let Some((cols, rows)) = lattice_points() else {
+            return Ok(None);
+        };
+        let mut screen = Bitmap::try_new_filled(width, height, 1, true, 0)?;
         let pipe = source_over();
         let mut phases: [Option<Rc<Bitmap<Rgb8>>>; (CELL_PHASES * CELL_PHASES) as usize] =
             Default::default();
@@ -279,12 +286,15 @@ impl TiledPattern {
                 let slot = usize::from(phase.1 * CELL_PHASES + phase.0);
                 let bitmap = match &mut phases[slot] {
                     Some(bitmap) => bitmap,
-                    empty => empty.insert(cell(phase)?),
+                    empty => match cell(phase) {
+                        Some(bitmap) => empty.insert(bitmap),
+                        None => return Ok(None),
+                    },
                 };
                 stamp(&mut screen, bitmap, sx, sy, &pipe);
             }
         }
-        Some(Self::screen(screen, x0, y0))
+        Ok(Some(Self::screen(screen, x0, y0)))
     }
 }
 
@@ -397,6 +407,7 @@ mod tests {
     fn compose(lattice: &Lattice, x0: i32, y0: i32, w: u32, h: u32) -> Option<TiledPattern> {
         let c = Rc::new(cell());
         TiledPattern::compose(|_| Some(Rc::clone(&c)), (2, 2), lattice, x0, y0, w, h)
+            .expect("the screen is allocated")
     }
 
     fn axis_aligned(step: f64) -> Lattice {
@@ -432,6 +443,29 @@ mod tests {
         assert!(compose(&axis_aligned(f64::NAN), 0, 0, 4, 4).is_none());
     }
 
+    /// A screen too large to allocate is an error, not an abort.
+    #[test]
+    fn compose_reports_a_screen_it_cannot_allocate() {
+        let c = Rc::new(cell());
+        let side = i32::MAX.unsigned_abs();
+        let got = TiledPattern::compose(
+            |_| Some(Rc::clone(&c)),
+            (2, 2),
+            &axis_aligned(f64::from(1 << 30)),
+            0,
+            0,
+            side,
+            side,
+        );
+        assert_eq!(
+            got.err(),
+            Some(BitmapAllocError {
+                width: side,
+                height: side
+            })
+        );
+    }
+
     #[test]
     fn compose_stamps_cells_on_the_lattice_and_repeats_their_coverage() {
         let p = compose(&axis_aligned(2.0), 0, 0, 4, 2).unwrap();
@@ -461,6 +495,7 @@ mod tests {
             7,
             1,
         )
+        .unwrap()
         .unwrap();
         asked.sort_unstable();
         assert_eq!(asked, [(0, 0), (2, 0)]);

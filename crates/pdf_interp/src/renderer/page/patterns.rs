@@ -380,6 +380,10 @@ impl PageRenderer<'_> {
             };
             Some(bitmap)
         };
+        #[cfg(test)]
+        if self.refuses_test_canvas(region.width(), region.height()) {
+            return None;
+        }
         TiledPattern::compose(
             |phase| raster_at(self, phase),
             size,
@@ -389,6 +393,10 @@ impl PageRenderer<'_> {
             region.width(),
             region.height(),
         )
+        .unwrap_or_else(|e| {
+            self.abort_allocation(e);
+            None
+        })
     }
 
     /// The cells meeting `region` rendered in place on a region-sized

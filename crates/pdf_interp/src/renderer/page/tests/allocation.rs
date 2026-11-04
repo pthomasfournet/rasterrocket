@@ -284,3 +284,42 @@ fn a_refused_child_canvas_stops_the_render() {
         assert!(page.iter().all(|&b| b == 255), "{what}: nothing is painted");
     }
 }
+
+/// A tiling pattern whose composited screen is refused stops the render
+/// with nothing painted; its 4 × 4 cell fits the limit, the 10 × 10 region
+/// does not.
+#[test]
+fn a_refused_pattern_screen_stops_the_render() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /Pattern << /P 5 0 R >> >> >>".to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+                 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >>",
+                "0 g 0 0 2 2 re f",
+            ),
+        ),
+    ]);
+    let mut renderer = PageRenderer::new(10, 10, &doc, (4, 0));
+    renderer.max_canvas_px = 50;
+    renderer.execute(&crate::content::parse(
+        b"/Pattern cs /P scn 0 0 10 10 re f 0 g 0 0 10 10 re f",
+    ));
+    assert!(
+        matches!(
+            renderer.budget_status(),
+            Some(RenderAbort::AllocationFailed {
+                width: 10,
+                height: 10
+            })
+        ),
+        "{:?}",
+        renderer.budget_status()
+    );
+    let page = renderer.finish().0.data().to_vec();
+    assert!(page.iter().all(|&b| b == 255), "nothing is painted");
+}

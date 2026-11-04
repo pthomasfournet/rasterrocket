@@ -667,13 +667,24 @@ impl<'doc> PageRenderer<'doc> {
     /// allocator refuses it.
     fn try_canvas(&mut self, kind: CanvasKind, width: u32, height: u32) -> Option<PageCanvas> {
         #[cfg(test)]
-        if u64::from(width) * u64::from(height) > self.max_canvas_px {
-            self.abort_allocation(raster::BitmapAllocError { width, height });
+        if self.refuses_test_canvas(width, height) {
             return None;
         }
         PageCanvas::try_new(kind, width, height, true)
             .map_err(|e| self.abort_allocation(e))
             .ok()
+    }
+
+    /// Whether the test limit on canvas-sized bitmaps (`max_canvas_px`)
+    /// refuses a `width × height` one, stopping the render as a refused
+    /// allocation does.
+    #[cfg(test)]
+    pub(super) fn refuses_test_canvas(&mut self, width: u32, height: u32) -> bool {
+        let refused = u64::from(width) * u64::from(height) > self.max_canvas_px;
+        if refused {
+            self.abort_allocation(raster::BitmapAllocError { width, height });
+        }
+        refused
     }
 
     /// Stop the render with [`RenderAbort::AllocationFailed`] for the
