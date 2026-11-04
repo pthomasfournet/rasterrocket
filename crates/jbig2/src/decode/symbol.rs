@@ -9,7 +9,7 @@ use crate::budget::Budget;
 use crate::decode::generic::{decode_bitmap_mmr, parse_adaptive_template_pixels};
 use crate::decode::text::{
     DecodeContext, ReferenceCorner, SymbolSet, TextRegionContexts, TextRegionFlags,
-    TextRegionHeader, TextRegionHuffmanFlags, decode_with,
+    TextRegionHeader, TextRegionHuffmanFlags, decode_with, instance_allowance,
 };
 use crate::decode::{
     AdaptiveTemplatePixel, CombinationOperator, RefinementTemplate, RegionSegmentInfo, Template,
@@ -51,6 +51,7 @@ pub(crate) fn decode(
         header,
         standard_tables,
         budget,
+        instance_allowance: instance_allowance(header.data.len()),
     };
 
     let read_height_class_delta = |ctx: &mut SymbolDecodeContext<'_>| {
@@ -201,13 +202,25 @@ fn decode_refinement_aggregation_bitmap(
     }
     .ok_or(DecodeError::Symbol(SymbolError::UnexpectedOob))?;
 
-    if aggregation_instance_count == 1 {
+    let instance_count = u32::try_from(aggregation_instance_count)
+        .ok()
+        .filter(|&count| count > 0)
+        .ok_or(SymbolError::Invalid)?;
+    take_instances(&mut ctx.instance_allowance, instance_count)?;
+
+    if instance_count == 1 {
         decode_refinement_bitmap(ctx, symbol_width)
-    } else if aggregation_instance_count > 1 {
-        decode_aggregation_bitmap(ctx, symbol_width, aggregation_instance_count as u32)
     } else {
-        Err(DecodeError::Symbol(SymbolError::Invalid))
+        decode_aggregation_bitmap(ctx, symbol_width, instance_count)
     }
+}
+
+/// Take `count` symbol instances from `allowance`, or fail if fewer remain.
+fn take_instances(allowance: &mut usize, count: u32) -> Result<()> {
+    *allowance = allowance
+        .checked_sub(count as usize)
+        .ok_or(SymbolError::TooManyInstances)?;
+    Ok(())
 }
 
 /// Decode a refinement bitmap symbol with a single aggregate (6.5.8.2).
@@ -215,6 +228,8 @@ fn decode_refinement_bitmap(
     ctx: &mut SymbolDecodeContext<'_>,
     symbol_width: u32,
 ) -> Result<Bitmap> {
+    ctx.budget.charge_instance()?;
+
     let use_huffman = ctx.header.flags.use_huffman;
     let mut symbol_code_length = 32 - (ctx.total_symbols() - 1).leading_zeros();
 
@@ -378,7 +393,8 @@ fn decode_aggregation_bitmap(
         refinement_at_pixels: ctx.header.refinement_at_pixels.clone(),
         num_instances: aggregation_instance_count,
         symbol_id_table,
-        segment_data_len: ctx.header.data.len(),
+        // Already taken from the dictionary's allowance.
+        max_instances: aggregation_instance_count as usize,
         data: &[], // Data comes from parent decoder context, not the header.
         strict: ctx.header.strict,
     };
@@ -445,6 +461,8 @@ struct SymbolDecodeContext<'a> {
     symbols: Symbols<'a>,
     standard_tables: &'a StandardHuffmanTables,
     budget: &'a Budget,
+    /// The symbol instances the remaining aggregates may still declare.
+    instance_allowance: usize,
     symbol_widths: Vec<u32>,
     height_class_first_symbol: u32,
     symbols_decoded_count: u32,
@@ -863,4 +881,24 @@ pub(crate) fn parse<'a>(
         data,
         strict,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The instance allowance is shared by every aggregate of a dictionary:
+    /// two aggregates that each fit it alone do not fit it together.
+    #[test]
+    fn aggregates_share_the_instance_allowance() {
+        let mut allowance = instance_allowance(10);
+
+        assert!(take_instances(&mut allowance, 200).is_ok());
+        assert_eq!(
+            take_instances(&mut allowance, 200),
+            Err(DecodeError::Symbol(SymbolError::TooManyInstances))
+        );
+        assert!(take_instances(&mut allowance, 120).is_ok());
+        assert_eq!(allowance, 0);
+    }
 }

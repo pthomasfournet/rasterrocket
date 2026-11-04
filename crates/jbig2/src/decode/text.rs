@@ -115,7 +115,8 @@ impl<'a> SymbolSet<'a> {
 
 /// Decode a text region segment with a decode context (6.4).
 ///
-/// Each placed symbol charges the pixels it writes to `budget`.
+/// Each symbol instance charges a fixed decoding cost, and each placed
+/// symbol the pixels it writes, to `budget`.
 pub(crate) fn decode_with(
     mut ctx: DecodeContext<'_, '_>,
     symbols: SymbolSet<'_>,
@@ -125,10 +126,7 @@ pub(crate) fn decode_with(
 ) -> Result<()> {
     let strip_size = header.strip_size();
 
-    // Inspired by Chromium's limit:
-    // https://pdfium.googlesource.com/pdfium/%2B/refs/heads/main/core/fxcodec/jbig2/jbig2_context.cpp#666
-    let max_instances = header.segment_data_len.saturating_mul(32);
-    if header.num_instances as usize > max_instances {
+    if header.num_instances as usize > header.max_instances {
         bail!(SymbolError::TooManyInstances);
     }
 
@@ -175,6 +173,8 @@ pub(crate) fn decode_with(
                     .and_then(|v| v.checked_add(header.flags.delta_s_offset as i32))
                     .ok_or(OverflowError::PlacementCoordinate)?;
             }
+
+            budget.charge_instance()?;
 
             let current_t = ctx.read_symbol_t(strip_size, header.flags.log_strip_size)?;
             let symbol_t = strip_t
@@ -855,7 +855,8 @@ pub(crate) struct TextRegionHeader<'a> {
     pub(crate) refinement_at_pixels: Vec<AdaptiveTemplatePixel>,
     pub(crate) num_instances: u32,
     pub(crate) symbol_id_table: Option<HuffmanTable>,
-    pub(crate) segment_data_len: usize,
+    /// The most instances the region may declare.
+    pub(crate) max_instances: usize,
     pub(crate) data: &'a [u8],
     pub(crate) strict: bool,
 }
@@ -924,13 +925,20 @@ fn parse_text_region_huffman_flags(reader: &mut Reader<'_>) -> Result<TextRegion
     })
 }
 
+/// The most symbol instances that `data_len` bytes of segment data may
+/// declare: 32 per byte, the same bound for a text region and, summed over
+/// its aggregates, for a symbol dictionary.
+pub(crate) fn instance_allowance(data_len: usize) -> usize {
+    data_len.saturating_mul(32)
+}
+
 /// Parse a text region segment header (7.4.3.1).
 pub(crate) fn parse<'a>(
     reader: &mut Reader<'a>,
     num_symbols: u32,
     strict: bool,
 ) -> Result<TextRegionHeader<'a>> {
-    let segment_data_len = reader.tail().ok_or(ParseError::UnexpectedEof)?.len();
+    let max_instances = instance_allowance(reader.tail().ok_or(ParseError::UnexpectedEof)?.len());
     let region_info = parse_region_segment_info(reader)?;
     let flags = parse_text_region_flags(reader)?;
     let huffman_flags = if flags.use_huffman {
@@ -963,8 +971,63 @@ pub(crate) fn parse<'a>(
         refinement_at_pixels,
         num_instances,
         symbol_id_table,
-        segment_data_len,
+        max_instances,
         data,
         strict,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::DecodeError;
+
+    /// An arithmetic-coded text region segment (7.4.3.1) of `width` ×
+    /// `height` pixels with no refinement, declaring `num_instances`
+    /// instances and followed by `coded_len` bytes of `fill`.
+    fn text_region_data(
+        width: u32,
+        height: u32,
+        num_instances: u32,
+        coded_len: usize,
+        fill: u8,
+    ) -> Vec<u8> {
+        let mut data: Vec<u8> = [width, height, 0, 0]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        data.push(0);
+        data.extend_from_slice(&0_u16.to_be_bytes());
+        data.extend_from_slice(&num_instances.to_be_bytes());
+        data.extend(iter::repeat_n(fill, coded_len));
+        data
+    }
+
+    fn decode_region(data: &[u8], budget: Budget) -> Result<()> {
+        let header = parse(&mut Reader::new(data), 0, false)?;
+        let mut scratch = ScratchBuffers {
+            contexts: Vec::new(),
+            budget,
+        };
+        decode(
+            &header,
+            &[],
+            &[],
+            &StandardHuffmanTables::new(),
+            &mut scratch,
+        )
+        .map(|_| ())
+    }
+
+    /// Instances that reference no symbol write no pixels, yet each one is
+    /// decoded; every instance is charged to the work budget.
+    #[test]
+    fn placements_that_write_nothing_are_charged() {
+        let data = text_region_data(1, 1, 3200, 100, 0xfc);
+
+        assert_eq!(
+            decode_region(&data, Budget::with_limits(1 << 20, 64 * 1000)),
+            Err(DecodeError::Overflow(OverflowError::WorkBudget))
+        );
+    }
 }

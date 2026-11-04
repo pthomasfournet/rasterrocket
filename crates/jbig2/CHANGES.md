@@ -49,9 +49,10 @@ is opened with `Page::new_embedded`.
   fallible (`DecodeError::OutOfMemory`). A page may allocate 16 times its
   area plus 2^26 bits besides the page bitmap, at most 2^33 bits (1 GiB);
   the global segments of a file or a `JBIG2Globals` stream may allocate
-  2^31 bits. Placing a symbol in a text region charges the pixels it
-  writes, and a halftone region charges grid cells × pattern area, to a
-  compositing budget of 64 page areas plus 2^28 pixels, at most 2^36
+  2^31 bits. Decoding a symbol instance of a text region or of a
+  refinement/aggregate symbol charges 64 pixels, whether or not it writes
+  any, plus the pixels it writes; a halftone region charges grid cells ×
+  pattern area; all to a compositing budget of 64 page areas plus 2^28 pixels, at most 2^36
   (2^32 for the globals). An exhausted budget fails the segment with
   `OverflowError::MemoryBudget` or `OverflowError::WorkBudget`; in lenient
   mode a failed immediate region is dropped and the page kept. Over the
@@ -59,7 +60,13 @@ is opened with `Page::new_embedded`.
   images) the largest page used 21 % of its memory budget and 1.6 % of
   its compositing budget, and the largest globals 2 % of theirs; no
   output changes. Tests: `tests/budget.rs`, `budget::tests`,
-  `bitmap::tests`.
+  `bitmap::tests`, `decode::text::tests`.
+- The limit of 32 symbol instances per byte of segment data applies to a
+  symbol dictionary as a whole: its aggregate symbols (6.5.8.2) draw on
+  one allowance of 32 per byte of the dictionary's data, where upstream
+  gave each aggregate the whole allowance. A dictionary whose aggregates
+  declare more instances in total fails with
+  `SymbolError::TooManyInstances`. Tests: `decode::symbol::tests`.
 - `Bitmap::combine` iterates only the source rows that fall inside the
   destination, so a symbol placed far outside its region costs nothing
   per row. A refinement/aggregate symbol (6.5.8.2) looks its referenced

@@ -3,8 +3,8 @@
 //! Every bitmap and every buffer derived from one is sized by header fields
 //! before any coded data is read, so a short segment can declare an
 //! arbitrarily large amount of state. A [`Budget`] is charged before each
-//! such allocation, and before each text-region placement and halftone
-//! rendering pass, and refuses the decode once it is spent. Charges are
+//! such allocation, and before each symbol instance, text-region placement
+//! and halftone rendering pass, and refuses the decode once it is spent. Charges are
 //! never refunded: the memory limit bounds the total allocated over the
 //! decode, which also bounds the work proportional to it.
 
@@ -41,6 +41,12 @@ const PAGE_WORK_BASE: u64 = 1 << 28;
 
 /// Compositing budget of the global segments, in pixels.
 const GLOBALS_WORK: u64 = 1 << 32;
+
+/// Compositing work charged for decoding one symbol instance, in pixels,
+/// on top of the pixels it writes. An instance that writes nothing, being
+/// empty, out of range or outside its region, still costs its integer
+/// decodes.
+const INSTANCE_WORK: u64 = 64;
 
 /// The memory and compositing work that a decode may still spend.
 ///
@@ -102,6 +108,11 @@ impl Budget {
             }
             None => bail!(OverflowError::WorkBudget),
         }
+    }
+
+    /// Spend the fixed work of decoding one symbol instance.
+    pub(crate) fn charge_instance(&self) -> Result<()> {
+        self.charge_work(INSTANCE_WORK)
     }
 
     /// A vector of `len` copies of `fill`, charged to the memory budget and
