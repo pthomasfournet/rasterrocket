@@ -888,11 +888,6 @@ impl Document {
     /// the eager-walk fallback inside the page-tree descent.
     #[must_use]
     fn read_page_count_uncached(&self) -> u32 {
-        // Linearized PDFs declare /N up front; trust it without descending
-        // into the catalog dict.
-        if let Some(hints) = self.linearization_hints() {
-            return hints.page_count;
-        }
         let Ok(pages_root) = self.pages_root_id() else {
             return self.page_count();
         };
