@@ -32,11 +32,13 @@
 //! into the integer part; the top [`WEIGHT_BITS`] bits of the resulting
 //! fraction weight the upper of the two samples.
 //!
-//! Integer parts are clamped to ±[`COORD_LIMIT`] at build time, so a
-//! column + row sum can never overflow `i32`.  The sum of two entries is the
-//! exact coordinate only while neither is clamped; a clamped entry lies
-//! outside every image narrower than [`COORD_LIMIT`] samples unless the
-//! other entry cancels it.
+//! Integer parts are bounded by ±[`COORD_LIMIT`], so a column + row sum can
+//! never overflow `i32`.  The sum of two entries is the exact coordinate only
+//! while neither entry exceeds that bound.  A draw whose terms do — a sliver
+//! of an image stretched across the page, whose per-axis terms grow with the
+//! bounding box while their sum stays on the image — builds no tables: its
+//! grid maps every pixel through the inverse matrix in `f64` instead, and only
+//! the CPU sampler draws it.
 
 use raster::{Clip, ClipResult, ClipRows, RowClip};
 
@@ -373,10 +375,52 @@ pub(super) struct SampleGrid {
     img_h: u32,
     /// Axes interpolated between samples.
     filter: Filter,
-    /// `x1 - x0` entries of [`ENTRY_WORDS`] words each.
-    cols: Vec<u32>,
-    /// `y1 - y0` entries of [`ENTRY_WORDS`] words each.
-    rows: Vec<u32>,
+    /// How a device pixel maps to its source coordinate.
+    map: GridMap,
+}
+
+/// The inverse image map of a [`SampleGrid`].
+enum GridMap {
+    /// Separable Q32 tables whose every term lies within ±[`COORD_LIMIT`].
+    Tables {
+        /// `x1 - x0` entries of [`ENTRY_WORDS`] words each.
+        cols: Vec<u32>,
+        /// `y1 - y0` entries of [`ENTRY_WORDS`] words each.
+        rows: Vec<u32>,
+    },
+    /// Per-pixel `f64` evaluation of the inverse matrix, for a draw whose
+    /// table terms would exceed ±[`COORD_LIMIT`].
+    Direct(InverseMap),
+}
+
+/// The inverse of an image's placement, evaluated per pixel.
+#[derive(Clone, Copy)]
+struct InverseMap {
+    /// The image-space-to-user-space matrix.
+    ctm: Ctm,
+    /// Its determinant.
+    det: f64,
+    /// Page height in pixels, for the bitmap's downward y axis.
+    page_h: f64,
+}
+
+impl InverseMap {
+    /// Source coordinate `(X, Y)` in samples of the centre of device pixel
+    /// `(dx, dy)` for an `img_w × img_h` image.
+    #[expect(
+        clippy::many_single_char_names,
+        clippy::similar_names,
+        clippy::suboptimal_flops,
+        reason = "PDF CTM components a-f are spec terminology; dx_rel/dy_rel are the paired per-axis offsets; the inverse is spelled as the textbook formula"
+    )]
+    fn coord(&self, dx: u32, dy: u32, img_w: u32, img_h: u32) -> (f64, f64) {
+        let [a, b, c, d, e, f] = self.ctm;
+        let dx_rel = f64::from(dx) + 0.5 - e;
+        let dy_rel = self.page_h - (f64::from(dy) + 0.5) - f;
+        let u = (d * dx_rel - c * dy_rel) / self.det;
+        let v = (-b * dx_rel + a * dy_rel) / self.det;
+        (u * f64::from(img_w), (1.0 - v) * f64::from(img_h))
+    }
 }
 
 impl SampleGrid {
@@ -467,16 +511,40 @@ impl SampleGrid {
         let kx_row = -c * inv_det * w;
         let ky_row = -a * inv_det * h;
 
-        let mut cols = Vec::with_capacity((x1 - x0) as usize * ENTRY_WORDS);
-        for dx in x0..x1 {
-            let dx_rel = (f64::from(dx) + 0.5) - e;
-            push_entry(&mut cols, kx_col * dx_rel, ky_col * dx_rel);
-        }
-        let mut rows = Vec::with_capacity((y1 - y0) as usize * ENTRY_WORDS);
-        for dy in y0..y1 {
-            let dy_rel = (page_h_f - (f64::from(dy) + 0.5)) - f;
-            push_entry(&mut rows, kx_row * dy_rel, ky_row.mul_add(dy_rel, h));
-        }
+        // Each term is affine in `dx_rel` or `dy_rel`, so its extremes over
+        // the bounding box lie at the box's first and last pixel centres.
+        let dx_rel = |dx: u32| (f64::from(dx) + 0.5) - e;
+        let dy_rel = |dy: u32| (page_h_f - (f64::from(dy) + 0.5)) - f;
+        let col_term = |dx: u32| (kx_col * dx_rel(dx), ky_col * dx_rel(dx));
+        let row_term = |dy: u32| (kx_row * dy_rel(dy), ky_row.mul_add(dy_rel(dy), h));
+        let representable = [
+            col_term(x0),
+            col_term(x1 - 1),
+            row_term(y0),
+            row_term(y1 - 1),
+        ]
+        .iter()
+        .all(|&(x, y)| fits_q32(x) && fits_q32(y));
+
+        let map = if representable {
+            let mut cols = Vec::with_capacity((x1 - x0) as usize * ENTRY_WORDS);
+            for dx in x0..x1 {
+                let (x, y) = col_term(dx);
+                push_entry(&mut cols, x, y);
+            }
+            let mut rows = Vec::with_capacity((y1 - y0) as usize * ENTRY_WORDS);
+            for dy in y0..y1 {
+                let (x, y) = row_term(dy);
+                push_entry(&mut rows, x, y);
+            }
+            GridMap::Tables { cols, rows }
+        } else {
+            GridMap::Direct(InverseMap {
+                ctm: *ctm,
+                det,
+                page_h: page_h_f,
+            })
+        };
 
         Some(Self {
             x0,
@@ -486,8 +554,7 @@ impl SampleGrid {
             img_w,
             img_h,
             filter,
-            cols,
-            rows,
+            map,
         })
     }
 
@@ -496,16 +563,16 @@ impl SampleGrid {
         self.filter
     }
 
-    /// Column table, `(x1 - x0) * ENTRY_WORDS` words.
+    /// The column table, `(x1 - x0) * ENTRY_WORDS` words, and the row
+    /// table, `(y1 - y0) * ENTRY_WORDS` words; `None` when the draw's terms
+    /// exceed the Q32 table range and the grid evaluates the inverse matrix
+    /// per pixel instead.
     #[cfg(any(feature = "cache", test))]
-    pub(super) fn cols(&self) -> &[u32] {
-        &self.cols
-    }
-
-    /// Row table, `(y1 - y0) * ENTRY_WORDS` words.
-    #[cfg(any(feature = "cache", test))]
-    pub(super) fn rows(&self) -> &[u32] {
-        &self.rows
+    pub(super) fn tables(&self) -> Option<(&[u32], &[u32])> {
+        match &self.map {
+            GridMap::Tables { cols, rows } => Some((cols, rows)),
+            GridMap::Direct(_) => None,
+        }
     }
 
     /// Source taps for device pixel `(dx, dy)`, or `None` when the pixel
@@ -522,7 +589,8 @@ impl SampleGrid {
     /// the same x words and every column entry the same y words, so the
     /// source x of a pixel is a function of its column and its source y of
     /// its row: an axis-aligned draw without a quarter turn.  `None`
-    /// otherwise.
+    /// otherwise, and for a draw mapped per pixel (its terms past the
+    /// tables' range).
     pub(super) fn separable(&self) -> Option<SeparableTaps> {
         let uniform = |table: &[u32], word: usize| {
             let first = &table[word..word + 2];
@@ -532,7 +600,11 @@ impl SampleGrid {
                 .iter()
                 .all(|e| &e[word..word + 2] == first)
         };
-        if !uniform(&self.rows, 0) || !uniform(&self.cols, 2) {
+        // A draw mapped per pixel is never taken as separable.
+        let GridMap::Tables { cols, rows } = &self.map else {
+            return None;
+        };
+        if !uniform(rows, 0) || !uniform(cols, 2) {
             return None;
         }
         let cols = (self.x0..self.x1)
@@ -582,10 +654,17 @@ impl SampleGrid {
         reason = "hi words carry an i32 bit pattern by construction"
     )]
     fn coord(&self, dx: u32, dy: u32) -> ((i32, u32), (i32, u32)) {
+        let (cols, rows) = match &self.map {
+            GridMap::Tables { cols, rows } => (cols, rows),
+            GridMap::Direct(inverse) => {
+                let (x, y) = inverse.coord(dx, dy, self.img_w, self.img_h);
+                return (split_bounded(x, self.img_w), split_bounded(y, self.img_h));
+            }
+        };
         let c = (dx - self.x0) as usize * ENTRY_WORDS;
         let r = (dy - self.y0) as usize * ENTRY_WORDS;
-        let col = &self.cols[c..c + ENTRY_WORDS];
-        let row = &self.rows[r..r + ENTRY_WORDS];
+        let col = &cols[c..c + ENTRY_WORDS];
+        let row = &rows[r..r + ENTRY_WORDS];
         let (frac_x, carry_x) = col[1].overflowing_add(row[1]);
         let x = (col[0] as i32)
             .wrapping_add(row[0] as i32)
@@ -729,6 +808,33 @@ fn push_entry(table: &mut Vec<u32>, x: f64, y: f64) {
     table.extend_from_slice(&[x_hi, x_lo, y_hi, y_lo]);
 }
 
+/// Whether `v` is a table term whose integer part lies within
+/// ±[`COORD_LIMIT`].
+fn fits_q32(v: f64) -> bool {
+    v.abs() <= COORD_LIMIT
+}
+
+/// Split a source coordinate along an axis of `n` samples into an integer
+/// part and a Q32 fraction, first clamping it to `[-1, n]`: a coordinate off
+/// the image stays off it, on the same side, and the integer part fits `i32`.
+/// NaN maps to `n`, which the range check rejects.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "value is clamped to [-1, n] with n < 2^31, so the floor fits i32; the fraction is in [0, 2^32)"
+)]
+fn split_bounded(v: f64, n: u32) -> (i32, u32) {
+    let upper = f64::from(n.min(i32::MAX.cast_unsigned()));
+    let v = if v.is_nan() {
+        upper
+    } else {
+        v.clamp(-1.0, upper)
+    };
+    let hi = v.floor();
+    let lo = ((v - hi) * FRACTION_SCALE) as u32;
+    (hi as i32, lo)
+}
+
 /// Split a source coordinate into its Q32 integer and fraction words.
 ///
 /// Non-finite input maps to the positive limit, which the range check
@@ -856,8 +962,9 @@ mod tests {
         let grid = SampleGrid::new(&ctm, 50, 50, 10, 10, Filter::NEAREST).expect("grid");
         assert_eq!((grid.x0, grid.x1), (0, 50));
         assert_eq!((grid.y0, grid.y1), (0, 30));
-        assert_eq!(grid.cols().len(), 50 * ENTRY_WORDS);
-        assert_eq!(grid.rows().len(), 30 * ENTRY_WORDS);
+        let (cols, rows) = grid.tables().expect("tables");
+        assert_eq!(cols.len(), 50 * ENTRY_WORDS);
+        assert_eq!(rows.len(), 30 * ENTRY_WORDS);
     }
 
     #[test]
@@ -976,6 +1083,48 @@ mod tests {
             grid.sample_clamped(299, 199),
             grid.sample_clamped(grid.x1 - 1, grid.y1 - 1)
         );
+    }
+
+    /// A one-row image of 2^20 samples drawn as a half-pixel-thick sliver
+    /// along a page diagonal: across the 1000-pixel bounding box each column
+    /// and row term spans about 1.5e9 samples, past the Q32 table range, while
+    /// their sum stays on the image along the sliver.  Every pixel must still
+    /// match the exact inverse map — in particular the far corners, where a
+    /// positive and a negative term both exceed the range.
+    #[test]
+    fn sliver_whose_table_terms_exceed_q32_matches_reference() {
+        let r = std::f64::consts::FRAC_1_SQRT_2;
+        let (thickness, length) = (0.5, 1350.0);
+        let ctm = [
+            thickness * r,
+            -thickness * r,
+            length * r,
+            length * r,
+            20.0,
+            20.0,
+        ];
+        let img = (1 << 20, 1);
+        let grid = SampleGrid::new(&ctm, 1000, 1000, img.0, img.1, Filter::NEAREST).expect("grid");
+        assert!(grid.tables().is_none(), "terms must exceed the table range");
+        assert_matches_reference(&ctm, (1000, 1000), img);
+    }
+
+    /// A draw whose terms fit the table range keeps its tables.
+    #[test]
+    fn ordinary_draw_builds_tables() {
+        let ctm = [120.5, 30.25, -20.75, 150.5, 50.33, 40.17];
+        let grid = SampleGrid::new(&ctm, 300, 300, 50, 80, Filter::NEAREST).expect("grid");
+        assert!(grid.tables().is_some());
+    }
+
+    #[test]
+    fn split_bounded_keeps_off_image_coordinates_off_the_image() {
+        assert_eq!(split_bounded(2.5, 10), (2, 1 << 31));
+        assert_eq!(split_bounded(-1e300, 10), (-1, 0));
+        assert_eq!(split_bounded(1e300, 10), (10, 0));
+        assert_eq!(split_bounded(f64::NAN, 10), (10, 0));
+        assert_eq!(split_bounded(f64::NEG_INFINITY, 1 << 30), (-1, 0));
+        assert_eq!(split_bounded(3e9, u32::MAX), (i32::MAX, 0));
     }
 
     #[test]

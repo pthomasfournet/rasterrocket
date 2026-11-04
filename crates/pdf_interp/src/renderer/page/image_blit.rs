@@ -16,11 +16,44 @@ use super::image_compositor::composite_rgba_rows;
 use super::image_reduce::{self, DeviceWindow};
 use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
 use super::pixel_rect::PixelRect;
-use crate::resources::{ImageColorSpace, SoftMask};
+use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask};
 #[cfg(feature = "cache")]
 use gpu::cache::DevicePageBuffer;
 
 impl PageRenderer<'_> {
+    /// Count the drawn image in the page diagnostics (presence, filter) and
+    /// widen the source-resolution hint by its `source_width` samples
+    /// across the page: `ppi = source_width / page width in points × 72`.
+    fn record_image_diagnostics(&mut self, img: &ImageDescriptor, source_width: u32) {
+        // Track diagnostics: image presence and per-filter counts.
+        self.diag.has_images = true;
+        let filter_idx = img.filter as usize;
+        self.filter_counts[filter_idx] = self.filter_counts[filter_idx].saturating_add(1);
+
+        // Update source_ppi_hint: take the widest image seen (best resolution proxy).
+        // ppi = (image_px_width / page_pts_width) × 72.
+        let page_pts_w = f64::from(self.page_width) / {
+            // For unrotated pages CTM[0] carries the scale; for 90°/270° rotations
+            // CTM[0] is 0 and CTM[1] carries it.  Take the larger of the two to
+            // handle all axis-aligned cases.  Falls back to 1.0 for a degenerate CTM
+            // (page_pts_w would be width in pixels — wrong, but finite).
+            let ctm = self.gstate.current().ctm;
+            let ctm_scale = ctm[0].abs().max(ctm[1].abs());
+            if ctm_scale > 0.0 { ctm_scale } else { 1.0 }
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "src_ppi is finite and positive, checked below; f64→f32 is safe for PPI values in practice (well under f32::MAX)"
+        )]
+        let src_ppi = ((f64::from(source_width) / page_pts_w) * 72.0) as f32;
+        if src_ppi.is_finite() && src_ppi > 0.0 {
+            self.diag.source_ppi_hint = Some(match self.diag.source_ppi_hint {
+                Some(prev) if prev >= src_ppi => prev,
+                _ => src_ppi,
+            });
+        }
+    }
+
     /// Blit a decoded image `XObject` onto the bitmap using the current CTM.
     ///
     /// The CTM maps the unit square (image space) onto the page; every
@@ -68,33 +101,7 @@ impl PageRenderer<'_> {
             "PDF §8.9.6: image masks must not carry SMask",
         );
 
-        // Track diagnostics: image presence and per-filter counts.
-        self.diag.has_images = true;
-        let filter_idx = img.filter as usize;
-        self.filter_counts[filter_idx] = self.filter_counts[filter_idx].saturating_add(1);
-
-        // Update source_ppi_hint: take the widest image seen (best resolution proxy).
-        // ppi = (image_px_width / page_pts_width) × 72.
-        let page_pts_w = f64::from(self.page_width) / {
-            // For unrotated pages CTM[0] carries the scale; for 90°/270° rotations
-            // CTM[0] is 0 and CTM[1] carries it.  Take the larger of the two to
-            // handle all axis-aligned cases.  Falls back to 1.0 for a degenerate CTM
-            // (page_pts_w would be width in pixels — wrong, but finite).
-            let ctm = self.gstate.current().ctm;
-            let ctm_scale = ctm[0].abs().max(ctm[1].abs());
-            if ctm_scale > 0.0 { ctm_scale } else { 1.0 }
-        };
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "src_ppi is finite and positive, checked below; f64→f32 is safe for PPI values in practice (well under f32::MAX)"
-        )]
-        let src_ppi = ((f64::from(source_width) / page_pts_w) * 72.0) as f32;
-        if src_ppi.is_finite() && src_ppi > 0.0 {
-            self.diag.source_ppi_hint = Some(match self.diag.source_ppi_hint {
-                Some(prev) if prev >= src_ppi => prev,
-                _ => src_ppi,
-            });
-        }
+        self.record_image_diagnostics(img, source_width);
 
         // An image or mask drawn below its resolution is area-averaged
         // first, so that point sampling neither drops thin features nor
@@ -132,6 +139,16 @@ impl PageRenderer<'_> {
             );
             return;
         };
+        // The blit kernel reads only the grid's tables; a device-resident
+        // image whose grid has none is drawn from a host copy.
+        #[cfg(feature = "cache")]
+        let table_less_copy = if grid.tables().is_none() {
+            self.host_copy(img, "a draw without sample tables")
+        } else {
+            None
+        };
+        #[cfg(feature = "cache")]
+        let img = table_less_copy.as_ref().unwrap_or(img);
 
         // The grid covers the image's bounding box on the page; the clip
         // region decides which of those pixels the image may paint.
@@ -269,7 +286,7 @@ impl PageRenderer<'_> {
     /// read back from the image cache for `purpose`; `None` when they are
     /// host-resident or the read-back fails.
     #[cfg(feature = "cache")]
-    fn host_copy(
+    pub(super) fn host_copy(
         &self,
         img: &crate::resources::ImageDescriptor,
         purpose: &str,
@@ -541,6 +558,9 @@ impl PageRenderer<'_> {
             return false;
         };
         let bbox = BlitBbox { x0, y0, x1, y1 };
+        let Some((cols, rows)) = grid.tables() else {
+            return false;
+        };
 
         // Lazy-allocate the per-page device buffer on first GPU
         // image; subsequent images on the same page reuse it.
@@ -557,14 +577,9 @@ impl PageRenderer<'_> {
             return false;
         };
 
-        if let Err(e) = gpu_ctx.blit_image_to_buffer(
-            cached,
-            buf,
-            bbox,
-            grid.cols(),
-            grid.rows(),
-            grid.filter().bits(),
-        ) {
+        if let Err(e) =
+            gpu_ctx.blit_image_to_buffer(cached, buf, bbox, cols, rows, grid.filter().bits())
+        {
             log::warn!("blit_image: GPU kernel dispatch failed: {e}");
             return false;
         }
