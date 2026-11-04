@@ -462,9 +462,8 @@ fn shared_memory_upload_waits_for_the_page_reading_the_buffer() {
     let mut second = backend.alloc_host_readback(LEN).expect("readback");
 
     backend.begin_page().expect("begin_page");
-    backend
-        .record_copy_to_host(&buf, &mut first, LEN)
-        .expect("record copy");
+    // SAFETY: `first` is read only after `wait_page` below.
+    unsafe { backend.record_copy_to_host(&buf, &mut first, LEN) }.expect("record copy");
     let fence = backend.submit_page().expect("submit_page");
     let before = backend.submits();
     backend
@@ -482,7 +481,8 @@ fn shared_memory_upload_waits_for_the_page_reading_the_buffer() {
     );
 
     backend
-        .run_page(|b| b.record_copy_to_host(&buf, &mut second, LEN))
+        // SAFETY: `run_page` waits for the page before `second` is read.
+        .run_page(|b| unsafe { b.record_copy_to_host(&buf, &mut second, LEN) })
         .expect("second page");
     assert!(
         second.as_slice().iter().all(|&b| b == 0x22),
@@ -505,4 +505,28 @@ fn backends_are_created_and_dropped_on_several_threads() {
             });
         }
     });
+}
+
+/// A copy recorded after a zero-fill in one page reads the zeros: the fill
+/// runs in the `CLEAR` stage, which the copy's barrier must cover.
+#[test]
+fn a_copy_after_a_zero_fill_in_one_page_reads_zeros() {
+    const LEN: usize = 1 << 16;
+    let (backend, _serial) = shared_backend();
+    let buf = backend.alloc_device(LEN).expect("alloc_device");
+    backend
+        .upload(&buf, &vec![0xA5; LEN])
+        .expect("dirty upload");
+    let mut out = backend.alloc_host_readback(LEN).expect("readback");
+    backend
+        .run_page(|b| {
+            b.record_zero_buffer(&buf)?;
+            // SAFETY: `run_page` waits for the page before `out` is read.
+            unsafe { b.record_copy_to_host(&buf, &mut out, LEN) }
+        })
+        .expect("page");
+    assert!(
+        out.as_slice().iter().all(|&b| b == 0),
+        "the copy read bytes the fill had not cleared"
+    );
 }

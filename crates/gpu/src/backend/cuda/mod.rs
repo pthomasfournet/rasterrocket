@@ -183,7 +183,7 @@ impl GpuBackend for CudaBackend {
         self.recorder.record_zero_buffer(buf)
     }
 
-    fn record_copy_to_device(
+    unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
         dst: &Self::DeviceBuffer,
@@ -193,7 +193,7 @@ impl GpuBackend for CudaBackend {
         transfer::queue_htod(&self.ctx, &src.as_slice()[..len], dst)
     }
 
-    fn record_copy_to_host(
+    unsafe fn record_copy_to_host(
         &self,
         src: &Self::DeviceBuffer,
         dst: &mut Self::HostBuffer,
@@ -203,11 +203,18 @@ impl GpuBackend for CudaBackend {
         transfer::queue_dtoh(&self.ctx, src, &mut dst.as_mut_slice()[..len])
     }
 
-    fn device_bytes<'a>(&self, _buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+    fn device_memory_is_host_mapped(&self) -> bool {
+        false
+    }
+
+    unsafe fn device_bytes<'a>(&self, _buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
         None
     }
 
-    fn device_bytes_mut<'a>(&self, _buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
+    unsafe fn device_bytes_mut<'a>(
+        &self,
+        _buf: &'a mut Self::DeviceBuffer,
+    ) -> Option<&'a mut [u8]> {
         None
     }
 
@@ -221,6 +228,27 @@ impl GpuBackend for CudaBackend {
 
     fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
         buf.as_mut_slice()
+    }
+
+    /// As the trait's default, except that a failed page synchronises the
+    /// calling thread's stream before returning: copies and kernels queued
+    /// before the failure may still read or write host and device buffers
+    /// the caller frees once the error is returned.
+    fn run_page<F>(&self, record: F) -> Result<()>
+    where
+        F: FnOnce(&Self) -> Result<()>,
+    {
+        let result = self.begin_page().and_then(|()| {
+            record(self)?;
+            let fence = self.submit_page()?;
+            self.wait_page(fence)
+        });
+        if result.is_err()
+            && let Err(e) = self.ctx.stream().synchronize()
+        {
+            log::warn!("abandoning a failed page: synchronising its stream failed: {e}");
+        }
+        result
     }
 
     fn submit_page(&self) -> Result<Self::PageFence> {

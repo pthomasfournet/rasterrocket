@@ -6,7 +6,7 @@ use super::{BackendError, GpuBackend, Result};
 use crate::fill::{AaFillRect, AaScanTable};
 
 /// A device buffer and, unless the host reaches the device buffer in place
-/// ([`GpuBackend::device_bytes`]), a host buffer of at least its length that
+/// ([`GpuBackend::device_memory_is_host_mapped`]), a host buffer of at least its length that
 /// transfers go through.
 struct Staged<B: GpuBackend> {
     host: Option<B::HostBuffer>,
@@ -79,7 +79,7 @@ fn ensure<'a, B: GpuBackend>(
             backend.free_device(old.device);
         }
         let device = backend.alloc_device(size)?;
-        let host = if backend.device_bytes(&device).is_some() {
+        let host = if backend.device_memory_is_host_mapped() {
             None
         } else {
             Some(match direction {
@@ -102,9 +102,11 @@ fn stage<'a, B: GpuBackend>(
     let staged = ensure(backend, slot, bytes.len(), Direction::ToDevice)?;
     let target = match staged.host.as_mut() {
         Some(host) => backend.host_bytes_mut(host),
-        None => backend
-            .device_bytes_mut(&mut staged.device)
-            .ok_or_else(|| BackendError::msg("aa_fill: device buffer lost its host mapping"))?,
+        // SAFETY: the scratch owns the buffer exclusively (`&mut`), and
+        // every page that used it was waited on before `aa_fill_page`
+        // returned, whether it succeeded or failed (`run_page`).
+        None => unsafe { backend.device_bytes_mut(&mut staged.device) }
+            .ok_or_else(|| BackendError::msg("aa_fill: device buffer is not host-mapped"))?,
     };
     target[..bytes.len()].copy_from_slice(bytes);
     Ok(staged)
@@ -112,9 +114,14 @@ fn stage<'a, B: GpuBackend>(
 
 /// Record the copy of `staged`'s first `len` bytes from host to device, if
 /// it has a host buffer.
-fn record_upload<B: GpuBackend>(backend: &B, staged: &Staged<B>, len: usize) -> Result<()> {
+///
+/// # Safety
+/// The page this records into is waited on before `staged` is written again
+/// or dropped.
+unsafe fn record_upload<B: GpuBackend>(backend: &B, staged: &Staged<B>, len: usize) -> Result<()> {
     staged.host.as_ref().map_or(Ok(()), |host| {
-        backend.record_copy_to_device(host, &staged.device, len)
+        // SAFETY: forwarded from this function's contract.
+        unsafe { backend.record_copy_to_device(host, &staged.device, len) }
     })
 }
 
@@ -176,9 +183,13 @@ pub fn aa_fill_page<B: GpuBackend>(
     let d_intersects = stage(backend, intersects_slot, intersects)?;
     let d_row_starts = stage(backend, row_starts_slot, row_starts)?;
     let coverage = ensure(backend, coverage_slot, n_pixels, Direction::ToHost)?;
+    // SAFETY (the recorded copies and the in-place reads below): the
+    // scratch's buffers are borrowed mutably for this whole call and
+    // `run_page` returns only once its page has completed or, on failure,
+    // been waited on; nothing touches them in between.
     backend.run_page(|backend| {
-        record_upload(backend, d_intersects, intersects.len())?;
-        record_upload(backend, d_row_starts, row_starts.len())?;
+        unsafe { record_upload(backend, d_intersects, intersects.len()) }?;
+        unsafe { record_upload(backend, d_row_starts, row_starts.len()) }?;
         backend.record_aa_fill(AaFillParams {
             intersects: &d_intersects.device,
             row_starts: &d_row_starts.device,
@@ -189,15 +200,14 @@ pub fn aa_fill_page<B: GpuBackend>(
             aa_width,
             fill_rule: u8::from(even_odd),
         })?;
-        coverage.host.as_mut().map_or(Ok(()), |host| {
+        coverage.host.as_mut().map_or(Ok(()), |host| unsafe {
             backend.record_copy_to_host(&coverage.device, host, n_pixels)
         })
     })?;
     let counts = match coverage.host.as_ref() {
         Some(host) => backend.host_bytes(host),
-        None => backend
-            .device_bytes(&coverage.device)
-            .ok_or_else(|| BackendError::msg("aa_fill: device buffer lost its host mapping"))?,
+        None => unsafe { backend.device_bytes(&coverage.device) }
+            .ok_or_else(|| BackendError::msg("aa_fill: device buffer is not host-mapped"))?,
     };
     Ok(counts[..n_pixels].to_vec())
 }

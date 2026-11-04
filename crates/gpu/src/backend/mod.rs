@@ -429,15 +429,21 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// page's command list.
     ///
     /// The copy runs in page order: device work recorded after it reads the
-    /// copied bytes.  It reads `src` when the page executes, not when it is
-    /// recorded, so the host bytes of `src` must be final before
-    /// `submit_page` and must neither be written nor freed until the page's
-    /// fence has been waited on.  A zero `len` records nothing.
+    /// copied bytes.  The device reads `src` asynchronously, at any time
+    /// from this call until the page's fence has been waited on (a CUDA
+    /// stream may start the copy before `submit_page`).  A zero `len`
+    /// records nothing.
+    ///
+    /// # Safety
+    /// From this call until the fence of the page that records it has been
+    /// waited on, `src` is neither written, through [`Self::host_bytes_mut`]
+    /// or otherwise, nor freed.  A page abandoned by an error of
+    /// [`Self::run_page`] has been waited on when `run_page` returns.
     ///
     /// # Errors
     /// Returns `BackendError` if no page is being recorded, if `len`
     /// exceeds either buffer, or if the copy cannot be recorded.
-    fn record_copy_to_device(
+    unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
         dst: &Self::DeviceBuffer,
@@ -448,34 +454,49 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// page's command list.
     ///
     /// The copy runs in page order, after the device work recorded before
-    /// it.  The host may read `dst` once the page's fence has been waited
-    /// on, and must neither read, write nor free it before.  A zero `len`
-    /// records nothing.
+    /// it, and writes `dst` asynchronously.  A zero `len` records nothing.
+    ///
+    /// # Safety
+    /// From this call until the fence of the page that records it has been
+    /// waited on, `dst` is neither read, written nor freed.  A page
+    /// abandoned by an error of [`Self::run_page`] has been waited on when
+    /// `run_page` returns.
     ///
     /// # Errors
     /// Returns `BackendError` if no page is being recorded, if `len`
     /// exceeds either buffer, or if the copy cannot be recorded.
-    fn record_copy_to_host(
+    unsafe fn record_copy_to_host(
         &self,
         src: &Self::DeviceBuffer,
         dst: &mut Self::HostBuffer,
         len: usize,
     ) -> Result<()>;
 
+    /// Whether device buffers live in host memory the host reaches in place
+    /// ([`Self::device_bytes`]): true on an integrated GPU whose backend
+    /// maps them.
+    fn device_memory_is_host_mapped(&self) -> bool;
+
     /// The bytes of a device buffer in place, when the device shares host
-    /// memory (an integrated GPU); `None` when they are reachable only
-    /// through copies.
+    /// memory ([`Self::device_memory_is_host_mapped`]); `None` when they are
+    /// reachable only through copies.
     ///
-    /// The view reflects device writes only after the fence of the page
-    /// that made them has been waited on, and must not be read while a
-    /// submitted page that writes `buf` is in flight.
-    fn device_bytes<'a>(&self, buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]>;
+    /// # Safety
+    /// While the returned view lives, no device work that writes `buf` is
+    /// recorded-and-submitted without its fence having been waited on, and
+    /// no other thread writes `buf` ([`Self::upload`],
+    /// [`Self::device_bytes_mut`]).
+    unsafe fn device_bytes<'a>(&self, buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]>;
 
     /// The writable bytes of a device buffer in place; see
     /// [`Self::device_bytes`].  Writes are seen by device work submitted
-    /// afterwards; they must not be made while a submitted page that
-    /// accesses `buf` is in flight.
-    fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]>;
+    /// afterwards.
+    ///
+    /// # Safety
+    /// While the returned view lives, no submitted device work whose fence
+    /// has not been waited on accesses `buf`, and no other thread reads it
+    /// ([`Self::download`]).
+    unsafe fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]>;
 
     /// Byte length of a host buffer returned by
     /// [`Self::alloc_host_pinned`].

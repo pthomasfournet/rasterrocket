@@ -1314,7 +1314,7 @@ mod tests {
         fn record_zero_buffer(&self, _buf: &Self::DeviceBuffer) -> super::super::Result<()> {
             unreachable!()
         }
-        fn record_copy_to_device(
+        unsafe fn record_copy_to_device(
             &self,
             _src: &Self::HostBuffer,
             _dst: &Self::DeviceBuffer,
@@ -1322,7 +1322,7 @@ mod tests {
         ) -> super::super::Result<()> {
             unreachable!()
         }
-        fn record_copy_to_host(
+        unsafe fn record_copy_to_host(
             &self,
             _src: &Self::DeviceBuffer,
             _dst: &mut Self::HostBuffer,
@@ -1330,10 +1330,16 @@ mod tests {
         ) -> super::super::Result<()> {
             unreachable!()
         }
-        fn device_bytes<'a>(&self, _buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+        fn device_memory_is_host_mapped(&self) -> bool {
             unreachable!()
         }
-        fn device_bytes_mut<'a>(&self, _buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
+        unsafe fn device_bytes<'a>(&self, _buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+            unreachable!()
+        }
+        unsafe fn device_bytes_mut<'a>(
+            &self,
+            _buf: &'a mut Self::DeviceBuffer,
+        ) -> Option<&'a mut [u8]> {
             unreachable!()
         }
         fn host_buffer_len(&self, _buf: &Self::HostBuffer) -> usize {

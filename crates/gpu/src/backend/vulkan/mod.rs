@@ -45,6 +45,10 @@ pub struct VulkanBackend {
     /// one recording state, so pages from several threads run one at a
     /// time.
     page: std::sync::Mutex<()>,
+    /// Held for a host write or read of a mapped device buffer in
+    /// [`GpuBackend::upload`] / [`GpuBackend::download`], so that two such
+    /// calls on one buffer from different threads do not race.
+    mapped_access: std::sync::Mutex<()>,
     #[expect(
         dead_code,
         reason = "kept for explicit drop ordering; readers go via recorder's Arc clone"
@@ -84,6 +88,7 @@ impl VulkanBackend {
             transfer,
             recorder,
             page: std::sync::Mutex::new(()),
+            mapped_access: std::sync::Mutex::new(()),
             pipelines,
             memory,
             device,
@@ -273,7 +278,7 @@ impl GpuBackend for VulkanBackend {
         self.recorder.record_zero_buffer(buf)
     }
 
-    fn record_copy_to_device(
+    unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
         dst: &Self::DeviceBuffer,
@@ -284,7 +289,7 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
-    fn record_copy_to_host(
+    unsafe fn record_copy_to_host(
         &self,
         src: &Self::DeviceBuffer,
         dst: &mut Self::HostBuffer,
@@ -295,11 +300,15 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
-    fn device_bytes<'a>(&self, buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+    fn device_memory_is_host_mapped(&self) -> bool {
+        self.device.integrated
+    }
+
+    unsafe fn device_bytes<'a>(&self, buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
         buf.mapped()
     }
 
-    fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
+    unsafe fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
         buf.mapped_mut()
     }
 
@@ -347,7 +356,7 @@ impl GpuBackend for VulkanBackend {
     /// gets from the queue: earlier pages read the old bytes, later ones the
     /// new.
     fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
-        if dst.mapped().is_none() {
+        if !dst.is_mapped() {
             return self.transfer.upload(&self.memory, dst, src);
         }
         if src.is_empty() {
@@ -355,6 +364,10 @@ impl GpuBackend for VulkanBackend {
         }
         check_copy_len(src.len(), src.len(), self.device_buffer_len(dst), "upload")?;
         self.recorder.wait_submitted()?;
+        let _access = self
+            .mapped_access
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         dst.write_mapped(src)
             .ok_or_else(|| crate::backend::BackendError::msg("upload: mapped buffer changed"))
     }
@@ -362,14 +375,19 @@ impl GpuBackend for VulkanBackend {
     /// A mapped buffer (integrated GPU) is read in place once every
     /// submitted page has completed.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-        let Some(bytes) = src.mapped() else {
+        if !src.is_mapped() {
             return self.transfer.download(&self.memory, src, dst);
-        };
+        }
         if dst.is_empty() {
             return Ok(());
         }
-        check_copy_len(dst.len(), bytes.len(), dst.len(), "download")?;
         self.recorder.wait_submitted()?;
+        let _access = self
+            .mapped_access
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bytes = src.mapped().expect("checked above");
+        check_copy_len(dst.len(), bytes.len(), dst.len(), "download")?;
         dst.copy_from_slice(&bytes[..dst.len()]);
         Ok(())
     }

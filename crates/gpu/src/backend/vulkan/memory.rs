@@ -89,20 +89,29 @@ impl DeviceBuffer {
     pub const fn size(&self) -> u64 {
         self.size
     }
+    /// Whether the buffer's memory is host-mapped (device buffers of an
+    /// integrated GPU).
+    #[must_use]
+    pub fn is_mapped(&self) -> bool {
+        self.allocation
+            .as_ref()
+            .is_some_and(|a| a.mapped_ptr().is_some())
+    }
+
     /// The buffer's bytes in place, when its memory is host-mapped (device
     /// buffers of an integrated GPU); `None` otherwise.
     ///
     /// The bytes reflect device writes only once the fence of the page that
     /// made them has been waited on.
     #[must_use]
-    pub fn mapped(&self) -> Option<&[u8]> {
+    pub(super) fn mapped(&self) -> Option<&[u8]> {
         let len = usize::try_from(self.size).ok()?;
         self.allocation.as_ref()?.mapped_slice()?.get(..len)
     }
 
     /// The buffer's bytes in place, writable; see [`Self::mapped`].  Writes
     /// are visible to device work submitted afterwards.
-    pub fn mapped_mut(&mut self) -> Option<&mut [u8]> {
+    pub(super) fn mapped_mut(&mut self) -> Option<&mut [u8]> {
         let len = usize::try_from(self.size).ok()?;
         self.allocation.as_mut()?.mapped_slice_mut()?.get_mut(..len)
     }
@@ -114,7 +123,9 @@ impl DeviceBuffer {
     /// The trait's `upload` takes the buffer by shared reference, as the
     /// staged path, which writes it by device copy, does.  The caller has
     /// waited for every submitted page, so no device access races the write,
-    /// and holds no slice from [`Self::mapped`] across the call.
+    /// and serialises it against every other host access to the mapping
+    /// (`VulkanBackend::mapped_access`; views from the trait's `device_bytes`
+    /// are excluded by its safety contract).
     pub(super) fn write_mapped(&self, src: &[u8]) -> Option<()> {
         let len = usize::try_from(self.size).ok()?;
         if src.len() > len {
