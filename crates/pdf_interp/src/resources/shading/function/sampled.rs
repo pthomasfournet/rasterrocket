@@ -29,6 +29,9 @@ pub(super) struct Sampled {
     /// Output intervals, one per output: `Decode`, then `Range` for the
     /// outputs `Decode` does not cover.
     decode: Vec<(f64, f64)>,
+    /// The output count `n` of the sample grid, which holds `n` samples per
+    /// node: the pairs of `Range`, or of `Decode` when `Range` is absent.
+    outputs: usize,
     /// The decoded sample stream; `None` for a dictionary without one.
     samples: Option<Vec<u8>>,
 }
@@ -49,23 +52,39 @@ impl Sampled {
             decode: (0..decode.len().max(range.len()))
                 .filter_map(|ch| decode.get(ch).or_else(|| range.get(ch)).copied())
                 .collect(),
+            outputs: if range.is_empty() {
+                decode.len()
+            } else {
+                range.len()
+            },
             samples,
         }
     }
 
-    /// A bound on the work of one evaluation: the `2^m` grid corners it
-    /// visits.
+    /// A bound on the work of one evaluation, in sample bits read: at each
+    /// of the `2^m` grid corners, the `BitsPerSample` bits of each of the
+    /// grid's outputs.
     pub(super) fn cost(&self) -> u64 {
-        1u64 << self.size.as_ref().map_or(0, Vec::len).min(MAX_INPUTS)
+        let corners = 1u64 << self.size.as_ref().map_or(0, Vec::len).min(MAX_INPUTS);
+        let bits = u64::from(self.bits_per_sample.unwrap_or(1).clamp(1, 32));
+        corners
+            .saturating_mul(self.outputs.max(1) as u64)
+            .saturating_mul(bits)
     }
 
-    /// Evaluate at `inputs`, returning `n_out` outputs.  `None` when the
-    /// dictionary is malformed, `Size` does not have one entry per input, or
+    /// Evaluate at `inputs`, returning the first `n_out` of the grid's
+    /// outputs.  `None` when the dictionary is malformed, `Size` does not
+    /// have one entry per input, the grid has fewer than `n_out` outputs, or
     /// the stream is shorter than the grid it declares.
     pub(super) fn eval_nd(&self, inputs: &[f64], n_out: usize) -> Option<Vec<f64>> {
         let samples = self.samples.as_deref()?;
         let dims = inputs.len();
         if dims == 0 || dims > MAX_INPUTS || n_out == 0 {
+            return None;
+        }
+        let outputs = self.outputs;
+        if outputs < n_out {
+            log::debug!("function: Type 0 function has {outputs} outputs, {n_out} needed");
             return None;
         }
         let size = self.size.as_deref()?;
@@ -78,7 +97,7 @@ impl Sampled {
         }
         let total_bits = size
             .iter()
-            .try_fold(n_out, |acc, &axis| acc.checked_mul(axis))?
+            .try_fold(outputs, |acc, &axis| acc.checked_mul(axis))?
             .checked_mul(bps as usize)?;
         if samples.len().checked_mul(8)? < total_bits {
             log::warn!(
@@ -114,7 +133,7 @@ impl Sampled {
         let mut out = vec![0.0; n_out];
         for_each_corner(&axes, |index, weight| {
             for (ch, acc) in out.iter_mut().enumerate() {
-                let raw = read_sample(samples, (index * n_out + ch) * bps as usize, bps);
+                let raw = read_sample(samples, (index * outputs + ch) * bps as usize, bps);
                 *acc = weight.mul_add(f64::from(raw), *acc);
             }
         });
@@ -211,6 +230,26 @@ mod tests {
         let samples = [0x0F, 0x0F];
         let out = eval(&d, &samples, &[1.0, 0.0], 1).unwrap();
         assert!((out[0] - 1.0).abs() < 1e-9);
+    }
+
+    /// The grid holds `Range`'s output count per node whatever count the
+    /// caller asks for; a request for more outputs than the grid holds
+    /// fails.
+    #[test]
+    fn the_grid_layout_follows_range() {
+        let d = dict(&[2], 8, 2);
+        // Nodes (out0, out1): (0, 0) and (255, 0).
+        let samples = [0u8, 0, 255, 0];
+        let out = eval(&d, &samples, &[0.25], 1).unwrap();
+        assert!((out[0] - 0.25).abs() < 1e-9, "{out:?}");
+        assert!(eval(&d, &samples, &[0.25], 3).is_none());
+    }
+
+    /// Each evaluation reads every output's bits at every corner.
+    #[test]
+    fn cost_counts_the_bits_read() {
+        let s = Sampled::compile(&dict(&[2, 2, 2], 16, 4), None);
+        assert_eq!(s.cost(), 8 * 4 * 16);
     }
 
     #[test]
