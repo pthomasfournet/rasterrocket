@@ -1016,8 +1016,8 @@ mod tests {
         assert!(saved.test(14, 32) && c.test(14, 32));
     }
 
-    /// Dropping a long uniquely owned path-clip list does not recurse once
-    /// per clip.
+    /// Intersecting many path clips keeps fewer than `FOLD_DEPTH` scanners,
+    /// and the folded clip still passes the common interior.
     #[test]
     fn a_clip_holds_at_most_fold_depth_scanners() {
         let mut c = Clip::new(0.0, 0.0, 4.0, 4.0, false);
