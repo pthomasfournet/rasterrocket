@@ -19,34 +19,17 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DriverError};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DriverError, HostSlice, PinnedHostSlice};
 
 use crate::GpuCtx;
-use crate::backend::{BackendError, Result};
+use crate::backend::{Result, copy_len, recorded_copy_len};
 
 use super::be;
-
-/// Verify `src_len ≤ dst_capacity` and emit a uniform error message
-/// with the operation label for diagnostic clarity.
-///
-/// Returns the validated length as `usize` for downstream use. The
-/// length-mismatch case is the most common cause of an unsigned-int
-/// underflow in transfer code, so this stays a hard check rather than
-/// a debug-assert.
-fn check_transfer_len(src_len: usize, dst_capacity: usize, op_label: &'static str) -> Result<()> {
-    if src_len > dst_capacity {
-        return Err(BackendError::msg(format!(
-            "{op_label}: source length ({src_len} bytes) exceeds destination \
-             capacity ({dst_capacity} bytes)"
-        )));
-    }
-    Ok(())
-}
 
 /// Copy `src` into `dst` and return once the copy has completed.  Empty
 /// `src` is a no-op, since cudarc rejects zero-byte transfers.
 pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &CudaSlice<u8>, src: &[u8]) -> Result<()> {
-    check_transfer_len(src.len(), dst.len(), "upload")?;
+    copy_len(src.len(), dst.len() as u64, "upload", "destination").map(drop)?;
     if src.is_empty() {
         return Ok(());
     }
@@ -64,7 +47,7 @@ pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &CudaSlice<u8>, src: &[u8]) -> Resu
 /// Copy the first `dst.len()` bytes of `src` into `dst` and return once
 /// the copy has completed.  Empty `dst` is a no-op.
 pub(super) fn download(ctx: &Arc<GpuCtx>, src: &CudaSlice<u8>, dst: &mut [u8]) -> Result<()> {
-    check_transfer_len(dst.len(), src.len(), "download")?;
+    copy_len(dst.len(), src.len() as u64, "download", "source").map(drop)?;
     if dst.is_empty() {
         return Ok(());
     }
@@ -79,42 +62,73 @@ pub(super) fn download(ctx: &Arc<GpuCtx>, src: &CudaSlice<u8>, dst: &mut [u8]) -
     finish_copy(&stream, queued)
 }
 
-/// Queue a copy of `src` into the start of `dst` on the calling thread's
-/// stream without waiting for it.  Empty `src` is a no-op.
+/// Queue a copy of `src[..len]` into the start of `dst` on the calling
+/// thread's stream without waiting for it.  A zero `len` is a no-op.
 ///
-/// The copy reads `src` after this call returns: the caller keeps the
-/// memory behind `src` allocated and unwritten until the stream has passed
-/// the copy, which the page fence of the recording page establishes.
-pub(super) fn queue_htod(ctx: &Arc<GpuCtx>, src: &[u8], dst: &CudaSlice<u8>) -> Result<()> {
-    check_transfer_len(src.len(), dst.len(), "record_copy_to_device")?;
-    if src.is_empty() {
+/// The copy reads `src` after this call returns.  `src`'s event is
+/// recorded on the stream after the copy, so [`PinnedHostSlice::as_mut_slice`]
+/// and the drop of `src` wait for the copy instead of racing it.
+pub(super) fn queue_htod(
+    ctx: &Arc<GpuCtx>,
+    src: &PinnedHostSlice<u8>,
+    len: usize,
+    dst: &CudaSlice<u8>,
+) -> Result<()> {
+    if recorded_copy_len(
+        len,
+        src.len() as u64,
+        dst.len() as u64,
+        "record_copy_to_device",
+    )?
+    .is_none()
+    {
         return Ok(());
     }
     let stream = ctx.stream();
-    let (dptr, _sync) = dst.device_ptr(&stream);
-    // SAFETY: `dptr` addresses `dst` on `stream` and `src.len()` does not
-    // exceed `dst.len()` (checked above); the caller keeps `src` alive and
-    // unwritten until the copy has completed.
-    unsafe { cudarc::driver::result::memcpy_htod_async(dptr, src, stream.cu_stream()) }.map_err(be)
+    let (dptr, _dst_sync) = dst.device_ptr(&stream);
+    // SAFETY: the slice is used only by the copy queued on `stream` below,
+    // and its guard, dropped after the copy is queued, records `src`'s event
+    // behind the copy.
+    let (host, _src_sync) = unsafe { src.stream_synced_slice(&stream) };
+    // SAFETY: `dptr` addresses `dst` on `stream`; `len` fits both buffers
+    // (checked above); `host` stays allocated and unwritten until the event
+    // recorded behind the copy has completed.
+    unsafe { cudarc::driver::result::memcpy_htod_async(dptr, &host[..len], stream.cu_stream()) }
+        .map_err(be)
 }
 
-/// Queue a copy of the first `dst.len()` bytes of `src` into `dst` on the
-/// calling thread's stream without waiting for it.  Empty `dst` is a no-op.
+/// Queue a copy of the first `len` bytes of `src` into `dst` on the calling
+/// thread's stream without waiting for it.  A zero `len` is a no-op.
 ///
-/// The copy writes `dst` after this call returns: the caller neither
-/// reads, writes nor frees the memory behind `dst` until the stream has
-/// passed the copy, which the page fence of the recording page establishes.
-pub(super) fn queue_dtoh(ctx: &Arc<GpuCtx>, src: &CudaSlice<u8>, dst: &mut [u8]) -> Result<()> {
-    check_transfer_len(dst.len(), src.len(), "record_copy_to_host")?;
-    if dst.is_empty() {
+/// The copy writes `dst` after this call returns.  `dst`'s event is
+/// recorded on the stream after the copy, so [`PinnedHostSlice::as_slice`],
+/// [`PinnedHostSlice::as_mut_slice`] and the drop of `dst` wait for the copy
+/// instead of racing it.
+pub(super) fn queue_dtoh(
+    ctx: &Arc<GpuCtx>,
+    src: &CudaSlice<u8>,
+    dst: &mut PinnedHostSlice<u8>,
+    len: usize,
+) -> Result<()> {
+    if recorded_copy_len(
+        len,
+        src.len() as u64,
+        dst.len() as u64,
+        "record_copy_to_host",
+    )?
+    .is_none()
+    {
         return Ok(());
     }
     let stream = ctx.stream();
-    let (dptr, _sync) = src.device_ptr(&stream);
-    // SAFETY: `dptr` addresses `src` on `stream` and `dst.len()` does not
-    // exceed `src.len()` (checked above); the caller keeps `dst` alive and
-    // untouched until the copy has completed.
-    unsafe { cudarc::driver::result::memcpy_dtoh_async(dst, dptr, stream.cu_stream()) }.map_err(be)
+    let (dptr, _src_sync) = src.device_ptr(&stream);
+    // SAFETY: as in `queue_htod`.
+    let (host, _dst_sync) = unsafe { dst.stream_synced_mut_slice(&stream) };
+    // SAFETY: `dptr` addresses `src` on `stream`; `len` fits both buffers
+    // (checked above); `host` is accessed again only once the event
+    // recorded behind the copy has completed.
+    unsafe { cudarc::driver::result::memcpy_dtoh_async(&mut host[..len], dptr, stream.cu_stream()) }
+        .map_err(be)
 }
 
 /// Wait for `stream`, on which a copy was queued with result `queued`.
@@ -207,7 +221,7 @@ mod tests {
             return;
         };
         let mut pinned = b.alloc_host_pinned(LEN).expect("pinned");
-        let host = pinned.as_mut_slice();
+        let host = pinned.as_mut_slice().expect("host view");
         host.fill(0x5A);
         let dst = b.alloc_device(LEN).expect("alloc");
         b.upload(&dst, host).expect("upload");
@@ -215,5 +229,42 @@ mod tests {
         let mut readback = vec![0u8; LEN];
         b.download(&dst, &mut readback).expect("download");
         assert!(readback.iter().all(|&v| v == 0x5A));
+    }
+
+    /// A host view taken while a recorded copy into or out of the buffer
+    /// is in flight waits for that copy.
+    #[test]
+    fn host_access_waits_for_a_recorded_copy() {
+        const LEN: usize = 64 << 20;
+        let Some(b) = try_backend() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let device = b.alloc_device(LEN).expect("alloc");
+        b.upload(&device, &vec![0x5A; LEN]).expect("upload");
+        let mut readback = b.alloc_host_readback(LEN).expect("readback");
+        b.begin_page().expect("begin_page");
+        // SAFETY: the buffer's event orders the host view below after the
+        // copy; the page is waited on before either buffer is dropped.
+        unsafe { b.record_copy_to_host(&device, &mut readback, LEN) }.expect("record");
+        let seen = b.host_bytes(&readback).expect("host view");
+        assert!(seen.iter().all(|&v| v == 0x5A), "the view raced the copy");
+        let fence = b.submit_page().expect("submit_page");
+        b.wait_page(fence).expect("wait_page");
+
+        let mut staged = b.alloc_host_pinned(LEN).expect("pinned");
+        b.host_bytes_mut(&mut staged).expect("host view").fill(0xC3);
+        b.begin_page().expect("begin_page");
+        // SAFETY: as above.
+        unsafe { b.record_copy_to_device(&staged, &device, LEN) }.expect("record");
+        b.host_bytes_mut(&mut staged).expect("host view").fill(0x11);
+        let fence = b.submit_page().expect("submit_page");
+        b.wait_page(fence).expect("wait_page");
+        let mut out = vec![0u8; LEN];
+        b.download(&device, &mut out).expect("download");
+        assert!(
+            out.iter().all(|&v| v == 0xC3),
+            "a host write raced the copy"
+        );
     }
 }

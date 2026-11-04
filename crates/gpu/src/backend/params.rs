@@ -1351,10 +1351,13 @@ mod tests {
         fn host_buffer_len(&self, _buf: &Self::HostBuffer) -> usize {
             unreachable!()
         }
-        fn host_bytes<'a>(&self, _buf: &'a Self::HostBuffer) -> &'a [u8] {
+        fn host_bytes<'a>(&self, _buf: &'a Self::HostBuffer) -> super::super::Result<&'a [u8]> {
             unreachable!()
         }
-        fn host_bytes_mut<'a>(&self, _buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
+        fn host_bytes_mut<'a>(
+            &self,
+            _buf: &'a mut Self::HostBuffer,
+        ) -> super::super::Result<&'a mut [u8]> {
             unreachable!()
         }
         fn submit_page(&self) -> super::super::Result<Self::PageFence> {

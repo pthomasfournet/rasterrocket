@@ -157,21 +157,36 @@ pub(crate) const fn reject_zero_size(size: usize, what: &'static str) -> Result<
     Ok(())
 }
 
-/// Check a recorded copy of `len` bytes against the lengths of its source
-/// and destination buffers.
-pub(crate) fn check_copy_len(
+/// `len` as a device copy size, after checking that it fits `capacity`, the
+/// byte size of the buffer that is the copy's `side` (`"source"` or
+/// `"destination"`); `op` names the operation in the error.
+pub(crate) fn copy_len(
     len: usize,
-    src_len: usize,
-    dst_len: usize,
-    what: &'static str,
-) -> Result<()> {
-    if len > src_len || len > dst_len {
-        return Err(BackendError::msg(format!(
-            "{what}: copy of {len} bytes exceeds the source ({src_len} bytes) or the \
-             destination ({dst_len} bytes)"
-        )));
-    }
-    Ok(())
+    capacity: u64,
+    op: &'static str,
+    side: &'static str,
+) -> Result<u64> {
+    u64::try_from(len)
+        .ok()
+        .filter(|&n| n <= capacity)
+        .ok_or_else(|| {
+            BackendError::msg(format!(
+                "{op}: copy of {len} bytes exceeds the {side} buffer ({capacity} bytes)"
+            ))
+        })
+}
+
+/// The size of a recorded copy of `len` bytes from a buffer of `src` bytes
+/// to one of `dst` bytes, `None` for an empty copy.
+pub(crate) fn recorded_copy_len(
+    len: usize,
+    src: u64,
+    dst: u64,
+    op: &'static str,
+) -> Result<Option<u64>> {
+    copy_len(len, src, op, "source").map(drop)?;
+    let n = copy_len(len, dst, op, "destination")?;
+    Ok((n > 0).then_some(n))
 }
 
 /// Live VRAM budget snapshot returned by `GpuBackend::detect_vram_budget`.
@@ -519,11 +534,18 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// The host view of `buf`'s bytes.
     ///
     /// The view reflects device writes only after the fence of the page
-    /// that recorded them has been waited on.
-    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> &'a [u8];
+    /// that recorded them has been waited on.  A backend that tracks the
+    /// copies recorded against `buf` waits for them first.
+    ///
+    /// # Errors
+    /// Returns `BackendError` if waiting for such a copy fails.
+    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> Result<&'a [u8]>;
 
     /// The writable host view of `buf`'s bytes; see [`Self::host_bytes`].
-    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8];
+    ///
+    /// # Errors
+    /// As [`Self::host_bytes`].
+    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> Result<&'a mut [u8]>;
 
     /// Submit all recorded work for the current page; returns a fence to wait on.
     ///

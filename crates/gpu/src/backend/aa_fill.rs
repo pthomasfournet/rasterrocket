@@ -107,7 +107,7 @@ fn stage<'a, B: GpuBackend>(
 ) -> Result<&'a mut Staged<B>> {
     let staged = ensure(backend, slot, bytes.len(), Direction::ToDevice)?;
     let target = match staged.host.as_mut() {
-        Some(host) => backend.host_bytes_mut(host),
+        Some(host) => backend.host_bytes_mut(host)?,
         // SAFETY: the scratch owns the buffer exclusively (`&mut`), and
         // every page that used it was waited on before `aa_fill_page`
         // returned, whether it succeeded or failed (`run_page`).
@@ -211,7 +211,7 @@ pub fn aa_fill_page<B: GpuBackend>(
         })
     })?;
     let counts = match coverage.host.as_ref() {
-        Some(host) => backend.host_bytes(host),
+        Some(host) => backend.host_bytes(host)?,
         None => unsafe { backend.device_bytes(&coverage.device) }
             .ok_or_else(|| BackendError::msg("aa_fill: device buffer is not host-mapped"))?,
     };

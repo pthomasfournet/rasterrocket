@@ -4,19 +4,14 @@
 //! Per-page batching is recorded into a `PageRecorder`; see `page_recorder.rs`.
 
 mod page_recorder;
-mod pinned;
 mod transfer;
-
-pub use pinned::PinnedBuffer;
 
 use std::sync::Arc;
 
-use cudarc::driver::CudaSlice;
+use cudarc::driver::{CudaContext, CudaSlice, PinnedHostSlice};
 
 use crate::GpuCtx;
-use crate::backend::{
-    BackendError, GpuBackend, Result, VramBudget, check_copy_len, params, reject_zero_size,
-};
+use crate::backend::{BackendError, GpuBackend, Result, VramBudget, params, reject_zero_size};
 
 /// Convert any `Display` error to a `BackendError`.
 ///
@@ -26,6 +21,28 @@ use crate::backend::{
 /// this is used on (driver missing, device missing, kernel-load failure).
 pub(super) fn be(e: impl std::fmt::Display) -> BackendError {
     BackendError::msg(e.to_string())
+}
+
+/// `size > 0` bytes of zeroed, page-locked host memory in `ctx`, allocated
+/// without `CU_MEMHOSTALLOC_WRITECOMBINED`, so host reads are cached.
+fn alloc_pinned(
+    ctx: &Arc<CudaContext>,
+    size: usize,
+    what: &'static str,
+) -> Result<PinnedHostSlice<u8>> {
+    reject_zero_size(size, what)?;
+    if isize::try_from(size).is_err() {
+        return Err(BackendError::msg(format!(
+            "{what}: {size} bytes exceeds the largest host allocation"
+        )));
+    }
+    // SAFETY: the bytes are zeroed below, before any view of them exists.
+    let mut buf = unsafe { ctx.alloc_pinned_with_flags::<u8>(size, 0) }.map_err(be)?;
+    let ptr = buf.as_mut_ptr().map_err(be)?;
+    // SAFETY: `ptr` addresses the `size` bytes just allocated, which no copy
+    // references yet.
+    unsafe { ptr.write_bytes(0, size) };
+    Ok(buf)
 }
 
 /// A CUDA backend that wraps `GpuCtx`.
@@ -59,7 +76,7 @@ impl crate::backend::sealed::Sealed for CudaBackend {}
 impl GpuBackend for CudaBackend {
     const NAME: &'static str = "cuda";
     type DeviceBuffer = CudaSlice<u8>;
-    type HostBuffer = PinnedBuffer;
+    type HostBuffer = PinnedHostSlice<u8>;
     type PageFence = page_recorder::PageFence;
 
     fn alloc_device(&self, size: usize) -> Result<Self::DeviceBuffer> {
@@ -100,18 +117,19 @@ impl GpuBackend for CudaBackend {
         // of scope.
     }
 
+    /// Host-cached for either direction ([`alloc_pinned`]).
     fn alloc_host_pinned(&self, size: usize) -> Result<Self::HostBuffer> {
-        reject_zero_size(size, "alloc_host_pinned")?;
-        PinnedBuffer::new(&self.ctx.cuda, size)
+        alloc_pinned(&self.ctx.cuda, size, "alloc_host_pinned")
     }
 
+    /// The same memory as [`Self::alloc_host_pinned`].
     fn alloc_host_readback(&self, size: usize) -> Result<Self::HostBuffer> {
-        reject_zero_size(size, "alloc_host_readback")?;
-        PinnedBuffer::new(&self.ctx.cuda, size)
+        alloc_pinned(&self.ctx.cuda, size, "alloc_host_readback")
     }
 
     fn free_host_pinned(&self, _buf: Self::HostBuffer) {
-        // cudarc frees the pinned allocation on Drop.
+        // `PinnedHostSlice::drop` waits for the last copy recorded against
+        // the buffer, then frees it.
     }
 
     fn begin_page(&self) -> Result<()> {
@@ -189,24 +207,26 @@ impl GpuBackend for CudaBackend {
         self.recorder.record_zero_buffer(buf)
     }
 
+    /// Host access to `src` and its drop wait for the copy through the
+    /// buffer's event, recorded behind the copy on the calling thread's
+    /// stream.
     unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
         dst: &Self::DeviceBuffer,
         len: usize,
     ) -> Result<()> {
-        check_copy_len(len, src.len(), dst.len(), "record_copy_to_device")?;
-        transfer::queue_htod(&self.ctx, &src.as_slice()[..len], dst)
+        transfer::queue_htod(&self.ctx, src, len, dst)
     }
 
+    /// As [`Self::record_copy_to_device`], for `dst`.
     unsafe fn record_copy_to_host(
         &self,
         src: &Self::DeviceBuffer,
         dst: &mut Self::HostBuffer,
         len: usize,
     ) -> Result<()> {
-        check_copy_len(len, src.len(), dst.len(), "record_copy_to_host")?;
-        transfer::queue_dtoh(&self.ctx, src, &mut dst.as_mut_slice()[..len])
+        transfer::queue_dtoh(&self.ctx, src, dst, len)
     }
 
     fn device_memory_is_host_mapped(&self) -> bool {
@@ -228,12 +248,14 @@ impl GpuBackend for CudaBackend {
         buf.len()
     }
 
-    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> &'a [u8] {
-        buf.as_slice()
+    /// Waits for the last copy recorded against `buf`.
+    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> Result<&'a [u8]> {
+        buf.as_slice().map_err(be)
     }
 
-    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
-        buf.as_mut_slice()
+    /// Waits for the last copy recorded against `buf`.
+    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> Result<&'a mut [u8]> {
+        buf.as_mut_slice().map_err(be)
     }
 
     /// Synchronises the calling thread's stream: copies and kernels a page

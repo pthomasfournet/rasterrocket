@@ -31,7 +31,9 @@ pub use select::DeviceSelector;
 
 use std::sync::Arc;
 
-use crate::backend::{GpuBackend, Result, VramBudget, params, reject_zero_size};
+use crate::backend::{
+    GpuBackend, Result, VramBudget, copy_len, params, recorded_copy_len, reject_zero_size,
+};
 
 /// Vulkan compute backend.
 ///
@@ -118,28 +120,6 @@ impl VulkanBackend {
     pub fn submits(&self) -> u64 {
         self.device.submits()
     }
-}
-
-/// `len` as a Vulkan copy size, after checking that it fits `capacity`, the
-/// size of the buffer that is the copy's `side` (`"source"` or
-/// `"destination"`); `op` names the operation in the error.
-fn copy_len(len: usize, capacity: u64, op: &'static str, side: &'static str) -> Result<u64> {
-    u64::try_from(len)
-        .ok()
-        .filter(|&n| n <= capacity)
-        .ok_or_else(|| {
-            crate::backend::BackendError::msg(format!(
-                "{op}: copy of {len} bytes exceeds the {side} buffer ({capacity} bytes)"
-            ))
-        })
-}
-
-/// The size of a recorded copy of `len` bytes from a buffer of `src` bytes
-/// to one of `dst` bytes, `None` for an empty copy.
-fn recorded_copy_len(len: usize, src: u64, dst: u64, op: &'static str) -> Result<Option<u64>> {
-    copy_len(len, src, op, "source").map(drop)?;
-    let n = copy_len(len, dst, op, "destination")?;
-    Ok((n > 0).then_some(n))
 }
 
 impl Drop for VulkanBackend {
@@ -337,12 +317,12 @@ impl GpuBackend for VulkanBackend {
         buf.as_slice().len()
     }
 
-    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> &'a [u8] {
-        buf.as_slice()
+    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> Result<&'a [u8]> {
+        Ok(buf.as_slice())
     }
 
-    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
-        buf.as_mut_slice()
+    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> Result<&'a mut [u8]> {
+        Ok(buf.as_mut_slice())
     }
 
     fn submit_page(&self) -> Result<Self::PageFence> {
