@@ -2291,8 +2291,15 @@ planned Phase 13 above; Phase 14 is on master, unreleased.
 
 **Unreleased on master since v2.0.0 (2026-10-31):** Phase 13's fax output,
 `--print` through CUPS and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
-follow-ups, overprint simulation (below), and a hardening review pass
-(2026-11-03) over the overprint work, gray output and the vendored forks.
+follow-ups, overprint simulation (below), and two hardening review passes:
+2026-11-03 over the overprint work, gray output and the vendored forks, and
+2026-11-04 over everything since (output path, document images, parser,
+rasteriser, text, allocation, HTJ2K, printing).  The second fixed, among
+others: bilevel and planar TIFF pages in comic archives (every one failed
+before), subpaths ending in a curve merging into the next (filled
+artwork drawn in several curve-closed loops gained connector fills),
+antialiased edges past device column 8191, a quadratic cross-reference
+index and an unbounded `/Count`, and a world-readable print spool.
 Public API added since v2.0.0, none of it breaking a v2.0.0 caller:
 `RasterOptions::overprint`, `SessionConfig::overprint`,
 `PageDiagnostics::unslotted_spots`, `ComicOptions::session` (the session an
