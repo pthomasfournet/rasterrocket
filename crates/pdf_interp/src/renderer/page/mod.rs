@@ -703,21 +703,44 @@ impl<'doc> PageRenderer<'doc> {
     /// page diagnostics.  An ink canvas converts with the process
     /// equivalents of the page's spot colorants.
     #[must_use]
-    pub fn finish(mut self) -> (Bitmap<Rgb8>, PageDiagnostics) {
-        self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
+    pub fn finish(self) -> (Bitmap<Rgb8>, PageDiagnostics) {
+        let (canvas, ink_map, diag) = self.into_parts();
+        let rgb = canvas.into_rgb(&ink_map.luts());
+        (rgb, Self::finish_diagnostics(diag, ink_map))
+    }
 
+    /// [`Self::finish`] that reports an RGB bitmap the allocator refuses for
+    /// an ink canvas as an error instead of aborting.
+    ///
+    /// # Errors
+    ///
+    /// The allocator refused the page's RGB bitmap.
+    pub fn try_finish(self) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
+        let (canvas, ink_map, diag) = self.into_parts();
+        let rgb = canvas.try_into_rgb(&ink_map.luts())?;
+        Ok((rgb, Self::finish_diagnostics(diag, ink_map)))
+    }
+
+    /// The finished canvas, composited onto paper for a page group, with the
+    /// ink map and the diagnostics.
+    fn into_parts(mut self) -> (PageCanvas, ink_map::InkMap, PageDiagnostics) {
+        self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
         if self.page_group.is_some() {
             self.canvas.composite_onto_white();
         }
         let Self {
             canvas,
             ink_map,
-            mut diag,
+            diag,
             ..
         } = self;
-        let rgb = canvas.into_rgb(&ink_map.luts());
+        (canvas, ink_map, diag)
+    }
+
+    /// `diag` with the spot colorants `ink_map` could not slot.
+    fn finish_diagnostics(mut diag: PageDiagnostics, ink_map: ink_map::InkMap) -> PageDiagnostics {
         diag.unslotted_spots = ink_map.into_unslotted();
-        (rgb, diag)
+        diag
     }
 
     /// Execute a slice of decoded operators in order.

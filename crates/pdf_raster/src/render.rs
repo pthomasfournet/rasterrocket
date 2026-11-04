@@ -146,6 +146,14 @@ fn page_view(
     Ok(whole.window(r.x, r.y, r.width, r.height))
 }
 
+/// The error of a page bitmap the allocator refused.
+const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
+    RasterError::PageAllocationFailed {
+        width: e.width,
+        height: e.height,
+    }
+}
+
 /// Inner implementation shared by [`render_page_rgb_with`] and [`render_page_gray`].
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
@@ -210,10 +218,7 @@ fn render_page_rgb_with_geom(
         pdf_interp::page_group(doc, page_id),
         ink,
     )
-    .map_err(|e| RasterError::PageAllocationFailed {
-        width: e.width,
-        height: e.height,
-    })?;
+    .map_err(allocation_failed)?;
     if let Some(cancel) = &params.cancel {
         renderer.set_cancel(cancel.flag());
     }
@@ -286,7 +291,7 @@ fn render_page_rgb_with_geom(
         }
     }
 
-    let (bitmap, mut diag) = renderer.finish();
+    let (bitmap, mut diag) = renderer.try_finish().map_err(allocation_failed)?;
     diag.form_type = session.form_type;
     Ok((bitmap, diag))
 }

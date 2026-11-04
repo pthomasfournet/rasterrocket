@@ -74,14 +74,51 @@ fn paper<P: Pixel>() -> u8 {
     }
 }
 
+/// The byte every channel of a fresh canvas of `kind` holds: paper white
+/// for an opaque RGB canvas, 0 (transparent, or no ink) otherwise.
+const fn initial_fill(kind: CanvasKind, alpha: bool) -> u8 {
+    if matches!(kind, CanvasKind::Rgb) && !alpha {
+        u8::MAX
+    } else {
+        0
+    }
+}
+
+/// A `width × height` bitmap of `fill` bytes, with an alpha plane when
+/// `alpha`: zeroed memory when `fill` is 0.
+fn fresh_bitmap<P: Pixel>(width: u32, height: u32, alpha: bool, fill: u8) -> Bitmap<P> {
+    if fill == 0 {
+        Bitmap::new(width, height, 1, alpha)
+    } else {
+        Bitmap::new_filled(width, height, 1, alpha, fill)
+    }
+}
+
+/// Convert the ink canvas `ink` into `rgb`, of its size, through
+/// [`ink_to_rgb_row`] with the spot colourants `spots`, copying its alpha.
+fn ink_into_rgb(ink: &Bitmap<DeviceN8>, spots: &[Option<&SpotLut>; 4], rgb: &mut Bitmap<Rgb8>) {
+    let n = ink.width as usize;
+    for y in 0..ink.height {
+        ink_to_rgb_row(
+            &ink.row_bytes(y)[..n * 8],
+            spots,
+            &mut rgb.row_bytes_mut(y)[..n * 3],
+        );
+    }
+    if let (Some(src), Some(dst)) = (ink.alpha_plane(), rgb.alpha_plane_mut()) {
+        dst.copy_from_slice(src);
+    }
+}
+
 impl PageCanvas {
     /// A `width × height` canvas of `kind`: transparent, with an alpha
-    /// plane, when `alpha`; opaque paper white otherwise.
+    /// plane, when `alpha`; opaque paper white otherwise.  A canvas whose
+    /// bytes start at 0 takes zeroed memory, committed as it is written.
     pub(super) fn new(kind: CanvasKind, width: u32, height: u32, alpha: bool) -> Self {
+        let fill = initial_fill(kind, alpha);
         match kind {
-            CanvasKind::Rgb if alpha => Self::Rgb(Bitmap::new(width, height, 1, true)),
-            CanvasKind::Rgb => Self::Rgb(Bitmap::new_filled(width, height, 1, false, u8::MAX)),
-            CanvasKind::Ink => Self::Ink(Bitmap::new(width, height, 1, alpha)),
+            CanvasKind::Rgb => Self::Rgb(fresh_bitmap(width, height, alpha, fill)),
+            CanvasKind::Ink => Self::Ink(fresh_bitmap(width, height, alpha, fill)),
         }
     }
 
@@ -93,12 +130,10 @@ impl PageCanvas {
         height: u32,
         alpha: bool,
     ) -> Result<Self, raster::BitmapAllocError> {
+        let fill = initial_fill(kind, alpha);
         Ok(match kind {
-            CanvasKind::Rgb if alpha => {
-                Self::Rgb(Bitmap::try_new_filled(width, height, 1, true, 0)?)
-            }
-            CanvasKind::Rgb => Self::Rgb(Bitmap::try_new_filled(width, height, 1, false, u8::MAX)?),
-            CanvasKind::Ink => Self::Ink(Bitmap::try_new_filled(width, height, 1, alpha, 0)?),
+            CanvasKind::Rgb => Self::Rgb(Bitmap::try_new_filled(width, height, 1, alpha, fill)?),
+            CanvasKind::Ink => Self::Ink(Bitmap::try_new_filled(width, height, 1, alpha, fill)?),
         })
     }
 
@@ -123,23 +158,31 @@ impl PageCanvas {
     /// The canvas as sRGB pixels, keeping its alpha plane.  Ink converts
     /// through [`ink_to_rgb_row`] with the spot colourants `spots`.
     pub(super) fn into_rgb(self, spots: &[Option<&SpotLut>; 4]) -> Bitmap<Rgb8> {
-        let ink = match self {
-            Self::Rgb(bitmap) => return bitmap,
-            Self::Ink(ink) => ink,
-        };
-        let mut rgb = Bitmap::<Rgb8>::new(ink.width, ink.height, 1, ink.has_alpha());
-        let n = ink.width as usize;
-        for y in 0..ink.height {
-            ink_to_rgb_row(
-                &ink.row_bytes(y)[..n * 8],
-                spots,
-                &mut rgb.row_bytes_mut(y)[..n * 3],
-            );
+        match self {
+            Self::Rgb(bitmap) => bitmap,
+            Self::Ink(ink) => {
+                let mut rgb = Bitmap::<Rgb8>::new(ink.width, ink.height, 1, ink.has_alpha());
+                ink_into_rgb(&ink, spots, &mut rgb);
+                rgb
+            }
         }
-        if let (Some(src), Some(dst)) = (ink.alpha_plane(), rgb.alpha_plane_mut()) {
-            dst.copy_from_slice(src);
+    }
+
+    /// [`Self::into_rgb`] that reports an RGB bitmap the allocator refuses
+    /// as an error.
+    pub(super) fn try_into_rgb(
+        self,
+        spots: &[Option<&SpotLut>; 4],
+    ) -> Result<Bitmap<Rgb8>, raster::BitmapAllocError> {
+        match self {
+            Self::Rgb(bitmap) => Ok(bitmap),
+            Self::Ink(ink) => {
+                let mut rgb =
+                    Bitmap::<Rgb8>::try_new_filled(ink.width, ink.height, 1, ink.has_alpha(), 0)?;
+                ink_into_rgb(&ink, spots, &mut rgb);
+                Ok(rgb)
+            }
         }
-        rgb
     }
 
     /// Composite the canvas, a page group with an alpha plane, onto opaque

@@ -498,7 +498,13 @@ pub struct RenderedPage {
 /// - [`RasterError::InvalidOptions`] — `opts` violates documented constraints.
 /// - [`RasterError::Pdf`] — document cannot be opened or parsed.
 /// - [`RasterError::PageOutOfRange`] — requested page exceeds the document.
-/// - [`RasterError::PageDegenerate`] / [`RasterError::PageTooLarge`] — malformed geometry.
+/// - [`RasterError::PageDegenerate`] / [`RasterError::PageTooLarge`] /
+///   [`RasterError::PageAreaTooLarge`] — malformed geometry, or a page
+///   beyond the size limits at the requested scale.
+/// - [`RasterError::PageAllocationFailed`] — the allocator refused a page
+///   bitmap within the limits.  Under Linux's default overcommit a large
+///   allocation is seldom refused; the process can instead be stopped by
+///   the out-of-memory killer when the memory is touched.
 /// - [`RasterError::Deskew`] — deskew rotation failed.
 /// - [`RasterError::BackendUnavailable`] — `PDF_RASTER_BACKEND` requested a
 ///   forced backend (e.g. `cuda`, `vulkan`) and that backend's runtime

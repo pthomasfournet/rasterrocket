@@ -276,13 +276,20 @@ impl AxisPlan {
         }
         let (lo, hi) = (origin.min(origin + extent), origin.max(origin + extent));
         let (k0, k1) = ((lo - 0.5).ceil(), (hi - 0.5).ceil());
-        let (k0, k1) = (k0.max(window.0), k1.min(window.1));
-        let count = k1 - k0;
-        if !(count >= 1.0 && count < f64::from(n)) {
+        // Whether the axis reduces is decided on the whole draw, so that the
+        // window changes which pixels are made, never their values.
+        let whole = k1 - k0;
+        if !(whole >= 1.0 && whole < f64::from(n)) {
             // No pixel centre covered (the image draws nothing on this
             // axis), or the rounding to whole pixels leaves nothing to
             // reduce.
-            return (count >= 1.0).then(unreduced);
+            return (whole >= 1.0).then(unreduced);
+        }
+        let (k0, k1) = (k0.max(window.0), k1.min(window.1));
+        let count = k1 - k0;
+        if count < 1.0 {
+            // No pixel centre within the window.
+            return None;
         }
         let count_u = count as u32;
         let to_source = f64::from(n) / extent;
@@ -847,6 +854,23 @@ mod tests {
                 }
             }
             assert!(painted > 0, "{ctm:?}");
+        }
+    }
+
+    /// An axis the whole draw leaves unreduced, its pixels as many as its
+    /// samples, stays unreduced under a window that covers fewer.
+    #[test]
+    fn a_window_does_not_reduce_an_axis_the_whole_draw_leaves_alone() {
+        // Ten samples over 9.6 pixels: reducing (n > 1.03125 · extent), yet
+        // the pixel centres they cover number ten.
+        let window = (0.0, 5.0);
+        for (origin, extent) in [(0.2, 9.6), (9.8, -9.6)] {
+            let whole =
+                AxisPlan::device_aligned(10, origin, extent, (f64::NEG_INFINITY, f64::INFINITY))
+                    .expect("drawn");
+            let cut = AxisPlan::device_aligned(10, origin, extent, window).expect("drawn");
+            assert!(whole.filter.is_none(), "{origin} {extent}");
+            assert!(cut.filter.is_none(), "{origin} {extent}");
         }
     }
 

@@ -109,7 +109,10 @@ impl<P: Pixel> Bitmap<P> {
     }
 
     /// [`Bitmap::new_filled`] that reports a buffer size overflowing
-    /// `usize`, or an allocation the allocator refuses, as an error.
+    /// `usize`, or an allocation the allocator refuses, as an error.  The
+    /// buffer is written at once, so its memory is committed here: an
+    /// allocator that overcommits (Linux by default) seldom refuses, and the
+    /// out-of-memory killer may act instead when memory runs out.
     ///
     /// # Errors
     ///
