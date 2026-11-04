@@ -13,7 +13,7 @@ pub(super) struct Scope {
 }
 
 impl Scope {
-    pub(super) const fn new(stage: vk::PipelineStageFlags2, access: vk::AccessFlags2) -> Self {
+    const fn new(stage: vk::PipelineStageFlags2, access: vk::AccessFlags2) -> Self {
         Self { stage, access }
     }
 }

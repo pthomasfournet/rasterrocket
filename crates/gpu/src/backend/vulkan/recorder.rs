@@ -6,9 +6,8 @@
 //!   fresh primary command buffer, `vkBeginCommandBuffer`.
 //! - `record_*`: bind the kernel's pipeline + a freshly allocated
 //!   descriptor set, push scalars via push constants, dispatch, then
-//!   emit a global compute→compute memory barrier so the next dispatch
-//!   sees the writes.  Pessimistic but correct (mirrors the CUDA
-//!   backend's single-stream serialisation).
+//!   emit a global memory barrier that orders every later command of the
+//!   page after the dispatch, as a single stream would.
 //! - `submit_page`: end the command buffer, signal the timeline
 //!   semaphore at value `next_value`, return a `PageFence` carrying the
 //!   wait-value.
@@ -43,7 +42,7 @@ use ash::vk;
 use crate::backend::params;
 use crate::backend::{BackendError, Result};
 
-use super::barrier::{self, Scope};
+use super::barrier;
 use super::device::DeviceCtx;
 use super::error::vk_err;
 use super::pipeline::{KernelId, PipelineCache};
@@ -104,18 +103,6 @@ const MAX_DESC_SETS_PER_PAGE: u32 = 64;
 /// kernel: seven `u32`s, in the order of the Slang `PushParams`.
 #[cfg(feature = "gpu-jpeg-huffman")]
 const HUFFMAN_PUSH_BYTES: usize = 28;
-
-/// Destination scope of the barrier after a dispatch.
-const AFTER_DISPATCH: Scope = Scope::new(
-    vk::PipelineStageFlags2::from_raw(
-        vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw() | vk::PipelineStageFlags2::COPY.as_raw(),
-    ),
-    vk::AccessFlags2::from_raw(
-        vk::AccessFlags2::SHADER_STORAGE_READ.as_raw()
-            | vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw()
-            | vk::AccessFlags2::TRANSFER_READ.as_raw(),
-    ),
-);
 
 /// Initial timeline-semaphore signal value.  Must be > 0 so
 /// `submit_page`'s `NonZeroU64::new(signal_value)` is `Some` by
@@ -437,7 +424,7 @@ impl PageRecorder {
     }
 
     /// Record one Blelloch scan phase. Each call records one
-    /// `vkCmdDispatch` plus the compute→compute memory barrier that
+    /// `vkCmdDispatch` plus the memory barrier that
     /// `dispatch_kernel` always emits. Callers run all three phases
     /// (`PerWorkgroup` → `BlockSums` → `ScatterBlockSums`) back-to-
     /// back; the barriers between them make phase N+1 observe phase
@@ -870,8 +857,10 @@ impl PageRecorder {
     /// cheaper than the kernel-dispatch path and doesn't consume from
     /// the per-page descriptor budget.
     ///
-    /// Emits a transfer→compute memory barrier afterwards so any later
-    /// kernel dispatch in the same page observes the zeros.
+    /// Between two global memory barriers: the one before orders the fill
+    /// after every earlier command of the page that reads or writes the
+    /// buffer (write-after-read and write-after-write), the one after makes
+    /// the zeros visible to every later one.
     ///
     /// Validation order is state → size: a wrong-state caller with a
     /// zero-byte buffer still surfaces the state error rather than
@@ -893,21 +882,10 @@ impl PageRecorder {
         // created with TRANSFER_DST usage via the slab allocator's
         // DEVICE_USAGE; size is a checked multiple of 4.
         unsafe {
-            self.device
-                .device
-                .cmd_fill_buffer(s.cmd, dst_handle, 0, size, 0);
-
-            // transfer→compute barrier: a later record_* may read the
-            // zeros via a storage-buffer binding, so the fill writes
-            // must be visible to SHADER_STORAGE_READ before the next
-            // dispatch.  Pessimistic (covers any later kernel that
-            // reads buf) but cheap relative to the fill itself.
-            barrier::global(
-                &self.device.device,
-                s.cmd,
-                barrier::FILL_WRITES,
-                barrier::PAGE_COMMANDS,
-            );
+            let d = &self.device.device;
+            barrier::global(d, s.cmd, barrier::PAGE_WRITES, barrier::FILL_WRITES);
+            d.cmd_fill_buffer(s.cmd, dst_handle, 0, size, 0);
+            barrier::global(d, s.cmd, barrier::FILL_WRITES, barrier::PAGE_COMMANDS);
         }
         Ok(())
     }
@@ -927,7 +905,7 @@ impl PageRecorder {
     }
 
     /// Allocate a descriptor set, bind pipeline + buffers + push constants,
-    /// dispatch, emit a compute→compute memory barrier.  Holds the mutex
+    /// dispatch, emit a barrier to every later page command.  Holds the mutex
     /// for the whole body so two threads can't race on `s.cmd` (command
     /// buffers are not externally synchronised by default).
     fn dispatch_kernel(
@@ -1045,24 +1023,15 @@ impl PageRecorder {
                 .device
                 .cmd_dispatch(s.cmd, groups.0, groups.1, groups.2);
 
-            // Global compute→{compute, transfer} memory barrier so
-            // both the next dispatch AND any subsequent host download
-            // (which submits a transfer-queue `vkCmdCopyBuffer` against
-            // the same buffer) observe these writes. Without the
-            // TRANSFER stage in the destination mask, the in-cmd-
-            // buffer barrier covers compute→compute only and a later
-            // download submission would see a stale buffer — even
-            // though same-queue submission order guarantees execution
-            // ordering, Vulkan memory dependencies require explicit
-            // barriers for cross-cmd-buffer visibility.
-            //
-            // Pessimistic but correct (the CUDA backend serialises the
-            // same way via stream ordering + implicit memcpy fences).
+            // The kernel's writes are made visible to, and its reads and
+            // writes ordered before, every later command of the page:
+            // dispatches, copies, and fills (`CLEAR`), whose writes would
+            // otherwise race the kernel's accesses to the same buffer.
             barrier::global(
                 &self.device.device,
                 s.cmd,
                 barrier::DISPATCH_WRITES,
-                AFTER_DISPATCH,
+                barrier::PAGE_COMMANDS,
             );
         }
 
