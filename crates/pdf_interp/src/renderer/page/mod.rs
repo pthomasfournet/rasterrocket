@@ -334,6 +334,12 @@ pub struct PageRenderer<'doc> {
     /// the ICC CMYK→RGB CLUT) takes its CPU path.
     #[cfg(feature = "vulkan")]
     vk_backend: Option<Arc<VulkanBackend>>,
+    /// Transfer buffers of the CUDA AA fill, reused by every fill of the page.
+    #[cfg(feature = "gpu-aa")]
+    cuda_aa_scratch: gpu::backend::AaFillScratch<gpu::backend::cuda::CudaBackend>,
+    /// Transfer buffers of the Vulkan AA fill, reused by every fill of the page.
+    #[cfg(feature = "vulkan")]
+    vk_aa_scratch: gpu::backend::AaFillScratch<VulkanBackend>,
     /// Device-image-cache state.  `Some` only when the `cache` feature is
     /// on AND a cache was wired in via [`Self::set_image_cache`];
     /// `None` keeps the renderer fully CPU-resident.
@@ -523,6 +529,10 @@ impl<'doc> PageRenderer<'doc> {
             gpu_ctx: None,
             #[cfg(feature = "vulkan")]
             vk_backend: None,
+            #[cfg(feature = "gpu-aa")]
+            cuda_aa_scratch: gpu::backend::AaFillScratch::new(),
+            #[cfg(feature = "vulkan")]
+            vk_aa_scratch: gpu::backend::AaFillScratch::new(),
             #[cfg(feature = "cache")]
             cache_state: None,
         })

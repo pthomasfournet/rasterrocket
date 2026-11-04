@@ -243,16 +243,9 @@ impl PageRecorder {
             .signal_semaphores(&signal_semaphores)
             .push_next(&mut tl_submit);
 
-        self.device.with_queue(|q| {
-            // Safety: queue is exclusively held via with_queue; submit
-            // outlives the call.
-            unsafe {
-                self.device
-                    .device
-                    .queue_submit(q, &[submit], vk::Fence::null())
-                    .map_err(vk_err("vkQueueSubmit"))
-            }
-        })?;
+        // Safety: the command buffer was ended above; the timeline
+        // semaphore lives as long as the recorder.
+        unsafe { self.device.submit(&submit, "vkQueueSubmit") }?;
         s.state = State::Submitted;
         Ok(PageFence(value))
     }
@@ -781,6 +774,64 @@ impl PageRecorder {
             &push,
             (groups_x, groups_y, 1),
         )
+    }
+
+    /// Record `vkCmdCopyBuffer(src[0..len] → dst[0..len])` into the active
+    /// per-page command buffer, between two global memory barriers.
+    ///
+    /// The barrier before orders the copy after every earlier dispatch and
+    /// copy of the page (write-after-read and write-after-write on `dst`).
+    /// The barrier after makes the copied bytes visible to later dispatches
+    /// and copies of the page and, through the `HOST` stage, to host reads
+    /// once the page's fence has been waited on.  Host writes to `src`
+    /// made before `submit_page` need no barrier: queue submission makes
+    /// them visible to the device.
+    pub(super) fn record_copy(&self, src: vk::Buffer, dst: vk::Buffer, len: u64) -> Result<()> {
+        let s = self.inner.lock().expect("recorder mutex poisoned");
+        if s.state != State::Recording {
+            return Err(BackendError::msg(format!(
+                "record_copy called from {:?} state; expected Recording",
+                s.state
+            )));
+        }
+        let before = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY)
+            .src_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+            )
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE)];
+        let after = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER
+                    | vk::PipelineStageFlags2::COPY
+                    | vk::PipelineStageFlags2::HOST,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                    | vk::AccessFlags2::TRANSFER_READ
+                    | vk::AccessFlags2::HOST_READ,
+            )];
+        let region = [vk::BufferCopy::default().size(len)];
+        // Safety: cmd is in the Recording state (checked above); both
+        // buffers carry TRANSFER_SRC | TRANSFER_DST usage and the callers
+        // checked `len` against both sizes.
+        unsafe {
+            let d = &self.device.device;
+            d.cmd_pipeline_barrier2(
+                s.cmd,
+                &vk::DependencyInfo::default().memory_barriers(&before),
+            );
+            d.cmd_copy_buffer(s.cmd, src, dst, &region);
+            d.cmd_pipeline_barrier2(
+                s.cmd,
+                &vk::DependencyInfo::default().memory_barriers(&after),
+            );
+        }
+        Ok(())
     }
 
     /// Record a `vkCmdFillBuffer(buf, 0, size, 0)` into the active

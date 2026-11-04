@@ -13,7 +13,7 @@
 //! buffer-device-addresses (Vulkan) at record time.
 
 mod aa_fill;
-pub use aa_fill::aa_fill_page;
+pub use aa_fill::{AaFillScratch, aa_fill_page};
 pub mod cuda;
 pub mod params;
 #[cfg(feature = "vulkan")]
@@ -157,6 +157,23 @@ pub(crate) const fn reject_zero_size(size: usize, what: &'static str) -> Result<
     Ok(())
 }
 
+/// Check a recorded copy of `len` bytes against the lengths of its source
+/// and destination buffers.
+pub(crate) fn check_copy_len(
+    len: usize,
+    src_len: usize,
+    dst_len: usize,
+    what: &'static str,
+) -> Result<()> {
+    if len > src_len || len > dst_len {
+        return Err(BackendError::msg(format!(
+            "{what}: copy of {len} bytes exceeds the source ({src_len} bytes) or the \
+             destination ({dst_len} bytes)"
+        )));
+    }
+    Ok(())
+}
+
 /// Live VRAM budget snapshot returned by `GpuBackend::detect_vram_budget`.
 ///
 /// Construct via [`VramBudget::new`] to enforce the `usable_bytes <= total_bytes`
@@ -287,7 +304,8 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// or a panic.
     fn free_device(&self, buf: Self::DeviceBuffer);
 
-    /// Allocate `size` bytes of host-pinned (DMA-accessible) memory.
+    /// Allocate `size` bytes of host-pinned (DMA-accessible) memory for host
+    /// writes the device reads.
     ///
     /// `size` must be greater than zero; the same zero-size constraints as
     /// `alloc_device` apply.
@@ -296,7 +314,20 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// Returns `BackendError` if `size == 0`, or if the pinned allocation fails
     /// (OOM or driver error).
     fn alloc_host_pinned(&self, size: usize) -> Result<Self::HostBuffer>;
-    /// Free a host-pinned buffer previously returned by `alloc_host_pinned`.
+    /// Allocate `size` bytes of host-pinned memory for device writes the
+    /// host reads back.
+    ///
+    /// [`Self::alloc_host_pinned`] may return memory the host reads
+    /// uncached, one bus transaction per access (Vulkan's host-visible
+    /// upload heaps); this allocation is host-cached where the device
+    /// offers it.  Same zero-size constraints as `alloc_device`.
+    ///
+    /// # Errors
+    /// Returns `BackendError` if `size == 0`, or if the pinned allocation fails.
+    fn alloc_host_readback(&self, size: usize) -> Result<Self::HostBuffer>;
+
+    /// Free a host-pinned buffer previously returned by `alloc_host_pinned`
+    /// or `alloc_host_readback`.
     ///
     /// Same deferred-free contract as `free_device`: the caller must
     /// ensure no outstanding `PageFence` (from
@@ -394,6 +425,56 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// Vulkan's `vkCmdFillBuffer` requires the buffer size to be a multiple
     /// of 4; non-aligned sizes return [`BackendError::UnalignedFill`].
     fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()>;
+    /// Record a copy of `src[..len]` into `dst[..len]` into the current
+    /// page's command list.
+    ///
+    /// The copy runs in page order: device work recorded after it reads the
+    /// copied bytes.  It reads `src` when the page executes, not when it is
+    /// recorded, so the host bytes of `src` must be final before
+    /// `submit_page` and must neither be written nor freed until the page's
+    /// fence has been waited on.  A zero `len` records nothing.
+    ///
+    /// # Errors
+    /// Returns `BackendError` if no page is being recorded, if `len`
+    /// exceeds either buffer, or if the copy cannot be recorded.
+    fn record_copy_to_device(
+        &self,
+        src: &Self::HostBuffer,
+        dst: &Self::DeviceBuffer,
+        len: usize,
+    ) -> Result<()>;
+
+    /// Record a copy of `src[..len]` into `dst[..len]` into the current
+    /// page's command list.
+    ///
+    /// The copy runs in page order, after the device work recorded before
+    /// it.  The host may read `dst` once the page's fence has been waited
+    /// on, and must neither read, write nor free it before.  A zero `len`
+    /// records nothing.
+    ///
+    /// # Errors
+    /// Returns `BackendError` if no page is being recorded, if `len`
+    /// exceeds either buffer, or if the copy cannot be recorded.
+    fn record_copy_to_host(
+        &self,
+        src: &Self::DeviceBuffer,
+        dst: &mut Self::HostBuffer,
+        len: usize,
+    ) -> Result<()>;
+
+    /// Byte length of a host buffer returned by
+    /// [`Self::alloc_host_pinned`].
+    fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize;
+
+    /// The host view of `buf`'s bytes.
+    ///
+    /// The view reflects device writes only after the fence of the page
+    /// that recorded them has been waited on.
+    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> &'a [u8];
+
+    /// The writable host view of `buf`'s bytes; see [`Self::host_bytes`].
+    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8];
+
     /// Submit all recorded work for the current page; returns a fence to wait on.
     ///
     /// # Errors

@@ -1280,6 +1280,9 @@ mod tests {
         fn alloc_host_pinned(&self, _size: usize) -> super::super::Result<Self::HostBuffer> {
             unreachable!()
         }
+        fn alloc_host_readback(&self, _size: usize) -> super::super::Result<Self::HostBuffer> {
+            unreachable!()
+        }
         fn free_host_pinned(&self, _buf: Self::HostBuffer) {}
         fn begin_page(&self) -> super::super::Result<()> {
             unreachable!()
@@ -1309,6 +1312,31 @@ mod tests {
             unreachable!()
         }
         fn record_zero_buffer(&self, _buf: &Self::DeviceBuffer) -> super::super::Result<()> {
+            unreachable!()
+        }
+        fn record_copy_to_device(
+            &self,
+            _src: &Self::HostBuffer,
+            _dst: &Self::DeviceBuffer,
+            _len: usize,
+        ) -> super::super::Result<()> {
+            unreachable!()
+        }
+        fn record_copy_to_host(
+            &self,
+            _src: &Self::DeviceBuffer,
+            _dst: &mut Self::HostBuffer,
+            _len: usize,
+        ) -> super::super::Result<()> {
+            unreachable!()
+        }
+        fn host_buffer_len(&self, _buf: &Self::HostBuffer) -> usize {
+            unreachable!()
+        }
+        fn host_bytes<'a>(&self, _buf: &'a Self::HostBuffer) -> &'a [u8] {
+            unreachable!()
+        }
+        fn host_bytes_mut<'a>(&self, _buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
             unreachable!()
         }
         fn submit_page(&self) -> super::super::Result<Self::PageFence> {

@@ -79,6 +79,44 @@ pub(super) fn download(ctx: &Arc<GpuCtx>, src: &CudaSlice<u8>, dst: &mut [u8]) -
     finish_copy(&stream, queued)
 }
 
+/// Queue a copy of `src` into the start of `dst` on the calling thread's
+/// stream without waiting for it.  Empty `src` is a no-op.
+///
+/// The copy reads `src` after this call returns: the caller keeps the
+/// memory behind `src` allocated and unwritten until the stream has passed
+/// the copy, which the page fence of the recording page establishes.
+pub(super) fn queue_htod(ctx: &Arc<GpuCtx>, src: &[u8], dst: &CudaSlice<u8>) -> Result<()> {
+    check_transfer_len(src.len(), dst.len(), "record_copy_to_device")?;
+    if src.is_empty() {
+        return Ok(());
+    }
+    let stream = ctx.stream();
+    let (dptr, _sync) = dst.device_ptr(&stream);
+    // SAFETY: `dptr` addresses `dst` on `stream` and `src.len()` does not
+    // exceed `dst.len()` (checked above); the caller keeps `src` alive and
+    // unwritten until the copy has completed.
+    unsafe { cudarc::driver::result::memcpy_htod_async(dptr, src, stream.cu_stream()) }.map_err(be)
+}
+
+/// Queue a copy of the first `dst.len()` bytes of `src` into `dst` on the
+/// calling thread's stream without waiting for it.  Empty `dst` is a no-op.
+///
+/// The copy writes `dst` after this call returns: the caller neither
+/// reads, writes nor frees the memory behind `dst` until the stream has
+/// passed the copy, which the page fence of the recording page establishes.
+pub(super) fn queue_dtoh(ctx: &Arc<GpuCtx>, src: &CudaSlice<u8>, dst: &mut [u8]) -> Result<()> {
+    check_transfer_len(dst.len(), src.len(), "record_copy_to_host")?;
+    if dst.is_empty() {
+        return Ok(());
+    }
+    let stream = ctx.stream();
+    let (dptr, _sync) = src.device_ptr(&stream);
+    // SAFETY: `dptr` addresses `src` on `stream` and `dst.len()` does not
+    // exceed `src.len()` (checked above); the caller keeps `dst` alive and
+    // untouched until the copy has completed.
+    unsafe { cudarc::driver::result::memcpy_dtoh_async(dst, dptr, stream.cu_stream()) }.map_err(be)
+}
+
 /// Wait for `stream`, on which a copy was queued with result `queued`.
 ///
 /// The stream is synchronised even when queueing reported an error, so
@@ -169,7 +207,7 @@ mod tests {
             return;
         };
         let mut pinned = b.alloc_host_pinned(LEN).expect("pinned");
-        let host = pinned.as_mut_slice().expect("pinned slice");
+        let host = pinned.as_mut_slice();
         host.fill(0x5A);
         let dst = b.alloc_device(LEN).expect("alloc");
         b.upload(&dst, host).expect("upload");

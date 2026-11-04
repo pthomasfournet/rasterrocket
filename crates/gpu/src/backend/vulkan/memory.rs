@@ -308,21 +308,41 @@ impl SlabAllocator {
     }
 
     /// Allocate a `HOST_VISIBLE` | `HOST_COHERENT` staging buffer of `size`
-    /// bytes.  Persistently mapped — caller can read/write via
-    /// [`HostBuffer::as_mut_slice`].
+    /// bytes for host writes the device reads.  Persistently mapped — caller
+    /// can read/write via [`HostBuffer::as_mut_slice`].
     pub(super) fn alloc_host(&self, size: usize) -> Result<HostBuffer> {
-        let (buffer, allocation) = self.create_and_bind(
+        self.alloc_mapped(
             size,
-            HOST_USAGE,
             MemoryLocation::CpuToGpu,
             "rasterrocket host staging buffer",
-        )?;
-        // gpu-allocator persistently maps CpuToGpu allocations.  If the
+        )
+    }
+
+    /// Allocate a `HOST_VISIBLE` | `HOST_COHERENT` buffer of `size` bytes for
+    /// device writes the host reads, in host-cached memory where the device
+    /// offers it: reads from uncached memory cost one bus transaction each.
+    pub(super) fn alloc_host_readback(&self, size: usize) -> Result<HostBuffer> {
+        self.alloc_mapped(
+            size,
+            MemoryLocation::GpuToCpu,
+            "rasterrocket host readback buffer",
+        )
+    }
+
+    /// A persistently mapped host buffer of `size` bytes at `location`.
+    fn alloc_mapped(
+        &self,
+        size: usize,
+        location: MemoryLocation,
+        name: &'static str,
+    ) -> Result<HostBuffer> {
+        let (buffer, allocation) = self.create_and_bind(size, HOST_USAGE, location, name)?;
+        // gpu-allocator persistently maps host-visible allocations.  If the
         // pointer is missing, free what we have and report.
         let mapped_ptr = if let Some(nn) = allocation.mapped_ptr() {
             nn.as_ptr().cast::<u8>()
         } else {
-            free_buffer(&self.inner, buffer, allocation, "alloc_host rollback");
+            free_buffer(&self.inner, buffer, allocation, "host buffer rollback");
             return Err(BackendError::msg(
                 "host buffer allocation has no mapped pointer (gpu-allocator returned None)",
             ));

@@ -22,8 +22,8 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rasterrocket_gpu::backend::aa_fill_page;
 use rasterrocket_gpu::backend::cuda::CudaBackend;
+use rasterrocket_gpu::backend::{AaFillScratch, aa_fill_page};
 use rasterrocket_gpu::{
     AA_SIZE, AaFillRect, AaScanTable, GpuCtx, ScanIntersect, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
 };
@@ -187,10 +187,11 @@ fn bench_aa_fill(ctx: &Arc<GpuCtx>, cfg: &Config) {
             cfg.iters,
         );
 
+        let mut scratch = AaFillScratch::new();
         let gpu_ns = time_ns(
             || {
                 let _ = gpu_unwrap(
-                    aa_fill_page(&backend, &table, rect, aa_width, false),
+                    aa_fill_page(&backend, &mut scratch, &table, rect, aa_width, false),
                     "aa_fill",
                 );
             },

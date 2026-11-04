@@ -8,15 +8,15 @@
 //! byte-exact twin of it.
 //!
 //! Dispatch is generic over [`GpuBackend`], so the CUDA and Vulkan backends
-//! run the same sequence, [`gpu::backend::aa_fill_page`]: upload, one page,
-//! download. The module is compiled only with the `gpu-aa` feature, which
+//! run the same sequence, [`gpu::backend::aa_fill_page`]: the table's
+//! uploads, the kernel and the counts' download as one page. The module is compiled only with the `gpu-aa` feature, which
 //! `vulkan` implies.
 
 #![cfg(feature = "gpu-aa")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpu::backend::{GpuBackend, aa_fill_page};
+use gpu::backend::{AaFillScratch, GpuBackend, aa_fill_page};
 use gpu::{AaFillRect, AaScanTable, ScanIntersect};
 use raster::clip::Clip;
 use raster::pipe::{PipeSrc, PipeState};
@@ -225,7 +225,13 @@ fn report_failure(backend: &'static str, e: &dyn std::fmt::Display) {
     }
 }
 
-/// Rasterise `path` through `backend`'s scanline-AA fill kernel
+/// A backend and the fill transfer buffers the renderer keeps for it.
+pub(super) struct Device<'a, B: GpuBackend> {
+    pub(super) backend: &'a B,
+    pub(super) scratch: &'a mut AaFillScratch<B>,
+}
+
+/// Rasterise `path` through the device's scanline-AA fill kernel
 /// ([`gpu::backend::aa_fill_page`]) and composite the counts by
 /// [`gpu_coverage_to_bitmap`].
 ///
@@ -239,7 +245,7 @@ fn report_failure(backend: &'static str, e: &dyn std::fmt::Display) {
 /// [`report_failure`]) and the CPU fill is the exact fallback.
 pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     renderer: &mut PageRenderer<'_>,
-    backend: &B,
+    device: Device<'_, B>,
     path: &raster::path::Path,
     even_odd: bool,
     flatness: f64,
@@ -267,7 +273,15 @@ pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     if fill.intersects.is_empty() {
         return false;
     }
-    match aa_fill_page(backend, &fill.table(), fill.rect, fill.aa_width, even_odd) {
+    let Device { backend, scratch } = device;
+    match aa_fill_page(
+        backend,
+        scratch,
+        &fill.table(),
+        fill.rect,
+        fill.aa_width,
+        even_odd,
+    ) {
         Ok(mut counts) => {
             gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
             true

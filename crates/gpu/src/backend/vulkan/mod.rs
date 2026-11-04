@@ -29,7 +29,7 @@ pub use select::DeviceSelector;
 
 use std::sync::Arc;
 
-use crate::backend::{GpuBackend, Result, VramBudget, params, reject_zero_size};
+use crate::backend::{GpuBackend, Result, VramBudget, check_copy_len, params, reject_zero_size};
 
 /// Vulkan compute backend.
 ///
@@ -89,6 +89,21 @@ impl VulkanBackend {
             device,
         })
     }
+
+    /// Queue submissions this backend has made so far: one per page, one
+    /// per synchronous transfer or zero-fill.
+    #[must_use]
+    pub fn submits(&self) -> u64 {
+        self.device.submits()
+    }
+}
+
+/// `len` as a Vulkan copy size, `None` for an empty copy, after checking it
+/// against both buffers.
+fn copy_size(len: usize, src: u64, dst: u64, what: &'static str) -> Result<Option<u64>> {
+    let as_usize = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+    check_copy_len(len, as_usize(src), as_usize(dst), what)?;
+    Ok((len > 0).then(|| u64::try_from(len).expect("len is at most a u64 buffer size")))
 }
 
 impl Drop for VulkanBackend {
@@ -159,6 +174,11 @@ impl GpuBackend for VulkanBackend {
     fn alloc_host_pinned(&self, size: usize) -> Result<Self::HostBuffer> {
         reject_zero_size(size, "alloc_host_pinned")?;
         self.memory.alloc_host(size)
+    }
+
+    fn alloc_host_readback(&self, size: usize) -> Result<Self::HostBuffer> {
+        reject_zero_size(size, "alloc_host_readback")?;
+        self.memory.alloc_host_readback(size)
     }
 
     fn free_host_pinned(&self, buf: Self::HostBuffer) {
@@ -235,6 +255,40 @@ impl GpuBackend for VulkanBackend {
 
     fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()> {
         self.recorder.record_zero_buffer(buf)
+    }
+
+    fn record_copy_to_device(
+        &self,
+        src: &Self::HostBuffer,
+        dst: &Self::DeviceBuffer,
+        len: usize,
+    ) -> Result<()> {
+        copy_size(len, src.size(), dst.size(), "record_copy_to_device")?.map_or(Ok(()), |n| {
+            self.recorder.record_copy(src.handle(), dst.handle(), n)
+        })
+    }
+
+    fn record_copy_to_host(
+        &self,
+        src: &Self::DeviceBuffer,
+        dst: &mut Self::HostBuffer,
+        len: usize,
+    ) -> Result<()> {
+        copy_size(len, src.size(), dst.size(), "record_copy_to_host")?.map_or(Ok(()), |n| {
+            self.recorder.record_copy(src.handle(), dst.handle(), n)
+        })
+    }
+
+    fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize {
+        buf.as_slice().len()
+    }
+
+    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> &'a [u8] {
+        buf.as_slice()
+    }
+
+    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
+        buf.as_mut_slice()
     }
 
     fn submit_page(&self) -> Result<Self::PageFence> {

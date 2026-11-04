@@ -172,8 +172,8 @@ mod cuda {
 
     use super::{aa_fill_cpu, assert_identical, cases};
     use rasterrocket_gpu::GpuCtx;
-    use rasterrocket_gpu::backend::aa_fill_page;
     use rasterrocket_gpu::backend::cuda::CudaBackend;
+    use rasterrocket_gpu::backend::{AaFillScratch, aa_fill_page};
 
     /// The CUDA backend on a fresh context.
     pub(super) fn backend() -> CudaBackend {
@@ -184,12 +184,14 @@ mod cuda {
     #[test]
     fn cuda_kernel_matches_host_twin() {
         let backend = backend();
+        let mut scratch = AaFillScratch::new();
         for case in cases() {
             for eo in [false, true] {
                 let table = case.table();
                 let expected = aa_fill_cpu(&table, case.rect, case.aa_width, eo);
-                let actual = aa_fill_page(&backend, &table, case.rect, case.aa_width, eo)
-                    .unwrap_or_else(|e| panic!("{}: CUDA aa_fill failed: {e}", case.name));
+                let actual =
+                    aa_fill_page(&backend, &mut scratch, &table, case.rect, case.aa_width, eo)
+                        .unwrap_or_else(|e| panic!("{}: CUDA aa_fill failed: {e}", case.name));
                 assert_identical(
                     &expected,
                     &actual,
@@ -210,21 +212,34 @@ mod cuda {
 #[cfg(feature = "vulkan")]
 mod vulkan {
     use super::{Case, aa_fill_cpu, assert_identical, cases};
-    use rasterrocket_gpu::backend::aa_fill_page;
     use rasterrocket_gpu::backend::vulkan::VulkanBackend;
+    use rasterrocket_gpu::backend::{AaFillScratch, aa_fill_page};
 
-    fn run_vulkan(backend: &VulkanBackend, case: &Case, eo: bool) -> Vec<u8> {
-        aa_fill_page(backend, &case.table(), case.rect, case.aa_width, eo)
-            .unwrap_or_else(|e| panic!("{}: Vulkan aa_fill failed: {e}", case.name))
+    fn run_vulkan(
+        backend: &VulkanBackend,
+        scratch: &mut AaFillScratch<VulkanBackend>,
+        case: &Case,
+        eo: bool,
+    ) -> Vec<u8> {
+        aa_fill_page(
+            backend,
+            scratch,
+            &case.table(),
+            case.rect,
+            case.aa_width,
+            eo,
+        )
+        .unwrap_or_else(|e| panic!("{}: Vulkan aa_fill failed: {e}", case.name))
     }
 
     #[test]
     fn vulkan_kernel_matches_host_twin() {
         let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let mut scratch = AaFillScratch::new();
         for case in cases() {
             for eo in [false, true] {
                 let expected = aa_fill_cpu(&case.table(), case.rect, case.aa_width, eo);
-                let actual = run_vulkan(&backend, &case, eo);
+                let actual = run_vulkan(&backend, &mut scratch, &case, eo);
                 assert_identical(
                     &expected,
                     &actual,
@@ -244,12 +259,13 @@ mod vulkan {
             for _ in 0..4 {
                 // The scope joins every thread, propagating a panic.
                 let _ = scope.spawn(|| {
+                    let mut scratch = AaFillScratch::new();
                     for case in &cases {
                         for eo in [false, true] {
                             let expected = aa_fill_cpu(&case.table(), case.rect, case.aa_width, eo);
                             assert_identical(
                                 &expected,
-                                &run_vulkan(&backend, case, eo),
+                                &run_vulkan(&backend, &mut scratch, case, eo),
                                 &format!("{} (eo={eo}) from a thread", case.name),
                             );
                         }
@@ -272,7 +288,7 @@ mod vulkan {
         let expected = aa_fill_cpu(&case.table(), case.rect, case.aa_width, false);
         assert_identical(
             &expected,
-            &run_vulkan(&backend, case, false),
+            &run_vulkan(&backend, &mut AaFillScratch::new(), case, false),
             "the page after a failed one",
         );
     }
@@ -283,11 +299,21 @@ mod vulkan {
     fn vulkan_kernel_matches_cuda_kernel() {
         let backend = VulkanBackend::new().expect("VulkanBackend::new");
         let cuda_backend = super::cuda::backend();
+        let mut cuda_scratch = AaFillScratch::new();
+        let mut vk_scratch = AaFillScratch::new();
         for case in cases() {
             for eo in [false, true] {
-                let cuda = aa_fill_page(&cuda_backend, &case.table(), case.rect, case.aa_width, eo)
-                    .unwrap_or_else(|e| panic!("{}: CUDA aa_fill failed: {e}", case.name));
-                let vk = run_vulkan(&backend, &case, eo);
+                let table = case.table();
+                let cuda = aa_fill_page(
+                    &cuda_backend,
+                    &mut cuda_scratch,
+                    &table,
+                    case.rect,
+                    case.aa_width,
+                    eo,
+                )
+                .unwrap_or_else(|e| panic!("{}: CUDA aa_fill failed: {e}", case.name));
+                let vk = run_vulkan(&backend, &mut vk_scratch, &case, eo);
                 assert_identical(
                     &cuda,
                     &vk,

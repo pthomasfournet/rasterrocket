@@ -16,6 +16,7 @@ use ash::khr::{portability_enumeration, portability_subset};
 use ash::vk;
 use std::ffi::{CStr, c_char};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{BackendError, Result};
@@ -38,9 +39,11 @@ pub(super) struct DeviceCtx {
     /// the same queue must not run concurrently from multiple threads).
     /// The mutex *is* the access path — there is no way to reach the
     /// raw `vk::Queue` without holding the lock.  Both submitters (the
-    /// per-page recorder and the transfer context) call
-    /// [`Self::with_queue`] for the queue-touching FFI window only.
+    /// per-page recorder and the transfer context) go through
+    /// [`Self::submit`] or [`Self::submit_and_wait_idle`].
     compute_queue: Mutex<vk::Queue>,
+    /// Successful `vkQueueSubmit` calls on `compute_queue`.
+    submits: AtomicU64,
     /// Cached physical-device handle for memory-property + budget queries.
     pub(super) phys: vk::PhysicalDevice,
     /// Cached memory properties (memoryTypeBits → `MemoryType` lookup).
@@ -118,6 +121,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         device,
         compute_queue_family,
         compute_queue: Mutex::new(compute_queue),
+        submits: AtomicU64::new(0),
         phys,
         mem_props,
         max_workgroup_count,
@@ -130,15 +134,56 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
 }
 
 impl DeviceCtx {
-    /// Run `f` with the externally-synchronized compute queue.
+    /// Submit `submit` to the compute queue with no fence.
     ///
-    /// The queue handle is only reachable through this method; callers
-    /// can't bypass the mutex.  Hold the closure scope as small as
-    /// possible — every other submitter (transfer context, recorder)
-    /// is blocked while this call runs.
-    pub(super) fn with_queue<R>(&self, f: impl FnOnce(vk::Queue) -> R) -> R {
+    /// The queue lock is held for the `vkQueueSubmit` call only.  `what`
+    /// names the submitter in the error.
+    ///
+    /// # Safety
+    /// Every handle `submit` references is live and its command buffers are
+    /// in the Executable state.
+    pub(super) unsafe fn submit(
+        &self,
+        submit: &vk::SubmitInfo<'_>,
+        what: &'static str,
+    ) -> Result<()> {
         let queue = self.compute_queue.lock().expect("compute_queue poisoned");
-        f(*queue)
+        // Safety: the queue is held exclusively; the caller guarantees `submit`.
+        unsafe {
+            self.device
+                .queue_submit(*queue, std::slice::from_ref(submit), vk::Fence::null())
+        }
+        .map_err(vk_err(what))?;
+        let _ = self.submits.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// [`Self::submit`], then `vkQueueWaitIdle` under the same lock hold, so
+    /// that the queue is idle when the call returns.
+    ///
+    /// # Safety
+    /// As [`Self::submit`].
+    pub(super) unsafe fn submit_and_wait_idle(
+        &self,
+        submit: &vk::SubmitInfo<'_>,
+        what: &'static str,
+    ) -> Result<()> {
+        let queue = self.compute_queue.lock().expect("compute_queue poisoned");
+        // Safety: the queue is held exclusively; the caller guarantees `submit`.
+        unsafe {
+            self.device
+                .queue_submit(*queue, std::slice::from_ref(submit), vk::Fence::null())
+                .map_err(vk_err(what))?;
+            let _ = self.submits.fetch_add(1, Ordering::Relaxed);
+            self.device
+                .queue_wait_idle(*queue)
+                .map_err(vk_err("vkQueueWaitIdle"))
+        }
+    }
+
+    /// Successful submissions to the compute queue so far.
+    pub(super) fn submits(&self) -> u64 {
+        self.submits.load(Ordering::Relaxed)
     }
 }
 

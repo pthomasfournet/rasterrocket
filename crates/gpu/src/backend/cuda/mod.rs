@@ -4,14 +4,19 @@
 //! Per-page batching is recorded into a `PageRecorder`; see `page_recorder.rs`.
 
 mod page_recorder;
+mod pinned;
 mod transfer;
+
+pub use pinned::PinnedBuffer;
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, PinnedHostSlice};
+use cudarc::driver::CudaSlice;
 
 use crate::GpuCtx;
-use crate::backend::{BackendError, GpuBackend, Result, VramBudget, params, reject_zero_size};
+use crate::backend::{
+    BackendError, GpuBackend, Result, VramBudget, check_copy_len, params, reject_zero_size,
+};
 
 /// Convert any `Display` error to a `BackendError`.
 ///
@@ -54,7 +59,7 @@ impl crate::backend::sealed::Sealed for CudaBackend {}
 impl GpuBackend for CudaBackend {
     const NAME: &'static str = "cuda";
     type DeviceBuffer = CudaSlice<u8>;
-    type HostBuffer = PinnedHostSlice<u8>;
+    type HostBuffer = PinnedBuffer;
     type PageFence = page_recorder::PageFence;
 
     fn alloc_device(&self, size: usize) -> Result<Self::DeviceBuffer> {
@@ -91,10 +96,12 @@ impl GpuBackend for CudaBackend {
 
     fn alloc_host_pinned(&self, size: usize) -> Result<Self::HostBuffer> {
         reject_zero_size(size, "alloc_host_pinned")?;
-        let cuda_ctx = &self.ctx.cuda;
-        // Safety: the caller must initialise every byte before reading it back.
-        // Mirrors the pattern in `cache::host_tier::HostTier::alloc_pinned`.
-        unsafe { cuda_ctx.alloc_pinned::<u8>(size) }.map_err(be)
+        PinnedBuffer::new(&self.ctx.cuda, size)
+    }
+
+    fn alloc_host_readback(&self, size: usize) -> Result<Self::HostBuffer> {
+        reject_zero_size(size, "alloc_host_readback")?;
+        PinnedBuffer::new(&self.ctx.cuda, size)
     }
 
     fn free_host_pinned(&self, _buf: Self::HostBuffer) {
@@ -174,6 +181,38 @@ impl GpuBackend for CudaBackend {
 
     fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()> {
         self.recorder.record_zero_buffer(buf)
+    }
+
+    fn record_copy_to_device(
+        &self,
+        src: &Self::HostBuffer,
+        dst: &Self::DeviceBuffer,
+        len: usize,
+    ) -> Result<()> {
+        check_copy_len(len, src.len(), dst.len(), "record_copy_to_device")?;
+        transfer::queue_htod(&self.ctx, &src.as_slice()[..len], dst)
+    }
+
+    fn record_copy_to_host(
+        &self,
+        src: &Self::DeviceBuffer,
+        dst: &mut Self::HostBuffer,
+        len: usize,
+    ) -> Result<()> {
+        check_copy_len(len, src.len(), dst.len(), "record_copy_to_host")?;
+        transfer::queue_dtoh(&self.ctx, src, &mut dst.as_mut_slice()[..len])
+    }
+
+    fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize {
+        buf.len()
+    }
+
+    fn host_bytes<'a>(&self, buf: &'a Self::HostBuffer) -> &'a [u8] {
+        buf.as_slice()
+    }
+
+    fn host_bytes_mut<'a>(&self, buf: &'a mut Self::HostBuffer) -> &'a mut [u8] {
+        buf.as_mut_slice()
     }
 
     fn submit_page(&self) -> Result<Self::PageFence> {

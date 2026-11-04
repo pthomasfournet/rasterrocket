@@ -218,21 +218,12 @@ impl TransferContext {
 
         let submit_buffers = [pool.cmd];
         let submit = vk::SubmitInfo::default().command_buffers(&submit_buffers);
-        self.device.with_queue(|q| {
-            // Safety: queue exclusively held via with_queue; submit
-            // outlives the call.
-            unsafe {
-                self.device
-                    .device
-                    .queue_submit(q, &[submit], vk::Fence::null())
-                    .map_err(vk_err("vkQueueSubmit (transfer)"))?;
-                self.device
-                    .device
-                    .queue_wait_idle(q)
-                    .map_err(vk_err("vkQueueWaitIdle (transfer)"))?;
-            }
-            Ok(())
-        })
+        // Safety: the command buffer was ended above and the pool mutex
+        // keeps it from being reset until the queue is idle.
+        unsafe {
+            self.device
+                .submit_and_wait_idle(&submit, "vkQueueSubmit (transfer)")
+        }
     }
 }
 
