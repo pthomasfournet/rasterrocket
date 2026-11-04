@@ -499,7 +499,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     unsafe fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]>;
 
     /// Byte length of a host buffer returned by
-    /// [`Self::alloc_host_pinned`].
+    /// [`Self::alloc_host_pinned`] or [`Self::alloc_host_readback`].
     fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize;
 
     /// The host view of `buf`'s bytes.

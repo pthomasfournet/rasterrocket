@@ -460,7 +460,7 @@ PASSED
 
 ## Build and backend A/B comparison
 
-Two scripts compare one `rrocket` binary against another byte for byte. Use them to check that a change leaves output untouched, or that a GPU backend matches the CPU. Both need bash 4 or later; on macOS that means Homebrew's `bash`. Each render runs under `timeout`, or `gtimeout` on macOS, when one is installed.
+Two scripts compare one `rrocket` binary against another byte for byte. Use them to check that a change leaves output untouched, or that a GPU backend matches the CPU. Both need bash 4.4 or later; on macOS that means Homebrew's `bash`. Each render runs under `timeout`, or `gtimeout` on macOS, when one is installed.
 
 ```bash
 # Every output mode (RGB PNG, JPEG, gray PNG, mono PNG, gray PGM), 50 dpi, first 3 pages
@@ -474,8 +474,8 @@ AFTER_FLAGS="--backend vulkan" tests/compare/ab_render.sh \
   target/release/rrocket target/release/rrocket /tmp/ab -- tests/fixtures/*.pdf
 ```
 
-`BEFORE_FLAGS` and `AFTER_FLAGS` append arguments to one side only, and `AB_TIMEOUT` sets the per-render limit in seconds. `ab_render.sh` prints a `DIFF` line for each differing file and a `COUNT` line when the two sides wrote different numbers of pages.
+`BEFORE_FLAGS` and `AFTER_FLAGS` append arguments to one side only, and `AB_TIMEOUT` sets the per-render limit in seconds. `ab_render.sh` prints a `DIFF` line for each differing file, a `COUNT` line when the two sides wrote different numbers of pages, an `EXIT` line when their exit statuses differ, and a `FAILED` line when both failed alike. It renders into a temporary directory inside `OUTDIR` and removes it on exit, and it fails when no output was compared at all.
 
 Without a `LIST`, `ab_archive.sh` scans the repository fixtures plus a fixed sample of 150 PDFs from `$AB_ARCHIVE` (default `~/mss-content/archives`). The sample is the same on every run, and the archive is skipped when that directory is missing. It writes `OUTPREFIX.list` and `OUTPREFIX.diffs`. The diffs file has a `PAGE`, `COUNT` or `EXIT` line for each difference: differing pixels, differing page counts, or a different exit status.
 
-Both scripts exit with 0 when nothing differs, 1 when something does, and 2 on bad usage.
+Both scripts exit with 0 when nothing differs, 1 when something does, and 2 on bad usage. The archive sample needs `shuf` (`gshuf` from Homebrew `coreutils` on macOS).

@@ -58,8 +58,10 @@ static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// touching Vulkan, and so does `Auto` while every Vulkan kernel is dormant
 /// (see [`auto_wants_vulkan`]).  An unavailable Vulkan is `Ok(None)` under `Auto` (the
 /// caller falls through to CUDA, then CPU) and an error under
-/// `ForceVulkan`.  A selector that does not resolve is an error under both,
-/// since it is a configuration mistake rather than missing hardware.
+/// `ForceVulkan`.  A selector that does not resolve is an error whenever
+/// Vulkan is initialised, under either policy, since it is a configuration
+/// mistake rather than missing hardware; under `Auto` with every Vulkan
+/// kernel dormant it is not resolved, as no device is opened.
 ///
 /// # Errors
 ///

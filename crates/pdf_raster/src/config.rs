@@ -222,7 +222,9 @@ pub struct SessionConfig {
     /// that is not a valid index is matched as a name.  A value that does
     /// not resolve to exactly one usable device makes [`open_session`]
     /// return [`RasterError::InvalidOptions`] listing the enumerated
-    /// devices, under `Auto` as well as `ForceVulkan`.
+    /// devices, under `ForceVulkan`, and under `Auto` when a Vulkan kernel is
+    /// enabled (with every Vulkan kernel dormant `Auto` opens no device and
+    /// does not resolve the selector).
     ///
     /// [`SessionConfig::with_policy`] sets `None`; [`SessionConfig::default`]
     /// reads `PDF_RASTER_VULKAN_DEVICE` (see
@@ -434,7 +436,9 @@ impl Default for SessionConfig {
 ///
 /// A Vulkan backend that wins `Auto` also keeps the CUDA context from
 /// initialising, so with every Vulkan kernel dormant `Auto` falls through to
-/// CUDA (whose CLUT kernel is live), then the CPU.
+/// CUDA (whose CLUT kernel is live), then the CPU; conversely, enabling a
+/// Vulkan kernel turns the CUDA paths (CLUT, device image cache) off under
+/// `Auto`.
 #[cfg(feature = "vulkan")]
 pub(crate) const fn auto_wants_vulkan(aa_fill_threshold: usize, huffman_threshold: u32) -> bool {
     aa_fill_threshold != usize::MAX || huffman_threshold != u32::MAX
