@@ -59,6 +59,142 @@ alongside `fuzz` and `qa`.
 
 ## Release history
 
+### v2.1.0 (November 2026)
+
+**Output to printers and fax machines, overprint, shaped text for
+substituted fonts; no API break.** `rrocket` writes JPEG and TIFF, prints
+through CUPS and writes or sends fax documents; the library simulates
+overprint and spot inks on request, shapes complex-script text drawn with
+substitute fonts, decodes HTJ2K and decodes an image shared by several pages
+once. The cycle closes with three hardening review passes (2026-11-03 and
+twice on 2026-11-04). Every addition to the public API is a new item or a
+field of a `#[non_exhaustive]` type, so a v2.0.0 caller builds unchanged.
+
+**New capabilities.**
+- **JPEG and TIFF output.** `--jpeg` with `--jpegopt quality=N,
+  progressive=y|n,optimize=y|n`, as `pdftoppm -jpeg`, colour or gray;
+  `--tiff` with `--tiffcompression none|packbits|lzw|deflate|g3|g3-2d|g4`,
+  RGB, gray or bilevel, the fax codings from a CCITT Group 3 / Group 4
+  encoder added to the `crates/ccitt` fork. Fax-coded pages read back
+  pixel-exact through libtiff and the `tiff` crate. `--jpegcmyk` is still
+  refused.
+- **Fax documents.** `--fax` writes one TIFF Class F file, 1728 px wide at
+  204 × 196 dpi (`fine`) or 204 × 98 dpi (`--fax-resolution standard`),
+  landscape pages turned, Group 3 one-dimensional by default; `--fax-to
+  NUMBER [--fax-queue NAME]` hands it to a CUPS fax queue or HylaFAX
+  `sendfax`. `--invert[=always|auto|never]` (`auto` under `--fax`) turns
+  pages reversed out of a flat dark ground, and `--dither halftone` renders
+  photographs as dot patterns for `--mono` and `--fax`.
+- **Printing.** `--print` / `--printer NAME` / `--copies N` /
+  `--duplex long|short` render the pages at 600 dpi (or `-r`) for printing
+  and hand CUPS's `lp` one PDF of page images through a private, anonymous
+  spool, a window of pages at a time; `--list-printers` lists the queues.
+  Linux and macOS; refused on Windows.
+- **Overprint simulation.** `--overprint` / `RasterOptions::overprint` /
+  `SessionConfig::overprint` (default off) paint a page whose graphics
+  states set `OP` or `op` on a canvas of four process and four spot inks
+  (ISO 32000-1 §8.6.7) and convert it to RGB; further spot colorants are
+  listed in `PageDiagnostics::unslotted_spots`. Other pages render
+  byte-identically. Not simulated: `Separation` / `DeviceN` images and
+  shadings, tiling-pattern cells and transparency groups as a whole.
+- **Text shaping for substituted fonts.** Runs of Arabic, Devanagari and
+  other scripts that need shaping, drawn with a substitute face, are shaped
+  with its `GSUB`/`GPOS` through a vendored harfrust fork; synthesised
+  annotation and field text is put in visual order by the bidirectional
+  algorithm. The bundled fallbacks gain Bengali, Tamil, Armenian, Georgian
+  and Ethiopic (0.49 → 0.75 MB); vertical-form CIDs a substitute lacks are
+  rotated or shifted from the horizontal glyph.
+- **HTJ2K.** JPX images coded with the high-throughput block coder
+  (ISO/IEC 15444-15) decode; reversible OpenJPH test streams decode
+  bit-exactly. The mixed HT / classic mode is refused by name.
+- **Vulkan on macOS.** The Vulkan backend finds Homebrew's or the SDK's
+  loader and runs on MoltenVK; the fixtures render byte-identically on an
+  A18 Pro's GPU and CPU (the GPU fill is slower, so it stays off).
+- **CLI.** `--version` / `-V`; `ab_render.sh` / `ab_archive.sh` compare two
+  binaries, or two backends of one, byte for byte.
+
+**Fixes.**
+- *Geometry.* The page box is anchored at the bitmap's top-left corner for
+  every `/Rotate`; over 434 changed pages the fitted vertical offset against
+  mutool falls from 0.15 to 0.06 px and against pdfium from 0.32 to 0.20 px.
+  Subpaths ending in a curve no longer merge into the next; antialiased
+  edges past device column 8191 are right; a sloped edge's fixed-point
+  position no longer drifts by pixels for vertices far off the page; a
+  zero-width filled rectangle fills its pixel column.
+- *Memory.* A page bitmap, transparency group, soft mask, knockout,
+  tiling-pattern, Type 3 or snapshot bitmap the allocator refuses fails the
+  page with `RasterError::PageAllocationFailed` instead of aborting the
+  process.
+- *Bounded work.* Tint-transform conversion is budgeted per image (2^28
+  operations) and per page (2^32), with a lattice of exact conversions past
+  it: a 2000 × 2000 noise image under a 100 000-token transform renders in
+  0.4 s instead of not finishing in 180 s. Type 4 runs are limited by fuel,
+  function costs are computed once, and JBIG2 decoding has cumulative
+  memory and work budgets that fail the image when spent.
+- *Parser.* Linear cross-reference index growth, a bounded `/Count`,
+  linearization found by position and the page count read from the tree.
+- *Output.* Bilevel and planar TIFF pages in comic archives decode (every
+  one failed before); `--mono --png` is fixed; the print spool is private.
+- *CLI.* INPUT `-` reads the PDF from standard input, as the help always
+  said (it was opened as a file named `-`); an encrypted piped document is
+  decrypted only under `--decrypt-owned`.
+- *Caches.* Pattern cells, kept forms and inline decodes are keyed on the
+  resources they resolve in; the document font and image stores each serve
+  one document; a decode curtailed by a page's budget is not shared.
+- *GPU.* Vulkan mapped access, transfers and zero-fills are synchronised;
+  devices lacking a required feature are skipped; a failed or panicking page
+  is abandoned on every backend; concurrent Vulkan instance creation no
+  longer crashes the loader; a relative `$VULKAN_SDK` is ignored.
+- *Fonts.* The read-fonts, skrifa and harfrust forks are rebased on
+  upstream (renders byte-identical over 12 169 pages); a shaping failure or
+  exhausted shaper falls back to glyph-by-glyph drawing with a warning.
+
+**Performance.**
+- An image `XObject` drawn on several pages is decoded once per session
+  (up to `image_budget`, 256 MiB by default): a 48-page document sharing one
+  3000 × 3000 JPEG renders in 1.9 s instead of 4.5 s at 0.51 GB peak
+  instead of 1.22 GB.
+- Synthetic-bold (`2 Tr`) text draws strokes from cached coverage (the
+  israel pages 1.32 → 0.10 s, pdfium 0.95 s); together with chord-based
+  curve flattening, clip-culled subpaths, an indexed cross-reference table
+  and one face lookup per text run, the two documents slower than pdfium in
+  the archive latency run now match or beat it.
+- A clip of more than eight paths folds into one table: 3 000 nested clips
+  and 3 000 fills render in 0.31 s instead of 6.1 s, 47 MB instead of
+  600 MB.
+- Images are area-averaged only over the pixels a draw can paint (1.2–1.6×
+  on mostly clipped images); gray output converts in place.
+- On integrated GPUs Vulkan buffers are mapped instead of staged and
+  read-back buffers are host-cached (a 16 Mpx device fill on RADV: 38–65 ms
+  → 13 ms); a device AA fill is one submission instead of four. Under
+  `auto`, no Vulkan device and no Huffman decoder is initialised while
+  their kernels are dormant.
+- Two optimisations change pixels, both approved against an 8× reference
+  render: the curve flattening and the cached glyph strokes (60 archive
+  pages, all stroked text). Everything else is byte-identical over the
+  archive.
+
+**API changes** (additive; no v2.0.0 caller breaks).
+- `rasterrocket`: `RasterOptions::{overprint, image_budget}`,
+  `SessionConfig::{overprint, image_budget}` (both structs
+  `#[non_exhaustive]`), `RasterError::PageAllocationFailed` (enum
+  `#[non_exhaustive]`), `PageDiagnostics::unslotted_spots` (struct
+  `#[non_exhaustive]`), `DOCUMENT_IMAGE_BUDGET_BYTES`, `rgb_into_gray`,
+  `gray8_into_rendered_page`, `is_encrypted_bytes`.
+- Behaviour: a session keeps up to 256 MiB of shared image decodes resident
+  by default (`image_budget = 0` keeps none); under `BackendPolicy::Auto` a
+  Vulkan build opens no Vulkan device unless a Vulkan kernel's threshold
+  enables it.
+- `rasterrocket-comic`: `ComicOptions::session`. `rasterrocket-render`:
+  `Bitmap::{into_data, from_packed, try_new_filled}`, `BitmapAllocError`.
+  `rasterrocket-interp`: `PageRenderer::{with_page_group,
+  try_with_page_group, try_set_page_group, try_finish,
+  set_document_images}`, `page_uses_overprint`, `DocumentImages`,
+  `ExtGStateParams::{overprint_stroke, overprint_fill, overprint_mode}`,
+  `RenderAbort::AllocationFailed`, `DeviceKernel`, `device_kernel_enabled`.
+- CLI: new flags only; `--jpeg` and `--tiff`, refused in v2.0.0, now write
+  files, and `--overprint`, removed in v2.0.0, is back with a meaning.
+
 ### v2.0.0 (October 2026)
 
 **More of the PDF drawn, and drawn as the specification says; one API
@@ -2289,9 +2425,9 @@ derived from it for vertical forms.
 ## Current status (2026-11-04)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
-planned Phase 13 above; Phase 14 is on master, unreleased.
+planned Phase 13 above; Phase 14 shipped in v2.1.0.
 
-**Unreleased on master since v2.0.0 (2026-10-31):** Phase 13's fax output,
+**Released in v2.1.0 (2026-11-04), since v2.0.0 (2026-10-31):** Phase 13's fax output,
 `--print` through CUPS and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
 follow-ups, overprint simulation (below), and three hardening review passes:
 2026-11-03 over the overprint work, gray output and the vendored forks, and

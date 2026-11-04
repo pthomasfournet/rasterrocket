@@ -29,6 +29,29 @@ documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#p
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## What's new in v2.1.0
+
+**Output to printers and fax machines, overprint, shaped text for
+substituted fonts; no API break.** The full list is in
+[ROADMAP.md](ROADMAP.md#release-history).
+
+- **JPEG and TIFF output.** `--jpeg` / `--jpegopt` as `pdftoppm -jpeg`, and
+  `--tiff` with `--tiffcompression none|packbits|lzw|deflate|g3|g3-2d|g4`.
+- **Printing and fax.** `--print` (with `--printer`, `--copies`, `--duplex`;
+  `--list-printers` lists the queues) hands the pages to CUPS; `--fax`
+  writes a TIFF Class F document and `--fax-to` sends it.
+- **Overprint simulation.** `--overprint` / `RasterOptions::overprint`
+  paints overprinting graphics on process and spot inks (default off).
+- **Text shaping.** Arabic, Devanagari and other complex scripts drawn with
+  a substitute face are shaped; the bundled fallbacks cover more scripts.
+- **HTJ2K** images decode, and **Vulkan runs on macOS** through MoltenVK.
+- **Faster and bounded.** An image shared by several pages decodes once per
+  session; deep clips, synthetic-bold text and curve flattening are faster;
+  tint transforms, Type 4 functions and JBIG2 decoding have work budgets,
+  and a refused page-sized allocation fails the page instead of the
+  process.
+- **CLI:** INPUT `-` reads the PDF from standard input.
+
 ## What's new in v2.0.0
 
 **More of the PDF is drawn, and drawn as specified; the public API breaks

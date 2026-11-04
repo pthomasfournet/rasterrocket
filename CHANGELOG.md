@@ -2,6 +2,293 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-11-04
+
+### Bug Fixes
+
+- Clear the clippy findings only non-Linux targets compile
+- Clamp -l to the page count for the pdfium reference
+- Index installed faces by their English family name
+- Read the English family name from Macintosh Roman records
+- Prefer the macOS CJK, Arabic and Thai system families
+- Rank a CID's code points by character class, not value
+- Route the simple pipe's solid fill through the per-arch dispatch
+- Read available memory on macOS; refuse --ram without /dev/shm
+- An image whose mask fails to decode is a failed image
+- Resolve image masks once; remember failed image decodes
+- Harden RAM output and page-file writes after review
+- Match listed families as whole designs; keep placeholders out
+- Fence the movdir64b fills; build the page bitmap once
+- Choose script faces that carry the script, listed designs first
+- Read fixed-width byte groups with as_chunks in the font forks
+- Uploads return once the source buffer is no longer read
+- Harden synthesised annotation text against hostile markup and fonts
+- Blocking downloads; remove the transfer-fence API
+- Keep the serif class first in per-character fallback
+- Find installed Liberation in any distribution's font directory
+- --invert=auto turns only pages reversed out of a flat ground
+- Hardening pass over the TIFF writer and fax encoder
+- Hardening pass over fax, tone and page writing
+- Run whole pages on a shared backend; one AA-fill page sequence
+- Hardening pass over shaping and bidi
+- Draw vertical forms a substitute lacks from its horizontal glyphs
+- Resolve embedded TrueType names the cmap misses through post
+- Re-index installed fonts when their directories change
+- Vertical-form fallback classes per review
+- Keep post-name lookup to non-symbolic TrueType fonts
+- Substitute searches make a font library stale too
+- Box-constrained inverse nodes and lookup-only rgb_to_cmyk
+- Overprint inside a non-isolated group keeps the composited colour
+- Overprint solve accounts for a translucent group backdrop
+- Ink canvas transfer functions, K-only greys, mask in sRGB
+- Spot slots are taken only by colours that fit
+- Soft masks render against their own backdrop
+- CFF custom encoding codes stop at the glyph count
+- Allocate the row's colour changes fallibly
+- Bound the inverse's black by the slice's corner hull
+- Composite unpainted overprint channels per CompatibleOverprint
+- Overprint and coverage of translucent strokes, indexed ink
+- Scan page resources to the renderer's form depth
+- One font-directory walk per library, deduplicated stamps
+- Bundled-font script fails loudly; Indic punctuation in the subsets
+- CFF charset glyph lookups stop at the glyph count
+- An MMR allocation failure is an error, not a blank region
+- Soft masks cover the whole of filled glyph bitmaps
+- A page bitmap the allocator refuses is an error
+- Linearization found by position; page count from the tree
+- A zero-width filled rectangle fills its pixel column
+- Bilevel and planar TIFF pages decode; review of the output path
+- Linear xref index growth; /Count bounded; linearization read in place
+- Private print spool on lp's stdin; review of --print
+- Document image store keys, failures and charges; review
+- Curve-ended subpaths no longer merge; 48.16 scanline stepping; review
+- HT failures lenient, lengths bounded to 32 bits, mixed mode refused early; review
+- Stroked-glyph cache bounds and keys; charset iteration; review
+- Windowed reduction decided on the whole draw; ink page conversion fallible; review
+- Find the macOS Vulkan loader; portability enumeration and subset; enable shaderInt64
+- Bound a page's decode by a cumulative memory and work budget
+- Bring over upstream robustness and shaping fixes; first upstream review
+- Refused group, soft-mask and coverage bitmaps stop the page
+- A document image store serves one document; session image budget
+- Sample image draws whose Q32 table terms saturate exactly
+- Anchor the scanner's edge accumulator at the segment's first row
+- Compute a region's device coordinates in the page's space
+- Serialise Vulkan instance creation and teardown
+- Close safe-code races on in-flight copies and mapped buffers
+- A/B scripts never wipe caller paths or pass on no output
+- A Vulkan selector that matches no device fails under Auto
+- Anchor the page box at the bitmap's top-left corner
+- Bound tint-transform work per image with a lattice
+- Charge every symbol instance and share the aggregate allowance
+- Fail the page on an exhausted budget in lenient mode
+- Place a collective bitmap's AT pixel at -HDPW for wide patterns
+- Store each function's cost at construction
+- Bound Type 4 runs by fuel, not by token count
+- Count nested tint transforms in a space's conversion cost
+- Cost a Type 0 evaluation by the sample bits it reads
+- Bound the tint-transform work of a page's images together
+- Bind the document font store to one document
+- Compute the render-time PPI hint over the page width in points
+- Place a NaN lattice position at the first node
+- Warn when an image's colours are interpolated in a lattice
+- Keep a decode its page's tint budget curtailed off the document store
+- Bound a sloped edge's fixed-point drift by re-anchoring
+- Charge kept forms for the heap behind their operands
+- Stop the page when a canvas snapshot is refused
+- Build pattern-cell and Type 3 child renderers fallibly
+- Key kept forms and inline decodes on their colour-space dictionary
+- State the knockout coverage rectangle's i32 invariant
+- A refused tiling-pattern screen stops the page
+- Ab_archive.sh fails when no page was compared
+- Build no Huffman decoder while its kernel is disabled
+- Point a refused print job at the queues, not a missing lp
+- Find the default printer without reading lpstat's wording
+- --list-printers writes through a fallible stdout
+- Draw ab_archive.sh's sample the same way in every locale
+- Count a render failure once and accept a reused LIST
+- Key inheriting pattern cells on the resources' own identity
+- Stage Vulkan downloads through host-cached memory
+- Hold the Vulkan recorder lock across mapped host access
+- Place host-read device buffers in host-cached memory on iGPUs
+- Order Vulkan zero-fills after earlier dispatches of the page
+- Make one-shot Vulkan transfers visible to the host
+- Leave the Vulkan recorder Idle after a failed or panicking page
+- Skip Vulkan devices lacking a required feature
+- One copy-length check for every Vulkan transfer
+- Ignore a relative VULKAN_SDK and report each loader failure
+- Abandon a failed page on every backend through one run_page chain
+- Bound AA scratch growth and reject a zero-length slot loudly
+- Keep the AA fill scratch with its backend, across pages
+- Reject CUDA page calls outside a page, as the trait documents
+- Place the JPEG decoder's host-read buffers in read-back memory
+- Treat a shaping run that exhausts the shaper's limits as unshaped
+- Release a program's spare vector capacity before caching it
+- Ignore vertical forms that name no glyph of the program
+- The archive sample is opt-in through AB_ARCHIVE
+- INPUT "-" reads the PDF from standard input
+
+### Chores
+
+- Drop the Tamil Supplement range from the bundled build
+- Tighten the inverse tests and docs
+- Lockfile lists the harfrust fork
+- Lockfile lists log for the render crate
+- Lockfile lists log for the render crate
+
+### Documentation
+
+- A guide per operating system, linked from the top of the README
+- Fix broken intra-doc links
+- State what CI and the font search actually cover
+- Phase 14 on master; CUDA inventory closed
+- --jpeg and --jpegopt
+- Bundled fallback scripts, substitution follow-ups, overprint status
+- Overprint simulation, in-place gray, font discovery on master
+- Latency work, stroked-text glyph cache and the page allocation error
+- Credit OpenHTJ2K for the HT segment reader
+- Printing and fax in the READMEs, the platform guides and the architecture
+- The 2026-11-04 review pass
+- Results come from one A-series Mac; M-series untested
+- Vulkan through MoltenVK
+- Record the font fork rebase
+- Defer banded image decoding on measurement
+- Reflow the combine entry of CHANGES.md
+- Describe what the fold-depth clip test checks
+- PageAllocationFailed covers every bitmap a page render needs
+- State exactly when auto opens Vulkan and where queue names come from
+- Correct stale and narrative Vulkan backend comments
+- State the CUDA allocation invariant once and share its body
+- Say which dependents the font-fork patch reaches
+- Record the font forks' remaining local deltas
+- Vulkan runs on the Apple GPU; only an absolute VULKAN_SDK is used
+- Input is a file, never stdin; bounds on tint, Type 4 and JBIG2 work
+- Every bitmap behind PageAllocationFailed; the font store's document binding
+- --printer names a queue --list-printers lists
+- Current status to 2026-11-04, the second review pass of the day
+- Phase 14 names the harfrust rebase
+
+### Features
+
+- Add --version / -V
+- Document::is_undefined for references to absent objects
+- Leader lines and captions on synthesised Line annotations
+- Turn synthesised free text by its /Rotate
+- Style synthesised text from rich text and default style strings
+- Draw any script in synthesised text through Unicode block fonts
+- Set field text in Identity-H fonts through their embedded program
+- Shape non-embedded text in complex scripts
+- Lay out synthesised text in visual order
+- --jpeg output with --jpegopt; fix --mono --png
+- Baseline TIFF writer
+- Group 3 and Group 4 encoder in the ccitt fork
+- CCITT Group 3 and Group 4 TIFF compression
+- --tiff output with --tiffcompression
+- --invert[=always|auto|never]
+- --dither halftone for --mono
+- --fax writes one TIFF Class F document
+- --fax-to NUMBER [--fax-queue NAME]
+- Bundle Bengali, Tamil, Armenian, Georgian and Ethiopic fallbacks
+- RGB to CMYK inverse and ink-to-RGB conversion
+- Per-paint channel mask for overprint
+- Parse OP, op and OPM; overprint page prescan
+- Rgb_to_ink prints neutrals in black alone
+- Colorant masks and spot slots for the ink canvas
+- Rgb_to_ink inverts the four-ink model with grey-component replacement
+- Simulate overprint on the ink canvas
+- --overprint
+- HTJ2K code-blocks decode
+- --print through the system's print service
+- --list-printers lists the CUPS queues
+
+### Other
+
+- Build the fuzz targets for the glibc target explicitly
+- Lock the fuzz crate to the 2.0.0 workspace crates
+- Run clippy on aarch64 Linux and macOS
+- Lint every platform from one job; fail on a stale fuzz lock
+- Require Rust 1.99 in every crate
+- Build the scheduled fuzz runs for the glibc target
+- Update 13 dependencies within their semver ranges
+- Check the declared Rust 1.99 floor
+- Vendor harfrust 0.12.0 as a local fork
+- Merge branch 'overprint'
+- Clippy gates the vendored forks
+- Rebase the read-fonts, skrifa and harfrust forks
+- Pin the auto traits of DecoderContext and Globals
+- Format the curtailed-decode test
+- Keep the fork out of cargo release, like the other forks
+- Parenthesise the BitsPerSample packing in the TIFF test builder
+- The fuzz lock file follows the font fork rebase; typos skips the harfrust fork
+
+### Performance
+
+- Write page files through a 64 KiB buffer
+- Initialise the page bitmap once
+- Resample unrotated images a row at a time
+- One 32-bit access per pixel in composite and soft mask
+- Convert RGB to gray in place
+- Write packed PGM data in 64 KiB slices
+- Share hinting across transformed faces; map only vertical fallbacks
+- RGB PPM written from the bitmap's rows; one netpbm row writer
+- Comic pages decode into one buffer from codec to writer
+- --mono thresholds in the luma buffer; gray page doc
+- Image XObjects drawn on several pages decode once
+- Cross-reference entries indexed by object number
+- Fills skip closed subpaths lying wholly outside the clip
+- Subpath culling costs a fill nothing when nothing is outside
+- Curves flatten against the chord, not its midpoint
+- Stroked glyphs drawn from cached coverage
+- A run of text-showing operators looks its face up once
+- CFF built-in encodings resolve through one charset walk
+- Image reduction limited to the pixels a draw can paint
+- Share a clip's path-clip list across saves
+- Keep the parsed content of a repeated form XObject
+- Convert multi-component image tuples without per-pixel allocation
+- One device submission per AA fill, scratch buffers reused
+- Map shared memory instead of staging on integrated GPUs
+- Auto initialises Vulkan only when one of its kernels is enabled
+- Fold a clip's path scanners into one past eight
+
+### Refactor
+
+- Harden the image sampler and blit after review
+- Run the CUDA fill on the backend recorder
+- Gouraud triangle spans apart from compositing
+- Page canvas over RGB or ink pixels
+- Soft-mask luminosity reads an RGB bitmap
+- Overprint review follow-ups
+- **breaking** Overprint canvas chosen at construction; session for comics
+- One source of paint parameters; overprint test cleanups
+- Font-descriptor flags in one place, descriptor resolved once
+- Share one fallible-reserve helper
+- Rename clipped_rows to clipped_span
+- Construct every decode budget explicitly
+- Derive the per-pixel image inverse from the table one
+- Move the lattice interpolation helper out of shading
+- One memo helper for the Vulkan backend and selector caches
+- Share the A/B scripts' argument and limiter set-up
+- Record every Vulkan barrier through one scope helper
+- Share Vulkan instance setup between init and check_selector
+- Decode each Vulkan kernel's SPIR-V once per compile
+- Abort_page waits on the recorded last submission
+- Use cudarc's PinnedHostSlice for CUDA host buffers
+- Share the AA fill's pixel-index, invariant and host-view helpers
+- Share the GSUB single-substitution arms through add_forms
+- Split program.rs into charmap, vertical and pens modules
+- Share TableId's lengths with the length-first check
+
+### Testing
+
+- Skip the glyph checks that need an installed face on hosts without one
+- Do not tie the block-font test to one face's tatweel width
+- Compare rgb_to_cmyk against a brute-force nearest
+- Overprint option changes gray output
+- A/B render scripts for backend and build comparisons
+- Pin which quadrilaterals fill adjustment snaps
+- Pin the text, dictionary and refinement budget charges
+- Share the image colour-conversion test helpers
+- Fail, not skip, when integrated-GPU selection breaks
+
 ## [2.0.0] - 2026-10-31
 
 ### Bug Fixes
@@ -228,6 +515,7 @@ All notable changes to this project will be documented in this file.
 - Drop package.homepage from the manifests
 - Add a typos configuration for PDF and font terms
 - Drop duplicate .gitignore entries and correct a deny.toml note
+- Release v2.0.0
 
 ### Documentation
 
@@ -285,6 +573,7 @@ All notable changes to this project will be documented in this file.
 - State ComicPages::len and list render_page_gray
 - State that the JPEG and TIFF flags are refused at startup
 - Record v2.0.0 in the release history
+- Prep v2.0.0 release notes
 
 ### Features
 
