@@ -13,7 +13,7 @@ use super::canvas::{CanvasKind, blend_u8, with_canvas};
 use super::image_compositor::ImageCompositor;
 #[cfg(feature = "cache")]
 use super::image_compositor::composite_rgba_rows;
-use super::image_reduce;
+use super::image_reduce::{self, DeviceWindow};
 use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
 use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, SoftMask};
@@ -102,10 +102,11 @@ impl PageRenderer<'_> {
         // separately, each on its own grid, and each comes with the matrix
         // that draws the resampled samples.
         let page_ctm = self.gstate.current().ctm;
+        let window = self.paintable_window();
         let reduced_mask = img
             .smask
             .as_ref()
-            .and_then(|m| image_reduce::reduce_mask_for_draw(m, &page_ctm));
+            .and_then(|m| image_reduce::reduce_mask_for_draw(m, &page_ctm, &window));
         let (mask_src, mask_ctm) = match &reduced_mask {
             Some((m, c)) => (Some(m), *c),
             None => (img.smask.as_ref(), page_ctm),
@@ -114,10 +115,10 @@ impl PageRenderer<'_> {
         // blit kernel.  A draw that reduces it takes a host copy so that it
         // is area-averaged as a host-resident image is.
         #[cfg(feature = "cache")]
-        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm);
+        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm, &window);
         #[cfg(feature = "cache")]
         let img = host_copy.as_ref().unwrap_or(img);
-        let reduced = image_reduce::reduce_for_draw(img, &page_ctm);
+        let reduced = image_reduce::reduce_for_draw(img, &page_ctm, &window);
         let (img, ctm) = match &reduced {
             Some((i, c)) => (i, *c),
             None => (img, page_ctm),
@@ -175,6 +176,22 @@ impl PageRenderer<'_> {
         }
     }
 
+    /// The device pixels an image draw can paint: the bitmap within the
+    /// clip rectangle, which bounds every path clip.
+    fn paintable_window(&self) -> DeviceWindow {
+        let clip = &self.gstate.current().clip;
+        DeviceWindow::of_bitmap_rect(
+            self.width,
+            self.height,
+            [
+                i64::from(clip.x_min_i),
+                i64::from(clip.y_min_i),
+                i64::from(clip.x_max_i) + 1,
+                i64::from(clip.y_max_i) + 1,
+            ],
+        )
+    }
+
     /// Paint the fill pattern through the stencil mask `img` sampled
     /// through `grid` (PDF §8.9.6.2: the stencil's set samples are painted
     /// with the current fill colour, here a pattern).  The pattern fills the
@@ -222,8 +239,9 @@ impl PageRenderer<'_> {
         &self,
         img: &crate::resources::ImageDescriptor,
         ctm: &Ctm,
+        window: &DeviceWindow,
     ) -> Option<crate::resources::ImageDescriptor> {
-        if !image_reduce::draw_reduces(ctm, img.width, img.height) {
+        if !image_reduce::draw_reduces(ctm, img.width, img.height, window) {
             return None;
         }
         self.host_copy(img, "a reduced draw")

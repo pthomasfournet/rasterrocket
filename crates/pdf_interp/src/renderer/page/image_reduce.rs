@@ -24,6 +24,11 @@
 //! [`REDUCTION_MARGIN`] of one sample per device pixel — keep their
 //! samples, so full-resolution and upscaled draws are untouched.
 //!
+//! On an axis-aligned draw a reduced axis produces samples only for the
+//! device pixels of a [`DeviceWindow`], the pixels the draw can paint.  A
+//! pixel's footprint does not depend on the window, so the samples inside
+//! it are those of the unwindowed resampling.
+//!
 //! The filter is separable: a vertical pass accumulates whole source rows,
 //! each scaled by its weight, into one output row, and a horizontal pass
 //! then reduces that row.  Weights are 16-bit fixed point summing to
@@ -56,7 +61,43 @@ pub(super) const AXIS_TOLERANCE: f64 = 0.5;
 /// by the sub-pixel phase of the two grids.
 pub(super) const REDUCTION_MARGIN: f64 = 1.0 / 32.0;
 
-/// Resample `img` for drawing through `ctm`.
+/// Device pixels a draw can paint: columns `x.0 .. x.1` and rows
+/// `y.0 .. y.1`, pixel indices in the device space of [`Plan::new`] (y
+/// counted up from the bottom edge), half-open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct DeviceWindow {
+    pub(super) x: (f64, f64),
+    pub(super) y: (f64, f64),
+}
+
+impl DeviceWindow {
+    /// No restriction.
+    #[cfg(test)]
+    pub(super) const UNBOUNDED: Self = Self {
+        x: (f64::NEG_INFINITY, f64::INFINITY),
+        y: (f64::NEG_INFINITY, f64::INFINITY),
+    };
+
+    /// The pixels of a `page_w × page_h` bitmap within the bitmap-space
+    /// pixel rectangle `[x0, x1) × [y0, y1)` (rows counted down from the
+    /// top edge), each edge clamped to the bitmap.
+    pub(super) fn of_bitmap_rect(page_w: u32, page_h: u32, rect: [i64; 4]) -> Self {
+        let [x0, y0, x1, y1] = rect;
+        let clamp = |v: i64, max: u32| v.clamp(0, i64::from(max));
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "edges are clamped to the bitmap, far below 2^52"
+        )]
+        let f = |v: i64| v as f64;
+        let h = f(i64::from(page_h));
+        Self {
+            x: (f(clamp(x0, page_w)), f(clamp(x1, page_w))),
+            y: (h - f(clamp(y1, page_h)), h - f(clamp(y0, page_h))),
+        }
+    }
+}
+
+/// Resample `img` for drawing through `ctm` onto the pixels of `window`.
 ///
 /// Returns the resampled image and the matrix to draw it through, or `None`
 /// — draw `img` as is through `ctm` — when the draw reduces neither axis or
@@ -65,8 +106,12 @@ pub(super) const REDUCTION_MARGIN: f64 = 1.0 / 32.0;
 /// sample is 255 minus the paint coverage of its footprint.  The result
 /// carries no mask: the caller resamples the original's mask separately
 /// with [`reduce_mask_for_draw`], on the mask's own grid.
-pub(super) fn reduce_for_draw(img: &ImageDescriptor, ctm: &Ctm) -> Option<(ImageDescriptor, Ctm)> {
-    let plan = Plan::new(ctm, img.width, img.height)?;
+pub(super) fn reduce_for_draw(
+    img: &ImageDescriptor,
+    ctm: &Ctm,
+    window: &DeviceWindow,
+) -> Option<(ImageDescriptor, Ctm)> {
+    let plan = Plan::new(ctm, img.width, img.height, window)?;
     let src = img.data.as_cpu()?;
     let out = plan.resample(src, img.color_space.bytes_per_pixel())?;
     Some((
@@ -86,15 +131,19 @@ pub(super) fn reduce_for_draw(img: &ImageDescriptor, ctm: &Ctm) -> Option<(Image
 /// either axis, so that [`reduce_for_draw`] would resample host-resident
 /// samples.
 #[cfg(feature = "cache")]
-pub(super) fn draw_reduces(ctm: &Ctm, width: u32, height: u32) -> bool {
-    Plan::new(ctm, width, height).is_some()
+pub(super) fn draw_reduces(ctm: &Ctm, width: u32, height: u32, window: &DeviceWindow) -> bool {
+    Plan::new(ctm, width, height, window).is_some()
 }
 
 /// Resample `mask` for drawing through `ctm`, as [`reduce_for_draw`] does
 /// an image: each output value is the mean alpha of its footprint, so a
 /// bilevel mask becomes the fraction of each device pixel it admits.
-pub(super) fn reduce_mask_for_draw(mask: &SoftMask, ctm: &Ctm) -> Option<(SoftMask, Ctm)> {
-    let plan = Plan::new(ctm, mask.width(), mask.height())?;
+pub(super) fn reduce_mask_for_draw(
+    mask: &SoftMask,
+    ctm: &Ctm,
+    window: &DeviceWindow,
+) -> Option<(SoftMask, Ctm)> {
+    let plan = Plan::new(ctm, mask.width(), mask.height(), window)?;
     let out = plan.resample(mask.alpha(), 1)?;
     let reduced = SoftMask::new(plan.out_w, plan.out_h, out)?.interpolated(mask.interpolate());
     Some((reduced, plan.ctm))
@@ -207,14 +256,15 @@ struct AxisPlan {
 impl AxisPlan {
     /// A reduced axis of `n` samples spanning device `origin ..
     /// origin + extent` along a device axis whose pixel edges are integers:
-    /// one output sample per device pixel whose centre the axis covers.
-    /// Unreduced when the axis has no more samples than device pixels.
+    /// one output sample per device pixel whose centre the axis covers and
+    /// whose index lies in `window`.  Unreduced when the axis has no more
+    /// samples than device pixels, or when no such pixel exists.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "pixel counts are bounded by n (checked) and pixel indices are finite"
     )]
-    fn device_aligned(n: u32, origin: f64, extent: f64) -> Option<Self> {
+    fn device_aligned(n: u32, origin: f64, extent: f64, window: (f64, f64)) -> Option<Self> {
         let unreduced = || Self {
             n,
             origin,
@@ -226,6 +276,7 @@ impl AxisPlan {
         }
         let (lo, hi) = (origin.min(origin + extent), origin.max(origin + extent));
         let (k0, k1) = ((lo - 0.5).ceil(), (hi - 0.5).ceil());
+        let (k0, k1) = (k0.max(window.0), k1.min(window.1));
         let count = k1 - k0;
         if !(count >= 1.0 && count < f64::from(n)) {
             // No pixel centre covered (the image draws nothing on this
@@ -310,7 +361,7 @@ impl Plan {
         clippy::many_single_char_names,
         reason = "a–f are the PDF matrix components"
     )]
-    fn new(ctm: &Ctm, width: u32, height: u32) -> Option<Self> {
+    fn new(ctm: &Ctm, width: u32, height: u32, window: &DeviceWindow) -> Option<Self> {
         if width == 0 || height == 0 || ctm.iter().any(|v| !v.is_finite()) {
             return None;
         }
@@ -322,8 +373,8 @@ impl Plan {
         // position t of h lies at v = 1 − t / h.
         let (cols, rows, ctm) = if b.abs() <= AXIS_TOLERANCE && c.abs() <= AXIS_TOLERANCE {
             // Columns along device x, rows along device y.
-            let cols = AxisPlan::device_aligned(width, e, a)?;
-            let rows = AxisPlan::device_aligned(height, f + d, -d)?;
+            let cols = AxisPlan::device_aligned(width, e, a, window.x)?;
+            let rows = AxisPlan::device_aligned(height, f + d, -d, window.y)?;
             let ctm = [
                 cols.extent,
                 0.0,
@@ -335,8 +386,8 @@ impl Plan {
             (cols, rows, ctm)
         } else if a.abs() <= AXIS_TOLERANCE && d.abs() <= AXIS_TOLERANCE {
             // A quarter turn: columns along device y, rows along device x.
-            let cols = AxisPlan::device_aligned(width, f, b)?;
-            let rows = AxisPlan::device_aligned(height, e + c, -c)?;
+            let cols = AxisPlan::device_aligned(width, f, b, window.y)?;
+            let rows = AxisPlan::device_aligned(height, e + c, -c, window.x)?;
             let ctm = [
                 0.0,
                 cols.extent,
@@ -531,7 +582,8 @@ mod tests {
             .collect();
         // Drawn 4 × 1 device pixels at the origin.
         let ctm = [4.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let (out, out_ctm) = reduce_for_draw(&gray(w, h, data), &ctm).expect("reduced");
+        let (out, out_ctm) =
+            reduce_for_draw(&gray(w, h, data), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         assert_eq!((out.width, out.height), (4, 1));
         assert_eq!(out.data.as_cpu().unwrap(), &[191, 191, 191, 191]);
         assert_eq!(out_ctm, [4.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -543,7 +595,8 @@ mod tests {
     fn fractional_ratio_weights_boundary_samples_by_overlap() {
         let data: Vec<u8> = vec![0, 30, 60, 90, 120, 150, 180, 210, 240, 255];
         let ctm = [3.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let (out, _) = reduce_for_draw(&gray(10, 1, data.clone()), &ctm).expect("reduced");
+        let (out, _) = reduce_for_draw(&gray(10, 1, data.clone()), &ctm, &DeviceWindow::UNBOUNDED)
+            .expect("reduced");
         let out = out.data.as_cpu().unwrap();
         let third = 10.0 / 3.0;
         for (i, &got) in out.iter().enumerate() {
@@ -565,7 +618,7 @@ mod tests {
         // x: 37 samples from device 20.3 back to 9.1 — flipped, ratio ≈ 3.3.
         // y: 23 rows from device 10.6 (top row) down to 3.7 — ratio ≈ 3.3.
         let ctm = [-11.2, 0.0, 0.0, 6.9, 20.3, 3.7];
-        let plan = Plan::new(&ctm, 37, 23).expect("plan");
+        let plan = Plan::new(&ctm, 37, 23, &DeviceWindow::UNBOUNDED).expect("plan");
         let out = plan.resample(&data, 1).expect("resampled");
         // Pixel centres covered: x 9.5 ..= 19.5 → 11 px; y 4.5 ..= 10.5 → 7 px.
         assert_eq!((plan.out_w, plan.out_h), (11, 7));
@@ -603,7 +656,12 @@ mod tests {
             color_space: ImageColorSpace::Rgb,
             ..gray(4, 1, vec![255, 0, 0, 0, 0, 255, 10, 20, 30, 30, 40, 50])
         };
-        let (out, _) = reduce_for_draw(&img, &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0]).expect("reduced");
+        let (out, _) = reduce_for_draw(
+            &img,
+            &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &DeviceWindow::UNBOUNDED,
+        )
+        .expect("reduced");
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(out.data.as_cpu().unwrap(), &[128, 0, 128, 20, 30, 40]);
     }
@@ -618,7 +676,7 @@ mod tests {
             .collect();
         // u (columns) along +y over 4 px, v along −x: rows run along +x.
         let ctm = [0.0, 4.0, -2.0, 0.0, 2.0, 0.0];
-        let plan = Plan::new(&ctm, 8, 4).expect("plan");
+        let plan = Plan::new(&ctm, 8, 4, &DeviceWindow::UNBOUNDED).expect("plan");
         let out = plan.resample(&data, 1).expect("resampled");
         assert_eq!((plan.out_w, plan.out_h), (4, 2));
         // Row t of 4 lies at device x = (2 − 2) + 2·t/4: the black top rows
@@ -633,7 +691,8 @@ mod tests {
     fn unreduced_axis_keeps_its_samples() {
         let data: Vec<u8> = (0..2u8).flat_map(|y| [y * 100; 8]).collect();
         let ctm = [2.0, 0.0, 0.0, 50.0, 0.0, 0.0];
-        let (out, out_ctm) = reduce_for_draw(&gray(8, 2, data), &ctm).expect("reduced");
+        let (out, out_ctm) =
+            reduce_for_draw(&gray(8, 2, data), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         assert_eq!((out.width, out.height), (2, 2));
         assert_eq!(out.data.as_cpu().unwrap(), &[0, 0, 100, 100]);
         assert_eq!(out_ctm, [2.0, 0.0, 0.0, 50.0, 0.0, 0.0]);
@@ -649,11 +708,28 @@ mod tests {
             [0.0, 10.0, 10.0, 0.0, 0.0, 0.0],
             [9.0, 4.4, -4.4, 9.0, 0.0, 0.0],
         ] {
-            assert!(reduce_for_draw(&img, &ctm).is_none(), "{ctm:?}");
+            assert!(
+                reduce_for_draw(&img, &ctm, &DeviceWindow::UNBOUNDED).is_none(),
+                "{ctm:?}"
+            );
         }
         let mask = SoftMask::new(10, 10, vec![0; 100]).unwrap();
-        assert!(reduce_mask_for_draw(&mask, &[6.0, 0.0, 0.0, 12.0, 0.0, 0.0]).is_some());
-        assert!(reduce_mask_for_draw(&mask, &[12.0, 0.0, 0.0, 12.0, 0.0, 0.0]).is_none());
+        assert!(
+            reduce_mask_for_draw(
+                &mask,
+                &[6.0, 0.0, 0.0, 12.0, 0.0, 0.0],
+                &DeviceWindow::UNBOUNDED
+            )
+            .is_some()
+        );
+        assert!(
+            reduce_mask_for_draw(
+                &mask,
+                &[12.0, 0.0, 0.0, 12.0, 0.0, 0.0],
+                &DeviceWindow::UNBOUNDED
+            )
+            .is_none()
+        );
     }
 
     /// A rotated draw resamples along the image's own axes to its drawn
@@ -662,7 +738,8 @@ mod tests {
     fn skewed_draw_resamples_to_its_drawn_extent() {
         let img = gray(40, 40, vec![255; 1600]);
         let ctm = [6.0, 8.0, -8.0, 6.0, 50.0, 50.0];
-        let (out, out_ctm) = reduce_for_draw(&img, &ctm).expect("reduced");
+        let (out, out_ctm) =
+            reduce_for_draw(&img, &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         assert_eq!((out.width, out.height), (10, 10));
         assert!(out.data.as_cpu().unwrap().iter().all(|&v| v == 255));
         assert_eq!(out_ctm, ctm);
@@ -676,7 +753,12 @@ mod tests {
             color_space: ImageColorSpace::Mask,
             ..gray(4, 2, vec![0, 255, 0, 0, 255, 255, 0, 0])
         };
-        let (out, _) = reduce_for_draw(&stencil, &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0]).expect("reduced");
+        let (out, _) = reduce_for_draw(
+            &stencil,
+            &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &DeviceWindow::UNBOUNDED,
+        )
+        .expect("reduced");
         assert_eq!(out.color_space, ImageColorSpace::Mask);
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(out.data.as_cpu().unwrap(), &[191, 0]);
@@ -686,10 +768,111 @@ mod tests {
     #[test]
     fn mask_reduces_to_its_mean_alpha() {
         let mask = SoftMask::new(6, 3, [[255, 0, 0, 255, 255, 255]; 3].concat()).unwrap();
-        let (out, _) =
-            reduce_mask_for_draw(&mask, &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0]).expect("reduced");
+        let (out, _) = reduce_mask_for_draw(
+            &mask,
+            &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &DeviceWindow::UNBOUNDED,
+        )
+        .expect("reduced");
         assert_eq!((out.width(), out.height()), (2, 1));
         assert_eq!(out.alpha(), &[85, 255]);
+    }
+
+    /// The sample of a `w × h` gray image drawn through `ctm` whose area
+    /// holds the centre of device pixel `(px, py)`, if any.
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "a–f are the PDF matrix components"
+    )]
+    fn sample_at(data: &[u8], (w, h): (u32, u32), ctm: &Ctm, px: f64, py: f64) -> Option<u8> {
+        let [a, b, c, d, e, f] = *ctm;
+        let det = a.mul_add(d, -b * c);
+        let (x, y) = (px + 0.5 - e, py + 0.5 - f);
+        let (u, v) = (d.mul_add(x, -c * y) / det, a.mul_add(y, -b * x) / det);
+        if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "u and v are in [0, 1)"
+        )]
+        let (col, row) = (
+            (u * f64::from(w)) as usize,
+            ((1.0 - v) * f64::from(h)) as usize,
+        );
+        Some(data[row.min(h as usize - 1) * w as usize + col])
+    }
+
+    /// A windowed reduction paints every window pixel the unwindowed one
+    /// does, with the same value, and holds no sample outside the window.
+    #[test]
+    fn windowed_reduction_matches_the_unwindowed_one_inside_the_window() {
+        let (w, h) = (97u32, 61u32);
+        let data: Vec<u8> = (0..w * h)
+            .map(|i| u8::try_from((i * 37 + i / w * 11) % 251).unwrap())
+            .collect();
+        let img = gray(w, h, data);
+        let window = DeviceWindow {
+            x: (5.0, 17.0),
+            y: (3.0, 11.0),
+        };
+        for ctm in [
+            [30.0, 0.0, 0.0, 20.0, -4.3, -2.6],
+            [-30.0, 0.0, 0.0, -20.0, 25.7, 22.2],
+            [0.0, 21.0, -33.0, 0.0, 26.4, -3.1],
+            [0.0, -21.0, 33.0, 0.0, -6.4, 19.9],
+        ] {
+            let (full, full_ctm) =
+                reduce_for_draw(&img, &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
+            let (cut, cut_ctm) = reduce_for_draw(&img, &ctm, &window).expect("reduced");
+            let full_dims = (full.width, full.height);
+            let cut_dims = (cut.width, cut.height);
+            assert!(cut.width * cut.height < full.width * full.height, "{ctm:?}");
+            let (full, cut) = (full.data.as_cpu().unwrap(), cut.data.as_cpu().unwrap());
+            let mut painted = 0;
+            for py in -2..25 {
+                for px in -2..30 {
+                    let (x, y) = (f64::from(px), f64::from(py));
+                    let inside = (window.x.0..window.x.1).contains(&x)
+                        && (window.y.0..window.y.1).contains(&y);
+                    let got = sample_at(cut, cut_dims, &cut_ctm, x, y);
+                    if inside {
+                        let want = sample_at(full, full_dims, &full_ctm, x, y);
+                        assert_eq!(got, want, "{ctm:?} pixel ({px}, {py})");
+                        painted += usize::from(got.is_some());
+                    } else {
+                        assert_eq!(got, None, "{ctm:?} pixel ({px}, {py})");
+                    }
+                }
+            }
+            assert!(painted > 0, "{ctm:?}");
+        }
+    }
+
+    /// A window that holds none of the drawn pixels leaves the draw as it
+    /// was: unreduced, for the clip to discard.
+    #[test]
+    fn window_missing_the_draw_does_not_reduce() {
+        let img = gray(40, 40, vec![0; 1600]);
+        let window = DeviceWindow {
+            x: (100.0, 120.0),
+            y: (0.0, 10.0),
+        };
+        assert!(reduce_for_draw(&img, &[10.0, 0.0, 0.0, 10.0, 0.0, 0.0], &window).is_none());
+    }
+
+    /// Bitmap rows count down from the top edge; window rows count up.
+    #[test]
+    fn bitmap_rect_converts_to_device_rows_and_clamps() {
+        let w = DeviceWindow::of_bitmap_rect(100, 50, [-3, 10, 40, 60]);
+        assert_eq!(
+            w,
+            DeviceWindow {
+                x: (0.0, 40.0),
+                y: (0.0, 40.0),
+            }
+        );
     }
 
     /// Weights of every output sum to exactly one, whatever the ratio.
