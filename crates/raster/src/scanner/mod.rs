@@ -61,6 +61,17 @@ fn fp_column(fp: i64) -> i32 {
     i32::try_from(fp >> 16).unwrap_or(if fp < 0 { i32::MIN } else { i32::MAX })
 }
 
+/// Period, in rows counted from a sloped segment's first row, at which its
+/// fixed-point accumulator is recomputed from f64.  Counting from the
+/// segment's own first row keeps a row's value a function of the segment and
+/// the row alone, so integer translations of the geometry translate the spans
+/// exactly.
+///
+/// Stepping by the rounded slope drifts by at most 2⁻¹⁷ px per row, so an
+/// edge's position on any row is within `REANCHOR_ROWS`·2⁻¹⁷ px (1/32 px) plus
+/// one 2⁻¹⁶ conversion of the exact value, whatever the segment's length.
+const REANCHOR_ROWS: i32 = 4096;
+
 // ── Intersect ─────────────────────────────────────────────────────────────────
 
 /// One intersection entry for a scanline.
@@ -647,11 +658,11 @@ fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]
 /// so `row_start[i] + cursors[i]` is the next free slot for row `i`.
 ///
 /// Sloped segments use a 48.16 fixed-point integer accumulator (`xx1_fp += dxdy_fp`)
-/// for the per-scanline step.  The accumulator is initialised from f64 at the
-/// segment's first row, then stepped by the pre-computed slope — no f64
-/// arithmetic in the inner loop; rows above the clip are skipped by one
-/// multiply, landing on the value stepping would reach.  Its range covers
-/// every coordinate a page bitmap holds, antialiased included.
+/// for the per-scanline step.  The accumulator is set from f64 at the
+/// segment's first row and every [`REANCHOR_ROWS`] rows after it, then stepped by the pre-computed slope; rows above the
+/// clip are skipped by one multiply from the nearest anchor, landing on the
+/// value stepping would reach.  Its range covers every coordinate a page
+/// bitmap holds, antialiased included.
 fn fill_intersections(
     xpath: &XPath,
     y_min: i32,
@@ -702,28 +713,37 @@ fn fill_intersections(
             let fp_clamp_max = fp_from_f64(sloped_x_max);
 
             // 48.16 fixed-point accumulator for the right edge of each span:
-            // initialised from f64 at the bottom of the segment's own first
-            // row, then stepped by `dxdy_fp` (integer add) per scanline.  The
-            // value at a row depends only on the segment and the row, never
-            // on the clip's first row, so a translated copy of the geometry
-            // yields translated spans wherever the clip starts.
+            // set from f64 at the segment's first row and every
+            // `REANCHOR_ROWS` rows after it, stepped by `dxdy_fp` (integer
+            // add) in between.  The value at a row depends only on
+            // the segment and the row, never on the clip's first row, so a
+            // translated copy of the geometry yields translated spans
+            // wherever the clip starts.
             let first_row = floor_i32(seg_y_min);
-            let first_xx1_fp = fp_from_f64((f64::from(first_row) + 1.0).mul_add(seg.dxdy, x_base));
-            // The accumulator after `n` steps from the first row; stepping
-            // saturates, so the jump saturates alike.
-            let xx1_after = |n: i64| n.saturating_mul(seg.dxdy_fp).saturating_add(first_xx1_fp);
+            // Rows since the last anchor at or above `row` (`row ≥ first_row`):
+            // the low bits of the difference, exact even when it wraps.
+            let stepped = |row: i32| row.wrapping_sub(first_row) & (REANCHOR_ROWS - 1);
+            let xx1_at = |row: i32| {
+                let n = stepped(row);
+                let anchored = fp_from_f64((f64::from(row - n) + 1.0).mul_add(seg.dxdy, x_base));
+                i64::from(n)
+                    .saturating_mul(seg.dxdy_fp)
+                    .saturating_add(anchored)
+            };
 
             // The span on the first row drawn starts at the segment's end
             // point, or where the previous row's span ended.
-            let skipped = i64::from(row_y0) - i64::from(first_row);
-            let mut px0 = if skipped > 0 {
-                fp_column(xx1_after(skipped - 1).clamp(fp_clamp_min, fp_clamp_max))
+            let mut px0 = if row_y0 > first_row {
+                fp_column(xx1_at(row_y0 - 1).clamp(fp_clamp_min, fp_clamp_max))
             } else {
                 floor_i32(seg.x0.clamp(sloped_x_min, sloped_x_max))
             };
-            let mut xx1_fp = xx1_after(skipped.max(0));
+            let mut xx1_fp = xx1_at(row_y0);
 
             for row in row_y0..=row_y1 {
+                if stepped(row) == 0 {
+                    xx1_fp = xx1_at(row);
+                }
                 let xx1_fp_clamped = xx1_fp.clamp(fp_clamp_min, fp_clamp_max);
                 let px1 = fp_column(xx1_fp_clamped);
                 let c = if seg_y_min < f64::from(row) { count } else { 0 };
@@ -859,7 +879,7 @@ mod tests {
         let mut state = 0x2545_f491_u32;
         let mut next = || {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            f64::from(state >> 8) / f64::from(1u32 << 24) * 4000.0
+            (f64::from(state >> 8) / f64::from(1u32 << 24)).mul_add(14_000.0, -5000.0)
         };
         let mut b = PathBuilder::new();
         for _ in 0..40 {
@@ -869,16 +889,45 @@ mod tests {
             b.close(false).unwrap();
         }
         let xpath = XPath::new(&b.build(), &identity(), 1.0, true);
-        let full = XPathScanner::new(&xpath, false, 0, 4000);
-        for first in (1..4000).step_by(97) {
-            let part = XPathScanner::new(&xpath, false, first, 4000);
-            for y in first..=4000 {
+        // Edges span up to 14 000 rows, so several re-anchor along the way.
+        let full = XPathScanner::new(&xpath, false, -5000, 9000);
+        for first in (-4999..9000).step_by(293) {
+            let part = XPathScanner::new(&xpath, false, first, 9000);
+            for y in first..=9000 {
                 assert_eq!(
                     spans(&part, y),
                     spans(&full, y),
                     "row {y} of a scanner starting at row {first}"
                 );
             }
+        }
+    }
+
+    /// A sloped edge that starts 10⁶ rows above the scanned range lands
+    /// within [`REANCHOR_ROWS`]·2⁻¹⁷ px (plus one conversion) of its exact
+    /// position on every scanned row, whatever the slope's rounding error.
+    #[test]
+    fn a_distant_edge_start_does_not_drift() {
+        // 0.49 units of 2⁻¹⁶ per row: the slope rounds to 0, the worst case.
+        let dxdy = 0.49 / 65536.0;
+        let (top, bottom) = (-1.0e6, 1000.0);
+        let x_bottom = (bottom - top) * dxdy;
+        let mut b = PathBuilder::new();
+        b.move_to(0.0, top).unwrap();
+        b.line_to(x_bottom, bottom).unwrap();
+        b.line_to(500.0, bottom).unwrap();
+        b.line_to(500.0, top).unwrap();
+        b.close(false).unwrap();
+        let xpath = XPath::new(&b.build(), &identity(), 1.0, true);
+        let scanner = XPathScanner::new(&xpath, false, 0, 999);
+        for y in 0..1000 {
+            // The span's left column is the edge's x at the row's top.
+            let exact = (f64::from(y) - top) * dxdy;
+            let x0 = scanner.row(y)[0].x0;
+            assert!(
+                (f64::from(x0) - exact.floor()).abs() <= 1.0,
+                "row {y}: span starts at {x0}, edge at {exact}"
+            );
         }
     }
 

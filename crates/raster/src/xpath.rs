@@ -92,9 +92,10 @@ pub struct XPathSeg {
     /// Slope in 48.16 fixed-point: `(dxdy * 65536.0).round()`, saturated.
     ///
     /// Used by the scanner's incremental x-accumulator: `xx_fp += dxdy_fp` per
-    /// scanline.  The rounding error is at most 2⁻¹⁷ pixel per scanline, so
-    /// under one pixel over the 32 768 rows (×4 under antialiasing) of the
-    /// tallest page.
+    /// scanline.  The scanner recomputes the accumulator from f64 every 4096
+    /// rows counted from the segment's first row, so an edge's position on any
+    /// row is within 1/32 pixel (plus one 2⁻¹⁶ conversion) of the exact value,
+    /// however far above the scanned range the segment starts.
     pub dxdy_fp: i64,
     /// Orientation and flip flags; see [`XPathFlags`] for the set of valid bits.
     pub flags: XPathFlags,
