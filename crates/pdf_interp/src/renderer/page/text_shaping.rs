@@ -110,8 +110,10 @@ const fn class(c: char) -> Option<Class> {
 /// Empty unless `face` is a substitute that knows its codes' characters.
 ///
 /// A run is left glyph by glyph when its face is not an sfnt, when a
-/// shaped glyph has no selector, or when shaping yields `.notdef`, which a
-/// per-code fallback may still draw; the last two are logged at `debug`.
+/// shaped glyph has no selector, when shaping yields `.notdef`, which a
+/// per-code fallback may still draw, or when the shaper reads no font from
+/// the program, refuses the run or exceeds its limits.  The middle two are
+/// logged at `debug`, the last three at `warn`.
 pub(super) fn shaped_runs<'f>(
     face: &PageFace,
     codes: &[DecodedCode],
@@ -195,7 +197,7 @@ fn shape(
             log::debug!("shaping {text:?}: {e}; drawn glyph by glyph");
             None
         }
-        Err(e @ ShapeError::Shaper) => {
+        Err(e @ (ShapeError::NoShaperFont | ShapeError::Refused(_) | ShapeError::Exhausted)) => {
             log::warn!("shaping {text:?}: {e}; drawn glyph by glyph");
             None
         }
