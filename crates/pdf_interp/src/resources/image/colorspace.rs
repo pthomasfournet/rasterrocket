@@ -1579,35 +1579,20 @@ mod tests {
             (9, "{ pop pop pop pop pop }"),
         ];
         for (n, program) in cases {
-            let (doc, cs) = devicen_cmyk(usize::from(n), program);
+            let width = usize::from(n);
+            let (doc, cs) = devicen_cmyk(width, program);
             let space = crate::resources::colorspace::resolve(&doc, &cs);
             // 3000 pixels over 1000 distinct tuples: repeats, and more
             // tuples than the smallest cache has slots.
-            let mut state = 0x2545_f491_u32;
-            let tuples: Vec<Vec<u8>> = (0..1000)
-                .map(|_| {
-                    (0..n)
-                        .map(|_| {
-                            state ^= state << 13;
-                            state ^= state >> 17;
-                            state ^= state << 5;
-                            state.to_le_bytes()[0]
-                        })
-                        .collect()
-                })
-                .collect();
+            let tuples = noise(width, 1000);
             let data: Vec<u8> = (0..3000)
-                .flat_map(|i| tuples[i * 7 % 1000].clone())
+                .flat_map(|i| tuples[i * 7 % 1000 * width..][..width].to_vec())
                 .collect();
             let img = convert(&doc, cs, &[], Layout::Color(n), &data);
             assert_eq!(img.color_space, ImageColorSpace::Rgb);
             let px = img.data.as_cpu().unwrap();
-            for (i, tuple) in data.chunks_exact(usize::from(n)).enumerate() {
-                let comps: Vec<f64> = tuple
-                    .iter()
-                    .map(|&s| decoded_sample(s, (0.0, 1.0), 255.0))
-                    .collect();
-                let want = space.convert_to_rgb(&doc, &comps);
+            for (i, tuple) in data.chunks_exact(width).enumerate() {
+                let want = exact(&doc, &space, tuple);
                 assert_eq!(px[i * 3..i * 3 + 3], want, "n = {n}, pixel {i}: {tuple:?}");
             }
         }
