@@ -236,6 +236,55 @@ pub fn aa_scanner(
     (!scanner.is_empty()).then_some(scanner)
 }
 
+/// Antialiased coverage of the device-space `xpath` over the pixels
+/// `[0, width) × [0, height)` under the non-zero winding rule.
+///
+/// The result holds `width × height` bytes, row-major, each the
+/// gamma-mapped shape an antialiased [`fill`] of the same outline
+/// composites at that pixel.  Placed at an integer pixel offset and
+/// composited as an 8-bit glyph, the coverage reproduces such a fill under
+/// a clip it lies wholly inside.
+///
+/// # Panics
+///
+/// Panics if `height × AA_SIZE` overflows `i32`.
+#[must_use]
+pub fn aa_coverage(mut xpath: XPath, width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut coverage = vec![0u8; w * h];
+    if w == 0 || h == 0 {
+        return coverage;
+    }
+    xpath.aa_scale();
+    let aa_rows = i32::try_from(height)
+        .ok()
+        .and_then(|h| h.checked_mul(AA_SIZE))
+        .expect("coverage height overflows the AA row range");
+    let scanner = XPathScanner::new(&xpath, false, 0, aa_rows - 1);
+    if scanner.is_empty() {
+        return coverage;
+    }
+    let mut aa_buf = AaBuf::new(w);
+    for (y, row) in (0..).zip(coverage.chunks_exact_mut(w)) {
+        let (mut x0, mut x1) = (0, 0);
+        scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
+        if x0 > x1 {
+            continue;
+        }
+        let rows = [
+            aa_buf.row_slice(0),
+            aa_buf.row_slice(1),
+            aa_buf.row_slice(2),
+            aa_buf.row_slice(3),
+        ];
+        simd::aa_coverage_span(rows, 0, row);
+        // The gamma map reports whether any pixel is covered; an uncovered
+        // row stays zero either way.
+        let _ = simd::apply_aa_gamma(row);
+    }
+    coverage
+}
+
 // ── Span drawing helpers ──────────────────────────────────────────────────────
 
 /// Emit one composited output pixel row from the 4-row `AaBuf`.
@@ -411,6 +460,39 @@ mod tests {
     /// it did, output row `y` was composited from the coverage of row
     /// `y * AA_SIZE + 3`, squashing every fill into the top quarter of its own
     /// bounding box.
+    /// The coverage of an outline is the shape an antialiased fill of it
+    /// composites: white filled onto black carries the shape byte as is.
+    #[test]
+    fn aa_coverage_matches_an_aa_fill() {
+        let mut b = PathBuilder::new();
+        b.move_to(1.3, 0.6).unwrap();
+        b.line_to(10.7, 3.2).unwrap();
+        b.line_to(4.1, 9.4).unwrap();
+        b.close(false).unwrap();
+        let path = b.build();
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(12, 10, 1, false);
+        fill::<Rgb8>(
+            &mut bmp,
+            &make_clip(12, 10),
+            &path,
+            &simple_pipe(),
+            &PipeSrc::Solid(&[255, 255, 255]),
+            &identity_matrix(),
+            0.1,
+            true,
+        );
+        let filled: Vec<u8> = (0..10)
+            .flat_map(|y| bmp.row(y).iter().map(|p| p.r))
+            .collect();
+        let xpath = XPath::new(&path, &identity_matrix(), 0.1, true);
+        let coverage = aa_coverage(xpath, 12, 10);
+        assert!(
+            coverage.iter().any(|&v| v > 0 && v < 255),
+            "edges are partial"
+        );
+        assert_eq!(coverage, filled);
+    }
+
     #[test]
     fn aa_fill_rect_lands_on_its_own_geometry() {
         const W: u32 = 64;

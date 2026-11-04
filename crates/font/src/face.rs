@@ -388,7 +388,8 @@ fn compose(outer: Affine, inner: Affine) -> Affine {
 }
 
 /// `x_scale` in `(0, 1]` as a [`GlyphKey::x_scale`] value.
-fn quantise_scale(x_scale: f64) -> u16 {
+#[must_use]
+pub fn quantise_scale(x_scale: f64) -> u16 {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,

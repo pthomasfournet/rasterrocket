@@ -9,15 +9,19 @@ use super::text_ops::{
     translate_text_y,
 };
 use super::text_shaping::{Drawn, shaped_runs};
+use super::text_stroke::GlyphStroke;
 use crate::resources::cmap::DecodedCode;
 use crate::resources::font::CidEncoding;
-use font::face::FontFace;
+use font::face::{FontFace, quantise_scale};
+use font::key::{FaceId, GlyphKey};
 use raster::Clip;
 use raster::pipe::PipeState;
+use raster::types::BlendMode;
 use raster::{
     glyph::{GlyphBitmap, fill_glyph},
     pipe::PipeSrc,
 };
+use std::sync::Arc;
 
 /// The top-left and bottom-right corners of the bitmaps of `records`, as
 /// [`fill_glyph`] places them: a bitmap's left edge lies `x_off` pixels left
@@ -156,6 +160,22 @@ impl PageRenderer<'_> {
         // A pattern fill colour paints through the path fill, which resolves
         // the pattern once over the union of the glyph outlines.
         let pattern_fill = do_fill && self.gstate.current().fill_pattern.is_some();
+        // The stroke as per-glyph cached coverage, when the graphics state
+        // admits it; the glyph strokes drawn from that coverage; and the
+        // cache identifier of each stroked face of the run.
+        let glyph_stroke = if do_stroke {
+            GlyphStroke::new(
+                self.gstate.current(),
+                &self.device_matrix(),
+                self.vector_antialias,
+            )
+        } else {
+            None
+        };
+        let stroke_key = glyph_stroke.as_ref().map(GlyphStroke::key);
+        let mut stroke_records: Vec<GlyphRecord> = Vec::new();
+        let mut stroked_ids: Vec<((FaceId, bool), FaceId)> = Vec::new();
+        let document_fonts = Arc::clone(self.font_cache.document_fonts());
 
         {
             // Trm[2×2] = [Tfs×Th 0 0 Tfs] × Tm[2×2] × CTM[2×2] — the text
@@ -195,7 +215,6 @@ impl PageRenderer<'_> {
             let fill_as_path =
                 do_fill && face.is_some_and(|f| pattern_fill || f.prefers_path_fill());
             let fill_as_bitmap = do_fill && !fill_as_path;
-            let need_outline = do_clip || do_stroke || fill_as_path;
 
             let cid_enc = descriptor.cid_encoding.as_ref();
             // Vertical writing mode (PDF §9.7.4.3): a composite font whose
@@ -275,19 +294,50 @@ impl PageRenderer<'_> {
                         bitmap,
                     });
                 }
-                if !need_outline {
+                // The glyph outline relative to the pen, in device pixels
+                // with Trm applied, y up.
+                let outline = || {
+                    if by_gid {
+                        face.glyph_path_by_gid_fitted(gid, x_scale)
+                    } else {
+                        face.glyph_path_fitted(char_code_for_path, x_scale)
+                    }
+                };
+                let stroked = glyph_stroke
+                    .as_ref()
+                    .zip(stroke_key)
+                    .and_then(|(stroke, key)| {
+                        let id = if let Some(&(_, id)) =
+                            stroked_ids.iter().find(|(k, _)| *k == (face.id, by_gid))
+                        {
+                            id
+                        } else {
+                            let id = document_fonts.stroked_face_id(face.id, by_gid, key);
+                            stroked_ids.push(((face.id, by_gid), id));
+                            id
+                        };
+                        let selector = if by_gid { gid } else { char_code_for_path };
+                        let key = GlyphKey::new(id, selector, face.size_px, x_frac, true)
+                            .condensed(quantise_scale(x_scale));
+                        glyph_cache.get_or_render(key, || stroke.coverage(&outline()?, x_frac))
+                    });
+                // A glyph whose stroke has no cached coverage strokes with
+                // the outline of the run.
+                let stroke_path = do_stroke && stroked.is_none();
+                if let Some(bitmap) = stroked {
+                    stroke_records.push(GlyphRecord {
+                        pen_x,
+                        pen_y,
+                        bitmap,
+                    });
+                }
+                if !(do_clip || stroke_path || fill_as_path) {
                     return;
                 }
-                // The glyph outline in device space.  `glyph_path`
-                // returns pixels relative to the pen position with Trm
-                // applied, y up; translate by the exact x and the bitmap's
-                // row and flip y (device y is positive-down).
-                let outline = if by_gid {
-                    face.glyph_path_by_gid_fitted(gid, x_scale)
-                } else {
-                    face.glyph_path_fitted(char_code_for_path, x_scale)
-                };
-                let Some(mut path) = outline else {
+                // The glyph outline in device space: translated by the
+                // exact x and the bitmap's row, y flipped (device y is
+                // positive-down).
+                let Some(mut path) = outline() else {
                     return;
                 };
                 let py = f64::from(pen_y);
@@ -298,7 +348,7 @@ impl PageRenderer<'_> {
                 if do_clip {
                     clip_outline.append(&path);
                 }
-                if do_stroke {
+                if stroke_path {
                     stroke_outline.append(&path);
                 }
                 if fill_as_path {
@@ -465,6 +515,21 @@ impl PageRenderer<'_> {
                 }
             });
         }
+        // The cached strokes are one opaque object in the normal blend mode
+        // under the soft mask in effect.
+        if !stroke_records.is_empty() && !self.gstate.current().stroke_paints_nothing() {
+            let stroke_color = self.gstate.current().painted_stroke_color();
+            let stroke_bytes = stroke_color.bytes_for(self.canvas.kind().mode());
+            let clip = self.gstate.current().clip.clone_shared();
+            let paint = self.solid_paint(true, &stroke_color, u8::MAX, BlendMode::Normal);
+            let pipe = paint.pipe();
+            let src = PipeSrc::Solid(stroke_bytes);
+            let region =
+                PixelRect::around(glyph_corners(&stroke_records), 1.0, self.width, self.height);
+            self.paint_object(region, u8::MAX, |r| {
+                r.blit_glyph_records(&stroke_records, &clip, &pipe, &src);
+            });
+        }
         // The stroke parameters are user-space quantities under the CTM, as
         // for any stroked path (PDF §8.4.3.2); the text matrix and font size
         // scale the outline but not the line width.
@@ -577,6 +642,24 @@ mod tests {
             let content = format!("/Hidden gs BT /F1 24 Tf {mode} Tr 4 8 Td (AB) Tj ET");
             assert_eq!(dark_pixels(content.as_bytes()), 0, "mode {mode}");
         }
+    }
+
+    /// A stroke drawn from cached per-glyph coverage covers what the
+    /// stroke of the run's outline covers, to within the quarter-pixel
+    /// placement of the glyphs.  A dash cycle far below a pixel strokes
+    /// solid but keeps the stroke off the cache.
+    #[test]
+    fn a_cached_glyph_stroke_matches_the_outline_stroke() {
+        let run = |dash: &str| {
+            let content = format!("{dash} 0.8 w BT /F1 24 Tf 1 Tr 4 8 Td (AB) Tj ET");
+            dark_pixels(content.as_bytes())
+        };
+        let (cached, outline) = (run("[] 0 d"), run("[0.001] 0 d"));
+        assert!(outline > 40, "the outline stroke paints: {outline}");
+        assert!(
+            cached.abs_diff(outline) * 20 <= outline,
+            "cached {cached} vs outline {outline}"
+        );
     }
 
     /// The glyphs of every text-showing operator of a text object in a

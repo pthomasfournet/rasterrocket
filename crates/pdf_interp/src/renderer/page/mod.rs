@@ -77,6 +77,7 @@ mod soft_mask;
 mod text;
 mod text_ops;
 mod text_shaping;
+mod text_stroke;
 mod type3;
 mod view;
 mod xobject;

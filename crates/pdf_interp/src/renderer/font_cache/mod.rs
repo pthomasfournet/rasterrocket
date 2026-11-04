@@ -177,7 +177,15 @@ pub struct DocumentFonts {
     face_ids: Arc<FaceIds>,
     /// Glyph bitmaps of every face made for the document.
     glyphs: GlyphCache,
+    /// The identifier under which the stroked glyphs of a face are cached,
+    /// by face, selector kind and stroke.
+    stroked: Mutex<HashMap<StrokedFace, FaceId>>,
 }
+
+/// A face's glyphs under one stroke: the face, whether its glyphs are
+/// selected by glyph index (`true`) or by code, and the bit patterns of the
+/// stroke's parameters.
+type StrokedFace = (FaceId, bool, [u64; 9]);
 
 impl Default for DocumentFonts {
     /// A store drawing substitutes from the standard font directories.
@@ -197,7 +205,21 @@ impl DocumentFonts {
             library: FontLibrary::shared(font_dirs, system_fonts),
             face_ids: Arc::default(),
             glyphs: GlyphCache::default(),
+            stroked: Mutex::default(),
         }
+    }
+
+    /// The identifier under which the coverage of the glyphs of the face
+    /// `face`, selected by glyph index when `by_gid` and by code otherwise,
+    /// stroked with the parameters whose bit patterns are `stroke`, is
+    /// cached in the document's glyph cache; one per document, face,
+    /// selector kind and stroke.
+    #[must_use]
+    pub(crate) fn stroked_face_id(&self, face: FaceId, by_gid: bool, stroke: [u64; 9]) -> FaceId {
+        let mut stroked = self.stroked.lock().unwrap_or_else(PoisonError::into_inner);
+        *stroked
+            .entry((face, by_gid, stroke))
+            .or_insert_with(|| self.face_ids.next())
     }
 
     /// The entry of the font dictionary `id`, created empty on first use.
