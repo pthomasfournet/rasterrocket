@@ -125,29 +125,34 @@ static CHECKED: Mutex<Vec<(String, Result<(), InitError>)>> = Mutex::new(Vec::ne
 /// unavailable Vulkan is not a selection error: `Auto` falls through then
 /// as it does when it opens Vulkan.
 fn checked_selector(selector: &str) -> Result<(), InitError> {
-    let mut cache = CHECKED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, result)) = cache.iter().find(|(key, _)| key == selector) {
-        return result.clone();
-    }
-    let result = parse_selector(Some(selector))
-        .and_then(|parsed| {
-            VulkanBackend::check_selector(&parsed.expect("Some selector parses to Some"))
-        })
-        .map_err(InitError::from);
-    cache.push((selector.to_owned(), result.clone()));
-    result
+    memo(&CHECKED, selector.to_owned(), || {
+        selector
+            .parse::<DeviceSelector>()
+            .and_then(|parsed| VulkanBackend::check_selector(&parsed))
+            .map_err(InitError::from)
+    })
 }
 
 /// Look up or construct the backend for `selector`.  The lock is held
 /// across construction so concurrent first sessions build one device.
 fn cached_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
-    let mut cache = BACKENDS.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, result)) = cache.iter().find(|(key, _)| key.as_deref() == selector) {
-        return result.clone();
+    memo(&BACKENDS, selector.map(str::to_owned), || {
+        construct(selector)
+    })
+}
+
+/// The value `cache` holds for `key`, computed by `make` and retained on
+/// first use.  The lock is held across `make`, so concurrent first callers
+/// compute it once; a poisoned lock is taken over, since every entry is
+/// pushed whole.
+fn memo<K: PartialEq, T: Clone>(cache: &Mutex<Vec<(K, T)>>, key: K, make: impl FnOnce() -> T) -> T {
+    let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, value)) = cache.iter().find(|(k, _)| *k == key) {
+        return value.clone();
     }
-    let result = construct(selector);
-    cache.push((selector.map(str::to_owned), result.clone()));
-    result
+    let value = make();
+    cache.push((key, value.clone()));
+    value
 }
 
 fn construct(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
