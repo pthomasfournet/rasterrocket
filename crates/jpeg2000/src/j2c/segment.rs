@@ -342,6 +342,11 @@ pub(crate) fn ht_segment_id(last_pass: u8) -> u8 {
     2 * (last_pass / 3) + u8::from(!last_pass.is_multiple_of(3))
 }
 
+// The HT segment reader below follows the packet-header parsing of
+// OpenHTJ2K (source/core/coding/coding_units.cpp):
+// Copyright (c) 2019 - 2026, Osamu Watanabe. All rights reserved.
+// Distributed under the BSD 3-Clause licence; see LICENSE-BSD-3-HT-SEGMENTS.
+
 /// Read the codeword segment lengths of `added` HT coding passes that
 /// follow `previous` passes of `code_block` (ISO/IEC 15444-15, B.3), and
 /// push their segments.

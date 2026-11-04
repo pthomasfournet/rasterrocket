@@ -39,6 +39,9 @@ unchanged.
 - `j2c/segment.rs`: HT codeword segments (B.3 of 15444-15): placeholder
   passes until a cleanup segment carries data, then a cleanup segment and
   a refinement segment per HT set, with their length signalling.
+  The reader follows the packet-header parsing of OpenHTJ2K; its BSD
+  3-clause notice precedes `read_ht_segments` and is in
+  `LICENSE-BSD-3-HT-SEGMENTS`.
 - `j2c/decode.rs`: an HT code-block decodes the last HT set whose cleanup
   segment carries data, a later set superseding the earlier ones.
 - `j2c/codestream.rs`: the CAP and CPF markers are skipped; code-block
