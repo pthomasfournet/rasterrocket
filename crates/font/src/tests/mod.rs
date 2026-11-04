@@ -326,9 +326,9 @@ fn corrupted_programs_do_not_panic() {
     }
 }
 
-/// Glyph names resolve to Unicode through the Adobe Glyph List (version
-/// 2.0, which carries no Zapf Dingbats `aN` name) and the `uni` / `u`
-/// conventions; a `.variant` suffix is ignored.
+/// Glyph names resolve to Unicode through the Adobe Glyph List, the ITC
+/// Zapf Dingbats names (`aN`) and the `uni` / `u` conventions; a
+/// `.variant` suffix is ignored.
 #[test]
 fn glyph_names_resolve_to_unicode() {
     use crate::glyph_name_to_unicode;
@@ -336,7 +336,7 @@ fn glyph_names_resolve_to_unicode() {
     assert_eq!(glyph_name_to_unicode("alpha"), Some(0x3B1));
     assert_eq!(glyph_name_to_unicode("therefore"), Some(0x2234));
     assert_eq!(glyph_name_to_unicode("arrowright"), Some(0x2192));
-    assert_eq!(glyph_name_to_unicode("a1"), None);
+    assert_eq!(glyph_name_to_unicode("a1"), Some(0x2701));
     assert_eq!(glyph_name_to_unicode("afii57415"), Some(0x627));
     assert_eq!(glyph_name_to_unicode("uni20AC"), Some(0x20AC));
     assert_eq!(glyph_name_to_unicode("u1F600"), Some(0x1F600));

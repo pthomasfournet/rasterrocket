@@ -56,9 +56,9 @@ pub mod sfnt_info;
 
 /// The Unicode scalar value a glyph name denotes.
 ///
-/// The name may be an Adobe Glyph List name (`alpha`, `a1`, `therefore`),
-/// a `uniXXXX` name or a `uXXXX[XX]` name; a `.variant` suffix is
-/// ignored.  `None` for a name that denotes no single character.
+/// The name may be an Adobe Glyph List or ITC Zapf Dingbats name (`alpha`,
+/// `therefore`, `a1`), a `uniXXXX` name or a `uXXXX[XX]` name; a `.variant`
+/// suffix is ignored.  `None` for a name that denotes no single character.
 #[must_use]
 pub fn glyph_name_to_unicode(name: &str) -> Option<u32> {
     read_fonts::ps::agl::name_to_char(name).map(u32::from)

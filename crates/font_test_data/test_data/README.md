@@ -54,6 +54,11 @@ The pattern ends with a single `-`.
 ## test font sources
 Describes the provenance, usage and generation procedures for font data used for testing.
 
+* _negative_var_advances_
+  * source: synthetic font, described in `ttx/negative_var_advances.ttx`
+  * usage: negative and fractional advances from HVAR, VVAR and gvar
+  * generation: `ttx --no-recalc-timestamp -o ttf/negative_var_advances.ttf ttx/negative_var_advances.ttx`
+
 * _notoseriftc_autohint_metrics_
   * font: Noto Serif Traditional Chinese Regular
   * source: https://fonts.google.com/noto/specimen/Noto+Serif+TC
@@ -130,6 +135,21 @@ Describes the provenance, usage and generation procedures for font data used for
     ```shell
     pyftsubset cousine-regular.ttf --gids=85
     ```
+* _mplus1code_vertical_subset_
+  * font: M PLUS 1 Code
+  * source: https://fonts.google.com/specimen/M+PLUS+1+Code
+  * license: [Open Font License][OFL]
+  * usage: testing varied vertical advances, in both the `VVAR` and `gvar`
+    paths. Of the fonts surveyed this is the only one whose `gvar` moves a
+    vertical advance at all: it varies the bottom phantom point without the
+    top, so the two disagree about the advance where `VVAR` says it does not
+    move. `VVAR` wins when present, and withholding it drives the phantom
+    point path.
+  * subset: one composite glyph and the component carrying its metrics
+    ```shell
+    pyftsubset "MPLUS1Code[wght].ttf" --gids=0,2 --drop-tables+=DSIG,GPOS,GSUB,STAT,gasp
+    ```
+
 * _cmap6_
   * font: Hand rolled cmap 6 subtable
   * usage: testing cmap format 6 mapping and iteration
@@ -137,6 +157,35 @@ Describes the provenance, usage and generation procedures for font data used for
 * _cmap10_
   * font: Hand rolled cmap 10 subtable
   * usage: testing cmap format 10 mapping and iteration
+
+* _tofu_
+  * font: Tofu
+  * source: https://github.com/googlefonts/tofu
+  * license: [Apache 2][Apache2]
+  * usage: testing cmap format 13
+  * subset: manually subset to ASCII to reduce ttx size
+
+* _LastResortHE-Regular_
+  * font: Last Resort High-Efficiency 18.000
+  * source: https://github.com/unicode-org/last-resort-font/releases/tag/18.000
+  * license: [Open Font License][OFL]
+  * usage: testing selection of a Unicode encoding 6 format 13 cmap over an
+    empty Windows encoding 1 format 4 cmap
+
+* _noto_color_emoji_flags_
+  * font: Noto Color Emoji
+  * source: https://fonts.google.com/noto/specimen/Noto+Color+Emoji
+  * license: [Open Font License][OFL]
+  * usage: testing COLRv1 paint traversal with high node counts; the Ecuador
+    and El Salvador flags have the most complex paint graphs in the font,
+    requiring ~6700 nodes
+  * subset: the Ecuador (`glyph01852`) and El Salvador (`glyph01986`) flag
+    glyphs, their COLRv1 paint graph dependencies, and the regional indicator
+    glyphs needed to keep the GSUB ligature lookups. The `SVG `, `vhea` and
+    `vmtx` tables are dropped as they are not needed for testing COLRv1.
+    ```shell
+    pyftsubset NotoColorEmoji-Regular.ttf --glyphs=glyph01852,glyph01986,u1F1EA,u1F1E8,u1F1F8,u1F1FB --layout-features='*' --drop-tables='SVG ,vhea,vmtx'
+    ```
 
 * type1/notoserif-regular.subset.pfa
   * font: Noto Serif Regular

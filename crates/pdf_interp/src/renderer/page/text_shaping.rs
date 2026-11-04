@@ -195,6 +195,10 @@ fn shape(
             log::debug!("shaping {text:?}: {e}; drawn glyph by glyph");
             None
         }
+        Err(e @ ShapeError::Shaper) => {
+            log::warn!("shaping {text:?}: {e}; drawn glyph by glyph");
+            None
+        }
     }
 }
 

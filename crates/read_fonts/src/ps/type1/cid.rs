@@ -18,14 +18,14 @@
 
 use super::{decode_hex, decrypt, Parser, Subrs, Token, CHARSTRING_SEED};
 use crate::{
-    model::pen::OutlinePen,
+    model::{glyph::outline::PathSink, Error},
     ps::{
-        cs::{self, CharstringContext, CharstringKind, CommandSink, NopFilterSink, TransformSink},
-        error::Error,
+        charstring::{
+            self, CharstringContext, CharstringKind, CommandSink, NopFilterSink, TransformSink,
+        },
         transform::{FontMatrix, ScaledFontMatrix, Transform},
     },
     types::{Fixed, GlyphId},
-    ReadError,
 };
 use alloc::{borrow::ToOwned, collections::BTreeMap, string::String, vec::Vec};
 use core::ops::Range;
@@ -94,7 +94,7 @@ impl CidType1Font {
     /// Any PostScript header (`%!`) is accepted; the font must provide an
     /// `FDArray` and a `StartData` data section.
     pub fn new(data: &[u8]) -> Result<Self, Error> {
-        Self::new_impl(data).ok_or(Error::InvalidFontFormat)
+        Self::new_impl(data).ok_or(Error::Malformed)
     }
 
     fn new_impl(data: &[u8]) -> Option<Self> {
@@ -275,19 +275,19 @@ impl CidType1Font {
         cid: GlyphId,
         sink: &mut impl CommandSink,
     ) -> Result<Option<Fixed>, Error> {
-        let glyph = self.glyph(cid).ok_or(ReadError::OutOfBounds)?;
+        let glyph = self.glyph(cid).ok_or(Error::Malformed)?;
         let context = FontDictContext {
             font: self,
             dict: self
                 .dicts
                 .get(glyph.dict as usize)
-                .ok_or(ReadError::OutOfBounds)?,
+                .ok_or(Error::Malformed)?,
         };
         let data = self
             .charstrings
             .get(glyph.data.clone())
-            .ok_or(ReadError::OutOfBounds)?;
-        cs::evaluate(&context, None, data, sink)
+            .ok_or(Error::Malformed)?;
+        charstring::evaluate(&context, None, data, sink)
     }
 
     /// Draws the glyph for the given CID with an optional size in ppem to
@@ -299,10 +299,10 @@ impl CidType1Font {
         &self,
         cid: GlyphId,
         ppem: Option<f32>,
-        pen: &mut impl OutlinePen,
+        sink: &mut impl PathSink,
     ) -> Result<Option<f32>, Error> {
-        let transform = self.transform(cid, ppem).ok_or(ReadError::OutOfBounds)?;
-        let mut nop_filter = NopFilterSink::new(pen);
+        let transform = self.transform(cid, ppem).ok_or(Error::Malformed)?;
+        let mut nop_filter = NopFilterSink::new(sink);
         let mut transformer = TransformSink::new(&mut nop_filter, transform);
         let width = self.evaluate_charstring(cid, &mut transformer)?;
         Ok(width.map(|w| transform.transform_h_metric(w).to_f32().max(0.0)))
@@ -340,22 +340,21 @@ impl CharstringContext for FontDictContext<'_> {
             u32::try_from(code)
                 .ok()
                 .and_then(|cid| self.font.charstring(cid))
-                .ok_or(Error::InvalidSeacCode(code))
+                .ok_or(Error::InvalidOperation)
         };
         Ok([get(base_code)?, get(accent_code)?])
     }
 
     fn subr(&self, index: i32) -> Result<&[u8], Error> {
-        Ok(self
-            .font
+        self.font
             .subrs
             .get(self.dict.subrs)
             .and_then(|subrs| subrs.get(index as u32))
-            .ok_or(ReadError::OutOfBounds)?)
+            .ok_or(Error::Malformed)
     }
 
     fn global_subr(&self, _index: i32) -> Result<&[u8], Error> {
-        Err(Error::MissingSubroutines)
+        Err(Error::MissingResource)
     }
 }
 

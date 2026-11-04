@@ -1,5 +1,5 @@
 use super::*;
-use crate::ps::cs::test_helpers::{CaptureCommandSink, Command};
+use crate::ps::charstring::test_helpers::{CaptureCommandSink, Command};
 use alloc::{format, vec};
 
 fn num(v: i32) -> Vec<u8> {

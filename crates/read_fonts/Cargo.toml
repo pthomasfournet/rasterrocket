@@ -1,10 +1,10 @@
 # Local fork of read-fonts (https://github.com/googlefonts/fontations,
 # directory `read-fonts/`), vendored from upstream commit
-# cd4aaef57887dd1d8a5875e38c406843e66c9cab (2026-07-03, crate version 0.41.0).  Licence: MIT OR Apache-2.0 (see LICENSE-APACHE,
+# 1d1672367c7909013b4e366085d68d5ad612ee67 (2026-11-02, crate version 0.46.0).  Licence: MIT OR Apache-2.0 (see LICENSE-APACHE,
 # LICENSE-MIT).  Changes made here are ours; see CHANGES.md.
 [package]
 name = "read-fonts"
-version = "0.41.0"
+version = "0.46.0"
 description = "Reading OpenType font files."
 readme = "README.md"
 categories = ["text-processing", "parsing", "graphics"]
@@ -17,25 +17,26 @@ publish = false
 
 [package.metadata.docs.rs]
 # To build locally:
-# RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --features libm,serde,std
-features = ["libm", "serde", "std"]
+# RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --features agl,libm,serde,std
+features = ["agl", "libm", "serde", "std"]
 
 [features]
-std = ["font-types/std"]
+std = ["font-types/std", "dep:foldhash"]
 codegen_test = []
 scaler_test = []
 # experimental support for incremental font transfer (https://www.w3.org/TR/IFT/)
 # code behind this feature does not honor semver and may break at any time.
 ift = []
-# this feature is not stable, but provides untyped traversal of font tables.
-# we do not consider this feature public API for the purposes of semver.
-experimental_traverse = ["std"]
-# Enables experimental implementations of proposed changes to the spec
-# as discussed at https://github.com/harfbuzz/boring-expansion-spec
+# Does nothing. The cubic outlines it once enabled are now always read.
 spec_next = []
 # Enables support for a new font API, as proposed at
 # https://github.com/googlefonts/oxidize/pull/77
 experimental_font_api = []
+# Does nothing. Traversal was removed in #2087, but consumers still ask for
+# this feature -- fontconfig's fc-fontations does, without using any of it --
+# and cargo fails to resolve a feature that does not exist. Keeping it empty
+# lets them upgrade before they edit their manifests.
+experimental_traverse = []
 default = ["std"]
 serde = ["dep:serde", "font-types/serde"]
 libm = ["dep:core_maths"]
@@ -43,17 +44,23 @@ libm = ["dep:core_maths"]
 agl = []
 
 [dependencies]
-font-types = { version = "0.12.1", features = ["bytemuck"] }
+foldhash = { version = "0.2.0", default-features = false, optional = true }
+smallvec = { version = "1.13.1", default-features = false, features = [
+    "const_generics",
+    "union",
+] }
+font-types = { version = "0.12.7", features = ["bytemuck"] }
+yoke = { version = "0.8.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 core_maths = { version = "0.1", optional = true }
-bytemuck = "1.13.1"
+bytemuck = "1.14.0"
 once_cell = { version = "1.21.4", default-features = false, features = [
     "alloc",
     "race",
 ] }
 
 [dev-dependencies]
-read-fonts = { path = ".", features = ["experimental_font_api"] }
+read-fonts = { path = "." }
 font-test-data = { path = "../font_test_data" }
 serde_json = "1.0"
 

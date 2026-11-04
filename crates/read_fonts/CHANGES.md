@@ -1,8 +1,8 @@
 # Changes from upstream
 
 This crate is a local fork of `read-fonts`, vendored from fontations commit
-`cd4aaef57887dd1d8a5875e38c406843e66c9cab` (2026-07-03, the 0.41.0 release).
-It is not published and changes are not sent upstream.
+`1d1672367c7909013b4e366085d68d5ad612ee67` (2026-11-02, after the 0.46.0
+release). It is not published and changes are not sent upstream.
 
 ## Vendoring
 
@@ -14,18 +14,18 @@ It is not published and changes are not sent upstream.
 
 - `Cargo.toml`: `rust-version` is inherited from the workspace (1.99), so
   every crate of the repository builds with the same minimum toolchain;
-  the other workspace-inherited fields are resolved to values; `publish =
-  false`; `font-test-data` points at the copy in `crates/font_test_data`
-  (same upstream commit as the `skrifa` fork). The benchmarks and their
+  the other workspace-inherited fields and dependencies are resolved to
+  values; `publish = false`; `font-test-data` points at the copy in
+  `crates/font_test_data` (same upstream commit). The benchmarks and their
   `criterion` / `rand` dev-dependencies are removed.
 
 - Fixed-width byte groups are read with `slice::as_chunks` (stable since
   Rust 1.88) instead of `chunks_exact` with a constant size, as clippy
   requires once the minimum toolchain allows it: the checksum in
   `tables.rs`, inline instruction operands, and the `I16` / `I32` delta
-  runs in `tables/variations.rs`; in tests, the `kerx` anchor and
-  coordinate readers. `int_set`'s test domain uses `is_multiple_of`.
-  Behaviour is unchanged.
+  runs in `tables/variations.rs`. The `post` name iterator's checkpoint
+  test uses `is_multiple_of`, and `ps::type1::mul_div_wide` divides with
+  `checked_div`. Behaviour is unchanged.
 
 - The licence files replace upstream's symlinks to the repository root.
 
@@ -41,14 +41,12 @@ It is not published and changes are not sent upstream.
   Resource-Font`, which some producers write into `FontFile` streams). The
   dictionary parse that follows still rejects non-fonts. Test:
   `resource_font_header_accepted`.
-- `ps::type1::Parser::read_proc`: a token ending at the closing brace, as
-  in the `/OtherSubrs` entry `dup 3 {3} executeonly put` of TeX-derived
-  fonts, consumed the brace; the procedure then ran on through the
-  following entries and the font was rejected for lacking `/CharStrings`.
-  The closing brace was then checked before each token was read; that
-  change is superseded by upstream's byte-level procedure scan (#1993,
-  under "Upstream fixes brought over"), which handles the same input.
-  Test: `parse_procs_with_tokens_ending_at_the_brace`.
+- Two parser tests upstream does not have: a procedure whose last token
+  ends at the closing brace, as in the `/OtherSubrs` entry `dup 3 {3}
+  executeonly put` of TeX-derived fonts
+  (`parse_procs_with_tokens_ending_at_the_brace`), and a font of 1 000 000
+  nested braces, which a recursive procedure scan overflowed the stack on
+  (`parse_deeply_nested_procs_without_recursion`).
 
 ## CID-keyed Type 1 fonts
 
@@ -66,7 +64,8 @@ It is not published and changes are not sent upstream.
   more lenient: any `%!` header is accepted (FreeType requires
   `%!PS-Adobe-3.0 Resource-CIDFont`, which `CidType1Font::is_cid_keyed`
   tests for), and a dictionary key outside a declared dictionary or an
-  unreadable `FontMatrix` is ignored instead of failing the font. Tests:
+  unreadable `FontMatrix` is ignored instead of failing the font. Errors
+  are reported with the `model::Error` kinds the Type 1 reader uses. Tests:
   `ps::type1::cid::tests::*` (in `src/tests/test_cid_type1.rs`).
 - `CidType1Font`: decoded subroutines and charstrings are bounded by the
   length of the data section. The CIDMap and the subroutine maps are
@@ -84,85 +83,42 @@ It is not published and changes are not sent upstream.
   `identical_charstring_ranges_share_one_copy`,
   `font_dicts_naming_one_subr_map_share_their_subrs`.
 
-## CFF charset iteration past the largest string identifier
+## CFF charsets
 
-`ps/cff/charset.rs`: the range iterator of format 1 and 2 charsets ended
-the whole iteration at the first glyph whose string identifier exceeds
-`u16` (a range starting near 65535), while `Charset::glyph_id` skips such
-a range and keeps counting glyphs.  The iterator now skips those glyphs, so
-the two agree and the glyphs of later ranges are reached.
+- `ps/cff/charset.rs`: the range iterator of format 1 and 2 charsets ended
+  the whole iteration at the first glyph whose string identifier exceeds
+  `u16` (a range starting near 65535), while `Charset::glyph_id` skips such
+  a range and keeps counting glyphs. The iterator now skips those glyphs,
+  so the two agree and the glyphs of later ranges are reached. Test:
+  `iteration_skips_identifiers_past_u16_and_agrees_with_lookup`.
+- `ps/cff/encoding.rs`: a test that a predefined encoding, and a
+  supplement, naming a glyph past the font's glyph count map to nothing
+  (`predefined_codes_stop_at_the_glyph_count`); upstream's charset bound
+  provides the behaviour.
 
-## Upstream fixes brought over
+## Hint-reliant ("tricky") TrueType detection
 
-Fixes to code this fork's users reach (glyf outlines, the CFF, CFF2 and
-Type 1 parsers and charstring interpreter) from upstream commits after the
-base, applied as upstream wrote them with their tests. The base in
-`UPSTREAM.toml` is unchanged; `reviewed` records how far upstream history
-was examined.
+- `tables::glyf::hint_reliant`: the `cvt ` / `fpgm` / `prep`
+  identification compares the three table lengths with the list first and
+  computes the checksums only when they match an entry, so ordinary fonts
+  pay no scan of their hinting programs. The result is unchanged.
 
-- `26503f2a0` (#1965) `tables::glyf::SimpleGlyph::read_points_fast`: a
-  simple glyph with zero points and trailing padding indexed `flags[0]`
-  of an empty slice (a panic in release builds). Found by the `fuzz_font`
-  target within 605 runs.
-- `f5ab31fe7` (#2052) `PointIter::advance_flags`: the repeat count is
-  widened so its `+ 1` cannot overflow.
-- `dd9af718b` (#1977) `BitmapSize::location`: an error instead of a
-  panic on truncated subtable data.
-- `d8769631a` (#2000) charstring evaluation: a bound on the work one
-  charstring may ask for.
-- `d0f5d071f` (#2016) CFF charset: overflow panics in range arithmetic.
-- `10b5d6959` (#2026) CFF FDSelect: out-of-range font dictionary indices.
-- `b08c6cce2` (#2051) `VarLenArray::get`: reads bounded by the data.
-- `2a6bdb532` (#2359) CFF DICT: a BCD real whose exponent overflows is
-  consumed whole instead of desynchronising the operand stream.
-- `f95a2db5b` (#1993) `ps::type1::Parser`: procedures are scanned byte by
-  byte with a nesting counter instead of recursing once per `{`, so a
-  font of nested braces no longer overflows the stack (1 000 000 levels
-  aborted the test process before; test
-  `parse_deeply_nested_procs_without_recursion`); comments and literal
-  strings inside a procedure no longer end it early; the `RD` / `-|`
-  lookahead no longer tokenizes binary data; a literal string no longer
-  consumes the byte after its closing parenthesis. Hand-applied: the
-  procedure scan replaces this fork's earlier `read_proc` change.
-- `7bdbbde1d` `tables::kerx::Subtable2::kerning`: the left and right
-  class values of a format 2 subtable are byte offsets (pre-multiplied by
-  the row width and by the two-byte value size), so their sum is halved
-  before indexing the kerning array. Not reached by this fork's users
-  (glyph positions come from the PDF); brought over to keep the AAT
-  reader correct.
-- `fd5d51999` (#2398) CFF custom encoding: a code whose format 0 or 1
-  glyph lies past the font's glyph count maps to nothing, as in FreeType,
-  instead of to a glyph index the font does not have. The PDF simple-font
-  resolver then falls through to the code's glyph name.
-  Extended in this fork to every code-to-glyph path: `Charset::glyph_id`
-  returns `OutOfBounds` for a glyph index at or past the glyph count, as
-  `string_id` does, so a predefined (Standard, Expert) encoding and a
-  supplement naming a SID whose charset position lies past the font's
-  glyphs map to nothing as well. This covers the predefined ISOAdobe,
-  Expert and ExpertSubset charsets and a custom charset whose last range
-  overshoots the glyph count.
+## Rebase history
 
-## Upstream review (2026-10-30, extended 2026-11-03)
-
-Upstream history through `42e0f877d` (2026-10-27, crates.io 0.46.0) was
-reviewed by commit, and through `7bdbbde1d` (2026-10-30) on that date.
-On 2026-11-03 it was reviewed through `1d1672367` (2026-11-02): of the
-commits after `7bdbbde1d`, #2398 and #2433 touch `read-fonts`. #2433
-bounds a scan over every VARC axis-index list when the outlines are set
-up; that scan arrived with the 0.46 `model` restructure, and this fork
-reads one list per component at draw time, already returning its error.
-Besides the fixes above, nothing is brought over:
-
-- The rebase onto 0.46 is deferred to the next font work. Upstream has
-  restructured the crate since the base (`model` / `OutlineGlyphs`, the
-  hinting error types and outline-to-path conversion moved in from
-  skrifa, the `ps` module reorganised), which this fork's Type 1 and
-  CID-keyed Type 1 changes would have to be re-applied onto.
-- Left out as behaviour changes that need their own render comparison:
-  #2376 (cmap format 4: an `idRangeOffset` before the glyph id array maps
-  nothing instead of the first entry), #2379 / #2397 (CFF charset lookups
-  stop at the glyph count), #2257 (Type 1 parsing fixes), #2053 (bitmap
-  table overflows; this fork's users draw outlines only).
-- Not reached by this fork's users: layout, AAT, COLR, SVG, cmap formats
-  14 / 15, DMAP, subsetting and glyph closure.
-
+- 2026-11-04: rebased from fontations `cd4aaef57` (read-fonts 0.41.0) onto
+  `1d1672367` (after 0.46.0). Upstream had by then restructured the crate
+  (the `model` module with `Font` and the hinting error types and
+  outline-to-path conversion from skrifa; the `ps` module's `cs`, `error`
+  and `Charmap` became `charstring`, `model::Error` and `UnicodeCharmap`)
+  and taken over hint-reliant detection from skrifa, deriving the family
+  name as FreeType does, which this fork had done in skrifa. Every upstream
+  fix this fork had brought over by hand (glyf point reading and flag
+  repeats, bitmap locations, charstring work bounds, CFF charset, FDSelect,
+  encoding and BCD real fixes, `VarLenArray::get`, the Type 1 procedure
+  scan, `kerx` format 2 classes) is upstream's own code now. Rendering
+  changes this brings that were deliberately left out before: cmap format
+  4 `idRangeOffset` handling (#2376), CFF charset lookups bounded by the
+  glyph count (#2379, #2397), Type 1 parsing fixes (#2257), bitmap table
+  overflows (#2053), and the Adobe Glyph List extended with the ITC Zapf
+  Dingbats names (`a1` maps to U+2701), as FreeType's synthesized Unicode
+  cmap does (#2378).

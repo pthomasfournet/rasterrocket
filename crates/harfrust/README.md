@@ -1,13 +1,18 @@
 # HarfRust
 
-<div align="center">
-<p><img src="HarfRust.png" alt="HarfRust Logo" width="256" align="center"/></p>
-
-[![Build Status](https://github.com/harfbuzz/harfrust/actions/workflows/main.yml/badge.svg)](https://github.com/harfbuzz/harfrust/actions/workflows/main.yml)
-[![Crates.io](https://img.shields.io/crates/v/harfrust.svg)](https://crates.io/crates/harfrust)
-[![Documentation](https://docs.rs/harfrust/badge.svg)](https://docs.rs/harfrust)
-
-</div>
+> **Local fork.** This directory is the rasterrocket workspace's local fork
+> of [`harfrust`](https://github.com/harfbuzz/harfrust), based on upstream
+> release 0.15.0 (a later commit). The upstream base commit is recorded in
+> [`UPSTREAM.toml`](UPSTREAM.toml); every change made here is listed in
+> [`CHANGES.md`](CHANGES.md). The crate is not published (`publish = false`)
+> and changes are not sent upstream.
+>
+> `rasterrocket-font` uses it to shape runs of scripts that need shaping
+> with a substitute face's `GSUB` and `GPOS` tables. It is built against the
+> local `read-fonts` fork, and the two are rebased together.
+>
+> Everything below is upstream's README, kept as written, minus its logo and
+> badges. Its links describe the upstream crate, not this fork.
 
 HarfRust is a Rust port of [HarfBuzz](https://github.com/harfbuzz/harfbuzz) text shaping engine.
 See [Major changes](#major-changes) below for major differences between HarfRust and HarfBuzz.
@@ -17,7 +22,7 @@ HarfRust started as a fork of [RustyBuzz](https://docs.rs/rustybuzz) to explore 
 multiple implementations of core font parsing for [`skrifa`](https://docs.rs/skrifa) consumers.
 Further context in https://github.com/googlefonts/fontations/issues/956.
 
-Matches HarfBuzz [v13.0.0](https://github.com/harfbuzz/harfbuzz/releases/tag/13.0.0).
+Matches HarfBuzz [v15.0.0](https://github.com/harfbuzz/harfbuzz/releases/tag/15.0.0).
 
 ## Why?
 
@@ -29,7 +34,6 @@ production and consumption to Rust.
 - No font size property. Shaping is always using UnitsPerEm. You should scale the result manually.
 - Most of the font loading and parsing is done using [`read-fonts`](https://docs.rs/read-fonts).
 - HarfRust doesn't provide any integration with external libraries, so no FreeType, CoreText, or Uniscribe/DirectWrite font-loading integration, and no ICU, or GLib Unicode-functions integration, as well as no `graphite2` library support.
-- `mort` table is not supported, since it's deprecated by Apple.
 - No `graphite` font support.
 
 ## Conformance
@@ -38,7 +42,6 @@ The following conformance issues need to be fixed:
 
 - HarfRust for the most part passes the HarfBuzz test and fuzzing suites, but there are some known issues. See [HARFBUZZ.md](./HARFBUZZ.md) for details.
 - Malformed fonts will cause an error. HarfBuzz uses fallback/dummy shaper in this case.
-- No Arabic fallback shaper. This requires the ability to build lookups on the fly. In HarfBuzz (C++) this requires serialization code that is associated with subsetting.
 - Experimental HarfBuzz features like most of the boring-expansion-spec are not supported yet.
 
 ## Performance
@@ -46,6 +49,30 @@ The following conformance issues need to be fixed:
 HarfRust is less than 25% slower than HarfBuzz on most common fonts. For a comparison see this [spreadsheet][3].
 You can run `cargo bench` to see the performance of HarfRust on your machine.
 
+
+## Tracing shaping
+
+Enable the opt-in `tracing` Cargo feature to receive HarfBuzz shaping messages:
+
+```toml
+harfrust = { version = "0.15", features = ["tracing"] }
+```
+
+Install a callback before shaping with
+`buffer.set_message_function(Some(Box::new(callback)))`. It receives the public
+`Buffer`, `ShaperFont`, and message text, and can inspect or serialize
+intermediate Unicode and glyph contents. Return `true` to continue shaping, or
+`false` from a skippable `start` message to skip that operation. Per-glyph and
+recursion messages are informational and ignore the return value. Mutable closures
+are supported; callbacks own their captures and must be `Send + Sync + 'static`.
+Use `buffer.set_message_function(None)` to remove a callback.
+
+Tracing also works with `no_std` and `libm`. Without the `tracing` feature, the
+callback storage, message formatting, and intermediate snapshots compile out.
+The `hr-shape` tool enables tracing and exposes `--trace` to print messages and
+intermediate buffer contents to stderr. Its library rendering API includes traces
+in the returned string. Per-glyph messages follow HarfBuzz's detailed trace mode
+(`HB_BUFFER_MESSAGE_MORE=1`), which release builds of HarfBuzz normally disable.
 
 ## Notes about the port
 
@@ -74,7 +101,21 @@ There are no `unsafe` in this library and in most of its dependencies (excluding
   * Determine new version number according to SemVer
     Note that increasing a dependency version to a new major release
     means a breaking change for this crate.
-* Update Cargo.toml release version following SemVer, in TWO places
+* Update the release version following SemVer:
+  * Cargo.toml, in TWO places: `version` under `[workspace.package]` and the
+    `harfrust` entry under `[workspace.dependencies]`
+  * The dependency example in this README
+  * The C API's copy of it: `HR_VERSION_*` in `harfrust_capi/src/shape.rs`
+    and `HR_VERSION_STRING` in `harfrust_capi/cbindgen.toml`
+* If the matched HarfBuzz release changed, update it in:
+  * This README ("Matches HarfBuzz ...") and CHANGELOG.md
+  * `HR_HARFBUZZ_VERSION_*` and `hr_harfbuzz_version_string` in
+    `harfrust_capi/src/shape.rs`
+  * `HR_HARFBUZZ_VERSION_STRING` in `harfrust_capi/cbindgen.toml`
+  * `harfrust_capi/README.md` and `harfrust_capi/tests/skia_version.rs`
+* Regenerate `harfrust_capi/include/hr.h` with cbindgen, as described in
+  `harfrust_capi/README.md`, then run `scripts/gen-hb-compat-header.py`.
+  `cargo test -p harfrust_capi` checks that the header's versions match.
 * Run cargo-semver-checks:
   * `cargo semver-checks check-release -p harfrust`
   * `cargo semver-checks check-release -p hr-shape`

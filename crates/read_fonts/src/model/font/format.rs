@@ -4,7 +4,7 @@ use crate::{FileRef, FontRead};
 
 /// Format for a blob of font data.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub enum FontFormat {
+pub enum Format {
     /// An [SFNT](https://en.wikipedia.org/wiki/SFNT)-based font, which includes
     /// TrueType and OpenType fonts.
     ///
@@ -13,15 +13,15 @@ pub enum FontFormat {
     /// The field contains the number of available fonts. This is always 1 for
     /// .ttf and .otf files and usually greater than 1 for .ttc and .otc files.
     Sfnt(u32),
-    /// A Type1 font.
+    /// A Type 1 font.
     Type1,
-    /// A pure CFF font.
+    /// A standalone CFF font.
     ///
     /// The field contains the number of available fonts.
     Cff(u32),
 }
 
-impl FontFormat {
+impl Format {
     /// Returns the format of the font data in the given buffer.
     pub fn new(data: &[u8]) -> Option<Self> {
         if let Ok(file) = FileRef::new(data) {
@@ -73,7 +73,7 @@ mod tests {
             .unwrap()
             .offset_data()
             .as_bytes();
-        use FontFormat::*;
+        use Format::*;
         #[rustfmt::skip]
         let pairs = [
             (font_test_data::CANTARELL_VF_TRIMMED, Sfnt(1)),
@@ -83,8 +83,8 @@ mod tests {
             (font_test_data::type1::NOTO_SERIF_REGULAR_SUBSET_PFA, Type1),
         ];
         for (data, expected_format) in pairs {
-            assert_eq!(FontFormat::new(data).unwrap(), expected_format);
+            assert_eq!(Format::new(data).unwrap(), expected_format);
         }
-        assert!(FontFormat::new(b"I'm not a font").is_none());
+        assert!(Format::new(b"I'm not a font").is_none());
     }
 }

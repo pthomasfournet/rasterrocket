@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use harfrust::{Direction, Script, ShapeOptions, ShapePlan, ShaperData, UnicodeBuffer};
+use harfrust::font::Font;
+use harfrust::{Buffer, Direction, Script, ShapeOptions, ShapePlan, ShaperFont};
 
 use super::FontProgram;
 
@@ -29,6 +30,8 @@ pub enum ShapeError {
     /// Shaping produced the glyph index held, which has no selector:
     /// a CID-keyed program whose charset omits it.
     NoSelector(u32),
+    /// The shaper read no font from the program, or refused the run.
+    Shaper,
 }
 
 impl std::fmt::Display for ShapeError {
@@ -36,17 +39,22 @@ impl std::fmt::Display for ShapeError {
         match self {
             Self::NotSfnt => f.write_str("the program is not an sfnt"),
             Self::NoSelector(gid) => write!(f, "shaped glyph {gid} has no selector"),
+            Self::Shaper => f.write_str("the shaper did not shape the run"),
         }
     }
 }
 
 impl std::error::Error for ShapeError {}
 
-/// The shaping state of an sfnt program: its layout tables and a shape
-/// plan per script and direction, each compiled once.
+/// The script and direction a shape plan is compiled for.
+type PlanKey = (Option<Script>, Direction);
+
+/// The shaping state of an sfnt program: the shaper's view of the font,
+/// which caches its layout tables, and a shape plan per script and
+/// direction, each compiled once.
 pub(super) struct Shaping {
-    data: ShaperData,
-    plans: Mutex<HashMap<(Script, Direction), Arc<ShapePlan>>>,
+    font: Option<Font>,
+    plans: Mutex<HashMap<PlanKey, Arc<ShapePlan>>>,
 }
 
 impl FontProgram {
@@ -59,13 +67,17 @@ impl FontProgram {
     /// [`ShapeError::NotSfnt`] for a program that is not an sfnt;
     /// [`ShapeError::NoSelector`] when a shaped glyph has no selector.
     pub fn shape(&self, text: &str, rtl: bool) -> Result<Vec<ShapedGlyph>, ShapeError> {
-        let font = self.sfnt().ok_or(ShapeError::NotSfnt)?;
-        let shaping = self.shaper.get_or_init(|| Shaping {
-            data: ShaperData::new(font),
-            plans: Mutex::new(HashMap::new()),
+        let face_index = self.sfnt_face_index().ok_or(ShapeError::NotSfnt)?;
+        let shaping = self.shaper.get_or_init(|| {
+            let data: Arc<dyn AsRef<[u8]> + Send + Sync> = self.shared_data();
+            Shaping {
+                font: Font::new(harfrust::font::Blob::from(data), face_index),
+                plans: Mutex::new(HashMap::new()),
+            }
         });
-        let shaper = shaping.data.shaper(font).build();
-        let mut buffer = UnicodeBuffer::new();
+        let font = shaping.font.as_ref().ok_or(ShapeError::Shaper)?;
+        let shaper = ShaperFont::new(font);
+        let mut buffer = Buffer::new();
         buffer.push_str(text);
         buffer.set_direction(if rtl {
             Direction::RightToLeft
@@ -78,11 +90,19 @@ impl FontProgram {
         let plan = buffer.language().is_none().then(|| {
             let key = (buffer.script(), buffer.direction());
             let mut plans = shaping.plans.lock().unwrap_or_else(PoisonError::into_inner);
-            Arc::clone(plans.entry(key).or_insert_with(|| {
-                Arc::new(ShapePlan::new(&shaper, key.1, Some(key.0), None, &[]))
-            }))
+            Arc::clone(
+                plans
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(ShapePlan::new(font, key.1, key.0, None, &[]))),
+            )
         });
-        let glyphs = shaper.shape(buffer, ShapeOptions::new().plan(plan.as_deref()));
+        harfrust::shape(
+            &shaper,
+            &mut buffer,
+            ShapeOptions::new().plan(plan.as_deref()),
+        )
+        .map_err(|_| ShapeError::Shaper)?;
+        let glyphs = buffer;
         let em = |units: i32| f64::from(units) / self.upem;
         glyphs
             .glyph_infos()

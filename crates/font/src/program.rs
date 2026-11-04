@@ -21,15 +21,16 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
+use read_fonts::ps::UnicodeCharmap as Charmap;
 use read_fonts::ps::cff::charset::Charset;
 use read_fonts::ps::cff::{CffFontRef, Subfont};
-use read_fonts::ps::charmap::Charmap;
 use read_fonts::ps::type1::Type1Font;
 use read_fonts::ps::type1::cid::CidType1Font;
 use read_fonts::tables::cmap::{Cmap, CmapSubtable, PlatformId};
 use read_fonts::tables::gsub::{SingleSubst, SubstitutionSubtables};
+use read_fonts::tables::layout::CoverageTable;
 use read_fonts::types::{BigEndian, GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
 use skrifa::instance::{LocationRef, Size};
@@ -135,7 +136,7 @@ enum Views<'a> {
 self_cell::self_cell!(
     /// The program bytes and the [`Views`] that borrow them.
     struct ProgramData {
-        owner: Box<[u8]>,
+        owner: Arc<Vec<u8>>,
         #[covariant]
         dependent: Views,
     }
@@ -199,7 +200,7 @@ impl FontProgram {
     /// or carry no outlines.
     pub fn parse(data: Vec<u8>, face_index: u32) -> Result<Self, LoadError> {
         let format = FontFormat::detect(&data).ok_or(LoadError::UnsupportedFormat)?;
-        let data = data.into_boxed_slice();
+        let data = Arc::new(data);
         let name_charmap = OnceLock::new();
         let (outlines, upem, cid_to_gid) = match format {
             FontFormat::Sfnt => {
@@ -302,6 +303,19 @@ impl FontProgram {
     #[must_use]
     pub fn data(&self) -> &[u8] {
         self.data.borrow_owner()
+    }
+
+    /// The collection index of an sfnt program, `None` for other formats.
+    const fn sfnt_face_index(&self) -> Option<u32> {
+        match &self.outlines {
+            Outlines::Sfnt { face_index, .. } => Some(*face_index),
+            _ => None,
+        }
+    }
+
+    /// The program bytes, shared rather than copied.
+    fn shared_data(&self) -> Arc<Vec<u8>> {
+        Arc::clone(self.data.borrow_owner())
     }
 
     /// `true` when this is an sfnt whose charmap is Unicode (a Unicode
@@ -818,26 +832,64 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
                     let Ok(coverage) = single.coverage() else {
                         continue;
                     };
-                    let delta = i32::from(single.delta_glyph_id());
-                    for glyph in coverage.iter() {
-                        let from = i32::from(glyph.to_u16());
-                        let to = (from + delta).rem_euclid(0x1_0000).unsigned_abs();
-                        let _ = forms.entry(from.unsigned_abs()).or_insert(to);
-                    }
+                    add_delta_forms(
+                        &mut forms,
+                        &coverage,
+                        single.delta_glyph_id().into(),
+                        1 << 16,
+                    );
+                }
+                SingleSubst::Format3(single) => {
+                    let Ok(coverage) = single.coverage() else {
+                        continue;
+                    };
+                    add_delta_forms(
+                        &mut forms,
+                        &coverage,
+                        single.delta_glyph_id().into(),
+                        1 << 24,
+                    );
                 }
                 SingleSubst::Format2(single) => {
                     let Ok(coverage) = single.coverage() else {
                         continue;
                     };
                     for (glyph, to) in coverage.iter().zip(single.substitute_glyph_ids()) {
-                        let to = u32::from(to.get().to_u16());
-                        let _ = forms.entry(u32::from(glyph.to_u16())).or_insert(to);
+                        let to = to.get().to_u32();
+                        let _ = forms.entry(glyph.to_u32()).or_insert(to);
+                    }
+                }
+                SingleSubst::Format4(single) => {
+                    let Ok(coverage) = single.coverage() else {
+                        continue;
+                    };
+                    for (glyph, to) in coverage.iter().zip(single.substitute_glyph_ids()) {
+                        let to = to.get().to_u32();
+                        let _ = forms.entry(glyph.to_u32()).or_insert(to);
                     }
                 }
             }
         }
     }
     forms
+}
+
+/// Adds the forms of a delta single substitution: each covered glyph maps
+/// to itself plus `delta`, modulo `modulus` (the glyph-index range of the
+/// subtable format).
+fn add_delta_forms(
+    forms: &mut HashMap<u32, u32>,
+    coverage: &CoverageTable<'_>,
+    delta: i32,
+    modulus: i64,
+) {
+    for glyph in coverage.iter() {
+        let from = glyph.to_u32();
+        let Ok(to) = u32::try_from((i64::from(from) + i64::from(delta)).rem_euclid(modulus)) else {
+            continue;
+        };
+        let _ = forms.entry(from).or_insert(to);
+    }
 }
 
 /// Lowest glyph index carrying each string identifier below
@@ -952,7 +1004,8 @@ fn post_name_charmap(font: &FontRef<'_>) -> Option<Charmap> {
         .map(|(gid, name)| (gid, name.as_str().to_owned()))
         .collect();
     let map = Charmap::from_glyph_names(pairs.iter().map(|(gid, name)| (*gid, name.as_str())));
-    map.iter().next().is_some().then_some(map)
+    let maps_any = map.iter().next().is_some();
+    maps_any.then_some(map)
 }
 
 /// Pen accumulating the box of every point it receives.

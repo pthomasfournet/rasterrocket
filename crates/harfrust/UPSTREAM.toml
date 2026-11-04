@@ -6,11 +6,8 @@
 # examined and every change in it brought over or deliberately left out
 # (CHANGES.md records which).
 crate = "harfrust"
-version = "0.12.0"
+version = "0.15.0"
 repository = "harfbuzz/harfrust"
 path = "harfrust"
-commit = "60b28ea22b5261710018d69c168a762bcb28794c"
-date = "2026-07-03T19:27:35Z"
-reviewed = "bba5d0ff3463944a9bef2f55ad8a7fdde6305557"
-reviewed_date = "2026-11-02T02:39:40Z"
-reviewed_version = "0.15.0"
+commit = "bdd55a548fb3baaaed0e0633402909858858170a"
+date = "2026-11-02T02:42:30Z"

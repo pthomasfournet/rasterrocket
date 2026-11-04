@@ -6,11 +6,8 @@
 # examined and every change in it brought over or deliberately left out
 # (CHANGES.md records which).
 crate = "read-fonts"
-version = "0.41.0"
+version = "0.46.0"
 repository = "googlefonts/fontations"
 path = "read-fonts"
-commit = "cd4aaef57887dd1d8a5875e38c406843e66c9cab"
-date = "2026-07-03T18:31:35Z"
-reviewed = "1d1672367c7909013b4e366085d68d5ad612ee67"
-reviewed_date = "2026-11-02T16:01:26Z"
-reviewed_version = "0.46.0"
+commit = "1d1672367c7909013b4e366085d68d5ad612ee67"
+date = "2026-11-02T16:01:26Z"

@@ -1,10 +1,10 @@
 # Local fork of skrifa (https://github.com/googlefonts/fontations,
 # directory `skrifa/`), vendored from upstream commit
-# b373cdbc6043a791fb23b3e0f413649458f5e63a (2026-07-04, crate version 0.44.0).  Licence: MIT OR Apache-2.0 (see LICENSE-APACHE,
+# 1d1672367c7909013b4e366085d68d5ad612ee67 (2026-11-02, crate version 0.49.0).  Licence: MIT OR Apache-2.0 (see LICENSE-APACHE,
 # LICENSE-MIT).  Changes made here are ours; see CHANGES.md.
 [package]
 name = "skrifa"
-version = "0.44.0"
+version = "0.49.0"
 description = "Metadata reader and glyph scaler for OpenType fonts."
 readme = "README.md"
 categories = ["text-processing", "parsing", "graphics"]
@@ -23,24 +23,36 @@ all-features = true
 [features]
 default = ["std", "autohint_shaping"]
 std = ["read-fonts/std"]
-traversal = ["std", "read-fonts/experimental_traverse"]
 # Enables extended shaping support for the autohinter. Enabled by default.
 # This exists as a feature because shaping support is "best effort" and
 # we want the ability to disable it for testing against FreeType.
 autohint_shaping = []
-# Enables experimental implementations of proposed changes to the spec
-# as discussed at https://github.com/harfbuzz/boring-expansion-spec
+# Does nothing. The cubic outlines it once enabled are now always read.
 spec_next = ["read-fonts/spec_next"]
 libm = ["dep:core_maths", "read-fonts/libm"]
+# Maps characters to the glyphs of Type 1 and standalone CFF fonts through
+# their glyph names, as FreeType does, at the cost of the Adobe Glyph List's
+# size. Without it those fonts map no characters, so the automatic hinter
+# finds no blue zones in them.
+agl = ["read-fonts/agl"]
 
 [dependencies]
-read-fonts = { version = "0.41.0", path = "../read_fonts", default-features = false }
+smallvec = { version = "1.13.1", default-features = false, features = [
+    "const_generics",
+    "union",
+] }
+read-fonts = { version = "0.46.0", path = "../read_fonts", default-features = false }
 core_maths = { version = "0.1", optional = true }
-bytemuck = "1.13.1"
+bytemuck = "1.14.0"
+yoke = { version = "0.8.0", features = ["derive"] }
+once_cell = { version = "1.21.4", default-features = false, features = [
+    "alloc",
+    "race",
+] }
 
 [dev-dependencies]
 font-test-data = { path = "../font_test_data" }
-read-fonts = { version = "0.41.0", path = "../read_fonts", features = [
+read-fonts = { version = "0.46.0", path = "../read_fonts", features = [
     "scaler_test",
     "serde",
 ] }
