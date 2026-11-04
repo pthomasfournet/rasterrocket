@@ -121,11 +121,11 @@ impl DeviceBuffer {
     /// `src.len()` bytes.
     ///
     /// The trait's `upload` takes the buffer by shared reference, as the
-    /// staged path, which writes it by device copy, does.  The caller has
-    /// waited for every submitted page, so no device access races the write,
-    /// and serialises it against every other host access to the mapping
-    /// (`VulkanBackend::mapped_access`; views from the trait's `device_bytes`
-    /// are excluded by its safety contract).
+    /// staged path, which writes it by device copy, does.  The caller runs
+    /// the write under `PageRecorder::with_quiescent`, so no device access
+    /// races it and every other host access through `upload` / `download`
+    /// is serialised against it; views from the trait's `device_bytes` are
+    /// excluded by its safety contract.
     pub(super) fn write_mapped(&self, src: &[u8]) -> Option<()> {
         let len = usize::try_from(self.size).ok()?;
         if src.len() > len {

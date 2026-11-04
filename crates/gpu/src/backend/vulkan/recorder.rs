@@ -299,18 +299,31 @@ impl PageRecorder {
         Ok(())
     }
 
-    /// Block until every page submitted so far has completed.
+    /// Run `f` once every page submitted so far has completed, with no
+    /// submission able to start before `f` returns.
     ///
-    /// The recorder lock is released before the wait, so a page being
-    /// recorded on another thread is not held up; a page submitted after
-    /// the call began is not waited for.
-    pub(super) fn wait_submitted(&self) -> Result<()> {
-        let last = self
-            .inner
-            .lock()
-            .expect("recorder mutex poisoned")
-            .last_submitted;
-        last.map_or(Ok(()), |value| self.wait_timeline(value))
+    /// The recorder lock is held from before the wait until `f` returns, and
+    /// `submit_page` takes it, so a host access to a mapped device buffer
+    /// made in `f` is ordered after every submitted page and before every
+    /// later one: the order the staged copy gets from the queue.  Two such
+    /// accesses are serialised by the same lock.
+    pub(super) fn with_quiescent<R>(&self, f: impl FnOnce() -> R) -> Result<R> {
+        let s = self.inner.lock().expect("recorder mutex poisoned");
+        if let Some(last) = s.last_submitted {
+            self.wait_timeline(last)?;
+        }
+        let out = f();
+        drop(s);
+        Ok(out)
+    }
+
+    /// Whether the recorder lock is held, so that `submit_page` would block.
+    #[cfg(test)]
+    pub(super) fn submission_blocked(&self) -> bool {
+        matches!(
+            self.inner.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 
     /// `vkWaitSemaphores` on the timeline reaching `value`, with no
