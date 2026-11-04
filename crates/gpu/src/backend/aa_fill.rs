@@ -3,7 +3,7 @@
 
 use std::sync::{Mutex, PoisonError};
 
-use super::params::AaFillParams;
+use super::params::{AaFillParams, aa_fill_invariant};
 use super::{BackendError, GpuBackend, Result, reject_zero_size};
 use crate::fill::{AaFillRect, AaScanTable};
 
@@ -179,6 +179,40 @@ fn ensure<'a, B: GpuBackend>(
         .ok_or_else(|| BackendError::msg("aa_fill: scratch slot is empty"))
 }
 
+/// The error of a staged transfer without a host buffer on a device whose
+/// buffers the host cannot reach in place.
+fn not_mapped() -> BackendError {
+    BackendError::msg("aa_fill: device buffer is not host-mapped")
+}
+
+/// The host-side bytes of `staged`: its host buffer, or its device buffer in
+/// place when there is none.
+///
+/// # Safety
+/// No device work that writes `staged`'s buffers is in flight.
+unsafe fn host_view<'a, B: GpuBackend>(backend: &B, staged: &'a Staged<B>) -> Result<&'a [u8]> {
+    staged.host.as_ref().map_or_else(
+        // SAFETY: forwarded from this function's contract.
+        || unsafe { backend.device_bytes(&staged.device) }.ok_or_else(not_mapped),
+        |host| backend.host_bytes(host),
+    )
+}
+
+/// The writable host-side bytes of `staged`; see [`host_view`].
+///
+/// # Safety
+/// No device work that accesses `staged`'s buffers is in flight.
+unsafe fn host_view_mut<'a, B: GpuBackend>(
+    backend: &B,
+    staged: &'a mut Staged<B>,
+) -> Result<&'a mut [u8]> {
+    match staged.host.as_mut() {
+        Some(host) => backend.host_bytes_mut(host),
+        // SAFETY: forwarded from this function's contract.
+        None => unsafe { backend.device_bytes_mut(&mut staged.device) }.ok_or_else(not_mapped),
+    }
+}
+
 /// Copy `bytes` into `slot`, growing it first as needed: into the host
 /// buffer, or into the device buffer in place when there is none.
 fn stage<'a, B: GpuBackend>(
@@ -187,14 +221,10 @@ fn stage<'a, B: GpuBackend>(
     bytes: &[u8],
 ) -> Result<&'a mut Staged<B>> {
     let staged = ensure(backend, slot, bytes.len(), Direction::ToDevice)?;
-    let target = match staged.host.as_mut() {
-        Some(host) => backend.host_bytes_mut(host)?,
-        // SAFETY: the scratch owns the buffer exclusively (`&mut`), and
-        // every page that used it was waited on before `aa_fill_page`
-        // returned, whether it succeeded or failed (`run_page`).
-        None => unsafe { backend.device_bytes_mut(&mut staged.device) }
-            .ok_or_else(|| BackendError::msg("aa_fill: device buffer is not host-mapped"))?,
-    };
+    // SAFETY: the scratch owns the buffers exclusively (`&mut`), and every
+    // page that used them was waited on before `aa_fill_page` returned,
+    // whether it succeeded or failed (`run_page`).
+    let target = unsafe { host_view_mut(backend, staged) }?;
     target[..bytes.len()].copy_from_slice(bytes);
     Ok(staged)
 }
@@ -209,6 +239,24 @@ unsafe fn record_upload<B: GpuBackend>(backend: &B, staged: &Staged<B>, len: usi
     staged.host.as_ref().map_or(Ok(()), |host| {
         // SAFETY: forwarded from this function's contract.
         unsafe { backend.record_copy_to_device(host, &staged.device, len) }
+    })
+}
+
+/// Record the copy of `staged`'s first `len` bytes from device to host, if
+/// it has a host buffer.
+///
+/// # Safety
+/// The page this records into is waited on before `staged` is accessed again
+/// or dropped.
+unsafe fn record_download<B: GpuBackend>(
+    backend: &B,
+    staged: &mut Staged<B>,
+    len: usize,
+) -> Result<()> {
+    let Staged { host, device } = staged;
+    host.as_mut().map_or(Ok(()), |host| {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { backend.record_copy_to_host(device, host, len) }
     })
 }
 
@@ -243,16 +291,12 @@ pub fn aa_fill_page<B: GpuBackend>(
     aa_width: u32,
     even_odd: bool,
 ) -> Result<Vec<u8>> {
-    let invariant = |detail: &'static str| BackendError::InvariantViolation {
-        kind: "AaFillInvariantViolation",
-        detail,
-    };
+    let invariant = aa_fill_invariant;
     if !table.is_well_formed() {
         return Err(invariant("malformed scan table"));
     }
     let n_pixels = rect
-        .pixel_count()
-        .filter(|&n| u32::try_from(n).is_ok())
+        .kernel_pixel_count()
         .ok_or_else(|| invariant("rect has more pixels than a 32-bit index addresses"))?;
     if n_pixels == 0 || table.intersects.is_empty() {
         return Ok(vec![0; n_pixels]);
@@ -287,15 +331,9 @@ pub fn aa_fill_page<B: GpuBackend>(
             aa_width,
             fill_rule: u8::from(even_odd),
         })?;
-        coverage.host.as_mut().map_or(Ok(()), |host| unsafe {
-            backend.record_copy_to_host(&coverage.device, host, n_pixels)
-        })
+        unsafe { record_download(backend, coverage, n_pixels) }
     })?;
-    let counts = match coverage.host.as_ref() {
-        Some(host) => backend.host_bytes(host)?,
-        None => unsafe { backend.device_bytes(&coverage.device) }
-            .ok_or_else(|| BackendError::msg("aa_fill: device buffer is not host-mapped"))?,
-    };
+    let counts = unsafe { host_view(backend, coverage) }?;
     Ok(counts[..n_pixels].to_vec())
 }
 

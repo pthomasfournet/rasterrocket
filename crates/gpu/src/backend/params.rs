@@ -180,6 +180,15 @@ pub struct AaFillParams<'a, B: GpuBackend + ?Sized> {
     pub fill_rule: u8,
 }
 
+/// The [`super::BackendError::InvariantViolation`] of a scanline-AA fill
+/// whose input breaks `detail`.
+pub(crate) const fn aa_fill_invariant(detail: &'static str) -> super::BackendError {
+    super::BackendError::InvariantViolation {
+        kind: "AaFillInvariantViolation",
+        detail,
+    }
+}
+
 impl<B: GpuBackend + ?Sized> AaFillParams<'_, B> {
     /// Check the buffer-size invariants the kernel indexes without bounds
     /// checks.
@@ -187,20 +196,16 @@ impl<B: GpuBackend + ?Sized> AaFillParams<'_, B> {
     /// # Errors
     /// Returns a `BackendError` if any documented invariant is violated.
     pub fn validate(&self, backend: &B) -> super::Result<()> {
-        const KIND: &str = "AaFillInvariantViolation";
-        let invariant =
-            |detail: &'static str| super::BackendError::InvariantViolation { kind: KIND, detail };
+        let invariant = aa_fill_invariant;
         let offsets_needed = (self.n_rows as usize)
             .saturating_add(1)
             .saturating_mul(size_of::<u32>());
         if backend.device_buffer_len(self.row_starts) < offsets_needed {
             return Err(invariant("row_starts shorter than (n_rows + 1) × 4 bytes"));
         }
-        // The kernel indexes coverage pixels in 32-bit arithmetic.
         let pixels = self
             .rect
-            .pixel_count()
-            .filter(|&n| u32::try_from(n).is_ok())
+            .kernel_pixel_count()
             .ok_or_else(|| invariant("rect.width × rect.height exceeds the 32-bit pixel index"))?;
         if backend.device_buffer_len(self.coverage) < pixels {
             return Err(invariant(

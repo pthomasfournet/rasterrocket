@@ -110,6 +110,13 @@ impl AaFillRect {
     pub const fn pixel_count(&self) -> Option<usize> {
         (self.width as usize).checked_mul(self.height as usize)
     }
+
+    /// `width × height` when the fill kernels' 32-bit pixel index addresses
+    /// every pixel, `None` otherwise.
+    #[must_use]
+    pub fn kernel_pixel_count(&self) -> Option<usize> {
+        self.pixel_count().filter(|&n| u32::try_from(n).is_ok())
+    }
 }
 
 /// Sub-sample bitmask of one AA row's coverage within the four AA columns
