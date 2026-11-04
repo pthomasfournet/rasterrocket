@@ -2404,6 +2404,18 @@ U+2701). Over 1 125 PDFs (the fixtures and the archive), renders at
 before. A shaping failure now falls back to glyph-by-glyph drawing with a
 warning.
 
+**Page box anchored at the top-left corner, unreleased.** When a page's
+size in device pixels is fractional, the bitmap is its rounding, and the
+page box now starts at the bitmap's top-left corner for every `/Rotate`,
+the leftover fraction of a pixel lying past the right and bottom edges.
+Before, the box was anchored at the bottom edge (rotations 0 and 270)
+and at the right edge (180 and 270), so content sat up to a pixel low or
+right. Over the 434 pages that change among pages 1–3 of 250 random
+archive PDFs at 150 dpi, the fitted vertical offset against mutool falls
+from 0.15 to 0.06 px on average and against pdfium from 0.32 to 0.20 px;
+pdftoppm, which places a CropBox by its MediaBox at a whole-pixel offset,
+moves from 0.38 to 0.36 px.
+
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder, transfers

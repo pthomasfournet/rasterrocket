@@ -118,19 +118,19 @@ fn initial_ctm_zero_origin_is_pixel_neutral_for_every_rotation() {
     let w = f64::from(wpx) / s;
     let h = f64::from(hpx) / s;
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 0, 0.0, 0.0),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 0, 0.0, 0.0),
         [s, 0.0, 0.0, s, 0.0, 0.0],
     );
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 90, 0.0, 0.0),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 90, 0.0, 0.0),
         [0.0, -s, s, 0.0, 0.0, h * s],
     );
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 180, 0.0, 0.0),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 180, 0.0, 0.0),
         [-s, 0.0, 0.0, -s, w * s, h * s],
     );
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 270, 0.0, 0.0),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 270, 0.0, 0.0),
         [0.0, s, -s, 0.0, w * s, 0.0],
     );
 }
@@ -144,21 +144,71 @@ fn initial_ctm_nonzero_origin_pretranslates_per_rotation() {
     let h = f64::from(hpx) / s;
 
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 0, llx, lly),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 0, llx, lly),
         [s, 0.0, 0.0, s, -llx * s, -lly * s],
     );
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 90, llx, lly),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 90, llx, lly),
         [0.0, -s, s, 0.0, -lly * s, (h + llx) * s],
     );
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 180, llx, lly),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 180, llx, lly),
         [-s, 0.0, 0.0, -s, (w + llx) * s, (h + lly) * s],
     );
     assert_ctm_eq(
-        build_initial_ctm(wpx, hpx, (s, s), 270, llx, lly),
+        build_initial_ctm(hpx, (f64::from(wpx), f64::from(hpx)), (s, s), 270, llx, lly),
         [0.0, s, -s, 0.0, (w + lly) * s, -llx * s],
     );
+}
+
+#[test]
+fn initial_ctm_anchors_the_box_top_left_when_the_extent_is_fractional() {
+    // A box 272.67 px tall in a 273-row bitmap (and 190.4 px wide in 190
+    // columns) spans [0, 190.4] × [0, 272.67] from the top-left corner,
+    // whatever the rotation, the fraction of a row lying below it.
+    let (sx, sy) = (40.0 / 72.0, 40.0 / 72.0);
+    let extent = (190.4, 272.67);
+    let (llx, lly) = (12.5, -3.25);
+    let height = 273;
+    for rotate in [0, 90, 180, 270] {
+        let ctm = build_initial_ctm(height, extent, (sx, sy), rotate, llx, lly);
+        let (bw, bh) = if rotate % 180 == 0 {
+            (extent.0 / sx, extent.1 / sy)
+        } else {
+            (extent.1 / sy, extent.0 / sx)
+        };
+        let corners = [
+            (llx, lly),
+            (llx + bw, lly),
+            (llx, lly + bh),
+            (llx + bw, lly + bh),
+        ]
+        .map(|(x, y)| {
+            let (dx, dy) = ctm_transform(&ctm, x, y);
+            (dx, f64::from(height) - dy)
+        });
+        let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let max_x = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let max_y = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        for (got, want, edge) in [
+            (min_x, 0.0, "left"),
+            (max_x, extent.0, "right"),
+            (min_y, 0.0, "top"),
+            (max_y, extent.1, "bottom"),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "rotate {rotate} {edge}: got {got}, want {want}"
+            );
+        }
+    }
 }
 
 /// Page geometry input for `assert_box_corners_map_to`.
@@ -201,7 +251,14 @@ fn assert_box_corners_map_to(case: &CornerCase, want: &ExpectedCorners) {
         llx,
         lly,
     } = *case;
-    let ctm = build_initial_ctm(wpx, hpx, (sx, sy), rotate, llx, lly);
+    let ctm = build_initial_ctm(
+        hpx,
+        (f64::from(wpx), f64::from(hpx)),
+        (sx, sy),
+        rotate,
+        llx,
+        lly,
+    );
     // For 0°/180° the box is wpx×hpx; for 90°/270° the caller swapped the
     // bitmap dims, so the box in points is hpx×wpx.  Resolve box pts from
     // the unrotated orientation.
@@ -396,7 +453,7 @@ fn initial_ctm_non_spec_rotation_trips_debug_assert() {
     // Callers must normalise /Rotate to {0,90,180,270}; a non-spec value is a
     // contract violation and must fail loudly in debug rather than silently
     // selecting a rotation arm and rendering a wrong-but-plausible page.
-    let _ = build_initial_ctm(100, 100, (1.0, 1.0), 45, 0.0, 0.0);
+    let _ = build_initial_ctm(100, (100.0, 100.0), (1.0, 1.0), 45, 0.0, 0.0);
 }
 
 #[test]
@@ -408,7 +465,7 @@ fn initial_ctm_non_spec_rotation_release_falls_back_to_unrotated() {
         return;
     }
     assert_ctm_eq(
-        build_initial_ctm(100, 100, (1.0, 1.0), 45, 0.0, 0.0),
+        build_initial_ctm(100, (100.0, 100.0), (1.0, 1.0), 45, 0.0, 0.0),
         [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
     );
 }

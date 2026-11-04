@@ -5,39 +5,43 @@ use crate::PageGeometry;
 
 /// Build the initial page CTM that maps PDF user space to device pixels.
 ///
-/// `scale_x` and `scale_y` are device pixels per user-space unit along the
-/// device axes (`x_dpi / 72 × UserUnit`, `y_dpi / 72 × UserUnit`), applied
-/// after rotation.  `rotate_cw`
-/// is the page `/Rotate`, which callers must
-/// pass already normalised to one of {0, 90, 180, 270} (the only values ISO
-/// 32000-2 §14.11.6 defines; `page_size_pts_by_id` snaps `/Rotate` to this set
-/// upstream).  Any other value is a caller contract violation: it trips a
-/// `debug_assert` and, in release, renders unrotated rather than silently
-/// emitting a wrong-but-plausible rotation.  `origin_x`/`origin_y` are the
-/// selected page box's lower-left corner in PDF user space (ISO 32000-2
-/// §14.11.2); zero for the common box-at-origin case.
+/// `width × height` is the page's bitmap in device pixels and `extent` the
+/// page box's exact device size, of which the bitmap is the rounding; both
+/// are after rotation.  `scale_x` and `scale_y` are device pixels per
+/// user-space unit along the device axes (`x_dpi / 72 × UserUnit`,
+/// `y_dpi / 72 × UserUnit`), applied after rotation.  `rotate_cw` is the
+/// page `/Rotate`, which callers must pass already normalised to one of
+/// {0, 90, 180, 270} (the only values ISO 32000-2 §14.11.6 defines;
+/// `page_size_pts_by_id` snaps `/Rotate` to this set upstream).  Any other
+/// value is a caller contract violation: it trips a `debug_assert` and, in
+/// release, renders unrotated rather than silently emitting a
+/// wrong-but-plausible rotation.  `origin_x`/`origin_y` are the selected
+/// page box's lower-left corner in PDF user space (ISO 32000-2 §14.11.2);
+/// zero for the common box-at-origin case.
 ///
-/// The `to_device` helper applies an additional Y-flip (`height_px - dy`), so
+/// The box's top-left corner, as displayed, lands on the bitmap's top-left
+/// corner, for every rotation, and the box spans `extent` from there; the
+/// fraction of a pixel by which the bitmap's rounding exceeds the extent
+/// lies past the box's right and bottom edges.
+///
+/// The `to_device` helper applies an additional Y-flip (`height - dy`), so
 /// these matrices only carry scale + rotation + the box-origin pre-translation;
-/// the flip is not folded in here.  `w`/`h` are the output bitmap dimensions in
-/// points (`width_px / scale_x`, `height_px / scale_y`); for 90°/270° the
-/// caller has already swapped the pixel dimensions, so here `w` is the
-/// post-rotation width.
+/// the flip is not folded in here.  In points, `h` is the bitmap height
+/// (`height / scale_y`), `wr × hr` the extent (`extent / scale`) and
+/// `dh = h − hr`.
 ///
 /// PDF user-space content coordinates are absolute: a content point at PDF
-/// `(X, Y)` with `X ∈ [llx, llx+boxW]`, `Y ∈ [lly, lly+boxH]`.  We want the box
-/// lower-left `(llx, lly)` to land at device origin, so each branch is the
-/// box-at-origin matrix with the substitution `X → X-llx`, `Y → Y-lly` — i.e. an
-/// innermost pre-translation `T(-llx, -lly)` composed under rotate and then
-/// the device scale.  The device scale multiplies the matrix entries that
-/// produce device x (`a`, `c`, `e`) by `sx = scale_x` and those that produce
-/// device y (`b`, `d`, `f`) by `sy = scale_y`.  Per branch:
-///   Rotate 0   → `[ sx,   0,   0,  sy,     -llx·sx,     -lly·sy]`
-///   Rotate 90  → `[  0, -sy,  sx,   0,     -lly·sx,  (h+llx)·sy]`
-///   Rotate 180 → `[-sx,   0,   0, -sy,  (w+llx)·sx,  (h+lly)·sy]`
-///   Rotate 270 → `[  0,  sy, -sx,   0,  (w+lly)·sx,     -llx·sy]`
-/// When `llx = lly = 0` every branch reduces to the box-at-origin value, so
-/// origin-at-zero PDFs (the vast majority) are unchanged in scale.
+/// `(X, Y)` with `X ∈ [llx, llx+boxW]`, `Y ∈ [lly, lly+boxH]`.  Each branch
+/// is the box-at-origin matrix with the substitution `X → X-llx`,
+/// `Y → Y-lly` — i.e. an innermost pre-translation `T(-llx, -lly)` composed
+/// under rotate and then the device scale.  The device scale multiplies the
+/// matrix entries that produce device x (`a`, `c`, `e`) by `sx = scale_x`
+/// and those that produce device y (`b`, `d`, `f`) by `sy = scale_y`.  Per
+/// branch:
+///   Rotate 0   → `[ sx,   0,   0,  sy,      -llx·sx,  (dh−lly)·sy]`
+///   Rotate 90  → `[  0, -sy,  sx,   0,      -lly·sx,   (h+llx)·sy]`
+///   Rotate 180 → `[-sx,   0,   0, -sy,  (wr+llx)·sx,   (h+lly)·sy]`
+///   Rotate 270 → `[  0,  sy, -sx,   0,  (wr+lly)·sx,  (dh−llx)·sy]`
 ///
 /// The `initial_ctm_rotate{0,90,180,270}_maps_box_corners_to_device_pixels`
 /// tests pin each box corner to its required device pixel for every rotation,
@@ -50,8 +54,8 @@ use crate::PageGeometry;
 /// and logs malformed-box recovery.  This function therefore performs only the
 /// arithmetic; it does not re-validate.
 pub(super) fn build_initial_ctm(
-    width: u32,
     height: u32,
+    extent: (f64, f64),
     (sx, sy): (f64, f64),
     rotate_cw: u16,
     origin_x: f64,
@@ -59,17 +63,18 @@ pub(super) fn build_initial_ctm(
 ) -> Ctm {
     let llx = origin_x;
     let lly = origin_y;
-    let w = f64::from(width) / sx;
     let h = f64::from(height) / sy;
+    let wr = extent.0 / sx;
+    let dh = h - extent.1 / sy;
     match rotate_cw % 360 {
         // Rotate 0: standard scale + y-flip handled by to_device.
-        0 => [sx, 0.0, 0.0, sy, -llx * sx, -lly * sy],
+        0 => [sx, 0.0, 0.0, sy, -llx * sx, (dh - lly) * sy],
         // Rotate 90 CW: swap axes. Bitmap width = original H, height = original W.
         90 => [0.0, -sy, sx, 0.0, -lly * sx, (h + llx) * sy],
         // Rotate 180: flip both axes.
-        180 => [-sx, 0.0, 0.0, -sy, (w + llx) * sx, (h + lly) * sy],
+        180 => [-sx, 0.0, 0.0, -sy, (wr + llx) * sx, (h + lly) * sy],
         // Rotate 270 CW (= 90 CCW): swap axes, opposite orientation.
-        270 => [0.0, sy, -sx, 0.0, (w + lly) * sx, -llx * sy],
+        270 => [0.0, sy, -sx, 0.0, (wr + lly) * sx, (dh - llx) * sy],
         // Non-spec value: a caller contract violation (callers normalise to
         // {0,90,180,270} upstream).  Fail loudly in debug; in release fall back
         // to the unrotated matrix so a stray value renders upright rather than
@@ -79,7 +84,7 @@ pub(super) fn build_initial_ctm(
                 false,
                 "build_initial_ctm: rotate_cw must be normalised to {{0,90,180,270}}, got {other}"
             );
-            [sx, 0.0, 0.0, sy, -llx * sx, -lly * sy]
+            [sx, 0.0, 0.0, sy, -llx * sx, (dh - lly) * sy]
         }
     }
 }
@@ -113,6 +118,9 @@ pub struct PageView {
     pub page_width: u32,
     /// Height of the whole page in device pixels, after rotation.
     pub page_height: u32,
+    /// The page box's exact width and height in device pixels, after
+    /// rotation, of which `page_width × page_height` is the rounding.
+    pub extent: (f64, f64),
     /// Device pixels per point along the page's width (`x_dpi / 72` for the
     /// renderer's callers).  Positive and finite.
     pub scale_x: f64,
@@ -147,6 +155,7 @@ impl PageView {
         Self {
             page_width,
             page_height,
+            extent: (geom.width_pts * scale_x, geom.height_pts * scale_y),
             scale_x,
             scale_y,
             user_unit: geom.user_unit,
@@ -182,8 +191,8 @@ impl PageView {
     /// last (see [`window_ctm`]).
     pub(super) fn page_ctm(&self) -> Ctm {
         build_initial_ctm(
-            self.page_width,
             self.page_height,
+            self.extent,
             (self.scale_x * self.user_unit, self.scale_y * self.user_unit),
             self.rotate_cw,
             self.origin_x,
