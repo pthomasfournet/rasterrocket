@@ -54,6 +54,8 @@ bitflags! {
         const VERT    = 0x02;
         /// Segment was flipped (original y0 > y1) to enforce y0 ≤ y1.
         const FLIPPED = 0x04;
+        /// First segment of a subpath, in a path whose subpaths are closed.
+        const SUBPATH = 0x08;
     }
 }
 
@@ -117,9 +119,9 @@ pub struct XPathSeg {
 pub struct XPath {
     /// The flattened, transformed edge segments making up this path, in insertion order.
     pub segs: Vec<XPathSeg>,
-    /// Index in `segs` of the first segment of each subpath, in order, when
-    /// every subpath is closed; empty otherwise.
-    closed_subpaths: Vec<usize>,
+    /// Whether every subpath is closed, its first segment flagged
+    /// [`XPathFlags::SUBPATH`].
+    closed: bool,
     /// Lazily allocated (~25 KB) scratch for Bezier subdivision.
     curve_data: Option<CurveData>,
 }
@@ -135,7 +137,7 @@ impl XPath {
     pub(crate) fn aa_scaled_copy(&self) -> Self {
         let mut scaled = Self {
             segs: self.segs.clone(),
-            closed_subpaths: self.closed_subpaths.clone(),
+            closed: self.closed,
             curve_data: None,
         };
         scaled.aa_scale();
@@ -147,7 +149,7 @@ impl XPath {
     pub(crate) const fn empty() -> Self {
         Self {
             segs: Vec::new(),
-            closed_subpaths: Vec::new(),
+            closed: false,
             curve_data: None,
         }
     }
@@ -179,7 +181,7 @@ impl XPath {
         let flatness_sq = flatness * flatness;
         let mut xpath = Self {
             segs: Vec::new(),
-            closed_subpaths: Vec::new(),
+            closed: close_subpaths,
             curve_data: None,
         };
 
@@ -218,9 +220,7 @@ impl XPath {
         while i < n {
             if path.flags[i].contains(PathFlags::FIRST) {
                 // Start of a new subpath.
-                if close_subpaths {
-                    xpath.closed_subpaths.push(xpath.segs.len());
-                }
+                let first_seg = xpath.segs.len();
                 let sp_x = tpts[i].x;
                 let sp_y = tpts[i].y;
                 let mut cur_x = sp_x;
@@ -270,6 +270,9 @@ impl XPath {
                 if close_subpaths && ((cur_x - sp_x).abs() > 1e-10 || (cur_y - sp_y).abs() > 1e-10)
                 {
                     xpath.add_segment(cur_x, cur_y, sp_x, sp_y);
+                }
+                if close_subpaths && let Some(seg) = xpath.segs.get_mut(first_seg) {
+                    seg.flags.insert(XPathFlags::SUBPATH);
                 }
             } else {
                 i += 1;
@@ -332,52 +335,40 @@ impl XPath {
     /// coordinate is kept, since the scanner skips its NaN segments and its
     /// remaining crossings need not sum to zero.
     pub fn cull_subpaths_outside(&mut self, x_min: i32, x_max: i32, y_min: i32, y_max: i32) {
-        if self.closed_subpaths.is_empty() {
+        if !self.closed {
             return;
         }
-        let ends = self
-            .closed_subpaths
-            .iter()
-            .skip(1)
-            .copied()
-            .chain(std::iter::once(self.segs.len()));
-        let ranges: Vec<(usize, usize)> = self.closed_subpaths.iter().copied().zip(ends).collect();
-        let outside = |segs: &[XPathSeg]| {
-            let (mut lx, mut hx, mut ly, mut hy) = (
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-            );
-            for seg in segs {
-                let coords = [seg.x0, seg.y0, seg.x1, seg.y1];
-                if !coords.iter().all(|c| c.is_finite()) {
-                    return false;
-                }
-                lx = lx.min(seg.x0).min(seg.x1);
-                hx = hx.max(seg.x0).max(seg.x1);
-                ly = ly.min(seg.y0).min(seg.y1);
-                hy = hy.max(seg.y0).max(seg.y1);
-            }
-            !segs.is_empty()
-                && (floor_i32(hx) < x_min
-                    || floor_i32(lx) > x_max
-                    || floor_i32(hy) < y_min
-                    || floor_i32(ly) > y_max)
+        let inside = |(lx, hx, ly, hy): (f64, f64, f64, f64)| {
+            floor_i32(lx) >= x_min
+                && floor_i32(hx) <= x_max
+                && floor_i32(ly) >= y_min
+                && floor_i32(hy) <= y_max
         };
-        if !ranges.iter().any(|&(a, b)| outside(&self.segs[a..b])) {
+        // When the box of the finite coordinates lies within the bounds, so
+        // does every subpath that could be removed.
+        if inside(bounding_box(&self.segs)) {
             return;
         }
-        let mut segs = Vec::with_capacity(self.segs.len());
-        let mut starts = Vec::with_capacity(ranges.len());
-        for (a, b) in ranges {
-            if !outside(&self.segs[a..b]) {
-                starts.push(segs.len());
-                segs.extend_from_slice(&self.segs[a..b]);
+        let outside = |segs: &[XPathSeg]| {
+            let finite = segs.iter().all(|s| {
+                s.x0.is_finite() && s.y0.is_finite() && s.x1.is_finite() && s.y1.is_finite()
+            });
+            if !finite || segs.is_empty() {
+                return false;
+            }
+            let (lx, hx, ly, hy) = bounding_box(segs);
+            floor_i32(hx) < x_min
+                || floor_i32(lx) > x_max
+                || floor_i32(hy) < y_min
+                || floor_i32(ly) > y_max
+        };
+        let segs = std::mem::take(&mut self.segs);
+        self.segs.reserve(segs.len());
+        for subpath in segs.chunk_by(|_, next| !next.flags.contains(XPathFlags::SUBPATH)) {
+            if !outside(subpath) {
+                self.segs.extend_from_slice(subpath);
             }
         }
-        self.segs = segs;
-        self.closed_subpaths = starts;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -566,6 +557,30 @@ fn build_adjusts(
         ));
     }
     adjusts
+}
+
+/// The bounds of no points: every point extends them.
+const NO_BOUNDS: (f64, f64, f64, f64) = (
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+);
+
+/// The smallest box `(x_min, x_max, y_min, y_max)` holding the endpoints of
+/// `segs`, NaN coordinates aside; [`NO_BOUNDS`] when there are none.
+fn bounding_box(segs: &[XPathSeg]) -> (f64, f64, f64, f64) {
+    // A comparison with NaN is false, so NaN never replaces a bound.
+    let lo = |a: f64, b: f64| if b < a { b } else { a };
+    let hi = |a: f64, b: f64| if b > a { b } else { a };
+    segs.iter().fold(NO_BOUNDS, |(lx, hx, ly, hy), s| {
+        (
+            lo(lo(lx, s.x0), s.x1),
+            hi(hi(hx, s.x0), s.x1),
+            lo(lo(ly, s.y0), s.y1),
+            hi(hi(hy, s.y0), s.y1),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -772,6 +787,11 @@ mod tests {
         let n = open.segs.len();
         open.cull_subpaths_outside(0, 15, 0, 15);
         assert_eq!(open.segs.len(), n, "an unclosed path is not culled");
+
+        let mut within = XPath::new(&path, &identity(), 1.0, true);
+        let n = within.segs.len();
+        within.cull_subpaths_outside(-40, 40, -40, 40);
+        assert_eq!(within.segs.len(), n, "nothing lies outside wider bounds");
 
         let mut b = PathBuilder::new();
         b.move_to(-30.0, 2.0).unwrap();
