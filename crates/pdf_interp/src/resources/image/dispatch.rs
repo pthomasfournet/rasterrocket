@@ -209,6 +209,7 @@ pub(super) fn decode_image_stream<
         .convert(
             doc,
             samples,
+            ctx.tint_budget,
             #[cfg(feature = "gpu-icc")]
             &ctx.icc,
         )

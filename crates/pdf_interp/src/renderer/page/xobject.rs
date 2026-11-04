@@ -197,6 +197,7 @@ impl PageRenderer<'_> {
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
             color_spaces: self.resources.color_space_dict(),
+            tint_budget: Some(&self.tint_budget),
             #[cfg(feature = "nvjpeg")]
             nvjpeg: self.nvjpeg.as_mut(),
             #[cfg(feature = "vaapi")]

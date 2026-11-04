@@ -259,6 +259,9 @@ pub struct PageRenderer<'doc> {
     /// Image `XObjects` already decoded on this page, shared with the
     /// renderers of its pattern cells, and the document's shared decodes.
     image_memo: image_memo::SharedImageMemo,
+    /// The tint-transform work left to the images of the page, shared with
+    /// the renderers of its pattern cells and Type 3 glyphs.
+    tint_budget: std::rc::Rc<crate::resources::image::colorspace::TintBudget>,
     /// Shadings and tiling cells already resolved on this page, shared with
     /// the renderers of its pattern cells.
     pattern_memo: pattern_memo::SharedPatternMemo,
@@ -498,6 +501,7 @@ impl<'doc> PageRenderer<'doc> {
             ink_map: ink_map::InkMap::default(),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
+            tint_budget: std::rc::Rc::new(crate::resources::image::colorspace::TintBudget::page()),
             pattern_memo: pattern_memo::PatternMemo::shared(),
             form_memo: form_memo::FormMemo::shared(),
             op_budget: MAX_PAGE_OPS,
@@ -715,9 +719,11 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Draw image and form `XObjects`, shadings and tiling cells from
     /// `parent`'s memos, and keep this renderer's in them, so a pattern cell
-    /// does not decode, parse or rasterise what the page already has.
+    /// does not decode, parse or rasterise what the page already has.  The
+    /// cell's images also spend the page's tint-transform budget.
     pub(super) fn share_memos(&mut self, parent: &Self) {
         self.image_memo = std::rc::Rc::clone(&parent.image_memo);
+        self.tint_budget = std::rc::Rc::clone(&parent.tint_budget);
         self.pattern_memo = std::rc::Rc::clone(&parent.pattern_memo);
         self.form_memo = std::rc::Rc::clone(&parent.form_memo);
     }

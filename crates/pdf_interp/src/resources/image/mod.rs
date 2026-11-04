@@ -754,6 +754,9 @@ pub struct ImageDecodeCtx<'a> {
     /// which an inline image's `/CS` name other than a device space resolves
     /// (PDF §8.9.7).
     pub color_spaces: Option<&'a Dictionary>,
+    /// The tint-transform work left to the page's images; `None` bounds
+    /// each image by its own budget alone.
+    pub tint_budget: Option<&'a colorspace::TintBudget>,
     /// nvJPEG decoder for large `DCTDecode` images.
     #[cfg(feature = "nvjpeg")]
     pub nvjpeg: Option<&'a mut NvJpegDecoder>,
@@ -782,6 +785,7 @@ impl<'a> ImageDecodeCtx<'a> {
         Self {
             doc,
             color_spaces: None,
+            tint_budget: None,
             #[cfg(feature = "nvjpeg")]
             nvjpeg: None,
             #[cfg(feature = "vaapi")]
