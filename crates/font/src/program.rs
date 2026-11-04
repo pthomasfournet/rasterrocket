@@ -198,8 +198,9 @@ impl FontProgram {
     /// [`LoadError::UnsupportedFormat`] when the bytes match no supported
     /// format; [`LoadError::Malformed`] when they do but cannot be parsed
     /// or carry no outlines.
-    pub fn parse(data: Vec<u8>, face_index: u32) -> Result<Self, LoadError> {
+    pub fn parse(mut data: Vec<u8>, face_index: u32) -> Result<Self, LoadError> {
         let format = FontFormat::detect(&data).ok_or(LoadError::UnsupportedFormat)?;
+        data.shrink_to_fit();
         let data = Arc::new(data);
         let name_charmap = OnceLock::new();
         let (outlines, upem, cid_to_gid) = match format {
@@ -1053,4 +1054,19 @@ impl OutlinePen for NullPen {
     fn quad_to(&mut self, _cx0: f32, _cy0: f32, _x: f32, _y: f32) {}
     fn curve_to(&mut self, _cx0: f32, _cy0: f32, _cx1: f32, _cy1: f32, _x: f32, _y: f32) {}
     fn close(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FontProgram;
+
+    /// The program keeps no spare capacity of the vector it is parsed from.
+    #[test]
+    fn program_bytes_hold_no_spare_capacity() {
+        let mut data = Vec::with_capacity(2 * font_test_data::AHEM.len());
+        data.extend_from_slice(font_test_data::AHEM);
+        let program = FontProgram::parse(data, 0).expect("Ahem parses");
+        let owner = program.shared_data();
+        assert_eq!(owner.capacity(), owner.len());
+    }
 }
