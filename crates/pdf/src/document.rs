@@ -274,8 +274,15 @@ fn parse_structure(data: &[u8]) -> Result<(XrefTable, usize), PdfError> {
 /// [`PdfError::Io`] if the file cannot be read, and the structural errors of
 /// [`Document::open`] (empty, not a PDF, no cross-reference table).
 pub fn is_encrypted(path: &Path) -> Result<bool, PdfError> {
-    let data = load_file(path)?;
-    let (xref, _) = parse_structure(data.as_bytes())?;
+    is_encrypted_bytes(load_file(path)?.as_bytes())
+}
+
+/// [`is_encrypted`] for a document held in `bytes`.
+///
+/// # Errors
+/// The errors of parsing the cross-reference structure.
+pub fn is_encrypted_bytes(bytes: &[u8]) -> Result<bool, PdfError> {
+    let (xref, _) = parse_structure(bytes)?;
     Ok(xref.trailer.contains_key(b"Encrypt"))
 }
 

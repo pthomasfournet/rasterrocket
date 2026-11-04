@@ -214,6 +214,13 @@ pub fn is_encrypted(path: &Path) -> bool {
     pdf::is_encrypted(path).unwrap_or(false)
 }
 
+/// [`is_encrypted`] for a document held in memory, such as one read from
+/// standard input; `false` when `bytes` do not parse.
+#[must_use]
+pub fn is_encrypted_bytes(bytes: &[u8]) -> bool {
+    pdf::is_encrypted_bytes(bytes).unwrap_or(false)
+}
+
 /// Message shown when an encrypted document's decryption is not authorised.
 ///
 /// Used when the CLI liability gate is declined, or on a non-interactive

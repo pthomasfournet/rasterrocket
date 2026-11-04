@@ -19,8 +19,11 @@ not implemented, and the CropBox is always rendered).
   extension is `.cbz` (ZIP), `.cb7` (7-Zip), or `.cbt` (TAR). The format is
   chosen by extension: comic archives take the comic path, everything else is
   treated as a PDF. `.cbr` (RAR) is unsupported and exits with a
-  convert-to-`.cbz` message. A path that begins with `-` must follow a literal
-  `--` (or be written `./-name.pdf`) so it is not read as an option.
+  convert-to-`.cbz` message. `-` reads a PDF from standard input
+  (`rrocket - out < doc.pdf`); an encrypted one is decrypted only under
+  `--decrypt-owned`, since no terminal is left to prompt on. A path that
+  begins with `-` must follow a literal `--` (or be written `./-name.pdf`) so
+  it is not read as an option.
 - `<OUTPUT_PREFIX>` — output filename prefix. The page number and extension are appended automatically, the number zero-padded to the width of the document's page count (prefix `out` → `out-1.ppm` … `out-9.ppm` for a 9-page document, `out-01.ppm` … `out-12.ppm` for a 12-page one). A bare prefix such as `out` writes to a temporary directory in RAM, not the current directory; see [Output destination](#output-destination-ram-backed-by-default).
 
 **Comic archives:** pages are the archive's image entries, ordered by a

@@ -24,7 +24,9 @@ mod xref;
 
 pub use crypt::{OpenOptions, Password, msg_gate_declined};
 pub use dictionary::Dictionary;
-pub use document::{ContentFailure, Document, PageContent, Resolved, is_encrypted};
+pub use document::{
+    ContentFailure, Document, PageContent, Resolved, is_encrypted, is_encrypted_bytes,
+};
 pub use error::PdfError;
 pub use lexer::{decode_name, parse_number};
 pub use linearization::LinearizationHints;

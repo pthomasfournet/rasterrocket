@@ -431,6 +431,56 @@ fn fax_with_a_bare_stem_writes_the_document_to_disk() {
     );
 }
 
+/// `-` reads the PDF from standard input and renders it as the same file
+/// named by path does; an empty standard input is refused.
+#[test]
+fn a_pdf_on_standard_input_renders_as_from_a_file() {
+    use std::io::Write;
+    let pdf = two_page_pdf();
+    let (dir, input) = workdir(&pdf);
+    assert_success(&rrocket(dir.path(), &input, &["-r", "72"]));
+    let from_file = outputs(dir.path());
+
+    let piped = tempfile::tempdir().expect("create temp dir");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .current_dir(piped.path())
+        .args(["--no-ram", "--backend", "cpu", "-r", "72", "-", "./out"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run rrocket");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(&pdf)
+        .expect("write the PDF");
+    let out = child.wait_with_output().expect("wait for rrocket");
+    assert_success(&out);
+    assert_eq!(outputs(piped.path()), from_file);
+    for name in &from_file {
+        assert_eq!(
+            std::fs::read(piped.path().join(name)).unwrap(),
+            std::fs::read(dir.path().join(name)).unwrap(),
+            "{name}"
+        );
+    }
+
+    let empty = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .current_dir(piped.path())
+        .args(["--no-ram", "--backend", "cpu", "-", "./empty"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run rrocket");
+    assert!(!empty.status.success());
+    assert!(
+        String::from_utf8_lossy(&empty.stderr).contains("standard input is empty"),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+}
+
 #[test]
 fn missing_input_fails_without_output() {
     let dir = tempfile::tempdir().expect("create temp dir");

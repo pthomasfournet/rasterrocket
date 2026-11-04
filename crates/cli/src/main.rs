@@ -29,6 +29,29 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The document on standard input, read to its end.
+///
+/// # Errors
+///
+/// When standard input is a terminal, cannot be read, or is empty.
+fn read_stdin_pdf() -> Result<Vec<u8>, String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err("INPUT \"-\" reads standard input, which is a terminal; \
+                    pipe a PDF in (rrocket - out < doc.pdf) or name the file"
+            .to_owned());
+    }
+    let mut bytes = Vec::new();
+    let len = stdin
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read standard input: {e}"))?;
+    if len == 0 {
+        return Err("standard input is empty; INPUT \"-\" expects a PDF on it".to_owned());
+    }
+    Ok(bytes)
+}
+
 /// Every exit path returns through here rather than `std::process::exit`,
 /// so the RAM output guard and the thread pool are dropped before the
 /// process ends.
@@ -100,13 +123,26 @@ fn main() -> ExitCode {
         };
     }
 
+    // `-` names standard input, read to its end and parsed from memory.
+    let stdin_pdf = if args.input() == "-" {
+        match read_stdin_pdf() {
+            Ok(bytes) => Some(bytes),
+            Err(e) => return fail(e),
+        }
+    } else {
+        None
+    };
+
     // Encrypted-document liability gate (production/CLI path only). Probe
     // the input cheaply; only an encrypted document triggers the gate, so
-    // unencrypted documents pay zero cost and see no prompt. `-` (stdin)
-    // cannot be probed and is treated as unencrypted — an encrypted stdin
-    // stream surfaces the clear EncryptedDocument error from open_session
-    // below, never a silent strip.
-    if args.input() != "-" && pdf_raster::is_encrypted(std::path::Path::new(args.input())) {
+    // unencrypted documents pay zero cost and see no prompt.  A document on
+    // standard input leaves no terminal to prompt on, so only
+    // `--decrypt-owned` or its environment variable authorise it.
+    let encrypted = stdin_pdf.as_deref().map_or_else(
+        || pdf_raster::is_encrypted(std::path::Path::new(args.input())),
+        pdf_raster::is_encrypted_bytes,
+    );
+    if encrypted {
         // Never silently strip in production: require an explicit decision.
         let authorized = decrypt_gate::prompt_decrypt(args.decrypt_owned);
         if !authorized {
@@ -129,14 +165,17 @@ fn main() -> ExitCode {
         Err(e) => return fail(format_args!("cannot start the render thread pool: {e}")),
     };
 
-    let session =
-        match pdf_raster::open_session(std::path::Path::new(args.input()), &session_config) {
-            Ok(session) => session,
-            Err(e) => {
-                diagnostics::report_open_error(&e, &args, session_config.policy);
-                return ExitCode::FAILURE;
-            }
-        };
+    let opened = stdin_pdf.map_or_else(
+        || pdf_raster::open_session(std::path::Path::new(args.input()), &session_config),
+        |bytes| pdf_raster::open_session_from_bytes(bytes, &session_config),
+    );
+    let session = match opened {
+        Ok(session) => session,
+        Err(e) => {
+            diagnostics::report_open_error(&e, &args, session_config.policy);
+            return ExitCode::FAILURE;
+        }
+    };
 
     let n = session.total_pages();
     if n == 0 {
