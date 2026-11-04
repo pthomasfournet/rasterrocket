@@ -41,7 +41,7 @@ dispatches to it.
 **Overprint simulation has gaps (on master).** Under `--overprint`,
 `Separation` / `DeviceN` images and shadings, tiling-pattern cells and
 transparency groups as a whole knock out instead of overprinting; see
-[Current status](#current-status-2026-11-03).
+[Current status](#current-status-2026-11-04).
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -2285,17 +2285,18 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-03)
+## Current status (2026-11-04)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 planned Phase 13 above; Phase 14 is on master, unreleased.
 
 **Unreleased on master since v2.0.0 (2026-10-31):** Phase 13's fax output,
 `--print` through CUPS and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
-follow-ups, overprint simulation (below), and two hardening review passes:
+follow-ups, overprint simulation (below), and three hardening review passes:
 2026-11-03 over the overprint work, gray output and the vendored forks, and
-2026-11-04 over everything since (output path, document images, parser,
-rasteriser, text, allocation, HTJ2K, printing).  The second fixed, among
+two on 2026-11-04, the first over everything since (output path, document
+images, parser, rasteriser, text, allocation, HTJ2K, printing) and the
+second over the work that followed it (below).  The first fixed, among
 others: bilevel and planar TIFF pages in comic archives (every one failed
 before), subpaths ending in a curve merging into the next (filled
 artwork drawn in several curve-closed loops gained connector fills),
@@ -2303,6 +2304,7 @@ antialiased edges past device column 8191, a quadratic cross-reference
 index and an unbounded `/Count`, and a world-readable print spool.
 Public API added since v2.0.0, none of it breaking a v2.0.0 caller:
 `RasterOptions::overprint`, `SessionConfig::overprint`,
+`RasterOptions::image_budget`, `SessionConfig::image_budget`,
 `PageDiagnostics::unslotted_spots`, `ComicOptions::session` (the session an
 embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `Bitmap::into_data` and `Bitmap::from_packed`; in `rasterrocket-interp`,
@@ -2313,7 +2315,9 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `DOCUMENT_IMAGE_BUDGET_BYTES` and `PageRenderer::set_document_images`;
 `RasterError::PageAllocationFailed` (the enum is `non_exhaustive`),
 `PageRenderer::try_with_page_group` in `rasterrocket-interp`, and
-`Bitmap::try_new_filled` / `BitmapAllocError` in `rasterrocket-render`. The
+`Bitmap::try_new_filled` / `BitmapAllocError` in `rasterrocket-render`;
+`DeviceKernel`, `device_kernel_enabled`, `aa_fill_threshold` (`gpu-aa`) and
+`huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
 **Document-wide image decodes, on master, unreleased.** An image `XObject`
@@ -2425,19 +2429,106 @@ every clip test exactly as the eight did, so a page installing thousands of
 byte-identical (the 1 125 fixture and archive PDFs, a randomized parity
 test of every clip query).
 
-**Tint-transform work bounded per image, unreleased.** An image whose
-colour space converts through a tint transform (`DeviceN`, and the other
-spaces converted tuple by tuple) has a budget of 2^28 interpreted
-operations, each conversion costing its function's static bound (a Type 4
-program's tokens). Within it, by pixel or by distinct sample tuple (up to
-2^20 of them), every pixel converts exactly as before. Past it, the image
-converts through a lattice of exact conversions (18, 16, 6, 4 or 2 values
-per component, the largest whose nodes fit the budget) with multilinear
-interpolation, shared with Type 0 functions; past eight components, or
-when no lattice fits, the image is dropped with a warning. A
-2000 × 2000 four-colorant noise image under a 100 000-token transform
-renders in 0.4 s; it did not finish in 180 s before. The fixture and
-archive PDFs render byte-identically.
+**Tint-transform work bounded per image and per page, unreleased.** An
+image whose colour space converts through a tint transform (`DeviceN`, and
+the other spaces converted tuple by tuple) has a budget of 2^28
+interpreted operations, and the images of a page, its pattern cells and
+Type 3 glyphs included, share 2^32; an image spends at most the smaller of
+its own budget and what the page has left. Each conversion costs its
+function's bound, fixed when the function is built: a Type 4 program's
+tokens plus the entries its `copy` and `roll` can move, a Type 0
+function's grid corners × outputs × bits per sample, and the transforms
+of nested alternate and `Indexed` base spaces added in. Within the budget,
+by pixel or by distinct sample tuple (up to 2^20 of them), every pixel
+converts exactly as before. Past it, the image converts through a lattice
+of exact conversions (18, 16, 6, 4 or 2 values per component, the largest
+whose nodes fit; one-component images included) with multilinear
+interpolation, shared with Type 0 functions, and a warning names the grid;
+past eight components, or when no lattice fits, the image is dropped with
+a warning. A decode the page's remaining budget curtailed is not offered
+to the document image store, so a page's output does not depend on which
+page decoded an image first. One Type 4 run is limited to 2^20 operations.
+A 2000 × 2000 four-colorant noise image under a 100 000-token transform
+renders in 0.4 s; it did not finish in 180 s before. Before the page
+budget, a page of a thousand images each just inside the per-image budget
+took a quarter of an hour. The fixture and archive PDFs render byte-identically.
+
+**Vulkan on integrated GPUs and on macOS, unreleased.** On an integrated
+GPU, device buffers are host memory, mapped and read and written in place
+instead of staged; buffers the host reads back are placed in host-cached
+memory (on the Raphael iGPU under RADV a 64 MiB download takes 3.1–3.5 ms
+instead of 212–235 ms, and a 16 Mpx device AA fill 13 ms instead of
+38–65 ms), and a discrete GPU stages its downloads through host-cached
+memory too. A device AA fill is one submission instead of four (CUDA per
+fill: 25.5 → 12.1 µs at 256 px, 631 → 527 µs at 4 MP), its scratch buffers
+owned by the backend and reused across pages. On macOS the Vulkan backend
+finds Homebrew's or an absolute `$VULKAN_SDK`'s loader and enables
+portability enumeration, so MoltenVK runs it: the fixtures render
+byte-identically on an A18 Pro's GPU and its CPU. Under `auto`, no Vulkan
+device is initialised while both Vulkan kernels are dormant, no
+parallel-Huffman decoder is built while its kernel is disabled, and a
+`--vulkan-device` / `PDF_RASTER_VULKAN_DEVICE` selector is still checked
+against the enumerated devices, so one that matches nothing fails.
+Concurrent Vulkan instance creation and teardown, which crashed in the
+loader, is serialised. The fixtures render byte-identically under
+`--backend vulkan` on the RTX 5070 and on RADV and under `--backend cuda`,
+against `--backend cpu`, with the AA fill forced on (215 outputs each).
+`tests/compare/ab_render.sh` and `ab_archive.sh` compare two binaries, or
+two backends of one, byte for byte.
+
+**Second 2026-11-04 review pass, unreleased.** A review of the work since
+the first pass of the day:
+- *JBIG2.* Every symbol instance is charged against the page's work
+  budget whether or not it writes pixels, a dictionary's aggregate
+  symbols share one instance allowance, and an exhausted memory or work
+  budget fails the image in lenient mode too instead of dropping regions
+  silently; a pattern dictionary 128 pixels wide or more placed its
+  collective bitmap's AT pixel wrongly (or overflowed at 128).
+- *Tint transforms.* The page-wide budget, the cost model and the Type 4
+  run limit described above; a Type 0 function reads its grid at the
+  stride of its own output count; a function's cost is stored when it is
+  built (a chain of stitching functions sharing sub-functions made the
+  walk exponential); a NaN lattice position takes the first node.
+- *Rasteriser.* A sloped edge's 48.16 fixed-point position is re-anchored
+  every 4096 rows, so a vertex far outside the page no longer moves the
+  edge by pixels (up to about 7 px for a vertex 10^6 rows above it); the
+  error is at most 1/32 px plus one conversion, and region renders stay
+  byte-identical to the whole page.
+- *Interpreter.* Tiling-pattern cells, kept forms and inline-image decodes
+  are keyed on the identity of the resources and colour-space dictionary
+  they resolve in, so two resource sets built without a page object
+  (interactive-form default resources) no longer share a cell or a decode;
+  the document font store, like the image store, serves one document;
+  the render-time `suggested_dpi` hint divides by the page width in
+  points, as the prescan does, instead of always returning the maximum
+  for a full-page scan; kept forms are charged for the heap behind their
+  operands. A refused tiling-pattern screen, pattern-cell or Type 3
+  child canvas, or canvas snapshot stops the page with
+  `RasterError::PageAllocationFailed` instead of aborting the process.
+- *GPU.* Mapped host access holds the Vulkan recorder lock, so a page
+  submitted from another thread cannot write a buffer being read; one-shot
+  transfers end with a host-visibility barrier and zero-fills are ordered
+  after earlier dispatches of the page; devices lacking a required feature
+  are skipped under `auto` and refused by a selector; a failed or
+  panicking page leaves the recorder idle and is abandoned on every
+  backend through one chain; CUDA rejects transfers recorded outside a
+  page, as the trait documents, and its host buffers are cudarc's pinned
+  slices, whose drop waits for in-flight copies; AA scratch growth is
+  bounded to 64 MiB beyond the request; a relative or empty `$VULKAN_SDK`
+  is ignored on macOS, so a loader planted in the working directory is
+  not loaded.
+- *CLI.* `--list-printers` finds the default destination in any locale
+  and ends quietly on a closed pipe; a refused print job points at
+  `--list-printers` (and `--printer` for the default destination), not at
+  a missing `lp`.
+- *Fonts.* A shaping run that exhausts harfrust's limits is drawn glyph by
+  glyph with a warning instead of half-shaped; vertical forms that name no
+  glyph of the program are ignored; a cached program releases its spare
+  capacity. The font forks' `CHANGES.md` files list every remaining local
+  delta.
+- *Comparison scripts.* `ab_archive.sh` draws the same sample in every
+  locale, fails when no page was compared, and counts a render failure
+  once.
 
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
@@ -2448,7 +2539,7 @@ are blocking by design, and the composite and soft-mask kernels use one
 Deferred/blocked items, in full:
 
 - **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.
-- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; a formal byte-parity run against the CPU path on RADV is still to do. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
+- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; on RADV the fixtures render byte-identically to the CPU path with the AA fill forced on (215 outputs, `tests/compare/ab_render.sh`), and an archive-scale byte-parity run (`ab_archive.sh`) is still to do. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
 - **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
 - **Banded / clip-restricted image decoding** — deferred by measurement (2026-11-04). Every codec decodes an image whole, and the page memo and document store share that one decode between draws and pages. Over the first 40 pages of the 1 125 fixture and archive PDFs (49 661 image draws), the largest decode is 81 MiB and only 3 draws of 16 MiB or more show less than half their image (one 25 MiB JPEG), so decoding just the visible rows would save 45 MiB in all. Hostile sizes are already bounded: the 1 GiB decode budget is checked before allocation and sample buffers are allocated fallibly. Revive for a workload of very large images drawn mostly clipped.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.

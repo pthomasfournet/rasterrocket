@@ -98,7 +98,7 @@ once.** The full list, with migration notes, is in
   unreleased: `--jpeg` with `--jpegopt`, `--tiff`, the fax output,
   printing through CUPS (`--print`) and `--overprint` are implemented; see the
   [CLI reference](docs/cli-reference.md) and
-  [ROADMAP.md](ROADMAP.md#current-status-2026-11-03).)
+  [ROADMAP.md](ROADMAP.md#current-status-2026-11-04).)
 
 ## What's new in v1.5.0
 
