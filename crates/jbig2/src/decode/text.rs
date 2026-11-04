@@ -1003,17 +1003,16 @@ mod tests {
         data
     }
 
-    fn decode_region(data: &[u8], budget: Budget) -> Result<()> {
-        let header = parse(&mut Reader::new(data), 0, false)?;
+    fn decode_region(data: &[u8], symbols: &[&Bitmap], budget: Budget) -> Result<RegionBitmap> {
+        let header = parse(&mut Reader::new(data), symbols.len() as u32, false)?;
         let mut scratch = ScratchBuffers::new(budget);
         decode(
             &header,
-            &[],
+            symbols,
             &[],
             &StandardHuffmanTables::new(),
             &mut scratch,
         )
-        .map(|_| ())
     }
 
     /// Instances that reference no symbol write no pixels, yet each one is
@@ -1023,8 +1022,26 @@ mod tests {
         let data = text_region_data(1, 1, 3200, 100, 0xfc);
 
         assert_eq!(
-            decode_region(&data, Budget::with_limits(1 << 20, 64 * 1000)),
-            Err(DecodeError::Overflow(OverflowError::WorkBudget))
+            decode_region(&data, &[], Budget::with_limits(1 << 20, 64 * 1000)).err(),
+            Some(DecodeError::Overflow(OverflowError::WorkBudget))
+        );
+    }
+
+    /// Placed symbols charge the pixels they cover on top of the cost of
+    /// their instances.
+    #[test]
+    fn placed_pixels_are_charged() {
+        let unlimited = Budget::with_limits(1 << 20, 1 << 20);
+        let symbol = Bitmap::new_with(32, 32, 0, 0, true, &unlimited).unwrap();
+        // Ten instances, which this coded data places inside the region.
+        let data = text_region_data(32, 32, 10, 100, 0x18);
+
+        let region = decode_region(&data, &[&symbol], unlimited).unwrap();
+        assert!(region.bitmap.data.iter().any(|&word| word != 0));
+
+        assert_eq!(
+            decode_region(&data, &[&symbol], Budget::with_limits(1 << 20, 10 * 64)).err(),
+            Some(DecodeError::Overflow(OverflowError::WorkBudget))
         );
     }
 }

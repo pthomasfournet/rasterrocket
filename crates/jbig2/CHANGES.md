@@ -63,8 +63,10 @@ is opened with `Page::new_embedded`.
   images) the largest page used 21 % of its memory budget and 1.6 % of
   its compositing budget, and the largest globals 2 % of theirs; no
   output changes. Tests: `tests/budget.rs`, `budget::tests`,
-  `bitmap::tests`, `decode::text::tests`; the exhausted-decoder test of
-  `tests/malformed.rs` declares a region that the budget admits. The
+  `bitmap::tests`, `decode::text::tests` (instance and pixel work),
+  `decode::symbol::tests` (every allocation of a dictionary, including
+  its collective bitmap and exported copies); the exhausted-decoder test
+  of `tests/malformed.rs` declares a region that the budget admits. The
   budget's counters are `Cell`s, which leaves the auto traits of the
   public types as upstream has them with the `std` feature:
   `DecoderContext` is `Send` but not `Sync` (its lazily built standard

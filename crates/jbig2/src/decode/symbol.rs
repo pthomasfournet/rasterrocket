@@ -887,6 +887,94 @@ pub(crate) fn parse<'a>(
 mod tests {
     use super::*;
 
+    /// The shortest code of `value` (`None` for OOB) in `table`, found by
+    /// decoding every bit string of up to 16 bits.
+    fn huffman_code(table: &HuffmanTable, value: Option<i32>) -> Vec<bool> {
+        for len in 1..=16_u32 {
+            for code in 0..1_u32 << len {
+                let bits: Vec<bool> = (0..len).rev().map(|i| code >> i & 1 != 0).collect();
+                let bytes = pack(&bits);
+                let mut reader = Reader::new(&bytes);
+                let consumed = |reader: &Reader<'_>| reader.byte_pos() * 8 + reader.bit_pos();
+                if table.decode(&mut reader) == Ok(value) && consumed(&reader) == len as usize {
+                    return bits;
+                }
+            }
+        }
+        panic!("no code of at most 16 bits for {value:?}");
+    }
+
+    /// `bits`, most significant first, padded with zeros to whole bytes.
+    fn pack(bits: &[bool]) -> Vec<u8> {
+        bits.chunks(8)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0, |byte, (i, &bit)| byte | u8::from(bit) << (7 - i))
+            })
+            .collect()
+    }
+
+    /// A Huffman-coded symbol dictionary segment (7.4.2.1) with the default
+    /// tables, defining one blank `size` × `size` symbol in an uncompressed
+    /// collective bitmap (6.5.9) and exporting it.
+    fn one_symbol_dictionary(size: u8) -> Vec<u8> {
+        let tables = StandardHuffmanTables::new();
+        let size_value = i32::from(size);
+
+        let mut bits = huffman_code(tables.table_d(), Some(size_value));
+        bits.extend(huffman_code(tables.table_b(), Some(size_value)));
+        bits.extend(huffman_code(tables.table_b(), None));
+        bits.extend(huffman_code(tables.table_a(), Some(0)));
+
+        let mut data = vec![0, 0x01];
+        data.extend_from_slice(&1_u32.to_be_bytes());
+        data.extend_from_slice(&1_u32.to_be_bytes());
+        data.extend(pack(&bits));
+        data.extend(core::iter::repeat_n(
+            0,
+            usize::from(size).div_ceil(8) * usize::from(size),
+        ));
+
+        let mut export = huffman_code(tables.table_a(), Some(0));
+        export.extend(huffman_code(tables.table_a(), Some(1)));
+        data.extend(pack(&export));
+        data
+    }
+
+    fn decode_dictionary(data: &[u8], budget: &Budget) -> Result<SymbolDictionary> {
+        let header = parse(&mut Reader::new(data), true)?;
+        decode(
+            &header,
+            &[],
+            &[],
+            &StandardHuffmanTables::new(),
+            None,
+            budget,
+        )
+    }
+
+    /// The dictionary charges its symbol and width lists, the collective
+    /// bitmap, the symbol cut from it, and the export list with its copy of
+    /// the symbol; one bit less than their sum is refused.
+    #[test]
+    fn dictionary_charges_every_allocation() {
+        let data = one_symbol_dictionary(64);
+        let bitmap_bits = 64 * 64;
+        let list_entry_bits = core::mem::size_of::<Bitmap>() as u64 * 8;
+        let total =
+            list_entry_bits + 32 + bitmap_bits + bitmap_bits + list_entry_bits + bitmap_bits;
+
+        let dictionary = decode_dictionary(&data, &Budget::with_limits(total, 0)).unwrap();
+        assert_eq!(dictionary.exported_symbols.len(), 1);
+
+        assert_eq!(
+            decode_dictionary(&data, &Budget::with_limits(total - 1, 0)).err(),
+            Some(DecodeError::Overflow(OverflowError::MemoryBudget))
+        );
+    }
+
     /// The instance allowance is shared by every aggregate of a dictionary:
     /// two aggregates that each fit it alone do not fit it together.
     #[test]

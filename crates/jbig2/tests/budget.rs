@@ -3,7 +3,7 @@
 
 use hayro_jbig2::{DecodeError, DecodeSettings, Globals, OverflowError, Page};
 
-use crate::{Collector, page_information, pattern_dictionary, region_info};
+use crate::{Collector, page_information, pattern_dictionary, region_info, segment};
 
 /// An embedded segment (7.2) like [`segment`], referring to segment
 /// `referred` (at most 255).
@@ -92,6 +92,48 @@ fn globals_beyond_the_memory_budget_are_refused() {
 
     assert_eq!(
         Globals::new(&data, &DecodeSettings::default()).err(),
+        Some(DecodeError::Overflow(OverflowError::MemoryBudget))
+    );
+}
+
+/// A symbol dictionary declaring 2^20 new symbols reserves a list entry
+/// for each before decoding any, far more than a 1 × 1 page may allocate.
+#[test]
+fn symbol_dictionary_beyond_the_memory_budget_is_refused() {
+    // SDHUFF 1 with the default tables, no exports, 2^20 new symbols.
+    let mut dictionary = vec![0, 0x01];
+    dictionary.extend_from_slice(&0_u32.to_be_bytes());
+    dictionary.extend_from_slice(&(1_u32 << 20).to_be_bytes());
+    let mut data = page_information(1, 1);
+    data.extend(segment(1, 0, &dictionary));
+
+    for strict in [true, false] {
+        assert_eq!(
+            decode(&data, strict).err(),
+            Some(DecodeError::Overflow(OverflowError::MemoryBudget))
+        );
+    }
+}
+
+/// An immediate generic refinement region (7.4.7) of `size` × `size`
+/// pixels with GRTEMPLATE 1, referring to no region and so refining the
+/// page, with no coded data.
+fn page_refinement(size: u32) -> Vec<u8> {
+    let mut region = region_info(size, size, 0, 0, 0);
+    region.push(0x01);
+    let mut data = page_information(1, 1);
+    data.extend(segment(1, 42, &region));
+    data
+}
+
+/// Refining the page copies the area of the page under the region as its
+/// reference, which is charged like the refined bitmap: either of two
+/// 6000 × 6000 bitmaps fits the budget of a 1 × 1 page, both do not.
+#[test]
+fn page_area_of_a_refinement_is_charged() {
+    assert!(decode(&page_refinement(4000), false).is_ok());
+    assert_eq!(
+        decode(&page_refinement(6000), false).err(),
         Some(DecodeError::Overflow(OverflowError::MemoryBudget))
     );
 }
