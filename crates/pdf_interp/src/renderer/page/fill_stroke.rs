@@ -60,7 +60,9 @@ impl PageRenderer<'_> {
     /// The stroke is drawn opaque white on a black RGB bitmap of `rect`'s
     /// size, the device matrix and the clip moved by `rect`'s origin, so
     /// the red channel is the coverage whatever the stroke's colour space,
-    /// pattern, transfer function or soft mask.
+    /// pattern, transfer function or soft mask.  The error names the
+    /// bitmap when the allocator refuses it, or when `rect`'s origin lies
+    /// off the `i32` range a clip translates by.
     pub(super) fn stroke_coverage(
         &self,
         path: &Path,
@@ -73,10 +75,19 @@ impl PageRenderer<'_> {
         let (x0, y0) = (rect.x0, rect.y0);
         shape.matrix[4] -= f64::from(x0);
         shape.matrix[5] -= f64::from(y0);
-        let mut clip = self.gstate.current().clip.translated(
-            -i32::try_from(x0).unwrap_or(i32::MAX),
-            -i32::try_from(y0).unwrap_or(i32::MAX),
+        // A rectangle within the clip lies within the page, whose
+        // coordinates fit i32.
+        debug_assert!(
+            i32::try_from(x0).is_ok() && i32::try_from(y0).is_ok(),
+            "stroke_coverage: the rectangle's origin ({x0}, {y0}) lies off the i32 range"
         );
+        let (Ok(dx), Ok(dy)) = (i32::try_from(x0), i32::try_from(y0)) else {
+            log::warn!(
+                "rasterrocket-interp: knockout stroke rectangle at ({x0}, {y0}) lies off the i32 range"
+            );
+            return Err(raster::BitmapAllocError { width, height });
+        };
+        let mut clip = self.gstate.current().clip.translated(-dx, -dy);
         clip.clip_to_rect(0.0, 0.0, f64::from(width), f64::from(height));
 
         let white = RasterColor::from_bytes([u8::MAX; 3]);
