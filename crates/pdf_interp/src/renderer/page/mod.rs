@@ -521,7 +521,18 @@ impl<'doc> PageRenderer<'doc> {
     /// Decode image `XObjects` drawn on several pages once through
     /// `images`, a store shared by every page of this renderer's document,
     /// instead of once per page.  Call before execute.
+    ///
+    /// A store serves the first document whose renderer it is given to: a
+    /// store already serving another document is ignored, with a warning,
+    /// and the page decodes its images itself.
     pub fn set_document_images(&mut self, images: Arc<super::DocumentImages>) {
+        if !images.bind(self.resources.doc()) {
+            log::warn!(
+                "rasterrocket-interp: the document image store serves another document — \
+                 decoding this page's images without it"
+            );
+            return;
+        }
         let page = self.image_memo.borrow().page();
         self.image_memo = image_memo::ImageMemo::shared(page, images);
     }

@@ -325,6 +325,14 @@ pub struct SessionConfig {
     /// (on by default), the bundled Greek, Cyrillic, Hebrew, Arabic,
     /// Devanagari, Thai and symbol fallback faces.
     pub system_fonts: bool,
+    /// Host bytes of decoded images the session keeps for reuse by later
+    /// pages: an image `XObject` drawn on several pages is decoded once
+    /// while its decode fits, and the decodes kept stay resident for the
+    /// session's life.
+    ///
+    /// Default [`DOCUMENT_IMAGE_BUDGET_BYTES`](crate::DOCUMENT_IMAGE_BUDGET_BYTES)
+    /// (256 MiB).  0 keeps nothing: every page decodes the images it draws.
+    pub image_budget: usize,
 }
 
 impl SessionConfig {
@@ -355,6 +363,7 @@ impl SessionConfig {
             overprint: false,
             font_dirs: Vec::new(),
             system_fonts: true,
+            image_budget: crate::DOCUMENT_IMAGE_BUDGET_BYTES,
         }
     }
 

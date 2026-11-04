@@ -1260,6 +1260,49 @@ fn shared_image_decodes_render_and_report_as_page_decodes() {
     assert_eq!(images.kept_bytes(), 4);
 }
 
+/// Pages `(4, 0)` and `(5, 0)` drawing the 2×2 `DeviceGray` image `/Im`
+/// (object 6) of hex samples `samples`.
+fn image_doc(samples: &str) -> Document {
+    let page = "<< /Type /Page /Resources << /XObject << /Im 6 0 R >> >> >>";
+    crate::test_helpers::make_doc_with_objects(&[
+        (4, page.to_owned()),
+        (5, page.to_owned()),
+        (
+            6,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                &format!("{samples}>"),
+            ),
+        ),
+    ])
+}
+
+/// A document image store given to the renderer of a second document,
+/// whose image has the object number of one the store keeps, is ignored:
+/// the second document draws its own image, not the first's.
+#[test]
+fn an_image_store_serves_one_document() {
+    let first = image_doc("00000000");
+    let second = image_doc("FFFFFFFF");
+    let render = |doc: &Document, id: ObjectId, images: &Arc<super::super::DocumentImages>| {
+        let mut renderer = PageRenderer::new(8, 8, doc, id);
+        renderer.set_document_images(Arc::clone(images));
+        renderer.execute(&crate::content::parse(b"q 8 0 0 8 0 0 cm /Im Do Q"));
+        renderer.finish().0.data().to_vec()
+    };
+    let images: Arc<super::super::DocumentImages> = Arc::default();
+    for id in [(4, 0), (5, 0)] {
+        assert!(render(&first, id, &images).iter().all(|&b| b == 0));
+    }
+    assert_eq!(images.kept_bytes(), 4, "the first document's image is kept");
+    for id in [(4, 0), (5, 0)] {
+        let page = render(&second, id, &images);
+        assert!(page.iter().all(|&b| b == 255), "page {id:?}: {page:?}");
+    }
+    assert_eq!(images.kept_bytes(), 4);
+}
+
 /// Pages whose resources share one `/ColorSpace` dictionary defining a
 /// default space share the decodes of an image drawn under it.
 #[test]

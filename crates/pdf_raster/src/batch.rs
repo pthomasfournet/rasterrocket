@@ -105,6 +105,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
             .chain(env_font_dirs)
             .collect(),
         system_fonts: opts.system_fonts,
+        image_budget: opts.image_budget,
         ..defaults
     }
 }
@@ -749,6 +750,7 @@ mod channel_tests {
 #[cfg(test)]
 mod from_bytes_tests {
     use super::*;
+    use crate::{BackendPolicy, DOCUMENT_IMAGE_BUDGET_BYTES};
 
     /// Two empty 100 × 100 pt pages.
     fn two_page_pdf() -> Vec<u8> {
@@ -779,6 +781,29 @@ mod from_bytes_tests {
             .as_bytes(),
         );
         pdf
+    }
+
+    /// The image budget reaches the session's document image store, from
+    /// `RasterOptions` as from `SessionConfig`.
+    #[test]
+    fn image_budget_sizes_the_session_image_store() {
+        let opts = RasterOptions::default();
+        assert_eq!(opts.image_budget, DOCUMENT_IMAGE_BUDGET_BYTES);
+        let session = open_session_from_bytes(two_page_pdf(), &session_config_for(&opts)).unwrap();
+        assert_eq!(session.images.budget(), DOCUMENT_IMAGE_BUDGET_BYTES);
+
+        let opts = RasterOptions {
+            image_budget: 0,
+            ..RasterOptions::default()
+        };
+        let config = session_config_for(&opts);
+        assert_eq!(config.image_budget, 0);
+        let session = open_session_from_bytes(two_page_pdf(), &config).unwrap();
+        assert_eq!(session.images.budget(), 0);
+        assert_eq!(
+            SessionConfig::with_policy(BackendPolicy::CpuOnly).image_budget,
+            DOCUMENT_IMAGE_BUDGET_BYTES
+        );
     }
 
     /// A minimal valid single-page PDF (one empty 612×792-pt page).

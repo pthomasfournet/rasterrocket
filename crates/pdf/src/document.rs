@@ -8,7 +8,10 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use memmap2::Mmap;
@@ -147,6 +150,9 @@ fn is_object_stream(dict: &Dictionary) -> bool {
 
 // ── Document ─────────────────────────────────────────────────────────────────
 
+/// The [`Document::instance_id`] of the next document constructed.
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+
 /// A lazily-parsed PDF document backed by a memory-mapped file or an owned
 /// buffer.
 pub struct Document {
@@ -183,6 +189,8 @@ pub struct Document {
     /// Object number of the indirect `/Encrypt` dictionary, whose strings
     /// are never encrypted.
     encrypt_id: Option<u32>,
+    /// See [`Self::instance_id`].
+    instance_id: u64,
 }
 
 /// Memory source: a mapping for files of at least [`MMAP_MIN_LEN`] bytes, an
@@ -342,6 +350,7 @@ impl Document {
             derived: DerivedCache::default(),
             crypt: None,
             encrypt_id: None,
+            instance_id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
         };
         if let Some(encrypt) = doc.xref.trailer.get(b"Encrypt").cloned() {
             if !options.decrypt_authorized {
@@ -838,6 +847,14 @@ impl Document {
         *self
             .lin_hints
             .get_or_init(|| LinearizationHints::load(self))
+    }
+
+    /// A number distinct for every `Document` constructed in the process,
+    /// whatever its bytes: the identity of this document for values derived
+    /// from it and held outside it, such as caches keyed by object number.
+    #[must_use]
+    pub const fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     /// Raw byte view of the underlying file.  Used by hint-table parsing
@@ -1368,6 +1385,17 @@ impl std::ops::Deref for Resolved<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two documents of the same bytes are told apart; a document keeps
+    /// its identity.
+    #[test]
+    fn every_document_has_its_own_instance_id() {
+        let bytes = pdf_with_objects(&[]);
+        let a = Document::from_bytes_owned(bytes.clone()).expect("opens");
+        let b = Document::from_bytes_owned(bytes).expect("opens");
+        assert_ne!(a.instance_id(), b.instance_id());
+        assert_eq!(a.instance_id(), a.instance_id());
+    }
 
     /// Assemble a PDF from `(object number, object body)` pairs, with a
     /// catalog as object 1 and a classic xref table.  Missing numbers are

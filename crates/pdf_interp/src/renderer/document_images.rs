@@ -86,14 +86,21 @@ pub(crate) enum Lookup {
     Shared(SharedCell),
 }
 
-/// The decoded images shared by the pages of one document.  Entries are
-/// keyed by object number, so a store serves one document only.
+/// The decoded images shared by the pages of one document.
+///
+/// Entries are keyed by object number, so a store serves one document
+/// only: the first document whose renderer it is given to (see
+/// [`PageRenderer::set_document_images`](crate::renderer::PageRenderer::set_document_images)).
 ///
 /// The store holds a slot per distinct image requested, for the session's
-/// life; a slot not kept holds no pixels.
+/// life; a slot not kept holds no pixels.  A store of budget 0 shares
+/// nothing and holds no slots.
 pub struct DocumentImages {
     state: Mutex<State>,
     budget: usize,
+    /// The [`pdf::Document::instance_id`] of the document the store serves,
+    /// set by the first [`Self::bind`].
+    document: OnceLock<u64>,
 }
 
 struct State {
@@ -124,7 +131,8 @@ impl Default for DocumentImages {
 }
 
 impl DocumentImages {
-    /// A store holding at most `budget` host bytes of decodes.
+    /// A store holding at most `budget` host bytes of decodes; 0 turns
+    /// sharing off.
     #[must_use]
     pub fn new(budget: usize) -> Self {
         Self {
@@ -133,7 +141,21 @@ impl DocumentImages {
                 bytes: 0,
             }),
             budget,
+            document: OnceLock::new(),
         }
+    }
+
+    /// The host bytes of decodes the store holds at most.
+    #[must_use]
+    pub const fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// Bind the store to `doc` if it serves no document yet; whether it
+    /// serves `doc`.
+    pub(crate) fn bind(&self, doc: &pdf::Document) -> bool {
+        let id = doc.instance_id();
+        *self.document.get_or_init(|| id) == id
     }
 
     /// Host bytes of the decodes the store keeps.
@@ -148,6 +170,9 @@ impl DocumentImages {
 
     /// How page `page`, which holds no decode of `key`, obtains one.
     pub(crate) fn lookup(&self, key: ImageKey, page: ObjectId) -> Lookup {
+        if self.budget == 0 {
+            return Lookup::Local;
+        }
         self.state().lookup(key, page, self.budget)
     }
 
@@ -319,6 +344,25 @@ pub(crate) mod tests {
             Lookup::Shared(cell) => cell,
             Lookup::Local => panic!("expected a shared entry"),
         }
+    }
+
+    #[test]
+    fn a_store_of_budget_zero_shares_nothing() {
+        let store = DocumentImages::new(0);
+        for page in [PAGE_1, PAGE_2, PAGE_3] {
+            assert!(matches!(store.lookup(KEY, page), Lookup::Local));
+        }
+        assert!(store.state().slots.is_empty());
+    }
+
+    #[test]
+    fn a_store_serves_the_first_document_it_is_bound_to() {
+        let a = crate::test_helpers::empty_doc();
+        let b = crate::test_helpers::empty_doc();
+        let store = DocumentImages::default();
+        assert!(store.bind(&a));
+        assert!(store.bind(&a));
+        assert!(!store.bind(&b));
     }
 
     #[test]

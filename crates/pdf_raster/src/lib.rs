@@ -134,7 +134,9 @@ pub use page::{
     validate_dimensions,
 };
 pub use pdf::Password;
-pub use pdf_interp::renderer::{ContentFailure, ImageFailure, PageDiagnostics};
+pub use pdf_interp::renderer::{
+    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, ImageFailure, PageDiagnostics,
+};
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{FormType, PageGeometry, RenderPurpose};
 pub use render::{render_page_gray, render_page_rgb, render_page_rgb_with};
@@ -405,6 +407,11 @@ pub struct RasterOptions {
     /// [`SessionConfig::system_fonts`].  Default `true`.
     pub system_fonts: bool,
 
+    /// Host bytes of decoded images kept for reuse by later pages; see
+    /// [`SessionConfig::image_budget`].  Default
+    /// [`DOCUMENT_IMAGE_BUDGET_BYTES`]; 0 keeps nothing.
+    pub image_budget: usize,
+
     /// Cancellation flag polled while each page renders; default `None`.
     ///
     /// Once it is raised, the page in progress stops before its next
@@ -446,6 +453,7 @@ impl Default for RasterOptions {
             password: None,
             font_dirs: Vec::new(),
             system_fonts: true,
+            image_budget: DOCUMENT_IMAGE_BUDGET_BYTES,
             cancel: None,
         }
     }
