@@ -324,6 +324,9 @@ pub struct PageResources<'doc> {
     /// The default colour spaces for `DeviceGray`, `DeviceRGB` and
     /// `DeviceCMYK`, in that order, resolved on first use.
     default_spaces: OnceLock<[Option<ColorSpace>; 3]>,
+    /// The object identifying the `/ColorSpace` sub-dictionary in effect
+    /// (see [`Document::page_resource_entry`]), resolved on first use.
+    color_space_source: OnceLock<Option<ObjectId>>,
 }
 
 /// A sub-dictionary key of a resource dictionary (ISO 32000-1 §7.8.3).
@@ -374,6 +377,7 @@ impl<'doc> PageResources<'doc> {
             resource_context_id: page_id,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
+            color_space_source: OnceLock::new(),
         }
     }
 
@@ -391,6 +395,7 @@ impl<'doc> PageResources<'doc> {
             resource_context_id: form.resources_id,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
+            color_space_source: OnceLock::new(),
         }
     }
 
@@ -405,6 +410,7 @@ impl<'doc> PageResources<'doc> {
             resource_context_id: self.resource_context_id,
             subdicts: self.subdicts.clone(),
             default_spaces: self.default_spaces.clone(),
+            color_space_source: self.color_space_source.clone(),
         }
     }
 
@@ -424,11 +430,15 @@ impl<'doc> PageResources<'doc> {
                     .map(Arc::new),
             )
         });
+        let color_space_source = resources
+            .get(Category::ColorSpace.key())
+            .map(|entry| entry.as_reference().unwrap_or(context));
         Self {
             doc: self.doc,
             resource_context_id: context,
             subdicts,
             default_spaces: OnceLock::new(),
+            color_space_source: OnceLock::from(color_space_source),
         }
     }
 
@@ -441,6 +451,7 @@ impl<'doc> PageResources<'doc> {
             resource_context_id: context,
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
+            color_space_source: OnceLock::new(),
         }
     }
 
@@ -563,6 +574,20 @@ impl<'doc> PageResources<'doc> {
             .map(|d| colorspace::default_space(self.doc, dict, &d))
         });
         defaults[slot].clone().unwrap_or(device)
+    }
+
+    /// The object identifying the `/ColorSpace` sub-dictionary in effect,
+    /// shared by every context that inherits the same one; `None` when there
+    /// is none.
+    #[must_use]
+    pub fn color_space_source(&self) -> Option<ObjectId> {
+        *self.color_space_source.get_or_init(|| {
+            self.doc
+                .page_resource_entry(self.resource_context_id, Category::ColorSpace.key())
+                .ok()
+                .flatten()
+                .map(|(_, source)| source)
+        })
     }
 
     /// Whether the resources in effect replace any device colour space with

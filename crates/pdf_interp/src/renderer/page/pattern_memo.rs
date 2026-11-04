@@ -319,9 +319,11 @@ impl PageRenderer<'_> {
     /// image resolved here takes; `None` when the resources in effect have
     /// none.
     pub(super) fn default_spaces_context(&self) -> Option<ObjectId> {
-        self.resources
-            .has_default_spaces()
-            .then(|| self.resources.resource_context_id())
+        self.resources.has_default_spaces().then(|| {
+            self.resources
+                .color_space_source()
+                .unwrap_or_else(|| self.resources.resource_context_id())
+        })
     }
 
     /// The named `Pattern` resource resolved as a tiling pattern, with its

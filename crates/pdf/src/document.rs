@@ -1096,6 +1096,25 @@ impl Document {
         page_id: ObjectId,
         resource_name: &[u8],
     ) -> Result<Dictionary, PdfError> {
+        Ok(self
+            .page_resource_entry(page_id, resource_name)?
+            .map_or_else(Dictionary::new, |(dict, _)| dict))
+    }
+
+    /// The `resource_name` sub-dictionary of the resources in effect for
+    /// `page_id`, as [`Self::get_page_resource_dict`] finds it, with the
+    /// object that identifies it: the sub-dictionary itself when indirect,
+    /// else the `/Resources` dictionary when indirect, else the page or
+    /// page-tree node holding them.  Every page inheriting one sub-dictionary
+    /// gets the same identity.  `None` when no node defines it.
+    ///
+    /// # Errors
+    /// As [`Self::get_page_resource_dict`].
+    pub fn page_resource_entry(
+        &self,
+        page_id: ObjectId,
+        resource_name: &[u8],
+    ) -> Result<Option<(Dictionary, ObjectId)>, PdfError> {
         // Walk up the page tree to find /Resources. Bound to 64 hops to defeat
         // cyclic /Parent references in malformed PDFs.
         let mut current_id = Some(page_id);
@@ -1113,14 +1132,18 @@ impl Document {
             if let Some(res) = dict.get(b"Resources") {
                 let res_dict = self.dict_from_object(res)?;
                 if let Some(sub) = res_dict.get(resource_name) {
-                    return self.dict_from_object(sub);
+                    let source = sub
+                        .as_reference()
+                        .or_else(|| res.as_reference())
+                        .unwrap_or(id);
+                    return Ok(Some((self.dict_from_object(sub)?, source)));
                 }
             }
 
             // Walk to parent.
             current_id = dict.get(b"Parent").and_then(Object::as_reference);
         }
-        Ok(Dictionary::new())
+        Ok(None)
     }
 
     /// Return an inheritable page attribute value for a page object, following

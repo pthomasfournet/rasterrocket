@@ -175,15 +175,17 @@ impl ImageMemo {
     }
 
     /// Keep `image`, the document store's decode of `key` for a request at
-    /// `draw_size`, in place of any earlier decode of `key`.  It charges
-    /// the budget nothing, as the store holds it.
+    /// `draw_size`, in place of any earlier decode of `key`.  It charges the
+    /// budget nothing when the store `kept` it, its bytes otherwise.
     pub(super) fn insert_shared(
         &mut self,
         key: ImageKey,
         draw_size: Option<(u32, u32)>,
         image: &Arc<DecodedImage>,
+        kept: bool,
     ) {
-        let entry = Entry::new(Arc::clone(image), draw_size, 0);
+        let bytes = if kept { 0 } else { host_bytes(image) };
+        let entry = Entry::new(Arc::clone(image), draw_size, bytes);
         keep(&mut self.entries, &mut self.bytes, self.budget, key, entry);
     }
 }
@@ -224,24 +226,8 @@ fn keep<K: Eq + Hash>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::image::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter};
-
-    fn decoded(filter: ImageFilter, width: u32) -> DecodedImage {
-        DecodedImage {
-            image: ImageDescriptor {
-                width,
-                height: 1,
-                color_space: ImageColorSpace::Gray,
-                data: ImageData::Cpu(vec![0; width as usize]),
-                smask: None,
-                filter,
-            },
-            source_width: 8,
-            interpolate: false,
-            own_soft_mask: false,
-            partial: None,
-        }
-    }
+    use crate::renderer::document_images::tests::decoded;
+    use crate::resources::image::ImageFilter;
 
     const KEY: ImageKey = ImageKey {
         id: (5, 0),
@@ -310,8 +296,26 @@ mod tests {
         let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10));
         let other = ImageKey { id: (6, 0), ..KEY };
         let shared = Arc::new(decoded(ImageFilter::Raw, 50));
-        memo.insert_shared(other, None, &shared);
+        memo.insert_shared(other, None, &shared, true);
         assert!(Arc::ptr_eq(&memo.get(other, None).expect("hit"), &shared));
         assert_eq!(memo.bytes, 10);
+    }
+
+    #[test]
+    fn a_decode_the_store_refused_is_charged() {
+        let mut memo = memo(100);
+        let refused = Arc::new(decoded(ImageFilter::Raw, 30));
+        memo.insert_shared(KEY, None, &refused, false);
+        assert_eq!(memo.bytes, 30);
+        // Beyond the page budget, it is not kept at all.
+        let other = ImageKey { id: (6, 0), ..KEY };
+        memo.insert_shared(
+            other,
+            None,
+            &Arc::new(decoded(ImageFilter::Raw, 200)),
+            false,
+        );
+        assert!(memo.get(other, None).is_none());
+        assert_eq!(memo.bytes, 30);
     }
 }

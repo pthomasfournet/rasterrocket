@@ -99,7 +99,7 @@ impl PageRenderer<'_> {
             return false;
         };
         let mut device = None;
-        let outcome = document.resolve(key, &cell, || {
+        let (outcome, kept) = document.resolve(key, &cell, || {
             match self.decode_image_xobject(name, draw_size) {
                 ImageResolution::Ok(decoded) if decoded.image.data.as_cpu().is_none() => {
                     device = Some(decoded);
@@ -109,25 +109,24 @@ impl PageRenderer<'_> {
                     image: Arc::new(decoded),
                     draw_size,
                 },
-                ImageResolution::DecodeFailed(reason) => Outcome::Failed(reason),
+                ImageResolution::DecodeFailed(reason) => Outcome::Failed { reason, draw_size },
                 ImageResolution::Absent => Outcome::Absent,
             }
         });
         match outcome {
             Outcome::Image {
                 image,
-                draw_size: kept,
-            } if document_images::serves(&image, kept, draw_size) => {
+                draw_size: made,
+            } if document_images::serves(&image, made, draw_size) => {
                 if let Some(reason) = &image.partial {
                     self.record_partial_image(Some(name), reason.clone());
                 }
                 self.image_memo
                     .borrow_mut()
-                    .insert_shared(key, draw_size, &image);
+                    .insert_shared(key, draw_size, &image, kept);
                 self.draw_image_xobject(name, &image);
             }
-            // A JPEG 2000 decode at another resolution level.
-            Outcome::Image { .. } => return false,
+
             Outcome::Device => match device {
                 // This page made the decode; the store does not keep it.
                 Some(decoded) => self.handle_image_resolution(
@@ -137,11 +136,17 @@ impl PageRenderer<'_> {
                 ),
                 None => return false,
             },
-            Outcome::Failed(reason) => self.handle_image_resolution(
+            Outcome::Failed {
+                reason,
+                draw_size: made,
+            } if made == draw_size => self.handle_image_resolution(
                 name,
                 ImageResolution::DecodeFailed(reason),
                 Some((key, draw_size)),
             ),
+            // A JPEG 2000 decode at another resolution level, or a failure
+            // at another draw size, says nothing of this request.
+            Outcome::Image { .. } | Outcome::Failed { .. } => return false,
             Outcome::Absent => {
                 self.handle_image_resolution(name, ImageResolution::Absent, None);
             }

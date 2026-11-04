@@ -15,9 +15,13 @@
 //! byte budget; a decode beyond it, or a JPEG 2000 decode at a draw size
 //! other than the one kept, is decoded by each page as before.
 //!
+//! A failure is shared only with requests at the draw size it was made
+//! for: a JPEG 2000 decode can fail at one resolution level and succeed at
+//! another.
+//!
 //! No decode path below the page fan-out runs on the thread pool, so a
 //! page waiting for another page's decode cannot be asked to run that
-//! page.
+//! page; a `decode` given to [`DocumentImages::resolve`] must keep it so.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
@@ -47,8 +51,11 @@ pub(crate) enum Outcome {
         image: Arc<DecodedImage>,
         draw_size: Option<(u32, u32)>,
     },
-    /// The reason decoding failed.
-    Failed(String),
+    /// Why decoding failed for a request at `draw_size`.
+    Failed {
+        reason: String,
+        draw_size: Option<(u32, u32)>,
+    },
     /// The `XObject` has no raster appearance.
     Absent,
     /// The decode is device-resident and is not kept; each page decodes
@@ -81,6 +88,9 @@ pub(crate) enum Lookup {
 
 /// The decoded images shared by the pages of one document.  Entries are
 /// keyed by object number, so a store serves one document only.
+///
+/// The store holds a slot per distinct image requested, for the session's
+/// life; a slot not kept holds no pixels.
 pub struct DocumentImages {
     state: Mutex<State>,
     budget: usize,
@@ -166,31 +176,37 @@ impl DocumentImages {
         }
     }
 
-    /// The outcome kept in `cell`, the store's entry for `key`, made by
-    /// `decode` when no page has made it yet.  A device-resident decode,
-    /// or one beyond the budget, is dropped from the store once made.
+    /// The outcome in `cell`, the store's entry for `key`, made by
+    /// `decode` when no page has made it yet, and whether the store keeps
+    /// it.  A device-resident decode, or one beyond the budget, is dropped
+    /// from the store once made; the pages holding `cell` still receive it,
+    /// and keep it at their own charge.
     pub(crate) fn resolve(
         &self,
         key: ImageKey,
         cell: &SharedCell,
         decode: impl FnOnce() -> Outcome,
-    ) -> Outcome {
+    ) -> (Outcome, bool) {
         let mut made = None;
         let outcome = cell
             .get_or_init(|| {
                 let outcome = decode();
                 made = Some(match &outcome {
                     Outcome::Image { image, .. } => Some(host_bytes(image)),
-                    Outcome::Failed(_) | Outcome::Absent => Some(0),
+                    Outcome::Failed { .. } | Outcome::Absent => Some(0),
                     Outcome::Device => None,
                 });
                 outcome
             })
             .clone();
+        let mut state = self.state();
         if let Some(size) = made {
-            self.state().settle(key, size, self.budget);
+            state.settle(key, cell, size, self.budget);
         }
-        outcome
+        let kept =
+            matches!(state.slots.get(&key), Some(Slot::Shared(kept)) if Arc::ptr_eq(kept, cell));
+        drop(state);
+        (outcome, kept)
     }
 }
 
@@ -232,15 +248,20 @@ impl State {
         }
     }
 
-    /// Count `size`, the host bytes of the decode just made for `key`,
-    /// against `budget`; drop the entry when it is `None` (a
-    /// device-resident decode) or does not fit.
-    fn settle(&mut self, key: ImageKey, size: Option<usize>, budget: usize) {
+    /// Count `size`, the host bytes of the decode just made in `cell` for
+    /// `key`, against `budget`; drop the entry when it is `None` (a
+    /// device-resident decode) or does not fit.  An entry no longer holding
+    /// `cell` is left as it is.
+    fn settle(&mut self, key: ImageKey, cell: &SharedCell, size: Option<usize>, budget: usize) {
+        let Some(slot) = self.slots.get_mut(&key) else {
+            return;
+        };
+        if !matches!(slot, Slot::Shared(held) if Arc::ptr_eq(held, cell)) {
+            return;
+        }
         match size {
             Some(size) if size <= budget - self.bytes => self.bytes += size,
-            _ => {
-                let _ = self.slots.insert(key, Slot::Refused);
-            }
+            _ => *slot = Slot::Refused,
         }
     }
 }
@@ -254,13 +275,14 @@ pub(crate) fn host_bytes(image: &DecodedImage) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
 
     use super::*;
     use crate::resources::image::{ImageColorSpace, ImageData, ImageDescriptor};
 
-    fn decoded(filter: ImageFilter, width: u32) -> DecodedImage {
+    /// A `width` × 1 gray decode from `filter`.
+    pub(crate) fn decoded(filter: ImageFilter, width: u32) -> DecodedImage {
         DecodedImage {
             image: ImageDescriptor {
                 width,
@@ -320,7 +342,7 @@ mod tests {
             let cell = shared(store.lookup(KEY, page));
             assert!(matches!(
                 store.resolve(KEY, &cell, decode),
-                Outcome::Image { .. }
+                (Outcome::Image { .. }, true)
             ));
         }
         assert_eq!(decodes.get(), 1);
@@ -334,7 +356,9 @@ mod tests {
         let first = Arc::new(decoded(ImageFilter::Raw, 8));
         store.offer(KEY, PAGE_1, &first, None);
         let cell = shared(store.lookup(KEY, PAGE_2));
-        let Outcome::Image { image, .. } = store.resolve(KEY, &cell, || panic!("no decode")) else {
+        let (Outcome::Image { image, .. }, true) =
+            store.resolve(KEY, &cell, || panic!("no decode"))
+        else {
             panic!("expected the offered image");
         };
         assert!(Arc::ptr_eq(&image, &first));
@@ -357,9 +381,10 @@ mod tests {
         let store = DocumentImages::new(10);
         let _ = store.lookup(KEY, PAGE_1);
         let cell = shared(store.lookup(KEY, PAGE_2));
+        // The decode is returned, but not kept: the page charges it.
         assert!(matches!(
             store.resolve(KEY, &cell, || image(11)),
-            Outcome::Image { .. }
+            (Outcome::Image { .. }, false)
         ));
         assert_eq!(store.state().bytes, 0);
         assert!(matches!(store.lookup(KEY, PAGE_3), Lookup::Local));
@@ -379,7 +404,7 @@ mod tests {
         let cell = shared(store.lookup(KEY, PAGE_2));
         assert!(matches!(
             store.resolve(KEY, &cell, || Outcome::Device),
-            Outcome::Device
+            (Outcome::Device, false)
         ));
         assert!(matches!(store.lookup(KEY, PAGE_3), Lookup::Local));
     }
@@ -389,10 +414,40 @@ mod tests {
         let store = DocumentImages::default();
         let _ = store.lookup(KEY, PAGE_1);
         let cell = shared(store.lookup(KEY, PAGE_2));
-        let _ = store.resolve(KEY, &cell, || Outcome::Failed("broken".to_owned()));
+        let _ = store.resolve(KEY, &cell, || Outcome::Failed {
+            reason: "broken".to_owned(),
+            draw_size: Some((4, 4)),
+        });
         let cell = shared(store.lookup(KEY, PAGE_3));
-        let outcome = store.resolve(KEY, &cell, || panic!("no decode"));
-        assert!(matches!(outcome, Outcome::Failed(reason) if reason == "broken"));
+        let (outcome, _) = store.resolve(KEY, &cell, || panic!("no decode"));
+        assert!(matches!(
+            outcome,
+            Outcome::Failed { reason, draw_size: Some((4, 4)) } if reason == "broken"
+        ));
+    }
+
+    #[test]
+    fn concurrent_pages_wait_for_one_decode() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = DocumentImages::default();
+        let _ = store.lookup(KEY, PAGE_1);
+        let decodes = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for page in 0..8 {
+                let (store, decodes) = (&store, &decodes);
+                let _ = scope.spawn(move || {
+                    let cell = shared(store.lookup(KEY, (100 + page, 0)));
+                    let (outcome, kept) = store.resolve(KEY, &cell, || {
+                        let _ = decodes.fetch_add(1, Ordering::Relaxed);
+                        image(8)
+                    });
+                    assert!(matches!(outcome, Outcome::Image { .. }) && kept);
+                });
+            }
+        });
+        assert_eq!(decodes.load(Ordering::Relaxed), 1);
+        assert_eq!(store.state().bytes, 8);
     }
 
     #[test]

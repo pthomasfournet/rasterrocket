@@ -1127,8 +1127,6 @@ fn an_uncoloured_pattern_tint_takes_the_default_space() {
     assert!(px.iter().all(|v| (186..=189).contains(v)), "got {px:?}");
 }
 
-/// A default space of the wrong component count leaves the device space
-/// in effect.
 /// Page `(4, 0)`, whose resources map `/DefaultGray` to `default_gray`,
 /// with the 1×1 `DeviceGray` image `/Im` of sample 0x80 (object 5) and
 /// the form `/F` (object 6), whose own resources name the same image and
@@ -1262,6 +1260,39 @@ fn shared_image_decodes_render_and_report_as_page_decodes() {
     assert_eq!(images.kept_bytes(), 4);
 }
 
+/// Pages whose resources share one `/ColorSpace` dictionary defining a
+/// default space share the decodes of an image drawn under it.
+#[test]
+fn pages_sharing_default_spaces_share_image_decodes() {
+    let page = "<< /Type /Page /Resources << /XObject << /Im 6 0 R >> /ColorSpace 7 0 R >> >>";
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (4, page.to_owned()),
+        (5, page.to_owned()),
+        (
+            6,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                "40C0>",
+            ),
+        ),
+        (
+            7,
+            "<< /DefaultGray [/CalGray << /WhitePoint [0.9505 1 1.089] >>] >>".to_owned(),
+        ),
+    ]);
+    let images: Arc<super::super::DocumentImages> = Arc::default();
+    for id in [(4, 0), (5, 0)] {
+        let mut renderer = PageRenderer::new(8, 8, &doc, id);
+        renderer.set_document_images(Arc::clone(&images));
+        renderer.execute(&crate::content::parse(b"q 8 0 0 8 0 0 cm /Im Do Q"));
+        let _ = renderer.finish();
+    }
+    assert_eq!(images.kept_bytes(), 4, "the 2×2 image is kept once");
+}
+
+/// A default space of the wrong component count leaves the device space
+/// in effect.
 #[test]
 fn default_space_of_another_component_count_is_ignored() {
     let doc = default_gray_doc("[/CalRGB << /WhitePoint [0.9505 1 1.089] >>]");
