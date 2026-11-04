@@ -243,10 +243,10 @@ impl TiledPattern {
     /// `cell_w × cell_h` pixels stamped at the whole-pixel part.  `cell` is
     /// called once per phase stamped.  `None` when the lattice is
     /// degenerate or enumerates more than `MAX_LATTICE_POINTS` (2^26) points over
-    /// the rectangle.
+    /// the rectangle, or when `cell` gives no bitmap for a phase.
     #[must_use]
     pub fn compose(
-        mut cell: impl FnMut(CellPhase) -> Rc<Bitmap<Rgb8>>,
+        mut cell: impl FnMut(CellPhase) -> Option<Rc<Bitmap<Rgb8>>>,
         (cell_w, cell_h): (u32, u32),
         lattice: &Lattice,
         x0: i32,
@@ -277,7 +277,10 @@ impl TiledPattern {
                     continue;
                 }
                 let slot = usize::from(phase.1 * CELL_PHASES + phase.0);
-                let bitmap = phases[slot].get_or_insert_with(|| cell(phase));
+                let bitmap = match &mut phases[slot] {
+                    Some(bitmap) => bitmap,
+                    empty => empty.insert(cell(phase)?),
+                };
                 stamp(&mut screen, bitmap, sx, sy, &pipe);
             }
         }
@@ -393,7 +396,7 @@ mod tests {
     /// [`cell`] composited at every point of `lattice` over a rectangle.
     fn compose(lattice: &Lattice, x0: i32, y0: i32, w: u32, h: u32) -> Option<TiledPattern> {
         let c = Rc::new(cell());
-        TiledPattern::compose(|_| Rc::clone(&c), (2, 2), lattice, x0, y0, w, h)
+        TiledPattern::compose(|_| Some(Rc::clone(&c)), (2, 2), lattice, x0, y0, w, h)
     }
 
     fn axis_aligned(step: f64) -> Lattice {
@@ -449,7 +452,7 @@ mod tests {
         let p = TiledPattern::compose(
             |phase| {
                 asked.push(phase);
-                Rc::clone(&c)
+                Some(Rc::clone(&c))
             },
             (2, 2),
             &axis_aligned(2.5),

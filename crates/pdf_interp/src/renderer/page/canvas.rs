@@ -84,16 +84,6 @@ const fn initial_fill(kind: CanvasKind, alpha: bool) -> u8 {
     }
 }
 
-/// A `width × height` bitmap of `fill` bytes, with an alpha plane when
-/// `alpha`: zeroed memory when `fill` is 0.
-fn fresh_bitmap<P: Pixel>(width: u32, height: u32, alpha: bool, fill: u8) -> Bitmap<P> {
-    if fill == 0 {
-        Bitmap::new(width, height, 1, alpha)
-    } else {
-        Bitmap::new_filled(width, height, 1, alpha, fill)
-    }
-}
-
 /// Convert the ink canvas `ink` into `rgb`, of its size, through
 /// [`ink_to_rgb_row`] with the spot colourants `spots`, copying its alpha.
 fn ink_into_rgb(ink: &Bitmap<DeviceN8>, spots: &[Option<&SpotLut>; 4], rgb: &mut Bitmap<Rgb8>) {
@@ -111,19 +101,19 @@ fn ink_into_rgb(ink: &Bitmap<DeviceN8>, spots: &[Option<&SpotLut>; 4], rgb: &mut
 }
 
 impl PageCanvas {
-    /// A `width × height` canvas of `kind`: transparent, with an alpha
-    /// plane, when `alpha`; opaque paper white otherwise.  A canvas whose
-    /// bytes start at 0 takes zeroed memory, committed as it is written.
+    /// [`Self::try_new`] for a canvas the allocator grants.
+    ///
+    /// # Panics
+    ///
+    /// When the allocator refuses the canvas.
+    #[cfg(test)]
     pub(super) fn new(kind: CanvasKind, width: u32, height: u32, alpha: bool) -> Self {
-        let fill = initial_fill(kind, alpha);
-        match kind {
-            CanvasKind::Rgb => Self::Rgb(fresh_bitmap(width, height, alpha, fill)),
-            CanvasKind::Ink => Self::Ink(fresh_bitmap(width, height, alpha, fill)),
-        }
+        Self::try_new(kind, width, height, alpha).expect("a test canvas is allocated")
     }
 
-    /// [`Self::new`] that reports buffers the allocator refuses as an
-    /// error.
+    /// A `width × height` canvas of `kind`: transparent, with an alpha
+    /// plane, when `alpha`; opaque paper white otherwise; or the error for
+    /// buffers the allocator refuses.
     pub(super) fn try_new(
         kind: CanvasKind,
         width: u32,

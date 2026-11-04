@@ -356,23 +356,24 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// The raster at `key`, from the memo when kept, else from `render`.  A
-    /// raster rendered after the page's work budget ran out is not kept.
+    /// The raster at `key`, from the memo when kept, else from `render`, or
+    /// `None` when `render` gives none.  A raster rendered after the page's
+    /// work budget ran out is not kept.
     pub(super) fn memo_raster(
         &mut self,
         key: RasterKey,
-        render: impl FnOnce(&mut Self) -> CellRaster,
-    ) -> CellRaster {
+        render: impl FnOnce(&mut Self) -> Option<CellRaster>,
+    ) -> Option<CellRaster> {
         if let Some(kept) = self.pattern_memo.borrow().raster(&key) {
-            return kept;
+            return Some(kept);
         }
-        let raster = render(self);
+        let raster = render(self)?;
         if self.budget_exceeded.is_none() {
             self.pattern_memo
                 .borrow_mut()
                 .insert_raster(key, raster.clone());
         }
-        raster
+        Some(raster)
     }
 }
 

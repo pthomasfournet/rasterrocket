@@ -2,7 +2,6 @@
 
 use super::super::color::RasterColor;
 use super::super::gstate::ctm_multiply;
-use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey};
 use super::pixel_rect::PixelRect;
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
@@ -295,7 +294,7 @@ impl PageRenderer<'_> {
         // A lattice cell below one pixel in area repeats more than once per
         // pixel; box-filtered over a pixel, the pattern is its mean.
         if geometry.area < 1.0 {
-            return Some(self.mean_pattern(&cell, &geometry, key));
+            return self.mean_pattern(&cell, &geometry, key);
         }
         let (cell_w, cell_h) = geometry.cell_size();
         if cell_w * cell_h > MAX_CELL_OVERDRAW * geometry.area {
@@ -333,17 +332,17 @@ impl PageRenderer<'_> {
         cell: &CellContent<'_>,
         geometry: &CellGeometry,
         key: RasterKey,
-    ) -> TiledPattern {
+    ) -> Option<TiledPattern> {
         let raster = self.memo_raster(key, |r| {
             let (w, h) = (geometry.bounds.width, geometry.bounds.height);
             let k = (MEAN_SAMPLE_PX / w.min(h)).min(MAX_TILE_PX / w.max(h));
             let size = (pixel_ceil(w * k) as u32, pixel_ceil(h * k) as u32);
-            let sample = r.render_cells(cell, size, &[geometry.placement(k, 0.0, 0.0)]);
+            let sample = r.render_cells(cell, size, &[geometry.placement(k, 0.0, 0.0)])?;
             let (colour, coverage) = mean_over_period(&sample, geometry.area * k * k);
-            CellRaster::Mean(colour, coverage)
-        });
+            Some(CellRaster::Mean(colour, coverage))
+        })?;
         match raster {
-            CellRaster::Mean(colour, coverage) => TiledPattern::uniform(colour, coverage),
+            CellRaster::Mean(colour, coverage) => Some(TiledPattern::uniform(colour, coverage)),
             CellRaster::Cell(_) => unreachable!("a mean is kept under its key"),
         }
     }
@@ -373,16 +372,13 @@ impl PageRenderer<'_> {
         let raster_at = |r: &mut Self, phase: CellPhase| {
             let raster = r.memo_raster(key.at_phase(phase), |r| {
                 let (x, y) = (f64::from(phase.0) * scale, f64::from(phase.1) * scale);
-                CellRaster::Cell(Rc::new(r.render_cells(
-                    cell,
-                    size,
-                    &[geometry.placement(1.0, x, y)],
-                )))
-            });
+                let bitmap = r.render_cells(cell, size, &[geometry.placement(1.0, x, y)])?;
+                Some(CellRaster::Cell(Rc::new(bitmap)))
+            })?;
             let CellRaster::Cell(bitmap) = raster else {
                 unreachable!("a cell bitmap is kept under its key")
             };
-            bitmap
+            Some(bitmap)
         };
         TiledPattern::compose(
             |phase| raster_at(self, phase),
@@ -434,7 +430,7 @@ impl PageRenderer<'_> {
             return None;
         }
         let size = (region.width(), region.height());
-        let screen = self.render_cells(cell, size, &placements);
+        let screen = self.render_cells(cell, size, &placements)?;
         Some(TiledPattern::screen(screen, rx0, ry0))
     }
 
@@ -446,28 +442,20 @@ impl PageRenderer<'_> {
     ///
     /// A child `PageRenderer` scoped to the pattern's resource context runs
     /// the content.  An uncoloured pattern's tint is set as the fill and
-    /// stroke colour before the content runs.
+    /// stroke colour before the content runs.  `None`, with the render
+    /// stopped, when the allocator refuses the bitmap.
     fn render_cells(
         &mut self,
         cell: &CellContent<'_>,
         (width, height): (u32, u32),
         placements: &[[f64; 6]],
-    ) -> Bitmap<Rgb8> {
+    ) -> Option<Bitmap<Rgb8>> {
         let desc = cell.desc;
-        // A child renderer sharing the document, its fonts and the page's
-        // memos.
-        let doc = self.resources.doc();
-        let mut child = PageRenderer::new(width, height, doc, desc.stream_id);
-        child.set_document_fonts(std::sync::Arc::clone(self.font_cache.document_fonts()));
-        child.set_antialias(self.text_antialias, self.vector_antialias);
-        child.canvas = PageCanvas::new(CanvasKind::Rgb, width, height, true);
-        // One level deeper, bounded by MAX_PATTERN_DEPTH.
-        child.pattern_depth = self.pattern_depth.saturating_add(1);
         // The cell's operators count against the page's operation budget
         // and deadline, which the parent cannot check while the cell runs.
-        child.adopt_parent_budget(self);
-        child.share_memos(self);
-        child.set_optional_content(std::sync::Arc::clone(self.optional_content()));
+        let mut child = self.try_child(width, height, desc.stream_id)?;
+        // One level deeper, bounded by MAX_PATTERN_DEPTH.
+        child.pattern_depth = self.pattern_depth.saturating_add(1);
 
         // A pattern without resources of its own inherits the resources in
         // effect, whichever dictionary they came from.
@@ -495,7 +483,7 @@ impl PageRenderer<'_> {
         // The cells' operations and any budget breach pass to the parent,
         // whose execution stops on a breach.
         child.fold_child_into(self);
-        child.finish().0
+        Some(child.finish().0)
     }
 
     /// Intersect the clip with `bbox`, a rectangle `[x0, y0, x1, y1]` in

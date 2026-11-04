@@ -9,8 +9,6 @@
 //! every later occurrence composites the bitmap in the fill colour as a
 //! font glyph is.
 
-use std::sync::Arc;
-
 use font::bitmap::GlyphBitmap as CachedGlyph;
 use font::key::GlyphKey;
 use raster::glyph::{GlyphBitmap, fill_glyph};
@@ -21,7 +19,7 @@ use super::super::gstate::ctm_multiply;
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
-use super::canvas::{CanvasKind, PageCanvas, with_canvas};
+use super::canvas::with_canvas;
 use super::text_ops::{glyph_advance, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
@@ -172,8 +170,7 @@ impl PageRenderer<'_> {
             self.vector_antialias,
         );
         let cache = self.font_cache.glyph_cache().clone();
-        let Some(coverage) =
-            cache.get_or_render(key, || Some(self.render_type3_coverage(glyph, &frame)))
+        let Some(coverage) = cache.get_or_render(key, || self.render_type3_coverage(glyph, &frame))
         else {
             return false;
         };
@@ -218,19 +215,18 @@ impl PageRenderer<'_> {
     /// covering the declared bounding box and a margin, whose alpha plane
     /// is the coverage.  A bitmap of width 0 marks a glyph whose content
     /// reaches the margin's outer edge and so may extend past the box.
-    fn render_type3_coverage(&mut self, glyph: &Type3Glyph, frame: &GlyphFrame) -> CachedGlyph {
+    /// `None`, with the render stopped, when the allocator refuses the
+    /// child's canvas.
+    fn render_type3_coverage(
+        &mut self,
+        glyph: &Type3Glyph,
+        frame: &GlyphFrame,
+    ) -> Option<CachedGlyph> {
         let (width, height) = (frame.width, frame.height);
-        let doc = self.resources.doc();
         let context = self.resources.resource_context_id();
-        let mut child = PageRenderer::new(width, height, doc, context);
-        child.set_document_fonts(Arc::clone(self.font_cache.document_fonts()));
-        child.set_antialias(self.text_antialias, self.vector_antialias);
-        child.canvas = PageCanvas::new(CanvasKind::Rgb, width, height, true);
+        let mut child = self.try_child(width, height, context)?;
         child.pattern_depth = self.pattern_depth;
         child.form_depth = self.form_depth + 1;
-        child.adopt_parent_budget(self);
-        child.share_memos(self);
-        child.set_optional_content(Arc::clone(self.optional_content()));
         child.resources = self.resources.inherited();
         child.gstate.current_mut().ctm = frame.child_ctm;
         child.execute(&glyph.ops);
@@ -245,23 +241,23 @@ impl PageRenderer<'_> {
                 .chunks_exact(w)
                 .any(|row| row[0] != 0 || row[w - 1] != 0);
         if touches_edge {
-            return CachedGlyph {
+            return Some(CachedGlyph {
                 x_off: 0,
                 y_off: 0,
                 width: 0,
                 height: 0,
                 aa: true,
                 data: Vec::new(),
-            };
+            });
         }
-        CachedGlyph {
+        Some(CachedGlyph {
             x_off: frame.x_off,
             y_off: frame.y_off,
             width,
             height,
             aa: true,
             data,
-        }
+        })
     }
 }
 

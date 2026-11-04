@@ -450,6 +450,28 @@ impl<'doc> PageRenderer<'doc> {
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: bool,
     ) -> Result<Self, raster::BitmapAllocError> {
+        let kind = if ink {
+            CanvasKind::Ink
+        } else {
+            CanvasKind::Rgb
+        };
+        let canvas = PageCanvas::try_new(kind, view.width, view.height, group.is_some())?;
+        Ok(Self::with_canvas(view, doc, page_id, canvas, group))
+    }
+
+    /// A renderer for `view` painting onto `canvas`, a bitmap of the view's
+    /// window, as the page group `group`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_view`].
+    fn with_canvas(
+        view: &PageView,
+        doc: &'doc Document,
+        page_id: ObjectId,
+        canvas: PageCanvas,
+        group: Option<crate::resources::TransparencyGroupParams>,
+    ) -> Self {
         let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
             sx.is_finite() && sx > 0.0 && sy.is_finite() && sy > 0.0,
@@ -461,13 +483,11 @@ impl<'doc> PageRenderer<'doc> {
             "PageRenderer::with_view: window lies outside the page: {view:?}"
         );
         let (width, height, rotate_cw) = (view.width, view.height, view.rotate_cw);
-
-        let kind = if ink {
-            CanvasKind::Ink
-        } else {
-            CanvasKind::Rgb
-        };
-        let canvas = PageCanvas::try_new(kind, width, height, group.is_some())?;
+        debug_assert_eq!(
+            canvas.dims(),
+            (width, height),
+            "the canvas covers the window"
+        );
 
         let initial_ctm = view.page_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);
@@ -475,7 +495,7 @@ impl<'doc> PageRenderer<'doc> {
         let font_cache = FontCache::new(Arc::default(), true);
         let resources = PageResources::new(doc, page_id);
 
-        Ok(Self {
+        Self {
             canvas,
             width,
             height,
@@ -545,7 +565,7 @@ impl<'doc> PageRenderer<'doc> {
             vk_aa_scratch: gpu::backend::AaFillScratch::new(),
             #[cfg(feature = "cache")]
             cache_state: None,
-        })
+        }
     }
 
     /// Resolve indirect fonts through `fonts`, a store shared by every page
@@ -743,6 +763,24 @@ impl<'doc> PageRenderer<'doc> {
         self.tint_budget = std::rc::Rc::clone(&parent.tint_budget);
         self.pattern_memo = std::rc::Rc::clone(&parent.pattern_memo);
         self.form_memo = std::rc::Rc::clone(&parent.form_memo);
+    }
+
+    /// A renderer of `width × height` pixels, resolving resources in
+    /// `context`, that paints content drawn for this one (a tiling cell, a
+    /// Type 3 glyph) onto a transparent RGB canvas whose alpha plane is the
+    /// content's coverage.  It shares this renderer's document fonts,
+    /// antialiasing, operation budget, memos and optional content.  `None`,
+    /// with the render stopped, when the allocator refuses the canvas.
+    pub(super) fn try_child(&mut self, width: u32, height: u32, context: ObjectId) -> Option<Self> {
+        let canvas = self.try_canvas(CanvasKind::Rgb, width, height)?;
+        let view = Self::unit_view(width, height);
+        let mut child = Self::with_canvas(&view, self.resources.doc(), context, canvas, None);
+        child.set_document_fonts(Arc::clone(self.font_cache.document_fonts()));
+        child.set_antialias(self.text_antialias, self.vector_antialias);
+        child.adopt_parent_budget(self);
+        child.share_memos(self);
+        child.set_optional_content(Arc::clone(self.optional_content()));
+        Some(child)
     }
 
     /// Fold a finished child renderer (a tiling-pattern tile) into its
