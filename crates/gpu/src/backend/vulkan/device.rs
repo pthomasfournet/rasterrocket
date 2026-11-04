@@ -114,16 +114,14 @@ fn instance_lifecycle() -> MutexGuard<'static, ()> {
 /// the `ash::Device` reference everywhere.  `selector`, when given,
 /// names the physical device; otherwise the automatic ranking applies.
 pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> {
-    let _lifecycle = instance_lifecycle();
-    let entry = load_entry()?;
-
-    let instance = create_instance(&entry)?;
-
-    let (phys, chosen) =
-        destroy_instance_on_err(&instance, pick_physical_device(&instance, selector))?;
-    let compute_queue_family = chosen
-        .compute_queue
-        .map_err(|why| BackendError::msg(format!("picked an unusable device: {why}")))?;
+    let Picked {
+        _lifecycle,
+        entry,
+        instance,
+        phys,
+        chosen,
+        compute_queue_family,
+    } = open_and_pick(selector)?;
     let mem_props = unsafe { instance.get_physical_device_memory_properties(phys) };
 
     // Pull the dispatch group-count limit once.  Spec guarantees ≥ 65535
@@ -224,21 +222,55 @@ impl DeviceCtx {
 /// several, or one that cannot host the backend; the loader's or the
 /// instance's error when Vulkan itself is unavailable.
 pub(super) fn check_selector(selector: &DeviceSelector) -> Result<()> {
-    let _lifecycle = instance_lifecycle();
-    let entry = load_entry()?;
-    let instance = create_instance(&entry)?;
-    let picked = pick_physical_device(&instance, Some(selector));
+    let picked = open_and_pick(Some(selector))?;
     // Safety: the instance has no child objects; physical-device handles
     // are not owned.
-    unsafe { instance.destroy_instance(None) };
-    picked.map(drop)
+    unsafe { picked.instance.destroy_instance(None) };
+    Ok(())
+}
+
+/// A loaded loader, an instance on it, and the physical device chosen on
+/// that instance, with the lifecycle lock still held.
+struct Picked {
+    _lifecycle: MutexGuard<'static, ()>,
+    entry: ash::Entry,
+    instance: ash::Instance,
+    phys: vk::PhysicalDevice,
+    chosen: Candidate,
+    compute_queue_family: u32,
+}
+
+/// Take the lifecycle lock, load the loader, create an instance, and pick
+/// the device `selector` names (or the best-ranked one).  On failure no
+/// instance is left behind.
+fn open_and_pick(selector: Option<&DeviceSelector>) -> Result<Picked> {
+    let lifecycle = instance_lifecycle();
+    let entry = load_entry()?;
+    let instance = create_instance(&entry)?;
+    let (phys, chosen, compute_queue_family) = destroy_instance_on_err(
+        &instance,
+        pick_physical_device(&instance, selector).and_then(|(phys, chosen)| {
+            let family = chosen
+                .compute_queue
+                .map_err(|why| BackendError::msg(format!("picked an unusable device: {why}")))?;
+            Ok((phys, chosen, family))
+        }),
+    )?;
+    Ok(Picked {
+        _lifecycle: lifecycle,
+        entry,
+        instance,
+        phys,
+        chosen,
+        compute_queue_family,
+    })
 }
 
 /// Pass `result` through, destroying `instance` first when it is an error.
 ///
 /// Only valid while `instance` has no live child objects: every caller is
-/// in [`init`] before a logical device exists, and [`create_device`]
-/// creates none on failure.
+/// in [`open_and_pick`] or [`init`] before a logical device exists, and
+/// [`create_device`] creates none on failure.
 fn destroy_instance_on_err<T>(instance: &ash::Instance, result: Result<T>) -> Result<T> {
     if result.is_err() {
         // Safety: per the precondition above, no child objects exist.
@@ -516,11 +548,7 @@ fn query_identity(
     }
     let exts = unsafe { instance.enumerate_device_extension_properties(phys) }
         .map_err(vk_err("vkEnumerateDeviceExtensionProperties"))?;
-    let has_pci = exts.iter().any(|ext| {
-        // Safety: extension_name is a NUL-terminated C string per spec.
-        let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
-        name == pci_bus_info::NAME
-    });
+    let has_pci = extension_names(&exts).contains(&pci_bus_info::NAME);
 
     let mut id = vk::PhysicalDeviceIDProperties::default();
     let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
