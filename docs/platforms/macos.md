@@ -103,16 +103,51 @@ readable by you alone, and removes it with its contents when it exits.
 
 ## GPU
 
-rrocket does not use the Mac's GPU. The CPU path is the supported one on
-macOS, and the release build needs no GPU features.
+The CPU path is the supported one on macOS, and the release build needs no
+GPU features. The Apple GPU can run rrocket's Vulkan kernels through
+MoltenVK, with output byte-identical to the CPU, but it does not make
+rendering faster.
 
 - **Metal:** there is no Metal backend.
-- **Vulkan through MoltenVK:** the `vulkan` feature builds the cross-vendor
-  kernels, but it has not been tested on a Mac. Those kernels are off by
-  default on every platform, because the CPU paths are faster.
+- **Vulkan through MoltenVK:** see below.
 - **Hardware JPEG decoding (VideoToolbox):** not used. On the scanned
   documents measured, JPEG decoding is about 15 % of render time, too little
   for the media engine to pay off.
+
+### Vulkan through MoltenVK
+
+Install the Vulkan loader, MoltenVK and the Slang shader compiler, which the
+build needs to compile the kernels:
+
+```bash
+brew install molten-vk vulkan-loader vulkan-tools
+vulkaninfo --summary          # lists the Apple GPU, driverName = MoltenVK
+```
+
+`slangc` comes from the [Slang releases](https://github.com/shader-slang/slang/releases)
+(macOS arm64 archive); put its `bin` directory on `PATH`. Then build with the
+`vulkan` feature and select the backend:
+
+```bash
+cargo build --release -p rasterrocket-cli --features vulkan
+target/release/rrocket --backend vulkan document.pdf out
+```
+
+rrocket finds Homebrew's loader (`/opt/homebrew/lib/libvulkan.1.dylib`) or
+the Vulkan SDK's (`$VULKAN_SDK/lib`) without `DYLD_LIBRARY_PATH`. On the
+Apple GPU device buffers live in shared memory, which the CPU reads and
+writes in place, so no data is copied to or from the GPU.
+
+What runs on the GPU is the antialiased path fill (solid colour, rectangular
+clip), and it is off by default: `PDF_RASTER_AA_FILL_THRESHOLD=0` sends
+every eligible fill to the device. Under the default `--backend auto`, no
+Vulkan device is opened while every Vulkan kernel is off.
+
+Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
+byte-identically on the GPU and the CPU. A page of 300 large solid polygons
+takes about 1 ms per fill on the GPU against about 0.25 ms on the CPU, because
+each fill waits for its result, and that round trip through Metal outweighs the
+fill itself. So the kernel stays off.
 
 ## Comparing against pdftoppm
 
@@ -122,7 +157,8 @@ The comparison scripts in `tests/compare/` need a few Homebrew packages:
 brew install poppler imagemagick bash
 ```
 
-The scripts need bash 4.4 or newer; macOS ships bash 3.2, and Homebrew's
+`ab_render.sh` and `ab_archive.sh` compare two builds, or the CPU and the
+GPU (`AFTER_FLAGS="--backend vulkan"`), byte for byte. The scripts need bash 4.4 or newer; macOS ships bash 3.2, and Homebrew's
 bash takes precedence once installed. See
 [Getting Started](../getting-started.md#dependencies) for the full list.
 
@@ -137,7 +173,8 @@ and send it another way. See the [CLI reference](../cli-reference.md#printing).
 
 ## Known gaps
 
-- No GPU acceleration (see above).
+- No GPU acceleration: the Vulkan kernels run on the Apple GPU but are
+  slower than the CPU (see above).
 - Intel Macs are not tested, nor M-series Macs: every result here comes
   from one A-series machine (NEON, the Apple GPU of an A-series chip).
 - The SVE2 code path (`nightly-sve2`) cannot run on Apple silicon, which has
