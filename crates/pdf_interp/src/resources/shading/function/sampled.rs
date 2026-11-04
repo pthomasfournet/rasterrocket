@@ -9,8 +9,8 @@
 
 use pdf::{Dictionary, Object};
 
-use super::lattice::{Axis, for_each_corner};
 use super::{domain_pairs, numbers};
+use crate::resources::lattice::{Axis, for_each_corner};
 
 /// Upper bound on the input dimension.  The interpolation visits `2^m`
 /// grid corners; real tint transforms take a handful of colorants.

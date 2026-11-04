@@ -20,6 +20,7 @@ pub(crate) mod font;
 pub(crate) mod font_substitute;
 pub(crate) mod icc_shaper;
 pub(crate) mod image;
+pub(crate) mod lattice;
 pub(crate) mod shading;
 pub(crate) mod tiling;
 pub(crate) mod transfer;

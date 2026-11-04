@@ -40,7 +40,7 @@ use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{ColorSpace, decoded_sample, default_space, resolve};
 use crate::resources::dict_ext::DictExt as _;
 use crate::resources::icc_shaper::{ProfileConversion, RgbShaper};
-use crate::resources::shading::function::lattice::{Axis, for_each_corner};
+use crate::resources::lattice::{Axis, for_each_corner};
 
 // ── Codec output ──────────────────────────────────────────────────────────────
 

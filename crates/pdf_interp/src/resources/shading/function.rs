@@ -25,7 +25,6 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use crate::resources::dict_ext::DictExt;
 use crate::resources::obj_to_f64;
 
-pub(crate) mod lattice;
 mod postscript;
 mod sampled;
 
