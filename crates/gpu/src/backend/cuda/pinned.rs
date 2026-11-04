@@ -84,10 +84,18 @@ impl PinnedBuffer {
 }
 
 impl Drop for PinnedBuffer {
+    /// A failure cannot be returned from `drop`; it is logged at `warn`, as
+    /// a leaked page-locked allocation or an unusable context is.
     fn drop(&mut self) {
-        let ctx = &self.ctx;
-        ctx.record_err(ctx.bind_to_thread());
+        if let Err(e) = self.ctx.bind_to_thread() {
+            log::warn!("PinnedBuffer drop: binding the CUDA context failed: {e}");
+        }
         // SAFETY: `ptr` was returned by `cuMemHostAlloc` and is freed once.
-        ctx.record_err(unsafe { result::free_host(self.ptr.as_ptr().cast::<c_void>()) });
+        if let Err(e) = unsafe { result::free_host(self.ptr.as_ptr().cast::<c_void>()) } {
+            log::warn!(
+                "PinnedBuffer drop: cuMemFreeHost of {} bytes failed: {e}",
+                self.len
+            );
+        }
     }
 }

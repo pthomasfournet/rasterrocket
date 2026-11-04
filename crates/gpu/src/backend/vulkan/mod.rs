@@ -95,6 +95,19 @@ impl VulkanBackend {
         })
     }
 
+    /// Check that `selector` names exactly one device that can host the
+    /// backend, without opening it: an instance is created and destroyed,
+    /// no logical device or pipeline is built.
+    ///
+    /// # Errors
+    /// [`BackendError::DeviceSelection`] when it does not resolve; the
+    /// loader's or instance's error when Vulkan is unavailable.
+    ///
+    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
+    pub fn check_selector(selector: &DeviceSelector) -> Result<()> {
+        device::check_selector(selector)
+    }
+
     /// Whether the device is an integrated GPU, whose device buffers are
     /// host memory the host writes and reads directly.
     #[must_use]

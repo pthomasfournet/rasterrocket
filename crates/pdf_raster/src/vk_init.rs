@@ -61,7 +61,8 @@ static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// `ForceVulkan`.  A selector that does not resolve is an error whenever
 /// Vulkan is initialised, under either policy, since it is a configuration
 /// mistake rather than missing hardware; under `Auto` with every Vulkan
-/// kernel dormant it is not resolved, as no device is opened.
+/// kernel dormant it is still resolved against the enumerated devices, but
+/// no device is opened.
 ///
 /// # Errors
 ///
@@ -79,6 +80,11 @@ pub(crate) fn init_vk_backend(
         && !auto_wants_vulkan(aa_fill_threshold(), huffman_threshold())
     {
         log::debug!("rasterrocket: every Vulkan kernel is dormant; Auto leaves Vulkan idle");
+        if let Some(selector) = selector
+            && let Err(InitError::Selection(msg)) = checked_selector(selector)
+        {
+            return Err(RasterError::InvalidOptions(msg));
+        }
         return Ok(None);
     }
     match cached_backend(selector) {
@@ -109,6 +115,27 @@ pub(crate) fn parse_selector(
     selector.map(str::parse).transpose()
 }
 
+/// Selectors already checked by [`checked_selector`], with the outcome.
+static CHECKED: Mutex<Vec<(String, Result<(), InitError>)>> = Mutex::new(Vec::new());
+
+/// Check `selector` against the enumerated devices without opening one
+/// ([`VulkanBackend::check_selector`]), once per selector per process.  An
+/// unavailable Vulkan is not a selection error: `Auto` falls through then
+/// as it does when it opens Vulkan.
+fn checked_selector(selector: &str) -> Result<(), InitError> {
+    let mut cache = CHECKED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, result)) = cache.iter().find(|(key, _)| key == selector) {
+        return result.clone();
+    }
+    let result = parse_selector(Some(selector))
+        .and_then(|parsed| {
+            VulkanBackend::check_selector(&parsed.expect("Some selector parses to Some"))
+        })
+        .map_err(InitError::from);
+    cache.push((selector.to_owned(), result.clone()));
+    result
+}
+
 /// Look up or construct the backend for `selector`.  The lock is held
 /// across construction so concurrent first sessions build one device.
 fn cached_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
@@ -124,4 +151,34 @@ fn cached_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitErro
 fn construct(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
     let parsed = parse_selector(selector)?;
     Ok(Arc::new(VulkanBackend::with_selector(parsed.as_ref())?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::init_vk_backend;
+    use crate::{BackendPolicy, RasterError};
+
+    /// A selector naming no device is a configuration error under `Auto`
+    /// even while every Vulkan kernel is dormant (the default thresholds of
+    /// this test process) and no device is opened.
+    #[test]
+    fn auto_rejects_an_unresolvable_selector_while_vulkan_is_idle() {
+        const SELECTOR: &str = "no-such-gpu-7f3c";
+        match init_vk_backend(BackendPolicy::Auto, Some(SELECTOR)) {
+            Err(RasterError::InvalidOptions(msg)) => {
+                assert!(
+                    msg.contains(SELECTOR),
+                    "message does not name the selector: {msg}"
+                );
+            }
+            Ok(None) if gpu::backend::vulkan::VulkanBackend::new().is_err() => {
+                eprintln!("skipping: no Vulkan device to resolve against");
+            }
+            Ok(backend) => panic!(
+                "expected InvalidOptions, got Ok (backend opened: {})",
+                backend.is_some()
+            ),
+            Err(other) => panic!("expected InvalidOptions, got {other:?}"),
+        }
+    }
 }

@@ -222,9 +222,9 @@ pub struct SessionConfig {
     /// that is not a valid index is matched as a name.  A value that does
     /// not resolve to exactly one usable device makes [`open_session`]
     /// return [`RasterError::InvalidOptions`] listing the enumerated
-    /// devices, under `ForceVulkan`, and under `Auto` when a Vulkan kernel is
-    /// enabled (with every Vulkan kernel dormant `Auto` opens no device and
-    /// does not resolve the selector).
+    /// devices, under `Auto` as well as `ForceVulkan`; with every Vulkan kernel
+    /// dormant, `Auto` resolves it against the enumerated devices without
+    /// opening one.
     ///
     /// [`SessionConfig::with_policy`] sets `None`; [`SessionConfig::default`]
     /// reads `PDF_RASTER_VULKAN_DEVICE` (see

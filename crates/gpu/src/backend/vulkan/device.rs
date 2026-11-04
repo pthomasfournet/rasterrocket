@@ -207,6 +207,25 @@ impl DeviceCtx {
     }
 }
 
+/// Resolve `selector` against the enumerated physical devices without
+/// creating a logical device: an instance is created, the devices are
+/// enumerated and ranked as [`init`] does, and the instance is destroyed.
+///
+/// # Errors
+/// [`BackendError::DeviceSelection`] when `selector` matches no device,
+/// several, or one that cannot host the backend; the loader's or the
+/// instance's error when Vulkan itself is unavailable.
+pub(super) fn check_selector(selector: &DeviceSelector) -> Result<()> {
+    let _lifecycle = instance_lifecycle();
+    let entry = load_entry()?;
+    let instance = create_instance(&entry)?;
+    let picked = pick_physical_device(&instance, Some(selector));
+    // Safety: the instance has no child objects; physical-device handles
+    // are not owned.
+    unsafe { instance.destroy_instance(None) };
+    picked.map(drop)
+}
+
 /// Pass `result` through, destroying `instance` first when it is an error.
 ///
 /// Only valid while `instance` has no live child objects: every caller is
