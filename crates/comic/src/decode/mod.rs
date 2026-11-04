@@ -275,7 +275,7 @@ mod tests {
                 3,
                 u32::from(samples),
                 if samples <= 2 {
-                    u32::from(bits) | (u32::from(bits) << 16) * u32::from(samples - 1)
+                    u32::from(bits) | ((u32::from(bits) << 16) * u32::from(samples - 1))
                 } else {
                     bits_at
                 },
@@ -288,7 +288,7 @@ mod tests {
             (279, 4, planes, inline(plane_len, planes, counts_at)),
             (284, 3, 1, if planar { 2 } else { 1 }),
         ];
-        if samples % 2 == 0 {
+        if samples.is_multiple_of(2) {
             // ExtraSamples: the last sample is unassociated alpha.
             entries.push((338, 3, 1, 2));
         }
