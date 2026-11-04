@@ -18,6 +18,15 @@ release). It is not published and changes are not sent upstream.
   values; `publish = false`; `read-fonts` is the fork in
   `crates/read_fonts` and `font-test-data` the copy in
   `crates/font_test_data`.
+  `[package.metadata.release] release = false` keeps the crate out of
+  `cargo release`, so its version stays that of the upstream base. A
+  `[lints.clippy]` table allows `needless_return_with_question_mark` and
+  `unnecessary_unwrap`, whose findings are in upstream code this fork does
+  not change.
+
+- Upstream's integration tests (`skrifa/tests`: `glyf_parity.rs` and
+  `glyf_path_parity.rs`, which compare read-fonts' `glyf` loader with
+  skrifa's scalers) are not vendored. The unit tests are.
 
 - The licence files replace upstream's symlinks to the repository root.
 

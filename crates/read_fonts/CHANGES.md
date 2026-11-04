@@ -18,6 +18,11 @@ release). It is not published and changes are not sent upstream.
   values; `publish = false`; `font-test-data` points at the copy in
   `crates/font_test_data` (same upstream commit). The benchmarks and their
   `criterion` / `rand` dev-dependencies are removed.
+  `[package.metadata.release] release = false` keeps the crate out of
+  `cargo release`, so its version stays that of the upstream base. A
+  `[lints.clippy]` table allows `collapsible_match`, `derivable_impls` and
+  `while_let_loop`, whose findings are in upstream code this fork does not
+  change.
 
 - Fixed-width byte groups are read with `slice::as_chunks` (stable since
   Rust 1.88) instead of `chunks_exact` with a constant size, as clippy

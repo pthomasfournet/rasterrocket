@@ -4,7 +4,13 @@
 # 1d1672367c7909013b4e366085d68d5ad612ee67 (2026-11-02, crate version 0.10.1).
 # Only test suites (theirs and rasterrocket-font's) depend on it.
 # Licence: MIT OR Apache-2.0 (see LICENSE-APACHE, LICENSE-MIT).
-# Changed from upstream: rust-version is inherited from the workspace.
+# Changed from upstream: rust-version is inherited from the workspace and
+# the other workspace-inherited fields and dependencies are resolved to
+# values; `publish = false`; `[package.metadata.release] release = false`
+# keeps the crate out of `cargo release`; `src/extended.rs` splits the
+# 16-byte groups of its test data with `as_chunks::<16>()` instead of
+# `chunks_exact(16)`, as clippy requires under the 1.99 minimum toolchain
+# (same result).
 [package]
 name = "font-test-data"
 version = "0.10.1"
