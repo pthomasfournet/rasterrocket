@@ -16,6 +16,7 @@ use ash::vk;
 
 use crate::backend::{BackendError, Result};
 
+use super::barrier;
 use super::device::DeviceCtx;
 use super::error::vk_err;
 use super::memory::{DeviceBuffer, FillAction, HostBuffer, SlabAllocator, validate_fill_size};
@@ -143,9 +144,9 @@ impl TransferContext {
         let staging_handle = staging.handle();
         let src_handle = src.handle();
         self.copy_via_staging(src_handle, staging_handle, len)?;
-        // GPU has finished writing the staging buffer (queue_wait_idle
-        // inside copy_via_staging).  HOST_COHERENT means the read sees
-        // the latest data without an explicit invalidate.
+        // The copy has completed (`vkQueueWaitIdle`) and its writes are
+        // visible to the host (`run_one_shot`'s closing barrier); the
+        // memory is HOST_COHERENT, so no invalidate is needed.
         dst.copy_from_slice(&staging.as_slice()[..dst.len()]);
         Ok(())
     }
@@ -189,8 +190,8 @@ impl TransferContext {
         })
     }
 
-    /// Reset the pool, record `f` into the cached cmd buffer, submit,
-    /// wait idle.  Holds the `cmd_pool` mutex for the whole body so
+    /// Reset the pool, record `f` and a closing barrier into the cached
+    /// cmd buffer, submit, wait idle.  Holds the `cmd_pool` mutex for the whole body so
     /// the buffer can't be reused before `vkQueueWaitIdle` returns
     /// (cmd buffers in Pending state must not be reset).
     fn run_one_shot<F: FnOnce(vk::CommandBuffer)>(&self, f: F) -> Result<()> {
@@ -213,8 +214,17 @@ impl TransferContext {
 
         f(pool.cmd);
 
+        // A wait on the queue makes the transfer's writes available to the
+        // device domain only: the barrier makes them visible to host reads
+        // of a staging buffer and to the dispatches of later submissions.
         // Safety: cmd is in Recording state; pool mutex still held.
         unsafe {
+            barrier::global(
+                &self.device.device,
+                pool.cmd,
+                barrier::TRANSFER_WRITES,
+                barrier::LATER_SUBMISSIONS_AND_HOST,
+            );
             self.device
                 .device
                 .end_command_buffer(pool.cmd)

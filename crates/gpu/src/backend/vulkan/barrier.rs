@@ -70,6 +70,25 @@ pub(super) const FILL_WRITES: Scope = Scope::new(
     vk::AccessFlags2::TRANSFER_WRITE,
 );
 
+/// The writes of any transfer command (copy or fill).
+pub(super) const TRANSFER_WRITES: Scope = Scope::new(
+    vk::PipelineStageFlags2::ALL_TRANSFER,
+    vk::AccessFlags2::TRANSFER_WRITE,
+);
+
+/// Every device access of later submissions, and host reads after the
+/// submission's completion has been waited on.
+pub(super) const LATER_SUBMISSIONS_AND_HOST: Scope = Scope::new(
+    vk::PipelineStageFlags2::from_raw(
+        vk::PipelineStageFlags2::ALL_COMMANDS.as_raw() | vk::PipelineStageFlags2::HOST.as_raw(),
+    ),
+    vk::AccessFlags2::from_raw(
+        vk::AccessFlags2::MEMORY_READ.as_raw()
+            | vk::AccessFlags2::MEMORY_WRITE.as_raw()
+            | vk::AccessFlags2::HOST_READ.as_raw(),
+    ),
+);
+
 /// Every device write, of any command.
 pub(super) const ALL_WRITES: Scope = Scope::new(
     vk::PipelineStageFlags2::ALL_COMMANDS,
