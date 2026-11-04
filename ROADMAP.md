@@ -2331,9 +2331,9 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 ---
 
-## Phase 13 — Output to the operating system: print and fax (planned, after v2.0.0)
+## Phase 13 — Output to the operating system: print and fax (partly shipped in v2.1.0)
 
-**Status: in progress on master, unreleased.** The four fax layers are on
+**Status: in progress; what exists shipped in v2.1.0.** The four fax layers are on
 master (2026-11-01), with `--jpeg` and `--jpegopt` (as `pdftoppm -jpeg`,
 colour or gray), and printing through CUPS (2026-11-04); the Windows
 spooler is not started.
@@ -2376,9 +2376,9 @@ No modem code and no internet-fax services.
 
 ---
 
-## Phase 14 — Text shaping for substituted fonts (on master, unreleased)
+## Phase 14 — Text shaping for substituted fonts (shipped in v2.1.0)
 
-**Status: shipped on master (2026-11-01), not yet released.**
+**Status: shipped in v2.1.0 (2026-11-04), on master since 2026-11-01.**
 
 When a PDF does not embed the font for Arabic, Devanagari or another script
 that needs shaping, the substitute (an installed face, or the bundled Noto
@@ -2400,7 +2400,7 @@ same text. The tests cover joining, letter order and vowel-sign reordering
 on the bundled faces. Runs do not cross show strings, so a word split
 across `Tj` operators is shaped piecewise.
 
-**Substitution follow-ups, also on master (2026-11-02).** A vertical-form
+**Substitution follow-ups, in v2.1.0 (2026-11-02).** A vertical-form
 CID drawn by a substitute without a `vert`/`vrt2` form is rotated or
 shifted from its horizontal glyph (brackets, dashes, the long-vowel mark,
 small kana) instead of drawn upright; an embedded TrueType name the cmap
@@ -2410,7 +2410,7 @@ searches included; and the bundled fallbacks gain Bengali, Tamil,
 Armenian, Georgian and Ethiopic (0.49 → 0.75 MB). Verified on Linux and on
 a stock macOS 27 install.
 
-**Font-discovery review, also on master (2026-11-03).** One walk lists the
+**Font-discovery review, in v2.1.0 (2026-11-03).** One walk lists the
 font files of a library, its Liberation substitutes included: a directory
 reached through several paths or a symbolic link is read once, and the walk
 stops at 10 000 directories with a warning. The Windows and macOS font
@@ -2425,7 +2425,7 @@ derived from it for vertical forms.
 ## Current status (2026-11-04)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
-planned Phase 13 above; Phase 14 shipped in v2.1.0.
+Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
 
 **Released in v2.1.0 (2026-11-04), since v2.0.0 (2026-10-31):** Phase 13's fax output,
 `--print` through CUPS and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
@@ -2457,7 +2457,7 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
-**Document-wide image decodes, on master, unreleased.** An image `XObject`
+**Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
 page: a store shared by the session's pages keeps it once a second page asks
 for it, up to 256 MiB of host-resident decodes (device-resident decodes stay
@@ -2469,7 +2469,7 @@ kept per default-colour-space context, so a form whose resources define no
 `/DefaultGray` no longer draws an image as the page's `/DefaultGray`
 decoded it.
 
-**Per-document latency, on master, unreleased.** The archive-wide latency
+**Per-document latency, in v2.1.0.** The archive-wide latency
 run (50 dpi gray, one core) left two text-heavy documents slower than
 pdfium; both now match or beat it. A text run drawn with `2 Tr` (synthetic
 bold, a stroked glyph outline) draws each glyph's stroke from cached
@@ -2486,13 +2486,13 @@ cached glyph strokes (60 archive pages change, all stroked text; each
 glyph stroke is placed at the quarter-pixel phase of its fill). Everything
 else is byte-identical over the archive.
 
-**A refused page bitmap is an error, on master, unreleased.** The page
+**A refused page bitmap is an error, in v2.1.0.** The page
 canvas used to be allocated infallibly, so a page within the size limits
 whose bitmap the allocator refuses (up to 1.8 GB RGB, 4.8 GB on the
 overprint canvas) aborted the process. It now fails that page with
 `RasterError::PageAllocationFailed`.
 
-**HTJ2K, on master, unreleased.** JPX images coded with the high-throughput
+**HTJ2K, in v2.1.0.** JPX images coded with the high-throughput
 block coder (ISO/IEC 15444-15) decode; they used to fail with a diagnostic
 naming HTJ2K. The vendored JPEG 2000 fork gains an HT block decoder (the
 cleanup, SigProp and MagRef passes) and HT codeword segments, quality layers
@@ -2502,13 +2502,13 @@ count; the HT conformance streams of ISO/IEC 15444-4 decode as their classic
 originals do wherever the transcode is lossless. Only the mixed mode (HT and
 classic code-blocks in one tile-component) is still refused, by name.
 
-**Image reduction limited to the paintable pixels, on master, unreleased.**
+**Image reduction limited to the paintable pixels, in v2.1.0.**
 An image drawn below its resolution is area-averaged only over the device
 pixels inside the page and the clip rectangle. Output is byte-identical; a
 large image drawn mostly off-page or under a small clip renders 1.2–1.6×
 faster.
 
-**Overprint simulation, on master (merged 2026-11-03), unreleased.**
+**Overprint simulation, in v2.1.0 (merged 2026-11-03).**
 `--overprint` / `RasterOptions::overprint` (default off). With it, a page on
 which some `ExtGState` reachable from its resources, or from the appearance
 streams of annotations that are drawn, sets `OP` or `op` is painted on a
@@ -2531,7 +2531,7 @@ than its profile; antialiased edges of RGB or grey black text take a slight
 colour cast; and fills and image composites on an overprint page run on
 the CPU.
 
-**Font forks rebased, unreleased.** The read-fonts and skrifa forks move
+**Font forks rebased, in v2.1.0.** The read-fonts and skrifa forks move
 to fontations `1d1672367` (read-fonts 0.46, skrifa 0.49) and the harfrust
 fork to `bdd55a548` (0.15), together, since harfrust is built against the
 read-fonts API. The fixes the forks had carried over by hand are now
@@ -2545,7 +2545,7 @@ U+2701). Over 1 125 PDFs (the fixtures and the archive), renders at
 before. A shaping failure now falls back to glyph-by-glyph drawing with a
 warning.
 
-**Page box anchored at the top-left corner, unreleased.** When a page's
+**Page box anchored at the top-left corner, in v2.1.0.** When a page's
 size in device pixels is fractional, the bitmap is its rounding, and the
 page box now starts at the bitmap's top-left corner for every `/Rotate`,
 the leftover fraction of a pixel lying past the right and bottom edges.
@@ -2557,7 +2557,7 @@ from 0.15 to 0.06 px on average and against pdfium from 0.32 to 0.20 px;
 pdftoppm, which places a CropBox by its MediaBox at a whole-pixel offset,
 moves from 0.38 to 0.36 px.
 
-**Many path clips fold into one, unreleased.** A clip that reaches eight
+**Many path clips fold into one, in v2.1.0.** A clip that reaches eight
 path clips replaces them with a single intersection table, which answers
 every clip test exactly as the eight did, so a page installing thousands of
 `W n` clips no longer pays for each one on every later fill. A page of
@@ -2566,7 +2566,7 @@ every clip test exactly as the eight did, so a page installing thousands of
 byte-identical (the 1 125 fixture and archive PDFs, a randomized parity
 test of every clip query).
 
-**Tint-transform work bounded per image and per page, unreleased.** An
+**Tint-transform work bounded per image and per page, in v2.1.0.** An
 image whose colour space converts through a tint transform (`DeviceN`, and
 the other spaces converted tuple by tuple) has a budget of 2^28
 interpreted operations, and the images of a page, its pattern cells and
@@ -2590,7 +2590,7 @@ renders in 0.4 s; it did not finish in 180 s before. Before the page
 budget, a page of a thousand images each just inside the per-image budget
 took a quarter of an hour. The fixture and archive PDFs render byte-identically.
 
-**Vulkan on integrated GPUs and on macOS, unreleased.** On an integrated
+**Vulkan on integrated GPUs and on macOS, in v2.1.0.** On an integrated
 GPU, device buffers are host memory, mapped and read and written in place
 instead of staged; buffers the host reads back are placed in host-cached
 memory (on the Raphael iGPU under RADV a 64 MiB download takes 3.1–3.5 ms
@@ -2613,7 +2613,7 @@ against `--backend cpu`, with the AA fill forced on (215 outputs each).
 `tests/compare/ab_render.sh` and `ab_archive.sh` compare two binaries, or
 two backends of one, byte for byte.
 
-**Second 2026-11-04 review pass, unreleased.** A review of the work since
+**Second 2026-11-04 review pass, in v2.1.0.** A review of the work since
 the first pass of the day:
 - *JBIG2.* Every symbol instance is charged against the page's work
   budget whether or not it writes pixels, a dictionary's aggregate
