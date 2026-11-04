@@ -80,7 +80,6 @@ impl Budget {
     }
 
     /// A budget of `memory` bits and `work` pixels.
-    #[cfg(test)]
     pub(crate) fn with_limits(memory: u64, work: u64) -> Self {
         Self {
             memory: Cell::new(memory),

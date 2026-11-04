@@ -71,7 +71,11 @@ is opened with `Page::new_embedded`.
   Huffman tables already were not), and `Globals` is `Send + Sync`. A
   compile-time assertion in `lib.rs` pins both. Every fallible
   reservation, of a charged vector or of the reused page bitmap, goes
-  through `budget::try_reserve`.
+  through `budget::try_reserve`. Every budget is constructed explicitly:
+  `Globals` decode under the globals budget, and a `DecoderContext`
+  starts with an empty budget that each page replaces with its own, so a
+  decode path that skipped that step would fail with a budget error
+  rather than run under the globals limits.
 - The limit of 32 symbol instances per byte of segment data applies to a
   symbol dictionary as a whole: its aggregate symbols (6.5.8.2) draw on
   one allowance of 32 per byte of the dictionary's data, where upstream

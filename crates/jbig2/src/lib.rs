@@ -36,25 +36,35 @@ const _: () = {
 };
 
 /// A reusable context for decoding JBIG2 images.
-#[derive(Default)]
 pub struct DecoderContext {
     pub(crate) page_state: PageState,
     pub(crate) scratch_buffers: ScratchBuffers,
     pub(crate) page_bitmap: Bitmap,
 }
 
+impl Default for DecoderContext {
+    /// A context with an empty budget, which `decode_segments` replaces with
+    /// the budget of each page before decoding it.
+    fn default() -> Self {
+        Self {
+            page_state: PageState::default(),
+            scratch_buffers: ScratchBuffers::new(Budget::with_limits(0, 0)),
+            page_bitmap: Bitmap::default(),
+        }
+    }
+}
+
 pub(crate) struct ScratchBuffers {
     pub(crate) contexts: Vec<ArithmeticDecoderContext>,
-    /// The memory and compositing work the decode may still spend; set per
-    /// page by `decode_segments`.
+    /// The memory and compositing work the decode may still spend.
     pub(crate) budget: Budget,
 }
 
-impl Default for ScratchBuffers {
-    fn default() -> Self {
+impl ScratchBuffers {
+    pub(crate) fn new(budget: Budget) -> Self {
         Self {
             contexts: Vec::new(),
-            budget: Budget::for_globals(),
+            budget,
         }
     }
 }
@@ -269,7 +279,7 @@ impl Globals {
     fn from_segments(segments: &[Segment<'_>], strict: bool) -> Result<Self> {
         let mut dictionaries = Dictionaries::default();
         let standard_tables = StandardHuffmanTables::default();
-        let mut scratch_buffers = ScratchBuffers::default();
+        let mut scratch_buffers = ScratchBuffers::new(Budget::for_globals());
 
         for seg in segments {
             decode_dictionary_segment(
@@ -1039,4 +1049,26 @@ fn init_page(
     page.reset(page_info);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A context's budget is empty until a page sets it, so a decode that
+    /// bypasses the per-page budget fails instead of running under another
+    /// limit.
+    #[test]
+    fn a_fresh_context_has_no_budget() {
+        let ctx = DecoderContext::default();
+
+        assert_eq!(
+            ctx.scratch_buffers.budget.charge_memory(1),
+            Err(DecodeError::Overflow(OverflowError::MemoryBudget))
+        );
+        assert_eq!(
+            ctx.scratch_buffers.budget.charge_work(1),
+            Err(DecodeError::Overflow(OverflowError::WorkBudget))
+        );
+    }
 }

@@ -1005,10 +1005,7 @@ mod tests {
 
     fn decode_region(data: &[u8], budget: Budget) -> Result<()> {
         let header = parse(&mut Reader::new(data), 0, false)?;
-        let mut scratch = ScratchBuffers {
-            contexts: Vec::new(),
-            budget,
-        };
+        let mut scratch = ScratchBuffers::new(budget);
         decode(
             &header,
             &[],
