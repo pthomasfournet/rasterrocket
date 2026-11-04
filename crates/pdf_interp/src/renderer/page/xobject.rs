@@ -466,16 +466,13 @@ impl PageRenderer<'_> {
         } else {
             let components = |name: &[u8]| self.resources.inline_image_components(name);
             let ops = crate::content::parse_with(&form.content, Some(&components));
-            let len = form.content.len();
             match source {
-                FormContent::Stream(key)
-                    if self.form_memo.borrow_mut().repeated(key, ops.len(), len) =>
-                {
+                FormContent::Stream(key) if self.form_memo.borrow_mut().repeated(key) => {
                     let form = KeptForm {
                         form: form.without_content(),
                         ops: ops.into_iter().map(Operator::into_owned).collect(),
                     };
-                    kept = self.form_memo.borrow_mut().insert(key, form, len);
+                    kept = self.form_memo.borrow_mut().insert(key, form);
                     &kept.ops
                 }
                 _ => {

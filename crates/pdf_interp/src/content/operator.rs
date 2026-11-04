@@ -386,6 +386,134 @@ impl Operator<'_> {
     }
 }
 
+/// Bookkeeping bytes an allocator spends on one heap block beyond its
+/// requested size.
+pub(crate) const ALLOCATION_OVERHEAD: usize = 16;
+
+/// Heap bytes of a block of `bytes`: none for an empty one, which is not
+/// allocated.
+const fn block_bytes(bytes: usize) -> usize {
+    if bytes == 0 {
+        0
+    } else {
+        bytes.saturating_add(ALLOCATION_OVERHEAD)
+    }
+}
+
+/// Heap bytes behind `v`'s buffer.
+const fn vec_bytes<T>(v: &Vec<T>) -> usize {
+    block_bytes(v.capacity().saturating_mul(size_of::<T>()))
+}
+
+/// Heap bytes behind `bytes` once owned: its buffer, or, while it borrows,
+/// the buffer [`Operator::into_owned`] copies it to.
+#[expect(
+    clippy::ptr_arg,
+    reason = "an owned buffer's capacity, not its length, is what it holds"
+)]
+const fn cow_bytes(bytes: &Cow<'_, [u8]>) -> usize {
+    match bytes {
+        Cow::Owned(v) => vec_bytes(v),
+        Cow::Borrowed(b) => block_bytes(b.len()),
+    }
+}
+
+impl TextArrayElement<'_> {
+    /// Heap bytes the element holds once owned.
+    #[must_use]
+    pub const fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => cow_bytes(text),
+            Self::Offset(_) => 0,
+        }
+    }
+}
+
+impl Operator<'_> {
+    /// Heap bytes the operator holds once owned, beyond its own
+    /// `size_of::<Operator>()`: every operand buffer, each with the
+    /// allocator's per-block overhead.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Self::SetDash { dashes: v, .. } | Self::SetFillColor(v) | Self::SetStrokeColor(v) => {
+                vec_bytes(v)
+            }
+            Self::SetRenderingIntent(b)
+            | Self::SetExtGState(b)
+            | Self::SetFont { name: b, .. }
+            | Self::ShowText(b)
+            | Self::MoveNextLineShow(b)
+            | Self::MoveNextLineShowSpaced { text: b, .. }
+            | Self::SetFillColorSpace(b)
+            | Self::SetStrokeColorSpace(b)
+            | Self::PaintXObject(b)
+            | Self::PaintShading(b)
+            | Self::BeginOptionalContent(b)
+            | Self::Unknown(b) => cow_bytes(b),
+            Self::ShowTextArray(elements) => elements
+                .iter()
+                .map(TextArrayElement::heap_bytes)
+                .fold(vec_bytes(elements), usize::saturating_add),
+            Self::SetFillPattern { name, components }
+            | Self::SetStrokePattern { name, components } => {
+                cow_bytes(name).saturating_add(vec_bytes(components))
+            }
+            Self::InlineImage { params, data } => cow_bytes(params).saturating_add(cow_bytes(data)),
+            Self::Save
+            | Self::Restore
+            | Self::ConcatMatrix(_)
+            | Self::SetLineWidth(_)
+            | Self::SetLineCap(_)
+            | Self::SetLineJoin(_)
+            | Self::SetMiterLimit(_)
+            | Self::SetFlatness(_)
+            | Self::MoveTo(..)
+            | Self::LineTo(..)
+            | Self::CurveTo(..)
+            | Self::CurveToV(..)
+            | Self::CurveToY(..)
+            | Self::ClosePath
+            | Self::Rectangle(..)
+            | Self::Stroke
+            | Self::CloseStroke
+            | Self::Fill
+            | Self::FillEvenOdd
+            | Self::FillStroke
+            | Self::FillStrokeEvenOdd
+            | Self::CloseFillStroke
+            | Self::CloseFillStrokeEvenOdd
+            | Self::EndPath
+            | Self::Clip
+            | Self::ClipEvenOdd
+            | Self::BeginText
+            | Self::EndText
+            | Self::SetCharSpacing(_)
+            | Self::SetWordSpacing(_)
+            | Self::SetHorizScaling(_)
+            | Self::SetLeading(_)
+            | Self::SetTextRise(_)
+            | Self::SetTextRenderMode(_)
+            | Self::TextMove(..)
+            | Self::TextMoveSetLeading(..)
+            | Self::SetTextMatrix(_)
+            | Self::NextLine
+            | Self::SetFillGray(_)
+            | Self::SetStrokeGray(_)
+            | Self::SetFillRgb(..)
+            | Self::SetStrokeRgb(..)
+            | Self::SetFillCmyk(..)
+            | Self::SetStrokeCmyk(..)
+            | Self::Type3GlyphWidth(..)
+            | Self::Type3GlyphWidthBBox(..)
+            | Self::MarkedContentPoint
+            | Self::BeginMarkedContent
+            | Self::EndMarkedContent
+            | Self::CompatibilitySection => 0,
+        }
+    }
+}
+
 /// Decode a pending operand stack and operator keyword into an [`Operator`].
 ///
 /// `operands` is always cleared on return, regardless of success or failure,
