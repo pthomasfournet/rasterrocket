@@ -118,13 +118,7 @@ impl Budget {
     /// A vector of `len` copies of `fill`, charged to the memory budget and
     /// allocated fallibly.
     pub(crate) fn filled_vec<T: Copy>(&self, len: usize, fill: T) -> Result<Vec<T>> {
-        let bits = (len as u64).saturating_mul(core::mem::size_of::<T>() as u64 * 8);
-        self.charge_memory(bits)?;
-
-        let mut vec = Vec::new();
-        if vec.try_reserve_exact(len).is_err() {
-            bail!(DecodeError::OutOfMemory);
-        }
+        let mut vec = self.vec_with_capacity(len)?;
         vec.resize(len, fill);
 
         Ok(vec)
@@ -137,12 +131,20 @@ impl Budget {
         self.charge_memory(bits)?;
 
         let mut vec = Vec::new();
-        if vec.try_reserve_exact(len).is_err() {
-            bail!(DecodeError::OutOfMemory);
-        }
+        try_reserve(&mut vec, len)?;
 
         Ok(vec)
     }
+}
+
+/// Reserve room for exactly `additional` more elements in `vec`, failing
+/// with [`DecodeError::OutOfMemory`] if the allocation fails.
+pub(crate) fn try_reserve<T>(vec: &mut Vec<T>, additional: usize) -> Result<()> {
+    if vec.try_reserve_exact(additional).is_err() {
+        bail!(DecodeError::OutOfMemory);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

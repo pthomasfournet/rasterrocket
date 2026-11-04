@@ -5,9 +5,9 @@
 //!
 //! "GBREG - The decoded region bitmap." (Table 3)
 
-use crate::budget::Budget;
+use crate::budget::{Budget, try_reserve};
 use crate::decode::CombinationOperator;
-use crate::error::{DecodeError, OverflowError, Result, bail};
+use crate::error::{OverflowError, Result, bail};
 use alloc::vec::Vec;
 
 // To guard better against malicious files, we limit bitmap dimensions
@@ -140,9 +140,7 @@ impl Bitmap {
         self.y_location = 0;
         let len = stride as usize * height as usize;
         self.data.clear();
-        if self.data.try_reserve_exact(len).is_err() {
-            bail!(DecodeError::OutOfMemory);
-        }
+        try_reserve(&mut self.data, len)?;
         self.data.resize(len, default_word);
 
         if default_pixel {

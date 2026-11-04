@@ -69,7 +69,9 @@ is opened with `Page::new_embedded`.
   public types as upstream has them with the `std` feature:
   `DecoderContext` is `Send` but not `Sync` (its lazily built standard
   Huffman tables already were not), and `Globals` is `Send + Sync`. A
-  compile-time assertion in `lib.rs` pins both.
+  compile-time assertion in `lib.rs` pins both. Every fallible
+  reservation, of a charged vector or of the reused page bitmap, goes
+  through `budget::try_reserve`.
 - The limit of 32 symbol instances per byte of segment data applies to a
   symbol dictionary as a whole: its aggregate symbols (6.5.8.2) draw on
   one allowance of 32 per byte of the dictionary's data, where upstream
