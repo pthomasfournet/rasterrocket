@@ -47,6 +47,9 @@ pub(crate) struct Function {
     body: Body,
     /// `Range` as flat `[lo0 hi0 lo1 hi1 …]` numbers; empty when absent.
     range: Vec<f64>,
+    /// [`Self::cost`], computed from the stored costs of the sub-functions
+    /// when the function is built.
+    cost: u64,
 }
 
 #[derive(Debug)]
@@ -83,11 +86,42 @@ enum Body {
     Invalid,
 }
 
+impl Body {
+    /// [`Function::cost`] of a function of this body, from the stored costs
+    /// of its sub-functions.
+    fn cost(&self) -> u64 {
+        match self {
+            Self::Array(fns) => fns.iter().map(|f| f.cost).fold(0, u64::saturating_add),
+            Self::Stitching { functions, .. } => functions
+                .iter()
+                .map(|f| f.cost)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            Self::Sampled(s) => s.cost(),
+            Self::PostScript {
+                program: Some(p), ..
+            } => p.cost().max(1),
+            Self::Exponential { .. }
+            | Self::PostScript { program: None, .. }
+            | Self::Constant(_)
+            | Self::Invalid => 1,
+        }
+    }
+}
+
 impl Function {
     const INVALID: Self = Self {
         body: Body::Invalid,
         range: Vec::new(),
+        cost: 1,
     };
+
+    /// The function of `body` clipped to `range`.
+    fn new(body: Body, range: Vec<f64>) -> Self {
+        let cost = body.cost();
+        Self { body, range, cost }
+    }
 
     /// Compile the function object `obj`.  An indirect function is compiled
     /// once per document and shared; the elements of a direct array of
@@ -98,37 +132,23 @@ impl Function {
             Object::Reference(id) => doc
                 .derived(*id, || Some(Compiler::new(doc).compile(obj, 0)))
                 .unwrap_or_else(|| Arc::new(Self::INVALID)),
-            Object::Array(elems) => Arc::new(Self {
-                body: Body::Array(elems.iter().map(|e| Self::load(doc, e)).collect()),
-                range: Vec::new(),
-            }),
+            Object::Array(elems) => Arc::new(Self::new(
+                Body::Array(elems.iter().map(|e| Self::load(doc, e)).collect()),
+                Vec::new(),
+            )),
             direct => Arc::new(Compiler::new(doc).compile(direct, 0)),
         }
     }
 
     /// A bound on the work of one evaluation, in interpreted operations: a
-    /// Type 4 program's tokens, a Type 0 function's grid corners, one for
-    /// the other types, summed over an array and taking the costliest
-    /// sub-function of a stitching function.
+    /// Type 4 program's bound (see [`Program::cost`]), a Type 0 function's
+    /// sample reads (see [`Sampled::cost`]), one for the other types, summed
+    /// over an array and taking the costliest sub-function of a stitching
+    /// function.  Stored at construction, so a sub-function several entries
+    /// share is costed once.
     #[must_use]
-    pub(crate) fn cost(&self) -> u64 {
-        match &self.body {
-            Body::Array(fns) => fns.iter().map(|f| f.cost()).fold(0, u64::saturating_add),
-            Body::Stitching { functions, .. } => functions
-                .iter()
-                .map(|f| f.cost())
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1),
-            Body::Sampled(s) => s.cost(),
-            Body::PostScript {
-                program: Some(p), ..
-            } => p.cost().max(1),
-            Body::Exponential { .. }
-            | Body::PostScript { program: None, .. }
-            | Body::Constant(_)
-            | Body::Invalid => 1,
-        }
+    pub(crate) const fn cost(&self) -> u64 {
+        self.cost
     }
 
     /// Evaluate at the single input `t`, returning `n` outputs clipped to
@@ -289,10 +309,10 @@ impl<'d> Compiler<'d> {
                 if depth >= MAX_FN_DEPTH {
                     return Function::INVALID;
                 }
-                return Function {
-                    body: Body::Array(elems.iter().map(|e| self.sub(e, depth + 1)).collect()),
-                    range: Vec::new(),
-                };
+                return Function::new(
+                    Body::Array(elems.iter().map(|e| self.sub(e, depth + 1)).collect()),
+                    Vec::new(),
+                );
             }
             Object::Dictionary(d) => (d, None),
             Object::Stream(s) => (&s.dict, Some(s)),
@@ -304,10 +324,7 @@ impl<'d> Compiler<'d> {
                 "function: nesting depth {depth} exceeds limit {MAX_FN_DEPTH} — \
                  evaluating as C0"
             );
-            return Function {
-                body: Body::Constant(read_color(dict, b"C0")),
-                range,
-            };
+            return Function::new(Body::Constant(read_color(dict, b"C0")), range);
         }
         let stream_bytes = || {
             stream?
@@ -363,7 +380,7 @@ impl<'d> Compiler<'d> {
                 Body::Constant(read_color(dict, b"C0"))
             }
         };
-        Function { body, range }
+        Function::new(body, range)
     }
 }
 
@@ -706,6 +723,40 @@ mod tests {
         let f = Function::load(&doc, &Object::Reference((4, 0)));
         let out = f.eval(0.5, 1).expect("innermost level evaluates as C0");
         assert!((out[0] - 0.25).abs() < 1e-12, "got {out:?}");
+    }
+
+    /// A chain of stitching functions, each naming the next in all of its
+    /// 100 sub-functions, has 100^10 paths from the top to the leaf.  Its
+    /// cost is that of one path, read without walking the paths.
+    #[test]
+    fn cost_of_shared_sub_functions_is_read_once() {
+        const WIDTH: u32 = 100;
+        let bounds = (1..WIDTH)
+            .map(|i| (f64::from(i) / f64::from(WIDTH)).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let encode = "0 1 ".repeat(WIDTH as usize);
+        let objects: Vec<(u32, String)> = (4..14)
+            .map(|id| {
+                let refs = format!("{} 0 R ", id + 1).repeat(WIDTH as usize);
+                (
+                    id,
+                    format!(
+                        "<< /FunctionType 3 /Domain [0 1] /Functions [{refs}] \
+                         /Bounds [{bounds}] /Encode [{encode}] >>"
+                    ),
+                )
+            })
+            .chain(std::iter::once((
+                14,
+                "<< /FunctionType 2 /Domain [0 1] /N 1 >>".to_owned(),
+            )))
+            .collect();
+        let doc = crate::test_helpers::make_doc_with_objects(&objects);
+        let f = Function::load(&doc, &Object::Reference((4, 0)));
+        // Ten stitching levels over a leaf, which sits at the nesting limit
+        // and evaluates as its C0: one per level, one for the leaf.
+        assert_eq!(f.cost(), 11);
     }
 
     // ── Type 0 (Sampled) ──────────────────────────────────────────────────────
