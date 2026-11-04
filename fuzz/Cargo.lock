@@ -568,7 +568,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rasterrocket"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "base64",
  "log",
@@ -582,14 +582,14 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-color"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "rasterrocket-encode"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-font"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "harfrust",
  "log",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-interp"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-parser"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "aes",
  "brotli-decompressor",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-render"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "bitflags",
  "bytemuck",
