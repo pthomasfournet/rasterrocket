@@ -53,7 +53,11 @@ pub(super) struct DeviceCtx {
     /// time so the kernel-launch helpers can fail with a useful message
     /// instead of letting the driver return `ERROR_DEVICE_LOST`.
     pub(super) max_workgroup_count: [u32; 3],
-    /// Total VRAM advertised by the driver — fixed across the device's lifetime.
+    /// Bit `i` set for each memory heap `i` device buffers are placed in
+    /// ([`buffer_heaps`]); the heaps the VRAM budget covers.
+    pub(super) buffer_heaps: u32,
+    /// Total size of the heaps in `buffer_heaps`, fixed across the device's
+    /// lifetime.
     pub(super) vram_total: u64,
     /// Whether `VK_EXT_memory_budget` was successfully enabled (gates
     /// runtime budget queries).
@@ -134,7 +138,9 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         create_device(&instance, phys, compute_queue_family),
     )?;
 
-    let vram_total = total_device_local_bytes(&mem_props);
+    let integrated = dev_props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU;
+    let buffer_heaps = buffer_heaps(&mem_props, integrated);
+    let vram_total = heap_bytes(&mem_props, buffer_heaps);
 
     Ok(Arc::new(DeviceCtx {
         device,
@@ -144,9 +150,10 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         phys,
         mem_props,
         max_workgroup_count,
+        buffer_heaps,
         vram_total,
         has_memory_budget: setup.has_memory_budget(),
-        integrated: dev_props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU,
+        integrated,
         has_int64: setup.int64,
         instance,
         entry,
@@ -590,19 +597,67 @@ fn log_chosen_device(
 
 /// Sum of every `DEVICE_LOCAL` heap described by `props`.
 fn total_device_local_bytes(props: &vk::PhysicalDeviceMemoryProperties) -> u64 {
-    let mut total: u64 = 0;
-    for i in 0..props.memory_heap_count as usize {
-        let heap = props.memory_heaps[i];
-        if heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
-            total = total.saturating_add(heap.size);
-        }
-    }
-    total
+    heap_bytes(props, buffer_heaps(props, false))
 }
 
-/// Query the live `VK_EXT_memory_budget` snapshot if the extension is on,
-/// otherwise return `(used, budget) = (0, vram_total)` — a safe fallback
-/// that lets the caller derive a usable budget from total VRAM.
+/// `props`' memory heaps and types as slices of their declared counts.
+fn heaps_and_types(
+    props: &vk::PhysicalDeviceMemoryProperties,
+) -> (&[vk::MemoryHeap], &[vk::MemoryType]) {
+    let heaps = props
+        .memory_heaps
+        .get(..props.memory_heap_count as usize)
+        .unwrap_or(&props.memory_heaps);
+    let types = props
+        .memory_types
+        .get(..props.memory_type_count as usize)
+        .unwrap_or(&props.memory_types);
+    (heaps, types)
+}
+
+/// Bit `i` set for each memory heap `i` a device buffer can be placed in:
+/// every `DEVICE_LOCAL` heap and, on an integrated GPU, the heap of the
+/// type a read-back buffer (`MemoryLocation::GpuToCpu`) is allocated from.
+/// That type is the first `HOST_VISIBLE | HOST_COHERENT | HOST_CACHED` one,
+/// else the first `HOST_VISIBLE | HOST_COHERENT` one: the allocator's
+/// choice for a buffer that every memory type may back.
+fn buffer_heaps(props: &vk::PhysicalDeviceMemoryProperties, integrated: bool) -> u32 {
+    let (heaps, types) = heaps_and_types(props);
+    let bit = |heap: u32| 1u32.checked_shl(heap).unwrap_or(0);
+    let mut mask = heaps
+        .iter()
+        .zip(0u32..)
+        .filter(|(h, _)| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .fold(0, |m, (_, i)| m | bit(i));
+    if integrated {
+        let coherent =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let first = |wanted: vk::MemoryPropertyFlags| {
+            types.iter().find(|t| t.property_flags.contains(wanted))
+        };
+        if let Some(t) =
+            first(coherent | vk::MemoryPropertyFlags::HOST_CACHED).or_else(|| first(coherent))
+        {
+            mask |= bit(t.heap_index);
+        }
+    }
+    mask
+}
+
+/// Total size of the heaps of `props` whose bit is set in `mask`.
+fn heap_bytes(props: &vk::PhysicalDeviceMemoryProperties, mask: u32) -> u64 {
+    let (heaps, _) = heaps_and_types(props);
+    heaps
+        .iter()
+        .zip(0u32..)
+        .filter(|&(_, i)| mask & 1u32.checked_shl(i).unwrap_or(0) != 0)
+        .fold(0u64, |total, (h, _)| total.saturating_add(h.size))
+}
+
+/// Query the live `VK_EXT_memory_budget` snapshot of the heaps in
+/// `buffer_heaps` if the extension is on, otherwise return `(used, budget)
+/// = (0, vram_total)` — a safe fallback that lets the caller derive a
+/// usable budget from the heaps' total size.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "Result kept for forward-compat: a future variant calls vkGetPhysicalDeviceMemoryProperties2 indirectly which can fail on lost devices"
@@ -621,9 +676,9 @@ pub(super) fn query_memory_budget(ctx: &DeviceCtx) -> Result<(u64, u64)> {
 
     let mut used = 0_u64;
     let mut total_budget = 0_u64;
-    for i in 0..ctx.mem_props.memory_heap_count as usize {
-        let heap = ctx.mem_props.memory_heaps[i];
-        if heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+    let heaps = (ctx.mem_props.memory_heap_count as usize).min(vk::MAX_MEMORY_HEAPS);
+    for i in 0..heaps {
+        if ctx.buffer_heaps & (1 << i) != 0 {
             used = used.saturating_add(budget.heap_usage[i]);
             total_budget = total_budget.saturating_add(budget.heap_budget[i]);
         }
@@ -660,6 +715,76 @@ mod tests {
         let yes = vk::PhysicalDeviceFeatures::default().shader_int64(true);
         assert!(device_setup(&[], &yes).int64);
         assert!(!device_setup(&[], &vk::PhysicalDeviceFeatures::default()).int64);
+    }
+
+    /// Memory properties with the heaps `heaps` (size, flags) and the types
+    /// `types` (heap index, flags).
+    fn mem_props(
+        heaps: &[(u64, vk::MemoryHeapFlags)],
+        types: &[(u32, vk::MemoryPropertyFlags)],
+    ) -> vk::PhysicalDeviceMemoryProperties {
+        let mut p = vk::PhysicalDeviceMemoryProperties {
+            memory_heap_count: u32::try_from(heaps.len()).unwrap(),
+            memory_type_count: u32::try_from(types.len()).unwrap(),
+            ..Default::default()
+        };
+        for (i, &(size, flags)) in heaps.iter().enumerate() {
+            p.memory_heaps[i] = vk::MemoryHeap { size, flags };
+        }
+        for (i, &(heap_index, property_flags)) in types.iter().enumerate() {
+            p.memory_types[i] = vk::MemoryType {
+                property_flags,
+                heap_index,
+            };
+        }
+        p
+    }
+
+    /// An integrated GPU's layout: heap 0 host-only, heap 1 device-local;
+    /// the device-local host-visible type precedes the cached one, which
+    /// lives in heap 0.
+    fn shared_memory_layout() -> vk::PhysicalDeviceMemoryProperties {
+        use vk::MemoryPropertyFlags as F;
+        mem_props(
+            &[
+                (5 << 30, vk::MemoryHeapFlags::empty()),
+                (10 << 30, vk::MemoryHeapFlags::DEVICE_LOCAL),
+            ],
+            &[
+                (1, F::DEVICE_LOCAL),
+                (0, F::HOST_VISIBLE | F::HOST_COHERENT),
+                (1, F::DEVICE_LOCAL | F::HOST_VISIBLE | F::HOST_COHERENT),
+                (0, F::HOST_VISIBLE | F::HOST_COHERENT | F::HOST_CACHED),
+            ],
+        )
+    }
+
+    #[test]
+    fn readback_heap_counts_towards_an_integrated_budget_only() {
+        let p = shared_memory_layout();
+        assert_eq!(buffer_heaps(&p, false), 0b10);
+        assert_eq!(heap_bytes(&p, buffer_heaps(&p, false)), 10 << 30);
+        assert_eq!(buffer_heaps(&p, true), 0b11);
+        assert_eq!(heap_bytes(&p, buffer_heaps(&p, true)), 15 << 30);
+        assert_eq!(total_device_local_bytes(&p), 10 << 30);
+    }
+
+    #[test]
+    fn readback_heap_falls_back_to_the_first_coherent_type() {
+        use vk::MemoryPropertyFlags as F;
+        let p = mem_props(
+            &[
+                (1 << 30, vk::MemoryHeapFlags::empty()),
+                (2 << 30, vk::MemoryHeapFlags::DEVICE_LOCAL),
+                (3 << 30, vk::MemoryHeapFlags::empty()),
+            ],
+            &[
+                (1, F::DEVICE_LOCAL),
+                (2, F::HOST_VISIBLE | F::HOST_COHERENT),
+                (0, F::HOST_VISIBLE | F::HOST_COHERENT),
+            ],
+        );
+        assert_eq!(buffer_heaps(&p, true), 0b110);
     }
 
     #[cfg(target_os = "macos")]

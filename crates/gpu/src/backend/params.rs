@@ -1276,6 +1276,9 @@ mod tests {
         fn alloc_device(&self, _size: usize) -> super::super::Result<Self::DeviceBuffer> {
             unreachable!("FakeBackend allocation paths are not exercised by validate-only tests")
         }
+        fn alloc_device_readback(&self, _size: usize) -> super::super::Result<Self::DeviceBuffer> {
+            unreachable!()
+        }
         fn free_device(&self, _buf: Self::DeviceBuffer) {}
         fn alloc_host_pinned(&self, _size: usize) -> super::super::Result<Self::HostBuffer> {
             unreachable!()

@@ -82,6 +82,12 @@ impl GpuBackend for CudaBackend {
         self.ctx.stream().alloc_zeros::<u8>(size).map_err(be)
     }
 
+    fn alloc_device_readback(&self, size: usize) -> Result<Self::DeviceBuffer> {
+        // CUDA device memory is not host-mapped: the host reads it only
+        // through copies, so the read-back intent selects nothing.
+        self.alloc_device(size)
+    }
+
     fn device_buffer_len(&self, buf: &Self::DeviceBuffer) -> usize {
         buf.len()
     }

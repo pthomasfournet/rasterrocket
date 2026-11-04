@@ -151,12 +151,17 @@ impl GpuBackend for VulkanBackend {
 
     fn alloc_device(&self, size: usize) -> Result<Self::DeviceBuffer> {
         reject_zero_size(size, "alloc_device")?;
-        self.memory.alloc_device(size)
+        self.memory.alloc_device(size, memory::HostAccess::Write)
+    }
+
+    fn alloc_device_readback(&self, size: usize) -> Result<Self::DeviceBuffer> {
+        reject_zero_size(size, "alloc_device_readback")?;
+        self.memory.alloc_device(size, memory::HostAccess::ReadBack)
     }
 
     fn alloc_device_zeroed(&self, size: usize) -> Result<Self::DeviceBuffer> {
         reject_zero_size(size, "alloc_device_zeroed")?;
-        let mut buf = self.memory.alloc_device(size)?;
+        let mut buf = self.memory.alloc_device(size, memory::HostAccess::Write)?;
         let byte_len = buf.size();
         // A fresh buffer is referenced by no page: a mapped one is zeroed in
         // place, under the same size rule as the device fill so that a size
@@ -397,10 +402,10 @@ impl GpuBackend for VulkanBackend {
         let (used, budget) = device::query_memory_budget(&self.device)?;
         let usable = budget.saturating_sub(used).saturating_mul(3) / 4;
         let total = self.device.vram_total;
-        // Spec invariant: usable <= total.  Both `total` (sum of
-        // DEVICE_LOCAL heaps) and `budget` come from the same heap set,
-        // so this holds; clamp anyway in case a driver reports an
-        // inconsistent budget.
+        // `total` and `budget` are sums over the same heaps (those device
+        // buffers are placed in, `DeviceCtx::buffer_heaps`), so usable <=
+        // total; the clamp covers a driver reporting a budget above the
+        // heap size.
         Ok(VramBudget::new(total, usable.min(total)))
     }
 }
@@ -442,6 +447,39 @@ mod tests {
             .expect("with_quiescent");
         assert!(blocked, "a page could be submitted during a host access");
         assert!(!backend.recorder.submission_blocked());
+    }
+
+    /// The first integrated GPU among the devices named by a driver that
+    /// only integrated parts carry, or `None` (the test is skipped).
+    fn integrated() -> Option<VulkanBackend> {
+        let found = ["radv", "intel"].iter().find_map(|name| {
+            let selector = name.parse().expect("non-empty selector");
+            VulkanBackend::with_selector(Some(&selector))
+                .ok()
+                .filter(VulkanBackend::is_integrated)
+        });
+        if found.is_none() {
+            eprintln!("skipping: no integrated GPU");
+        }
+        found
+    }
+
+    #[test]
+    fn vulkan_shared_memory_readback_buffers_are_host_cached() {
+        let Some(backend) = integrated() else { return };
+        let written = backend.alloc_device(4096).expect("alloc_device");
+        let read = backend
+            .alloc_device_readback(4096)
+            .expect("alloc_device_readback");
+        assert!(written.is_mapped() && read.is_mapped());
+        if offers_host_cached(&backend.device) {
+            assert!(
+                read.memory_properties()
+                    .contains(vk::MemoryPropertyFlags::HOST_CACHED),
+                "read-back buffer is in uncached memory: {:?}",
+                read.memory_properties()
+            );
+        }
     }
 
     #[test]

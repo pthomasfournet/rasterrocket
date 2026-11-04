@@ -283,15 +283,29 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// zero-fill fails.
     fn alloc_device_zeroed(&self, size: usize) -> Result<Self::DeviceBuffer>;
 
+    /// Allocate `size` bytes of device memory that device work writes and
+    /// the host reads back ([`Self::download`], [`Self::device_bytes`]).
+    ///
+    /// On a device whose buffers are host-mapped
+    /// ([`Self::device_memory_is_host_mapped`]) the buffer is placed in
+    /// host-cached memory where the device offers it, whereas
+    /// [`Self::alloc_device`] may return memory the host reads uncached, one
+    /// bus transaction per access.  Elsewhere the two are the same.  Same
+    /// zero-size constraints as `alloc_device`; contents are unspecified.
+    ///
+    /// # Errors
+    /// Returns `BackendError` if `size == 0`, or if the device allocation fails.
+    fn alloc_device_readback(&self, size: usize) -> Result<Self::DeviceBuffer>;
+
     /// Byte length of a device buffer previously returned by
-    /// `alloc_device` / `alloc_device_zeroed`.
+    /// `alloc_device`, `alloc_device_zeroed` or `alloc_device_readback`.
     ///
     /// Exposed so generic callers (e.g. `DeviceImageCache`) can size
     /// transfers without holding a parallel length field per entry.
     fn device_buffer_len(&self, buf: &Self::DeviceBuffer) -> usize;
 
-    /// Free a device buffer previously returned by `alloc_device` or
-    /// `alloc_device_zeroed`.
+    /// Free a device buffer previously returned by `alloc_device`,
+    /// `alloc_device_zeroed` or `alloc_device_readback`.
     ///
     /// **Deferred-free contract:** the caller must ensure no
     /// outstanding `PageFence` (from `submit_page`) still references this

@@ -148,6 +148,17 @@ impl DeviceBuffer {
     }
 }
 
+#[cfg(test)]
+impl DeviceBuffer {
+    /// Property flags of the memory type backing the buffer.
+    pub(super) fn memory_properties(&self) -> vk::MemoryPropertyFlags {
+        self.allocation.as_ref().map_or_else(
+            vk::MemoryPropertyFlags::empty,
+            Allocation::memory_properties,
+        )
+    }
+}
+
 impl Drop for DeviceBuffer {
     fn drop(&mut self) {
         let alloc = self.allocation.take().expect("DeviceBuffer dropped twice");
@@ -309,6 +320,16 @@ struct Inner {
     allocator: Mutex<Allocator>,
 }
 
+/// How the host accesses a device buffer, which selects its memory on a
+/// device whose buffers are host-mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostAccess {
+    /// The host writes the buffer, or does not access it.
+    Write,
+    /// Device work writes the buffer and the host reads it back.
+    ReadBack,
+}
+
 /// Slab sub-allocator front-end.
 pub(super) struct SlabAllocator {
     inner: Arc<Inner>,
@@ -348,22 +369,28 @@ impl SlabAllocator {
         })
     }
 
-    /// Allocate a `DEVICE_LOCAL` storage buffer of `size` bytes.
+    /// Allocate a storage buffer of `size` bytes the host accesses as
+    /// `access` says.
     ///
-    /// On an integrated GPU the buffer is also `HOST_VISIBLE` |
-    /// `HOST_COHERENT` and persistently mapped (see [`DeviceBuffer::mapped`]):
-    /// device memory is host memory there, so the host writes and reads it
-    /// in place instead of through a staging copy.  A discrete GPU keeps it
-    /// in device-only memory: host access to its `HOST_VISIBLE` device
-    /// memory crosses the bus uncached.
-    pub(super) fn alloc_device(&self, size: usize) -> Result<DeviceBuffer> {
-        let location = if self.inner.device.integrated {
-            MemoryLocation::CpuToGpu
-        } else {
-            MemoryLocation::GpuOnly
+    /// A discrete GPU keeps it in `DEVICE_LOCAL` memory, which the host does
+    /// not map: host access to its `HOST_VISIBLE` device memory crosses the
+    /// bus uncached.  On an integrated GPU device memory is host memory, so
+    /// the buffer is `HOST_VISIBLE` | `HOST_COHERENT` and persistently mapped
+    /// (see [`DeviceBuffer::mapped`]), and the host writes and reads it in
+    /// place instead of through a staging copy: [`HostAccess::Write`] in
+    /// `DEVICE_LOCAL` memory where offered, which the host may map
+    /// write-combined, [`HostAccess::ReadBack`] in `HOST_CACHED` memory
+    /// where offered.
+    pub(super) fn alloc_device(&self, size: usize, access: HostAccess) -> Result<DeviceBuffer> {
+        let (location, name) = match (self.inner.device.integrated, access) {
+            (false, _) => (MemoryLocation::GpuOnly, "rasterrocket device buffer"),
+            (true, HostAccess::Write) => (MemoryLocation::CpuToGpu, "rasterrocket device buffer"),
+            (true, HostAccess::ReadBack) => (
+                MemoryLocation::GpuToCpu,
+                "rasterrocket device readback buffer",
+            ),
         };
-        let (buffer, allocation) =
-            self.create_and_bind(size, DEVICE_USAGE, location, "rasterrocket device buffer")?;
+        let (buffer, allocation) = self.create_and_bind(size, DEVICE_USAGE, location, name)?;
         let info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
         // Safety: `buffer` is a freshly created handle bound to memory.
         let device_address = unsafe { self.inner.device.device.get_buffer_device_address(&info) };
@@ -494,6 +521,11 @@ impl SlabAllocator {
                 }
             }
         };
+
+        log::debug!(
+            "vulkan: {name} of {size} bytes ({location:?}) in memory {:?}",
+            allocation.memory_properties()
+        );
 
         // Safety: buffer + allocation belong to the same device; the
         // allocation's memory + offset are valid per gpu-allocator's docs.

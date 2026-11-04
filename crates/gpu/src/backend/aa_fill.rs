@@ -46,12 +46,15 @@ impl<B: GpuBackend> Default for AaFillScratch<B> {
     }
 }
 
-/// Direction of a staged transfer, which picks the host memory kind.
+/// Direction of a staged transfer, which picks the memory kind of both
+/// buffers.
 #[derive(Clone, Copy)]
 enum Direction {
-    /// Host writes, device reads: [`GpuBackend::alloc_host_pinned`].
+    /// Host writes, device reads: [`GpuBackend::alloc_device`] and
+    /// [`GpuBackend::alloc_host_pinned`].
     ToDevice,
-    /// Device writes, host reads: [`GpuBackend::alloc_host_readback`].
+    /// Device writes, host reads: [`GpuBackend::alloc_device_readback`] and
+    /// [`GpuBackend::alloc_host_readback`].
     ToHost,
 }
 
@@ -78,7 +81,10 @@ fn ensure<'a, B: GpuBackend>(
             }
             backend.free_device(old.device);
         }
-        let device = backend.alloc_device(size)?;
+        let device = match direction {
+            Direction::ToDevice => backend.alloc_device(size)?,
+            Direction::ToHost => backend.alloc_device_readback(size)?,
+        };
         let host = if backend.device_memory_is_host_mapped() {
             None
         } else {
