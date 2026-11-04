@@ -1413,6 +1413,7 @@ version = "2.0.0"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
+ "log",
  "rasterrocket-color",
 ]
 
