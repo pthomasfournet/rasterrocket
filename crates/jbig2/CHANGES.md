@@ -87,12 +87,12 @@ is opened with `Page::new_embedded`.
 - `Bitmap::combine` iterates only the source rows that fall inside the
   destination (`Bitmap::clipped_span`, which also clips the columns
   counted by `Bitmap::clipped_area`), so a symbol placed far outside its
-  region costs nothing per row. A refinement/aggregate symbol (6.5.8.2) looks its referenced
-  symbols up in the input and new symbol lists (`SymbolSet`) instead of
-  copying both into a new list per symbol, which was quadratic in the
-  dictionary size. `Bitmap` is no longer `Clone`, so every copy goes
-  through the charged `Bitmap::try_clone`. Output is unchanged.
-
+  region costs nothing per row. A refinement/aggregate symbol (6.5.8.2)
+  looks its referenced symbols up in the input and new symbol lists
+  (`SymbolSet`) instead of copying both into a new list per symbol,
+  which was quadratic in the dictionary size. `Bitmap` is no longer
+  `Clone`, so every copy goes through the charged `Bitmap::try_clone`.
+  Output is unchanged.
 - The first adaptive template pixel of a pattern dictionary's collective
   bitmap is placed at x = -HDPW (6.7.5) for every pattern width: the AT
   pixel x offset is an `i16`. Upstream negated `HDPW as i8`, which
