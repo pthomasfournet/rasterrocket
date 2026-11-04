@@ -149,6 +149,19 @@ pub enum OverflowError {
     WorkBudget,
 }
 
+impl DecodeError {
+    /// Whether the error is a failed allocation or an exhausted decode
+    /// budget, which depend on the decode as a whole rather than on the
+    /// data of one segment.
+    pub(crate) fn is_resource_exhaustion(self) -> bool {
+        matches!(
+            self,
+            Self::OutOfMemory
+                | Self::Overflow(OverflowError::MemoryBudget | OverflowError::WorkBudget)
+        )
+    }
+}
+
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

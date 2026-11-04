@@ -64,10 +64,12 @@ fn halftone_grid_beyond_the_memory_budget_is_refused() {
         Some(DecodeError::Overflow(OverflowError::MemoryBudget))
     );
 
-    // A lenient decode drops the immediate region and keeps the page.
-    let page = decode(&data, false).unwrap();
-    assert_eq!(page.rows.len(), 1);
-    assert!(!page.rows[0][0]);
+    // An exhausted budget fails the page in lenient mode too, instead of
+    // dropping the region.
+    assert_eq!(
+        decode(&data, false).err(),
+        Some(DecodeError::Overflow(OverflowError::MemoryBudget))
+    );
 }
 
 /// Rendering a 128 × 128 grid of 255 × 255 patterns writes 2^30 pixels,
@@ -76,10 +78,12 @@ fn halftone_grid_beyond_the_memory_budget_is_refused() {
 fn halftone_rendering_beyond_the_work_budget_is_refused() {
     let data = halftone_page(255, 128, 128);
 
-    assert_eq!(
-        decode(&data, true).err(),
-        Some(DecodeError::Overflow(OverflowError::WorkBudget))
-    );
+    for strict in [true, false] {
+        assert_eq!(
+            decode(&data, strict).err(),
+            Some(DecodeError::Overflow(OverflowError::WorkBudget))
+        );
+    }
 }
 
 /// A halftone region well inside the budget still decodes.
