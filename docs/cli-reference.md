@@ -455,3 +455,27 @@ Exit code 0 if all pages are within threshold; 1 on failures or errors.
 ─────────────────────────────────────────────────────────────────────────
 PASSED
 ```
+
+---
+
+## Build and backend A/B comparison
+
+Two scripts compare one `rrocket` binary against another byte for byte. Use them to check that a change leaves output untouched, or that a GPU backend matches the CPU. Both need bash 4 or later; on macOS that means Homebrew's `bash`. Each render runs under `timeout`, or `gtimeout` on macOS, when one is installed.
+
+```bash
+# Every output mode (RGB PNG, JPEG, gray PNG, mono PNG, gray PGM), 50 dpi, first 3 pages
+tests/compare/ab_render.sh BEFORE AFTER OUTDIR [--] PDF...
+
+# Corpus scan: 50 dpi gray, first 4 pages; LIST holds one PDF path per line
+tests/compare/ab_archive.sh BEFORE AFTER OUTPREFIX [LIST]
+
+# A GPU backend against the CPU, with one binary
+AFTER_FLAGS="--backend vulkan" tests/compare/ab_render.sh \
+  target/release/rrocket target/release/rrocket /tmp/ab -- tests/fixtures/*.pdf
+```
+
+`BEFORE_FLAGS` and `AFTER_FLAGS` append arguments to one side only, and `AB_TIMEOUT` sets the per-render limit in seconds. `ab_render.sh` prints a `DIFF` line for each differing file and a `COUNT` line when the two sides wrote different numbers of pages.
+
+Without a `LIST`, `ab_archive.sh` scans the repository fixtures plus a fixed sample of 150 PDFs from `$AB_ARCHIVE` (default `~/mss-content/archives`). The sample is the same on every run, and the archive is skipped when that directory is missing. It writes `OUTPREFIX.list` and `OUTPREFIX.diffs`. The diffs file has a `PAGE`, `COUNT` or `EXIT` line for each difference: differing pixels, differing page counts, or a different exit status.
+
+Both scripts exit with 0 when nothing differs, 1 when something does, and 2 on bad usage.
