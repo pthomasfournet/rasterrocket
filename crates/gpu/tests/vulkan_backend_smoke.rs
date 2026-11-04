@@ -376,9 +376,9 @@ fn slanted_band(rows: u32, width_aa: i32) -> (Vec<ScanIntersect>, Vec<u32>) {
     (intersects, row_starts)
 }
 
-#[test]
-fn aa_fill_page_runs_in_one_submission() {
-    let (backend, _serial) = shared_backend();
+/// Three fills through one scratch on `backend`: each is one submission and
+/// matches the host twin.
+fn assert_fills_in_one_submission(backend: &VulkanBackend) {
     let mut scratch = AaFillScratch::new();
     // Small, larger, small again: the scratch grows once and the last fill
     // reads none of the larger fill's counts.
@@ -398,7 +398,7 @@ fn aa_fill_page_runs_in_one_submission() {
         };
         let aa_width = width_px * AA_SIZE.unsigned_abs();
         let before = backend.submits();
-        let counts = aa_fill_page(&*backend, &mut scratch, &table, rect, aa_width, false)
+        let counts = aa_fill_page(backend, &mut scratch, &table, rect, aa_width, false)
             .expect("aa_fill_page");
         assert_eq!(
             backend.submits() - before,
@@ -411,6 +411,83 @@ fn aa_fill_page_runs_in_one_submission() {
             "{rows}-row fill"
         );
     }
+}
+
+#[test]
+fn aa_fill_page_runs_in_one_submission() {
+    let (backend, _serial) = shared_backend();
+    assert_fills_in_one_submission(&backend);
+}
+
+/// The first integrated GPU: the default device when it is one, else a
+/// device matched by a driver name that only integrated parts carry.
+fn integrated_backend() -> Option<VulkanBackend> {
+    let default = VulkanBackend::new()
+        .ok()
+        .filter(VulkanBackend::is_integrated);
+    default.or_else(|| {
+        ["radv", "intel"].iter().find_map(|name| {
+            let selector = name.parse().expect("non-empty selector");
+            VulkanBackend::with_selector(Some(&selector))
+                .ok()
+                .filter(VulkanBackend::is_integrated)
+        })
+    })
+}
+
+#[test]
+fn aa_fill_page_runs_in_one_submission_on_shared_memory() {
+    let Some(backend) = integrated_backend() else {
+        eprintln!("skipping: no integrated GPU");
+        return;
+    };
+    assert_fills_in_one_submission(&backend);
+}
+
+/// On shared memory an upload writes the device buffer directly, so it must
+/// first wait for every submitted page: a page that reads the buffer and is
+/// still in flight sees the old bytes, the next page the new ones.
+#[test]
+fn shared_memory_upload_waits_for_the_page_reading_the_buffer() {
+    const LEN: usize = 1 << 20;
+    let Some(backend) = integrated_backend() else {
+        eprintln!("skipping: no integrated GPU");
+        return;
+    };
+    let buf = backend.alloc_device(LEN).expect("alloc_device");
+    backend
+        .upload(&buf, &vec![0x11; LEN])
+        .expect("first upload");
+    let mut first = backend.alloc_host_readback(LEN).expect("readback");
+    let mut second = backend.alloc_host_readback(LEN).expect("readback");
+
+    backend.begin_page().expect("begin_page");
+    backend
+        .record_copy_to_host(&buf, &mut first, LEN)
+        .expect("record copy");
+    let fence = backend.submit_page().expect("submit_page");
+    let before = backend.submits();
+    backend
+        .upload(&buf, &vec![0x22; LEN])
+        .expect("second upload");
+    assert_eq!(
+        backend.submits(),
+        before,
+        "an upload to shared memory submits nothing"
+    );
+    backend.wait_page(fence).expect("wait_page");
+    assert!(
+        first.as_slice().iter().all(|&b| b == 0x11),
+        "the in-flight page saw the new bytes"
+    );
+
+    backend
+        .run_page(|b| b.record_copy_to_host(&buf, &mut second, LEN))
+        .expect("second page");
+    assert!(
+        second.as_slice().iter().all(|&b| b == 0x22),
+        "the next page missed the upload"
+    );
 }
 
 /// Backends created and dropped on several threads at once: the loader is

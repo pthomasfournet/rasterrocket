@@ -81,6 +81,9 @@ struct RecorderState {
     /// track them individually because `vkResetDescriptorPool` blasts
     /// them all in one call.
     desc_sets_in_flight: u32,
+    /// Timeline value of the last page whose submission succeeded; `None`
+    /// before the first.
+    last_submitted: Option<NonZeroU64>,
 }
 
 pub(super) struct PageRecorder {
@@ -172,6 +175,7 @@ impl PageRecorder {
                 cmd,
                 desc_pool,
                 desc_sets_in_flight: 0,
+                last_submitted: None,
             }),
         })
     }
@@ -218,7 +222,20 @@ impl PageRecorder {
                 s.state
             )));
         }
+        // Every device write of the page is made visible to host reads that
+        // follow the wait on the page's fence: a semaphore signal makes
+        // writes available to the device domain only, and buffers of an
+        // integrated GPU are read by the host in place.
+        let to_host = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
         unsafe {
+            self.device.device.cmd_pipeline_barrier2(
+                s.cmd,
+                &vk::DependencyInfo::default().memory_barriers(&to_host),
+            );
             self.device
                 .device
                 .end_command_buffer(s.cmd)
@@ -246,6 +263,7 @@ impl PageRecorder {
         // Safety: the command buffer was ended above; the timeline
         // semaphore lives as long as the recorder.
         unsafe { self.device.submit(&submit, "vkQueueSubmit") }?;
+        s.last_submitted = Some(value);
         s.state = State::Submitted;
         Ok(PageFence(value))
     }
@@ -279,6 +297,20 @@ impl PageRecorder {
         self.wait_timeline(fence.0)?;
         s.state = State::Idle;
         Ok(())
+    }
+
+    /// Block until every page submitted so far has completed.
+    ///
+    /// The recorder lock is released before the wait, so a page being
+    /// recorded on another thread is not held up; a page submitted after
+    /// the call began is not waited for.
+    pub(super) fn wait_submitted(&self) -> Result<()> {
+        let last = self
+            .inner
+            .lock()
+            .expect("recorder mutex poisoned")
+            .last_submitted;
+        last.map_or(Ok(()), |value| self.wait_timeline(value))
     }
 
     /// `vkWaitSemaphores` on the timeline reaching `value`, with no
@@ -782,8 +814,8 @@ impl PageRecorder {
     /// The barrier before orders the copy after every earlier dispatch and
     /// copy of the page (write-after-read and write-after-write on `dst`).
     /// The barrier after makes the copied bytes visible to later dispatches
-    /// and copies of the page and, through the `HOST` stage, to host reads
-    /// once the page's fence has been waited on.  Host writes to `src`
+    /// and copies of the page; the barrier `submit_page` ends every page
+    /// with makes them visible to host reads after the fence.  Host writes to `src`
     /// made before `submit_page` need no barrier: queue submission makes
     /// them visible to the device.
     pub(super) fn record_copy(&self, src: vk::Buffer, dst: vk::Buffer, len: u64) -> Result<()> {
@@ -804,16 +836,11 @@ impl PageRecorder {
         let after = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER
-                    | vk::PipelineStageFlags2::COPY
-                    | vk::PipelineStageFlags2::HOST,
-            )
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY)
             .dst_access_mask(
                 vk::AccessFlags2::SHADER_STORAGE_READ
                     | vk::AccessFlags2::SHADER_STORAGE_WRITE
-                    | vk::AccessFlags2::TRANSFER_READ
-                    | vk::AccessFlags2::HOST_READ,
+                    | vk::AccessFlags2::TRANSFER_READ,
             )];
         let region = [vk::BufferCopy::default().size(len)];
         // Safety: cmd is in the Recording state (checked above); both

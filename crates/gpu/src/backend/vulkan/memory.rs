@@ -89,6 +89,45 @@ impl DeviceBuffer {
     pub const fn size(&self) -> u64 {
         self.size
     }
+    /// The buffer's bytes in place, when its memory is host-mapped (device
+    /// buffers of an integrated GPU); `None` otherwise.
+    ///
+    /// The bytes reflect device writes only once the fence of the page that
+    /// made them has been waited on.
+    #[must_use]
+    pub fn mapped(&self) -> Option<&[u8]> {
+        let len = usize::try_from(self.size).ok()?;
+        self.allocation.as_ref()?.mapped_slice()?.get(..len)
+    }
+
+    /// The buffer's bytes in place, writable; see [`Self::mapped`].  Writes
+    /// are visible to device work submitted afterwards.
+    pub fn mapped_mut(&mut self) -> Option<&mut [u8]> {
+        let len = usize::try_from(self.size).ok()?;
+        self.allocation.as_mut()?.mapped_slice_mut()?.get_mut(..len)
+    }
+
+    /// Copy `src` into the start of the mapped bytes through a shared
+    /// reference; `None` when the buffer is not mapped or holds fewer than
+    /// `src.len()` bytes.
+    ///
+    /// The trait's `upload` takes the buffer by shared reference, as the
+    /// staged path, which writes it by device copy, does.  The caller has
+    /// waited for every submitted page, so no device access races the write,
+    /// and holds no slice from [`Self::mapped`] across the call.
+    pub(super) fn write_mapped(&self, src: &[u8]) -> Option<()> {
+        let len = usize::try_from(self.size).ok()?;
+        if src.len() > len {
+            return None;
+        }
+        let dst = self.allocation.as_ref()?.mapped_ptr()?.cast::<u8>();
+        // SAFETY: `dst` addresses at least `len >= src.len()` mapped bytes
+        // of this allocation, which the device does not access (see above);
+        // the source is host memory distinct from the mapping.
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), src.len()) };
+        Some(())
+    }
+
     /// Buffer device address — non-zero only when the device opted into
     /// `bufferDeviceAddress`.  Reserved for the future BDA push-constant
     /// path; today's descriptor-set bindings don't read it.
@@ -288,13 +327,21 @@ impl SlabAllocator {
     }
 
     /// Allocate a `DEVICE_LOCAL` storage buffer of `size` bytes.
+    ///
+    /// On an integrated GPU the buffer is also `HOST_VISIBLE` |
+    /// `HOST_COHERENT` and persistently mapped (see [`DeviceBuffer::mapped`]):
+    /// device memory is host memory there, so the host writes and reads it
+    /// in place instead of through a staging copy.  A discrete GPU keeps it
+    /// in device-only memory: host access to its `HOST_VISIBLE` device
+    /// memory crosses the bus uncached.
     pub(super) fn alloc_device(&self, size: usize) -> Result<DeviceBuffer> {
-        let (buffer, allocation) = self.create_and_bind(
-            size,
-            DEVICE_USAGE,
-            MemoryLocation::GpuOnly,
-            "rasterrocket device buffer",
-        )?;
+        let location = if self.inner.device.integrated {
+            MemoryLocation::CpuToGpu
+        } else {
+            MemoryLocation::GpuOnly
+        };
+        let (buffer, allocation) =
+            self.create_and_bind(size, DEVICE_USAGE, location, "rasterrocket device buffer")?;
         let info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
         // Safety: `buffer` is a freshly created handle bound to memory.
         let device_address = unsafe { self.inner.device.device.get_buffer_device_address(&info) };

@@ -203,6 +203,14 @@ impl GpuBackend for CudaBackend {
         transfer::queue_dtoh(&self.ctx, src, &mut dst.as_mut_slice()[..len])
     }
 
+    fn device_bytes<'a>(&self, _buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+        None
+    }
+
+    fn device_bytes_mut<'a>(&self, _buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
+        None
+    }
+
     fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize {
         buf.len()
     }

@@ -5,18 +5,21 @@ use super::params::AaFillParams;
 use super::{BackendError, GpuBackend, Result};
 use crate::fill::{AaFillRect, AaScanTable};
 
-/// One host buffer and one device buffer of at least the same length.
+/// A device buffer and, unless the host reaches the device buffer in place
+/// ([`GpuBackend::device_bytes`]), a host buffer of at least its length that
+/// transfers go through.
 struct Staged<B: GpuBackend> {
-    host: B::HostBuffer,
+    host: Option<B::HostBuffer>,
     device: B::DeviceBuffer,
 }
 
 /// Reusable host and device buffers for [`aa_fill_page`].
 ///
 /// Each of the three transfers of a fill (intersections, row offsets,
-/// counts) keeps one host and one device buffer, grown to the largest fill
-/// seen and reused by later fills, so a fill allocates only when it is
-/// larger than every earlier one.  The buffers are freed when the scratch
+/// counts) keeps one device buffer and, on a device whose buffers the host
+/// cannot reach in place, one host buffer, grown to the largest fill seen
+/// and reused by later fills, so a fill allocates only when it is larger
+/// than every earlier one.  The buffers are freed when the scratch
 /// is dropped; [`aa_fill_page`] returns only after its page has completed,
 /// so no device work references them then.
 pub struct AaFillScratch<B: GpuBackend> {
@@ -62,37 +65,57 @@ fn ensure<'a, B: GpuBackend>(
     direction: Direction,
 ) -> Result<&'a mut Staged<B>> {
     let capacity = slot.as_ref().map_or(0, |s| {
-        backend
-            .host_buffer_len(&s.host)
-            .min(backend.device_buffer_len(&s.device))
+        let device = backend.device_buffer_len(&s.device);
+        s.host
+            .as_ref()
+            .map_or(device, |host| device.min(backend.host_buffer_len(host)))
     });
     if capacity < len {
         let size = len.max(capacity.saturating_mul(2));
         if let Some(old) = slot.take() {
-            backend.free_host_pinned(old.host);
+            if let Some(host) = old.host {
+                backend.free_host_pinned(host);
+            }
             backend.free_device(old.device);
         }
-        let host = match direction {
-            Direction::ToDevice => backend.alloc_host_pinned(size)?,
-            Direction::ToHost => backend.alloc_host_readback(size)?,
+        let device = backend.alloc_device(size)?;
+        let host = if backend.device_bytes(&device).is_some() {
+            None
+        } else {
+            Some(match direction {
+                Direction::ToDevice => backend.alloc_host_pinned(size)?,
+                Direction::ToHost => backend.alloc_host_readback(size)?,
+            })
         };
-        *slot = Some(Staged {
-            host,
-            device: backend.alloc_device(size)?,
-        });
+        *slot = Some(Staged { host, device });
     }
     Ok(slot.as_mut().expect("populated above"))
 }
 
-/// Copy `bytes` into the host half of `slot`, growing it first as needed.
+/// Copy `bytes` into `slot`, growing it first as needed: into the host
+/// buffer, or into the device buffer in place when there is none.
 fn stage<'a, B: GpuBackend>(
     backend: &B,
     slot: &'a mut Option<Staged<B>>,
     bytes: &[u8],
 ) -> Result<&'a mut Staged<B>> {
     let staged = ensure(backend, slot, bytes.len(), Direction::ToDevice)?;
-    backend.host_bytes_mut(&mut staged.host)[..bytes.len()].copy_from_slice(bytes);
+    let target = match staged.host.as_mut() {
+        Some(host) => backend.host_bytes_mut(host),
+        None => backend
+            .device_bytes_mut(&mut staged.device)
+            .ok_or_else(|| BackendError::msg("aa_fill: device buffer lost its host mapping"))?,
+    };
+    target[..bytes.len()].copy_from_slice(bytes);
     Ok(staged)
+}
+
+/// Record the copy of `staged`'s first `len` bytes from host to device, if
+/// it has a host buffer.
+fn record_upload<B: GpuBackend>(backend: &B, staged: &Staged<B>, len: usize) -> Result<()> {
+    staged.host.as_ref().map_or(Ok(()), |host| {
+        backend.record_copy_to_device(host, &staged.device, len)
+    })
 }
 
 /// The per-pixel AA sub-sample counts of `rect` from `table`, computed on
@@ -105,7 +128,9 @@ fn stage<'a, B: GpuBackend>(
 ///
 /// The table is written into `scratch`'s host buffers, and the uploads, the
 /// fill kernel and the download of the counts are recorded into one page
-/// ([`GpuBackend::run_page`]): one device submission per fill.  A table
+/// ([`GpuBackend::run_page`]): one device submission per fill.  On a device
+/// whose buffers the host reaches in place, the table is written into the
+/// device buffers and the counts read from them, with no copies.  A table
 /// without intersections, or an empty rectangle, yields zero counts without
 /// a device round trip.  The caller decides whether the fill is worth one
 /// (see [`crate::GPU_AA_FILL_THRESHOLD`]).
@@ -152,16 +177,8 @@ pub fn aa_fill_page<B: GpuBackend>(
     let d_row_starts = stage(backend, row_starts_slot, row_starts)?;
     let coverage = ensure(backend, coverage_slot, n_pixels, Direction::ToHost)?;
     backend.run_page(|backend| {
-        backend.record_copy_to_device(
-            &d_intersects.host,
-            &d_intersects.device,
-            intersects.len(),
-        )?;
-        backend.record_copy_to_device(
-            &d_row_starts.host,
-            &d_row_starts.device,
-            row_starts.len(),
-        )?;
+        record_upload(backend, d_intersects, intersects.len())?;
+        record_upload(backend, d_row_starts, row_starts.len())?;
         backend.record_aa_fill(AaFillParams {
             intersects: &d_intersects.device,
             row_starts: &d_row_starts.device,
@@ -172,7 +189,15 @@ pub fn aa_fill_page<B: GpuBackend>(
             aa_width,
             fill_rule: u8::from(even_odd),
         })?;
-        backend.record_copy_to_host(&coverage.device, &mut coverage.host, n_pixels)
+        coverage.host.as_mut().map_or(Ok(()), |host| {
+            backend.record_copy_to_host(&coverage.device, host, n_pixels)
+        })
     })?;
-    Ok(backend.host_bytes(&coverage.host)[..n_pixels].to_vec())
+    let counts = match coverage.host.as_ref() {
+        Some(host) => backend.host_bytes(host),
+        None => backend
+            .device_bytes(&coverage.device)
+            .ok_or_else(|| BackendError::msg("aa_fill: device buffer lost its host mapping"))?,
+    };
+    Ok(counts[..n_pixels].to_vec())
 }

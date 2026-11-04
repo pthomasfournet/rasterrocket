@@ -462,6 +462,21 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
         len: usize,
     ) -> Result<()>;
 
+    /// The bytes of a device buffer in place, when the device shares host
+    /// memory (an integrated GPU); `None` when they are reachable only
+    /// through copies.
+    ///
+    /// The view reflects device writes only after the fence of the page
+    /// that made them has been waited on, and must not be read while a
+    /// submitted page that writes `buf` is in flight.
+    fn device_bytes<'a>(&self, buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]>;
+
+    /// The writable bytes of a device buffer in place; see
+    /// [`Self::device_bytes`].  Writes are seen by device work submitted
+    /// afterwards; they must not be made while a submitted page that
+    /// accesses `buf` is in flight.
+    fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]>;
+
     /// Byte length of a host buffer returned by
     /// [`Self::alloc_host_pinned`].
     fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize;

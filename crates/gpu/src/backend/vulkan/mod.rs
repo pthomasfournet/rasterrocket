@@ -90,6 +90,13 @@ impl VulkanBackend {
         })
     }
 
+    /// Whether the device is an integrated GPU, whose device buffers are
+    /// host memory the host writes and reads directly.
+    #[must_use]
+    pub fn is_integrated(&self) -> bool {
+        self.device.integrated
+    }
+
     /// Queue submissions this backend has made so far: one per page, one
     /// per synchronous transfer or zero-fill.
     #[must_use]
@@ -136,7 +143,16 @@ impl GpuBackend for VulkanBackend {
 
     fn alloc_device_zeroed(&self, size: usize) -> Result<Self::DeviceBuffer> {
         reject_zero_size(size, "alloc_device_zeroed")?;
-        let buf = self.memory.alloc_device(size)?;
+        let mut buf = self.memory.alloc_device(size)?;
+        let byte_len = buf.size();
+        // A fresh buffer is referenced by no page: a mapped one is zeroed in
+        // place, under the same size rule as the device fill so that a size
+        // is accepted or refused alike on every device.
+        if let Some(bytes) = buf.mapped_mut() {
+            memory::validate_fill_size(byte_len).map(drop)?;
+            bytes.fill(0);
+            return Ok(buf);
+        }
         // vkCmdFillBuffer requires 4-byte-aligned size; every realistic
         // caller (RGBA8 pages, u32 indices) is naturally aligned.
         // Mis-aligned sizes fail loudly rather than silently downgrading
@@ -279,6 +295,14 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
+    fn device_bytes<'a>(&self, buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+        buf.mapped()
+    }
+
+    fn device_bytes_mut<'a>(&self, buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
+        buf.mapped_mut()
+    }
+
     fn host_buffer_len(&self, buf: &Self::HostBuffer) -> usize {
         buf.as_slice().len()
     }
@@ -318,12 +342,36 @@ impl GpuBackend for VulkanBackend {
         result
     }
 
+    /// A mapped buffer (integrated GPU) is written in place once every
+    /// submitted page has completed, which is the ordering the staged copy
+    /// gets from the queue: earlier pages read the old bytes, later ones the
+    /// new.
     fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
-        self.transfer.upload(&self.memory, dst, src)
+        if dst.mapped().is_none() {
+            return self.transfer.upload(&self.memory, dst, src);
+        }
+        if src.is_empty() {
+            return Ok(());
+        }
+        check_copy_len(src.len(), src.len(), self.device_buffer_len(dst), "upload")?;
+        self.recorder.wait_submitted()?;
+        dst.write_mapped(src)
+            .ok_or_else(|| crate::backend::BackendError::msg("upload: mapped buffer changed"))
     }
 
+    /// A mapped buffer (integrated GPU) is read in place once every
+    /// submitted page has completed.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-        self.transfer.download(&self.memory, src, dst)
+        let Some(bytes) = src.mapped() else {
+            return self.transfer.download(&self.memory, src, dst);
+        };
+        if dst.is_empty() {
+            return Ok(());
+        }
+        check_copy_len(dst.len(), bytes.len(), dst.len(), "download")?;
+        self.recorder.wait_submitted()?;
+        dst.copy_from_slice(&bytes[..dst.len()]);
+        Ok(())
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {

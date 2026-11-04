@@ -1330,6 +1330,12 @@ mod tests {
         ) -> super::super::Result<()> {
             unreachable!()
         }
+        fn device_bytes<'a>(&self, _buf: &'a Self::DeviceBuffer) -> Option<&'a [u8]> {
+            unreachable!()
+        }
+        fn device_bytes_mut<'a>(&self, _buf: &'a mut Self::DeviceBuffer) -> Option<&'a mut [u8]> {
+            unreachable!()
+        }
         fn host_buffer_len(&self, _buf: &Self::HostBuffer) -> usize {
             unreachable!()
         }

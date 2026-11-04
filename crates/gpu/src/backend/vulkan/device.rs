@@ -58,6 +58,9 @@ pub(super) struct DeviceCtx {
     /// Whether `VK_EXT_memory_budget` was successfully enabled (gates
     /// runtime budget queries).
     pub(super) has_memory_budget: bool,
+    /// Whether the device is an integrated GPU: device memory is host
+    /// memory, so device buffers are allocated host-visible and mapped.
+    pub(super) integrated: bool,
     /// Whether `shaderInt64` is enabled: kernels declaring the `Int64`
     /// capability are built only when it is.
     pub(super) has_int64: bool,
@@ -143,6 +146,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         max_workgroup_count,
         vram_total,
         has_memory_budget: setup.has_memory_budget(),
+        integrated: dev_props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU,
         has_int64: setup.int64,
         instance,
         entry,
