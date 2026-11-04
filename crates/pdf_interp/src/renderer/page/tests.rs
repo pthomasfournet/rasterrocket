@@ -1382,7 +1382,11 @@ fn a_decode_the_page_budget_curtailed_is_not_shared() {
     let curtailed = pixels(curtailed);
     assert_ne!(curtailed, alone, "the lattice interpolates across the step");
     assert_eq!(pixels(second), alone, "the curtailed decode is not shared");
-    assert_eq!(images.kept_bytes(), 1, "the second page's exact decode is kept");
+    assert_eq!(
+        images.kept_bytes(),
+        1,
+        "the second page's exact decode is kept"
+    );
 }
 
 /// Pages `(4, 0)` and `(5, 0)` drawing the 2×2 `DeviceGray` image `/Im`
