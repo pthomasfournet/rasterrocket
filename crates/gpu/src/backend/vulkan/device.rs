@@ -83,8 +83,8 @@ impl Drop for DeviceCtx {
     fn drop(&mut self) {
         // Safety: every owned handle was created via the matching create_*
         // call above; matching destroy_* calls here, in reverse order, are
-        // sound because we have exclusive ownership and the recorder calls
-        // `vkDeviceWaitIdle` before the backend drops.
+        // sound because we have exclusive ownership and `VulkanBackend::drop`
+        // calls `vkDeviceWaitIdle` before any child of the device drops.
         let _lifecycle = instance_lifecycle();
         unsafe {
             self.device.destroy_device(None);

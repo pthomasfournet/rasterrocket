@@ -202,23 +202,14 @@ impl GpuBackend for VulkanBackend {
             bytes.fill(0);
             return Ok(buf);
         }
-        // vkCmdFillBuffer requires 4-byte-aligned size; every realistic
-        // caller (RGBA8 pages, u32 indices) is naturally aligned.
-        // Mis-aligned sizes fail loudly rather than silently downgrading
-        // to a 33 MB host-vec staging path.
+        // `vkCmdFillBuffer` requires a 4-byte-aligned size; a misaligned
+        // one fails rather than being zeroed through a host staging copy.
         //
-        // Allocation-time zero-fill rides `run_one_shot`, which holds
-        // both `TransferContext::cmd_pool` and `DeviceCtx::compute_queue`
-        // for the full submit + `vkQueueWaitIdle` (~1–2 ms for a 4K RGBA8
-        // page). Concurrent renderer threads serialise here.
-        //
-        // The cheaper path is [`GpuBackend::record_zero_buffer`], which
-        // folds the fill into the page's own command buffer between
-        // `begin_page` and `submit_page` — zero extra submits, no
-        // transfer-queue lock. Callers that already hold an active page
-        // recording should prefer it. This method exists for paths that
-        // need the buffer zeroed *outside* a page (e.g., one-shot setup,
-        // tests).
+        // The fill is a one-shot submission (`TransferContext::run_one_shot`),
+        // which holds the transfer command pool and the compute queue until
+        // `vkQueueWaitIdle` returns: concurrent callers serialise.
+        // [`GpuBackend::record_zero_buffer`] folds the fill into a page's
+        // own command buffer instead, with no extra submission.
         self.transfer.fill_zero(&buf)?;
         Ok(buf)
     }

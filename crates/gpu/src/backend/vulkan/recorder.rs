@@ -2,8 +2,9 @@
 //!
 //! Lifecycle (matching the `GpuBackend` trait):
 //!
-//! - `begin_page`: reset the previous page's command pool, allocate a
-//!   fresh primary command buffer, `vkBeginCommandBuffer`.
+//! - `begin_page`: reset the command pool and the descriptor pool of the
+//!   previous page, `vkBeginCommandBuffer` on the recorder's one primary
+//!   command buffer.
 //! - `record_*`: bind the kernel's pipeline + a freshly allocated
 //!   descriptor set, push scalars via push constants, dispatch, then
 //!   emit a global memory barrier that orders every later command of the
@@ -12,17 +13,13 @@
 //!   semaphore at value `next_value`, return a `PageFence` carrying the
 //!   wait-value.
 //! - `wait_page`: wait until the timeline semaphore reaches the fence's
-//!   value.  After the wait succeeds, the descriptor pool used for the
-//!   page is reset (it can be reused on the next page).
+//!   value; the page's pools are then free for the next `begin_page`.
 //!
 //! ## Single-page-in-flight invariant
 //!
-//! For simplicity (mirroring the existing CUDA backend) the recorder
-//! holds at most one page in flight.  `begin_page` immediately after
+//! The recorder holds at most one page in flight.  `begin_page` immediately after
 //! another `begin_page` without a `submit_page` in between is a
-//! programmer error and produces a clear error.  Once the parity gate
-//! is green, a small ring buffer (N=2-4) can replace the single slot
-//! to allow CPU-record/GPU-execute overlap.
+//! programmer error and produces a clear error.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -846,9 +843,9 @@ impl PageRecorder {
     /// `vkCmdFillBuffer`, which runs in the `CLEAR` stage, not `COPY`.
     /// The barrier after makes the copied bytes visible to later dispatches
     /// and copies of the page; the barrier `submit_page` ends every page
-    /// with makes them visible to host reads after the fence.  Host writes to `src`
-    /// made before `submit_page` need no barrier: queue submission makes
-    /// them visible to the device.
+    /// with makes them visible to host reads after the fence.  Host writes
+    /// to `src` made before `submit_page` need no barrier: queue submission
+    /// makes them visible to the device.
     pub(super) fn record_copy(&self, src: vk::Buffer, dst: vk::Buffer, len: u64) -> Result<()> {
         let s = self.inner.lock().expect("recorder mutex poisoned");
         if s.state != State::Recording {
