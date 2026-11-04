@@ -27,24 +27,27 @@ impl PageRenderer<'_> {
     /// within `region`, knocking out the group's earlier content within the
     /// object's shape when the group being painted into is a knockout group.
     /// Outside one, or on a bitmap without an alpha plane, `paint` runs as
-    /// it is.
-    pub(super) fn paint_knocking_out<R>(
+    /// it is.  A snapshot of the region the allocator refuses stops the
+    /// render, `paint` unrun.
+    pub(super) fn paint_knocking_out(
         &mut self,
         region: Option<PixelRect>,
         alpha: u8,
-        paint: impl FnOnce(&mut Self) -> R,
-    ) -> R {
+        paint: impl FnOnce(&mut Self),
+    ) {
         let region = region
             .filter(|_| self.group.knockout && alpha > 0 && self.canvas.has_alpha())
             .and_then(|r| self.within_clip(r));
         let Some(region) = region else {
-            return paint(self);
+            paint(self);
+            return;
         };
-        let prior = self.take_region(region);
+        let Some(prior) = self.take_region(region) else {
+            return;
+        };
         self.canvas.clear(region);
-        let result = paint(self);
+        paint(self);
         with_canvas!(&mut self.canvas, |b| prior.merge_under(b, alpha));
-        result
     }
 }
 
@@ -124,7 +127,7 @@ mod tests {
         bmp.row_bytes_mut(0).copy_from_slice(&prior.0);
         bmp.alpha_plane_mut().unwrap()[0] = prior.1;
         let region = PixelRect::new(0, 0, 1, 1).unwrap();
-        let snapshot = Snapshot::take(&bmp, region);
+        let snapshot = Snapshot::try_take(&bmp, region).unwrap();
         clear(&mut bmp, region);
         bmp.row_bytes_mut(0).copy_from_slice(&painted.0);
         bmp.alpha_plane_mut().unwrap()[0] = painted.1;

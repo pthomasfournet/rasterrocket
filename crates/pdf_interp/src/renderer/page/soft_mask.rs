@@ -147,44 +147,42 @@ impl PageRenderer<'_> {
     /// The mask is removed from the graphics state while `paint` runs, so
     /// that painting it performs through other primitives (a Type 3 glyph's
     /// content, a group's compositing) is not masked a second time.
-    pub(super) fn paint_object<R>(
+    pub(super) fn paint_object(
         &mut self,
         region: Option<PixelRect>,
         alpha: u8,
-        paint: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        self.paint_knocking_out(region, alpha, |r| r.paint_masked(region, paint))
+        paint: impl FnOnce(&mut Self),
+    ) {
+        self.paint_knocking_out(region, alpha, |r| r.paint_masked(region, paint));
     }
 
     /// Run `paint` — the painting of one object within `region` — under the
     /// soft mask in effect, if any.
-    fn paint_masked<R>(
-        &mut self,
-        region: Option<PixelRect>,
-        paint: impl FnOnce(&mut Self) -> R,
-    ) -> R {
+    fn paint_masked(&mut self, region: Option<PixelRect>, paint: impl FnOnce(&mut Self)) {
         let Some(mask) = self.gstate.current_mut().soft_mask.take() else {
-            return paint(self);
+            paint(self);
+            return;
         };
-        let result = self.paint_through_soft_mask(&mask, region, paint);
+        self.paint_through_soft_mask(&mask, region, paint);
         self.gstate.current_mut().soft_mask = Some(mask);
-        result
     }
 
     /// Run `paint` — the painting of one object within `region`, the
     /// pixels it can touch — under `mask`.  A mask of the wrong size, or a
-    /// region outside the clip, leaves the painting unmasked.
-    pub(super) fn paint_through_soft_mask<R>(
+    /// region outside the clip, leaves the painting unmasked; a snapshot of
+    /// the region the allocator refuses stops the render, `paint` unrun.
+    pub(super) fn paint_through_soft_mask(
         &mut self,
         mask: &SoftMaskPlane,
         region: Option<PixelRect>,
-        paint: impl FnOnce(&mut Self) -> R,
-    ) -> R {
+        paint: impl FnOnce(&mut Self),
+    ) {
         let region = region
             .filter(|_| mask.width == self.width && mask.height == self.height)
             .and_then(|r| self.within_clip(r));
         let Some(region) = region else {
-            return paint(self);
+            paint(self);
+            return;
         };
         let view = MaskView {
             values: &mask.values,
@@ -192,21 +190,23 @@ impl PageRenderer<'_> {
             x0: 0,
             y0: 0,
         };
-        let before = self.take_region(region);
-        let result = paint(self);
+        let Some(before) = self.take_region(region) else {
+            return;
+        };
+        paint(self);
         with_canvas!(&mut self.canvas, |b| before.blend_back(b, &view));
-        result
     }
 
     /// Run `paint` with what it paints scaled by `coverage`, one value per
     /// pixel of `rect` in row-major order; pixels outside `rect` are left
-    /// unchanged.  `coverage` must hold `rect.area()` values.
-    pub(super) fn paint_through_coverage<R>(
+    /// unchanged.  `coverage` must hold `rect.area()` values.  A snapshot
+    /// the allocator refuses stops the render, `paint` unrun.
+    pub(super) fn paint_through_coverage(
         &mut self,
         rect: PixelRect,
         coverage: &[u8],
-        paint: impl FnOnce(&mut Self) -> R,
-    ) -> R {
+        paint: impl FnOnce(&mut Self),
+    ) {
         debug_assert_eq!(
             coverage.len() as u64,
             rect.area(),
@@ -214,7 +214,8 @@ impl PageRenderer<'_> {
         );
         let region = self.within_clip(rect);
         let Some(region) = region else {
-            return paint(self);
+            paint(self);
+            return;
         };
         let view = MaskView {
             values: coverage,
@@ -222,10 +223,11 @@ impl PageRenderer<'_> {
             x0: rect.x0,
             y0: rect.y0,
         };
-        let before = self.take_region(region);
-        let result = paint(self);
+        let Some(before) = self.take_region(region) else {
+            return;
+        };
+        paint(self);
         with_canvas!(&mut self.canvas, |b| before.blend_back(b, &view));
-        result
     }
 }
 
@@ -259,9 +261,13 @@ impl PageRenderer<'_> {
             x0: rect.x0,
             y0: rect.y0,
         };
-        let backdrop = self.take_region(region);
+        let Some(backdrop) = self.take_region(region) else {
+            return;
+        };
         under(self);
-        let painted = self.take_region(region);
+        let Some(painted) = self.take_region(region) else {
+            return;
+        };
         self.restore_region(backdrop);
         over(self);
         with_canvas!(&mut self.canvas, |b| painted.blend_back(b, &view));

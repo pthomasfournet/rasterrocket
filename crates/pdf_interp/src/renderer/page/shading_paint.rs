@@ -113,13 +113,13 @@ impl PageRenderer<'_> {
     /// and the shading.  The `ExtGState` applies on top of the current
     /// graphics state for the duration of `paint` only; a soft mask it sets
     /// is resolved in pattern space and masks what `paint` paints.
-    pub(super) fn paint_shading_pattern<R>(
+    pub(super) fn paint_shading_pattern(
         &mut self,
         pattern: &ShadingPattern,
         stroke: bool,
         region: Option<PixelRect>,
-        paint: impl FnOnce(&mut Self, &PipeState<'_>, &ResolvedShading) -> R,
-    ) -> R {
+        paint: impl FnOnce(&mut Self, &PipeState<'_>, &ResolvedShading),
+    ) {
         let ShadingPattern {
             shading,
             ext_gstate,
@@ -128,7 +128,8 @@ impl PageRenderer<'_> {
         let Some(ext) = ext_gstate else {
             let state = self.shading_paint(stroke, shading);
             let pipe = state.pipe(self.canvas.kind());
-            return paint(self, &pipe, shading);
+            paint(self, &pipe, shading);
+            return;
         };
         self.gstate.save();
         let ctm = std::mem::replace(&mut self.gstate.current_mut().ctm, *matrix);
@@ -136,12 +137,11 @@ impl PageRenderer<'_> {
         self.gstate.current_mut().ctm = ctm;
         let state = self.shading_paint(stroke, shading);
         let pipe = state.pipe(self.canvas.kind());
-        let result = match self.gstate.current_mut().soft_mask.take() {
+        match self.gstate.current_mut().soft_mask.take() {
             Some(mask) => self.paint_through_soft_mask(&mask, region, |r| paint(r, &pipe, shading)),
             None => paint(self, &pipe, shading),
-        };
+        }
         self.gstate.restore();
-        result
     }
 
     /// Execute an `sh` shading operator: paint the named shading over the

@@ -438,13 +438,14 @@ impl PageRenderer<'_> {
             let pipe = paint.pipe();
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);
-            let bitmap = self.paint_knocking_out(region, parent_fill_alpha, |r| match group_mask {
-                Some(mask) => {
-                    r.paint_through_soft_mask(&mask, region, |r| r.canvas.paint_group(g, &pipe))
-                }
-                None => r.canvas.paint_group(g, &pipe),
+            let composite = |r: &mut Self| {
+                let bitmap = r.canvas.paint_group(g, &pipe);
+                r.group_pool.push(bitmap);
+            };
+            self.paint_knocking_out(region, parent_fill_alpha, |r| match group_mask {
+                Some(mask) => r.paint_through_soft_mask(&mask, region, composite),
+                None => composite(r),
             });
-            self.group_pool.push(bitmap);
         }
 
         // Restore resources and graphics state.

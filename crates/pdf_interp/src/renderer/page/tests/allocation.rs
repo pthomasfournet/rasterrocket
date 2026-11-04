@@ -8,14 +8,16 @@ use raster::path::Path;
 use super::*;
 use crate::resources::{ColorSpace, TransparencyGroupParams};
 
-/// Page `(4, 0)` naming the transparency-group form `/F` and the
-/// `ExtGState` `/M`, whose soft mask is the luminosity of the form `(6, 0)`.
+/// Page `(4, 0)` naming the transparency-group form `/F`, the `ExtGState`
+/// `/M`, whose soft mask is the luminosity of the form `(6, 0)`, and the
+/// `ExtGState` `/H` of stroke alpha one half.
 fn group_and_mask_doc() -> Document {
     crate::test_helpers::make_doc_with_objects(&[
         (
             4,
             "<< /Type /Page /Resources << /XObject << /F 5 0 R >> \
-             /ExtGState << /M << /SMask << /S /Luminosity /G 6 0 R >> >> >> >> >>"
+             /ExtGState << /M << /SMask << /S /Luminosity /G 6 0 R >> >> \
+             /H << /CA 0.5 >> >> >> >>"
                 .to_owned(),
         ),
         (
@@ -52,6 +54,41 @@ const REFUSED: Option<RenderAbort> = Some(RenderAbort::AllocationFailed {
     width: 10,
     height: 10,
 });
+
+/// Run `content` on a 10-pixel-square page of [`group_and_mask_doc`],
+/// knocking out within its page group when `knockout`, with every snapshot
+/// of the canvas refused; the abort and the page.
+fn render_refusing_snapshots(content: &[u8], knockout: bool) -> (Option<RenderAbort>, Vec<u8>) {
+    let doc = group_and_mask_doc();
+    let mut renderer = PageRenderer::new(10, 10, &doc, (4, 0));
+    if knockout {
+        let group = TransparencyGroupParams {
+            isolated: true,
+            knockout: true,
+        };
+        renderer.try_set_page_group(Some(group)).unwrap();
+    }
+    renderer.max_snapshot_px = 0;
+    renderer.execute(&crate::content::parse(content));
+    let abort = renderer.budget_status().cloned();
+    (abort, renderer.finish().0.data().to_vec())
+}
+
+/// A snapshot refused under a soft mask, in a knockout group or for a
+/// knocked-out fill and stroke stops the render with nothing painted.
+#[test]
+fn a_refused_snapshot_stops_the_render() {
+    for (content, knockout) in [
+        (&b"/M gs 0 g 0 0 10 10 re f 0 g 0 0 10 10 re f"[..], false),
+        (b"0 g 0 0 10 10 re f", true),
+        (b"/H gs 0 g 0 G 0 0 10 10 re B 0 g 0 0 10 10 re f", false),
+    ] {
+        let what = String::from_utf8_lossy(content);
+        let (abort, page) = render_refusing_snapshots(content, knockout);
+        assert_eq!(abort, REFUSED, "{what}");
+        assert!(page.iter().all(|&b| b == 255), "{what}: nothing is painted");
+    }
+}
 
 /// A transparency group whose bitmap is refused stops the render: neither
 /// the group's content nor anything after it is painted.

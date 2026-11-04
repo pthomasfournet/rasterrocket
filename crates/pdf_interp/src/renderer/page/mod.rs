@@ -284,6 +284,10 @@ pub struct PageRenderer<'doc> {
     /// a larger one is refused.
     #[cfg(test)]
     max_canvas_px: u64,
+    /// The most pixels a [`Self::take_region`] snapshot may hold; a larger
+    /// one is refused.
+    #[cfg(test)]
+    max_snapshot_px: u64,
     /// Distinct unknown operator keywords already warned about this page,
     /// so a content stream that repeats an unsupported op doesn't flood the
     /// log.  Bounded at [`MAX_WARNED_UNKNOWN_OPS`] entries.
@@ -514,6 +518,8 @@ impl<'doc> PageRenderer<'doc> {
             cancel: None,
             #[cfg(test)]
             max_canvas_px: u64::MAX,
+            #[cfg(test)]
+            max_snapshot_px: u64::MAX,
             warned_unknown_ops: std::collections::HashSet::new(),
             warned_unknown_ops_capped: false,
             filter_counts: [0u32; IMAGE_FILTER_COUNT],

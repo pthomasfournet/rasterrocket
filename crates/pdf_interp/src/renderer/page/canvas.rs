@@ -377,30 +377,46 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
-    /// Capture `region` of `bitmap`.
-    pub(super) fn take<P: Pixel>(bitmap: &Bitmap<P>, region: PixelRect) -> Self {
+    /// Capture `region` of `bitmap`, or the error for a buffer of the
+    /// region's size when the allocator refuses one.
+    pub(super) fn try_take<P: Pixel>(
+        bitmap: &Bitmap<P>,
+        region: PixelRect,
+    ) -> Result<Self, raster::BitmapAllocError> {
         let PixelRect { x0, y0, x1, y1 } = region;
+        let refused = |()| raster::BitmapAllocError {
+            width: region.width(),
+            height: region.height(),
+        };
         let bpp = P::BYTES;
         let (cx0, cx1) = (x0 as usize * bpp, x1 as usize * bpp);
         let (ax0, ax1) = (x0 as usize, x1 as usize);
-        let mut color = Vec::with_capacity((cx1 - cx0) * (y1 - y0) as usize);
-        let mut alpha = bitmap
-            .has_alpha()
-            .then(|| Vec::with_capacity((ax1 - ax0) * (y1 - y0) as usize));
+        let rows = (y1 - y0) as usize;
+        let buffer = |bytes: Option<usize>| -> Result<Vec<u8>, ()> {
+            let mut v = Vec::new();
+            v.try_reserve_exact(bytes.ok_or(())?).map_err(|_| ())?;
+            Ok(v)
+        };
+        let mut color = buffer((cx1 - cx0).checked_mul(rows)).map_err(refused)?;
+        let mut alpha = if bitmap.has_alpha() {
+            Some(buffer((ax1 - ax0).checked_mul(rows)).map_err(refused)?)
+        } else {
+            None
+        };
         for y in y0..y1 {
             color.extend_from_slice(&bitmap.row_bytes(y)[cx0..cx1]);
             if let (Some(a), Some(row)) = (alpha.as_mut(), bitmap.alpha_row(y)) {
                 a.extend_from_slice(&row[ax0..ax1]);
             }
         }
-        Self {
+        Ok(Self {
             x0,
             y0,
             x1,
             bpp,
             color,
             alpha,
-        }
+        })
     }
 
     /// Pixels per row of the rectangle.
@@ -433,9 +449,21 @@ impl Snapshot {
 }
 
 impl PageRenderer<'_> {
-    /// Capture `region` of the canvas.
-    pub(super) fn take_region(&self, region: PixelRect) -> Snapshot {
-        with_canvas!(&self.canvas, |b| Snapshot::take(b, region))
+    /// Capture `region` of the canvas, or `None`, with the render stopped
+    /// by `RenderAbort::AllocationFailed`, when the allocator refuses the
+    /// snapshot's buffers.
+    pub(super) fn take_region(&mut self, region: PixelRect) -> Option<Snapshot> {
+        #[cfg(test)]
+        if region.area() > self.max_snapshot_px {
+            self.abort_allocation(raster::BitmapAllocError {
+                width: region.width(),
+                height: region.height(),
+            });
+            return None;
+        }
+        with_canvas!(&self.canvas, |b| Snapshot::try_take(b, region))
+            .map_err(|e| self.abort_allocation(e))
+            .ok()
     }
 
     /// Write `snapshot`, taken from the canvas, back over its rectangle.
