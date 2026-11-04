@@ -236,25 +236,13 @@ impl GpuBackend for CudaBackend {
         buf.as_mut_slice()
     }
 
-    /// As the trait's default, except that a failed page synchronises the
-    /// calling thread's stream before returning: copies and kernels queued
-    /// before the failure may still read or write host and device buffers
-    /// the caller frees once the error is returned.
-    fn run_page<F>(&self, record: F) -> Result<()>
-    where
-        F: FnOnce(&Self) -> Result<()>,
-    {
-        let result = self.begin_page().and_then(|()| {
-            record(self)?;
-            let fence = self.submit_page()?;
-            self.wait_page(fence)
-        });
-        if result.is_err()
-            && let Err(e) = self.ctx.stream().synchronize()
-        {
-            log::warn!("abandoning a failed page: synchronising its stream failed: {e}");
+    /// Synchronises the calling thread's stream: copies and kernels a page
+    /// queued run until the stream has passed them, whether or not the
+    /// page was submitted.
+    fn abandon_page(&self) {
+        if let Err(e) = self.ctx.stream().synchronize() {
+            log::warn!("abandoning a page: synchronising its stream failed: {e}");
         }
-        result
     }
 
     fn submit_page(&self) -> Result<Self::PageFence> {

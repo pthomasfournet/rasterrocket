@@ -1288,7 +1288,10 @@ mod tests {
         }
         fn free_host_pinned(&self, _buf: Self::HostBuffer) {}
         fn begin_page(&self) -> super::super::Result<()> {
-            unreachable!()
+            Ok(())
+        }
+        fn abandon_page(&self) {
+            ABANDONED.set(ABANDONED.get() + 1);
         }
         fn record_blit_image(&self, _p: BlitParams<'_, Self>) -> super::super::Result<()> {
             unreachable!()
@@ -1355,10 +1358,10 @@ mod tests {
             unreachable!()
         }
         fn submit_page(&self) -> super::super::Result<Self::PageFence> {
-            unreachable!()
+            Ok(())
         }
         fn wait_page(&self, _fence: Self::PageFence) -> super::super::Result<()> {
-            unreachable!()
+            Ok(())
         }
         fn upload(&self, _dst: &Self::DeviceBuffer, _src: &[u8]) -> super::super::Result<()> {
             unreachable!()
@@ -1375,6 +1378,36 @@ mod tests {
         fn detect_vram_budget(&self) -> super::super::Result<super::super::VramBudget> {
             unreachable!()
         }
+    }
+
+    thread_local! {
+        /// [`FakeBackend::abandon_page`] calls made on this thread.
+        static ABANDONED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn default_run_page_abandons_a_failed_or_unwinding_page() {
+        let before = ABANDONED.get();
+        FakeBackend.run_page(|_| Ok(())).expect("empty page");
+        assert_eq!(ABANDONED.get(), before, "a completed page was abandoned");
+        let err = FakeBackend
+            .run_page(|_| Err(super::super::BackendError::msg("injected")))
+            .expect_err("the record error is returned");
+        assert_eq!(err.to_string(), "injected");
+        assert_eq!(
+            ABANDONED.get(),
+            before + 1,
+            "a failed page was not abandoned"
+        );
+        let unwound = std::panic::catch_unwind(|| {
+            FakeBackend.run_page(|_| -> super::super::Result<()> { panic!("page closure") })
+        });
+        assert!(unwound.is_err());
+        assert_eq!(
+            ABANDONED.get(),
+            before + 2,
+            "an unwinding page was not abandoned"
+        );
     }
 
     /// Static stand-in for a device buffer of "large enough" capacity.

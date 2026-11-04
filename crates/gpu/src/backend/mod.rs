@@ -536,14 +536,25 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// Returns `BackendError` if the fence wait fails or the GPU raised an error.
     fn wait_page(&self, fence: Self::PageFence) -> Result<()>;
 
+    /// Abandon the page the calling thread has begun or submitted, if any.
+    ///
+    /// Returns once no work that page queued is still running, with the
+    /// backend ready for a new [`Self::begin_page`]; buffers the page
+    /// referenced may then be accessed and freed.  A failure to wait is
+    /// logged at `warn`, the page is abandoned regardless.  Requires the
+    /// same external synchronisation as the individual page calls.
+    fn abandon_page(&self);
+
     /// Run one page: `begin_page`, the work `record` records, `submit_page`
     /// and `wait_page`, returning once the device has finished it.
     ///
     /// This is the page lifecycle for a backend shared between threads: a
     /// backend with one recording state serialises whole pages, so a
-    /// second thread's page waits instead of failing, and a failure at any
-    /// step abandons the page and returns the backend to idle, so one
-    /// failed page does not fail every later one.
+    /// second thread's page waits instead of failing.  A failure at any
+    /// step, or an unwinding `record`, abandons the page
+    /// ([`Self::abandon_page`]) before `run_page` returns or unwinds, so
+    /// no work of the page is still running then and one failed page does
+    /// not fail every later one.
     ///
     /// # Errors
     /// The first error of any step.
@@ -552,10 +563,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
         F: FnOnce(&Self) -> Result<()>,
         Self: Sized,
     {
-        self.begin_page()?;
-        record(self)?;
-        let fence = self.submit_page()?;
-        self.wait_page(fence)
+        run_page_steps(self, record)
     }
 
     /// Copy `src` into `dst[..src.len()]`.
@@ -590,6 +598,41 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// # Errors
     /// Returns `BackendError` if the driver query fails.
     fn detect_vram_budget(&self) -> Result<VramBudget>;
+}
+
+/// `begin_page`, `record`, `submit_page` and `wait_page` on `backend`, with
+/// [`GpuBackend::abandon_page`] run when a step fails or `record` unwinds:
+/// the body of [`GpuBackend::run_page`] for every backend.
+pub(crate) fn run_page_steps<B, F>(backend: &B, record: F) -> Result<()>
+where
+    B: GpuBackend,
+    F: FnOnce(&B) -> Result<()>,
+{
+    /// Abandons the page when dropped armed.
+    struct AbandonOnExit<'a, B: GpuBackend> {
+        backend: &'a B,
+        armed: bool,
+    }
+
+    impl<B: GpuBackend> Drop for AbandonOnExit<'_, B> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.backend.abandon_page();
+            }
+        }
+    }
+
+    let mut abandon = AbandonOnExit {
+        backend,
+        armed: true,
+    };
+    let result = backend.begin_page().and_then(|()| {
+        record(backend)?;
+        let fence = backend.submit_page()?;
+        backend.wait_page(fence)
+    });
+    abandon.armed = result.is_err();
+    result
 }
 
 /// The supertrait that closes [`GpuBackend`] to the backends of this
