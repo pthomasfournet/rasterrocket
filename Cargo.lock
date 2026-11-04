@@ -1396,6 +1396,7 @@ dependencies = [
  "clap",
  "env_logger",
  "libc",
+ "log",
  "mimalloc",
  "rasterrocket",
  "rasterrocket-camera",

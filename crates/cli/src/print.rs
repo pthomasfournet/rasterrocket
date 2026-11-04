@@ -286,25 +286,51 @@ pub(crate) fn list_printers() -> Result<String, String> {
             "--list-printers asks CUPS for its queues, which Windows does not have".to_owned(),
         );
     }
-    let queues = deliver::query("lpstat", &["-e"], CUPS_CLIENT_HINT)?;
-    let default = deliver::query("lpstat", &["-d"], CUPS_CLIENT_HINT)?;
-    Ok(printer_list(&queues, default_destination(&default)))
+    let lpstat_e = deliver::query("lpstat", &["-e"], CUPS_CLIENT_HINT)?;
+    let lpstat_d = deliver::query("lpstat", &["-d"], CUPS_CLIENT_HINT)?;
+    let queues = queue_names(&lpstat_e);
+    let default = default_destination(&lpstat_d, &queues);
+    Ok(printer_list(&queues, default))
 }
 
-/// The default destination `lpstat -d` reports in the C locale, if any.
-fn default_destination(lpstat_d: &str) -> Option<&str> {
-    lpstat_d
+/// The destinations `lpstat -e` reports, one per line.
+fn queue_names(lpstat_e: &str) -> Vec<&str> {
+    lpstat_e
         .lines()
-        .find_map(|line| line.strip_prefix("system default destination:"))
         .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .filter(|q| !q.is_empty())
+        .collect()
 }
 
-/// The listing of the destinations `lpstat -e` reports, one per line,
-/// `default` marked.
-fn printer_list(lpstat_e: &str, default: Option<&str>) -> String {
+/// The queue of `queues` that `lpstat -d` names as the default
+/// destination, if any.  The `-d` line ends with `: ` and the queue name in
+/// every locale, so the match does not depend on the wording before it; the
+/// longest matching name wins, so `Office/duplex` is not taken for a queue
+/// `duplex`.  Output that names no queue and is not the C locale's
+/// no-default line is logged.
+fn default_destination<'q>(lpstat_d: &str, queues: &[&'q str]) -> Option<&'q str> {
+    let line = lpstat_d.trim();
+    let default = queues
+        .iter()
+        .filter(|q| {
+            line.strip_suffix(**q)
+                .is_some_and(|head| head.trim_end().ends_with(':'))
+        })
+        .max_by_key(|q| q.len())
+        .copied();
+    if default.is_none() && !line.is_empty() && line != "no system default destination" {
+        log::warn!(
+            "lpstat -d reported {line:?}, which names none of the queues; \
+             no queue is marked default"
+        );
+    }
+    default
+}
+
+/// The listing of `queues`, one per line, `default` marked.
+fn printer_list(queues: &[&str], default: Option<&str>) -> String {
     let mut list = String::new();
-    for queue in lpstat_e.lines().map(str::trim).filter(|q| !q.is_empty()) {
+    for &queue in queues {
         list.push_str(queue);
         if Some(queue) == default {
             list.push_str("\tdefault");
@@ -323,25 +349,47 @@ mod tests {
 
     use super::{
         Duplex, PageSink, Spool, Submission, default_destination, job_title, lp_options,
-        printer_list, refusal_hint,
+        printer_list, queue_names, refusal_hint,
     };
     use crate::cleanup::{Page, SpreadHalf};
     use crate::deliver::SubmitError;
 
     #[test]
     fn printers_are_listed_one_per_line_with_the_default_marked() {
-        let lpstat_e = "Office\nOffice/duplex\nLab\n";
+        let queues = queue_names("Office\nOffice/duplex\n duplex \n\nLab\n");
+        assert_eq!(queues, ["Office", "Office/duplex", "duplex", "Lab"]);
         assert_eq!(
-            default_destination("system default destination: Office/duplex\n"),
-            Some("Office/duplex")
+            printer_list(&queues, Some("Office/duplex")),
+            "Office\nOffice/duplex\tdefault\nduplex\nLab\n"
         );
-        assert_eq!(default_destination("no system default destination\n"), None);
         assert_eq!(
-            printer_list(lpstat_e, Some("Office/duplex")),
-            "Office\nOffice/duplex\tdefault\nLab\n"
+            printer_list(&queues, None),
+            "Office\nOffice/duplex\nduplex\nLab\n"
         );
-        assert_eq!(printer_list(lpstat_e, None), "Office\nOffice/duplex\nLab\n");
-        assert_eq!(printer_list("", None), "");
+        assert_eq!(printer_list(&[], None), "");
+    }
+
+    #[test]
+    fn the_default_destination_is_found_in_any_locale() {
+        let queues = ["Office", "Office/duplex", "duplex", "Lab"];
+        for (lpstat_d, default) in [
+            (
+                "system default destination: Office/duplex\n",
+                Some("Office/duplex"),
+            ),
+            ("system default destination: duplex\n", Some("duplex")),
+            ("destination système par défaut : Lab\n", Some("Lab")),
+            ("Standardziel des Systems: Office\n", Some("Office")),
+            ("no system default destination\n", None),
+            ("system default destination: Gone\n", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                default_destination(lpstat_d, &queues),
+                default,
+                "{lpstat_d:?}"
+            );
+        }
     }
 
     #[test]

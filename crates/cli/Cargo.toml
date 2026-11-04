@@ -44,6 +44,7 @@ raster      = { package = "rasterrocket-render", path = "../raster",     version
 clap        = { version = "4", features = ["derive"] }
 rayon       = "1"
 env_logger  = { workspace = true }
+log         = { workspace = true }
 mimalloc    = { version = "0.1", default-features = false }
 # The --print spool: an anonymous temporary file.
 tempfile    = { workspace = true }
