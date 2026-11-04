@@ -4,6 +4,7 @@
 mod code_blocks;
 mod codestream;
 mod errors;
+mod ht;
 mod integration;
 mod jp2;
 mod limits;

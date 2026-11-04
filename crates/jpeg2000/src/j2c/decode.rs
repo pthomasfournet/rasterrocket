@@ -6,15 +6,20 @@
 
 use alloc::vec::Vec;
 
-use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
+use super::bitplane::{
+    BitPlaneDecodeBuffers, BitPlaneDecodeContext, Coefficient, CoefficientState,
+};
 use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, SubBandType};
-use super::codestream::{ComponentInfo, Header, QuantizationStyle, WaveletTransform};
+use super::codestream::{
+    CodeBlockStyle, ComponentInfo, Header, QuantizationStyle, WaveletTransform,
+};
+use super::ht::{HtBlock, HtDecodeContext};
 use super::idwt::IDWTOutput;
 use super::progression::progression_iterator;
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
-use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
-use crate::error::{DecodingError, Result, TileError, ValidationError, bail};
+use super::{ComponentData, bitplane, build, ht, idwt, mct, segment, tile};
+use crate::error::{DecodingError, MarkerError, Result, TileError, ValidationError, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
 use crate::math::SimdBuffer;
 use crate::reader::BitReader;
@@ -297,6 +302,11 @@ pub(crate) struct TileDecodeContext {
     pub(crate) bit_plane_decode_context: BitPlaneDecodeContext,
     /// Reusable buffers for decoding bitplanes.
     pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
+    /// A reusable context for decoding HT code blocks.
+    pub(crate) ht_decode_context: HtDecodeContext,
+    /// The cleanup and refinement segments of the HT code block being
+    /// decoded, gathered from its layers.
+    pub(crate) ht_segments: [Vec<u8>; 2],
 }
 
 impl TileDecodeContext {
@@ -399,46 +409,153 @@ fn decode_sub_band_bitplanes(
             .clone()
             .map(|idx| &storage.code_blocks[idx])
         {
-            bitplane::decode(
-                code_block,
-                sub_band.sub_band_type,
-                num_bitplanes,
-                &component_info.coding_style.parameters.code_block_style,
-                tile_ctx,
-                storage,
-                header.strict,
-            )?;
-
-            // Turn the signs and magnitudes into singular coefficients and
-            // copy them into the sub-band.
-
+            let style = &component_info.coding_style.parameters.code_block_style;
+            if style.mixed_high_throughput {
+                bail!(MarkerError::UnsupportedHtj2k);
+            }
             let x_offset = code_block.rect.x0 - sub_band.rect.x0;
             let y_offset = code_block.rect.y0 - sub_band.rect.y0;
+            let base_idx = (y_offset * sub_band.rect.width()) as usize + x_offset as usize;
+            let reconstruction = Reconstruction {
+                irreversible,
+                roi_shift: component_info.roi_shift,
+                dequantization_step,
+                stride: sub_band.rect.width() as usize,
+            };
 
-            let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
-            let mut base_idx = (y_offset * sub_band.rect.width()) as usize + x_offset as usize;
-
-            for (coefficients, coefficient_states) in
-                tile_ctx.bit_plane_decode_context.coefficient_rows()
-            {
-                let out_row = &mut base_store[base_idx..];
-
-                for ((output, coefficient), coefficient_state) in
-                    out_row.iter_mut().zip(coefficients).zip(coefficient_states)
-                {
-                    *output = coefficient.reconstructed(
-                        coefficient_state,
-                        irreversible,
-                        component_info.roi_shift,
-                    );
-                    *output *= dequantization_step;
-                }
-
-                base_idx += sub_band.rect.width() as usize;
+            if style.high_throughput {
+                decode_ht_code_block(code_block, num_bitplanes, style, tile_ctx, storage)?;
+                let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
+                reconstruction.store(
+                    tile_ctx.ht_decode_context.coefficient_rows(),
+                    &mut base_store[base_idx..],
+                );
+            } else {
+                bitplane::decode(
+                    code_block,
+                    sub_band.sub_band_type,
+                    num_bitplanes,
+                    style,
+                    tile_ctx,
+                    storage,
+                    header.strict,
+                )?;
+                let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
+                reconstruction.store(
+                    tile_ctx.bit_plane_decode_context.coefficient_rows(),
+                    &mut base_store[base_idx..],
+                );
             }
         }
     }
 
+    Ok(())
+}
+
+/// How decoded signs and magnitudes become sub-band coefficients.
+struct Reconstruction {
+    irreversible: bool,
+    roi_shift: u8,
+    dequantization_step: f32,
+    /// The sub-band's row length.
+    stride: usize,
+}
+
+impl Reconstruction {
+    /// Write a code block's rows into `out`, which starts at the code
+    /// block's first coefficient within the sub-band.
+    fn store<'a>(
+        &self,
+        rows: impl Iterator<Item = (&'a [Coefficient], &'a [CoefficientState])>,
+        out: &mut [f32],
+    ) {
+        let mut base_idx = 0;
+        for (coefficients, coefficient_states) in rows {
+            let Some(out_row) = out.get_mut(base_idx..) else {
+                return;
+            };
+            for ((output, coefficient), coefficient_state) in
+                out_row.iter_mut().zip(coefficients).zip(coefficient_states)
+            {
+                *output =
+                    coefficient.reconstructed(coefficient_state, self.irreversible, self.roi_shift)
+                        * self.dequantization_step;
+            }
+            base_idx += self.stride;
+        }
+    }
+}
+
+/// Gather into `cleanup` and `refinement` the segments of the last HT set
+/// in `segments` whose cleanup segment carries data.  Returns the set's
+/// index and its number of refinement passes; the index is `None`, and the
+/// buffers are empty, when no cleanup segment carries data.
+fn gather_ht_set<'a>(
+    segments: impl Iterator<Item = &'a Segment<'a>>,
+    cleanup: &mut Vec<u8>,
+    refinement: &mut Vec<u8>,
+) -> (Option<u8>, u8) {
+    cleanup.clear();
+    refinement.clear();
+    let mut refinement_passes = 0u8;
+    let mut set = None;
+    for segment in segments {
+        let segment_set = segment.idx / 2;
+        if segment.idx % 2 == 0 {
+            // An empty cleanup segment opens an empty set, which leaves the
+            // set before it in force.
+            if !segment.data.is_empty() {
+                set = Some(segment_set);
+                cleanup.clear();
+                cleanup.extend_from_slice(segment.data);
+                refinement.clear();
+                refinement_passes = 0;
+            }
+        } else if set == Some(segment_set) {
+            refinement_passes = refinement_passes.saturating_add(segment.coding_pases);
+            refinement.extend_from_slice(segment.data);
+        }
+    }
+    (set, refinement_passes)
+}
+
+/// Decode an HT code block: the last of its HT sets whose cleanup segment
+/// carries data, with the refinement segment that follows it.  Each HT set
+/// codes the whole magnitude down to one bitplane below the set before it,
+/// so the last such set supersedes the others.
+fn decode_ht_code_block(
+    code_block: &CodeBlock,
+    num_bitplanes: u8,
+    style: &CodeBlockStyle,
+    tile_ctx: &mut TileDecodeContext,
+    storage: &DecompositionStorage<'_>,
+) -> Result<()> {
+    let [cleanup, refinement] = &mut tile_ctx.ht_segments;
+    let segments = storage.layers[code_block.layers.clone()]
+        .iter()
+        .filter_map(|layer| layer.segments.clone())
+        .flat_map(|range| &storage.segments[range]);
+    let (set, refinement_passes) = gather_ht_set(segments, cleanup, refinement);
+    let block = HtBlock {
+        width: code_block.rect.width(),
+        height: code_block.rect.height(),
+        cleanup,
+        refinement,
+        passes: if set.is_some() {
+            1 + refinement_passes.min(2)
+        } else {
+            0
+        },
+        bitplanes: num_bitplanes,
+        // Every HT set before the decoded one, placeholder or not, lowers
+        // its cleanup by one bitplane.
+        missing_msbs: code_block
+            .missing_bit_planes
+            .saturating_add(set.unwrap_or(0)),
+        stripe_causal: style.vertically_causal_context,
+    };
+    ht::decode(&block, &mut tile_ctx.ht_decode_context)
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
     Ok(())
 }
 
@@ -594,5 +711,65 @@ fn store<'a>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segment(idx: u8, coding_pases: u8, data: &[u8]) -> Segment<'_> {
+        Segment {
+            idx,
+            coding_pases,
+            data_length: data.len() as u32,
+            data,
+        }
+    }
+
+    fn gather(segments: &[Segment<'_>]) -> (Option<u8>, u8, Vec<u8>, Vec<u8>) {
+        let (mut cleanup, mut refinement) = (Vec::new(), Vec::new());
+        let (set, passes) = gather_ht_set(segments.iter(), &mut cleanup, &mut refinement);
+        (set, passes, cleanup, refinement)
+    }
+
+    /// A later HT set whose cleanup carries data supersedes the one before
+    /// it, refinement included.
+    #[test]
+    fn later_set_supersedes_earlier_one() {
+        let segments = [
+            segment(0, 1, &[1, 1]),
+            segment(1, 2, &[2]),
+            segment(2, 1, &[3, 3]),
+            segment(3, 1, &[4]),
+        ];
+        assert_eq!(gather(&segments), (Some(1), 1, vec![3, 3], vec![4]));
+    }
+
+    /// An empty cleanup segment leaves the set before it in force, and its
+    /// own refinement segment does not join it.
+    #[test]
+    fn empty_cleanup_keeps_previous_set() {
+        let segments = [
+            segment(0, 1, &[1, 1]),
+            segment(1, 1, &[2]),
+            segment(2, 1, &[]),
+            segment(3, 2, &[]),
+        ];
+        assert_eq!(gather(&segments), (Some(0), 1, vec![1, 1], vec![2]));
+    }
+
+    /// Refinement passes of one set split over layers concatenate; leading
+    /// placeholder sets carry no data.
+    #[test]
+    fn split_refinement_concatenates_after_placeholders() {
+        let segments = [segment(2, 7, &[]), segment(3, 1, &[])];
+        assert_eq!(gather(&segments), (None, 0, vec![], vec![]));
+        let segments = [
+            segment(4, 7, &[9, 9]),
+            segment(5, 1, &[5]),
+            segment(5, 1, &[6, 7]),
+        ];
+        assert_eq!(gather(&segments), (Some(2), 2, vec![9, 9], vec![5, 6, 7]));
     }
 }

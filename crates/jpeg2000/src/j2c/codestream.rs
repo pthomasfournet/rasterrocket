@@ -126,11 +126,12 @@ pub(crate) fn read_header<'a>(
                 reader.read_marker()?;
                 skip_marker_segment(reader);
             }
-            markers::CAP => {
-                // ISO/IEC 15444-15 (HTJ2K): the high-throughput block coder
-                // is signalled by the CAP marker; its code-blocks cannot be
-                // decoded here.
-                bail!(MarkerError::UnsupportedHtj2k);
+            markers::CAP | markers::CPF => {
+                // The capabilities (ISO/IEC 15444-15 for HTJ2K) and the
+                // corresponding profile; the code-block style of COD and
+                // COC selects the block coder.
+                reader.read_marker()?;
+                skip_marker_segment(reader);
             }
             (0x30..=0x3F) => {
                 // "All markers with the marker code between 0xFF30 and 0xFF3F
@@ -410,6 +411,10 @@ pub(crate) struct CodeBlockStyle {
     pub(crate) termination_on_each_pass: bool,
     pub(crate) vertically_causal_context: bool,
     pub(crate) segmentation_symbols: bool,
+    /// The HT block coder (ISO/IEC 15444-15) codes every code-block.
+    pub(crate) high_throughput: bool,
+    /// HT and the block coder of Annex D are mixed between code-blocks.
+    pub(crate) mixed_high_throughput: bool,
 }
 
 impl CodeBlockStyle {
@@ -422,6 +427,8 @@ impl CodeBlockStyle {
             // The predictable termination flag is only informative and
             // can therefore be ignored.
             segmentation_symbols: (value & 0x20) != 0,
+            high_throughput: (value & 0xC0) == 0x40,
+            mixed_high_throughput: (value & 0xC0) == 0xC0,
         }
     }
 }
@@ -1090,6 +1097,8 @@ pub(crate) mod markers {
     pub(crate) const CRG: u8 = 0x63;
     /// Comment - 'COM'.
     pub(crate) const COM: u8 = 0x64;
+    /// Corresponding profile - 'CPF'.
+    pub(crate) const CPF: u8 = 0x59;
 
     pub(crate) fn to_string(marker: u8) -> &'static str {
         match marker {

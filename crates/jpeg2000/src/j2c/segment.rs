@@ -2,7 +2,9 @@
 
 use alloc::boxed::Box;
 
-use super::build::Segment;
+use alloc::vec::Vec;
+
+use super::build::{CodeBlock, Segment};
 use super::codestream::markers::{EPH, SOP};
 use super::codestream::{ComponentInfo, Header};
 use super::decode::DecompositionStorage;
@@ -241,15 +243,28 @@ fn resolve_segments(
             return None;
         }
 
+        let style = component_info.code_block_style();
+        if style.high_throughput {
+            let start = storage.segments.len();
+            read_ht_segments(
+                code_block,
+                reader,
+                previous_layers_passes,
+                added_coding_passes,
+                &mut storage.segments,
+            )?;
+            layer.segments = Some(start..storage.segments.len());
+            code_block.number_of_coding_passes = cumulative_passes;
+            code_block.non_empty_layer_count += 1;
+            continue;
+        }
+
         let get_segment_idx = |pass_idx: u8| {
-            if component_info.code_block_style().termination_on_each_pass {
+            if style.termination_on_each_pass {
                 // If we terminate on each pass, the segment is just the index
                 // of the pass.
                 pass_idx
-            } else if component_info
-                .code_block_style()
-                .selective_arithmetic_coding_bypass
-            {
+            } else if style.selective_arithmetic_coding_bypass {
                 // Use the formula derived from the table in the spec.
                 segment_idx_for_bypass(pass_idx)
             } else {
@@ -317,6 +332,112 @@ fn resolve_segments(
         code_block.non_empty_layer_count += 1;
     }
 
+    Some(())
+}
+
+/// The segment id of an HT codeword segment ending with pass `last_pass`:
+/// `2s` for the cleanup segment of HT set `s` (three passes each, the
+/// cleanup first), `2s + 1` for its refinement segment.
+pub(crate) fn ht_segment_id(last_pass: u8) -> u8 {
+    2 * (last_pass / 3) + u8::from(!last_pass.is_multiple_of(3))
+}
+
+/// Read the codeword segment lengths of `added` HT coding passes that
+/// follow `previous` passes of `code_block` (ISO/IEC 15444-15, B.3), and
+/// push their segments.
+///
+/// Until a cleanup segment carries data, a contribution's passes up to its
+/// last cleanup pass form one segment, signalled as for the block coder of
+/// Annex D; a zero length makes them all placeholders, and the length then
+/// covers every pass of the contribution.  After it, each cleanup pass is a
+/// segment of its own and the one or two refinement passes that follow it a
+/// further segment, each signalled in `Lblock` bits plus one per pass beyond
+/// the first.
+fn read_ht_segments<'a>(
+    code_block: &mut CodeBlock,
+    reader: &mut BitReader<'_>,
+    previous: u8,
+    added: u8,
+    segments: &mut Vec<Segment<'a>>,
+) -> Option<()> {
+    let l_block = code_block.l_block;
+    let read_length = |reader: &mut BitReader<'_>, bits: u32| -> Option<u32> {
+        if bits == 0 {
+            return Some(0);
+        }
+        reader.read_bits_with_stuffing(u8::try_from(bits).ok()?)
+    };
+    let mut push = |first: u8, passes: u8, length: u32| {
+        segments.push(Segment {
+            idx: ht_segment_id(first + passes - 1),
+            data_length: length,
+            coding_pases: passes,
+            data: &[],
+        });
+    };
+
+    let mut pass = previous;
+    let mut remaining = added;
+    let mut next_passes;
+    if !code_block.ht_cleanup_seen {
+        let refinement = (previous + added - 1) % 3;
+        let through_cleanup = added - refinement.min(added);
+        if through_cleanup == 0 {
+            // No cleanup pass: placeholder passes only.
+            if read_length(reader, l_block + added.ilog2())? != 0 {
+                return None;
+            }
+            push(pass, added, 0);
+            return Some(());
+        }
+        let length = read_length(reader, l_block + through_cleanup.ilog2())?;
+        if length == 0 {
+            // Placeholders: the length extends to cover every pass.
+            let extra = added.ilog2() - through_cleanup.ilog2();
+            if read_length(reader, extra)? != 0 {
+                return None;
+            }
+            push(pass, added, 0);
+            return Some(());
+        }
+        if length < 2 {
+            return None;
+        }
+        code_block.ht_cleanup_seen = true;
+        push(pass, through_cleanup, length);
+        pass += through_cleanup;
+        remaining -= through_cleanup;
+        next_passes = 2;
+    } else {
+        // The contribution starts at a cleanup (phase 0), SigProp (1) or
+        // MagRef (2) pass.
+        let phase = previous % 3;
+        let passes = match phase {
+            0 => 1,
+            _ if remaining > 1 => 3 - phase,
+            _ => 1,
+        };
+        next_passes = if phase == 0 { 2 } else { 1 };
+        let length = read_length(reader, l_block + u32::from(passes) - 1)?;
+        if phase == 0 && length == 1 {
+            return None;
+        }
+        push(pass, passes, length);
+        pass += passes;
+        remaining -= passes;
+    }
+    while remaining > 0 {
+        let passes = if remaining > 1 { next_passes } else { 1 };
+        let is_cleanup = next_passes == 1;
+        next_passes = 3 - next_passes;
+        let length = read_length(reader, l_block + u32::from(passes) - 1)?;
+        if is_cleanup && length == 1 {
+            return None;
+        }
+        push(pass, passes, length);
+        pass += passes;
+        remaining -= passes;
+    }
     Some(())
 }
 

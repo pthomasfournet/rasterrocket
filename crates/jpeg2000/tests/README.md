@@ -298,3 +298,21 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `colr_cielab_alpha` | SerenityOS (`kakadu-lossless-lab-alpha-u8-prog1-layers1-res6.jp2`) |
 | `colr_cielab_16bit` | OpenJPEG (`issue559-eci-090-CIELab.jp2`) |
 | `icc_invalid` | OpenJPEG (`orb-blue10-lin-jp2.jp2`), OpenJPEG (`orb-blue10-win-jp2.jp2`) |
+
+### `ht`
+
+The HT streams are local to this fork. The lossless ones decode to an existing reference exactly. The references of the lossy ones (`ht_refinement`, `ht_refinement_causal`, `ht_layers`) are an independent HT decoder's output.
+
+| Test | Stream |
+|---|---|
+| `gray`, `reduced_resolution` | OpenJPH `ojph_compress`, reversible, of `main_r` |
+| `rgb_rct` | OpenJPH, reversible with the RCT, of `main_rgb` |
+| `blocks_4x4` | OpenJPH, reversible, 4×4 code-blocks |
+| `odd_size` | OpenJPH, reversible, 8×32 code-blocks, of a 61×47 crop of `main_r` |
+| `vertically_causal` | OpenHTJ2K `open_htj2k_enc`, reversible, `Cmodes=HT\|CAUSAL`, 16×16 code-blocks |
+| `refinement_passes` | OpenHTJ2K, `-rate 3`, 16×16 code-blocks: SigProp and MagRef passes |
+| `refinement_passes_vertically_causal` | OpenHTJ2K, `-rate 2`, `Cmodes=HT\|CAUSAL`, 8×8 code-blocks |
+| `quality_layers` | `ds1_ht_01_b12.j2k` of the ITU-T T.803 \| ISO/IEC 15444-4 HTJ2K conformance set: five quality layers, HT sets in several of them |
+| `mixed_with_annex_d_blocks` | `ht_gray` with the HTMIXED code-block style |
+
+`ht_layers.j2k` carries this notice: These files were originally developed by Kakadu Software Pty Ltd, Algo Vision Technology GmbH, Aware Inc., Kodak Inc., and Ricoh Innovations Inc., in the course of development of ITU-T 803 | ISO/IEC 15444-4. The files help test parts of implementations of a part of ITU-T 800 | ISO/IEC 15444-1. Copyright holders agree not to assert against ITU, ISO/IEC and users of the JPEG 2000 Standards (Users) any of their rights under the copyright, not including other intellectual property rights, for these files with respect to the usage by ITU, ISO/IEC and Users of these files or modifications thereof for use in hardware or software products claiming conformance to or testing conformance to the JPEG 2000 Standard. The original developers of these files, ITU and ISO/IEC assume no liability for use of these files or modifications thereof. No right to these files is granted for non JPEG 2000 Standard uses. Copyright holders have full right to use these files for his/her own purpose, assign or donate these files to any third party and to inhibit third parties from using this software module for non JPEG 2000 Standard conforming products. This copyright notice must be included in all copies or derivative works of these files. Copyright (c) 2002, 2021.

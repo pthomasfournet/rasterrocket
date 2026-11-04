@@ -264,6 +264,7 @@ fn build_code_blocks(
                 number_of_coding_passes: 0,
                 layers: start..end,
                 non_empty_layer_count: 0,
+                ht_cleanup_seen: false,
             });
 
             x += code_block_width;
@@ -330,6 +331,9 @@ pub(crate) struct CodeBlock {
     pub(crate) number_of_coding_passes: u8,
     pub(crate) l_block: u32,
     pub(crate) non_empty_layer_count: u8,
+    /// Whether an HT cleanup segment carrying data has been read; until
+    /// then, HT passes are placeholders.
+    pub(crate) ht_cleanup_seen: bool,
 }
 
 pub(crate) struct Segment<'a> {

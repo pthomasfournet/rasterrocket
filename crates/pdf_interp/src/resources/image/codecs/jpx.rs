@@ -317,21 +317,18 @@ mod tests {
         assert_eq!(mask.alpha(), &alpha[..]);
     }
 
-    /// A codestream whose main header carries a CAP marker (HTJ2K) is
-    /// refused with a diagnostic that names it.
+    /// An HTJ2K codestream (ISO/IEC 15444-15: CAP marker, HT code-blocks)
+    /// decodes: the fixture's pixels, coded losslessly with the HT block
+    /// coder.
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
-    fn jpx_htj2k_codestream_is_refused_by_name() {
-        // SOC and SIZ of the RGB fixture, then CAP (Lcap 8, Pcap bit 15:
-        // Part 15, Ccap15 0x4000), then an EOC.
-        let j2k = include_bytes!("../testdata/rgb8.j2k");
-        assert_eq!(&j2k[..4], &[0xFF, 0x4F, 0xFF, 0x51]);
-        let lsiz = usize::from(u16::from_be_bytes([j2k[4], j2k[5]]));
-        let mut ht = j2k[..4 + lsiz].to_vec();
-        ht.extend_from_slice(&[0xFF, 0x50, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x40, 0x00]);
-        ht.extend_from_slice(&[0xFF, 0xD9]);
-        let err = decode_jpx(&ht, 8, 8, None, PLAIN).expect_err("HTJ2K is not decoded");
-        assert!(err.contains("HTJ2K"), "{err}");
+    fn jpx_htj2k_codestream_matches_reference_decode() {
+        let img = jpx_fixture(include_bytes!("../testdata/rgb8_ht.j2k"));
+        assert_eq!(img.layout, Layout::Color(3));
+        assert_eq!(
+            img.data.as_cpu(),
+            Some(&include_bytes!("../testdata/rgb8.rgb")[..])
+        );
     }
 
     /// A codestream whose SIZ declares 30 000 × 30 000 RGB samples, under a

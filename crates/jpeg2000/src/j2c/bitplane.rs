@@ -213,6 +213,13 @@ const REFINEMENT_PASS_MASK: u8 = (1 << SIGNIFICANCE_SHIFT) | (1 << HAS_ZERO_CODI
 pub(crate) struct CoefficientState(u8);
 
 impl CoefficientState {
+    /// The state of a coefficient decoded down to bitplane `position`.
+    pub(crate) fn with_decoded_bit_position(position: u8) -> Self {
+        let mut state = Self::default();
+        state.set_decoded_bit_position(position);
+        state
+    }
+
     #[inline(always)]
     fn set_significant(&mut self) {
         self.0 |= 1_u8 << SIGNIFICANCE_SHIFT;
@@ -275,6 +282,11 @@ impl CoefficientState {
 pub(crate) struct Coefficient(u32);
 
 impl Coefficient {
+    /// A coefficient of `magnitude`, negative when `sign` is 1.
+    pub(crate) fn from_sign_magnitude(sign: u32, magnitude: u32) -> Self {
+        Self((sign << 31) | (magnitude & 0x7FFF_FFFF))
+    }
+
     pub(crate) fn reconstructed(
         &self,
         state: &CoefficientState,

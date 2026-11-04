@@ -2334,6 +2334,22 @@ whose bitmap the allocator refuses (up to 1.8 GB RGB, 4.8 GB on the
 overprint canvas) aborted the process. It now fails that page with
 `RasterError::PageAllocationFailed`.
 
+**HTJ2K, on master, unreleased.** JPX images coded with the high-throughput
+block coder (ISO/IEC 15444-15) decode; they used to fail with a diagnostic
+naming HTJ2K. The vendored JPEG 2000 fork gains an HT block decoder (the
+cleanup, SigProp and MagRef passes) and HT codeword segments, quality layers
+and placeholder passes included. Reversible streams of the OpenJPH test set
+decode bit-exactly as OpenJPH decodes them and irreversible ones within one
+count; the HT conformance streams of ISO/IEC 15444-4 decode as their classic
+originals do wherever the transcode is lossless. Only the mixed mode (HT and
+classic code-blocks in one tile-component) is still refused, by name.
+
+**Image reduction limited to the paintable pixels, on master, unreleased.**
+An image drawn below its resolution is area-averaged only over the device
+pixels inside the page and the clip rectangle. Output is byte-identical; a
+large image drawn mostly off-page or under a small clip renders 1.2–1.6×
+faster.
+
 **Overprint simulation, on master (merged 2026-11-03), unreleased.**
 `--overprint` / `RasterOptions::overprint` (default off). With it, a page on
 which some `ExtGState` reachable from its resources, or from the appearance

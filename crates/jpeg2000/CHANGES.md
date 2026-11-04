@@ -24,12 +24,31 @@ unless the entry says otherwise.
 - `LICENSE-APACHE`, `LICENSE-MIT`: upstream's symlinks to its repository
   root replaced by the files themselves.
 
-## Diagnostics
+## HTJ2K (ISO/IEC 15444-15)
 
-- `j2c/codestream.rs`, `error.rs`: a CAP marker (0xFF50, ISO/IEC 15444-15
-  HTJ2K) in the main header fails with `MarkerError::UnsupportedHtj2k`,
-  whose message names HTJ2K, instead of the generic "unsupported marker".
-  Decoding is otherwise unchanged; HTJ2K code-blocks are not decoded.
+Upstream has no HT block decoder.  Decoding of Annex D code-blocks is
+unchanged.
+
+- `j2c/ht.rs`, `j2c/ht_tables.rs`: the HT block decoder (cleanup,
+  SigProp and MagRef passes, vertically causal contexts), ported from the
+  HTJ2K decoder of OpenJPEG; its BSD 2-clause notice heads both files and
+  is in `LICENSE-BSD-2-HT`.  The bitstream readers take one byte at a time
+  with bounds checks instead of unaligned 32-bit loads past the segment.
+  Output is the sign, magnitude and decoded bitplane the Annex D decoder
+  produces, so reconstruction, ROI and dequantisation are shared.
+- `j2c/segment.rs`: HT codeword segments (B.3 of 15444-15): placeholder
+  passes until a cleanup segment carries data, then a cleanup segment and
+  a refinement segment per HT set, with their length signalling.
+- `j2c/decode.rs`: an HT code-block decodes the last HT set whose cleanup
+  segment carries data, a later set superseding the earlier ones.
+- `j2c/codestream.rs`: the CAP and CPF markers are skipped; code-block
+  style bit 6 selects the HT coder.  The mixed mode (bits 6 and 7, HT and
+  Annex D code-blocks in one tile-component) fails with
+  `MarkerError::UnsupportedHtj2k`.
+- Verified against OpenJPH and OpenHTJ2K on the OpenJPH test codestreams,
+  and against the classic originals of the HTJ2K conformance streams of
+  ITU-T T.803 | ISO/IEC 15444-4, which decode identically where the
+  transcode is lossless.  `tests/ht.rs` covers it.
 
 ## Memory traffic under parallel decoding
 
