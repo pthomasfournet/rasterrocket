@@ -8,8 +8,10 @@
 //! The curve is stored as a linked list of pending segments in the `CurveData`
 //! array. Each segment `[p1, p2]` covers control points `cx[p1*3..p1*3+3]` and
 //! endpoint `cx[p2*3]`. The loop advances `p1` rightward, either emitting a
-//! line segment when the chord deviation is within `flatness_sq`, or splitting
-//! via De Casteljau and inserting a midpoint `p3`.
+//! line segment when both control points lie within `flatness` of the chord,
+//! or splitting via De Casteljau and inserting a midpoint `p3`.  A cubic lies
+//! in the convex hull of its control points, so its distance from the chord
+//! is then at most `flatness` too.
 //!
 //! ## Output convention
 //!
@@ -32,6 +34,27 @@ use crate::types::MAX_CURVE_SPLITS;
 #[inline]
 fn to_idx(v: i32) -> usize {
     usize::try_from(v).expect("curve stack index must be non-negative")
+}
+
+/// Squared distance from `(px, py)` to the segment from `(ax, ay)` to
+/// `(bx, by)`: to the nearer endpoint when the point projects outside the
+/// segment, so that a curve doubling back along its chord is not taken for
+/// the chord.  A zero-length segment is its endpoint.
+#[inline]
+fn dist_sq_to_segment(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let (cx, cy) = (bx - ax, by - ay);
+    let (vx, vy) = (px - ax, py - ay);
+    let chord_sq = cx.mul_add(cx, cy * cy);
+    let along = vx.mul_add(cx, vy * cy);
+    if along <= 0.0 || chord_sq == 0.0 {
+        vx.mul_add(vx, vy * vy)
+    } else if along >= chord_sq {
+        let (wx, wy) = (px - bx, py - by);
+        wx.mul_add(wx, wy * wy)
+    } else {
+        let cross = vx.mul_add(cy, -(vy * cx));
+        cross * cross / chord_sq
+    }
 }
 
 // ── CurveData ─────────────────────────────────────────────────────────────────
@@ -89,8 +112,9 @@ impl CurveData {
 /// The first appended point is the endpoint of the first sub-segment; the last
 /// appended point is always `p3`.
 ///
-/// `flatness_sq` is the **squared** maximum allowed deviation from the true
-/// curve to a chord. Use `flatness * flatness` when calling from `XPath::new`.
+/// `flatness_sq` is the **squared** maximum allowed distance of a control
+/// point, and hence of the curve, from the chord that replaces it.  Use
+/// `flatness * flatness` when calling from `XPath::new`.
 ///
 /// `curve_data` is lazy-allocated storage reused across multiple calls on the
 /// same `XPath`. Pass `None` on the first call; the `CurveData` is
@@ -156,17 +180,9 @@ pub(crate) fn flatten_curve(
         let xr3 = data.cx[pp2u * 3];
         let yr3 = data.cy[pp2u * 3];
 
-        // Midpoint of the chord (f64::midpoint: stable Rust 1.85, never overflows).
-        let mx = xl0.midpoint(xr3);
-        let my = yl0.midpoint(yr3);
-
-        // Squared deviation of the two control points from the chord midpoint.
-        let dx1 = xx1 - mx;
-        let dy1 = yy1 - my;
-        let dx2 = xx2 - mx;
-        let dy2 = yy2 - my;
-        let d1 = dx1.mul_add(dx1, dy1 * dy1);
-        let d2 = dx2.mul_add(dx2, dy2 * dy2);
+        // Squared distances of the two control points from the chord.
+        let d1 = dist_sq_to_segment(xx1, yy1, xl0, yl0, xr3, yr3);
+        let d2 = dist_sq_to_segment(xx2, yy2, xl0, yl0, xr3, yr3);
 
         if pp2 - pp1 == 1 || (d1 <= flatness_sq && d2 <= flatness_sq) {
             // Emit this segment as a straight line.
@@ -223,10 +239,8 @@ mod tests {
 
     #[test]
     fn flat_curve_emits_one_segment() {
-        // A degenerate curve with all control points on the line y=0.
-        // The curve is geometrically flat, but control points deviate from the
-        // chord midpoint, so it may still subdivide. All outputs must have y≈0
-        // and the last point must be the endpoint (3, 0).
+        // A degenerate curve with all control points on the chord y=0
+        // between its ends is the chord: one segment to (3, 0).
         let mut out = Vec::new();
         let mut data = None;
         flatten_curve(
@@ -238,13 +252,7 @@ mod tests {
             &mut out,
             &mut data,
         );
-        assert_ne!(out.len(), 0);
-        for p in &out {
-            assert!(p.y.abs() < 1e-10, "y={} should be 0", p.y);
-        }
-        let last = out.last().unwrap();
-        assert!((last.x - 3.0).abs() < 1e-10);
-        assert!(last.y.abs() < 1e-10);
+        assert_eq!(out, [pt(3.0, 0.0)]);
     }
 
     #[test]
@@ -281,8 +289,8 @@ mod tests {
     #[test]
     fn curve_to_line_is_two_points() {
         // Degenerate curve: all four control points are identical.
-        // The chord has zero length, both control points sit exactly on the
-        // chord midpoint (deviation = 0), so the flatness test passes
+        // The chord has zero length and both control points sit on its
+        // endpoint (distance 0), so the flatness test passes
         // immediately. The output must contain exactly one point (the endpoint
         // p3 = p0 = the single shared coordinate).
         let origin = pt(5.0, 7.0);
@@ -299,5 +307,53 @@ mod tests {
         );
         assert_eq!(out.len(), 1, "degenerate curve must emit exactly one point");
         assert_eq!(out[0], origin, "emitted point must equal p3");
+    }
+
+    #[test]
+    fn curve_doubling_back_along_its_chord_is_split() {
+        // Control points on the chord's line but beyond its ends: the curve
+        // overshoots both ends, so it is not replaced by the chord.
+        let mut out = Vec::new();
+        let mut data = None;
+        flatten_curve(
+            pt(0.0, 0.0),
+            pt(4.0, 0.0),
+            pt(-3.0, 0.0),
+            pt(1.0, 0.0),
+            0.1 * 0.1,
+            &mut out,
+            &mut data,
+        );
+        assert!(out.len() > 1);
+        let reach = out.iter().fold(0.0_f64, |m, p| m.max(p.x));
+        assert!(reach > 1.0, "the overshoot past x = 1 is kept: {reach}");
+        assert_eq!(*out.last().unwrap(), pt(1.0, 0.0));
+    }
+
+    #[test]
+    fn quarter_circle_stays_within_flatness() {
+        // A radius-100 quarter circle at flatness 0.1: every chord stays
+        // within 0.1 of the arc, with far fewer chords than a split until
+        // each is a few flatness units long.
+        let k = crate::types::BEZIER_CIRCLE * 100.0;
+        let mut out = Vec::new();
+        let mut data = None;
+        flatten_curve(
+            pt(100.0, 0.0),
+            pt(100.0, k),
+            pt(k, 100.0),
+            pt(0.0, 100.0),
+            0.1 * 0.1,
+            &mut out,
+            &mut data,
+        );
+        let mut prev = pt(100.0, 0.0);
+        for p in &out {
+            let mid = pt(prev.x.midpoint(p.x), prev.y.midpoint(p.y));
+            let sag = 100.0 - mid.x.hypot(mid.y);
+            assert!(sag <= 0.1 + 1e-3, "chord sag {sag}");
+            prev = *p;
+        }
+        assert!(out.len() <= 32, "{} chords", out.len());
     }
 }
