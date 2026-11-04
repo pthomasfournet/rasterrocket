@@ -208,6 +208,19 @@ impl ColorSpace {
         }
     }
 
+    /// A bound on the interpreted work of converting one colour of the
+    /// space: the tint transform's cost (see [`TintTransform::cost`]) plus
+    /// one for a `Separation` or `DeviceN` space, one for any other.
+    #[must_use]
+    pub(crate) fn conversion_cost(&self) -> u64 {
+        match self {
+            Self::Separation { tint: Some(t), .. } | Self::DeviceN { tint: Some(t), .. } => {
+                t.cost().saturating_add(1)
+            }
+            _ => 1,
+        }
+    }
+
     /// Whether the space is a process CMYK space — `DeviceCMYK` or a
     /// four-component ICC space — whose components are the inks of a CMYK
     /// device.
@@ -403,6 +416,12 @@ impl TintTransform {
     #[must_use]
     pub(crate) fn load(doc: &Document, obj: &Object) -> Self {
         Self(Function::load(doc, obj))
+    }
+
+    /// A bound on the work of one evaluation (see [`Function::cost`]).
+    #[must_use]
+    pub(crate) fn cost(&self) -> u64 {
+        self.0.cost()
     }
 
     /// The components in `alternate` of the colour of `tints`: `tints`

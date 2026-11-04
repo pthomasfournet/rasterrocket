@@ -25,6 +25,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use crate::resources::dict_ext::DictExt;
 use crate::resources::obj_to_f64;
 
+pub(crate) mod lattice;
 mod postscript;
 mod sampled;
 
@@ -102,6 +103,31 @@ impl Function {
                 range: Vec::new(),
             }),
             direct => Arc::new(Compiler::new(doc).compile(direct, 0)),
+        }
+    }
+
+    /// A bound on the work of one evaluation, in interpreted operations: a
+    /// Type 4 program's tokens, a Type 0 function's grid corners, one for
+    /// the other types, summed over an array and taking the costliest
+    /// sub-function of a stitching function.
+    #[must_use]
+    pub(crate) fn cost(&self) -> u64 {
+        match &self.body {
+            Body::Array(fns) => fns.iter().map(|f| f.cost()).fold(0, u64::saturating_add),
+            Body::Stitching { functions, .. } => functions
+                .iter()
+                .map(|f| f.cost())
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            Body::Sampled(s) => s.cost(),
+            Body::PostScript {
+                program: Some(p), ..
+            } => p.cost().max(1),
+            Body::Exponential { .. }
+            | Body::PostScript { program: None, .. }
+            | Body::Constant(_)
+            | Body::Invalid => 1,
         }
     }
 

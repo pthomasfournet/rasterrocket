@@ -2425,6 +2425,20 @@ every clip test exactly as the eight did, so a page installing thousands of
 byte-identical (the 1 125 fixture and archive PDFs, a randomized parity
 test of every clip query).
 
+**Tint-transform work bounded per image, unreleased.** An image whose
+colour space converts through a tint transform (`DeviceN`, and the other
+spaces converted tuple by tuple) has a budget of 2^28 interpreted
+operations, each conversion costing its function's static bound (a Type 4
+program's tokens). Within it, by pixel or by distinct sample tuple (up to
+2^20 of them), every pixel converts exactly as before. Past it, the image
+converts through a lattice of exact conversions (18, 16, 6, 4 or 2 values
+per component, the largest whose nodes fit the budget) with multilinear
+interpolation, shared with Type 0 functions; past eight components, or
+when no lattice fits, the image is dropped with a warning. A
+2000 × 2000 four-colorant noise image under a 100 000-token transform
+renders in 0.4 s; it did not finish in 180 s before. The fixture and
+archive PDFs render byte-identically.
+
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder, transfers

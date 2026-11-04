@@ -9,6 +9,7 @@
 
 use pdf::{Dictionary, Object};
 
+use super::lattice::{Axis, for_each_corner};
 use super::{domain_pairs, numbers};
 
 /// Upper bound on the input dimension.  The interpolation visits `2^m`
@@ -52,6 +53,12 @@ impl Sampled {
         }
     }
 
+    /// A bound on the work of one evaluation: the `2^m` grid corners it
+    /// visits.
+    pub(super) fn cost(&self) -> u64 {
+        1u64 << self.size.as_ref().map_or(0, Vec::len).min(MAX_INPUTS)
+    }
+
     /// Evaluate at `inputs`, returning `n_out` outputs.  `None` when the
     /// dictionary is malformed, `Size` does not have one entry per input, or
     /// the stream is shorter than the grid it declares.
@@ -81,8 +88,6 @@ impl Sampled {
             return None;
         }
 
-        // Per axis: lower grid index, upper grid index, interpolation weight of
-        // the upper index, and the axis stride in samples.
         let mut axes = Vec::with_capacity(dims);
         let mut stride = 1usize;
         for (axis, (&input, (d0, d1))) in inputs
@@ -101,40 +106,18 @@ impl Sampled {
             } else {
                 0.0
             };
-            let pos = unit.mul_add(e1 - e0, e0).clamp(0.0, last);
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "pos is finite and clamped to [0, size - 1]"
-            )]
-            let lo = pos.floor() as usize;
-            let hi = (lo + 1).min(size[axis] - 1);
-            axes.push((lo, hi, pos - pos.floor(), stride));
+            axes.push(Axis::at(unit.mul_add(e1 - e0, e0), size[axis], stride));
             stride = stride.checked_mul(size[axis])?;
         }
 
         let max_sample = f64::from(u32::MAX >> (32 - bps));
         let mut out = vec![0.0; n_out];
-        for corner in 0..1usize << dims {
-            let mut weight = 1.0;
-            let mut index = 0usize;
-            for (bit, &(lo, hi, frac, axis_stride)) in axes.iter().enumerate() {
-                let (grid_index, axis_weight) = if corner >> bit & 1 == 1 {
-                    (hi, frac)
-                } else {
-                    (lo, 1.0 - frac)
-                };
-                weight *= axis_weight;
-                index += grid_index * axis_stride;
-            }
-            if weight <= 0.0 {
-                continue;
-            }
+        for_each_corner(&axes, |index, weight| {
             for (ch, acc) in out.iter_mut().enumerate() {
                 let raw = read_sample(samples, (index * n_out + ch) * bps as usize, bps);
                 *acc = weight.mul_add(f64::from(raw), *acc);
             }
-        }
+        });
 
         Some(
             out.into_iter()

@@ -40,6 +40,21 @@ impl Program {
         Ok(Self(toks))
     }
 
+    /// A bound on the work of one run: every token, both branches of each
+    /// conditional included, counted once.
+    pub(super) fn cost(&self) -> u64 {
+        fn tokens(toks: &[PsTok]) -> u64 {
+            toks.iter()
+                .map(|t| match t {
+                    PsTok::Num(_) | PsTok::Op(_) => 1,
+                    PsTok::If(body) => 1 + tokens(body),
+                    PsTok::IfElse(then, other) => 1 + tokens(then) + tokens(other),
+                })
+                .sum()
+        }
+        tokens(&self.0)
+    }
+
     /// Run the program on `inputs` (already clipped to `Domain`) and return
     /// the top `n` stack values, deepest first.  `None` on any execution
     /// error, on fewer than `n` results, or on a boolean result.

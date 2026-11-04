@@ -39,6 +39,7 @@ use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{ColorSpace, decoded_sample, default_space, resolve};
 use crate::resources::dict_ext::DictExt as _;
 use crate::resources::icc_shaper::{ProfileConversion, RgbShaper};
+use crate::resources::shading::function::lattice::{Axis, for_each_corner};
 
 // ── Codec output ──────────────────────────────────────────────────────────────
 
@@ -406,6 +407,25 @@ const fn descriptor(
 
 // ── Conversion ────────────────────────────────────────────────────────────────
 
+/// Interpreted operations (see [`ColorSpace::conversion_cost`]) one image's
+/// conversion may spend converting colours exactly; an image whose exact
+/// conversion would spend more converts through a lattice.
+const EXACT_WORK_BUDGET: u64 = 1 << 28;
+
+/// Distinct sample tuples an image past the per-pixel budget may hold and
+/// still convert each exactly; bounds the memory of that table.
+const DISTINCT_LIMIT: usize = 1 << 20;
+
+/// The lattice sizes, values per component, largest first: each `g − 1`
+/// divides 255, so every node is a sample byte.  A conversion of up to four
+/// components starts at the first, of five or six at the third, of seven
+/// or eight at the fourth.
+const LATTICE_GRIDS: [usize; 5] = [18, 16, 6, 4, 2];
+
+/// The most components a lattice conversion takes: interpolating visits
+/// `2^n` nodes per distinct tuple.
+const LATTICE_MAX_COMPONENTS: usize = 8;
+
 /// Distinct sample tuples memoised before the table is reset; bounds the
 /// memory of a continuous-tone image's per-pixel conversion.  Also the
 /// slot count of the [`TupleCache`] of a tuple of at most eight samples.
@@ -725,11 +745,143 @@ impl Decoded<'_> {
         bytes
     }
 
+    /// `n`-component samples through the space.
+    ///
+    /// Each pixel converts exactly when the work that takes fits
+    /// [`EXACT_WORK_BUDGET`]: every pixel's conversion
+    /// ([`Self::convert_cached`]), or, past that, each distinct sample
+    /// tuple's once ([`Self::convert_distinct`]) when there are at most
+    /// [`DISTINCT_LIMIT`] of them.  Otherwise the image converts through a
+    /// lattice of exact conversions ([`Self::convert_lattice`]).  `None`
+    /// when the output cannot be allocated or no lattice fits the budget.
+    fn convert_memo(&self, bytes: &[u8], n: usize) -> Option<Vec<u8>> {
+        let cost = if self.profile.is_some() {
+            1
+        } else {
+            self.space.conversion_cost()
+        };
+        let exact_conversions = EXACT_WORK_BUDGET / cost.max(1);
+        let pixels = bytes.len() / n;
+        if u64::try_from(pixels).is_ok_and(|p| p <= exact_conversions) {
+            return self.convert_cached(bytes, n);
+        }
+        let limit =
+            usize::try_from(exact_conversions).map_or(DISTINCT_LIMIT, |e| e.min(DISTINCT_LIMIT));
+        if let Some(out) = self.convert_distinct(bytes, n, limit) {
+            return Some(out);
+        }
+        self.convert_lattice(bytes, n, cost)
+    }
+
+    /// Each distinct `n`-sample tuple of `bytes` converted once, when there
+    /// are at most `limit` of them; `None` past the limit or when the
+    /// output cannot be allocated.
+    fn convert_distinct(&self, bytes: &[u8], n: usize, limit: usize) -> Option<Vec<u8>> {
+        let mut colours: HashMap<&[u8], [u8; 3]> = HashMap::new();
+        for px in bytes.chunks_exact(n) {
+            if colours.len() == limit && !colours.contains_key(px) {
+                return None;
+            }
+            let _ = colours.entry(px).or_insert([0; 3]);
+        }
+        let mut comps = Vec::with_capacity(n);
+        for (px, rgb) in &mut colours {
+            *rgb = self.to_rgb_with(px, &mut comps);
+        }
+        let mut out = super::try_with_capacity(bytes.len() / n * 3)?;
+        for px in bytes.chunks_exact(n) {
+            out.extend_from_slice(&colours[px]);
+        }
+        Some(out)
+    }
+
+    /// `n`-component samples through a lattice: the space converts exactly
+    /// at the nodes of a regular grid of `g` values per component, the
+    /// largest of [`LATTICE_GRIDS`] for `n` whose `g^n` conversions at
+    /// `cost` each fit [`EXACT_WORK_BUDGET`], and each pixel takes the
+    /// multilinear interpolation of the nodes around its samples.  `None`
+    /// (logged) when `n` exceeds [`LATTICE_MAX_COMPONENTS`] or not even a
+    /// grid of two values per component fits, and when the output cannot be
+    /// allocated.
+    fn convert_lattice(&self, bytes: &[u8], n: usize, cost: u64) -> Option<Vec<u8>> {
+        let start = match n {
+            0 => return None,
+            1..=4 => 0,
+            5..=6 => 2,
+            7..=LATTICE_MAX_COMPONENTS => 3,
+            _ => {
+                log::warn!(
+                    "image: converting {n}-component samples exactly exceeds the work budget, \
+                     and no lattice is kept past {LATTICE_MAX_COMPONENTS} components; image dropped"
+                );
+                return None;
+            }
+        };
+        let fits = |g: usize| {
+            u32::try_from(n)
+                .ok()
+                .and_then(|n| (g as u64).checked_pow(n))
+                .and_then(|nodes| nodes.checked_mul(cost))
+                .is_some_and(|work| work <= EXACT_WORK_BUDGET)
+        };
+        let Some(&g) = LATTICE_GRIDS[start..].iter().find(|&&g| fits(g)) else {
+            log::warn!(
+                "image: converting {n}-component samples exceeds the work budget even through \
+                 a lattice of 2 values per component; image dropped"
+            );
+            return None;
+        };
+        log::debug!("image: {n}-component samples convert through a {g}-value lattice");
+        let step = 255 / (g - 1);
+        let nodes = g.pow(u32::try_from(n).ok()?);
+        let mut lattice = Vec::new();
+        lattice.try_reserve_exact(nodes).ok()?;
+        let mut comps = Vec::with_capacity(n);
+        let mut node = vec![0u8; n];
+        for index in 0..nodes {
+            let mut rest = index;
+            for sample in &mut node {
+                *sample = u8::try_from(rest % g * step).ok()?;
+                rest /= g;
+            }
+            lattice.push(self.to_rgb_with(&node, &mut comps));
+        }
+        #[expect(clippy::cast_precision_loss, reason = "g ≤ 18")]
+        let scale = (g - 1) as f64 / 255.0;
+        let mut axes = Vec::with_capacity(n);
+        let mut interpolate = |px: &[u8]| {
+            axes.clear();
+            let mut stride = 1;
+            for &s in px {
+                axes.push(Axis::at(f64::from(s) * scale, g, stride));
+                stride *= g;
+            }
+            let mut acc = [0.0f64; 3];
+            for_each_corner(&axes, |index, weight| {
+                for (a, &c) in acc.iter_mut().zip(&lattice[index]) {
+                    *a = weight.mul_add(f64::from(c), *a);
+                }
+            });
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a convex combination of bytes, rounded, is a byte"
+            )]
+            acc.map(|a| a.round().clamp(0.0, 255.0) as u8)
+        };
+        let mut out = super::try_with_capacity(bytes.len() / n * 3)?;
+        let mut cache = TupleCache::new(bytes.len() / n)?;
+        for px in bytes.chunks_exact(n) {
+            out.extend_from_slice(&cache.get_or_insert(px, || interpolate(px)));
+        }
+        Some(out)
+    }
+
     /// `n`-component samples through the space, a tuple converted again
     /// only once the cache has dropped it: a [`TupleCache`] for tuples of
     /// at most eight samples, otherwise a table of up to [`MEMO_LIMIT`]
     /// tuples reset when full.  `None` when the output cannot be allocated.
-    fn convert_memo(&self, bytes: &[u8], n: usize) -> Option<Vec<u8>> {
+    fn convert_cached(&self, bytes: &[u8], n: usize) -> Option<Vec<u8>> {
         let pixels = bytes.len() / n;
         let mut out = super::try_with_capacity(pixels * 3)?;
         let mut comps = Vec::with_capacity(n);
@@ -1318,6 +1470,135 @@ mod tests {
                 assert_eq!(px[i * 3..i * 3 + 3], want, "n = {n}, pixel {i}: {tuple:?}");
             }
         }
+    }
+
+    /// `count` tuples of `n` samples from a xorshift generator.
+    fn noise(n: usize, count: usize) -> Vec<u8> {
+        let mut state = 0x9e37_79b9_u32;
+        (0..n * count)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[1]
+            })
+            .collect()
+    }
+
+    /// The exact colour of the sample tuple `px` in `space`.
+    fn exact(doc: &Document, space: &ColorSpace, px: &[u8]) -> [u8; 3] {
+        let comps: Vec<f64> = px
+            .iter()
+            .map(|&s| decoded_sample(s, (0.0, 1.0), 255.0))
+            .collect();
+        space.convert_to_rgb(doc, &comps)
+    }
+
+    /// A program of `n` inputs and four outputs, smooth in each, padded
+    /// with `pad` no-op pairs to raise its cost.
+    fn smooth_program(n: usize, pad: usize) -> String {
+        let fold = " 4 1 roll 0.7 mul 4 1 roll 0.8 mul 4 1 roll 0.9 mul 4 1 roll";
+        let mut program = format!("{{{}", " 1 pop".repeat(pad));
+        for _ in 4..n {
+            program.push_str(" 0.5 mul add");
+        }
+        program.push_str(fold);
+        program.push_str(" }");
+        program
+    }
+
+    #[test]
+    fn a_lattice_conversion_interpolates_the_exact_one() {
+        // Each grid the budget can select, on a smooth transform: nodes
+        // convert exactly and every pixel stays within a few levels.
+        let (doc, cs) = devicen_cmyk(4, &smooth_program(4, 0));
+        let space = crate::resources::colorspace::resolve(&doc, &cs);
+        let decode = vec![(0.0, 1.0); 4];
+        let decoded = Decoded {
+            doc: &doc,
+            space: &space,
+            decode: &decode,
+            max_sample: 255.0,
+            profile: None,
+        };
+        let data = noise(4, 4000);
+        for (g, tolerance) in [(18_u8, 2), (6, 8)] {
+            let cost = EXACT_WORK_BUDGET / u64::from(g).pow(4);
+            let out = decoded.convert_lattice(&data, 4, cost).expect("converts");
+            let worst = data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(out.as_chunks::<3>().0)
+                .map(|(px, rgb)| {
+                    let want = exact(&doc, &space, px);
+                    (0..3).map(|c| rgb[c].abs_diff(want[c])).max().unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(worst <= tolerance, "g = {g}: off by {worst}");
+            let step = 255 / (g - 1);
+            let node = [0, step, 2 * step, 255];
+            let at_node = decoded.convert_lattice(&node, 4, cost).expect("converts");
+            assert_eq!(at_node, exact(&doc, &space, &node), "g = {g}");
+        }
+    }
+
+    #[test]
+    fn costly_conversions_stay_exact_while_their_tuples_fit_the_budget() {
+        // 8000 pixels of ten tuples through a 40 000-token program: past
+        // the per-pixel budget, within the per-tuple one, so exact.
+        let (doc, cs) = devicen_cmyk(4, &smooth_program(4, 20_000));
+        let space = crate::resources::colorspace::resolve(&doc, &cs);
+        let tuples = noise(4, 10);
+        let data: Vec<u8> = (0..8000)
+            .flat_map(|i| tuples[i % 10 * 4..i % 10 * 4 + 4].to_vec())
+            .collect();
+        assert!(8000 * space.conversion_cost() > EXACT_WORK_BUDGET);
+        let img = convert(&doc, cs, &[], Layout::Color(4), &data);
+        let px = img.data.as_cpu().unwrap();
+        for (i, tuple) in data.as_chunks::<4>().0.iter().enumerate().step_by(97) {
+            assert_eq!(
+                px[i * 3..i * 3 + 3],
+                exact(&doc, &space, tuple),
+                "pixel {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn costly_conversions_of_many_tuples_go_through_a_lattice() {
+        // Seven colorants through a 20 000-token program: 14 000 distinct
+        // tuples exceed the budget, which then holds a lattice of two
+        // values per colorant.  Its nodes convert exactly.
+        let (doc, cs) = devicen_cmyk(7, &smooth_program(7, 10_000));
+        let space = crate::resources::colorspace::resolve(&doc, &cs);
+        let nodes = [[0u8; 7], [255; 7], [0, 255, 0, 255, 0, 255, 0]];
+        let mut data = noise(7, 14_000);
+        for (i, node) in nodes.iter().enumerate() {
+            data[i * 7..i * 7 + 7].copy_from_slice(node);
+        }
+        let img = convert(&doc, cs, &[], Layout::Color(7), &data);
+        let px = img.data.as_cpu().unwrap();
+        assert_eq!(px.len(), 14_000 * 3);
+        for (i, node) in nodes.iter().enumerate() {
+            assert_eq!(px[i * 3..i * 3 + 3], exact(&doc, &space, node), "node {i}");
+        }
+    }
+
+    #[test]
+    fn no_lattice_past_eight_costly_colorants() {
+        let (doc, cs) = devicen_cmyk(9, &smooth_program(9, 10_000));
+        let space = crate::resources::colorspace::resolve(&doc, &cs);
+        let decode = vec![(0.0, 1.0); 9];
+        let decoded = Decoded {
+            doc: &doc,
+            space: &space,
+            decode: &decode,
+            max_sample: 255.0,
+            profile: None,
+        };
+        assert!(decoded.convert_lattice(&noise(9, 10), 9, 20_000).is_none());
     }
 
     #[test]
