@@ -24,6 +24,17 @@ use core::ops::ControlFlow;
 use crate::arithmetic_decoder::ArithmeticDecoderContext;
 use crate::budget::Budget;
 
+// A context can move to another thread, and the global segments it may
+// refer to can be shared between threads. A context is not `Sync`: its
+// standard Huffman tables and decode budget use interior mutability.
+#[cfg(feature = "std")]
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send::<DecoderContext>();
+    assert_send_sync::<Globals>();
+};
+
 /// A reusable context for decoding JBIG2 images.
 #[derive(Default)]
 pub struct DecoderContext {
