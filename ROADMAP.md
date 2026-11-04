@@ -2416,6 +2416,15 @@ from 0.15 to 0.06 px on average and against pdfium from 0.32 to 0.20 px;
 pdftoppm, which places a CropBox by its MediaBox at a whole-pixel offset,
 moves from 0.38 to 0.36 px.
 
+**Many path clips fold into one, unreleased.** A clip that reaches eight
+path clips replaces them with a single intersection table, which answers
+every clip test exactly as the eight did, so a page installing thousands of
+`W n` clips no longer pays for each one on every later fill. A page of
+3 000 nested diamond clips and 3 000 fills renders in 0.31 s instead of
+6.1 s and peaks at 47 MB instead of 600 MB at 150 dpi; output is
+byte-identical (the 1 125 fixture and archive PDFs, a randomized parity
+test of every clip query).
+
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder, transfers

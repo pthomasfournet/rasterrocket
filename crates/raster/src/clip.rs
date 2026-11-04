@@ -7,7 +7,9 @@
 //! each node owns one [`XPathScanner`] and an [`Arc`] to the list it was
 //! intersected onto.  [`Clip::clone_shared`] (a graphics-state save) copies the
 //! head pointer, so a save costs O(1) whatever the number of path clips, and
-//! an intersection allocates one node shared by no other clip.
+//! an intersection allocates one node shared by no other clip.  A list that
+//! reaches [`FOLD_DEPTH`] nodes is replaced by one node holding their
+//! intersection, so a list never holds more than `FOLD_DEPTH - 1` nodes.
 //! [`XPathScanner`] instances are immutable after construction, so sharing
 //! across threads and across `clone_shared` copies is safe: there is no
 //! interior mutability in the shared objects.
@@ -19,6 +21,13 @@ use crate::scanner::XPathScanner;
 use crate::simd;
 use crate::types::{AA_SIZE, ceil_i32, floor_i32};
 use crate::xpath::XPath;
+
+/// Path clips a [`Clip`] holds at most: intersecting the one that reaches
+/// this many replaces the list with a single scanner of their intersection
+/// ([`XPathScanner::intersection`]), which every query answers exactly as
+/// the list did, so the per-span cost of a clip stays bounded however many
+/// paths it intersects.
+const FOLD_DEPTH: usize = 8;
 
 // ── ClipResult ────────────────────────────────────────────────────────────────
 
@@ -72,19 +81,6 @@ pub struct Clip {
 struct ClipNode {
     scanner: XPathScanner,
     parent: Option<Arc<Self>>,
-}
-
-impl Drop for ClipNode {
-    /// Releases the chain iteratively: the default recursive drop of a list
-    /// of K uniquely owned nodes would use O(K) stack.
-    fn drop(&mut self) {
-        let mut next = self.parent.take();
-        while let Some(node) = next {
-            next = Arc::try_unwrap(node)
-                .ok()
-                .and_then(|mut owned| owned.parent.take());
-        }
-    }
 }
 
 impl Clip {
@@ -202,7 +198,8 @@ impl Clip {
     ///
     /// If the path resolves to a simple axis-aligned rectangle (4 segments,
     /// axis-aligned), it is reduced to `clip_to_rect`. Otherwise a new
-    /// [`XPathScanner`] is pushed onto the scanner stack.
+    /// [`XPathScanner`] is pushed onto the scanner stack, and a stack that
+    /// reaches [`FOLD_DEPTH`] scanners is folded into one.
     ///
     /// An empty path forces the clip to be empty (nothing passes through).
     ///
@@ -242,6 +239,13 @@ impl Clip {
             scanner,
             parent: self.scanners.take(),
         }));
+        if self.scanners().nth(FOLD_DEPTH - 1).is_some() {
+            let folded = XPathScanner::intersection(self.scanners());
+            self.scanners = Some(Arc::new(ClipNode {
+                scanner: folded,
+                parent: None,
+            }));
+        }
     }
 
     /// The clip's rows in the supersampled AA grid, inclusive:
@@ -702,6 +706,143 @@ mod tests {
         clip.clip_to_path(&xpath, false);
     }
 
+    /// The path of a random star polygon of 5 to 12 vertices around
+    /// `(32, 32)`, its radii between 20 and 48 so it is concave and crosses
+    /// the clip rectangle's edges; one in three visits its vertices out of
+    /// angular order, crossing itself.  Drawn from the generator state `seed`.
+    fn random_polygon(seed: &mut u64) -> XPath {
+        let mut next = || {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            #[expect(clippy::cast_precision_loss, reason = "31-bit value")]
+            let unit = (*seed >> 33) as f64 / f64::from(1u32 << 31);
+            unit
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "0..8"
+        )]
+        let n = 5 + (next() * 8.0) as usize;
+        let crossing = next() < 1.0 / 3.0;
+        let mut angles: Vec<f64> = (0..n).map(|_| next() * std::f64::consts::TAU).collect();
+        if !crossing {
+            angles.sort_by(f64::total_cmp);
+        }
+        let mut builder = PathBuilder::new();
+        for (k, angle) in angles.into_iter().enumerate() {
+            let r = next().mul_add(28.0, 20.0);
+            let (x, y) = (r.mul_add(angle.cos(), 32.0), r.mul_add(angle.sin(), 32.0));
+            if k == 0 {
+                builder.move_to(x, y).expect("move_to");
+            } else {
+                builder.line_to(x, y).expect("line_to");
+            }
+        }
+        builder.close(false).expect("close");
+        XPath::new(&builder.build(), &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true)
+    }
+
+    #[test]
+    fn a_folded_clip_answers_as_the_conjunction_of_its_paths() {
+        let mut seed = 7;
+        // Trials whose intersection is neither empty nor the whole rectangle.
+        let mut partly_inside = 0;
+        for antialias in [false, true] {
+            for eo in [false, true] {
+                for _ in 0..12 {
+                    let paths: Vec<XPath> = (0..10).map(|_| random_polygon(&mut seed)).collect();
+                    let mut folded = Clip::new(0.0, 0.0, 64.0, 64.0, antialias);
+                    let singles: Vec<Clip> = paths
+                        .iter()
+                        .map(|path| {
+                            folded.clip_to_path(path, eo);
+                            let mut single = Clip::new(0.0, 0.0, 64.0, 64.0, antialias);
+                            single.clip_to_path(path, eo);
+                            single
+                        })
+                        .collect();
+                    assert!(folded.scanners().count() < FOLD_DEPTH);
+                    let inside = (0..64)
+                        .flat_map(|y| (0..64).map(move |x| (x, y)))
+                        .filter(|&(x, y)| folded.test(x, y))
+                        .count();
+                    if (1..64 * 64).contains(&inside) {
+                        partly_inside += 1;
+                    }
+                    for y in -2..66 {
+                        for x in -2..66 {
+                            assert_eq!(
+                                folded.test(x, y),
+                                singles.iter().all(|c| c.test(x, y)),
+                                "test ({x}, {y}), aa {antialias}, eo {eo}"
+                            );
+                        }
+                        for x0 in (-2..66).step_by(3) {
+                            for len in [0, 1, 4, 9, 30] {
+                                let results: Vec<ClipResult> = singles
+                                    .iter()
+                                    .map(|c| c.test_span(x0, x0 + len, y))
+                                    .collect();
+                                let want = if results.iter().all(|&r| r == ClipResult::AllInside) {
+                                    ClipResult::AllInside
+                                } else if results[0] == ClipResult::AllOutside {
+                                    // The rectangle, shared by every clip, excludes the span.
+                                    ClipResult::AllOutside
+                                } else {
+                                    ClipResult::Partial
+                                };
+                                assert_eq!(
+                                    folded.test_span(x0, x0 + len, y),
+                                    want,
+                                    "test_span {x0}..={} on {y}",
+                                    x0 + len
+                                );
+                            }
+                        }
+                        if antialias {
+                            let full = |buf: &mut AaBuf| {
+                                for row in 0..buf.height {
+                                    buf.set_span(row, 0, 70 * AA_SIZE as usize);
+                                }
+                            };
+                            let mut got = AaBuf::new(70);
+                            full(&mut got);
+                            let (mut gx0, mut gx1) = (0, 69);
+                            folded.clip_aa_line(&mut got, &mut gx0, &mut gx1, y);
+                            let mut want = AaBuf::new(70);
+                            full(&mut want);
+                            // Every scanner of a clip is given the caller's
+                            // columns; only the result is clamped.
+                            let (mut wx0, mut wx1) = (0, 69);
+                            for single in &singles {
+                                let (mut x0, mut x1) = (0, 69);
+                                single.clip_aa_line(&mut want, &mut x0, &mut x1, y);
+                                (wx0, wx1) = (x0, x1);
+                            }
+                            assert_eq!((gx0, gx1), (wx0, wx1));
+                            for row in 0..AA_SIZE as usize {
+                                for x in 0..70 * AA_SIZE as usize {
+                                    assert_eq!(
+                                        aa_bit(&got, row, x),
+                                        aa_bit(&want, row, x),
+                                        "clip_aa_line y {y} sub-row {row} sample {x}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Of the 48 trials, enough must cross a boundary of the intersection.
+        assert!(
+            partly_inside >= 20,
+            "{partly_inside} of 48 trials had a boundary"
+        );
+    }
+
     /// Whether AA sub-sample `x` of sub-row `row` is set.
     fn aa_bit(buf: &AaBuf, row: usize, x: usize) -> bool {
         buf.get_byte(row, x / 8) & (0x80 >> (x % 8)) != 0
@@ -878,15 +1019,13 @@ mod tests {
     /// Dropping a long uniquely owned path-clip list does not recurse once
     /// per clip.
     #[test]
-    fn dropping_a_long_clip_list_is_iterative() {
+    fn a_clip_holds_at_most_fold_depth_scanners() {
         let mut c = Clip::new(0.0, 0.0, 4.0, 4.0, false);
-        for _ in 0..200_000 {
+        for _ in 0..10_000 {
             clip_to_diamond(&mut c, 2.0, 2.0, 1.5);
+            assert!(c.scanners().count() < FOLD_DEPTH);
         }
-        let saved = c.clone_shared();
-        drop(c);
-        assert_eq!(saved.scanners().count(), 200_000);
-        drop(saved);
+        assert!(c.test(2, 2));
     }
 
     #[test]

@@ -476,17 +476,29 @@ impl XPathScanner {
 
     /// Call `emit(bx0, bx1)` for each covered half-open span `[bx0, bx1)` of
     /// AA scanline `scan_y`, clamped to `[0, width)`, in increasing `bx0`.
+    fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
+        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
+        self.covered_spans(scan_y, |x0, x1| {
+            let bx0 = usize::try_from(x0.max(0)).unwrap_or(0);
+            let bx1 = usize::try_from(x1.saturating_add(1).min(width_i32)).unwrap_or(0);
+            if bx0 < bx1 {
+                emit(bx0, bx1);
+            }
+        });
+    }
+
+    /// Call `emit(x0, x1)` for each covered span `[x0, x1]` (inclusive,
+    /// unclamped) of scanline `scan_y`, in increasing `x0`; the spans are
+    /// disjoint.  A row that ends inside the shape reaches `i32::MAX`.
     ///
     /// Every intersection covers its own cells `[x0, x1]`, whatever its
     /// winding count: a horizontal edge, or a sloped or vertical edge on the
     /// scanline where it starts, carries count 0 yet still bounds the shape.
     /// A span starts at an intersection and absorbs the following ones while
     /// they touch it or the running winding count is inside (`count & eo_mask
-    /// != 0`: parity for even-odd, non-zero for non-zero winding); a row that
-    /// ends inside extends to `width`.
-    fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
+    /// != 0`: parity for even-odd, non-zero for non-zero winding).
+    fn covered_spans(&self, scan_y: i32, mut emit: impl FnMut(i32, i32)) {
         let row = self.row(scan_y);
-        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
         let eo_mask = if self.eo { 1i32 } else { !0i32 };
         let mut count = 0i32;
         let mut i = 0usize;
@@ -501,17 +513,91 @@ impl XPathScanner {
                 count = count.wrapping_add(row[i].count);
                 i += 1;
             }
-            let end = if i >= row.len() && (count & eo_mask) != 0 {
-                width_i32
+            let last = if i >= row.len() && (count & eo_mask) != 0 {
+                i32::MAX
             } else {
-                xx1.saturating_add(1)
+                xx1
             };
+            emit(xx0, last);
+        }
+    }
 
-            let bx0 = usize::try_from(xx0.max(0)).unwrap_or(0);
-            let bx1 = usize::try_from(end.min(width_i32)).unwrap_or(0);
-            if bx0 < bx1 {
-                emit(bx0, bx1);
+    /// The region every one of `scanners` covers, as one table: on each
+    /// scanline it holds the intersection of their covered spans, each as a
+    /// winding-count-0 intersection, so [`test`](Self::test),
+    /// [`test_span`](Self::test_span) and [`clip_aa_line`](Self::clip_aa_line)
+    /// answer for it exactly as the conjunction of theirs over the scanners.
+    /// The scanners share one coordinate space; none gives an empty table.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the intersection count exceeds `u32::MAX`; it is bounded by
+    /// the sum of the scanners' own counts.
+    #[must_use]
+    pub fn intersection<'a>(scanners: impl IntoIterator<Item = &'a Self>) -> Self {
+        let scanners: Vec<&Self> = scanners.into_iter().collect();
+        let (Some(y_min), Some(y_max)) = (
+            scanners.iter().map(|s| s.y_min).max(),
+            scanners.iter().map(|s| s.y_max).min(),
+        ) else {
+            return Self::empty(false);
+        };
+        if y_min > y_max || scanners.iter().any(|s| s.is_empty()) {
+            return Self::empty(false);
+        }
+        let n_rows = usize::try_from(i64::from(y_max) - i64::from(y_min) + 1)
+            .expect("n_rows overflows usize; page height is impossibly large");
+        let mut row_start = Vec::with_capacity(n_rows + 1);
+        let mut intersects = Vec::new();
+        let (mut x_min, mut x_max) = (i32::MAX, i32::MIN);
+        let (mut acc, mut next, mut spans) = (Vec::new(), Vec::new(), Vec::new());
+        for y in y_min..=y_max {
+            row_start.push(
+                u32::try_from(intersects.len()).expect("intersection count exceeds u32::MAX"),
+            );
+            acc.clear();
+            scanners[0].covered_spans(y, |a, b| acc.push((a, b)));
+            for scanner in &scanners[1..] {
+                if acc.is_empty() {
+                    break;
+                }
+                spans.clear();
+                scanner.covered_spans(y, |a, b| spans.push((a, b)));
+                next.clear();
+                let (mut i, mut j) = (0, 0);
+                while i < acc.len() && j < spans.len() {
+                    let ((a0, a1), (b0, b1)): ((i32, i32), (i32, i32)) = (acc[i], spans[j]);
+                    let (lo, hi) = (a0.max(b0), a1.min(b1));
+                    if lo <= hi {
+                        next.push((lo, hi));
+                    }
+                    if a1 < b1 {
+                        i += 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                std::mem::swap(&mut acc, &mut next);
             }
+            for &(x0, x1) in &acc {
+                x_min = x_min.min(x0);
+                x_max = x_max.max(x1);
+                intersects.push(Intersect { x0, x1, count: 0 });
+            }
+        }
+        row_start
+            .push(u32::try_from(intersects.len()).expect("intersection count exceeds u32::MAX"));
+        if intersects.is_empty() {
+            return Self::empty(false);
+        }
+        Self {
+            eo: false,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            row_start,
+            intersects,
         }
     }
 }
