@@ -16,6 +16,7 @@
 //! - `knockout` — the painting of one object in a knockout group.
 //! - `image_memo`, `image_reduce`, `image_sampler` — image decode memo,
 //!   area-averaged reduction and device-pixel sampling.
+//! - `form_memo` — parsed form `XObjects`, kept per page.
 //! - `pixel_rect` — rectangles of device pixels.
 //! - `canvas` — the page bitmap, of RGB or ink pixels, and the dispatch of
 //!   paint calls to either.
@@ -59,6 +60,7 @@ mod canvas;
 mod devices;
 mod diagnostics;
 mod fill_stroke;
+mod form_memo;
 mod gpu_ops;
 mod image_blit;
 mod image_compositor;
@@ -251,6 +253,9 @@ pub struct PageRenderer<'doc> {
     /// Shadings and tiling cells already resolved on this page, shared with
     /// the renderers of its pattern cells.
     pattern_memo: pattern_memo::SharedPatternMemo,
+    /// Form `XObjects` already parsed on this page, shared with the
+    /// renderers of its pattern cells.
+    form_memo: form_memo::SharedFormMemo,
     /// Maximum operators this page may execute before the render is aborted.
     op_budget: u64,
     /// Absolute wall-clock deadline for this page render.
@@ -477,6 +482,7 @@ impl<'doc> PageRenderer<'doc> {
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
             pattern_memo: pattern_memo::PatternMemo::shared(),
+            form_memo: form_memo::FormMemo::shared(),
             op_budget: MAX_PAGE_OPS,
             deadline: Some(
                 std::time::Instant::now()
@@ -686,12 +692,13 @@ impl<'doc> PageRenderer<'doc> {
         self.budget_exceeded.clone_from(&parent.budget_exceeded);
     }
 
-    /// Draw image `XObjects`, shadings and tiling cells from `parent`'s
-    /// memos, and keep this renderer's in them, so a pattern cell does not
-    /// decode or rasterise what the page already has.
+    /// Draw image and form `XObjects`, shadings and tiling cells from
+    /// `parent`'s memos, and keep this renderer's in them, so a pattern cell
+    /// does not decode, parse or rasterise what the page already has.
     pub(super) fn share_memos(&mut self, parent: &Self) {
         self.image_memo = std::rc::Rc::clone(&parent.image_memo);
         self.pattern_memo = std::rc::Rc::clone(&parent.pattern_memo);
+        self.form_memo = std::rc::Rc::clone(&parent.form_memo);
     }
 
     /// Fold a finished child renderer (a tiling-pattern tile) into its

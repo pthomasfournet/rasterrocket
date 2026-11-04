@@ -274,6 +274,21 @@ pub struct FormXObject {
     pub transparency: Option<TransparencyGroupParams>,
 }
 
+impl FormXObject {
+    /// The form's dictionary entries, with no content.
+    #[must_use]
+    pub const fn without_content(&self) -> Self {
+        Self {
+            content: Vec::new(),
+            matrix: self.matrix,
+            bbox: self.bbox,
+            resources_id: self.resources_id,
+            has_own_resources: self.has_own_resources,
+            transparency: self.transparency,
+        }
+    }
+}
+
 /// The attributes of a transparency group dictionary (PDF §11.6.6), of a
 /// form `XObject` or of a page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -672,12 +687,22 @@ impl<'doc> PageResources<'doc> {
     /// or unreadable streams.
     #[must_use]
     pub fn form_xobject(&self, name: &[u8]) -> Option<FormXObject> {
+        let (stream_id, _) = self.form_xobject_entry(name)?;
+        self.form_from_stream_id(stream_id)
+    }
+
+    /// The stream object of the named `XObject` when its subtype is `Form`,
+    /// and whether the form has a `Resources` dictionary of its own; its
+    /// content is not decoded.
+    #[must_use]
+    pub fn form_xobject_entry(&self, name: &[u8]) -> Option<(ObjectId, bool)> {
         let stream_id = self.xobject_id(name)?;
         let obj = self.doc.get_object(stream_id).ok()?;
-        if obj.as_stream()?.dict.get(b"Subtype")?.as_name()? != b"Form" {
+        let dict = &obj.as_stream()?.dict;
+        if dict.get(b"Subtype")?.as_name()? != b"Form" {
             return None;
         }
-        self.form_from_stream_id(stream_id)
+        Some((stream_id, dict.get(b"Resources").is_some()))
     }
 
     /// Build a [`FormXObject`] directly from a stream object ID.

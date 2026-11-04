@@ -7,8 +7,11 @@ use raster::{transparency::GroupParams, types::BlendMode};
 use super::super::document_images::{self, ImageKey, Lookup, Outcome};
 use super::super::gstate::{ctm_multiply, ctm_transform};
 use super::canvas::PageCanvas;
+use super::form_memo::{FormKey, KeptForm};
 use super::pixel_rect::PixelRect;
 use super::{GroupContext, MAX_FORM_DEPTH, PageRenderer, RenderAbort};
+use crate::content::Operator;
+use crate::resources::FormXObject;
 use crate::resources::image::ImageResolution;
 
 /// Device-pixel extent `(width, height)` of an image drawn under `ctm`: the
@@ -27,6 +30,18 @@ pub(super) fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
     Some((extent(ctm[0], ctm[1])?, extent(ctm[2], ctm[3])?))
 }
 
+/// Where a form's operators come from.
+#[derive(Clone, Copy)]
+enum FormContent<'a> {
+    /// Parsed from its content, then kept at the key once repeated.
+    Stream(FormKey),
+    /// Parsed from its content and not kept: a form without a stream of
+    /// its own, or one drawn other than by `Do`.
+    Unkeyed,
+    /// Already parsed.
+    Kept(&'a [Operator<'static>]),
+}
+
 impl PageRenderer<'_> {
     // ── XObject rendering ─────────────────────────────────────────────────────
 
@@ -42,9 +57,20 @@ impl PageRenderer<'_> {
             return;
         }
         // Try Form first (cheap dict lookup, no pixel decoding).
-        if let Some(form) = self.resources.form_xobject(name) {
-            self.do_form_xobject(&form);
-            return;
+        if let Some((id, own_resources)) = self.resources.form_xobject_entry(name) {
+            let key = (
+                id,
+                (!own_resources).then(|| self.resources.resource_context_id()),
+            );
+            let kept = self.form_memo.borrow().get(&key);
+            if let Some(kept) = kept {
+                self.run_form_xobject(&kept.form, FormContent::Kept(&kept.ops));
+                return;
+            }
+            if let Some(form) = self.resources.form_from_stream_id(id) {
+                self.run_form_xobject(&form, FormContent::Stream(key));
+                return;
+            }
         }
         let draw_size = image_draw_size(&self.gstate.current().ctm);
         let key = self.resources.xobject_id(name).map(|id| ImageKey {
@@ -277,7 +303,13 @@ impl PageRenderer<'_> {
     ///
     /// A form invoked while it is already executing, directly or through
     /// other forms, draws nothing.
-    pub(super) fn do_form_xobject(&mut self, form: &crate::resources::FormXObject) {
+    pub(super) fn do_form_xobject(&mut self, form: &FormXObject) {
+        self.run_form_xobject(form, FormContent::Unkeyed);
+    }
+
+    /// [`Self::do_form_xobject`], with the form's operators taken from
+    /// `source`.
+    fn run_form_xobject(&mut self, form: &FormXObject, source: FormContent<'_>) {
         if self.form_depth >= MAX_FORM_DEPTH {
             self.budget_exceeded = Some(RenderAbort::FormDepth);
             log::warn!(
@@ -379,9 +411,7 @@ impl PageRenderer<'_> {
 
         // Parse and execute the form's content stream.  Its `Q`s cannot
         // pop the state saved above.
-        let components = |name: &[u8]| self.resources.inline_image_components(name);
-        let ops = crate::content::parse_with(&form.content, Some(&components));
-        self.execute_content_stream(&ops);
+        self.execute_form_content(form, source);
 
         // Swap the group bitmap back and composite it as one object of the
         // parent group, using the parent's opacity/blend (captured before
@@ -408,6 +438,38 @@ impl PageRenderer<'_> {
         self.form_depth -= 1;
         let _ = self.active_forms.pop();
         self.gstate.restore();
+    }
+
+    /// Execute the operators of `form` from `source`, in the resources and
+    /// graphics state already set up for it; a stream form parsed for the
+    /// second time is kept in the page's form memo.
+    fn execute_form_content(&mut self, form: &FormXObject, source: FormContent<'_>) {
+        let kept;
+        let parsed;
+        let ops: &[Operator<'_>] = if let FormContent::Kept(ops) = source {
+            ops
+        } else {
+            let components = |name: &[u8]| self.resources.inline_image_components(name);
+            let ops = crate::content::parse_with(&form.content, Some(&components));
+            let len = form.content.len();
+            match source {
+                FormContent::Stream(key)
+                    if self.form_memo.borrow_mut().repeated(key, ops.len(), len) =>
+                {
+                    let form = KeptForm {
+                        form: form.without_content(),
+                        ops: ops.into_iter().map(Operator::into_owned).collect(),
+                    };
+                    kept = self.form_memo.borrow_mut().insert(key, form, len);
+                    &kept.ops
+                }
+                _ => {
+                    parsed = ops;
+                    &parsed
+                }
+            }
+        };
+        self.execute_content_stream(ops);
     }
 
     /// A transparent canvas of the current canvas's kind and size for a

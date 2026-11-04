@@ -1653,6 +1653,87 @@ fn a_glyph_description_s_restores_cannot_pop_the_page_s_states() {
     );
 }
 
+/// A document whose page `(4, 0)` names `/C` as `DeviceGray` and draws
+/// the resource-less form `/F` (object 5), which paints a 1×1 inline image
+/// in `/C` over the page, and the form `/G` (object 6), whose own
+/// resources name `/C` as `DeviceRGB` and which draws `/F`.
+fn form_memo_doc() -> Document {
+    let stream = |dict: &str, content: &[u8]| {
+        let mut body = format!("<< {dict} /Length {} >>\nstream\n", content.len()).into_bytes();
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\nendstream");
+        body
+    };
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /ColorSpace << /C /DeviceGray >> \
+              /XObject << /F 5 0 R /G 6 0 R >> >> >>"
+                .to_vec(),
+        ),
+        (
+            5,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 8 8]",
+                b"q 8 0 0 8 0 0 cm BI /W 1 /H 1 /CS /C /BPC 8 ID \x00\xff\x00 EI Q",
+            ),
+        ),
+        (
+            6,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 8 8] /Resources \
+                 << /ColorSpace << /C /DeviceRGB >> /XObject << /F 5 0 R >> >>",
+                b"/F Do",
+            ),
+        ),
+    ])
+}
+
+/// Run `content` on page `(4, 0)` of `doc`, 8 × 8 pixels, and return the
+/// renderer.
+fn render_forms<'a>(doc: &'a Document, content: &[u8]) -> PageRenderer<'a> {
+    let mut renderer = PageRenderer::new(8, 8, doc, (4, 0));
+    renderer.execute(&crate::content::parse(content));
+    renderer
+}
+
+/// The bytes of `renderer`'s RGB canvas.
+fn rgb_bytes(renderer: &PageRenderer<'_>) -> Vec<u8> {
+    match &renderer.canvas {
+        super::canvas::PageCanvas::Rgb(bitmap) => bitmap.data().to_vec(),
+        super::canvas::PageCanvas::Ink(_) => panic!("an RGB canvas was expected"),
+    }
+}
+
+/// A form drawn once is not kept; drawn again it is, once per resource
+/// context it inherits, and every draw renders as a fresh parse does.
+#[test]
+fn repeated_forms_are_parsed_once_per_resource_context() {
+    let doc = form_memo_doc();
+    assert!(
+        render_forms(&doc, b"/F Do")
+            .form_memo
+            .borrow()
+            .kept
+            .is_empty()
+    );
+
+    let fresh = render_forms(&doc, b"/G Do");
+    assert_eq!(rgb_bytes(&fresh)[..3], [0, 255, 0], "RGB within /G");
+
+    let repeated = render_forms(&doc, b"/F Do /F Do /G Do /G Do");
+    // /F under the page's resources, /G, and /F under /G's resources.
+    assert_eq!(repeated.form_memo.borrow().kept.len(), 3);
+    assert_eq!(rgb_bytes(&repeated), rgb_bytes(&fresh));
+
+    let page_gray = render_forms(&doc, b"/G Do /G Do /F Do /F Do");
+    assert_eq!(page_gray.form_memo.borrow().kept.len(), 3);
+    assert!(
+        rgb_bytes(&page_gray).iter().all(|&v| v == 0),
+        "the last draw is the gray image of the page's /C"
+    );
+}
+
 /// Annotations are drawn in the initial graphics state of the vector
 /// antialiasing mode selected for the page, not the default mode.
 #[test]
