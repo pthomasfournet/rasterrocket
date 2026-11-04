@@ -32,27 +32,24 @@
 # Requires bash >= 4.4, and `shuf` or `gshuf` for the archive sample;
 # `timeout` or `gtimeout` is used when present.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=ab_lib.sh
+source "$(dirname "$0")/ab_lib.sh"
 
-if (($# < 3 || $# > 4)); then
-    sed -n '/^set -euo/q; 2,$p' "$0" >&2
-    exit 2
-fi
+(($# >= 3 && $# <= 4)) || ab_usage
 before=$1 after=$2 prefix=$3 list=${4-}
-for bin in "$before" "$after"; do
-    [[ -x $bin ]] || { echo "ab_archive.sh: not executable: $bin" >&2; exit 2; }
-done
+ab_require_bins "$before" "$after"
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 archive=${AB_ARCHIVE:-$HOME/mss-content/archives}
 
 if [[ -n $list ]]; then
-    [[ -r $list ]] || { echo "ab_archive.sh: cannot read list: $list" >&2; exit 2; }
+    [[ -r $list ]] || ab_usage_error "cannot read list: $list"
     cp "$list" "$prefix.list"
 else
     {
         printf '%s\n' "$repo"/tests/fixtures/*.pdf
         if [[ -d $archive ]]; then
             shuffle=$(command -v shuf || command -v gshuf) ||
-                { echo "ab_archive.sh: the archive sample needs shuf or gshuf" >&2; exit 2; }
+                ab_usage_error "the archive sample needs shuf or gshuf"
             # Byte-order sort and NUL separators: the same input order, and
             # so the same sample, in every locale.  LIST holds one path per
             # line, so paths containing a newline are left out.
@@ -62,16 +59,8 @@ else
     } >"$prefix.list"
 fi
 
-read -r -a before_flags <<<"${BEFORE_FLAGS-}"
-read -r -a after_flags <<<"${AFTER_FLAGS-}"
-limit=${AB_TIMEOUT:-120}
-if command -v timeout >/dev/null; then
-    limiter=(timeout "$limit")
-elif command -v gtimeout >/dev/null; then
-    limiter=(gtimeout "$limit")
-else
-    limiter=()
-fi
+ab_flags
+ab_limiter "${AB_TIMEOUT:-120}"
 
 work=$(mktemp -d "$prefix.work.XXXXXX")
 trap 'rm -rf "$work"' EXIT

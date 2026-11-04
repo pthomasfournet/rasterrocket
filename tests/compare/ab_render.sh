@@ -28,29 +28,18 @@
 # Requires bash >= 4.4 (macOS: Homebrew bash); `timeout` or `gtimeout` is
 # used when present.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=ab_lib.sh
+source "$(dirname "$0")/ab_lib.sh"
 
-if (($# < 4)); then
-    sed -n '/^set -euo/q; 2,$p' "$0" >&2
-    exit 2
-fi
+(($# >= 4)) || ab_usage
 before=$1 after=$2 out=$3
 shift 3
 [[ ${1-} == -- ]] && shift
-(($# > 0)) || { echo "ab_render.sh: no PDF given" >&2; exit 2; }
-for bin in "$before" "$after"; do
-    [[ -x $bin ]] || { echo "ab_render.sh: not executable: $bin" >&2; exit 2; }
-done
+(($# > 0)) || ab_usage_error "no PDF given"
+ab_require_bins "$before" "$after"
 
-read -r -a before_flags <<<"${BEFORE_FLAGS-}"
-read -r -a after_flags <<<"${AFTER_FLAGS-}"
-limit=${AB_TIMEOUT:-300}
-if command -v timeout >/dev/null; then
-    limiter=(timeout "$limit")
-elif command -v gtimeout >/dev/null; then
-    limiter=(gtimeout "$limit")
-else
-    limiter=()
-fi
+ab_flags
+ab_limiter "${AB_TIMEOUT:-300}"
 
 mkdir -p "$out"
 work=$(mktemp -d "$out/ab.XXXXXX")
