@@ -2457,6 +2457,10 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
+**Unreleased on master.** A reduced image draw builds its resampling plan
+once, and the vertical pass reads only the source columns the horizontal
+pass uses (54d8712e); renders unchanged.
+
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
 page: a store shared by the session's pages keeps it once a second page asks
