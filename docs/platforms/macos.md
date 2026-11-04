@@ -138,6 +138,7 @@ and send it another way. See the [CLI reference](../cli-reference.md#printing).
 ## Known gaps
 
 - No GPU acceleration (see above).
-- Intel Macs are not tested.
+- Intel Macs are not tested, nor M-series Macs: every result here comes
+  from one A-series machine (NEON, the Apple GPU of an A-series chip).
 - The SVE2 code path (`nightly-sve2`) cannot run on Apple silicon, which has
   no SVE. It is for Arm server chips.
