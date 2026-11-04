@@ -577,13 +577,16 @@ impl FontProgram {
 
     /// The vertical form of glyph `gid` through the `GSUB` `vert` / `vrt2`
     /// single substitutions (rotated brackets and punctuation of vertical
-    /// writing), or `gid` itself when the program defines none.
+    /// writing), or `gid` itself when the program defines none or the form
+    /// it names is not a glyph of the program.
     #[must_use]
     pub fn vertical_gid(&self, gid: u32) -> u32 {
         self.vertical_forms
-            .get_or_init(|| {
-                self.sfnt()
-                    .map_or_else(HashMap::new, |font| vertical_forms(font))
+            .get_or_init(|| match self.data.borrow_dependent() {
+                Views::Sfnt { font, outlines } => {
+                    vertical_forms(font, &|gid| outlines.get(GlyphId::new(gid)).is_some())
+                }
+                _ => HashMap::new(),
             })
             .get(&gid)
             .copied()
@@ -800,8 +803,8 @@ fn parse_type1(data: &[u8]) -> Result<(Outlines, i32), LoadError> {
 
 /// Glyph index → vertical form from the single substitutions the `vert`
 /// and `vrt2` features of `font`'s `GSUB` table apply (the first feature
-/// listing a glyph wins).
-fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
+/// listing a glyph with a form for which `is_glyph` holds wins).
+fn vertical_forms(font: &FontRef<'_>, is_glyph: &dyn Fn(u32) -> bool) -> HashMap<u32, u32> {
     let mut forms = HashMap::new();
     let Ok(gsub) = font.gsub() else {
         return forms;
@@ -834,6 +837,7 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
                         let delta = single.delta_glyph_id().into();
                         add_forms(
                             &mut forms,
+                            is_glyph,
                             &coverage,
                             delta_targets(&coverage, delta, 0xFFFF),
                         );
@@ -844,6 +848,7 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
                         let delta = single.delta_glyph_id().into();
                         add_forms(
                             &mut forms,
+                            is_glyph,
                             &coverage,
                             delta_targets(&coverage, delta, 0xFF_FFFF),
                         );
@@ -852,13 +857,23 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
                 SingleSubst::Format2(single) => {
                     if let Ok(coverage) = single.coverage() {
                         let targets = single.substitute_glyph_ids().iter();
-                        add_forms(&mut forms, &coverage, targets.map(|to| to.get().to_u32()));
+                        add_forms(
+                            &mut forms,
+                            is_glyph,
+                            &coverage,
+                            targets.map(|to| to.get().to_u32()),
+                        );
                     }
                 }
                 SingleSubst::Format4(single) => {
                     if let Ok(coverage) = single.coverage() {
                         let targets = single.substitute_glyph_ids().iter();
-                        add_forms(&mut forms, &coverage, targets.map(|to| to.get().to_u32()));
+                        add_forms(
+                            &mut forms,
+                            is_glyph,
+                            &coverage,
+                            targets.map(|to| to.get().to_u32()),
+                        );
                     }
                 }
             }
@@ -868,15 +883,18 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
 }
 
 /// Adds the forms of a single substitution: the covered glyphs, in
-/// coverage order, map to `targets`.  A glyph already mapped keeps its
-/// earlier form.
+/// coverage order, map to `targets`.  A target for which `is_glyph` fails
+/// is skipped; a glyph already mapped keeps its earlier form.
 fn add_forms(
     forms: &mut HashMap<u32, u32>,
+    is_glyph: &dyn Fn(u32) -> bool,
     coverage: &CoverageTable<'_>,
     targets: impl IntoIterator<Item = u32>,
 ) {
     for (glyph, to) in coverage.iter().zip(targets) {
-        let _ = forms.entry(glyph.to_u32()).or_insert(to);
+        if is_glyph(to) {
+            let _ = forms.entry(glyph.to_u32()).or_insert(to);
+        }
     }
 }
 

@@ -365,6 +365,24 @@ fn vertical_forms_come_from_gsub() {
     assert_eq!(cid.vertical_selector(34), 34);
 }
 
+/// A `vert` substitution whose target lies past the font's glyphs leaves
+/// the glyph in its horizontal form.
+#[test]
+fn out_of_range_vertical_forms_are_ignored() {
+    let mut data = include_bytes!("data/vertical-forms.ttf").to_vec();
+    // The single format 1 subtable: format 1, coverage at offset 6, delta
+    // +1, then its coverage of glyph 1.
+    let subtable = [0, 1, 0, 6, 0, 1, 0, 1, 0, 1, 0, 1];
+    let at = data
+        .windows(subtable.len())
+        .position(|w| w == subtable)
+        .expect("the vert subtable");
+    data[at + 4..at + 6].copy_from_slice(&0x0100u16.to_be_bytes());
+    let program = crate::program::FontProgram::parse(data, 0).expect("parse");
+    assert_eq!(program.vertical_gid(1), 1);
+    assert_eq!(program.vertical_selector(1), 1);
+}
+
 /// A transformed face draws each glyph mapped by its em-space affine
 /// before the face matrix; `bounds` is the em-unit box of the outline.
 #[test]
