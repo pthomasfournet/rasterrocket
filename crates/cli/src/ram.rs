@@ -265,13 +265,15 @@ fn read_mem_available() -> Option<u64> {
 /// path they asked for.
 fn should_use_ram(args: &Args) -> bool {
     // A fax document is one file written after the last page, which no
-    // reader consumes during the run: it stays on disk (`--ram` with
-    // `--fax` is refused at validation).
+    // reader consumes during the run, and a print job writes no page
+    // files: neither uses RAM (`--ram` with either is refused at
+    // validation).
     !args.faxing()
+        && !args.printing()
         && use_ram_for(
             args.no_ram,
             args.ram || args.ram_path.is_some(),
-            &args.output_prefix,
+            args.prefix(),
             Path::new(RAM_ROOT).is_dir(),
         )
 }
@@ -307,7 +309,7 @@ fn use_ram_for(no_ram: bool, force_ram: bool, prefix: &str, ram_root_present: bo
 /// The directory cannot be created (see [`create_ram_dir`]), or RAM output
 /// was requested where available memory cannot be read.
 pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, SpillPolicy)> {
-    let original_prefix = args.output_prefix.clone();
+    let original_prefix = args.prefix().to_owned();
     let passthrough = |prefix| {
         (
             RamDirGuard { dir: None },
@@ -346,7 +348,7 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
     );
     println!("{}", dir.display());
 
-    args.output_prefix.clone_from(&ram_prefix);
+    args.output_prefix = Some(ram_prefix.clone());
     Ok((
         RamDirGuard { dir: Some(dir) },
         SpillPolicy::new(Targets::Ram {

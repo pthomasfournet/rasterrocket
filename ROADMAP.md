@@ -2199,15 +2199,24 @@ A 2-stage interpretation+render pipeline within a single document.  rasterrocket
 
 **Status: in progress on master, unreleased.** The four fax layers are on
 master (2026-11-01), with `--jpeg` and `--jpegopt` (as `pdftoppm -jpeg`,
-colour or gray); printing is not started.
+colour or gray), and printing through CUPS (2026-11-04); the Windows
+spooler is not started.
 
 **Printing through the OS spooler.** No device or driver code of our own.
-`rrocket --print [--printer NAME] [--copies N]` renders each page at the
-printer's resolution with `RenderPurpose::Print` and hands our raster (PNG or
-PWG raster, not the PDF) to CUPS (`lp`) on Linux and macOS, and to the Win32
-spooler, behind a feature, on Windows. Parity gap: poppler's `pdftocairo` has
-`-print` / `-printer` on Windows, and pdfium renders into a Windows printer
-context.
+**Done on Linux and macOS:** `rrocket --print [--printer NAME] [--copies N]
+[--duplex long|short]` renders each page at 600 dpi (or `-r`) with
+`RenderPurpose::Print` and hands CUPS (`lp`) one PDF whose every page is our
+raster as a single image; the queue's filters fit it to the printer (media,
+orientation, colour, resolution, back sides) without rendering the source
+document. Raster PWG was tried first: driverless queues pass it to the
+printer untouched, leaving colour model, resolution and back-side
+orientation to the sender. Pages are spooled a window at a time, so memory
+stays bounded. Verified through a CUPS `everywhere` queue on
+`ippeveprinter`: colour pages reach a gray-only printer as sGray at its
+resolution, landscape pages are turned, and the page images round-trip
+pixel-exact. **Not done:** the Win32 spooler, behind a feature, on Windows.
+Parity gap: poppler's `pdftocairo` has `-print` / `-printer` on Windows,
+and pdfium renders into a Windows printer context.
 
 **Fax, in layers.**
 1. **Done.** TIFF output (`--tiff`, `--tiffcompression none|packbits|lzw|
@@ -2280,8 +2289,8 @@ derived from it for vertical forms.
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 planned Phase 13 above; Phase 14 is on master, unreleased.
 
-**Unreleased on master since v2.0.0 (2026-10-31):** Phase 13's fax output
-and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
+**Unreleased on master since v2.0.0 (2026-10-31):** Phase 13's fax output,
+`--print` through CUPS and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
 follow-ups, overprint simulation (below), and a hardening review pass
 (2026-11-03) over the overprint work, gray output and the vendored forks.
 Public API added since v2.0.0, none of it breaking a v2.0.0 caller:

@@ -1,4 +1,5 @@
-//! Image encoding — write a `raster::Bitmap<P>` to PPM, PGM, PBM, PNG, and JPEG.
+//! Image encoding — write a `raster::Bitmap<P>` to PPM, PGM, PBM, PNG, JPEG,
+//! TIFF, and raster pages as PDF.
 //!
 //! # Supported formats
 //!
@@ -11,6 +12,7 @@
 //! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8` |
 //! | [`jpeg_gray`] | JPEG (baseline), to a byte vector | `Gray8` |
 //! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8`, `Gray8`, bilevel from `Gray8` |
+//! | [`PdfWriter`] | PDF of raster pages, one image each | `Rgb8`, `Gray8` |
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in
 //! [`std::io::BufWriter`] at the call site if buffering is needed.
@@ -24,6 +26,7 @@
 
 pub(crate) mod jpeg;
 pub(crate) mod pbm;
+pub(crate) mod pdf;
 pub(crate) mod pgm;
 pub(crate) mod png;
 pub(crate) mod ppm;
@@ -31,6 +34,7 @@ pub(crate) mod tiff;
 
 pub use jpeg::{JpegOptions, jpeg_gray, write_jpeg};
 pub use pbm::write_pbm;
+pub use pdf::{PdfImage, PdfPage, PdfWriter};
 pub use pgm::write_pgm;
 pub use png::write_png;
 pub use ppm::write_ppm;

@@ -16,6 +16,7 @@ use crate::args::{Args, OutputFormat};
 use crate::cleanup::{self, Page};
 use crate::fax::{self, FaxDocument};
 use crate::naming::output_path_with_prefix;
+use crate::print::PrintJob;
 use crate::ram::SpillPolicy;
 use crate::tone;
 
@@ -79,6 +80,18 @@ impl From<camera::CameraError> for RenderError {
 
 // ── Per-page render + write ───────────────────────────────────────────────────
 
+/// The document a page belongs to, when the pages are not files of their
+/// own.
+#[derive(Clone, Copy)]
+pub(crate) enum Document<'a> {
+    /// One file per page.
+    None,
+    /// A page of the fax document.
+    Fax(&'a FaxDocument),
+    /// A page of the print job.
+    Print(&'a PrintJob),
+}
+
 /// Render one page and write it to the appropriate output file.
 ///
 /// `page_num` is 1-based.  Each call prescans the page to determine whether
@@ -92,7 +105,7 @@ pub(crate) fn render_page(
     total_pages: u32,
     args: &Args,
     spill: &SpillPolicy,
-    fax: Option<&FaxDocument>,
+    document: Document<'_>,
 ) -> Result<(), RenderError> {
     // Prescan only when a GPU decoder is compiled in — otherwise it's pure overhead
     // with no benefit (CpuOnly is already the effective policy for every page).
@@ -109,7 +122,10 @@ pub(crate) fn render_page(
 
     let geom = session.page_geometry(page_num)?;
     let dims = (geom.width_pts, geom.height_pts);
-    let fax_layout = fax.map(|_| fax::layout(dims, args.y_dpi()));
+    let fax_layout = match document {
+        Document::Fax(_) => Some(fax::layout(dims, args.y_dpi())),
+        Document::None | Document::Print(_) => None,
+    };
     let (scale_x, scale_y) =
         fax_layout.map_or_else(|| args.scales(dims), |l| (l.scale_x, l.scale_y));
     let mut params = RenderParams::new_xy(scale_x, scale_y).with_policy(effective_policy);
@@ -120,11 +136,12 @@ pub(crate) fn render_page(
         params = params.with_region(region);
     }
     let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
-    let sink = match (fax, fax_layout) {
-        (Some(document), Some(layout)) => Sink::Fax {
+    let sink = match (document, fax_layout) {
+        (Document::Fax(document), Some(layout)) => Sink::Fax {
             document,
             turn: layout.turn,
         },
+        (Document::Print(job), _) => Sink::Print { job },
         _ => Sink::Files {
             spill,
             format: args.output_format(),
@@ -158,13 +175,15 @@ pub(crate) enum Sink<'a> {
         document: &'a FaxDocument,
         turn: bool,
     },
+    /// A page of the print job.
+    Print { job: &'a PrintJob },
 }
 
 /// Run the camera stages selected on the command line on `page` (see
 /// [`cleanup::clean`]) and the tone operations (see [`tone::prepare`]),
 /// then hand each resulting page, one or the `a`/`b` halves of a split
-/// spread, to `sink`: a file each (see [`output_path_with_prefix`]), or
-/// the fax document.
+/// spread, to `sink`: a file each (see [`output_path_with_prefix`]), the
+/// fax document or the print job.
 ///
 /// Shared by the PDF render path and the comic-archive path.
 pub(crate) fn write_cleaned(
@@ -181,6 +200,10 @@ pub(crate) fn write_cleaned(
             Sink::Files { spill, format } => (spill, format),
             Sink::Fax { document, turn } => {
                 document.add(page_num, page, turn)?;
+                continue;
+            }
+            Sink::Print { job } => {
+                job.add(page_num, half, &page)?;
                 continue;
             }
         };
@@ -213,7 +236,7 @@ pub(crate) fn write_cleaned(
 /// least as long passes straight to the file once the buffer is flushed.
 /// The capacity equals `PACKED_WRITE_BYTES`, so every full packed slice
 /// takes the second path.
-const OUTPUT_BUFFER_BYTES: usize = encode::PACKED_WRITE_BYTES;
+pub(crate) const OUTPUT_BUFFER_BYTES: usize = encode::PACKED_WRITE_BYTES;
 
 /// Create the page output file `out_path` and fill it through an
 /// [`OUTPUT_BUFFER_BYTES`] write buffer with `encode`.  A file this call

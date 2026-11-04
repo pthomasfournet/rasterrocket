@@ -9,7 +9,6 @@
 //! order once all are done.  The written document can be handed to the
 //! system's fax service through its submission command, `lp` or `sendfax`.
 
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use color::Gray8;
@@ -17,6 +16,7 @@ use encode::{TiffCompression, TiffImage, TiffPage, TiffWriter};
 use raster::Bitmap;
 
 use crate::cleanup::Page;
+use crate::deliver;
 use crate::render::{RenderError, write_output};
 
 /// The width of a fax page in pixels: ITU-T T.4's 215 mm scan line.
@@ -164,37 +164,20 @@ fn submission(path: &str, number: &str, queue: Option<&str>) -> (&'static str, V
 
 /// Submit the fax document at `path` to the dial string `number` through
 /// the system's fax service (see [`submission`]) and wait for the service
-/// to accept it.  The command's output goes to standard error, keeping
-/// standard output for rrocket's own.
+/// to accept it.
 ///
 /// # Errors
 ///
-/// The command could not be run or reported a failure; the message names
-/// the document, which stays at `path`.
+/// See [`deliver::submit`].
 pub(crate) fn submit(path: &str, number: &str, queue: Option<&str>) -> Result<(), String> {
     let (program, argv) = submission(path, number, queue);
-    let status = Command::new(program)
-        .args(&argv)
-        .stdin(Stdio::null())
-        .stdout(std::io::stderr())
-        .status()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "{program} is not installed: name a CUPS fax queue with --fax-queue, or \
-                     install HylaFAX for sendfax; the document is at {path}"
-                )
-            } else {
-                format!("cannot run {program}: {e}; the document is at {path}")
-            }
-        })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{program} refused the fax ({status}); the document is at {path}"
-        ))
-    }
+    deliver::submit(
+        program,
+        &argv,
+        "the fax",
+        path,
+        "name a CUPS fax queue with --fax-queue, or install HylaFAX for sendfax",
+    )
 }
 
 /// `src` turned a quarter counterclockwise: its top row becomes the left

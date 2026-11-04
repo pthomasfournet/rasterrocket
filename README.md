@@ -91,8 +91,8 @@ once.** The full list, with migration notes, is in
   exit, and the RAM directory is removed after a failed run too; errors print
   their cause chain. The flags `--overprint`, `--thinlinemode` and
   `--jpegopt`, which did nothing, are removed. (On master since v2.0.0,
-  unreleased: `--jpeg` with `--jpegopt`, `--tiff`, the fax output and
-  `--overprint` are implemented; see the
+  unreleased: `--jpeg` with `--jpegopt`, `--tiff`, the fax output,
+  printing through CUPS (`--print`) and `--overprint` are implemented; see the
   [CLI reference](docs/cli-reference.md) and
   [ROADMAP.md](ROADMAP.md#current-status-2026-11-03).)
 

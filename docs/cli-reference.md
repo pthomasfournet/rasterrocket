@@ -2,6 +2,7 @@
 
 ```
 rrocket [OPTIONS] <INPUT> <OUTPUT_PREFIX>
+rrocket --print [OPTIONS] <INPUT>
 ```
 
 Renders pages to image files. Flag names and output naming follow `pdftoppm`
@@ -162,6 +163,25 @@ demand. None of these bounds fails the page; the rest of the page renders:
 
 ---
 
+## Printing
+
+| Flag | Default | Description |
+|---|---|---|
+| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages render a window of `--threads` pages at a time and are spooled to a temporary file as each window completes, so a long document is not held in memory. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error, and removes the temporary file; a refusal exits with status 1 and keeps the file, naming it. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
+| `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`. Implies `--print`. |
+| `--copies N` | 1 | Copies (1–9999), `lp -n N`. Needs `--print`. |
+| `--duplex long\|short` | the printer's setting | Two-sided printing, the sheet turning on its long or short edge (`-o sides=two-sided-long-edge` / `two-sided-short-edge`). Needs `--print`. |
+
+```bash
+# Print pages 1–4 to the default printer at 600 dpi
+rrocket --print -l 4 document.pdf
+
+# Two copies, two-sided, gray, on the queue "Office"
+rrocket --printer Office --copies 2 --duplex long --gray document.pdf
+```
+
+---
+
 ## Rendering
 
 | Flag | Default | Description |
@@ -250,7 +270,7 @@ that says so.
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |
 | `--timings` | off | Print per-page wall time and thread index to stderr for profiling. |
 | `--strict` | off | Fail a page when one of its images or content streams cannot be decoded or drawn, or decodes only in part. Without it the image or stream is skipped (or drawn from the data that decoded), the page is written, and a warning naming the page and object goes to stderr. |
-| `--purpose view\|print` | `view` | What the pages are rendered for. `view`: optional-content groups (layers) take their View usage state, and annotations flagged NoView are omitted. `print`: layers take their Print usage state, and only annotations flagged Print are drawn. Annotations flagged Hidden are never drawn. |
+| `--purpose view\|print` | `view` (`print` under `--print`) | What the pages are rendered for. `view`: optional-content groups (layers) take their View usage state, and annotations flagged NoView are omitted. `print`: layers take their Print usage state, and only annotations flagged Print are drawn. Annotations flagged Hidden are never drawn. |
 
 ---
 

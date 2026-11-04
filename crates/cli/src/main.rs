@@ -2,9 +2,11 @@ mod args;
 mod cleanup;
 mod comic;
 mod decrypt_gate;
+mod deliver;
 mod diagnostics;
 mod fax;
 mod naming;
+mod print;
 mod ram;
 mod render;
 mod tone;
@@ -49,6 +51,7 @@ fn main() -> ExitCode {
         return fail(e);
     }
     args.apply_fax_preset();
+    args.apply_print_preset();
 
     // RAM output (see `ram`): the guard removes the RAM directory when it
     // drops, and the spill policy chooses each page's directory.
@@ -157,71 +160,90 @@ fn main() -> ExitCode {
     let fax = args
         .fax
         .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
-    // A fax document is written whole or not at all: once a page has
-    // failed, the pages not yet started are skipped.
-    let fax_failed = AtomicBool::new(false);
+    let print_job = if args.print {
+        match print::PrintJob::create(args.dpi()) {
+            Ok(job) => Some(job),
+            Err(e) => return fail(format_args!("nothing printed: {e}")),
+        }
+    } else {
+        None
+    };
+    let document = match (&fax, &print_job) {
+        (Some(fax), _) => render::Document::Fax(fax),
+        (_, Some(job)) => render::Document::Print(job),
+        (None, None) => render::Document::None,
+    };
+    // A fax document or print job is made whole or not at all: once a
+    // page has failed, the pages not yet started are skipped.
+    let whole_document = !matches!(document, render::Document::None);
+    let document_failed = AtomicBool::new(false);
 
-    let errors: Vec<(i32, render::RenderError)> = pool.install(|| {
-        pages
-            .par_iter()
-            .filter_map(|&page_num| {
-                #[expect(
-                    clippy::cast_sign_loss,
-                    reason = "page_num ≥ 1, enforced by build_page_list"
-                )]
-                let page_u32 = page_num as u32;
-                if fax_failed.load(Ordering::Relaxed) {
-                    return None;
-                }
+    let render_one = |&page_num: &i32| {
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "page_num ≥ 1, enforced by build_page_list"
+        )]
+        let page_u32 = page_num as u32;
+        if document_failed.load(Ordering::Relaxed) {
+            return None;
+        }
 
-                let t0 = timings.then(Instant::now);
-                let result = render::render_page(
-                    &session,
-                    page_u32,
-                    total_u32,
-                    &args,
-                    &spill_policy,
-                    fax.as_ref(),
-                );
-                if fax.is_some() && result.is_err() {
-                    fax_failed.store(true, Ordering::Relaxed);
-                }
-                if let Some(t0) = t0 {
-                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                    let tid = rayon::current_thread_index().unwrap_or(99);
-                    eprintln!("timing: page {page_num:4}  {ms:7.1}ms  thread {tid}");
-                }
+        let t0 = timings.then(Instant::now);
+        let result = render::render_page(
+            &session,
+            page_u32,
+            total_u32,
+            &args,
+            &spill_policy,
+            document,
+        );
+        if whole_document && result.is_err() {
+            document_failed.store(true, Ordering::Relaxed);
+        }
+        if let Some(t0) = t0 {
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let tid = rayon::current_thread_index().unwrap_or(99);
+            eprintln!("timing: page {page_num:4}  {ms:7.1}ms  thread {tid}");
+        }
 
-                if args.progress {
-                    let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let completed_usize = usize::try_from(completed).unwrap_or(n_pages);
-                    let remaining = n_pages.saturating_sub(completed_usize);
-                    #[expect(
-                        clippy::cast_precision_loss,
-                        reason = "ETA display; ±1s accuracy is sufficient"
-                    )]
-                    let eta_str = if elapsed > 0.5 && completed >= 2 {
-                        let rate = f64::from(completed) / elapsed;
-                        let eta_s = remaining as f64 / rate;
-                        if eta_s.is_finite() {
-                            format!("~{eta_s:.1}s remaining")
-                        } else {
-                            "~?s remaining".to_owned()
-                        }
-                    } else {
-                        "~?s remaining".to_owned()
-                    };
-                    eprintln!(
-                        "rrocket: page {page_num} done  [{completed}/{n_pages}]  \
+        if args.progress {
+            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let elapsed = start.elapsed().as_secs_f64();
+            let completed_usize = usize::try_from(completed).unwrap_or(n_pages);
+            let remaining = n_pages.saturating_sub(completed_usize);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "ETA display; ±1s accuracy is sufficient"
+            )]
+            let eta_str = if elapsed > 0.5 && completed >= 2 {
+                let rate = f64::from(completed) / elapsed;
+                let eta_s = remaining as f64 / rate;
+                if eta_s.is_finite() {
+                    format!("~{eta_s:.1}s remaining")
+                } else {
+                    "~?s remaining".to_owned()
+                }
+            } else {
+                "~?s remaining".to_owned()
+            };
+            eprintln!(
+                "rrocket: page {page_num} done  [{completed}/{n_pages}]  \
                          {elapsed:.1}s elapsed  {eta_str}"
-                    );
-                }
+            );
+        }
 
-                result.err().map(|e| (page_num, e))
-            })
-            .collect()
-    });
+        result.err().map(|e| (page_num, e))
+    };
+
+    // Printed pages render a window at a time (see `print`); other pages
+    // render in one pass.
+    let (errors, spool_error) = print_job.as_ref().map_or_else(
+        || {
+            let errors: Vec<_> = pool.install(|| pages.par_iter().filter_map(render_one).collect());
+            (errors, None)
+        },
+        |job| job.render_in_windows(&pages, &pool, render_one),
+    );
 
     // Eagerly drop GPU decoders on every worker thread while the CUDA driver is
     // still fully live, before the pool drops.  Avoids the process-exit teardown
@@ -229,6 +251,35 @@ fn main() -> ExitCode {
     // driver that has already started its own atexit shutdown sequence.
     let _ = pool.broadcast(|_| pdf_raster::release_gpu_decoders());
 
+    if let Some(job) = print_job {
+        if let Some(e) = spool_error {
+            job.discard();
+            return fail(format_args!(
+                "nothing printed: the print document was not written: {e}"
+            ));
+        }
+        if !errors.is_empty() {
+            job.discard();
+            let status = diagnostics::report_errors(errors);
+            eprintln!("rrocket: nothing printed: pages failed to render");
+            return status;
+        }
+        let title = std::path::Path::new(&args.input)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|_| args.input != "-")
+            .unwrap_or("rrocket");
+        let submission = print::Submission {
+            printer: args.printer.as_deref(),
+            copies: args.copies.unwrap_or(1),
+            duplex: args.duplex,
+            title,
+        };
+        if let Err(e) = job.submit(&submission) {
+            return fail(format_args!("nothing printed: {e}"));
+        }
+        return ExitCode::SUCCESS;
+    }
     if let Some(document) = fax {
         // A fax missing pages would read as complete: none is written.
         if !errors.is_empty() {

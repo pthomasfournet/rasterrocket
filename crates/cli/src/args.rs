@@ -65,7 +65,9 @@ pub(crate) struct Args {
     pub input: String,
 
     /// Output filename prefix (page number and extension are appended).
-    pub output_prefix: String,
+    /// Not given with --print, which writes no files.
+    #[arg(required_unless_present_any = ["print", "printer"])]
+    pub output_prefix: Option<String>,
 
     // ── Page range ──────────────────────────────────────────────────────────
     /// First page to render (1-based, default: 1).
@@ -236,6 +238,28 @@ pub(crate) struct Args {
     )]
     pub invert: Option<InvertWhen>,
 
+    /// Print the pages through the system's print service: CUPS's `lp`
+    /// takes them as one PDF of page images at the resolution flags
+    /// (default 600 dpi), colour, or gray with --gray and --mono, and fits
+    /// them to the printer.  Pages render for printing unless --purpose
+    /// says otherwise.  No `OUTPUT_PREFIX` is given.
+    #[arg(long)]
+    pub print: bool,
+
+    /// The printer --print submits to, a CUPS queue (`lp -d NAME`), else
+    /// the default destination.  Implies --print.
+    #[arg(long = "printer", value_name = "NAME", value_parser = crate::print::parse_printer)]
+    pub printer: Option<String>,
+
+    /// Copies --print asks for.
+    #[arg(long = "copies", value_name = "N", value_parser = clap::value_parser!(u32).range(1..=9999))]
+    pub copies: Option<u32>,
+
+    /// Two-sided printing with --print, the sheet turning on its `long` or
+    /// `short` edge.  Default: the printer's own setting.
+    #[arg(long = "duplex", value_name = "EDGE", value_enum)]
+    pub duplex: Option<crate::print::Duplex>,
+
     // ── Rendering options ────────────────────────────────────────────────────
     /// Antialias text (default yes).  `no` draws glyphs with hard,
     /// bilevel edges.
@@ -394,17 +418,14 @@ pub(crate) struct Args {
 
     /// What the pages are rendered for.
     ///
-    /// `view`  — on-screen viewing (the default): layers take their View
-    ///           usage state and annotations marked not for viewing are omitted.
-    /// `print` — printing: layers take their Print usage state and only
-    ///           annotations marked for printing are drawn.
-    #[arg(
-        long = "purpose",
-        value_name = "PURPOSE",
-        default_value = "view",
-        verbatim_doc_comment
-    )]
-    pub purpose: PurposeArg,
+    /// `view`  — on-screen viewing (the default without --print): layers
+    ///           take their View usage state and annotations marked not for
+    ///           viewing are omitted.
+    /// `print` — printing (the default with --print): layers take their
+    ///           Print usage state and only annotations marked for printing
+    ///           are drawn.
+    #[arg(long = "purpose", value_name = "PURPOSE", verbatim_doc_comment)]
+    pub purpose: Option<PurposeArg>,
 
     // ── Camera-capture cleanup ───────────────────────────────────────────────
     /// Detect a page photographed on a darker surround and crop to its
@@ -628,6 +649,7 @@ impl Args {
             );
         }
         self.validate_fax_flags()?;
+        self.validate_print_flags()?;
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
@@ -687,6 +709,78 @@ impl Args {
     /// implies it.
     pub(crate) const fn faxing(&self) -> bool {
         self.fax || self.fax_to.is_some()
+    }
+
+    /// The output prefix; empty under `--print`, which writes no files.
+    pub(crate) fn prefix(&self) -> &str {
+        self.output_prefix.as_deref().unwrap_or("")
+    }
+
+    /// Whether the pages are printed: `--print`, or `--printer`, which
+    /// implies it.
+    pub(crate) const fn printing(&self) -> bool {
+        self.print || self.printer.is_some()
+    }
+
+    /// Refuse the flags `--print` excludes, and the print-only flags
+    /// without it.
+    fn validate_print_flags(&self) -> Result<(), String> {
+        if !self.printing() {
+            return match (self.copies.is_some(), self.duplex.is_some()) {
+                (true, _) => Err("--copies applies to --print only".to_owned()),
+                (_, true) => Err("--duplex applies to --print only".to_owned()),
+                _ => Ok(()),
+            };
+        }
+        if cfg!(windows) {
+            return Err(
+                "--print submits through CUPS's lp, which Windows does not have; render the \
+                 pages to files and print them from an application"
+                    .to_owned(),
+            );
+        }
+        if let Some(prefix) = &self.output_prefix {
+            return Err(format!(
+                "--print writes no files; drop the output prefix {prefix:?}"
+            ));
+        }
+        if self.is_comic_input() {
+            return Err(
+                "--print renders PDF input; a comic archive's pages have no page size".to_owned(),
+            );
+        }
+        if self.faxing() {
+            return Err("--print and --fax are mutually exclusive".to_owned());
+        }
+        let excluded = [
+            (self.png, "--png"),
+            (self.jpeg, "--jpeg"),
+            (self.tiff, "--tiff"),
+            (self.single_file, "--singlefile"),
+            (self.ram || self.ram_path.is_some(), "--ram / --ram-path"),
+            (self.scale_to.is_some(), "--scale-to"),
+            (self.scale_to_x.is_some(), "--scale-to-x"),
+            (self.scale_to_y.is_some(), "--scale-to-y"),
+        ];
+        if let Some((_, flag)) = excluded.iter().find(|(set, _)| *set) {
+            return Err(format!(
+                "--print sends page images measured by their resolution; drop {flag}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Expand `--print`: implied by `--printer`, at [`crate::print::PRINT_DPI`]
+    /// unless a resolution flag is given.  Call after
+    /// [`Self::validate_format_flags`].
+    pub(crate) const fn apply_print_preset(&mut self) {
+        if !self.printing() {
+            return;
+        }
+        self.print = true;
+        if self.resolution.is_none() && self.resolution_x.is_none() && self.resolution_y.is_none() {
+            self.resolution = Some(crate::print::PRINT_DPI);
+        }
     }
 
     /// Refuse the flags `--fax` fixes or excludes, and the fax-only flags
@@ -964,7 +1058,16 @@ impl Args {
         config.font_dirs = SessionConfig::font_dirs_from_env();
         config.system_fonts = !self.no_system_fonts;
         config.strict = self.strict;
-        config.purpose = self.purpose.into();
+        config.purpose = self.purpose.map_or_else(
+            || {
+                if self.printing() {
+                    RenderPurpose::Print
+                } else {
+                    RenderPurpose::View
+                }
+            },
+            Into::into,
+        );
         config.annotations = !self.hide_annotations;
         config.text_antialias = self.antialias == AaFlag::Yes;
         config.vector_antialias = self.vector_antialias == AaFlag::Yes;
@@ -1366,6 +1469,59 @@ mod page_list_tests {
                 "{flags:?}"
             );
         }
+    }
+
+    fn print_args(flags: &[&str]) -> Result<Args, String> {
+        let mut command_line = vec!["rrocket"];
+        command_line.extend_from_slice(flags);
+        command_line.push("in.pdf");
+        let mut parsed = Args::try_parse_from(command_line).map_err(|e| e.to_string())?;
+        parsed.validate_format_flags()?;
+        parsed.apply_print_preset();
+        Ok(parsed)
+    }
+
+    #[test]
+    fn print_needs_no_prefix_and_defaults_to_600_dpi_for_printing() {
+        let args = print_args(&["--print"]).unwrap();
+        assert_eq!(args.dpi(), (600.0, 600.0));
+        assert_eq!(args.session_config().unwrap().purpose, RenderPurpose::Print);
+        let args = print_args(&["--printer", "Office", "--rx", "300", "--ry", "600"]).unwrap();
+        assert!(args.print);
+        assert_eq!(args.dpi(), (300.0, 600.0));
+        let args = print_args(&["--print", "--purpose", "view", "-r", "1200"]).unwrap();
+        assert_eq!(args.dpi(), (1200.0, 1200.0));
+        assert_eq!(args.session_config().unwrap().purpose, RenderPurpose::View);
+        // Without --print the prefix is required.
+        assert!(Args::try_parse_from(["rrocket", "in.pdf"]).is_err());
+    }
+
+    #[test]
+    fn print_refuses_file_output_and_print_flags_need_it() {
+        for (flags, message) in [
+            (&["--print", "--png"][..], "drop --png"),
+            (&["--print", "--scale-to", "100"], "drop --scale-to"),
+            (&["--print", "--ram"], "drop --ram"),
+            (&["--print", "--fax"], "mutually exclusive"),
+        ] {
+            let error = print_args(flags).err().unwrap();
+            assert!(error.contains(message), "{flags:?}: {error}");
+        }
+        let with_prefix = Args::parse_from(["rrocket", "--print", "in.pdf", "out"]);
+        assert!(
+            with_prefix
+                .validate_format_flags()
+                .unwrap_err()
+                .contains("output prefix")
+        );
+        for flags in [&["--copies", "2"][..], &["--duplex", "long"]] {
+            assert!(
+                args_with(flags).validate_format_flags().is_err(),
+                "{flags:?}"
+            );
+        }
+        assert!(Args::try_parse_from(["rrocket", "--print", "--copies", "0", "in.pdf"]).is_err());
+        assert!(Args::try_parse_from(["rrocket", "--printer", "-x", "in.pdf"]).is_err());
     }
 
     #[test]

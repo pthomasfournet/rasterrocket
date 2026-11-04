@@ -15,14 +15,7 @@ pub(crate) fn output_path(
     total_pages: i32,
     format: OutputFormat,
 ) -> String {
-    output_path_with_prefix(
-        &args.output_prefix,
-        args,
-        page_num,
-        total_pages,
-        format,
-        None,
-    )
+    output_path_with_prefix(args.prefix(), args, page_num, total_pages, format, None)
 }
 
 /// Compute the output filename for a given page with an explicit prefix
