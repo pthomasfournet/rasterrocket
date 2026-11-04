@@ -44,8 +44,9 @@ pub enum RasterError {
     },
     /// A bitmap the render of the drawn region needs could not be
     /// allocated: the region is within the size limits, but the allocator
-    /// refused the buffers of its page bitmap, or of a transparency group,
-    /// soft mask or knockout coverage canvas drawn on it.
+    /// refused the buffers of its page bitmap, or of a bitmap drawn on it: a
+    /// transparency group, soft mask, knockout coverage canvas, tiling-pattern
+    /// cell or screen, Type 3 glyph canvas, or a snapshot of the canvas.
     PageAllocationFailed {
         /// Width of the refused bitmap in pixels.
         width: u32,

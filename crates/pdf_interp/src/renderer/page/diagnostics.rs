@@ -163,7 +163,8 @@ pub enum RenderAbort {
         ops: u64,
     },
     /// The allocator refused a bitmap the page needs: a transparency
-    /// group, a soft mask or a knockout coverage canvas.
+    /// group, soft mask, knockout coverage canvas, tiling-pattern cell or
+    /// screen, Type 3 glyph canvas, or a snapshot of the canvas.
     AllocationFailed {
         /// Width of the refused bitmap in pixels.
         width: u32,

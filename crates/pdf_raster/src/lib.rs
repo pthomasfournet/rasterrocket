@@ -511,7 +511,8 @@ pub struct RenderedPage {
 ///   beyond the size limits at the requested scale.
 /// - [`RasterError::PageAllocationFailed`] — the allocator refused a bitmap
 ///   the page's render needs, within the limits: its page bitmap, or a
-///   transparency group, soft mask or knockout canvas drawn on it.  Under
+///   transparency group, soft mask, knockout coverage, tiling-pattern or
+///   Type 3 glyph bitmap drawn on it, or a snapshot of the canvas.  Under
 ///   Linux's default overcommit a large allocation is seldom refused; the
 ///   process can instead be stopped by the out-of-memory killer when the
 ///   memory is touched.
