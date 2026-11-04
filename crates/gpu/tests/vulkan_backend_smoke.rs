@@ -2,7 +2,7 @@
 //! the system has.  Skipped if the `vulkan` feature isn't built.
 //!
 //! Run with:
-//!   `cargo test -p gpu --features vulkan --test vulkan_backend_smoke`
+//!   `cargo test -p rasterrocket-gpu --features vulkan --test vulkan_backend_smoke`
 //!
 //! This test only requires *any* working Vulkan ICD — Mesa lavapipe (the
 //! CPU software ICD) counts.  CI without a discrete GPU can run it via
@@ -25,8 +25,10 @@
 //! holds one `VulkanBackend` for the whole process), so subtle leaks or
 //! stale-state bugs that per-test reset would mask now surface here.
 //!
-//! [`vulkan_backend_initialises`] is the single test that keeps its own
-//! `VulkanBackend::new()` — its job is to verify cold init.
+//! Tests that need a backend of their own build it: cold init
+//! ([`vulkan_backend_initialises`]), concurrent creation and teardown, a
+//! page left broken by a panic, and the integrated GPU
+//! ([`integrated_backend`]).
 
 #![cfg(feature = "vulkan")]
 
@@ -421,17 +423,27 @@ fn aa_fill_page_runs_in_one_submission() {
 
 /// The first integrated GPU: the default device when it is one, else a
 /// device matched by a driver name that only integrated parts carry.
+///
+/// `None` (the caller skips) only when no device matches either name; any
+/// other failure, an ambiguous name included, fails the test, so that a
+/// broken device selection does not pass as a box without an iGPU.
 fn integrated_backend() -> Option<VulkanBackend> {
-    let default = VulkanBackend::new()
-        .ok()
-        .filter(VulkanBackend::is_integrated);
-    default.or_else(|| {
-        ["radv", "intel"].iter().find_map(|name| {
-            let selector = name.parse().expect("non-empty selector");
-            VulkanBackend::with_selector(Some(&selector))
-                .ok()
-                .filter(VulkanBackend::is_integrated)
-        })
+    let default = VulkanBackend::new().expect("VulkanBackend::new");
+    if default.is_integrated() {
+        return Some(default);
+    }
+    drop(default);
+    ["radv", "intel"].iter().find_map(|name| {
+        let selector = name.parse().expect("non-empty selector");
+        match VulkanBackend::with_selector(Some(&selector)) {
+            Ok(backend) => backend.is_integrated().then_some(backend),
+            Err(BackendError::DeviceSelection(msg))
+                if msg.contains("no device name contains it") =>
+            {
+                None
+            }
+            Err(e) => panic!("selecting the {name} device failed: {e}"),
+        }
     })
 }
 
