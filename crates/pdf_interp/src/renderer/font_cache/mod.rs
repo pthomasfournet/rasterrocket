@@ -33,6 +33,7 @@ use font::{
 };
 use pdf::ObjectId;
 
+use super::document_binding::DocumentBinding;
 use super::fallback::{FallbackGlyph, FallbackResolver};
 use super::substitutes::substitute_program;
 use super::system_fonts::FontLibrary;
@@ -170,10 +171,16 @@ impl Deref for PageFace {
 type ResolvedProgram = (Arc<FontProgram>, bool);
 
 /// The fonts of one document, resolved once and shared by every page
-/// rendered from it.  Entries are keyed by the object number of an indirect
-/// font dictionary, so a store serves one document only.
+/// rendered from it.
+///
+/// Entries are keyed by the object number of an indirect font dictionary,
+/// so a store serves one document only: the first document whose renderer
+/// it is given to (see
+/// [`PageRenderer::set_document_fonts`](crate::renderer::PageRenderer::set_document_fonts)).
 pub struct DocumentFonts {
     fonts: Mutex<HashMap<ObjectId, Arc<SharedFont>>>,
+    /// The document the store serves.
+    document: DocumentBinding,
     /// The installed fonts substitutes and fallbacks are drawn from.
     library: Arc<FontLibrary>,
     /// Source of the identifier of every face made for the document.
@@ -205,11 +212,18 @@ impl DocumentFonts {
     pub fn new(font_dirs: &[PathBuf], system_fonts: bool) -> Self {
         Self {
             fonts: Mutex::default(),
+            document: DocumentBinding::default(),
             library: FontLibrary::shared(font_dirs, system_fonts),
             face_ids: Arc::default(),
             glyphs: GlyphCache::default(),
             stroked: Mutex::default(),
         }
+    }
+
+    /// Bind the store to `doc` if it serves no document yet; whether it
+    /// serves `doc`.
+    pub(crate) fn bind(&self, doc: &pdf::Document) -> bool {
+        self.document.bind(doc)
     }
 
     /// The identifier under which the coverage of the glyphs of the face

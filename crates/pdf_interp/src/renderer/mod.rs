@@ -3,6 +3,7 @@
 #[cfg(feature = "bundled-fonts")]
 mod bundled_fonts;
 pub(crate) mod color;
+mod document_binding;
 pub(crate) mod document_images;
 pub(crate) mod encodings;
 mod fallback;

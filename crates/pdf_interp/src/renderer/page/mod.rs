@@ -545,7 +545,18 @@ impl<'doc> PageRenderer<'doc> {
     /// Resolve indirect fonts through `fonts`, a store shared by every page
     /// of this renderer's document, instead of a store private to the page.
     /// Call before execute.
+    ///
+    /// A store serves the first document whose renderer it is given to: a
+    /// store already serving another document is ignored, with a warning,
+    /// and the page resolves its fonts itself.
     pub fn set_document_fonts(&mut self, fonts: Arc<DocumentFonts>) {
+        if !fonts.bind(self.resources.doc()) {
+            log::warn!(
+                "rasterrocket-interp: the document font store serves another document — \
+                 resolving this page's fonts without it"
+            );
+            return;
+        }
         self.font_cache = FontCache::new(fonts, self.text_antialias);
     }
 

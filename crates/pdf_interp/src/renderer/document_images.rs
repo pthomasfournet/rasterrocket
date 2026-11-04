@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use pdf::ObjectId;
 
+use super::document_binding::DocumentBinding;
 use crate::resources::DecodedImage;
 use crate::resources::image::ImageFilter;
 
@@ -98,9 +99,8 @@ pub(crate) enum Lookup {
 pub struct DocumentImages {
     state: Mutex<State>,
     budget: usize,
-    /// The [`pdf::Document::instance_id`] of the document the store serves,
-    /// set by the first [`Self::bind`].
-    document: OnceLock<u64>,
+    /// The document the store serves.
+    document: DocumentBinding,
 }
 
 struct State {
@@ -141,7 +141,7 @@ impl DocumentImages {
                 bytes: 0,
             }),
             budget,
-            document: OnceLock::new(),
+            document: DocumentBinding::default(),
         }
     }
 
@@ -154,8 +154,7 @@ impl DocumentImages {
     /// Bind the store to `doc` if it serves no document yet; whether it
     /// serves `doc`.
     pub(crate) fn bind(&self, doc: &pdf::Document) -> bool {
-        let id = doc.instance_id();
-        *self.document.get_or_init(|| id) == id
+        self.document.bind(doc)
     }
 
     /// Host bytes of the decodes the store keeps.

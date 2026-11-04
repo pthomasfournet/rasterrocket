@@ -1395,6 +1395,21 @@ fn pages_sharing_default_spaces_share_image_decodes() {
     assert_eq!(images.kept_bytes(), 4, "the 2×2 image is kept once");
 }
 
+/// A font store bound to one document is refused by the renderer of
+/// another, whose fonts stay its own.
+#[test]
+fn a_document_font_store_serves_one_document() {
+    let a = crate::test_helpers::empty_doc();
+    let b = crate::test_helpers::empty_doc();
+    let fonts: Arc<super::super::DocumentFonts> = Arc::default();
+    let mut on_a = PageRenderer::new(8, 8, &a, (1, 0));
+    on_a.set_document_fonts(Arc::clone(&fonts));
+    assert!(Arc::ptr_eq(on_a.font_cache.document_fonts(), &fonts));
+    let mut on_b = PageRenderer::new(8, 8, &b, (1, 0));
+    on_b.set_document_fonts(Arc::clone(&fonts));
+    assert!(!Arc::ptr_eq(on_b.font_cache.document_fonts(), &fonts));
+}
+
 /// A default space of the wrong component count leaves the device space
 /// in effect.
 #[test]
