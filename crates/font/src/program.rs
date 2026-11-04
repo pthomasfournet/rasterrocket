@@ -830,43 +830,35 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
         for subtable in subtables.iter().flatten() {
             match subtable {
                 SingleSubst::Format1(single) => {
-                    let Ok(coverage) = single.coverage() else {
-                        continue;
-                    };
-                    add_delta_forms(
-                        &mut forms,
-                        &coverage,
-                        single.delta_glyph_id().into(),
-                        1 << 16,
-                    );
+                    if let Ok(coverage) = single.coverage() {
+                        let delta = single.delta_glyph_id().into();
+                        add_forms(
+                            &mut forms,
+                            &coverage,
+                            delta_targets(&coverage, delta, 0xFFFF),
+                        );
+                    }
                 }
                 SingleSubst::Format3(single) => {
-                    let Ok(coverage) = single.coverage() else {
-                        continue;
-                    };
-                    add_delta_forms(
-                        &mut forms,
-                        &coverage,
-                        single.delta_glyph_id().into(),
-                        1 << 24,
-                    );
+                    if let Ok(coverage) = single.coverage() {
+                        let delta = single.delta_glyph_id().into();
+                        add_forms(
+                            &mut forms,
+                            &coverage,
+                            delta_targets(&coverage, delta, 0xFF_FFFF),
+                        );
+                    }
                 }
                 SingleSubst::Format2(single) => {
-                    let Ok(coverage) = single.coverage() else {
-                        continue;
-                    };
-                    for (glyph, to) in coverage.iter().zip(single.substitute_glyph_ids()) {
-                        let to = to.get().to_u32();
-                        let _ = forms.entry(glyph.to_u32()).or_insert(to);
+                    if let Ok(coverage) = single.coverage() {
+                        let targets = single.substitute_glyph_ids().iter();
+                        add_forms(&mut forms, &coverage, targets.map(|to| to.get().to_u32()));
                     }
                 }
                 SingleSubst::Format4(single) => {
-                    let Ok(coverage) = single.coverage() else {
-                        continue;
-                    };
-                    for (glyph, to) in coverage.iter().zip(single.substitute_glyph_ids()) {
-                        let to = to.get().to_u32();
-                        let _ = forms.entry(glyph.to_u32()).or_insert(to);
+                    if let Ok(coverage) = single.coverage() {
+                        let targets = single.substitute_glyph_ids().iter();
+                        add_forms(&mut forms, &coverage, targets.map(|to| to.get().to_u32()));
                     }
                 }
             }
@@ -875,22 +867,30 @@ fn vertical_forms(font: &FontRef<'_>) -> HashMap<u32, u32> {
     forms
 }
 
-/// Adds the forms of a delta single substitution: each covered glyph maps
-/// to itself plus `delta`, modulo `modulus` (the glyph-index range of the
-/// subtable format).
-fn add_delta_forms(
+/// Adds the forms of a single substitution: the covered glyphs, in
+/// coverage order, map to `targets`.  A glyph already mapped keeps its
+/// earlier form.
+fn add_forms(
     forms: &mut HashMap<u32, u32>,
     coverage: &CoverageTable<'_>,
-    delta: i32,
-    modulus: i64,
+    targets: impl IntoIterator<Item = u32>,
 ) {
-    for glyph in coverage.iter() {
-        let from = glyph.to_u32();
-        let Ok(to) = u32::try_from((i64::from(from) + i64::from(delta)).rem_euclid(modulus)) else {
-            continue;
-        };
-        let _ = forms.entry(from).or_insert(to);
+    for (glyph, to) in coverage.iter().zip(targets) {
+        let _ = forms.entry(glyph.to_u32()).or_insert(to);
     }
+}
+
+/// The targets of a delta single substitution, in coverage order: each
+/// covered glyph plus `delta`, reduced to the glyph-index range of the
+/// subtable format, whose largest index is the all-ones `mask`.
+fn delta_targets<'a>(
+    coverage: &CoverageTable<'a>,
+    delta: i32,
+    mask: u32,
+) -> impl Iterator<Item = u32> + 'a {
+    coverage
+        .iter()
+        .map(move |glyph| glyph.to_u32().wrapping_add_signed(delta) & mask)
 }
 
 /// Lowest glyph index carrying each string identifier below
