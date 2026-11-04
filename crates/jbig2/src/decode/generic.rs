@@ -181,7 +181,7 @@ pub(crate) fn parse_adaptive_template_pixels(
 
 /// Parse the location of one adaptive template pixel (7.4.6.3).
 fn parse_adaptive_template_pixel(reader: &mut Reader<'_>) -> Result<AdaptiveTemplatePixel> {
-    let x = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
+    let x = i16::from(reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8);
     let y = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
 
     // Validate AT pixel location (6.2.5.4, Figure 7).
@@ -196,10 +196,10 @@ fn parse_adaptive_template_pixel(reader: &mut Reader<'_>) -> Result<AdaptiveTemp
 }
 
 /// The default AT pixels of template 0 (Figure 3(a)).
-const TEMPLATE0_DEFAULT: [(i8, i8); 4] = [(3, -1), (-3, -1), (2, -2), (-2, -2)];
+const TEMPLATE0_DEFAULT: [(i16, i8); 4] = [(3, -1), (-3, -1), (2, -2), (-2, -2)];
 
 /// The nominal locations of A1 to A12 (Figure 3(b)).
-const EXTENDED_TEMPLATE_NOMINAL: [(i8, i8); 12] = [
+const EXTENDED_TEMPLATE_NOMINAL: [(i16, i8); 12] = [
     (-2, 0),
     (0, -2),
     (-2, -1),

@@ -173,6 +173,14 @@ fn segment(number: u32, segment_type: u8, data: &[u8]) -> Vec<u8> {
     segment
 }
 
+/// A pattern dictionary segment (7.4.4) of `count` arithmetic-coded patterns
+/// of `width` × `height` pixels, with GBTEMPLATE 0 and no coded data.
+fn pattern_dictionary(number: u32, width: u8, height: u8, count: u32) -> Vec<u8> {
+    let mut data = vec![0, width, height];
+    data.extend_from_slice(&(count - 1).to_be_bytes());
+    segment(number, 16, &data)
+}
+
 /// A region segment information field (7.4.1).
 fn region_info(width: u32, height: u32, x: u32, y: u32, combination_operator: u8) -> Vec<u8> {
     [width, height, x, y]

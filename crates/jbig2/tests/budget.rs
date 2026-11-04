@@ -3,7 +3,7 @@
 
 use hayro_jbig2::{DecodeError, DecodeSettings, Globals, OverflowError, Page};
 
-use crate::{Collector, page_information, region_info, segment};
+use crate::{Collector, page_information, pattern_dictionary, region_info};
 
 /// An embedded segment (7.2) like [`segment`], referring to segment
 /// `referred` (at most 255).
@@ -13,14 +13,6 @@ fn referring_segment(number: u32, segment_type: u8, referred: u8, data: &[u8]) -
     segment.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
     segment.extend_from_slice(data);
     segment
-}
-
-/// A pattern dictionary segment (7.4.4) of `count` arithmetic-coded patterns
-/// of `width` × `height` pixels, with GBTEMPLATE 0 and no coded data.
-fn pattern_dictionary(number: u32, width: u8, height: u8, count: u32) -> Vec<u8> {
-    let mut data = vec![0, width, height];
-    data.extend_from_slice(&(count - 1).to_be_bytes());
-    segment(number, 16, &data)
 }
 
 /// An immediate halftone region segment (7.4.5) of 1 × 1 pixels at the page

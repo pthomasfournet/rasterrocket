@@ -1,6 +1,6 @@
 //! Pattern dictionaries and halftone regions (6.6, 6.7).
 
-use crate::{check, check_crop};
+use crate::{check, check_crop, pattern_dictionary};
 
 #[test]
 fn basic() {
@@ -120,4 +120,20 @@ fn large_patterns() {
 #[test]
 fn tall_patterns() {
     check("halftone_tall_patterns", "truchet");
+}
+
+/// The first adaptive template pixel of a collective bitmap lies HDPW
+/// pixels to the left (6.7.5), which for HDPW of 128 and more is beyond
+/// the range of the AT pixel fields of a region header.
+#[test]
+fn patterns_at_least_128_pixels_wide() {
+    use hayro_jbig2::{DecodeSettings, Globals};
+
+    for width in [127, 128, 200, 255] {
+        let data = pattern_dictionary(1, width, 1, 2);
+        assert!(
+            Globals::new(&data, &DecodeSettings { strict: true }).is_ok(),
+            "HDPW {width}"
+        );
+    }
 }

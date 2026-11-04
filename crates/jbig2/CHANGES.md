@@ -79,6 +79,15 @@ is opened with `Page::new_embedded`.
   dictionary size. `Bitmap` is no longer `Clone`, so every copy goes
   through the charged `Bitmap::try_clone`. Output is unchanged.
 
+- The first adaptive template pixel of a pattern dictionary's collective
+  bitmap is placed at x = -HDPW (6.7.5) for every pattern width: the AT
+  pixel x offset is an `i16`. Upstream negated `HDPW as i8`, which
+  overflowed at HDPW = 128 (a panic with overflow checks) and put the
+  pixel at 256 - HDPW for HDPW > 128, decoding those dictionaries with the
+  wrong context. Output changes only for patterns 128 or more pixels
+  wide. Tests: `decode::pattern::tests`,
+  `halftone::patterns_at_least_128_pixels_wide`.
+
 ## Upstream fixes brought over
 
 Upstream commits to `hayro-jbig2/` after the base, applied as upstream

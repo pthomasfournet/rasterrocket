@@ -34,27 +34,7 @@ pub(crate) fn decode(
     if header.mmr {
         let _ = generic::decode_bitmap_mmr(&mut collective_bitmap, header.data, header.strict)?;
     } else {
-        let at_pixels = match header.template {
-            Template::Template0 => [
-                AdaptiveTemplatePixel {
-                    x: -(pattern_width as i8),
-                    y: 0,
-                },
-                AdaptiveTemplatePixel { x: -3, y: -1 },
-                AdaptiveTemplatePixel { x: 2, y: -2 },
-                AdaptiveTemplatePixel { x: -2, y: -2 },
-            ],
-            Template::Template1 | Template::Template2 | Template::Template3 => [
-                AdaptiveTemplatePixel {
-                    x: -(pattern_width as i8),
-                    y: 0,
-                },
-                // Unused.
-                AdaptiveTemplatePixel::default(),
-                AdaptiveTemplatePixel::default(),
-                AdaptiveTemplatePixel::default(),
-            ],
-        };
+        let at_pixels = collective_at_pixels(header.template, header.pattern_width);
 
         let mut decoder = ArithmeticDecoder::new(header.data);
         scratch.contexts.clear();
@@ -165,6 +145,32 @@ pub(crate) fn decode(
     })
 }
 
+/// The AT pixels of a collective bitmap of patterns `pattern_width` pixels
+/// wide (6.7.5 step 2): the first lies one pattern to the left, the others,
+/// used by template 0 only, at their defaults.
+fn collective_at_pixels(template: Template, pattern_width: u8) -> [AdaptiveTemplatePixel; 4] {
+    let first = AdaptiveTemplatePixel {
+        x: -i16::from(pattern_width),
+        y: 0,
+    };
+
+    match template {
+        Template::Template0 => [
+            first,
+            AdaptiveTemplatePixel { x: -3, y: -1 },
+            AdaptiveTemplatePixel { x: 2, y: -2 },
+            AdaptiveTemplatePixel { x: -2, y: -2 },
+        ],
+        Template::Template1 | Template::Template2 | Template::Template3 => [
+            first,
+            // Unused.
+            AdaptiveTemplatePixel::default(),
+            AdaptiveTemplatePixel::default(),
+            AdaptiveTemplatePixel::default(),
+        ],
+    }
+}
+
 /// A decoded pattern dictionary.
 #[derive(Debug)]
 pub(crate) struct PatternDictionary {
@@ -226,4 +232,17 @@ pub(crate) fn parse<'a>(
         data,
         strict,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_at_pixel_is_one_pattern_to_the_left() {
+        for width in [1, 127, 128, 200, 255] {
+            let pixels = collective_at_pixels(Template::Template0, width);
+            assert_eq!((pixels[0].x, pixels[0].y), (-i16::from(width), 0));
+        }
+    }
 }

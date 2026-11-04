@@ -186,9 +186,13 @@ pub(crate) fn parse_region_segment_info(reader: &mut Reader<'_>) -> Result<Regio
 }
 
 /// Adaptive template pixel position for generic and refinement regions (6.2.5.4, Figure 7).
+///
+/// `x` is wider than the signed byte of a header field: the first AT pixel
+/// of a pattern dictionary's collective bitmap lies `-HDPW` pixels away,
+/// down to -255 (6.7.5).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AdaptiveTemplatePixel {
-    pub(crate) x: i8,
+    pub(crate) x: i16,
     pub(crate) y: i8,
 }
 
@@ -201,10 +205,10 @@ pub(crate) struct AdaptiveTemplatePixel {
 pub(crate) fn parse_refinement_at_pixels(
     reader: &mut Reader<'_>,
 ) -> Result<Vec<AdaptiveTemplatePixel>> {
-    let x1 = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
+    let x1 = i16::from(reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8);
     let y1 = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
 
-    let x2 = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
+    let x2 = i16::from(reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8);
     let y2 = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
 
     Ok(vec![
