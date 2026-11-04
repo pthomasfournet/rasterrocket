@@ -69,8 +69,8 @@ path such as `./out`, or pass `--no-ram`. See the
 
 `--print` hands the rendered pages to CUPS through `lp`, which the CUPS client
 provides (`cups-client` on Debian and Ubuntu, `cups` on Fedora and Arch);
-`--printer NAME` picks a queue, else the default destination
-(`lpstat -d`). The pages are spooled in an anonymous file under `$TMPDIR`,
+`--printer NAME` picks a queue, one of those `rrocket --list-printers`
+lists, else the default destination (`lpstat -d`). The pages are spooled in an anonymous file under `$TMPDIR`,
 else `/var/tmp`. `--fax-to NUMBER` sends a `--fax` document through a CUPS
 fax queue (`--fax-queue NAME`) or, without one, HylaFAX's `sendfax`. See the
 [CLI reference](../cli-reference.md#printing).
