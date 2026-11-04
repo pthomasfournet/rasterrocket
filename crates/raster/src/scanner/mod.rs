@@ -561,10 +561,11 @@ fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]
 /// so `row_start[i] + cursors[i]` is the next free slot for row `i`.
 ///
 /// Sloped segments use a 48.16 fixed-point integer accumulator (`xx1_fp += dxdy_fp`)
-/// for the per-scanline step.  The accumulator is initialised from f64 for the
-/// first row to preserve accuracy, then stepped by the pre-computed slope —
-/// no f64 arithmetic in the inner loop.  Its range covers every coordinate a
-/// page bitmap holds, antialiased included.
+/// for the per-scanline step.  The accumulator is initialised from f64 at the
+/// segment's first row, then stepped by the pre-computed slope — no f64
+/// arithmetic in the inner loop; rows above the clip are skipped by one
+/// multiply, landing on the value stepping would reach.  Its range covers
+/// every coordinate a page bitmap holds, antialiased included.
 fn fill_intersections(
     xpath: &XPath,
     y_min: i32,
@@ -614,19 +615,27 @@ fn fill_intersections(
             let fp_clamp_min = fp_from_f64(sloped_x_min);
             let fp_clamp_max = fp_from_f64(sloped_x_max);
 
-            // Initial x at the top of the first row (or seg.x0 if row_y0 == seg.y0).
-            let xx_init = if f64::from(row_y0) > seg.y0 {
-                f64::from(row_y0).mul_add(seg.dxdy, x_base)
-            } else {
-                seg.x0
-            };
-            let mut px0 = floor_i32(xx_init.clamp(sloped_x_min, sloped_x_max));
+            // 48.16 fixed-point accumulator for the right edge of each span:
+            // initialised from f64 at the bottom of the segment's own first
+            // row, then stepped by `dxdy_fp` (integer add) per scanline.  The
+            // value at a row depends only on the segment and the row, never
+            // on the clip's first row, so a translated copy of the geometry
+            // yields translated spans wherever the clip starts.
+            let first_row = floor_i32(seg_y_min);
+            let first_xx1_fp = fp_from_f64((f64::from(first_row) + 1.0).mul_add(seg.dxdy, x_base));
+            // The accumulator after `n` steps from the first row; stepping
+            // saturates, so the jump saturates alike.
+            let xx1_after = |n: i64| n.saturating_mul(seg.dxdy_fp).saturating_add(first_xx1_fp);
 
-            // 48.16 fixed-point accumulator for the right edge of each span.
-            // Initialised from f64 to preserve accuracy at the first row, then
-            // stepped by `dxdy_fp` (integer add) per scanline — no f64 arithmetic
-            // inside the hot loop.
-            let mut xx1_fp = fp_from_f64((f64::from(row_y0) + 1.0).mul_add(seg.dxdy, x_base));
+            // The span on the first row drawn starts at the segment's end
+            // point, or where the previous row's span ended.
+            let skipped = i64::from(row_y0) - i64::from(first_row);
+            let mut px0 = if skipped > 0 {
+                fp_column(xx1_after(skipped - 1).clamp(fp_clamp_min, fp_clamp_max))
+            } else {
+                floor_i32(seg.x0.clamp(sloped_x_min, sloped_x_max))
+            };
+            let mut xx1_fp = xx1_after(skipped.max(0));
 
             for row in row_y0..=row_y1 {
                 let xx1_fp_clamped = xx1_fp.clamp(fp_clamp_min, fp_clamp_max);
@@ -744,6 +753,47 @@ mod tests {
         b.line_to(2.0, 4.0).unwrap();
         b.close(false).unwrap();
         XPath::new(&b.build(), &identity(), 1.0, true)
+    }
+
+    /// The spans of `scanner`'s row `y` as `(x0, x1, count)` triples.
+    fn spans(scanner: &XPathScanner, y: i32) -> Vec<(i32, i32, i32)> {
+        scanner
+            .row(y)
+            .iter()
+            .map(|i| (i.x0, i.x1, i.count))
+            .collect()
+    }
+
+    /// A row's spans do not depend on the first row the scanner covers: a
+    /// scanner whose range starts partway down sloped edges reproduces, on
+    /// every row it shares, the spans of one that starts above them.
+    #[test]
+    fn rows_are_independent_of_the_scanned_range() {
+        // A deterministic spread of long sloped edges.
+        let mut state = 0x2545_f491_u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f64::from(state >> 8) / f64::from(1u32 << 24) * 4000.0
+        };
+        let mut b = PathBuilder::new();
+        for _ in 0..40 {
+            b.move_to(next(), next()).unwrap();
+            b.line_to(next(), next()).unwrap();
+            b.line_to(next(), next()).unwrap();
+            b.close(false).unwrap();
+        }
+        let xpath = XPath::new(&b.build(), &identity(), 1.0, true);
+        let full = XPathScanner::new(&xpath, false, 0, 4000);
+        for first in (1..4000).step_by(97) {
+            let part = XPathScanner::new(&xpath, false, first, 4000);
+            for y in first..=4000 {
+                assert_eq!(
+                    spans(&part, y),
+                    spans(&full, y),
+                    "row {y} of a scanner starting at row {first}"
+                );
+            }
+        }
     }
 
     #[test]
