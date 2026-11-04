@@ -5,17 +5,25 @@
 //! operator set of §7.10.5 — arithmetic, relational, boolean and bitwise,
 //! stack, and the `if`/`ifelse` conditionals.  The language has no loops,
 //! definitions, strings or arrays, so a run executes each token of the
-//! program at most once: the parser's bounds on the token count
-//! ([`MAX_PS_TOKENS`]) and the nesting depth ([`MAX_PS_DEPTH`]) bound the work
-//! and the native recursion of every run.  Only the operand stack can grow
-//! faster than one entry per token (`copy` doubles it), and it is bounded by
-//! [`MAX_PS_STACK`].
+//! program at most once, and the parser's bound on the nesting depth
+//! ([`MAX_PS_DEPTH`]) bounds the native recursion of every run.  A token
+//! does not do bounded work, though: `n copy` pushes `n` entries and
+//! `n j roll` moves `n`, with `n` up to the depth of the operand stack,
+//! itself bounded by [`MAX_PS_STACK`].  A run therefore carries fuel: each
+//! token charges one unit and `copy` and `roll` one more per entry they
+//! push or move, and a run that exhausts [`MAX_PS_FUEL`] is abandoned.
+//! [`Program::cost`] bounds the fuel one run can spend.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A parsed Type 4 program: the token tree of its outermost `{ }` block.
 #[derive(Debug)]
-pub(super) struct Program(Vec<PsTok>);
+pub(super) struct Program {
+    toks: Vec<PsTok>,
+    /// Set by the first run that exhausts [`MAX_PS_FUEL`], which logs it.
+    exhausted: AtomicBool,
+}
 
 impl Program {
     /// Parse the program text `src`, a single `{ }` block.
@@ -37,33 +45,54 @@ impl Program {
         if !rest.is_empty() {
             return Err(ParseError::TrailingTokens);
         }
-        Ok(Self(toks))
+        Ok(Self {
+            toks,
+            exhausted: AtomicBool::new(false),
+        })
     }
 
-    /// A bound on the work of one run: every token, both branches of each
-    /// conditional included, counted once.
+    /// A bound on the fuel one run spends, at most [`MAX_PS_FUEL`]: every
+    /// token, both branches of each conditional included, counted once,
+    /// and for each `copy` and `roll` the count it takes.  A count pushed
+    /// by the literal before the operator is read from the program; any
+    /// other is bounded by [`MAX_PS_STACK`].
     pub(super) fn cost(&self) -> u64 {
         fn tokens(toks: &[PsTok]) -> u64 {
             toks.iter()
-                .map(|t| match t {
-                    PsTok::Num(_) | PsTok::Op(_) => 1,
+                .enumerate()
+                .map(|(i, t)| match t {
+                    PsTok::Num(_) | PsTok::Op(_) => 1 + literal_work(toks, i),
                     PsTok::If(body) => 1 + tokens(body),
                     PsTok::IfElse(then, other) => 1 + tokens(then) + tokens(other),
                 })
-                .sum()
+                .fold(0, u64::saturating_add)
         }
-        tokens(&self.0)
+        tokens(&self.toks).min(MAX_PS_FUEL)
     }
 
     /// Run the program on `inputs` (already clipped to `Domain`) and return
     /// the top `n` stack values, deepest first.  `None` on any execution
-    /// error, on fewer than `n` results, or on a boolean result.
+    /// error, on a run that exhausts [`MAX_PS_FUEL`] (logged once per
+    /// program), on fewer than `n` results, or on a boolean result.
     pub(super) fn run(&self, inputs: impl IntoIterator<Item = f64>, n: usize) -> Option<Vec<f64>> {
         let inputs = inputs.into_iter();
         let run = |stack: &mut Vec<PsVal>| {
             stack.clear();
             stack.extend(inputs.map(PsVal::Num));
-            exec(&self.0, stack)?;
+            let mut fuel = MAX_PS_FUEL;
+            match exec(&self.toks, stack, &mut fuel) {
+                Ok(()) => {}
+                Err(Halt::Error) => return None,
+                Err(Halt::OutOfFuel) => {
+                    if !self.exhausted.swap(true, Ordering::Relaxed) {
+                        log::warn!(
+                            "function: Type 4 program exceeds the work limit of {MAX_PS_FUEL} \
+                             stack operations per evaluation — evaluation abandoned"
+                        );
+                    }
+                    return None;
+                }
+            }
             let first = stack.len().checked_sub(n)?;
             stack[first..]
                 .iter()
@@ -135,10 +164,13 @@ impl fmt::Display for ParseError {
     }
 }
 
-/// Upper bound on the tokens of a program.  A run executes each token at
-/// most once, so this bounds the work of one evaluation; tint transforms
-/// and shading functions run to tens or hundreds of tokens.
+/// Upper bound on the tokens of a program; tint transforms and shading
+/// functions run to tens or hundreds of tokens.
 pub(super) const MAX_PS_TOKENS: usize = 100_000;
+
+/// Upper bound on the fuel of one run (see the module documentation): ten
+/// times the most tokens a program holds.
+pub(super) const MAX_PS_FUEL: u64 = 1 << 20;
 
 /// Upper bound on `{ }` nesting.  Parsing and execution recurse once per
 /// nested procedure; real programs nest a handful of levels.
@@ -404,27 +436,93 @@ fn push_num(stack: &mut Vec<PsVal>, r: f64) -> Option<()> {
     r.is_finite().then(|| stack.push(PsVal::Num(r)))
 }
 
-/// Execute `toks` on `stack`.  `None` on any execution error.
-fn exec(toks: &[PsTok], stack: &mut Vec<PsVal>) -> Option<()> {
+/// Why a run stopped before the end of the program.
+enum Halt {
+    /// An execution error of §7.10.5: a type error, a stack underflow or
+    /// overflow, an undefined result.
+    Error,
+    /// The run spent its fuel.
+    OutOfFuel,
+}
+
+/// Execute `toks` on `stack`, spending `fuel` (see the module
+/// documentation).
+fn exec(toks: &[PsTok], stack: &mut Vec<PsVal>, fuel: &mut u64) -> Result<(), Halt> {
     for tok in toks {
+        let work = match tok {
+            PsTok::Op(op) => 1 + op_work(*op, stack),
+            _ => 1,
+        };
+        *fuel = fuel.checked_sub(work).ok_or(Halt::OutOfFuel)?;
         match tok {
             PsTok::Num(n) => stack.push(PsVal::Num(*n)),
-            PsTok::Op(op) => run_op(*op, stack)?,
+            PsTok::Op(op) => run_op(*op, stack).ok_or(Halt::Error)?,
             PsTok::If(then) => {
-                if pop_bool(stack)? {
-                    exec(then, stack)?;
+                if pop_bool(stack).ok_or(Halt::Error)? {
+                    exec(then, stack, fuel)?;
                 }
             }
             PsTok::IfElse(then, otherwise) => {
-                let branch = if pop_bool(stack)? { then } else { otherwise };
-                exec(branch, stack)?;
+                let branch = if pop_bool(stack).ok_or(Halt::Error)? {
+                    then
+                } else {
+                    otherwise
+                };
+                exec(branch, stack, fuel)?;
             }
         }
         if stack.len() > MAX_PS_STACK {
-            return None;
+            return Err(Halt::Error);
         }
     }
-    Some(())
+    Ok(())
+}
+
+/// The stack position, counted from the top, of the count operand of a
+/// `copy` or `roll`, the operators whose work grows with their operand.
+const fn count_operand(op: PsOp) -> Option<usize> {
+    match op {
+        PsOp::Copy => Some(0),
+        PsOp::Roll => Some(1),
+        _ => None,
+    }
+}
+
+/// The entries `op` pushes or moves on `stack` beyond its own token: the
+/// count of a `copy` or `roll`, bounded by the entries below it; 0 for
+/// every other operator and for an operand the operator rejects.
+fn op_work(op: PsOp, stack: &[PsVal]) -> u64 {
+    let Some(depth) = count_operand(op) else {
+        return 0;
+    };
+    let below = stack.len().saturating_sub(depth + 1);
+    let count = match stack.len().checked_sub(depth + 1).map(|i| stack[i]) {
+        Some(PsVal::Num(n)) => to_count(n).unwrap_or(0),
+        _ => 0,
+    };
+    count.min(below) as u64
+}
+
+/// The work [`op_work`] charges for the operator at `toks[i]`, bounded
+/// from the program text: a count pushed by a literal is that literal, any
+/// other count at most [`MAX_PS_STACK`]; 0 for a token that is not `copy`
+/// or `roll`.  A `roll` reads its count below one other operand, so the
+/// literal is the second token back when the first is a literal too.
+fn literal_work(toks: &[PsTok], i: usize) -> u64 {
+    let Some(PsTok::Op(op)) = toks.get(i) else {
+        return 0;
+    };
+    let Some(depth) = count_operand(*op) else {
+        return 0;
+    };
+    let literal = i
+        .checked_sub(depth + 1)
+        .filter(|&j| toks[j..i].iter().all(|t| matches!(t, PsTok::Num(_))))
+        .and_then(|j| match toks[j] {
+            PsTok::Num(n) => to_count(n),
+            _ => None,
+        });
+    literal.unwrap_or(MAX_PS_STACK).min(MAX_PS_STACK) as u64
 }
 
 /// Execute one operator.
@@ -777,6 +875,34 @@ mod tests {
     fn an_over_long_program_is_rejected_before_it_runs() {
         let src = format!("{{{}}}", " 1 pop".repeat(MAX_PS_TOKENS / 2));
         assert!(matches!(parse_err(&src), ParseError::TooLong(_)));
+    }
+
+    /// A stack doubled to 65 536 entries and rolled at depth 50 000 a
+    /// hundred times moves five million entries in about 120 tokens: the
+    /// run spends its fuel and is abandoned, and the program's cost is the
+    /// fuel limit.
+    #[test]
+    fn deep_rolls_exhaust_the_fuel() {
+        let mut src: String = std::iter::once("{".to_owned())
+            .chain((0..16).map(|k| format!(" {} copy", 1u32 << k)))
+            .collect();
+        src.push_str(&" 50000 1 roll".repeat(100));
+        src.push_str(" }");
+        let program = Program::parse(src.as_bytes()).expect("parses");
+        assert_eq!(program.cost(), MAX_PS_FUEL);
+        assert_eq!(program.run([0.5], 1), None);
+    }
+
+    /// The cost charges `copy` and `roll` the literal count before them, and
+    /// a computed count the stack bound.
+    #[test]
+    fn cost_charges_stack_operators_their_count() {
+        let cost = |src: &str| Program::parse(src.as_bytes()).expect("parses").cost();
+        assert_eq!(cost("{ 0 0 0 4 -1 roll }"), 6 + 4);
+        assert_eq!(cost("{ 3 copy }"), 2 + 3);
+        assert_eq!(cost("{ dup 2 1 add copy }"), 5 + MAX_PS_STACK as u64);
+        assert_eq!(cost("{ 4 dup 1 roll }"), 4 + MAX_PS_STACK as u64);
+        assert_eq!(cost("{ 1 index }"), 2);
     }
 
     #[test]
