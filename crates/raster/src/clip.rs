@@ -105,6 +105,47 @@ impl Clip {
         }
     }
 
+    /// This clip moved by `dx` columns and `dy` rows of device pixels.  The
+    /// path clips' intersection tables shift by whole cells, so a pixel
+    /// `(x, y)` passes them exactly when `(x − dx, y − dy)` passes this
+    /// clip's; the rectangle's bounds move by `dx` and `dy` in `f64`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shift in the supersampled AA grid overflows `i32`.
+    #[must_use]
+    pub fn translated(&self, dx: i32, dy: i32) -> Self {
+        let (sx, sy) = if self.antialias {
+            (
+                dx.checked_mul(AA_SIZE)
+                    .expect("Clip::translated: dx * AA_SIZE overflows i32"),
+                dy.checked_mul(AA_SIZE)
+                    .expect("Clip::translated: dy * AA_SIZE overflows i32"),
+            )
+        } else {
+            (dx, dy)
+        };
+        let (fx, fy) = (f64::from(dx), f64::from(dy));
+        let mut clip = Self {
+            antialias: self.antialias,
+            x_min: self.x_min + fx,
+            y_min: self.y_min + fy,
+            x_max: self.x_max + fx,
+            y_max: self.y_max + fy,
+            x_min_i: 0,
+            y_min_i: 0,
+            x_max_i: 0,
+            y_max_i: 0,
+            scanners: self
+                .scanners
+                .iter()
+                .map(|s| Arc::new(s.translated(sx, sy)))
+                .collect(),
+        };
+        clip.recompute_int_bounds();
+        clip
+    }
+
     /// True when the clip is its rectangle alone, with no path clips.
     #[must_use]
     pub const fn is_rect(&self) -> bool {
@@ -670,6 +711,57 @@ mod tests {
             assert!(!aa_bit(&buf, row, 4 * 8), "only in the first diamond");
             assert!(aa_bit(&buf, row, 4 * 22), "in both diamonds");
             assert!(!aa_bit(&buf, row, 4 * 36), "only in the second diamond");
+        }
+    }
+
+    /// A translated clip passes and clips exactly what the clip passes and
+    /// clips at the shifted coordinates, pixel by pixel and sub-sample by
+    /// sub-sample.
+    #[test]
+    fn translated_clip_tests_the_shifted_pixels() {
+        let (dx, dy) = (-9, -5);
+        for antialias in [false, true] {
+            let mut clip = Clip::new(2.5, 1.0, 60.0, 40.25, antialias);
+            clip_to_diamond(&mut clip, 24.0, 18.0, 13.5);
+            let moved = clip.translated(dx, dy);
+            assert_eq!(
+                (moved.x_min_i, moved.y_min_i, moved.x_max_i, moved.y_max_i),
+                (
+                    clip.x_min_i + dx,
+                    clip.y_min_i + dy,
+                    clip.x_max_i + dx,
+                    clip.y_max_i + dy
+                )
+            );
+            for y in 0..48 {
+                for x in 0..64 {
+                    assert_eq!(moved.test(x + dx, y + dy), clip.test(x, y), "({x}, {y})");
+                }
+            }
+            if antialias {
+                for y in 0..48 {
+                    let mut a = AaBuf::new(64);
+                    let mut b = AaBuf::new(64);
+                    for row in 0..a.height {
+                        a.set_span(row, 0, 256);
+                        b.set_span(row, 0, 256);
+                    }
+                    let (mut ax0, mut ax1) = (9, 63);
+                    clip.clip_aa_line(&mut a, &mut ax0, &mut ax1, y);
+                    let (mut bx0, mut bx1) = (0, 54);
+                    moved.clip_aa_line(&mut b, &mut bx0, &mut bx1, y + dy);
+                    assert_eq!((ax0 + dx, ax1 + dx), (bx0, bx1), "row {y}");
+                    for row in 0..a.height {
+                        for sx in 36..256 {
+                            assert_eq!(
+                                aa_bit(&a, row, sx),
+                                aa_bit(&b, row, sx - 36),
+                                "row {y}, sub-row {row}, sub-sample {sx}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

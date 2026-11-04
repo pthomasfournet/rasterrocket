@@ -265,6 +265,9 @@ fn render_page_rgb_with_geom(
         Some(pdf_interp::renderer::RenderAbort::Cancelled { .. }) => {
             return Err(RasterError::Cancelled);
         }
+        Some(&pdf_interp::renderer::RenderAbort::AllocationFailed { width, height }) => {
+            return Err(RasterError::PageAllocationFailed { width, height });
+        }
         Some(reason) => return Err(RasterError::PageBudgetExceeded(reason.to_string())),
     }
 

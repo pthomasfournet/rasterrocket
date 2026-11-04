@@ -34,7 +34,7 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 - `RasterError::PageOutOfRange` — page number exceeds document length.
 - `RasterError::PageDegenerate` — page has zero pixel dimensions.
 - `RasterError::PageTooLarge` / `RasterError::PageAreaTooLarge` — pixel dimensions exceed `MAX_PX_DIMENSION` (32 768) or the area exceeds `MAX_PX_AREA`.
-- `RasterError::PageAllocationFailed` — the page is within those limits, but the allocator refused its bitmap.
+- `RasterError::PageAllocationFailed` — the page is within those limits, but the allocator refused its bitmap, or a transparency group, soft mask or knockout coverage bitmap drawn on it.
 - `RasterError::InvalidPageGeometry` — `UserUnit` outside `[0.1, 10.0]`.
 - `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` — only when `opts.strict` is set; see [`RasterOptions`](#rasteroptions).
 - `RasterError::PageBudgetExceeded` — the page exceeded the per-page operator budget or wall-clock deadline.
@@ -544,9 +544,10 @@ pub enum RasterError {
 
 `PageAreaTooLarge` is distinct from `PageTooLarge`: each side can be within
 `MAX_PX_DIMENSION` while the product still exceeds `MAX_PX_AREA`.
-`PageAllocationFailed` is a page within both limits whose bitmap the
-allocator refused (the process does not abort); render it at a lower
-resolution or in regions. `RenderPanic`
+`PageAllocationFailed` is a page within both limits for which the allocator
+refused a bitmap: the page's own, or a transparency group, soft mask or
+knockout coverage bitmap drawn on it (the process does not abort); render it at
+a lower resolution or in regions. `RenderPanic`
 carries a per-page panic caught by `render_channel`, which happens only under
 `panic = "unwind"`; with the `panic = "abort"` release profile a panic aborts
 the process.

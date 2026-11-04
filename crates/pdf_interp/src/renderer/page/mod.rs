@@ -263,6 +263,10 @@ pub struct PageRenderer<'doc> {
     /// Caller-owned cancellation flag, polled before every operator; `true`
     /// stops the render with [`RenderAbort::Cancelled`].
     cancel: Option<Arc<AtomicBool>>,
+    /// The most pixels a canvas [`Self::try_canvas`] allocates may hold;
+    /// a larger one is refused.
+    #[cfg(test)]
+    max_canvas_px: u64,
     /// Distinct unknown operator keywords already warned about this page,
     /// so a content stream that repeats an unsupported op doesn't flood the
     /// log.  Bounded at [`MAX_WARNED_UNKNOWN_OPS`] entries.
@@ -481,6 +485,8 @@ impl<'doc> PageRenderer<'doc> {
             ops_executed: 0,
             budget_exceeded: None,
             cancel: None,
+            #[cfg(test)]
+            max_canvas_px: u64::MAX,
             warned_unknown_ops: std::collections::HashSet::new(),
             warned_unknown_ops_capped: false,
             filter_counts: [0u32; IMAGE_FILTER_COUNT],
@@ -544,17 +550,62 @@ impl<'doc> PageRenderer<'doc> {
     /// default, paints onto opaque white, which gives the same pixels when
     /// nothing on the page blends (see [`crate::page_group()`]).  Call before
     /// execute.
+    ///
+    /// # Panics
+    ///
+    /// When the replacement canvas cannot be allocated.
     pub fn set_page_group(&mut self, group: Option<crate::resources::TransparencyGroupParams>) {
+        self.try_set_page_group(group)
+            .expect("PageRenderer::set_page_group: canvas allocation failed");
+    }
+
+    /// [`Self::set_page_group`] that reports a canvas the allocator refuses
+    /// as an error.  On error the renderer is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`raster::BitmapAllocError`] when the replacement canvas cannot be
+    /// allocated.
+    pub fn try_set_page_group(
+        &mut self,
+        group: Option<crate::resources::TransparencyGroupParams>,
+    ) -> Result<(), raster::BitmapAllocError> {
         debug_assert_eq!(
             self.ops_executed, 0,
             "set_page_group must precede execute: the page canvas is replaced"
         );
-        let was_group = self.page_group.is_some();
+        if group.is_some() != self.page_group.is_some() {
+            let kind = self.canvas.kind();
+            self.canvas = PageCanvas::try_new(kind, self.width, self.height, group.is_some())?;
+        }
         self.page_group = group;
         self.group.knockout = group.is_some_and(|g| g.knockout);
-        if group.is_some() != was_group {
-            let kind = self.canvas.kind();
-            self.canvas = PageCanvas::new(kind, self.width, self.height, group.is_some());
+        Ok(())
+    }
+
+    /// A transparent canvas of `kind`, `width × height`, or `None` with the
+    /// render stopped by [`RenderAbort::AllocationFailed`] when the
+    /// allocator refuses it.
+    fn try_canvas(&mut self, kind: CanvasKind, width: u32, height: u32) -> Option<PageCanvas> {
+        #[cfg(test)]
+        if u64::from(width) * u64::from(height) > self.max_canvas_px {
+            self.abort_allocation(raster::BitmapAllocError { width, height });
+            return None;
+        }
+        PageCanvas::try_new(kind, width, height, true)
+            .map_err(|e| self.abort_allocation(e))
+            .ok()
+    }
+
+    /// Stop the render with [`RenderAbort::AllocationFailed`] for the
+    /// bitmap `e` describes, unless it has already stopped.
+    fn abort_allocation(&mut self, e: raster::BitmapAllocError) {
+        log::warn!("rasterrocket-interp: {e} — aborting page render");
+        if self.budget_exceeded.is_none() {
+            self.budget_exceeded = Some(RenderAbort::AllocationFailed {
+                width: e.width,
+                height: e.height,
+            });
         }
     }
 
@@ -578,7 +629,8 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// `Some(reason)` means the page was aborted before all of its operators
     /// ran: it exceeded the operator count cap, the wall-clock deadline or
-    /// the form nesting limit, or it was cancelled.  The rendered bitmap is
+    /// the form nesting limit, a bitmap it needs could not be allocated, or
+    /// it was cancelled.  The rendered bitmap is
     /// partial and the per-page `Result` must be an `Err`.
     ///
     /// Check this after [`execute`](Self::execute) and before

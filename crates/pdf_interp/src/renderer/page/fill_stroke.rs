@@ -13,13 +13,15 @@
 use color::Rgb8;
 use raster::Bitmap;
 use raster::path::Path;
+use raster::pipe::PipeSrc;
+use raster::stroke::stroke;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
-use super::canvas::PageCanvas;
+use super::canvas::CanvasKind;
+use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
-use crate::resources::ColorSpace;
 
 impl PageRenderer<'_> {
     /// Fill `path` (by the even-odd rule when `even_odd`) and stroke it as
@@ -36,7 +38,13 @@ impl PageRenderer<'_> {
             self.stroke_path(path);
             return;
         };
-        let coverage = self.stroke_coverage(path, line_width, rect);
+        let coverage = match self.stroke_coverage(path, line_width, rect) {
+            Ok(coverage) => coverage,
+            Err(e) => {
+                self.abort_allocation(e);
+                return;
+            }
+        };
         let area = rect.to_path();
         self.paint_knocked_out(
             rect,
@@ -48,30 +56,57 @@ impl PageRenderer<'_> {
 
     /// The coverage (0–255) of the stroke of `path`, `line_width` wide,
     /// over each pixel of `rect` in row-major order, within the clip.
-    fn stroke_coverage(&mut self, path: &Path, line_width: f64, rect: PixelRect) -> Vec<u8> {
-        self.gstate.save();
-        {
-            let gs = self.gstate.current_mut();
-            gs.soft_mask = None;
-            gs.stroke_alpha = u8::MAX;
-            gs.blend_mode = BlendMode::Normal;
-            gs.stroke_pattern = None;
-            gs.stroke_color_space = ColorSpace::DeviceGray;
-            gs.stroke_color = RasterColor::from_bytes([u8::MAX; 3]);
-            gs.transfer = None;
-        }
-        // White on black on an RGB canvas: the red channel is the coverage,
-        // whatever the stroke's colour space, pattern or transfer function.
-        let black = PageCanvas::Rgb(Bitmap::<Rgb8>::new(self.width, self.height, 1, false));
-        let page = std::mem::replace(&mut self.canvas, black);
-        self.stroke_within(path, line_width, Some(rect));
-        let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
-        self.gstate.restore();
+    ///
+    /// The stroke is drawn opaque white on a black RGB bitmap of `rect`'s
+    /// size, the device matrix and the clip moved by `rect`'s origin, so
+    /// the red channel is the coverage whatever the stroke's colour space,
+    /// pattern, transfer function or soft mask.
+    pub(super) fn stroke_coverage(
+        &self,
+        path: &Path,
+        line_width: f64,
+        rect: PixelRect,
+    ) -> Result<Vec<u8>, raster::BitmapAllocError> {
+        let (width, height) = (rect.width(), rect.height());
+        let mut bitmap = Bitmap::<Rgb8>::try_new_filled(width, height, 1, false, 0)?;
+        let mut shape = self.stroke_shape(path, line_width);
+        let (x0, y0) = (rect.x0, rect.y0);
+        shape.matrix[4] -= f64::from(x0);
+        shape.matrix[5] -= f64::from(y0);
+        let mut clip = self.gstate.current().clip.translated(
+            -i32::try_from(x0).unwrap_or(i32::MAX),
+            -i32::try_from(y0).unwrap_or(i32::MAX),
+        );
+        clip.clip_to_rect(0.0, 0.0, f64::from(width), f64::from(height));
 
-        let (cx0, cx1) = (rect.x0 as usize * 3, rect.x1 as usize * 3);
-        (rect.y0..rect.y1)
-            .flat_map(|y| canvas.row_bytes(y)[cx0..cx1].iter().step_by(3).copied())
-            .collect()
+        let white = RasterColor::from_bytes([u8::MAX; 3]);
+        let paint = PaintParams {
+            alpha: u8::MAX,
+            blend_mode: BlendMode::Normal,
+            overprint: None,
+            backdrop: None,
+        };
+        let pipe = paint.pipe();
+        let src = PipeSrc::Solid(white.bytes_for(CanvasKind::Rgb.mode()));
+        stroke(
+            &mut bitmap,
+            &clip,
+            &shape.path,
+            &pipe,
+            &src,
+            &shape.matrix,
+            &shape.params(),
+        );
+
+        let mut coverage = Vec::new();
+        coverage
+            .try_reserve_exact(width as usize * height as usize)
+            .map_err(|_| raster::BitmapAllocError { width, height })?;
+        let n = width as usize * 3;
+        for y in 0..height {
+            coverage.extend(bitmap.row_bytes(y)[..n].iter().step_by(3));
+        }
+        Ok(coverage)
     }
 
     /// Fill `area` with the stroke's colour or pattern, alpha and

@@ -2131,4 +2131,5 @@ fn cmyk_colour_paints_process_inks_and_is_opm_eligible() {
     assert!(fill.opm_eligible());
 }
 
+mod allocation;
 mod overprint;

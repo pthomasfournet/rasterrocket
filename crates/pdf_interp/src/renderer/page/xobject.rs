@@ -330,18 +330,19 @@ impl PageRenderer<'_> {
         let parent_resources = std::mem::replace(&mut self.resources, child_resources);
 
         // Transparency group: render into an intermediate bitmap, then
-        // composite it back onto the page.
+        // composite it back onto the page.  A group bitmap the allocator
+        // refuses stops the render, so the form's content executes nothing.
         let mut group = form
             .transparency
             .and_then(|tg| self.group_params(form.bbox, tg))
-            .map(|params| {
-                let bitmap = self.group_bitmap();
-                self.canvas.begin_group(
+            .and_then(|params| {
+                let bitmap = self.group_bitmap()?;
+                Some(self.canvas.begin_group(
                     self.group.backdrop.as_deref(),
                     &self.gstate.current().clip,
                     params,
                     bitmap,
-                )
+                ))
             });
 
         // Swap in the group bitmap when present.  PDF §11.6.6: the alpha
@@ -410,13 +411,14 @@ impl PageRenderer<'_> {
     }
 
     /// A transparent canvas of the current canvas's kind and size for a
-    /// transparency group: one from the pool, or a fresh one.
-    pub(super) fn group_bitmap(&mut self) -> PageCanvas {
+    /// transparency group: one from the pool, or a fresh one; `None`, with
+    /// the render stopped, when the allocator refuses a fresh one.
+    pub(super) fn group_bitmap(&mut self) -> Option<PageCanvas> {
         let (kind, (width, height)) = (self.canvas.kind(), self.canvas.dims());
         self.group_pool
             .pop()
             .filter(|b| b.kind() == kind && b.dims() == (width, height))
-            .unwrap_or_else(|| PageCanvas::new(kind, width, height, true))
+            .or_else(|| self.try_canvas(kind, width, height))
     }
 
     /// The parameters of a transparency group `tg` whose form has `bbox`:

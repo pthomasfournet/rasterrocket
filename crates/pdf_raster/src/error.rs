@@ -42,13 +42,14 @@ pub enum RasterError {
         /// Total area in pixels (`width as u64 * height as u64`).
         area: u64,
     },
-    /// The page bitmap of the drawn region could not be allocated: the
-    /// region is within the size limits, but the allocator refused its
-    /// buffers.
+    /// A bitmap the render of the drawn region needs could not be
+    /// allocated: the region is within the size limits, but the allocator
+    /// refused the buffers of its page bitmap, or of a transparency group,
+    /// soft mask or knockout coverage canvas drawn on it.
     PageAllocationFailed {
-        /// Width in pixels.
+        /// Width of the refused bitmap in pixels.
         width: u32,
-        /// Height in pixels.
+        /// Height of the refused bitmap in pixels.
         height: u32,
     },
     /// Deskew rotation failed.
@@ -129,7 +130,7 @@ impl std::fmt::Display for RasterError {
             ),
             Self::PageAllocationFailed { width, height } => write!(
                 f,
-                "cannot allocate the {width}×{height} page bitmap; lower the resolution, \
+                "cannot allocate a {width}×{height} bitmap for the page; lower the resolution, \
                  or render the page in smaller regions"
             ),
             Self::Deskew(msg) => write!(f, "deskew failed: {msg}"),

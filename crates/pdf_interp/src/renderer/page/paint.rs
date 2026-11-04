@@ -511,6 +511,40 @@ impl PageRenderer<'_> {
         self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0)
     }
 
+    /// The geometry of a stroke of `path`, in device space, `line_width`
+    /// wide under the current graphics state.
+    ///
+    /// PDF §8.4.3.2 / §8.4.3.6: the line width and dash lengths are
+    /// user-space distances under the CTM at stroke time.  The path is held
+    /// in device space, so it is mapped back through the inverse device
+    /// matrix and the stroker transforms the outline it builds; flatness
+    /// stays a device-space tolerance.  A singular CTM collapses the path
+    /// to a line or point, so it is stroked in device space unchanged.
+    pub(super) fn stroke_shape(&self, path: &raster::path::Path, line_width: f64) -> StrokeShape {
+        let gs = self.gstate.current();
+        let device = self.device_matrix();
+        let device_flatness = gs.flatness.max(0.1);
+        let (path, matrix, flatness) = match (invert_affine(&device), area_scale(&device)) {
+            (Some(inv), Some(scale)) => {
+                (transform_path(path, &inv), device, device_flatness / scale)
+            }
+            _ => (path.clone(), DEVICE_MATRIX, device_flatness),
+        };
+        StrokeShape {
+            path,
+            matrix,
+            device_flatness,
+            line_width,
+            line_cap: gs.line_cap,
+            line_join: gs.line_join,
+            miter_limit: gs.miter_limit,
+            flatness,
+            line_dash: gs.dash.0.clone(),
+            line_dash_phase: gs.dash.1,
+            vector_antialias: self.vector_antialias,
+        }
+    }
+
     /// Stroke `path` `line_width` wide, whose stroke lies within `region`.
     pub(super) fn stroke_within(
         &mut self,
@@ -525,39 +559,11 @@ impl PageRenderer<'_> {
         let clip = gs.clip.clone_shared();
         let (stroke_alpha, blend_mode) = (gs.stroke_alpha, gs.blend_mode);
         let transfer = gs.transfer.clone();
-        let line_cap = gs.line_cap;
-        let line_join = gs.line_join;
-        let miter_limit = gs.miter_limit;
-        let flatness = gs.flatness.max(0.1);
-        let line_dash = gs.dash.0.clone();
-        let line_dash_phase = gs.dash.1;
         let pat_name = gs.stroke_pattern.clone();
         let solid_color = gs.painted_stroke_color();
-
-        // PDF §8.4.3.2 / §8.4.3.6: the line width and dash lengths are
-        // user-space distances under the CTM at stroke time.  The path is held
-        // in device space, so it is mapped back through the inverse device
-        // matrix and the stroker transforms the outline it builds; flatness
-        // stays a device-space tolerance.  A singular CTM collapses the path
-        // to a line or point, so it is stroked in device space unchanged.
-        let device = self.device_matrix();
-        let device_flatness = flatness;
-        let (path, matrix, flatness) = match (invert_affine(&device), area_scale(&device)) {
-            (Some(inv), Some(scale)) => (transform_path(path, &inv), device, flatness / scale),
-            _ => (path.clone(), DEVICE_MATRIX, flatness),
-        };
-
-        let params = StrokeParams {
-            line_width,
-            line_cap,
-            line_join,
-            miter_limit,
-            flatness,
-            line_dash: &line_dash,
-            line_dash_phase,
-            stroke_adjust: false,
-            vector_antialias: self.vector_antialias,
-        };
+        let shape = self.stroke_shape(path, line_width);
+        let (path, matrix, device_flatness) = (&shape.path, &shape.matrix, shape.device_flatness);
+        let params = shape.params();
 
         // Resolve the stroke source — pattern or solid colour.  A pattern
         // colour that does not resolve paints nothing.
@@ -568,8 +574,8 @@ impl PageRenderer<'_> {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 self.paint_shading_pattern(&pattern, true, region, |r, pipe, shading| {
                     r.stroke_with_shading(
-                        &path,
-                        &matrix,
+                        path,
+                        matrix,
                         &params,
                         clip,
                         pipe,
@@ -599,8 +605,45 @@ impl PageRenderer<'_> {
         let src = source.src();
 
         with_canvas!(&mut self.canvas, |b| stroke(
-            b, &clip, &path, &pipe, &src, &matrix, &params
+            b, &clip, path, &pipe, &src, matrix, &params
         ));
+    }
+}
+
+/// The geometry of a stroke as the stroker takes it (see
+/// [`PageRenderer::stroke_shape`]).
+pub(super) struct StrokeShape {
+    /// The path, in the space `matrix` maps to device pixels.
+    pub(super) path: raster::path::Path,
+    /// The map from the path's space to device pixels.
+    pub(super) matrix: [f64; 6],
+    /// The flatness tolerance in device pixels.
+    pub(super) device_flatness: f64,
+    line_width: f64,
+    line_cap: LineCap,
+    line_join: LineJoin,
+    miter_limit: f64,
+    /// The flatness tolerance in the path's space.
+    flatness: f64,
+    line_dash: Vec<f64>,
+    line_dash_phase: f64,
+    vector_antialias: bool,
+}
+
+impl StrokeShape {
+    /// The stroker's parameters.
+    pub(super) fn params(&self) -> StrokeParams<'_> {
+        StrokeParams {
+            line_width: self.line_width,
+            line_cap: self.line_cap,
+            line_join: self.line_join,
+            miter_limit: self.miter_limit,
+            flatness: self.flatness,
+            line_dash: &self.line_dash,
+            line_dash_phase: self.line_dash_phase,
+            stroke_adjust: false,
+            vector_antialias: self.vector_antialias,
+        }
     }
 }
 

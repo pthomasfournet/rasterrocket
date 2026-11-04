@@ -145,6 +145,14 @@ pub enum RenderAbort {
         /// Operators executed before the flag was observed.
         ops: u64,
     },
+    /// The allocator refused a bitmap the page needs: a transparency
+    /// group, a soft mask or a knockout coverage canvas.
+    AllocationFailed {
+        /// Width of the refused bitmap in pixels.
+        width: u32,
+        /// Height of the refused bitmap in pixels.
+        height: u32,
+    },
 }
 
 impl std::fmt::Display for RenderAbort {
@@ -165,6 +173,10 @@ impl std::fmt::Display for RenderAbort {
                 "Form XObject nesting depth {MAX_FORM_DEPTH} exceeded; aborting page render"
             ),
             Self::Cancelled { ops } => write!(f, "page render cancelled after {ops} ops"),
+            Self::AllocationFailed { width, height } => write!(
+                f,
+                "cannot allocate a {width}×{height} bitmap; aborting page render"
+            ),
         }
     }
 }

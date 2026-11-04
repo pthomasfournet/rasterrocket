@@ -241,6 +241,32 @@ impl XPathScanner {
         }
     }
 
+    /// This table moved by `dx` columns and `dy` rows, in the scanner's own
+    /// units; coordinates saturate at the `i32` range.
+    #[must_use]
+    pub fn translated(&self, dx: i32, dy: i32) -> Self {
+        if self.is_empty() {
+            return Self::empty(self.eo);
+        }
+        Self {
+            eo: self.eo,
+            x_min: self.x_min.saturating_add(dx),
+            x_max: self.x_max.saturating_add(dx),
+            y_min: self.y_min.saturating_add(dy),
+            y_max: self.y_max.saturating_add(dy),
+            row_start: self.row_start.clone(),
+            intersects: self
+                .intersects
+                .iter()
+                .map(|i| Intersect {
+                    x0: i.x0.saturating_add(dx),
+                    x1: i.x1.saturating_add(dx),
+                    count: i.count,
+                })
+                .collect(),
+        }
+    }
+
     const fn empty(eo: bool) -> Self {
         Self {
             eo,

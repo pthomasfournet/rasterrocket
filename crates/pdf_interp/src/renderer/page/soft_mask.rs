@@ -22,7 +22,7 @@ use raster::Bitmap;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
-use super::canvas::{CanvasKind, PageCanvas, Snapshot, with_canvas};
+use super::canvas::{CanvasKind, Snapshot, with_canvas};
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::RasterColor;
 use crate::renderer::gstate::SoftMaskPlane;
@@ -41,7 +41,7 @@ impl PageRenderer<'_> {
                 transfer,
             } => {
                 let plane = self.render_soft_mask(*luminosity, *group, backdrop, transfer.as_ref());
-                if plane.is_none() {
+                if plane.is_none() && self.budget_exceeded.is_none() {
                     log::warn!(
                         "rasterrocket-interp: soft mask group {group:?} unreadable — painting unmasked"
                     );
@@ -52,7 +52,8 @@ impl PageRenderer<'_> {
         self.gstate.current_mut().soft_mask = plane;
     }
 
-    /// Render the mask group `group` and reduce it to mask values.
+    /// Render the mask group `group` and reduce it to mask values.  A mask
+    /// canvas the allocator refuses stops the render.
     fn render_soft_mask(
         &mut self,
         luminosity: bool,
@@ -61,6 +62,12 @@ impl PageRenderer<'_> {
         transfer: Option<&pdf::Object>,
     ) -> Option<SoftMaskPlane> {
         let form = self.resources.form_from_stream_id(group)?;
+        // A mask group yields mask values, not printed colorants, so it is
+        // painted in sRGB whatever the page's canvas: its luminosity is
+        // that of its colours (ISO 32000-1 §11.6.5.2), not of the inks
+        // that print them, which reproduce a colour only within the
+        // process gamut.
+        let mask = self.try_canvas(CanvasKind::Rgb, self.width, self.height)?;
 
         // The mask group is painted with the graphics state in effect at
         // `gs`, except that the soft mask is `None`, the alpha constants are
@@ -77,24 +84,30 @@ impl PageRenderer<'_> {
             gs.blend_mode = BlendMode::Normal;
         }
         let enclosing = std::mem::take(&mut self.group);
-        // A mask group yields mask values, not printed colorants, so it is
-        // painted in sRGB whatever the page's canvas: its luminosity is
-        // that of its colours (ISO 32000-1 §11.6.5.2), not of the inks
-        // that print them, which reproduce a colour only within the
-        // process gamut.
-        let mask = PageCanvas::new(CanvasKind::Rgb, self.width, self.height, true);
         let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);
+        // The canvas is RGB, so the conversion moves its bitmap out.
         let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
         self.group = enclosing;
         self.gstate.restore();
 
         let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
-        let values = if luminosity {
-            luminosity_values(&canvas, self.mask_backdrop_rgb(group, backdrop))
-        } else {
-            canvas.alpha_plane()?.to_vec()
+        let mut values = match mask_plane(canvas.width, canvas.height) {
+            Ok(values) => values,
+            Err(e) => {
+                self.abort_allocation(e);
+                return None;
+            }
         };
+        if luminosity {
+            luminosity_values(
+                &canvas,
+                self.mask_backdrop_rgb(group, backdrop),
+                &mut values,
+            );
+        } else {
+            values.extend_from_slice(canvas.alpha_plane()?);
+        }
         let values = match lut {
             Some(lut) => values.into_iter().map(|v| lut[usize::from(v)]).collect(),
             None => values,
@@ -390,12 +403,21 @@ fn backdrop_rgb(bc: &[f64]) -> [u8; 3] {
     [s[0], s[1], s[2]]
 }
 
-/// Luminosity mask values: each pixel of `group` composited over the opaque
-/// backdrop `bc`, reduced to its luminosity by [`color::convert::luminosity`]
-/// (PDF §11.3.5.3).
-fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
-    let (w, h) = (group.width as usize, group.height as usize);
-    let mut out = Vec::with_capacity(w * h);
+/// An empty buffer with room for the `width × height` values of a mask
+/// plane.
+fn mask_plane(width: u32, height: u32) -> Result<Vec<u8>, raster::BitmapAllocError> {
+    let error = raster::BitmapAllocError { width, height };
+    let len = (width as usize).checked_mul(height as usize).ok_or(error)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(len).map_err(|_| error)?;
+    Ok(values)
+}
+
+/// Append to `out` the luminosity mask values: each pixel of `group`
+/// composited over the opaque backdrop `bc`, reduced to its luminosity by
+/// [`color::convert::luminosity`] (PDF §11.3.5.3).
+fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3], out: &mut Vec<u8>) {
+    let w = group.width as usize;
     for y in 0..group.height {
         let row = group.row_bytes(y);
         let alpha = group.alpha_row(y);
@@ -412,7 +434,6 @@ fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3]) -> Vec<u8> {
             out.push(color::convert::luminosity(ch(0), ch(1), ch(2)));
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -457,9 +478,21 @@ mod tests {
         bmp.alpha_plane_mut()
             .unwrap()
             .copy_from_slice(&[255, 255, 0]);
+        let values = |bc| {
+            let mut out = mask_plane(3, 1).unwrap();
+            luminosity_values(&bmp, bc, &mut out);
+            out
+        };
         // White, pure red, and a transparent pixel showing the backdrop.
-        assert_eq!(luminosity_values(&bmp, [0, 0, 0]), [255, 77, 0]);
-        assert_eq!(luminosity_values(&bmp, [255, 255, 255]), [255, 77, 255]);
+        assert_eq!(values([0, 0, 0]), [255, 77, 0]);
+        assert_eq!(values([255, 255, 255]), [255, 77, 255]);
+    }
+
+    #[test]
+    fn a_mask_plane_beyond_the_address_space_is_an_error() {
+        assert!(mask_plane(4, 2).unwrap().capacity() >= 8);
+        let refused = mask_plane(u32::MAX, u32::MAX).unwrap_err();
+        assert_eq!((refused.width, refused.height), (u32::MAX, u32::MAX));
     }
 
     /// `BC` is read in the mask group's colour space: Lab white is white,
