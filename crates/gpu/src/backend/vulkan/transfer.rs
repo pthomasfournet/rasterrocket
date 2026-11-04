@@ -1,13 +1,13 @@
 //! Host↔device transfer helpers.
 //!
-//! Synchronous upload/download via a reusable `HOST_VISIBLE` staging
-//! buffer (grown to the high-water-mark of any transfer seen so far)
-//! and a one-time-submit command buffer on the compute queue, with
+//! Synchronous upload/download via reusable `HOST_VISIBLE` staging
+//! buffers, one per direction (each grown to the largest transfer seen so
+//! far), and a one-time-submit command buffer on the compute queue, with
 //! `vkQueueWaitIdle` for completion.
 
 #![expect(
     clippy::significant_drop_tightening,
-    reason = "the staging Mutex<Option<HostBuffer>> is held across Vulkan calls intentionally — releasing it between the host-side write and the GPU-side wait would let a second upload observe the same staging buffer mid-DMA"
+    reason = "each staging Mutex<Option<HostBuffer>> is held across Vulkan calls intentionally — releasing it between the host-side write and the GPU-side wait would let a second upload observe the same staging buffer mid-DMA"
 )]
 
 use std::sync::{Arc, Mutex};
@@ -49,14 +49,16 @@ pub(super) struct TransferContext {
     /// transitions it back to Initial state without freeing it,
     /// avoiding a `vkAllocateCommandBuffers` round-trip per transfer.
     cmd_pool: Mutex<TransferPool>,
-    /// Reusable staging buffer, grown to the high-water-mark of any
-    /// upload/download seen so far.  `None` until the first transfer;
-    /// reallocated only when a request exceeds the current capacity.
-    /// The `Mutex` guards the staging payload: a concurrent
-    /// `upload` would otherwise observe the same staging buffer
-    /// mid-DMA.  Command-pool / queue external-sync are NOT this
-    /// lock's job — see `cmd_pool` and `DeviceCtx::with_queue`.
-    staging: Mutex<Option<HostBuffer>>,
+    /// Staging buffer of [`Self::upload`], in memory the host writes
+    /// ([`SlabAllocator::alloc_host`]), grown to the largest upload so far.
+    /// `None` until the first upload.  The `Mutex` is held from the host
+    /// write to the end of the device copy, so a concurrent upload cannot
+    /// overwrite the bytes being copied.
+    upload_staging: Mutex<Option<HostBuffer>>,
+    /// Staging buffer of [`Self::download`], in host-cached memory where
+    /// the device offers it ([`SlabAllocator::alloc_host_readback`]), under
+    /// the same growth and locking rule as `upload_staging`.
+    download_staging: Mutex<Option<HostBuffer>>,
 }
 
 /// Pool + cached cmd buffer pair guarded together by `cmd_pool`'s mutex.
@@ -87,7 +89,8 @@ impl TransferContext {
         Ok(Self {
             device,
             cmd_pool: Mutex::new(TransferPool { pool, cmd }),
-            staging: Mutex::new(None),
+            upload_staging: Mutex::new(None),
+            download_staging: Mutex::new(None),
         })
     }
 
@@ -108,10 +111,10 @@ impl TransferContext {
         // the lock between write and wait would let a second upload
         // observe the same staging buffer mid-DMA.
         let mut staging_slot = self
-            .staging
+            .upload_staging
             .lock()
             .expect("transfer staging mutex poisoned");
-        let staging = ensure_staging(allocator, &mut staging_slot, src.len())?;
+        let staging = ensure_staging(&mut staging_slot, src.len(), |n| allocator.alloc_host(n))?;
         staging.as_mut_slice()[..src.len()].copy_from_slice(src);
         let staging_handle = staging.handle();
         let dst_handle = dst.handle();
@@ -131,10 +134,12 @@ impl TransferContext {
         }
         let len = check_len(dst.len(), src.size(), "download", "src size")?;
         let mut staging_slot = self
-            .staging
+            .download_staging
             .lock()
             .expect("transfer staging mutex poisoned");
-        let staging = ensure_staging(allocator, &mut staging_slot, dst.len())?;
+        let staging = ensure_staging(&mut staging_slot, dst.len(), |n| {
+            allocator.alloc_host_readback(n)
+        })?;
         let staging_handle = staging.handle();
         let src_handle = src.handle();
         self.copy_via_staging(src_handle, staging_handle, len)?;
@@ -227,14 +232,26 @@ impl TransferContext {
     }
 }
 
-/// Make sure the cached staging buffer is at least `min_size` bytes;
-/// allocate or grow as needed.  Returns a mutable reference to the
-/// (now-large-enough) buffer.
-fn ensure_staging<'a>(
-    allocator: &SlabAllocator,
-    slot: &'a mut Option<HostBuffer>,
+#[cfg(test)]
+impl TransferContext {
+    /// Memory property flags of the download staging buffer, once a
+    /// download has allocated it.
+    pub(super) fn download_staging_properties(&self) -> Option<vk::MemoryPropertyFlags> {
+        self.download_staging
+            .lock()
+            .expect("transfer staging mutex poisoned")
+            .as_ref()
+            .map(HostBuffer::memory_properties)
+    }
+}
+
+/// The staging buffer in `slot`, replaced first by one from `alloc` when it
+/// holds fewer than `min_size` bytes.
+fn ensure_staging(
+    slot: &mut Option<HostBuffer>,
     min_size: usize,
-) -> Result<&'a mut HostBuffer> {
+    alloc: impl FnOnce(usize) -> Result<HostBuffer>,
+) -> Result<&mut HostBuffer> {
     let current_capacity = slot.as_ref().map_or(0, HostBuffer::size);
     let needed = u64::try_from(min_size).expect("min_size fits u64");
     if needed > current_capacity {
@@ -246,9 +263,10 @@ fn ensure_staging<'a>(
         // Drop the old buffer first so its VkBuffer + allocation are
         // released before we ask for the new one.
         *slot = None;
-        *slot = Some(allocator.alloc_host(grown_usize)?);
+        return Ok(slot.insert(alloc(grown_usize)?));
     }
-    Ok(slot.as_mut().expect("ensure_staging always populates"))
+    slot.as_mut()
+        .ok_or_else(|| BackendError::msg("staging buffer requested for an empty transfer"))
 }
 
 impl Drop for TransferContext {

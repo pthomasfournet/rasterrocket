@@ -416,3 +416,54 @@ impl GpuBackend for VulkanBackend {
         Ok(VramBudget::new(total, usable.min(total)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ash::vk;
+
+    /// The default device, or `None` (the test is skipped) when no Vulkan
+    /// device is present.
+    fn backend() -> Option<VulkanBackend> {
+        match VulkanBackend::new() {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("skipping: no Vulkan backend: {e}");
+                None
+            }
+        }
+    }
+
+    /// Whether `device` offers a host-visible, host-coherent, host-cached
+    /// memory type.
+    fn offers_host_cached(device: &device::DeviceCtx) -> bool {
+        let wanted = vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT
+            | vk::MemoryPropertyFlags::HOST_CACHED;
+        device.mem_props.memory_types[..device.mem_props.memory_type_count as usize]
+            .iter()
+            .any(|t| t.property_flags.contains(wanted))
+    }
+
+    #[test]
+    fn vulkan_staged_download_reads_host_cached_memory() {
+        let Some(backend) = backend() else { return };
+        if backend.is_integrated() || !offers_host_cached(&backend.device) {
+            eprintln!("skipping: the download is not staged or no cached type exists");
+            return;
+        }
+        let buf = backend
+            .alloc_device_zeroed(4096)
+            .expect("alloc_device_zeroed");
+        let mut out = vec![1u8; 4096];
+        backend.download(&buf, &mut out).expect("download");
+        let flags = backend
+            .transfer
+            .download_staging_properties()
+            .expect("the download allocated its staging buffer");
+        assert!(
+            flags.contains(vk::MemoryPropertyFlags::HOST_CACHED),
+            "download staging is in uncached memory: {flags:?}"
+        );
+    }
+}

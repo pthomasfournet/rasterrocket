@@ -263,6 +263,17 @@ impl HostBuffer {
     }
 }
 
+#[cfg(test)]
+impl HostBuffer {
+    /// Property flags of the memory type backing the buffer.
+    pub(super) fn memory_properties(&self) -> vk::MemoryPropertyFlags {
+        self.allocation.as_ref().map_or_else(
+            vk::MemoryPropertyFlags::empty,
+            Allocation::memory_properties,
+        )
+    }
+}
+
 impl Drop for HostBuffer {
     fn drop(&mut self) {
         let alloc = self.allocation.take().expect("HostBuffer dropped twice");
