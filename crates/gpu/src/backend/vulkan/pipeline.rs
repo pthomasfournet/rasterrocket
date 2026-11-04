@@ -110,33 +110,40 @@ const _: () = {
     assert!(KernelId::IdctColor.slot_index() < NUM_KERNELS);
 };
 
-/// SPIR-V `OpCapability`, and the `Int64` capability operand.
+/// SPIR-V magic number, `OpCapability`, and the `Int64` capability operand.
+const SPIRV_MAGIC: u32 = 0x0723_0203;
 const OP_CAPABILITY: u32 = 17;
 const CAPABILITY_INT64: u32 = 11;
 
-/// Whether the SPIR-V module `spirv` (little-endian words after the
-/// five-word header) declares `OpCapability capability`.  Instructions are
-/// walked by their word counts, so an operand equal to the opcode is not
-/// mistaken for one; a malformed length ends the walk.
-fn spirv_declares_capability(spirv: &[u8], capability: u32) -> bool {
-    let words: Vec<u32> = spirv
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|&w| u32::from_le_bytes(w))
-        .collect();
+/// Whether the SPIR-V module `words` declares `OpCapability capability`.
+///
+/// The `OpCapability` instructions are the first of a module, after the
+/// five-word header (logical layout, SPIR-V specification §2.4), so the
+/// walk stops at the first other instruction.  A module without the
+/// SPIR-V magic number, or with a zero instruction length, declares none.
+fn spirv_declares_capability(words: &[u32], capability: u32) -> bool {
+    if words.first() != Some(&SPIRV_MAGIC) {
+        return false;
+    }
     let mut at = 5;
     while let Some(&first) = words.get(at) {
         let (count, opcode) = ((first >> 16) as usize, first & 0xFFFF);
-        if count == 0 {
+        if count == 0 || opcode != OP_CAPABILITY {
             return false;
         }
-        if opcode == OP_CAPABILITY && words.get(at + 1) == Some(&capability) {
+        if words.get(at + 1) == Some(&capability) {
             return true;
         }
         at += count;
     }
     false
+}
+
+/// The SPIR-V words of `spirv`, decoded as `vkCreateShaderModule` takes
+/// them.
+fn spirv_words(spirv: &[u8], label: &str) -> Result<Vec<u32>> {
+    ash::util::read_spv(&mut std::io::Cursor::new(spirv))
+        .map_err(|e| BackendError::msg(format!("read_spv({label}): {e}")))
 }
 
 impl KernelId {
@@ -470,7 +477,8 @@ impl PipelineCache {
     }
 
     fn compile(&self, id: KernelId) -> Result<CompiledKernel> {
-        if spirv_declares_capability(id.spirv(), CAPABILITY_INT64) && !self.device.has_int64 {
+        let words = spirv_words(id.spirv(), id.label())?;
+        if spirv_declares_capability(&words, CAPABILITY_INT64) && !self.device.has_int64 {
             return Err(BackendError::msg(format!(
                 "kernel {id:?} uses 64-bit integers, which need shaderInt64; this device lacks it"
             )));
@@ -518,31 +526,6 @@ impl PipelineCache {
                     .destroy_descriptor_set_layout(descriptor_set_layout, None);
             })?;
 
-        let spirv = id.spirv();
-        // Safety: SPIR-V comes from `slangc -target spirv` at build time;
-        // it's pre-validated by `spirv-val` and aligned to 4 bytes (any
-        // SPIR-V file is, per spec).  We wrap in a Cursor to feed
-        // ash::util::read_spv which expects a Read.  The Vec<u32> result
-        // is dropped at the end of `compile`; the shader module owns its
-        // own copy of the SPIR-V after vkCreateShaderModule succeeds.
-        //
-        // If read_spv fails (would only happen if our build-baked SPIR-V
-        // bytes have a non-multiple-of-4 length, which the SPIR-V spec
-        // forbids — so this branch is unreachable in practice), still
-        // tear down the layouts we already created.
-        let words = ash::util::read_spv(&mut std::io::Cursor::new(spirv)).map_err(|e| {
-            // Safety: handles owned by us; nothing else holds them; we're
-            // bailing out before they could be used.
-            unsafe {
-                self.device
-                    .device
-                    .destroy_pipeline_layout(pipeline_layout, None);
-                self.device
-                    .device
-                    .destroy_descriptor_set_layout(descriptor_set_layout, None);
-            }
-            BackendError::msg(format!("read_spv({}): {e}", id.label()))
-        })?;
         let sm_info = vk::ShaderModuleCreateInfo::default().code(&words);
         let shader_module = unsafe { self.device.device.create_shader_module(&sm_info, None) }
             .map_err(vk_err("vkCreateShaderModule"))
@@ -713,27 +696,35 @@ mod tests {
 
     #[test]
     fn int64_is_declared_by_the_64_bit_kernels_only() {
-        assert!(!spirv_declares_capability(
-            KernelId::AaFill.spirv(),
-            CAPABILITY_INT64
-        ));
-        assert!(!spirv_declares_capability(
-            KernelId::Composite.spirv(),
-            CAPABILITY_INT64
-        ));
+        let declares = |id: KernelId, capability| {
+            spirv_declares_capability(&spirv_words(id.spirv(), id.label()).unwrap(), capability)
+        };
+        assert!(!declares(KernelId::AaFill, CAPABILITY_INT64));
+        assert!(!declares(KernelId::Composite, CAPABILITY_INT64));
         #[cfg(feature = "gpu-jpeg-huffman")]
         {
-            assert!(spirv_declares_capability(
-                KernelId::IdctColor.spirv(),
-                CAPABILITY_INT64
-            ));
-            assert!(spirv_declares_capability(
-                KernelId::Phase1IntraSync.spirv(),
-                CAPABILITY_INT64
-            ));
+            assert!(declares(KernelId::IdctColor, CAPABILITY_INT64));
+            assert!(declares(KernelId::Phase1IntraSync, CAPABILITY_INT64));
         }
         // Every module declares Shader (capability 1).
-        assert!(spirv_declares_capability(KernelId::AaFill.spirv(), 1));
+        assert!(declares(KernelId::AaFill, 1));
+    }
+
+    #[test]
+    fn capability_walk_stops_at_the_first_other_instruction() {
+        let op = |count: u32, opcode: u32| (count << 16) | opcode;
+        let header = [SPIRV_MAGIC, 0x0001_0300, 0, 1, 0];
+        let module: Vec<u32> = header
+            .into_iter()
+            .chain([op(2, OP_CAPABILITY), 1])
+            .chain([op(3, 14), 0, 1])
+            .chain([op(2, OP_CAPABILITY), CAPABILITY_INT64])
+            .collect();
+        assert!(spirv_declares_capability(&module, 1));
+        assert!(!spirv_declares_capability(&module, CAPABILITY_INT64));
+        let mut no_magic = module;
+        no_magic[0] = 0;
+        assert!(!spirv_declares_capability(&no_magic, 1));
     }
 
     /// The recorder feeds `binding_slots` to descriptor-set
