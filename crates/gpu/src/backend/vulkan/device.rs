@@ -17,7 +17,7 @@ use ash::vk;
 use std::ffi::{CStr, c_char};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::backend::{BackendError, Result};
 
@@ -77,11 +77,26 @@ impl Drop for DeviceCtx {
         // call above; matching destroy_* calls here, in reverse order, are
         // sound because we have exclusive ownership and the recorder calls
         // `vkDeviceWaitIdle` before the backend drops.
+        let _lifecycle = instance_lifecycle();
         unsafe {
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
     }
+}
+
+/// Serialises instance creation and destruction across the process.
+///
+/// The Vulkan loader updates process-global state (its driver and implicit
+/// layer lists, and the libraries behind them) during `vkCreateInstance` and
+/// `vkDestroyInstance` under its own lock, while
+/// `vkEnumerateInstanceExtensionProperties` reads that state without it:
+/// creating backends on several threads at once calls through a freed
+/// layer pointer.  Holding this lock from loading the loader to the end of
+/// device creation, and around teardown, keeps each thread's view whole.
+fn instance_lifecycle() -> MutexGuard<'static, ()> {
+    static LIFECYCLE: Mutex<()> = Mutex::new(());
+    LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Initialise the Vulkan loader, instance, and device.
@@ -91,6 +106,7 @@ impl Drop for DeviceCtx {
 /// the `ash::Device` reference everywhere.  `selector`, when given,
 /// names the physical device; otherwise the automatic ranking applies.
 pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> {
+    let _lifecycle = instance_lifecycle();
     let entry = load_entry()?;
 
     let instance = create_instance(&entry)?;

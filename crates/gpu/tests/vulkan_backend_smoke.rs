@@ -412,3 +412,20 @@ fn aa_fill_page_runs_in_one_submission() {
         );
     }
 }
+
+/// Backends created and dropped on several threads at once: the loader is
+/// shared by the process, so one thread's teardown never unloads it under
+/// another thread's instance creation.
+#[test]
+fn backends_are_created_and_dropped_on_several_threads() {
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            // The scope joins every thread, propagating a panic.
+            let _ = scope.spawn(|| {
+                for _ in 0..8 {
+                    drop(VulkanBackend::new().expect("VulkanBackend::new"));
+                }
+            });
+        }
+    });
+}
