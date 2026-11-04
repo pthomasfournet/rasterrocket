@@ -16,13 +16,18 @@
 #   AB_TIMEOUT                 per-render limit in seconds (default 120)
 #   AB_ARCHIVE                 archive root for the default sample
 #
-# Files written: OUTPREFIX.list (the corpus) and OUTPREFIX.diffs (one line
-# per difference); renders go to a temporary directory beside them, removed
-# on exit.  Differences are
+# Files written: OUTPREFIX.list (the corpus), OUTPREFIX.diffs (one line
+# per difference) and OUTPREFIX.errors (the output of every render that
+# exited non-zero, each under a "== <side> <status> <pdf>" line); renders go
+# to a temporary directory beside them, removed on exit.  Differences are
 # "PAGE <pdf> <page>" (pixels differ), "COUNT <pdf>" (page counts differ) and
-# "EXIT <pdf> <before> <after>" (exit statuses differ).
+# "EXIT <pdf> <before> <after>" (exit statuses differ).  A file both builds
+# fail on with the same status prints "FAILED <pdf> <status>: <first line of
+# AFTER's output>" on standard output.  The summary line counts the page
+# pairs present on both sides and compared, and the differences.
 #
-# Exit status: 0 when nothing differs, 1 otherwise, 2 on bad usage.
+# Exit status: 0 when nothing differs and at least one page pair was
+# compared; 1 on any difference or when nothing was compared; 2 on bad usage.
 # Requires bash >= 4.4, and `shuf` or `gshuf` for the archive sample;
 # `timeout` or `gtimeout` is used when present.
 set -euo pipefail
@@ -66,18 +71,24 @@ fi
 work=$(mktemp -d "$prefix.work.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-# Renders into $work/<tag>-NNN.pgm and stores the exit status in $work/<tag>.status.
+# Renders into $work/<tag>-NNN.pgm and stores the exit status in
+# $work/<tag>.status; a non-zero exit appends the render's output to $errors.
 render() {
     local tag=$1 bin=$2 status=0
     shift 2
     "${limiter[@]}" "$bin" --no-ram -r 50 --gray -l 4 --threads 4 "$@" "$pdf" "$work/$tag" \
         </dev/null >"$work/$tag.err" 2>&1 || status=$?
     echo "$status" >"$work/$tag.status"
+    if ((status != 0)); then
+        echo "== $tag $status $pdf" >>"$errors"
+        cat "$work/$tag.err" >>"$errors"
+    fi
 }
 
-diffs=$prefix.diffs
+diffs=$prefix.diffs errors=$prefix.errors
 : >"$diffs"
-scanned=0
+: >"$errors"
+scanned=0 compared=0
 while IFS= read -r pdf; do
     [[ -n $pdf ]] || continue
     scanned=$((scanned + 1))
@@ -88,14 +99,24 @@ while IFS= read -r pdf; do
     b_pages=("$work"/B-*.pgm) a_pages=("$work"/A-*.pgm)
     shopt -u nullglob
     for page in "${b_pages[@]}"; do
+        [[ -e $work/A-${page##*/B-} ]] || continue
+        compared=$((compared + 1))
         cmp -s "$page" "$work/A-${page##*/B-}" || echo "PAGE $pdf ${page##*-}" >>"$diffs"
     done
     ((${#b_pages[@]} == ${#a_pages[@]})) || echo "COUNT $pdf" >>"$diffs"
     b_status=$(<"$work/B.status") a_status=$(<"$work/A.status")
-    [[ $b_status == "$a_status" ]] || echo "EXIT $pdf $b_status $a_status" >>"$diffs"
+    if [[ $b_status != "$a_status" ]]; then
+        echo "EXIT $pdf $b_status $a_status" >>"$diffs"
+    elif [[ $b_status != 0 ]]; then
+        echo "FAILED $pdf $b_status: $(head -n 1 "$work/A.err")"
+    fi
 done <"$prefix.list"
 
 count=$(wc -l <"$diffs" | tr -d ' ')
-echo "scanned $scanned files; $count differences"
+echo "scanned $scanned files, $compared pages compared; $count differences"
 head -20 "$diffs"
+if ((compared == 0)); then
+    echo "ab_archive.sh: no page was compared; see $errors" >&2
+    exit 1
+fi
 ((count == 0))
