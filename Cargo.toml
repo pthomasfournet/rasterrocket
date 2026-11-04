@@ -56,8 +56,10 @@ weezl        = { version = "0.2" }
 # JPEG decoding: images in documents and archives, and encoder tests.
 zune-jpeg    = { version = "0.5.15" }
 
-# The local read-fonts and skrifa forks replace the registry crates for every
-# dependent, including the bench crate's vello_common.
+# The local read-fonts (0.46) and skrifa (0.49) forks replace the registry
+# crates for every dependent whose requirement those versions satisfy.  The
+# bench crate's vello_cpu, through glifo, requires skrifa 0.44 and with it
+# read-fonts 0.41, so it builds those registry releases alongside the forks.
 [patch.crates-io]
 read-fonts = { path = "crates/read_fonts" }
 skrifa     = { path = "crates/skrifa" }
