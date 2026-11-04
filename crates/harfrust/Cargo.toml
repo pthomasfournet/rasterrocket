@@ -38,3 +38,8 @@ tracing = []
 [lib]
 bench = false
 
+
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false

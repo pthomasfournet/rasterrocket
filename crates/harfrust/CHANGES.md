@@ -24,7 +24,9 @@ read-fonts 0.46), and the two are rebased together.
   own lint levels do not apply to upstream's code; `exclude` is removed,
   nothing outside the crate being vendored; `readme` points at the crate's
   own `README.md`, upstream's repository README with a provenance note and
-  without its logo and badges.
+  without its logo and badges. `[package.metadata.release] release =
+  false` keeps the crate out of `cargo release`, so its version stays that
+  of the upstream base.
 
 - Upstream's test suite (`harfrust/tests`, about 6 000 shaping cases with
   their fonts) is not vendored. The unit tests are, and some embed fonts
