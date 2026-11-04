@@ -43,6 +43,30 @@ is opened with `Page::new_embedded`.
   upstream's behaviour: an error in strict mode, the rows decoded so far
   in lenient mode. Output changes only when an allocation fails. Tests:
   `decode::generic::tests`.
+- Decode budget (`src/budget.rs`). Every bitmap, symbol copy, pattern
+  table, halftone gray-scale image and skip mask is charged, before it is
+  allocated, to a cumulative memory budget, and the allocation itself is
+  fallible (`DecodeError::OutOfMemory`). A page may allocate 16 times its
+  area plus 2^26 bits besides the page bitmap, at most 2^33 bits (1 GiB);
+  the global segments of a file or a `JBIG2Globals` stream may allocate
+  2^31 bits. Placing a symbol in a text region charges the pixels it
+  writes, and a halftone region charges grid cells × pattern area, to a
+  compositing budget of 64 page areas plus 2^28 pixels, at most 2^36
+  (2^32 for the globals). An exhausted budget fails the segment with
+  `OverflowError::MemoryBudget` or `OverflowError::WorkBudget`; in lenient
+  mode a failed immediate region is dropped and the page kept. Over the
+  579 JBIG2 documents of the archive corpus (first 40 pages each, 21 275
+  images) the largest page used 21 % of its memory budget and 1.6 % of
+  its compositing budget, and the largest globals 2 % of theirs; no
+  output changes. Tests: `tests/budget.rs`, `budget::tests`,
+  `bitmap::tests`.
+- `Bitmap::combine` iterates only the source rows that fall inside the
+  destination, so a symbol placed far outside its region costs nothing
+  per row. A refinement/aggregate symbol (6.5.8.2) looks its referenced
+  symbols up in the input and new symbol lists (`SymbolSet`) instead of
+  copying both into a new list per symbol, which was quadratic in the
+  dictionary size. `Bitmap` is no longer `Clone`, so every copy goes
+  through the charged `Bitmap::try_clone`. Output is unchanged.
 
 ## Upstream fixes brought over
 

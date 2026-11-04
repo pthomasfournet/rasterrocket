@@ -143,6 +143,10 @@ pub enum OverflowError {
     Index,
     /// A symbol dictionary or region has too many symbols.
     SymbolCount,
+    /// The decode would allocate more than its memory budget.
+    MemoryBudget,
+    /// The decode would composite more pixels than its work budget.
+    WorkBudget,
 }
 
 impl fmt::Display for DecodeError {
@@ -171,6 +175,8 @@ impl fmt::Display for OverflowError {
             Self::Index => write!(f, "overflow in index computation"),
             Self::GridDimension => write!(f, "overflow in grid dimension computation"),
             Self::SymbolCount => write!(f, "too many symbols"),
+            Self::MemoryBudget => write!(f, "decode exceeds its memory budget"),
+            Self::WorkBudget => write!(f, "decode exceeds its compositing budget"),
         }
     }
 }

@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::arithmetic_decoder::ArithmeticDecoderContext;
+use crate::budget::Budget;
 
 /// A reusable context for decoding JBIG2 images.
 #[derive(Default)]
@@ -31,9 +32,20 @@ pub struct DecoderContext {
     pub(crate) page_bitmap: Bitmap,
 }
 
-#[derive(Default)]
 pub(crate) struct ScratchBuffers {
     pub(crate) contexts: Vec<ArithmeticDecoderContext>,
+    /// The memory and compositing work the decode may still spend; set per
+    /// page by `decode_segments`.
+    pub(crate) budget: Budget,
+}
+
+impl Default for ScratchBuffers {
+    fn default() -> Self {
+        Self {
+            contexts: Vec::new(),
+            budget: Budget::for_globals(),
+        }
+    }
 }
 
 /// A decoder for JBIG2 images.
@@ -58,6 +70,7 @@ pub mod integration;
 
 mod arithmetic_decoder;
 mod bitmap;
+mod budget;
 mod decode;
 mod error;
 mod file;
@@ -488,6 +501,7 @@ fn decode_segments(
     let page_bitmap = &mut decoder_ctx.page_bitmap;
     let page_state = &mut decoder_ctx.page_state;
     let scratch_buffers = &mut decoder_ctx.scratch_buffers;
+    scratch_buffers.budget = Budget::for_page(page_bitmap.width, page_bitmap.height);
 
     for seg in segments {
         match decode_segment(
@@ -661,7 +675,11 @@ fn decode_segment(
             let reference = match referred_segment {
                 Some(referred_segment) => referred_segment,
                 None => {
-                    page_area = page_bitmap_area(page_bitmap, &header.region_info)?;
+                    page_area = page_bitmap_area(
+                        page_bitmap,
+                        &header.region_info,
+                        &scratch_buffers.budget,
+                    )?;
                     &page_area
                 }
             };
@@ -698,7 +716,11 @@ fn decode_segment(
                 let reference = match referred_segment {
                     Some(referred_segment) => referred_segment,
                     None => {
-                        page_area = page_bitmap_area(page_bitmap, &header.region_info)?;
+                        page_area = page_bitmap_area(
+                            page_bitmap,
+                            &header.region_info,
+                            &scratch_buffers.budget,
+                        )?;
                         &page_area
                     }
                 };
@@ -759,6 +781,7 @@ fn decode_dictionary_segment(
                 &referred_tables,
                 standard_tables,
                 retained_contexts,
+                &scratch_buffers.budget,
             )?;
             dictionaries.store_symbol_dictionary(seg.header.segment_number, dictionary);
         }
@@ -956,13 +979,18 @@ fn find<T>(entries: &[(u32, T)], segment_number: u32) -> Option<&T> {
         .map(|idx| &entries[idx].1)
 }
 
-fn page_bitmap_area(page: &Bitmap, region_info: &decode::RegionSegmentInfo) -> Result<Bitmap> {
+fn page_bitmap_area(
+    page: &Bitmap,
+    region_info: &decode::RegionSegmentInfo,
+    budget: &Budget,
+) -> Result<Bitmap> {
     let mut area = Bitmap::new_with(
         region_info.width,
         region_info.height,
         region_info.x_location,
         region_info.y_location,
         false,
+        budget,
     )?;
     area.combine(
         page,

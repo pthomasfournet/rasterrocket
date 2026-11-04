@@ -1,6 +1,5 @@
 //! Halftone region segment parsing and decoding (7.4.5, 6.6).
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::RegionBitmap;
@@ -8,6 +7,7 @@ use super::pattern::PatternDictionary;
 use super::{CombinationOperator, RegionSegmentInfo, Template, parse_region_segment_info};
 use crate::ScratchBuffers;
 use crate::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
+use crate::budget::Budget;
 use crate::error::{OverflowError, ParseError, RegionError, Result, bail};
 use crate::gray_scale::{GrayScaleParams, decode_gray_scale_image};
 use crate::reader::Reader;
@@ -26,6 +26,7 @@ pub(crate) fn decode(
         region.x_location,
         region.y_location,
         header.flags.initial_pixel_color,
+        &ctx.budget,
     )?;
 
     decode_into(header, pattern_dict, &mut htreg, ctx)?;
@@ -43,10 +44,24 @@ pub(crate) fn decode_into(
     ctx: &mut ScratchBuffers,
 ) -> Result<()> {
     let skip_bitmap = if header.flags.enable_skip {
-        Some(compute_skip_bitmap(header, pattern_dict, htreg)?)
+        Some(compute_skip_bitmap(
+            header,
+            pattern_dict,
+            htreg,
+            &ctx.budget,
+        )?)
     } else {
         None
     };
+
+    // Rendering places one pattern per grid cell (6.6.5.2).
+    let grid = &header.grid_position_and_size;
+    ctx.budget.charge_work(
+        u64::from(grid.width)
+            * u64::from(grid.height)
+            * u64::from(pattern_dict.pattern_width)
+            * u64::from(pattern_dict.pattern_height),
+    )?;
 
     // "3) Set HBPP to ⌈log₂(HNUMPATS)⌉." (6.6.5)
     let bits_per_pixel = (pattern_dict.patterns.len() as u32)
@@ -215,6 +230,7 @@ fn compute_skip_bitmap(
     header: &HalftoneRegionHeader<'_>,
     pattern_dict: &PatternDictionary,
     htreg: &Bitmap,
+    budget: &Budget,
 ) -> Result<Vec<u32>> {
     let grid = &header.grid_position_and_size;
     let pattern_width = pattern_dict.pattern_width as i32;
@@ -226,7 +242,7 @@ fn compute_skip_bitmap(
     let len = stride
         .checked_mul(grid.height)
         .ok_or(OverflowError::BitmapDimension)? as usize;
-    let mut hskip = vec![0_u32; len];
+    let mut hskip = budget.filled_vec(len, 0_u32)?;
     let mut coords = GridCoords::new(grid, &header.grid_vector);
 
     for m_g in 0..grid.height {

@@ -15,7 +15,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 /// A decoded region bitmap with its combination operator.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct RegionBitmap {
     /// The decoded bitmap.
     pub(crate) bitmap: Bitmap,

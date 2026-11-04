@@ -11,6 +11,7 @@ use super::{RegionBitmap, generic_refinement};
 use crate::ScratchBuffers;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::Bitmap;
+use crate::budget::Budget;
 use crate::error::{HuffmanError, OverflowError, ParseError, Result, SymbolError, bail};
 use crate::huffman_table::{HuffmanTable, StandardHuffmanTables, TableLine};
 use crate::integer_decoder::IntegerDecoder;
@@ -31,6 +32,7 @@ pub(crate) fn decode(
         header.region_info.x_location,
         header.region_info.y_location,
         header.flags.default_pixel,
+        &scratch.budget,
     )?;
 
     decode_into(
@@ -71,7 +73,7 @@ pub(crate) fn decode_into(
             standard_tables,
             &mut scratch.contexts,
         )?;
-        decode_with(ctx, symbols, header, bitmap)?;
+        decode_with(ctx, SymbolSet::of(symbols), header, bitmap, &scratch.budget)?;
     } else {
         let mut decoder = ArithmeticDecoder::new(header.data);
 
@@ -80,18 +82,46 @@ pub(crate) fn decode_into(
         let mut contexts = TextRegionContexts::new(symbol_code_length);
 
         let ctx = DecodeContext::new_arithmetic(&mut decoder, &mut contexts, &mut scratch.contexts);
-        decode_with(ctx, symbols, header, bitmap)?;
+        decode_with(ctx, SymbolSet::of(symbols), header, bitmap, &scratch.budget)?;
     }
 
     Ok(())
 }
 
+/// The symbols a text region refers to, `SBSYMS` (6.4): the symbols of
+/// `input` followed by those of `new`.
+#[derive(Clone, Copy)]
+pub(crate) struct SymbolSet<'a> {
+    pub(crate) input: &'a [&'a Bitmap],
+    pub(crate) new: &'a [Bitmap],
+}
+
+impl<'a> SymbolSet<'a> {
+    /// The set consisting of `symbols`.
+    pub(crate) fn of(symbols: &'a [&'a Bitmap]) -> Self {
+        Self {
+            input: symbols,
+            new: &[],
+        }
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<&'a Bitmap> {
+        match index.checked_sub(self.input.len()) {
+            None => Some(self.input[index]),
+            Some(new_index) => self.new.get(new_index),
+        }
+    }
+}
+
 /// Decode a text region segment with a decode context (6.4).
+///
+/// Each placed symbol charges the pixels it writes to `budget`.
 pub(crate) fn decode_with(
     mut ctx: DecodeContext<'_, '_>,
-    symbols: &[&Bitmap],
+    symbols: SymbolSet<'_>,
     header: &TextRegionHeader<'_>,
     region: &mut Bitmap,
+    budget: &Budget,
 ) -> Result<()> {
     let strip_size = header.strip_size();
 
@@ -154,7 +184,7 @@ pub(crate) fn decode_with(
             let symbol_id = ctx.read_symbol_id()?;
 
             let symbol_bitmap =
-                decode_symbol_instance_bitmap(&mut ctx, symbols, header, symbol_id)?;
+                decode_symbol_instance_bitmap(&mut ctx, symbols, header, symbol_id, budget)?;
 
             let symbol_bitmap_ref: &Bitmap = match &symbol_bitmap {
                 SymbolBitmap::Reference(idx) => match symbols.get(*idx) {
@@ -214,6 +244,7 @@ pub(crate) fn decode_with(
                 }
             };
 
+            budget.charge_work(region.clipped_area(symbol_bitmap_ref, x, y))?;
             region.combine(symbol_bitmap_ref, x, y, header.flags.combination_operator);
 
             if !header.flags.transposed
@@ -554,9 +585,10 @@ enum SymbolBitmap {
 /// Decode the symbol instance bitmap (6.4.11).
 fn decode_symbol_instance_bitmap(
     ctx: &mut DecodeContext<'_, '_>,
-    symbols: &[&Bitmap],
+    symbols: SymbolSet<'_>,
     header: &TextRegionHeader<'_>,
     symbol_id: usize,
+    budget: &Budget,
 ) -> Result<SymbolBitmap> {
     if !header.flags.use_refinement || ctx.read_refinement_flag()? == 0 {
         return Ok(SymbolBitmap::Reference(symbol_id));
@@ -588,7 +620,7 @@ fn decode_symbol_instance_bitmap(
         .checked_add(rdy)
         .ok_or(OverflowError::ReferenceOffset)?;
 
-    let mut refined_bitmap = Bitmap::new(refined_width, refined_height)?;
+    let mut refined_bitmap = Bitmap::new(refined_width, refined_height, budget)?;
 
     ctx.decode_refinement_bitmap(
         &mut refined_bitmap,

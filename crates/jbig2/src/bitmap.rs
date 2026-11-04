@@ -5,9 +5,9 @@
 //!
 //! "GBREG - The decoded region bitmap." (Table 3)
 
+use crate::budget::Budget;
 use crate::decode::CombinationOperator;
-use crate::error::{OverflowError, Result, bail};
-use alloc::vec;
+use crate::error::{DecodeError, OverflowError, Result, bail};
 use alloc::vec::Vec;
 
 // To guard better against malicious files, we limit bitmap dimensions
@@ -27,7 +27,7 @@ pub(crate) const WORD_SHIFT: u32 = WORD_BITS - 1;
 /// "Pixels decoded by the MMR decoder having the value 'black' shall be treated
 /// as having the value 1. Pixels decoded by the MMR decoder having the value
 /// 'white' shall be treated as having the value 0." (6.2.6)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Bitmap {
     /// Width in pixels.
     pub(crate) width: u32,
@@ -47,14 +47,17 @@ pub(crate) struct Bitmap {
 }
 
 impl Bitmap {
-    /// Create a new bitmap filled with white pixels (false).
+    /// Create a new bitmap filled with white pixels (false), charged to
+    /// `budget`.
     ///
     /// The bitmap is positioned at (0, 0).
-    pub(crate) fn new(width: u32, height: u32) -> Result<Self> {
-        Self::new_with(width, height, 0, 0, false)
+    pub(crate) fn new(width: u32, height: u32, budget: &Budget) -> Result<Self> {
+        Self::new_with(width, height, 0, 0, false, budget)
     }
 
-    pub(crate) fn new_wide(width: u32, height: u32) -> Result<Self> {
+    /// Like [`Bitmap::new`], but bounded by area (65 535² pixels) instead of
+    /// by each side.
+    pub(crate) fn new_wide(width: u32, height: u32, budget: &Budget) -> Result<Self> {
         if u64::from(width) * u64::from(height) > u64::from(MAX_DIMENSION).pow(2) {
             bail!(OverflowError::BitmapDimension);
         }
@@ -65,19 +68,20 @@ impl Bitmap {
             width,
             height,
             stride,
-            data: vec![0; stride as usize * height as usize],
+            data: budget.filled_vec(stride as usize * height as usize, 0)?,
             x_location: 0,
             y_location: 0,
         })
     }
 
-    /// Create a new bitmap with full configuration.
+    /// Create a new bitmap with full configuration, charged to `budget`.
     pub(crate) fn new_with(
         width: u32,
         height: u32,
         x_location: u32,
         y_location: u32,
         default_pixel: bool,
+        budget: &Budget,
     ) -> Result<Self> {
         if width > MAX_DIMENSION || height > MAX_DIMENSION {
             bail!(OverflowError::BitmapDimension);
@@ -85,7 +89,7 @@ impl Bitmap {
 
         let stride = width.div_ceil(WORD_BITS);
         let default_word: Word = if default_pixel { !0 } else { 0 };
-        let data = vec![default_word; stride as usize * height as usize];
+        let data = budget.filled_vec(stride as usize * height as usize, default_word)?;
         let mut bitmap = Self {
             width,
             height,
@@ -102,6 +106,21 @@ impl Bitmap {
         Ok(bitmap)
     }
 
+    /// A copy of the bitmap, charged to `budget`.
+    pub(crate) fn try_clone(&self, budget: &Budget) -> Result<Self> {
+        let mut data = budget.vec_with_capacity(self.data.len())?;
+        data.extend_from_slice(&self.data);
+
+        Ok(Self {
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            data,
+            x_location: self.x_location,
+            y_location: self.y_location,
+        })
+    }
+
     pub(crate) fn reinitialize(
         &mut self,
         width: u32,
@@ -109,7 +128,7 @@ impl Bitmap {
         default_pixel: bool,
     ) -> Result<()> {
         if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(OverflowError::BitmapDimension.into());
+            bail!(OverflowError::BitmapDimension);
         }
 
         let stride = width.div_ceil(WORD_BITS);
@@ -119,9 +138,12 @@ impl Bitmap {
         self.stride = stride;
         self.x_location = 0;
         self.y_location = 0;
+        let len = stride as usize * height as usize;
         self.data.clear();
-        self.data
-            .resize(stride as usize * height as usize, default_word);
+        if self.data.try_reserve_exact(len).is_err() {
+            bail!(DecodeError::OutOfMemory);
+        }
+        self.data.resize(len, default_word);
 
         if default_pixel {
             self.clear_padding();
@@ -188,13 +210,10 @@ impl Bitmap {
         let dest_x_start = dest_x_start as u32;
         let dest_x_end = dest_x_end as u32;
 
-        for src_y in 0..other.height {
-            let dest_y = y.saturating_add(src_y as i32);
-            if dest_y < 0 || dest_y >= self.height as i32 {
-                continue;
-            }
+        let (src_y_start, src_y_end) = Self::clipped_rows(self.height, other.height, y);
 
-            let dest_y = dest_y as u32;
+        for src_y in src_y_start..src_y_end {
+            let dest_y = (i64::from(y) + i64::from(src_y)) as u32;
 
             let first_word = dest_x_start / WORD_BITS;
             let last_word = (dest_x_end - 1) / WORD_BITS;
@@ -245,6 +264,24 @@ impl Bitmap {
         }
     }
 
+    /// The rows of a source `src_height` rows tall, placed at row `y`, that
+    /// fall inside a destination `dest_height` rows tall.
+    fn clipped_rows(dest_height: u32, src_height: u32, y: i32) -> (u32, u32) {
+        let start = (-i64::from(y)).clamp(0, i64::from(src_height));
+        let end = (i64::from(dest_height) - i64::from(y)).clamp(start, i64::from(src_height));
+
+        (start as u32, end as u32)
+    }
+
+    /// The number of pixels of this bitmap that [`Bitmap::combine`] writes
+    /// when `other` is placed at (`x`, `y`).
+    pub(crate) fn clipped_area(&self, other: &Self, x: i32, y: i32) -> u64 {
+        let (x_start, x_end) = Self::clipped_rows(self.width, other.width, x);
+        let (y_start, y_end) = Self::clipped_rows(self.height, other.height, y);
+
+        u64::from(x_end - x_start) * u64::from(y_end - y_start)
+    }
+
     #[inline]
     pub(crate) fn get_word(&self, row: u32, word_idx: u32) -> Word {
         if row >= self.height || word_idx >= self.stride {
@@ -261,10 +298,36 @@ mod tests {
 
     #[test]
     fn combine_far_away() {
-        let mut page = Bitmap::new(8, 8).unwrap();
-        let region = Bitmap::new_with(8, 8, 0, 0, true).unwrap();
+        let budget = Budget::for_page(8, 8);
+        let mut page = Bitmap::new(8, 8, &budget).unwrap();
+        let region = Bitmap::new_with(8, 8, 0, 0, true, &budget).unwrap();
         page.combine(&region, i32::MAX - 1, 0, CombinationOperator::Or);
         page.combine(&region, 0, i32::MAX - 1, CombinationOperator::Or);
         assert!(page.data.iter().all(|&w| w == 0));
+        assert_eq!(page.clipped_area(&region, i32::MAX - 1, 0), 0);
+        assert_eq!(page.clipped_area(&region, 0, i32::MIN), 0);
+    }
+
+    #[test]
+    fn clipped_area_counts_the_pixels_inside_the_destination() {
+        let budget = Budget::for_page(10, 10);
+        let page = Bitmap::new(10, 10, &budget).unwrap();
+        let symbol = Bitmap::new(4, 6, &budget).unwrap();
+
+        assert_eq!(page.clipped_area(&symbol, 0, 0), 24);
+        assert_eq!(page.clipped_area(&symbol, -1, 7), 9);
+        assert_eq!(page.clipped_area(&symbol, 8, -5), 2);
+        assert_eq!(page.clipped_area(&symbol, 10, 0), 0);
+    }
+
+    #[test]
+    fn bitmaps_are_charged_to_the_budget() {
+        let budget = Budget::with_limits(64, 0);
+
+        assert!(Bitmap::new(33, 1, &budget).is_ok());
+        assert_eq!(
+            Bitmap::new(1, 1, &budget).unwrap_err(),
+            crate::DecodeError::Overflow(OverflowError::MemoryBudget)
+        );
     }
 }
