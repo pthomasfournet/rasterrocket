@@ -280,7 +280,8 @@ fn destroy_instance_on_err<T>(instance: &ash::Instance, result: Result<T>) -> Re
 }
 
 /// Load the Vulkan loader: the platform's default name first, then the
-/// paths of [`loader_candidates`].  The error names every path tried.
+/// paths of [`loader_candidates`].  The error names every path tried and
+/// why each failed to load.
 fn load_entry() -> Result<ash::Entry> {
     // Safety: `Entry::load` and `Entry::load_from` `dlopen` the loader; the
     // returned `Entry` owns the library handle and is `Send + Sync` by ash
@@ -291,30 +292,47 @@ fn load_entry() -> Result<ash::Entry> {
     };
     let sdk = std::env::var_os("VULKAN_SDK").map(PathBuf::from);
     let candidates = loader_candidates(sdk.as_deref());
+    let mut failures = Vec::with_capacity(candidates.len());
     for path in &candidates {
-        if let Ok(entry) = unsafe { ash::Entry::load_from(path) } {
-            return Ok(entry);
+        match unsafe { ash::Entry::load_from(path) } {
+            Ok(entry) => return Ok(entry),
+            Err(e) => failures.push(format!("{}: {e}", path.display())),
         }
     }
-    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
-    Err(BackendError::msg(if tried.is_empty() {
+    Err(BackendError::msg(if failures.is_empty() {
         format!("Vulkan loader failed: {default_error}")
     } else {
         format!(
             "Vulkan loader failed: {default_error}; also tried {}",
-            tried.join(", ")
+            failures.join("; ")
         )
     }))
 }
 
+/// `sdk` when it is an absolute path.  An empty or relative `$VULKAN_SDK`
+/// is ignored with a warning: the loader path joined to it would resolve
+/// against the working directory.
+fn absolute_sdk(sdk: Option<&Path>) -> Option<&Path> {
+    let sdk = sdk?;
+    if sdk.is_absolute() {
+        Some(sdk)
+    } else {
+        log::warn!(
+            "vulkan: ignoring VULKAN_SDK={:?}: not an absolute path",
+            sdk.display()
+        );
+        None
+    }
+}
+
 /// Loader libraries to try when the default name is not found: on macOS,
-/// the Vulkan SDK's (`$VULKAN_SDK`) and Homebrew's, whose directories the
+/// the Vulkan SDK's (`$VULKAN_SDK`, when absolute) and Homebrew's, whose directories the
 /// dynamic linker does not search by default; none elsewhere.
 fn loader_candidates(vulkan_sdk: Option<&Path>) -> Vec<PathBuf> {
     if !cfg!(target_os = "macos") {
         return Vec::new();
     }
-    let mut candidates: Vec<PathBuf> = vulkan_sdk
+    let mut candidates: Vec<PathBuf> = absolute_sdk(vulkan_sdk)
         .map(|sdk| sdk.join("lib/libvulkan.1.dylib"))
         .into_iter()
         .collect();
@@ -903,6 +921,17 @@ mod tests {
         assert_eq!(buffer_heaps(&p, true), 0b110);
     }
 
+    #[test]
+    fn only_an_absolute_vulkan_sdk_is_used() {
+        assert_eq!(
+            absolute_sdk(Some(Path::new("/sdk"))),
+            Some(Path::new("/sdk"))
+        );
+        assert_eq!(absolute_sdk(Some(Path::new(""))), None);
+        assert_eq!(absolute_sdk(Some(Path::new("sdk"))), None);
+        assert_eq!(absolute_sdk(None), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn loader_candidates_follow_the_sdk_then_homebrew() {
@@ -910,6 +939,7 @@ mod tests {
         assert_eq!(found[0], Path::new("/sdk/lib/libvulkan.1.dylib"));
         assert_eq!(found[1], Path::new("/opt/homebrew/lib/libvulkan.1.dylib"));
         assert_eq!(found.len(), 3);
+        assert_eq!(loader_candidates(Some(Path::new("sdk"))).len(), 2);
     }
 
     #[cfg(not(target_os = "macos"))]
