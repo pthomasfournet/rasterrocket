@@ -8,8 +8,9 @@
 # 50 dpi gray, first four pages, four threads.  Without LIST the corpus is
 # the repository fixtures plus a fixed 150-file sample of the archive at
 # $AB_ARCHIVE (default ~/mss-content/archives); the archive part is skipped
-# when that directory does not exist.  The sample is reproducible: `shuf`
-# draws from a constant random source.
+# when that directory does not exist.  The sample is reproducible: the
+# paths are sorted in byte order and `shuf` draws from a constant random
+# source.
 #
 # Environment:
 #   BEFORE_FLAGS, AFTER_FLAGS  extra arguments for one binary only (word-split)
@@ -48,11 +49,15 @@ if [[ -n $list ]]; then
     cp "$list" "$prefix.list"
 else
     {
-        ls "$repo"/tests/fixtures/*.pdf
+        printf '%s\n' "$repo"/tests/fixtures/*.pdf
         if [[ -d $archive ]]; then
             shuffle=$(command -v shuf || command -v gshuf) ||
                 { echo "ab_archive.sh: the archive sample needs shuf or gshuf" >&2; exit 2; }
-            find "$archive" -iname '*.pdf' | sort | "$shuffle" -n 150 --random-source=<(yes)
+            # Byte-order sort and NUL separators: the same input order, and
+            # so the same sample, in every locale.  LIST holds one path per
+            # line, so paths containing a newline are left out.
+            find "$archive" -iname '*.pdf' ! -path $'*\n*' -print0 | LC_ALL=C sort -z |
+                "$shuffle" -z -n 150 --random-source=<(yes) | tr '\0' '\n'
         fi
     } >"$prefix.list"
 fi
