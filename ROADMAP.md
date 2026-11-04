@@ -2214,7 +2214,8 @@ orientation to the sender. Pages are spooled a window at a time, so memory
 stays bounded. Verified through a CUPS `everywhere` queue on
 `ippeveprinter`: colour pages reach a gray-only printer as sGray at its
 resolution, landscape pages are turned, and the page images round-trip
-pixel-exact. **Not done:** the Win32 spooler, behind a feature, on Windows.
+pixel-exact. `--list-printers` lists the CUPS queues (`lpstat -e`), the
+default one marked. **Not done:** the Win32 spooler, behind a feature, on Windows.
 Parity gap: poppler's `pdftocairo` has `-print` / `-printer` on Windows,
 and pdfium renders into a Windows printer context.
 

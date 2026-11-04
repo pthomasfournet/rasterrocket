@@ -76,6 +76,44 @@ pub(crate) fn submit(
     }
 }
 
+/// Run `program` with `argv` in the C locale to read what a system service
+/// reports, and return its standard output.  `missing` tells the user what
+/// to do when `program` is not installed.
+///
+/// # Errors
+///
+/// The program could not be run, reported a failure, or wrote output that
+/// is not UTF-8; the message carries what it wrote to standard error.
+pub(crate) fn query(program: &str, argv: &[&str], missing: &str) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(argv)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("{program} is not installed: {missing}")
+            } else {
+                format!("cannot run {program}: {e}")
+            }
+        })?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{program} {} failed ({}): {}",
+            argv.join(" "),
+            output.status,
+            said.trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        format!(
+            "{program} {} wrote output that is not UTF-8",
+            argv.join(" ")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{lp_args, parse_queue};

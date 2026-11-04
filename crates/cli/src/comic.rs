@@ -46,7 +46,7 @@ pub(crate) fn run(
     let mut opts = ComicOptions::new(dpi);
     opts.session = session;
 
-    let mut pages = open_comic(Path::new(&args.input), &opts)?;
+    let mut pages = open_comic(Path::new(args.input()), &opts)?;
 
     // A comic with more pages than `i32::MAX` cannot be page-listed or named;
     // fail hard rather than silently mis-number, matching the PDF path.

@@ -62,11 +62,12 @@ pub(crate) struct Args {
     /// Input PDF file ("-" for stdin). A path that begins with '-' must be
     /// passed after a literal `--` (or as `./-name.pdf`) so it is not parsed
     /// as an option.
-    pub input: String,
+    #[arg(required_unless_present = "list_printers")]
+    input: Option<String>,
 
     /// Output filename prefix (page number and extension are appended).
     /// Not given with --print, which writes no files.
-    #[arg(required_unless_present_any = ["print", "printer"])]
+    #[arg(required_unless_present_any = ["print", "printer", "list_printers"])]
     pub output_prefix: Option<String>,
 
     // ── Page range ──────────────────────────────────────────────────────────
@@ -250,6 +251,12 @@ pub(crate) struct Args {
     /// the default destination.  Implies --print.
     #[arg(long = "printer", value_name = "NAME", value_parser = crate::deliver::parse_queue)]
     pub printer: Option<String>,
+
+    /// List the printers --printer can name, the CUPS queues, one per line,
+    /// the default destination followed by a tab and `default`; then exit.
+    /// Takes no input or other option.
+    #[arg(long = "list-printers", exclusive = true)]
+    pub list_printers: bool,
 
     /// Copies --print asks for.
     #[arg(long = "copies", value_name = "N", value_parser = clap::value_parser!(u32).range(1..=9999))]
@@ -688,9 +695,16 @@ impl Args {
         }
     }
 
+    /// The input path, `-` for standard input; empty only under
+    /// `--list-printers`, which clap admits without an input and which
+    /// renders nothing.
+    pub(crate) fn input(&self) -> &str {
+        self.input.as_deref().unwrap_or("")
+    }
+
     /// Whether the input is a comic archive, by its extension.
     pub(crate) fn is_comic_input(&self) -> bool {
-        std::path::Path::new(&self.input)
+        std::path::Path::new(self.input())
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| {

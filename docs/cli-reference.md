@@ -168,11 +168,15 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | Flag | Default | Description |
 |---|---|---|
 | `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages render a window of `--threads` pages at a time and are spooled as each window completes, so a long document is not held in memory. The spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
-| `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`. Implies `--print`. |
+| `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`; `--list-printers` lists them. Implies `--print`. When `lp` refuses the job, the message points at `--list-printers`. |
+| `--list-printers` | | List the CUPS destinations `--printer` can name (`lpstat -e`), one per line, the default destination (`lpstat -d`) followed by a tab and `default`, then exit. Takes no input, output prefix or other flag. With no queues, writes nothing to standard output and says so on standard error. Refused on Windows. |
 | `--copies N` | the queue's setting | Copies (1–9999), `lp -n N`. Needs `--print`. |
 | `--duplex long\|short` | the printer's setting | Two-sided printing, the sheet turning on its long or short edge (`-o sides=two-sided-long-edge` / `two-sided-short-edge`). Needs `--print`. |
 
 ```bash
+# The queues --printer can name
+rrocket --list-printers
+
 # Print pages 1–4 to the default printer at 600 dpi
 rrocket --print -l 4 document.pdf
 

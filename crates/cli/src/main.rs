@@ -43,6 +43,19 @@ fn main() -> ExitCode {
         .try_init();
 
     let mut args = Args::parse();
+    if args.list_printers {
+        return match print::list_printers() {
+            Ok(list) if list.is_empty() => {
+                eprintln!("rrocket: CUPS has no printers");
+                ExitCode::SUCCESS
+            }
+            Ok(list) => {
+                print!("{list}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        };
+    }
 
     if args.odd_only && args.even_only {
         return fail("--odd and --even are mutually exclusive");
@@ -93,7 +106,7 @@ fn main() -> ExitCode {
     // cannot be probed and is treated as unencrypted — an encrypted stdin
     // stream surfaces the clear EncryptedDocument error from open_session
     // below, never a silent strip.
-    if args.input != "-" && pdf_raster::is_encrypted(std::path::Path::new(&args.input)) {
+    if args.input() != "-" && pdf_raster::is_encrypted(std::path::Path::new(args.input())) {
         // Never silently strip in production: require an explicit decision.
         let authorized = decrypt_gate::prompt_decrypt(args.decrypt_owned);
         if !authorized {
@@ -116,14 +129,14 @@ fn main() -> ExitCode {
         Err(e) => return fail(format_args!("cannot start the render thread pool: {e}")),
     };
 
-    let session = match pdf_raster::open_session(std::path::Path::new(&args.input), &session_config)
-    {
-        Ok(session) => session,
-        Err(e) => {
-            diagnostics::report_open_error(&e, &args, session_config.policy);
-            return ExitCode::FAILURE;
-        }
-    };
+    let session =
+        match pdf_raster::open_session(std::path::Path::new(args.input()), &session_config) {
+            Ok(session) => session,
+            Err(e) => {
+                diagnostics::report_open_error(&e, &args, session_config.policy);
+                return ExitCode::FAILURE;
+            }
+        };
 
     let n = session.total_pages();
     if n == 0 {
@@ -267,7 +280,7 @@ fn main() -> ExitCode {
             printer: args.printer.as_deref(),
             copies: args.copies,
             duplex: args.duplex,
-            title: print::job_title(&args.input),
+            title: print::job_title(args.input()),
         };
         if let Err(e) = spool.submit(&submission) {
             return fail(format_args!("nothing printed: {e}"));

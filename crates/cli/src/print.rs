@@ -249,7 +249,52 @@ impl Spool {
             None,
             "install the CUPS client (cups-client on Debian and Ubuntu, cups on Fedora and Arch)",
         )
+        .map_err(|e| match job.printer {
+            Some(_) => format!("{e}; --list-printers lists the queues"),
+            None => e,
+        })
     }
+}
+
+/// What `--list-printers` writes: the CUPS destinations, one per line, the
+/// default one followed by a tab and `default`.
+///
+/// # Errors
+///
+/// `lpstat` is not installed or cannot reach the scheduler.
+pub(crate) fn list_printers() -> Result<String, String> {
+    const MISSING: &str = "--list-printers asks CUPS for its queues; install CUPS";
+    if cfg!(windows) {
+        return Err(
+            "--list-printers asks CUPS for its queues, which Windows does not have".to_owned(),
+        );
+    }
+    let queues = deliver::query("lpstat", &["-e"], MISSING)?;
+    let default = deliver::query("lpstat", &["-d"], MISSING)?;
+    Ok(printer_list(&queues, default_destination(&default)))
+}
+
+/// The default destination `lpstat -d` reports in the C locale, if any.
+fn default_destination(lpstat_d: &str) -> Option<&str> {
+    lpstat_d
+        .lines()
+        .find_map(|line| line.strip_prefix("system default destination:"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+/// The listing of the destinations `lpstat -e` reports, one per line,
+/// `default` marked.
+fn printer_list(lpstat_e: &str, default: Option<&str>) -> String {
+    let mut list = String::new();
+    for queue in lpstat_e.lines().map(str::trim).filter(|q| !q.is_empty()) {
+        list.push_str(queue);
+        if Some(queue) == default {
+            list.push_str("\tdefault");
+        }
+        list.push('\n');
+    }
+    list
 }
 
 #[cfg(test)]
@@ -259,8 +304,27 @@ mod tests {
     use color::Gray8;
     use raster::Bitmap;
 
-    use super::{Duplex, PageSink, Spool, Submission, job_title, lp_options};
+    use super::{
+        Duplex, PageSink, Spool, Submission, default_destination, job_title, lp_options,
+        printer_list,
+    };
     use crate::cleanup::{Page, SpreadHalf};
+
+    #[test]
+    fn printers_are_listed_one_per_line_with_the_default_marked() {
+        let lpstat_e = "Office\nOffice/duplex\nLab\n";
+        assert_eq!(
+            default_destination("system default destination: Office/duplex\n"),
+            Some("Office/duplex")
+        );
+        assert_eq!(default_destination("no system default destination\n"), None);
+        assert_eq!(
+            printer_list(lpstat_e, Some("Office/duplex")),
+            "Office\nOffice/duplex\tdefault\nLab\n"
+        );
+        assert_eq!(printer_list(lpstat_e, None), "Office\nOffice/duplex\nLab\n");
+        assert_eq!(printer_list("", None), "");
+    }
 
     #[test]
     fn lp_gets_copies_title_format_and_sides_only_when_given() {
