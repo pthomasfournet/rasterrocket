@@ -284,10 +284,16 @@ pub(crate) struct FontCache {
     shared: Arc<DocumentFonts>,
     /// Descriptor of each font selected on this page.
     descriptors: HashMap<ResourceKey, Arc<FontDescriptor>>,
-    /// Map from (font dictionary, four f64-as-u64 bits of the Trm 2×2 matrix)
-    /// to loaded face.  The full matrix is the key because the same font can
-    /// appear at different sizes and skew angles within a single page.
-    faces: HashMap<FaceKey, Option<PageFace>>,
+    /// The faces loaded for the page, `None` for one that failed to load.
+    faces: Vec<Option<PageFace>>,
+    /// Index into `faces` of the face of each (font dictionary, four
+    /// f64-as-u64 bits of the Trm 2×2 matrix).  The full matrix is the key
+    /// because the same font can appear at different sizes and skew angles
+    /// within a single page.
+    face_slots: HashMap<FaceKey, usize>,
+    /// The key and index of the face looked up last, which consecutive
+    /// text-showing operators mostly share.
+    last_face: Option<(FaceKey, usize)>,
 }
 
 impl FontCache {
@@ -300,7 +306,9 @@ impl FontCache {
             engine: FontEngine::with_face_ids(antialias, Arc::clone(&shared.face_ids)),
             shared,
             descriptors: HashMap::new(),
-            faces: HashMap::new(),
+            faces: Vec::new(),
+            face_slots: HashMap::new(),
+            last_face: None,
         }
     }
 
@@ -397,18 +405,31 @@ impl FontCache {
         // The full 2×2 Trm matrix, as bit patterns, is part of the key: the
         // same font at different sizes or skews needs distinct faces.  Failed
         // loads are stored as `None`, so a font that cannot load is tried once.
-        let key: FaceKey = (font.key.clone(), trm.map(f64::to_bits));
-        if !self.faces.contains_key(&key) {
-            let face = self.load_face(&font.key, &font.descriptor, trm);
-            if face.is_none() {
-                log::warn!(
-                    "font_cache: could not load face for /{} trm={trm:?}",
-                    String::from_utf8_lossy(name)
-                );
+        let trm_bits = trm.map(f64::to_bits);
+        let slot = match &self.last_face {
+            Some(((key, bits), slot)) if *bits == trm_bits && *key == font.key => *slot,
+            _ => {
+                let key: FaceKey = (font.key.clone(), trm_bits);
+                let slot = if let Some(&slot) = self.face_slots.get(&key) {
+                    slot
+                } else {
+                    let face = self.load_face(&font.key, &font.descriptor, trm);
+                    if face.is_none() {
+                        log::warn!(
+                            "font_cache: could not load face for /{} trm={trm:?}",
+                            String::from_utf8_lossy(name)
+                        );
+                    }
+                    self.faces.push(face);
+                    let slot = self.faces.len() - 1;
+                    let _ = self.face_slots.insert(key.clone(), slot);
+                    slot
+                };
+                self.last_face = Some((key, slot));
+                slot
             }
-            let _ = self.faces.insert(key.clone(), face);
-        }
-        let face = self.faces.get_mut(&key)?.as_mut()?;
+        };
+        let face = self.faces.get_mut(slot)?.as_mut()?;
         let fallback = face.fallback.is_some();
         let vertical = !face.vertical_fallbacks.is_empty();
         if !bytes.is_empty() && (fallback || vertical) {
@@ -426,7 +447,7 @@ impl FontCache {
                 loader.prepare_vertical(face, enc, bytes);
             }
         }
-        self.faces.get(&key)?.as_ref()
+        Some(face)
     }
 
     fn load_face(
@@ -663,6 +684,41 @@ mod tests {
             eprintln!("no installed face maps U+0915; skipping");
         }
         found
+    }
+
+    /// Lookups alternating between fonts and matrices each get the face
+    /// of their own font at their own matrix, loaded once.
+    #[test]
+    fn alternating_lookups_get_their_own_faces() {
+        let mut cache = cache();
+        let embedded = |id: u32| ActiveFont {
+            key: ResourceKey::Object((id, 0)),
+            descriptor: Arc::new(simple(
+                PdfFontKind::TrueType,
+                Some(ahem()),
+                diffs(&[]),
+                BaseEncoding::Standard,
+            )),
+        };
+        let (one, two) = (embedded(1), embedded(2));
+        let (small, large) = ([20.0, 0.0, 0.0, 20.0], [40.0, 0.0, 0.0, 40.0]);
+        let mut face = |font: &ActiveFont, trm: [f64; 4]| {
+            let face = cache
+                .get_or_load_showing(font, b"F", trm, b"A")
+                .expect("face loads");
+            (face.id, face.size_px)
+        };
+        let first = face(&one, small);
+        assert_eq!(first.1, 20);
+        let large_one = face(&one, large);
+        assert_eq!(large_one.1, 40);
+        let small_two = face(&two, small);
+        assert_ne!(small_two.0, first.0, "another font has another face");
+        assert_eq!(face(&two, small), small_two, "a repeated lookup");
+        assert_eq!(face(&one, small), first, "the face is not reloaded");
+        assert_eq!(face(&one, large), large_one);
+        assert_eq!(face(&two, small), small_two);
+        assert_eq!(cache.faces.len(), 3);
     }
 
     /// A non-embedded simple font naming a Devanagari glyph draws it from
