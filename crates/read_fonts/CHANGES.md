@@ -106,7 +106,10 @@ release). It is not published and changes are not sent upstream.
 - `tables::glyf::hint_reliant`: the `cvt ` / `fpgm` / `prep`
   identification compares the three table lengths with the list first and
   computes the checksums only when they match an entry, so ordinary fonts
-  pay no scan of their hinting programs. The result is unchanged.
+  pay no scan of their hinting programs. The result is unchanged. The
+  lengths compared are those `TableId` records, computed by its
+  `data_len` / `cvt_len` helpers for both the comparison and the full
+  identity.
 
 ## Rebase history
 

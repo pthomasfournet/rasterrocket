@@ -208,6 +208,17 @@ struct TableId {
 }
 
 impl TableId {
+    /// The length the identity of a table with contents `data` records.
+    fn data_len(data: &[u8]) -> u32 {
+        data.len() as u32
+    }
+
+    /// The length the identity of a control value table records: two bytes
+    /// per entry.
+    fn cvt_len(cvt: &[BigEndian<i16>]) -> u32 {
+        (cvt.len() * 2) as u32
+    }
+
     fn from_data(data: Option<&[u8]>) -> Self {
         let Some(data) = data else {
             return Self::default();
@@ -216,7 +227,7 @@ impl TableId {
             // Note: FreeType always just computes the checksum
             // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/truetype/ttobjs.c#L281>
             checksum: crate::tables::compute_checksum(data),
-            len: data.len() as u32,
+            len: Self::data_len(data),
         }
     }
 
@@ -237,7 +248,7 @@ impl TableId {
         }
         Self {
             checksum,
-            len: (cvt.len() * 2) as u32,
+            len: Self::cvt_len(cvt),
         }
     }
 }
@@ -259,11 +270,10 @@ impl FontId {
         let cvt = font.cvt().ok();
         let fpgm = font.fpgm().ok();
         let prep = font.prep().ok();
-        let len = |data: Option<&[u8]>| data.map_or(0, |data| data.len() as u32);
         let lens = (
-            cvt.map_or(0, |cvt| (cvt.len() * 2) as u32),
-            len(fpgm),
-            len(prep),
+            cvt.map_or(0, TableId::cvt_len),
+            fpgm.map_or(0, TableId::data_len),
+            prep.map_or(0, TableId::data_len),
         );
         HINT_RELIANT_IDS
             .iter()
