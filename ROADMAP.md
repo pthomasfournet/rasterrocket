@@ -2389,6 +2389,20 @@ than its profile; antialiased edges of RGB or grey black text take a slight
 colour cast; and fills and image composites on an overprint page run on
 the CPU.
 
+**Font forks rebased, unreleased.** The read-fonts and skrifa forks move
+to fontations `1d1672367` (read-fonts 0.46, skrifa 0.49) and the harfrust
+fork to `bdd55a548` (0.15), together, since harfrust is built against the
+read-fonts API. The fixes the forks had carried over by hand are now
+upstream's own code; each crate's `CHANGES.md` lists what the forks still
+change and the upstream behaviour changes this brings in (cmap format 4
+`idRangeOffset`, CFF charset bounds, Type 1 parsing, the TrueType
+interpreter's parity checks for hint-reliant fonts, harfrust's Hangul and
+OpenType rounding, and the ITC Zapf Dingbats glyph names, so `a1` maps to
+U+2701). Over 1 125 PDFs (the fixtures and the archive), renders at
+50 dpi (4 pages) and 150 dpi (12 pages, 12 169 pages) are byte-identical to
+before. A shaping failure now falls back to glyph-by-glyph drawing with a
+warning.
+
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder, transfers
