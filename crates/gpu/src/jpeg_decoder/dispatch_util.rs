@@ -81,6 +81,46 @@ impl<'a, B: GpuBackend + ?Sized> DeviceBufferGuard<'a, B> {
         })
     }
 
+    /// Allocate `size` bytes of device memory that the host reads back
+    /// ([`GpuBackend::alloc_device_readback`]); contents unspecified.
+    ///
+    /// # Errors
+    /// Propagates whatever `backend.alloc_device_readback` returns.
+    pub(super) fn alloc_readback(backend: &'a B, size: usize) -> Result<Self> {
+        Ok(Self {
+            backend,
+            buf: Some(backend.alloc_device_readback(size)?),
+        })
+    }
+
+    /// Allocate `size` bytes of zeroed device memory that the host reads
+    /// back.  On a device whose buffers the host reaches in place the
+    /// read-back buffer is zeroed in place; elsewhere it is the memory of
+    /// [`Self::alloc_zeroed`].
+    ///
+    /// # Errors
+    /// Propagates the allocation's error; fails if a host-mapped device
+    /// returns a buffer the host cannot reach.
+    pub(super) fn alloc_readback_zeroed(backend: &'a B, size: usize) -> Result<Self> {
+        if !backend.device_memory_is_host_mapped() {
+            return Self::alloc_zeroed(backend, size);
+        }
+        let mut buf = backend.alloc_device_readback(size)?;
+        // SAFETY: the buffer was just allocated: no device work references
+        // it and no other thread holds it.
+        let zeroed = unsafe { backend.device_bytes_mut(&mut buf) }.map(|bytes| bytes.fill(0));
+        let guard = Self {
+            backend,
+            buf: Some(buf),
+        };
+        zeroed.ok_or_else(|| {
+            crate::backend::BackendError::msg(
+                "alloc_readback_zeroed: a host-mapped device returned an unmapped buffer",
+            )
+        })?;
+        Ok(guard)
+    }
+
     /// Borrow the underlying buffer for recording / uploads. Does
     /// not transfer ownership; the guard still frees on Drop.
     pub(super) const fn as_ref(&self) -> &B::DeviceBuffer {
@@ -109,5 +149,43 @@ impl<B: GpuBackend + ?Sized> Drop for DeviceBufferGuard<'_, B> {
         if let Some(buf) = self.buf.take() {
             self.backend.free_device(buf);
         }
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::DeviceBufferGuard;
+    use crate::backend::vulkan::VulkanBackend;
+    use crate::backend::{BackendError, GpuBackend};
+
+    #[test]
+    fn zeroed_readback_guard_uses_readback_memory_on_an_integrated_gpu() {
+        let selector = "radv".parse().expect("non-empty selector");
+        let backend = match VulkanBackend::with_selector(Some(&selector)) {
+            Ok(b) if b.is_integrated() => b,
+            Ok(_) => {
+                eprintln!("skipping: the radv device is not integrated");
+                return;
+            }
+            Err(BackendError::DeviceSelection(msg))
+                if msg.contains("no device name contains it") =>
+            {
+                eprintln!("skipping: no radv device");
+                return;
+            }
+            Err(e) => panic!("selecting the radv device failed: {e}"),
+        };
+        let guard = DeviceBufferGuard::alloc_readback_zeroed(&backend, 4096).expect("alloc");
+        let reference = backend.alloc_device_readback(4096).expect("readback");
+        assert_eq!(
+            guard.as_ref().memory_properties(),
+            reference.memory_properties(),
+            "the zeroed read-back buffer is not in read-back memory"
+        );
+        let mut out = vec![1u8; 4096];
+        backend
+            .download(guard.as_ref(), &mut out)
+            .expect("download");
+        assert!(out.iter().all(|&b| b == 0), "the buffer is not zeroed");
     }
 }

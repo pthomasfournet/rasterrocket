@@ -240,7 +240,8 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
         let coef_buf = DeviceBufferGuard::alloc(&self.backend, coef_bytes).map_err(be)?;
         let qt_buf = DeviceBufferGuard::alloc(&self.backend, qt_bytes).map_err(be)?;
         let dc_buf = DeviceBufferGuard::alloc(&self.backend, dc_bytes).map_err(be)?;
-        let px_buf = DeviceBufferGuard::alloc_zeroed(&self.backend, px_bytes).map_err(be)?;
+        let px_buf =
+            DeviceBufferGuard::alloc_readback_zeroed(&self.backend, px_bytes).map_err(be)?;
 
         self.backend
             .upload(coef_buf.as_ref(), bytemuck::cast_slice(coefficients))

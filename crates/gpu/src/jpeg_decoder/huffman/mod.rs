@@ -214,8 +214,10 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         let codebook = DeviceBufferGuard::alloc(backend, ac_flat.len() * 4)?;
         let dc_codebook = DeviceBufferGuard::alloc(backend, dc_flat.len() * 4)?;
         let mcu_schedule = DeviceBufferGuard::alloc(backend, mcu_sched_host.len() * 4)?;
-        let s_info = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-        let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+        // `s_info` and `s_info_scratch` swap roles between passes; the host
+        // reads back both.
+        let s_info = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
+        let s_info_scratch = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
         // Every entry Phase 2 reads is written by Phase 1 first.
         let memo = DeviceBufferGuard::alloc(
             backend,
@@ -224,7 +226,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         // Zeroed so a kernel guard that returns without writing (e.g.
         // the defensive blocks_per_mcu check) reads back as
         // all-unsynced, never as spurious convergence.
-        let sync_flags = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
+        let sync_flags = DeviceBufferGuard::alloc_readback_zeroed(backend, flags_bytes)?;
 
         backend.upload(
             bitstream.as_ref(),
@@ -607,10 +609,11 @@ pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
     let offsets_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
     backend.upload(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
 
-    let symbols_buf = DeviceBufferGuard::alloc_zeroed(backend, (total_symbols as usize) * 4)?;
+    let symbols_buf =
+        DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel
     // does not reach reads back clean.
-    let decode_status_buf = DeviceBufferGuard::alloc_zeroed(backend, flags_bytes)?;
+    let decode_status_buf = DeviceBufferGuard::alloc_readback_zeroed(backend, flags_bytes)?;
 
     // Phase 4.
     backend.run_page(|backend| {

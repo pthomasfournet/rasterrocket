@@ -75,8 +75,8 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
 
         let bitstream = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
         let codebook = DeviceBufferGuard::alloc(backend, codebook_flat.len() * 4)?;
-        let s_info = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
-        let s_info_scratch = DeviceBufferGuard::alloc(backend, s_info_bytes)?;
+        let s_info = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
+        let s_info_scratch = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
 
         backend.upload(bitstream.as_ref(), bytemuck::cast_slice(&stream.words))?;
         backend.upload(codebook.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
@@ -230,7 +230,8 @@ pub(super) fn dispatch_phase1_then_phase2<B: GpuBackend>(
         codebooks,
         subsequence_bits,
     )?;
-    let sync_flags = DeviceBufferGuard::alloc(backend, (setup.num_subsequences as usize) * 4)?;
+    let sync_flags =
+        DeviceBufferGuard::alloc_readback(backend, (setup.num_subsequences as usize) * 4)?;
     let outcome = run_phase1_and_phase2(backend, &mut setup, &sync_flags)?;
     Ok((setup.download_s_info(backend)?, outcome))
 }
@@ -264,7 +265,7 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
         subsequence_bits,
     )?;
     let per_subseq_bytes = (setup.num_subsequences as usize) * 4;
-    let sync_flags = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
+    let sync_flags = DeviceBufferGuard::alloc_readback(backend, per_subseq_bytes)?;
     if !matches!(
         run_phase1_and_phase2(backend, &mut setup, &sync_flags)?,
         Phase2Outcome::Converged { .. }
@@ -290,10 +291,10 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
 
     let offsets = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
     backend.upload(offsets.as_ref(), bytemuck::cast_slice(&offsets_host))?;
-    let symbols = DeviceBufferGuard::alloc_zeroed(backend, (total_symbols as usize) * 4)?;
+    let symbols = DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel
     // does not reach reads back clean.
-    let decode_status = DeviceBufferGuard::alloc_zeroed(backend, per_subseq_bytes)?;
+    let decode_status = DeviceBufferGuard::alloc_readback_zeroed(backend, per_subseq_bytes)?;
 
     backend.run_page(|backend| {
         let mut params = setup.base_params(HuffmanPhase::Phase4Redecode);
