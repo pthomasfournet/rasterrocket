@@ -98,14 +98,19 @@ impl PageRenderer<'_> {
             Some((m, c)) => (Some(m), *c),
             None => (img.smask.as_ref(), page_ctm),
         };
+        let plan = image_reduce::Plan::new(&page_ctm, img.width, img.height, &window);
         // A device-resident image is sampled at full resolution by the
         // blit kernel.  A draw that reduces it takes a host copy so that it
         // is area-averaged as a host-resident image is.
         #[cfg(feature = "cache")]
-        let host_copy = self.host_copy_for_reduced_draw(img, &page_ctm, &window);
+        let host_copy = plan
+            .as_ref()
+            .and_then(|_| self.host_copy(img, "a reduced draw"));
         #[cfg(feature = "cache")]
         let img = host_copy.as_ref().unwrap_or(img);
-        let reduced = image_reduce::reduce_for_draw(img, &page_ctm, &window);
+        let reduced = plan
+            .as_ref()
+            .and_then(|plan| image_reduce::reduce_for_draw(img, plan));
         let (img, ctm) = match &reduced {
             Some((i, c)) => (i, *c),
             None => (img, page_ctm),
@@ -219,23 +224,6 @@ impl PageRenderer<'_> {
         let area = rect.to_path();
         self.paint_through_coverage(rect, &coverage, |r| r.fill_path(&area, false));
         Ok(true)
-    }
-
-    /// A host-resident copy of `img` when its samples are device-resident
-    /// and drawing them through `ctm` reduces the image, so that it is
-    /// area-averaged as a host-resident image is.  `None` otherwise, or
-    /// when the copy fails; the device samples are then drawn as they are.
-    #[cfg(feature = "cache")]
-    pub(super) fn host_copy_for_reduced_draw(
-        &self,
-        img: &crate::resources::ImageDescriptor,
-        ctm: &Ctm,
-        window: &DeviceWindow,
-    ) -> Option<crate::resources::ImageDescriptor> {
-        if !image_reduce::draw_reduces(ctm, img.width, img.height, window) {
-            return None;
-        }
-        self.host_copy(img, "a reduced draw")
     }
 
     /// A host-resident copy of `img` when its samples are device-resident

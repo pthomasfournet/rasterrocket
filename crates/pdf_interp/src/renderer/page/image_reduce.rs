@@ -29,9 +29,9 @@
 //! pixel's footprint does not depend on the window, so the samples inside
 //! it are those of the unwindowed resampling.
 //!
-//! The filter is separable: a vertical pass accumulates whole source rows,
-//! each scaled by its weight, into one output row, and a horizontal pass
-//! then reduces that row.  Weights are 16-bit fixed point summing to
+//! The filter is separable: a vertical pass accumulates source rows, each
+//! scaled by its weight, into one output row, over the source columns the
+//! horizontal pass reads, and that pass then reduces the row.  Weights are 16-bit fixed point summing to
 //! exactly 65 536 per output sample, rounded cumulatively so that each
 //! partial sum is within half a count of exact; the vertical pass keeps 8
 //! fraction bits, so the result is the exact mean to within one count.
@@ -97,21 +97,20 @@ impl DeviceWindow {
     }
 }
 
-/// Resample `img` for drawing through `ctm` onto the pixels of `window`.
+/// Resample `img` through `plan`, the [`Plan`] of its dimensions, draw
+/// matrix and window.
 ///
 /// Returns the resampled image and the matrix to draw it through, or `None`
-/// — draw `img` as is through `ctm` — when the draw reduces neither axis or
-/// the samples are not host-resident.  A stencil mask resamples like a grey
+/// — draw `img` as is through the draw matrix — when the samples are not
+/// host-resident.  A stencil mask resamples like a grey
 /// image: its samples are 0 (paint) and 255 (transparent), so each output
 /// sample is 255 minus the paint coverage of its footprint.  The result
 /// carries no mask: the caller resamples the original's mask separately
 /// with [`reduce_mask_for_draw`], on the mask's own grid.
 pub(super) fn reduce_for_draw(
     img: &ImageDescriptor,
-    ctm: &Ctm,
-    window: &DeviceWindow,
+    plan: &Plan,
 ) -> Option<(ImageDescriptor, Ctm)> {
-    let plan = Plan::new(ctm, img.width, img.height, window)?;
     let src = img.data.as_cpu()?;
     let out = plan.resample(src, img.color_space.bytes_per_pixel())?;
     Some((
@@ -125,14 +124,6 @@ pub(super) fn reduce_for_draw(
         },
         plan.ctm,
     ))
-}
-
-/// Whether drawing a `width × height` image through `ctm` reduces it on
-/// either axis, so that [`reduce_for_draw`] would resample host-resident
-/// samples.
-#[cfg(feature = "cache")]
-pub(super) fn draw_reduces(ctm: &Ctm, width: u32, height: u32, window: &DeviceWindow) -> bool {
-    Plan::new(ctm, width, height, window).is_some()
 }
 
 /// Resample `mask` for drawing through `ctm`, as [`reduce_for_draw`] does
@@ -192,6 +183,14 @@ impl AxisFilter {
             filter.start.push(start);
         }
         filter
+    }
+
+    /// The source samples `[first, end)` some output sample weights.
+    fn span(&self) -> (u32, u32) {
+        let first = self.start.iter().copied().min().unwrap_or(0);
+        let last = self.start.iter().copied().max().unwrap_or(0);
+        let width = u32::try_from(self.width).expect("filter width is at most n");
+        (first, last + width)
     }
 
     /// `(first source sample, weights)` of output sample `i`.
@@ -346,7 +345,7 @@ fn reduces(n: u32, pixels: f64) -> bool {
 }
 
 /// The resampling of one image for one draw.
-struct Plan {
+pub(super) struct Plan {
     /// Source dimensions.
     src_w: u32,
     src_h: u32,
@@ -357,6 +356,9 @@ struct Plan {
     /// axis.  At least one is `Some`.
     cols: Option<AxisFilter>,
     rows: Option<AxisFilter>,
+    /// The source columns `[first, end)` the output reads: those the column
+    /// filter weights, or every column when the columns are kept.
+    col_span: (u32, u32),
     /// The matrix the output is drawn through.
     ctm: Ctm,
 }
@@ -368,7 +370,7 @@ impl Plan {
         clippy::many_single_char_names,
         reason = "a–f are the PDF matrix components"
     )]
-    fn new(ctm: &Ctm, width: u32, height: u32, window: &DeviceWindow) -> Option<Self> {
+    pub(super) fn new(ctm: &Ctm, width: u32, height: u32, window: &DeviceWindow) -> Option<Self> {
         if width == 0 || height == 0 || ctm.iter().any(|v| !v.is_finite()) {
             return None;
         }
@@ -414,11 +416,13 @@ impl Plan {
         if cols.filter.is_none() && rows.filter.is_none() {
             return None;
         }
+        let col_span = cols.filter.as_ref().map_or((0, width), AxisFilter::span);
         Some(Self {
             src_w: width,
             src_h: height,
             out_w: cols.n,
             out_h: rows.n,
+            col_span,
             cols: cols.filter,
             rows: rows.filter,
             ctm,
@@ -436,21 +440,24 @@ impl Plan {
         let (out_w, out_h) = (self.out_w as usize, self.out_h as usize);
         let out_row_len = out_w * bpp;
         let mut out = vec![0u8; out_row_len.checked_mul(out_h)?];
-        // `acc` holds the vertical pass's row carrying `frac` fraction bits.
+        // `acc` holds the vertical pass's row carrying `frac` fraction bits;
+        // only its bytes `span` (the columns the output reads) are computed.
         let mut acc = vec![0u32; row_len];
+        let span = self.col_span.0 as usize * bpp..self.col_span.1 as usize * bpp;
 
         for (oy, out_row) in out.chunks_exact_mut(out_row_len).enumerate() {
+            let window = &mut acc[span.clone()];
             let frac = if let Some(rows) = &self.rows {
-                acc.fill(0);
+                window.fill(0);
                 let (first, weights) = rows.taps(oy);
                 for (j, &wt) in weights.iter().enumerate() {
                     if wt != 0 {
-                        accumulate_row(&mut acc, &src[(first + j) * row_len..][..row_len], wt);
+                        accumulate_row(window, &src[(first + j) * row_len..][span.clone()], wt);
                     }
                 }
                 WEIGHT_BITS
             } else {
-                for (a, &v) in acc.iter_mut().zip(&src[oy * row_len..][..row_len]) {
+                for (a, &v) in window.iter_mut().zip(&src[oy * row_len..][span.clone()]) {
                     *a = u32::from(v);
                 }
                 0
@@ -460,7 +467,7 @@ impl Plan {
                     // At most MID_BITS fraction bits enter the second pass.
                     let shift = frac.saturating_sub(MID_BITS);
                     if shift > 0 {
-                        for a in &mut acc {
+                        for a in window {
                             *a = (*a + (1 << (shift - 1))) >> shift;
                         }
                     }
@@ -548,6 +555,16 @@ fn reduce_row_fixed<const N: usize, const T: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `img` resampled for drawing through `ctm` onto `window`, or `None`
+    /// when the draw reduces neither axis.
+    fn reduce(
+        img: &ImageDescriptor,
+        ctm: &Ctm,
+        window: &DeviceWindow,
+    ) -> Option<(ImageDescriptor, Ctm)> {
+        reduce_for_draw(img, &Plan::new(ctm, img.width, img.height, window)?)
+    }
     use crate::resources::image::ImageColorSpace;
 
     fn gray(width: u32, height: u32, data: Vec<u8>) -> ImageDescriptor {
@@ -578,6 +595,45 @@ mod tests {
             / (s1 - s0)
     }
 
+    /// The vertical pass computes only the source columns the column filter
+    /// reads: a draw whose first pixel centre lies inside the image leaves
+    /// the columns before that pixel's footprint unread, and the output is
+    /// still the exact mean of each footprint, with the rows kept or
+    /// reduced.
+    #[test]
+    fn vertical_pass_covers_only_the_columns_read() {
+        let w = 100usize;
+        for (h, d) in [(1u32, 1.0), (20, 2.0)] {
+            let data: Vec<u8> = (0..w * h as usize)
+                .map(|i| u8::try_from((i % w) * 2 + (i / w) % 3).unwrap())
+                .collect();
+            // 100 samples over device x 0.6 .. 10.6: pixel 0's centre is
+            // outside, pixel 1 starts at sample 4.
+            let ctm = [10.0, 0.0, 0.0, d, 0.6, 0.0];
+            let plan = Plan::new(&ctm, 100, h, &DeviceWindow::UNBOUNDED).expect("plan");
+            assert_eq!(plan.col_span, (4, 100), "h = {h}");
+            assert_eq!(plan.out_w, 10);
+            let out = plan.resample(&data, 1).expect("resampled");
+            let out_h = plan.out_h as usize;
+            let rows_per_out = h as usize / out_h;
+            for (oy, out_row) in out.as_chunks::<10>().0.iter().enumerate() {
+                for (ox, &got) in out_row.iter().enumerate() {
+                    let s0 = 10.0f64.mul_add(f64::from(u8::try_from(ox).unwrap()), 4.0);
+                    let rows = &data[oy * rows_per_out * w..][..rows_per_out * w];
+                    let want = rows
+                        .chunks_exact(w)
+                        .map(|row| exact_mean(row, s0, (s0 + 10.0).min(100.0)))
+                        .sum::<f64>()
+                        / f64::from(u32::try_from(rows_per_out).unwrap());
+                    assert!(
+                        (f64::from(got) - want).abs() <= 1.0,
+                        "h = {h}, ({ox}, {oy}): {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A one-pixel-wide black stroke in every fourth column survives a 4:1
     /// reduction as a uniform quarter-grey, where point sampling at that
     /// step lands on the stroke either always or never.
@@ -590,7 +646,7 @@ mod tests {
         // Drawn 4 × 1 device pixels at the origin.
         let ctm = [4.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         let (out, out_ctm) =
-            reduce_for_draw(&gray(w, h, data), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
+            reduce(&gray(w, h, data), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         assert_eq!((out.width, out.height), (4, 1));
         assert_eq!(out.data.as_cpu().unwrap(), &[191, 191, 191, 191]);
         assert_eq!(out_ctm, [4.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -602,8 +658,8 @@ mod tests {
     fn fractional_ratio_weights_boundary_samples_by_overlap() {
         let data: Vec<u8> = vec![0, 30, 60, 90, 120, 150, 180, 210, 240, 255];
         let ctm = [3.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let (out, _) = reduce_for_draw(&gray(10, 1, data.clone()), &ctm, &DeviceWindow::UNBOUNDED)
-            .expect("reduced");
+        let (out, _) =
+            reduce(&gray(10, 1, data.clone()), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         let out = out.data.as_cpu().unwrap();
         let third = 10.0 / 3.0;
         for (i, &got) in out.iter().enumerate() {
@@ -663,7 +719,7 @@ mod tests {
             color_space: ImageColorSpace::Rgb,
             ..gray(4, 1, vec![255, 0, 0, 0, 0, 255, 10, 20, 30, 30, 40, 50])
         };
-        let (out, _) = reduce_for_draw(
+        let (out, _) = reduce(
             &img,
             &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             &DeviceWindow::UNBOUNDED,
@@ -699,7 +755,7 @@ mod tests {
         let data: Vec<u8> = (0..2u8).flat_map(|y| [y * 100; 8]).collect();
         let ctm = [2.0, 0.0, 0.0, 50.0, 0.0, 0.0];
         let (out, out_ctm) =
-            reduce_for_draw(&gray(8, 2, data), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
+            reduce(&gray(8, 2, data), &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         assert_eq!((out.width, out.height), (2, 2));
         assert_eq!(out.data.as_cpu().unwrap(), &[0, 0, 100, 100]);
         assert_eq!(out_ctm, [2.0, 0.0, 0.0, 50.0, 0.0, 0.0]);
@@ -716,7 +772,7 @@ mod tests {
             [9.0, 4.4, -4.4, 9.0, 0.0, 0.0],
         ] {
             assert!(
-                reduce_for_draw(&img, &ctm, &DeviceWindow::UNBOUNDED).is_none(),
+                reduce(&img, &ctm, &DeviceWindow::UNBOUNDED).is_none(),
                 "{ctm:?}"
             );
         }
@@ -745,8 +801,7 @@ mod tests {
     fn skewed_draw_resamples_to_its_drawn_extent() {
         let img = gray(40, 40, vec![255; 1600]);
         let ctm = [6.0, 8.0, -8.0, 6.0, 50.0, 50.0];
-        let (out, out_ctm) =
-            reduce_for_draw(&img, &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
+        let (out, out_ctm) = reduce(&img, &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
         assert_eq!((out.width, out.height), (10, 10));
         assert!(out.data.as_cpu().unwrap().iter().all(|&v| v == 255));
         assert_eq!(out_ctm, ctm);
@@ -760,7 +815,7 @@ mod tests {
             color_space: ImageColorSpace::Mask,
             ..gray(4, 2, vec![0, 255, 0, 0, 255, 255, 0, 0])
         };
-        let (out, _) = reduce_for_draw(
+        let (out, _) = reduce(
             &stencil,
             &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             &DeviceWindow::UNBOUNDED,
@@ -830,9 +885,8 @@ mod tests {
             [0.0, 21.0, -33.0, 0.0, 26.4, -3.1],
             [0.0, -21.0, 33.0, 0.0, -6.4, 19.9],
         ] {
-            let (full, full_ctm) =
-                reduce_for_draw(&img, &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
-            let (cut, cut_ctm) = reduce_for_draw(&img, &ctm, &window).expect("reduced");
+            let (full, full_ctm) = reduce(&img, &ctm, &DeviceWindow::UNBOUNDED).expect("reduced");
+            let (cut, cut_ctm) = reduce(&img, &ctm, &window).expect("reduced");
             let full_dims = (full.width, full.height);
             let cut_dims = (cut.width, cut.height);
             assert!(cut.width * cut.height < full.width * full.height, "{ctm:?}");
@@ -883,7 +937,7 @@ mod tests {
             x: (100.0, 120.0),
             y: (0.0, 10.0),
         };
-        assert!(reduce_for_draw(&img, &[10.0, 0.0, 0.0, 10.0, 0.0, 0.0], &window).is_none());
+        assert!(reduce(&img, &[10.0, 0.0, 0.0, 10.0, 0.0, 0.0], &window).is_none());
     }
 
     /// Bitmap rows count down from the top edge; window rows count up.
