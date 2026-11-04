@@ -43,18 +43,42 @@ impl Program {
     /// Run the program on `inputs` (already clipped to `Domain`) and return
     /// the top `n` stack values, deepest first.  `None` on any execution
     /// error, on fewer than `n` results, or on a boolean result.
-    pub(super) fn run(&self, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
-        let mut stack: Vec<PsVal> = inputs.iter().map(|&t| PsVal::Num(t)).collect();
-        exec(&self.0, &mut stack)?;
-        let first = stack.len().checked_sub(n)?;
-        stack[first..]
-            .iter()
-            .map(|v| match *v {
-                PsVal::Num(x) => Some(x),
-                PsVal::Bool(_) => None,
-            })
-            .collect()
+    pub(super) fn run(&self, inputs: impl IntoIterator<Item = f64>, n: usize) -> Option<Vec<f64>> {
+        let inputs = inputs.into_iter();
+        let run = |stack: &mut Vec<PsVal>| {
+            stack.clear();
+            stack.extend(inputs.map(PsVal::Num));
+            exec(&self.0, stack)?;
+            let first = stack.len().checked_sub(n)?;
+            stack[first..]
+                .iter()
+                .map(|v| match *v {
+                    PsVal::Num(x) => Some(x),
+                    PsVal::Bool(_) => None,
+                })
+                .collect()
+        };
+        STACK.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut stack) => {
+                let out = run(&mut stack);
+                if stack.capacity() > KEPT_STACK {
+                    stack.clear();
+                    stack.shrink_to(KEPT_STACK);
+                }
+                out
+            }
+            Err(_) => run(&mut Vec::new()),
+        })
     }
+}
+
+/// Operand-stack entries a thread keeps allocated between runs.
+const KEPT_STACK: usize = 1 << 10;
+
+thread_local! {
+    /// The operand stack of the runs on this thread, reused so that a run
+    /// allocates only its result.
+    static STACK: std::cell::RefCell<Vec<PsVal>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Why a Type 4 program failed to parse.
@@ -607,11 +631,26 @@ mod tests {
     fn run(src: &str, inputs: &[f64], n: usize) -> Option<Vec<f64>> {
         Program::parse(src.as_bytes())
             .expect("program parses")
-            .run(inputs, n)
+            .run(inputs.iter().copied(), n)
     }
 
     fn parse_err(src: &str) -> ParseError {
         Program::parse(src.as_bytes()).expect_err("program is rejected")
+    }
+
+    /// A run starts from its own inputs alone: neither the values a failed
+    /// run leaves on the stack nor a stack grown past the kept capacity
+    /// reach the next run on the thread.
+    #[test]
+    fn runs_do_not_see_one_another_s_stack() {
+        assert_eq!(run("{ 1 2 3 true add }", &[7.0], 1), None);
+        assert_eq!(run("{ }", &[0.25], 1), Some(vec![0.25]));
+        assert_eq!(run("{ }", &[], 1), None);
+        let grow = "{ 1 copy 2 copy 4 copy 8 copy 16 copy 32 copy 64 copy 128 copy \
+                    256 copy 512 copy 1024 copy pop }";
+        assert!(run(grow, &[1.0], 1).is_some());
+        assert_eq!(run("{ 2 mul }", &[0.25], 1), Some(vec![0.5]));
+        assert_eq!(run("{ pop }", &[1.0], 1), None);
     }
 
     #[test]
@@ -685,7 +724,7 @@ mod tests {
         );
         let latin1_comment = b"{ 2 mul % caf\xe9\n }";
         let program = Program::parse(latin1_comment).expect("parses");
-        assert_eq!(program.run(&[0.25], 1), Some(vec![0.5]));
+        assert_eq!(program.run([0.25], 1), Some(vec![0.5]));
     }
 
     #[test]

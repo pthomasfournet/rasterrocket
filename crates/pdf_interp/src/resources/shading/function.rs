@@ -139,7 +139,7 @@ impl Function {
             Body::PostScript { domain, program } => {
                 let out = program
                     .as_ref()
-                    .and_then(|p| p.run(&clip_to_domains(domain, &[t]), n));
+                    .and_then(|p| p.run(clip_to_domains(domain, &[t]), n));
                 if out.is_none() {
                     log::debug!("function: Type 4 program failed to evaluate");
                 }
@@ -183,7 +183,7 @@ impl Function {
             }
             Body::Sampled(s) => s.eval_nd(inputs, n)?,
             Body::PostScript { domain, program } => {
-                program.as_ref()?.run(&clip_to_domains(domain, inputs), n)?
+                program.as_ref()?.run(clip_to_domains(domain, inputs), n)?
             }
             _ => {
                 log::debug!(
@@ -407,12 +407,11 @@ fn stitch<'f>(
 
 /// Clip input `i` to `Domain` interval `i` (default `[0, 1]`); an empty
 /// interval leaves the input as given.
-fn clip_to_domains(domain: &[f64], inputs: &[f64]) -> Vec<f64> {
+fn clip_to_domains<'a>(domain: &'a [f64], inputs: &'a [f64]) -> impl Iterator<Item = f64> + 'a {
     inputs
         .iter()
         .zip(domain_pairs(domain, inputs.len()))
         .map(|(&t, (d0, d1))| if d1 > d0 { t.clamp(d0, d1) } else { t })
-        .collect()
 }
 
 /// `values` padded with its last element, or truncated, to `n` entries;

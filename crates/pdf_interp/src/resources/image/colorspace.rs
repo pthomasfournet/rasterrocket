@@ -407,8 +407,56 @@ const fn descriptor(
 // ── Conversion ────────────────────────────────────────────────────────────────
 
 /// Distinct sample tuples memoised before the table is reset; bounds the
-/// memory of a continuous-tone image's per-pixel conversion.
+/// memory of a continuous-tone image's per-pixel conversion.  Also the
+/// slot count of the [`TupleCache`] of a tuple of at most eight samples.
 const MEMO_LIMIT: usize = 1 << 16;
+
+/// A direct-mapped cache of the colours of sample tuples of at most eight
+/// bytes, each packed into a `u64`: a tuple occupies the slot its key
+/// hashes to, replacing the one there.  Conversion is a function of the
+/// tuple, so a replaced entry is only recomputed, never stale.
+struct TupleCache {
+    /// `(key, [r, g, b, filled])` per slot.
+    slots: Vec<(u64, [u8; 4])>,
+    /// `64 − log2(slots.len())`: the hash's high bits index the slot.
+    shift: u32,
+}
+
+impl TupleCache {
+    /// A cache of at least 16 and at most [`MEMO_LIMIT`] slots, sized to
+    /// `tuples`, the tuples it will be asked for, rounded up to a power of
+    /// two; `None` when the table cannot be allocated.
+    fn new(tuples: usize) -> Option<Self> {
+        let len = tuples.clamp(16, MEMO_LIMIT).next_power_of_two();
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(len)
+            .map_err(|e| log::warn!("image: cannot allocate a {len}-slot colour cache: {e}"))
+            .ok()?;
+        slots.resize(len, (0, [0; 4]));
+        Some(Self {
+            slots,
+            shift: 64 - len.trailing_zeros(),
+        })
+    }
+
+    /// The colour of `px`, from the cache or from `convert`.
+    fn get_or_insert(&mut self, px: &[u8], convert: impl FnOnce() -> [u8; 3]) -> [u8; 3] {
+        let key = px.iter().fold(0u64, |k, &b| (k << 8) | u64::from(b));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the shifted hash is below slots.len() ≤ MEMO_LIMIT"
+        )]
+        let slot =
+            &mut self.slots[(key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize];
+        if slot.1[3] != 0 && slot.0 == key {
+            return [slot.1[0], slot.1[1], slot.1[2]];
+        }
+        let [r, g, b] = convert();
+        *slot = (key, [r, g, b, 1]);
+        [r, g, b]
+    }
+}
 
 /// The conversion of samples in one space under one `/Decode`.
 struct Decoded<'a> {
@@ -458,22 +506,24 @@ impl Decoded<'_> {
         self.decode.iter().all(|&(d0, d1)| is_identity_pair(d0, d1))
     }
 
-    /// The component values of the sample tuple `px`.
-    fn components(&self, px: &[u8]) -> Vec<f64> {
-        px.iter()
-            .zip(self.decode)
-            .map(|(&s, &pair)| decoded_sample(s, pair, self.max_sample))
-            .collect()
-    }
-
     /// The colour of the sample tuple `px` through the profile when there
     /// is one, otherwise through the space.
     fn to_rgb(&self, px: &[u8]) -> [u8; 3] {
-        let comps = self.components(px);
+        self.to_rgb_with(px, &mut Vec::new())
+    }
+
+    /// [`Self::to_rgb`], with the component values built in `comps`.
+    fn to_rgb_with(&self, px: &[u8], comps: &mut Vec<f64>) -> [u8; 3] {
+        comps.clear();
+        comps.extend(
+            px.iter()
+                .zip(self.decode)
+                .map(|(&s, &pair)| decoded_sample(s, pair, self.max_sample)),
+        );
         self.profile
             .as_ref()
-            .and_then(|p| p.convert(self.doc, &comps))
-            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, &comps))
+            .and_then(|p| p.convert(self.doc, comps))
+            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, comps))
     }
 
     /// The table of the space's conversion of every one-component sample.
@@ -675,11 +725,23 @@ impl Decoded<'_> {
         bytes
     }
 
-    /// `n`-component samples through the space, each distinct tuple
-    /// converted once; `None` when the output cannot be allocated.
+    /// `n`-component samples through the space, a tuple converted again
+    /// only once the cache has dropped it: a [`TupleCache`] for tuples of
+    /// at most eight samples, otherwise a table of up to [`MEMO_LIMIT`]
+    /// tuples reset when full.  `None` when the output cannot be allocated.
     fn convert_memo(&self, bytes: &[u8], n: usize) -> Option<Vec<u8>> {
+        let pixels = bytes.len() / n;
+        let mut out = super::try_with_capacity(pixels * 3)?;
+        let mut comps = Vec::with_capacity(n);
+        if n <= size_of::<u64>() {
+            let mut cache = TupleCache::new(pixels)?;
+            for px in bytes.chunks_exact(n) {
+                let rgb = cache.get_or_insert(px, || self.to_rgb_with(px, &mut comps));
+                out.extend_from_slice(&rgb);
+            }
+            return Some(out);
+        }
         let mut memo: HashMap<Box<[u8]>, [u8; 3]> = HashMap::new();
-        let mut out = super::try_with_capacity(bytes.len() / n * 3)?;
         for px in bytes.chunks_exact(n) {
             let rgb = if let Some(&rgb) = memo.get(px) {
                 rgb
@@ -687,7 +749,7 @@ impl Decoded<'_> {
                 if memo.len() >= MEMO_LIMIT {
                     memo.clear();
                 }
-                let rgb = self.to_rgb(px);
+                let rgb = self.to_rgb_with(px, &mut comps);
                 let _ = memo.insert(px.into(), rgb);
                 rgb
             };
@@ -1186,6 +1248,76 @@ mod tests {
         assert_eq!(px[0..3], teal_rgb());
         assert_eq!(px[3..6], [255, 255, 255]);
         assert_eq!(px[6..9], color::cmyk::cmyk_f64_to_rgb(0.0, 0.0, 0.0, 1.0));
+    }
+
+    /// A `DeviceN` space of `n` colorants converting to `DeviceCMYK`
+    /// through the Type 4 program `program`.
+    fn devicen_cmyk(n: usize, program: &str) -> (Document, Object) {
+        let domain = "0 1 ".repeat(n);
+        let body = format!(
+            "<< /FunctionType 4 /Domain [{domain}] /Range [0 1 0 1 0 1 0 1] /Length {} >>\n\
+             stream\n{program}\nendstream",
+            program.len()
+        );
+        let doc = make_doc_with_objects(&[(4, &body)]);
+        let names = (0..n)
+            .map(|i| name_obj(format!("Spot{i}").as_bytes()))
+            .collect();
+        let cs = Object::Array(vec![
+            name_obj(b"DeviceN"),
+            Object::Array(names),
+            name_obj(b"DeviceCMYK"),
+            Object::Reference((4, 0)),
+        ]);
+        (doc, cs)
+    }
+
+    /// Every pixel of a multi-colorant image converts as its tuple does
+    /// alone, whether the tuple is cached, replaces another in the cache or
+    /// is converted afresh: four colorants take the packed-tuple cache,
+    /// nine the table of byte tuples.
+    #[test]
+    fn cached_devicen_conversion_matches_per_tuple_conversion() {
+        let cases: [(u8, &str); 2] = [
+            (
+                4,
+                "{ 0.9 mul 4 1 roll 0.8 mul 4 1 roll 0.7 mul 4 1 roll 0.6 mul 4 1 roll }",
+            ),
+            (9, "{ pop pop pop pop pop }"),
+        ];
+        for (n, program) in cases {
+            let (doc, cs) = devicen_cmyk(usize::from(n), program);
+            let space = crate::resources::colorspace::resolve(&doc, &cs);
+            // 3000 pixels over 1000 distinct tuples: repeats, and more
+            // tuples than the smallest cache has slots.
+            let mut state = 0x2545_f491_u32;
+            let tuples: Vec<Vec<u8>> = (0..1000)
+                .map(|_| {
+                    (0..n)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 17;
+                            state ^= state << 5;
+                            state.to_le_bytes()[0]
+                        })
+                        .collect()
+                })
+                .collect();
+            let data: Vec<u8> = (0..3000)
+                .flat_map(|i| tuples[i * 7 % 1000].clone())
+                .collect();
+            let img = convert(&doc, cs, &[], Layout::Color(n), &data);
+            assert_eq!(img.color_space, ImageColorSpace::Rgb);
+            let px = img.data.as_cpu().unwrap();
+            for (i, tuple) in data.chunks_exact(usize::from(n)).enumerate() {
+                let comps: Vec<f64> = tuple
+                    .iter()
+                    .map(|&s| decoded_sample(s, (0.0, 1.0), 255.0))
+                    .collect();
+                let want = space.convert_to_rgb(&doc, &comps);
+                assert_eq!(px[i * 3..i * 3 + 3], want, "n = {n}, pixel {i}: {tuple:?}");
+            }
+        }
     }
 
     #[test]
