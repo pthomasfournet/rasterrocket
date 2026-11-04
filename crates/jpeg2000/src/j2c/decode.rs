@@ -19,7 +19,7 @@ use super::progression::progression_iterator;
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{ComponentData, bitplane, build, ht, idwt, mct, segment, tile};
-use crate::error::{DecodingError, MarkerError, Result, TileError, ValidationError, bail};
+use crate::error::{DecodingError, Result, TileError, ValidationError, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
 use crate::math::SimdBuffer;
 use crate::reader::BitReader;
@@ -410,9 +410,6 @@ fn decode_sub_band_bitplanes(
             .map(|idx| &storage.code_blocks[idx])
         {
             let style = &component_info.coding_style.parameters.code_block_style;
-            if style.mixed_high_throughput {
-                bail!(MarkerError::UnsupportedHtj2k);
-            }
             let x_offset = code_block.rect.x0 - sub_band.rect.x0;
             let y_offset = code_block.rect.y0 - sub_band.rect.y0;
             let base_idx = (y_offset * sub_band.rect.width()) as usize + x_offset as usize;
@@ -424,7 +421,14 @@ fn decode_sub_band_bitplanes(
             };
 
             if style.high_throughput {
-                decode_ht_code_block(code_block, num_bitplanes, style, tile_ctx, storage)?;
+                decode_ht_code_block(
+                    code_block,
+                    num_bitplanes,
+                    style,
+                    tile_ctx,
+                    storage,
+                    header.strict,
+                )?;
                 let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
                 reconstruction.store(
                     tile_ctx.ht_decode_context.coefficient_rows(),
@@ -529,7 +533,11 @@ fn decode_ht_code_block(
     style: &CodeBlockStyle,
     tile_ctx: &mut TileDecodeContext,
     storage: &DecompositionStorage<'_>,
+    strict: bool,
 ) -> Result<()> {
+    if num_bitplanes > ht::MAX_BITPLANES {
+        bail!(DecodingError::TooManyBitplanes);
+    }
     let [cleanup, refinement] = &mut tile_ctx.ht_segments;
     let segments = storage.layers[code_block.layers.clone()]
         .iter()
@@ -554,9 +562,12 @@ fn decode_ht_code_block(
             .saturating_add(set.unwrap_or(0)),
         stripe_causal: style.vertically_causal_context,
     };
-    ht::decode(&block, &mut tile_ctx.ht_decode_context)
-        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
-    Ok(())
+    // A malformed block decodes as zero, as an Annex D block does, unless
+    // decoding is strict.
+    match (ht::decode(&block, &mut tile_ctx.ht_decode_context), strict) {
+        (Ok(()), _) | (Err(ht::HtError::Data), false) => Ok(()),
+        _ => bail!(DecodingError::CodeBlockDecodeFailure),
+    }
 }
 
 /// The DC level shift of a component: `2^(precision - 1)`.

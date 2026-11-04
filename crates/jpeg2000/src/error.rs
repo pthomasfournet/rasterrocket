@@ -42,7 +42,7 @@ pub enum MarkerError {
     /// Unsupported marker encountered.
     Unsupported,
     /// The codestream mixes HT (ISO/IEC 15444-15) and Annex D code-blocks.
-    UnsupportedHtj2k,
+    UnsupportedMixedHt,
     /// Expected a specific marker.
     Expected(&'static str),
     /// Missing a required marker.
@@ -153,7 +153,7 @@ impl fmt::Display for MarkerError {
         match self {
             Self::Invalid => write!(f, "invalid marker"),
             Self::Unsupported => write!(f, "unsupported marker"),
-            Self::UnsupportedHtj2k => write!(
+            Self::UnsupportedMixedHt => write!(
                 f,
                 "HTJ2K (ISO/IEC 15444-15) codestream mixing HT and classic code-blocks: not supported"
             ),

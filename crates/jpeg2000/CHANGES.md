@@ -47,7 +47,13 @@ unchanged.
 - `j2c/codestream.rs`: the CAP and CPF markers are skipped; code-block
   style bit 6 selects the HT coder.  The mixed mode (bits 6 and 7, HT and
   Annex D code-blocks in one tile-component) fails with
-  `MarkerError::UnsupportedHtj2k`.
+  `MarkerError::UnsupportedMixedHt` when the COD or COC marker is read.
+- A malformed HT block decodes as zero unless decoding is strict, as an
+  Annex D block does; a block over the size limits, or with more than 30
+  bitplanes (`DecodingError::TooManyBitplanes`), is an error.
+- Codeword segment lengths wider than 32 bits are refused, in the Annex D
+  path as well (`read_segment_length`), and a zero-bitplane count past 255
+  saturates instead of wrapping.
 - Verified against OpenJPH and OpenHTJ2K on the OpenJPH test codestreams,
   and against the classic originals of the HTJ2K conformance streams of
   ITU-T T.803 | ISO/IEC 15444-4, which decode identically where the

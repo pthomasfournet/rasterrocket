@@ -74,12 +74,15 @@ pub(crate) fn read_header<'a>(
             markers::SOT => break,
             markers::COD => {
                 reader.read_marker()?;
-                cod = Some(cod_marker(reader).ok_or(MarkerError::ParseFailure("COD"))?);
+                let parsed = cod_marker(reader).ok_or(MarkerError::ParseFailure("COD"))?;
+                refuse_mixed_ht(&parsed.component_parameters.parameters)?;
+                cod = Some(parsed);
             }
             markers::COC => {
                 reader.read_marker()?;
                 let (component_index, coc) =
                     coc_marker(reader, num_components).ok_or(MarkerError::ParseFailure("COC"))?;
+                refuse_mixed_ht(&coc.parameters)?;
                 *cod_components
                     .get_mut(component_index as usize)
                     .ok_or(MarkerError::ParseFailure("COC"))? = Some(coc);
@@ -474,6 +477,16 @@ pub(crate) struct CodingStyleDefault {
     pub(crate) mct: bool,
     // This is the default used for all components, if not overridden by COC.
     pub(crate) component_parameters: CodingStyleComponent,
+}
+
+/// Refuse a coding style mixing HT and Annex D code-blocks (code-block style
+/// bits 6 and 7, ISO/IEC 15444-15), which is not decoded: before any packet
+/// is parsed with the wrong tier-2 reader.
+fn refuse_mixed_ht(parameters: &CodingStyleParameters) -> Result<()> {
+    if parameters.code_block_style.mixed_high_throughput {
+        bail!(MarkerError::UnsupportedMixedHt);
+    }
+    Ok(())
 }
 
 /// Values of coding style for each component, from the COC marker (A.6.2).

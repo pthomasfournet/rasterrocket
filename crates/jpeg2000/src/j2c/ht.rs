@@ -110,8 +110,8 @@ pub(crate) struct HtBlock<'a> {
     pub(crate) cleanup: &'a [u8],
     /// The refinement segment (SigProp, then MagRef growing backward).
     pub(crate) refinement: &'a [u8],
-    /// Passes of the HT set to decode: 1 (cleanup), 2 (+ SigProp) or 3
-    /// (+ MagRef).
+    /// Passes of the HT set to decode: 0 (no set: the block is zero),
+    /// 1 (cleanup), 2 (+ SigProp) or 3 (+ MagRef).
     pub(crate) passes: u8,
     /// The bitplane `Mb` count of the sub-band (Equation E-2).
     pub(crate) bitplanes: u8,
@@ -124,23 +124,40 @@ pub(crate) struct HtBlock<'a> {
 
 /// Decode one HT code-block into `ctx`.  `None` when the code-block is
 /// malformed.
-pub(crate) fn decode(block: &HtBlock<'_>, ctx: &mut HtDecodeContext) -> Option<()> {
+pub(crate) fn decode(block: &HtBlock<'_>, ctx: &mut HtDecodeContext) -> Result<(), HtError> {
     let (width, height) = (block.width, block.height);
     if width > MAX_BLOCK_SIDE || height > MAX_BLOCK_SIDE || width * height > MAX_BLOCK_AREA {
-        return None;
+        return Err(HtError::Size);
     }
     ctx.width = width;
     ctx.height = height;
     ctx.samples.clear();
     ctx.samples.resize((width * height) as usize, 0);
 
-    if width > 0 && height > 0 && block.passes > 0 && !block.cleanup.is_empty() {
-        let mut decoder = BlockDecoder::new(block, &mut ctx.samples)?;
-        decoder.run()?;
+    let decoded = if width > 0 && height > 0 && block.passes > 0 && !block.cleanup.is_empty() {
+        BlockDecoder::new(block, &mut ctx.samples).and_then(|mut decoder| decoder.run())
+    } else {
+        Some(())
+    };
+    if decoded.is_none() {
+        ctx.samples.fill(0);
     }
     ctx.finish();
-    Some(())
+    decoded.ok_or(HtError::Data)
 }
+
+/// Why an HT code-block did not decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HtError {
+    /// The block exceeds the code-block size limits; nothing was decoded.
+    Size,
+    /// The block's data is malformed; the context holds the block zeroed.
+    Data,
+}
+
+/// Magnitude bitplanes an HT block holds at most: the doubled domain keeps
+/// `2μ + 1` at bit `p − 1` within 31 bits.
+pub(crate) const MAX_BITPLANES: u8 = 30;
 
 // ── Bitstream readers ───────────────────────────────────────────────────────
 
@@ -374,82 +391,90 @@ fn uvlc_value(d: u32, vlc: u32) -> (u32, u32) {
 /// holds the two `u_off` bits, plus 1 when both are set and the MEL event
 /// is 1.  Returns the bits consumed.
 fn decode_init_uvlc(mut vlc: u32, mode: u32, u: &mut [u32; 2]) -> u32 {
-    let mut consumed = 0;
     match mode {
-        0 => *u = [1, 1],
-        1 | 2 => {
-            let (d, len) = uvlc_prefix(vlc);
-            vlc >>= len;
-            let (v, suffix) = uvlc_value(d, vlc);
-            consumed += len + suffix;
-            *u = if mode == 1 { [v + 1, 1] } else { [1, v + 1] };
-        }
+        0..=2 => uvlc_one_of_pair(vlc, mode, u),
         3 => {
             let (d1, len1) = uvlc_prefix(vlc);
             vlc >>= len1;
-            consumed += len1;
             if len1 > 2 {
                 // The first prefix is "000" or "001": the second quad's
                 // u is 1 or 2, coded in one bit.
                 u[1] = (vlc & 1) + 2;
-                consumed += 1;
-                vlc >>= 1;
-                let (v, suffix) = uvlc_value(d1, vlc);
-                consumed += suffix;
+                let (v, suffix) = uvlc_value(d1, vlc >> 1);
                 u[0] = v + 1;
+                len1 + 1 + suffix
             } else {
                 let (d2, len2) = uvlc_prefix(vlc);
-                vlc >>= len2;
-                consumed += len2;
-                let (v1, s1) = uvlc_value(d1, vlc);
-                vlc >>= s1;
-                let (v2, s2) = uvlc_value(d2, vlc);
-                consumed += s1 + s2;
-                *u = [v1 + 1, v2 + 1];
+                let (v, suffixes) = uvlc_suffixes(d1, d2, vlc >> len2);
+                *u = [v[0] + 1, v[1] + 1];
+                len1 + len2 + suffixes
             }
         }
         _ => {
-            let (d1, len1) = uvlc_prefix(vlc);
-            vlc >>= len1;
-            let (d2, len2) = uvlc_prefix(vlc);
-            vlc >>= len2;
-            let (v1, s1) = uvlc_value(d1, vlc);
-            vlc >>= s1;
-            let (v2, s2) = uvlc_value(d2, vlc);
-            consumed += len1 + len2 + s1 + s2;
-            *u = [v1 + 3, v2 + 3];
+            let (v, consumed) = uvlc_both(vlc);
+            *u = [v[0] + 3, v[1] + 3];
+            consumed
         }
     }
-    consumed
 }
 
 /// The `u` values (plus κ = 1) of a quad pair in a later row; `mode` holds
 /// the two `u_off` bits.  Returns the bits consumed.
-fn decode_noninit_uvlc(mut vlc: u32, mode: u32, u: &mut [u32; 2]) -> u32 {
+fn decode_noninit_uvlc(vlc: u32, mode: u32, u: &mut [u32; 2]) -> u32 {
     match mode {
-        0 => {
-            *u = [1, 1];
-            0
-        }
-        1 | 2 => {
-            let (d, len) = uvlc_prefix(vlc);
-            vlc >>= len;
-            let (v, suffix) = uvlc_value(d, vlc);
-            *u = if mode == 1 { [v + 1, 1] } else { [1, v + 1] };
-            len + suffix
-        }
+        0..=2 => uvlc_one_of_pair(vlc, mode, u),
         _ => {
-            let (d1, len1) = uvlc_prefix(vlc);
-            vlc >>= len1;
-            let (d2, len2) = uvlc_prefix(vlc);
-            vlc >>= len2;
-            let (v1, s1) = uvlc_value(d1, vlc);
-            vlc >>= s1;
-            let (v2, s2) = uvlc_value(d2, vlc);
-            *u = [v1 + 1, v2 + 1];
-            len1 + len2 + s1 + s2
+            let (v, consumed) = uvlc_both(vlc);
+            *u = [v[0] + 1, v[1] + 1];
+            consumed
         }
     }
+}
+
+/// The `u` values of a quad pair of which `mode` 1 (the first) or 2 (the
+/// second) has a coded offset, or `mode` 0 neither: one prefix and suffix.
+/// Returns the bits consumed.
+fn uvlc_one_of_pair(vlc: u32, mode: u32, u: &mut [u32; 2]) -> u32 {
+    if mode == 0 {
+        *u = [1, 1];
+        return 0;
+    }
+    let (d, len) = uvlc_prefix(vlc);
+    let (v, suffix) = uvlc_value(d, vlc >> len);
+    *u = if mode == 1 { [v + 1, 1] } else { [1, v + 1] };
+    len + suffix
+}
+
+/// The offsets of both quads of a pair, two prefixes then two suffixes, and
+/// the bits consumed.
+fn uvlc_both(vlc: u32) -> ([u32; 2], u32) {
+    let (d1, len1) = uvlc_prefix(vlc);
+    let (d2, len2) = uvlc_prefix(vlc >> len1);
+    let (v, suffixes) = uvlc_suffixes(d1, d2, vlc >> (len1 + len2));
+    (v, len1 + len2 + suffixes)
+}
+
+/// The values of the prefixes `d1` and `d2` from their suffixes at the
+/// bottom of `vlc`, and the suffix bits consumed.
+fn uvlc_suffixes(d1: u32, d2: u32, vlc: u32) -> ([u32; 2], u32) {
+    let (v1, s1) = uvlc_value(d1, vlc);
+    let (v2, s2) = uvlc_value(d2, vlc >> s1);
+    ([v1, v2], s1 + s2)
+}
+
+/// The significance of a quad pair, `qinf` of each, in the packed stripe
+/// layout: the first quad's two columns of two in the low byte, the
+/// second's four bits above.
+const fn sigma_bits(qinf: [u32; 2]) -> u32 {
+    let [q0, q1] = qinf;
+    (((q0 & 0x30) >> 4) | ((q0 & 0xC0) >> 2)) | (((q1 & 0x30) | ((q1 & 0xC0) << 2)) << 4)
+}
+
+/// The significance `sig` of a group of eight columns spread one column
+/// left and right, the neighbouring groups `prev` and `next` contributing
+/// across the group's edges.
+const fn horizontal_spread(prev: u32, sig: u32, next: u32) -> u32 {
+    sig | (prev >> 28) | (sig << 4) | (sig >> 4) | (next << 28)
 }
 
 // ── The block decoder ──────────────────────────────────────────────────────
@@ -487,11 +512,12 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
         if passes > 3 {
             return None;
         }
-        // The doubled domain holds `2μ + 1` at bit `p − 1` in 31 bits.
-        if block.bitplanes > 30 || block.missing_msbs >= block.bitplanes {
+        if block.bitplanes > MAX_BITPLANES || block.missing_msbs >= block.bitplanes {
             return None;
         }
-        // The cleanup pass decodes bitplane `Mb − 1 − P`.
+        // With `Z` missing most significant bitplanes, the cleanup pass
+        // decodes bitplane `Mb − 1 − Z`; `p = Mb − Z` is the bit just above
+        // it, where the doubled domain places a sample's `2μ + 1`.
         let p = u32::from(block.bitplanes - block.missing_msbs);
         if p == 1 || block.refinement.is_empty() {
             // No bitplane below the cleanup's, or no refinement data.
@@ -526,6 +552,9 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
     }
 
     fn sample_mut(&mut self, row: u32, col: u32) -> Option<&mut u32> {
+        if col >= self.width {
+            return None;
+        }
         self.samples
             .get_mut(row as usize * self.stride + col as usize)
     }
@@ -545,10 +574,10 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
         let mut v_n = ms_val & ((1 << m_n) - 1);
         v_n |= ((qinf >> (8 + bit)) & 1) << m_n;
         v_n |= 1;
-        let value = (v_n + 2).checked_shl(self.p - 1)?;
-        if value >> 31 != 0 {
-            return None;
-        }
+        // In 64 bits, so that no bit shifted past 31 goes unseen.
+        let value = u32::try_from(u64::from(v_n + 2) << (self.p - 1))
+            .ok()
+            .filter(|value| value >> 31 == 0)?;
         Some((sign | value, v_n))
     }
 
@@ -629,7 +658,6 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
             }
             c_q = ((qinf[0] & 0x10) >> 4) | ((qinf[0] & 0xE0) >> 5);
             vlc_val = self.vlc.advance(qinf[0] & 7);
-            self.sigma[0][sip] |= (((qinf[0] & 0x30) >> 4) | ((qinf[0] & 0xC0) >> 2)) << sip_shift;
 
             if x + 2 < width {
                 qinf[1] = u32::from(VLC_TBL0[((c_q << 7) | (vlc_val & 0x7F)) as usize]);
@@ -639,7 +667,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
                 c_q = ((qinf[1] & 0x10) >> 4) | ((qinf[1] & 0xE0) >> 5);
                 vlc_val = self.vlc.advance(qinf[1] & 7);
             }
-            self.sigma[0][sip] |= ((qinf[1] & 0x30) | ((qinf[1] & 0xC0) << 2)) << (4 + sip_shift);
+            self.sigma[0][sip] |= sigma_bits(qinf) << sip_shift;
             if x & 7 != 0 {
                 sip += 1;
             }
@@ -686,8 +714,6 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
                 }
                 c_q = ((qinf[0] & 0x40) >> 5) | ((qinf[0] & 0x80) >> 6);
                 vlc_val = self.vlc.advance(qinf[0] & 7);
-                self.sigma[si][sip] |=
-                    (((qinf[0] & 0x30) >> 4) | ((qinf[0] & 0xC0) >> 2)) << sip_shift;
 
                 if x + 2 < width {
                     c_q |= u32::from(self.line_state[ls + 1] >> 7);
@@ -699,8 +725,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
                     c_q = ((qinf[1] & 0x40) >> 5) | ((qinf[1] & 0x80) >> 6);
                     vlc_val = self.vlc.advance(qinf[1] & 7);
                 }
-                self.sigma[si][sip] |=
-                    ((qinf[1] & 0x30) | ((qinf[1] & 0xC0) << 2)) << (4 + sip_shift);
+                self.sigma[si][sip] |= sigma_bits(qinf) << sip_shift;
                 if x & 7 != 0 {
                     sip += 1;
                 }
@@ -831,7 +856,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
         for g in 0..groups {
             let sig = self.sigma[slot][g];
             let next = self.sigma[slot][g + 1];
-            let mut m = sig | (prev >> 28) | (sig << 4) | (sig >> 4) | (next << 28);
+            let mut m = horizontal_spread(prev, sig, next);
             prev = sig;
             let t = m;
             m |= (t & 0x7777_7777) << 1;
@@ -850,7 +875,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
         let groups = (self.width as usize).div_ceil(8);
         for g in 0..groups {
             let ns = self.sigma[nxt][g];
-            let t = ns | (prev >> 28) | (ns << 4) | (ns >> 4) | (self.sigma[nxt][g + 1] << 28);
+            let t = horizontal_spread(prev, ns, self.sigma[nxt][g + 1]);
             prev = ns;
             if !self.stripe_causal {
                 self.mbr[cur][g] |= (t & 0x1111_1111) << 3;
@@ -932,5 +957,68 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
             g += 1;
         }
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HtBlock, HtDecodeContext, HtError, MAX_BITPLANES, decode};
+
+    /// A block of `width` × `height` with a cleanup segment `cleanup`.
+    fn block(cleanup: &[u8], bitplanes: u8, missing_msbs: u8, passes: u8) -> HtBlock<'_> {
+        HtBlock {
+            width: 4,
+            height: 4,
+            cleanup,
+            refinement: &[],
+            passes,
+            bitplanes,
+            missing_msbs,
+            stripe_causal: false,
+        }
+    }
+
+    /// `Scup` in the cleanup's last two bytes: its high bits, then its low
+    /// four in the low nibble.
+    fn cleanup(len: usize, scup: usize) -> Vec<u8> {
+        let mut data = vec![0u8; len];
+        data[len - 1] = u8::try_from(scup >> 4).unwrap();
+        data[len - 2] = u8::try_from(scup & 0xF).unwrap();
+        data
+    }
+
+    #[test]
+    fn malformed_blocks_decode_as_zero_and_say_so() {
+        let mut ctx = HtDecodeContext::default();
+        let good = cleanup(8, 4);
+        let cases = [
+            (vec![0u8], 8, 0, 1),           // Lcup < 2
+            (cleanup(8, 1), 8, 0, 1),       // Scup < 2
+            (cleanup(8, 9), 8, 0, 1),       // Scup > Lcup
+            (cleanup(5000, 4080), 8, 0, 1), // Scup > 4079
+            (good.clone(), 8, 8, 1),        // Z >= Mb
+            (good.clone(), MAX_BITPLANES + 1, 0, 1),
+            (good, 8, 0, 4), // more than three passes
+        ];
+        for (data, bitplanes, missing, passes) in cases {
+            ctx.samples = vec![7; 16];
+            let result = decode(&block(&data, bitplanes, missing, passes), &mut ctx);
+            assert_eq!(
+                result,
+                Err(HtError::Data),
+                "Mb {bitplanes}, Z {missing}, {passes} passes"
+            );
+            assert!(ctx.samples.iter().all(|&s| s == 0), "the block is zeroed");
+        }
+    }
+
+    #[test]
+    fn oversized_blocks_are_refused_without_decoding() {
+        let mut ctx = HtDecodeContext::default();
+        let data = cleanup(8, 4);
+        let mut big = block(&data, 8, 0, 1);
+        big.width = 4096;
+        big.height = 4096;
+        assert_eq!(decode(&big, &mut ctx), Err(HtError::Size));
     }
 }

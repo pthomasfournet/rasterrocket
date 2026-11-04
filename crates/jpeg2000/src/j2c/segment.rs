@@ -188,13 +188,16 @@ fn resolve_segments(
         // value of P is coded in the packet header with a separate tag tree for every
         // precinct, in the same manner as the code block inclusion information."
         if included_first_time {
-            code_block.missing_bit_planes = precinct.zero_bitplane_tree.read(
-                code_block.x_idx,
-                code_block.y_idx,
-                reader,
-                u32::MAX,
-                &mut storage.tag_tree_nodes,
-            )? as u8;
+            code_block.missing_bit_planes = precinct
+                .zero_bitplane_tree
+                .read(
+                    code_block.x_idx,
+                    code_block.y_idx,
+                    reader,
+                    u32::MAX,
+                    &mut storage.tag_tree_nodes,
+                )
+                .map(|missing| u8::try_from(missing).unwrap_or(u8::MAX))?;
         }
 
         code_block.has_been_included |= is_included;
@@ -292,7 +295,7 @@ fn resolve_segments(
                 // the number of bits used to signal the length of the code-block contribution can
                 // increase or decrease depending on the number of coding passes included."
                 let length_bits = code_block.l_block + coding_passes_for_segment.ilog2();
-                reader.read_bits_with_stuffing(length_bits as u8)
+                read_segment_length(reader, length_bits)
             }?;
 
             storage.segments.push(Segment {
@@ -338,8 +341,18 @@ fn resolve_segments(
 /// The segment id of an HT codeword segment ending with pass `last_pass`:
 /// `2s` for the cleanup segment of HT set `s` (three passes each, the
 /// cleanup first), `2s + 1` for its refinement segment.
-pub(crate) fn ht_segment_id(last_pass: u8) -> u8 {
+fn ht_segment_id(last_pass: u8) -> u8 {
     2 * (last_pass / 3) + u8::from(!last_pass.is_multiple_of(3))
+}
+
+/// Read a codeword segment length of `bits` bits (B.10.7.1): `None` past
+/// the 32 bits a length holds, or when the packet header ends.
+fn read_segment_length(reader: &mut BitReader<'_>, bits: u32) -> Option<u32> {
+    match bits {
+        0 => Some(0),
+        1..=32 => reader.read_bits_with_stuffing(u8::try_from(bits).ok()?),
+        _ => None,
+    }
 }
 
 // The HT segment reader below follows the packet-header parsing of
@@ -366,12 +379,7 @@ fn read_ht_segments<'a>(
     segments: &mut Vec<Segment<'a>>,
 ) -> Option<()> {
     let l_block = code_block.l_block;
-    let read_length = |reader: &mut BitReader<'_>, bits: u32| -> Option<u32> {
-        if bits == 0 {
-            return Some(0);
-        }
-        reader.read_bits_with_stuffing(u8::try_from(bits).ok()?)
-    };
+    let read_length = read_segment_length;
     let mut push = |first: u8, passes: u8, length: u32| {
         segments.push(Segment {
             idx: ht_segment_id(first + passes - 1),
@@ -453,5 +461,21 @@ fn segment_idx_for_bypass(pass_idx: u8) -> u8 {
         0
     } else {
         1 + (2 * ((pass_idx - 10) / 3)) + (if ((pass_idx - 10) % 3) == 2 { 1 } else { 0 })
+    }
+}
+
+#[cfg(test)]
+mod length_tests {
+    use super::read_segment_length;
+    use crate::reader::BitReader;
+
+    #[test]
+    fn segment_lengths_hold_at_most_32_bits() {
+        let data = [0xAB; 8];
+        let mut reader = BitReader::new(&data);
+        assert_eq!(read_segment_length(&mut reader, 0), Some(0));
+        assert_eq!(read_segment_length(&mut reader, 8), Some(0xAB));
+        assert!(read_segment_length(&mut reader, 32).is_some());
+        assert_eq!(read_segment_length(&mut reader, 33), None);
     }
 }
