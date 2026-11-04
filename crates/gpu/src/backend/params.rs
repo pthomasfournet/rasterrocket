@@ -1381,6 +1381,9 @@ mod tests {
         fn detect_vram_budget(&self) -> super::super::Result<super::super::VramBudget> {
             unreachable!()
         }
+        fn aa_fill_scratch(&self) -> &super::super::AaFillScratchPool<Self> {
+            unreachable!()
+        }
     }
 
     thread_local! {

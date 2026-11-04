@@ -195,6 +195,8 @@ pub(crate) struct GpuKernels {
 pub struct GpuCtx {
     pub(crate) cuda: Arc<CudaContext>,
     pub(crate) kernels: GpuKernels,
+    /// Scratch buffers of the AA fills run on this context.
+    pub(crate) aa_scratch: backend::AaFillScratchPool<backend::cuda::CudaBackend>,
 }
 
 thread_local! {
@@ -263,6 +265,7 @@ impl GpuCtx {
 
         Ok(Self {
             cuda: Arc::clone(&ctx),
+            aa_scratch: backend::AaFillScratchPool::new(),
             kernels: GpuKernels {
                 composite_rgba8: load(PTX_COMPOSITE, "composite_rgba8")?,
                 apply_soft_mask: load(PTX_SOFT_MASK, "apply_soft_mask")?,

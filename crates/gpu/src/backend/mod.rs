@@ -13,7 +13,7 @@
 //! buffer-device-addresses (Vulkan) at record time.
 
 mod aa_fill;
-pub use aa_fill::{AaFillScratch, aa_fill_page};
+pub use aa_fill::{AaFillScratch, AaFillScratchPool, aa_fill, aa_fill_page};
 pub mod cuda;
 pub mod params;
 #[cfg(feature = "vulkan")]
@@ -614,6 +614,11 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// Returns `BackendError` if the copy fails, or if `dst.len()`
     /// exceeds `src`'s device length.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()>;
+
+    /// The scratch buffers of the fills [`aa_fill`] runs on this backend.
+    fn aa_fill_scratch(&self) -> &AaFillScratchPool<Self>
+    where
+        Self: Sized;
 
     /// Query the current VRAM budget from the driver.
     ///

@@ -283,6 +283,11 @@ impl GpuBackend for CudaBackend {
         transfer::download(&self.ctx, src, dst)
     }
 
+    /// The pool of the context, shared by every backend over it.
+    fn aa_fill_scratch(&self) -> &crate::backend::AaFillScratchPool<Self> {
+        &self.ctx.aa_scratch
+    }
+
     fn detect_vram_budget(&self) -> Result<VramBudget> {
         let cuda_ctx = &self.ctx.cuda;
         let (free, total) = cuda_ctx.mem_get_info().map_err(be)?;

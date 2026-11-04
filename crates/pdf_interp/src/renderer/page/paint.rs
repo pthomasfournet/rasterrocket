@@ -463,30 +463,16 @@ impl PageRenderer<'_> {
         pipe: &raster::pipe::PipeState<'_>,
         src: &raster::pipe::PipeSrc<'_>,
     ) -> bool {
-        use super::gpu_ops::{Device, try_backend_aa_fill};
+        use super::gpu_ops::try_backend_aa_fill;
         #[cfg(feature = "vulkan")]
         if let Some(vk) = self.vk_backend.clone() {
-            let mut scratch = std::mem::take(&mut self.vk_aa_scratch);
-            let device = Device {
-                backend: &*vk,
-                scratch: &mut scratch,
-            };
-            let painted = try_backend_aa_fill(self, device, path, even_odd, flatness, pipe, src);
-            self.vk_aa_scratch = scratch;
-            return painted;
+            return try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src);
         }
         let Some(ctx) = self.gpu_ctx.clone() else {
             return false;
         };
         let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
-        let mut scratch = std::mem::take(&mut self.cuda_aa_scratch);
-        let device = Device {
-            backend: &cuda,
-            scratch: &mut scratch,
-        };
-        let painted = try_backend_aa_fill(self, device, path, even_odd, flatness, pipe, src);
-        self.cuda_aa_scratch = scratch;
-        painted
+        try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
     }
 
     /// Stroke `path` with the current line width, widened to at least one

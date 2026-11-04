@@ -43,6 +43,7 @@ use crate::backend::{
 pub struct VulkanBackend {
     // Field order = drop order: children that record into command buffers
     // / hold pool handles must drop before the device they were created on.
+    aa_scratch: crate::backend::AaFillScratchPool<Self>,
     transfer: transfer::TransferContext,
     recorder: recorder::PageRecorder,
     /// Held for the whole of a [`GpuBackend::run_page`]: the recorder has
@@ -85,6 +86,7 @@ impl VulkanBackend {
         let recorder = recorder::PageRecorder::new(device.clone(), pipelines.clone())?;
         let transfer = transfer::TransferContext::new(device.clone())?;
         Ok(Self {
+            aa_scratch: crate::backend::AaFillScratchPool::new(),
             transfer,
             recorder,
             page: std::sync::Mutex::new(()),
@@ -381,6 +383,10 @@ impl GpuBackend for VulkanBackend {
             dst.copy_from_slice(bytes);
             Ok(())
         })?
+    }
+
+    fn aa_fill_scratch(&self) -> &crate::backend::AaFillScratchPool<Self> {
+        &self.aa_scratch
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {

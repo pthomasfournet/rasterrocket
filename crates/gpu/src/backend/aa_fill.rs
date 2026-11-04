@@ -1,6 +1,8 @@
 //! The scanline-AA fill as one backend page: the one sequence every caller
 //! of the fill kernel runs, on either backend.
 
+use std::sync::{Mutex, PoisonError};
+
 use super::params::AaFillParams;
 use super::{BackendError, GpuBackend, Result, reject_zero_size};
 use crate::fill::{AaFillRect, AaScanTable};
@@ -44,6 +46,68 @@ impl<B: GpuBackend> Default for AaFillScratch<B> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Scratches lent to the fills a backend runs ([`aa_fill`]), one per
+/// concurrent fill.
+///
+/// Owned by the backend ([`GpuBackend::aa_fill_scratch`]), so its buffers
+/// belong to the device they were allocated on and live as long as the
+/// backend: a fill takes an idle scratch, or a new one when every scratch
+/// is lent, and returns it when done.  The pool holds as many scratches as
+/// fills have run at once, each at the size of the largest fill it served.
+pub struct AaFillScratchPool<B: GpuBackend> {
+    idle: Mutex<Vec<AaFillScratch<B>>>,
+}
+
+impl<B: GpuBackend> AaFillScratchPool<B> {
+    /// An empty pool.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take(&self) -> AaFillScratch<B> {
+        self.idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default()
+    }
+
+    fn put(&self, scratch: AaFillScratch<B>) {
+        self.idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(scratch);
+    }
+}
+
+impl<B: GpuBackend> Default for AaFillScratchPool<B> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`aa_fill_page`] with a scratch lent by `backend`'s pool
+/// ([`GpuBackend::aa_fill_scratch`]).
+///
+/// # Errors
+/// As [`aa_fill_page`].
+pub fn aa_fill<B: GpuBackend>(
+    backend: &B,
+    table: &AaScanTable<'_>,
+    rect: AaFillRect,
+    aa_width: u32,
+    even_odd: bool,
+) -> Result<Vec<u8>> {
+    let pool = backend.aa_fill_scratch();
+    let mut scratch = pool.take();
+    let counts = aa_fill_page(backend, &mut scratch, table, rect, aa_width, even_odd);
+    pool.put(scratch);
+    counts
 }
 
 /// Direction of a staged transfer, which picks the memory kind of both
@@ -262,5 +326,43 @@ mod tests {
             .expect("a zero-length slot is rejected");
         assert!(matches!(err, BackendError::ZeroSizeAlloc { .. }), "{err}");
         assert!(slot.is_none());
+    }
+
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn fills_reuse_the_backends_pooled_scratch() {
+        use crate::fill::ScanIntersect;
+        let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let intersects = [ScanIntersect {
+            x0: 0,
+            x1: 7,
+            count: 0,
+        }];
+        let row_starts = [0, 1];
+        let table = AaScanTable {
+            intersects: &intersects,
+            row_starts: &row_starts,
+            y_min: 0,
+        };
+        let rect = AaFillRect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        let idle = || backend.aa_fill_scratch().idle.lock().expect("pool").len();
+        for _ in 0..3 {
+            let counts = aa_fill(&backend, &table, rect, 8, false).expect("aa_fill");
+            assert_eq!(counts.len(), 2);
+            assert_eq!(idle(), 1, "the fill did not return its scratch");
+        }
+        let pooled = backend.aa_fill_scratch().take();
+        assert!(
+            pooled.coverage.is_some(),
+            "the pooled scratch kept no buffers"
+        );
     }
 }
