@@ -433,24 +433,50 @@ const PAGE_TINT_WORK_BUDGET: u64 = 1 << 32;
 /// through a coarser lattice, and once a lattice of two values per
 /// component no longer fits, it is not drawn.  Every such fallback is
 /// logged.
+///
+/// A conversion the page's remaining work curtailed (a lattice or a drop
+/// under an allowance below [`EXACT_WORK_BUDGET`]) depends on what the
+/// page drew before it; [`Self::curtailments`] counts them, so that such
+/// a decode is not shared with other pages.
 #[derive(Debug)]
-pub struct TintBudget(Cell<u64>);
+pub struct TintBudget {
+    left: Cell<u64>,
+    curtailed: Cell<u64>,
+}
 
 impl TintBudget {
     /// The full budget of one page.
     #[must_use]
     pub(crate) const fn page() -> Self {
-        Self(Cell::new(PAGE_TINT_WORK_BUDGET))
+        Self::with_work(PAGE_TINT_WORK_BUDGET)
+    }
+
+    /// A budget of `work` operations.
+    pub(crate) const fn with_work(work: u64) -> Self {
+        Self {
+            left: Cell::new(work),
+            curtailed: Cell::new(0),
+        }
     }
 
     /// The work left.
     const fn remaining(&self) -> u64 {
-        self.0.get()
+        self.left.get()
     }
 
     /// Spend `work`; the budget does not fall below zero.
     fn spend(&self, work: u64) {
-        self.0.set(self.0.get().saturating_sub(work));
+        self.left.set(self.left.get().saturating_sub(work));
+    }
+
+    /// The conversions the remaining work has curtailed so far: a decode
+    /// during which this count rose depends on the page's earlier draws.
+    pub(crate) const fn curtailments(&self) -> u64 {
+        self.curtailed.get()
+    }
+
+    fn curtail(&self) {
+        self.curtailed.set(self.curtailed.get().saturating_add(1));
     }
 }
 
@@ -576,6 +602,10 @@ struct Decoded<'a> {
     /// The work spent by exact conversions so far, at [`Self::cost`] each,
     /// when a conversion costs more than one operation; zero otherwise.
     spent: Cell<u64>,
+    /// The page's budget, when [`Self::allowance`] was drawn from it and
+    /// is below [`EXACT_WORK_BUDGET`]: a lattice or a drop is then a
+    /// curtailment of the page (see [`TintBudget::curtailments`]).
+    limiting: Option<&'a TintBudget>,
 }
 
 /// The colour of every value of a one-component sample.
@@ -618,17 +648,15 @@ impl<'a> Decoded<'a> {
         decode: &'a [(f64, f64)],
         max_sample: f64,
         profile: Option<Arc<IccConversion>>,
-        budget: Option<&TintBudget>,
+        budget: Option<&'a TintBudget>,
     ) -> Self {
         let cost = if profile.is_some() {
             1
         } else {
             space.conversion_cost().max(1)
         };
-        let allowance = match budget {
-            Some(b) if cost > 1 => EXACT_WORK_BUDGET.min(b.remaining()),
-            _ => EXACT_WORK_BUDGET,
-        };
+        let limiting = budget.filter(|b| cost > 1 && b.remaining() < EXACT_WORK_BUDGET);
+        let allowance = limiting.map_or(EXACT_WORK_BUDGET, TintBudget::remaining);
         Self {
             doc,
             space,
@@ -638,6 +666,7 @@ impl<'a> Decoded<'a> {
             cost,
             allowance,
             spent: Cell::new(0),
+            limiting,
         }
     }
 
@@ -945,6 +974,9 @@ impl<'a> Decoded<'a> {
                 return None;
             }
         };
+        if let Some(page) = self.limiting {
+            page.curtail();
+        }
         let fits = |g: usize| {
             u32::try_from(n)
                 .ok()
@@ -1725,7 +1757,7 @@ mod tests {
         let mut data = noise(4, 1000);
         data[..8].copy_from_slice(nodes.as_flattened());
 
-        let budget = TintBudget(Cell::new(1000 * cost));
+        let budget = TintBudget::with_work(1000 * cost);
         let img = convert_in(
             &doc,
             cs.clone(),
@@ -1747,8 +1779,13 @@ mod tests {
             budget.remaining() < 1000 * cost,
             "the exact conversion spent"
         );
+        assert_eq!(
+            budget.curtailments(),
+            0,
+            "an exact conversion is not curtailed"
+        );
 
-        budget.0.set(16 * cost);
+        budget.left.set(16 * cost);
         let img = convert_in(
             &doc,
             cs.clone(),
@@ -1763,8 +1800,18 @@ mod tests {
             assert_eq!(px[i * 3..i * 3 + 3], exact(&doc, &space, node), "node {i}");
         }
         assert_eq!(budget.remaining(), 0);
+        assert_eq!(
+            budget.curtailments(),
+            1,
+            "the page's work chose the lattice"
+        );
 
         assert!(convert_in(&doc, cs, &[], Layout::Color(4), &data, Some(&budget)).is_none());
+        assert_eq!(
+            budget.curtailments(),
+            2,
+            "the page's work dropped the image"
+        );
         let gray = convert_in(
             &doc,
             name_obj(b"DeviceGray"),
@@ -1775,12 +1822,17 @@ mod tests {
         )
         .expect("a device space spends no tint work");
         assert_eq!(gray.data.as_cpu().unwrap(), [0, 128, 255]);
+        assert_eq!(
+            budget.curtailments(),
+            2,
+            "a device space is never curtailed"
+        );
 
         // One colorant: 256 exact conversions do not fit, a lattice of 18
         // values does.
         let (doc, cs) = devicen_cmyk(1, &format!("{{{} dup dup dup }}", " 1 pop".repeat(1_000)));
         let cost = crate::resources::colorspace::resolve(&doc, &cs).conversion_cost();
-        budget.0.set(18 * cost);
+        budget.left.set(18 * cost);
         let one = convert_in(
             &doc,
             cs,

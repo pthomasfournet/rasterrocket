@@ -155,20 +155,21 @@ impl ImageMemo {
     }
 
     /// Keep `image`, the page's decode of `key` for a request at
-    /// `draw_size`, in place of any earlier decode of `key`, and offer it
-    /// to the document store.  When it would exceed the budget, the
-    /// earlier decode is dropped and `image` is not kept.  Returns the
-    /// image for drawing either way.
+    /// `draw_size`, in place of any earlier decode of `key`, and, when
+    /// `share`, offer it to the document store.  When it would exceed the
+    /// budget, the earlier decode is dropped and `image` is not kept.
+    /// Returns the image for drawing either way.
     pub(super) fn insert(
         &mut self,
         key: ImageKey,
         draw_size: Option<(u32, u32)>,
         image: DecodedImage,
+        share: bool,
     ) -> Arc<DecodedImage> {
         let image = Arc::new(image);
         let entry = Entry::new(Arc::clone(&image), draw_size, host_bytes(&image));
         keep(&mut self.entries, &mut self.bytes, self.budget, key, entry);
-        if self.entries.contains_key(&key) {
+        if share && self.entries.contains_key(&key) {
             self.document.offer(key, self.page, &image, draw_size);
         }
         image
@@ -242,7 +243,7 @@ mod tests {
     fn non_jpx_decode_serves_every_draw_size() {
         let mut memo = memo(BUDGET_BYTES);
         assert!(memo.get(KEY, None).is_none());
-        let kept = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Dct, 8));
+        let kept = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Dct, 8), true);
         for size in [None, Some((4, 4)), Some((100, 3))] {
             let hit = memo.get(KEY, size).expect("hit");
             assert!(Arc::ptr_eq(&hit, &kept));
@@ -262,13 +263,13 @@ mod tests {
     #[test]
     fn jpx_decode_serves_only_its_draw_size() {
         let mut memo = memo(BUDGET_BYTES);
-        let _ = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Jpx, 4));
+        let _ = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Jpx, 4), true);
         assert!(memo.get(KEY, Some((4, 4))).is_some());
         assert!(memo.get(KEY, Some((8, 8))).is_none());
         assert!(memo.get(KEY, None).is_none());
 
         // A decode for another size replaces it.
-        let _ = memo.insert(KEY, Some((8, 8)), decoded(ImageFilter::Jpx, 8));
+        let _ = memo.insert(KEY, Some((8, 8)), decoded(ImageFilter::Jpx, 8), true);
         assert!(memo.get(KEY, Some((4, 4))).is_none());
         assert_eq!(memo.get(KEY, Some((8, 8))).expect("hit").image.width, 8);
         assert_eq!(memo.bytes, 8);
@@ -277,23 +278,23 @@ mod tests {
     #[test]
     fn decodes_beyond_the_budget_are_not_kept() {
         let mut memo = memo(10);
-        let drawn = memo.insert(KEY, None, decoded(ImageFilter::Raw, 8));
+        let drawn = memo.insert(KEY, None, decoded(ImageFilter::Raw, 8), true);
         assert_eq!(drawn.image.width, 8);
         assert_eq!(memo.bytes, 8);
         let other = ImageKey { id: (6, 0), ..KEY };
-        let over = memo.insert(other, None, decoded(ImageFilter::Raw, 3));
+        let over = memo.insert(other, None, decoded(ImageFilter::Raw, 3), true);
         assert_eq!(over.image.width, 3, "an image over budget is still drawn");
         assert!(memo.get(other, None).is_none());
         assert_eq!(memo.bytes, 8);
         // Replacing an entry frees its bytes first.
-        let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10));
+        let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10), true);
         assert_eq!(memo.bytes, 10);
     }
 
     #[test]
     fn shared_decodes_charge_nothing() {
         let mut memo = memo(10);
-        let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10));
+        let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10), true);
         let other = ImageKey { id: (6, 0), ..KEY };
         let shared = Arc::new(decoded(ImageFilter::Raw, 50));
         memo.insert_shared(other, None, &shared, true);

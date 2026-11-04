@@ -1321,6 +1321,70 @@ fn shared_image_decodes_render_and_report_as_page_decodes() {
     assert_eq!(images.kept_bytes(), 4);
 }
 
+/// A decode whose colours its page's remaining tint-transform work
+/// curtailed is not shared: a later page converts the image exactly, as it
+/// does alone.  The 1×1 `Separation` image's tint 104/255 steps to 1 at
+/// 0.4, between the lattice nodes 90 and 105.
+#[test]
+fn a_decode_the_page_budget_curtailed_is_not_shared() {
+    let page = "<< /Type /Page /Resources << /XObject << /Im 6 0 R >> >> >>";
+    let program = "{0.4 ge {1} {0} ifelse}";
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (4, page.to_owned()),
+        (5, page.to_owned()),
+        (
+            6,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace [/Separation /Step /DeviceGray 7 0 R] \
+                 /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                "68>",
+            ),
+        ),
+        (
+            7,
+            format!(
+                "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length {} >>\n\
+                 stream\n{program}\nendstream",
+                program.len()
+            ),
+        ),
+    ]);
+    let cost = crate::resources::colorspace::resolve(
+        &doc,
+        &pdf::Object::Array(vec![
+            pdf::Object::Name(b"Separation".to_vec()),
+            pdf::Object::Name(b"Step".to_vec()),
+            pdf::Object::Name(b"DeviceGray".to_vec()),
+            pdf::Object::Reference((7, 0)),
+        ]),
+    )
+    .conversion_cost();
+    let draw = crate::content::parse(b"q 8 0 0 8 0 0 cm /Im Do Q");
+    let render = |id: ObjectId, images: &Arc<super::super::DocumentImages>, work: Option<u64>| {
+        let mut renderer = PageRenderer::new(8, 8, &doc, id);
+        renderer.set_document_images(Arc::clone(images));
+        if let Some(work) = work {
+            renderer.tint_budget = std::rc::Rc::new(
+                crate::resources::image::colorspace::TintBudget::with_work(work),
+            );
+        }
+        renderer.execute(&draw);
+        renderer
+    };
+    let pixels = |renderer: PageRenderer<'_>| renderer.finish().0.data().to_vec();
+
+    let alone = pixels(render((5, 0), &Arc::default(), None));
+    let images: Arc<super::super::DocumentImages> = Arc::default();
+    let curtailed = render((4, 0), &images, Some(18 * cost));
+    assert_eq!(curtailed.tint_budget.curtailments(), 1);
+    let second = render((5, 0), &images, None);
+    let curtailed = pixels(curtailed);
+    assert_ne!(curtailed, alone, "the lattice interpolates across the step");
+    assert_eq!(pixels(second), alone, "the curtailed decode is not shared");
+    assert_eq!(images.kept_bytes(), 1, "the second page's exact decode is kept");
+}
+
 /// Pages `(4, 0)` and `(5, 0)` drawing the 2×2 `DeviceGray` image `/Im`
 /// (object 6) of hex samples `samples`.
 fn image_doc(samples: &str) -> Document {

@@ -78,8 +78,8 @@ impl PageRenderer<'_> {
             context: self.default_spaces_context(),
         });
         let Some(key) = key else {
-            let resolution = self.decode_image_xobject(name, draw_size);
-            self.handle_image_resolution(name, resolution, None);
+            let (resolution, _) = self.decode_image_xobject(name, draw_size);
+            self.handle_image_resolution(name, resolution, None, false);
             return;
         };
         // Decode the image only when neither this page nor, for an image
@@ -101,8 +101,8 @@ impl PageRenderer<'_> {
         if self.draw_shared_image(name, key, draw_size) {
             return;
         }
-        let resolution = self.decode_image_xobject(name, draw_size);
-        self.handle_image_resolution(name, resolution, Some((key, draw_size)));
+        let (resolution, shareable) = self.decode_image_xobject(name, draw_size);
+        self.handle_image_resolution(name, resolution, Some((key, draw_size)), shareable);
     }
 
     /// Draw the image `XObject` `name` (`key`) at `draw_size` from the
@@ -124,19 +124,25 @@ impl PageRenderer<'_> {
         let Lookup::Shared(cell) = document.lookup(key, page) else {
             return false;
         };
-        let mut device = None;
+        let mut local = None;
         let (outcome, kept) = document.resolve(key, &cell, || {
             match self.decode_image_xobject(name, draw_size) {
-                ImageResolution::Ok(decoded) if decoded.image.data.as_cpu().is_none() => {
-                    device = Some(decoded);
-                    Outcome::Device
+                (resolution, false) => {
+                    local = Some(resolution);
+                    Outcome::Local
                 }
-                ImageResolution::Ok(decoded) => Outcome::Image {
+                (ImageResolution::Ok(decoded), true) if decoded.image.data.as_cpu().is_none() => {
+                    local = Some(ImageResolution::Ok(decoded));
+                    Outcome::Local
+                }
+                (ImageResolution::Ok(decoded), true) => Outcome::Image {
                     image: Arc::new(decoded),
                     draw_size,
                 },
-                ImageResolution::DecodeFailed(reason) => Outcome::Failed { reason, draw_size },
-                ImageResolution::Absent => Outcome::Absent,
+                (ImageResolution::DecodeFailed(reason), true) => {
+                    Outcome::Failed { reason, draw_size }
+                }
+                (ImageResolution::Absent, true) => Outcome::Absent,
             }
         });
         match outcome {
@@ -153,13 +159,11 @@ impl PageRenderer<'_> {
                 self.draw_image_xobject(name, &image);
             }
 
-            Outcome::Device => match device {
+            Outcome::Local => match local {
                 // This page made the decode; the store does not keep it.
-                Some(decoded) => self.handle_image_resolution(
-                    name,
-                    ImageResolution::Ok(decoded),
-                    Some((key, draw_size)),
-                ),
+                Some(resolution) => {
+                    self.handle_image_resolution(name, resolution, Some((key, draw_size)), false);
+                }
                 None => return false,
             },
             Outcome::Failed {
@@ -169,18 +173,22 @@ impl PageRenderer<'_> {
                 name,
                 ImageResolution::DecodeFailed(reason),
                 Some((key, draw_size)),
+                false,
             ),
             // A JPEG 2000 decode at another resolution level, or a failure
             // at another draw size, says nothing of this request.
             Outcome::Image { .. } | Outcome::Failed { .. } => return false,
             Outcome::Absent => {
-                self.handle_image_resolution(name, ImageResolution::Absent, None);
+                self.handle_image_resolution(name, ImageResolution::Absent, None, false);
             }
         }
         true
     }
 
-    /// Decode the image `XObject` `name` for a draw at `draw_size`.
+    /// Decode the image `XObject` `name` for a draw at `draw_size`, and
+    /// whether other pages may share the result: not when the page's
+    /// remaining tint-transform work curtailed its colours (see
+    /// [`TintBudget::curtailments`](crate::resources::image::colorspace::TintBudget::curtailments)).
     #[cfg_attr(
         not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
         expect(
@@ -192,7 +200,8 @@ impl PageRenderer<'_> {
         &mut self,
         name: &[u8],
         draw_size: Option<(u32, u32)>,
-    ) -> ImageResolution {
+    ) -> (ImageResolution, bool) {
+        let curtailed = self.tint_budget.curtailments();
         let request = crate::resources::ImageRequest { name, draw_size };
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
@@ -230,7 +239,7 @@ impl PageRenderer<'_> {
             #[cfg(feature = "gpu-jpeg-huffman")]
             self.jpeg_gpu.as_mut(),
         );
-        resolution
+        (resolution, self.tint_budget.curtailments() == curtailed)
     }
 
     /// Dispatch on an [`ImageResolution`] returned from
@@ -238,8 +247,9 @@ impl PageRenderer<'_> {
     ///
     /// - `Ok` → blit the image, keeping it in the page's image memo under
     ///   `memo_key` (the image and the draw size it was decoded for) when
-    ///   given; on an ink canvas device-resident samples are read back to
-    ///   the host first.
+    ///   given, and offering it to the document store when `share`; on an
+    ///   ink canvas device-resident samples are read back to the host
+    ///   first.
     /// - `DecodeFailed` → record the failure in the page diagnostics and skip
     ///   the image; the pixel region keeps what was painted beneath it.
     /// - `Absent` → a non-image `XObject` subtype with no raster appearance;
@@ -249,6 +259,7 @@ impl PageRenderer<'_> {
         name: &[u8],
         resolution: ImageResolution,
         memo_key: Option<(ImageKey, Option<(u32, u32)>)>,
+        share: bool,
     ) {
         match resolution {
             ImageResolution::Ok(decoded) => {
@@ -259,7 +270,10 @@ impl PageRenderer<'_> {
                 }
                 match memo_key {
                     Some((key, draw_size)) => {
-                        let decoded = self.image_memo.borrow_mut().insert(key, draw_size, decoded);
+                        let decoded = self
+                            .image_memo
+                            .borrow_mut()
+                            .insert(key, draw_size, decoded, share);
                         self.draw_image_xobject(name, &decoded);
                     }
                     None => self.draw_image_xobject(name, &decoded),

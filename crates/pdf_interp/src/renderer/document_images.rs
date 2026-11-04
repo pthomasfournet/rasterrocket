@@ -11,7 +11,9 @@
 //! appear on one page therefore keeps nothing.
 //!
 //! Only host-resident decodes are kept; device-resident ones are shared
-//! by the device image cache.  Kept decodes total at most the store's
+//! by the device image cache.  A decode whose colours the page's
+//! remaining tint-transform work curtailed is not kept either: another
+//! page would convert them otherwise.  Kept decodes total at most the store's
 //! byte budget; a decode beyond it, or a JPEG 2000 decode at a draw size
 //! other than the one kept, is decoded by each page as before.
 //!
@@ -59,9 +61,11 @@ pub(crate) enum Outcome {
     },
     /// The `XObject` has no raster appearance.
     Absent,
-    /// The decode is device-resident and is not kept; each page decodes
-    /// it through the device image cache.
-    Device,
+    /// The decode is not kept, and each page makes its own: it is
+    /// device-resident (shared through the device image cache), or it
+    /// depends on the page that made it (see
+    /// [`TintBudget::curtailments`](crate::resources::image::colorspace::TintBudget::curtailments)).
+    Local,
 }
 
 /// Whether `image`, decoded for a request at `kept`, is what decoding its
@@ -202,7 +206,7 @@ impl DocumentImages {
 
     /// The outcome in `cell`, the store's entry for `key`, made by
     /// `decode` when no page has made it yet, and whether the store keeps
-    /// it.  A device-resident decode, or one beyond the budget, is dropped
+    /// it.  A [`Outcome::Local`] decode, or one beyond the budget, is dropped
     /// from the store once made; the pages holding `cell` still receive it,
     /// and keep it at their own charge.
     pub(crate) fn resolve(
@@ -218,7 +222,7 @@ impl DocumentImages {
                 made = Some(match &outcome {
                     Outcome::Image { image, .. } => Some(host_bytes(image)),
                     Outcome::Failed { .. } | Outcome::Absent => Some(0),
-                    Outcome::Device => None,
+                    Outcome::Local => None,
                 });
                 outcome
             })
@@ -446,8 +450,8 @@ pub(crate) mod tests {
         let _ = store.lookup(KEY, PAGE_1);
         let cell = shared(store.lookup(KEY, PAGE_2));
         assert!(matches!(
-            store.resolve(KEY, &cell, || Outcome::Device),
-            (Outcome::Device, false)
+            store.resolve(KEY, &cell, || Outcome::Local),
+            (Outcome::Local, false)
         ));
         assert!(matches!(store.lookup(KEY, PAGE_3), Lookup::Local));
     }
