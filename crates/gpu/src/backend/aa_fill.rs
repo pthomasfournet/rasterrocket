@@ -2,7 +2,7 @@
 //! of the fill kernel runs, on either backend.
 
 use super::params::AaFillParams;
-use super::{BackendError, GpuBackend, Result};
+use super::{BackendError, GpuBackend, Result, reject_zero_size};
 use crate::fill::{AaFillRect, AaScanTable};
 
 /// A device buffer and, unless the host reaches the device buffer in place
@@ -58,15 +58,30 @@ enum Direction {
     ToHost,
 }
 
-/// `slot`'s buffers, reallocated first when either holds fewer than `len`
-/// bytes.  Growth is at least geometric, so a run of slowly growing fills
-/// reallocates logarithmically often.
+/// Largest number of bytes a slot is grown by beyond the size requested.
+const GROWTH_CAP: usize = 64 << 20;
+
+/// The size a slot holding `capacity` bytes is reallocated to for a
+/// transfer of `len > capacity` bytes: doubled, but by at most
+/// [`GROWTH_CAP`] beyond `len`, so `len <= size <= len + GROWTH_CAP`.
+fn grown_size(capacity: usize, len: usize) -> usize {
+    len.max(
+        capacity
+            .saturating_mul(2)
+            .min(len.saturating_add(GROWTH_CAP)),
+    )
+}
+
+/// `slot`'s buffers, reallocated first when either holds fewer than
+/// `len > 0` bytes, to [`grown_size`]: a run of slowly growing fills
+/// reallocates logarithmically often below [`GROWTH_CAP`].
 fn ensure<'a, B: GpuBackend>(
     backend: &B,
     slot: &'a mut Option<Staged<B>>,
     len: usize,
     direction: Direction,
 ) -> Result<&'a mut Staged<B>> {
+    reject_zero_size(len, "aa_fill scratch")?;
     let capacity = slot.as_ref().map_or(0, |s| {
         let device = backend.device_buffer_len(&s.device);
         s.host
@@ -74,7 +89,7 @@ fn ensure<'a, B: GpuBackend>(
             .map_or(device, |host| device.min(backend.host_buffer_len(host)))
     });
     if capacity < len {
-        let size = len.max(capacity.saturating_mul(2));
+        let size = grown_size(capacity, len);
         if let Some(old) = slot.take() {
             if let Some(host) = old.host {
                 backend.free_host_pinned(host);
@@ -93,9 +108,11 @@ fn ensure<'a, B: GpuBackend>(
                 Direction::ToHost => backend.alloc_host_readback(size)?,
             })
         };
-        *slot = Some(Staged { host, device });
+        return Ok(slot.insert(Staged { host, device }));
     }
-    Ok(slot.as_mut().expect("populated above"))
+    // `capacity >= len > 0` holds only for a populated slot.
+    slot.as_mut()
+        .ok_or_else(|| BackendError::msg("aa_fill: scratch slot is empty"))
 }
 
 /// Copy `bytes` into `slot`, growing it first as needed: into the host
@@ -216,4 +233,34 @@ pub fn aa_fill_page<B: GpuBackend>(
             .ok_or_else(|| BackendError::msg("aa_fill: device buffer is not host-mapped"))?,
     };
     Ok(counts[..n_pixels].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn growth_doubles_below_the_cap_and_is_bounded_above_it() {
+        assert_eq!(grown_size(0, 10), 10);
+        assert_eq!(grown_size(100, 101), 200);
+        assert_eq!(grown_size(100, 300), 300);
+        let big = 300 << 20;
+        assert_eq!(grown_size(big, big + 1), big + 1 + GROWTH_CAP);
+        assert_eq!(grown_size(usize::MAX - 1, usize::MAX), usize::MAX);
+    }
+
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn a_zero_length_transfer_into_an_empty_slot_is_an_error() {
+        let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let mut slot = None;
+        let err = ensure(&backend, &mut slot, 0, Direction::ToDevice)
+            .err()
+            .expect("a zero-length slot is rejected");
+        assert!(matches!(err, BackendError::ZeroSizeAlloc { .. }), "{err}");
+        assert!(slot.is_none());
+    }
 }
