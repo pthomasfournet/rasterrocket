@@ -2293,7 +2293,10 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `page_uses_overprint(doc, page, annotations)` and
 `ExtGStateParams::{overprint_stroke, overprint_fill, overprint_mode}` (an
 `Option<OverprintMode>`), and `DocumentImages`,
-`DOCUMENT_IMAGE_BUDGET_BYTES` and `PageRenderer::set_document_images`. The
+`DOCUMENT_IMAGE_BUDGET_BYTES` and `PageRenderer::set_document_images`;
+`RasterError::PageAllocationFailed` (the enum is `non_exhaustive`),
+`PageRenderer::try_with_page_group` in `rasterrocket-interp`, and
+`Bitmap::try_new_filled` / `BitmapAllocError` in `rasterrocket-render`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
 **Document-wide image decodes, on master, unreleased.** An image `XObject`
@@ -2307,6 +2310,29 @@ shared images are small, is unchanged. Image decodes on a page are now also
 kept per default-colour-space context, so a form whose resources define no
 `/DefaultGray` no longer draws an image as the page's `/DefaultGray`
 decoded it.
+
+**Per-document latency, on master, unreleased.** The archive-wide latency
+run (50 dpi gray, one core) left two text-heavy documents slower than
+pdfium; both now match or beat it. A text run drawn with `2 Tr` (synthetic
+bold, a stroked glyph outline) draws each glyph's stroke from cached
+coverage instead of stroking the run's outlines (solid, opaque, undashed,
+normal blend, antialiased): the israel pages go from 1.32 s to 0.10 s
+against pdfium's 0.95 s. Curves flatten against the chord segment rather
+than its midpoint; fills drop closed subpaths lying wholly outside the clip;
+cross-reference entries are indexed by object number; a run of
+text-showing operators resolves its face once; and a CFF program's built-in
+encoding is built in one charset walk. rosa-scheuerman renders in 0.266 s
+against pdfium's 0.261 s. **Two of these change pixels**, both approved
+after a comparison against an 8× reference render: the flattening, and the
+cached glyph strokes (60 archive pages change, all stroked text; each
+glyph stroke is placed at the quarter-pixel phase of its fill). Everything
+else is byte-identical over the archive.
+
+**A refused page bitmap is an error, on master, unreleased.** The page
+canvas used to be allocated infallibly, so a page within the size limits
+whose bitmap the allocator refuses (up to 1.8 GB RGB, 4.8 GB on the
+overprint canvas) aborted the process. It now fails that page with
+`RasterError::PageAllocationFailed`.
 
 **Overprint simulation, on master (merged 2026-11-03), unreleased.**
 `--overprint` / `RasterOptions::overprint` (default off). With it, a page on

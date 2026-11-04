@@ -239,6 +239,8 @@ Document-open errors (bad path, corrupt PDF, an encrypted document without autho
 A page is rendered at most 32 768 pixels on a side and 600 MP in area
 (`MAX_PX_DIMENSION`, `MAX_PX_AREA`); a larger one is `PageTooLarge` or
 `PageAreaTooLarge`, and can be rendered in tiles through the session API below.
+A page within those limits whose bitmap cannot be allocated is
+`PageAllocationFailed`.
 Images have their own decode budget. See
 [Size limits](cli-reference.md#size-limits).
 

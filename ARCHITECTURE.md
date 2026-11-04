@@ -165,7 +165,9 @@ PathBuilder  →  Path  →  flatten_path()  →  XPath (edge table)
                                            XPathScanner  →  ScanIterator
                                                             (x0, x1, y) spans
 ```
-Bézier flattening via De Casteljau. Stroke expansion produces a fill path from
+Bézier flattening by De Casteljau subdivision: a curve is a segment once both
+control points lie within the flatness of its chord segment. Stroke expansion
+produces a fill path from
 the outline — strokes and fills share a single rasterizer.
 
 **Fill rasterizer**
@@ -266,7 +268,7 @@ programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
 - `GlyphCache` — `quick_cache::sync::Cache<GlyphKey, Arc<GlyphBitmap>>`, bounded
   by bitmap bytes; valid for every face whose ID comes from one `FaceIds`
   source, so the interpreter keeps one per document, shared by all its pages
-- `GlyphKey` — `{ face_id, glyph_id, size_px, x_frac, aa }`
+- `GlyphKey` — `{ face_id, glyph_id, size_px, x_frac, x_scale, aa }`
 - `FontProgram::vertical_selector` — maps a glyph to its vertical form through
   the face's `vert` / `vrt2` GSUB features, for vertical writing with a
   substitute face
@@ -431,6 +433,7 @@ renderer/
     diagnostics.rs   — PageDiagnostics, ImageFailure, RenderAbort
     devices.rs       — GPU decoders, kernels and image cache of a renderer
     text.rs          — show_text
+    text_stroke.rs   — per-glyph stroke coverage of stroked text (Tr 1, 2, 5, 6)
     type3.rs         — show_text_type3; coverage cache of d1 glyphs
     text_ops.rs      — glyph records, advances, text-space → device
     text_shaping.rs  — runs of substitute-drawn text shaped with the face's
@@ -633,6 +636,13 @@ image, not the process.
   vertical-form CIDs of a collection (those only its `UCS2-V` `CMap`
   reaches), in either writing mode. A collection CID keeps every code
   point that maps to it and draws the first the substitute maps.
+- **Stroked text.** In the stroking render modes, under a solid, opaque,
+  undashed stroke in the normal blend mode with antialiasing on, each
+  glyph's stroke is rendered once into coverage at its quarter-pixel phase
+  (`renderer/page/text_stroke.rs`), kept in the document glyph cache under
+  a face identifier derived from the face and the stroke parameters, and
+  composited in the stroke colour. Any other stroke strokes the union of
+  the run's device-space outlines as a path.
 - **Type 3 glyphs.** A `CharProc` runs per glyph under the glyph-to-device
   matrix. A `d1` glyph of an indirect font, shown with an opaque colour in
   the normal blend mode, is a stencil: its coverage is rendered once per
@@ -1076,6 +1086,7 @@ holds the glyph bitmaps of every page through `quick_cache::sync::Cache`
 - `InterpError::InvalidPageGeometry`
 - `RasterError::PageDegenerate` / `RasterError::PageTooLarge` /
   `RasterError::PageAreaTooLarge`
+- `RasterError::PageAllocationFailed` — the page bitmap could not be allocated
 - `RasterError::PageBudgetExceeded` — operator budget or wall-clock deadline
 - `RasterError::Cancelled` — stopped through a `CancelToken`
 - `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` —
