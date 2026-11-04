@@ -680,13 +680,6 @@ impl Document {
         Some((found, obj))
     }
 
-    /// The position in [`Self::bytes`] that offsets written in the file
-    /// (cross-reference entries, linearization hint offsets) are relative
-    /// to: 0, or the `%PDF-` header's position when bytes precede it.
-    pub(crate) const fn base(&self) -> usize {
-        self.base
-    }
-
     /// The file from `base` on: the bytes cross-reference offsets index.
     fn body(&self) -> &[u8] {
         &self.data.as_bytes()[self.base..]
@@ -870,13 +863,10 @@ impl Document {
         u32::try_from(self.get_pages().count()).unwrap_or(u32::MAX)
     }
 
-    /// Return the number of pages without walking the page tree.
-    ///
-    /// Reads `/Pages /Count` directly from the catalog and memoises it on
-    /// first call.  Falls back to the eager [`Self::page_count`] (full tree
-    /// walk) if the catalog is malformed.
-    ///
-    /// Cached, so repeated calls are a relaxed-load away from the answer.
+    /// The number of pages, memoised: the page tree root's `/Count` when it
+    /// is plausible, at least 1 and at most the number of cross-reference
+    /// entries (every page is an object of its own), else the count of an
+    /// eager walk of the tree ([`Self::page_count`]).
     #[must_use]
     pub fn page_count_fast(&self) -> u32 {
         *self
@@ -884,19 +874,25 @@ impl Document {
             .get_or_init(|| self.read_page_count_uncached())
     }
 
-    /// Inner page-count read.  Used by `page_count_fast` (memoised) and
-    /// the eager-walk fallback inside the page-tree descent.
+    /// The uncached read behind [`Self::page_count_fast`].
     #[must_use]
     fn read_page_count_uncached(&self) -> u32 {
-        let Ok(pages_root) = self.pages_root_id() else {
-            return self.page_count();
-        };
-        let Ok(dict) = self.get_dict(pages_root) else {
-            return self.page_count();
-        };
-        dict.get(b"Count")
-            .and_then(Object::as_u32)
-            .unwrap_or_else(|| self.page_count())
+        let declared = self
+            .pages_root_id()
+            .ok()
+            .and_then(|root| self.get_dict(root).ok())
+            .and_then(|dict| dict.get(b"Count").and_then(Object::as_u32));
+        match declared {
+            Some(count) if count >= 1 && count as usize <= self.xref.entries.len() => count,
+            Some(count) => {
+                let walked = self.page_count();
+                if walked != count {
+                    log::warn!("/Pages /Count {count} is wrong; the page tree holds {walked}");
+                }
+                walked
+            }
+            None => self.page_count(),
+        }
     }
 
     /// Return the catalog's `/Pages` reference, memoised on first call.

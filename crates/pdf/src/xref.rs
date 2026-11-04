@@ -63,13 +63,14 @@ const MIN_DENSE: usize = 1024;
 /// Numbers below `dense.len()` are held in `dense`, indexed by number; the
 /// others in `sparse`.  The dense part grows to cover a number only while
 /// it stays at most twice the entry count (and at least [`MIN_DENSE`]), so
-/// its memory is linear in the entries held, whatever the numbers.
+/// its memory is linear in the entries held, whatever the numbers.  Growing
+/// moves at most as many sparse entries as the new range has slots, so the
+/// total cost of all growth is linear in the final dense length.
 #[derive(Debug, Default)]
 pub(crate) struct XrefEntries {
     dense: Vec<Option<XrefEntry>>,
-    /// Entries numbered at or above `dense.len()`; every value is `Some`
-    /// once its insertion returns.
-    sparse: HashMap<u32, Option<XrefEntry>>,
+    /// Entries numbered at or above `dense.len()`.
+    sparse: HashMap<u32, XrefEntry>,
     len: usize,
 }
 
@@ -78,7 +79,7 @@ impl XrefEntries {
     pub(crate) fn get(&self, num: u32) -> Option<XrefEntry> {
         self.dense
             .get(num as usize)
-            .map_or_else(|| self.sparse.get(&num).copied().flatten(), |entry| *entry)
+            .map_or_else(|| self.sparse.get(&num).copied(), |entry| *entry)
     }
 
     /// Whether object `num` has an entry.
@@ -98,24 +99,18 @@ impl XrefEntries {
 
     /// Set the entry of object `num` to `entry`, replacing any earlier one.
     pub(crate) fn insert(&mut self, num: u32, entry: XrefEntry) {
-        let slot = self.slot(num);
-        if slot.replace(entry).is_none() {
-            self.len += 1;
-        }
+        self.place(num, entry, true);
     }
 
     /// Set the entry of object `num` to `entry` unless it has one.
     pub(crate) fn insert_if_absent(&mut self, num: u32, entry: XrefEntry) {
-        let slot = self.slot(num);
-        if slot.is_none() {
-            *slot = Some(entry);
-            self.len += 1;
-        }
+        self.place(num, entry, false);
     }
 
-    /// The place of object `num`'s entry, growing the dense part over it
-    /// when that keeps the dense part within its bound.
-    fn slot(&mut self, num: u32) -> &mut Option<XrefEntry> {
+    /// Store `entry` as object `num`'s, over an existing one only when
+    /// `replace`, growing the dense part over `num` when that keeps it
+    /// within its bound.
+    fn place(&mut self, num: u32, entry: XrefEntry, replace: bool) {
         let index = num as usize;
         if index >= self.dense.len() {
             let bound = (2 * (self.len + 1)).max(MIN_DENSE);
@@ -123,24 +118,39 @@ impl XrefEntries {
                 self.grow((index + 1).max(2 * self.dense.len()).min(bound));
             }
         }
-        match self.dense.get_mut(index) {
-            Some(slot) => slot,
-            None => self.sparse.entry(num).or_insert(None),
+        let added = if let Some(slot) = self.dense.get_mut(index) {
+            let added = slot.is_none();
+            if added || replace {
+                *slot = Some(entry);
+            }
+            added
+        } else if replace {
+            self.sparse.insert(num, entry).is_none()
+        } else {
+            !self.sparse.contains_key(&num) && self.sparse.insert(num, entry).is_none()
+        };
+        if added {
+            self.len += 1;
         }
     }
 
     /// Extend the dense part to `len` slots, moving the sparse entries it
-    /// now covers into it.
+    /// now covers into it: by probing each new slot, or by one pass over
+    /// the sparse part when that is the smaller.
     fn grow(&mut self, len: usize) {
+        let old = self.dense.len();
         self.dense.resize(len, None);
-        let covered: Vec<u32> = self
-            .sparse
-            .keys()
-            .copied()
-            .filter(|&num| (num as usize) < len)
-            .collect();
-        for num in covered {
-            self.dense[num as usize] = self.sparse.remove(&num).flatten();
+        if len - old <= self.sparse.len() {
+            for num in old..len {
+                // `len` is at most twice the entry count, so `num` fits u32.
+                if let Some(entry) = u32::try_from(num).ok().and_then(|n| self.sparse.remove(&n)) {
+                    self.dense[num] = Some(entry);
+                }
+            }
+        } else {
+            for (num, entry) in self.sparse.extract_if(|&num, _| (num as usize) < len) {
+                self.dense[num as usize] = Some(entry);
+            }
         }
     }
 }
@@ -299,20 +309,14 @@ fn read_traditional_xref(
             let obj_num = first.checked_add(i).ok_or_else(|| {
                 PdfError::BadXref(format!("object number overflow: first={first} i={i}"))
             })?;
-            // Only insert if not already present (newer xref sections win).
-            // A generation above `u16::MAX` names no object that can exist;
-            // the entry is dropped rather than truncated.  A free entry is
-            // kept as such so that no older section can redefine the object.
-            let entry = match flag {
-                b'n' => u16::try_from(generation)
-                    .ok()
-                    .map(|generation| XrefEntry::Direct { offset, generation }),
-                b'f' => Some(XrefEntry::Free),
-                _ => None,
+            // Newer sections win.  An in-use entry whose generation exceeds
+            // `u16::MAX`, or a flag other than `n`, names no object that can
+            // exist and reads as free: the number still masks older sections.
+            let entry = match (flag, u16::try_from(generation)) {
+                (b'n', Ok(generation)) => XrefEntry::Direct { offset, generation },
+                _ => XrefEntry::Free,
             };
-            if let Some(entry) = entry {
-                table.entries.insert_if_absent(obj_num, entry);
-            }
+            table.entries.insert_if_absent(obj_num, entry);
         }
     }
 
@@ -452,15 +456,11 @@ fn read_xref_stream(
             let Some(obj_num) = first_obj.checked_add(i) else {
                 break; // object number overflow — stop processing this subsection
             };
-            if table.entries.contains(obj_num) {
-                continue; // newer xref section already has this
-            }
-
-            // A field value outside its target type names no object that
-            // can exist; such an entry is dropped rather than truncated onto
-            // a different object.
+            // Newer sections win.  A type other than 0, 1 and 2 is a
+            // reference to the null object (ISO 32000-1 §7.5.8.3), and so is
+            // a field outside its target type: either reads as free, and the
+            // number still masks older sections.
             let entry = match type_val {
-                0 => Some(XrefEntry::Free),
                 1 => u16::try_from(f2).ok().map(|generation| XrefEntry::Direct {
                     offset: f1,
                     generation,
@@ -469,12 +469,11 @@ fn read_xref_stream(
                     .ok()
                     .zip(u32::try_from(f2).ok())
                     .map(|(container, index)| XrefEntry::InObjStm { container, index }),
-                // Other types are ignored per spec.
                 _ => None,
             };
-            if let Some(entry) = entry {
-                table.entries.insert(obj_num, entry);
-            }
+            table
+                .entries
+                .insert_if_absent(obj_num, entry.unwrap_or(XrefEntry::Free));
         }
     }
 
@@ -635,6 +634,41 @@ mod tests {
     }
 
     #[test]
+    fn growth_stays_linear_when_each_insert_extends_the_dense_part_a_little() {
+        // Far entries stay sparse and raise the bound; each later number sits
+        // just below the bound, so the dense part grows by two slots per
+        // insert.  Growth must not rescan the sparse part each time.
+        let mut entries = XrefEntries::default();
+        let far = 200_000u32;
+        for i in 0..far {
+            entries.insert(1_000_000_000 + i, direct(u64::from(i)));
+        }
+        for _ in 0..far {
+            let num = u32::try_from(2 * (entries.len() + 1) - 1).unwrap();
+            entries.insert(num, direct(1));
+        }
+        assert_eq!(entries.len(), 2 * far as usize);
+        assert!(entries.dense.len() <= 2 * (entries.len() + 1));
+        assert_eq!(
+            offset_of(&entries, 1_000_000_000 + far - 1),
+            Some(u64::from(far - 1))
+        );
+    }
+
+    #[test]
+    fn a_malformed_entry_masks_older_sections_as_free() {
+        let mut table = XrefTable::default();
+        // The newer section: object 1 in use at generation 70000 (no such
+        // object), object 2 with an unknown flag.
+        let newer = b"xref\n1 2\n0000000100 70000 n\r\n0000000200 00000 x\r\ntrailer\n<<>>";
+        assert!(read_traditional_xref(newer, 0, &mut table).is_ok());
+        let older = b"xref\n1 2\n0000000300 00000 n\r\n0000000400 00000 n\r\ntrailer\n<<>>";
+        assert!(read_traditional_xref(older, 0, &mut table).is_ok());
+        assert!(matches!(table.get(1), Some(XrefEntry::Free)));
+        assert!(matches!(table.get(2), Some(XrefEntry::Free)));
+    }
+
+    #[test]
     fn find_startxref_basic() {
         let data = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\nxref\n0 1\n0000000009 65535 f\r\ntrailer\n<<>>\nstartxref\n9\n%%EOF";
         let off = find_startxref(data).unwrap();
@@ -771,9 +805,9 @@ startxref
         }
     }
 
-    /// Entry fields wider than their target type must not be truncated: a
-    /// type-2 container number of `2^32 + 4` used to alias object 4, and a
-    /// type-1 generation of `65536 + 7` used to alias generation 7.
+    /// Entry fields wider than their target type are not truncated onto
+    /// another object (a type-2 container of `2^32 + 4` onto object 4, a
+    /// type-1 generation of `65536 + 7` onto generation 7): they read as free.
     #[test]
     fn xref_stream_out_of_range_fields_are_dropped() {
         // `/W [1 8 5]`: one type byte, an 8-byte field 1, a 5-byte field 2.
@@ -790,9 +824,16 @@ startxref
 
         let data = xref_stream_pdf("[1 8 5]", "[1 4]", &entries);
         let table = read_xref_strict(&data).expect("xref stream parses");
-        assert!(table.get(1).is_none(), "container 2^32+4 must not alias 4");
-        assert!(table.get(2).is_none(), "index 2^32+1 must not alias 1");
-        assert!(table.get(3).is_none(), "generation 65543 must not alias 7");
+        for (num, what) in [
+            (1, "container 2^32+4"),
+            (2, "index 2^32+1"),
+            (3, "generation 65543"),
+        ] {
+            assert!(
+                matches!(table.get(num), Some(XrefEntry::Free)),
+                "{what} reads as free"
+            );
+        }
         assert!(
             matches!(
                 table.get(4),
@@ -961,8 +1002,8 @@ startxref
         assert!(table.entries.is_empty());
     }
 
-    /// A traditional entry whose generation exceeds `u16::MAX` is dropped
-    /// instead of being truncated onto another generation.
+    /// A traditional entry whose generation exceeds `u16::MAX` reads as
+    /// free instead of being truncated onto another generation.
     #[test]
     fn traditional_xref_out_of_range_generation_is_dropped() {
         let data = b"%PDF-1.4\n\
@@ -976,7 +1017,10 @@ startxref\n\
 9\n\
 %%EOF";
         let table = read_xref_strict(data).expect("xref parses");
-        assert!(table.get(0).is_none(), "generation 65543 must be dropped");
+        assert!(
+            matches!(table.get(0), Some(XrefEntry::Free)),
+            "generation 65543 reads as free"
+        );
         assert!(table.get(1).is_some(), "well-formed entry must survive");
     }
 

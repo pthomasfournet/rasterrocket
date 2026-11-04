@@ -1,15 +1,16 @@
-//! `/Linearized` (Fast Web View) hint-table detection.
+//! `/Linearized` (Fast Web View) detection.
 //!
-//! Per PDF 1.7 § F.3.3, a linearized PDF places a `/Linearized` dict as the
-//! first indirect object in the file, within its first 1024 bytes, and
-//! records the file's length in `/L`.  A file whose length differs has been
-//! updated since it was linearized, and its linearization no longer holds.
+//! Per ISO 32000-1 Annex F.3.3, a linearized PDF places a `/Linearized`
+//! dictionary as the first indirect object of the file, beginning within its
+//! first 1024 bytes, and records the file's length in `/L`.  When the length
+//! differs, the linearization parameters no longer describe the file.
 //!
-//! This module reads the dictionary's `/N`, `/O` and `/H` entries.  The
-//! contents of the Page Offset Hint Table (§ F.4.5) are not parsed; page
-//! lookup always descends the page tree, and the page count is the tree's.
+//! [`LinearizationHints`] is public API of the parser; the renderer does not
+//! consult it.  The contents of the Page Offset Hint Table (§ F.4.5) are not
+//! parsed: page lookup always descends the page tree, and the page count is
+//! the tree's.
 
-use crate::{document::Document, object::Object};
+use crate::{document::Document, lexer::skip_ws, object::Object, object::parse_indirect_object};
 
 /// Parsed `/Linearized` parameters.
 #[derive(Debug, Clone, Copy)]
@@ -29,90 +30,64 @@ pub struct LinearizationHints {
 impl LinearizationHints {
     /// The linearization parameters of `doc`: `Some` only when the file's
     /// first indirect object is a `/Linearized` dictionary carrying `/N`,
-    /// `/O`, `/H[0]` and `/H[1]`, and an `/L` equal to the file's length.
-    /// A document that is not linearized, was updated after it was, or
-    /// whose dictionary lacks one of those entries, yields `None`.
+    /// `/O`, `/H[0]` and `/H[1]`, and an `/L` equal to the length of the file
+    /// from its `%PDF-` header on.
     pub(crate) fn load(doc: &Document) -> Option<Self> {
-        let lin_obj = find_linearized_object(doc)?;
-        let dict = lin_obj.as_dict()?;
-        let file_length = doc.bytes().len() - doc.base();
-        if dict.get(b"L").and_then(Object::as_u64) != u64::try_from(file_length).ok() {
-            log::debug!(
-                "LinearizationHints: /L differs from the file length {file_length}; the file \
-                 was updated after linearization",
-            );
+        let bytes = doc.bytes();
+        let header = find_header(bytes)?;
+        let dict = first_object(&bytes[header..])?;
+        if !dict.contains_key(b"Linearized") {
             return None;
         }
-        let hints = parse_dict(dict, doc.base());
+        let file_length = u64::try_from(bytes.len() - header).ok()?;
+        match dict.get(b"L").and_then(Object::as_u64) {
+            Some(length) if length == file_length => {}
+            Some(length) => {
+                log::debug!(
+                    "LinearizationHints: /L {length} differs from the file length \
+                     {file_length}; the parameters do not describe the file"
+                );
+                return None;
+            }
+            None => {
+                log::debug!("LinearizationHints: /Linearized dict has no integer /L");
+                return None;
+            }
+        }
+        let hints = parse_dict(&dict, header);
         if hints.is_none() {
-            log::debug!(
-                "LinearizationHints: /Linearized dict present but required keys missing; \
-                 falling back to descent",
-            );
+            log::debug!("LinearizationHints: /Linearized dict lacks /N, /O or /H");
         }
         hints
     }
 }
 
-/// The bytes after the header in which the `/Linearized` dict begins.
+/// The bytes of the file within which the `%PDF-` header and the
+/// `/Linearized` dictionary each begin.
 const FIRST_OBJECT_WINDOW: usize = 1024;
 
-/// The first indirect object of the file, when it is a `/Linearized`
-/// dict.  Any failure to find, read or destructure it yields `None`, since
-/// a non-linearized PDF is not an error.
-fn find_linearized_object(doc: &Document) -> Option<std::sync::Arc<Object>> {
-    let body = &doc.bytes()[doc.base()..];
-    let id = first_object_id(&body[..body.len().min(FIRST_OBJECT_WINDOW)])?;
-    let obj = doc.get_object(id).ok()?;
-    obj.as_dict()?.contains_key(b"Linearized").then_some(obj)
+/// The position of the `%PDF-` header within the file's first
+/// [`FIRST_OBJECT_WINDOW`] bytes.
+fn find_header(bytes: &[u8]) -> Option<usize> {
+    bytes[..bytes.len().min(FIRST_OBJECT_WINDOW)]
+        .windows(5)
+        .position(|w| w == b"%PDF-")
 }
 
-/// The `(number, generation)` of the first `N G obj` header in `head`, the
-/// file from its `%PDF-` header on, after the header line and any comment
-/// lines and white space.
-fn first_object_id(head: &[u8]) -> Option<(u32, u16)> {
+/// The first indirect object of `file`, the file from its header on, read
+/// in place when it is a dictionary beginning within the first
+/// [`FIRST_OBJECT_WINDOW`] bytes.  The header line and any other comments
+/// before it are skipped as white space.
+fn first_object(file: &[u8]) -> Option<crate::dictionary::Dictionary> {
     let mut at = 0;
-    loop {
-        at = skip_white(head, at);
-        if head.get(at) != Some(&b'%') {
-            break;
-        }
-        while head.get(at).is_some_and(|&b| b != b'\r' && b != b'\n') {
-            at += 1;
-        }
-    }
-    let (num, at) = integer(head, at)?;
-    let gen_at = skip_white(head, at);
-    if gen_at == at {
+    skip_ws(file, &mut at);
+    if at >= FIRST_OBJECT_WINDOW {
         return None;
     }
-    let (generation, at) = integer(head, gen_at)?;
-    let obj_at = skip_white(head, at);
-    if obj_at == at || !head[obj_at..].starts_with(b"obj") {
-        return None;
+    match parse_indirect_object(file, at)?.1 {
+        Object::Dictionary(dict) => Some(dict),
+        _ => None,
     }
-    Some((u32::try_from(num).ok()?, u16::try_from(generation).ok()?))
-}
-
-/// The position of the first byte at or after `at` that is not white space.
-fn skip_white(bytes: &[u8], mut at: usize) -> usize {
-    while bytes
-        .get(at)
-        .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | b'\0'))
-    {
-        at += 1;
-    }
-    at
-}
-
-/// The unsigned integer of the digits at `at`, and the position after them.
-fn integer(bytes: &[u8], at: usize) -> Option<(u64, usize)> {
-    let digits = bytes[at..]
-        .iter()
-        .take_while(|b| b.is_ascii_digit())
-        .count();
-    let text = std::str::from_utf8(&bytes[at..at + digits]).ok()?;
-    Some((text.parse().ok()?, at + digits))
 }
 
 /// Pure parsing of a `/Linearized` dict into `LinearizationHints`, for a
@@ -237,23 +212,20 @@ mod tests {
     }
 
     #[test]
+    fn an_implausible_count_yields_to_the_tree() {
+        for count in ["2000000000", "0"] {
+            let pages = PAGES.replace("/Count 1", &format!("/Count {count}"));
+            let bytes = pdf(&[(2, CATALOG), (3, &pages), (4, PAGE)], 2);
+            let doc = Document::from_bytes_owned(bytes).unwrap();
+            assert_eq!(doc.page_count_fast(), 1, "/Count {count}");
+        }
+    }
+
+    #[test]
     fn the_page_count_is_the_trees_not_the_dicts() {
         let bytes = pdf(&[(1, LINEARIZED), (2, CATALOG), (3, PAGES), (4, PAGE)], 2);
         let doc = Document::from_bytes_owned(bytes).unwrap();
         assert_eq!(doc.linearization_hints().unwrap().page_count, 100);
         assert_eq!(doc.page_count_fast(), 1);
-    }
-
-    #[test]
-    fn object_headers_are_read_after_comments_and_white_space() {
-        assert_eq!(
-            first_object_id(b"%PDF-1.7\n%\xE2\xE3\n\r\n 12 3 obj<<>>"),
-            Some((12, 3))
-        );
-        assert_eq!(first_object_id(b"%PDF-1.7\n12 0 obj"), Some((12, 0)));
-        assert_eq!(first_object_id(b"%PDF-1.7\n120 obj"), None);
-        assert_eq!(first_object_id(b"%PDF-1.7\n12 0obj"), None);
-        assert_eq!(first_object_id(b"%PDF-1.7\nxref"), None);
-        assert_eq!(first_object_id(b"%PDF-1.7\n"), None);
     }
 }
