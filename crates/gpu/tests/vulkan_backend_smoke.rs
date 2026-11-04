@@ -530,3 +530,17 @@ fn a_copy_after_a_zero_fill_in_one_page_reads_zeros() {
         "the copy read bytes the fill had not cleared"
     );
 }
+
+/// A panic inside a `run_page` closure abandons the page: the next page
+/// starts from `Idle` instead of finding the recorder still `Recording`.
+#[test]
+fn a_panicking_page_leaves_the_backend_usable() {
+    let backend = VulkanBackend::new().expect("VulkanBackend::new");
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = backend.run_page(|_| -> Result<(), BackendError> { panic!("page closure") });
+    }));
+    assert!(panicked.is_err(), "the closure's panic propagates");
+    backend
+        .run_page(|_| Ok(()))
+        .expect("a page after the panicking one runs");
+}

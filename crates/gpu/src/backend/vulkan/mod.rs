@@ -128,6 +128,21 @@ fn copy_size(len: usize, src: u64, dst: u64, what: &'static str) -> Result<Optio
     Ok((len > 0).then(|| u64::try_from(len).expect("len is at most a u64 buffer size")))
 }
 
+/// Abandons the recorder's page when dropped armed: on the error path of
+/// [`GpuBackend::run_page`] and when its closure unwinds.
+struct AbortPageOnExit<'a> {
+    recorder: &'a recorder::PageRecorder,
+    armed: bool,
+}
+
+impl Drop for AbortPageOnExit<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.recorder.abort_page();
+        }
+    }
+}
+
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
         // Wait for all in-flight work before any handle in any submodule
@@ -355,14 +370,16 @@ impl GpuBackend for VulkanBackend {
             .page
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut abort = AbortPageOnExit {
+            recorder: &self.recorder,
+            armed: true,
+        };
         let result = self.begin_page().and_then(|()| {
             record(self)?;
             let fence = self.submit_page()?;
             self.wait_page(fence)
         });
-        if result.is_err() {
-            self.recorder.abort_page();
-        }
+        abort.armed = result.is_err();
         result
     }
 

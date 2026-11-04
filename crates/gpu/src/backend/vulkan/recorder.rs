@@ -222,6 +222,24 @@ impl PageRecorder {
                 s.state
             )));
         }
+        match self.end_and_submit(&mut s) {
+            Ok(value) => {
+                s.last_submitted = Some(value);
+                s.state = State::Submitted;
+                Ok(PageFence(value))
+            }
+            Err(e) => {
+                // Nothing of the page is in flight, and its command buffer
+                // is no longer recording: the next `begin_page` resets it.
+                s.state = State::Idle;
+                Err(e)
+            }
+        }
+    }
+
+    /// End the recording page's command buffer and submit it, signalling
+    /// the timeline at the returned value.
+    fn end_and_submit(&self, s: &mut RecorderState) -> Result<NonZeroU64> {
         // Every device write of the page is made visible to host reads that
         // follow the wait on the page's fence: a semaphore signal makes
         // writes available to the device domain only, and buffers of an
@@ -260,9 +278,7 @@ impl PageRecorder {
         // Safety: the command buffer was ended above; the timeline
         // semaphore lives as long as the recorder.
         unsafe { self.device.submit(&submit, "vkQueueSubmit") }?;
-        s.last_submitted = Some(value);
-        s.state = State::Submitted;
-        Ok(PageFence(value))
+        Ok(value)
     }
 
     /// Abandon the current page and return to `Idle`: a recording page is
@@ -271,7 +287,10 @@ impl PageRecorder {
     /// The wait's own failure leaves the device's state to its error and is
     /// logged.
     pub(super) fn abort_page(&self) {
-        let mut s = self.inner.lock().expect("recorder mutex poisoned");
+        let mut s = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.state == State::Submitted
             && let Some(last) = NonZeroU64::new(s.next_value - 1)
             && let Err(e) = self.wait_timeline(last)
