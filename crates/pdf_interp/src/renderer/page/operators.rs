@@ -368,7 +368,7 @@ impl PageRenderer<'_> {
                 // The same block in a form or pattern cell drawn repeatedly
                 // decodes once per page.
                 let key = super::image_memo::ImageMemo::inline_key(
-                    self.resources.resource_context_id(),
+                    self.resources.color_space_source(),
                     params,
                     data,
                 );

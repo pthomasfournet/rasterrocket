@@ -1,12 +1,14 @@
 //! Parsed form `XObjects` of one page, so a form drawn by many `Do`
 //! operators is decoded and parsed once.
 //!
-//! A form's operators depend on its stream and on the resources its inline
-//! images resolve colour-space names in, which size their data: the form's
-//! own resources, or, for a form without any, the resource context it is
-//! drawn in.  The key is therefore the stream object and, for a form
-//! without resources of its own, that context.  A form is kept from its
-//! second use on, so a form drawn once costs no copy of its operators.
+//! A form's operators depend on its stream and on the `/ColorSpace`
+//! dictionary its inline images resolve colour-space names in, which size
+//! their data: its own resources' dictionary, or, for a form without
+//! resources, the dictionary in effect where it is drawn.  The key is
+//! therefore the stream object and, for a form without resources of its
+//! own, the object identifying that dictionary (`None` when there is none:
+//! every name then resolves alike).  A form is kept from its second use on,
+//! so a form drawn once costs no copy of its operators.
 
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -26,8 +28,8 @@ const BUDGET_BYTES: usize = 64 << 20;
 /// cells.
 pub(super) type SharedFormMemo = Rc<RefCell<FormMemo>>;
 
-/// A form stream and, for a form without resources of its own, the
-/// resource context it is drawn in.
+/// A form stream and, for a form without resources of its own, the source
+/// of the `/ColorSpace` dictionary in effect where it is drawn.
 pub(super) type FormKey = (ObjectId, Option<ObjectId>);
 
 /// A form's dictionary entries and its parsed content.

@@ -60,7 +60,9 @@ impl PageRenderer<'_> {
         if let Some((id, own_resources)) = self.resources.form_xobject_entry(name) {
             let key = (
                 id,
-                (!own_resources).then(|| self.resources.resource_context_id()),
+                (!own_resources)
+                    .then(|| self.resources.color_space_source())
+                    .flatten(),
             );
             let kept = self.form_memo.borrow().get(&key);
             if let Some(kept) = kept {

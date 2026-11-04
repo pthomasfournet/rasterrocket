@@ -1845,13 +1845,18 @@ fn a_glyph_description_s_restores_cannot_pop_the_page_s_states() {
 /// in `/C` over the page, and the form `/G` (object 6), whose own
 /// resources name `/C` as `DeviceRGB` and which draws `/F`.
 fn form_memo_doc() -> Document {
+    crate::test_helpers::make_doc_with_objects(&form_memo_objects())
+}
+
+/// The objects of [`form_memo_doc`], numbered 4 to 6.
+fn form_memo_objects() -> Vec<(u32, Vec<u8>)> {
     let stream = |dict: &str, content: &[u8]| {
         let mut body = format!("<< {dict} /Length {} >>\nstream\n", content.len()).into_bytes();
         body.extend_from_slice(content);
         body.extend_from_slice(b"\nendstream");
         body
     };
-    crate::test_helpers::make_doc_with_objects(&[
+    vec![
         (
             4,
             b"<< /Type /Page /Resources << /ColorSpace << /C /DeviceGray >> \
@@ -1873,7 +1878,7 @@ fn form_memo_doc() -> Document {
                 b"/F Do",
             ),
         ),
-    ])
+    ]
 }
 
 /// Run `content` on page `(4, 0)` of `doc`, 8 × 8 pixels, and return the
@@ -1918,6 +1923,59 @@ fn repeated_forms_are_parsed_once_per_resource_context() {
     assert!(
         rgb_bytes(&page_gray).iter().all(|&v| v == 0),
         "the last draw is the gray image of the page's /C"
+    );
+}
+
+/// A resource-less form, and its inline image's decode, are kept once per
+/// `/ColorSpace` dictionary they are drawn under: resource sets sharing a
+/// context id but naming different dictionaries keep one each, and
+/// contexts naming one dictionary share one.
+#[test]
+fn a_form_is_kept_per_colour_space_dictionary() {
+    let mut objects = form_memo_objects();
+    objects.push((7, b"<< /C /DeviceRGB >>".to_vec()));
+    objects.push((8, b"<< /C /DeviceGray >>".to_vec()));
+    let doc = crate::test_helpers::make_doc_with_objects(&objects);
+    let set = |spaces: &[u8]| {
+        let mut dict = b"<< /XObject << /F 5 0 R >> /ColorSpace ".to_vec();
+        dict.extend_from_slice(spaces);
+        dict.extend_from_slice(b" >>");
+        pdf::parse_object(&dict, &mut 0).unwrap()
+    };
+    let (rgb, gray) = (set(b"7 0 R"), set(b"8 0 R"));
+    let mut renderer = PageRenderer::new(8, 8, &doc, (4, 0));
+    renderer.resources = renderer
+        .resources
+        .with_resources((0, 0), rgb.as_dict().unwrap());
+    renderer.execute(&crate::content::parse(b"/F Do /F Do"));
+    assert_eq!(
+        rgb_bytes(&renderer)[..3],
+        [0, 255, 0],
+        "RGB under the first set"
+    );
+    renderer.resources = renderer
+        .resources
+        .with_resources((0, 0), gray.as_dict().unwrap());
+    renderer.execute(&crate::content::parse(b"/F Do /F Do"));
+    assert!(
+        rgb_bytes(&renderer).iter().all(|&v| v == 0),
+        "the gray image of the second set"
+    );
+    assert_eq!(
+        renderer.form_memo.borrow().kept.len(),
+        2,
+        "one per dictionary"
+    );
+
+    // Two contexts naming one dictionary share the parse.
+    renderer.resources = renderer
+        .resources
+        .with_resources((1, 0), gray.as_dict().unwrap());
+    renderer.execute(&crate::content::parse(b"/F Do"));
+    assert_eq!(
+        renderer.form_memo.borrow().kept.len(),
+        2,
+        "the parse is shared"
     );
 }
 

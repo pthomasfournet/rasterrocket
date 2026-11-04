@@ -94,13 +94,15 @@ impl ImageMemo {
         &self.document
     }
 
-    /// The key of an inline image: `context` (the object whose resources
-    /// its colour-space names resolve through), its parameters and its
-    /// data.
-    pub(super) fn inline_key(context: ObjectId, params: &[u8], data: &[u8]) -> Box<[u8]> {
-        let mut key = Vec::with_capacity(16 + params.len() + data.len());
-        key.extend_from_slice(&context.0.to_le_bytes());
-        key.extend_from_slice(&context.1.to_le_bytes());
+    /// The key of an inline image: `spaces` (the object identifying the
+    /// `/ColorSpace` dictionary its colour-space names resolve in, `None`
+    /// when there is none), its parameters and its data.
+    pub(super) fn inline_key(spaces: Option<ObjectId>, params: &[u8], data: &[u8]) -> Box<[u8]> {
+        let mut key = Vec::with_capacity(17 + params.len() + data.len());
+        let (tag, (num, generation)) = spaces.map_or((0u8, (0, 0)), |id| (1, id));
+        key.push(tag);
+        key.extend_from_slice(&num.to_le_bytes());
+        key.extend_from_slice(&generation.to_le_bytes());
         key.extend_from_slice(&(params.len() as u64).to_le_bytes());
         key.extend_from_slice(params);
         key.extend_from_slice(data);
