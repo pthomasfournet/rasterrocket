@@ -389,7 +389,7 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// # Panics
     ///
-    /// As [`Self::with_view`].
+    /// As [`Self::with_view`], and when the canvas cannot be allocated.
     #[must_use]
     pub fn with_page_group(
         view: &PageView,
@@ -398,6 +398,27 @@ impl<'doc> PageRenderer<'doc> {
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: bool,
     ) -> Self {
+        Self::try_with_page_group(view, doc, page_id, group, ink)
+            .expect("PageRenderer::with_page_group: canvas allocation failed")
+    }
+
+    /// [`Self::with_page_group`] that reports a canvas the allocator
+    /// refuses as an error.
+    ///
+    /// # Errors
+    ///
+    /// [`raster::BitmapAllocError`] when the canvas cannot be allocated.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_view`].
+    pub fn try_with_page_group(
+        view: &PageView,
+        doc: &'doc Document,
+        page_id: ObjectId,
+        group: Option<crate::resources::TransparencyGroupParams>,
+        ink: bool,
+    ) -> Result<Self, raster::BitmapAllocError> {
         let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
             sx.is_finite() && sx > 0.0 && sy.is_finite() && sy > 0.0,
@@ -415,7 +436,7 @@ impl<'doc> PageRenderer<'doc> {
         } else {
             CanvasKind::Rgb
         };
-        let canvas = PageCanvas::new(kind, width, height, group.is_some());
+        let canvas = PageCanvas::try_new(kind, width, height, group.is_some())?;
 
         let initial_ctm = view.initial_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);
@@ -423,7 +444,7 @@ impl<'doc> PageRenderer<'doc> {
         let font_cache = FontCache::new(Arc::default(), true);
         let resources = PageResources::new(doc, page_id);
 
-        Self {
+        Ok(Self {
             canvas,
             width,
             height,
@@ -481,7 +502,7 @@ impl<'doc> PageRenderer<'doc> {
             vk_backend: None,
             #[cfg(feature = "cache")]
             cache_state: None,
-        }
+        })
     }
 
     /// Resolve indirect fonts through `fonts`, a store shared by every page

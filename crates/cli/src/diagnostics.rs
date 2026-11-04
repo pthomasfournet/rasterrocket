@@ -139,7 +139,9 @@ pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) -> std::process
         size_hint |= matches!(
             err,
             RenderError::Raster(
-                RasterError::PageTooLarge { .. } | RasterError::PageAreaTooLarge { .. }
+                RasterError::PageTooLarge { .. }
+                    | RasterError::PageAreaTooLarge { .. }
+                    | RasterError::PageAllocationFailed { .. }
             )
         );
     }

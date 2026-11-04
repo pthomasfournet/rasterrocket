@@ -31,6 +31,24 @@ const fn u32_to_usize(v: u32) -> usize {
     v as usize
 }
 
+/// A bitmap whose buffers cannot be allocated: their size overflows
+/// `usize`, or the allocator refuses them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BitmapAllocError {
+    /// Width of the requested bitmap in pixels.
+    pub width: u32,
+    /// Height of the requested bitmap in pixels.
+    pub height: u32,
+}
+
+impl std::fmt::Display for BitmapAllocError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot allocate a {}×{} bitmap", self.width, self.height)
+    }
+}
+
+impl std::error::Error for BitmapAllocError {}
+
 // ── Bitmap ────────────────────────────────────────────────────────────────────
 
 /// A typed, top-down pixel buffer.
@@ -78,31 +96,79 @@ impl<P: Pixel> Bitmap<P> {
     /// Panics if `row_pad` is 0 or the buffer size overflows `usize`.
     #[must_use]
     pub fn new_filled(width: u32, height: u32, row_pad: usize, with_alpha: bool, fill: u8) -> Self {
-        assert!(row_pad >= 1, "row_pad must be ≥ 1");
-        let raw_stride = u32_to_usize(width) * P::BYTES;
-        let stride = if row_pad <= 1 {
-            raw_stride
-        } else {
-            raw_stride.div_ceil(row_pad) * row_pad
-        };
-        let data_len = stride
-            .checked_mul(u32_to_usize(height))
-            .expect("Bitmap::new: colour buffer size overflows usize");
-        let data = vec![fill; data_len];
-        let alpha = with_alpha.then(|| {
-            let len = u32_to_usize(width)
-                .checked_mul(u32_to_usize(height))
-                .expect("Bitmap::new: alpha plane size overflows usize");
-            vec![0u8; len]
-        });
+        let (stride, data_len, alpha_len) = Self::layout(width, height, row_pad, with_alpha)
+            .expect("Bitmap::new: buffer size overflows usize");
         Self {
+            width,
+            height,
+            stride,
+            data: vec![fill; data_len],
+            alpha: alpha_len.map(|len| vec![0u8; len]),
+            _marker: PhantomData,
+        }
+    }
+
+    /// [`Bitmap::new_filled`] that reports a buffer size overflowing
+    /// `usize`, or an allocation the allocator refuses, as an error.
+    ///
+    /// # Errors
+    ///
+    /// [`BitmapAllocError`] when either buffer cannot be allocated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row_pad` is 0.
+    pub fn try_new_filled(
+        width: u32,
+        height: u32,
+        row_pad: usize,
+        with_alpha: bool,
+        fill: u8,
+    ) -> Result<Self, BitmapAllocError> {
+        let error = BitmapAllocError { width, height };
+        let (stride, data_len, alpha_len) =
+            Self::layout(width, height, row_pad, with_alpha).ok_or(error)?;
+        let filled = |len: usize, value: u8| {
+            let mut buf = Vec::new();
+            buf.try_reserve_exact(len).map_err(|_| error)?;
+            buf.resize(len, value);
+            Ok(buf)
+        };
+        let data = filled(data_len, fill)?;
+        let alpha = alpha_len.map(|len| filled(len, 0)).transpose()?;
+        Ok(Self {
             width,
             height,
             stride,
             data,
             alpha,
             _marker: PhantomData,
-        }
+        })
+    }
+
+    /// Row stride, colour buffer length and, when `with_alpha`, alpha
+    /// plane length of a `width` × `height` bitmap with rows padded to
+    /// `row_pad` bytes; `None` when a length overflows `usize`.
+    fn layout(
+        width: u32,
+        height: u32,
+        row_pad: usize,
+        with_alpha: bool,
+    ) -> Option<(usize, usize, Option<usize>)> {
+        assert!(row_pad >= 1, "row_pad must be ≥ 1");
+        let raw_stride = u32_to_usize(width).checked_mul(P::BYTES)?;
+        let stride = if row_pad <= 1 {
+            raw_stride
+        } else {
+            raw_stride.div_ceil(row_pad).checked_mul(row_pad)?
+        };
+        let data_len = stride.checked_mul(u32_to_usize(height))?;
+        let alpha_len = if with_alpha {
+            Some(u32_to_usize(width).checked_mul(u32_to_usize(height))?)
+        } else {
+            None
+        };
+        Some((stride, data_len, alpha_len))
     }
 
     // ── Row access ────────────────────────────────────────────────────────────
@@ -537,6 +603,29 @@ mod tests {
         let bm = Bitmap::<Rgb8>::new(7, 3, 4, false);
         // 7 * 3 = 21 bytes, next multiple of 4 = 24
         assert_eq!(bm.stride, 24);
+    }
+
+    #[test]
+    fn try_new_filled_matches_new_filled() {
+        let a = Bitmap::<Rgb8>::new_filled(7, 3, 4, true, 9);
+        let b = Bitmap::<Rgb8>::try_new_filled(7, 3, 4, true, 9).unwrap();
+        assert_eq!(a.stride, b.stride);
+        assert_eq!(a.data(), b.data());
+        assert_eq!(a.alpha_plane(), b.alpha_plane());
+    }
+
+    #[test]
+    fn try_new_filled_reports_overflow_and_refusal() {
+        let overflow = BitmapAllocError {
+            width: u32::MAX,
+            height: u32::MAX,
+        };
+        assert_eq!(
+            Bitmap::<Rgb8>::try_new_filled(u32::MAX, u32::MAX, 1, false, 0).err(),
+            Some(overflow)
+        );
+        // 13 PB: representable, but no allocator grants it.
+        assert!(Bitmap::<Rgb8>::try_new_filled(u32::MAX, 1 << 20, 1, false, 0).is_err());
     }
 
     #[test]

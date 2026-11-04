@@ -47,8 +47,9 @@ pub fn render_page_rgb(
 ///   this thread.
 /// - [`RasterError::InvalidPageGeometry`] / [`RasterError::PageDegenerate`] /
 ///   [`RasterError::PageTooLarge`] / [`RasterError::PageAreaTooLarge`] /
-///   [`RasterError::PageOutOfRange`] / [`RasterError::Pdf`] as documented on
-///   the error variants; the size limits apply to the drawn region.
+///   [`RasterError::PageAllocationFailed`] / [`RasterError::PageOutOfRange`] /
+///   [`RasterError::Pdf`] as documented on the error variants; the size
+///   limits apply to the drawn region.
 pub fn render_page_rgb_with(
     session: &RasterSession,
     page_num: u32,
@@ -202,13 +203,17 @@ fn render_page_rgb_with_geom(
     // some graphics state that is drawn sets it.
     let ink =
         session.overprint && pdf_interp::page_uses_overprint(doc, page_id, session.annotations);
-    let mut renderer = pdf_interp::renderer::PageRenderer::with_page_group(
+    let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group(
         &view,
         doc,
         page_id,
         pdf_interp::page_group(doc, page_id),
         ink,
-    );
+    )
+    .map_err(|e| RasterError::PageAllocationFailed {
+        width: e.width,
+        height: e.height,
+    })?;
     if let Some(cancel) = &params.cancel {
         renderer.set_cancel(cancel.flag());
     }

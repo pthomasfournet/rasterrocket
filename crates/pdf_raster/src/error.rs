@@ -42,6 +42,15 @@ pub enum RasterError {
         /// Total area in pixels (`width as u64 * height as u64`).
         area: u64,
     },
+    /// The page bitmap of the drawn region could not be allocated: the
+    /// region is within the size limits, but the allocator refused its
+    /// buffers.
+    PageAllocationFailed {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+    },
     /// Deskew rotation failed.
     Deskew(String),
     /// A Page dictionary entry is structurally valid but outside permitted range
@@ -117,6 +126,11 @@ impl std::fmt::Display for RasterError {
                 "page pixel area {width}×{height} = {area} px exceeds the limit of \
                  {MAX_PX_AREA} px; lower the resolution, or render the page in regions \
                  within the limit"
+            ),
+            Self::PageAllocationFailed { width, height } => write!(
+                f,
+                "cannot allocate the {width}×{height} page bitmap; lower the resolution, \
+                 or render the page in smaller regions"
             ),
             Self::Deskew(msg) => write!(f, "deskew failed: {msg}"),
             Self::InvalidPageGeometry(msg) => write!(f, "invalid page geometry: {msg}"),

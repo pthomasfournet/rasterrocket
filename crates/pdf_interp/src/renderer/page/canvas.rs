@@ -85,6 +85,23 @@ impl PageCanvas {
         }
     }
 
+    /// [`Self::new`] that reports buffers the allocator refuses as an
+    /// error.
+    pub(super) fn try_new(
+        kind: CanvasKind,
+        width: u32,
+        height: u32,
+        alpha: bool,
+    ) -> Result<Self, raster::BitmapAllocError> {
+        Ok(match kind {
+            CanvasKind::Rgb if alpha => {
+                Self::Rgb(Bitmap::try_new_filled(width, height, 1, true, 0)?)
+            }
+            CanvasKind::Rgb => Self::Rgb(Bitmap::try_new_filled(width, height, 1, false, u8::MAX)?),
+            CanvasKind::Ink => Self::Ink(Bitmap::try_new_filled(width, height, 1, alpha, 0)?),
+        })
+    }
+
     /// The pixel type of the canvas.
     pub(super) const fn kind(&self) -> CanvasKind {
         match self {
@@ -537,6 +554,25 @@ mod tests {
             panic!("an ink canvas");
         };
         assert_eq!(group.alpha_plane(), Some([0, 0].as_slice()));
+    }
+
+    #[test]
+    fn a_fallible_canvas_matches_and_reports_refusal() {
+        for (kind, alpha) in [
+            (CanvasKind::Rgb, false),
+            (CanvasKind::Rgb, true),
+            (CanvasKind::Ink, false),
+            (CanvasKind::Ink, true),
+        ] {
+            let a = PageCanvas::new(kind, 3, 2, alpha);
+            let b = PageCanvas::try_new(kind, 3, 2, alpha).unwrap();
+            assert_eq!(a.kind(), b.kind());
+            assert_eq!(a.has_alpha(), b.has_alpha());
+            let bytes = |c: &PageCanvas| with_canvas!(c, |b| b.data().to_vec());
+            assert_eq!(bytes(&a), bytes(&b), "{kind:?} alpha {alpha}");
+        }
+        // 36 PB of ink: representable, but no allocator grants it.
+        assert!(PageCanvas::try_new(CanvasKind::Ink, u32::MAX, 1 << 20, false).is_err());
     }
 
     #[test]
