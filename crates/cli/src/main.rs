@@ -49,10 +49,10 @@ fn main() -> ExitCode {
                 eprintln!("rrocket: CUPS has no printers");
                 ExitCode::SUCCESS
             }
-            Ok(list) => {
-                print!("{list}");
-                ExitCode::SUCCESS
-            }
+            Ok(list) => match print::write_printer_list(&mut std::io::stdout().lock(), &list) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(format_args!("cannot write the printer list: {e}")),
+            },
             Err(e) => fail(e),
         };
     }

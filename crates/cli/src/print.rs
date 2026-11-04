@@ -12,7 +12,7 @@
 //! however it ends; `lp` reads it as its standard input.
 
 use std::fs::File;
-use std::io::{BufWriter, Seek};
+use std::io::{self, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use encode::{PdfImage, PdfPage, PdfWriter};
@@ -293,6 +293,20 @@ pub(crate) fn list_printers() -> Result<String, String> {
     Ok(printer_list(&queues, default))
 }
 
+/// Write the `--list-printers` listing to `out` and flush it.  A reader
+/// that closed the pipe has taken all it wants, so a broken pipe is not
+/// an error.
+///
+/// # Errors
+///
+/// Any other write error.
+pub(crate) fn write_printer_list(out: &mut impl Write, list: &str) -> io::Result<()> {
+    match out.write_all(list.as_bytes()).and_then(|()| out.flush()) {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
 /// The destinations `lpstat -e` reports, one per line.
 fn queue_names(lpstat_e: &str) -> Vec<&str> {
     lpstat_e
@@ -349,7 +363,7 @@ mod tests {
 
     use super::{
         Duplex, PageSink, Spool, Submission, default_destination, job_title, lp_options,
-        printer_list, queue_names, refusal_hint,
+        printer_list, queue_names, refusal_hint, write_printer_list,
     };
     use crate::cleanup::{Page, SpreadHalf};
     use crate::deliver::SubmitError;
@@ -367,6 +381,34 @@ mod tests {
             "Office\nOffice/duplex\nduplex\nLab\n"
         );
         assert_eq!(printer_list(&[], None), "");
+    }
+
+    /// A writer whose every write fails with `kind`.
+    struct Failing(std::io::ErrorKind);
+
+    impl std::io::Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_pipe_ends_the_printer_list_quietly_and_other_errors_surface() {
+        let mut out = Vec::new();
+        write_printer_list(&mut out, "Office\n").unwrap();
+        assert_eq!(out, b"Office\n");
+        assert!(
+            write_printer_list(&mut Failing(std::io::ErrorKind::BrokenPipe), "Office\n").is_ok()
+        );
+        let err = write_printer_list(
+            &mut Failing(std::io::ErrorKind::PermissionDenied),
+            "Office\n",
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]
