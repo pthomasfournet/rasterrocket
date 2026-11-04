@@ -428,35 +428,9 @@ impl Default for SessionConfig {
     }
 }
 
-/// Whether [`BackendPolicy::Auto`] initialises the Vulkan backend: only
-/// when a kernel that runs on it in production is enabled, the AA fill
-/// (`aa_fill_threshold`) or the parallel-Huffman JPEG decoder
-/// (`huffman_threshold`).  A threshold equal to its type's maximum disables
-/// its kernel.
-///
-/// A Vulkan backend that wins `Auto` also keeps the CUDA context from
-/// initialising, so with every Vulkan kernel dormant `Auto` falls through to
-/// CUDA (whose CLUT kernel is live), then the CPU; conversely, enabling a
-/// Vulkan kernel turns the CUDA paths (CLUT, device image cache) off under
-/// `Auto`.
-#[cfg(feature = "vulkan")]
-pub(crate) const fn auto_wants_vulkan(aa_fill_threshold: usize, huffman_threshold: u32) -> bool {
-    aa_fill_threshold != usize::MAX || huffman_threshold != u32::MAX
-}
-
 #[cfg(test)]
 mod tests {
     use super::BackendPolicy;
-
-    #[cfg(feature = "vulkan")]
-    #[test]
-    fn auto_leaves_vulkan_idle_while_its_kernels_are_dormant() {
-        use super::auto_wants_vulkan;
-        assert!(!auto_wants_vulkan(usize::MAX, u32::MAX));
-        assert!(auto_wants_vulkan(0, u32::MAX));
-        assert!(auto_wants_vulkan(usize::MAX, 0));
-        assert!(auto_wants_vulkan(4096, 262_144));
-    }
 
     #[test]
     fn backend_policy_parses_known_names() {

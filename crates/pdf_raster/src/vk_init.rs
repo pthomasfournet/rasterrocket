@@ -12,17 +12,21 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
-use pdf_interp::aa_fill_threshold;
-#[cfg(feature = "gpu-jpeg-huffman")]
-use pdf_interp::huffman_threshold;
+use pdf_interp::{DeviceKernel, device_kernel_enabled};
 
-use crate::config::auto_wants_vulkan;
 use crate::{BackendPolicy, RasterError};
 
-/// The parallel-Huffman threshold of a build without the decoder: dormant.
-#[cfg(not(feature = "gpu-jpeg-huffman"))]
-const fn huffman_threshold() -> u32 {
-    u32::MAX
+/// Whether [`BackendPolicy::Auto`] initialises the Vulkan backend: only
+/// when a kernel that runs on it in production is enabled, the AA fill or
+/// the parallel-Huffman JPEG decoder ([`device_kernel_enabled`]).
+///
+/// A Vulkan backend that wins `Auto` also keeps the CUDA context from
+/// initialising, so with every Vulkan kernel disabled `Auto` falls through
+/// to CUDA (whose CLUT kernel is live), then the CPU; conversely, enabling a
+/// Vulkan kernel turns the CUDA paths (CLUT, device image cache) off under
+/// `Auto`.
+fn auto_wants_vulkan() -> bool {
+    device_kernel_enabled(DeviceKernel::AaFill) || device_kernel_enabled(DeviceKernel::HuffmanJpeg)
 }
 
 /// Why a backend could not be constructed.
@@ -76,9 +80,7 @@ pub(crate) fn init_vk_backend(
     if !matches!(policy, BackendPolicy::Auto | BackendPolicy::ForceVulkan) {
         return Ok(None);
     }
-    if matches!(policy, BackendPolicy::Auto)
-        && !auto_wants_vulkan(aa_fill_threshold(), huffman_threshold())
-    {
+    if matches!(policy, BackendPolicy::Auto) && !auto_wants_vulkan() {
         log::debug!("rasterrocket: every Vulkan kernel is dormant; Auto leaves Vulkan idle");
         if let Some(selector) = selector
             && let Err(InitError::Selection(msg)) = checked_selector(selector)

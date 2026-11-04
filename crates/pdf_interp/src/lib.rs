@@ -46,6 +46,53 @@ pub fn huffman_threshold() -> u32 {
     resources::image::huffman_threshold()
 }
 
+/// A device kernel that a dispatch threshold can disable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceKernel {
+    /// The antialiased path fill (`aa_fill_threshold`, feature `gpu-aa`).
+    AaFill,
+    /// The parallel-Huffman JPEG decoder (`huffman_threshold`, feature
+    /// `gpu-jpeg-huffman`).
+    HuffmanJpeg,
+}
+
+/// Whether `kernel` can dispatch at all.  A threshold equal to its type's
+/// maximum disables its kernel, and a kernel not compiled into this build
+/// is disabled.
+#[cfg_attr(
+    not(any(feature = "gpu-aa", feature = "gpu-jpeg-huffman")),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "non-const only in builds that read a threshold"
+    )
+)]
+#[must_use]
+pub fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
+    match kernel {
+        DeviceKernel::AaFill => {
+            #[cfg(feature = "gpu-aa")]
+            {
+                aa_fill_threshold() != usize::MAX
+            }
+            #[cfg(not(feature = "gpu-aa"))]
+            {
+                false
+            }
+        }
+        DeviceKernel::HuffmanJpeg => {
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            {
+                huffman_threshold() != u32::MAX
+            }
+            #[cfg(not(feature = "gpu-jpeg-huffman"))]
+            {
+                false
+            }
+        }
+    }
+}
+
 /// Entry points for fuzz targets: the CCITT and JBIG2 codec wrappers and a
 /// `CMap` parse-and-lookup driver.
 ///
@@ -1294,5 +1341,20 @@ startxref\n180\n%%EOF"
             matches!(parser, pdf::PdfError::Io(_)),
             "a missing file is an I/O error, got {parser:?}"
         );
+    }
+
+    #[test]
+    fn a_device_kernel_is_enabled_only_below_its_maximum_threshold() {
+        use super::{DeviceKernel, device_kernel_enabled};
+        #[cfg(feature = "gpu-aa")]
+        let aa = super::aa_fill_threshold() != usize::MAX;
+        #[cfg(not(feature = "gpu-aa"))]
+        let aa = false;
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        let huffman = super::huffman_threshold() != u32::MAX;
+        #[cfg(not(feature = "gpu-jpeg-huffman"))]
+        let huffman = false;
+        assert_eq!(device_kernel_enabled(DeviceKernel::AaFill), aa);
+        assert_eq!(device_kernel_enabled(DeviceKernel::HuffmanJpeg), huffman);
     }
 }

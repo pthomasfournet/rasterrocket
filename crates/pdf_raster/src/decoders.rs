@@ -105,57 +105,57 @@ pub(crate) fn lend_decoders(
     Ok(())
 }
 
+/// Whether `policy` builds this thread's parallel-Huffman JPEG decoder,
+/// `kernel_enabled` being [`pdf_interp::device_kernel_enabled`] for it.
+/// `Auto` builds it only while the kernel can dispatch; `ForceCuda` and
+/// `ForceVulkan` build it regardless, so a missing device fails the forced
+/// policy; `CpuOnly` and `ForceVaapi` never build it.
+#[cfg(feature = "gpu-jpeg-huffman")]
+const fn wants_huffman_decoder(policy: BackendPolicy, kernel_enabled: bool) -> bool {
+    match policy {
+        BackendPolicy::Auto => kernel_enabled,
+        BackendPolicy::ForceCuda | BackendPolicy::ForceVulkan => true,
+        BackendPolicy::CpuOnly => false,
+        #[cfg(feature = "vaapi")]
+        BackendPolicy::ForceVaapi => false,
+    }
+}
+
 /// Lend this thread's parallel-Huffman JPEG decoder to `renderer`: the
 /// Vulkan one when Vulkan is the active backend, the CUDA one otherwise.
-/// Nothing is lent under `ForceVaapi`.
+/// Nothing is built or lent when [`wants_huffman_decoder`] says no.
 #[cfg(feature = "gpu-jpeg-huffman")]
 fn lend_huffman_decoder(
     session: &RasterSession,
     renderer: &mut pdf_interp::renderer::PageRenderer,
     effective_policy: BackendPolicy,
 ) -> Result<(), RasterError> {
-    let dispatch_huffman = {
-        #[cfg(feature = "vaapi")]
-        {
-            !matches!(effective_policy, BackendPolicy::ForceVaapi)
-        }
-        #[cfg(not(feature = "vaapi"))]
-        {
-            true
-        }
-    };
-    if dispatch_huffman {
-        // Vulkan wins Auto when a Vulkan backend is available.
-        #[cfg(feature = "vulkan")]
-        let vulkan_active = matches!(effective_policy, BackendPolicy::ForceVulkan)
-            || (matches!(effective_policy, BackendPolicy::Auto) && session.vk_backend.is_some());
-        #[cfg(not(feature = "vulkan"))]
-        let vulkan_active = false;
-
-        if vulkan_active {
-            #[cfg(feature = "vulkan")]
-            {
-                gpu_init::ensure_jpeg_vk_huffman(
-                    effective_policy,
-                    session.vulkan_device.as_deref(),
-                )
-                .map_err(RasterError::BackendUnavailable)?;
-                gpu_init::JPEG_VK_DEC.with(|cell| {
-                    if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-                        renderer.set_jpeg_vk(slot.take());
-                    }
-                });
-            }
-        } else {
-            gpu_init::ensure_jpeg_gpu_huffman(effective_policy)
-                .map_err(RasterError::BackendUnavailable)?;
-            gpu_init::JPEG_CUDA_DEC.with(|cell| {
-                if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-                    renderer.set_jpeg_gpu(slot.take());
-                }
-            });
-        }
+    let kernel_enabled = pdf_interp::device_kernel_enabled(pdf_interp::DeviceKernel::HuffmanJpeg);
+    if !wants_huffman_decoder(effective_policy, kernel_enabled) {
+        return Ok(());
     }
+    // Vulkan wins Auto when a Vulkan backend is available.
+    #[cfg(feature = "vulkan")]
+    if matches!(effective_policy, BackendPolicy::ForceVulkan)
+        || (matches!(effective_policy, BackendPolicy::Auto) && session.vk_backend.is_some())
+    {
+        gpu_init::ensure_jpeg_vk_huffman(effective_policy, session.vulkan_device.as_deref())
+            .map_err(RasterError::BackendUnavailable)?;
+        gpu_init::JPEG_VK_DEC.with(|cell| {
+            if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
+                renderer.set_jpeg_vk(slot.take());
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(not(feature = "vulkan"))]
+    let _ = session;
+    gpu_init::ensure_jpeg_gpu_huffman(effective_policy).map_err(RasterError::BackendUnavailable)?;
+    gpu_init::JPEG_CUDA_DEC.with(|cell| {
+        if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
+            renderer.set_jpeg_gpu(slot.take());
+        }
+    });
     Ok(())
 }
 
@@ -228,5 +228,23 @@ pub(crate) struct DecoderReclaim<'r, 'doc>(pub &'r mut pdf_interp::renderer::Pag
 impl Drop for DecoderReclaim<'_, '_> {
     fn drop(&mut self) {
         reclaim_decoders(self.0);
+    }
+}
+
+#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
+mod tests {
+    use super::wants_huffman_decoder;
+    use crate::BackendPolicy;
+
+    #[test]
+    fn auto_builds_no_huffman_decoder_while_the_kernel_is_disabled() {
+        assert!(!wants_huffman_decoder(BackendPolicy::Auto, false));
+        assert!(wants_huffman_decoder(BackendPolicy::Auto, true));
+        for forced in [BackendPolicy::ForceCuda, BackendPolicy::ForceVulkan] {
+            assert!(wants_huffman_decoder(forced, false), "{forced:?}");
+        }
+        assert!(!wants_huffman_decoder(BackendPolicy::CpuOnly, true));
+        #[cfg(feature = "vaapi")]
+        assert!(!wants_huffman_decoder(BackendPolicy::ForceVaapi, true));
     }
 }
