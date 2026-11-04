@@ -300,6 +300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "harfrust"
+version = "0.12.0"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "read-fonts",
+ "smallvec",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -580,16 +590,20 @@ dependencies = [
 name = "rasterrocket-encode"
 version = "2.0.0"
 dependencies = [
+ "flate2",
+ "hayro-ccitt",
  "jpeg-encoder",
  "png",
  "rasterrocket-color",
  "rasterrocket-render",
+ "weezl",
 ]
 
 [[package]]
 name = "rasterrocket-font"
 version = "2.0.0"
 dependencies = [
+ "harfrust",
  "log",
  "quick_cache",
  "rasterrocket-render",
@@ -623,6 +637,8 @@ dependencies = [
  "rasterrocket-font",
  "rasterrocket-parser",
  "rasterrocket-render",
+ "unicode-bidi",
+ "unicode-bidi-mirroring",
  "zune-core",
  "zune-jpeg",
 ]
@@ -779,6 +795,18 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
+
+[[package]]
+name = "unicode-bidi-mirroring"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dfa6e8c60bb66d49db113e0125ee8711b7647b5579dc7f5f19c42357ed039fe"
 
 [[package]]
 name = "unicode-ident"
