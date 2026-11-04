@@ -209,14 +209,23 @@ impl ColorSpace {
     }
 
     /// A bound on the interpreted work of converting one colour of the
-    /// space: the tint transform's cost (see [`TintTransform::cost`]) plus
-    /// one for a `Separation` or `DeviceN` space, one for any other.
+    /// space: for a `Separation` or `DeviceN` space, the tint transform's
+    /// cost (see [`TintTransform::cost`]) plus the cost of converting in
+    /// the alternate space; for an `Indexed` space, the base space's cost;
+    /// one for any other.
     #[must_use]
     pub(crate) fn conversion_cost(&self) -> u64 {
         match self {
-            Self::Separation { tint: Some(t), .. } | Self::DeviceN { tint: Some(t), .. } => {
-                t.cost().saturating_add(1)
+            Self::Separation {
+                tint, alternate, ..
             }
+            | Self::DeviceN {
+                tint, alternate, ..
+            } => tint
+                .as_ref()
+                .map_or(0, TintTransform::cost)
+                .saturating_add(alternate.conversion_cost()),
+            Self::Indexed { base, .. } => base.conversion_cost(),
             _ => 1,
         }
     }
@@ -1348,6 +1357,32 @@ mod tests {
         );
         // No ink at all is paper white.
         assert_eq!(dn.convert_to_rgb(&doc, &[0.0, 0.0]), [255, 255, 255]);
+    }
+
+    /// A tint space converts through its alternate, so its cost counts the
+    /// alternate's tint transform too; a palette costs its base's.
+    #[test]
+    fn conversion_cost_counts_nested_tint_transforms() {
+        let doc = devicen_teal_doc();
+        let teal = TintTransform::load(&doc, &Object::Reference((4, 0)));
+        let inner = ColorSpace::DeviceN {
+            colorants: spots(2),
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: Some(teal.clone()),
+        };
+        assert_eq!(inner.conversion_cost(), teal.cost() + 1);
+        let outer = ColorSpace::Separation {
+            alternate: Box::new(inner),
+            tint: Some(teal.clone()),
+            colorant: spot(),
+        };
+        assert_eq!(outer.conversion_cost(), 2 * teal.cost() + 1);
+        let indexed = ColorSpace::Indexed {
+            base: Box::new(outer),
+            hival: 0,
+            lookup: None,
+        };
+        assert_eq!(indexed.conversion_cost(), 2 * teal.cost() + 1);
     }
 
     #[test]
