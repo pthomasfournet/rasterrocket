@@ -961,7 +961,11 @@ impl<'a> Decoded<'a> {
             );
             return None;
         };
-        log::debug!("image: {n}-component samples convert through a {g}-value lattice");
+        log::warn!(
+            "image: converting {n}-component samples exactly at {} operations each exceeds \
+             the work budget; colours are interpolated in a lattice of {g} values per component",
+            self.cost
+        );
         let step = 255 / (g - 1);
         let count = g.pow(u32::try_from(n).ok()?);
         let mut nodes = Vec::new();
