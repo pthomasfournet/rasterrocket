@@ -31,7 +31,7 @@ pub use select::DeviceSelector;
 
 use std::sync::Arc;
 
-use crate::backend::{GpuBackend, Result, VramBudget, check_copy_len, params, reject_zero_size};
+use crate::backend::{GpuBackend, Result, VramBudget, params, reject_zero_size};
 
 /// Vulkan compute backend.
 ///
@@ -120,12 +120,26 @@ impl VulkanBackend {
     }
 }
 
-/// `len` as a Vulkan copy size, `None` for an empty copy, after checking it
-/// against both buffers.
-fn copy_size(len: usize, src: u64, dst: u64, what: &'static str) -> Result<Option<u64>> {
-    let as_usize = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
-    check_copy_len(len, as_usize(src), as_usize(dst), what)?;
-    Ok((len > 0).then(|| u64::try_from(len).expect("len is at most a u64 buffer size")))
+/// `len` as a Vulkan copy size, after checking that it fits `capacity`, the
+/// size of the buffer that is the copy's `side` (`"source"` or
+/// `"destination"`); `op` names the operation in the error.
+fn copy_len(len: usize, capacity: u64, op: &'static str, side: &'static str) -> Result<u64> {
+    u64::try_from(len)
+        .ok()
+        .filter(|&n| n <= capacity)
+        .ok_or_else(|| {
+            crate::backend::BackendError::msg(format!(
+                "{op}: copy of {len} bytes exceeds the {side} buffer ({capacity} bytes)"
+            ))
+        })
+}
+
+/// The size of a recorded copy of `len` bytes from a buffer of `src` bytes
+/// to one of `dst` bytes, `None` for an empty copy.
+fn recorded_copy_len(len: usize, src: u64, dst: u64, op: &'static str) -> Result<Option<u64>> {
+    copy_len(len, src, op, "source").map(drop)?;
+    let n = copy_len(len, dst, op, "destination")?;
+    Ok((n > 0).then_some(n))
 }
 
 /// Abandons the recorder's page when dropped armed: on the error path of
@@ -314,9 +328,10 @@ impl GpuBackend for VulkanBackend {
         dst: &Self::DeviceBuffer,
         len: usize,
     ) -> Result<()> {
-        copy_size(len, src.size(), dst.size(), "record_copy_to_device")?.map_or(Ok(()), |n| {
-            self.recorder.record_copy(src.handle(), dst.handle(), n)
-        })
+        recorded_copy_len(len, src.size(), dst.size(), "record_copy_to_device")?
+            .map_or(Ok(()), |n| {
+                self.recorder.record_copy(src.handle(), dst.handle(), n)
+            })
     }
 
     unsafe fn record_copy_to_host(
@@ -325,7 +340,7 @@ impl GpuBackend for VulkanBackend {
         dst: &mut Self::HostBuffer,
         len: usize,
     ) -> Result<()> {
-        copy_size(len, src.size(), dst.size(), "record_copy_to_host")?.map_or(Ok(()), |n| {
+        recorded_copy_len(len, src.size(), dst.size(), "record_copy_to_host")?.map_or(Ok(()), |n| {
             self.recorder.record_copy(src.handle(), dst.handle(), n)
         })
     }
@@ -393,10 +408,7 @@ impl GpuBackend for VulkanBackend {
         if src.is_empty() {
             return Ok(());
         }
-        check_copy_len(src.len(), src.len(), self.device_buffer_len(dst), "upload")?;
-        self.recorder
-            .with_quiescent(|| dst.write_mapped(src))?
-            .ok_or_else(|| crate::backend::BackendError::msg("upload: mapped buffer changed"))
+        self.recorder.with_quiescent(|| dst.write_mapped(src))?
     }
 
     /// A mapped buffer (integrated GPU) is read in place under
@@ -409,10 +421,13 @@ impl GpuBackend for VulkanBackend {
         if dst.is_empty() {
             return Ok(());
         }
+        let len = copy_len(dst.len(), src.size(), "download", "source")?;
         self.recorder.with_quiescent(|| {
-            let bytes = src.mapped().expect("checked above");
-            check_copy_len(dst.len(), bytes.len(), dst.len(), "download")?;
-            dst.copy_from_slice(&bytes[..dst.len()]);
+            let bytes = src
+                .mapped()
+                .and_then(|b| b.get(..dst.len()))
+                .ok_or_else(|| memory::not_mapped("download", len))?;
+            dst.copy_from_slice(bytes);
             Ok(())
         })?
     }

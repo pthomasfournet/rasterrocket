@@ -21,20 +21,6 @@ use super::device::DeviceCtx;
 use super::error::vk_err;
 use super::memory::{DeviceBuffer, FillAction, HostBuffer, SlabAllocator, validate_fill_size};
 
-/// Convert a host-side `usize` length to `u64` and verify it doesn't
-/// exceed the device-side buffer capacity.  `op_label` and `cap_label`
-/// only show up in the error message, e.g. `("upload", "dst capacity")`.
-fn check_len(len: usize, capacity: u64, op_label: &str, cap_label: &str) -> Result<u64> {
-    let len_u64 = u64::try_from(len)
-        .map_err(|_| BackendError::msg(format!("{op_label}: length ({len}) exceeds u64")))?;
-    if len_u64 > capacity {
-        return Err(BackendError::msg(format!(
-            "{op_label}: length ({len_u64}) exceeds {cap_label} ({capacity})"
-        )));
-    }
-    Ok(len_u64)
-}
-
 pub(super) struct TransferContext {
     device: Arc<DeviceCtx>,
     /// Reusable command pool + cached primary command buffer for
@@ -106,7 +92,7 @@ impl TransferContext {
         if src.is_empty() {
             return Ok(());
         }
-        let len = check_len(src.len(), dst.size(), "upload", "dst capacity")?;
+        let len = super::copy_len(src.len(), dst.size(), "upload", "destination")?;
         // Hold the staging slot for the entire operation: write the
         // payload, kick off the GPU copy, wait for completion.  Releasing
         // the lock between write and wait would let a second upload
@@ -133,7 +119,7 @@ impl TransferContext {
         if dst.is_empty() {
             return Ok(());
         }
-        let len = check_len(dst.len(), src.size(), "download", "src size")?;
+        let len = super::copy_len(dst.len(), src.size(), "download", "source")?;
         let mut staging_slot = self
             .download_staging
             .lock()

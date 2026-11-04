@@ -544,3 +544,29 @@ fn a_panicking_page_leaves_the_backend_usable() {
         .run_page(|_| Ok(()))
         .expect("a page after the panicking one runs");
 }
+
+/// An oversize upload or download is refused with the same error whether
+/// the buffer is reached through staging (discrete) or in place (shared
+/// memory).
+#[test]
+fn oversize_transfers_fail_alike_on_every_device() {
+    fn errors(backend: &VulkanBackend) -> (String, String) {
+        let buf = backend.alloc_device(4).expect("alloc_device");
+        let up = backend.upload(&buf, &[0; 8]).expect_err("oversize upload");
+        let down = backend
+            .download(&buf, &mut [0; 8])
+            .expect_err("oversize download");
+        (up.to_string(), down.to_string())
+    }
+    let expected = (
+        "upload: copy of 8 bytes exceeds the destination buffer (4 bytes)".to_owned(),
+        "download: copy of 8 bytes exceeds the source buffer (4 bytes)".to_owned(),
+    );
+    {
+        let (backend, _serial) = shared_backend();
+        assert_eq!(errors(&backend), expected);
+    }
+    if let Some(backend) = integrated_backend() {
+        assert_eq!(errors(&backend), expected);
+    }
+}
