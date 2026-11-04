@@ -17,6 +17,10 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 
 **Platform guides:** [Linux](docs/platforms/linux.md) · [macOS](docs/platforms/macos.md) · [BSD and Windows](docs/platforms/other.md)
 
+Besides image files (PPM, PGM, PBM, PNG, JPEG, TIFF), `rrocket` prints
+through the system's print service (`--print`, CUPS) and writes or sends fax
+documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#printing).
+
 > **This project is distributed via GitHub, not crates.io.** Two crates were
 > published there once (`rasterrocket` and `rasterrocket-cli`, both at 1.0.1)
 > before the registry was abandoned; those versions are frozen, unmaintained,

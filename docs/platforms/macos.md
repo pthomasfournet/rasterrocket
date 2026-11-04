@@ -126,6 +126,15 @@ The scripts need bash 4.4 or newer; macOS ships bash 3.2, and Homebrew's
 bash takes precedence once installed. See
 [Getting Started](../getting-started.md#dependencies) for the full list.
 
+## Printing and fax
+
+macOS prints through CUPS, so `--print` works with the built-in `lp`;
+`--printer NAME` takes a queue name from `lpstat -p`, else the default
+destination. The pages are spooled in an anonymous file under the per-user
+`$TMPDIR`. `--fax-to` needs a CUPS fax queue (`--fax-queue NAME`) or
+HylaFAX's `sendfax`; macOS ships neither, so write the document with `--fax`
+and send it another way. See the [CLI reference](../cli-reference.md#printing).
+
 ## Known gaps
 
 - No GPU acceleration (see above).

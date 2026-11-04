@@ -19,6 +19,8 @@ find.
   so `--ram` and `--ram-path` are refused.
 - **GPU:** none tested. The Vulkan feature may work wherever a Vulkan 1.3
   driver exists.
+- **Printing and fax:** `--print` and `--fax-to` submit through `lp`, which
+  the CUPS port or package provides; see the [Linux guide](linux.md#printing-and-fax).
 
 ## Windows
 
@@ -30,3 +32,7 @@ find.
 - **Writing output to RAM:** as on the BSDs, a bare prefix writes to the
   current directory, and `--ram` and `--ram-path` are refused.
 - **GPU:** CUDA and Vulkan are untested on Windows.
+- **Printing and fax:** `--print` and `--fax-to` are refused: both submit
+  through CUPS's `lp` (or HylaFAX's `sendfax`), which Windows does not have.
+  Render to files and print them from an application, or write a fax
+  document with `--fax` and send it with Windows Fax and Scan.

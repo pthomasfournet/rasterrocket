@@ -21,7 +21,8 @@ rasterrocket-color
   │     │           TrueType / OpenType / CFF / Type 1 parsing and outlines
   │     │
   │     ├── rasterrocket-encode
-  │     │     PPM / PGM / PBM / PNG output, baseline grayscale JPEG
+  │     │     PPM / PGM / PBM / PNG / JPEG output; TIFF, CCITT G3/G4 coded
+  │     │     for fax; PDF of page images (the --print document)
   │     │
   │     └── rasterrocket-interp
   │           PDF content stream interpreter + operator dispatcher
@@ -39,7 +40,8 @@ rasterrocket-color
   │                 public OCR library — raster_pdf(), render_channel()
   │                 │
   │                 └── rasterrocket-cli
-  │                       `rrocket` binary (pdftoppm-style flags)
+  │                       `rrocket` binary (pdftoppm-style flags); hands fax
+  │                       and print documents to lp / sendfax
   │
   ├── rasterrocket-comic  (comic-archive input: .cbz/.cb7/.cbt → RenderedPage;
   │                        depends on rasterrocket + render + color; used by the CLI)

@@ -64,3 +64,13 @@ stdout, and it is removed when rrocket exits. If `MemAvailable` falls below
 1 GiB, the remaining pages go to disk instead. To keep the pages, give a
 path such as `./out`, or pass `--no-ram`. See the
 [CLI reference](../cli-reference.md#output-destination-ram-backed-by-default).
+
+## Printing and fax
+
+`--print` hands the rendered pages to CUPS through `lp`, which the CUPS client
+provides (`cups-client` on Debian and Ubuntu, `cups` on Fedora and Arch);
+`--printer NAME` picks a queue, else the default destination
+(`lpstat -d`). The pages are spooled in an anonymous file under `$TMPDIR`,
+else `/var/tmp`. `--fax-to NUMBER` sends a `--fax` document through a CUPS
+fax queue (`--fax-queue NAME`) or, without one, HylaFAX's `sendfax`. See the
+[CLI reference](../cli-reference.md#printing).
