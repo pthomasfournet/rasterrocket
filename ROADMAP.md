@@ -2250,7 +2250,8 @@ fallbacks) drew each character in its isolated form. Now, within one show
 string, the codes of a run in such a script drawn by one face are shaped
 together with that face's `GSUB`/`GPOS` through `harfrust`, vendored as a
 local fork in `crates/harfrust` (release 0.12.0, the one built on the
-read-fonts fork's base). A right-to-left run, in visual order in the string,
+read-fonts fork's base; since rebased to 0.15 with the font forks, see
+Current status). A right-to-left run, in visual order in the string,
 is reversed to logical order first; the shaped glyphs fill the advance the
 document gives the run's codes, so the pen moves exactly as before. The
 bundled Hebrew, Arabic, Devanagari and Thai faces keep their layout features
