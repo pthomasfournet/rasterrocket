@@ -287,23 +287,25 @@ impl PageRenderer<'_> {
     /// pattern matrix in effect, from the memo when kept.
     pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
         let page_h = f64::from(self.height);
+        let pattern_ctm = self.window_ctm(&self.pattern_ctm);
         let key = PlacedKey::new(
             self.resources.pattern_key(name)?,
-            &self.pattern_ctm,
+            &pattern_ctm,
             page_h,
             self.default_spaces_context(),
         );
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             self.resources
-                .shading_pattern(name, &self.pattern_ctm, page_h)
+                .shading_pattern(name, &pattern_ctm, page_h)
                 .map(Rc::new)
         })
     }
 
-    /// The named `Shading` resource resolved under `ctm`, from the memo when
-    /// kept.
+    /// The named `Shading` resource resolved under `ctm`, a matrix into the
+    /// whole page's space, from the memo when kept.
     pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
         let page_h = f64::from(self.height);
+        let ctm = &self.window_ctm(ctm);
         let key = PlacedKey::new(
             self.resources.shading_key(name)?,
             ctm,

@@ -18,7 +18,7 @@ use super::image_blit::{ImageLenError, blend_rgb, check_image_bytes_len};
 use super::image_compositor::ImageCompositor;
 use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
-use super::view::build_initial_ctm;
+use super::view::{build_initial_ctm, window_ctm};
 use super::xobject::image_draw_size;
 use super::{
     DEADLINE_CHECK_INTERVAL, MAX_WARNED_UNKNOWN_OPS, PageDiagnostics, PageGeometry, PageRenderer,
@@ -380,9 +380,13 @@ fn page_view_user_unit_scales_the_ctm_with_the_extent() {
     };
     let whole = PageView::whole(&geom, (1.0, 1.0));
     assert_eq!((whole.page_width, whole.page_height), (400, 200));
-    assert_ctm_eq(whole.initial_ctm(), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    assert_ctm_eq(whole.page_ctm(), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
     let window = whole.window(100, 50, 200, 100);
-    assert_ctm_eq(window.initial_ctm(), [2.0, 0.0, 0.0, 2.0, -100.0, -50.0]);
+    assert_ctm_eq(window.page_ctm(), whole.page_ctm());
+    assert_ctm_eq(
+        window_ctm(&window.page_ctm(), (100, 50), 100, 200),
+        [2.0, 0.0, 0.0, 2.0, -100.0, -50.0],
+    );
 }
 
 #[test]

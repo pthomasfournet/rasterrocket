@@ -16,41 +16,29 @@ use rasterrocket::{
     SessionConfig, open_session, render_page_rgb, render_page_rgb_with,
 };
 
-/// Content exercising antialiased edges, strokes, a clip, a shading and
-/// text: everything whose placement depends on the device transform.  The
-/// shading extends without bound, so it is clipped to 120..180 × 30..70;
-/// unclipped, `sh` would paint the whole page over the paths before it.
+/// Content exercising antialiased edges, strokes, a clip, a shading, an
+/// image and text: everything whose placement depends on the device
+/// transform.  The shading extends without bound, so it is clipped to
+/// 120..180 × 30..70; unclipped, `sh` would paint the whole page over the
+/// paths before it.  At 150 dpi the clip's bottom edge falls exactly on an
+/// antialiasing sample boundary, which a window's coordinates must reach
+/// with the same rounding as the whole page's.  The image is skewed and
+/// interpolated, so its samples blend across the tile seams.
 const CONTENT: &[u8] = b"\
 q 0.2 0.4 0.8 rg 13.3 7.7 m 187.1 52.9 l 61.4 93.2 l h f Q \
 q 0.8 0 0 RG 2.7 w 1 J 5 95 m 195 5 l S Q \
+q 0.1 0.6 0.2 RG 0.7 w 12 4 m 60 98 90 2 150 96 c S Q \
 q 30 20 140 60 re W n 1 0 0 rg 0 0 200 100 re f Q \
 q 120 30 60 40 re W n 1 0 0 1 120 30 cm /Sh sh Q \
+q 31.3 6.9 -9.2 27.6 40.7 22.1 cm \
+BI /W 4 /H 3 /CS /RGB /BPC 8 /I true /F /AHx ID \
+ff0000 00ff00 0000ff ffff00 00ffff ff00ff 808080 202020 c0c0c0 ff8000 0080ff 80ff00> \
+EI Q \
 BT /F 17.3 Tf 21.1 41.7 Td (Tiles) Tj ET";
 
-/// The parts of [`CONTENT`] whose region renders match the whole-page
-/// render byte for byte.
-const TILE_EXACT_CONTENT: &[u8] = b"\
-q 30 20 140 60 re W n 1 0 0 rg 0 0 200 100 re f Q \
-BT /F 17.3 Tf 21.1 41.7 Td (Tiles) Tj ET";
-
-/// The parts of [`CONTENT`] whose region renders differ from the
-/// whole-page render at 150 dpi in 3 × 2 tiles, away from the tile seams:
-/// the bottom clip-edge row of the clipped shading (125 px), one
-/// antialiased pixel on an edge of the triangle, and ten edge pixels of the
-/// stroke on the page rotated by 270°.
-const TILE_INEXACT_CONTENT: &[u8] = b"\
-q 0.2 0.4 0.8 rg 13.3 7.7 m 187.1 52.9 l 61.4 93.2 l h f Q \
-q 0.8 0 0 RG 2.7 w 1 J 5 95 m 195 5 l S Q \
-q 120 30 60 40 re W n 1 0 0 1 120 30 cm /Sh sh Q";
-
-/// A page with [`CONTENT`] and the page dictionary entries `extra`.
-fn page_pdf(extra: &str) -> Vec<u8> {
-    page_pdf_with(CONTENT, extra)
-}
-
-/// A page with `content` and the page dictionary entries `extra` (a
+/// A page with [`CONTENT`] and the page dictionary entries `extra` (a
 /// rotation, an off-origin crop box).
-fn page_pdf_with(content: &[u8], extra: &str) -> Vec<u8> {
+fn page_pdf(extra: &str) -> Vec<u8> {
     one_page(
         &format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] {extra} \
@@ -58,7 +46,7 @@ fn page_pdf_with(content: &[u8], extra: &str) -> Vec<u8> {
              /Contents 4 0 R >>"
         ),
         vec![
-            stream_object("", content),
+            stream_object("", CONTENT),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
             b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 60 0] \
                /Function << /FunctionType 2 /Domain [0 1] /C0 [1 1 0] /C1 [0 0.5 1] /N 1 >> \
@@ -120,30 +108,23 @@ const GEOMETRIES: [&str; 6] = [
     "/CropBox [17 9 181 97] /Rotate 90",
 ];
 
-/// 3 × 2 tiles of `content` on each of [`GEOMETRIES`] stitch into the
+/// Tiles of [`CONTENT`] on each of [`GEOMETRIES`], in grids whose seams
+/// fall at different sub-pixel phases of the content, stitch into the
 /// whole-page render.
-fn assert_tiles_compose(content: &[u8]) {
-    for extra in GEOMETRIES {
-        let s = session(page_pdf_with(content, extra), BackendPolicy::CpuOnly);
-        let full = whole(&s, SCALE);
-        let tiles = stitched(&s, SCALE, 3, 2);
-        common::assert_identical(
-            &full,
-            &tiles,
-            &format!("3×2 tiles of a page with `{extra}`"),
-        );
-    }
-}
-
 #[test]
 fn tiles_compose_into_the_whole_page() {
-    assert_tiles_compose(TILE_EXACT_CONTENT);
-}
-
-#[test]
-#[ignore = "antialiased fill, stroke and clipped-shading edges render differently in a region"]
-fn tiles_of_antialiased_edges_compose_into_the_whole_page() {
-    assert_tiles_compose(TILE_INEXACT_CONTENT);
+    for extra in GEOMETRIES {
+        let s = session(page_pdf(extra), BackendPolicy::CpuOnly);
+        let full = whole(&s, SCALE);
+        for (cols, rows) in [(3, 2), (5, 7)] {
+            let tiles = stitched(&s, SCALE, cols, rows);
+            common::assert_identical(
+                &full,
+                &tiles,
+                &format!("{cols}×{rows} tiles of a page with `{extra}`"),
+            );
+        }
+    }
 }
 
 #[test]

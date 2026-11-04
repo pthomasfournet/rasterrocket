@@ -108,7 +108,7 @@ impl PageRenderer<'_> {
         // turns them into whole pixels.  The image and its mask resample
         // separately, each on its own grid, and each comes with the matrix
         // that draws the resampled samples.
-        let page_ctm = self.gstate.current().ctm;
+        let page_ctm = self.window_ctm(&self.gstate.current().ctm);
         let window = self.paintable_window();
         let reduced_mask = img
             .smask
@@ -139,14 +139,8 @@ impl PageRenderer<'_> {
             );
             return;
         };
-        // The blit kernel reads only the grid's tables; a device-resident
-        // image whose grid has none is drawn from a host copy.
         #[cfg(feature = "cache")]
-        let table_less_copy = if grid.tables().is_none() {
-            self.host_copy(img, "a draw without sample tables")
-        } else {
-            None
-        };
+        let table_less_copy = self.host_copy_for_table_less_grid(img, &grid);
         #[cfg(feature = "cache")]
         let img = table_less_copy.as_ref().unwrap_or(img);
 
@@ -262,6 +256,21 @@ impl PageRenderer<'_> {
             return None;
         }
         self.host_copy(img, "a reduced draw")
+    }
+
+    /// A host-resident copy of `img` when its samples are device-resident
+    /// and `grid` has no tables, which are all the blit kernel reads;
+    /// `None` otherwise, or when the copy fails.
+    #[cfg(feature = "cache")]
+    fn host_copy_for_table_less_grid(
+        &self,
+        img: &crate::resources::ImageDescriptor,
+        grid: &SampleGrid,
+    ) -> Option<crate::resources::ImageDescriptor> {
+        grid.tables()
+            .is_none()
+            .then(|| self.host_copy(img, "a draw beyond the blit tables"))
+            .flatten()
     }
 
     /// `decoded` with its samples host-resident when they are

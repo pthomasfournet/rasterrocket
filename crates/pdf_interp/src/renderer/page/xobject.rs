@@ -501,7 +501,7 @@ impl PageRenderer<'_> {
                 isolated: tg.isolated,
             });
         };
-        let ctm = self.gstate.current().ctm;
+        let ctm = self.window_ctm(&self.gstate.current().ctm);
         let page_h = f64::from(self.height);
         let [bx0, by0, bx1, by1] = bbox;
         let corners = [

@@ -97,8 +97,10 @@ pub(super) fn initial_gstate(width: u32, height: u32, ctm: Ctm, antialias: bool)
 ///
 /// Device pixels are counted from the top-left corner of the whole page.  The
 /// renderer's bitmap covers the window `[x, x + width) × [y, y + height)`; its
-/// initial CTM is the whole-page CTM translated by the window's offset, so a
-/// window draws exactly the device pixels the whole-page render places there.
+/// initial CTM is the whole page's, and device coordinates are computed in
+/// the whole page's device space and translated into the window last (see
+/// [`page_to_window`]), so a window draws the device pixels the whole-page
+/// render places there.
 ///
 /// The page's pixel extent is its geometry's [`PageGeometry::size_px`] at
 /// the scales, which counts `user_unit` (ISO 32000-2 §14.11.2: one user-space
@@ -171,32 +173,53 @@ impl PageView {
         }
     }
 
-    /// The initial CTM: the whole page's, with the window's top-left corner
-    /// moved to the device origin.
+    /// The initial CTM: user space to the whole page's device space.
     ///
     /// One user-space unit is `user_unit` points, so the CTM's scale is
-    /// `scale × user_unit` device pixels per unit.  Device y grows downward
-    /// from the window's top edge (`device_y = height − ctm_y`), so a window
-    /// `y` pixels below the page top and `height` tall shifts the CTM's y
-    /// translation by `page_height − y − height`.
-    pub(super) fn initial_ctm(&self) -> Ctm {
-        let mut ctm = build_initial_ctm(
+    /// `scale × user_unit` device pixels per unit.  The window does not
+    /// enter the matrix: a renderer of a window keeps every CTM in the whole
+    /// page's device space and moves device coordinates into the window
+    /// last (see [`window_ctm`]).
+    pub(super) fn page_ctm(&self) -> Ctm {
+        build_initial_ctm(
             self.page_width,
             self.page_height,
             (self.scale_x * self.user_unit, self.scale_y * self.user_unit),
             self.rotate_cw,
             self.origin_x,
             self.origin_y,
-        );
-        let below = i64::from(self.page_height) - i64::from(self.y) - i64::from(self.height);
-        ctm[4] -= f64::from(self.x);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "|below| < 2^33, exactly representable in f64"
-        )]
-        {
-            ctm[5] -= below as f64;
-        }
-        ctm
+        )
     }
+}
+
+/// Move `(x, y)`, a point in a page's device space (y down), into the
+/// window whose top-left corner lies at `origin` on that page.
+///
+/// The offset is an integer, so the translation is exact for every point at
+/// or past the window's top-left corner: a window receives bit for bit the
+/// coordinates the whole-page render computes, shifted, and its edges cover
+/// the same sub-pixel samples.
+pub(super) fn page_to_window(origin: (u32, u32), (x, y): (f64, f64)) -> (f64, f64) {
+    (x - f64::from(origin.0), y - f64::from(origin.1))
+}
+
+/// `ctm`, which maps into the device space of a `page_height`-pixel page,
+/// with its translation moved so that it maps into the `height`-pixel
+/// window whose top-left corner lies at `origin` on that page.
+///
+/// Device y grows downward from the window's top edge
+/// (`device_y = height − ctm_y`), so a window `y` pixels below the page top
+/// and `height` tall shifts the y translation by `page_height − y − height`.
+/// For the whole page both shifts are zero and `ctm` is returned unchanged.
+pub(super) fn window_ctm(ctm: &Ctm, origin: (u32, u32), height: u32, page_height: u32) -> Ctm {
+    let below = i64::from(page_height) - i64::from(origin.1) - i64::from(height);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "|below| < 2^33, exactly representable in f64"
+    )]
+    let below = below as f64;
+    let mut moved = *ctm;
+    moved[4] -= f64::from(origin.0);
+    moved[5] -= below;
+    moved
 }

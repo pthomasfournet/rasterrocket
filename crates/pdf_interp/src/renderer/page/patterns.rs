@@ -269,7 +269,7 @@ impl PageRenderer<'_> {
         // coordinate space of the parent content stream, not to the CTM in
         // effect at the fill.  `device` carries on to device pixels.
         let pat_ctm = ctm_multiply(&desc.matrix, &self.pattern_ctm);
-        let device = flip_y(&pat_ctm, f64::from(self.height));
+        let device = flip_y(&self.window_ctm(&pat_ctm), f64::from(self.height));
         let geometry = match CellGeometry::new(&device, desc) {
             Ok(geometry) => geometry,
             Err(why) => {

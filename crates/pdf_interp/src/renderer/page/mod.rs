@@ -190,6 +190,15 @@ pub struct PageRenderer<'doc> {
     /// Width of the whole page in device pixels; equals `width` unless the
     /// renderer draws a window of the page.
     page_width: u32,
+    /// Height of the whole page in device pixels; equals `height` unless the
+    /// renderer draws a window of the page.
+    page_height: u32,
+    /// Offset of the drawn window's top-left corner from the page's, in
+    /// device pixels.  Every CTM in the graphics state maps to the whole
+    /// page's device space; a device coordinate is computed there and
+    /// translated by this integer offset last, so that a window holds the
+    /// values the whole-page render computes for the same pixels.
+    window_origin: (u32, u32),
     /// Graphics state save/restore stack.
     pub(super) gstate: GStateStack,
     /// Current path under construction, if any.
@@ -226,7 +235,7 @@ pub struct PageRenderer<'doc> {
     /// tile renderers carry this incremented; capped at `MAX_PATTERN_DEPTH`
     /// to break self-referential pattern cycles (see `resolve_fill_pattern`).
     pub(super) pattern_depth: u32,
-    /// The page's initial CTM: user space to the device window.
+    /// The page's initial CTM: user space to the whole page's device space.
     initial_ctm: Ctm,
     /// The matrix from the default coordinate space of the content stream
     /// being executed to the device (PDF §8.7.3.1): the page's initial CTM,
@@ -447,7 +456,7 @@ impl<'doc> PageRenderer<'doc> {
         };
         let canvas = PageCanvas::try_new(kind, width, height, group.is_some())?;
 
-        let initial_ctm = view.initial_ctm();
+        let initial_ctm = view.page_ctm();
         let gstate = initial_gstate(width, height, initial_ctm, true);
 
         let font_cache = FontCache::new(Arc::default(), true);
@@ -458,6 +467,8 @@ impl<'doc> PageRenderer<'doc> {
             width,
             height,
             page_width: view.page_width,
+            page_height: view.page_height,
+            window_origin: (view.x, view.y),
             gstate,
             path: None,
             pending_clip: None,

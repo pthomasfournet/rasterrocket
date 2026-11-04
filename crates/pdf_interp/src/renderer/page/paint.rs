@@ -15,7 +15,7 @@ use raster::{
 };
 
 use super::super::color::RasterColor;
-use super::super::gstate::{ctm_transform, invert_affine};
+use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
 use super::patterns::PatternPaint;
 use super::pixel_rect::PixelRect;
@@ -175,13 +175,26 @@ impl PageRenderer<'_> {
     pub(super) fn to_device(&self, x: f64, y: f64) -> (f64, f64) {
         let ctm = &self.gstate.current().ctm;
         let (dx, dy) = ctm_transform(ctm, x, y);
-        (dx, f64::from(self.height) - dy)
+        self.page_to_window((dx, f64::from(self.page_height) - dy))
     }
 
-    /// The user-space → device-space matrix: the CTM followed by the y-flip
-    /// that [`Self::to_device`] applies.
+    /// Move a point in the whole page's device space (y down) into the
+    /// drawn window (see [`super::view::page_to_window`]).
+    pub(super) fn page_to_window(&self, point: (f64, f64)) -> (f64, f64) {
+        super::view::page_to_window(self.window_origin, point)
+    }
+
+    /// `ctm`, a matrix into the whole page's space, re-based to map into
+    /// the drawn window (see [`super::view::window_ctm`]); unchanged when the
+    /// renderer draws the whole page.
+    pub(super) fn window_ctm(&self, ctm: &Ctm) -> Ctm {
+        super::view::window_ctm(ctm, self.window_origin, self.height, self.page_height)
+    }
+
+    /// The user-space → device-space matrix: the CTM, re-based to the
+    /// window, followed by the y-flip.
     pub(super) fn device_matrix(&self) -> [f64; 6] {
-        let m = self.gstate.current().ctm;
+        let m = self.window_ctm(&self.gstate.current().ctm);
         [
             m[0],
             -m[1],

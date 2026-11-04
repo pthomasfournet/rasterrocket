@@ -10,6 +10,7 @@ use super::text_ops::{
 };
 use super::text_shaping::{Drawn, shaped_runs};
 use super::text_stroke::GlyphStroke;
+use super::view::page_to_window;
 use crate::resources::cmap::DecodedCode;
 use crate::resources::font::CidEncoding;
 use font::face::FontFace;
@@ -102,6 +103,7 @@ impl PageRenderer<'_> {
         // horizontal advances to zero width.
         let horiz_scaling = self.gstate.current().text.horiz_scaling / 100.0;
         let ctm = self.gstate.current().ctm;
+        let (origin, page_h) = (self.window_origin, self.page_height);
         let rise = self.gstate.current().text.rise;
         let mut tm = self.gstate.current().text.text_matrix;
 
@@ -405,15 +407,16 @@ impl PageRenderer<'_> {
                     // sits at the pen: its horizontal origin is displaced
                     // by the position vector −v, in glyph units scaled by
                     // the font size (PDF §9.7.4.3).
-                    let (dx, dy) = if let Some(enc) = vertical_enc {
-                        let v = enc.vertical_metrics_for_cid(cid);
-                        let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
-                        let ty = (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise);
-                        text_to_device(&ctm, &tm, tx, ty, self.height)
-                    } else {
-                        let tx = centre / 1000.0 * font_size * horiz_scaling;
-                        text_to_device(&ctm, &tm, tx, rise, self.height)
-                    };
+                    let (tx, ty) = vertical_enc.map_or_else(
+                        || (centre / 1000.0 * font_size * horiz_scaling, rise),
+                        |enc| {
+                            let v = enc.vertical_metrics_for_cid(cid);
+                            let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
+                            (tx, (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise))
+                        },
+                    );
+                    let (dx, dy) =
+                        page_to_window(origin, text_to_device(&ctm, &tm, tx, ty, page_h));
                     if let Some((drawn, selector, by_gid)) = drawn {
                         push_glyph(drawn, code, selector, by_gid, dx, dy, x_scale);
                     }
@@ -473,7 +476,8 @@ impl PageRenderer<'_> {
                 for g in &run.glyphs {
                     let tx = (g.offset.0 * em_x).mul_add(scale, pen);
                     let ty = g.offset.1.mul_add(font_size, rise);
-                    let (dx, dy) = text_to_device(&ctm, &run_origin, tx, ty, self.height);
+                    let (dx, dy) =
+                        page_to_window(origin, text_to_device(&ctm, &run_origin, tx, ty, page_h));
                     push_glyph(run.face, g.selector, g.selector, true, dx, dy, scale);
                     pen = (g.advance * em_x).mul_add(scale, pen);
                 }

@@ -159,12 +159,8 @@ impl PageRenderer<'_> {
         }
         let [m0, m1, m2, m3, tx, ty] = charproc_ctm;
         let matrix = [m0, m1, m2, m3];
-        let Some(frame) = GlyphFrame::new(
-            matrix,
-            [llx, lly, urx, ury],
-            tx,
-            f64::from(self.height) - ty,
-        ) else {
+        let (origin_x, origin_y) = self.page_to_window((tx, f64::from(self.page_height) - ty));
+        let Some(frame) = GlyphFrame::new(matrix, [llx, lly, urx, ury], origin_x, origin_y) else {
             return false;
         };
         let face_id = self.font_cache.type3_face_id(*font_id, matrix);
