@@ -238,7 +238,9 @@ impl Path {
     /// as is; either then gets one hint per pair of opposite edges (`0–1` with
     /// `2–3`, `1–2` with `3–4`).  The scanline stage snaps a hinted pair to
     /// pixel boundaries only when both of its edges are axis-aligned, so a
-    /// rectangle fills whole pixels and a skewed quadrilateral is unaffected.
+    /// rectangle fills whole pixels, a trapezoid with two parallel
+    /// axis-aligned edges snaps those two and keeps its slanted sides, and a
+    /// quadrilateral with no axis-aligned pair is unaffected.
     /// A path that already carries hints is left alone.
     #[must_use]
     pub fn with_fill_adjust_hints(&self) -> Option<Self> {

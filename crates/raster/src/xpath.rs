@@ -644,6 +644,60 @@ mod tests {
         }
     }
 
+    /// The device segments of the closed quadrilateral `pts`, fill adjusted
+    /// when `adjust`.
+    fn quad_segs(pts: [(f64, f64); 4], adjust: bool) -> Vec<(f64, f64, f64, f64)> {
+        let mut b = PathBuilder::new();
+        b.move_to(pts[0].0, pts[0].1).unwrap();
+        for &(x, y) in &pts[1..] {
+            b.line_to(x, y).unwrap();
+        }
+        b.close(true).unwrap();
+        let path = b.build();
+        let path = if adjust {
+            path.with_fill_adjust_hints().unwrap()
+        } else {
+            path
+        };
+        XPath::new(&path, &identity(), 0.1, true)
+            .segs
+            .iter()
+            .map(|s| (s.x0, s.y0, s.x1, s.y1))
+            .collect()
+    }
+
+    #[test]
+    fn a_trapezoid_snaps_its_horizontal_edges_and_keeps_its_slanted_sides() {
+        // A one-pixel band whose ends slant by 0.1 px: the horizontal pair
+        // snaps to row boundaries as a rectangle's would, and the slanted
+        // pair, not axis-aligned, keeps its slant.
+        let segs = quad_segs(
+            [(10.0, 10.3), (50.0, 10.3), (50.1, 11.3), (10.1, 11.3)],
+            true,
+        );
+        let snapped = |y: f64| {
+            [10.0, 10.99, 11.0, 11.99]
+                .iter()
+                .any(|r| (y - r).abs() < 1e-9)
+        };
+        assert!(
+            segs.iter().all(|s| snapped(s.1) && snapped(s.3)),
+            "{segs:?}"
+        );
+        assert!(
+            segs.iter()
+                .any(|s| (s.0 - s.2).abs() > 1e-9 && (s.1 - s.3).abs() > 1e-9),
+            "a side lost its slant: {segs:?}"
+        );
+    }
+
+    #[test]
+    fn a_quadrilateral_without_axis_aligned_edges_is_not_adjusted() {
+        // Every edge slants: no pair qualifies, and the fill is the path's.
+        let pts = [(10.0, 10.3), (50.0, 10.4), (50.1, 11.4), (10.1, 11.3)];
+        assert_eq!(quad_segs(pts, true), quad_segs(pts, false));
+    }
+
     #[test]
     fn horizontal_segment_not_flipped() {
         let mut xpath = XPath::empty();
