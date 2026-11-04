@@ -79,8 +79,9 @@ is opened with `Page::new_embedded`.
   declare more instances in total fails with
   `SymbolError::TooManyInstances`. Tests: `decode::symbol::tests`.
 - `Bitmap::combine` iterates only the source rows that fall inside the
-  destination, so a symbol placed far outside its region costs nothing
-  per row. A refinement/aggregate symbol (6.5.8.2) looks its referenced
+  destination (`Bitmap::clipped_span`, which also clips the columns
+  counted by `Bitmap::clipped_area`), so a symbol placed far outside its
+  region costs nothing per row. A refinement/aggregate symbol (6.5.8.2) looks its referenced
   symbols up in the input and new symbol lists (`SymbolSet`) instead of
   copying both into a new list per symbol, which was quadratic in the
   dictionary size. `Bitmap` is no longer `Clone`, so every copy goes

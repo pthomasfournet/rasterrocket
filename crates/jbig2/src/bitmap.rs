@@ -208,7 +208,7 @@ impl Bitmap {
         let dest_x_start = dest_x_start as u32;
         let dest_x_end = dest_x_end as u32;
 
-        let (src_y_start, src_y_end) = Self::clipped_rows(self.height, other.height, y);
+        let (src_y_start, src_y_end) = Self::clipped_span(self.height, other.height, y);
 
         for src_y in src_y_start..src_y_end {
             let dest_y = (i64::from(y) + i64::from(src_y)) as u32;
@@ -262,11 +262,12 @@ impl Bitmap {
         }
     }
 
-    /// The rows of a source `src_height` rows tall, placed at row `y`, that
-    /// fall inside a destination `dest_height` rows tall.
-    fn clipped_rows(dest_height: u32, src_height: u32, y: i32) -> (u32, u32) {
-        let start = (-i64::from(y)).clamp(0, i64::from(src_height));
-        let end = (i64::from(dest_height) - i64::from(y)).clamp(start, i64::from(src_height));
+    /// Along one axis, the half-open range of source positions, `0..src_len`,
+    /// that land inside `0..dest_len` when the source starts at `offset`; an
+    /// empty range if none do.
+    fn clipped_span(dest_len: u32, src_len: u32, offset: i32) -> (u32, u32) {
+        let start = (-i64::from(offset)).clamp(0, i64::from(src_len));
+        let end = (i64::from(dest_len) - i64::from(offset)).clamp(start, i64::from(src_len));
 
         (start as u32, end as u32)
     }
@@ -274,8 +275,8 @@ impl Bitmap {
     /// The number of pixels of this bitmap that [`Bitmap::combine`] writes
     /// when `other` is placed at (`x`, `y`).
     pub(crate) fn clipped_area(&self, other: &Self, x: i32, y: i32) -> u64 {
-        let (x_start, x_end) = Self::clipped_rows(self.width, other.width, x);
-        let (y_start, y_end) = Self::clipped_rows(self.height, other.height, y);
+        let (x_start, x_end) = Self::clipped_span(self.width, other.width, x);
+        let (y_start, y_end) = Self::clipped_span(self.height, other.height, y);
 
         u64::from(x_end - x_start) * u64::from(y_end - y_start)
     }
