@@ -3,8 +3,11 @@
 //!
 //! ## Sharing semantics
 //!
-//! When a [`Clip`] is cloned (e.g. on a graphics-state save), the path-clip
-//! scanners are shared via [`Arc`].
+//! The path-clip scanners form a persistent singly linked list, newest first:
+//! each node owns one [`XPathScanner`] and an [`Arc`] to the list it was
+//! intersected onto.  [`Clip::clone_shared`] (a graphics-state save) copies the
+//! head pointer, so a save costs O(1) whatever the number of path clips, and
+//! an intersection allocates one node shared by no other clip.
 //! [`XPathScanner`] instances are immutable after construction, so sharing
 //! across threads and across `clone_shared` copies is safe: there is no
 //! interior mutability in the shared objects.
@@ -56,12 +59,32 @@ pub struct Clip {
     pub x_max_i: i32,
     /// Integer pixel row of the bottom clip edge: `ceil(y_max) - 1`.
     pub y_max_i: i32,
-    /// Arbitrary path-clip scanners.
+    /// Head of the path-clip list, newest first; `None` for a rectangle-only
+    /// clip.
     ///
     /// Shared across [`clone_shared`](Clip::clone_shared) copies via [`Arc`].
     /// [`XPathScanner`] is immutable after construction so no interior-mutability
     /// hazard exists.
-    scanners: Vec<Arc<XPathScanner>>,
+    scanners: Option<Arc<ClipNode>>,
+}
+
+/// One path clip of a [`Clip`] and the clips it was intersected with.
+struct ClipNode {
+    scanner: XPathScanner,
+    parent: Option<Arc<Self>>,
+}
+
+impl Drop for ClipNode {
+    /// Releases the chain iteratively: the default recursive drop of a list
+    /// of K uniquely owned nodes would use O(K) stack.
+    fn drop(&mut self) {
+        let mut next = self.parent.take();
+        while let Some(node) = next {
+            next = Arc::try_unwrap(node)
+                .ok()
+                .and_then(|mut owned| owned.parent.take());
+        }
+    }
 }
 
 impl Clip {
@@ -78,7 +101,7 @@ impl Clip {
             y_min_i: 0,
             x_max_i: 0,
             y_max_i: 0,
-            scanners: Vec::new(),
+            scanners: None,
         };
         clip.set_rect(x0, y0, x1, y1);
         clip
@@ -101,7 +124,7 @@ impl Clip {
             y_min_i: self.y_min_i,
             x_max_i: self.x_max_i,
             y_max_i: self.y_max_i,
-            scanners: self.scanners.clone(), // Arc::clone per element
+            scanners: self.scanners.clone(),
         }
     }
 
@@ -136,12 +159,18 @@ impl Clip {
             y_min_i: 0,
             x_max_i: 0,
             y_max_i: 0,
-            scanners: self
-                .scanners
-                .iter()
-                .map(|s| Arc::new(s.translated(sx, sy)))
-                .collect(),
+            scanners: None,
         };
+        // The list rebuilt with each scanner shifted, oldest first, so the
+        // newest stays at its head.
+        #[expect(
+            clippy::needless_collect,
+            reason = "the list iterates newest first and is rebuilt oldest first; its iterator is not double-ended"
+        )]
+        let shifted: Vec<XPathScanner> = self.scanners().map(|s| s.translated(sx, sy)).collect();
+        clip.scanners = shifted.into_iter().rev().fold(None, |parent, scanner| {
+            Some(Arc::new(ClipNode { scanner, parent }))
+        });
         clip.recompute_int_bounds();
         clip
     }
@@ -149,13 +178,13 @@ impl Clip {
     /// True when the clip is its rectangle alone, with no path clips.
     #[must_use]
     pub const fn is_rect(&self) -> bool {
-        self.scanners.is_empty()
+        self.scanners.is_none()
     }
 
     /// Replace the clip rectangle and clear all path clips.
     pub fn reset_to_rect(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         self.set_rect(x0, y0, x1, y1);
-        self.scanners.clear();
+        self.scanners = None;
     }
 
     /// Intersect the clip rectangle with `[x0, y0, x1, y1]`.
@@ -209,7 +238,10 @@ impl Clip {
         } else {
             XPathScanner::new(xpath, eo, y_lo, y_hi)
         };
-        self.scanners.push(Arc::new(scanner));
+        self.scanners = Some(Arc::new(ClipNode {
+            scanner,
+            parent: self.scanners.take(),
+        }));
     }
 
     /// The clip's rows in the supersampled AA grid, inclusive:
@@ -292,7 +324,7 @@ impl Clip {
             && (f64::from(right) + 1.0) <= self.x_max
             && f64::from(top) >= self.y_min
             && (f64::from(bottom) + 1.0) <= self.y_max
-            && self.scanners.is_empty()
+            && self.scanners.is_none()
         {
             return ClipResult::AllInside;
         }
@@ -311,7 +343,7 @@ impl Clip {
         if result != ClipResult::AllInside {
             return result;
         }
-        for scanner in &self.scanners {
+        for scanner in self.scanners() {
             let (sx0, sx1, sy) = aa_coords(x0, x1, y, self.antialias);
             if !scanner.test_span(sx0, sx1, sy) {
                 return ClipResult::Partial;
@@ -327,7 +359,7 @@ impl Clip {
     /// `aa_buf` over `[*x0, *x1]`, and the output span is then clamped to the
     /// integer clip bounds.
     pub fn clip_aa_line(&self, aa_buf: &mut AaBuf, x0: &mut i32, x1: &mut i32, y: i32) {
-        for scanner in &self.scanners {
+        for scanner in self.scanners() {
             scanner.clip_aa_line(aa_buf, *x0, *x1, y);
         }
         *x0 = (*x0).max(self.x_min_i);
@@ -353,7 +385,14 @@ impl Clip {
 
     fn test_clip_paths(&self, x: i32, y: i32) -> bool {
         let (tx, _, ty) = aa_coords(x, x, y, self.antialias);
-        self.scanners.iter().all(|s| s.test(tx, ty))
+        self.scanners().all(|s| s.test(tx, ty))
+    }
+
+    /// The path-clip scanners, newest first.  Every consumer intersects their
+    /// regions, so the order does not affect any result.
+    fn scanners(&self) -> impl Iterator<Item = &XPathScanner> {
+        std::iter::successors(self.scanners.as_deref(), |node| node.parent.as_deref())
+            .map(|node| &node.scanner)
     }
 }
 
@@ -629,7 +668,11 @@ mod tests {
         let path = builder.build();
         let xpath = XPath::new(&path, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true);
         clip.clip_to_path(&xpath, false);
-        assert_eq!(clip.scanners.len(), 1, "diamond must become a scanner clip");
+        assert_eq!(
+            clip.scanners().count(),
+            1,
+            "diamond must become a scanner clip"
+        );
 
         assert!(clip.test(16, 16), "diamond centre must be inside the clip");
         assert!(clip.test(16, 8), "upper interior point must be inside");
@@ -698,7 +741,7 @@ mod tests {
         let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
         clip_to_diamond(&mut clip, 16.0, 16.0, 14.0);
         clip_to_diamond(&mut clip, 28.0, 16.0, 14.0);
-        assert_eq!(clip.scanners.len(), 2);
+        assert_eq!(clip.scanners().count(), 2);
 
         let mut buf = AaBuf::new(64);
         for row in 0..buf.height {
@@ -807,13 +850,43 @@ mod tests {
         assert_eq!(c.test_rect(15, 15, 20, 20), ClipResult::AllOutside);
     }
 
+    /// A save shares the whole path-clip list (one pointer, not one `Arc`
+    /// per clip), and intersecting the copy leaves the original unchanged.
     #[test]
-    fn clone_shares_scanners() {
-        let c = Clip::new(0.0, 0.0, 10.0, 10.0, false);
-        let c2 = c.clone_shared();
-        assert_eq!(c2.x_min_i, c.x_min_i);
-        // Both should have the same (empty) scanner list.
-        assert_eq!(c.scanners.len(), c2.scanners.len());
+    fn clone_shares_the_path_clip_list() {
+        let mut c = Clip::new(0.0, 0.0, 64.0, 64.0, false);
+        for i in 0..3 {
+            clip_to_diamond(&mut c, 32.0, 32.0, 20.0 + f64::from(i));
+        }
+        let mut saved = c.clone_shared();
+        assert_eq!(saved.x_min_i, c.x_min_i);
+        let (head, saved_head) = (c.scanners.as_ref(), saved.scanners.as_ref());
+        assert!(head.zip(saved_head).is_some_and(|(a, b)| Arc::ptr_eq(a, b)));
+        assert_eq!(head.map(Arc::strong_count), Some(2));
+
+        clip_to_diamond(&mut saved, 10.0, 32.0, 6.0);
+        assert_eq!(c.scanners().count(), 3);
+        assert_eq!(saved.scanners().count(), 4);
+        // (32, 32) is inside the three shared diamonds but outside the
+        // fourth, (10, 32) the other way round.
+        assert!(c.test(32, 32) && !saved.test(32, 32));
+        assert!(!c.test(10, 32) && !saved.test(10, 32));
+        assert!(c.test(30, 32) && !saved.test(30, 32));
+        assert!(saved.test(14, 32) && c.test(14, 32));
+    }
+
+    /// Dropping a long uniquely owned path-clip list does not recurse once
+    /// per clip.
+    #[test]
+    fn dropping_a_long_clip_list_is_iterative() {
+        let mut c = Clip::new(0.0, 0.0, 4.0, 4.0, false);
+        for _ in 0..200_000 {
+            clip_to_diamond(&mut c, 2.0, 2.0, 1.5);
+        }
+        let saved = c.clone_shared();
+        drop(c);
+        assert_eq!(saved.scanners().count(), 200_000);
+        drop(saved);
     }
 
     #[test]
