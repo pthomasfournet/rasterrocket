@@ -7,8 +7,7 @@
 # Every PDF named in LIST (one path per line) is rendered by both binaries at
 # 50 dpi gray, first four pages, four threads.  Without LIST the corpus is
 # the repository fixtures plus a fixed 150-file sample of the archive at
-# $AB_ARCHIVE (default ~/mss-content/archives); the archive part is skipped
-# when that directory does not exist.  The sample is reproducible: the
+# $AB_ARCHIVE when that names a directory, and none otherwise.  The sample is reproducible: the
 # paths are sorted in byte order and `shuf` draws from a constant random
 # source.
 #
@@ -41,7 +40,7 @@ source "$(dirname "$0")/ab_lib.sh"
 before=$1 after=$2 prefix=$3 list=${4-}
 ab_require_bins "$before" "$after"
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-archive=${AB_ARCHIVE:-$HOME/mss-content/archives}
+archive=${AB_ARCHIVE:-}
 
 if [[ -n $list ]]; then
     [[ -r $list ]] || ab_usage_error "cannot read list: $list"
@@ -49,7 +48,7 @@ if [[ -n $list ]]; then
 else
     {
         printf '%s\n' "$repo"/tests/fixtures/*.pdf
-        if [[ -d $archive ]]; then
+        if [[ -n $archive && -d $archive ]]; then
             shuffle=$(command -v shuf || command -v gshuf) ||
                 ab_usage_error "the archive sample needs shuf or gshuf"
             # Byte-order sort and NUL separators: the same input order, and
