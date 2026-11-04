@@ -344,29 +344,32 @@ where
     }
 
     fn next(&mut self) -> Option<(GlyphId, Sid)> {
-        if self.gid >= self.num_glyphs {
-            return None;
+        loop {
+            if self.gid >= self.num_glyphs {
+                return None;
+            }
+            // The notdef glyph isn't explicitly mapped so we need to special case
+            // it and add -1 and +1 at a few places when processing ranges
+            if self.gid == 0 {
+                self.gid += 1;
+                return Some((GlyphId::new(0), Sid::new(0)));
+            }
+            let gid = self.gid - 1;
+            self.gid = self.gid.checked_add(1)?;
+            while gid >= self.end {
+                let (first, end) = next_range(&mut self.ranges)?;
+                self.prev_end = self.end;
+                self.first = first;
+                self.end = self.prev_end.checked_add(end)?;
+            }
+            // A range running past the largest string identifier still
+            // counts its glyphs, as `glyph_id` does: the glyphs past it are
+            // skipped, not the rest of the charset.
+            let sid = self.first.checked_add(gid.checked_sub(self.prev_end)?)?;
+            if let Ok(sid) = u16::try_from(sid) {
+                return Some((GlyphId::new(gid + 1), Sid::new(sid)));
+            }
         }
-        // The notdef glyph isn't explicitly mapped so we need to special case
-        // it and add -1 and +1 at a few places when processing ranges
-        if self.gid == 0 {
-            self.gid += 1;
-            return Some((GlyphId::new(0), Sid::new(0)));
-        }
-        let gid = self.gid - 1;
-        self.gid = self.gid.checked_add(1)?;
-        while gid >= self.end {
-            let (first, end) = next_range(&mut self.ranges)?;
-            self.prev_end = self.end;
-            self.first = first;
-            self.end = self.prev_end.checked_add(end)?;
-        }
-        let sid = self
-            .first
-            .checked_add(gid.checked_sub(self.prev_end)?)?
-            .try_into()
-            .ok()?;
-        Some((GlyphId::new(gid + 1), Sid::new(sid)))
     }
 }
 
@@ -606,6 +609,33 @@ mod tests {
         assert_eq!(
             glyph_id_from_ranges(&ranges, Sid::new(1)),
             Err(ReadError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    fn iteration_skips_identifiers_past_u16_and_agrees_with_lookup() {
+        // The first range runs past the largest string identifier; the
+        // second range's glyphs must still be iterated.
+        let ranges = [
+            TestRange {
+                first: 65530,
+                n_left: 10,
+            },
+            TestRange {
+                first: 34,
+                n_left: 0,
+            },
+        ];
+        let mut iter = RangeIter::new(&ranges, 13);
+        let pairs: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+        let sid_34 = pairs
+            .iter()
+            .find(|(_, sid)| sid.to_u16() == 34)
+            .map(|p| p.0);
+        assert_eq!(sid_34, Some(GlyphId::new(12)));
+        assert_eq!(
+            glyph_id_from_ranges(&ranges, Sid::new(34)).ok(),
+            Some(GlyphId::new(12))
         );
     }
 

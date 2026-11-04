@@ -68,8 +68,21 @@ impl PaintParams {
 /// The area scale `√|det|` of the linear part of `m`: the factor by which
 /// it scales lengths on average.  `None` for a singular or non-finite `m`,
 /// whose inverse [`invert_affine`] does not give.
-fn area_scale(m: &[f64; 6]) -> Option<f64> {
+pub(super) fn area_scale(m: &[f64; 6]) -> Option<f64> {
     invert_affine(m).map(|_| m[0].mul_add(m[3], -(m[1] * m[2])).abs().sqrt())
+}
+
+/// The farthest a stroke `line_width` wide reaches past its path in device
+/// pixels under `device`: half the width, stretched at most by the matrix's
+/// largest singular value (bounded above by the Frobenius norm of its 2×2
+/// part), times the miter limit, or √2 for a square cap.  Under a singular
+/// matrix the width is taken in device pixels.
+pub(super) fn stroke_reach(device: &[f64; 6], line_width: f64, miter_limit: f64) -> f64 {
+    let [a, b, c, d, _, _] = *device;
+    let stretch = invert_affine(device).map_or(1.0, |_| {
+        a.mul_add(a, b.mul_add(b, c.mul_add(c, d * d))).sqrt()
+    });
+    line_width / 2.0 * stretch * miter_limit.max(std::f64::consts::SQRT_2)
 }
 
 impl PageRenderer<'_> {
@@ -494,11 +507,7 @@ impl PageRenderer<'_> {
         line_width: f64,
     ) -> Option<PixelRect> {
         let gs = self.gstate.current();
-        let device = self.device_matrix();
-        let scale = invert_affine(&device).map_or(1.0, |_| {
-            device[0].hypot(device[1]).max(device[2].hypot(device[3]))
-        });
-        let reach = line_width / 2.0 * scale * gs.miter_limit.max(std::f64::consts::SQRT_2);
+        let reach = stroke_reach(&self.device_matrix(), line_width, gs.miter_limit);
         self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0)
     }
 

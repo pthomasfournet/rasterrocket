@@ -12,8 +12,8 @@ use super::text_shaping::{Drawn, shaped_runs};
 use super::text_stroke::GlyphStroke;
 use crate::resources::cmap::DecodedCode;
 use crate::resources::font::CidEncoding;
-use font::face::{FontFace, quantise_scale};
-use font::key::{FaceId, GlyphKey};
+use font::face::FontFace;
+use font::key::FaceId;
 use raster::Clip;
 use raster::pipe::PipeState;
 use raster::types::BlendMode;
@@ -295,12 +295,12 @@ impl PageRenderer<'_> {
                     });
                 }
                 // The glyph outline relative to the pen, in device pixels
-                // with Trm applied, y up.
-                let outline = || {
+                // with Trm applied, y up, condensed by `scale`.
+                let outline_at = |scale: f64| {
                     if by_gid {
-                        face.glyph_path_by_gid_fitted(gid, x_scale)
+                        face.glyph_path_by_gid_fitted(gid, scale)
                     } else {
-                        face.glyph_path_fitted(char_code_for_path, x_scale)
+                        face.glyph_path_fitted(char_code_for_path, scale)
                     }
                 };
                 let stroked = glyph_stroke
@@ -317,9 +317,15 @@ impl PageRenderer<'_> {
                             id
                         };
                         let selector = if by_gid { gid } else { char_code_for_path };
-                        let key = GlyphKey::new(id, selector, face.size_px, x_frac, true)
-                            .condensed(quantise_scale(x_scale));
-                        glyph_cache.get_or_render(key, || stroke.coverage(&outline()?, x_frac))
+                        face.cached_condensed(
+                            glyph_cache,
+                            id,
+                            selector,
+                            true,
+                            x_frac,
+                            x_scale,
+                            |scale| stroke.coverage(&outline_at(scale)?, x_frac),
+                        )
                     });
                 // A glyph whose stroke has no cached coverage strokes with
                 // the outline of the run.
@@ -337,7 +343,7 @@ impl PageRenderer<'_> {
                 // The glyph outline in device space: translated by the
                 // exact x and the bitmap's row, y flipped (device y is
                 // positive-down).
-                let Some(mut path) = outline() else {
+                let Some(mut path) = outline_at(x_scale) else {
                     return;
                 };
                 let py = f64::from(pen_y);
@@ -563,7 +569,8 @@ impl PageRenderer<'_> {
         for rec in records {
             #[expect(
                 clippy::cast_possible_wrap,
-                reason = "glyph bitmaps are at most a few hundred pixels a side"
+                reason = "bitmap sides are bounded by the glyph rasteriser and, for a \
+                          cached stroke, by its 2^18-pixel area, far below i32::MAX"
             )]
             let glyph = GlyphBitmap {
                 data: &rec.bitmap.data,

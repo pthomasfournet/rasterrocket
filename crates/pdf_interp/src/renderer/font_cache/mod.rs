@@ -49,8 +49,11 @@ use vertical::{VerticalFallback, glyph_transform};
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
-/// Key type for [`FontCache::faces`]: the font dictionary's identity paired
-/// with the 2×2 Trm matrix bit pattern.
+/// Stroked-face identifiers a document holds at most.
+const MAX_STROKED_FACES: usize = 4096;
+
+/// Key of a face slot: the font dictionary's identity paired with the 2×2
+/// Trm matrix bit pattern.
 type FaceKey = (ResourceKey, [u64; 4]);
 
 /// The font selected by `Tf`: the identity of its dictionary and the
@@ -217,6 +220,12 @@ impl DocumentFonts {
     #[must_use]
     pub(crate) fn stroked_face_id(&self, face: FaceId, by_gid: bool, stroke: [u64; 9]) -> FaceId {
         let mut stroked = self.stroked.lock().unwrap_or_else(PoisonError::into_inner);
+        // The identifiers only name cache entries: past the bound they are
+        // dealt afresh, and the glyphs cached under the old ones age out of
+        // the byte-bounded glyph cache.
+        if stroked.len() >= MAX_STROKED_FACES {
+            stroked.clear();
+        }
         *stroked
             .entry((face, by_gid, stroke))
             .or_insert_with(|| self.face_ids.next())

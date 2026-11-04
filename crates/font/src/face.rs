@@ -222,10 +222,33 @@ impl FontFace {
         x_frac: u8,
         x_scale: f64,
     ) -> Option<Arc<GlyphBitmap>> {
+        self.cached_condensed(cache, self.id, gid, self.aa, x_frac, x_scale, |x_scale| {
+            self.render_gid(gid, x_frac, x_scale)
+        })
+    }
+
+    /// The bitmap `render` makes of glyph `selector` of the face `id` (this
+    /// face, or a face derived from it, such as its stroke), at `x_frac`
+    /// and condensed by `x_scale`, from `cache` when held.  The scale is
+    /// quantised as the key holds it, and `render` receives the quantised
+    /// value, so that a bitmap always matches its key.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a component of the cache key or its renderer"
+    )]
+    pub fn cached_condensed(
+        &self,
+        cache: &GlyphCache,
+        id: FaceId,
+        selector: u32,
+        aa: bool,
+        x_frac: u8,
+        x_scale: f64,
+        render: impl FnOnce(f64) -> Option<GlyphBitmap>,
+    ) -> Option<Arc<GlyphBitmap>> {
         let quantised = quantise_scale(x_scale);
-        let key = GlyphKey::new(self.id, gid, self.size_px, x_frac, self.aa).condensed(quantised);
-        let x_scale = f64::from(quantised) / f64::from(u16::MAX);
-        cache.get_or_render(key, || self.render_gid(gid, x_frac, x_scale))
+        let key = GlyphKey::new(id, selector, self.size_px, x_frac, aa).condensed(quantised);
+        cache.get_or_render(key, || render(f64::from(quantised) / f64::from(u16::MAX)))
     }
 
     /// Outline of the glyph for `char_code` in device pixels relative to
@@ -389,7 +412,7 @@ fn compose(outer: Affine, inner: Affine) -> Affine {
 
 /// `x_scale` in `(0, 1]` as a [`GlyphKey::x_scale`] value.
 #[must_use]
-pub fn quantise_scale(x_scale: f64) -> u16 {
+fn quantise_scale(x_scale: f64) -> u16 {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,

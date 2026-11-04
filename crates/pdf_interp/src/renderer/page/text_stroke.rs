@@ -6,15 +6,14 @@
 //! once per glyph, stroke and quarter-pixel phase into an 8-bit coverage
 //! bitmap and composited like a glyph bitmap thereafter.
 
-use std::f64::consts::SQRT_2;
-
 use font::bitmap::GlyphBitmap as CachedGlyph;
 use font::key::FRACTION;
 use raster::path::Path;
 use raster::types::{BlendMode, LineCap, LineJoin};
 use raster::{StrokeParams, stroke_outline};
 
-use super::super::gstate::InterpGState;
+use super::super::gstate::{InterpGState, invert_affine};
+use super::paint::{area_scale, stroke_reach};
 
 /// Most pixels a cached stroke covers; a larger glyph strokes as a path.
 const MAX_CACHED_AREA: f64 = (1 << 18) as f64;
@@ -42,8 +41,7 @@ impl GlyphStroke {
     /// `None` when it cannot be cached per glyph: without antialiasing, with
     /// a pattern colour, a constant alpha below 1, a blend mode other than
     /// normal, a dash pattern, a line width that is not positive (a
-    /// hairline), or a singular matrix.  Overlapping strokes of neighbouring
-    /// glyphs composite as one painted area only under these conditions.
+    /// hairline), or a matrix the path stroke takes for singular.
     pub(super) fn new(gs: &InterpGState, device: &[f64; 6], antialias: bool) -> Option<Self> {
         if !antialias
             || gs.stroke_pattern.is_some()
@@ -55,22 +53,19 @@ impl GlyphStroke {
             return None;
         }
         let [a, b, c, d, _, _] = *device;
-        let det = a.mul_add(d, -(b * c));
-        if det == 0.0 || !det.is_finite() {
-            return None;
-        }
-        let reach = gs.line_width / 2.0 * a.hypot(b).max(c.hypot(d)) * gs.miter_limit.max(SQRT_2);
+        let [i0, i1, i2, i3, _, _] = invert_affine(device)?;
+        let reach = stroke_reach(device, gs.line_width, gs.miter_limit);
         if !reach.is_finite() {
             return None;
         }
         Some(Self {
             matrix: [a, b, c, d],
-            inverse: [d / det, -b / det, -c / det, a / det],
+            inverse: [i0, i1, i2, i3],
             line_width: gs.line_width,
             line_cap: gs.line_cap,
             line_join: gs.line_join,
             miter_limit: gs.miter_limit,
-            flatness: gs.flatness.max(0.1) / det.abs().sqrt(),
+            flatness: gs.flatness.max(0.1) / area_scale(device)?,
             reach,
         })
     }

@@ -84,6 +84,14 @@ It is not published and changes are not sent upstream.
   `identical_charstring_ranges_share_one_copy`,
   `font_dicts_naming_one_subr_map_share_their_subrs`.
 
+## CFF charset iteration past the largest string identifier
+
+`ps/cff/charset.rs`: the range iterator of format 1 and 2 charsets ended
+the whole iteration at the first glyph whose string identifier exceeds
+`u16` (a range starting near 65535), while `Charset::glyph_id` skips such
+a range and keeps counting glyphs.  The iterator now skips those glyphs, so
+the two agree and the glyphs of later ranges are reached.
+
 ## Upstream fixes brought over
 
 Fixes to code this fork's users reach (glyf outlines, the CFF, CFF2 and
