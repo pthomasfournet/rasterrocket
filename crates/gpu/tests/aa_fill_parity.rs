@@ -242,7 +242,8 @@ mod vulkan {
         let cases = cases();
         std::thread::scope(|scope| {
             for _ in 0..4 {
-                scope.spawn(|| {
+                // The scope joins every thread, propagating a panic.
+                let _ = scope.spawn(|| {
                     for case in &cases {
                         for eo in [false, true] {
                             let expected = aa_fill_cpu(&case.table(), case.rect, case.aa_width, eo);

@@ -110,6 +110,35 @@ const _: () = {
     assert!(KernelId::IdctColor.slot_index() < NUM_KERNELS);
 };
 
+/// SPIR-V `OpCapability`, and the `Int64` capability operand.
+const OP_CAPABILITY: u32 = 17;
+const CAPABILITY_INT64: u32 = 11;
+
+/// Whether the SPIR-V module `spirv` (little-endian words after the
+/// five-word header) declares `OpCapability capability`.  Instructions are
+/// walked by their word counts, so an operand equal to the opcode is not
+/// mistaken for one; a malformed length ends the walk.
+fn spirv_declares_capability(spirv: &[u8], capability: u32) -> bool {
+    let words: Vec<u32> = spirv
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&w| u32::from_le_bytes(w))
+        .collect();
+    let mut at = 5;
+    while let Some(&first) = words.get(at) {
+        let (count, opcode) = ((first >> 16) as usize, first & 0xFFFF);
+        if count == 0 {
+            return false;
+        }
+        if opcode == OP_CAPABILITY && words.get(at + 1) == Some(&capability) {
+            return true;
+        }
+        at += count;
+    }
+    false
+}
+
 impl KernelId {
     /// SPIR-V blob for this kernel, baked into the binary at build time.
     const fn spirv(self) -> &'static [u8] {
@@ -441,6 +470,11 @@ impl PipelineCache {
     }
 
     fn compile(&self, id: KernelId) -> Result<CompiledKernel> {
+        if spirv_declares_capability(id.spirv(), CAPABILITY_INT64) && !self.device.has_int64 {
+            return Err(BackendError::msg(format!(
+                "kernel {id:?} uses 64-bit integers, which need shaderInt64; this device lacks it"
+            )));
+        }
         // Descriptor-set layout binding slots match the kernel's
         // SPIR-V `OpDecorate Binding N` exactly. Most kernels use
         // sequential 0..n; Phase 4 skips slot 3 (see
@@ -676,6 +710,31 @@ impl PipelineCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn int64_is_declared_by_the_64_bit_kernels_only() {
+        assert!(!spirv_declares_capability(
+            KernelId::AaFill.spirv(),
+            CAPABILITY_INT64
+        ));
+        assert!(!spirv_declares_capability(
+            KernelId::Composite.spirv(),
+            CAPABILITY_INT64
+        ));
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        {
+            assert!(spirv_declares_capability(
+                KernelId::IdctColor.spirv(),
+                CAPABILITY_INT64
+            ));
+            assert!(spirv_declares_capability(
+                KernelId::Phase1IntraSync.spirv(),
+                CAPABILITY_INT64
+            ));
+        }
+        // Every module declares Shader (capability 1).
+        assert!(spirv_declares_capability(KernelId::AaFill.spirv(), 1));
+    }
 
     /// The recorder feeds `binding_slots` to descriptor-set
     /// `vkUpdateDescriptorSets` while passing one buffer per slot

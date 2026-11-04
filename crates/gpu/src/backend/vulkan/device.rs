@@ -12,8 +12,10 @@
 //! No surface, no graphics queue — this is a headless compute backend.
 
 use ash::ext::{memory_budget, pci_bus_info};
+use ash::khr::{portability_enumeration, portability_subset};
 use ash::vk;
 use std::ffi::{CStr, c_char};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{BackendError, Result};
@@ -53,6 +55,9 @@ pub(super) struct DeviceCtx {
     /// Whether `VK_EXT_memory_budget` was successfully enabled (gates
     /// runtime budget queries).
     pub(super) has_memory_budget: bool,
+    /// Whether `shaderInt64` is enabled: kernels declaring the `Int64`
+    /// capability are built only when it is.
+    pub(super) has_int64: bool,
     /// Borrowed PFNs onto the live instance for runtime queries (e.g. memory budget).
     pub(super) instance: ash::Instance,
     /// Vulkan loader; must outlive instance.
@@ -83,10 +88,7 @@ impl Drop for DeviceCtx {
 /// the `ash::Device` reference everywhere.  `selector`, when given,
 /// names the physical device; otherwise the automatic ranking applies.
 pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> {
-    // Safety: `Entry::load` calls `dlopen("libvulkan.so")`; the returned
-    // `Entry` owns the dylib handle and is `Send + Sync` by ash design.
-    let entry = unsafe { ash::Entry::load() }
-        .map_err(|e| BackendError::msg(format!("Vulkan loader failed: {e}")))?;
+    let entry = load_entry()?;
 
     let instance = create_instance(&entry)?;
 
@@ -105,7 +107,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
 
     log_chosen_device(&dev_props, &chosen, selector);
 
-    let (device, compute_queue, has_memory_budget) = destroy_instance_on_err(
+    let (device, compute_queue, setup) = destroy_instance_on_err(
         &instance,
         create_device(&instance, phys, compute_queue_family),
     )?;
@@ -120,7 +122,8 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         mem_props,
         max_workgroup_count,
         vram_total,
-        has_memory_budget,
+        has_memory_budget: setup.has_memory_budget(),
+        has_int64: setup.int64,
         instance,
         entry,
     }))
@@ -152,6 +155,111 @@ fn destroy_instance_on_err<T>(instance: &ash::Instance, result: Result<T>) -> Re
     result
 }
 
+/// Load the Vulkan loader: the platform's default name first, then the
+/// paths of [`loader_candidates`].  The error names every path tried.
+fn load_entry() -> Result<ash::Entry> {
+    // Safety: `Entry::load` and `Entry::load_from` `dlopen` the loader; the
+    // returned `Entry` owns the library handle and is `Send + Sync` by ash
+    // design.
+    let default_error = match unsafe { ash::Entry::load() } {
+        Ok(entry) => return Ok(entry),
+        Err(e) => e,
+    };
+    let sdk = std::env::var_os("VULKAN_SDK").map(PathBuf::from);
+    let candidates = loader_candidates(sdk.as_deref());
+    for path in &candidates {
+        if let Ok(entry) = unsafe { ash::Entry::load_from(path) } {
+            return Ok(entry);
+        }
+    }
+    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+    Err(BackendError::msg(if tried.is_empty() {
+        format!("Vulkan loader failed: {default_error}")
+    } else {
+        format!(
+            "Vulkan loader failed: {default_error}; also tried {}",
+            tried.join(", ")
+        )
+    }))
+}
+
+/// Loader libraries to try when the default name is not found: on macOS,
+/// the Vulkan SDK's (`$VULKAN_SDK`) and Homebrew's, whose directories the
+/// dynamic linker does not search by default; none elsewhere.
+fn loader_candidates(vulkan_sdk: Option<&Path>) -> Vec<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let mut candidates: Vec<PathBuf> = vulkan_sdk
+        .map(|sdk| sdk.join("lib/libvulkan.1.dylib"))
+        .into_iter()
+        .collect();
+    candidates.extend(
+        [
+            "/opt/homebrew/lib/libvulkan.1.dylib",
+            "/usr/local/lib/libvulkan.1.dylib",
+        ]
+        .map(PathBuf::from),
+    );
+    candidates
+}
+
+/// The instance extensions to enable and the create flags, from the
+/// extensions the loader offers (`available`): portability enumeration
+/// when offered, so that the loader lists portability implementations
+/// such as `MoltenVK`.
+fn instance_setup(available: &[&CStr]) -> (Vec<&'static CStr>, vk::InstanceCreateFlags) {
+    if available.contains(&portability_enumeration::NAME) {
+        (
+            vec![portability_enumeration::NAME],
+            vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR,
+        )
+    } else {
+        (Vec::new(), vk::InstanceCreateFlags::empty())
+    }
+}
+
+/// The device extensions to enable and the optional features to use, from
+/// what the device offers.
+#[derive(Debug, PartialEq, Eq)]
+struct DeviceSetup {
+    extensions: Vec<&'static CStr>,
+    /// `shaderInt64` is supported and enabled.
+    int64: bool,
+}
+
+impl DeviceSetup {
+    fn has_memory_budget(&self) -> bool {
+        self.extensions.contains(&memory_budget::NAME)
+    }
+}
+
+/// [`DeviceSetup`] for a device offering the extensions `available` and the
+/// core features `supported`: memory budget when offered, the portability
+/// subset whenever advertised (its enabling is then required), and
+/// `shaderInt64` when supported.
+fn device_setup(available: &[&CStr], supported: &vk::PhysicalDeviceFeatures) -> DeviceSetup {
+    let extensions = [memory_budget::NAME, portability_subset::NAME]
+        .into_iter()
+        .filter(|name| available.contains(name))
+        .collect();
+    DeviceSetup {
+        extensions,
+        int64: supported.shader_int64 == vk::TRUE,
+    }
+}
+
+/// The names of `properties`, NUL-terminated per the specification.
+fn extension_names(properties: &[vk::ExtensionProperties]) -> Vec<&CStr> {
+    properties
+        .iter()
+        .map(|ext| {
+            // Safety: extension_name is a NUL-terminated C string per spec.
+            unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }
+        })
+        .collect()
+}
+
 fn create_instance(entry: &ash::Entry) -> Result<ash::Instance> {
     let app_name = c"rasterrocket";
     let app_info = vk::ApplicationInfo::default()
@@ -161,8 +269,17 @@ fn create_instance(entry: &ash::Entry) -> Result<ash::Instance> {
         .engine_version(vk::make_api_version(0, 0, 7, 0))
         .api_version(vk::API_VERSION_1_3);
 
-    // No surface/extension list at instance level — headless compute only.
-    let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+    // Headless compute: no surface extensions; portability enumeration when
+    // the loader offers it.
+    // Safety: no layer name is passed.
+    let offered = unsafe { entry.enumerate_instance_extension_properties(None) }
+        .map_err(vk_err("vkEnumerateInstanceExtensionProperties"))?;
+    let (extensions, flags) = instance_setup(&extension_names(&offered));
+    let extension_ptrs: Vec<*const c_char> = extensions.iter().map(|e| e.as_ptr()).collect();
+    let create_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&extension_ptrs)
+        .flags(flags);
 
     // Safety: `app_info` and `create_info` outlive this call; the pointers
     // captured by the ash::vk structs stay valid through the call.
@@ -285,20 +402,12 @@ fn create_device(
     instance: &ash::Instance,
     phys: vk::PhysicalDevice,
     queue_family: u32,
-) -> Result<(ash::Device, vk::Queue, bool)> {
+) -> Result<(ash::Device, vk::Queue, DeviceSetup)> {
     let available_exts = unsafe { instance.enumerate_device_extension_properties(phys) }
         .map_err(vk_err("vkEnumerateDeviceExtensionProperties"))?;
-
-    let has_memory_budget = available_exts.iter().any(|ext| {
-        // Safety: extension_name is a NUL-terminated C string per spec.
-        let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
-        name == memory_budget::NAME
-    });
-
-    let mut enabled_exts: Vec<*const c_char> = Vec::new();
-    if has_memory_budget {
-        enabled_exts.push(memory_budget::NAME.as_ptr());
-    }
+    let supported = unsafe { instance.get_physical_device_features(phys) };
+    let setup = device_setup(&extension_names(&available_exts), &supported);
+    let enabled_exts: Vec<*const c_char> = setup.extensions.iter().map(|e| e.as_ptr()).collect();
 
     let priorities = [1.0_f32];
     let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -318,7 +427,9 @@ fn create_device(
         // missing-capability error from the validation layer.
         .shader_int8(true);
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+    let core = vk::PhysicalDeviceFeatures::default().shader_int64(setup.int64);
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .features(core)
         .push_next(&mut f12)
         .push_next(&mut f13);
 
@@ -332,7 +443,7 @@ fn create_device(
 
     let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
-    Ok((device, queue, has_memory_budget))
+    Ok((device, queue, setup))
 }
 
 /// PCI vendor ID for NVIDIA, per the PCI-SIG registry.  Vulkan's
@@ -434,4 +545,54 @@ pub(super) fn query_memory_budget(ctx: &DeviceCtx) -> Result<(u64, u64)> {
         }
     }
     Ok((used, total_budget))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portability_enumeration_is_requested_only_when_the_loader_has_it() {
+        let (exts, flags) = instance_setup(&[portability_enumeration::NAME]);
+        assert_eq!(exts, [portability_enumeration::NAME]);
+        assert!(flags.contains(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR));
+        let (exts, flags) = instance_setup(&[]);
+        assert_eq!(exts, Vec::<&CStr>::new());
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn portability_subset_and_memory_budget_are_enabled_when_advertised() {
+        let none = vk::PhysicalDeviceFeatures::default();
+        let setup = device_setup(&[portability_subset::NAME, memory_budget::NAME], &none);
+        assert!(setup.extensions.contains(&portability_subset::NAME));
+        assert!(setup.has_memory_budget());
+        let bare = device_setup(&[], &none);
+        assert!(bare.extensions.is_empty() && !bare.has_memory_budget());
+    }
+
+    #[test]
+    fn int64_is_enabled_exactly_when_supported() {
+        let yes = vk::PhysicalDeviceFeatures::default().shader_int64(true);
+        assert!(device_setup(&[], &yes).int64);
+        assert!(!device_setup(&[], &vk::PhysicalDeviceFeatures::default()).int64);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn loader_candidates_follow_the_sdk_then_homebrew() {
+        let found = loader_candidates(Some(Path::new("/sdk")));
+        assert_eq!(found[0], Path::new("/sdk/lib/libvulkan.1.dylib"));
+        assert_eq!(found[1], Path::new("/opt/homebrew/lib/libvulkan.1.dylib"));
+        assert_eq!(found.len(), 3);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn loader_candidates_are_macos_only() {
+        assert_eq!(
+            loader_candidates(Some(Path::new("/sdk"))),
+            Vec::<PathBuf>::new()
+        );
+    }
 }
