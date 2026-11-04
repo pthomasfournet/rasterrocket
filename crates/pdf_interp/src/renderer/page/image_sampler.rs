@@ -393,33 +393,88 @@ enum GridMap {
     Direct(InverseMap),
 }
 
-/// The inverse of an image's placement, evaluated per pixel.
+/// The inverse of an image's placement: the source coordinate `(X, Y)`,
+/// in samples, of the centre of each device pixel.
+///
+/// The CTM `[a b c d e f]` sends image space `(u, v)` to PDF user space:
+///
+/// ```text
+/// x     = a·u + c·v + e
+/// y_pdf = b·u + d·v + f
+/// ```
+///
+/// so with `dx_rel = x − e`, `dy_rel = y_pdf − f` and `det = a·d − b·c`,
+/// `u = (d·dx_rel − c·dy_rel) / det` and `v = (a·dy_rel − b·dx_rel) / det`.
+/// The source coordinate is `X = u·img_w` and `Y = (1 − v)·img_h` (image
+/// rows run top-down, PDF `v` bottom-up).  Both are affine in `dx_rel` and
+/// `dy_rel`, so each splits into a column term, a function of the device
+/// column alone, and a row term, which carries the `img_h` offset of `Y`.
 #[derive(Clone, Copy)]
 struct InverseMap {
-    /// The image-space-to-user-space matrix.
-    ctm: Ctm,
-    /// Its determinant.
-    det: f64,
+    /// `∂X/∂dx_rel = d·img_w / det`.
+    kx_col: f64,
+    /// `∂Y/∂dx_rel = b·img_h / det`.
+    ky_col: f64,
+    /// `∂X/∂dy_rel = −c·img_w / det`.
+    kx_row: f64,
+    /// `∂Y/∂dy_rel = −a·img_h / det`.
+    ky_row: f64,
+    /// The CTM's translation `(e, f)`.
+    origin: (f64, f64),
     /// Page height in pixels, for the bitmap's downward y axis.
     page_h: f64,
+    /// Image height in samples.
+    img_h: f64,
 }
 
 impl InverseMap {
-    /// Source coordinate `(X, Y)` in samples of the centre of device pixel
-    /// `(dx, dy)` for an `img_w × img_h` image.
+    /// The inverse of `ctm` for an `img_w × img_h` image on a bitmap
+    /// `page_h` pixels tall.  `None` when `ctm` is singular; every
+    /// component of `ctm` is finite.
     #[expect(
         clippy::many_single_char_names,
-        clippy::similar_names,
-        clippy::suboptimal_flops,
-        reason = "PDF CTM components a-f are spec terminology; dx_rel/dy_rel are the paired per-axis offsets; the inverse is spelled as the textbook formula"
+        reason = "PDF CTM components a-f are spec terminology"
     )]
-    fn coord(&self, dx: u32, dy: u32, img_w: u32, img_h: u32) -> (f64, f64) {
-        let [a, b, c, d, e, f] = self.ctm;
-        let dx_rel = f64::from(dx) + 0.5 - e;
-        let dy_rel = self.page_h - (f64::from(dy) + 0.5) - f;
-        let u = (d * dx_rel - c * dy_rel) / self.det;
-        let v = (-b * dx_rel + a * dy_rel) / self.det;
-        (u * f64::from(img_w), (1.0 - v) * f64::from(img_h))
+    fn new(ctm: &Ctm, page_h: f64, img_w: u32, img_h: u32) -> Option<Self> {
+        let [a, b, c, d, e, f] = *ctm;
+        let det = a.mul_add(d, -(b * c));
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        let w = f64::from(img_w);
+        let h = f64::from(img_h);
+        Some(Self {
+            kx_col: d * inv_det * w,
+            ky_col: b * inv_det * h,
+            kx_row: -c * inv_det * w,
+            ky_row: -a * inv_det * h,
+            origin: (e, f),
+            page_h,
+            img_h: h,
+        })
+    }
+
+    /// The column term `(X, Y)` of device column `dx`.
+    fn col_term(&self, dx: u32) -> (f64, f64) {
+        let dx_rel = (f64::from(dx) + 0.5) - self.origin.0;
+        (self.kx_col * dx_rel, self.ky_col * dx_rel)
+    }
+
+    /// The row term `(X, Y)` of device row `dy`.
+    fn row_term(&self, dy: u32) -> (f64, f64) {
+        let dy_rel = (self.page_h - (f64::from(dy) + 0.5)) - self.origin.1;
+        (
+            self.kx_row * dy_rel,
+            self.ky_row.mul_add(dy_rel, self.img_h),
+        )
+    }
+
+    /// The source coordinate of the centre of device pixel `(dx, dy)`.
+    fn coord(&self, dx: u32, dy: u32) -> (f64, f64) {
+        let (cx, cy) = self.col_term(dx);
+        let (rx, ry) = self.row_term(dy);
+        (cx + rx, cy + ry)
     }
 }
 
@@ -430,11 +485,6 @@ impl SampleGrid {
     ///
     /// Returns `None` when nothing can be drawn: a non-finite or singular
     /// CTM, or a bounding box that misses the page entirely.
-    #[expect(
-        clippy::many_single_char_names,
-        clippy::similar_names,
-        reason = "PDF CTM components a-f are spec terminology; kx_*/ky_* are the paired per-axis coefficients they produce"
-    )]
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -487,41 +537,16 @@ impl SampleGrid {
             return None;
         }
 
-        // Inverse map.  The CTM sends image space (u, v) to PDF user space:
-        //   x     = a*u + c*v + e
-        //   y_pdf = b*u + d*v + f
-        // so with dx_rel = x - e and dy_rel = y_pdf - f:
-        //   u = ( d*dx_rel - c*dy_rel) / det
-        //   v = (-b*dx_rel + a*dy_rel) / det
-        // The source coordinate is X = u * img_w and Y = (1 - v) * img_h
-        // (image rows run top-down, PDF v runs bottom-up).  Both are affine
-        // in (dx_rel, dy_rel), so each splits into a column term and a row
-        // term; the `img_h` offset of Y lives in the row term.
-        let [a, b, c, d, e, f] = *ctm;
-        let det = a.mul_add(d, -(b * c));
-        // `det` is finite: every corner was, so every CTM component is.
-        if det.abs() < 1e-12 {
-            return None;
-        }
-        let inv_det = 1.0 / det;
-        let w = f64::from(img_w);
-        let h = f64::from(img_h);
-        let kx_col = d * inv_det * w;
-        let ky_col = b * inv_det * h;
-        let kx_row = -c * inv_det * w;
-        let ky_row = -a * inv_det * h;
+        // Every corner is finite, so every CTM component is.
+        let inverse = InverseMap::new(ctm, page_h_f, img_w, img_h)?;
 
         // Each term is affine in `dx_rel` or `dy_rel`, so its extremes over
         // the bounding box lie at the box's first and last pixel centres.
-        let dx_rel = |dx: u32| (f64::from(dx) + 0.5) - e;
-        let dy_rel = |dy: u32| (page_h_f - (f64::from(dy) + 0.5)) - f;
-        let col_term = |dx: u32| (kx_col * dx_rel(dx), ky_col * dx_rel(dx));
-        let row_term = |dy: u32| (kx_row * dy_rel(dy), ky_row.mul_add(dy_rel(dy), h));
         let representable = [
-            col_term(x0),
-            col_term(x1 - 1),
-            row_term(y0),
-            row_term(y1 - 1),
+            inverse.col_term(x0),
+            inverse.col_term(x1 - 1),
+            inverse.row_term(y0),
+            inverse.row_term(y1 - 1),
         ]
         .iter()
         .all(|&(x, y)| fits_q32(x) && fits_q32(y));
@@ -529,21 +554,17 @@ impl SampleGrid {
         let map = if representable {
             let mut cols = Vec::with_capacity((x1 - x0) as usize * ENTRY_WORDS);
             for dx in x0..x1 {
-                let (x, y) = col_term(dx);
+                let (x, y) = inverse.col_term(dx);
                 push_entry(&mut cols, x, y);
             }
             let mut rows = Vec::with_capacity((y1 - y0) as usize * ENTRY_WORDS);
             for dy in y0..y1 {
-                let (x, y) = row_term(dy);
+                let (x, y) = inverse.row_term(dy);
                 push_entry(&mut rows, x, y);
             }
             GridMap::Tables { cols, rows }
         } else {
-            GridMap::Direct(InverseMap {
-                ctm: *ctm,
-                det,
-                page_h: page_h_f,
-            })
+            GridMap::Direct(inverse)
         };
 
         Some(Self {
@@ -657,7 +678,7 @@ impl SampleGrid {
         let (cols, rows) = match &self.map {
             GridMap::Tables { cols, rows } => (cols, rows),
             GridMap::Direct(inverse) => {
-                let (x, y) = inverse.coord(dx, dy, self.img_w, self.img_h);
+                let (x, y) = inverse.coord(dx, dy);
                 return (split_bounded(x, self.img_w), split_bounded(y, self.img_h));
             }
         };
