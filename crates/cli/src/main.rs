@@ -160,17 +160,18 @@ fn main() -> ExitCode {
     let fax = args
         .fax
         .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
-    let print_job = if args.print {
-        match print::PrintJob::create(args.dpi()) {
-            Ok(job) => Some(job),
+    let mut spool = if args.print {
+        match print::Spool::create() {
+            Ok(spool) => Some(spool),
             Err(e) => return fail(format_args!("nothing printed: {e}")),
         }
     } else {
         None
     };
-    let document = match (&fax, &print_job) {
+    let print_pages = print::PageSink::new(args.dpi());
+    let document = match (&fax, &spool) {
         (Some(fax), _) => render::Document::Fax(fax),
-        (_, Some(job)) => render::Document::Print(job),
+        (_, Some(_)) => render::Document::Print(&print_pages),
         (None, None) => render::Document::None,
     };
     // A fax document or print job is made whole or not at all: once a
@@ -237,12 +238,12 @@ fn main() -> ExitCode {
 
     // Printed pages render a window at a time (see `print`); other pages
     // render in one pass.
-    let (errors, spool_error) = print_job.as_ref().map_or_else(
+    let (errors, spool_error) = spool.as_mut().map_or_else(
         || {
             let errors: Vec<_> = pool.install(|| pages.par_iter().filter_map(render_one).collect());
             (errors, None)
         },
-        |job| job.render_in_windows(&pages, &pool, render_one),
+        |spool| spool.render_in_windows(&print_pages, &pages, &pool, render_one),
     );
 
     // Eagerly drop GPU decoders on every worker thread while the CUDA driver is
@@ -251,31 +252,24 @@ fn main() -> ExitCode {
     // driver that has already started its own atexit shutdown sequence.
     let _ = pool.broadcast(|_| pdf_raster::release_gpu_decoders());
 
-    if let Some(job) = print_job {
+    if let Some(spool) = spool {
         if let Some(e) = spool_error {
-            job.discard();
             return fail(format_args!(
                 "nothing printed: the print document was not written: {e}"
             ));
         }
         if !errors.is_empty() {
-            job.discard();
-            let status = diagnostics::report_errors(errors);
+            let status = diagnostics::report_errors(errors, &args);
             eprintln!("rrocket: nothing printed: pages failed to render");
             return status;
         }
-        let title = std::path::Path::new(&args.input)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|_| args.input != "-")
-            .unwrap_or("rrocket");
         let submission = print::Submission {
             printer: args.printer.as_deref(),
-            copies: args.copies.unwrap_or(1),
+            copies: args.copies,
             duplex: args.duplex,
-            title,
+            title: print::job_title(&args.input),
         };
-        if let Err(e) = job.submit(&submission) {
+        if let Err(e) = spool.submit(&submission) {
             return fail(format_args!("nothing printed: {e}"));
         }
         return ExitCode::SUCCESS;
@@ -283,7 +277,7 @@ fn main() -> ExitCode {
     if let Some(document) = fax {
         // A fax missing pages would read as complete: none is written.
         if !errors.is_empty() {
-            let status = diagnostics::report_errors(errors);
+            let status = diagnostics::report_errors(errors, &args);
             eprintln!("rrocket: no fax document written: pages failed to render");
             return status;
         }
@@ -297,5 +291,5 @@ fn main() -> ExitCode {
             return fail(format_args!("fax to {number} not sent: {e}"));
         }
     }
-    diagnostics::report_errors(errors)
+    diagnostics::report_errors(errors, &args)
 }

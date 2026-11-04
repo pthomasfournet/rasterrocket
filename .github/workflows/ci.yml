@@ -233,14 +233,18 @@ jobs:
       - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
         run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
 
-      # The vendored forks, at clippy's defaults: every library, and the
-      # tests of the forks whose upstream test code is clean (read-fonts'
-      # and skrifa's are upstream's, left as upstream wrote them).
+      # The vendored forks at clippy's defaults, one package at a time so
+      # features do not unify across them: library and tests, with the
+      # `image` feature their integration tests require; read-fonts' and
+      # skrifa's libraries only, their test code being upstream's.
       - name: Clippy (vendored forks)
-        run: cargo clippy -p hayro-jpeg2000 -p hayro-ccitt -p hayro-jbig2 -p read-fonts -p skrifa -p harfrust -- -D warnings
-
-      - name: Clippy (vendored fork tests)
-        run: cargo clippy -p hayro-jpeg2000 -p hayro-ccitt -p hayro-jbig2 -p harfrust --tests -- -D warnings
+        run: |
+          cargo clippy -p hayro-jpeg2000 --features image --tests -- -D warnings
+          cargo clippy -p hayro-jbig2 --features image --tests -- -D warnings
+          cargo clippy -p hayro-ccitt --tests -- -D warnings
+          cargo clippy -p harfrust --tests -- -D warnings
+          cargo clippy -p read-fonts -- -D warnings
+          cargo clippy -p skrifa -- -D warnings
 
       - name: Test rasterrocket-render (NEON tiers)
         if: runner.os == 'Linux' && runner.arch == 'ARM64'

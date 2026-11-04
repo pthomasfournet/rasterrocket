@@ -127,27 +127,36 @@ fn print_vulkan_hint() {
 ///
 /// Returns the run's exit status: success when `errors` is empty, failure
 /// otherwise.
-pub(crate) fn report_errors(mut errors: Vec<(i32, RenderError)>) -> std::process::ExitCode {
+pub(crate) fn report_errors(
+    mut errors: Vec<(i32, RenderError)>,
+    args: &crate::args::Args,
+) -> std::process::ExitCode {
     if errors.is_empty() {
         return std::process::ExitCode::SUCCESS;
     }
     errors.sort_by_key(|(p, _)| *p);
-    let mut size_hint = false;
+    let (mut over_limit, mut unallocated) = (false, false);
     for (page, err) in &errors {
         eprintln!("rrocket: page {page}: {err}");
         print_error_chain(err);
-        size_hint |= matches!(
-            err,
+        match err {
             RenderError::Raster(
-                RasterError::PageTooLarge { .. }
-                    | RasterError::PageAreaTooLarge { .. }
-                    | RasterError::PageAllocationFailed { .. }
-            )
-        );
+                RasterError::PageTooLarge { .. } | RasterError::PageAreaTooLarge { .. },
+            ) => over_limit = true,
+            RenderError::Raster(RasterError::PageAllocationFailed { .. }) => unallocated = true,
+            _ => {}
+        }
     }
-    if size_hint {
+    if (over_limit || unallocated) && args.printing() {
+        eprintln!("  hint: lower the resolution with -r (--print renders at 600 dpi by default)");
+    } else if over_limit {
         eprintln!(
             "  hint: render such a page in tiles with -x/-y/-W/-H, each tile within the limit"
+        );
+    } else if unallocated {
+        eprintln!(
+            "  hint: lower the resolution with -r, or render the page in tiles with \
+             -x/-y/-W/-H so each tile's bitmap fits in memory"
         );
     }
     std::process::ExitCode::FAILURE

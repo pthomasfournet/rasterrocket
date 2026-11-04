@@ -45,12 +45,13 @@ clap        = { version = "4", features = ["derive"] }
 rayon       = "1"
 env_logger  = { workspace = true }
 mimalloc    = { version = "0.1", default-features = false }
+# The --print spool: an anonymous temporary file.
+tempfile    = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc        = "0.2"
 
 [dev-dependencies]
-tempfile = { workspace = true }
 # Reads TIFF output back in the end-to-end tests: an independent decoder.
 tiff = { workspace = true }
 

@@ -207,7 +207,7 @@ pub(crate) struct Args {
     pub fax_to: Option<String>,
 
     /// The CUPS fax queue --fax-to submits to (`lp -d NAME -o phone=NUMBER`).
-    #[arg(long = "fax-queue", value_name = "NAME", requires = "fax_to")]
+    #[arg(long = "fax-queue", value_name = "NAME", requires = "fax_to", value_parser = crate::deliver::parse_queue)]
     pub fax_queue: Option<String>,
 
     /// How --mono and --fax render intermediate grays: `none` (default), a 50%
@@ -248,7 +248,7 @@ pub(crate) struct Args {
 
     /// The printer --print submits to, a CUPS queue (`lp -d NAME`), else
     /// the default destination.  Implies --print.
-    #[arg(long = "printer", value_name = "NAME", value_parser = crate::print::parse_printer)]
+    #[arg(long = "printer", value_name = "NAME", value_parser = crate::deliver::parse_queue)]
     pub printer: Option<String>,
 
     /// Copies --print asks for.
@@ -758,6 +758,9 @@ impl Args {
             (self.tiff, "--tiff"),
             (self.single_file, "--singlefile"),
             (self.ram || self.ram_path.is_some(), "--ram / --ram-path"),
+            (self.no_ram, "--no-ram"),
+            (self.separator != '-', "--sep"),
+            (self.force_num_digits.is_some(), "--forcenum"),
             (self.scale_to.is_some(), "--scale-to"),
             (self.scale_to_x.is_some(), "--scale-to-x"),
             (self.scale_to_y.is_some(), "--scale-to-y"),

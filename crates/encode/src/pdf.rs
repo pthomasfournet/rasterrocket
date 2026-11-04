@@ -25,8 +25,14 @@ pub enum PdfImage<'a> {
     Gray(&'a Bitmap<Gray8>),
 }
 
+/// The largest byte offset a cross-reference entry's ten digits hold.
+const MAX_XREF_OFFSET: u64 = 9_999_999_999;
+
+/// The smallest page side, in points, that four decimals write as nonzero.
+const MIN_PAGE_PTS: f64 = 0.001;
+
 /// A page's image, compressed, and its size.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PdfPage {
     width: u32,
     height: u32,
@@ -42,8 +48,8 @@ impl PdfPage {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidInput`] for an empty image or a resolution
-    /// that is not positive and finite.
+    /// [`EncodeError::InvalidInput`] for an empty image, a resolution that
+    /// is not positive and finite, or a page side under 0.001 point.
     pub fn encode(image: PdfImage<'_>, dpi: (f64, f64)) -> Result<Self, EncodeError> {
         let (width, height, rgb) = match image {
             PdfImage::Rgb(b) => (b.width, b.height, true),
@@ -59,6 +65,15 @@ impl PdfPage {
                 "a PDF page needs a positive resolution",
             ));
         }
+        let size_pts = (
+            f64::from(width) * 72.0 / dpi.0,
+            f64::from(height) * 72.0 / dpi.1,
+        );
+        if size_pts.0 < MIN_PAGE_PTS || size_pts.1 < MIN_PAGE_PTS {
+            return Err(EncodeError::InvalidInput(
+                "a PDF page side is at least 0.001 point: lower the resolution",
+            ));
+        }
         let mut z = ZlibEncoder::new(Vec::new(), Compression::fast());
         match image {
             PdfImage::Rgb(b) => crate::write_live_rows(b, &mut z)?,
@@ -68,10 +83,7 @@ impl PdfPage {
             width,
             height,
             rgb,
-            size_pts: (
-                f64::from(width) * 72.0 / dpi.0,
-                f64::from(height) * 72.0 / dpi.1,
-            ),
+            size_pts,
             data: z.finish()?,
         })
     }
@@ -156,7 +168,7 @@ impl<W: Write> PdfWriter<W> {
         if self.pages.is_empty() {
             return Err(EncodeError::InvalidInput("a PDF needs at least one page"));
         }
-        self.offsets[1] = self.out.written;
+        self.offsets[1] = self.indexable_offset()?;
         let kids: Vec<String> = self.pages.iter().map(|p| format!("{p} 0 R")).collect();
         write!(
             self.out,
@@ -164,7 +176,7 @@ impl<W: Write> PdfWriter<W> {
             kids.join(" "),
             self.pages.len()
         )?;
-        self.offsets[0] = self.out.written;
+        self.offsets[0] = self.indexable_offset()?;
         self.out
             .write_all(b"1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n")?;
 
@@ -182,10 +194,36 @@ impl<W: Write> PdfWriter<W> {
     }
 
     /// Record object `id` as starting here and write its header.
-    fn begin(&mut self, id: usize) -> io::Result<()> {
+    fn begin(&mut self, id: usize) -> Result<(), EncodeError> {
         debug_assert_eq!(id, self.offsets.len() + 1);
-        self.offsets.push(self.out.written);
-        writeln!(self.out, "{id} 0 obj")
+        let offset = self.indexable_offset()?;
+        self.offsets.push(offset);
+        writeln!(self.out, "{id} 0 obj")?;
+        Ok(())
+    }
+
+    /// The current byte offset, refused past what a cross-reference entry
+    /// holds.
+    const fn indexable_offset(&self) -> Result<u64, EncodeError> {
+        if self.out.written > MAX_XREF_OFFSET {
+            return Err(EncodeError::InvalidInput(
+                "a PDF of more than 9 999 999 999 bytes cannot be indexed by a \
+                 cross-reference table: print fewer pages at once",
+            ));
+        }
+        Ok(self.out.written)
+    }
+}
+
+impl std::fmt::Debug for PdfPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdfPage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("rgb", &self.rgb)
+            .field("size_pts", &self.size_pts)
+            .field("data_bytes", &self.data.len())
+            .finish()
     }
 }
 
@@ -310,6 +348,14 @@ mod tests {
     }
 
     #[test]
+    fn offsets_past_ten_digits_are_refused() {
+        let page = PdfPage::encode(PdfImage::Gray(&gray(1, 1, |_, _| 0)), (72.0, 72.0)).unwrap();
+        let mut writer = PdfWriter::new(Vec::new()).unwrap();
+        writer.out.written = super::MAX_XREF_OFFSET + 1;
+        assert!(writer.write_page(&page).is_err());
+    }
+
+    #[test]
     fn empty_documents_images_and_resolutions_are_refused() {
         assert!(PdfWriter::new(Vec::new()).unwrap().finish().is_err());
         let empty: Bitmap<Gray8> = Bitmap::new(0, 4, 4, false);
@@ -317,5 +363,7 @@ mod tests {
         let bmp = gray(2, 2, |_, _| 0);
         assert!(PdfPage::encode(PdfImage::Gray(&bmp), (0.0, 300.0)).is_err());
         assert!(PdfPage::encode(PdfImage::Gray(&bmp), (f64::NAN, 300.0)).is_err());
+        // Two pixels at 2 000 000 dpi measure 0.000072 point.
+        assert!(PdfPage::encode(PdfImage::Gray(&bmp), (2.0e6, 300.0)).is_err());
     }
 }

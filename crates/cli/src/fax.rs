@@ -9,15 +9,13 @@
 //! order once all are done.  The written document can be handed to the
 //! system's fax service through its submission command, `lp` or `sendfax`.
 
-use std::sync::Mutex;
-
 use color::Gray8;
 use encode::{TiffCompression, TiffImage, TiffPage, TiffWriter};
 use raster::Bitmap;
 
 use crate::cleanup::Page;
 use crate::deliver;
-use crate::render::{RenderError, write_output};
+use crate::render::{PageCollector, RenderError, write_output};
 
 /// The width of a fax page in pixels: ITU-T T.4's 215 mm scan line.
 pub(crate) const FAX_WIDTH: u32 = 1728;
@@ -62,7 +60,7 @@ pub(crate) fn layout((width_pts, height_pts): (f64, f64), y_dpi: f64) -> FaxLayo
 pub(crate) struct FaxDocument {
     compression: TiffCompression,
     dpi: (f64, f64),
-    pages: Mutex<Vec<(i32, TiffPage)>>,
+    pages: PageCollector<i32, TiffPage>,
 }
 
 impl FaxDocument {
@@ -71,7 +69,7 @@ impl FaxDocument {
         Self {
             compression,
             dpi,
-            pages: Mutex::new(Vec::new()),
+            pages: PageCollector::new(),
         }
     }
 
@@ -87,10 +85,7 @@ impl FaxDocument {
         let luma = if turn { quarter_turn(&luma) } else { luma };
         let fitted = fit_width(&luma, FAX_WIDTH);
         let coded = TiffPage::encode(TiffImage::Bilevel(&fitted), self.dpi, self.compression)?;
-        self.pages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((page_num, coded));
+        self.pages.push(page_num, coded);
         Ok(())
     }
 
@@ -100,13 +95,8 @@ impl FaxDocument {
     ///
     /// No page was added, or the file could not be written.
     pub(crate) fn write(self, path: &str) -> Result<(), RenderError> {
-        let mut pages = self
-            .pages
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pages.sort_unstable_by_key(|&(page, _)| page);
         let mut writer = TiffWriter::fax_document();
-        for (_, page) in pages {
+        for page in self.pages.take_sorted() {
             writer.push_page(page);
         }
         write_output(path, |out| writer.write(out).map_err(RenderError::from))
@@ -149,14 +139,11 @@ fn submission(path: &str, number: &str, queue: Option<&str>) -> (&'static str, V
         |queue| {
             (
                 "lp",
-                vec![
-                    "-d".to_owned(),
-                    queue.to_owned(),
-                    "-o".to_owned(),
-                    format!("phone={number}"),
-                    "--".to_owned(),
-                    path.to_owned(),
-                ],
+                deliver::lp_args(
+                    Some(queue),
+                    vec!["-o".to_owned(), format!("phone={number}")],
+                    Some(path),
+                ),
             )
         },
     )
@@ -174,8 +161,9 @@ pub(crate) fn submit(path: &str, number: &str, queue: Option<&str>) -> Result<()
     deliver::submit(
         program,
         &argv,
+        std::process::Stdio::null(),
         "the fax",
-        path,
+        Some(path),
         "name a CUPS fax queue with --fax-queue, or install HylaFAX for sendfax",
     )
 }

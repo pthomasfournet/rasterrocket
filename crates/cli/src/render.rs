@@ -16,7 +16,7 @@ use crate::args::{Args, OutputFormat};
 use crate::cleanup::{self, Page};
 use crate::fax::{self, FaxDocument};
 use crate::naming::output_path_with_prefix;
-use crate::print::PrintJob;
+use crate::print::PageSink;
 use crate::ram::SpillPolicy;
 use crate::tone;
 
@@ -89,7 +89,7 @@ pub(crate) enum Document<'a> {
     /// A page of the fax document.
     Fax(&'a FaxDocument),
     /// A page of the print job.
-    Print(&'a PrintJob),
+    Print(&'a PageSink),
 }
 
 /// Render one page and write it to the appropriate output file.
@@ -141,7 +141,7 @@ pub(crate) fn render_page(
             document,
             turn: layout.turn,
         },
-        (Document::Print(job), _) => Sink::Print { job },
+        (Document::Print(pages), _) => Sink::Print { pages },
         _ => Sink::Files {
             spill,
             format: args.output_format(),
@@ -176,7 +176,7 @@ pub(crate) enum Sink<'a> {
         turn: bool,
     },
     /// A page of the print job.
-    Print { job: &'a PrintJob },
+    Print { pages: &'a PageSink },
 }
 
 /// Run the camera stages selected on the command line on `page` (see
@@ -202,8 +202,8 @@ pub(crate) fn write_cleaned(
                 document.add(page_num, page, turn)?;
                 continue;
             }
-            Sink::Print { job } => {
-                job.add(page_num, half, &page)?;
+            Sink::Print { pages } => {
+                pages.add(page_num, half, &page)?;
                 continue;
             }
         };
@@ -228,6 +228,41 @@ pub(crate) fn write_cleaned(
         })?;
     }
     Ok(())
+}
+
+/// Pages encoded on the workers that rendered them, handed back in key
+/// order.
+pub(crate) struct PageCollector<K, P> {
+    pages: std::sync::Mutex<Vec<(K, P)>>,
+}
+
+impl<K: Ord + Copy, P> PageCollector<K, P> {
+    /// An empty collection.
+    pub(crate) const fn new() -> Self {
+        Self {
+            pages: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Hold `page` under `key`.
+    pub(crate) fn push(&self, key: K, page: P) {
+        self.pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((key, page));
+    }
+
+    /// The pages held, in key order, leaving the collection empty.
+    pub(crate) fn take_sorted(&self) -> Vec<P> {
+        let mut pages = std::mem::take(
+            &mut *self
+                .pages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        pages.sort_unstable_by_key(|&(key, _)| key);
+        pages.into_iter().map(|(_, page)| page).collect()
+    }
 }
 
 /// Write-buffer size of an output file: at most

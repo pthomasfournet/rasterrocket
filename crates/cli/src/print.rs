@@ -1,28 +1,31 @@
 //! The `--print` output: the rendered pages as one PDF, each page a single
-//! image at the render resolution (see [`encode::PdfWriter`]), spooled to a
-//! temporary file and submitted to a CUPS queue with `lp`.  The queue's
-//! filters fit the images to the printer: media and orientation, colour,
-//! resolution and two-sided sheets; the pages are not rendered again.
+//! image at the render resolution (see [`encode::PdfWriter`]), handed to a
+//! CUPS queue with `lp`.  The queue's filters fit the images to the
+//! printer: media and orientation, colour, resolution and two-sided
+//! sheets; the pages are not rendered again.
 //!
 //! Pages render in windows of as many pages as the pool has threads.  Each
-//! page is compressed on the worker that rendered it, and a window's pages
-//! are appended to the spool file in page order once the window is done,
-//! so at most one window of pages is held.
+//! page is compressed on the worker that rendered it into a [`PageSink`],
+//! and a window's pages are appended to the [`Spool`] in page order once the
+//! window is done, so at most one window of pages is held in memory.  The
+//! spool is an anonymous temporary file, private to the process and freed
+//! however it ends; `lp` reads it as its standard input.
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs::File;
+use std::io::{BufWriter, Seek};
+use std::path::{Path, PathBuf};
 
 use encode::{PdfImage, PdfPage, PdfWriter};
 
 use crate::cleanup::{Page, SpreadHalf};
 use crate::deliver;
-use crate::render::{OUTPUT_BUFFER_BYTES, RenderError};
+use crate::render::{OUTPUT_BUFFER_BYTES, PageCollector, RenderError};
 
 /// The resolution of a printed page when no resolution flag is given.
 pub(crate) const PRINT_DPI: f64 = 600.0;
+
+/// Longest job name in bytes: IPP's `name(MAX)`.
+const MAX_TITLE_BYTES: usize = 255;
 
 /// `--duplex` argument value: which edge a two-sided sheet turns on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -43,99 +46,72 @@ impl Duplex {
     }
 }
 
-/// What `lp` is told about the job.
+/// What `lp` is told about the job; an option not given leaves the
+/// queue's default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Submission<'a> {
     /// The queue, else the default destination.
     pub printer: Option<&'a str>,
-    pub copies: u32,
+    pub copies: Option<u32>,
     pub duplex: Option<Duplex>,
-    /// The job's name.
-    pub title: &'a str,
+    /// The job's name (see [`job_title`]).
+    pub title: String,
 }
 
-/// Parse a CUPS destination name, a queue optionally followed by
-/// `/instance`: non-empty, without spaces or control characters, and not
-/// beginning with `-`, so no command reads it as an option.
-pub(crate) fn parse_printer(s: &str) -> Result<String, String> {
-    if s.is_empty() {
-        return Err("a printer name is not empty".to_owned());
+/// The job name for the input `input`: its file name, `rrocket` for
+/// standard input, with control characters replaced by spaces and cut to
+/// [`MAX_TITLE_BYTES`] on a character boundary.
+pub(crate) fn job_title(input: &str) -> String {
+    let name = Path::new(input)
+        .file_name()
+        .filter(|_| input != "-")
+        .map_or_else(|| "rrocket".into(), |name| name.to_string_lossy());
+    let mut title: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut cut = title.len().min(MAX_TITLE_BYTES);
+    while !title.is_char_boundary(cut) {
+        cut -= 1;
     }
-    if s.starts_with('-') {
-        return Err(format!("{s:?} is not a printer name: it begins with -"));
-    }
-    if let Some(c) = s.chars().find(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("{s:?} is not a printer name: it holds {c:?}"));
-    }
-    Ok(s.to_owned())
+    title.truncate(cut);
+    title
 }
 
-/// The arguments of `lp` that submit the PDF at `path`.
-fn submission_args(path: &str, job: &Submission<'_>) -> Vec<String> {
-    let mut argv = Vec::new();
-    if let Some(printer) = job.printer {
-        argv.extend(["-d".to_owned(), printer.to_owned()]);
+/// The options of `lp` for `job`, the document read from standard input.
+fn lp_options(job: &Submission<'_>) -> Vec<String> {
+    let mut options = Vec::new();
+    if let Some(copies) = job.copies {
+        options.extend(["-n".to_owned(), copies.to_string()]);
     }
-    argv.extend([
-        "-n".to_owned(),
-        job.copies.to_string(),
+    options.extend([
         "-t".to_owned(),
-        job.title.to_owned(),
+        job.title.clone(),
         "-o".to_owned(),
         "document-format=application/pdf".to_owned(),
     ]);
     if let Some(duplex) = job.duplex {
-        argv.extend(["-o".to_owned(), format!("sides={}", duplex.sides())]);
+        options.extend(["-o".to_owned(), format!("sides={}", duplex.sides())]);
     }
-    argv.extend(["--".to_owned(), path.to_owned()]);
-    argv
+    options
 }
 
 /// The position of a page in the document: its page number, then the left
 /// half of a split spread before the right.
 type PageKey = (i32, u8);
 
-/// A print job being spooled.
-pub(crate) struct PrintJob {
+/// The encoded pages of the current window, shared by the workers.
+pub(crate) struct PageSink {
     dpi: (f64, f64),
-    path: PathBuf,
-    writer: Mutex<PdfWriter<BufWriter<File>>>,
-    /// The pages of the current window, encoded.
-    window: Mutex<Vec<(PageKey, PdfPage)>>,
+    pages: PageCollector<PageKey, PdfPage>,
 }
 
-impl PrintJob {
-    /// Open a new spool file in the temporary directory for pages at
-    /// `dpi`.
-    ///
-    /// # Errors
-    ///
-    /// The file could not be created or its first bytes written.
-    pub(crate) fn create(dpi: (f64, f64)) -> Result<Self, RenderError> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path =
-            std::env::temp_dir().join(format!("rrocket-print-{}-{nanos}.pdf", std::process::id()));
-        let file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| {
-                std::io::Error::new(e.kind(), format!("cannot create {}: {e}", path.display()))
-            })?;
-        let writer = PdfWriter::new(BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file));
-        match writer {
-            Ok(writer) => Ok(Self {
-                dpi,
-                path,
-                writer: Mutex::new(writer),
-                window: Mutex::new(Vec::new()),
-            }),
-            Err(e) => {
-                let _ = fs::remove_file(&path);
-                Err(e.into())
-            }
+impl PageSink {
+    /// An empty sink for pages rendered at `dpi`.
+    pub(crate) const fn new(dpi: (f64, f64)) -> Self {
+        Self {
+            dpi,
+            pages: PageCollector::new(),
         }
     }
 
@@ -159,46 +135,68 @@ impl PrintJob {
             None | Some(SpreadHalf::Left) => 0,
             Some(SpreadHalf::Right) => 1,
         };
-        self.window
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(((page_num, half), coded));
+        self.pages.push((page_num, half), coded);
         Ok(())
     }
+}
 
-    /// Append the window's pages to the spool file in page order.
+/// The directory of the spool: `$TMPDIR` when set, else `/var/tmp` where it
+/// exists (a disk, where `/tmp` may be memory), else the system's temporary
+/// directory.
+fn spool_dir() -> PathBuf {
+    let var_tmp = Path::new("/var/tmp");
+    if std::env::var_os("TMPDIR").is_none() && var_tmp.is_dir() {
+        var_tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// The print document being written.
+pub(crate) struct Spool {
+    writer: PdfWriter<BufWriter<File>>,
+}
+
+impl Spool {
+    /// Open an anonymous temporary file in [`spool_dir`] and begin the PDF.
     ///
     /// # Errors
     ///
-    /// The spool file could not be written.
-    pub(crate) fn write_window(&self) -> Result<(), RenderError> {
-        let mut window = std::mem::take(
-            &mut *self
-                .window
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        window.sort_unstable_by_key(|&(key, _)| key);
-        let mut writer = self
-            .writer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (_, page) in window {
-            writer.write_page(&page)?;
+    /// The file could not be created or its first bytes written.
+    pub(crate) fn create() -> Result<Self, RenderError> {
+        let dir = spool_dir();
+        let file = tempfile::tempfile_in(&dir).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("cannot create a spool file in {}: {e}", dir.display()),
+            )
+        })?;
+        let writer = PdfWriter::new(BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file))?;
+        Ok(Self { writer })
+    }
+
+    /// Append the pages `sink` holds, in page order.
+    ///
+    /// # Errors
+    ///
+    /// The spool could not be written.
+    pub(crate) fn write_from(&mut self, sink: &PageSink) -> Result<(), RenderError> {
+        for page in sink.pages.take_sorted() {
+            self.writer.write_page(&page)?;
         }
-        drop(writer);
         Ok(())
     }
 
     /// Render `pages` with `render` on `pool`, a window of as many pages as
-    /// the pool has threads at a time, spooling each window once it is
-    /// done.  Rendering stops at the first window with a failed page, or
-    /// when the spool file cannot be written.
+    /// the pool has threads at a time into `sink`, appending each window
+    /// once it is done.  Rendering stops at the first window with a failed
+    /// page, or when the spool cannot be written.
     ///
-    /// Returns the pages that failed, with their errors, and the spool
-    /// file's write error.
+    /// Returns the pages that failed, with their errors, and the spool's
+    /// write error.
     pub(crate) fn render_in_windows<F>(
-        &self,
+        &mut self,
+        sink: &PageSink,
         pages: &[i32],
         pool: &rayon::ThreadPool,
         render: F,
@@ -208,101 +206,73 @@ impl PrintJob {
     {
         use rayon::prelude::*;
 
-        let mut errors = Vec::new();
         for window in pages.chunks(pool.current_num_threads().max(1)) {
-            errors
-                .extend(pool.install(|| window.par_iter().filter_map(render).collect::<Vec<_>>()));
+            let errors: Vec<_> = pool.install(|| window.par_iter().filter_map(render).collect());
             if !errors.is_empty() {
                 return (errors, None);
             }
-            if let Err(e) = self.write_window() {
-                return (errors, Some(e));
+            if let Err(e) = self.write_from(sink) {
+                return (Vec::new(), Some(e));
             }
         }
-        (errors, None)
+        (Vec::new(), None)
     }
 
-    /// Complete the spool file and submit it as `job`.  The file is
-    /// removed once `lp` has taken it; when the submission fails it stays,
-    /// and the message names it.
+    /// Complete the document and its file, rewound to its start.
+    fn finish(self) -> Result<File, String> {
+        let mut file = self
+            .writer
+            .finish()
+            .map_err(|e| e.to_string())?
+            .into_inner()
+            .map_err(|e| e.error().to_string())?;
+        file.rewind().map_err(|e| e.to_string())?;
+        Ok(file)
+    }
+
+    /// Complete the document and submit it as `job`, `lp` reading it from
+    /// its standard input.
     ///
     /// # Errors
     ///
-    /// No page was written, the file could not be completed, or `lp`
+    /// No page was written, the document could not be completed, or `lp`
     /// refused it.
     pub(crate) fn submit(self, job: &Submission<'_>) -> Result<(), String> {
-        let path = self.path.to_string_lossy().into_owned();
-        let completed = self
-            .write_window()
-            .map_err(|e| e.to_string())
-            .and_then(|()| {
-                self.writer
-                    .into_inner()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .finish()
-                    .map_err(|e| e.to_string())
-            })
-            .and_then(|mut out| out.flush().map_err(|e| e.to_string()));
-        if let Err(e) = completed {
-            let _ = fs::remove_file(&self.path);
-            return Err(format!("the print document was not written: {e}"));
-        }
+        let file = self
+            .finish()
+            .map_err(|e| format!("the print document was not written: {e}"))?;
         deliver::submit(
             "lp",
-            &submission_args(&path, job),
+            &deliver::lp_args(job.printer, lp_options(job), None),
+            file.into(),
             "the print job",
-            &path,
-            "install the CUPS client (cups-client, or cups-bsd for lpr)",
-        )?;
-        if let Err(e) = fs::remove_file(&self.path) {
-            eprintln!("rrocket: warning: could not remove the spooled {path}: {e}");
-        }
-        Ok(())
-    }
-
-    /// Remove the spool file without submitting it.
-    pub(crate) fn discard(self) {
-        drop(self.writer);
-        if let Err(e) = fs::remove_file(&self.path) {
-            eprintln!(
-                "rrocket: warning: could not remove the spooled {}: {e}",
-                self.path.display()
-            );
-        }
+            None,
+            "install the CUPS client (cups-client on Debian and Ubuntu, cups on Fedora and Arch)",
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use color::Gray8;
     use raster::Bitmap;
 
-    use super::{Duplex, PrintJob, Submission, parse_printer, submission_args};
+    use super::{Duplex, PageSink, Spool, Submission, job_title, lp_options};
     use crate::cleanup::{Page, SpreadHalf};
 
     #[test]
-    fn printer_names_cannot_pass_for_options() {
-        for name in ["Office", "HP_LaserJet-4", "Office/duplex", "queue@host"] {
-            assert_eq!(parse_printer(name).as_deref(), Ok(name));
-        }
-        for bad in ["", "-o", "Office Jet", "a\tb", "a\nb"] {
-            assert!(parse_printer(bad).is_err(), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn lp_gets_the_queue_copies_title_format_and_sides() {
+    fn lp_gets_copies_title_format_and_sides_only_when_given() {
         let job = Submission {
             printer: Some("Office"),
-            copies: 2,
+            copies: Some(2),
             duplex: Some(Duplex::Long),
-            title: "report.pdf",
+            title: "report.pdf".to_owned(),
         };
         assert_eq!(
-            submission_args("/tmp/j.pdf", &job),
+            lp_options(&job),
             [
-                "-d",
-                "Office",
                 "-n",
                 "2",
                 "-t",
@@ -311,28 +281,36 @@ mod tests {
                 "document-format=application/pdf",
                 "-o",
                 "sides=two-sided-long-edge",
-                "--",
-                "/tmp/j.pdf"
             ]
         );
         let default = Submission {
             printer: None,
-            copies: 1,
+            copies: None,
             duplex: None,
-            title: "-o",
+            title: "-o".to_owned(),
         };
-        let argv = submission_args("/tmp/j.pdf", &default);
-        assert_eq!(argv[0], "-n");
         // The title is the value of -t, never an option of its own.
-        assert_eq!(&argv[2..4], ["-t", "-o"]);
-        assert_eq!(argv.len(), 8);
+        assert_eq!(
+            lp_options(&default),
+            ["-t", "-o", "-o", "document-format=application/pdf"]
+        );
+    }
+
+    #[test]
+    fn titles_are_file_names_without_control_characters_within_255_bytes() {
+        assert_eq!(job_title("/docs/report.pdf"), "report.pdf");
+        assert_eq!(job_title("-"), "rrocket");
+        assert_eq!(job_title("a\nb\x1b.pdf"), "a b .pdf");
+        let long = "é".repeat(200);
+        let title = job_title(&long);
+        assert!(title.len() <= 255 && title.chars().all(|c| c == 'é'));
     }
 
     fn gray(w: u32, h: u32) -> Page {
         Page::Gray(Bitmap::<Gray8>::new(w, h, 1, false))
     }
 
-    /// The `(width, height)` of each image in a spooled PDF, in file order.
+    /// The `(width, height)` of each image in a PDF, in file order.
     fn image_sizes(pdf: &[u8]) -> Vec<(u32, u32)> {
         let text = String::from_utf8_lossy(pdf);
         text.match_indices("/Width ")
@@ -349,27 +327,22 @@ mod tests {
 
     #[test]
     fn pages_spool_in_page_order() {
-        let job = PrintJob::create((72.0, 72.0)).unwrap();
-        let path = job.path.clone();
-        job.add(2, None, &gray(4, 6)).unwrap();
-        job.add(1, Some(SpreadHalf::Right), &gray(3, 5)).unwrap();
-        job.add(1, Some(SpreadHalf::Left), &gray(2, 5)).unwrap();
-        job.write_window().unwrap();
-        job.add(3, None, &gray(8, 5)).unwrap();
-        job.write_window().unwrap();
-        let writer = job.writer.into_inner().unwrap();
-        drop(writer.finish().unwrap().into_inner().unwrap());
-        let pdf = std::fs::read(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let sink = PageSink::new((72.0, 72.0));
+        let mut spool = Spool::create().unwrap();
+        sink.add(2, None, &gray(4, 6)).unwrap();
+        sink.add(1, Some(SpreadHalf::Right), &gray(3, 5)).unwrap();
+        sink.add(1, Some(SpreadHalf::Left), &gray(2, 5)).unwrap();
+        spool.write_from(&sink).unwrap();
+        sink.add(3, None, &gray(8, 5)).unwrap();
+        spool.write_from(&sink).unwrap();
+        let mut pdf = Vec::new();
+        let n = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
+        assert_eq!(n, pdf.len());
         assert_eq!(image_sizes(&pdf), [(2, 5), (3, 5), (4, 6), (8, 5)]);
     }
 
     #[test]
-    fn a_discarded_job_leaves_no_file() {
-        let job = PrintJob::create((300.0, 300.0)).unwrap();
-        let path = job.path.clone();
-        assert!(path.exists());
-        job.discard();
-        assert!(!path.exists());
+    fn an_empty_document_is_refused() {
+        assert!(Spool::create().unwrap().finish().is_err());
     }
 }
