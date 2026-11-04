@@ -2,6 +2,8 @@
 //! program runs with its arguments and no shell, and its standard output
 //! goes to standard error, keeping standard output for rrocket's own.
 
+use std::fmt;
+use std::io;
 use std::process::{Command, Stdio};
 
 /// Parse a CUPS destination name (`lp -d`), a queue optionally followed by
@@ -39,6 +41,33 @@ pub(crate) fn lp_args(
     argv
 }
 
+/// Why [`submit`] did not hand the document over.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SubmitError {
+    /// The submission program could not be started.
+    NotStarted(String),
+    /// The submission program ran and refused the document.
+    Refused(String),
+}
+
+impl fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStarted(msg) | Self::Refused(msg) => f.write_str(msg),
+        }
+    }
+}
+
+/// The message for a `program` that could not be started: `missing` tells
+/// the user what to do when it is not installed.
+fn spawn_error(program: &str, missing: &str, e: &io::Error) -> String {
+    if e.kind() == io::ErrorKind::NotFound {
+        format!("{program} is not installed: {missing}")
+    } else {
+        format!("cannot run {program}: {e}")
+    }
+}
+
 /// Run `program` with `argv` and `stdin` to submit a document, `what`
 /// naming the job in messages, and wait for the service to accept it.
 /// `missing` tells the user what to do when `program` is not installed;
@@ -46,7 +75,8 @@ pub(crate) fn lp_args(
 ///
 /// # Errors
 ///
-/// The program could not be run or reported a failure; the message names
+/// [`SubmitError::NotStarted`] when the program could not be run,
+/// [`SubmitError::Refused`] when it reported a failure; the message names
 /// the kept document, if any.
 pub(crate) fn submit(
     program: &str,
@@ -55,24 +85,22 @@ pub(crate) fn submit(
     what: &str,
     kept: Option<&str>,
     missing: &str,
-) -> Result<(), String> {
+) -> Result<(), SubmitError> {
     let kept = kept.map_or_else(String::new, |path| format!("; the document is at {path}"));
     let status = Command::new(program)
         .args(argv)
         .stdin(stdin)
-        .stdout(std::io::stderr())
+        .stdout(io::stderr())
         .status()
         .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!("{program} is not installed: {missing}{kept}")
-            } else {
-                format!("cannot run {program}: {e}{kept}")
-            }
+            SubmitError::NotStarted(format!("{}{kept}", spawn_error(program, missing, &e)))
         })?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} refused {what} ({status}){kept}"))
+        Err(SubmitError::Refused(format!(
+            "{program} refused {what} ({status}){kept}"
+        )))
     }
 }
 
@@ -90,13 +118,7 @@ pub(crate) fn query(program: &str, argv: &[&str], missing: &str) -> Result<Strin
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!("{program} is not installed: {missing}")
-            } else {
-                format!("cannot run {program}: {e}")
-            }
-        })?;
+        .map_err(|e| spawn_error(program, missing, &e))?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -116,7 +138,9 @@ pub(crate) fn query(program: &str, argv: &[&str], missing: &str) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{lp_args, parse_queue};
+    use std::process::Stdio;
+
+    use super::{SubmitError, lp_args, parse_queue, submit};
 
     #[test]
     fn queue_names_cannot_pass_for_options() {
@@ -136,5 +160,30 @@ mod tests {
             ["-d", "Q", "-o", "x=1", "--", "f"]
         );
         assert_eq!(lp_args(None, options, None), ["-o", "x=1"]);
+    }
+
+    #[test]
+    fn a_missing_program_is_not_started_and_a_failing_one_refused() {
+        let missing = submit(
+            "rrocket-no-such-program-4b1d",
+            &[],
+            Stdio::null(),
+            "the job",
+            Some("/kept.pdf"),
+            "install it",
+        );
+        assert_eq!(
+            missing,
+            Err(SubmitError::NotStarted(
+                "rrocket-no-such-program-4b1d is not installed: install it; \
+                 the document is at /kept.pdf"
+                    .to_owned()
+            ))
+        );
+        #[cfg(unix)]
+        assert!(matches!(
+            submit("false", &[], Stdio::null(), "the job", None, "install it"),
+            Err(SubmitError::Refused(msg)) if msg.starts_with("false refused the job (")
+        ));
     }
 }

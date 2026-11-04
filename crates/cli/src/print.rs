@@ -247,12 +247,30 @@ impl Spool {
             file.into(),
             "the print job",
             None,
-            "install the CUPS client (cups-client on Debian and Ubuntu, cups on Fedora and Arch)",
+            CUPS_CLIENT_HINT,
         )
-        .map_err(|e| match job.printer {
-            Some(_) => format!("{e}; --list-printers lists the queues"),
-            None => e,
-        })
+        .map_err(|e| refusal_hint(e, job.printer.is_some()))
+    }
+}
+
+/// What to do when `lp` or `lpstat` is not installed.
+const CUPS_CLIENT_HINT: &str =
+    "install the CUPS client (cups-client on Debian and Ubuntu, cups on Fedora and Arch)";
+
+/// The message for a print job `lp` did not take, with a pointer to the
+/// queues when `lp` ran and refused it: `named` is whether `--printer` chose
+/// the queue, else the job went to the default destination, which may be
+/// unset.
+fn refusal_hint(e: deliver::SubmitError, named: bool) -> String {
+    match e {
+        deliver::SubmitError::NotStarted(msg) => msg,
+        deliver::SubmitError::Refused(msg) if named => {
+            format!("{msg}; --list-printers lists the queues")
+        }
+        deliver::SubmitError::Refused(msg) => format!(
+            "{msg}; when no default destination is set, name a queue with --printer; \
+             --list-printers lists them"
+        ),
     }
 }
 
@@ -263,14 +281,13 @@ impl Spool {
 ///
 /// `lpstat` is not installed or cannot reach the scheduler.
 pub(crate) fn list_printers() -> Result<String, String> {
-    const MISSING: &str = "--list-printers asks CUPS for its queues; install CUPS";
     if cfg!(windows) {
         return Err(
             "--list-printers asks CUPS for its queues, which Windows does not have".to_owned(),
         );
     }
-    let queues = deliver::query("lpstat", &["-e"], MISSING)?;
-    let default = deliver::query("lpstat", &["-d"], MISSING)?;
+    let queues = deliver::query("lpstat", &["-e"], CUPS_CLIENT_HINT)?;
+    let default = deliver::query("lpstat", &["-d"], CUPS_CLIENT_HINT)?;
     Ok(printer_list(&queues, default_destination(&default)))
 }
 
@@ -306,9 +323,10 @@ mod tests {
 
     use super::{
         Duplex, PageSink, Spool, Submission, default_destination, job_title, lp_options,
-        printer_list,
+        printer_list, refusal_hint,
     };
     use crate::cleanup::{Page, SpreadHalf};
+    use crate::deliver::SubmitError;
 
     #[test]
     fn printers_are_listed_one_per_line_with_the_default_marked() {
@@ -324,6 +342,25 @@ mod tests {
         );
         assert_eq!(printer_list(lpstat_e, None), "Office\nOffice/duplex\nLab\n");
         assert_eq!(printer_list("", None), "");
+    }
+
+    #[test]
+    fn a_refused_job_points_at_the_queues_and_a_job_lp_never_saw_does_not() {
+        let refused = || SubmitError::Refused("lp refused the print job".to_owned());
+        assert_eq!(
+            refusal_hint(refused(), true),
+            "lp refused the print job; --list-printers lists the queues"
+        );
+        let default = refusal_hint(refused(), false);
+        assert!(
+            default.contains("--printer") && default.contains("--list-printers"),
+            "{default}"
+        );
+        let missing = "lp is not installed: install the CUPS client";
+        assert_eq!(
+            refusal_hint(SubmitError::NotStarted(missing.to_owned()), true),
+            missing
+        );
     }
 
     #[test]

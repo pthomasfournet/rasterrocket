@@ -166,6 +166,7 @@ pub(crate) fn submit(path: &str, number: &str, queue: Option<&str>) -> Result<()
         Some(path),
         "name a CUPS fax queue with --fax-queue, or install HylaFAX for sendfax",
     )
+    .map_err(|e| e.to_string())
 }
 
 /// `src` turned a quarter counterclockwise: its top row becomes the left
