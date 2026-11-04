@@ -87,6 +87,7 @@ mod xobject;
 use canvas::{CanvasKind, PageCanvas};
 #[cfg(feature = "cache")]
 use devices::CacheState;
+pub(crate) use diagnostics::source_ppi;
 pub use diagnostics::{ImageFailure, PageDiagnostics, RenderAbort};
 use paint::components_to_color;
 pub use view::PageView;
@@ -187,9 +188,8 @@ pub struct PageRenderer<'doc> {
     width: u32,
     /// Height of the drawn window (the bitmap) in device pixels.
     height: u32,
-    /// Width of the whole page in device pixels; equals `width` unless the
-    /// renderer draws a window of the page.
-    page_width: u32,
+    /// Width of the page box in points, after rotation.
+    page_width_pts: f64,
     /// Height of the whole page in device pixels; equals `height` unless the
     /// renderer draws a window of the page.
     page_height: u32,
@@ -475,7 +475,7 @@ impl<'doc> PageRenderer<'doc> {
             canvas,
             width,
             height,
-            page_width: view.page_width,
+            page_width_pts: view.extent.0 / view.scale_x,
             page_height: view.page_height,
             window_origin: (view.x, view.y),
             gstate,

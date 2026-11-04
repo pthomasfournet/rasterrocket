@@ -22,35 +22,15 @@ use gpu::cache::DevicePageBuffer;
 
 impl PageRenderer<'_> {
     /// Count the drawn image in the page diagnostics (presence, filter) and
-    /// widen the source-resolution hint by its `source_width` samples
-    /// across the page: `ppi = source_width / page width in points × 72`.
+    /// raise the source-resolution hint to that of its `source_width`
+    /// samples across the page (see [`super::diagnostics::source_ppi`]).
     fn record_image_diagnostics(&mut self, img: &ImageDescriptor, source_width: u32) {
-        // Track diagnostics: image presence and per-filter counts.
         self.diag.has_images = true;
         let filter_idx = img.filter as usize;
         self.filter_counts[filter_idx] = self.filter_counts[filter_idx].saturating_add(1);
-
-        // Update source_ppi_hint: take the widest image seen (best resolution proxy).
-        // ppi = (image_px_width / page_pts_width) × 72.
-        let page_pts_w = f64::from(self.page_width) / {
-            // For unrotated pages CTM[0] carries the scale; for 90°/270° rotations
-            // CTM[0] is 0 and CTM[1] carries it.  Take the larger of the two to
-            // handle all axis-aligned cases.  Falls back to 1.0 for a degenerate CTM
-            // (page_pts_w would be width in pixels — wrong, but finite).
-            let ctm = self.gstate.current().ctm;
-            let ctm_scale = ctm[0].abs().max(ctm[1].abs());
-            if ctm_scale > 0.0 { ctm_scale } else { 1.0 }
-        };
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "src_ppi is finite and positive, checked below; f64→f32 is safe for PPI values in practice (well under f32::MAX)"
-        )]
-        let src_ppi = ((f64::from(source_width) / page_pts_w) * 72.0) as f32;
-        if src_ppi.is_finite() && src_ppi > 0.0 {
-            self.diag.source_ppi_hint = Some(match self.diag.source_ppi_hint {
-                Some(prev) if prev >= src_ppi => prev,
-                _ => src_ppi,
-            });
+        if let Some(ppi) = super::diagnostics::source_ppi(source_width, self.page_width_pts) {
+            self.diag.source_ppi_hint =
+                Some(self.diag.source_ppi_hint.map_or(ppi, |prev| prev.max(ppi)));
         }
     }
 

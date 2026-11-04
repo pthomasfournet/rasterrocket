@@ -47,7 +47,7 @@ use crate::{
     InterpError,
     content::Operator,
     page_size_pts_by_id, parse_page_content,
-    renderer::PageDiagnostics,
+    renderer::{PageDiagnostics, page::source_ppi},
     resources::image::{
         IMAGE_FILTER_COUNT, ImageFilter, dominant_filter, filter_name, inline::parse_inline_params,
     },
@@ -80,11 +80,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
     let page_id = crate::resolve_page_id(doc, page_num)?;
 
     let geom = page_size_pts_by_id(doc, page_id)?;
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "page width in PDF points (≤ ~10 000 pts); f32 is sufficient for PPI routing"
-    )]
-    let mut scan = ImageScan::new(doc, geom.width_pts as f32);
+    let mut scan = ImageScan::new(doc, geom.width_pts);
 
     // 1. Walk XObject resource dictionary (no decoding).
     scan.xobjects(page_id, 0);
@@ -128,7 +124,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
 struct ImageScan<'a> {
     doc: &'a Document,
     /// Width of the page in PDF points, the denominator of the PPI estimate.
-    page_pts_width: f32,
+    page_pts_width: f64,
     /// Images seen per filter, indexed by [`ImageFilter`] discriminant.
     filter_counts: [u32; IMAGE_FILTER_COUNT],
     has_images: bool,
@@ -141,7 +137,7 @@ struct ImageScan<'a> {
 }
 
 impl<'a> ImageScan<'a> {
-    fn new(doc: &'a Document, page_pts_width: f32) -> Self {
+    fn new(doc: &'a Document, page_pts_width: f64) -> Self {
         Self {
             doc,
             page_pts_width,
@@ -193,14 +189,9 @@ impl<'a> ImageScan<'a> {
             );
         let slot = &mut self.filter_counts[filter as usize];
         *slot = slot.saturating_add(1);
-        if let Some(w_px) = positive_u32(dict, b"Width")
-            && self.page_pts_width > 0.0
+        if let Some(ppi) =
+            positive_u32(dict, b"Width").and_then(|w_px| source_ppi(w_px, self.page_pts_width))
         {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "an image width is far below 2^24 in practice; f32 is sufficient for PPI routing"
-            )]
-            let ppi = (w_px as f32 / self.page_pts_width) * 72.0;
             self.max_ppi = self.max_ppi.max(ppi);
         }
     }

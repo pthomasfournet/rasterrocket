@@ -6,6 +6,21 @@ use pdf::ContentFailure;
 use super::{MAX_FORM_DEPTH, PAGE_RENDER_DEADLINE_SECS, PageRenderer};
 use crate::resources::ImageFilter;
 
+/// The source-resolution estimate of an image `image_width_px` samples
+/// across on a page `page_width_pts` points wide, as
+/// [`PageDiagnostics::source_ppi_hint`] defines it:
+/// `image_width_px / page_width_pts × 72`, the resolution of the image
+/// were it to span the page's width.  `None` unless finite and positive.
+pub(crate) fn source_ppi(image_width_px: u32, page_width_pts: f64) -> Option<f32> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a resolution estimate needs no more than f32 precision; an overflow to \
+                  infinity is rejected below"
+    )]
+    let ppi = (f64::from(image_width_px) / page_width_pts * 72.0) as f32;
+    (ppi.is_finite() && ppi > 0.0).then_some(ppi)
+}
+
 /// Lightweight page metadata collected at zero extra cost during rendering.
 ///
 /// Returned alongside the finished bitmap from [`PageRenderer::finish`].
@@ -28,7 +43,9 @@ pub struct PageDiagnostics {
     pub dominant_filter: Option<ImageFilter>,
     /// Estimated source pixels-per-inch of the dominant image, if any.
     ///
-    /// Computed as `(image_width_px / page_width_pts) × 72`.  Useful as a hint
+    /// Computed as `(image_width_px / page_width_pts) × 72` for the widest
+    /// image on the page, its width in source samples whatever resolution
+    /// it was decoded at, and the page width in points.  Useful as a hint
     /// for DPI auto-selection: rendering at the source PPI avoids upsampling a
     /// 67-PPI scan at 300 DPI (4.5× upscale with no information gain).
     ///

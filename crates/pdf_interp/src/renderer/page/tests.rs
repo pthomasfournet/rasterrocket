@@ -1395,6 +1395,49 @@ fn pages_sharing_default_spaces_share_image_decodes() {
     assert_eq!(images.kept_bytes(), 4, "the 2×2 image is kept once");
 }
 
+/// The source-resolution hint of a full-page image is its width in samples
+/// over the page width in inches, whatever the render resolution: 300
+/// samples across a 100 pt page are 216 PPI, at 2 px/pt as at 1.
+#[test]
+fn source_ppi_hint_is_the_image_width_over_the_page_width() {
+    let samples = "80".repeat(300) + ">";
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /XObject << /Im 5 0 R >> >> >>".to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Image /Width 300 /Height 1 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                &samples,
+            ),
+        ),
+    ]);
+    let geom = PageGeometry {
+        width_pts: 100.0,
+        height_pts: 50.0,
+        rotate_cw: 0,
+        user_unit: 1.0,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        media_box: None,
+        crop_box: None,
+    };
+    for scale in [1.0, 2.0] {
+        let view = PageView::whole(&geom, (scale, scale));
+        let mut renderer = PageRenderer::with_view(&view, &doc, (4, 0));
+        renderer.execute(&crate::content::parse(b"q 100 0 0 50 0 0 cm /Im Do Q"));
+        let ppi = renderer
+            .finish()
+            .1
+            .source_ppi_hint
+            .expect("an image was drawn");
+        assert!((ppi - 216.0).abs() < 1e-3, "scale {scale}: got {ppi}");
+    }
+}
+
 /// A font store bound to one document is refused by the renderer of
 /// another, whose fonts stay its own.
 #[test]
