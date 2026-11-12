@@ -463,16 +463,38 @@ impl PageRenderer<'_> {
         pipe: &raster::pipe::PipeState<'_>,
         src: &raster::pipe::PipeSrc<'_>,
     ) -> bool {
+        #[cfg(feature = "vulkan")]
         use super::gpu_ops::try_backend_aa_fill;
         #[cfg(feature = "vulkan")]
-        if let Some(vk) = self.vk_backend.clone() {
-            return try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src);
+        let painted = if let Some(vk) = self.vk_backend.clone() {
+            try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src)
+        } else {
+            self.try_cuda_aa_fill(path, even_odd, flatness, pipe, src)
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let painted = self.try_cuda_aa_fill(path, even_odd, flatness, pipe, src);
+        if painted {
+            self.diag.device_fills = self.diag.device_fills.saturating_add(1);
         }
+        painted
+    }
+
+    /// Fill `path` on the attached CUDA context, if any; `true` when the
+    /// device painted it.
+    #[cfg(feature = "gpu-aa")]
+    fn try_cuda_aa_fill(
+        &mut self,
+        path: &raster::path::Path,
+        even_odd: bool,
+        flatness: f64,
+        pipe: &raster::pipe::PipeState<'_>,
+        src: &raster::pipe::PipeSrc<'_>,
+    ) -> bool {
         let Some(ctx) = self.gpu_ctx.clone() else {
             return false;
         };
         let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
-        try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
+        super::gpu_ops::try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
     }
 
     /// Stroke `path` with the current line width, widened to at least one

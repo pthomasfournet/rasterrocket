@@ -114,6 +114,7 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         missing_fonts: Vec::new(),
         unslotted_spots: Vec::new(),
         form_type: crate::form_type(doc),
+        device_fills: 0,
     })
 }
 

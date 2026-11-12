@@ -2465,7 +2465,9 @@ pass uses (54d8712e); renders unchanged. `--print` no longer renders in
 barrier windows: each page is appended to the spool once the pages before
 it are done, and a slow page no longer idles the other workers (a 200-page
 text document with one scan page in ten, 600 dpi: 7.5 → 4.3 s, peak memory
-4.4 → 5.5 GB).
+4.4 → 5.5 GB). `PageDiagnostics::device_fills` (public, additive) counts the fills a
+GPU backend painted, so the GPU fill parity tests fail when a device fill
+falls back to the CPU instead of comparing the CPU render with itself.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

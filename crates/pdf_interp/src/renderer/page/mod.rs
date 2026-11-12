@@ -817,6 +817,7 @@ impl<'doc> PageRenderer<'doc> {
         }
         diag.has_images |= self.diag.has_images;
         diag.has_vector_text |= self.diag.has_vector_text;
+        diag.device_fills = diag.device_fills.saturating_add(self.diag.device_fills);
     }
 
     /// Override the operator-count budget.  Test-only — used to trigger the

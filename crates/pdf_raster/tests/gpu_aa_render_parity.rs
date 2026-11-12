@@ -26,7 +26,9 @@
 mod common;
 
 use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
-use rasterrocket::{BackendPolicy, SessionConfig, open_session};
+use rasterrocket::{
+    BackendPolicy, RasterOptions, RasterSession, SessionConfig, open_session, render_page_gray,
+};
 
 /// A 400×400 pt page whose fills cover every dispatch decision:
 ///
@@ -74,16 +76,39 @@ fn require_device_fills() {
     );
 }
 
-/// Render the synthetic page under `policy` and against the CPU.
+/// The fills of page 1 of `session` painted from device coverage.
+fn device_fills(session: &RasterSession) -> u32 {
+    render_page_gray(session, 1, &RasterOptions::new(72.0))
+        .expect("render page")
+        .diagnostics
+        .device_fills
+}
+
+/// Render the synthetic page under `policy` and against the CPU, after
+/// checking that `policy` paints fills on the device: a device fill that
+/// fails falls back to the CPU, and the comparison would then hold by
+/// construction.
 fn assert_synthetic_page_identical(policy: BackendPolicy) {
     require_device_fills();
     let pdf = fixture_pdf();
-    let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
+    let cpu_session = session(pdf.clone(), BackendPolicy::CpuOnly);
+    assert_eq!(
+        device_fills(&cpu_session),
+        0,
+        "CPU-only session used a device"
+    );
+    let cpu = render(&cpu_session, 1);
     assert!(
         cpu.2.iter().any(|&b| b != 0xff),
         "fixture rendered blank on the CPU path"
     );
-    let gpu = render(&session(pdf, policy), 1);
+    let gpu_session = session(pdf, policy);
+    let fills = device_fills(&gpu_session);
+    assert!(
+        fills > 0,
+        "no fill was painted on the device under {policy:?}"
+    );
+    let gpu = render(&gpu_session, 1);
     assert_identical(&cpu, &gpu, &format!("synthetic fills under {policy:?}"));
 }
 

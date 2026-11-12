@@ -77,6 +77,10 @@ pub struct PageDiagnostics {
     ///
     /// [`FormType::XfaFull`]: crate::FormType::XfaFull
     pub form_type: crate::FormType,
+    /// Fills painted from coverage counts computed on a GPU backend.  Zero
+    /// when every fill ran on the CPU: the default, the device fill being
+    /// dormant unless its size threshold is lowered.
+    pub device_fills: u32,
 }
 
 /// An image the renderer skipped because it could not be decoded or drawn,
