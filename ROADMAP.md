@@ -927,7 +927,8 @@ codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
 - **Security/robustness**: max-raster-area DoS cap (`MAX_PX_AREA`,
   `u64`-computed to avoid a latent overflow that would let a hostile
   page pass); FFI trust-boundary documented (system FreeType/OpenJPEG
-  must be patched — `cargo audit` covers the Rust tree only); bounded
+  must be patched — `cargo audit` covers the Rust tree only; both libraries
+  have since left the render path, OpenJPEG in v1.4.1 and FreeType in v1.5.0); bounded
   deterministic decoder property/fuzz harness; page-level and
   per-annotation/widget JavaScript entry points now detected (bounded,
   first-hit; structural `/S` only, `/JS` never decoded or executed).
