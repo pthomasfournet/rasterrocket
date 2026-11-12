@@ -23,6 +23,30 @@ members = [
     "crates/harfrust",
     "crates/font_test_data",
 ]
+# Every member but `pdf_bridge`, whose build script needs a poppler source
+# tree (`POPPLER_SRC`): a bare `cargo build` / `check` / `test` at the root
+# builds without one; `-p pdf_bridge` builds it on purpose.
+default-members = [
+    "crates/color",
+    "crates/raster",
+    "crates/encode",
+    "crates/font",
+    "crates/pdf",
+    "crates/pdf_interp",
+    "crates/pdf_raster",
+    "crates/cli",
+    "crates/gpu",
+    "crates/bench",
+    "crates/comic",
+    "crates/camera",
+    "crates/ccitt",
+    "crates/jbig2",
+    "crates/jpeg2000",
+    "crates/read_fonts",
+    "crates/skrifa",
+    "crates/harfrust",
+    "crates/font_test_data",
+]
 
 [workspace.package]
 version     = "2.1.0"
