@@ -9,10 +9,8 @@
 )]
 mod common;
 
-use std::path::PathBuf;
-
-use common::{stream_object, with_page_tree};
-use rasterrocket::{BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb};
+use common::{font_dir, isolated_fonts, stream_object, with_page_tree};
+use rasterrocket::{open_session_from_bytes, render_page_rgb};
 
 /// The characters shown, one per 40 pt cell: Greek alpha, Cyrillic zhe,
 /// Hebrew alef, Arabic beh, Devanagari ka.
@@ -23,8 +21,6 @@ const NAMES: [&str; 5] = ["uni03B1", "uni0416", "uni05D0", "uni0628", "uni0915"]
 /// hold a glyph; a code no face covers would leave its cell blank.
 #[test]
 fn bundled_faces_draw_scripts_without_installed_fonts() {
-    let empty = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bundled-fonts-empty");
-    std::fs::create_dir_all(&empty).expect("creates the empty font directory");
     let differences = NAMES.map(|n| format!("/{n}")).join(" ");
     let font = format!(
         "<< /Type /Font /Subtype /TrueType /BaseFont /Arial \
@@ -42,9 +38,7 @@ fn bundled_faces_draw_scripts_without_installed_fonts() {
         stream_object("", content.as_bytes()),
         font.into_bytes(),
     ]);
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.font_dirs = vec![empty];
-    config.system_fonts = false;
+    let config = isolated_fonts(vec![font_dir("bundled-fonts-empty", &[])]);
     let session = open_session_from_bytes(pdf, &config).expect("session");
     let page = render_page_rgb(&session, 1, 1.0).expect("render page");
     let width = page.width as usize;

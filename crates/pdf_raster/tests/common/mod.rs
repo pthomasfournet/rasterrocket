@@ -21,6 +21,41 @@ use rasterrocket::{
     SessionConfig, open_session_from_bytes, raster_pdf_from_bytes, render_page_rgb,
 };
 
+/// A font directory named `name` under the test target's scratch space,
+/// holding exactly `files` (name, bytes).  The directory is this process's
+/// own and is emptied first, so a file left by an earlier run, or written
+/// by a concurrent one, is never indexed.
+///
+/// # Panics
+///
+/// When the directory cannot be emptied, created or written.
+pub fn font_dir(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    let dir =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+    if let Err(e) = std::fs::remove_dir_all(&dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        panic!("cannot empty the font directory {}: {e}", dir.display());
+    }
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("cannot create the font directory {}: {e}", dir.display()));
+    for (file, bytes) in files {
+        std::fs::write(dir.join(file), bytes)
+            .unwrap_or_else(|e| panic!("cannot write {file} in {}: {e}", dir.display()));
+    }
+    dir
+}
+
+/// A CPU-only session configuration whose non-embedded fonts are drawn
+/// from `font_dirs` and the faces compiled into the library only, so no
+/// installed font takes part.
+pub fn isolated_fonts(font_dirs: Vec<PathBuf>) -> SessionConfig {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.font_dirs = font_dirs;
+    config.system_fonts = false;
+    config
+}
+
 /// 150 DPI: the resolution the parity findings were measured at.
 pub const SCALE: f64 = 150.0 / 72.0;
 

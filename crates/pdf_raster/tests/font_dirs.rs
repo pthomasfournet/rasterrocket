@@ -11,24 +11,12 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{dark_pixels_with, text_page as page};
-use rasterrocket::{BackendPolicy, SessionConfig};
+use common::{dark_pixels_with, font_dir, isolated_fonts, text_page as page};
 
 /// Dark pixels of page 1 of `pdf` rendered at one pixel per point with
-/// the font directories `font_dirs`.
+/// the font directories `font_dirs` and no installed fonts.
 fn ink(pdf: Vec<u8>, font_dirs: Vec<PathBuf>) -> usize {
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.font_dirs = font_dirs;
-    dark_pixels_with(pdf, &config).len()
-}
-
-/// A new directory under the test target's scratch space holding `bytes`
-/// as `file`.
-fn font_dir(name: &str, file: &str, bytes: &[u8]) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    std::fs::create_dir_all(&dir).expect("creates the font directory");
-    std::fs::write(dir.join(file), bytes).expect("writes the font");
-    dir
+    dark_pixels_with(pdf, &isolated_fonts(font_dirs)).len()
 }
 
 /// A font directory is searched first for the installed substitute: a
@@ -38,8 +26,10 @@ fn font_dir(name: &str, file: &str, bytes: &[u8]) -> PathBuf {
 fn font_dirs_supply_the_installed_substitute() {
     let dir = font_dir(
         "font-dirs-substitute",
-        "LiberationSans-Regular.ttf",
-        include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf"),
+        &[(
+            "LiberationSans-Regular.ttf",
+            include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf"),
+        )],
     );
     let helvetica = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
     let standard = ink(page(helvetica, "(AB)"), Vec::new());
@@ -56,8 +46,10 @@ fn font_dirs_supply_the_installed_substitute() {
 fn font_dirs_supply_fallback_glyphs() {
     let dir = font_dir(
         "font-dirs-fallback",
-        "material_symbols_subset.ttf",
-        include_bytes!("../../font_test_data/test_data/ttf/material_symbols_subset.ttf"),
+        &[(
+            "material_symbols_subset.ttf",
+            include_bytes!("../../font_test_data/test_data/ttf/material_symbols_subset.ttf"),
+        )],
     );
     let font = "<< /Type /Font /Subtype /TrueType /BaseFont /Arial \
                 /Encoding << /Differences [65 /uniEB2F] >> >>";

@@ -9,12 +9,10 @@
 )]
 mod common;
 
-use std::path::PathBuf;
-
 use common::{
-    dark_pixels, dark_pixels_with, font_page, ink_span, render_gray, stream_object, text_page,
+    dark_pixels, dark_pixels_with, font_dir, font_page, ink_span, isolated_fonts, render_gray,
+    stream_object, text_page,
 };
-use rasterrocket::{BackendPolicy, SessionConfig};
 
 /// Dark pixels of [`text_page`] showing `text` in `font`.
 fn ink(font: &str, text: &str) -> usize {
@@ -198,19 +196,14 @@ fn non_embedded_japanese_font_draws_latin_through_cid_to_unicode() {
                 .to_vec(),
         ],
     );
-    let ink = |font_dirs: Vec<PathBuf>| {
-        let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-        config.font_dirs = font_dirs;
-        config.system_fonts = false;
-        dark_pixels_with(pdf.clone(), &config).len()
-    };
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cid-route-boxes");
-    std::fs::create_dir_all(&dir).expect("creates the font directory");
-    std::fs::write(
-        dir.join("cid-route-boxes.ttf"),
-        include_bytes!("data/cid-route-boxes.ttf"),
-    )
-    .expect("writes the font");
+    let ink = |font_dirs| dark_pixels_with(pdf.clone(), &isolated_fonts(font_dirs)).len();
+    let dir = font_dir(
+        "cid-route-boxes",
+        &[(
+            "cid-route-boxes.ttf",
+            include_bytes!("data/cid-route-boxes.ttf"),
+        )],
+    );
     let compiled = ink(Vec::new());
     let boxes = ink(vec![dir]);
     assert!(

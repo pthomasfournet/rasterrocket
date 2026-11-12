@@ -15,10 +15,8 @@
 )]
 mod common;
 
-use std::path::PathBuf;
-
-use common::{assemble_pdf, stream_object, with_page_tree};
-use rasterrocket::{BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb};
+use common::{assemble_pdf, font_dir, isolated_fonts, stream_object, with_page_tree};
+use rasterrocket::{open_session_from_bytes, render_page_rgb};
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 60;
@@ -26,11 +24,7 @@ const HEIGHT: u32 = 60;
 /// The first page of `pdf` rendered with the bundled faces alone, as rows
 /// of booleans, `true` where inked.
 fn rendered(pdf: Vec<u8>) -> Vec<Vec<bool>> {
-    let empty = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("text-shaping-empty");
-    std::fs::create_dir_all(&empty).expect("creates the empty font directory");
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.font_dirs = vec![empty];
-    config.system_fonts = false;
+    let config = isolated_fonts(vec![font_dir("text-shaping-empty", &[])]);
     let session = open_session_from_bytes(pdf, &config).expect("session");
     let page = render_page_rgb(&session, 1, 1.0).expect("render page");
     let width = page.width as usize;
