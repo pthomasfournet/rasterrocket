@@ -369,8 +369,8 @@ The CLI crate forwards each of these feature names to the library.
 **To build:** a Rust toolchain (1.99 or newer, edition 2024) and the platform's C linker
 (`build-essential` on Debian/Ubuntu, the Xcode Command Line Tools on macOS). The CPU build
 needs nothing else; the GPU features add the CUDA 13 toolkit or the Vulkan SDK (`slangc`).
-Build the CLI with `-p rasterrocket-cli`, not the whole workspace: the `pdf_bridge` reference
-crate needs a poppler source tree (`POPPLER_SRC`).
+Build the CLI with `-p rasterrocket-cli`.  `cargo build --workspace` also builds the
+`pdf_bridge` reference crate, which needs a poppler source tree (`POPPLER_SRC`).
 
 **To run:** nothing. Fonts that a document does not embed are drawn from `RROCKET_FONT_DIR`
 and the installed system fonts, and from the faces built into the binary for characters no

@@ -23,12 +23,15 @@ pub(super) struct GlyphRecord {
 /// `(w × Tfs + Tc + Tw) × Th`, where `extra` is the word spacing when it
 /// applies and `0.0` otherwise.
 ///
-/// Evaluated as separate multiplies and adds.  The advance accumulates into
-/// the text matrix glyph after glyph, and a fused multiply-add rounds
-/// differently, which moves glyph pen positions by a device pixel.
+/// Evaluated as separate multiplies and adds, as are the text-matrix
+/// translations it feeds ([`translate_text_x`], [`translate_text_y`]).  The
+/// advance accumulates into the text matrix glyph after glyph; a fused
+/// evaluation rounds differently and moves some glyphs by a device pixel
+/// against the output this path is held to.  The pen of a shaped run is
+/// accumulated fused and is not held to it.
 #[expect(
     clippy::suboptimal_flops,
-    reason = "unfused evaluation is the rounding the rendered pen positions depend on"
+    reason = "unfused rounding keeps unshaped glyph positions byte-stable; see the doc"
 )]
 pub(super) fn glyph_advance(
     width: f64,
@@ -64,7 +67,7 @@ pub(super) fn fit_to_advance(pdf_width: i32, face_width: i32) -> (f64, f64) {
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
 #[expect(
     clippy::suboptimal_flops,
-    reason = "unfused evaluation is the rounding the rendered pen positions depend on"
+    reason = "unfused rounding keeps unshaped glyph positions byte-stable; see glyph_advance"
 )]
 pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;
@@ -76,7 +79,7 @@ pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
 #[expect(
     clippy::suboptimal_flops,
-    reason = "unfused evaluation is the rounding the rendered pen positions depend on"
+    reason = "unfused rounding keeps unshaped glyph positions byte-stable; see glyph_advance"
 )]
 pub(super) const fn translate_text_y(tm: [f64; 6], ty: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;

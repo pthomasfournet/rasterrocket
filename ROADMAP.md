@@ -46,14 +46,12 @@ transparency groups as a whole knock out instead of overprinting; see
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
 
-**`pdf_bridge` cannot build unattended.** Its build script hard-
-requires `POPPLER_SRC` (a poppler *source* tree, not just the system package),
-so any `cargo build/check/test --workspace` fails on a clean machine. CI never
-hits this because every job targets specific crates with `-p`. The crate has
-not changed since v1.2.0 and exists only as a pixel-diff reference
-baseline. It should either gain a feature gate that no-ops the build script
-when `POPPLER_SRC` is absent, or move to `exclude` in the workspace manifest
-alongside `fuzz` and `qa`.
+**`pdf_bridge` needs a poppler source tree.** Its build script requires
+`POPPLER_SRC` (a poppler *source* tree, not just the system package).  It is
+left out of the workspace's `default-members`, so a bare `cargo build`,
+`check` or `test` at the root builds without it; `--workspace` and
+`-p pdf_bridge` still need `POPPLER_SRC`.  The crate has not changed since
+v1.2.0 and exists only as a pixel-diff reference baseline.
 
 ---
 
@@ -926,9 +924,9 @@ codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
   JS-detection false-positives.
 - **Security/robustness**: max-raster-area DoS cap (`MAX_PX_AREA`,
   `u64`-computed to avoid a latent overflow that would let a hostile
-  page pass); FFI trust-boundary documented (system FreeType/OpenJPEG
-  must be patched — `cargo audit` covers the Rust tree only; both libraries
-  have since left the render path, OpenJPEG in v1.4.1 and FreeType in v1.5.0); bounded
+  page pass); FFI trust-boundary documented (at the time, system
+  FreeType/OpenJPEG had to be patched — `cargo audit` covers the Rust tree
+  only; OpenJPEG left the render path in v1.4.1 and FreeType in v1.5.0); bounded
   deterministic decoder property/fuzz harness; page-level and
   per-annotation/widget JavaScript entry points now detected (bounded,
   first-hit; structural `/S` only, `/JS` never decoded or executed).

@@ -347,6 +347,11 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Default members are every member but pdf_bridge
+        run: |
+          cargo metadata --format-version 1 --no-deps | jq -e '
+            (.workspace_default_members | sort) as $default
+            | [.workspace_members[] | select(test("pdf_bridge") | not)] | sort == $default'
       - name: Install typos
         uses: taiki-e/install-action@v2
         with:

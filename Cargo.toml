@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 exclude = ["fuzz", "qa"]
+# A new member also goes into `default-members` below (CI checks that the
+# two lists differ by `crates/pdf_bridge` alone).
 members = [
     "crates/color",
     "crates/raster",
