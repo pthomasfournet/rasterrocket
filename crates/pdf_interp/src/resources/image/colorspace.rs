@@ -37,7 +37,9 @@ use pdf::{Dictionary, Document, Object};
 
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, SoftMask};
 use crate::resources::colorspace::icc::IccConversion;
-use crate::resources::colorspace::{ColorSpace, decoded_sample, default_space, resolve};
+use crate::resources::colorspace::{
+    ColorSpace, EXACT_WORK_BUDGET, decoded_sample, default_space, resolve,
+};
 use crate::resources::dict_ext::DictExt as _;
 use crate::resources::icc_shaper::{ProfileConversion, RgbShaper};
 use crate::resources::lattice::{Axis, for_each_corner};
@@ -412,11 +414,6 @@ const fn descriptor(
 }
 
 // ── Conversion ────────────────────────────────────────────────────────────────
-
-/// Interpreted operations (see [`ColorSpace::conversion_cost`]) one image's
-/// conversion may spend converting colours exactly; an image whose exact
-/// conversion would spend more converts through a lattice.
-const EXACT_WORK_BUDGET: u64 = 1 << 28;
 
 /// Interpreted operations the images of one page may spend through tint
 /// transforms together: sixteen images' [`EXACT_WORK_BUDGET`].

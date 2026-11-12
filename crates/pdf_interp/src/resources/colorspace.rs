@@ -57,6 +57,11 @@ pub(crate) use cal::CalSpace;
 use icc::IccConversion;
 pub(crate) use lab::LabSpace;
 
+/// Interpreted operations (see [`ColorSpace::conversion_cost`]) one image's
+/// or one shading's colour conversion may spend; past it, colours are
+/// converted at the points of a lattice and interpolated between them.
+pub(crate) const EXACT_WORK_BUDGET: u64 = 1 << 28;
+
 /// Maximum recursion depth for nested colour-space chains
 /// (Indexed/Pattern/Separation/DeviceN's `alternate` base). PDF spec
 /// forbids cycles but adversarial PDFs are not required to be

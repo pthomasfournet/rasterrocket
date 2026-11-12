@@ -26,7 +26,7 @@ use raster::{Bitmap, CellPhase};
 use super::super::color::RasterColor;
 use super::PageRenderer;
 use crate::content::Operator;
-use crate::resources::shading::{ResolvedShading, ShadingResult};
+use crate::resources::shading::{Canvas, ResolvedShading};
 use crate::resources::tiling::TilingDescriptor;
 use crate::resources::{ResourceIdentity, ResourceKey, ShadingPattern};
 
@@ -43,24 +43,24 @@ pub(super) type SharedPatternMemo = Rc<RefCell<PatternMemo>>;
 pub(super) struct PlacedKey {
     id: ResourceKey,
     matrix: [u64; 6],
-    page_h: u64,
+    canvas: [u64; 2],
     /// The resource context, when its default colour spaces take part.
     defaults: Option<ObjectId>,
 }
 
 impl PlacedKey {
-    /// The key of object `id` under `matrix` on a page `page_h` pixels
-    /// high, resolved with the default colour spaces of `defaults`.
+    /// The key of object `id` under `matrix` on `canvas`, resolved with
+    /// the default colour spaces of `defaults`.
     pub(super) fn new(
         id: ResourceKey,
         matrix: &[f64; 6],
-        page_h: f64,
+        canvas: Canvas,
         defaults: Option<ObjectId>,
     ) -> Self {
         Self {
             id,
             matrix: matrix.map(f64::to_bits),
-            page_h: page_h.to_bits(),
+            canvas: [canvas.width.to_bits(), canvas.height.to_bits()],
             defaults,
         }
     }
@@ -287,17 +287,17 @@ impl PageRenderer<'_> {
     /// The named `Pattern` resource resolved as a shading pattern under the
     /// pattern matrix in effect, from the memo when kept.
     pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
-        let page_h = f64::from(self.height);
+        let canvas = self.shading_canvas();
         let pattern_ctm = self.window_ctm(&self.pattern_ctm);
         let key = PlacedKey::new(
             self.resources.pattern_key(name)?,
             &pattern_ctm,
-            page_h,
+            canvas,
             self.default_spaces_context(),
         );
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             self.resources
-                .shading_pattern(name, &pattern_ctm, page_h)
+                .shading_pattern(name, &pattern_ctm, canvas)
                 .map(Rc::new)
         })
     }
@@ -305,17 +305,25 @@ impl PageRenderer<'_> {
     /// The named `Shading` resource resolved under `ctm`, a matrix into the
     /// whole page's space, from the memo when kept.
     pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
-        let page_h = f64::from(self.height);
+        let canvas = self.shading_canvas();
         let ctm = &self.window_ctm(ctm);
         let key = PlacedKey::new(
             self.resources.shading_key(name)?,
             ctm,
-            page_h,
+            canvas,
             self.default_spaces_context(),
         );
         self.pattern_memo.borrow_mut().shading(key, || {
-            self.resources.shading(name, ctm, page_h).map(Rc::new)
+            self.resources.shading(name, ctm, canvas).map(Rc::new)
         })
+    }
+
+    /// The canvas shadings are resolved for: this renderer's bitmap.
+    fn shading_canvas(&self) -> Canvas {
+        Canvas {
+            width: f64::from(self.width),
+            height: f64::from(self.height),
+        }
     }
 
     /// The resource context whose default colour spaces a shading or an
@@ -378,12 +386,9 @@ impl PageRenderer<'_> {
     }
 }
 
-/// Host bytes of a resolved shading's mesh; a gradient counts nothing.
-fn shading_bytes(shading: &ResolvedShading) -> usize {
-    match &shading.result {
-        ShadingResult::Mesh(mesh) => std::mem::size_of_val(mesh.triangles()),
-        ShadingResult::Pattern(_) => 0,
-    }
+/// Host bytes a resolved shading holds (see [`ResolvedShading::held_bytes`]).
+const fn shading_bytes(shading: &ResolvedShading) -> usize {
+    shading.held_bytes
 }
 
 #[cfg(test)]
@@ -397,22 +402,28 @@ mod tests {
             y: 0.0,
             color: [0; 3],
         };
+        let mesh = crate::resources::shading::Mesh::new(vec![[v; 3]; triangles]);
+        let held_bytes = std::mem::size_of_val(mesh.triangles());
         Rc::new(ResolvedShading {
-            result: ShadingResult::Mesh(crate::resources::shading::Mesh::new(vec![
-                [v; 3];
-                triangles
-            ])),
+            result: crate::resources::shading::ShadingResult::Mesh(mesh),
             bbox: None,
             background: None,
             paints: raster::pipe::ChannelMask::ALL,
+            held_bytes,
         })
     }
 
     const ID: ObjectId = (5, 0);
     const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
+    /// The key of `id` under `matrix` on a canvas 100 pixels wide and
+    /// `page_h` high.
     fn placed(id: ObjectId, matrix: &[f64; 6], page_h: f64) -> PlacedKey {
-        PlacedKey::new(ResourceKey::Object(id), matrix, page_h, None)
+        let canvas = Canvas {
+            width: 100.0,
+            height: page_h,
+        };
+        PlacedKey::new(ResourceKey::Object(id), matrix, canvas, None)
     }
 
     /// Whether `memo` holds the shading at `key`: a lookup that would

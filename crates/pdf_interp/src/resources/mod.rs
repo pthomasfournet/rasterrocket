@@ -823,10 +823,10 @@ impl<'doc> PageResources<'doc> {
         &self,
         name: &[u8],
         ctm: &[f64; 6],
-        page_h: f64,
+        canvas: shading::Canvas,
     ) -> Option<shading::ResolvedShading> {
         let shadings = self.resource_subdict(Category::Shading)?;
-        shading::resolve_shading(self, shadings, name, ctm, page_h)
+        shading::resolve_shading(self, shadings, name, ctm, canvas)
     }
 
     /// Resolve the named `Pattern` resource as a shading pattern
@@ -841,7 +841,7 @@ impl<'doc> PageResources<'doc> {
         &self,
         name: &[u8],
         pattern_ctm: &[f64; 6],
-        page_h: f64,
+        canvas: shading::Canvas,
     ) -> Option<ShadingPattern> {
         let patterns = self.resource_subdict(Category::Pattern)?;
         let pattern = resolve_stream_dict(self.doc, patterns.get(name)?)?;
@@ -852,7 +852,7 @@ impl<'doc> PageResources<'doc> {
             crate::renderer::gstate::ctm_multiply(&m, pattern_ctm)
         });
         let Some(shading) =
-            shading::resolve_shading_object(self, pattern.get(b"Shading")?, &matrix, page_h)
+            shading::resolve_shading_object(self, pattern.get(b"Shading")?, &matrix, canvas)
         else {
             log::warn!(
                 "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
