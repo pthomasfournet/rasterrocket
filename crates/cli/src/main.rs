@@ -305,13 +305,15 @@ fn main() -> ExitCode {
     let _ = pool.broadcast(|_| pdf_raster::release_gpu_decoders());
 
     if let Some(spool) = spool {
+        // Page errors are reported whether or not the spool failed.
+        let pages_failed = !errors.is_empty();
+        let status = diagnostics::report_errors(errors, &args);
         if let Some(e) = spool_error {
             return fail(format_args!(
                 "nothing printed: the print document was not written: {e}"
             ));
         }
-        if !errors.is_empty() {
-            let status = diagnostics::report_errors(errors, &args);
+        if pages_failed {
             eprintln!("rrocket: nothing printed: pages failed to render");
             return status;
         }

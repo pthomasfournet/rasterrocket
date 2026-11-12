@@ -149,10 +149,7 @@ impl SpillPolicy {
     /// Available memory in bytes, re-probed at most once per [`PROBE_TTL`];
     /// `None` when the platform offers no reading.
     fn available_bytes(&self) -> Option<u64> {
-        let mut probe = self
-            .probe
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut probe = crate::render::lock(&self.probe);
         probe.refresh_if_stale();
         probe.last_available_bytes
     }

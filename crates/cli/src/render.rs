@@ -2,6 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use color::Rgb8;
 use encode::{
@@ -230,63 +231,56 @@ pub(crate) fn write_cleaned(
     Ok(())
 }
 
+/// `mutex` locked.  A thread that panicked while holding it leaves the
+/// data as its last completed update; every guarded update in this crate is
+/// a single push, assignment or take, so that state is consistent.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Pages encoded on the workers that rendered them, handed back in key
 /// order.
 pub(crate) struct PageCollector<K, P> {
-    pages: std::sync::Mutex<Vec<(K, P)>>,
+    pages: Mutex<Vec<(K, P)>>,
 }
 
 impl<K: Ord + Copy, P> PageCollector<K, P> {
     /// An empty collection.
     pub(crate) const fn new() -> Self {
         Self {
-            pages: std::sync::Mutex::new(Vec::new()),
+            pages: Mutex::new(Vec::new()),
         }
     }
 
     /// Hold `page` under `key`.
     pub(crate) fn push(&self, key: K, page: P) {
-        self.pages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((key, page));
+        lock(&self.pages).push((key, page));
     }
 
     /// The pages held, in key order, leaving the collection empty.
     pub(crate) fn take_sorted(&self) -> Vec<P> {
-        let mut pages = std::mem::take(
-            &mut *self
-                .pages
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        pages.sort_unstable_by_key(|&(key, _)| key);
-        pages.into_iter().map(|(_, page)| page).collect()
-    }
-
-    /// How many pages are held.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.pages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        Self::in_key_order(std::mem::take(&mut *lock(&self.pages)))
     }
 
     /// The pages held under keys up to `last` inclusive, in key order,
     /// leaving the others held.
     pub(crate) fn take_through(&self, last: K) -> Vec<P> {
-        let mut held = self
-            .pages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mut taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held)
-            .into_iter()
-            .partition(|&(key, _)| key <= last);
-        *held = kept;
-        drop(held);
-        taken.sort_unstable_by_key(|&(key, _)| key);
-        taken.into_iter().map(|(_, page)| page).collect()
+        let taken = lock(&self.pages)
+            .extract_if(.., |(key, _)| *key <= last)
+            .collect();
+        Self::in_key_order(taken)
+    }
+
+    /// How many pages are held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        lock(&self.pages).len()
+    }
+
+    /// The pages of `keyed`, sorted by key.
+    fn in_key_order(mut keyed: Vec<(K, P)>) -> Vec<P> {
+        keyed.sort_unstable_by_key(|&(key, _)| key);
+        keyed.into_iter().map(|(_, page)| page).collect()
     }
 }
 
