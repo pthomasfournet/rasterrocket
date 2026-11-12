@@ -8,7 +8,7 @@
 //!
 //! | PDF type | Name | Support |
 //! |---|---|---|
-//! | 1 | Function-based | yes (pre-sampled 64×64 grid) |
+//! | 1 | Function-based | yes (evaluated per device pixel; sampled when very large) |
 //! | 2 | Axial (linear) | yes |
 //! | 3 | Radial | yes |
 //! | 4 | Free-form Gouraud triangle mesh | yes |
@@ -418,12 +418,160 @@ fn resolve_radial(
 
 // ── Function-based (Type 1) ───────────────────────────────────────────────────
 
-/// Number of grid samples per axis for the pre-sampled Type 1 shading grid.
-const TYPE1_GRID: usize = 64;
+/// Most samples of a Type 1 shading's device lattice (12 MiB of RGB).
+const TYPE1_LATTICE_MAX: u64 = 1 << 22;
 
 /// Tolerance, in units of the Domain's extent, admitting a point on a
 /// Type 1 shading's Domain edge despite rounding error.
 const TYPE1_EDGE_TOLERANCE: f64 = 1e-9;
+
+/// The device pixels a Type 1 shading is sampled at: every `step`-th
+/// pixel from `(x0, y0)`, `cols × rows` of them, covering the device
+/// bounding box of the Domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Lattice {
+    x0: i64,
+    y0: i64,
+    step: i64,
+    cols: usize,
+    rows: usize,
+}
+
+impl Lattice {
+    /// The lattice over the integer device pixels of the box spanned by
+    /// `corners`: step 1 while the box holds at most [`TYPE1_LATTICE_MAX`]
+    /// pixels, else the least step keeping the lattice within it, the last
+    /// row and column reaching the box's far edges.  `None` when a corner
+    /// is not finite.
+    fn covering(corners: &[(f64, f64); 4]) -> Option<Self> {
+        if corners
+            .iter()
+            .any(|&(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return None;
+        }
+        let bound = |pick: fn(&(f64, f64)) -> f64, lo: bool| {
+            let v = corners.iter().map(pick);
+            let v = if lo {
+                v.fold(f64::INFINITY, f64::min).floor()
+            } else {
+                v.fold(f64::NEG_INFINITY, f64::max).ceil()
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped to ±2^31 first; the cast is exact"
+            )]
+            let v = v.clamp(-2_147_483_648.0, 2_147_483_647.0) as i64;
+            v
+        };
+        let (x0, x1) = (bound(|c| c.0, true), bound(|c| c.0, false));
+        let (y0, y1) = (bound(|c| c.1, true), bound(|c| c.1, false));
+        #[expect(clippy::cast_sign_loss, reason = "x1 ≥ x0 and y1 ≥ y0")]
+        let (w, h) = ((x1 - x0 + 1) as u64, (y1 - y0 + 1) as u64);
+        let dims = |step: u64| ((w - 1).div_ceil(step) + 1, (h - 1).div_ceil(step) + 1);
+        let fits = |step: u64| {
+            let (c, r) = dims(step);
+            c.saturating_mul(r) <= TYPE1_LATTICE_MAX
+        };
+        // The box's area over the budget, square-rooted, is within a few
+        // steps of the least step that fits.
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an estimate of a step below 2^32; corrected by the loop"
+        )]
+        let mut step = ((w as f64 * h as f64 / TYPE1_LATTICE_MAX as f64).sqrt() as u64).max(1);
+        while step > 1 && fits(step - 1) {
+            step -= 1;
+        }
+        while !fits(step) {
+            step += 1;
+        }
+        let (cols, rows) = dims(step);
+        Some(Self {
+            x0,
+            y0,
+            step: i64::try_from(step).ok()?,
+            cols: usize::try_from(cols).ok()?,
+            rows: usize::try_from(rows).ok()?,
+        })
+    }
+
+    /// Device pixel of lattice point `(col, row)`.
+    #[expect(
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss,
+        reason = "col < cols, row < rows ≤ 2^22 and the pixel within ±2^33: exact"
+    )]
+    fn pixel(self, col: usize, row: usize) -> (f64, f64) {
+        let at = |o: i64, i: usize| (o + self.step * i as i64) as f64;
+        (at(self.x0, col), at(self.y0, row))
+    }
+
+    /// Lattice coordinates of device pixel `(px, py)`, clamped to the
+    /// lattice: whole numbers at the lattice's own pixels.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "x0, y0, step within ±2^31; cols, rows ≤ 2^22; exact in f64"
+    )]
+    fn coords(self, px: f64, py: f64) -> (f64, f64) {
+        let step = self.step as f64;
+        (
+            ((px - self.x0 as f64) / step).clamp(0.0, (self.cols - 1) as f64),
+            ((py - self.y0 as f64) / step).clamp(0.0, (self.rows - 1) as f64),
+        )
+    }
+}
+
+/// The colours of a Type 1 shading at the points of `lattice`, row by row:
+/// `Function` at the shading-space point of each, its fractions of the
+/// Domain `[x0, x1, y0, y1]` given by `domain_at`, converted through `cs`.
+/// At step 1 a point outside the Domain is never read and is left black;
+/// at a larger step it takes the colour of the nearest Domain point.
+///
+/// `None`, logged, when the function evaluates at no point; points where
+/// it fails take colour components 0, logged once.
+fn sample_lattice(
+    lattice: Lattice,
+    domain_at: &impl Fn(f64, f64) -> (f64, f64, bool),
+    function: &Function,
+    cs: ShadingCs<'_>,
+    n: usize,
+    [xd0, xd1, yd0, yd1]: [f64; 4],
+) -> Option<Arc<[[u8; 3]]>> {
+    let mut samples = Vec::with_capacity(lattice.cols * lattice.rows);
+    let (mut evaluated, mut failures) = (0usize, 0usize);
+    for row in 0..lattice.rows {
+        for col in 0..lattice.cols {
+            let (px, py) = lattice.pixel(col, row);
+            let (tx, ty, inside) = domain_at(px, py);
+            if lattice.step == 1 && !inside {
+                samples.push([0; 3]);
+                continue;
+            }
+            let sx = tx.mul_add(xd1 - xd0, xd0);
+            let sy = ty.mul_add(yd1 - yd0, yd0);
+            evaluated += 1;
+            let channels = function.eval_n(&[sx, sy], n).unwrap_or_else(|| {
+                failures += 1;
+                vec![0.0; n]
+            });
+            samples.push(cs.to_rgb(&channels));
+        }
+    }
+    if failures == evaluated {
+        log::warn!("shading/type1: Function evaluates at no sampled point — skipping");
+        return None;
+    }
+    if failures > 0 {
+        log::warn!(
+            "shading/type1: Function fails at {failures} of {evaluated} sampled points — \
+             painting their colour components as 0"
+        );
+    }
+    Some(Arc::from(samples.into_boxed_slice()))
+}
 
 fn resolve_function_based(
     doc: &Document,
@@ -458,77 +606,67 @@ fn resolve_function_based(
         return None;
     };
 
-    // Pre-sample the function on a TYPE1_GRID×TYPE1_GRID grid over Domain.
-    // All document references are resolved here; the closure captures only the
-    // finished grid (Arc<[…]>) and scalar domain bounds — no lifetime issues.
-    let g = TYPE1_GRID;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "g=64; g-1=63 fits exactly in f64 mantissa"
-    )]
-    let gf = (g - 1) as f64;
-    // PDF §8.7.4.5.2: the colour at shading-space point (x, y) is the
-    // conversion of Function(x, y).  Row r of the grid holds y at r / (g − 1)
-    // of the Domain's y range, column c holds x likewise.
-    let mut grid: Vec<[u8; 3]> = Vec::with_capacity(g * g);
-    let mut failures = 0usize;
-    for row in 0..g {
-        #[expect(clippy::cast_precision_loss, reason = "row < 64; exact in f64")]
-        let sy = (row as f64 / gf).mul_add(yd1 - yd0, yd0);
-        for col in 0..g {
-            #[expect(clippy::cast_precision_loss, reason = "col < 64; exact in f64")]
-            let sx = (col as f64 / gf).mul_add(xd1 - xd0, xd0);
-            let channels = function.eval_n(&[sx, sy], n).unwrap_or_else(|| {
-                failures += 1;
-                vec![0.0; n]
-            });
-            grid.push(cs.to_rgb(&channels));
-        }
-    }
-    if failures == g * g {
-        log::warn!("shading/type1: Function evaluates at no grid point — skipping");
-        return None;
-    }
-    if failures > 0 {
-        log::warn!(
-            "shading/type1: Function fails at {failures} of {} grid points — \
-             painting their colour components as 0",
-            g * g
-        );
-    }
-    let grid: Arc<[[u8; 3]]> = Arc::from(grid.into_boxed_slice());
-
-    let pattern = FunctionPattern::new(move |px, py| {
+    // The shading-space point of device pixel (px, py) as fractions of the
+    // Domain, and whether it lies in the Domain (PDF §8.7.4.5.2: points
+    // outside it are not painted).
+    let domain_at = move |px: f64, py: f64| {
         let (sx, sy) = ctm_transform(&inv, px, py);
-
-        // PDF §8.7.4.5.2: points outside the Domain are not painted.
         let tx = (sx - xd0) / (xd1 - xd0);
         let ty = (sy - yd0) / (yd1 - yd0);
         let inside = |t: f64| (-TYPE1_EDGE_TOLERANCE..=1.0 + TYPE1_EDGE_TOLERANCE).contains(&t);
-        if !inside(tx) || !inside(ty) {
+        (
+            tx.clamp(0.0, 1.0),
+            ty.clamp(0.0, 1.0),
+            inside(tx) && inside(ty),
+        )
+    };
+
+    // The colour at shading-space point (x, y) is the conversion of
+    // Function(x, y).  It is evaluated at the device pixels of a lattice
+    // over the Domain's device bounding box: at every pixel (exact, the
+    // closure below then reads the sample of its own pixel) unless the box
+    // exceeds the lattice budget, when every `step`-th pixel is sampled and
+    // the pixels between are interpolated.  A lattice point outside the
+    // Domain samples the nearest Domain point, so interpolation next to the
+    // Domain's edge has a value on both sides; at step 1 none is read and
+    // none is evaluated.  All document references are resolved here; the
+    // closure captures only the finished samples.
+    let corner = |x, y| transform_point(&shading_ctm, x, y, page_h);
+    let Some(lattice) = Lattice::covering(&[
+        corner(xd0, yd0),
+        corner(xd1, yd0),
+        corner(xd0, yd1),
+        corner(xd1, yd1),
+    ]) else {
+        log::warn!("shading/type1: Domain maps to non-finite device coordinates — skipping");
+        return None;
+    };
+    let samples = sample_lattice(lattice, &domain_at, &function, cs, n, [xd0, xd1, yd0, yd1])?;
+    let (cols, rows) = (lattice.cols, lattice.rows);
+
+    let pattern = FunctionPattern::new(move |px, py| {
+        if !domain_at(px, py).2 {
             return None;
         }
-        let (tx, ty) = (tx.clamp(0.0, 1.0), ty.clamp(0.0, 1.0));
-
-        // Bilinear interpolation over the pre-sampled grid.
-        // tx/ty ∈ [0,1] and gf > 0, so fx/fy ∈ [0, gf]; floor ∈ [0, g-1].
-        let fx = tx * gf;
-        let fy = ty * gf;
+        // Bilinear interpolation between the lattice points around the
+        // pixel; at a lattice point both weights are 0 and the sample is
+        // returned unchanged.
+        let (fx, fy) = lattice.coords(px, py);
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "fx/fy clamped to [0,gf=63]; floor fits in usize"
+            reason = "fx ∈ [0, cols − 1], fy ∈ [0, rows − 1]; floor fits in usize"
         )]
         let (c0, r0) = (fx.floor() as usize, fy.floor() as usize);
-        let c1 = (c0 + 1).min(g - 1);
-        let r1 = (r0 + 1).min(g - 1);
-        #[expect(clippy::cast_precision_loss, reason = "c0/r0 ≤ g-1=63; exact in f64")]
-        let (wc, wr) = (fx - c0 as f64, fy - r0 as f64); // weights ∈ [0,1)
+        let c1 = (c0 + 1).min(cols - 1);
+        let r1 = (r0 + 1).min(rows - 1);
+        #[expect(clippy::cast_precision_loss, reason = "c0, r0 < 2^22; exact in f64")]
+        let (wc, wr) = (fx - c0 as f64, fy - r0 as f64);
 
-        let s00 = grid[r0 * g + c0];
-        let s10 = grid[r0 * g + c1];
-        let s01 = grid[r1 * g + c0];
-        let s11 = grid[r1 * g + c1];
+        let s00 = samples[r0 * cols + c0];
+        let s10 = samples[r0 * cols + c1];
+        let s01 = samples[r1 * cols + c0];
+        let s11 = samples[r1 * cols + c1];
 
         // Lerp a single u8 channel; t ∈ [0,1), result ∈ [0,255].
         #[expect(
@@ -728,6 +866,58 @@ mod tests {
         let (dx, dy) = transform_point(&ctm, 4.0, -6.0, 100.0);
         let back = ctm_transform(&inv, dx, dy);
         assert!((back.0 - 4.0).abs() < 1e-9 && (back.1 + 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_lattice_covers_every_pixel_of_a_small_box() {
+        let lattice =
+            Lattice::covering(&[(10.2, 5.7), (20.9, 5.7), (10.2, 8.1), (20.9, 8.1)]).unwrap();
+        assert_eq!(
+            lattice,
+            Lattice {
+                x0: 10,
+                y0: 5,
+                step: 1,
+                cols: 12,
+                rows: 5,
+            }
+        );
+        assert_eq!(lattice.pixel(11, 4), (21.0, 9.0));
+        assert_eq!(lattice.coords(13.0, 6.0), (3.0, 1.0));
+    }
+
+    #[test]
+    fn a_large_box_takes_the_least_step_within_the_budget() {
+        let lattice = Lattice::covering(&[
+            (0.0, 0.0),
+            (10_000.0, 0.0),
+            (0.0, 6_000.0),
+            (10_000.0, 6_000.0),
+        ])
+        .unwrap();
+        let cells = |l: &Lattice| l.cols as u64 * l.rows as u64;
+        assert!(cells(&lattice) <= TYPE1_LATTICE_MAX);
+        let finer = Lattice::covering(&[(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]).unwrap();
+        assert_eq!(finer.step, 1);
+        let step = u64::try_from(lattice.step).unwrap();
+        let dims = |s: u64| (10_000_u64.div_ceil(s) + 1) * (6_000_u64.div_ceil(s) + 1);
+        assert!(
+            dims(step - 1) > TYPE1_LATTICE_MAX,
+            "step {step} is not the least"
+        );
+        let (far_x, far_y) = lattice.pixel(lattice.cols - 1, lattice.rows - 1);
+        assert!(
+            far_x >= 10_000.0 && far_y >= 6_000.0,
+            "reaches the far edges"
+        );
+    }
+
+    #[test]
+    fn a_lattice_needs_finite_corners() {
+        assert_eq!(
+            Lattice::covering(&[(0.0, 0.0), (f64::INFINITY, 0.0), (0.0, 1.0), (1.0, 1.0)]),
+            None
+        );
     }
 
     #[test]

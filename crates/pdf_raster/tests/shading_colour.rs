@@ -142,6 +142,40 @@ fn function_based_shading_reads_both_coordinates_through_its_matrix() {
     }
 }
 
+/// A function-based shading is evaluated at every device pixel, so detail
+/// finer than any fixed sampling grid survives: 24 periods of a sine across
+/// a 192-pixel Domain, 8 pixels a period, match the function at each pixel
+/// (patterns are evaluated at the integer device coordinate of a pixel).
+#[test]
+fn function_based_shading_is_evaluated_at_every_pixel() {
+    // Function(x, y) = grey 0.5 + 0.5 sin(24 × 360° × x).
+    let shading = "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] \
+                   /Matrix [192 0 0 50 4 25] /Function 7 0 R >>";
+    let probes: Vec<(u32, u32)> = (6..196).map(|x| (x, 50)).collect();
+    let px = rgb_at(
+        page_with(
+            "/Sh0 sh",
+            shading.as_bytes(),
+            &[xy_function(
+                3,
+                "{ pop 8640 mul sin 0.5 mul 0.5 add dup dup }",
+            )],
+        ),
+        &probes,
+    );
+    for ((x, _), got) in probes.into_iter().zip(px) {
+        let t = (f64::from(x) - 4.0) / 192.0;
+        let grey = 0.5f64.mul_add((24.0 * std::f64::consts::TAU * t).sin(), 0.5) * 255.0;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "grey ∈ [0, 255]"
+        )]
+        let grey = grey.round() as u8;
+        assert_rgb_near(got, [grey; 3], 2, &format!("pixel {x}"));
+    }
+}
+
 #[test]
 fn function_based_shading_takes_an_array_of_two_input_functions() {
     // Function = [x, y, 0], one single-output function per channel.

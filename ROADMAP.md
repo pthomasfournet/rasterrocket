@@ -2469,6 +2469,12 @@ text document with one scan page in ten, 600 dpi: 7.5 → 4.3 s, peak memory
 4.4 → 5.5 GB). `PageDiagnostics::device_fills` (public, additive) counts the fills a
 GPU backend painted, so the GPU fill parity tests fail when a device fill
 falls back to the CPU instead of comparing the CPU render with itself.
+A function-based (Type 1) shading is evaluated at every device pixel of its
+Domain instead of on a 64 × 64 grid, so detail finer than 1/64 of the Domain
+is drawn (above 4 Mi pixels it samples every k-th pixel and interpolates).
+**This changes pixels** of every Type 1 shading: by 1–2 counts on a smooth
+function, wholly on fine detail; a full-page shading of a Type 4 function
+costs about 0.2 s more at 150 dpi.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
