@@ -144,7 +144,7 @@ impl Encoder {
                         } else {
                             self.code_two_d(changes);
                         }
-                        self.phase = (self.phase + 1) % k.get();
+                        self.phase = (self.phase + 1) % k;
                     }
                 }
             }

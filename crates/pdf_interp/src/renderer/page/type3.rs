@@ -232,7 +232,7 @@ impl PageRenderer<'_> {
         child.execute(&glyph.ops);
         child.fold_child_into(self);
         let bitmap = child.finish().0;
-        let data = bitmap.alpha_plane().map(<[u8]>::to_vec).unwrap_or_default();
+        let data = bitmap.alpha_plane().map_or_default(<[u8]>::to_vec);
         let (w, h) = (width as usize, height as usize);
         let touches_edge = data.len() != w * h
             || data[..w].iter().any(|&v| v != 0)

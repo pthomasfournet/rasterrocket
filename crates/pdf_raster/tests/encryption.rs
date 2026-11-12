@@ -279,7 +279,7 @@ fn every_variant_decrypts_to_the_plaintext_and_renders_identically() {
                 .err()
                 .unwrap_or_else(|| panic!("{}: wrong password must fail", variant.name));
             assert!(is_encrypted_error(&err), "{}: {err}", variant.name);
-            let err = open_session_from_bytes(enc.clone(), &authorised(None))
+            let err = open_session_from_bytes(enc, &authorised(None))
                 .err()
                 .unwrap_or_else(|| panic!("{}: no password must fail", variant.name));
             assert!(

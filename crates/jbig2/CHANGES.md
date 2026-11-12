@@ -21,6 +21,9 @@ unless the entry says otherwise.
   false`; `hayro-ccitt` resolved to the local fork in `crates/ccitt`;
   upstream's workspace lint set is not inherited, so the crate is linted
   with clippy's defaults plus upstream's `too_many_arguments` allowance.
+  The pattern-shift table in `decode/pattern.rs` iterates a pattern's
+  rows by slice rather than by index (clippy's `needless_range_loop`
+  from Rust 1.100); behaviour is unchanged.
 
 - `examples/` dropped; `LICENSE-APACHE`, `LICENSE-MIT`: upstream's
   symlinks to its repository root replaced by the files themselves.

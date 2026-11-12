@@ -408,8 +408,7 @@ impl Document {
             .and_then(Object::as_array)
             .and_then(|ids| ids.first())
             .and_then(Object::as_str)
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
+            .map_or_default(<[u8]>::to_vec);
         self.crypt = Some(SecurityHandler::open(&dict, &id0, password)?);
         Ok(())
     }

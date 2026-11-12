@@ -46,11 +46,10 @@ pub(super) fn appearance(
     let mut s = String::from("1 1 0 rg 0 G 1 w\n");
     rectangle(&mut s, inset(rect, &[0.5; 4]));
     s.push_str("b\n");
-    let contents = parent.map(|p| markup_text(doc, p)).unwrap_or_default();
+    let contents = parent.map_or_default(|p| markup_text(doc, p));
     let title = parent
         .and_then(|p| string(doc, p.get(b"T")))
-        .map(|t| decode_text_string(&t))
-        .unwrap_or_default();
+        .map_or_default(|t| decode_text_string(&t));
     let text = match (title.is_empty(), contents.is_empty()) {
         (false, false) => format!("{title}\n{contents}"),
         (false, true) => title,

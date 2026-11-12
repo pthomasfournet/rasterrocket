@@ -115,10 +115,7 @@ pub(super) fn decode_image_stream<
     let dict = &src.stream.dict;
     let (w, h, is_mask) = (src.width, src.height, src.is_mask);
 
-    let chain = dict
-        .get(b"Filter")
-        .map(image_filter_chain)
-        .unwrap_or_default();
+    let chain = dict.get(b"Filter").map_or_default(image_filter_chain);
     let chain_len = chain.len();
     let filter = chain.last().map(AsRef::as_ref);
     let terminal_transport = filter.is_some_and(is_transport_filter);

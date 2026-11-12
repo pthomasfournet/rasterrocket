@@ -398,13 +398,11 @@ impl SessionConfig {
     /// Empty entries are skipped.
     #[must_use]
     pub fn font_dirs_from_env() -> Vec<PathBuf> {
-        std::env::var_os(FONT_DIR_ENV)
-            .map(|value| {
-                std::env::split_paths(&value)
-                    .filter(|dir| !dir.as_os_str().is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
+        std::env::var_os(FONT_DIR_ENV).map_or_default(|value| {
+            std::env::split_paths(&value)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .collect()
+        })
     }
 }
 

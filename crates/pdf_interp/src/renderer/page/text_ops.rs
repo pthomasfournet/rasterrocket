@@ -62,6 +62,10 @@ pub(super) fn fit_to_advance(pdf_width: i32, face_width: i32) -> (f64, f64) {
 /// Evaluated as separate multiplies and adds, for the reason given on
 /// [`glyph_advance`].
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
+#[expect(
+    clippy::suboptimal_flops,
+    reason = "unfused evaluation is the rounding the rendered pen positions depend on"
+)]
 pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;
     [a, b, c, d, e + tx * a, f + tx * b]
@@ -70,6 +74,10 @@ pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
 /// Translate text matrix `tm` by `ty` along its own y axis: `[1 0 0 1 0 ty] × Tm`,
 /// the advance of vertical writing mode.
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
+#[expect(
+    clippy::suboptimal_flops,
+    reason = "unfused evaluation is the rounding the rendered pen positions depend on"
+)]
 pub(super) const fn translate_text_y(tm: [f64; 6], ty: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;
     [a, b, c, d, e + ty * c, f + ty * d]

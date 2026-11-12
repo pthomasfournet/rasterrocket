@@ -476,8 +476,7 @@ fn read_color(dict: &Dictionary, key: &[u8]) -> Option<Vec<f64>> {
 fn numbers(dict: &Dictionary, key: &[u8]) -> Vec<f64> {
     dict.get(key)
         .and_then(Object::as_array)
-        .map(|a| a.iter().filter_map(obj_to_f64).collect())
-        .unwrap_or_default()
+        .map_or_default(|a| a.iter().filter_map(obj_to_f64).collect())
 }
 
 /// The first `m` intervals of the flat `Domain` numbers `domain`; an

@@ -30,7 +30,9 @@ release). It is not published and changes are not sent upstream.
   `tables.rs`, inline instruction operands, and the `I16` / `I32` delta
   runs in `tables/variations.rs`. The `post` name iterator's checkpoint
   test uses `is_multiple_of`, and `ps::type1::mul_div_wide` divides with
-  `checked_div`. Behaviour is unchanged.
+  `checked_div`. `ps::transform`'s matrix-degeneracy test returns its
+  comparison directly (clippy's `needless_bool` from Rust 1.100).
+  Behaviour is unchanged.
 
 - The licence files replace upstream's symlinks to the repository root.
 

@@ -236,8 +236,7 @@ const SCRIPT_NAMES: &[(Script, &[&str])] = &[
 pub(crate) fn substitute_style(font_dict: &Dictionary, fd: Option<&Dictionary>) -> SubstituteStyle {
     let name = font_dict
         .get_name(b"BaseFont")
-        .map(|n| String::from_utf8_lossy(n).to_ascii_lowercase())
-        .unwrap_or_default();
+        .map_or_default(|n| String::from_utf8_lossy(n).to_ascii_lowercase());
     // A subset tag (`ABCDEF+`) carries no style information.
     let name = name.split_once('+').map_or(name.as_str(), |(_, rest)| rest);
 

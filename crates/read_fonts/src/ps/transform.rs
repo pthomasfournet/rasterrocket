@@ -47,10 +47,7 @@ pub(crate) fn is_degenerate(matrix: &FontMatrix) -> bool {
     }
     let temp1 = 32 * (xx * yy - xy * yx).abs();
     let temp2 = (xx * xx) + (xy * xy) + (yx * yx) + (yy * yy);
-    if temp1 <= temp2 {
-        return true;
-    }
-    false
+    temp1 <= temp2
 }
 
 /// Combination of a matrix and optional scale.

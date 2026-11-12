@@ -194,10 +194,7 @@ impl Border {
                 if d.is_empty() { vec![3.0] } else { d }
             }
             Some(_) => Vec::new(),
-            None => border
-                .get(3)
-                .map(|d| numbers(doc, Some(d)))
-                .unwrap_or_default(),
+            None => border.get(3).map_or_default(|d| numbers(doc, Some(d))),
         };
         Self { width, dash }
     }

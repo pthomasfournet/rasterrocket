@@ -120,8 +120,7 @@ pub(crate) fn decode(
             .vec_with_capacity(patterns.len() * 32 * h * 2)?;
         for pattern in &patterns {
             for k in 0..32_u32 {
-                for y in 0..h {
-                    let word = pattern.data[y];
+                for &word in &pattern.data[..h] {
                     if k == 0 {
                         data.push(word);
                         data.push(0);

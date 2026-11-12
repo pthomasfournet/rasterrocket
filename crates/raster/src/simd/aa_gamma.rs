@@ -224,7 +224,7 @@ mod tests {
                 0x1234_5678 ^ u32::try_from(n).expect("test lengths fit u32"),
             );
             let (want, want_any) = reference(&shape);
-            let mut got = shape.clone();
+            let mut got = shape;
             let got_any = apply_aa_gamma(&mut got);
             assert_eq!(got, want, "mapped bytes differ at n={n}");
             assert_eq!(got_any, want_any, "any-covered flag differs at n={n}");
@@ -305,7 +305,7 @@ mod tests {
                 && is_x86_feature_detected!("avx512vbmi")
                 && n >= 64
             {
-                let mut got = shape.clone();
+                let mut got = shape;
                 // SAFETY: avx512bw + avx512vbmi confirmed; n ≥ 64.
                 let any = unsafe { apply_aa_gamma_avx512(&mut got) };
                 assert_eq!(got, want, "avx512 n={n}");
