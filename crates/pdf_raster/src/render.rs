@@ -55,9 +55,25 @@ pub fn render_page_rgb_with(
     page_num: u32,
     params: &RenderParams,
 ) -> Result<Bitmap<Rgb8>, RasterError> {
+    render_page_rgb_with_diagnostics(session, page_num, params).map(|(bmp, _)| bmp)
+}
+
+/// [`render_page_rgb_with`], also returning the [`PageDiagnostics`] the
+/// render collected.
+///
+/// [`PageDiagnostics`]: crate::PageDiagnostics
+///
+/// # Errors
+///
+/// As [`render_page_rgb_with`].
+pub fn render_page_rgb_with_diagnostics(
+    session: &RasterSession,
+    page_num: u32,
+    params: &RenderParams,
+) -> Result<(Bitmap<Rgb8>, crate::PageDiagnostics), RasterError> {
     let page_id = session.resolve_page(page_num)?;
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id)?;
-    render_page_rgb_with_geom(session, page_num, page_id, geom, params).map(|(bmp, _diag)| bmp)
+    render_page_rgb_with_geom(session, page_num, page_id, geom, params)
 }
 
 /// Render page `page_num` (1-based) of `session` to the grayscale
@@ -154,7 +170,8 @@ const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
     }
 }
 
-/// Inner implementation shared by [`render_page_rgb_with`] and [`render_page_gray`].
+/// Inner implementation shared by [`render_page_rgb_with_diagnostics`] and
+/// [`render_page_gray`].
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
 /// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.

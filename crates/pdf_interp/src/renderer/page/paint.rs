@@ -17,6 +17,8 @@ use raster::{
 use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
+#[cfg(feature = "gpu-aa")]
+use super::gpu_ops::{DeviceFill, try_backend_aa_fill};
 use super::patterns::PatternPaint;
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -453,7 +455,8 @@ impl PageRenderer<'_> {
     }
 
     /// Fill `path` on the attached GPU backend, if any; `true` when the
-    /// device painted it. See `gpu_ops::try_backend_aa_fill`.
+    /// device painted it.  The outcome is counted in the page diagnostics.
+    /// See [`try_backend_aa_fill`].
     #[cfg(feature = "gpu-aa")]
     fn try_device_aa_fill(
         &mut self,
@@ -463,38 +466,24 @@ impl PageRenderer<'_> {
         pipe: &raster::pipe::PipeState<'_>,
         src: &raster::pipe::PipeSrc<'_>,
     ) -> bool {
-        #[cfg(feature = "vulkan")]
-        use super::gpu_ops::try_backend_aa_fill;
-        #[cfg(feature = "vulkan")]
-        let painted = if let Some(vk) = self.vk_backend.clone() {
-            try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src)
-        } else {
-            self.try_cuda_aa_fill(path, even_odd, flatness, pipe, src)
+        let outcome = 'device: {
+            #[cfg(feature = "vulkan")]
+            if let Some(vk) = self.vk_backend.clone() {
+                break 'device try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src);
+            }
+            let Some(ctx) = self.gpu_ctx.clone() else {
+                break 'device DeviceFill::Declined;
+            };
+            let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
+            try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
         };
-        #[cfg(not(feature = "vulkan"))]
-        let painted = self.try_cuda_aa_fill(path, even_odd, flatness, pipe, src);
-        if painted {
-            self.diag.device_fills = self.diag.device_fills.saturating_add(1);
-        }
-        painted
-    }
-
-    /// Fill `path` on the attached CUDA context, if any; `true` when the
-    /// device painted it.
-    #[cfg(feature = "gpu-aa")]
-    fn try_cuda_aa_fill(
-        &mut self,
-        path: &raster::path::Path,
-        even_odd: bool,
-        flatness: f64,
-        pipe: &raster::pipe::PipeState<'_>,
-        src: &raster::pipe::PipeSrc<'_>,
-    ) -> bool {
-        let Some(ctx) = self.gpu_ctx.clone() else {
-            return false;
+        let count = match outcome {
+            DeviceFill::Painted => &mut self.diag.device_fills,
+            DeviceFill::Failed => &mut self.diag.device_fill_failures,
+            DeviceFill::Declined => return false,
         };
-        let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
-        super::gpu_ops::try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
+        *count = count.saturating_add(1);
+        outcome == DeviceFill::Painted
     }
 
     /// Stroke `path` with the current line width, widened to at least one

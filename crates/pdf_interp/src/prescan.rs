@@ -66,8 +66,11 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 /// Classify page `page_num` (1-based) without rendering any pixels.
 ///
 /// Returns a [`PageDiagnostics`] with `has_images`, `has_vector_text`,
-/// `dominant_filter`, and a conservative `source_ppi_hint` derived from the
-/// image's PDF dictionary `Width` entry (see module doc for caveats).
+/// `dominant_filter`, a conservative `source_ppi_hint` derived from the
+/// image's PDF dictionary `Width` entry (see module doc for caveats),
+/// `content_failures` and `form_type`.  The fields only rendering measures
+/// (`image_failures`, `missing_fonts`, `unslotted_spots`, `device_fills`,
+/// `device_fill_failures`) are empty or zero.
 ///
 /// # Errors
 ///
@@ -109,12 +112,9 @@ pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, In
         has_vector_text,
         dominant_filter: dominant_filter(&scan.filter_counts),
         source_ppi_hint: (scan.max_ppi > 0.0).then_some(scan.max_ppi),
-        image_failures: Vec::new(),
         content_failures: content.failures,
-        missing_fonts: Vec::new(),
-        unslotted_spots: Vec::new(),
         form_type: crate::form_type(doc),
-        device_fills: 0,
+        ..PageDiagnostics::default()
     })
 }
 

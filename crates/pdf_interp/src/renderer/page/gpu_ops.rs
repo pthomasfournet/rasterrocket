@@ -212,9 +212,13 @@ fn paint_coverage(
     }
 }
 
-/// Log a failed device fill: once per session at `warn`, after that at
-/// `debug`, since a failure that recurs for every fill would otherwise
-/// flood the log.  The CPU fill paints the path either way.
+/// Log a failed device fill: once per process at `warn`, whichever
+/// backend failed, and at `debug` after that, since a failure that recurs
+/// for every fill would otherwise flood the log.  Every failure is also
+/// counted in the page's [`PageDiagnostics::device_fill_failures`].  The
+/// CPU fill paints the path either way.
+///
+/// [`PageDiagnostics::device_fill_failures`]: super::PageDiagnostics::device_fill_failures
 fn report_failure(backend: &'static str, e: &dyn std::fmt::Display) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if WARNED.swap(true, Ordering::Relaxed) {
@@ -226,18 +230,29 @@ fn report_failure(backend: &'static str, e: &dyn std::fmt::Display) {
     }
 }
 
+/// The outcome of offering a fill to a device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceFill {
+    /// The fill was painted from device counts.
+    Painted,
+    /// The fill is not one the device takes; the bitmap is untouched.
+    Declined,
+    /// The device failed; the bitmap is untouched.
+    Failed,
+}
+
 /// Rasterise `path` through `backend`'s scanline-AA fill kernel
 /// ([`gpu::backend::aa_fill`]) and composite the counts by
 /// [`gpu_coverage_to_bitmap`].
 ///
-/// Returns `true` when the fill was painted from device counts, so the
-/// caller skips the CPU fill.  Returns `false`, leaving the bitmap
-/// untouched, on a canvas of ink (the counts composite onto RGB pixels
-/// only), when the device fill is disabled (the threshold is
-/// `usize::MAX`, checked before the path is scan-converted),
-/// [`prepare_aa_fill`] declines the fill, the table has no intersections
-/// (it paints nothing), or the device fails; a failure is logged (see
-/// [`report_failure`]) and the CPU fill is the exact fallback.
+/// [`DeviceFill::Painted`] means the caller skips the CPU fill.  The fill
+/// is [`DeviceFill::Declined`] on a canvas of ink (the counts composite
+/// onto RGB pixels only), when the device fill is disabled (the threshold
+/// is `usize::MAX`, checked before the path is scan-converted), when
+/// [`prepare_aa_fill`] declines it, or when the table has no
+/// intersections (it paints nothing).  A device error is
+/// [`DeviceFill::Failed`], logged (see [`report_failure`]); either way the
+/// CPU fill is the exact fallback.
 pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     renderer: &mut PageRenderer<'_>,
     backend: &B,
@@ -246,13 +261,13 @@ pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     flatness: f64,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
-) -> bool {
+) -> DeviceFill {
     let PageCanvas::Rgb(bitmap) = &renderer.canvas else {
-        return false;
+        return DeviceFill::Declined;
     };
     let threshold = aa_fill_threshold();
     if threshold == usize::MAX {
-        return false;
+        return DeviceFill::Declined;
     }
     let Some(fill) = prepare_aa_fill(
         &renderer.gstate.current().clip,
@@ -263,19 +278,19 @@ pub(super) fn try_backend_aa_fill<B: GpuBackend>(
         even_odd,
         threshold,
     ) else {
-        return false;
+        return DeviceFill::Declined;
     };
     if fill.intersects.is_empty() {
-        return false;
+        return DeviceFill::Declined;
     }
     match aa_fill(backend, &fill.table(), fill.rect, fill.aa_width, even_odd) {
         Ok(mut counts) => {
             gpu_coverage_to_bitmap(renderer, &mut counts, fill.rect, pipe, src);
-            true
+            DeviceFill::Painted
         }
         Err(e) => {
             report_failure(B::NAME, &e);
-            false
+            DeviceFill::Failed
         }
     }
 }

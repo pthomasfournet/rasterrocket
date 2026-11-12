@@ -2466,9 +2466,15 @@ pass uses (54d8712e); renders unchanged. `--print` no longer renders in
 barrier windows: each page is appended to the spool once the pages before
 it are done, and a slow page no longer idles the other workers (a 200-page
 text document with one scan page in ten, 600 dpi: 7.5 → 4.3 s, peak memory
-4.4 → 5.5 GB). `PageDiagnostics::device_fills` (public, additive) counts the fills a
-GPU backend painted, so the GPU fill parity tests fail when a device fill
-falls back to the CPU instead of comparing the CPU render with itself.
+4.4 → 5.5 GB). `PageDiagnostics::device_fills` and `device_fill_failures` (public,
+additive) count the fills a GPU backend painted and those it took and
+failed (each then painted by the CPU), and `render_page_rgb_with_diagnostics`
+returns an RGB render's diagnostics.  The GPU fill parity tests assert both
+counts on the renders they compare, so a device fill falling back to the
+CPU fails them instead of comparing the CPU render with itself; their corpus
+half now uses fixtures whose fills reach the device (corpus-02 and
+corpus-07 fill only through Type 3 glyphs or path clips, which stay on the
+CPU).
 A function-based (Type 1) shading is evaluated at every device pixel of its
 Domain instead of on a 64 × 64 grid, so detail finer than 1/64 of the Domain
 is drawn (above 4 Mi pixels it samples every k-th pixel and interpolates).

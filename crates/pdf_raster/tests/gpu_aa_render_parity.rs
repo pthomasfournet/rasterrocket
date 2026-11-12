@@ -27,7 +27,8 @@ mod common;
 
 use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
 use rasterrocket::{
-    BackendPolicy, RasterOptions, RasterSession, SessionConfig, open_session, render_page_gray,
+    BackendPolicy, PageDiagnostics, RasterSession, RenderParams, SessionConfig, open_session,
+    render_page_rgb_with_diagnostics,
 };
 
 /// A 400×400 pt page whose fills cover every dispatch decision:
@@ -76,43 +77,50 @@ fn require_device_fills() {
     );
 }
 
-/// The fills of page 1 of `session` painted from device coverage.
-fn device_fills(session: &RasterSession) -> u32 {
-    render_page_gray(session, 1, &RasterOptions::new(72.0))
-        .expect("render page")
-        .diagnostics
-        .device_fills
+/// Page `page` of `session` at [`common::SCALE`] as `(width, height,
+/// bytes)`, with the diagnostics of the same render.
+fn render_diagnosed(session: &RasterSession, page: u32) -> (Page, PageDiagnostics) {
+    let (bmp, diag) =
+        render_page_rgb_with_diagnostics(session, page, &RenderParams::new(common::SCALE))
+            .expect("render page");
+    ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
 }
 
-/// Render the synthetic page under `policy` and against the CPU, after
-/// checking that `policy` paints fills on the device: a device fill that
+/// A render as [`assert_identical`] compares it.
+type Page = (u32, u32, Vec<u8>);
+
+/// Fills of the synthetic page the device takes: every fill but the one
+/// under the diamond path clip, which the device fill declines.
+const SYNTHETIC_DEVICE_FILLS: u32 = 8;
+
+/// Render the synthetic page under `policy` and against the CPU.  The
+/// device must paint every fill it takes, and fail none: a device fill that
 /// fails falls back to the CPU, and the comparison would then hold by
 /// construction.
 fn assert_synthetic_page_identical(policy: BackendPolicy) {
     require_device_fills();
     let pdf = fixture_pdf();
-    let cpu_session = session(pdf.clone(), BackendPolicy::CpuOnly);
+    let (cpu, cpu_diag) = render_diagnosed(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
     assert_eq!(
-        device_fills(&cpu_session),
-        0,
+        (cpu_diag.device_fills, cpu_diag.device_fill_failures),
+        (0, 0),
         "CPU-only session used a device"
     );
-    let cpu = render(&cpu_session, 1);
     assert!(
         cpu.2.iter().any(|&b| b != 0xff),
         "fixture rendered blank on the CPU path"
     );
-    let gpu_session = session(pdf, policy);
-    let fills = device_fills(&gpu_session);
-    assert!(
-        fills > 0,
-        "no fill was painted on the device under {policy:?}"
+    let (gpu, diag) = render_diagnosed(&session(pdf, policy), 1);
+    assert_eq!(
+        (diag.device_fills, diag.device_fill_failures),
+        (SYNTHETIC_DEVICE_FILLS, 0),
+        "device fills painted and failed under {policy:?}"
     );
-    let gpu = render(&gpu_session, 1);
     assert_identical(&cpu, &gpu, &format!("synthetic fills under {policy:?}"));
 }
 
 /// Render `pages` of a corpus fixture under `policy` and against the CPU.
+/// No device fill may fail, and some page must be filled on the device.
 /// Skipped when the fixture is absent.
 fn assert_corpus_pages_identical(fixture: &str, pages: &[u32], policy: BackendPolicy) {
     require_device_fills();
@@ -123,28 +131,33 @@ fn assert_corpus_pages_identical(fixture: &str, pages: &[u32], policy: BackendPo
         open_session(&path, &SessionConfig::with_policy(BackendPolicy::CpuOnly)).expect("CPU");
     let gpu_session = open_session(&path, &SessionConfig::with_policy(policy))
         .unwrap_or_else(|e| panic!("{policy:?} session: {e}"));
+    let mut device_fills = 0;
     for &page in pages {
+        let what = format!("{fixture} page {page} under {policy:?}");
         let cpu = render(&cpu_session, page);
-        let gpu = render(&gpu_session, page);
-        assert_identical(
-            &cpu,
-            &gpu,
-            &format!("{fixture} page {page} under {policy:?}"),
-        );
+        let (gpu, diag) = render_diagnosed(&gpu_session, page);
+        assert_eq!(diag.device_fill_failures, 0, "{what}: device fills failed");
+        device_fills += diag.device_fills;
+        assert_identical(&cpu, &gpu, &what);
     }
+    assert!(
+        device_fills > 0,
+        "{fixture} under {policy:?}: no fill reached the device"
+    );
 }
 
-/// The corpus pages the divergence was measured on: corpus-08 page 2 carries
-/// the 10 × 160 px rectangle whose partial-coverage edge differed; corpus-02
-/// is vector-heavy; corpus-07 pages are full-page scans with vector overlays.
+/// Corpus pages whose fills reach the device: corpus-08 page 2 carries
+/// the 10 × 160 px rectangle whose partial-coverage edge once differed;
+/// corpus-05 (46 device fills on pages 1–4), corpus-04 (11) and corpus-11
+/// (6 on its one page of CMYK swatches) cover rules, boxes and colour
+/// fills.  Pages whose
+/// fills are all Type 3 glyphs or under path clips (corpus-02, corpus-07)
+/// never reach the device and would compare the CPU with itself.
 fn assert_corpus_identical(policy: BackendPolicy) {
     assert_corpus_pages_identical("corpus-08-scan-dct-1927.pdf", &[1, 2, 3], policy);
-    assert_corpus_pages_identical(
-        "corpus-02-native-vector-text.pdf",
-        &(1..=16).collect::<Vec<_>>(),
-        policy,
-    );
-    assert_corpus_pages_identical("corpus-07-journal-dct-heavy.pdf", &[1, 2], policy);
+    assert_corpus_pages_identical("corpus-05-academic-book.pdf", &[1, 2, 3, 4], policy);
+    assert_corpus_pages_identical("corpus-04-ebook-mixed.pdf", &[1, 2, 3, 4], policy);
+    assert_corpus_pages_identical("corpus-11-cmyk-swatches.pdf", &[1], policy);
 }
 
 #[cfg(all(feature = "gpu-aa", feature = "gpu-validation"))]

@@ -784,10 +784,11 @@ impl<'doc> PageRenderer<'doc> {
         Some(child)
     }
 
-    /// Fold a finished child renderer (a tiling-pattern tile) into its
-    /// parent: its watchdog consumption, so the shared per-page budget keeps
-    /// accounting for work done inside sub-renders, and its skipped images,
-    /// so they are reported on the page.
+    /// Fold a finished child renderer (a tiling-pattern tile or a Type 3
+    /// glyph) into its parent: its watchdog consumption, so the shared
+    /// per-page budget keeps accounting for work done inside sub-renders,
+    /// its skipped images, so they are reported on the page, and its device
+    /// fill counts (zero while children are built without a device).
     ///
     /// Without this the parent's `ops_executed` would not reflect the child's
     /// work and a sequence of expensive pattern fills would never trip the
@@ -818,6 +819,9 @@ impl<'doc> PageRenderer<'doc> {
         diag.has_images |= self.diag.has_images;
         diag.has_vector_text |= self.diag.has_vector_text;
         diag.device_fills = diag.device_fills.saturating_add(self.diag.device_fills);
+        diag.device_fill_failures = diag
+            .device_fill_failures
+            .saturating_add(self.diag.device_fill_failures);
     }
 
     /// Override the operator-count budget.  Test-only — used to trigger the
