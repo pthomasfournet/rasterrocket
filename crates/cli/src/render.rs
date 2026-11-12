@@ -263,6 +263,31 @@ impl<K: Ord + Copy, P> PageCollector<K, P> {
         pages.sort_unstable_by_key(|&(key, _)| key);
         pages.into_iter().map(|(_, page)| page).collect()
     }
+
+    /// How many pages are held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// The pages held under keys up to `last` inclusive, in key order,
+    /// leaving the others held.
+    pub(crate) fn take_through(&self, last: K) -> Vec<P> {
+        let mut held = self
+            .pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held)
+            .into_iter()
+            .partition(|&(key, _)| key <= last);
+        *held = kept;
+        drop(held);
+        taken.sort_unstable_by_key(|&(key, _)| key);
+        taken.into_iter().map(|(_, page)| page).collect()
+    }
 }
 
 /// Write-buffer size of an output file: at most

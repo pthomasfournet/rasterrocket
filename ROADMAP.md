@@ -88,7 +88,8 @@ field of a `#[non_exhaustive]` type, so a v2.0.0 caller builds unchanged.
 - **Printing.** `--print` / `--printer NAME` / `--copies N` /
   `--duplex long|short` render the pages at 600 dpi (or `-r`) for printing
   and hand CUPS's `lp` one PDF of page images through a private, anonymous
-  spool, a window of pages at a time; `--list-printers` lists the queues.
+  spool, each page appended in order as it finishes; `--list-printers`
+  lists the queues.
   Linux and macOS; refused on Windows.
 - **Overprint simulation.** `--overprint` / `RasterOptions::overprint` /
   `SessionConfig::overprint` (default off) paint a page whose graphics
@@ -2346,8 +2347,9 @@ raster as a single image; the queue's filters fit it to the printer (media,
 orientation, colour, resolution, back sides) without rendering the source
 document. Raster PWG was tried first: driverless queues pass it to the
 printer untouched, leaving colour model, resolution and back-side
-orientation to the sender. Pages are spooled a window at a time, so memory
-stays bounded. Verified through a CUPS `everywhere` queue on
+orientation to the sender. Pages are appended to the spool in page order
+as they finish, at most two pages per thread started past the first page
+not yet appended, so memory stays bounded. Verified through a CUPS `everywhere` queue on
 `ippeveprinter`: colour pages reach a gray-only printer as sGray at its
 resolution, landscape pages are turned, and the page images round-trip
 pixel-exact. `--list-printers` lists the CUPS queues (`lpstat -e`), the
@@ -2459,7 +2461,11 @@ canvas kind is fixed when the renderer is built; there is no setter.
 
 **Unreleased on master.** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
-pass uses (54d8712e); renders unchanged.
+pass uses (54d8712e); renders unchanged. `--print` no longer renders in
+barrier windows: each page is appended to the spool once the pages before
+it are done, and a slow page no longer idles the other workers (a 200-page
+text document with one scan page in ten, 600 dpi: 7.5 → 4.3 s, peak memory
+4.4 → 5.5 GB).
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

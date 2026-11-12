@@ -288,14 +288,14 @@ fn main() -> ExitCode {
         result.err().map(|e| (page_num, e))
     };
 
-    // Printed pages render a window at a time (see `print`); other pages
-    // render in one pass.
+    // Printed pages are appended to the spool in page order as they finish
+    // (see `print`); other pages render in one pass.
     let (errors, spool_error) = spool.as_mut().map_or_else(
         || {
             let errors: Vec<_> = pool.install(|| pages.par_iter().filter_map(render_one).collect());
             (errors, None)
         },
-        |spool| spool.render_in_windows(&print_pages, &pages, &pool, render_one),
+        |spool| spool.render_in_order(&print_pages, &pages, &pool, render_one),
     );
 
     // Eagerly drop GPU decoders on every worker thread while the CUDA driver is

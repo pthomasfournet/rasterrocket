@@ -4,16 +4,18 @@
 //! printer: media and orientation, colour, resolution and two-sided
 //! sheets; the pages are not rendered again.
 //!
-//! Pages render in windows of as many pages as the pool has threads.  Each
-//! page is compressed on the worker that rendered it into a [`PageSink`],
-//! and a window's pages are appended to the [`Spool`] in page order once the
-//! window is done, so at most one window of pages is held in memory.  The
+//! Each page is compressed on the worker that rendered it into a
+//! [`PageSink`] and appended to the [`Spool`] once every page before it is
+//! done.  Pages start in page order, at most a fixed number per thread past
+//! the first page not yet appended, so that many pages at most are held in
+//! memory, and a slow page delays only the appending of those after it.  The
 //! spool is an anonymous temporary file, private to the process and freed
 //! however it ends; `lp` reads it as its standard input.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use encode::{PdfImage, PdfPage, PdfWriter};
 
@@ -152,6 +154,42 @@ fn spool_dir() -> PathBuf {
     }
 }
 
+/// How many pages per pool thread may be started past the first page not
+/// yet appended to the spool.
+const PAGES_AHEAD_PER_THREAD: usize = 2;
+
+/// The pages of a print job that are done, by index in the page list, and
+/// the errors of those that failed.
+struct Progress {
+    done: Vec<bool>,
+    errors: Vec<(i32, RenderError)>,
+}
+
+/// `progress` locked; a worker that panicked left it consistent, since
+/// every update is a single assignment or push.
+fn lock(progress: &Mutex<Progress>) -> MutexGuard<'_, Progress> {
+    progress.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Marks page `index` of a print job done when dropped, with its error,
+/// so the page counts as done even when its render unwinds.
+struct PageDone<'a> {
+    progress: &'a Mutex<Progress>,
+    finished: &'a Condvar,
+    index: usize,
+    error: Option<(i32, RenderError)>,
+}
+
+impl Drop for PageDone<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(self.progress);
+        state.done[self.index] = true;
+        state.errors.extend(self.error.take());
+        drop(state);
+        self.finished.notify_one();
+    }
+}
+
 /// The print document being written.
 pub(crate) struct Spool {
     writer: PdfWriter<BufWriter<File>>,
@@ -175,26 +213,31 @@ impl Spool {
         Ok(Self { writer })
     }
 
-    /// Append the pages `sink` holds, in page order.
+    /// Append the pages `sink` holds for document pages up to `last`
+    /// inclusive, in page order.
     ///
     /// # Errors
     ///
     /// The spool could not be written.
-    pub(crate) fn write_from(&mut self, sink: &PageSink) -> Result<(), RenderError> {
-        for page in sink.pages.take_sorted() {
+    pub(crate) fn write_through(&mut self, sink: &PageSink, last: i32) -> Result<(), RenderError> {
+        for page in sink.pages.take_through((last, u8::MAX)) {
             self.writer.write_page(&page)?;
         }
         Ok(())
     }
 
-    /// Render `pages` with `render` on `pool`, a window of as many pages as
-    /// the pool has threads at a time into `sink`, appending each window
-    /// once it is done.  Rendering stops at the first window with a failed
-    /// page, or when the spool cannot be written.
+    /// Render `pages`, ascending page numbers, with `render` on `pool` into
+    /// `sink`, appending a page to the spool once it and every page before
+    /// it are done.  A page is started only while it lies fewer than
+    /// [`PAGES_AHEAD_PER_THREAD`] × threads pages past the first page not
+    /// yet appended, which bounds the pages held in memory; no page waits
+    /// for a slower page to start.  No page is started after a page has
+    /// failed or the spool could not be written; pages already started
+    /// finish.
     ///
     /// Returns the pages that failed, with their errors, and the spool's
     /// write error.
-    pub(crate) fn render_in_windows<F>(
+    pub(crate) fn render_in_order<F>(
         &mut self,
         sink: &PageSink,
         pages: &[i32],
@@ -204,18 +247,54 @@ impl Spool {
     where
         F: Fn(&i32) -> Option<(i32, RenderError)> + Sync + Send + Copy,
     {
-        use rayon::prelude::*;
-
-        for window in pages.chunks(pool.current_num_threads().max(1)) {
-            let errors: Vec<_> = pool.install(|| window.par_iter().filter_map(render).collect());
-            if !errors.is_empty() {
-                return (errors, None);
+        let ahead = pool.current_num_threads().max(1) * PAGES_AHEAD_PER_THREAD;
+        let progress = Mutex::new(Progress {
+            done: vec![false; pages.len()],
+            errors: Vec::new(),
+        });
+        let finished = Condvar::new();
+        let mut write_error = None;
+        pool.in_place_scope(|scope| {
+            let (mut started, mut written) = (0, 0);
+            loop {
+                while started < pages.len() && started < written + ahead {
+                    let (index, page) = (started, &pages[started]);
+                    let (progress, finished) = (&progress, &finished);
+                    scope.spawn(move |_| {
+                        let mut done = PageDone {
+                            progress,
+                            finished,
+                            index,
+                            error: None,
+                        };
+                        done.error = render(page);
+                    });
+                    started += 1;
+                }
+                let mut state = lock(&progress);
+                while written < started && !state.done[written] {
+                    state = finished.wait(state).unwrap_or_else(PoisonError::into_inner);
+                }
+                if written == started || !state.errors.is_empty() {
+                    return;
+                }
+                let ready = state.done[written..started]
+                    .iter()
+                    .take_while(|&&done| done)
+                    .count();
+                drop(state);
+                written += ready;
+                if let Err(e) = self.write_through(sink, pages[written - 1]) {
+                    write_error = Some(e);
+                    return;
+                }
             }
-            if let Err(e) = self.write_from(sink) {
-                return (Vec::new(), Some(e));
-            }
-        }
-        (Vec::new(), None)
+        });
+        let errors = progress
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+            .errors;
+        (errors, write_error)
     }
 
     /// Complete the document and its file, rewound to its start.
@@ -356,17 +435,18 @@ fn printer_list(queues: &[&str], default: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{self, Read};
 
     use color::Gray8;
     use raster::Bitmap;
 
     use super::{
-        Duplex, PageSink, Spool, Submission, default_destination, job_title, lp_options,
-        printer_list, queue_names, refusal_hint, write_printer_list,
+        Duplex, PAGES_AHEAD_PER_THREAD, PageSink, Spool, Submission, default_destination,
+        job_title, lp_options, printer_list, queue_names, refusal_hint, write_printer_list,
     };
     use crate::cleanup::{Page, SpreadHalf};
     use crate::deliver::SubmitError;
+    use crate::render::RenderError;
 
     #[test]
     fn printers_are_listed_one_per_line_with_the_default_marked() {
@@ -523,13 +603,66 @@ mod tests {
         sink.add(2, None, &gray(4, 6)).unwrap();
         sink.add(1, Some(SpreadHalf::Right), &gray(3, 5)).unwrap();
         sink.add(1, Some(SpreadHalf::Left), &gray(2, 5)).unwrap();
-        spool.write_from(&sink).unwrap();
         sink.add(3, None, &gray(8, 5)).unwrap();
-        spool.write_from(&sink).unwrap();
+        spool.write_through(&sink, 2).unwrap();
+        spool.write_through(&sink, 3).unwrap();
         let mut pdf = Vec::new();
         let n = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
         assert_eq!(n, pdf.len());
         assert_eq!(image_sizes(&pdf), [(2, 5), (3, 5), (4, 6), (8, 5)]);
+    }
+
+    /// Render `n` pages on two threads, page `p` a `p × 1` image, the
+    /// early pages slowest; page `fail` fails.  Returns the spooled image
+    /// widths, the failed pages and the most pages ever held at once.
+    fn render_pages(n: i32, fail: Option<i32>) -> (Vec<u32>, Vec<i32>, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let sink = PageSink::new((72.0, 72.0));
+        let mut spool = Spool::create().unwrap();
+        let pages: Vec<i32> = (1..=n).collect();
+        let peak = AtomicUsize::new(0);
+        let render = |&page: &i32| {
+            std::thread::sleep(std::time::Duration::from_millis(
+                u64::try_from(n - page).unwrap() * 3,
+            ));
+            if Some(page) == fail {
+                return Some((page, RenderError::Io(io::Error::other("refused"))));
+            }
+            sink.add(page, None, &gray(page.unsigned_abs(), 1)).unwrap();
+            let held = sink.pages.len();
+            let _ = peak.fetch_max(held, Ordering::Relaxed);
+            None
+        };
+        let (errors, write_error) = spool.render_in_order(&sink, &pages, &pool, render);
+        assert!(write_error.is_none());
+        let failed = errors.iter().map(|&(page, _)| page).collect();
+        if !errors.is_empty() {
+            return (Vec::new(), failed, peak.into_inner());
+        }
+        let mut pdf = Vec::new();
+        let n = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
+        assert_eq!(n, pdf.len());
+        let widths = image_sizes(&pdf).into_iter().map(|(w, _)| w).collect();
+        (widths, failed, peak.into_inner())
+    }
+
+    #[test]
+    fn pages_spool_in_page_order_as_they_finish_with_bounded_holding() {
+        let (widths, failed, peak) = render_pages(24, None);
+        assert_eq!(widths, (1..=24).collect::<Vec<u32>>());
+        assert_eq!(failed, Vec::<i32>::new());
+        assert!(peak <= 2 * PAGES_AHEAD_PER_THREAD, "{peak} pages held");
+    }
+
+    #[test]
+    fn a_failed_page_stops_new_pages_and_is_reported() {
+        let (_, failed, _) = render_pages(24, Some(3));
+        assert_eq!(failed, [3]);
     }
 
     #[test]
