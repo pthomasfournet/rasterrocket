@@ -634,7 +634,6 @@ dependencies = [
  "log",
  "moxcms",
  "rasterrocket-color",
- "rasterrocket-encode",
  "rasterrocket-font",
  "rasterrocket-parser",
  "rasterrocket-render",
