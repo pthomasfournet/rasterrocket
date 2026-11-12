@@ -9,7 +9,12 @@
 )]
 mod common;
 
-use common::{dark_pixels, font_page, ink_span, render_gray, stream_object, text_page};
+use std::path::PathBuf;
+
+use common::{
+    dark_pixels, dark_pixels_with, font_page, ink_span, render_gray, stream_object, text_page,
+};
+use rasterrocket::{BackendPolicy, SessionConfig};
 
 /// Dark pixels of [`text_page`] showing `text` in `font`.
 fn ink(font: &str, text: &str) -> usize {
@@ -170,8 +175,12 @@ fn winansi_high_codes_resolve_by_name_on_the_substitute() {
 
 /// A composite font without a program, of the Adobe-Japan1 collection
 /// and a Shift-JIS encoding, draws its Latin text through CID → Unicode
-/// on whatever substitute serves it: `A` is CID 264, which no Latin
-/// substitute carries as a glyph index.
+/// on the Japanese face that serves it: `A` is CID 264, `B` CID 265.
+///
+/// The face is pinned (`font_dirs`, no system fonts): it declares Japanese,
+/// draws `A` and `B` as solid boxes, and its glyphs 264 and 265 are empty,
+/// so CIDs taken as glyph indices would draw nothing.  Without it the text
+/// falls to a compiled-in face, whose letters hold far less ink.
 #[test]
 fn non_embedded_japanese_font_draws_latin_through_cid_to_unicode() {
     let pdf = font_page(
@@ -189,6 +198,27 @@ fn non_embedded_japanese_font_draws_latin_through_cid_to_unicode() {
                 .to_vec(),
         ],
     );
-    let dark = dark_pixels(pdf).len();
-    assert!(dark > 40, "AB draws ({dark} dark pixels)");
+    let ink = |font_dirs: Vec<PathBuf>| {
+        let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        config.font_dirs = font_dirs;
+        config.system_fonts = false;
+        dark_pixels_with(pdf.clone(), &config).len()
+    };
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cid-route-boxes");
+    std::fs::create_dir_all(&dir).expect("creates the font directory");
+    std::fs::write(
+        dir.join("cid-route-boxes.ttf"),
+        include_bytes!("data/cid-route-boxes.ttf"),
+    )
+    .expect("writes the font");
+    let compiled = ink(Vec::new());
+    let boxes = ink(vec![dir]);
+    assert!(
+        compiled > 40,
+        "AB draws in a compiled-in face ({compiled} dark pixels)"
+    );
+    assert!(
+        boxes > 2 * compiled,
+        "AB draws as the pinned face's boxes ({boxes} dark pixels, {compiled} without it)"
+    );
 }
