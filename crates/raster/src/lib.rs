@@ -68,7 +68,7 @@ pub use shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangl
 pub use shading::radial::RadialPattern;
 pub use shading::shaded_fill;
 pub use simd::{blend_solid_gray8, blend_solid_rgb8, composite_aa_rgb8_opaque, unpack_mono_row};
-pub use stroke::{StrokeParams, stroke, stroke_outline};
+pub use stroke::{StrokeParams, hairline_runs, stroke, stroke_aa_scanner, stroke_outline};
 pub use tiling::{CELL_PHASES, CellPhase, Lattice, TiledPattern};
 pub use types::*;
 pub use xpath::{XPath, XPathFlags, XPathSeg};

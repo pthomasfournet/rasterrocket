@@ -1,8 +1,10 @@
 //! Stroke rasterization.
 //!
-//! Public entry points are [`stroke`] and [`stroke_outline`]; the helpers (`stroke_narrow`,
-//! `stroke_wide`, and the path-shaping functions in the private `path`
-//! submodule) are crate-internal implementation details.
+//! Public entry points are [`stroke`] and [`stroke_outline`], and the
+//! geometry stages of a stroke, [`stroke_aa_scanner`] and [`hairline_runs`];
+//! the helpers (`stroke_narrow`, `stroke_wide`, and the path-shaping
+//! functions in the private `path` submodule) are crate-internal
+//! implementation details.
 //!
 //! A stroke is flattened, dashed, then either drawn as a hairline (zero
 //! width) or expanded into an outline and filled.
@@ -12,9 +14,10 @@ use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, m
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::fill::fill;
+use crate::fill::{aa_scanner, fill};
 use crate::path::Path;
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
+use crate::scanner::XPathScanner;
 use crate::types::{LineCap, LineJoin, floor_i32};
 use crate::xpath::XPath;
 use color::Pixel;
@@ -111,7 +114,8 @@ fn flattened_dashed(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -
 /// Draw zero-width (hairline) strokes: one pixel per scanline intersection.
 ///
 /// Each segment of the flattened [`XPath`] is walked scanline-by-scanline,
-/// drawing a single span (possibly one pixel wide) per row.
+/// drawing a single span (possibly one pixel wide) per row; see
+/// [`narrow_runs`].
 fn stroke_narrow<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
@@ -121,8 +125,73 @@ fn stroke_narrow<P: Pixel>(
     matrix: &[f64; 6],
     flatness: f64,
 ) {
+    let (width, height) = (bitmap.width, bitmap.height);
+    narrow_runs(clip, path, matrix, flatness, width, height, |x0, x1, y| {
+        render_bitmap_span::<P>(bitmap, pipe, src, None, x0, x1, y);
+    });
+}
+
+/// The pixel runs a hairline stroke of `path` paints on a `width × height`
+/// bitmap under `clip`, in the order [`stroke`] paints them, as
+/// `emit(x0, x1, y)` with `0 ≤ x0 ≤ x1 < width` and `0 ≤ y < height`.
+///
+/// Each run is composited with full coverage (no shape).  Runs of different
+/// segments may overlap; each is composited on its own.  Nothing is emitted
+/// for a positive line width.
+pub fn hairline_runs(
+    path: &Path,
+    matrix: &[f64; 6],
+    params: &StrokeParams<'_>,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+    emit: impl FnMut(i32, i32, i32),
+) {
+    if params.line_width != 0.0 {
+        return;
+    }
+    let Some(path) = flattened_dashed(path, matrix, params) else {
+        return;
+    };
+    narrow_runs(clip, &path, matrix, params.flatness, width, height, emit);
+}
+
+/// The AA-space scanner of a stroke of `path` with a positive line width.
+///
+/// It is the geometry stage ([`crate::fill::aa_scanner`]) of the non-zero
+/// antialiased fill of the outline [`stroke`] paints.  `None` for a
+/// hairline (`line_width == 0`) and for a stroke that covers no row.
+#[must_use]
+pub fn stroke_aa_scanner(
+    path: &Path,
+    matrix: &[f64; 6],
+    params: &StrokeParams<'_>,
+    clip: &Clip,
+) -> Option<XPathScanner> {
+    if params.line_width == 0.0 {
+        return None;
+    }
+    let path = flattened_dashed(path, matrix, params)?;
+    let outline = make_stroke_path(&path, params.line_width, params);
+    aa_scanner(&outline, matrix, params.flatness, clip, false)
+}
+
+/// Walk the segments of the flattened `path` scanline by scanline and emit
+/// the pixel runs of a hairline (see [`narrow_span_runs`]).
+fn narrow_runs(
+    clip: &Clip,
+    path: &Path,
+    matrix: &[f64; 6],
+    flatness: f64,
+    width: u32,
+    height: u32,
+    mut emit: impl FnMut(i32, i32, i32),
+) {
     // Build a non-closing XPath (no implicit close for hairlines).
     let xpath = XPath::new(path, matrix, flatness, false);
+    let mut span = |x0: i32, x1: i32, y: i32, clip_res: ClipResult| {
+        narrow_span_runs(clip, x0, x1, y, clip_res, width, height, &mut emit);
+    };
 
     for seg in &xpath.segs {
         // Orient so that y0 <= y1.
@@ -146,7 +215,7 @@ fn stroke_narrow<P: Pixel>(
         if y0 == y1 {
             // Horizontal or near-horizontal: draw one span.
             let (span_x0, span_x1) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
-            draw_narrow_span::<P>(bitmap, clip, pipe, src, span_x0, span_x1, y0, clip_res);
+            span(span_x0, span_x1, y0, clip_res);
         } else {
             // Sloped segment: walk scanlines.
             let dxdy = seg.dxdy;
@@ -186,7 +255,7 @@ fn stroke_narrow<P: Pixel>(
                 } else {
                     (xb + 1, xa)
                 };
-                draw_narrow_span::<P>(bitmap, clip, pipe, src, span_x0, span_x1, y, clip_res);
+                span(span_x0, span_x1, y, clip_res);
                 xa = xb;
             }
         }
@@ -218,28 +287,29 @@ fn stroke_wide<P: Pixel>(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Draw a span (possibly a single pixel), clamped to the bitmap and clipped.
+/// Emit the runs of the span `[x0, x1]` on row `y` (possibly a single
+/// pixel) that lie on a `width × height` bitmap and inside the clip.
 ///
-/// Used by [`stroke_narrow`] to draw each hairline pixel-run.
+/// Used by [`narrow_runs`] for each hairline pixel-run.
 #[expect(
     clippy::too_many_arguments,
     reason = "all parameters are required; splitting would add indirection"
 )]
-fn draw_narrow_span<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
+fn narrow_span_runs(
     clip: &Clip,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
     x0: i32,
     x1: i32,
     y: i32,
     clip_res: ClipResult,
+    width: u32,
+    height: u32,
+    emit: &mut impl FnMut(i32, i32, i32),
 ) {
     if y < 0 {
         return;
     }
     #[expect(clippy::cast_sign_loss, reason = "y >= 0 checked above")]
-    if (y as u32) >= bitmap.height {
+    if (y as u32) >= height {
         return;
     }
     // Clamp x to bitmap.
@@ -247,7 +317,7 @@ fn draw_narrow_span<P: Pixel>(
         clippy::cast_possible_wrap,
         reason = "bitmap width fits in i32 in practice"
     )]
-    let width_i = bitmap.width as i32;
+    let width_i = width as i32;
 
     // The span is clamped to the bitmap in both branches: a clip rectangle
     // need not lie within it.
@@ -263,10 +333,10 @@ fn draw_narrow_span<P: Pixel>(
         return;
     }
     if clip_res == ClipResult::AllInside {
-        render_bitmap_span::<P>(bitmap, pipe, src, None, sx0, sx1, y);
+        emit(sx0, sx1, y);
     } else {
         for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
-            render_bitmap_span::<P>(bitmap, pipe, src, None, rx0, rx1, y);
+            emit(rx0, rx1, y);
         }
     }
 }
