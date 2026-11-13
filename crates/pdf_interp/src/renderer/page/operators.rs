@@ -72,6 +72,10 @@ impl PageRenderer<'_> {
         if self.marked_content.hidden() {
             return;
         }
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() && self.refuse_device_operator(op) {
+            return;
+        }
         // A `d1` glyph description is a stencil in the text fill colour.
         if op.sets_colour() && self.gstate.current().colour_locked {
             return;

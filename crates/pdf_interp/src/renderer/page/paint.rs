@@ -380,6 +380,11 @@ impl PageRenderer<'_> {
         even_odd: bool,
         region: Option<PixelRect>,
     ) {
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            self.record_device_fill(path, even_odd);
+            return;
+        }
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
         let flatness = gs.flatness.max(0.1);
@@ -576,6 +581,11 @@ impl PageRenderer<'_> {
         line_width: f64,
         region: Option<PixelRect>,
     ) {
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            self.record_device_stroke(path, line_width);
+            return;
+        }
         let gs = self.gstate.current();
         if gs.stroke_paints_nothing() {
             return;

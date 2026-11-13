@@ -58,6 +58,8 @@
 mod annotations;
 mod canvas;
 mod device_blit;
+#[cfg(feature = "vulkan")]
+mod device_page;
 mod devices;
 mod diagnostics;
 mod fill_stroke;
@@ -86,10 +88,12 @@ mod view;
 mod xobject;
 
 use canvas::{CanvasKind, PageCanvas};
+#[cfg(feature = "vulkan")]
+pub use device_page::{DeviceRecording, device_page_operators};
 #[cfg(feature = "cache")]
 use devices::CacheState;
 pub(crate) use diagnostics::source_ppi;
-pub use diagnostics::{ImageFailure, PageDiagnostics, RenderAbort};
+pub use diagnostics::{DevicePage, ImageFailure, PageDiagnostics, RenderAbort};
 #[cfg(feature = "cache")]
 pub(crate) use image_reduce::draw_reduces;
 use paint::components_to_color;
@@ -368,6 +372,10 @@ pub struct PageRenderer<'doc> {
     /// `None` keeps the renderer fully CPU-resident.
     #[cfg(feature = "cache")]
     cache_state: Option<CacheState>,
+    /// The page's paint commands while it is recorded for the device page
+    /// raster instead of painted; see [`Self::record_for_device`].
+    #[cfg(feature = "vulkan")]
+    device_page: Option<Box<device_page::Recording>>,
 }
 
 /// The transparency group being painted into: the page group, or a form's.
@@ -616,6 +624,8 @@ impl<'doc> PageRenderer<'doc> {
             vk_backend: None,
             #[cfg(feature = "cache")]
             cache_state: None,
+            #[cfg(feature = "vulkan")]
+            device_page: None,
         }
     }
 
@@ -1008,6 +1018,10 @@ impl<'doc> PageRenderer<'doc> {
             if self.budget_exceeded.is_some() {
                 return;
             }
+            #[cfg(feature = "vulkan")]
+            if self.device_refused() {
+                return;
+            }
             if self
                 .cancel
                 .as_ref()
@@ -1091,6 +1105,10 @@ impl<'doc> PageRenderer<'doc> {
         self.pending_clip = None;
         self.text_clip = None;
         self.marked_content = operators::MarkedContent::default();
+        #[cfg(feature = "vulkan")]
+        if self.device_refused() {
+            return;
+        }
         annotations::render_annotations(self, page_id);
     }
 }

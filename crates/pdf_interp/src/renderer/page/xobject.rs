@@ -342,6 +342,11 @@ impl PageRenderer<'_> {
     /// [`Self::do_form_xobject`], with the form's operators taken from
     /// `source`.
     fn run_form_xobject(&mut self, form: &FormXObject, source: FormContent<'_>) {
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            self.refuse_device("form XObject");
+            return;
+        }
         if self.form_depth >= MAX_FORM_DEPTH {
             self.budget_exceeded = Some(RenderAbort::FormDepth);
             log::warn!(

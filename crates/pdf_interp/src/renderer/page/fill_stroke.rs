@@ -38,6 +38,11 @@ impl PageRenderer<'_> {
             self.stroke_path(path);
             return;
         };
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            self.refuse_device("translucent fill and stroke");
+            return;
+        }
         let coverage = match self.stroke_coverage(path, line_width, rect) {
             Ok(coverage) => coverage,
             Err(e) => {

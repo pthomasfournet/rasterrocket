@@ -105,6 +105,35 @@ pub struct PageDiagnostics {
     /// device path is broken on this host; the first failure of the
     /// process is also logged at `warn`.
     pub device_icc_failures: u32,
+    /// Whether the page was rendered whole on a GPU from its recorded
+    /// paint commands, and why not when it was offered and declined.
+    pub device_page: DevicePage,
+}
+
+/// How a page used the whole-page GPU raster.
+///
+/// A page offered to it is first interpreted into paint commands; one
+/// that uses anything the raster does not render is then rendered on the
+/// CPU, whole, as is a page the device fails on.  Every outcome yields the
+/// same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum DevicePage {
+    /// The page was not offered to a device: the session renders every
+    /// page on the CPU, the device was busy with another page or not yet
+    /// open, or the page's operators ruled it out before interpretation.
+    #[default]
+    NotOffered,
+    /// The device rendered the page from `commands` paint commands.
+    Rendered {
+        /// Paint commands the page recorded.
+        commands: u32,
+    },
+    /// The page paints with something the GPU raster does not render,
+    /// named here; it was rendered on the CPU.
+    Ineligible(&'static str),
+    /// The device failed on the page; it was rendered on the CPU.
+    Failed,
 }
 
 /// An image the renderer skipped because it could not be decoded or drawn,

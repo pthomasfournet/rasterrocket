@@ -153,6 +153,11 @@ impl PageRenderer<'_> {
         alpha: u8,
         paint: impl FnOnce(&mut Self),
     ) {
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() && self.gstate.current().soft_mask.is_some() {
+            self.refuse_device("soft mask");
+            return;
+        }
         self.paint_knocking_out(region, alpha, |r| r.paint_masked(region, paint));
     }
 
