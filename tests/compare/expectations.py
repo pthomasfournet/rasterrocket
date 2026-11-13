@@ -366,9 +366,20 @@ def load(path: pathlib.Path) -> dict[str, dict[TestId, Entry]]:
 
 
 def save(path: pathlib.Path, suites: Mapping[str, Mapping[TestId, Entry]]) -> None:
-    """Write `suites` to `path`, replacing it atomically."""
+    """Write `suites` to `path`, replacing it atomically.
+
+    The file keeps its permissions; a new one gets 0666 less the umask
+    (`mkstemp` itself creates 0600).
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(dump(suites))
         pathlib.Path(tmp).replace(path)

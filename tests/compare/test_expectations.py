@@ -210,6 +210,16 @@ class FileFormat(unittest.TestCase):
         with self.assertRaises(ex.RegistryError):
             ex.parse('{"format": 2, "suites": {}}')
 
+    def test_save_keeps_permissions(self) -> None:
+        """An existing registry keeps its mode across a save."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "e.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o640)
+            ex.save(path, {"s": {("a.pdf", None): ex.Entry("a.pdf", None, "error", "r")}})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertIn(("a.pdf", None), ex.load(path)["s"])
+
     def test_missing_file_is_empty(self) -> None:
         """A registry that does not exist has no entries."""
         with tempfile.TemporaryDirectory() as tmp:
