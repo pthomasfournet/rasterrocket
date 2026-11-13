@@ -48,6 +48,9 @@ pub struct RasterSession {
     /// The page boundary box every page is measured and rendered on
     /// ([`crate::SessionConfig::page_box`]).
     pub(crate) page_box: pdf_interp::PageBox,
+    /// The rotation added to every page's `/Rotate`
+    /// ([`crate::SessionConfig::rotation`]).
+    pub(crate) rotation: pdf_interp::Rotation,
     /// The document's interactive form type, reported in every page's
     /// [`PageDiagnostics::form_type`](crate::PageDiagnostics::form_type).
     pub(crate) form_type: pdf_interp::FormType,
@@ -114,9 +117,10 @@ impl RasterSession {
     }
 
     /// The geometry of page `page_num` (1-based): its size in points after
-    /// `/Rotate` and `UserUnit`, rotation, `UserUnit`, the origin of the
-    /// box selected by [`SessionConfig::page_box`], and the `MediaBox` and
-    /// `CropBox`.  No content is parsed.
+    /// `/Rotate`, [`SessionConfig::rotation`] and `UserUnit`, the rotation
+    /// (the page's `/Rotate` plus the session's), `UserUnit`, the origin of
+    /// the box selected by [`SessionConfig::page_box`], and the `MediaBox`
+    /// and `CropBox`.  No content is parsed.
     ///
     /// [`PageGeometry::size_px`](crate::PageGeometry::size_px) gives the
     /// pixel size a render at given scales produces.
@@ -127,8 +131,20 @@ impl RasterSession {
     /// [`RasterError::InvalidPageGeometry`] when `UserUnit` is out of range.
     pub fn page_geometry(&self, page_num: u32) -> Result<crate::PageGeometry, RasterError> {
         let page_id = self.resolve_page(page_num)?;
-        pdf_interp::page_size_pts_by_id(&self.doc, page_id, self.page_box)
-            .map_err(RasterError::from)
+        self.geometry_by_id(page_id)
+    }
+
+    /// The geometry of the page object `page_id` as this session renders
+    /// it: measured on [`SessionConfig::page_box`] and turned by
+    /// [`SessionConfig::rotation`].
+    pub(crate) fn geometry_by_id(
+        &self,
+        page_id: pdf::ObjectId,
+    ) -> Result<crate::PageGeometry, RasterError> {
+        Ok(
+            pdf_interp::page_size_pts_by_id(&self.doc, page_id, self.page_box)?
+                .rotated(self.rotation),
+        )
     }
 
     /// The pixel size `(width, height)` of page `page_num` (1-based)
@@ -512,6 +528,7 @@ fn open_session_with_doc(
         vector_antialias: config.vector_antialias,
         overprint: config.overprint,
         page_box: config.page_box,
+        rotation: config.rotation,
         form_type,
         javascript_warned: AtomicBool::new(false),
         media_warned: AtomicBool::new(false),

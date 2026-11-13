@@ -231,7 +231,7 @@ impl PageBuffer {
         let scale = f64::from(opts.dpi) / 72.0;
         check_scale(scale)?;
         let page_id = session.resolve_page(page_num)?;
-        let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
+        let geom = session.geometry_by_id(page_id)?;
         let view = page_view(&geom, (scale, scale), None)?;
         check_output(view.width, view.height, format, out_len, stride)?;
         let mut params = RenderParams::new(scale);

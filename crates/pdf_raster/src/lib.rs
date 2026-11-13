@@ -144,7 +144,8 @@ pub use pdf_interp::renderer::{
 };
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{
-    FormType, MediaKind, PageBox, PageGeometry, RenderPurpose, ScriptLocation, UnsupportedFeature,
+    FormType, InvalidRotation, MediaKind, PageBox, PageGeometry, RenderPurpose, Rotation,
+    ScriptLocation, UnsupportedFeature,
 };
 pub use render::{
     render_page_gray, render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics,
@@ -433,6 +434,10 @@ pub struct RasterOptions {
     /// [`SessionConfig::page_box`].  Default [`PageBox::Crop`].
     pub page_box: PageBox,
 
+    /// A rotation added to each page's `/Rotate`; see
+    /// [`SessionConfig::rotation`].  Default [`Rotation::None`].
+    pub rotation: Rotation,
+
     /// Whether pages are rendered over a transparent backdrop instead of
     /// white paper.  Default `false`: pages are 8-bit gray.  `true` yields
     /// [`PixelFormat::Rgba8`] pages whose alpha is the page's coverage ×
@@ -483,6 +488,7 @@ impl Default for RasterOptions {
             system_fonts: true,
             image_budget: DOCUMENT_IMAGE_BUDGET_BYTES,
             page_box: PageBox::Crop,
+            rotation: Rotation::None,
             transparent_background: false,
             cancel: None,
         }

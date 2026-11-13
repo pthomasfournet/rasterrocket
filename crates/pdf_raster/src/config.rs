@@ -5,7 +5,7 @@ use crate::{PageDiagnostics, RasterError, RasterSession, open_session, open_sess
 
 use std::path::PathBuf;
 
-use crate::{PageBox, Password, RenderPurpose};
+use crate::{PageBox, Password, RenderPurpose, Rotation};
 
 // ── Backend policy ────────────────────────────────────────────────────────────
 
@@ -349,6 +349,13 @@ pub struct SessionConfig {
     /// page's own box of that kind intersected with the `MediaBox`, or the
     /// `CropBox` region when the page has none.
     pub page_box: PageBox,
+    /// A rotation added to every page's `/Rotate` before it is drawn.
+    ///
+    /// The page is rasterised in the turned orientation: a quarter turn
+    /// exchanges the page's width and height in every size the session
+    /// reports and renders, and a [`RenderRegion`](crate::RenderRegion) is
+    /// placed on the turned page.  Default [`Rotation::None`].
+    pub rotation: Rotation,
 }
 
 impl SessionConfig {
@@ -381,6 +388,7 @@ impl SessionConfig {
             system_fonts: true,
             image_budget: crate::DOCUMENT_IMAGE_BUDGET_BYTES,
             page_box: PageBox::Crop,
+            rotation: Rotation::None,
         }
     }
 

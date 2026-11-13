@@ -72,7 +72,7 @@ pub fn render_page_rgb_with_diagnostics(
     params: &RenderParams,
 ) -> Result<(Bitmap<Rgb8>, crate::PageDiagnostics), RasterError> {
     let page_id = session.resolve_page(page_num)?;
-    let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
+    let geom = session.geometry_by_id(page_id)?;
     render_page_rgb_with_geom(
         session,
         page_num,
@@ -105,7 +105,7 @@ pub fn render_page_gray(
 ) -> Result<RenderedPage, RasterError> {
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
-    let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
+    let geom = session.geometry_by_id(page_id)?;
     let mut params = RenderParams::new(f64::from(dpi) / 72.0);
     params.cancel.clone_from(&opts.cancel);
     let (rgb, diagnostics) = render_page_rgb_with_geom(
@@ -157,7 +157,7 @@ pub fn render_page_rgba(
     }
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
-    let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
+    let geom = session.geometry_by_id(page_id)?;
     let mut params = RenderParams::new(f64::from(dpi) / 72.0).with_transparent_background();
     params.cancel.clone_from(&opts.cancel);
     let (rgb, diagnostics) = render_page_rgb_with_geom(
