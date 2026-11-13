@@ -213,6 +213,10 @@ pub(crate) fn render<'a>(
             match renderer.paint_device_page(claim.backend, &page) {
                 Ok(()) => {
                     let commands = u32::try_from(page.len()).unwrap_or(u32::MAX);
+                    log::debug!(
+                        "page {}: rendered on the GPU from {commands} commands",
+                        job.page_num
+                    );
                     return Ok((renderer, DevicePage::Rendered { commands }));
                 }
                 Err(e) => {
