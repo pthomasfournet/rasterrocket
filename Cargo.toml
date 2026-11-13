@@ -83,6 +83,9 @@ flate2       = { version = "1", features = ["zlib-rs"] }
 weezl        = { version = "0.2" }
 # JPEG decoding: images in documents and archives, and encoder tests.
 zune-jpeg    = { version = "0.5.15" }
+# Property tests.  Without the default `fork` and `timeout` features, which
+# run each case in a subprocess and pull in tempfile and rusty-fork.
+proptest     = { version = "1.12", default-features = false, features = ["std"] }
 
 # The local read-fonts (0.46) and skrifa (0.49) forks replace the registry
 # crates for every dependent whose requirement those versions satisfy, the

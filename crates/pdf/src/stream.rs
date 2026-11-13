@@ -169,7 +169,7 @@ fn apply_flate(data: &[u8], params: Option<&dyn DictLookup>) -> Result<Decoded, 
 }
 
 /// Maximum decompressed size we will accept, to defeat decompression bombs.
-const MAX_DECOMPRESSED: usize = 1 << 30; // 1 GiB
+pub(crate) const MAX_DECOMPRESSED: usize = 1 << 30; // 1 GiB
 
 /// Inflate a zlib (RFC 1950) or raw deflate stream, as `FlateDecode` does
 /// for a stream without predictor parameters.
@@ -767,7 +767,7 @@ fn decode_ascii85(data: &[u8]) -> Decoded {
 /// the next byte `257 − n` times; 128 ends the data.  A run cut short by the
 /// end of input contributes the bytes present, and decoding stops at a run
 /// that would exceed `max_output`; both mark the output truncated.
-fn decode_run_length(data: &[u8], max_output: usize) -> Decoded {
+pub(crate) fn decode_run_length(data: &[u8], max_output: usize) -> Decoded {
     let mut out = Vec::new();
     let mut i = 0;
     let over_cap = || format!("RunLengthDecode: output exceeds {max_output} bytes");

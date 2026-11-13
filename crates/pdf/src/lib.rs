@@ -18,6 +18,8 @@ mod madvise;
 mod object;
 mod objstm;
 mod page_tree;
+#[cfg(test)]
+mod proptests;
 mod repair;
 mod stream;
 mod xref;
