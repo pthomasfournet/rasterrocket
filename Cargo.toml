@@ -23,6 +23,7 @@ members = [
     "crates/read_fonts",
     "crates/skrifa",
     "crates/harfrust",
+    "crates/rav1d",
     "crates/font_test_data",
 ]
 # Every member but `pdf_bridge`, whose build script needs a poppler source
@@ -47,6 +48,7 @@ default-members = [
     "crates/read_fonts",
     "crates/skrifa",
     "crates/harfrust",
+    "crates/rav1d",
     "crates/font_test_data",
 ]
 

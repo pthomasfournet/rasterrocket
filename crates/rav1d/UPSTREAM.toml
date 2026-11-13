@@ -1,0 +1,13 @@
+# Where this local fork came from.  Read by scripts/check_vendored.py, which
+# reports upstream commits, crates.io releases and RustSec advisories that
+# appeared after this base, or after the last review when `reviewed` is set.
+# Update `commit`, `date` and `version` when the fork is rebased; set the
+# `reviewed*` fields when upstream history up to a later commit has been
+# examined and every change in it brought over or deliberately left out
+# (CHANGES.md records which).
+crate = "rav1d"
+version = "1.1.1"
+repository = "memorysafety/rav1d"
+path = "src"
+commit = "2e7216c20ac2a75de204d6c8d7268b75a45959b4"
+date = "2026-10-27T18:44:56Z"

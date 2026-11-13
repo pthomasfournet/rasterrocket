@@ -1,0 +1,65 @@
+# Local fork of rav1d (https://github.com/memorysafety/rav1d), the Rust port
+# of the dav1d AV1 decoder, vendored from upstream commit
+# 2e7216c20ac2a75de204d6c8d7268b75a45959b4 (2026-10-27, crate version 1.1.1).
+# Licence: BSD-2-Clause (see COPYING; patent grant in PATENTS).  Changes made
+# here are ours; see CHANGES.md.
+[package]
+name = "rav1d"
+authors = ["Rav1d Developers", "Prossimo"]
+version = "1.1.1"
+edition = "2021"
+rust-version.workspace = true
+description = "Rust port of the dav1d AV1 decoder (local fork)."
+license = "BSD-2-Clause"
+repository = "https://github.com/memorysafety/rav1d"
+readme = "README.md"
+publish = false
+
+[lib]
+bench = false
+
+[dependencies]
+assert_matches = "1.5.0"
+atomig = { version = "0.4.0", features = ["derive"] }
+av-data = "0.4.2"
+bitflags = "2.4.0"
+cfg-if = "1.0.0"
+libc = "0.2"
+parking_lot = "0.12.2"
+pastey = "0.2.3"
+# Read by the run-time CPU detection that selects assembly kernels.
+raw-cpuid = { version = "11.0.1", optional = true }
+static_assertions = "1.1.0"
+strum = { version = "0.27", features = ["derive"] }
+to_method = "1.1.0"
+zerocopy = { version = "0.7.32", features = ["derive"] }
+
+# Needed by the `asm` feature alone: `nasm-rs` drives the nasm executable
+# for the x86 sources, `cc` assembles the arm `.S` sources.
+[build-dependencies]
+cc = { version = "1.0.79", optional = true }
+nasm-rs = { version = "0.3", features = ["parallel"], optional = true }
+
+[features]
+default = ["asm", "asm_arm64_dotprod", "asm_arm64_i8mm", "asm_arm64_sve2", "bitdepth_8", "bitdepth_16"]
+# Hand-written assembly kernels, selected at run time by CPU feature.  An
+# x86 build needs the nasm executable; without this feature the crate is
+# Rust alone and builds with no external tool.
+asm = ["dep:cc", "dep:nasm-rs", "dep:raw-cpuid"]
+asm_arm64_dotprod = ["asm"]
+asm_arm64_i8mm = ["asm"]
+asm_arm64_sve2 = ["asm"]
+bitdepth_8 = []
+bitdepth_16 = []
+
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false
+
+# Linted at clippy's defaults (the workspace lint set is not inherited),
+# minus findings in upstream code we have not changed, beyond those the
+# crate root already expects.
+[lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+manual_is_multiple_of = "allow"

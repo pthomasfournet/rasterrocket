@@ -43,8 +43,10 @@ jobs:
 
       # crates/pdf_raster/tests/encryption.rs builds its encrypted fixtures
       # with qpdf at test time and skips without it.
-      - name: Install qpdf
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qpdf
+      # nasm assembles the x86 kernels of the AV1 decoder (crates/rav1d,
+      # behind AVIF comic pages).
+      - name: Install qpdf and nasm
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qpdf nasm
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@v5
@@ -88,6 +90,15 @@ jobs:
 
       - name: Test vendored JBIG2 and CCITT decoders
         run: cargo test -p hayro-jbig2 -p hayro-ccitt --release
+
+      # The fork's own tests; its use by the comic crate is tested there.
+      # The second command keeps the build without assembly, which needs no
+      # nasm, compiling.
+      - name: Test vendored AV1 decoder, check it without assembly
+        run: |
+          cargo test -p rav1d --release --lib
+          cargo check -p rav1d --no-default-features --features bitdepth_8,bitdepth_16
+          cargo check -p rasterrocket-cli --no-default-features --features bundled-fonts
 
       - name: Test rasterrocket-cli (argument handling, end-to-end runs of the binary)
         run: cargo test -p rasterrocket-cli
@@ -202,6 +213,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-platforms-
 
+      # The arm64 legs assemble the decoder's .S kernels with the C compiler.
+      - name: Install nasm (x86-64 Linux)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends nasm
+
       - name: Clippy (no GPU features)
         run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
 
@@ -238,7 +254,8 @@ jobs:
       # The vendored forks at clippy's defaults, one package at a time so
       # features do not unify across them: library and tests, with the
       # `image` feature their integration tests require; read-fonts' and
-      # skrifa's libraries only, their test code being upstream's.
+      # skrifa's libraries only, their test code being upstream's, and
+      # rav1d's library, its tests being in the library.
       - name: Clippy (vendored forks)
         run: |
           cargo clippy -p hayro-jpeg2000 --features image --tests -- -D warnings
@@ -247,6 +264,7 @@ jobs:
           cargo clippy -p harfrust --tests -- -D warnings
           cargo clippy -p read-fonts -- -D warnings
           cargo clippy -p skrifa -- -D warnings
+          cargo clippy -p rav1d -- -D warnings
 
       - name: Test rasterrocket-render (NEON tiers)
         if: runner.os == 'Linux' && runner.arch == 'ARM64'
@@ -329,6 +347,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.100
+      - name: Install nasm
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends nasm
       - name: Cache Cargo registry
         uses: actions/cache@v5
         with:
