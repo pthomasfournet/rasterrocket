@@ -1660,9 +1660,8 @@ Track and close fidelity gaps against pdftoppm once the native path is default.
 
 ### Still open / lower priority
 
-- [x] Function-based shading (Type 1) — pre-sampled 64×64 grid; bilinear interpolation in fill_span; BBox intersection; full CTM inversion
+- [x] Function-based shading (Type 1) — evaluated at every device pixel of the Domain (every k-th above 4 Mi pixels, interpolated between); BBox intersection; full CTM inversion
 - [x] nvJPEG2000 for JPXDecode — GPU fast path via `nvjpeg2k` feature; planar→interleaved copy (`cudaMemcpy2D` D→H per component); sub-sampling guard + OOM cap + zero-dimension guard; CPU `jpeg2k`/OpenJPEG fallback; threshold-gated at 512×512 px (see Phase 4 item 1 for full audit)
-- [ ] OptiX BVH (evaluate only if profiling shows complex paths as bottleneck)
 
 ---
 
@@ -1752,10 +1751,6 @@ DeviceCMYK → DeviceRGB via two paths depending on whether a full ICC CLUT is a
 - [x] Parity tests: `icc_cmyk_matrix_simd_vs_scalar` asserts the dispatcher-selected SIMD tier and scalar agree byte-for-byte across a 40-pixel vector covering axis extremes and a mid-range sweep; `icc_cmyk_avx512_matches_scalar` calls the AVX-512 VBMI kernel directly against 200 pseudorandom 32-pixel blocks on machines that support it
 - [x] nvJPEG2000 for JPXDecode — implemented (see Phase 4 item 1 above)
 
-**5. OptiX BVH for complex paths — low priority, evaluate later**
-
-RT cores on Blackwell provide hardware BVH traversal. For pages with thousands of path segments, an OptiX any-hit kernel computing winding numbers via ray casting would be faster than the tile rasteriser for very complex geometry. In practice, most PDF pages have O(100) path segments, not O(10000), so this is unlikely to be the bottleneck. Evaluate only after profiling shows complex path rasterisation in the flamegraph.
-
 ### GPU dispatch table
 
 | Target | Value | Unblocked by |
@@ -1764,7 +1759,6 @@ RT cores on Blackwell provide hardware BVH traversal. For pages with thousands o
 | GPU supersampled AA (warp ballot) | High — quality + speed | GPU segment upload |
 | Tile-parallel fill rasterisation | High — sparse/complex paths | GPU segment upload |
 | ICC colour transforms | Medium — CMYK docs | Phase 1 colour spaces ✓ | ✓ COMPLETE |
-| OptiX BVH winding test | Low — only extreme geometry | Tile rasteriser |
 | Blend / composite | Low — already fast on CPU | Phase 2 perf work ✓ |
 
 Glyph rasterisation is **not** a GPU target — glyphs are rasterised once per document into the glyph cache. A GPU text path requires a GPU-resident rasteriser (SDF atlas or Slug algorithm) and is a separate major project.
@@ -2113,9 +2107,9 @@ Reverse-engineering desktop NVJPG would take a multi-month research project (cf.
 
 ---
 
-## Phase 8 — Custom on-GPU parallel Huffman decoder (Phase A SHIPPED as OSS artifact v1.0.0; B–D DEFERRED by decision)
+## Phase 8 — Custom on-GPU parallel Huffman decoder (Phase A SHIPPED as OSS artifact v1.0.0; B–D CLOSED)
 
-**Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07. Phase A (the parallel-Huffman algorithm in isolation) shipped 2026-05-12 / v1.0.0 as a byte-identical CUDA+Vulkan OSS artifact, wired into the production Vulkan path but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`). Phases B–D remain deferred indefinitely as a research project, not a performance work item — the bench gate confirmed 24-thread CPU wins on aggregate throughput, which is the answer to the research question, not a gap.
+**Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07. Phase A (the parallel-Huffman algorithm in isolation) shipped 2026-05-12 / v1.0.0 as a byte-identical CUDA+Vulkan OSS artifact, wired into the production Vulkan path but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`). Phases B–D are closed (2026-11-12): the bench gate confirmed 24-thread CPU wins on aggregate throughput, which is the answer to the research question, not a gap.
 
 **Why deferred:**
 
@@ -2144,7 +2138,7 @@ The full original spec is preserved as a developer-side research artifact; it is
 - Typed `Phase4FailureKind` per-subseq exit-condition surface — kernel writes `decode_status[i] ∈ {Ok, PrefixMiss, LengthBits, Incomplete}`, dispatcher inspects post-Phase-4 and surfaces non-Ok as typed `BackendError`. Defence-in-depth against future kernel divergence.
 - 10-vector adversarial corpus (`huffman/corpus.rs`) covering short / long / uniform / skewed / single-symbol / max-len-16 / Phase-2-retry-trigger / one-subseq / word-aligned / max-tail-padding. Pass on both backends, byte-for-byte.
 
-**Phase A acceptance criterion satisfied.** Phases B–D (real JPEG framing, integration, perf gate) remain deferred per the original Phase 8 deferral reasoning — the aggregate-throughput comparison vs. 24-thread CPU doesn't change just because the algorithm now demonstrably works.
+**Phase A acceptance criterion satisfied.** Phases B–D (real JPEG framing, integration, perf gate) are closed, for the original Phase 8 deferral reasoning — the aggregate-throughput comparison vs. 24-thread CPU doesn't change just because the algorithm now demonstrably works.
 
 **MVP limitations carried forward** (would block production, not the OSS artifact):
 
@@ -2290,17 +2284,15 @@ We're already 4× faster than `pdftoppm` and 4.5× faster than `mutool` on this 
 
 The 10 GB archive run completed; `bench/v11/results.md` is written and the release-history block above carries the v0.9.0 numbers (E1 first-pixel 35.6 ms vs mutool 93.7 ms = 2.6×; E3 cross-doc 3.5 ms/archive). rasterrocket won or tied at least three of four events on the 10 GB workload, so the phase gate passed and Phase 11 shipped. Nothing in this phase is open.
 
-**What stays deferred:**
+**Closed (2026-11-12):** the original Phase-11 draft's three non-contest tasks.
 
-The original Phase-11 draft had three tasks that are still real future work but are not contest-shaped, so they aren't part of this phase:
-
-- **Banded rendering as an OOM escape valve.**  Useful when 600+ DPI archival book scans exceed working-set memory; current corpus fits comfortably.  Defer until a real OOM workload appears.
-- **Multi-resolution image cache** (`(content_hash, l2factor)` keys).  Pays off only when the same corpus is rendered at multiple DPIs in sequence.  No current consumer does that.  Worth re-scoping if a multi-DPI workload materialises.
-- **Display-list intermediate.**  Flat byte buffer with bitfield-packed command headers (not `Vec<DisplayCmd>` — established C-renderer practice; the data-structure decision is recorded here so future-us doesn't ship the wrong shape).  Pays off when something consumes the same parsed page twice; nothing does today.
+- **Banded rendering as an OOM escape valve.**  Satisfied by region rendering: `RenderRegion` tiles bound a page's memory and stitch byte for byte.
+- **Multi-resolution image cache** (`(content_hash, l2factor)` keys).  Dropped: it pays off only when one corpus is rendered at several DPIs in sequence, and no consumer does that.
+- **Display-list intermediate.**  Dropped as a render path.  A page trace survives only as a pixel-independent regression oracle, tracked as its own work item.
 
 **Out of scope (re-affirming from the original):**
 
-A 2-stage interpretation+render pipeline within a single document.  rasterrocket already parallelises across pages with Rayon, which dominates per-document pipelining on any multi-core machine — confirmed empirically by the May-2026 baseline matrix (3–10 % gain over serial vs. Rayon-per-page's much larger lead).  Network-streaming PDF (HTTP range requests).  Not our user; PDFium's browser use case, not a CLI tool's.  AVX-512 simdjson-style PDF lexer.  Real engineering effort with a real win, but the contest events don't bottleneck on dictionary parsing — deferred to a future phase.
+Vector output (PostScript, SVG or PDF, as `pdftocairo` writes) and dynamic XFA forms: rasterrocket renders PDF to pixels, and a dynamic XFA form is reported (`FormType::XfaFull`) with a warning rather than laid out.  A 2-stage interpretation+render pipeline within a single document.  rasterrocket already parallelises across pages with Rayon, which dominates per-document pipelining on any multi-core machine — confirmed empirically by the May-2026 baseline matrix (3–10 % gain over serial vs. Rayon-per-page's much larger lead).  Network-streaming PDF (HTTP range requests).  Not our user; PDFium's browser use case, not a CLI tool's.  AVX-512 simdjson-style PDF lexer.  Real engineering effort with a real win, but the contest events don't bottleneck on dictionary parsing — deferred to a future phase.
 
 **Rejected ideas (kept here so they don't get re-proposed under new names):**
 
@@ -2481,6 +2473,15 @@ function, wholly on fine detail; a full-page shading of a Type 4 function
 costs about 0.2 s more at 150 dpi.
 Every crate now requires Rust 1.100 (was 1.99); CI's minimum-toolchain job
 holds the new floor.
+A `DCTDecode` stream with bytes before its SOI marker, or a frame height of
+0xFFFF (unknown) with a matching `/Width`, is repaired instead of dropped,
+and JPEGs taller or wider than 16 384 pixels decode (the 1 GiB decode budget
+bounds them); a stream whose scan data ends short is drawn as far as it
+decodes and reported partial.  A `--fax` page longer than the B4 length
+(364 mm on the fax) is sent as A4-length pieces.  The glyph advance and
+text-matrix translations use fused multiply-adds: **this changes pixels**,
+glyphs on a rounding boundary moving by a device pixel (corpus-05 at
+150 dpi: 169 of 601 pages, a median of 69 pixels a page).
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
@@ -2700,9 +2701,9 @@ are blocking by design, and the composite and soft-mask kernels use one
 
 Deferred/blocked items, in full:
 
-- **Phase 8 B–D** — deferred indefinitely by decision. Phase A shipped as an OSS artifact (v1.0.0). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap; revive only for single-page-latency / embedded / cross-vendor demand.
+- **Phase 8 B–D** — closed (2026-11-12). Phase A shipped as an OSS artifact (v1.0.0) and stays wired but dormant. The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap.
 - **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; on RADV the fixtures render byte-identically to the CPU path with the AA fill forced on (215 outputs, `tests/compare/ab_render.sh`), and an archive-scale byte-parity run (`ab_archive.sh`) is still to do. Also the perf-only Task 3 follow-ups (deferrable; none block correctness/parity). The tile-fill kernel and its missing parity oracle are gone: the single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
-- **Phase 11 deferred tasks** — banded rendering, multi-resolution cache, display-list intermediate. All deliberately deferred until a workload that needs them materialises.
+- **Phase 11 deferred tasks** — closed (2026-11-12): banded rendering is satisfied by `RenderRegion` tiles; the multi-resolution cache and the display-list render path are dropped; a page trace survives only as a regression oracle.
 - **Banded / clip-restricted image decoding** — deferred by measurement (2026-11-04). Every codec decodes an image whole, and the page memo and document store share that one decode between draws and pages. Over the first 40 pages of the 1 125 fixture and archive PDFs (49 661 image draws), the largest decode is 81 MiB and only 3 draws of 16 MiB or more show less than half their image (one 25 MiB JPEG), so decoding just the visible rows would save 45 MiB in all. Hostile sizes are already bounded: the 1 GiB decode budget is checked before allocation and sample buffers are allocated fallibly. Revive for a workload of very large images drawn mostly clipped.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.
 
