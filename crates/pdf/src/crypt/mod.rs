@@ -60,7 +60,10 @@ impl std::fmt::Debug for Password {
     }
 }
 
-/// How to treat an encrypted document when opening it.
+/// How to read a document's file and how to treat it when it is encrypted.
+///
+/// By default a file of at least 256 KiB is memory-mapped; see
+/// [`read_into_memory`](Self::read_into_memory).
 ///
 /// The default refuses encrypted input: an `/Encrypt` entry in the trailer
 /// makes the open fail with [`PdfError::EncryptedDocument`].  Decryption of
@@ -78,15 +81,31 @@ pub struct OpenOptions {
     /// and then as the owner password.  Has no effect unless
     /// [`decrypt_authorized`](Self::decrypt_authorized) is `true`.
     pub password: Option<Password>,
+    /// Whether a file opened by path is copied into memory instead of being
+    /// memory-mapped.  Default `false`.
+    ///
+    /// A mapping shares the file's page-cache pages, so the document's bytes
+    /// are only as stable as the file: when another process truncates the
+    /// file while the document is open, the first access to a mapped page
+    /// past the new end of file raises `SIGBUS`, which terminates the whole
+    /// process, and a write to the file changes bytes already indexed by the
+    /// cross-reference offsets.  `true` reads the whole file at open into a
+    /// buffer the document owns, which later changes to the file cannot
+    /// reach, at the cost of the file's size in memory and of reading every
+    /// byte at open.  A file shorter than 256 KiB is read into memory either
+    /// way.  No effect on a document opened from bytes.
+    pub read_into_memory: bool,
 }
 
 impl OpenOptions {
-    /// Options with the given decryption authorisation and password.
+    /// Options with the given decryption authorisation and password, the
+    /// file memory-mapped.
     #[must_use]
     pub const fn new(decrypt_authorized: bool, password: Option<Password>) -> Self {
         Self {
             decrypt_authorized,
             password,
+            read_into_memory: false,
         }
     }
 }

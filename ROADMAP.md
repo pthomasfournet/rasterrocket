@@ -2676,6 +2676,13 @@ CI's CPU-only test sets with `cargo-llvm-cov`, uploads the lcov and HTML
 reports as an artifact and writes a per-package table to the job summary;
 it reports only and gates nothing.
 
+A file opened by path can be read into memory instead of memory-mapped
+(`SessionConfig::read_into_memory`, `RasterOptions::read_into_memory`,
+`pdf::OpenOptions::read_into_memory`; public, additive, default `false`),
+so a long-running process whose input file another process truncates no
+longer dies of `SIGBUS` on the next read of a mapped page.  The CLI keeps
+the mapping.
+
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
 page: a store shared by the session's pages keeps it once a second page asks

@@ -2,8 +2,9 @@
 //!
 //! Open a PDF with [`Document::open`].  Objects are resolved on demand from the
 //! file bytes — the constructor only parses the xref table and trailer.  Files
-//! of at least [`MMAP_MIN_LEN`] bytes are memory-mapped; smaller files are
-//! read into memory.
+//! of at least [`MMAP_MIN_LEN`] bytes are memory-mapped unless
+//! [`OpenOptions::read_into_memory`] is set; other files are read into
+//! memory.
 
 use std::{
     collections::HashMap,
@@ -225,7 +226,8 @@ impl MmapOrVec {
 /// already borrowed, and a truncation makes any later access to a page past
 /// the new end of file raise `SIGBUS`, which terminates the process.  The
 /// parser never writes the file; callers must not modify or truncate a file
-/// while a [`Document`] opened from it is alive.
+/// while a [`Document`] opened from it is alive, or must open it with
+/// [`OpenOptions::read_into_memory`].
 fn map_file(file: &std::fs::File) -> std::io::Result<Mmap> {
     // SAFETY: `Mmap::map` is unsafe because the returned slice aliases
     // memory that another process can change or unmap by writing to or
@@ -243,14 +245,16 @@ fn map_file(file: &std::fs::File) -> std::io::Result<Mmap> {
 }
 
 /// The bytes of the file at `path`: a mapping for a file of at least
-/// [`MMAP_MIN_LEN`] bytes, an owned buffer for a shorter one.
-fn load_file(path: &Path) -> std::io::Result<MmapOrVec> {
+/// [`MMAP_MIN_LEN`] bytes, an owned buffer for a shorter one or when
+/// `read_into_memory` is set.
+fn load_file(path: &Path, read_into_memory: bool) -> std::io::Result<MmapOrVec> {
     use std::io::Read as _;
 
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
-    if len < MMAP_MIN_LEN {
-        // `len < MMAP_MIN_LEN`, so the capacity conversion cannot fail.
+    if read_into_memory || len < MMAP_MIN_LEN {
+        // A length beyond `usize` reserves nothing up front; `read_to_end`
+        // then grows the buffer or fails to allocate.
         let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
         let _ = file.read_to_end(&mut bytes)?;
         Ok(MmapOrVec::Owned(bytes))
@@ -283,7 +287,7 @@ fn parse_structure(data: &[u8]) -> Result<(XrefTable, usize), PdfError> {
 /// [`PdfError::Io`] if the file cannot be read, and the structural errors of
 /// [`Document::open`] (empty, not a PDF, no cross-reference table).
 pub fn is_encrypted(path: &Path) -> Result<bool, PdfError> {
-    is_encrypted_bytes(load_file(path)?.as_bytes())
+    is_encrypted_bytes(load_file(path, false)?.as_bytes())
 }
 
 /// [`is_encrypted`] for a document held in `bytes`.
@@ -302,8 +306,13 @@ impl Document {
     /// are parsed on first access and cached for subsequent calls.
     ///
     /// A file of at least 256 KiB is memory-mapped, so it must not be
-    /// modified or truncated while the returned `Document` is alive; a
-    /// shorter file is copied into memory.
+    /// modified or truncated while the returned `Document` is alive: a
+    /// truncation makes the next access to a page past the new end of file
+    /// raise `SIGBUS`, which terminates the process.  A shorter file is
+    /// copied into memory.  [`Self::open_with`] with
+    /// [`OpenOptions::read_into_memory`] copies a file of any length, for a
+    /// process that cannot rule out another truncating the file while it is
+    /// open.
     ///
     /// # Errors
     /// [`PdfError::Io`] if the file cannot be opened, read or mapped;
@@ -319,7 +328,9 @@ impl Document {
     /// [`OpenOptions::decrypt_authorized`] is set; with it, the empty user
     /// password and then [`OpenOptions::password`] unlock the file key, and
     /// every string and stream is decrypted in process as its object is
-    /// parsed.  An unencrypted document ignores `options`.
+    /// parsed; an unencrypted document ignores those two fields.
+    /// [`OpenOptions::read_into_memory`] decides whether the file is mapped
+    /// or copied (see [`Self::open`]).
     ///
     /// # Errors
     /// The errors of [`Self::open`], and [`PdfError::EncryptedDocument`]
@@ -327,7 +338,10 @@ impl Document {
     /// uses a security handler other than `/Standard`, or needs a password
     /// other than the one given.
     pub fn open_with(path: &Path, options: &OpenOptions) -> Result<Self, PdfError> {
-        Self::from_source(Arc::new(load_file(path)?), options)
+        Self::from_source(
+            Arc::new(load_file(path, options.read_into_memory)?),
+            options,
+        )
     }
 
     /// Construct from PDF bytes already in memory.
@@ -1917,6 +1931,26 @@ mod tests {
         let doc = Document::from_shared(leaked).expect("opens");
         assert_eq!(doc.bytes().as_ptr(), leaked.as_ptr(), "no copy");
         assert!(Document::from_shared(&b"not a pdf"[..]).is_err());
+    }
+
+    /// A file of at least `MMAP_MIN_LEN` bytes opened with
+    /// `read_into_memory` is copied, so truncating it after open leaves the
+    /// document's bytes intact.
+    #[test]
+    fn large_file_read_into_memory_survives_truncation() {
+        let padding = "a".repeat(usize::try_from(MMAP_MIN_LEN).unwrap());
+        let bytes = pdf_with_objects(&[(2, format!("({padding})")), (3, "(after)".to_owned())]);
+        let file = temp_pdf(&bytes);
+        let options = OpenOptions {
+            read_into_memory: true,
+            ..OpenOptions::default()
+        };
+        let doc = Document::open_with(file.path(), &options).expect("opens");
+        assert!(matches!(*doc.data, MmapOrVec::Owned(_)));
+        file.as_file().set_len(0).expect("truncate");
+        let obj = doc.get_object((3, 0)).expect("object 3");
+        assert_eq!(obj.as_str(), Some(&b"after"[..]));
+        assert_eq!(doc.bytes(), &bytes[..]);
     }
 
     /// A file of at least `MMAP_MIN_LEN` bytes is memory-mapped.

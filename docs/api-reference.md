@@ -106,7 +106,9 @@ pub fn open_session_from_reader(reader: impl std::io::Read, config: &SessionConf
 
 `open_session_from_bytes` is the in-memory counterpart to `open_session` (the session-level analogue of `raster_pdf_from_bytes`): same behaviour, taking owned PDF bytes instead of a path.
 
-The parser reads the document as one contiguous slice, indexed by the cross-reference offsets: a file is memory-mapped (from 256 KiB; a shorter one is read), owned bytes are held as they are, and `open_session_from_shared` holds any `AsRef<[u8]>` storage the caller shares (`Arc<[u8]>`, `&'static [u8]`, a reference-counted byte buffer type such as `bytes::Bytes`, a mapping the caller made) and reads it in place, never copying it. `bytes.as_ref()` must return the same bytes on every call. `open_session_from_reader` reads a `Read` source (a socket, an archive member) to its end into memory and opens that; a `Seek` source gains nothing, since nothing is parsed before the whole document is in memory, and a file on disk is better opened by path. A reader's I/O error is `RasterError::Pdf`. Every source renders the same document to identical pixels.
+The parser reads the document as one contiguous slice, indexed by the cross-reference offsets: a file is memory-mapped (from 256 KiB; a shorter one is read, and so is any file when `config.read_into_memory` is set), owned bytes are held as they are, and `open_session_from_shared` holds any `AsRef<[u8]>` storage the caller shares (`Arc<[u8]>`, `&'static [u8]`, a reference-counted byte buffer type such as `bytes::Bytes`, a mapping the caller made) and reads it in place, never copying it. `bytes.as_ref()` must return the same bytes on every call. `open_session_from_reader` reads a `Read` source (a socket, an archive member) to its end into memory and opens that; a `Seek` source gains nothing, since nothing is parsed before the whole document is in memory, and a file on disk is better opened by path. A reader's I/O error is `RasterError::Pdf`. Every source renders the same document to identical pixels.
+
+A mapped file shares the operating system's page cache, so the session's bytes are only as stable as the file: if another process truncates the file while the session is alive, the next read of a mapped page past the new end of file raises `SIGBUS`, which terminates the whole process instead of failing the render, and a write to the file changes bytes the cross-reference offsets already index. A long-running process rendering files it does not control sets `SessionConfig::read_into_memory` (or `RasterOptions::read_into_memory`): the whole file is read at open into a buffer the session owns, at the cost of the file's size in memory, and later changes to the file do not reach it. `rrocket` maps: it renders one file and exits.
 
 An encrypted document (Standard security handler, revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters) is refused with `RasterError::Pdf` unless `config.decrypt_authorized` is `true`; with it, the document is decrypted in process — no subprocess, no temporary file. The empty user password is tried first (a permissions-only document needs none), then `config.password` as the user and as the owner password; a wrong password, or none where one is needed, is a `RasterError::Pdf` saying which. A document using another security handler (public-key encryption, `/Adobe.PubSec`) is refused by name.
 
@@ -322,6 +324,7 @@ pub struct RasterOptions {
     pub overprint: bool,
     pub decrypt_authorized: bool,
     pub password: Option<Password>,
+    pub read_into_memory: bool,
     pub font_dirs: Vec<PathBuf>,
     pub system_fonts: bool,
     pub image_budget: usize,
@@ -348,6 +351,7 @@ pub struct RasterOptions {
 | `overprint` | — | When `true`, overprint (`OP`, `op`, `OPM`) is simulated on pages that set it; see [`SessionConfig`](#sessionconfig). |
 | `decrypt_authorized` | — | Whether an encrypted document may be decrypted; see [`SessionConfig`](#sessionconfig). `false` makes an encrypted document an error. |
 | `password` | — | Password for an encrypted document, tried as user then owner password after the empty user password. No effect unless `decrypt_authorized` is `true`. |
+| `read_into_memory` | — | When `true`, `raster_pdf` and `render_channel` read the file into memory instead of memory-mapping it, so a truncation of the file by another process cannot raise `SIGBUS`; see [`SessionConfig`](#sessionconfig). |
 | `font_dirs` | — | Extra directories of installed fonts, searched before those `RROCKET_FONT_DIR` names and the standard ones; see [`SessionConfig`](#sessionconfig). |
 | `system_fonts` | — | When `false`, the standard font directories are not searched; see [`SessionConfig`](#sessionconfig). |
 | `image_budget` | — | Host bytes of decoded images kept for reuse by later pages; 0 keeps none. See [`SessionConfig`](#sessionconfig). |
@@ -362,7 +366,7 @@ let mut opts = RasterOptions::new(150.0);
 opts.deskew = true;
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`, `image_budget = DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB), `page_box = PageBox::Crop`, `rotation = Rotation::None`, `transparent_background = false`, `cancel = None`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `read_into_memory = false`, `font_dirs` empty, `system_fonts = true`, `image_budget = DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB), `page_box = PageBox::Crop`, `rotation = Rotation::None`, `transparent_background = false`, `cancel = None`.
 
 ---
 
@@ -606,6 +610,7 @@ pub struct SessionConfig {
     // `prefetch: bool` exists only when `cache` feature is enabled
     pub decrypt_authorized: bool,  // default: false
     pub password: Option<Password>, // default: None
+    pub read_into_memory: bool,    // default: false (a file of 256 KiB or more is mapped)
     pub strict: bool,              // default: false
     pub purpose: RenderPurpose,    // default: RenderPurpose::View
     pub annotations: bool,         // default: true
@@ -1026,7 +1031,7 @@ pub fn open_bytes(bytes: Vec<u8>) -> Result<pdf::Document, InterpError>
 pub fn open_bytes_with(bytes: Vec<u8>, options: &pdf::OpenOptions) -> Result<pdf::Document, InterpError>
 ```
 
-Opens and validates a PDF, from a path or from bytes. `open` and `open_bytes` refuse an encrypted document; the `_with` forms take a `pdf::OpenOptions` (`OpenOptions::new(decrypt_authorized: bool, password: Option<Password>)`, or `default()` to refuse encrypted input), with the same meaning as the `SessionConfig` fields of those names: an authorised encrypted document is decrypted in process as its objects are read (the `pdf` crate's Standard security handler), and `Document::is_encrypted()` then reports `true`. `pdf::is_encrypted(path) -> Result<bool, PdfError>` probes the trailer for `/Encrypt` without opening the document, and `pdf::is_encrypted_bytes(&[u8])` does so for a document in memory.
+Opens and validates a PDF, from a path or from bytes. `open` and `open_bytes` refuse an encrypted document; the `_with` forms take a `pdf::OpenOptions` (`OpenOptions::new(decrypt_authorized: bool, password: Option<Password>)`, or `default()` to refuse encrypted input; its `read_into_memory` field, default `false`, reads the file into memory instead of mapping it), with the same meaning as the `SessionConfig` fields of those names: an authorised encrypted document is decrypted in process as its objects are read (the `pdf` crate's Standard security handler), and `Document::is_encrypted()` then reports `true`. `pdf::is_encrypted(path) -> Result<bool, PdfError>` probes the trailer for `/Encrypt` without opening the document, and `pdf::is_encrypted_bytes(&[u8])` does so for a document in memory.
 
  If a catalog JavaScript entry point is detected (checked locations: `/OpenAction`, catalog `/AA`, `/Names/JavaScript`, `/AcroForm/AA`, each flagged only when genuinely a JavaScript action: `/S /JavaScript`, or `/S /Rendition` with a `/JS` script, also along an action's `/Next` chain), a loud `WARN` is emitted per location and the document still opens — rasterrocket has no JavaScript engine and never executes `/JS`, so a script's structural presence cannot change the static rendered page. No JS is parsed or evaluated. A dynamic XFA form and a portable collection are warned about the same way. No page object is read at open; page-level `/AA` and annotation `/A`/`/AA` are checked per page by `page_has_javascript(doc, page_id) -> bool`. The same checks return typed data: `document_unsupported_features(doc) -> Vec<UnsupportedFeature>` and `page_unsupported_features(doc, page_id) -> Vec<UnsupportedFeature>`; see [`UnsupportedFeature`](#unsupportedfeature).
 

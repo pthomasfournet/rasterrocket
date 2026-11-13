@@ -103,6 +103,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
         overprint: opts.overprint,
         decrypt_authorized: opts.decrypt_authorized,
         password: opts.password.clone(),
+        read_into_memory: opts.read_into_memory,
         font_dirs: opts
             .font_dirs
             .iter()

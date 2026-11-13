@@ -267,6 +267,21 @@ pub struct SessionConfig {
     /// `true`, and none on an unencrypted document.  `Password` converts
     /// from `&str` and `String`, and its `Debug` output is redacted.
     pub password: Option<Password>,
+    /// Whether [`open_session`] copies the file into memory instead of
+    /// memory-mapping it.
+    ///
+    /// Default `false`: a file of at least 256 KiB is mapped, and its bytes
+    /// are read from the page cache as pages render.  The mapping is only as
+    /// stable as the file: if another process truncates the file while the
+    /// session is alive, the first access to a mapped page past the new end
+    /// of file raises `SIGBUS`, which terminates the whole process rather
+    /// than failing the render.  `true` reads the whole file at open into a
+    /// buffer the session owns, so later changes to the file cannot reach
+    /// it, at the cost of the file's size in memory.  For a long-running
+    /// process rendering files it does not control.  No effect on the
+    /// sessions opened from bytes, shared storage or a reader, which hold
+    /// their own bytes.
+    pub read_into_memory: bool,
     /// Whether an image or a content stream that cannot be decoded, or
     /// decodes only in part, fails its page.
     ///
@@ -378,6 +393,7 @@ impl SessionConfig {
             prefetch: false,
             decrypt_authorized: false,
             password: None,
+            read_into_memory: false,
             strict: false,
             purpose: RenderPurpose::View,
             annotations: true,
@@ -392,9 +408,12 @@ impl SessionConfig {
         }
     }
 
-    /// The parser's view of this config's decryption fields.
+    /// The parser's view of this config's decryption and file-access
+    /// fields.
     pub(crate) fn open_options(&self) -> pdf::OpenOptions {
-        pdf::OpenOptions::new(self.decrypt_authorized, self.password.clone())
+        let mut options = pdf::OpenOptions::new(self.decrypt_authorized, self.password.clone());
+        options.read_into_memory = self.read_into_memory;
+        options
     }
 
     /// The Vulkan device selector named by the `PDF_RASTER_VULKAN_DEVICE`

@@ -286,6 +286,12 @@ const _: fn() = || {
 /// objects are then decrypted in process, with `config.password` when the
 /// empty user password does not unlock it.
 ///
+/// A file of at least 256 KiB is memory-mapped unless
+/// `config.read_into_memory` is set: truncating a mapped file while the
+/// session is alive makes the next read past the new end of file raise
+/// `SIGBUS`, which terminates the process (see
+/// [`SessionConfig::read_into_memory`]).
+///
 /// # Errors
 ///
 /// - [`RasterError::Pdf`] if the file cannot be opened or parsed, or is

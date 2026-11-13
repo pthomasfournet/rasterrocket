@@ -416,6 +416,13 @@ pub struct RasterOptions {
     /// [`decrypt_authorized`](Self::decrypt_authorized) is `true`.
     pub password: Option<Password>,
 
+    /// Whether [`raster_pdf`] and [`render_channel`] copy the file into
+    /// memory instead of memory-mapping it; see
+    /// [`SessionConfig::read_into_memory`].  Default `false`.  `true` keeps
+    /// a truncation of the file by another process from raising `SIGBUS`
+    /// during the render.
+    pub read_into_memory: bool,
+
     /// Extra directories of installed fonts, searched before those
     /// `RROCKET_FONT_DIR` names and the standard ones; see
     /// [`SessionConfig::font_dirs`].  Default empty.
@@ -484,6 +491,7 @@ impl Default for RasterOptions {
             overprint: false,
             decrypt_authorized: false,
             password: None,
+            read_into_memory: false,
             font_dirs: Vec::new(),
             system_fonts: true,
             image_budget: DOCUMENT_IMAGE_BUDGET_BYTES,
