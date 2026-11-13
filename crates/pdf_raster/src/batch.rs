@@ -106,6 +106,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
             .collect(),
         system_fonts: opts.system_fonts,
         image_budget: opts.image_budget,
+        page_box: opts.page_box,
         ..defaults
     }
 }

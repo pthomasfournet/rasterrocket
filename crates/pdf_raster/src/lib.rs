@@ -421,6 +421,10 @@ pub struct RasterOptions {
     /// [`DOCUMENT_IMAGE_BUDGET_BYTES`]; 0 keeps nothing.
     pub image_budget: usize,
 
+    /// The page boundary box each page is measured and rendered on; see
+    /// [`SessionConfig::page_box`].  Default [`PageBox::Crop`].
+    pub page_box: PageBox,
+
     /// Cancellation flag polled while each page renders; default `None`.
     ///
     /// Once it is raised, the page in progress stops before its next
@@ -463,6 +467,7 @@ impl Default for RasterOptions {
             font_dirs: Vec::new(),
             system_fonts: true,
             image_budget: DOCUMENT_IMAGE_BUDGET_BYTES,
+            page_box: PageBox::Crop,
             cancel: None,
         }
     }
