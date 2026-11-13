@@ -22,7 +22,7 @@ use rav1d::StillLayout;
 use super::DecodeError;
 
 /// A plane sample: 8 bits, or 10 and 12 bits in 16.
-pub(super) trait Sample: Copy + Default + Into<i32> + Into<u32> {
+pub(super) trait Sample: Copy + Default + Into<i32> + Into<u16> {
     /// The samples as bytes when they are bytes, else the samples back.
     fn into_bytes(samples: Vec<Self>) -> Result<Vec<u8>, Vec<Self>>;
 }
@@ -236,36 +236,48 @@ const fn clamp(v: i32) -> u8 {
 ///
 /// `near` is the chroma row covering the output row and `far` the next
 /// nearest one (`None` when chroma is not halved vertically).  `mix` is
-/// scratch of the chroma width.  Vertically `mix = 3·near + far` (or
-/// `4·near`); horizontally each output is `(3·mix[i] + mix[i ± 1] + 8) >> 4`
-/// with the neighbour on the output's side, replicated at the edges.
-fn upsample_row<T: Sample>(near: &[T], far: Option<&[T]>, mix: &mut [u32], out: &mut [u16]) {
+/// scratch of the chroma width, `ceil(out.len() / 2)`.  Vertically
+/// `mix = 3·near + far` (or `4·near`); horizontally each output is
+/// `(3·mix[i] + mix[i ± 1] + 8) >> 4` with the neighbour on the output's
+/// side, replicated at the edges.  Every intermediate fits 16 bits:
+/// `mix ≤ 4·4095` and `4·mix + 8 ≤ 65 528`.
+fn upsample_row<T: Sample>(near: &[T], far: Option<&[T]>, mix: &mut [u16], out: &mut [u16]) {
     match far {
         Some(far) => {
             for ((m, &n), &f) in mix.iter_mut().zip(near).zip(far) {
-                *m = 3 * Into::<u32>::into(n) + Into::<u32>::into(f);
+                *m = 3 * Into::<u16>::into(n) + Into::<u16>::into(f);
             }
         }
         None => {
             for (m, &n) in mix.iter_mut().zip(near) {
-                *m = 4 * Into::<u32>::into(n);
+                *m = 4 * Into::<u16>::into(n);
             }
         }
     }
     let Some(last) = mix.len().checked_sub(1) else {
         return;
     };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "a weighted mean of 12-bit samples"
-    )]
-    for (i, pair) in out.chunks_mut(2).enumerate() {
-        let i = i.min(last);
-        let centre = 3 * mix[i] + 8;
-        pair[0] = ((centre + mix[i.saturating_sub(1)]) >> 4) as u16;
-        if let Some(right) = pair.get_mut(1) {
-            *right = ((centre + mix[(i + 1).min(last)]) >> 4) as u16;
+    let blend = |centre: u16, side: u16| (3 * centre + side + 8) >> 4;
+    // Outputs 2i and 2i + 1 lie in chroma sample i, towards i − 1 and
+    // i + 1.  The interior pairs read a window of three and carry no
+    // edge test.
+    let (pairs, tail) = out.as_chunks_mut::<2>();
+    if let Some(first) = pairs.first_mut() {
+        *first = [blend(mix[0], mix[0]), blend(mix[0], mix[last.min(1)])];
+    }
+    for (pair, window) in pairs.iter_mut().skip(1).zip(mix.windows(3)) {
+        *pair = [blend(window[1], window[0]), blend(window[1], window[2])];
+    }
+    if last > 0 {
+        let before = mix[last - 1];
+        if let Some(pair) = pairs.get_mut(last) {
+            *pair = [blend(mix[last], before), blend(mix[last], mix[last])];
         }
+        if let [odd] = tail {
+            *odd = blend(mix[last], before);
+        }
+    } else if let [odd] = tail {
+        *odd = blend(mix[0], mix[0]);
     }
 }
 
@@ -325,7 +337,7 @@ pub(super) fn to_pixels<T: Sample>(
         return Ok(Pixels::Rgb(out));
     }
     let halved_rows = frame.layout == StillLayout::I420;
-    let mut mix = vec![0u32; u.width];
+    let mut mix = vec![0u16; u.width];
     let (mut wide_u, mut wide_v) = (vec![0u16; w], vec![0u16; w]);
     for (y, (row, luma)) in rows.zip(luma.rows()).enumerate() {
         // Output row `y` lies in chroma row `y / 2`, nearer the row above
@@ -497,7 +509,7 @@ mod tests {
 
     #[test]
     fn chroma_interpolates_with_three_to_one_weights() {
-        let mut mix = [0u32; 2];
+        let mut mix = [0u16; 2];
         let mut out = [0u16; 4];
         // One chroma row, halved horizontally only: 4·c, then 3:1.
         upsample_row::<u8>(&[0, 160], None, &mut mix, &mut out);
@@ -509,6 +521,67 @@ mod tests {
         let mut odd = [0u16; 3];
         upsample_row::<u8>(&[0, 160], None, &mut mix, &mut odd);
         assert_eq!(odd, [0, 40, 120]);
+    }
+
+    /// A 64-bit linear congruential generator (Knuth's MMIX constants);
+    /// the high bits are the output.
+    fn noise(state: &mut u64) -> u16 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u16::try_from(*state >> 48).unwrap()
+    }
+
+    #[test]
+    fn interpolation_matches_its_definition_on_random_rows() {
+        // The definition, one output at a time with clamped neighbours.
+        let reference = |near: &[u16], far: Option<&[u16]>, width: usize| -> Vec<u16> {
+            let mix = |i: usize| {
+                let i = i.min(near.len() - 1);
+                let far = far.map_or(near[i], |far| far[i]);
+                3 * u32::from(near[i]) + u32::from(far)
+            };
+            (0..width)
+                .map(|x| {
+                    let side = if x % 2 == 0 {
+                        (x / 2).saturating_sub(1)
+                    } else {
+                        x / 2 + 1
+                    };
+                    u16::try_from((3 * mix(x / 2) + mix(side) + 8) >> 4).unwrap()
+                })
+                .collect()
+        };
+        let mut state = 1;
+        for width in 1..=67usize {
+            for depth in [8u32, 10, 12] {
+                let chroma = width.div_ceil(2);
+                let mut row = || -> Vec<u16> {
+                    (0..chroma)
+                        .map(|_| noise(&mut state) >> (16 - depth))
+                        .collect()
+                };
+                let (near, far) = (row(), row());
+                let mut mix = vec![0u16; chroma];
+                let mut out = vec![0u16; width];
+                for far in [None, Some(far.as_slice())] {
+                    upsample_row(&near, far, &mut mix, &mut out);
+                    assert_eq!(
+                        out,
+                        reference(&near, far, width),
+                        "{width} wide, {depth} bits"
+                    );
+                }
+                if depth == 8 {
+                    let narrow = |row: &[u16]| -> Vec<u8> {
+                        row.iter().map(|&v| u8::try_from(v).unwrap()).collect()
+                    };
+                    let (near8, far8) = (narrow(&near), narrow(&far));
+                    upsample_row(&near8, Some(&far8), &mut mix, &mut out);
+                    assert_eq!(out, reference(&near, Some(&far), width), "{width} wide");
+                }
+            }
+        }
     }
 
     #[test]
