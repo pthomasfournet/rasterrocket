@@ -21,18 +21,8 @@ pub(super) struct GlyphRecord {
 
 /// Horizontal text-space advance of one glyph (PDF §9.4.4):
 /// `(w × Tfs + Tc + Tw) × Th`, where `extra` is the word spacing when it
-/// applies and `0.0` otherwise.
-///
-/// Evaluated as separate multiplies and adds, as are the text-matrix
-/// translations it feeds ([`translate_text_x`], [`translate_text_y`]).  The
-/// advance accumulates into the text matrix glyph after glyph; a fused
-/// evaluation rounds differently and moves some glyphs by a device pixel
-/// against the output this path is held to.  The pen of a shaped run is
-/// accumulated fused and is not held to it.
-#[expect(
-    clippy::suboptimal_flops,
-    reason = "unfused rounding keeps unshaped glyph positions byte-stable; see the doc"
-)]
+/// applies and `0.0` otherwise.  Evaluated with fused multiply-adds, as are
+/// the text-matrix translations it feeds and the pen of a shaped run.
 pub(super) fn glyph_advance(
     width: f64,
     font_size: f64,
@@ -40,7 +30,7 @@ pub(super) fn glyph_advance(
     extra: f64,
     horiz_scaling: f64,
 ) -> f64 {
-    (width * font_size + char_spacing + extra) * horiz_scaling
+    width.mul_add(font_size, char_spacing + extra) * horiz_scaling
 }
 
 /// How a substitute glyph of advance `face_width` is drawn in the advance
@@ -61,29 +51,18 @@ pub(super) fn fit_to_advance(pdf_width: i32, face_width: i32) -> (f64, f64) {
 }
 
 /// Translate text matrix `tm` by `tx` along its own x axis: `[1 0 0 1 tx 0] × Tm`.
-///
-/// Evaluated as separate multiplies and adds, for the reason given on
-/// [`glyph_advance`].
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
-#[expect(
-    clippy::suboptimal_flops,
-    reason = "unfused rounding keeps unshaped glyph positions byte-stable; see glyph_advance"
-)]
 pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;
-    [a, b, c, d, e + tx * a, f + tx * b]
+    [a, b, c, d, tx.mul_add(a, e), tx.mul_add(b, f)]
 }
 
 /// Translate text matrix `tm` by `ty` along its own y axis: `[1 0 0 1 0 ty] × Tm`,
 /// the advance of vertical writing mode.
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
-#[expect(
-    clippy::suboptimal_flops,
-    reason = "unfused rounding keeps unshaped glyph positions byte-stable; see glyph_advance"
-)]
 pub(super) const fn translate_text_y(tm: [f64; 6], ty: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;
-    [a, b, c, d, e + ty * c, f + ty * d]
+    [a, b, c, d, ty.mul_add(c, e), ty.mul_add(d, f)]
 }
 
 /// Map a text-space point through the text matrix and CTM to device-pixel
