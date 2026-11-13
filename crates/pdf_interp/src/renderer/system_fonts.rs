@@ -980,11 +980,7 @@ mod tests {
         // A modification time in the past, so that the install below
         // changes it whatever the file system's timestamp granularity.
         for d in [&dir, &sub] {
-            std::fs::File::open(d)
-                .and_then(|f| {
-                    f.set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
-                })
-                .expect("set mtime");
+            crate::test_helpers::backdate_dir(d);
         }
         let before = FontLibrary::shared(std::slice::from_ref(&dir), false);
         assert!(before.faces().is_empty());

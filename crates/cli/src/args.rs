@@ -1579,15 +1579,38 @@ mod page_list_tests {
     #[test]
     fn fax_to_implies_fax_and_a_queue_needs_a_number() {
         let mut to = args_with(&["--fax-to", "+1 555 0100", "--fax-queue", "Fax"]);
-        assert!(to.validate_format_flags().is_ok());
         to.apply_fax_preset();
         assert!(to.fax && to.mono && to.tiff);
         assert!(Args::try_parse_from(["rrocket", "--fax-queue", "Fax", "in.pdf", "out"]).is_err());
         assert!(Args::try_parse_from(["rrocket", "--fax-to", "-x", "in.pdf", "out"]).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn fax_to_is_validated_as_a_fax_document() {
+        let to = args_with(&["--fax-to", "+1 555 0100", "--fax-queue", "Fax"]);
+        assert!(to.validate_format_flags().is_ok());
         let err = args_with(&["--fax-to", "5550100", "--png"])
             .validate_format_flags()
             .unwrap_err();
         assert!(err.contains("drop --png"), "{err}");
+    }
+
+    /// Windows has neither `lp` nor `sendfax`: `--fax-to`, `--print` and
+    /// `--printer` are refused before any other check, naming the
+    /// alternative.
+    #[cfg(windows)]
+    #[test]
+    fn submission_flags_are_refused_on_windows() {
+        let err = args_with(&["--fax-to", "5550100", "--png"])
+            .validate_format_flags()
+            .unwrap_err();
+        assert!(err.contains("Windows Fax and Scan"), "{err}");
+        for flags in [&["--print"][..], &["--printer", "Office"]] {
+            let err = print_args(flags).unwrap_err();
+            assert!(err.contains("Windows does not have"), "{flags:?}: {err}");
+        }
+        assert!(crate::print::list_printers().is_err());
     }
 
     #[test]
@@ -1692,6 +1715,7 @@ mod page_list_tests {
         Ok(parsed)
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn print_needs_no_prefix_and_defaults_to_600_dpi_for_printing() {
         let args = print_args(&["--print"]).unwrap();
@@ -1707,6 +1731,7 @@ mod page_list_tests {
         assert!(Args::try_parse_from(["rrocket", "in.pdf"]).is_err());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn print_refuses_file_output_and_print_flags_need_it() {
         for (flags, message) in [

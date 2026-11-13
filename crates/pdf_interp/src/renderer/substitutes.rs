@@ -260,13 +260,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         // A modification time in the past, so that the install below
         // changes it whatever the file system's timestamp granularity.
-        std::fs::File::open(&dir)
-            .and_then(|f| {
-                f.set_times(
-                    std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH),
-                )
-            })
-            .expect("set mtime");
+        crate::test_helpers::backdate_dir(&dir);
         let style = SubstituteStyle::default();
         let before = FontLibrary::shared(std::slice::from_ref(&dir), false);
         let compiled_in = substitute_program(style, &before).expect("compiled-in face");

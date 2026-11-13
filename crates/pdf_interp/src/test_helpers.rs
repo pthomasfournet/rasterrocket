@@ -186,6 +186,30 @@ pub(crate) fn make_doc_with_objects<B: AsRef<[u8]>>(objects: &[(u32, B)]) -> Doc
     Document::from_bytes_owned(body).expect("test PDF with objects parse")
 }
 
+/// Set the modification time of directory `dir` to the Unix epoch.
+///
+/// Windows opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and
+/// sets its times only through a handle with `FILE_WRITE_ATTRIBUTES`
+/// access; elsewhere a read-only handle serves both.
+pub(crate) fn backdate_dir(dir: &std::path::Path) {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+    };
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(dir);
+    file.and_then(|f| {
+        f.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+    })
+    .unwrap_or_else(|e| panic!("cannot backdate {}: {e}", dir.display()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

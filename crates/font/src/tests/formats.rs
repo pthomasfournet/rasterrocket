@@ -111,6 +111,7 @@ fn system_fallback_font_loads_from_file() {
         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
+        "C:/Windows/Fonts/arial.ttf",
     ];
     let Some(path) = CANDIDATES.iter().find(|p| std::path::Path::new(p).exists()) else {
         eprintln!("no system font available; skipping");

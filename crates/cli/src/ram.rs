@@ -369,12 +369,15 @@ fn create_ram_dir(explicit: Option<&Path>, root: &Path) -> std::io::Result<PathB
     use std::io::{Error, ErrorKind};
 
     let dir = explicit.map_or_else(|| default_ram_dir(root), Path::to_path_buf);
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = fs::DirBuilder::new();
         let _ = builder.mode(0o700);
-    }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     builder
         .create(&dir)
         .map_err(|e| match (explicit, e.kind()) {
