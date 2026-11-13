@@ -163,7 +163,13 @@ pub struct Document {
     /// and the offsets were written without them.
     base: usize,
     xref: XrefTable,
-    /// Per-object parse cache.  `None` = not yet resolved.
+    /// Per-object parse cache, keyed by object number.  The document is
+    /// immutable and its cross-reference table holds one entry per number
+    /// (the newest section's), so a number names one object for the
+    /// document's lifetime.  A reference resolves by number alone: one whose
+    /// generation differs from the entry's still reaches that object rather
+    /// than null (§7.3.10), since writers emit such references in files that
+    /// display correctly elsewhere.
     cache: Mutex<HashMap<u32, Arc<Object>>>,
     /// Object-stream decompression cache (shared across threads).
     objstm: ObjStmCache,
@@ -1391,6 +1397,18 @@ impl std::ops::Deref for Resolved<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reference whose generation differs from the object's resolves to
+    /// the object, the same `Arc` as the matching reference.
+    #[test]
+    fn a_reference_resolves_by_object_number_whatever_its_generation() {
+        let bytes = pdf_with_objects(&[(2, "<</Kind /Two>>".to_owned())]);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let exact = doc.get_object((2, 0)).expect("2 0 R");
+        let other = doc.get_object((2, 7)).expect("2 7 R");
+        assert!(Arc::ptr_eq(&exact, &other));
+        assert!(matches!(&*other, Object::Dictionary(d) if d.get(b"Kind").is_some()));
+    }
 
     /// Two documents of the same bytes are told apart; a document keeps
     /// its identity.
