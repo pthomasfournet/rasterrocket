@@ -7,7 +7,8 @@
 # Changed from upstream: rust-version is inherited from the workspace and
 # the other workspace-inherited fields and dependencies are resolved to
 # values; `publish = false`; `[package.metadata.release] release = false`
-# keeps the crate out of `cargo release`; `src/extended.rs` splits the
+# keeps the crate out of `cargo release`; an empty `[lints]` table keeps
+# clippy's defaults; `src/extended.rs` splits the
 # 16-byte groups of its test data with `as_chunks::<16>()` instead of
 # `chunks_exact(16)`, as clippy requires under the 1.99 minimum toolchain
 # (same result).
@@ -31,3 +32,6 @@ font-types = "0.12.7"
 # vendored upstream base.
 [package.metadata.release]
 release = false
+
+# Linted at clippy's defaults: the workspace lint set is not inherited.
+[lints]

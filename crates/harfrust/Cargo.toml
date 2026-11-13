@@ -43,3 +43,6 @@ bench = false
 # vendored upstream base.
 [package.metadata.release]
 release = false
+
+# Linted at clippy's defaults: the workspace lint set is not inherited.
+[lints]

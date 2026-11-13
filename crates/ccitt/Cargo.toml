@@ -26,3 +26,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [[test]]
 name = "tests"
 path = "tests/main.rs"
+
+# Linted at clippy's defaults: the workspace lint set is not inherited.
+[lints]

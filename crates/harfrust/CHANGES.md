@@ -15,12 +15,12 @@ read-fonts 0.46), and the two are rebased together.
   newer crates.io releases and RustSec advisories after that base. Bring
   wanted upstream changes over by hand and update `UPSTREAM.toml`.
 
-- `Cargo.toml`: `rust-version` is inherited from the workspace (1.99), so
+- `Cargo.toml`: `rust-version` is inherited from the workspace (1.100), so
   every crate of the repository builds with the same minimum toolchain;
   the other workspace-inherited fields are resolved to values; `publish =
   false`; `read-fonts` is the fork in `crates/read_fonts`. The benchmarks
   and the dev-dependencies of upstream's test suite and comparison tools
-  are dropped. `[lints] workspace = true` is removed, so the repository's
+  are dropped. `[lints] workspace = true` is emptied to `[lints]`, so the repository's
   own lint levels do not apply to upstream's code; `exclude` is removed,
   nothing outside the crate being vendored; `readme` points at the crate's
   own `README.md`, upstream's repository README with a provenance note and

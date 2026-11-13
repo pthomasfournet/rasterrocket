@@ -43,10 +43,11 @@ bumps and changelogs).
   newer crates.io releases and RustSec advisories after that base. Bring
   wanted upstream changes over by hand and update `UPSTREAM.toml`.
 
-- `Cargo.toml`: `rust-version` is inherited from the workspace (1.99), so
+- `Cargo.toml`: `rust-version` is inherited from the workspace (1.100), so
   every crate of the repository builds with the same minimum toolchain;
   the other workspace-inherited fields are resolved to values; `publish =
-  false`; upstream's workspace lint set is not inherited, so the crate is
+  false`; upstream's workspace lint set is not inherited (an empty `[lints]`
+  table states it), so the crate is
   linted with clippy's defaults.
 
 - `LICENSE-APACHE`, `LICENSE-MIT`: upstream's symlinks to its repository
