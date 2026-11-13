@@ -85,6 +85,15 @@ unless the entry says otherwise.
   code here is ours. `tests/scan_layouts.rs` decodes one set of
   coefficients in every scan layout and requires identical pixels.
 
+- **Arithmetic decoding is on by default** (`arith` is an optional
+  feature upstream). `tests/arithmetic.rs` decodes arithmetic-coded
+  lossless transcodes of Huffman-coded files (sequential, restart
+  intervals, a scan per component, progressive; four subsamplings, gray,
+  four components) and requires the Huffman decode within one level, and
+  damages every byte of six such streams without a panic.
+  `tests/arithmetic_progressive.rs` and its images are upstream's (commit
+  `8cccb0b0`).
+
 - **Arithmetic decoding, three fixes brought over from upstream.**
   `BitStream::marker_ends_data` (upstream `52300d39`): a row of an
   arithmetic-coded scan is not cut short at a marker, the decoder being

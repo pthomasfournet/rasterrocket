@@ -1,6 +1,7 @@
-//! `DCTDecode` images whose JPEG streams are laid out or damaged in ways
-//! the usual encoder output is not: components spread over several scans,
-//! a missing EOI marker, data that stops short.  The page renders the
+//! `DCTDecode` images whose JPEG streams are coded, laid out or damaged in
+//! ways the usual encoder output is not: arithmetic entropy coding,
+//! components spread over several scans, a missing EOI marker, data that
+//! stops short.  The page renders the
 //! image whichever way its coefficients are coded, and reports an image
 //! as partial exactly when its stream lacks data.
 
@@ -21,6 +22,12 @@ const SCAN_PER_COMPONENT: &[u8] =
     include_bytes!("../../zune_jpeg/tests/images/scans/mix_420_ni.jpg");
 const LUMA_THEN_CHROMA: &[u8] =
     include_bytes!("../../zune_jpeg/tests/images/scans/mix_420_y_cbcr.jpg");
+
+/// The same coefficients arithmetic-coded: sequential (SOF9) and
+/// progressive (SOF10).
+const ARITHMETIC: &[u8] = include_bytes!("../../zune_jpeg/tests/images/scans/mix_420_arith.jpg");
+const ARITHMETIC_PROGRESSIVE: &[u8] =
+    include_bytes!("../../zune_jpeg/tests/images/scans/mix_420_arith_prog.jpg");
 
 /// 52 × 44 noise images: baseline with a restart marker after every MCU
 /// row, and progressive.
@@ -76,6 +83,34 @@ fn every_scan_layout_of_an_image_renders_alike() {
         let page = render(data, 43, 37);
         assert_eq!(page.diagnostics.image_failures, [], "{name}");
         assert_eq!(page.pixels, reference.pixels, "{name}");
+    }
+}
+
+/// The arithmetic decoder reports a block's coefficient count its own
+/// way, and with it the inverse transform chosen, so a sample may round
+/// one level apart from the Huffman-coded stream's.
+#[test]
+fn an_arithmetic_coded_image_renders_as_its_huffman_coded_twin() {
+    let reference = render(ONE_SCAN, 43, 37);
+    for (name, data) in [
+        ("sequential", ARITHMETIC),
+        ("progressive", ARITHMETIC_PROGRESSIVE),
+    ] {
+        assert!(
+            data.windows(2)
+                .any(|m| m == [0xFF, 0xC9] || m == [0xFF, 0xCA]),
+            "{name}: an arithmetic-coded frame"
+        );
+        let page = render(data, 43, 37);
+        assert_eq!(page.diagnostics.image_failures, [], "{name}");
+        let worst = page
+            .pixels
+            .iter()
+            .zip(&reference.pixels)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .expect("a rendered page");
+        assert!(worst <= 1, "{name}: differs from the reference by {worst}");
     }
 }
 

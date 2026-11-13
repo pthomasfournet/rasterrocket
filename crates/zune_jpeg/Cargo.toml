@@ -21,10 +21,10 @@ neon = []
 std = ["zune-core/std"]
 # NOTE: portable_simd requires a nightly toolchain.
 portable_simd = []
-# Arithmetic entropy coding (SOF9, SOF10).
+# Arithmetic entropy coding (SOF9, SOF10).  Off by default upstream.
 arith = []
 log = ["zune-core/log"]
-default = ["x86", "neon", "std"]
+default = ["x86", "neon", "std", "arith"]
 
 [dependencies]
 zune-core = { version = "0.5.1" }

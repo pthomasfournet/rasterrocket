@@ -71,15 +71,24 @@ struct Image {
     /// Whether the frame is decoded row by row from a single scan, so
     /// that the rows before a cut are exactly the complete decode's.
     single_scan: bool,
+    /// Whether the entropy coding tells a scan that stops at a marker
+    /// from a complete one, and a complete stream without EOI from a cut
+    /// one.  Arithmetic coding does not: its decoder reads zeros past a
+    /// marker as a matter of course, and fails at the end of the input.
+    marks_its_end: bool,
 }
 
 macro_rules! image {
     ($name:literal, $mcu_rows:literal, $single_scan:literal) => {
+        image!($name, $mcu_rows, $single_scan, true)
+    };
+    ($name:literal, $mcu_rows:literal, $single_scan:literal, $marks_its_end:literal) => {
         Image {
             name: $name,
             data: include_bytes!(concat!("images/cut/", $name)),
             mcu_rows: $mcu_rows,
             single_scan: $single_scan,
+            marks_its_end: $marks_its_end,
         }
     };
 }
@@ -92,6 +101,10 @@ const IMAGES: &[Image] = &[
     image!("noise_420_ni.jpg", 16, false),
     image!("noise_444_prog.jpg", 8, false),
     image!("noise_420_prog.jpg", 16, false),
+    #[cfg(feature = "arith")]
+    image!("noise_420_arith.jpg", 16, true, false),
+    #[cfg(feature = "arith")]
+    image!("noise_420_arith_prog.jpg", 16, false, false),
 ];
 
 #[test]
@@ -100,6 +113,9 @@ fn a_complete_stream_is_intact_with_or_without_eoi() {
         for strict in [true, false] {
             let whole = decode(image.data, strict).expect(image.name);
             assert_eq!(whole.intact_rows, whole.height, "{}", image.name);
+        }
+        if !image.marks_its_end {
+            continue;
         }
         let whole = decode(image.data, false).expect(image.name);
         let no_eoi = &image.data[..image.data.len() - 2];
@@ -157,6 +173,9 @@ fn a_cut_stream_reports_the_rows_before_the_cut() {
         let start = entropy_start(image.data);
         let end = image.data.len() - 2;
         for eoi in [false, true] {
+            if eoi && !image.marks_its_end {
+                continue;
+            }
             let (mut decoded, mut short) = (0, 0);
             for cut in start..end {
                 if let Some(rows) = check_cut(image, &whole, cut, eoi) {
