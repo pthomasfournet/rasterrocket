@@ -13,6 +13,7 @@
 //! buffer-device-addresses (Vulkan) at record time.
 
 mod aa_fill;
+mod staged;
 pub use aa_fill::{AaFillScratch, AaFillScratchPool, aa_fill, aa_fill_page};
 mod icc_clut;
 pub use icc_clut::{icc_clut, icc_clut_matches_cpu};
