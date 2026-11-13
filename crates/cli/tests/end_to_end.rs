@@ -272,13 +272,45 @@ fn fax_pages(path: &Path) -> Vec<(u32, u32, f64)> {
 }
 
 #[test]
+fn a_fax_page_longer_than_b4_is_sent_in_a4_pieces() {
+    // 100 × 400 points: 6637 lines at fine resolution, past the 2808 of the
+    // B4 length, so it goes as 297 mm pieces of 2291 lines and the rest.
+    let pdf = assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 400] /Contents 4 0 R >>".to_vec(),
+        stream_object("", b"0 g 10 10 20 20 re f"),
+    ]);
+    let (dir, input) = workdir(&pdf);
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["--fax", "--tiffcompression", "g4"],
+    ));
+    let heights: Vec<u32> = fax_pages(&dir.path().join("out.tif"))
+        .iter()
+        .map(|&(w, h, _)| {
+            assert_eq!(w, 1728);
+            h
+        })
+        .collect();
+    let total: u32 = heights.iter().sum();
+    assert!(
+        (f64::from(total) - 400.0 * 17.28 * 196.0 / 204.0).abs() <= 1.0,
+        "{heights:?}"
+    );
+    assert_eq!(heights[..2], [2291, 2291], "{heights:?}");
+    assert_eq!(heights.len(), 3, "{heights:?}");
+}
+
+#[test]
 fn fax_writes_one_document_of_fax_width_pages() {
     // A portrait page with a small square, a landscape page, a dark page.
     let pdf = assemble_pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 150] /Contents 6 0 R >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 150 100] /Contents 6 0 R >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 150] /Contents 7 0 R >>".to_vec(),
         stream_object("", b"0 g 10 10 20 20 re f"),
         stream_object("", b"0 g 0 0 100 150 re f"),
@@ -306,9 +338,9 @@ fn fax_writes_one_document_of_fax_width_pages() {
     assert_eq!(pages.len(), 3);
     // 1728 pixels across: the portrait page by its width, the landscape
     // page turned and spanned by its height; 196/204 as many lines per
-    // point along: 150 and 200 points at 17.28 × 196/204 lines each.
+    // point along: 150 points at 17.28 × 196/204 lines each.
     let lines = |pts: f64| pts * 17.28 * 196.0 / 204.0;
-    for ((w, h, _), pts) in pages.iter().zip([150.0, 200.0, 150.0]) {
+    for ((w, h, _), pts) in pages.iter().zip([150.0, 150.0, 150.0]) {
         assert_eq!(*w, 1728);
         assert!(
             (f64::from(*h) - lines(pts)).abs() <= 1.0,

@@ -5,6 +5,10 @@
 //!
 //! A page is laid across the fax width by its shorter side: a landscape
 //! page is turned a quarter counterclockwise, its top edge to the left.
+//! A page that then runs longer than [`WHOLE_PAGE_MM`] (ITU-T T.30's B4
+//! length) is sent as consecutive fax pages of at most [`PIECE_MM`] (A4
+//! length, the length every receiver accepts); A4, Letter, Legal and the
+//! other common sizes stay whole.
 //! Pages are coded on the worker that rendered them and written in page
 //! order once all are done.  The written document can be handed to the
 //! system's fax service through its submission command, `lp` or `sendfax`.
@@ -22,6 +26,36 @@ pub(crate) const FAX_WIDTH: u32 = 1728;
 
 /// The horizontal resolution of a fax page, pixels per inch.
 pub(crate) const FAX_X_DPI: f64 = 204.0;
+
+/// The longest page sent whole, in millimetres: the B4 length of ITU-T
+/// T.30.  An A4 page laid across the 215 mm line is about 304 mm long and a
+/// Legal page about 354 mm.
+const WHOLE_PAGE_MM: f64 = 364.0;
+
+/// The longest piece a longer page is cut into, in millimetres: the A4
+/// length, which T.30 requires every receiver to accept.
+const PIECE_MM: f64 = 297.0;
+
+/// The row ranges a fitted page of `height` lines at `y_dpi` lines per inch
+/// is sent as: the whole page when it is at most [`WHOLE_PAGE_MM`] long,
+/// else consecutive pieces of at most [`PIECE_MM`].
+fn pieces(height: u32, y_dpi: f64) -> impl Iterator<Item = std::ops::Range<u32>> {
+    let lines = |mm: f64| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a few thousand lines at fax resolutions; the cast saturates"
+        )]
+        let n = (mm / 25.4 * y_dpi).floor() as u32;
+        n.max(1)
+    };
+    let piece = if height <= lines(WHOLE_PAGE_MM) {
+        height.max(1)
+    } else {
+        lines(PIECE_MM)
+    };
+    (0..height.div_ceil(piece)).map(move |i| i * piece..((i + 1) * piece).min(height))
+}
 
 /// How a page is laid on the fax width.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,7 +94,8 @@ pub(crate) fn layout((width_pts, height_pts): (f64, f64), y_dpi: f64) -> FaxLayo
 pub(crate) struct FaxDocument {
     compression: TiffCompression,
     dpi: (f64, f64),
-    pages: PageCollector<i32, TiffPage>,
+    /// Keyed by page number and piece index.
+    pages: PageCollector<(i32, u32), TiffPage>,
 }
 
 impl FaxDocument {
@@ -74,8 +109,9 @@ impl FaxDocument {
     }
 
     /// Turn `page` when `turn`, fit it to the fax width and code it,
-    /// bilevel, as document page `page_num`.  The page is the two-level
-    /// luma of [`crate::tone::prepare`]; any luma is thresholded.
+    /// bilevel, as document page `page_num`: one fax page, or several when
+    /// it is too long to send whole (see [`pieces`]).  The page is the
+    /// two-level luma of [`crate::tone::prepare`]; any luma is thresholded.
     ///
     /// # Errors
     ///
@@ -83,9 +119,11 @@ impl FaxDocument {
     pub(crate) fn add(&self, page_num: i32, page: Page, turn: bool) -> Result<(), RenderError> {
         let luma = page.into_luma();
         let luma = if turn { quarter_turn(&luma) } else { luma };
-        let fitted = fit_width(&luma, FAX_WIDTH);
-        let coded = TiffPage::encode(TiffImage::Bilevel(&fitted), self.dpi, self.compression)?;
-        self.pages.push(page_num, coded);
+        for (index, rows) in (0u32..).zip(pieces(luma.height, self.dpi.1)) {
+            let fitted = fit_width(&luma, FAX_WIDTH, rows);
+            let coded = TiffPage::encode(TiffImage::Bilevel(&fitted), self.dpi, self.compression)?;
+            self.pages.push((page_num, index), coded);
+        }
         Ok(())
     }
 
@@ -183,18 +221,18 @@ fn quarter_turn(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
     dst
 }
 
-/// `src` made exactly `width` pixels wide: centred on white paper when
-/// narrower, its middle `width` columns when wider.
-fn fit_width(src: &Bitmap<Gray8>, width: u32) -> Bitmap<Gray8> {
-    let mut dst: Bitmap<Gray8> = Bitmap::new(width, src.height, 1, false);
+/// The `rows` of `src` made exactly `width` pixels wide: centred on white
+/// paper when narrower, its middle `width` columns when wider.
+fn fit_width(src: &Bitmap<Gray8>, width: u32, rows: std::ops::Range<u32>) -> Bitmap<Gray8> {
+    let mut dst: Bitmap<Gray8> = Bitmap::new(width, rows.end - rows.start, 1, false);
     let (skip, pad) = if src.width >= width {
         ((src.width - width) / 2, 0)
     } else {
         (0, (width - src.width) / 2)
     };
     let copied = src.width.min(width) as usize;
-    for y in 0..src.height {
-        let from = &src.row_bytes(y)[skip as usize..skip as usize + copied];
+    for (y, from_y) in (0..).zip(rows) {
+        let from = &src.row_bytes(from_y)[skip as usize..skip as usize + copied];
         let to = &mut dst.row_bytes_mut(y)[..width as usize];
         to.fill(255);
         to[pad as usize..pad as usize + copied].copy_from_slice(from);
@@ -207,7 +245,7 @@ mod tests {
     use color::Gray8;
     use raster::Bitmap;
 
-    use super::{FAX_WIDTH, fit_width, layout, parse_number, quarter_turn, submission};
+    use super::{FAX_WIDTH, fit_width, layout, parse_number, pieces, quarter_turn, submission};
 
     #[test]
     fn fax_numbers_are_dial_strings_that_cannot_pass_for_options() {
@@ -282,9 +320,58 @@ mod tests {
 
     #[test]
     fn fitting_centres_on_white_or_keeps_the_middle() {
-        let narrow = fit_width(&bitmap(2, 1, |_, _| 0), 6);
+        let narrow = fit_width(&bitmap(2, 1, |_, _| 0), 6, 0..1);
         assert_eq!(&narrow.row_bytes(0)[..6], &[255, 255, 0, 0, 255, 255]);
-        let wide = fit_width(&bitmap(6, 1, |x, _| u8::try_from(x).unwrap()), 2);
+        let wide = fit_width(&bitmap(6, 1, |x, _| u8::try_from(x).unwrap()), 2, 0..1);
         assert_eq!(&wide.row_bytes(0)[..2], &[2, 3]);
+        let tall = fit_width(&bitmap(1, 4, |_, y| u8::try_from(y).unwrap()), 1, 1..3);
+        assert_eq!(
+            (tall.height, tall.row_bytes(0)[0], tall.row_bytes(1)[0]),
+            (2, 1, 2)
+        );
+    }
+
+    /// The fitted length, in lines, of a `width_pts × height_pts` page.
+    fn fitted_lines(width_pts: f64, height_pts: f64, y_dpi: f64) -> u32 {
+        let l = layout((width_pts, height_pts), y_dpi);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "page lengths of a few thousand lines"
+        )]
+        let lines =
+            (height_pts.max(width_pts) * if l.turn { l.scale_x } else { l.scale_y }).round() as u32;
+        lines
+    }
+
+    #[test]
+    fn common_page_sizes_stay_whole_and_long_pages_are_cut() {
+        for y_dpi in [196.0, 98.0] {
+            // A4, US Letter, US Legal, A3, Tabloid; then a landscape A4.
+            for (w, h) in [
+                (595.0, 842.0),
+                (612.0, 792.0),
+                (612.0, 1008.0),
+                (842.0, 1191.0),
+                (792.0, 1224.0),
+                (842.0, 595.0),
+            ] {
+                let lines = fitted_lines(w, h, y_dpi);
+                let cut: Vec<_> = pieces(lines, y_dpi).collect();
+                assert!(
+                    matches!(cut.as_slice(), [whole] if *whole == (0..lines)),
+                    "{w}×{h} at {y_dpi}: {cut:?}"
+                );
+            }
+        }
+        // A 1 m receipt at fine resolution: 297 mm pieces, the rest last.
+        let receipt = fitted_lines(226.8, 2835.0, 196.0);
+        let cut: Vec<_> = pieces(receipt, 196.0).collect();
+        let piece = 2291;
+        assert_eq!(cut.len(), receipt.div_ceil(piece) as usize);
+        assert!(cut.iter().all(|r| r.len() <= piece as usize));
+        assert_eq!(cut.first().map(|r| r.start), Some(0));
+        assert_eq!(cut.last().map(|r| r.end), Some(receipt));
+        assert!(cut.windows(2).all(|w| w[0].end == w[1].start));
     }
 }
