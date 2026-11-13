@@ -35,7 +35,7 @@ Three GPU backends are available on Linux:
 | `gpu-aa` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
 | `gpu-icc` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
 | `gpu-deskew` | Any CUDA-capable NVIDIA GPU | CUDA NPP (`libnppig.so`, `libnppc.so`) |
-| `cache` | Any CUDA-capable NVIDIA GPU | CUDA runtime; opt-in disk-tier persistence via `PDF_RASTER_CACHE_DIR` |
+| `cache` | Any CUDA-capable NVIDIA GPU, or a Vulkan 1.3+ device with `vulkan` | CUDA runtime or Vulkan ICD; opt-in disk-tier persistence via `PDF_RASTER_CACHE_DIR` |
 
 `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
@@ -45,7 +45,7 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  No `nvjpeg` / `cache` support today; under `--backend vulkan` the renderer runs uncached.  Both kernels are dormant by default: the AA fill (`GPU_AA_FILL_THRESHOLD = usize::MAX`) is byte-identical to the CPU fill but slower end to end, and the Huffman decode (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) loses to the multi-threaded CPU decoder; `PDF_RASTER_AA_FILL_THRESHOLD=0` and `PDF_RASTER_HUFFMAN_THRESHOLD=0` enable them.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
+Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`; there is no `nvjpeg` support.  Both kernels are dormant by default: the AA fill (`GPU_AA_FILL_THRESHOLD = usize::MAX`) is byte-identical to the CPU fill but slower end to end, and the Huffman decode (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) loses to the multi-threaded CPU decoder; `PDF_RASTER_AA_FILL_THRESHOLD=0` and `PDF_RASTER_HUFFMAN_THRESHOLD=0` enable them.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 

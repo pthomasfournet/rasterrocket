@@ -2180,7 +2180,7 @@ Re-bench result: cold-render regression collapsed from 14× to 1.1–1.9× on lo
 
 **Total scope:** ~1850 LoC new Rust + ~150 LoC new CUDA + ~400 LoC modified existing. Tasks 1+2 ship in ~5-7 days; full pipeline ~3 weeks elapsed.
 
-**Shipped:** all six tasks landed; the `cache` feature is in `rasterrocket`, `rasterrocket-interp`, and the CLI as of v1.0.0. In-memory VRAM/host tiers run unconditionally when the feature is built; the disk tier is opt-in via `PDF_RASTER_CACHE_DIR`. The bench-gate reframe above (cross-pass / cross-session speedup, not cold-render) is the final answer, not an open item — criterion 5 as originally worded tested the wrong property and is closed as such.
+**Shipped:** all six tasks landed; the `cache` feature is in `rasterrocket`, `rasterrocket-interp`, and the CLI as of v1.0.0. Since 2026-11-13 (unreleased) the cache also runs on the Vulkan backend: `DeviceImageCache<B>` is generic over a `CacheBackend` (CUDA, Vulkan), the session builds it on the backend it resolved to, and a Vulkan image is blitted into a bounding-box target in one backend page (see Phase 10, Task 4 step 5). In-memory VRAM/host tiers run unconditionally when the feature is built; the disk tier is opt-in via `PDF_RASTER_CACHE_DIR`. The bench-gate reframe above (cross-pass / cross-session speedup, not cold-render) is the final answer, not an open item — criterion 5 as originally worded tested the wrong property and is closed as such.
 
 ---
 
@@ -2199,13 +2199,13 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
 - Single kernel source-of-truth in **Slang** (Khronos-supported shading language). One `.slang` file per algorithm; `slangc` compiles to PTX for CUDA backend and SPIR-V for Vulkan backend.
 - `GpuBackend` trait abstracting device-memory, kernel launch, host↔device transfer, synchronisation. Two implementations: `CudaBackend` (current, refactored) and `VulkanBackend` (new, via `ash`).
 - `BackendPreference` enum on `RasterOptions`: `Auto` (CUDA on NVIDIA, Vulkan elsewhere), `ForceCuda`, `ForceVulkan`, `CpuOnly`.
-- The Phase 9 cache and page buffer become generic over `B: GpuBackend`.
+- The Phase 9 cache and page buffer become generic over `B: GpuBackend`. (Done for the cache, 2026-11-13: `DeviceImageCache<B: CacheBackend>`; the page buffer stays the CUDA blit target, see Task 4 step 5.)
 
 **Work items:**
 
 - [~] **Task 1 — Backend trait + CUDA refactor** (merged via `4c22ce0`).
     - **Shipped:** `GpuBackend` trait + `*Params` structs with state-machine and invariant docs (`crates/gpu/src/backend/{mod,params}.rs`); `CudaBackend` init + alloc + budget + `record_*` + `submit_page` / `wait_page` (`crates/gpu/src/backend/cuda/`); the five existing kernels extracted into `lib_kernels::{aa, composite, icc, soft_mask, tile}`; `BackendError::msg`; `cuda_backend_smoke` + `cuda_backend_per_page` tests; `crates/gpu/src/cache/mod.rs` split into `budget` / `eviction` / `promotion` submodules.
-    - **Deliberately deferred:** renderer migration to the trait (the spec's `rasterrocket_interp::renderer::page::gpu_ops` rewrite). The Phase 9 blit path is *already* per-page-batched (no `synchronize` between blits; only `buf.download()` at end-of-page), so migrating shape-only without an upload/download surface on the trait would just shuffle code. `DevicePageBuffer` and `DeviceImageCache` therefore stay un-generified for now; they generify alongside Task 3 once the trait grows the H↔D surface that the Vulkan side will need anyway. See the docstring on `DevicePageBuffer` (`crates/gpu/src/cache/page_buffer.rs`) for the in-tree rationale.
+    - **Deliberately deferred:** renderer migration to the trait (the spec's `rasterrocket_interp::renderer::page::gpu_ops` rewrite). The Phase 9 blit path is *already* per-page-batched (no `synchronize` between blits; only `buf.download()` at end-of-page), so migrating shape-only without an upload/download surface on the trait would just shuffle code. `DevicePageBuffer` and `DeviceImageCache` therefore stay un-generified for now; they generify alongside Task 3 once the trait grows the H↔D surface that the Vulkan side will need anyway. See the docstring on `DevicePageBuffer` (`crates/gpu/src/cache/page_buffer.rs`) for the in-tree rationale. The cache was generified on 2026-11-13 (Task 4 step 5).
     - **Not yet measured:** the spec's `±5%-of-pre-refactor` per-kernel bench gate. Deferred until Task 3 lands so the bench matrix runs CUDA + Vulkan together.
 - [x] **Task 2 — Slang port of all kernels** (merged via `42dc479`). All six kernels translated; `slangc -target spirv` invocation in `build.rs`; `vulkan` Cargo feature gates the SPIR-V compile; aa_fill's `WaveActiveSum` confirmed lowering to `OpGroupNonUniformIAdd Reduce` (no fallback emulation).
     - **Sub-task 2a — CPU twin per kernel.** For each kernel, ship a plain-Rust function that produces bit-identical output (or pixel-diff ≤ 1 LSB for floating-point ones) used as a correctness oracle in tests. Lets us validate Slang→SPIR-V codegen *without* a GPU, isolates "is the kernel logic right" from "is the Vulkan dispatch right" when chasing cross-backend divergence. Already partially present (`crates/gpu/src/blit.rs` has a CPU reference for `blit_image`); generalise to all five.
@@ -2228,6 +2228,8 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
         - **Criterion 2** (Vulkan pixel-diff ≤ 1 LSB vs CUDA): verified during step 2 (16/16 pages byte-identical on corpus-02, 358/358 on corpus-04).
         - **Criterion 3** (Vulkan ≤ 1.15× CUDA timing): **PASS** on all 5 corpora — Vulkan is *faster* than CUDA on every one (V/D ratios 0.27–0.82×).  Note: not strictly apples-to-apples either way because CUDA mode D pays nvjpeg / ICC-CLUT init even on vector-heavy corpora that don't decode JPEGs; the Vulkan binary skips those.  The *intent* of criterion 3 — Vulkan within striking distance of CUDA on the kernel paths Phase 10 actually migrated — is satisfied.
         - **Criterion 4** (cross-vendor proof of life on AMD or Intel): blocked on hardware at the time; since v1.5.0 the backend renders on an AMD Raphael iGPU (RADV), and it renders byte-identically to the CPU path (see the Task 3 list above); Intel ANV is untested.
+
+    - [x] **Step 5 — Device image cache on Vulkan** (2026-11-13, unreleased).  `DeviceImageCache`, `CachedDeviceImage` and the host tier are generic over `CacheBackend: GpuBackend` (CUDA, Vulkan); slabs are the backend's `DeviceBuffer`.  CUDA keeps its own stream, stream-ordered uploads, write-combined pinned host tier and `DevicePageBuffer` unchanged.  Vulkan uploads and downloads through the backend's synchronous transfers, keeps its host tier in ordinary memory (its transfers stage through mapped buffers of their own) and sizes its VRAM budget from `detect_vram_budget`; the disk tier is shared.  A Vulkan image blit (`gpu::backend::blit_image_box`) records the table uploads, the zero-fill of a target the size of the blit's bounding box, the kernel and the readback as one page, rather than a page-sized buffer read back and cleared by separate submissions; the box composites through the same `composite_rgba_rows` as CUDA.  `gpu::cache::ImageCache` / `CachedImage` carry either backend through the interpreter.  The session builds the cache on the backend it resolved to, so under `Auto` the cache follows Vulkan exactly when Vulkan wins (a Vulkan kernel enabled), as it follows CUDA otherwise.  Verified: the cache parity tests on CUDA and on Vulkan (RTX 5070, RADV, llvmpipe) and an archive A/B (22 image-heavy archive PDFs, 229 pages at 300 and 150 dpi: 0 byte differences from the CPU render on Vulkan RTX 5070, on RADV and on CUDA).
 
 **Bench gate:** Phase 10 ships if (1) CUDA path performance unchanged within ±5%; (2) Vulkan path functional on RTX 5070 with pixel-diff ≤ 1 LSB vs CUDA; (3) Vulkan timing within 15% of CUDA on RTX 5070; (4) cross-vendor proof of life on AMD or Intel.
 
@@ -2465,6 +2467,18 @@ CPU fails them instead of comparing the CPU render with itself; their corpus
 half now uses fixtures whose fills reach the device (corpus-02 and
 corpus-07 fill only through Type 3 glyphs or path clips, which stay on the
 CPU).
+The device image cache (`cache` feature) runs on the Vulkan backend too:
+under `--backend vulkan` (or `Auto` with a Vulkan kernel enabled) JPEG
+images are cached in Vulkan device memory, with the host and disk tiers and
+the prefetcher, and drawn by the Vulkan blit kernel, byte-identical to the
+CPU render (22 image-heavy archive PDFs, 229 pages at 300 and 150 dpi: 0 byte differences from the CPU render on Vulkan RTX 5070, on RADV and on CUDA).  CUDA behaviour is unchanged.  API changes:
+`gpu::cache::DeviceImageCache` / `CachedDeviceImage` take a backend
+parameter (defaulting to CUDA), `ContentHash::of` replaces
+`DeviceImageCache::hash_bytes`, `CacheError` gains `Backend` and
+`BackendMismatch`, and `RasterSession::image_cache`,
+`rasterrocket_interp::cache::spawn_prefetch` and
+`PageRenderer::set_image_cache` take or return the backend-erased
+`gpu::cache::ImageCache`.
 A function-based (Type 1) shading is evaluated at every device pixel of its
 Domain instead of on a 64 × 64 grid, so detail finer than 1/64 of the Domain
 is drawn (above 4 Mi pixels it samples every k-th pixel and interpolates).

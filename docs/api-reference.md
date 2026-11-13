@@ -103,7 +103,7 @@ pub fn open_session_from_bytes(bytes: Vec<u8>, config: &SessionConfig) -> Result
 
 An encrypted document (Standard security handler, revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters) is refused with `RasterError::Pdf` unless `config.decrypt_authorized` is `true`; with it, the document is decrypted in process — no subprocess, no temporary file. The empty user password is tried first (a permissions-only document needs none), then `config.password` as the user and as the owner password; a wrong password, or none where one is needed, is a `RasterError::Pdf` saying which. A document using another security handler (public-key encryption, `/Adobe.PubSec`) is refused by name.
 
-Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared CUDA context (for the `gpu-aa`, `gpu-icc` or `cache` features; not when Vulkan is chosen under `Auto`) according to `config.policy`. Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend cannot be initialised (for `ForceVulkan`, also when the crate was built without the `vulkan` feature; for `ForceCuda`, when it was built without any of `gpu-aa`, `gpu-icc` or `cache`).
+Opens the PDF and reads the page count from the page-tree root (`/Pages /Count`); no page object is read until that page is rendered. Also initialises the shared CUDA context (for the `gpu-aa`, `gpu-icc` or `cache` features; not when Vulkan is chosen under `Auto`) according to `config.policy`, and, with the `cache` feature, the device image cache on the backend the session resolved to (the Vulkan backend when it holds one, otherwise the CUDA context). Errors with `RasterError::Pdf` if the file is unreadable or corrupt. A JavaScript-bearing PDF is **not** an error — it opens and renders normally; a loud `WARN` is emitted per detected catalog JS entry point (see `open` below), the first rendered page carrying page or annotation JavaScript emits one more, and no `/JS` is ever decoded or executed. Errors with `RasterError::BackendUnavailable` if `config.policy` is `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend cannot be initialised (for `ForceVulkan`, also when the crate was built without the `vulkan` feature; for `ForceCuda`, when it was built without any of `gpu-aa`, `gpu-icc` or `cache`).
 
 ```rust
 pub fn render_page_rgb(
@@ -207,7 +207,7 @@ impl RasterSession {
     pub const fn form_type(&self) -> FormType
     pub fn page_geometry(&self, page_num: u32) -> Result<PageGeometry, RasterError>
     #[cfg(feature = "cache")]
-    pub const fn image_cache(&self) -> Option<&Arc<DeviceImageCache>>  // diagnostics
+    pub const fn image_cache(&self) -> Option<&gpu::cache::ImageCache>  // diagnostics; CUDA or Vulkan
     // doc() and resolve_page() are #[doc(hidden)] — use prescan_session instead
 }
 ```
@@ -454,7 +454,7 @@ pub enum BackendPolicy {
 
 Controls which compute backend is used. The `Force*` variants convert silent GPU fallbacks into hard `RasterError::BackendUnavailable` errors so you know immediately whether the expected hardware path is actually active. `ForceVaapi` is only present when the `vaapi` Cargo feature is enabled.
 
-`ForceVulkan` runs the AA-fill kernel (and, in a build with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  The device-resident image cache is CUDA-only, so under `ForceVulkan` the renderer runs uncached; ICC CMYK→RGB stays on the CPU.  Both GPU paths are dormant by default (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)): `PDF_RASTER_AA_FILL_THRESHOLD=0` enables the AA fill and `PDF_RASTER_HUFFMAN_THRESHOLD=0` the Huffman decode.
+`ForceVulkan` runs the AA-fill kernel (and, in a build with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  In a build with the `cache` feature the device-resident image cache keeps its images in Vulkan device memory and draws them with the Vulkan blit kernel, byte-identical to the CPU render; with `gpu-icc`, ICC CMYK→RGB runs on the Vulkan device too.  Both GPU paths are dormant by default (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)): `PDF_RASTER_AA_FILL_THRESHOLD=0` enables the AA fill and `PDF_RASTER_HUFFMAN_THRESHOLD=0` the Huffman decode.
 
 `BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vulkan` and, with the `vaapi` feature, `vaapi` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling; `BackendPolicy::ALL` lists the policies of the build. A name it does not accept is a `ParseBackendPolicyError`: `value()` returns the rejected input, and its `Display` names it and lists the accepted names (`unknown backend "cdua"; expected one of auto, cpu, cuda, vulkan`). `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
 
@@ -971,7 +971,7 @@ Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`.
 | `gpu-aa` | CUDA-capable NVIDIA GPU | CUDA runtime only |
 | `gpu-icc` | CUDA-capable NVIDIA GPU | CUDA runtime only |
 | `gpu-deskew` | CUDA-capable NVIDIA GPU | Requires CUDA NPP: `libnppig.so` + `libnppc.so` |
-| `cache` | CUDA-capable NVIDIA GPU | Device-resident 3-tier image cache (CUDA-only) |
+| `cache` | CUDA-capable NVIDIA GPU, or a Vulkan 1.3+ device with `vulkan` | Device-resident 3-tier image cache, on the session's backend |
 
 `cudarc` is pinned to the `cuda-13030` driver-API binding; a CUDA 13.x driver is required.
 
@@ -981,7 +981,7 @@ Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`.
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, NVIDIA driver); `slangc` from the LunarG Vulkan SDK at *build* time. Implies `gpu-aa`. |
 
-Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when `gpu-jpeg-huffman` is also enabled (`vulkan` does not imply it).  `cache` and `nvjpeg` stay CUDA-only; under `--backend vulkan` the renderer runs uncached.
+Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when `gpu-jpeg-huffman` is also enabled (`vulkan` does not imply it).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`; `nvjpeg` stays CUDA-only.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 
@@ -1010,9 +1010,9 @@ and the guides for [Linux](platforms/linux.md), [macOS](platforms/macos.md) and
 | `gpu-aa` | CUDA 13 | GPU evaluation of the 4× scanline-AA coverage for solid fills; output is byte-identical to the CPU fill. Dormant by default: the CPU fill is faster at every size measured, so dispatch is off unless `PDF_RASTER_AA_FILL_THRESHOLD` sets a pixel-area threshold. Path clips and pattern fills always stay on the CPU. |
 | `gpu-icc` | CUDA 13, or `vulkan` | An image in an ICC-based CMYK space converts through the profile's 17⁴ lookup table on the session's GPU backend (Vulkan when attached, else CUDA) from 500 000 px; smaller images evaluate the same table on the CPU with the same bytes. A Vulkan device whose kernel fails a one-time exactness check converts on the CPU. Without a backend, images convert through the profile transform. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
-| `cache` | CUDA 13 | Device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. CUDA-only; no Vulkan support today. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
+| `cache` | CUDA 13 | Device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. Runs on the session's backend: CUDA, or Vulkan under `--backend vulkan` with the `vulkan` feature. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
 | `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU; adds `BackendPolicy::ForceVaapi` and `--backend vaapi`. Shares the disabled `GPU_JPEG_THRESHOLD_PX` gate with `nvjpeg`, so JPEGs still decode on the CPU. |
-| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa`. | Vulkan compute backend. The AA-fill kernel (with `gpu-icc`, the ICC CMYK lookup; with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). No nvJPEG / `cache` support under this backend. |
+| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. Implies `gpu-aa`. | Vulkan compute backend. The AA-fill kernel (with `gpu-icc`, the ICC CMYK lookup; with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). With `cache`, the device image cache and its blit kernel run on the Vulkan device. No nvJPEG under this backend. |
 | `gpu-jpeg-huffman` | CUDA 13 or `vulkan` | Custom parallel-Huffman GPU JPEG decoder (baseline 4:4:4, one or three components). Dormant: `GPU_JPEG_HUFFMAN_THRESHOLD_PX` is `u32::MAX`; `PDF_RASTER_HUFFMAN_THRESHOLD=<area>` overrides it at runtime. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |
 | `bundled-fonts` | — (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the library (~0.75 MB, SIL OFL 1.1; provenance in `crates/pdf_interp/fonts/README.md`). A character of a non-embedded font that neither its substitute nor any installed face covers is drawn from them; an installed face is always preferred. Disable with `default-features = false` for a slim build. |

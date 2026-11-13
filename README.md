@@ -427,7 +427,7 @@ crates.io (see the note at the top).
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG and the AA fill, which are wired but dormant by default because the CPU paths beat them.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  No nvJPEG / cache support under Vulkan.
+- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) runs under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
@@ -475,7 +475,7 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 | `gpu-aa` | GPU evaluation of the anti-aliased fill coverage (byte-identical to the CPU fill; dormant by default, see `PDF_RASTER_AA_FILL_THRESHOLD`) | CUDA |
 | `gpu-icc` | GPU CMYK→RGB ICC transform | CUDA |
 | `gpu-deskew` | GPU deskew rotation via NPP | CUDA + NPP |
-| `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA |
+| `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
 | `vulkan` | Vulkan compute backend for the AA fill (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
 | `gpu-jpeg-huffman` | Custom parallel-Huffman GPU JPEG decode, on CUDA or (with `vulkan`) Vulkan (dormant; `PDF_RASTER_HUFFMAN_THRESHOLD=0` enables it) | CUDA or Vulkan |

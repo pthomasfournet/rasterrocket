@@ -207,10 +207,10 @@ pub enum CacheError {
     /// or budget probe).
     Backend(BackendError),
     /// The cache cannot fit a new entry because every reclaimable slab is
-    /// pinned by an outstanding `Arc` (e.g. an in-flight CUDA stream).
+    /// pinned by an outstanding `Arc` (e.g. held by an in-flight blit).
     /// This condition is **transient**: once consumers drop their `Arc`s
-    /// — typically after `cudaStreamSynchronize` on the kernel that read
-    /// the slab — retry will succeed.
+    /// — typically once the device work that read the slab has
+    /// completed — retry will succeed.
     OverBudget {
         /// Bytes the new entry needs.
         needed: u64,
@@ -305,7 +305,7 @@ impl ContentHash {
 
 /// Two-tier in-process image cache.
 ///
-/// VRAM is the hot tier; pinned host RAM is the demotion target.
+/// VRAM is the hot tier; host RAM is the demotion target.
 ///
 /// The VRAM tier is indexed by content hash (primary, for cross-
 /// document dedup) and by `(DocId, ObjId)` (secondary, fast same-
@@ -435,7 +435,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
 
     /// Probe the cache by `(DocId, ObjId)`.  Returns `None` if the
     /// alias is unknown or its content hash is in neither tier; on a
-    /// host-tier hit, transparently promotes to VRAM (one `PCIe`
+    /// host-tier hit, transparently promotes to VRAM (one
     /// upload).  Updates LRU.
     #[must_use]
     pub fn lookup_by_id(&self, doc: DocId, obj: ObjId) -> Option<Arc<CachedDeviceImage<B>>> {
@@ -452,7 +452,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
 
     /// Probe the cache by content hash.  On a VRAM hit, returns the
     /// device-resident handle and bumps LRU.  On a VRAM miss, falls
-    /// through to the host tier and promotes back to VRAM (one `PCIe`
+    /// through to the host tier and promotes back to VRAM (one
     /// upload).  Returns `None` only if the hash is in neither tier or
     /// the promotion upload fails.
     ///
