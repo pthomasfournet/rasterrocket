@@ -33,7 +33,7 @@ pub use av_data::pixel;
 
 use crate::error::Rav1dError;
 use crate::in_range::InRange;
-use crate::include::common::bitdepth::BitDepth8;
+use crate::include::common::bitdepth::{BitDepth16, BitDepth8};
 pub use crate::include::dav1d::dav1d::{
     Rav1dDecodeFrameType as DecodeFrameType, Rav1dInloopFilterType as InloopFilterType,
 };
@@ -352,6 +352,20 @@ impl Picture {
         // (in [`Decoder::get_picture`], which calls [`rav1d_get_picture`]).
         // Thus, the decoder no longer writes to this data,
         // and there are no other safe public ways to have a `&mut` to this data.
+        unsafe { guard.get_unchecked() }
+    }
+
+    /// Plane data of the `component` as 16-bit samples: the form of the
+    /// planes of a frame of more than 8 bits per component (see
+    /// [`Picture::bit_depth`]), whose [`Picture::plane`] bytes are these
+    /// samples in native byte order.
+    pub fn plane_wide<'a>(&'a self, component: PlanarImageComponent) -> &'a [u16] {
+        let data = &self.inner.data.as_ref().unwrap().data;
+        let component = &data[component.as_index()];
+        let guard = component.slice::<BitDepth16, _>(..);
+        // SAFETY: As in [`Picture::plane`]: decoding is complete, so nothing
+        // writes to this data any more, and no safe public way to a `&mut`
+        // to it exists.
         unsafe { guard.get_unchecked() }
     }
 

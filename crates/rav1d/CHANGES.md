@@ -71,13 +71,22 @@ unless the entry says otherwise.
   delay), with film grain applied, the highest spatial layer of operating
   point 0 alone, the frame size limit from `StillLimits::max_pixels`, and
   no logger (failures are the returned error, nothing is written to
-  stderr).  `StillPicture` owns tight copies of the planes (`u8` samples
-  for 8-bit pictures, `u16` for 10 and 12 bits) and carries the size, bit
-  depth, chroma layout and the sequence header's colour description as
-  ITU-T H.273 code points with the range flag.  The module has no `unsafe`
-  code: it is built on the `Decoder` and `Picture` types of `rust_api`.
+  stderr).  `StillPicture` keeps the decoder's picture and carries the
+  size, bit depth, chroma layout and the sequence header's colour
+  description as ITU-T H.273 code points with the range flag;
+  `StillPicture::plane` lends each plane from the decoder's buffer as
+  `&[u8]` (8-bit pictures) or `&[u16]` (10 and 12 bits) with its stride in
+  samples, the geometry having been checked once when the picture was
+  wrapped.  The module has no `unsafe` code: it is built on the `Decoder`
+  and `Picture` types of `rust_api`.
+
+  The planes were first handed out as tight owned copies; lending them
+  removes a copy of every sample (2000 × 3000 4:2:0 page through the comic
+  crate, one thread, Ryzen 9 9900X3D, medians of 21: 34.0 → 31.9 ms at 8
+  bits, 37.9 → 35.8 ms at 10).
 
 - `src/rust_api.rs`: `Picture::color_primaries_code`, `transfer_code`,
   `matrix_code` and `full_range`, the sequence header's colour description
   as code points, beside the existing accessors that return `av-data`
-  enums.
+  enums; `Picture::plane_wide`, a plane as `&[u16]`, for pictures of more
+  than 8 bits (the existing `Picture::plane` gives their bytes).

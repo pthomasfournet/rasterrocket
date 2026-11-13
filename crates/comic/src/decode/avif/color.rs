@@ -17,66 +17,67 @@
 //! interpolation with chroma sited between luma samples: weights 3:1 along
 //! each halved axis, hence 9:3:3:1 for 4:2:0, edges replicated.
 
+use std::borrow::Cow;
+
 use rav1d::StillLayout;
 
 use super::DecodeError;
 
 /// A plane sample: 8 bits, or 10 and 12 bits in 16.
 pub(super) trait Sample: Copy + Default + Into<i32> + Into<u16> {
-    /// The samples as bytes when they are bytes, else the samples back.
-    fn into_bytes(samples: Vec<Self>) -> Result<Vec<u8>, Vec<Self>>;
+    /// The samples as bytes when they are bytes.
+    fn as_bytes(samples: &[Self]) -> Option<&[u8]>;
 }
 
 impl Sample for u8 {
-    fn into_bytes(samples: Vec<Self>) -> Result<Vec<u8>, Vec<Self>> {
-        Ok(samples)
+    fn as_bytes(samples: &[Self]) -> Option<&[u8]> {
+        Some(samples)
     }
 }
 
 impl Sample for u16 {
-    fn into_bytes(samples: Vec<Self>) -> Result<Vec<u8>, Vec<Self>> {
-        Err(samples)
+    fn as_bytes(_: &[Self]) -> Option<&[u8]> {
+        None
     }
 }
 
-/// One plane, row-major and tight.
+/// One plane: borrowed from the decoder's picture, or owned.  Row `y` is
+/// the `width` samples from index `y · stride`, and `data` holds at least
+/// `(height − 1) · stride + width` samples when the plane is not empty.
 #[derive(Debug)]
-pub(super) struct Plane<T> {
+pub(super) struct Plane<'a, T: Clone> {
     pub(super) width: usize,
     pub(super) height: usize,
-    pub(super) data: Vec<T>,
+    pub(super) stride: usize,
+    pub(super) data: Cow<'a, [T]>,
 }
 
-impl<T: Sample> Plane<T> {
-    /// A zeroed plane.
+impl<T: Sample> Plane<'_, T> {
+    /// A zeroed plane without row padding.
     pub(super) fn zeroed(width: usize, height: usize) -> Self {
         Self {
             width,
             height,
-            data: vec![T::default(); width * height],
+            stride: width,
+            data: Cow::Owned(vec![T::default(); width * height]),
         }
     }
 
-    fn rows(&self) -> impl Iterator<Item = &[T]> {
-        self.data.chunks_exact(self.width.max(1))
-    }
-
-    fn row(&self, y: usize) -> &[T] {
-        &self.data[y * self.width..(y + 1) * self.width]
+    pub(super) fn row(&self, y: usize) -> &[T] {
+        &self.data[y * self.stride..][..self.width]
     }
 }
 
 /// A picture in the decoder's colour model.  Invariant: plane 0 is
 /// `width × height`; planes 1 and 2 are empty for [`StillLayout::Mono`] and
-/// otherwise `chroma_size(width, height)`; each plane holds exactly
-/// `width · height` samples of its own.
+/// otherwise `chroma_size(width, height)`.
 #[derive(Debug)]
-pub(super) struct Frame<T> {
+pub(super) struct Frame<'a, T: Clone> {
     pub(super) width: usize,
     pub(super) height: usize,
     pub(super) depth: u8,
     pub(super) layout: StillLayout,
-    pub(super) planes: [Plane<T>; 3],
+    pub(super) planes: [Plane<'a, T>; 3],
 }
 
 /// The size of a chroma plane under `layout` for `width × height` luma.
@@ -290,22 +291,22 @@ fn upsample_row<T: Sample>(near: &[T], far: Option<&[T]>, mix: &mut [u16], out: 
 /// chroma, and for the reversible `YCgCo` matrices (code points 16 and 17),
 /// which are not implemented.
 pub(super) fn to_pixels<T: Sample>(
-    frame: Frame<T>,
+    frame: &Frame<'_, T>,
     spec: ColorSpec,
 ) -> Result<Pixels, DecodeError> {
     let matrix = Matrix::new(frame.depth, spec);
     let (w, h) = (frame.width, frame.height);
-    let [mut luma, u, v] = frame.planes;
+    let [luma, u, v] = &frame.planes;
     if frame.layout == StillLayout::Mono {
-        if matrix.level_is_identity() {
-            match T::into_bytes(luma.data) {
-                Ok(gray) => return Ok(Pixels::Gray(gray)),
-                Err(samples) => luma.data = samples,
+        let mut gray = Vec::with_capacity(w * h);
+        for y in 0..h {
+            let row = luma.row(y);
+            match T::as_bytes(row) {
+                Some(bytes) if matrix.level_is_identity() => gray.extend_from_slice(bytes),
+                _ => gray.extend(row.iter().map(|&s| matrix.level(s))),
             }
         }
-        return Ok(Pixels::Gray(
-            luma.data.iter().map(|&s| matrix.level(s)).collect(),
-        ));
+        return Ok(Pixels::Gray(gray));
     }
     if matches!(spec.matrix, 16 | 17) {
         return Err(DecodeError::Codec(format!(
@@ -322,24 +323,25 @@ pub(super) fn to_pixels<T: Sample>(
             ));
         }
         // G, B, R are carried as Y, U, V.
-        for (((row, g), b), r) in rows.zip(luma.rows()).zip(u.rows()).zip(v.rows()) {
+        for (y, row) in rows.enumerate() {
             let (row, _) = row.as_chunks_mut::<3>();
-            for (((px, &g), &b), &r) in row.iter_mut().zip(g).zip(b).zip(r) {
+            let planes = luma.row(y).iter().zip(u.row(y)).zip(v.row(y));
+            for (px, ((&g, &b), &r)) in row.iter_mut().zip(planes) {
                 *px = [matrix.level(r), matrix.level(g), matrix.level(b)];
             }
         }
         return Ok(Pixels::Rgb(out));
     }
     if frame.layout == StillLayout::I444 {
-        for (((row, y), u), v) in rows.zip(luma.rows()).zip(u.rows()).zip(v.rows()) {
-            matrix.rgb_row(y, u, v, row);
+        for (y, row) in rows.enumerate() {
+            matrix.rgb_row(luma.row(y), u.row(y), v.row(y), row);
         }
         return Ok(Pixels::Rgb(out));
     }
     let halved_rows = frame.layout == StillLayout::I420;
     let mut mix = vec![0u16; u.width];
     let (mut wide_u, mut wide_v) = (vec![0u16; w], vec![0u16; w]);
-    for (y, (row, luma)) in rows.zip(luma.rows()).enumerate() {
+    for (y, row) in rows.enumerate() {
         // Output row `y` lies in chroma row `y / 2`, nearer the row above
         // when `y` is even and the row below when odd.
         let (near, far) = if halved_rows {
@@ -355,7 +357,7 @@ pub(super) fn to_pixels<T: Sample>(
         };
         upsample_row(u.row(near), far.map(|f| u.row(f)), &mut mix, &mut wide_u);
         upsample_row(v.row(near), far.map(|f| v.row(f)), &mut mix, &mut wide_v);
-        matrix.rgb_row(luma, &wide_u, &wide_v, row);
+        matrix.rgb_row(luma.row(y), &wide_u, &wide_v, row);
     }
     Ok(Pixels::Rgb(out))
 }
@@ -377,7 +379,7 @@ mod tests {
         depth: u8,
         (width, height): (usize, usize),
         planes: [Vec<T>; 3],
-    ) -> Frame<T> {
+    ) -> Frame<'static, T> {
         let chroma = chroma_size(layout, width, height);
         let mut sizes = [(width, height), chroma, chroma].into_iter();
         Frame {
@@ -390,13 +392,14 @@ mod tests {
                 Plane {
                     width,
                     height,
-                    data,
+                    stride: width,
+                    data: Cow::Owned(data),
                 }
             }),
         }
     }
 
-    fn rgb<T: Sample>(f: Frame<T>, spec: ColorSpec) -> Vec<u8> {
+    fn rgb<T: Sample>(f: &Frame<'_, T>, spec: ColorSpec) -> Vec<u8> {
         match to_pixels(f, spec).unwrap() {
             Pixels::Rgb(v) => v,
             Pixels::Gray(_) => panic!("a colour frame converts to RGB"),
@@ -412,7 +415,7 @@ mod tests {
                 (4, 1),
                 [vec![0, 16, 235, 255], vec![128; 4], vec![128; 4]],
             )
-            .pipe(|f| rgb(f, spec(1, range)))
+            .pipe(|f| rgb(&f, spec(1, range)))
         };
         assert_eq!(f(true), [0, 0, 0, 16, 16, 16, 235, 235, 235, 255, 255, 255]);
         assert_eq!(f(false), [0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255]);
@@ -448,7 +451,7 @@ mod tests {
                 (1, 1),
                 [vec![y as u8], vec![cb as u8], vec![255]],
             );
-            let px = rgb(f, spec(matrix, true));
+            let px = rgb(&f, spec(matrix, true));
             assert!(
                 px[0] >= 253 && px[1] <= 2 && px[2] <= 2,
                 "matrix {matrix}: {px:?}"
@@ -466,7 +469,7 @@ mod tests {
             [vec![1023, 512, 2, 3], vec![], vec![]],
         );
         assert_eq!(
-            to_pixels(f, spec(2, true)).unwrap(),
+            to_pixels(&f, spec(2, true)).unwrap(),
             Pixels::Gray(vec![255, 128, 0, 1])
         );
         // 12-bit limited range: black 256, white 3760.
@@ -477,7 +480,7 @@ mod tests {
             [vec![256, 3760, 2010], vec![], vec![]],
         );
         assert_eq!(
-            to_pixels(f, spec(2, false)).unwrap(),
+            to_pixels(&f, spec(2, false)).unwrap(),
             Pixels::Gray(vec![0, 255, 128])
         );
     }
@@ -490,9 +493,9 @@ mod tests {
             (2, 1),
             [vec![10, 20], vec![30, 40], vec![50, 60]],
         );
-        assert_eq!(rgb(f, spec(0, true)), [50, 10, 30, 60, 20, 40]);
+        assert_eq!(rgb(&f, spec(0, true)), [50, 10, 30, 60, 20, 40]);
         let f = frame::<u8>(StillLayout::I420, 8, (2, 2), [vec![0; 4], vec![0], vec![0]]);
-        assert!(to_pixels(f, spec(0, true)).is_err());
+        assert!(to_pixels(&f, spec(0, true)).is_err());
     }
 
     #[test]
@@ -504,7 +507,7 @@ mod tests {
             (1, 1),
             [vec![110], vec![118], vec![208]],
         );
-        assert_eq!(rgb(f, spec(8, true)), [200, 100, 40]);
+        assert_eq!(rgb(&f, spec(8, true)), [200, 100, 40]);
     }
 
     #[test]
@@ -597,7 +600,7 @@ mod tests {
                         [vec![90; w * h], vec![128; cw * ch], vec![128; cw * ch]],
                     );
                     assert_eq!(
-                        rgb(f, spec(1, true)),
+                        rgb(&f, spec(1, true)),
                         vec![90; w * h * 3],
                         "{layout:?} {w}x{h}"
                     );

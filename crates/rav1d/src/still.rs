@@ -1,5 +1,5 @@
 //! Single-picture decode: one call from the OBUs of a still image to its
-//! planes.
+//! planes, borrowed from the decoder's picture buffer.
 //!
 //! This module is not part of upstream `rav1d`; it is the entry point the
 //! rasterrocket workspace uses (see `CHANGES.md`).  It is built on the safe
@@ -51,43 +51,34 @@ pub struct StillColor {
     pub full_range: bool,
 }
 
-/// The samples of one plane, row-major without padding.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum StillSamples {
+/// The samples of one plane: rows [`StillPlane::stride`] samples apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StillSamples<'a> {
     /// 8-bit pictures.
-    U8(Vec<u8>),
+    U8(&'a [u8]),
     /// 10- and 12-bit pictures.
-    U16(Vec<u16>),
+    U16(&'a [u16]),
 }
 
-impl StillSamples {
-    /// The number of samples.
-    pub fn len(&self) -> usize {
-        match self {
-            Self::U8(v) => v.len(),
-            Self::U16(v) => v.len(),
-        }
-    }
-
-    /// Whether the plane holds no samples.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// One plane of a decoded picture.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct StillPlane {
+/// One plane of a decoded picture, borrowed from the decoder's buffer.
+///
+/// Row `y` is the `width` samples from index `y * stride`; the samples
+/// between rows are padding.  The slice ends with the last row, so it holds
+/// `(height - 1) * stride + width` samples, or none for an absent plane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StillPlane<'a> {
     /// Samples per row.
     pub width: u32,
     /// Rows.
     pub height: u32,
-    /// `width * height` samples.
-    pub samples: StillSamples,
+    /// The distance between the starts of consecutive rows, in samples.
+    pub stride: usize,
+    /// The samples.
+    pub samples: StillSamples<'a>,
 }
 
 /// A decoded still picture.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug)]
 pub struct StillPicture {
     /// Luma width in pixels.
     pub width: u32,
@@ -99,8 +90,67 @@ pub struct StillPicture {
     pub layout: StillLayout,
     /// Colour description of the sequence header.
     pub color: StillColor,
-    /// The Y, U and V planes; U and V are empty for [`StillLayout::Mono`].
-    pub planes: [StillPlane; 3],
+    /// The decoder's picture; [`check`] has verified that each plane holds
+    /// the rows [`Self::plane`] hands out.
+    picture: Picture,
+}
+
+impl StillPicture {
+    /// The size of the chroma planes: `(0, 0)` for [`StillLayout::Mono`].
+    pub const fn chroma_size(&self) -> (u32, u32) {
+        if matches!(self.layout, StillLayout::Mono) {
+            return (0, 0);
+        }
+        let (shift_x, shift_y) = self.layout.chroma_shift();
+        (
+            (self.width + (1 << shift_x) - 1) >> shift_x,
+            (self.height + (1 << shift_y) - 1) >> shift_y,
+        )
+    }
+
+    /// Plane `index`: 0 is Y, 1 is U, 2 is V.  U and V are empty for
+    /// [`StillLayout::Mono`].
+    ///
+    /// # Panics
+    ///
+    /// If `index` is over 2.
+    pub fn plane(&self, index: usize) -> StillPlane<'_> {
+        let component = PlanarImageComponent::try_from(index).expect("a plane index of 0 to 2");
+        let (width, height) = if index == 0 {
+            (self.width, self.height)
+        } else {
+            self.chroma_size()
+        };
+        let wide = self.bit_depth > 8;
+        if width == 0 || height == 0 {
+            let samples = if wide {
+                StillSamples::U16(&[])
+            } else {
+                StillSamples::U8(&[])
+            };
+            return StillPlane {
+                width,
+                height,
+                stride: 0,
+                samples,
+            };
+        }
+        let stride_bytes = self.picture.stride(component) as usize;
+        // `check` established that the plane holds this many samples.
+        let stride = if wide { stride_bytes / 2 } else { stride_bytes };
+        let len = (height as usize - 1) * stride + width as usize;
+        let samples = if wide {
+            StillSamples::U16(&self.picture.plane_wide(component)[..len])
+        } else {
+            StillSamples::U8(&self.picture.plane(component)[..len])
+        };
+        StillPlane {
+            width,
+            height,
+            stride,
+            samples,
+        }
+    }
 }
 
 /// Bounds on what [`decode_still`] may allocate.
@@ -170,7 +220,7 @@ pub fn decode_still(obu: &[u8], limits: StillLimits) -> Result<StillPicture, Sti
     // any.
     for _ in 0..=obu.len() {
         match decoder.get_picture() {
-            Ok(picture) => return own(&picture),
+            Ok(picture) => return check(picture),
             Err(Rav1dError::TryAgain) => {}
             Err(e) => return Err(e.into()),
         }
@@ -183,8 +233,10 @@ pub fn decode_still(obu: &[u8], limits: StillLimits) -> Result<StillPicture, Sti
     Err(StillError::NoPicture)
 }
 
-/// Copy `picture` out of the decoder's padded planes.
-fn own(picture: &Picture) -> Result<StillPicture, StillError> {
+/// Wrap `picture` once its geometry is verified: a non-empty size, a bit
+/// depth of 8, 10 or 12, and in every plane a stride of whole samples that
+/// covers a row, with all rows inside the buffer.
+fn check(picture: Picture) -> Result<StillPicture, StillError> {
     let (width, height) = (picture.width(), picture.height());
     if width == 0 || height == 0 {
         return Err(StillError::Malformed);
@@ -196,17 +248,7 @@ fn own(picture: &Picture) -> Result<StillPicture, StillError> {
         PixelLayout::I422 => StillLayout::I422,
         PixelLayout::I444 => StillLayout::I444,
     };
-    let (shift_x, shift_y) = layout.chroma_shift();
-    let chroma = if layout == StillLayout::Mono {
-        (0, 0)
-    } else {
-        (
-            (width + (1 << shift_x) - 1) >> shift_x,
-            (height + (1 << shift_y) - 1) >> shift_y,
-        )
-    };
-    let plane = |component, (w, h): (u32, u32)| own_plane(picture, component, w, h, bit_depth > 8);
-    Ok(StillPicture {
+    let still = StillPicture {
         width,
         height,
         bit_depth,
@@ -217,72 +259,34 @@ fn own(picture: &Picture) -> Result<StillPicture, StillError> {
             matrix: picture.matrix_code(),
             full_range: picture.full_range(),
         },
-        planes: [
-            plane(PlanarImageComponent::Y, (width, height))?,
-            plane(PlanarImageComponent::U, chroma)?,
-            plane(PlanarImageComponent::V, chroma)?,
-        ],
-    })
-}
-
-/// The top-left `width × height` samples of one component, whose rows are
-/// `stride` bytes apart; `wide` samples are two native-endian bytes.
-fn own_plane(
-    picture: &Picture,
-    component: PlanarImageComponent,
-    width: u32,
-    height: u32,
-    wide: bool,
-) -> Result<StillPlane, StillError> {
-    let (w, h) = (width as usize, height as usize);
-    let samples = w.checked_mul(h).ok_or(StillError::Malformed)?;
-    if samples == 0 {
-        let samples = if wide {
-            StillSamples::U16(Vec::new())
-        } else {
-            StillSamples::U8(Vec::new())
-        };
-        return Ok(StillPlane {
-            width,
-            height,
-            samples,
-        });
-    }
-    let stride = picture.stride(component) as usize;
-    let data = picture.plane(component);
-    let row_bytes = if wide { w * 2 } else { w };
-    // Row `h - 1` ends at `(h - 1) * stride + row_bytes`.
-    let needed = (h - 1)
-        .checked_mul(stride)
-        .and_then(|n| n.checked_add(row_bytes))
-        .ok_or(StillError::Malformed)?;
-    if stride < row_bytes || data.len() < needed {
-        return Err(StillError::Malformed);
-    }
-    let rows = data.chunks(stride).take(h).map(|row| &row[..row_bytes]);
-    let samples = if wide {
-        let mut out = Vec::with_capacity(samples);
-        for row in rows {
-            out.extend(
-                row.as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|&pair| u16::from_ne_bytes(pair)),
-            );
-        }
-        StillSamples::U16(out)
-    } else {
-        let mut out = Vec::with_capacity(samples);
-        for row in rows {
-            out.extend_from_slice(row);
-        }
-        StillSamples::U8(out)
+        picture,
     };
-    Ok(StillPlane {
-        width,
-        height,
-        samples,
-    })
+    let sample_bytes = if bit_depth > 8 { 2 } else { 1 };
+    let components = [
+        (PlanarImageComponent::Y, (width, height)),
+        (PlanarImageComponent::U, still.chroma_size()),
+        (PlanarImageComponent::V, still.chroma_size()),
+    ];
+    for (component, (w, h)) in components {
+        let (w, h) = (w as usize, h as usize);
+        if w == 0 || h == 0 {
+            continue;
+        }
+        let stride = still.picture.stride(component) as usize;
+        let row_bytes = w.checked_mul(sample_bytes).ok_or(StillError::Malformed)?;
+        // Row `h - 1` ends at `(h - 1) * stride + row_bytes`.
+        let needed = (h - 1)
+            .checked_mul(stride)
+            .and_then(|n| n.checked_add(row_bytes))
+            .ok_or(StillError::Malformed)?;
+        if stride % sample_bytes != 0
+            || stride < row_bytes
+            || still.picture.plane(component).len() < needed
+        {
+            return Err(StillError::Malformed);
+        }
+    }
+    Ok(still)
 }
 
 #[cfg(test)]
@@ -310,26 +314,29 @@ mod tests {
         assert_eq!((picture.width, picture.height), (8, 4));
         assert_eq!((picture.bit_depth, picture.layout), (8, StillLayout::I444));
         assert_eq!((picture.color.matrix, picture.color.full_range), (0, true));
+        assert_eq!(picture.chroma_size(), (8, 4));
         // The identity matrix carries G, B, R as Y, U, V.
-        let plane = |sample: fn(u8, u8) -> u8| StillPlane {
-            width: 8,
-            height: 4,
-            samples: StillSamples::U8(
-                (0..4)
-                    .flat_map(|y| (0..8).map(move |x| sample(x, y)))
-                    .collect(),
-            ),
-        };
-        assert_eq!(picture.planes[0], plane(|_, y| y * 60));
-        assert_eq!(picture.planes[1], plane(|x, _| 255 - x * 30));
-        assert_eq!(picture.planes[2], plane(|x, _| x * 30));
+        let samples: [fn(u8, u8) -> u8; 3] = [|_, y| y * 60, |x, _| 255 - x * 30, |x, _| x * 30];
+        for (index, sample) in samples.into_iter().enumerate() {
+            let plane = picture.plane(index);
+            assert_eq!((plane.width, plane.height), (8, 4));
+            let StillSamples::U8(data) = plane.samples else {
+                panic!("an 8-bit picture has 8-bit samples")
+            };
+            assert_eq!(data.len(), 3 * plane.stride + 8);
+            for y in 0..4u8 {
+                let row = &data[usize::from(y) * plane.stride..][..8];
+                let want: Vec<u8> = (0..8).map(|x| sample(x, y)).collect();
+                assert_eq!(row, want, "plane {index} row {y}");
+            }
+        }
     }
 
     #[test]
     fn a_frame_over_the_limit_is_refused() {
         assert_eq!(
-            decode_still(OBU, limits(31)),
-            Err(StillError::Decode(Rav1dError::OutOfRange))
+            decode_still(OBU, limits(31)).err(),
+            Some(StillError::Decode(Rav1dError::OutOfRange))
         );
         assert!(decode_still(OBU, limits(0)).is_ok());
     }

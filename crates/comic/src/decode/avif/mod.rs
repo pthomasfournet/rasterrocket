@@ -20,7 +20,9 @@ mod container;
 #[cfg(test)]
 mod tests;
 
-use rav1d::{StillLayout, StillLimits, StillPicture, StillSamples};
+use std::borrow::Cow;
+
+use rav1d::{StillLimits, StillPicture, StillSamples};
 
 use self::color::{ColorSpec, Frame, Pixels, Plane, Sample, chroma_size, to_pixels};
 use self::container::{Container, Grid, ItemInfo, Nclx};
@@ -115,9 +117,9 @@ impl<'a> ItemProps<'a> {
 
 /// A decoded picture of either sample width.
 #[derive(Debug)]
-enum AnyFrame {
-    U8(Frame<u8>),
-    U16(Frame<u16>),
+enum AnyFrame<'a> {
+    U8(Frame<'a, u8>),
+    U16(Frame<'a, u16>),
 }
 
 /// The colour description of a decoded picture's sequence header.
@@ -129,56 +131,48 @@ fn stream_color(picture: &StillPicture) -> ColorSpec {
     }
 }
 
-/// A frame of size, depth and layout `like` over exactly three `planes`.
-fn frame_of<T>(like: (usize, usize, u8, StillLayout), planes: Vec<Plane<T>>) -> Option<Frame<T>> {
-    let (width, height, depth, layout) = like;
+/// A frame of the size, depth and layout of `picture` over exactly three
+/// `planes`.
+fn frame_of<'a, T: Clone>(
+    picture: &StillPicture,
+    planes: Vec<Plane<'a, T>>,
+) -> Option<Frame<'a, T>> {
     Some(Frame {
-        width,
-        height,
-        depth,
-        layout,
+        width: picture.width as usize,
+        height: picture.height as usize,
+        depth: picture.bit_depth,
+        layout: picture.layout,
         planes: planes.try_into().ok()?,
     })
 }
 
-/// Take over the planes of `picture`, checking them against the invariant
-/// of [`Frame`].
-fn into_frame(picture: StillPicture) -> Result<AnyFrame, DecodeError> {
-    let (width, height) = (picture.width as usize, picture.height as usize);
-    let (depth, layout) = (picture.bit_depth, picture.layout);
-    let chroma = chroma_size(layout, width, height);
-    let sizes = [(width, height), chroma, chroma];
-    let inconsistent = || codec("decoded planes disagree with the picture size");
-    let wide = matches!(picture.planes[0].samples, StillSamples::U16(_));
-    if !matches!((depth, wide), (8, false) | (10 | 12, true)) {
-        return Err(inconsistent());
-    }
-    let mut narrow_planes = Vec::with_capacity(3);
-    let mut wide_planes = Vec::with_capacity(3);
-    for (plane, (w, h)) in picture.planes.into_iter().zip(sizes) {
-        if (plane.width as usize, plane.height as usize) != (w, h) || plane.samples.len() != w * h {
-            return Err(inconsistent());
-        }
+/// The planes of `picture` as a frame, borrowed from the decoder's buffer.
+fn frame_view(picture: &StillPicture) -> Result<AnyFrame<'_>, DecodeError> {
+    let mut narrow = Vec::with_capacity(3);
+    let mut wide = Vec::with_capacity(3);
+    for index in 0..3 {
+        let plane = picture.plane(index);
+        let (width, height) = (plane.width as usize, plane.height as usize);
         match plane.samples {
-            StillSamples::U8(data) => narrow_planes.push(Plane {
-                width: w,
-                height: h,
-                data,
+            StillSamples::U8(data) => narrow.push(Plane {
+                width,
+                height,
+                stride: plane.stride,
+                data: Cow::Borrowed(data),
             }),
-            StillSamples::U16(data) => wide_planes.push(Plane {
-                width: w,
-                height: h,
-                data,
+            StillSamples::U16(data) => wide.push(Plane {
+                width,
+                height,
+                stride: plane.stride,
+                data: Cow::Borrowed(data),
             }),
         }
     }
-    let like = (width, height, depth, layout);
-    if wide {
-        frame_of(like, wide_planes).map(AnyFrame::U16)
-    } else {
-        frame_of(like, narrow_planes).map(AnyFrame::U8)
-    }
-    .ok_or_else(inconsistent)
+    // The three planes are of one sample width, so one list holds them all.
+    frame_of(picture, narrow)
+        .map(AnyFrame::U8)
+        .or_else(|| frame_of(picture, wide).map(AnyFrame::U16))
+        .ok_or_else(|| codec("decoded planes of mixed sample widths"))
 }
 
 /// Decode the coded picture item `item`, whose properties are `props`.
@@ -233,7 +227,7 @@ fn decode_coded(
 /// Copy `tile` into `canvas` with its top-left luma sample at
 /// (`x`, `y`), clipped to the canvas.  Both have one layout, and `x`, `y`
 /// are multiples of the chroma subsampling factors.
-fn blit<T: Sample>(canvas: &mut Frame<T>, tile: &Frame<T>, x: usize, y: usize) {
+fn blit<T: Sample>(canvas: &mut Frame<'_, T>, tile: &Frame<'_, T>, x: usize, y: usize) {
     let (sx, sy) = canvas.layout.chroma_shift();
     for (index, (to, from)) in canvas.planes.iter_mut().zip(&tile.planes).enumerate() {
         let (x, y) = if index == 0 {
@@ -245,15 +239,15 @@ fn blit<T: Sample>(canvas: &mut Frame<T>, tile: &Frame<T>, x: usize, y: usize) {
             continue;
         }
         let n = from.width.min(to.width - x);
-        let rows = to.data.chunks_exact_mut(to.width).skip(y);
-        for (to, from) in rows.zip(from.data.chunks_exact(from.width)) {
-            to[x..x + n].copy_from_slice(&from[..n]);
+        let rows = to.data.to_mut().chunks_exact_mut(to.stride).skip(y);
+        for (row, to) in rows.enumerate().take(from.height) {
+            to[x..x + n].copy_from_slice(&from.row(row)[..n]);
         }
     }
 }
 
 /// An all-zero frame of the layout and depth of `like`.
-fn canvas_like<T: Sample>(like: &Frame<T>, width: usize, height: usize) -> Frame<T> {
+fn canvas_like<T: Sample>(like: &Frame<'_, T>, width: usize, height: usize) -> Frame<'static, T> {
     let (cw, ch) = chroma_size(like.layout, width, height);
     Frame {
         width,
@@ -275,7 +269,7 @@ fn decode_grid(
     container: &Container<'_>,
     id: u32,
     file_len: usize,
-) -> Result<(AnyFrame, ColorSpec, Option<Nclx>), DecodeError> {
+) -> Result<(AnyFrame<'static>, ColorSpec, Option<Nclx>), DecodeError> {
     let Grid {
         rows,
         columns,
@@ -294,7 +288,7 @@ fn decode_grid(
         )));
     }
 
-    let mut canvas: Option<(AnyFrame, ColorSpec, Option<Nclx>)> = None;
+    let mut canvas: Option<(AnyFrame<'static>, ColorSpec, Option<Nclx>)> = None;
     let mut tile_size = (0u32, 0u32);
     for (index, &tile_id) in (0u32..).zip(tiles) {
         let props = ItemProps::read(container, tile_id)?;
@@ -327,7 +321,7 @@ fn decode_grid(
         }
         let picture = decode_coded(container, container.item(tile_id)?, &props, file_len)?;
         let color = stream_color(&picture);
-        let tile = into_frame(picture)?;
+        let tile = frame_view(&picture)?;
         let (canvas, ..) = canvas.get_or_insert_with(|| {
             let (w, h) = (width as usize, height as usize);
             let canvas = match &tile {
@@ -410,12 +404,13 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     let container = Container::parse(bytes)?;
     let primary = container.primary()?;
     let props = ItemProps::read(&container, primary.id)?;
+    // The frame of a coded picture borrows the decoder's planes.
+    let picture;
     let (frame, stream, tile_nclx) = if primary.kind == *b"grid" {
         decode_grid(&container, primary.id, bytes.len())?
     } else {
-        let picture = decode_coded(&container, primary, &props, bytes.len())?;
-        let stream = stream_color(&picture);
-        (into_frame(picture)?, stream, None)
+        picture = decode_coded(&container, primary, &props, bytes.len())?;
+        (frame_view(&picture)?, stream_color(&picture), None)
     };
     let spec = props.nclx.or(tile_nclx).map_or(stream, |nclx| ColorSpec {
         primaries: nclx.primaries,
@@ -423,8 +418,8 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
         full_range: nclx.full_range,
     });
     let (width, height, pixels) = match frame {
-        AnyFrame::U8(f) => (f.width, f.height, to_pixels(f, spec)?),
-        AnyFrame::U16(f) => (f.width, f.height, to_pixels(f, spec)?),
+        AnyFrame::U8(f) => (f.width, f.height, to_pixels(&f, spec)?),
+        AnyFrame::U16(f) => (f.width, f.height, to_pixels(&f, spec)?),
     };
     let (gray, data) = match pixels {
         Pixels::Gray(data) => (true, data),
