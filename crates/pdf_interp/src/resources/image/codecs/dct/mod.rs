@@ -8,77 +8,17 @@ use std::sync::Arc;
 use crate::resources::image::ImageData;
 use crate::resources::image::colorspace::{Layout, Samples};
 
+#[cfg(test)]
+mod repair_tests;
+mod stream;
+
+use stream::jpeg_sof;
+
 #[cfg(feature = "cache")]
 use gpu::cache::{
     CachedDeviceImage, ContentHash, DeviceImageCache, DocId, ImageLayout as CacheImageLayout,
     InsertRequest, ObjId,
 };
-
-// ── JPEG SOF peek ─────────────────────────────────────────────────────────────
-
-/// Frame header fields of a JPEG's first SOF marker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct JpegSof {
-    /// Number of lines (`Y`); 0 means the height is defined by a later DNL marker.
-    height: u16,
-    /// Number of samples per line (`X`).
-    width: u16,
-    /// Number of image components (`Nf`).
-    components: u8,
-}
-
-/// The component count (`Nf`) of the first SOF marker in `data`.
-fn jpeg_sof_components(data: &[u8]) -> Option<u8> {
-    jpeg_sof(data).map(|sof| sof.components)
-}
-
-/// Scan `data` for the first JPEG SOF marker and return its frame header.
-/// Returns `None` if `data` is not a valid JPEG or the SOF payload is too
-/// short. Zero allocations; stops at the first SOF found.
-///
-/// This avoids a full header-decode probe pass before calling the main
-/// decode. The `gpu` crate has the same logic but is an optional dependency
-/// (requires CUDA at link time), so the CPU path carries its own copy of the
-/// scan.
-fn jpeg_sof(data: &[u8]) -> Option<JpegSof> {
-    if data.get(0..2) != Some(&[0xFF, 0xD8]) {
-        return None;
-    }
-    let mut pos = 2usize;
-    loop {
-        let ff_start = pos;
-        while data.get(pos).copied() == Some(0xFF) {
-            pos += 1;
-        }
-        if pos == ff_start {
-            return None;
-        }
-        let &marker = data.get(pos)?;
-        pos += 1;
-        if matches!(marker, 0x01 | 0xD0..=0xD9) {
-            continue;
-        }
-        let hi = *data.get(pos)?;
-        let lo = *data.get(pos + 1)?;
-        let seg_len = ((hi as usize) << 8) | (lo as usize);
-        if seg_len < 2 {
-            return None;
-        }
-        // SOF layout from the length field: length(2) P(1) Y(2) X(2) Nf(1).
-        if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xCC) {
-            let frame = data.get(pos + 3..pos + 8)?;
-            return Some(JpegSof {
-                height: u16::from_be_bytes([frame[0], frame[1]]),
-                width: u16::from_be_bytes([frame[2], frame[3]]),
-                components: frame[4],
-            });
-        }
-        if marker == 0xDA {
-            return None;
-        }
-        pos = pos.checked_add(seg_len)?;
-    }
-}
 
 // ── DCTDecode (JPEG) ──────────────────────────────────────────────────────────
 
@@ -127,6 +67,9 @@ pub(in crate::resources::image) fn decode_dct<
     use zune_core::colorspace::ColorSpace as ZColorSpace;
     use zune_core::options::DecoderOptions;
     use zune_jpeg::JpegDecoder;
+
+    let repaired = stream::repair(data, pdf_w, pdf_h);
+    let data: &[u8] = &repaired;
 
     #[cfg(feature = "nvjpeg")]
     let gpu = ctx.nvjpeg.as_deref_mut();
@@ -235,19 +178,25 @@ pub(in crate::resources::image) fn decode_dct<
                                 // the blit path, and preserve the correct
                                 // color_space tag so downstream code branches
                                 // correctly.
-                                return Some(if jpeg_sof_components(data) == Some(1) {
-                                    let gray: Vec<u8> =
-                                        rgba.as_chunks::<4>().0.iter().map(|px| px[0]).collect();
-                                    Samples::gray(w, h, gray)
-                                } else {
-                                    let rgb: Vec<u8> = rgba
-                                        .as_chunks::<4>()
-                                        .0
-                                        .iter()
-                                        .flat_map(|&[r, g, b, _]| [r, g, b])
-                                        .collect();
-                                    Samples::cpu(w, h, Layout::Color(3), rgb)
-                                });
+                                return Some(
+                                    if jpeg_sof(data).is_some_and(|sof| sof.components == 1) {
+                                        let gray: Vec<u8> = rgba
+                                            .as_chunks::<4>()
+                                            .0
+                                            .iter()
+                                            .map(|px| px[0])
+                                            .collect();
+                                        Samples::gray(w, h, gray)
+                                    } else {
+                                        let rgb: Vec<u8> = rgba
+                                            .as_chunks::<4>()
+                                            .0
+                                            .iter()
+                                            .flat_map(|&[r, g, b, _]| [r, g, b])
+                                            .collect();
+                                        Samples::cpu(w, h, Layout::Color(3), rgb)
+                                    },
+                                );
                             }
                             Err(e) => log::warn!("GPU JPEG download failed: {e}"),
                         }
@@ -259,17 +208,38 @@ pub(in crate::resources::image) fn decode_dct<
     }
 
     // ── CPU path ──────────────────────────────────────────────────────────────
-    let components = match jpeg_sof_components(data) {
-        Some(n @ (1 | 3 | 4)) => n,
-        Some(n) => {
+    let Some(sof) = jpeg_sof(data) else {
+        log::warn!("image: DCTDecode: not a valid JPEG stream");
+        return None;
+    };
+    if sof.height == u16::MAX {
+        // The repair takes such a frame's height from `/Height` when the
+        // widths agree; otherwise the line count is unknown, and the decoder
+        // would fill every row past the data without reporting it.
+        log::warn!(
+            "image: DCTDecode: frame height 0xFFFF (unknown) and width {} differs from /Width {pdf_w}",
+            sof.width
+        );
+        return None;
+    }
+    let components = match sof.components {
+        n @ (1 | 3 | 4) => n,
+        n => {
             log::warn!("image: DCTDecode: unexpected component count {n}");
             return None;
         }
-        None => {
-            log::warn!("image: DCTDecode: not a valid JPEG stream");
-            return None;
-        }
     };
+    // The frame header's dimensions, not the dictionary's, size the decode,
+    // so the budget is applied to them; the decoder's own per-side cap is
+    // lifted to the format's maximum so the budget is the one size policy.
+    if let Err(e) = crate::resources::image::decode_budget(
+        u32::from(sof.width),
+        u32::from(sof.height),
+        usize::from(components),
+    ) {
+        log::warn!("image: DCTDecode: {e}");
+        return None;
+    }
 
     // Choose the output colorspace to request from the decoder.
     let out_cs = match components {
@@ -279,7 +249,14 @@ pub(in crate::resources::image) fn decode_dct<
         _ => ZColorSpace::CMYK,
     };
 
-    let options = DecoderOptions::default().jpeg_set_out_colorspace(out_cs);
+    // The decode is strict, so scan data that ends short of the frame's
+    // rows, or is damaged, is detected rather than silently filled; the
+    // lenient decode below then draws such a stream and reports it partial.
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(out_cs)
+        .set_max_width(usize::from(u16::MAX))
+        .set_max_height(usize::from(u16::MAX))
+        .set_strict_mode(true);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
 
     // An Adobe APP14 transform of 2 marks a four-component stream as YCCK.
@@ -296,10 +273,22 @@ pub(in crate::resources::image) fn decode_dct<
         decoder.set_options(options.jpeg_set_out_colorspace(ZColorSpace::YCCK));
     }
 
-    let mut pixels = decoder
-        .decode()
-        .map_err(|e| log::warn!("image: DCTDecode decode error: {e}"))
-        .ok()?;
+    let (mut pixels, partial) = match decoder.decode() {
+        Ok(pixels) => (pixels, None),
+        Err(e) => {
+            let lenient = decoder.options().set_strict_mode(false);
+            decoder = JpegDecoder::new_with_options(ZCursor::new(data), lenient);
+            let pixels = decoder
+                .decode()
+                .map_err(|e| log::warn!("image: DCTDecode decode error: {e}"))
+                .ok()?;
+            let partial = format!(
+                "DCTDecode: the scan data is incomplete or damaged ({e}); \
+                 the image is drawn as far as it decodes"
+            );
+            (pixels, Some(partial))
+        }
+    };
     if ycck {
         ycck_to_adobe_cmyk(&mut pixels);
     }
@@ -337,7 +326,13 @@ pub(in crate::resources::image) fn decode_dct<
         );
     }
 
-    let cpu = Samples::cpu(jw, jh, Layout::Color(components), pixels);
+    let mut cpu = Samples::cpu(jw, jh, Layout::Color(components), pixels);
+    if partial.is_some() {
+        // An incomplete decode is not cached: a later hit would draw it
+        // without reporting that the page is incomplete.
+        cpu.partial = partial;
+        return Some(cpu);
+    }
 
     // Insert into the cache so the next render of this PDF
     // (or a different PDF with the same image content) hits the
@@ -570,37 +565,6 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
         px[0] = 255 - r;
         px[1] = 255 - g;
         px[2] = 255 - b;
-    }
-}
-
-#[cfg(test)]
-mod sof_tests {
-    use super::{JpegSof, jpeg_sof, jpeg_sof_components};
-
-    /// SOI, an APP0 segment to skip, then a baseline SOF0 frame header.
-    const FRAME: &[u8] = &[
-        0xFF, 0xD8, // SOI
-        0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, // APP0, length 4
-        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x01, 0x2C, 0x02, 0x80, 0x01, 0x01, 0x11, 0x00, // SOF0
-    ];
-
-    #[test]
-    fn sof_yields_the_frame_dimensions() {
-        assert_eq!(
-            jpeg_sof(FRAME),
-            Some(JpegSof {
-                height: 300,
-                width: 640,
-                components: 1
-            })
-        );
-        assert_eq!(jpeg_sof_components(FRAME), Some(1));
-    }
-
-    #[test]
-    fn truncated_sof_yields_none() {
-        assert_eq!(jpeg_sof(&FRAME[..FRAME.len() - 7]), None);
-        assert_eq!(jpeg_sof(b"not a jpeg"), None);
     }
 }
 
