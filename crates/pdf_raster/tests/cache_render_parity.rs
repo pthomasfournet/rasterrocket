@@ -1,16 +1,23 @@
 //! End-to-end render parity: a page rendered through the device-resident
-//! image cache (`--backend cuda` with the `cache` feature) must be
-//! byte-identical to the CPU render of the same page.
+//! image cache (`--backend cuda` or `--backend vulkan` with the `cache`
+//! feature) must be byte-identical to the CPU render of the same page.
 //!
 //! The cached path decodes JPEGs once, keeps the pixels in VRAM, samples
 //! them with the blit kernel, and composites the result onto the page in
 //! content-stream order.  Everything downstream of the decode differs from
 //! the CPU path, so the only meaningful check is the final page bitmap.
 //!
+//! Every test runs on CUDA (under `gpu-validation`) and on Vulkan (under
+//! `vulkan`).  The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE`
+//! names, or the automatically ranked one, and is skipped when no Vulkan
+//! device opens.
+//!
 //! Run with:
 //!   `cargo test -p rasterrocket --features cache,gpu-validation --test cache_render_parity`
+//!   `cargo test -p rasterrocket --features cache,vulkan --test cache_render_parity`
+//!   `PDF_RASTER_VULKAN_DEVICE=radv cargo test -p rasterrocket --features cache,vulkan --test cache_render_parity`
 
-#![cfg(all(feature = "cache", feature = "gpu-validation"))]
+#![cfg(all(feature = "cache", any(feature = "gpu-validation", feature = "vulkan")))]
 
 #[expect(
     dead_code,
@@ -20,7 +27,9 @@ mod common;
 
 use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
 use jpeg_encoder::{ColorType, Encoder};
-use rasterrocket::{BackendPolicy, SessionConfig, open_session};
+use rasterrocket::{
+    BackendPolicy, RasterError, RasterSession, SessionConfig, open_session, open_session_from_bytes,
+};
 
 // ── fixture ───────────────────────────────────────────────────────────────────
 
@@ -126,10 +135,90 @@ BT /F1 18 Tf 30 200 Td (Parity) Tj ET\n"
     with_page_tree(&objects)
 }
 
+// ── backends ──────────────────────────────────────────────────────────────────
+
+/// The GPU backend a cached session renders on.
+#[derive(Clone, Copy, Debug)]
+enum Backend {
+    #[cfg(feature = "gpu-validation")]
+    Cuda,
+    #[cfg(feature = "vulkan")]
+    Vulkan,
+}
+
+impl Backend {
+    /// The session configuration forcing this backend.
+    fn config(self) -> SessionConfig {
+        match self {
+            #[cfg(feature = "gpu-validation")]
+            Self::Cuda => SessionConfig::with_policy(BackendPolicy::ForceCuda),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan => {
+                let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
+                config.vulkan_device = SessionConfig::vulkan_device_from_env();
+                config
+            }
+        }
+    }
+
+    /// The name of the backend in `ImageCache::backend_name`.
+    const fn name(self) -> &'static str {
+        match self {
+            #[cfg(feature = "gpu-validation")]
+            Self::Cuda => "cuda",
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan => "vulkan",
+        }
+    }
+
+    /// `opened`, or `None` (the test is skipped) for a Vulkan session that
+    /// failed to open; a CUDA session must open.  An opened session must
+    /// carry an image cache of this backend.
+    fn session(self, opened: Result<RasterSession, RasterError>) -> Option<RasterSession> {
+        match opened {
+            Ok(session) => {
+                let cache = session
+                    .image_cache()
+                    .unwrap_or_else(|| panic!("{self:?} session must carry an image cache"));
+                assert_eq!(cache.backend_name(), self.name(), "cache backend");
+                Some(session)
+            }
+            #[cfg(feature = "vulkan")]
+            Err(e) if matches!(self, Self::Vulkan) => {
+                eprintln!("skipping: no Vulkan session ({e})");
+                None
+            }
+            Err(e) => panic!("{self:?} session: {e}"),
+        }
+    }
+
+    /// A session of this backend on the PDF `bytes`.
+    fn session_from_bytes(self, bytes: Vec<u8>) -> Option<RasterSession> {
+        self.session(open_session_from_bytes(bytes, &self.config()))
+    }
+}
+
+/// One `#[test]` per backend compiled in, named `$cuda` and `$vulkan`, each
+/// calling `$check` with its backend.
+macro_rules! on_each_backend {
+    ($check:ident, $cuda:ident, $vulkan:ident) => {
+        #[cfg(feature = "gpu-validation")]
+        #[test]
+        fn $cuda() {
+            $check(Backend::Cuda);
+        }
+
+        #[cfg(feature = "vulkan")]
+        #[test]
+        fn $vulkan() {
+            $check(Backend::Vulkan);
+        }
+    };
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn synthetic_page_renders_identically_through_the_cache() {
+fn synthetic_page_renders_identically(backend: Backend) {
     let pdf = fixture_pdf();
     let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
     assert!(
@@ -137,10 +226,10 @@ fn synthetic_page_renders_identically_through_the_cache() {
         "fixture rendered blank on the CPU path"
     );
 
-    let session = session(pdf, BackendPolicy::ForceCuda);
-    let cache = session
-        .image_cache()
-        .expect("ForceCuda session must carry an image cache");
+    let Some(session) = backend.session_from_bytes(pdf) else {
+        return;
+    };
+    let cache = session.image_cache().expect("image cache");
     assert!(cache.is_empty(), "cache must start empty");
 
     // Cold pass: every eligible JPEG misses, decodes, and is inserted.
@@ -159,25 +248,36 @@ fn synthetic_page_renders_identically_through_the_cache() {
     assert_eq!(cache.len(), 2, "a warm pass must not insert again");
 }
 
+on_each_backend!(
+    synthetic_page_renders_identically,
+    synthetic_page_renders_identically_through_the_cuda_cache,
+    synthetic_page_renders_identically_through_the_vulkan_cache
+);
+
 /// Magnified draws, which the sampler interpolates: a gray JPEG drawn
 /// rotated (both axes) and axis-aligned at about 3× across and 1:1 down
 /// (columns only), and an RGB JPEG with `/Interpolate true` drawn at about
 /// 10× (both axes).
-#[test]
-fn interpolated_draws_render_identically_through_the_cache() {
+fn interpolated_draws_render_identically(backend: Backend) {
     for draw in [
         "q 60.5 15.25 -10.75 75.5 200.33 140.17 cm /ImB Do Q",
         "q 70 0 0 38.4 150.4 5 cm /ImB Do Q",
         "q 190.3 0 0 101.7 10.6 30.2 cm /ImD Do Q",
     ] {
-        assert_cached_draw_identical(draw);
+        assert_cached_draw_identical(backend, draw);
     }
 }
 
+on_each_backend!(
+    interpolated_draws_render_identically,
+    interpolated_draws_render_identically_through_the_cuda_cache,
+    interpolated_draws_render_identically_through_the_vulkan_cache
+);
+
 /// Render `draw` (which may use `/ImB`, a 50×80 gray JPEG, and `/ImD`, a
-/// 40×21 RGB JPEG with `/Interpolate true`) on both backends and assert the
-/// pages are byte-identical and the image came from the cache.
-fn assert_cached_draw_identical(draw: &str) {
+/// 40×21 RGB JPEG with `/Interpolate true`) on the CPU and on `backend` and
+/// assert the pages are byte-identical and the image came from the cache.
+fn assert_cached_draw_identical(backend: Backend, draw: &str) {
     let content = draw.as_bytes();
     let objects = vec![
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
@@ -198,7 +298,9 @@ fn assert_cached_draw_identical(draw: &str) {
     ];
     let pdf = with_page_tree(&objects);
     let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
-    let session = session(pdf, BackendPolicy::ForceCuda);
+    let Some(session) = backend.session_from_bytes(pdf) else {
+        return;
+    };
     let gpu = render(&session, 1);
     assert_identical(&cpu, &gpu, draw);
     assert_eq!(
@@ -208,23 +310,29 @@ fn assert_cached_draw_identical(draw: &str) {
     );
 }
 
-/// Render `pages` of a corpus fixture on both backends and assert each is
-/// byte-identical, checking that the cache grows by exactly
+/// Render `pages` of a corpus fixture on the CPU and on `backend` and
+/// assert each is byte-identical, checking that the cache grows by exactly
 /// `cached_per_page[i]` entries after page `pages[i]`.  Skipped when the
 /// fixture is absent.
-fn assert_corpus_pages_identical(fixture: &str, pages: &[u32], cached_per_page: &[usize]) {
+fn assert_corpus_pages_identical(
+    backend: Backend,
+    fixture: &str,
+    pages: &[u32],
+    cached_per_page: &[usize],
+) {
     let Some(path) = corpus_fixture(fixture) else {
         return;
     };
     let cpu_session =
         open_session(&path, &SessionConfig::with_policy(BackendPolicy::CpuOnly)).expect("CPU");
-    let cuda_session = open_session(&path, &SessionConfig::with_policy(BackendPolicy::ForceCuda))
-        .expect("CUDA session (needs a CUDA device)");
-    let cache = cuda_session.image_cache().expect("image cache");
+    let Some(gpu_session) = backend.session(open_session(&path, &backend.config())) else {
+        return;
+    };
+    let cache = gpu_session.image_cache().expect("image cache");
     let mut expected_len = 0;
     for (&page, &cached) in pages.iter().zip(cached_per_page) {
         let cpu = render(&cpu_session, page);
-        let gpu = render(&cuda_session, page);
+        let gpu = render(&gpu_session, page);
         assert_identical(&cpu, &gpu, &format!("{fixture} page {page}"));
         expected_len += cached;
         assert_eq!(
@@ -237,17 +345,32 @@ fn assert_corpus_pages_identical(fixture: &str, pages: &[u32], cached_per_page: 
 
 /// The corpus pages the divergence was first measured on: full-page
 /// `DeviceRGB` JPEG scans at a fractional offset, one cached entry each.
-#[test]
-fn corpus_scan_pages_render_identically_through_the_cache() {
-    assert_corpus_pages_identical("corpus-07-journal-dct-heavy.pdf", &[1, 2], &[1, 1]);
+fn corpus_scan_pages_render_identically(backend: Backend) {
+    assert_corpus_pages_identical(backend, "corpus-07-journal-dct-heavy.pdf", &[1, 2], &[1, 1]);
 }
+
+on_each_backend!(
+    corpus_scan_pages_render_identically,
+    corpus_scan_pages_render_identically_through_the_cuda_cache,
+    corpus_scan_pages_render_identically_through_the_vulkan_cache
+);
 
 /// Pages whose images must bypass the cache next to one that must not.
 /// Pages 1–2 draw Flate-encoded `CalRGB` images carrying an `/SMask` over
 /// vector fills and text — nothing is cacheable, so the cache stays empty
 /// and the page must still match the CPU render exactly.  Page 3 is the
 /// first DCT scan and inserts one entry.
-#[test]
-fn corpus_masked_flate_pages_render_identically_and_bypass_the_cache() {
-    assert_corpus_pages_identical("corpus-08-scan-dct-1927.pdf", &[1, 2, 3], &[0, 0, 1]);
+fn corpus_masked_flate_pages_bypass_the_cache(backend: Backend) {
+    assert_corpus_pages_identical(
+        backend,
+        "corpus-08-scan-dct-1927.pdf",
+        &[1, 2, 3],
+        &[0, 0, 1],
+    );
 }
+
+on_each_backend!(
+    corpus_masked_flate_pages_bypass_the_cache,
+    corpus_masked_flate_pages_render_identically_and_bypass_the_cuda_cache,
+    corpus_masked_flate_pages_render_identically_and_bypass_the_vulkan_cache
+);
