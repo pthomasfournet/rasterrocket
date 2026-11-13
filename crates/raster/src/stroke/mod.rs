@@ -164,11 +164,15 @@ fn stroke_narrow<P: Pixel>(
                 cx1 = floor_i32((clip.y_max - sy0).mul_add(dxdy, sx0));
             }
 
-            // Hoist the shared initialisation out of both branches.
+            // Hoist the shared initialisation out of both branches.  Every
+            // row above the segment's own last row `y1` ends where the
+            // segment crosses the row's bottom edge, a row the clip cuts
+            // short included, so a clip changes which rows are drawn but
+            // not the pixels of a drawn row.
             let mut xa = cx0;
             let left_to_right = cx0 <= cx1;
             for y in cy0..=cy1 {
-                let xb = if y < cy1 {
+                let xb = if y < y1 {
                     floor_i32((f64::from(y) + 1.0 - sy0).mul_add(dxdy, sx0))
                 } else if left_to_right {
                     cx1 + 1
@@ -323,6 +327,37 @@ mod tests {
             any_painted,
             "stroke_narrow should paint at least one diagonal pixel"
         );
+    }
+
+    /// A hairline cut short by the clip's bottom edge draws the rows it
+    /// keeps as the unclipped hairline draws them.
+    #[test]
+    fn stroke_narrow_rows_are_unchanged_by_a_bottom_clip() {
+        let draw = |clip_height: u32| {
+            let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 16, 4, false);
+            let clip = make_clip(16, clip_height);
+            let pipe = simple_pipe();
+            let color = [255u8, 0, 0];
+            let src = PipeSrc::Solid(&color);
+            for (x1, y1) in [(15.3, 6.6), (0.4, 7.9)] {
+                let mut b = PathBuilder::new();
+                b.move_to(4.2, 0.5).unwrap();
+                b.line_to(x1, y1).unwrap();
+                let flat = flatten_path(&b.build(), 1.0);
+                stroke_narrow::<Rgb8>(&mut bmp, &clip, &flat, &pipe, &src, &identity_matrix(), 1.0);
+            }
+            (0..clip_height)
+                .map(|y| bmp.row(y).iter().map(|p| p.r).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        let whole = draw(16);
+        for height in 1..8 {
+            assert_eq!(
+                draw(height),
+                whole[..height as usize],
+                "clip height {height}"
+            );
+        }
     }
 
     /// `make_stroke_path` must return a non-empty outline for a non-degenerate
