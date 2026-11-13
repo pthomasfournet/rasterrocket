@@ -44,6 +44,21 @@ pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroup
     })
 }
 
+/// The page group of `page_id` for a render that keeps the page's alpha.
+///
+/// [`page_group`] when the page is painted as a group, and an isolated,
+/// non-knockout group otherwise; see
+/// [`PageRenderer::try_finish_transparent`].
+///
+/// [`PageRenderer::try_finish_transparent`]: crate::renderer::PageRenderer::try_finish_transparent
+#[must_use]
+pub fn transparent_page_group(doc: &Document, page_id: ObjectId) -> TransparencyGroupParams {
+    page_group(doc, page_id).unwrap_or(TransparencyGroupParams {
+        isolated: true,
+        knockout: false,
+    })
+}
+
 /// Whether some `ExtGState` reachable from the page's resources, or from
 /// its annotations' appearance streams when `annotations` (the
 /// annotations are drawn), sets stroking or non-stroking overprint.

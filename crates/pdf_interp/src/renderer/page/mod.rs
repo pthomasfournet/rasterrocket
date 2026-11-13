@@ -869,7 +869,7 @@ impl<'doc> PageRenderer<'doc> {
     /// equivalents of the page's spot colorants.
     #[must_use]
     pub fn finish(self) -> (Bitmap<Rgb8>, PageDiagnostics) {
-        let (canvas, ink_map, diag) = self.into_parts();
+        let (canvas, ink_map, diag) = self.into_parts(true);
         let rgb = canvas.into_rgb(&ink_map.luts());
         (rgb, Self::finish_diagnostics(diag, ink_map))
     }
@@ -881,16 +881,34 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// The allocator refused the page's RGB bitmap.
     pub fn try_finish(self) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
-        let (canvas, ink_map, diag) = self.into_parts();
+        let (canvas, ink_map, diag) = self.into_parts(true);
         let rgb = canvas.try_into_rgb(&ink_map.luts())?;
         Ok((rgb, Self::finish_diagnostics(diag, ink_map)))
     }
 
-    /// The finished canvas, composited onto paper for a page group, with the
-    /// ink map and the diagnostics.
-    fn into_parts(mut self) -> (PageCanvas, ink_map::InkMap, PageDiagnostics) {
+    /// [`Self::try_finish`] without the composite onto paper: the bitmap of
+    /// a page painted as a page group keeps its alpha plane, the page's
+    /// shape × opacity, under colour that is not premultiplied by it
+    /// (colour and alpha are 0 where nothing was painted).  A page painted
+    /// without a page group has no alpha plane and is opaque.
+    ///
+    /// # Errors
+    ///
+    /// The allocator refused the page's RGB bitmap.
+    pub fn try_finish_transparent(
+        self,
+    ) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
+        let (canvas, ink_map, diag) = self.into_parts(false);
+        let mut rgb = canvas.try_into_rgb(&ink_map.luts())?;
+        canvas::zero_transparent_colour(&mut rgb);
+        Ok((rgb, Self::finish_diagnostics(diag, ink_map)))
+    }
+
+    /// The finished canvas, with the ink map and the diagnostics; a page
+    /// group is composited onto paper when `onto_paper`.
+    fn into_parts(mut self, onto_paper: bool) -> (PageCanvas, ink_map::InkMap, PageDiagnostics) {
         self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
-        if self.page_group.is_some() {
+        if onto_paper && self.page_group.is_some() {
             self.canvas.composite_onto_white();
         }
         let Self {

@@ -25,7 +25,7 @@ mod test_helpers;
 
 pub use form_type::{FormType, form_type};
 pub use optional_content::{OptionalContent, RenderPurpose};
-pub use page_group::{page_group, page_uses_overprint};
+pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
 
 /// The effective device AA-fill dispatch threshold in pixels:

@@ -324,6 +324,22 @@ pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) {
     bitmap.drop_alpha_plane();
 }
 
+/// Set the colour of every pixel of `bitmap` whose alpha is 0 to 0.  A
+/// bitmap without an alpha plane is left as it is.
+pub(super) fn zero_transparent_colour<P: Pixel>(bitmap: &mut Bitmap<P>) {
+    let n = bitmap.width as usize * P::BYTES;
+    for y in 0..bitmap.height {
+        let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
+            return;
+        };
+        for (px, &a) in row[..n].chunks_exact_mut(P::BYTES).zip(&*alpha_row) {
+            if a == 0 {
+                px.fill(0);
+            }
+        }
+    }
+}
+
 /// Porter-Duff source-over blend for a single 8-bit channel:
 /// `(src × alpha + dst × (255 − alpha)) / 255`.
 ///

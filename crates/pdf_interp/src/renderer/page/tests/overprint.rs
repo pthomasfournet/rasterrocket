@@ -427,3 +427,34 @@ fn soft_mask_in_a_group_ignores_the_group_backdrop() {
     }
     assert_eq!(multiply, normal);
 }
+
+/// A page group finished without the composite onto paper keeps its alpha
+/// plane on either canvas: opaque where painted, zero elsewhere, the ink
+/// canvas's colour converted to sRGB.
+#[test]
+fn a_transparent_finish_keeps_the_page_alpha() {
+    let doc = overprint_doc("", "");
+    let group = crate::resources::TransparencyGroupParams {
+        isolated: true,
+        knockout: false,
+    };
+    for ink in [false, true] {
+        let mut renderer = if ink {
+            PageRenderer::new_ink(10, 10, &doc, (4, 0))
+        } else {
+            PageRenderer::new(10, 10, &doc, (4, 0))
+        };
+        renderer.set_page_group(Some(group));
+        renderer.execute(&crate::content::parse(b"1 0 0 0 k 0 0 5 10 re f"));
+        let (bitmap, _) = renderer.try_finish_transparent().unwrap();
+        let alpha = bitmap.alpha_plane().expect("an alpha plane");
+        assert_eq!(alpha[2], u8::MAX, "ink {ink}: painted");
+        assert_eq!(alpha[7], 0, "ink {ink}: unpainted");
+        assert_eq!(
+            rgb_at(bitmap.data(), 2, 0),
+            color::cmyk::cmyk_to_rgb(255, 0, 0, 0),
+            "ink {ink}: cyan"
+        );
+        assert_eq!(rgb_at(bitmap.data(), 7, 0), [0; 3], "ink {ink}: no colour");
+    }
+}
