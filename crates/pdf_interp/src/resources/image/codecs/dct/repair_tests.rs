@@ -72,6 +72,35 @@ fn a_truncated_stream_is_drawn_and_reported_partial() {
     }
 }
 
+/// An encoder that optimises its Huffman tables writes a baseline frame
+/// with one scan per component; the scans of a flat image are two bytes
+/// long.
+#[test]
+fn a_frame_with_a_scan_per_component_decodes_whole() {
+    let colour = [206_u8, 81, 103];
+    for (w, h) in [(16_u16, 16_u16), (40, 24), (8, 64)] {
+        let mut data = Vec::new();
+        let mut enc = Encoder::new(&mut data, 100);
+        enc.set_optimized_huffman_tables(true);
+        enc.encode(
+            &colour.repeat(usize::from(w) * usize::from(h)),
+            w,
+            h,
+            ColorType::Rgb,
+        )
+        .expect("encode");
+        let scans = data.windows(2).filter(|m| m == &[0xFF, 0xDA]).count();
+        assert_eq!(scans, 3, "the encoder writes one scan per component");
+        let img = decode(&data, u32::from(w), u32::from(h)).expect("decode");
+        assert!(img.partial.is_none(), "{:?}", img.partial);
+        for px in pixels(&img).as_chunks::<3>().0 {
+            for (c, want) in px.iter().zip(colour) {
+                assert!(c.abs_diff(want) <= 3, "{w}x{h}: {px:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn bytes_before_soi_are_skipped() {
     let full = rgb_jpeg(16, 16, false);

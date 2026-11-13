@@ -49,3 +49,29 @@ unless the entry says otherwise.
   (upstream uses nightly-only options).
 
 ## Changes in this fork
+
+- **Sequential frames coded in several scans decode correctly (output
+  changes).** A baseline or extended-sequential frame whose components are
+  spread over several scans is buffered whole and decoded scan by scan.
+  Three defects, all in `mcu.rs`:
+
+  - The bit reader finds the marker that follows a scan up to eight bytes
+    before the decoder reaches it, and the row loop acted on it at the end
+    of the row in progress: a scan whose last rows fit in those bytes lost
+    them (a flat 16×16 image with one scan per component decoded its
+    second block row as zero coefficients). A marker that ends the scan is
+    now acted on after the scan's last row, or when the scan's data is
+    used up. The same held for a single-scan frame followed by a marker
+    other than EOI.
+  - A scan of one component of a subsampled frame was read with the MCU
+    row count and each row placed `vertical_sample` block rows apart; the
+    scan has the component's own number of block rows, one after the
+    other. A scan of several components (`Y` then `Cb Cr`, say) was read
+    one block per component in raster order; it is coded in MCUs.
+  - A scan whose last block leaves no marker in the lookahead ended the
+    decode; the marker after it is now read. Each scan starts its own
+    restart interval.
+
+  Upstream fixed the first two later (commits `90b6bbca`, `0346b875`); the
+  code here is ours. `tests/scan_layouts.rs` decodes one set of
+  coefficients in every scan layout and requires identical pixels.

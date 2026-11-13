@@ -399,10 +399,7 @@ proptest! {
     }
 
     /// JPEG output of any size decodes to that size, and a flat image to
-    /// its colour within the quantisation error of quality 100.  The
-    /// reference decoder, zune-jpeg 0.5, misreads the non-interleaved scans
-    /// of optimised colour output from the second MCU row on, so those are
-    /// checked for their size alone.
+    /// its colour within the quantisation error of quality 100.
     #[test]
     fn jpeg_output_decodes_to_its_size(
         img in image(3, 40, 40, false),
@@ -429,7 +426,7 @@ proptest! {
                 zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(&file));
             let pixels = decoder.decode().map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
             prop_assert_eq!(decoder.dimensions(), Some((img.w as usize, img.h as usize)));
-            if is_flat && (gray || !optimize) {
+            if is_flat {
                 let step = pixels.len() / n;
                 for px in pixels.chunks_exact(step) {
                     for (c, &want) in px.iter().zip(&flat[..channels]) {
