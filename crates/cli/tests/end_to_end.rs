@@ -605,6 +605,33 @@ fn crop_flags_write_the_selected_area_of_the_page() {
 }
 
 #[test]
+fn box_flag_selects_the_rendered_page_box() {
+    // MediaBox 100 × 50 pt; CropBox [20 10 80 40]; a black square at the
+    // MediaBox origin, outside the CropBox.
+    let pdf = with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] /CropBox [20 10 80 40] \
+           /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", b"0 g 0 0 10 10 re f"),
+    ]);
+    let (w, h, media) = gray_page(&pdf, &["--box", "media"]);
+    assert_eq!((w, h), (100, 50));
+    let at = |x: usize, y: usize| media[y * 100 + x];
+    assert_eq!((at(5, 45), at(50, 25)), (0, 255));
+
+    for args in [
+        &[][..],
+        &["--cropbox"],
+        &["--box", "crop"],
+        &["--box", "trim"],
+    ] {
+        let (w, h, crop) = gray_page(&pdf, args);
+        assert_eq!((w, h), (60, 30), "{args:?}");
+        assert!(crop.iter().all(|&p| p == 255), "{args:?}");
+    }
+}
+
+#[test]
 fn scale_to_flags_size_the_page() {
     let pdf = two_page_pdf(); // page 1 is 100 × 50 pt
     let size = |args: &[&str]| {

@@ -44,7 +44,7 @@ use std::collections::HashSet;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::{
-    InterpError,
+    InterpError, PageBox,
     content::Operator,
     page_size_pts_by_id, parse_page_content,
     renderer::{PageDiagnostics, page::source_ppi},
@@ -63,7 +63,8 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Classify page `page_num` (1-based) without rendering any pixels.
+/// Classify page `page_num` (1-based) without rendering any pixels, its
+/// width measured on `page_box`.
 ///
 /// Returns a [`PageDiagnostics`] with `has_images`, `has_vector_text`,
 /// `dominant_filter`, a conservative `source_ppi_hint` derived from the
@@ -79,10 +80,14 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 ///
 /// Any per-resource lookup error (corrupt dict, missing filter key) is
 /// silently skipped so that a partial classification is still returned.
-pub fn prescan_page(doc: &Document, page_num: u32) -> Result<PageDiagnostics, InterpError> {
+pub fn prescan_page(
+    doc: &Document,
+    page_num: u32,
+    page_box: PageBox,
+) -> Result<PageDiagnostics, InterpError> {
     let page_id = crate::resolve_page_id(doc, page_num)?;
 
-    let geom = page_size_pts_by_id(doc, page_id)?;
+    let geom = page_size_pts_by_id(doc, page_id, page_box)?;
     let mut scan = ImageScan::new(doc, geom.width_pts);
 
     // 1. Walk XObject resource dictionary (no decoding).
@@ -274,7 +279,7 @@ mod tests {
     #[test]
     fn prescan_page_out_of_range_returns_err() {
         let (doc, _) = doc_with_content(b"BT /F1 12 Tf (Hello) Tj ET");
-        let result = prescan_page(&doc, 99);
+        let result = prescan_page(&doc, 99, PageBox::Crop);
         assert!(
             matches!(result, Err(InterpError::PageOutOfRange { .. })),
             "expected PageOutOfRange, got {result:?}"
@@ -286,7 +291,7 @@ mod tests {
         // Content stream: begin text, show text, end text.
         let ops = b"BT /F1 12 Tf 72 720 Td (Hello World) Tj ET";
         let (doc, page_num) = doc_with_content(ops);
-        let diag = prescan_page(&doc, page_num).expect("prescan should succeed");
+        let diag = prescan_page(&doc, page_num, PageBox::Crop).expect("prescan should succeed");
         assert!(!diag.has_images, "pure text page must not have images");
         assert!(diag.dominant_filter.is_none());
         assert!(diag.source_ppi_hint.is_none());
@@ -298,7 +303,8 @@ mod tests {
     #[test]
     fn prescan_empty_page_is_clean() {
         let (doc, page_num) = doc_with_content(b"");
-        let diag = prescan_page(&doc, page_num).expect("prescan of empty page should succeed");
+        let diag = prescan_page(&doc, page_num, PageBox::Crop)
+            .expect("prescan of empty page should succeed");
         assert!(!diag.has_images);
         assert!(!diag.has_vector_text);
         assert!(diag.dominant_filter.is_none());

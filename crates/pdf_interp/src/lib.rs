@@ -484,24 +484,210 @@ impl PageGeometry {
     }
 }
 
-/// Return the geometry for page `page_num` (1-based).
+/// A page boundary box (ISO 32000-2 §14.11.2, Table 31).
 ///
-/// Reads the page's `CropBox` (the display region, per ISO 32000-2 §14.11.2), falling back
-/// to `MediaBox` when absent. Applies the `/Rotate` entry (multiples of 90° CW). Dimensions
-/// in the returned struct are already swapped for 90°/270° rotations and scaled by `UserUnit`
-/// so callers can use `width_pts × height_pts` directly as output point dimensions.
+/// Selects the region of the page that [`page_size_pts`] reports and the
+/// renderer rasterises.  The default is [`Crop`](Self::Crop), the region a
+/// conforming viewer displays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PageBox {
+    /// The `MediaBox`: the full extent of the physical medium.  Inheritable.
+    Media,
+    /// The `CropBox`, intersected with the `MediaBox`; the `MediaBox` when
+    /// absent.  Inheritable.
+    #[default]
+    Crop,
+    /// The `BleedBox`, intersected with the `MediaBox`; the effective
+    /// `CropBox` when absent.  Read from the page dictionary only.
+    Bleed,
+    /// The `TrimBox`, intersected with the `MediaBox`; the effective
+    /// `CropBox` when absent.  Read from the page dictionary only.
+    Trim,
+    /// The `ArtBox`, intersected with the `MediaBox`; the effective
+    /// `CropBox` when absent.  Read from the page dictionary only.
+    Art,
+}
+
+impl PageBox {
+    /// The page dictionary key of the box.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Media => "MediaBox",
+            Self::Crop => "CropBox",
+            Self::Bleed => "BleedBox",
+            Self::Trim => "TrimBox",
+            Self::Art => "ArtBox",
+        }
+    }
+}
+
+/// A page box as `(llx, lly, width, height)` in default user space, with a
+/// finite lower-left corner and a positive finite extent.
+type BoxRect = (f64, f64, f64, f64);
+
+/// The number `o` holds, directly or through an indirect reference.
+fn number(doc: &Document, o: &pdf::Object) -> Option<f64> {
+    doc.resolve(o).ok().and_then(|o| resources::obj_to_f64(&o))
+}
+
+/// The rectangle `obj` describes, normalised so that `(llx, lly)` is the
+/// minimum corner; `None` unless `obj` is an array of four finite numbers
+/// (each direct or indirect) spanning a positive area.
+fn parse_box(doc: &Document, obj: &pdf::Object) -> Option<BoxRect> {
+    let number = |o| number(doc, o);
+    let pdf::Object::Array(arr) = obj else {
+        return None;
+    };
+    let [x0, y0, x1, y1] = arr.as_slice() else {
+        return None;
+    };
+    let (x0, y0, x1, y1) = (number(x0)?, number(y0)?, number(x1)?, number(y1)?);
+    // A coordinate beyond the f32 range is stored as an infinite Real; the
+    // finiteness check keeps every derived width, height and origin finite,
+    // as `build_initial_ctm` requires of its origin inputs.
+    if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+        return None;
+    }
+    let w = (x1 - x0).abs();
+    let h = (y1 - y0).abs();
+    (w > 0.0 && h > 0.0).then(|| (x0.min(x1), y0.min(y1), w, h))
+}
+
+/// The intersection of `b` with the `MediaBox` `m` (ISO 32000-2 §14.11.2);
+/// `None`, with a warning naming `page_box` and page object `page`, when
+/// the intersection has no area.
+fn clamp_to_media(b: BoxRect, m: BoxRect, page_box: PageBox, page: u32) -> Option<BoxRect> {
+    let x0 = b.0.max(m.0);
+    let y0 = b.1.max(m.1);
+    let x1 = (b.0 + b.2).min(m.0 + m.2);
+    let y1 = (b.1 + b.3).min(m.1 + m.3);
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w > 0.0 && h > 0.0 {
+        return Some((x0, y0, w, h));
+    }
+    log::warn!(
+        "page object {page} {key} [{bx} {by} {bw}×{bh}] does not intersect \
+         MediaBox [{mx} {my} {mw}×{mh}] (malformed PDF, §14.11.2)",
+        key = page_box.key(),
+        bx = b.0,
+        by = b.1,
+        bw = b.2,
+        bh = b.3,
+        mx = m.0,
+        my = m.1,
+        mw = m.2,
+        mh = m.3,
+    );
+    None
+}
+
+/// The effective `CropBox` of page object `page`: the `CropBox` intersected
+/// with the `MediaBox`; the `MediaBox` when the `CropBox` is absent or the
+/// intersection is empty; the `CropBox` when the `MediaBox` is absent; and
+/// `letter` at the origin when both are absent.  Every recovery from a
+/// malformed page is logged.
+fn effective_crop_box(
+    media_box: Option<BoxRect>,
+    crop_box: Option<BoxRect>,
+    letter: (f64, f64),
+    page: u32,
+) -> BoxRect {
+    match (media_box, crop_box) {
+        (None, None) => {
+            log::warn!(
+                "page object {page} has no usable MediaBox or CropBox; assuming \
+                 {}×{} (malformed PDF, §7.7.3.3)",
+                letter.0,
+                letter.1,
+            );
+            (0.0, 0.0, letter.0, letter.1)
+        }
+        (Some(m), None) => m,
+        (None, Some(c)) => {
+            log::warn!(
+                "page object {page} has no usable MediaBox; falling back to CropBox \
+                 for page geometry (malformed PDF, §7.7.3.3)",
+            );
+            c
+        }
+        (Some(m), Some(c)) => clamp_to_media(c, m, PageBox::Crop, page).unwrap_or_else(|| {
+            log::warn!("page object {page}: using MediaBox for page geometry");
+            m
+        }),
+    }
+}
+
+/// The rectangle of `page_box` on page object `page_id` (dictionary `dict`),
+/// given the page's inherited `MediaBox` and `CropBox` and the `letter` size
+/// assumed when both are absent; see [`page_size_pts`] for the rules.
+fn select_box(
+    doc: &Document,
+    page_id: pdf::ObjectId,
+    dict: &pdf::Dictionary,
+    page_box: PageBox,
+    (media_box, crop_box): (Option<BoxRect>, Option<BoxRect>),
+    letter: (f64, f64),
+) -> BoxRect {
+    let crop_region = || effective_crop_box(media_box, crop_box, letter, page_id.0);
+    match page_box {
+        PageBox::Crop => crop_region(),
+        PageBox::Media => media_box.unwrap_or_else(crop_region),
+        PageBox::Bleed | PageBox::Trim | PageBox::Art => {
+            // ISO 32000-2 Table 31: BleedBox, TrimBox and ArtBox are not
+            // inheritable; only the page dictionary's own entry counts.
+            let own = dict
+                .get(page_box.key().as_bytes())
+                .and_then(|o| doc.resolve(o).ok())
+                .and_then(|o| parse_box(doc, &o));
+            match (own, media_box) {
+                (Some(b), Some(m)) => {
+                    clamp_to_media(b, m, page_box, page_id.0).unwrap_or_else(|| {
+                        log::warn!(
+                            "page object {}: using the CropBox for page geometry",
+                            page_id.0
+                        );
+                        crop_region()
+                    })
+                }
+                (Some(b), None) => b,
+                (None, _) => crop_region(),
+            }
+        }
+    }
+}
+
+/// Return the geometry for page `page_num` (1-based), measured on `page_box`.
 ///
-/// When neither box can be read the page box is US Letter (612 × 792 pt at the origin),
-/// still rotated by `/Rotate` and scaled by `UserUnit`; a page object that is not a
-/// dictionary is unrotated US Letter.
+/// The selected box follows ISO 32000-2 §14.11.2: the `MediaBox` and
+/// `CropBox` are inherited through the `/Parent` chain; the `BleedBox`,
+/// `TrimBox` and `ArtBox` are read from the page dictionary only and default
+/// to the effective `CropBox` when absent, unusable or disjoint from the
+/// `MediaBox`; every box but the `MediaBox` is intersected with the
+/// `MediaBox`.  An absent `MediaBox` is replaced by the `CropBox`.
+///
+/// Applies the `/Rotate` entry (multiples of 90° CW). Dimensions in the
+/// returned struct are already swapped for 90°/270° rotations and scaled by
+/// `UserUnit` so callers can use `width_pts × height_pts` directly as output
+/// point dimensions.
+///
+/// When neither the `MediaBox` nor the `CropBox` can be read the page box is
+/// US Letter (612 × 792 pt at the origin), still rotated by `/Rotate` and
+/// scaled by `UserUnit`; a page object that is not a dictionary is unrotated
+/// US Letter.
 ///
 /// # Errors
 ///
 /// - [`InterpError::PageOutOfRange`] if `page_num` is 0 or exceeds the document page count.
 /// - [`InterpError::InvalidPageGeometry`] if `UserUnit` is present but outside `[0.1, 10.0]`.
-pub fn page_size_pts(doc: &Document, page_num: u32) -> Result<PageGeometry, InterpError> {
+pub fn page_size_pts(
+    doc: &Document,
+    page_num: u32,
+    page_box: PageBox,
+) -> Result<PageGeometry, InterpError> {
     let page_id = resolve_page_id(doc, page_num)?;
-    page_size_pts_by_id(doc, page_id)
+    page_size_pts_by_id(doc, page_id, page_box)
 }
 
 /// Like [`page_size_pts`] but takes a pre-resolved page object id.
@@ -515,11 +701,13 @@ pub fn page_size_pts(doc: &Document, page_num: u32) -> Result<PageGeometry, Inte
 /// `[0.1, 10.0]`.
 #[expect(
     clippy::too_many_lines,
-    reason = "all logic is tightly coupled to the same page-geometry resolution; splitting would require threading several local closures through helper boundaries"
+    reason = "box selection, /Rotate and UserUnit resolve one page dictionary in sequence; \
+              each step is a short match whose result the next consumes"
 )]
 pub fn page_size_pts_by_id(
     doc: &Document,
     page_id: pdf::ObjectId,
+    page_box: PageBox,
 ) -> Result<PageGeometry, InterpError> {
     let fallback = PageGeometry {
         width_pts: 612.0,
@@ -536,121 +724,23 @@ pub fn page_size_pts_by_id(
         return Ok(fallback);
     };
 
-    // A number, directly or through an indirect reference.
-    let number = |o: &pdf::Object| doc.resolve(o).ok().and_then(|o| resources::obj_to_f64(&o));
+    // ISO 32000-2 §7.7.3.4: MediaBox and CropBox are inheritable.
+    let media_box = doc
+        .get_inherited_page_attr(page_id, b"MediaBox")
+        .and_then(|o| parse_box(doc, &o));
+    let crop_box = doc
+        .get_inherited_page_attr(page_id, b"CropBox")
+        .and_then(|o| parse_box(doc, &o));
+    let corners = |(x, y, w, h): BoxRect| [x, y, x + w, y + h];
 
-    // Returns (x0, y0, w, h) — the lower-left origin and dimensions of the box.
-    // The origin is needed to pre-translate the initial CTM so the box lower-left
-    // maps to device origin (ISO 32000-2 §8.3.2: user space origin = box lower-left).
-    // A box with an entry that is not a number is unusable.
-    //
-    // Takes an Object (resolved via the inherited-attr lookup) rather than a dict
-    // key, so the same parsing logic can be applied regardless of which node in the
-    // /Parent chain supplied the value.
-    let parse_box = |obj: &pdf::Object| -> Option<(f64, f64, f64, f64)> {
-        let pdf::Object::Array(arr) = obj else {
-            return None;
-        };
-        let [x0, y0, x1, y1] = arr.as_slice() else {
-            return None;
-        };
-        let (x0, y0, x1, y1) = (number(x0)?, number(y0)?, number(x1)?, number(y1)?);
-        // Reject non-finite coordinates before any arithmetic.  A hostile PDF
-        // can write a magnitude that overflows f32 (e.g. /MediaBox
-        // [0 0 1e40 1e40]) which the lexer stores as Real(inf); without this
-        // guard `w`/`h` would be inf, pass the `> 0.0` test, and propagate an
-        // infinite page box.  `build_initial_ctm` documents that its origin
-        // inputs are finite — this is the upstream check that makes that hold.
-        if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
-            return None;
-        }
-        let w = (x1 - x0).abs();
-        let h = (y1 - y0).abs();
-        if w > 0.0 && h > 0.0 {
-            // Normalise: lower-left is the minimum corner regardless of array order.
-            Some((x0.min(x1), y0.min(y1), w, h))
-        } else {
-            None
-        }
-    };
-
-    // ISO 32000-2 §7.7.3.4: MediaBox and CropBox are inheritable.  Walk the
-    // /Parent chain so a page that omits these keys inherits from the nearest
-    // /Pages ancestor rather than falling back to the 612×792 default.
-    let media_obj = doc.get_inherited_page_attr(page_id, b"MediaBox");
-    let crop_obj = doc.get_inherited_page_attr(page_id, b"CropBox");
-
-    let media_box = media_obj.as_ref().and_then(parse_box);
-    let crop_box = crop_obj.as_ref().and_then(parse_box);
-    let corners = |(x, y, w, h): (f64, f64, f64, f64)| [x, y, x + w, y + h];
-
-    // ISO 32000-2 §14.11.2: CropBox shall be intersected with MediaBox to
-    // determine the visible region.  If CropBox is absent, use MediaBox
-    // directly (spec: CropBox defaults to MediaBox).
-    //
-    // For the common case where the leaf has both boxes and CropBox ⊆ MediaBox
-    // the intersection is the CropBox itself — byte-identical to the old path.
-    let (box_left, box_bottom, w_pts, h_pts) = match (media_box, crop_box) {
-        (None, None) => {
-            // MediaBox is mandatory (§7.7.3.3).  The box is assumed; the
-            // page's other attributes, /Rotate among them, still apply.
-            log::warn!(
-                "page object {} has no usable MediaBox or CropBox; assuming \
-                 612×792 (malformed PDF, §7.7.3.3)",
-                page_id.0
-            );
-            (0.0, 0.0, fallback.width_pts, fallback.height_pts)
-        }
-        (Some(m), None) => m,
-        (None, Some(c)) => {
-            // MediaBox is mandatory (§7.7.3.3); reaching here means it was
-            // absent or unparseable on every node of the /Parent chain.  We
-            // recover using CropBox so the page still renders, but the
-            // selected box (and therefore the initial-CTM origin) may not be
-            // what the author intended — surface it rather than silently
-            // placing content against a guessed box.
-            log::warn!(
-                "page object {} has no usable MediaBox; falling back to CropBox \
-                 for page geometry (malformed PDF, §7.7.3.3)",
-                page_id.0
-            );
-            c
-        }
-        (Some(m), Some(c)) => {
-            // Clamp CropBox to the MediaBox bounds (§14.11.2 intersection).
-            let x0 = c.0.max(m.0);
-            let y0 = c.1.max(m.1);
-            let x1 = (c.0 + c.2).min(m.0 + m.2);
-            let y1 = (c.1 + c.3).min(m.1 + m.3);
-            let w = x1 - x0;
-            let h = y1 - y0;
-            if w > 0.0 && h > 0.0 {
-                (x0, y0, w, h)
-            } else {
-                // Degenerate intersection (CropBox entirely outside MediaBox):
-                // fall back to MediaBox so the page is not empty.  This is a
-                // malformed PDF — the displayed region and the initial-CTM
-                // origin now derive from MediaBox, not the authored CropBox,
-                // so the placement differs from a conforming viewer's. Log it
-                // rather than rendering a silently-relocated page.
-                log::warn!(
-                    "page object {page} CropBox [{cx} {cy} {cw}×{ch}] does not \
-                     intersect MediaBox [{mx} {my} {mw}×{mh}]; using MediaBox \
-                     for page geometry (malformed PDF, §14.11.2)",
-                    page = page_id.0,
-                    cx = c.0,
-                    cy = c.1,
-                    cw = c.2,
-                    ch = c.3,
-                    mx = m.0,
-                    my = m.1,
-                    mw = m.2,
-                    mh = m.3,
-                );
-                m
-            }
-        }
-    };
+    let (box_left, box_bottom, w_pts, h_pts) = select_box(
+        doc,
+        page_id,
+        &dict,
+        page_box,
+        (media_box, crop_box),
+        (fallback.width_pts, fallback.height_pts),
+    );
 
     // ISO 32000-2 §7.7.3.4: /Rotate is inheritable.  Walk the /Parent chain
     // for the same reason as MediaBox/CropBox above.  A real number is read
@@ -714,7 +804,7 @@ pub fn page_size_pts_by_id(
     let user_unit: f64 = match dict.get(b"UserUnit") {
         None => 1.0, // absent — use default
         Some(obj) => {
-            let Some(v) = number(obj) else {
+            let Some(v) = number(doc, obj) else {
                 return Err(InterpError::InvalidPageGeometry(format!(
                     "UserUnit on page object {} is not a number (got {})",
                     page_id.0,
@@ -964,7 +1054,7 @@ mod js_guard_tests {
 mod page_box_tests {
     use pdf::Document;
 
-    use super::{page_size_pts, page_size_pts_by_id};
+    use super::{PageBox, page_size_pts, page_size_pts_by_id};
 
     /// Build a minimal one-page PDF where the `MediaBox` is on the /Pages node
     /// (inherited), not on the page leaf.  The leaf has only /Type /Page and a
@@ -1056,7 +1146,7 @@ mod page_box_tests {
     #[test]
     fn inherited_mediabox_produces_correct_size() {
         let doc = make_inherited_mediabox_doc();
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts failed");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts failed");
         assert_eq!(
             (geom.width_pts, geom.height_pts),
             (500.0, 700.0),
@@ -1072,7 +1162,7 @@ mod page_box_tests {
     #[test]
     fn inherited_mediabox_is_not_fallback() {
         let doc = make_inherited_mediabox_doc();
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts failed");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts failed");
         assert_ne!(
             (geom.width_pts, geom.height_pts),
             (612.0, 792.0),
@@ -1085,7 +1175,7 @@ mod page_box_tests {
     #[test]
     fn cropbox_exceeding_mediabox_is_clamped() {
         let doc = make_cropbox_exceeds_mediabox_doc();
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts failed");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts failed");
         assert_eq!(
             (geom.width_pts, geom.height_pts),
             (600.0, 800.0),
@@ -1107,7 +1197,7 @@ mod page_box_tests {
     #[test]
     fn cropbox_inside_mediabox_is_unchanged() {
         let doc = make_cropbox_inside_mediabox_doc();
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts failed");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts failed");
         // w = 540-72 = 468, h = 720-72 = 648
         assert_eq!(
             (geom.width_pts, geom.height_pts),
@@ -1128,9 +1218,10 @@ mod page_box_tests {
     #[test]
     fn page_size_pts_by_id_agrees_with_page_size_pts() {
         let doc = make_inherited_mediabox_doc();
-        let geom_num = page_size_pts(&doc, 1).expect("page_size_pts failed");
+        let geom_num = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts failed");
         let page_id = doc.get_page(0).expect("get_page(0) failed");
-        let geom_id = page_size_pts_by_id(&doc, page_id).expect("page_size_pts_by_id failed");
+        let geom_id =
+            page_size_pts_by_id(&doc, page_id, PageBox::Crop).expect("page_size_pts_by_id failed");
         assert_eq!(
             (geom_num.width_pts, geom_num.height_pts),
             (geom_id.width_pts, geom_id.height_pts)
@@ -1187,7 +1278,7 @@ mod page_box_tests {
         let bytes = format!("{header}{obj1}{obj2}{obj3}{xref}{trailer}").into_bytes();
         let doc = Document::from_bytes_owned(bytes).expect("test PDF parse");
 
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts");
         assert_eq!(geom.rotate_cw, 90);
         assert_eq!((geom.width_pts, geom.height_pts), (792.0, 612.0));
         assert_eq!((geom.origin_x, geom.origin_y), (0.0, 0.0));
@@ -1199,7 +1290,8 @@ mod page_box_tests {
     #[test]
     fn cyclic_parent_chain_terminates_with_fallback() {
         let doc = make_cyclic_parent_doc();
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts must not hang/panic on a cycle");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop)
+            .expect("page_size_pts must not hang/panic on a cycle");
         assert_eq!(
             (geom.width_pts, geom.height_pts),
             (612.0, 792.0),
@@ -1241,7 +1333,7 @@ mod page_box_tests {
     #[test]
     fn disjoint_cropbox_falls_back_to_mediabox() {
         let doc = make_disjoint_cropbox_doc();
-        let geom = page_size_pts(&doc, 1).expect("page_size_pts failed");
+        let geom = page_size_pts(&doc, 1, PageBox::Crop).expect("page_size_pts failed");
         assert_eq!(
             (geom.width_pts, geom.height_pts),
             (600.0, 800.0),
@@ -1259,10 +1351,159 @@ mod page_box_tests {
     /// The geometry of page object `(4, 0)` with dictionary entries `page`
     /// and indirect objects 5, 6, … `objects`.
     fn geometry_of(page: &str, objects: &[&str]) -> super::PageGeometry {
+        geometry_on(page, objects, PageBox::Crop)
+    }
+
+    /// As [`geometry_of`], measured on `page_box`.
+    fn geometry_on(page: &str, objects: &[&str], page_box: PageBox) -> super::PageGeometry {
         let mut all = vec![(4, format!("<< /Type /Page {page} >>"))];
         all.extend((5..).zip(objects.iter().map(|o| (*o).to_owned())));
         let doc = crate::test_helpers::make_doc_with_objects(&all);
-        page_size_pts_by_id(&doc, (4, 0)).expect("geometry")
+        page_size_pts_by_id(&doc, (4, 0), page_box).expect("geometry")
+    }
+
+    /// `(width_pts, height_pts, origin_x, origin_y)` of `geom`.
+    fn extent(geom: &super::PageGeometry) -> (f64, f64, f64, f64) {
+        (
+            geom.width_pts,
+            geom.height_pts,
+            geom.origin_x,
+            geom.origin_y,
+        )
+    }
+
+    const ALL_BOXES: [PageBox; 5] = [
+        PageBox::Media,
+        PageBox::Crop,
+        PageBox::Bleed,
+        PageBox::Trim,
+        PageBox::Art,
+    ];
+
+    #[test]
+    fn media_and_crop_boxes_are_inherited() {
+        let page = "/Parent 5 0 R";
+        let pages = "<< /Type /Pages /MediaBox [0 0 600 800] /CropBox [50 60 550 760] >>";
+        let media = geometry_on(page, &[pages], PageBox::Media);
+        assert_eq!(extent(&media), (600.0, 800.0, 0.0, 0.0));
+        let crop = geometry_on(page, &[pages], PageBox::Crop);
+        assert_eq!(extent(&crop), (500.0, 700.0, 50.0, 60.0));
+    }
+
+    #[test]
+    fn each_leaf_box_is_selected_with_its_own_origin() {
+        let page = "/MediaBox [0 0 600 800] /CropBox [10 10 590 790] \
+                    /BleedBox [20 30 580 770] /TrimBox [40 50 560 750] /ArtBox [300 400 100 200]";
+        let expected = [
+            (PageBox::Media, (600.0, 800.0, 0.0, 0.0)),
+            (PageBox::Crop, (580.0, 780.0, 10.0, 10.0)),
+            (PageBox::Bleed, (560.0, 740.0, 20.0, 30.0)),
+            (PageBox::Trim, (520.0, 700.0, 40.0, 50.0)),
+            (PageBox::Art, (200.0, 200.0, 100.0, 200.0)),
+        ];
+        for (page_box, want) in expected {
+            assert_eq!(
+                extent(&geometry_on(page, &[], page_box)),
+                want,
+                "{page_box:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_bleed_trim_and_art_boxes_are_ignored() {
+        let page = "/Parent 5 0 R /MediaBox [0 0 600 800] /CropBox [10 20 590 780]";
+        let pages = "<< /Type /Pages /BleedBox [0 0 100 100] /TrimBox [0 0 100 100] \
+                     /ArtBox [0 0 100 100] >>";
+        for page_box in [PageBox::Bleed, PageBox::Trim, PageBox::Art] {
+            let geom = geometry_on(page, &[pages], page_box);
+            assert_eq!(extent(&geom), (580.0, 760.0, 10.0, 20.0), "{page_box:?}");
+        }
+    }
+
+    #[test]
+    fn absent_or_unusable_leaf_boxes_default_to_the_crop_box() {
+        let crop = "/MediaBox [0 0 600 800] /CropBox [72 72 540 720]";
+        for page_box in [PageBox::Bleed, PageBox::Trim, PageBox::Art] {
+            let geom = geometry_on(crop, &[], page_box);
+            assert_eq!(extent(&geom), (468.0, 648.0, 72.0, 72.0), "{page_box:?}");
+            let unusable = format!("{crop} /{} [0 0 /W 100]", page_box.key());
+            let geom = geometry_on(&unusable, &[], page_box);
+            assert_eq!(extent(&geom), (468.0, 648.0, 72.0, 72.0), "{page_box:?}");
+        }
+        // Without a CropBox the default is the MediaBox.
+        let geom = geometry_on("/MediaBox [0 0 600 800]", &[], PageBox::Trim);
+        assert_eq!(extent(&geom), (600.0, 800.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn leaf_boxes_are_intersected_with_the_media_box() {
+        let page = "/MediaBox [0 0 600 800] /TrimBox [-50 100 300 900]";
+        let geom = geometry_on(page, &[], PageBox::Trim);
+        assert_eq!(extent(&geom), (300.0, 700.0, 0.0, 100.0));
+    }
+
+    #[test]
+    fn a_leaf_box_disjoint_from_the_media_box_falls_back_to_the_crop_box() {
+        let page = "/MediaBox [0 0 600 800] /CropBox [10 10 500 700] /BleedBox [900 900 1000 1000]";
+        let geom = geometry_on(page, &[], PageBox::Bleed);
+        assert_eq!(extent(&geom), (490.0, 690.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn the_media_box_ignores_a_disjoint_crop_box() {
+        let page = "/MediaBox [5 5 605 805] /CropBox [900 900 1000 1000]";
+        let geom = geometry_on(page, &[], PageBox::Media);
+        assert_eq!(extent(&geom), (600.0, 800.0, 5.0, 5.0));
+    }
+
+    #[test]
+    fn the_media_box_falls_back_to_the_crop_box_when_absent() {
+        let geom = geometry_on("/CropBox [10 10 110 210]", &[], PageBox::Media);
+        assert_eq!(extent(&geom), (100.0, 200.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn a_leaf_box_may_be_indirect() {
+        let geom = geometry_on(
+            "/MediaBox [0 0 600 800] /ArtBox 5 0 R",
+            &["[100 100 200 300]"],
+            PageBox::Art,
+        );
+        assert_eq!(extent(&geom), (100.0, 200.0, 100.0, 100.0));
+    }
+
+    #[test]
+    fn rotate_applies_to_every_box() {
+        let page = "/MediaBox [0 0 600 800] /CropBox [0 0 500 700] /BleedBox [0 0 400 600] \
+                    /TrimBox [0 0 300 500] /ArtBox [0 0 200 400] /Rotate 90";
+        let unrotated = [
+            (600.0, 800.0),
+            (500.0, 700.0),
+            (400.0, 600.0),
+            (300.0, 500.0),
+            (200.0, 400.0),
+        ];
+        for (page_box, (w, h)) in ALL_BOXES.into_iter().zip(unrotated) {
+            let geom = geometry_on(page, &[], page_box);
+            assert_eq!(geom.rotate_cw, 90);
+            assert_eq!((geom.width_pts, geom.height_pts), (h, w), "{page_box:?}");
+        }
+    }
+
+    #[test]
+    fn the_crop_box_is_the_default() {
+        assert_eq!(PageBox::default(), PageBox::Crop);
+    }
+
+    #[test]
+    fn the_page_boxes_are_reported_whichever_box_is_selected() {
+        let page = "/MediaBox [0 0 600 800] /CropBox [10 10 590 790] /TrimBox [40 50 560 750]";
+        for page_box in ALL_BOXES {
+            let geom = geometry_on(page, &[], page_box);
+            assert_eq!(geom.media_box, Some([0.0, 0.0, 600.0, 800.0]));
+            assert_eq!(geom.crop_box, Some([10.0, 10.0, 590.0, 790.0]));
+        }
     }
 
     #[test]

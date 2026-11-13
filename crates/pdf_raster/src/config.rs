@@ -5,7 +5,7 @@ use crate::{PageDiagnostics, RasterError, RasterSession, open_session, open_sess
 
 use std::path::PathBuf;
 
-use crate::{Password, RenderPurpose};
+use crate::{PageBox, Password, RenderPurpose};
 
 // ── Backend policy ────────────────────────────────────────────────────────────
 
@@ -336,6 +336,15 @@ pub struct SessionConfig {
     /// Default [`DOCUMENT_IMAGE_BUDGET_BYTES`](crate::DOCUMENT_IMAGE_BUDGET_BYTES)
     /// (256 MiB).  0 keeps nothing: every page decodes the images it draws.
     pub image_budget: usize,
+    /// The page boundary box (ISO 32000-2 §14.11.2) every page of the
+    /// session is measured and rendered on.
+    ///
+    /// Default [`PageBox::Crop`]: the `CropBox` intersected with the
+    /// `MediaBox`.  [`PageBox::Media`] renders the whole `MediaBox`;
+    /// [`PageBox::Bleed`], [`PageBox::Trim`] and [`PageBox::Art`] render the
+    /// page's own box of that kind intersected with the `MediaBox`, or the
+    /// `CropBox` region when the page has none.
+    pub page_box: PageBox,
 }
 
 impl SessionConfig {
@@ -367,6 +376,7 @@ impl SessionConfig {
             font_dirs: Vec::new(),
             system_fonts: true,
             image_budget: crate::DOCUMENT_IMAGE_BUDGET_BYTES,
+            page_box: PageBox::Crop,
         }
     }
 

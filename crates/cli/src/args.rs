@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 
 use camera::CameraOptions;
 use clap::Parser;
-use pdf_raster::{BackendPolicy, RenderPurpose, RenderRegion, SessionConfig};
+use pdf_raster::{BackendPolicy, PageBox, RenderPurpose, RenderRegion, SessionConfig};
 
 /// Parse `--jpegopt`: comma-separated `quality=N` (0–100),
 /// `progressive=y|n` and `optimize=y|n`, as `pdftoppm -jpegopt` takes them.
@@ -152,6 +152,23 @@ pub(crate) struct Args {
     /// edge; clipped to it).
     #[arg(short = 'H', long = "crop-height", value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..))]
     pub crop_h: Option<u32>,
+
+    /// The page boundary box rendered: `media`, `crop` (default), `bleed`,
+    /// `trim` or `art`.  Every box but the `MediaBox` is intersected with the
+    /// `MediaBox`; a page without the bleed, trim or art box named renders
+    /// its `CropBox`.
+    #[arg(
+        long = "box",
+        value_name = "BOX",
+        value_enum,
+        default_value = "crop",
+        conflicts_with = "cropbox"
+    )]
+    pub page_box: BoxArg,
+
+    /// Render the `CropBox`: `--box crop`, the default.
+    #[arg(long = "cropbox")]
+    pub cropbox: bool,
 
     // ── Output format ────────────────────────────────────────────────────────
     /// Output PNG (default: PPM).
@@ -492,6 +509,33 @@ impl From<PurposeArg> for RenderPurpose {
         match p {
             PurposeArg::View => Self::View,
             PurposeArg::Print => Self::Print,
+        }
+    }
+}
+
+/// `--box` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum BoxArg {
+    /// The `MediaBox`.
+    Media,
+    /// The `CropBox`.
+    Crop,
+    /// The `BleedBox`.
+    Bleed,
+    /// The `TrimBox`.
+    Trim,
+    /// The `ArtBox`.
+    Art,
+}
+
+impl From<BoxArg> for PageBox {
+    fn from(b: BoxArg) -> Self {
+        match b {
+            BoxArg::Media => Self::Media,
+            BoxArg::Crop => Self::Crop,
+            BoxArg::Bleed => Self::Bleed,
+            BoxArg::Trim => Self::Trim,
+            BoxArg::Art => Self::Art,
         }
     }
 }
@@ -1091,6 +1135,7 @@ impl Args {
         config.text_antialias = self.antialias == AaFlag::Yes;
         config.vector_antialias = self.vector_antialias == AaFlag::Yes;
         config.overprint = self.overprint;
+        config.page_box = self.page_box.into();
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -1335,6 +1380,30 @@ mod page_list_tests {
         assert!(base_args().session_config().unwrap().annotations);
         let hidden = args_with(&["--hide-annotations"]).session_config().unwrap();
         assert!(!hidden.annotations);
+    }
+
+    #[test]
+    fn box_flag_reaches_session_config() {
+        assert_eq!(
+            base_args().session_config().unwrap().page_box,
+            PageBox::Crop
+        );
+        for (name, page_box) in [
+            ("media", PageBox::Media),
+            ("crop", PageBox::Crop),
+            ("bleed", PageBox::Bleed),
+            ("trim", PageBox::Trim),
+            ("art", PageBox::Art),
+        ] {
+            let config = args_with(&["--box", name]).session_config().unwrap();
+            assert_eq!(config.page_box, page_box, "--box {name}");
+        }
+        let cropbox = args_with(&["--cropbox"]).session_config().unwrap();
+        assert_eq!(cropbox.page_box, PageBox::Crop);
+        assert!(
+            Args::try_parse_from(["rrocket", "--cropbox", "--box", "media", "in.pdf", "out"])
+                .is_err()
+        );
     }
 
     #[test]

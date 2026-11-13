@@ -45,6 +45,9 @@ pub struct RasterSession {
     pub(crate) vector_antialias: bool,
     /// Simulate overprint ([`crate::SessionConfig::overprint`]).
     pub(crate) overprint: bool,
+    /// The page boundary box every page is measured and rendered on
+    /// ([`crate::SessionConfig::page_box`]).
+    pub(crate) page_box: pdf_interp::PageBox,
     /// The document's interactive form type, reported in every page's
     /// [`PageDiagnostics::form_type`](crate::PageDiagnostics::form_type).
     pub(crate) form_type: pdf_interp::FormType,
@@ -106,7 +109,8 @@ impl RasterSession {
 
     /// The geometry of page `page_num` (1-based): its size in points after
     /// `/Rotate` and `UserUnit`, rotation, `UserUnit`, the origin of the
-    /// selected box, and the `MediaBox` and `CropBox`.  No content is parsed.
+    /// box selected by [`SessionConfig::page_box`], and the `MediaBox` and
+    /// `CropBox`.  No content is parsed.
     ///
     /// [`PageGeometry::size_px`](crate::PageGeometry::size_px) gives the
     /// pixel size a render at given scales produces.
@@ -117,7 +121,8 @@ impl RasterSession {
     /// [`RasterError::InvalidPageGeometry`] when `UserUnit` is out of range.
     pub fn page_geometry(&self, page_num: u32) -> Result<crate::PageGeometry, RasterError> {
         let page_id = self.resolve_page(page_num)?;
-        pdf_interp::page_size_pts_by_id(&self.doc, page_id).map_err(RasterError::from)
+        pdf_interp::page_size_pts_by_id(&self.doc, page_id, self.page_box)
+            .map_err(RasterError::from)
     }
 
     /// Borrow the underlying [`pdf::Document`] for read-only operations.
@@ -203,7 +208,7 @@ pub fn prescan_session(
     session: &RasterSession,
     page_num: u32,
 ) -> Result<crate::PageDiagnostics, RasterError> {
-    pdf_interp::prescan_page(&session.doc, page_num).map_err(RasterError::from)
+    pdf_interp::prescan_page(&session.doc, page_num, session.page_box).map_err(RasterError::from)
 }
 
 // Compile-time assertions: RasterSession must be Sync (shared across rayon threads) and
@@ -398,6 +403,7 @@ fn open_session_with_doc(
         text_antialias: config.text_antialias,
         vector_antialias: config.vector_antialias,
         overprint: config.overprint,
+        page_box: config.page_box,
         form_type,
         javascript_warned: AtomicBool::new(false),
         #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]

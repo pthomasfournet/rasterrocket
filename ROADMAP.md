@@ -2501,6 +2501,10 @@ dispatched, are deleted with their `GpuBackend::record_composite` /
 `record_apply_soft_mask` methods, parameter structs, thresholds and CPU
 twins (`composite_rgba8_cpu`, `apply_soft_mask_cpu`) from
 `rasterrocket-gpu`; renders unchanged.
+`--box media|crop|bleed|trim|art` (and `--cropbox`) selects the page box
+rendered, the MediaBox among them; the default stays the CropBox.  Public
+API: `PageBox` and `SessionConfig::page_box` (additive); `page_size_pts`,
+`page_size_pts_by_id` and `prescan_page` in `rasterrocket-interp` take the box.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

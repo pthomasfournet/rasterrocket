@@ -9,7 +9,7 @@ rrocket --list-printers
 Renders pages to image files. Flag names and output naming follow `pdftoppm`
 wherever rrocket has the same feature, so most `pdftoppm` command lines run
 unchanged; the differences are listed under each section (CMYK JPEG output is
-not implemented, and the CropBox is always rendered).
+not implemented, and the CropBox, not the MediaBox, is rendered by default).
 
 `-h` / `--help` lists the flags and `-V` / `--version` prints the version.
 
@@ -34,7 +34,7 @@ to grayscale, so colour output carries gray pixels; `-r` only sets the
 resolution recorded for the page, never its pixel size. An archive that
 contains a single PDF instead of loose images renders that PDF, with the
 rendering flags (`--aa`, `--aaVector`, `--overprint`, `--hide-annotations`,
-`--no-system-fonts`), `--strict`, `--purpose` and the backend flags; an
+`--no-system-fonts`), `--box`, `--strict`, `--purpose` and the backend flags; an
 invalid backend combination is refused for comic input as for a PDF. The
 crop, scale-to and password flags, `--threads`, `--progress` and
 `--timings` apply to PDF input only and have no effect on comic input.
@@ -87,8 +87,23 @@ render whole at that resolution still succeeds. An offset outside a page
 fails that page. These flags apply to PDF input; comic-archive pages are
 written whole.
 
-The page boundary is selected automatically: the CropBox clamped to the
-MediaBox, per ISO 32000-2 §14.11.2. There is no flag to switch between them.
+---
+
+## Page box
+
+| Flag | Default | Description |
+|---|---|---|
+| `--box BOX` | `crop` | The page boundary box rendered: `media`, `crop`, `bleed`, `trim` or `art` (ISO 32000-2 §14.11.2). |
+| `--cropbox` | | `--box crop`, under the `pdftoppm` name. Refused together with `--box`. |
+
+`crop` renders the CropBox intersected with the MediaBox (the MediaBox when
+the page has no CropBox); `media` renders the whole MediaBox, which is what
+`pdftoppm` renders without `-cropbox`. `bleed`, `trim` and `art` render the
+page's own BleedBox, TrimBox or ArtBox intersected with the MediaBox; these
+three are not inherited from the page tree, and a page without the box named
+renders its CropBox. The pixel coordinates of the crop flags, the
+`--scale-to` sizes, `--print` and `--fax` all measure the selected box. For a
+comic archive holding a PDF, `--box` applies to that PDF.
 
 ---
 

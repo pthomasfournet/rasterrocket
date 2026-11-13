@@ -37,10 +37,12 @@ fn main() {
         std::process::exit(1);
     });
 
-    let geom = rasterrocket_interp::page_size_pts_by_id(&doc, page_id).unwrap_or_else(|e| {
-        eprintln!("error: could not determine size of page {page}: {e}");
-        std::process::exit(1);
-    });
+    let geom =
+        rasterrocket_interp::page_size_pts_by_id(&doc, page_id, rasterrocket_interp::PageBox::Crop)
+            .unwrap_or_else(|e| {
+                eprintln!("error: could not determine size of page {page}: {e}");
+                std::process::exit(1);
+            });
     println!(
         "Page {page} size: {:.1} × {:.1} pt (rotate {}°)",
         geom.width_pts, geom.height_pts, geom.rotate_cw
