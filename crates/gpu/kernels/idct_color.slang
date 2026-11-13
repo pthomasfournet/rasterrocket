@@ -160,10 +160,8 @@ void idct_dequant_colour(
     uint row       = lid.y;    // 0..7 within block
     uint comp      = lid.z;    // component index
 
-    // Only components 0..num_components-1 are active.
-    if (comp >= num_components) {
-        return;
-    }
+    // Threads of an absent component skip the work but reach every barrier.
+    bool active = comp < num_components;
     // num_qtables == 0 would underflow in `min(qt_sel, num_qtables - 1u)`.
     // The host validates this before dispatch; guard here as defence-in-depth.
     if (num_qtables == 0u) {
@@ -182,75 +180,80 @@ void idct_dequant_colour(
         return;
     }
 
-    // Flat block index within this component's block grid.
-    // Widened to uint64_t: for a 3-component 65535×65535 JPEG, block_idx reaches
-    // ~201 M which overflows u32; coef_base = block_idx * 64 reaches ~12.9 G.
-    // The host rejects images exceeding the 2^26-block limit before dispatch;
-    // the 64-bit arithmetic here is defence-in-depth for kernel correctness.
-    uint64_t block_idx = uint64_t(comp) * uint64_t(blocks_wide) * uint64_t(blocks_high)
-                       + uint64_t(by) * uint64_t(blocks_wide) + uint64_t(bx);
+    if (active) {
+        // Flat block index within this component's block grid.
+        // Widened to uint64_t: for a 3-component 65535×65535 JPEG, block_idx reaches
+        // ~201 M which overflows u32; coef_base = block_idx * 64 reaches ~12.9 G.
+        // The host rejects images exceeding the 2^26-block limit before dispatch;
+        // the 64-bit arithmetic here is defence-in-depth for kernel correctness.
+        uint64_t block_idx = uint64_t(comp) * uint64_t(blocks_wide) * uint64_t(blocks_high)
+                           + uint64_t(by) * uint64_t(blocks_wide) + uint64_t(bx);
 
-    // --- Step 1: dequantise and inverse zigzag into scratch[comp][row][col] ---
-    // The qtable selector is 0 for Y (luma) and 1 for Cb/Cr (chroma) by JFIF convention;
-    // clamp to num_qtables - 1 so a grayscale image with one table doesn't OOB.
-    uint qt_sel = (comp == 0u) ? 0u : 1u;
-    qt_sel = min(qt_sel, num_qtables - 1u);
-    uint qt_base = qt_sel * 64u;
-    uint64_t coef_base = block_idx * 64u;
+        // --- Step 1: dequantise and inverse zigzag into scratch[comp][row][col] ---
+        // The qtable selector is 0 for Y (luma) and 1 for Cb/Cr (chroma) by JFIF convention;
+        // clamp to num_qtables - 1 so a grayscale image with one table doesn't OOB.
+        uint qt_sel = (comp == 0u) ? 0u : 1u;
+        qt_sel = min(qt_sel, num_qtables - 1u);
+        uint qt_base = qt_sel * 64u;
+        uint64_t coef_base = block_idx * 64u;
 
-    // Load all 64 zigzag coefficients for this thread's block.
-    // We need the whole block to run the column IDCT, so each thread
-    // loads one coefficient (8 threads × 8 threads = 64 total).
-    // Coefficients and qtables are both in zigzag order, so the quantiser
-    // for zigzag slot zz_pos is at the same offset — no permutation.
-    uint zz_pos = row * 8u + col;
-    int  coef   = coefficients[coef_base + zz_pos];
-    int  qval   = qtables[qt_base + zz_pos];
-    // DC absolute value override: Phase 4 symbols encode DC deltas;
-    // `dc_values[block_idx]` is the running absolute DC reconstructed by
-    // the host dispatcher. Overwrite slot 0 (zigzag DC position).
-    if (zz_pos == 0u) {
-        coef = dc_values[block_idx];
+        // Load all 64 zigzag coefficients for this thread's block.
+        // We need the whole block to run the column IDCT, so each thread
+        // loads one coefficient (8 threads × 8 threads = 64 total).
+        // Coefficients and qtables are both in zigzag order, so the quantiser
+        // for zigzag slot zz_pos is at the same offset — no permutation.
+        uint zz_pos = row * 8u + col;
+        int  coef   = coefficients[coef_base + zz_pos];
+        int  qval   = qtables[qt_base + zz_pos];
+        // DC absolute value override: Phase 4 symbols encode DC deltas;
+        // `dc_values[block_idx]` is the running absolute DC reconstructed by
+        // the host dispatcher. Overwrite slot 0 (zigzag DC position).
+        if (zz_pos == 0u) {
+            coef = dc_values[block_idx];
+        }
+        int dequanted = coef * qval;
+
+        // Place into scratch at the natural (row,col) position.
+        uint nat_pos = uint(zigzag_to_natural[zz_pos]);
+        uint nat_row = nat_pos / 8u;
+        uint nat_col = nat_pos & 7u;
+        scratch[comp][nat_row][nat_col] = dequanted;
     }
-    int dequanted = coef * qval;
-
-    // Place into scratch at the natural (row,col) position.
-    uint nat_pos = uint(zigzag_to_natural[zz_pos]);
-    uint nat_row = nat_pos / 8u;
-    uint nat_col = nat_pos & 7u;
-    scratch[comp][nat_row][nat_col] = dequanted;
 
     GroupMemoryBarrierWithGroupSync();
 
-    // --- Step 2: 1-D IDCT on rows (each thread handles one element of one row) ---
-    // Thread (row, col) owns row `row` of component `comp`.
+    // --- Step 2: 1-D IDCT on rows ---
+    // The eight threads of row `row` each transform the whole row; every
+    // read completes before the barrier, and each thread then stores only
+    // its own element, so no thread reads a slot another has overwritten.
     // Outputs stay scaled up by 2^PASS1_BITS.
-    {
-        int v[8];
+    int v[8];
+    if (active) {
         for (uint k = 0u; k < 8u; k++) {
             v[k] = scratch[comp][row][k];
         }
         idct_1d(v, CONST_BITS - PASS1_BITS);
-        for (uint k = 0u; k < 8u; k++) {
-            scratch[comp][row][k] = v[k];
-        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (active) {
+        scratch[comp][row][col] = v[col];
     }
 
     GroupMemoryBarrierWithGroupSync();
 
     // --- Step 3: 1-D IDCT on columns ---
-    // Thread (row, col) owns column `col` of component `comp`.
-    // The pass-2 descale removes the pass-1 scale and the 8× two-pass gain;
-    // then add the JPEG level-shift of 128.
-    {
-        int v[8];
+    // Same read / barrier / own-store discipline, over column `col`.
+    // The pass-2 descale removes the pass-1 scale and the 8× gain of the
+    // two passes; then add the JPEG level-shift of 128.
+    if (active) {
         for (uint k = 0u; k < 8u; k++) {
             v[k] = scratch[comp][k][col];
         }
         idct_1d(v, CONST_BITS + PASS1_BITS + 3);
-        for (uint k = 0u; k < 8u; k++) {
-            scratch[comp][k][col] = clamp_byte(v[k] + 128);
-        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (active) {
+        scratch[comp][row][col] = clamp_byte(v[row] + 128);
     }
 
     GroupMemoryBarrierWithGroupSync();

@@ -1094,10 +1094,11 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
 
 /// Parameters for the IDCT + dequant + colour-conversion kernel (Phase 5).
 ///
-/// The kernel runs one 8×8-thread workgroup per MCU block per component and
-/// writes packed RGBA8 pixels to `pixels_rgba`.  The caller is responsible
-/// for building `coefficients` from the symbol stream, running the DC
-/// reconstruction, and packing quantisation tables in natural (row-major) order.
+/// The kernel runs one 8×8×3-thread workgroup per 8×8 block (one 8×8 layer
+/// per component) and writes packed RGBA8 pixels to `pixels_rgba`.  The
+/// caller is responsible for building `coefficients` from the symbol stream,
+/// running the DC reconstruction, and packing quantisation tables in zigzag
+/// order (as stored in DQT).
 ///
 /// # Invariants
 /// - `width > 0`, `height > 0`, `num_components ∈ {1, 3}`
@@ -1111,7 +1112,7 @@ pub struct IdctParams<'a, B: GpuBackend + ?Sized> {
     /// Zigzag-ordered DCT coefficients from Phase 4 (one i32 per slot).
     /// Layout: `[comp][block_y][block_x][64]`.
     pub coefficients: &'a B::DeviceBuffer,
-    /// Quantisation tables in natural (row-major) order.
+    /// Quantisation tables in zigzag order (as stored in DQT).
     /// Layout: `[qt_index][64]` as i32.
     pub qtables: &'a B::DeviceBuffer,
     /// Absolute DC value per block (reconstructed by host before dispatch).

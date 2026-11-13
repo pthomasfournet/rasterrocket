@@ -140,56 +140,63 @@ extern "C" __global__ void idct_dequant_colour(
     const uint32_t row  = threadIdx.y;   // 0..7 within block
     const uint32_t comp = threadIdx.z;   // component index
 
-    if (comp >= num_components) return;
+    // Threads of an absent component skip the work but reach every barrier.
+    const bool active = comp < num_components;
 
     const uint32_t bx = blockIdx.x;  // block column
     const uint32_t by = blockIdx.y;  // block row
 
     if (bx >= blocks_wide || by >= blocks_high) return;
 
-    // Flat block index within this component's grid.
-    const uint32_t block_idx = comp * blocks_wide * blocks_high + by * blocks_wide + bx;
+    if (active) {
+        // Flat block index within this component's grid.
+        const uint32_t block_idx = comp * blocks_wide * blocks_high + by * blocks_wide + bx;
 
-    // QT selector: 0 for luma, 1 (clamped) for chroma.
-    uint32_t qt_sel = (comp == 0u) ? 0u : 1u;
-    if (qt_sel >= num_qtables) qt_sel = num_qtables - 1u;
-    const uint32_t qt_base   = qt_sel * 64u;
-    const uint32_t coef_base = block_idx * 64u;
+        // QT selector: 0 for luma, 1 (clamped) for chroma.
+        uint32_t qt_sel = (comp == 0u) ? 0u : 1u;
+        if (qt_sel >= num_qtables) qt_sel = num_qtables - 1u;
+        const uint32_t qt_base   = qt_sel * 64u;
+        const uint32_t coef_base = block_idx * 64u;
 
-    // Step 1: dequantise + inverse-zigzag into shared scratch.
-    // Coefficients and qtables are both in zigzag order, so the quantiser
-    // for zigzag slot zz_pos is at the same offset — no permutation.
-    const uint32_t zz_pos  = row * 8u + col;
-    int coef = coefficients[coef_base + zz_pos];
-    // DC override: use pre-resolved absolute DC from the host.
-    if (zz_pos == 0u) coef = dc_values[block_idx];
-    const int qval     = qtables[qt_base + zz_pos];
-    const int dequanted = coef * qval;
+        // Step 1: dequantise + inverse-zigzag into shared scratch.
+        // Coefficients and qtables are both in zigzag order, so the quantiser
+        // for zigzag slot zz_pos is at the same offset — no permutation.
+        const uint32_t zz_pos  = row * 8u + col;
+        int coef = coefficients[coef_base + zz_pos];
+        // DC override: use pre-resolved absolute DC from the host.
+        if (zz_pos == 0u) coef = dc_values[block_idx];
+        const int qval     = qtables[qt_base + zz_pos];
+        const int dequanted = coef * qval;
 
-    const uint32_t nat_pos = (uint32_t)zigzag_to_natural[zz_pos];
-    scratch[comp][nat_pos / 8u][nat_pos & 7u] = dequanted;
+        const uint32_t nat_pos = (uint32_t)zigzag_to_natural[zz_pos];
+        scratch[comp][nat_pos / 8u][nat_pos & 7u] = dequanted;
+    }
 
     __syncthreads();
 
     // Step 2: row IDCT. Outputs stay scaled up by 2^PASS1_BITS.
-    {
-        int v[8];
+    // The eight threads of a row each transform the whole row; every read
+    // completes before the barrier, and each thread then stores only its
+    // own element, so no thread reads a slot another has overwritten.
+    int v[8];
+    if (active) {
         for (int k = 0; k < 8; k++) v[k] = scratch[comp][row][k];
         idct_1d(v, CONST_BITS - PASS1_BITS);
-        for (int k = 0; k < 8; k++) scratch[comp][row][k] = v[k];
     }
+    __syncthreads();
+    if (active) scratch[comp][row][col] = v[col];
 
     __syncthreads();
 
     // Step 3: column IDCT + level shift. The pass-2 descale removes the
-    // pass-1 scale and the 8x two-pass gain.
-    {
-        int v[8];
+    // pass-1 scale and the 8x two-pass gain.  Same read / barrier / own
+    // store discipline as the row pass.
+    if (active) {
         for (int k = 0; k < 8; k++) v[k] = scratch[comp][k][col];
         idct_1d(v, CONST_BITS + PASS1_BITS + 3);
-        for (int k = 0; k < 8; k++)
-            scratch[comp][k][col] = clamp_byte(v[k] + 128);
     }
+    __syncthreads();
+    if (active) scratch[comp][row][col] = clamp_byte(v[row] + 128);
 
     __syncthreads();
 
