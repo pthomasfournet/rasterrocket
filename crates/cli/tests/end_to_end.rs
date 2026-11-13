@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{assemble_pdf, stream_object, with_page_tree};
-use rasterrocket::{BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb};
+use rasterrocket::{
+    BackendPolicy, RenderParams, SessionConfig, open_session_from_bytes, render_page_rgb,
+    render_page_rgb_with,
+};
 
 /// Page 1: 100 × 50 pt, a black square at (10, 10) of side 20.
 /// Page 2: 60 × 80 pt, a blue rectangle over the lower half.
@@ -186,6 +189,85 @@ fn png_output_has_the_png_signature() {
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     // IHDR: width and height, big-endian, at bytes 16..24.
     assert_eq!(&png[16..24], &[0, 0, 0, 100, 0, 0, 0, 50]);
+}
+
+/// Page 1 of [`two_page_pdf`] as the library renders it over a transparent
+/// backdrop at 72 dpi: RGBA, alpha not premultiplied.
+fn library_rgba() -> Vec<u8> {
+    let session = open_session_from_bytes(
+        two_page_pdf(),
+        &SessionConfig::with_policy(BackendPolicy::CpuOnly),
+    )
+    .expect("open session");
+    let params = RenderParams::new(1.0).with_transparent_background();
+    let bmp = render_page_rgb_with(&session, 1, &params).expect("render page 1");
+    let alpha = bmp.alpha_plane().expect("an alpha plane");
+    bmp.data()
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(alpha)
+        .flat_map(|(px, &a)| [px[0], px[1], px[2], a])
+        .collect()
+}
+
+#[test]
+fn transparent_png_and_tiff_carry_the_library_rgba() {
+    let want = library_rgba();
+    assert!(want.as_chunks::<4>().0.iter().any(|px| px[3] == 0));
+    assert!(want.as_chunks::<4>().0.iter().any(|px| px[3] == 255));
+    let (dir, input) = workdir(&two_page_pdf());
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["-r", "72", "-l", "1", "--transparent", "--png"],
+    ));
+    let png = std::fs::read(dir.path().join("out-1.png")).expect("read PNG");
+    // IHDR: bit depth 8, colour type 6 (RGBA), at bytes 24 and 25.
+    assert_eq!(&png[24..26], &[8, 6], "an 8-bit RGBA PNG");
+    for method in ["none", "lzw", "deflate"] {
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &[
+                "-r",
+                "72",
+                "-l",
+                "1",
+                "--transparent",
+                "--tiff",
+                "--tiffcompression",
+                method,
+            ],
+        ));
+        let file = std::fs::read(dir.path().join("out-1.tif")).expect("read TIFF");
+        let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+        assert_eq!(
+            decoder.colortype().expect("colour type"),
+            tiff::ColorType::RGBA(8)
+        );
+        let tiff::decoder::DecodingResult::U8(rgba) = decoder.read_image().expect("decodes") else {
+            panic!("8-bit samples");
+        };
+        assert_eq!(rgba, want, "{method}");
+    }
+}
+
+#[test]
+fn transparent_refuses_outputs_without_alpha() {
+    for (flags, needle) in [
+        (&["--transparent"][..], "PPM has none; add --png or --tiff"),
+        (&["--transparent", "--jpeg"], "JPEG has none"),
+        (&["--transparent", "--gray"], "drop --gray"),
+        (&["--transparent", "--png", "--mono"], "drop --mono"),
+    ] {
+        let (dir, input) = workdir(&two_page_pdf());
+        let out = rrocket(dir.path(), &input, flags);
+        assert!(!out.status.success(), "{flags:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{flags:?}: {stderr}");
+        assert_eq!(outputs(dir.path()), Vec::<String>::new(), "{flags:?}");
+    }
 }
 
 #[test]

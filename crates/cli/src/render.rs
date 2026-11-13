@@ -130,6 +130,9 @@ pub(crate) fn render_page(
     let (scale_x, scale_y) =
         fax_layout.map_or_else(|| args.scales(dims), |l| (l.scale_x, l.scale_y));
     let mut params = RenderParams::new_xy(scale_x, scale_y).with_policy(effective_policy);
+    if args.transparent {
+        params = params.with_transparent_background();
+    }
     if let Some(region) = args
         .crop_region(geom.size_px(scale_x, scale_y))
         .map_err(RasterError::InvalidOptions)?

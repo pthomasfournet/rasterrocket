@@ -198,6 +198,13 @@ pub(crate) struct Args {
     #[arg(long = "tiffcompression", value_name = "METHOD", value_enum)]
     pub tiffcompression: Option<TiffMethod>,
 
+    /// Render over a transparent background instead of white paper: PNG
+    /// or TIFF with an alpha channel, the page's coverage × opacity, colour
+    /// not premultiplied.  Needs --png or --tiff; not with --gray, --mono,
+    /// --invert, the camera cleanup flags, --fax or --print.
+    #[arg(long = "transparent", visible_alias = "transp")]
+    pub transparent: bool,
+
     /// Output gray: PGM, or a gray PNG, JPEG or TIFF.
     #[arg(long = "gray")]
     pub gray: bool,
@@ -700,6 +707,7 @@ impl Args {
                     .to_owned(),
             );
         }
+        self.validate_transparent_flags()?;
         self.validate_fax_flags()?;
         self.validate_print_flags()?;
         if self.mono && self.gray {
@@ -738,6 +746,44 @@ impl Args {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Refuse `--transparent` with an output that carries no alpha channel
+    /// and with the flags that work on opaque pages.
+    fn validate_transparent_flags(&self) -> Result<(), String> {
+        if !self.transparent {
+            return Ok(());
+        }
+        let opaque = [
+            (self.gray, "--gray"),
+            (self.mono, "--mono"),
+            (self.invert.is_some(), "--invert"),
+            (self.crop, "--crop"),
+            (self.rectify, "--rectify"),
+            (self.dewarp, "--dewarp"),
+            (self.split_spreads, "--split-spreads"),
+            (self.faxing(), "--fax"),
+            (self.printing(), "--print"),
+        ];
+        if let Some((_, flag)) = opaque.iter().find(|(set, _)| *set) {
+            return Err(format!(
+                "--transparent writes colour pages with an alpha channel; drop {flag}"
+            ));
+        }
+        if self.is_comic_input() {
+            return Err(
+                "--transparent renders PDF input; a comic archive's pages are opaque images"
+                    .to_owned(),
+            );
+        }
+        if self.png || self.tiff {
+            return Ok(());
+        }
+        let format = if self.jpeg { "JPEG" } else { "PPM" };
+        Err(format!(
+            "--transparent needs an output with an alpha channel: {format} has none; \
+             add --png or --tiff"
+        ))
     }
 
     /// The input path, `-` for standard input; empty only under
@@ -1522,6 +1568,33 @@ mod page_list_tests {
             let err = args_with(flags).validate_format_flags().unwrap_err();
             assert!(err.contains(needle), "{flags:?}: {err}");
         }
+    }
+
+    #[test]
+    fn transparent_needs_an_alpha_output_and_colour_pages() {
+        for flags in [
+            &["--transparent", "--png"][..],
+            &["--transp", "--tiff", "--tiffcompression", "deflate"],
+        ] {
+            let args = args_with(flags);
+            assert!(args.transparent);
+            assert!(args.validate_format_flags().is_ok(), "{flags:?}");
+        }
+        for (flags, needle) in [
+            (&["--transparent"][..], "PPM has none; add --png or --tiff"),
+            (&["--transparent", "--jpeg"], "JPEG has none"),
+            (&["--transparent", "--gray"], "drop --gray"),
+            (&["--transparent", "--png", "--mono"], "drop --mono"),
+            (&["--transparent", "--png", "--invert"], "drop --invert"),
+            (&["--transparent", "--png", "--crop"], "drop --crop"),
+            (&["--transparent", "--fax"], "drop --fax"),
+        ] {
+            let err = args_with(flags).validate_format_flags().unwrap_err();
+            assert!(err.contains(needle), "{flags:?}: {err}");
+        }
+        let comic = Args::parse_from(["rrocket", "--transparent", "--png", "a.cbz", "out"]);
+        let err = comic.validate_format_flags().unwrap_err();
+        assert!(err.contains("PDF input"), "{err}");
     }
 
     #[test]
