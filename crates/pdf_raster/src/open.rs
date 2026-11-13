@@ -290,6 +290,53 @@ pub fn open_session_from_bytes(
     open_session_with_doc(doc, config)
 }
 
+/// [`open_session_from_bytes`] for bytes the caller keeps shared.
+///
+/// `bytes` is any `AsRef<[u8]>` storage: an `Arc<[u8]>`, a `&'static [u8]`,
+/// a reference-counted byte buffer type, or a mapping the caller made.  The
+/// bytes are read in place, never copied, and held by the session until it
+/// is dropped.
+///
+/// `bytes.as_ref()` must return the same bytes on every call: the parser
+/// reads the cross-reference table once at open and indexes the bytes by
+/// its offsets afterwards.
+///
+/// # Errors
+///
+/// As [`open_session_from_bytes`].
+pub fn open_session_from_shared(
+    bytes: impl AsRef<[u8]> + Send + Sync + 'static,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError> {
+    let doc =
+        pdf_interp::open_shared_with(bytes, &config.open_options()).map_err(RasterError::from)?;
+    open_session_with_doc(doc, config)
+}
+
+/// [`open_session_from_bytes`] for a document read from `reader`, such as
+/// a network stream or a member of an archive.
+///
+/// The parser needs random access to the whole document as one contiguous
+/// slice, so `reader` is read to its end into memory first; nothing is
+/// parsed before then, and a `Seek` source gains nothing over a plain
+/// [`Read`](std::io::Read) one.  A file on disk opens without the copy
+/// through [`open_session`].
+///
+/// # Errors
+///
+/// [`RasterError::Pdf`] wrapping an I/O error when `reader` fails;
+/// otherwise as [`open_session_from_bytes`].
+pub fn open_session_from_reader(
+    mut reader: impl std::io::Read,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError> {
+    let mut bytes = Vec::new();
+    let _ = reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| RasterError::from(pdf::PdfError::from(e)))?;
+    open_session_from_bytes(bytes, config)
+}
+
 /// Why `policy` cannot run in this build: a `Force*` policy whose backend
 /// was not compiled in (`ForceVulkan` without the `vulkan` feature,
 /// `ForceCuda` without any CUDA feature).  Without this gate the backend's
