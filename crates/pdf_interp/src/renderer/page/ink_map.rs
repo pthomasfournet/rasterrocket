@@ -72,16 +72,22 @@ impl InkMap {
     /// free one: the distinct spot names of `space` without a slot number
     /// at most the free slots.
     fn fits(&self, space: &ColorSpace) -> bool {
-        let mut unseen: Vec<&[u8]> = Vec::new();
+        let free = SLOTS - self.slots.len();
+        let mut unseen: [&[u8]; SLOTS] = [&[]; SLOTS];
+        let mut count = 0;
         for colorant in space.colorants() {
             if let Colorant::Spot(name) = colorant
                 && !self.slots.iter().any(|s| *s.name == **name)
-                && !unseen.contains(&&**name)
+                && !unseen[..count].contains(&&**name)
             {
-                unseen.push(name);
+                if count == free {
+                    return false;
+                }
+                unseen[count] = name;
+                count += 1;
             }
         }
-        unseen.len() <= SLOTS - self.slots.len()
+        true
     }
 
     /// Record the spot colorants of `space` that hold no slot, which paint
@@ -346,6 +352,32 @@ mod tests {
         // A colour whose spots are all seen fits whatever the free slots.
         let (ink, paints) = map.colorant_ink(&doc, &separation(&doc, "S1", "0 0 0 1"), &[0.5]);
         assert_eq!((ink[5], paints), (128, ChannelMask::new(0b10_0000)));
+    }
+
+    /// A space fits when its distinct new spots, a repeated name counted
+    /// once, number at most the free slots.
+    #[test]
+    fn fits_counts_distinct_new_spots_against_free_slots() {
+        let doc = empty_doc();
+        let dn = |names: &str| {
+            space(
+                &doc,
+                &format!(
+                    "[/DeviceN [{names}] /DeviceCMYK \
+                     << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>]"
+                ),
+            )
+        };
+        let mut map = InkMap::default();
+        assert!(map.fits(&dn("/A /B /C /D")));
+        assert!(map.fits(&dn("/A /A /B /B /C /D /Cyan /None")));
+        assert!(!map.fits(&dn("/A /B /C /D /E")));
+        for name in ["A", "B", "C"] {
+            let _ = map.slot(&doc, name.as_bytes(), &separation(&doc, name, "0 0 0 1"));
+        }
+        assert!(map.fits(&dn("/A /B /C /D")));
+        assert!(map.fits(&dn("/C /E /E")));
+        assert!(!map.fits(&dn("/D /E")));
     }
 
     /// A tint transform that does not evaluate still gives a defined table.
