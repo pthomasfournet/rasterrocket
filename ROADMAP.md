@@ -2630,6 +2630,24 @@ additive: `PageBuffer`, `PageInfo`, `PixelFormat::Rgb8`,
 `rasterrocket-interp`, `open_shared_with` and
 `PageRenderer::try_with_page_group_in`; in `rasterrocket-render`,
 `BitmapBuffers`, `Bitmap::try_new_filled_in` and `Bitmap::into_buffers`.
+An extra rotation in quarter turns (`rrocket --rotate DEG`,
+`SessionConfig::rotation` / `RasterOptions::rotation`, a `Rotation` built by
+`Rotation::from_degrees`, which takes any multiple of 90 and rejects other
+angles with `InvalidRotation`) is added to each page's `/Rotate` before the
+page geometry is computed, so the page is drawn turned: sizes,
+`page_size_px`, regions, deskew, `PageBuffer` and the gray, RGB and
+transparent outputs all see the turned page, and comic-archive page images
+are turned pixel for pixel.  On a page of whole pixels, fills, clips and
+nearest-neighbour images are byte-identical to the unturned render turned
+as a bitmap; antialiased edges, hairlines, text and interpolated images may
+differ at their edges.  Public API, additive: `Rotation`, `InvalidRotation`
+and `PageGeometry::rotated` in `rasterrocket-interp`, re-exported with the
+two new fields by `rasterrocket`.
+A zero-width line cut short by a clip's bottom edge, the page's or a
+region's included, drew one pixel too many on its last kept row; it now
+ends that row where the unclipped line does, so a region render of a
+hairline crossing the region's bottom matches the whole page (this changes
+pixels on that row only).
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

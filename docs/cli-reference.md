@@ -34,7 +34,7 @@ to grayscale, so colour output carries gray pixels; `-r` only sets the
 resolution recorded for the page, never its pixel size. An archive that
 contains a single PDF instead of loose images renders that PDF, with the
 rendering flags (`--aa`, `--aaVector`, `--overprint`, `--hide-annotations`,
-`--no-system-fonts`), `--box`, `--strict`, `--purpose` and the backend flags; an
+`--no-system-fonts`), `--box`, `--rotate`, `--strict`, `--purpose` and the backend flags; an
 invalid backend combination is refused for comic input as for a PDF. The
 crop, scale-to and password flags, `--threads`, `--progress` and
 `--timings` apply to PDF input only and have no effect on comic input.
@@ -104,6 +104,20 @@ three are not inherited from the page tree, and a page without the box named
 renders its CropBox. The pixel coordinates of the crop flags, the
 `--scale-to` sizes, `--print` and `--fax` all measure the selected box. For a
 comic archive holding a PDF, `--box` applies to that PDF.
+
+---
+
+## Rotation
+
+| Flag | Default | Description |
+|---|---|---|
+| `--rotate DEG` | `0` | Turn every page DEG degrees clockwise on top of its own `/Rotate`: a multiple of 90, negative for counter-clockwise, reduced modulo 360 (`-90` is `270`). Other values are rejected at startup. |
+
+The page is drawn turned, not turned as a bitmap afterwards, so a quarter
+turn exchanges its width and height, and the crop flags, the `--scale-to`
+sizes, the camera-capture flags, `--print` and `--fax` all work on the
+turned page. Comic-archive page images are turned pixel for pixel, and a
+comic archive holding a PDF turns that PDF's pages.
 
 ---
 
