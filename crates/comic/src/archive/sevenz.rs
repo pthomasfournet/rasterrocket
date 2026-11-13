@@ -2,10 +2,15 @@
 
 use std::io::Cursor;
 
-use sevenz_rust2::{ArchiveReader, Password};
+use sevenz_rust2::{ArchiveReader, EntryDecision, Password};
 
 use super::{Archive, DecodedEntries};
 use crate::ComicError;
+
+/// The largest allocation, in KiB, the archive's header and decoders (LZMA
+/// dictionary, the `PPMd` model) may make: 1 GiB.  An archive declaring more is
+/// refused when it is opened or its block decoded, before the allocation.
+const MAX_DECODER_KIB: usize = 1 << 20;
 
 /// A 7-Zip archive decoded eagerly into an in-memory name→bytes table.
 pub(super) struct SevenzArchive {
@@ -16,28 +21,25 @@ impl SevenzArchive {
     /// Parse 7z bytes into an in-memory table.
     ///
     /// # Errors
-    /// [`ComicError::BadArchive`] if the archive cannot be opened/decoded.
+    /// [`ComicError::BadArchive`] if the archive cannot be opened/decoded,
+    /// including when it needs more than [`MAX_DECODER_KIB`] of decoder
+    /// memory.
     pub(super) fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
-        let mut reader = ArchiveReader::new(Cursor::new(bytes), Password::empty())
-            .map_err(|e| ComicError::BadArchive(format!("7z: {e}")))?;
+        let mut reader = ArchiveReader::new_with_memory_limit(
+            Cursor::new(bytes),
+            Password::empty(),
+            MAX_DECODER_KIB,
+        )
+        .map_err(|e| ComicError::BadArchive(format!("7z: {e}")))?;
         let mut entries = Vec::new();
-        // The cap helper returns `ComicError`, which can't be constructed into
-        // the sevenz error type from outside that crate. Capture an over-limit
-        // failure here and halt iteration with `Ok(false)`, then surface it
-        // after the walk so the precise message survives.
+        // The cap helper returns `ComicError`, which cannot be converted into
+        // the archive crate's error type, so an over-limit entry is held here,
+        // iteration stopped, and the error returned after the walk.
         let mut capped: Option<ComicError> = None;
         reader
-            .for_each_entries(|entry, rdr| {
-                // Once an entry has tripped the size cap, stop reading any
-                // further entries. The outer block loop keeps invoking this
-                // closure even after a halt for non-solid (block-per-file)
-                // archives, so without this guard a multi-bomb archive would
-                // read every bomb before the captured error is surfaced.
-                if capped.is_some() {
-                    return Ok(false);
-                }
+            .for_each_entries_with_decision(|entry, rdr| {
                 if entry.is_directory() {
-                    return Ok(true);
+                    return Ok(EntryDecision::Continue);
                 }
                 let name = entry.name().to_owned();
                 // `entry.size()` is the attacker-controlled uncompressed size;
@@ -45,11 +47,11 @@ impl SevenzArchive {
                 match super::read_entry_capped(&mut *rdr, &name, entry.size()) {
                     Ok(data) => {
                         entries.push((name, data));
-                        Ok(true)
+                        Ok(EntryDecision::Continue)
                     }
                     Err(e) => {
                         capped = Some(e);
-                        Ok(false)
+                        Ok(EntryDecision::Stop)
                     }
                 }
             })

@@ -49,7 +49,7 @@ zune-jpeg = { workspace = true }
 zune-core = "0.5.1"
 # JBIG2: a local fork of hayro-jbig2 (crates/jbig2).
 hayro-jbig2 = { path = "../jbig2", default-features = false, features = ["std"] }
-moxcms = "0.9.0"
+moxcms = "0.9.2"
 # Bidirectional text (UAX #9) and mirrored glyphs for synthesised appearances.
 unicode-bidi = "0.3.18"
 unicode-bidi-mirroring = "0.4.0"

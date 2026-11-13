@@ -2482,6 +2482,11 @@ decodes and reported partial.  A `--fax` page longer than the B4 length
 text-matrix translations use fused multiply-adds: **this changes pixels**,
 glyphs on a rounding boundary moving by a device pixel (corpus-05 at
 150 dpi: 169 of 601 pages, a median of 69 pixels a page).
+moxcms 0.9.2 rounds integer gamma tables to nearest and corrects D50
+adaptation: colour-managed RGB output may move by one level (two archive
+documents with an output intent, of 2600 sampled outputs).  A `.cb7`
+archive is opened with a 1 GiB bound on its decoder allocations, and
+sevenz-rust2 0.25 rejects entries whose data ends short or fails its CRC.
 The GPU composite and soft-mask kernels, which nothing in the render path
 dispatched, are deleted with their `GpuBackend::record_composite` /
 `record_apply_soft_mask` methods, parameter structs, thresholds and CPU
