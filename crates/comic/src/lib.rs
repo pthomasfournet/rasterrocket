@@ -10,6 +10,7 @@ mod decode;
 mod order;
 #[cfg(test)]
 mod test_helpers;
+mod turn;
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -134,6 +135,8 @@ pub struct ComicOptions {
     pub deskew: bool,
     /// The session an embedded PDF is opened with: its overprint,
     /// antialiasing, annotation, font, decryption and backend settings.
+    /// Its [`rotation`](pdf_raster::SessionConfig::rotation) also turns
+    /// every page image, before deskew.
     /// Default [`SessionConfig::default`](pdf_raster::SessionConfig::default).
     pub session: pdf_raster::SessionConfig,
 }
@@ -404,6 +407,7 @@ fn render_one(
             reason: other.to_string(),
         },
     })?;
+    bmp = turn::turn(bmp, opts.session.rotation);
 
     if opts.deskew {
         pdf_raster::deskew::apply(&mut bmp).map_err(|e| ComicError::Deskew(e.to_string()))?;
@@ -540,6 +544,26 @@ startxref\n180\n%%EOF"
         // weight... the first pixel (0, 0, 255) is darker than the last of
         // the row (210, 0, 45).
         assert!(page.pixels[0] < page.pixels[7], "{:?}", &page.pixels[..8]);
+    }
+
+    #[test]
+    fn the_session_rotation_turns_page_images() {
+        // 8 × 4: the first pixel of the row is darker than the last.
+        let avif: &[u8] = include_bytes!("../tests/data/rgb-8x4.avif");
+        let cbz = make_cbz(&[("1.avif", avif)]);
+        let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
+        let render = |rotation| {
+            let mut opts = ComicOptions::default();
+            opts.session.rotation = rotation;
+            let mut pages: Vec<_> = open_comic(&path, &opts).unwrap().collect();
+            pages.remove(0).1.unwrap()
+        };
+        let upright = render(pdf_raster::Rotation::None);
+        let turned = render(pdf_raster::Rotation::Cw90);
+        assert_eq!((turned.width, turned.height), (4, 8));
+        // The top row, left to right, is now the right column, top to bottom.
+        let right_column: Vec<u8> = (0..8).map(|y| turned.pixels[y * 4 + 3]).collect();
+        assert_eq!(right_column, upright.pixels[..8]);
     }
 
     #[test]
