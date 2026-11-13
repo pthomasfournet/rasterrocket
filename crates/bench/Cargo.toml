@@ -13,12 +13,24 @@ path = "src/main.rs"
 name = "contest_v11"
 path = "src/contest_v11/main.rs"
 
+[[bin]]
+name = "page_gpu_bench"
+path = "src/page_gpu/main.rs"
+required-features = ["vulkan"]
+
+[features]
+# Vulkan page-raster benchmark (`page_gpu_bench`): compiles
+# `kernels/page_raster.slang` to SPIR-V with `slangc` at build time.
+vulkan = ["dep:ash"]
+
 [dependencies]
 raster     = { package = "rasterrocket-render", path = "../raster" }
 color      = { package = "rasterrocket-color",  path = "../color" }
 encode     = { package = "rasterrocket-encode", path = "../encode" }
 pdf_raster = { package = "rasterrocket",        path = "../pdf_raster" }
 vello_cpu  = "0.4.0"
+bytemuck   = { workspace = true }
+ash        = { version = "0.38", optional = true, default-features = false, features = ["loaded"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }
